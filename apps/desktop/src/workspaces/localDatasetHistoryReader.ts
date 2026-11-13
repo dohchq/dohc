@@ -3,7 +3,9 @@ import { DatasetHostError } from "@dohc/app-backend-runtime/dataset-error";
 import type { LocalDatasetHistoryInput, readLocalDatasetHistory } from "./localDatasetHistory";
 
 type Result = ReturnType<typeof readLocalDatasetHistory>;
-type Answer = { result: Result; error?: never } | { result?: never; error: { message: string; code?: DatasetHostError["code"] } };
+type Answer =
+  | { result: Result; error?: never }
+  | { result?: never; error: { message: string; code?: DatasetHostError["code"] } };
 
 /** One read-only connection per workspace, opened on the first History request. */
 export function createLocalDatasetHistoryReader(path: string, workspaceId: string) {
@@ -13,28 +15,58 @@ export function createLocalDatasetHistoryReader(path: string, workspaceId: strin
   let closing: Promise<void> | undefined;
 
   function send(input: LocalDatasetHistoryInput): Promise<Result> {
-    if (closed) return Promise.reject(new Error("This Collection session ended. Reopen the workspace."));
+    if (closed)
+      return Promise.reject(new Error("This Collection session ended. Reopen the workspace."));
     if (!worker) {
-      const started = new Worker(new URL(import.meta.url.endsWith(".ts")
-        ? "localDatasetHistoryThread.ts" : "collection-history-worker.js", import.meta.url), { workerData: { path, workspaceId } });
+      const started = new Worker(
+        new URL(
+          import.meta.url.endsWith(".ts")
+            ? "localDatasetHistoryThread.ts"
+            : "collection-history-worker.js",
+          import.meta.url,
+        ),
+        { workerData: { path, workspaceId } },
+      );
       worker = started;
-      const discard = () => { if (worker === started) worker = undefined; };
+      const discard = () => {
+        if (worker === started) worker = undefined;
+      };
       started.on("error", discard);
       started.on("exit", discard);
     }
     const current = worker;
     return new Promise((resolve, reject) => {
-      const cleanup = () => { current.off("message", message); current.off("error", failed); current.off("exit", exited); current.unref(); };
-      const failed = (error: Error) => { cleanup(); reject(error); };
+      const cleanup = () => {
+        current.off("message", message);
+        current.off("error", failed);
+        current.off("exit", exited);
+        current.unref();
+      };
+      const failed = (error: Error) => {
+        cleanup();
+        reject(error);
+      };
       const exited = () => failed(new Error("Collection history is unavailable."));
       const message = (answer: Answer) => {
         cleanup();
-        if (answer.error) reject(answer.error.code ? new DatasetHostError(answer.error.code, answer.error.message) : new Error(answer.error.message));
+        if (answer.error)
+          reject(
+            answer.error.code
+              ? new DatasetHostError(answer.error.code, answer.error.message)
+              : new Error(answer.error.message),
+          );
         else resolve(answer.result);
       };
       current.ref();
-      current.once("message", message); current.once("error", failed); current.once("exit", exited);
-      try { current.postMessage(input); } catch (error) { cleanup(); reject(error); }
+      current.once("message", message);
+      current.once("error", failed);
+      current.once("exit", exited);
+      try {
+        current.postMessage(input);
+      } catch (error) {
+        cleanup();
+        reject(error);
+      }
     });
   }
   return {
@@ -46,11 +78,11 @@ export function createLocalDatasetHistoryReader(path: string, workspaceId: strin
       return result;
     },
     close(): Promise<void> {
-      return closing ??= (async () => {
+      return (closing ??= (async () => {
         closed = true;
         await serial;
         if (worker) await worker.terminate();
-      })();
+      })());
     },
   };
 }

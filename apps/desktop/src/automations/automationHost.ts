@@ -47,12 +47,19 @@ export type HostAnswer = { status: number; body: unknown } | null;
 export type HostRequest =
   | { action: "check-in"; body: { installId: string; label: string; claim: boolean } }
   | {
-    action: "release";
-    // `groups` is the engine's Group handover, carried to the next host
-    // unread; `groupsWatched` is the host generation at which it last
-    // watched its Group subscriptions.
-    body: { installId: string; generation: number; releasedThroughMs: number; groups: unknown; groupsWatched: number; reach: unknown };
-  };
+      action: "release";
+      // `groups` is the engine's Group handover, carried to the next host
+      // unread; `groupsWatched` is the host generation at which it last
+      // watched its Group subscriptions.
+      body: {
+        installId: string;
+        generation: number;
+        releasedThroughMs: number;
+        groups: unknown;
+        groupsWatched: number;
+        reach: unknown;
+      };
+    };
 
 /**
  * What a computer that hands over reports: how far its schedules ran, its
@@ -141,12 +148,16 @@ interface HostState {
 function isHost(value: unknown): value is RelayAutomationHost {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const host = value as Record<string, unknown>;
-  const time = (entry: unknown) => typeof entry === "number" && Number.isSafeInteger(entry) && entry >= 0;
-  return Object.keys(host).length === 4 &&
+  const time = (entry: unknown) =>
+    typeof entry === "number" && Number.isSafeInteger(entry) && entry >= 0;
+  return (
+    Object.keys(host).length === 4 &&
     isNoticeLine(host.installId, AUTOMATION_INSTALL_ID_MAX_CHARS) &&
     time(host.generation) &&
-    (host.handoverFrom === null || isNoticeLine(host.handoverFrom, AUTOMATION_INSTALL_ID_MAX_CHARS)) &&
-    (host.releasedThroughMs === null || time(host.releasedThroughMs));
+    (host.handoverFrom === null ||
+      isNoticeLine(host.handoverFrom, AUTOMATION_INSTALL_ID_MAX_CHARS)) &&
+    (host.releasedThroughMs === null || time(host.releasedThroughMs))
+  );
 }
 
 /**
@@ -154,13 +165,19 @@ function isHost(value: unknown): value is RelayAutomationHost {
  * the request ran out of time. dohc expects this offline, so it is not an error.
  */
 export function relayUnreachable(error: unknown): boolean {
-  return error instanceof TypeError || (error instanceof DOMException && error.name === "TimeoutError");
+  return (
+    error instanceof TypeError || (error instanceof DOMException && error.name === "TimeoutError")
+  );
 }
 
 /** The host from a relay answer, or undefined when the answer is not one. */
-export function hostOfAnswer(answer: { status: number; body: unknown }): RelayAutomationHost | null | undefined {
+export function hostOfAnswer(answer: {
+  status: number;
+  body: unknown;
+}): RelayAutomationHost | null | undefined {
   const { body } = answer;
-  if (answer.status !== 200 || !body || typeof body !== "object" || Array.isArray(body)) return undefined;
+  if (answer.status !== 200 || !body || typeof body !== "object" || Array.isArray(body))
+    return undefined;
   const { ok, host } = body as { ok?: unknown; host?: unknown };
   if (ok !== true) return undefined;
   return host === null ? null : isHost(host) ? host : undefined;
@@ -177,21 +194,34 @@ export function refusalOfAnswer(answer: { status: number; body: unknown }): stri
 }
 
 /** The owner's computers from a relay answer, or undefined when the answer is not one. */
-export function computersOfAnswer(answer: { status: number; body: unknown }): RelayAutomationComputer[] | undefined {
-  const computers = answer.status === 200 && answer.body && typeof answer.body === "object"
-    ? (answer.body as { computers?: unknown }).computers
-    : undefined;
+export function computersOfAnswer(answer: {
+  status: number;
+  body: unknown;
+}): RelayAutomationComputer[] | undefined {
+  const computers =
+    answer.status === 200 && answer.body && typeof answer.body === "object"
+      ? (answer.body as { computers?: unknown }).computers
+      : undefined;
   if (!Array.isArray(computers)) return undefined;
   const valid = computers.every((computer: unknown) => {
     if (!computer || typeof computer !== "object") return false;
     const { installId, kind, label, lastSeenMs } = computer as Record<string, unknown>;
-    return isNoticeLine(installId, AUTOMATION_INSTALL_ID_MAX_CHARS) &&
+    return (
+      isNoticeLine(installId, AUTOMATION_INSTALL_ID_MAX_CHARS) &&
       (kind === "computer" || kind === "server") &&
       isNoticeLine(label, AUTOMATION_COMPUTER_LABEL_MAX_CHARS) &&
-      typeof lastSeenMs === "number" && Number.isSafeInteger(lastSeenMs) && lastSeenMs >= 0;
+      typeof lastSeenMs === "number" &&
+      Number.isSafeInteger(lastSeenMs) &&
+      lastSeenMs >= 0
+    );
   });
   return valid
-    ? (computers as RelayAutomationComputer[]).map(({ installId, kind, label, lastSeenMs }) => ({ installId, kind, label, lastSeenMs }))
+    ? (computers as RelayAutomationComputer[]).map(({ installId, kind, label, lastSeenMs }) => ({
+        installId,
+        kind,
+        label,
+        lastSeenMs,
+      }))
     : undefined;
 }
 
@@ -250,13 +280,18 @@ export interface WorkspaceHostsDependencies {
  * anything else to happen here. Those reads ask no relay.
  */
 export function createWorkspaceHosts(dependencies: WorkspaceHostsDependencies) {
-  const setTimer = dependencies.setTimer ?? ((wake: () => Promise<void>, delayMs: number) => setTimeout(() => void wake(), delayMs));
-  const clearTimer = dependencies.clearTimer ?? ((timer: unknown) => clearTimeout(timer as ReturnType<typeof setTimeout>));
+  const setTimer =
+    dependencies.setTimer ??
+    ((wake: () => Promise<void>, delayMs: number) => setTimeout(() => void wake(), delayMs));
+  const clearTimer =
+    dependencies.clearTimer ??
+    ((timer: unknown) => clearTimeout(timer as ReturnType<typeof setTimeout>));
   const open = new Set<string>();
   const runs = new Map<string, boolean>();
   const elsewhere = new Set<string>();
   let timer: unknown = null;
-  const local = (workspace: HostedWorkspace) => workspace !== null && workspace.remote === undefined && workspace.shareView === undefined;
+  const local = (workspace: HostedWorkspace) =>
+    workspace !== null && workspace.remote === undefined && workspace.shareView === undefined;
 
   async function generation(
     workspaceId: string,
@@ -267,14 +302,17 @@ export function createWorkspaceHosts(dependencies: WorkspaceHostsDependencies) {
     if (local(workspace) && open.has(workspaceId)) {
       const before = runs.get(workspaceId);
       runs.set(workspaceId, answer !== null);
-      if (before !== undefined && before !== (answer !== null)) dependencies.hostChanged(workspaceId);
+      if (before !== undefined && before !== (answer !== null))
+        dependencies.hostChanged(workspaceId);
       noteElsewhere(workspaceId);
     }
     return answer;
   }
 
   function noteElsewhere(workspaceId: string): void {
-    const waits = runs.get(workspaceId) === false && local(dependencies.workspace(workspaceId)) &&
+    const waits =
+      runs.get(workspaceId) === false &&
+      local(dependencies.workspace(workspaceId)) &&
       dependencies.hasHostTriggers(workspaceId);
     if (waits === elsewhere.has(workspaceId)) return;
     if (waits) elsewhere.add(workspaceId);
@@ -287,8 +325,15 @@ export function createWorkspaceHosts(dependencies: WorkspaceHostsDependencies) {
     timer = setTimer(async () => {
       timer = null;
       // A workspace that does not sync never asks its relay here.
-      await Promise.all([...open].filter((workspaceId) => local(dependencies.workspace(workspaceId))).map((workspaceId) =>
-        generation(workspaceId, () => null).catch((error: unknown) => dependencies.logError(workspaceId, error))));
+      await Promise.all(
+        [...open]
+          .filter((workspaceId) => local(dependencies.workspace(workspaceId)))
+          .map((workspaceId) =>
+            generation(workspaceId, () => null).catch((error: unknown) =>
+              dependencies.logError(workspaceId, error),
+            ),
+          ),
+      );
       arm();
     }, MAX_TIMER_MS);
   }
@@ -300,7 +345,9 @@ export function createWorkspaceHosts(dependencies: WorkspaceHostsDependencies) {
       arm();
       return {
         runsHere: async () =>
-          (await generation(workspaceId, async () => ((await dependencies.relay.runsHere(workspaceId)) ? 0 : null))) !== null,
+          (await generation(workspaceId, async () =>
+            (await dependencies.relay.runsHere(workspaceId)) ? 0 : null,
+          )) !== null,
         // Turning sync on or opening a share records it in the registry in
         // one synchronous call, and runsHere just read the folder or the
         // relay. So this check, with nothing awaited before a claim, stops
@@ -308,7 +355,9 @@ export function createWorkspaceHosts(dependencies: WorkspaceHostsDependencies) {
         stillRuns: () => {
           const workspace = dependencies.workspace(workspaceId);
           if (workspace === null || workspace.shareView !== undefined) return false;
-          return workspace.remote === undefined ? runs.get(workspaceId) === true : dependencies.relay.stillRuns(workspaceId);
+          return workspace.remote === undefined
+            ? runs.get(workspaceId) === true
+            : dependencies.relay.stillRuns(workspaceId);
         },
         // The owner can choose this computer from another one at any time.
         asksAgain: () => {
@@ -329,7 +378,8 @@ export function createWorkspaceHosts(dependencies: WorkspaceHostsDependencies) {
     },
 
     /** The host generation this computer runs Group triggers at, or null. */
-    groupHost: (workspaceId: string) => generation(workspaceId, () => dependencies.relay.runsAt(workspaceId)),
+    groupHost: (workspaceId: string) =>
+      generation(workspaceId, () => dependencies.relay.runsAt(workspaceId)),
 
     /** The workspace's automations were read again, so what waits on another computer may differ. */
     automationsChanged: (workspaceId: string) => noteElsewhere(workspaceId),
@@ -341,8 +391,11 @@ export function createWorkspaceHosts(dependencies: WorkspaceHostsDependencies) {
 
 export function createAutomationHosts(dependencies: AutomationHostsDependencies) {
   const monotonicMs = dependencies.monotonicMs ?? (() => performance.now());
-  const setTimer = dependencies.setTimer ?? ((wake: () => void, delayMs: number) => setTimeout(wake, delayMs));
-  const clearTimer = dependencies.clearTimer ?? ((timer: unknown) => clearTimeout(timer as ReturnType<typeof setTimeout>));
+  const setTimer =
+    dependencies.setTimer ?? ((wake: () => void, delayMs: number) => setTimeout(wake, delayMs));
+  const clearTimer =
+    dependencies.clearTimer ??
+    ((timer: unknown) => clearTimeout(timer as ReturnType<typeof setTimeout>));
   const states = new Map<string, HostState>();
 
   const runsOn = (host: RelayAutomationHost | null | undefined) =>
@@ -361,9 +414,14 @@ export function createAutomationHosts(dependencies: AutomationHostsDependencies)
     if (runsOn(host) && !runsOn(before)) {
       // A release since this computer's last copy says where the last host stopped.
       const released = host?.releasedThroughMs ?? null;
-      dependencies.startedHere(workspaceId, released !== (before?.releasedThroughMs ?? null) ? released : null, released);
+      dependencies.startedHere(
+        workspaceId,
+        released !== (before?.releasedThroughMs ?? null) ? released : null,
+        released,
+      );
     }
-    if (host !== null && host.handoverFrom === dependencies.installId()) void handOver(workspaceId, state, host);
+    if (host !== null && host.handoverFrom === dependencies.installId())
+      void handOver(workspaceId, state, host);
     if (changed) dependencies.hostChanged(workspaceId);
     // Another handover starts its reads short again.
     followHandover(workspaceId, state, changed);
@@ -375,7 +433,8 @@ export function createAutomationHosts(dependencies: AutomationHostsDependencies)
    * check, and its answer goes through apply like any other.
    */
   function followHandover(workspaceId: string, state: HostState, restart = false): void {
-    const waits = state.open && (state.host?.handoverFrom ?? null) !== null && dependencies.synced(workspaceId);
+    const waits =
+      state.open && (state.host?.handoverFrom ?? null) !== null && dependencies.synced(workspaceId);
     if (!waits || restart) {
       if (state.handoverTimer !== null) clearTimer(state.handoverTimer);
       state.handoverTimer = null;
@@ -394,10 +453,14 @@ export function createAutomationHosts(dependencies: AutomationHostsDependencies)
     for (;;) {
       const claim = state.claims;
       try {
-        const answer = await dependencies.send(workspaceId, {
-          action: "check-in",
-          body: { installId: dependencies.installId(), label: dependencies.label(), claim },
-        }, signal);
+        const answer = await dependencies.send(
+          workspaceId,
+          {
+            action: "check-in",
+            body: { installId: dependencies.installId(), label: dependencies.label(), claim },
+          },
+          signal,
+        );
         if (states.get(workspaceId) !== state) return;
         if (answer === null) {
           state.retry = true;
@@ -405,7 +468,8 @@ export function createAutomationHosts(dependencies: AutomationHostsDependencies)
           return;
         }
         const host = hostOfAnswer(answer);
-        if (host === undefined) throw new Error(`The relay answered the automation host check-in with ${answer.status}.`);
+        if (host === undefined)
+          throw new Error(`The relay answered the automation host check-in with ${answer.status}.`);
         state.retry = false;
         state.failedUnnamed = false;
         apply(workspaceId, state, host);
@@ -429,7 +493,8 @@ export function createAutomationHosts(dependencies: AutomationHostsDependencies)
    * answers, so the reads it starts do not repeat it.
    */
   function failedUnnamed(workspaceId: string, state: HostState): void {
-    if (state.failedUnnamed || (state.host ?? null) !== null || !dependencies.synced(workspaceId)) return;
+    if (state.failedUnnamed || (state.host ?? null) !== null || !dependencies.synced(workspaceId))
+      return;
     state.failedUnnamed = true;
     dependencies.hostChanged(workspaceId);
   }
@@ -441,7 +506,11 @@ export function createAutomationHosts(dependencies: AutomationHostsDependencies)
     return state.reading;
   }
 
-  async function handOver(workspaceId: string, state: HostState, host: RelayAutomationHost): Promise<void> {
+  async function handOver(
+    workspaceId: string,
+    state: HostState,
+    host: RelayAutomationHost,
+  ): Promise<void> {
     if (state.handingOver) return;
     state.handingOver = true;
     let reread = false;
@@ -449,9 +518,11 @@ export function createAutomationHosts(dependencies: AutomationHostsDependencies)
     // this handover is over.
     const stillHandingOver = () => {
       const current = state.host;
-      return states.get(workspaceId) === state &&
+      return (
+        states.get(workspaceId) === state &&
         current?.generation === host.generation &&
-        current.handoverFrom === dependencies.installId();
+        current.handoverFrom === dependencies.installId()
+      );
     };
     try {
       // Work admitted while this computer was host finishes first; once
@@ -486,7 +557,8 @@ export function createAutomationHosts(dependencies: AutomationHostsDependencies)
       const released = hostOfAnswer(answer);
       // 409: the owner changed the host again first. Read it and act on it.
       if (released === undefined && answer.status === 409) reread = true;
-      else if (released === undefined) throw new Error(`The relay answered the automation host release with ${answer.status}.`);
+      else if (released === undefined)
+        throw new Error(`The relay answered the automation host release with ${answer.status}.`);
       else apply(workspaceId, state, released);
     } catch (error) {
       state.retry = true;
@@ -572,7 +644,9 @@ export function createAutomationHosts(dependencies: AutomationHostsDependencies)
     /** The host generation this computer runs at when stillRuns, or null. */
     runsAt(workspaceId: string): number | null {
       const state = states.get(workspaceId);
-      return state?.open === true && !state.handingOver && runsOn(state.host) ? state.host?.generation ?? null : null;
+      return state?.open === true && !state.handingOver && runsOn(state.host)
+        ? (state.host?.generation ?? null)
+        : null;
     },
 
     /**
@@ -589,7 +663,8 @@ export function createAutomationHosts(dependencies: AutomationHostsDependencies)
       const state = states.get(workspaceId);
       if (!state?.open || signal.aborted) return;
       state.claims = true;
-      if ((state.host ?? null) !== null || state.failedUnnamed || !dependencies.synced(workspaceId)) return;
+      if ((state.host ?? null) !== null || state.failedUnnamed || !dependencies.synced(workspaceId))
+        return;
       const reading = refresh(workspaceId, state, signal);
       // A read another caller started does not stop, so admit stops waiting.
       await new Promise<void>((resolve) => {
@@ -612,7 +687,9 @@ export function createAutomationHosts(dependencies: AutomationHostsDependencies)
       const state = states.get(workspaceId);
       if (!state?.open || state.handingOver || !runsOn(state.host)) return null;
       let release: () => void = () => undefined;
-      const done = new Promise<void>((resolve) => { release = resolve; });
+      const done = new Promise<void>((resolve) => {
+        release = resolve;
+      });
       state.held.add(done);
       return () => {
         state.held.delete(done);

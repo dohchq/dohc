@@ -11,7 +11,7 @@ const credentials: CloudCredentials = {
 const remote = { serverUrl: "https://cloud.test/", ownerUserId: "owner" };
 
 describe("localPersonOwnsWorkspace", () => {
-  describe.each(["remote", "pausedRemote"] as const)("with %s", field => {
+  describe.each(["remote", "pausedRemote"] as const)("with %s", (field) => {
     const workspace = { [field]: remote };
 
     it("refuses a signed-out person", () => {
@@ -23,7 +23,9 @@ describe("localPersonOwnsWorkspace", () => {
     });
 
     it("refuses the same user id on another server", () => {
-      expect(localPersonOwnsWorkspace(workspace, { ...credentials, serverUrl: "https://other.test" })).toBe(false);
+      expect(
+        localPersonOwnsWorkspace(workspace, { ...credentials, serverUrl: "https://other.test" }),
+      ).toBe(false);
     });
 
     it("accepts the owning account on its server", () => {

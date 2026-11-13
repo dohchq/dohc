@@ -26,7 +26,9 @@ export function CollectionCustomizeDialog(props: {
   // What opened this dialog, read before Close takes focus. Dismissing it
   // returns focus there; a menu item inside a closed <details> hands it to
   // that menu's summary. Open moves on to the file's tab, so focus goes with it.
-  const [opener] = useState(() => (document.activeElement instanceof HTMLElement ? document.activeElement : null));
+  const [opener] = useState(() =>
+    document.activeElement instanceof HTMLElement ? document.activeElement : null,
+  );
   const dismiss = () => {
     props.onClose();
     const summary = opener?.closest("details:not([open])")?.querySelector("summary");
@@ -44,7 +46,10 @@ export function CollectionCustomizeDialog(props: {
         className="dohc-elevated w-[min(480px,calc(100vw-32px))] rounded-xl border border-line bg-bg p-6"
       >
         <div className="flex items-center gap-2">
-          <h2 id="collection-customize-title" className="m-0 min-w-0 flex-1 truncate text-base font-semibold text-ink">
+          <h2
+            id="collection-customize-title"
+            className="m-0 min-w-0 flex-1 truncate text-base font-semibold text-ink"
+          >
             {`Customize ${props.name}`}
           </h2>
           <IconButton ref={closeRef} aria-label="Close" title="Close" onClick={dismiss}>
@@ -56,10 +61,16 @@ export function CollectionCustomizeDialog(props: {
             const name = file.path.split("/").at(-1) ?? file.path;
             return (
               <div key={file.path} className="flex flex-col gap-1">
-                <dt className="text-[12px] text-muted">{file.holds.slice(0, 1).toUpperCase() + file.holds.slice(1)}</dt>
+                <dt className="text-[12px] text-muted">
+                  {file.holds.slice(0, 1).toUpperCase() + file.holds.slice(1)}
+                </dt>
                 <dd className="m-0 flex min-w-0 items-center gap-2">
                   <div className="min-w-0 flex-1">
-                    <CopyField label={`Copy ${name} path`} copiedLabel="Path copied" getText={() => file.path}>
+                    <CopyField
+                      label={`Copy ${name} path`}
+                      copiedLabel="Path copied"
+                      getText={() => file.path}
+                    >
                       <code title={file.path}>{file.path}</code>
                     </CopyField>
                   </div>
@@ -95,6 +106,12 @@ export function automationsFile(folder: string, made: boolean): CollectionFile {
 }
 
 /** The files a document Collection keeps in its folder. */
-export function documentCollectionFiles(folder: string, automationsMade: boolean): CollectionFile[] {
-  return [{ path: `${folder}/collection.yaml`, holds: "fields and views" }, automationsFile(folder, automationsMade)];
+export function documentCollectionFiles(
+  folder: string,
+  automationsMade: boolean,
+): CollectionFile[] {
+  return [
+    { path: `${folder}/collection.yaml`, holds: "fields and views" },
+    automationsFile(folder, automationsMade),
+  ];
 }

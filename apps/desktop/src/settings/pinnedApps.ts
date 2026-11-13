@@ -27,12 +27,14 @@ export function withAppPinned(
     throw new Error(`The sidebar holds ${MAX_PINNED_APPS} pinned apps. Unpin one first.`);
   }
   const next = change.pinned
-    ? current.includes(change.appRoot) ? [...current] : [...current, change.appRoot]
+    ? current.includes(change.appRoot)
+      ? [...current]
+      : [...current, change.appRoot]
     : current.filter((root) => root !== change.appRoot);
   const pinnedApps = Object.fromEntries(
-    Object.entries({ ...settings.sidebar.pinnedApps, [change.workspaceId]: next })
-      .filter(([workspaceId, roots]) =>
-        roots.length > 0 && knownWorkspaceIds.includes(workspaceId)),
+    Object.entries({ ...settings.sidebar.pinnedApps, [change.workspaceId]: next }).filter(
+      ([workspaceId, roots]) => roots.length > 0 && knownWorkspaceIds.includes(workspaceId),
+    ),
   );
   return { ...settings, sidebar: { ...settings.sidebar, pinnedApps } };
 }

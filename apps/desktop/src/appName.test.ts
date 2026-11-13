@@ -20,15 +20,28 @@ function electronApp(appData: string, join: (...parts: string[]) => string, user
 
 describe("nameApp", () => {
   it.each([
-    ["Windows", "C:\\Users\\ana\\AppData\\Roaming", win32.join, "C:\\Users\\ana\\AppData\\Roaming\\@dohc\\desktop"],
-    ["macOS", "/Users/ana/Library/Application Support", posix.join, "/Users/ana/Library/Application Support/@dohc/desktop"],
+    [
+      "Windows",
+      "C:\\Users\\ana\\AppData\\Roaming",
+      win32.join,
+      "C:\\Users\\ana\\AppData\\Roaming\\@dohc\\desktop",
+    ],
+    [
+      "macOS",
+      "/Users/ana/Library/Application Support",
+      posix.join,
+      "/Users/ana/Library/Application Support/@dohc/desktop",
+    ],
     ["Linux", "/home/ana/.config", posix.join, "/home/ana/.config/@dohc/desktop"],
-  ])("names the app dohc and keeps the settings folder on %s", (_platform, appData, join, folder) => {
-    const app = electronApp(appData, join);
-    nameApp(app);
-    expect(app.name).toBe("dohc");
-    expect(app.getPath("userData")).toBe(folder);
-  });
+  ])(
+    "names the app dohc and keeps the settings folder on %s",
+    (_platform, appData, join, folder) => {
+      const app = electronApp(appData, join);
+      nameApp(app);
+      expect(app.name).toBe("dohc");
+      expect(app.getPath("userData")).toBe(folder);
+    },
+  );
 
   it("keeps a folder the run chose", () => {
     const app = electronApp("/home/ana/.config", posix.join, "/tmp/e2e/electron-user-data");

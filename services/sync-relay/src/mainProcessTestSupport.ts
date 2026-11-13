@@ -181,13 +181,20 @@ syncBuiltinESMExports();
   async function spawnRunningRelay(
     dbPath: string,
     envOverrides: Record<string, string | undefined> = {},
-    bootstrap: { rejectPoolEnd?: boolean; sourceEntry?: boolean; projectionHandshake?: boolean; emptyDeletionJobs?: boolean } = {},
+    bootstrap: {
+      rejectPoolEnd?: boolean;
+      sourceEntry?: boolean;
+      projectionHandshake?: boolean;
+      emptyDeletionJobs?: boolean;
+    } = {},
   ): Promise<RunningRelay> {
     const mainUrl = bootstrap.sourceEntry
       ? new URL("./main.ts", import.meta.url)
       : pathToFileURL(join(buildDirectory, "main.js"));
     const childArguments = [
-      ...(bootstrap.sourceEntry ? ["--import", process.platform === "win32" ? "tsx" : "tsx/esm"] : []),
+      ...(bootstrap.sourceEntry
+        ? ["--import", process.platform === "win32" ? "tsx" : "tsx/esm"]
+        : []),
       "--input-type=module",
       "--eval",
       `process.on("message", (message) => {
@@ -254,7 +261,9 @@ syncBuiltinESMExports();
       const outputBarrierFailure = (reason: string): Error =>
         new Error(`${reason}\nstdout:\n${stdout}\nstderr:\n${stderr}`);
       const timeout = setTimeout(() => {
-        reject(new Error(`sync relay did not report a port\nstdout:\n${stdout}\nstderr:\n${stderr}`));
+        reject(
+          new Error(`sync relay did not report a port\nstdout:\n${stdout}\nstderr:\n${stderr}`),
+        );
       }, 45_000);
       childStdout.on("data", (chunk) => {
         stdout += String(chunk);
@@ -297,9 +306,7 @@ syncBuiltinESMExports();
                 };
                 const onDisconnect = (): void => {
                   finish(
-                    outputBarrierFailure(
-                      "sync relay disconnected before settling output barrier",
-                    ),
+                    outputBarrierFailure("sync relay disconnected before settling output barrier"),
                   );
                 };
                 const timeout = setTimeout(() => {
@@ -309,34 +316,29 @@ syncBuiltinESMExports();
                     ),
                   );
                 }, OUTPUT_BARRIER_TIMEOUT_MS);
-  
+
                 childStdout.on("data", checkForMarkers);
                 childStderr.on("data", checkForMarkers);
                 child.once("close", onClose);
                 child.once("disconnect", onDisconnect);
                 if (!child.connected) {
                   finish(
-                    outputBarrierFailure(
-                      "sync relay IPC was disconnected before settling output",
-                    ),
+                    outputBarrierFailure("sync relay IPC was disconnected before settling output"),
                   );
                   return;
                 }
                 try {
-                  child.send(
-                    { type: OUTPUT_BARRIER_MESSAGE_TYPE, id: barrierId },
-                    (error) => {
-                      if (error) {
-                        finish(
-                          outputBarrierFailure(
-                            `sync relay output barrier send failed: ${error.message}`,
-                          ),
-                        );
-                        return;
-                      }
-                      checkForMarkers();
-                    },
-                  );
+                  child.send({ type: OUTPUT_BARRIER_MESSAGE_TYPE, id: barrierId }, (error) => {
+                    if (error) {
+                      finish(
+                        outputBarrierFailure(
+                          `sync relay output barrier send failed: ${error.message}`,
+                        ),
+                      );
+                      return;
+                    }
+                    checkForMarkers();
+                  });
                 } catch (error) {
                   finish(
                     outputBarrierFailure(
@@ -355,7 +357,11 @@ syncBuiltinESMExports();
       });
       child.on("exit", (code) => {
         clearTimeout(timeout);
-        reject(new Error(`sync relay exited before listening: ${code}\nstdout:\n${stdout}\nstderr:\n${stderr}`));
+        reject(
+          new Error(
+            `sync relay exited before listening: ${code}\nstdout:\n${stdout}\nstderr:\n${stderr}`,
+          ),
+        );
       });
     });
   }
@@ -413,7 +419,10 @@ syncBuiltinESMExports();
     return fetch(`${baseUrl}${path}`, {
       method: "PUT",
       headers: authHeaders(),
-      body: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
+      body: bytes.buffer.slice(
+        bytes.byteOffset,
+        bytes.byteOffset + bytes.byteLength,
+      ) as ArrayBuffer,
     });
   }
 
@@ -443,13 +452,25 @@ syncBuiltinESMExports();
     bootstrap: { projectionHandshake?: boolean; emptyDeletionJobs?: boolean } = {},
   ): Promise<{ code: number | null; stderr: string }> {
     const env: Record<string, string> = {};
-    for (const [key, value] of Object.entries({ ...process.env, DOHC_RELAY_DEPLOYMENT_CONFIG: undefined, DOHC_RELAY_SERVICE_HOST_CONFIG: undefined, DOHC_RELAY_DEVICE_DELIVERY_CONFIG: undefined, DOHC_RELAY_SHARE_WEB_URL: "http://share-web:1790", ...envOverrides })) {
+    for (const [key, value] of Object.entries({
+      ...process.env,
+      DOHC_RELAY_DEPLOYMENT_CONFIG: undefined,
+      DOHC_RELAY_SERVICE_HOST_CONFIG: undefined,
+      DOHC_RELAY_DEVICE_DELIVERY_CONFIG: undefined,
+      DOHC_RELAY_SHARE_WEB_URL: "http://share-web:1790",
+      ...envOverrides,
+    })) {
       if (value !== undefined) env[key] = value;
     }
     const mainPath = join(buildDirectory, "main.js");
-    const args = bootstrap.projectionHandshake || bootstrap.emptyDeletionJobs
-      ? ["--input-type=module", "--eval", `${bootstrap.emptyDeletionJobs ? EMPTY_DELETION_JOBS_BOOTSTRAP : ""}\n${bootstrap.projectionHandshake ? PROJECTION_HANDSHAKE_BOOTSTRAP : ""}\nawait import(${JSON.stringify(pathToFileURL(mainPath).href)});`]
-      : [mainPath];
+    const args =
+      bootstrap.projectionHandshake || bootstrap.emptyDeletionJobs
+        ? [
+            "--input-type=module",
+            "--eval",
+            `${bootstrap.emptyDeletionJobs ? EMPTY_DELETION_JOBS_BOOTSTRAP : ""}\n${bootstrap.projectionHandshake ? PROJECTION_HANDSHAKE_BOOTSTRAP : ""}\nawait import(${JSON.stringify(pathToFileURL(mainPath).href)});`,
+          ]
+        : [mainPath];
     const child = spawn(process.execPath, args, {
       cwd: packageRoot(),
       env,
@@ -496,8 +517,7 @@ syncBuiltinESMExports();
   }
 
   function sendTerminationSignal(child: ChildProcess): void {
-    const sent =
-      process.platform === "win32" ? child.send("SIGTERM") : child.kill("SIGTERM");
+    const sent = process.platform === "win32" ? child.send("SIGTERM") : child.kill("SIGTERM");
     if (!sent) throw new Error("failed to send SIGTERM to sync relay");
   }
 
@@ -506,5 +526,20 @@ syncBuiltinESMExports();
     if (!sent) throw new Error("failed to send duplicate SIGTERM to sync relay");
   }
 
-  return { tempRoot, spawnRelay, spawnRunningRelay, authHeaders, postJson, exchangeLink, postJsonAs, putBytes, sha256, settleWithin, spawnRelayExpectExit, waitForExit, sendTerminationSignal, sendDoubleTerminationSignal };
+  return {
+    tempRoot,
+    spawnRelay,
+    spawnRunningRelay,
+    authHeaders,
+    postJson,
+    exchangeLink,
+    postJsonAs,
+    putBytes,
+    sha256,
+    settleWithin,
+    spawnRelayExpectExit,
+    waitForExit,
+    sendTerminationSignal,
+    sendDoubleTerminationSignal,
+  };
 }

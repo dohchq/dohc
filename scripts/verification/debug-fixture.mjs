@@ -1,5 +1,13 @@
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -12,16 +20,36 @@ export function runEarlyCloseDebugFixture(source, closed) {
   try {
     put("package.json", '{"type":"module"}');
     put("apps/desktop/package.json", "{}");
-    put("scripts/verification/build.mjs", "export const prepare=async()=>{};export const assertPrepared=()=>({});");
-    put("scripts/verification/process.mjs", "import {resolve} from 'node:path';export const repoRoot=resolve(import.meta.dirname,'../..');export const git=()=> 'fixture-head';");
+    put(
+      "scripts/verification/build.mjs",
+      "export const prepare=async()=>{};export const assertPrepared=()=>({});",
+    );
+    put(
+      "scripts/verification/process.mjs",
+      "import {resolve} from 'node:path';export const repoRoot=resolve(import.meta.dirname,'../..');export const git=()=> 'fixture-head';",
+    );
     copyFileSync(source, join(root, "scripts/verification/debug.mjs"));
-    copyFileSync(new URL("./close-electron.mjs", import.meta.url), join(root, "scripts/verification/close-electron.mjs"));
-    copyFileSync(new URL("./debug-home.mjs", import.meta.url), join(root, "scripts/verification/debug-home.mjs"));
-    copyFileSync(new URL("./desktop-close-policy.mjs", import.meta.url), join(root, "scripts/verification/desktop-close-policy.mjs"));
+    copyFileSync(
+      new URL("./close-electron.mjs", import.meta.url),
+      join(root, "scripts/verification/close-electron.mjs"),
+    );
+    copyFileSync(
+      new URL("./debug-home.mjs", import.meta.url),
+      join(root, "scripts/verification/debug-home.mjs"),
+    );
+    copyFileSync(
+      new URL("./desktop-close-policy.mjs", import.meta.url),
+      join(root, "scripts/verification/desktop-close-policy.mjs"),
+    );
     mkdirSync(join(root, "apps/desktop/src"), { recursive: true });
-    copyFileSync(new URL("../../apps/desktop/src/shutdownBudgets.ts", import.meta.url), join(root, "apps/desktop/src/shutdownBudgets.ts"));
+    copyFileSync(
+      new URL("../../apps/desktop/src/shutdownBudgets.ts", import.meta.url),
+      join(root, "apps/desktop/src/shutdownBudgets.ts"),
+    );
     put("node_modules/electron/index.js", "module.exports='fixture-electron';");
-    put("node_modules/playwright/index.js", `
+    put(
+      "node_modules/playwright/index.js",
+      `
       const {EventEmitter}=require('node:events');
       const {PassThrough}=require('node:stream');
       const {writeFileSync}=require('node:fs');
@@ -42,14 +70,29 @@ export function runEarlyCloseDebugFixture(source, closed) {
         app.close=async()=>{child.exitCode=0;child.emit('exit',0,null);app.emit('close');};
         return app;
       }};
-    `);
-    const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+    `,
+    );
+    const result = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `
       globalThis.fetch=async()=>({ok:true,json:async()=>[{type:'page',webSocketDebuggerUrl:'ws://fixture'}]});
       await import('./scripts/verification/debug.mjs');
-    `], { cwd: root, encoding: "utf8", timeout: 20_000 });
+    `,
+      ],
+      { cwd: root, encoding: "utf8", timeout: 20_000 },
+    );
     const artifacts = join(root, ".agent-artifacts/debug");
     const directory = existsSync(artifacts) ? readdirSync(artifacts)[0] : undefined;
-    const files = directory ? readdirSync(join(artifacts, directory)).filter((name) => /\.(jsonl|json|png|zip)$/.test(name)) : [];
+    const files = directory
+      ? readdirSync(join(artifacts, directory)).filter((name) =>
+          /\.(jsonl|json|png|zip)$/.test(name),
+        )
+      : [];
     return { ...result, files };
-  } finally { rmSync(root, { recursive: true, force: true }); }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 }

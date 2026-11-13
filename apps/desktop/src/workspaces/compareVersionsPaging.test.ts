@@ -1,8 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type {
-  SecretFileComparePage,
-  SecretFileStore,
-} from "@dohc/workspace-contracts/engine";
+import type { SecretFileComparePage, SecretFileStore } from "@dohc/workspace-contracts/engine";
 import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
 import {
@@ -99,18 +96,17 @@ describe("capture.compareVersions pages both sources under one cursor", () => {
     engine.start();
 
     const first = await engine.compareVersions("v-1");
-    expect(first.files, "restore the drain -> both protected rows land on this page and a second secrets.compare call rides the same comparison page.").toEqual([
-      { path: ".env-a", status: "modified", protected: true },
-    ]);
+    expect(
+      first.files,
+      "restore the drain -> both protected rows land on this page and a second secrets.compare call rides the same comparison page.",
+    ).toEqual([{ path: ".env-a", status: "modified", protected: true }]);
     expect(first.nextAfterPath).toBe(".env-a");
     expect(secretCalls).toEqual([undefined]);
 
     const second = await engine.compareVersions("v-1", {
       afterPath: first.nextAfterPath!,
     });
-    expect(second.files).toEqual([
-      { path: ".env-b", status: "added", protected: true },
-    ]);
+    expect(second.files).toEqual([{ path: ".env-b", status: "added", protected: true }]);
     expect(second.nextAfterPath).toBeNull();
     expect(secretCalls).toEqual([undefined, ".env-a"]);
     await engine.stop();
@@ -170,7 +166,10 @@ describe("capture.compareVersions pages both sources under one cursor", () => {
     engine.start();
 
     const first = await engine.compareVersions("v-1");
-    expect(first.files.map((file) => file.path), "compare the window in UTF-16 (`path <= boundary`) -> the protected row rides page one and page two.").toEqual(["a.md"]);
+    expect(
+      first.files.map((file) => file.path),
+      "compare the window in UTF-16 (`path <= boundary`) -> the protected row rides page one and page two.",
+    ).toEqual(["a.md"]);
     expect(first.nextAfterPath).toBe(boundary);
 
     const second = await engine.compareVersions("v-1", {
@@ -178,7 +177,12 @@ describe("capture.compareVersions pages both sources under one cursor", () => {
     });
     // Code-point order again: "zz.md" (0x7A) sorts before the U+10000 path.
     expect(second.files).toEqual([
-      { path: "zz.md", status: "modified", currentText: "main body of zz.md", incomingText: "v-1 body of zz.md" },
+      {
+        path: "zz.md",
+        status: "modified",
+        currentText: "main body of zz.md",
+        incomingText: "v-1 body of zz.md",
+      },
       { path: astralSecret, status: "modified", protected: true },
     ]);
     expect(second.nextAfterPath).toBeNull();

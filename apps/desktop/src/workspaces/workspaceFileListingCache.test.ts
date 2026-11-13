@@ -18,14 +18,21 @@ describe("WorkspaceFileListingCache", () => {
   it("patches content identity without walking again, including pathless content wakes", async () => {
     const metadata = vi.fn(async () => [{ path: "note.md", kind: "file" as const, icon: "new" }]);
     const cache = new WorkspaceFileListingCache("win32", metadata);
-    const load = vi.fn(async () => ({ files: [{ path: "note.md", kind: "file" as const, contentIdentity: "old", icon: "old" }], folders: [] }));
-    const read = () => cache.list({ workspaceId: "ws-a", attachmentId: ATTACHMENT_A, allowCached: true, load });
+    const load = vi.fn(async () => ({
+      files: [{ path: "note.md", kind: "file" as const, contentIdentity: "old", icon: "old" }],
+      folders: [],
+    }));
+    const read = () =>
+      cache.list({ workspaceId: "ws-a", attachmentId: ATTACHMENT_A, allowCached: true, load });
     await read();
     cache.observe("ws-a", ATTACHMENT_B, [{ path: "note.md", kind: "changed" }]);
     expect(Reflect.get((await read()).files[0]!, "contentIdentity")).toBe("old");
     cache.observe("ws-a", ATTACHMENT_A, [{ path: "note.md", kind: "changed" }]);
     cache.invalidate({ workspaceId: "ws-a", pathSetChanged: false });
-    expect((await read()).files[0]).toMatchObject({ icon: "new", contentIdentity: expect.stringMatching(/^observation:/) });
+    expect((await read()).files[0]).toMatchObject({
+      icon: "new",
+      contentIdentity: expect.stringMatching(/^observation:/),
+    });
     expect(load).toHaveBeenCalledOnce();
     cache.observe("ws-a", ATTACHMENT_A, [{ path: "added.md", kind: "appeared" }]);
     await read();
@@ -35,7 +42,8 @@ describe("WorkspaceFileListingCache", () => {
   it("walks again when a changed file is missing from the listing", async () => {
     const cache = new WorkspaceFileListingCache("win32");
     const load = vi.fn(async () => listing("plan.md"));
-    const read = () => cache.list({ workspaceId: "ws-a", attachmentId: ATTACHMENT_A, allowCached: true, load });
+    const read = () =>
+      cache.list({ workspaceId: "ws-a", attachmentId: ATTACHMENT_A, allowCached: true, load });
     await read();
     // Deleted after the walk and written again before the next engine scan.
     cache.observe("ws-a", ATTACHMENT_A, [{ path: "packing.md", kind: "changed" }]);
@@ -47,9 +55,16 @@ describe("WorkspaceFileListingCache", () => {
   it("walks again when a file changed during a walk is missing from it", async () => {
     const cache = new WorkspaceFileListingCache("win32");
     const first = deferred<WorkspacePathListing>();
-    const both = { files: [{ path: "plan.md", kind: "file" as const }, { path: "packing.md", kind: "file" as const }], folders: [] };
+    const both = {
+      files: [
+        { path: "plan.md", kind: "file" as const },
+        { path: "packing.md", kind: "file" as const },
+      ],
+      folders: [],
+    };
     const load = vi.fn().mockReturnValueOnce(first.promise).mockResolvedValue(both);
-    const read = () => cache.list({ workspaceId: "ws-a", attachmentId: ATTACHMENT_A, allowCached: true, load });
+    const read = () =>
+      cache.list({ workspaceId: "ws-a", attachmentId: ATTACHMENT_A, allowCached: true, load });
     const walking = read();
     // Written again behind the walk, before the next engine scan.
     cache.observe("ws-a", ATTACHMENT_A, [{ path: "packing.md", kind: "changed" }]);
@@ -69,55 +84,90 @@ describe("WorkspaceFileListingCache", () => {
       cache.observe("ws-a", ATTACHMENT_A, [{ path: "link.md", kind: "changed" }]);
       return listing("plan.md");
     });
-    await expect(cache.list({ workspaceId: "ws-a", attachmentId: ATTACHMENT_A, allowCached: true, load })).resolves.toEqual(listing("plan.md"));
+    await expect(
+      cache.list({ workspaceId: "ws-a", attachmentId: ATTACHMENT_A, allowCached: true, load }),
+    ).resolves.toEqual(listing("plan.md"));
     expect(load).toHaveBeenCalledTimes(2);
   });
 
-  const answers = (walk: Deferred<WorkspacePathListing>, both: WorkspacePathListing) => walk.resolve(both);
+  const answers = (walk: Deferred<WorkspacePathListing>, both: WorkspacePathListing) =>
+    walk.resolve(both);
   const fails = (walk: Deferred<WorkspacePathListing>) => walk.reject(new Error("walk failed"));
   it.each([
     ["before", "answers", answers],
     ["before", "fails", fails],
     ["after", "answers", answers],
     ["after", "fails", fails],
-  ] as const)("does not answer with a replaced walk that lacks a file changed during it, %s the newer walk starts, when the newer walk %s", async (when, outcome, settle) => {
-    const cache = new WorkspaceFileListingCache("win32");
-    const replaced = deferred<WorkspacePathListing>();
-    const newer = deferred<WorkspacePathListing>();
-    const both = { files: [{ path: "plan.md", kind: "file" as const }, { path: "packing.md", kind: "file" as const }], folders: [] };
-    const load = vi.fn().mockReturnValueOnce(replaced.promise).mockReturnValueOnce(newer.promise).mockResolvedValue(both);
-    const options = { workspaceId: "ws-a", attachmentId: ATTACHMENT_A, load };
-    const putBack = () => cache.observe("ws-a", ATTACHMENT_A, [{ path: "packing.md", kind: "changed" }]);
-    // Started after a delete answered; packing.md is put back behind it.
-    const walking = cache.list({ ...options, allowCached: true });
-    if (when === "before") putBack();
-    const replacing = cache.list({ ...options, allowCached: false });
-    if (when === "after") putBack();
-    replaced.resolve(listing("plan.md"));
-    await expect(walking).resolves.toEqual(both);
-    settle(newer, both);
-    if (outcome === "answers") await expect(replacing).resolves.toEqual(both);
-    else await expect(replacing).rejects.toThrow("walk failed");
-    // The retry answers only the replaced walk's callers. After a failed newer walk, nothing is cached.
-    await expect(cache.list({ ...options, allowCached: true })).resolves.toEqual(outcome === "answers" ? { ...both, cached: true } : both);
-    expect(load).toHaveBeenCalledTimes(outcome === "answers" ? 3 : 4);
-  });
+  ] as const)(
+    "does not answer with a replaced walk that lacks a file changed during it, %s the newer walk starts, when the newer walk %s",
+    async (when, outcome, settle) => {
+      const cache = new WorkspaceFileListingCache("win32");
+      const replaced = deferred<WorkspacePathListing>();
+      const newer = deferred<WorkspacePathListing>();
+      const both = {
+        files: [
+          { path: "plan.md", kind: "file" as const },
+          { path: "packing.md", kind: "file" as const },
+        ],
+        folders: [],
+      };
+      const load = vi
+        .fn()
+        .mockReturnValueOnce(replaced.promise)
+        .mockReturnValueOnce(newer.promise)
+        .mockResolvedValue(both);
+      const options = { workspaceId: "ws-a", attachmentId: ATTACHMENT_A, load };
+      const putBack = () =>
+        cache.observe("ws-a", ATTACHMENT_A, [{ path: "packing.md", kind: "changed" }]);
+      // Started after a delete answered; packing.md is put back behind it.
+      const walking = cache.list({ ...options, allowCached: true });
+      if (when === "before") putBack();
+      const replacing = cache.list({ ...options, allowCached: false });
+      if (when === "after") putBack();
+      replaced.resolve(listing("plan.md"));
+      await expect(walking).resolves.toEqual(both);
+      settle(newer, both);
+      if (outcome === "answers") await expect(replacing).resolves.toEqual(both);
+      else await expect(replacing).rejects.toThrow("walk failed");
+      // The retry answers only the replaced walk's callers. After a failed newer walk, nothing is cached.
+      await expect(cache.list({ ...options, allowCached: true })).resolves.toEqual(
+        outcome === "answers" ? { ...both, cached: true } : both,
+      );
+      expect(load).toHaveBeenCalledTimes(outcome === "answers" ? 3 : 4);
+    },
+  );
 
   it("keeps a newer walk cached when a replaced walk's retry still lacks a changed file", async () => {
     const cache = new WorkspaceFileListingCache("win32");
     const replaced = deferred<WorkspacePathListing>();
-    const both = { files: [{ path: "plan.md", kind: "file" as const }, { path: "packing.md", kind: "file" as const }], folders: [] };
-    const putBack = () => cache.observe("ws-a", ATTACHMENT_A, [{ path: "packing.md", kind: "changed" }]);
+    const both = {
+      files: [
+        { path: "plan.md", kind: "file" as const },
+        { path: "packing.md", kind: "file" as const },
+      ],
+      folders: [],
+    };
+    const putBack = () =>
+      cache.observe("ws-a", ATTACHMENT_A, [{ path: "packing.md", kind: "changed" }]);
     // packing.md is put back behind the replaced walk, and again behind its retry.
-    const load = vi.fn().mockReturnValueOnce(replaced.promise).mockResolvedValueOnce(both)
-      .mockImplementationOnce(async () => { putBack(); return listing("plan.md"); });
+    const load = vi
+      .fn()
+      .mockReturnValueOnce(replaced.promise)
+      .mockResolvedValueOnce(both)
+      .mockImplementationOnce(async () => {
+        putBack();
+        return listing("plan.md");
+      });
     const options = { workspaceId: "ws-a", attachmentId: ATTACHMENT_A, load };
     const walking = cache.list({ ...options, allowCached: true });
     putBack();
     await expect(cache.list({ ...options, allowCached: false })).resolves.toEqual(both);
     replaced.resolve(listing("plan.md"));
     await expect(walking).resolves.toEqual(listing("plan.md"));
-    await expect(cache.list({ ...options, allowCached: true })).resolves.toEqual({ ...both, cached: true });
+    await expect(cache.list({ ...options, allowCached: true })).resolves.toEqual({
+      ...both,
+      cached: true,
+    });
     expect(load).toHaveBeenCalledTimes(3);
   });
 
@@ -125,7 +175,8 @@ describe("WorkspaceFileListingCache", () => {
     const cache = new WorkspaceFileListingCache("win32");
     const first = deferred<WorkspacePathListing>();
     const load = vi.fn(() => first.promise);
-    const read = () => cache.list({ workspaceId: "ws-a", attachmentId: ATTACHMENT_A, allowCached: true, load });
+    const read = () =>
+      cache.list({ workspaceId: "ws-a", attachmentId: ATTACHMENT_A, allowCached: true, load });
     const walking = read();
     cache.observe("ws-a", ATTACHMENT_A, [{ path: "plan.md", kind: "changed" }]);
     first.resolve(listing("plan.md"));
@@ -136,9 +187,18 @@ describe("WorkspaceFileListingCache", () => {
 
   it("does not overwrite newer content metadata with an older worker response", async () => {
     const first = deferred<readonly { path: string; kind: "file"; icon: string }[]>();
-    const metadata = vi.fn().mockReturnValueOnce(first.promise).mockResolvedValue([{ path: "note.md", kind: "file", icon: "newest" }]);
+    const metadata = vi
+      .fn()
+      .mockReturnValueOnce(first.promise)
+      .mockResolvedValue([{ path: "note.md", kind: "file", icon: "newest" }]);
     const cache = new WorkspaceFileListingCache("win32", metadata);
-    const read = () => cache.list({ workspaceId: "ws-a", attachmentId: ATTACHMENT_A, allowCached: true, load: async () => listing("note.md") });
+    const read = () =>
+      cache.list({
+        workspaceId: "ws-a",
+        attachmentId: ATTACHMENT_A,
+        allowCached: true,
+        load: async () => listing("note.md"),
+      });
     await read();
     cache.observe("ws-a", ATTACHMENT_A, [{ path: "note.md", kind: "changed" }]);
     const refreshing = read();
@@ -295,8 +355,7 @@ describe("WorkspaceFileListingCache", () => {
     const read = (workspaceId: string) =>
       cache.list({
         workspaceId,
-        attachmentId:
-          workspaceId === "ws-a" ? ATTACHMENT_A : ATTACHMENT_B,
+        attachmentId: workspaceId === "ws-a" ? ATTACHMENT_A : ATTACHMENT_B,
         allowCached: true,
         load: async () => {
           const revision = (loads.get(workspaceId) ?? 0) + 1;
@@ -389,15 +448,24 @@ describe("WorkspaceFileListingCache", () => {
   });
 });
 
- it("reuses the path listing through policy edits, creation and deletion", async () => {
+it("reuses the path listing through policy edits, creation and deletion", async () => {
   const cache = new WorkspaceFileListingCache("win32");
   const load = vi.fn(async () => listing("kept.md"));
-  const read = () => cache.list({ workspaceId: "ws-a", attachmentId: ATTACHMENT_A, allowCached: true, load });
+  const read = () =>
+    cache.list({ workspaceId: "ws-a", attachmentId: ATTACHMENT_A, allowCached: true, load });
   await read();
-  cache.invalidate({ workspaceId: "ws-a", paths: [".dohc/engine/index", ".dohc/local/ui-state.json"], pathSetChanged: false });
+  cache.invalidate({
+    workspaceId: "ws-a",
+    paths: [".dohc/engine/index", ".dohc/local/ui-state.json"],
+    pathSetChanged: false,
+  });
   await read();
   expect(load).toHaveBeenCalledOnce();
-  cache.invalidate({ workspaceId: "ws-a", paths: [".DOHC/VISIBILITY.TOML"], pathSetChanged: false });
+  cache.invalidate({
+    workspaceId: "ws-a",
+    paths: [".DOHC/VISIBILITY.TOML"],
+    pathSetChanged: false,
+  });
   await read();
   expect(load).toHaveBeenCalledTimes(1);
   cache.invalidate({ workspaceId: "ws-a", paths: [".dohc/visibility.toml"], pathSetChanged: true });
@@ -415,35 +483,75 @@ it("answers whether the listing in hand has a file, once its walk finishes, and 
   const has = (attachmentId = ATTACHMENT_A) => cache.hasFile("ws-a", attachmentId, named);
   expect(await has()).toBeUndefined();
   const walk = deferred<WorkspacePathListing>();
-  const read = cache.list({ workspaceId: "ws-a", attachmentId: ATTACHMENT_A, allowCached: true, load: () => walk.promise });
+  const read = cache.list({
+    workspaceId: "ws-a",
+    attachmentId: ATTACHMENT_A,
+    allowCached: true,
+    load: () => walk.promise,
+  });
   const answer = has();
-  walk.resolve({ files: [{ path: "notes.md", kind: "file" }, { path: "tasks/dataset.json", kind: "file" }], folders: ["tasks"] });
+  walk.resolve({
+    files: [
+      { path: "notes.md", kind: "file" },
+      { path: "tasks/dataset.json", kind: "file" },
+    ],
+    folders: ["tasks"],
+  });
   await read;
   expect(await answer).toBe(true);
   expect(await has(ATTACHMENT_B)).toBeUndefined();
   cache.invalidate({ workspaceId: "ws-a", paths: ["tasks/dataset.json"] });
   expect(await has()).toBeUndefined();
-  await cache.list({ workspaceId: "ws-a", attachmentId: ATTACHMENT_A, allowCached: true, load: async () => listing("notes.md") });
+  await cache.list({
+    workspaceId: "ws-a",
+    attachmentId: ATTACHMENT_A,
+    allowCached: true,
+    load: async () => listing("notes.md"),
+  });
   expect(await has()).toBe(false);
-  cache.invalidate({ workspaceId: "ws-a" , paths: ["notes.md"] });
-  await cache.list({ workspaceId: "ws-a", attachmentId: ATTACHMENT_A, allowCached: true, load: async () => { throw new Error("walk failed"); } }).catch(() => undefined);
+  cache.invalidate({ workspaceId: "ws-a", paths: ["notes.md"] });
+  await cache
+    .list({
+      workspaceId: "ws-a",
+      attachmentId: ATTACHMENT_A,
+      allowCached: true,
+      load: async () => {
+        throw new Error("walk failed");
+      },
+    })
+    .catch(() => undefined);
   expect(await has()).toBeUndefined();
 });
 
 it("answers nothing from a walk that a newer walk or a change replaced while it ran", async () => {
   const cache = new WorkspaceFileListingCache("win32");
-  const has = () => cache.hasFile("ws-a", ATTACHMENT_A, path => path.endsWith("dataset.json"));
+  const has = () => cache.hasFile("ws-a", ATTACHMENT_A, (path) => path.endsWith("dataset.json"));
   const replaced = deferred<WorkspacePathListing>();
-  const first = cache.list({ workspaceId: "ws-a", attachmentId: ATTACHMENT_A, allowCached: true, load: () => replaced.promise });
+  const first = cache.list({
+    workspaceId: "ws-a",
+    attachmentId: ATTACHMENT_A,
+    allowCached: true,
+    load: () => replaced.promise,
+  });
   const answer = has();
-  const newer = cache.list({ workspaceId: "ws-a", attachmentId: ATTACHMENT_A, allowCached: false, load: async () => listing("tasks/dataset.json") });
+  const newer = cache.list({
+    workspaceId: "ws-a",
+    attachmentId: ATTACHMENT_A,
+    allowCached: false,
+    load: async () => listing("tasks/dataset.json"),
+  });
   replaced.resolve(listing("notes.md"));
   await Promise.all([first, newer]);
   expect(await answer).toBeUndefined();
   expect(await has()).toBe(true);
   cache.invalidate({ workspaceId: "ws-a", paths: ["tasks/dataset.json"] });
   const dropped = deferred<WorkspacePathListing>();
-  const second = cache.list({ workspaceId: "ws-a", attachmentId: ATTACHMENT_A, allowCached: true, load: () => dropped.promise });
+  const second = cache.list({
+    workspaceId: "ws-a",
+    attachmentId: ATTACHMENT_A,
+    allowCached: true,
+    load: () => dropped.promise,
+  });
   const late = has();
   cache.invalidate({ workspaceId: "ws-a", paths: ["tasks/dataset.json"] });
   dropped.resolve(listing("notes.md"));

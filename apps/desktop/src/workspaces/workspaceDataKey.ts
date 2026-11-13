@@ -25,11 +25,13 @@ function hardLinksUnsupported(error: unknown): boolean {
   const { code, syscall } = error as NodeJS.ErrnoException;
   // libuv maps Windows ERROR_INVALID_FUNCTION (1) to EISDIR and ERROR_NOT_SUPPORTED (50) to ENOTSUP.
   // Off Windows, match materialize.rs::hard_links_unsupported; Windows EPERM remains a permissions failure.
-  return syscall === "link" && (
-    code === "ENOTSUP" || code === "ENOSYS" ||
-    (process.platform === "win32"
-      ? code === "EISDIR"
-      : code === "EPERM" || code === "EOPNOTSUPP")
+  return (
+    syscall === "link" &&
+    (code === "ENOTSUP" ||
+      code === "ENOSYS" ||
+      (process.platform === "win32"
+        ? code === "EISDIR"
+        : code === "EPERM" || code === "EOPNOTSUPP"))
   );
 }
 
@@ -50,7 +52,8 @@ async function publishKey(temporary: string, destination: string): Promise<void>
     await rename(temporary, destination);
   } catch (error) {
     // An empty claim holds no key, so it can go.
-    if ((await stat(destination).catch(() => null))?.size === 0) await rm(destination, { force: true }).catch(() => undefined);
+    if ((await stat(destination).catch(() => null))?.size === 0)
+      await rm(destination, { force: true }).catch(() => undefined);
     throw error;
   }
 }
@@ -176,7 +179,8 @@ export async function loadSecretDataKey(
   // workspace, which callers do first. Writing here never creates it.
   const key = randomBytes(SECRET_KEY_BYTES);
   const payload = `${SECRET_KEY_FILE_PREFIX}${key.toString("base64")}\n`;
-  const createFailed = "The workspace secret key file could not be created; refusing to store protected files.";
+  const createFailed =
+    "The workspace secret key file could not be created; refusing to store protected files.";
   let created: boolean;
   try {
     created = await atomicCreateFile(path, payload, 0o600, { link: publishKey });

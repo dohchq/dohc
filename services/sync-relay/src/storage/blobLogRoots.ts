@@ -26,7 +26,9 @@ export function removeBlobLogReferences(remaining: Set<string>, payload: string 
 }
 
 export function currentBlobLogSequence(db: SqliteDb, workspaceId: string): number | null {
-  const row = db.prepare("SELECT MAX(relay_seq) AS seq FROM sync_relay_log WHERE workspace_id = ?").get(workspaceId);
+  const row = db
+    .prepare("SELECT MAX(relay_seq) AS seq FROM sync_relay_log WHERE workspace_id = ?")
+    .get(workspaceId);
   if (row?.seq === null) return null;
   if (typeof row?.seq !== "number" || !Number.isSafeInteger(row.seq)) {
     throw new TypeError("invalid blob log sequence");
@@ -36,7 +38,11 @@ export function currentBlobLogSequence(db: SqliteDb, workspaceId: string): numbe
 
 // Every statement completes before yielding a bounded piece to the caller.
 // A synchronous consumer never yields the event loop or leaves its transaction.
-export function* blobLogPayloadChunks(db: SqliteDb, workspaceId: string, throughSeq: number | null): Generator<string> {
+export function* blobLogPayloadChunks(
+  db: SqliteDb,
+  workspaceId: string,
+  throughSeq: number | null,
+): Generator<string> {
   if (throughSeq === null) return;
   const firstPage = db.prepare(`SELECT relay_seq, substr(payload_json, 1, ?) AS payload
     FROM sync_relay_log WHERE workspace_id = ? AND relay_seq <= ? AND ${REFERENCES_BLOBS} ORDER BY relay_seq LIMIT ?`);
@@ -46,9 +52,10 @@ export function* blobLogPayloadChunks(db: SqliteDb, workspaceId: string, through
     FROM sync_relay_log WHERE workspace_id = ? AND relay_seq = ?`);
   let afterSeq: number | null = null;
   while (true) {
-    const page: Array<Record<string, unknown>> = afterSeq === null
-      ? firstPage.all(BLOB_LOG_TEXT_CHUNK, workspaceId, throughSeq, PAGE_ROWS)
-      : nextPage.all(BLOB_LOG_TEXT_CHUNK, workspaceId, afterSeq, throughSeq, PAGE_ROWS);
+    const page: Array<Record<string, unknown>> =
+      afterSeq === null
+        ? firstPage.all(BLOB_LOG_TEXT_CHUNK, workspaceId, throughSeq, PAGE_ROWS)
+        : nextPage.all(BLOB_LOG_TEXT_CHUNK, workspaceId, afterSeq, throughSeq, PAGE_ROWS);
     if (page.length === 0) return;
     for (const row of page) {
       let payload = row.payload;
@@ -68,7 +75,11 @@ export function* blobLogPayloadChunks(db: SqliteDb, workspaceId: string, through
       }
     }
     const sequence = page[page.length - 1]!.relay_seq;
-    if (typeof sequence !== "number" || !Number.isSafeInteger(sequence) || (afterSeq !== null && sequence <= afterSeq)) {
+    if (
+      typeof sequence !== "number" ||
+      !Number.isSafeInteger(sequence) ||
+      (afterSeq !== null && sequence <= afterSeq)
+    ) {
       throw new TypeError("invalid blob log page sequence");
     }
     afterSeq = sequence;

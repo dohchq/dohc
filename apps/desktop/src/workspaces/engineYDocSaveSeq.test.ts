@@ -51,9 +51,9 @@ describe("engine Y.Doc save-seq bookkeeping", () => {
       noteLocalEdit(state, index + 1);
       noteSettleStart(state, token);
     });
-    expect(
-      [...tokens].reverse().map((token) => noteSettleOutcome(state, token)),
-    ).toEqual([3, 2, 1]);
+    expect([...tokens].reverse().map((token) => noteSettleOutcome(state, token))).toEqual([
+      3, 2, 1,
+    ]);
   });
 
   it("pairs each completing settle with its own start, not the newest one", () => {

@@ -3,7 +3,8 @@
 
 export const DEFAULT_MODEL = "claude-sonnet-5-5";
 
-export const USAGE = "usage: pnpm eval --out <folder> [--model <id>] [--case <ids>] [--samples <n>] [--concurrency <n>] [--baseline <results.jsonl>] [--keep-session-route] [--dry-run] [--context]";
+export const USAGE =
+  "usage: pnpm eval --out <folder> [--model <id>] [--case <ids>] [--samples <n>] [--concurrency <n>] [--baseline <results.jsonl>] [--keep-session-route] [--dry-run] [--context]";
 
 export interface RunOptions {
   out?: string;
@@ -17,7 +18,14 @@ export interface RunOptions {
   context: boolean;
 }
 
-const VALUE_FLAGS = ["--out", "--model", "--case", "--samples", "--concurrency", "--baseline"] as const;
+const VALUE_FLAGS = [
+  "--out",
+  "--model",
+  "--case",
+  "--samples",
+  "--concurrency",
+  "--baseline",
+] as const;
 const SWITCHES = ["--keep-session-route", "--dry-run", "--context"] as const;
 
 function count(value: string | undefined, name: string, fallback: number): number {
@@ -35,7 +43,8 @@ export function readOptions(argv: readonly string[]): RunOptions {
       switches.add(name);
     } else if ((VALUE_FLAGS as readonly string[]).includes(name)) {
       const value = argv[index + 1];
-      if (value === undefined || value === "" || value.startsWith("--")) throw new Error(`${name} takes a value`);
+      if (value === undefined || value === "" || value.startsWith("--"))
+        throw new Error(`${name} takes a value`);
       values.set(name, value);
       index += 1;
     } else {

@@ -21,15 +21,24 @@ type ErrorReporter = () => ReportShellFailure | null;
 const COPY_ICON_MARKUP: Record<CopyFeedback | "rest", string> = {
   rest: '<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
   copied: '<path d="M20 6 9 17l-5-5"/>',
-  failed: '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
+  failed:
+    '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
 };
 
 function copyIcon(feedback: CopyFeedback | null): SVGSVGElement {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   for (const [name, value] of Object.entries({
-    width: "13", height: "13", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor",
-    "stroke-width": "2", "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true",
-  })) svg.setAttribute(name, value);
+    width: "13",
+    height: "13",
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    "stroke-width": "2",
+    "stroke-linecap": "round",
+    "stroke-linejoin": "round",
+    "aria-hidden": "true",
+  }))
+    svg.setAttribute(name, value);
   svg.innerHTML = COPY_ICON_MARKUP[feedback ?? "rest"];
   return svg;
 }
@@ -51,26 +60,19 @@ function directElementChild(
   return null;
 }
 
-export function findEmptyListItemParagraph(
-  target: EventTarget | null,
-): HTMLElement | null {
+export function findEmptyListItemParagraph(target: EventTarget | null): HTMLElement | null {
   if (!(target instanceof HTMLElement)) return null;
   const item = target.closest("li");
   if (!item) return null;
   const paragraph =
     directElementChild(item, (child) => child.tagName === "P") ??
-    directElementChild(item, (child) => child.tagName === "DIV")?.querySelector(
-      ":scope > p",
-    );
+    directElementChild(item, (child) => child.tagName === "DIV")?.querySelector(":scope > p");
   if (!(paragraph instanceof HTMLElement)) return null;
   const text = paragraph.textContent?.replace(/\u200b/g, "").trim() ?? "";
   return text.length === 0 ? paragraph : null;
 }
 
-function focusEmptyListItemParagraph(
-  view: EditorView,
-  event: MouseEvent,
-): boolean {
+function focusEmptyListItemParagraph(view: EditorView, event: MouseEvent): boolean {
   if (
     event.button !== 0 ||
     event.altKey ||
@@ -100,9 +102,7 @@ function focusEmptyListItemParagraph(
     if (!$pos.parent.isTextblock) continue;
     event.preventDefault();
     view.dispatch(
-      view.state.tr
-        .setSelection(TextSelection.create(view.state.doc, pos))
-        .scrollIntoView(),
+      view.state.tr.setSelection(TextSelection.create(view.state.doc, pos)).scrollIntoView(),
     );
     view.focus();
     return true;
@@ -122,19 +122,8 @@ function insertParagraphAfterBlock(view: EditorView, blockPos: number): boolean 
   const $insert = state.doc.resolve(insertPos);
   let tr = state.tr;
 
-  if (
-    !(
-      $insert.nodeAfter?.type === paragraphType &&
-      $insert.nodeAfter.content.size === 0
-    )
-  ) {
-    if (
-      !$insert.parent.canReplaceWith(
-        $insert.index(),
-        $insert.index(),
-        paragraphType,
-      )
-    ) {
+  if (!($insert.nodeAfter?.type === paragraphType && $insert.nodeAfter.content.size === 0)) {
+    if (!$insert.parent.canReplaceWith($insert.index(), $insert.index(), paragraphType)) {
       return false;
     }
     tr = tr.insert(insertPos, paragraphType.create());
@@ -205,9 +194,7 @@ function codeBlockToolbar(
       select.setAttribute("aria-label", "Code language");
       select.disabled = view.editable === false;
 
-      const hasKnownLanguage = CODE_LANGUAGE_OPTIONS.some(
-        (option) => option.value === language,
-      );
+      const hasKnownLanguage = CODE_LANGUAGE_OPTIONS.some((option) => option.value === language);
       const options = hasKnownLanguage
         ? CODE_LANGUAGE_OPTIONS
         : [{ value: language, label: language }, ...CODE_LANGUAGE_OPTIONS];
@@ -227,9 +214,7 @@ function codeBlockToolbar(
         if (!current || !isCodeBlockNode(current)) return;
 
         const nextLanguage = cleanCodeLanguage(select.value);
-        const currentLanguage = cleanCodeLanguage(
-          String(current.attrs.language ?? ""),
-        );
+        const currentLanguage = cleanCodeLanguage(String(current.attrs.language ?? ""));
         select.value = nextLanguage;
         if (nextLanguage === currentLanguage) return;
 
@@ -341,14 +326,21 @@ export function makeCodeBlockChromePlugin(report: ErrorReporter = () => null) {
         // A toolbar sits before its block, so content inserted at a block's
         // start leaves its toolbar at the start of the range.
         const blocks: Array<{ node: ProseMirrorNode; pos: number }> = [];
-        tr.doc.nodesBetween(range.from, Math.min(range.to + 1, tr.doc.content.size), (node, pos) => {
-          if (!isCodeBlockNode(node)) return !node.isTextblock;
-          if (pos >= range.from) blocks.push({ node, pos });
-          return false;
-        });
+        tr.doc.nodesBetween(
+          range.from,
+          Math.min(range.to + 1, tr.doc.content.size),
+          (node, pos) => {
+            if (!isCodeBlockNode(node)) return !node.isTextblock;
+            if (pos >= range.from) blocks.push({ node, pos });
+            return false;
+          },
+        );
         const previous = old.find(range.from, range.toBefore);
         const owners = remote
-          ? ownersByPlace(previous, blocks.map(({ pos }) => pos))
+          ? ownersByPlace(
+              previous,
+              blocks.map(({ pos }) => pos),
+            )
           : mapWidgetOwners(previous, tr.mapping);
         const toolbars = blocks.map(({ node, pos }) =>
           codeBlockToolbar(node, pos, owners.get(pos) ?? nextOwnerKey(), report),

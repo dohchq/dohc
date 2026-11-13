@@ -45,12 +45,8 @@ function dumpSearchIndexTables(rootPath: string): string {
     readOnly: true,
   });
   try {
-    const files = db
-      .prepare("SELECT path, text FROM engine_search_files_fts")
-      .all();
-    const chats = db
-      .prepare("SELECT thread_id, text FROM engine_search_chat_messages_fts")
-      .all();
+    const files = db.prepare("SELECT path, text FROM engine_search_files_fts").all();
+    const chats = db.prepare("SELECT thread_id, text FROM engine_search_chat_messages_fts").all();
     return JSON.stringify({ chats, files });
   } finally {
     db.close();
@@ -67,7 +63,10 @@ test("search finds file content and a chat message; .env.local content never sur
     // Disk state: one ordinary tracked file plus a `.env.local` (the family
     // member that originally fell through the secret classifier).
     await writeWorkspaceFiles(temp, [
-      { path: "notes/roadmap.md", contents: "# Roadmap\n\nThe galaxy-brain milestone lands next.\n" },
+      {
+        path: "notes/roadmap.md",
+        contents: "# Roadmap\n\nThe galaxy-brain milestone lands next.\n",
+      },
       { path: ".env.local", contents: `API_TOKEN=${SECRET_VALUE}\n` },
     ]);
     desktop = await launchDesktopApp({ workspace: temp });
@@ -88,9 +87,7 @@ test("search finds file content and a chat message; .env.local content never sur
     await comment.fill("Roadmap sync\nLet's settle the quasar sync cadence this week.");
     await comment.press("Enter");
     await expect(page.getByTestId("linked-chat-title")).toContainText("Roadmap sync");
-    await expect(page.getByTestId("linked-chat-message-body")).toContainText(
-      "quasar sync cadence",
-    );
+    await expect(page.getByTestId("linked-chat-message-body")).toContainText("quasar sync cadence");
 
     await page.getByTestId(activityPin("search")).click();
     await expect(page.getByTestId("search-view")).toBeVisible();
@@ -116,9 +113,7 @@ test("search finds file content and a chat message; .env.local content never sur
       timeout: 20_000,
     });
     await expect(page.getByTestId("linked-chat-title")).toContainText("Roadmap sync");
-    await expect(page.getByTestId("linked-chat-message-body")).toContainText(
-      "quasar sync cadence",
-    );
+    await expect(page.getByTestId("linked-chat-message-body")).toContainText("quasar sync cadence");
 
     // 4. The `.env.local` content is never findable... (the search panel is
     // still open — opening the Chats panel does not close it)
@@ -173,10 +168,7 @@ test("a newly saved editor change is searchable before relaunch", async () => {
     });
     await expect
       .poll(
-        async () =>
-          await readFile(join(temp.rootPath, "notes/live.md"), "utf8").catch(
-            () => "",
-          ),
+        async () => await readFile(join(temp.rootPath, "notes/live.md"), "utf8").catch(() => ""),
         { timeout: 20_000 },
       )
       .toContain(sentinel);
@@ -186,9 +178,7 @@ test("a newly saved editor change is searchable before relaunch", async () => {
     await page.getByTestId("search-input").fill(sentinel);
 
     await expect(
-      page.locator(
-        '[data-testid="search-result-group"][data-path="notes/live.md"]',
-      ),
+      page.locator('[data-testid="search-result-group"][data-path="notes/live.md"]'),
     ).toBeVisible({ timeout: 20_000 });
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);

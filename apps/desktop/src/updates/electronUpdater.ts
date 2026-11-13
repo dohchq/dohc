@@ -91,7 +91,10 @@ type AutoUpdaterLike = {
   on(eventName: "update-available", listener: (info: { version: string }) => void): void;
   on(eventName: "update-not-available", listener: () => void): void;
   on(eventName: "download-progress", listener: (progress: { percent: number }) => void): void;
-  on(eventName: "update-downloaded", listener: (info: { version: string; downloadedFile?: string }) => void): void;
+  on(
+    eventName: "update-downloaded",
+    listener: (info: { version: string; downloadedFile?: string }) => void,
+  ): void;
   on(eventName: "error", listener: (error: Error) => void): void;
 };
 
@@ -106,10 +109,7 @@ export function resolveUpdateChannel(version: string): UpdateChannel {
   return NIGHTLY_VERSION_PATTERN.test(version) ? "nightly" : "latest";
 }
 
-export function updateFeedOverride(
-  env: NodeJS.ProcessEnv,
-  isPackaged: boolean,
-): string | null {
+export function updateFeedOverride(env: NodeJS.ProcessEnv, isPackaged: boolean): string | null {
   const url = env.DOHC_UPDATE_URL?.trim();
   if (!url) return null;
   if (isPackaged) return url;
@@ -118,10 +118,7 @@ export function updateFeedOverride(
 
 // Whether this build runs an updater at all: packaged, or pointed at a mock
 // feed in development.
-export function updatesEnabled(
-  env: NodeJS.ProcessEnv,
-  isPackaged: boolean,
-): boolean {
+export function updatesEnabled(env: NodeJS.ProcessEnv, isPackaged: boolean): boolean {
   return isPackaged || updateFeedOverride(env, isPackaged) !== null;
 }
 
@@ -174,7 +171,10 @@ export function debInstallFailure(error: Error, installer: string): InstallFailu
   }
   const installCommand = `sudo apt install '${installer.replaceAll("'", "'\\''")}'`;
   return program === "pkexec" && status === "127"
-    ? { message: "dohc did not get permission. Run this command in a terminal to install it.", installCommand }
+    ? {
+        message: "dohc did not get permission. Run this command in a terminal to install it.",
+        installCommand,
+      }
     : { message: "Run this command in a terminal to install it.", installCommand };
 }
 // electron-updater's code when the feed has no channel file for this
@@ -183,7 +183,12 @@ export function debInstallFailure(error: Error, installer: string): InstallFailu
 const CHANNEL_FILE_NOT_FOUND = "ERR_UPDATER_CHANNEL_FILE_NOT_FOUND";
 
 function checkFailure(error: unknown, macReleaseFeed: boolean): UpdateEvent {
-  if (macReleaseFeed && error instanceof Error && "code" in error && error.code === CHANNEL_FILE_NOT_FOUND) {
+  if (
+    macReleaseFeed &&
+    error instanceof Error &&
+    "code" in error &&
+    error.code === CHANNEL_FILE_NOT_FOUND
+  ) {
     return { type: "not-available" };
   }
   const message = causeOf(error);
@@ -234,7 +239,9 @@ export function publicUpdateState(
     canCheck,
     canInstall,
     ...("version" in state ? { version: state.version } : {}),
-    ...(state.status === "downloading" && state.percent !== undefined ? { percent: state.percent } : {}),
+    ...(state.status === "downloading" && state.percent !== undefined
+      ? { percent: state.percent }
+      : {}),
   };
 }
 
@@ -268,10 +275,9 @@ export async function startAutoUpdates(options: {
   const platform = options.platform ?? process.platform;
   if (!updatesEnabled(env, options.isPackaged)) return null;
 
-  const imported =
-    options.importUpdater
-      ? await options.importUpdater()
-      : ((await import("electron-updater")) as UpdaterModuleLike);
+  const imported = options.importUpdater
+    ? await options.importUpdater()
+    : ((await import("electron-updater")) as UpdaterModuleLike);
   const { autoUpdater } = imported.default ?? imported;
   const currentVersion = options.currentVersion ?? "0.0.0";
   const channel = options.channel ?? resolveUpdateChannel(currentVersion);
@@ -376,7 +382,11 @@ export async function startAutoUpdates(options: {
   autoUpdater.on("update-available", (info) => {
     failure = null;
     if (notInstalled) {
-      fail("download", { message: `dohc is still on version ${currentVersion}.`, notInstalled }, true);
+      fail(
+        "download",
+        { message: `dohc is still on version ${currentVersion}.`, notInstalled },
+        true,
+      );
       notInstalled = null;
       keepChosen(null);
     }
@@ -399,7 +409,8 @@ export async function startAutoUpdates(options: {
   );
   autoUpdater.on("update-downloaded", (info) => {
     failure = null;
-    debInstaller = platform === "linux" && info.downloadedFile?.endsWith(".deb") ? info.downloadedFile : null;
+    debInstaller =
+      platform === "linux" && info.downloadedFile?.endsWith(".deb") ? info.downloadedFile : null;
     dispatch({ type: "downloaded", version: info.version });
   });
   autoUpdater.on("error", (error) => {
@@ -416,7 +427,11 @@ export async function startAutoUpdates(options: {
     }
     if (restartStaged && state.status === "ready") {
       restartStaged = false;
-      fail("install", debInstaller ? debInstallFailure(error, debInstaller) : { message: causeOf(error) }, true);
+      fail(
+        "install",
+        debInstaller ? debInstallFailure(error, debInstaller) : { message: causeOf(error) },
+        true,
+      );
       emit();
       return;
     }
@@ -545,12 +560,15 @@ export async function startAutoUpdates(options: {
           // The answer has no bound: the person decides, not the feed.
           asked = asking = true;
           clearTimeout(timer);
-          void confirmDownload(state.version).then((accepted) => {
-            asking = false;
-            if (!accepted) return finish(null);
-            downloadUpdate();
-            settle();
-          }, () => finish(null));
+          void confirmDownload(state.version).then(
+            (accepted) => {
+              asking = false;
+              if (!accepted) return finish(null);
+              downloadUpdate();
+              settle();
+            },
+            () => finish(null),
+          );
           return;
         }
         if (state.status === "downloading") {

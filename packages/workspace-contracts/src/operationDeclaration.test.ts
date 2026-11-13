@@ -9,8 +9,10 @@ type Declarations = typeof LINKS_DECLARATIONS;
 
 function changeLinks(change: (declarations: Declarations) => object) {
   vi.resetModules();
-  vi.doMock("./linksDeclarations", async importOriginal => {
-    const { LINKS_DECLARATIONS: declarations } = await importOriginal<{ LINKS_DECLARATIONS: Declarations }>();
+  vi.doMock("./linksDeclarations", async (importOriginal) => {
+    const { LINKS_DECLARATIONS: declarations } = await importOriginal<{
+      LINKS_DECLARATIONS: Declarations;
+    }>();
     return { LINKS_DECLARATIONS: change(declarations) };
   });
 }
@@ -32,19 +34,32 @@ it("refuses a declared operation named like one in another family", async () => 
 });
 
 it("refuses a declared MCP tool named like a hand-written tool", async () => {
-  changeLinks(declarations => ({ ...declarations, linksEdges: { ...declarations.linksEdges, mcp: { ...declarations.linksEdges.mcp, tool: "dohc_read_chat" } } }));
+  changeLinks((declarations) => ({
+    ...declarations,
+    linksEdges: {
+      ...declarations.linksEdges,
+      mcp: { ...declarations.linksEdges.mcp, tool: "dohc_read_chat" },
+    },
+  }));
   await expect(import("./capabilities")).rejects.toThrow("dohc_read_chat is declared twice.");
 });
 
 it("refuses a declaration whose access a cast changed to write", async () => {
-  changeLinks(declarations => ({ ...declarations, linksEdges: { ...declarations.linksEdges, access: "write" as "read" } }));
-  await expect(import("./capabilities")).rejects.toThrow("linksEdges is declared as write. Only reads can be declared.");
+  changeLinks((declarations) => ({
+    ...declarations,
+    linksEdges: { ...declarations.linksEdges, access: "write" as "read" },
+  }));
+  await expect(import("./capabilities")).rejects.toThrow(
+    "linksEdges is declared as write. Only reads can be declared.",
+  );
 });
 
 it("joins every listed family, and only those", async () => {
   vi.resetModules();
-  vi.doMock("./allDeclarations", async importOriginal => {
-    const { DECLARATION_FAMILIES: { links } } = await importOriginal<typeof import("./allDeclarations")>();
+  vi.doMock("./allDeclarations", async (importOriginal) => {
+    const {
+      DECLARATION_FAMILIES: { links },
+    } = await importOriginal<typeof import("./allDeclarations")>();
     return { DECLARATION_FAMILIES: { links } };
   });
   const { CAPABILITIES } = await import("./capabilities");
@@ -54,7 +69,15 @@ it("joins every listed family, and only those", async () => {
 });
 
 // The type refuses these too, unless the input is widened to z.ZodObject.
-it.each(ENVELOPE_FIELDS)("refuses a declared input that names %s", async field => {
-  changeLinks(declarations => ({ ...declarations, linksEdges: { ...declarations.linksEdges, input: declarations.linksEdges.input.extend({ [field]: z.string() }) as z.ZodObject } }));
-  await expect(import("./capabilities")).rejects.toThrow(`linksEdges input names ${field}, which its doors set.`);
+it.each(ENVELOPE_FIELDS)("refuses a declared input that names %s", async (field) => {
+  changeLinks((declarations) => ({
+    ...declarations,
+    linksEdges: {
+      ...declarations.linksEdges,
+      input: declarations.linksEdges.input.extend({ [field]: z.string() }) as z.ZodObject,
+    },
+  }));
+  await expect(import("./capabilities")).rejects.toThrow(
+    `linksEdges input names ${field}, which its doors set.`,
+  );
 });

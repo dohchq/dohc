@@ -24,15 +24,22 @@ import {
 const ME = "install-me";
 const OTHER = "install-other";
 
-const host = (installId: string, generation: number, handoverFrom: string | null, releasedThroughMs: number | null): RelayAutomationHost =>
-  ({ installId, generation, handoverFrom, releasedThroughMs });
+const host = (
+  installId: string,
+  generation: number,
+  handoverFrom: string | null,
+  releasedThroughMs: number | null,
+): RelayAutomationHost => ({ installId, generation, handoverFrom, releasedThroughMs });
 
 // The Group handover this computer's engine answers when it releases.
 const GROUPS = { floorMs: 1, automations: [] };
 // This computer's reach verdicts, released with it.
 const REACH = { version: 1, verdicts: [] };
 
-const answer = (row: RelayAutomationHost | null): HostAnswer => ({ status: 200, body: { ok: true, host: row, computers: [] } });
+const answer = (row: RelayAutomationHost | null): HostAnswer => ({
+  status: 200,
+  body: { ok: true, host: row, computers: [] },
+});
 
 // A relay that records one host and answers as the routes do, and a record
 // of everything the module asked and told.
@@ -74,34 +81,62 @@ function world(options: { stored?: unknown; synced?: boolean } = {}) {
         return answer(relay);
       }
       if (releaseAnswer) return releaseAnswer(request);
-      if (!relay || relay.handoverFrom !== request.body.installId || relay.generation !== request.body.generation) {
+      if (
+        !relay ||
+        relay.handoverFrom !== request.body.installId ||
+        relay.generation !== request.body.generation
+      ) {
         return { status: 409, body: { ok: false, code: "conflict" } };
       }
-      relay = host(relay.installId, relay.generation + 1, null, Math.max(relay.releasedThroughMs ?? 0, request.body.releasedThroughMs));
+      relay = host(
+        relay.installId,
+        relay.generation + 1,
+        null,
+        Math.max(relay.releasedThroughMs ?? 0, request.body.releasedThroughMs),
+      );
       return answer(relay);
     },
     stored: () => options.stored,
-    store: (_workspaceId, row) => { stored.push(row); },
-    startedHere: (_workspaceId, startAfterMs, floorMs) => { started.push(startAfterMs); floors.push(floorMs); },
-    hostChanged: () => { hostChanges += 1; },
+    store: (_workspaceId, row) => {
+      stored.push(row);
+    },
+    startedHere: (_workspaceId, startAfterMs, floorMs) => {
+      started.push(startAfterMs);
+      floors.push(floorMs);
+    },
+    hostChanged: () => {
+      hostChanges += 1;
+    },
     finishHere: async (_workspaceId, stillHandingOver) => {
       finishes += 1;
       whileFinishing?.(stillHandingOver);
-      return finish === null ? null : { throughMs: finish, groups: GROUPS, groupsWatched: 2, reach: REACH };
+      return finish === null
+        ? null
+        : { throughMs: finish, groups: GROUPS, groupsWatched: 2, reach: REACH };
     },
-    logError: (_workspaceId, error) => { errors.push(error); },
+    logError: (_workspaceId, error) => {
+      errors.push(error);
+    },
     monotonicMs: () => clock,
     setTimer: (wake, delayMs) => {
       const timer = { wake, delayMs, done: false };
       timers.push(timer);
       return timer;
     },
-    clearTimer: (cleared) => { for (const timer of timers) if (timer === cleared) timer.done = true; },
+    clearTimer: (cleared) => {
+      for (const timer of timers) if (timer === cleared) timer.done = true;
+    },
   });
   const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
   const armed = () => timers.filter((timer) => !timer.done).map((timer) => timer.delayMs);
   return {
-    hosts, requests, started, floors, stored, errors, settle,
+    hosts,
+    requests,
+    started,
+    floors,
+    stored,
+    errors,
+    settle,
     hostChanges: () => hostChanges,
     armed,
     /** Fires the one armed timer and lets its read land. */
@@ -112,16 +147,32 @@ function world(options: { stored?: unknown; synced?: boolean } = {}) {
       pending[0]!.wake();
       await settle();
     },
-    advance: (ms: number) => { clock += ms; },
-    setRelay: (row: RelayAutomationHost | null) => { relay = row; },
+    advance: (ms: number) => {
+      clock += ms;
+    },
+    setRelay: (row: RelayAutomationHost | null) => {
+      relay = row;
+    },
     relay: () => relay,
-    setReachable: (value: boolean) => { reachable = value; },
-    setHung: (value: boolean) => { hung = value; },
-    setSignedIn: (value: boolean) => { signedIn = value; },
-    setFinish: (value: number | null) => { finish = value; },
-    whileFinishing: (run: (stillHandingOver: () => boolean) => void) => { whileFinishing = run; },
+    setReachable: (value: boolean) => {
+      reachable = value;
+    },
+    setHung: (value: boolean) => {
+      hung = value;
+    },
+    setSignedIn: (value: boolean) => {
+      signedIn = value;
+    },
+    setFinish: (value: number | null) => {
+      finish = value;
+    },
+    whileFinishing: (run: (stillHandingOver: () => boolean) => void) => {
+      whileFinishing = run;
+    },
     finishes: () => finishes,
-    setReleaseAnswer: (respond: ((request: HostRequest) => HostAnswer) | null) => { releaseAnswer = respond; },
+    setReleaseAnswer: (respond: ((request: HostRequest) => HostAnswer) | null) => {
+      releaseAnswer = respond;
+    },
   };
 }
 
@@ -130,9 +181,14 @@ describe("automation hosts", () => {
     const w = world();
     w.hosts.open("ws");
     await w.settle();
-    expect(w.requests).toEqual([{ action: "check-in", body: { installId: ME, label: "Ice's laptop", claim: false } }]);
+    expect(w.requests).toEqual([
+      { action: "check-in", body: { installId: ME, label: "Ice's laptop", claim: false } },
+    ]);
     expect(await w.hosts.runsHere("ws")).toBe(true);
-    expect(w.requests[1]).toEqual({ action: "check-in", body: { installId: ME, label: "Ice's laptop", claim: true } });
+    expect(w.requests[1]).toEqual({
+      action: "check-in",
+      body: { installId: ME, label: "Ice's laptop", claim: true },
+    });
     expect(w.started, "a first host starts at now").toEqual([null]);
     expect(w.stored.at(-1)).toEqual(host(ME, 1, null, null));
   });
@@ -181,7 +237,14 @@ describe("automation hosts", () => {
     await w.settle();
     expect(w.requests[1], "the release carries the Group handover").toEqual({
       action: "release",
-      body: { installId: ME, generation: 3, releasedThroughMs: 5_000, groups: GROUPS, groupsWatched: 2, reach: REACH },
+      body: {
+        installId: ME,
+        generation: 3,
+        releasedThroughMs: 5_000,
+        groups: GROUPS,
+        groupsWatched: 2,
+        reach: REACH,
+      },
     });
     expect(w.relay()).toEqual(host(OTHER, 4, null, 5_000));
     expect(await w.hosts.runsHere("ws")).toBe(false);
@@ -202,7 +265,10 @@ describe("automation hosts", () => {
     expect(w.hosts.stillRuns("ws")).toBe(false);
     expect(w.hosts.hold("ws"), "no new work once the handover began").toBeNull();
     await w.settle();
-    expect(w.requests.map((request) => request.action), "the release waits for the press").not.toContain("release");
+    expect(
+      w.requests.map((request) => request.action),
+      "the release waits for the press",
+    ).not.toContain("release");
 
     release!();
     await w.settle();
@@ -303,7 +369,11 @@ describe("automation hosts", () => {
     w.setFinish(6_000);
     w.hosts.relayAnswered("ws");
     await w.settle();
-    expect(w.requests.map((request) => request.action)).toEqual(["check-in", "check-in", "release"]);
+    expect(w.requests.map((request) => request.action)).toEqual([
+      "check-in",
+      "check-in",
+      "release",
+    ]);
     expect(w.relay()).toEqual(host(OTHER, 4, null, 6_000));
   });
 
@@ -318,7 +388,11 @@ describe("automation hosts", () => {
     w.hosts.open("ws");
     await w.settle();
     await w.settle();
-    expect(w.requests.map((request) => request.action)).toEqual(["check-in", "release", "check-in"]);
+    expect(w.requests.map((request) => request.action)).toEqual([
+      "check-in",
+      "release",
+      "check-in",
+    ]);
     expect(await w.hosts.runsHere("ws")).toBe(true);
   });
 
@@ -333,7 +407,9 @@ describe("automation hosts", () => {
     taken.setRelay(host(ME, 4, null, 1_000));
     taken.hosts.open("ws");
     await taken.settle();
-    expect(taken.started, "no release, so a run before now may have happened there").toEqual([null]);
+    expect(taken.started, "no release, so a run before now may have happened there").toEqual([
+      null,
+    ]);
     expect(taken.floors, "but never at or before the progress recorded").toEqual([1_000]);
 
     // The server stopped running automations without a release, after it
@@ -392,12 +468,17 @@ describe("automation hosts", () => {
     expect(w.hosts.stillRuns("ws")).toBe(false);
     // A check-in that was still out answers with the older host, then a
     // stale answer says no host at all: neither turns running back on.
-    expect(w.hosts.learned("ws", host(ME, 2, null, null)), "the host it holds, not the stale answer")
-      .toEqual(host(OTHER, 4, null, 3_000));
+    expect(
+      w.hosts.learned("ws", host(ME, 2, null, null)),
+      "the host it holds, not the stale answer",
+    ).toEqual(host(OTHER, 4, null, 3_000));
     expect(w.hosts.stillRuns("ws")).toBe(false);
     expect(w.hosts.learned("ws", null)).toEqual(host(OTHER, 4, null, 3_000));
     expect(w.hosts.stillRuns("ws")).toBe(false);
-    expect(w.hosts.learned("closed-workspace", host(ME, 1, null, null)), "nothing held: the answer").toEqual(host(ME, 1, null, null));
+    expect(
+      w.hosts.learned("closed-workspace", host(ME, 1, null, null)),
+      "nothing held: the answer",
+    ).toEqual(host(ME, 1, null, null));
     expect(w.started, "never started here again").toEqual([]);
     w.hosts.learned("ws", host(ME, 5, null, 4_000));
     expect(w.hosts.stillRuns("ws")).toBe(true);
@@ -464,7 +545,10 @@ describe("automation hosts", () => {
     const w = world();
     w.hosts.open("ws");
     await w.hosts.admit("ws", new AbortController().signal);
-    expect(w.requests.at(-1), "no host named, so it claims").toEqual({ action: "check-in", body: { installId: ME, label: "Ice's laptop", claim: true } });
+    expect(w.requests.at(-1), "no host named, so it claims").toEqual({
+      action: "check-in",
+      body: { installId: ME, label: "Ice's laptop", claim: true },
+    });
     expect(w.hosts.stillRuns("ws")).toBe(true);
     const reads = w.requests.length;
     w.advance(HOST_FRESH_MS + 1);
@@ -485,9 +569,14 @@ describe("automation hosts", () => {
     w.setHung(true);
     const closing = new AbortController();
     let admitted = false;
-    const admitting = w.hosts.admit("ws", closing.signal).then(() => { admitted = true; });
+    const admitting = w.hosts.admit("ws", closing.signal).then(() => {
+      admitted = true;
+    });
     await w.settle();
-    expect(w.requests.at(-1), "the check-in is out").toEqual({ action: "check-in", body: { installId: ME, label: "Ice's laptop", claim: true } });
+    expect(w.requests.at(-1), "the check-in is out").toEqual({
+      action: "check-in",
+      body: { installId: ME, label: "Ice's laptop", claim: true },
+    });
     expect(admitted).toBe(false);
     closing.abort();
     await admitting;
@@ -557,7 +646,10 @@ describe("the automation host", () => {
     expect(await at({ rootPath: root, shareView: {} }, 7), "shared with this person").toBeNull();
     expect(await at(null, 7)).toBeNull();
     await recordSynced(root);
-    expect(await at({ rootPath: root }, 7), "synced before, so another computer may be the host").toBeNull();
+    expect(
+      await at({ rootPath: root }, 7),
+      "synced before, so another computer may be the host",
+    ).toBeNull();
   });
 
   it("is one computer of two that read a copied folder that never synced, until the other takes over", async () => {
@@ -566,10 +658,16 @@ describe("the automation host", () => {
     await recordNeverSynced(root, laptop);
     // iCloud Drive or a copy carries the same folder to the desk.
     expect(await automationHostGeneration({ rootPath: root }, laptop, () => null)).toBe(0);
-    expect(await automationHostGeneration({ rootPath: root }, desk, () => null), "the desk did not make it").toBeNull();
+    expect(
+      await automationHostGeneration({ rootPath: root }, desk, () => null),
+      "the desk did not make it",
+    ).toBeNull();
     expect(await runSchedulesOn(root, desk)).toBe(true);
     expect(await automationHostGeneration({ rootPath: root }, desk, () => null)).toBe(0);
-    expect(await automationHostGeneration({ rootPath: root }, laptop, () => null), "the laptop stops at its next read").toBeNull();
+    expect(
+      await automationHostGeneration({ rootPath: root }, laptop, () => null),
+      "the laptop stops at its next read",
+    ).toBeNull();
   });
 
   describe("for a workspace that never synced", () => {
@@ -579,7 +677,9 @@ describe("the automation host", () => {
       await mkdir(join(root, ".dohc"), { recursive: true });
       await recordNeverSynced(root, laptop);
       const changes: string[] = [];
-      const workspace: { rootPath: string; remote?: unknown; shareView?: unknown } = { rootPath: root };
+      const workspace: { rootPath: string; remote?: unknown; shareView?: unknown } = {
+        rootPath: root,
+      };
       const triggers = { here: true };
       const timers: Array<{ wake: () => Promise<void>; delayMs: number }> = [];
       const hosts = createWorkspaceHosts({
@@ -589,13 +689,20 @@ describe("the automation host", () => {
         hasHostTriggers: () => triggers.here,
         hostChanged: (id) => changes.push(`host ${id}`),
         elsewhereChanged: (id) => changes.push(`elsewhere ${id}`),
-        logError: (_id, error) => { throw error; },
+        logError: (_id, error) => {
+          throw error;
+        },
         setTimer: (wake, delayMs) => {
           const timer = { wake, delayMs };
           timers.push(timer);
           return timer;
         },
-        clearTimer: (cleared) => { timers.splice(timers.findIndex((timer) => timer === cleared), 1); },
+        clearTimer: (cleared) => {
+          timers.splice(
+            timers.findIndex((timer) => timer === cleared),
+            1,
+          );
+        },
       });
       // The next 15-minute read, as its timer fires.
       const recheck = async () => {
@@ -655,7 +762,12 @@ describe("the automation host", () => {
       expect(changes).toEqual(["host ws", "elsewhere ws"]);
       await rename(`${record}.away`, record);
       await recheck();
-      expect(changes, "nothing else asked").toEqual(["host ws", "elsewhere ws", "host ws", "elsewhere ws"]);
+      expect(changes, "nothing else asked").toEqual([
+        "host ws",
+        "elsewhere ws",
+        "host ws",
+        "elsewhere ws",
+      ]);
       expect(hosts.waitsElsewhere("ws")).toBe(false);
       await recheck();
       expect(changes, "an unchanged read changes nothing").toHaveLength(4);
@@ -679,11 +791,20 @@ describe("the automation host", () => {
     const hosts = createWorkspaceHosts({
       here: () => laptop,
       workspace: () => ({ rootPath: "/nowhere", remote: {} }),
-      relay: { runsHere: async () => { asked += 1; return true; }, stillRuns: () => true, runsAt: () => 7 },
+      relay: {
+        runsHere: async () => {
+          asked += 1;
+          return true;
+        },
+        stillRuns: () => true,
+        runsAt: () => 7,
+      },
       hasHostTriggers: () => true,
       hostChanged: (id) => changes.push(id),
       elsewhereChanged: (id) => changes.push(id),
-      logError: (_id, error) => { throw error; },
+      logError: (_id, error) => {
+        throw error;
+      },
       setTimer: () => ({}),
       clearTimer: () => undefined,
     });
@@ -721,22 +842,32 @@ describe("host answers and labels", () => {
     expect(hostOfAnswer({ status: 200, body: { ok: true, host: null } })).toBeNull();
     expect(hostOfAnswer(answer(host(ME, 1, null, 5))!)).toEqual(host(ME, 1, null, 5));
     expect(hostOfAnswer({ status: 409, body: { ok: true, host: null } })).toBeUndefined();
-    expect(hostOfAnswer({ status: 200, body: { ok: true, host: { ...host(ME, 1, null, null), extra: 1 } } })).toBeUndefined();
-    expect(hostOfAnswer({ status: 200, body: { ok: true, host: host(" padded", 1, null, null) } })).toBeUndefined();
+    expect(
+      hostOfAnswer({
+        status: 200,
+        body: { ok: true, host: { ...host(ME, 1, null, null), extra: 1 } },
+      }),
+    ).toBeUndefined();
+    expect(
+      hostOfAnswer({ status: 200, body: { ok: true, host: host(" padded", 1, null, null) } }),
+    ).toBeUndefined();
   });
 
   it("takes the owner's computers and the server, each with its kind", () => {
     const server = { installId: "server", kind: "server", label: "My dohc server", lastSeenMs: 5 };
     const laptop = { installId: OTHER, kind: "computer", label: "Ice's laptop", lastSeenMs: 4 };
-    const of = (computers: unknown[]) => computersOfAnswer({ status: 200, body: { ok: true, host: null, computers } });
+    const of = (computers: unknown[]) =>
+      computersOfAnswer({ status: 200, body: { ok: true, host: null, computers } });
     expect(of([server, { ...laptop, extra: 1 }])).toEqual([server, laptop]);
     expect(of([{ ...laptop, kind: undefined }])).toBeUndefined();
     expect(of([{ ...laptop, kind: "phone" }])).toBeUndefined();
   });
 
   it("takes the relay's reason for refusing the server, and no other refusal", () => {
-    const refused = (error: string, status = 400) => refusalOfAnswer({ status, body: { ok: false, error, code: "bad_request" } });
-    const full = "This server is running automations for as many workspaces as it can. Choose one of your computers.";
+    const refused = (error: string, status = 400) =>
+      refusalOfAnswer({ status, body: { ok: false, error, code: "bad_request" } });
+    const full =
+      "This server is running automations for as many workspaces as it can. Choose one of your computers.";
     const off = "This server does not run automations.";
     expect(refused(full)).toBe(full);
     expect(refused(off)).toBe(off);
@@ -747,9 +878,15 @@ describe("host answers and labels", () => {
 
   it("tells a relay that did not answer from a failure", () => {
     expect(relayUnreachable(new TypeError("fetch failed"))).toBe(true);
-    expect(relayUnreachable(new DOMException("The operation timed out.", "TimeoutError"))).toBe(true);
-    expect(relayUnreachable(new DOMException("The operation was aborted.", "AbortError"))).toBe(false);
-    expect(relayUnreachable(new Error("Reconnect your sharing server, then try again."))).toBe(false);
+    expect(relayUnreachable(new DOMException("The operation timed out.", "TimeoutError"))).toBe(
+      true,
+    );
+    expect(relayUnreachable(new DOMException("The operation was aborted.", "AbortError"))).toBe(
+      false,
+    );
+    expect(relayUnreachable(new Error("Reconnect your sharing server, then try again."))).toBe(
+      false,
+    );
   });
 
   it("names the computer within the relay's bounds", () => {

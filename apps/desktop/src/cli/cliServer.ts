@@ -41,7 +41,11 @@ import {
   type LoadedThread,
   type ShownThreadRead,
 } from "@dohc/workspace-operations/chats";
-import { documentsUnavailable, readDocument, type DocumentsHost } from "@dohc/workspace-operations/documents";
+import {
+  documentsUnavailable,
+  readDocument,
+  type DocumentsHost,
+} from "@dohc/workspace-operations/documents";
 import {
   answerDecision,
   postToGroup,
@@ -127,29 +131,9 @@ import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispat
 import type { ChatDispatchService, QuietRunRefusal } from "../agents/chatDispatchService";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type Server, type Socket } from "node:net";
-import {
-  chmod,
-  mkdir,
-  realpath,
-  rm,
-  writeFile,
-} from "node:fs/promises";
-import {
-  mkdirSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import {
-  basename,
-  dirname,
-  isAbsolute,
-  join,
-  posix,
-  relative,
-  resolve,
-  sep,
-} from "node:path";
+import { chmod, mkdir, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import { Worker } from "node:worker_threads";
 import { z } from "zod";
 import { DatasetSchemaChangeError } from "../workspaces/datasetSchemaChanges";
@@ -164,7 +148,10 @@ import {
   type LiveDocumentEditOrigin,
   type LiveDocumentEditOutcome,
 } from "../workspaces/engineYDocSessionIpc";
-import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@dohc/cli/app-publication";
+import type {
+  OwnerAppPublicationRequest,
+  OwnerAppPublicationResult,
+} from "@dohc/cli/app-publication";
 import type { DocumentEdit } from "@dohc/ydoc-projection";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import { unjournalablePathMessages } from "../workspaces/shareViewRecords";
@@ -191,14 +178,11 @@ const RUN_MESSAGE_LINK_FOREGROUND_BUDGET_MS = 1_500;
 const RUN_MESSAGE_LINK_RECOVERY_MAX_PENDING = 1_000;
 const RUN_MESSAGE_LINK_RECOVERY_MAX_ATTEMPTS = 12;
 const RUN_MESSAGE_LINK_RECOVERY_MAX_AGE_MS = 24 * 60 * 60 * 1_000;
-export const RUN_MESSAGE_LINK_RECOVERY_FILE =
-  "dohc-run-message-link-recovery.json";
+export const RUN_MESSAGE_LINK_RECOVERY_FILE = "dohc-run-message-link-recovery.json";
 const TOKEN_RE = /^[a-f0-9]{64}$/u;
 
 const authEnvelopeSchema = z.object({ token: z.string() }).passthrough();
-const versionEnvelopeSchema = z
-  .object({ protocolVersion: z.number().int() })
-  .passthrough();
+const versionEnvelopeSchema = z.object({ protocolVersion: z.number().int() }).passthrough();
 const regexWorkerResponseSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(true), matches: z.array(z.boolean()) }).strict(),
   z.object({ ok: z.literal(false) }).strict(),
@@ -221,10 +205,7 @@ type CliGranularChatMessageSearchResult = Pick<
   GranularChatMessageSearchResult,
   "threadId" | "messageId" | "text"
 >;
-type CliGranularChatMessageSearchResponse = Pick<
-  GranularChatMessageSearchResponse,
-  "saturated"
-> & {
+type CliGranularChatMessageSearchResponse = Pick<GranularChatMessageSearchResponse, "saturated"> & {
   results: CliGranularChatMessageSearchResult[];
 };
 type CliUnreadFileThread = Pick<
@@ -260,7 +241,10 @@ export interface CliCollectionWriteSeam {
     recordId?: string;
     fields?: Record<string, unknown>;
     author: ChangeAuthor;
-  }): Promise<{ path: string; recordId: string; kept?: Record<string, unknown> } | import("@dohc/cli/creation").CreationPartial>;
+  }): Promise<
+    | { path: string; recordId: string; kept?: Record<string, unknown> }
+    | import("@dohc/cli/creation").CreationPartial
+  >;
 }
 
 // Engine-backed collection access for the CLI verbs. Reads go to the engine
@@ -290,20 +274,30 @@ export interface CliDocumentsPort extends DocumentsHost {
   }): Promise<{ path: string }>;
 }
 
-type CliVersionPage<Verb extends "versionList" | "versionCompare" | "versionConflicts"> = Omit<Extract<CliResultByVerb[Verb], { ok: true }>, "ok">;
+type CliVersionPage<Verb extends "versionList" | "versionCompare" | "versionConflicts"> = Omit<
+  Extract<CliResultByVerb[Verb], { ok: true }>,
+  "ok"
+>;
 
 // The versions menu's reads, for the owning workspace. Compare and conflict
 // pages leave out secret-backed files and paths the workspace's rules don't
 // track, as History does.
 export interface CliVersionsPort {
   list(): Promise<CliVersionPage<"versionList">>;
-  compare(versionId: string, afterPath?: string): Promise<Omit<CliVersionPage<"versionCompare">, "version"> | HistoryPolicyRefusal>;
-  conflicts(afterConflictId?: string): Promise<CliVersionPage<"versionConflicts"> | HistoryPolicyRefusal>;
+  compare(
+    versionId: string,
+    afterPath?: string,
+  ): Promise<Omit<CliVersionPage<"versionCompare">, "version"> | HistoryPolicyRefusal>;
+  conflicts(
+    afterConflictId?: string,
+  ): Promise<CliVersionPage<"versionConflicts"> | HistoryPolicyRefusal>;
   // The versions menu's changes. Each first has the windows showing the
   // workspace save their open edits, and throws their reason when one can't.
   create(name: string): Promise<{ id: string; name: string }>;
   switch(versionId: string): Promise<{ changedFileCount: number }>;
-  merge(versionId: string): Promise<{ mergedFileCount: number; unchangedFileCount: number; conflictCount: number }>;
+  merge(
+    versionId: string,
+  ): Promise<{ mergedFileCount: number; unchangedFileCount: number; conflictCount: number }>;
   resolve(conflictId: string, resolution: VersionResolution): Promise<void>;
 }
 
@@ -311,11 +305,19 @@ export interface CliVersionsPort {
 // them meanwhile, and the step that moves one to a visible copy beside its
 // file. The desktop's Notices row offers the same step.
 export interface CliKeptCopiesPort {
-  list(): Promise<{ keptCopies: Array<{ id: number; path: string; keptAtMs: number }>; more: boolean; outsideWriteCopies?: [string, string, string][]; protectedCopies?: [string, string, number][] }>;
+  list(): Promise<{
+    keptCopies: Array<{ id: number; path: string; keptAtMs: number }>;
+    more: boolean;
+    outsideWriteCopies?: [string, string, string][];
+    protectedCopies?: [string, string, number][];
+  }>;
   save(id: number): Promise<KeptCopySaveResult>;
   // A protected file's change a sync replaced, kept on this computer. The
   // same capture operations as the Notices row's Restore and Discard.
-  restoreProtected(id: string, restoredBy: "you" | "agent"): Promise<{ path: string; status: "restored" }>;
+  restoreProtected(
+    id: string,
+    restoredBy: "you" | "agent",
+  ): Promise<{ path: string; status: "restored" }>;
   discardProtected(id: string): Promise<{ path: string; status: "discarded" }>;
 }
 
@@ -328,18 +330,33 @@ export interface CliKeptEditsPort {
   /** Shared notes whose edits wait on this computer for the server, so their files hold older text. */
   pendingShare(): Promise<readonly string[]>;
   /** With an incident, saves exactly the kept edits it names. */
-  saveRecoveryCopy(path: string, incident?: string): Promise<Omit<Extract<CliResultByVerb["saveRecoveryCopy"], { ok: true }>, "ok" | "folder">>;
+  saveRecoveryCopy(
+    path: string,
+    incident?: string,
+  ): Promise<Omit<Extract<CliResultByVerb["saveRecoveryCopy"], { ok: true }>, "ok" | "folder">>;
   retry(path: string, incident: string): Promise<void>;
-  stopAgain(path: string, incident: string): Promise<Pick<Extract<CliResultByVerb["stopAgain"], { ok: true }>, "keptEdits">>;
+  stopAgain(
+    path: string,
+    incident: string,
+  ): Promise<Pick<Extract<CliResultByVerb["stopAgain"], { ok: true }>, "keptEdits">>;
 }
 
 // The owner's Live documents list, and its Stop and Resume for one document,
 // through the same desktop actions as the dialog. Paths are workspace-relative;
 // the cursor is the list's own nextCursor. A Stop or Resume names its author.
 export interface CliLiveDocumentsPort {
-  list(cursor?: string): Promise<Omit<Extract<CliResultByVerb["liveDocuments"], { ok: true }>, "ok">>;
-  stop(path: string, author: import("@dohc/workspace-contracts/change-author").ChangeAuthor, objectId?: string): Promise<Pick<Extract<CliResultByVerb["liveStop"], { ok: true }>, "keptEdits" | "already">>;
-  resume(path: string, author: import("@dohc/workspace-contracts/change-author").ChangeAuthor): Promise<Pick<Extract<CliResultByVerb["liveResume"], { ok: true }>, "already">>;
+  list(
+    cursor?: string,
+  ): Promise<Omit<Extract<CliResultByVerb["liveDocuments"], { ok: true }>, "ok">>;
+  stop(
+    path: string,
+    author: import("@dohc/workspace-contracts/change-author").ChangeAuthor,
+    objectId?: string,
+  ): Promise<Pick<Extract<CliResultByVerb["liveStop"], { ok: true }>, "keptEdits" | "already">>;
+  resume(
+    path: string,
+    author: import("@dohc/workspace-contracts/change-author").ChangeAuthor,
+  ): Promise<Pick<Extract<CliResultByVerb["liveResume"], { ok: true }>, "already">>;
 }
 
 // Old file copies kept on a drive that cannot tell dohc whether a program
@@ -354,23 +371,43 @@ export interface CliRetainedCopiesPort {
 // verbs. Main answers with the same executor calls the panel's IPC makes,
 // so a run is listed, read, and tried again under the same rules.
 export interface CliAutomationsPort {
-  list?(collectionPath: string): Promise<import("@dohc/workspace-contracts/automation-controls").AutomationDefinitionList>;
-  switch?(collectionPath: string, input: import("@dohc/workspace-contracts/automation-controls").AutomationSwitchInput): Promise<import("@dohc/workspace-contracts/automation-controls").AutomationSwitchResult>;
+  list?(
+    collectionPath: string,
+  ): Promise<import("@dohc/workspace-contracts/automation-controls").AutomationDefinitionList>;
+  switch?(
+    collectionPath: string,
+    input: import("@dohc/workspace-contracts/automation-controls").AutomationSwitchInput,
+  ): Promise<import("@dohc/workspace-contracts/automation-controls").AutomationSwitchResult>;
   /** The engine id of an automation in the Collection at a path, or null when no Collection is there. */
   automationIdAt(collectionPath: string, id: string): Promise<string | null>;
   /** One page of runs, newest first, after `before`, and the `before` of the next page or null. */
-  runs(automationId: string, before?: string): Promise<{ runs: CollectionAutomationRun[]; next: string | null }>;
+  runs(
+    automationId: string,
+    before?: string,
+  ): Promise<{ runs: CollectionAutomationRun[]; next: string | null }>;
   run(automationId: string, claimId: string): Promise<CollectionAutomationRunDetail | null>;
   /** The same reads of the workspace's self-hosted server's runs. Null when this computer cannot ask it as the owner. */
-  serverRuns(automationId: string, before?: string): Promise<{ runs: CollectionAutomationRun[]; next: string | null } | null>;
+  serverRuns(
+    automationId: string,
+    before?: string,
+  ): Promise<{ runs: CollectionAutomationRun[]; next: string | null } | null>;
   serverRun(automationId: string, claimId: string): Promise<CollectionAutomationRun | null>;
-  retry(input: { automationId: string; claimId: string; startOver: boolean }): Promise<AutomationRunRetry>;
+  retry(input: {
+    automationId: string;
+    claimId: string;
+    startOver: boolean;
+  }): Promise<AutomationRunRetry>;
 }
 
 // Button presses for the press verb, through the same press path a window's
 // press takes. `waiting` is why the run the press started waits, if it does.
 export interface CliButtonsPort {
-  inspect(input: Pick<NamedPress, "collectionPath" | "table">, by: AutomationPressActor): Promise<import("@dohc/automation-executor/collection-automations").CollectionAutomationButton[]>;
+  inspect(
+    input: Pick<NamedPress, "collectionPath" | "table">,
+    by: AutomationPressActor,
+  ): Promise<
+    import("@dohc/automation-executor/collection-automations").CollectionAutomationButton[]
+  >;
   press(
     input: Omit<NamedPress, "workspaceId">,
     by: AutomationPressActor,
@@ -379,7 +416,10 @@ export interface CliButtonsPort {
 
 // dohc can't read the workspace's History rules, so every History answer is
 // this one, naming the files and nothing about any change.
-export type HistoryPolicyRefusal = { status: "policy-unreadable"; unreadable: WorkspacePolicyPath[] };
+export type HistoryPolicyRefusal = {
+  status: "policy-unreadable";
+  unreadable: WorkspacePolicyPath[];
+};
 export type HistoryReadRefusal = { status: "untracked" } | HistoryPolicyRefusal;
 
 function historyPolicyUnreadable(refusal: HistoryPolicyRefusal, hidden = "History is hidden") {
@@ -403,7 +443,10 @@ export interface CliConnectedAgent {
 }
 
 // A run dohc dispatched: its agent, and its engine id (null for a self-test).
-export interface CliRunCaller { agentId: string; runId: string | null }
+export interface CliRunCaller {
+  agentId: string;
+  runId: string | null;
+}
 
 export interface CliWorkspaceContext extends CliRegistryWorkspace {
   signal?: AbortSignal;
@@ -413,21 +456,49 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   // The run dohc dispatched that this request proved it is, with the run's
   // secret. The socket sets it per request; without it, the request is no run's.
   run?: CliRunCaller;
-  stopSync?(author?: import("@dohc/workspace-contracts/change-author").ChangeAuthor): Promise<CliResultByVerb["stopSync"]>;
-  shareCopy?(input: import("@dohc/workspace-contracts/share-copy").ShareCopyInput): Promise<import("@dohc/workspace-contracts/share-copy").ShareCopyResult>;
+  stopSync?(
+    author?: import("@dohc/workspace-contracts/change-author").ChangeAuthor,
+  ): Promise<CliResultByVerb["stopSync"]>;
+  shareCopy?(
+    input: import("@dohc/workspace-contracts/share-copy").ShareCopyInput,
+  ): Promise<import("@dohc/workspace-contracts/share-copy").ShareCopyResult>;
   shareLinkAgents?: {
-    list(input: import("@dohc/workspace-contracts/share-link-agents").ShareLinkAgentsInput): Promise<import("@dohc/workspace-contracts/share-link-agents").ListRelayShareLinkAgentsResult>;
-    disconnect(input: import("@dohc/workspace-contracts/share-link-agents").ShareLinkAgentDisconnectInput): Promise<import("@dohc/workspace-contracts/share-link-agents").DisconnectRelayShareLinkAgentResult>;
+    list(
+      input: import("@dohc/workspace-contracts/share-link-agents").ShareLinkAgentsInput,
+    ): Promise<
+      import("@dohc/workspace-contracts/share-link-agents").ListRelayShareLinkAgentsResult
+    >;
+    disconnect(
+      input: import("@dohc/workspace-contracts/share-link-agents").ShareLinkAgentDisconnectInput,
+    ): Promise<
+      import("@dohc/workspace-contracts/share-link-agents").DisconnectRelayShareLinkAgentResult
+    >;
   };
   access?: {
     refresh(): Promise<import("@dohc/workspace-contracts/access").AccessRefreshResult>;
-    object(input: import("zod").infer<typeof import("@dohc/workspace-contracts/access").ObjectAccessInput>): Promise<import("@dohc/workspace-contracts/access").AccessAnswer>;
-    sharing(input: import("zod").infer<typeof import("@dohc/workspace-contracts/access").SharingAccessInput>): Promise<import("@dohc/workspace-contracts/access").AccessAnswer>;
+    object(
+      input: import("zod").infer<
+        typeof import("@dohc/workspace-contracts/access").ObjectAccessInput
+      >,
+    ): Promise<import("@dohc/workspace-contracts/access").AccessAnswer>;
+    sharing(
+      input: import("zod").infer<
+        typeof import("@dohc/workspace-contracts/access").SharingAccessInput
+      >,
+    ): Promise<import("@dohc/workspace-contracts/access").AccessAnswer>;
   };
   // `agent` is the agent this socket's write is, or null for the person.
-  dataset?(request: import("@dohc/cli/dataset").DatasetRequest, agent: LocalDatasetAgent | null): Promise<import("@dohc/cli/dataset").DatasetResult>;
-  ownerAppResponses?(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest):Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>;
-  appPublication?(request: OwnerAppPublicationRequest, agent?: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null): Promise<OwnerAppPublicationResult>;
+  dataset?(
+    request: import("@dohc/cli/dataset").DatasetRequest,
+    agent: LocalDatasetAgent | null,
+  ): Promise<import("@dohc/cli/dataset").DatasetResult>;
+  ownerAppResponses?(
+    request: import("@dohc/cli/app-responses").OwnerAppResponsesRequest,
+  ): Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>;
+  appPublication?(
+    request: OwnerAppPublicationRequest,
+    agent?: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null,
+  ): Promise<OwnerAppPublicationResult>;
   store: LinkedChatStore;
   // Main's answer to whose account a person's read of this thread journals
   // under: the owner, checked against the signed-in account and joined
@@ -442,12 +513,21 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   // Why the last sync pass failed, until a pass succeeds.
   syncFailure?(): CloudSyncFailure | null;
   // A save the engine holds for this path, as the held band's review shows it.
-  heldChange?(path: string): Promise<import("@dohc/workspace-contracts/held-changes").HeldChange | null>;
+  heldChange?(
+    path: string,
+  ): Promise<import("@dohc/workspace-contracts/held-changes").HeldChange | null>;
   // New group, as the window's: the group and its folder.
-  createGroup?(input: { name: string; purpose?: string; type?: ChatChannelType }): Promise<ChatChannel>;
+  createGroup?(input: {
+    name: string;
+    purpose?: string;
+    type?: ChatChannelType;
+  }): Promise<ChatChannel>;
   fileObjectIdForPath(path: string): Promise<string | null>;
   filePathForObjectId(objectId: string): Promise<string | null>;
-  listMoments(input: { limit: number; objectId?: string }): Promise<VersionedTextMomentSummary[] | HistoryPolicyRefusal>;
+  listMoments(input: {
+    limit: number;
+    objectId?: string;
+  }): Promise<VersionedTextMomentSummary[] | HistoryPolicyRefusal>;
   // A refusal says why History hides a change, never its path or contents:
   // its rules no longer track a file it touched, or dohc can't read them.
   readMoment(momentId: string): Promise<VersionedTextMoment | HistoryReadRefusal | null>;
@@ -466,12 +546,35 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   // Absent when the workspace has no engine-backed collection access.
   collections?: CliCollectionsPort;
   documents?: CliDocumentsPort;
-  writeFiles?(files: CliFileWrite[], origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileWrite"]>;
-  historyOperation?(input: { operationId: string; cursor?: string }): Promise<CliResultByVerb["historyOperation"]>;
-  historyUndo?(input: { operationId: string }, origin: LiveDocumentEditOrigin): Promise<CliResultByVerb["historyUndo"]>;
-  duplicateFile?(path: string, origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileDuplicate"]>;
-  movePath?(input: { fromPath: string; toPath: string; overwrite?: boolean; confirmNotVersioned?: boolean }, origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileMove"]>;
-  deletePath?(path: string, origin: LiveDocumentEditOrigin, requestId: string, confirmNotVersioned?: boolean): Promise<CliResultByVerb["fileDelete"]>;
+  writeFiles?(
+    files: CliFileWrite[],
+    origin: LiveDocumentEditOrigin,
+    requestId: string,
+  ): Promise<CliResultByVerb["fileWrite"]>;
+  historyOperation?(input: {
+    operationId: string;
+    cursor?: string;
+  }): Promise<CliResultByVerb["historyOperation"]>;
+  historyUndo?(
+    input: { operationId: string },
+    origin: LiveDocumentEditOrigin,
+  ): Promise<CliResultByVerb["historyUndo"]>;
+  duplicateFile?(
+    path: string,
+    origin: LiveDocumentEditOrigin,
+    requestId: string,
+  ): Promise<CliResultByVerb["fileDuplicate"]>;
+  movePath?(
+    input: { fromPath: string; toPath: string; overwrite?: boolean; confirmNotVersioned?: boolean },
+    origin: LiveDocumentEditOrigin,
+    requestId: string,
+  ): Promise<CliResultByVerb["fileMove"]>;
+  deletePath?(
+    path: string,
+    origin: LiveDocumentEditOrigin,
+    requestId: string,
+    confirmNotVersioned?: boolean,
+  ): Promise<CliResultByVerb["fileDelete"]>;
   // Absent in a shared view, which keeps no copies or versions of its own.
   versions?: CliVersionsPort;
   keptCopies?: CliKeptCopiesPort;
@@ -501,7 +604,10 @@ export interface CliServerOptions {
   recordSuccess?(invocation: CliUsageInvocation): unknown;
   // The server account this computer is connected to. Its verbs need no
   // workspace.
-  serverAccount?: Pick<import("../workspaces/serverAccountDeletion").ServerAccountDeletion, "preview" | "delete">;
+  serverAccount?: Pick<
+    import("../workspaces/serverAccountDeletion").ServerAccountDeletion,
+    "preview" | "delete"
+  >;
   stateDir: string;
   listWorkspaces(): readonly CliRegistryWorkspace[];
   openWorkspace(workspace: CliRegistryWorkspace): Promise<CliWorkspaceContext>;
@@ -513,7 +619,10 @@ export interface CliServerOptions {
   // chat uses, so a CLI or MCP write gets the same checks and effects.
   chatWrites: ChatWrites;
   // Try again for a conversation's stopped agent request, as the chat runs it.
-  chatRuns?: Pick<ChatDispatchService, "dispatchStateForThread" | "retryStoppedRun" | "endRunQuietly">;
+  chatRuns?: Pick<
+    ChatDispatchService,
+    "dispatchStateForThread" | "retryStoppedRun" | "endRunQuietly"
+  >;
   localUserDisplayName(): string;
   // The person this computer's agents work for: the account, or this
   // installation's id when signed out.
@@ -614,8 +723,9 @@ function tokenMatches(expected: string, supplied: string): boolean {
   if (!TOKEN_RE.test(supplied)) return false;
   const expectedBytes = Buffer.from(expected, "hex");
   const suppliedBytes = Buffer.from(supplied, "hex");
-  return expectedBytes.length === suppliedBytes.length &&
-    timingSafeEqual(expectedBytes, suppliedBytes);
+  return (
+    expectedBytes.length === suppliedBytes.length && timingSafeEqual(expectedBytes, suppliedBytes)
+  );
 }
 
 function oneLine(value: string): string {
@@ -632,7 +742,11 @@ function cliErrorLine(error: unknown): string {
 function cliNoticeOpens(opens: SentNoticeTarget): CliNoticeOpens {
   if (opens.to !== "chat") return opens;
   const { message, ...chat } = opens;
-  return { ...chat, thread: cliThreadId(opens.thread), ...(message === undefined ? {} : { message: cliMessageId(message) }) };
+  return {
+    ...chat,
+    thread: cliThreadId(opens.thread),
+    ...(message === undefined ? {} : { message: cliMessageId(message) }),
+  };
 }
 
 // A history row carries only facts the path admission checked. The moment's
@@ -647,7 +761,9 @@ function rawMomentSummary(
 ) {
   return {
     id: moment.id,
-    ...(HistoryOperationId.safeParse(moment.metadata.correlationId).success ? { operationId: moment.metadata.correlationId } : {}),
+    ...(HistoryOperationId.safeParse(moment.metadata.correlationId).success
+      ? { operationId: moment.metadata.correlationId }
+      : {}),
     recordedAtMs: moment.recordedAtMs,
     source: "workspace-engine" as const,
     operation: moment.operation,
@@ -655,9 +771,7 @@ function rawMomentSummary(
     versionId: moment.versionId,
     ...(moment.authors ? { authors: moment.authors } : {}),
     fileCount: 1 as const,
-    ...(includeFiles
-      ? { files: [{ path: moment.path, operation: moment.operation }] }
-      : {}),
+    ...(includeFiles ? { files: [{ path: moment.path, operation: moment.operation }] } : {}),
   };
 }
 
@@ -671,8 +785,12 @@ function mcpFailure(error: unknown, fallback: string) {
 // refusals, which name paths as the caller spelled them, pass through.
 function pathFreeFailure(error: unknown, failed: string) {
   const system = error instanceof Error && "syscall" in error && "code" in error;
-  const reason = system ? `${failed} (${String(error.code)}). Check the path, then try again.`
-    : error instanceof Error && !/(?:[A-Za-z]:[\\/]|\\\\|(?<![\p{L}\p{N}_./\\-])\/)/u.test(error.message) ? error.message : failed;
+  const reason = system
+    ? `${failed} (${String(error.code)}). Check the path, then try again.`
+    : error instanceof Error &&
+        !/(?:[A-Za-z]:[\\/]|\\\\|(?<![\p{L}\p{N}_./\\-])\/)/u.test(error.message)
+      ? error.message
+      : failed;
   return { ok: false as const, reason };
 }
 
@@ -719,9 +837,7 @@ function encodedCollectionCursor(cursor: CollectionQueryCursor) {
   };
 }
 
-function decodedCollectionCursor(
-  cursor: CliCollectionQueryCursor,
-): CollectionQueryCursor {
+function decodedCollectionCursor(cursor: CliCollectionQueryCursor): CollectionQueryCursor {
   return {
     sortValues: cursor.sortValues.map((entry) => ({
       present: entry.present,
@@ -742,7 +858,9 @@ function writeActor(
   context: CliWorkspaceContext,
   options: CliServerOptions,
 ): CliActor {
-  return context.run !== undefined || options.agentRunDepth(context.workspaceId) > 0 ? "agent" : actor;
+  return context.run !== undefined || options.agentRunDepth(context.workspaceId) > 0
+    ? "agent"
+    : actor;
 }
 
 // The agent an edit through this socket is recorded as. An agent you run is
@@ -761,12 +879,17 @@ function connectedAgentName(
   context: CliWorkspaceContext,
   agentName: string | undefined,
 ): { agentName?: string } {
-  return agentName !== undefined && context.connected === undefined && context.run === undefined ? { agentName } : {};
+  return agentName !== undefined && context.connected === undefined && context.run === undefined
+    ? { agentName }
+    : {};
 }
 
 // The run an agent's write names. An agent you run is never part of a run,
 // even while one holds the workspace; its write still keeps the run's depth.
-function agentWriteRun(context: CliWorkspaceContext, options: CliServerOptions): { agentRunId?: string } {
+function agentWriteRun(
+  context: CliWorkspaceContext,
+  options: CliServerOptions,
+): { agentRunId?: string } {
   const agentRunId = context.connected ? null : options.agentWriteRunId(context.workspaceId);
   return agentRunId === null ? {} : { agentRunId };
 }
@@ -789,7 +912,8 @@ function cliChatWriter(
   agentName?: string,
   reported?: CliReportedAgent,
 ): PersonWriter {
-  const agentId = actor === "agent" ? context.connected?.agentId ?? context.run?.agentId ?? null : null;
+  const agentId =
+    actor === "agent" ? (context.connected?.agentId ?? context.run?.agentId ?? null) : null;
   return {
     via: "cli",
     actor,
@@ -835,8 +959,10 @@ function datasetAgent(
 
 // A person edits documents and records in the app. Through this socket, an
 // edit or a creation is an agent's, refused in the same words for both.
-const EDIT_AS_AGENT_REFUSAL = "a document edit through the CLI socket is recorded as an agent's; send actor \"agent\"";
-const CREATE_AS_AGENT_REFUSAL = "a document created through the CLI socket is recorded as an agent's; send actor \"agent\"";
+const EDIT_AS_AGENT_REFUSAL =
+  'a document edit through the CLI socket is recorded as an agent\'s; send actor "agent"';
+const CREATE_AS_AGENT_REFUSAL =
+  'a document created through the CLI socket is recorded as an agent\'s; send actor "agent"';
 
 // Provenance for a document edit, derived here. A person types in the
 // editor, so every edit through this socket is an agent's on behalf of the
@@ -878,12 +1004,24 @@ function retainedCopiesUnavailable() {
 // Who stopped or resumed live editing through this socket. Every call here
 // is an agent's, whatever it claims: the window is the person's door. The
 // agent is the one History records for this socket's edits.
-function liveChangeAuthor(context: CliWorkspaceContext, options: CliServerOptions): import("@dohc/workspace-contracts/change-author").ChangeAuthor {
-  return { kind: "agent", agentId: editingAgentId(context), onBehalfOf: options.localPersonId(), depth: options.agentRunDepth(context.workspaceId) };
+function liveChangeAuthor(
+  context: CliWorkspaceContext,
+  options: CliServerOptions,
+): import("@dohc/workspace-contracts/change-author").ChangeAuthor {
+  return {
+    kind: "agent",
+    agentId: editingAgentId(context),
+    onBehalfOf: options.localPersonId(),
+    depth: options.agentRunDepth(context.workspaceId),
+  };
 }
 
 function liveDocumentsUnavailable() {
-  return { ok: false as const, reason: "Live documents can be listed, stopped, and resumed only in the original workspace. Open it to continue." };
+  return {
+    ok: false as const,
+    reason:
+      "Live documents can be listed, stopped, and resumed only in the original workspace. Open it to continue.",
+  };
 }
 
 function keptEditsUnavailable() {
@@ -901,7 +1039,8 @@ function heldChangesUnavailable() {
 }
 
 const SHARED_VIEW_AUTOMATIONS = SHARED_AUTOMATION_HISTORY_REASON;
-const SERVER_RUNS_UNREADABLE = "Your server has no runs in this workspace that this computer can read.";
+const SERVER_RUNS_UNREADABLE =
+  "Your server has no runs in this workspace that this computer can read.";
 
 // Try again as the panel answers it, in words for an agent: a run that
 // would start over needs startOver, as the panel's confirmation asks.
@@ -910,8 +1049,12 @@ function automationRetryResult(result: AutomationRunRetry): CliResultByVerb["aut
     case "queued":
       return { ok: true, status: "queued" };
     case "switched-off":
-      return { ok: false, status: result.status, target: result.target,
-        reason: "This automation is switched off. Open its controls to turn it on, then try again." };
+      return {
+        ok: false,
+        status: result.status,
+        target: result.target,
+        reason: "This automation is switched off. Open its controls to turn it on, then try again.",
+      };
     case "definition-changed":
       return {
         ok: false,
@@ -920,12 +1063,18 @@ function automationRetryResult(result: AutomationRunRetry): CliResultByVerb["aut
         reason: [
           "This automation changed since the run failed.",
           "Running it again starts from the first step and can repeat changes it already made.",
-          ...(result.repeatsMessages ? ["Posts, direct messages, and notices it already sent may be sent again."] : []),
+          ...(result.repeatsMessages
+            ? ["Posts, direct messages, and notices it already sent may be sent again."]
+            : []),
           "To do that, try again with --start-over, or startOver: true.",
         ].join(" "),
       };
     case "refused":
-      return { ok: false, reason: result.reason, ...(result.notice ? { notice: result.notice } : {}) };
+      return {
+        ok: false,
+        reason: result.reason,
+        ...(result.notice ? { notice: result.notice } : {}),
+      };
   }
 }
 
@@ -948,15 +1097,26 @@ function automationRunFields(run: Omit<CollectionAutomationRun, "writes">) {
 // Who presses for the person: the agent a collection write through this
 // socket would be, at its run's depth, or the person. A press counts in the
 // chain as that agent's own record write does, and stops at the cap.
-function pressActor(actor: CliActor, context: CliWorkspaceContext, options: CliServerOptions): AutomationPressActor {
+function pressActor(
+  actor: CliActor,
+  context: CliWorkspaceContext,
+  options: CliServerOptions,
+): AutomationPressActor {
   const author = collectionWriteAuthor(actor, context, options);
-  return author.kind === "agent" ? { kind: "agent", originId: author.agentId, depth: author.depth } : { kind: "human" };
+  return author.kind === "agent"
+    ? { kind: "agent", originId: author.agentId, depth: author.depth }
+    : { kind: "human" };
 }
 
-function automationPressResult(pressed: { result: NamedPressResult; waiting: PressWaitReason | null }): CliResultByVerb["automationPress"] {
+function automationPressResult(pressed: {
+  result: NamedPressResult;
+  waiting: PressWaitReason | null;
+}): CliResultByVerb["automationPress"] {
   const { result, waiting } = pressed;
   if ("confirm" in result) {
-    const names = result.confirm.map((action) => `"${action.label}" (--confirm ${action.name})`).join(", ");
+    const names = result.confirm
+      .map((action) => `"${action.label}" (--confirm ${action.name})`)
+      .join(", ");
     return {
       ok: false,
       reason: `This press runs actions dohc cannot undo: ${names}. Confirm each by name to run them.`,
@@ -975,7 +1135,8 @@ function automationPressResult(pressed: { result: NamedPressResult; waiting: Pre
 }
 
 const QUIET_RUN_REFUSALS: Record<QuietRunRefusal, string> = {
-  "not-running": "Only a running agent run that an automation started can end with nothing to report.",
+  "not-running":
+    "Only a running agent run that an automation started can end with nothing to report.",
   "other-thread": "Send nothingToReport in the thread this run was started for.",
   person: "A person asked for this run. Reply to them.",
 };
@@ -986,12 +1147,16 @@ async function readReplyThread(
   input: string,
 ): Promise<{ threadId: string; messages: ChatMessage[] }> {
   try {
-    const messages = await context.store.listMessages({ workspaceId: context.workspaceId, threadId: input });
+    const messages = await context.store.listMessages({
+      workspaceId: context.workspaceId,
+      threadId: input,
+    });
     return { threadId: input, messages };
   } catch (error) {
     if (!(error instanceof Error) || error.message !== "thread-not-found") throw error;
   }
-  const threadId = resolveThread(input, await loadThreads(chats, await loadChannels(chats))).thread.id;
+  const threadId = resolveThread(input, await loadThreads(chats, await loadChannels(chats))).thread
+    .id;
   const messages = await context.store.listMessages({ workspaceId: context.workspaceId, threadId });
   return { threadId, messages };
 }
@@ -1009,15 +1174,26 @@ async function askingThreadParent(
   if (!runId) return undefined;
   try {
     const run = await context.dispatchStore.getRunRecord(runId);
-    if (!run || run.workspaceId !== context.workspaceId || run.threadId !== threadId) return undefined;
-    const parentId = messages.find((message) => message.id === run.triggerMessageId)?.parentMessageId;
+    if (!run || run.workspaceId !== context.workspaceId || run.threadId !== threadId)
+      return undefined;
+    const parentId = messages.find(
+      (message) => message.id === run.triggerMessageId,
+    )?.parentMessageId;
     const parent = parentId ? messages.find((message) => message.id === parentId) : undefined;
     if (!parent) return undefined;
-    const { thread } = await context.store.getThread({ workspaceId: context.workspaceId, threadId });
+    const { thread } = await context.store.getThread({
+      workspaceId: context.workspaceId,
+      threadId,
+    });
     return thread.lane === "chat" ? parent : undefined;
   } catch (error) {
     // The reply still posts, in the conversation itself.
-    onError?.(new Error(`Could not find the thread for an agent reply, so it posts to the conversation. runId=${runId}`, { cause: error }));
+    onError?.(
+      new Error(
+        `Could not find the thread for an agent reply, so it posts to the conversation. runId=${runId}`,
+        { cause: error },
+      ),
+    );
     return undefined;
   }
 }
@@ -1081,9 +1257,12 @@ async function workspaceRelativePath(
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
-    const realParent = await pathUnderRoot(root, await realpath(dirname(absolute)).catch(() => {
-      throw new CliCommandError(`${noun} is not a tracked workspace file: ${path}`);
-    }));
+    const realParent = await pathUnderRoot(
+      root,
+      await realpath(dirname(absolute)).catch(() => {
+        throw new CliCommandError(`${noun} is not a tracked workspace file: ${path}`);
+      }),
+    );
     if (realParent === null) {
       throw new CliCommandError(`${noun} is outside this workspace: ${path}`);
     }
@@ -1107,9 +1286,7 @@ async function resolveAttachments(
       const pathHint = await workspaceRelativePath(context, cwd, path, "attachment");
       const objectId = await context.fileObjectIdForPath(pathHint);
       if (!objectId) {
-        throw new CliCommandError(
-          `attachment is not a tracked workspace file: ${path}`,
-        );
+        throw new CliCommandError(`attachment is not a tracked workspace file: ${path}`);
       }
       return { objectId, pathHint };
     }),
@@ -1146,8 +1323,10 @@ function sinceThreshold(value: string | undefined, nowMs: number): number | null
 function messageMatchesFrom(message: ChatMessage, from: string | undefined): boolean {
   if (!from) return true;
   const normalized = from.toLocaleLowerCase();
-  return message.author.kind === normalized ||
-    message.author.displayName.toLocaleLowerCase().includes(normalized);
+  return (
+    message.author.kind === normalized ||
+    message.author.displayName.toLocaleLowerCase().includes(normalized)
+  );
 }
 
 function substringTextMatcher(input: {
@@ -1184,15 +1363,17 @@ async function regexMatchesForTexts(
     }, timeoutMs);
     worker.once("message", (raw: unknown) => {
       const response = regexWorkerResponseSchema.safeParse(raw);
-      if (!response.success ||
-          (response.data.ok && response.data.matches.length !== input.texts.length)) {
+      if (
+        !response.success ||
+        (response.data.ok && response.data.matches.length !== input.texts.length)
+      ) {
         finish(() => rejectMatches(new CliCommandError("regular expression scan failed")));
         return;
       }
       if (!response.data.ok) {
-        finish(() => rejectMatches(
-          new CliCommandError(`invalid regular expression: ${input.pattern}`),
-        ));
+        finish(() =>
+          rejectMatches(new CliCommandError(`invalid regular expression: ${input.pattern}`)),
+        );
         return;
       }
       const matches = response.data.matches;
@@ -1204,9 +1385,7 @@ async function regexMatchesForTexts(
     worker.once("exit", (code) => {
       if (settled) return;
       const detail = code === 0 ? "ended without a response" : `exited with code ${code}`;
-      finish(() => rejectMatches(
-        new CliCommandError(`regular expression scan failed: ${detail}`),
-      ));
+      finish(() => rejectMatches(new CliCommandError(`regular expression scan failed: ${detail}`)));
     });
   });
 }
@@ -1235,19 +1414,13 @@ async function queryFtsCandidates(
     }
     return { threadIds, messageIds };
   } catch (error) {
-    const detail = oneLine(
-      error instanceof Error ? error.message : "unknown daemon read failure",
-    );
-    onDebug?.(
-      `grep daemon prefilter failed; falling back to full scan: ${detail}`,
-    );
+    const detail = oneLine(error instanceof Error ? error.message : "unknown daemon read failure");
+    onDebug?.(`grep daemon prefilter failed; falling back to full scan: ${detail}`);
     return null;
   }
 }
 
-async function humanUnreadFileThreadIds(
-  context: CliWorkspaceContext,
-): Promise<Set<string>> {
+async function humanUnreadFileThreadIds(context: CliWorkspaceContext): Promise<Set<string>> {
   const threadIds = new Set<string>();
   let afterThreadId: string | undefined;
   for (;;) {
@@ -1270,10 +1443,7 @@ function safePathSegment(value: string): string {
   return safe || "chat";
 }
 
-async function notifyWrite(
-  options: CliServerOptions,
-  context: CliWorkspaceContext,
-): Promise<void> {
+async function notifyWrite(options: CliServerOptions, context: CliWorkspaceContext): Promise<void> {
   signalChatWrite(context.workspaceId);
   try {
     await options.onWrite?.(context);
@@ -1290,7 +1460,8 @@ function chatsHost(context: CliWorkspaceContext, options: CliServerOptions): Cha
     store: context.store,
     fileObjectId: (path) => context.fileObjectIdForPath(path),
     filePath: (objectId) => context.filePathForObjectId(objectId),
-    dispatch: (threadId) => readThreadDispatchState(context.dispatchStore, context.workspaceId, threadId),
+    dispatch: (threadId) =>
+      readThreadDispatchState(context.dispatchStore, context.workspaceId, threadId),
     writable: !context.readOnly,
     provisioned: () => notifyWrite(options, context),
     errorDetail: "full",
@@ -1347,10 +1518,7 @@ async function notifyRead(
   }
   let timer: ReturnType<typeof setTimeout> | undefined;
   const budget = new Promise<void>((resolveBudget) => {
-    timer = setTimeout(
-      resolveBudget,
-      options.chatReadSyncBudgetMs ?? CHAT_READ_SYNC_BUDGET_MS,
-    );
+    timer = setTimeout(resolveBudget, options.chatReadSyncBudgetMs ?? CHAT_READ_SYNC_BUDGET_MS);
   });
   // Past the budget, the read proceeds on whatever the store already has —
   // `pending` keeps running (tracked above, so a concurrent read joins it
@@ -1387,7 +1555,9 @@ function chatReadTarget(
 ): { channelId: string } | { threadId: string } | undefined {
   switch (request.verb) {
     case "chat":
-      return "group" in request.args ? { channelId: request.args.group } : { threadId: request.args.threadId };
+      return "group" in request.args
+        ? { channelId: request.args.group }
+        : { threadId: request.args.threadId };
     case "show":
       return { threadId: request.args.target };
     case "threads":
@@ -1410,16 +1580,10 @@ type RunMessageLinkInput = {
 // id ("invalid-input"), and a run that is not in this workspace
 // ("run-not-found"). Retryability does not select them — a persist failure is
 // terminal too, and giving up on it would drop a recoverable link.
-const PERMANENT_RUN_MESSAGE_LINK_CODES = new Set([
-  "invalid-input",
-  "run-not-found",
-]);
+const PERMANENT_RUN_MESSAGE_LINK_CODES = new Set(["invalid-input", "run-not-found"]);
 
 function isPermanentRunMessageLinkFailure(error: unknown): boolean {
-  return (
-    error instanceof DaemonRefusalError &&
-    PERMANENT_RUN_MESSAGE_LINK_CODES.has(error.message)
-  );
+  return error instanceof DaemonRefusalError && PERMANENT_RUN_MESSAGE_LINK_CODES.has(error.message);
 }
 
 async function tryRunMessageLink(
@@ -1428,10 +1592,9 @@ async function tryRunMessageLink(
   requestDeadlineMs: () => number,
 ): Promise<void> {
   if (input.actor !== "agent" || !input.runId) return;
-  const run = await context.dispatchStore.getRunRecord(
-    input.runId,
-    { deadlineMs: requestDeadlineMs() },
-  );
+  const run = await context.dispatchStore.getRunRecord(input.runId, {
+    deadlineMs: requestDeadlineMs(),
+  });
   if (!run || run.workspaceId !== context.workspaceId) return;
   await context.dispatchStore.recordRunMessage(
     {
@@ -1470,9 +1633,7 @@ class RunMessageLinkRecoveryQueue {
     this.restored = true;
     let stored: StoredRunMessageLink[];
     try {
-      const parsed = JSON.parse(
-        readFileSync(this.persistencePath(), "utf8"),
-      ) as unknown;
+      const parsed = JSON.parse(readFileSync(this.persistencePath(), "utf8")) as unknown;
       if (!Array.isArray(parsed)) throw new Error("expected an array");
       stored = parsed.filter(isStoredRunMessageLink);
     } catch (error) {
@@ -1492,10 +1653,7 @@ class RunMessageLinkRecoveryQueue {
       return;
     }
     const workspaces = new Map(
-      this.options.listWorkspaces().map((workspace) => [
-        workspace.workspaceId,
-        workspace,
-      ]),
+      this.options.listWorkspaces().map((workspace) => [workspace.workspaceId, workspace]),
     );
     const restored: Array<{
       context: CliWorkspaceContext;
@@ -1522,10 +1680,9 @@ class RunMessageLinkRecoveryQueue {
         restored.push({ context, link });
       } catch (error) {
         this.options.onError?.(
-          new Error(
-            `Could not restore CLI provenance link for workspace ${link.workspaceId}.`,
-            { cause: error },
-          ),
+          new Error(`Could not restore CLI provenance link for workspace ${link.workspaceId}.`, {
+            cause: error,
+          }),
         );
         this.deferred.set(this.key(link), link);
         continue;
@@ -1547,10 +1704,7 @@ class RunMessageLinkRecoveryQueue {
     this.persist();
   }
 
-  enqueue(
-    context: CliWorkspaceContext,
-    input: RunMessageLinkInput & { runId: string },
-  ): boolean {
+  enqueue(context: CliWorkspaceContext, input: RunMessageLinkInput & { runId: string }): boolean {
     if (this.closed) return false;
     const key = this.key({
       workspaceId: context.workspaceId,
@@ -1616,10 +1770,7 @@ class RunMessageLinkRecoveryQueue {
     const baseDelay =
       this.options.runMessageLinkRecoveryRetryMs ??
       Math.max(250, this.options.runMessageLinkRetryMs ?? RUN_MESSAGE_LINK_RETRY_MS);
-    const delay = Math.min(
-      baseDelay * 2 ** Math.min(pending.attempt, 20),
-      5_000,
-    );
+    const delay = Math.min(baseDelay * 2 ** Math.min(pending.attempt, 20), 5_000);
     pending.timer = setTimeout(() => {
       pending.timer = null;
       void this.retry(key, pending);
@@ -1627,10 +1778,7 @@ class RunMessageLinkRecoveryQueue {
     pending.timer.unref?.();
   }
 
-  private async retry(
-    key: string,
-    pending: PendingRunMessageLink,
-  ): Promise<void> {
+  private async retry(key: string, pending: PendingRunMessageLink): Promise<void> {
     if (this.closed || this.pending.get(key) !== pending) return;
     pending.attempt += 1;
     this.persist();
@@ -1638,9 +1786,7 @@ class RunMessageLinkRecoveryQueue {
       await tryRunMessageLink(
         pending.context,
         pending.input,
-        () =>
-          this.options.runMessageLinkDeadlineMs ??
-          RUN_MESSAGE_LINK_DEADLINE_MS,
+        () => this.options.runMessageLinkDeadlineMs ?? RUN_MESSAGE_LINK_DEADLINE_MS,
       );
       if (this.closed || this.pending.get(key) !== pending) return;
       this.pending.delete(key);
@@ -1659,8 +1805,7 @@ class RunMessageLinkRecoveryQueue {
           (this.options.runMessageLinkRecoveryMaxAttempts ??
             RUN_MESSAGE_LINK_RECOVERY_MAX_ATTEMPTS) ||
         Date.now() - pending.createdAtMs >=
-          (this.options.runMessageLinkRecoveryMaxAgeMs ??
-            RUN_MESSAGE_LINK_RECOVERY_MAX_AGE_MS)
+          (this.options.runMessageLinkRecoveryMaxAgeMs ?? RUN_MESSAGE_LINK_RECOVERY_MAX_AGE_MS)
       ) {
         this.pending.delete(key);
         this.persist();
@@ -1674,8 +1819,7 @@ class RunMessageLinkRecoveryQueue {
   private maxPending(): number {
     return Math.max(
       1,
-      this.options.runMessageLinkRecoveryMaxPending ??
-        RUN_MESSAGE_LINK_RECOVERY_MAX_PENDING,
+      this.options.runMessageLinkRecoveryMaxPending ?? RUN_MESSAGE_LINK_RECOVERY_MAX_PENDING,
     );
   }
 
@@ -1697,18 +1841,18 @@ class RunMessageLinkRecoveryQueue {
       mkdirSync(this.options.stateDir, { recursive: true, mode: 0o700 });
       const stored: StoredRunMessageLink[] = [
         ...this.deferred.values(),
-        ...[...this.pending.values()].map(
-          ({ link, attempt, createdAtMs }) => ({
-            ...link,
-            attempt,
-            createdAtMs,
-          }),
-        ),
+        ...[...this.pending.values()].map(({ link, attempt, createdAtMs }) => ({
+          ...link,
+          attempt,
+          createdAtMs,
+        })),
       ];
-      atomicReplaceFileSync(path, (temporaryPath) => writeFileSync(temporaryPath, `${JSON.stringify(stored)}\n`, {
-        encoding: "utf8",
-        mode: 0o600,
-      }));
+      atomicReplaceFileSync(path, (temporaryPath) =>
+        writeFileSync(temporaryPath, `${JSON.stringify(stored)}\n`, {
+          encoding: "utf8",
+          mode: 0o600,
+        }),
+      );
       return true;
     } catch (error) {
       try {
@@ -1754,14 +1898,9 @@ function isStoredRunMessageLink(value: unknown): value is StoredRunMessageLink {
   );
 }
 
-const runMessageLinkRecoveryQueues = new WeakMap<
-  CliServerOptions,
-  RunMessageLinkRecoveryQueue
->();
+const runMessageLinkRecoveryQueues = new WeakMap<CliServerOptions, RunMessageLinkRecoveryQueue>();
 
-function runMessageLinkRecoveryQueue(
-  options: CliServerOptions,
-): RunMessageLinkRecoveryQueue {
+function runMessageLinkRecoveryQueue(options: CliServerOptions): RunMessageLinkRecoveryQueue {
   const existing = runMessageLinkRecoveryQueues.get(options);
   if (existing) return existing;
   const created = new RunMessageLinkRecoveryQueue(options);
@@ -1776,9 +1915,7 @@ export function disposeCliServerRuntime(options: CliServerOptions): void {
   runMessageLinkRecoveryQueues.delete(options);
 }
 
-export async function restoreCliServerRuntime(
-  options: CliServerOptions,
-): Promise<void> {
+export async function restoreCliServerRuntime(options: CliServerOptions): Promise<void> {
   await runMessageLinkRecoveryQueue(options).restore();
 }
 
@@ -1789,12 +1926,10 @@ async function linkRunMessage(
 ): Promise<string | null> {
   if (input.actor !== "agent" || !input.runId) return null;
   const retryMs = options.runMessageLinkRetryMs ?? RUN_MESSAGE_LINK_RETRY_MS;
-  const perRequestDeadlineMs =
-    options.runMessageLinkDeadlineMs ?? RUN_MESSAGE_LINK_DEADLINE_MS;
+  const perRequestDeadlineMs = options.runMessageLinkDeadlineMs ?? RUN_MESSAGE_LINK_DEADLINE_MS;
   const foregroundDeadline =
     Date.now() +
-    (options.runMessageLinkForegroundBudgetMs ??
-      RUN_MESSAGE_LINK_FOREGROUND_BUDGET_MS);
+    (options.runMessageLinkForegroundBudgetMs ?? RUN_MESSAGE_LINK_FOREGROUND_BUDGET_MS);
   const requestDeadlineMs = (): number => {
     const remaining = foregroundDeadline - Date.now();
     if (remaining <= 0) {
@@ -1832,10 +1967,9 @@ async function linkRunMessage(
     : `Message posted, but agent-run provenance could not be recorded and the bounded recovery queue is full.`;
   try {
     options.onError?.(
-      new Error(
-        `${warning} runId=${input.runId} messageId=${input.messageId}`,
-        { cause: lastError },
-      ),
+      new Error(`${warning} runId=${input.runId} messageId=${input.messageId}`, {
+        cause: lastError,
+      }),
     );
   } catch {}
   return warning;
@@ -1875,7 +2009,10 @@ async function startFileChat(
       },
     });
   } catch (error) {
-    return { created: false, result: mcpFailure(error, `failed to start a chat on: ${input.path}`) };
+    return {
+      created: false,
+      result: mcpFailure(error, `failed to start a chat on: ${input.path}`),
+    };
   }
   let message: ChatMessage;
   try {
@@ -1898,11 +2035,15 @@ async function startFileChat(
       },
     };
   }
-  const linkWarning = await linkRunMessage(context, {
-    actor: "agent",
-    ...(input.runId ? { runId: input.runId } : {}),
-    messageId: message.id,
-  }, options);
+  const linkWarning = await linkRunMessage(
+    context,
+    {
+      actor: "agent",
+      ...(input.runId ? { runId: input.runId } : {}),
+      messageId: message.id,
+    },
+    options,
+  );
   await notifyWrite(options, context);
   return {
     created: true,
@@ -1956,7 +2097,10 @@ function workspaceRequests(options: CliServerOptions, workspaceId: string): Work
   return memory;
 }
 
-function forgetOldestResults(memory: WorkspaceRequests, limits: { results: number; ids: number }): void {
+function forgetOldestResults(
+  memory: WorkspaceRequests,
+  limits: { results: number; ids: number },
+): void {
   let finished = 0;
   for (const request of memory.requests.values()) if (request.finished) finished += 1;
   for (const [requestId, request] of memory.requests) {
@@ -1987,7 +2131,10 @@ async function onceForRequestId(
   if (remembered) {
     completion.replayed = true;
     if (remembered.input !== inputKey) {
-      return { ok: false as const, reason: `request id ${requestId} was already used for a different request` };
+      return {
+        ok: false as const,
+        reason: `request id ${requestId} was already used for a different request`,
+      };
     }
     return await remembered.result;
   }
@@ -2030,7 +2177,22 @@ function refusePathColon(path: string): void {
 }
 
 function validateRequestPathSpellings(request: CliRequest): void {
-  const fields = ["fromPath", "toPath", "path", "recordPath", "collectionPath", "datasetPath", "descriptorPath", "migrationPath", "sourcePath", "savePath", "appRoot", "outDir", "schemaPath", "operationsPath"];
+  const fields = [
+    "fromPath",
+    "toPath",
+    "path",
+    "recordPath",
+    "collectionPath",
+    "datasetPath",
+    "descriptorPath",
+    "migrationPath",
+    "sourcePath",
+    "savePath",
+    "appRoot",
+    "outDir",
+    "schemaPath",
+    "operationsPath",
+  ];
   const check = (value: object) => {
     for (const [key, path] of Object.entries(value)) {
       if (fields.includes(key) && typeof path === "string") refusePathColon(path);
@@ -2040,7 +2202,8 @@ function validateRequestPathSpellings(request: CliRequest): void {
   check(request.args);
   if (request.verb === "dataset" || request.verb === "appPublication") {
     check(request.args.request);
-    if (request.verb === "dataset" && request.args.request.action === "create") check(request.args.request.definition);
+    if (request.verb === "dataset" && request.args.request.action === "create")
+      check(request.args.request.definition);
   }
   if (request.verb === "collectionQuery" && request.args.cursor) check(request.args.cursor);
 }
@@ -2055,13 +2218,15 @@ async function callerPaths(context: CliWorkspaceContext, cwd: string) {
   if (folder === null) throw new CliCommandError("not inside a dohc workspace");
   const known = new Map<string, string>();
   const workspacePath = (path: string) => isInside(root, resolve(root, path));
-  const callerPath = (path: string) => workspacePath(path) ? relative(folder, resolve(root, path)).split(sep).join("/") || "." : path;
+  const callerPath = (path: string) =>
+    workspacePath(path) ? relative(folder, resolve(root, path)).split(sep).join("/") || "." : path;
   const escapePattern = (path: string) => path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const validate = (path: string, mode: CliPathMode) => mode === "write"
-    ? validateUserWritePath(path)
-    : mode === "materialize"
-      ? validateUserMaterializePath(path, { platform: process.platform })
-      : validateUserReadPath(path, { platform: process.platform });
+  const validate = (path: string, mode: CliPathMode) =>
+    mode === "write"
+      ? validateUserWritePath(path)
+      : mode === "materialize"
+        ? validateUserMaterializePath(path, { platform: process.platform })
+        : validateUserReadPath(path, { platform: process.platform });
   return {
     rebase(path: string, mode: CliPathMode): string {
       const supplied = validate(path, mode);
@@ -2084,41 +2249,116 @@ async function callerPaths(context: CliWorkspaceContext, cwd: string) {
       return path;
     },
     result(value: unknown, changeSnapshots = false): unknown {
-      const paths = new Set(["fromPath", "toPath", "path", "recordPath", "collectionPath", "datasetPath", "savedPath", "appRoot", "pathHint", "linkedPathHint", "schemaPath", "operationsPath", "copyPath", "packagePath", "folder", "sharedFile"]);
-      const lists = new Set(["paths", "sourcePaths", "datasetPaths", "created", "written", "deleted", "withoutHistory"]);
-      const data = new Set(["values", "fields", "kept", "input", "result", "definitions", "value", "previous", "next", "sortValues", "validation", "reasons", "default", "before", "after", "key", "recordId", "planned", "current", "undo"]);
-      if (changeSnapshots) { data.delete("before"); data.delete("after"); }
+      const paths = new Set([
+        "fromPath",
+        "toPath",
+        "path",
+        "recordPath",
+        "collectionPath",
+        "datasetPath",
+        "savedPath",
+        "appRoot",
+        "pathHint",
+        "linkedPathHint",
+        "schemaPath",
+        "operationsPath",
+        "copyPath",
+        "packagePath",
+        "folder",
+        "sharedFile",
+      ]);
+      const lists = new Set([
+        "paths",
+        "sourcePaths",
+        "datasetPaths",
+        "created",
+        "written",
+        "deleted",
+        "withoutHistory",
+      ]);
+      const data = new Set([
+        "values",
+        "fields",
+        "kept",
+        "input",
+        "result",
+        "definitions",
+        "value",
+        "previous",
+        "next",
+        "sortValues",
+        "validation",
+        "reasons",
+        "default",
+        "before",
+        "after",
+        "key",
+        "recordId",
+        "planned",
+        "current",
+        "undo",
+      ]);
+      if (changeSnapshots) {
+        data.delete("before");
+        data.delete("after");
+      }
       const collect = (entry: unknown, key = ""): void => {
-        if (typeof entry === "string" && (paths.has(key) || lists.has(key)) && workspacePath(entry)) {
+        if (
+          typeof entry === "string" &&
+          (paths.has(key) || lists.has(key)) &&
+          workspacePath(entry)
+        ) {
           known.set(entry, callerPath(entry));
           known.set(resolve(root, entry), callerPath(entry));
-        }
-        else if (Array.isArray(entry)) entry.forEach(item => collect(item, key));
+        } else if (Array.isArray(entry)) entry.forEach((item) => collect(item, key));
         else if (entry !== null && typeof entry === "object") {
-          for (const [name, item] of Object.entries(entry)) if (!data.has(name)) collect(item, name);
+          for (const [name, item] of Object.entries(entry))
+            if (!data.has(name)) collect(item, name);
         }
       };
       collect(value);
       const text = (line: string) => {
-        const names = [...known.keys()].filter(path => root !== folder || !isAbsolute(path)).sort((a, b) => b.length - a.length).map(path => escapePattern(path));
+        const names = [...known.keys()]
+          .filter((path) => root !== folder || !isAbsolute(path))
+          .sort((a, b) => b.length - a.length)
+          .map((path) => escapePattern(path));
         const prefix = relative(root, folder).split(sep).join("/") + "/";
         // A port can mention another source file beside the requested descriptor.
-        const anchors = root === folder ? [] : [prefix, root + sep, root.split(sep).join("/") + "/"];
-        const pathsInText = anchors.map(path => escapePattern(path) + '[^\\s"\'<>()]+');
+        const anchors =
+          root === folder ? [] : [prefix, root + sep, root.split(sep).join("/") + "/"];
+        const pathsInText = anchors.map((path) => escapePattern(path) + "[^\\s\"'<>()]+");
         const pattern = [...names, ...pathsInText].join("|");
         if (!pattern) return line;
-        return line.replace(new RegExp(`(?<![\\p{L}\\p{N}_./\\\\-])(?:${pattern})(?![\\p{L}\\p{N}_.\\\\-])`, "gu"), path => known.get(path) ?? callerPath(path));
+        return line.replace(
+          new RegExp(`(?<![\\p{L}\\p{N}_./\\\\-])(?:${pattern})(?![\\p{L}\\p{N}_.\\\\-])`, "gu"),
+          (path) => known.get(path) ?? callerPath(path),
+        );
       };
       const map = (entry: unknown, key = ""): unknown => {
         if (typeof entry === "string") {
           if (paths.has(key) || lists.has(key)) return callerPath(entry);
-          if (["reason", "message", "warning", "instruction", "sourceError", "error", "body"].includes(key)) return text(entry);
+          if (
+            [
+              "reason",
+              "message",
+              "warning",
+              "instruction",
+              "sourceError",
+              "error",
+              "body",
+            ].includes(key)
+          )
+            return text(entry);
           return entry;
         }
-        if (Array.isArray(entry)) return entry.map(item => map(item, key));
-        if (entry !== null && typeof entry === "object") return Object.fromEntries(
-          Object.entries(entry).map(([name, item]) => [name, data.has(name) ? item : map(item, name)]),
-        );
+        if (Array.isArray(entry)) return entry.map((item) => map(item, key));
+        if (entry !== null && typeof entry === "object")
+          return Object.fromEntries(
+            Object.entries(entry).map(([name, item]) => [
+              name,
+              data.has(name) ? item : map(item, name),
+            ]),
+          );
         return entry;
       };
       return map(value);
@@ -2129,8 +2369,10 @@ async function callerPaths(context: CliWorkspaceContext, cwd: string) {
 // A received share's folder sits under shared-with-me in your own workspace.
 // Commands for your workspace as its owner, and chat, run from your own
 // folder instead.
-const OWNER_COMMAND_IN_RECEIVED_SHARE = "This command isn't available in a folder others share with you. Run it from your own workspace's folder.";
-const CHAT_IN_RECEIVED_SHARE = "Chat isn't available from the command line in a folder others share with you. Run this command from your own workspace's folder.";
+const OWNER_COMMAND_IN_RECEIVED_SHARE =
+  "This command isn't available in a folder others share with you. Run it from your own workspace's folder.";
+const CHAT_IN_RECEIVED_SHARE =
+  "Chat isn't available from the command line in a folder others share with you. Run this command from your own workspace's folder.";
 
 // What each command does when run from a received share's folder: it runs
 // ("anywhere"), is refused with one of the sentences above, or gives its own
@@ -2138,55 +2380,141 @@ const CHAT_IN_RECEIVED_SHARE = "Chat isn't available from the command line in a 
 type ReceivedShareRule = "anywhere" | "owner" | "chat" | { answer: unknown };
 const keptEditsInOwner = { answer: keptEditsUnavailable() };
 const liveDocumentsInOwner = { answer: liveDocumentsUnavailable() };
-const versionsInOwner = { answer: { ok: false as const, reason: "Versions belong to the owning workspace. Open it to continue." } };
-const syncStatusInOwner = { answer: { ok: false as const, reason: "Sync status is kept only in the original workspace. Open it to continue." } };
+const versionsInOwner = {
+  answer: {
+    ok: false as const,
+    reason: "Versions belong to the owning workspace. Open it to continue.",
+  },
+};
+const syncStatusInOwner = {
+  answer: {
+    ok: false as const,
+    reason: "Sync status is kept only in the original workspace. Open it to continue.",
+  },
+};
 const HISTORY_IN_OWNER = "History operations require the owning workspace. Open it to continue.";
 // A Collection request with one of these names the Collection by its path.
 const DATASET_PATH_FIELDS = ["datasetPath", "descriptorPath", "definition"] as const;
-const RECEIVED_SHARE_RULES: { [Verb in CliVerb]: ReceivedShareRule | ((request: Extract<CliRequest, { verb: Verb }>) => ReceivedShareRule) } = {
+const RECEIVED_SHARE_RULES: {
+  [Verb in CliVerb]:
+    | ReceivedShareRule
+    | ((request: Extract<CliRequest, { verb: Verb }>) => ReceivedShareRule);
+} = {
   // Reads. Account deletion is the account's, not a workspace's.
-  chatLinks: "anywhere", chatFileMentions: "anywhere", linksEdges: "anywhere", linksIn: "anywhere", linksResolve: "anywhere",
-  accountDeletePreview: "anywhere", accountDelete: "anywhere", accessRefresh: "anywhere", accessObject: "anywhere", accessSharing: "anywhere",
-  groups: "anywhere", threads: "anywhere", inbox: "anywhere", notices: "anywhere", grep: "anywhere", moments: "anywhere", moment: "anywhere",
-  fileChats: "anywhere", chat: "anywhere", groupsFull: "anywhere", collectionQuery: "anywhere", collectionRecord: "anywhere",
-  documentRead: "anywhere", collectionsWaiting: "anywhere", sharedFilesHeld: "anywhere", automationList: "anywhere",
+  chatLinks: "anywhere",
+  chatFileMentions: "anywhere",
+  linksEdges: "anywhere",
+  linksIn: "anywhere",
+  linksResolve: "anywhere",
+  accountDeletePreview: "anywhere",
+  accountDelete: "anywhere",
+  accessRefresh: "anywhere",
+  accessObject: "anywhere",
+  accessSharing: "anywhere",
+  groups: "anywhere",
+  threads: "anywhere",
+  inbox: "anywhere",
+  notices: "anywhere",
+  grep: "anywhere",
+  moments: "anywhere",
+  moment: "anywhere",
+  fileChats: "anywhere",
+  chat: "anywhere",
+  groupsFull: "anywhere",
+  collectionQuery: "anywhere",
+  collectionRecord: "anywhere",
+  documentRead: "anywhere",
+  collectionsWaiting: "anywhere",
+  sharedFilesHeld: "anywhere",
+  automationList: "anywhere",
   // These act on the paths they name, which the path rules check.
-  collectionSetFields: "anywhere", collectionCreateRecord: "anywhere", fileWrite: "anywhere", fileDuplicate: "anywhere", fileMove: "anywhere",
-  fileDelete: "anywhere", documentEdit: "anywhere", documentCreate: "anywhere", heldNoteChange: "anywhere",
-  automationSwitch: "anywhere", automationRuns: "anywhere", automationRun: "anywhere", automationRetry: "anywhere", automationPress: "anywhere",
+  collectionSetFields: "anywhere",
+  collectionCreateRecord: "anywhere",
+  fileWrite: "anywhere",
+  fileDuplicate: "anywhere",
+  fileMove: "anywhere",
+  fileDelete: "anywhere",
+  documentEdit: "anywhere",
+  documentCreate: "anywhere",
+  heldNoteChange: "anywhere",
+  automationSwitch: "anywhere",
+  automationRuns: "anywhere",
+  automationRun: "anywhere",
+  automationRetry: "anywhere",
+  automationPress: "anywhere",
   automationButtons: "anywhere",
-  dataset: request => DATASET_PATH_FIELDS.some(field => field in request.args.request) ? "anywhere" : "owner",
-  appPublication: request => "appRoot" in request.args.request ? "anywhere" : "owner",
-  stopSync: "owner", shareCopy: "owner", shareAgents: "owner", shareDisconnect: "owner", keptCopies: "owner", saveKeptCopy: "owner",
-  retainedCopies: "owner", deleteRetainedCopies: "owner", ownerAppResponses: "owner",
-  groupCreate: "chat", post: "chat", reply: "chat", nothingToReport: "chat", react: "chat", chatRetry: "chat", fileChatStart: "chat", export: "chat", watch: "chat",
+  dataset: (request) =>
+    DATASET_PATH_FIELDS.some((field) => field in request.args.request) ? "anywhere" : "owner",
+  appPublication: (request) => ("appRoot" in request.args.request ? "anywhere" : "owner"),
+  stopSync: "owner",
+  shareCopy: "owner",
+  shareAgents: "owner",
+  shareDisconnect: "owner",
+  keptCopies: "owner",
+  saveKeptCopy: "owner",
+  retainedCopies: "owner",
+  deleteRetainedCopies: "owner",
+  ownerAppResponses: "owner",
+  groupCreate: "chat",
+  post: "chat",
+  reply: "chat",
+  nothingToReport: "chat",
+  react: "chat",
+  chatRetry: "chat",
+  fileChatStart: "chat",
+  export: "chat",
+  watch: "chat",
   link: "chat",
-  show: request => request.args.peek ? "anywhere" : "chat",
-  liveKeptEdits: keptEditsInOwner, saveRecoveryCopy: keptEditsInOwner, retryKeptEdits: keptEditsInOwner, stopAgain: keptEditsInOwner,
+  show: (request) => (request.args.peek ? "anywhere" : "chat"),
+  liveKeptEdits: keptEditsInOwner,
+  saveRecoveryCopy: keptEditsInOwner,
+  retryKeptEdits: keptEditsInOwner,
+  stopAgain: keptEditsInOwner,
   // Protected copies stay on the computer of the workspace that kept them.
-  restoreProtectedCopy: { answer: keptCopiesUnavailable() }, discardProtectedCopy: { answer: keptCopiesUnavailable() },
-  liveDocuments: liveDocumentsInOwner, liveStop: liveDocumentsInOwner, liveResume: liveDocumentsInOwner,
+  restoreProtectedCopy: { answer: keptCopiesUnavailable() },
+  discardProtectedCopy: { answer: keptCopiesUnavailable() },
+  liveDocuments: liveDocumentsInOwner,
+  liveStop: liveDocumentsInOwner,
+  liveResume: liveDocumentsInOwner,
   documentHeld: { answer: heldChangesUnavailable() },
   syncFailure: syncStatusInOwner,
   historyOperation: { answer: { ok: false as const, reason: HISTORY_IN_OWNER } },
   // Every refused Undo carries a refusal.
-  historyUndo: { answer: { ok: false as const, reason: HISTORY_IN_OWNER, refusal: { code: "unexplained" as const } } },
-  versionList: versionsInOwner, versionCompare: versionsInOwner, versionConflicts: versionsInOwner, versionCreate: versionsInOwner,
-  versionSwitch: versionsInOwner, versionMerge: versionsInOwner, versionResolve: versionsInOwner,
+  historyUndo: {
+    answer: {
+      ok: false as const,
+      reason: HISTORY_IN_OWNER,
+      refusal: { code: "unexplained" as const },
+    },
+  },
+  versionList: versionsInOwner,
+  versionCompare: versionsInOwner,
+  versionConflicts: versionsInOwner,
+  versionCreate: versionsInOwner,
+  versionSwitch: versionsInOwner,
+  versionMerge: versionsInOwner,
+  versionResolve: versionsInOwner,
 };
 
 // The answer a command gives instead of running from a received share's
 // folder, or undefined when it runs.
-async function receivedShareRefusal(request: CliRequest, options: CliServerOptions): Promise<{ answer: unknown } | undefined> {
+async function receivedShareRefusal(
+  request: CliRequest,
+  options: CliServerOptions,
+): Promise<{ answer: unknown } | undefined> {
   const rule = RECEIVED_SHARE_RULES[request.verb];
-  const resolved = typeof rule === "function" ? (rule as (request: CliRequest) => ReceivedShareRule)(request) : rule;
+  const resolved =
+    typeof rule === "function"
+      ? (rule as (request: CliRequest) => ReceivedShareRule)(request)
+      : rule;
   if (resolved === "anywhere") return undefined;
   const workspace = await resolveCliWorkspace(request.args.cwd, options.listWorkspaces());
   if (!workspace) return undefined;
   // Needs the native realpath: the folder's real name, as the system reports it.
   const root = await realpath(workspace.rootPath);
   const folder = await pathUnderRoot(root, await realpath(request.args.cwd));
-  if (folder === null || !isSharedWithMePath(relative(root, folder).split(sep).join("/"))) return undefined;
+  if (folder === null || !isSharedWithMePath(relative(root, folder).split(sep).join("/")))
+    return undefined;
   if (resolved === "owner") throw new CliCommandError(OWNER_COMMAND_IN_RECEIVED_SHARE);
   if (resolved === "chat") throw new CliCommandError(CHAT_IN_RECEIVED_SHARE);
   return resolved;
@@ -2202,18 +2530,69 @@ async function dispatch(
     const ref = request.args.ref;
     if (ref.kind !== "path") return dispatchWorkspace(request, context, options, completion);
     const paths = await callerPaths(context, request.args.cwd);
-    const rebased = { ...request, args: { ...request.args, ref: { ...ref, path: paths.rebase(ref.path, "read") } } };
+    const rebased = {
+      ...request,
+      args: { ...request.args, ref: { ...ref, path: paths.rebase(ref.path, "read") } },
+    };
     return dispatchWorkspace(rebased, context, options, completion);
   }
-  const pathVerbs = new Set(["link", "heldNoteChange", "moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentHeld", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "restoreProtectedCopy", "discardProtectedCopy", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "liveDocuments", "liveStop", "liveResume", "fileWrite", "fileMove", "fileDelete", "fileDuplicate", "appPublication"]);
+  const pathVerbs = new Set([
+    "link",
+    "heldNoteChange",
+    "moment",
+    "moments",
+    "fileChats",
+    "fileChatStart",
+    "documentRead",
+    "documentHeld",
+    "documentEdit",
+    "documentCreate",
+    "collectionQuery",
+    "collectionRecord",
+    "collectionSetFields",
+    "collectionCreateRecord",
+    "automationList",
+    "automationSwitch",
+    "automationRuns",
+    "automationRun",
+    "automationRetry",
+    "automationButtons",
+    "automationPress",
+    "dataset",
+    "keptCopies",
+    "saveKeptCopy",
+    "restoreProtectedCopy",
+    "discardProtectedCopy",
+    "liveKeptEdits",
+    "saveRecoveryCopy",
+    "retryKeptEdits",
+    "stopAgain",
+    "liveDocuments",
+    "liveStop",
+    "liveResume",
+    "fileWrite",
+    "fileMove",
+    "fileDelete",
+    "fileDuplicate",
+    "appPublication",
+  ]);
   if (!pathVerbs.has(request.verb)) {
     validateRequestPathSpellings(request);
     return dispatchWorkspace(request, context, options, completion);
   }
   let paths: Awaited<ReturnType<typeof callerPaths>>;
-  try { paths = await callerPaths(context, request.args.cwd); } catch (error) {
-    if (request.verb === "fileMove" || request.verb === "fileDelete" || request.verb === "fileDuplicate") {
-      return pathFreeFailure(error, `dohc could not ${request.verb === "fileMove" ? "move" : request.verb === "fileDuplicate" ? "duplicate" : "delete"} the file.`);
+  try {
+    paths = await callerPaths(context, request.args.cwd);
+  } catch (error) {
+    if (
+      request.verb === "fileMove" ||
+      request.verb === "fileDelete" ||
+      request.verb === "fileDuplicate"
+    ) {
+      return pathFreeFailure(
+        error,
+        `dohc could not ${request.verb === "fileMove" ? "move" : request.verb === "fileDuplicate" ? "duplicate" : "delete"} the file.`,
+      );
     }
     throw error;
   }
@@ -2222,126 +2601,278 @@ async function dispatch(
     validateRequestPathSpellings(request);
     switch (request.verb) {
       case "fileMove":
-        rebased = { ...request, args: { ...request.args, fromPath: paths.rebase(request.args.fromPath, "materialize"), toPath: paths.rebase(request.args.toPath, "materialize") } };
+        rebased = {
+          ...request,
+          args: {
+            ...request.args,
+            fromPath: paths.rebase(request.args.fromPath, "materialize"),
+            toPath: paths.rebase(request.args.toPath, "materialize"),
+          },
+        };
         break;
       case "fileDuplicate": {
         const path = paths.rebase(request.args.path, "materialize");
-        if (classifyEngineFilePathForRead(path, process.platform).kind === "secret") throw new CliCommandError("History cannot record secret files. Choose another file.");
+        if (classifyEngineFilePathForRead(path, process.platform).kind === "secret")
+          throw new CliCommandError("History cannot record secret files. Choose another file.");
         rebased = { ...request, args: { ...request.args, path } };
         break;
       }
       case "fileDelete":
-        rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "materialize") } };
+        rebased = {
+          ...request,
+          args: { ...request.args, path: paths.rebase(request.args.path, "materialize") },
+        };
         break;
       case "fileWrite":
-        rebased = { ...request, args: { ...request.args, files: request.args.files.map(file => ({
-          ...file, path: paths.rebase(file.path, "materialize"),
-        })) } };
+        rebased = {
+          ...request,
+          args: {
+            ...request.args,
+            files: request.args.files.map((file) => ({
+              ...file,
+              path: paths.rebase(file.path, "materialize"),
+            })),
+          },
+        };
         break;
       case "appPublication": {
         const input = request.args.request;
-        rebased = { ...request, args: { ...request.args, request: "appRoot" in input
-          ? { ...input, appRoot: paths.rebase(input.appRoot, "read"), ...(input.action === "createLink" && input.paths ? {paths:input.paths.map(path=>paths.rebase(path,"read"))} : {}) } : input } };
+        rebased = {
+          ...request,
+          args: {
+            ...request.args,
+            request:
+              "appRoot" in input
+                ? {
+                    ...input,
+                    appRoot: paths.rebase(input.appRoot, "read"),
+                    ...(input.action === "createLink" && input.paths
+                      ? { paths: input.paths.map((path) => paths.rebase(path, "read")) }
+                      : {}),
+                  }
+                : input,
+          },
+        };
         break;
       }
       case "fileChats":
-        rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "read") } };
+        rebased = {
+          ...request,
+          args: { ...request.args, path: paths.rebase(request.args.path, "read") },
+        };
         break;
       case "link": {
         const target = request.args.target;
-        rebased = target.kind === "path" ? { ...request, args: { ...request.args, target: { ...target, path: paths.rebase(target.path, "read") } } } : request;
+        rebased =
+          target.kind === "path"
+            ? {
+                ...request,
+                args: {
+                  ...request.args,
+                  target: { ...target, path: paths.rebase(target.path, "read") },
+                },
+              }
+            : request;
         break;
       }
       case "fileChatStart":
-        rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "read") } };
+        rebased = {
+          ...request,
+          args: { ...request.args, path: paths.rebase(request.args.path, "read") },
+        };
         break;
       case "documentRead":
       case "documentHeld":
-        rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "read") } };
+        rebased = {
+          ...request,
+          args: { ...request.args, path: paths.rebase(request.args.path, "read") },
+        };
         break;
       case "heldNoteChange":
-        rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "write") } };
+        rebased = {
+          ...request,
+          args: { ...request.args, path: paths.rebase(request.args.path, "write") },
+        };
         break;
       case "documentEdit":
-        rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "write") } };
+        rebased = {
+          ...request,
+          args: { ...request.args, path: paths.rebase(request.args.path, "write") },
+        };
         break;
       case "saveRecoveryCopy":
-        rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "write") } };
+        rebased = {
+          ...request,
+          args: { ...request.args, path: paths.rebase(request.args.path, "write") },
+        };
         break;
       case "retryKeptEdits":
       case "stopAgain":
-        rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "write") } };
+        rebased = {
+          ...request,
+          args: { ...request.args, path: paths.rebase(request.args.path, "write") },
+        };
         break;
       case "liveStop":
-        rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "write") } };
+        rebased = {
+          ...request,
+          args: { ...request.args, path: paths.rebase(request.args.path, "write") },
+        };
         break;
       case "liveResume":
-        rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "write") } };
+        rebased = {
+          ...request,
+          args: { ...request.args, path: paths.rebase(request.args.path, "write") },
+        };
         break;
       case "documentCreate":
-        rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "materialize") } };
+        rebased = {
+          ...request,
+          args: { ...request.args, path: paths.rebase(request.args.path, "materialize") },
+        };
         break;
       case "collectionSetFields":
-        rebased = { ...request, args: { ...request.args, recordPath: paths.rebase(request.args.recordPath, "write") } };
+        rebased = {
+          ...request,
+          args: { ...request.args, recordPath: paths.rebase(request.args.recordPath, "write") },
+        };
         break;
       case "collectionQuery":
-        rebased = { ...request, args: { ...request.args, collectionPath: paths.rebase(request.args.collectionPath, "read"),
-          ...(request.args.cursor ? { cursor: { ...request.args.cursor, recordPath: paths.rebase(request.args.cursor.recordPath, "read") } } : {}) } };
+        rebased = {
+          ...request,
+          args: {
+            ...request.args,
+            collectionPath: paths.rebase(request.args.collectionPath, "read"),
+            ...(request.args.cursor
+              ? {
+                  cursor: {
+                    ...request.args.cursor,
+                    recordPath: paths.rebase(request.args.cursor.recordPath, "read"),
+                  },
+                }
+              : {}),
+          },
+        };
         break;
       case "collectionRecord":
-        rebased = { ...request, args: { ...request.args, collectionPath: paths.rebase(request.args.collectionPath, "read") } };
+        rebased = {
+          ...request,
+          args: {
+            ...request.args,
+            collectionPath: paths.rebase(request.args.collectionPath, "read"),
+          },
+        };
         break;
       case "collectionCreateRecord":
-        rebased = { ...request, args: { ...request.args, collectionPath: paths.rebase(request.args.collectionPath, "read") } };
+        rebased = {
+          ...request,
+          args: {
+            ...request.args,
+            collectionPath: paths.rebase(request.args.collectionPath, "read"),
+          },
+        };
         break;
       case "automationRuns":
       case "automationList":
       case "automationSwitch":
-        rebased = { ...request, args: { ...request.args, collectionPath: paths.rebase(request.args.collectionPath, "read") } } as typeof request;
+        rebased = {
+          ...request,
+          args: {
+            ...request.args,
+            collectionPath: paths.rebase(request.args.collectionPath, "read"),
+          },
+        } as typeof request;
         break;
       case "automationRun":
-        rebased = { ...request, args: { ...request.args, collectionPath: paths.rebase(request.args.collectionPath, "read") } };
+        rebased = {
+          ...request,
+          args: {
+            ...request.args,
+            collectionPath: paths.rebase(request.args.collectionPath, "read"),
+          },
+        };
         break;
       case "automationRetry":
-        rebased = { ...request, args: { ...request.args, collectionPath: paths.rebase(request.args.collectionPath, "read") } };
+        rebased = {
+          ...request,
+          args: {
+            ...request.args,
+            collectionPath: paths.rebase(request.args.collectionPath, "read"),
+          },
+        };
         break;
       case "automationButtons":
-        rebased = { ...request, args: { ...request.args, collectionPath: paths.rebase(request.args.collectionPath, "read") } };
+        rebased = {
+          ...request,
+          args: {
+            ...request.args,
+            collectionPath: paths.rebase(request.args.collectionPath, "read"),
+          },
+        };
         break;
       case "automationPress":
-        rebased = { ...request, args: { ...request.args, collectionPath: paths.rebase(request.args.collectionPath, "read") } };
+        rebased = {
+          ...request,
+          args: {
+            ...request.args,
+            collectionPath: paths.rebase(request.args.collectionPath, "read"),
+          },
+        };
         break;
       case "dataset": {
         const input = request.args.request;
         const translated = { ...input };
-        if ("datasetPath" in translated) translated.datasetPath = paths.rebase(translated.datasetPath, "read");
-        if ("descriptorPath" in translated) translated.descriptorPath = paths.rebase(translated.descriptorPath, "read");
-        if ("migrationPath" in translated) translated.migrationPath = paths.rebase(translated.migrationPath, "read");
-        if ("sourcePath" in translated && translated.sourcePath !== undefined) translated.sourcePath = paths.recoveryPath(translated.sourcePath, "read");
-        if ("savePath" in translated && translated.savePath !== undefined) translated.savePath = paths.exportPath(translated.savePath);
-        if ("appRoot" in translated) translated.appRoot = paths.rebase(translated.appRoot, "materialize");
-        if (translated.action === "create") translated.definition = { ...translated.definition,
-          schemaPath: paths.rebase(translated.definition.schemaPath, "read"),
-          operationsPath: paths.rebase(translated.definition.operationsPath, "read") };
+        if ("datasetPath" in translated)
+          translated.datasetPath = paths.rebase(translated.datasetPath, "read");
+        if ("descriptorPath" in translated)
+          translated.descriptorPath = paths.rebase(translated.descriptorPath, "read");
+        if ("migrationPath" in translated)
+          translated.migrationPath = paths.rebase(translated.migrationPath, "read");
+        if ("sourcePath" in translated && translated.sourcePath !== undefined)
+          translated.sourcePath = paths.recoveryPath(translated.sourcePath, "read");
+        if ("savePath" in translated && translated.savePath !== undefined)
+          translated.savePath = paths.exportPath(translated.savePath);
+        if ("appRoot" in translated)
+          translated.appRoot = paths.rebase(translated.appRoot, "materialize");
+        if (translated.action === "create")
+          translated.definition = {
+            ...translated.definition,
+            schemaPath: paths.rebase(translated.definition.schemaPath, "read"),
+            operationsPath: paths.rebase(translated.definition.operationsPath, "read"),
+          };
         rebased = { ...request, args: { ...request.args, request: translated } };
         break;
       }
-      default: rebased = request;
+      default:
+        rebased = request;
     }
   } catch (error) {
     const reason = error instanceof Error ? error.message : "path rejected";
-    if (request.verb === "moments" || request.verb === "appPublication" || request.verb === "link") throw new CliCommandError(reason);
+    if (request.verb === "moments" || request.verb === "appPublication" || request.verb === "link")
+      throw new CliCommandError(reason);
     if (request.verb === "fileWrite") return { ok: false, written: [], reason };
-    return request.verb === "dataset" ? { kind: "refused", code: "path_rejected", message: reason } : { ok: false, reason };
+    return request.verb === "dataset"
+      ? { kind: "refused", code: "path_rejected", message: reason }
+      : { ok: false, reason };
   }
   try {
-    return paths.result(parseCliResult(request.verb, await dispatchWorkspace(rebased, context, options, completion)), request.verb === "moment");
+    return paths.result(
+      parseCliResult(request.verb, await dispatchWorkspace(rebased, context, options, completion)),
+      request.verb === "moment",
+    );
   } catch (error) {
-    const workspacePaths = error instanceof DatasetSchemaChangeError
-      ? error.workspacePaths
-      : [];
-    const mapped = paths.result({ error: error instanceof Error ? error.message : "request failed", paths: workspacePaths });
-    if (mapped !== null && typeof mapped === "object" && "error" in mapped && typeof mapped.error === "string") throw new CliCommandError(mapped.error);
+    const workspacePaths = error instanceof DatasetSchemaChangeError ? error.workspacePaths : [];
+    const mapped = paths.result({
+      error: error instanceof Error ? error.message : "request failed",
+      paths: workspacePaths,
+    });
+    if (
+      mapped !== null &&
+      typeof mapped === "object" &&
+      "error" in mapped &&
+      typeof mapped.error === "string"
+    )
+      throw new CliCommandError(mapped.error);
     throw error;
   }
 }
@@ -2349,8 +2880,13 @@ async function dispatch(
 // A work link for a chat message. A path names a Collection by its folder,
 // or else a file. A read-only workspace makes none: its references would not
 // reach the owner's server.
-async function makeLink(target: CliLinkTarget, context: CliWorkspaceContext, chats: ChatsHost): Promise<CliResultByVerb["link"]> {
-  if (context.readOnly || !context.makeWorkReference) throw new CliCommandError("This workspace is read-only. Make links in the owning workspace.");
+async function makeLink(
+  target: CliLinkTarget,
+  context: CliWorkspaceContext,
+  chats: ChatsHost,
+): Promise<CliResultByVerb["link"]> {
+  if (context.readOnly || !context.makeWorkReference)
+    throw new CliCommandError("This workspace is read-only. Make links in the owning workspace.");
   const make = context.makeWorkReference;
   const made = async (kind: CliResultByVerb["link"]["kind"], input: WorkTargetInput) => {
     const reference = await make(input);
@@ -2362,12 +2898,19 @@ async function makeLink(target: CliLinkTarget, context: CliWorkspaceContext, cha
       return made("chat", { kind: "chat", channelId: channel.engine.id });
     }
     case "thread": {
-      const thread = resolveThread(target.thread, await loadThreads(chats, await loadChannels(chats)));
+      const thread = resolveThread(
+        target.thread,
+        await loadThreads(chats, await loadChannels(chats)),
+      );
       return made("thread", { kind: "thread", threadId: thread.thread.id });
     }
     case "message": {
       const threads = await loadThreads(chats, await loadChannels(chats));
-      const found = resolveThreadOrMessage(target.message, threads, await loadMessagesByThread(chats, threads));
+      const found = resolveThreadOrMessage(
+        target.message,
+        threads,
+        await loadMessagesByThread(chats, threads),
+      );
       if (!found.rootMessage) throw new CliCommandError(`no such message: ${target.message}`);
       return made("message", { kind: "message", messageId: found.rootMessage.id });
     }
@@ -2382,7 +2925,9 @@ async function makeLink(target: CliLinkTarget, context: CliWorkspaceContext, cha
           return await made("file", { kind: "file", path: target.path });
         } catch (error) {
           if (!(error instanceof Error && error.message === "work-target-not-found")) throw error;
-          throw new CliCommandError(`dohc could not find ${target.path}. Link a tracked file, or a Collection by its folder.`);
+          throw new CliCommandError(
+            `dohc could not find ${target.path}. Link a tracked file, or a Collection by its folder.`,
+          );
         }
       }
   }
@@ -2394,7 +2939,11 @@ async function dispatchWorkspace(
   options: CliServerOptions,
   completion: { replayed: boolean },
 ): Promise<unknown> {
-  if (request.verb === "reply" && request.args.choose !== undefined && request.args.resolve === undefined) {
+  if (
+    request.verb === "reply" &&
+    request.args.choose !== undefined &&
+    request.args.resolve === undefined
+  ) {
     throw new CliCommandError("--choose needs --resolve <message>");
   }
   const chats = chatsHost(context, options);
@@ -2406,24 +2955,49 @@ async function dispatchWorkspace(
       // Only where a row opens is a path. Its title and text stay as sent.
       const paths = await callerPaths(context, request.args.cwd);
       const notices = await options.notices(context.workspaceId);
-      return { notices: notices.map(({ opens, ...notice }) => ({ ...notice,
-        opens: opens && (opens.to === "chat" ? cliNoticeOpens(opens) : paths.result(opens) as CliNoticeOpens) })) };
+      return {
+        notices: notices.map(({ opens, ...notice }) => ({
+          ...notice,
+          opens:
+            opens &&
+            (opens.to === "chat" ? cliNoticeOpens(opens) : (paths.result(opens) as CliNoticeOpens)),
+        })),
+      };
     }
     case "stopSync":
-      if (context.readOnly || !context.stopSync) throw new CliCommandError("Open the owning workspace to stop its sync.");
-      return context.stopSync(writeActor(request.args.actor, context, options) === "agent"
-        ? { kind: "agent", agentId: editingAgentId(context), ...connectedAgentName(context, request.args.agent), onBehalfOf: options.localPersonId(), depth: options.agentRunDepth(context.workspaceId) }
-        : undefined);
+      if (context.readOnly || !context.stopSync)
+        throw new CliCommandError("Open the owning workspace to stop its sync.");
+      return context.stopSync(
+        writeActor(request.args.actor, context, options) === "agent"
+          ? {
+              kind: "agent",
+              agentId: editingAgentId(context),
+              ...connectedAgentName(context, request.args.agent),
+              onBehalfOf: options.localPersonId(),
+              depth: options.agentRunDepth(context.workspaceId),
+            }
+          : undefined,
+      );
     case "shareCopy":
-      if (context.readOnly || !context.shareCopy) throw new CliCommandError("Share copy details require the owning workspace.");
+      if (context.readOnly || !context.shareCopy)
+        throw new CliCommandError("Share copy details require the owning workspace.");
       return context.shareCopy({ shareId: request.args.shareId, grantId: request.args.grantId });
     case "shareAgents":
-      if (context.readOnly || !context.shareLinkAgents) throw new CliCommandError("Open the owning workspace to list a link's agents.");
-      return context.shareLinkAgents.list({ shareId: request.args.shareId, grantId: request.args.grantId,
-        ...(request.args.cursor === undefined ? {} : { cursor: request.args.cursor }) });
+      if (context.readOnly || !context.shareLinkAgents)
+        throw new CliCommandError("Open the owning workspace to list a link's agents.");
+      return context.shareLinkAgents.list({
+        shareId: request.args.shareId,
+        grantId: request.args.grantId,
+        ...(request.args.cursor === undefined ? {} : { cursor: request.args.cursor }),
+      });
     case "shareDisconnect":
-      if (context.readOnly || !context.shareLinkAgents) throw new CliCommandError("Open the owning workspace to disconnect a link's agent.");
-      return context.shareLinkAgents.disconnect({ shareId: request.args.shareId, grantId: request.args.grantId, connectionId: request.args.connectionId });
+      if (context.readOnly || !context.shareLinkAgents)
+        throw new CliCommandError("Open the owning workspace to disconnect a link's agent.");
+      return context.shareLinkAgents.disconnect({
+        shareId: request.args.shareId,
+        grantId: request.args.grantId,
+        connectionId: request.args.connectionId,
+      });
     case "accessRefresh":
       if (!context.access) throw new CliCommandError("Access observations are unavailable.");
       return context.access.refresh();
@@ -2434,24 +3008,67 @@ async function dispatchWorkspace(
       if (!context.access) throw new CliCommandError("Access observations are unavailable.");
       return context.access.sharing(request.args);
     case "appPublication": {
-      if (request.args.request.workspaceId !== context.workspaceId || context.readOnly || !context.appPublication) throw new CliCommandError("App publication requires the owning workspace.");
-      if (options.agentRunDepth(context.workspaceId) > 0) throw new CliCommandError("Automations cannot use app publication.");
-      const agent = writeActor(request.args.actor, context, options) === "agent"
-        ? {kind:"agent" as const,label:"agentLabel" in request.args.request ? request.args.request.agentLabel ?? null : null,labelSource:"agent-declared" as const} : null;
+      if (
+        request.args.request.workspaceId !== context.workspaceId ||
+        context.readOnly ||
+        !context.appPublication
+      )
+        throw new CliCommandError("App publication requires the owning workspace.");
+      if (options.agentRunDepth(context.workspaceId) > 0)
+        throw new CliCommandError("Automations cannot use app publication.");
+      const agent =
+        writeActor(request.args.actor, context, options) === "agent"
+          ? {
+              kind: "agent" as const,
+              label:
+                "agentLabel" in request.args.request
+                  ? (request.args.request.agentLabel ?? null)
+                  : null,
+              labelSource: "agent-declared" as const,
+            }
+          : null;
       return context.appPublication(request.args.request, agent);
     }
     case "dataset": {
-      if (request.args.request.action === "export" && !request.args.request.savePath) throw new CliCommandError("Collection export requires an explicit savePath.");
-      if (request.args.request.workspaceId !== context.workspaceId || context.readOnly || !context.dataset) throw new CliCommandError("Collections require the owning workspace.");
-      if (request.args.request.action === "approve" || request.args.request.action === "approveMigration") {
+      if (request.args.request.action === "export" && !request.args.request.savePath)
+        throw new CliCommandError("Collection export requires an explicit savePath.");
+      if (
+        request.args.request.workspaceId !== context.workspaceId ||
+        context.readOnly ||
+        !context.dataset
+      )
+        throw new CliCommandError("Collections require the owning workspace.");
+      if (
+        request.args.request.action === "approve" ||
+        request.args.request.action === "approveMigration"
+      ) {
         const invocationAgent = datasetAgent(request.args.actor, context, options);
-        return context.dataset(request.args.request, invocationAgent
-          ? {...invocationAgent,approvalAgent:{kind:"agent",label:request.args.request.agentLabel ?? null,labelSource:"agent-declared"}} : null);
+        return context.dataset(
+          request.args.request,
+          invocationAgent
+            ? {
+                ...invocationAgent,
+                approvalAgent: {
+                  kind: "agent",
+                  label: request.args.request.agentLabel ?? null,
+                  labelSource: "agent-declared",
+                },
+              }
+            : null,
+        );
       }
-      return context.dataset(request.args.request, datasetAgent(request.args.actor, context, options));
+      return context.dataset(
+        request.args.request,
+        datasetAgent(request.args.actor, context, options),
+      );
     }
     case "ownerAppResponses": {
-      if(request.args.request.workspaceId!==context.workspaceId || context.readOnly || !context.ownerAppResponses)throw new CliCommandError("App responses require the owning workspace.");
+      if (
+        request.args.request.workspaceId !== context.workspaceId ||
+        context.readOnly ||
+        !context.ownerAppResponses
+      )
+        throw new CliCommandError("App responses require the owning workspace.");
       return context.ownerAppResponses(request.args.request);
     }
     case "moments": {
@@ -2464,9 +3081,15 @@ async function dispatchWorkspace(
       // A path narrows the list to that file's own history, across renames.
       let objectId: string | undefined;
       if (request.args.path !== undefined) {
-        const path = await workspaceRelativePath(context, request.args.cwd, request.args.path, "file");
+        const path = await workspaceRelativePath(
+          context,
+          request.args.cwd,
+          request.args.path,
+          "file",
+        );
         objectId = (await context.fileObjectIdForPath(path)) ?? undefined;
-        if (!objectId) throw new CliCommandError(`file is not a tracked workspace file: ${request.args.path}`);
+        if (!objectId)
+          throw new CliCommandError(`file is not a tracked workspace file: ${request.args.path}`);
       }
       const moments = await context.listMoments({
         limit: LIST_MOMENTS_HARD_LIMIT,
@@ -2474,14 +3097,13 @@ async function dispatchWorkspace(
       });
       // An empty list would say this workspace has no History.
       if (!Array.isArray(moments)) return historyPolicyUnreadable(moments);
-      const selectedMoments = sinceMs === undefined
-        ? moments
-        : moments.filter((moment) => moment.recordedAtMs > sinceMs);
+      const selectedMoments =
+        sinceMs === undefined ? moments : moments.filter((moment) => moment.recordedAtMs > sinceMs);
       const merged = selectedMoments
         .map((moment) => rawMomentSummary(moment, includeFiles))
-        .sort((left, right) =>
-          right.recordedAtMs - left.recordedAtMs ||
-          left.id.localeCompare(right.id),
+        .sort(
+          (left, right) =>
+            right.recordedAtMs - left.recordedAtMs || left.id.localeCompare(right.id),
         );
       const selected = merged.slice(0, limit);
       return {
@@ -2489,10 +3111,7 @@ async function dispatchWorkspace(
         count: selected.length,
         totalAvailable: merged.length,
         hasMore: merged.length > selected.length,
-        cursorMs: selected.reduce(
-          (max, entry) => Math.max(max, entry.recordedAtMs),
-          sinceMs ?? 0,
-        ),
+        cursorMs: selected.reduce((max, entry) => Math.max(max, entry.recordedAtMs), sinceMs ?? 0),
       };
     }
 
@@ -2535,7 +3154,9 @@ async function dispatchWorkspace(
     case "collectionQuery": {
       const collections = context.collections;
       if (!collections) return collectionsUnavailable();
-      const validated = validateUserReadPath(request.args.collectionPath, { platform: process.platform });
+      const validated = validateUserReadPath(request.args.collectionPath, {
+        platform: process.platform,
+      });
       if (!validated.ok) {
         return cliPathRejected(validated.reason, request.args.collectionPath);
       }
@@ -2558,11 +3179,12 @@ async function dispatchWorkspace(
             ? { resolveRelations: args.resolveRelations }
             : {}),
           ...(args.limit !== undefined ? { limit: args.limit } : {}),
-          ...(args.cursor !== undefined
-            ? { cursor: decodedCollectionCursor(args.cursor) }
-            : {}),
+          ...(args.cursor !== undefined ? { cursor: decodedCollectionCursor(args.cursor) } : {}),
         });
-        const versionError = collectionVersionError(result.collection.reasons, `${validated.normalized}/collection.yaml`);
+        const versionError = collectionVersionError(
+          result.collection.reasons,
+          `${validated.normalized}/collection.yaml`,
+        );
         if (versionError) return { ok: false as const, reason: versionError };
         return {
           ok: true as const,
@@ -2576,22 +3198,19 @@ async function dispatchWorkspace(
                   records: group.records.map(encodedCollectionRecord),
                 })),
           nextCursor:
-            result.nextCursor === null
-              ? null
-              : encodedCollectionCursor(result.nextCursor),
+            result.nextCursor === null ? null : encodedCollectionCursor(result.nextCursor),
         };
       } catch (error) {
-        return mcpFailure(
-          error,
-          `failed to query collection: ${request.args.collectionPath}`,
-        );
+        return mcpFailure(error, `failed to query collection: ${request.args.collectionPath}`);
       }
     }
 
     case "collectionRecord": {
       const collections = context.collections;
       if (!collections) return collectionsUnavailable();
-      const validated = validateUserReadPath(request.args.collectionPath, { platform: process.platform });
+      const validated = validateUserReadPath(request.args.collectionPath, {
+        platform: process.platform,
+      });
       if (!validated.ok) {
         return cliPathRejected(validated.reason, request.args.collectionPath);
       }
@@ -2604,7 +3223,10 @@ async function dispatchWorkspace(
             ? { beforeHistoryId: request.args.beforeHistoryId }
             : {}),
         });
-        const versionError = collectionVersionError(result.collection.reasons, `${validated.normalized}/collection.yaml`);
+        const versionError = collectionVersionError(
+          result.collection.reasons,
+          `${validated.normalized}/collection.yaml`,
+        );
         if (versionError) return { ok: false as const, reason: versionError };
         return {
           ok: true as const,
@@ -2634,23 +3256,27 @@ async function dispatchWorkspace(
         // Unsupported schemas have no record bindings, so getRecord can fail
         // before returning the collection diagnostic.
         try {
-          const result = await collections.query({ collectionPath: validated.normalized, limit: 1 });
-          const versionError = collectionVersionError(result.collection.reasons, `${validated.normalized}/collection.yaml`);
+          const result = await collections.query({
+            collectionPath: validated.normalized,
+            limit: 1,
+          });
+          const versionError = collectionVersionError(
+            result.collection.reasons,
+            `${validated.normalized}/collection.yaml`,
+          );
           if (versionError) return { ok: false as const, reason: versionError };
         } catch {
           // Preserve the original read failure if the schema is unavailable too.
         }
-        return mcpFailure(
-          error,
-          `failed to read record: ${request.args.recordId}`,
-        );
+        return mcpFailure(error, `failed to read record: ${request.args.recordId}`);
       }
     }
 
     case "collectionSetFields": {
       const collections = context.collections;
       if (!collections) return collectionsUnavailable();
-      if (request.args.actor !== "agent") return { ok: false as const, reason: EDIT_AS_AGENT_REFUSAL };
+      if (request.args.actor !== "agent")
+        return { ok: false as const, reason: EDIT_AS_AGENT_REFUSAL };
       // A write-mode check: the seam opens the record's live session, so
       // the path must clear the same floor every other CLI write clears.
       const validated = validateUserWritePath(request.args.recordPath);
@@ -2665,26 +3291,20 @@ async function dispatchWorkspace(
         });
         return { ok: true as const, recordPath: outcome.path };
       } catch (error) {
-        return mcpFailure(
-          error,
-          `failed to set fields on: ${request.args.recordPath}`,
-        );
+        return mcpFailure(error, `failed to set fields on: ${request.args.recordPath}`);
       }
     }
 
     case "collectionCreateRecord": {
       const collections = context.collections;
       if (!collections) return collectionsUnavailable();
-      if (request.args.actor !== "agent") return { ok: false as const, reason: CREATE_AS_AGENT_REFUSAL };
-      const collectionValidated = validateUserReadPath(
-        request.args.collectionPath,
-        { platform: process.platform },
-      );
+      if (request.args.actor !== "agent")
+        return { ok: false as const, reason: CREATE_AS_AGENT_REFUSAL };
+      const collectionValidated = validateUserReadPath(request.args.collectionPath, {
+        platform: process.platform,
+      });
       if (!collectionValidated.ok) {
-        return cliPathRejected(
-          collectionValidated.reason,
-          request.args.collectionPath,
-        );
+        return cliPathRejected(collectionValidated.reason, request.args.collectionPath);
       }
       // The record materializes as a new file, so the joined spelling must
       // pass the stricter materialization rules before the seam sees it.
@@ -2706,7 +3326,8 @@ async function dispatchWorkspace(
           fields: request.args.fields,
           author: collectionWriteAuthor(request.args.actor, context, options),
         });
-        if ("kind" in outcome) return { ok: false as const, reason: creationPartialMessage(outcome), partial: outcome };
+        if ("kind" in outcome)
+          return { ok: false as const, reason: creationPartialMessage(outcome), partial: outcome };
         return {
           ok: true as const,
           recordId: outcome.recordId,
@@ -2714,26 +3335,35 @@ async function dispatchWorkspace(
           ...(outcome.kept ? { kept: outcome.kept } : {}),
         };
       } catch (error) {
-        return mcpFailure(
-          error,
-          `failed to create a record in: ${request.args.collectionPath}`,
-        );
+        return mcpFailure(error, `failed to create a record in: ${request.args.collectionPath}`);
       }
     }
 
     case "automationList":
     case "automationSwitch": {
       const automations = context.automations;
-      if (!automations?.list || !automations.switch) return { ok: false, reason: "Automation controls are unavailable in this workspace." };
-      const validated = validateUserReadPath(request.args.collectionPath, { platform: process.platform });
+      if (!automations?.list || !automations.switch)
+        return { ok: false, reason: "Automation controls are unavailable in this workspace." };
+      const validated = validateUserReadPath(request.args.collectionPath, {
+        platform: process.platform,
+      });
       if (!validated.ok) return cliPathRejected(validated.reason, request.args.collectionPath);
       try {
-        if (request.verb === "automationList") return { ok: true, definitions: await automations.list(validated.normalized) };
+        if (request.verb === "automationList")
+          return { ok: true, definitions: await automations.list(validated.normalized) };
         const { automation, enabled, expectedContentHash, reformat, submitId } = request.args;
-        const result = await automations.switch(validated.normalized, { automation, enabled, expectedContentHash, reformat, submitId });
+        const result = await automations.switch(validated.normalized, {
+          automation,
+          enabled,
+          expectedContentHash,
+          reformat,
+          submitId,
+        });
         if (result.status === "written") await notifyWrite(options, context);
         return { ok: true, result };
-      } catch (error) { return mcpFailure(error, "dohc could not read or switch this automation."); }
+      } catch (error) {
+        return mcpFailure(error, "dohc could not read or switch this automation.");
+      }
     }
 
     case "automationRuns":
@@ -2741,30 +3371,52 @@ async function dispatchWorkspace(
     case "automationRetry": {
       if (context.readOnly) return { ok: false as const, reason: SHARED_VIEW_AUTOMATIONS };
       const automations = context.automations;
-      if (!automations) return { ok: false as const, reason: "automations are not available in this workspace" };
-      const validated = validateUserReadPath(request.args.collectionPath, { platform: process.platform });
+      if (!automations)
+        return { ok: false as const, reason: "automations are not available in this workspace" };
+      const validated = validateUserReadPath(request.args.collectionPath, {
+        platform: process.platform,
+      });
       if (!validated.ok) return cliPathRejected(validated.reason, request.args.collectionPath);
       if (isSharedWithMePath(validated.normalized)) {
         return { ok: false as const, reason: SHARED_AUTOMATION_HISTORY_REASON };
       }
       try {
-        const automationId = await automations.automationIdAt(validated.normalized, request.args.automation);
-        if (automationId === null) return { ok: false as const, reason: `"${validated.normalized}" is not a Collection in this workspace.` };
+        const automationId = await automations.automationIdAt(
+          validated.normalized,
+          request.args.automation,
+        );
+        if (automationId === null)
+          return {
+            ok: false as const,
+            reason: `"${validated.normalized}" is not a Collection in this workspace.`,
+          };
         if (request.verb === "automationRuns") {
-          const page = request.args.server ? await automations.serverRuns(automationId, request.args.page) : await automations.runs(automationId, request.args.page);
+          const page = request.args.server
+            ? await automations.serverRuns(automationId, request.args.page)
+            : await automations.runs(automationId, request.args.page);
           if (page === null) return { ok: false as const, reason: SERVER_RUNS_UNREADABLE };
           const listed: CliResultByVerb["automationRuns"] = {
             ok: true,
-            runs: page.runs.map(({ writes, ...run }) => ({ ...automationRunFields(run), changes: writes.length })),
+            runs: page.runs.map(({ writes, ...run }) => ({
+              ...automationRunFields(run),
+              changes: writes.length,
+            })),
             next: page.next,
           };
           return listed;
         }
         if (request.verb === "automationRun" && request.args.server) {
           const run = await automations.serverRun(automationId, request.args.run);
-          if (run === null) return { ok: false as const, reason: `Your server has no run ${request.args.run} of this automation that this computer can read.` };
+          if (run === null)
+            return {
+              ok: false as const,
+              reason: `Your server has no run ${request.args.run} of this automation that this computer can read.`,
+            };
           const { writes, ...fields } = run;
-          const read: CliResultByVerb["automationRun"] = { ok: true, run: { ...automationRunFields(fields), server: true, changes: writes } };
+          const read: CliResultByVerb["automationRun"] = {
+            ok: true,
+            run: { ...automationRunFields(fields), server: true, changes: writes },
+          };
           return read;
         }
         if (request.verb === "automationRun") {
@@ -2790,68 +3442,147 @@ async function dispatchWorkspace(
           };
           return read;
         }
-        return automationRetryResult(await automations.retry({
-          automationId,
-          claimId: request.args.run,
-          startOver: request.args.startOver,
-        }));
+        return automationRetryResult(
+          await automations.retry({
+            automationId,
+            claimId: request.args.run,
+            startOver: request.args.startOver,
+          }),
+        );
       } catch (error) {
-        return mcpFailure(error, `failed to reach the runs of ${request.args.automation} in ${validated.normalized}`);
+        return mcpFailure(
+          error,
+          `failed to reach the runs of ${request.args.automation} in ${validated.normalized}`,
+        );
       }
     }
 
     case "fileWrite": {
-      if (request.args.actor !== "agent") return { ok: false, written: [], reason: `A file write through the CLI socket is recorded as an agent's; send actor "agent".` };
-      if (!context.writeFiles) return { ok: false, written: [], reason: "dohc could not start the engine for this workspace. Restart dohc to try again." };
+      if (request.args.actor !== "agent")
+        return {
+          ok: false,
+          written: [],
+          reason: `A file write through the CLI socket is recorded as an agent's; send actor "agent".`,
+        };
+      if (!context.writeFiles)
+        return {
+          ok: false,
+          written: [],
+          reason: "dohc could not start the engine for this workspace. Restart dohc to try again.",
+        };
       try {
-        const result = await context.writeFiles(request.args.files, documentEditOrigin(context, options, request.args.agent), request.args.requestId);
+        const result = await context.writeFiles(
+          request.args.files,
+          documentEditOrigin(context, options, request.args.agent),
+          request.args.requestId,
+        );
         if (result.written?.length) await notifyWrite(options, context);
         return result;
-      } catch (error) { return pathFreeFailure(error, "dohc could not write the files."); }
+      } catch (error) {
+        return pathFreeFailure(error, "dohc could not write the files.");
+      }
     }
 
     case "historyOperation":
     case "historyUndo": {
       // Every refused Undo carries a refusal, and main can name none of these.
-      const refused = ({ reason }: { reason: string }) =>
-        ({ ok: false as const, reason, ...(request.verb === "historyUndo" ? { refusal: { code: "unexplained" as const } } : {}) });
-      if (request.verb === "historyUndo" && request.args.actor !== "agent") return refused({ reason: `An Undo through the CLI socket is recorded as an agent's; send actor "agent".` });
-      if (!context.historyOperation || !context.historyUndo) return refused({ reason: "The workspace engine is not running." });
+      const refused = ({ reason }: { reason: string }) => ({
+        ok: false as const,
+        reason,
+        ...(request.verb === "historyUndo" ? { refusal: { code: "unexplained" as const } } : {}),
+      });
+      if (request.verb === "historyUndo" && request.args.actor !== "agent")
+        return refused({
+          reason: `An Undo through the CLI socket is recorded as an agent's; send actor "agent".`,
+        });
+      if (!context.historyOperation || !context.historyUndo)
+        return refused({ reason: "The workspace engine is not running." });
       try {
-        if (request.verb === "historyOperation") return await context.historyOperation(request.args);
-        const result = await context.historyUndo(request.args, documentEditOrigin(context, options, request.args.agent));
+        if (request.verb === "historyOperation")
+          return await context.historyOperation(request.args);
+        const result = await context.historyUndo(
+          request.args,
+          documentEditOrigin(context, options, request.args.agent),
+        );
         if (result.ok) await notifyWrite(options, context);
         return result;
-      } catch (error) { return refused(pathFreeFailure(error, `dohc could not ${request.verb === "historyUndo" ? "undo" : "read"} this operation.`)); }
+      } catch (error) {
+        return refused(
+          pathFreeFailure(
+            error,
+            `dohc could not ${request.verb === "historyUndo" ? "undo" : "read"} this operation.`,
+          ),
+        );
+      }
     }
 
     case "fileDuplicate": {
-      if (context.readOnly) return {ok: false, reason: "Duplicate requires the owning workspace. Open it to continue."};
-      if (request.args.actor !== "agent") return {ok: false, reason: 'Duplicate through the CLI socket requires actor "agent".'};
-      if (!context.duplicateFile) return {ok: false, reason: "Restart dohc before duplicating this file."};
-      return await onceForRequestId(context, options, request.args.requestId, ["fileDuplicate", request.args.path, request.args.agent ?? null], async () => {
-        const result = await context.duplicateFile!(request.args.path, documentEditOrigin(context, options, request.args.agent), request.args.requestId)
-          .catch(error => pathFreeFailure(error, "dohc could not duplicate the file."));
-        if (result.ok) await notifyWrite(options, context);
-        return { done: result.ok, result };
-      }, completion);
+      if (context.readOnly)
+        return {
+          ok: false,
+          reason: "Duplicate requires the owning workspace. Open it to continue.",
+        };
+      if (request.args.actor !== "agent")
+        return { ok: false, reason: 'Duplicate through the CLI socket requires actor "agent".' };
+      if (!context.duplicateFile)
+        return { ok: false, reason: "Restart dohc before duplicating this file." };
+      return await onceForRequestId(
+        context,
+        options,
+        request.args.requestId,
+        ["fileDuplicate", request.args.path, request.args.agent ?? null],
+        async () => {
+          const result = await context.duplicateFile!(
+            request.args.path,
+            documentEditOrigin(context, options, request.args.agent),
+            request.args.requestId,
+          ).catch((error) => pathFreeFailure(error, "dohc could not duplicate the file."));
+          if (result.ok) await notifyWrite(options, context);
+          return { done: result.ok, result };
+        },
+        completion,
+      );
     }
     case "fileMove":
     case "fileDelete": {
       const change = request.verb === "fileMove" ? "move" : "delete";
-      if (request.args.actor !== "agent") return { ok: false, reason: `A file ${change} through the CLI socket is recorded as an agent's; send actor "agent".` };
-      if (!context.movePath || !context.deletePath) return { ok: false, reason: "dohc could not start the engine for this workspace. Restart dohc to try again." };
+      if (request.args.actor !== "agent")
+        return {
+          ok: false,
+          reason: `A file ${change} through the CLI socket is recorded as an agent's; send actor "agent".`,
+        };
+      if (!context.movePath || !context.deletePath)
+        return {
+          ok: false,
+          reason: "dohc could not start the engine for this workspace. Restart dohc to try again.",
+        };
       try {
         const origin = documentEditOrigin(context, options, request.args.agent);
         if (request.verb === "fileMove") {
-          const result = await context.movePath({ fromPath: request.args.fromPath, toPath: request.args.toPath,
-            ...(request.args.overwrite !== undefined ? { overwrite: request.args.overwrite } : {}),
-            ...(request.args.confirmNotVersioned ? { confirmNotVersioned: true } : {}) }, origin, request.args.requestId);
-          if (result.ok || result.deleted?.length || result.withoutHistory?.length) await notifyWrite(options, context);
+          const result = await context.movePath(
+            {
+              fromPath: request.args.fromPath,
+              toPath: request.args.toPath,
+              ...(request.args.overwrite !== undefined
+                ? { overwrite: request.args.overwrite }
+                : {}),
+              ...(request.args.confirmNotVersioned ? { confirmNotVersioned: true } : {}),
+            },
+            origin,
+            request.args.requestId,
+          );
+          if (result.ok || result.deleted?.length || result.withoutHistory?.length)
+            await notifyWrite(options, context);
           return result;
         }
-        const result = await context.deletePath(request.args.path, origin, request.args.requestId, request.args.confirmNotVersioned);
-        if (result.ok || result.deleted?.length || result.withoutHistory?.length) await notifyWrite(options, context);
+        const result = await context.deletePath(
+          request.args.path,
+          origin,
+          request.args.requestId,
+          request.args.confirmNotVersioned,
+        );
+        if (result.ok || result.deleted?.length || result.withoutHistory?.length)
+          await notifyWrite(options, context);
         return result;
       } catch (error) {
         return pathFreeFailure(error, `dohc could not ${change} the file.`);
@@ -2860,40 +3591,74 @@ async function dispatchWorkspace(
 
     // Shared views inspect and press Buttons through the owner's host.
     case "automationButtons": {
-      if (!context.buttons) return { ok: false as const, reason: "buttons are not available in this workspace" };
-      const validated = validateUserReadPath(request.args.collectionPath, { platform: process.platform });
+      if (!context.buttons)
+        return { ok: false as const, reason: "buttons are not available in this workspace" };
+      const validated = validateUserReadPath(request.args.collectionPath, {
+        platform: process.platform,
+      });
       if (!validated.ok) return cliPathRejected(validated.reason, request.args.collectionPath);
       try {
-        const buttons = await context.buttons.inspect({ collectionPath: validated.normalized, ...(request.args.table === undefined ? {} : { table: request.args.table }) }, pressActor(request.args.actor, context, options));
+        const buttons = await context.buttons.inspect(
+          {
+            collectionPath: validated.normalized,
+            ...(request.args.table === undefined ? {} : { table: request.args.table }),
+          },
+          pressActor(request.args.actor, context, options),
+        );
         return { ok: true as const, buttons };
-      } catch (error) { return mcpFailure(error, "failed to inspect buttons"); }
+      } catch (error) {
+        return mcpFailure(error, "failed to inspect buttons");
+      }
     }
     case "automationPress": {
       const buttons = context.buttons;
-      if (!buttons) return { ok: false as const, reason: "buttons are not available in this workspace" };
-      const validated = validateUserReadPath(request.args.collectionPath, { platform: process.platform });
+      if (!buttons)
+        return { ok: false as const, reason: "buttons are not available in this workspace" };
+      const validated = validateUserReadPath(request.args.collectionPath, {
+        platform: process.platform,
+      });
       if (!validated.ok) return cliPathRejected(validated.reason, request.args.collectionPath);
       if (isSharedWithMePath(validated.normalized)) {
-        return { ok: false as const, reason: `"${validated.normalized}" is not a Collection in this workspace.` };
+        return {
+          ok: false as const,
+          reason: `"${validated.normalized}" is not a Collection in this workspace.`,
+        };
       }
       const { field, record, table, confirm, requestId } = request.args;
       const collectionPath = validated.normalized;
       const pressWith = async (pressKey: string) => {
         try {
-          return automationPressResult(await buttons.press({
-            collectionPath, field, recordId: record, ...(table === undefined ? {} : { table }), confirm, pressKey,
-          }, pressActor(request.args.actor, context, options)));
+          return automationPressResult(
+            await buttons.press(
+              {
+                collectionPath,
+                field,
+                recordId: record,
+                ...(table === undefined ? {} : { table }),
+                confirm,
+                pressKey,
+              },
+              pressActor(request.args.actor, context, options),
+            ),
+          );
         } catch (error) {
           return mcpFailure(error, `failed to press ${field}`);
         }
       };
       if (requestId === undefined) return await pressWith(randomUUID());
       // Only a press is remembered, so a press refused for its questions can be sent again with confirm.
-      return await onceForRequestId(context, options, requestId, [collectionPath, field, record, table ?? null, confirm], async () => {
-        // The request id is the press's key, so a resend after a restart names the same press.
-        const result = await pressWith(requestId);
-        return { done: result.ok, result };
-      }, completion);
+      return await onceForRequestId(
+        context,
+        options,
+        requestId,
+        [collectionPath, field, record, table ?? null, confirm],
+        async () => {
+          // The request id is the press's key, so a resend after a restart names the same press.
+          const result = await pressWith(requestId);
+          return { done: result.ok, result };
+        },
+        completion,
+      );
     }
 
     case "documentRead":
@@ -2905,7 +3670,8 @@ async function dispatchWorkspace(
 
     case "documentHeld":
       // A share mount's notes are held in their original workspace, not this one.
-      if (!context.heldChange || context.readOnly || isSharedWithMePath(request.args.path)) return heldChangesUnavailable();
+      if (!context.heldChange || context.readOnly || isSharedWithMePath(request.args.path))
+        return heldChangesUnavailable();
       try {
         return { ok: true as const, change: await context.heldChange(request.args.path) };
       } catch (error) {
@@ -2924,22 +3690,33 @@ async function dispatchWorkspace(
       // A version as version list names it: by its name, then by its ID.
       const named = async (name: string) => {
         const { versions: all, activeVersionId } = await versions.list();
-        const version = all.find(candidate => candidate.name === name) ?? all.find(candidate => candidate.id === name);
+        const version =
+          all.find((candidate) => candidate.name === name) ??
+          all.find((candidate) => candidate.id === name);
         return { version, activeVersionId };
       };
-      const unknown = (name: string) => ({ ok: false as const, reason: `No version is called ${name}. Run dohc version list to see them.` });
+      const unknown = (name: string) => ({
+        ok: false as const,
+        reason: `No version is called ${name}. Run dohc version list to see them.`,
+      });
       try {
         switch (request.verb) {
           case "versionList":
             return { ok: true as const, ...(await versions.list()) };
           case "versionConflicts": {
             const page = await versions.conflicts(request.args.afterConflictId);
-            return "status" in page ? historyPolicyUnreadable(page, "Conflicts are hidden") : { ok: true as const, ...page };
+            return "status" in page
+              ? historyPolicyUnreadable(page, "Conflicts are hidden")
+              : { ok: true as const, ...page };
           }
           case "versionCompare": {
             const { version } = await named(request.args.version);
             if (!version) return unknown(request.args.version);
-            if (version.kind === "main") return { ok: false as const, reason: "Versions compare with Main. Name another version." };
+            if (version.kind === "main")
+              return {
+                ok: false as const,
+                reason: "Versions compare with Main. Name another version.",
+              };
             const page = await versions.compare(version.id, request.args.afterPath);
             if ("status" in page) return historyPolicyUnreadable(page, "Version files are hidden");
             return { ok: true as const, version: { id: version.id, name: version.name }, ...page };
@@ -2951,26 +3728,55 @@ async function dispatchWorkspace(
             } catch (error) {
               // The menu's name field says the same.
               const refusal = versionNameRefusal(error);
-              if (refusal === "taken") return { ok: false as const, reason: `Another version is called ${name}. Choose another name.` };
-              if (refusal === "invalid") return { ok: false as const, reason: "dohc can't use that name. Choose another name." };
+              if (refusal === "taken")
+                return {
+                  ok: false as const,
+                  reason: `Another version is called ${name}. Choose another name.`,
+                };
+              if (refusal === "invalid")
+                return {
+                  ok: false as const,
+                  reason: "dohc can't use that name. Choose another name.",
+                };
               return pathFreeFailure(error, `dohc could not create the version ${name}.`);
             }
           }
           case "versionSwitch": {
             const { version, activeVersionId } = await named(request.args.version);
             if (!version) return unknown(request.args.version);
-            const changed = version.id === activeVersionId ? { changedFileCount: 0 } : await versions.switch(version.id);
-            return { ok: true as const, version: { id: version.id, name: version.name }, changedFileCount: changed.changedFileCount };
+            const changed =
+              version.id === activeVersionId
+                ? { changedFileCount: 0 }
+                : await versions.switch(version.id);
+            return {
+              ok: true as const,
+              version: { id: version.id, name: version.name },
+              changedFileCount: changed.changedFileCount,
+            };
           }
           case "versionMerge": {
             const { version } = await named(request.args.version);
             if (!version) return unknown(request.args.version);
-            if (version.kind === "main") return { ok: false as const, reason: "Versions merge into Main. Name another version." };
-            if (!version.canMergeIntoMain) return { ok: false as const, reason: "Only versions made from Main can merge into Main." };
+            if (version.kind === "main")
+              return {
+                ok: false as const,
+                reason: "Versions merge into Main. Name another version.",
+              };
+            if (!version.canMergeIntoMain)
+              return {
+                ok: false as const,
+                reason: "Only versions made from Main can merge into Main.",
+              };
             const merged = await versions.merge(version.id);
             const page = await versions.conflicts();
-            if ("status" in page) return historyPolicyUnreadable(page, "The merge ran, and its conflicts are hidden");
-            return { ok: true as const, version: { id: version.id, name: version.name }, ...merged, ...page };
+            if ("status" in page)
+              return historyPolicyUnreadable(page, "The merge ran, and its conflicts are hidden");
+            return {
+              ok: true as const,
+              version: { id: version.id, name: version.name },
+              ...merged,
+              ...page,
+            };
           }
           case "versionResolve": {
             const { conflictId, resolution } = request.args;
@@ -2981,21 +3787,37 @@ async function dispatchWorkspace(
             do {
               const page = await versions.conflicts(after);
               if ("status" in page) return historyPolicyUnreadable(page, "Conflicts are hidden");
-              conflict = page.conflicts.find(candidate => candidate.conflictId === conflictId);
+              conflict = page.conflicts.find((candidate) => candidate.conflictId === conflictId);
               after = page.nextAfterConflictId ?? undefined;
             } while (!conflict && after !== undefined);
-            if (!conflict) return { ok: false as const, reason: `No open conflict has the ID ${conflictId}. Run dohc version conflicts to see them.` };
+            if (!conflict)
+              return {
+                ok: false as const,
+                reason: `No open conflict has the ID ${conflictId}. Run dohc version conflicts to see them.`,
+              };
             if (resolution.keep === "combined" && conflict.contentKind === "binary") {
-              return { ok: false as const, reason: "This conflict is between binary files, so it takes no combined text. Keep current or incoming." };
+              return {
+                ok: false as const,
+                reason:
+                  "This conflict is between binary files, so it takes no combined text. Keep current or incoming.",
+              };
             }
             await versions.resolve(conflictId, resolution);
             const remaining = await versions.conflicts();
-            return "status" in remaining ? historyPolicyUnreadable(remaining, "Conflicts are hidden") : { ok: true as const, ...remaining };
+            return "status" in remaining
+              ? historyPolicyUnreadable(remaining, "Conflicts are hidden")
+              : { ok: true as const, ...remaining };
           }
         }
       } catch (error) {
-        return pathFreeFailure(error, request.verb === "versionList" || request.verb === "versionCompare" || request.verb === "versionConflicts"
-          ? "dohc could not read the workspace's versions." : "dohc could not change the workspace's versions.");
+        return pathFreeFailure(
+          error,
+          request.verb === "versionList" ||
+            request.verb === "versionCompare" ||
+            request.verb === "versionConflicts"
+            ? "dohc could not read the workspace's versions."
+            : "dohc could not change the workspace's versions.",
+        );
       }
     }
 
@@ -3010,14 +3832,16 @@ async function dispatchWorkspace(
     }
 
     case "sharedFilesHeld": {
-      if (!context.sharedFilesHeld) return { ok: false as const, reason: "dohc cannot read this workspace's shared files" };
+      if (!context.sharedFilesHeld)
+        return { ok: false as const, reason: "dohc cannot read this workspace's shared files" };
       try {
         const held = await context.sharedFilesHeld();
         return {
           ok: true as const,
-          heldFiles: held && held.count > 0
-            ? { ...held, message: unjournalablePathMessages(held.files).join(" ") }
-            : null,
+          heldFiles:
+            held && held.count > 0
+              ? { ...held, message: unjournalablePathMessages(held.files).join(" ") }
+              : null,
         };
       } catch (error) {
         return mcpFailure(error, "failed to read the shared files held back");
@@ -3030,7 +3854,10 @@ async function dispatchWorkspace(
       if (!context.syncFailure || context.readOnly) return syncStatusInOwner.answer;
       try {
         const failure = context.syncFailure();
-        return { ok: true as const, syncFailure: failure && { ...syncFailureWords(failure), detail: failure.detail } };
+        return {
+          ok: true as const,
+          syncFailure: failure && { ...syncFailureWords(failure), detail: failure.detail },
+        };
       } catch (error) {
         return mcpFailure(error, "failed to read why sync stopped");
       }
@@ -3103,7 +3930,10 @@ async function dispatchWorkspace(
       const keptEdits = context.keptEdits;
       if (!keptEdits || context.readOnly) return keptEditsUnavailable();
       try {
-        const [kept, pendingShare] = await Promise.all([keptEdits.list(), keptEdits.pendingShare()]);
+        const [kept, pendingShare] = await Promise.all([
+          keptEdits.list(),
+          keptEdits.pendingShare(),
+        ]);
         return { ok: true as const, keptEdits: kept, pendingShare: [...pendingShare] };
       } catch (error) {
         return mcpFailure(error, "failed to list kept edits");
@@ -3116,9 +3946,19 @@ async function dispatchWorkspace(
       try {
         const saved = await keptEdits.saveRecoveryCopy(request.args.path, request.args.incident);
         await notifyWrite(options, context);
-        return { ok: true as const, copyPath: saved.copyPath, packagePath: saved.packagePath, folder: posix.dirname(saved.packagePath), storedOn: saved.storedOn, keptEdits: saved.keptEdits };
+        return {
+          ok: true as const,
+          copyPath: saved.copyPath,
+          packagePath: saved.packagePath,
+          folder: posix.dirname(saved.packagePath),
+          storedOn: saved.storedOn,
+          keptEdits: saved.keptEdits,
+        };
       } catch (error) {
-        return pathFreeFailure(error, `dohc could not save a recovery copy of ${request.args.path}.`);
+        return pathFreeFailure(
+          error,
+          `dohc could not save a recovery copy of ${request.args.path}.`,
+        );
       }
     }
 
@@ -3147,27 +3987,43 @@ async function dispatchWorkspace(
 
     case "heldNoteChange": {
       if (!context.heldNoteChange || context.readOnly || request.args.actor !== "agent") {
-        return {ok: false as const, reason: "Only a local agent in the owner's workspace can drop or restore a held change."};
+        return {
+          ok: false as const,
+          reason: "Only a local agent in the owner's workspace can drop or restore a held change.",
+        };
       }
       const path = validateUserWritePath(request.args.path);
       if (!path.ok) return cliPathRejected(path.reason, request.args.path);
       try {
-        const input = request.args.action === "review" ? {path: path.normalized, action: "review" as const}
-          : {path: path.normalized, action: request.args.action, token: request.args.token, author: {
-            kind: "agent" as const, agentId: editingAgentId(context), onBehalfOf: options.localPersonId(),
-            ...agentWriteRun(context, options),
-            ...(options.agentRunDepth(context.workspaceId) > 0 ? {depth: options.agentRunDepth(context.workspaceId)} : {}),
-          }};
+        const input =
+          request.args.action === "review"
+            ? { path: path.normalized, action: "review" as const }
+            : {
+                path: path.normalized,
+                action: request.args.action,
+                token: request.args.token,
+                author: {
+                  kind: "agent" as const,
+                  agentId: editingAgentId(context),
+                  onBehalfOf: options.localPersonId(),
+                  ...agentWriteRun(context, options),
+                  ...(options.agentRunDepth(context.workspaceId) > 0
+                    ? { depth: options.agentRunDepth(context.workspaceId) }
+                    : {}),
+                },
+              };
         const result = await context.heldNoteChange(input);
         if (input.action !== "review") await notifyWrite(options, context);
-        return {ok: true as const, ...result};
-      } catch (error) { return mcpFailure(error, "dohc could not change the held note."); }
+        return { ok: true as const, ...result };
+      } catch (error) {
+        return mcpFailure(error, "dohc could not change the held note.");
+      }
     }
     case "liveDocuments": {
       const live = context.liveDocuments;
       if (!live || context.readOnly) return liveDocumentsUnavailable();
       try {
-        return { ok: true as const, ...await live.list(request.args.cursor) };
+        return { ok: true as const, ...(await live.list(request.args.cursor)) };
       } catch (error) {
         return mcpFailure(error, "failed to list live documents");
       }
@@ -3177,9 +4033,18 @@ async function dispatchWorkspace(
       const live = context.liveDocuments;
       if (!live || context.readOnly) return liveDocumentsUnavailable();
       try {
-        const stopped = await live.stop(request.args.path, liveChangeAuthor(context, options), request.args.objectId);
+        const stopped = await live.stop(
+          request.args.path,
+          liveChangeAuthor(context, options),
+          request.args.objectId,
+        );
         await notifyWrite(options, context);
-        return { ok: true as const, path: request.args.path, keptEdits: stopped.keptEdits, ...(stopped.already ? { already: true as const } : {}) };
+        return {
+          ok: true as const,
+          path: request.args.path,
+          keptEdits: stopped.keptEdits,
+          ...(stopped.already ? { already: true as const } : {}),
+        };
       } catch (error) {
         return mcpFailure(error, `failed to stop live editing for ${request.args.path}`);
       }
@@ -3191,7 +4056,11 @@ async function dispatchWorkspace(
       try {
         const resumed = await live.resume(request.args.path, liveChangeAuthor(context, options));
         await notifyWrite(options, context);
-        return { ok: true as const, path: request.args.path, ...(resumed.already ? { already: true as const } : {}) };
+        return {
+          ok: true as const,
+          path: request.args.path,
+          ...(resumed.already ? { already: true as const } : {}),
+        };
       } catch (error) {
         return mcpFailure(error, `failed to resume live editing for ${request.args.path}`);
       }
@@ -3209,7 +4078,9 @@ async function dispatchWorkspace(
       const edit = async (): Promise<{ done: boolean; result: unknown }> => {
         try {
           const outcome = await documents.edit({
-            ...(request.args.allowLossySourceSha256 ? { allowLossySourceSha256: request.args.allowLossySourceSha256 } : {}),
+            ...(request.args.allowLossySourceSha256
+              ? { allowLossySourceSha256: request.args.allowLossySourceSha256 }
+              : {}),
             path,
             edit: { find, replacement },
             origin: documentEditOrigin(context, options, request.args.agent),
@@ -3226,7 +4097,20 @@ async function dispatchWorkspace(
       };
       const requestId = request.args.requestId;
       if (requestId === undefined) return (await edit()).result;
-       return await onceForRequestId(context, options, requestId, [path, find ?? null, replacement, agent ?? null, request.args.allowLossySourceSha256 ?? null], edit, completion);
+      return await onceForRequestId(
+        context,
+        options,
+        requestId,
+        [
+          path,
+          find ?? null,
+          replacement,
+          agent ?? null,
+          request.args.allowLossySourceSha256 ?? null,
+        ],
+        edit,
+        completion,
+      );
     }
 
     case "documentCreate": {
@@ -3239,7 +4123,10 @@ async function dispatchWorkspace(
       const validated = validateUserMaterializePath(path, { platform: process.platform });
       if (!validated.ok) return cliPathRejected(validated.reason, request.args.path);
       if (liveDocumentKindForPath(validated.normalized) !== "richdoc") {
-        return { ok: false as const, reason: `a document path ends in .md or .markdown: ${request.args.path}` };
+        return {
+          ok: false as const,
+          reason: `a document path ends in .md or .markdown: ${request.args.path}`,
+        };
       }
       try {
         return {
@@ -3261,7 +4148,7 @@ async function dispatchWorkspace(
       if (request.args.actor !== "agent") {
         return {
           ok: false as const,
-          reason: "a comment through the CLI socket is recorded as an agent's; send actor \"agent\"",
+          reason: 'a comment through the CLI socket is recorded as an agent\'s; send actor "agent"',
         };
       }
       const validated = validateUserReadPath(request.args.path, { platform: process.platform });
@@ -3280,7 +4167,14 @@ async function dispatchWorkspace(
         context,
         options,
         requestId,
-        [input.path, input.title, input.body, input.runId ?? null, input.agent ?? null, input.reported ?? null],
+        [
+          input.path,
+          input.title,
+          input.body,
+          input.runId ?? null,
+          input.agent ?? null,
+          input.reported ?? null,
+        ],
         async () => {
           const started = await startFileChat(context, input, options);
           return { done: started.created, result: started.result };
@@ -3295,7 +4189,10 @@ async function dispatchWorkspace(
     case "threads":
       return listGroupThreads(chats, {
         group: request.args.group,
-        reader: request.args.actor === "agent" ? chatAgentReader(context, context.run?.runId ?? null) : null,
+        reader:
+          request.args.actor === "agent"
+            ? chatAgentReader(context, context.run?.runId ?? null)
+            : null,
       });
 
     case "show": {
@@ -3322,20 +4219,34 @@ async function dispatchWorkspace(
     // checks a reply makes, then the same two-attempt limit the chat's button
     // keeps.
     case "chatRetry": {
-      if (!options.chatRuns) return { ok: false as const, reason: "Agent runs are not available here." };
+      if (!options.chatRuns)
+        return { ok: false as const, reason: "Agent runs are not available here." };
       const { threadId } = await readReplyThread(context, chats, request.args.thread);
       await options.chatWrites.assertMayPost(context, threadId);
-      const { failedRun } = await options.chatRuns.dispatchStateForThread(context.workspaceId, threadId);
-      if (!failedRun) return { ok: false as const, reason: "No agent request in this conversation has stopped." };
+      const { failedRun } = await options.chatRuns.dispatchStateForThread(
+        context.workspaceId,
+        threadId,
+      );
+      if (!failedRun)
+        return { ok: false as const, reason: "No agent request in this conversation has stopped." };
       if (!failedRun.retryable) {
-        const nextStep = failedRun.nextStep ? ` ${nextStepWords(failedRun.nextStep, undefined)}` : "";
+        const nextStep = failedRun.nextStep
+          ? ` ${nextStepWords(failedRun.nextStep, undefined)}`
+          : "";
         return { ok: false as const, reason: `${failedRun.words} It can't run again.${nextStep}` };
       }
       try {
-        if (!await options.chatRuns.retryStoppedRun(context.workspaceId, threadId, failedRun.runId)) {
-          return { ok: false as const, reason: "This request can't run again now. Check dohc chat show for its state." };
+        if (
+          !(await options.chatRuns.retryStoppedRun(context.workspaceId, threadId, failedRun.runId))
+        ) {
+          return {
+            ok: false as const,
+            reason: "This request can't run again now. Check dohc chat show for its state.",
+          };
         }
-      } catch (error) { return mcpFailure(error, "dohc could not run this request again."); }
+      } catch (error) {
+        return mcpFailure(error, "dohc could not run this request again.");
+      }
       await notifyWrite(options, context);
       return { ok: true as const, status: "queued" as const, threadId: cliThreadId(threadId) };
     }
@@ -3348,7 +4259,8 @@ async function dispatchWorkspace(
 
   switch (request.verb) {
     case "groupCreate": {
-      if (!context.createGroup) throw new CliCommandError("Groups cannot be created in this workspace.");
+      if (!context.createGroup)
+        throw new CliCommandError("Groups cannot be created in this workspace.");
       const channel = await context.createGroup({
         name: request.args.name,
         ...(request.args.purpose !== undefined ? { purpose: request.args.purpose } : {}),
@@ -3380,46 +4292,52 @@ async function dispatchWorkspace(
             })),
         );
         const unreadFileIds = await humanUnreadFileThreadIds(context);
-        const fileThreads = (await loadThreads(chats, channels)).filter((thread) =>
-          thread.thread.linkedFile && unreadFileIds.has(thread.thread.id));
+        const fileThreads = (await loadThreads(chats, channels)).filter(
+          (thread) => thread.thread.linkedFile && unreadFileIds.has(thread.thread.id),
+        );
         const messagesByThread = await loadMessagesByThread(chats, fileThreads);
-        const unreadFileThreads = await Promise.all(fileThreads.map(async (thread) => ({
-          id: cliThreadId(thread.thread.id),
-          title: thread.thread.title,
-          ...await threadCounts(
-            chats,
-            thread,
-            messagesByThread.get(thread.thread.id) ?? [],
-          ),
-          unread: true,
-          updatedAtMs: thread.thread.updatedAtMs,
-          group: thread.group,
-        })));
+        const unreadFileThreads = await Promise.all(
+          fileThreads.map(async (thread) => ({
+            id: cliThreadId(thread.thread.id),
+            title: thread.thread.title,
+            ...(await threadCounts(chats, thread, messagesByThread.get(thread.thread.id) ?? [])),
+            unread: true,
+            updatedAtMs: thread.thread.updatedAtMs,
+            group: thread.group,
+          })),
+        );
         const threads = [...channelThreads, ...unreadFileThreads];
-        threads.sort((left, right) =>
-          right.updatedAtMs - left.updatedAtMs || right.id.localeCompare(left.id));
+        threads.sort(
+          (left, right) => right.updatedAtMs - left.updatedAtMs || right.id.localeCompare(left.id),
+        );
         return { threads, mentions: [] };
       }
 
       const loadedThreads = await loadThreads(chats, channels);
-      const loadedById = new Map(
-        loadedThreads.map((thread) => [thread.thread.id, thread]),
-      );
+      const loadedById = new Map(loadedThreads.map((thread) => [thread.thread.id, thread]));
       // An agent you run, and the agent of a run dohc dispatched, each read
       // their own unread work: their chat, and each message elsewhere that
       // asked them. Connected agents share plain @agent mentions and replies
       // in threads they posted in. Agent chats belong to their agents.
       const reader = chatAgentReader(context, context.run?.runId ?? null);
-      const readerAgentId = reader.kind === "connected"
-        ? reader.agentId
-        : reader.kind === "run" ? context.run?.agentId ?? null : null;
+      const readerAgentId =
+        reader.kind === "connected"
+          ? reader.agentId
+          : reader.kind === "run"
+            ? (context.run?.agentId ?? null)
+            : null;
       const mentionRows = await context.store.listAgentUnreadRequests(context.workspaceId, reader);
-      const unread = reader.kind === "unnamed"
-        ? [...new Set(mentionRows.map(row => row.threadId))].map(id => ({ id }))
-        : await context.store.listAgentUnreadThreads(context.workspaceId, reader);
+      const unread =
+        reader.kind === "unnamed"
+          ? [...new Set(mentionRows.map((row) => row.threadId))].map((id) => ({ id }))
+          : await context.store.listAgentUnreadThreads(context.workspaceId, reader);
       const agentChannelIds = new Set(
         channels
-          .filter(({ engine }) => engine.kind === "agent" && (readerAgentId === null || engine.agentId === readerAgentId))
+          .filter(
+            ({ engine }) =>
+              engine.kind === "agent" &&
+              (readerAgentId === null || engine.agentId === readerAgentId),
+          )
           .map(({ engine }) => engine.id),
       );
       const inboxThreads = await Promise.all(
@@ -3479,13 +4397,13 @@ async function dispatchWorkspace(
     case "post": {
       const channel = resolveChannel(request.args.group, channels);
       if (channel.engine.kind === "dm") {
-        throw new CliCommandError(
-          "DMs are streams — use 'dohc chat reply <thread>'",
-        );
+        throw new CliCommandError("DMs are streams — use 'dohc chat reply <thread>'");
       }
       // An agent DM is one conversation; the engine puts the message there.
       if (channel.engine.kind === "agent" && request.args.title) {
-        throw new CliCommandError("An agent DM is one conversation, so its messages have no title. Drop --title.");
+        throw new CliCommandError(
+          "An agent DM is one conversation, so its messages have no title. Drop --title.",
+        );
       }
       const actor = writeActor(request.args.actor, context, options);
       refusePersonWork(actor, request.args.work);
@@ -3503,12 +4421,19 @@ async function dispatchWorkspace(
         ...(request.args.options ? { options: request.args.options } : {}),
       };
       // A chat-only group shows only its chat lane, so a post there joins it.
-      const started = channel.engine.type === "chat" ? await sendToStream(host, message) : await postToGroup(host, message);
-      const linkWarning = await linkRunMessage(context, {
-        actor,
-        ...(request.args.runId ? { runId: request.args.runId } : {}),
-        messageId: started.message.id,
-      }, options);
+      const started =
+        channel.engine.type === "chat"
+          ? await sendToStream(host, message)
+          : await postToGroup(host, message);
+      const linkWarning = await linkRunMessage(
+        context,
+        {
+          actor,
+          ...(request.args.runId ? { runId: request.args.runId } : {}),
+          messageId: started.message.id,
+        },
+        options,
+      );
       await notifyWrite(options, context);
       return {
         group: channel.cli,
@@ -3522,8 +4447,9 @@ async function dispatchWorkspace(
     case "nothingToReport": {
       const { threadId } = await readReplyThread(context, chats, request.args.thread);
       // Only a run dohc started, proven by its secret, says this of itself.
-      const runId = context.connected ? null : request.args.runId ?? context.run?.runId ?? null;
-      if (!options.chatRuns || runId === null) throw new CliCommandError(QUIET_RUN_REFUSALS["not-running"]);
+      const runId = context.connected ? null : (request.args.runId ?? context.run?.runId ?? null);
+      if (!options.chatRuns || runId === null)
+        throw new CliCommandError(QUIET_RUN_REFUSALS["not-running"]);
       const refusal = options.chatRuns.endRunQuietly(context.workspaceId, runId, threadId);
       if (refusal) throw new CliCommandError(QUIET_RUN_REFUSALS[refusal]);
       return { threadId: cliThreadId(threadId), nothingToReport: true as const };
@@ -3535,20 +4461,21 @@ async function dispatchWorkspace(
       const parent = request.args.to
         ? resolveMessageInThread(request.args.to, messages)
         : actor === "agent"
-          // An agent you run answers no run.
-          ? await askingThreadParent(context, threadId, messages, context.connected ? null : request.args.runId ?? context.run?.runId ?? null, options.onError)
+          ? // An agent you run answers no run.
+            await askingThreadParent(
+              context,
+              threadId,
+              messages,
+              context.connected ? null : (request.args.runId ?? context.run?.runId ?? null),
+              options.onError,
+            )
           : undefined;
       let decisionMessage: ChatMessage | undefined;
       let question: ChatDecision | undefined;
       if (request.args.resolve) {
         decisionMessage = resolveMessageInThread(request.args.resolve, messages);
-        const decisions = await context.store.listThreadDecisions(
-          context.workspaceId,
-          threadId,
-        );
-        const decision = decisions.find(
-          (candidate) => candidate.messageId === decisionMessage?.id,
-        );
+        const decisions = await context.store.listThreadDecisions(context.workspaceId, threadId);
+        const decision = decisions.find((candidate) => candidate.messageId === decisionMessage?.id);
         if (!decision || decision.state !== "open") {
           throw new CliCommandError(
             `message is not an open decision: ${cliMessageId(decisionMessage.id)}`,
@@ -3582,11 +4509,15 @@ async function dispatchWorkspace(
           })
         : undefined;
       const message = answered ? answered.message : await replyInThread(host, reply);
-      const linkWarning = await linkRunMessage(context, {
-        actor,
-        ...(request.args.runId ? { runId: request.args.runId } : {}),
-        messageId: message.id,
-      }, options);
+      const linkWarning = await linkRunMessage(
+        context,
+        {
+          actor,
+          ...(request.args.runId ? { runId: request.args.runId } : {}),
+          messageId: message.id,
+        },
+        options,
+      );
       const resolvedByReply = answered?.state === "resolved";
       let resolutionFailure: string | null = null;
       if (answered?.state === "failed") {
@@ -3608,12 +4539,13 @@ async function dispatchWorkspace(
         }
       }
       await notifyWrite(options, context);
-      const resolutionWarning = decisionMessage && !resolvedByReply
-        ? `reply ${cliMessageId(message.id)} was posted, but decision ${cliMessageId(decisionMessage.id)} ` +
-          (resolutionFailure
-            ? `could not be resolved: ${resolutionFailure}`
-            : "was already resolved by another message")
-        : undefined;
+      const resolutionWarning =
+        decisionMessage && !resolvedByReply
+          ? `reply ${cliMessageId(message.id)} was posted, but decision ${cliMessageId(decisionMessage.id)} ` +
+            (resolutionFailure
+              ? `could not be resolved: ${resolutionFailure}`
+              : "was already resolved by another message")
+          : undefined;
       const warning = [linkWarning, resolutionWarning].filter(Boolean).join(" ");
       return {
         threadId: cliThreadId(threadId),
@@ -3629,11 +4561,7 @@ async function dispatchWorkspace(
     case "react": {
       const threads = await loadThreads(chats, channels);
       const messagesByThread = await loadMessagesByThread(chats, threads);
-      const target = resolveThreadOrMessage(
-        request.args.message,
-        threads,
-        messagesByThread,
-      );
+      const target = resolveThreadOrMessage(request.args.message, threads, messagesByThread);
       if (!target.rootMessage) {
         throw new CliCommandError(`no such message: ${request.args.message}`);
       }
@@ -3660,12 +4588,11 @@ async function dispatchWorkspace(
       const scopedChannel = request.args.group
         ? resolveChannel(request.args.group, channels).cli
         : null;
-      const scopedThread = request.args.thread
-        ? resolveThread(request.args.thread, threads)
-        : null;
-      const selected = threads.filter((thread) =>
-        (!scopedChannel || thread.group.id === scopedChannel.id) &&
-        (!scopedThread || thread.thread.id === scopedThread.thread.id),
+      const scopedThread = request.args.thread ? resolveThread(request.args.thread, threads) : null;
+      const selected = threads.filter(
+        (thread) =>
+          (!scopedChannel || thread.group.id === scopedChannel.id) &&
+          (!scopedThread || thread.thread.id === scopedThread.thread.id),
       );
       // Substring grep asks FTS for candidate thread/message ids before any
       // bodies are loaded. A candidate thread is then loaded in full so
@@ -3673,21 +4600,22 @@ async function dispatchWorkspace(
       // deadline-bounded full scan.
       const fts = request.args.regex
         ? null
-        : await queryFtsCandidates(
-            context,
-            request.args.pattern,
-            options.onDebug,
-          );
-      const scanThreads = !request.args.regex && fts
-        ? selected.filter((thread) => fts.threadIds.has(thread.thread.id))
-        : selected;
+        : await queryFtsCandidates(context, request.args.pattern, options.onDebug);
+      const scanThreads =
+        !request.args.regex && fts
+          ? selected.filter((thread) => fts.threadIds.has(thread.thread.id))
+          : selected;
       const messagesByThread = await loadMessagesByThread(chats, scanThreads);
       let matchesText: (text: string) => boolean;
       if (request.args.regex) {
-        const searchableTexts = [...new Set(scanThreads.flatMap((thread) => [
-          thread.thread.title,
-          ...(messagesByThread.get(thread.thread.id) ?? []).map((message) => message.body),
-        ]))];
+        const searchableTexts = [
+          ...new Set(
+            scanThreads.flatMap((thread) => [
+              thread.thread.title,
+              ...(messagesByThread.get(thread.thread.id) ?? []).map((message) => message.body),
+            ]),
+          ),
+        ];
         const regexMatches = await regexMatchesForTexts(
           {
             pattern: request.args.pattern,
@@ -3710,8 +4638,7 @@ async function dispatchWorkspace(
         for (let index = 0; index < messages.length; index += 1) {
           const message = messages[index]!;
           const bodyCandidate = !fts || fts.messageIds.has(message.id);
-          const titleCandidate = index === 0 &&
-            (!fts || fts.threadIds.has(thread.thread.id));
+          const titleCandidate = index === 0 && (!fts || fts.threadIds.has(thread.thread.id));
           const bodyInScope =
             (threshold === null || message.createdAtMs >= threshold) &&
             messageMatchesFrom(message, request.args.from);
@@ -3732,13 +4659,16 @@ async function dispatchWorkspace(
           });
         }
       }
-      matches.sort((left, right) =>
-        right.createdAtMs - left.createdAtMs || left.messageId.localeCompare(right.messageId),
+      matches.sort(
+        (left, right) =>
+          right.createdAtMs - left.createdAtMs || left.messageId.localeCompare(right.messageId),
       );
       if (request.args.filesWithMatches) {
         return {
-          threadIds: [...new Set(matches.map((match) => match.threadId))]
-            .slice(0, request.args.limit),
+          threadIds: [...new Set(matches.map((match) => match.threadId))].slice(
+            0,
+            request.args.limit,
+          ),
         };
       }
       return { matches: matches.slice(0, request.args.limit) };
@@ -3791,20 +4721,34 @@ function isDeclaredRequest(request: CliRequest): request is DeclaredRequest {
 
 // Reads one declared verb in the request's workspace. The received-share
 // rules have already run.
-async function dispatchDeclaredRead(request: DeclaredRequest, options: CliServerOptions, runSecret: string | undefined): Promise<unknown> {
+async function dispatchDeclaredRead(
+  request: DeclaredRequest,
+  options: CliServerOptions,
+  runSecret: string | undefined,
+): Promise<unknown> {
   const workspace = await resolveCliWorkspace(request.args.cwd, options.listWorkspaces());
   if (!workspace) throw new CliCommandError("not inside a dohc workspace");
-  const read = options.reads?.[request.verb] as ((workspace: CliRegistryWorkspace, input: object) => Promise<unknown>) | undefined;
+  const read = options.reads?.[request.verb] as
+    | ((workspace: CliRegistryWorkspace, input: object) => Promise<unknown>)
+    | undefined;
   if (!read) throw new CliCommandError(DECLARED_VERBS[request.verb].cli.unavailable);
   if (request.verb === "chatLinks" && "group" in request.args) {
     // `dohc chat links` names a Group, read as the caller's chat. A Group
     // without a wire id has no links to read.
     const context = await workspaceContextForRequest(request, options, runSecret);
-    const channel = resolveChannel(request.args.group, await loadChannels(chatsHost(context, options)));
-    const channelWireId = await context.store.getChannelWireId({
-      workspaceId: context.workspaceId, channelId: channel.engine.id,
-    }).catch(() => null);
-    return channelWireId === null ? null : read(workspace, { channelWireId, cursor: request.args.cursor });
+    const channel = resolveChannel(
+      request.args.group,
+      await loadChannels(chatsHost(context, options)),
+    );
+    const channelWireId = await context.store
+      .getChannelWireId({
+        workspaceId: context.workspaceId,
+        channelId: channel.engine.id,
+      })
+      .catch(() => null);
+    return channelWireId === null
+      ? null
+      : read(workspace, { channelWireId, cursor: request.args.cursor });
   }
   const { cwd: _cwd, actor: _actor, agentId: _agentId, ...input } = request.args;
   return read(workspace, input);
@@ -3832,27 +4776,42 @@ async function workspaceContextForRequest(
   const { agentId } = request.args;
   let connected: CliConnectedAgent | null = null;
   if (agentId !== undefined) {
-    if (request.args.actor !== "agent") throw new CliCommandError("Only an agent works as an agent you run. Send actor \"agent\" with its id.");
-    if ("runId" in request.args && request.args.runId) throw new CliCommandError("An agent you run is not a run. Send its id without a run id.");
+    if (request.args.actor !== "agent")
+      throw new CliCommandError(
+        'Only an agent works as an agent you run. Send actor "agent" with its id.',
+      );
+    if ("runId" in request.args && request.args.runId)
+      throw new CliCommandError("An agent you run is not a run. Send its id without a run id.");
     connected = await options.connectedAgent(workspace.workspaceId, agentId);
     if (!connected) throw new CliCommandError("No agent you run has this id in Settings › Agents.");
-    if (!connected.handle) throw new CliCommandError("Give this agent a name with a letter or digit in Settings › Agents, so @ can reach it.");
+    if (!connected.handle)
+      throw new CliCommandError(
+        "Give this agent a name with a letter or digit in Settings › Agents, so @ can reach it.",
+      );
   }
   // An agent you run is never part of a run, even one whose secret it holds.
   const run = connected ? undefined : provenRun(workspace.workspaceId, runSecret, options);
   if ("runId" in request.args && request.args.runId) {
     const runWorkspaceId = options.agentRunWorkspace(request.args.runId);
     // A run id is only a claim unless the request proves it is that run.
-    if (runWorkspaceId === undefined || !provenRun(runWorkspaceId, runSecret, options)) delete request.args.runId;
-    else if (runWorkspaceId !== workspace.workspaceId) throw new CliCommandError("Agent runs cannot write in another workspace.");
+    if (runWorkspaceId === undefined || !provenRun(runWorkspaceId, runSecret, options))
+      delete request.args.runId;
+    else if (runWorkspaceId !== workspace.workspaceId)
+      throw new CliCommandError("Agent runs cannot write in another workspace.");
     else request.args.actor = "agent";
   }
   const collectionWriteRequest =
-    request.verb === "collectionSetFields" ||
-    request.verb === "collectionCreateRecord";
-  const fileRequest = request.verb === "fileWrite" || request.verb === "fileMove" || request.verb === "fileDelete" || request.verb === "fileDuplicate";
+    request.verb === "collectionSetFields" || request.verb === "collectionCreateRecord";
+  const fileRequest =
+    request.verb === "fileWrite" ||
+    request.verb === "fileMove" ||
+    request.verb === "fileDelete" ||
+    request.verb === "fileDuplicate";
   const documentWriteRequest =
-    request.verb === "documentEdit" || request.verb === "documentCreate" || request.verb === "heldNoteChange" || fileRequest;
+    request.verb === "documentEdit" ||
+    request.verb === "documentCreate" ||
+    request.verb === "heldNoteChange" ||
+    fileRequest;
   const writeRequest =
     collectionWriteRequest ||
     documentWriteRequest ||
@@ -3871,10 +4830,10 @@ async function workspaceContextForRequest(
       fileRequest
         ? "This workspace is read-only. Write in the owning workspace."
         : collectionWriteRequest
-        ? "collection writes are not available in a read-only shared view"
-        : documentWriteRequest
-          ? "document changes are not available in a read-only shared view"
-          : "chats are not available in a read-only shared view",
+          ? "collection writes are not available in a read-only shared view"
+          : documentWriteRequest
+            ? "document changes are not available in a read-only shared view"
+            : "chats are not available in a read-only shared view",
     );
   }
   const opened = await options.openWorkspace(workspace);
@@ -3894,7 +4853,13 @@ function provenRun(
 ): CliRunCaller | undefined {
   const secret = options.dispatchedRunSecret(workspaceId);
   const agentId = options.dispatchedAgent(workspaceId);
-  if (runSecret === undefined || secret === null || agentId === null || !tokenMatches(secret, runSecret)) return undefined;
+  if (
+    runSecret === undefined ||
+    secret === null ||
+    agentId === null ||
+    !tokenMatches(secret, runSecret)
+  )
+    return undefined;
   return { agentId, runId: options.dispatchedRunId(workspaceId) };
 }
 
@@ -3909,14 +4874,18 @@ export const WATCH_BATCH_MAX_BYTES = 96 * 1024;
 const MAX_WATCH_SEEN = 50_000;
 // `reader` is the id of the agent you run, `run:<id>` for a run dohc started,
 // or null for unnamed agents. Each seen request is its time and message id.
-const watchCursorSchema = z.object({
-  v: z.literal(2),
-  workspaceId: z.string(),
-  group: z.string().nullable(),
-  thread: z.string().nullable(),
-  reader: z.string().nullable(),
-  seen: z.array(z.tuple([z.number().int().nonnegative(), z.string().min(1).max(500)])).max(MAX_WATCH_SEEN),
-}).strict();
+const watchCursorSchema = z
+  .object({
+    v: z.literal(2),
+    workspaceId: z.string(),
+    group: z.string().nullable(),
+    thread: z.string().nullable(),
+    reader: z.string().nullable(),
+    seen: z
+      .array(z.tuple([z.number().int().nonnegative(), z.string().min(1).max(500)]))
+      .max(MAX_WATCH_SEEN),
+  })
+  .strict();
 type WatchSeen = [createdAtMs: number, messageId: string];
 
 function compareWatchSeen([leftAt, leftId]: WatchSeen, [rightAt, rightId]: WatchSeen): number {
@@ -3929,7 +4898,8 @@ async function watchMessages(
   runSecret: string | undefined,
   connectionSignal?: AbortSignal,
 ): Promise<CliResultByVerb["watch"]> {
-  if (request.args.actor !== "agent") throw new CliCommandError("Chat watch is for agents. Use chat inbox for your unread threads.");
+  if (request.args.actor !== "agent")
+    throw new CliCommandError("Chat watch is for agents. Use chat inbox for your unread threads.");
   connectionSignal?.throwIfAborted();
   // A run dohc started waits as its run's reader: for the requests its agent
   // was woken for, which include replies in threads it posted in. Any other
@@ -3947,14 +4917,29 @@ async function watchMessages(
   let seen: WatchSeen[] = [];
   if (request.args.cursor !== undefined) {
     try {
-      const cursor = watchCursorSchema.parse(JSON.parse(Buffer.from(request.args.cursor, "base64url").toString("utf8")));
-      if (cursor.workspaceId !== scope.workspaceId || cursor.group !== scope.group || cursor.thread !== scope.thread || cursor.reader !== scope.reader) throw new Error("scope");
+      const cursor = watchCursorSchema.parse(
+        JSON.parse(Buffer.from(request.args.cursor, "base64url").toString("utf8")),
+      );
+      if (
+        cursor.workspaceId !== scope.workspaceId ||
+        cursor.group !== scope.group ||
+        cursor.thread !== scope.thread ||
+        cursor.reader !== scope.reader
+      )
+        throw new Error("scope");
       seen = cursor.seen;
-    } catch { throw new CliCommandError("This chat cursor is invalid for this agent, workspace or filter. Watch again without a cursor."); }
+    } catch {
+      throw new CliCommandError(
+        "This chat cursor is invalid for this agent, workspace or filter. Watch again without a cursor.",
+      );
+    }
   }
   const encode = (entries: WatchSeen[]) => {
     const cursor = Buffer.from(JSON.stringify({ ...scope, seen: entries })).toString("base64url");
-    if (entries.length > MAX_WATCH_SEEN || cursor.length > 1_048_576) throw new CliCommandError("The chat cursor is full. Mark processed threads read, then watch without a cursor.");
+    if (entries.length > MAX_WATCH_SEEN || cursor.length > 1_048_576)
+      throw new CliCommandError(
+        "The chat cursor is full. Mark processed threads read, then watch without a cursor.",
+      );
     return cursor;
   };
   // The Group and thread filters resolve once, before the wait.
@@ -3968,13 +4953,16 @@ async function watchMessages(
       if (!group) throw new CliCommandError("Group not found. Use chat groups to choose a Group.");
       channelId = group.engine.id;
     }
-    if (request.args.thread !== undefined) threadId = resolveThread(request.args.thread, await loadThreads(chats, channels)).thread.id;
+    if (request.args.thread !== undefined)
+      threadId = resolveThread(request.args.thread, await loadThreads(chats, channels)).thread.id;
   }
   const empty = { messages: [], cursor: request.args.cursor ?? encode([]) };
   const seenIds = new Set(seen.map(([, messageId]) => messageId));
   let waiters = chatWaiters.get(options);
-  if (!waiters) chatWaiters.set(options, waiters = new ChatMessageWaiters());
-  const signals = [connectionSignal, context.signal].filter((value): value is AbortSignal => value !== undefined);
+  if (!waiters) chatWaiters.set(options, (waiters = new ChatMessageWaiters()));
+  const signals = [connectionSignal, context.signal].filter(
+    (value): value is AbortSignal => value !== undefined,
+  );
   // An agent you run reads as listening until the wait ends, aborts or times out.
   const endWait = context.connected ? options.agentWaiting?.(context.connected.agentId) : undefined;
   const engineIds = new WeakMap<object, string[]>();
@@ -3982,8 +4970,10 @@ async function watchMessages(
     signal: signals.length ? AbortSignal.any(signals) : undefined,
     timeoutMs: request.args.timeoutMs ?? CHAT_WATCH_TIMEOUT_MS,
     empty,
-    subscribe: listener => subscribeChatWrites(context.workspaceId, listener),
-    refresh: () => { void notifyRead(options, context, threadId ? { threadId } : undefined); },
+    subscribe: (listener) => subscribeChatWrites(context.workspaceId, listener),
+    refresh: () => {
+      void notifyRead(options, context, threadId ? { threadId } : undefined);
+    },
     // Walk the reader's requests from the start, skipping the seen ones,
     // until the batch is full or the walk reaches the end. A late arrival
     // with an older time is still met.
@@ -4020,7 +5010,10 @@ async function watchMessages(
             text: unread.body,
           };
           const size = Buffer.byteLength(JSON.stringify(message));
-          if (messages.length === WATCH_BATCH || (messages.length > 0 && bytes + size > WATCH_BATCH_MAX_BYTES)) {
+          if (
+            messages.length === WATCH_BATCH ||
+            (messages.length > 0 && bytes + size > WATCH_BATCH_MAX_BYTES)
+          ) {
             stoppedAt = [unread.createdAtMs, unread.messageId];
             break walk;
           }
@@ -4034,9 +5027,15 @@ async function watchMessages(
       }
       // A seen request the walk met is still unread. One past where it
       // stopped was not reached. Any other is read now, so it drops.
-      const kept = seen.filter((entry) => met.has(entry[1]) || (stoppedAt !== null && compareWatchSeen(entry, stoppedAt) >= 0));
+      const kept = seen.filter(
+        (entry) =>
+          met.has(entry[1]) || (stoppedAt !== null && compareWatchSeen(entry, stoppedAt) >= 0),
+      );
       const found = { messages, cursor: encode([...kept, ...returned]) };
-      engineIds.set(found, returned.map(([, messageId]) => messageId));
+      engineIds.set(
+        found,
+        returned.map(([, messageId]) => messageId),
+      );
       return found;
     },
   });
@@ -4047,19 +5046,26 @@ async function watchMessages(
     const result = await waited;
     const delivered = engineIds.get(result);
     if (delivered !== undefined && delivered.length > 0) {
-      await context.dispatchStore.coverDeliveredRequests({ workspaceId: context.workspaceId, runId, messageIds: delivered });
+      await context.dispatchStore.coverDeliveredRequests({
+        workspaceId: context.workspaceId,
+        runId,
+        messageIds: delivered,
+      });
     }
     return result;
   }
   if (!endWait) return waited;
   // A refused or aborted wait clears at once; an answered one holds briefly.
-  return waited.then((result) => {
-    endWait();
-    return result;
-  }, (error: unknown) => {
-    endWait(false);
-    throw error;
-  });
+  return waited.then(
+    (result) => {
+      endWait();
+      return result;
+    },
+    (error: unknown) => {
+      endWait(false);
+      throw error;
+    },
+  );
 }
 
 export async function handleCliRequestLine(
@@ -4116,25 +5122,37 @@ export async function handleCliRequestLine(
     // if the caller stood there. Only an id this computer's registry lists
     // selects one; a workspace's name never does, because other people can change it.
     if (workspaceId !== undefined) {
-      const named = options.listWorkspaces().find((workspace) => workspace.workspaceId === workspaceId);
+      const named = options
+        .listWorkspaces()
+        .find((workspace) => workspace.workspaceId === workspaceId);
       if (!named) throw new CliCommandError("No workspace on this computer has this id.");
       // Two registry entries can share a folder. The request must run in the
       // one it named, never in the other.
       const resolved = await resolveCliWorkspace(named.rootPath, options.listWorkspaces());
-      if (!resolved) throw new CliCommandError("This workspace's folder is missing on this computer.");
-      if (resolved.workspaceId !== workspaceId) throw new CliCommandError("This workspace's folder belongs to another workspace on this computer.");
+      if (!resolved)
+        throw new CliCommandError("This workspace's folder is missing on this computer.");
+      if (resolved.workspaceId !== workspaceId)
+        throw new CliCommandError(
+          "This workspace's folder belongs to another workspace on this computer.",
+        );
       request.args.cwd = named.rootPath;
     }
     const completion = { replayed: false };
     const refusal = await receivedShareRefusal(request, options);
-    const unvalidated = refusal ? refusal.answer
+    const unvalidated = refusal
+      ? refusal.answer
       : request.verb === "watch"
-      ? await watchMessages(request, options, runSecret, signal)
-      : request.verb === "accountDeletePreview" || request.verb === "accountDelete"
-      ? await dispatchAccount(request, options)
-      : isDeclaredRequest(request)
-        ? await dispatchDeclaredRead(request, options, runSecret)
-        : await dispatch(request, await workspaceContextForRequest(request, options, runSecret), options, completion);
+        ? await watchMessages(request, options, runSecret, signal)
+        : request.verb === "accountDeletePreview" || request.verb === "accountDelete"
+          ? await dispatchAccount(request, options)
+          : isDeclaredRequest(request)
+            ? await dispatchDeclaredRead(request, options, runSecret)
+            : await dispatch(
+                request,
+                await workspaceContextForRequest(request, options, runSecret),
+                options,
+                completion,
+              );
     const result = parseCliResult(parsed.data.verb, unvalidated);
     const response = cliTransportResponseSchema.parse({
       protocolVersion: CLI_PROTOCOL_VERSION,
@@ -4143,7 +5161,11 @@ export async function handleCliRequestLine(
     });
     const invocation = completion.replayed ? null : cliUsageInvocation(parsed.data, result);
     if (invocation) {
-      try { options.recordSuccess?.(invocation); } catch { /* Measurement cannot fail the command. */ }
+      try {
+        options.recordSuccess?.(invocation);
+      } catch {
+        /* Measurement cannot fail the command. */
+      }
     }
     return `${JSON.stringify(response)}\n`;
   } catch (error) {
@@ -4238,9 +5260,7 @@ async function closeServer(server: Server): Promise<void> {
   });
 }
 
-export async function startCliServer(
-  options: CliServerOptions,
-): Promise<CliServerHandle> {
+export async function startCliServer(options: CliServerOptions): Promise<CliServerHandle> {
   const platform = options.platform ?? process.platform;
   const isWindows = platform === "win32";
 
@@ -4257,10 +5277,7 @@ export async function startCliServer(
     : join(options.stateDir, CLI_SOCKET_FILE);
   const tokenPath = join(options.stateDir, CLI_TOKEN_FILE);
   const endpointArtifactPath = isWindows ? endpointPath : socketPath;
-  await Promise.all([
-    rm(endpointArtifactPath, { force: true }),
-    rm(tokenPath, { force: true }),
-  ]);
+  await Promise.all([rm(endpointArtifactPath, { force: true }), rm(tokenPath, { force: true })]);
   const token = randomBytes(32).toString("hex");
   // Windows ignores this mode; token secrecy depends on the inherited stateDir ACL.
   await writeFile(tokenPath, `${token}\n`, {
@@ -4274,7 +5291,8 @@ export async function startCliServer(
   const sockets = new Set<Socket>();
   const inFlight = new Set<Promise<void>>();
   const server = createServer((socket) =>
-    attachSocketHandler(socket, token, options, sockets, inFlight));
+    attachSocketHandler(socket, token, options, sockets, inFlight),
+  );
   server.maxConnections = MAX_SOCKET_CONNECTIONS;
   try {
     await listen(server, socketPath);
@@ -4295,10 +5313,7 @@ export async function startCliServer(
       for (const socket of sockets) socket.destroy();
       await closeServer(server);
     }
-    await Promise.all([
-      rm(endpointArtifactPath, { force: true }),
-      rm(tokenPath, { force: true }),
-    ]);
+    await Promise.all([rm(endpointArtifactPath, { force: true }), rm(tokenPath, { force: true })]);
     disposeCliServerRuntime(options);
     throw error;
   }

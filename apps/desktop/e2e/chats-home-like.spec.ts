@@ -62,7 +62,10 @@ test("Home Like works by keyboard and pointer and persists across reopen in both
     });
 
     for (const theme of ["light", "dark"] as const) {
-      await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
+      await page.evaluate(
+        (value) => document.documentElement.setAttribute("data-theme", value),
+        theme,
+      );
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       await waitForVisibleAnimations(page);
       await page.screenshot({ path: testInfo.outputPath(`home-like-${theme}.png`) });

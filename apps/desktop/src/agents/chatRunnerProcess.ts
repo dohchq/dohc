@@ -1,12 +1,33 @@
-import { accessSync, chmodSync, closeSync, constants, fchmodSync, mkdirSync, openSync, statSync, writeFileSync, writeSync } from "node:fs";
+import {
+  accessSync,
+  chmodSync,
+  closeSync,
+  constants,
+  fchmodSync,
+  mkdirSync,
+  openSync,
+  statSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs";
 import { readFile } from "node:fs/promises";
 import { delimiter, dirname, isAbsolute, join, resolve, win32 } from "node:path";
 import { execFile, spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { killChildTreeWin32, resolveSpawnCommand } from "../process/windowsSpawn";
 import { MAX_ADMISSION_BYTES, ownerEnvironment, type WindowsProbeOwner } from "./agentProbeProcess";
-import { agentProfileArguments, ownFlagsProblem, tokenizeRunnerCommand, type AgentLaunchProfile } from "./agentToolCatalog";
+import {
+  agentProfileArguments,
+  ownFlagsProblem,
+  tokenizeRunnerCommand,
+  type AgentLaunchProfile,
+} from "./agentToolCatalog";
 import { resolveDohcNodeExecutable } from "./dohcNodeExecutable";
-import { type CodexConfigFiles, codexConfigFiles, codexRequirementsRefuseReadOnly, codexRunConfig } from "./codexRunConfig";
+import {
+  type CodexConfigFiles,
+  codexConfigFiles,
+  codexRequirementsRefuseReadOnly,
+  codexRunConfig,
+} from "./codexRunConfig";
 
 export const RUNNER_KILL_GRACE_MS = 10_000;
 
@@ -59,9 +80,7 @@ function defaultSpawnRunner(
     detached: options.detached,
     stdio: options.stdio,
     windowsHide: options.windowsHide,
-    ...(options.windowsVerbatimArguments
-      ? { windowsVerbatimArguments: true }
-      : {}),
+    ...(options.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
   };
   const child = spawn(command, args, spawnOptions);
   // A runner that exits before reading its prompt breaks this pipe. That is
@@ -101,14 +120,28 @@ export function spawnOwnedRunner(
 ): RunnerProcess {
   // The environment carries credentials and the prompt carries the thread,
   // so both travel over stdin, never a command line.
-  const admission = Buffer.from(JSON.stringify({
-    command, args, windowsVerbatimArguments: options.windowsVerbatimArguments ?? false,
-    cwd: options.cwd, env: options.env, input: options.input,
-  }));
-  if (admission.byteLength > MAX_ADMISSION_BYTES) throw new Error("This chat is too long to send to an agent. Start a new chat with the agent.");
-  const child = spawnProcess(owner.executable, [owner.node, owner.relay, String(admission.byteLength)], {
-    cwd: owner.root, env: ownerEnvironment(), windowsHide: true, stdio: options.stdio,
-  });
+  const admission = Buffer.from(
+    JSON.stringify({
+      command,
+      args,
+      windowsVerbatimArguments: options.windowsVerbatimArguments ?? false,
+      cwd: options.cwd,
+      env: options.env,
+      input: options.input,
+    }),
+  );
+  if (admission.byteLength > MAX_ADMISSION_BYTES)
+    throw new Error("This chat is too long to send to an agent. Start a new chat with the agent.");
+  const child = spawnProcess(
+    owner.executable,
+    [owner.node, owner.relay, String(admission.byteLength)],
+    {
+      cwd: owner.root,
+      env: ownerEnvironment(),
+      windowsHide: true,
+      stdio: options.stdio,
+    },
+  );
   // An owner that exits early breaks this pipe; its exit code and log say why.
   child.stdin?.on("error", () => undefined);
   // After the admission the owner waits for end of input, so this pipe stays
@@ -142,26 +175,36 @@ function runnerSearchPath(
   const entries = (current ?? "")
     .split(delimiter)
     .map((entry) => (platform === "win32" ? entry.replace(/^"(.*)"$/u, "$1") : entry))
-    .filter((entry) => isAbsolute(entry) && !(skipAppAliases && WINDOWS_APP_ALIAS_DIRECTORY.test(entry)));
+    .filter(
+      (entry) => isAbsolute(entry) && !(skipAppAliases && WINDOWS_APP_ALIAS_DIRECTORY.test(entry)),
+    );
   return [prefix, ...entries].join(delimiter);
 }
 
 function runnerNodeAvailable(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): boolean {
-  const extensions = platform === "win32"
-    ? (env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").map((ext) => ext.trim()).filter(Boolean)
-    : [""];
-  const searchPath = platform === "win32" ? env.Path ?? env.PATH : env.PATH;
-  return (searchPath ?? "").split(delimiter).filter((entry) => isAbsolute(entry)).some((directory) =>
-    extensions.some((extension) => {
-      const candidate = join(directory, `node${extension}`);
-      try {
-        if (!statSync(candidate).isFile()) return false;
-        accessSync(candidate, platform === "win32" ? constants.F_OK : constants.X_OK);
-        return true;
-      } catch {
-        return false;
-      }
-    }));
+  const extensions =
+    platform === "win32"
+      ? (env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD")
+          .split(";")
+          .map((ext) => ext.trim())
+          .filter(Boolean)
+      : [""];
+  const searchPath = platform === "win32" ? (env.Path ?? env.PATH) : env.PATH;
+  return (searchPath ?? "")
+    .split(delimiter)
+    .filter((entry) => isAbsolute(entry))
+    .some((directory) =>
+      extensions.some((extension) => {
+        const candidate = join(directory, `node${extension}`);
+        try {
+          if (!statSync(candidate).isFile()) return false;
+          accessSync(candidate, platform === "win32" ? constants.F_OK : constants.X_OK);
+          return true;
+        } catch {
+          return false;
+        }
+      }),
+    );
 }
 
 export interface ReplyRuntimeAvailability {
@@ -170,13 +213,22 @@ export interface ReplyRuntimeAvailability {
 }
 
 // Older records describe PATH. New records name the selected reply runtime.
-export async function readRunnerNodeAvailable(logPath: string): Promise<ReplyRuntimeAvailability | undefined> {
+export async function readRunnerNodeAvailable(
+  logPath: string,
+): Promise<ReplyRuntimeAvailability | undefined> {
   try {
     const saved = await readFile(`${logPath}.node`, "utf8");
-    if (saved === "true\n" || saved === "false\n") return { source: "path", available: saved === "true\n" };
+    if (saved === "true\n" || saved === "false\n")
+      return { source: "path", available: saved === "true\n" };
     const record: unknown = JSON.parse(saved);
-    if (typeof record === "object" && record !== null && "source" in record && "available" in record &&
-        (record.source === "bundled" || record.source === "path") && typeof record.available === "boolean") {
+    if (
+      typeof record === "object" &&
+      record !== null &&
+      "source" in record &&
+      "available" in record &&
+      (record.source === "bundled" || record.source === "path") &&
+      typeof record.available === "boolean"
+    ) {
       return { source: record.source, available: record.available };
     }
     return undefined;
@@ -222,12 +274,19 @@ function replyServerArguments(input: {
 }): string[] {
   const command = join(input.cliBin, input.platform === "win32" ? "dohc-mcp.cmd" : "dohc-mcp");
   const args = [
-    "--workspace", input.rootPath, "--home", input.stateDir,
+    "--workspace",
+    input.rootPath,
+    "--home",
+    input.stateDir,
     ...(input.dohcTools === "reply" ? ["--tool", "dohc_reply_to_chat"] : []),
   ];
   if (input.tool === "claude") {
     const configPath = `${input.logPath}.mcp.json`;
-    writeFileSync(configPath, JSON.stringify({ mcpServers: { dohc: { type: "stdio", command, args } } }), { mode: 0o600 });
+    writeFileSync(
+      configPath,
+      JSON.stringify({ mcpServers: { dohc: { type: "stdio", command, args } } }),
+      { mode: 0o600 },
+    );
     return ["--mcp-config", configPath];
   }
   return [
@@ -260,29 +319,42 @@ export interface ChatRunnerProcessOptions {
   runCodexCheck?: CodexCheck;
 }
 
-export type CodexCheck = (command: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; windowsVerbatimArguments?: boolean }) => Promise<string>;
+export type CodexCheck = (
+  command: string,
+  args: string[],
+  options: { cwd: string; env: NodeJS.ProcessEnv; windowsVerbatimArguments?: boolean },
+) => Promise<string>;
 
 const CODEX_CHECK_TIMEOUT_MS = 15_000;
 
 // On Windows an npm-installed Codex runs behind cmd.exe, so a check that
 // takes too long ends the whole process tree, as stopping a run does.
 export function codexCheckWithTimeout(timeoutMs: number): CodexCheck {
-  return (command, args, options) => new Promise((resolveCheck, rejectCheck) => {
-    const child = execFile(command, args, {
-      cwd: options.cwd, env: options.env, maxBuffer: 4 * 1024 * 1024, windowsHide: true,
-      ...(options.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
-    }, (error, stdout) => {
-      clearTimeout(timer);
-      if (error) rejectCheck(error);
-      else resolveCheck(stdout);
+  return (command, args, options) =>
+    new Promise((resolveCheck, rejectCheck) => {
+      const child = execFile(
+        command,
+        args,
+        {
+          cwd: options.cwd,
+          env: options.env,
+          maxBuffer: 4 * 1024 * 1024,
+          windowsHide: true,
+          ...(options.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
+        },
+        (error, stdout) => {
+          clearTimeout(timer);
+          if (error) rejectCheck(error);
+          else resolveCheck(stdout);
+        },
+      );
+      const timer = setTimeout(() => {
+        rejectCheck(new Error("Codex took too long to list its MCP servers."));
+        if (process.platform === "win32") void killChildTreeWin32(child).catch(() => undefined);
+        else child.kill();
+      }, timeoutMs);
+      child.stdin?.end();
     });
-    const timer = setTimeout(() => {
-      rejectCheck(new Error("Codex took too long to list its MCP servers."));
-      if (process.platform === "win32") void killChildTreeWin32(child).catch(() => undefined);
-      else child.kill();
-    }, timeoutMs);
-    child.stdin?.end();
-  });
 }
 
 // A reply-only Codex run starts only when, with the run's own arguments,
@@ -309,9 +381,11 @@ export function createChatRunnerProcess(
   reportError: (error: unknown) => void,
 ) {
   const platform = options.platform ?? process.platform;
-  const spawnRunner: SpawnRunner = options.spawnRunner ?? (platform === "win32"
-    ? (command, args, spawnOptions) => spawnOwnedRunner(runOwner(), command, args, spawnOptions)
-    : defaultSpawnRunner);
+  const spawnRunner: SpawnRunner =
+    options.spawnRunner ??
+    (platform === "win32"
+      ? (command, args, spawnOptions) => spawnOwnedRunner(runOwner(), command, args, spawnOptions)
+      : defaultSpawnRunner);
 
   function runOwner(): WindowsProbeOwner {
     try {
@@ -320,7 +394,9 @@ export function createChatRunnerProcess(
       // The person gets the reinstall words; the log keeps what is missing.
       reportError(error);
     }
-    throw new Error("dohc is missing a file it needs to run agents. Reinstall dohc, then try again.");
+    throw new Error(
+      "dohc is missing a file it needs to run agents. Reinstall dohc, then try again.",
+    );
   }
 
   function prepareLog(logPath: string): number {
@@ -402,18 +478,25 @@ export function createChatRunnerProcess(
     logFd: number,
   ): Promise<RunnerProcess> {
     const problem = input.profile ? ownFlagsProblem(input.profile) : null;
-    if (problem) throw new Error(`dohc did not start ${input.agentName}. ${problem} Change the command in Settings › Agents.`);
-    const bundledNode = options.isPackaged() ? resolveDohcNodeExecutable({
-      resourcesPath: options.resourcesPath?.() ?? dirname(process.execPath),
-      platform,
-      arch: options.arch,
-    }) : null;
+    if (problem)
+      throw new Error(
+        `dohc did not start ${input.agentName}. ${problem} Change the command in Settings › Agents.`,
+      );
+    const bundledNode = options.isPackaged()
+      ? resolveDohcNodeExecutable({
+          resourcesPath: options.resourcesPath?.() ?? dirname(process.execPath),
+          platform,
+          arch: options.arch,
+        })
+      : null;
     if (bundledNode !== null) {
       try {
         if (!statSync(bundledNode).isFile()) throw new Error("Not a regular file");
         accessSync(bundledNode, platform === "win32" ? constants.F_OK : constants.X_OK);
       } catch {
-        throw new Error("dohc is missing a file it needs to run agents. Reinstall dohc, then try again.");
+        throw new Error(
+          "dohc is missing a file it needs to run agents. Reinstall dohc, then try again.",
+        );
       }
     }
     const cliBin = resolveDohcCliBinDirectory({
@@ -429,29 +512,40 @@ export function createChatRunnerProcess(
       profile: input.profile,
     });
     // An npm-installed Codex starts behind cmd.exe, which can't carry double quotes.
-    const codexBehindCmd = input.profile?.tool === "codex"
-      && resolveSpawnCommand(input.profile.executable, [], { env, platform, cwd: input.rootPath }).windowsVerbatimArguments === true;
+    const codexBehindCmd =
+      input.profile?.tool === "codex" &&
+      resolveSpawnCommand(input.profile.executable, [], { env, platform, cwd: input.rootPath })
+        .windowsVerbatimArguments === true;
     const readOnly = input.dohcTools === "reply";
-    const codexFiles = input.profile?.tool === "codex"
-      ? options.codexConfigFiles ? options.codexConfigFiles() : codexConfigFiles(process.env, platform)
-      : null;
+    const codexFiles =
+      input.profile?.tool === "codex"
+        ? options.codexConfigFiles
+          ? options.codexConfigFiles()
+          : codexConfigFiles(process.env, platform)
+        : null;
     const runArguments = input.profile
       ? [
-        ...replyServerArguments({
-          tool: input.profile.tool, dohcTools: input.dohcTools, cliBin, platform, rootPath: input.rootPath, stateDir: options.stateDir(), logPath: input.logPath,
-        }),
-        ...(input.profile.tool === "codex"
-          ? codexRunConfig({
-            rootPath: input.rootPath,
-            runId: input.runId,
+          ...replyServerArguments({
+            tool: input.profile.tool,
+            dohcTools: input.dohcTools,
+            cliBin,
             platform,
-            files: codexFiles,
-            behindCmd: codexBehindCmd,
-            readOnly,
-            replyOnly: input.dohcTools === "reply",
-          })
-          : []),
-      ]
+            rootPath: input.rootPath,
+            stateDir: options.stateDir(),
+            logPath: input.logPath,
+          }),
+          ...(input.profile.tool === "codex"
+            ? codexRunConfig({
+                rootPath: input.rootPath,
+                runId: input.runId,
+                platform,
+                files: codexFiles,
+                behindCmd: codexBehindCmd,
+                readOnly,
+                replyOnly: input.dohcTools === "reply",
+              })
+            : []),
+        ]
       : [];
     const commandParts = input.profile
       ? [input.profile.executable, ...agentProfileArguments(input.profile, runArguments, readOnly)]
@@ -472,7 +566,9 @@ export function createChatRunnerProcess(
     // An apostrophe in the folder's path puts double quotes in a Codex run's
     // trust entry (codexRunConfig.ts).
     if (codexBehindCmd && args.some((arg) => arg.includes('"'))) {
-      throw new Error("Codex can't start here because this folder's path has an apostrophe and Codex was installed with npm. Rename the folder, or install Codex with OpenAI's installer.");
+      throw new Error(
+        "Codex can't start here because this folder's path has an apostrophe and Codex was installed with npm. Rename the folder, or install Codex with OpenAI's installer.",
+      );
     }
     const resolved = resolveSpawnCommand(executable, args, {
       env,
@@ -492,14 +588,17 @@ export function createChatRunnerProcess(
     }
     if (readOnly && input.profile?.tool === "codex") {
       if (codexRequirementsRefuseReadOnly(codexFiles, platform)) {
-        throw new Error("Your organization's Codex settings don't allow automations to start this agent.");
+        throw new Error(
+          "Your organization's Codex settings don't allow automations to start this agent.",
+        );
       }
       await checkCodexServers(executable, runArguments, env, input.rootPath);
     }
     try {
-      const runtime: ReplyRuntimeAvailability = bundledNode !== null
-        ? { source: "bundled", available: true }
-        : { source: "path", available: runnerNodeAvailable(env, platform) };
+      const runtime: ReplyRuntimeAvailability =
+        bundledNode !== null
+          ? { source: "bundled", available: true }
+          : { source: "path", available: runnerNodeAvailable(env, platform) };
       writeFileSync(`${input.logPath}.node`, `${JSON.stringify(runtime)}\n`, { mode: 0o600 });
     } catch {}
     input.assertMayStart();
@@ -511,9 +610,7 @@ export function createChatRunnerProcess(
       detached: platform !== "win32",
       stdio: ["pipe", logFd, logFd],
       windowsHide: true,
-      ...(resolved.windowsVerbatimArguments
-        ? { windowsVerbatimArguments: true }
-        : {}),
+      ...(resolved.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
       input: input.prompt,
     });
     return child;
@@ -521,15 +618,32 @@ export function createChatRunnerProcess(
 
   // Asks Codex, with the run's own configuration and features, which MCP
   // servers it would start. It reads the same CODEX_HOME and makes no model call.
-  async function checkCodexServers(executable: string, runArguments: string[], env: NodeJS.ProcessEnv, rootPath: string): Promise<void> {
-    const check = resolveSpawnCommand(executable, ["mcp", "list", "--json", ...runArguments], { env, platform, cwd: rootPath });
+  async function checkCodexServers(
+    executable: string,
+    runArguments: string[],
+    env: NodeJS.ProcessEnv,
+    rootPath: string,
+  ): Promise<void> {
+    const check = resolveSpawnCommand(executable, ["mcp", "list", "--json", ...runArguments], {
+      env,
+      platform,
+      cwd: rootPath,
+    });
     let stdout: string;
     try {
-      stdout = await (options.runCodexCheck ?? codexCheckWithTimeout(CODEX_CHECK_TIMEOUT_MS))(check.command, check.args, {
-        cwd: rootPath, env, ...(check.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
-      });
+      stdout = await (options.runCodexCheck ?? codexCheckWithTimeout(CODEX_CHECK_TIMEOUT_MS))(
+        check.command,
+        check.args,
+        {
+          cwd: rootPath,
+          env,
+          ...(check.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
+        },
+      );
     } catch {
-      throw new Error("Codex couldn't list its MCP servers, so dohc didn't start it. Run `codex mcp list` to see why.");
+      throw new Error(
+        "Codex couldn't list its MCP servers, so dohc didn't start it. Run `codex mcp list` to see why.",
+      );
     }
     const enabled = enabledCodexServers(stdout);
     if (enabled === null || !enabled.includes("dohc")) {
@@ -537,14 +651,13 @@ export function createChatRunnerProcess(
     }
     const others = enabled.filter((name) => name !== "dohc");
     if (others.length > 0) {
-      throw new Error(`Codex would also start ${others.map((name) => `\`${name}\``).join(", ")}, so dohc didn't start it. dohc turns off only the MCP servers named in your Codex config.toml.`);
+      throw new Error(
+        `Codex would also start ${others.map((name) => `\`${name}\``).join(", ")}, so dohc didn't start it. dohc turns off only the MCP servers named in your Codex config.toml.`,
+      );
     }
   }
 
-  function signalOwnedProcess(
-    processHandle: RunnerProcess,
-    signal: NodeJS.Signals,
-  ): void {
+  function signalOwnedProcess(processHandle: RunnerProcess, signal: NodeJS.Signals): void {
     if (processHandle.hasExited() || !validPid(processHandle.pid)) return;
     if (platform === "win32") {
       processHandle.stop?.(signal);

@@ -20,7 +20,9 @@ function secretError(): Error {
 beforeEach(() => {
   vi.spyOn(console, "error").mockImplementation(() => undefined);
   reportRendererErrorCall = vi.fn(async () => undefined);
-  window.dohcDesktop = { reportRendererError: reportRendererErrorCall } as unknown as typeof window.dohcDesktop;
+  window.dohcDesktop = {
+    reportRendererError: reportRendererErrorCall,
+  } as unknown as typeof window.dohcDesktop;
 });
 
 afterEach(() => {
@@ -34,7 +36,10 @@ describe("renderer error reports", () => {
     reportRendererError("uncaught", secretError());
     expect(reportRendererErrorCall).toHaveBeenCalledWith({
       origin: "uncaught",
-      error: { name: "RangeError", stack: `    at open (file:///C:/dohc/resources/app.asar/dist/renderer/index.js:${line}:2)` },
+      error: {
+        name: "RangeError",
+        stack: `    at open (file:///C:/dohc/resources/app.asar/dist/renderer/index.js:${line}:2)`,
+      },
     });
     expect(JSON.stringify(reportRendererErrorCall.mock.calls)).not.toContain(SECRET);
   });
@@ -48,15 +53,16 @@ describe("renderer error reports", () => {
     ]);
   });
 
-
   it("forwards uncaught errors and unhandled rejections", () => {
     const target = new EventTarget();
     installGlobalErrorReporters(target as unknown as Window);
-    target.dispatchEvent(Object.assign(new Event("error"), { error: secretError(), message: SECRET }));
+    target.dispatchEvent(
+      Object.assign(new Event("error"), { error: secretError(), message: SECRET }),
+    );
     target.dispatchEvent(Object.assign(new Event("unhandledrejection"), { reason: secretError() }));
-    expect(reportRendererErrorCall.mock.calls.map(([payload]) => (payload as { origin: string }).origin))
-      .toEqual(["uncaught", "rejection"]);
+    expect(
+      reportRendererErrorCall.mock.calls.map(([payload]) => (payload as { origin: string }).origin),
+    ).toEqual(["uncaught", "rejection"]);
     expect(JSON.stringify(reportRendererErrorCall.mock.calls)).not.toContain(SECRET);
   });
-
 });

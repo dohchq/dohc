@@ -115,7 +115,10 @@ describe("AddAgentForm", () => {
     await waitFor(() =>
       expect(screen.getByTestId("chats-add-agent-check").textContent).toBe("Checking…"),
     );
-    expect(bridgeMock.runnerSelfTest).toHaveBeenCalledWith({ workspaceId: "ws-1", agentId: "default" });
+    expect(bridgeMock.runnerSelfTest).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      agentId: "default",
+    });
     expectDismissBlocked(onCancel);
 
     await act(async () => {
@@ -163,7 +166,10 @@ describe("AddAgentForm", () => {
     let contentHeight = 300;
     Object.defineProperty(body, "clientHeight", { configurable: true, value: 400 });
     Object.defineProperty(body, "scrollHeight", { configurable: true, get: () => contentHeight });
-    const banded = () => form.hasAttribute("data-scrolls") && header.classList.contains("border-b") && footer.classList.contains("border-t");
+    const banded = () =>
+      form.hasAttribute("data-scrolls") &&
+      header.classList.contains("border-b") &&
+      footer.classList.contains("border-t");
 
     report();
     expect(form.hasAttribute("data-scrolls")).toBe(false);

@@ -38,11 +38,7 @@ function pushableTransport() {
   return { transport, set, publishes, leaves };
 }
 
-function Harness(props: {
-  enabled: boolean;
-  transport: PresenceTransport | null;
-  topic: string;
-}) {
+function Harness(props: { enabled: boolean; transport: PresenceTransport | null; topic: string }) {
   const { others, typingNames, setTyping } = usePresence({
     enabled: props.enabled,
     transport: props.transport,
@@ -84,8 +80,24 @@ describe("usePresence gating + guard", () => {
     expect(t.publishes.length).toBeGreaterThan(0); // published presence
     act(() => {
       t.set([
-        { faceToken: "me", sessionToken: "me", isSelf: true, displayName: "Me", paletteSlot: 0, state: { displayName: "Me" }, updatedAtMs: 0 },
-        { faceToken: "bob", sessionToken: "cb", isSelf: false, displayName: "Bob", paletteSlot: 0, state: { displayName: "Bob", typing: true }, updatedAtMs: 0 },
+        {
+          faceToken: "me",
+          sessionToken: "me",
+          isSelf: true,
+          displayName: "Me",
+          paletteSlot: 0,
+          state: { displayName: "Me" },
+          updatedAtMs: 0,
+        },
+        {
+          faceToken: "bob",
+          sessionToken: "cb",
+          isSelf: false,
+          displayName: "Bob",
+          paletteSlot: 0,
+          state: { displayName: "Bob", typing: true },
+          updatedAtMs: 0,
+        },
       ]);
     });
     await flush();
@@ -108,7 +120,15 @@ describe("usePresence gating + guard", () => {
       // Late resolution of the old channel's in-flight poll: the ghost only
       // renders if the stale callback slipped past the guard.
       tA.set([
-        { faceToken: "ghost", sessionToken: "cg", isSelf: false, displayName: "Ghost", paletteSlot: 0, state: { displayName: "Ghost" }, updatedAtMs: 0 },
+        {
+          faceToken: "ghost",
+          sessionToken: "cg",
+          isSelf: false,
+          displayName: "Ghost",
+          paletteSlot: 0,
+          state: { displayName: "Ghost" },
+          updatedAtMs: 0,
+        },
       ]);
     });
     await flush();

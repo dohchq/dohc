@@ -19,9 +19,7 @@ export interface ShareHandoffIntent {
   readonly relayUrl: string;
 }
 
-export function parseShareHandoffUrl(
-  rawArgument: string,
-): ShareHandoffIntent | null {
+export function parseShareHandoffUrl(rawArgument: string): ShareHandoffIntent | null {
   const match = SHARE_HANDOFF_URL_PATTERN.exec(rawArgument);
   if (
     match?.[0] !== rawArgument ||
@@ -78,11 +76,7 @@ export function parseWorkLinkHandoffUrl(rawArgument: string): WorkLink | null {
     return null;
   }
   const server = workLinkServerOrigin(decodedServer);
-  if (
-    server === null ||
-    server !== decodedServer ||
-    encodeURIComponent(server) !== match[4]
-  ) {
+  if (server === null || server !== decodedServer || encodeURIComponent(server) !== match[4]) {
     return null;
   }
   return { server, reference: match[3] };

@@ -1,17 +1,33 @@
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
-import { readSyncHistory, recordNeverSynced, recordSynced, recordReceivedShare, scheduleComputer } from "./syncHistory";
-import { installWorkspaceDataKey, loadSecretDataKey, SECRET_KEY_RELATIVE_PATH } from "./workspaceDataKey";
+import {
+  readSyncHistory,
+  recordNeverSynced,
+  recordSynced,
+  recordReceivedShare,
+  scheduleComputer,
+} from "./syncHistory";
+import {
+  installWorkspaceDataKey,
+  loadSecretDataKey,
+  SECRET_KEY_RELATIVE_PATH,
+} from "./workspaceDataKey";
 import { createTestScratch } from "./testTemp";
 
-const fault = vi.hoisted(() => ({ write: false, link: false, remove: false, synced: [] as string[] }));
+const fault = vi.hoisted(() => ({
+  write: false,
+  link: false,
+  remove: false,
+  synced: [] as string[],
+}));
 vi.mock("node:fs/promises", async (original) => {
   const fs = await original<typeof import("node:fs/promises")>();
   return {
     ...fs,
     link: async (...args: Parameters<typeof fs.link>) => {
-      if (fault.link) throw Object.assign(new Error("unsupported link"), { code: "ENOTSUP", syscall: "link" });
+      if (fault.link)
+        throw Object.assign(new Error("unsupported link"), { code: "ENOTSUP", syscall: "link" });
       return fs.link(...args);
     },
     rm: async (...args: Parameters<typeof fs.rm>) => {
@@ -26,7 +42,10 @@ vi.mock("node:fs/promises", async (original) => {
     open: async (...args: Parameters<typeof fs.open>) => {
       const handle = await fs.open(...args);
       const sync = handle.sync.bind(handle);
-      handle.sync = async () => { await sync(); fault.synced.push(String(args[0])); };
+      handle.sync = async () => {
+        await sync();
+        fault.synced.push(String(args[0]));
+      };
       if (fault.write && args[1] === "wx") {
         handle.writeFile = async () => {
           await handle.write("{");
@@ -37,7 +56,12 @@ vi.mock("node:fs/promises", async (original) => {
     },
   };
 });
-afterEach(() => { fault.write = false; fault.link = false; fault.remove = false; fault.synced = []; });
+afterEach(() => {
+  fault.write = false;
+  fault.link = false;
+  fault.remove = false;
+  fault.synced = [];
+});
 
 const here = { installId: "here", label: "Here" };
 const there = { installId: "there", label: "There" };
@@ -49,46 +73,71 @@ async function fixture() {
   return root;
 }
 
-it.each(["history", "schedules", "synced", "received-share"] as const)("falls back to a flushed exclusive %s write, and a key only by a claim and rename off Windows", async (kind) => {
-  const root = await fixture();
-  if (kind === "schedules") await writeFile(join(root, ".dohc", "sync-history.json"), legacy);
-  fault.link = true;
-  const path = join(root, kind === "history" ? ".dohc/sync-history.json" : `.dohc/sync-history/${kind === "schedules" ? "schedules.json" : kind}`);
-  if (kind === "history") {
-    await recordNeverSynced(root, here);
-    expect(await readSyncHistory(root)).toBe("never-synced");
-  } else if (kind === "schedules") {
-    expect(await scheduleComputer(root, here)).toEqual({ kind: "computer", computer: here });
-  } else {
-    await (kind === "synced" ? recordSynced(root) : recordReceivedShare(root));
-    expect(await readFile(path, "utf8")).toBe("");
-  }
-  expect(fault.synced).toContain(path);
-  const winner = await readFile(path, "utf8");
-  if (kind === "history") await recordNeverSynced(root, there);
-  if (kind === "schedules") expect(await scheduleComputer(root, there)).toEqual({ kind: "computer", computer: here });
-  expect(await readFile(path, "utf8")).toBe(winner);
-  if (process.platform === "win32") {
-    await expect(loadSecretDataKey(root, { createIfMissing: true })).rejects.toMatchObject({ code: "key-corrupt" });
-    await expect(installWorkspaceDataKey(root, Buffer.alloc(32, 1))).rejects.toMatchObject({ code: "key-install-unsupported" });
-    expect(await readdir(join(root, ".dohc", "engine"))).toEqual([]);
-  } else {
-    const key = await loadSecretDataKey(root, { createIfMissing: true });
-    await installWorkspaceDataKey(root, key);
-    await expect(installWorkspaceDataKey(root, Buffer.alloc(32, 1))).rejects.toThrow("A different workspace secret key");
-    expect(await readdir(join(root, ".dohc", "engine"))).toEqual(["secret.key"]);
-  }
-  expect(await readdir(dirname(path))).not.toEqual(expect.arrayContaining([expect.stringContaining(".tmp-")]));
-});
+it.each(["history", "schedules", "synced", "received-share"] as const)(
+  "falls back to a flushed exclusive %s write, and a key only by a claim and rename off Windows",
+  async (kind) => {
+    const root = await fixture();
+    if (kind === "schedules") await writeFile(join(root, ".dohc", "sync-history.json"), legacy);
+    fault.link = true;
+    const path = join(
+      root,
+      kind === "history"
+        ? ".dohc/sync-history.json"
+        : `.dohc/sync-history/${kind === "schedules" ? "schedules.json" : kind}`,
+    );
+    if (kind === "history") {
+      await recordNeverSynced(root, here);
+      expect(await readSyncHistory(root)).toBe("never-synced");
+    } else if (kind === "schedules") {
+      expect(await scheduleComputer(root, here)).toEqual({ kind: "computer", computer: here });
+    } else {
+      await (kind === "synced" ? recordSynced(root) : recordReceivedShare(root));
+      expect(await readFile(path, "utf8")).toBe("");
+    }
+    expect(fault.synced).toContain(path);
+    const winner = await readFile(path, "utf8");
+    if (kind === "history") await recordNeverSynced(root, there);
+    if (kind === "schedules")
+      expect(await scheduleComputer(root, there)).toEqual({ kind: "computer", computer: here });
+    expect(await readFile(path, "utf8")).toBe(winner);
+    if (process.platform === "win32") {
+      await expect(loadSecretDataKey(root, { createIfMissing: true })).rejects.toMatchObject({
+        code: "key-corrupt",
+      });
+      await expect(installWorkspaceDataKey(root, Buffer.alloc(32, 1))).rejects.toMatchObject({
+        code: "key-install-unsupported",
+      });
+      expect(await readdir(join(root, ".dohc", "engine"))).toEqual([]);
+    } else {
+      const key = await loadSecretDataKey(root, { createIfMissing: true });
+      await installWorkspaceDataKey(root, key);
+      await expect(installWorkspaceDataKey(root, Buffer.alloc(32, 1))).rejects.toThrow(
+        "A different workspace secret key",
+      );
+      expect(await readdir(join(root, ".dohc", "engine"))).toEqual(["secret.key"]);
+    }
+    expect(await readdir(dirname(path))).not.toEqual(
+      expect.arrayContaining([expect.stringContaining(".tmp-")]),
+    );
+  },
+);
 
-it.each(["load", "install"] as const)("a failed temporary removal still returns the published %s key", async (kind) => {
-  const root = await fixture();
-  fault.remove = true;
-  const key = kind === "load" ? await loadSecretDataKey(root, { createIfMissing: true }) : Buffer.alloc(32, 1);
-  if (kind === "install") await installWorkspaceDataKey(root, key);
-  expect(await loadSecretDataKey(root, { createIfMissing: false })).toEqual(key);
-  expect(await readFile(join(root, SECRET_KEY_RELATIVE_PATH), "utf8")).toBe(`dohc-secret-key-v1:${key.toString("base64")}\n`);
-});
+it.each(["load", "install"] as const)(
+  "a failed temporary removal still returns the published %s key",
+  async (kind) => {
+    const root = await fixture();
+    fault.remove = true;
+    const key =
+      kind === "load"
+        ? await loadSecretDataKey(root, { createIfMissing: true })
+        : Buffer.alloc(32, 1);
+    if (kind === "install") await installWorkspaceDataKey(root, key);
+    expect(await loadSecretDataKey(root, { createIfMissing: false })).toEqual(key);
+    expect(await readFile(join(root, SECRET_KEY_RELATIVE_PATH), "utf8")).toBe(
+      `dohc-secret-key-v1:${key.toString("base64")}\n`,
+    );
+  },
+);
 
 it("keeps cut-off history unknown and runs no schedules", async () => {
   const root = await fixture();
@@ -116,25 +165,43 @@ it("refuses to load or install over a cut-off key", async () => {
   const path = join(root, SECRET_KEY_RELATIVE_PATH);
   await writeFile(path, "dohc-secret-key-v1:AA");
   for (const createIfMissing of [false, true]) {
-    await expect(loadSecretDataKey(root, { createIfMissing })).rejects.toMatchObject({ code: "key-corrupt" });
+    await expect(loadSecretDataKey(root, { createIfMissing })).rejects.toMatchObject({
+      code: "key-corrupt",
+    });
   }
   await expect(installWorkspaceDataKey(root, Buffer.alloc(32, 1))).rejects.toThrow("malformed");
   expect(await readFile(path, "utf8")).toBe("dohc-secret-key-v1:AA");
 });
 
-it.each(["history", "schedules", "load-key", "install-key"] as const)("an interrupted %s write leaves no destination or temporary file", async (kind) => {
-  const root = await fixture();
-  if (kind === "schedules") await writeFile(join(root, ".dohc", "sync-history.json"), legacy);
-  const path = join(root, kind === "history" ? ".dohc/sync-history.json"
-    : kind === "schedules" ? ".dohc/sync-history/schedules.json" : SECRET_KEY_RELATIVE_PATH);
-  const before = await readdir(dirname(path));
-  fault.write = true;
-  if (kind === "history") await expect(recordNeverSynced(root, here)).rejects.toThrow();
-  if (kind === "schedules") expect(await scheduleComputer(root, here)).toMatchObject({ kind: "unreadable" });
-  if (kind === "load-key") await expect(loadSecretDataKey(root, { createIfMissing: true })).rejects.toMatchObject({ code: "key-corrupt" });
-  if (kind === "install-key") await expect(installWorkspaceDataKey(root, Buffer.alloc(32, 1))).rejects.toMatchObject({ code: "key-corrupt" });
-  expect(await readdir(dirname(path))).toEqual(before);
-});
+it.each(["history", "schedules", "load-key", "install-key"] as const)(
+  "an interrupted %s write leaves no destination or temporary file",
+  async (kind) => {
+    const root = await fixture();
+    if (kind === "schedules") await writeFile(join(root, ".dohc", "sync-history.json"), legacy);
+    const path = join(
+      root,
+      kind === "history"
+        ? ".dohc/sync-history.json"
+        : kind === "schedules"
+          ? ".dohc/sync-history/schedules.json"
+          : SECRET_KEY_RELATIVE_PATH,
+    );
+    const before = await readdir(dirname(path));
+    fault.write = true;
+    if (kind === "history") await expect(recordNeverSynced(root, here)).rejects.toThrow();
+    if (kind === "schedules")
+      expect(await scheduleComputer(root, here)).toMatchObject({ kind: "unreadable" });
+    if (kind === "load-key")
+      await expect(loadSecretDataKey(root, { createIfMissing: true })).rejects.toMatchObject({
+        code: "key-corrupt",
+      });
+    if (kind === "install-key")
+      await expect(installWorkspaceDataKey(root, Buffer.alloc(32, 1))).rejects.toMatchObject({
+        code: "key-corrupt",
+      });
+    expect(await readdir(dirname(path))).toEqual(before);
+  },
+);
 
 it("concurrent readers agree on one schedules host and one generated key", async () => {
   const root = await fixture();
@@ -142,7 +209,10 @@ it("concurrent readers agree on one schedules host and one generated key", async
   const hosts = await Promise.all([scheduleComputer(root, here), scheduleComputer(root, there)]);
   expect(hosts[0]).toEqual(hosts[1]);
   expect(hosts[0]).toMatchObject({ kind: "computer" });
-  const keys = await Promise.all([loadSecretDataKey(root, { createIfMissing: true }), loadSecretDataKey(root, { createIfMissing: true })]);
+  const keys = await Promise.all([
+    loadSecretDataKey(root, { createIfMissing: true }),
+    loadSecretDataKey(root, { createIfMissing: true }),
+  ]);
   expect(keys[0]).toEqual(keys[1]);
   expect(await readdir(join(root, ".dohc", "engine"))).toEqual(["secret.key"]);
   expect(await readdir(join(root, ".dohc", "sync-history"))).toEqual(["schedules.json"]);

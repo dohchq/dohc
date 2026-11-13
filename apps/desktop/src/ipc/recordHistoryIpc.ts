@@ -1,5 +1,8 @@
 import type { CollectionGetRecordResult } from "@dohc/workspace-contracts";
-import type { GetCollectionRecordHistoryResult, LocateRecordHistoryRunResult } from "./bridgeContract";
+import type {
+  GetCollectionRecordHistoryResult,
+  LocateRecordHistoryRunResult,
+} from "./bridgeContract";
 import type { ServerAsker } from "../automations/serverRuns";
 
 type HistoryEntry = CollectionGetRecordResult["history"][number];
@@ -33,26 +36,41 @@ export function recordHistoryPersonIsNamed(userId: string, ownerId: string | nul
 export function createRunLocator(dependencies: {
   onThisComputer(workspaceId: string, automationId: string, claimId: string): Promise<boolean>;
   /** Whether the server shows the run, and who asked; null when this computer cannot ask. Throws when dohc could not ask. */
-  onServer(workspaceId: string, automationId: string, claimId: string): Promise<{ shown: boolean; asker: ServerAsker } | null>;
+  onServer(
+    workspaceId: string,
+    automationId: string,
+    claimId: string,
+  ): Promise<{ shown: boolean; asker: ServerAsker } | null>;
   /** The signed-in account now, or null when signed out. */
   signedInAccount(): string | null;
 }) {
   const shownByServer = new Set<string>();
   const keyOf = (account: string, workspaceId: string, automationId: string, claimId: string) =>
     JSON.stringify([account, workspaceId, automationId, claimId]);
-  const available = async (workspaceId: string, automationId: string, claimId: string): Promise<boolean> => {
+  const available = async (
+    workspaceId: string,
+    automationId: string,
+    claimId: string,
+  ): Promise<boolean> => {
     const account = dependencies.signedInAccount();
-    return (account !== null && shownByServer.has(keyOf(account, workspaceId, automationId, claimId))) ||
-      await dependencies.onThisComputer(workspaceId, automationId, claimId);
+    return (
+      (account !== null && shownByServer.has(keyOf(account, workspaceId, automationId, claimId))) ||
+      (await dependencies.onThisComputer(workspaceId, automationId, claimId))
+    );
   };
   return {
     available,
-    async locate(workspaceId: string, automationId: string, claimId: string): Promise<LocateRecordHistoryRunResult["location"]> {
+    async locate(
+      workspaceId: string,
+      automationId: string,
+      claimId: string,
+    ): Promise<LocateRecordHistoryRunResult["location"]> {
       if (await available(workspaceId, automationId, claimId)) return "available";
       const answer = await dependencies.onServer(workspaceId, automationId, claimId);
       if (answer === null) return "unavailable";
       // An answer, yes or no, for a sign-in that has since ended or changed is no answer.
-      if (!answer.asker.current()) throw new Error("Your sign-in changed while dohc checked this run.");
+      if (!answer.asker.current())
+        throw new Error("Your sign-in changed while dohc checked this run.");
       if (!answer.shown) return "unavailable";
       shownByServer.add(keyOf(answer.asker.account, workspaceId, automationId, claimId));
       return "available";
@@ -69,12 +87,16 @@ export async function recordHistoryForIpc(
   page: Pick<CollectionGetRecordResult, "history" | "nextBeforeHistoryId">,
   authors: RecordHistoryAuthors,
 ): Promise<GetCollectionRecordHistoryResult> {
-  authors.prepare([...new Set(page.history.flatMap(entry => {
-    if (entry.linkAuthor !== null) return [];
-    if (entry.authorOriginId === null) return [];
-    const userId = entry.actorKind === "human" ? entry.authorOriginId : entry.onBehalfOf;
-    return userId !== null && recordHistoryPersonIsNamed(userId) ? [userId] : [];
-  }))]);
+  authors.prepare([
+    ...new Set(
+      page.history.flatMap((entry) => {
+        if (entry.linkAuthor !== null) return [];
+        if (entry.authorOriginId === null) return [];
+        const userId = entry.actorKind === "human" ? entry.authorOriginId : entry.onBehalfOf;
+        return userId !== null && recordHistoryPersonIsNamed(userId) ? [userId] : [];
+      }),
+    ),
+  ]);
   const people = new Map<string, string | null>();
   const personOf = (userId: string): string | null => {
     if (!recordHistoryPersonIsNamed(userId)) return null;
@@ -91,7 +113,9 @@ export async function recordHistoryForIpc(
   const authorOf = async (entry: HistoryEntry): Promise<Author> => {
     if (entry.linkAuthor !== null) {
       // The renderer names the role, so the link's ids stay in main.
-      return entry.actorKind === "agent" && entry.authorOriginId !== null && entry.onBehalfOf === entry.linkAuthor.publicPrincipalId
+      return entry.actorKind === "agent" &&
+        entry.authorOriginId !== null &&
+        entry.onBehalfOf === entry.linkAuthor.publicPrincipalId
         ? { kind: "link", agentName: authors.agent(entry.authorOriginId, entry.onBehalfOf) }
         : { kind: "link" };
     }
@@ -103,7 +127,11 @@ export async function recordHistoryForIpc(
     }
     if (entry.actorKind === "agent") {
       const person = entry.onBehalfOf === null ? null : personOf(entry.onBehalfOf);
-      return { kind: "agent", name: authors.agent(actor, entry.onBehalfOf), ...(person === null ? {} : { person }) };
+      return {
+        kind: "agent",
+        name: authors.agent(actor, entry.onBehalfOf),
+        ...(person === null ? {} : { person }),
+      };
     }
     if (entry.actorKind !== "automation") return null;
     const run = entry.automationRun;
@@ -113,18 +141,26 @@ export async function recordHistoryForIpc(
       automationId: actor,
       name: run?.automationName ?? authors.automationName(actor) ?? actor,
       ...(person === null ? {} : { person }),
-      run: run === null ? null : { claimId: run.claimId, location: await available(actor, run.claimId) ? "available" : "unchecked" },
+      run:
+        run === null
+          ? null
+          : {
+              claimId: run.claimId,
+              location: (await available(actor, run.claimId)) ? "available" : "unchecked",
+            },
     };
   };
   return {
-    entries: await Promise.all(page.history.map(async (entry) => ({
-      historyId: entry.historyId,
-      field: entry.field,
-      previous: entry.previous,
-      next: entry.next,
-      recordedAtMs: entry.recordedAtMs,
-      author: await authorOf(entry),
-    }))),
+    entries: await Promise.all(
+      page.history.map(async (entry) => ({
+        historyId: entry.historyId,
+        field: entry.field,
+        previous: entry.previous,
+        next: entry.next,
+        recordedAtMs: entry.recordedAtMs,
+        author: await authorOf(entry),
+      })),
+    ),
     nextBeforeHistoryId: page.nextBeforeHistoryId,
   };
 }

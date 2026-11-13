@@ -1,4 +1,4 @@
-import {canonicalIpAddress} from "@dohc/service-http";
+import { canonicalIpAddress } from "@dohc/service-http";
 
 export function clientAddress(
   peerAddress: string | undefined,

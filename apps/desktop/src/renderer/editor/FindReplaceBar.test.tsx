@@ -18,10 +18,17 @@ it.each([
   vi.stubGlobal("dohcDesktop", { platform });
   // jsdom has no layout, and the bar scrolls the active match into view.
   Element.prototype.scrollIntoView = vi.fn();
-  const editor = new Editor({ extensions: [StarterKit, findReplaceExtension], content: "<p>the cat, the mat, the hat</p>" });
+  const editor = new Editor({
+    extensions: [StarterKit, findReplaceExtension],
+    content: "<p>the cat, the mat, the hat</p>",
+  });
   try {
     render(<FindReplaceBar editor={editor} />);
-    act(() => editor.view.dispatch(editor.state.tr.setMeta(findReplaceKey, { type: "open", replace: true, query: "the" })));
+    act(() =>
+      editor.view.dispatch(
+        editor.state.tr.setMeta(findReplaceKey, { type: "open", replace: true, query: "the" }),
+      ),
+    );
     expect(screen.getByText("1/3")).toBeTruthy();
     fireEvent.keyDown(screen.getByPlaceholderText("Find"), next);
     expect(screen.getByText("2/3")).toBeTruthy();

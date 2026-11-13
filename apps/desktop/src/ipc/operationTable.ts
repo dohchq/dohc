@@ -1,6 +1,9 @@
 import { DECLARATION_FAMILIES } from "@dohc/workspace-contracts/all-declarations";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
-import type { OperationDeclaration, OperationFamily } from "@dohc/workspace-contracts/operation-declaration";
+import type {
+  OperationDeclaration,
+  OperationFamily,
+} from "@dohc/workspace-contracts/operation-declaration";
 import type { z } from "zod";
 
 // One row per renderer-to-main operation: the channel, the payload main
@@ -14,16 +17,22 @@ type OperationRow<Payload extends z.ZodType> = {
   readonly result?: z.ZodType;
 } & (
   | { readonly capabilityId: CapabilityId; readonly capabilityIdsByAction?: never }
-  | { readonly capabilityId?: never; readonly capabilityIdsByAction: Readonly<Record<string, CapabilityId>> }
+  | {
+      readonly capabilityId?: never;
+      readonly capabilityIdsByAction: Readonly<Record<string, CapabilityId>>;
+    }
 );
 
 export type OperationDefinition =
   // Any trusted window may call it.
   | (OperationRow<z.ZodType> & { readonly guard: "trusted-sender" } & (
-      | { readonly scope: "device" }
-      // Describes existing handler admission without wrapping its lifetime.
-      | { readonly scope: "workspace"; readonly handlerCheck: { readonly check: string; readonly reason: string } }
-    ))
+        | { readonly scope: "device" }
+        // Describes existing handler admission without wrapping its lifetime.
+        | {
+            readonly scope: "workspace";
+            readonly handlerCheck: { readonly check: string; readonly reason: string };
+          }
+      ))
   // The handler runs inside the sending window's workspace operation. It fails
   // with inactiveMessage, before or after the handler, unless the payload's
   // workspace is the one open in that window.
@@ -45,49 +54,62 @@ type DeclaredRow<Declaration extends OperationDeclaration> = {
     z.output<Declaration["input"]> & { workspaceId: string },
     z.input<Declaration["input"]> & { workspaceId: string }
   >;
-  readonly result: Declaration["ipc"] extends { readonly result: infer Result extends z.ZodType } ? Result : Declaration["result"];
+  readonly result: Declaration["ipc"] extends { readonly result: infer Result extends z.ZodType }
+    ? Result
+    : Declaration["result"];
 };
 
 type Families = typeof DECLARATION_FAMILIES;
-type DeclaredRows<Family> = { readonly [Name in keyof Family]: Family[Name] extends OperationDeclaration ? DeclaredRow<Family[Name]> : never };
+type DeclaredRows<Family> = {
+  readonly [Name in keyof Family]: Family[Name] extends OperationDeclaration
+    ? DeclaredRow<Family[Name]>
+    : never;
+};
 
 // The rows of one listed family, named by its key in DECLARATION_FAMILIES, so
 // a family that is not listed there gets no IPC rows. Each row runs inside the
 // sending window's active workspace; a declaration cannot choose another guard.
-export function declaredRows<Key extends keyof Families>(key: Key, workspaceId: z.ZodType<string>): DeclaredRows<Families[Key]> {
+export function declaredRows<Key extends keyof Families>(
+  key: Key,
+  workspaceId: z.ZodType<string>,
+): DeclaredRows<Families[Key]> {
   if (!Object.hasOwn(DECLARATION_FAMILIES, key)) throw new Error(`${key} is not a listed family.`);
   const family: OperationFamily = DECLARATION_FAMILIES[key];
-  const rows: Record<string, unknown> = Object.fromEntries(Object.entries(family).map(([name, declaration]) => [name, {
-    capabilityId: declaration.capabilityId,
-    channel: declaration.ipc.channel,
-    scope: "workspace",
-    guard: "active-workspace",
-    inactiveMessage: declaration.ipc.inactiveMessage,
-    payload: declaration.input.extend({ workspaceId }),
-    result: declaration.ipc.result ?? declaration.result,
-  }]));
+  const rows: Record<string, unknown> = Object.fromEntries(
+    Object.entries(family).map(([name, declaration]) => [
+      name,
+      {
+        capabilityId: declaration.capabilityId,
+        channel: declaration.ipc.channel,
+        scope: "workspace",
+        guard: "active-workspace",
+        inactiveMessage: declaration.ipc.inactiveMessage,
+        payload: declaration.input.extend({ workspaceId }),
+        result: declaration.ipc.result ?? declaration.result,
+      },
+    ]),
+  );
   return rows as DeclaredRows<Families[Key]>;
 }
 
-type Reply<Definition> =
-  Definition extends { readonly result: infer Result extends z.ZodType }
-    ? z.output<Result>
-    : void;
-type HandlerReply<Definition> =
-  Definition extends { readonly result: infer Result extends z.ZodType }
-    ? z.input<Result>
-    : void;
+type Reply<Definition> = Definition extends { readonly result: infer Result extends z.ZodType }
+  ? z.output<Result>
+  : void;
+type HandlerReply<Definition> = Definition extends {
+  readonly result: infer Result extends z.ZodType;
+}
+  ? z.input<Result>
+  : void;
 
 export type OperationBridge<Table extends OperationTable> = {
-  [Name in keyof Table]: (
-    payload: z.input<Table[Name]["payload"]>,
-  ) => Promise<Reply<Table[Name]>>;
+  [Name in keyof Table]: (payload: z.input<Table[Name]["payload"]>) => Promise<Reply<Table[Name]>>;
 };
 
-type OperationContext<Definition, Event, WorkspaceOperation> =
-  Definition extends { readonly guard: "active-workspace" }
-    ? { readonly event: Event; readonly operation: WorkspaceOperation }
-    : { readonly event: Event };
+type OperationContext<Definition, Event, WorkspaceOperation> = Definition extends {
+  readonly guard: "active-workspace";
+}
+  ? { readonly event: Event; readonly operation: WorkspaceOperation }
+  : { readonly event: Event };
 
 export type OperationHandlers<
   Table extends OperationTable,
@@ -101,10 +123,7 @@ export type OperationHandlers<
 };
 
 export interface OperationBoundary<Event, WorkspaceOperation> {
-  handle(
-    channel: string,
-    listener: (event: Event, payload: unknown) => Promise<unknown>,
-  ): void;
+  handle(channel: string, listener: (event: Event, payload: unknown) => Promise<unknown>): void;
   assertTrustedSender(event: Event): void;
   withActiveWorkspace<Result>(
     event: Event,
@@ -140,18 +159,17 @@ export function operationBridge<Table extends OperationTable>(
   return bridge as OperationBridge<Table>;
 }
 
-export function registerOperations<
-  Table extends OperationTable,
-  Event,
-  WorkspaceOperation,
->(
+export function registerOperations<Table extends OperationTable, Event, WorkspaceOperation>(
   boundary: OperationBoundary<Event, WorkspaceOperation>,
   table: Table,
   handlers: OperationHandlers<Table, Event, WorkspaceOperation>,
   completions: OperationCompletions<Table, Event> = {},
 ): void {
   const bodies = handlers as Record<string, LooseHandler<Event, WorkspaceOperation>>;
-  const observers = completions as Record<string, ((input: unknown, result: unknown, event: Event) => void) | undefined>;
+  const observers = completions as Record<
+    string,
+    ((input: unknown, result: unknown, event: Event) => void) | undefined
+  >;
   for (const [name, definition] of Object.entries<OperationDefinition>(table)) {
     const handler = bodies[name]!;
     boundary.handle(definition.channel, async (event, payload) => {
@@ -173,7 +191,11 @@ export function registerOperations<
       }
       const reply = definition.result?.parse(result);
       // Measurement cannot change the reply or bypass admission and validation.
-      try { observers[name]?.(input, reply, event); } catch { /* Keep the operation's result. */ }
+      try {
+        observers[name]?.(input, reply, event);
+      } catch {
+        /* Keep the operation's result. */
+      }
       return reply;
     });
   }

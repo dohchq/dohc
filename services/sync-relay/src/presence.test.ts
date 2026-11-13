@@ -124,9 +124,7 @@ describe("PresenceHub", () => {
     const hub = new PresenceHub({ maxEntriesPerScope: 2 });
     hub.publish("ws:w:general", "a", "t", {}, 1000);
     hub.publish("ws:w:general", "b", "t", {}, 1000);
-    expect(() => hub.publish("ws:w:general", "c", "t", {}, 1000)).toThrow(
-      PresenceCapacityError,
-    );
+    expect(() => hub.publish("ws:w:general", "c", "t", {}, 1000)).toThrow(PresenceCapacityError);
     // Updating an existing entry is still fine at capacity.
     expect(() => hub.publish("ws:w:general", "a", "t", { x: 1 }, 1001)).not.toThrow();
   });
@@ -226,9 +224,7 @@ describe("PresenceHub caps (memory is bounded)", () => {
     const hub = new PresenceHub({ maxScopes: 2 });
     hub.publish(key("w1", "a"), "u", "c", {}, 1_000);
     hub.publish(key("w2", "a"), "u", "c", {}, 1_000);
-    expect(() => hub.publish(key("w3", "a"), "u", "c", {}, 1_000)).toThrow(
-      PresenceCapacityError,
-    );
+    expect(() => hub.publish(key("w3", "a"), "u", "c", {}, 1_000)).toThrow(PresenceCapacityError);
     // Existing scopes still accept publishes at the cap.
     expect(() => hub.publish(key("w1", "a"), "u", "c2", {}, 1_000)).not.toThrow();
     hub.dispose();
@@ -238,9 +234,7 @@ describe("PresenceHub caps (memory is bounded)", () => {
     const hub = new PresenceHub({ maxScopesPerGroup: 2 });
     hub.publish(key("w1", "a"), "u", "c", {}, 1_000);
     hub.publish(key("w1", "b"), "u", "c", {}, 1_000);
-    expect(() => hub.publish(key("w1", "c"), "u", "c", {}, 1_000)).toThrow(
-      PresenceCapacityError,
-    );
+    expect(() => hub.publish(key("w1", "c"), "u", "c", {}, 1_000)).toThrow(PresenceCapacityError);
     // A different workspace is unaffected by w1 hitting its cap.
     expect(() => hub.publish(key("w2", "a"), "u", "c", {}, 1_000)).not.toThrow();
     hub.dispose();
@@ -250,9 +244,7 @@ describe("PresenceHub caps (memory is bounded)", () => {
     const hub = new PresenceHub({ maxTotalEntries: 2 });
     hub.publish(key("w1", "a"), "u1", "c", {}, 1_000);
     hub.publish(key("w2", "a"), "u2", "c", {}, 1_000);
-    expect(() => hub.publish(key("w3", "a"), "u3", "c", {}, 1_000)).toThrow(
-      PresenceCapacityError,
-    );
+    expect(() => hub.publish(key("w3", "a"), "u3", "c", {}, 1_000)).toThrow(PresenceCapacityError);
     // Updating an existing entry is still allowed at the cap.
     expect(() => hub.publish(key("w1", "a"), "u1", "c", { x: 1 }, 1_001)).not.toThrow();
     // Freeing an entry frees the budget.
@@ -265,9 +257,7 @@ describe("PresenceHub caps (memory is bounded)", () => {
     const hub = new PresenceHub({ maxEntriesPerGroup: 2 });
     hub.publish(key("w1", "a"), "u", "c1", {}, 1_000);
     hub.publish(key("w1", "b"), "u", "c2", {}, 1_000);
-    expect(() => hub.publish(key("w1", "c"), "u", "c3", {}, 1_000)).toThrow(
-      PresenceCapacityError,
-    );
+    expect(() => hub.publish(key("w1", "c"), "u", "c3", {}, 1_000)).toThrow(PresenceCapacityError);
     expect(() => hub.publish(key("w2", "a"), "u", "c1", {}, 1_000)).not.toThrow();
     hub.dispose();
   });
@@ -275,9 +265,7 @@ describe("PresenceHub caps (memory is bounded)", () => {
   it("a refused publish allocates nothing (no scope/entry leak)", () => {
     const hub = new PresenceHub({ maxTotalEntries: 1 });
     hub.publish(key("w1", "a"), "u", "c", {}, 1_000);
-    expect(() => hub.publish(key("w2", "a"), "u", "c", {}, 1_000)).toThrow(
-      PresenceCapacityError,
-    );
+    expect(() => hub.publish(key("w2", "a"), "u", "c", {}, 1_000)).toThrow(PresenceCapacityError);
     expect(hub.stats()).toMatchObject({ scopes: 1, entries: 1 });
     hub.dispose();
   });
@@ -292,17 +280,15 @@ describe("PresenceHub parked-waiter caps", () => {
     const seed = hub.publish(key, "a", "c", {}, 1_000);
     const first = hub.wait(key, seed.version, { holdMs: 60_000, nowMs: 1_001 });
     expect(hub.stats().waiters).toBe(1);
-    expect(() =>
-      hub.wait(key, seed.version, { holdMs: 60_000, nowMs: 1_002 }),
-    ).toThrow(PresenceCapacityError);
+    expect(() => hub.wait(key, seed.version, { holdMs: 60_000, nowMs: 1_002 })).toThrow(
+      PresenceCapacityError,
+    );
     // A publish wakes the parked waiter and releases its slot.
     hub.publish(key, "b", "c", {}, 1_003);
     await first;
     expect(hub.stats().waiters).toBe(0);
     const snap = hub.snapshot(key, 1_004);
-    expect(() =>
-      hub.wait(key, snap.version, { holdMs: 1, nowMs: 1_005 }),
-    ).not.toThrow();
+    expect(() => hub.wait(key, snap.version, { holdMs: 1, nowMs: 1_005 })).not.toThrow();
     hub.dispose();
   });
 
@@ -313,9 +299,9 @@ describe("PresenceHub parked-waiter caps", () => {
     const seedA = hub.publish(keyA, "u", "c", {}, 1_000);
     const seedB = hub.publish(keyB, "u", "c", {}, 1_000);
     const parked = hub.wait(keyA, seedA.version, { holdMs: 60_000, nowMs: 1_001 });
-    expect(() =>
-      hub.wait(keyA, seedA.version, { holdMs: 60_000, nowMs: 1_002 }),
-    ).toThrow(PresenceCapacityError);
+    expect(() => hub.wait(keyA, seedA.version, { holdMs: 60_000, nowMs: 1_002 })).toThrow(
+      PresenceCapacityError,
+    );
     // Another scope still has budget.
     const parkedB = hub.wait(keyB, seedB.version, { holdMs: 60_000, nowMs: 1_003 });
     hub.publish(keyA, "x", "c", {}, 1_004);

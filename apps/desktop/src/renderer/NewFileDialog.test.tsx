@@ -24,8 +24,14 @@ describe("NewFileDialog", () => {
   it.each([
     ["a?b", "A name cannot contain a question mark (?). Remove it."],
     ["CON", 'Windows keeps "CON" for itself. Choose another name.'],
-    ["tail.", "Windows removes dots and spaces at the end of a name. Remove the ending dot or space."],
-    ["tail ", "Windows removes dots and spaces at the end of a name. Remove the ending dot or space."],
+    [
+      "tail.",
+      "Windows removes dots and spaces at the end of a name. Remove the ending dot or space.",
+    ],
+    [
+      "tail ",
+      "Windows removes dots and spaces at the end of a name. Remove the ending dot or space.",
+    ],
   ])("keeps invalid Windows name %s for correction", async (name, message) => {
     window.dohcDesktop = { platform: "win32" } as DohcDesktopBridge;
     render(<NewFileDialog workspaceId="ws-1" onClose={vi.fn()} onCreated={vi.fn()} />);
@@ -47,20 +53,13 @@ describe("NewFileDialog", () => {
   it("exposes a labelled modal with visible create and cancel actions", async () => {
     const onClose = vi.fn();
     const user = userEvent.setup();
-    render(
-      <NewFileDialog
-        workspaceId="ws-1"
-        onClose={onClose}
-        onCreated={() => undefined}
-      />,
-    );
+    render(<NewFileDialog workspaceId="ws-1" onClose={onClose} onCreated={() => undefined} />);
 
+    expect(screen.getByRole("dialog", { name: "New file" }).getAttribute("aria-modal")).toBe(
+      "true",
+    );
     expect(
-      screen.getByRole("dialog", { name: "New file" }).getAttribute("aria-modal"),
-    ).toBe("true");
-    expect(
-      (screen.getByRole("button", { name: "Create file" }) as HTMLButtonElement)
-        .disabled,
+      (screen.getByRole("button", { name: "Create file" }) as HTMLButtonElement).disabled,
     ).toBe(true);
     await user.click(screen.getByRole("button", { name: "Cancel" }));
     expect(onClose).toHaveBeenCalledTimes(1);
@@ -70,13 +69,7 @@ describe("NewFileDialog", () => {
     bridgeMock.createWorkspaceFile.mockResolvedValueOnce({ path: "notes/today.md" });
     const onCreated = vi.fn();
     const user = userEvent.setup();
-    render(
-      <NewFileDialog
-        workspaceId="ws-1"
-        onClose={() => undefined}
-        onCreated={onCreated}
-      />,
-    );
+    render(<NewFileDialog workspaceId="ws-1" onClose={() => undefined} onCreated={onCreated} />);
 
     await user.type(screen.getByLabelText("File name"), "notes/today");
     await user.click(screen.getByRole("button", { name: "Create file" }));
@@ -95,18 +88,12 @@ describe("NewFileDialog", () => {
     );
     const user = userEvent.setup();
     render(
-      <NewFileDialog
-        workspaceId="ws-1"
-        onClose={() => undefined}
-        onCreated={() => undefined}
-      />,
+      <NewFileDialog workspaceId="ws-1" onClose={() => undefined} onCreated={() => undefined} />,
     );
 
     await user.type(screen.getByLabelText("File name"), "notes/today{Enter}");
 
-    expect((await screen.findByRole("alert")).textContent).toBe(
-      "dohc could not create this file.",
-    );
+    expect((await screen.findByRole("alert")).textContent).toBe("dohc could not create this file.");
   });
 
   it("ignores duplicate create submits while a create is pending", async () => {
@@ -114,13 +101,7 @@ describe("NewFileDialog", () => {
     bridgeMock.createWorkspaceFile.mockImplementationOnce(() => create.promise);
     const onCreated = vi.fn();
     const user = userEvent.setup();
-    render(
-      <NewFileDialog
-        workspaceId="ws-1"
-        onClose={() => undefined}
-        onCreated={onCreated}
-      />,
-    );
+    render(<NewFileDialog workspaceId="ws-1" onClose={() => undefined} onCreated={onCreated} />);
 
     await user.type(screen.getByLabelText("File name"), "notes/new.md{Enter}{Enter}");
     await act(async () => {
@@ -143,13 +124,7 @@ describe("NewFileDialog", () => {
       const onClose = vi.fn();
       const onCreated = vi.fn();
       const user = userEvent.setup();
-      render(
-        <NewFileDialog
-          workspaceId="ws-1"
-          onClose={onClose}
-          onCreated={onCreated}
-        />,
-      );
+      render(<NewFileDialog workspaceId="ws-1" onClose={onClose} onCreated={onCreated} />);
 
       await user.type(screen.getByLabelText("File name"), "notes/new.md");
       await user.click(screen.getByRole("button", { name: "Create file" }));
@@ -177,13 +152,7 @@ describe("NewFileDialog", () => {
     });
     const onCreated = vi.fn();
     const user = userEvent.setup();
-    render(
-      <NewFileDialog
-        workspaceId="ws-1"
-        onClose={() => undefined}
-        onCreated={onCreated}
-      />,
-    );
+    render(<NewFileDialog workspaceId="ws-1" onClose={() => undefined} onCreated={onCreated} />);
 
     await user.type(screen.getByLabelText("File name"), "plans/roadmap{Enter}");
     await act(async () => {});
@@ -200,11 +169,7 @@ describe("NewFileDialog", () => {
     bridgeMock.createWorkspaceFile.mockResolvedValueOnce({ path: "data.csv" });
     const user = userEvent.setup();
     render(
-      <NewFileDialog
-        workspaceId="ws-1"
-        onClose={() => undefined}
-        onCreated={() => undefined}
-      />,
+      <NewFileDialog workspaceId="ws-1" onClose={() => undefined} onCreated={() => undefined} />,
     );
 
     await user.type(screen.getByLabelText("File name"), "data.csv{Enter}");

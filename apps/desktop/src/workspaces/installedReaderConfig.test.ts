@@ -12,21 +12,30 @@ function fixture(selection: unknown) {
   writeFileSync(join(root, "engine-reader/selection.json"), JSON.stringify(selection));
   return root;
 }
-afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+afterEach(() => {
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
 
 describe("installed reader paths", () => {
-  it.each([["darwin", "arm64"], ["linux", "x64"], ["win32", "x64"]] as const)(
-    "passes the selected %s-%s closure to the engine", (platform, arch) => {
-      const generation = "a".repeat(64), resources = fixture({ generation });
-      const root = resolve(resources, "engine-reader", generation);
-      expect(JSON.parse(installedReaderConfig(resources, platform, arch)!)).toEqual({
-        node: platform === "win32" ? resolve(resources, "app-compiler/node.exe") : join(root, "node"),
-        bundle: join(root, "reader.cjs"), manifest: join(root, "manifest.json"),
-      });
+  it.each([
+    ["darwin", "arm64"],
+    ["linux", "x64"],
+    ["win32", "x64"],
+  ] as const)("passes the selected %s-%s closure to the engine", (platform, arch) => {
+    const generation = "a".repeat(64),
+      resources = fixture({ generation });
+    const root = resolve(resources, "engine-reader", generation);
+    expect(JSON.parse(installedReaderConfig(resources, platform, arch)!)).toEqual({
+      node: platform === "win32" ? resolve(resources, "app-compiler/node.exe") : join(root, "node"),
+      bundle: join(root, "reader.cjs"),
+      manifest: join(root, "manifest.json"),
     });
+  });
 
   it("does not configure the reader on Intel Macs", () => {
-    expect(installedReaderConfig(fixture({ generation: "a".repeat(64) }), "darwin", "x64")).toBeUndefined();
+    expect(
+      installedReaderConfig(fixture({ generation: "a".repeat(64) }), "darwin", "x64"),
+    ).toBeUndefined();
   });
 
   it("disables missing, malformed, and unsupported installations", () => {
@@ -38,6 +47,8 @@ describe("installed reader paths", () => {
     }
     writeFileSync(join(resources, "engine-reader/selection.json"), "invalid JSON");
     expect(installedReaderConfig(resources, "darwin", "arm64")).toBeUndefined();
-    expect(installedReaderConfig(fixture({ generation: "a".repeat(64) }), "darwin", "ia32")).toBeUndefined();
+    expect(
+      installedReaderConfig(fixture({ generation: "a".repeat(64) }), "darwin", "ia32"),
+    ).toBeUndefined();
   });
 });

@@ -64,8 +64,7 @@ export function parseExcalidrawDocument(text: string): ExcalidrawDocument {
   }
   const elements = document.elements ?? [];
   elements.forEach(assertRestorableElement);
-  const appState =
-    document.appState === undefined ? {} : objectRecord(document.appState);
+  const appState = document.appState === undefined ? {} : objectRecord(document.appState);
   if (!appState) {
     throw new Error("The drawing has invalid app state.");
   }
@@ -81,9 +80,7 @@ export function parseExcalidrawDocument(text: string): ExcalidrawDocument {
 
   return {
     type: "excalidraw",
-    ...(typeof document.version === "number"
-      ? { version: document.version }
-      : {}),
+    ...(typeof document.version === "number" ? { version: document.version } : {}),
     ...(typeof document.source === "string" ? { source: document.source } : {}),
     elements,
     appState,

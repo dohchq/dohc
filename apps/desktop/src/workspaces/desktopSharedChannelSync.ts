@@ -2,7 +2,10 @@ import { signalChatWrite } from "./chatWriteSignals";
 import type { EngineWorkspace } from "@dohc/workspace-engine-client/daemon";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import type { JoinedSharedChannel, RegistryEntry } from "./registryStore";
-import type { WorkspaceAuthorityLease, WorkspaceAuthorityOperation } from "./workspaceAuthorityOwner";
+import type {
+  WorkspaceAuthorityLease,
+  WorkspaceAuthorityOperation,
+} from "./workspaceAuthorityOwner";
 import type { createReceivedShareEngineAccess } from "./receivedShareEngineAccess";
 import type { EngineRelayWorkspaceClient } from "./engineRelayClient";
 import {
@@ -58,7 +61,9 @@ export function createDesktopSharedChannelSync<
   normalizeServerUrl(url: string): string;
   receivedShareEngine: {
     relayForRegistered(
-      input: Parameters<ReturnType<typeof createReceivedShareEngineAccess>["relayForRegistered"]>[0],
+      input: Parameters<
+        ReturnType<typeof createReceivedShareEngineAccess>["relayForRegistered"]
+      >[0],
     ): Pick<EngineRelayWorkspaceClient, "pullSharedChannel" | "pushSharedChannel">;
   };
   updateWorkspaceSharedChannels(
@@ -159,10 +164,7 @@ export function createDesktopSharedChannelSync<
         return await syncWorkspaceSharedChannels(workspaceId);
       }
       if (!joinedChannel || joinedChannel.ended === true) return 0;
-      return await syncWorkspaceSharedChannels(
-        workspaceId,
-        joinedChannel.channelWireId,
-      );
+      return await syncWorkspaceSharedChannels(workspaceId, joinedChannel.channelWireId);
     });
   }
 
@@ -186,10 +188,7 @@ export function createDesktopSharedChannelSync<
       return runRendererSharedChannelPass(operation);
     }
     if (!joinedChannel || joinedChannel.ended === true) return idlePass(0);
-    return runRendererSharedChannelPass(
-      operation,
-      joinedChannel.channelWireId,
-    );
+    return runRendererSharedChannelPass(operation, joinedChannel.channelWireId);
   }
 
   // A pass with no rows to cover left nothing behind. Clearing the remainder this
@@ -209,11 +208,8 @@ export function createDesktopSharedChannelSync<
     priorityChannelWireId?: string,
   ): Promise<SharedChannelPassOutcome> {
     const binding = "binding" in authority ? authority.binding : null;
-    const operation: Operation | null =
-      binding === null ? (authority as Operation) : null;
-    const workspaceId = operation
-      ? operation.workspace.workspaceId
-      : binding!.workspaceId;
+    const operation: Operation | null = binding === null ? (authority as Operation) : null;
+    const workspaceId = operation ? operation.workspace.workspaceId : binding!.workspaceId;
     let requestCredentialGeneration: number | null = null;
     const assertRequestCurrent = (): void => {
       authority.assertCurrent();
@@ -235,7 +231,9 @@ export function createDesktopSharedChannelSync<
     let progress: SyncJoinedSharedChannelsResult | null = null;
     try {
       authority.assertCurrent();
-      let current: RegistryEntry | null = operation ? operation.workspace : findWorkspace(workspaceId);
+      let current: RegistryEntry | null = operation
+        ? operation.workspace
+        : findWorkspace(workspaceId);
       // An ended row the relay ended may be one the owner has since put
       // back. Ask before this pass decides the row is not its work.
       if (
@@ -249,12 +247,8 @@ export function createDesktopSharedChannelSync<
       const entry = current
         ? {
             ...current,
-            attachmentId: operation
-              ? operation.workspace.attachmentId
-              : binding!.attachmentId,
-            rootPath: operation
-              ? current.rootPath
-              : binding!.canonicalRootPath,
+            attachmentId: operation ? operation.workspace.attachmentId : binding!.attachmentId,
+            rootPath: operation ? current.rootPath : binding!.canonicalRootPath,
           }
         : null;
       // The registry, unfiltered: the pass needs a row's place even after the row
@@ -302,8 +296,7 @@ export function createDesktopSharedChannelSync<
         channels: matching,
         registryOrder,
         passRows: SHARED_CHANNEL_SYNC_PASS_ROWS,
-        resumeAfterChannelWireId:
-          authority.state.sharedChannelSyncCursor ?? undefined,
+        resumeAfterChannelWireId: authority.state.sharedChannelSyncCursor ?? undefined,
         priorityChannelWireId,
         pull: async (input) => {
           assertRequestCurrent();
@@ -311,7 +304,11 @@ export function createDesktopSharedChannelSync<
           const pulled = await daemonRelay.pullSharedChannel({
             shareId: input.shareId,
             channelWireId: input.channelWireId,
-            onApplied: () => { input.onApplied(); signalled = true; signalChatWrite(workspaceId); },
+            onApplied: () => {
+              input.onApplied();
+              signalled = true;
+              signalChatWrite(workspaceId);
+            },
           });
           assertRequestCurrent();
           if (pulled.applied > 0 && !signalled) signalChatWrite(workspaceId);

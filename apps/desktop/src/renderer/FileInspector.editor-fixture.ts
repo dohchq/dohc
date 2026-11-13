@@ -81,13 +81,13 @@ export function codeEditorTestHost(host: HTMLElement): CodeEditorTestHost {
     value: {
       configurable: true,
       get: () => codeEditorText(host),
-      set: (text: string) => { replaceCodeEditorText(host, text); },
+      set: (text: string) => {
+        replaceCodeEditorText(host, text);
+      },
     },
     readOnly: {
       configurable: true,
-      get: () =>
-        host.querySelector(".cm-content")?.getAttribute("contenteditable") ===
-        "false",
+      get: () => host.querySelector(".cm-content")?.getAttribute("contenteditable") === "false",
     },
     selectionStart: {
       configurable: true,
@@ -203,10 +203,11 @@ export function stubScrollSpy(
 export async function findEnabledMarkdownEditToggle(): Promise<HTMLElement> {
   return await waitFor(() => {
     const toggle = screen.getByTestId("markdown-edit-toggle");
-    if ((toggle instanceof HTMLButtonElement && toggle.disabled) || toggle.getAttribute("aria-disabled") === "true") {
-      throw new Error(
-        "markdown-edit-toggle is still disabled — the document is opening",
-      );
+    if (
+      (toggle instanceof HTMLButtonElement && toggle.disabled) ||
+      toggle.getAttribute("aria-disabled") === "true"
+    ) {
+      throw new Error("markdown-edit-toggle is still disabled — the document is opening");
     }
     return toggle;
   });

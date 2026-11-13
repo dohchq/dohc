@@ -1,6 +1,9 @@
 import type { CliResultByVerb } from "@dohc/cli/protocol";
 import {
-  hasEngineIgnoredSegment, matchesFileListingScope, validateUserReadPath, type WorkspaceFileListingScope,
+  hasEngineIgnoredSegment,
+  matchesFileListingScope,
+  validateUserReadPath,
+  type WorkspaceFileListingScope,
 } from "@dohc/workspace-contracts/workspace-paths";
 import { failure, pathRejected, type ErrorDetail } from "./results";
 
@@ -70,14 +73,21 @@ const lexical = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
  * case-sensitively, and both lists are in lexical order. A folder is listed
  * when a file below it is. The scope's path is checked as a read path.
  */
-export async function listFiles(files: FilesHost, scope: WorkspaceFileListingScope, platform: string): Promise<FileListResult> {
+export async function listFiles(
+  files: FilesHost,
+  scope: WorkspaceFileListingScope,
+  platform: string,
+): Promise<FileListResult> {
   let root = ".";
   if (scope.path !== undefined && scope.path !== ".") {
     const validated = validateUserReadPath(scope.path, { platform });
     if (!validated.ok) return pathRejected(validated.reason, scope.path);
     root = validated.normalized;
   }
-  const within: WorkspaceFileListingScope = { path: root, ...(scope.recursive === undefined ? {} : { recursive: scope.recursive }) };
+  const within: WorkspaceFileListingScope = {
+    path: root,
+    ...(scope.recursive === undefined ? {} : { recursive: scope.recursive }),
+  };
   let listed: readonly WorkspaceFile[];
   try {
     listed = (await files.list()).filter((file) => !hasEngineIgnoredSegment(file.path, platform));
@@ -94,14 +104,20 @@ export async function listFiles(files: FilesHost, scope: WorkspaceFileListingSco
   }
   return {
     ok: true,
-    files: listed.filter((file) => matchesFileListingScope(file.path, within)).map((file) => ({ ...file }))
+    files: listed
+      .filter((file) => matchesFileListingScope(file.path, within))
+      .map((file) => ({ ...file }))
       .sort((a, b) => lexical(a.path, b.path)),
     folders: [...folders].sort(lexical),
   };
 }
 
 /** A text file's contents. A binary file, and one over the host's limit, answer a refusal that names why. */
-export async function readText(files: FilesHost, path: string, platform: string): Promise<TextReadResult> {
+export async function readText(
+  files: FilesHost,
+  path: string,
+  platform: string,
+): Promise<TextReadResult> {
   const validated = validateUserReadPath(path, { platform });
   if (!validated.ok) return pathRejected(validated.reason, path);
   const normalized = validated.normalized;
@@ -112,7 +128,13 @@ export async function readText(files: FilesHost, path: string, platform: string)
     return failure(error, `failed to read file: ${normalized}`, files.errorDetail);
   }
   if (read.kind === "missing") return { ok: false, reason: `dohc: No file at ${normalized}.` };
-  if (read.kind === "binary") return { ok: false, reason: `dohc: ${normalized} is not a text file.`, refusal: "binary" };
-  if (read.kind === "too-large") return { ok: false, reason: `dohc: ${normalized} is larger than ${read.maxBytes} bytes.`, refusal: "too-large" };
+  if (read.kind === "binary")
+    return { ok: false, reason: `dohc: ${normalized} is not a text file.`, refusal: "binary" };
+  if (read.kind === "too-large")
+    return {
+      ok: false,
+      reason: `dohc: ${normalized} is larger than ${read.maxBytes} bytes.`,
+      refusal: "too-large",
+    };
   return { ok: true, path: normalized, text: read.text };
 }

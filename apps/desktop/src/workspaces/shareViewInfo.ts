@@ -1,5 +1,5 @@
 import { receivedReferencePin, type ReceivedReferencePin } from "./workspaceFileReferenceScopes";
-import {normalizeShareLabel} from "@dohc/security-contract/share-labels";
+import { normalizeShareLabel } from "@dohc/security-contract/share-labels";
 import {
   type ShareAccess,
   isShareAccessValue,
@@ -89,11 +89,7 @@ async function shareFetch(
 // Strict, because this value becomes the pinned grant every later pull is
 // enforced against. `null` means "a chat grant, no file selector";
 // anything unreadable throws rather than degrading into a wider grant.
-function parseSelector(
-  value: unknown,
-  access: unknown,
-  shareId: string,
-): ShareViewSelector | null {
+function parseSelector(value: unknown, access: unknown, shareId: string): ShareViewSelector | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new ShareSelectorInvalidError(shareId);
   }
@@ -137,9 +133,7 @@ function parseSelector(
       throw new ShareSelectorInvalidError(shareId);
     }
   }
-  const versionId = isValidShareVersionId(record.versionId)
-    ? record.versionId
-    : null;
+  const versionId = isValidShareVersionId(record.versionId) ? record.versionId : null;
   // The relay refuses to CREATE a selector that selects nothing, so a
   // response carrying one is not a grant — it is a relay this client cannot
   // enforce anything against.
@@ -199,14 +193,25 @@ export async function fetchShareViewAccess(input: {
   if (response.status === 401) throw new RelayUnauthorizedError();
   if (response.status === 404) {
     const body: unknown = await response.json();
-    if (body && typeof body === "object" && "code" in body && body.code === "share_access_removed") {
+    if (
+      body &&
+      typeof body === "object" &&
+      "code" in body &&
+      body.code === "share_access_removed"
+    ) {
       throw new ShareUnavailableError();
     }
   }
   if (!response.ok) throw new Error(`Share access request failed (${response.status})`);
   const body: unknown = await response.json();
-  if (!body || typeof body !== "object" || !("status" in body) || body.status !== "current" ||
-    !("access" in body) || !isShareAccessValue(body.access)) {
+  if (
+    !body ||
+    typeof body !== "object" ||
+    !("status" in body) ||
+    body.status !== "current" ||
+    !("access" in body) ||
+    !isShareAccessValue(body.access)
+  ) {
     throw new ShareSelectorInvalidError(input.shareId);
   }
   return body.access;
@@ -220,14 +225,24 @@ export async function probeShareViewLog(input: {
 }): Promise<{ unchanged: boolean }> {
   // Standalone share.view.pull reads the whole share log without channelWireId,
   // including group shares. Only shared-channel pulls pass a channel filter.
-  const response = await shareFetch(input.relay,
+  const response = await shareFetch(
+    input.relay,
     `/sync/shares/${encodeURIComponent(input.shareId)}/log?since=${input.since}`,
-    { signal: input.signal });
+    { signal: input.signal },
+  );
   const body: unknown = await response.json();
-  if (!body || typeof body !== "object" || !("ops" in body) || !Array.isArray(body.ops) ||
-    !("hasMore" in body) || typeof body.hasMore !== "boolean" ||
-    !("nextCursor" in body) || typeof body.nextCursor !== "number" ||
-    !Number.isSafeInteger(body.nextCursor) || body.nextCursor < input.since) {
+  if (
+    !body ||
+    typeof body !== "object" ||
+    !("ops" in body) ||
+    !Array.isArray(body.ops) ||
+    !("hasMore" in body) ||
+    typeof body.hasMore !== "boolean" ||
+    !("nextCursor" in body) ||
+    typeof body.nextCursor !== "number" ||
+    !Number.isSafeInteger(body.nextCursor) ||
+    body.nextCursor < input.since
+  ) {
     throw new Error("The server did not return a readable share log.");
   }
   // This cursor is only a probe. The engine commits the next cursor after
@@ -240,10 +255,17 @@ export async function fetchShareAutomationSwitchable(input: {
   shareId: string;
   collectionPath: string;
 }): Promise<boolean> {
-  const response = await shareFetch(input.relay,
-    `/sync/shares/${encodeURIComponent(input.shareId)}/collection-writes?${new URLSearchParams({ collectionPath: input.collectionPath })}`);
+  const response = await shareFetch(
+    input.relay,
+    `/sync/shares/${encodeURIComponent(input.shareId)}/collection-writes?${new URLSearchParams({ collectionPath: input.collectionPath })}`,
+  );
   const body: unknown = await response.json();
-  if (typeof body !== "object" || body === null || !("canSwitch" in body) || typeof body.canSwitch !== "boolean") {
+  if (
+    typeof body !== "object" ||
+    body === null ||
+    !("canSwitch" in body) ||
+    typeof body.canSwitch !== "boolean"
+  ) {
     throw new Error("The server did not confirm automation switches.");
   }
   return body.canSwitch;

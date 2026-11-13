@@ -16,7 +16,9 @@ let compiledRelayMain: string;
 
 beforeAll(async () => {
   if (engine.missing) return;
-  const output = fileURLToPath(new URL("../../../../services/sync-relay/.output/", import.meta.url));
+  const output = fileURLToPath(
+    new URL("../../../../services/sync-relay/.output/", import.meta.url),
+  );
   await mkdir(output, { recursive: true });
   relayBuildDirectory = await mkdtemp(join(output, "owner-install-abort-"));
   await buildRelay(relayBuildDirectory);
@@ -24,16 +26,23 @@ beforeAll(async () => {
 }, 30_000);
 
 afterAll(async () => {
-  if (relayBuildDirectory) await rm(relayBuildDirectory, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 });
+  if (relayBuildDirectory)
+    await rm(relayBuildDirectory, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 });
 }, 30_000);
 
 type Install = EngineClient["ownerYDocApplyInitialSync"];
 
 // The real client, except that it counts enrollments, records each install's
 // cursor and the cursors it reads, and lets the test take over the install.
-function observedClient(real: EngineClient, install?: (commit: () => ReturnType<Install>) => ReturnType<Install>) {
+function observedClient(
+  real: EngineClient,
+  install?: (commit: () => ReturnType<Install>) => ReturnType<Install>,
+) {
   const calls = { enroll: 0, installs: [] as number[], readStates: [] as number[] };
-  const enroll: EngineClient["ownerYDocEnroll"] = (...args) => { calls.enroll++; return real.ownerYDocEnroll(...args); };
+  const enroll: EngineClient["ownerYDocEnroll"] = (...args) => {
+    calls.enroll++;
+    return real.ownerYDocEnroll(...args);
+  };
   const applyInitialSync: Install = (request, input, signal) => {
     calls.installs.push(input.journalCursor);
     const commit = () => real.ownerYDocApplyInitialSync(request, input, signal);
@@ -44,8 +53,11 @@ function observedClient(real: EngineClient, install?: (commit: () => ReturnType<
     calls.readStates.push(state.acceptedCursor);
     return state;
   };
-  const replaced = new Map<PropertyKey, unknown>([["ownerYDocEnroll", enroll], ["ownerYDocApplyInitialSync", applyInitialSync],
-    ["ownerYDocReadState", readState]]);
+  const replaced = new Map<PropertyKey, unknown>([
+    ["ownerYDocEnroll", enroll],
+    ["ownerYDocApplyInitialSync", applyInitialSync],
+    ["ownerYDocReadState", readState],
+  ]);
   const client = new Proxy(real, {
     get(target, property) {
       if (replaced.has(property)) return replaced.get(property);
@@ -57,44 +69,65 @@ function observedClient(real: EngineClient, install?: (commit: () => ReturnType<
 }
 
 // An abandoned install keeps its committed cursor and digest paired for the next pass.
-it.skipIf(engine.missing)("an abandoned committed owner sync leaves a matched accepted state", async () => {
-  const fixture = await openLiveMoveFixture({ workspaceId: "owner-install-abort-after", compiledRelayMain,
-    engineExecutable: engine.require(), pages: ["page"] });
-  try {
-    const owner = fixture.ownerEngine;
-    const document = fixture.ownerDocument("page");
-    const pass = (client: EngineClient, signal: AbortSignal) => owner.sessions.run(owner.workspace, ({ workspace }) =>
-      runNativeOwnerDeliveryPass({ client, workspaceHandle: workspace, document, config: fixture.ownerConfig(document),
-        refusals: new OwnerKnownRefusals(), signal, bearer: fixture.relayConnection.token, accountId: fixture.workspaceId,
-        assertCurrent() {}, observedOnly: true }));
-    const old = fixture.ownerAccepted("page");
-    const cursor = await fixture.edit("page", " abandoned");
-    expect(cursor).toBeGreaterThan(old.cursor);
-
-    const controller = new AbortController();
-    const abandoned = observedClient(owner.nativeClient(), async install => {
-      await install();
-      controller.abort();
-      throw controller.signal.reason;
+it.skipIf(engine.missing)(
+  "an abandoned committed owner sync leaves a matched accepted state",
+  async () => {
+    const fixture = await openLiveMoveFixture({
+      workspaceId: "owner-install-abort-after",
+      compiledRelayMain,
+      engineExecutable: engine.require(),
+      pages: ["page"],
     });
-    await pass(abandoned.client, controller.signal).catch(() => undefined);
-    expect(abandoned.calls.installs).toHaveLength(1);
-    const installed = abandoned.calls.installs[0]!;
-    expect(installed).toBeGreaterThanOrEqual(cursor);
-    // A failed commit would leave the old pair.
-    const after = fixture.ownerAccepted("page");
-    const pair = JSON.stringify({ old, after, installed });
-    expect(after.cursor, pair).toBe(installed);
-    expect(after.digest === old.digest, pair).toBe(false);
-    expect(abandoned.calls.enroll).toBe(0);
+    try {
+      const owner = fixture.ownerEngine;
+      const document = fixture.ownerDocument("page");
+      const pass = (client: EngineClient, signal: AbortSignal) =>
+        owner.sessions.run(owner.workspace, ({ workspace }) =>
+          runNativeOwnerDeliveryPass({
+            client,
+            workspaceHandle: workspace,
+            document,
+            config: fixture.ownerConfig(document),
+            refusals: new OwnerKnownRefusals(),
+            signal,
+            bearer: fixture.relayConnection.token,
+            accountId: fixture.workspaceId,
+            assertCurrent() {},
+            observedOnly: true,
+          }),
+        );
+      const old = fixture.ownerAccepted("page");
+      const cursor = await fixture.edit("page", " abandoned");
+      expect(cursor).toBeGreaterThan(old.cursor);
 
-    // The next pass reads the durable state again and starts from it.
-    const next = observedClient(owner.nativeClient());
-    expect(["empty", "acknowledged"]).toContain(await pass(next.client, AbortSignal.timeout(60_000)));
-    expect(next.calls.readStates[0]).toBe(after.cursor);
-    expect(next.calls.enroll).toBe(0);
-    expect(fixture.ownerAccepted("page").cursor).toBeGreaterThanOrEqual(cursor);
-  } finally {
-    await fixture.close();
-  }
-}, 300_000);
+      const controller = new AbortController();
+      const abandoned = observedClient(owner.nativeClient(), async (install) => {
+        await install();
+        controller.abort();
+        throw controller.signal.reason;
+      });
+      await pass(abandoned.client, controller.signal).catch(() => undefined);
+      expect(abandoned.calls.installs).toHaveLength(1);
+      const installed = abandoned.calls.installs[0]!;
+      expect(installed).toBeGreaterThanOrEqual(cursor);
+      // A failed commit would leave the old pair.
+      const after = fixture.ownerAccepted("page");
+      const pair = JSON.stringify({ old, after, installed });
+      expect(after.cursor, pair).toBe(installed);
+      expect(after.digest === old.digest, pair).toBe(false);
+      expect(abandoned.calls.enroll).toBe(0);
+
+      // The next pass reads the durable state again and starts from it.
+      const next = observedClient(owner.nativeClient());
+      expect(["empty", "acknowledged"]).toContain(
+        await pass(next.client, AbortSignal.timeout(60_000)),
+      );
+      expect(next.calls.readStates[0]).toBe(after.cursor);
+      expect(next.calls.enroll).toBe(0);
+      expect(fixture.ownerAccepted("page").cursor).toBeGreaterThanOrEqual(cursor);
+    } finally {
+      await fixture.close();
+    }
+  },
+  300_000,
+);

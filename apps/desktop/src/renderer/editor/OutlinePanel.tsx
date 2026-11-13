@@ -33,9 +33,7 @@ type HeadingFlashMeta =
   | { kind: "show"; pos: number; end?: number; token: number }
   | { kind: "clear"; token: number };
 
-const headingFlashPluginKey = new PluginKey<HeadingFlashState>(
-  "dohc-heading-target-flash",
-);
+const headingFlashPluginKey = new PluginKey<HeadingFlashState>("dohc-heading-target-flash");
 
 /** The flashed range's class, which is also how a caller finds the element it
  *  drew: an inline flash renders spans ProseMirror owns, and nothing else in
@@ -64,9 +62,7 @@ export function makeHeadingFlashPlugin(): Plugin<HeadingFlashState> {
     state: {
       init: () => ({ token: null, decorations: DecorationSet.empty }),
       apply(transaction, current) {
-        const meta = transaction.getMeta(headingFlashPluginKey) as
-          | HeadingFlashMeta
-          | undefined;
+        const meta = transaction.getMeta(headingFlashPluginKey) as HeadingFlashMeta | undefined;
         if (meta?.kind === "show") {
           const decoration = flashDecoration(transaction.doc, meta);
           if (!decoration) return { token: null, decorations: DecorationSet.empty };
@@ -82,10 +78,7 @@ export function makeHeadingFlashPlugin(): Plugin<HeadingFlashState> {
         }
         return {
           ...current,
-          decorations: current.decorations.map(
-            transaction.mapping,
-            transaction.doc,
-          ),
+          decorations: current.decorations.map(transaction.mapping, transaction.doc),
         };
       },
     },
@@ -147,14 +140,14 @@ function headingIndexAtReadingLine(
 
 /** The same headings with the same text and levels draw the same outline,
  *  wherever an edit moved them. */
-function sameOutline(
-  a: readonly OutlineHeading[],
-  b: readonly OutlineHeading[],
-): boolean {
-  return a.length === b.length && a.every((heading, index) => {
-    const other = b[index]!;
-    return heading.level === other.level && heading.text === other.text;
-  });
+function sameOutline(a: readonly OutlineHeading[], b: readonly OutlineHeading[]): boolean {
+  return (
+    a.length === b.length &&
+    a.every((heading, index) => {
+      const other = b[index]!;
+      return heading.level === other.level && heading.text === other.text;
+    })
+  );
 }
 
 function findScrollParent(el: HTMLElement | null): HTMLElement | null {
@@ -244,9 +237,8 @@ function scrollToHeading(
       );
       if (headingIndex < 0) return null;
       return (
-        editor.view.dom.querySelectorAll<HTMLElement>("h1, h2, h3, h4, h5, h6")[
-          headingIndex
-        ] ?? null
+        editor.view.dom.querySelectorAll<HTMLElement>("h1, h2, h3, h4, h5, h6")[headingIndex] ??
+        null
       );
     },
     moveCursor ? heading.pos + 1 : undefined,
@@ -375,10 +367,7 @@ export function OutlinePanel({ editor, containerRef, headingTarget }: OutlinePan
     let firstFrame = 0;
     let secondFrame = 0;
     const applyTarget = () => {
-      const heading = resolveOutlineHeadingTarget(
-        extractOutline(editor.state.doc),
-        headingTarget,
-      );
+      const heading = resolveOutlineHeadingTarget(extractOutline(editor.state.doc), headingTarget);
       if (!heading) return;
       editor.off("update", applyTarget);
       cleanupFlash = scrollToHeading(editor, heading, false);
@@ -426,9 +415,7 @@ export function OutlinePanel({ editor, containerRef, headingTarget }: OutlinePan
       frame = requestAnimationFrame(updateActiveHeading);
     };
     const resizeObserver =
-      typeof ResizeObserver === "undefined"
-        ? null
-        : new ResizeObserver(scheduleUpdate);
+      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(scheduleUpdate);
     const observedElements = new Set<HTMLElement>();
     const refreshResizeTargets = () => {
       const nextElements = new Set<HTMLElement>([
@@ -459,9 +446,9 @@ export function OutlinePanel({ editor, containerRef, headingTarget }: OutlinePan
       typeof MutationObserver === "undefined"
         ? null
         : new MutationObserver((records) => {
-            if (records.some((record) =>
-              record.type === "childList" && record.target === scrollEl
-            )) {
+            if (
+              records.some((record) => record.type === "childList" && record.target === scrollEl)
+            ) {
               refreshResizeTargets();
             }
             scheduleUpdate();
@@ -489,9 +476,11 @@ export function OutlinePanel({ editor, containerRef, headingTarget }: OutlinePan
     scrollEl.addEventListener("load", scheduleUpdate, true);
     scrollEl.addEventListener("error", scheduleUpdate, true);
     editor.on("update", scheduleUpdate);
-    const handleDocumentTransaction = (
-      { transaction }: { transaction: { docChanged: boolean } },
-    ) => {
+    const handleDocumentTransaction = ({
+      transaction,
+    }: {
+      transaction: { docChanged: boolean };
+    }) => {
       if (transaction.docChanged) scheduleUpdate();
     };
     editor.on("transaction", handleDocumentTransaction);
@@ -501,15 +490,11 @@ export function OutlinePanel({ editor, containerRef, headingTarget }: OutlinePan
     const handleResolutionChange = () => {
       resolutionQuery?.removeEventListener("change", handleResolutionChange);
       scheduleUpdate();
-      resolutionQuery = window.matchMedia(
-        `(resolution: ${window.devicePixelRatio}dppx)`,
-      );
+      resolutionQuery = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
       resolutionQuery.addEventListener("change", handleResolutionChange);
     };
     if (typeof window.matchMedia === "function") {
-      resolutionQuery = window.matchMedia(
-        `(resolution: ${window.devicePixelRatio}dppx)`,
-      );
+      resolutionQuery = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
       resolutionQuery.addEventListener("change", handleResolutionChange);
     }
 

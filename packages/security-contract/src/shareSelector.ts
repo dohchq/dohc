@@ -3,7 +3,9 @@ import { classifyEngineFilePath } from "./enginePathFloor";
 
 const preparedPaths = new WeakSet<PreparedSharePath>();
 class PreparedSharePath {
-  private constructor(readonly path: string) { Object.freeze(this); }
+  private constructor(readonly path: string) {
+    Object.freeze(this);
+  }
   static prepare(path: string): PreparedSharePath | null {
     const validated = validateUserWritePath(path);
     if (!validated.ok) return null;
@@ -18,20 +20,32 @@ class PreparedSharePath {
 export const prepareSharePath = (path: string) => PreparedSharePath.prepare(path);
 
 /** The normalized tracked path selected by a file scope, or null. Versions are checked by the caller. */
-export function visibleSharePath(selector: { paths: readonly string[]; versionId: string | null }, path: string | PreparedSharePath): string | null {
-  const prepared = typeof path === "string" ? prepareSharePath(path) : preparedPaths.has(path) ? path : null;
+export function visibleSharePath(
+  selector: { paths: readonly string[]; versionId: string | null },
+  path: string | PreparedSharePath,
+): string | null {
+  const prepared =
+    typeof path === "string" ? prepareSharePath(path) : preparedPaths.has(path) ? path : null;
   if (!prepared) return null;
   const normalized = prepared.path;
-  const selected = selector.paths.length === 0
-    ? selector.versionId !== null
-    : selector.paths.some(granted => normalized === granted || normalized.startsWith(`${granted}/`));
+  const selected =
+    selector.paths.length === 0
+      ? selector.versionId !== null
+      : selector.paths.some(
+          (granted) => normalized === granted || normalized.startsWith(`${granted}/`),
+        );
   return selected ? normalized : null;
 }
 
 /** Whether a chat link's path names a file the scope covers, spelled exactly as the scope reads it. No scope covers nothing. */
-export function shareCoversLinkPath(selector: { paths: readonly string[]; versionId: string | null } | null, path: string): boolean {
+export function shareCoversLinkPath(
+  selector: { paths: readonly string[]; versionId: string | null } | null,
+  path: string,
+): boolean {
   const prepared = selector ? prepareSharePath(path) : null;
-  return prepared !== null && prepared.path === path && visibleSharePath(selector!, prepared) !== null;
+  return (
+    prepared !== null && prepared.path === path && visibleSharePath(selector!, prepared) !== null
+  );
 }
 
 // The share selector's VERSION and ACCESS dimensions, as one rule in one
@@ -113,11 +127,7 @@ export function isShareablePathList(paths: readonly unknown[]): boolean {
 }
 
 export function isShareablePath(value: unknown): value is string {
-  if (
-    typeof value !== "string" ||
-    value.length === 0 ||
-    value.length > MAX_SHARE_PATH_CHARS
-  ) {
+  if (typeof value !== "string" || value.length === 0 || value.length > MAX_SHARE_PATH_CHARS) {
     return false;
   }
   const validated = validateUserWritePath(value);
@@ -151,8 +161,5 @@ export function shareAccessRank(access: string): number {
  * `crates/dohc-engine-sync/tests/security_contract.rs`.
  */
 export function isShareAccessValue(value: unknown): value is ShareAccess {
-  return (
-    typeof value === "string" &&
-    (SHARE_ACCESS_VALUES as readonly string[]).includes(value)
-  );
+  return typeof value === "string" && (SHARE_ACCESS_VALUES as readonly string[]).includes(value);
 }

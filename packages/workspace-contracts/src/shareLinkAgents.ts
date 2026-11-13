@@ -14,7 +14,9 @@ export const RelayShareLinkAgent = z.object({
 export type RelayShareLinkAgent = z.infer<typeof RelayShareLinkAgent>;
 
 // A link names no workspace: main answers for the workspace it admitted.
-export const ShareLinkAgentsInput = z.object({ shareId: Id, grantId: Id, cursor: Cursor.optional() }).strict();
+export const ShareLinkAgentsInput = z
+  .object({ shareId: Id, grantId: Id, cursor: Cursor.optional() })
+  .strict();
 export type ShareLinkAgentsInput = z.infer<typeof ShareLinkAgentsInput>;
 
 // The relay answers 50 connections a page.
@@ -26,8 +28,12 @@ export const ListRelayShareLinkAgentsResult = z
   .strict();
 export type ListRelayShareLinkAgentsResult = z.infer<typeof ListRelayShareLinkAgentsResult>;
 
-export const ShareLinkAgentDisconnectInput = z.object({ shareId: Id, grantId: Id, connectionId: Id }).strict();
+export const ShareLinkAgentDisconnectInput = z
+  .object({ shareId: Id, grantId: Id, connectionId: Id })
+  .strict();
 export type ShareLinkAgentDisconnectInput = z.infer<typeof ShareLinkAgentDisconnectInput>;
 
 export const DisconnectRelayShareLinkAgentResult = z.object({ connectionId: Id }).strict();
-export type DisconnectRelayShareLinkAgentResult = z.infer<typeof DisconnectRelayShareLinkAgentResult>;
+export type DisconnectRelayShareLinkAgentResult = z.infer<
+  typeof DisconnectRelayShareLinkAgentResult
+>;

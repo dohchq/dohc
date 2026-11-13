@@ -81,9 +81,7 @@ function mergeGroups(
   return merged;
 }
 
-export function createCollectionStore(
-  options: CollectionStoreOptions,
-): CollectionStore {
+export function createCollectionStore(options: CollectionStoreOptions): CollectionStore {
   const { collectionPath, executor } = options;
   const listeners = new Set<() => void>();
   // A monotonically increasing token guards every async response: only the

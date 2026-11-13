@@ -2,28 +2,62 @@ import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import type { WorkspaceFile } from "../server/workspaceReads";
 
 export type HomeRow =
-  | { readonly kind: "folder"; readonly key: string; readonly path: string; readonly name: string; readonly depth: number; readonly open: boolean }
-  | { readonly kind: "page"; readonly key: string; readonly path: string; readonly name: string; readonly depth: number }
-  | { readonly kind: "sketch" | "other"; readonly key: string; readonly path: string; readonly name: string; readonly folder: string };
+  | {
+      readonly kind: "folder";
+      readonly key: string;
+      readonly path: string;
+      readonly name: string;
+      readonly depth: number;
+      readonly open: boolean;
+    }
+  | {
+      readonly kind: "page";
+      readonly key: string;
+      readonly path: string;
+      readonly name: string;
+      readonly depth: number;
+    }
+  | {
+      readonly kind: "sketch" | "other";
+      readonly key: string;
+      readonly path: string;
+      readonly name: string;
+      readonly folder: string;
+    };
 
 /** The first FILES_SHOWN of a kind by name, and how many there are in all. */
-export interface FirstFiles { readonly shown: HomeRow[]; readonly count: number }
+export interface FirstFiles {
+  readonly shown: HomeRow[];
+  readonly count: number;
+}
 
 export const FILES_SHOWN = 20;
 
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 const basename = (path: string) => path.slice(path.lastIndexOf("/") + 1);
-const dirname = (path: string) => path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+const dirname = (path: string) => (path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "");
 
 /** A page's name: its file's, without the extension. */
 export const pageTitle = (path: string) => basename(path).replace(/\.(md|markdown)$/i, "");
 
-type Folder = { readonly path: string; readonly folders: Map<string, Folder>; readonly pages: WorkspaceFile[] };
+type Folder = {
+  readonly path: string;
+  readonly folders: Map<string, Folder>;
+  readonly pages: WorkspaceFile[];
+};
 
-export function homeRows(files: readonly WorkspaceFile[], expanded: ReadonlySet<string>): { pages: HomeRow[]; sketches: FirstFiles; others: FirstFiles } {
+export function homeRows(
+  files: readonly WorkspaceFile[],
+  expanded: ReadonlySet<string>,
+): { pages: HomeRow[]; sketches: FirstFiles; others: FirstFiles } {
   // A dataset's folder holds its dataset.json; everything under it belongs to the Collection.
-  const owners = new Set(files.filter(file => basename(file.path) === "dataset.json").map(file => dirname(file.path)));
-  const owned = (path: string) => [...owners].some(owner => path === owner || path.startsWith(`${owner}/`));
+  const owners = new Set(
+    files
+      .filter((file) => basename(file.path) === "dataset.json")
+      .map((file) => dirname(file.path)),
+  );
+  const owned = (path: string) =>
+    [...owners].some((owner) => path === owner || path.startsWith(`${owner}/`));
   const root: Folder = { path: "", folders: new Map(), pages: [] };
   const sketches: WorkspaceFile[] = [];
   const others: WorkspaceFile[] = [];
@@ -51,20 +85,44 @@ export function homeRows(files: readonly WorkspaceFile[], expanded: ReadonlySet<
   const walk = (folder: Folder, depth: number) => {
     for (const [name, child] of [...folder.folders].sort(([a], [b]) => collator.compare(a, b))) {
       const open = expanded.has(child.path);
-      pages.push({ kind: "folder", key: `folder:${child.path}`, path: child.path, name, depth, open });
+      pages.push({
+        kind: "folder",
+        key: `folder:${child.path}`,
+        path: child.path,
+        name,
+        depth,
+        open,
+      });
       if (open) walk(child, depth + 1);
     }
-    const titled = folder.pages.map(page => ({ path: page.path, name: pageTitle(page.path) }))
+    const titled = folder.pages
+      .map((page) => ({ path: page.path, name: pageTitle(page.path) }))
       .sort((a, b) => collator.compare(a.name, b.name) || collator.compare(a.path, b.path));
-    for (const page of titled) pages.push({ kind: "page", key: `page:${page.path}`, path: page.path, name: page.name, depth });
+    for (const page of titled)
+      pages.push({
+        kind: "page",
+        key: `page:${page.path}`,
+        path: page.path,
+        name: page.name,
+        depth,
+      });
   };
   walk(root, 0);
 
   const first = (kind: "sketch" | "other", list: WorkspaceFile[]): FirstFiles => ({
     shown: list
-      .sort((a, b) => collator.compare(basename(a.path), basename(b.path)) || collator.compare(a.path, b.path))
+      .sort(
+        (a, b) =>
+          collator.compare(basename(a.path), basename(b.path)) || collator.compare(a.path, b.path),
+      )
       .slice(0, FILES_SHOWN)
-      .map((file): HomeRow => ({ kind, key: `${kind}:${file.path}`, path: file.path, name: basename(file.path), folder: dirname(file.path) })),
+      .map((file): HomeRow => ({
+        kind,
+        key: `${kind}:${file.path}`,
+        path: file.path,
+        name: basename(file.path),
+        folder: dirname(file.path),
+      })),
     count: list.length,
   });
   return { pages, sketches: first("sketch", sketches), others: first("other", others) };

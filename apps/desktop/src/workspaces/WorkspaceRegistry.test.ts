@@ -8,8 +8,14 @@ import { updateShareMountRecords, withoutShareMountRecords } from "./shareMounts
 import { readSyncHistory, recordNeverSynced } from "./syncHistory";
 import { createTestScratch } from "./testTemp";
 import {
-  acknowledgeWorkspaceShareSkips, findWorkspace, reconcileWorkspaceRecipientShares, registerWorkspace,
-  setWorkspaceRemote, setWorkspaceShareView, updateWorkspaceShareMounts, updateWorkspaceSharedChannels,
+  acknowledgeWorkspaceShareSkips,
+  findWorkspace,
+  reconcileWorkspaceRecipientShares,
+  registerWorkspace,
+  setWorkspaceRemote,
+  setWorkspaceShareView,
+  updateWorkspaceShareMounts,
+  updateWorkspaceSharedChannels,
 } from "./WorkspaceRegistry";
 
 const userData = vi.hoisted(() => ({ path: "" }));
@@ -17,13 +23,26 @@ vi.mock("electron", () => ({ app: { isPackaged: false, getPath: () => userData.p
 
 const selector = { paths: ["Trip"], versionId: null, access: "view" as const };
 const remote = { serverUrl: "https://server.dohc.test", ownerUserId: "u-me" };
-const shareView = { shareId: "s-view", granterEmail: null, genericChatWritable: false, grantedSelector: selector };
+const shareView = {
+  shareId: "s-view",
+  granterEmail: null,
+  genericChatWritable: false,
+  grantedSelector: selector,
+};
 const channel = (shareId: string) => ({
-  shareId, channelWireId: `wire-${shareId}`, access: "read-write" as const, granterEmail: "ana@dohc.test",
-  relayUrl: "https://relay.dohc.test", recipientUserId: "u-me",
+  shareId,
+  channelWireId: `wire-${shareId}`,
+  access: "read-write" as const,
+  granterEmail: "ana@dohc.test",
+  relayUrl: "https://relay.dohc.test",
+  recipientUserId: "u-me",
 });
 const mount = (shareId: string) => ({
-  shareId, label: shareId, granterEmail: "ana@dohc.test", relayUrl: "https://relay.dohc.test", grantedSelector: selector,
+  shareId,
+  label: shareId,
+  granterEmail: "ana@dohc.test",
+  relayUrl: "https://relay.dohc.test",
+  grantedSelector: selector,
 });
 const ended = <Row>(row: Row) => ({ ...row, ended: true });
 
@@ -41,7 +60,8 @@ async function workspace(
   const rootPath = canonicalWorkspaceRoot(await createTestScratch("dohc-registry-workspace-"));
   if (folder === "unwritable-folder") await writeFile(join(rootPath, ".dohc"), "");
   else await mkdir(join(rootPath, ".dohc"));
-  if (folder === "never-synced") await recordNeverSynced(rootPath, { installId: "install-here", label: "This Mac" });
+  if (folder === "never-synced")
+    await recordNeverSynced(rootPath, { installId: "install-here", label: "This Mac" });
   if (folder === "unwritable-record") await writeFile(join(rootPath, ".dohc", "sync-history"), "");
   const workspaceId = `w-${next++}`;
   registerWorkspace({ workspaceId, rootPath, kind: "personal", mode: "local-first", ...received });
@@ -49,7 +69,9 @@ async function workspace(
 }
 
 const endMount = (workspaceId: string, shareId: string) =>
-  updateWorkspaceShareMounts(workspaceId, mounts => updateShareMountRecords(mounts, shareId, ended));
+  updateWorkspaceShareMounts(workspaceId, (mounts) =>
+    updateShareMountRecords(mounts, shareId, ended),
+  );
 
 describe("the registry and the folder's sync record", () => {
   it("records a sync or opened share in the folder along with the registry", async () => {
@@ -76,8 +98,12 @@ describe("the registry and the folder's sync record", () => {
 
   it("keeps no received share or chat the folder cannot record", async () => {
     const received = await workspace("unwritable-record");
-    await expect(updateWorkspaceShareMounts(received.workspaceId, () => [mount("s-mount")])).rejects.toThrow();
-    await expect(updateWorkspaceSharedChannels(received.workspaceId, () => [channel("s-chat")])).rejects.toThrow();
+    await expect(
+      updateWorkspaceShareMounts(received.workspaceId, () => [mount("s-mount")]),
+    ).rejects.toThrow();
+    await expect(
+      updateWorkspaceSharedChannels(received.workspaceId, () => [channel("s-chat")]),
+    ).rejects.toThrow();
     expect(findWorkspace(received.workspaceId)?.shareMounts).toBeUndefined();
     expect(findWorkspace(received.workspaceId)?.sharedChannels).toBeUndefined();
   });
@@ -85,11 +111,13 @@ describe("the registry and the folder's sync record", () => {
   it("stores nothing when a change refuses the set it finds after the folder records the share", async () => {
     const received = await workspace("never-synced");
     let passes = 0;
-    await expect(updateWorkspaceShareMounts(received.workspaceId, mounts => {
-      passes += 1;
-      if (passes === 2) throw new Error("This workspace was closed. Open it again.");
-      return [...mounts, mount("s-mount")];
-    })).rejects.toThrow("This workspace was closed. Open it again.");
+    await expect(
+      updateWorkspaceShareMounts(received.workspaceId, (mounts) => {
+        passes += 1;
+        if (passes === 2) throw new Error("This workspace was closed. Open it again.");
+        return [...mounts, mount("s-mount")];
+      }),
+    ).rejects.toThrow("This workspace was closed. Open it again.");
     expect(findWorkspace(received.workspaceId)?.shareMounts).toBeUndefined();
   });
 });
@@ -98,16 +126,24 @@ describe("changes that wait on the folder record", () => {
   it("keeps both of two mounts ended together", async () => {
     const received = await workspace("never-synced", { shareMounts: [mount("a"), mount("b")] });
     await Promise.all([endMount(received.workspaceId, "a"), endMount(received.workspaceId, "b")]);
-    expect(findWorkspace(received.workspaceId)?.shareMounts).toEqual([ended(mount("a")), ended(mount("b"))]);
+    expect(findWorkspace(received.workspaceId)?.shareMounts).toEqual([
+      ended(mount("a")),
+      ended(mount("b")),
+    ]);
   });
 
   it("keeps a chat joined while another is left", async () => {
     const received = await workspace("never-synced", { sharedChannels: [channel("a")] });
-    const joining = updateWorkspaceSharedChannels(received.workspaceId, channels => mergeJoinedChannel(channels, channel("b")));
-    const leaving = updateWorkspaceSharedChannels(received.workspaceId, channels => endJoinedChannel(channels, "a"));
+    const joining = updateWorkspaceSharedChannels(received.workspaceId, (channels) =>
+      mergeJoinedChannel(channels, channel("b")),
+    );
+    const leaving = updateWorkspaceSharedChannels(received.workspaceId, (channels) =>
+      endJoinedChannel(channels, "a"),
+    );
     await Promise.all([joining, leaving]);
     expect(findWorkspace(received.workspaceId)?.sharedChannels).toEqual([
-      { ...channel("a"), ended: true, left: true }, channel("b"),
+      { ...channel("a"), ended: true, left: true },
+      channel("b"),
     ]);
   });
 
@@ -115,26 +151,41 @@ describe("changes that wait on the folder record", () => {
     const received = await workspace("never-synced", { shareMounts: [mount("a")] });
     const ending = endMount(received.workspaceId, "a");
     // The last mount's removal leaves an empty set, which needs no record.
-    await updateWorkspaceShareMounts(received.workspaceId, mounts => withoutShareMountRecords(mounts, "a"));
+    await updateWorkspaceShareMounts(received.workspaceId, (mounts) =>
+      withoutShareMountRecords(mounts, "a"),
+    );
     expect(findWorkspace(received.workspaceId)?.shareMounts).toEqual([]);
     await ending;
     expect(findWorkspace(received.workspaceId)?.shareMounts).toEqual([]);
   });
 
   it("keeps an acknowledgement and a reconcile made meanwhile", async () => {
-    const skippedOps = mergeShareSkippedOps(undefined, [{
-      originId: "origin-granter", originSeq: 1, opKind: "moment.append",
-      code: "share-boundary-violation", detail: "refused 1", atMs: 1000,
-    }]);
-    const received = await workspace("never-synced", { shareMounts: [{ ...mount("a"), skippedOps }, mount("b")] });
+    const skippedOps = mergeShareSkippedOps(undefined, [
+      {
+        originId: "origin-granter",
+        originSeq: 1,
+        opKind: "moment.append",
+        code: "share-boundary-violation",
+        detail: "refused 1",
+        atMs: 1000,
+      },
+    ]);
+    const received = await workspace("never-synced", {
+      shareMounts: [{ ...mount("a"), skippedOps }, mount("b")],
+    });
     const ending = endMount(received.workspaceId, "a");
     acknowledgeWorkspaceShareSkips(received.workspaceId, "a", skippedOps.generation);
-    reconcileWorkspaceRecipientShares(received.workspaceId, entry => ({
-      ...entry, shareMounts: entry.shareMounts!.map(row => row.shareId === "b" ? ended(row) : row),
+    reconcileWorkspaceRecipientShares(received.workspaceId, (entry) => ({
+      ...entry,
+      shareMounts: entry.shareMounts!.map((row) => (row.shareId === "b" ? ended(row) : row)),
     }));
     await ending;
     expect(findWorkspace(received.workspaceId)?.shareMounts).toEqual([
-      { ...mount("a"), ended: true, skippedOps: { ...skippedOps, acknowledgedGeneration: skippedOps.generation } },
+      {
+        ...mount("a"),
+        ended: true,
+        skippedOps: { ...skippedOps, acknowledgedGeneration: skippedOps.generation },
+      },
       ended(mount("b")),
     ]);
   });
@@ -145,8 +196,12 @@ describe("a folder reached through a link", () => {
     const real = await createTestScratch("dohc-registry-real-");
     const link = join(await createTestScratch("dohc-registry-links-"), "linked");
     await symlink(real, link, process.platform === "win32" ? "junction" : "dir");
-    const entry = (workspaceId: string, rootPath: string): RegistryEntry =>
-      ({ workspaceId, rootPath, kind: "personal", mode: "local-first" });
+    const entry = (workspaceId: string, rootPath: string): RegistryEntry => ({
+      workspaceId,
+      rootPath,
+      kind: "personal",
+      mode: "local-first",
+    });
 
     // A root that is not its own real path changed after its check: nothing is saved.
     expect(() => registerWorkspace(entry("w-linked", link))).toThrow(FOLDER_CHANGED);
@@ -154,7 +209,9 @@ describe("a folder reached through a link", () => {
 
     registerWorkspace(entry("w-real", canonicalWorkspaceRoot(real)));
     expect(findWorkspace("w-real")?.rootPath).toBe(canonicalWorkspaceRoot(link));
-    expect(() => registerWorkspace(entry("w-again", canonicalWorkspaceRoot(link)))).toThrow("Folder is already attached");
+    expect(() => registerWorkspace(entry("w-again", canonicalWorkspaceRoot(link)))).toThrow(
+      "Folder is already attached",
+    );
     expect(findWorkspace("w-again")).toBeNull();
   });
 });
@@ -163,14 +220,21 @@ describe("two folders whose names differ only in capitals", () => {
   it("are two workspaces on a disk that tells capitals apart", async (ctx) => {
     const parent = await createTestScratch("dohc-registry-capitals-");
     await mkdir(join(parent, "Notes"));
-    const second = await mkdir(join(parent, "notes")).then(() => true, (error: NodeJS.ErrnoException) => {
-      if (error.code === "EEXIST") return false;
-      throw error;
-    });
+    const second = await mkdir(join(parent, "notes")).then(
+      () => true,
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === "EEXIST") return false;
+        throw error;
+      },
+    );
     // A disk that ignores capitals has only one folder here.
     if (!second) ctx.skip();
-    const entry = (workspaceId: string, name: string): RegistryEntry =>
-      ({ workspaceId, rootPath: canonicalWorkspaceRoot(join(parent, name)), kind: "personal", mode: "local-first" });
+    const entry = (workspaceId: string, name: string): RegistryEntry => ({
+      workspaceId,
+      rootPath: canonicalWorkspaceRoot(join(parent, name)),
+      kind: "personal",
+      mode: "local-first",
+    });
     registerWorkspace(entry("w-upper", "Notes"));
     registerWorkspace(entry("w-lower", "notes"));
     expect(findWorkspace("w-upper")?.rootPath).not.toBe(findWorkspace("w-lower")?.rootPath);

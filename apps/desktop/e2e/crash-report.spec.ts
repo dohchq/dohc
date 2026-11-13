@@ -18,7 +18,9 @@ test("an engine crash leaves a notice and sends its report only after the person
   const server = createServer((request, response) => {
     let body = "";
     request.setEncoding("utf8");
-    request.on("data", (chunk: string) => { body += chunk; });
+    request.on("data", (chunk: string) => {
+      body += chunk;
+    });
     request.on("end", () => {
       received.push({ method: request.method, body });
       response.writeHead(204).end();
@@ -51,22 +53,29 @@ test("an engine crash leaves a notice and sends its report only after the person
 
     // Main asks in its own dialog. Answer it from main: Cancel first, which
     // sends nothing, then Send report.
-    const answerDialog = async (response: number) => await app.evaluate(({ dialog }, answer) => {
-      const asked = globalThis as { crashDialogMessages?: string[] };
-      asked.crashDialogMessages ??= [];
-      dialog.showMessageBox = (async (...args: unknown[]) => {
-        const options = args.at(-1) as { message: string };
-        asked.crashDialogMessages!.push(options.message);
-        return { response: answer, checkboxChecked: false };
-      }) as typeof dialog.showMessageBox;
-    }, response);
-    const report = await page.evaluate(async () => (await window.dohcDesktop!.readCrashReport({})).report);
+    const answerDialog = async (response: number) =>
+      await app.evaluate(({ dialog }, answer) => {
+        const asked = globalThis as { crashDialogMessages?: string[] };
+        asked.crashDialogMessages ??= [];
+        dialog.showMessageBox = (async (...args: unknown[]) => {
+          const options = args.at(-1) as { message: string };
+          asked.crashDialogMessages!.push(options.message);
+          return { response: answer, checkboxChecked: false };
+        }) as typeof dialog.showMessageBox;
+      }, response);
+    const report = await page.evaluate(
+      async () => (await window.dohcDesktop!.readCrashReport({})).report,
+    );
     expect(report?.text).toContain("Process: workspace engine");
 
     await answerDialog(2);
     await page.getByTestId("crash-report-toast-send").click();
     const asked = async () =>
-      (await app.evaluate(() => (globalThis as { crashDialogMessages?: string[] }).crashDialogMessages))?.length ?? 0;
+      (
+        await app.evaluate(
+          () => (globalThis as { crashDialogMessages?: string[] }).crashDialogMessages,
+        )
+      )?.length ?? 0;
     await expect.poll(asked).toBe(1);
     await expect(page.getByTestId("crash-report-toast-send")).toBeVisible();
     expect(received).toEqual([]);
@@ -75,8 +84,11 @@ test("an engine crash leaves a notice and sends its report only after the person
     await page.getByTestId("crash-report-toast-send").click();
     await expect.poll(() => received.length).toBe(1);
     expect(received[0]).toEqual({ method: "POST", body: report!.text });
-    expect(await app.evaluate(() => (globalThis as { crashDialogMessages?: string[] }).crashDialogMessages))
-      .toEqual(Array(2).fill(`Send this crash report to 127.0.0.1:${port}?`));
+    expect(
+      await app.evaluate(
+        () => (globalThis as { crashDialogMessages?: string[] }).crashDialogMessages,
+      ),
+    ).toEqual(Array(2).fill(`Send this crash report to 127.0.0.1:${port}?`));
     await expect(toast).toHaveCount(0);
     await expect(page.getByTestId("workspace-shell-notice")).toContainText("Report sent");
   } finally {
@@ -108,8 +120,14 @@ test("a closed crash toast stays closed after a restart, and its row stays in No
     await expect(toast).toContainText("The workspace engine failed");
     await page.getByRole("button", { name: "Close crash report notice" }).click();
     await expect(toast).toHaveCount(0);
-    await expect.poll(async () =>
-      await page.evaluate(async () => (await window.dohcDesktop!.readCrashReport({})).report?.read)).toBe(true);
+    await expect
+      .poll(
+        async () =>
+          await page.evaluate(
+            async () => (await window.dohcDesktop!.readCrashReport({})).report?.read,
+          ),
+      )
+      .toBe(true);
 
     await desktop.close();
     desktop = null;

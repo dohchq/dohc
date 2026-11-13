@@ -46,8 +46,14 @@ it("reports a copy refused from a notice to the owner it was given", async () =>
     />,
   );
 
-  await user.click(within(screen.getByTestId("workspace-shell-error")).getByRole("button", { name: "Details" }));
-  await user.click(within(screen.getByTestId("workspace-shell-error")).getByRole("button", { name: "Copy details" }));
+  await user.click(
+    within(screen.getByTestId("workspace-shell-error")).getByRole("button", { name: "Details" }),
+  );
+  await user.click(
+    within(screen.getByTestId("workspace-shell-error")).getByRole("button", {
+      name: "Copy details",
+    }),
+  );
   expect(reportFailure).toHaveBeenCalledWith({
     message: `${COPY_FAILURE} Document is not focused.`,
     cause: refusal,
@@ -60,10 +66,17 @@ it("reports a copy refused from a notice to the owner it was given", async () =>
 // toast with Try again.
 it("gives a copy on a screen with no notice owner a toast and Try again", async () => {
   const user = userEvent.setup();
-  const writeText = vi.spyOn(navigator.clipboard, "writeText").mockRejectedValueOnce(new Error("Document is not focused."));
+  const writeText = vi
+    .spyOn(navigator.clipboard, "writeText")
+    .mockRejectedValueOnce(new Error("Document is not focused."));
   render(
     <StandaloneNotices>
-      <CopyButton label="Copy" pinName iconOnly getText={() => "Error: dohc couldn't read its workspace registry"} />
+      <CopyButton
+        label="Copy"
+        pinName
+        iconOnly
+        getText={() => "Error: dohc couldn't read its workspace registry"}
+      />
     </StandaloneNotices>,
   );
 

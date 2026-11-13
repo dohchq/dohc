@@ -23,9 +23,7 @@ export interface DesktopRecordEditHost {
   /** The person, read when the write was requested. */
   person: LocalPersonAuthor;
   /** Engine adapter runner; resolves null when the engine is unavailable. */
-  withAdapter<T>(
-    work: (adapter: CollectionRecordEditAdapter) => Promise<T>,
-  ): Promise<T | null>;
+  withAdapter<T>(work: (adapter: CollectionRecordEditAdapter) => Promise<T>): Promise<T | null>;
   /**
    * Subscribes to the engine's announcement of each settled capture pass in
    * this workspace: the paths the pass captured or reconciled, or null when
@@ -39,12 +37,20 @@ export interface DesktopRecordEditHost {
 // automation's keeps the person its run names.
 function byPerson(session: RecordEditSession, personId: string): RecordEditSession {
   return {
-    applyDecidedLocalUpdate: (decide, onArmed, options) => session.applyDecidedLocalUpdate(decide, onArmed,
-      options.attribution?.actorKind === "human"
-        ? { ...options, actorOriginId: personId, attribution: { actorKind: "human", onBehalfOf: personId, depth: 0 } }
-        : options),
-    settleNow: options => session.settleNow(options),
-    close: options => session.close(options),
+    applyDecidedLocalUpdate: (decide, onArmed, options) =>
+      session.applyDecidedLocalUpdate(
+        decide,
+        onArmed,
+        options.attribution?.actorKind === "human"
+          ? {
+              ...options,
+              actorOriginId: personId,
+              attribution: { actorKind: "human", onBehalfOf: personId, depth: 0 },
+            }
+          : options,
+      ),
+    settleNow: (options) => session.settleNow(options),
+    close: (options) => session.close(options),
   };
 }
 
@@ -62,13 +68,17 @@ export function desktopRecordEditContext(host: DesktopRecordEditHost): Collectio
     async createFile(path, text, author) {
       const named = author.kind === "automation" || author.kind === "agent" ? author : person;
       let result;
-      try { result = await capture.writeAuthoredFile(join(workspaceRoot, path), text, named, {
-        createOnly: true,
-        ...(named.kind === "automation" ? { requestId: `automation-create:${createHash("sha256").update(text).digest("hex")}` } : {}),
-        signal,
-      }); }
-      catch (error) {
-        if (named.kind === "automation" && isIdempotencyKeyReuseRefusal(error)) throw new AutomationCreationCommitted();
+      try {
+        result = await capture.writeAuthoredFile(join(workspaceRoot, path), text, named, {
+          createOnly: true,
+          ...(named.kind === "automation"
+            ? { requestId: `automation-create:${createHash("sha256").update(text).digest("hex")}` }
+            : {}),
+          signal,
+        });
+      } catch (error) {
+        if (named.kind === "automation" && isIdempotencyKeyReuseRefusal(error))
+          throw new AutomationCreationCommitted();
         throw error;
       }
       if (named.kind === "automation" && result.deduped) throw new AutomationCreationCommitted();
@@ -92,10 +102,18 @@ export async function createRecordByHand<Operation>(
     author: CreateCollectionRecordInput["author"];
     localPerson(): Promise<LocalPersonAuthor>;
     withWorkspaceOperation<T>(work: (operation: Operation) => Promise<T>): Promise<T>;
-    editContext(operation: Operation, person: LocalPersonAuthor): Promise<CollectionRecordEditContext>;
+    editContext(
+      operation: Operation,
+      person: LocalPersonAuthor,
+    ): Promise<CollectionRecordEditContext>;
   },
 ): ReturnType<typeof runCollectionRecordCreation> {
   const person = await host.localPerson();
-  return runCollectionRecordCreation(work => host.withWorkspaceOperation(async operation =>
-    work(await host.editContext(operation, person))), { ...input, author: host.author });
+  return runCollectionRecordCreation(
+    (work) =>
+      host.withWorkspaceOperation(async (operation) =>
+        work(await host.editContext(operation, person)),
+      ),
+    { ...input, author: host.author },
+  );
 }

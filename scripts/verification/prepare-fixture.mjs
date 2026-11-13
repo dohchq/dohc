@@ -9,15 +9,29 @@ export function createPrepareFixture(root, buildSource, { commit = true } = {}) 
     writeFileSync(join(root, path), contents);
   };
   put("package.json", '{"type":"module"}\n');
-  put(".gitignore", "node_modules/\ntarget/\n.dohc-dev/\napps/desktop/dist/\napps/desktop/resources/\nservices/share-web/viewer/dist/\nservices/sync-relay/dist/\n");
+  put(
+    ".gitignore",
+    "node_modules/\ntarget/\n.dohc-dev/\napps/desktop/dist/\napps/desktop/resources/\nservices/share-web/viewer/dist/\nservices/sync-relay/dist/\n",
+  );
   put("pnpm-lock.yaml", "new-lock");
   put("node_modules/installed.txt", "old-lock");
   put("scripts/verification/build.mjs", readFileSync(buildSource));
-  put("scripts/verification/cancellation.mjs", readFileSync(new URL("./cancellation.mjs", import.meta.url)));
-  put("tools/rust-engine-program/build-slot.mjs", "export const acquireExclusiveSlot=()=>null; export const capBuildParallelism=source=>({...source}); export const resolveBuildBudget=()=>null; export const freeDiskGb=()=>100; export const acquireBuildSlot=()=>{throw Error('not expected')};  export const acquireVerificationSlot=()=>null;");
-  put("scripts/verification/admission.mjs", "export const admissionPreflight=()=>{};export const installedDependenciesMatch=()=>false;");
+  put(
+    "scripts/verification/cancellation.mjs",
+    readFileSync(new URL("./cancellation.mjs", import.meta.url)),
+  );
+  put(
+    "tools/rust-engine-program/build-slot.mjs",
+    "export const acquireExclusiveSlot=()=>null; export const capBuildParallelism=source=>({...source}); export const resolveBuildBudget=()=>null; export const freeDiskGb=()=>100; export const acquireBuildSlot=()=>{throw Error('not expected')};  export const acquireVerificationSlot=()=>null;",
+  );
+  put(
+    "scripts/verification/admission.mjs",
+    "export const admissionPreflight=()=>{};export const installedDependenciesMatch=()=>false;",
+  );
   put("apps/desktop/scripts/require-e2e-engine.mjs", "export const requireE2eEngine=()=>{};");
-  put("scripts/verification/process.mjs", `
+  put(
+    "scripts/verification/process.mjs",
+    `
     import assert from 'node:assert/strict';
     import {execFileSync} from 'node:child_process';
     import {appendFileSync,chmodSync,existsSync,mkdirSync,readFileSync,writeFileSync} from 'node:fs';
@@ -66,15 +80,39 @@ export function createPrepareFixture(root, buildSource, { commit = true } = {}) 
       }
       return {};
     }
-  `);
+  `,
+  );
   const git = (args) => execFileSync("git", args, { cwd: root, stdio: "ignore" });
   git(["init"]);
   if (commit) {
     git(["add", "."]);
-    git(["-c", `core.hooksPath=${join(root, "no-hooks")}`, "-c", "commit.gpgsign=false",
-      "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "Fixture"]);
+    git([
+      "-c",
+      `core.hooksPath=${join(root, "no-hooks")}`,
+      "-c",
+      "commit.gpgsign=false",
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.invalid",
+      "commit",
+      "-m",
+      "Fixture",
+    ]);
   }
-  return ({ failInstall = false, statusOnly = false, platform = process.platform, arch = process.arch, install = true } = {}) => spawnSync(process.execPath, ["--input-type=module", "-e", `
+  return ({
+    failInstall = false,
+    statusOnly = false,
+    platform = process.platform,
+    arch = process.arch,
+    install = true,
+  } = {}) =>
+    spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `
     import cp from 'node:child_process';
     import {syncBuiltinESMExports} from 'node:module';
     const exec=cp.execFileSync;
@@ -85,5 +123,13 @@ export function createPrepareFixture(root, buildSource, { commit = true } = {}) 
     const {prepare,preparedStatus}=await import('./scripts/verification/build.mjs');
     if(!${statusOnly}) await prepare({install:${install}});
     console.log(JSON.stringify({desktopPrepared:preparedStatus('desktop'),enginePrepared:preparedStatus('engine')}));
-  `], { cwd: root, encoding: "utf8", timeout: 20_000, env: { ...process.env, FIXTURE_INSTALL_FAIL: failInstall ? "1" : "0" } });
+  `,
+      ],
+      {
+        cwd: root,
+        encoding: "utf8",
+        timeout: 20_000,
+        env: { ...process.env, FIXTURE_INSTALL_FAIL: failInstall ? "1" : "0" },
+      },
+    );
 }

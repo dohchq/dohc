@@ -5,7 +5,10 @@ import { join, resolve } from "node:path";
 import { hasPreferredNameControlCharacters } from "@dohc/workspace-contracts/chat-identity-values";
 import { AGENT_HUES } from "@dohc/workspace-contracts/agent-hues";
 import {
-  agentProblem, DEFAULT_USER_SETTINGS, type AgentColors, type AgentProblem,
+  agentProblem,
+  DEFAULT_USER_SETTINGS,
+  type AgentColors,
+  type AgentProblem,
   StoredUserSettings,
   settingsDeepEqual,
   type StoredUserSettingsResult,
@@ -22,10 +25,13 @@ export const USER_SETTINGS_FILE = "dohc-settings.json";
 export const MAX_USER_SETTINGS_FILE_BYTES = 256 * 1024;
 
 const schemaSettingKinds = settingKinds(StoredUserSettings, DEFAULT_USER_SETTINGS);
-const userSettingKinds: typeof schemaSettingKinds = path =>
-  path.length === 2 && path[0] === "appearance" && path[1] === "agentColors" ? "group" : schemaSettingKinds(path);
+const userSettingKinds: typeof schemaSettingKinds = (path) =>
+  path.length === 2 && path[0] === "appearance" && path[1] === "agentColors"
+    ? "group"
+    : schemaSettingKinds(path);
 // An agent starts from a tool or a command, never from parts of both.
-const agentLaunch = (path: readonly string[]) => path.length === 3 && path[0] === "agents" && path[2] === "launch";
+const agentLaunch = (path: readonly string[]) =>
+  path.length === 3 && path[0] === "agents" && path[2] === "launch";
 
 function parseUserSettings(candidate: unknown): StoredUserSettings | null {
   const parsed = StoredUserSettings.safeParse(candidate);
@@ -50,17 +56,15 @@ function rememberColors(root: string, snapshot: UserSettingsSnapshot): UserSetti
 }
 
 // A request reads once, then resolves against the current settings after its awaits.
-export async function agentColorsForPresentation(dir: string): Promise<() => AgentColors | undefined> {
+export async function agentColorsForPresentation(
+  dir: string,
+): Promise<() => AgentColors | undefined> {
   const root = resolve(dir);
   await snapshotFor(root);
   return () => presentationColors.get(root);
 }
 
-function unusable(
-  path: string,
-  text: string | null,
-  problem: string,
-): UserSettingsSnapshot {
+function unusable(path: string, text: string | null, problem: string): UserSettingsSnapshot {
   return {
     text,
     problem,
@@ -75,14 +79,27 @@ function unusable(
 
 function agentProblems(raw: Record<string, unknown>, settings: StoredUserSettings): AgentProblem[] {
   if (!isSettingsObject(raw.agents)) return [];
-  return Object.entries(raw.agents).flatMap(([id, entry], position) => {
-    if (Object.hasOwn(settings.agents, id)) return [];
-    const fields = isSettingsObject(entry) ? entry : {};
-    // A name Settings can show, or none, so the row shows the id.
-    const name = typeof fields.name === "string" && !hasPreferredNameControlCharacters(fields.name) ? fields.name.trim().slice(0, 200) : "";
-    const hue = AGENT_HUES.find((value) => value === fields.hue);
-    return [{ id: id.slice(0, 200), ...(name ? { name } : {}), ...(hue ? { hue } : {}), position, problem: agentProblem(id, entry).slice(0, 500) }];
-  }).slice(0, 50);
+  return Object.entries(raw.agents)
+    .flatMap(([id, entry], position) => {
+      if (Object.hasOwn(settings.agents, id)) return [];
+      const fields = isSettingsObject(entry) ? entry : {};
+      // A name Settings can show, or none, so the row shows the id.
+      const name =
+        typeof fields.name === "string" && !hasPreferredNameControlCharacters(fields.name)
+          ? fields.name.trim().slice(0, 200)
+          : "";
+      const hue = AGENT_HUES.find((value) => value === fields.hue);
+      return [
+        {
+          id: id.slice(0, 200),
+          ...(name ? { name } : {}),
+          ...(hue ? { hue } : {}),
+          position,
+          problem: agentProblem(id, entry).slice(0, 500),
+        },
+      ];
+    })
+    .slice(0, 50);
 }
 
 function snapshotOfText(path: string, text: string): UserSettingsSnapshot {
@@ -95,7 +112,8 @@ function snapshotOfText(path: string, text: string): UserSettingsSnapshot {
   if (!isSettingsObject(parsed)) return unusable(path, text, "it is not a JSON object");
   // The first save writes the migrated file. Version 1 read a file without a
   // version as its own, and migrating one without its keys changes nothing.
-  const raw = parsed.version === 1 || parsed.version === undefined ? migrateVersion1(parsed) : parsed;
+  const raw =
+    parsed.version === 1 || parsed.version === undefined ? migrateVersion1(parsed) : parsed;
   // Another version is a format this build cannot read, not one bad key.
   if (raw.version !== undefined && raw.version !== DEFAULT_USER_SETTINGS.version) {
     return unusable(path, text, `its version is not ${DEFAULT_USER_SETTINGS.version}`);
@@ -105,7 +123,7 @@ function snapshotOfText(path: string, text: string): UserSettingsSnapshot {
     defaults: DEFAULT_USER_SETTINGS,
     kind: userSettingKinds,
     parse: parseUserSettings,
-    reportIgnored: path => !(path[0] === "appearance" && path[1] === "agentColors"),
+    reportIgnored: (path) => !(path[0] === "appearance" && path[1] === "agentColors"),
   });
   const problems = agentProblems(raw, settings);
   return {
@@ -113,7 +131,8 @@ function snapshotOfText(path: string, text: string): UserSettingsSnapshot {
     problem: null,
     raw,
     result: {
-      settings, source: "stored",
+      settings,
+      source: "stored",
       ...(ignored.length > 0 ? { ignored } : {}),
       ...(problems.length > 0 ? { agentProblems: problems } : {}),
     },
@@ -150,7 +169,7 @@ function settingsPath(root: string): string {
 function snapshotFor(root: string): Promise<UserSettingsSnapshot> {
   const existing = snapshots.get(root);
   if (existing) return existing;
-  const read = loadUserSettings(settingsPath(root)).then(snapshot => {
+  const read = loadUserSettings(settingsPath(root)).then((snapshot) => {
     if (snapshots.get(root) === read) rememberColors(root, snapshot);
     return snapshot;
   });
@@ -158,15 +177,11 @@ function snapshotFor(root: string): Promise<UserSettingsSnapshot> {
   return read;
 }
 
-export async function readUserSettingsFile(
-  dir: string,
-): Promise<StoredUserSettingsResult> {
+export async function readUserSettingsFile(dir: string): Promise<StoredUserSettingsResult> {
   return (await loadUserSettings(settingsPath(resolve(dir)))).result;
 }
 
-export async function readCachedUserSettingsFile(
-  dir: string,
-): Promise<StoredUserSettingsResult> {
+export async function readCachedUserSettingsFile(dir: string): Promise<StoredUserSettingsResult> {
   return (await snapshotFor(resolve(dir))).result;
 }
 
@@ -202,7 +217,9 @@ async function commitUserSettings(
   const path = settingsPath(root);
   const text = `${JSON.stringify(content, null, 2)}\n`;
   if (Buffer.byteLength(text, "utf8") > MAX_USER_SETTINGS_FILE_BYTES) {
-    throw new Error("dohc did not save settings because the file would exceed 256 KB. Clear some settings and try again.");
+    throw new Error(
+      "dohc did not save settings because the file would exceed 256 KB. Clear some settings and try again.",
+    );
   }
   const snapshot = snapshotOfText(path, text);
   const conflict = Symbol("settings changed");
@@ -252,11 +269,20 @@ export async function updateUserSettingsFile(
     const fileAgents = onDisk.raw?.agents;
     const changedIds = Object.keys(isSettingsObject(changed.agents) ? changed.agents : {});
     if (fileAgents !== undefined && !isSettingsObject(fileAgents) && changedIds.length > 0) {
-      throw new Error(`dohc did not save settings. ${path} has an "agents" value dohc can't use. Fix or remove it in the file, then try again.`);
+      throw new Error(
+        `dohc did not save settings. ${path} has an "agents" value dohc can't use. Fix or remove it in the file, then try again.`,
+      );
     }
-    const replaced = changedIds.find((id) => isSettingsObject(fileAgents) && Object.hasOwn(fileAgents, id) && !Object.hasOwn(current.agents, id));
+    const replaced = changedIds.find(
+      (id) =>
+        isSettingsObject(fileAgents) &&
+        Object.hasOwn(fileAgents, id) &&
+        !Object.hasOwn(current.agents, id),
+    );
     if (replaced !== undefined) {
-      throw new Error(`dohc did not save settings. ${path} has an agent "${replaced}" that dohc can't use. Fix or remove it in the file, then try again.`);
+      throw new Error(
+        `dohc did not save settings. ${path} has an agent "${replaced}" that dohc can't use. Fix or remove it in the file, then try again.`,
+      );
     }
     const next = StoredUserSettings.parse(changed);
     if (settingsDeepEqual(next, current)) {
@@ -294,9 +320,13 @@ export function writeUserSettingsFile(
 ): Promise<StoredUserSettingsResult> {
   const next = StoredUserSettings.parse(settings);
   return updateUserSettingsFile(dir, (current) => {
-    const taken = Object.keys(next.agents).find((id) => !Object.hasOwn(base.agents, id) && Object.hasOwn(current.agents, id));
+    const taken = Object.keys(next.agents).find(
+      (id) => !Object.hasOwn(base.agents, id) && Object.hasOwn(current.agents, id),
+    );
     if (taken !== undefined) {
-      throw new AgentIdTakenError(`dohc didn't add ${next.agents[taken]!.name} because the settings file changed at the same time.`);
+      throw new AgentIdTakenError(
+        `dohc didn't add ${next.agents[taken]!.name} because the settings file changed at the same time.`,
+      );
     }
     return overlaySettings(current, base, next, agentLaunch);
   });
@@ -321,7 +351,11 @@ export async function orderUserSettingsAgents(
     const agents = onDisk.raw?.agents;
     const ids = isSettingsObject(agents) ? Object.keys(agents) : [];
     const next = [...new Set([...order.filter((id) => ids.includes(id)), ...ids])];
-    if (onDisk.raw === null || !isSettingsObject(agents) || next.every((id, index) => id === ids[index])) {
+    if (
+      onDisk.raw === null ||
+      !isSettingsObject(agents) ||
+      next.every((id, index) => id === ids[index])
+    ) {
       snapshots.set(root, Promise.resolve(rememberColors(root, onDisk)));
       return onDisk.result;
     }
@@ -383,9 +417,10 @@ export async function reloadUserSettingsFile(
   if (previous && previous.text === loaded.text && previous.problem === loaded.problem) {
     return null;
   }
-  const snapshot = previous && loaded.problem !== null
-    ? { ...loaded, result: { ...loaded.result, settings: previous.result.settings } }
-    : loaded;
+  const snapshot =
+    previous && loaded.problem !== null
+      ? { ...loaded, result: { ...loaded.result, settings: previous.result.settings } }
+      : loaded;
   snapshots.set(root, Promise.resolve(rememberColors(root, snapshot)));
   return snapshot.result;
 }

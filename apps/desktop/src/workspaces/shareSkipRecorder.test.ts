@@ -51,9 +51,7 @@ describe("share skip recorder", () => {
       share.effects,
       "batching the pages loses the ones a failed pull already committed past",
     ).toEqual(["persist", "persist"]);
-    expect(
-      share.stored()?.skippedOps?.ops.map((op) => op.originSeq),
-    ).toEqual([1, 2, 3]);
+    expect(share.stored()?.skippedOps?.ops.map((op) => op.originSeq)).toEqual([1, 2, 3]);
     expect(share.stored()?.skippedOps?.generation).toBe(2);
   });
 

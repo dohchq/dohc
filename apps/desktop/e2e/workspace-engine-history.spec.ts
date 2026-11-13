@@ -36,15 +36,11 @@ test("a workspace shows engine moments and restores a file end-to-end", async ()
     await page.getByTestId(activityPin("history")).click();
     await expect(
       page
-        .locator(
-          '[data-testid="engine-moment-group"], [data-testid="engine-moment-open"]',
-        )
+        .locator('[data-testid="engine-moment-group"], [data-testid="engine-moment-open"]')
         .first(),
     ).toBeVisible();
 
-    await writeWorkspaceFiles(temp, [
-      { path: "notes/plan.md", contents: "first draft\n" },
-    ]);
+    await writeWorkspaceFiles(temp, [{ path: "notes/plan.md", contents: "first draft\n" }]);
     await waitForWorkspaceFile(page, workspace.workspaceId, "notes/plan.md");
     const momentRow = page.locator(
       '[data-testid="engine-moment-open"][data-moment-path="notes/plan.md"]',
@@ -56,9 +52,7 @@ test("a workspace shows engine moments and restores a file end-to-end", async ()
     await expect(page.getByTestId("history-list")).toHaveCount(0);
 
     // Second edit -> newest moment carries the v1 -> v2 diff.
-    await writeWorkspaceFiles(temp, [
-      { path: "notes/plan.md", contents: "second draft\n" },
-    ]);
+    await writeWorkspaceFiles(temp, [{ path: "notes/plan.md", contents: "second draft\n" }]);
     await expect(momentRow).toHaveCount(2);
 
     await momentRow.first().click();
@@ -72,7 +66,9 @@ test("a workspace shows engine moments and restores a file end-to-end", async ()
     await expect(lines.locator("ins")).toHaveText("second");
     await expect(lines.locator("[data-kind='removed'] code")).toHaveText("Removed: first draft");
     await expect(lines.locator("[data-kind='added'] code")).toHaveText("Added: second draft");
-    await expect(page.getByTestId("engine-diff-counts")).toContainText("1 line added, 1 line removed");
+    await expect(page.getByTestId("engine-diff-counts")).toContainText(
+      "1 line added, 1 line removed",
+    );
 
     // Engine restore: back to the state before this change...
     await page.getByTestId("engine-diff-restore-file").click();
@@ -93,9 +89,7 @@ test("a workspace shows engine moments and restores a file end-to-end", async ()
 
     // Undo = restore to before the restore moment (forward again).
     await page.getByTestId("engine-diff-undo-restore").click();
-    await expect(page.getByTestId("engine-diff-restore-status")).toContainText(
-      "Undid the restore",
-    );
+    await expect(page.getByTestId("engine-diff-restore-status")).toContainText("Undid the restore");
     await expect
       .poll(() => readFile(join(temp.rootPath, "notes/plan.md"), "utf8"))
       .toBe("second draft\n");

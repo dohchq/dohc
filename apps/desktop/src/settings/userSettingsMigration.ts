@@ -20,8 +20,12 @@ function version1Agent(raw: Record<string, unknown>): Record<string, unknown> | 
   const profile = AgentLaunchProfile.safeParse(runner.profile);
   const command = typeof runner.command === "string" ? runner.command.trim() : "";
   const launch = profile.success ? profile.data : command ? { command } : null;
-  const name = AgentSettings.shape.name.safeParse(isSettingsObject(raw.profile) ? raw.profile.agentName : undefined);
-  const yourAgentColor = isSettingsObject(raw.appearance) ? raw.appearance.yourAgentColor : undefined;
+  const name = AgentSettings.shape.name.safeParse(
+    isSettingsObject(raw.profile) ? raw.profile.agentName : undefined,
+  );
+  const yourAgentColor = isSettingsObject(raw.appearance)
+    ? raw.appearance.yourAgentColor
+    : undefined;
   const hue = IDENTITY_HUES.find((hue) => hue === yourAgentColor);
   if (!launch && !name.success && !hue) return null;
   const timeoutMinutes = AgentSettings.shape.timeoutMinutes.safeParse(runner.timeoutMinutes);
@@ -44,7 +48,8 @@ export function migrateVersion1(raw: Record<string, unknown>): Record<string, un
   const agents = raw.agents === undefined ? {} : raw.agents;
   // Agents the person wrote in the file stay. When the version 1 agent has
   // no place among them, its keys stay too, so a save cannot lose it.
-  if (agent && (!isSettingsObject(agents) || Object.hasOwn(agents, DEFAULT_AGENT_ID))) return { ...raw, version: 2 };
+  if (agent && (!isSettingsObject(agents) || Object.hasOwn(agents, DEFAULT_AGENT_ID)))
+    return { ...raw, version: 2 };
   const { runner: _runner, ...rest } = raw;
   return {
     ...rest,

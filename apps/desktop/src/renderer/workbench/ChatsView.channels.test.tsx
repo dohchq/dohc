@@ -18,8 +18,13 @@ import { deferred } from "../../testing/deferred";
 
 describe("ChatsView channels", () => {
   it("keeps reaction writes ordered when switching away from and remounting a chat lane", async () => {
-    bridgeMock.listChatChannels.mockResolvedValue({ channels: [channel({ type: "both" })], fileThreads: [] });
-    bridgeMock.listChannelThreads.mockImplementation(async (input) => ({ threads: input.lane === "chat" ? [thread()] : [] }));
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ type: "both" })],
+      fileThreads: [],
+    });
+    bridgeMock.listChannelThreads.mockImplementation(async (input) => ({
+      threads: input.lane === "chat" ? [thread()] : [],
+    }));
     bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
     const writes: ReturnType<typeof deferred<void>>[] = [];
     bridgeMock.setChatReaction.mockImplementation(() => {
@@ -50,7 +55,9 @@ describe("ChatsView channels", () => {
     const onError = vi.fn();
     bridgeMock.createChatChannel
       .mockRejectedValueOnce(new Error("The workspace engine is not running."))
-      .mockResolvedValueOnce({ channel: channel({ id: "channel-9", name: "launch", slug: "launch", wireId: "channel-9" }) });
+      .mockResolvedValueOnce({
+        channel: channel({ id: "channel-9", name: "launch", slug: "launch", wireId: "channel-9" }),
+      });
     renderView(vi.fn(), onError);
 
     await user.click(await screen.findByTestId("chats-new-channel"));
@@ -62,7 +69,11 @@ describe("ChatsView channels", () => {
     const retry = onError.mock.calls[0]?.[2] as () => void;
     act(() => retry());
     expect((await screen.findByTestId("chats-channel-title")).textContent).toBe("launch");
-    expect(bridgeMock.createChatChannel).toHaveBeenLastCalledWith({ workspaceId: "workspace-a", name: "launch", type: "chat" });
+    expect(bridgeMock.createChatChannel).toHaveBeenLastCalledWith({
+      workspaceId: "workspace-a",
+      name: "launch",
+      type: "chat",
+    });
     expect(onError).toHaveBeenCalledTimes(1);
   });
 
@@ -83,7 +94,10 @@ describe("ChatsView channels", () => {
     await screen.findByTestId("chats-new-channel-error");
     await user.click(screen.getByTestId("chats-new-channel-cancel"));
 
-    bridgeMock.listChatChannels.mockResolvedValue({ channels: [channel(), existing], fileThreads: [] });
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel(), existing],
+      fileThreads: [],
+    });
     act(() => onError.mock.calls[0]?.[2]?.());
     await waitFor(() => expect(onError).toHaveBeenCalledTimes(2));
     expect(onError).toHaveBeenLastCalledWith(
@@ -99,7 +113,10 @@ describe("ChatsView channels", () => {
     );
     act(() => onError.mock.calls[1]?.[4]?.action?.run());
     expect((await screen.findByTestId("chats-channel-title")).textContent).toBe("Launch team");
-    expect(bridgeMock.listChannelThreads).toHaveBeenLastCalledWith({ workspaceId: "workspace-a", channelId: existing.id });
+    expect(bridgeMock.listChannelThreads).toHaveBeenLastCalledWith({
+      workspaceId: "workspace-a",
+      channelId: existing.id,
+    });
     expect(bridgeMock.createChatChannel).toHaveBeenCalledTimes(2);
   });
 
@@ -298,14 +315,10 @@ describe("ChatsView panel navigator unread badges", () => {
       .mockRejectedValue(new Error("offline"));
 
     const view = render(navigator(0));
-    await waitFor(() =>
-      expect(bridgeMock.listChatChannelShares).toHaveBeenCalledTimes(1),
-    );
+    await waitFor(() => expect(bridgeMock.listChatChannelShares).toHaveBeenCalledTimes(1));
     // The background refresh: nothing has answered yet, so it fills in.
     view.rerender(navigator(1));
-    await waitFor(() =>
-      expect(bridgeMock.listChatChannelShares).toHaveBeenCalledTimes(2),
-    );
+    await waitFor(() => expect(bridgeMock.listChatChannelShares).toHaveBeenCalledTimes(2));
     expect(await screen.findByTestId("chats-shares-unreadable")).toBeTruthy();
 
     // Now the read that was always in flight answers, authoritatively.
@@ -623,9 +636,7 @@ describe("ChatsView panel navigator unread badges", () => {
       );
       await Promise.resolve();
     });
-    await waitFor(() =>
-      expect(screen.getAllByTestId("chats-share-member")).toHaveLength(2),
-    );
+    await waitFor(() => expect(screen.getAllByTestId("chats-share-member")).toHaveLength(2));
 
     // Now the stalled background lookup answers with its older snapshot.
     await act(async () => {

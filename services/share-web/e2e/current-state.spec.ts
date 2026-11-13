@@ -6,9 +6,7 @@ const LOG_BATCH_SIZE = 500;
 
 async function requireOk(response: Response, operation: string): Promise<void> {
   if (response.ok) return;
-  throw new Error(
-    `${operation} failed with ${String(response.status)}: ${await response.text()}`,
-  );
+  throw new Error(`${operation} failed with ${String(response.status)}: ${await response.text()}`);
 }
 
 test("opens mature shares from current state and then follows forward updates", async ({
@@ -69,7 +67,11 @@ test("opens mature shares from current state and then follows forward updates", 
   }
 
   await page.goto(`${stack.shareWebUrl}/s/#${seeded.secret}`);
-  await expect(page.getByRole("navigation", { name: "Shared files" }).getByRole("button", { name: "mature.md", exact: true })).toBeVisible();
+  await expect(
+    page
+      .getByRole("navigation", { name: "Shared files" })
+      .getByRole("button", { name: "mature.md", exact: true }),
+  ).toBeVisible();
   await expect(page.getByRole("heading", { name: "Current projection" })).toBeVisible();
   await expect(page.locator("article.markdown")).toContainText(
     "Opened without replaying mature history.",
@@ -94,25 +96,27 @@ test("opens mature shares from current state and then follows forward updates", 
       headers: ownerHeaders(seeded.ownerUserId, true),
       body: JSON.stringify({
         originId,
-        ops: [{
-          originSeq: HISTORY_OPS,
-          opKind: "moment.append",
-          recordedAtMs: startedAtMs + HISTORY_OPS,
-          payload: {
-            momentId: `mature-moment-${String(HISTORY_OPS)}`,
-            versionId: "main",
-            objectId: file.objectId,
-            path: file.path,
+        ops: [
+          {
+            originSeq: HISTORY_OPS,
+            opKind: "moment.append",
             recordedAtMs: startedAtMs + HISTORY_OPS,
-            operation: "write",
-            payloadBeforeBlobSha256: file.blobSha256,
-            payloadBeforePath: file.path,
-            payloadAfterBlobSha256: updatedSha,
-            payloadAfterPath: file.path,
-            metadata: { origin: "user" },
-            beforePresent: "present",
+            payload: {
+              momentId: `mature-moment-${String(HISTORY_OPS)}`,
+              versionId: "main",
+              objectId: file.objectId,
+              path: file.path,
+              recordedAtMs: startedAtMs + HISTORY_OPS,
+              operation: "write",
+              payloadBeforeBlobSha256: file.blobSha256,
+              payloadBeforePath: file.path,
+              payloadAfterBlobSha256: updatedSha,
+              payloadAfterPath: file.path,
+              metadata: { origin: "user" },
+              beforePresent: "present",
+            },
           },
-        }],
+        ],
       }),
     }),
     "append forward update",

@@ -6,8 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 // Auth schema that the auth service and relay query.
 import { applyMigrations, listMigrations } from "../../../../scripts/lib/apply-migrations.mjs";
 
-const POSTGRES_URL =
-  process.env.POSTGRES_URL ?? "postgres://dohc:dohc@localhost:54329/dohc";
+const POSTGRES_URL = process.env.POSTGRES_URL ?? "postgres://dohc:dohc@localhost:54329/dohc";
 const RETIRED_TABLES = [
   "agent_approvals",
   "agent_runs",
@@ -43,7 +42,9 @@ try {
   pgAvailable = true;
 } catch (error) {
   if (process.env.DOHC_REQUIRE_POSTGRES === "1") {
-    throw new Error(`DOHC_REQUIRE_POSTGRES=1 but no Postgres is reachable at ${POSTGRES_URL}.`, { cause: error });
+    throw new Error(`DOHC_REQUIRE_POSTGRES=1 but no Postgres is reachable at ${POSTGRES_URL}.`, {
+      cause: error,
+    });
   }
 }
 

@@ -1,5 +1,15 @@
 import { AtSign, FileText, Hash, ListChecks, Plus, type LucideIcon } from "lucide-react";
-import { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
+import {
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type Ref,
+} from "react";
 import {
   activeMentionQuery,
   applyMentionCompletion,
@@ -7,14 +17,25 @@ import {
   matchMentionCandidates,
   type MentionCandidate,
 } from "@dohc/workspace-contracts/chat-mentions";
-import { agentRosterPickIsPresent, mapAgentRosterPick, type AgentAddressedOffer, type AgentRosterPick } from "../offers/agentAddressed";
+import {
+  agentRosterPickIsPresent,
+  mapAgentRosterPick,
+  type AgentAddressedOffer,
+  type AgentRosterPick,
+} from "../offers/agentAddressed";
 import type { ActorPresentation, WorkspaceHeadingRecord } from "../../ipc/bridgeContract";
 import { AgentOffer } from "./AgentOffer";
 import { ChatAvatar } from "./ChatAvatar";
 import { ownPresentation, ownAgentPresentation } from "./actorPresentation";
 import { ComposerSendButton } from "./ComposerSendButton";
 import { ComposerPoll } from "./ComposerPoll";
-import { activeCatalogQuery, NEW_POLL, openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./chatPoll";
+import {
+  activeCatalogQuery,
+  NEW_POLL,
+  openPollChoices,
+  pollChoicesToSend,
+  type ComposerPollDraft,
+} from "./chatPoll";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { Menu, type MenuItem } from "../ui/Menu";
 import {
@@ -54,15 +75,32 @@ export type CatalogRowId = "poll" | "mention" | "file";
 
 // What a / at the start of a word offers. A row's key shows only where that
 // key works in the composer.
-const CATALOG: readonly { id: CatalogRowId; label: string; icon: LucideIcon; keyHint?: string; words: readonly string[] }[] = [
+const CATALOG: readonly {
+  id: CatalogRowId;
+  label: string;
+  icon: LucideIcon;
+  keyHint?: string;
+  words: readonly string[];
+}[] = [
   { id: "poll", label: "Poll", icon: ListChecks, keyHint: "/poll", words: ["poll"] },
-  { id: "mention", label: "Person or agent", icon: AtSign, keyHint: "@", words: ["person", "agent", "mention"] },
+  {
+    id: "mention",
+    label: "Person or agent",
+    icon: AtSign,
+    keyHint: "@",
+    words: ["person", "agent", "mention"],
+  },
   { id: "file", label: "File or heading", icon: FileText, words: ["file", "heading"] },
 ];
 
-export function matchCatalogRows(query: string, available: (id: CatalogRowId) => boolean): CatalogRowId[] {
+export function matchCatalogRows(
+  query: string,
+  available: (id: CatalogRowId) => boolean,
+): CatalogRowId[] {
   const needle = query.toLocaleLowerCase();
-  return CATALOG.filter((row) => available(row.id) && row.words.some((word) => word.startsWith(needle))).map((row) => row.id);
+  return CATALOG.filter(
+    (row) => available(row.id) && row.words.some((word) => word.startsWith(needle)),
+  ).map((row) => row.id);
 }
 
 // The catalog's rows. The textarea keeps focus, so a row is picked on mouse
@@ -121,7 +159,11 @@ const BAR_BUTTON =
   "grid size-7 shrink-0 place-items-center rounded-md text-muted hover:bg-hover hover:text-ink disabled:opacity-40";
 // A person or agent's role, such as "your agent", reads as words, not a hint.
 const ROLE_DETAIL = "min-w-0 flex-1 truncate text-[12px] text-muted";
-const COMPOSER_INSET = { stream: "mx-5 mb-4 mt-1", thread: "mx-4 mb-4 mt-1", narrow: "mx-3 mb-3 mt-1" } as const;
+const COMPOSER_INSET = {
+  stream: "mx-5 mb-4 mt-1",
+  thread: "mx-4 mb-4 mt-1",
+  narrow: "mx-3 mb-3 mt-1",
+} as const;
 
 export function MentionComposer(props: {
   testIdPrefix: string;
@@ -170,7 +212,7 @@ export function MentionComposer(props: {
   handle?: Ref<MentionComposerHandle>;
 }) {
   const [focused, setFocused] = useState(false);
-  const pollDraft = props.onPollChange ? props.poll ?? null : null;
+  const pollDraft = props.onPollChange ? (props.poll ?? null) : null;
   // The open poll's choices; null while no poll is open.
   const poll = openPollChoices(pollDraft);
   const expanded = props.surface !== "post" || focused || props.value.length > 0 || poll !== null;
@@ -186,14 +228,24 @@ export function MentionComposer(props: {
   }, [props.value, props.onRosterPick]);
   useEffect(() => {
     const pick = rosterPick.current;
-    if (!pick || props.candidates.some(candidate => candidate.id === pick.candidate.id && candidate.handle === pick.candidate.handle)) return;
+    if (
+      !pick ||
+      props.candidates.some(
+        (candidate) =>
+          candidate.id === pick.candidate.id && candidate.handle === pick.candidate.handle,
+      )
+    )
+      return;
     rosterPick.current = null;
     props.onRosterPick?.(null);
   }, [props.candidates, props.onRosterPick]);
-  useEffect(() => () => {
-    rosterPick.current = null;
-    props.onRosterPick?.(null);
-  }, [props.composerId, props.rosterScope]);
+  useEffect(
+    () => () => {
+      rosterPick.current = null;
+      props.onRosterPick?.(null);
+    },
+    [props.composerId, props.rosterScope],
+  );
   const [caret, setCaret] = useState(0);
   const [menuOpen, setMenuOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
@@ -210,36 +262,43 @@ export function MentionComposer(props: {
   // When we complete a mention we must reposition the caret after React commits
   // the new value; this holds the pending caret target for the layout effect.
   const pendingCaret = useRef<number | null>(null);
-  useImperativeHandle(props.handle, () => ({
-    focus: () => textareaRef.current?.focus(),
-    mention: (candidateId) => {
-      const candidate = props.candidates.find((value) => value.id === candidateId);
-      const pick = rosterPick.current;
-      const node = textareaRef.current;
-      if (!candidate) {
-        node?.focus();
-        return;
-      }
-      // Already mentioned: the caret goes back to the end, as on the first press.
-      if (pick?.candidate.id === candidateId && agentRosterPickIsPresent(pick, props.value)) {
-        node?.focus();
-        node?.setSelectionRange(props.value.length, props.value.length);
-        setCaret(props.value.length);
-        return;
-      }
-      // A mention glued to a word is not a mention; give it its own word.
-      const draft = props.value.length > 0 && !/\s$/u.test(props.value) ? `${props.value} ` : props.value;
-      const from = draft.length;
-      const value = `${draft}@${candidate.handle} `;
-      pendingCaret.current = value.length;
-      const next = !props.onRosterPick ? null : candidate.kind === "agent"
-        ? { candidate, from, to: from + 1 + candidate.handle.length }
-        : rosterPick.current;
-      rosterPick.current = next;
-      props.onChange(value);
-      props.onRosterPick?.(next);
-    },
-  }), [props.candidates, props.value, props.onChange, props.onRosterPick]);
+  useImperativeHandle(
+    props.handle,
+    () => ({
+      focus: () => textareaRef.current?.focus(),
+      mention: (candidateId) => {
+        const candidate = props.candidates.find((value) => value.id === candidateId);
+        const pick = rosterPick.current;
+        const node = textareaRef.current;
+        if (!candidate) {
+          node?.focus();
+          return;
+        }
+        // Already mentioned: the caret goes back to the end, as on the first press.
+        if (pick?.candidate.id === candidateId && agentRosterPickIsPresent(pick, props.value)) {
+          node?.focus();
+          node?.setSelectionRange(props.value.length, props.value.length);
+          setCaret(props.value.length);
+          return;
+        }
+        // A mention glued to a word is not a mention; give it its own word.
+        const draft =
+          props.value.length > 0 && !/\s$/u.test(props.value) ? `${props.value} ` : props.value;
+        const from = draft.length;
+        const value = `${draft}@${candidate.handle} `;
+        pendingCaret.current = value.length;
+        const next = !props.onRosterPick
+          ? null
+          : candidate.kind === "agent"
+            ? { candidate, from, to: from + 1 + candidate.handle.length }
+            : rosterPick.current;
+        rosterPick.current = next;
+        props.onChange(value);
+        props.onRosterPick?.(next);
+      },
+    }),
+    [props.candidates, props.value, props.onChange, props.onRosterPick],
+  );
   const highlightFileOnOpen = useRef(false);
   const pollRef = useRef<HTMLFieldSetElement | null>(null);
   const focusPollOnOpen = useRef(false);
@@ -255,7 +314,12 @@ export function MentionComposer(props: {
   const hasFiles = (props.fileCandidates?.length ?? 0) > 0;
   const offersPoll = props.onPollChange !== undefined;
   const catalogRows = useMemo(
-    () => (catalogQuery ? matchCatalogRows(catalogQuery.query, (id) => (id === "poll" ? offersPoll : id === "file" ? hasFiles : true)) : []),
+    () =>
+      catalogQuery
+        ? matchCatalogRows(catalogQuery.query, (id) =>
+            id === "poll" ? offersPoll : id === "file" ? hasFiles : true,
+          )
+        : [],
     [catalogQuery, hasFiles, offersPoll],
   );
   const matches = useMemo(
@@ -279,7 +343,8 @@ export function MentionComposer(props: {
     : catalogQuery
       ? catalogRows.length
       : matches.length + fileMatches.length;
-  const showMenu = fileStage !== null || ((active !== null || catalogQuery !== null) && menuLength > 0);
+  const showMenu =
+    fileStage !== null || ((active !== null || catalogQuery !== null) && menuLength > 0);
 
   const menuRef = useRef<HTMLUListElement | null>(null);
   const formRef = useRef<HTMLFormElement | null>(null);
@@ -313,13 +378,20 @@ export function MentionComposer(props: {
       const height = Math.min(192, menu.scrollHeight + 2);
       const down = height > above && below > above;
       const width = Math.min(256, window.innerWidth - 16);
-      const left = Math.max(MENU_EDGE_PX, Math.min(frame.left, window.innerWidth - MENU_EDGE_PX - width));
+      const left = Math.max(
+        MENU_EDGE_PX,
+        Math.min(frame.left, window.innerWidth - MENU_EDGE_PX - width),
+      );
       const maxHeight = Math.max(0, Math.min(192, down ? below : above));
-      setMenuPosition(down
-        ? { left, top: frame.bottom + MENU_GAP_PX, maxHeight, placement: "below" }
-        : { left, bottom: window.innerHeight - top + MENU_GAP_PX, maxHeight, placement: "above" });
+      setMenuPosition(
+        down
+          ? { left, top: frame.bottom + MENU_GAP_PX, maxHeight, placement: "below" }
+          : { left, bottom: window.innerHeight - top + MENU_GAP_PX, maxHeight, placement: "above" },
+      );
     };
-    const scrolled = (event: Event) => { if (event.target !== menu) position(); };
+    const scrolled = (event: Event) => {
+      if (event.target !== menu) position();
+    };
     const resized = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(position);
     resized?.observe(stack);
     position();
@@ -393,9 +465,15 @@ export function MentionComposer(props: {
       const result = applyMentionCompletion(props.value, current, candidate);
       pendingCaret.current = result.caret;
       setMenuOpen(false);
-      const pick = !props.onRosterPick ? null : candidate.kind === "agent"
-        ? { candidate, from: current.start, to: result.caret - 1 }
-        : mapAgentRosterPick(rosterPick.current, { from: current.start, to: current.start + 1 + current.query.length, insertedLength: result.caret - current.start });
+      const pick = !props.onRosterPick
+        ? null
+        : candidate.kind === "agent"
+          ? { candidate, from: current.start, to: result.caret - 1 }
+          : mapAgentRosterPick(rosterPick.current, {
+              from: current.start,
+              to: current.start + 1 + current.query.length,
+              insertedLength: result.caret - current.start,
+            });
       rosterPick.current = pick;
       props.onChange(result.value);
       props.onRosterPick?.(pick);
@@ -425,7 +503,12 @@ export function MentionComposer(props: {
       setFileStage({ path: candidate.path, label: candidate.label, headings: [], loading: true });
       const load = props.loadFileHeadings;
       if (!load) {
-        setFileStage({ path: candidate.path, label: candidate.label, headings: [], loading: false });
+        setFileStage({
+          path: candidate.path,
+          label: candidate.label,
+          headings: [],
+          loading: false,
+        });
         return;
       }
       void load(candidate.path)
@@ -440,7 +523,12 @@ export function MentionComposer(props: {
         })
         .catch(() => {
           if (request !== fileRequest.current || load !== currentFileLoader.current) return;
-          setFileStage({ path: candidate.path, label: candidate.label, headings: [], loading: false });
+          setFileStage({
+            path: candidate.path,
+            label: candidate.label,
+            headings: [],
+            loading: false,
+          });
         });
     },
     [props.loadFileHeadings],
@@ -555,7 +643,22 @@ export function MentionComposer(props: {
         props.onEscape();
       }
     },
-    [catalogQuery, catalogRows, chooseFile, complete, completeFile, fileMatches, fileStage, highlight, matches, menuLength, pickCatalogRow, props.onEscape, props.onSend, showMenu],
+    [
+      catalogQuery,
+      catalogRows,
+      chooseFile,
+      complete,
+      completeFile,
+      fileMatches,
+      fileStage,
+      highlight,
+      matches,
+      menuLength,
+      pickCatalogRow,
+      props.onEscape,
+      props.onSend,
+      showMenu,
+    ],
   );
 
   const listboxId = `${props.composerId}-mentions`;
@@ -600,46 +703,56 @@ export function MentionComposer(props: {
   const locked = props.sending || props.disabled === true;
   const empty = !props.allowEmptySend && props.value.trim().length === 0;
   // A poll sends once it has a question and two choices the engine accepts.
-  const pollUnready = poll !== null && (props.value.trim().length === 0 || pollChoicesToSend(poll) === null);
+  const pollUnready =
+    poll !== null && (props.value.trim().length === 0 || pollChoicesToSend(poll) === null);
   const sendDisabled = props.disabled === true || empty || pollUnready;
-  const pollBlock = poll !== null && props.onPollChange ? (
-    <ComposerPoll
-      rootRef={pollRef}
-      testIdPrefix={props.testIdPrefix}
-      choices={poll}
-      disabled={locked}
-      surface={isPost ? "post" : "stream"}
-      onChange={(choices) => props.onPollChange?.({ choices, open: true })}
-      onRemove={() => {
-        props.onPollChange?.({ choices: poll, open: false });
-        textareaRef.current?.focus();
-      }}
-      onFocusQuestion={() => textareaRef.current?.focus()}
-    />
-  ) : null;
+  const pollBlock =
+    poll !== null && props.onPollChange ? (
+      <ComposerPoll
+        rootRef={pollRef}
+        testIdPrefix={props.testIdPrefix}
+        choices={poll}
+        disabled={locked}
+        surface={isPost ? "post" : "stream"}
+        onChange={(choices) => props.onPollChange?.({ choices, open: true })}
+        onRemove={() => {
+          props.onPollChange?.({ choices: poll, open: false });
+          textareaRef.current?.focus();
+        }}
+        onFocusQuestion={() => textareaRef.current?.focus()}
+      />
+    ) : null;
   // A chat's "+": attach a page, or start or remove a poll.
   const addItems: MenuItem[] = [
-    ...(hasFiles ? [{
-      id: "file",
-      label: "Attach a page",
-      icon: <FileText size={14} aria-hidden />,
-      testId: `${props.testIdPrefix}-attach-page`,
-      onSelect: () => {
-        textareaRef.current?.focus();
-        highlightFileOnOpen.current = true;
-        insertAtCaret("@");
-      },
-    }] : []),
-    ...(offersPoll ? [{
-      id: "poll",
-      label: poll ? "Remove poll" : "Start a poll",
-      icon: <ListChecks size={14} aria-hidden />,
-      testId: `${props.testIdPrefix}-poll-toggle`,
-      onSelect: () => {
-        textareaRef.current?.focus();
-        togglePoll(props.value);
-      },
-    }] : []),
+    ...(hasFiles
+      ? [
+          {
+            id: "file",
+            label: "Attach a page",
+            icon: <FileText size={14} aria-hidden />,
+            testId: `${props.testIdPrefix}-attach-page`,
+            onSelect: () => {
+              textareaRef.current?.focus();
+              highlightFileOnOpen.current = true;
+              insertAtCaret("@");
+            },
+          },
+        ]
+      : []),
+    ...(offersPoll
+      ? [
+          {
+            id: "poll",
+            label: poll ? "Remove poll" : "Start a poll",
+            icon: <ListChecks size={14} aria-hidden />,
+            testId: `${props.testIdPrefix}-poll-toggle`,
+            onSelect: () => {
+              textareaRef.current?.focus();
+              togglePoll(props.value);
+            },
+          },
+        ]
+      : []),
   ];
   const pollButton = offersPoll ? (
     <button
@@ -668,7 +781,9 @@ export function MentionComposer(props: {
       className={
         isPost
           ? `@container/composer relative flex shrink-0 flex-col rounded-xl border bg-panel transition-colors duration-75 ${
-              expanded ? "border-line px-4 pb-2 pt-3" : "border-line px-3 py-2 hover:border-muted/50"
+              expanded
+                ? "border-line px-4 pb-2 pt-3"
+                : "border-line px-3 py-2 hover:border-muted/50"
             }`
           : `relative flex shrink-0 flex-col rounded-[10px] border border-line bg-bg transition-colors duration-75 focus-within:border-ink/45 ${COMPOSER_INSET[props.inset ?? "stream"]}`
       }
@@ -679,7 +794,14 @@ export function MentionComposer(props: {
     >
       {isPost && props.authorName ? (
         <div className={`flex items-center gap-2.5 ${expanded ? "mb-2" : ""}`}>
-          <ChatAvatar presentation={props.authorPresentation ?? (props.authorKind === "agent" ? ownAgentPresentation : ownPresentation)} name={props.authorName} kind={props.authorKind ?? "human"} />
+          <ChatAvatar
+            presentation={
+              props.authorPresentation ??
+              (props.authorKind === "agent" ? ownAgentPresentation : ownPresentation)
+            }
+            name={props.authorName}
+            kind={props.authorKind ?? "human"}
+          />
           {expanded ? (
             <span className="text-[14px] font-semibold text-ink">{props.authorName}</span>
           ) : (
@@ -705,7 +827,13 @@ export function MentionComposer(props: {
           id={listboxId}
           data-testid={`${props.testIdPrefix}-${!fileStage && catalogQuery ? "catalog" : "mention-menu"}`}
           role="listbox"
-          aria-label={fileStage ? `Mention ${fileStage.label}` : catalogQuery ? "Add to message" : "Mention a person, agent, or file"}
+          aria-label={
+            fileStage
+              ? `Mention ${fileStage.label}`
+              : catalogQuery
+                ? "Add to message"
+                : "Mention a person, agent, or file"
+          }
           className={`${MENU_FRAME} ${MENU_ENTER} fixed z-50 w-64 max-w-[calc(100vw-16px)]`}
         >
           {!fileStage && catalogQuery ? (
@@ -778,68 +906,71 @@ export function MentionComposer(props: {
             </>
           ) : (
             <>
-          {matches.map((candidate, index) => (
-            <li key={`mention:${candidate.id}`} role="presentation">
-              <button
-                type="button"
-                role="option"
-                id={`${listboxId}-${candidate.id}`}
-                aria-selected={index === boundedHighlight}
-                data-active={index === boundedHighlight || undefined}
-                data-testid={`${props.testIdPrefix}-mention-option`}
-                data-candidate-id={candidate.id}
-                tabIndex={-1}
-                // Mouse down (not click) so the textarea never loses focus
-                // before we reposition the caret.
-                onMouseDown={(event) => {
-                  event.preventDefault();
-                  complete(candidate);
-                }}
-                onMouseMove={hover(index)}
-                className={OPTION_CLASS}
-              >
-                <span className={`${MENU_ICON} text-subtle`}>
-                  <AtSign size={14} aria-hidden />
-                </span>
-                <span className={MENU_TITLE}>
-                  <span className="sr-only">@</span>
-                  {candidate.handle}
-                </span>
-                {(candidate.description ?? candidate.label).toLocaleLowerCase() === candidate.handle.toLocaleLowerCase() ? null : (
-                  <span className={ROLE_DETAIL}>{candidate.description ?? candidate.label}</span>
-                )}
-              </button>
-            </li>
-          ))}
-          {fileMatches.map((candidate, fileIndex) => {
-            const index = matches.length + fileIndex;
-            return (
-              <li key={`file:${candidate.path}`} role="presentation">
-                <button
-                  type="button"
-                  role="option"
-                  id={`${listboxId}-file-${fileIndex}`}
-                  aria-selected={index === boundedHighlight}
-                  data-active={index === boundedHighlight || undefined}
-                  data-testid={`${props.testIdPrefix}-file-mention-option`}
-                  data-path={candidate.path}
-                  tabIndex={-1}
-                  onMouseDown={(event) => {
-                    event.preventDefault();
-                    chooseFile(candidate);
-                  }}
-                  onMouseMove={hover(index)}
-                  className={OPTION_CLASS}
-                >
-                  <span className={`${MENU_ICON} text-subtle`}>
-                    <FileText size={14} aria-hidden />
-                  </span>
-                  <span className={MENU_TITLE}>{candidate.label}</span>
-                  <span className={MENU_DETAIL}>{candidate.path}</span>
-                </button>
-              </li>
-            );
-          })}
+              {matches.map((candidate, index) => (
+                <li key={`mention:${candidate.id}`} role="presentation">
+                  <button
+                    type="button"
+                    role="option"
+                    id={`${listboxId}-${candidate.id}`}
+                    aria-selected={index === boundedHighlight}
+                    data-active={index === boundedHighlight || undefined}
+                    data-testid={`${props.testIdPrefix}-mention-option`}
+                    data-candidate-id={candidate.id}
+                    tabIndex={-1}
+                    // Mouse down (not click) so the textarea never loses focus
+                    // before we reposition the caret.
+                    onMouseDown={(event) => {
+                      event.preventDefault();
+                      complete(candidate);
+                    }}
+                    onMouseMove={hover(index)}
+                    className={OPTION_CLASS}
+                  >
+                    <span className={`${MENU_ICON} text-subtle`}>
+                      <AtSign size={14} aria-hidden />
+                    </span>
+                    <span className={MENU_TITLE}>
+                      <span className="sr-only">@</span>
+                      {candidate.handle}
+                    </span>
+                    {(candidate.description ?? candidate.label).toLocaleLowerCase() ===
+                    candidate.handle.toLocaleLowerCase() ? null : (
+                      <span className={ROLE_DETAIL}>
+                        {candidate.description ?? candidate.label}
+                      </span>
+                    )}
+                  </button>
+                </li>
+              ))}
+              {fileMatches.map((candidate, fileIndex) => {
+                const index = matches.length + fileIndex;
+                return (
+                  <li key={`file:${candidate.path}`} role="presentation">
+                    <button
+                      type="button"
+                      role="option"
+                      id={`${listboxId}-file-${fileIndex}`}
+                      aria-selected={index === boundedHighlight}
+                      data-active={index === boundedHighlight || undefined}
+                      data-testid={`${props.testIdPrefix}-file-mention-option`}
+                      data-path={candidate.path}
+                      tabIndex={-1}
+                      onMouseDown={(event) => {
+                        event.preventDefault();
+                        chooseFile(candidate);
+                      }}
+                      onMouseMove={hover(index)}
+                      className={OPTION_CLASS}
+                    >
+                      <span className={`${MENU_ICON} text-subtle`}>
+                        <FileText size={14} aria-hidden />
+                      </span>
+                      <span className={MENU_TITLE}>{candidate.label}</span>
+                      <span className={MENU_DETAIL}>{candidate.path}</span>
+                    </button>
+                  </li>
+                );
+              })}
             </>
           )}
         </ul>
@@ -874,11 +1005,12 @@ export function MentionComposer(props: {
           if (pick) {
             const delta = nextValue.length - props.value.length;
             const range = beforeInput.current;
-            const edit = range && (range.from !== range.to || delta >= 0)
-              ? { ...range, insertedLength: delta + range.to - range.from }
-              : delta >= 0
-                ? { from: nextCaret - delta, to: nextCaret - delta, insertedLength: delta }
-                : { from: nextCaret, to: nextCaret - delta, insertedLength: 0 };
+            const edit =
+              range && (range.from !== range.to || delta >= 0)
+                ? { ...range, insertedLength: delta + range.to - range.from }
+                : delta >= 0
+                  ? { from: nextCaret - delta, to: nextCaret - delta, insertedLength: delta }
+                  : { from: nextCaret, to: nextCaret - delta, insertedLength: 0 };
             const next = mapAgentRosterPick(pick, edit);
             rosterPick.current = next;
             if (next !== pick) props.onRosterPick?.(next);

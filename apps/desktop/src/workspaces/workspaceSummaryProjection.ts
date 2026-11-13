@@ -1,4 +1,4 @@
-import {normalizeShareLabel} from "@dohc/security-contract/share-labels";
+import { normalizeShareLabel } from "@dohc/security-contract/share-labels";
 import { ShareSkippedOpsSummary, WorkspaceSummary } from "../ipc/bridgeContract";
 import type { RegistryEntry } from "./registryStore";
 import { usableShareMountRecord } from "./shareMounts";
@@ -50,9 +50,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 // fallback into the failure it was written to prevent — so damaged shapes are
 // built from bounded reads, never from raw ones.
 function boundedString(value: unknown, min: number, max: number): string | null {
-  return typeof value === "string" && value.length >= min && value.length <= max
-    ? value
-    : null;
+  return typeof value === "string" && value.length >= min && value.length <= max ? value : null;
 }
 
 /**
@@ -82,21 +80,30 @@ export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
     // not. Dropping one costs a line of display; rejecting the record costs
     // the whole workspace list.
     const skipped = ShareSkippedOpsSummary.safeParse(raw.skippedOps);
-    const unconfirmed = WorkspaceSummary.shape.shareView.unwrap().shape.unconfirmedChanges.safeParse(raw.unconfirmedChanges);
+    const unconfirmed = WorkspaceSummary.shape.shareView
+      .unwrap()
+      .shape.unconfirmedChanges.safeParse(raw.unconfirmedChanges);
     shareView = {
       ...(shareId !== null ? { shareId } : {}),
       ...(recipientUserId !== null ? { recipientUserId } : {}),
       granterEmail: shareViewGranterEmail(raw),
-      ...(normalizeShareLabel(raw.subjectName) ? {subjectName: normalizeShareLabel(raw.subjectName)} : {}),
-      ...(normalizeShareLabel(raw.sharerName, 320) ? {sharerName: normalizeShareLabel(raw.sharerName, 320)} : {}),
-      ...(damaged
-        ? { damaged: true as const }
-        : { access: level, genericChatWritable }),
+      ...(normalizeShareLabel(raw.subjectName)
+        ? { subjectName: normalizeShareLabel(raw.subjectName) }
+        : {}),
+      ...(normalizeShareLabel(raw.sharerName, 320)
+        ? { sharerName: normalizeShareLabel(raw.sharerName, 320) }
+        : {}),
+      ...(damaged ? { damaged: true as const } : { access: level, genericChatWritable }),
       ...(raw.ended === true ? { ended: true } : {}),
-      ...(raw.unsavedPaths !== undefined ? {
-        unsavedPaths: Array.isArray(raw.unsavedPaths) && raw.unsavedPaths.every(path => typeof path === "string")
-          ? raw.unsavedPaths : null,
-      } : {}),
+      ...(raw.unsavedPaths !== undefined
+        ? {
+            unsavedPaths:
+              Array.isArray(raw.unsavedPaths) &&
+              raw.unsavedPaths.every((path) => typeof path === "string")
+                ? raw.unsavedPaths
+                : null,
+          }
+        : {}),
       ...(skipped.success ? { skippedOps: skipped.data } : {}),
       ...(unconfirmed.success ? { unconfirmedChanges: unconfirmed.data } : {}),
     };
@@ -145,8 +152,6 @@ export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
 }
 
 /** Project the whole registry. */
-export function workspaceSummariesFrom(
-  entries: readonly RegistryEntry[],
-): WorkspaceSummary[] {
+export function workspaceSummariesFrom(entries: readonly RegistryEntry[]): WorkspaceSummary[] {
   return entries.map(workspaceSummaryFor);
 }

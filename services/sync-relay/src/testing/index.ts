@@ -553,9 +553,17 @@ export function seedFullNoticeList(
     );
     for (let index = 0; index < NOTICE_LIST_ROW_LIMIT; index += 1) {
       const at = input.nowMs + index * (input.timeStepMs ?? 1);
-      insert.run(input.recipientUserId, `${input.idPrefix}${index}`, index + 1, input.workspaceId,
-        input.recipientUserId, input.senderLabel ?? "Self", input.originInstallId ?? "install-a",
-        at, at + NOTICE_UNREAD_RETENTION_MS);
+      insert.run(
+        input.recipientUserId,
+        `${input.idPrefix}${index}`,
+        index + 1,
+        input.workspaceId,
+        input.recipientUserId,
+        input.senderLabel ?? "Self",
+        input.originInstallId ?? "install-a",
+        at,
+        at + NOTICE_UNREAD_RETENTION_MS,
+      );
     }
     db.exec("COMMIT");
   } finally {

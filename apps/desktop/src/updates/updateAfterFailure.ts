@@ -61,7 +61,9 @@ export function createUpdateAfterFailure(dependencies: {
         console.error("[desktop] update after failure:", error);
         return false;
       })
-      .finally(() => { running = null; });
+      .finally(() => {
+        running = null;
+      });
     return running;
   };
 }

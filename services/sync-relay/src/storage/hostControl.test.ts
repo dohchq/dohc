@@ -7,7 +7,7 @@ import {
   parseHostTransitionGeneration,
   type HostControlSnapshot,
 } from "@dohc/live-session-contract/host-control";
-import { afterEach, expect, it} from "vitest";
+import { afterEach, expect, it } from "vitest";
 import {
   openSyncRelayStorage,
   type LiveHostConnectionCoordinate,
@@ -35,9 +35,7 @@ const storages: SyncRelayStorage[] = [];
 
 afterEach(async () => {
   for (const storage of storages.splice(0)) storage.close();
-  await Promise.all(
-    roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
-  );
+  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
 async function newStorage(): Promise<{
@@ -203,9 +201,15 @@ it("aborts a draining transition to closed admission that survives reopen", asyn
     ok: false,
     reason: "wrong-mode",
   });
-  expect(register(reopened, { ...DEVICE, connectionId: "device-connection-2" }, 1_002)).toMatchObject({
+  expect(
+    register(reopened, { ...DEVICE, connectionId: "device-connection-2" }, 1_002),
+  ).toMatchObject({
     ok: true,
-    snapshot: { admissionState: "open", hostEpoch: 1, registeredConnectionId: "device-connection-2" },
+    snapshot: {
+      admissionState: "open",
+      hostEpoch: 1,
+      registeredConnectionId: "device-connection-2",
+    },
   });
 });
 
@@ -258,9 +262,10 @@ it("fences disconnected, replaced, and stale host connections", async () => {
   provisionAndRegister(storage);
 
   expect(disconnect(storage, DEVICE, 50).ok).toBe(true);
-  expect(
-    register(storage, { ...DEVICE, instanceId: "different-device-instance" }, 51),
-  ).toEqual({ ok: false, reason: "wrong-instance" });
+  expect(register(storage, { ...DEVICE, instanceId: "different-device-instance" }, 51)).toEqual({
+    ok: false,
+    reason: "wrong-instance",
+  });
   const currentDevice = { ...DEVICE, connectionId: "device-connection-2" };
   expect(register(storage, currentDevice, 52).ok).toBe(true);
   expect(disconnect(storage, DEVICE, 53)).toEqual({ ok: false, reason: "wrong-connection" });
@@ -285,7 +290,12 @@ it("fences a stale epoch even when every other connection coordinate is reused",
   provisionAndRegister(storage);
   completeTransition(storage, DEVICE, SERVICE, "to-service");
   expect(
-    completeTransition(storage, SERVICE, { ...DEVICE, hostEpoch: parseHostEpoch(3) }, "back-to-device"),
+    completeTransition(
+      storage,
+      SERVICE,
+      { ...DEVICE, hostEpoch: parseHostEpoch(3) },
+      "back-to-device",
+    ),
   ).toMatchObject({ hostEpoch: 3 });
   expect(disconnect(storage, DEVICE, 60)).toEqual({ ok: false, reason: "stale-epoch" });
   expect(storage.getLiveHostControl()).toMatchObject({
@@ -407,15 +417,15 @@ it("rolls back every guarded host-control mutation", async () => {
     updatedAtMs: 2,
   });
   let before = storage.getLiveHostControl();
-  expect(() =>
-    storage.registerLiveHost({ ...DEVICE, guard: refused, updatedAtMs: 3 }),
-  ).toThrow("guard refused");
+  expect(() => storage.registerLiveHost({ ...DEVICE, guard: refused, updatedAtMs: 3 })).toThrow(
+    "guard refused",
+  );
   expect(storage.getLiveHostControl()).toEqual(before);
   register(storage, DEVICE, 4);
   before = storage.getLiveHostControl();
-  expect(() =>
-    storage.disconnectLiveHost({ ...DEVICE, guard: refused, updatedAtMs: 5 }),
-  ).toThrow("guard refused");
+  expect(() => storage.disconnectLiveHost({ ...DEVICE, guard: refused, updatedAtMs: 5 })).toThrow(
+    "guard refused",
+  );
   expect(storage.getLiveHostControl()).toEqual(before);
   expect(() =>
     storage.beginLiveHostTransition({

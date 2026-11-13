@@ -1,11 +1,4 @@
-import {
-  closeSync,
-  fsyncSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  writeFileSync,
-} from "node:fs";
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { atomicReplaceFileSync } from "../atomicReplaceFile";
 import type { WorkspaceSyncPause } from "@dohc/workspace-contracts/workspace-sync";
@@ -137,10 +130,7 @@ export function mergeShareSkippedOps(
   // Every coordinate this record has counted: the retained ops, plus the ones
   // it counted and could not keep. Membership is the only duplicate test —
   // there is no ordering assumption to break.
-  const counted = new Set([
-    ...ops.map(coordinate),
-    ...(existing?.counted ?? []),
-  ]);
+  const counted = new Set([...ops.map(coordinate), ...(existing?.counted ?? [])]);
   let added = false;
   let inexact = existing?.inexact ?? false;
   const uncounted: string[] = [];
@@ -172,8 +162,7 @@ export function mergeShareSkippedOps(
     uncounted.length > 0 && uncounted.length <= MAX_TRACKED_BATCH_COORDINATES
       ? [...uncounted].sort()
       : undefined;
-  const lastUncountedBatch =
-    uncounted.length > 0 ? batch : existing?.lastUncountedBatch;
+  const lastUncountedBatch = uncounted.length > 0 ? batch : existing?.lastUncountedBatch;
   if (uncounted.length > 0 && !sameBatch(batch, existing?.lastUncountedBatch)) {
     added = true;
   }
@@ -411,8 +400,13 @@ export function createRegistryStore(
   // A non-enumerable projection keeps existing roster consumers on one store,
   // without reading every workspace's grants during registry startup or writes.
   function withRoster(entry: RegistryEntry): RegistryEntry {
-    const registered = Object.fromEntries(Object.entries(entry).filter(([key]) => key !== "shareRoster")) as RegistryEntry;
-    Object.defineProperty(registered, "shareRoster", { get: () => rosters.read(registered), enumerable: false });
+    const registered = Object.fromEntries(
+      Object.entries(entry).filter(([key]) => key !== "shareRoster"),
+    ) as RegistryEntry;
+    Object.defineProperty(registered, "shareRoster", {
+      get: () => rosters.read(registered),
+      enumerable: false,
+    });
     return registered;
   }
 
@@ -454,7 +448,8 @@ export function createRegistryStore(
     const obj = parsed as Record<string, unknown>;
     if (obj.version !== 1) {
       // Preserve a registry from a newer dohc, or one with a broken version, never wipe it.
-      const newer = typeof obj.version === "number" && Number.isInteger(obj.version) && obj.version > 1;
+      const newer =
+        typeof obj.version === "number" && Number.isInteger(obj.version) && obj.version > 1;
       throw new RegistryReadError(
         newer
           ? `Workspace registry version ${String(obj.version)} is newer than supported (${registryFile}); refusing to overwrite it.`
@@ -469,7 +464,12 @@ export function createRegistryStore(
         registryFile,
       );
     }
-    cache = { version: 1, workspaces: (obj.workspaces as RegistryEntry[]).map((entry) => withRoster(withRealRoot(entry))) };
+    cache = {
+      version: 1,
+      workspaces: (obj.workspaces as RegistryEntry[]).map((entry) =>
+        withRoster(withRealRoot(entry)),
+      ),
+    };
     return cache;
   }
 
@@ -482,10 +482,9 @@ export function createRegistryStore(
     // EPERM, so the flushed file plus atomic rename is the strongest Node API.
     let replaced = false;
     try {
-      atomicReplaceFileSync(registryFile, (tmp) => writeAndSync(
-        tmp,
-        Buffer.from(`${JSON.stringify(registry, null, 2)}\n`),
-      ));
+      atomicReplaceFileSync(registryFile, (tmp) =>
+        writeAndSync(tmp, Buffer.from(`${JSON.stringify(registry, null, 2)}\n`)),
+      );
       replaced = true;
       if (process.platform !== "win32") {
         fsyncAndClose(openSync(directory, "r"));
@@ -507,9 +506,7 @@ export function createRegistryStore(
     // Entry writers receive a read-only current value and return a replacement.
     // Only write() can publish that replacement to the cache, after rename.
     const registry = read();
-    const index = registry.workspaces.findIndex(
-      (entry) => entry.workspaceId === workspaceId,
-    );
+    const index = registry.workspaces.findIndex((entry) => entry.workspaceId === workspaceId);
     if (index < 0) throw new Error(missingMessage);
     const current = registry.workspaces[index];
     if (!current) throw new Error(missingMessage);
@@ -542,19 +539,16 @@ export function createRegistryStore(
       // The same folder under other capitals, as Linux can spell a folder
       // that ignores them. An unknown identity matches nothing.
       const identity = identityOf(workspace.rootPath);
-      const sameFolderEntry = identity === null
-        ? undefined
-        : registry.workspaces.find((w) => sameFolder(identityOf(w.rootPath), identity));
+      const sameFolderEntry =
+        identity === null
+          ? undefined
+          : registry.workspaces.find((w) => sameFolder(identityOf(w.rootPath), identity));
       if (sameFolderEntry) {
         throw new Error(`Folder is already attached: ${sameFolderEntry.rootPath}`);
       }
       // Two roots with one workspaceId would make file operations silently
       // target whichever registered first (e.g., attaching a copied folder).
-      if (
-        registry.workspaces.some(
-          (w) => w.workspaceId === workspace.workspaceId,
-        )
-      ) {
+      if (registry.workspaces.some((w) => w.workspaceId === workspace.workspaceId)) {
         throw new Error(
           `This folder carries the identity of an already attached workspace (${workspace.workspaceId}). ` +
             `If this is a copy, remove its .dohc folder to attach it as a new workspace.`,
@@ -564,18 +558,19 @@ export function createRegistryStore(
     },
 
     setRemote(workspaceId: string, remote: RemoteIdentity): void {
-      const entry = read().workspaces.find(entry => entry.workspaceId === workspaceId);
+      const entry = read().workspaces.find((entry) => entry.workspaceId === workspaceId);
       if (!entry) throw new Error("This workspace is not open. Open it again.");
       const previous = entry.remote ?? entry.pausedRemote;
       const next = { ...entry, remote };
       delete next.pausedRemote;
       delete next.syncPause;
       updateWorkspaceEntry(workspaceId, () => next);
-      if (previous?.serverUrl !== remote.serverUrl || previous?.ownerUserId !== remote.ownerUserId) rosters.remove(entry);
+      if (previous?.serverUrl !== remote.serverUrl || previous?.ownerUserId !== remote.ownerUserId)
+        rosters.remove(entry);
     },
 
     pauseRemote(workspaceId: string, syncPause?: WorkspaceSyncPause): void {
-      updateWorkspaceEntry(workspaceId, entry => {
+      updateWorkspaceEntry(workspaceId, (entry) => {
         if (!entry.remote) return undefined;
         const next = { ...entry, pausedRemote: entry.remote, ...(syncPause ? { syncPause } : {}) };
         delete next.remote;
@@ -656,9 +651,14 @@ export function createRegistryStore(
      * Store a new listing of the workspace's grants. It replaces the last
      * listing's pull mark. The version rises only when the listing differs.
      */
-    setShareRoster(workspaceId: string, listing: RosterListing, pulledAfter: boolean, listedAtMs = Date.now()): void {
+    setShareRoster(
+      workspaceId: string,
+      listing: RosterListing,
+      pulledAfter: boolean,
+      listedAtMs = Date.now(),
+    ): void {
       const registry = read();
-      const entry = registry.workspaces.find(entry => entry.workspaceId === workspaceId);
+      const entry = registry.workspaces.find((entry) => entry.workspaceId === workspaceId);
       if (!entry) throw new Error("This workspace is not open. Open it again.");
       rosters.save(entry, listing, pulledAfter, listedAtMs);
     },
@@ -666,7 +666,7 @@ export function createRegistryStore(
     /** The pull mark remains durable for automation reach, independently of Access freshness. */
     markShareRosterPulled(workspaceId: string): void {
       const registry = read();
-      const entry = registry.workspaces.find(entry => entry.workspaceId === workspaceId);
+      const entry = registry.workspaces.find((entry) => entry.workspaceId === workspaceId);
       if (!entry) throw new Error("This workspace is not open. Open it again.");
       rosters.markPulled(entry);
     },
@@ -718,10 +718,7 @@ export function createRegistryStore(
     // MU-C4: replace the workspace's joined shared-channel set. Upserts and
     // removals both go through this one write (callers compute the next set),
     // keeping the file format append-simple.
-    setSharedChannels(
-      workspaceId: string,
-      sharedChannels: JoinedSharedChannel[],
-    ): void {
+    setSharedChannels(workspaceId: string, sharedChannels: JoinedSharedChannel[]): void {
       updateWorkspaceEntry(workspaceId, (entry) => {
         const updated: RegistryEntry = { ...entry };
         if (sharedChannels.length === 0) delete updated.sharedChannels;
@@ -747,7 +744,7 @@ export function createRegistryStore(
       const registry = read();
       const remaining = registry.workspaces.filter((w) => w.workspaceId !== workspaceId);
       if (remaining.length === registry.workspaces.length) return;
-      const removed = registry.workspaces.find(entry => entry.workspaceId === workspaceId);
+      const removed = registry.workspaces.find((entry) => entry.workspaceId === workspaceId);
       if (removed) rosters.remove(removed);
       write({ ...registry, workspaces: remaining });
     },

@@ -11,7 +11,9 @@ describe("splitMarkdownBlocks", () => {
 
   it("never splits inside a fenced code block", () => {
     const fence = "```js\nconst a = 1;\n\n\nconst b = 2;\n```";
-    const filler = Array.from({ length: 400 }, (_, i) => `Paragraph ${i} with some words.`).join("\n\n");
+    const filler = Array.from({ length: 400 }, (_, i) => `Paragraph ${i} with some words.`).join(
+      "\n\n",
+    );
     const doc = `${filler}\n\n${fence}\n\n${filler}`;
     const chunks = splitMarkdownBlocks(doc);
     expect(chunks.length).toBeGreaterThan(1);
@@ -33,7 +35,10 @@ describe("splitMarkdownBlocks", () => {
   });
 
   it("chunk boundaries are blank-line block boundaries (no mid-paragraph cuts)", () => {
-    const paragraphs = Array.from({ length: 300 }, (_, i) => `Paragraph number ${i} continues onto words.`);
+    const paragraphs = Array.from(
+      { length: 300 },
+      (_, i) => `Paragraph number ${i} continues onto words.`,
+    );
     const doc = paragraphs.join("\n\n");
     const chunks = splitMarkdownBlocks(doc);
     // Re-joining chunks reproduces every paragraph intact.

@@ -26,15 +26,26 @@ export interface AccountWorkspace {
 }
 
 /** The workspaces this account owns, by workspace ID. */
-export function listAccountWorkspaces(storage: StorageContext, ownerUserId: string): AccountWorkspace[] {
-  return storage.readTx(() => storage.db.prepare(
-    `SELECT w.workspace_id, w.display_name, w.replication_epoch IS NOT NULL AS can_open,
+export function listAccountWorkspaces(
+  storage: StorageContext,
+  ownerUserId: string,
+): AccountWorkspace[] {
+  return storage.readTx(() =>
+    storage.db
+      .prepare(
+        `SELECT w.workspace_id, w.display_name, w.replication_epoch IS NOT NULL AS can_open,
        NOT EXISTS (SELECT 1 FROM sync_relay_phone_hidden_workspaces h
          WHERE h.workspace_id = w.workspace_id AND h.owner_user_id = w.owner_user_id) AS show_on_phone
      FROM sync_relay_workspaces w WHERE w.owner_user_id = ? ORDER BY w.workspace_id`,
-  ).all(ownerUserId).map((row) => ({
-    workspaceId: String(row.workspace_id), name: row.display_name === null ? null : String(row.display_name), canOpen: Boolean(row.can_open), showOnPhone: Boolean(row.show_on_phone),
-  })));
+      )
+      .all(ownerUserId)
+      .map((row) => ({
+        workspaceId: String(row.workspace_id),
+        name: row.display_name === null ? null : String(row.display_name),
+        canOpen: Boolean(row.can_open),
+        showOnPhone: Boolean(row.show_on_phone),
+      })),
+  );
 }
 
 /**
@@ -44,20 +55,30 @@ export function listAccountWorkspaces(storage: StorageContext, ownerUserId: stri
  */
 export function endAccountReasonsOfHiddenOrDisownedCopies(storage: StorageContext): void {
   storage.tx(() => {
-    storage.db.prepare(
-      `DELETE FROM sync_relay_automation_workspace_reasons WHERE reason = 'account' AND workspace_id IN (
+    storage.db
+      .prepare(
+        `DELETE FROM sync_relay_automation_workspace_reasons WHERE reason = 'account' AND workspace_id IN (
          SELECT a.workspace_id FROM sync_relay_automation_workspaces a
          JOIN sync_relay_workspaces w ON w.workspace_id = a.workspace_id
          WHERE w.owner_user_id IS NOT a.owner_user_id OR EXISTS (SELECT 1 FROM sync_relay_phone_hidden_workspaces h
            WHERE h.workspace_id = a.workspace_id AND h.owner_user_id = a.owner_user_id))`,
-    ).run();
+      )
+      .run();
   });
 }
 
-export function showsOnPhone(storage: StorageContext, ownerUserId: string, workspaceId: string): boolean {
-  return storage.db.prepare(
-    "SELECT 1 FROM sync_relay_phone_hidden_workspaces WHERE workspace_id = ? AND owner_user_id = ?",
-  ).get(workspaceId, ownerUserId) === undefined;
+export function showsOnPhone(
+  storage: StorageContext,
+  ownerUserId: string,
+  workspaceId: string,
+): boolean {
+  return (
+    storage.db
+      .prepare(
+        "SELECT 1 FROM sync_relay_phone_hidden_workspaces WHERE workspace_id = ? AND owner_user_id = ?",
+      )
+      .get(workspaceId, ownerUserId) === undefined
+  );
 }
 
 /**
@@ -71,14 +92,22 @@ export function setShowOnPhone(
   input: { ownerUserId: string; workspaceId: string; showOnPhone: boolean },
 ): boolean {
   return storage.tx(() => {
-    const owned = storage.db.prepare("SELECT 1 FROM sync_relay_workspaces WHERE workspace_id = ? AND owner_user_id = ?")
-      .get(input.workspaceId, input.ownerUserId) !== undefined;
+    const owned =
+      storage.db
+        .prepare("SELECT 1 FROM sync_relay_workspaces WHERE workspace_id = ? AND owner_user_id = ?")
+        .get(input.workspaceId, input.ownerUserId) !== undefined;
     if (!owned) return false;
     if (input.showOnPhone) {
-      storage.db.prepare("DELETE FROM sync_relay_phone_hidden_workspaces WHERE workspace_id = ? AND owner_user_id = ?")
+      storage.db
+        .prepare(
+          "DELETE FROM sync_relay_phone_hidden_workspaces WHERE workspace_id = ? AND owner_user_id = ?",
+        )
         .run(input.workspaceId, input.ownerUserId);
     } else {
-      storage.db.prepare("INSERT OR IGNORE INTO sync_relay_phone_hidden_workspaces (workspace_id, owner_user_id) VALUES (?, ?)")
+      storage.db
+        .prepare(
+          "INSERT OR IGNORE INTO sync_relay_phone_hidden_workspaces (workspace_id, owner_user_id) VALUES (?, ?)",
+        )
         .run(input.workspaceId, input.ownerUserId);
       endCopyReasonInTransaction(storage, input.workspaceId, "account");
     }

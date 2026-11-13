@@ -3,10 +3,16 @@ import type { CloudStopSyncResult, SyncStatusResult } from "../ipc/bridgeContrac
 import type { RegistryEntry } from "./registryStore";
 import { shareViewIsPresent } from "./shareViewMarker";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/change-author";
-import type { WorkspaceSyncPause, WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
+import type {
+  WorkspaceSyncPause,
+  WorkspaceSyncPauseStatus,
+} from "@dohc/workspace-contracts/workspace-sync";
 
 const syncTransitions = new Map<string, Promise<void>>();
-export function withWorkspaceSyncTransition<Result>(workspaceId: string, work: () => Promise<Result>): Promise<Result> {
+export function withWorkspaceSyncTransition<Result>(
+  workspaceId: string,
+  work: () => Promise<Result>,
+): Promise<Result> {
   return runInKeyedLane(syncTransitions, workspaceId, work);
 }
 
@@ -55,26 +61,35 @@ export async function reopenWithoutSync(
   } catch (error) {
     failure ??= { error };
   } finally {
-    try { dependencies.notify(workspace.workspaceId); } catch (error) { failure ??= { error }; }
+    try {
+      dependencies.notify(workspace.workspaceId);
+    } catch (error) {
+      failure ??= { error };
+    }
   }
   return failure ? { reopened, failure } : { reopened };
 }
 
-export function createWorkspaceSyncStop(dependencies: SyncPauseReopen & {
-  person(): Promise<ChangeAuthor>;
-  pauseStatus(pause: WorkspaceSyncPause): WorkspaceSyncPauseStatus;
-  withOwnerHostPaused<Result>(work: () => Promise<Result>): Promise<Result>;
-  prepare(workspace: RegistryEntry): Promise<() => void>;
-  resume(workspace: RegistryEntry): Promise<unknown>;
-  pauseRemote(workspaceId: string, pause: WorkspaceSyncPause): void;
-  status(workspaceId: string): SyncStatusResult;
-  cleanupFailed(workspaceId: string, error: unknown): void;
-  // Collection updates waited when sync paused, and the reopen that ends the
-  // wait did not finish.
-  reopenFailed(workspace: RegistryEntry): void;
-  nowMs?: () => number;
-}) {
-  return async (operation: SyncStopOperation, actor?: ChangeAuthor): Promise<CloudStopSyncResult> => {
+export function createWorkspaceSyncStop(
+  dependencies: SyncPauseReopen & {
+    person(): Promise<ChangeAuthor>;
+    pauseStatus(pause: WorkspaceSyncPause): WorkspaceSyncPauseStatus;
+    withOwnerHostPaused<Result>(work: () => Promise<Result>): Promise<Result>;
+    prepare(workspace: RegistryEntry): Promise<() => void>;
+    resume(workspace: RegistryEntry): Promise<unknown>;
+    pauseRemote(workspaceId: string, pause: WorkspaceSyncPause): void;
+    status(workspaceId: string): SyncStatusResult;
+    cleanupFailed(workspaceId: string, error: unknown): void;
+    // Collection updates waited when sync paused, and the reopen that ends the
+    // wait did not finish.
+    reopenFailed(workspace: RegistryEntry): void;
+    nowMs?: () => number;
+  },
+) {
+  return async (
+    operation: SyncStopOperation,
+    actor?: ChangeAuthor,
+  ): Promise<CloudStopSyncResult> => {
     const workspaceId = operation.workspace.workspaceId;
     const author = actor === undefined ? dependencies.person() : Promise.resolve(actor);
     return withWorkspaceSyncTransition(workspaceId, async () => {
@@ -82,7 +97,9 @@ export function createWorkspaceSyncStop(dependencies: SyncPauseReopen & {
       operation.assertCurrent();
       const workspace = operation.workspace;
       if (workspace.joinBootstrapPending) {
-        throw new Error("This workspace is still joining. Wait for it to finish, then stop sync. If it doesn't finish, remove it from the list in Manage workspaces and join again.");
+        throw new Error(
+          "This workspace is still joining. Wait for it to finish, then stop sync. If it doesn't finish, remove it from the list in Manage workspaces and join again.",
+        );
       }
       let status = dependencies.status(workspaceId);
       const result = (): CloudStopSyncResult => ({
@@ -92,7 +109,9 @@ export function createWorkspaceSyncStop(dependencies: SyncPauseReopen & {
         status,
       });
       if (shareViewIsPresent(workspace.shareView)) {
-        throw new Error("This workspace syncs through a received share. Open the owner's workspace to stop its sync.");
+        throw new Error(
+          "This workspace syncs through a received share. Open the owner's workspace to stop its sync.",
+        );
       }
       if (!workspace.remote) return result();
       const collectionsWaiting = status.collectionsWaitingForSync !== undefined;
@@ -127,7 +146,12 @@ export function createWorkspaceSyncStop(dependencies: SyncPauseReopen & {
         if (collectionsWaiting && !reopened) dependencies.reopenFailed(workspace);
       }
       // The saved pause is the outcome, even if its attachment retired during cleanup.
-      try { operation.assertCurrent(); status = dependencies.status(workspaceId); } catch { /* Keep the saved outcome. */ }
+      try {
+        operation.assertCurrent();
+        status = dependencies.status(workspaceId);
+      } catch {
+        /* Keep the saved outcome. */
+      }
       return result();
     });
   };

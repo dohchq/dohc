@@ -1,11 +1,4 @@
-import {
-  useEffect,
-  useId,
-  useRef,
-  useState,
-  type KeyboardEvent,
-  type ReactNode,
-} from "react";
+import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 
 /**
  * Words for a mark that has none of its own, such as a ⚡. They show while
@@ -72,7 +65,12 @@ export function useTooltip() {
 /** The words, below the element that holds them, with no gap to cross. */
 export function Tooltip(props: { id: string; open: boolean; children: ReactNode }) {
   return (
-    <span id={props.id} role="tooltip" hidden={!props.open} className="absolute left-0 top-full z-20 pt-1">
+    <span
+      id={props.id}
+      role="tooltip"
+      hidden={!props.open}
+      className="absolute left-0 top-full z-20 pt-1"
+    >
       <span className="dohc-popover block w-max max-w-64 rounded-lg border border-line bg-panel px-2 py-1 text-left text-[12px] font-normal text-ink">
         {props.children}
       </span>

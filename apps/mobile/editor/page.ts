@@ -11,15 +11,19 @@ post("started", { at: Date.now() });
 // page doesn't draw, and the app shows "dohc could not open this file." with Try again. A large file's text is monospace only,
 // so it doesn't wait.
 const fontsLoaded = Promise.race([
-  document.fonts.load('1rem "Inter Variable"', "aĀạ").then(faces => faces.length === 3),
-  new Promise<boolean>(done => setTimeout(() => done(false), 5000)),
+  document.fonts.load('1rem "Inter Variable"', "aĀạ").then((faces) => faces.length === 3),
+  new Promise<boolean>((done) => setTimeout(() => done(false), 5000)),
 ]).catch(() => false);
 if (!host.__dohcWarm && host.__dohcPage) {
   const page = host.__dohcPage;
   if (page.large) mountDocument(page);
-  else void fontsLoaded.then(loaded => {
-    if (!loaded) { post("fontsFailed", { at: Date.now() }); return; }
-    post("fonts", { at: Date.now() });
-    mountDocument(page);
-  });
+  else
+    void fontsLoaded.then((loaded) => {
+      if (!loaded) {
+        post("fontsFailed", { at: Date.now() });
+        return;
+      }
+      post("fonts", { at: Date.now() });
+      mountDocument(page);
+    });
 }

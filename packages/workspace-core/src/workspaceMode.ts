@@ -1,11 +1,7 @@
 // Single source of truth: TS types and runtime validators (zod enums in the
 // desktop bridge) derive from these tuples, so adding a kind/mode can't drift
 // the type from the runtime check.
-export const WORKSPACE_MODES = [
-  "local-first",
-  "cloud-first-local-copy",
-  "cloud-only",
-] as const;
+export const WORKSPACE_MODES = ["local-first", "cloud-first-local-copy", "cloud-only"] as const;
 export type WorkspaceMode = (typeof WORKSPACE_MODES)[number];
 
 export const WORKSPACE_KINDS = ["personal", "shared", "cloud-only"] as const;

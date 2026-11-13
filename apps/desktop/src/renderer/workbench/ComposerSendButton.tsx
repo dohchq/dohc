@@ -47,11 +47,16 @@ export function ComposerSendButton(props: {
         data-look={look}
         disabled={props.sending || props.disabled}
         className={`relative shrink-0 rounded-md border ${LOOK[look]} ${
-          props.shape === "box" ? "grid size-7 place-items-center" : "h-7 px-3 text-[12px] font-medium"
+          props.shape === "box"
+            ? "grid size-7 place-items-center"
+            : "h-7 px-3 text-[12px] font-medium"
         }`}
       >
-        {props.shape === "box" ? <ArrowUp size={15} strokeWidth={2} aria-hidden className={hidden} />
-          : <span className={hidden}>Post</span>}
+        {props.shape === "box" ? (
+          <ArrowUp size={15} strokeWidth={2} aria-hidden className={hidden} />
+        ) : (
+          <span className={hidden}>Post</span>
+        )}
         {slow ? (
           <LoaderCircle
             data-testid={`${props.testId}-pending`}

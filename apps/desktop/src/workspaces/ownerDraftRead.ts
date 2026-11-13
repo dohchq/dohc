@@ -9,17 +9,26 @@ type DraftReader = Pick<EngineClient, "ownerYDocListDrafts" | "ownerYDocOpenDraf
  * misses edits this device already kept. Null when the note has no draft to
  * read, and the file is its text.
  */
-export async function readOwnerDraftState(client: DraftReader, workspace: string, path: string,
-  activeVersionId: () => Promise<string>, signal?: AbortSignal): Promise<Uint8Array | null> {
+export async function readOwnerDraftState(
+  client: DraftReader,
+  workspace: string,
+  path: string,
+  activeVersionId: () => Promise<string>,
+  signal?: AbortSignal,
+): Promise<Uint8Array | null> {
   const request = () => ({ id: 0, workspace, deadlineMs: 30_000 });
   // An edit that lands between the list and the open changes the revision.
   for (let attempt = 0; ; attempt++) {
-    let after: Parameters<EngineClient["ownerYDocListDrafts"]>[1]["after"] = null, draft;
+    let after: Parameters<EngineClient["ownerYDocListDrafts"]>[1]["after"] = null,
+      draft;
     try {
       do {
         const page = await client.ownerYDocListDrafts(request(), { after, limit: 64 }, signal);
         // A quarantined draft does not open; its file and recovery row stand.
-        draft = page.drafts.find(candidate => candidate.binding.currentPath === path && candidate.state !== "quarantined");
+        draft = page.drafts.find(
+          (candidate) =>
+            candidate.binding.currentPath === path && candidate.state !== "quarantined",
+        );
         after = page.next;
       } while (!draft && after);
     } catch {
@@ -28,12 +37,20 @@ export async function readOwnerDraftState(client: DraftReader, workspace: string
       return null;
     }
     // Drafts belong to main; another active version keeps its own file.
-    if (!draft || await activeVersionId() !== draft.binding.mainVersionId) return null;
+    if (!draft || (await activeVersionId()) !== draft.binding.mainVersionId) return null;
     try {
-      const opened = await client.ownerYDocOpenDraft(request(), { binding: draft.binding, expectedRevision: draft.revision }, signal);
+      const opened = await client.ownerYDocOpenDraft(
+        request(),
+        { binding: draft.binding, expectedRevision: draft.revision },
+        signal,
+      );
       return new Uint8Array(opened.initialUpdate);
     } catch (error) {
-      if (attempt > 0 || !(error instanceof EngineRequestError && error.message === "owner-outbox-parent-mismatch")) throw error;
+      if (
+        attempt > 0 ||
+        !(error instanceof EngineRequestError && error.message === "owner-outbox-parent-mismatch")
+      )
+        throw error;
     }
   }
 }

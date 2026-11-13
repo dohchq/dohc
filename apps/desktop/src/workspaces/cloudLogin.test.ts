@@ -53,7 +53,13 @@ function fakeFetch(routes: Record<string, Route>) {
   const impl = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
     calls.push({ url, init });
-    if (url.endsWith("/.well-known/dohc-server")) return Response.json({ version: 1, authUrl: "https://cloud.test", relayUrl: "https://cloud.test", shareUrl: "https://cloud.test" });
+    if (url.endsWith("/.well-known/dohc-server"))
+      return Response.json({
+        version: 1,
+        authUrl: "https://cloud.test",
+        relayUrl: "https://cloud.test",
+        shareUrl: "https://cloud.test",
+      });
     const route = Object.entries(routes).find(([suffix]) => url.endsWith(suffix))?.[1];
     if (!route) return new Response("not found", { status: 404 });
     const { status = 200, body } = route(init);
@@ -90,13 +96,23 @@ describe("cloud device-flow login", () => {
     const { impl } = fakeFetch({
       "/api/auth/device/code": () => ({ body: DEVICE }),
       "/api/auth/device/token": () => ({ body: { access_token: "secret" } }),
-      "/api/auth/get-session": () => ({ body: { user: { id: "user", email: "user@example.test" } } }),
+      "/api/auth/get-session": () => ({
+        body: { user: { id: "user", email: "user@example.test" } },
+      }),
     });
     const login = createCloudLogin({
       store: memoryStore(),
-      fetch: async (url, init) => String(url).endsWith("/.well-known/dohc-server")
-        ? Response.json({ version: 1, authUrl: "https://cloud.test", relayUrl: "https://cloud.test", shareUrl: "https://cloud.test", name: "Research server", networkAccess: "private" })
-        : impl(url, init),
+      fetch: async (url, init) =>
+        String(url).endsWith("/.well-known/dohc-server")
+          ? Response.json({
+              version: 1,
+              authUrl: "https://cloud.test",
+              relayUrl: "https://cloud.test",
+              shareUrl: "https://cloud.test",
+              name: "Research server",
+              networkAccess: "private",
+            })
+          : impl(url, init),
     });
     await login.start("https://cloud.test");
     await login.poll();
@@ -110,15 +126,20 @@ describe("cloud device-flow login", () => {
     "https://user:password@cloud.test/device",
     "http://cloud.test/device",
     "javascript:alert(1)",
-  ])("rejects a verification address outside the selected server: %s", async verificationUri => {
+  ])("rejects a verification address outside the selected server: %s", async (verificationUri) => {
     const { impl, calls } = fakeFetch({
-      "/api/auth/device/code": () => ({ body: { ...DEVICE, verification_uri_complete: verificationUri } }),
+      "/api/auth/device/code": () => ({
+        body: { ...DEVICE, verification_uri_complete: verificationUri },
+      }),
     });
     const store = memoryStore();
     const login = createCloudLogin({ store, fetch: impl });
     await expect(login.start("https://cloud.test")).rejects.toThrow("invalid sign-in address");
     expect(store.saved).toBeNull();
-    expect(calls.map(call => new URL(call.url).origin)).toEqual(["https://cloud.test", "https://cloud.test"]);
+    expect(calls.map((call) => new URL(call.url).origin)).toEqual([
+      "https://cloud.test",
+      "https://cloud.test",
+    ]);
     await expect(login.poll()).rejects.toThrow("No cloud login in progress");
   });
 
@@ -126,7 +147,9 @@ describe("cloud device-flow login", () => {
     const { impl, calls } = fakeFetch({
       "/api/auth/device/code": () => ({ body: DEVICE }),
       "/api/auth/device/token": () => ({ body: { access_token: "secret" } }),
-      "/api/auth/get-session": () => ({ body: { user: { id: "user", email: "user@example.test" } } }),
+      "/api/auth/get-session": () => ({
+        body: { user: { id: "user", email: "user@example.test" } },
+      }),
     });
     const login = createCloudLogin({ store: memoryStore(), fetch: impl });
     await login.start("https://cloud.test");
@@ -141,20 +164,39 @@ describe("cloud device-flow login", () => {
   it("rejects an empty or invalid server before making a request", async () => {
     const { impl, calls } = fakeFetch({});
     const login = createCloudLogin({ store: memoryStore(), fetch: impl });
-    for (const address of ["", "https://cloud.test/api", "http://cloud.test", "http://localhost:1786"]) {
+    for (const address of [
+      "",
+      "https://cloud.test/api",
+      "http://cloud.test",
+      "http://localhost:1786",
+    ]) {
       await expect(login.start(address)).rejects.toThrow("Enter the server's https address");
     }
     expect(calls).toEqual([]);
   });
 
   it("reads a session saved for a plain http server as signed out, except under the e2e switch", async () => {
-    const saved = { serverUrl: "http://localhost:1786", relayUrl: "http://localhost:1786", email: "user@example.test", userId: "user", token: "secret" };
+    const saved = {
+      serverUrl: "http://localhost:1786",
+      relayUrl: "http://localhost:1786",
+      email: "user@example.test",
+      userId: "user",
+      token: "secret",
+    };
     for (const allowInsecureLoopbackForTests of [false, true]) {
       const store = memoryStore();
       store.saved = saved;
-      const login = createCloudLogin({ store, fetch: fakeFetch({}).impl, allowInsecureLoopbackForTests });
-      await expect(login.credentials()).resolves.toEqual(allowInsecureLoopbackForTests ? saved : null);
-      await expect(login.status()).resolves.toMatchObject({ connected: allowInsecureLoopbackForTests });
+      const login = createCloudLogin({
+        store,
+        fetch: fakeFetch({}).impl,
+        allowInsecureLoopbackForTests,
+      });
+      await expect(login.credentials()).resolves.toEqual(
+        allowInsecureLoopbackForTests ? saved : null,
+      );
+      await expect(login.status()).resolves.toMatchObject({
+        connected: allowInsecureLoopbackForTests,
+      });
     }
     const store = memoryStore();
     store.saved = { ...saved, serverUrl: "https://cloud.test", relayUrl: "http://localhost:1786" };
@@ -163,13 +205,24 @@ describe("cloud device-flow login", () => {
 
   it("signs in to a plain http server on this machine only under the e2e switch", async () => {
     const local = "http://127.0.0.1:1786";
-    const fetcher = (async (url: string | URL | Request) => String(url).endsWith("/.well-known/dohc-server")
-      ? Response.json({ version: 1, authUrl: local, relayUrl: local, shareUrl: local })
-      : Response.json({ ...DEVICE, verification_uri: `${local}/device`, verification_uri_complete: `${local}/device?user_code=ABCD1234` })) as typeof fetch;
-    await expect(createCloudLogin({ store: memoryStore(), fetch: fetcher }).start(local))
-      .rejects.toThrow("Enter the server's https address");
-    await expect(createCloudLogin({ store: memoryStore(), fetch: fetcher, allowInsecureLoopbackForTests: true }).start(local))
-      .resolves.toMatchObject({ userCode: DEVICE.user_code });
+    const fetcher = (async (url: string | URL | Request) =>
+      String(url).endsWith("/.well-known/dohc-server")
+        ? Response.json({ version: 1, authUrl: local, relayUrl: local, shareUrl: local })
+        : Response.json({
+            ...DEVICE,
+            verification_uri: `${local}/device`,
+            verification_uri_complete: `${local}/device?user_code=ABCD1234`,
+          })) as typeof fetch;
+    await expect(
+      createCloudLogin({ store: memoryStore(), fetch: fetcher }).start(local),
+    ).rejects.toThrow("Enter the server's https address");
+    await expect(
+      createCloudLogin({
+        store: memoryStore(),
+        fetch: fetcher,
+        allowInsecureLoopbackForTests: true,
+      }).start(local),
+    ).resolves.toMatchObject({ userCode: DEVICE.user_code });
   });
 
   it("discovers the relay from the server before sign-in", async () => {
@@ -185,7 +238,6 @@ describe("cloud device-flow login", () => {
     });
     const login = createCloudLogin({
       store,
-
 
       fetch: impl,
     });
@@ -285,9 +337,7 @@ describe("cloud device-flow login", () => {
   ])("rejects %s credential email through the identity failure", async (_case, email) => {
     const store = memoryStore();
     const user =
-      email === undefined
-        ? { id: "usr_email_boundary" }
-        : { email, id: "usr_email_boundary" };
+      email === undefined ? { id: "usr_email_boundary" } : { email, id: "usr_email_boundary" };
     const { impl } = fakeFetch({
       "/api/auth/device/code": () => ({ body: DEVICE }),
       "/api/auth/device/token": () => ({ body: { access_token: "session-token-xyz" } }),
@@ -478,8 +528,16 @@ describe("cloud device-flow login", () => {
   // every such withdrawal into a 401, so that change must wait for the withdrawal, and update this test.
   it("logout() asks the server nothing, so the forgotten token can still withdraw this computer's agents", async () => {
     const store = memoryStore();
-    store.saved = { serverUrl: "https://cloud.test", relayUrl: "https://cloud.test", email: "x@y.z", userId: "usr_x", token: "t" };
-    const fetch = vi.fn<typeof globalThis.fetch>(async () => { throw new Error("Logout reached the server."); });
+    store.saved = {
+      serverUrl: "https://cloud.test",
+      relayUrl: "https://cloud.test",
+      email: "x@y.z",
+      userId: "usr_x",
+      token: "t",
+    };
+    const fetch = vi.fn<typeof globalThis.fetch>(async () => {
+      throw new Error("Logout reached the server.");
+    });
     const login = createCloudLogin({ store, fetch });
     await login.logout();
     expect(fetch).not.toHaveBeenCalled();
@@ -575,7 +633,13 @@ describe("cloud device-flow login", () => {
     const deviceBody = deferred<typeof DEVICE>();
     const fetchImpl = (async (input: string | URL | Request) => {
       const url = String(input);
-      if (url.endsWith("/.well-known/dohc-server")) return Response.json({ version: 1, authUrl: "https://cloud.test", relayUrl: "https://cloud.test", shareUrl: "https://cloud.test" });
+      if (url.endsWith("/.well-known/dohc-server"))
+        return Response.json({
+          version: 1,
+          authUrl: "https://cloud.test",
+          relayUrl: "https://cloud.test",
+          shareUrl: "https://cloud.test",
+        });
       if (url.endsWith("/api/auth/device/code")) {
         return {
           ok: true,
@@ -605,7 +669,13 @@ describe("cloud device-flow login", () => {
     let tokenCalls = 0;
     const fetchImpl = (async (input: string | URL | Request) => {
       const url = String(input);
-      if (url.endsWith("/.well-known/dohc-server")) return Response.json({ version: 1, authUrl: "https://cloud.test", relayUrl: "https://cloud.test", shareUrl: "https://cloud.test" });
+      if (url.endsWith("/.well-known/dohc-server"))
+        return Response.json({
+          version: 1,
+          authUrl: "https://cloud.test",
+          relayUrl: "https://cloud.test",
+          shareUrl: "https://cloud.test",
+        });
       if (url.endsWith("/api/auth/device/code")) {
         return Response.json(DEVICE);
       }
@@ -994,9 +1064,7 @@ describe("invalidateSessionIf", () => {
 
     // The deletion fails loudly — and the dead record stops answering. The
     // marker also persists, so a restart cannot resurrect the session.
-    await expect(login.invalidateSessionIf(identity)).rejects.toThrow(
-      "store unavailable",
-    );
+    await expect(login.invalidateSessionIf(identity)).rejects.toThrow("store unavailable");
     expect(store.saved).toEqual(SESSION_A);
     expect(store.invalidMarker).not.toBeNull();
     await expect(login.status()).resolves.toEqual({ connected: false });
@@ -1032,9 +1100,7 @@ describe("invalidateSessionIf", () => {
 
       fetch: fakeFetch({}).impl,
     });
-    await expect(beforeRestart.invalidateSessionIf(identity)).rejects.toThrow(
-      "store unavailable",
-    );
+    await expect(beforeRestart.invalidateSessionIf(identity)).rejects.toThrow("store unavailable");
     expect(store.invalidMarker).not.toBeNull();
 
     // Restart: a new instance over the same store, deletion now possible.
@@ -1100,8 +1166,14 @@ describe("invalidateAccount", () => {
   });
 
   it.each([
-    ["another account on the same server", { ...SESSION_A, userId: "usr_b", email: "b@dohc.test", token: "token-b" }],
-    ["the same user id on another server", { ...SESSION_A, serverUrl: "https://other.test", token: "token-o" }],
+    [
+      "another account on the same server",
+      { ...SESSION_A, userId: "usr_b", email: "b@dohc.test", token: "token-b" },
+    ],
+    [
+      "the same user id on another server",
+      { ...SESSION_A, serverUrl: "https://other.test", token: "token-o" },
+    ],
   ])("keeps %s", async (_name, other) => {
     const store = memoryStore();
     store.saved = other;
@@ -1124,7 +1196,9 @@ describe("invalidateAccount", () => {
     const { impl } = fakeFetch({
       "/api/auth/device/code": () => ({ body: DEVICE }),
       "/api/auth/device/token": () => ({ body: { access_token: "token-a2" } }),
-      "/api/auth/get-session": () => ({ body: { user: { email: SESSION_A.email, id: SESSION_A.userId } } }),
+      "/api/auth/get-session": () => ({
+        body: { user: { email: SESSION_A.email, id: SESSION_A.userId } },
+      }),
     });
     const login = createCloudLogin({ store, fetch: impl });
 
@@ -1183,7 +1257,9 @@ describe("invalidateAccount", () => {
       fetch: fakeFetch({
         "/api/auth/device/code": () => ({ body: DEVICE }),
         "/api/auth/device/token": () => ({ body: { access_token: "token-again" } }),
-        "/api/auth/get-session": () => ({ body: { user: { id: SESSION_A.userId, email: SESSION_A.email } } }),
+        "/api/auth/get-session": () => ({
+          body: { user: { id: SESSION_A.userId, email: SESSION_A.email } },
+        }),
       }).impl,
     });
     await restarted.start("https://cloud.test");
@@ -1204,8 +1280,16 @@ describe("invalidateAccount", () => {
   });
 
   it.each([
-    ["another account on the same server", { id: "usr_b", email: "b@dohc.test" }, "https://cloud.test"],
-    ["the same user id on another server", { id: SESSION_A.userId, email: SESSION_A.email }, "https://other.test"],
+    [
+      "another account on the same server",
+      { id: "usr_b", email: "b@dohc.test" },
+      "https://cloud.test",
+    ],
+    [
+      "the same user id on another server",
+      { id: SESSION_A.userId, email: SESSION_A.email },
+      "https://other.test",
+    ],
   ])("still signs in to %s after a deletion", async (_name, user, deletedServer) => {
     const store = memoryStore();
     const held = heldSessionFetch(user);
@@ -1218,7 +1302,11 @@ describe("invalidateAccount", () => {
     held.answer();
 
     await expect(polling).resolves.toMatchObject({ status: "complete" });
-    expect(store.saved).toMatchObject({ serverUrl: "https://cloud.test", userId: user.id, token: "token-late" });
+    expect(store.saved).toMatchObject({
+      serverUrl: "https://cloud.test",
+      userId: user.id,
+      token: "token-late",
+    });
     await expect(login.status()).resolves.toMatchObject({ connected: true });
   });
 

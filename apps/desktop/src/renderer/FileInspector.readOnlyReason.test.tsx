@@ -19,9 +19,10 @@ describe("read-only reason on the text and CSV chips", () => {
     platform: "linux" as const,
     onWorkspaceActivity: vi.fn(() => () => undefined),
     readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(),
-    writeWorkspaceText: vi.fn<DohcDesktopBridge["writeWorkspaceText"]>(
-      async () => ({ status: "written", contentHash: TEST_CONTENT_HASH }),
-    ),
+    writeWorkspaceText: vi.fn<DohcDesktopBridge["writeWorkspaceText"]>(async () => ({
+      status: "written",
+      contentHash: TEST_CONTENT_HASH,
+    })),
     listWorkspaceFiles: vi.fn(async () => ({ files: [], folders: [] })),
     readWorkspaceDatabase: vi.fn(async () => ({ tables: [] })),
     getWorkspaceSettings: vi.fn(async () => ({
@@ -43,19 +44,26 @@ describe("read-only reason on the text and CSV chips", () => {
   const PAGE_SHARE = "This page is shared with you to read.";
   const TOO_LARGE = "This file is too large to edit in dohc.";
 
-  it.each([false, true])("describes why the Markdown toggle is disabled, truncated: %s", async (truncated) => {
-    bridgeMock.readWorkspaceText.mockResolvedValue(truncated
-      ? { text: "# Plan\n", truncated: true, contentHash: null }
-      : { text: "# Plan\n", truncated: false, contentHash: TEST_CONTENT_HASH });
-    const user = userEvent.setup();
-    render(<FileInspector workspaceId="ws-1" path="plan.md" readOnly={!truncated} />);
-    const toggle = await screen.findByRole("button", { name: "Edit", description: truncated ? TOO_LARGE : PAGE_SHARE });
-    expect(toggle.getAttribute("title")).toBe(truncated ? TOO_LARGE : PAGE_SHARE);
-    toggle.focus();
-    await user.keyboard("{Enter} ");
-    await user.click(toggle);
-    expect(screen.queryByTestId("markdown-editor")).toBeNull();
-    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
-  });
-
+  it.each([false, true])(
+    "describes why the Markdown toggle is disabled, truncated: %s",
+    async (truncated) => {
+      bridgeMock.readWorkspaceText.mockResolvedValue(
+        truncated
+          ? { text: "# Plan\n", truncated: true, contentHash: null }
+          : { text: "# Plan\n", truncated: false, contentHash: TEST_CONTENT_HASH },
+      );
+      const user = userEvent.setup();
+      render(<FileInspector workspaceId="ws-1" path="plan.md" readOnly={!truncated} />);
+      const toggle = await screen.findByRole("button", {
+        name: "Edit",
+        description: truncated ? TOO_LARGE : PAGE_SHARE,
+      });
+      expect(toggle.getAttribute("title")).toBe(truncated ? TOO_LARGE : PAGE_SHARE);
+      toggle.focus();
+      await user.keyboard("{Enter} ");
+      await user.click(toggle);
+      expect(screen.queryByTestId("markdown-editor")).toBeNull();
+      expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+    },
+  );
 });

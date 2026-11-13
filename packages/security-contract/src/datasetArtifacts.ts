@@ -12,7 +12,12 @@ const hash = (value: string) => createHash("sha256").update(value).digest("hex")
 const ARTIFACT_BYTES = 256 * 1024;
 
 function source(value: unknown): string {
-  if (typeof value !== "string" || !value.length || Buffer.byteLength(value) > ARTIFACT_BYTES || value.includes("\0")) {
+  if (
+    typeof value !== "string" ||
+    !value.length ||
+    Buffer.byteLength(value) > ARTIFACT_BYTES ||
+    value.includes("\0")
+  ) {
     throw new Error("Invalid dataset source artifact.");
   }
   return value;
@@ -26,7 +31,9 @@ function source(value: unknown): string {
  * match data grants to the people on its share roster.
  */
 export function datasetPrincipalKey(workspaceId: string, grantId: string, userId: string): string {
-  return createHash("sha256").update(JSON.stringify(["dohc-dataset-principal-v1", workspaceId, grantId, userId])).digest("hex");
+  return createHash("sha256")
+    .update(JSON.stringify(["dohc-dataset-principal-v1", workspaceId, grantId, userId]))
+    .digest("hex");
 }
 
 export function describeDatasetRevision(input: {
@@ -36,11 +43,16 @@ export function describeDatasetRevision(input: {
   operationSource: string;
 }): DatasetRevision {
   const definition = parseDatasetDefinition(input.definition);
-  const schemaSql = source(input.schemaSql), operationSource = source(input.operationSource);
+  const schemaSql = source(input.schemaSql),
+    operationSource = source(input.operationSource);
   const revision = parseDatasetRevision({
-    datasetId: definition.datasetId, revision: input.revision, definition,
+    datasetId: definition.datasetId,
+    revision: input.revision,
+    definition,
     definitionSha256: hash(datasetDefinitionDigestContent(definition)),
-    schemaSha256: hash(schemaSql), operationsSha256: hash(operationSource), revisionSha256: "0".repeat(64),
+    schemaSha256: hash(schemaSql),
+    operationsSha256: hash(operationSource),
+    revisionSha256: "0".repeat(64),
   });
   revision.revisionSha256 = hash(datasetRevisionDigestContent(revision));
   return revision;
@@ -51,8 +63,13 @@ export function describeDatasetRevision(input: {
  * apply: the revision it creates and the migration that gets there. The host
  * refuses an approval that names another digest.
  */
-export function datasetChangeDigest(input: { revisionSha256: string; migrationSql: string }): string {
-  return hash(JSON.stringify(["dohc-dataset-change-v1", input.revisionSha256, hash(input.migrationSql)]));
+export function datasetChangeDigest(input: {
+  revisionSha256: string;
+  migrationSql: string;
+}): string {
+  return hash(
+    JSON.stringify(["dohc-dataset-change-v1", input.revisionSha256, hash(input.migrationSql)]),
+  );
 }
 
 /** Verify captured bytes, not paths that may have changed since preparation. */
@@ -62,10 +79,18 @@ export function verifyDatasetArtifacts(input: {
   operationSource: string;
 }): DatasetRevision {
   const revision = parseDatasetRevision(input.revision);
-  const expected = describeDatasetRevision({ definition: revision.definition, revision: revision.revision,
-    schemaSql: input.schemaSql, operationSource: input.operationSource });
-  if (revision.definitionSha256 !== expected.definitionSha256 || revision.schemaSha256 !== expected.schemaSha256 ||
-      revision.operationsSha256 !== expected.operationsSha256 || revision.revisionSha256 !== expected.revisionSha256) {
+  const expected = describeDatasetRevision({
+    definition: revision.definition,
+    revision: revision.revision,
+    schemaSql: input.schemaSql,
+    operationSource: input.operationSource,
+  });
+  if (
+    revision.definitionSha256 !== expected.definitionSha256 ||
+    revision.schemaSha256 !== expected.schemaSha256 ||
+    revision.operationsSha256 !== expected.operationsSha256 ||
+    revision.revisionSha256 !== expected.revisionSha256
+  ) {
     throw new Error("Dataset artifacts do not match the prepared revision.");
   }
   return expected;

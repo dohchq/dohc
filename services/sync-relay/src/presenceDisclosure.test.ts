@@ -61,12 +61,25 @@ it("coalesces account lookups and refreshes positive and missing labels after 30
   expect((await renamed).peers[0]!.displayName).toBe("Renamed");
 });
 
-it.each([["alice", 6], ["A😀", 4], ["é", 0]] as const)("discloses the shared hue slot for %s", async (userId, slot) => {
+it.each([
+  ["alice", 6],
+  ["A😀", 4],
+  ["é", 0],
+] as const)("discloses the shared hue slot for %s", async (userId, slot) => {
   const peer = { userId, clientId: "device", sessionId: "session", state: {}, updatedAtMs: 0 };
-  const project = createPresenceProjection(() => "Renamed", () => 0);
-  const result = await project({ version: 1, peers: [peer] }, {
-    scopeKey: "scope", viewerUserId: userId, viewerClientId: "device", viewerIsOwner: true,
-    prepare: () => ({ peers: [{ peer, isOwner: true, state: {} }], chatAttribution: false }),
-  });
+  const project = createPresenceProjection(
+    () => "Renamed",
+    () => 0,
+  );
+  const result = await project(
+    { version: 1, peers: [peer] },
+    {
+      scopeKey: "scope",
+      viewerUserId: userId,
+      viewerClientId: "device",
+      viewerIsOwner: true,
+      prepare: () => ({ peers: [{ peer, isOwner: true, state: {} }], chatAttribution: false }),
+    },
+  );
   expect(result.peers[0]?.paletteSlot).toBe(slot);
 });

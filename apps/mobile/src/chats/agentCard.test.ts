@@ -3,7 +3,9 @@ import { agentCard, agentCardLabel, reportedClaim } from "./agentCard";
 
 describe("reportedClaim", () => {
   it("joins the product, its version and the model as the desktop does", () => {
-    expect(reportedClaim({ product: "Claude Code", version: "2.1", model: "Claude Opus 5.5" })).toBe("Claude Code 2.1 · Claude Opus 5.5");
+    expect(
+      reportedClaim({ product: "Claude Code", version: "2.1", model: "Claude Opus 5.5" }),
+    ).toBe("Claude Code 2.1 · Claude Opus 5.5");
     expect(reportedClaim({ product: "Claude Code", version: "2.1" })).toBe("Claude Code 2.1");
     expect(reportedClaim({ product: "Claude Code" })).toBe("Claude Code");
     expect(reportedClaim({ model: "Claude Opus 5.5" })).toBe("Claude Opus 5.5");
@@ -17,8 +19,16 @@ describe("agentCard", () => {
 
   it("marks a connected agent's reported line, and not its name", () => {
     const card = agentCard({ name: "Scout", named: true, kind: "connected", reported });
-    expect(card).toEqual({ name: "Scout", nameAsReported: false, kindLine: "Connected agent", reported: "Claude Code 2.1 · Claude Opus 5.5", markLabel: "connected agent" });
-    expect(agentCardLabel(card)).toBe("Scout, Connected agent, Claude Code 2.1 · Claude Opus 5.5 (as reported)");
+    expect(card).toEqual({
+      name: "Scout",
+      nameAsReported: false,
+      kindLine: "Connected agent",
+      reported: "Claude Code 2.1 · Claude Opus 5.5",
+      markLabel: "connected agent",
+    });
+    expect(agentCardLabel(card)).toBe(
+      "Scout, Connected agent, Claude Code 2.1 · Claude Opus 5.5 (as reported)",
+    );
   });
 
   it("marks a connected agent's name when it reported nothing else", () => {
@@ -42,7 +52,13 @@ describe("agentCard", () => {
   });
 
   it("names your own agent's owner, or says the name is unavailable, and never marks it", () => {
-    expect(agentCard({ name: "Nova", named: true, kind: "own", owner: "Ice" })).toMatchObject({ kindLine: "Owned by Ice", nameAsReported: false, markLabel: "agent" });
-    expect(agentCard({ name: "Nova", named: true, kind: "own" }).kindLine).toBe("Owner name unavailable");
+    expect(agentCard({ name: "Nova", named: true, kind: "own", owner: "Ice" })).toMatchObject({
+      kindLine: "Owned by Ice",
+      nameAsReported: false,
+      markLabel: "agent",
+    });
+    expect(agentCard({ name: "Nova", named: true, kind: "own" }).kindLine).toBe(
+      "Owner name unavailable",
+    );
   });
 });

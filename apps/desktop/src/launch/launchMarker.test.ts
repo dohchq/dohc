@@ -17,10 +17,20 @@ function memoryFs(initial?: string) {
       if (content === undefined) throw Object.assign(new Error("missing"), { code: "ENOENT" });
       return content;
     },
-    writeFileSync: (path, data) => { files.set(path, data); },
-    rmSync: (path) => { files.delete(path); },
+    writeFileSync: (path, data) => {
+      files.set(path, data);
+    },
+    rmSync: (path) => {
+      files.delete(path);
+    },
   };
-  return { fs, read: (): unknown => { const content = files.get(PATH); return content === undefined ? undefined : JSON.parse(content); } };
+  return {
+    fs,
+    read: (): unknown => {
+      const content = files.get(PATH);
+      return content === undefined ? undefined : JSON.parse(content);
+    },
+  };
 }
 
 const open = (fs: MarkerFileSystem, pass: string | null = null, version = "1.0.0") =>
@@ -76,18 +86,25 @@ describe("launch marker", () => {
     expect(disk.read()).toEqual({ version: "1.0.1", unfinished: 1 });
   });
 
-  it.each(["not json", "null", "{}", JSON.stringify({ version: "1.0.0", unfinished: -2 }), JSON.stringify({ version: "1.0.0", unfinished: "3" })])(
-    "treats an unreadable marker (%s) as no unfinished launches",
-    (content) => {
-      expect(open(memoryFs(content).fs).unfinished).toBe(0);
-    },
-  );
+  it.each([
+    "not json",
+    "null",
+    "{}",
+    JSON.stringify({ version: "1.0.0", unfinished: -2 }),
+    JSON.stringify({ version: "1.0.0", unfinished: "3" }),
+  ])("treats an unreadable marker (%s) as no unfinished launches", (content) => {
+    expect(open(memoryFs(content).fs).unfinished).toBe(0);
+  });
 
   it("never stops a launch when the profile cannot be written", () => {
     const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const disk = memoryFs();
-    disk.fs.writeFileSync = () => { throw new Error("read-only profile"); };
-    disk.fs.rmSync = () => { throw new Error("read-only profile"); };
+    disk.fs.writeFileSync = () => {
+      throw new Error("read-only profile");
+    };
+    disk.fs.rmSync = () => {
+      throw new Error("read-only profile");
+    };
     const launch = open(disk.fs);
     expect(launch.unfinished).toBe(0);
     launch.finish();

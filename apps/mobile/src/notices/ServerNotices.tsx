@@ -15,21 +15,25 @@ export function ServerNotices() {
       <Stack.Screen options={{ title: noticesWords.heading }} />
       {unread > 0 ? (
         <Stack.Toolbar placement="right">
-          <Stack.Toolbar.Button onPress={markAllRead}>{noticesWords.markAllRead}</Stack.Toolbar.Button>
+          <Stack.Toolbar.Button onPress={markAllRead}>
+            {noticesWords.markAllRead}
+          </Stack.Toolbar.Button>
         </Stack.Toolbar>
       ) : null}
       <LegendList
         data={notices}
-        keyExtractor={notice => notice.id}
+        keyExtractor={(notice) => notice.id}
         estimatedItemSize={128}
         style={{ backgroundColor: theme.bg }}
         contentInsetAdjustmentBehavior="automatic"
-        ListFooterComponent={notices.length === 0 ? (
-          <View style={styles.empty}>
-            <Check size={40} color={theme.subtle} strokeWidth={1.75} />
-            <Text style={[styles.emptyText, { color: theme.ink }]}>{noticesWords.allClear}</Text>
-          </View>
-        ) : undefined}
+        ListFooterComponent={
+          notices.length === 0 ? (
+            <View style={styles.empty}>
+              <Check size={40} color={theme.subtle} strokeWidth={1.75} />
+              <Text style={[styles.emptyText, { color: theme.ink }]}>{noticesWords.allClear}</Text>
+            </View>
+          ) : undefined
+        }
         renderItem={({ item }) => <NoticeRow notice={item} onDismiss={dismiss} />}
       />
     </>

@@ -17,11 +17,13 @@ nas.local:/export/home/ada on /System/Volumes/Data/home/ada (nfs, nodev, nosuid,
 
 // A computer whose links and volumes the test names. Every other path
 // resolves to itself.
-function computer(options: {
-  platform?: NodeJS.Platform;
-  links?: Record<string, string>;
-  types?: Record<string, number>;
-} = {}): NetworkShareProbe {
+function computer(
+  options: {
+    platform?: NodeJS.Platform;
+    links?: Record<string, string>;
+    types?: Record<string, number>;
+  } = {},
+): NetworkShareProbe {
   return {
     platform: options.platform ?? "darwin",
     realpath: async (path) => options.links?.[path] ?? path,
@@ -33,7 +35,12 @@ function computer(options: {
 describe("onNetworkShare on a Mac", () => {
   it("finds a root on a volume the kernel does not mark local, wherever it is mounted", async () => {
     const probe = computer({ links: { "/tmp/team": "/Volumes/Team/Trip" } });
-    for (const root of ["/Volumes/Team/Trip", "/System/Volumes/Data/home/ada/Trip", `${HOME}/Documents/Team/Trip`, "/tmp/team"]) {
+    for (const root of [
+      "/Volumes/Team/Trip",
+      "/System/Volumes/Data/home/ada/Trip",
+      `${HOME}/Documents/Team/Trip`,
+      "/tmp/team",
+    ]) {
       await expect(onNetworkShare(root, probe)).resolves.toBe(true);
     }
   });
@@ -67,7 +74,10 @@ describe("onNetworkShare on a Mac", () => {
     const logged = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       await expect(onNetworkShare("/Volumes/Team/Trip", probe)).resolves.toBe(false);
-      expect(logged).toHaveBeenCalledWith("[desktop] could not list volumes to check whether /Volumes/Team/Trip is on a network share:", failure);
+      expect(logged).toHaveBeenCalledWith(
+        "[desktop] could not list volumes to check whether /Volumes/Team/Trip is on a network share:",
+        failure,
+      );
     } finally {
       logged.mockRestore();
     }
@@ -100,7 +110,11 @@ describe("onNetworkShare on Windows", () => {
 
   it("leaves local drives and WSL's shares alone", async () => {
     const probe = computer({ platform: "win32" });
-    for (const root of ["C:\\Users\\ada\\Trip", "\\\\wsl$\\Ubuntu\\home\\ada\\Trip", "\\\\wsl.localhost\\Ubuntu\\home\\ada\\Trip"]) {
+    for (const root of [
+      "C:\\Users\\ada\\Trip",
+      "\\\\wsl$\\Ubuntu\\home\\ada\\Trip",
+      "\\\\wsl.localhost\\Ubuntu\\home\\ada\\Trip",
+    ]) {
       await expect(onNetworkShare(root, probe)).resolves.toBe(false);
     }
   });
@@ -108,8 +122,15 @@ describe("onNetworkShare on Windows", () => {
 
 describe("onNetworkShare on Linux", () => {
   it("finds NFS, SMB, CIFS, Ceph, AFS and 9p volumes, and only those", async () => {
-    const types = { "/mnt/nfs": 0x6969, "/mnt/smb": 0x517b, "/mnt/cifs": 0xff534d42, "/mnt/smb2": 0xfe534d42,
-      "/mnt/ceph": 0x00c36400, "/afs/example.org": 0x5346414f, "/mnt/9p": 0x01021997 };
+    const types = {
+      "/mnt/nfs": 0x6969,
+      "/mnt/smb": 0x517b,
+      "/mnt/cifs": 0xff534d42,
+      "/mnt/smb2": 0xfe534d42,
+      "/mnt/ceph": 0x00c36400,
+      "/afs/example.org": 0x5346414f,
+      "/mnt/9p": 0x01021997,
+    };
     const probe = computer({ platform: "linux", types, links: { "/home/ada/nfs": "/mnt/nfs" } });
     for (const root of [...Object.keys(types), "/home/ada/nfs"]) {
       await expect(onNetworkShare(root, probe)).resolves.toBe(true);
@@ -150,12 +171,17 @@ describe("onNetworkShare on Linux", () => {
     ]) {
       await expect(onNetworkShare(root, probe)).resolves.toBe(true);
     }
-    for (const root of ["/run/user/1000/kio-fuse-AbC123/mtp/Pixel 8/Trip", "/run/user/1000/kio-fuse-AbC123/smb"]) {
+    for (const root of [
+      "/run/user/1000/kio-fuse-AbC123/mtp/Pixel 8/Trip",
+      "/run/user/1000/kio-fuse-AbC123/smb",
+    ]) {
       await expect(onNetworkShare(root, probe)).resolves.toBe(false);
     }
   });
 });
 
 it("finds no network share on another platform", async () => {
-  await expect(onNetworkShare("/mnt/nfs", computer({ platform: "freebsd", types: { "/mnt/nfs": 0x6969 } }))).resolves.toBe(false);
+  await expect(
+    onNetworkShare("/mnt/nfs", computer({ platform: "freebsd", types: { "/mnt/nfs": 0x6969 } })),
+  ).resolves.toBe(false);
 });

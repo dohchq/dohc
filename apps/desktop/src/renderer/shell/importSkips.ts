@@ -51,7 +51,9 @@ export function skipSentence(reason: SkippedImportSource["reason"], name: string
 
 function shownPath(path: string): string {
   const chars = [...path];
-  return chars.length <= SHOWN_PATH_MAX_CHARS ? path : `…${chars.slice(1 - SHOWN_PATH_MAX_CHARS).join("")}`;
+  return chars.length <= SHOWN_PATH_MAX_CHARS
+    ? path
+    : `…${chars.slice(1 - SHOWN_PATH_MAX_CHARS).join("")}`;
 }
 
 const moreLine = (more: number) => `${more} more weren't imported.`;
@@ -72,8 +74,10 @@ export function importSkipLines(
     used += needed;
   }
   const rest = lines.length > 0 ? skipped - lines.length : 0;
-  const details: ErrorDetailField[] = sources.map((source) =>
-    ["Skipped", skipSentence(source.reason, source.path), COPIED_LINE_MAX_CHARS] as const);
+  const details: ErrorDetailField[] = sources.map(
+    (source) =>
+      ["Skipped", skipSentence(source.reason, source.path), COPIED_LINE_MAX_CHARS] as const,
+  );
   if (skipped > sources.length) details.push(["Skipped", `${skipped - sources.length} more`]);
   return { lines, ...(rest > 0 ? { lastLine: moreLine(rest) } : {}), details };
 }

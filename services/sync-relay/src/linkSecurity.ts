@@ -40,10 +40,8 @@ export const LINK_GRANT_READ_BUCKET_CAPACITY = LINK_READ_BUCKET_CAPACITY * 4;
 export const LINK_GRANT_READ_REFILL_PER_SECOND = LINK_READ_REFILL_PER_SECOND * 4;
 export const LINK_LOG_READ_BUCKET_CAPACITY = 2_000;
 export const LINK_LOG_READ_REFILL_PER_SECOND = 8;
-export const LINK_GRANT_LOG_READ_BUCKET_CAPACITY =
-  LINK_LOG_READ_BUCKET_CAPACITY * 4;
-export const LINK_GRANT_LOG_READ_REFILL_PER_SECOND =
-  LINK_LOG_READ_REFILL_PER_SECOND * 4;
+export const LINK_GRANT_LOG_READ_BUCKET_CAPACITY = LINK_LOG_READ_BUCKET_CAPACITY * 4;
+export const LINK_GRANT_LOG_READ_REFILL_PER_SECOND = LINK_LOG_READ_REFILL_PER_SECOND * 4;
 // A grant may burst through five maximum-size (20 MiB) blobs. Its refill adds
 // the same allowance over 24 hours, so a sustained viewer can reopen a maximum
 // blob several times per day without giving an accountless grant unlimited
@@ -71,30 +69,54 @@ export function hashLinkBearer(secret: string, key: BinaryLike): string {
 let sealingKeyFor: { key: string | Uint8Array; derived: Buffer } | null = null;
 function linkSealingKey(key: string | Uint8Array): Buffer {
   if (sealingKeyFor?.key !== key) {
-    sealingKeyFor = { key, derived: Buffer.from(hkdfSync("sha256", key, Buffer.alloc(0), "dohc-link-url-seal-v1", 32)) };
+    sealingKeyFor = {
+      key,
+      derived: Buffer.from(hkdfSync("sha256", key, Buffer.alloc(0), "dohc-link-url-seal-v1", 32)),
+    };
   }
   return sealingKeyFor.derived;
 }
 
-export function sealLinkBearer(secret: string, key: string | Uint8Array, credentialId: string, grantId: string): string {
+export function sealLinkBearer(
+  secret: string,
+  key: string | Uint8Array,
+  credentialId: string,
+  grantId: string,
+): string {
   const nonce = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", linkSealingKey(key), nonce);
   cipher.setAAD(Buffer.from(JSON.stringify([credentialId, grantId])));
-  const sealed = Buffer.concat([cipher.update(secret, "utf8"), cipher.final(), cipher.getAuthTag()]);
+  const sealed = Buffer.concat([
+    cipher.update(secret, "utf8"),
+    cipher.final(),
+    cipher.getAuthTag(),
+  ]);
   return `v1.${nonce.toString("base64url")}.${sealed.toString("base64url")}`;
 }
 
-export function unsealLinkBearer(sealed: string, key: string | Uint8Array, credentialId: string, grantId: string): string | null {
+export function unsealLinkBearer(
+  sealed: string,
+  key: string | Uint8Array,
+  credentialId: string,
+  grantId: string,
+): string | null {
   try {
     const parts = sealed.split(".");
-    if (parts.length !== 3 || parts[0] !== "v1" || !parts.slice(1).every(part => /^[A-Za-z0-9_-]+$/u.test(part))) return null;
+    if (
+      parts.length !== 3 ||
+      parts[0] !== "v1" ||
+      !parts.slice(1).every((part) => /^[A-Za-z0-9_-]+$/u.test(part))
+    )
+      return null;
     const nonce = Buffer.from(parts[1]!, "base64url");
     const encrypted = Buffer.from(parts[2]!, "base64url");
     if (nonce.length !== 12 || encrypted.length <= 16) return null;
     const decipher = createDecipheriv("aes-256-gcm", linkSealingKey(key), nonce);
     decipher.setAAD(Buffer.from(JSON.stringify([credentialId, grantId])));
     decipher.setAuthTag(encrypted.subarray(-16));
-    return Buffer.concat([decipher.update(encrypted.subarray(0, -16)), decipher.final()]).toString("utf8");
+    return Buffer.concat([decipher.update(encrypted.subarray(0, -16)), decipher.final()]).toString(
+      "utf8",
+    );
   } catch {
     return null;
   }
@@ -104,36 +126,59 @@ export function composePublicLinkUrl(shareWebOrigin: string, secret: string): st
   return `${shareWebOrigin}/s/#${secret}`;
 }
 
-export function recoverPublicLinkUrl(grant: SyncRelayShareGrantRow | null, credential: SyncRelayLinkCredentialRow | null, key: string | Uint8Array | undefined, shareWebOrigin: string | undefined): string | null {
-  if (!key || !shareWebOrigin || !grant || grant.principalKind !== "link" || grant.status !== "active" || grant.revokedAtMs !== null ||
-    !credential || credential.grantId !== grant.grantId || credential.generation !== grant.generation || credential.retiredAtMs !== null || !credential.secretSealed) return null;
-  const secret = unsealLinkBearer(credential.secretSealed, key, credential.credentialId, grant.grantId);
+export function recoverPublicLinkUrl(
+  grant: SyncRelayShareGrantRow | null,
+  credential: SyncRelayLinkCredentialRow | null,
+  key: string | Uint8Array | undefined,
+  shareWebOrigin: string | undefined,
+): string | null {
+  if (
+    !key ||
+    !shareWebOrigin ||
+    !grant ||
+    grant.principalKind !== "link" ||
+    grant.status !== "active" ||
+    grant.revokedAtMs !== null ||
+    !credential ||
+    credential.grantId !== grant.grantId ||
+    credential.generation !== grant.generation ||
+    credential.retiredAtMs !== null ||
+    !credential.secretSealed
+  )
+    return null;
+  const secret = unsealLinkBearer(
+    credential.secretSealed,
+    key,
+    credential.credentialId,
+    grant.grantId,
+  );
   return secret === null ? null : composePublicLinkUrl(shareWebOrigin, secret);
 }
 
 export function hashLinkProfileSecret(secret: string, key: BinaryLike): string {
-  return createHmac("sha256", key)
-    .update("link-profile\n")
-    .update(secret)
-    .digest("base64url");
+  return createHmac("sha256", key).update("link-profile\n").update(secret).digest("base64url");
 }
 
 export function hashLinkHandoffCode(code: string, key: BinaryLike): string {
-  return createHmac("sha256", key)
-    .update("link-handoff\n")
-    .update(code)
-    .digest("base64url");
+  return createHmac("sha256", key).update("link-handoff\n").update(code).digest("base64url");
 }
 
 // Each kind of agent sign-in value hashes in its own domain, so one kind can
 // never stand in for another.
-export type AgentCredentialKind = "request" | "code" | "access" | "refresh" | "resource" | "profile";
+export type AgentCredentialKind =
+  | "request"
+  | "code"
+  | "access"
+  | "refresh"
+  | "resource"
+  | "profile";
 
-export function hashAgentCredential(kind: AgentCredentialKind, value: string, key: BinaryLike): string {
-  return createHmac("sha256", key)
-    .update(`agent-${kind}\n`)
-    .update(value)
-    .digest("base64url");
+export function hashAgentCredential(
+  kind: AgentCredentialKind,
+  value: string,
+  key: BinaryLike,
+): string {
+  return createHmac("sha256", key).update(`agent-${kind}\n`).update(value).digest("base64url");
 }
 
 // RFC 7636 S256: the challenge is the verifier's SHA-256 in base64url.
@@ -157,10 +202,7 @@ export function hashRelayExchangeKey(value: string): string {
   return createHash("sha256").update(value).digest("base64url");
 }
 
-export function verifyRelayExchangeKey(
-  presented: string | null,
-  expectedHash: string,
-): boolean {
+export function verifyRelayExchangeKey(presented: string | null, expectedHash: string): boolean {
   const presentedHash = hashRelayExchangeKey(presented ?? "");
   return presented !== null && constantTimeHashEqual(presentedHash, expectedHash);
 }
@@ -175,8 +217,7 @@ export class LinkEgressRateLimiter {
 
   constructor(
     private readonly capacityBytes = LINK_GRANT_EGRESS_BUCKET_CAPACITY_BYTES,
-    private readonly refillBytesPerSecond =
-      LINK_GRANT_EGRESS_REFILL_BYTES_PER_SECOND,
+    private readonly refillBytesPerSecond = LINK_GRANT_EGRESS_REFILL_BYTES_PER_SECOND,
     private readonly maxGrants = LINK_GRANT_EGRESS_MAX_GRANTS,
   ) {
     if (capacityBytes <= 0 || refillBytesPerSecond <= 0 || maxGrants <= 0) {
@@ -204,10 +245,7 @@ export class LinkEgressRateLimiter {
       settled = true;
       if (this.buckets.get(grantId) !== bucket) return;
       this.refill(bucket, settledAtMs);
-      bucket.tokens = Math.min(
-        this.capacityBytes,
-        bucket.tokens + byteLength - emittedByteLength,
-      );
+      bucket.tokens = Math.min(this.capacityBytes, bucket.tokens + byteLength - emittedByteLength);
     };
   }
 
@@ -217,10 +255,7 @@ export class LinkEgressRateLimiter {
     }
     let bucket = this.buckets.get(grantId);
     if (!bucket) {
-      if (
-        this.buckets.size >= this.maxGrants &&
-        !this.evictRefilled(nowMs)
-      ) {
+      if (this.buckets.size >= this.maxGrants && !this.evictRefilled(nowMs)) {
         return null;
       }
       bucket = { tokens: this.capacityBytes, updatedAtMs: nowMs };
@@ -245,10 +280,7 @@ export class LinkEgressRateLimiter {
   private evictRefilled(nowMs: number): boolean {
     for (const [key, bucket] of this.buckets) {
       const elapsedSeconds = Math.max(0, nowMs - bucket.updatedAtMs) / 1_000;
-      if (
-        bucket.tokens + elapsedSeconds * this.refillBytesPerSecond >=
-        this.capacityBytes
-      ) {
+      if (bucket.tokens + elapsedSeconds * this.refillBytesPerSecond >= this.capacityBytes) {
         this.buckets.delete(key);
         return true;
       }
@@ -283,9 +315,17 @@ export function validateLinkCapability(input: {
 }): ValidatedLinkCapability | null {
   const capabilityHash = hashLinkBearer(input.capabilityToken, input.linkKey);
   const session = input.storage.findLinkSessionByCapabilityHash(capabilityHash);
-  const matches = constantTimeHashEqual(capabilityHash, session?.capabilityHash ?? hashLinkBearer("", input.linkKey));
+  const matches = constantTimeHashEqual(
+    capabilityHash,
+    session?.capabilityHash ?? hashLinkBearer("", input.linkKey),
+  );
   if (!session || !matches) return null;
-  const authorized = authorizeLinkSession(input.storage, session, input.nowMs, input.publicEditRelease);
+  const authorized = authorizeLinkSession(
+    input.storage,
+    session,
+    input.nowMs,
+    input.publicEditRelease,
+  );
   if (!authorized) return null;
   return {
     session,
@@ -304,17 +344,29 @@ export function authorizeLinkSession(
   publicEditRelease: PublicEditRelease | undefined,
 ) {
   if (session.expiresAtMs <= nowMs) return null;
-  const authorized = authorizeLinkShareAction({ storage, grantId: session.grantId, action: "read" });
-  return authorized.ok && authorized.grant.generation === session.generation &&
-    servableFiles(authorized.effectiveSelector, publicEditRelease) ? authorized : null;
+  const authorized = authorizeLinkShareAction({
+    storage,
+    grantId: session.grantId,
+    action: "read",
+  });
+  return authorized.ok &&
+    authorized.grant.generation === session.generation &&
+    servableFiles(authorized.effectiveSelector, publicEditRelease)
+    ? authorized
+    : null;
 }
 
 // A link serves the access its files carry: its own, or a Group folder's.
 export function servableFiles(selector: ShareSelector, release?: PublicEditRelease): boolean {
-  return isPublicLinkAccess(selector.access, release) &&
-    (selector.access !== "edit" || isLiveEditShareSelector(selector));
+  return (
+    isPublicLinkAccess(selector.access, release) &&
+    (selector.access !== "edit" || isLiveEditShareSelector(selector))
+  );
 }
 
-export function isPublicLinkAccess(value: string, release?: import("@dohc/security-contract").PublicEditRelease): value is "view" | "comment" | "edit" {
+export function isPublicLinkAccess(
+  value: string,
+  release?: import("@dohc/security-contract").PublicEditRelease,
+): value is "view" | "comment" | "edit" {
   return value === "view" || value === "comment" || (release?.version === 1 && value === "edit");
 }

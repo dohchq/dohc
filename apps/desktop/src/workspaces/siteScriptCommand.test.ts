@@ -327,23 +327,31 @@ describe("commandForSiteScript loopback defaults", () => {
   });
 
   it("starts a configured literal command on loopback", () => {
-    expect(commandForSiteScript(packageSite({ configuredScripts: { dev: "next dev" } }), "dev")).toEqual({
+    expect(
+      commandForSiteScript(packageSite({ configuredScripts: { dev: "next dev" } }), "dev"),
+    ).toEqual({
       command: "next",
       args: ["dev", "--hostname", "127.0.0.1"],
     });
     expect(
-      commandForSiteScript(packageSite({ configuredScripts: { dev: "react-scripts start" } }), "dev").env,
+      commandForSiteScript(
+        packageSite({ configuredScripts: { dev: "react-scripts start" } }),
+        "dev",
+      ).env,
     ).toEqual({ HOST: "127.0.0.1" });
   });
 
-  it.each(["next dev && node notify.mjs", "node server.mjs", "next lint", "nextjs dev", "react-scripts test"])(
-    "does not change a %s script it does not recognize",
-    (dev) => {
-      const site = packageSite({ configuredScripts: {}, scripts: { dev } });
+  it.each([
+    "next dev && node notify.mjs",
+    "node server.mjs",
+    "next lint",
+    "nextjs dev",
+    "react-scripts test",
+  ])("does not change a %s script it does not recognize", (dev) => {
+    const site = packageSite({ configuredScripts: {}, scripts: { dev } });
 
-      expect(commandForSiteScript(site, "dev")).toEqual({ command: "npm", args: ["run", "dev"] });
-    },
-  );
+    expect(commandForSiteScript(site, "dev")).toEqual({ command: "npm", args: ["run", "dev"] });
+  });
 
   it("does not change build commands", () => {
     const site = packageSite({
@@ -363,7 +371,10 @@ describe("commandForSiteScript loopback defaults", () => {
     ["vite -- --host 127.0.0.1", "vite", ["--host", "127.0.0.1", "--", "--host", "127.0.0.1"]],
     ["next dev -- ./app", "next", ["dev", "--hostname", "127.0.0.1", "--", "./app"]],
   ])("puts the host before the server's own -- in the literal command %s", (dev, command, args) => {
-    expect(commandForSiteScript(packageSite({ configuredScripts: { dev } }), "dev")).toEqual({ command, args });
+    expect(commandForSiteScript(packageSite({ configuredScripts: { dev } }), "dev")).toEqual({
+      command,
+      args,
+    });
   });
 
   it("puts the host before the server's own -- in args a configured npm run forwards", () => {
@@ -396,7 +407,12 @@ describe("commandForSiteScript loopback defaults", () => {
     expect(commandForSiteScript(site, "dev")).toEqual({ command: "npm", args: ["run", "dev"] });
   });
 
-  it.each(["react-scripts start;", "react-scripts start &", "react-scripts start # local", "react-scripts start --"])(
+  it.each([
+    "react-scripts start;",
+    "react-scripts start &",
+    "react-scripts start # local",
+    "react-scripts start --",
+  ])(
     "still gives the package script %j HOST, which reaches the server wherever the script ends",
     (start) => {
       const site = packageSite({ configuredScripts: {}, scripts: { start } });
@@ -413,17 +429,23 @@ describe("commandForSiteScript loopback defaults", () => {
 // Runs the real pnpm with fixture `next` and `react-scripts` bins that print
 // the argv and HOST they receive, as the hooks around them do.
 describe.skipIf(!pnpmAvailable())("commandForSiteScript loopback defaults through pnpm", () => {
-  const PRINT = "console.log(JSON.stringify({ argv: process.argv.slice(2), host: process.env.HOST ?? null }));\n";
+  const PRINT =
+    "console.log(JSON.stringify({ argv: process.argv.slice(2), host: process.env.HOST ?? null }));\n";
 
   async function pnpmApp(scripts: Record<string, string>): Promise<string> {
     const root = await realpath(await createTestScratch("site-script-pnpm-"));
-    await writeFile(join(root, "package.json"), JSON.stringify({ name: "probe", private: true, scripts }));
+    await writeFile(
+      join(root, "package.json"),
+      JSON.stringify({ name: "probe", private: true, scripts }),
+    );
     await writeFile(join(root, "print.cjs"), PRINT);
     await mkdir(join(root, "node_modules", ".bin"), { recursive: true });
     for (const name of ["next", "react-scripts"]) {
       const bin = join(root, "node_modules", ".bin", name);
       await writeFile(`${bin}.cmd`, `@node "%~dp0\\..\\..\\print.cjs" %*\r\n`);
-      await writeFile(bin, `#!/bin/sh\nexec node "$(dirname "$0")/../../print.cjs" "$@"\n`, { mode: 0o755 });
+      await writeFile(bin, `#!/bin/sh\nexec node "$(dirname "$0")/../../print.cjs" "$@"\n`, {
+        mode: 0o755,
+      });
     }
     return root;
   }
@@ -446,7 +468,11 @@ describe.skipIf(!pnpmAvailable())("commandForSiteScript loopback defaults throug
   }
 
   it("passes the host flag to next dev and not to its hooks", async () => {
-    const scripts = { predev: "node print.cjs predev", dev: "next dev", postdev: "node print.cjs postdev" };
+    const scripts = {
+      predev: "node print.cjs predev",
+      dev: "next dev",
+      postdev: "node print.cjs postdev",
+    };
     const root = await pnpmApp(scripts);
     const site = packageSite({ packageManager: "pnpm", configuredScripts: {}, scripts });
 

@@ -43,107 +43,141 @@ export class ClientClosedRequest extends DOMException {
 export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
   // Streaming handlers own their receive deadline. Ordinary bodies retain a
   // five-minute bound after headers; headers themselves remain bounded to 60s.
-  const server = createServer(options.streamBody ? { requestTimeout: 0, headersTimeout: 60_000 } : {}, (incoming, outgoing) => {
-    let url: URL;
-    try {
-      url = new URL(incoming.url ?? "/", `http://${incoming.headers.host ?? "localhost"}`);
-    } catch {
-      outgoing.destroy();
-      return;
-    }
-    const arrivedAtMs = Date.now();
-    const method = incoming.method ?? "GET";
-    let logged = false;
-    const answer = (response: Response, request?: Request, closeAfter?: IncomingMessage): Promise<void> => {
-      if (!logged) {
-        logged = true;
-        options.requestLog?.write(request, method, response.status, arrivedAtMs);
-      }
-      return writeResponse(response, outgoing, closeAfter);
-    };
-    const maxBodyBytes = options.maxBodyBytes(url);
-    const chunks: Buffer[] = [];
-    let received = 0;
-    let rejected = false;
-    const disconnect = new AbortController();
-    // A server that has stopped listening is shutting down and closes its own connections.
-    const closed = () => disconnect.abort(server.listening ? new ClientClosedRequest() : undefined);
-    outgoing.once("close", closed);
-    incoming.on("error", () => {
-      rejected = true;
-      closed();
-      outgoing.destroy();
-    });
-    if (options.streamBody?.(url, method)) {
-      const headers = new Headers(incoming.headers as Record<string, string>);
-      options.prepareHeaders?.(headers, incoming, url);
-      const body = method === "GET" || method === "HEAD" ? null : Readable.toWeb(incoming, {
-        strategy: { highWaterMark: 64 * 1024, size: (chunk: Uint8Array) => chunk.byteLength },
-      }) as ReadableStream<Uint8Array>;
-      const init: RequestInit & { duplex: "half" } = { method, headers, signal: disconnect.signal, body, duplex: "half" };
-      let request: Request;
-      try { request = new Request(url, init); }
-      catch { incoming.destroy(); outgoing.destroy(); return; }
-      // An admission refusal may leave the upload unread. Flush its response
-      // before closing the connection; never drain an unauthenticated archive.
-      void options.handler(request)
-        .then(response => answer(response, request, incoming.readableEnded ? undefined : incoming))
-        .catch(() => {
-          if (!outgoing.destroyed) void answer(options.failure(url), request, incoming);
-        });
-      return;
-    }
-    const bodyTimer = options.streamBody ? setTimeout(() => {
-      if (rejected) return;
-      rejected = true;
-      chunks.length = 0;
-      disconnect.abort(new DOMException("Request body timed out", "TimeoutError"));
-      void answer(options.timedOut?.(url) ?? new Response(null, { status: 408 }), undefined, incoming);
-    }, 300_000) : undefined;
-    bodyTimer?.unref();
-    const clearBodyTimer = () => clearTimeout(bodyTimer);
-    incoming.once("end", clearBodyTimer);
-    incoming.once("close", clearBodyTimer);
-    outgoing.once("close", clearBodyTimer);
-    incoming.on("data", (chunk: Buffer) => {
-      if (rejected) return;
-      received += chunk.length;
-      if (received > maxBodyBytes) {
-        rejected = true;
-        clearBodyTimer();
-        chunks.length = 0;
-        void answer(options.oversized(url), undefined, incoming);
-        return;
-      }
-      chunks.push(Buffer.from(chunk));
-    });
-    incoming.on("end", () => {
-      if (rejected) return;
-      const headers = new Headers(incoming.headers as Record<string, string>);
-      options.prepareHeaders?.(headers, incoming, url);
-      let request: Request;
+  const server = createServer(
+    options.streamBody ? { requestTimeout: 0, headersTimeout: 60_000 } : {},
+    (incoming, outgoing) => {
+      let url: URL;
       try {
-        request = new Request(url, {
-          method,
-          headers,
-          signal: disconnect.signal,
-          body:
-            method === "GET" || method === "HEAD" || chunks.length === 0
-              ? undefined
-              : Buffer.concat(chunks),
-        });
+        url = new URL(incoming.url ?? "/", `http://${incoming.headers.host ?? "localhost"}`);
       } catch {
         outgoing.destroy();
         return;
       }
-      void options
-        .handler(request)
-        .then((response) => answer(response, request))
-        .catch(() => {
-          if (!outgoing.destroyed) void answer(options.failure(url), request);
-        });
-    });
-  });
+      const arrivedAtMs = Date.now();
+      const method = incoming.method ?? "GET";
+      let logged = false;
+      const answer = (
+        response: Response,
+        request?: Request,
+        closeAfter?: IncomingMessage,
+      ): Promise<void> => {
+        if (!logged) {
+          logged = true;
+          options.requestLog?.write(request, method, response.status, arrivedAtMs);
+        }
+        return writeResponse(response, outgoing, closeAfter);
+      };
+      const maxBodyBytes = options.maxBodyBytes(url);
+      const chunks: Buffer[] = [];
+      let received = 0;
+      let rejected = false;
+      const disconnect = new AbortController();
+      // A server that has stopped listening is shutting down and closes its own connections.
+      const closed = () =>
+        disconnect.abort(server.listening ? new ClientClosedRequest() : undefined);
+      outgoing.once("close", closed);
+      incoming.on("error", () => {
+        rejected = true;
+        closed();
+        outgoing.destroy();
+      });
+      if (options.streamBody?.(url, method)) {
+        const headers = new Headers(incoming.headers as Record<string, string>);
+        options.prepareHeaders?.(headers, incoming, url);
+        const body =
+          method === "GET" || method === "HEAD"
+            ? null
+            : (Readable.toWeb(incoming, {
+                strategy: {
+                  highWaterMark: 64 * 1024,
+                  size: (chunk: Uint8Array) => chunk.byteLength,
+                },
+              }) as ReadableStream<Uint8Array>);
+        const init: RequestInit & { duplex: "half" } = {
+          method,
+          headers,
+          signal: disconnect.signal,
+          body,
+          duplex: "half",
+        };
+        let request: Request;
+        try {
+          request = new Request(url, init);
+        } catch {
+          incoming.destroy();
+          outgoing.destroy();
+          return;
+        }
+        // An admission refusal may leave the upload unread. Flush its response
+        // before closing the connection; never drain an unauthenticated archive.
+        void options
+          .handler(request)
+          .then((response) =>
+            answer(response, request, incoming.readableEnded ? undefined : incoming),
+          )
+          .catch(() => {
+            if (!outgoing.destroyed) void answer(options.failure(url), request, incoming);
+          });
+        return;
+      }
+      const bodyTimer = options.streamBody
+        ? setTimeout(() => {
+            if (rejected) return;
+            rejected = true;
+            chunks.length = 0;
+            disconnect.abort(new DOMException("Request body timed out", "TimeoutError"));
+            void answer(
+              options.timedOut?.(url) ?? new Response(null, { status: 408 }),
+              undefined,
+              incoming,
+            );
+          }, 300_000)
+        : undefined;
+      bodyTimer?.unref();
+      const clearBodyTimer = () => clearTimeout(bodyTimer);
+      incoming.once("end", clearBodyTimer);
+      incoming.once("close", clearBodyTimer);
+      outgoing.once("close", clearBodyTimer);
+      incoming.on("data", (chunk: Buffer) => {
+        if (rejected) return;
+        received += chunk.length;
+        if (received > maxBodyBytes) {
+          rejected = true;
+          clearBodyTimer();
+          chunks.length = 0;
+          void answer(options.oversized(url), undefined, incoming);
+          return;
+        }
+        chunks.push(Buffer.from(chunk));
+      });
+      incoming.on("end", () => {
+        if (rejected) return;
+        const headers = new Headers(incoming.headers as Record<string, string>);
+        options.prepareHeaders?.(headers, incoming, url);
+        let request: Request;
+        try {
+          request = new Request(url, {
+            method,
+            headers,
+            signal: disconnect.signal,
+            body:
+              method === "GET" || method === "HEAD" || chunks.length === 0
+                ? undefined
+                : Buffer.concat(chunks),
+          });
+        } catch {
+          outgoing.destroy();
+          return;
+        }
+        void options
+          .handler(request)
+          .then((response) => answer(response, request))
+          .catch(() => {
+            if (!outgoing.destroyed) void answer(options.failure(url), request);
+          });
+      });
+    },
+  );
   return server;
 }
 

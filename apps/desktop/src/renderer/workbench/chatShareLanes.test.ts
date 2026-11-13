@@ -49,11 +49,7 @@ describe("planJoinedCommit", () => {
         `wire-${pass + 2}`,
       ]);
     }
-    expect(cache.map((entry) => entry.channelWireId)).toEqual([
-      "wire-499",
-      "wire-500",
-      "wire-501",
-    ]);
+    expect(cache.map((entry) => entry.channelWireId)).toEqual(["wire-499", "wire-500", "wire-501"]);
     // The per-wire ordering is the same cache and is bounded the same way.
     expect(order.answeredAt.size).toBe(3);
   });
@@ -78,10 +74,7 @@ describe("planJoinedCommit", () => {
     const order = emptyJoinedLaneOrder();
     let cache = commit(order, [], 1, ["wire-a", "wire-b"]);
     cache = commit(order, cache, 2, ["wire-a"], { shown: null });
-    expect(cache.map((entry) => entry.channelWireId).sort()).toEqual([
-      "wire-a",
-      "wire-b",
-    ]);
+    expect(cache.map((entry) => entry.channelWireId).sort()).toEqual(["wire-a", "wire-b"]);
   });
 
   it("keeps a channel this surface answered itself until a read names it", () => {
@@ -93,10 +86,7 @@ describe("planJoinedCommit", () => {
     cache = [...cache, answer("wire-new")];
 
     cache = commit(order, cache, 2, ["wire-team"]);
-    expect(cache.map((entry) => entry.channelWireId).sort()).toEqual([
-      "wire-new",
-      "wire-team",
-    ]);
+    expect(cache.map((entry) => entry.channelWireId).sort()).toEqual(["wire-new", "wire-team"]);
 
     // A read that names it takes the answer over, and the local claim ends
     // there: from the next scope that drops it, it evicts like any other.

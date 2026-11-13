@@ -2,59 +2,59 @@ import { cursorText } from "./cursorText";
 import { makeTriggerPlugin } from "./triggerPlugin";
 import { documentChange, isCodeBlock, isCodeMark } from "./pmHelpers";
 
-import type { Node as ProseMirrorNode, ResolvedPos } from '@tiptap/pm/model'
-import { PluginKey, type Transaction } from '@tiptap/pm/state'
-import { Decoration, DecorationSet } from '@tiptap/pm/view'
+import type { Node as ProseMirrorNode, ResolvedPos } from "@tiptap/pm/model";
+import { PluginKey, type Transaction } from "@tiptap/pm/state";
+import { Decoration, DecorationSet } from "@tiptap/pm/view";
 
-export const wikilinkPluginKey = new PluginKey<WikilinkState>('dohc-wikilink')
+export const wikilinkPluginKey = new PluginKey<WikilinkState>("dohc-wikilink");
 
 export type WikilinkFile = {
   /** The vault path (e.g. `playground/a.md`). */
-  path: string
+  path: string;
   /** Display title — derived by api.atoms.list from frontmatter
    *  name/title or the body's first H1. May be null; fallbacks to
    *  the leaf of the path (e.g. `a`). */
-  title?: string | null
+  title?: string | null;
   /** D4.8e — rename-proof fileId from frontmatter. Consumers use it to
    *  keep references stable when the file path changes. */
-  fileId?: string | null
-}
+  fileId?: string | null;
+};
 
 type WikilinkRange = {
-  from: number
-  to: number
+  from: number;
+  to: number;
   /** The path text written between `[[` and `]]`, with `.md`
    *  stripped (matches the rename cascade's convention). */
-  target: string
-}
+  target: string;
+};
 
 type WikilinkPreview = WikilinkRange & {
-  display: string
-  resolved: boolean
-  source: boolean
-}
+  display: string;
+  resolved: boolean;
+  source: boolean;
+};
 
 type WikilinkState = {
-  ranges: WikilinkRange[]
-  previews: WikilinkPreview[]
-  decorations: DecorationSet
-}
+  ranges: WikilinkRange[];
+  previews: WikilinkPreview[];
+  decorations: DecorationSet;
+};
 
 /** State surfaced to React for the autocomplete popover. `active:
  *  false` means no live `[[query` at the cursor. */
 export type AutocompleteState =
   | { active: false }
   | {
-      active: true
+      active: true;
       /** Doc position of the opening `[` (the first char of `[[`
        *  or `\[\[`). The completion transaction replaces from
        *  this position through the current cursor. */
-      from: number
+      from: number;
       /** The query string (text between `[[` and the cursor). */
-      query: string
-    }
+      query: string;
+    };
 
-const WIKILINK_RE = /\\?\[\\?\[(!?)([^\]\n[]+)\\?\]\\?\]/g
+const WIKILINK_RE = /\\?\[\\?\[(!?)([^\]\n[]+)\\?\]\\?\]/g;
 
 // Exported so other trigger surfaces (e.g. mentionTrigger.ts's `@`
 // autocomplete) can reuse the same "don't fire inside code" rules
@@ -64,36 +64,36 @@ const WIKILINK_RE = /\\?\[\\?\[(!?)([^\]\n[]+)\\?\]\\?\]/g
  *  resolved targets in absolute doc coordinates; `start` is where the
  *  block's content starts. */
 function textblockWikilinkRanges(block: ProseMirrorNode, start: number): WikilinkRange[] {
-  const ranges: WikilinkRange[] = []
+  const ranges: WikilinkRange[] = [];
   block.descendants((node, pos, parent) => {
-    if (!node.isText || !node.text) return
-    if (isCodeBlock(parent)) return
-    if (node.marks.some(isCodeMark)) return
-    const text = node.text
-    WIKILINK_RE.lastIndex = 0
-    let m: RegExpExecArray | null
+    if (!node.isText || !node.text) return;
+    if (isCodeBlock(parent)) return;
+    if (node.marks.some(isCodeMark)) return;
+    const text = node.text;
+    WIKILINK_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
     while ((m = WIKILINK_RE.exec(text)) !== null) {
-      const raw = m[2]!
-      const target = raw.replace(/\.md$/i, '')
+      const raw = m[2]!;
+      const target = raw.replace(/\.md$/i, "");
       ranges.push({
         from: start + pos + m.index,
         to: start + pos + m.index + m[0].length,
         target,
-      })
+      });
     }
-  })
-  return ranges
+  });
+  return ranges;
 }
 
 /** Pure: every wikilink range in the doc, in document order. */
 export function computeWikilinkRanges(doc: ProseMirrorNode): WikilinkRange[] {
-  const ranges: WikilinkRange[] = []
+  const ranges: WikilinkRange[] = [];
   doc.descendants((node, pos) => {
-    if (!node.isTextblock) return
-    ranges.push(...textblockWikilinkRanges(node, pos + 1))
-    return false
-  })
-  return ranges
+    if (!node.isTextblock) return;
+    ranges.push(...textblockWikilinkRanges(node, pos + 1));
+    return false;
+  });
+  return ranges;
 }
 
 /** Pure: the ranges after `tr`. Textblocks the transaction changed are
@@ -103,18 +103,18 @@ export function mapWikilinkRanges(
   ranges: readonly WikilinkRange[],
   tr: Transaction,
 ): WikilinkRange[] {
-  const { textblocks, mapping } = documentChange(tr.before, tr.doc)
-  const first = textblocks[0]?.pos ?? 0
-  const last = textblocks.at(-1)
-  const end = last ? last.pos + last.node.nodeSize : 0
-  const rescanned = (pos: number) => pos > first && pos < end
+  const { textblocks, mapping } = documentChange(tr.before, tr.doc);
+  const first = textblocks[0]?.pos ?? 0;
+  const last = textblocks.at(-1);
+  const end = last ? last.pos + last.node.nodeSize : 0;
+  const rescanned = (pos: number) => pos > first && pos < end;
   const moved = ranges.flatMap((range) => {
-    const from = mapping.map(range.from, 1)
-    const to = mapping.map(range.to, -1)
-    return to - from === range.to - range.from && !rescanned(from) ? [{ ...range, from, to }] : []
-  })
-  const found = textblocks.flatMap(({ node, pos }) => textblockWikilinkRanges(node, pos + 1))
-  return [...moved, ...found].sort((a, b) => a.from - b.from)
+    const from = mapping.map(range.from, 1);
+    const to = mapping.map(range.to, -1);
+    return to - from === range.to - range.from && !rescanned(from) ? [{ ...range, from, to }] : [];
+  });
+  const found = textblocks.flatMap(({ node, pos }) => textblockWikilinkRanges(node, pos + 1));
+  return [...moved, ...found].sort((a, b) => a.from - b.from);
 }
 
 /** Pure: detect an incomplete wikilink at the cursor. Looks at the
@@ -126,48 +126,43 @@ export function detectAutocomplete(
   cursorPos: number,
   position?: ResolvedPos,
 ): AutocompleteState {
-  const run = cursorText(doc, cursorPos, position)
-  if (!run) return { active: false }
-  const before = run.text
+  const run = cursorText(doc, cursorPos, position);
+  if (!run) return { active: false };
+  const before = run.text;
   // Reject if the slice contains `]]` After the opener — that
   // means the `[[` already closed (it's a complete wikilink).
-  const re = /\\?\[\\?\[([^\]\n[]*)$/
-  const m = re.exec(before)
-  if (!m) return { active: false }
+  const re = /\\?\[\\?\[([^\]\n[]*)$/;
+  const m = re.exec(before);
+  if (!m) return { active: false };
   return {
     active: true,
     from: run.from + before.length - m[0].length,
-    query: m[1] ?? '',
-  }
+    query: m[1] ?? "",
+  };
 }
 
 /** Build the pill widget DOM for a wikilink range. */
-function makePillElement(
-  target: string,
-  display: string,
-  resolved: boolean,
-): HTMLElement {
-  const span = document.createElement('span')
-  span.className =
-    'dohc-wikilink-pill' + (resolved ? '' : ' dohc-wikilink-pill--broken')
-  span.setAttribute('data-wikilink-target', target)
+function makePillElement(target: string, display: string, resolved: boolean): HTMLElement {
+  const span = document.createElement("span");
+  span.className = "dohc-wikilink-pill" + (resolved ? "" : " dohc-wikilink-pill--broken");
+  span.setAttribute("data-wikilink-target", target);
   // The pill is not editable. PM treats contentEditable=false as
   // an atom — clicks land on the widget itself; cursor skips past.
-  span.contentEditable = 'false'
+  span.contentEditable = "false";
 
-  const icon = document.createElement('span')
-  icon.className = 'dohc-wikilink-pill__icon'
-  icon.setAttribute('aria-hidden', 'true')
+  const icon = document.createElement("span");
+  icon.className = "dohc-wikilink-pill__icon";
+  icon.setAttribute("aria-hidden", "true");
   // lucide arrow-up-right
   icon.innerHTML =
-    '<svg viewBox="0 0 24 24" width="11" height="11" stroke="currentColor" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7"/><path d="M7 7h10v10"/></svg>'
-  span.appendChild(icon)
+    '<svg viewBox="0 0 24 24" width="11" height="11" stroke="currentColor" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7"/><path d="M7 7h10v10"/></svg>';
+  span.appendChild(icon);
 
-  const label = document.createElement('span')
-  label.className = 'dohc-wikilink-pill__label'
-  label.textContent = display
-  span.appendChild(label)
-  return span
+  const label = document.createElement("span");
+  label.className = "dohc-wikilink-pill__label";
+  label.textContent = display;
+  span.appendChild(label);
+  return span;
 }
 
 /** Resolve display title from the known-files map. Falls back to
@@ -176,26 +171,27 @@ function displayFor(
   target: string,
   knownFiles: ReadonlyMap<string, WikilinkFile>,
 ): { display: string; resolved: boolean } {
-  const file =
-    knownFiles.get(target) ??
-    knownFiles.get(`${target}.md`) ??
-    null
+  const file = knownFiles.get(target) ?? knownFiles.get(`${target}.md`) ?? null;
   if (file) {
-    const t = (file.title ?? '').trim()
-    if (t) return { display: t, resolved: true }
+    const t = (file.title ?? "").trim();
+    if (t) return { display: t, resolved: true };
     // No title — fall back to leaf of the path.
-    const leaf = file.path.replace(/\.(md|markdown)$/i, '').split('/').pop() ?? file.path
-    return { display: leaf, resolved: true }
+    const leaf =
+      file.path
+        .replace(/\.(md|markdown)$/i, "")
+        .split("/")
+        .pop() ?? file.path;
+    return { display: leaf, resolved: true };
   }
   // Broken — display the bare path; the dashed style signals brokenness.
-  return { display: target, resolved: false }
+  return { display: target, resolved: false };
 }
 
 function buildWikilinkDecorations(
   doc: ProseMirrorNode,
   previews: readonly WikilinkPreview[],
 ): DecorationSet {
-  const decorations: Decoration[] = []
+  const decorations: Decoration[] = [];
   for (const [index, r] of previews.entries()) {
     // D4.8c — Obsidian-style live preview toggle. When the cursor
     // is inside the wikilink range, render it as SOURCE (the raw
@@ -206,11 +202,11 @@ function buildWikilinkDecorations(
     if (r.source) {
       decorations.push(
         Decoration.inline(r.from, r.to, {
-          class: 'dohc-wikilink-source',
-          'data-wikilink-target': r.target,
+          class: "dohc-wikilink-source",
+          "data-wikilink-target": r.target,
         } as Record<string, string>),
-      )
-      continue
+      );
+      continue;
     }
     // Preview mode — widget + hide.
     decorations.push(
@@ -219,17 +215,21 @@ function buildWikilinkDecorations(
         () => makePillElement(r.target, r.display, r.resolved),
         // side:-1 places the widget before the underlying text so
         // clicks land on the widget, not on the hidden text behind.
-        { side: -1, ignoreSelection: true, key: JSON.stringify([index, r.target, r.display, r.resolved]) },
+        {
+          side: -1,
+          ignoreSelection: true,
+          key: JSON.stringify([index, r.target, r.display, r.resolved]),
+        },
       ),
-    )
+    );
     decorations.push(
       Decoration.inline(r.from, r.to, {
-        class: 'dohc-wikilink-hidden',
-        'data-wikilink-source': r.target,
+        class: "dohc-wikilink-hidden",
+        "data-wikilink-source": r.target,
       } as Record<string, string>),
-    )
+    );
   }
-  return DecorationSet.create(doc, decorations)
+  return DecorationSet.create(doc, decorations);
 }
 
 function wikilinkState(
@@ -245,12 +245,21 @@ function wikilinkState(
     ...range,
     ...displayFor(range.target, knownFiles),
     source: cursorPos >= range.from && cursorPos <= range.to,
-  }))
-  if (previous && ranges === previous.ranges && previews.every((preview, index) => {
-    const old = previous.previews[index]
-    return old.source === preview.source && old.display === preview.display && old.resolved === preview.resolved
-  })) return previous
-  return { ranges, previews, decorations: buildWikilinkDecorations(doc, previews) }
+  }));
+  if (
+    previous &&
+    ranges === previous.ranges &&
+    previews.every((preview, index) => {
+      const old = previous.previews[index];
+      return (
+        old.source === preview.source &&
+        old.display === preview.display &&
+        old.resolved === preview.resolved
+      );
+    })
+  )
+    return previous;
+  return { ranges, previews, decorations: buildWikilinkDecorations(doc, previews) };
 }
 
 /** Build the plugin.
@@ -262,36 +271,39 @@ export function makeWikilinkPlugin(
   getKnownFiles: () => ReadonlyMap<string, WikilinkFile>,
   onAutocompleteChange: (s: AutocompleteState) => void,
 ) {
-  return makeTriggerPlugin({
-    key: wikilinkPluginKey,
-    state: {
-      init(_, instance) {
-        return wikilinkState(
-          instance.doc,
-          computeWikilinkRanges(instance.doc),
-          getKnownFiles(),
-          instance.selection.from,
-        )
+  return makeTriggerPlugin(
+    {
+      key: wikilinkPluginKey,
+      state: {
+        init(_, instance) {
+          return wikilinkState(
+            instance.doc,
+            computeWikilinkRanges(instance.doc),
+            getKnownFiles(),
+            instance.selection.from,
+          );
+        },
+        apply(tr, old, _oldState, newState) {
+          if (!tr.docChanged && !tr.selectionSet) return old;
+          return wikilinkState(
+            newState.doc,
+            tr.docChanged ? mapWikilinkRanges(old.ranges, tr) : old.ranges,
+            getKnownFiles(),
+            newState.selection.from,
+            tr.docChanged ? undefined : old,
+          );
+        },
       },
-      apply(tr, old, _oldState, newState) {
-        if (!tr.docChanged && !tr.selectionSet) return old
-        return wikilinkState(
-          newState.doc,
-          tr.docChanged ? mapWikilinkRanges(old.ranges, tr) : old.ranges,
-          getKnownFiles(),
-          newState.selection.from,
-          tr.docChanged ? undefined : old,
-        )
+      props: {
+        decorations(state) {
+          return wikilinkPluginKey.getState(state)?.decorations;
+        },
       },
+      // We watch state in `view.update` rather than `apply` so we
+      // also catch selection-only changes (the cursor moving over an
+      // existing `[[query`).
     },
-    props: {
-      decorations(state) {
-        return wikilinkPluginKey.getState(state)?.decorations
-      },
-    },
-    // We watch state in `view.update` rather than `apply` so we
-    // also catch selection-only changes (the cursor moving over an
-    // existing `[[query`).
-
-  }, detectAutocomplete, onAutocompleteChange)
+    detectAutocomplete,
+    onAutocompleteChange,
+  );
 }

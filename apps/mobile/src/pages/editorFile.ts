@@ -7,7 +7,7 @@ import { pageFonts, pageHtml, pageScript, pageVersion } from "../editorHtml.gene
 const folder = new Directory(Paths.cache, `editor-${pageVersion}`);
 const file = new File(folder, "page.html");
 const script = new File(folder, "page.js");
-const fonts = pageFonts.map(font => ({ file: new File(folder, font.name), base64: font.base64 }));
+const fonts = pageFonts.map((font) => ({ file: new File(folder, font.name), base64: font.base64 }));
 
 let pending: Promise<string> | null = null;
 
@@ -19,20 +19,27 @@ export function editorHtmlUri(): Promise<string> {
     try {
       if (!folder.exists) folder.create({ intermediates: true });
       if (!script.exists) await script.write(pageScript);
-      for (const font of fonts) if (!font.file.exists) await font.file.write(font.base64, { encoding: "base64" });
+      for (const font of fonts)
+        if (!font.file.exists) await font.file.write(font.base64, { encoding: "base64" });
       if (!file.exists) await file.write(pageHtml);
       return file.uri;
     } catch (error) {
       // A write that failed (a full disk, say) may have left half a file: the folder goes, so the next try writes
       // every file again.
-      try { if (folder.exists) folder.delete(); } catch { /* the next try finds what's left and writes it again */ }
+      try {
+        if (folder.exists) folder.delete();
+      } catch {
+        /* the next try finds what's left and writes it again */
+      }
       throw error;
     }
-  })().finally(() => { pending = null; });
+  })().finally(() => {
+    pending = null;
+  });
   return pending;
 }
 
-export const editorFontFiles = fonts.map(font => font.file);
+export const editorFontFiles = fonts.map((font) => font.file);
 
 /** The folder the web view may read from. */
 export const editorFolderUri = folder.uri;

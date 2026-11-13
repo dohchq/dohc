@@ -64,7 +64,10 @@ const isBlank = (code: number) => code === SPACE || code === TAB;
 const isDigit = (code: number) => code >= 48 && code <= 57;
 const isControl = (code: number) => code < SPACE || code === 127;
 const isAsciiPunctuation = (code: number) =>
-  (code >= 33 && code <= 47) || (code >= 58 && code <= 64) || (code >= 91 && code <= 96) || (code >= 123 && code <= 126);
+  (code >= 33 && code <= 47) ||
+  (code >= 58 && code <= 64) ||
+  (code >= 91 && code <= 96) ||
+  (code >= 123 && code <= 126);
 const isWordCode = (code: number) => code > SPACE && !isAsciiPunctuation(code);
 const isMarker = (code: number) => code === STAR || code === UNDERSCORE || code === TILDE;
 
@@ -75,7 +78,8 @@ const PUNCTUATION = 2;
 // As micromark classifies a character beside a run: -1 is the line's edge.
 function classify(code: number): number {
   if (code < 0 || code === SPACE || code === TAB) return WHITESPACE;
-  if (code < 128) return isAsciiPunctuation(code) ? PUNCTUATION : code === 11 || code === 12 ? WHITESPACE : 0;
+  if (code < 128)
+    return isAsciiPunctuation(code) ? PUNCTUATION : code === 11 || code === 12 ? WHITESPACE : 0;
   const char = String.fromCharCode(code);
   if (UNICODE_WHITESPACE.test(char)) return WHITESPACE;
   return UNICODE_PUNCTUATION.test(char) ? PUNCTUATION : 0;
@@ -133,7 +137,10 @@ const normalizeLabel = (label: string) => {
   return value.toLowerCase().toUpperCase();
 };
 
-export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []): StrippedMarkdown {
+export function stripMarkdown(
+  source: string,
+  atoms: readonly SourceRange[] = [],
+): StrippedMarkdown {
   // Output pieces. Kept atoms remember their piece, and a link opener or an
   // emphasis run can change its own piece once its pair is found, so offsets
   // are summed last.
@@ -241,7 +248,8 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
   function definitionClose(start: number, at: number, end: number): number {
     if (at >= end || source.charCodeAt(at) !== OPEN_BRACKET) return -1;
     const close = find(CLOSE_BRACKET, at, end);
-    if (close + 1 >= end || source.charCodeAt(close + 1) !== COLON || close - at - 1 > LABEL_MAX) return -1;
+    if (close + 1 >= end || source.charCodeAt(close + 1) !== COLON || close - at - 1 > LABEL_MAX)
+      return -1;
     let column = 0;
     let size = 0;
     for (let next = start; next < close; next++) {
@@ -278,7 +286,13 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
 
   // Whether the line from `at` holds only `allowed` characters and blanks, with
   // at least `least` of `counted`.
-  function onlyOf(at: number, end: number, allowed: (code: number) => boolean, counted: number, least: number): boolean {
+  function onlyOf(
+    at: number,
+    end: number,
+    allowed: (code: number) => boolean,
+    counted: number,
+    least: number,
+  ): boolean {
     let count = 0;
     for (let next = at; next < end; next++) {
       if (counting) steps++;
@@ -332,7 +346,8 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
     }
     // Thematic breaks, setext underlines and table delimiter rows.
     if (
-      ((first === DASH || first === STAR || first === UNDERSCORE) && onlyOf(at, end, () => false, first, 3)) ||
+      ((first === DASH || first === STAR || first === UNDERSCORE) &&
+        onlyOf(at, end, () => false, first, 3)) ||
       (first === EQUALS && onlyOf(at, end, () => false, EQUALS, 1)) ||
       ((first === PIPE || first === DASH || first === COLON) &&
         onlyOf(at, end, (code) => code === DASH || code === COLON, PIPE, 1) &&
@@ -393,7 +408,14 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
     if (at < end && source.charCodeAt(at) === PIPE) tableRow = true;
     // A link reference definition shows nothing.
     const definition = definitionClose(start, at, end) >= 0;
-    if (!continues || opensBlock || quotes > paragraphQuotes || tableRow || definition || at >= end) {
+    if (
+      !continues ||
+      opensBlock ||
+      quotes > paragraphQuotes ||
+      tableRow ||
+      definition ||
+      at >= end
+    ) {
       // The markers belong to this line, after the paragraph that ended.
       const own = pieces.splice(markers);
       endParagraph();
@@ -426,7 +448,11 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
 
   function skipTaskBox(at: number, end: number): number {
     const from = indentEnd(at, end);
-    if (from + 3 > end || source.charCodeAt(from) !== OPEN_BRACKET || source.charCodeAt(from + 2) !== CLOSE_BRACKET) {
+    if (
+      from + 3 > end ||
+      source.charCodeAt(from) !== OPEN_BRACKET ||
+      source.charCodeAt(from + 2) !== CLOSE_BRACKET
+    ) {
       return at;
     }
     const mark = source.charCodeAt(from + 1);
@@ -504,7 +530,11 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
   function pairs(open: Run, close: Run): boolean {
     if (open.code !== close.code || !open.open) return false;
     if (close.code === TILDE) return open.size === close.size;
-    return !((open.close || close.open) && close.size % 3 !== 0 && (open.size + close.size) % 3 === 0);
+    return !(
+      (open.close || close.open) &&
+      close.size % 3 !== 0 &&
+      (open.size + close.size) % 3 === 0
+    );
   }
 
   function stripInline(start: number, end: number, tableRow: boolean) {
@@ -531,10 +561,12 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
         next[end - start] = -1;
         const escaped = new Uint8Array(end - start + 1);
         for (let at = start; at < end; at++) {
-          if (source.charCodeAt(at) === BACKSLASH && !escaped[at - start]) escaped[at + 1 - start] = 1;
+          if (source.charCodeAt(at) === BACKSLASH && !escaped[at - start])
+            escaped[at + 1 - start] = 1;
         }
         for (let at = end - 1; at >= start; at--) {
-          next[at - start] = source.charCodeAt(at) === marker && !escaped[at - start] ? at : next[at + 1 - start]!;
+          next[at - start] =
+            source.charCodeAt(at) === marker && !escaped[at - start] ? at : next[at + 1 - start]!;
         }
         titleEnds.set(marker, next);
       }
@@ -576,7 +608,8 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
         if (counting) steps++;
         const code = source.charCodeAt(next);
         // A blank inside parentheses ends no destination: the link fails.
-        if (isBlank(code) || (depth === 0 && code === CLOSE_PAREN)) return depth === 0 && next > at ? next : -1;
+        if (isBlank(code) || (depth === 0 && code === CLOSE_PAREN))
+          return depth === 0 && next > at ? next : -1;
         if (code === OPEN_PAREN) {
           if (depth >= DESTINATION_DEPTH) return -1;
           depth++;
@@ -600,13 +633,16 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
         if (!isBlank(code)) blank = false;
         if (code === BACKSLASH && next + 1 < end) {
           const escaped = source.charCodeAt(next + 1);
-          if (escaped === OPEN_BRACKET || escaped === CLOSE_BRACKET || escaped === BACKSLASH) next++;
+          if (escaped === OPEN_BRACKET || escaped === CLOSE_BRACKET || escaped === BACKSLASH)
+            next++;
         }
       }
       return -1;
     };
     const isDefined = (from: number, to: number) =>
-      defined.size > 0 && to - from <= LABEL_MAX && defined.has(normalizeLabel(source.slice(from, to)));
+      defined.size > 0 &&
+      to - from <= LABEL_MAX &&
+      defined.has(normalizeLabel(source.slice(from, to)));
     // Where the link that "]" at `close` ends, or -1.
     const linkEnd = (bracket: Bracket, close: number): number => {
       const next = close + 1 < end ? source.charCodeAt(close + 1) : -1;
@@ -721,7 +757,8 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
               [open, close] = [open && (left !== 0 || !close), close && (right !== 0 || !open)];
             }
           }
-          if (open || close) runs.push({ piece: pieces.length - 1, code, size, open, close, prev: 0, next: 0 });
+          if (open || close)
+            runs.push({ piece: pieces.length - 1, code, size, open, close, prev: 0, next: 0 });
           continue;
         }
         case BANG:
@@ -729,7 +766,12 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
           if (code === BANG && (at + 1 >= end || source.charCodeAt(at + 1) !== OPEN_BRACKET)) break;
           flush();
           const size = code === BANG ? 2 : 1;
-          brackets.push({ piece: pieces.length, link: code === OPEN_BRACKET, runs: runs.length, textStart: at + size });
+          brackets.push({
+            piece: pieces.length,
+            link: code === OPEN_BRACKET,
+            runs: runs.length,
+            textStart: at + size,
+          });
           pieces.push(source.slice(at, at + size));
           lastBracket = at + size - 1;
           at = plain = at + size;
@@ -756,12 +798,20 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
           pieces[bracket!.piece] = "";
           if (bracket!.link) inactiveBelow = brackets.length;
           // An image without alt text shows its address, as the chat draws it.
-          else if (bracket!.textStart === at && after > at + 1 && source.charCodeAt(at + 1) === OPEN_PAREN) {
+          else if (
+            bracket!.textStart === at &&
+            after > at + 1 &&
+            source.charCodeAt(at + 1) === OPEN_PAREN
+          ) {
             const from = blanksEnd(at + 2, end);
             if (source.charCodeAt(from) !== CLOSE_PAREN) {
               const angled = source.charCodeAt(from) === LT;
               const to = destinationEnd(from);
-              pieces.push(normalizeUri(decodeText(source.slice(angled ? from + 1 : from, angled ? to - 1 : to))));
+              pieces.push(
+                normalizeUri(
+                  decodeText(source.slice(angled ? from + 1 : from, angled ? to - 1 : to)),
+                ),
+              );
             }
           }
           at = plain = after;

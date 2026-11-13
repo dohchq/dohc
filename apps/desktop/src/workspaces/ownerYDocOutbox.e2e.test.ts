@@ -38,17 +38,31 @@ const LIMITS = {
 
 it("maps an interrupted outbox snapshot to caller-scheduled retry without authority, delivery, or ACK", async () => {
   const methods: string[] = [];
-  const outbox = new OwnerYDocOutbox({
-    async sendRequest(request) {
-      methods.push(request.method);
-      return { id: request.id, result: { kind: "readChanged" } };
+  const outbox = new OwnerYDocOutbox(
+    {
+      async sendRequest(request) {
+        methods.push(request.method);
+        return { id: request.id, result: { kind: "readChanged" } };
+      },
     },
-  }, "test-workspace");
+    "test-workspace",
+  );
   const calls: string[] = [];
-  const drainer = new OwnerYDocOutboxDrainer(outbox, "outbox-1", {
-    async freshOwnerAuthority() { calls.push("authority"); return { kind: "retry" }; },
-    async deliver() { calls.push("delivery"); return { kind: "retry" }; },
-  }, new OwnerKnownRefusals());
+  const drainer = new OwnerYDocOutboxDrainer(
+    outbox,
+    "outbox-1",
+    {
+      async freshOwnerAuthority() {
+        calls.push("authority");
+        return { kind: "retry" };
+      },
+      async deliver() {
+        calls.push("delivery");
+        return { kind: "retry" };
+      },
+    },
+    new OwnerKnownRefusals(),
+  );
   try {
     await expect(drainer.drainOnce()).resolves.toBe("retry");
     expect(methods).toEqual(["ydoc.ownerOutbox.readPending"]);
@@ -63,77 +77,124 @@ it.each([
   { stage: "read", outcome: "receipt" },
   { stage: "authority", outcome: "quarantine" },
   { stage: "delivery", outcome: "receipt" },
-] as const)("stops after disposal during $stage with a $outcome result", async ({ stage, outcome }) => {
-  let markReached!: () => void;
-  const reached = new Promise<void>((resolve) => { markReached = resolve; });
-  let release!: () => void;
-  const held = new Promise<void>((resolve) => { release = resolve; });
-  const calls: string[] = [];
-  const boundary = async (current: typeof stage) => {
-    calls.push(current);
-    if (current === stage) {
-      markReached();
-      await held;
+] as const)(
+  "stops after disposal during $stage with a $outcome result",
+  async ({ stage, outcome }) => {
+    let markReached!: () => void;
+    const reached = new Promise<void>((resolve) => {
+      markReached = resolve;
+    });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const calls: string[] = [];
+    const boundary = async (current: typeof stage) => {
+      calls.push(current);
+      if (current === stage) {
+        markReached();
+        await held;
+      }
+    };
+    class TestOutbox extends OwnerYDocOutbox {
+      override async readHead(): Promise<Awaited<ReturnType<OwnerYDocOutbox["readHead"]>>> {
+        await boundary("read");
+        return {
+          outboxId: "outbox-1",
+          binding: {
+            workspaceId: "workspace-1",
+            mainVersionId: "main",
+            objectId: "object-1",
+            lineageClaimId: "lineage-1",
+            currentPath: "owner.md",
+            selectorPaths: ["owner.md"],
+            restoreFenceGeneration: 0,
+          },
+          baseUpdate: new Uint8Array([0, 0]),
+          baseUpdateDigest: "a".repeat(64),
+          state: "active",
+          pendingBytes: 1,
+          oldestEntryAtMs: 0,
+          quarantineReason: null,
+          observedBinding: null,
+          retryDeliveryId: null,
+          entry: {
+            sequence: 1,
+            appendKey: "append-1",
+            deliveryId: "delivery-1",
+            update: new Uint8Array([1]),
+            updateDigest: "b".repeat(64),
+            byteLength: 1,
+            createdAtMs: 0,
+          },
+        };
+      }
+
+      override async acknowledge() {
+        calls.push("ACK");
+        return { acknowledged: 1, pendingBytes: 0, oldestEntryAtMs: null };
+      }
+
+      override async quarantine(): Promise<void> {
+        calls.push("quarantine");
+      }
     }
-  };
-  class TestOutbox extends OwnerYDocOutbox {
-    override async readHead(): Promise<Awaited<ReturnType<OwnerYDocOutbox["readHead"]>>> {
-      await boundary("read");
-      return {
-        outboxId: "outbox-1",
-        binding: {
-          workspaceId: "workspace-1", mainVersionId: "main", objectId: "object-1",
-          lineageClaimId: "lineage-1", currentPath: "owner.md", selectorPaths: ["owner.md"],
-          restoreFenceGeneration: 0,
+    const outbox = new TestOutbox(
+      {
+        async sendRequest() {
+          throw new Error("Unexpected daemon request.");
         },
-        baseUpdate: new Uint8Array([0, 0]), baseUpdateDigest: "a".repeat(64),
-        state: "active", pendingBytes: 1, oldestEntryAtMs: 0,
-        quarantineReason: null, observedBinding: null, retryDeliveryId: null,
-        entry: { sequence: 1, appendKey: "append-1", deliveryId: "delivery-1",
-          update: new Uint8Array([1]), updateDigest: "b".repeat(64), byteLength: 1, createdAtMs: 0 },
-      };
+      },
+      "test-workspace",
+    );
+    const drainer = new OwnerYDocOutboxDrainer(
+      outbox,
+      "outbox-1",
+      {
+        async freshOwnerAuthority() {
+          await boundary("authority");
+          return stage === "authority" && outcome === "quarantine"
+            ? { kind: "quarantine", reason: "binding changed" }
+            : { kind: "authority", authority: { value: {}, hostEpoch: parseHostEpoch(1) } };
+        },
+        async deliver() {
+          await boundary("delivery");
+          return outcome === "quarantine"
+            ? { kind: "quarantine", reason: "binding changed" }
+            : {
+                kind: "receipt",
+                receipt: {
+                  deliveryId: "delivery-1",
+                  updateDigest: "b".repeat(64),
+                  journalCursor: 1,
+                  acceptingHostEpoch: parseHostEpoch(1),
+                },
+              };
+        },
+      },
+      new OwnerKnownRefusals(),
+    );
+    const draining = drainer.drainOnce();
+    try {
+      await reached;
+      drainer.dispose();
+      release();
+      await expect(draining).resolves.toBe("retry");
+      expect(calls).toEqual(
+        stage === "read"
+          ? ["read"]
+          : stage === "authority"
+            ? ["read", "authority"]
+            : ["read", "authority", "delivery"],
+      );
+    } finally {
+      drainer.dispose();
+      release();
+      await draining.catch(() => undefined);
+      outbox.dispose();
     }
-
-    override async acknowledge() {
-      calls.push("ACK");
-      return { acknowledged: 1, pendingBytes: 0, oldestEntryAtMs: null };
-    }
-
-    override async quarantine(): Promise<void> {
-      calls.push("quarantine");
-    }
-  }
-  const outbox = new TestOutbox({ async sendRequest() { throw new Error("Unexpected daemon request."); } }, "test-workspace");
-  const drainer = new OwnerYDocOutboxDrainer(outbox, "outbox-1", {
-    async freshOwnerAuthority() {
-      await boundary("authority");
-      return stage === "authority" && outcome === "quarantine"
-        ? { kind: "quarantine", reason: "binding changed" }
-        : { kind: "authority", authority: { value: {}, hostEpoch: parseHostEpoch(1) } };
-    },
-    async deliver() {
-      await boundary("delivery");
-      return outcome === "quarantine"
-        ? { kind: "quarantine", reason: "binding changed" }
-        : { kind: "receipt", receipt: { deliveryId: "delivery-1", updateDigest: "b".repeat(64),
-          journalCursor: 1, acceptingHostEpoch: parseHostEpoch(1) } };
-    },
-  }, new OwnerKnownRefusals());
-  const draining = drainer.drainOnce();
-  try {
-    await reached;
-    drainer.dispose();
-    release();
-    await expect(draining).resolves.toBe("retry");
-    expect(calls).toEqual(stage === "read" ? ["read"]
-      : stage === "authority" ? ["read", "authority"] : ["read", "authority", "delivery"]);
-  } finally {
-    drainer.dispose();
-    release();
-    await draining.catch(() => undefined);
-    outbox.dispose();
-  }
-});
+  },
+);
 
 class AppendGate implements DaemonRequesterClient {
   private releaseGate: (() => void) | null = null;
@@ -205,10 +266,7 @@ class FakeOwnerHost implements OwnerYDocDelivery {
     const stored = this.receipts.get(envelope.deliveryId);
     if (stored !== undefined) return { kind: "receipt", receipt: stored };
 
-    Y.applyUpdate(
-      this.doc,
-      Y.mergeUpdates([envelope.baseUpdate, envelope.update]),
-    );
+    Y.applyUpdate(this.doc, Y.mergeUpdates([envelope.baseUpdate, envelope.update]));
     this.appliedDeliveryIds.push(envelope.deliveryId);
     this.journal.push({
       deliveryId: envelope.deliveryId,
@@ -342,10 +400,7 @@ it.skipIf(engine.missing)(
       });
 
       await sessions.run(workspace, async (engineBinding) => {
-        const outbox = new OwnerYDocOutbox(
-          engineBinding.client,
-          engineBinding.workspace,
-        );
+        const outbox = new OwnerYDocOutbox(engineBinding.client, engineBinding.workspace);
         const host = new FakeOwnerHost();
         const refusals = new OwnerKnownRefusals();
         const firstDrainer = new OwnerYDocOutboxDrainer(
@@ -370,9 +425,7 @@ it.skipIf(engine.missing)(
         expect(host.delivered).toHaveLength(2);
         expect(host.delivered[1]?.deliveryId).toBe(host.delivered[0]?.deliveryId);
         expect(host.delivered[1]?.updateDigest).toBe(host.delivered[0]?.updateDigest);
-        expect(
-          host.receipts.get(host.delivered[0]!.deliveryId)?.acceptingHostEpoch,
-        ).toBe(1);
+        expect(host.receipts.get(host.delivered[0]!.deliveryId)?.acceptingHostEpoch).toBe(1);
         expect(host.journal).toHaveLength(1);
         expect(host.authorship).toHaveLength(1);
         expect(host.appliedDeliveryIds).toHaveLength(1);

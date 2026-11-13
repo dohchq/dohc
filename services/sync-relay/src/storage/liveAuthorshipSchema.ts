@@ -10,7 +10,8 @@ export const LIVE_AUTHOR_COLUMNS = [
   "checkpoint_coverage_json TEXT CHECK (checkpoint_coverage_json IS NULL OR json_valid(checkpoint_coverage_json))",
   "seed_first_seen_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(seed_first_seen_json))",
 ] as const;
-const logColumn = "admitted_author_snapshot_json TEXT CHECK (admitted_author_snapshot_json IS NULL OR json_valid(admitted_author_snapshot_json))";
+const logColumn =
+  "admitted_author_snapshot_json TEXT CHECK (admitted_author_snapshot_json IS NULL OR json_valid(admitted_author_snapshot_json))";
 const clientSql = `CREATE TABLE ${LIVE_AUTHOR_CLIENTS} (
   workspace_id TEXT NOT NULL, main_version_id TEXT NOT NULL, object_id TEXT NOT NULL, lineage_claim_id TEXT NOT NULL,
   client_id INTEGER NOT NULL CHECK (client_id BETWEEN 0 AND 9007199254740991),
@@ -30,11 +31,14 @@ const triggerSql = {
     UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes-length(CAST(OLD.admitted_author_snapshot_json AS BLOB)) WHERE workspace_id=OLD.workspace_id; END`,
 } as const;
 const normalize = (sql: string) => sql.trim().replace(/;$/, "").replace(/\s+/g, " ");
-function require(value: unknown): asserts value { if (!value) throw new Error("live author schema is missing or damaged"); }
+function require(value: unknown): asserts value {
+  if (!value) throw new Error("live author schema is missing or damaged");
+}
 function assertColumnSql(db: SqliteDb, table: string, definition: string): void {
   const row = db.prepare("SELECT type,sql FROM sqlite_schema WHERE name=?").get(table);
   require(row?.type === "table" && typeof row.sql === "string");
-  const sql = normalize(row.sql), fragment = ", " + definition;
+  const sql = normalize(row.sql),
+    fragment = ", " + definition;
   const index = sql.indexOf(fragment);
   require(index >= 0);
   const rest = sql.slice(index + fragment.length).trimStart();
@@ -43,8 +47,13 @@ function assertColumnSql(db: SqliteDb, table: string, definition: string): void 
 function assertObject(db: SqliteDb, name: string, type: string, table: string, sql: string): void {
   const rows = db.prepare("SELECT type,tbl_name,sql FROM sqlite_schema WHERE name=?").all(name);
   const row = rows[0];
-  require(rows.length === 1 && row?.type === type && row.tbl_name === table &&
-    typeof row.sql === "string" && normalize(row.sql) === normalize(sql));
+  require(
+    rows.length === 1 &&
+      row?.type === type &&
+      row.tbl_name === table &&
+      typeof row.sql === "string" &&
+      normalize(row.sql) === normalize(sql),
+  );
 }
 export function originalLiveJournalSql(sql: string): string {
   let result = normalize(sql);
@@ -52,38 +61,87 @@ export function originalLiveJournalSql(sql: string): string {
   return result;
 }
 export function liveAuthorSchemaMarked(db: SqliteDb): boolean {
-  return !!db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(LIVE_AUTHOR_MIGRATION);
+  return !!db
+    .prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?")
+    .get(LIVE_AUTHOR_MIGRATION);
 }
 export function assertLiveAuthorColumns(db: SqliteDb): void {
   const columns = db.prepare("PRAGMA table_info(sync_relay_live_update_journal)").all().slice(24);
-  const expected = [[24,"canonical_version","INTEGER",1,"1",0], [25,"author_context_json","TEXT",0,null,0],
-    [26,"author_snapshot_json","TEXT",0,null,0], [27,"first_seen_deletes_json","TEXT",1,"'[]'",0],
-    [28,"checkpoint_coverage_json","TEXT",0,null,0], [29,"seed_first_seen_json","TEXT",1,"'[]'",0]];
-  require(JSON.stringify(columns.map(r => [r.cid,r.name,r.type,r.notnull,r.dflt_value,r.pk])) === JSON.stringify(expected));
-  for (const column of LIVE_AUTHOR_COLUMNS) assertColumnSql(db, "sync_relay_live_update_journal", column);
+  const expected = [
+    [24, "canonical_version", "INTEGER", 1, "1", 0],
+    [25, "author_context_json", "TEXT", 0, null, 0],
+    [26, "author_snapshot_json", "TEXT", 0, null, 0],
+    [27, "first_seen_deletes_json", "TEXT", 1, "'[]'", 0],
+    [28, "checkpoint_coverage_json", "TEXT", 0, null, 0],
+    [29, "seed_first_seen_json", "TEXT", 1, "'[]'", 0],
+  ];
+  require(
+    JSON.stringify(columns.map((r) => [r.cid, r.name, r.type, r.notnull, r.dflt_value, r.pk])) ===
+      JSON.stringify(expected),
+  );
+  for (const column of LIVE_AUTHOR_COLUMNS)
+    assertColumnSql(db, "sync_relay_live_update_journal", column);
 }
 function assertSchema(db: SqliteDb): void {
   assertLiveAuthorColumns(db);
   assertObject(db, LIVE_AUTHOR_CLIENTS, "table", LIVE_AUTHOR_CLIENTS, clientSql);
-  const columns = db.prepare("PRAGMA table_info(sync_relay_log)").all().filter(r => Number(r.cid) >= 7 && r.name !== "settlement_admission_json" && r.name !== "relay_admission");
-  require(JSON.stringify(columns.map(r => [r.cid,r.name,r.type,r.notnull,r.dflt_value,r.pk])) ===
-    JSON.stringify([[7,"admitted_author_snapshot_json","TEXT",0,null,0]]));
+  const columns = db
+    .prepare("PRAGMA table_info(sync_relay_log)")
+    .all()
+    .filter(
+      (r) =>
+        Number(r.cid) >= 7 &&
+        r.name !== "settlement_admission_json" &&
+        r.name !== "relay_admission",
+    );
+  require(
+    JSON.stringify(columns.map((r) => [r.cid, r.name, r.type, r.notnull, r.dflt_value, r.pk])) ===
+      JSON.stringify([[7, "admitted_author_snapshot_json", "TEXT", 0, null, 0]]),
+  );
   assertColumnSql(db, "sync_relay_log", logColumn);
   for (const [name, sql] of Object.entries(triggerSql)) {
-    assertObject(db, name, "trigger", name.startsWith("live_author_client_") ? LIVE_AUTHOR_CLIENTS : "sync_relay_log", sql);
+    assertObject(
+      db,
+      name,
+      "trigger",
+      name.startsWith("live_author_client_") ? LIVE_AUTHOR_CLIENTS : "sync_relay_log",
+      sql,
+    );
   }
 }
 export function initializeLiveAuthorshipSchema(db: SqliteDb): void {
-  if (liveAuthorSchemaMarked(db)) { assertSchema(db); return; }
+  if (liveAuthorSchemaMarked(db)) {
+    assertSchema(db);
+    return;
+  }
   const names = [LIVE_AUTHOR_CLIENTS, ...Object.keys(triggerSql)];
-  require(db.prepare(`SELECT name FROM sqlite_schema WHERE name IN (${names.map(() => "?").join(",")})`).all(...names).length === 0);
-  require(!db.prepare("PRAGMA table_info(sync_relay_live_update_journal)").all().some(row =>
-    LIVE_AUTHOR_COLUMNS.some(column => column.startsWith(String(row.name) + " "))));
-  require(!db.prepare("PRAGMA table_info(sync_relay_log)").all().some(row => row.name === "admitted_author_snapshot_json"));
-  for (const column of LIVE_AUTHOR_COLUMNS) db.exec("ALTER TABLE sync_relay_live_update_journal ADD COLUMN " + column);
+  require(
+    db
+      .prepare(`SELECT name FROM sqlite_schema WHERE name IN (${names.map(() => "?").join(",")})`)
+      .all(...names).length === 0,
+  );
+  require(
+    !db
+      .prepare("PRAGMA table_info(sync_relay_live_update_journal)")
+      .all()
+      .some((row) =>
+        LIVE_AUTHOR_COLUMNS.some((column) => column.startsWith(String(row.name) + " ")),
+      ),
+  );
+  require(
+    !db
+      .prepare("PRAGMA table_info(sync_relay_log)")
+      .all()
+      .some((row) => row.name === "admitted_author_snapshot_json"),
+  );
+  for (const column of LIVE_AUTHOR_COLUMNS)
+    db.exec("ALTER TABLE sync_relay_live_update_journal ADD COLUMN " + column);
   db.exec("ALTER TABLE sync_relay_log ADD COLUMN " + logColumn);
   db.exec(clientSql);
   for (const sql of Object.values(triggerSql)) db.exec(sql);
   assertSchema(db);
-  db.prepare("INSERT INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES (?,?)").run(LIVE_AUTHOR_MIGRATION, Date.now());
+  db.prepare("INSERT INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES (?,?)").run(
+    LIVE_AUTHOR_MIGRATION,
+    Date.now(),
+  );
 }

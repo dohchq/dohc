@@ -9,7 +9,11 @@ import { VersionComparePage } from "./WorkspaceVersions";
 // This suite checks protected metadata, not viewport measurement. The real
 // virtualizer is covered by history-virtualization.spec.ts in Chromium.
 vi.mock("@legendapp/list/react", () => ({
-  LegendList: ({ data, renderItem, ListHeaderComponent }: {
+  LegendList: ({
+    data,
+    renderItem,
+    ListHeaderComponent,
+  }: {
     data: unknown[];
     renderItem: (props: { item: unknown; index: number }) => ReactNode;
     ListHeaderComponent: ReactNode;
@@ -51,7 +55,12 @@ describe("EngineHistoryView automation rows", () => {
     render(
       <EngineHistoryView
         entries={[
-          moment({ id: "m-auto", origin: "api", path: "Tasks/new.md", automationAuthor: { name: "Stamp the finish date", collection: "Tasks" } }),
+          moment({
+            id: "m-auto",
+            origin: "api",
+            path: "Tasks/new.md",
+            automationAuthor: { name: "Stamp the finish date", collection: "Tasks" },
+          }),
         ].map((entry) => ({ kind: "file" as const, moment: entry }))}
         hasMore={false}
         loadingMore={false}
@@ -64,7 +73,9 @@ describe("EngineHistoryView automation rows", () => {
     const row = screen.getByTestId("engine-moment-open");
     expect(row.querySelector('[title="Stamp the finish date"] .lucide-zap')).not.toBeNull();
     expect(row.getAttribute("aria-label")).toBe("Open diff for Tasks/new.md");
-    expect(document.getElementById(row.getAttribute("aria-describedby")!)?.textContent).toContain("Automation Stamp the finish date in Tasks");
+    expect(document.getElementById(row.getAttribute("aria-describedby")!)?.textContent).toContain(
+      "Automation Stamp the finish date in Tasks",
+    );
   });
 });
 
@@ -89,7 +100,11 @@ describe("EngineHistoryView protected rows", () => {
       />,
     );
     expect(screen.getAllByTestId("engine-moment-lock")).toHaveLength(1);
-    expect(screen.getAllByTestId("engine-moment-summary").find((summary) => summary.textContent === "Updated .env")).toBeTruthy();
+    expect(
+      screen
+        .getAllByTestId("engine-moment-summary")
+        .find((summary) => summary.textContent === "Updated .env"),
+    ).toBeTruthy();
     // The protected row is still a normal, clickable timeline row.
     const rows = screen.getAllByTestId("engine-moment-open");
     expect(rows).toHaveLength(2);
@@ -147,9 +162,7 @@ describe("VersionComparePage protected rows", () => {
     expect(document.body.textContent).not.toContain(SECRET_VALUE);
     const files = screen.getAllByTestId("version-compare-file");
     expect(files).toHaveLength(2);
-    const secretSection = files.find(
-      (section) => section.dataset.comparePath === ".env",
-    );
+    const secretSection = files.find((section) => section.dataset.comparePath === ".env");
     expect(secretSection?.querySelector('[data-testid="version-compare-protected"]')).toBeTruthy();
     // The protected section renders no diff body at all.
     expect(secretSection?.querySelector('[data-testid="version-compare-diff-lines"]')).toBeNull();

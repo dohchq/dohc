@@ -44,7 +44,8 @@ export interface CredentialFence {
 
 function epochOf(value: unknown): number {
   const epoch = Number(value ?? 0);
-  if (!Number.isSafeInteger(epoch) || epoch < 0) throw new Error("A credential fence epoch is out of range.");
+  if (!Number.isSafeInteger(epoch) || epoch < 0)
+    throw new Error("A credential fence epoch is out of range.");
   return epoch;
 }
 
@@ -53,7 +54,13 @@ function parseChange(payload: string): CredentialFenceChange | null {
     const value = JSON.parse(payload) as Record<string, unknown>;
     const epoch = Number(value.epoch);
     const changedAtMs = Number(value.changedAtMs);
-    if (typeof value.userId !== "string" || !Number.isSafeInteger(epoch) || epoch < 1 || !Number.isSafeInteger(changedAtMs)) return null;
+    if (
+      typeof value.userId !== "string" ||
+      !Number.isSafeInteger(epoch) ||
+      epoch < 1 ||
+      !Number.isSafeInteger(changedAtMs)
+    )
+      return null;
     return { userId: value.userId, epoch, changedAtMs };
   } catch {
     return null;
@@ -66,7 +73,10 @@ export function createPostgresCredentialFence(pool: Pool): CredentialFence {
     async readEpoch(userId) {
       // pg reads query_timeout from each query's config, but its QueryConfig type doesn't declare it.
       const query: QueryConfig & { query_timeout: number } = {
-        text: "select epoch from dohc_credential_fences where user_id = $1", values: [userId], query_timeout: CREDENTIAL_FENCE_READ_TIMEOUT_MS };
+        text: "select epoch from dohc_credential_fences where user_id = $1",
+        values: [userId],
+        query_timeout: CREDENTIAL_FENCE_READ_TIMEOUT_MS,
+      };
       const result = await pool.query<{ epoch: string }>(query);
       return epochOf(result.rows[0]?.epoch);
     },
@@ -93,7 +103,11 @@ export function createPostgresCredentialFence(pool: Pool): CredentialFence {
          order by changed_at`,
         [positionMs],
       );
-      return result.rows.map(row => ({ userId: row.user_id, epoch: epochOf(row.epoch), changedAtMs: Number(row.changed_at_ms) }));
+      return result.rows.map((row) => ({
+        userId: row.user_id,
+        epoch: epochOf(row.epoch),
+        changedAtMs: Number(row.changed_at_ms),
+      }));
     },
 
     listen(listener) {
@@ -125,7 +139,10 @@ export function createPostgresCredentialFence(pool: Pool): CredentialFence {
             if (client === held) drop();
           };
           next.on("notification", (message) => {
-            const change = message.channel === CREDENTIAL_FENCE_CHANNEL && message.payload ? parseChange(message.payload) : null;
+            const change =
+              message.channel === CREDENTIAL_FENCE_CHANNEL && message.payload
+                ? parseChange(message.payload)
+                : null;
             if (!change) return;
             try {
               listener.onChange(change);

@@ -34,7 +34,8 @@ export class SmtpConfigError extends Error {}
 /** One message could not be delivered. */
 export class SmtpDeliveryError extends Error {}
 
-const ADDRESS = /^[^\s<>@,;:"\\]+@[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$/;
+const ADDRESS =
+  /^[^\s<>@,;:"\\]+@[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$/;
 const SMTP_ENV_KEYS = [
   "DOHC_SMTP_HOST",
   "DOHC_SMTP_PORT",
@@ -78,7 +79,9 @@ export function smtpSettingsFromEnv(env: SmtpEnv): SmtpSettings | null {
 
   const portNumber = Number(port);
   if (!Number.isInteger(portNumber) || portNumber < 1 || portNumber > 65535) {
-    throw new SmtpConfigError(`DOHC_SMTP_PORT must be a port number from 1 to 65535, got "${port}".`);
+    throw new SmtpConfigError(
+      `DOHC_SMTP_PORT must be a port number from 1 to 65535, got "${port}".`,
+    );
   }
   const flag = secure!.toLowerCase();
   if (!["true", "false"].includes(flag)) {
@@ -105,14 +108,19 @@ export function smtpSettingsFromEnv(env: SmtpEnv): SmtpSettings | null {
   };
 }
 
-export function createSmtpSender(settings: SmtpSettings, options: { timeoutMs?: number } = {}): SendEmail {
+export function createSmtpSender(
+  settings: SmtpSettings,
+  options: { timeoutMs?: number } = {},
+): SendEmail {
   const timeoutMs = options.timeoutMs ?? 20_000;
   const transport = nodemailer.createTransport({
     host: settings.host,
     port: settings.port,
     secure: settings.secure,
     requireTLS: !settings.secure && !isLoopback(settings.host),
-    ...(settings.user !== undefined ? { auth: { user: settings.user, pass: settings.password! } } : {}),
+    ...(settings.user !== undefined
+      ? { auth: { user: settings.user, pass: settings.password! } }
+      : {}),
     connectionTimeout: timeoutMs,
     greetingTimeout: timeoutMs,
     socketTimeout: timeoutMs,
@@ -128,7 +136,9 @@ export function createSmtpSender(settings: SmtpSettings, options: { timeoutMs?: 
     try {
       await transport.sendMail({ from: settings.from, ...message });
     } catch {
-      throw new SmtpDeliveryError("Account email could not be delivered. Check the SMTP connection, TLS, and credentials.");
+      throw new SmtpDeliveryError(
+        "Account email could not be delivered. Check the SMTP connection, TLS, and credentials.",
+      );
     }
   };
 }

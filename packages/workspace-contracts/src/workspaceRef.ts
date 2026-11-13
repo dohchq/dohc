@@ -20,7 +20,10 @@ export const isReceivedObject = (value: unknown): value is string =>
 export function isWorkspaceRefSource(value: unknown): value is WorkspaceRefSource {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const source = value as Record<string, unknown>;
-  return "workspaceId" in source ? !("receivedSource" in source) && typeof source.workspaceId === "string" && source.workspaceId.length > 0
+  return "workspaceId" in source
+    ? !("receivedSource" in source) &&
+        typeof source.workspaceId === "string" &&
+        source.workspaceId.length > 0
     : isReceivedSource(source.receivedSource);
 }
 
@@ -39,17 +42,35 @@ export type WorkspaceFileRef = WorkspaceRef<Extract<WorkspaceRefTarget, { kind: 
 
 /** Labels can change without changing the referenced object. */
 export function workspaceRefsEqual(left: WorkspaceRef, right: WorkspaceRef): boolean {
-  if (!isWorkspaceRefSource(left.source) || !isWorkspaceRefSource(right.source) || left.target.kind !== right.target.kind) return false;
-  if ("workspaceId" in left.source
-    ? !("workspaceId" in right.source) || left.source.workspaceId !== right.source.workspaceId
-    : "workspaceId" in right.source || left.source.receivedSource !== right.source.receivedSource) return false;
+  if (
+    !isWorkspaceRefSource(left.source) ||
+    !isWorkspaceRefSource(right.source) ||
+    left.target.kind !== right.target.kind
+  )
+    return false;
+  if (
+    "workspaceId" in left.source
+      ? !("workspaceId" in right.source) || left.source.workspaceId !== right.source.workspaceId
+      : "workspaceId" in right.source || left.source.receivedSource !== right.source.receivedSource
+  )
+    return false;
   const other = right.target;
   switch (left.target.kind) {
-    case "file": return other.kind === "file" && left.target.objectId === other.objectId;
-    case "channel": return other.kind === "channel" && left.target.channelId === other.channelId;
-    case "thread": return other.kind === "thread" && left.target.threadId === other.threadId;
-    case "dataset": return other.kind === "dataset" && left.target.datasetId === other.datasetId;
-    case "table": return other.kind === "table" && left.target.datasetId === other.datasetId && left.target.tableId === other.tableId;
-    case "version": return other.kind === "version" && left.target.versionId === other.versionId;
+    case "file":
+      return other.kind === "file" && left.target.objectId === other.objectId;
+    case "channel":
+      return other.kind === "channel" && left.target.channelId === other.channelId;
+    case "thread":
+      return other.kind === "thread" && left.target.threadId === other.threadId;
+    case "dataset":
+      return other.kind === "dataset" && left.target.datasetId === other.datasetId;
+    case "table":
+      return (
+        other.kind === "table" &&
+        left.target.datasetId === other.datasetId &&
+        left.target.tableId === other.tableId
+      );
+    case "version":
+      return other.kind === "version" && left.target.versionId === other.versionId;
   }
 }

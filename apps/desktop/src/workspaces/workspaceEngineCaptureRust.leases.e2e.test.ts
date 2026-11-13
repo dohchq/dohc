@@ -6,10 +6,20 @@ import { defaultWorkspaceMode } from "@dohc/workspace-core";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import { createWorkspaceEngineCapture as createAttachedWorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { createInMemoryWorkspaceActivity as createWorkspaceActivity } from "./workspaceActivity.testSupport";
-import { createRealDaemonLifecycle, createRealDaemonWorkspaceSessions } from "../testing/realDaemonWorkspaceSessions";
+import {
+  createRealDaemonLifecycle,
+  createRealDaemonWorkspaceSessions,
+} from "../testing/realDaemonWorkspaceSessions";
 import { createTestScratch } from "./testTemp";
 import { waitForPathMoments } from "./waitForPathMoments";
-import { createWorkspaceEngineCapture, engine, waitForDaemonCaptureDeferral, waitForRecoveredSibling, listDaemonPathMoments, holdWithoutShareDelete } from "./workspaceEngineCaptureRust.fixture";
+import {
+  createWorkspaceEngineCapture,
+  engine,
+  waitForDaemonCaptureDeferral,
+  waitForRecoveredSibling,
+  listDaemonPathMoments,
+  holdWithoutShareDelete,
+} from "./workspaceEngineCaptureRust.fixture";
 
 it.skipIf(engine.missing)(
   "preserves a settled watcher capture across stopAll and a new daemon process",
@@ -82,9 +92,7 @@ it.skipIf(engine.missing)(
       });
       try {
         const moments = await waitForPathMoments(reopened, "final.md", 1);
-        const persistedWrite = moments.find(
-          (moment) => moment.operation === "write",
-        );
+        const persistedWrite = moments.find((moment) => moment.operation === "write");
         expect(persistedWrite).toBeTruthy();
         const detail = await reopened.readMoment(persistedWrite!.id);
         const payload = detail?.protected === false ? detail.moment.payload : undefined;
@@ -168,7 +176,7 @@ it.skipIf(engine.missing || process.platform !== "win32")(
       // settle on a doubling delay, so releasing the lock is followed by the
       // write landing BY ITSELF — no further edit. The retry replays the
       // durably pending materialization job through the idempotent settle.
-      await expect.poll(() => states.includes("saved"), {timeout: 20_000}).toBe(true);
+      await expect.poll(() => states.includes("saved"), { timeout: 20_000 }).toBe(true);
       expect(await readFile(absolute, "utf8")).toBe("locked edit\nbase\n");
       expect(states).toContain("saved");
 
@@ -178,9 +186,7 @@ it.skipIf(engine.missing || process.platform !== "win32")(
       await type("second edit\n");
       await session.settleNow();
       expect(states).toEqual(["settling", "saved"]);
-      expect(await readFile(absolute, "utf8")).toBe(
-        "second edit\nlocked edit\nbase\n",
-      );
+      expect(await readFile(absolute, "utf8")).toBe("second edit\nlocked edit\nbase\n");
 
       await expect(session.close()).resolves.toBeUndefined();
     } finally {
@@ -242,18 +248,12 @@ it.skipIf(engine.missing)(
       };
       await type("typed in dohc\n");
       await session.settleNow();
-      const settledMoments = await listDaemonPathMoments(
-        sessions,
-        workspace,
-        "note.md",
-      );
+      const settledMoments = await listDaemonPathMoments(sessions, workspace, "note.md");
       expect(settledMoments).toHaveLength(2);
 
       await writeFile(join(root, "note.md"), outside, "utf8");
       await waitForDaemonCaptureDeferral(sessions, workspace);
-      expect(
-        await listDaemonPathMoments(sessions, workspace, "note.md"),
-      ).toHaveLength(2);
+      expect(await listDaemonPathMoments(sessions, workspace, "note.md")).toHaveLength(2);
 
       // The difference from the clean case: text the engine has journaled but
       // never settled, so the projection no longer equals `last_settled_sha`
@@ -273,10 +273,13 @@ it.skipIf(engine.missing)(
       // Y.Doc save overwrite it.
       const capturedMoments = await waitForPathMoments(capture, "note.md", 4);
       expect(capturedMoments).toHaveLength(4);
-      const recovery = capturedMoments.find(moment => moment.metadata.origin === "capture-recovery");
+      const recovery = capturedMoments.find(
+        (moment) => moment.metadata.origin === "capture-recovery",
+      );
       expect(recovery).toBeDefined();
       const detail = await capture.readMoment(recovery!.id);
-      if (!detail || detail.protected) throw new Error("recovery must have a readable History payload");
+      if (!detail || detail.protected)
+        throw new Error("recovery must have a readable History payload");
       expect(detail.moment.payload.before?.text).toBe("never settled\ntyped in dohc\nbase\n");
       expect(detail.moment.payload.after?.text).toBe(outside);
       expect(await readFile(join(root, "note.md"), "utf8")).toBe(outside);

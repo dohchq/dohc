@@ -1,10 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { SitePackageInfo } from "../workspaces/sitePackage";
 import type { SitePreviewMode } from "./bridgeContract";
-import {
-  createSitesIpcHandlers,
-  type SitesIpcDependencies,
-} from "./sitesIpc";
+import { createSitesIpcHandlers, type SitesIpcDependencies } from "./sitesIpc";
 
 interface TestEvent {
   trusted: boolean;
@@ -42,11 +39,7 @@ function harness() {
       return null;
     },
   );
-  const dependencies: SitesIpcDependencies<
-    TestEvent,
-    TestSender,
-    TestWorkspace
-  > = {
+  const dependencies: SitesIpcDependencies<TestEvent, TestSender, TestWorkspace> = {
     authority: {
       requireTrustedSender(event) {
         trace.push("trust");
@@ -60,9 +53,7 @@ function harness() {
           throw new Error("This workspace is not open. Open it again.");
         }
         if (activeWorkspaceId !== workspaceId) {
-          throw new Error(
-            "The apps request does not target the active workspace.",
-          );
+          throw new Error("The apps request does not target the active workspace.");
         }
         return work(workspace);
       },
@@ -88,9 +79,9 @@ describe("sites IPC handlers", () => {
   it("rejects an untrusted sender before parsing or reading", async () => {
     const { handlers, trace, list } = harness();
 
-    await expect(
-      handlers.listSites({ trusted: false, senderId: 7 }, null),
-    ).rejects.toThrow("Untrusted renderer.");
+    await expect(handlers.listSites({ trusted: false, senderId: 7 }, null)).rejects.toThrow(
+      "Untrusted renderer.",
+    );
 
     expect(trace).toEqual(["trust"]);
     expect(list).not.toHaveBeenCalled();
@@ -99,9 +90,7 @@ describe("sites IPC handlers", () => {
   it("rejects malformed input before workspace authorization or reads", async () => {
     const { handlers, trace, list } = harness();
 
-    await expect(
-      handlers.listSites(trustedEvent, { workspaceId: "" }),
-    ).rejects.toThrow();
+    await expect(handlers.listSites(trustedEvent, { workspaceId: "" })).rejects.toThrow();
 
     expect(trace).toEqual(["trust"]);
     expect(list).not.toHaveBeenCalled();
@@ -137,11 +126,7 @@ describe("sites IPC handlers", () => {
     ).resolves.toEqual({ sites: [] });
 
     expect(test.list).toHaveBeenCalledWith(test.workspace);
-    expect(test.trace).toEqual([
-      "trust",
-      "authorize:7:workspace-1",
-      "list:canonical",
-    ]);
+    expect(test.trace).toEqual(["trust", "authorize:7:workspace-1", "list:canonical"]);
     expect(test.subjects).toEqual(["apps request"]);
   });
 
@@ -156,11 +141,7 @@ describe("sites IPC handlers", () => {
       }),
     ).resolves.toBeNull();
 
-    expect(test.get).toHaveBeenCalledWith(
-      test.workspace,
-      "clients/acme/site",
-      "build",
-    );
+    expect(test.get).toHaveBeenCalledWith(test.workspace, "clients/acme/site", "build");
     expect(test.trace).toEqual([
       "trust",
       "authorize:7:workspace-1",
@@ -170,9 +151,7 @@ describe("sites IPC handlers", () => {
 
   it("does not replace an owner catalog failure with an empty result", async () => {
     const listTest = harness();
-    listTest.list.mockRejectedValueOnce(
-      new Error("Canonical owner unavailable."),
-    );
+    listTest.list.mockRejectedValueOnce(new Error("Canonical owner unavailable."));
     await expect(
       listTest.handlers.listSites(trustedEvent, {
         workspaceId: "workspace-1",
@@ -180,9 +159,7 @@ describe("sites IPC handlers", () => {
     ).rejects.toThrow("Canonical owner unavailable.");
 
     const getTest = harness();
-    getTest.get.mockRejectedValueOnce(
-      new Error("Canonical owner unavailable."),
-    );
+    getTest.get.mockRejectedValueOnce(new Error("Canonical owner unavailable."));
     await expect(
       getTest.handlers.getSitePackage(trustedEvent, {
         workspaceId: "workspace-1",
@@ -192,13 +169,7 @@ describe("sites IPC handlers", () => {
   });
 
   it("forwards every effective preview mode exactly", async () => {
-    for (const mode of [
-      "static",
-      "dev",
-      "build",
-      null,
-      undefined,
-    ] as const) {
+    for (const mode of ["static", "dev", "build", null, undefined] as const) {
       const test = harness();
       await test.handlers.getSitePackage(trustedEvent, {
         workspaceId: "workspace-1",

@@ -11,7 +11,7 @@ const DOWNLOAD_LINK = "[data-download-primary], [data-download-card], [data-down
 let loading: Promise<PostHog> | undefined;
 
 function loadAnalytics(): Promise<PostHog> {
-  return loading ??= import("posthog-js").then(({ default: posthog }) => {
+  return (loading ??= import("posthog-js").then(({ default: posthog }) => {
     posthog.init(POSTHOG_TOKEN, {
       api_host: "/ingest",
       ui_host: "https://us.posthog.com",
@@ -76,21 +76,27 @@ function loadAnalytics(): Promise<PostHog> {
       disable_web_experiments: true,
     });
     return posthog;
-  });
+  }));
 }
 
-document.addEventListener("click", (event) => {
-  const link = event.target instanceof Element ? event.target.closest<HTMLElement>(DOWNLOAD_LINK) : null;
-  // The build the link points at, such as "windows-x64". The primary button
-  // has none while it only scrolls to the platform list.
-  const asset = link?.dataset.downloadCard || link?.dataset.downloadBuild || link?.dataset.downloadAsset;
-  if (!asset) return;
-  const platform = asset.split("-")[0];
-  // The click may navigate away, so the event skips the send queue.
-  loadAnalytics().then((posthog) => {
-    posthog.capture("download_clicked", { asset, platform }, { send_instantly: true });
-  }, ignore);
-}, { capture: true });
+document.addEventListener(
+  "click",
+  (event) => {
+    const link =
+      event.target instanceof Element ? event.target.closest<HTMLElement>(DOWNLOAD_LINK) : null;
+    // The build the link points at, such as "windows-x64". The primary button
+    // has none while it only scrolls to the platform list.
+    const asset =
+      link?.dataset.downloadCard || link?.dataset.downloadBuild || link?.dataset.downloadAsset;
+    if (!asset) return;
+    const platform = asset.split("-")[0];
+    // The click may navigate away, so the event skips the send queue.
+    loadAnalytics().then((posthog) => {
+      posthog.capture("download_clicked", { asset, platform }, { send_instantly: true });
+    }, ignore);
+  },
+  { capture: true },
+);
 
 // A blocker may stop PostHog from loading. The page works the same without it.
 function ignore() {}

@@ -49,36 +49,80 @@ export function Toast({ message, onClose }: { message: ToastMessage; onClose(): 
   const titleLines = useLineClamp(message.titleLines ?? 4);
   const bodyLines = useLineClamp(3);
   const [open, setOpen] = useState(false);
-  const toggle = () => setOpen(value => !value);
+  const toggle = () => setOpen((value) => !value);
   useEffect(() => {
     if (!success) return;
     const timer = setTimeout(onClose, FADING_TOAST_MS);
     return () => clearTimeout(timer);
   }, [success, onClose]);
   return (
-    <Animated.View entering={FadeInDown.duration(220)} exiting={FadeOutDown.duration(180)}
-      style={[styles.toast, { bottom: insets.bottom + 66, backgroundColor: theme.raised, borderColor: theme.raisedLine }]}
-      accessibilityRole="alert">
+    <Animated.View
+      entering={FadeInDown.duration(220)}
+      exiting={FadeOutDown.duration(180)}
+      style={[
+        styles.toast,
+        {
+          bottom: insets.bottom + 66,
+          backgroundColor: theme.raised,
+          borderColor: theme.raisedLine,
+        },
+      ]}
+      accessibilityRole="alert"
+    >
       <View style={styles.titleLine}>
-        {message.sender ? <SenderMark kind={message.sender} failed={message.tone === "failure"} /> : (
+        {message.sender ? (
+          <SenderMark kind={message.sender} failed={message.tone === "failure"} />
+        ) : (
           <View style={styles.mark}>
-            {success
-              ? <CheckCircle2 size={18} color={theme.success} strokeWidth={2} />
-              : <AlertTriangle size={18} color={theme.danger} strokeWidth={2} />}
+            {success ? (
+              <CheckCircle2 size={18} color={theme.success} strokeWidth={2} />
+            ) : (
+              <AlertTriangle size={18} color={theme.danger} strokeWidth={2} />
+            )}
           </View>
         )}
-        <Text style={[styles.title, { color: theme.ink }]} numberOfLines={open ? undefined : titleLines}
-          onPress={toggle} suppressHighlighting>{message.title}</Text>
-        <TitleControls copyLabel={success ? undefined : noticesWords.copyErrorDetails}
-          onCopy={() => copyText([message.fullTitle ?? message.title, message.body].filter(Boolean).join("\n"))} onDismiss={onClose}
-          demoCopied={demoMode === "toast-copied"} style={styles.controls}
-          dismissLabel={success ? noticesWords.dismissWorkspaceNotice : noticesWords.dismissWorkspaceError} />
+        <Text
+          style={[styles.title, { color: theme.ink }]}
+          numberOfLines={open ? undefined : titleLines}
+          onPress={toggle}
+          suppressHighlighting
+        >
+          {message.title}
+        </Text>
+        <TitleControls
+          copyLabel={success ? undefined : noticesWords.copyErrorDetails}
+          onCopy={() =>
+            copyText([message.fullTitle ?? message.title, message.body].filter(Boolean).join("\n"))
+          }
+          onDismiss={onClose}
+          demoCopied={demoMode === "toast-copied"}
+          style={styles.controls}
+          dismissLabel={
+            success ? noticesWords.dismissWorkspaceNotice : noticesWords.dismissWorkspaceError
+          }
+        />
       </View>
-      {message.body ? <Text style={[styles.body, { color: theme.muted }]} numberOfLines={open ? undefined : bodyLines} onPress={toggle} suppressHighlighting>{message.body}</Text> : null}
+      {message.body ? (
+        <Text
+          style={[styles.body, { color: theme.muted }]}
+          numberOfLines={open ? undefined : bodyLines}
+          onPress={toggle}
+          suppressHighlighting
+        >
+          {message.body}
+        </Text>
+      ) : null}
       {message.action ? (
         <View style={styles.actions}>
           {/* Close first: an action that shows a new toast (Undo, Try again) must not have it cleared by this close. */}
-          <ActionPill label={message.action.label} onPress={() => { const action = message.action; onClose(); action?.onPress?.(); }} />
+          <ActionPill
+            label={message.action.label}
+            onPress={() => {
+              const action = message.action;
+              onClose();
+              action?.onPress?.();
+            }}
+          />
         </View>
       ) : null}
     </Animated.View>
@@ -90,8 +134,17 @@ const TEXT_INSET = 40;
 
 const styles = StyleSheet.create({
   toast: {
-    position: "absolute", left: 16, right: 16, borderRadius: 16, borderWidth: StyleSheet.hairlineWidth, padding: 14, gap: 2,
-    shadowColor: "#000", shadowOpacity: 0.14, shadowRadius: 16, shadowOffset: { width: 0, height: 6 },
+    position: "absolute",
+    left: 16,
+    right: 16,
+    borderRadius: 16,
+    borderWidth: StyleSheet.hairlineWidth,
+    padding: 14,
+    gap: 2,
+    shadowColor: "#000",
+    shadowOpacity: 0.14,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 6 },
   },
   titleLine: { flexDirection: "row", alignItems: "flex-start", gap: 10 },
   mark: { width: 30, height: 30, alignItems: "center", justifyContent: "center" },

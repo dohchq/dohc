@@ -106,7 +106,9 @@ describe("CredentialSessionCache", () => {
 
   it("marks only a load's placeholder null as unsettled", async () => {
     const changes: Array<[string | null, boolean]> = [];
-    const cache = new CredentialSessionCache<string>((snapshot, settled) => changes.push([snapshot.credentials, settled]));
+    const cache = new CredentialSessionCache<string>((snapshot, settled) =>
+      changes.push([snapshot.credentials, settled]),
+    );
     const loading = deferred<string | null>();
     const warming = cache.warm(() => loading.promise);
     expect(changes).toEqual([[null, false]]);
@@ -114,7 +116,12 @@ describe("CredentialSessionCache", () => {
     await warming;
     cache.clear();
     cache.set("other-account");
-    expect(changes).toEqual([[null, false], ["account", true], [null, true], ["other-account", true]]);
+    expect(changes).toEqual([
+      [null, false],
+      ["account", true],
+      [null, true],
+      ["other-account", true],
+    ]);
   });
 
   it("refuses to adopt a store read that crossed a clear", async () => {

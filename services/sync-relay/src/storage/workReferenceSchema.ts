@@ -1,4 +1,4 @@
-import type {SqliteDb} from "./types";
+import type { SqliteDb } from "./types";
 
 export function initializeWorkReferenceSchema(db: SqliteDb): void {
   db.exec(`CREATE TABLE IF NOT EXISTS sync_relay_work_references (
@@ -57,19 +57,42 @@ export function initializeWorkReferenceSchema(db: SqliteDb): void {
   ) STRICT;`);
   const migration = "work-reference-snapshot-objects-v1";
   if (db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(migration)) return;
-  for (const row of db.prepare("SELECT workspace_id,payload_json,relay_seq FROM sync_relay_log WHERE op_kind='version.create' ORDER BY relay_seq").iterate()) {
-    indexWorkReferenceSnapshot(db, String(row.workspace_id), String(row.payload_json), Number(row.relay_seq));
+  for (const row of db
+    .prepare(
+      "SELECT workspace_id,payload_json,relay_seq FROM sync_relay_log WHERE op_kind='version.create' ORDER BY relay_seq",
+    )
+    .iterate()) {
+    indexWorkReferenceSnapshot(
+      db,
+      String(row.workspace_id),
+      String(row.payload_json),
+      Number(row.relay_seq),
+    );
   }
   db.prepare("INSERT INTO sync_relay_migrations VALUES (?,?)").run(migration, Date.now());
 }
 
-export function indexWorkReferenceSnapshot(db: SqliteDb, workspaceId: string, payloadJson: string, relaySeq: number): void {
-  const payload = JSON.parse(payloadJson) as {versionId?: unknown; forkSnapshots?: unknown};
+export function indexWorkReferenceSnapshot(
+  db: SqliteDb,
+  workspaceId: string,
+  payloadJson: string,
+  relaySeq: number,
+): void {
+  const payload = JSON.parse(payloadJson) as { versionId?: unknown; forkSnapshots?: unknown };
   if (typeof payload.versionId !== "string" || !Array.isArray(payload.forkSnapshots)) return;
-  const insert = db.prepare("INSERT OR IGNORE INTO sync_relay_work_reference_snapshot_objects VALUES (?,?,?,?,?)");
+  const insert = db.prepare(
+    "INSERT OR IGNORE INTO sync_relay_work_reference_snapshot_objects VALUES (?,?,?,?,?)",
+  );
   for (const snapshot of payload.forkSnapshots) {
-    if (!snapshot || typeof snapshot !== "object" || typeof snapshot.objectId !== "string" || !snapshot.objectId ||
-        typeof snapshot.path !== "string" || !snapshot.path) continue;
+    if (
+      !snapshot ||
+      typeof snapshot !== "object" ||
+      typeof snapshot.objectId !== "string" ||
+      !snapshot.objectId ||
+      typeof snapshot.path !== "string" ||
+      !snapshot.path
+    )
+      continue;
     insert.run(workspaceId, payload.versionId, snapshot.objectId, snapshot.path, relaySeq);
   }
 }

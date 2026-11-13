@@ -36,8 +36,12 @@ export function watchLiveSessions(workspaceId: string): () => void {
   watchers.set(workspaceId, (watchers.get(workspaceId) ?? 0) + 1);
   return () => {
     const left = watchers.get(workspaceId)! - 1;
-    if (left > 0) { watchers.set(workspaceId, left); return; }
-    watchers.delete(workspaceId); keyedGenerations.delete(workspaceId);
+    if (left > 0) {
+      watchers.set(workspaceId, left);
+      return;
+    }
+    watchers.delete(workspaceId);
+    keyedGenerations.delete(workspaceId);
   };
 }
 
@@ -47,8 +51,15 @@ export function watchLiveSessions(workspaceId: string): () => void {
  * A shell's first read moves nothing, and a shell that opens after a change
  * reads its generation first, so only a change sets what the key moved for.
  */
-export function observeLiveSessions(workspaceId: string, generation: number, changed: boolean): void {
-  if (!changed) { if (!keyedGenerations.has(workspaceId)) keyedGenerations.set(workspaceId, generation); return; }
+export function observeLiveSessions(
+  workspaceId: string,
+  generation: number,
+  changed: boolean,
+): void {
+  if (!changed) {
+    if (!keyedGenerations.has(workspaceId)) keyedGenerations.set(workspaceId, generation);
+    return;
+  }
   if (keyedGenerations.get(workspaceId) === generation) return;
   keyedGenerations.set(workspaceId, generation);
   advanceReopenKey(workspaceId);
@@ -62,4 +73,3 @@ function subscribeReopenKeys(listener: () => void): () => void {
 export function useReopenKey(workspaceId: string): number {
   return useSyncExternalStore(subscribeReopenKeys, () => reopenKeys.get(workspaceId) ?? 0);
 }
-

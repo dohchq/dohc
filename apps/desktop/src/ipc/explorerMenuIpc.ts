@@ -28,28 +28,36 @@ export function createExplorerMenuIpc<
       const isMountPath = shareView === null && !!input.path && isSharedWithMePath(input.path);
       const mounts = isMountPath ? storedShareMounts(workspace) : [];
       const hasMountRecord = mounts.some(
-        (mount) => usableShareMountRecord(mounts, mount) && input.path === `shared-with-me/${mount.label}`,
+        (mount) =>
+          usableShareMountRecord(mounts, mount) && input.path === `shared-with-me/${mount.label}`,
       );
-      return explorerMenuEntries({
-        kind: input.kind,
-        pinned: input.pinned,
-        ...(input.count !== undefined && input.kind !== "root" ? { count: input.count } : {}),
-        isMountPath,
-        hasMountRecord,
-        // Sharing onward is offered nowhere in a share view or a mount:
-        // someone else's files are not this account's to grant. A workspace
-        // that does not sync still offers it, as the toolbar does, and the
-        // dialog says how to set up sync.
-        canShare: shareView === null && !isMountPath && input.kind !== "root",
-        shareView,
-      }, platform);
+      return explorerMenuEntries(
+        {
+          kind: input.kind,
+          pinned: input.pinned,
+          ...(input.count !== undefined && input.kind !== "root" ? { count: input.count } : {}),
+          isMountPath,
+          hasMountRecord,
+          // Sharing onward is offered nowhere in a share view or a mount:
+          // someone else's files are not this account's to grant. A workspace
+          // that does not sync still offers it, as the toolbar does, and the
+          // dialog says how to set up sync.
+          canShare: shareView === null && !isMountPath && input.kind !== "root",
+          shareView,
+        },
+        platform,
+      );
     },
 
     // Containment before the OS sees the path (resolveWorkspaceFile:
     // validate + realpath + inside-root), the same rule as openFileExternally.
     revealExplorerPath: async (input, { operation }) => {
       await ensureOwnedProjectionCurrent(operation.workspace, input.path);
-      const { realTarget } = await resolveWorkspaceFile(operation.workspace.rootPath, input.path, "read");
+      const { realTarget } = await resolveWorkspaceFile(
+        operation.workspace.rootPath,
+        input.path,
+        "read",
+      );
       operation.assertCurrent();
       shell.showItemInFolder(realTarget);
     },

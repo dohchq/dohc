@@ -1,18 +1,33 @@
 import { createHash } from "node:crypto";
-import type { ChatChannelKind, ChatChannelType, ChatMessage, ChatThreadLane, LinkedChatStore } from "@dohc/workspace-contracts/engine";
+import type {
+  ChatChannelKind,
+  ChatChannelType,
+  ChatMessage,
+  ChatThreadLane,
+  LinkedChatStore,
+} from "@dohc/workspace-contracts/engine";
 import type { Automation } from "@dohc/workspace-contracts/automations";
 import type { ReachRoster } from "./automationReach";
 
 /** The message, or null when the store has no message with this id. */
-export async function findChatMessage(store: Pick<LinkedChatStore, "getMessage">, workspaceId: string, messageId: string): Promise<ChatMessage | null> {
-  try { return await store.getMessage({ workspaceId, messageId }); }
-  catch (error) {
+export async function findChatMessage(
+  store: Pick<LinkedChatStore, "getMessage">,
+  workspaceId: string,
+  messageId: string,
+): Promise<ChatMessage | null> {
+  try {
+    return await store.getMessage({ workspaceId, messageId });
+  } catch (error) {
     if (error instanceof Error && error.message === "message-not-found") return null;
     throw error;
   }
 }
 
-export async function hasChatMessage(store: Pick<LinkedChatStore, "getMessage">, workspaceId: string, messageId: string): Promise<boolean> {
+export async function hasChatMessage(
+  store: Pick<LinkedChatStore, "getMessage">,
+  workspaceId: string,
+  messageId: string,
+): Promise<boolean> {
   return (await findChatMessage(store, workspaceId, messageId)) !== null;
 }
 
@@ -47,9 +62,11 @@ interface ChatGroupTarget {
 }
 
 /** Why an automation cannot post in a Group this computer may only read. */
-export const GROUP_READ_ONLY = "This computer can only read this Group, so an automation cannot post in it.";
+export const GROUP_READ_ONLY =
+  "This computer can only read this Group, so an automation cannot post in it.";
 /** Why a Group whose grant ended cannot start an automation. */
-export const GROUP_ENDED = "This Group's share ended, so its messages no longer reach this computer.";
+export const GROUP_ENDED =
+  "This Group's share ended, so its messages no longer reach this computer.";
 
 interface ChatDirectMessageTarget {
   channelId: string;
@@ -81,16 +98,21 @@ export function chatDirectoryOf(
   // shared, by this computer's own id for them.
   const isOwner = (userId: string) =>
     roster.kind === "owner" && (userId === roster.ownerUserId || userId === roster.localPersonId);
-  const personName = (userId: string) => isOwner(userId)
-    ? "you"
-    : grants.find((grant) => grant.recipientUserId === userId && grant.recipientEmail)?.recipientEmail ?? "that person";
+  const personName = (userId: string) =>
+    isOwner(userId)
+      ? "you"
+      : (grants.find((grant) => grant.recipientUserId === userId && grant.recipientEmail)
+          ?.recipientEmail ?? "that person");
   return {
     person: personName,
     noticeRecipient(userId) {
       if (isOwner(userId) || grants.some((grant) => grant.recipientUserId === userId)) {
         return { name: personName(userId) };
       }
-      return { problem: "dohc cannot find that person among the people this workspace is shared with. They may not have accepted your share yet." };
+      return {
+        problem:
+          "dohc cannot find that person among the people this workspace is shared with. They may not have accepted your share yet.",
+      };
     },
     group(name) {
       // A slug names one Group; a name can match several, or another Group's slug.
@@ -99,7 +121,9 @@ export function chatDirectoryOf(
       const matches = bySlug ? [bySlug] : groups.filter((channel) => channel.name === name);
       if (matches.length === 0) return { problem: `dohc cannot find the Group ${name}.` };
       if (matches.length > 1) {
-        return { problem: `More than one Group is called ${name}. Name one by its slug instead: ${matches.map((channel) => channel.slug).join(" or ")}.` };
+        return {
+          problem: `More than one Group is called ${name}. Name one by its slug instead: ${matches.map((channel) => channel.slug).join(" or ")}.`,
+        };
       }
       const [channel] = matches as [ChatDirectoryChannel];
       return {
@@ -117,14 +141,23 @@ export function chatDirectoryOf(
       // its own id. Its people are the grants on that wire, and a pending
       // invite counts as someone else.
       const found = channels.find((channel) => {
-        if (channel.kind !== "dm" || channel.wireId !== channel.id || channel.runningThreadId === null) return false;
-        const people = new Set(grants
-          .filter((grant) => grant.channel?.wireId === channel.wireId)
-          .map((grant) => grant.recipientUserId ?? `email:${grant.recipientEmail ?? ""}`));
+        if (
+          channel.kind !== "dm" ||
+          channel.wireId !== channel.id ||
+          channel.runningThreadId === null
+        )
+          return false;
+        const people = new Set(
+          grants
+            .filter((grant) => grant.channel?.wireId === channel.wireId)
+            .map((grant) => grant.recipientUserId ?? `email:${grant.recipientEmail ?? ""}`),
+        );
         return people.size === 1 && people.has(userId);
       });
       if (!found) {
-        return { problem: `There is no direct message with ${personName(userId)} yet. Start one first: automations never start one.` };
+        return {
+          problem: `There is no direct message with ${personName(userId)} yet. Start one first: automations never start one.`,
+        };
       }
       return { channelId: found.id, wireId: found.wireId, threadId: found.runningThreadId!, name };
     },
@@ -136,15 +169,13 @@ export function chatDirectoryOf(
 // participant picks the same one even if a race ever minted a duplicate. The
 // DM list, startDm, and automations' direct messages all use this one rule
 // (they must never drift).
-export function runningThread<
-  T extends { thread: { id: string; createdAtMs: number } },
->(threads: T[]): T | undefined {
+export function runningThread<T extends { thread: { id: string; createdAtMs: number } }>(
+  threads: T[],
+): T | undefined {
   return threads
     .slice()
     .sort(
-      (a, b) =>
-        a.thread.createdAtMs - b.thread.createdAtMs ||
-        (a.thread.id < b.thread.id ? -1 : 1),
+      (a, b) => a.thread.createdAtMs - b.thread.createdAtMs || (a.thread.id < b.thread.id ? -1 : 1),
     )[0];
 }
 
@@ -160,7 +191,11 @@ export interface AutomationNotice {
 
 /** The server handed a wake to the owner's computers instead of posting local chat. */
 export class AutomationWakeSent {
-  constructor(readonly noticeId: string, readonly name: string, readonly supersededBy?: string) {}
+  constructor(
+    readonly noticeId: string,
+    readonly name: string,
+    readonly supersededBy?: string,
+  ) {}
 }
 
 // A notice for another person that did not reach them. The message says why.
@@ -239,7 +274,10 @@ export class AutomationChatSessionWait extends Error {
   }
 }
 
-type ChatDirectoryStore = Pick<LinkedChatStore, "listChannels" | "getChannelWireId" | "listChannelThreads">;
+type ChatDirectoryStore = Pick<
+  LinkedChatStore,
+  "listChannels" | "getChannelWireId" | "listChannelThreads"
+>;
 
 /** What an automation's messages need from the directory: Groups by name, and direct messages. */
 export interface ChatNeeds {
@@ -260,7 +298,8 @@ export function chatNeedsOf(automations: readonly Automation[]): ChatNeeds {
         needs.groups.add(step.group);
       } else if (step.kind === "direct-message") {
         for (const person of step.to) {
-          if (person.kind === "literal" && typeof person.value === "string") needs.people.add(person.value);
+          if (person.kind === "literal" && typeof person.value === "string")
+            needs.people.add(person.value);
         }
       }
     }
@@ -290,27 +329,43 @@ export async function readChatDirectory(
   // A direct message the owner started keeps its own id as its wire id, and
   // its grants name its people.
   const onePerson = (wireId: string): string | undefined => {
-    const people = new Set(grants
-      .filter((grant) => grant.channel?.wireId === wireId)
-      .map((grant) => grant.recipientUserId ?? `email:${grant.recipientEmail ?? ""}`));
+    const people = new Set(
+      grants
+        .filter((grant) => grant.channel?.wireId === wireId)
+        .map((grant) => grant.recipientUserId ?? `email:${grant.recipientEmail ?? ""}`),
+    );
     const [person] = people;
     return people.size === 1 ? person : undefined;
   };
   const entries: ChatDirectoryChannel[] = [];
   for (const channel of channels) {
-    const base = { id: channel.id, name: channel.name, slug: channel.slug, kind: channel.kind, type: channel.type };
-    if (channel.kind === "channel" && (needs.groups.has(channel.name) || needs.groups.has(channel.slug))) {
-      const wireId = (await store.getChannelWireId({ workspaceId, channelId: channel.id })) ?? channel.id;
+    const base = {
+      id: channel.id,
+      name: channel.name,
+      slug: channel.slug,
+      kind: channel.kind,
+      type: channel.type,
+    };
+    if (
+      channel.kind === "channel" &&
+      (needs.groups.has(channel.name) || needs.groups.has(channel.slug))
+    ) {
+      const wireId =
+        (await store.getChannelWireId({ workspaceId, channelId: channel.id })) ?? channel.id;
       const access = joined(wireId);
       entries.push({
-        ...base, wireId, runningThreadId: null,
+        ...base,
+        wireId,
+        runningThreadId: null,
         ...(access?.readOnly || access?.ended ? { readOnly: true as const } : {}),
         ...(access?.ended ? { ended: true as const } : {}),
       });
     } else if (channel.kind === "dm") {
       const person = onePerson(channel.id);
       if (person === undefined || !needs.people.has(person)) continue;
-      const running = runningThread(await store.listChannelThreads({ workspaceId, channelId: channel.id }));
+      const running = runningThread(
+        await store.listChannelThreads({ workspaceId, channelId: channel.id }),
+      );
       entries.push({ ...base, wireId: channel.id, runningThreadId: running?.thread.id ?? null });
     }
   }

@@ -63,7 +63,10 @@ describe("workspace server", () => {
 
   it("answers 408 and closes a connection that stops sending its headers", async () => {
     const port = await listen(SHORT);
-    const { reply, ms } = await exchange(port, "GET /health HTTP/1.1\r\nHost: api.example.test\r\n");
+    const { reply, ms } = await exchange(
+      port,
+      "GET /health HTTP/1.1\r\nHost: api.example.test\r\n",
+    );
     expect(reply).toMatch(/^HTTP\/1\.1 408 /);
     // Node checks its limits every 30 s by default, so this fails if the check interval isn't set.
     expect(ms).toBeLessThan(5_000);
@@ -73,7 +76,7 @@ describe("workspace server", () => {
     const port = await listen(SHORT);
     const { reply, ms } = await exchange(
       port,
-      "POST /api/auth/sign-in/email HTTP/1.1\r\nHost: api.example.test\r\nContent-Type: application/json\r\nContent-Length: 10\r\n\r\n{\"a\"",
+      'POST /api/auth/sign-in/email HTTP/1.1\r\nHost: api.example.test\r\nContent-Type: application/json\r\nContent-Length: 10\r\n\r\n{"a"',
     );
     expect(reply).toMatch(/^HTTP\/1\.1 408 /);
     expect(ms).toBeLessThan(5_000);
@@ -81,16 +84,30 @@ describe("workspace server", () => {
 
   it("answers 400 to a request the adapter can't read, and keeps serving", async () => {
     const port = await listen();
-    const unreadable = await exchange(port, "GET /health HTTP/1.1\r\nHost: a b\r\nConnection: close\r\n\r\n");
+    const unreadable = await exchange(
+      port,
+      "GET /health HTTP/1.1\r\nHost: a b\r\nConnection: close\r\n\r\n",
+    );
     expect(unreadable.reply).toMatch(/^HTTP\/1\.1 400 /);
-    const { reply } = await exchange(port, "GET /health HTTP/1.1\r\nHost: api.example.test\r\nConnection: close\r\n\r\n");
+    const { reply } = await exchange(
+      port,
+      "GET /health HTTP/1.1\r\nHost: api.example.test\r\nConnection: close\r\n\r\n",
+    );
     expect(reply).toMatch(/^HTTP\/1\.1 200 /);
     expect(reply).toContain("read 0");
   });
 
   it("closes a connection when its answer stops moving for the idle limit", async () => {
     // An answer with no end, so it stops moving once the client stops reading.
-    const port = await listen(SHORT, async () => new Response(new ReadableStream({ pull: (controller) => controller.enqueue(new Uint8Array(64 * 1024)) })));
+    const port = await listen(
+      SHORT,
+      async () =>
+        new Response(
+          new ReadableStream({
+            pull: (controller) => controller.enqueue(new Uint8Array(64 * 1024)),
+          }),
+        ),
+    );
     const { client, socket } = await open(port);
     client.pause();
     const started = Date.now();
@@ -108,7 +125,10 @@ describe("workspace server", () => {
       return new Response("slow answer");
     });
     accepted = once(server!, "connection");
-    const { reply } = await exchange(port, "GET / HTTP/1.1\r\nHost: api.example.test\r\nConnection: close\r\n\r\n");
+    const { reply } = await exchange(
+      port,
+      "GET / HTTP/1.1\r\nHost: api.example.test\r\nConnection: close\r\n\r\n",
+    );
     expect(reply).toMatch(/^HTTP\/1\.1 200 /);
     expect(reply).toContain("slow answer");
   });

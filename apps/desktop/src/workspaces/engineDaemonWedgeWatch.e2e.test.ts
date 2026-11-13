@@ -1,5 +1,9 @@
 import type { Request } from "@dohc/workspace-engine-client";
-import { createEngineClient, type EngineDaemonClient, type EngineDaemonLifecycle } from "@dohc/workspace-engine-client/daemon";
+import {
+  createEngineClient,
+  type EngineDaemonClient,
+  type EngineDaemonLifecycle,
+} from "@dohc/workspace-engine-client/daemon";
 import { afterEach, describe, expect, it } from "vitest";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import {
@@ -27,40 +31,70 @@ afterEach(async () => {
 });
 
 describe("engine.ping against a real daemon", () => {
-  it.skipIf(engine.missing)("drains queued startup replies after the host event loop stalls beyond the request deadline", async () => {
-    const failures: Error[] = [];
-    let complete!: () => void, refuse!: (error: Error) => void, stalled = false;
-    const smoke = new Promise<void>((resolve,reject) => {complete=resolve;refuse=reject;});
-    const lifecycle = createRealDaemonLifecycle({command:engine.require(),maxRestarts:0,
-      onFailure(error) {failures.push(error);refuse(error);},
-      launch:async options => {
-        const client = await createEngineClient(options);
-        return {
-          sendRequest:async (request, signal, progress, cancelSignal) => {
-            const pending = client.sendRequest(request, signal, progress, cancelSignal);
-            if (!stalled && request.method === "workspace.open") {
-              stalled = true;
-              // Freeze only this process after the pipe write. The lifecycle sends
-              // its request timeout as the daemon's deadline, so the real daemon
-              // queues its reply inside it, and the freeze outlasts both.
-              setImmediate(() => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,REAL_DAEMON_DEADLINE_MS + 1_000));
-            }
-            const response = await pending;
-            if (request.method === "workspace.close") complete();
-            return response;
-          },
-          onEvent:handler=>client.onEvent(handler),onBlob:handler=>client.onBlob(handler),
-          close:()=>client.close(),closeUnresponsive:()=>{refuse(new Error("Healthy engine killed after host stall."));client.closeUnresponsive();},
-          inboundActivity:()=>client.inboundActivity(),waitForExit:()=>client.waitForExit(),
-        };
-      }});
-    lifecycles.push(lifecycle);
-    await lifecycle.start();
-    await smoke;
-    expect(stalled).toBe(true);
-    expect(failures).toEqual([]);
-    await expect(lifecycle.currentClient().sendRequest({id:99,method:"engine.ping",params:{}})).resolves.toMatchObject({id:99});
-  },REAL_DAEMON_TEST_TIMEOUT_MS);
+  it.skipIf(engine.missing)(
+    "drains queued startup replies after the host event loop stalls beyond the request deadline",
+    async () => {
+      const failures: Error[] = [];
+      let complete!: () => void,
+        refuse!: (error: Error) => void,
+        stalled = false;
+      const smoke = new Promise<void>((resolve, reject) => {
+        complete = resolve;
+        refuse = reject;
+      });
+      const lifecycle = createRealDaemonLifecycle({
+        command: engine.require(),
+        maxRestarts: 0,
+        onFailure(error) {
+          failures.push(error);
+          refuse(error);
+        },
+        launch: async (options) => {
+          const client = await createEngineClient(options);
+          return {
+            sendRequest: async (request, signal, progress, cancelSignal) => {
+              const pending = client.sendRequest(request, signal, progress, cancelSignal);
+              if (!stalled && request.method === "workspace.open") {
+                stalled = true;
+                // Freeze only this process after the pipe write. The lifecycle sends
+                // its request timeout as the daemon's deadline, so the real daemon
+                // queues its reply inside it, and the freeze outlasts both.
+                setImmediate(() =>
+                  Atomics.wait(
+                    new Int32Array(new SharedArrayBuffer(4)),
+                    0,
+                    0,
+                    REAL_DAEMON_DEADLINE_MS + 1_000,
+                  ),
+                );
+              }
+              const response = await pending;
+              if (request.method === "workspace.close") complete();
+              return response;
+            },
+            onEvent: (handler) => client.onEvent(handler),
+            onBlob: (handler) => client.onBlob(handler),
+            close: () => client.close(),
+            closeUnresponsive: () => {
+              refuse(new Error("Healthy engine killed after host stall."));
+              client.closeUnresponsive();
+            },
+            inboundActivity: () => client.inboundActivity(),
+            waitForExit: () => client.waitForExit(),
+          };
+        },
+      });
+      lifecycles.push(lifecycle);
+      await lifecycle.start();
+      await smoke;
+      expect(stalled).toBe(true);
+      expect(failures).toEqual([]);
+      await expect(
+        lifecycle.currentClient().sendRequest({ id: 99, method: "engine.ping", params: {} }),
+      ).resolves.toMatchObject({ id: 99 });
+    },
+    REAL_DAEMON_TEST_TIMEOUT_MS,
+  );
 
   it.skipIf(engine.missing)(
     "answers every probe, so a healthy daemon is never killed",
@@ -118,15 +152,12 @@ describe("engine.ping against a real daemon", () => {
           () => ({
             failures: failures.map((error) => error.message),
             spannedTwoExpiries:
-              probes.filter(({ answered }) => answered).length >=
-              answersSpanningTwoExpiries,
+              probes.filter(({ answered }) => answered).length >= answersSpanningTwoExpiries,
           }),
           { timeout: REAL_DAEMON_DEADLINE_MS },
         )
         .toEqual({ failures: [], spannedTwoExpiries: true });
-      expect(
-        probes.every(({ request }) => (request.deadlineMs ?? null) === null),
-      ).toBe(true);
+      expect(probes.every(({ request }) => (request.deadlineMs ?? null) === null)).toBe(true);
       expect(failures.map((error) => error.message)).toEqual([]);
       // Same daemon throughout: a kill would have ended or replaced it.
       expect(() => lifecycle.currentClient()).not.toThrow();

@@ -42,16 +42,18 @@ export function resolveFloatingMenuPosition({
 }: FloatingMenuPositionInput): FloatingMenuPosition {
   const maxLeft = Math.max(margin, viewportWidth - menuWidth - margin);
   const x = Math.min(Math.max(cursorRect.left, margin), maxLeft);
-  const availableBelow = Math.max(
-    0,
-    viewportHeight - cursorRect.bottom - gap - margin,
-  );
+  const availableBelow = Math.max(0, viewportHeight - cursorRect.bottom - gap - margin);
   const availableAbove = Math.max(0, cursorRect.top - gap - margin);
   const belowHeight = Math.min(menuMaxHeight, availableBelow);
   const aboveHeight = Math.min(menuMaxHeight, availableAbove);
-  const placement = prefer === "above"
-    ? aboveHeight >= menuMaxHeight || aboveHeight >= belowHeight ? "above" : "below"
-    : belowHeight >= menuMaxHeight || belowHeight >= aboveHeight ? "below" : "above";
+  const placement =
+    prefer === "above"
+      ? aboveHeight >= menuMaxHeight || aboveHeight >= belowHeight
+        ? "above"
+        : "below"
+      : belowHeight >= menuMaxHeight || belowHeight >= aboveHeight
+        ? "below"
+        : "above";
   const maxHeight = placement === "above" ? aboveHeight : belowHeight;
   const y =
     placement === "above"

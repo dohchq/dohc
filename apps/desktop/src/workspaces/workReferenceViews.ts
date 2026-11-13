@@ -9,13 +9,21 @@ type WorkReferenceResolution = Awaited<ReturnType<VersionedLiveAdapter["resolveW
  * no longer holds, opens nothing. A transactional table or row has no place
  * to open yet.
  */
-export function workReferenceView(reference: string, resolution: WorkReferenceResolution | null): WorkReferenceView {
+export function workReferenceView(
+  reference: string,
+  resolution: WorkReferenceResolution | null,
+): WorkReferenceView {
   const unavailable: WorkReferenceView = { reference, kind: null, label: "", open: null };
   if (resolution?.status !== "found" || resolution.state === "deleted") return unavailable;
   const { target, path, title } = resolution;
   switch (target.kind) {
     case "chat":
-      return { reference, kind: "chat", label: title ?? "", open: { to: "chat-channel", channel: target.channelId } };
+      return {
+        reference,
+        kind: "chat",
+        label: title ?? "",
+        open: { to: "chat-channel", channel: target.channelId },
+      };
     case "thread":
     case "message": {
       const open = {
@@ -31,8 +39,18 @@ export function workReferenceView(reference: string, resolution: WorkReferenceRe
     case "documentRecord":
     case "documentCollection": {
       if (path === undefined) return unavailable;
-      const kind = target.kind === "documentRecord" ? "record" : target.kind === "documentCollection" ? "collection" : target.kind;
-      return { reference, kind, label: path, open: { to: kind === "collection" ? "collection" : "file", path } };
+      const kind =
+        target.kind === "documentRecord"
+          ? "record"
+          : target.kind === "documentCollection"
+            ? "collection"
+            : target.kind;
+      return {
+        reference,
+        kind,
+        label: path,
+        open: { to: kind === "collection" ? "collection" : "file", path },
+      };
     }
     case "transactionalCollection":
     case "transactionalRecord":

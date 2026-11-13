@@ -104,15 +104,10 @@ const VERSIONED_TEXT_STORE_ERROR_CODES = [
 // A new domain code must be listed above, or this stops compiling.
 type AssertNever<T extends never> = T;
 type _AllDomainCodesRepresented = AssertNever<
-  Exclude<
-    VersionedTextStoreErrorCode,
-    (typeof VERSIONED_TEXT_STORE_ERROR_CODES)[number]
-  >
+  Exclude<VersionedTextStoreErrorCode, (typeof VERSIONED_TEXT_STORE_ERROR_CODES)[number]>
 >;
 
-const DOMAIN_ERROR_CODES: ReadonlySet<string> = new Set(
-  VERSIONED_TEXT_STORE_ERROR_CODES,
-);
+const DOMAIN_ERROR_CODES: ReadonlySet<string> = new Set(VERSIONED_TEXT_STORE_ERROR_CODES);
 
 /**
  * Present a daemon refusal as the domain error this store's contract promises.
@@ -132,8 +127,7 @@ function domainErrorFrom(error: unknown): VersionedTextStoreError | null {
   // engine sends the constraint, the limit and the observed usage as a
   // sentence, so the WIRE code names this refusal and the numbers survive as
   // the message.
-  const code =
-    error.wireCode === "PAYLOAD_TOO_LARGE" ? "payload-too-large" : error.message;
+  const code = error.wireCode === "PAYLOAD_TOO_LARGE" ? "payload-too-large" : error.message;
   if (!DOMAIN_ERROR_CODES.has(code)) return null;
   const translated = new VersionedTextStoreError(
     code as VersionedTextStoreErrorCode,
@@ -166,9 +160,19 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
   linkEdges: VersionedLiveAdapter["linkEdges"];
   incomingLinks: VersionedLiveAdapter["incomingLinks"];
   resolveLinks: VersionedLiveAdapter["resolveLinks"];
-  listUnconfirmedSharePaths(input: { workspaceId: string; shareId: string; grantedSelector: ShareViewSelector }): Promise<ShareUnconfirmedChanges>;
+  listUnconfirmedSharePaths(input: {
+    workspaceId: string;
+    shareId: string;
+    grantedSelector: ShareViewSelector;
+  }): Promise<ShareUnconfirmedChanges>;
   // Preflight the author of the following rename or delete.
-  checkMove(input: { workspaceId: string; versionId: string; path: string; author?: MomentWriteAuthor; change?: "movePage" | "moveFolder" | "delete" }): Promise<void>;
+  checkMove(input: {
+    workspaceId: string;
+    versionId: string;
+    path: string;
+    author?: MomentWriteAuthor;
+    change?: "movePage" | "moveFolder" | "delete";
+  }): Promise<void>;
   listPendingCollectionAdoptions?(input?: {
     limit?: number;
     cursor?: CollectionPendingAdoptionCursor;
@@ -179,10 +183,19 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
     under?: string;
   }): Promise<CaptureTextFileMetadata[]>;
   listHistoryPage(input: {
-    workspaceId: string; versionId?: string; objectId?: string; limit?: number; cursor?: HistoryCursor;
+    workspaceId: string;
+    versionId?: string;
+    objectId?: string;
+    limit?: number;
+    cursor?: HistoryCursor;
   }): Promise<{
-    activeVersion: VersionRecord; moments: VersionedTextMomentSummary[]; protectedMoments: SecretFileMoment[];
-    versionMarkers: VersionRecord[]; startCursor: HistoryCursor; nextCursor: HistoryCursor | null; latestMomentOrder: number;
+    activeVersion: VersionRecord;
+    moments: VersionedTextMomentSummary[];
+    protectedMoments: SecretFileMoment[];
+    versionMarkers: VersionRecord[];
+    startCursor: HistoryCursor;
+    nextCursor: HistoryCursor | null;
+    latestMomentOrder: number;
   }>;
   // `signal` replaces the store's own cancel for this flush.
   flushCapture?(options?: { signal?: AbortSignal }): Promise<void>;
@@ -207,7 +220,11 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
   releaseCapture?(holdId: string): Promise<boolean>;
   // One rename that refuses to replace, of a visible regular file, under a hold.
   duplicateFileUnderHold?: VersionedLiveAdapter["duplicateFileUnderHold"];
-  moveFileUnderHold?(input: { holdId: string; fromPath: string; toPath: string }): Promise<CaptureMoveFileResult>;
+  moveFileUnderHold?(input: {
+    holdId: string;
+    fromPath: string;
+    toPath: string;
+  }): Promise<CaptureMoveFileResult>;
   replaceFile?: VersionedLiveAdapter["replaceFile"];
 };
 
@@ -223,9 +240,7 @@ function metadataFromOrigin(
   return {
     origin: publicOrigin(origin),
     ...(supplied?.summary !== undefined ? { summary: supplied.summary } : {}),
-    ...(supplied?.correlationId !== undefined
-      ? { correlationId: supplied.correlationId }
-      : {}),
+    ...(supplied?.correlationId !== undefined ? { correlationId: supplied.correlationId } : {}),
   };
 }
 
@@ -253,7 +268,8 @@ function momentMetadataFromOrigin(
 ): MomentMetadata {
   const metadata = metadataFromOrigin(origin, supplied);
   return origin === "ydoc" || origin === "capture-recovery" || origin === "capture-recovery-cleared"
-    ? { ...metadata, origin } : metadata;
+    ? { ...metadata, origin }
+    : metadata;
 }
 
 function snapshotFromWire(
@@ -275,9 +291,7 @@ function snapshotFromWire(
     latestMomentId: value.latestMomentId,
     metadata: metadataFromOrigin(value.metadataOrigin, {
       origin: publicOrigin(value.metadataOrigin),
-      ...(value.metadataSummary != null
-        ? { summary: value.metadataSummary }
-        : {}),
+      ...(value.metadataSummary != null ? { summary: value.metadataSummary } : {}),
       ...(value.metadataCorrelationId != null
         ? { correlationId: value.metadataCorrelationId }
         : {}),
@@ -314,15 +328,26 @@ function authorFromWire(author: NonNullable<MomentRecord["authors"]>[number]): M
       ...(author.onBehalfOf !== undefined ? { onBehalfOf: author.onBehalfOf } : {}),
     };
   }
-  if (author.kind === "public") return { kind: "public", principalId: author.principalId, grantId: author.grantId };
+  if (author.kind === "public")
+    return { kind: "public", principalId: author.principalId, grantId: author.grantId };
   if (author.kind === "named") {
-    return { kind: "named", userId: author.userId, grantId: author.grantId, grantGeneration: author.grantGeneration };
+    return {
+      kind: "named",
+      userId: author.userId,
+      grantId: author.grantId,
+      grantGeneration: author.grantGeneration,
+    };
   }
   if (author.kind === "link") {
     if ("publicPrincipalId" in author) {
       return { kind: "link", publicPrincipalId: author.publicPrincipalId, label: author.label };
     }
-    return { kind: "link", grantId: author.grantId, grantGeneration: author.grantGeneration, principalId: author.principalId };
+    return {
+      kind: "link",
+      grantId: author.grantId,
+      grantGeneration: author.grantGeneration,
+      principalId: author.principalId,
+    };
   }
   if (author.kind === "automation") {
     return {
@@ -337,9 +362,7 @@ function authorFromWire(author: NonNullable<MomentRecord["authors"]>[number]): M
     agentId: author.agentId,
     ...(author.agentName !== undefined ? { agentName: author.agentName } : {}),
     ...(author.onBehalfOf !== undefined ? { onBehalfOf: author.onBehalfOf } : {}),
-    ...(author.agentRunId !== undefined
-      ? { agentRunId: author.agentRunId }
-      : {}),
+    ...(author.agentRunId !== undefined ? { agentRunId: author.agentRunId } : {}),
     ...(author.depth !== undefined ? { depth: author.depth } : {}),
   };
 }
@@ -349,9 +372,7 @@ function payloadSnapshot(
   side: "before" | "after",
 ): VersionedTextMoment["payload"]["after"] {
   const before = side === "before";
-  const contentKind = before
-    ? moment.beforeContentKind
-    : moment.afterContentKind;
+  const contentKind = before ? moment.beforeContentKind : moment.afterContentKind;
   const text = before ? moment.beforeText : moment.afterText;
   // Every caller hydrates an over-cap body first (`hydratedMoment`), so a
   // withheld text reaching here is one of two different failures. Fabricating
@@ -388,9 +409,7 @@ function momentFromWire(
   suppliedMetadata?: ActorNeutralWriteMetadata,
 ): VersionedTextMoment {
   const authors = authorsFromWire(moment.authors);
-  const before = moment.beforePresent
-    ? payloadSnapshot(moment, "before")
-    : null;
+  const before = moment.beforePresent ? payloadSnapshot(moment, "before") : null;
   return {
     id: moment.momentId,
     workspaceId,
@@ -409,9 +428,7 @@ function momentFromWire(
     },
     metadata: momentMetadataFromOrigin(moment.metadataOrigin, {
       origin: publicOrigin(moment.metadataOrigin),
-      ...(moment.metadataSummary != null
-        ? { summary: moment.metadataSummary }
-        : {}),
+      ...(moment.metadataSummary != null ? { summary: moment.metadataSummary } : {}),
       ...(moment.metadataCorrelationId != null
         ? { correlationId: moment.metadataCorrelationId }
         : {}),
@@ -437,15 +454,11 @@ function momentSummaryFromWire(
     recordedAtMs: moment.recordedAtMs,
     operation: moment.operation,
     contentKind: moment.afterContentKind,
-    ...(moment.afterByteLength !== null
-      ? { byteLength: moment.afterByteLength }
-      : {}),
+    ...(moment.afterByteLength !== null ? { byteLength: moment.afterByteLength } : {}),
     ...(sha256 !== undefined ? { sha256 } : {}),
     metadata: momentMetadataFromOrigin(moment.metadataOrigin, {
       origin: publicOrigin(moment.metadataOrigin),
-      ...(moment.metadataSummary != null
-        ? { summary: moment.metadataSummary }
-        : {}),
+      ...(moment.metadataSummary != null ? { summary: moment.metadataSummary } : {}),
       ...(moment.metadataCorrelationId != null
         ? { correlationId: moment.metadataCorrelationId }
         : {}),
@@ -467,16 +480,12 @@ function conflictFromWire(conflict: ConflictRecord): VersionedTextConflictRecord
     incoming: conflictStateFromWire(conflict.incoming),
     metadata: metadataFromOrigin(conflict.metadata.origin, {
       origin: publicOrigin(conflict.metadata.origin),
-      ...(conflict.metadata.summary !== null
-        ? { summary: conflict.metadata.summary }
-        : {}),
+      ...(conflict.metadata.summary !== null ? { summary: conflict.metadata.summary } : {}),
       ...(conflict.metadata.correlationId !== null
         ? { correlationId: conflict.metadata.correlationId }
         : {}),
     }),
-    ...(resolution !== null
-      ? { resolution }
-      : {}),
+    ...(resolution !== null ? { resolution } : {}),
   };
 }
 
@@ -489,12 +498,8 @@ function conflictStateFromWire(state: ConflictFileState): VersionedTextFileState
         path: state.path,
         contentKind: "binary",
         sha256: state.binarySha256,
-        ...(state.binaryByteLength !== null
-          ? { byteLength: state.binaryByteLength }
-          : {}),
-        ...(state.binaryObjectId !== null
-          ? { objectId: state.binaryObjectId }
-          : {}),
+        ...(state.binaryByteLength !== null ? { byteLength: state.binaryByteLength } : {}),
+        ...(state.binaryObjectId !== null ? { objectId: state.binaryObjectId } : {}),
         ...(state.binaryLatestMomentId !== null
           ? { latestMomentId: state.binaryLatestMomentId }
           : {}),
@@ -518,16 +523,12 @@ function conflictStateFromWire(state: ConflictFileState): VersionedTextFileState
     // read for identity and content kind, never for a body — the bodies a
     // reader paints come from `conflicts.list`, whose adapter hydrates any
     // side the daemon withheld before this mapping sees it.
-    ...(state.contentKind === "text" && snapshot.text !== null
-      ? { text: snapshot.text }
-      : {}),
+    ...(state.contentKind === "text" && snapshot.text !== null ? { text: snapshot.text } : {}),
     updatedAtMs: snapshot.updatedAtMs,
     latestMomentId: snapshot.latestMomentId,
     metadata: metadataFromOrigin(snapshot.metadataOrigin, {
       origin: publicOrigin(snapshot.metadataOrigin),
-      ...(state.metadataSummary !== null
-        ? { summary: state.metadataSummary }
-        : {}),
+      ...(state.metadataSummary !== null ? { summary: state.metadataSummary } : {}),
       ...(state.metadataCorrelationId !== null
         ? { correlationId: state.metadataCorrelationId }
         : {}),
@@ -540,9 +541,7 @@ function secretMomentFromWire(moment: SecretMomentRecord): SecretFileMoment {
     ...moment,
     metadata: metadataFromOrigin(moment.metadata.origin, {
       origin: publicOrigin(moment.metadata.origin),
-      ...(moment.metadata.summary !== null
-        ? { summary: moment.metadata.summary }
-        : {}),
+      ...(moment.metadata.summary !== null ? { summary: moment.metadata.summary } : {}),
       ...(moment.metadata.correlationId !== null
         ? { correlationId: moment.metadata.correlationId }
         : {}),
@@ -550,17 +549,11 @@ function secretMomentFromWire(moment: SecretMomentRecord): SecretFileMoment {
   };
 }
 
-function comparisonFromWire(
-  comparison: VersionedComparisonRecord,
-) {
-  const state = (
-    value: VersionedTextReadValue | null,
-  ): VersionedTextFileState => {
+function comparisonFromWire(comparison: VersionedComparisonRecord) {
+  const state = (value: VersionedTextReadValue | null): VersionedTextFileState => {
     if (value === null) return { exists: false, path: comparison.path };
     if (value.contentKind === "text" && value.text === null) {
-      throw new Error(
-        `Engine comparison text for ${value.path} exceeds the RPC in-band limit.`,
-      );
+      throw new Error(`Engine comparison text for ${value.path} exceeds the RPC in-band limit.`);
     }
     return {
       exists: true,
@@ -574,9 +567,7 @@ function comparisonFromWire(
       latestMomentId: value.latestMomentId,
       metadata: metadataFromOrigin(value.metadataOrigin, {
         origin: publicOrigin(value.metadataOrigin),
-        ...(value.metadataSummary != null
-          ? { summary: value.metadataSummary }
-          : {}),
+        ...(value.metadataSummary != null ? { summary: value.metadataSummary } : {}),
         ...(value.metadataCorrelationId != null
           ? { correlationId: value.metadataCorrelationId }
           : {}),
@@ -618,9 +609,7 @@ function adapterMetadata(metadata: ActorNeutralWriteMetadata) {
   return {
     origin: metadata.origin,
     ...(metadata.summary !== undefined ? { summary: metadata.summary } : {}),
-    ...(metadata.correlationId !== undefined
-      ? { correlationId: metadata.correlationId }
-      : {}),
+    ...(metadata.correlationId !== undefined ? { correlationId: metadata.correlationId } : {}),
   };
 }
 
@@ -643,15 +632,21 @@ function adapterAuthor(author: MomentWriteAuthor): WriteAuthor {
 
 // The author capture stamps on this computer's own edits: an agent run only.
 function captureAuthor(author: MomentWriteAuthor): AgentAuthor {
-  if (author.kind !== "agent") throw new VersionedTextStoreError("invalid-input", "Only an agent run can author captured edits.");
-  if (author.onBehalfOf === undefined) throw new VersionedTextStoreError("invalid-input", "The write does not name the person it acts for.");
+  if (author.kind !== "agent")
+    throw new VersionedTextStoreError(
+      "invalid-input",
+      "Only an agent run can author captured edits.",
+    );
+  if (author.onBehalfOf === undefined)
+    throw new VersionedTextStoreError(
+      "invalid-input",
+      "The write does not name the person it acts for.",
+    );
   return {
     kind: "agent",
     agentId: author.agentId,
     onBehalfOf: author.onBehalfOf,
-    ...(author.agentRunId !== undefined
-      ? { agentRunId: author.agentRunId }
-      : {}),
+    ...(author.agentRunId !== undefined ? { agentRunId: author.agentRunId } : {}),
     ...(author.depth !== undefined && author.depth > 0 ? { depth: author.depth } : {}),
   };
 }
@@ -690,20 +685,23 @@ export function createCaptureLiveStores(
   async function runRawRead<T>(
     operation: (adapter: VersionedLiveAdapter) => Promise<T>,
   ): Promise<T> {
-    return await sessions.run(
-      workspace,
-      async (binding) => await operation(adapterFor(binding)),
-      { retryTransportErrors: true },
-    );
+    return await sessions.run(workspace, async (binding) => await operation(adapterFor(binding)), {
+      retryTransportErrors: true,
+    });
   }
 
-  async function waitForCapture<T>(signal: AbortSignal | undefined, operation: () => Promise<T>): Promise<T> {
+  async function waitForCapture<T>(
+    signal: AbortSignal | undefined,
+    operation: () => Promise<T>,
+  ): Promise<T> {
     signal?.throwIfAborted();
     if (!signal) return await operation();
     let rejectAbort!: (reason: unknown) => void;
-    const cancelled = new Promise<never>((_resolve, reject) => {rejectAbort = reject;});
+    const cancelled = new Promise<never>((_resolve, reject) => {
+      rejectAbort = reject;
+    });
     const abort = () => rejectAbort(signal.reason);
-    signal.addEventListener("abort", abort, {once: true});
+    signal.addEventListener("abort", abort, { once: true });
     try {
       return await Promise.race([operation(), cancelled]);
     } finally {
@@ -714,10 +712,7 @@ export function createCaptureLiveStores(
   async function runRawMutation<T>(
     operation: (adapter: VersionedLiveAdapter) => Promise<T>,
   ): Promise<T> {
-    return await sessions.run(
-      workspace,
-      async (binding) => await operation(adapterFor(binding)),
-    );
+    return await sessions.run(workspace, async (binding) => await operation(adapterFor(binding)));
   }
 
   async function withDomainErrors<T>(run: () => Promise<T>): Promise<T> {
@@ -730,9 +725,7 @@ export function createCaptureLiveStores(
     }
   }
 
-  async function runRead<T>(
-    operation: (adapter: VersionedLiveAdapter) => Promise<T>,
-  ): Promise<T> {
+  async function runRead<T>(operation: (adapter: VersionedLiveAdapter) => Promise<T>): Promise<T> {
     return await withDomainErrors(async () => await runRawRead(operation));
   }
 
@@ -782,8 +775,7 @@ export function createCaptureLiveStores(
       // Hashing happens here, not at the offer: only an over-cap answer ever
       // asks, and only then is a candidate worth a digest.
       const held = offered.find(
-        (candidate) =>
-          createHash("sha256").update(candidate, "utf8").digest("hex") === sha256,
+        (candidate) => createHash("sha256").update(candidate, "utf8").digest("hex") === sha256,
       );
       const body =
         held === undefined
@@ -830,16 +822,12 @@ export function createCaptureLiveStores(
         ? moment.afterBlobSha256
         : null;
     const beforeSha256 =
-      moment.beforePresent &&
-      moment.beforeContentKind === "text" &&
-      moment.beforeText === null
+      moment.beforePresent && moment.beforeContentKind === "text" && moment.beforeText === null
         ? moment.beforeBlobSha256
         : null;
     if (afterSha256 === null && beforeSha256 === null) return moment;
-    const afterText =
-      afterSha256 === null ? null : await body(afterSha256, moment.path);
-    const beforeText =
-      beforeSha256 === null ? null : await body(beforeSha256, moment.path);
+    const afterText = afterSha256 === null ? null : await body(afterSha256, moment.path);
+    const beforeText = beforeSha256 === null ? null : await body(beforeSha256, moment.path);
     return {
       ...moment,
       ...(afterText !== null ? { afterText } : {}),
@@ -921,13 +909,26 @@ export function createCaptureLiveStores(
   }
 
   const store = {
-    async listUnconfirmedSharePaths(input: { workspaceId: string; shareId: string; grantedSelector: ShareViewSelector }): Promise<ShareUnconfirmedChanges> {
-      return sessions.run(workspace, async binding => {
+    async listUnconfirmedSharePaths(input: {
+      workspaceId: string;
+      shareId: string;
+      grantedSelector: ShareViewSelector;
+    }): Promise<ShareUnconfirmedChanges> {
+      return sessions.run(workspace, async (binding) => {
         const adapter = adapterFor(binding);
-        const rows = (await adapter.listTextFileMetadata({ workspaceId: input.workspaceId, versionId: input.grantedSelector.versionId ?? "main" }))
-          .filter(row => classifyEngineFilePath(row.path).kind === "tracked"
-            && input.grantedSelector.paths.some(path => row.path === path || row.path.startsWith(`${path}/`))
-            && !(row.metadataOrigin === "sync" && row.latestMomentId.startsWith("moment-share-")));
+        const rows = (
+          await adapter.listTextFileMetadata({
+            workspaceId: input.workspaceId,
+            versionId: input.grantedSelector.versionId ?? "main",
+          })
+        ).filter(
+          (row) =>
+            classifyEngineFilePath(row.path).kind === "tracked" &&
+            input.grantedSelector.paths.some(
+              (path) => row.path === path || row.path.startsWith(`${path}/`),
+            ) &&
+            !(row.metadataOrigin === "sync" && row.latestMomentId.startsWith("moment-share-")),
+        );
         const requester = new WorkspaceDaemonRequester(binding.client);
         const paths: string[] = [];
         // Bound the one-time check; owner-pull heads need no receipt query.
@@ -936,12 +937,17 @@ export function createCaptureLiveStores(
         for (let offset = 0; offset < rows.length; offset += 256) {
           const remainingMs = deadline - Date.now();
           if (offset === 8_192 || remainingMs <= 0) return { paths, unchecked: true, checked };
-          const batch = rows.slice(offset, offset + 256).map(row => row.path);
+          const batch = rows.slice(offset, offset + 256).map((row) => row.path);
           try {
-            const statuses = z.record(z.string(), ShareDeliveryStatus).parse(
-              await requester.request("share.direct.statuses", { ...input, grantedSelector: { ...input.grantedSelector }, paths: batch },
-                { workspace: binding.workspace, deadlineMs: remainingMs }),
-            );
+            const statuses = z
+              .record(z.string(), ShareDeliveryStatus)
+              .parse(
+                await requester.request(
+                  "share.direct.statuses",
+                  { ...input, grantedSelector: { ...input.grantedSelector }, paths: batch },
+                  { workspace: binding.workspace, deadlineMs: remainingMs },
+                ),
+              );
             for (const path of batch) {
               const status = statuses[path];
               if (!status) return { paths, unchecked: true, checked };
@@ -963,31 +969,39 @@ export function createCaptureLiveStores(
       runRead(async (adapter) => await adapter.getActiveVersion(input)),
     setActiveVersion: (input: { workspaceId: string; versionId: string }) =>
       runMutation(async (adapter) => await adapter.setActiveVersion(input)),
-    createNamedVersion: (input: {
-      workspaceId: string;
-      name: string;
-      fromVersionId: string;
-    }) => runMutation(async (adapter) => await adapter.createNamedVersion(input)),
+    createNamedVersion: (input: { workspaceId: string; name: string; fromVersionId: string }) =>
+      runMutation(async (adapter) => await adapter.createNamedVersion(input)),
     listVersions: (input: { workspaceId: string }) =>
       runRead(async (adapter) => await adapter.listVersions(input)),
 
-    async readTextFile(input: {
-      workspaceId: string;
-      versionId: string;
-      path: string;
-    }) {
+    async readTextFile(input: { workspaceId: string; versionId: string; path: string }) {
       const value = await runRead(async (adapter) => await adapter.readTextFile(input));
       return value === null ? null : snapshotFromWire(value);
     },
 
-    checkMove: ({ author, ...input }: { workspaceId: string; versionId: string; path: string; author?: MomentWriteAuthor; change?: "movePage" | "moveFolder" | "delete" }) =>
-      runRead(async (adapter) => await adapter.checkMove({ ...input, ...(author ? { author: adapterAuthor(author) } : {}) })),
+    checkMove: ({
+      author,
+      ...input
+    }: {
+      workspaceId: string;
+      versionId: string;
+      path: string;
+      author?: MomentWriteAuthor;
+      change?: "movePage" | "moveFolder" | "delete";
+    }) =>
+      runRead(
+        async (adapter) =>
+          await adapter.checkMove({
+            ...input,
+            ...(author ? { author: adapterAuthor(author) } : {}),
+          }),
+      ),
 
-    linkEdges: input => runRead(adapter => adapter.linkEdges(input)),
-    incomingLinks: input => runRead(adapter => adapter.incomingLinks(input)),
-    resolveLinks: input => runRead(adapter => adapter.resolveLinks(input)),
+    linkEdges: (input) => runRead((adapter) => adapter.linkEdges(input)),
+    incomingLinks: (input) => runRead((adapter) => adapter.incomingLinks(input)),
+    resolveLinks: (input) => runRead((adapter) => adapter.resolveLinks(input)),
     async resolveFiles(input: Parameters<VersionedLiveAdapter["resolveFiles"]>[0]) {
-      return await runRead(adapter => adapter.resolveFiles(input));
+      return await runRead((adapter) => adapter.resolveFiles(input));
     },
 
     async listTextFileMetadata(input: {
@@ -995,9 +1009,7 @@ export function createCaptureLiveStores(
       versionId: string;
       under?: string;
     }): Promise<CaptureTextFileMetadata[]> {
-      const rows = await runRead(
-        async (adapter) => await adapter.listTextFileMetadata(input),
-      );
+      const rows = await runRead(async (adapter) => await adapter.listTextFileMetadata(input));
       return rows.map((row: VersionedTextListEntry) => ({
         path: row.path,
         objectId: row.objectId,
@@ -1041,11 +1053,7 @@ export function createCaptureLiveStores(
         materializeOutcome: raw.materializeOutcome,
         object: raw.object,
         snapshot: snapshotFromWire(raw.snapshot, input.metadata),
-        moment: momentFromWire(
-          input.workspaceId,
-          await hydratedMoment(raw.moment),
-          input.metadata,
-        ),
+        moment: momentFromWire(input.workspaceId, await hydratedMoment(raw.moment), input.metadata),
       };
     },
 
@@ -1092,19 +1100,12 @@ export function createCaptureLiveStores(
         materializeOutcome: raw.materializeOutcome,
         object: raw.object,
         snapshot: snapshotFromWire(value, input.metadata),
-        moment: momentFromWire(
-          input.workspaceId,
-          await hydratedMoment(raw.moment),
-          input.metadata,
-        ),
+        moment: momentFromWire(input.workspaceId, await hydratedMoment(raw.moment), input.metadata),
       };
     },
 
-    readBinaryFile: (input: {
-      workspaceId: string;
-      versionId: string;
-      path: string;
-    }) => runRead(async (adapter) => await adapter.readBinaryFile(input)),
+    readBinaryFile: (input: { workspaceId: string; versionId: string; path: string }) =>
+      runRead(async (adapter) => await adapter.readBinaryFile(input)),
     readBinaryBlob: (input: { workspaceId: string; sha256: string }) =>
       runRead(async (adapter) => await adapter.readBinaryBlob(input)),
 
@@ -1198,15 +1199,14 @@ export function createCaptureLiveStores(
         object: raw.object,
         before,
         after,
-        moment: momentFromWire(
-          input.workspaceId,
-          await hydratedMoment(raw.moment),
-          input.metadata,
-        ),
+        moment: momentFromWire(input.workspaceId, await hydratedMoment(raw.moment), input.metadata),
       };
     },
 
-    rollbackTextFileMutation: ({ author, ...input }: {
+    rollbackTextFileMutation: ({
+      author,
+      ...input
+    }: {
       workspaceId: string;
       versionId: string;
       path: string;
@@ -1215,10 +1215,11 @@ export function createCaptureLiveStores(
       author?: MomentWriteAuthor;
     }) =>
       runMutation(
-        async (adapter) => await adapter.rollbackTextFileMutation({
-          ...input,
-          ...(author ? { author: adapterAuthor(author) } : {}),
-        }),
+        async (adapter) =>
+          await adapter.rollbackTextFileMutation({
+            ...input,
+            ...(author ? { author: adapterAuthor(author) } : {}),
+          }),
       ),
 
     async listMoments(input: {
@@ -1232,19 +1233,26 @@ export function createCaptureLiveStores(
       return {
         ...page,
         moments: page.moments.map((moment) =>
-          momentSummaryFromWire(input.workspaceId, {...moment, beforePath: moment.beforePath ?? null},
-            moment.afterBinarySha256 ?? moment.afterBlobSha256 ?? undefined),
+          momentSummaryFromWire(
+            input.workspaceId,
+            { ...moment, beforePath: moment.beforePath ?? null },
+            moment.afterBinarySha256 ?? moment.afterBlobSha256 ?? undefined,
+          ),
         ),
       };
     },
 
     async listHistoryPage(input: {
-      workspaceId: string; versionId?: string; objectId?: string; limit?: number; cursor?: HistoryCursor;
+      workspaceId: string;
+      versionId?: string;
+      objectId?: string;
+      limit?: number;
+      cursor?: HistoryCursor;
     }) {
-      const page = await runRead(async adapter => await adapter.readHistoryPage(input));
+      const page = await runRead(async (adapter) => await adapter.readHistoryPage(input));
       return {
         ...page,
-        moments: page.moments.map(moment => momentSummaryFromWire(input.workspaceId, moment)),
+        moments: page.moments.map((moment) => momentSummaryFromWire(input.workspaceId, moment)),
         protectedMoments: page.protectedMoments.map(secretMomentFromWire),
       };
     },
@@ -1266,9 +1274,7 @@ export function createCaptureLiveStores(
       sourceVersionId: string;
       path: string;
     }) {
-      const result = await runRead(
-        async (adapter) => await adapter.compareTextFileVersions(input),
-      );
+      const result = await runRead(async (adapter) => await adapter.compareTextFileVersions(input));
       return comparisonFromWire(result);
     },
 
@@ -1277,9 +1283,7 @@ export function createCaptureLiveStores(
       status?: "open" | "resolved";
       afterConflictId?: string;
     }) {
-      const page = await runRead(
-        async (adapter) => await adapter.listTextConflicts(input),
-      );
+      const page = await runRead(async (adapter) => await adapter.listTextConflicts(input));
       return {
         conflicts: page.conflicts.map(conflictFromWire),
         nextAfterConflictId: page.nextAfterConflictId,
@@ -1292,9 +1296,7 @@ export function createCaptureLiveStores(
       targetVersionId: string;
       afterPath?: string;
     }) {
-      return await runRead(
-        async (adapter) => await adapter.compareVersionFilesPage(input),
-      );
+      return await runRead(async (adapter) => await adapter.compareVersionFilesPage(input));
     },
 
     async mergeTextFileFromVersion(input: {
@@ -1475,7 +1477,7 @@ export function createCaptureLiveStores(
       };
       const request = <T>(operation: (adapter: VersionedLiveAdapter) => Promise<T>) => {
         assertActive();
-        return runRead(adapter => {
+        return runRead((adapter) => {
           assertActive();
           return operation(adapter);
         });
@@ -1483,9 +1485,9 @@ export function createCaptureLiveStores(
       const settle = async () => {
         // A manifest rebuild after switching versions needs an unsettled pass.
         // Capture events report path progress or initial readiness, not quiescence.
-        let outcome = await request(adapter => adapter.flushCapture());
+        let outcome = await request((adapter) => adapter.flushCapture());
         if (!outcome.settled) {
-          const status = await request(adapter => adapter.watcherStatus());
+          const status = await request((adapter) => adapter.watcherStatus());
           if (status.phase === "starting" || status.phase === "importing") {
             throw new DaemonRefusalError(
               {
@@ -1500,13 +1502,17 @@ export function createCaptureLiveStores(
         for (let attempt = 0; !outcome.settled && attempt < FLUSH_SETTLE_ATTEMPTS; attempt += 1) {
           assertActive();
           // Do not leave a poll scheduled beyond the total deadline.
-          await delay(Math.min(FLUSH_SETTLE_POLL_MS, Math.max(0, deadline - performance.now())), undefined, {
-            signal,
-          }).catch(error => {
+          await delay(
+            Math.min(FLUSH_SETTLE_POLL_MS, Math.max(0, deadline - performance.now())),
+            undefined,
+            {
+              signal,
+            },
+          ).catch((error) => {
             signal?.throwIfAborted();
             throw error;
           });
-          outcome = await request(adapter => adapter.flushCapture());
+          outcome = await request((adapter) => adapter.flushCapture());
         }
         if (!outcome.settled) throw didNotSettle();
       };
@@ -1530,9 +1536,7 @@ export function createCaptureLiveStores(
     },
 
     async listPendingCollectionAdoptions(input = {}) {
-      return await runRead(async (adapter) =>
-        await adapter.listPendingCollectionAdoptions(input),
-      );
+      return await runRead(async (adapter) => await adapter.listPendingCollectionAdoptions(input));
     },
 
     async reconcileCapture() {
@@ -1562,7 +1566,7 @@ export function createCaptureLiveStores(
     },
 
     async heldNoteChange(input) {
-      return await runMutation(async adapter => await adapter.heldNoteChange(input));
+      return await runMutation(async (adapter) => await adapter.heldNoteChange(input));
     },
 
     async listRetainedCopies() {
@@ -1573,10 +1577,12 @@ export function createCaptureLiveStores(
       return await runMutation(async (adapter) => await adapter.deleteRetainedCopies(copies));
     },
 
-    readHistoryOperation: input => runRead(adapter => adapter.readHistoryOperation(input)),
-    readHistoryPage: input => runRead(adapter => adapter.readHistoryPage(input)),
-    duplicateFileUnderHold: input => runMutation(adapter => adapter.duplicateFileUnderHold(input)),
-    holdCapture: async (input) => await runMutation(async (adapter) => await adapter.holdCapture(input)),
+    readHistoryOperation: (input) => runRead((adapter) => adapter.readHistoryOperation(input)),
+    readHistoryPage: (input) => runRead((adapter) => adapter.readHistoryPage(input)),
+    duplicateFileUnderHold: (input) =>
+      runMutation((adapter) => adapter.duplicateFileUnderHold(input)),
+    holdCapture: async (input) =>
+      await runMutation(async (adapter) => await adapter.holdCapture(input)),
 
     renewCapture: async (holdId: string) =>
       await runMutation(async (adapter) => await adapter.renewCapture(holdId)),
@@ -1586,7 +1592,7 @@ export function createCaptureLiveStores(
 
     moveFileUnderHold: async (input: { holdId: string; fromPath: string; toPath: string }) =>
       await runMutation(async (adapter) => await adapter.moveFileUnderHold(input)),
-    replaceFile: input => runMutation(adapter => adapter.replaceFile(input)),
+    replaceFile: (input) => runMutation((adapter) => adapter.replaceFile(input)),
 
     async setCaptureAuthor(author: Extract<MomentWriteAuthor, { kind: "agent" }> | null) {
       const desired = author === null ? null : captureAuthor(author);
@@ -1612,42 +1618,32 @@ export function createCaptureLiveStores(
         });
         return {
           changed: result.changed,
-          ...(result.moment
-            ? { moment: secretMomentFromWire(result.moment) }
-            : {}),
+          ...(result.moment ? { moment: secretMomentFromWire(result.moment) } : {}),
         };
       });
     },
     async deleteSecretFile(input: Parameters<SecretFileStore["deleteSecretFile"]>[0]) {
       return await runRawMutation(async (adapter) => {
         const result = await adapter.deleteSecretFile({
-            ...input,
-            metadata: adapterMetadata(input.metadata),
+          ...input,
+          metadata: adapterMetadata(input.metadata),
         });
         return {
-          moment:
-            result.moment === null
-              ? null
-              : secretMomentFromWire(result.moment),
+          moment: result.moment === null ? null : secretMomentFromWire(result.moment),
         };
       });
     },
     listSecretFiles: (input: Parameters<SecretFileStore["listSecretFiles"]>[0]) =>
       runRawRead(async (adapter) => await adapter.listSecretFiles(input)),
-    async getSecretMoment(
-      input: Parameters<SecretFileStore["getSecretMoment"]>[0],
-    ) {
-      const moment = await runRawRead(
-        async (adapter) => await adapter.getSecretMoment(input),
-      );
+    async getSecretMoment(input: Parameters<SecretFileStore["getSecretMoment"]>[0]) {
+      const moment = await runRawRead(async (adapter) => await adapter.getSecretMoment(input));
       return moment === null ? null : secretMomentFromWire(moment);
     },
     forkVersion: (input: Parameters<SecretFileStore["forkVersion"]>[0]) =>
       runRawMutation(async (adapter) => await adapter.forkVersion(input)),
     compareSecretFileVersions: (
       input: Parameters<SecretFileStore["compareSecretFileVersions"]>[0],
-    ) =>
-      runRawRead(async (adapter) => await adapter.compareSecretFileVersions(input)),
+    ) => runRawRead(async (adapter) => await adapter.compareSecretFileVersions(input)),
     applySecretFileFromVersion: (
       input: Parameters<SecretFileStore["applySecretFileFromVersion"]>[0],
     ) =>
@@ -1655,9 +1651,7 @@ export function createCaptureLiveStores(
         const result = await adapter.applySecretFileFromVersion(input);
         return {
           changed: result.changed,
-          ...(result.moment
-            ? { moment: secretMomentFromWire(result.moment) }
-            : {}),
+          ...(result.moment ? { moment: secretMomentFromWire(result.moment) } : {}),
         };
       }),
     restoreSecretFileToBeforeMoment: (
@@ -1670,13 +1664,9 @@ export function createCaptureLiveStores(
             metadata: adapterMetadata(input.metadata),
           }),
       ),
-    materializeSecretFile: (
-      input: Parameters<SecretFileStore["materializeSecretFile"]>[0],
-    ) =>
+    materializeSecretFile: (input: Parameters<SecretFileStore["materializeSecretFile"]>[0]) =>
       runRawRead(async (adapter) => await adapter.materializeSecretFile(input)),
-    secretTextRecorded: (
-      input: Parameters<SecretFileStore["secretTextRecorded"]>[0],
-    ) =>
+    secretTextRecorded: (input: Parameters<SecretFileStore["secretTextRecorded"]>[0]) =>
       runRawRead(async (adapter) => await adapter.secretTextRecorded(input)),
     close: async () => await sessions.closeWorkspace(workspace),
   } satisfies SecretFileStore;

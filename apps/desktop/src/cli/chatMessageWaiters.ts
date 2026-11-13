@@ -1,4 +1,6 @@
-interface Batch { messages: readonly unknown[] }
+interface Batch {
+  messages: readonly unknown[];
+}
 
 export class ChatMessageWaiters {
   private readonly cancellations = new Set<() => void>();
@@ -6,7 +8,9 @@ export class ChatMessageWaiters {
 
   constructor(private readonly limit = 32) {}
 
-  get size(): number { return this.cancellations.size; }
+  get size(): number {
+    return this.cancellations.size;
+  }
 
   wait<Result extends Batch>(input: {
     subscribe(listener: () => void): () => void;
@@ -17,7 +21,10 @@ export class ChatMessageWaiters {
     refresh?(): void;
   }): Promise<Result> {
     if (this.closed) return Promise.reject(new Error("Chat waits are closed."));
-    if (this.size >= this.limit) return Promise.reject(new Error("Too many chat waits. Finish an existing wait and try again."));
+    if (this.size >= this.limit)
+      return Promise.reject(
+        new Error("Too many chat waits. Finish an existing wait and try again."),
+      );
     if (input.signal?.aborted) return Promise.reject(new Error("Chat wait cancelled."));
     return new Promise<Result>((resolve, reject) => {
       let finished = false;
@@ -36,7 +43,8 @@ export class ChatMessageWaiters {
         else resolve(result!);
       };
       const cancel = () => finish(undefined, new Error("Chat wait cancelled."));
-      const timer = input.timeoutMs === 0 ? undefined : setTimeout(() => finish(empty), input.timeoutMs);
+      const timer =
+        input.timeoutMs === 0 ? undefined : setTimeout(() => finish(empty), input.timeoutMs);
       const query = async () => {
         dirty = true;
         if (querying || finished) return;
@@ -51,12 +59,17 @@ export class ChatMessageWaiters {
               if (input.timeoutMs === 0) finish(result);
             }
           }
-        } catch (error) { finish(undefined, error); }
-        finally { querying = false; }
+        } catch (error) {
+          finish(undefined, error);
+        } finally {
+          querying = false;
+        }
       };
       this.cancellations.add(cancel);
       input.signal?.addEventListener("abort", cancel, { once: true });
-      unsubscribe = input.subscribe(() => { void query(); });
+      unsubscribe = input.subscribe(() => {
+        void query();
+      });
       void query();
       input.refresh?.();
     });

@@ -1,7 +1,8 @@
 import { systemPrivacySettingsOperations } from "./bridgeContract";
 import { registerOperations, type OperationBoundary } from "./operationTable";
 
-const FILES_AND_FOLDERS = "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders";
+const FILES_AND_FOLDERS =
+  "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders";
 
 // Where a person allows dohc a folder macOS refused.
 export function registerSystemPrivacySettingsIpc<Event, Operation>(

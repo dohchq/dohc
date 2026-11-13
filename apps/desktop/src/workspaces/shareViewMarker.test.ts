@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  readableShareLevel,
-  shareViewGranterEmail,
-  shareViewIsPresent,
-} from "./shareViewMarker";
+import { readableShareLevel, shareViewGranterEmail, shareViewIsPresent } from "./shareViewMarker";
 
 // `shareViewIsPresent` is what main's `sharedViewOf` asks before refusing a
 // write. It decides whether someone else's files can be edited, so it is
@@ -31,14 +27,9 @@ describe("share-view marker presence", () => {
   // projection — the zero-workspaces defect reached through the field added
   // to describe the damage.
   it("shows a granter email only when the wire schema will carry it", () => {
-    expect(shareViewGranterEmail({ granterEmail: "sam@dohc.test" })).toBe(
-      "sam@dohc.test",
-    );
+    expect(shareViewGranterEmail({ granterEmail: "sam@dohc.test" })).toBe("sam@dohc.test");
     for (const raw of [null, 7, undefined, {}, "", "ab", "x".repeat(321)]) {
-      expect(
-        shareViewGranterEmail({ granterEmail: raw }),
-        String(raw).slice(0, 20),
-      ).toBeNull();
+      expect(shareViewGranterEmail({ granterEmail: raw }), String(raw).slice(0, 20)).toBeNull();
     }
     expect(shareViewGranterEmail(null)).toBeNull();
   });
@@ -56,9 +47,9 @@ describe("share-view pinned level", () => {
   });
 
   it("reads the level from a complete grant", () => {
-    expect(
-      readableShareLevel({ paths: ["docs"], versionId: null, access: "comment" }),
-    ).toBe("comment");
+    expect(readableShareLevel({ paths: ["docs"], versionId: null, access: "comment" })).toBe(
+      "comment",
+    );
   });
 
   // Same verdict as the refresh path, from the same function. A selector the

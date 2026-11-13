@@ -62,10 +62,7 @@ describe("desktop renderer workspace retirement", () => {
     expect(input.presenceMutations.retireSender).toHaveBeenCalledWith(session);
 
     for (const drain of drains) drain.resolve();
-    await Promise.all([
-      retiring.requiredForAdmission,
-      retiring.detachedFromAdmission,
-    ]);
+    await Promise.all([retiring.requiredForAdmission, retiring.detachedFromAdmission]);
   });
 
   it("reports sender-arm failures without skipping or abandoning other arms", async () => {
@@ -90,10 +87,7 @@ describe("desktop renderer workspace retirement", () => {
     expect(input.workspaceSearch.disposeSender).toHaveBeenCalledOnce();
 
     lastDrain.resolve();
-    await Promise.all([
-      retiring.requiredForAdmission,
-      retiring.detachedFromAdmission,
-    ]);
+    await Promise.all([retiring.requiredForAdmission, retiring.detachedFromAdmission]);
     expect(input.onCleanupError).toHaveBeenCalledWith(
       "engine Y.Doc sessions",
       { kind: "sender", senderId: 17 },
@@ -179,7 +173,9 @@ describe("desktop renderer workspace retirement", () => {
     const input = dependencies({
       sitePreviews: {
         cancelSender: vi.fn(),
-        stopWorkspace: vi.fn(async () => { throw failure; }),
+        stopWorkspace: vi.fn(async () => {
+          throw failure;
+        }),
       },
     });
     const retirement = createDesktopRendererWorkspaceRetirement(input);

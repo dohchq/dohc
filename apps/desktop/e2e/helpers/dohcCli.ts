@@ -9,9 +9,7 @@ const repoRoot = resolve(desktopRoot, "../..");
 const cliBin = join(repoRoot, "packages/cli/bin/dohc.js");
 // Unix serves the CLI over a socket file. Windows serves the same protocol
 // over a named pipe whose per-boot name lives in the endpoint descriptor.
-const cliEndpointFile = process.platform === "win32"
-  ? "dohc-cli-endpoint"
-  : "dohc-cli.sock";
+const cliEndpointFile = process.platform === "win32" ? "dohc-cli-endpoint" : "dohc-cli.sock";
 const cliTokenFile = "dohc-cli-token";
 
 /** A dohc run that did not succeed, with exactly what it printed. */

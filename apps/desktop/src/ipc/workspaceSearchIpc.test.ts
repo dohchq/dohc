@@ -16,10 +16,7 @@ function harness() {
   const trace: string[] = [];
   let activeWorkspaceId = "workspace-1";
   let rendererSessionCurrent = true;
-  const handlers = new Map<
-    string,
-    (event: TestEvent, payload: unknown) => Promise<unknown>
-  >();
+  const handlers = new Map<string, (event: TestEvent, payload: unknown) => Promise<unknown>>();
   const workspace = {
     workspaceId: "workspace-1",
     rootPath: "C:/workspace-1",
@@ -47,9 +44,7 @@ function harness() {
         workspace,
         attachmentId,
         signal,
-        isCurrent: () =>
-          rendererSessionCurrent &&
-          activeWorkspaceId === workspace.workspaceId,
+        isCurrent: () => rendererSessionCurrent && activeWorkspaceId === workspace.workspaceId,
       });
     },
     authorizeCancel,
@@ -58,10 +53,13 @@ function harness() {
   });
   registerOperations<typeof ops, TestEvent, unknown>(
     {
-      handle: (channel, handler) => { handlers.set(channel, handler); },
-      assertTrustedSender: () => { trace.push("trust"); },
-      withActiveWorkspace: () =>
-        Promise.reject(new Error("Search rows take no workspace guard.")),
+      handle: (channel, handler) => {
+        handlers.set(channel, handler);
+      },
+      assertTrustedSender: () => {
+        trace.push("trust");
+      },
+      withActiveWorkspace: () => Promise.reject(new Error("Search rows take no workspace guard.")),
     },
     ops,
     search,
@@ -160,9 +158,7 @@ describe("workspace search IPC registration", () => {
         searchId: "search-1",
         query: "needle",
       }),
-    ).rejects.toThrow(
-      "Workspace search stopped because it is no longer current.",
-    );
+    ).rejects.toThrow("Workspace search stopped because it is no longer current.");
   });
 
   it("returns a stable refusal code while the workspace is updating", async () => {

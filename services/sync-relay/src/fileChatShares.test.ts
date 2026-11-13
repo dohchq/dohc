@@ -179,10 +179,12 @@ async function seedWorkspace(h: SyncRelayHandler): Promise<OwnerLog> {
 describe("chat over a file share", () => {
   it("reads a named share without a received-identity key", async () => {
     const storage = await testStorage();
-    const h = testHandler(storage, {linkKey: undefined});
+    const h = testHandler(storage, { linkKey: undefined });
     await seedWorkspace(h);
     const shareId = await createShare(h, "view");
-    const response = await h(request(RECIPIENT, `/sync/shares/${shareId}/log?since=0&includeReferences=true`));
+    const response = await h(
+      request(RECIPIENT, `/sync/shares/${shareId}/log?since=0&includeReferences=true`),
+    );
     expect(response.status).toBe(200);
     const page = await json(response);
     expect(page.ops).not.toEqual([]);
@@ -200,22 +202,32 @@ describe("chat over a file share", () => {
     const path = "/sync/shares/" + shareId + "/log?limit=500&since=";
     const initial = await json(await h(request(RECIPIENT, path + "0")));
     const controller = new AbortController();
-    const held = h(request(RECIPIENT, path + initial.nextCursor + "&hold=30000", { signal: controller.signal }));
+    const held = h(
+      request(RECIPIENT, path + initial.nextCursor + "&hold=30000", { signal: controller.signal }),
+    );
     try {
       await expect.poll(() => activity.stats().waiters).toBe(1);
       await log.append(log.threadCreate("new-thread", "object-in", "New thread"));
       const response = await held;
       expect(response.status).toBe(200);
       const page = await json(response);
-      const token = createReceivedIdentity(LINK_KEY).object(["user", RECIPIENT], WORKSPACE, "object-in");
+      const token = createReceivedIdentity(LINK_KEY).object(
+        ["user", RECIPIENT],
+        WORKSPACE,
+        "object-in",
+      );
       expect(page.ops).toEqual([
-        expect.objectContaining({ opKind: "chat.thread.create", payload: expect.objectContaining({
-          linkedObjectId: token, linkedPathHint: "docs/in.md",
-        }) }),
+        expect.objectContaining({
+          opKind: "chat.thread.create",
+          payload: expect.objectContaining({
+            linkedObjectId: token,
+            linkedPathHint: "docs/in.md",
+          }),
+        }),
       ]);
       const immediate = await json(await h(request(RECIPIENT, path + initial.nextCursor)));
-      const {nextReferenceAfter: heldCursor, ...heldPage} = page;
-      const {nextReferenceAfter: immediateCursor, ...immediatePage} = immediate;
+      const { nextReferenceAfter: heldCursor, ...heldPage } = page;
+      const { nextReferenceAfter: immediateCursor, ...immediatePage } = immediate;
       expect(heldPage).toEqual(immediatePage);
       expect(heldCursor).toBeTypeOf("string");
       expect(immediateCursor).toBeTypeOf("string");
@@ -251,16 +263,17 @@ describe("chat over a file share", () => {
     }
 
     const served = chatOps(JSON.parse(body).ops);
-    expect(served.map((op) => op.opKind)).toEqual([
-      "chat.thread.create",
-      "chat.message.append",
-    ]);
+    expect(served.map((op) => op.opKind)).toEqual(["chat.thread.create", "chat.message.append"]);
     expect(served[0]?.payload).toEqual({
       threadId: "thread-in",
       title: "About the shared file",
       createdAtMs: 100,
       linkedAtMs: 101,
-      linkedObjectId: createReceivedIdentity(LINK_KEY).object(["user", RECIPIENT], WORKSPACE, "object-in"),
+      linkedObjectId: createReceivedIdentity(LINK_KEY).object(
+        ["user", RECIPIENT],
+        WORKSPACE,
+        "object-in",
+      ),
       linkedPathHint: "docs/in.md",
     });
   });
@@ -396,10 +409,7 @@ describe("chat over a file share", () => {
         }),
       ),
     );
-    expect(
-      second.status,
-      "a recipient's own thread must still resolve in a later batch",
-    ).toBe(200);
+    expect(second.status, "a recipient's own thread must still resolve in a later batch").toBe(200);
 
     const served = chatOps(await readShareLog(h, shareId));
     expect(served.map((op) => op.payload.messageId).filter(Boolean)).toContain("m-recipient");
@@ -591,18 +601,15 @@ describe("chat over a file share", () => {
       ),
     );
     expect(revoked).toBe(true);
-    expect(
-      push.status,
-      "without the in-transaction active-grant check this append lands",
-    ).toBe(404);
+    expect(push.status, "without the in-transaction active-grant check this append lands").toBe(
+      404,
+    );
     const ownerLog = storage.fetchLogPage({
       workspaceId: WORKSPACE,
       sinceRelaySeq: 0,
       limit: 500,
     });
-    expect(ownerLog.rows.map((row) => row.payloadJson).join("\n")).not.toContain(
-      "m-grant-raced",
-    );
+    expect(ownerLog.rows.map((row) => row.payloadJson).join("\n")).not.toContain("m-grant-raced");
   });
 
   it("re-reads the LEVEL inside the write transaction, not just the entry check", async () => {
@@ -667,7 +674,6 @@ describe("chat over a file share", () => {
     const served = chatOps(await readShareLog(h, shareId));
     expect(served.map((op) => op.payload.messageId)).not.toContain("m-tampered");
   });
-
 
   // P1 (review of bcdc31e0). A version share has NO paths, and
   // `pathVisibleThroughShare` reads an empty path list as "every tracked
@@ -827,7 +833,6 @@ describe("chat over a file share", () => {
     expect(chatOps(await readShareLog(h, shareId))).toHaveLength(0);
   });
 
-
   // The asymmetry review probed for. A GRANTER's thread is bound by object, so
   // it follows its file anywhere inside the share. A RECIPIENT's thread named
   // its file by path, so an in-share rename used to kill it while the
@@ -946,12 +951,11 @@ describe("chat over a file share", () => {
     );
 
     const binding = storage.findThreadCreateFileBinding(WORKSPACE, "thread-recipient");
-    expect(
-      binding,
-      "persisting the path leaves the thread unable to follow its file",
-    ).toEqual({ kind: "object", objectId: "object-in" });
+    expect(binding, "persisting the path leaves the thread unable to follow its file").toEqual({
+      kind: "object",
+      objectId: "object-in",
+    });
   });
-
 
   // A selector can name both dimensions. The paths-only rule must key on
   // "names no paths", not on "names a version" — otherwise a share of
@@ -1038,10 +1042,7 @@ describe("chat over a file share", () => {
       ),
     );
     expect(reads).toBeGreaterThan(1);
-    expect(
-      push.status,
-      "without the refusal the thread stores bound to nothing",
-    ).toBe(403);
+    expect(push.status, "without the refusal the thread stores bound to nothing").toBe(403);
     expect((await json(push)).code).toBe("share_op_rejected");
     expect(storage.findThreadCreateFileBinding(WORKSPACE, "thread-raced")).toBeUndefined();
   });
@@ -1060,9 +1061,7 @@ describe("chat over a file share", () => {
       request(GRANTER, `/sync/${WORKSPACE}/blobs/${sha}`, { method: "PUT", body: content }),
     );
     expect(upload.status).toBe(200);
-    await log.append(
-      log.moment("object-out", "notes/out.md", { payloadAfterBlobSha256: sha }),
-    );
+    await log.append(log.moment("object-out", "notes/out.md", { payloadAfterBlobSha256: sha }));
     const shareId = await createShare(h, "comment");
     const response = await h(request(RECIPIENT, `/sync/shares/${shareId}/blobs/${sha}`));
     expect(response.status).toBe(404);
@@ -1154,10 +1153,9 @@ describe("the append gate accepts chat only", () => {
 
       expect(push.status, await push.clone().text()).toBe(403);
       expect((await json(push)).code).toBe("share_op_rejected");
-      expect(
-        await ownerLog(h),
-        "a recipient's delete must never reach the granter's log",
-      ).toEqual(before);
+      expect(await ownerLog(h), "a recipient's delete must never reach the granter's log").toEqual(
+        before,
+      );
       // And the file is still where it was: the delete did not apply.
       expect(storage.objectCurrentPath(WORKSPACE, "object-in")).toBe("docs/in.md");
     });
@@ -1173,10 +1171,9 @@ describe("the append gate accepts chat only", () => {
 
       expect(push.status, await push.clone().text()).toBe(403);
       expect((await json(push)).code).toBe("share_op_rejected");
-      expect(
-        await ownerLog(h),
-        "a recipient's rename must never reach the granter's log",
-      ).toEqual(before);
+      expect(await ownerLog(h), "a recipient's rename must never reach the granter's log").toEqual(
+        before,
+      );
       expect(storage.objectCurrentPath(WORKSPACE, "object-in")).toBe("docs/in.md");
     });
 

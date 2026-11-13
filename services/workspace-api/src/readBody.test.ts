@@ -15,7 +15,10 @@ const bytesOf = (text: string) => new TextEncoder().encode(text);
 
 describe("readBodyAtMost", () => {
   it("reads a body in many chunks up to the limit", async () => {
-    const read = await readBodyAtMost(reader([bytesOf("dohc "), bytesOf("crash "), bytesOf("report")]), 17);
+    const read = await readBodyAtMost(
+      reader([bytesOf("dohc "), bytesOf("crash "), bytesOf("report")]),
+      17,
+    );
     expect("bytes" in read && new TextDecoder().decode(read.bytes)).toBe("dohc crash report");
   });
 
@@ -25,7 +28,10 @@ describe("readBodyAtMost", () => {
   });
 
   it("holds less than twice what has arrived, and never more than the limit", async () => {
-    const small = await readBodyAtMost(reader(Array.from({ length: 1000 }, () => bytesOf("x"))), 96 * 1024);
+    const small = await readBodyAtMost(
+      reader(Array.from({ length: 1000 }, () => bytesOf("x"))),
+      96 * 1024,
+    );
     expect("bytes" in small && small.bytes.byteLength).toBe(1000);
     expect("bytes" in small && small.bytes.buffer.byteLength).toBeLessThan(2000);
     const full = await readBodyAtMost(reader(Array.from({ length: 100 }, () => bytesOf("x"))), 100);

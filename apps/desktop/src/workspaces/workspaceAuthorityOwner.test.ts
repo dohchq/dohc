@@ -50,8 +50,9 @@ describe("workspace authority owner", () => {
     first.release();
     await test.owner.invalidate("workspace");
     const replacement = test.owner.acquire("workspace");
-    expect(() => test.owner.acquireBinding(first.binding))
-      .toThrow("This workspace changed while this ran. Try again.");
+    expect(() => test.owner.acquireBinding(first.binding)).toThrow(
+      "This workspace changed while this ran. Try again.",
+    );
     replacement.release();
     await test.owner.close();
   });
@@ -96,7 +97,9 @@ describe("workspace authority owner", () => {
     test.replace({ ...workspace });
 
     expect(() => first.assertCurrent()).toThrow("This workspace was closed. Open it again.");
-    expect(() => test.owner.acquire("workspace")).toThrow("This workspace was closed. Open it again.");
+    expect(() => test.owner.acquire("workspace")).toThrow(
+      "This workspace was closed. Open it again.",
+    );
     first.release();
     await drained;
     const replacement = test.owner.acquire("workspace");
@@ -150,7 +153,9 @@ describe("workspace authority owner", () => {
       const identity = lease.binding.attachmentId;
       await held;
       expect(test.disposed).not.toContain(identity);
-      expect(() => lease.assertCurrent()).toThrow("This workspace changed while this ran. Try again.");
+      expect(() => lease.assertCurrent()).toThrow(
+        "This workspace changed while this ran. Try again.",
+      );
       return identity;
     });
 
@@ -163,52 +168,65 @@ describe("workspace authority owner", () => {
     expect(test.disposed).toEqual([retiredIdentity]);
   });
 
-  it.each(["invalidate", "retireBinding"] as const)("returns finished physical work while %s drains its canonical attachment", async retirement => {
-    const test = testOwner({ workspaceId: "workspace", rootPath: "alias", label: "A" });
-    const entered = Promise.withResolvers<void>();
-    const resume = Promise.withResolvers<void>();
-    let attachmentId!: symbol;
-    const running = test.owner.withOperation("workspace", async operation => {
-      attachmentId = operation.workspace.attachmentId;
-      expect(operation.workspace).toMatchObject({ workspaceId: "workspace", rootPath: "real:alias", label: "A", attachmentId });
-      const result = { rootPath: operation.workspace.rootPath };
-      entered.resolve();
-      await resume.promise;
-      return result;
-    });
-    await entered.promise;
-    const binding = test.owner.currentBinding("workspace");
-    const retiring = retirement === "invalidate"
-      ? test.owner.invalidate("workspace")
-      : test.owner.retireBinding(binding, { removeBinding: () => test.replace(null) });
-    expect(test.disposed).toEqual([]);
-    resume.resolve();
-    await expect(running).resolves.toEqual({ rootPath: "real:alias" });
-    await retiring;
-    expect(test.disposed).toEqual([attachmentId]);
-  });
+  it.each(["invalidate", "retireBinding"] as const)(
+    "returns finished physical work while %s drains its canonical attachment",
+    async (retirement) => {
+      const test = testOwner({ workspaceId: "workspace", rootPath: "alias", label: "A" });
+      const entered = Promise.withResolvers<void>();
+      const resume = Promise.withResolvers<void>();
+      let attachmentId!: symbol;
+      const running = test.owner.withOperation("workspace", async (operation) => {
+        attachmentId = operation.workspace.attachmentId;
+        expect(operation.workspace).toMatchObject({
+          workspaceId: "workspace",
+          rootPath: "real:alias",
+          label: "A",
+          attachmentId,
+        });
+        const result = { rootPath: operation.workspace.rootPath };
+        entered.resolve();
+        await resume.promise;
+        return result;
+      });
+      await entered.promise;
+      const binding = test.owner.currentBinding("workspace");
+      const retiring =
+        retirement === "invalidate"
+          ? test.owner.invalidate("workspace")
+          : test.owner.retireBinding(binding, { removeBinding: () => test.replace(null) });
+      expect(test.disposed).toEqual([]);
+      resume.resolve();
+      await expect(running).resolves.toEqual({ rootPath: "real:alias" });
+      await retiring;
+      expect(test.disposed).toEqual([attachmentId]);
+    },
+  );
 
-  it.each(["invalidate", "retireBinding"] as const)("refuses unfinished work that checks its attachment after %s", async retirement => {
-    const test = testOwner({ workspaceId: "workspace", rootPath: "root", label: "A" });
-    const entered = Promise.withResolvers<void>();
-    const resume = Promise.withResolvers<void>();
-    const commit = vi.fn();
-    const running = test.owner.withOperation("workspace", async operation => {
-      entered.resolve();
-      await resume.promise;
-      operation.assertCurrent();
-      commit();
-    });
-    await entered.promise;
-    const binding = test.owner.currentBinding("workspace");
-    const retiring = retirement === "invalidate"
-      ? test.owner.invalidate("workspace")
-      : test.owner.retireBinding(binding, { removeBinding: () => test.replace(null) });
-    resume.resolve();
-    await expect(running).rejects.toThrow("This workspace was closed. Open it again.");
-    await retiring;
-    expect(commit).not.toHaveBeenCalled();
-  });
+  it.each(["invalidate", "retireBinding"] as const)(
+    "refuses unfinished work that checks its attachment after %s",
+    async (retirement) => {
+      const test = testOwner({ workspaceId: "workspace", rootPath: "root", label: "A" });
+      const entered = Promise.withResolvers<void>();
+      const resume = Promise.withResolvers<void>();
+      const commit = vi.fn();
+      const running = test.owner.withOperation("workspace", async (operation) => {
+        entered.resolve();
+        await resume.promise;
+        operation.assertCurrent();
+        commit();
+      });
+      await entered.promise;
+      const binding = test.owner.currentBinding("workspace");
+      const retiring =
+        retirement === "invalidate"
+          ? test.owner.invalidate("workspace")
+          : test.owner.retireBinding(binding, { removeBinding: () => test.replace(null) });
+      resume.resolve();
+      await expect(running).rejects.toThrow("This workspace was closed. Open it again.");
+      await retiring;
+      expect(commit).not.toHaveBeenCalled();
+    },
+  );
 
   it("keeps the admitted canonical root when its registry alias is retargeted", async () => {
     const workspace = {
@@ -352,9 +370,9 @@ describe("workspace authority owner", () => {
       disposeState,
     });
 
-    await expect(
-      owner.withOperation("workspace", async () => undefined),
-    ).rejects.toThrow("This workspace was closed. Open it again.");
+    await expect(owner.withOperation("workspace", async () => undefined)).rejects.toThrow(
+      "This workspace was closed. Open it again.",
+    );
 
     await owner.invalidate("workspace");
     expect(disposeState).toHaveBeenCalledOnce();
@@ -433,7 +451,9 @@ describe("workspace authority owner", () => {
     expect(removeBinding).toHaveBeenCalledOnce();
     expect(test.disposed).toEqual([binding.attachmentId]);
     expect(test.owner.workspaceIds()).toEqual([]);
-    expect(() => test.owner.currentBinding("workspace")).toThrow("This workspace is not open. Open it again.");
+    expect(() => test.owner.currentBinding("workspace")).toThrow(
+      "This workspace is not open. Open it again.",
+    );
   });
 
   it("keeps the registry and tombstone until every finalizer finishes", async () => {
@@ -503,9 +523,9 @@ describe("workspace authority owner", () => {
     const rollback = vi.fn(() => {
       workspace = null;
     });
-    expect(() =>
-      owner.registerBinding(replacement, { persist, rollback }),
-    ).toThrow("This workspace was closed. Open it again.");
+    expect(() => owner.registerBinding(replacement, { persist, rollback })).toThrow(
+      "This workspace was closed. Open it again.",
+    );
     expect(persist).not.toHaveBeenCalled();
     expect(rollback).not.toHaveBeenCalled();
     expect(workspace?.label).toBe("old");
@@ -514,23 +534,19 @@ describe("workspace authority owner", () => {
     finishRelay();
     await folderStarted;
     expect(workspace?.label).toBe("old");
-    expect(() =>
-      owner.registerBinding(replacement, { persist, rollback }),
-    ).toThrow("This workspace was closed. Open it again.");
+    expect(() => owner.registerBinding(replacement, { persist, rollback })).toThrow(
+      "This workspace was closed. Open it again.",
+    );
     expect(steps).toEqual(["relay-close", "folder-reset"]);
 
     finishFolderReset();
     await removed;
     expect(workspace).toBeNull();
-    expect(() =>
-      owner.registerBinding(replacement, { persist, rollback }),
-    ).toThrow("This workspace was closed. Open it again.");
+    expect(() => owner.registerBinding(replacement, { persist, rollback })).toThrow(
+      "This workspace was closed. Open it again.",
+    );
     expect(persist).not.toHaveBeenCalled();
-    expect(steps).toEqual([
-      "relay-close",
-      "folder-reset",
-      "remove-binding",
-    ]);
+    expect(steps).toEqual(["relay-close", "folder-reset", "remove-binding"]);
 
     finishRemoval();
     await retiring;
@@ -638,9 +654,9 @@ describe("workspace authority owner", () => {
         rollback: () => undefined,
       }),
     ).toThrow("could not be rolled back");
-    await expect(
-      owner.releaseReservation(reservation, cleanup),
-    ).rejects.toThrow("registry binding remains");
+    await expect(owner.releaseReservation(reservation, cleanup)).rejects.toThrow(
+      "registry binding remains",
+    );
     expect(cleanup).not.toHaveBeenCalled();
     expect(() => owner.acquire("workspace")).toThrow("This workspace was closed. Open it again.");
     expect(workspace).toBe(attempted);
@@ -756,8 +772,7 @@ describe("workspace authority owner", () => {
     };
     const createState = vi.fn(() => ({}));
     const owner = createWorkspaceAuthorityOwner({
-      findWorkspace: (workspaceId) =>
-        workspaceId === workspace.workspaceId ? workspace : null,
+      findWorkspace: (workspaceId) => (workspaceId === workspace.workspaceId ? workspace : null),
       canonicalizeRoot: (rootPath) => `real:${rootPath}`,
       createState,
     });
@@ -823,10 +838,7 @@ describe("workspace authority owner", () => {
         throw new Error("first cleanup failed");
       }),
     ).rejects.toThrow("first cleanup failed");
-    const pendingRelease = owner.releaseReservation(
-      pendingReservation,
-      async () => await pending,
-    );
+    const pendingRelease = owner.releaseReservation(pendingReservation, async () => await pending);
     await Promise.resolve();
     expect(closeSettled).toBe(false);
 
@@ -901,12 +913,12 @@ describe("workspace authority owner", () => {
         throw new Error("relay close failed");
       }),
     ).rejects.toThrow("relay close failed");
-    expect(() =>
-      owner.reserveBinding({ workspaceId: "workspace", rootPath: "other" }),
-    ).toThrow("This workspace was closed. Open it again.");
-    expect(() =>
-      owner.reserveBinding({ workspaceId: "other", rootPath: "alias-b" }),
-    ).toThrow("blocked by failed cleanup");
+    expect(() => owner.reserveBinding({ workspaceId: "workspace", rootPath: "other" })).toThrow(
+      "This workspace was closed. Open it again.",
+    );
+    expect(() => owner.reserveBinding({ workspaceId: "other", rootPath: "alias-b" })).toThrow(
+      "blocked by failed cleanup",
+    );
   });
 
   it("rolls back the just-persisted row when state admission fails", () => {
@@ -935,17 +947,15 @@ describe("workspace authority owner", () => {
       workspace = null;
     });
 
-    expect(() =>
-      owner.registerBinding(registered, { persist, rollback }),
-    ).toThrow("state admission failed");
+    expect(() => owner.registerBinding(registered, { persist, rollback })).toThrow(
+      "state admission failed",
+    );
     expect(workspace).toBeNull();
     expect(persist).toHaveBeenCalledOnce();
     expect(rollback).toHaveBeenCalledOnce();
 
     failStateCreation = false;
-    expect(
-      owner.registerBinding(registered, { persist, rollback }).workspaceId,
-    ).toBe("workspace");
+    expect(owner.registerBinding(registered, { persist, rollback }).workspaceId).toBe("workspace");
   });
 
   it("rejects a registration callback that did not persist the requested binding", () => {
@@ -1146,51 +1156,72 @@ describe("workspace authority owner", () => {
     await retiring;
   });
 
-  it.each(["finalize", "removeBinding"] as const)("opens a workspace again when %s fails during removal", async step => {
-    const test = testOwner({ workspaceId: "workspace", rootPath: "root", label: "A" });
-    const binding = test.owner.currentBinding("workspace");
-    const error = new Error("profile file is busy");
-    await expect(test.owner.retireBinding(binding, {
-      ...(step === "finalize" ? { finalize: () => { throw error; } } : {}),
-      removeBinding: () => { if (step === "removeBinding") throw error; },
-    })).rejects.toBe(error);
+  it.each(["finalize", "removeBinding"] as const)(
+    "opens a workspace again when %s fails during removal",
+    async (step) => {
+      const test = testOwner({ workspaceId: "workspace", rootPath: "root", label: "A" });
+      const binding = test.owner.currentBinding("workspace");
+      const error = new Error("profile file is busy");
+      await expect(
+        test.owner.retireBinding(binding, {
+          ...(step === "finalize"
+            ? {
+                finalize: () => {
+                  throw error;
+                },
+              }
+            : {}),
+          removeBinding: () => {
+            if (step === "removeBinding") throw error;
+          },
+        }),
+      ).rejects.toBe(error);
 
-    expect(test.disposed).toEqual([binding.attachmentId]);
-    const reopened = test.owner.acquire("workspace");
-    expect(reopened.binding.attachmentId).not.toBe(binding.attachmentId);
-    reopened.release();
-  });
-
-  it.each([true, false])("removes a workspace whose other removal failed only if it wasn't opened again (opened again: %s)", async openedAgain => {
-    const test = testOwner({ workspaceId: "workspace", rootPath: "root", label: "A" });
-    const binding = test.owner.currentBinding("workspace");
-    const finalizers: { resolve: () => void; reject: (error: unknown) => void }[] = [];
-    let bothStarted!: () => void;
-    const started = new Promise<void>((resolve) => { bothStarted = resolve; });
-    const finalize = () => new Promise<void>((resolve, reject) => {
-      if (finalizers.push({ resolve, reject }) === 2) bothStarted();
-    });
-    const removeBinding = vi.fn(() => test.replace(null));
-    const first = test.owner.retireBinding(binding, { finalize, removeBinding });
-    const second = test.owner.retireBinding(binding, { finalize, removeBinding });
-    await started;
-    const error = new Error("trust file is busy");
-    finalizers[0]!.reject(error);
-    await expect(first).rejects.toBe(error);
-    const reopened = openedAgain ? test.owner.acquire("workspace") : null;
-    finalizers[1]!.resolve();
-
-    if (reopened) {
-      await expect(second).rejects.toThrow("This workspace changed while this ran. Try again.");
-      expect(removeBinding).not.toHaveBeenCalled();
-      expect(() => reopened.assertCurrent()).not.toThrow();
+      expect(test.disposed).toEqual([binding.attachmentId]);
+      const reopened = test.owner.acquire("workspace");
+      expect(reopened.binding.attachmentId).not.toBe(binding.attachmentId);
       reopened.release();
-    } else {
-      await second;
-      expect(removeBinding).toHaveBeenCalledOnce();
-      expect(() => test.owner.currentBinding("workspace")).toThrow("This workspace is not open. Open it again.");
-    }
-  });
+    },
+  );
+
+  it.each([true, false])(
+    "removes a workspace whose other removal failed only if it wasn't opened again (opened again: %s)",
+    async (openedAgain) => {
+      const test = testOwner({ workspaceId: "workspace", rootPath: "root", label: "A" });
+      const binding = test.owner.currentBinding("workspace");
+      const finalizers: { resolve: () => void; reject: (error: unknown) => void }[] = [];
+      let bothStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        bothStarted = resolve;
+      });
+      const finalize = () =>
+        new Promise<void>((resolve, reject) => {
+          if (finalizers.push({ resolve, reject }) === 2) bothStarted();
+        });
+      const removeBinding = vi.fn(() => test.replace(null));
+      const first = test.owner.retireBinding(binding, { finalize, removeBinding });
+      const second = test.owner.retireBinding(binding, { finalize, removeBinding });
+      await started;
+      const error = new Error("trust file is busy");
+      finalizers[0]!.reject(error);
+      await expect(first).rejects.toBe(error);
+      const reopened = openedAgain ? test.owner.acquire("workspace") : null;
+      finalizers[1]!.resolve();
+
+      if (reopened) {
+        await expect(second).rejects.toThrow("This workspace changed while this ran. Try again.");
+        expect(removeBinding).not.toHaveBeenCalled();
+        expect(() => reopened.assertCurrent()).not.toThrow();
+        reopened.release();
+      } else {
+        await second;
+        expect(removeBinding).toHaveBeenCalledOnce();
+        expect(() => test.owner.currentBinding("workspace")).toThrow(
+          "This workspace is not open. Open it again.",
+        );
+      }
+    },
+  );
 
   it("keeps a blocking tombstone when cleanup fails", async () => {
     const registry = new Map<string, Workspace>([
@@ -1223,9 +1254,7 @@ describe("workspace authority owner", () => {
       rootPath: "root",
       label: "same root, different id",
     });
-    expect(() => owner.acquire("other")).toThrow(
-      "already attached as workspace workspace",
-    );
+    expect(() => owner.acquire("other")).toThrow("already attached as workspace workspace");
   });
 
   it("does not let a released lease touch its former authority", () => {
@@ -1243,7 +1272,9 @@ describe("workspace authority owner", () => {
 
   it("refuses an unknown workspace before creating state", () => {
     const test = testOwner(null);
-    expect(() => test.owner.acquire("missing")).toThrow("This workspace is not open. Open it again.");
+    expect(() => test.owner.acquire("missing")).toThrow(
+      "This workspace is not open. Open it again.",
+    );
     expect(test.canonicalizeRoot).not.toHaveBeenCalled();
   });
 });
@@ -1251,11 +1282,14 @@ describe("workspace authority owner", () => {
 describe("workspace authority owner on a Linux folder that ignores capitals", () => {
   // /home ignores capitals and /srv tells them apart. canonicalizeRoot keeps
   // the capitals it gets, as Linux realpath does.
-  const disk = caseFoldDisk({
-    "/home/sam/Notes/a.md": "file",
-    "/srv/Notes/a.md": "file",
-    "/srv/notes/a.md": "file",
-  }, { foldsCase: (folder) => folder === "/home" || folder.startsWith("/home/") });
+  const disk = caseFoldDisk(
+    {
+      "/home/sam/Notes/a.md": "file",
+      "/srv/Notes/a.md": "file",
+      "/srv/notes/a.md": "file",
+    },
+    { foldsCase: (folder) => folder === "/home" || folder.startsWith("/home/") },
+  );
 
   function linuxOwner(knowsInodes = true) {
     // What the disk answers for a folder's identity. A test can change it to
@@ -1269,7 +1303,8 @@ describe("workspace authority owner on a Linux folder that ignores capitals", ()
         if (real === null) throw new Error(`ENOENT: ${rootPath}`);
         return real;
       },
-      rootIdentity: (rootPath) => probe.replacedBy ?? (probe.knows ? folderIdentitySync(rootPath, disk.stat) : null),
+      rootIdentity: (rootPath) =>
+        probe.replacedBy ?? (probe.knows ? folderIdentitySync(rootPath, disk.stat) : null),
       createState: () => ({}),
     });
     const add = (workspaceId: string, rootPath: string) => {
@@ -1283,9 +1318,12 @@ describe("workspace authority owner on a Linux folder that ignores capitals", ()
     add("first", "/home/sam/Notes");
     const first = owner.acquire("first");
     add("second", "/home/sam/notes");
-    expect(() => owner.acquire("second")).toThrow("This folder is already attached as workspace first.");
-    expect(() => owner.reserveBinding({ workspaceId: "third", rootPath: "/home/sam/NOTES" }))
-      .toThrow("This folder is already attached as workspace first.");
+    expect(() => owner.acquire("second")).toThrow(
+      "This folder is already attached as workspace first.",
+    );
+    expect(() =>
+      owner.reserveBinding({ workspaceId: "third", rootPath: "/home/sam/NOTES" }),
+    ).toThrow("This folder is already attached as workspace first.");
     first.release();
     await owner.close();
   });
@@ -1297,12 +1335,16 @@ describe("workspace authority owner on a Linux folder that ignores capitals", ()
     const invalidating = owner.invalidate("first");
     registry.delete("first");
     add("second", "/home/sam/NOTES");
-    expect(() => owner.acquire("second")).toThrow("This folder is already attached as workspace first.");
+    expect(() => owner.acquire("second")).toThrow(
+      "This folder is already attached as workspace first.",
+    );
     lease.release();
     await invalidating;
     const second = owner.acquire("second");
     expect(second.binding).toMatchObject({
-      workspaceId: "second", registeredRootPath: "/home/sam/NOTES", canonicalRootPath: "/home/sam/NOTES",
+      workspaceId: "second",
+      registeredRootPath: "/home/sam/NOTES",
+      canonicalRootPath: "/home/sam/NOTES",
     });
     expect(second.binding.attachmentId).not.toBe(lease.binding.attachmentId);
     second.release();
@@ -1313,13 +1355,17 @@ describe("workspace authority owner on a Linux folder that ignores capitals", ()
     const { owner, add } = linuxOwner();
     const reservation = owner.reserveBinding({ workspaceId: "first", rootPath: "/home/sam/Notes" });
     add("second", "/home/sam/notes");
-    expect(() => owner.acquire("second")).toThrow("This folder is blocked by failed cleanup for workspace first.");
+    expect(() => owner.acquire("second")).toThrow(
+      "This folder is blocked by failed cleanup for workspace first.",
+    );
     let finishCleanup!: () => void;
     const finish = new Promise<void>((resolve) => {
       finishCleanup = resolve;
     });
     const releasing = owner.releaseReservation(reservation, () => finish);
-    expect(() => owner.acquire("second")).toThrow("This folder is blocked by failed cleanup for workspace first.");
+    expect(() => owner.acquire("second")).toThrow(
+      "This folder is blocked by failed cleanup for workspace first.",
+    );
     finishCleanup();
     await releasing;
     owner.acquire("second").release();
@@ -1345,7 +1391,9 @@ describe("workspace authority owner on a Linux folder that ignores capitals", ()
     add("again", "/srv/Notes");
     const upper = owner.acquire("upper");
     owner.acquire("lower").release();
-    expect(() => owner.acquire("again")).toThrow("This folder is already attached as workspace upper.");
+    expect(() => owner.acquire("again")).toThrow(
+      "This folder is already attached as workspace upper.",
+    );
     upper.release();
     await owner.close();
   });
@@ -1357,7 +1405,9 @@ describe("workspace authority owner on a Linux folder that ignores capitals", ()
         const { owner, add, probe } = linuxOwner(knownAtReservation);
         const reservation = owner.reserveBinding({ workspaceId: "first", rootPath: "/srv/Notes" });
         probe.knows = !knownAtReservation;
-        expect(() => owner.reserveBinding({ workspaceId: "second", rootPath: "/srv/Notes" })).toThrow(blocked);
+        expect(() =>
+          owner.reserveBinding({ workspaceId: "second", rootPath: "/srv/Notes" }),
+        ).toThrow(blocked);
         let cleanupStarted!: () => void;
         const started = new Promise<void>((resolve) => {
           cleanupStarted = resolve;
@@ -1395,7 +1445,9 @@ describe("workspace authority owner on a Linux folder that ignores capitals", ()
     registry.delete("first");
     probe.replacedBy = { dev: 1n, ino: 999n };
     add("second", "/srv/Notes");
-    expect(() => owner.acquire("second")).toThrow("This folder is already attached as workspace first.");
+    expect(() => owner.acquire("second")).toThrow(
+      "This folder is already attached as workspace first.",
+    );
     lease.release();
     await invalidating;
     owner.acquire("second").release();
@@ -1412,7 +1464,9 @@ describe("workspace authority owner on a Linux folder that ignores capitals", ()
       rollback: () => undefined,
     });
     add("second", "/home/sam/notes");
-    expect(() => owner.acquire("second")).toThrow("This folder is already attached as workspace first.");
+    expect(() => owner.acquire("second")).toThrow(
+      "This folder is already attached as workspace first.",
+    );
     await owner.close();
   });
 });

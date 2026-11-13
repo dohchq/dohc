@@ -1,5 +1,16 @@
-import { policyGlobMatches, validatePolicyGlob, resolveVisibilityPolicy, type VisibilityPolicyRule } from "./visibilityPolicy";
-export { policyGlobMatches, validatePolicyGlob, resolveVisibilityPolicy, prepareVisibilityPolicy, type VisibilityPolicyRule } from "./visibilityPolicy";
+import {
+  policyGlobMatches,
+  validatePolicyGlob,
+  resolveVisibilityPolicy,
+  type VisibilityPolicyRule,
+} from "./visibilityPolicy";
+export {
+  policyGlobMatches,
+  validatePolicyGlob,
+  resolveVisibilityPolicy,
+  prepareVisibilityPolicy,
+  type VisibilityPolicyRule,
+} from "./visibilityPolicy";
 import { isRecord } from "@dohc/workspace-core/records";
 import { parse as parseToml } from "smol-toml";
 import { classifyEngineFilePath } from "./enginePathFloor";
@@ -8,7 +19,11 @@ import { fileVersionError } from "@dohc/workspace-contracts/file-version";
 // Where a workspace keeps the rules for which files History tracks and who
 // sees them: the folder, and its two rules files. A person is told which of
 // these dohc could not read.
-export const WORKSPACE_POLICY_PATHS = [".dohc", ".dohc/files.toml", ".dohc/visibility.toml"] as const;
+export const WORKSPACE_POLICY_PATHS = [
+  ".dohc",
+  ".dohc/files.toml",
+  ".dohc/visibility.toml",
+] as const;
 export type WorkspacePolicyPath = (typeof WORKSPACE_POLICY_PATHS)[number];
 
 export interface FilesPolicyRule {
@@ -17,9 +32,7 @@ export interface FilesPolicyRule {
   searchable?: boolean;
 }
 
-export type PolicyParseResult<T> =
-  | { ok: true; rules: T[] }
-  | { ok: false; errors: string[] };
+export type PolicyParseResult<T> = { ok: true; rules: T[] } | { ok: false; errors: string[] };
 
 interface EffectivePolicyInput {
   path: string;
@@ -59,9 +72,7 @@ function parsePolicyToml(
   } catch (error) {
     return {
       ok: false,
-      errors: [
-        `invalid TOML: ${error instanceof Error ? error.message : String(error)}`,
-      ],
+      errors: [`invalid TOML: ${error instanceof Error ? error.message : String(error)}`],
     };
   }
 }
@@ -123,7 +134,11 @@ export function parseFilesPolicy(tomlText: string): PolicyParseResult<FilesPolic
       if (searchable !== undefined && typeof searchable !== "boolean") {
         errors.push(`${label}: searchable must be a boolean`);
       }
-      if (path && (tracked === undefined || typeof tracked === "boolean") && (searchable === undefined || typeof searchable === "boolean")) {
+      if (
+        path &&
+        (tracked === undefined || typeof tracked === "boolean") &&
+        (searchable === undefined || typeof searchable === "boolean")
+      ) {
         rules.push({
           path,
           ...(typeof tracked === "boolean" ? { tracked } : {}),
@@ -135,9 +150,7 @@ export function parseFilesPolicy(tomlText: string): PolicyParseResult<FilesPolic
   return errors.length > 0 ? { ok: false, errors } : { ok: true, rules };
 }
 
-export function parseVisibilityPolicy(
-  tomlText: string,
-): PolicyParseResult<VisibilityPolicyRule> {
+export function parseVisibilityPolicy(tomlText: string): PolicyParseResult<VisibilityPolicyRule> {
   const parsed = parsePolicyToml(tomlText);
   if (!parsed.ok) return parsed;
   const errors: string[] = [];
@@ -217,7 +230,10 @@ export function resolveEffectivePolicy(input: EffectivePolicyInput): EffectivePo
     if (rule.tracked !== undefined) tracked = rule.tracked;
     if (rule.searchable !== undefined) searchable = rule.searchable;
   }
-  const { visibility, export: exportPolicy } = resolveVisibilityPolicy(input.path, input.visibilityPolicy);
+  const { visibility, export: exportPolicy } = resolveVisibilityPolicy(
+    input.path,
+    input.visibilityPolicy,
+  );
 
   return {
     path: input.path,

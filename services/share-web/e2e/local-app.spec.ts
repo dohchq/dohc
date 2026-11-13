@@ -6,22 +6,74 @@ import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { sourceCaptureAdapter } from "../../../apps/desktop/src/testing/sourceCaptureAdapter";
 import { compileClosedApp } from "../../../apps/desktop/src/workspaces/closedAppCompiler";
 import { prepareLocalAppPublication } from "../../../apps/desktop/src/workspaces/ownerAppPublication";
-import { createLocalDatasetHost, type LocalDatasetHost } from "../../../apps/desktop/src/workspaces/localDatasetHost";
+import {
+  createLocalDatasetHost,
+  type LocalDatasetHost,
+} from "../../../apps/desktop/src/workspaces/localDatasetHost";
 import { openedLocalState } from "../../../apps/desktop/src/testing/preparedLocalState";
 import { unguardedCollections } from "../../../apps/desktop/src/testing/collectionsHolder";
-import { createLocalAppLaunchHost, type LocalAppLaunchHost } from "../../../apps/desktop/src/workspaces/localAppLaunch";
+import {
+  createLocalAppLaunchHost,
+  type LocalAppLaunchHost,
+} from "../../../apps/desktop/src/workspaces/localAppLaunch";
 
 const id = (value: number) => `00000000-0000-4000-8000-${String(value).padStart(12, "0")}`;
 const definition: DatasetDefinition = {
-  formatVersion: 1, datasetId: id(1), name: "Orders", schemaPath: "data/schema.sql", operationsPath: "data/operations.js",
-  tables: [{ tableId: id(2), name: "Orders", sqlName: "orders", primaryKey: "id", fields: [
-    { fieldId: id(3), name: "ID", sqlColumn: "id", type: "text", required: true, unique: true },
-    { fieldId: id(4), name: "Receipt", sqlColumn: "file_id", type: "attachment", required: true, unique: false },
-  ] }],
+  formatVersion: 1,
+  datasetId: id(1),
+  name: "Orders",
+  schemaPath: "data/schema.sql",
+  operationsPath: "data/operations.js",
+  tables: [
+    {
+      tableId: id(2),
+      name: "Orders",
+      sqlName: "orders",
+      primaryKey: "id",
+      fields: [
+        { fieldId: id(3), name: "ID", sqlColumn: "id", type: "text", required: true, unique: true },
+        {
+          fieldId: id(4),
+          name: "Receipt",
+          sqlColumn: "file_id",
+          type: "attachment",
+          required: true,
+          unique: false,
+        },
+      ],
+    },
+  ],
   operations: [
-    { operationId: id(5), name: "order", label: "Save order", tableId: id(2), kind: "action", access: "owner", readOnly: false, fieldIds: [id(4)] },
-    { operationId: id(6), name: "list", label: "List orders", tableId: id(2), kind: "read", access: "owner", readOnly: true, fieldIds: [id(3), id(4)] },
-    { operationId: id(7), name: "receipt", label: "Read receipt", tableId: id(2), kind: "read", access: "owner", readOnly: true, fieldIds: [id(4)] },
+    {
+      operationId: id(5),
+      name: "order",
+      label: "Save order",
+      tableId: id(2),
+      kind: "action",
+      access: "owner",
+      readOnly: false,
+      fieldIds: [id(4)],
+    },
+    {
+      operationId: id(6),
+      name: "list",
+      label: "List orders",
+      tableId: id(2),
+      kind: "read",
+      access: "owner",
+      readOnly: true,
+      fieldIds: [id(3), id(4)],
+    },
+    {
+      operationId: id(7),
+      name: "receipt",
+      label: "Read receipt",
+      tableId: id(2),
+      kind: "read",
+      access: "owner",
+      readOnly: true,
+      fieldIds: [id(4)],
+    },
   ],
 };
 const frontend = `
@@ -42,86 +94,214 @@ receipt(ctx,input){const rows=ctx.db.query('SELECT file_id FROM orders WHERE fil
 
 async function prepare(host: LocalDatasetHost) {
   const sources = new Map([
-    ["data/dataset.json", Buffer.from(JSON.stringify(definition))], ["app/main.ts", Buffer.from(frontend)],
-    [definition.operationsPath, Buffer.from(backendSource)], [definition.schemaPath, Buffer.from("CREATE TABLE orders(id TEXT PRIMARY KEY NOT NULL,file_id TEXT NOT NULL);")],
+    ["data/dataset.json", Buffer.from(JSON.stringify(definition))],
+    ["app/main.ts", Buffer.from(frontend)],
+    [definition.operationsPath, Buffer.from(backendSource)],
+    [
+      definition.schemaPath,
+      Buffer.from("CREATE TABLE orders(id TEXT PRIMARY KEY NOT NULL,file_id TEXT NOT NULL);"),
+    ],
   ]);
   const adapter = sourceCaptureAdapter(sources);
   const prepared = await host.prepare({ descriptorPath: "data/dataset.json", adapter });
-  const revision = await host.approve({ preparationId: prepared.preparationId, revisionSha256: prepared.revision.revisionSha256 });
-  const dataset = { kind: "dataset", datasetPath: "data/dataset.json", revision: revision.revision, revisionSha256: revision.revisionSha256, operationIds: definition.operations.map(operation => operation.operationId) };
-  sources.set("app/app.publish.json", Buffer.from(JSON.stringify({ entryPath: "main.ts", inputs: ["main.ts"], packageMap: {}, dataset })));
-  return prepareLocalAppPublication({ workspaceId: "w", appRoot: "app" }, { adapter, deferredWrites: [], compile: compileClosedApp, signal: new AbortController().signal, assertCurrent() {}, async resolveDatasetRevision() { return revision; } });
+  const revision = await host.approve({
+    preparationId: prepared.preparationId,
+    revisionSha256: prepared.revision.revisionSha256,
+  });
+  const dataset = {
+    kind: "dataset",
+    datasetPath: "data/dataset.json",
+    revision: revision.revision,
+    revisionSha256: revision.revisionSha256,
+    operationIds: definition.operations.map((operation) => operation.operationId),
+  };
+  sources.set(
+    "app/app.publish.json",
+    Buffer.from(
+      JSON.stringify({ entryPath: "main.ts", inputs: ["main.ts"], packageMap: {}, dataset }),
+    ),
+  );
+  return prepareLocalAppPublication(
+    { workspaceId: "w", appRoot: "app" },
+    {
+      adapter,
+      deferredWrites: [],
+      compile: compileClosedApp,
+      signal: new AbortController().signal,
+      assertCurrent() {},
+      async resolveDatasetRevision() {
+        return revision;
+      },
+    },
+  );
 }
 
 // Real compiled frontend, loopback bootstrap, opaque browser broker, isolated runtime, and durable SQLite store.
-test("local app works without an account, survives restart, and stops at shared authority", async ({ browser }, testInfo) => {
-  const root = await mkdtemp(join(tmpdir(), "dohc-local-app-e2e-")), lifetime = new AbortController();
-  const backends: LocalDatasetHost[] = [], launchers: LocalAppLaunchHost[] = [];
+test("local app works without an account, survives restart, and stops at shared authority", async ({
+  browser,
+}, testInfo) => {
+  const root = await mkdtemp(join(tmpdir(), "dohc-local-app-e2e-")),
+    lifetime = new AbortController();
+  const backends: LocalDatasetHost[] = [],
+    launchers: LocalAppLaunchHost[] = [];
   try {
     await openedLocalState({ workspaceId: "w", rootPath: root });
-    let backend = await createLocalDatasetHost({ holder: unguardedCollections, localPersonId: () => "person-local",  workspaceId: "w", workspaceRoot: root }); backends.push(backend);
+    let backend = await createLocalDatasetHost({
+      holder: unguardedCollections,
+      localPersonId: () => "person-local",
+      workspaceId: "w",
+      workspaceRoot: root,
+    });
+    backends.push(backend);
     const publication = await backend.apps.activate(await prepare(backend), lifetime.signal);
-    let launcher = await createLocalAppLaunchHost({ backend: backend.apps, lifetime: lifetime.signal }); launchers.push(launcher);
-    const context = await browser.newContext({ viewport: { width: 1100, height: 760 }, reducedMotion: "reduce" });
-    const page = await context.newPage(), errors: string[] = [];
-    page.on("pageerror", error => errors.push(error.message));
+    let launcher = await createLocalAppLaunchHost({
+      backend: backend.apps,
+      lifetime: lifetime.signal,
+    });
+    launchers.push(launcher);
+    const context = await browser.newContext({
+      viewport: { width: 1100, height: 760 },
+      reducedMotion: "reduce",
+    });
+    const page = await context.newPage(),
+      errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
     const url = await launcher.launch(publication.publicationId, lifetime.signal);
     await page.goto(url);
-    const app = page.frameLocator("iframe"), status = app.getByRole("status");
+    const app = page.frameLocator("iframe"),
+      status = app.getByRole("status");
     await expect(status).toHaveText("Ready");
     expect(page.url()).toBe(new URL(url).origin + "/bootstrap");
     await app.getByRole("button", { name: "Save order" }).click();
     await expect(status).toContainText('"saved":true');
     await app.getByRole("button", { name: "Save order" }).click();
     await expect(status).toContainText('"replayed":true');
-    const child = page.frames().find(frame => frame !== page.mainFrame())!;
-    expect(await child.evaluate(() => {
-      const blocked = (read: () => unknown) => { try { read(); return false; } catch { return true; } };
-      return { parent: blocked(() => parent.document.body), cookies: blocked(() => document.cookie), storage: blocked(() => localStorage.length) };
-    })).toEqual({ parent: true, cookies: true, storage: true });
-    expect(await page.evaluate(async () => (await fetch("/backend", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status)).toBe(404);
+    const child = page.frames().find((frame) => frame !== page.mainFrame())!;
+    expect(
+      await child.evaluate(() => {
+        const blocked = (read: () => unknown) => {
+          try {
+            read();
+            return false;
+          } catch {
+            return true;
+          }
+        };
+        return {
+          parent: blocked(() => parent.document.body),
+          cookies: blocked(() => document.cookie),
+          storage: blocked(() => localStorage.length),
+        };
+      }),
+    ).toEqual({ parent: true, cookies: true, storage: true });
+    expect(
+      await page.evaluate(
+        async () =>
+          (
+            await fetch("/backend", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: "{}",
+            })
+          ).status,
+      ),
+    ).toBe(404);
     await page.screenshot({ path: testInfo.outputPath("local-app.png"), fullPage: true });
-    await launcher.close(); await backend.close();
-    backend = await createLocalDatasetHost({ holder: unguardedCollections, localPersonId: () => "person-local",  workspaceId: "w", workspaceRoot: root }); backends.push(backend);
-    launcher = await createLocalAppLaunchHost({ backend: backend.apps, lifetime: lifetime.signal }); launchers.push(launcher);
+    await launcher.close();
+    await backend.close();
+    backend = await createLocalDatasetHost({
+      holder: unguardedCollections,
+      localPersonId: () => "person-local",
+      workspaceId: "w",
+      workspaceRoot: root,
+    });
+    backends.push(backend);
+    launcher = await createLocalAppLaunchHost({ backend: backend.apps, lifetime: lifetime.signal });
+    launchers.push(launcher);
     await page.goto(await launcher.launch(publication.publicationId, lifetime.signal));
     await expect(status).toHaveText("Ready");
     await app.getByRole("button", { name: "List orders" }).click();
     await expect(status).toContainText('"rows":[{');
-    const listed = JSON.parse(await status.innerText()); expect(listed.value.result.rows).toHaveLength(1);
+    const listed = JSON.parse(await status.innerText());
+    expect(listed.value.result.rows).toHaveLength(1);
     await app.getByRole("button", { name: "Read receipt" }).click();
     await expect(status).toContainText('"bytesBase64":"JVBERi0="');
     await app.getByRole("button", { name: "Check capacity" }).click();
-    await expect(status).toContainText('"error":{"code":"capacity_full","message":"This session is full."}');
+    await expect(status).toContainText(
+      '"error":{"code":"capacity_full","message":"This session is full."}',
+    );
     await page.reload();
     await expect(status).toHaveText("Ready");
     await app.getByRole("button", { name: "List orders" }).click();
     await expect(status).toContainText('"rows":[{');
     for (let count = 0; count < 17; count++) {
-      const tab = await context.newPage(), launch = await launcher.launch(publication.publicationId, lifetime.signal);
-      await tab.goto(launch); await expect(tab.frameLocator("iframe").getByRole("status")).toHaveText("Ready");
-      expect(await tab.evaluate(async () => (await fetch("/close", { method: "POST", headers: {
-        "x-dohc-app-proof": sessionStorage.getItem("dohc-local-app-proof")!,
-      } })).status)).toBe(204);
+      const tab = await context.newPage(),
+        launch = await launcher.launch(publication.publicationId, lifetime.signal);
+      await tab.goto(launch);
+      await expect(tab.frameLocator("iframe").getByRole("status")).toHaveText("Ready");
+      expect(
+        await tab.evaluate(
+          async () =>
+            (
+              await fetch("/close", {
+                method: "POST",
+                headers: {
+                  "x-dohc-app-proof": sessionStorage.getItem("dohc-local-app-proof")!,
+                },
+              })
+            ).status,
+        ),
+      ).toBe(204);
       await tab.close();
-      await expect.poll(async () => { try { await fetch(new URL(launch).origin + "/bootstrap"); return false; } catch { return true; } }).toBe(true);
+      await expect
+        .poll(async () => {
+          try {
+            await fetch(new URL(launch).origin + "/bootstrap");
+            return false;
+          } catch {
+            return true;
+          }
+        })
+        .toBe(true);
     }
-    await expect(backend.transferToShared({ datasetId: definition.datasetId, targetOrigin: "https://relay.example", target: {
-      async importRecovery() { throw new Error("The sharing server is offline."); },
-    } })).rejects.toThrow("The sharing server is offline.");
+    await expect(
+      backend.transferToShared({
+        datasetId: definition.datasetId,
+        targetOrigin: "https://relay.example",
+        target: {
+          async importRecovery() {
+            throw new Error("The sharing server is offline.");
+          },
+        },
+      }),
+    ).rejects.toThrow("The sharing server is offline.");
     expect(backend.transferStatus(definition.datasetId)?.state).toBe("ready");
     await app.getByRole("button", { name: "List orders" }).click();
     await expect(status).toContainText('"ok":false');
     await expect(launcher.launch(publication.publicationId, lifetime.signal)).rejects.toThrow();
     // The stopped session closes its loopback server, so the app can't load there again.
     const stoppedOrigin = new URL(page.url()).origin;
-    await expect.poll(async () => { try { await fetch(stoppedOrigin + "/bootstrap"); return false; } catch { return true; } }).toBe(true);
+    await expect
+      .poll(async () => {
+        try {
+          await fetch(stoppedOrigin + "/bootstrap");
+          return false;
+        } catch {
+          return true;
+        }
+      })
+      .toBe(true);
     expect(errors).toEqual([]);
     await context.close();
   } finally {
-    lifetime.abort(); await Promise.all(launchers.map(launcher => launcher.close()));
+    lifetime.abort();
+    await Promise.all(launchers.map((launcher) => launcher.close()));
     for (const backend of backends) await backend.close();
-    if (!resolve(root).startsWith(resolve(tmpdir()) + "\\") && !resolve(root).startsWith(resolve(tmpdir()) + "/")) throw Error("Invalid test cleanup directory");
+    if (
+      !resolve(root).startsWith(resolve(tmpdir()) + "\\") &&
+      !resolve(root).startsWith(resolve(tmpdir()) + "/")
+    )
+      throw Error("Invalid test cleanup directory");
     await rm(root, { recursive: true, force: true });
   }
 });

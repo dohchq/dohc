@@ -17,13 +17,19 @@ export function useForgetWorkspace(workspace: PhoneWorkspace | null, waitingToSe
     if (!workspace || !forget) return;
     if (waitingToSend > 0) {
       const sure = await confirm({
-        title: confirmWords.forgetTitle(workspace.name), message: confirmWords.forgetWaiting(waitingToSend),
-        confirm: confirmWords.forget, destructive: true,
+        title: confirmWords.forgetTitle(workspace.name),
+        message: confirmWords.forgetWaiting(waitingToSend),
+        confirm: confirmWords.forget,
+        destructive: true,
       });
       if (!sure) return;
     }
     const undo = forget(workspace);
-    showToast({ tone: "success", title: confirmWords.forgot(workspace.name), action: { label: confirmWords.undo, onPress: undo } });
+    showToast({
+      tone: "success",
+      title: confirmWords.forgot(workspace.name),
+      action: { label: confirmWords.undo, onPress: undo },
+    });
   }, [forget, showToast, waitingToSend, workspace]);
 }
 
@@ -33,7 +39,10 @@ export function useWorkspaceMenu(workspace: PhoneWorkspace | null, waitingToSend
   const router = useRouter();
   return useCallback(async () => {
     if (!workspace) return;
-    const chosen = await choose({ title: workspace.name, options: [{ label: sharingWords.heading }, { label: confirmWords.forget, destructive: true }] });
+    const chosen = await choose({
+      title: workspace.name,
+      options: [{ label: sharingWords.heading }, { label: confirmWords.forget, destructive: true }],
+    });
     if (chosen === 0) router.push("/sharing");
     if (chosen === 1) await forget();
   }, [forget, router, workspace]);

@@ -17,7 +17,11 @@ export interface MoveAcceptedEditsGuardOptions {
   // Sync already reports a failure, so catching up would only wait.
   offline(workspaceId: string): boolean;
   // One owner sync for each listed page. The pull follows whatever it answers.
-  ownerCatchUp(workspaceId: string, objectIds: readonly string[], signal: AbortSignal): Promise<unknown>;
+  ownerCatchUp(
+    workspaceId: string,
+    objectIds: readonly string[],
+    signal: AbortSignal,
+  ): Promise<unknown>;
   // One ordinary pull, which lands the saved edit in the file.
   relayCatchUp(workspaceId: string, signal: AbortSignal): Promise<void>;
   // How long each move waits, from its arrival.
@@ -40,8 +44,17 @@ interface Attempt {
 
 function newAttempt(): Attempt {
   let settle!: () => void;
-  const done = new Promise<void>(resolve => { settle = resolve; });
-  return { targets: new Set(), waiting: 0, expiresAt: -Infinity, controller: new AbortController(), done, settle };
+  const done = new Promise<void>((resolve) => {
+    settle = resolve;
+  });
+  return {
+    targets: new Set(),
+    waiting: 0,
+    expiresAt: -Infinity,
+    controller: new AbortController(),
+    done,
+    settle,
+  };
 }
 
 // Each workspace has at most one active attempt, already sent, and one
@@ -54,7 +67,8 @@ export function createMoveAcceptedEditsGuard(options: MoveAcceptedEditsGuardOpti
   const pending = new Map<string, Attempt>();
 
   // A deadline can pass before its timer runs, so each phase checks the clock too.
-  const expired = (attempt: Attempt) => attempt.controller.signal.aborted || now() >= attempt.expiresAt;
+  const expired = (attempt: Attempt) =>
+    attempt.controller.signal.aborted || now() >= attempt.expiresAt;
 
   async function run(workspaceId: string, attempt: Attempt): Promise<void> {
     const { signal } = attempt.controller;
@@ -68,17 +82,22 @@ export function createMoveAcceptedEditsGuard(options: MoveAcceptedEditsGuardOpti
     active.set(workspaceId, attempt);
     // Late results and rejections are swallowed: the move already went ahead
     // or is about to, and ordinary sync reports its own failures.
-    void run(workspaceId, attempt).catch(() => undefined).finally(() => {
-      attempt.settle();
-      if (active.get(workspaceId) === attempt) active.delete(workspaceId);
-      // A settled attempt never runs again. Only a pending, unexpired one
-      // starts. An expired one releases its moves at once.
-      const next = pending.get(workspaceId);
-      if (!next) return;
-      pending.delete(workspaceId);
-      if (!expired(next)) start(workspaceId, next);
-      else {next.controller.abort(); next.settle();}
-    });
+    void run(workspaceId, attempt)
+      .catch(() => undefined)
+      .finally(() => {
+        attempt.settle();
+        if (active.get(workspaceId) === attempt) active.delete(workspaceId);
+        // A settled attempt never runs again. Only a pending, unexpired one
+        // starts. An expired one releases its moves at once.
+        const next = pending.get(workspaceId);
+        if (!next) return;
+        pending.delete(workspaceId);
+        if (!expired(next)) start(workspaceId, next);
+        else {
+          next.controller.abort();
+          next.settle();
+        }
+      });
   }
 
   // The last waiting move's timer expires its attempt. A pending attempt is
@@ -92,7 +111,11 @@ export function createMoveAcceptedEditsGuard(options: MoveAcceptedEditsGuardOpti
 
   function join(workspaceId: string, objectIds: readonly string[], deadline: number): Attempt {
     const current = active.get(workspaceId);
-    if (current && !current.controller.signal.aborted && objectIds.every(id => current.targets.has(id))) {
+    if (
+      current &&
+      !current.controller.signal.aborted &&
+      objectIds.every((id) => current.targets.has(id))
+    ) {
       current.expiresAt = Math.max(current.expiresAt, deadline);
       return current;
     }
@@ -126,13 +149,15 @@ export function createMoveAcceptedEditsGuard(options: MoveAcceptedEditsGuardOpti
       const path = await storedSpelling().catch(() => undefined);
       if (path === undefined) return;
       const objectIds = livePaths(workspaceId)
-        .filter(document => document.path === path || document.path.startsWith(`${path}/`))
-        .map(document => document.objectId);
+        .filter((document) => document.path === path || document.path.startsWith(`${path}/`))
+        .map((document) => document.objectId);
       if (!objectIds.length) return;
       const attempt = join(workspaceId, objectIds, now() + waitMs);
       attempt.waiting += 1;
       let timer: ReturnType<typeof setTimeout> | undefined;
-      const expired = new Promise<void>(resolve => { timer = setTimeout(resolve, waitMs); });
+      const expired = new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, waitMs);
+      });
       try {
         await Promise.race([attempt.done, expired]);
       } finally {

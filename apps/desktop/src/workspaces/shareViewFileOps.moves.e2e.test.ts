@@ -3,11 +3,21 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { type CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 import { withStaleSensitiveWorkspaceOperation } from "./workspaceAssets";
-import { engine, harness, seedSharedFiles, scope, shareViewFilesOwner, settleShareViewThroughOwner, applyShareViewPathMove, waitForStorePaths, storePaths, exists } from './shareViewFileOps.fixture';
+import {
+  engine,
+  harness,
+  seedSharedFiles,
+  scope,
+  shareViewFilesOwner,
+  settleShareViewThroughOwner,
+  applyShareViewPathMove,
+  waitForStorePaths,
+  storePaths,
+  exists,
+} from "./shareViewFileOps.fixture";
 
 describe("share-view file operations through the real store", () => {
-
-it.skipIf(engine.missing)(
+  it.skipIf(engine.missing)(
     "keeps refresh capture outside a rename's store-to-projection gap",
     async () => {
       const view = await harness("dohc-share-rename-capture-race-", "edit");
@@ -30,9 +40,7 @@ it.skipIf(engine.missing)(
             return value;
           }
           return async (...args: unknown[]) => {
-            const result = await (
-              value as (...inner: unknown[]) => unknown
-            ).apply(target, args);
+            const result = await (value as (...inner: unknown[]) => unknown).apply(target, args);
             signalStoreRenamed();
             await holdRename;
             return result;
@@ -41,14 +49,12 @@ it.skipIf(engine.missing)(
       }) as CaptureVersionedTextStore;
       const owner = shareViewFilesOwner(view, pausedStore);
 
-      const moving = withStaleSensitiveWorkspaceOperation(
-        view.rootPath,
-        (lease) =>
-          owner.files.change(lease, owner.requested, {
-            kind: "move",
-            fromPath,
-            toPath,
-          }),
+      const moving = withStaleSensitiveWorkspaceOperation(view.rootPath, (lease) =>
+        owner.files.change(lease, owner.requested, {
+          kind: "move",
+          fromPath,
+          toPath,
+        }),
       );
       await storeRenamed;
 
@@ -61,10 +67,7 @@ it.skipIf(engine.missing)(
           }
           return (...args: unknown[]) => {
             captureEnteredGap = true;
-            return (value as (...inner: unknown[]) => unknown).apply(
-              target,
-              args,
-            );
+            return (value as (...inner: unknown[]) => unknown).apply(target, args);
           };
         },
       }) as CaptureVersionedTextStore;
@@ -93,9 +96,7 @@ it.skipIf(engine.missing)(
       });
       expect(await storePaths(view)).toEqual([toPath]);
       expect(await exists(join(view.rootPath, fromPath))).toBe(false);
-      await expect(readFile(join(view.rootPath, toPath), "utf8")).resolves.toBe(
-        "granter\n",
-      );
+      await expect(readFile(join(view.rootPath, toPath), "utf8")).resolves.toBe("granter\n");
 
       const destinationMoments = (
         await view.store.listMoments({
@@ -103,10 +104,7 @@ it.skipIf(engine.missing)(
           limit: 200,
         })
       ).moments
-        .filter(
-          (moment) =>
-            moment.path === toPath && moment.metadata.origin === "local-file",
-        )
+        .filter((moment) => moment.path === toPath && moment.metadata.origin === "local-file")
         .map((moment) => moment.operation);
       expect(
         destinationMoments,
@@ -116,7 +114,7 @@ it.skipIf(engine.missing)(
     60_000,
   );
 
-it.skipIf(engine.missing)(
+  it.skipIf(engine.missing)(
     "renames a folder whose name differs only in case, keeping the files in it",
     async () => {
       const view = await harness("dohc-share-dir-case-", "edit");
@@ -147,14 +145,14 @@ it.skipIf(engine.missing)(
         readFile(join(view.rootPath, "docs", "plans", "one.md"), "utf8"),
         "a case-only folder rename deletes everything it just moved",
       ).resolves.toBe("one\n");
-      await expect(
-        readFile(join(view.rootPath, "docs", "plans", "two.md"), "utf8"),
-      ).resolves.toBe("two\n");
+      await expect(readFile(join(view.rootPath, "docs", "plans", "two.md"), "utf8")).resolves.toBe(
+        "two\n",
+      );
     },
     60_000,
   );
 
-it.skipIf(engine.missing)(
+  it.skipIf(engine.missing)(
     "refuses to move a folder that holds files no moment describes",
     async () => {
       const view = await harness("dohc-share-rename-dir-local-", "edit");
@@ -162,11 +160,7 @@ it.skipIf(engine.missing)(
         { path: "docs/plans/one.md", text: "one\n" },
         { path: "docs/plans/two.md", text: "two\n" },
       ]);
-      await writeFile(
-        join(view.rootPath, "docs", "plans", "mine.md"),
-        "mine\n",
-        "utf8",
-      );
+      await writeFile(join(view.rootPath, "docs", "plans", "mine.md"), "mine\n", "utf8");
 
       // The exact sentence, not a fragment every refusal in this module
       // shares: a scan that returned nothing would raise the "nothing to move"
@@ -183,16 +177,12 @@ it.skipIf(engine.missing)(
         "docs/plans holds 1 file that is not part of this shared view: docs/plans/mine.md. Move it out of the folder first.",
       );
 
-      await expect(
-        readFile(join(view.rootPath, "docs", "plans", "mine.md"), "utf8"),
-      ).resolves.toBe("mine\n");
-      expect(await storePaths(view)).toEqual([
-        "docs/plans/one.md",
-        "docs/plans/two.md",
-      ]);
+      await expect(readFile(join(view.rootPath, "docs", "plans", "mine.md"), "utf8")).resolves.toBe(
+        "mine\n",
+      );
+      expect(await storePaths(view)).toEqual(["docs/plans/one.md", "docs/plans/two.md"]);
       expect(await exists(join(view.rootPath, "docs", "roadmap"))).toBe(false);
     },
     60_000,
   );
-
 });

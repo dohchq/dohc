@@ -1,14 +1,31 @@
-import type { AutomationDeclaration, LiveAuthorContext } from "@dohc/live-session-contract/live-authorship";
+import type {
+  AutomationDeclaration,
+  LiveAuthorContext,
+} from "@dohc/live-session-contract/live-authorship";
 import { createHash } from "node:crypto";
 import {
-  createLiveFrameSession, encodeLiveFrame, encodeLiveFrameSync, LiveFrameError,
-  type LiveFrame, type LiveFrameBegin, type LiveFrameLease, type LiveFrameSessionPolicy, type LiveFrameSync,
+  createLiveFrameSession,
+  encodeLiveFrame,
+  encodeLiveFrameSync,
+  LiveFrameError,
+  type LiveFrame,
+  type LiveFrameBegin,
+  type LiveFrameLease,
+  type LiveFrameSessionPolicy,
+  type LiveFrameSync,
 } from "@dohc/live-session-contract/live-frame";
 import type { HostEpoch } from "@dohc/live-session-contract/host-control";
-import type { LiveUpdateHostApplicationAck, LiveUpdateRefusal, LiveUpdateRetry } from "@dohc/live-session-contract/live-update-admission";
+import type {
+  LiveUpdateHostApplicationAck,
+  LiveUpdateRefusal,
+  LiveUpdateRetry,
+} from "@dohc/live-session-contract/live-update-admission";
 import type { LiveMembershipSession } from "./liveMembership";
 
-export interface NamedFrameAppliedUpdate { readonly journalCursor: number; readonly updateBytes: Uint8Array }
+export interface NamedFrameAppliedUpdate {
+  readonly journalCursor: number;
+  readonly updateBytes: Uint8Array;
+}
 export interface NamedFrameSync extends LiveFrameSync {
   readonly appliedThroughJournalCursor: number;
   nextApplied(this: void, signal: AbortSignal): Promise<LiveFrameLease<NamedFrameAppliedUpdate>>;
@@ -26,7 +43,21 @@ export interface NamedFrameHostSession {
   assertCurrent(): void;
   openSync(clientVector: Uint8Array, signal: AbortSignal): Promise<NamedFrameSync>;
   /** Recording context is checked against the authenticated route by admission. */
-  submit(input: { deliveryId: string; updateDigest: string; updateBytes: Uint8Array; authorContext?: LiveAuthorContext; trustedAutomation?: AutomationDeclaration; trustedAutomationPress?: {readonly hostPressId: string; readonly automationId: string}; readonly trustedAutomationGrant?: {readonly grantId: string; readonly grantGeneration: number} }, signal: AbortSignal): Promise<NamedFrameSubmissionResult>;
+  submit(
+    input: {
+      deliveryId: string;
+      updateDigest: string;
+      updateBytes: Uint8Array;
+      authorContext?: LiveAuthorContext;
+      trustedAutomation?: AutomationDeclaration;
+      trustedAutomationPress?: { readonly hostPressId: string; readonly automationId: string };
+      readonly trustedAutomationGrant?: {
+        readonly grantId: string;
+        readonly grantGeneration: number;
+      };
+    },
+    signal: AbortSignal,
+  ): Promise<NamedFrameSubmissionResult>;
   close(): void;
 }
 export interface NamedFrameTransport {
@@ -57,57 +88,125 @@ export function createNamedLiveFrameSession(options: {
   const protocol = createLiveFrameSession("server", frames, options.reserveBytes);
   const lifetime = new AbortController();
   const tasks = new Set<Promise<void>>();
-  let closed = false, pumping = false, pulling = false, submitting = false, opening = false;
-  let sync: Pick<NamedFrameSync, "nextApplied" | "close"> | undefined, transfer: Transfer | undefined;
+  let closed = false,
+    pumping = false,
+    pulling = false,
+    submitting = false,
+    opening = false;
+  let sync: Pick<NamedFrameSync, "nextApplied" | "close"> | undefined,
+    transfer: Transfer | undefined;
   let result: Extract<LiveFrame, { kind: "result" }> | undefined;
-  let greeted = false, credit: Extract<LiveFrame, { kind: "credit" }> | undefined;
-  let grantedBytes = 0, grantedFrames = 0, nextTransfer = 1;
+  let greeted = false,
+    credit: Extract<LiveFrame, { kind: "credit" }> | undefined;
+  let grantedBytes = 0,
+    grantedFrames = 0,
+    nextTransfer = 1;
   let maxFrameBytes = Math.min(frames.receive.maxFrameBytes, frames.maxQueuedBytes);
   let peerSyncBytes = frames.receive.maxSyncBytes;
-  let membershipDirty = membership !== undefined, membershipRevision = 0;
+  let membershipDirty = membership !== undefined,
+    membershipRevision = 0;
   let unsubscribeMembership: (() => void) | undefined;
 
-  function check() { lifetime.signal.throwIfAborted(); host.assertCurrent(); }
+  function check() {
+    lifetime.signal.throwIfAborted();
+    host.assertCurrent();
+  }
   function close() {
     if (closed) return;
     closed = true;
     lifetime.abort(new Error("Named frame session closed."));
     host.invalidated.removeEventListener("abort", close);
     membership?.invalidated.removeEventListener("abort", close);
-    unsubscribeMembership?.(); unsubscribeMembership = undefined;
+    unsubscribeMembership?.();
+    unsubscribeMembership = undefined;
     membershipDirty = false;
     membership?.close();
     protocol.close();
-    credit = undefined; result = undefined;
-    transfer?.release(); transfer = undefined;
-    try { sync?.close(); } catch { /* Release the remaining capture and transport too. */ }
+    credit = undefined;
+    result = undefined;
+    transfer?.release();
+    transfer = undefined;
+    try {
+      sync?.close();
+    } catch {
+      /* Release the remaining capture and transport too. */
+    }
     sync = undefined;
-    try { host.close(); } catch { /* This browser capture is already invalid. */ }
-    try { transport.close(); } catch { /* The transport must still settle its borrowed sends. */ }
+    try {
+      host.close();
+    } catch {
+      /* This browser capture is already invalid. */
+    }
+    try {
+      transport.close();
+    } catch {
+      /* The transport must still settle its borrowed sends. */
+    }
   }
   function run(action: () => Promise<void>) {
-    const task = action().catch(error => { options.failed?.(error); close(); });
+    const task = action().catch((error) => {
+      options.failed?.(error);
+      close();
+    });
     tasks.add(task);
     void task.finally(() => tasks.delete(task));
   }
   function grant(bytes: number, count: number) {
-    grantedBytes += bytes; grantedFrames += count;
-    if (!Number.isSafeInteger(grantedBytes) || !Number.isSafeInteger(grantedFrames)) throw new Error("Frame credit exhausted.");
+    grantedBytes += bytes;
+    grantedFrames += count;
+    if (!Number.isSafeInteger(grantedBytes) || !Number.isSafeInteger(grantedFrames))
+      throw new Error("Frame credit exhausted.");
     credit = { kind: "credit", grantedBytes, grantedFrames };
   }
-  function outgoing(begin: Omit<Extract<LiveFrameBegin, { purpose: "initial-sync" }>, "kind" | "transferId" | "totalBytes" | "digest"> |
-      Omit<Extract<LiveFrameBegin, { purpose: "applied-update" }>, "kind" | "transferId" | "totalBytes" | "digest">,
-    bytes: Uint8Array, release: () => void) {
-    if (transfer || !Number.isSafeInteger(nextTransfer)) throw new Error("Frame transfer already owned.");
-    transfer = { begin: { kind: "begin", ...begin, transferId: nextTransfer++, totalBytes: bytes.length, digest: digest(bytes) },
-      bytes, begun: false, offset: 0, release };
+  function outgoing(
+    begin:
+      | Omit<
+          Extract<LiveFrameBegin, { purpose: "initial-sync" }>,
+          "kind" | "transferId" | "totalBytes" | "digest"
+        >
+      | Omit<
+          Extract<LiveFrameBegin, { purpose: "applied-update" }>,
+          "kind" | "transferId" | "totalBytes" | "digest"
+        >,
+    bytes: Uint8Array,
+    release: () => void,
+  ) {
+    if (transfer || !Number.isSafeInteger(nextTransfer))
+      throw new Error("Frame transfer already owned.");
+    transfer = {
+      begin: {
+        kind: "begin",
+        ...begin,
+        transferId: nextTransfer++,
+        totalBytes: bytes.length,
+        digest: digest(bytes),
+      },
+      bytes,
+      begun: false,
+      offset: 0,
+      release,
+    };
   }
   function startPull() {
     if (closed || pulling || transfer || !sync || !protocol.usage().live) return;
     const available = protocol.usage().outgoing;
     // Keep the native read dormant until a BEGIN can use output credit.
-    if (available.promisedFrames < 1 || available.promisedBytes < encodeLiveFrame({ kind: "begin", purpose: "applied-update",
-      transferId: nextTransfer, totalBytes: 1, digest: "0".repeat(64), journalCursor: 1 }, maxFrameBytes).length) return;
+    if (
+      available.promisedFrames < 1 ||
+      available.promisedBytes <
+        encodeLiveFrame(
+          {
+            kind: "begin",
+            purpose: "applied-update",
+            transferId: nextTransfer,
+            totalBytes: 1,
+            digest: "0".repeat(64),
+            journalCursor: 1,
+          },
+          maxFrameBytes,
+        ).length
+    )
+      return;
     const held = sync;
     pulling = true;
     run(async () => {
@@ -117,9 +216,16 @@ export function createNamedLiveFrameSession(options: {
         check();
         if (sync !== held) throw new Error("Sync capture changed.");
         const lease = update;
-        outgoing({ purpose: "applied-update", journalCursor: lease.value.journalCursor }, lease.value.updateBytes, () => lease.release());
+        outgoing(
+          { purpose: "applied-update", journalCursor: lease.value.journalCursor },
+          lease.value.updateBytes,
+          () => lease.release(),
+        );
         update = undefined;
-      } finally { pulling = false; update?.release(); }
+      } finally {
+        pulling = false;
+        update?.release();
+      }
       pump();
     });
   }
@@ -132,45 +238,75 @@ export function createNamedLiveFrameSession(options: {
           check();
           let frame: LiveFrame;
           const held = transfer;
-          if (!greeted) frame = { kind: "welcome", hostEpoch: host.hostEpoch, receivePolicy: frames.receive };
+          if (!greeted)
+            frame = { kind: "welcome", hostEpoch: host.hostEpoch, receivePolicy: frames.receive };
           else if (credit) frame = credit;
           else if (result) frame = result;
           else if (held && !held.begun) frame = held.begin;
           else if (held) {
             const available = protocol.usage().outgoing;
-            const overhead = encodeLiveFrame({ kind: "chunk", transferId: 1, offset: 0, bytes: new Uint8Array(1) }, maxFrameBytes).length - 1;
+            const overhead =
+              encodeLiveFrame(
+                { kind: "chunk", transferId: 1, offset: 0, bytes: new Uint8Array(1) },
+                maxFrameBytes,
+              ).length - 1;
             const length = Math.min(maxFrameBytes, available.promisedBytes) - overhead;
             if (available.promisedFrames < 1 || length < 1) return;
-            frame = { kind: "chunk", transferId: held.begin.transferId, offset: held.offset,
-              bytes: held.bytes.subarray(held.offset, held.offset + length) };
+            frame = {
+              kind: "chunk",
+              transferId: held.begin.transferId,
+              offset: held.offset,
+              bytes: held.bytes.subarray(held.offset, held.offset + length),
+            };
           } else if (membership && membershipDirty && protocol.usage().live) {
             startPull();
             membershipDirty = false;
             frame = membership.snapshot(Math.min(maxFrameBytes, frames.maxControlBytes));
             check();
             if (frame.revision === membershipRevision) continue;
-          } else { startPull(); return; }
+          } else {
+            startPull();
+            return;
+          }
           let lease;
-          try { lease = protocol.send(frame); }
-          catch (error) { if (error instanceof LiveFrameError && error.reason === "credit") return; throw error; }
+          try {
+            lease = protocol.send(frame);
+          } catch (error) {
+            if (error instanceof LiveFrameError && error.reason === "credit") return;
+            throw error;
+          }
           if (frame.kind === "welcome") greeted = true;
           else if (frame.kind === "credit") credit = undefined;
           else if (frame.kind === "result") result = undefined;
           else if (frame.kind === "membership") membershipRevision = frame.revision;
           else if (frame.kind === "begin") held!.begun = true;
           else if (frame.kind === "chunk") held!.offset += frame.bytes.length;
-          try { await transport.send(lease.value); check(); }
-          finally { lease.release(); }
-          if (held && transfer === held && held.offset === held.bytes.length) { transfer = undefined; held.release(); }
-          if (frame.kind === "result" && frame.result === "refused") { close(); return; }
+          try {
+            await transport.send(lease.value);
+            check();
+          } finally {
+            lease.release();
+          }
+          if (held && transfer === held && held.offset === held.bytes.length) {
+            transfer = undefined;
+            held.release();
+          }
+          if (frame.kind === "result" && frame.result === "refused") {
+            close();
+            return;
+          }
         }
-      } finally { pumping = false; }
+      } finally {
+        pumping = false;
+      }
     });
   }
   function receive(bytes: Uint8Array) {
     if (closed) return;
     let received: ReturnType<typeof protocol.receive> | undefined;
-    let completed: NonNullable<ReturnType<typeof protocol.receive>["value"]["transfer"]> | undefined;
+    let completed:
+      | NonNullable<ReturnType<typeof protocol.receive>["value"]["transfer"]>
+      | undefined;
     try {
       check();
       received = protocol.receive(bytes);
@@ -179,9 +315,13 @@ export function createNamedLiveFrameSession(options: {
       if (frame.kind === "hello") {
         maxFrameBytes = Math.min(maxFrameBytes, frame.receivePolicy.maxFrameBytes);
         peerSyncBytes = Math.min(peerSyncBytes, frame.receivePolicy.maxSyncBytes);
-      } else if (frame.kind === "close") { close(); return; }
+      } else if (frame.kind === "close") {
+        close();
+        return;
+      }
       if (completed) {
-        const held = completed, { begin, bytes: updateBytes } = held.value;
+        const held = completed,
+          { begin, bytes: updateBytes } = held.value;
         if (digest(updateBytes) !== begin.digest) throw new Error("Transfer digest mismatch.");
         if (begin.purpose === "client-vector") {
           if (opening || sync) throw new Error("Sync already opened.");
@@ -190,16 +330,35 @@ export function createNamedLiveFrameSession(options: {
             let opened: NamedFrameSync | undefined;
             let releaseBytes: (() => void) | undefined;
             try {
-              opened = await host.openSync(updateBytes, lifetime.signal); check();
-              const bytes = encodeLiveFrameSync({ binding: opened.binding, hostVector: opened.hostVector,
-                missingStateUpdate: opened.missingStateUpdate }, { ...frames.receive, maxSyncBytes: peerSyncBytes });
+              opened = await host.openSync(updateBytes, lifetime.signal);
+              check();
+              const bytes = encodeLiveFrameSync(
+                {
+                  binding: opened.binding,
+                  hostVector: opened.hostVector,
+                  missingStateUpdate: opened.missingStateUpdate,
+                },
+                { ...frames.receive, maxSyncBytes: peerSyncBytes },
+              );
               releaseBytes = options.reserveBytes?.(bytes.byteLength);
               const cursor = opened.appliedThroughJournalCursor;
-              sync = { nextApplied: opened.nextApplied, close: opened.close }; opened = undefined;
+              sync = { nextApplied: opened.nextApplied, close: opened.close };
+              opened = undefined;
               const releaseOutput = releaseBytes;
-              outgoing({ purpose: "initial-sync", appliedThroughJournalCursor: cursor }, bytes, () => { releaseOutput?.(); });
+              outgoing(
+                { purpose: "initial-sync", appliedThroughJournalCursor: cursor },
+                bytes,
+                () => {
+                  releaseOutput?.();
+                },
+              );
               releaseBytes = undefined;
-            } finally { opening = false; held.release(); opened?.close(); releaseBytes?.(); }
+            } finally {
+              opening = false;
+              held.release();
+              opened?.close();
+              releaseBytes?.();
+            }
             pump();
           });
         } else if (begin.purpose === "submit-update") {
@@ -207,29 +366,65 @@ export function createNamedLiveFrameSession(options: {
           submitting = true;
           run(async () => {
             try {
-              const accepted = await host.submit({ deliveryId: begin.deliveryId, updateDigest: begin.digest, updateBytes,
-                ...(begin.authorContext ? { authorContext: begin.authorContext } : {}) }, lifetime.signal);
+              const accepted = await host.submit(
+                {
+                  deliveryId: begin.deliveryId,
+                  updateDigest: begin.digest,
+                  updateBytes,
+                  ...(begin.authorContext ? { authorContext: begin.authorContext } : {}),
+                },
+                lifetime.signal,
+              );
               check();
-              result = accepted.result === "success" ? { kind: "result", ...accepted } :
-                { kind: "result", deliveryId: begin.deliveryId, updateDigest: begin.digest, ...accepted };
-            } finally { submitting = false; held.release(); }
+              result =
+                accepted.result === "success"
+                  ? { kind: "result", ...accepted }
+                  : {
+                      kind: "result",
+                      deliveryId: begin.deliveryId,
+                      updateDigest: begin.digest,
+                      ...accepted,
+                    };
+            } finally {
+              submitting = false;
+              held.release();
+            }
             pump();
           });
         } else throw new Error("Unexpected client transfer.");
         completed = undefined;
       }
-      received.release(); received = undefined;
+      received.release();
+      received = undefined;
       if (frame.kind === "begin" || frame.kind === "chunk") grant(bytes.length, 1);
       pump();
-    } catch (error) { completed?.release(); options.failed?.(error); close(); }
-    finally { received?.release(); }
+    } catch (error) {
+      completed?.release();
+      options.failed?.(error);
+      close();
+    } finally {
+      received?.release();
+    }
   }
   host.invalidated.addEventListener("abort", close, { once: true });
   membership?.invalidated.addEventListener("abort", close, { once: true });
   if (membership?.invalidated.aborted) close();
   if (host.invalidated.aborted) close();
-  if (!closed && membership) unsubscribeMembership = membership.subscribe(() => { membershipDirty = true; pump(); });
-  if (!closed) { grant(frames.maxQueuedBytes, frames.maxQueuedFrames); pump(); }
-  return { receive, close, usage: () => ({ ...protocol.usage(), pulling, submitting, opening, membershipDirty }),
-    async settled() { while (tasks.size) await Promise.allSettled([...tasks]); } };
+  if (!closed && membership)
+    unsubscribeMembership = membership.subscribe(() => {
+      membershipDirty = true;
+      pump();
+    });
+  if (!closed) {
+    grant(frames.maxQueuedBytes, frames.maxQueuedFrames);
+    pump();
+  }
+  return {
+    receive,
+    close,
+    usage: () => ({ ...protocol.usage(), pulling, submitting, opening, membershipDirty }),
+    async settled() {
+      while (tasks.size) await Promise.allSettled([...tasks]);
+    },
+  };
 }

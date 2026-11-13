@@ -9,8 +9,9 @@ export const DECLARATION_FAMILIES = { chat: CHAT_DECLARATIONS, links: LINKS_DECL
 // The type refuses these, but a cast can hide one from it.
 for (const family of Object.values<OperationFamily>(DECLARATION_FAMILIES)) {
   for (const [name, { access, input }] of Object.entries(family)) {
-    if (access !== "read") throw new Error(`${name} is declared as ${String(access)}. Only reads can be declared.`);
-    const field = ENVELOPE_FIELDS.find(envelope => Object.hasOwn(input.shape, envelope));
+    if (access !== "read")
+      throw new Error(`${name} is declared as ${String(access)}. Only reads can be declared.`);
+    const field = ENVELOPE_FIELDS.find((envelope) => Object.hasOwn(input.shape, envelope));
     if (field) throw new Error(`${name} input names ${field}, which its doors set.`);
   }
 }

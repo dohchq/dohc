@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { AGENT_CHANNEL_WIRE_ID, GENERAL_CHANNEL_WIRE_ID, agentChannelWireId, agentIdForChannelWireId } from "./chatWireIds";
+import {
+  AGENT_CHANNEL_WIRE_ID,
+  GENERAL_CHANNEL_WIRE_ID,
+  agentChannelWireId,
+  agentIdForChannelWireId,
+} from "./chatWireIds";
 
 describe("agentIdForChannelWireId", () => {
   it("reads the agent from an agent chat's wire id", () => {

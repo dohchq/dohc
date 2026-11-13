@@ -1,29 +1,52 @@
 import type { StorageContext } from "./storage/context.js";
-import { claimsPersonalAgent, deriveLiveAuthorSnapshot, type TrustedLiveAccount } from "./storage/liveAuthorSnapshot.js";
+import {
+  claimsPersonalAgent,
+  deriveLiveAuthorSnapshot,
+  type TrustedLiveAccount,
+} from "./storage/liveAuthorSnapshot.js";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { limitLiveDeclaredAgents, liveAuthorCheckpointAnticipated } from "./storage/liveAuthorWindow";
+import {
+  limitLiveDeclaredAgents,
+  liveAuthorCheckpointAnticipated,
+} from "./storage/liveAuthorWindow";
 import type { ServiceActivationAccess } from "./storage/serviceActivationAccess";
 import { OwnerYDocOutbox } from "@dohc/workspace-engine-client";
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
-import { refusalOutstanding, type OwnerKnownRefusal, type OwnerKnownRefusals } from "@dohc/workspace-engine-client/owner-ydoc-drainer";
+import {
+  refusalOutstanding,
+  type OwnerKnownRefusal,
+  type OwnerKnownRefusals,
+} from "@dohc/workspace-engine-client/owner-ydoc-drainer";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
-import { parseLiveUpdateHostApplicationAck, type LiveDocumentKey, type LiveUpdateHostApplicationAck, type LiveUpdateReceipt } from "@dohc/live-session-contract/live-update-admission";
+import {
+  parseLiveUpdateHostApplicationAck,
+  type LiveDocumentKey,
+  type LiveUpdateHostApplicationAck,
+  type LiveUpdateReceipt,
+} from "@dohc/live-session-contract/live-update-admission";
 import type { SyncRelayStorage, LiveHostConnectionCoordinate } from "./storage.js";
 import type { LiveJournalValidation } from "./storage/types.js";
-import { SERVICE_KEPT_EDITS_REASONS, type ServiceKeptEditsIdentity } from "./storage/serviceKeptEdits.js";
+import {
+  SERVICE_KEPT_EDITS_REASONS,
+  type ServiceKeptEditsIdentity,
+} from "./storage/serviceKeptEdits.js";
 import { configRecord } from "./deviceLiveHostConfig.js";
 import { receiptFirstSeed, type ServiceSeedDelivery } from "./serviceOwnerTransport.js";
 
-export type LiveAdmissionValidation = LiveJournalValidation | {
-  readonly kind: "retry";
-  readonly reason: "admission-unavailable";
-  waitForCapacity(signal?: AbortSignal): Promise<void>;
-};
+export type LiveAdmissionValidation =
+  | LiveJournalValidation
+  | {
+      readonly kind: "retry";
+      readonly reason: "admission-unavailable";
+      waitForCapacity(signal?: AbortSignal): Promise<void>;
+    };
 
 export interface OwnerOutboxAdmission {
   readonly activation?: ServiceActivationAccess;
-  trustedAccount(accountId: string): TrustedLiveAccount | undefined | Promise<TrustedLiveAccount | undefined>;
+  trustedAccount(
+    accountId: string,
+  ): TrustedLiveAccount | undefined | Promise<TrustedLiveAccount | undefined>;
   /** The workspaces whose owner queues it delivers, each as its workspace's owner. */
   readonly workspaceIds: ReadonlySet<string>;
   readonly maxEntriesPerDrain: number;
@@ -36,8 +59,17 @@ export interface OwnerOutboxAdmission {
    * there. A device's queue is on the owner's computer.
    */
   readonly keptOnServer?: ServiceKeptEditsIdentity;
-  validate(input: {document: LiveDocumentKey; currentPath: string; checkpoint: Uint8Array; suffix: readonly Uint8Array[]; candidate: Uint8Array;
-    retainStateUpdate?: boolean}, signal?: AbortSignal): LiveAdmissionValidation | Promise<LiveAdmissionValidation>;
+  validate(
+    input: {
+      document: LiveDocumentKey;
+      currentPath: string;
+      checkpoint: Uint8Array;
+      suffix: readonly Uint8Array[];
+      candidate: Uint8Array;
+      retainStateUpdate?: boolean;
+    },
+    signal?: AbortSignal,
+  ): LiveAdmissionValidation | Promise<LiveAdmissionValidation>;
 }
 
 /**
@@ -46,10 +78,16 @@ export interface OwnerOutboxAdmission {
  * no ownership transfer. Any future transfer must fence the old owner's
  * queues, or tie them to that account, before this delivers them.
  */
-export function admittedOwner(storage: Pick<SyncRelayStorage, "workspaceOwner">, admission: Pick<OwnerOutboxAdmission, "workspaceIds">, workspaceId: string) {
-  const userId = admission.workspaceIds.has(workspaceId) ? storage.workspaceOwner(workspaceId) : null;
+export function admittedOwner(
+  storage: Pick<SyncRelayStorage, "workspaceOwner">,
+  admission: Pick<OwnerOutboxAdmission, "workspaceIds">,
+  workspaceId: string,
+) {
+  const userId = admission.workspaceIds.has(workspaceId)
+    ? storage.workspaceOwner(workspaceId)
+    : null;
   if (userId === null) throw new Error("Owner workspace is unavailable.");
-  return {kind: "owner" as const, userId};
+  return { kind: "owner" as const, userId };
 }
 
 export type CapacityLiveAdmissionValidator = OwnerOutboxAdmission["validate"] & {
@@ -74,62 +112,137 @@ export interface OwnerOutboxAdoption {
 }
 
 /** The key under which `adoption` queues its divergent seed. */
-const adoptionSeedKey = (adoption: Pick<OwnerOutboxAdoption, "adoptionId" | "sequence">, updateDigest: string) =>
-  `owner-adoption:${createHash("sha256").update(JSON.stringify([adoption.adoptionId,adoption.sequence,updateDigest])).digest("hex")}`;
+const adoptionSeedKey = (
+  adoption: Pick<OwnerOutboxAdoption, "adoptionId" | "sequence">,
+  updateDigest: string,
+) =>
+  `owner-adoption:${createHash("sha256")
+    .update(JSON.stringify([adoption.adoptionId, adoption.sequence, updateDigest]))
+    .digest("hex")}`;
 
 /** One registration's owner queue, read through the host. Every await rechecks standing. */
 interface OwnerOutboxScope {
-  client: EngineClient; workspace: string; registrationId: number; nextRequestId(): number; deadlineMs: number; signal?: AbortSignal;
+  client: EngineClient;
+  workspace: string;
+  registrationId: number;
+  nextRequestId(): number;
+  deadlineMs: number;
+  signal?: AbortSignal;
   assertCurrent(): void;
 }
 
-function ownerOutboxRequests(scope: OwnerOutboxScope, onRead?: (result: Record<string,unknown>) => void) {
-  const {client,registrationId,signal} = scope;
-  const check = () => { signal?.throwIfAborted(); scope.assertCurrent(); };
-  const request = () => ({id: scope.nextRequestId(),workspace: scope.workspace,deadlineMs: scope.deadlineMs});
-  const readStatus = async () => {
-    const available = await client.sendRequest({...request(),method: "liveApplication.ownerOutbox",params: {registrationId}},signal);
-    check();
-    const status = configRecord(available.result,["outboxId","pendingBytes","state","retryDeliveryId"]);
-    if (typeof status.pendingBytes !== "number" || !Number.isSafeInteger(status.pendingBytes) || status.pendingBytes < 0) throw new Error("Invalid owner pending bytes.");
-    if (status.retryDeliveryId !== null && (status.state !== "quarantined" || typeof status.retryDeliveryId !== "string")) throw new Error("Invalid owner outbox retry.");
-    // Only the owner's Try again lets a quarantined queue reach admission, and only for its head.
-    if (status.state === "quarantined") return {outboxId: status.outboxId, pendingBytes: status.pendingBytes, quarantined: status.retryDeliveryId === null};
-    if (status.pendingBytes > 0 && ((status.state !== "active" && status.state !== "sealed") || typeof status.outboxId !== "string")) throw new Error("Invalid owner outbox state.");
-    return {outboxId: status.outboxId, pendingBytes: status.pendingBytes};
+function ownerOutboxRequests(
+  scope: OwnerOutboxScope,
+  onRead?: (result: Record<string, unknown>) => void,
+) {
+  const { client, registrationId, signal } = scope;
+  const check = () => {
+    signal?.throwIfAborted();
+    scope.assertCurrent();
   };
-  const open = (outboxId: unknown) => new OwnerYDocOutbox({sendRequest: async original => {
+  const request = () => ({
+    id: scope.nextRequestId(),
+    workspace: scope.workspace,
+    deadlineMs: scope.deadlineMs,
+  });
+  const readStatus = async () => {
+    const available = await client.sendRequest(
+      { ...request(), method: "liveApplication.ownerOutbox", params: { registrationId } },
+      signal,
+    );
     check();
-    const reading = original.method === "ydoc.ownerOutbox.readPending";
-    if (!reading && original.method !== "ydoc.ownerOutbox.acknowledge") throw new Error("Unsupported owner outbox operation.");
-    const params = original.params as Record<string,unknown>;
-    if (params.outboxId !== outboxId) throw new Error("Owner outbox changed.");
-    const response = await client.sendRequest({...request(),method: reading ? "liveApplication.readOwnerOutbox" : "liveApplication.acknowledgeOwnerOutbox",
-      params: {registrationId,...(reading ? (params.cursor === undefined ? {} : {cursor: params.cursor as never}) : {receipts: params.receipts as never})}},signal);
-    check();
-    if (reading) onRead?.(response.result as Record<string,unknown>);
-    return {...response,id: original.id};
-  }},scope.workspace);
-  return {check,request,readStatus,open};
+    const status = configRecord(available.result, [
+      "outboxId",
+      "pendingBytes",
+      "state",
+      "retryDeliveryId",
+    ]);
+    if (
+      typeof status.pendingBytes !== "number" ||
+      !Number.isSafeInteger(status.pendingBytes) ||
+      status.pendingBytes < 0
+    )
+      throw new Error("Invalid owner pending bytes.");
+    if (
+      status.retryDeliveryId !== null &&
+      (status.state !== "quarantined" || typeof status.retryDeliveryId !== "string")
+    )
+      throw new Error("Invalid owner outbox retry.");
+    // Only the owner's Try again lets a quarantined queue reach admission, and only for its head.
+    if (status.state === "quarantined")
+      return {
+        outboxId: status.outboxId,
+        pendingBytes: status.pendingBytes,
+        quarantined: status.retryDeliveryId === null,
+      };
+    if (
+      status.pendingBytes > 0 &&
+      ((status.state !== "active" && status.state !== "sealed") ||
+        typeof status.outboxId !== "string")
+    )
+      throw new Error("Invalid owner outbox state.");
+    return { outboxId: status.outboxId, pendingBytes: status.pendingBytes };
+  };
+  const open = (outboxId: unknown) =>
+    new OwnerYDocOutbox(
+      {
+        sendRequest: async (original) => {
+          check();
+          const reading = original.method === "ydoc.ownerOutbox.readPending";
+          if (!reading && original.method !== "ydoc.ownerOutbox.acknowledge")
+            throw new Error("Unsupported owner outbox operation.");
+          const params = original.params as Record<string, unknown>;
+          if (params.outboxId !== outboxId) throw new Error("Owner outbox changed.");
+          const response = await client.sendRequest(
+            {
+              ...request(),
+              method: reading
+                ? "liveApplication.readOwnerOutbox"
+                : "liveApplication.acknowledgeOwnerOutbox",
+              params: {
+                registrationId,
+                ...(reading
+                  ? params.cursor === undefined
+                    ? {}
+                    : { cursor: params.cursor as never }
+                  : { receipts: params.receipts as never }),
+              },
+            },
+            signal,
+          );
+          check();
+          if (reading) onRead?.(response.result as Record<string, unknown>);
+          return { ...response, id: original.id };
+        },
+      },
+      scope.workspace,
+    );
+  return { check, request, readStatus, open };
 }
 
 /**
  * Whether `adoption`'s seed heads the owner queue, by the check
  * `drainOwnerOutbox` uses. Reads only; it admits and acknowledges nothing.
  */
-export async function ownerOutboxHeadIsSeed(options: OwnerOutboxScope & {
-  binding: LiveObjectBinding; adoption: Pick<OwnerOutboxAdoption, "adoptionId" | "sequence">;
-}): Promise<boolean> {
-  const {check,readStatus,open} = ownerOutboxRequests(options);
+export async function ownerOutboxHeadIsSeed(
+  options: OwnerOutboxScope & {
+    binding: LiveObjectBinding;
+    adoption: Pick<OwnerOutboxAdoption, "adoptionId" | "sequence">;
+  },
+): Promise<boolean> {
+  const { check, readStatus, open } = ownerOutboxRequests(options);
   check();
   const status = await readStatus();
   if (status.pendingBytes === 0 || typeof status.outboxId !== "string") return false;
   const outbox = open(status.outboxId);
   try {
     // The key alone decides; the drain reads the update itself, within its byte budget.
-    const head = await outbox.readDeliveryHeadKey(status.outboxId, options.binding); check();
+    const head = await outbox.readDeliveryHeadKey(status.outboxId, options.binding);
+    check();
     return head !== null && head.appendKey === adoptionSeedKey(options.adoption, head.updateDigest);
-  } finally {outbox.dispose();}
+  } finally {
+    outbox.dispose();
+  }
 }
 
 /**
@@ -138,50 +251,78 @@ export async function ownerOutboxHeadIsSeed(options: OwnerOutboxScope & {
  * activation's seed under its `seedDelivery`: that is acknowledged first, so
  * the host keeps the relay's receipt for it before applying it.
  */
-export async function drainOwnerOutbox(options: OwnerOutboxScope & {
-  storage: SyncRelayStorage; admission: OwnerOutboxAdmission; host: LiveHostConnectionCoordinate;
-  binding: LiveObjectBinding; adoption: OwnerOutboxAdoption;
-  seedDelivery?: ServiceSeedDelivery;
-  applyThrough(receipt: LiveUpdateReceipt): Promise<LiveUpdateHostApplicationAck | null>;
-}): Promise<{admittedEntries: number; hasMore: boolean; retryReady?: boolean}> {
-  const {storage,admission,client,registrationId,binding,host,signal,adoption} = options;
-  for (const value of [admission.maxEntriesPerDrain,admission.maxBytesPerDrain]) {
+export async function drainOwnerOutbox(
+  options: OwnerOutboxScope & {
+    storage: SyncRelayStorage;
+    admission: OwnerOutboxAdmission;
+    host: LiveHostConnectionCoordinate;
+    binding: LiveObjectBinding;
+    adoption: OwnerOutboxAdoption;
+    seedDelivery?: ServiceSeedDelivery;
+    applyThrough(receipt: LiveUpdateReceipt): Promise<LiveUpdateHostApplicationAck | null>;
+  },
+): Promise<{ admittedEntries: number; hasMore: boolean; retryReady?: boolean }> {
+  const { storage, admission, client, registrationId, binding, host, signal, adoption } = options;
+  for (const value of [admission.maxEntriesPerDrain, admission.maxBytesPerDrain]) {
     if (!Number.isSafeInteger(value) || value < 1) throw new Error("Invalid owner drain budget.");
   }
-  let receivedBytes = 0, admittedEntries = 0;
+  let receivedBytes = 0,
+    admittedEntries = 0;
   const byteBudget = new Error("Owner drain byte budget exceeded.");
-  const {check,request,readStatus,open} = ownerOutboxRequests(options, result => {
+  const { check, request, readStatus, open } = ownerOutboxRequests(options, (result) => {
     if (typeof result.bytesBase64 === "string") receivedBytes += result.bytesBase64.length;
     if (receivedBytes > admission.maxBytesPerDrain) throw byteBudget;
   });
   check();
-  const status = await readStatus(), outboxId = status.outboxId;
+  const status = await readStatus(),
+    outboxId = status.outboxId;
   // Read after the status, which names a fresh adoption's outbox. Acknowledged
   // first, the seed can leave the queue before the host applies it, so neither
   // an empty queue nor a later head proves its application.
-  const receiptFirst = receiptFirstSeed(options.seedDelivery, {storage, transport: client, activationId: adoption.adoptionId, binding, host});
+  const receiptFirst = receiptFirstSeed(options.seedDelivery, {
+    storage,
+    transport: client,
+    activationId: adoption.adoptionId,
+    binding,
+    host,
+  });
   // The engine holds a service activation's seed until its receipt is saved,
   // so applying that seed first would wait forever.
   const service = options.seedDelivery !== undefined || admission.activation !== undefined;
-  const refusals = admission.refusals, held = JSON.stringify([host.mode,host.hostId,outboxId]);
+  const refusals = admission.refusals,
+    held = JSON.stringify([host.mode, host.hostId, outboxId]);
   // The row of this queue in the attached store. A store of another identity can hold a queue with the same ID.
-  const queue = admission.keptOnServer && typeof outboxId === "string" ? {workspaceId: binding.workspaceId, identity: admission.keptOnServer, outboxId} : undefined;
+  const queue =
+    admission.keptOnServer && typeof outboxId === "string"
+      ? { workspaceId: binding.workspaceId, identity: admission.keptOnServer, outboxId }
+      : undefined;
   // A queue that delivers again, as after an accepted Try again, is no longer
   // kept for its owner. Its status is read again under the hold, so a refusal
   // another pass is recording keeps its row.
   if (queue && status.quarantined === undefined && storage.readServiceKeptEdits(queue)) {
-    if (!refusals.hold(held)) return {admittedEntries: 0, hasMore: true};
+    if (!refusals.hold(held)) return { admittedEntries: 0, hasMore: true };
     try {
       const current = await readStatus();
-      if (current.outboxId === outboxId && current.quarantined === undefined) storage.forgetServiceKeptEdits(queue);
-    } finally {refusals.release(held);}
+      if (current.outboxId === outboxId && current.quarantined === undefined)
+        storage.forgetServiceKeptEdits(queue);
+    } finally {
+      refusals.release(held);
+    }
   }
   const outbox = open(outboxId);
   // The record of a refusal its owner can find, written before the engine's
   // quarantine so no crash leaves a quarantine without one.
-  const keep = (outbox: string, refusal: {reason: string; deliveryId: string; key: string}) => {
-    if (admission.keptOnServer) storage.recordServiceKeptEdits({identity: admission.keptOnServer, outboxId: outbox, binding, reason: refusal.reason,
-      headDeliveryId: refusal.deliveryId, refusalKey: refusal.key, nowMs: Date.now()});
+  const keep = (outbox: string, refusal: { reason: string; deliveryId: string; key: string }) => {
+    if (admission.keptOnServer)
+      storage.recordServiceKeptEdits({
+        identity: admission.keptOnServer,
+        outboxId: outbox,
+        binding,
+        reason: refusal.reason,
+        headDeliveryId: refusal.deliveryId,
+        refusalKey: refusal.key,
+        nowMs: Date.now(),
+      });
   };
   if (status.quarantined) {
     // With no Try again outstanding, no known refusal is left to record.
@@ -191,119 +332,263 @@ export async function drainOwnerOutbox(options: OwnerOutboxScope & {
       if (queue && !storage.readServiceKeptEdits(queue)) {
         if (known) keep(queue.outboxId, known);
         else {
-          const head = await outbox.readDeliveryHead(queue.outboxId, binding); check();
-          if (head.entry && head.quarantineReason !== null && SERVICE_KEPT_EDITS_REASONS.includes(head.quarantineReason)) {
-            keep(queue.outboxId, {reason: head.quarantineReason, deliveryId: head.entry.deliveryId, key: `quarantined:${head.entry.deliveryId}`});
+          const head = await outbox.readDeliveryHead(queue.outboxId, binding);
+          check();
+          if (
+            head.entry &&
+            head.quarantineReason !== null &&
+            SERVICE_KEPT_EDITS_REASONS.includes(head.quarantineReason)
+          ) {
+            keep(queue.outboxId, {
+              reason: head.quarantineReason,
+              deliveryId: head.entry.deliveryId,
+              key: `quarantined:${head.entry.deliveryId}`,
+            });
           }
         }
       }
-    } finally {outbox.dispose();}
+    } finally {
+      outbox.dispose();
+    }
     if (known) refusals.recorded(held, known);
-    adoption.applied(); return {admittedEntries: 0, hasMore: false};
+    adoption.applied();
+    return { admittedEntries: 0, hasMore: false };
   }
-  if (status.pendingBytes === 0) {if (!receiptFirst) adoption.applied(); return {admittedEntries: 0, hasMore: false};}
+  if (status.pendingBytes === 0) {
+    if (!receiptFirst) adoption.applied();
+    return { admittedEntries: 0, hasMore: false };
+  }
   if (typeof outboxId !== "string") throw new Error("Invalid owner outbox identity.");
   const quarantine = async (known: OwnerKnownRefusal) => {
     keep(outboxId, known);
-    await client.sendRequest({...request(), method: "liveApplication.quarantineOwnerOutbox",
-      params: {registrationId, reason: known.reason, deliveryId: known.deliveryId, refusalKey: known.key}}, signal);
+    await client.sendRequest(
+      {
+        ...request(),
+        method: "liveApplication.quarantineOwnerOutbox",
+        params: {
+          registrationId,
+          reason: known.reason,
+          deliveryId: known.deliveryId,
+          refusalKey: known.key,
+        },
+      },
+      signal,
+    );
     refusals.recorded(held, known);
     check();
   };
   // One attempt per outbox at a time, across passes and connections.
-  if (!refusals.hold(held)) return {admittedEntries: 0, hasMore: true};
+  if (!refusals.hold(held)) return { admittedEntries: 0, hasMore: true };
   try {
     for (let index = 0; index < admission.maxEntriesPerDrain; index++) {
       check();
-      const pending = await outbox.readDeliveryHead(outboxId,binding); check();
-      if (!isDeepStrictEqual(pending.binding,binding) || pending.baseUpdateDigest !== binding.lineageClaimId) throw new Error("Owner outbox binding changed.");
+      const pending = await outbox.readDeliveryHead(outboxId, binding);
+      check();
+      if (
+        !isDeepStrictEqual(pending.binding, binding) ||
+        pending.baseUpdateDigest !== binding.lineageClaimId
+      )
+        throw new Error("Owner outbox binding changed.");
       const known = refusals.get(held);
       if (known) {
         // A refusal already received completes; it never reaches admission again.
         if (refusalOutstanding(pending, known)) {
           await quarantine(known);
           adoption.applied();
-          return {admittedEntries, hasMore: true, retryReady: true};
+          return { admittedEntries, hasMore: true, retryReady: true };
         }
         refusals.recorded(held, known);
       }
-      if (pending.state === "quarantined" && (!pending.entry || pending.entry.deliveryId !== pending.retryDeliveryId)) {adoption.applied(); return {admittedEntries, hasMore: false};}
-      if (!pending.entry) {if (!receiptFirst) adoption.applied(); return {admittedEntries, hasMore: false};}
+      if (
+        pending.state === "quarantined" &&
+        (!pending.entry || pending.entry.deliveryId !== pending.retryDeliveryId)
+      ) {
+        adoption.applied();
+        return { admittedEntries, hasMore: false };
+      }
+      if (!pending.entry) {
+        if (!receiptFirst) adoption.applied();
+        return { admittedEntries, hasMore: false };
+      }
       const entry = pending.entry;
       // The seed is the queue's first entry, so a later head proves it applied
       // when entries are applied first. Another adoption's key here means this
       // queue is not the one recorded.
       const seed = entry.appendKey === adoptionSeedKey(adoption, entry.updateDigest);
-      if (!seed && entry.appendKey.startsWith("owner-adoption:")) throw new Error("Owner outbox holds another adoption's seed.");
+      if (!seed && entry.appendKey.startsWith("owner-adoption:"))
+        throw new Error("Owner outbox holds another adoption's seed.");
       if (!seed && !receiptFirst) adoption.applied();
       // The engine's entry names the seed's place in its outbox.
-      const acknowledgeFirst = seed && receiptFirst?.deliveryId(entry.sequence) === entry.deliveryId && receiptFirst.updateDigest === entry.updateDigest;
-      if (seed && service && !acknowledgeFirst) throw new Error("Service seed delivery is unavailable.");
+      const acknowledgeFirst =
+        seed &&
+        receiptFirst?.deliveryId(entry.sequence) === entry.deliveryId &&
+        receiptFirst.updateDigest === entry.updateDigest;
+      if (seed && service && !acknowledgeFirst)
+        throw new Error("Service seed delivery is unavailable.");
       const actor = admittedOwner(storage, admission, binding.workspaceId);
-      const document = {workspaceId: binding.workspaceId,mainVersionId: binding.mainVersionId,objectId: binding.objectId,lineageClaimId: binding.lineageClaimId};
-      const current = storage.resolveCurrentLiveDocumentBinding({document,actor}, admission.activation);
-      if (current.kind !== "current" || !isDeepStrictEqual(current.host,host) || !isDeepStrictEqual(current.binding,binding)) throw new Error("Owner standing changed.");
-      const cut = storage.readLiveUpdateJournalCut({document});
+      const document = {
+        workspaceId: binding.workspaceId,
+        mainVersionId: binding.mainVersionId,
+        objectId: binding.objectId,
+        lineageClaimId: binding.lineageClaimId,
+      };
+      const current = storage.resolveCurrentLiveDocumentBinding(
+        { document, actor },
+        admission.activation,
+      );
+      if (
+        current.kind !== "current" ||
+        !isDeepStrictEqual(current.host, host) ||
+        !isDeepStrictEqual(current.binding, binding)
+      )
+        throw new Error("Owner standing changed.");
+      const cut = storage.readLiveUpdateJournalCut({ document });
       if (cut.kind !== "cut") throw new Error("Owner journal is unavailable.");
       const declared = entry.agentDeclaration;
       const trustedAccount = await admission.trustedAccount(current.authority.principalId);
       check();
-      if ((entry.personEdit || declared) && !trustedAccount) return {admittedEntries, hasMore: true};
-      if (trustedAccount && trustedAccount.accountId !== current.authority.principalId) throw new Error("Owner account changed.");
-      const authorContext = entry.personEdit || declared ? {kind: "account" as const, accountId: trustedAccount!.accountId,
-        ...(declared ? {agent: {agentId: declared.agentId, ...(declared.onBehalfOf !== null ? {onBehalfOf: declared.onBehalfOf} : {}), depth: declared.depth}} : {})} : undefined;
+      if ((entry.personEdit || declared) && !trustedAccount)
+        return { admittedEntries, hasMore: true };
+      if (trustedAccount && trustedAccount.accountId !== current.authority.principalId)
+        throw new Error("Owner account changed.");
+      const authorContext =
+        entry.personEdit || declared
+          ? {
+              kind: "account" as const,
+              accountId: trustedAccount!.accountId,
+              ...(declared
+                ? {
+                    agent: {
+                      agentId: declared.agentId,
+                      ...(declared.onBehalfOf !== null ? { onBehalfOf: declared.onBehalfOf } : {}),
+                      depth: declared.depth,
+                    },
+                  }
+                : {}),
+            }
+          : undefined;
       // Only the relay attributes work to a personal agent, so this refusal is final, as the journal's would be.
       if (claimsPersonalAgent(authorContext)) {
-        await quarantine(refusals.receive(held, {deliveryId: entry.deliveryId, reason: "provenance-refused"}));
+        await quarantine(
+          refusals.receive(held, { deliveryId: entry.deliveryId, reason: "provenance-refused" }),
+        );
         adoption.applied();
-        return {admittedEntries, hasMore: false};
+        return { admittedEntries, hasMore: false };
       }
-      const validation = await admission.validate({document,currentPath: binding.currentPath,checkpoint: cut.cut.checkpoint.bytes,
-        suffix: cut.cut.suffix.map(row => row.bytes),candidate: entry.update,
-        retainStateUpdate: liveAuthorCheckpointAnticipated(cut.cut.suffix.map(row => row.metadata), []) || liveAuthorCheckpointAnticipated(cut.cut.suffix.map(row => row.metadata),
-          limitLiveDeclaredAgents(cut.cut.suffix.map(row => row.metadata), current.authority,
-            deriveLiveAuthorSnapshot(storage as StorageContext, current.authority, authorContext, trustedAccount)))}, signal);
+      const validation = await admission.validate(
+        {
+          document,
+          currentPath: binding.currentPath,
+          checkpoint: cut.cut.checkpoint.bytes,
+          suffix: cut.cut.suffix.map((row) => row.bytes),
+          candidate: entry.update,
+          retainStateUpdate:
+            liveAuthorCheckpointAnticipated(
+              cut.cut.suffix.map((row) => row.metadata),
+              [],
+            ) ||
+            liveAuthorCheckpointAnticipated(
+              cut.cut.suffix.map((row) => row.metadata),
+              limitLiveDeclaredAgents(
+                cut.cut.suffix.map((row) => row.metadata),
+                current.authority,
+                deriveLiveAuthorSnapshot(
+                  storage as StorageContext,
+                  current.authority,
+                  authorContext,
+                  trustedAccount,
+                ),
+              ),
+            ),
+        },
+        signal,
+      );
       check();
       if (validation.kind === "retry") {
-        await validation.waitForCapacity(signal); check();
-        return {admittedEntries, hasMore: true, retryReady: true};
+        await validation.waitForCapacity(signal);
+        check();
+        return { admittedEntries, hasMore: true, retryReady: true };
       }
-      const committed = storage.commitLiveUpdateJournal({host,actor,expectedAuthority: current.authority,
-        trustedAccount,
-        metadata: {deliveryId: entry.deliveryId,updateDigest: entry.updateDigest,binding,...(authorContext ? {authorContext} : {})},
-        cutToken: cut.cut,validation,updateBytes: entry.update,receivedAtMs: Date.now()}, admission.activation);
-      if (committed.result.kind === "retry") return {admittedEntries, hasMore: true, retryReady: true};
+      const committed = storage.commitLiveUpdateJournal(
+        {
+          host,
+          actor,
+          expectedAuthority: current.authority,
+          trustedAccount,
+          metadata: {
+            deliveryId: entry.deliveryId,
+            updateDigest: entry.updateDigest,
+            binding,
+            ...(authorContext ? { authorContext } : {}),
+          },
+          cutToken: cut.cut,
+          validation,
+          updateBytes: entry.update,
+          receivedAtMs: Date.now(),
+        },
+        admission.activation,
+      );
+      if (committed.result.kind === "retry")
+        return { admittedEntries, hasMore: true, retryReady: true };
       if (committed.result.kind !== "accepted") {
         // Final refusals of this candidate freeze its whole queue. Contention returned retry above;
         // validator integration and admitted-cut failures threw in storage.
-        if (["provenance-refused", "delivery-conflict", "capacity-refused", "invalid-update"].includes(committed.result.reason)) {
-          await quarantine(refusals.receive(held, {deliveryId: entry.deliveryId, reason: committed.result.reason}));
+        if (
+          [
+            "provenance-refused",
+            "delivery-conflict",
+            "capacity-refused",
+            "invalid-update",
+          ].includes(committed.result.reason)
+        ) {
+          await quarantine(
+            refusals.receive(held, {
+              deliveryId: entry.deliveryId,
+              reason: committed.result.reason,
+            }),
+          );
           adoption.applied();
-          return {admittedEntries, hasMore: false};
+          return { admittedEntries, hasMore: false };
         }
         throw new Error("Owner update admission refused.");
       }
       const receipt = committed.result.receipt;
-      if (acknowledgeFirst) {await outbox.acknowledge(outboxId,[receipt]); check(); admittedEntries++;}
-      const applied = await options.applyThrough(receipt); check();
-      if (applied === null) return {admittedEntries, hasMore: true};
+      if (acknowledgeFirst) {
+        await outbox.acknowledge(outboxId, [receipt]);
+        check();
+        admittedEntries++;
+      }
+      const applied = await options.applyThrough(receipt);
+      check();
+      if (applied === null) return { admittedEntries, hasMore: true };
       const ack = parseLiveUpdateHostApplicationAck(applied);
-      if (ack.deliveryId !== receipt.deliveryId || ack.updateDigest !== receipt.updateDigest ||
-        ack.journalCursor !== receipt.journalCursor || ack.acceptingHostEpoch !== receipt.acceptingHostEpoch) {
+      if (
+        ack.deliveryId !== receipt.deliveryId ||
+        ack.updateDigest !== receipt.updateDigest ||
+        ack.journalCursor !== receipt.journalCursor ||
+        ack.acceptingHostEpoch !== receipt.acceptingHostEpoch
+      ) {
         throw new Error("Native application ACK identity changed.");
       }
       if (seed) adoption.applied();
-      if (!acknowledgeFirst) {await outbox.acknowledge(outboxId,[receipt]); check(); admittedEntries++;}
+      if (!acknowledgeFirst) {
+        await outbox.acknowledge(outboxId, [receipt]);
+        check();
+        admittedEntries++;
+      }
     }
     const remaining = await readStatus();
     if (remaining.outboxId !== outboxId) throw new Error("Owner outbox changed.");
-    return {admittedEntries, hasMore: remaining.pendingBytes > 0};
+    return { admittedEntries, hasMore: remaining.pendingBytes > 0 };
   } catch (error) {
     if (error === byteBudget && admittedEntries > 0) {
       const remaining = await readStatus();
       if (remaining.outboxId !== outboxId) throw new Error("Owner outbox changed.");
-      return {admittedEntries, hasMore: remaining.pendingBytes > 0};
+      return { admittedEntries, hasMore: remaining.pendingBytes > 0 };
     }
     throw error;
-  } finally { outbox.dispose(); refusals.release(held); }
+  } finally {
+    outbox.dispose();
+    refusals.release(held);
+  }
 }

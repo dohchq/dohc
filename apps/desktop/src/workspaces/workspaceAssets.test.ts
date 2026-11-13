@@ -70,24 +70,19 @@ describe("resolveWorkspaceFile containment", () => {
     );
     // And the read paths built on it refuse too — nothing leaks via media/text.
     await expect(
-      prepareWorkspaceFileRead(root, "notes/link.txt").then((read) =>
-        read.readAsset(),
-      ),
+      prepareWorkspaceFileRead(root, "notes/link.txt").then((read) => read.readAsset()),
     ).rejects.toThrow(/escapes the workspace/);
-    await expect(readWorkspaceText(root, "notes/link.txt")).rejects.toThrow(/escapes the workspace/);
+    await expect(readWorkspaceText(root, "notes/link.txt")).rejects.toThrow(
+      /escapes the workspace/,
+    );
   });
 
   it("returns the resolved source path with bytes read through an in-workspace alias", async () => {
     const root = await makeWorkspace();
     await writeFile(join(root, "notes", "data.csv"), "id,value\n1,canonical\n");
-    await symlink(
-      join(root, "notes", "data.csv"),
-      join(root, "notes", "notes.json"),
-    );
+    await symlink(join(root, "notes", "data.csv"), join(root, "notes", "notes.json"));
 
-    const source = await (
-      await prepareWorkspaceFileRead(root, "notes/notes.json")
-    ).readAsset();
+    const source = await (await prepareWorkspaceFileRead(root, "notes/notes.json")).readAsset();
 
     expect(source.path).toBe("notes/data.csv");
     expect(source.bytes.toString("utf8")).toBe("id,value\n1,canonical\n");
@@ -98,9 +93,7 @@ describe("resolveWorkspaceFile containment", () => {
     await writeFile(join(root, "notes", "blob"), "image bytes");
     await symlink(join(root, "notes", "blob"), join(root, "notes", "cover.png"));
 
-    const source = await (
-      await prepareWorkspaceFileRead(root, "notes/cover.png")
-    ).readAsset();
+    const source = await (await prepareWorkspaceFileRead(root, "notes/cover.png")).readAsset();
 
     expect(source.path).toBe("notes/blob");
     expect(source.mediaType).toBe("image/png");
@@ -116,18 +109,16 @@ describe("resolveWorkspaceFile containment", () => {
 
     const thenable = { then: vi.fn() };
     await expect(
-      (prepared.withVerifiedPathSync as unknown as (
-        run: () => unknown,
-      ) => Promise<unknown>)(() => thenable),
+      (prepared.withVerifiedPathSync as unknown as (run: () => unknown) => Promise<unknown>)(
+        () => thenable,
+      ),
     ).rejects.toThrow(/finish synchronously/i);
     expect(thenable.then).not.toHaveBeenCalled();
 
     const replacement = join(root, "notes", "replacement.md");
     await writeFile(replacement, "replacement");
     await expect(
-      (prepared.withVerifiedPathSync as unknown as (
-        run: () => unknown,
-      ) => Promise<unknown>)(() => {
+      (prepared.withVerifiedPathSync as unknown as (run: () => unknown) => Promise<unknown>)(() => {
         rmSync(join(root, "notes", "a.md"));
         symlinkSync(replacement, join(root, "notes", "a.md"));
         return thenable;
@@ -166,21 +157,14 @@ describe("size caps", () => {
     await writeFile(big, "");
     await truncate(big, 64 * 1024 * 1024 + 1);
     await expect(
-      prepareWorkspaceFileRead(root, "notes/huge.png").then((read) =>
-        read.readAsset(),
-      ),
+      prepareWorkspaceFileRead(root, "notes/huge.png").then((read) => read.readAsset()),
     ).rejects.toThrow(/too large to serve/);
   });
 
   it("refuses an editor write above the 2MB text cap before touching the file", async () => {
     const root = await makeWorkspace();
     await expect(
-      writeWorkspaceText(
-        root,
-        "notes/a.md",
-        "x".repeat(2 * 1024 * 1024 + 1),
-        INITIAL_CONTENT_HASH,
-      ),
+      writeWorkspaceText(root, "notes/a.md", "x".repeat(2 * 1024 * 1024 + 1), INITIAL_CONTENT_HASH),
     ).rejects.toThrow(/editor limit/);
     // The file is untouched by the refused write.
     expect(await readFile(join(root, "notes", "a.md"), "utf8")).toBe("# A\n");
@@ -224,12 +208,7 @@ describe("writeWorkspaceText atomic replacement + optimistic conflicts", () => {
     if (before.truncated) throw new Error("test fixture must be a complete read");
 
     const edited = "# Café 😀\n";
-    const result = await writeWorkspaceText(
-      root,
-      "notes/a.md",
-      edited,
-      before.contentHash,
-    );
+    const result = await writeWorkspaceText(root, "notes/a.md", edited, before.contentHash);
 
     expect(result).toEqual({ status: "written", contentHash: contentHash(edited) });
     expect(await readFile(join(root, "notes", "a.md"), "utf8")).toBe(edited);
@@ -247,12 +226,7 @@ describe("writeWorkspaceText atomic replacement + optimistic conflicts", () => {
     if (before.truncated) throw new Error("test fixture must be a complete read");
     await writeFile(join(root, "notes", "a.md"), "external\n", "utf8");
 
-    const result = await writeWorkspaceText(
-      root,
-      "notes/a.md",
-      "local\n",
-      before.contentHash,
-    );
+    const result = await writeWorkspaceText(root, "notes/a.md", "local\n", before.contentHash);
 
     expect(result).toEqual({
       status: "conflict",
@@ -276,12 +250,7 @@ describe("writeWorkspaceText atomic replacement + optimistic conflicts", () => {
 
   it("rejects a stale token after a successful write without changing the file", async () => {
     const root = await makeWorkspace();
-    const first = await writeWorkspaceText(
-      root,
-      "notes/a.md",
-      "first\n",
-      INITIAL_CONTENT_HASH,
-    );
+    const first = await writeWorkspaceText(root, "notes/a.md", "first\n", INITIAL_CONTENT_HASH);
     expect(first).toEqual({
       status: "written",
       contentHash: contentHash("first\n"),
@@ -321,79 +290,112 @@ describe("writeWorkspaceText atomic replacement + optimistic conflicts", () => {
     expect(committed).toEqual(staged.map((entry) => entry.temp));
   });
 
-  it.each([undefined, "EPERM", "EBUSY", "EACCES"])("writes after transient Windows rename errors (%s) when the preimage is unchanged", async (code) => {
-    const error = Object.assign(new Error("target locked"), { code });
-    const rename = vi.fn(async (_source: string, _destination: string) => {
-      if (code && rename.mock.calls.length <= 3) throw error;
-    });
-    const writeFile = vi.fn(async (_temp: string, _text: string) => undefined);
-    const remove = vi.fn(async (_temp: string) => undefined);
-    const wait = vi.fn(async (_milliseconds: number) => undefined);
-    const readCurrentContentHash = vi.fn(async () => INITIAL_CONTENT_HASH);
-    const writer = createAtomicTextWriter({
-      now: () => 1_000, uniqueId: () => "fixed-id",
-      writeFile, rename, remove, readCurrentContentHash, wait, platform: "win32",
-    });
+  it.each([undefined, "EPERM", "EBUSY", "EACCES"])(
+    "writes after transient Windows rename errors (%s) when the preimage is unchanged",
+    async (code) => {
+      const error = Object.assign(new Error("target locked"), { code });
+      const rename = vi.fn(async (_source: string, _destination: string) => {
+        if (code && rename.mock.calls.length <= 3) throw error;
+      });
+      const writeFile = vi.fn(async (_temp: string, _text: string) => undefined);
+      const remove = vi.fn(async (_temp: string) => undefined);
+      const wait = vi.fn(async (_milliseconds: number) => undefined);
+      const readCurrentContentHash = vi.fn(async () => INITIAL_CONTENT_HASH);
+      const writer = createAtomicTextWriter({
+        now: () => 1_000,
+        uniqueId: () => "fixed-id",
+        writeFile,
+        rename,
+        remove,
+        readCurrentContentHash,
+        wait,
+        platform: "win32",
+      });
 
-    await expect(writer("C:/workspace/notes/a.md", "local", INITIAL_CONTENT_HASH))
-      .resolves.toEqual({ status: "written", contentHash: contentHash("local") });
+      await expect(
+        writer("C:/workspace/notes/a.md", "local", INITIAL_CONTENT_HASH),
+      ).resolves.toEqual({ status: "written", contentHash: contentHash("local") });
 
-    expect(rename).toHaveBeenCalledTimes(code ? 4 : 1);
-    expect(wait.mock.calls).toEqual(code ? [[8], [16], [32]] : []);
-    expect(writeFile).toHaveBeenCalledTimes(1);
-    expect(readCurrentContentHash).toHaveBeenCalledTimes(code ? 4 : 1);
-    expect(remove).not.toHaveBeenCalled();
-    for (const call of rename.mock.calls) {
-      expect(call).toEqual([writeFile.mock.calls[0][0], "C:/workspace/notes/a.md"]);
-    }
-  });
+      expect(rename).toHaveBeenCalledTimes(code ? 4 : 1);
+      expect(wait.mock.calls).toEqual(code ? [[8], [16], [32]] : []);
+      expect(writeFile).toHaveBeenCalledTimes(1);
+      expect(readCurrentContentHash).toHaveBeenCalledTimes(code ? 4 : 1);
+      expect(remove).not.toHaveBeenCalled();
+      for (const call of rename.mock.calls) {
+        expect(call).toEqual([writeFile.mock.calls[0][0], "C:/workspace/notes/a.md"]);
+      }
+    },
+  );
 
-  it.each(["EPERM", "EBUSY", "EACCES"])("preserves an external save and removes the temp when the preimage changes during a %s retry", async (code) => {
-    const root = await makeWorkspace();
-    const target = join(root, "notes", "a.md");
-    const external = "external save\n";
-    const error = Object.assign(new Error("target locked"), { code });
-    const replace = vi.fn(async (temp: string, destination: string) => {
-      if (replace.mock.calls.length === 1) throw error;
-      await rename(temp, destination);
-    });
-    const wait = vi.fn(async (_milliseconds: number) => {
-      await writeFile(target, external);
-    });
-    const remove = vi.fn(async (temp: string) => rm(temp, { force: true }));
-    const readCurrentContentHash = vi.fn(async (path: string) => contentHash(await readFile(path, "utf8")));
-    const writer = createAtomicTextWriter({
-      now: () => 1_000, uniqueId: () => "fixed-id",
-      writeFile: async (temp, text) => writeFile(temp, text),
-      rename: replace, remove, readCurrentContentHash, wait, platform: "win32",
-    });
+  it.each(["EPERM", "EBUSY", "EACCES"])(
+    "preserves an external save and removes the temp when the preimage changes during a %s retry",
+    async (code) => {
+      const root = await makeWorkspace();
+      const target = join(root, "notes", "a.md");
+      const external = "external save\n";
+      const error = Object.assign(new Error("target locked"), { code });
+      const replace = vi.fn(async (temp: string, destination: string) => {
+        if (replace.mock.calls.length === 1) throw error;
+        await rename(temp, destination);
+      });
+      const wait = vi.fn(async (_milliseconds: number) => {
+        await writeFile(target, external);
+      });
+      const remove = vi.fn(async (temp: string) => rm(temp, { force: true }));
+      const readCurrentContentHash = vi.fn(async (path: string) =>
+        contentHash(await readFile(path, "utf8")),
+      );
+      const writer = createAtomicTextWriter({
+        now: () => 1_000,
+        uniqueId: () => "fixed-id",
+        writeFile: async (temp, text) => writeFile(temp, text),
+        rename: replace,
+        remove,
+        readCurrentContentHash,
+        wait,
+        platform: "win32",
+      });
 
-    await expect(writer(target, "local", INITIAL_CONTENT_HASH)).resolves.toEqual({
-      status: "conflict", currentContentHash: contentHash(external),
-    });
-    expect(await readFile(target, "utf8")).toBe(external);
-    expect(await readdir(dirname(target))).toEqual(["a.md"]);
-    expect(replace).toHaveBeenCalledTimes(1);
-    expect(wait.mock.calls).toEqual([[8]]);
-    expect(readCurrentContentHash).toHaveBeenCalledTimes(2);
-    expect(remove).toHaveBeenCalledOnce();
-    expect(remove).toHaveBeenCalledWith(replace.mock.calls[0][0]);
-  });
+      await expect(writer(target, "local", INITIAL_CONTENT_HASH)).resolves.toEqual({
+        status: "conflict",
+        currentContentHash: contentHash(external),
+      });
+      expect(await readFile(target, "utf8")).toBe(external);
+      expect(await readdir(dirname(target))).toEqual(["a.md"]);
+      expect(replace).toHaveBeenCalledTimes(1);
+      expect(wait.mock.calls).toEqual([[8]]);
+      expect(readCurrentContentHash).toHaveBeenCalledTimes(2);
+      expect(remove).toHaveBeenCalledOnce();
+      expect(remove).toHaveBeenCalledWith(replace.mock.calls[0][0]);
+    },
+  );
 
   it.each([
-    ["linux", "EPERM"], ["darwin", "EBUSY"], ["linux", "EACCES"], ["win32", "ENOENT"],
+    ["linux", "EPERM"],
+    ["darwin", "EBUSY"],
+    ["linux", "EACCES"],
+    ["win32", "ENOENT"],
   ] as const)("fails immediately for %s rename errors with code %s", async (platform, code) => {
     const error = Object.assign(new Error("rename failed"), { code });
-    const rename = vi.fn(async (_source: string, _destination: string) => { throw error; });
+    const rename = vi.fn(async (_source: string, _destination: string) => {
+      throw error;
+    });
     const wait = vi.fn(async (_milliseconds: number) => undefined);
     const remove = vi.fn(async (_temp: string) => undefined);
     const writer = createAtomicTextWriter({
-      now: () => 1_000, uniqueId: () => "fixed-id",
-      writeFile: async () => undefined, rename, remove,
-      readCurrentContentHash: async () => INITIAL_CONTENT_HASH, wait, platform,
+      now: () => 1_000,
+      uniqueId: () => "fixed-id",
+      writeFile: async () => undefined,
+      rename,
+      remove,
+      readCurrentContentHash: async () => INITIAL_CONTENT_HASH,
+      wait,
+      platform,
     });
 
-    await expect(writer("C:/workspace/notes/a.md", "local", INITIAL_CONTENT_HASH)).rejects.toBe(error);
+    await expect(writer("C:/workspace/notes/a.md", "local", INITIAL_CONTENT_HASH)).rejects.toBe(
+      error,
+    );
     expect(rename).toHaveBeenCalledTimes(1);
     expect(wait).not.toHaveBeenCalled();
     expect(remove).toHaveBeenCalledTimes(1);
@@ -402,18 +404,28 @@ describe("writeWorkspaceText atomic replacement + optimistic conflicts", () => {
 
   it("cleans the staged text after exhausting Windows rename retries", async () => {
     const errors = Array.from({ length: 6 }, (_, attempt) =>
-      Object.assign(new Error(`locked on attempt ${attempt}`), { code: "EPERM" }));
-    const rename = vi.fn(async (_source: string, _destination: string) => { throw errors[rename.mock.calls.length - 1]; });
+      Object.assign(new Error(`locked on attempt ${attempt}`), { code: "EPERM" }),
+    );
+    const rename = vi.fn(async (_source: string, _destination: string) => {
+      throw errors[rename.mock.calls.length - 1];
+    });
     const wait = vi.fn(async (_milliseconds: number) => undefined);
     const remove = vi.fn(async (_temp: string) => undefined);
     const readCurrentContentHash = vi.fn(async () => INITIAL_CONTENT_HASH);
     const writer = createAtomicTextWriter({
-      now: () => 1_000, uniqueId: () => "fixed-id",
-      writeFile: async () => undefined, rename, remove, readCurrentContentHash,
-      wait, platform: "win32",
+      now: () => 1_000,
+      uniqueId: () => "fixed-id",
+      writeFile: async () => undefined,
+      rename,
+      remove,
+      readCurrentContentHash,
+      wait,
+      platform: "win32",
     });
 
-    await expect(writer("C:/workspace/notes/a.md", "local", INITIAL_CONTENT_HASH)).rejects.toBe(errors[5]);
+    await expect(writer("C:/workspace/notes/a.md", "local", INITIAL_CONTENT_HASH)).rejects.toBe(
+      errors[5],
+    );
     expect(rename).toHaveBeenCalledTimes(6);
     expect(wait.mock.calls).toEqual([[8], [16], [32], [64], [128]]);
     expect(readCurrentContentHash).toHaveBeenCalledTimes(6);
@@ -440,12 +452,12 @@ describe("writeWorkspaceText atomic replacement + optimistic conflicts", () => {
       readCurrentContentHash: async () => contentHash("external"),
     });
 
-    await expect(
-      writer("C:/workspace/notes/a.md", "local", INITIAL_CONTENT_HASH),
-    ).resolves.toEqual({
-      status: "conflict",
-      currentContentHash: contentHash("external"),
-    });
+    await expect(writer("C:/workspace/notes/a.md", "local", INITIAL_CONTENT_HASH)).resolves.toEqual(
+      {
+        status: "conflict",
+        currentContentHash: contentHash("external"),
+      },
+    );
     expect(staged).toHaveLength(1);
     expect(committed).toHaveLength(0);
     expect(removed).toEqual(staged);
@@ -472,9 +484,9 @@ describe("writeWorkspaceText atomic replacement + optimistic conflicts", () => {
       readCurrentContentHash: async () => INITIAL_CONTENT_HASH,
     });
 
-    await expect(
-      writer("C:/workspace/notes/a.md", "rejected", INITIAL_CONTENT_HASH),
-    ).rejects.toBe(writeError);
+    await expect(writer("C:/workspace/notes/a.md", "rejected", INITIAL_CONTENT_HASH)).rejects.toBe(
+      writeError,
+    );
     expect(writes).toEqual(["rejected"]);
     expect(commits).toHaveLength(0);
     expect(removed).toHaveLength(1);
@@ -525,19 +537,9 @@ describe("writeWorkspaceText atomic replacement + optimistic conflicts", () => {
       },
     });
 
-    const older = access.write(
-      "C:/workspace",
-      "notes/alias.md",
-      "older",
-      INITIAL_CONTENT_HASH,
-    );
+    const older = access.write("C:/workspace", "notes/alias.md", "older", INITIAL_CONTENT_HASH);
     await vi.waitFor(() => expect(resolutions).toBe(1));
-    const newer = access.write(
-      "C:/workspace",
-      "notes/a.md",
-      "newer",
-      INITIAL_CONTENT_HASH,
-    );
+    const newer = access.write("C:/workspace", "notes/a.md", "newer", INITIAL_CONTENT_HASH);
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(resolutions).toBe(1);
 
@@ -570,21 +572,11 @@ describe("writeWorkspaceText atomic replacement + optimistic conflicts", () => {
       },
     });
 
-    const older = access.write(
-      "C:/workspace",
-      "notes/alias.md",
-      "older",
-      INITIAL_CONTENT_HASH,
-    );
+    const older = access.write("C:/workspace", "notes/alias.md", "older", INITIAL_CONTENT_HASH);
     const olderResult = older.catch((error: unknown) => error);
     await vi.waitFor(() => expect(writes).toEqual(["older"]));
 
-    const newer = access.write(
-      "C:/workspace",
-      "notes/a.md",
-      "newer",
-      INITIAL_CONTENT_HASH,
-    );
+    const newer = access.write("C:/workspace", "notes/a.md", "newer", INITIAL_CONTENT_HASH);
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(writes).toEqual(["older"]);
 
@@ -621,19 +613,9 @@ describe("writeWorkspaceText atomic replacement + optimistic conflicts", () => {
       },
     });
 
-    const first = access.write(
-      "C:/workspace",
-      "notes/a.md",
-      "a",
-      INITIAL_CONTENT_HASH,
-    );
+    const first = access.write("C:/workspace", "notes/a.md", "a", INITIAL_CONTENT_HASH);
     await vi.waitFor(() => expect(writes).toHaveLength(1));
-    const second = access.write(
-      "C:/workspace",
-      "notes/b.md",
-      "b",
-      INITIAL_CONTENT_HASH,
-    );
+    const second = access.write("C:/workspace", "notes/b.md", "b", INITIAL_CONTENT_HASH);
 
     await vi.waitFor(() => expect(writes).toHaveLength(2));
     expect(resolutions).toEqual(["notes/a.md", "notes/b.md"]);
@@ -662,18 +644,8 @@ describe("writeWorkspaceText atomic replacement + optimistic conflicts", () => {
       },
     });
 
-    const first = access.write(
-      "C:/workspace-a",
-      "notes/a.md",
-      "a",
-      INITIAL_CONTENT_HASH,
-    );
-    const second = access.write(
-      "C:/workspace-b",
-      "notes/b.md",
-      "b",
-      INITIAL_CONTENT_HASH,
-    );
+    const first = access.write("C:/workspace-a", "notes/a.md", "a", INITIAL_CONTENT_HASH);
+    const second = access.write("C:/workspace-b", "notes/b.md", "b", INITIAL_CONTENT_HASH);
     await vi.waitFor(() => expect(started).toHaveLength(2));
 
     release();
@@ -709,12 +681,7 @@ describe("writeWorkspaceText atomic replacement + optimistic conflicts", () => {
       },
     });
 
-    const writing = access.write(
-      "C:/workspace",
-      "notes/a.md",
-      "after",
-      contentHash("before"),
-    );
+    const writing = access.write("C:/workspace", "notes/a.md", "after", contentHash("before"));
     await writeStarted;
     const reading = access.read("C:/workspace", "notes/a.md");
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -762,12 +729,7 @@ describe("writeWorkspaceText atomic replacement + optimistic conflicts", () => {
 
     const reading = access.read("C:/workspace", "notes/alias.md");
     await readStarted;
-    const writing = access.write(
-      "C:/workspace",
-      "notes/a.md",
-      "after",
-      contentHash("before"),
-    );
+    const writing = access.write("C:/workspace", "notes/a.md", "after", contentHash("before"));
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(operations).toEqual(["read"]);
 
@@ -810,12 +772,7 @@ describe("writeWorkspaceText atomic replacement + optimistic conflicts", () => {
     const reading = access.read("C:/workspace", "notes/a.md");
     const readResult = reading.catch((error: unknown) => error);
     await readStarted;
-    const writing = access.write(
-      "C:/workspace",
-      "notes/alias.md",
-      "after",
-      contentHash("before"),
-    );
+    const writing = access.write("C:/workspace", "notes/alias.md", "after", contentHash("before"));
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(writes).toEqual([]);
 
@@ -887,9 +844,7 @@ describe("writeWorkspaceText atomic replacement + optimistic conflicts", () => {
           "C:/other-workspace/notes/a.md",
           async () => "wrong-root",
         ),
-      ).rejects.toThrow(
-        "Workspace operation lease is inactive or belongs to another root.",
-      );
+      ).rejects.toThrow("Workspace operation lease is inactive or belongs to another root.");
       await expect(
         access.orderedOnResolvedTargetInLease(
           "C:/workspace",
@@ -907,9 +862,7 @@ describe("writeWorkspaceText atomic replacement + optimistic conflicts", () => {
         "C:/workspace/notes/a.md",
         async () => "late",
       ),
-    ).rejects.toThrow(
-      "Workspace operation lease is inactive or belongs to another root.",
-    );
+    ).rejects.toThrow("Workspace operation lease is inactive or belongs to another root.");
   });
 
   it.runIf(process.platform === "win32")(
@@ -957,27 +910,18 @@ describe("writeWorkspaceText atomic replacement + optimistic conflicts", () => {
     });
     const order: string[] = [];
 
-    const first = access.orderedOnResolvedTarget(
-      rootPath,
-      resolvedTarget,
-      async () => {
-        order.push("first:start");
-        markFirstStarted();
-        await firstHeld;
-        order.push("first:end");
-      },
-    );
+    const first = access.orderedOnResolvedTarget(rootPath, resolvedTarget, async () => {
+      order.push("first:start");
+      markFirstStarted();
+      await firstHeld;
+      order.push("first:end");
+    });
     await firstStarted;
     const leased = scheduler.staleSensitiveShared(rootPath, async (lease) => {
       markLeasedAdmitted();
-      return access.orderedOnResolvedTargetInLease(
-        rootPath,
-        lease,
-        resolvedTarget,
-        async () => {
-          order.push("leased");
-        },
-      );
+      return access.orderedOnResolvedTargetInLease(rootPath, lease, resolvedTarget, async () => {
+        order.push("leased");
+      });
     });
     await leasedAdmitted;
 
@@ -1069,11 +1013,7 @@ describe("writeWorkspaceText atomic replacement + optimistic conflicts", () => {
       order.push("ordinary-shape:target");
       return "ordinary";
     });
-    const ordinary = access.orderedOnResolvedTarget(
-      rootPath,
-      resolvedTarget,
-      ordinaryRun,
-    );
+    const ordinary = access.orderedOnResolvedTarget(rootPath, resolvedTarget, ordinaryRun);
 
     releaseShared();
     await exclusiveStarted;
@@ -1090,10 +1030,7 @@ describe("writeWorkspaceText atomic replacement + optimistic conflicts", () => {
     await Promise.all([shared, exclusive]);
     await expect(ordinary).resolves.toBe("ordinary");
     expect(ordinaryRun).toHaveBeenCalledOnce();
-    expect(order.slice(-2)).toEqual([
-      "ordinary-shape:exclusive:end",
-      "ordinary-shape:target",
-    ]);
+    expect(order.slice(-2)).toEqual(["ordinary-shape:exclusive:end", "ordinary-shape:target"]);
   });
 
   it("rejects queued leased target work after its scheduler callback returns", async () => {
@@ -1124,22 +1061,13 @@ describe("writeWorkspaceText atomic replacement + optimistic conflicts", () => {
     const escapedRun = vi.fn(async () => "escaped");
     let escaped!: Promise<string>;
 
-    const first = access.orderedOnResolvedTarget(
-      rootPath,
-      resolvedTarget,
-      async () => {
-        markFirstStarted();
-        await firstHeld;
-      },
-    );
+    const first = access.orderedOnResolvedTarget(rootPath, resolvedTarget, async () => {
+      markFirstStarted();
+      await firstHeld;
+    });
     await firstStarted;
     await scheduler.staleSensitiveShared(rootPath, async (lease) => {
-      escaped = access.orderedOnResolvedTargetInLease(
-        rootPath,
-        lease,
-        resolvedTarget,
-        escapedRun,
-      );
+      escaped = access.orderedOnResolvedTargetInLease(rootPath, lease, resolvedTarget, escapedRun);
     });
 
     const rejected = expect(escaped).rejects.toThrow(
@@ -1168,14 +1096,11 @@ describe("writeWorkspaceText atomic replacement + optimistic conflicts", () => {
 
     let writeSettled = false;
     let readSettled = false;
-    const writing = writeWorkspaceText(
-      root,
-      "notes/a.md",
-      "after\n",
-      INITIAL_CONTENT_HASH,
-    ).finally(() => {
-      writeSettled = true;
-    });
+    const writing = writeWorkspaceText(root, "notes/a.md", "after\n", INITIAL_CONTENT_HASH).finally(
+      () => {
+        writeSettled = true;
+      },
+    );
     const reading = readWorkspaceText(root, "notes/a.md").finally(() => {
       readSettled = true;
     });
@@ -1216,11 +1141,7 @@ describe("writeWorkspaceText atomic replacement + optimistic conflicts", () => {
     await moveStarted;
 
     let assetSettled = false;
-    const assetResult = writeWorkspaceAsset(
-      root,
-      "notes/image.png",
-      new Uint8Array([1, 2, 3]),
-    )
+    const assetResult = writeWorkspaceAsset(root, "notes/image.png", new Uint8Array([1, 2, 3]))
       .catch((error: unknown) => error)
       .finally(() => {
         assetSettled = true;
@@ -1257,22 +1178,18 @@ describe("writeWorkspaceText atomic replacement + optimistic conflicts", () => {
     await moveStarted;
 
     let assetSettled = false;
-    const asset = writeWorkspaceAsset(
-      root,
-      "notes/image.png",
-      new Uint8Array([1, 2, 3]),
-    ).finally(() => {
-      assetSettled = true;
-    });
+    const asset = writeWorkspaceAsset(root, "notes/image.png", new Uint8Array([1, 2, 3])).finally(
+      () => {
+        assetSettled = true;
+      },
+    );
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(assetSettled).toBe(false);
 
     releaseMove();
     await expect(moveResult).resolves.toBe(mutationError);
     await asset;
-    expect(await readFile(join(root, "notes", "image.png"))).toEqual(
-      Buffer.from([1, 2, 3]),
-    );
+    expect(await readFile(join(root, "notes", "image.png"))).toEqual(Buffer.from([1, 2, 3]));
   });
 
   it("releases a failed exclusive operation so a late draft reaches the unchanged path", async () => {
@@ -1372,9 +1289,7 @@ describe("writeWorkspaceAsset", () => {
     ).rejects.toThrow(
       "An image attachment already exists at assets/pixel.png with different content.",
     );
-    expect(await readFile(join(root, "assets/pixel.png"))).toEqual(
-      Buffer.from([1, 2, 3]),
-    );
+    expect(await readFile(join(root, "assets/pixel.png"))).toEqual(Buffer.from([1, 2, 3]));
     expect(await readdir(join(root, "assets"))).toEqual(["pixel.png"]);
   });
 
@@ -1399,8 +1314,7 @@ describe("writeWorkspaceAsset", () => {
     "maps a %s collision read to a retryable attachment error",
     async (failureKind) => {
       vi.doMock("./boundedFileRead", async (importOriginal) => {
-        const original =
-          await importOriginal<typeof import("./boundedFileRead")>();
+        const original = await importOriginal<typeof import("./boundedFileRead")>();
         const failure =
           failureKind === "changed"
             ? new original.BoundedFileReadChangedError()
@@ -1419,17 +1333,10 @@ describe("writeWorkspaceAsset", () => {
         const collisionWrites = await import("./workspaceAssets");
         const root = await makeWorkspace();
         await mkdir(join(root, "assets"), { recursive: true });
-        await writeFile(
-          join(root, "assets/pixel.png"),
-          new Uint8Array([1, 2, 3]),
-        );
+        await writeFile(join(root, "assets/pixel.png"), new Uint8Array([1, 2, 3]));
 
         await expect(
-          collisionWrites.writeWorkspaceAsset(
-            root,
-            "assets/pixel.png",
-            new Uint8Array([1, 2, 3]),
-          ),
+          collisionWrites.writeWorkspaceAsset(root, "assets/pixel.png", new Uint8Array([1, 2, 3])),
         ).rejects.toThrow(
           "An image attachment changed at assets/pixel.png before this write could finish. Try the action again.",
         );
@@ -1456,11 +1363,7 @@ describe("writeWorkspaceAsset", () => {
       const root = await makeWorkspace();
 
       await expect(
-        fallbackWrites.writeWorkspaceAsset(
-          root,
-          "assets/pixel.png",
-          new Uint8Array([1, 2, 3]),
-        ),
+        fallbackWrites.writeWorkspaceAsset(root, "assets/pixel.png", new Uint8Array([1, 2, 3])),
       ).rejects.toBe(hardLinkUnsupported);
       await expect(readFile(join(root, "assets", "pixel.png"))).rejects.toMatchObject({
         code: "ENOENT",
@@ -1477,9 +1380,7 @@ describe("writeWorkspaceAsset", () => {
 
     await expect(
       writeWorkspaceAsset(root, "notes/a.md", new Uint8Array([1, 2, 3])),
-    ).rejects.toThrow(
-      "The attachment path must end with a supported image extension.",
-    );
+    ).rejects.toThrow("The attachment path must end with a supported image extension.");
     expect(await readFile(join(root, "notes/a.md"), "utf8")).toBe("# A\n");
   });
 
@@ -1490,9 +1391,7 @@ describe("writeWorkspaceAsset", () => {
     await writeWorkspaceAsset(root, `notes/${filename}`, new Uint8Array([1, 2, 3]));
 
     expect(await readFile(join(root, "notes", filename))).toEqual(Buffer.from([1, 2, 3]));
-    expect((await readdir(join(root, "notes"))).sort()).toEqual(
-      ["a.md", filename].sort(),
-    );
+    expect((await readdir(join(root, "notes"))).sort()).toEqual(["a.md", filename].sort());
   });
 
   it("preserves primary contained-write errors when cleanup also fails", async () => {

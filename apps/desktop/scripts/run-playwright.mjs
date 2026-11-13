@@ -67,26 +67,29 @@ export function requirePlaywrightCli(cliPath, resolveCli = playwrightCliPath) {
  * }} [options]
  * @returns {Promise<number>}
  */
-export async function runPlaywright(args, {
-  env = process.env,
-  cliPath,
-  platform = process.platform,
-  spawnImpl = spawn,
-  mkdtempImpl = mkdtempSync,
-  rmImpl = rmSync,
-  onTermination = (forward) => {
-    /** @type {Array<[NodeJS.Signals, () => void]>} */
-    const registered = [];
-    for (const signal of /** @type {NodeJS.Signals[]} */ (["SIGINT", "SIGTERM"])) {
-      const handler = () => forward(signal);
-      registered.push([signal, handler]);
-      process.on(signal, handler);
-    }
-    return () => {
-      for (const [signal, handler] of registered) process.off(signal, handler);
-    };
-  },
-} = {}) {
+export async function runPlaywright(
+  args,
+  {
+    env = process.env,
+    cliPath,
+    platform = process.platform,
+    spawnImpl = spawn,
+    mkdtempImpl = mkdtempSync,
+    rmImpl = rmSync,
+    onTermination = (forward) => {
+      /** @type {Array<[NodeJS.Signals, () => void]>} */
+      const registered = [];
+      for (const signal of /** @type {NodeJS.Signals[]} */ (["SIGINT", "SIGTERM"])) {
+        const handler = () => forward(signal);
+        registered.push([signal, handler]);
+        process.on(signal, handler);
+      }
+      return () => {
+        for (const [signal, handler] of registered) process.off(signal, handler);
+      };
+    },
+  } = {},
+) {
   const cli = requirePlaywrightCli(cliPath);
   const cacheDir = mkdtempImpl(join(tmpdir(), "dohc-playwright-cache-"));
   const child = spawnImpl(process.execPath, [cli, "test", ...args], {
@@ -113,9 +116,7 @@ export async function runPlaywright(args, {
     return signalNumber ? 128 + signalNumber : 1;
   } catch (error) {
     const code =
-      error instanceof Error
-        ? /** @type {NodeJS.ErrnoException} */ (error).code
-        : undefined;
+      error instanceof Error ? /** @type {NodeJS.ErrnoException} */ (error).code : undefined;
     if (code === "ENOENT") {
       throw new Error(
         `Could not launch the Playwright CLI at ${cli}. The e2e scripts need the playwright package installed; run pnpm install.`,

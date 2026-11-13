@@ -23,9 +23,7 @@ function configuredEffectGuard(surface: "preload" | "renderer"): Plugin {
 
 describe("main bundle config", () => {
   it("bundles the raw TypeScript engine client used by desktop dispatch", () => {
-    expect(mainBundledWorkspaceDeps).toContain(
-      "@dohc/workspace-engine-client",
-    );
+    expect(mainBundledWorkspaceDeps).toContain("@dohc/workspace-engine-client");
   });
 });
 
@@ -47,19 +45,11 @@ describe("preload bundle config", () => {
     );
 
     for (const surface of ["preload", "renderer"] as const) {
-      const resolveId = configuredEffectGuard(surface).resolveId as (
-        source: string,
-      ) => unknown;
-      expect(() => resolveId("effect/Schema")).toThrow(
-        `${surface} cannot import effect/Schema`,
-      );
+      const resolveId = configuredEffectGuard(surface).resolveId as (source: string) => unknown;
+      expect(() => resolveId("effect/Schema")).toThrow(`${surface} cannot import effect/Schema`);
       expect(() => resolveId("effect")).toThrow(`${surface} cannot import effect`);
-      expect(() => resolveId("effect?raw")).toThrow(
-        `${surface} cannot import effect?raw`,
-      );
-      expect(() => resolveId("effect#schema")).toThrow(
-        `${surface} cannot import effect#schema`,
-      );
+      expect(() => resolveId("effect?raw")).toThrow(`${surface} cannot import effect?raw`);
+      expect(() => resolveId("effect#schema")).toThrow(`${surface} cannot import effect#schema`);
       expect(() => resolveId("effect/Schema?raw")).toThrow(
         `${surface} cannot import effect/Schema?raw`,
       );

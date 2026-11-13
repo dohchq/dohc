@@ -1,14 +1,7 @@
 import { historyPageFields, timelinePage } from "../testing/historyPageFixture";
 import { defaultWorkbenchState, serializeUiState } from "./workbench/workbenchState";
 import "../testing/legendListMock";
-import {
-  act,
-  cleanup,
-  render,
-  screen,
-  waitFor,
-  within,
-} from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import type { AccessAnswer, AccessObjectRef } from "@dohc/workspace-contracts/access";
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
@@ -195,9 +188,7 @@ export const STORED_STATE: WorkspaceUiState = {
   activeView: "explorer",
   sidebarVisible: true,
   sidebarWidth: 320,
-  editorGroups: [
-    { id: "primary", tabs: ["b.md"], activeTab: "b.md", size: 1 },
-  ],
+  editorGroups: [{ id: "primary", tabs: ["b.md"], activeTab: "b.md", size: 1 }],
   activeEditorGroup: "primary",
   aboutVisible: true,
   aboutWidth: 360,
@@ -206,7 +197,10 @@ export const STORED_STATE: WorkspaceUiState = {
 
 // These tests drive the folder tree, so a workspace with no saved state
 // opens the Explorer in Files rather than Home.
-const FRESH_FILES_STATE: WorkspaceUiState = serializeUiState({ ...defaultWorkbenchState(), explorerMode: "files" });
+const FRESH_FILES_STATE: WorkspaceUiState = serializeUiState({
+  ...defaultWorkbenchState(),
+  explorerMode: "files",
+});
 
 // A workspace with no saved state but its Explorer on Home, as a new one opens.
 export const HOME_STATE: WorkspaceUiState = serializeUiState(defaultWorkbenchState());
@@ -260,10 +254,7 @@ export const CANONICAL_DM: DmRecord = {
   connected: true,
 };
 
-export function dmSyncResult(
-  dms: DmRecord[] = [],
-  available = true,
-): SyncDmsResult {
+export function dmSyncResult(dms: DmRecord[] = [], available = true): SyncDmsResult {
   return { available, dms, pending: [], declined: [], failed: false };
 }
 
@@ -277,10 +268,7 @@ const originalHasPointerCapture = Object.getOwnPropertyDescriptor(
   Element.prototype,
   "hasPointerCapture",
 );
-const originalElementFromPoint = Object.getOwnPropertyDescriptor(
-  document,
-  "elementFromPoint",
-);
+const originalElementFromPoint = Object.getOwnPropertyDescriptor(document, "elementFromPoint");
 
 function restoreProperty(
   target: object,
@@ -338,8 +326,14 @@ function makeBaseBridge(
 ) {
   const activityCallbacks = new Set<(event: WorkspaceActivityEvent) => void>();
   const heldDirectAnswers: ShareDirectWritesPushedEvent[] = [];
-  const directAnswerDelivery: ShareDirectWriteAnswerDelivery = { claim: async () => true, acknowledge: async () => true, release: async () => true };
-  const directWritesPushedCallbacks = new Set<(event: ShareDirectWritesPushedEvent, delivery: ShareDirectWriteAnswerDelivery) => void>();
+  const directAnswerDelivery: ShareDirectWriteAnswerDelivery = {
+    claim: async () => true,
+    acknowledge: async () => true,
+    release: async () => true,
+  };
+  const directWritesPushedCallbacks = new Set<
+    (event: ShareDirectWritesPushedEvent, delivery: ShareDirectWriteAnswerDelivery) => void
+  >();
   const crashReportCallbacks = new Set<() => void>();
   const collectionCopiesLeftCallbacks = new Set<() => void>();
   const liveDraftRecoveryCallbacks = new Set<(event: { workspaceId: string }) => void>();
@@ -352,26 +346,26 @@ function makeBaseBridge(
   const activatedCallbacks = new Set<(workspace: Workspace, file?: string) => void>();
   return {
     platform,
-    typingRecovery: vi.fn(async () => ({failures: []})),
+    typingRecovery: vi.fn(async () => ({ failures: [] })),
     emitWorkspaceActivity: (event: WorkspaceActivityEvent = {}) => {
       for (const callback of [...activityCallbacks]) callback(event);
     },
     workspaceActivitySubscriberCount: () => activityCallbacks.size,
     emitSearchResults: (batch: SearchResultsEvent) => searchCallback?.(batch),
-    getWorkspaceUiState: vi.fn((): Promise<WorkspaceUiState | null> => uiStatePromise.then((state) => state ?? FRESH_FILES_STATE)),
+    getWorkspaceUiState: vi.fn((): Promise<WorkspaceUiState | null> =>
+      uiStatePromise.then((state) => state ?? FRESH_FILES_STATE),
+    ),
     openSystemPrivacySettings: vi.fn(async () => undefined),
     // The shell re-reads the registry to pick up a share's durable skip
     // record. Default: a workspace with nothing skipped.
-    getWorkspaceRegistry: vi.fn(
-      async (): Promise<{ workspaces: unknown[] }> => ({ workspaces: [] }),
-    ),
+    getWorkspaceRegistry: vi.fn(async (): Promise<{ workspaces: unknown[] }> => ({
+      workspaces: [],
+    })),
     setWorkspaceUiState: vi.fn(
       async (_payload: { workspaceId: string; state: WorkspaceUiState }) => undefined,
     ),
     listWorkspaceFiles: vi.fn(
-      async (
-        _payload: ListWorkspaceFilesPayload,
-      ): Promise<ListWorkspaceFilesResult> => ({
+      async (_payload: ListWorkspaceFilesPayload): Promise<ListWorkspaceFilesResult> => ({
         visibility: { status: "ready", rules: [] },
         files: [
           { path: "a.md", kind: "file" },
@@ -381,26 +375,36 @@ function makeBaseBridge(
       }),
     ),
     openWorkspace: vi.fn(async () => SYNC_STATUS),
-    listLiveDraftRecovery: vi.fn(async (): Promise<import("../ipc/bridgeContract").LiveDraftRecoveryRecord[]> => []),
+    listLiveDraftRecovery: vi.fn(
+      async (): Promise<import("../ipc/bridgeContract").LiveDraftRecoveryRecord[]> => [],
+    ),
     listKeptTyping: vi.fn(async (): Promise<import("../ipc/bridgeContract").KeptTyping[]> => []),
-    dismissKeptTyping: vi.fn(async (_input: Parameters<import("../ipc/bridgeContract").DohcDesktopBridge["dismissKeptTyping"]>[0]) => undefined),
-    discardLiveDraftRecovery: vi.fn(async (_input: Parameters<import("../ipc/bridgeContract").DohcDesktopBridge["discardLiveDraftRecovery"]>[0]): Promise<import("../ipc/bridgeContract").LiveDraftRecoveryRecord[]> => []),
+    dismissKeptTyping: vi.fn(
+      async (
+        _input: Parameters<
+          import("../ipc/bridgeContract").DohcDesktopBridge["dismissKeptTyping"]
+        >[0],
+      ) => undefined,
+    ),
+    discardLiveDraftRecovery: vi.fn(
+      async (
+        _input: Parameters<
+          import("../ipc/bridgeContract").DohcDesktopBridge["discardLiveDraftRecovery"]
+        >[0],
+      ): Promise<import("../ipc/bridgeContract").LiveDraftRecoveryRecord[]> => [],
+    ),
     getSyncStatus: vi.fn(async () => SYNC_STATUS),
     // Owner live documents and the live-delivery retry command. Typed to the
     // contracts, not to these empty defaults: the live-document tests swap in
     // real rows and real refusals.
     listOwnerLiveDocuments: vi.fn(
-      async (
-        _payload: ListOwnerLiveDocumentsPayload,
-      ): Promise<OwnerLiveDocumentsResult> => ({
+      async (_payload: ListOwnerLiveDocumentsPayload): Promise<OwnerLiveDocumentsResult> => ({
         documents: [],
         nextCursor: null,
       }),
     ),
     listOwnerLiveRefusals: vi.fn(
-      async (
-        _payload: ListOwnerLiveRefusalsPayload,
-      ): Promise<OwnerLiveRefusalsResult> => ({
+      async (_payload: ListOwnerLiveRefusalsPayload): Promise<OwnerLiveRefusalsResult> => ({
         refusals: [],
         nextCursor: null,
       }),
@@ -409,14 +413,22 @@ function makeBaseBridge(
       async (_payload: RetryOwnerLiveSharePayload): Promise<void> => undefined,
     ),
     stopOwnerLiveDocument: vi.fn(
-      async (_payload: OwnerLiveDocumentActionPayload): Promise<StopOwnerLiveDocumentResult> => ({ keptEdits: "none" }),
+      async (_payload: OwnerLiveDocumentActionPayload): Promise<StopOwnerLiveDocumentResult> => ({
+        keptEdits: "none",
+      }),
     ),
     retryOwnerLiveQuarantine: vi.fn(
       async (_payload: RetryOwnerLiveQuarantinePayload): Promise<void> => undefined,
     ),
     saveOwnerLiveRecoveryCopy: vi.fn(
-      async (payload: import("../ipc/bridgeContract").SaveOwnerLiveRecoveryCopyPayload): Promise<import("../ipc/bridgeContract").SaveOwnerLiveRecoveryCopyResult> =>
-        ({ copyPath: payload.path.replace(/\.md$/u, " (recovered).md"), packagePath: payload.path.replace(/\.md$/u, " (recovered).dohc-recovery.json"), storedOn: "this-computer", keptEdits: "kept" }),
+      async (
+        payload: import("../ipc/bridgeContract").SaveOwnerLiveRecoveryCopyPayload,
+      ): Promise<import("../ipc/bridgeContract").SaveOwnerLiveRecoveryCopyResult> => ({
+        copyPath: payload.path.replace(/\.md$/u, " (recovered).md"),
+        packagePath: payload.path.replace(/\.md$/u, " (recovered).dohc-recovery.json"),
+        storedOn: "this-computer",
+        keptEdits: "kept",
+      }),
     ),
     resumeOwnerLiveDocument: vi.fn(
       async (_payload: OwnerLiveDocumentActionPayload): Promise<void> => undefined,
@@ -427,28 +439,27 @@ function makeBaseBridge(
     retryHistoryCapture: vi.fn(
       async (_payload: { workspaceId: string }): Promise<void> => undefined,
     ),
-    retrySecretKey: vi.fn(
-      async (_payload: { workspaceId: string }): Promise<void> => undefined,
-    ),
+    retrySecretKey: vi.fn(async (_payload: { workspaceId: string }): Promise<void> => undefined),
     retryCloudSync: vi.fn(
-      async (_payload: { workspaceId: string; reason: "person" | "reconnect" }): Promise<SyncStatusResult> => SYNC_STATUS,
+      async (_payload: {
+        workspaceId: string;
+        reason: "person" | "reconnect";
+      }): Promise<SyncStatusResult> => SYNC_STATUS,
     ),
-    retryFileObservation: vi.fn(async (_payload: { workspaceId: string }): Promise<SyncStatusResult> => SYNC_STATUS),
+    retryFileObservation: vi.fn(
+      async (_payload: { workspaceId: string }): Promise<SyncStatusResult> => SYNC_STATUS,
+    ),
     // The refused-store rebuild. Typed to the contract, not to this
     // default: the recovery tests swap in the no-clobber refusal.
-    rebuildEngineStore: vi.fn(
-      async (): Promise<RebuildEngineStoreResult> => ({
-        outcome: "moved",
-      }),
-    ),
+    rebuildEngineStore: vi.fn(async (): Promise<RebuildEngineStoreResult> => ({
+      outcome: "moved",
+    })),
     // Typed to the contract, not to this idle default: the Settings toggle
     // tests drive a real running agent through it.
-    getAgentRunStatus: vi.fn(
-      async (): Promise<AgentRunStatusResult> => ({
-        activeRun: null,
-        lastRun: null,
-      }),
-    ),
+    getAgentRunStatus: vi.fn(async (): Promise<AgentRunStatusResult> => ({
+      activeRun: null,
+      lastRun: null,
+    })),
     getMcpConfig: vi.fn(async (): Promise<McpConfigResult> => ({
       command: "dohc-mcp",
       args: ["--workspace", WORKSPACE.rootPath, "--home", "/tmp/dohc-home"],
@@ -457,15 +468,13 @@ function makeBaseBridge(
     })),
     // The Settings agent toggle reaches these. Typed to the contract, because
     // a test that drives the toggle has to be able to swap them.
-    startAgentRun: vi.fn(
-      async (): Promise<StartAgentRunResult> => ({
-        id: "run-1",
-        startedAt: 1,
-        agentId: "agent-1",
-        onBehalfOf: "ice",
-        status: "running",
-      }),
-    ),
+    startAgentRun: vi.fn(async (): Promise<StartAgentRunResult> => ({
+      id: "run-1",
+      startedAt: 1,
+      agentId: "agent-1",
+      onBehalfOf: "ice",
+      status: "running",
+    })),
     endAgentRun: vi.fn(async (): Promise<void> => undefined),
     getUserSettings: vi.fn(async () => ({
       settings: DEFAULT_USER_SETTINGS,
@@ -506,7 +515,11 @@ function makeBaseBridge(
     readScheduleHost: vi.fn(async () => ({ kind: "this-computer" as const })),
     // This computer's agent is idle until a test pushes a run.
     readAgentRunState: vi.fn(
-      async ({ workspaceId }: { workspaceId: string }): Promise<AgentRunStateEvent> => ({ workspaceId, revision: 0, active: false }),
+      async ({ workspaceId }: { workspaceId: string }): Promise<AgentRunStateEvent> => ({
+        workspaceId,
+        revision: 0,
+        active: false,
+      }),
     ),
     onAgentRunState: vi.fn((listener: (event: AgentRunStateEvent) => void) => {
       agentRunStateCallbacks.add(listener);
@@ -531,9 +544,13 @@ function makeBaseBridge(
     }),
     // No agent you run waits for messages until a test says one does.
     readAgentsListening: vi.fn(async () => ({ agentIds: [] as string[] })),
-    onAgentsListening: vi.fn((_listener: (event: { agentIds: string[] }) => void) => () => undefined),
+    onAgentsListening: vi.fn(
+      (_listener: (event: { agentIds: string[] }) => void) => () => undefined,
+    ),
     // No personal agents until a test reads or pushes some.
-    readPersonalAgents: vi.fn(async (_payload: { refresh: boolean }): Promise<PersonalAgentsEvent> => ({ accounts: [] })),
+    readPersonalAgents: vi.fn(
+      async (_payload: { refresh: boolean }): Promise<PersonalAgentsEvent> => ({ accounts: [] }),
+    ),
     onPersonalAgents: vi.fn((listener: (event: PersonalAgentsEvent) => void) => {
       personalAgentsCallbacks.add(listener);
       return () => {
@@ -543,8 +560,15 @@ function makeBaseBridge(
     emitPersonalAgents: (event: PersonalAgentsEvent) => {
       for (const callback of [...personalAgentsCallbacks]) callback(event);
     },
-    changePersonalAgent: vi.fn(async (): Promise<PersonalAgentChangeResult> => ({ ok: true, personalAgents: { accounts: [] } })),
-    registerChatDispatchNotices: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, revision: 0, notices: [] })),
+    changePersonalAgent: vi.fn(async (): Promise<PersonalAgentChangeResult> => ({
+      ok: true,
+      personalAgents: { accounts: [] },
+    })),
+    registerChatDispatchNotices: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({
+      workspaceId,
+      revision: 0,
+      notices: [],
+    })),
     dismissChatDispatchNotice: vi.fn(async () => {}),
     retryChatWakes: vi.fn(async () => {}),
     stepWindowZoom: vi.fn(async (payload: { step: "in" | "out" | "reset" }) => ({
@@ -570,37 +594,75 @@ function makeBaseBridge(
     linksResolve: vi.fn(async () => ({ versionId: "main", results: [], mountsCovered: true })),
     // An open lossy note's band reads its own hold from the engine.
     onNoticesChanged: vi.fn((_listener: () => void) => () => undefined),
-    readHeldChange: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["readHeldChange"]>(async () => ({ change: null })),
-    chatFileMentionsPage: vi.fn(async () => ({ versionId: "main", subject: null, entries: [], unchecked: [], complete: true, indexBuilding: false, mountsCovered: true, sharedChannelRowsUncovered: 0, nextCursor: null })),
+    readHeldChange: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["readHeldChange"]>(
+      async () => ({ change: null }),
+    ),
+    chatFileMentionsPage: vi.fn(async () => ({
+      versionId: "main",
+      subject: null,
+      entries: [],
+      unchecked: [],
+      complete: true,
+      indexBuilding: false,
+      mountsCovered: true,
+      sharedChannelRowsUncovered: 0,
+      nextCursor: null,
+    })),
     // About for a conversation reads the files it mentions.
-    chatLinks: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["chatLinks"]>(async ({ channelWireId }) => ({
-      versionId: "main", subject: { channelWireId }, entries: [], unchecked: [], complete: true, indexBuilding: false,
-      mountsCovered: true, sharedChannelRowsUncovered: 0, nextCursor: null })),
-    linksEdges: vi.fn(async () => ({ versionId: "main", files: [
-      {objectId:"a.md",path:"a.md",title:"A"},{objectId:"b.md",path:"b.md",title:"B"}],
-      entries: [{source:"a.md",target:"b.md",kind:"wikilink" as const,ordinal:0}],
-      unchecked:[],complete:true,indexBuilding:false,mountsCovered:true,nextCursor:null })),
+    chatLinks: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["chatLinks"]>(
+      async ({ channelWireId }) => ({
+        versionId: "main",
+        subject: { channelWireId },
+        entries: [],
+        unchecked: [],
+        complete: true,
+        indexBuilding: false,
+        mountsCovered: true,
+        sharedChannelRowsUncovered: 0,
+        nextCursor: null,
+      }),
+    ),
+    linksEdges: vi.fn(async () => ({
+      versionId: "main",
+      files: [
+        { objectId: "a.md", path: "a.md", title: "A" },
+        { objectId: "b.md", path: "b.md", title: "B" },
+      ],
+      entries: [{ source: "a.md", target: "b.md", kind: "wikilink" as const, ordinal: 0 }],
+      unchecked: [],
+      complete: true,
+      indexBuilding: false,
+      mountsCovered: true,
+      nextCursor: null,
+    })),
     writeWorkspaceText: vi.fn(
       async (_payload: WriteWorkspaceTextPayload): Promise<WriteWorkspaceTextResult> => ({
         status: "written",
         contentHash: "a".repeat(64),
       }),
     ),
-    createCollectionRecord: vi.fn(async (payload: { collectionPath: string; name: string; recordId?: string }): Promise<{ path: string; recordId: string } | import("@dohc/cli/creation").CreationPartial> => ({
-      path: `${payload.collectionPath}/${payload.name}.md`, recordId: payload.recordId ?? "rec_abcdefghijklmnopqrstuvwxyz",
-    })),
+    createCollectionRecord: vi.fn(
+      async (payload: {
+        collectionPath: string;
+        name: string;
+        recordId?: string;
+      }): Promise<
+        { path: string; recordId: string } | import("@dohc/cli/creation").CreationPartial
+      > => ({
+        path: `${payload.collectionPath}/${payload.name}.md`,
+        recordId: payload.recordId ?? "rec_abcdefghijklmnopqrstuvwxyz",
+      }),
+    ),
     createWorkspaceFile: vi.fn(async (payload: { relativePath: string }) => ({
       path: payload.relativePath,
     })),
     createWorkspaceFolder: vi.fn(async (payload: { relativePath: string }) => ({
       path: payload.relativePath,
     })),
-    importWorkspaceFiles: vi.fn(
-      async (): Promise<ImportWorkspaceFilesResult> => ({
-        imported: ["imported.md"],
-        skipped: 0,
-      }),
-    ),
+    importWorkspaceFiles: vi.fn(async (): Promise<ImportWorkspaceFilesResult> => ({
+      imported: ["imported.md"],
+      skipped: 0,
+    })),
     exportWorkspaceZip: vi.fn(async () => ({ path: "/tmp/workspace.zip" })),
     readExplorerMenu: vi.fn(async (): Promise<ExplorerMenuEntry[]> => []),
     revealExplorerPath: vi.fn(async () => undefined),
@@ -643,68 +705,64 @@ function makeBaseBridge(
     })),
     // Share changes. Typed to the contract, not to these empty
     // defaults: the review and submit tests drive real rows through them.
-    listShareProposals: vi.fn(
-      async (): Promise<ListShareProposalsResult> => ({ proposals: [] }),
-    ),
-    readShareProposalChanges: vi.fn(
-      async (): Promise<ReadShareProposalChangesResult> => ({
-        proposedByEmail: "friend@dohc.test",
-        files: [
-          {
-            opIndex: 0,
-            path: "docs/plan.md",
-            operation: "write",
-            drifted: false,
-            afterByteLength: 4,
-          },
-        ],
-      }),
-    ),
-    readShareProposalFileContent: vi.fn(
-      async (): Promise<ReadShareProposalFileContentResult> => ({
-        currentText: "one\n",
-        incomingText: "two\n",
-      }),
-    ),
+    listShareProposals: vi.fn(async (): Promise<ListShareProposalsResult> => ({ proposals: [] })),
+    readShareProposalChanges: vi.fn(async (): Promise<ReadShareProposalChangesResult> => ({
+      proposedByEmail: "friend@dohc.test",
+      files: [
+        {
+          opIndex: 0,
+          path: "docs/plan.md",
+          operation: "write",
+          drifted: false,
+          afterByteLength: 4,
+        },
+      ],
+    })),
+    readShareProposalFileContent: vi.fn(async (): Promise<ReadShareProposalFileContentResult> => ({
+      currentText: "one\n",
+      incomingText: "two\n",
+    })),
     settleShareProposal: vi.fn(
-      async (
-        _payload: SettleShareProposalPayload,
-      ): Promise<SettleShareProposalResult> => ({ state: "accepted" }),
-    ),
-    listMyShareChanges: vi.fn(
-      async (): Promise<ListMyShareChangesResult> => ({ proposals: [] }),
-    ),
-    submitShareChanges: vi.fn(
-      async (): Promise<SubmitShareChangesResult> => ({
-        ok: true,
-        submitted: 2,
-        capturedLocalChanges: 0,
-        skippedOutsideShare: 0,
-        morePending: false,
+      async (_payload: SettleShareProposalPayload): Promise<SettleShareProposalResult> => ({
+        state: "accepted",
       }),
     ),
-    withdrawShareChanges: vi.fn(
-      async (): Promise<WithdrawShareChangesResult> => ({ state: "withdrawn" }),
-    ),
-    pushShareDirectWrites: vi.fn(
-      async (): Promise<void> => undefined,
-    ),
-    emitShareDirectWritesPushed: (input: Omit<ShareDirectWritesPushedEvent, "answerId"> & { answerId?: string }) => {
+    listMyShareChanges: vi.fn(async (): Promise<ListMyShareChangesResult> => ({ proposals: [] })),
+    submitShareChanges: vi.fn(async (): Promise<SubmitShareChangesResult> => ({
+      ok: true,
+      submitted: 2,
+      capturedLocalChanges: 0,
+      skippedOutsideShare: 0,
+      morePending: false,
+    })),
+    withdrawShareChanges: vi.fn(async (): Promise<WithdrawShareChangesResult> => ({
+      state: "withdrawn",
+    })),
+    pushShareDirectWrites: vi.fn(async (): Promise<void> => undefined),
+    emitShareDirectWritesPushed: (
+      input: Omit<ShareDirectWritesPushedEvent, "answerId"> & { answerId?: string },
+    ) => {
       const event = { ...input, answerId: input.answerId ?? crypto.randomUUID() };
       if (!directWritesPushedCallbacks.size) heldDirectAnswers.push(event);
-      for (const callback of [...directWritesPushedCallbacks]) callback(event, directAnswerDelivery);
+      for (const callback of [...directWritesPushedCallbacks])
+        callback(event, directAnswerDelivery);
     },
     onShareDirectWritesPushed: vi.fn(
-      (listener: (event: ShareDirectWritesPushedEvent, delivery: ShareDirectWriteAnswerDelivery) => void) => {
+      (
+        listener: (
+          event: ShareDirectWritesPushedEvent,
+          delivery: ShareDirectWriteAnswerDelivery,
+        ) => void,
+      ) => {
         directWritesPushedCallbacks.add(listener);
         for (const event of heldDirectAnswers.splice(0)) listener(event, directAnswerDelivery);
         return () => directWritesPushedCallbacks.delete(listener);
       },
     ),
     pickWorkspaceRoot: vi.fn(async () => null),
-    getRelayReceivedShare: vi.fn(
-      async (): Promise<GetRelayReceivedShareResult> => ({ found: false }),
-    ),
+    getRelayReceivedShare: vi.fn(async (): Promise<GetRelayReceivedShareResult> => ({
+      found: false,
+    })),
     getDefaultShareRoot: vi.fn(
       async ({ shareId }: { shareId: string }) => `/home/sam/dohc/shared/${shareId}`,
     ),
@@ -720,36 +778,42 @@ function makeBaseBridge(
     dismissShareSkips: vi.fn(
       async (_payload: DismissShareSkipsPayload): Promise<void> => undefined,
     ),
-    refreshSharedView: vi.fn(
-      async (): Promise<RefreshSharedViewResult> => ({
-        ok: true,
-        status: "unchanged",
-        changedPaths: 0,
-        excludedPaths: [],
-        unjournalablePaths: [],
-        refusedOps: 0,
-        refusedDetail: null,
-      }),
+    refreshSharedView: vi.fn(async (): Promise<RefreshSharedViewResult> => ({
+      ok: true,
+      status: "unchanged",
+      changedPaths: 0,
+      excludedPaths: [],
+      unjournalablePaths: [],
+      refusedOps: 0,
+      refusedDetail: null,
+    })),
+    checkSharedViewAccess: vi.fn<
+      import("../ipc/bridgeContract").DohcDesktopBridge["checkSharedViewAccess"]
+    >(async () => ({ status: "unverified" })),
+    dismissShareCaptureNotice: vi.fn<
+      import("../ipc/bridgeContract").DohcDesktopBridge["dismissShareCaptureNotice"]
+    >(async () => undefined),
+    onCaptureHolds: vi.fn(
+      (_callback: (event: import("../ipc/bridgeContract").CaptureHoldsEvent) => void) => () => {},
     ),
-    checkSharedViewAccess: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["checkSharedViewAccess"]>(async () => ({ status: "unverified" })),
-    dismissShareCaptureNotice: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["dismissShareCaptureNotice"]>(async () => undefined),
-    onCaptureHolds: vi.fn((_callback: (event: import("../ipc/bridgeContract").CaptureHoldsEvent) => void) => () => {}),
-    onWorkspaceActivity: vi.fn(
-      (callback: (event: WorkspaceActivityEvent) => void) => {
-        activityCallbacks.add(callback);
-        return () => {
-          activityCallbacks.delete(callback);
-        };
-      },
-    ),
+    onWorkspaceActivity: vi.fn((callback: (event: WorkspaceActivityEvent) => void) => {
+      activityCallbacks.add(callback);
+      return () => {
+        activityCallbacks.delete(callback);
+      };
+    }),
     onCloudSessionChanged: vi.fn((_callback: () => void) => () => {}),
     // Folder app offers: no folder is an app unless a test says so.
     getFolderApp: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["getFolderApp"]>(
       async ({ workspaceId, folder }) => ({ workspaceId, folder, isApp: false, run: null }),
     ),
-    onFolderAppChanged: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["onFolderAppChanged"]>(() => () => undefined),
+    onFolderAppChanged: vi.fn<
+      import("../ipc/bridgeContract").DohcDesktopBridge["onFolderAppChanged"]
+    >(() => () => undefined),
     // The Explorer's Apps section: no apps unless a test says so.
-    listSites: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["listSites"]>(async () => ({ sites: [] })),
+    listSites: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["listSites"]>(async () => ({
+      sites: [],
+    })),
     onMenuCommand: vi.fn((callback: (command: MenuCommand) => void) => {
       menuCallback = callback;
       return () => {
@@ -758,42 +822,83 @@ function makeBaseBridge(
     }),
     closeThisWindow: vi.fn(async (): Promise<void> => undefined),
     goToWorkspaceWindow: vi.fn(async (): Promise<void> => undefined),
-    listKeptCopies: vi.fn(async (): Promise<ListKeptCopiesResult> => ({ keptCopies: [], more: false })),
+    listKeptCopies: vi.fn(async (): Promise<ListKeptCopiesResult> => ({
+      keptCopies: [],
+      more: false,
+    })),
     saveKeptCopy: vi.fn(async () => ({ status: "gone" as const })),
-    restoreProtectedCopy: vi.fn(async (_payload: { workspaceId: string; id: string }) => ({ path: ".env", status: "restored" as const })),
-    discardProtectedCopy: vi.fn(async (_payload: { workspaceId: string; id: string }) => ({ path: ".env", status: "discarded" as const })),
+    restoreProtectedCopy: vi.fn(async (_payload: { workspaceId: string; id: string }) => ({
+      path: ".env",
+      status: "restored" as const,
+    })),
+    discardProtectedCopy: vi.fn(async (_payload: { workspaceId: string; id: string }) => ({
+      path: ".env",
+      status: "discarded" as const,
+    })),
     // Typed to the contract: the capture recovery tests swap the answer.
     getCaptureRecoveryStatus: vi.fn(
-      async (_payload: { workspaceId: string }): Promise<CaptureRecoveryStatusResult> => ({ captureRecoveries: [] }),
+      async (_payload: { workspaceId: string }): Promise<CaptureRecoveryStatusResult> => ({
+        captureRecoveries: [],
+      }),
     ),
-    clearCaptureRecovery: vi.fn(async (_payload: { workspaceId: string; momentId: string }): Promise<void> => undefined),
-    retryAutomationNotice: vi.fn(
-      async (): Promise<RetryCollectionAutomationResult> => ({ status: "queued", press: false }),
+    clearCaptureRecovery: vi.fn(
+      async (_payload: { workspaceId: string; momentId: string }): Promise<void> => undefined,
     ),
+    retryAutomationNotice: vi.fn(async (): Promise<RetryCollectionAutomationResult> => ({
+      status: "queued",
+      press: false,
+    })),
     listAutomationHolds: vi.fn(async () => ({ holds: [], stops: [], unreadable: false })),
     resetAutomationHolds: vi.fn(async () => ({ status: "reset" as const })),
     revealAutomationHolds: vi.fn(async () => undefined),
     onAutomationRunSettled: vi.fn(() => () => undefined),
     onAutomationRunWaiting: vi.fn(() => () => undefined),
-    listAutomationButtons: vi.fn(async (): Promise<ListAutomationButtonsResult> => ({ buttons: [] })),
+    listAutomationButtons: vi.fn(async (): Promise<ListAutomationButtonsResult> => ({
+      buttons: [],
+    })),
     listRecordButtons: vi.fn(async () => ({ record: null })),
     onAutomationHoldsChanged: vi.fn(() => () => undefined),
     onCollectionAutomationsChanged: vi.fn(() => () => undefined),
-    listCollectionAutomations: vi.fn(
-      async (): Promise<ListCollectionAutomationsResult> => ({ status: "missing" }),
+    listCollectionAutomations: vi.fn(async (): Promise<ListCollectionAutomationsResult> => ({
+      status: "missing",
+    })),
+    findAutomationCollection: vi.fn(
+      async (
+        _payload: FindAutomationCollectionPayload,
+      ): Promise<FindAutomationCollectionResult> => ({ status: "missing" }),
     ),
-    findAutomationCollection: vi.fn(async (_payload: FindAutomationCollectionPayload): Promise<FindAutomationCollectionResult> => ({ status: "missing" })),
-    resolveAutomationControls: vi.fn(async (_payload: ResolveAutomationControlsPayload): Promise<ResolveAutomationControlsResult> => ({ status: "missing" })),
-    switchCollectionAutomation: vi.fn(async (_payload: SwitchCollectionAutomationPayload): Promise<SwitchCollectionAutomationResult> => ({ status: "unavailable", reason: "This share does not allow automation switches." })),
+    resolveAutomationControls: vi.fn(
+      async (
+        _payload: ResolveAutomationControlsPayload,
+      ): Promise<ResolveAutomationControlsResult> => ({ status: "missing" }),
+    ),
+    switchCollectionAutomation: vi.fn(
+      async (
+        _payload: SwitchCollectionAutomationPayload,
+      ): Promise<SwitchCollectionAutomationResult> => ({
+        status: "unavailable",
+        reason: "This share does not allow automation switches.",
+      }),
+    ),
     listCollectionAutomationRuns: vi.fn(
-      async (_payload: { workspaceId: string; automationId: string }): Promise<ListCollectionAutomationRunsResult> => ({ status: "listed", runs: [], next: null }),
+      async (_payload: {
+        workspaceId: string;
+        automationId: string;
+      }): Promise<ListCollectionAutomationRunsResult> => ({
+        status: "listed",
+        runs: [],
+        next: null,
+      }),
     ),
     listServerAutomationRuns: vi.fn(async () => ({ runs: null })),
     listServerAutomationHolds: vi.fn(async () => ({ holds: [] })),
-    retryCollectionAutomation: vi.fn(
-      async (): Promise<RetryCollectionAutomationResult> => ({ status: "queued", press: false }),
+    retryCollectionAutomation: vi.fn(async (): Promise<RetryCollectionAutomationResult> => ({
+      status: "queued",
+      press: false,
+    })),
+    onAutomationRunsChanged: vi.fn(
+      (_listener: (event: { workspaceId: string }) => void) => () => undefined,
     ),
-    onAutomationRunsChanged: vi.fn((_listener: (event: { workspaceId: string }) => void) => () => undefined),
     onCollectionRulesChanged: vi.fn(() => () => undefined),
     readCrashReport: vi.fn(
       async (_payload: Record<string, never>): Promise<ReadCrashReportResult> => ({
@@ -804,12 +909,25 @@ function makeBaseBridge(
     dismissCrashReport: vi.fn(async (_payload: { through: number }) => undefined),
     markCrashReportRead: vi.fn(async (_payload: { through: number }) => undefined),
     sendCrashReport: vi.fn(async (_payload: Record<string, never>) => ({ sent: true })),
-    readReportsNotice: vi.fn(async (_payload: Record<string, never>) => ({ usage: false, errors: false })),
+    readReportsNotice: vi.fn(async (_payload: Record<string, never>) => ({
+      usage: false,
+      errors: false,
+    })),
     acknowledgeReportsNotice: vi.fn(async (_shown: ReportKinds) => undefined),
-    readDiagnostics: vi.fn(async (_payload: Record<string, never>) => ({ text: "dohc diagnostics", available: { usage: false, errors: false } })),
+    readDiagnostics: vi.fn(async (_payload: Record<string, never>) => ({
+      text: "dohc diagnostics",
+      available: { usage: false, errors: false },
+    })),
     saveDiagnostics: vi.fn(async (_payload: Record<string, never>) => ({ saved: true })),
-    readUsageRecord: vi.fn(async (_payload: Record<string, never>): Promise<UsageRecordResult> =>
-      ({ status: "readable", enabled: true, file: "/state/dohc-usage.json", since: null, incompleteDays: 0, rows: [], setAside: null })),
+    readUsageRecord: vi.fn(async (_payload: Record<string, never>): Promise<UsageRecordResult> => ({
+      status: "readable",
+      enabled: true,
+      file: "/state/dohc-usage.json",
+      since: null,
+      incompleteDays: 0,
+      rows: [],
+      setAside: null,
+    })),
     clearUsageRecord: vi.fn(async (_payload: Record<string, never>) => undefined),
     setUsageRecordEnabled: vi.fn(async (_payload: { enabled: boolean }) => undefined),
     startUsageRecord: vi.fn(async (_payload: Record<string, never>) => undefined),
@@ -822,8 +940,20 @@ function makeBaseBridge(
       crashReportCallbacks.add(listener);
       return () => crashReportCallbacks.delete(listener);
     }),
-    readCollectionCopiesLeft: vi.fn(async (_payload: Record<string, never>): Promise<CollectionCopiesLeft> => ({ workspaces: [], recordUnreadable: false, sweepPending: false })),
-    removeCollectionCopiesLeft: vi.fn(async (_payload: Record<string, never>): Promise<CollectionCopiesLeft> => ({ workspaces: [], recordUnreadable: false, sweepPending: false })),
+    readCollectionCopiesLeft: vi.fn(
+      async (_payload: Record<string, never>): Promise<CollectionCopiesLeft> => ({
+        workspaces: [],
+        recordUnreadable: false,
+        sweepPending: false,
+      }),
+    ),
+    removeCollectionCopiesLeft: vi.fn(
+      async (_payload: Record<string, never>): Promise<CollectionCopiesLeft> => ({
+        workspaces: [],
+        recordUnreadable: false,
+        sweepPending: false,
+      }),
+    ),
     emitCollectionCopiesLeftChanged: () => {
       for (const callback of [...collectionCopiesLeftCallbacks]) callback();
     },
@@ -832,10 +962,21 @@ function makeBaseBridge(
       return () => collectionCopiesLeftCallbacks.delete(listener);
     }),
     onUsageRecordStopped: vi.fn((_listener: () => void) => () => {}),
-    readWorkspaceTrust: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, trusted: true })),
-    requestWorkspaceTrust: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, trusted: true })),
-    restrictWorkspace: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, trusted: false })),
-    onWorkspaceTrustChanged: vi.fn((_listener: (event: { workspaceId: string; trusted: boolean }) => void) => () => {}),
+    readWorkspaceTrust: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({
+      workspaceId,
+      trusted: true,
+    })),
+    requestWorkspaceTrust: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({
+      workspaceId,
+      trusted: true,
+    })),
+    restrictWorkspace: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({
+      workspaceId,
+      trusted: false,
+    })),
+    onWorkspaceTrustChanged: vi.fn(
+      (_listener: (event: { workspaceId: string; trusted: boolean }) => void) => () => {},
+    ),
     emitLiveDraftRecoveryChanged: (workspaceId: string) => {
       for (const callback of [...liveDraftRecoveryCallbacks]) callback({ workspaceId });
     },
@@ -875,15 +1016,22 @@ export function makeBridge(
 ) {
   const bridge = makeBaseBridge(uiStatePromise, platform);
   return Object.assign(bridge, {
-    pendingStopAndRestores: vi.fn(async (): Promise<import("../ipc/bridgeContract").PendingStopAndRestoresResult> => []),
+    pendingStopAndRestores: vi.fn(
+      async (): Promise<import("../ipc/bridgeContract").PendingStopAndRestoresResult> => [],
+    ),
     dismissStopAndRestore: vi.fn(async (): Promise<void> => undefined),
-    onEngineYDocSaveState: vi.fn((_listener: (event: import("../ipc/bridgeContract").EngineYDocSaveStateEvent) => void) => () => undefined),
+    onEngineYDocSaveState: vi.fn(
+      (_listener: (event: import("../ipc/bridgeContract").EngineYDocSaveStateEvent) => void) =>
+        () =>
+          undefined,
+    ),
     // Collections: the flagged shell lists collections on
     // ready and on activity. Typed to the contract; the collection tests
     // swap in real rows.
     listCollections: vi.fn(
       async (_payload: ListCollectionsPayload): Promise<ListCollectionsResult> => ({
-        collections: [], unclaimedDatasetFolders: [],
+        collections: [],
+        unclaimedDatasetFolders: [],
       }),
     ),
     dataset: vi.fn(async (request: DatasetRequest): Promise<DatasetResult> => {
@@ -904,83 +1052,85 @@ export function makeBridge(
       schema: { name: null, description: null, fields: [], views: [] },
       recordCount: 0,
     })),
-    queryCollectionRecords: vi.fn(
-      async (): Promise<QueryCollectionRecordsResult> => ({
-        collection: { path: "tasks", objectId: "object-test", status: "valid", reasons: [] },
-        records: [],
-        groups: null,
-        nextCursor: null,
-      }),
-    ),
+    queryCollectionRecords: vi.fn(async (): Promise<QueryCollectionRecordsResult> => ({
+      collection: { path: "tasks", objectId: "object-test", status: "valid", reasons: [] },
+      records: [],
+      groups: null,
+      nextCursor: null,
+    })),
     // Typed to the contract, not to this empty default: a test that drives
     // real pages must be able to swap the implementation.
-    listHistory: vi.fn(
-      async (payload: ListHistoryPayload): Promise<ListHistoryResult> =>
-        timelinePage([], { workspaceId: payload.workspaceId }),
+    listHistory: vi.fn(async (payload: ListHistoryPayload): Promise<ListHistoryResult> =>
+      timelinePage([], { workspaceId: payload.workspaceId }),
     ),
     // About opens Access with each file: by default only its owner has it.
     getObjectAccess: vi.fn(async (input: { ref: AccessObjectRef }): Promise<AccessAnswer> => ({
-      ref: input.ref, rows: [], visibility: "visible", unknownReason: null,
+      ref: input.ref,
+      rows: [],
+      visibility: "visible",
+      unknownReason: null,
       coverage: { kind: "granted", complete: true, observation: "interval" },
-      checkedAtMs: 0, freshness: "fresh", nextCursor: null,
+      checkedAtMs: 0,
+      freshness: "fresh",
+      nextCursor: null,
     })),
     requestAccessRefresh: vi.fn(async () => undefined),
     // About's per-file History still reads moments directly.
-    listEngineMoments: vi.fn(
-      async (): Promise<ListEngineMomentsResponse> => ({
-        moments: [],
-        nextCursor: null,
-        latestMomentOrder: 0,
-        activeVersionId: "main", ...historyPageFields,
-      }),
-    ),
+    listEngineMoments: vi.fn(async (): Promise<ListEngineMomentsResponse> => ({
+      moments: [],
+      nextCursor: null,
+      latestMomentOrder: 0,
+      activeVersionId: "main",
+      ...historyPageFields,
+    })),
     // Typed to the contract, not to these empty defaults: the freshness tests
     // drive a real version switch through it.
-    switchWorkspaceVersion: vi.fn(
-      async (): Promise<SwitchWorkspaceVersionResult> => ({
-        activeVersionId: "main", ...historyPageFields,
-        changedFileCount: 0,
-      }),
-    ),
+    switchWorkspaceVersion: vi.fn(async (): Promise<SwitchWorkspaceVersionResult> => ({
+      activeVersionId: "main",
+      ...historyPageFields,
+      changedFileCount: 0,
+    })),
     // On Main nothing is marked.
-    listNotVersionedFiles: vi.fn(async (): Promise<{ paths: string[] | null }> => ({ paths: null })),
+    listNotVersionedFiles: vi.fn(async (): Promise<{ paths: string[] | null }> => ({
+      paths: null,
+    })),
     // Typed to the contract as well: a workspace with only Main is this
     // default, not the shape every test is allowed to report.
-    listWorkspaceVersions: vi.fn(
-      async (): Promise<ListWorkspaceVersionsResult> => ({
-        versions: [
-          {
-            id: "main",
-            name: "Main",
-            kind: "main",
-            createdAtMs: 0,
-            canMergeIntoMain: false,
-          },
-        ],
-        activeVersionId: "main", ...historyPageFields,
-      }),
-    ),
+    listWorkspaceVersions: vi.fn(async (): Promise<ListWorkspaceVersionsResult> => ({
+      versions: [
+        {
+          id: "main",
+          name: "Main",
+          kind: "main",
+          createdAtMs: 0,
+          canMergeIntoMain: false,
+        },
+      ],
+      activeVersionId: "main",
+      ...historyPageFields,
+    })),
     // Typed to the contract as well: the moment-diff page mounts on it, and
     // a shared view's bridge overrides it with main's refusal.
-    readEngineMoment: vi.fn(
-      async (): Promise<ReadEngineMomentResult> => ({ moment: null }),
-    ),
+    readEngineMoment: vi.fn(async (): Promise<ReadEngineMomentResult> => ({ moment: null })),
     listChatChannels: vi.fn(
       async (): Promise<{
         channels: ChatChannelRecord[];
         fileThreads: FileChatThreadRecord[];
       }> => ({ channels: [], fileThreads: [] }),
     ),
-    listChatUnread: vi.fn(async (): Promise<{ chats: Array<{ channelId: string; unreadCount: number }> }> => ({ chats: [] })),
+    listChatUnread: vi.fn(
+      async (): Promise<{ chats: Array<{ channelId: string; unreadCount: number }> }> => ({
+        chats: [],
+      }),
+    ),
     listChannelThreads: vi.fn(async () => ({ threads: [] })),
     listPersonalChatFeed: vi.fn(async () => ({ items: [], nextCursor: null })),
     listChatChannelShares: vi.fn(async () => {
       // Sharing is optional; ChatsView downgrades a rejection to "none".
       throw new Error("sharing unavailable in shell tests");
     }),
-    syncDms: vi.fn(
-      async (_payload: SyncDmsPayload): Promise<SyncDmsResult> =>
-        dmSyncResult([], false),
+    syncDms: vi.fn(async (_payload: SyncDmsPayload): Promise<SyncDmsResult> =>
+      dmSyncResult([], false),
     ),
     // A fresh revision per read preserves the pre-gating contract for this
     // suite: every open-DM tick reloads. A test exercising the revision gate
@@ -991,9 +1141,10 @@ export function makeBridge(
         return async () => ({ revision: ++revision });
       })(),
     ),
-    listFileChats: vi.fn(
-      async (): Promise<ListFileChatsResult> => ({ fileObjectId: null, threads: [] }),
-    ),
+    listFileChats: vi.fn(async (): Promise<ListFileChatsResult> => ({
+      fileObjectId: null,
+      threads: [],
+    })),
   });
 }
 
@@ -1034,9 +1185,7 @@ export async function enterMarkdownSource(
     return currentSource;
   }
 
-  const toggle = (await queries.findByTestId(
-    "markdown-edit-toggle",
-  )) as HTMLButtonElement;
+  const toggle = (await queries.findByTestId("markdown-edit-toggle")) as HTMLButtonElement;
   await waitFor(() => {
     expect(toggle.disabled).toBe(false);
     expect(toggle.getAttribute("aria-disabled")).not.toBe("true");
@@ -1073,12 +1222,16 @@ export function holdHistory(bridge: ReturnType<typeof makeBridge>) {
 }
 
 export function sourceEditorText(editor: HTMLElement): string {
-  return Array.from(editor.querySelectorAll<HTMLElement>(".cm-line"), (line) =>
-    line.textContent ?? "",
+  return Array.from(
+    editor.querySelectorAll<HTMLElement>(".cm-line"),
+    (line) => line.textContent ?? "",
   ).join("\n");
 }
 
-export function shellBootstrapProps(bridge: ReturnType<typeof makeBridge>, onRegistry?: (workspaces: Workspace[]) => void) {
+export function shellBootstrapProps(
+  bridge: ReturnType<typeof makeBridge>,
+  onRegistry?: (workspaces: Workspace[]) => void,
+) {
   return {
     userSettings: {
       settings: DEFAULT_USER_SETTINGS,
@@ -1120,9 +1273,7 @@ export const SHARE_VIEW: Workspace = {
 // scope from the share instead of a capture, so the per-file chat surface is
 // served at every level. A fake that still refused it would model less than
 // main can do, and every pin written against it would certify fiction.
-export function makeShareBridge(
-  uiState: Promise<WorkspaceUiState | null> = Promise.resolve(null),
-) {
+export function makeShareBridge(uiState: Promise<WorkspaceUiState | null> = Promise.resolve(null)) {
   const bridge = makeBridge(uiState);
   bridge.openWorkspace = vi.fn(async () => SHARE_STATUS);
   bridge.getSyncStatus = vi.fn(async () => SHARE_STATUS);
@@ -1132,18 +1283,14 @@ export function makeShareBridge(
   // The granter's review channel is workspace-scoped and owner-only: main
   // refuses it for a share view. A fake that answered it would model more
   // than main can do, and the no-call pin below would pass after a revert.
-  bridge.listShareProposals.mockRejectedValue(
-    new Error("A shared view cannot review changes."),
-  );
+  bridge.listShareProposals.mockRejectedValue(new Error("A shared view cannot review changes."));
   for (const call of [
     "listChatChannels",
     "listChannelThreads",
     "chatFileMentionsPage",
     "syncDms",
   ] as const) {
-    bridge[call].mockRejectedValue(
-      new Error("Chats are not enabled for this workspace."),
-    );
+    bridge[call].mockRejectedValue(new Error("Chats are not enabled for this workspace."));
   }
   bridge.listFileChats.mockResolvedValue({
     fileObjectId: "share-object-1",
@@ -1161,16 +1308,8 @@ export async function settleShareView() {
 
 afterEach(async () => {
   cleanup();
-  restoreProperty(
-    Element.prototype,
-    "setPointerCapture",
-    originalSetPointerCapture,
-  );
-  restoreProperty(
-    Element.prototype,
-    "hasPointerCapture",
-    originalHasPointerCapture,
-  );
+  restoreProperty(Element.prototype, "setPointerCapture", originalSetPointerCapture);
+  restoreProperty(Element.prototype, "hasPointerCapture", originalHasPointerCapture);
   restoreProperty(document, "elementFromPoint", originalElementFromPoint);
   await disposeEngineDocLeasesForTests();
   resetSharedLocalDocumentsForTests();

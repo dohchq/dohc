@@ -29,7 +29,10 @@ function setup(content = "<p>Before</p><p></p><p>After</p>", caret = 9) {
   editor = new Editor({
     extensions: [
       StarterKit.configure({ link: { openOnClick: false, linkOnPaste: false } }),
-      Extension.create({ name: "urlOffer", addProseMirrorPlugins: () => [makeUrlPasteOfferPlugin((offer) => changes.push(offer))] }),
+      Extension.create({
+        name: "urlOffer",
+        addProseMirrorPlugins: () => [makeUrlPasteOfferPlugin((offer) => changes.push(offer))],
+      }),
     ],
     content,
   });
@@ -74,7 +77,13 @@ describe("URL paste offer", () => {
     const { editor, changes } = setup();
     paste(editor);
     expect(offer(editor)).toEqual({
-      from: 9, to: 9 + URL_TEXT.length, url: URL_TEXT, text: URL_TEXT, form: "link", chosen: false, anchors: null,
+      from: 9,
+      to: 9 + URL_TEXT.length,
+      url: URL_TEXT,
+      text: URL_TEXT,
+      form: "link",
+      chosen: false,
+      anchors: null,
     });
     expect(changes.at(-1)).toBe(offer(editor));
   });
@@ -169,7 +178,11 @@ describe("URL paste offer", () => {
   it("leaves when the whole document is replaced in an editor without a Y.Doc", () => {
     const { editor } = setup();
     paste(editor);
-    const tr = editor.state.tr.replaceWith(0, editor.state.doc.content.size, editor.state.doc.content);
+    const tr = editor.state.tr.replaceWith(
+      0,
+      editor.state.doc.content.size,
+      editor.state.doc.content,
+    );
     editor.view.dispatch(tr.setSelection(TextSelection.create(tr.doc, 33)));
     expect(offer(editor)).toBeNull();
   });
@@ -219,15 +232,23 @@ describe("URL paste offer in a shared document", () => {
     editor = new Editor({
       element: document.createElement("div"),
       extensions: [
-        StarterKit.configure({ trailingNode: false, undoRedo: false, link: { openOnClick: false, linkOnPaste: false } }),
+        StarterKit.configure({
+          trailingNode: false,
+          undoRedo: false,
+          link: { openOnClick: false, linkOnPaste: false },
+        }),
         Collaboration.configure({ document: ydoc }),
-        Extension.create({ name: "urlOffer", addProseMirrorPlugins: () => [makeUrlPasteOfferPlugin(() => {}, yTiptap)] }),
+        Extension.create({
+          name: "urlOffer",
+          addProseMirrorPlugins: () => [makeUrlPasteOfferPlugin(() => {}, yTiptap)],
+        }),
       ],
     });
     editor.commands.setContent(content);
     editor.commands.setTextSelection(9);
     const fragment = peer.getXmlFragment("default");
-    const peerText = (paragraph: number) => (fragment.get(paragraph) as Y.XmlElement).get(0) as Y.XmlText;
+    const peerText = (paragraph: number) =>
+      (fragment.get(paragraph) as Y.XmlElement).get(0) as Y.XmlText;
     return { editor, fragment, peerText };
   }
 
@@ -251,7 +272,9 @@ describe("URL paste offer in a shared document", () => {
   });
 
   it("leaves when a remote edit deletes the pasted line, and never takes an identical one", () => {
-    const { editor, fragment } = setupShared(`<p>Before</p><p></p><p><a href="${URL_TEXT}">${URL_TEXT}</a></p>`);
+    const { editor, fragment } = setupShared(
+      `<p>Before</p><p></p><p><a href="${URL_TEXT}">${URL_TEXT}</a></p>`,
+    );
     paste(editor);
     expect(linkedTexts(editor)).toEqual([URL_TEXT, URL_TEXT]);
     fragment.delete(1, 1);
@@ -271,8 +294,16 @@ describe("URL paste offer in a shared document", () => {
     chooseUrlForm(editor.view, "plain");
     // The collaborator's copy keeps its link.
     expect(linkedTexts(editor)).toEqual([URL_TEXT]);
-    expect(editor.state.doc.textBetween(9 + URL_TEXT.length + 1, 9 + 2 * URL_TEXT.length + 1)).toBe(URL_TEXT);
-    expect(editor.state.doc.rangeHasMark(9 + URL_TEXT.length + 1, 9 + 2 * URL_TEXT.length + 1, editor.schema.marks.link!)).toBe(true);
+    expect(editor.state.doc.textBetween(9 + URL_TEXT.length + 1, 9 + 2 * URL_TEXT.length + 1)).toBe(
+      URL_TEXT,
+    );
+    expect(
+      editor.state.doc.rangeHasMark(
+        9 + URL_TEXT.length + 1,
+        9 + 2 * URL_TEXT.length + 1,
+        editor.schema.marks.link!,
+      ),
+    ).toBe(true);
   });
 
   it("leaves when the caret moves into another paragraph with the URL", () => {

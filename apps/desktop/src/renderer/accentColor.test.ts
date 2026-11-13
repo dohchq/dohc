@@ -16,8 +16,11 @@ const SURFACES = ["bg", "panel", "panel2", "line"] as const;
 // Every 51st step of each channel: 216 colors from black to white.
 const GRID = [0, 51, 102, 153, 204, 255].flatMap((r) =>
   [0, 51, 102, 153, 204, 255].flatMap((g) =>
-    [0, 51, 102, 153, 204, 255].map((b) =>
-      `#${[r, g, b].map((value) => value.toString(16).padStart(2, "0")).join("")}`)));
+    [0, 51, 102, 153, 204, 255].map(
+      (b) => `#${[r, g, b].map((value) => value.toString(16).padStart(2, "0")).join("")}`,
+    ),
+  ),
+);
 
 describe("a chosen accent color", () => {
   for (const mode of MODES) {
@@ -32,12 +35,15 @@ describe("a chosen accent color", () => {
           ] as const;
           for (const [label, on] of pairs) {
             const ratio = contrastRatio(accent, on);
-            expect(ratio, `${chosen} → ${accent} ${label} ${name} (${mode})`)
-              .toBeGreaterThanOrEqual(ACCENT_MIN_CONTRAST);
+            expect(
+              ratio,
+              `${chosen} → ${accent} ${label} ${name} (${mode})`,
+            ).toBeGreaterThanOrEqual(ACCENT_MIN_CONTRAST);
           }
           const hover = contrastRatio(palette[mode].bg, mixHex(accent, surface, ACCENT_HOVER));
-          expect(hover, `paper on hovered ${accent} over ${name} (${mode})`)
-            .toBeGreaterThanOrEqual(ACCENT_MIN_CONTRAST);
+          expect(hover, `paper on hovered ${accent} over ${name} (${mode})`).toBeGreaterThanOrEqual(
+            ACCENT_MIN_CONTRAST,
+          );
         }
       }
     });
@@ -49,8 +55,9 @@ describe("a chosen accent color", () => {
     expect(readableAccent("#1F4A73", "light")).toBe("#1f4a73");
     // Magenta reads on the dark panels but only 4.40:1 on line.
     expect(contrastRatio("#ff00e1", palette.dark.line)).toBeLessThan(ACCENT_MIN_CONTRAST);
-    expect(contrastRatio(readableAccent("#ff00e1", "dark"), palette.dark.line))
-      .toBeGreaterThanOrEqual(ACCENT_MIN_CONTRAST);
+    expect(
+      contrastRatio(readableAccent("#ff00e1", "dark"), palette.dark.line),
+    ).toBeGreaterThanOrEqual(ACCENT_MIN_CONTRAST);
   });
 
   it("darkens a mid gray in the light theme and lightens it in the dark theme", () => {

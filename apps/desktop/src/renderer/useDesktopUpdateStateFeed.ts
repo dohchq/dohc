@@ -51,9 +51,7 @@ export function followDesktopUpdateState(
   };
 }
 
-export function useDesktopUpdateStateFeed(
-  acceptLiveState?: (state: UpdateStateEvent) => void,
-): {
+export function useDesktopUpdateStateFeed(acceptLiveState?: (state: UpdateStateEvent) => void): {
   updateState: UpdateStateEvent | null;
   acceptUpdateResult: (state: UpdateStateEvent) => void;
 } {
@@ -66,10 +64,8 @@ export function useDesktopUpdateStateFeed(
   }, []);
 
   useEffect(() => {
-    const follower = followDesktopUpdateState(
-      bridge(),
-      setUpdateState,
-      (state) => acceptLiveStateRef.current?.(state),
+    const follower = followDesktopUpdateState(bridge(), setUpdateState, (state) =>
+      acceptLiveStateRef.current?.(state),
     );
     followerRef.current = follower;
     return () => {

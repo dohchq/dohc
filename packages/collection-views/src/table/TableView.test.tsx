@@ -63,13 +63,7 @@ describe("TableView paging", () => {
 
   it("calls onNearEnd on first render when one page cannot outrun the viewport", () => {
     const onNearEnd = vi.fn();
-    render(
-      <TableView
-        schema={makeSchema()}
-        records={makeRecords(30)}
-        onNearEnd={onNearEnd}
-      />,
-    );
+    render(<TableView schema={makeSchema()} records={makeRecords(30)} onNearEnd={onNearEnd} />);
     expect(onNearEnd).toHaveBeenCalled();
   });
 });
@@ -77,7 +71,13 @@ describe("TableView paging", () => {
 describe("New record row", () => {
   it.each([0, 2])("ends the table with a New record row that adds one (%i records)", (count) => {
     const onNewRecord = vi.fn();
-    render(<TableView schema={makeSchema([{ name: "title", type: "text" }])} records={makeRecords(count)} onNewRecord={onNewRecord} />);
+    render(
+      <TableView
+        schema={makeSchema([{ name: "title", type: "text" }])}
+        records={makeRecords(count)}
+        onNewRecord={onNewRecord}
+      />,
+    );
     expect(screen.getByRole("columnheader", { name: /title/ })).toBeDefined();
     expect(screen.queryByText("No records in this collection yet.")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "New record" }));
@@ -86,8 +86,12 @@ describe("New record row", () => {
 
   it("disables the row while editing is paused, and has no row without the action", () => {
     const schema = makeSchema([{ name: "title", type: "text" }]);
-    const { rerender } = render(<TableView schema={schema} records={[]} onNewRecord={vi.fn()} editingDisabled />);
-    expect((screen.getByRole("button", { name: "New record" }) as HTMLButtonElement).disabled).toBe(true);
+    const { rerender } = render(
+      <TableView schema={schema} records={[]} onNewRecord={vi.fn()} editingDisabled />,
+    );
+    expect((screen.getByRole("button", { name: "New record" }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
     rerender(<TableView schema={schema} records={[]} />);
     expect(screen.queryByRole("button", { name: "New record" })).toBeNull();
     expect(screen.getByText("No records in this collection yet.")).toBeDefined();
@@ -101,8 +105,13 @@ describe("paused table editing", () => {
     const onCellChange = vi.fn(() => 1);
     const onCreateOption = vi.fn();
     const table = (editingDisabled: boolean) => (
-      <TableView schema={schema} records={records} editingDisabled={editingDisabled}
-        onCellChange={onCellChange} onCreateOption={onCreateOption} />
+      <TableView
+        schema={schema}
+        records={records}
+        editingDisabled={editingDisabled}
+        onCellChange={onCellChange}
+        onCreateOption={onCreateOption}
+      />
     );
     const view = render(table(false));
     fireEvent.click(screen.getByRole("button", { name: "alpha" }));
@@ -128,8 +137,12 @@ describe("paused table editing", () => {
     expect(onCreateOption).not.toHaveBeenCalled();
     fireEvent.pointerDown(document.body);
     expect(onCreateOption).toHaveBeenCalledExactlyOnceWith({
-      recordId: "rec-1", recordPath: records[0]!.path, field: "tags", option: "delta",
-      value: ["alpha", "delta"], previousValues: [["alpha"]],
+      recordId: "rec-1",
+      recordPath: records[0]!.path,
+      field: "tags",
+      option: "delta",
+      value: ["alpha", "delta"],
+      previousValues: [["alpha"]],
     });
     expect(onCellChange).not.toHaveBeenCalled();
   });
@@ -139,7 +152,12 @@ describe("paused table editing", () => {
     const schema = makeSchema([{ name: "title", type: "text" }]);
     const onCellChange = vi.fn(() => 1);
     const table = (editingDisabled: boolean) => (
-      <TableView schema={schema} records={records} editingDisabled={editingDisabled} onCellChange={onCellChange} />
+      <TableView
+        schema={schema}
+        records={records}
+        editingDisabled={editingDisabled}
+        onCellChange={onCellChange}
+      />
     );
     const view = render(table(false));
     fireEvent.click(screen.getByRole("button", { name: "Before" }));
@@ -153,7 +171,10 @@ describe("paused table editing", () => {
     expect(input.value).toBe("Draft");
     fireEvent.keyDown(input, { key: "Enter" });
     expect(onCellChange).toHaveBeenCalledExactlyOnceWith({
-      recordId: "rec-1", recordPath: records[0]!.path, field: "title", value: "Draft",
+      recordId: "rec-1",
+      recordPath: records[0]!.path,
+      field: "title",
+      value: "Draft",
     });
   });
 });
@@ -203,17 +224,31 @@ describe("button fields", () => {
 
 describe("field marks", () => {
   it("shows a field's mark after its name, and says what it means without renaming the sort control", () => {
-    const schema = makeSchema([{ name: "title", type: "text" }, { name: "done", type: "checkbox" }]);
-    const marks = new Map([["done", { icon: <svg data-testid="mark-icon" />, label: '"Stamp" sets this field' }]]);
+    const schema = makeSchema([
+      { name: "title", type: "text" },
+      { name: "done", type: "checkbox" },
+    ]);
+    const marks = new Map([
+      ["done", { icon: <svg data-testid="mark-icon" />, label: '"Stamp" sets this field' }],
+    ]);
     const onSortChange = vi.fn();
-    render(<TableView schema={schema} records={makeRecords(1)} fieldMarks={marks} onSortChange={onSortChange} />);
+    render(
+      <TableView
+        schema={schema}
+        records={makeRecords(1)}
+        fieldMarks={marks}
+        onSortChange={onSortChange}
+      />,
+    );
 
     const done = screen.getByRole("button", { name: "done" });
     const description = document.getElementById(done.getAttribute("aria-describedby") ?? "");
     expect(description?.getAttribute("role")).toBe("tooltip");
     expect(description?.textContent).toBe('"Stamp" sets this field');
     expect(done.querySelector('[data-testid="mark-icon"]')).not.toBeNull();
-    expect(screen.getByRole("button", { name: "title" }).hasAttribute("aria-describedby")).toBe(false);
+    expect(screen.getByRole("button", { name: "title" }).hasAttribute("aria-describedby")).toBe(
+      false,
+    );
     expect(screen.getAllByTestId("table-field-mark")).toHaveLength(1);
 
     fireEvent.click(done);
@@ -265,14 +300,18 @@ describe("field marks", () => {
   });
 
   it("closes every open mark's words with one Escape, even when the focused mark stops the key", () => {
-    const schema = makeSchema([{ name: "title", type: "text" }, { name: "done", type: "checkbox" }]);
+    const schema = makeSchema([
+      { name: "title", type: "text" },
+      { name: "done", type: "checkbox" },
+    ]);
     const marks = new Map([
       ["title", { icon: <svg />, label: '"Name" sets this field' }],
       ["done", { icon: <svg />, label: '"Stamp" sets this field' }],
     ]);
     render(<TableView schema={schema} records={makeRecords(1)} fieldMarks={marks} />);
     const title = screen.getByRole("button", { name: "title" });
-    const words = (button: HTMLElement) => document.getElementById(button.getAttribute("aria-describedby") ?? "")!;
+    const words = (button: HTMLElement) =>
+      document.getElementById(button.getAttribute("aria-describedby") ?? "")!;
     const done = screen.getByRole("button", { name: "done" });
     act(() => title.focus());
     fireEvent.mouseEnter(screen.getByRole("columnheader", { name: /done/ }));
@@ -315,13 +354,21 @@ describe("selection and keys", () => {
   function setup(props: Partial<TableViewProps> = {}) {
     const onCellChange = vi.fn((_change: CollectionCellChange) => 1);
     const table = (extra: Partial<TableViewProps> = {}) => (
-      <TableView schema={schema} records={taskRecords()} onCellChange={onCellChange} {...props} {...extra} />
+      <TableView
+        schema={schema}
+        records={taskRecords()}
+        onCellChange={onCellChange}
+        {...props}
+        {...extra}
+      />
     );
     const view = render(table());
     const grid = screen.getByRole("grid");
     const gutter = props.onOpenRecord ? 1 : 0;
     const cell = (row: number, column: number) => {
-      const found = grid.querySelectorAll<HTMLElement>(`[role="row"][data-index="${row}"] [role="gridcell"]`)[column + gutter];
+      const found = grid.querySelectorAll<HTMLElement>(
+        `[role="row"][data-index="${row}"] [role="gridcell"]`,
+      )[column + gutter];
       if (!found) throw new Error(`no cell at row ${row}, column ${column}`);
       return found;
     };
@@ -335,8 +382,10 @@ describe("selection and keys", () => {
       return [Number(row.dataset.index), [...row.children].indexOf(active) - gutter];
     };
     /** Presses a key on the grid. False when the grid kept the key from the browser. */
-    const press = (key: string, modifiers: { shiftKey?: boolean; ctrlKey?: boolean; metaKey?: boolean } = {}) =>
-      fireEvent.keyDown(grid, { key, ...modifiers });
+    const press = (
+      key: string,
+      modifiers: { shiftKey?: boolean; ctrlKey?: boolean; metaKey?: boolean } = {},
+    ) => fireEvent.keyDown(grid, { key, ...modifiers });
     const editorInput = () => grid.querySelector<HTMLInputElement>("[data-cell-editor] input");
     // A click on the checkbox cell's own padding selects it and opens nothing.
     const selectDone = (row = 0) => fireEvent.click(cell(row, DONE));
@@ -373,7 +422,9 @@ describe("selection and keys", () => {
   it("is one Tab stop, whatever the number of rows", () => {
     const { grid } = setup({ onOpenRecord: vi.fn() });
     expect(grid.tabIndex).toBe(0);
-    const rowStops = [...grid.querySelectorAll<HTMLElement>('[role="row"][data-index] :is(button, input)')];
+    const rowStops = [
+      ...grid.querySelectorAll<HTMLElement>('[role="row"][data-index] :is(button, input)'),
+    ];
     expect(rowStops.length).toBeGreaterThan(0);
     expect(rowStops.every((control) => control.tabIndex === -1)).toBe(true);
   });
@@ -450,7 +501,10 @@ describe("selection and keys", () => {
     fireEvent.change(editorInput()!, { target: { value: "Renamed" } });
     fireEvent.keyDown(editorInput()!, { key: "Enter" });
     expect(onCellChange).toHaveBeenCalledExactlyOnceWith({
-      recordId: "rec-b", recordPath: "tasks/rec-b.md", field: "title", value: "Renamed",
+      recordId: "rec-b",
+      recordPath: "tasks/rec-b.md",
+      field: "title",
+      value: "Renamed",
     });
     expect(editorInput()).toBeNull();
     expect(selection()).toEqual([2, 0]);
@@ -467,13 +521,17 @@ describe("selection and keys", () => {
     fireEvent.click(cell(0, 0));
     fireEvent.change(editorInput()!, { target: { value: "Renamed" } });
     expect(fireEvent.keyDown(editorInput()!, { key: "Tab" })).toBe(false);
-    expect(onCellChange).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ field: "title", value: "Renamed" }));
+    expect(onCellChange).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ field: "title", value: "Renamed" }),
+    );
     expect(selection()).toEqual([0, 1]);
 
     press("Enter");
     fireEvent.change(editorInput()!, { target: { value: "8" } });
     fireEvent.keyDown(editorInput()!, { key: "Tab", shiftKey: true });
-    expect(onCellChange).toHaveBeenLastCalledWith(expect.objectContaining({ field: "estimate", value: 8 }));
+    expect(onCellChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ field: "estimate", value: 8 }),
+    );
     expect(onCellChange).toHaveBeenCalledTimes(2);
     expect(selection()).toEqual([0, 0]);
   });
@@ -512,7 +570,9 @@ describe("selection and keys", () => {
     expect(editorInput()?.value).toBe("7");
     fireEvent.change(editorInput()!, { target: { value: "75" } });
     fireEvent.keyDown(editorInput()!, { key: "Enter" });
-    expect(onCellChange).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ field: "estimate", value: 75 }));
+    expect(onCellChange).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ field: "estimate", value: 75 }),
+    );
     expect(selection()).toEqual([1, 1]);
 
     // Ctrl+V is the app's key.
@@ -539,9 +599,17 @@ describe("selection and keys", () => {
     press("Backspace");
     press("ArrowRight");
     press("Delete");
-    expect(cleared()).toEqual([["status", null], ["tags", []], ["title", null], ["estimate", null]]);
+    expect(cleared()).toEqual([
+      ["status", null],
+      ["tags", []],
+      ["title", null],
+      ["estimate", null],
+    ]);
     expect(onCellChange.mock.calls[0]?.[0]).toEqual({
-      recordId: "rec-a", recordPath: "tasks/rec-a.md", field: "status", value: null,
+      recordId: "rec-a",
+      recordPath: "tasks/rec-a.md",
+      field: "status",
+      value: null,
     });
 
     // An empty cell has nothing to clear, and a paused table changes nothing.
@@ -570,7 +638,10 @@ describe("selection and keys", () => {
 
     press("Enter");
     expect(onCellChange).toHaveBeenCalledExactlyOnceWith({
-      recordId: "rec-b", recordPath: "tasks/rec-b.md", field: "done", value: true,
+      recordId: "rec-b",
+      recordPath: "tasks/rec-b.md",
+      field: "done",
+      value: true,
     });
     expect(press(" ")).toBe(false);
     expect(onCellChange).toHaveBeenCalledTimes(2);
@@ -589,7 +660,9 @@ describe("selection and keys", () => {
     const input = editorInput()!;
     fireEvent.change(input, { target: { value: "twelve" } });
     fireEvent.keyDown(input, { key: "Enter" });
-    expect(screen.getByRole("alert").textContent).toBe("This value is not a number. Enter a number.");
+    expect(screen.getByRole("alert").textContent).toBe(
+      "This value is not a number. Enter a number.",
+    );
     expect(editorInput()).toBe(input);
     expect(selection()).toEqual([0, 1]);
 
@@ -615,7 +688,9 @@ describe("selection and keys", () => {
     const input = editorInput()!;
     fireEvent.change(input, { target: { value: "Renamed" } });
     act(() => input.blur());
-    expect(onCellChange).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ field: "title", value: "Renamed" }));
+    expect(onCellChange).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ field: "title", value: "Renamed" }),
+    );
     expect(editorInput()).toBeNull();
     expect(selection()).toEqual([0, 0]);
     expect(document.activeElement).not.toBe(grid);
@@ -643,7 +718,11 @@ describe("selection and keys", () => {
   it("keeps an open edit through a refresh that moves its row and a scroll past it", () => {
     const onCellChange = vi.fn((_change: CollectionCellChange) => 1);
     const table = (records: CollectionRecord[]) => (
-      <TableView schema={makeSchema([{ name: "title", type: "text" }])} records={records} onCellChange={onCellChange} />
+      <TableView
+        schema={makeSchema([{ name: "title", type: "text" }])}
+        records={records}
+        onCellChange={onCellChange}
+      />
     );
     const view = render(table(makeRecords(200)));
     fireEvent.click(screen.getByRole("button", { name: "Task 3" }));
@@ -657,7 +736,9 @@ describe("selection and keys", () => {
     expect(screen.getByRole("textbox")).toBe(input);
     expect(input.value).toBe("Draft");
     fireEvent.keyDown(input, { key: "Enter" });
-    expect(onCellChange).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ recordId: "rec-3", value: "Draft" }));
+    expect(onCellChange).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ recordId: "rec-3", value: "Draft" }),
+    );
   });
 
   it("shows the host's names for fields and records, while keys drive edits and sort", () => {
@@ -672,7 +753,9 @@ describe("selection and keys", () => {
     render(
       <TableView
         schema={idSchema}
-        records={[makeRecord("rec-1", [indexedValue("f-1", "Invoice 12"), indexedValue("f-2", false)])]}
+        records={[
+          makeRecord("rec-1", [indexedValue("f-1", "Invoice 12"), indexedValue("f-2", false)]),
+        ]}
         fieldLabel={(field) => names[field] ?? field}
         recordName={(record) => `Invoice for ${record.id}`}
         onCellChange={onCellChange}
@@ -680,7 +763,12 @@ describe("selection and keys", () => {
         onOpenRecord={vi.fn()}
       />,
     );
-    expect(screen.getAllByRole("columnheader").map((header) => header.textContent)).toEqual(["", "Name", "Shipped", "Mark paid"]);
+    expect(screen.getAllByRole("columnheader").map((header) => header.textContent)).toEqual([
+      "",
+      "Name",
+      "Shipped",
+      "Mark paid",
+    ]);
     expect(screen.queryByText(/^f-\d$/)).toBeNull();
     expect(screen.getByRole("checkbox", { name: "Shipped" })).toBeDefined();
     // The button cell's fallback text is the name too: once in the header, once in the cell.
@@ -712,7 +800,10 @@ describe("pickers", () => {
     { name: "link", type: "url" },
   ]);
   const [STATUS, TAGS, DUE, OWNER, LINK] = [1, 2, 3, 4, 5];
-  const people = [{ id: "user-7", name: "Ada" }, { id: "user-9", name: "Grace" }];
+  const people = [
+    { id: "user-7", name: "Ada" },
+    { id: "user-9", name: "Grace" },
+  ];
   const pickerRecords = () =>
     ["a", "b"].map((id) =>
       makeRecord(`rec-${id}`, [
@@ -729,12 +820,20 @@ describe("pickers", () => {
     let writeId = 0;
     const onCellChange = vi.fn((_change: CollectionCellChange) => ++writeId);
     const table = (extra: Partial<TableViewProps> = {}) => (
-      <TableView schema={schema} records={pickerRecords()} onCellChange={onCellChange} {...props} {...extra} />
+      <TableView
+        schema={schema}
+        records={pickerRecords()}
+        onCellChange={onCellChange}
+        {...props}
+        {...extra}
+      />
     );
     const view = render(table());
     const grid = screen.getByRole("grid");
     const cell = (row: number, column: number) => {
-      const found = grid.querySelectorAll<HTMLElement>(`[role="row"][data-index="${row}"] [role="gridcell"]`)[column];
+      const found = grid.querySelectorAll<HTMLElement>(
+        `[role="row"][data-index="${row}"] [role="gridcell"]`,
+      )[column];
       if (!found) throw new Error(`no cell at row ${row}, column ${column}`);
       return found;
     };
@@ -743,15 +842,35 @@ describe("pickers", () => {
     const selection = () => {
       const active = grid.querySelector<HTMLElement>('[aria-selected="true"][role="gridcell"]');
       if (!active?.parentElement?.hasAttribute("data-index")) return null;
-      return [Number(active.parentElement.dataset.index), [...active.parentElement.children].indexOf(active)];
+      return [
+        Number(active.parentElement.dataset.index),
+        [...active.parentElement.children].indexOf(active),
+      ];
     };
     const editor = () => grid.querySelector<HTMLElement>("[data-cell-editor]");
     const search = () => screen.getByRole<HTMLInputElement>("combobox");
     const option = (name: string) => screen.getByRole("option", { name });
-    const chips = () => screen.queryAllByRole("button", { name: /^Remove / }).map((chip) => chip.getAttribute("aria-label")?.slice(7));
+    const chips = () =>
+      screen
+        .queryAllByRole("button", { name: /^Remove / })
+        .map((chip) => chip.getAttribute("aria-label")?.slice(7));
     const press = (key: string) => fireEvent.keyDown(grid, { key });
     const saved = () => onCellChange.mock.calls.map(([change]) => [change.field, change.value]);
-    return { view, table, grid, cell, open, selection, editor, search, option, chips, press, saved, onCellChange };
+    return {
+      view,
+      table,
+      grid,
+      cell,
+      open,
+      selection,
+      editor,
+      search,
+      option,
+      chips,
+      press,
+      saved,
+      onCellChange,
+    };
   }
 
   it("opens a picker as a popover on its cell, wider than the column", () => {
@@ -798,7 +917,10 @@ describe("pickers", () => {
     expect(document.activeElement).toBe(screen.getByRole("combobox", { name: "Search options" }));
     fireEvent.click(option("doing"));
     expect(onCellChange).toHaveBeenCalledExactlyOnceWith({
-      recordId: "rec-b", recordPath: "tasks/rec-b.md", field: "status", value: "doing",
+      recordId: "rec-b",
+      recordPath: "tasks/rec-b.md",
+      field: "status",
+      value: "doing",
     });
     expect(editor()).toBeNull();
     expect(selection()).toEqual([1, STATUS]);
@@ -844,7 +966,9 @@ describe("pickers", () => {
 
     press("ArrowRight");
     press("g");
-    expect(screen.getByRole<HTMLInputElement>("combobox", { name: "Search people" }).value).toBe("g");
+    expect(screen.getByRole<HTMLInputElement>("combobox", { name: "Search people" }).value).toBe(
+      "g",
+    );
     fireEvent.keyDown(search(), { key: "Enter" });
     expect(saved().at(-1)).toEqual(["owner", "user-9"]);
   });
@@ -857,8 +981,11 @@ describe("pickers", () => {
     expect(onCellChange).not.toHaveBeenCalled();
     expect(fireEvent.keyDown(search(), { key: "Tab" })).toBe(false);
     expect(onCellChange).toHaveBeenCalledExactlyOnceWith({
-      recordId: "rec-a", recordPath: "tasks/rec-a.md", field: "tags",
-      value: ["alpha", "beta", "gamma"], previousValues: [["alpha"]],
+      recordId: "rec-a",
+      recordPath: "tasks/rec-a.md",
+      field: "tags",
+      value: ["alpha", "beta", "gamma"],
+      previousValues: [["alpha"]],
     });
     expect(editor()).toBeNull();
     expect(selection()).toEqual([0, DUE]);
@@ -917,8 +1044,11 @@ describe("pickers", () => {
     fireEvent.click(option("alpha"));
     fireEvent.keyDown(search(), { key: "Tab" });
     expect(onCellChange).toHaveBeenLastCalledWith({
-      recordId: "rec-a", recordPath: "tasks/rec-a.md", field: "tags",
-      value: ["beta"], previousValues: [["alpha"], ["alpha", "beta"]],
+      recordId: "rec-a",
+      recordPath: "tasks/rec-a.md",
+      field: "tags",
+      value: ["beta"],
+      previousValues: [["alpha"], ["alpha", "beta"]],
     });
     // Another record's cell has its own saves.
     open(1, TAGS);
@@ -933,7 +1063,11 @@ describe("pickers", () => {
     // Nothing saved yet: Escape dropped the pick, so Delete clears the indexed ["alpha"].
     press("Delete");
     expect(onCellChange).toHaveBeenLastCalledWith({
-      recordId: "rec-a", recordPath: "tasks/rec-a.md", field: "tags", value: [], previousValues: [["alpha"]],
+      recordId: "rec-a",
+      recordPath: "tasks/rec-a.md",
+      field: "tags",
+      value: [],
+      previousValues: [["alpha"]],
     });
     // The index still shows ["alpha"], and the picker opens on the clear.
     open(0, TAGS);
@@ -941,15 +1075,20 @@ describe("pickers", () => {
     fireEvent.click(option("gamma"));
     fireEvent.pointerDown(document.body);
     expect(onCellChange).toHaveBeenLastCalledWith({
-      recordId: "rec-a", recordPath: "tasks/rec-a.md", field: "tags",
-      value: ["gamma"], previousValues: [["alpha"], []],
+      recordId: "rec-a",
+      recordPath: "tasks/rec-a.md",
+      field: "tags",
+      value: ["gamma"],
+      previousValues: [["alpha"], []],
     });
     // A saved pick the index lacks is cleared too, and an empty selection has nothing to clear.
     press("Escape");
     open(0, TAGS);
     fireEvent.keyDown(search(), { key: "Escape" });
     press("Delete");
-    expect(onCellChange).toHaveBeenLastCalledWith(expect.objectContaining({ value: [], previousValues: [["alpha"], [], ["gamma"]] }));
+    expect(onCellChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ value: [], previousValues: [["alpha"], [], ["gamma"]] }),
+    );
     const calls = onCellChange.mock.calls.length;
     press("Delete");
     expect(onCellChange).toHaveBeenCalledTimes(calls);
@@ -973,10 +1112,12 @@ describe("pickers", () => {
     fireEvent.pointerDown(document.body);
 
     // The index now shows edit 2, with someone else's removal of alpha on top.
-    view.rerender(table({
-      records: [makeRecord("rec-a", [indexedValue("tags", ["gamma"])])],
-      acknowledgedWriteId: () => 2,
-    }));
+    view.rerender(
+      table({
+        records: [makeRecord("rec-a", [indexedValue("tags", ["gamma"])])],
+        acknowledgedWriteId: () => 2,
+      }),
+    );
     open(0, TAGS);
     expect(chips()).toEqual(["gamma"]);
   });
@@ -991,8 +1132,12 @@ describe("pickers", () => {
     expect(onCreateOption).not.toHaveBeenCalled();
     fireEvent.keyDown(search(), { key: "Tab" });
     expect(onCreateOption).toHaveBeenCalledExactlyOnceWith({
-      recordId: "rec-a", recordPath: "tasks/rec-a.md", field: "tags", option: "delta",
-      value: ["alpha", "beta", "delta"], previousValues: [["alpha"]],
+      recordId: "rec-a",
+      recordPath: "tasks/rec-a.md",
+      field: "tags",
+      option: "delta",
+      value: ["alpha", "beta", "delta"],
+      previousValues: [["alpha"]],
     });
     expect(onCellChange).not.toHaveBeenCalled();
     open(0, TAGS);
@@ -1004,9 +1149,15 @@ describe("pickers", () => {
     const { open, press, search } = setup({ onOptionColorChange });
     open(0, STATUS);
     fireEvent.click(screen.getByRole("button", { name: "doing options" }));
-    const unchosen = screen.getAllByRole("radio").find((swatch) => swatch.getAttribute("aria-checked") === "false")!;
+    const unchosen = screen
+      .getAllByRole("radio")
+      .find((swatch) => swatch.getAttribute("aria-checked") === "false")!;
     fireEvent.click(unchosen);
-    expect(onOptionColorChange).toHaveBeenCalledExactlyOnceWith("status", "doing", unchosen.getAttribute("aria-label")!.toLowerCase());
+    expect(onOptionColorChange).toHaveBeenCalledExactlyOnceWith(
+      "status",
+      "doing",
+      unchosen.getAttribute("aria-label")!.toLowerCase(),
+    );
     // The picker is still open, and a tags field's options take colors too.
     fireEvent.keyDown(search(), { key: "Escape" });
     press("ArrowRight");
@@ -1025,7 +1176,10 @@ describe("pickers", () => {
   });
 
   it("opens a people picker when the host lists people, and a typed id when it does not", () => {
-    const withPeople = setup({ people, personLabel: (id) => people.find((person) => person.id === id)?.name ?? null });
+    const withPeople = setup({
+      people,
+      personLabel: (id) => people.find((person) => person.id === id)?.name ?? null,
+    });
     expect(withPeople.cell(0, OWNER).textContent).toBe("AAda");
     withPeople.open(0, OWNER);
     fireEvent.click(withPeople.option("Grace"));
@@ -1068,7 +1222,9 @@ describe("pickers", () => {
     render(
       <TableView
         schema={idSchema}
-        records={[makeRecord("rec-1", [indexedValue("f-1", "todo"), indexedValue("f-2", "2026-11-20")])]}
+        records={[
+          makeRecord("rec-1", [indexedValue("f-1", "todo"), indexedValue("f-2", "2026-11-20")]),
+        ]}
         fieldLabel={(field) => ({ "f-1": "Stage", "f-2": "Due" })[field] ?? field}
         onCellChange={vi.fn(() => 1)}
       />,
@@ -1083,12 +1239,20 @@ describe("pickers", () => {
 
   it("keeps every cell's element while a picker opens, takes picks, and closes", () => {
     const { cell, open, option } = setup();
-    const before = [cell(0, 0).firstElementChild, cell(0, TAGS).firstElementChild, cell(1, STATUS).firstElementChild];
+    const before = [
+      cell(0, 0).firstElementChild,
+      cell(0, TAGS).firstElementChild,
+      cell(1, STATUS).firstElementChild,
+    ];
     open(0, TAGS);
     fireEvent.click(option("beta"));
     fireEvent.pointerDown(document.body);
     open(1, STATUS);
-    expect([cell(0, 0).firstElementChild, cell(0, TAGS).firstElementChild, cell(1, STATUS).firstElementChild]).toEqual(before);
+    expect([
+      cell(0, 0).firstElementChild,
+      cell(0, TAGS).firstElementChild,
+      cell(1, STATUS).firstElementChild,
+    ]).toEqual(before);
     expect(before.every((element) => element?.isConnected)).toBe(true);
   });
 });

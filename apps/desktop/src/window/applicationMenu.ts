@@ -3,7 +3,11 @@ import { SHORTCUTS, shortcutAccelerators, type ShortcutId } from "../shortcuts/s
 import { shortcutName } from "../shortcuts/shortcutNames";
 import { basename } from "node:path";
 import type { MenuCommand, WorkspaceSummary } from "../ipc/bridgeContract";
-import { COMMAND_ROWS, isStaticCommandId, type StaticCommandId } from "../renderer/commands/commandRows";
+import {
+  COMMAND_ROWS,
+  isStaticCommandId,
+  type StaticCommandId,
+} from "../renderer/commands/commandRows";
 import type { ZoomStep } from "../settings/userSettings";
 
 // Each item's label is its palette row's label, so the menu and the palette
@@ -15,7 +19,9 @@ import type { ZoomStep } from "../settings/userSettings";
 // and replace…, which open the find bar.
 function menuLabel(id: MenuCommand | StaticCommandId): string {
   if (isStaticCommandId(id)) return COMMAND_ROWS[id].label.replace(/^View: /, "");
-  return id === "editor-find" || id === "editor-replace" ? `${shortcutName(id)}…` : shortcutName(id);
+  return id === "editor-find" || id === "editor-replace"
+    ? `${shortcutName(id)}…`
+    : shortcutName(id);
 }
 
 // Real application menu (File/Edit/View/Go/Help on Windows and Linux; the
@@ -40,10 +46,7 @@ export function buildMenuTemplate(options: {
   // Zoom is main-owned so its accelerators keep working on windows that
   // never mount the workspace shell (first run, a broken registry).
   stepZoom: (step: ZoomStep) => void;
-  openRecentWorkspace?: (
-    window: BrowserWindow | undefined,
-    workspace: WorkspaceSummary,
-  ) => void;
+  openRecentWorkspace?: (window: BrowserWindow | undefined, workspace: WorkspaceSummary) => void;
   // Windows and Linux. macOS shows its own About panel.
   showAbout: () => void;
 }): MenuItemConstructorOptions[] {
@@ -61,9 +64,9 @@ export function buildMenuTemplate(options: {
       ...(index > 0 ? { visible: false } : {}),
       ...(accelerator ? { accelerator } : {}),
       ...(accelerator && !["main", "native"].includes(SHORTCUTS[name as ShortcutId]?.owner)
-        ? { registerAccelerator: false } : {}),
-      click: (_item, window) =>
-        options.sendCommand(window as BrowserWindow | undefined, name),
+        ? { registerAccelerator: false }
+        : {}),
+      click: (_item, window) => options.sendCommand(window as BrowserWindow | undefined, name),
     }));
   };
 
@@ -95,7 +98,11 @@ export function buildMenuTemplate(options: {
       { role: "hideOthers" },
       { role: "unhide" },
       { type: "separator" },
-      { role: "quit", label: "Quit dohc", accelerator: shortcutAccelerators("quit", options.platform)[0] },
+      {
+        role: "quit",
+        label: "Quit dohc",
+        accelerator: shortcutAccelerators("quit", options.platform)[0],
+      },
     ],
   };
   const macEditItems: MenuItemConstructorOptions[] = [
@@ -154,10 +161,7 @@ export function buildMenuTemplate(options: {
                   label: recentLabel(workspace),
                   sublabel: workspace.rootPath,
                   click: (_item, window) =>
-                    options.openRecentWorkspace?.(
-                      window as BrowserWindow | undefined,
-                      workspace,
-                    ),
+                    options.openRecentWorkspace?.(window as BrowserWindow | undefined, workspace),
                 }))
               : [{ label: "No recent workspaces", enabled: false }],
         },
@@ -169,11 +173,22 @@ export function buildMenuTemplate(options: {
         ...command("close-tab"),
         // VS Code convention: CommandOrControl+W closes the tab in the
         // renderer. The close role uses a separate window shortcut.
-        { role: "close", label: "Close window", accelerator: shortcutAccelerators("close-window", options.platform)[0] },
+        {
+          role: "close",
+          label: "Close window",
+          accelerator: shortcutAccelerators("close-window", options.platform)[0],
+        },
         // A schedule can keep dohc running with no window, and GNOME hides the
         // tray icon that would quit it, so Linux quits from File.
         ...(options.platform === "linux"
-          ? [{ type: "separator" }, { role: "quit", label: "Quit", accelerator: shortcutAccelerators("quit", options.platform)[0] }] as const
+          ? ([
+              { type: "separator" },
+              {
+                role: "quit",
+                label: "Quit",
+                accelerator: shortcutAccelerators("quit", options.platform)[0],
+              },
+            ] as const)
           : []),
       ],
     },
@@ -189,7 +204,7 @@ export function buildMenuTemplate(options: {
         { role: "cut" },
         { role: "copy" },
         { role: "paste" },
-        ...(isMac ? [{ role: "pasteAndMatchStyle" }, { role: "delete" }] as const : []),
+        ...(isMac ? ([{ role: "pasteAndMatchStyle" }, { role: "delete" }] as const) : []),
         { role: "selectAll" },
         ...(isMac ? macEditItems : []),
       ],
@@ -213,11 +228,13 @@ export function buildMenuTemplate(options: {
         // registerAccelerator:false), so zoom works on windows that never
         // mount the workspace shell, and every path persists the level. The
         // hidden items keep the shifted and numpad chords live.
-        ...([
-          { id: "zoom-reset", step: "reset" },
-          { id: "zoom-in", step: "in" },
-          { id: "zoom-out", step: "out" },
-        ] as const).flatMap((zoom) =>
+        ...(
+          [
+            { id: "zoom-reset", step: "reset" },
+            { id: "zoom-in", step: "in" },
+            { id: "zoom-out", step: "out" },
+          ] as const
+        ).flatMap((zoom) =>
           shortcutAccelerators(zoom.id, options.platform).map(
             (accelerator, index): MenuItemConstructorOptions => ({
               label: menuLabel(zoom.id),
@@ -227,13 +244,9 @@ export function buildMenuTemplate(options: {
             }),
           ),
         ),
-        ...(isMac
-          ? [{ type: "separator" }, { role: "togglefullscreen" }] as const
-          : []),
+        ...(isMac ? ([{ type: "separator" }, { role: "togglefullscreen" }] as const) : []),
         // Dev only: a packaged everyday-people app has no devtools menu item.
-        ...(options.isDev
-          ? [{ type: "separator" }, { role: "toggleDevTools" }] as const
-          : []),
+        ...(options.isDev ? ([{ type: "separator" }, { role: "toggleDevTools" }] as const) : []),
       ],
     },
     // macOS keeps Settings in the app menu.

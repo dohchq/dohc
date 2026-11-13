@@ -14,8 +14,12 @@ afterEach(() => {
 });
 
 const ref = (letter: string) => letter.repeat(43);
-const chat = (reference: string): WorkReferenceView =>
-  ({ reference, kind: "chat", label: "Trip", open: { to: "chat-channel", channel: "c-1" } });
+const chat = (reference: string): WorkReferenceView => ({
+  reference,
+  kind: "chat",
+  label: "Trip",
+  open: { to: "chat-channel", channel: "c-1" },
+});
 const handlers = (open = vi.fn(), failed = vi.fn()) => ({ open, failed });
 
 describe("the work link store", () => {
@@ -45,7 +49,14 @@ describe("the work link store", () => {
   it("drops an answer and an open after the workspace changes", async () => {
     let answer!: (views: WorkReferenceView[]) => void;
     const open = vi.fn();
-    const links = createWorkReferenceLinks("ws", handlers(open), () => new Promise((resolve) => { answer = resolve; }));
+    const links = createWorkReferenceLinks(
+      "ws",
+      handlers(open),
+      () =>
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+    );
     links.want(ref("A"));
     await vi.waitFor(() => expect(answer).toBeDefined());
     links.dispose();
@@ -57,7 +68,10 @@ describe("the work link store", () => {
   });
 
   it("asks again after a failed read", async () => {
-    const describe = vi.fn().mockRejectedValueOnce(new Error("engine stopped")).mockImplementation(async (references: string[]) => references.map(chat));
+    const describe = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("engine stopped"))
+      .mockImplementation(async (references: string[]) => references.map(chat));
     const links = createWorkReferenceLinks("ws", handlers(), describe);
     links.want(ref("A"));
     await vi.waitFor(() => expect(describe).toHaveBeenCalledTimes(1));
@@ -69,8 +83,11 @@ describe("the work link store", () => {
   it("opens only the newest click when an older one is answered last", async () => {
     const answers = new Map<string, (views: WorkReferenceView[]) => void>();
     const open = vi.fn();
-    const links = createWorkReferenceLinks("ws", handlers(open), ([reference]) =>
-      new Promise((resolve) => answers.set(reference!, resolve)));
+    const links = createWorkReferenceLinks(
+      "ws",
+      handlers(open),
+      ([reference]) => new Promise((resolve) => answers.set(reference!, resolve)),
+    );
     const first = links.open(ref("A"));
     const second = links.open(ref("B"));
     answers.get(ref("B"))!([{ ...chat(ref("B")), open: { to: "chat-channel", channel: "c-2" } }]);
@@ -82,9 +99,17 @@ describe("the work link store", () => {
 
   it("keeps a click's newer answer when an older read of the same link answers last", async () => {
     let older!: (views: WorkReferenceView[]) => void;
-    const describe = vi.fn()
-      .mockImplementationOnce(() => new Promise((resolve) => { older = resolve; }))
-      .mockImplementation(async (references: string[]) => references.map((reference) => ({ ...chat(reference), label: "Trip 2026" })));
+    const describe = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            older = resolve;
+          }),
+      )
+      .mockImplementation(async (references: string[]) =>
+        references.map((reference) => ({ ...chat(reference), label: "Trip 2026" })),
+      );
     const links = createWorkReferenceLinks("ws", handlers(), describe);
     links.want(ref("A"));
     await vi.waitFor(() => expect(older).toBeDefined());
@@ -96,7 +121,10 @@ describe("the work link store", () => {
 
   it("says when a click cannot be read, and Try again opens it", async () => {
     const error = new Error("engine stopped");
-    const describe = vi.fn().mockRejectedValueOnce(error).mockImplementation(async (references: string[]) => references.map(chat));
+    const describe = vi
+      .fn()
+      .mockRejectedValueOnce(error)
+      .mockImplementation(async (references: string[]) => references.map(chat));
     const open = vi.fn();
     const failed = vi.fn();
     const links = createWorkReferenceLinks("ws", handlers(open, failed), describe);
@@ -104,7 +132,9 @@ describe("the work link store", () => {
     expect(open).not.toHaveBeenCalled();
     expect(failed).toHaveBeenCalledWith(error, expect.any(Function));
     failed.mock.calls[0]![1]();
-    await vi.waitFor(() => expect(open).toHaveBeenCalledWith({ to: "chat-channel", channel: "c-1" }));
+    await vi.waitFor(() =>
+      expect(open).toHaveBeenCalledWith({ to: "chat-channel", channel: "c-1" }),
+    );
   });
 });
 
@@ -112,7 +142,8 @@ describe("a work link in a chat message", () => {
   function renderLinks(body: string, views: WorkReferenceView[]) {
     const open = vi.fn();
     const links = createWorkReferenceLinks("ws", handlers(open), async (references) =>
-      views.filter((view) => references.includes(view.reference)));
+      views.filter((view) => references.includes(view.reference)),
+    );
     const view = render(
       <WorkReferences.Provider value={links}>
         <ChatMarkdown body={body} candidates={[]} testId="body" onOpenPath={vi.fn()} />
@@ -131,7 +162,12 @@ describe("a work link in a chat message", () => {
 
   it("names a file by its basename and a thread without a title as Thread", async () => {
     const { view } = renderLinks(`@[work:${ref("A")}] and @[work:${ref("B")}]`, [
-      { reference: ref("A"), kind: "file", label: "Trip/plan.md", open: { to: "file", path: "Trip/plan.md" } },
+      {
+        reference: ref("A"),
+        kind: "file",
+        label: "Trip/plan.md",
+        open: { to: "file", path: "Trip/plan.md" },
+      },
       { reference: ref("B"), kind: "thread", label: "", open: { to: "chat", thread: "t-1" } },
     ]);
     await waitFor(() => view.getByRole("button", { name: "Open plan.md" }));
@@ -139,7 +175,14 @@ describe("a work link in a chat message", () => {
   });
 
   it("reads a link again when it is opened, so a click follows a rename", async () => {
-    const views = [{ reference: ref("A"), kind: "file" as const, label: "plan.md", open: { to: "file" as const, path: "plan.md" } }];
+    const views = [
+      {
+        reference: ref("A"),
+        kind: "file" as const,
+        label: "plan.md",
+        open: { to: "file" as const, path: "plan.md" },
+      },
+    ];
     const { view, open } = renderLinks(`@[work:${ref("A")}]`, views);
     await waitFor(() => view.getByRole("button", { name: "Open plan.md" }));
     views[0] = { ...views[0]!, label: "trip.md", open: { to: "file", path: "trip.md" } };
@@ -150,12 +193,19 @@ describe("a work link in a chat message", () => {
 
   it("opens a link whose first read failed once it is read", async () => {
     const open = vi.fn();
-    const describe = vi.fn().mockRejectedValueOnce(new Error("engine stopped"))
+    const describe = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("engine stopped"))
       .mockImplementation(async (references: string[]) => references.map(chat));
     const links = createWorkReferenceLinks("ws", handlers(open), describe);
     const view = render(
       <WorkReferences.Provider value={links}>
-        <ChatMarkdown body={`@[work:${ref("A")}]`} candidates={[]} testId="body" onOpenPath={vi.fn()} />
+        <ChatMarkdown
+          body={`@[work:${ref("A")}]`}
+          candidates={[]}
+          testId="body"
+          onOpenPath={vi.fn()}
+        />
       </WorkReferences.Provider>,
     );
     await waitFor(() => expect(describe).toHaveBeenCalledTimes(1));
@@ -165,8 +215,12 @@ describe("a work link in a chat message", () => {
   });
 
   it("shows work this workspace cannot see as unavailable, with nothing to open", async () => {
-    const { view } = renderLinks(`@[work:${ref("A")}]`, [{ reference: ref("A"), kind: null, label: "", open: null }]);
-    await waitFor(() => expect(view.getByTestId("body-work-link").textContent).toContain("Unavailable"));
+    const { view } = renderLinks(`@[work:${ref("A")}]`, [
+      { reference: ref("A"), kind: null, label: "", open: null },
+    ]);
+    await waitFor(() =>
+      expect(view.getByTestId("body-work-link").textContent).toContain("Unavailable"),
+    );
     expect(view.getByTestId("body-work-link").dataset.missing).toBe("true");
     expect(view.queryByRole("button")).toBeNull();
   });
@@ -175,36 +229,53 @@ describe("a work link in a chat message", () => {
     vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
     const views: WorkReferenceView[] = [{ reference: ref("A"), kind: null, label: "", open: null }];
     const { view } = renderLinks(`@[work:${ref("A")}]`, views);
-    await vi.waitFor(() => expect(view.getByTestId("body-work-link").textContent).toContain("Unavailable"));
+    await vi.waitFor(() =>
+      expect(view.getByTestId("body-work-link").textContent).toContain("Unavailable"),
+    );
     views[0] = chat(ref("A"));
-    await act(async () => { vi.advanceTimersByTime(10_000); });
+    await act(async () => {
+      vi.advanceTimersByTime(10_000);
+    });
     await vi.waitFor(() => expect(view.getByRole("button", { name: "Open Trip" })).toBeTruthy());
   });
 
   it("reads a link whose first read failed again while it shows", async () => {
     vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
-    const describe = vi.fn().mockRejectedValueOnce(new Error("engine stopped"))
+    const describe = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("engine stopped"))
       .mockImplementation(async (references: string[]) => references.map(chat));
     const links = createWorkReferenceLinks("ws", handlers(), describe);
     const view = render(
       <WorkReferences.Provider value={links}>
-        <ChatMarkdown body={`@[work:${ref("A")}]`} candidates={[]} testId="body" onOpenPath={vi.fn()} />
+        <ChatMarkdown
+          body={`@[work:${ref("A")}]`}
+          candidates={[]}
+          testId="body"
+          onOpenPath={vi.fn()}
+        />
       </WorkReferences.Provider>,
     );
     await vi.waitFor(() => expect(describe).toHaveBeenCalledTimes(1));
-    await act(async () => { vi.advanceTimersByTime(10_000); });
+    await act(async () => {
+      vi.advanceTimersByTime(10_000);
+    });
     await vi.waitFor(() => expect(view.getByRole("button", { name: "Open Trip" })).toBeTruthy());
   });
 
   it("opens a link in a thread's header, which is not itself a button", async () => {
     const open = vi.fn();
-    const links = createWorkReferenceLinks("ws", handlers(open), async (references) => references.map(chat));
+    const links = createWorkReferenceLinks("ws", handlers(open), async (references) =>
+      references.map(chat),
+    );
     const view = render(
       <WorkReferences.Provider value={links}>
         <ChatHeader label={`Plans live in @[work:${ref("A")}]`} testId="thread" />
       </WorkReferences.Provider>,
     );
-    await act(async () => (await waitFor(() => view.getByRole("button", { name: "Open Trip" }))).click());
+    await act(async () =>
+      (await waitFor(() => view.getByRole("button", { name: "Open Trip" }))).click(),
+    );
     await waitFor(() => expect(open).toHaveBeenCalledWith({ to: "chat-channel", channel: "c-1" }));
   });
 

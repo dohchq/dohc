@@ -56,10 +56,7 @@ function settleRetryCapMs(error: unknown): number | null {
 // its capture forever while nothing holds the reservation.
 export class YdocReleasedWithSettleFailureError extends Error {
   constructor(path: string, cause: unknown) {
-    super(
-      `Y.Doc session for ${path} released, but its pre-close settle failed.`,
-      { cause },
-    );
+    super(`Y.Doc session for ${path} released, but its pre-close settle failed.`, { cause });
     this.name = "YdocReleasedWithSettleFailureError";
   }
 }
@@ -168,17 +165,17 @@ export interface EngineYdocProviderSession {
   // holds another history, `onLineageReplaced` has announced it by then.
   resync?(): Promise<void>;
   adoptCollectionRecord?(): Promise<"settled" | "ownerPending" | "declined">;
-  settleNow(options?: { summary?: string; ifNeeded?: boolean; allowLossySourceSha256?: string }): Promise<YdocSettleResult | undefined>;
+  settleNow(options?: {
+    summary?: string;
+    ifNeeded?: boolean;
+    allowLossySourceSha256?: string;
+  }): Promise<YdocSettleResult | undefined>;
   // `settle: false` alone does not promise the file will be left alone: a
   // release the daemon refuses as unsettled escalates to a settling close, so
   // pending edits survive a transient failure. A caller that must never
   // materialize this path has to say so with `settleOnRefusal: false`, which
   // turns that escalation off and surfaces the refusal instead.
-  close(options?: {
-    settle?: boolean;
-    summary?: string;
-    settleOnRefusal?: boolean;
-  }): Promise<void>;
+  close(options?: { settle?: boolean; summary?: string; settleOnRefusal?: boolean }): Promise<void>;
   // End the session while writing nothing and discarding nothing: the daemon
   // drops the session and its lease and leaves the durable lineage alone, so
   // the next open resurrects this document's edits. The exit for a session
@@ -196,13 +193,13 @@ export async function openEngineYdocProviderSession(
   let session: YdocAdapterSession;
   try {
     session = await adapter.openSession({
-      ...(options.allowLossySourceSha256 ? { allowLossySourceSha256: options.allowLossySourceSha256 } : {}),
+      ...(options.allowLossySourceSha256
+        ? { allowLossySourceSha256: options.allowLossySourceSha256 }
+        : {}),
       workspace: options.workspace,
       versionId: options.versionId,
       path: options.path,
-      ...(options.expectedObjectId
-        ? { expectedObjectId: options.expectedObjectId }
-        : {}),
+      ...(options.expectedObjectId ? { expectedObjectId: options.expectedObjectId } : {}),
       ...(options.contentKind ? { contentKind: options.contentKind } : {}),
       ...(options.seedAbsentLineage !== undefined
         ? { seedAbsentLineage: options.seedAbsentLineage }
@@ -214,8 +211,7 @@ export async function openEngineYdocProviderSession(
     throw error;
   }
 
-  const settleDebounceMs =
-    options.settleDebounceMs ?? DEFAULT_SETTLE_DEBOUNCE_MS;
+  const settleDebounceMs = options.settleDebounceMs ?? DEFAULT_SETTLE_DEBOUNCE_MS;
   session.onLocalUpdateAcknowledged((id, lane) => options.onLocalUpdateAcknowledged?.(id, lane));
   session.onLocalUpdateRefused((id, error) => options.onLocalUpdateRefused?.(id, error));
   const scheduleSettle =
@@ -241,16 +237,18 @@ export async function openEngineYdocProviderSession(
   // Updates and resyncs below withdraw this no-work proof.
   let settledRevision = session.head === "absent" && session.lineage === "absent" ? 0 : -1;
   let observedDoc = session.doc;
-  const noteDocumentChange = (): void => { documentRevision += 1; };
+  const noteDocumentChange = (): void => {
+    documentRevision += 1;
+  };
   observedDoc.on("update", noteDocumentChange);
   const canSkipSettle = (): boolean =>
-    session.head === "absent" && session.lineage === "absent" &&
-    settledRevision === documentRevision && !session.missingLocalState && session.lineageClaimId === null;
+    session.head === "absent" &&
+    session.lineage === "absent" &&
+    settledRevision === documentRevision &&
+    !session.missingLocalState &&
+    session.lineageClaimId === null;
 
-  function notifyError(
-    callback: ((error: unknown) => void) | undefined,
-    error: unknown,
-  ): void {
+  function notifyError(callback: ((error: unknown) => void) | undefined, error: unknown): void {
     if (error instanceof YdocOwnerDraftPendingError) return;
     try {
       callback?.(error);
@@ -304,9 +302,12 @@ export async function openEngineYdocProviderSession(
         }, retrySignal);
         if (localEditError !== null) throw localEditError;
         const revision = documentRevision;
-        const result = await retryWhileEngineBusy(() =>
-          session.settle({ ...(summary !== undefined ? { summary } : {}),
-            ...(allowLossySourceSha256 ? { allowLossySourceSha256 } : {}) }),
+        const result = await retryWhileEngineBusy(
+          () =>
+            session.settle({
+              ...(summary !== undefined ? { summary } : {}),
+              ...(allowLossySourceSha256 ? { allowLossySourceSha256 } : {}),
+            }),
           retrySignal,
         );
         // Artifact verification must finish before close can reuse this settle.
@@ -384,15 +385,13 @@ export async function openEngineYdocProviderSession(
     noteDocumentChange();
     options.onResyncNeeded?.(error);
   });
-  const unsubscribeReplacement = session.onLineageReplaced(
-    (replacement, recoveredPaths, head) => {
-      observedDoc.off("update", noteDocumentChange);
-      observedDoc = replacement;
-      observedDoc.on("update", noteDocumentChange);
-      noteDocumentChange();
-      options.onLineageReplaced?.(replacement, recoveredPaths, head);
-    },
-  );
+  const unsubscribeReplacement = session.onLineageReplaced((replacement, recoveredPaths, head) => {
+    observedDoc.off("update", noteDocumentChange);
+    observedDoc = replacement;
+    observedDoc.on("update", noteDocumentChange);
+    noteDocumentChange();
+    options.onLineageReplaced?.(replacement, recoveredPaths, head);
+  });
   const unsubscribeSessionError = session.onSessionError((error) => {
     noteDocumentChange();
     notifyError(options.onSessionError, error);
@@ -429,9 +428,11 @@ export async function openEngineYdocProviderSession(
 
   return {
     nativeOwner: {
-      get sessionId() { return session.sessionId; },
-      onDurableLocalChange: handler => session.onDurableLocalChange(handler),
-      onSettlementWanted: handler => session.onSettlementWanted(handler),
+      get sessionId() {
+        return session.sessionId;
+      },
+      onDurableLocalChange: (handler) => session.onDurableLocalChange(handler),
+      onSettlementWanted: (handler) => session.onSettlementWanted(handler),
       async flush() {
         if (closed) throw new Error("Owner session is closed.");
         await journalChain;
@@ -461,20 +462,25 @@ export async function openEngineYdocProviderSession(
     get lineageOriginatedHere() {
       return session.lineageOriginatedHere;
     },
-    get ownerBound() { return session.ownerDraft !== undefined; },
+    get ownerBound() {
+      return session.ownerDraft !== undefined;
+    },
     contentKind: session.contentKind,
     get artifactAssets() {
       return session.artifactAssets;
     },
     path: session.path,
     head: session.head,
-    get headSha256() { return session.headSha256; },
+    get headSha256() {
+      return session.headSha256;
+    },
     lineage: session.lineage,
     unsettled: session.unsettled,
 
     applyLocalUpdate(update, applyOptions) {
       if (closed) {
-        if (closeComplete) return Promise.reject(new Error(`Y.Doc provider session for ${options.path} is closed.`));
+        if (closeComplete)
+          return Promise.reject(new Error(`Y.Doc provider session for ${options.path} is closed.`));
         return Promise.reject(
           localEditError ??
             closeError ??
@@ -486,7 +492,10 @@ export async function openEngineYdocProviderSession(
       const { armSettle = true, ...recordOptions } = applyOptions ?? {};
       let operation: Promise<unknown>;
       try {
-        operation = session.applyLocalUpdate(update, {...recordOptions, ...(options.trustedAutomationDraft ? {trustedAutomationDraft: true} : {})});
+        operation = session.applyLocalUpdate(update, {
+          ...recordOptions,
+          ...(options.trustedAutomationDraft ? { trustedAutomationDraft: true } : {}),
+        });
       } catch (error) {
         if (!isLineageChange(error)) rememberLocalEditError(error);
         throw error;
@@ -497,7 +506,13 @@ export async function openEngineYdocProviderSession(
     async replayLocalUpdate(update, applyOptions) {
       if (closed) throw new Error(`Y.Doc provider session for ${options.path} is closing.`);
       const { armSettle = false, ...recordOptions } = applyOptions ?? {};
-      return trackLocalOperation(session.replayLocalUpdate(update, {...recordOptions, ...(options.trustedAutomationDraft ? {trustedAutomationDraft: true} : {})}), armSettle);
+      return trackLocalOperation(
+        session.replayLocalUpdate(update, {
+          ...recordOptions,
+          ...(options.trustedAutomationDraft ? { trustedAutomationDraft: true } : {}),
+        }),
+        armSettle,
+      );
     },
 
     async reestablishAcknowledgedState(update) {
@@ -518,10 +533,15 @@ export async function openEngineYdocProviderSession(
     },
 
     async settleNow(settleOptions) {
-      if (!settleOptions?.allowLossySourceSha256 && settleOptions?.ifNeeded && canSkipSettle()) return;
+      if (!settleOptions?.allowLossySourceSha256 && settleOptions?.ifNeeded && canSkipSettle())
+        return;
       cancelSettle?.();
       cancelSettle = null;
-      const operation = runSettle(settleOptions?.summary, undefined, settleOptions?.allowLossySourceSha256);
+      const operation = runSettle(
+        settleOptions?.summary,
+        undefined,
+        settleOptions?.allowLossySourceSha256,
+      );
       // The caller gets the rejection; the retry is armed here too, because
       // an explicit flush that hit the lock leaves the same durably pending
       // write as a debounced one.
@@ -547,7 +567,10 @@ export async function openEngineYdocProviderSession(
           await session.resyncIfNeeded();
           if (!canSkipSettle()) {
             if (settledRevision !== documentRevision || session.missingLocalState) {
-              await runSettle(closeOptions?.summary ?? "session close", closeRetryController.signal);
+              await runSettle(
+                closeOptions?.summary ?? "session close",
+                closeRetryController.signal,
+              );
             } else if (session.lineageClaimId !== null) {
               // Replicated lineage can contain owner frames whose notice has
               // not arrived. Settle it without repeating artifact verification,
@@ -559,7 +582,9 @@ export async function openEngineYdocProviderSession(
                   closeRetryController.signal,
                 );
                 if (!result.materialized) {
-                  throw new Error("dohc could not write the file (blocked target). The write is pending a retry.");
+                  throw new Error(
+                    "dohc could not write the file (blocked target). The write is pending a retry.",
+                  );
                 }
               } catch (error) {
                 // Reuse has no success callback. Give failures an observable token.

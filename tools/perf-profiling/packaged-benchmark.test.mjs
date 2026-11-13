@@ -1,81 +1,167 @@
-import './document-size.test.mjs';
-import './go-to-index-fixture.test.mjs';
-import './go-to-packaged-fixture.test.mjs';
-import test from 'node:test';
-import vm from 'node:vm';
-import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
-import { once } from 'node:events';
-import { mkdir, mkdtemp, realpath, rm, readFile, writeFile } from 'node:fs/promises';
-import fsPromises from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
-import { setTimeout as delay } from 'node:timers/promises';
-import { parseOptions, createEvidenceDirectory, benchmarkEnvironment, packagedLaunchArgs } from './packaged-benchmark-options.mjs';
-import { linkFixtureFile, linkingPaths, linkIndexReady } from './packaged-link-rename.mjs';
-import { startWindowController, waitForVisibleWindow } from './window-controller.mjs';
-import { closeOwnedPackage, observeExit, benchmarkCancellation, verifyRestartInput } from './packaged-process.mjs';
-import { parseCpuTime, parseMacProcessSnapshot } from './packaged-process-snapshot.mjs';
-import { summarize } from './summarize-packaged-benchmark.mjs';
-import { compareSummaries, DEFAULT_MARGIN, METRIC_VERSION } from './compare-packaged-benchmark.mjs';
-import { createRequire, syncBuiltinESMExports } from 'node:module';
-import { observeStartupReadiness, startupTargetFromRegistry } from './startup-readiness.mjs';
-import { observeSurface, observeSearchSubmit, seededPostThreadId, collectionFixtureFiles, recordId, classifyProcess, aggregateByKind } from './packaged-surfaces.mjs';
-import { automationCases, automationFixtureDigest, automationOf, busyShare, classifyOutcome, cpuByKind, DATASET_NAME, datasetAutomationDefinition, datasetListRequest, datasetRowValues, datasetSetupRequest, DEFAULT_LIMITS,
-  dismissToasts, documentAutomationFiles, documentValues, journalBytes, noticeForPress, observeAutomationRun, outcomeTexts, peakByKind, readAutomationNotices, readDocumentCase, readRunJournal, runForPress, TRIGGER,
-  verifyCase, waitForQuiet, WIDE_SET } from './packaged-collection-automations.mjs';
-import { run as runOwnedCommand } from '../../scripts/verification/process.mjs';
+import "./document-size.test.mjs";
+import "./go-to-index-fixture.test.mjs";
+import "./go-to-packaged-fixture.test.mjs";
+import test from "node:test";
+import vm from "node:vm";
+import assert from "node:assert/strict";
+import { spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
+import { mkdir, mkdtemp, realpath, rm, readFile, writeFile } from "node:fs/promises";
+import fsPromises from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import { setTimeout as delay } from "node:timers/promises";
+import {
+  parseOptions,
+  createEvidenceDirectory,
+  benchmarkEnvironment,
+  packagedLaunchArgs,
+} from "./packaged-benchmark-options.mjs";
+import { linkFixtureFile, linkingPaths, linkIndexReady } from "./packaged-link-rename.mjs";
+import { startWindowController, waitForVisibleWindow } from "./window-controller.mjs";
+import {
+  closeOwnedPackage,
+  observeExit,
+  benchmarkCancellation,
+  verifyRestartInput,
+} from "./packaged-process.mjs";
+import { parseCpuTime, parseMacProcessSnapshot } from "./packaged-process-snapshot.mjs";
+import { summarize } from "./summarize-packaged-benchmark.mjs";
+import { compareSummaries, DEFAULT_MARGIN, METRIC_VERSION } from "./compare-packaged-benchmark.mjs";
+import { createRequire, syncBuiltinESMExports } from "node:module";
+import { observeStartupReadiness, startupTargetFromRegistry } from "./startup-readiness.mjs";
+import {
+  observeSurface,
+  observeSearchSubmit,
+  seededPostThreadId,
+  collectionFixtureFiles,
+  recordId,
+  classifyProcess,
+  aggregateByKind,
+} from "./packaged-surfaces.mjs";
+import {
+  automationCases,
+  automationFixtureDigest,
+  automationOf,
+  busyShare,
+  classifyOutcome,
+  cpuByKind,
+  DATASET_NAME,
+  datasetAutomationDefinition,
+  datasetListRequest,
+  datasetRowValues,
+  datasetSetupRequest,
+  DEFAULT_LIMITS,
+  dismissToasts,
+  documentAutomationFiles,
+  documentValues,
+  journalBytes,
+  noticeForPress,
+  observeAutomationRun,
+  outcomeTexts,
+  peakByKind,
+  readAutomationNotices,
+  readDocumentCase,
+  readRunJournal,
+  runForPress,
+  TRIGGER,
+  verifyCase,
+  waitForQuiet,
+  WIDE_SET,
+} from "./packaged-collection-automations.mjs";
+import { run as runOwnedCommand } from "../../scripts/verification/process.mjs";
 
-test('link index readiness waits through startup refusal and indexing without hiding other errors', async () => {
-  const answers = [Error("Error invoking remote method 'desktop:links-in': DaemonRefusalError [OVERLOADED]: Workspace is still updating. Try again."),
-    {indexBuilding: true}, {indexBuilding: false}, Error('unrelated failure')];
-  const page = {evaluate: async (_read, request) => {
-    assert.deepEqual(request, {workspaceId: 'workspace', path: 'link-target.md'});
-    const answer = answers.shift();
-    if (answer instanceof Error) throw answer;
-    return answer;
-  }};
-  assert.equal(await linkIndexReady(page, 'workspace'), false);
-  assert.equal(await linkIndexReady(page, 'workspace'), false);
-  assert.equal(await linkIndexReady(page, 'workspace'), true);
-  await assert.rejects(linkIndexReady(page, 'workspace'), /unrelated failure/);
+test("link index readiness waits through startup refusal and indexing without hiding other errors", async () => {
+  const answers = [
+    Error(
+      "Error invoking remote method 'desktop:links-in': DaemonRefusalError [OVERLOADED]: Workspace is still updating. Try again.",
+    ),
+    { indexBuilding: true },
+    { indexBuilding: false },
+    Error("unrelated failure"),
+  ];
+  const page = {
+    evaluate: async (_read, request) => {
+      assert.deepEqual(request, { workspaceId: "workspace", path: "link-target.md" });
+      const answer = answers.shift();
+      if (answer instanceof Error) throw answer;
+      return answer;
+    },
+  };
+  assert.equal(await linkIndexReady(page, "workspace"), false);
+  assert.equal(await linkIndexReady(page, "workspace"), false);
+  assert.equal(await linkIndexReady(page, "workspace"), true);
+  await assert.rejects(linkIndexReady(page, "workspace"), /unrelated failure/);
 });
 
 function fakePage(t, html) {
-  const require = createRequire(new URL('../../apps/desktop/package.json', import.meta.url));
-  const { JSDOM } = require('jsdom');
-  const dom = new JSDOM(html, { pretendToBeVisual: true, runScripts: 'outside-only' });
+  const require = createRequire(new URL("../../apps/desktop/package.json", import.meta.url));
+  const { JSDOM } = require("jsdom");
+  const dom = new JSDOM(html, { pretendToBeVisual: true, runScripts: "outside-only" });
   t.after(() => dom.window.close());
   const w = dom.window;
-  let now = 10, id = 0;
-  const frames = new Map(), timers = new Map();
+  let now = 10,
+    id = 0;
+  const frames = new Map(),
+    timers = new Map();
   w.performance.now = () => now;
-  w.requestAnimationFrame = callback => { frames.set(++id, callback); return id; };
-  w.cancelAnimationFrame = key => frames.delete(key);
-  w.setTimeout = (callback, ms) => { timers.set(++id, { callback, at: now + ms }); return id; };
-  w.clearTimeout = key => timers.delete(key);
+  w.requestAnimationFrame = (callback) => {
+    frames.set(++id, callback);
+    return id;
+  };
+  w.cancelAnimationFrame = (key) => frames.delete(key);
+  w.setTimeout = (callback, ms) => {
+    timers.set(++id, { callback, at: now + ms });
+    return id;
+  };
+  w.clearTimeout = (key) => timers.delete(key);
   // jsdom has no layout. All DOM ancestry, selection and computed-style
   // checks are real; this supplies the visible fixture's viewport geometry.
-  w.HTMLElement.prototype.getBoundingClientRect = () => ({ left: 0, top: 0, right: 600, bottom: 400, width: 600, height: 400 });
+  w.HTMLElement.prototype.getBoundingClientRect = () => ({
+    left: 0,
+    top: 0,
+    right: 600,
+    bottom: 400,
+    width: 600,
+    height: 400,
+  });
   const step = () => {
     now += 50;
-    for (const [key, timer] of [...timers]) if (timer.at <= now) { timers.delete(key); timer.callback(); }
+    for (const [key, timer] of [...timers])
+      if (timer.at <= now) {
+        timers.delete(key);
+        timer.callback();
+      }
   };
   const frame = () => {
     now += 16;
-    const pending = [...frames.values()]; frames.clear();
+    const pending = [...frames.values()];
+    frames.clear();
     for (const callback of pending) callback(now);
   };
   const run = (observer, options) => w.eval(`(${observer.toString()})`)(options);
-  const keydown = (target, key) => target.dispatchEvent(new w.KeyboardEvent('keydown', { key, bubbles: true }));
-  return { window: w, document: w.document, run, step, frame, frames, timers, keydown, now: () => now };
+  const keydown = (target, key) =>
+    target.dispatchEvent(new w.KeyboardEvent("keydown", { key, bubbles: true }));
+  return {
+    window: w,
+    document: w.document,
+    run,
+    step,
+    frame,
+    frames,
+    timers,
+    keydown,
+    now: () => now,
+  };
 }
 // MutationObserver callbacks are microtasks; settle them before driving the fake clock.
-const mutations = () => new Promise(resolve => setImmediate(resolve));
+const mutations = () => new Promise((resolve) => setImmediate(resolve));
 
 function readinessPage(t) {
-  const p = fakePage(t, `<div data-testid="workspace-shell" data-ready="true">
+  const p = fakePage(
+    t,
+    `<div data-testid="workspace-shell" data-ready="true">
     <button data-testid="workspace-switcher">workspace-0</button>
     <div data-testid="workspace-workbench">
       <section data-editor-group-id="primary" data-active="true">
@@ -83,15 +169,19 @@ function readinessPage(t) {
         <div data-testid="view-markdown"><div class="tiptap" contenteditable="true">Workspace 0 small</div></div>
       </section>
     </div>
-  </div>`);
-  const observe = (target = { workspaceName: 'workspace-0', path: 'small.md', content: 'Workspace 0 small' }) => p.run(observeStartupReadiness, { ...target, timeoutMs: 1000 });
+  </div>`,
+  );
+  const observe = (
+    target = { workspaceName: "workspace-0", path: "small.md", content: "Workspace 0 small" },
+  ) => p.run(observeStartupReadiness, { ...target, timeoutMs: 1000 });
   return { ...p, observe };
 }
 
-test('startup observer records an already-ready document without inferring earlier readiness', async t => {
+test("startup observer records an already-ready document without inferring earlier readiness", async (t) => {
   const p = readinessPage(t);
   const result = p.observe();
-  p.frame(); p.frame();
+  p.frame();
+  p.frame();
   const observed = await result;
   assert.equal(observed.alreadyReady, true);
   assert.equal(observed.observerInstalledMs, 10);
@@ -101,7 +191,7 @@ test('startup observer records an already-ready document without inferring earli
   assert.equal(p.timers.size + p.frames.size, 0);
 });
 
-test('startup observer installed before the body exists waits for the editable document', async t => {
+test("startup observer installed before the body exists waits for the editable document", async (t) => {
   const p = readinessPage(t);
   const body = p.document.body;
   body.remove();
@@ -109,7 +199,9 @@ test('startup observer installed before the body exists waits for the editable d
   const result = p.observe();
   assert.equal(p.frames.size, 0);
   p.document.documentElement.append(body);
-  p.step(); p.frame(); p.frame();
+  p.step();
+  p.frame();
+  p.frame();
   const observed = await result;
   assert.equal(observed.alreadyReady, false);
   assert.equal(observed.observerInstalledMs, 10);
@@ -119,548 +211,1126 @@ test('startup observer installed before the body exists waits for the editable d
 });
 
 const notReadyCases = {
-  'wrong workspace': d => { const node = d.querySelector('[data-testid="workspace-switcher"]'); node.textContent = 'workspace-1'; return () => { node.textContent = 'workspace-0'; }; },
-  'wrong selected tab': d => { const node = d.querySelector('[role="tab"]'); node.setAttribute('data-testid', 'tab-large.md'); return () => node.setAttribute('data-testid', 'tab-small.md'); },
-  'wrong document body': d => { const node = d.querySelector('.tiptap'); node.textContent = 'Workspace 1 small'; return () => { node.textContent = 'Workspace 0 small'; }; },
-  'inactive editor group': d => { const node = d.querySelector('[data-editor-group-id]'); node.removeAttribute('data-active'); return () => node.setAttribute('data-active', 'true'); },
-  'unselected tab': d => { const node = d.querySelector('[role="tab"]'); node.setAttribute('aria-selected', 'false'); return () => node.setAttribute('aria-selected', 'true'); },
-  'pending workspace': d => { const node = d.querySelector('[data-testid="workspace-shell"]'); node.setAttribute('data-ready', 'false'); return () => node.setAttribute('data-ready', 'true'); },
-  'hidden preserved editor': d => { const node = d.querySelector('[data-testid="view-markdown"]'); node.hidden = true; return () => { node.hidden = false; }; },
-  'inert workbench': d => { const node = d.querySelector('[data-testid="workspace-workbench"]'); node.setAttribute('inert', ''); return () => node.removeAttribute('inert'); },
-  'CSS-hidden pane': d => { const node = d.querySelector('[data-testid="view-markdown"]'); node.style.display = 'none'; return () => { node.style.display = ''; }; },
-  'read-only editor': d => { const node = d.querySelector('.tiptap'); node.setAttribute('contenteditable', 'false'); return () => node.setAttribute('contenteditable', 'true'); },
-  'zero-sized editor': d => { const node = d.querySelector('.tiptap'); node.getBoundingClientRect = () => ({ width: 0, height: 0 }); return () => { delete node.getBoundingClientRect; }; },
+  "wrong workspace": (d) => {
+    const node = d.querySelector('[data-testid="workspace-switcher"]');
+    node.textContent = "workspace-1";
+    return () => {
+      node.textContent = "workspace-0";
+    };
+  },
+  "wrong selected tab": (d) => {
+    const node = d.querySelector('[role="tab"]');
+    node.setAttribute("data-testid", "tab-large.md");
+    return () => node.setAttribute("data-testid", "tab-small.md");
+  },
+  "wrong document body": (d) => {
+    const node = d.querySelector(".tiptap");
+    node.textContent = "Workspace 1 small";
+    return () => {
+      node.textContent = "Workspace 0 small";
+    };
+  },
+  "inactive editor group": (d) => {
+    const node = d.querySelector("[data-editor-group-id]");
+    node.removeAttribute("data-active");
+    return () => node.setAttribute("data-active", "true");
+  },
+  "unselected tab": (d) => {
+    const node = d.querySelector('[role="tab"]');
+    node.setAttribute("aria-selected", "false");
+    return () => node.setAttribute("aria-selected", "true");
+  },
+  "pending workspace": (d) => {
+    const node = d.querySelector('[data-testid="workspace-shell"]');
+    node.setAttribute("data-ready", "false");
+    return () => node.setAttribute("data-ready", "true");
+  },
+  "hidden preserved editor": (d) => {
+    const node = d.querySelector('[data-testid="view-markdown"]');
+    node.hidden = true;
+    return () => {
+      node.hidden = false;
+    };
+  },
+  "inert workbench": (d) => {
+    const node = d.querySelector('[data-testid="workspace-workbench"]');
+    node.setAttribute("inert", "");
+    return () => node.removeAttribute("inert");
+  },
+  "CSS-hidden pane": (d) => {
+    const node = d.querySelector('[data-testid="view-markdown"]');
+    node.style.display = "none";
+    return () => {
+      node.style.display = "";
+    };
+  },
+  "read-only editor": (d) => {
+    const node = d.querySelector(".tiptap");
+    node.setAttribute("contenteditable", "false");
+    return () => node.setAttribute("contenteditable", "true");
+  },
+  "zero-sized editor": (d) => {
+    const node = d.querySelector(".tiptap");
+    node.getBoundingClientRect = () => ({ width: 0, height: 0 });
+    return () => {
+      delete node.getBoundingClientRect;
+    };
+  },
 };
-for (const [name, prepare] of Object.entries(notReadyCases)) test(`startup observer waits for ${name} to become usable`, async t => {
-  const p = readinessPage(t);
-  const restore = prepare(p.document);
-  const result = p.observe();
-  assert.equal(p.frames.size, 0);
-  restore(); p.step(); p.frame(); p.frame();
-  const observed = await result;
-  assert.equal(observed.alreadyReady, false);
-  assert.equal(observed.observerInstalledMs, 10);
-  assert.equal(observed.predicateMatchedMs, 60);
-  assert.equal(observed.secondAnimationFrameMs, 92);
-});
+for (const [name, prepare] of Object.entries(notReadyCases))
+  test(`startup observer waits for ${name} to become usable`, async (t) => {
+    const p = readinessPage(t);
+    const restore = prepare(p.document);
+    const result = p.observe();
+    assert.equal(p.frames.size, 0);
+    restore();
+    p.step();
+    p.frame();
+    p.frame();
+    const observed = await result;
+    assert.equal(observed.alreadyReady, false);
+    assert.equal(observed.observerInstalledMs, 10);
+    assert.equal(observed.predicateMatchedMs, 60);
+    assert.equal(observed.secondAnimationFrameMs, 92);
+  });
 
-test('startup observer restarts its frame check when the bound editor is replaced', async t => {
+test("startup observer restarts its frame check when the bound editor is replaced", async (t) => {
   const p = readinessPage(t);
   const result = p.observe();
   p.frame();
-  const editor = p.document.querySelector('.tiptap');
+  const editor = p.document.querySelector(".tiptap");
   editor.replaceWith(editor.cloneNode(true));
-  p.frame(); p.frame(); p.frame();
+  p.frame();
+  p.frame();
+  p.frame();
   const observed = await result;
   assert.equal(observed.predicateMatchedMs, 42);
   assert.equal(observed.secondAnimationFrameMs, 74);
 });
 
-const fixtureWorkspaces = [0, 1].map(index => ({ workspaceId: `perf4-package-${index}`, rootPath: `C:/fixture/workspace-${index}` }));
+const fixtureWorkspaces = [0, 1].map((index) => ({
+  workspaceId: `perf4-package-${index}`,
+  rootPath: `C:/fixture/workspace-${index}`,
+}));
 
-test('full restart after odd switches opens workspace 1, the workspace opened last', async t => {
+test("full restart after odd switches opens workspace 1, the workspace opened last", async (t) => {
   const p = readinessPage(t);
-  p.document.querySelector('[data-testid="workspace-switcher"]').textContent = 'workspace-1';
-  p.document.querySelector('.tiptap').textContent = 'Workspace 1 small';
-  const registry = { version: 1, workspaces: fixtureWorkspaces.map((workspace, index) => ({ ...workspace, lastOpenedAt: 100 + index })) };
+  p.document.querySelector('[data-testid="workspace-switcher"]').textContent = "workspace-1";
+  p.document.querySelector(".tiptap").textContent = "Workspace 1 small";
+  const registry = {
+    version: 1,
+    workspaces: fixtureWorkspaces.map((workspace, index) => ({
+      ...workspace,
+      lastOpenedAt: 100 + index,
+    })),
+  };
   const target = startupTargetFromRegistry(registry, fixtureWorkspaces);
-  assert.deepEqual(target, { workspaceName: 'workspace-1', path: 'small.md', content: 'Workspace 1 small' });
+  assert.deepEqual(target, {
+    workspaceName: "workspace-1",
+    path: "small.md",
+    content: "Workspace 1 small",
+  });
   const result = p.observe(target);
-  p.frame(); p.frame();
+  p.frame();
+  p.frame();
   const observed = await result;
   assert.equal(observed.alreadyReady, true);
-  assert.equal(observed.workspaceName, 'workspace-1');
-  assert.equal(observed.path, 'small.md');
+  assert.equal(observed.workspaceName, "workspace-1");
+  assert.equal(observed.path, "small.md");
 });
 
-test('startup target keeps the first registry entry when lastOpenedAt ties', () => {
-  const registry = { version: 1, workspaces: fixtureWorkspaces.map(workspace => ({ ...workspace, lastOpenedAt: 100 })) };
-  assert.equal(startupTargetFromRegistry(registry, fixtureWorkspaces).workspaceName, 'workspace-0');
+test("startup target keeps the first registry entry when lastOpenedAt ties", () => {
+  const registry = {
+    version: 1,
+    workspaces: fixtureWorkspaces.map((workspace) => ({ ...workspace, lastOpenedAt: 100 })),
+  };
+  assert.equal(startupTargetFromRegistry(registry, fixtureWorkspaces).workspaceName, "workspace-0");
 });
 
-test('restart records a different known workspace only when the persisted registry selects it', async t => {
+test("restart records a different known workspace only when the persisted registry selects it", async (t) => {
   const p = readinessPage(t);
-  p.document.querySelector('[data-testid="workspace-switcher"]').textContent = 'workspace-1';
-  p.document.querySelector('.tiptap').textContent = 'Workspace 1 small';
-  const result = p.observe(startupTargetFromRegistry({ version: 1, workspaces: [...fixtureWorkspaces].reverse() }, fixtureWorkspaces));
-  p.frame(); p.frame();
+  p.document.querySelector('[data-testid="workspace-switcher"]').textContent = "workspace-1";
+  p.document.querySelector(".tiptap").textContent = "Workspace 1 small";
+  const result = p.observe(
+    startupTargetFromRegistry(
+      { version: 1, workspaces: [...fixtureWorkspaces].reverse() },
+      fixtureWorkspaces,
+    ),
+  );
+  p.frame();
+  p.frame();
   const observed = await result;
   assert.equal(observed.alreadyReady, true);
-  assert.equal(observed.workspaceName, 'workspace-1');
-  assert.equal(observed.path, 'small.md');
+  assert.equal(observed.workspaceName, "workspace-1");
+  assert.equal(observed.path, "small.md");
 });
 
-test('startup target refuses unknown workspace identities and roots', () => {
-  for (const selected of [{ workspaceId: 'unknown', rootPath: 'C:/fixture/workspace-0' }, { ...fixtureWorkspaces[0], rootPath: 'C:/other' }]) {
-    assert.throws(() => startupTargetFromRegistry({ version: 1, workspaces: [selected] }, fixtureWorkspaces), /known fixture workspace/);
+test("startup target refuses unknown workspace identities and roots", () => {
+  for (const selected of [
+    { workspaceId: "unknown", rootPath: "C:/fixture/workspace-0" },
+    { ...fixtureWorkspaces[0], rootPath: "C:/other" },
+  ]) {
+    assert.throws(
+      () => startupTargetFromRegistry({ version: 1, workspaces: [selected] }, fixtureWorkspaces),
+      /known fixture workspace/,
+    );
   }
 });
 
-test('startup observer cannot combine the active selection with content in another group', async t => {
+test("startup observer cannot combine the active selection with content in another group", async (t) => {
   const p = readinessPage(t);
-  const group = p.document.querySelector('[data-editor-group-id]');
+  const group = p.document.querySelector("[data-editor-group-id]");
   const inactiveGroup = group.cloneNode(true);
-  inactiveGroup.removeAttribute('data-active');
-  inactiveGroup.setAttribute('data-editor-group-id', 'other');
+  inactiveGroup.removeAttribute("data-active");
+  inactiveGroup.setAttribute("data-editor-group-id", "other");
   group.after(inactiveGroup);
-  const activeEditor = group.querySelector('.tiptap');
-  activeEditor.textContent = 'Workspace 1 small';
+  const activeEditor = group.querySelector(".tiptap");
+  activeEditor.textContent = "Workspace 1 small";
   const result = p.observe();
   assert.equal(p.frames.size, 0);
-  activeEditor.textContent = 'Workspace 0 small';
-  p.step(); p.frame(); p.frame();
+  activeEditor.textContent = "Workspace 0 small";
+  p.step();
+  p.frame();
+  p.frame();
   assert.equal((await result).alreadyReady, false);
 });
 
-for (const frameNumber of [1, 2]) test(`startup observer rejects a DOM error in animation frame ${frameNumber}`, async t => {
-  const p = readinessPage(t);
-  const result = p.observe();
-  if (frameNumber === 2) p.frame();
-  p.document.querySelector('.tiptap').getBoundingClientRect = () => { throw Error('fixture DOM failure'); };
-  const rejected = assert.rejects(result, /fixture DOM failure/);
-  p.frame();
-  await rejected;
-  assert.equal(p.frames.size + p.timers.size, 0);
-});
+for (const frameNumber of [1, 2])
+  test(`startup observer rejects a DOM error in animation frame ${frameNumber}`, async (t) => {
+    const p = readinessPage(t);
+    const result = p.observe();
+    if (frameNumber === 2) p.frame();
+    p.document.querySelector(".tiptap").getBoundingClientRect = () => {
+      throw Error("fixture DOM failure");
+    };
+    const rejected = assert.rejects(result, /fixture DOM failure/);
+    p.frame();
+    await rejected;
+    assert.equal(p.frames.size + p.timers.size, 0);
+  });
 
-test('startup observer times out and clears scheduled work when no editable document appears', async t => {
+test("startup observer times out and clears scheduled work when no editable document appears", async (t) => {
   const p = readinessPage(t);
-  p.document.querySelector('.tiptap').remove();
+  p.document.querySelector(".tiptap").remove();
   const rejected = assert.rejects(p.observe(), /Expected visible editable document/);
   for (let n = 0; n < 20; n++) p.step();
   await rejected;
   assert.equal(p.frames.size + p.timers.size, 0);
 });
 
-test('startup observer propagates the editing refusal', async t => {
+test("startup observer propagates the editing refusal", async (t) => {
   const p = readinessPage(t);
-  p.document.body.innerText = 'dohc could not open this document for editing.';
+  p.document.body.innerText = "dohc could not open this document for editing.";
   await assert.rejects(p.observe(), /Actual packaged app refused document editing/);
   assert.equal(p.frames.size + p.timers.size, 0);
 });
 
-const paletteHtml = '<div data-testid="quick-open"><input aria-label="File"><ul role="listbox"><li role="option">a.md</li><li role="option">b.md</li></ul></div>';
-test('surface observer sees a keydown-triggered palette on the next frame and paints one frame later', async t => {
-  const p = fakePage(t, '<main></main>');
-  const pending = p.run(observeSurface, { trigger: 'keydown', triggerKey: 'p', target: '[data-testid="quick-open"] input', focused: '[data-testid="quick-open"] input', countSelector: '[role="option"]', timeoutMs: 1000 });
+const paletteHtml =
+  '<div data-testid="quick-open"><input aria-label="File"><ul role="listbox"><li role="option">a.md</li><li role="option">b.md</li></ul></div>';
+test("surface observer sees a keydown-triggered palette on the next frame and paints one frame later", async (t) => {
+  const p = fakePage(t, "<main></main>");
+  const pending = p.run(observeSurface, {
+    trigger: "keydown",
+    triggerKey: "p",
+    target: '[data-testid="quick-open"] input',
+    focused: '[data-testid="quick-open"] input',
+    countSelector: '[role="option"]',
+    timeoutMs: 1000,
+  });
   p.frame();
-  p.keydown(p.document.body, 'Control');
-  p.document.body.insertAdjacentHTML('beforeend', paletteHtml);
-  p.document.querySelector('input').focus();
-  await mutations(); p.frame();
-  assert.equal(p.frames.size, 1, 'only the frame loop is pending: a surface present before the trigger is not a match');
-  p.keydown(p.document.body, 'p');
+  p.keydown(p.document.body, "Control");
+  p.document.body.insertAdjacentHTML("beforeend", paletteHtml);
+  p.document.querySelector("input").focus();
+  await mutations();
   p.frame();
-  assert.equal(p.frames.size, 2, 'the frame loop matched without a mutation and started the one-frame wait');
+  assert.equal(
+    p.frames.size,
+    1,
+    "only the frame loop is pending: a surface present before the trigger is not a match",
+  );
+  p.keydown(p.document.body, "p");
+  p.frame();
+  assert.equal(
+    p.frames.size,
+    2,
+    "the frame loop matched without a mutation and started the one-frame wait",
+  );
   p.frame();
   const observed = await pending;
   assert.equal(observed.triggerMs, 42);
   assert.equal(observed.triggerTrusted, false);
   // Matched inside frame N's callback, which paints it; the next callback comes after that paint.
-  assert.deepEqual([observed.matchedMs, observed.matchedIn, observed.paintedMs], [58, 'frame', 74]);
-  assert.deepEqual([observed.count, observed.matchedCount, observed.firstText, observed.entranceAnimating, observed.fullTimedOut], [2, 1, 'a.md', false, false]);
+  assert.deepEqual([observed.matchedMs, observed.matchedIn, observed.paintedMs], [58, "frame", 74]);
+  assert.deepEqual(
+    [
+      observed.count,
+      observed.matchedCount,
+      observed.firstText,
+      observed.entranceAnimating,
+      observed.fullTimedOut,
+    ],
+    [2, 1, "a.md", false, false],
+  );
   assert.equal(p.frames.size + p.timers.size, 0);
 });
-test('surface observer waits for the typed value, a focused input, and an in-order first row', async t => {
+test("surface observer waits for the typed value, a focused input, and an in-order first row", async (t) => {
   const p = fakePage(t, paletteHtml);
-  const input = p.document.querySelector('input');
+  const input = p.document.querySelector("input");
   input.focus();
-  const typed = p.run(observeSurface, { trigger: 'keydown', triggerKey: 'x', target: 'input', value: 'x', focused: 'input', firstTextMatches: 'AM', countSelector: '[role="option"]', timeoutMs: 1000 });
-  p.keydown(input, 'x');
+  const typed = p.run(observeSurface, {
+    trigger: "keydown",
+    triggerKey: "x",
+    target: "input",
+    value: "x",
+    focused: "input",
+    firstTextMatches: "AM",
+    countSelector: '[role="option"]',
+    timeoutMs: 1000,
+  });
+  p.keydown(input, "x");
   p.frame();
-  assert.equal(p.frames.size, 1, 'the keystroke has not reached the input value yet');
-  input.value = 'x';
+  assert.equal(p.frames.size, 1, "the keystroke has not reached the input value yet");
+  input.value = "x";
   input.blur();
   p.frame();
-  assert.equal(p.frames.size, 1, 'focus left the input');
+  assert.equal(p.frames.size, 1, "focus left the input");
   input.focus();
-  assert.equal(p.frames.size, 2, 'the focus change matched and started the one-frame wait');
+  assert.equal(p.frames.size, 2, "the focus change matched and started the one-frame wait");
   p.frame();
   const observed = await typed;
-  assert.deepEqual([observed.matchedIn, observed.paintedMs - observed.matchedMs], ['focus', 16]);
-  assert.deepEqual([observed.text, observed.firstText, observed.count], ['', 'a.md', 2]);
-  const mismatch = p.run(observeSurface, { target: 'input', firstTextMatches: 'zz', countSelector: '[role="option"]', timeoutMs: 120 });
+  assert.deepEqual([observed.matchedIn, observed.paintedMs - observed.matchedMs], ["focus", 16]);
+  assert.deepEqual([observed.text, observed.firstText, observed.count], ["", "a.md", 2]);
+  const mismatch = p.run(observeSurface, {
+    target: "input",
+    firstTextMatches: "zz",
+    countSelector: '[role="option"]',
+    timeoutMs: 120,
+  });
   const rejected = assert.rejects(mismatch, /did not render within 120ms/);
-  p.step(); p.step(); p.step();
+  p.step();
+  p.step();
+  p.step();
   await rejected;
   assert.equal(p.frames.size + p.timers.size, 0);
 });
-test('surface observer carries a first and a full milestone from one trigger and flags a full milestone that misses the deadline', async t => {
-  const p = fakePage(t, '<button>Open</button><ol></ol>');
-  const pending = p.run(observeSurface, { trigger: 'click', target: 'ol li', fullCount: 3, countSelector: 'ol li', timeoutMs: 1000 });
-  p.document.querySelector('button').dispatchEvent(new p.window.MouseEvent('mousedown', { bubbles: true }));
-  p.document.querySelector('ol').insertAdjacentHTML('beforeend', '<li>1</li>');
+test("surface observer carries a first and a full milestone from one trigger and flags a full milestone that misses the deadline", async (t) => {
+  const p = fakePage(t, "<button>Open</button><ol></ol>");
+  const pending = p.run(observeSurface, {
+    trigger: "click",
+    target: "ol li",
+    fullCount: 3,
+    countSelector: "ol li",
+    timeoutMs: 1000,
+  });
+  p.document
+    .querySelector("button")
+    .dispatchEvent(new p.window.MouseEvent("mousedown", { bubbles: true }));
+  p.document.querySelector("ol").insertAdjacentHTML("beforeend", "<li>1</li>");
   await mutations();
-  p.frame(); p.frame();
-  assert.equal(p.frames.size, 1, 'the first milestone painted and only the frame loop remains');
-  p.document.querySelector('ol').insertAdjacentHTML('beforeend', '<li>2</li><li>3</li>');
+  p.frame();
+  p.frame();
+  assert.equal(p.frames.size, 1, "the first milestone painted and only the frame loop remains");
+  p.document.querySelector("ol").insertAdjacentHTML("beforeend", "<li>2</li><li>3</li>");
   await mutations();
-  p.frame(); p.frame();
+  p.frame();
+  p.frame();
   const observed = await pending;
   // Both milestones matched between frames through mutations; each ends at the next frame callback.
-  assert.deepEqual([observed.triggerMs, observed.matchedMs, observed.paintedMs, observed.fullMatchedMs, observed.fullPaintedMs], [10, 10, 26, 42, 58]);
-  assert.deepEqual([observed.matchedIn, observed.fullMatchedIn, observed.count, observed.fullTimedOut], ['mutation', 'mutation', 3, false]);
-  const partial = p.run(observeSurface, { target: 'ol li', fullCount: 10, timeoutMs: 100 });
-  p.frame(); p.frame();
-  p.step(); p.step();
+  assert.deepEqual(
+    [
+      observed.triggerMs,
+      observed.matchedMs,
+      observed.paintedMs,
+      observed.fullMatchedMs,
+      observed.fullPaintedMs,
+    ],
+    [10, 10, 26, 42, 58],
+  );
+  assert.deepEqual(
+    [observed.matchedIn, observed.fullMatchedIn, observed.count, observed.fullTimedOut],
+    ["mutation", "mutation", 3, false],
+  );
+  const partial = p.run(observeSurface, { target: "ol li", fullCount: 10, timeoutMs: 100 });
+  p.frame();
+  p.frame();
+  p.step();
+  p.step();
   const timedOut = await partial;
   assert.equal(timedOut.fullTimedOut, true);
   assert.equal(timedOut.fullPaintedMs, null);
   // The rows were already present, so the installation check matched; it is not a frame callback.
-  assert.deepEqual([timedOut.matchedIn, timedOut.paintedMs - timedOut.matchedMs], ['install', 16]);
+  assert.deepEqual([timedOut.matchedIn, timedOut.paintedMs - timedOut.matchedMs], ["install", 16]);
   assert.equal(p.frames.size + p.timers.size, 0);
 });
-test('surface observer rejects unknown triggers and a surface that never renders', async t => {
-  const p = fakePage(t, '<main></main>');
-  await assert.rejects(p.run(observeSurface, { trigger: 'hover', target: 'main' }), /Unknown trigger/);
+test("surface observer rejects unknown triggers and a surface that never renders", async (t) => {
+  const p = fakePage(t, "<main></main>");
+  await assert.rejects(
+    p.run(observeSurface, { trigger: "hover", target: "main" }),
+    /Unknown trigger/,
+  );
   const missing = p.run(observeSurface, { target: '[data-testid="absent"]', timeoutMs: 120 });
   const rejected = assert.rejects(missing, /did not render within 120ms/);
-  p.step(); p.step(); p.step();
+  p.step();
+  p.step();
+  p.step();
   await rejected;
   assert.equal(p.frames.size + p.timers.size, 0);
 });
-const searchHtml = '<div data-testid="search-view" data-state="idle" data-search-id=""><input data-testid="search-input"><ul></ul></div>';
-test('search observer times Enter to the first result row and to the complete state', async t => {
+const searchHtml =
+  '<div data-testid="search-view" data-state="idle" data-search-id=""><input data-testid="search-input"><ul></ul></div>';
+test("search observer times Enter to the first result row and to the complete state", async (t) => {
   const p = fakePage(t, searchHtml);
   const view = p.document.querySelector('[data-testid="search-view"]');
-  const input = p.document.querySelector('input');
+  const input = p.document.querySelector("input");
   const pending = p.run(observeSearchSubmit, { timeoutMs: 1000 });
   p.frame();
-  p.keydown(p.document.body, 'Enter');
-  p.keydown(input, 'Enter');
-  view.dataset.searchId = 's1'; view.dataset.state = 'searching';
-  view.querySelector('ul').innerHTML = '<li data-testid="search-result-row">hit</li>';
-  await mutations(); p.frame();
-  view.dataset.state = 'complete';
-  view.insertAdjacentHTML('beforeend', '<span data-testid="search-summary">1 result in 1 file</span>');
-  await mutations(); p.frame(); p.frame();
+  p.keydown(p.document.body, "Enter");
+  p.keydown(input, "Enter");
+  view.dataset.searchId = "s1";
+  view.dataset.state = "searching";
+  view.querySelector("ul").innerHTML = '<li data-testid="search-result-row">hit</li>';
+  await mutations();
+  p.frame();
+  view.dataset.state = "complete";
+  view.insertAdjacentHTML(
+    "beforeend",
+    '<span data-testid="search-summary">1 result in 1 file</span>',
+  );
+  await mutations();
+  p.frame();
+  p.frame();
   const observed = await pending;
   assert.equal(observed.submitMs, 26);
   assert.equal(observed.submitTrusted, false);
   assert.equal(observed.debounceFiredBeforeSubmit, false);
-  assert.deepEqual([observed.firstResultMs, observed.firstResultPaintedMs, observed.settledMs, observed.settledPaintedMs], [26, 42, 42, 58]);
-  assert.deepEqual([observed.firstResultMatchedIn, observed.settledMatchedIn], ['mutation', 'mutation']);
-  assert.deepEqual([observed.rowsRendered, observed.summary, observed.limitHit, observed.emptyState, observed.searchIdChanges], [1, '1 result in 1 file', false, false, 0]);
-  assert.deepEqual([[...observed.statesSeen], observed.sawUpdating], [['searching', 'complete'], false]);
+  assert.deepEqual(
+    [
+      observed.firstResultMs,
+      observed.firstResultPaintedMs,
+      observed.settledMs,
+      observed.settledPaintedMs,
+    ],
+    [26, 42, 42, 58],
+  );
+  assert.deepEqual(
+    [observed.firstResultMatchedIn, observed.settledMatchedIn],
+    ["mutation", "mutation"],
+  );
+  assert.deepEqual(
+    [
+      observed.rowsRendered,
+      observed.summary,
+      observed.limitHit,
+      observed.emptyState,
+      observed.searchIdChanges,
+    ],
+    [1, "1 result in 1 file", false, false, 0],
+  );
+  assert.deepEqual(
+    [[...observed.statesSeen], observed.sawUpdating],
+    [["searching", "complete"], false],
+  );
   assert.equal(p.frames.size + p.timers.size, 0);
 });
-test('search observer flags a debounce that ran before Enter, records updating, and keeps a missing first result missing', async t => {
+test("search observer flags a debounce that ran before Enter, records updating, and keeps a missing first result missing", async (t) => {
   const p = fakePage(t, searchHtml);
   const view = p.document.querySelector('[data-testid="search-view"]');
   const pending = p.run(observeSearchSubmit, { timeoutMs: 1000 });
-  view.dataset.searchId = 'typed'; view.dataset.state = 'complete';
+  view.dataset.searchId = "typed";
+  view.dataset.state = "complete";
   await mutations();
-  p.keydown(p.document.querySelector('input'), 'Enter');
-  view.dataset.searchId = 's2'; view.dataset.state = 'updating';
+  p.keydown(p.document.querySelector("input"), "Enter");
+  view.dataset.searchId = "s2";
+  view.dataset.state = "updating";
   await mutations();
-  view.dataset.state = 'complete';
-  view.insertAdjacentHTML('beforeend', '<div data-testid="search-empty-state">No results found</div>');
-  await mutations(); p.frame(); p.frame();
+  view.dataset.state = "complete";
+  view.insertAdjacentHTML(
+    "beforeend",
+    '<div data-testid="search-empty-state">No results found</div>',
+  );
+  await mutations();
+  p.frame();
+  p.frame();
   const observed = await pending;
   assert.equal(observed.debounceFiredBeforeSubmit, true);
   assert.equal(observed.firstResultMs, null);
-  assert.deepEqual([observed.emptyState, observed.rowsRendered, [...observed.statesSeen], observed.sawUpdating], [true, 0, ['updating', 'complete'], true]);
-  const closed = fakePage(t, '<main></main>');
+  assert.deepEqual(
+    [observed.emptyState, observed.rowsRendered, [...observed.statesSeen], observed.sawUpdating],
+    [true, 0, ["updating", "complete"], true],
+  );
+  const closed = fakePage(t, "<main></main>");
   await assert.rejects(closed.run(observeSearchSubmit, {}), /Search view is not open/);
 });
-test('seeded post is found by its title and yields the engine thread id the DOM carries, not the CLI handle', t => {
-  const post = (id, title) => `<div data-testid="chats-post-card" data-thread-id="${id}"><div data-testid="chats-thread" data-thread-id="${id}"><span data-testid="chats-post-title"> ${title} </span></div></div>`;
-  const p = fakePage(t, `<div data-testid="chats-channel-view">${post('thread-f7a6fc48-3eb4', 'Other post')}${post('thread-0c1d2e3f-4a5b', 'Long history')}</div>`);
-  assert.equal(p.run(seededPostThreadId, { title: 'Long history' }), 'thread-0c1d2e3f-4a5b');
-  assert.throws(() => p.run(seededPostThreadId, { title: 'th_0c1d2e3f-4a5b' }), /found 0/);
-  p.document.querySelector('[data-testid="chats-channel-view"]').insertAdjacentHTML('beforeend', post('thread-dup', 'Long history'));
-  assert.throws(() => p.run(seededPostThreadId, { title: 'Long history' }), /found 2/);
+test("seeded post is found by its title and yields the engine thread id the DOM carries, not the CLI handle", (t) => {
+  const post = (id, title) =>
+    `<div data-testid="chats-post-card" data-thread-id="${id}"><div data-testid="chats-thread" data-thread-id="${id}"><span data-testid="chats-post-title"> ${title} </span></div></div>`;
+  const p = fakePage(
+    t,
+    `<div data-testid="chats-channel-view">${post("thread-f7a6fc48-3eb4", "Other post")}${post("thread-0c1d2e3f-4a5b", "Long history")}</div>`,
+  );
+  assert.equal(p.run(seededPostThreadId, { title: "Long history" }), "thread-0c1d2e3f-4a5b");
+  assert.throws(() => p.run(seededPostThreadId, { title: "th_0c1d2e3f-4a5b" }), /found 0/);
+  p.document
+    .querySelector('[data-testid="chats-channel-view"]')
+    .insertAdjacentHTML("beforeend", post("thread-dup", "Long history"));
+  assert.throws(() => p.run(seededPostThreadId, { title: "Long history" }), /found 2/);
 });
-test('collection fixture writes the schema first and deterministic pre-minted record ids', () => {
+test("collection fixture writes the schema first and deterministic pre-minted record ids", () => {
   const files = collectionFixtureFiles(3);
-  assert.deepEqual(files.map(f => f.path), ['records/collection.yaml', 'records/record-000001.md', 'records/record-000002.md', 'records/record-000003.md']);
-  assert.match(files[0].content, /^version: 1\nname: Records\nfields:\n {2}Name:\n {4}type: text\n/);
-  const ids = files.slice(1).map(f => f.content.match(/^id: (\S+)$/m)[1]);
+  assert.deepEqual(
+    files.map((f) => f.path),
+    [
+      "records/collection.yaml",
+      "records/record-000001.md",
+      "records/record-000002.md",
+      "records/record-000003.md",
+    ],
+  );
+  assert.match(
+    files[0].content,
+    /^version: 1\nname: Records\nfields:\n {2}Name:\n {4}type: text\n/,
+  );
+  const ids = files.slice(1).map((f) => f.content.match(/^id: (\S+)$/m)[1]);
   for (const id of ids) assert.match(id, /^rec_[a-z2-7]{26}$/);
   assert.equal(new Set(ids).size, 3);
   assert.deepEqual(collectionFixtureFiles(3), files);
   assert.match(files[1].content, /^Due: "2026-\d{2}-\d{2}"$/m);
-  assert.equal(recordId('records/1'), ids[0]);
+  assert.equal(recordId("records/1"), ids[0]);
 });
-test('process kinds come from the launched pid, engine name, and Chromium type flags', () => {
+test("process kinds come from the launched pid, engine name, and Chromium type flags", () => {
   const processes = [
-    { pid: 1, name: 'dohc.exe', commandLine: '"C:\\dohc.exe" --user-data-dir=x', workingSetBytes: 100, privateBytes: 10 },
-    { pid: 2, name: 'dohc.exe', commandLine: 'dohc.exe --type=renderer --lang=en', workingSetBytes: 200, privateBytes: 20 },
-    { pid: 3, name: 'dohc.exe', commandLine: 'dohc.exe --type=renderer', workingSetBytes: 300, privateBytes: 30 },
-    { pid: 4, name: 'dohc.exe', commandLine: 'dohc.exe --type=gpu-process', workingSetBytes: 40, privateBytes: 4 },
-    { pid: 5, name: 'dohc.exe', commandLine: 'dohc.exe --type=utility --utility-sub-type=network.mojom.NetworkService', workingSetBytes: 50, privateBytes: 5 },
-    { pid: 6, name: 'dohc-workspace-engine.exe', commandLine: null, workingSetBytes: 60, privateBytes: 6 },
-    { pid: 7, name: 'dohc.exe', commandLine: 'dohc.exe --type=crashpad-handler', workingSetBytes: 7, privateBytes: 1 },
-    { pid: 8, name: 'pwsh.exe', commandLine: 'pwsh -File sampler.ps1', workingSetBytes: 8, privateBytes: 1 },
+    {
+      pid: 1,
+      name: "dohc.exe",
+      commandLine: '"C:\\dohc.exe" --user-data-dir=x',
+      workingSetBytes: 100,
+      privateBytes: 10,
+    },
+    {
+      pid: 2,
+      name: "dohc.exe",
+      commandLine: "dohc.exe --type=renderer --lang=en",
+      workingSetBytes: 200,
+      privateBytes: 20,
+    },
+    {
+      pid: 3,
+      name: "dohc.exe",
+      commandLine: "dohc.exe --type=renderer",
+      workingSetBytes: 300,
+      privateBytes: 30,
+    },
+    {
+      pid: 4,
+      name: "dohc.exe",
+      commandLine: "dohc.exe --type=gpu-process",
+      workingSetBytes: 40,
+      privateBytes: 4,
+    },
+    {
+      pid: 5,
+      name: "dohc.exe",
+      commandLine: "dohc.exe --type=utility --utility-sub-type=network.mojom.NetworkService",
+      workingSetBytes: 50,
+      privateBytes: 5,
+    },
+    {
+      pid: 6,
+      name: "dohc-workspace-engine.exe",
+      commandLine: null,
+      workingSetBytes: 60,
+      privateBytes: 6,
+    },
+    {
+      pid: 7,
+      name: "dohc.exe",
+      commandLine: "dohc.exe --type=crashpad-handler",
+      workingSetBytes: 7,
+      privateBytes: 1,
+    },
+    {
+      pid: 8,
+      name: "pwsh.exe",
+      commandLine: "pwsh -File sampler.ps1",
+      workingSetBytes: 8,
+      privateBytes: 1,
+    },
   ];
-  assert.deepEqual(processes.map(p => classifyProcess(p, 1)), ['main', 'renderer', 'renderer', 'gpu', 'utility', 'engine', 'crashpad', 'other']);
+  assert.deepEqual(
+    processes.map((p) => classifyProcess(p, 1)),
+    ["main", "renderer", "renderer", "gpu", "utility", "engine", "crashpad", "other"],
+  );
   const aggregate = aggregateByKind({ completedAtMs: 5, processes }, 1);
   assert.equal(aggregate.processCount, 8);
   assert.deepEqual(aggregate.kinds.renderer, { count: 2, workingSetBytes: 500, privateBytes: 50 });
   assert.deepEqual(aggregate.kinds.main, { count: 1, workingSetBytes: 100, privateBytes: 10 });
 });
 
-const required = ['--binary', 'dohc.exe', '--package-commit', 'a'.repeat(40), '--output', 'new-output', '--label', 'baseline'];
-test('packaged rehearsals opt out of OS registration with their own profile', () => {
-  const profile = resolve('rehearsal/profile');
+const required = [
+  "--binary",
+  "dohc.exe",
+  "--package-commit",
+  "a".repeat(40),
+  "--output",
+  "new-output",
+  "--label",
+  "baseline",
+];
+test("packaged rehearsals opt out of OS registration with their own profile", () => {
+  const profile = resolve("rehearsal/profile");
   const args = packagedLaunchArgs(profile);
   assert.ok(args.includes(`--user-data-dir=${profile}`));
-  assert.ok(args.includes('--dohc-isolated-test'));
-  assert.throws(() => packagedLaunchArgs('relative/profile'), /absolute profile/);
-  assert.throws(() => packagedLaunchArgs(''), /absolute profile/);
+  assert.ok(args.includes("--dohc-isolated-test"));
+  assert.throws(() => packagedLaunchArgs("relative/profile"), /absolute profile/);
+  assert.throws(() => packagedLaunchArgs(""), /absolute profile/);
 });
-test('release environment excludes inherited dohc integration and Node controls', () => {
+test("release environment excludes inherited dohc integration and Node controls", () => {
   const inherited = {
-    PATH: 'runtime-path', SystemRoot: 'windows-root', HOME: 'user-home',
-    DOHC_DESKTOP_OWNER_HOST_CONFIG: 'private-host', DOHC_DESKTOP_OWNER_DELIVERY_CONFIG: 'private-delivery',
-    DOHC_UPDATE_URL: 'external-feed', DOHC_TEST_HOME: 'other-profile', DOHC_FUTURE_CONTROL: 'future',
-    dohc_lowercase_control: 'windows-case-variant', ELECTRON_RUN_AS_NODE: '1', node_options: 'injected',
+    PATH: "runtime-path",
+    SystemRoot: "windows-root",
+    HOME: "user-home",
+    DOHC_DESKTOP_OWNER_HOST_CONFIG: "private-host",
+    DOHC_DESKTOP_OWNER_DELIVERY_CONFIG: "private-delivery",
+    DOHC_UPDATE_URL: "external-feed",
+    DOHC_TEST_HOME: "other-profile",
+    DOHC_FUTURE_CONTROL: "future",
+    dohc_lowercase_control: "windows-case-variant",
+    ELECTRON_RUN_AS_NODE: "1",
+    node_options: "injected",
   };
-  assert.deepEqual(benchmarkEnvironment(inherited, 'http://127.0.0.1:1234'), {
-    PATH: 'runtime-path', SystemRoot: 'windows-root', HOME: 'user-home', DOHC_UPDATE_URL: 'http://127.0.0.1:1234',
+  assert.deepEqual(benchmarkEnvironment(inherited, "http://127.0.0.1:1234"), {
+    PATH: "runtime-path",
+    SystemRoot: "windows-root",
+    HOME: "user-home",
+    DOHC_UPDATE_URL: "http://127.0.0.1:1234",
   });
-  assert.equal(inherited.DOHC_DESKTOP_OWNER_HOST_CONFIG, 'private-host');
+  assert.equal(inherited.DOHC_DESKTOP_OWNER_HOST_CONFIG, "private-host");
 });
-test('strict release CLI rejects typos, duplicates, missing provenance and ambiguous modes', () => {
-  assert.equal(parseOptions(required).scenario, 'full');
+test("strict release CLI rejects typos, duplicates, missing provenance and ambiguous modes", () => {
+  assert.equal(parseOptions(required).scenario, "full");
   assert.equal(parseOptions(required).runCount, 3);
-  assert.deepEqual(parseOptions(['--help']), { help: true });
+  assert.deepEqual(parseOptions(["--help"]), { help: true });
   for (const extra of [
-    ['--runs'], ['--typo', '3'], ['--runs', 'NaN'], ['--runs', '0'], ['--runs', '1.5'], ['--runs', '1e2'],
-    ['--files', '1'], ['--switches', '-1'], ['--idle-seconds', 'Infinity'], ['--runs', '2', '--runs', '3'],
-    ['--label', 'candidate'], ['--profile-main', 'yes'], ['--profile-renderer', '1'], ['--scenario', 'typo'],
-    ['--package-dir', 'other'], ['--engine-commit', 'HEAD'], ['--profile-main', 'true'],
-    ['--profile-renderer', 'true', '--scenario', 'startup'], ['--profile-renderer', 'true', '--scenario', 'go-to'],
-    ['--soak-minutes', '5'], ['--chat-messages', '5'], ['--records', '5'], ['--scenario', 'soak', '--soak-minutes', '0'],
-    ['--scenario', 'chat-history', '--chat-messages', '1'], ['--scenario', 'soak', '--records', '5'],
-    ['--scenario', 'go-to'], ['--scenario', 'search', '--files', '4242'],
-  ]) assert.throws(() => parseOptions([...required, ...extra]), JSON.stringify(extra));
-  assert.throws(() => parseOptions(required.filter((_, i) => i !== 2 && i !== 3)), /package-commit/);
-  assert.throws(() => parseOptions([...required, '--scenario', 'go-to']), /at least 4243/);
+    ["--runs"],
+    ["--typo", "3"],
+    ["--runs", "NaN"],
+    ["--runs", "0"],
+    ["--runs", "1.5"],
+    ["--runs", "1e2"],
+    ["--files", "1"],
+    ["--switches", "-1"],
+    ["--idle-seconds", "Infinity"],
+    ["--runs", "2", "--runs", "3"],
+    ["--label", "candidate"],
+    ["--profile-main", "yes"],
+    ["--profile-renderer", "1"],
+    ["--scenario", "typo"],
+    ["--package-dir", "other"],
+    ["--engine-commit", "HEAD"],
+    ["--profile-main", "true"],
+    ["--profile-renderer", "true", "--scenario", "startup"],
+    ["--profile-renderer", "true", "--scenario", "go-to"],
+    ["--soak-minutes", "5"],
+    ["--chat-messages", "5"],
+    ["--records", "5"],
+    ["--scenario", "soak", "--soak-minutes", "0"],
+    ["--scenario", "chat-history", "--chat-messages", "1"],
+    ["--scenario", "soak", "--records", "5"],
+    ["--scenario", "go-to"],
+    ["--scenario", "search", "--files", "4242"],
+  ])
+    assert.throws(() => parseOptions([...required, ...extra]), JSON.stringify(extra));
+  assert.throws(
+    () => parseOptions(required.filter((_, i) => i !== 2 && i !== 3)),
+    /package-commit/,
+  );
+  assert.throws(() => parseOptions([...required, "--scenario", "go-to"]), /at least 4243/);
 });
-test('traced typing is a full-scenario option', () => {
+test("traced typing is a full-scenario option", () => {
   assert.equal(parseOptions(required).typingTrace, false);
-  assert.equal(parseOptions([...required, '--typing-trace', 'true']).typingTrace, true);
-  assert.throws(() => parseOptions([...required, '--typing-trace', 'true', '--scenario', 'startup']), /requires --scenario full/);
-  assert.throws(() => parseOptions([...required, '--typing-trace', 'yes']), /typing-trace/);
+  assert.equal(parseOptions([...required, "--typing-trace", "true"]).typingTrace, true);
+  assert.throws(
+    () => parseOptions([...required, "--typing-trace", "true", "--scenario", "startup"]),
+    /requires --scenario full/,
+  );
+  assert.throws(() => parseOptions([...required, "--typing-trace", "yes"]), /typing-trace/);
 });
-test('a package directory names the platform executable', () => {
-  const options = parseOptions(['--package-dir', '/packages/dohc', '--package-commit', 'a'.repeat(40), '--output', '/perf/out', '--label', 'baseline']);
-  assert.equal(options.binary, resolve(process.platform === 'darwin' ? '/packages/dohc/Contents/MacOS/dohc' : '/packages/dohc/dohc.exe'));
-});
-test('link rename fixtures have exactly the requested incoming links among 5000 files', () => {
-  for (const links of [0, 100, 2000]) {
-    const options = parseOptions([...required, '--scenario', 'link-rename', '--links', String(links)]);
-    assert.equal(options.fixtureFiles, 5000);
-    const files = Array.from({length: 4998}, (_, n) => linkFixtureFile(n + 2, links));
-    assert.equal(files.filter(file => file.content.includes('[[link-target')).length + (links ? 1 : 0), links);
-    assert.equal(linkingPaths(links).length, links);
-    assert.equal(new Set(files.map(file => file.name)).size, 4998);
-  }
-  assert.throws(() => parseOptions([...required, '--links', '100']), /requires --scenario/);
-  assert.throws(() => parseOptions([...required, '--scenario', 'link-rename', '--links', '5000']), /room for its target/);
-});
-test('the macOS sampler keeps the app tree with CPU time and physical footprint', () => {
-  assert.equal(parseCpuTime('0:01.50'), 1500);
-  assert.equal(parseCpuTime('1:02:03.04'), 3723040);
-  assert.equal(parseCpuTime('2-00:00:01.00'), 172801000);
-  const ps = [
-    '    1     0   1:00.00  1000 Mon Oct 19 06:00:00 2026  ',
-    '  100     1   0:02.50 20000 Mon Oct 19 06:01:00 2026  ',
-    '  101   100   0:01.25 10000 Mon Oct 19 06:01:01 2026  ',
-    '  102   101   0:00.10  5000 Mon Oct  5 06:01:02 2026  ',
-    '  200     1   0:09.00  9000 Mon Oct 19 06:02:00 2026  ',
-  ].join('\n');
-  const snapshot = parseMacProcessSnapshot({ ps, appPid: 100, startedAtMs: 1, completedAtMs: 2,
-    commands: '  100 /Apps/dohc.app/Contents/MacOS/dohc --user-data-dir=/p\n  101 /Apps/dohc.app/Contents/Frameworks/dohc Helper (Renderer).app/Contents/MacOS/dohc Helper (Renderer) --type=renderer\n',
-    executables: '  100 /Apps/dohc.app/Contents/MacOS/dohc\n  101 /Apps/dohc.app/Contents/Frameworks/dohc Helper (Renderer).app/Contents/MacOS/dohc Helper (Renderer)\n  102 /Apps/dohc.app/Contents/Resources/workspace-engine/dohc-workspace-engine\n',
-    footprint: 'dohc [100]: 64-bit    Footprint: 2000 B (16384 bytes per page)\ndohc Helper (Renderer) [101]: 64-bit    Footprint: 3000 B (16384 bytes per page)\n' });
-  assert.deepEqual(snapshot.processes.map(p => [p.pid, p.parentPid, p.cpuMs, p.workingSetBytes, p.privateBytes, p.name]), [
-    [100, 1, 2500, 20480000, 2000, 'dohc'],
-    [101, 100, 1250, 10240000, 3000, 'dohc Helper (Renderer)'],
-    [102, 101, 100, 5120000, null, 'dohc-workspace-engine'],
+test("a package directory names the platform executable", () => {
+  const options = parseOptions([
+    "--package-dir",
+    "/packages/dohc",
+    "--package-commit",
+    "a".repeat(40),
+    "--output",
+    "/perf/out",
+    "--label",
+    "baseline",
   ]);
+  assert.equal(
+    options.binary,
+    resolve(
+      process.platform === "darwin"
+        ? "/packages/dohc/Contents/MacOS/dohc"
+        : "/packages/dohc/dohc.exe",
+    ),
+  );
+});
+test("link rename fixtures have exactly the requested incoming links among 5000 files", () => {
+  for (const links of [0, 100, 2000]) {
+    const options = parseOptions([
+      ...required,
+      "--scenario",
+      "link-rename",
+      "--links",
+      String(links),
+    ]);
+    assert.equal(options.fixtureFiles, 5000);
+    const files = Array.from({ length: 4998 }, (_, n) => linkFixtureFile(n + 2, links));
+    assert.equal(
+      files.filter((file) => file.content.includes("[[link-target")).length + (links ? 1 : 0),
+      links,
+    );
+    assert.equal(linkingPaths(links).length, links);
+    assert.equal(new Set(files.map((file) => file.name)).size, 4998);
+  }
+  assert.throws(() => parseOptions([...required, "--links", "100"]), /requires --scenario/);
+  assert.throws(
+    () => parseOptions([...required, "--scenario", "link-rename", "--links", "5000"]),
+    /room for its target/,
+  );
+});
+test("the macOS sampler keeps the app tree with CPU time and physical footprint", () => {
+  assert.equal(parseCpuTime("0:01.50"), 1500);
+  assert.equal(parseCpuTime("1:02:03.04"), 3723040);
+  assert.equal(parseCpuTime("2-00:00:01.00"), 172801000);
+  const ps = [
+    "    1     0   1:00.00  1000 Mon Oct 19 06:00:00 2026  ",
+    "  100     1   0:02.50 20000 Mon Oct 19 06:01:00 2026  ",
+    "  101   100   0:01.25 10000 Mon Oct 19 06:01:01 2026  ",
+    "  102   101   0:00.10  5000 Mon Oct  5 06:01:02 2026  ",
+    "  200     1   0:09.00  9000 Mon Oct 19 06:02:00 2026  ",
+  ].join("\n");
+  const snapshot = parseMacProcessSnapshot({
+    ps,
+    appPid: 100,
+    startedAtMs: 1,
+    completedAtMs: 2,
+    commands:
+      "  100 /Apps/dohc.app/Contents/MacOS/dohc --user-data-dir=/p\n  101 /Apps/dohc.app/Contents/Frameworks/dohc Helper (Renderer).app/Contents/MacOS/dohc Helper (Renderer) --type=renderer\n",
+    executables:
+      "  100 /Apps/dohc.app/Contents/MacOS/dohc\n  101 /Apps/dohc.app/Contents/Frameworks/dohc Helper (Renderer).app/Contents/MacOS/dohc Helper (Renderer)\n  102 /Apps/dohc.app/Contents/Resources/workspace-engine/dohc-workspace-engine\n",
+    footprint:
+      "dohc [100]: 64-bit    Footprint: 2000 B (16384 bytes per page)\ndohc Helper (Renderer) [101]: 64-bit    Footprint: 3000 B (16384 bytes per page)\n",
+  });
+  assert.deepEqual(
+    snapshot.processes.map((p) => [
+      p.pid,
+      p.parentPid,
+      p.cpuMs,
+      p.workingSetBytes,
+      p.privateBytes,
+      p.name,
+    ]),
+    [
+      [100, 1, 2500, 20480000, 2000, "dohc"],
+      [101, 100, 1250, 10240000, 3000, "dohc Helper (Renderer)"],
+      [102, 101, 100, 5120000, null, "dohc-workspace-engine"],
+    ],
+  );
   assert.deepEqual(aggregateByKind(snapshot, 100).kinds, {
     main: { count: 1, workingSetBytes: 20480000, privateBytes: 2000 },
     renderer: { count: 1, workingSetBytes: 10240000, privateBytes: 3000 },
     engine: { count: 1, workingSetBytes: 5120000, privateBytes: 0 },
   });
 });
-test('surface scenarios parse with their own sizes and defaults', () => {
-  for (const scenario of ['go-to', 'go-to-mixed', 'command-palette', 'search', 'chat-history', 'collection', 'soak']) {
-    const options = parseOptions([...required, '--scenario', scenario, '--files', '5000']);
-    assert.deepEqual([options.scenario, options.soakMinutes, options.chatMessages, options.records], [scenario, 10, 200, 500]);
-    assert.equal(options.runCount, scenario === 'collection' ? 5 : 3);
+test("surface scenarios parse with their own sizes and defaults", () => {
+  for (const scenario of [
+    "go-to",
+    "go-to-mixed",
+    "command-palette",
+    "search",
+    "chat-history",
+    "collection",
+    "soak",
+  ]) {
+    const options = parseOptions([...required, "--scenario", scenario, "--files", "5000"]);
+    assert.deepEqual(
+      [options.scenario, options.soakMinutes, options.chatMessages, options.records],
+      [scenario, 10, 200, 500],
+    );
+    assert.equal(options.runCount, scenario === "collection" ? 5 : 3);
   }
-  assert.equal(parseOptions([...required, '--scenario', 'go-to', '--files', '4243']).fixtureFiles, 4243);
-  assert.throws(() => parseOptions([...required, '--scenario', 'go-to-mixed']), /at least 5000/);
-  assert.equal(parseOptions([...required, '--scenario', 'go-to-mixed', '--files', '5000']).fixtureFiles, 5000);
-  assert.equal(parseOptions([...required, '--scenario', 'soak', '--soak-minutes', '3', '--profile-renderer', 'true']).soakMinutes, 3);
-  assert.equal(parseOptions([...required, '--scenario', 'chat-history', '--chat-messages', '2']).chatMessages, 2);
-  assert.equal(parseOptions([...required, '--scenario', 'collection', '--records', '1']).records, 1);
-  assert.equal(parseOptions([...required, '--scenario', 'collection', '--runs', '3']).runCount, 3);
+  assert.equal(
+    parseOptions([...required, "--scenario", "go-to", "--files", "4243"]).fixtureFiles,
+    4243,
+  );
+  assert.throws(() => parseOptions([...required, "--scenario", "go-to-mixed"]), /at least 5000/);
+  assert.equal(
+    parseOptions([...required, "--scenario", "go-to-mixed", "--files", "5000"]).fixtureFiles,
+    5000,
+  );
+  assert.equal(
+    parseOptions([
+      ...required,
+      "--scenario",
+      "soak",
+      "--soak-minutes",
+      "3",
+      "--profile-renderer",
+      "true",
+    ]).soakMinutes,
+    3,
+  );
+  assert.equal(
+    parseOptions([...required, "--scenario", "chat-history", "--chat-messages", "2"]).chatMessages,
+    2,
+  );
+  assert.equal(
+    parseOptions([...required, "--scenario", "collection", "--records", "1"]).records,
+    1,
+  );
+  assert.equal(parseOptions([...required, "--scenario", "collection", "--runs", "3"]).runCount, 3);
 });
 
-test('evidence directory is exclusive even for concurrent starts', async t => {
-  const root = await mkdtemp(join(tmpdir(), 'dohc-release-cli-'));
+test("evidence directory is exclusive even for concurrent starts", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "dohc-release-cli-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const output = join(root, 'nested', 'run');
-  const results = await Promise.allSettled([createEvidenceDirectory(output), createEvidenceDirectory(output)]);
-  assert.equal(results.filter(result => result.status === 'fulfilled').length, 1);
-  await writeFile(join(output, 'keep.txt'), 'evidence');
-  await assert.rejects(createEvidenceDirectory(output), { code: 'EEXIST' });
-  assert.equal(await readFile(join(output, 'keep.txt'), 'utf8'), 'evidence');
+  const output = join(root, "nested", "run");
+  const results = await Promise.allSettled([
+    createEvidenceDirectory(output),
+    createEvidenceDirectory(output),
+  ]);
+  assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+  await writeFile(join(output, "keep.txt"), "evidence");
+  await assert.rejects(createEvidenceDirectory(output), { code: "EEXIST" });
+  assert.equal(await readFile(join(output, "keep.txt"), "utf8"), "evidence");
 });
-test('a scenario that seeds through the Windows job object refuses on a Mac', { skip: process.platform !== 'darwin' }, async t => {
-  const root = await mkdtemp(join(tmpdir(), 'dohc-release-mac-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
-  const result = spawnSync(process.execPath, ['tools/perf-profiling/packaged-benchmark.mjs', '--binary', join(root, 'dohc'), '--package-commit', 'a'.repeat(40),
-    '--output', join(root, 'run'), '--label', 'baseline', '--scenario', 'chat-history'], { encoding: 'utf8', timeout: 20_000 });
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /--scenario chat-history requires Windows/);
-  await assert.rejects(readFile(join(root, 'run', 'result.json')), { code: 'ENOENT' });
-});
-test('a Mac app bundle resolves its executable and Resources', { skip: process.platform !== 'darwin' }, async t => {
-  const root = await mkdtemp(join(tmpdir(), 'dohc-release-mac-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
-  const bundle = join(root, 'dohc.app');
-  await mkdir(join(bundle, 'Contents/MacOS'), { recursive: true });
-  await mkdir(join(bundle, 'Contents/Resources'), { recursive: true });
-  await writeFile(join(bundle, 'Contents/MacOS/dohc'), 'app');
-  await writeFile(join(bundle, 'Contents/Resources/app.asar'), 'asar');
-  const output = join(root, 'run');
-  const result = spawnSync(process.execPath, ['tools/perf-profiling/packaged-benchmark.mjs', '--package-dir', bundle, '--package-commit', 'a'.repeat(40),
-    '--output', output, '--label', 'baseline'], { encoding: 'utf8', timeout: 20_000 });
-  assert.equal(result.status, 1, result.stderr);
-  const failed = JSON.parse(await readFile(join(output, 'result.json'), 'utf8'));
-  assert.equal(failed.binary, join(bundle, 'Contents/MacOS/dohc'));
-  assert.equal(failed.settings.metricVersion, METRIC_VERSION);
-  // The engine is the first missing file, at the bundle's Resources path and without .exe.
-  assert.match(failed.error, /ENOENT.*dohc\.app\/Contents\/Resources\/workspace-engine\/dohc-workspace-engine'/);
-});
-test('missing package binary finalizes a CLI failure receipt', { skip: process.platform !== 'win32' }, async t => {
-  const root = await mkdtemp(join(tmpdir(), 'dohc-release-setup-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
-  const output = join(root, 'failed-run');
-  const result = spawnSync(process.execPath, ['tools/perf-profiling/packaged-benchmark.mjs',
-    '--binary', join(root, 'missing.exe'), '--package-commit', 'a'.repeat(40), '--output', output, '--label', 'baseline'], { encoding: 'utf8', timeout: 20_000 });
-  assert.equal(result.status, 1, result.stderr);
-  const receipt = JSON.parse(await readFile(join(output, 'result.json'), 'utf8'));
-  assert.equal(receipt.status, 'failed');
-  assert.match(receipt.error, /ENOENT.*missing\.exe/);
-  assert.equal(receipt.packageCommit, 'a'.repeat(40));
-  assert.ok(receipt.completedAt);
-  assert.deepEqual(receipt.runs, []);
-  assert.deepEqual(receipt.feedRequests, []);
-});
-for (const selected of [true, false]) test(`restart verifies saved input when edited workspace is ${selected ? 'already selected' : 'not selected'}`, async () => {
-  const calls = [];
-  const config = { isEditedWorkspaceSelected: async () => selected, marker: 'saved', selectEditedWorkspace: async () => { calls.push('select workspace 0'); },
-    readEditedText: async () => { calls.push('read'); return 'saved'; } };
-  assert.equal(await verifyRestartInput(config), true);
-  assert.deepEqual(calls, selected ? ['read'] : ['select workspace 0', 'read']);
-  await assert.rejects(verifyRestartInput({ ...config, readEditedText: async () => 'lost' }), /did not restore/);
-});
+test(
+  "a scenario that seeds through the Windows job object refuses on a Mac",
+  { skip: process.platform !== "darwin" },
+  async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "dohc-release-mac-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const result = spawnSync(
+      process.execPath,
+      [
+        "tools/perf-profiling/packaged-benchmark.mjs",
+        "--binary",
+        join(root, "dohc"),
+        "--package-commit",
+        "a".repeat(40),
+        "--output",
+        join(root, "run"),
+        "--label",
+        "baseline",
+        "--scenario",
+        "chat-history",
+      ],
+      { encoding: "utf8", timeout: 20_000 },
+    );
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /--scenario chat-history requires Windows/);
+    await assert.rejects(readFile(join(root, "run", "result.json")), { code: "ENOENT" });
+  },
+);
+test(
+  "a Mac app bundle resolves its executable and Resources",
+  { skip: process.platform !== "darwin" },
+  async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "dohc-release-mac-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const bundle = join(root, "dohc.app");
+    await mkdir(join(bundle, "Contents/MacOS"), { recursive: true });
+    await mkdir(join(bundle, "Contents/Resources"), { recursive: true });
+    await writeFile(join(bundle, "Contents/MacOS/dohc"), "app");
+    await writeFile(join(bundle, "Contents/Resources/app.asar"), "asar");
+    const output = join(root, "run");
+    const result = spawnSync(
+      process.execPath,
+      [
+        "tools/perf-profiling/packaged-benchmark.mjs",
+        "--package-dir",
+        bundle,
+        "--package-commit",
+        "a".repeat(40),
+        "--output",
+        output,
+        "--label",
+        "baseline",
+      ],
+      { encoding: "utf8", timeout: 20_000 },
+    );
+    assert.equal(result.status, 1, result.stderr);
+    const failed = JSON.parse(await readFile(join(output, "result.json"), "utf8"));
+    assert.equal(failed.binary, join(bundle, "Contents/MacOS/dohc"));
+    assert.equal(failed.settings.metricVersion, METRIC_VERSION);
+    // The engine is the first missing file, at the bundle's Resources path and without .exe.
+    assert.match(
+      failed.error,
+      /ENOENT.*dohc\.app\/Contents\/Resources\/workspace-engine\/dohc-workspace-engine'/,
+    );
+  },
+);
+test(
+  "missing package binary finalizes a CLI failure receipt",
+  { skip: process.platform !== "win32" },
+  async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "dohc-release-setup-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const output = join(root, "failed-run");
+    const result = spawnSync(
+      process.execPath,
+      [
+        "tools/perf-profiling/packaged-benchmark.mjs",
+        "--binary",
+        join(root, "missing.exe"),
+        "--package-commit",
+        "a".repeat(40),
+        "--output",
+        output,
+        "--label",
+        "baseline",
+      ],
+      { encoding: "utf8", timeout: 20_000 },
+    );
+    assert.equal(result.status, 1, result.stderr);
+    const receipt = JSON.parse(await readFile(join(output, "result.json"), "utf8"));
+    assert.equal(receipt.status, "failed");
+    assert.match(receipt.error, /ENOENT.*missing\.exe/);
+    assert.equal(receipt.packageCommit, "a".repeat(40));
+    assert.ok(receipt.completedAt);
+    assert.deepEqual(receipt.runs, []);
+    assert.deepEqual(receipt.feedRequests, []);
+  },
+);
+for (const selected of [true, false])
+  test(`restart verifies saved input when edited workspace is ${selected ? "already selected" : "not selected"}`, async () => {
+    const calls = [];
+    const config = {
+      isEditedWorkspaceSelected: async () => selected,
+      marker: "saved",
+      selectEditedWorkspace: async () => {
+        calls.push("select workspace 0");
+      },
+      readEditedText: async () => {
+        calls.push("read");
+        return "saved";
+      },
+    };
+    assert.equal(await verifyRestartInput(config), true);
+    assert.deepEqual(calls, selected ? ["read"] : ["select workspace 0", "read"]);
+    await assert.rejects(
+      verifyRestartInput({ ...config, readEditedText: async () => "lost" }),
+      /did not restore/,
+    );
+  });
 
-const fixture = body => `const readline=require('node:readline'); ${body}`;
+const fixture = (body) => `const readline=require('node:readline'); ${body}`;
 const protocol = `console.log(JSON.stringify({ready:true})); readline.createInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line);if(r.state==='exit')process.exit(0);console.log(JSON.stringify({id:r.id,value:{ok:true}}));});`;
 // Loaded-gate bounds for helpers that follow the protocol. A helper that ignores
 // the exit request passes closeTimeoutMs: 100 so its forced stop stays quick.
 function controller(code, options = {}) {
-  return startWindowController({ command: process.execPath, args: ['-e', fixture(code)], startupTimeoutMs: 20_000, requestTimeoutMs: 10_000, closeTimeoutMs: 10_000, ...options });
+  return startWindowController({
+    command: process.execPath,
+    args: ["-e", fixture(code)],
+    startupTimeoutMs: 20_000,
+    requestTimeoutMs: 10_000,
+    closeTimeoutMs: 10_000,
+    ...options,
+  });
 }
-test('helper completes requests and closes the recorded process', async () => {
+test("helper completes requests and closes the recorded process", async () => {
   let child;
-  const helper = await controller(protocol, { onSpawn: value => { child = value; } });
-  try { assert.deepEqual(await helper.request({ state: 'inspect' }), { ok: true }); }
-  finally { await helper.close(); }
-  assert.notEqual(child.exitCode, null);
-  await assert.rejects(helper.request({ state: 'ping' }), /closed/);
-});
-test('ordinary helper error rejects one request and the same controller remains usable', async () => {
-  let child;
-  const helper = await controller(`console.log(JSON.stringify({ready:true}));readline.createInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line);if(r.state==='exit')process.exit(0);console.log(JSON.stringify(r.state==='inspect'?{id:r.id,error:'Window title is changing'}:{id:r.id,value:{ok:true}}));});`, { onSpawn: value => { child = value; } });
+  const helper = await controller(protocol, {
+    onSpawn: (value) => {
+      child = value;
+    },
+  });
   try {
-    await assert.rejects(helper.request({ state: 'inspect' }), /Window title is changing/);
+    assert.deepEqual(await helper.request({ state: "inspect" }), { ok: true });
+  } finally {
+    await helper.close();
+  }
+  assert.notEqual(child.exitCode, null);
+  await assert.rejects(helper.request({ state: "ping" }), /closed/);
+});
+test("ordinary helper error rejects one request and the same controller remains usable", async () => {
+  let child;
+  const helper = await controller(
+    `console.log(JSON.stringify({ready:true}));readline.createInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line);if(r.state==='exit')process.exit(0);console.log(JSON.stringify(r.state==='inspect'?{id:r.id,error:'Window title is changing'}:{id:r.id,value:{ok:true}}));});`,
+    {
+      onSpawn: (value) => {
+        child = value;
+      },
+    },
+  );
+  try {
+    await assert.rejects(helper.request({ state: "inspect" }), /Window title is changing/);
     assert.equal(child.exitCode, null);
     assert.equal(child.signalCode, null);
-    assert.deepEqual(await helper.request({ state: 'visible' }), { ok: true });
-  } finally { await helper.close(); }
+    assert.deepEqual(await helper.request({ state: "visible" }), { ok: true });
+  } finally {
+    await helper.close();
+  }
   assert.notEqual(child.exitCode, null);
 });
-test('startup polling retries explicit not-ready replies on the same helper', async () => {
-  const helper = await controller(`let inspections=0;console.log(JSON.stringify({ready:true}));readline.createInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line);if(r.state==='exit')process.exit(0);const value=r.state==='inspect'?(++inspections===1?{ready:false,reason:'title-changing'}:{visible:true,minimized:false,inspections}):{ok:true};console.log(JSON.stringify({id:r.id,value}));});`);
+test("startup polling retries explicit not-ready replies on the same helper", async () => {
+  const helper = await controller(
+    `let inspections=0;console.log(JSON.stringify({ready:true}));readline.createInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line);if(r.state==='exit')process.exit(0);const value=r.state==='inspect'?(++inspections===1?{ready:false,reason:'title-changing'}:{visible:true,minimized:false,inspections}):{ok:true};console.log(JSON.stringify({id:r.id,value}));});`,
+  );
   try {
-    const state = await waitForVisibleWindow(() => helper.request({ state: 'inspect' }));
+    const state = await waitForVisibleWindow(() => helper.request({ state: "inspect" }));
     assert.equal(state.inspections, 2);
     assert.equal(state.visible, true);
-  } finally { await helper.close(); }
+  } finally {
+    await helper.close();
+  }
 });
-test('startup polling propagates ownership errors without retrying', async () => {
-  const helper = await controller(`console.log(JSON.stringify({ready:true}));readline.createInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line);if(r.state==='exit')process.exit(0);console.log(JSON.stringify(r.state==='inspect'?{id:r.id,error:'PID no longer belongs to the recorded packaged executable'}:{id:r.id,value:true}));});`);
+test("startup polling propagates ownership errors without retrying", async () => {
+  const helper = await controller(
+    `console.log(JSON.stringify({ready:true}));readline.createInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line);if(r.state==='exit')process.exit(0);console.log(JSON.stringify(r.state==='inspect'?{id:r.id,error:'PID no longer belongs to the recorded packaged executable'}:{id:r.id,value:true}));});`,
+  );
   let requests = 0;
   try {
-    await assert.rejects(waitForVisibleWindow(() => { requests++; return helper.request({ state: 'inspect' }); }), /PID no longer belongs/);
+    await assert.rejects(
+      waitForVisibleWindow(() => {
+        requests++;
+        return helper.request({ state: "inspect" });
+      }),
+      /PID no longer belongs/,
+    );
     assert.equal(requests, 1);
-  } finally { await helper.close(); }
+  } finally {
+    await helper.close();
+  }
 });
-test('startup polling propagates fatal protocol errors after helper cleanup', async () => {
+test("startup polling propagates fatal protocol errors after helper cleanup", async () => {
   let child;
-  const helper = await controller(`console.log(JSON.stringify({ready:true}));readline.createInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line);if(r.state==='exit')process.exit(0);console.log(JSON.stringify(r.state==='inspect'?{id:999,value:true}:{id:r.id,value:true}));});`, { onSpawn: value => { child = value; } });
-  await assert.rejects(waitForVisibleWindow(() => helper.request({ state: 'inspect' })), /Unexpected window helper response id/);
+  const helper = await controller(
+    `console.log(JSON.stringify({ready:true}));readline.createInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line);if(r.state==='exit')process.exit(0);console.log(JSON.stringify(r.state==='inspect'?{id:999,value:true}:{id:r.id,value:true}));});`,
+    {
+      onSpawn: (value) => {
+        child = value;
+      },
+    },
+  );
+  await assert.rejects(
+    waitForVisibleWindow(() => helper.request({ state: "inspect" })),
+    /Unexpected window helper response id/,
+  );
   assert.ok(child.exitCode !== null || child.signalCode !== null);
 });
-test('startup polling never starts a new request after its deadline', async t => {
-  t.mock.method(performance, 'now', (() => {
-    const times = [0, 0, 10000];
-    return () => times.shift() ?? 10000;
-  })());
+test("startup polling never starts a new request after its deadline", async (t) => {
+  t.mock.method(
+    performance,
+    "now",
+    (() => {
+      const times = [0, 0, 10000];
+      return () => times.shift() ?? 10000;
+    })(),
+  );
   let requests = 0;
-  await assert.rejects(waitForVisibleWindow(async () => { requests++; return { ready: false }; }), /within 10000ms/);
+  await assert.rejects(
+    waitForVisibleWindow(async () => {
+      requests++;
+      return { ready: false };
+    }),
+    /within 10000ms/,
+  );
   assert.equal(requests, 1);
 });
-test('startup polling cancels its wait without starting another request', async () => {
+test("startup polling cancels its wait without starting another request", async () => {
   const controller = new AbortController();
   let requests = 0;
-  await assert.rejects(waitForVisibleWindow(async () => {
-    requests++;
-    setImmediate(() => controller.abort(Error('cancel startup wait')));
-    return { ready: false };
-  }, { signal: controller.signal }), error => error.message === 'cancel startup wait' || error.cause?.message === 'cancel startup wait');
+  await assert.rejects(
+    waitForVisibleWindow(
+      async () => {
+        requests++;
+        setImmediate(() => controller.abort(Error("cancel startup wait")));
+        return { ready: false };
+      },
+      { signal: controller.signal },
+    ),
+    (error) =>
+      error.message === "cancel startup wait" || error.cause?.message === "cancel startup wait",
+  );
   assert.equal(requests, 1);
 });
 for (const [name, code, options, pattern] of [
-  ['malformed readiness', `console.log('not json');setInterval(()=>{},1000);`, {}, /JSON/],
-  ['missing readiness', `setInterval(()=>{},1000);`, { startupTimeoutMs: 100 }, /startup timed out/],
-  ['request timeout', `console.log(JSON.stringify({ready:true}));setInterval(()=>{},1000);`, { requestTimeoutMs: 100 }, /request timed out/],
-  ['invalid response object', `console.log('null');setInterval(()=>{},1000);`, {}, /Invalid window/],
-  ['unexpected exit', `process.exit(7);`, {}, /exited 7/],
+  ["malformed readiness", `console.log('not json');setInterval(()=>{},1000);`, {}, /JSON/],
+  [
+    "missing readiness",
+    `setInterval(()=>{},1000);`,
+    { startupTimeoutMs: 100 },
+    /startup timed out/,
+  ],
+  [
+    "request timeout",
+    `console.log(JSON.stringify({ready:true}));setInterval(()=>{},1000);`,
+    { requestTimeoutMs: 100 },
+    /request timed out/,
+  ],
+  [
+    "invalid response object",
+    `console.log('null');setInterval(()=>{},1000);`,
+    {},
+    /Invalid window/,
+  ],
+  ["unexpected exit", `process.exit(7);`, {}, /exited 7/],
 ]) {
   test(`helper ${name} rejects and stops its child`, async () => {
     let child;
-    await assert.rejects(controller(code, { closeTimeoutMs: 100, ...options, onSpawn: value => { child = value; } }), pattern);
-    assert.ok(child.exitCode !== null || child.signalCode !== null, 'owned helper must exit before rejection returns');
+    await assert.rejects(
+      controller(code, {
+        closeTimeoutMs: 100,
+        ...options,
+        onSpawn: (value) => {
+          child = value;
+        },
+      }),
+      pattern,
+    );
+    assert.ok(
+      child.exitCode !== null || child.signalCode !== null,
+      "owned helper must exit before rejection returns",
+    );
   });
 }
-test('helper spawn failure rejects without hanging on an exit event', async () => {
-  await assert.rejects(startWindowController({ command: 'dohc-no-such-helper-executable', startupTimeoutMs: 1000 }), /ENOENT/);
+test("helper spawn failure rejects without hanging on an exit event", async () => {
+  await assert.rejects(
+    startWindowController({ command: "dohc-no-such-helper-executable", startupTimeoutMs: 1000 }),
+    /ENOENT/,
+  );
 });
-test('helper malformed response after readiness rejects the request and cleans up', async () => {
+test("helper malformed response after readiness rejects the request and cleans up", async () => {
   let child;
-  const helper = await controller(`let n=0;console.log(JSON.stringify({ready:true}));readline.createInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line);if(r.state==='exit')process.exit(0);console.log(++n===1?JSON.stringify({id:r.id,value:true}):'broken');});`, { onSpawn: value => { child = value; } });
-  await assert.rejects(helper.request({ state: 'inspect' }), /JSON/);
+  const helper = await controller(
+    `let n=0;console.log(JSON.stringify({ready:true}));readline.createInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line);if(r.state==='exit')process.exit(0);console.log(++n===1?JSON.stringify({id:r.id,value:true}):'broken');});`,
+    {
+      onSpawn: (value) => {
+        child = value;
+      },
+    },
+  );
+  await assert.rejects(helper.request({ state: "inspect" }), /JSON/);
   assert.notEqual(child.exitCode, null);
 });
 
 async function ownedNode(code) {
-  const child = spawn(process.execPath, ['-e', code], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, detached: process.platform !== 'win32' });
+  const child = spawn(process.execPath, ["-e", code], {
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
+    detached: process.platform !== "win32",
+  });
   const exit = observeExit(child);
-  const [data] = await once(child.stdout, 'data');
+  const [data] = await once(child.stdout, "data");
   return { child, exit, firstOutput: data.toString() };
 }
-test('launch before CDP cleans up the owned process and its child, preserving an unrelated process', async () => {
+test("launch before CDP cleans up the owned process and its child, preserving an unrelated process", async () => {
   const unrelated = await ownedNode(`console.log('ready');setInterval(()=>{},1000);`);
-  const instance = await ownedNode(`const {spawn}=require('node:child_process');const c=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore',windowsHide:true});console.log(c.pid);setInterval(()=>{},1000);`);
+  const instance = await ownedNode(
+    `const {spawn}=require('node:child_process');const c=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore',windowsHide:true});console.log(c.pid);setInterval(()=>{},1000);`,
+  );
   try {
     await assert.rejects(closeOwnedPackage(instance, 100), /before CDP/);
     assert.ok(instance.child.exitCode !== null || instance.child.signalCode !== null);
@@ -669,10 +1339,15 @@ test('launch before CDP cleans up the owned process and its child, preserving an
     const deadline = performance.now() + 10_000;
     let descendantAlive = true;
     while (descendantAlive && performance.now() < deadline) {
-      try { process.kill(descendantPid, 0); await delay(10); }
-      catch (error) { if (error.code !== 'ESRCH') throw error; descendantAlive = false; }
+      try {
+        process.kill(descendantPid, 0);
+        await delay(10);
+      } catch (error) {
+        if (error.code !== "ESRCH") throw error;
+        descendantAlive = false;
+      }
     }
-    assert.equal(descendantAlive, false, 'the recorded descendant must also exit');
+    assert.equal(descendantAlive, false, "the recorded descendant must also exit");
     assert.equal(unrelated.child.exitCode, null);
     assert.equal(unrelated.child.signalCode, null);
   } finally {
@@ -683,330 +1358,769 @@ test('launch before CDP cleans up the owned process and its child, preserving an
 // The seed script's process ownership comes from scripts/verification/process.mjs, whose job and
 // process-group behavior scripts/verification/process-group.test.mjs covers. This checks the
 // script's own contract against a stand-in launcher.
-test('chat seed script posts once, replies for the rest, reports the CLI thread id, and fails on a CLI error', async t => {
+test("chat seed script posts once, replies for the rest, reports the CLI thread id, and fails on a CLI error", async (t) => {
   // Canonical, so a symlinked temp directory (macOS /var is /private/var) matches the child's cwd.
-  const root = await realpath(await mkdtemp(join(tmpdir(), 'dohc-seed-cli-')));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "dohc-seed-cli-")));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const calls = join(root, 'calls.jsonl');
-  const launcher = join(root, 'fake-dohc.mjs');
-  await writeFile(launcher, `import { appendFileSync } from 'node:fs';
+  const calls = join(root, "calls.jsonl");
+  const launcher = join(root, "fake-dohc.mjs");
+  await writeFile(
+    launcher,
+    `import { appendFileSync } from 'node:fs';
 const args = process.argv.slice(2);
 appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ args, cwd: process.cwd(), stateDir: process.env.DOHC_STATE_DIR }) + '\\n');
 if (args[0] === '--json') console.log(JSON.stringify({ schemaVersion: 1, threadId: 'th_seeded', messageId: 'msg_0', title: args[5] }));
 else if (args[3] === 'Message 3') { console.error('pipe closed'); process.exit(2); }
 else console.log('replied th_seeded msg_' + args[3].slice(8));
-`);
-  const seedScript = resolve('tools/perf-profiling/seed-chat-cli.mjs');
-  const seeded = spawnSync(process.execPath, [seedScript, launcher, 'Long history', '3'], { cwd: root, env: { ...process.env, DOHC_STATE_DIR: 'state-dir' }, encoding: 'utf8', timeout: 60000 });
+`,
+  );
+  const seedScript = resolve("tools/perf-profiling/seed-chat-cli.mjs");
+  const seeded = spawnSync(process.execPath, [seedScript, launcher, "Long history", "3"], {
+    cwd: root,
+    env: { ...process.env, DOHC_STATE_DIR: "state-dir" },
+    encoding: "utf8",
+    timeout: 60000,
+  });
   assert.equal(seeded.status, 0, seeded.stderr);
   const result = JSON.parse(seeded.stdout.trim().split(/\r?\n/).at(-1));
-  assert.deepEqual([result.channel, result.title, result.cliThreadId, result.messages], ['general', 'Long history', 'th_seeded', 3]);
+  assert.deepEqual(
+    [result.channel, result.title, result.cliThreadId, result.messages],
+    ["general", "Long history", "th_seeded", 3],
+  );
   assert.ok(Number.isFinite(result.seedingObservedMs));
-  const recorded = (await readFile(calls, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
-  assert.deepEqual(recorded.map(call => call.args), [['--json', 'chat', 'post', 'general', '--title', 'Long history', 'Message 0'], ['chat', 'reply', 'th_seeded', 'Message 1'], ['chat', 'reply', 'th_seeded', 'Message 2']]);
-  assert.ok(recorded.every(call => call.stateDir === 'state-dir' && resolve(call.cwd) === resolve(root)), 'the workspace cwd and profile reach every CLI call');
-  const failed = spawnSync(process.execPath, [seedScript, launcher, 'Long history', '5'], { cwd: root, env: process.env, encoding: 'utf8', timeout: 60000 });
+  const recorded = (await readFile(calls, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.deepEqual(
+    recorded.map((call) => call.args),
+    [
+      ["--json", "chat", "post", "general", "--title", "Long history", "Message 0"],
+      ["chat", "reply", "th_seeded", "Message 1"],
+      ["chat", "reply", "th_seeded", "Message 2"],
+    ],
+  );
+  assert.ok(
+    recorded.every((call) => call.stateDir === "state-dir" && resolve(call.cwd) === resolve(root)),
+    "the workspace cwd and profile reach every CLI call",
+  );
+  const failed = spawnSync(process.execPath, [seedScript, launcher, "Long history", "5"], {
+    cwd: root,
+    env: process.env,
+    encoding: "utf8",
+    timeout: 60000,
+  });
   assert.equal(failed.status, 1);
   assert.match(failed.stderr, /pipe closed/);
-  assert.match(spawnSync(process.execPath, [seedScript, launcher, 'Long history', '1'], { encoding: 'utf8', timeout: 60000 }).stderr, /usage/);
+  assert.match(
+    spawnSync(process.execPath, [seedScript, launcher, "Long history", "1"], {
+      encoding: "utf8",
+      timeout: 60000,
+    }).stderr,
+    /usage/,
+  );
 });
-test('CDP shutdown timeout still stops its owned process', async () => {
+test("CDP shutdown timeout still stops its owned process", async () => {
   const instance = await ownedNode(`console.log('ready');setInterval(()=>{},1000);`);
   instance.browser = { newBrowserCDPSession: () => new Promise(() => {}) };
   await assert.rejects(closeOwnedPackage(instance, 100), /timed out/);
   assert.ok(instance.child.exitCode !== null || instance.child.signalCode !== null);
 });
 
-for (const signal of ['SIGINT', 'SIGTERM']) test(`${signal} rejects pending work and blocks later launches`, async () => {
-  const priorExitCode = process.exitCode;
-  const listeners = [process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')];
-  const cancellation = benchmarkCancellation();
-  let helperChild;
-  const helper = await controller(protocol, { signal: cancellation.signal, onSpawn: child => { helperChild = child; } });
-  let laterLaunches = 0;
-  try {
-    const pending = cancellation.run(() => new Promise(() => {}));
-    process.emit(signal);
-    await assert.rejects(pending, new RegExp(signal));
-    await assert.rejects(cancellation.run(() => { laterLaunches++; }), new RegExp(signal));
-    assert.equal(laterLaunches, 0);
-    assert.equal(process.exitCode, signal === 'SIGINT' ? 130 : 143);
-    await assert.rejects(helper.request({ state: 'ping' }), new RegExp(signal));
-    assert.ok(helperChild.exitCode !== null || helperChild.signalCode !== null, 'abort must stop the helper before fallback cleanup');
-  } finally {
-    await helper.close();
-    cancellation.dispose();
-    process.exitCode = priorExitCode;
-  }
-  assert.ok(helperChild.exitCode !== null || helperChild.signalCode !== null);
-  assert.deepEqual([process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')], listeners);
-});
+for (const signal of ["SIGINT", "SIGTERM"])
+  test(`${signal} rejects pending work and blocks later launches`, async () => {
+    const priorExitCode = process.exitCode;
+    const listeners = [process.listenerCount("SIGINT"), process.listenerCount("SIGTERM")];
+    const cancellation = benchmarkCancellation();
+    let helperChild;
+    const helper = await controller(protocol, {
+      signal: cancellation.signal,
+      onSpawn: (child) => {
+        helperChild = child;
+      },
+    });
+    let laterLaunches = 0;
+    try {
+      const pending = cancellation.run(() => new Promise(() => {}));
+      process.emit(signal);
+      await assert.rejects(pending, new RegExp(signal));
+      await assert.rejects(
+        cancellation.run(() => {
+          laterLaunches++;
+        }),
+        new RegExp(signal),
+      );
+      assert.equal(laterLaunches, 0);
+      assert.equal(process.exitCode, signal === "SIGINT" ? 130 : 143);
+      await assert.rejects(helper.request({ state: "ping" }), new RegExp(signal));
+      assert.ok(
+        helperChild.exitCode !== null || helperChild.signalCode !== null,
+        "abort must stop the helper before fallback cleanup",
+      );
+    } finally {
+      await helper.close();
+      cancellation.dispose();
+      process.exitCode = priorExitCode;
+    }
+    assert.ok(helperChild.exitCode !== null || helperChild.signalCode !== null);
+    assert.deepEqual(
+      [process.listenerCount("SIGINT"), process.listenerCount("SIGTERM")],
+      listeners,
+    );
+  });
 
-test('cancellation during helper readiness waits for cleanup before returning', async () => {
+test("cancellation during helper readiness waits for cleanup before returning", async () => {
   const signal = new AbortController();
   let child;
-  const startup = controller(`setInterval(()=>{},1000);`, { closeTimeoutMs: 100, signal: signal.signal, onSpawn: value => { child = value; } });
-  signal.abort(Error('cancel readiness'));
+  const startup = controller(`setInterval(()=>{},1000);`, {
+    closeTimeoutMs: 100,
+    signal: signal.signal,
+    onSpawn: (value) => {
+      child = value;
+    },
+  });
+  signal.abort(Error("cancel readiness"));
   await assert.rejects(startup, /cancel readiness/);
   assert.ok(child.exitCode !== null || child.signalCode !== null);
 });
 
-test('summary keeps absent timing samples missing and labels diagnostic measurements', async () => {
-  const rendererReadiness = { timeOrigin: 1005, observerInstalledMs: 12, alreadyReady: true, predicateMatchedMs: 12, secondAnimationFrameMs: 28 };
-  const summary = await summarize({ label: 'baseline', status: 'failed', settings: { profileRenderer: true }, limits: ['16ms floor'], runs: [{
-    index: 1, freshStartup: { startedAt: 1000, editablePaintObservedMs: 50, windowControlObservedMs: 4, rendererReadiness, renderer: { timeOrigin: 1005, paints: [{ name: 'first-paint', startTime: 8 }] } },
-    typing: [{ name: 'small.md', supported: true, samples: [{ inputToNextPaintMs: null }, {}, { inputToNextPaintMs: 16 }], longTasks: [] }],
-    switches: [{ phasesMs: { files: 3 } }, { phasesMs: {} }],
-  }] }, async () => '[desktop] launch marks (ms since process start): ready 12');
-  assert.equal(summary.status, 'failed');
+test("summary keeps absent timing samples missing and labels diagnostic measurements", async () => {
+  const rendererReadiness = {
+    timeOrigin: 1005,
+    observerInstalledMs: 12,
+    alreadyReady: true,
+    predicateMatchedMs: 12,
+    secondAnimationFrameMs: 28,
+  };
+  const summary = await summarize(
+    {
+      label: "baseline",
+      status: "failed",
+      settings: { profileRenderer: true },
+      limits: ["16ms floor"],
+      runs: [
+        {
+          index: 1,
+          freshStartup: {
+            startedAt: 1000,
+            editablePaintObservedMs: 50,
+            windowControlObservedMs: 4,
+            rendererReadiness,
+            renderer: { timeOrigin: 1005, paints: [{ name: "first-paint", startTime: 8 }] },
+          },
+          typing: [
+            {
+              name: "small.md",
+              supported: true,
+              samples: [{ inputToNextPaintMs: null }, {}, { inputToNextPaintMs: 16 }],
+              longTasks: [],
+            },
+          ],
+          switches: [{ phasesMs: { files: 3 } }, { phasesMs: {} }],
+        },
+      ],
+    },
+    async () => "[desktop] launch marks (ms since process start): ready 12",
+  );
+  assert.equal(summary.status, "failed");
   assert.equal(summary.diagnostic, true);
-  assert.deepEqual(summary.restartEditableObservedMs, { count: 0, p50: null, p95: null, max: null });
-  assert.equal(summary.typing['small.md'].eventTimingUnreportedCount, 2);
-  assert.equal(summary.typing['small.md'].inputToNextPaintReportedOnlyMs.count, 1);
-  assert.equal(summary.typing['large.md'].eventTimingSupported, null);
+  assert.deepEqual(summary.restartEditableObservedMs, {
+    count: 0,
+    p50: null,
+    p95: null,
+    max: null,
+  });
+  assert.equal(summary.typing["small.md"].eventTimingUnreportedCount, 2);
+  assert.equal(summary.typing["small.md"].inputToNextPaintReportedOnlyMs.count, 1);
+  assert.equal(summary.typing["large.md"].eventTimingSupported, null);
   assert.equal(summary.nativeSwitchPhasesMs.files.count, 1);
   assert.equal(summary.startupEvidence[0].nativeMarksMsSinceModuleEvaluation.ready, 12);
   assert.equal(summary.startupEvidence[0].rendererPaintsMsSinceHarnessSpawn[0].ms, 13);
   assert.deepEqual(summary.startupEvidence[0].rendererReadiness, rendererReadiness);
   assert.equal(summary.freshEditableObservedMs.p50, 50);
-  assert.deepEqual(summary.limits, ['16ms floor']);
-  assert.deepEqual([summary.goTo, summary.commandPalette, summary.search, summary.chatHistory, summary.collection, summary.soak], [null, null, null, null, null, null]);
+  assert.deepEqual(summary.limits, ["16ms floor"]);
+  assert.deepEqual(
+    [
+      summary.goTo,
+      summary.commandPalette,
+      summary.search,
+      summary.chatHistory,
+      summary.collection,
+      summary.soak,
+    ],
+    [null, null, null, null, null, null],
+  );
 });
 
-test('summary reports each surface scenario from its own runs and keeps unobserved samples missing', async () => {
-  const open = (painted, optionCount) => ({ keydownToReadyMs: painted - 20, keydownToPaintedMs: painted, optionCount, observed: { entranceAnimating: true, matchedIn: 'frame' } });
-  const sample = (cycle, renderer, main) => ({ cycle, completedAtMs: 1000 + cycle * 60000, processCount: 5, kinds: { renderer: { count: 1, workingSetBytes: renderer, privateBytes: renderer / 2 }, main: { count: 1, workingSetBytes: main, privateBytes: main / 2 } } });
-  const summary = await summarize({ label: 'baseline', status: 'complete', settings: {}, limits: [], runs: [
-    { index: 1, goTo: { query: 'fixture-004242', firstOption: 'fixture-004242.txt', cold: open(120, 50), warm: open(40, 50), keystrokes: [{ keydownToPaintedMs: 30, optionCount: 50 }, { keydownToPaintedMs: 18, optionCount: 1 }] },
-      commandPalette: { cold: open(90, 12), warm: open(25, 12) },
-      search: [{ query: 'fixture', open: { clickToPaintedMs: 70 }, submitToFirstResultMs: 200, submitToSettledMs: 1500, debounceFiredBeforeSubmit: true, sawUpdating: true, summary: '50 results in 50 files', limitHit: false, rowsRendered: 40 },
-        { query: 'fixture 4242.', open: null, submitToFirstResultMs: null, submitToSettledMs: 300, debounceFiredBeforeSubmit: false, sawUpdating: false, summary: 'No results', limitHit: false, rowsRendered: 0 }],
-      chatHistory: { seed: { messages: 200, seedingObservedMs: 90000 }, channelOpen: { clickToPostsPaintedMs: 150 }, threadOpen: { clickToFirstCommentPaintedMs: 400, clickToAllCommentsPaintedMs: null, commentRowsRendered: 120 } },
-      collection: { records: 500, indexedWaitObservedMs: 800, clickToRowsPaintedMs: 210, rowsRendered: 24, loadedRecords: 100 },
-      soak: { minutes: 2, searchQuery: 'Performance', elapsedMs: 120000, cycles: [{ durationMs: 50000 }, { durationMs: 55000 }], samples: [sample(0, 400, 100), sample(1, 450, 100), sample(2, 440, 110)] } },
-    { index: 2, goTo: { query: 'fixture-004242', firstOption: 'fixture-004242.txt', cold: open(100, 50), warm: open(30, 50), keystrokes: [{ keydownToPaintedMs: 26, optionCount: 1 }] },
-      chatHistory: { seed: { messages: 200, seedingObservedMs: 80000 }, channelOpen: { clickToPostsPaintedMs: 130 }, threadOpen: { clickToFirstCommentPaintedMs: 380, clickToAllCommentsPaintedMs: 900, commentRowsRendered: 199 } } },
-  ] });
-  assert.deepEqual(summary.goTo.query, ['fixture-004242']);
-  assert.deepEqual(summary.goTo.coldOpenToEditableInputPaintedMs, { count: 2, p50: 100, p95: 120, max: 120 });
+test("summary reports each surface scenario from its own runs and keeps unobserved samples missing", async () => {
+  const open = (painted, optionCount) => ({
+    keydownToReadyMs: painted - 20,
+    keydownToPaintedMs: painted,
+    optionCount,
+    observed: { entranceAnimating: true, matchedIn: "frame" },
+  });
+  const sample = (cycle, renderer, main) => ({
+    cycle,
+    completedAtMs: 1000 + cycle * 60000,
+    processCount: 5,
+    kinds: {
+      renderer: { count: 1, workingSetBytes: renderer, privateBytes: renderer / 2 },
+      main: { count: 1, workingSetBytes: main, privateBytes: main / 2 },
+    },
+  });
+  const summary = await summarize({
+    label: "baseline",
+    status: "complete",
+    settings: {},
+    limits: [],
+    runs: [
+      {
+        index: 1,
+        goTo: {
+          query: "fixture-004242",
+          firstOption: "fixture-004242.txt",
+          cold: open(120, 50),
+          warm: open(40, 50),
+          keystrokes: [
+            { keydownToPaintedMs: 30, optionCount: 50 },
+            { keydownToPaintedMs: 18, optionCount: 1 },
+          ],
+        },
+        commandPalette: { cold: open(90, 12), warm: open(25, 12) },
+        search: [
+          {
+            query: "fixture",
+            open: { clickToPaintedMs: 70 },
+            submitToFirstResultMs: 200,
+            submitToSettledMs: 1500,
+            debounceFiredBeforeSubmit: true,
+            sawUpdating: true,
+            summary: "50 results in 50 files",
+            limitHit: false,
+            rowsRendered: 40,
+          },
+          {
+            query: "fixture 4242.",
+            open: null,
+            submitToFirstResultMs: null,
+            submitToSettledMs: 300,
+            debounceFiredBeforeSubmit: false,
+            sawUpdating: false,
+            summary: "No results",
+            limitHit: false,
+            rowsRendered: 0,
+          },
+        ],
+        chatHistory: {
+          seed: { messages: 200, seedingObservedMs: 90000 },
+          channelOpen: { clickToPostsPaintedMs: 150 },
+          threadOpen: {
+            clickToFirstCommentPaintedMs: 400,
+            clickToAllCommentsPaintedMs: null,
+            commentRowsRendered: 120,
+          },
+        },
+        collection: {
+          records: 500,
+          indexedWaitObservedMs: 800,
+          clickToRowsPaintedMs: 210,
+          rowsRendered: 24,
+          loadedRecords: 100,
+        },
+        soak: {
+          minutes: 2,
+          searchQuery: "Performance",
+          elapsedMs: 120000,
+          cycles: [{ durationMs: 50000 }, { durationMs: 55000 }],
+          samples: [sample(0, 400, 100), sample(1, 450, 100), sample(2, 440, 110)],
+        },
+      },
+      {
+        index: 2,
+        goTo: {
+          query: "fixture-004242",
+          firstOption: "fixture-004242.txt",
+          cold: open(100, 50),
+          warm: open(30, 50),
+          keystrokes: [{ keydownToPaintedMs: 26, optionCount: 1 }],
+        },
+        chatHistory: {
+          seed: { messages: 200, seedingObservedMs: 80000 },
+          channelOpen: { clickToPostsPaintedMs: 130 },
+          threadOpen: {
+            clickToFirstCommentPaintedMs: 380,
+            clickToAllCommentsPaintedMs: 900,
+            commentRowsRendered: 199,
+          },
+        },
+      },
+    ],
+  });
+  assert.deepEqual(summary.goTo.query, ["fixture-004242"]);
+  assert.deepEqual(summary.goTo.coldOpenToEditableInputPaintedMs, {
+    count: 2,
+    p50: 100,
+    p95: 120,
+    max: 120,
+  });
   assert.equal(summary.goTo.warmOpenToEditableInputPaintedMs.max, 40);
   assert.equal(summary.goTo.keystrokeToFirstMatchPaintedMs.count, 3);
-  assert.deepEqual(summary.goTo.lastKeystrokeToFirstMatchPaintedMs, { count: 2, p50: 18, p95: 26, max: 26 });
-  assert.deepEqual([summary.goTo.finalOptionCounts, summary.goTo.finalFirstOptions, summary.goTo.entranceAnimating, summary.goTo.openMatchedIn], [[1], ['fixture-004242.txt'], [true], ['frame']]);
-  assert.deepEqual(summary.commandPalette, { coldOpenToFirstRowPaintedMs: { count: 1, p50: 90, p95: 90, max: 90 }, warmOpenToFirstRowPaintedMs: { count: 1, p50: 25, p95: 25, max: 25 }, optionCounts: [12], entranceAnimating: [true], openMatchedIn: ['frame'] });
+  assert.deepEqual(summary.goTo.lastKeystrokeToFirstMatchPaintedMs, {
+    count: 2,
+    p50: 18,
+    p95: 26,
+    max: 26,
+  });
+  assert.deepEqual(
+    [
+      summary.goTo.finalOptionCounts,
+      summary.goTo.finalFirstOptions,
+      summary.goTo.entranceAnimating,
+      summary.goTo.openMatchedIn,
+    ],
+    [[1], ["fixture-004242.txt"], [true], ["frame"]],
+  );
+  assert.deepEqual(summary.commandPalette, {
+    coldOpenToFirstRowPaintedMs: { count: 1, p50: 90, p95: 90, max: 90 },
+    warmOpenToFirstRowPaintedMs: { count: 1, p50: 25, p95: 25, max: 25 },
+    optionCounts: [12],
+    entranceAnimating: [true],
+    openMatchedIn: ["frame"],
+  });
   assert.equal(summary.search.fixture.openToInputPaintedMs.p50, 70);
-  assert.deepEqual([summary.search.fixture.debounceFiredBeforeSubmitCount, summary.search.fixture.sawUpdatingCount], [1, 1]);
+  assert.deepEqual(
+    [
+      summary.search.fixture.debounceFiredBeforeSubmitCount,
+      summary.search.fixture.sawUpdatingCount,
+    ],
+    [1, 1],
+  );
   assert.deepEqual(summary.search.fixture.limitHit, [false]);
-  assert.deepEqual(summary.search['fixture 4242.'].submitToFirstResultPaintedMs, { count: 0, p50: null, p95: null, max: null });
-  assert.equal(summary.search['fixture 4242.'].openToInputPaintedMs.count, 0);
+  assert.deepEqual(summary.search["fixture 4242."].submitToFirstResultPaintedMs, {
+    count: 0,
+    p50: null,
+    p95: null,
+    max: null,
+  });
+  assert.equal(summary.search["fixture 4242."].openToInputPaintedMs.count, 0);
   assert.deepEqual(summary.chatHistory.messages, [200]);
-  assert.deepEqual(summary.chatHistory.channelOpenToPostsPaintedMs, { count: 2, p50: 130, p95: 150, max: 150 });
+  assert.deepEqual(summary.chatHistory.channelOpenToPostsPaintedMs, {
+    count: 2,
+    p50: 130,
+    p95: 150,
+    max: 150,
+  });
   assert.equal(summary.chatHistory.threadOpenToAllCommentsPaintedMs.count, 1);
   assert.equal(summary.chatHistory.allCommentsUnobservedCount, 1);
   assert.deepEqual(summary.chatHistory.commentRowsRendered, [120, 199]);
-  assert.deepEqual(summary.collection, { records: [500], indexedWaitObservedMs: { count: 1, p50: 800, p95: 800, max: 800 }, openToRowsPaintedMs: { count: 1, p50: 210, p95: 210, max: 210 }, rowsRendered: [24], loadedRecords: [100] });
+  assert.deepEqual(summary.collection, {
+    records: [500],
+    indexedWaitObservedMs: { count: 1, p50: 800, p95: 800, max: 800 },
+    openToRowsPaintedMs: { count: 1, p50: 210, p95: 210, max: 210 },
+    rowsRendered: [24],
+    loadedRecords: [100],
+  });
   assert.equal(summary.soak.length, 1);
-  assert.deepEqual(summary.soak[0].kinds.renderer, { processCounts: [1], workingSetBytes: { first: 400, last: 440, max: 450, delta: 40 }, privateBytes: { first: 200, last: 220, max: 225, delta: 20 } });
-  assert.deepEqual([summary.soak[0].cycles, summary.soak[0].elapsedMs, summary.soak[0].cycleDurationMs.max, summary.soak[0].searchQuery], [2, 120000, 55000, 'Performance']);
+  assert.deepEqual(summary.soak[0].kinds.renderer, {
+    processCounts: [1],
+    workingSetBytes: { first: 400, last: 440, max: 450, delta: 40 },
+    privateBytes: { first: 200, last: 220, max: 225, delta: 20 },
+  });
+  assert.deepEqual(
+    [
+      summary.soak[0].cycles,
+      summary.soak[0].elapsedMs,
+      summary.soak[0].cycleDurationMs.max,
+      summary.soak[0].searchQuery,
+    ],
+    [2, 120000, 55000, "Performance"],
+  );
 });
 
-const loadYaml = createRequire(new URL('../../apps/desktop/package.json', import.meta.url))('js-yaml').load;
-const caseNamed = (cases, name) => cases.find(spec => spec.name === name);
+const loadYaml = createRequire(new URL("../../apps/desktop/package.json", import.meta.url))(
+  "js-yaml",
+).load;
+const caseNamed = (cases, name) => cases.find((spec) => spec.name === name);
 
-test('automation limits default to the current ones and belong to the collection scenario', () => {
-  const collection = [...required, '--scenario', 'collection'];
-  assert.deepEqual([parseOptions(collection).findCap, parseOptions(collection).writeCap], [DEFAULT_LIMITS.findCap, DEFAULT_LIMITS.writeCap]);
+test("automation limits default to the current ones and belong to the collection scenario", () => {
+  const collection = [...required, "--scenario", "collection"];
+  assert.deepEqual(
+    [parseOptions(collection).findCap, parseOptions(collection).writeCap],
+    [DEFAULT_LIMITS.findCap, DEFAULT_LIMITS.writeCap],
+  );
   assert.deepEqual([500, 200], [DEFAULT_LIMITS.findCap, DEFAULT_LIMITS.writeCap]);
-  const candidate = parseOptions([...collection, '--find-cap', '500', '--write-cap', '1000']);
+  const candidate = parseOptions([...collection, "--find-cap", "500", "--write-cap", "1000"]);
   assert.deepEqual([candidate.findCap, candidate.writeCap], [500, 1000]);
-  for (const extra of [['--find-cap', '500'], ['--scenario', 'soak', '--write-cap', '10'], ['--scenario', 'collection', '--find-cap', '0'], ['--scenario', 'collection', '--write-cap', '1.5']]) {
+  for (const extra of [
+    ["--find-cap", "500"],
+    ["--scenario", "soak", "--write-cap", "10"],
+    ["--scenario", "collection", "--find-cap", "0"],
+    ["--scenario", "collection", "--write-cap", "1.5"],
+  ]) {
     assert.throws(() => parseOptions([...required, ...extra]), JSON.stringify(extra));
   }
 });
 
-test('automation cases expect the package limits to refuse only the cases over them', () => {
+test("automation cases expect the package limits to refuse only the cases over them", () => {
   const cases = automationCases(DEFAULT_LIMITS);
-  assert.deepEqual(cases.map(spec => [spec.name, spec.expected]), [['baseline', 'done'], ['find-500', 'refused'], ['five-finds', 'refused'], ['set-then-find', 'done'],
-    ['add-then-find', 'done'], ['find-at-cap', 'done'], ['find-over-cap', 'refused'], ['wide', 'done'], ['baseline-typing', 'done'], ['find-500-typing', 'refused']]);
-  assert.deepEqual(automationCases({ findCap: 500, writeCap: 1000 }).filter(spec => spec.expected === 'refused').map(spec => spec.name), ['find-over-cap']);
+  assert.deepEqual(
+    cases.map((spec) => [spec.name, spec.expected]),
+    [
+      ["baseline", "done"],
+      ["find-500", "refused"],
+      ["five-finds", "refused"],
+      ["set-then-find", "done"],
+      ["add-then-find", "done"],
+      ["find-at-cap", "done"],
+      ["find-over-cap", "refused"],
+      ["wide", "done"],
+      ["baseline-typing", "done"],
+      ["find-500-typing", "refused"],
+    ],
+  );
+  assert.deepEqual(
+    automationCases({ findCap: 500, writeCap: 1000 })
+      .filter((spec) => spec.expected === "refused")
+      .map((spec) => spec.name),
+    ["find-over-cap"],
+  );
   // Small limits keep the at-cap case under the write limit too.
-  assert.deepEqual(automationCases({ findCap: 5, writeCap: 5 }).filter(spec => spec.name.startsWith('find-') && spec.name.endsWith('cap')).map(spec => [spec.name, spec.expected]), [['find-at-cap', 'done'], ['find-over-cap', 'refused']]);
-  assert.deepEqual(cases.map(spec => spec.seed.length), [50, 500, 300, 40, 10, 500, 501, 50, 50, 500]);
-  assert.deepEqual(cases.filter(spec => spec.contention).map(spec => spec.name), ['baseline-typing', 'find-500-typing']);
+  assert.deepEqual(
+    automationCases({ findCap: 5, writeCap: 5 })
+      .filter((spec) => spec.name.startsWith("find-") && spec.name.endsWith("cap"))
+      .map((spec) => [spec.name, spec.expected]),
+    [
+      ["find-at-cap", "done"],
+      ["find-over-cap", "refused"],
+    ],
+  );
+  assert.deepEqual(
+    cases.map((spec) => spec.seed.length),
+    [50, 500, 300, 40, 10, 500, 501, 50, 50, 500],
+  );
+  assert.deepEqual(
+    cases.filter((spec) => spec.contention).map((spec) => spec.name),
+    ["baseline-typing", "find-500-typing"],
+  );
   // Five Finds of 100 records each, so their 1,000 assignments count records in two Finds twice.
-  const five = caseNamed(cases, 'five-finds');
-  assert.deepEqual([1, 2, 3, 4, 5].map(k => five.seed.filter(record => record[`F${k}`]).length), [100, 100, 100, 100, 100]);
-  assert.ok(five.seed.every(record => [1, 2].includes([1, 2, 3, 4, 5].filter(k => record[`F${k}`]).length)));
+  const five = caseNamed(cases, "five-finds");
+  assert.deepEqual(
+    [1, 2, 3, 4, 5].map((k) => five.seed.filter((record) => record[`F${k}`]).length),
+    [100, 100, 100, 100, 100],
+  );
+  assert.ok(
+    five.seed.every((record) =>
+      [1, 2].includes([1, 2, 3, 4, 5].filter((k) => record[`F${k}`]).length),
+    ),
+  );
   assert.equal(five.steps.length, 10);
-  const baseline = caseNamed(cases, 'baseline');
-  assert.deepEqual(baseline.seed[0], { Name: 'baseline 1', Case: 'baseline', N: 1 });
+  const baseline = caseNamed(cases, "baseline");
+  assert.deepEqual(baseline.seed[0], { Name: "baseline 1", Case: "baseline", N: 1 });
   assert.equal(baseline.matches * Object.keys(baseline.steps[1].set).length, baseline.assignments);
 });
 
-test('automation fixtures are deterministic, sort the trigger first, and pre-mint unique ids', () => {
+test("automation fixtures are deterministic, sort the trigger first, and pre-mint unique ids", () => {
   const cases = automationCases(DEFAULT_LIMITS);
   const files = documentAutomationFiles(cases);
   assert.deepEqual(documentAutomationFiles(automationCases(DEFAULT_LIMITS)), files);
-  assert.deepEqual(files.slice(0, 3).map(file => file.path), ['automation-bench/collection.yaml', 'automation-bench/automations.yaml', TRIGGER.document.path]);
-  const records = files.filter(file => file.path.endsWith('.md'));
+  assert.deepEqual(
+    files.slice(0, 3).map((file) => file.path),
+    [
+      "automation-bench/collection.yaml",
+      "automation-bench/automations.yaml",
+      TRIGGER.document.path,
+    ],
+  );
+  const records = files.filter((file) => file.path.endsWith(".md"));
   assert.equal(records.length, 1 + cases.reduce((sum, spec) => sum + spec.seed.length, 0));
-  assert.equal(records.map(file => file.path).sort()[0], TRIGGER.document.path);
-  const ids = records.map(file => file.content.match(/^id: (\S+)$/m)[1]);
-  assert.ok(ids.every(id => /^rec_[a-z2-7]{26}$/.test(id)));
+  assert.equal(records.map((file) => file.path).sort()[0], TRIGGER.document.path);
+  const ids = records.map((file) => file.content.match(/^id: (\S+)$/m)[1]);
+  assert.ok(ids.every((id) => /^rec_[a-z2-7]{26}$/.test(id)));
   assert.equal(new Set(ids).size, ids.length);
-  const setup = datasetSetupRequest(cases, 'workspace');
-  assert.deepEqual(datasetSetupRequest(automationCases(DEFAULT_LIMITS), 'workspace'), setup);
-  const keys = setup.records.map(record => record[setup.idFieldId]);
+  const setup = datasetSetupRequest(cases, "workspace");
+  assert.deepEqual(datasetSetupRequest(automationCases(DEFAULT_LIMITS), "workspace"), setup);
+  const keys = setup.records.map((record) => record[setup.idFieldId]);
   assert.equal(keys.length, records.length);
   assert.equal(new Set(keys).size, keys.length);
   assert.deepEqual([keys[0], [...keys].sort()[0]], [TRIGGER.dataset.id, TRIGGER.dataset.id]);
   // The Explorer's Collections section lists a dataset by its table's name, which the harness clicks.
-  assert.deepEqual(datasetAutomationDefinition(cases).tables.map(table => table.name), [DATASET_NAME]);
-  assert.equal(automationFixtureDigest(cases), automationFixtureDigest(automationCases(DEFAULT_LIMITS)));
+  assert.deepEqual(
+    datasetAutomationDefinition(cases).tables.map((table) => table.name),
+    [DATASET_NAME],
+  );
+  assert.equal(
+    automationFixtureDigest(cases),
+    automationFixtureDigest(automationCases(DEFAULT_LIMITS)),
+  );
   // A case's digest changes only when its own records, steps, or expected outcome do.
   const candidate = automationCases({ findCap: 1000, writeCap: 1000 });
-  assert.equal(caseNamed(candidate, 'baseline').fixtureSha256, caseNamed(cases, 'baseline').fixtureSha256);
-  for (const name of ['find-500', 'find-at-cap']) assert.notEqual(caseNamed(candidate, name).fixtureSha256, caseNamed(cases, name).fixtureSha256);
-  assert.equal(new Set(cases.map(spec => spec.fixtureSha256)).size, cases.length);
-  assert.notEqual(automationFixtureDigest(cases), automationFixtureDigest(automationCases({ findCap: 500, writeCap: 1000 })));
+  assert.equal(
+    caseNamed(candidate, "baseline").fixtureSha256,
+    caseNamed(cases, "baseline").fixtureSha256,
+  );
+  for (const name of ["find-500", "find-at-cap"])
+    assert.notEqual(caseNamed(candidate, name).fixtureSha256, caseNamed(cases, name).fixtureSha256);
+  assert.equal(new Set(cases.map((spec) => spec.fixtureSha256)).size, cases.length);
+  assert.notEqual(
+    automationFixtureDigest(cases),
+    automationFixtureDigest(automationCases({ findCap: 500, writeCap: 1000 })),
+  );
 });
 
 // The JS gate builds @dohc/app-backend-runtime before its tests; the executor's plan imports it.
-test('automation fixtures pass the product contracts for automations, schemas, and datasets', () => {
-  const tsx = pathToFileURL(createRequire(new URL('../../packages/cli/package.json', import.meta.url)).resolve('tsx')).href;
-  const checked = spawnSync(process.execPath, ['--import', tsx, 'tools/perf-profiling/check-automation-fixtures.mts'], { encoding: 'utf8', timeout: 120_000 });
+test("automation fixtures pass the product contracts for automations, schemas, and datasets", () => {
+  const tsx = pathToFileURL(
+    createRequire(new URL("../../packages/cli/package.json", import.meta.url)).resolve("tsx"),
+  ).href;
+  const checked = spawnSync(
+    process.execPath,
+    ["--import", tsx, "tools/perf-profiling/check-automation-fixtures.mts"],
+    { encoding: "utf8", timeout: 120_000 },
+  );
   assert.equal(checked.status, 0, checked.stderr);
   assert.deepEqual(JSON.parse(checked.stdout.trim().split(/\r?\n/).at(-1)), { problems: [] });
 });
 
-test('document records read back from frontmatter and the verifier tells step visibility apart', async t => {
+test("document records read back from frontmatter and the verifier tells step visibility apart", async (t) => {
   const cases = automationCases(DEFAULT_LIMITS);
-  const root = await mkdtemp(join(tmpdir(), 'dohc-automation-docs-'));
+  const root = await mkdtemp(join(tmpdir(), "dohc-automation-docs-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  await mkdir(join(root, 'automation-bench'));
-  for (const file of documentAutomationFiles(cases)) await writeFile(join(root, file.path), file.content);
-  const staged = caseNamed(cases, 'set-then-find');
+  await mkdir(join(root, "automation-bench"));
+  for (const file of documentAutomationFiles(cases))
+    await writeFile(join(root, file.path), file.content);
+  const staged = caseNamed(cases, "set-then-find");
   const read = await readDocumentCase(root, staged, loadYaml);
   assert.equal(read.length, 40);
   // A case reads its own seeded files and the records its runs created, never another file.
-  await writeFile(join(root, 'automation-bench', 'Added.md'), '---\nCase: "find-500"\nN: 501\n---\n');
-  await writeFile(join(root, 'automation-bench', 'Other.md'), '---\nCase: "find-500"\nN: 502\n---\n');
-  await writeFile(join(root, 'automation-bench', 'find-500-typing-0001.md'), '---\nCase: "find-500"\nN: 999\n---\n');
-  const fiveHundred = caseNamed(cases, 'find-500');
-  assert.deepEqual((await readDocumentCase(root, fiveHundred, loadYaml, ['automation-bench/Added.md'])).map(record => record.N).filter(n => n > 500), [501]);
-  await rm(join(root, 'automation-bench', 'find-500-0001.md'));
-  assert.deepEqual(verifyCase(fiveHundred, 'refused', await readDocumentCase(root, fiveHundred, loadYaml)).problems, ['N 1 is missing']);
-  assert.deepEqual(verifyCase(staged, 'refused', read), { ok: true, visibility: null, problems: [], problemCount: 0 });
-  assert.equal(documentValues('no frontmatter', loadYaml), null);
-  for (const visibility of ['run-start', 'stepwise']) {
+  await writeFile(
+    join(root, "automation-bench", "Added.md"),
+    '---\nCase: "find-500"\nN: 501\n---\n',
+  );
+  await writeFile(
+    join(root, "automation-bench", "Other.md"),
+    '---\nCase: "find-500"\nN: 502\n---\n',
+  );
+  await writeFile(
+    join(root, "automation-bench", "find-500-typing-0001.md"),
+    '---\nCase: "find-500"\nN: 999\n---\n',
+  );
+  const fiveHundred = caseNamed(cases, "find-500");
+  assert.deepEqual(
+    (await readDocumentCase(root, fiveHundred, loadYaml, ["automation-bench/Added.md"]))
+      .map((record) => record.N)
+      .filter((n) => n > 500),
+    [501],
+  );
+  await rm(join(root, "automation-bench", "find-500-0001.md"));
+  assert.deepEqual(
+    verifyCase(fiveHundred, "refused", await readDocumentCase(root, fiveHundred, loadYaml))
+      .problems,
+    ["N 1 is missing"],
+  );
+  assert.deepEqual(verifyCase(staged, "refused", read), {
+    ok: true,
+    visibility: null,
+    problems: [],
+    problemCount: 0,
+  });
+  assert.equal(documentValues("no frontmatter", loadYaml), null);
+  for (const visibility of ["run-start", "stepwise"]) {
     const { records } = staged.expect(staged.seed, visibility);
-    assert.deepEqual([verifyCase(staged, 'done', records).ok, verifyCase(staged, 'done', records).visibility], [true, visibility]);
+    assert.deepEqual(
+      [verifyCase(staged, "done", records).ok, verifyCase(staged, "done", records).visibility],
+      [true, visibility],
+    );
   }
-  const unchanged = verifyCase(staged, 'done', staged.seed);
+  const unchanged = verifyCase(staged, "done", staged.seed);
   assert.equal(unchanged.ok, false);
   assert.match(unchanged.problems[0], /^N 1 Stage is "stf-a", expected "stf-b"$/);
-  const added = caseNamed(cases, 'add-then-find');
-  const { records, added: [record] } = added.expect(added.seed, 'stepwise');
-  assert.equal(verifyCase(added, 'done', [...records, record]).visibility, 'stepwise');
-  assert.deepEqual(verifyCase(added, 'done', records).problems, ['N 11 is missing']);
-  assert.deepEqual(verifyCase(added, 'refused', [...added.seed, record]).problems, ['N 11 was not expected']);
-  assert.deepEqual(verifyCase(added, 'refused', [added.seed[0], ...added.seed]).problems, ['N 1 appears twice']);
-  const wide = caseNamed(cases, 'wide');
-  const problem = verifyCase(wide, 'done', wide.seed).problems[0];
-  assert.ok(problem.startsWith('N 1 C is null, expected 2') || problem.includes('Notes'), problem);
-  assert.ok(verifyCase(wide, 'done', wide.seed).problems.every(text => text.length < 140));
+  const added = caseNamed(cases, "add-then-find");
+  const {
+    records,
+    added: [record],
+  } = added.expect(added.seed, "stepwise");
+  assert.equal(verifyCase(added, "done", [...records, record]).visibility, "stepwise");
+  assert.deepEqual(verifyCase(added, "done", records).problems, ["N 11 is missing"]);
+  assert.deepEqual(verifyCase(added, "refused", [...added.seed, record]).problems, [
+    "N 11 was not expected",
+  ]);
+  assert.deepEqual(verifyCase(added, "refused", [added.seed[0], ...added.seed]).problems, [
+    "N 1 appears twice",
+  ]);
+  const wide = caseNamed(cases, "wide");
+  const problem = verifyCase(wide, "done", wide.seed).problems[0];
+  assert.ok(problem.startsWith("N 1 C is null, expected 2") || problem.includes("Notes"), problem);
+  assert.ok(verifyCase(wide, "done", wide.seed).problems.every((text) => text.length < 140));
   assert.equal(wide.expect(wide.seed).records[0].Notes, WIDE_SET);
 });
 
-test('dataset rows map back to field names and a list asks for one case', () => {
+test("dataset rows map back to field names and a list asks for one case", () => {
   const cases = automationCases(DEFAULT_LIMITS);
-  const setup = datasetSetupRequest(cases, 'workspace');
-  const request = datasetListRequest({ datasetId: setup.definition.datasetId, revision: 3, revisionSha256: 'b'.repeat(64) }, 'workspace', 'wide');
-  assert.deepEqual([request.mode, request.revision, request.filters.length, request.filters[0].value], ['list', 3, 1, 'wide']);
-  assert.deepEqual([setup.datasetPath, request.datasetPath], ['automation-data/dataset.json', 'automation-data/dataset.json']);
+  const setup = datasetSetupRequest(cases, "workspace");
+  const request = datasetListRequest(
+    { datasetId: setup.definition.datasetId, revision: 3, revisionSha256: "b".repeat(64) },
+    "workspace",
+    "wide",
+  );
+  assert.deepEqual(
+    [request.mode, request.revision, request.filters.length, request.filters[0].value],
+    ["list", 3, 1, "wide"],
+  );
+  assert.deepEqual(
+    [setup.datasetPath, request.datasetPath],
+    ["automation-data/dataset.json", "automation-data/dataset.json"],
+  );
   const [trigger, first] = setup.records;
   const { [setup.idFieldId]: id, ...values } = first;
   const row = datasetRowValues({ id, version: 1, values });
-  assert.deepEqual(row, { Name: 'baseline 1', Case: 'baseline', N: 1, A: null, B: null, C: null, D: null, Stage: null, Seen: null, F1: null, F2: null, F3: null, F4: null, F5: null, Hit: null, Last: null, Notes: null });
-  assert.equal(datasetRowValues({ values: trigger }).Name, 'Trigger');
+  assert.deepEqual(row, {
+    Name: "baseline 1",
+    Case: "baseline",
+    N: 1,
+    A: null,
+    B: null,
+    C: null,
+    D: null,
+    Stage: null,
+    Seen: null,
+    F1: null,
+    F2: null,
+    F3: null,
+    F4: null,
+    F5: null,
+    Hit: null,
+    Last: null,
+    Notes: null,
+  });
+  assert.equal(datasetRowValues({ values: trigger }).Name, "Trigger");
 });
 
-test('settle texts distinguish automation outcomes and names', () => {
-  const baseline = outcomeTexts('baseline', 'Trigger');
-  assert.deepEqual(baseline.done, ['Ran baseline on Trigger']);
-  assert.deepEqual(baseline.skipped, ['baseline made no changes to Trigger']);
-  assert.deepEqual(baseline.ended, ['baseline finished on Trigger']);
+test("settle texts distinguish automation outcomes and names", () => {
+  const baseline = outcomeTexts("baseline", "Trigger");
+  assert.deepEqual(baseline.done, ["Ran baseline on Trigger"]);
+  assert.deepEqual(baseline.skipped, ["baseline made no changes to Trigger"]);
+  assert.deepEqual(baseline.ended, ["baseline finished on Trigger"]);
   // A case's words never match another case's settle text.
-  const typing = Object.values(outcomeTexts('baseline-typing', 'Trigger')).flat();
-  assert.ok(Object.values(baseline).flat().every(phrase => typing.every(text => !text.includes(phrase))));
+  const typing = Object.values(outcomeTexts("baseline-typing", "Trigger")).flat();
+  assert.ok(
+    Object.values(baseline)
+      .flat()
+      .every((phrase) => typing.every((text) => !text.includes(phrase))),
+  );
 });
 
-test('a title-only failure with no Notice body stays failed', () => {
-  const observed = { outcome: 'failed', text: 'Automation "find-500" failed' };
-  assert.equal(classifyOutcome(observed), 'failed');
-  assert.equal(classifyOutcome(observed, null), 'failed');
+test("a title-only failure with no Notice body stays failed", () => {
+  const observed = { outcome: "failed", text: 'Automation "find-500" failed' };
+  assert.equal(classifyOutcome(observed), "failed");
+  assert.equal(classifyOutcome(observed, null), "failed");
 });
 
-test('a press uses its own saved run', async t => {
-  const root = await mkdtemp(join(tmpdir(), 'dohc-automation-press-'));
+test("a press uses its own saved run", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "dohc-automation-press-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const automation = automationOf('document', 'find-500');
-  const folder = join(root, '.dohc', 'local', 'automations', 'runs', 'f1');
+  const automation = automationOf("document", "find-500");
+  const folder = join(root, ".dohc", "local", "automations", "runs", "f1");
   await mkdir(folder, { recursive: true });
-  const save = (claimId, startedAtMs) => writeFile(join(folder, `run-${claimId}.json`), JSON.stringify({
-    kind: 'header', version: 9, claimId, startedAtMs, automationId: `collection:object-a#${automation.name}`,
-    collections: [{ collectionId: 'object-a', path: automation.collectionPath }], outcome: { state: 'failed' },
-  }) + '\n');
-  await save('old', 1000);
+  const save = (claimId, startedAtMs) =>
+    writeFile(
+      join(folder, `run-${claimId}.json`),
+      JSON.stringify({
+        kind: "header",
+        version: 9,
+        claimId,
+        startedAtMs,
+        automationId: `collection:object-a#${automation.name}`,
+        collections: [{ collectionId: "object-a", path: automation.collectionPath }],
+        outcome: { state: "failed" },
+      }) + "\n",
+    );
+  await save("old", 1000);
   const previousRuns = await readRunJournal(root, automation);
   const missing = runForPress(await readRunJournal(root, automation), previousRuns);
   assert.equal(missing, null);
 
-  await save('current', 2000);
+  await save("current", 2000);
   const current = runForPress(await readRunJournal(root, automation), previousRuns);
-  assert.equal(current.claimId, 'current');
+  assert.equal(current.claimId, "current");
 
   const beforeNextPress = await readRunJournal(root, automation);
-  await save('next', 3000);
+  await save("next", 3000);
   const next = runForPress(await readRunJournal(root, automation), beforeNextPress);
-  assert.equal(next.claimId, 'next');
+  assert.equal(next.claimId, "next");
 });
 
-test('step-1 refusals in both Collections use the new Notice body with no saved run or open panel', async t => {
-  const root = await mkdtemp(join(tmpdir(), 'dohc-automation-notice-'));
+test("step-1 refusals in both Collections use the new Notice body with no saved run or open panel", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "dohc-automation-notice-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const workspaceId = 'bench-workspace';
-  const cases = automationCases(DEFAULT_LIMITS).filter(spec => spec.expected === 'refused');
-  assert.deepEqual(cases.map(spec => spec.name), ['find-500', 'five-finds', 'find-over-cap', 'find-500-typing']);
-  for (const kind of ['document', 'dataset']) {
+  const workspaceId = "bench-workspace";
+  const cases = automationCases(DEFAULT_LIMITS).filter((spec) => spec.expected === "refused");
+  assert.deepEqual(
+    cases.map((spec) => spec.name),
+    ["find-500", "five-finds", "find-over-cap", "find-500-typing"],
+  );
+  for (const kind of ["document", "dataset"]) {
     for (const spec of cases) {
-      const automation = automationOf(kind, spec.name), other = automationOf(kind === 'document' ? 'dataset' : 'document', spec.name);
+      const automation = automationOf(kind, spec.name),
+        other = automationOf(kind === "document" ? "dataset" : "document", spec.name);
       const title = `Automation "${spec.name}" failed`;
-      const body = 'The Find in step 1 matched more than 50 records. Narrow its condition, then try again.';
+      const body =
+        "The Find in step 1 matched more than 50 records. Narrow its condition, then try again.";
       const row = (noticeId, targetAutomation = automation, overrides = {}) => ({
-        noticeId, kind: 'automation-failed', workspaceId, title, body,
-        target: { path: `${targetAutomation.collectionPath}/automations.yaml`, automation: `collection:object-a#${targetAutomation.name}` }, ...overrides,
+        noticeId,
+        kind: "automation-failed",
+        workspaceId,
+        title,
+        body,
+        target: {
+          path: `${targetAutomation.collectionPath}/automations.yaml`,
+          automation: `collection:object-a#${targetAutomation.name}`,
+        },
+        ...overrides,
       });
-      const old = row('old'), current = row('current');
-      let notices = [old, row('old-other', other)];
-      const p = fakePage(t, '<main><button></button><div data-testid="notice-toasts" id="toasts"></div></main>');
+      const old = row("old"),
+        current = row("current");
+      let notices = [old, row("old-other", other)];
+      const p = fakePage(
+        t,
+        '<main><button></button><div data-testid="notice-toasts" id="toasts"></div></main>',
+      );
       let lists = 0;
-      p.window.dohcDesktop = { listNotices: async payload => {
-        assert.deepEqual(Object.keys(payload), []);
-        lists++;
-        return { account: null, notices };
-      } };
-      const page = { evaluate: callback => p.run(callback) };
+      p.window.dohcDesktop = {
+        listNotices: async (payload) => {
+          assert.deepEqual(Object.keys(payload), []);
+          lists++;
+          return { account: null, notices };
+        },
+      };
+      const page = { evaluate: (callback) => p.run(callback) };
       const previousNotices = await readAutomationNotices(page);
       const previousRuns = await readRunJournal(root, automation);
       const button = `${spec.name} for ${TRIGGER[kind].label}`;
-      p.document.querySelector('button').setAttribute('aria-label', button);
-      const pending = p.run(observeAutomationRun, { button, texts: outcomeTexts(spec.name, TRIGGER[kind].label), timeoutMs: 1000 });
-      p.document.querySelector('button').dispatchEvent(new p.window.MouseEvent('mousedown', { bubbles: true }));
-      notices = [old, row('new-other', other), row('new-workspace', automation, { workspaceId: 'elsewhere' }),
-        row('new-automation', automation, { target: { ...current.target, automation: 'collection:object-a#bench-baseline' } }),
-        row('new-kind', automation, { kind: 'agent' }), current];
-      p.document.getElementById('toasts').insertAdjacentHTML('beforeend', `<div data-testid="sent-notice-toast"><span>${title}</span></div>`);
+      p.document.querySelector("button").setAttribute("aria-label", button);
+      const pending = p.run(observeAutomationRun, {
+        button,
+        texts: outcomeTexts(spec.name, TRIGGER[kind].label),
+        timeoutMs: 1000,
+      });
+      p.document
+        .querySelector("button")
+        .dispatchEvent(new p.window.MouseEvent("mousedown", { bubbles: true }));
+      notices = [
+        old,
+        row("new-other", other),
+        row("new-workspace", automation, { workspaceId: "elsewhere" }),
+        row("new-automation", automation, {
+          target: { ...current.target, automation: "collection:object-a#bench-baseline" },
+        }),
+        row("new-kind", automation, { kind: "agent" }),
+        current,
+      ];
+      p.document
+        .getElementById("toasts")
+        .insertAdjacentHTML(
+          "beforeend",
+          `<div data-testid="sent-notice-toast"><span>${title}</span></div>`,
+        );
       await mutations();
       p.frame();
       const observed = await pending;
@@ -1016,11 +2130,11 @@ test('step-1 refusals in both Collections use the new Notice body with no saved 
       assert.equal(run, null);
       const listed = await readAutomationNotices(page);
       const notice = noticeForPress(listed, previousNotices, workspaceId, automation);
-      assert.equal(notice.noticeId, 'current');
-      assert.equal(notice.body, body, 'the receipt reason comes from this press\'s Notice body');
-      assert.equal(classifyOutcome(observed, notice.body), 'refused');
-      assert.equal(classifyOutcome(observed, 'The Collection is unavailable.'), 'failed');
-      assert.equal(classifyOutcome({ outcome: 'done', text: 'Ran' }, body), 'done');
+      assert.equal(notice.noticeId, "current");
+      assert.equal(notice.body, body, "the receipt reason comes from this press's Notice body");
+      assert.equal(classifyOutcome(observed, notice.body), "refused");
+      assert.equal(classifyOutcome(observed, "The Collection is unavailable."), "failed");
+      assert.equal(classifyOutcome({ outcome: "done", text: "Ran" }, body), "done");
       assert.equal(noticeForPress(previousNotices, previousNotices, workspaceId, automation), null);
       assert.equal(lists, 2);
       assert.equal(p.document.querySelector('[data-testid="notice-center"]'), null);
@@ -1029,300 +2143,682 @@ test('step-1 refusals in both Collections use the new Notice body with no saved 
   }
 });
 
-test('journal byte samples read only bounded headers and stat progress after appends and rewrites', async t => {
-  const root = await mkdtemp(join(tmpdir(), 'dohc-automation-byte-sample-'));
+test("journal byte samples read only bounded headers and stat progress after appends and rewrites", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "dohc-automation-byte-sample-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const folder = join(root, '.dohc', 'local', 'automations', 'runs', 'f1');
+  const folder = join(root, ".dohc", "local", "automations", "runs", "f1");
   await mkdir(folder, { recursive: true });
-  const path = join(folder, 'run-c1.json');
-  const automation = automationOf('document', 'baseline');
-  const header = extra => JSON.stringify({ kind: 'header', automationId: 'collection:object-a#bench-baseline',
-    collections: [{ collectionId: 'object-a', path: automation.collectionPath }], ...extra }) + '\n';
-  let headerText = header({ label: 'é', padding: 'x'.repeat(5000) });
-  let progress = 'x'.repeat(1024 * 1024);
+  const path = join(folder, "run-c1.json");
+  const automation = automationOf("document", "baseline");
+  const header = (extra) =>
+    JSON.stringify({
+      kind: "header",
+      automationId: "collection:object-a#bench-baseline",
+      collections: [{ collectionId: "object-a", path: automation.collectionPath }],
+      ...extra,
+    }) + "\n";
+  let headerText = header({ label: "é", padding: "x".repeat(5000) });
+  let progress = "x".repeat(1024 * 1024);
   await writeFile(path, headerText + progress);
   const originalReadFile = fsPromises.readFile;
   const originalOpen = fsPromises.open;
-  let bytesRead = 0, stats = 0;
-  t.mock.method(fsPromises, 'readFile', (file, ...args) => {
-    assert.notEqual(file, path, 'byte sampling must not read the whole run');
+  let bytesRead = 0,
+    stats = 0;
+  t.mock.method(fsPromises, "readFile", (file, ...args) => {
+    assert.notEqual(file, path, "byte sampling must not read the whole run");
     return originalReadFile(file, ...args);
   });
-  t.mock.method(fsPromises, 'open', async (...args) => {
+  t.mock.method(fsPromises, "open", async (...args) => {
     const handle = await originalOpen(...args);
-    const read = handle.read.bind(handle), stat = handle.stat.bind(handle);
+    const read = handle.read.bind(handle),
+      stat = handle.stat.bind(handle);
     handle.read = async (...readArgs) => {
       const result = await read(...readArgs);
       bytesRead += result.bytesRead;
       return result;
     };
-    handle.stat = async (...statArgs) => { stats++; return stat(...statArgs); };
+    handle.stat = async (...statArgs) => {
+      stats++;
+      return stat(...statArgs);
+    };
     return handle;
   });
   syncBuiltinESMExports();
-  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  t.after(() => {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  });
   const sample = async () => {
-    bytesRead = 0; stats = 0;
+    bytesRead = 0;
+    stats = 0;
     assert.deepEqual(await journalBytes(root, automation), {
-      headerBytes: Buffer.byteLength(headerText), progressBytes: Buffer.byteLength(progress),
+      headerBytes: Buffer.byteLength(headerText),
+      progressBytes: Buffer.byteLength(progress),
     });
-    assert.ok(stats > 0, 'sample must use stat for the total size');
+    assert.ok(stats > 0, "sample must use stat for the total size");
     assert.ok(bytesRead < 32 * 1024, `sample read ${bytesRead} bytes of progress`);
   };
   await sample();
-  await fsPromises.appendFile(path, '\nmore progress\n');
-  progress += '\nmore progress\n';
+  await fsPromises.appendFile(path, "\nmore progress\n");
+  progress += "\nmore progress\n";
   await sample();
-  headerText = header({ outcome: { state: 'done' } });
-  const replacement = join(folder, 'replacement.tmp');
+  headerText = header({ outcome: { state: "done" } });
+  const replacement = join(folder, "replacement.tmp");
   await writeFile(replacement, headerText + progress);
   await fsPromises.rename(replacement, path);
   await sample();
 });
 
-test('run journal reads saved headers and progress, and a refused run leaves none', async t => {
-  const root = await mkdtemp(join(tmpdir(), 'dohc-automation-journal-'));
+test("run journal reads saved headers and progress, and a refused run leaves none", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "dohc-automation-journal-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const automation = automationOf('document', 'baseline');
-  assert.deepEqual(automation, { collectionPath: 'automation-bench', name: 'bench-baseline' });
+  const automation = automationOf("document", "baseline");
+  assert.deepEqual(automation, { collectionPath: "automation-bench", name: "bench-baseline" });
   assert.deepEqual(await readRunJournal(root, automation), []);
   assert.deepEqual(await journalBytes(root, automation), { headerBytes: 0, progressBytes: 0 });
   // The engine names the Collection by an object id, so the folder and id come from the saved header.
-  const runs = join(root, '.dohc', 'local', 'automations', 'runs');
-  const elsewhere = join(runs, 'f0');
+  const runs = join(root, ".dohc", "local", "automations", "runs");
+  const elsewhere = join(runs, "f0");
   await mkdir(elsewhere, { recursive: true });
-  await writeFile(join(elsewhere, 'run-x.json'), JSON.stringify({ kind: 'header', version: 9, automationId: 'collection:object-b#bench-baseline', collections: [{ collectionId: 'object-b', path: 'automation-data' }] }) + '\n');
+  await writeFile(
+    join(elsewhere, "run-x.json"),
+    JSON.stringify({
+      kind: "header",
+      version: 9,
+      automationId: "collection:object-b#bench-baseline",
+      collections: [{ collectionId: "object-b", path: "automation-data" }],
+    }) + "\n",
+  );
   // An unreadable run is skipped instead of stopping the lookup.
-  await writeFile(join(elsewhere, 'run-partial.json'), '{"automationId": "collection:obj');
+  await writeFile(join(elsewhere, "run-partial.json"), '{"automationId": "collection:obj');
   assert.deepEqual(await journalBytes(root, automation), { headerBytes: 0, progressBytes: 0 });
-  const folder = join(runs, 'f1');
+  const folder = join(runs, "f1");
   await mkdir(folder, { recursive: true });
-  const automationId = 'collection:object-a#bench-baseline';
-  const header = JSON.stringify({ kind: 'header', version: 9, claimId: 'c1', automationId, collections: [{ collectionId: 'object-a', path: 'automation-bench' }], startedAtMs: 1000, finishedAtMs: 1600, outcome: { state: 'done' } }) + '\n';
-  const progress = [{ kind: 'created', ordinal: 0, recordId: 'r', path: 'p' },
-    { kind: 'effect', ordinal: 1, writes: [{ kind: 'field', field: 'A' }, { kind: 'field', field: 'B' }, { kind: 'created', recordId: 'r', path: 'p' }] },
-    { kind: 'effect', ordinal: 2, writes: [{ kind: 'dataset-edit', fields: [{}, {}, {}] }, { kind: 'dataset-created' }] }].map(line => `${JSON.stringify(line)}\n`).join('');
-  await writeFile(join(folder, 'run-c1.json'), header + progress);
-  await writeFile(join(folder, 'other.json'), JSON.stringify({ kind: 'header', version: 9, automationId: 'collection:elsewhere#x', startedAtMs: 0 }) + '\n');
+  const automationId = "collection:object-a#bench-baseline";
+  const header =
+    JSON.stringify({
+      kind: "header",
+      version: 9,
+      claimId: "c1",
+      automationId,
+      collections: [{ collectionId: "object-a", path: "automation-bench" }],
+      startedAtMs: 1000,
+      finishedAtMs: 1600,
+      outcome: { state: "done" },
+    }) + "\n";
+  const progress = [
+    { kind: "created", ordinal: 0, recordId: "r", path: "p" },
+    {
+      kind: "effect",
+      ordinal: 1,
+      writes: [
+        { kind: "field", field: "A" },
+        { kind: "field", field: "B" },
+        { kind: "created", recordId: "r", path: "p" },
+      ],
+    },
+    {
+      kind: "effect",
+      ordinal: 2,
+      writes: [{ kind: "dataset-edit", fields: [{}, {}, {}] }, { kind: "dataset-created" }],
+    },
+  ]
+    .map((line) => `${JSON.stringify(line)}\n`)
+    .join("");
+  await writeFile(join(folder, "run-c1.json"), header + progress);
+  await writeFile(
+    join(folder, "other.json"),
+    JSON.stringify({
+      kind: "header",
+      version: 9,
+      automationId: "collection:elsewhere#x",
+      startedAtMs: 0,
+    }) + "\n",
+  );
   const [run, ...others] = await readRunJournal(root, automation);
   assert.deepEqual(others, []);
-  assert.deepEqual(run, { claimId: 'c1', startedAtMs: 1000, finishedAtMs: 1600, outcome: { state: 'done' }, headerBytes: Buffer.byteLength(header),
-    findMs: null, planMs: null, writeMs: null, writes: null,
-    appendMs: null, appendCount: null,
-    progressBytes: Buffer.byteLength(progress), progressLines: 3, fieldWrites: 5, created: 2, createdPaths: ['p'] });
+  assert.deepEqual(run, {
+    claimId: "c1",
+    startedAtMs: 1000,
+    finishedAtMs: 1600,
+    outcome: { state: "done" },
+    headerBytes: Buffer.byteLength(header),
+    findMs: null,
+    planMs: null,
+    writeMs: null,
+    writes: null,
+    appendMs: null,
+    appendCount: null,
+    progressBytes: Buffer.byteLength(progress),
+    progressLines: 3,
+    fieldWrites: 5,
+    created: 2,
+    createdPaths: ["p"],
+  });
   const bytes = await journalBytes(root, automation);
   assert.equal(bytes.progressBytes, Buffer.byteLength(progress));
   assert.equal(bytes.headerBytes, Buffer.byteLength(header));
   const measured = [
-    { kind: 'step', ordinal: 0, effects: [], findMs: 12, planMs: 3, appendMs: 0, appendCount: 0 },
-    { kind: 'step', ordinal: 1, effects: [{}, {}], findMs: 8, planMs: 7, appendMs: 31, appendCount: 2 },
-    { kind: 'effect', ordinal: 1, writes: [{ kind: 'field' }, { kind: 'field' }], writeMs: 25, writeCount: 1 },
-    { kind: 'effect', ordinal: 1, writes: [], writeMs: 0, writeCount: 1 },
+    { kind: "step", ordinal: 0, effects: [], findMs: 12, planMs: 3, appendMs: 0, appendCount: 0 },
+    {
+      kind: "step",
+      ordinal: 1,
+      effects: [{}, {}],
+      findMs: 8,
+      planMs: 7,
+      appendMs: 31,
+      appendCount: 2,
+    },
+    {
+      kind: "effect",
+      ordinal: 1,
+      writes: [{ kind: "field" }, { kind: "field" }],
+      writeMs: 25,
+      writeCount: 1,
+    },
+    { kind: "effect", ordinal: 1, writes: [], writeMs: 0, writeCount: 1 },
   ];
-  const timing = async lines => {
-    await writeFile(join(folder, 'run-c1.json'), header + lines.map(line => `${JSON.stringify(line)}\n`).join(''));
+  const timing = async (lines) => {
+    await writeFile(
+      join(folder, "run-c1.json"),
+      header + lines.map((line) => `${JSON.stringify(line)}\n`).join(""),
+    );
     const [saved] = await readRunJournal(root, automation);
-    return { findMs: saved.findMs, planMs: saved.planMs, writeMs: saved.writeMs, writes: saved.writes };
+    return {
+      findMs: saved.findMs,
+      planMs: saved.planMs,
+      writeMs: saved.writeMs,
+      writes: saved.writes,
+    };
   };
   assert.deepEqual(await timing(measured), { findMs: 20, planMs: 10, writeMs: 25, writes: 2 });
   assert.deepEqual(await timing([measured[0]]), { findMs: 12, planMs: 3, writeMs: 0, writes: 0 });
   assert.deepEqual(await timing([]), { findMs: null, planMs: null, writeMs: null, writes: null });
-  assert.deepEqual(await timing([{ kind: 'step', ordinal: 0, effects: [] }]), { findMs: null, planMs: null, writeMs: null, writes: null });
+  assert.deepEqual(await timing([{ kind: "step", ordinal: 0, effects: [] }]), {
+    findMs: null,
+    planMs: null,
+    writeMs: null,
+    writes: null,
+  });
   // A mixed journal cannot turn unmeasured stages into zeros or partial totals.
-  assert.deepEqual(await timing([...measured, { kind: 'step', ordinal: 2, effects: [], findMs: 2 }]),
-    { findMs: 22, planMs: null, writeMs: 25, writes: 2 });
-  assert.deepEqual(await timing([...measured, { kind: 'effect', ordinal: 1, writes: [] }]),
-    { findMs: 20, planMs: 10, writeMs: null, writes: null });
+  assert.deepEqual(
+    await timing([...measured, { kind: "step", ordinal: 2, effects: [], findMs: 2 }]),
+    { findMs: 22, planMs: null, writeMs: 25, writes: 2 },
+  );
+  assert.deepEqual(await timing([...measured, { kind: "effect", ordinal: 1, writes: [] }]), {
+    findMs: 20,
+    planMs: 10,
+    writeMs: null,
+    writes: null,
+  });
   await timing(measured);
-  assert.deepEqual((await readRunJournal(root, automation)).map(({ appendMs, appendCount }) => ({ appendMs, appendCount })),
-    [{ appendMs: 31, appendCount: 2 }]);
-  await timing([...measured, { kind: 'effect', ordinal: 1, writes: [] }]);
+  assert.deepEqual(
+    (await readRunJournal(root, automation)).map(({ appendMs, appendCount }) => ({
+      appendMs,
+      appendCount,
+    })),
+    [{ appendMs: 31, appendCount: 2 }],
+  );
+  await timing([...measured, { kind: "effect", ordinal: 1, writes: [] }]);
   assert.equal((await readRunJournal(root, automation))[0].appendMs, null);
-  await timing([{ kind: 'step', ordinal: 0, effects: [], findMs: 0, planMs: 0 }]);
+  await timing([{ kind: "step", ordinal: 0, effects: [], findMs: 0, planMs: 0 }]);
   assert.equal((await readRunJournal(root, automation))[0].appendMs, null);
 });
 
-const proc = (pid, name, cpuMs, workingSetBytes = 0, commandLine = 'dohc.exe') => ({ pid, name, commandLine, createdAt: `t${pid}`, cpuMs, workingSetBytes, privateBytes: workingSetBytes / 2 });
-test('process accounting splits CPU and peaks by kind', () => {
-  const before = { completedAtMs: 1000, processes: [proc(1, 'dohc.exe', 100, 10), proc(2, 'dohc-workspace-engine.exe', 50, 20), proc(3, 'dohc.exe', 10, 30, 'dohc.exe --type=renderer'), proc(9, 'dohc.exe', 5, 1, 'dohc.exe --type=utility')] };
-  const after = { completedAtMs: 3000, processes: [proc(1, 'dohc.exe', 130, 40), proc(2, 'dohc-workspace-engine.exe', 80, 10), proc(3, 'dohc.exe', 60, 30, 'dohc.exe --type=renderer'), proc(4, 'dohc.exe', 7, 5, 'dohc.exe --type=renderer')] };
+const proc = (pid, name, cpuMs, workingSetBytes = 0, commandLine = "dohc.exe") => ({
+  pid,
+  name,
+  commandLine,
+  createdAt: `t${pid}`,
+  cpuMs,
+  workingSetBytes,
+  privateBytes: workingSetBytes / 2,
+});
+test("process accounting splits CPU and peaks by kind", () => {
+  const before = {
+    completedAtMs: 1000,
+    processes: [
+      proc(1, "dohc.exe", 100, 10),
+      proc(2, "dohc-workspace-engine.exe", 50, 20),
+      proc(3, "dohc.exe", 10, 30, "dohc.exe --type=renderer"),
+      proc(9, "dohc.exe", 5, 1, "dohc.exe --type=utility"),
+    ],
+  };
+  const after = {
+    completedAtMs: 3000,
+    processes: [
+      proc(1, "dohc.exe", 130, 40),
+      proc(2, "dohc-workspace-engine.exe", 80, 10),
+      proc(3, "dohc.exe", 60, 30, "dohc.exe --type=renderer"),
+      proc(4, "dohc.exe", 7, 5, "dohc.exe --type=renderer"),
+    ],
+  };
   assert.deepEqual(cpuByKind(before, after, 1), { main: 30, engine: 30, renderer: 57 });
   assert.equal(busyShare(before, after, 1), 60 / 2000);
-  assert.deepEqual(peakByKind([before, after], 1), { main: { workingSetBytes: 40, privateBytes: 20 }, engine: { workingSetBytes: 20, privateBytes: 10 },
-    renderer: { workingSetBytes: 35, privateBytes: 17.5 }, utility: { workingSetBytes: 1, privateBytes: 0.5 } });
+  assert.deepEqual(peakByKind([before, after], 1), {
+    main: { workingSetBytes: 40, privateBytes: 20 },
+    engine: { workingSetBytes: 20, privateBytes: 10 },
+    renderer: { workingSetBytes: 35, privateBytes: 17.5 },
+    utility: { workingSetBytes: 1, privateBytes: 0.5 },
+  });
 });
 
-test('quiet wait needs consecutive quiet intervals and gives up at its deadline', async () => {
+test("quiet wait needs consecutive quiet intervals and gives up at its deadline", async () => {
   let at = 0;
-  const snapshotAt = cpuMs => ({ completedAtMs: (at += 1000), processes: [proc(1, 'dohc.exe', cpuMs)] });
+  const snapshotAt = (cpuMs) => ({
+    completedAtMs: (at += 1000),
+    processes: [proc(1, "dohc.exe", cpuMs)],
+  });
   const cumulative = [0, 500, 500, 1300, 1300, 1300, 1300];
   const samples = [];
-  const quiet = await waitForQuiet({ appPid: 1, sample: async () => { const next = snapshotAt(cumulative[samples.length]); samples.push(next); return next; } });
+  const quiet = await waitForQuiet({
+    appPid: 1,
+    sample: async () => {
+      const next = snapshotAt(cumulative[samples.length]);
+      samples.push(next);
+      return next;
+    },
+  });
   // Busy, quiet, busy, quiet, quiet, quiet: the third quiet interval in a row ends the wait.
   assert.equal(samples.length, 7);
   assert.equal(quiet.snapshot, samples[6]);
   assert.equal(quiet.busyShare, 0);
   let cpu = 0;
-  await assert.rejects(waitForQuiet({ appPid: 1, timeoutMs: 50, sample: async () => snapshotAt((cpu += 1000)) }), /did not settle within 50ms: main and engine used 100% of a core/);
+  await assert.rejects(
+    waitForQuiet({ appPid: 1, timeoutMs: 50, sample: async () => snapshotAt((cpu += 1000)) }),
+    /did not settle within 50ms: main and engine used 100% of a core/,
+  );
   const controller = new AbortController();
-  controller.abort(Error('stop waiting'));
-  await assert.rejects(waitForQuiet({ appPid: 1, signal: controller.signal, sample: async () => snapshotAt((cpu += 1000)) }), /stop waiting/);
+  controller.abort(Error("stop waiting"));
+  await assert.rejects(
+    waitForQuiet({
+      appPid: 1,
+      signal: controller.signal,
+      sample: async () => snapshotAt((cpu += 1000)),
+    }),
+    /stop waiting/,
+  );
 });
 
-const automationHtml = '<main><button aria-label="baseline for Trigger"><span>baseline</span></button><button aria-label="other for Trigger">other</button><div id="cells"></div><div data-testid="notice-toasts" id="toasts"></div></main>';
-test('automation presses dismiss both workspace and failed-run toasts before a repeated title', async t => {
-  const p = fakePage(t, `${automationHtml}<button aria-label="Close" id="unrelated">Close another panel</button>`);
-  const toasts = p.document.getElementById('toasts');
-  toasts.insertAdjacentHTML('beforeend', '<div><button aria-label="Dismiss workspace notice">Dismiss</button></div><div data-testid="sent-notice-toast"><span>Automation "baseline" failed</span><button aria-label="Close">Close</button></div>');
-  for (const button of toasts.querySelectorAll('button')) button.addEventListener('click', () => button.parentElement.remove());
-  await dismissToasts({ locator: selector => ({
-    count: async () => p.document.querySelectorAll(selector).length,
-    first: () => ({ click: async () => p.document.querySelector(selector).click() }),
-  }) });
+const automationHtml =
+  '<main><button aria-label="baseline for Trigger"><span>baseline</span></button><button aria-label="other for Trigger">other</button><div id="cells"></div><div data-testid="notice-toasts" id="toasts"></div></main>';
+test("automation presses dismiss both workspace and failed-run toasts before a repeated title", async (t) => {
+  const p = fakePage(
+    t,
+    `${automationHtml}<button aria-label="Close" id="unrelated">Close another panel</button>`,
+  );
+  const toasts = p.document.getElementById("toasts");
+  toasts.insertAdjacentHTML(
+    "beforeend",
+    '<div><button aria-label="Dismiss workspace notice">Dismiss</button></div><div data-testid="sent-notice-toast"><span>Automation "baseline" failed</span><button aria-label="Close">Close</button></div>',
+  );
+  for (const button of toasts.querySelectorAll("button"))
+    button.addEventListener("click", () => button.parentElement.remove());
+  await dismissToasts({
+    locator: (selector) => ({
+      count: async () => p.document.querySelectorAll(selector).length,
+      first: () => ({ click: async () => p.document.querySelector(selector).click() }),
+    }),
+  });
   assert.equal(toasts.childElementCount, 0);
-  assert.ok(p.document.getElementById('unrelated'), 'only Notice toasts are dismissed');
-  const pending = p.run(observeAutomationRun, { button: 'baseline for Trigger', texts: outcomeTexts('baseline', 'Trigger'), timeoutMs: 1000 });
-  p.document.querySelector('[aria-label="baseline for Trigger"]').dispatchEvent(new p.window.MouseEvent('mousedown', { bubbles: true }));
-  toasts.insertAdjacentHTML('beforeend', '<div data-testid="sent-notice-toast"><span>Automation "baseline" failed</span><button aria-label="Close">Close</button></div>');
+  assert.ok(p.document.getElementById("unrelated"), "only Notice toasts are dismissed");
+  const pending = p.run(observeAutomationRun, {
+    button: "baseline for Trigger",
+    texts: outcomeTexts("baseline", "Trigger"),
+    timeoutMs: 1000,
+  });
+  p.document
+    .querySelector('[aria-label="baseline for Trigger"]')
+    .dispatchEvent(new p.window.MouseEvent("mousedown", { bubbles: true }));
+  toasts.insertAdjacentHTML(
+    "beforeend",
+    '<div data-testid="sent-notice-toast"><span>Automation "baseline" failed</span><button aria-label="Close">Close</button></div>',
+  );
   await mutations();
-  assert.equal(p.frames.size, 1, 'the same title in a fresh toast settles the next press');
+  assert.equal(p.frames.size, 1, "the same title in a fresh toast settles the next press");
   p.frame();
-  assert.equal((await pending).outcome, 'failed');
+  assert.equal((await pending).outcome, "failed");
 });
 
-test('automation observer times a press on its own button to the painted settle text', async t => {
+test("automation observer times a press on its own button to the painted settle text", async (t) => {
   const p = fakePage(t, automationHtml);
-  const toasts = p.document.getElementById('toasts');
-  const pending = p.run(observeAutomationRun, { button: 'baseline for Trigger', texts: outcomeTexts('baseline', 'Trigger'), timeoutMs: 1000 });
-  const press = selector => p.document.querySelector(selector).dispatchEvent(new p.window.MouseEvent('mousedown', { bubbles: true }));
-  toasts.insertAdjacentHTML('beforeend', '<div>Ran baseline on Trigger</div>');
+  const toasts = p.document.getElementById("toasts");
+  const pending = p.run(observeAutomationRun, {
+    button: "baseline for Trigger",
+    texts: outcomeTexts("baseline", "Trigger"),
+    timeoutMs: 1000,
+  });
+  const press = (selector) =>
+    p.document
+      .querySelector(selector)
+      .dispatchEvent(new p.window.MouseEvent("mousedown", { bubbles: true }));
+  toasts.insertAdjacentHTML("beforeend", "<div>Ran baseline on Trigger</div>");
   await mutations();
   press('[aria-label="other for Trigger"]');
-  toasts.insertAdjacentHTML('beforeend', '<div>Ran baseline on Trigger</div>');
+  toasts.insertAdjacentHTML("beforeend", "<div>Ran baseline on Trigger</div>");
   await mutations();
-  assert.equal(p.frames.size, 0, 'text before the press, or after a press on another button, is not this run');
+  assert.equal(
+    p.frames.size,
+    0,
+    "text before the press, or after a press on another button, is not this run",
+  );
   p.step();
   press('[aria-label="baseline for Trigger"] span');
   p.step();
   // Text outside the toast stack and Notices, such as a table cell, is not a settle.
-  p.document.getElementById('cells').insertAdjacentHTML('beforeend', '<div>Ran baseline on Trigger</div>');
+  p.document
+    .getElementById("cells")
+    .insertAdjacentHTML("beforeend", "<div>Ran baseline on Trigger</div>");
   await mutations();
   assert.equal(p.frames.size, 0);
-  toasts.insertAdjacentHTML('beforeend', '<div role="status">Ran baseline on Trigger</div>');
+  toasts.insertAdjacentHTML("beforeend", '<div role="status">Ran baseline on Trigger</div>');
   await mutations();
   p.frame();
   const observed = await pending;
-  assert.deepEqual([observed.outcome, observed.text, observed.triggerMs, observed.matchedMs, observed.paintedMs, observed.triggerTrusted], ['done', 'Ran baseline on Trigger', 60, 110, 126, false]);
+  assert.deepEqual(
+    [
+      observed.outcome,
+      observed.text,
+      observed.triggerMs,
+      observed.matchedMs,
+      observed.paintedMs,
+      observed.triggerTrusted,
+    ],
+    ["done", "Ran baseline on Trigger", 60, 110, 126, false],
+  );
   assert.equal(observed.installedMs, 10);
   assert.ok(Number.isFinite(observed.installedEpochMs));
   assert.equal(observed.longTasks.length, 0);
   assert.equal(p.frames.size + p.timers.size, 0);
 });
 
-test('every document and dataset case settles on its failed-run toast, including a title without a reason', async t => {
-  for (const kind of ['document', 'dataset']) {
+test("every document and dataset case settles on its failed-run toast, including a title without a reason", async (t) => {
+  for (const kind of ["document", "dataset"]) {
     for (const spec of automationCases(DEFAULT_LIMITS)) {
       const label = TRIGGER[kind].label;
       const button = `${spec.name} for ${label}`;
-      const p = fakePage(t, '<main><button></button><div data-testid="notice-toasts" id="toasts"></div></main>');
-      p.document.querySelector('button').setAttribute('aria-label', button);
-      const pending = p.run(observeAutomationRun, { button, texts: outcomeTexts(spec.name, label), timeoutMs: 1000 });
-      p.document.querySelector('button').dispatchEvent(new p.window.MouseEvent('mousedown', { bubbles: true }));
+      const p = fakePage(
+        t,
+        '<main><button></button><div data-testid="notice-toasts" id="toasts"></div></main>',
+      );
+      p.document.querySelector("button").setAttribute("aria-label", button);
+      const pending = p.run(observeAutomationRun, {
+        button,
+        texts: outcomeTexts(spec.name, label),
+        timeoutMs: 1000,
+      });
+      p.document
+        .querySelector("button")
+        .dispatchEvent(new p.window.MouseEvent("mousedown", { bubbles: true }));
       const title = `Automation "${spec.name}" failed`;
-      p.document.getElementById('toasts').insertAdjacentHTML('beforeend', `<div data-testid="sent-notice-toast"><span class="sr-only">From an automation</span><span>${title}</span><button>Try again</button><button>Open</button></div>`);
+      p.document
+        .getElementById("toasts")
+        .insertAdjacentHTML(
+          "beforeend",
+          `<div data-testid="sent-notice-toast"><span class="sr-only">From an automation</span><span>${title}</span><button>Try again</button><button>Open</button></div>`,
+        );
       await mutations();
       assert.equal(p.frames.size, 1, `${kind} ${spec.name} failed-run Notice must settle`);
       p.frame();
       const observed = await pending;
-      assert.equal(observed.outcome, 'failed');
+      assert.equal(observed.outcome, "failed");
       assert.equal(observed.text, `From an automation${title}Try againOpen`);
-      assert.equal(classifyOutcome(observed), 'failed', 'a title alone does not prove a limit refusal');
+      assert.equal(
+        classifyOutcome(observed),
+        "failed",
+        "a title alone does not prove a limit refusal",
+      );
       assert.equal(p.frames.size + p.timers.size, 0);
     }
   }
 });
 
-test('automation observer ignores unrelated updates inside an old failed Notice', async t => {
-  for (const notice of ['<div data-testid="sent-notice-toast">', '<li data-notice-row>']) {
-    const p = fakePage(t, `${automationHtml}<div data-testid="notice-center">${notice}<span>Automation "baseline" failed</span><time id="age">Just now</time><button id="retry">Try again</button></${notice.startsWith('<li') ? 'li' : 'div'}></div>`);
-    const pending = p.run(observeAutomationRun, { button: 'baseline for Trigger', texts: outcomeTexts('baseline', 'Trigger'), timeoutMs: 1000 });
-    p.document.querySelector('[aria-label="baseline for Trigger"]').dispatchEvent(new p.window.MouseEvent('mousedown', { bubbles: true }));
-    p.document.getElementById('age').firstChild.data = '1 minute ago';
-    p.document.getElementById('retry').insertAdjacentHTML('beforeend', '<span>Retry</span>');
+test("automation observer ignores unrelated updates inside an old failed Notice", async (t) => {
+  for (const notice of ['<div data-testid="sent-notice-toast">', "<li data-notice-row>"]) {
+    const p = fakePage(
+      t,
+      `${automationHtml}<div data-testid="notice-center">${notice}<span>Automation "baseline" failed</span><time id="age">Just now</time><button id="retry">Try again</button></${notice.startsWith("<li") ? "li" : "div"}></div>`,
+    );
+    const pending = p.run(observeAutomationRun, {
+      button: "baseline for Trigger",
+      texts: outcomeTexts("baseline", "Trigger"),
+      timeoutMs: 1000,
+    });
+    p.document
+      .querySelector('[aria-label="baseline for Trigger"]')
+      .dispatchEvent(new p.window.MouseEvent("mousedown", { bubbles: true }));
+    p.document.getElementById("age").firstChild.data = "1 minute ago";
+    p.document.getElementById("retry").insertAdjacentHTML("beforeend", "<span>Retry</span>");
     await mutations();
-    assert.equal(p.frames.size, 0, 'a stale title cannot match an unrelated age or button update');
-    p.document.getElementById('toasts').insertAdjacentHTML('beforeend', '<div>Automation "baseline" failed</div>');
+    assert.equal(p.frames.size, 0, "a stale title cannot match an unrelated age or button update");
+    p.document
+      .getElementById("toasts")
+      .insertAdjacentHTML("beforeend", '<div>Automation "baseline" failed</div>');
     await mutations();
     p.frame();
-    assert.equal((await pending).outcome, 'failed');
+    assert.equal((await pending).outcome, "failed");
   }
 });
 
-test('automation observer preserves did-not-start and main recovery failure titles', async t => {
-  for (const text of ['baseline did not start. The Collection is unavailable.', 'Automation "baseline" did not finish', 'Automation "baseline" switched off']) {
+test("automation observer preserves did-not-start and main recovery failure titles", async (t) => {
+  for (const text of [
+    "baseline did not start. The Collection is unavailable.",
+    'Automation "baseline" did not finish',
+    'Automation "baseline" switched off',
+  ]) {
     const p = fakePage(t, automationHtml);
-    const pending = p.run(observeAutomationRun, { button: 'baseline for Trigger', texts: outcomeTexts('baseline', 'Trigger'), timeoutMs: 1000 });
-    p.document.querySelector('[aria-label="baseline for Trigger"]').dispatchEvent(new p.window.MouseEvent('mousedown', { bubbles: true }));
-    p.document.getElementById('toasts').insertAdjacentHTML('beforeend', `<div>${text}</div>`);
+    const pending = p.run(observeAutomationRun, {
+      button: "baseline for Trigger",
+      texts: outcomeTexts("baseline", "Trigger"),
+      timeoutMs: 1000,
+    });
+    p.document
+      .querySelector('[aria-label="baseline for Trigger"]')
+      .dispatchEvent(new p.window.MouseEvent("mousedown", { bubbles: true }));
+    p.document.getElementById("toasts").insertAdjacentHTML("beforeend", `<div>${text}</div>`);
     await mutations();
     assert.equal(p.frames.size, 1, text);
     p.frame();
     const observed = await pending;
-    assert.deepEqual([observed.outcome, observed.text], ['failed', text]);
+    assert.deepEqual([observed.outcome, observed.text], ["failed", text]);
   }
 });
 
-test('automation observer reads changed text and rejects a run that never settles', async t => {
-  const reason = 'The Find in step 1 matched more than 50 records. Narrow its condition, then try again.';
-  const p = fakePage(t, `${automationHtml}<div data-testid="notice-center"><li data-notice-row><span id="notice">Waiting</span><p>${reason}</p></li></div>`);
-  const pending = p.run(observeAutomationRun, { button: 'baseline for Trigger', texts: outcomeTexts('baseline', 'Trigger'), timeoutMs: 1000 });
-  p.document.querySelector('[aria-label="baseline for Trigger"]').dispatchEvent(new p.window.MouseEvent('mousedown', { bubbles: true }));
-  p.document.getElementById('notice').firstChild.data = 'Automation "baseline" failed';
+test("automation observer reads changed text and rejects a run that never settles", async (t) => {
+  const reason =
+    "The Find in step 1 matched more than 50 records. Narrow its condition, then try again.";
+  const p = fakePage(
+    t,
+    `${automationHtml}<div data-testid="notice-center"><li data-notice-row><span id="notice">Waiting</span><p>${reason}</p></li></div>`,
+  );
+  const pending = p.run(observeAutomationRun, {
+    button: "baseline for Trigger",
+    texts: outcomeTexts("baseline", "Trigger"),
+    timeoutMs: 1000,
+  });
+  p.document
+    .querySelector('[aria-label="baseline for Trigger"]')
+    .dispatchEvent(new p.window.MouseEvent("mousedown", { bubbles: true }));
+  p.document.getElementById("notice").firstChild.data = 'Automation "baseline" failed';
   await mutations();
   assert.equal(p.frames.size, 1);
   p.frame();
   const failed = await pending;
-  assert.deepEqual([failed.outcome, failed.text, classifyOutcome(failed)], ['failed', 'Automation "baseline" failed', 'failed']);
-  const silent = p.run(observeAutomationRun, { button: 'baseline for Trigger', texts: outcomeTexts('baseline', 'Trigger'), timeoutMs: 120 });
+  assert.deepEqual(
+    [failed.outcome, failed.text, classifyOutcome(failed)],
+    ["failed", 'Automation "baseline" failed', "failed"],
+  );
+  const silent = p.run(observeAutomationRun, {
+    button: "baseline for Trigger",
+    texts: outcomeTexts("baseline", "Trigger"),
+    timeoutMs: 120,
+  });
   const rejected = assert.rejects(silent, /baseline for Trigger did not settle within 120ms/);
-  p.step(); p.step(); p.step();
+  p.step();
+  p.step();
+  p.step();
   await rejected;
   assert.equal(p.frames.size + p.timers.size, 0);
 });
 
-test('summary reports automation cases per kind and keeps missing measurements missing', async () => {
-  const sample = (start, inputToNextPaintMs) => ({ start, dispatchToTwoRafMs: 20, inputToNextPaintMs });
-  const row = (name, fields) => ({ name, expected: 'done', outcome: 'done', pass: true, visibility: null, verification: { ok: true, settledOnDiskObservedMs: 300 },
-    triggerToSettledPaintedMs: 900, startMs: 400, runMs: 450, findMs: 25, planMs: 15, writeMs: 300, writes: 50, appendMs: 40, appendCount: 50,
-    journal: { headerPeakBytesSampled: 8000, runs: [{ headerBytes: 700, progressBytes: 5000, fieldWrites: 200, created: 0 }] },
-    cpuMs: { main: 300, engine: 200, renderer: 50 }, peakBytes: { main: { privateBytes: 1e8 } }, longTasks: [{ duration: 60 }, { duration: 80 }], typing: null, ...fields });
-  const refused = row('find-500', { expected: 'refused', outcome: 'refused', startMs: null, runMs: null,
-    findMs: null, planMs: null, writeMs: null, writes: null, appendMs: null, appendCount: null, journal: { headerPeakBytesSampled: 0, runs: [] } });
-  const summary = await summarize({ label: 'baseline', status: 'failed', settings: {}, limits: [], runs: [
-    { index: 1, collectionAutomations: { findCap: 50, writeCap: 200, fixtureSha256: 'f', document: { cases: [row('baseline'), refused] },
-      dataset: { cases: [row('baseline-typing', { pass: false, typing: { samplesDuringRun: 2, samples: [sample(1, 24), sample(2, null), sample(3, 99)] } })] } } },
-    { index: 2 },
-  ] });
+test("summary reports automation cases per kind and keeps missing measurements missing", async () => {
+  const sample = (start, inputToNextPaintMs) => ({
+    start,
+    dispatchToTwoRafMs: 20,
+    inputToNextPaintMs,
+  });
+  const row = (name, fields) => ({
+    name,
+    expected: "done",
+    outcome: "done",
+    pass: true,
+    visibility: null,
+    verification: { ok: true, settledOnDiskObservedMs: 300 },
+    triggerToSettledPaintedMs: 900,
+    startMs: 400,
+    runMs: 450,
+    findMs: 25,
+    planMs: 15,
+    writeMs: 300,
+    writes: 50,
+    appendMs: 40,
+    appendCount: 50,
+    journal: {
+      headerPeakBytesSampled: 8000,
+      runs: [{ headerBytes: 700, progressBytes: 5000, fieldWrites: 200, created: 0 }],
+    },
+    cpuMs: { main: 300, engine: 200, renderer: 50 },
+    peakBytes: { main: { privateBytes: 1e8 } },
+    longTasks: [{ duration: 60 }, { duration: 80 }],
+    typing: null,
+    ...fields,
+  });
+  const refused = row("find-500", {
+    expected: "refused",
+    outcome: "refused",
+    startMs: null,
+    runMs: null,
+    findMs: null,
+    planMs: null,
+    writeMs: null,
+    writes: null,
+    appendMs: null,
+    appendCount: null,
+    journal: { headerPeakBytesSampled: 0, runs: [] },
+  });
+  const summary = await summarize({
+    label: "baseline",
+    status: "failed",
+    settings: {},
+    limits: [],
+    runs: [
+      {
+        index: 1,
+        collectionAutomations: {
+          findCap: 50,
+          writeCap: 200,
+          fixtureSha256: "f",
+          document: { cases: [row("baseline"), refused] },
+          dataset: {
+            cases: [
+              row("baseline-typing", {
+                pass: false,
+                typing: {
+                  samplesDuringRun: 2,
+                  samples: [sample(1, 24), sample(2, null), sample(3, 99)],
+                },
+              }),
+            ],
+          },
+        },
+      },
+      { index: 2 },
+    ],
+  });
   const automations = summary.collectionAutomations;
-  assert.deepEqual([automations.findCap, automations.writeCap, automations.fixtureSha256], [[50], [200], ['f']]);
-  assert.deepEqual(automations.document.baseline.triggerToSettledPaintedMs, { count: 1, p50: 900, p95: 900, max: 900 });
-  assert.deepEqual([automations.document.baseline.longTaskCount.max, automations.document.baseline.longTaskTotalMs.max, automations.document.baseline.fieldWrites], [2, 140, [200]]);
-  assert.deepEqual(automations.document['find-500'].startMs, { count: 0, p50: null, p95: null, max: null });
-  for (const [field, value] of Object.entries({ findMs: 25, planMs: 15, writeMs: 300, writes: 50, appendMs: 40, appendCount: 50 })) {
-    assert.deepEqual(automations.document.baseline[field], { count: 1, p50: value, p95: value, max: value });
-    assert.deepEqual(automations.document['find-500'][field], { count: 0, p50: null, p95: null, max: null });
+  assert.deepEqual(
+    [automations.findCap, automations.writeCap, automations.fixtureSha256],
+    [[50], [200], ["f"]],
+  );
+  assert.deepEqual(automations.document.baseline.triggerToSettledPaintedMs, {
+    count: 1,
+    p50: 900,
+    p95: 900,
+    max: 900,
+  });
+  assert.deepEqual(
+    [
+      automations.document.baseline.longTaskCount.max,
+      automations.document.baseline.longTaskTotalMs.max,
+      automations.document.baseline.fieldWrites,
+    ],
+    [2, 140, [200]],
+  );
+  assert.deepEqual(automations.document["find-500"].startMs, {
+    count: 0,
+    p50: null,
+    p95: null,
+    max: null,
+  });
+  for (const [field, value] of Object.entries({
+    findMs: 25,
+    planMs: 15,
+    writeMs: 300,
+    writes: 50,
+    appendMs: 40,
+    appendCount: 50,
+  })) {
+    assert.deepEqual(automations.document.baseline[field], {
+      count: 1,
+      p50: value,
+      p95: value,
+      max: value,
+    });
+    assert.deepEqual(automations.document["find-500"][field], {
+      count: 0,
+      p50: null,
+      p95: null,
+      max: null,
+    });
   }
-  assert.deepEqual([automations.document['find-500'].outcomes, automations.document['find-500'].fieldWrites, automations.document['find-500'].runMs.count], [['refused'], [], 0]);
-  assert.deepEqual([automations.dataset['baseline-typing'].failures, automations.dataset['baseline-typing'].typingDuringRun.samplesDuringRun], [1, 2]);
-  assert.deepEqual(automations.dataset['baseline-typing'].typingDuringRun.inputToNextPaintReportedOnlyMs, { count: 1, p50: 24, p95: 24, max: 24 });
+  assert.deepEqual(
+    [
+      automations.document["find-500"].outcomes,
+      automations.document["find-500"].fieldWrites,
+      automations.document["find-500"].runMs.count,
+    ],
+    [["refused"], [], 0],
+  );
+  assert.deepEqual(
+    [
+      automations.dataset["baseline-typing"].failures,
+      automations.dataset["baseline-typing"].typingDuringRun.samplesDuringRun,
+    ],
+    [1, 2],
+  );
+  assert.deepEqual(
+    automations.dataset["baseline-typing"].typingDuringRun.inputToNextPaintReportedOnlyMs,
+    { count: 1, p50: 24, p95: 24, max: 24 },
+  );
   assert.equal(automations.document.baseline.typingDuringRun, null);
   assert.equal(automations.document.baseline.contention, false);
-  assert.equal(automations.dataset['baseline-typing'].contention, true);
-  assert.equal((await summarize({ label: 'baseline', status: 'complete', settings: {}, limits: [], runs: [{ index: 1 }] })).collectionAutomations, null);
+  assert.equal(automations.dataset["baseline-typing"].contention, true);
+  assert.equal(
+    (
+      await summarize({
+        label: "baseline",
+        status: "complete",
+        settings: {},
+        limits: [],
+        runs: [{ index: 1 }],
+      })
+    ).collectionAutomations,
+    null,
+  );
 });
 
 // A fake executeCli: it records each call and answers as the desktop CLI server does.
-const fakeCli = calls => `import { appendFileSync } from 'node:fs';
+const fakeCli = (calls) => `import { appendFileSync } from 'node:fs';
 const ok = body => ({ exitCode: 0, stdout: JSON.stringify({ schemaVersion: 1, ...body }), stderr: '' });
 export async function executeCli({ argv }) {
   const [, , verb, text] = argv;
@@ -1337,479 +2833,1049 @@ export async function executeCli({ argv }) {
   return ok({ kind: 'invoked', result: body.input.after ? { rows: [{ id: 'b' }], nextCursor: null } : { rows: [{ id: 'a' }], nextCursor: { id: 'a', value: 'a' } }, revision: 2, replayed: false });
 }
 `;
-test('dataset CLI script creates, seeds, and lists through executeCli, and fails on a CLI error', async t => {
-  const root = await realpath(await mkdtemp(join(tmpdir(), 'dohc-dataset-cli-')));
+test("dataset CLI script creates, seeds, and lists through executeCli, and fails on a CLI error", async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "dohc-dataset-cli-")));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const calls = join(root, 'calls.jsonl');
-  const cliModule = join(root, 'fake-cli.mjs');
+  const calls = join(root, "calls.jsonl");
+  const cliModule = join(root, "fake-cli.mjs");
   await writeFile(cliModule, fakeCli(calls));
-  const script = resolve('tools/perf-profiling/dataset-cli.mjs');
-  const request = async (name, body) => { const path = join(root, `${name}.json`); await writeFile(path, JSON.stringify({ cliModule, workspaceId: 'w', ...body })); return path; };
-  const runScript = path => spawnSync(process.execPath, [script, path], { cwd: root, env: { ...process.env, DOHC_STATE_DIR: 'profile' }, encoding: 'utf8', timeout: 60_000 });
-  const setup = runScript(await request('setup', { mode: 'setup', datasetPath: 'data/dataset.json', definition: { datasetId: 'd' }, createOperationId: 'create', idFieldId: 'key', records: [{ key: 'one' }, { key: 'two' }] }));
+  const script = resolve("tools/perf-profiling/dataset-cli.mjs");
+  const request = async (name, body) => {
+    const path = join(root, `${name}.json`);
+    await writeFile(path, JSON.stringify({ cliModule, workspaceId: "w", ...body }));
+    return path;
+  };
+  const runScript = (path) =>
+    spawnSync(process.execPath, [script, path], {
+      cwd: root,
+      env: { ...process.env, DOHC_STATE_DIR: "profile" },
+      encoding: "utf8",
+      timeout: 60_000,
+    });
+  const setup = runScript(
+    await request("setup", {
+      mode: "setup",
+      datasetPath: "data/dataset.json",
+      definition: { datasetId: "d" },
+      createOperationId: "create",
+      idFieldId: "key",
+      records: [{ key: "one" }, { key: "two" }],
+    }),
+  );
   assert.equal(setup.status, 0, setup.stderr);
   const seeded = JSON.parse(setup.stdout.trim().split(/\r?\n/).at(-1));
-  assert.deepEqual([seeded.datasetId, seeded.revision, seeded.revisionSha256, seeded.records], ['d', 1, 'a'.repeat(64), 2]);
+  assert.deepEqual(
+    [seeded.datasetId, seeded.revision, seeded.revisionSha256, seeded.records],
+    ["d", 1, "a".repeat(64), 2],
+  );
   assert.ok(Number.isFinite(seeded.seedingObservedMs));
-  const listed = runScript(await request('list', { mode: 'list', datasetPath: 'data/dataset.json', datasetId: 'd', revision: 1, revisionSha256: 'a'.repeat(64), operationId: 'list', filters: [{ fieldId: 'case', value: 'x' }] }));
+  const listed = runScript(
+    await request("list", {
+      mode: "list",
+      datasetPath: "data/dataset.json",
+      datasetId: "d",
+      revision: 1,
+      revisionSha256: "a".repeat(64),
+      operationId: "list",
+      filters: [{ fieldId: "case", value: "x" }],
+    }),
+  );
   assert.equal(listed.status, 0, listed.stderr);
-  assert.deepEqual(JSON.parse(listed.stdout.trim()), { rows: [{ id: 'a' }, { id: 'b' }] });
-  const recorded = (await readFile(calls, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
-  assert.deepEqual(recorded.map(call => call.argv), [...Array(5)].map((_, index) => ['--json', 'dataset', index === 0 ? 'create' : 'invoke']));
-  assert.deepEqual(recorded.slice(1, 3).map(call => [call.body.idempotencyKey, call.body.operationId, call.body.revision]), [['seed:one', 'create', 1], ['seed:two', 'create', 1]]);
-  const [first, second] = recorded.slice(3).map(call => call.body);
-  assert.deepEqual([first.input, second.input.after], [{ limit: 100, filters: [{ fieldId: 'case', value: 'x' }] }, { id: 'a', value: 'a' }]);
+  assert.deepEqual(JSON.parse(listed.stdout.trim()), { rows: [{ id: "a" }, { id: "b" }] });
+  const recorded = (await readFile(calls, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.deepEqual(
+    recorded.map((call) => call.argv),
+    [...Array(5)].map((_, index) => ["--json", "dataset", index === 0 ? "create" : "invoke"]),
+  );
+  assert.deepEqual(
+    recorded
+      .slice(1, 3)
+      .map((call) => [call.body.idempotencyKey, call.body.operationId, call.body.revision]),
+    [
+      ["seed:one", "create", 1],
+      ["seed:two", "create", 1],
+    ],
+  );
+  const [first, second] = recorded.slice(3).map((call) => call.body);
+  assert.deepEqual(
+    [first.input, second.input.after],
+    [
+      { limit: 100, filters: [{ fieldId: "case", value: "x" }] },
+      { id: "a", value: "a" },
+    ],
+  );
   assert.match(first.idempotencyKey, /^list:[0-9a-f-]{36}:0$/);
-  assert.equal(second.idempotencyKey, first.idempotencyKey.replace(/0$/, '1'));
-  assert.ok(recorded.every(call => call.stateDir === 'profile' && resolve(call.cwd) === resolve(root)));
+  assert.equal(second.idempotencyKey, first.idempotencyKey.replace(/0$/, "1"));
+  assert.ok(
+    recorded.every((call) => call.stateDir === "profile" && resolve(call.cwd) === resolve(root)),
+  );
   // The CLI names a dataset by its dataset.json path and refuses a body that still carries datasetId.
-  assert.ok(recorded.slice(1).every(call => call.body.datasetPath === 'data/dataset.json' && call.body.expectedDatasetId === 'd' && !('datasetId' in call.body)));
-  for (const [key, message] of [['refuse', /refused: not_unique/], ['fail', /the app did not answer/]]) {
-    const failed = runScript(await request(key, { mode: 'setup', definition: { datasetId: 'd' }, createOperationId: 'create', idFieldId: 'key', records: [{ key }] }));
+  assert.ok(
+    recorded
+      .slice(1)
+      .every(
+        (call) =>
+          call.body.datasetPath === "data/dataset.json" &&
+          call.body.expectedDatasetId === "d" &&
+          !("datasetId" in call.body),
+      ),
+  );
+  for (const [key, message] of [
+    ["refuse", /refused: not_unique/],
+    ["fail", /the app did not answer/],
+  ]) {
+    const failed = runScript(
+      await request(key, {
+        mode: "setup",
+        definition: { datasetId: "d" },
+        createOperationId: "create",
+        idFieldId: "key",
+        records: [{ key }],
+      }),
+    );
     assert.equal(failed.status, 1);
     assert.match(failed.stderr, message);
   }
-  assert.equal(spawnSync(process.execPath, [script], { encoding: 'utf8', timeout: 60_000 }).status, 2);
+  assert.equal(
+    spawnSync(process.execPath, [script], { encoding: "utf8", timeout: 60_000 }).status,
+    2,
+  );
 });
 
-test('dataset CLI runs in an owned job that stops what it started when it fails', { skip: process.platform !== 'win32' }, async t => {
-  const root = await realpath(await mkdtemp(join(tmpdir(), 'dohc-dataset-owned-')));
-  t.after(() => rm(root, { recursive: true, force: true }));
-  const pidFile = join(root, 'descendant.pid');
-  const cliModule = join(root, 'fake-cli.mjs');
-  // The CLI starts a process that outlives it, then fails, as a crashed CLI worker would leave one.
-  await writeFile(cliModule, `import { spawn } from 'node:child_process'; import { writeFileSync } from 'node:fs';
+test(
+  "dataset CLI runs in an owned job that stops what it started when it fails",
+  { skip: process.platform !== "win32" },
+  async (t) => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "dohc-dataset-owned-")));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const pidFile = join(root, "descendant.pid");
+    const cliModule = join(root, "fake-cli.mjs");
+    // The CLI starts a process that outlives it, then fails, as a crashed CLI worker would leave one.
+    await writeFile(
+      cliModule,
+      `import { spawn } from 'node:child_process'; import { writeFileSync } from 'node:fs';
 export async function executeCli() {
   const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true });
   child.unref();
   writeFileSync(${JSON.stringify(pidFile)}, String(child.pid));
   return { exitCode: 1, stdout: '', stderr: 'dohc: failed after starting a worker' };
 }
-`);
-  const requestPath = join(root, 'setup.json');
-  await writeFile(requestPath, JSON.stringify({ cliModule, workspaceId: 'w', mode: 'setup', definition: {}, records: [] }));
-  await assert.rejects(runOwnedCommand(process.execPath, [resolve('tools/perf-profiling/dataset-cli.mjs'), requestPath], { cwd: root, timeoutMs: 60_000, quietStdout: true, log: join(root, 'setup.log') }), /failed \(1\)/);
-  const descendant = Number(await readFile(pidFile, 'utf8'));
-  const deadline = performance.now() + 30_000;
-  let alive = true;
-  while (alive && performance.now() < deadline) {
-    try { process.kill(descendant, 0); await delay(50); }
-    catch (error) { if (error.code !== 'ESRCH') throw error; alive = false; }
-  }
-  assert.equal(alive, false, 'the job must stop the process the CLI started');
-});
+`,
+    );
+    const requestPath = join(root, "setup.json");
+    await writeFile(
+      requestPath,
+      JSON.stringify({ cliModule, workspaceId: "w", mode: "setup", definition: {}, records: [] }),
+    );
+    await assert.rejects(
+      runOwnedCommand(
+        process.execPath,
+        [resolve("tools/perf-profiling/dataset-cli.mjs"), requestPath],
+        { cwd: root, timeoutMs: 60_000, quietStdout: true, log: join(root, "setup.log") },
+      ),
+      /failed \(1\)/,
+    );
+    const descendant = Number(await readFile(pidFile, "utf8"));
+    const deadline = performance.now() + 30_000;
+    let alive = true;
+    while (alive && performance.now() < deadline) {
+      try {
+        process.kill(descendant, 0);
+        await delay(50);
+      } catch (error) {
+        if (error.code !== "ESRCH") throw error;
+        alive = false;
+      }
+    }
+    assert.equal(alive, false, "the job must stop the process the CLI started");
+  },
+);
 
-const receipt = ({ status = 'complete', open = [100, 105, 110, 115, 120], typed = [20, 21, 22, 23, 24], settled = [800, 850, 900, 950, 1000], fixture = 'f1', failures = 0, findCap = 50, contention = false } = {}) => ({
-  label: 'baseline', status, settings: { scenario: 'collection', runCount: open.length, keystrokes: 30, fixtureFiles: 2, records: 500, findCap, writeCap: 200 }, limits: [],
-  runs: open.map((openMs, index) => ({ index: index + 1,
-    collection: { records: 500, indexedWaitObservedMs: 10, clickToRowsPaintedMs: openMs, rowsRendered: 20, loadedRecords: 100 },
-    typing: [{ name: 'small.md', supported: true, longTasks: [], samples: [{ dispatchToTwoRafMs: typed[index], inputToNextPaintMs: null }] }],
-    collectionAutomations: { findCap, writeCap: 200, fixtureSha256: 'all', dataset: { cases: [] }, document: { cases: [
-      { name: contention ? 'baseline-typing' : 'baseline', fixtureSha256: fixture, expected: 'done', outcome: 'done', pass: index >= failures, verification: { ok: true }, triggerToSettledPaintedMs: settled[index], longTasks: [],
-        typing: contention ? { samplesDuringRun: 1, samples: [{ dispatchToTwoRafMs: typed[index] }] } : null },
-    ] } } })),
+const receipt = ({
+  status = "complete",
+  open = [100, 105, 110, 115, 120],
+  typed = [20, 21, 22, 23, 24],
+  settled = [800, 850, 900, 950, 1000],
+  fixture = "f1",
+  failures = 0,
+  findCap = 50,
+  contention = false,
+} = {}) => ({
+  label: "baseline",
+  status,
+  settings: {
+    scenario: "collection",
+    runCount: open.length,
+    keystrokes: 30,
+    fixtureFiles: 2,
+    records: 500,
+    findCap,
+    writeCap: 200,
+  },
+  limits: [],
+  runs: open.map((openMs, index) => ({
+    index: index + 1,
+    collection: {
+      records: 500,
+      indexedWaitObservedMs: 10,
+      clickToRowsPaintedMs: openMs,
+      rowsRendered: 20,
+      loadedRecords: 100,
+    },
+    typing: [
+      {
+        name: "small.md",
+        supported: true,
+        longTasks: [],
+        samples: [{ dispatchToTwoRafMs: typed[index], inputToNextPaintMs: null }],
+      },
+    ],
+    collectionAutomations: {
+      findCap,
+      writeCap: 200,
+      fixtureSha256: "all",
+      dataset: { cases: [] },
+      document: {
+        cases: [
+          {
+            name: contention ? "baseline-typing" : "baseline",
+            fixtureSha256: fixture,
+            expected: "done",
+            outcome: "done",
+            pass: index >= failures,
+            verification: { ok: true },
+            triggerToSettledPaintedMs: settled[index],
+            longTasks: [],
+            typing: contention
+              ? { samplesDuringRun: 1, samples: [{ dispatchToTwoRafMs: typed[index] }] }
+              : null,
+          },
+        ],
+      },
+    },
+  })),
 });
-const compared = async (baseline, candidate, margin) => compareSummaries(await summarize(receipt(baseline)), await summarize(receipt(candidate)), margin);
+const compared = async (baseline, candidate, margin) =>
+  compareSummaries(await summarize(receipt(baseline)), await summarize(receipt(candidate)), margin);
 
-test('the comparison refuses receipts from another metric version or typing timing', async () => {
-  const withSettings = async settings => { const data = receipt(); Object.assign(data.settings, settings); return summarize(data); };
+test("the comparison refuses receipts from another metric version or typing timing", async () => {
+  const withSettings = async (settings) => {
+    const data = receipt();
+    Object.assign(data.settings, settings);
+    return summarize(data);
+  };
   const current = await withSettings({ metricVersion: METRIC_VERSION, typingTrace: false });
   assert.equal(compareSummaries(current, current).pass, true);
   const older = compareSummaries(await withSettings({}), current);
   assert.equal(older.pass, false);
-  assert.ok(older.problems.includes(`The baseline uses metric version 1 and the candidate version ${METRIC_VERSION}. Measure both packages with the same harness.`), older.problems.join('\n'));
-  const traced = compareSummaries(current, await withSettings({ metricVersion: METRIC_VERSION, typingTrace: true }));
+  assert.ok(
+    older.problems.includes(
+      `The baseline uses metric version 1 and the candidate version ${METRIC_VERSION}. Measure both packages with the same harness.`,
+    ),
+    older.problems.join("\n"),
+  );
+  const traced = compareSummaries(
+    current,
+    await withSettings({ metricVersion: METRIC_VERSION, typingTrace: true }),
+  );
   assert.equal(traced.pass, false);
-  assert.deepEqual(traced.problems, ['The receipts differ in typingTrace.']);
+  assert.deepEqual(traced.problems, ["The receipts differ in typingTrace."]);
 });
-test('automation comparison uses the median at 25% despite a slower p95', async () => {
+test("automation comparison uses the median at 25% despite a slower p95", async () => {
   assert.deepEqual(DEFAULT_MARGIN, { percent: 10, automationPercent: 25, floorMs: 17 });
   const same = await compared({}, {});
-  assert.equal(same.pass, true, same.problems.join('; '));
-  assert.deepEqual(same.checks.map(check => [check.metric, check.verdict]), [['collection open to rows painted', 'pass'], ['typing small.md dispatch to two frames', 'pass'],
-    ['typing large.md dispatch to two frames', 'unmeasured'], ['document baseline press to settled', 'pass']]);
+  assert.equal(same.pass, true, same.problems.join("; "));
+  assert.deepEqual(
+    same.checks.map((check) => [check.metric, check.verdict]),
+    [
+      ["collection open to rows painted", "pass"],
+      ["typing small.md dispatch to two frames", "pass"],
+      ["typing large.md dispatch to two frames", "unmeasured"],
+      ["document baseline press to settled", "pass"],
+    ],
+  );
   const outlier = await compared({}, { settled: [800, 900, 1100, 1200, 5000] });
-  assert.equal(outlier.pass, true, outlier.problems.join('; '));
-  assert.deepEqual(outlier.checks.at(-1), { metric: 'document baseline press to settled', baselineP50: 900, candidateP50: 1100, limit: 1125, verdict: 'pass' });
+  assert.equal(outlier.pass, true, outlier.problems.join("; "));
+  assert.deepEqual(outlier.checks.at(-1), {
+    metric: "document baseline press to settled",
+    baselineP50: 900,
+    candidateP50: 1100,
+    limit: 1125,
+    verdict: "pass",
+  });
   assert.equal((await compared({}, { settled: [800, 900, 1125, 1200, 5000] })).pass, true);
   const slower = await compared({}, { settled: [800, 900, 1126, 1200, 5000] });
   assert.equal(slower.pass, false);
-  assert.deepEqual(slower.problems, ['document baseline press to settled: regressed']);
-  assert.deepEqual((await compared({}, { settled: [800, 900, 1126, 1200, 5000] }, { percent: 20, floorMs: 17 })).problems, ['document baseline press to settled: regressed']);
-  assert.equal((await compared({}, { settled: [800, 900, 1126, 1200, 5000] }, { ...DEFAULT_MARGIN, automationPercent: 30 })).pass, true);
-  assert.equal((await compared({ settled: [10, 10, 10, 10, 10] }, { settled: [27, 27, 27, 27, 27] })).pass, true);
-  assert.equal((await compared({ settled: [10, 10, 10, 10, 10] }, { settled: [28, 28, 28, 28, 28] })).pass, false);
+  assert.deepEqual(slower.problems, ["document baseline press to settled: regressed"]);
+  assert.deepEqual(
+    (await compared({}, { settled: [800, 900, 1126, 1200, 5000] }, { percent: 20, floorMs: 17 }))
+      .problems,
+    ["document baseline press to settled: regressed"],
+  );
+  assert.equal(
+    (
+      await compared(
+        {},
+        { settled: [800, 900, 1126, 1200, 5000] },
+        { ...DEFAULT_MARGIN, automationPercent: 30 },
+      )
+    ).pass,
+    true,
+  );
+  assert.equal(
+    (await compared({ settled: [10, 10, 10, 10, 10] }, { settled: [27, 27, 27, 27, 27] })).pass,
+    true,
+  );
+  assert.equal(
+    (await compared({ settled: [10, 10, 10, 10, 10] }, { settled: [28, 28, 28, 28, 28] })).pass,
+    false,
+  );
 });
 
-test('Collection open and typing keep p95 at 10% or the 17 ms floor', async () => {
-  assert.equal((await compared({}, { open: [100, 105, 110, 115, 137], typed: [20, 21, 22, 23, 41] })).pass, true);
-  assert.deepEqual((await compared({}, { open: [100, 105, 110, 115, 138], typed: [20, 21, 22, 23, 42] })).problems,
-    ['collection open to rows painted: regressed', 'typing small.md dispatch to two frames: regressed']);
+test("Collection open and typing keep p95 at 10% or the 17 ms floor", async () => {
+  assert.equal(
+    (await compared({}, { open: [100, 105, 110, 115, 137], typed: [20, 21, 22, 23, 41] })).pass,
+    true,
+  );
+  assert.deepEqual(
+    (await compared({}, { open: [100, 105, 110, 115, 138], typed: [20, 21, 22, 23, 42] })).problems,
+    [
+      "collection open to rows painted: regressed",
+      "typing small.md dispatch to two frames: regressed",
+    ],
+  );
   const baseline = { open: [200, 200, 200, 200, 200], typed: [200, 200, 200, 200, 200] };
   const candidate = { open: [200, 200, 200, 200, 221], typed: [200, 200, 200, 200, 221] };
   const slower = await compared(baseline, candidate);
-  assert.deepEqual(slower.checks.slice(0, 2).map(row => [row.baselineP95, row.candidateP95, row.limit, row.verdict]), [[200, 221, 220, 'regressed'], [200, 221, 220, 'regressed']]);
-  assert.equal((await compared(baseline, candidate, { ...DEFAULT_MARGIN, percent: 20 })).pass, true);
+  assert.deepEqual(
+    slower.checks
+      .slice(0, 2)
+      .map((row) => [row.baselineP95, row.candidateP95, row.limit, row.verdict]),
+    [
+      [200, 221, 220, "regressed"],
+      [200, 221, 220, "regressed"],
+    ],
+  );
+  assert.equal(
+    (await compared(baseline, candidate, { ...DEFAULT_MARGIN, percent: 20 })).pass,
+    true,
+  );
 });
 
-test('automation cases need five actual runs on each side', async () => {
-  for (const side of ['baseline', 'candidate']) {
-    const before = receipt(), after = receipt();
-    (side === 'baseline' ? before : after).runs.at(-1).collectionAutomations.document.cases = [];
+test("automation cases need five actual runs on each side", async () => {
+  for (const side of ["baseline", "candidate"]) {
+    const before = receipt(),
+      after = receipt();
+    (side === "baseline" ? before : after).runs.at(-1).collectionAutomations.document.cases = [];
     const result = compareSummaries(await summarize(before), await summarize(after));
     assert.equal(result.pass, false);
-    assert.deepEqual(result.problems, [`Automation cases need at least 5 runs on each side; the fewest recorded are baseline: ${side === 'baseline' ? 4 : 5}, candidate: ${side === 'candidate' ? 4 : 5}.`]);
-    assert.equal(result.checks.at(-1).verdict, 'insufficient-runs');
+    assert.deepEqual(result.problems, [
+      `Automation cases need at least 5 runs on each side; the fewest recorded are baseline: ${side === "baseline" ? 4 : 5}, candidate: ${side === "candidate" ? 4 : 5}.`,
+    ]);
+    assert.equal(result.checks.at(-1).verdict, "insufficient-runs");
   }
   const three = { open: [100, 110, 120], typed: [20, 22, 24], settled: [800, 900, 5000] };
   const result = await compared(three, { ...three, settled: [800, 6000, 7000] });
-  assert.deepEqual(result.problems, ['Automation cases need at least 5 runs on each side; the fewest recorded are baseline: 3, candidate: 3.']);
+  assert.deepEqual(result.problems, [
+    "Automation cases need at least 5 runs on each side; the fewest recorded are baseline: 3, candidate: 3.",
+  ]);
 });
 
-test('contention press-to-settled is reported while typing during the run still gates', async () => {
-  const result = await compared({ contention: true }, { contention: true, settled: [5000, 6000, 7000, 8000, 9000] });
-  assert.equal(result.pass, true, result.problems.join('; '));
-  assert.equal(result.checks.find(row => row.metric.endsWith('press to settled')).verdict, 'reported');
+test("contention press-to-settled is reported while typing during the run still gates", async () => {
+  const result = await compared(
+    { contention: true },
+    { contention: true, settled: [5000, 6000, 7000, 8000, 9000] },
+  );
+  assert.equal(result.pass, true, result.problems.join("; "));
+  assert.equal(
+    result.checks.find((row) => row.metric.endsWith("press to settled")).verdict,
+    "reported",
+  );
   const baseline = await summarize(receipt({ contention: true, typed: [200, 200, 200, 200, 200] }));
-  const candidate = await summarize(receipt({ contention: true, typed: [200, 200, 200, 200, 221] }));
+  const candidate = await summarize(
+    receipt({ contention: true, typed: [200, 200, 200, 200, 221] }),
+  );
   // Isolate the contention samples from typing on its own.
   candidate.typing = baseline.typing;
-  assert.deepEqual(compareSummaries(baseline, candidate).problems, ['document baseline-typing typing during the run: regressed']);
-  candidate.collectionAutomations.document['baseline-typing'].triggerToSettledPaintedMs = { count: 0, p50: null, p95: null, max: null };
-  assert.ok(compareSummaries(baseline, candidate).problems.includes('document baseline-typing press to settled: missing'));
+  assert.deepEqual(compareSummaries(baseline, candidate).problems, [
+    "document baseline-typing typing during the run: regressed",
+  ]);
+  candidate.collectionAutomations.document["baseline-typing"].triggerToSettledPaintedMs = {
+    count: 0,
+    p50: null,
+    p95: null,
+    max: null,
+  };
+  assert.ok(
+    compareSummaries(baseline, candidate).problems.includes(
+      "document baseline-typing press to settled: missing",
+    ),
+  );
 });
 
-test('comparison CLI records and applies the automation margin independently', async t => {
-  const root = await mkdtemp(join(tmpdir(), 'dohc-compare-cli-'));
+test("comparison CLI records and applies the automation margin independently", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "dohc-compare-cli-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const baseline = join(root, 'baseline'), candidate = join(root, 'candidate');
-  await mkdir(baseline); await mkdir(candidate);
-  await writeFile(join(baseline, 'result.json'), JSON.stringify(receipt()));
-  await writeFile(join(candidate, 'result.json'), JSON.stringify(receipt({ settled: [800, 900, 1126, 1200, 5000] })));
-  const run = flags => spawnSync(process.execPath, ['tools/perf-profiling/compare-packaged-benchmark.mjs', baseline, candidate, ...flags], { encoding: 'utf8', timeout: 20_000 });
+  const baseline = join(root, "baseline"),
+    candidate = join(root, "candidate");
+  await mkdir(baseline);
+  await mkdir(candidate);
+  await writeFile(join(baseline, "result.json"), JSON.stringify(receipt()));
+  await writeFile(
+    join(candidate, "result.json"),
+    JSON.stringify(receipt({ settled: [800, 900, 1126, 1200, 5000] })),
+  );
+  const run = (flags) =>
+    spawnSync(
+      process.execPath,
+      ["tools/perf-profiling/compare-packaged-benchmark.mjs", baseline, candidate, ...flags],
+      { encoding: "utf8", timeout: 20_000 },
+    );
   assert.equal(run([]).status, 1);
-  const passed = run(['--automation-margin-percent', '30', '--margin-percent', '11', '--floor-ms', '18']);
+  const passed = run([
+    "--automation-margin-percent",
+    "30",
+    "--margin-percent",
+    "11",
+    "--floor-ms",
+    "18",
+  ]);
   assert.equal(passed.status, 0, passed.stderr);
-  const comparison = JSON.parse(await readFile(join(candidate, 'comparison.json'), 'utf8'));
+  const comparison = JSON.parse(await readFile(join(candidate, "comparison.json"), "utf8"));
   assert.deepEqual(comparison.margin, { percent: 11, automationPercent: 30, floorMs: 18 });
   assert.equal(comparison.pass, true);
-  for (const value of ['-1', 'NaN', 'Infinity']) {
-    const invalid = run(['--automation-margin-percent', value]);
+  for (const value of ["-1", "NaN", "Infinity"]) {
+    const invalid = run(["--automation-margin-percent", value]);
     assert.equal(invalid.status, 1);
     assert.match(invalid.stderr, /--automation-margin-percent needs a number of at least 0/);
   }
 });
 
-test('comparison checks a case whose fixture changed only within the candidate, and refuses mismatched receipts', async () => {
-  const other = await compared({}, { fixture: 'f2', settled: [5000, 6000, 7000, 8000, 9000], findCap: 500 });
-  assert.equal(other.pass, true, other.problems.join('; '));
-  assert.deepEqual(other.cases, [{ kind: 'document', name: 'baseline', compared: false, outcomes: ['done'] }]);
-  assert.equal(other.checks.some(check => check.metric.startsWith('document baseline')), false);
-  const failed = await compared({}, { fixture: 'f2', failures: 1, status: 'failed' });
-  assert.deepEqual(failed.problems, ['The candidate receipt is failed, not complete.', "The candidate's document baseline case failed its checks in 1 of 5 runs."]);
+test("comparison checks a case whose fixture changed only within the candidate, and refuses mismatched receipts", async () => {
+  const other = await compared(
+    {},
+    { fixture: "f2", settled: [5000, 6000, 7000, 8000, 9000], findCap: 500 },
+  );
+  assert.equal(other.pass, true, other.problems.join("; "));
+  assert.deepEqual(other.cases, [
+    { kind: "document", name: "baseline", compared: false, outcomes: ["done"] },
+  ]);
+  assert.equal(
+    other.checks.some((check) => check.metric.startsWith("document baseline")),
+    false,
+  );
+  const failed = await compared({}, { fixture: "f2", failures: 1, status: "failed" });
+  assert.deepEqual(failed.problems, [
+    "The candidate receipt is failed, not complete.",
+    "The candidate's document baseline case failed its checks in 1 of 5 runs.",
+  ]);
   const baseline = await summarize(receipt());
   const candidate = await summarize(receipt());
   candidate.settings = { ...candidate.settings, keystrokes: 10 };
   delete candidate.collectionAutomations.document.baseline;
-  candidate.typing['small.md'].dispatchToTwoRafObservedMs = { count: 0, p50: null, p95: null, max: null };
-  assert.deepEqual(compareSummaries(baseline, candidate).problems, ['The receipts differ in keystrokes.', 'typing small.md dispatch to two frames: missing', 'document baseline: missing']);
+  candidate.typing["small.md"].dispatchToTwoRafObservedMs = {
+    count: 0,
+    p50: null,
+    p95: null,
+    max: null,
+  };
+  assert.deepEqual(compareSummaries(baseline, candidate).problems, [
+    "The receipts differ in keystrokes.",
+    "typing small.md dispatch to two frames: missing",
+    "document baseline: missing",
+  ]);
   // A receipt from before per-case digests cannot pass as comparable.
   const old = receipt({ settled: [5000, 6000, 7000, 8000, 9000] });
   for (const run of old.runs) delete run.collectionAutomations.document.cases[0].fixtureSha256;
   const undigested = await summarize(old);
-  assert.deepEqual(compareSummaries(undigested, await summarize(receipt())).problems, ['The document baseline case has no single fixture digest in both receipts.']);
+  assert.deepEqual(compareSummaries(undigested, await summarize(receipt())).problems, [
+    "The document baseline case has no single fixture digest in both receipts.",
+  ]);
 });
 
+const heapRequired = [
+  "--binary",
+  "dohc.exe",
+  "--package-commit",
+  "a".repeat(40),
+  "--output",
+  "heap-evidence",
+  "--label",
+  "baseline",
+];
+const heapOptions = (...args) =>
+  parseOptions([...heapRequired, "--scenario", "soak", "--soak-minutes", "60", ...args]);
 
-const heapRequired = ['--binary', 'dohc.exe', '--package-commit', 'a'.repeat(40), '--output', 'heap-evidence', '--label', 'baseline'];
-const heapOptions = (...args) => parseOptions([...heapRequired, '--scenario', 'soak', '--soak-minutes', '60', ...args]);
-
-test('heap snapshots are opt-in and parse sorted, distinct minutes within the soak', () => {
+test("heap snapshots are opt-in and parse sorted, distinct minutes within the soak", () => {
   assert.deepEqual(heapOptions().heapSnapshotMinutes, []);
-  assert.deepEqual(heapOptions('--heap-snapshot-minutes', '60,10').heapSnapshotMinutes, [10, 60]);
-  assert.deepEqual(heapOptions('--heap-snapshot-minutes', '1').heapSnapshotMinutes, [1]);
+  assert.deepEqual(heapOptions("--heap-snapshot-minutes", "60,10").heapSnapshotMinutes, [10, 60]);
+  assert.deepEqual(heapOptions("--heap-snapshot-minutes", "1").heapSnapshotMinutes, [1]);
 });
 
-test('heap snapshots reject invalid schedules and other scenarios', () => {
-  for (const value of ['0', '-1', '1.5', '1e1', '10,', ',10', '10,,60', '10,10', '10, 60', '61', '9007199254740992']) {
-    assert.throws(() => heapOptions('--heap-snapshot-minutes', value), /heap-snapshot-minutes/);
+test("heap snapshots reject invalid schedules and other scenarios", () => {
+  for (const value of [
+    "0",
+    "-1",
+    "1.5",
+    "1e1",
+    "10,",
+    ",10",
+    "10,,60",
+    "10,10",
+    "10, 60",
+    "61",
+    "9007199254740992",
+  ]) {
+    assert.throws(() => heapOptions("--heap-snapshot-minutes", value), /heap-snapshot-minutes/);
   }
-  assert.throws(() => parseOptions([...heapRequired, '--heap-snapshot-minutes', '10']), /requires --scenario soak/);
+  assert.throws(
+    () => parseOptions([...heapRequired, "--heap-snapshot-minutes", "10"]),
+    /requires --scenario soak/,
+  );
 });
 
 function heapClock() {
   let time = 100;
-  return { now: () => time, advance(ms) { time += ms; } };
+  return {
+    now: () => time,
+    advance(ms) {
+      time += ms;
+    },
+  };
 }
-function deferred() { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; }
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((a, b) => {
+    resolve = a;
+    reject = b;
+  });
+  return { promise, resolve, reject };
+}
 async function heapFixture(t, minutes = [10, 60], extra = {}) {
-  const { EventEmitter } = await import('node:events');
-  const { startRendererHeapSnapshots } = await import('./renderer-heap-snapshots.mjs');
-  const output = await mkdtemp(join(tmpdir(), 'dohc-heap-capture-'));
+  const { EventEmitter } = await import("node:events");
+  const { startRendererHeapSnapshots } = await import("./renderer-heap-snapshots.mjs");
+  const output = await mkdtemp(join(tmpdir(), "dohc-heap-capture-"));
   t.after(() => rm(output, { recursive: true, force: true }));
-  const clock = heapClock(), calls = [], captures = [], started = [];
+  const clock = heapClock(),
+    calls = [],
+    captures = [],
+    started = [];
   const session = new EventEmitter();
   session.send = async (method, params) => {
     calls.push({ method, params });
-    if (method !== 'HeapProfiler.takeHeapSnapshot') return;
-    const capture = deferred(); captures.push(capture);
+    if (method !== "HeapProfiler.takeHeapSnapshot") return;
+    const capture = deferred();
+    captures.push(capture);
     started.shift()?.resolve();
     return capture.promise;
   };
-  session.detach = async () => { calls.push({ method: 'detach' }); for (const capture of captures) capture.reject(Error('session detached')); };
-  const nextCapture = () => { const gate = deferred(); started.push(gate); return gate.promise; };
-  const controller = await startRendererHeapSnapshots({ session, output, minutes, ...clock, ...extra });
-  t.after(() => controller.cancel(Error('test cleanup')).catch(() => {}));
-  const chunk = value => session.emit('HeapProfiler.addHeapSnapshotChunk', { chunk: value });
-  const beginBoundary = cycle => { const pending = controller.captureDue(cycle); void pending.catch(() => {}); return pending; };
+  session.detach = async () => {
+    calls.push({ method: "detach" });
+    for (const capture of captures) capture.reject(Error("session detached"));
+  };
+  const nextCapture = () => {
+    const gate = deferred();
+    started.push(gate);
+    return gate.promise;
+  };
+  const controller = await startRendererHeapSnapshots({
+    session,
+    output,
+    minutes,
+    ...clock,
+    ...extra,
+  });
+  t.after(() => controller.cancel(Error("test cleanup")).catch(() => {}));
+  const chunk = (value) => session.emit("HeapProfiler.addHeapSnapshotChunk", { chunk: value });
+  const beginBoundary = (cycle) => {
+    const pending = controller.captureDue(cycle);
+    void pending.catch(() => {});
+    return pending;
+  };
   return { controller, session, output, clock, calls, captures, nextCapture, chunk, beginBoundary };
 }
 
-test('heap snapshots serialize every due minute once at the same boundary', async t => {
+test("heap snapshots serialize every due minute once at the same boundary", async (t) => {
   const f = await heapFixture(t);
   f.clock.advance(599999);
   await f.beginBoundary(1);
   assert.equal(f.captures.length, 0);
   f.clock.advance(3000001);
-  const first = f.nextCapture(), second = f.nextCapture();
+  const first = f.nextCapture(),
+    second = f.nextCapture();
   const boundary = f.beginBoundary(2);
   await first;
-  assert.equal(f.captures.length, 1, 'snapshots on one renderer never overlap');
-  f.chunk('{"first":true}'); f.captures[0].resolve(); await second;
-  f.chunk('{"second":true}'); f.captures[1].resolve();
+  assert.equal(f.captures.length, 1, "snapshots on one renderer never overlap");
+  f.chunk('{"first":true}');
+  f.captures[0].resolve();
+  await second;
+  f.chunk('{"second":true}');
+  f.captures[1].resolve();
   await boundary;
   await f.beginBoundary(3);
   await f.controller.finish();
-  assert.deepEqual(f.controller.records.map(r => [r.minute, r.status, r.cycle, r.requestedElapsedMs]),
-    [[10, 'complete', 2, 3600000], [60, 'complete', 2, 3600000]]);
+  assert.deepEqual(
+    f.controller.records.map((r) => [r.minute, r.status, r.cycle, r.requestedElapsedMs]),
+    [
+      [10, "complete", 2, 3600000],
+      [60, "complete", 2, 3600000],
+    ],
+  );
   assert.equal(f.captures.length, 2);
-  assert.equal(f.session.listenerCount('HeapProfiler.addHeapSnapshotChunk'), 0);
-  assert.equal(f.calls.at(-1).method, 'detach');
+  assert.equal(f.session.listenerCount("HeapProfiler.addHeapSnapshotChunk"), 0);
+  assert.equal(f.calls.at(-1).method, "detach");
 });
 
-test('heap snapshots stream chunks in order and publish only after protocol and disk completion', async t => {
-  const { Writable } = await import('node:stream');
-  const final = deferred(), release = deferred();
-  const f = await heapFixture(t, [1], { createStream: path => {
-    const chunks = [];
-    return new Writable({ write(chunk, encoding, callback) { chunks.push(chunk); callback(); },
-      final(callback) { final.resolve(); void release.promise.then(() => writeFile(path, Buffer.concat(chunks))).then(() => callback(), callback); } });
-  } });
-  const began = f.nextCapture(); f.clock.advance(60000); f.beginBoundary(1); await began;
-  f.chunk('{"name":"'); f.chunk('λ"}');
-  assert.equal(f.controller.records[0].status, 'capturing');
-  await assert.rejects(readFile(f.controller.records[0].file), { code: 'ENOENT' });
-  f.captures[0].resolve(); await final.promise;
-  let finished = false; const completion = f.controller.finish().then(() => { finished = true; });
+test("heap snapshots stream chunks in order and publish only after protocol and disk completion", async (t) => {
+  const { Writable } = await import("node:stream");
+  const final = deferred(),
+    release = deferred();
+  const f = await heapFixture(t, [1], {
+    createStream: (path) => {
+      const chunks = [];
+      return new Writable({
+        write(chunk, encoding, callback) {
+          chunks.push(chunk);
+          callback();
+        },
+        final(callback) {
+          final.resolve();
+          void release.promise
+            .then(() => writeFile(path, Buffer.concat(chunks)))
+            .then(() => callback(), callback);
+        },
+      });
+    },
+  });
+  const began = f.nextCapture();
+  f.clock.advance(60000);
+  f.beginBoundary(1);
+  await began;
+  f.chunk('{"name":"');
+  f.chunk('λ"}');
+  assert.equal(f.controller.records[0].status, "capturing");
+  await assert.rejects(readFile(f.controller.records[0].file), { code: "ENOENT" });
+  f.captures[0].resolve();
+  await final.promise;
+  let finished = false;
+  const completion = f.controller.finish().then(() => {
+    finished = true;
+  });
   await Promise.resolve();
-  assert.equal(finished, false, 'protocol completion alone does not mean a complete snapshot');
-  release.resolve(); await completion;
+  assert.equal(finished, false, "protocol completion alone does not mean a complete snapshot");
+  release.resolve();
+  await completion;
   const record = f.controller.records[0];
-  assert.equal(await readFile(record.file, 'utf8'), '{"name":"λ"}');
+  assert.equal(await readFile(record.file, "utf8"), '{"name":"λ"}');
   assert.equal(record.bytes, Buffer.byteLength('{"name":"λ"}'));
   assert.equal(record.chunks, 2);
-  assert.equal(record.status, 'complete');
-  await assert.rejects(readFile(record.partialFile), { code: 'ENOENT' });
+  assert.equal(record.status, "complete");
+  await assert.rejects(readFile(record.partialFile), { code: "ENOENT" });
 });
 
-test('heap snapshots finish never starts a capture without a cycle boundary', async t => {
+test("heap snapshots finish never starts a capture without a cycle boundary", async (t) => {
   const f = await heapFixture(t, [60]);
   f.clock.advance(3600000);
   await assert.rejects(f.controller.finish(), /requested heap snapshot boundary/);
   assert.equal(f.captures.length, 0);
-  assert.equal(f.controller.records[0].status, 'cancelled');
+  assert.equal(f.controller.records[0].status, "cancelled");
 });
 
-for (const empty of [false, true]) test('heap snapshots fail on ' + (empty ? 'empty output' : 'protocol failure') + ' and retain partial evidence', async t => {
-  const f = await heapFixture(t, [1, 2]);
-  const began = f.nextCapture(); f.clock.advance(60000); f.beginBoundary(1); await began;
-  if (empty) f.captures[0].resolve(); else { f.chunk('{"partial":'); f.captures[0].reject(Error('protocol failed')); }
-  await assert.rejects(f.controller.finish(), empty ? /empty/i : /protocol failed/);
-  const record = f.controller.records[0];
-  assert.equal(record.status, 'failed');
-  assert.equal(await readFile(record.partialFile, 'utf8'), empty ? '' : '{"partial":');
-  await assert.rejects(readFile(record.file), { code: 'ENOENT' });
-  assert.equal(f.session.listenerCount('HeapProfiler.addHeapSnapshotChunk'), 0);
-});
+for (const empty of [false, true])
+  test(
+    "heap snapshots fail on " +
+      (empty ? "empty output" : "protocol failure") +
+      " and retain partial evidence",
+    async (t) => {
+      const f = await heapFixture(t, [1, 2]);
+      const began = f.nextCapture();
+      f.clock.advance(60000);
+      f.beginBoundary(1);
+      await began;
+      if (empty) f.captures[0].resolve();
+      else {
+        f.chunk('{"partial":');
+        f.captures[0].reject(Error("protocol failed"));
+      }
+      await assert.rejects(f.controller.finish(), empty ? /empty/i : /protocol failed/);
+      const record = f.controller.records[0];
+      assert.equal(record.status, "failed");
+      assert.equal(await readFile(record.partialFile, "utf8"), empty ? "" : '{"partial":');
+      await assert.rejects(readFile(record.file), { code: "ENOENT" });
+      assert.equal(f.session.listenerCount("HeapProfiler.addHeapSnapshotChunk"), 0);
+    },
+  );
 
-test('heap snapshots surface asynchronous disk failure without waiting for a stuck protocol', async t => {
-  const { Writable } = await import('node:stream');
-  const f = await heapFixture(t, [1], { createStream: () => new Writable({ write(chunk, encoding, callback) { callback(Error('disk full')); } }) });
-  const began = f.nextCapture(); f.clock.advance(60000); f.beginBoundary(1); await began;
-  f.chunk('a chunk');
+test("heap snapshots surface asynchronous disk failure without waiting for a stuck protocol", async (t) => {
+  const { Writable } = await import("node:stream");
+  const f = await heapFixture(t, [1], {
+    createStream: () =>
+      new Writable({
+        write(chunk, encoding, callback) {
+          callback(Error("disk full"));
+        },
+      }),
+  });
+  const began = f.nextCapture();
+  f.clock.advance(60000);
+  f.beginBoundary(1);
+  await began;
+  f.chunk("a chunk");
   await assert.rejects(f.controller.finish(), /disk full/);
-  assert.equal(f.controller.records[0].status, 'failed');
-  assert.equal(f.calls.at(-1).method, 'detach');
+  assert.equal(f.controller.records[0].status, "failed");
+  assert.equal(f.calls.at(-1).method, "detach");
 });
 
-test('heap snapshots cancellation closes an active stream and cancels future captures', async t => {
+test("heap snapshots cancellation closes an active stream and cancels future captures", async (t) => {
   const abort = new AbortController();
   const f = await heapFixture(t, [1, 2], { signal: abort.signal });
-  const began = f.nextCapture(); f.clock.advance(60000); f.beginBoundary(1); await began;
-  f.chunk('{"partial":'); abort.abort(Error('benchmark interrupted'));
+  const began = f.nextCapture();
+  f.clock.advance(60000);
+  f.beginBoundary(1);
+  await began;
+  f.chunk('{"partial":');
+  abort.abort(Error("benchmark interrupted"));
   await assert.rejects(f.controller.finish(), /benchmark interrupted/);
-  assert.deepEqual(f.controller.records.map(r => r.status), ['cancelled', 'cancelled']);
-  assert.equal(f.session.listenerCount('HeapProfiler.addHeapSnapshotChunk'), 0);
-  assert.equal(f.calls.at(-1).method, 'detach');
+  assert.deepEqual(
+    f.controller.records.map((r) => r.status),
+    ["cancelled", "cancelled"],
+  );
+  assert.equal(f.session.listenerCount("HeapProfiler.addHeapSnapshotChunk"), 0);
+  assert.equal(f.calls.at(-1).method, "detach");
 });
 
-test('heap snapshots setup failure detaches its owned CDP session', async () => {
-  const { startRendererHeapSnapshots } = await import('./renderer-heap-snapshots.mjs');
+test("heap snapshots setup failure detaches its owned CDP session", async () => {
+  const { startRendererHeapSnapshots } = await import("./renderer-heap-snapshots.mjs");
   let detached = false;
-  await assert.rejects(startRendererHeapSnapshots({ session: { send: async () => { throw Error('enable failed'); }, detach: async () => { detached = true; } }, minutes: [1], output: 'unused' }), /enable failed/);
+  await assert.rejects(
+    startRendererHeapSnapshots({
+      session: {
+        send: async () => {
+          throw Error("enable failed");
+        },
+        detach: async () => {
+          detached = true;
+        },
+      },
+      minutes: [1],
+      output: "unused",
+    }),
+    /enable failed/,
+  );
   assert.equal(detached, true);
 });
 
-test('heap snapshots mark summaries diagnostic and retain capture receipts', async () => {
-  const captures = [{ minute: 10, status: 'complete', file: 'renderer-heap-10m.heapsnapshot' }];
-  const summary = await summarize({ settings: { heapSnapshotMinutes: [10] }, runs: [{ soak: { minutes: 10, cycles: [], elapsedMs: 600000, samples: [], heapSnapshots: captures, heapSnapshotPauseMs: 2500 } }] });
+test("heap snapshots mark summaries diagnostic and retain capture receipts", async () => {
+  const captures = [{ minute: 10, status: "complete", file: "renderer-heap-10m.heapsnapshot" }];
+  const summary = await summarize({
+    settings: { heapSnapshotMinutes: [10] },
+    runs: [
+      {
+        soak: {
+          minutes: 10,
+          cycles: [],
+          elapsedMs: 600000,
+          samples: [],
+          heapSnapshots: captures,
+          heapSnapshotPauseMs: 2500,
+        },
+      },
+    ],
+  });
   assert.equal(summary.diagnostic, true);
-  const comparison = compareSummaries({ ...summary, status: 'complete' }, { ...summary, status: 'complete' });
+  const comparison = compareSummaries(
+    { ...summary, status: "complete" },
+    { ...summary, status: "complete" },
+  );
   assert.equal(comparison.pass, false);
-  assert.deepEqual(comparison.problems, ['A profiled receipt cannot serve as a performance comparison.']);
+  assert.deepEqual(comparison.problems, [
+    "A profiled receipt cannot serve as a performance comparison.",
+  ]);
   assert.deepEqual(summary.soak[0].heapSnapshots, captures);
   assert.equal(summary.soak[0].heapSnapshotPauseMs, 2500);
-  assert.equal((await summarize({ settings: { heapSnapshotMinutes: [] }, runs: [] })).diagnostic, false);
+  assert.equal(
+    (await summarize({ settings: { heapSnapshotMinutes: [] }, runs: [] })).diagnostic,
+    false,
+  );
 });
 
-test('heap snapshots cancellation interrupts file completion after finish has begun', async t => {
-  const { Writable } = await import('node:stream');
+test("heap snapshots cancellation interrupts file completion after finish has begun", async (t) => {
+  const { Writable } = await import("node:stream");
   const final = deferred();
-  const f = await heapFixture(t, [1], { createStream: () => new Writable({
-    write(chunk, encoding, callback) { callback(); }, final() { final.resolve(); },
-  }) });
-  const began = f.nextCapture(); f.clock.advance(60000); f.beginBoundary(1); await began;
-  f.chunk('snapshot'); f.captures[0].resolve(); await final.promise;
+  const f = await heapFixture(t, [1], {
+    createStream: () =>
+      new Writable({
+        write(chunk, encoding, callback) {
+          callback();
+        },
+        final() {
+          final.resolve();
+        },
+      }),
+  });
+  const began = f.nextCapture();
+  f.clock.advance(60000);
+  f.beginBoundary(1);
+  await began;
+  f.chunk("snapshot");
+  f.captures[0].resolve();
+  await final.promise;
   const completion = f.controller.finish();
-  const cancelled = f.controller.cancel(Error('stop during disk close'));
+  const cancelled = f.controller.cancel(Error("stop during disk close"));
   await assert.rejects(completion, /stop during disk close/);
   await assert.rejects(cancelled, /stop during disk close/);
-  assert.equal(f.controller.records[0].status, 'cancelled');
-  assert.equal(f.calls.at(-1).method, 'detach');
+  assert.equal(f.controller.records[0].status, "cancelled");
+  assert.equal(f.calls.at(-1).method, "detach");
 });
 
-test('heap snapshots cancelled before their minute never send a capture command', async t => {
+test("heap snapshots cancelled before their minute never send a capture command", async (t) => {
   const f = await heapFixture(t);
-  await assert.rejects(f.controller.cancel(Error('soak failed')), /soak failed/);
+  await assert.rejects(f.controller.cancel(Error("soak failed")), /soak failed/);
   f.clock.advance(3600000);
   assert.equal(f.captures.length, 0);
-  assert.deepEqual(f.controller.records.map(r => r.status), ['cancelled', 'cancelled']);
+  assert.deepEqual(
+    f.controller.records.map((r) => r.status),
+    ["cancelled", "cancelled"],
+  );
 });
 
-test('heap snapshots soak waits for the cycle boundary and finishes before shutdown', { timeout: 120000 }, async t => {
-  const { runSoakCycles } = await import('./packaged-soak.mjs');
-  const firstCycle = deferred(), firstStep = deferred(), nextStep = deferred(), boundary = deferred();
-  const detaching = deferred(), releaseDetach = deferred(), events = [], captureStates = [];
-  t.after(() => { firstCycle.resolve(); releaseDetach.resolve(); });
-  const f = await heapFixture(t);
-  let activeStep = false, shutdown = false;
-  const send = f.session.send;
-  f.session.send = async (method, params) => {
-    if (method === 'HeapProfiler.takeHeapSnapshot') {
-      captureStates.push(activeStep);
-      events.push('capture');
-    }
-    return send(method, params);
-  };
-  const detach = f.session.detach;
-  f.session.detach = async () => { detaching.resolve(); await releaseDetach.promise; await detach(); };
-  const firstCapture = f.nextCapture();
-  const soak = runSoakCycles({ minutes: 60, heaps: f.controller, now: f.clock.now,
-    runCycle: async index => {
-      activeStep = true; events.push('step-' + index);
-      if (index === 1) { firstStep.resolve(); await firstCycle.promise; }
-      else { nextStep.resolve(); f.clock.advance(3000000); }
-      activeStep = false; events.push('boundary-' + index);
-    },
-    afterCycle: async index => { if (index === 1) boundary.resolve(); },
-  }).then(() => { shutdown = true; events.push('shutdown'); });
-  await firstStep.promise;
-  f.clock.advance(600000);
-  await Promise.resolve();
-  assert.equal(f.captures.length, 0, 'a due minute cannot interrupt an unfinished cycle');
-  firstCycle.resolve(); await firstCapture;
-  assert.equal(f.controller.records[0].cycle, 1);
-  assert.deepEqual(events, ['step-1', 'boundary-1', 'capture'], 'the next cycle waits for the capture');
-  f.clock.advance(2500);
-  const secondCapture = f.nextCapture();
-  f.chunk('{"first":true}'); f.captures[0].resolve();
-  await boundary.promise; await nextStep.promise; await secondCapture;
-  assert.equal(f.controller.records[1].cycle, 2);
-  assert.equal(f.controller.records[0].pauseMs, 2500);
-  f.clock.advance(4000);
-  f.chunk('{"second":true}'); f.captures[1].resolve();
-  await detaching.promise;
-  assert.equal(shutdown, false, 'soak must await finish, including session detach');
-  releaseDetach.resolve(); await soak;
-  assert.deepEqual(events, ['step-1', 'boundary-1', 'capture', 'step-2', 'boundary-2', 'capture', 'shutdown']);
-  assert.deepEqual(captureStates, [false, false], 'no browser step may run during either capture');
-  assert.deepEqual(f.controller.records.map(r => r.status), ['complete', 'complete']);
-  assert.equal(f.controller.records[1].pauseMs, 4000);
-});
+test(
+  "heap snapshots soak waits for the cycle boundary and finishes before shutdown",
+  { timeout: 120000 },
+  async (t) => {
+    const { runSoakCycles } = await import("./packaged-soak.mjs");
+    const firstCycle = deferred(),
+      firstStep = deferred(),
+      nextStep = deferred(),
+      boundary = deferred();
+    const detaching = deferred(),
+      releaseDetach = deferred(),
+      events = [],
+      captureStates = [];
+    t.after(() => {
+      firstCycle.resolve();
+      releaseDetach.resolve();
+    });
+    const f = await heapFixture(t);
+    let activeStep = false,
+      shutdown = false;
+    const send = f.session.send;
+    f.session.send = async (method, params) => {
+      if (method === "HeapProfiler.takeHeapSnapshot") {
+        captureStates.push(activeStep);
+        events.push("capture");
+      }
+      return send(method, params);
+    };
+    const detach = f.session.detach;
+    f.session.detach = async () => {
+      detaching.resolve();
+      await releaseDetach.promise;
+      await detach();
+    };
+    const firstCapture = f.nextCapture();
+    const soak = runSoakCycles({
+      minutes: 60,
+      heaps: f.controller,
+      now: f.clock.now,
+      runCycle: async (index) => {
+        activeStep = true;
+        events.push("step-" + index);
+        if (index === 1) {
+          firstStep.resolve();
+          await firstCycle.promise;
+        } else {
+          nextStep.resolve();
+          f.clock.advance(3000000);
+        }
+        activeStep = false;
+        events.push("boundary-" + index);
+      },
+      afterCycle: async (index) => {
+        if (index === 1) boundary.resolve();
+      },
+    }).then(() => {
+      shutdown = true;
+      events.push("shutdown");
+    });
+    await firstStep.promise;
+    f.clock.advance(600000);
+    await Promise.resolve();
+    assert.equal(f.captures.length, 0, "a due minute cannot interrupt an unfinished cycle");
+    firstCycle.resolve();
+    await firstCapture;
+    assert.equal(f.controller.records[0].cycle, 1);
+    assert.deepEqual(
+      events,
+      ["step-1", "boundary-1", "capture"],
+      "the next cycle waits for the capture",
+    );
+    f.clock.advance(2500);
+    const secondCapture = f.nextCapture();
+    f.chunk('{"first":true}');
+    f.captures[0].resolve();
+    await boundary.promise;
+    await nextStep.promise;
+    await secondCapture;
+    assert.equal(f.controller.records[1].cycle, 2);
+    assert.equal(f.controller.records[0].pauseMs, 2500);
+    f.clock.advance(4000);
+    f.chunk('{"second":true}');
+    f.captures[1].resolve();
+    await detaching.promise;
+    assert.equal(shutdown, false, "soak must await finish, including session detach");
+    releaseDetach.resolve();
+    await soak;
+    assert.deepEqual(events, [
+      "step-1",
+      "boundary-1",
+      "capture",
+      "step-2",
+      "boundary-2",
+      "capture",
+      "shutdown",
+    ]);
+    assert.deepEqual(
+      captureStates,
+      [false, false],
+      "no browser step may run during either capture",
+    );
+    assert.deepEqual(
+      f.controller.records.map((r) => r.status),
+      ["complete", "complete"],
+    );
+    assert.equal(f.controller.records[1].pauseMs, 4000);
+  },
+);
 
-test('heap snapshots soak cancels remaining captures on a cycle error', { timeout: 120000 }, async t => {
-  const { runSoakCycles } = await import('./packaged-soak.mjs');
-  const f = await heapFixture(t);
-  const began = f.nextCapture();
-  let shutdown = false;
-  const error = Error('closePalette failed');
-  const soak = runSoakCycles({ minutes: 60, heaps: f.controller, now: f.clock.now,
-    runCycle: async index => {
-      if (index === 1) f.clock.advance(600000);
-      else { f.clock.advance(3000000); throw error; }
-    },
-  }).then(() => { shutdown = true; });
-  const rejected = assert.rejects(soak, value => value === error);
-  await began; f.chunk('{"first":true}'); f.captures[0].resolve(); await rejected;
-  assert.equal(shutdown, false);
-  assert.equal(f.captures.length, 1);
-  assert.deepEqual(f.controller.records.map(r => r.status), ['complete', 'cancelled']);
-  assert.equal(f.calls.at(-1).method, 'detach');
-});
+test(
+  "heap snapshots soak cancels remaining captures on a cycle error",
+  { timeout: 120000 },
+  async (t) => {
+    const { runSoakCycles } = await import("./packaged-soak.mjs");
+    const f = await heapFixture(t);
+    const began = f.nextCapture();
+    let shutdown = false;
+    const error = Error("closePalette failed");
+    const soak = runSoakCycles({
+      minutes: 60,
+      heaps: f.controller,
+      now: f.clock.now,
+      runCycle: async (index) => {
+        if (index === 1) f.clock.advance(600000);
+        else {
+          f.clock.advance(3000000);
+          throw error;
+        }
+      },
+    }).then(() => {
+      shutdown = true;
+    });
+    const rejected = assert.rejects(soak, (value) => value === error);
+    await began;
+    f.chunk('{"first":true}');
+    f.captures[0].resolve();
+    await rejected;
+    assert.equal(shutdown, false);
+    assert.equal(f.captures.length, 1);
+    assert.deepEqual(
+      f.controller.records.map((r) => r.status),
+      ["complete", "cancelled"],
+    );
+    assert.equal(f.calls.at(-1).method, "detach");
+  },
+);
 
-test('heap snapshots soak captures the final minute crossed during boundary bookkeeping', { timeout: 120000 }, async t => {
-  const { runSoakCycles } = await import('./packaged-soak.mjs');
-  const f = await heapFixture(t, [60]);
-  const began = f.nextCapture(), events = [];
-  const soak = runSoakCycles({ minutes: 60, heaps: f.controller, now: f.clock.now,
-    runCycle: async index => { events.push('cycle-' + index); f.clock.advance(3599999); },
-    afterCycle: async () => { events.push('bookkeeping'); f.clock.advance(1); },
-  }).then(() => events.push('shutdown'));
-  await began;
-  assert.deepEqual(events, ['cycle-1', 'bookkeeping']);
-  assert.equal(f.controller.records[0].cycle, 1);
-  f.chunk('{"final":true}'); f.captures[0].resolve(); await soak;
-  assert.deepEqual(events, ['cycle-1', 'bookkeeping', 'shutdown']);
-  assert.equal(f.controller.records[0].status, 'complete');
-});
+test(
+  "heap snapshots soak captures the final minute crossed during boundary bookkeeping",
+  { timeout: 120000 },
+  async (t) => {
+    const { runSoakCycles } = await import("./packaged-soak.mjs");
+    const f = await heapFixture(t, [60]);
+    const began = f.nextCapture(),
+      events = [];
+    const soak = runSoakCycles({
+      minutes: 60,
+      heaps: f.controller,
+      now: f.clock.now,
+      runCycle: async (index) => {
+        events.push("cycle-" + index);
+        f.clock.advance(3599999);
+      },
+      afterCycle: async () => {
+        events.push("bookkeeping");
+        f.clock.advance(1);
+      },
+    }).then(() => events.push("shutdown"));
+    await began;
+    assert.deepEqual(events, ["cycle-1", "bookkeeping"]);
+    assert.equal(f.controller.records[0].cycle, 1);
+    f.chunk('{"final":true}');
+    f.captures[0].resolve();
+    await soak;
+    assert.deepEqual(events, ["cycle-1", "bookkeeping", "shutdown"]);
+    assert.equal(f.controller.records[0].status, "complete");
+  },
+);
 
-test('heap snapshots soak captures a later due minute crossed during the first pause without another cycle', { timeout: 120000 }, async t => {
-  const { runSoakCycles } = await import('./packaged-soak.mjs');
-  const f = await heapFixture(t);
-  const first = f.nextCapture(), second = f.nextCapture(), cycles = [];
-  const soak = runSoakCycles({ minutes: 60, heaps: f.controller, now: f.clock.now,
-    runCycle: async index => { cycles.push(index); f.clock.advance(600000); },
-  });
-  await first; f.clock.advance(3000000);
-  f.chunk('{"first":true}'); f.captures[0].resolve(); await second;
-  assert.deepEqual(cycles, [1]);
-  f.chunk('{"second":true}'); f.captures[1].resolve(); await soak;
-  assert.deepEqual(f.controller.records.map(r => r.cycle), [1, 1]);
-  assert.equal(f.controller.records[0].pauseMs, 3000000);
-});
+test(
+  "heap snapshots soak captures a later due minute crossed during the first pause without another cycle",
+  { timeout: 120000 },
+  async (t) => {
+    const { runSoakCycles } = await import("./packaged-soak.mjs");
+    const f = await heapFixture(t);
+    const first = f.nextCapture(),
+      second = f.nextCapture(),
+      cycles = [];
+    const soak = runSoakCycles({
+      minutes: 60,
+      heaps: f.controller,
+      now: f.clock.now,
+      runCycle: async (index) => {
+        cycles.push(index);
+        f.clock.advance(600000);
+      },
+    });
+    await first;
+    f.clock.advance(3000000);
+    f.chunk('{"first":true}');
+    f.captures[0].resolve();
+    await second;
+    assert.deepEqual(cycles, [1]);
+    f.chunk('{"second":true}');
+    f.captures[1].resolve();
+    await soak;
+    assert.deepEqual(
+      f.controller.records.map((r) => r.cycle),
+      [1, 1],
+    );
+    assert.equal(f.controller.records[0].pauseMs, 3000000);
+  },
+);
 
 // Run the actual signal setup and cleanup paths without launching Electron.
 for (const [name, scenario, abort, expectedCode] of [
-  ['document deadline', 'document-size', 'deadline', undefined],
-  ['presence admission loss', 'presence', 'slot', 1],
-  ['presence interrupt', 'presence', 'interrupt', 130],
-]) test(`benchmark cancellation preserves exit status for ${name} through cleanup errors`, async () => {
-  const source = await readFile(new URL('./packaged-benchmark.mjs', import.meta.url), 'utf8');
-  const setup = source.slice(source.indexOf('const cancellation = benchmarkCancellation();'), source.indexOf("await json(join(output, 'result.json'), receipt);"));
-  const teardown = source.slice(source.lastIndexOf('} catch (error) {'));
-  const interrupt = new AbortController(), slot = new AbortController();
-  const process = { env: {} }, receipt = {}, cleanup = [];
-  await vm.runInNewContext(`(async () => {
+  ["document deadline", "document-size", "deadline", undefined],
+  ["presence admission loss", "presence", "slot", 1],
+  ["presence interrupt", "presence", "interrupt", 130],
+])
+  test(`benchmark cancellation preserves exit status for ${name} through cleanup errors`, async () => {
+    const source = await readFile(new URL("./packaged-benchmark.mjs", import.meta.url), "utf8");
+    const setup = source.slice(
+      source.indexOf("const cancellation = benchmarkCancellation();"),
+      source.indexOf('await json(join(output, "result.json"), receipt);'),
+    );
+    const teardown = source.slice(source.lastIndexOf("} catch (error) {"));
+    const interrupt = new AbortController(),
+      slot = new AbortController();
+    const process = { env: {} },
+      receipt = {},
+      cleanup = [];
+    await vm.runInNewContext(
+      `(async () => {
     const root = '.', output = '.', feedRequests = [], json = async () => {}, join = (...parts) => parts.join('/');
     const dirname = () => '.', writeFile = async () => {}, console = { error() {} };
     let profilingSlot, feed, presenceFixture, goToFixture, helperStartup;
@@ -1821,21 +3887,47 @@ for (const [name, scenario, abort, expectedCode] of [
     abort(documentDeadline);
     benchmarkSignal.throwIfAborted();
     ${teardown}
-  })()`, {
-    AbortController, AbortSignal, scenario, process, receipt, cleanup,
-    benchmarkCancellation: () => ({ signal: interrupt.signal, dispose() { cleanup.push('dispose'); } }),
-    acquireProfilingSlot: () => ({ signal: slot.signal, evidence: {}, release() { cleanup.push('release'); } }),
-    abort(deadline) {
-      const reason = Error(name);
-      if (abort === 'deadline') deadline.abort(reason);
-      else if (abort === 'slot') slot.abort(reason);
-      else { process.exitCode = 130; interrupt.abort(reason); }
-    },
+  })()`,
+      {
+        AbortController,
+        AbortSignal,
+        scenario,
+        process,
+        receipt,
+        cleanup,
+        benchmarkCancellation: () => ({
+          signal: interrupt.signal,
+          dispose() {
+            cleanup.push("dispose");
+          },
+        }),
+        acquireProfilingSlot: () => ({
+          signal: slot.signal,
+          evidence: {},
+          release() {
+            cleanup.push("release");
+          },
+        }),
+        abort(deadline) {
+          const reason = Error(name);
+          if (abort === "deadline") deadline.abort(reason);
+          else if (abort === "slot") slot.abort(reason);
+          else {
+            process.exitCode = 130;
+            interrupt.abort(reason);
+          }
+        },
+      },
+    );
+    assert.equal(process.exitCode, expectedCode);
+    assert.equal(receipt.status, "failed");
+    assert.match(receipt.error, new RegExp(name));
+    assert.match(receipt.shutdownError, /package cleanup/);
+    assert.match(receipt.helperCleanupError, /helper cleanup/);
+    assert.deepEqual(cleanup, [
+      "package",
+      "helper",
+      ...(scenario === "presence" ? ["release"] : []),
+      "dispose",
+    ]);
   });
-  assert.equal(process.exitCode, expectedCode);
-  assert.equal(receipt.status, 'failed');
-  assert.match(receipt.error, new RegExp(name));
-  assert.match(receipt.shutdownError, /package cleanup/);
-  assert.match(receipt.helperCleanupError, /helper cleanup/);
-  assert.deepEqual(cleanup, ['package', 'helper', ...(scenario === 'presence' ? ['release'] : []), 'dispose']);
-});

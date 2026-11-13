@@ -32,7 +32,9 @@ describe("dohc guard refusals", () => {
     expect(fileChangedWhileOpeningRefusal(guard)).toBe(
       "dohc could not save this database edit. The file at .dohc/databases/data/operations.jsonl changed while dohc opened it. Stop other programs from changing this file. Then retry.",
     );
-    expect(folderChangedBeforeWritingRefusal({ ...DOHC_DATABASES_GUARD, path: ".dohc/databases/data" })).toBe(
+    expect(
+      folderChangedBeforeWritingRefusal({ ...DOHC_DATABASES_GUARD, path: ".dohc/databases/data" }),
+    ).toBe(
       "dohc could not save this database edit. The folder at .dohc/databases/data changed before dohc could save the edit. Stop other programs from changing this folder. Then retry.",
     );
   });
@@ -52,7 +54,9 @@ describe("dohc guard refusals", () => {
     expect(notARealFolderRefusal(DOHC_ENGINE_GUARD, asFile)).toBe(
       "dohc could not start the engine for this workspace. A file is at .dohc/engine, which must be a real folder. Remove or rename that file. Then retry.",
     );
-    expect(notAFileRefusal({ ...DOHC_SYNC_HISTORY_GUARD, path: ".dohc/sync-history/synced" }, asLink)).toBe(
+    expect(
+      notAFileRefusal({ ...DOHC_SYNC_HISTORY_GUARD, path: ".dohc/sync-history/synced" }, asLink),
+    ).toBe(
       "dohc could not record this workspace's sync history. A link is at .dohc/sync-history/synced, which must be a file. Remove or rename that link. Then retry.",
     );
     expect(notAFileRefusal(DOHC_COLLECTIONS_GUARD, asLink)).toBe(

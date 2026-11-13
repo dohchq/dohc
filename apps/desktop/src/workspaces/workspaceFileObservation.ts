@@ -37,7 +37,10 @@ export interface WorkspaceObservationCallbacks {
 // Read one cursor at a time. A wake received during a read schedules another
 // read; neither capture ordering nor the transport's event queue is a cursor.
 export function observeWorkspaceFiles(options: {
-  read(cursor: FileObservationCursor | undefined, drain: boolean): Promise<FileObservationChanges & { degraded?: boolean }>;
+  read(
+    cursor: FileObservationCursor | undefined,
+    drain: boolean,
+  ): Promise<FileObservationChanges & { degraded?: boolean }>;
   subscribe(wake: () => void, captured: (paths?: readonly string[]) => void): () => void;
   callbacks: WorkspaceObservationCallbacks;
   onError(error: unknown): void;
@@ -48,7 +51,9 @@ export function observeWorkspaceFiles(options: {
   let dirty = false;
   let chain = Promise.resolve();
   let resolveReady!: () => void;
-  const ready = new Promise<void>(resolve => { resolveReady = resolve; });
+  const ready = new Promise<void>((resolve) => {
+    resolveReady = resolve;
+  });
   let readySeen = false;
   let unavailable = false;
   // Deduplicate facts delivered before a pull page. A later fact can also
@@ -75,7 +80,10 @@ export function observeWorkspaceFiles(options: {
     options.callbacks.degraded(changes.degraded ? "unavailable" : null);
     if (changes.ready) {
       unavailable = false;
-      if (!readySeen) { readySeen = true; resolveReady(); }
+      if (!readySeen) {
+        readySeen = true;
+        resolveReady();
+      }
     } else if (changes.degraded) {
       unavailable = true;
       resolveReady();
@@ -84,7 +92,9 @@ export function observeWorkspaceFiles(options: {
 
   function enqueue(task: () => Promise<void>): Promise<void> {
     const next = chain.then(task);
-    chain = next.catch(error => { if (!drainTimedOut) options.onError(error); });
+    chain = next.catch((error) => {
+      if (!drainTimedOut) options.onError(error);
+    });
     return next;
   }
 
@@ -97,7 +107,10 @@ export function observeWorkspaceFiles(options: {
       if (closing) return;
       await apply(await options.read(cursor, false));
       retryMs = 250;
-      if (retryTimer) { clearTimeout(retryTimer); retryTimer = undefined; }
+      if (retryTimer) {
+        clearTimeout(retryTimer);
+        retryTimer = undefined;
+      }
     });
     pendingRead = next;
     void next.catch(() => {
@@ -119,15 +132,21 @@ export function observeWorkspaceFiles(options: {
     });
     return next;
   }
-  const unsubscribe = options.subscribe(wake, paths => {
+  const unsubscribe = options.subscribe(wake, (paths) => {
     if (!closing) options.callbacks.captured(paths);
   });
   void wake();
   let stopped: Promise<void> | undefined;
   return {
     ready,
-    pullStarting() { pulling = true; observedPaths.clear(); },
-    pullFinished() { pulling = false; observedPaths.clear(); },
+    pullStarting() {
+      pulling = true;
+      observedPaths.clear();
+    },
+    pullFinished() {
+      pulling = false;
+      observedPaths.clear();
+    },
     retry() {
       if (retryTimer) {
         clearTimeout(retryTimer);
@@ -139,9 +158,11 @@ export function observeWorkspaceFiles(options: {
     pulledPaths(paths) {
       if (closing) return Promise.resolve();
       try {
-        const remaining = paths.filter(path => !observedPaths.has(path));
+        const remaining = paths.filter((path) => !observedPaths.has(path));
         if (remaining.length) options.callbacks.pulled(remaining);
-      } catch (error) { options.onError(error); }
+      } catch (error) {
+        options.onError(error);
+      }
       return Promise.resolve();
     },
     stop() {
@@ -179,30 +200,44 @@ export function startWorkspaceFileObservation(
   callbacks: WorkspaceObservationCallbacks,
 ): WorkspaceObservationHandle {
   return observeWorkspaceFiles({
-    read: (cursor, drain) => sessions.run(workspace, async binding => {
-      const feed = new EngineFileObservation(binding.client, binding.workspace);
-      const changes = await (drain ? feed.drain(cursor) : feed.changesSince(cursor));
-      const degraded = !changes.ready && workspace.captureMode !== "none"
-        ? (await new VersionedLiveAdapter(binding.client, binding.workspace, { workspaceId: workspace.workspaceId }).watcherStatus()).degraded
-        : false;
-      sessions.assertCurrentBinding(workspace, binding);
-      return { ...changes, degraded };
-    }),
+    read: (cursor, drain) =>
+      sessions.run(workspace, async (binding) => {
+        const feed = new EngineFileObservation(binding.client, binding.workspace);
+        const changes = await (drain ? feed.drain(cursor) : feed.changesSince(cursor));
+        const degraded =
+          !changes.ready && workspace.captureMode !== "none"
+            ? (
+                await new VersionedLiveAdapter(binding.client, binding.workspace, {
+                  workspaceId: workspace.workspaceId,
+                }).watcherStatus()
+              ).degraded
+            : false;
+        sessions.assertCurrentBinding(workspace, binding);
+        return { ...changes, degraded };
+      }),
     subscribe: (wake, captured) => {
-      const eventOff = daemon.onEvent(event => {
+      const eventOff = daemon.onEvent((event) => {
         if (event.name === "workspace.filesChanged") {
           try {
-            if (decodeFileObservationWake(event.payload).workspaceId === workspace.workspaceId) wake();
-          } catch { wake(); }
+            if (decodeFileObservationWake(event.payload).workspaceId === workspace.workspaceId)
+              wake();
+          } catch {
+            wake();
+          }
         } else if (event.name === "capture.momentRecorded") {
           const scope = scopeOf(event.payload);
-          if (!scope || scope.workspaceId === workspace.workspaceId) captured(scope?.paths ?? undefined);
+          if (!scope || scope.workspaceId === workspace.workspaceId)
+            captured(scope?.paths ?? undefined);
         }
       });
       const clientOff = daemon.onClientChanged(wake);
-      return () => { eventOff(); clientOff(); };
+      return () => {
+        eventOff();
+        clientOff();
+      };
     },
     callbacks,
-    onError: error => console.error(`[desktop] file observation for ${workspace.workspaceId}:`, error),
+    onError: (error) =>
+      console.error(`[desktop] file observation for ${workspace.workspaceId}:`, error),
   });
 }

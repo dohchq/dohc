@@ -9,7 +9,13 @@ import { useAgentSetup } from "./useAgentSetup";
 
 const inactive: AgentRunStatusResult = { activeRun: null, lastRun: null };
 const active: AgentRunStatusResult = {
-  activeRun: { id: "run-1", startedAt: 1, agentId: "agent", onBehalfOf: "owner", status: "running" },
+  activeRun: {
+    id: "run-1",
+    startedAt: 1,
+    agentId: "agent",
+    onBehalfOf: "owner",
+    status: "running",
+  },
   lastRun: null,
 };
 
@@ -22,19 +28,27 @@ it("reads run status when the workspace opens and again when Settings closes", a
   const getAgentRunStatus = vi.fn().mockResolvedValue(inactive);
   vi.stubGlobal("dohcDesktop", { getAgentRunStatus });
   const { rerender } = renderHook(
-    ({ section }: { section: SettingsSectionId | null }) => useAgentSetup("ws-1", null, section, true),
+    ({ section }: { section: SettingsSectionId | null }) =>
+      useAgentSetup("ws-1", null, section, true),
     { initialProps: { section: null } as { section: SettingsSectionId | null } },
   );
   expect(getAgentRunStatus).toHaveBeenCalledExactlyOnceWith({ workspaceId: "ws-1" });
   rerender({ section: "agents" });
-  await act(async () => { rerender({ section: null }); });
+  await act(async () => {
+    rerender({ section: null });
+  });
   expect(getAgentRunStatus).toHaveBeenCalledTimes(2);
   expect(getAgentRunStatus).toHaveBeenLastCalledWith({ workspaceId: "ws-1" });
 });
 
 it("drops a slow run read from A after a switch to B and back to A", async () => {
   const reads: Array<(status: AgentRunStatusResult) => void> = [];
-  const getAgentRunStatus = vi.fn(() => new Promise<AgentRunStatusResult>((done) => { reads.push(done); }));
+  const getAgentRunStatus = vi.fn(
+    () =>
+      new Promise<AgentRunStatusResult>((done) => {
+        reads.push(done);
+      }),
+  );
   vi.stubGlobal("dohcDesktop", { getAgentRunStatus });
   const settings: DesktopUserSettingsResult = { settings: DEFAULT_USER_SETTINGS, source: "stored" };
   const { result, rerender } = renderHook(
@@ -45,22 +59,28 @@ it("drops a slow run read from A after a switch to B and back to A", async () =>
   rerender({ workspaceId: "ws-a" });
   expect(reads).toHaveLength(3);
 
-  await act(async () => { reads[2]!(inactive); });
+  await act(async () => {
+    reads[2]!(inactive);
+  });
   expect(result.current.agentSetup).toMatchObject({ workspaceId: "ws-a", agentRunActive: false });
   // The first A read and B's read both answer after the current one.
-  await act(async () => { reads[0]!(active); reads[1]!(active); });
+  await act(async () => {
+    reads[0]!(active);
+    reads[1]!(active);
+  });
   expect(result.current.agentSetup).toMatchObject({ workspaceId: "ws-a", agentRunActive: false });
 });
 
 it("does not read agent status before workspace admission", async () => {
   const getAgentRunStatus = vi.fn().mockResolvedValue(inactive);
   vi.stubGlobal("dohcDesktop", { getAgentRunStatus });
-  const { rerender } = renderHook(
-    ({ ready }) => useAgentSetup("workspace", null, null, ready),
-    { initialProps: { ready: false } },
-  );
+  const { rerender } = renderHook(({ ready }) => useAgentSetup("workspace", null, null, ready), {
+    initialProps: { ready: false },
+  });
   expect(getAgentRunStatus).not.toHaveBeenCalled();
-  await act(async () => { rerender({ ready: true }); });
+  await act(async () => {
+    rerender({ ready: true });
+  });
   expect(getAgentRunStatus).toHaveBeenCalledExactlyOnceWith({ workspaceId: "workspace" });
 });
 
@@ -68,10 +88,17 @@ it("sums up the agent dohc starts when an agent you run comes first", async () =
   vi.stubGlobal("dohcDesktop", { getAgentRunStatus: vi.fn().mockResolvedValue(inactive) });
   const { launch: _launch, ...yours } = testAgent({ name: "Terminal", enabled: false });
   const settings: DesktopUserSettingsResult = {
-    settings: { ...DEFAULT_USER_SETTINGS, agents: { agent: yours, "agent-2": testAgent({ name: "Nova" }) } },
+    settings: {
+      ...DEFAULT_USER_SETTINGS,
+      agents: { agent: yours, "agent-2": testAgent({ name: "Nova" }) },
+    },
     source: "stored",
   };
   const { result } = renderHook(() => useAgentSetup("ws-1", settings, null, true));
   await act(async () => undefined);
-  expect(result.current.agentSetup).toMatchObject({ agentName: "Nova", runnerConfigured: true, runnerEnabled: true });
+  expect(result.current.agentSetup).toMatchObject({
+    agentName: "Nova",
+    runnerConfigured: true,
+    runnerEnabled: true,
+  });
 });

@@ -47,18 +47,12 @@ describe("parseExcalidrawDocument", () => {
     ["an invalid elements list", '{"type":"excalidraw","elements":{}}'],
     ["invalid app state", '{"type":"excalidraw","appState":[]}'],
     ["invalid embedded files", '{"type":"excalidraw","files":[]}'],
-    [
-      "a null element",
-      '{"type":"excalidraw","elements":[null],"appState":{},"files":{}}',
-    ],
+    ["a null element", '{"type":"excalidraw","elements":[null],"appState":{},"files":{}}'],
     [
       "a null active tool",
       '{"type":"excalidraw","elements":[],"appState":{"activeTool":null},"files":{}}',
     ],
-    [
-      "a non-string legacy font",
-      '{"type":"excalidraw","elements":[{"type":"text","font":null}]}',
-    ],
+    ["a non-string legacy font", '{"type":"excalidraw","elements":[{"type":"text","font":null}]}'],
     [
       "non-string text content",
       '{"type":"excalidraw","elements":[{"type":"text","text":null,"height":20}]}',
@@ -83,10 +77,7 @@ describe("parseExcalidrawDocument", () => {
       "non-array legacy element bindings",
       '{"type":"excalidraw","elements":[{"type":"rectangle","boundElementIds":{}}]}',
     ],
-    [
-      "missing linear points",
-      '{"type":"excalidraw","elements":[{"type":"line"}]}',
-    ],
+    ["missing linear points", '{"type":"excalidraw","elements":[{"type":"line"}]}'],
     [
       "malformed linear points",
       '{"type":"excalidraw","elements":[{"type":"line","points":[null,[1,2]]}]}',
@@ -95,10 +86,7 @@ describe("parseExcalidrawDocument", () => {
       "a malformed fixed-point binding",
       '{"type":"excalidraw","elements":[{"type":"arrow","points":[[0,0],[1,1]],"elbowed":true,"startBinding":{"fixedPoint":{"0":0.5,"1":0.5}}}]}',
     ],
-    [
-      "a null embedded file",
-      '{"type":"excalidraw","files":{"file-1":null}}',
-    ],
+    ["a null embedded file", '{"type":"excalidraw","files":{"file-1":null}}'],
   ])("rejects %s", (_label, text) => {
     expect(() => parseExcalidrawDocument(text)).toThrow();
   });

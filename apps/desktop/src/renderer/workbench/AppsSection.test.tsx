@@ -67,10 +67,15 @@ function Harness(props: HarnessProps) {
     mode: "home",
     onModeChange: noop,
     listed: true,
-    files: [{ path: "client-portal/index.html", kind: "file" }, { path: "docs/index.html", kind: "file" }],
+    files: [
+      { path: "client-portal/index.html", kind: "file" },
+      { path: "docs/index.html", kind: "file" },
+    ],
     folders: ["client-portal", "docs"],
     listingRequest: 0,
-    editorGroups: [{ id: "group-1", tabs: activeTab ? [{ path: activeTab }] : [], activeTab, size: 1 }],
+    editorGroups: [
+      { id: "group-1", tabs: activeTab ? [{ path: activeTab }] : [], activeTab, size: 1 },
+    ],
     activeEditorGroup: "group-1",
     dirtyPaths: new Set(),
     recoveryPaths: new Set(),
@@ -178,7 +183,9 @@ describe("Home's Apps section", () => {
     await user.click(screen.getByRole("button", { name: "Pin to sidebar" }));
     expect(onSetPinned).toHaveBeenLastCalledWith("client-portal", true);
 
-    view.rerender(<Harness onOpenPath={onOpenPath} onSetPinned={onSetPinned} pinnedApps={["client-portal"]} />);
+    view.rerender(
+      <Harness onOpenPath={onOpenPath} onSetPinned={onSetPinned} pinnedApps={["client-portal"]} />,
+    );
     await user.click(screen.getByRole("button", { name: "Unpin" }));
     expect(onSetPinned).toHaveBeenLastCalledWith("client-portal", false);
     expect(onOpenPath).not.toHaveBeenCalled();
@@ -283,9 +290,7 @@ describe("Home's Apps section", () => {
     const workspaceA = deferred<{ sites: SitePackageInfo[] }>();
     const workspaceB = deferred<{ sites: SitePackageInfo[] }>();
     bridgeMock.listSites.mockImplementation((input: { workspaceId: string }) =>
-      input.workspaceId === "workspace-a"
-        ? workspaceA.promise
-        : workspaceB.promise,
+      input.workspaceId === "workspace-a" ? workspaceA.promise : workspaceB.promise,
     );
     const view = render(<Harness workspaceId="workspace-a" />);
 

@@ -32,20 +32,31 @@ describe("workspace trust", () => {
     const { file, workspace } = await setup();
     await createWorkspaceTrust({ file }).trust(workspace);
     expect(await createWorkspaceTrust({ file }).isTrusted(workspace)).toBe(true);
-    const saved = JSON.parse(await readFile(file, "utf8")) as { trusted: Array<{ workspaceId: string; rootPath: string; folder: string | null }> };
-    expect(saved.trusted).toEqual([expect.objectContaining({ workspaceId: "trip", rootPath: workspace.rootPath.replaceAll("\\", "/"), folder: expect.any(String) })]);
+    const saved = JSON.parse(await readFile(file, "utf8")) as {
+      trusted: Array<{ workspaceId: string; rootPath: string; folder: string | null }>;
+    };
+    expect(saved.trusted).toEqual([
+      expect.objectContaining({
+        workspaceId: "trip",
+        rootPath: workspace.rootPath.replaceAll("\\", "/"),
+        folder: expect.any(String),
+      }),
+    ]);
   });
 
-  it.runIf(process.platform === "win32")("matches one folder spelled with forward slashes or backslashes", async () => {
-    const { file, workspace } = await setup();
-    const forward = { ...workspace, rootPath: workspace.rootPath.replaceAll("\\", "/") };
-    const back = { ...workspace, rootPath: workspace.rootPath.replaceAll("/", "\\") };
-    const trust = createWorkspaceTrust({ file });
-    await trust.trust(forward);
-    expect(await trust.isTrusted(back)).toBe(true);
-    await trust.trust(back);
-    expect(await createWorkspaceTrust({ file }).isTrusted(forward)).toBe(true);
-  });
+  it.runIf(process.platform === "win32")(
+    "matches one folder spelled with forward slashes or backslashes",
+    async () => {
+      const { file, workspace } = await setup();
+      const forward = { ...workspace, rootPath: workspace.rootPath.replaceAll("\\", "/") };
+      const back = { ...workspace, rootPath: workspace.rootPath.replaceAll("/", "\\") };
+      const trust = createWorkspaceTrust({ file });
+      await trust.trust(forward);
+      expect(await trust.isTrusted(back)).toBe(true);
+      await trust.trust(back);
+      expect(await createWorkspaceTrust({ file }).isTrusted(forward)).toBe(true);
+    },
+  );
 
   it("gives another workspace in the same folder, or the same workspace elsewhere, no trust", async () => {
     const { scratch, file, workspace } = await setup();
@@ -107,7 +118,10 @@ describe("workspace trust", () => {
     await writeFile(file, "{ not json");
     expect(await createWorkspaceTrust({ file }).isTrusted(workspace)).toBe(false);
     // A record someone wrote by hand without the folder's identity does not match.
-    await writeFile(file, JSON.stringify({ version: 1, trusted: [{ ...workspace, folder: null, trustedAtMs: 1 }] }));
+    await writeFile(
+      file,
+      JSON.stringify({ version: 1, trusted: [{ ...workspace, folder: null, trustedAtMs: 1 }] }),
+    );
     expect(await createWorkspaceTrust({ file }).isTrusted(workspace)).toBe(false);
   });
 
@@ -129,7 +143,10 @@ describe("trust against races and failed files", () => {
     const trust = createWorkspaceTrust({
       file,
       identify: async (rootPath) => {
-        if (hold) { reached.resolve(); await release.promise; }
+        if (hold) {
+          reached.resolve();
+          await release.promise;
+        }
         return folderIdentity(rootPath);
       },
     });
@@ -164,7 +181,10 @@ describe("trust against races and failed files", () => {
   it("tells one listener of every change, whatever made it, and not of a grant a revoke beat", async () => {
     const { file, workspace } = await setup();
     const changes: Array<[string, boolean]> = [];
-    const trust = createWorkspaceTrust({ file, onChange: (workspaceId, trusted) => changes.push([workspaceId, trusted]) });
+    const trust = createWorkspaceTrust({
+      file,
+      onChange: (workspaceId, trusted) => changes.push([workspaceId, trusted]),
+    });
     // The dialog's grant, and New workspace's, which names its folder.
     await trust.trust(workspace);
     await trust.trust(workspace, { folder: null });
@@ -174,7 +194,13 @@ describe("trust against races and failed files", () => {
     const granting = trust.trust(workspace);
     trust.revoke("trip");
     expect(await granting).toBe(false);
-    expect(changes).toEqual([["trip", true], ["trip", true], ["trip", false], ["trip", false], ["trip", false]]);
+    expect(changes).toEqual([
+      ["trip", true],
+      ["trip", true],
+      ["trip", false],
+      ["trip", false],
+      ["trip", false],
+    ]);
   });
 
   it("keeps Restricted Mode when the person restricts while a grant waits to be written", async () => {
@@ -319,7 +345,9 @@ describe("trust against races and failed files", () => {
 
 describe("main's trust dialog", () => {
   function answering(response: number) {
-    const asked: Array<Parameters<Parameters<typeof confirmWorkspaceTrust>[0]["showMessageBox"]>[0]> = [];
+    const asked: Array<
+      Parameters<Parameters<typeof confirmWorkspaceTrust>[0]["showMessageBox"]>[0]
+    > = [];
     return {
       asked,
       deps: {
@@ -334,12 +362,14 @@ describe("main's trust dialog", () => {
   it("asks the person, names the folder, and defaults to Stay in Restricted Mode", async () => {
     const dialog = answering(1);
     expect(await confirmWorkspaceTrust(dialog.deps, { rootPath: "C:/Users/ice/trip" })).toBe(false);
-    expect(dialog.asked).toEqual([expect.objectContaining({
-      message: "Do you trust the authors of the files in this workspace?",
-      buttons: ["Trust workspace", "Stay in Restricted Mode"],
-      defaultId: 1,
-      cancelId: 1,
-    })]);
+    expect(dialog.asked).toEqual([
+      expect.objectContaining({
+        message: "Do you trust the authors of the files in this workspace?",
+        buttons: ["Trust workspace", "Stay in Restricted Mode"],
+        defaultId: 1,
+        cancelId: 1,
+      }),
+    ]);
     expect(dialog.asked[0]!.detail).toContain("That code can do anything you can");
     expect(dialog.asked[0]!.detail).toContain("C:/Users/ice/trip");
   });
@@ -351,7 +381,11 @@ describe("main's trust dialog", () => {
     const lines = `C:/trip${code(0x0a)}${code(0x0a)}Trust this folder${code(0x202e)}${code(0x07)}`;
     await confirmWorkspaceTrust(dialog.deps, { rootPath: lines });
     const detail = dialog.asked[0]!.detail;
-    expect(detail.endsWith(`C:/trip${escape("000a")}${escape("000a")}Trust this folder${escape("202e")}${escape("0007")}`)).toBe(true);
+    expect(
+      detail.endsWith(
+        `C:/trip${escape("000a")}${escape("000a")}Trust this folder${escape("202e")}${escape("0007")}`,
+      ),
+    ).toBe(true);
     expect(detail.split(code(0x0a)).filter(Boolean)).toHaveLength(3);
     expect(visiblePath("C:/Users/ice/trip")).toBe("C:/Users/ice/trip");
   });

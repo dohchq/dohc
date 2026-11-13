@@ -4,7 +4,12 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { bridge } from "../bridge";
 import { ChatMarkdown, createDrawnCache } from "./ChatMarkdown";
-import { CHAT_MARKDOWN_MAX_LENGTH, answerChatParse, parseChatMarkdown, type ChatParseRequest } from "./chatMarkdownParse";
+import {
+  CHAT_MARKDOWN_MAX_LENGTH,
+  answerChatParse,
+  parseChatMarkdown,
+  type ChatParseRequest,
+} from "./chatMarkdownParse";
 import { CHAT_PARSE_DEADLINE_MS } from "./chatMarkdownWorker";
 
 vi.mock("../bridge", () => ({ bridge: vi.fn() }));
@@ -73,7 +78,10 @@ describe("ChatMarkdown", () => {
     );
     expect(view.container.querySelector("strong")?.textContent).toBe("Personal");
     expect(view.container.querySelector("p code")?.textContent).toBe("Hello.md");
-    expect([...view.container.querySelectorAll("li")].map((item) => item.textContent)).toEqual(["one", "two"]);
+    expect([...view.container.querySelectorAll("li")].map((item) => item.textContent)).toEqual([
+      "one",
+      "two",
+    ]);
     expect(view.container.querySelector("pre code")?.textContent).toBe("const a = 1;");
     expect(view.getByRole("button", { name: "Copy code" })).toBeTruthy();
     expect(view.container.textContent).not.toContain("**");
@@ -124,7 +132,9 @@ describe("ChatMarkdown", () => {
     const onOpenPath = vi.fn();
     const view = renderBody("See @[notes/Trip plan.md#Day 1] and **@agent**.", {
       onOpenPath,
-      attachments: [{ attachmentId: "a", kind: "file", pathHint: "notes/Trip plan.md", headingAnchor: "Day 1" }] as never,
+      attachments: [
+        { attachmentId: "a", kind: "file", pathHint: "notes/Trip plan.md", headingAnchor: "Day 1" },
+      ] as never,
     });
     view.getByTestId("body-file-mention").click();
     expect(onOpenPath).toHaveBeenCalledWith("notes/Trip plan.md", "Day 1");
@@ -242,7 +252,6 @@ describe("ChatMarkdown", () => {
       expect(view.container.querySelectorAll("li")).toHaveLength(2);
     });
 
-
     it("parse in the worker when a short body nests deeply or has a long table", () => {
       for (const body of [
         `${"> ".repeat(40)}deep`,
@@ -282,7 +291,6 @@ describe("ChatMarkdown", () => {
       expect(workers.length).toBe(count + 1);
     });
 
-
     it("show a body over the length cap as text, with its chips", async () => {
       const view = renderBody(`hi @sam ${long("**word** ", 50_001)}`);
       await waitFor(() => expect(view.queryByTestId("body-mention")).not.toBeNull());
@@ -291,7 +299,9 @@ describe("ChatMarkdown", () => {
     });
 
     it("show a body whose tree is too large as text", async () => {
-      const view = renderBody(`${"[a][r] ".repeat(300)}\n\n[r]: https://example.com/${"x".repeat(1000)}`);
+      const view = renderBody(
+        `${"[a][r] ".repeat(300)}\n\n[r]: https://example.com/${"x".repeat(1000)}`,
+      );
       await act(async () => {});
       expect(view.queryByRole("link")).toBeNull();
       expect(view.container.textContent).toContain("a a a");
@@ -300,7 +310,9 @@ describe("ChatMarkdown", () => {
 
     it("show the current body when one is edited, deleted or remounted while its parse is pending", async () => {
       workerMode = "hold";
-      const draw = (body: string) => <ChatMarkdown body={body} candidates={CANDIDATES} testId="body" />;
+      const draw = (body: string) => (
+        <ChatMarkdown body={body} candidates={CANDIDATES} testId="body" />
+      );
       const view = render(draw(long("first **draft** ", 1200)));
       view.rerender(draw(long("edited **draft** ", 1200)));
       await act(async () => held.shift()!());
@@ -329,7 +341,13 @@ describe("ChatMarkdown", () => {
       vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
       workerMode = "hold";
       const slow = renderBody(long("slow **one** ", 1200));
-      const queued = render(<ChatMarkdown body={long("queued **two** ", 1200)} candidates={CANDIDATES} testId="queued" />);
+      const queued = render(
+        <ChatMarkdown
+          body={long("queued **two** ", 1200)}
+          candidates={CANDIDATES}
+          testId="queued"
+        />,
+      );
       const old = workers.at(-1)!;
       expect(held).toHaveLength(1);
       await act(async () => {
@@ -344,27 +362,36 @@ describe("ChatMarkdown", () => {
       await act(async () => held.shift()!());
       expect(queued.getByTestId("queued").querySelector("strong")?.textContent).toBe("two");
     });
-
   });
-
 });
-
 
 describe("the parse worker's answer", () => {
   it("gives up on a tree with too many nodes", () => {
-    const answer = answerChatParse({ id: 1, body: "- a\n".repeat(6000), candidates: CANDIDATES, attachments: [] });
+    const answer = answerChatParse({
+      id: 1,
+      body: "- a\n".repeat(6000),
+      candidates: CANDIDATES,
+      attachments: [],
+    });
     expect(answer.parsed).toBeUndefined();
   });
 
   it("gives up on deep nesting instead of throwing", () => {
-    const answer = answerChatParse({ id: 2, body: `${"> ".repeat(2000)}a`, candidates: CANDIDATES, attachments: [] });
+    const answer = answerChatParse({
+      id: 2,
+      body: `${"> ".repeat(2000)}a`,
+      candidates: CANDIDATES,
+      attachments: [],
+    });
     expect(answer.parsed).toBeUndefined();
   });
 
   it("keeps a reply at the length cap that links on every line", () => {
     const line = "See [the plan](https://example.com/trips/2026/plan) at the **harbor**.\n\n";
     const body = line.repeat(Math.floor(CHAT_MARKDOWN_MAX_LENGTH / line.length));
-    expect(answerChatParse({ id: 4, body, candidates: CANDIDATES, attachments: [] }).parsed).toBeDefined();
+    expect(
+      answerChatParse({ id: 4, body, candidates: CANDIDATES, attachments: [] }).parsed,
+    ).toBeDefined();
   });
 
   it("weighs a table by its nodes as well as its text", () => {
@@ -379,16 +406,22 @@ describe("the parse worker's answer", () => {
 
   it("gives up on a short body that repeats a long target or title", () => {
     const uses = "[a][r] ".repeat(300);
-    for (const definition of [`[r]: https://example.com/${"x".repeat(1000)}`, `[r]: https://example.com "${"t".repeat(1000)}"`]) {
-      const answer = answerChatParse({ id: 5, body: `${uses}\n\n${definition}`, candidates: CANDIDATES, attachments: [] });
+    for (const definition of [
+      `[r]: https://example.com/${"x".repeat(1000)}`,
+      `[r]: https://example.com "${"t".repeat(1000)}"`,
+    ]) {
+      const answer = answerChatParse({
+        id: 5,
+        body: `${uses}\n\n${definition}`,
+        candidates: CANDIDATES,
+        attachments: [],
+      });
       expect(answer.parsed).toBeUndefined();
     }
   });
-
 });
 
 describe("the drawn-body cache", () => {
-
   it("counts the text a tree holds, not only its key", () => {
     const cache = createDrawnCache<string>(10);
     cache.remember("aa", "A");

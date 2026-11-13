@@ -6,9 +6,7 @@ import { Explorer, type ExplorerProps } from "./Explorer";
 
 afterEach(cleanup);
 
-function explorerProps(
-  overrides: Partial<ExplorerProps> = {},
-): ExplorerProps {
+function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
   return {
     workspaceId: "workspace-1",
     mode: "files",
@@ -99,9 +97,7 @@ describe("Explorer editor groups", () => {
 
     expect(screen.getByText("Group 1")).toBeTruthy();
     expect(screen.getByText("Group 2")).toBeTruthy();
-    expect(
-      screen.getByRole("list", { name: "Group 2 open editors" }),
-    ).toBeTruthy();
+    expect(screen.getByRole("list", { name: "Group 2 open editors" })).toBeTruthy();
 
     const groups = screen.getAllByTestId("open-editor-group");
     const firstRow = within(groups[0]!).getByTestId("open-editor-row");

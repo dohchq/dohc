@@ -9,58 +9,134 @@ import { createTestScratch } from "../../workspaces/testTemp";
 import { createSharedViewsIpcHarness } from "../../testing/sharedViewsIpcHarness";
 import { deferred } from "../../testing/deferred";
 import { probeShareViewLog } from "../../workspaces/shareViewInfo";
-import { createShareViewFiles, type ResolvedShareViewFilesTarget } from "../../workspaces/shareViewFiles";
+import {
+  createShareViewFiles,
+  type ResolvedShareViewFilesTarget,
+} from "../../workspaces/shareViewFiles";
 import { createShareViewDaemonHarness } from "../../testing/shareViewLoopbackTransport";
 import { readLocalStateFrom } from "../../workspaces/workspaceLocalState";
 import { automationPressRelay } from "../../automations/relayedPresses";
 import { useSentNotices } from "./useSentNotices";
 import { useSharedViewAccess } from "./useSharedViewAccess";
-import { createAutomationButtons, resetAutomationButtonsForTests } from "../collections/useAutomationButtons";
+import {
+  createAutomationButtons,
+  resetAutomationButtonsForTests,
+} from "../collections/useAutomationButtons";
 
-afterEach(() => { cleanup(); resetAutomationButtonsForTests(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+afterEach(() => {
+  cleanup();
+  resetAutomationButtonsForTests();
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 async function delivery(rootPath?: string) {
   let changed: (() => void) | undefined;
   let rows: unknown[] = [];
-  const fetch = vi.fn(async () => Response.json({ ok: true, notices: rows, nextCursor: "1", hasMore: false, replace: true }));
+  const fetch = vi.fn(async () =>
+    Response.json({ ok: true, notices: rows, nextCursor: "1", hasMore: false, replace: true }),
+  );
   const store = createNoticeStore({
-    directory: await createTestScratch("shared-notices-"), installId: () => "recipient",
+    directory: await createTestScratch("shared-notices-"),
+    installId: () => "recipient",
     onChanged: () => changed?.(),
-    session: async () => ({ account: { key: "recipient", userId: "recipient",
-      relay: { baseUrl: "https://relay.example.test", token: "token", fetch } },
-      isCurrent: () => true, reachFor: () => ({ shareId: "share" }) }),
+    session: async () => ({
+      account: {
+        key: "recipient",
+        userId: "recipient",
+        relay: { baseUrl: "https://relay.example.test", token: "token", fetch },
+      },
+      isCurrent: () => true,
+      reachFor: () => ({ shareId: "share" }),
+    }),
   });
-  const h = await createSharedViewsIpcHarness({ rootPath, syncNotices: current => store.sync(current) });
+  const h = await createSharedViewsIpcHarness({
+    rootPath,
+    syncNotices: (current) => store.sync(current),
+  });
   vi.stubGlobal("dohcDesktop", {
     listNotices: () => store.list(),
-    onNoticesChanged: (listener: () => void) => { changed = listener; return () => { changed = undefined; }; },
+    onNoticesChanged: (listener: () => void) => {
+      changed = listener;
+      return () => {
+        changed = undefined;
+      };
+    },
   } as unknown as DohcDesktopBridge);
   const hook = renderHook(() => useSentNotices(true));
   await waitFor(() => expect(hook.result.current.settled).toBe(true));
   const failed = {
-    noticeId: "automation-press:failed", changeSeq: 1, workspaceId: null, recipientShareId: "share",
-    kind: "automation-failed", senderKind: "automation", senderUserId: "owner", senderLabel: "Finish",
-    title: "Finish did not finish", body: "The action failed.", target: { path: "docs", record: "docs/task.md", automation: "finish" },
-    originInstallId: "owner", createdAtMs: Date.now(), readAtMs: null, dismissedAtMs: null, removed: false,
+    noticeId: "automation-press:failed",
+    changeSeq: 1,
+    workspaceId: null,
+    recipientShareId: "share",
+    kind: "automation-failed",
+    senderKind: "automation",
+    senderUserId: "owner",
+    senderLabel: "Finish",
+    title: "Finish did not finish",
+    body: "The action failed.",
+    target: { path: "docs", record: "docs/task.md", automation: "finish" },
+    originInstallId: "owner",
+    createdAtMs: Date.now(),
+    readAtMs: null,
+    dismissedAtMs: null,
+    removed: false,
   };
-  return { h, hook, store, fetch, failed, arrive: () => { rows = [failed]; } };
+  return {
+    h,
+    hook,
+    store,
+    fetch,
+    failed,
+    arrive: () => {
+      rows = [failed];
+    },
+  };
 }
 
 async function pendingBurst(rootPath?: string) {
   const f = await delivery(rootPath);
-  const logFetch = vi.fn<typeof globalThis.fetch>(async input => Response.json({
-    ops: [], nextCursor: Number(new URL(String(input)).searchParams.get("since")), hasMore: false,
-  }));
-  f.h.probeLog.mockImplementation(input => probeShareViewLog({ ...input, relay: { ...input.relay, fetch: logFetch } }));
-  f.h.fetchInfo.mockResolvedValue({ shareId: "share", granterUserId: "owner", granterEmail: "owner@test", genericChatWritable: false,
-    selector: { paths: ["docs"], access: "edit", versionId: null }, createdAtMs: 1 });
+  const logFetch = vi.fn<typeof globalThis.fetch>(async (input) =>
+    Response.json({
+      ops: [],
+      nextCursor: Number(new URL(String(input)).searchParams.get("since")),
+      hasMore: false,
+    }),
+  );
+  f.h.probeLog.mockImplementation((input) =>
+    probeShareViewLog({ ...input, relay: { ...input.relay, fetch: logFetch } }),
+  );
+  f.h.fetchInfo.mockResolvedValue({
+    shareId: "share",
+    granterUserId: "owner",
+    granterEmail: "owner@test",
+    genericChatWritable: false,
+    selector: { paths: ["docs"], access: "edit", versionId: null },
+    createdAtMs: 1,
+  });
   f.h.reconcile.mockImplementation(async (_lease, _target, _mode, cursor) => {
     cursor?.(42);
-    return { kind: "refresh", outcome: { ok: true, status: "unchanged", changedPaths: 0,
-      excludedPaths: [], unjournalablePaths: [], refusedOps: 0, refusedDetail: null } };
+    return {
+      kind: "refresh",
+      outcome: {
+        ok: true,
+        status: "unchanged",
+        changedPaths: 0,
+        excludedPaths: [],
+        unjournalablePaths: [],
+        refusedOps: 0,
+        refusedDetail: null,
+      },
+    };
   });
-  const routes = automationPressRelay({ baseUrl: "https://relay.example.test", token: "token",
-    fetch: async () => Response.json({ ok: true, pressId: "press", state: "pending", createdAtMs: Date.now() }) });
+  const routes = automationPressRelay({
+    baseUrl: "https://relay.example.test",
+    token: "token",
+    fetch: async () =>
+      Response.json({ ok: true, pressId: "press", state: "pending", createdAtMs: Date.now() }),
+  });
   const bridge = window.dohcDesktop!;
   const check = vi.fn(async () => ({ status: "current", access: "edit" }));
   Object.assign(bridge, {
@@ -70,31 +146,57 @@ async function pendingBurst(rootPath?: string) {
     onAutomationRunWaiting: () => () => undefined,
     onCollectionAutomationsChanged: () => () => undefined,
     pressAutomationButton: async () => {
-      await routes.press("share", { pressId: "press", automationId: "finish", collectionPath: "docs", definitionHash: "0123456789abcdef", recordId: "docs/task.md", confirmed: [] },
-        { isCurrent: () => true, sync: f.h.syncNotices });
+      await routes.press(
+        "share",
+        {
+          pressId: "press",
+          automationId: "finish",
+          collectionPath: "docs",
+          definitionHash: "0123456789abcdef",
+          recordId: "docs/task.md",
+          confirmed: [],
+        },
+        { isCurrent: () => true, sync: f.h.syncNotices },
+      );
       return { busy: false, relayed: true };
     },
   });
   const admission = { superseded: false };
   const opened = deferred();
   let pulled = deferred();
-  renderHook(() => useSharedViewAccess({ workspaceId: "existing", admission, enabled: true,
-    onVerified() {}, onPersistentFailure(error) { throw error; },
-    pull: async pressBurst => {
-      const outcome = await f.h.invoke(sharedViewAccessOperations.refreshSharedView.channel,
-        { workspaceId: "existing", trigger: pressBurst ? "press-burst" : "background" });
-      opened.resolve();
-      pulled.resolve();
-      return (outcome as { changedPaths: number }).changedPaths > 0;
-    },
-  }));
+  renderHook(() =>
+    useSharedViewAccess({
+      workspaceId: "existing",
+      admission,
+      enabled: true,
+      onVerified() {},
+      onPersistentFailure(error) {
+        throw error;
+      },
+      pull: async (pressBurst) => {
+        const outcome = await f.h.invoke(sharedViewAccessOperations.refreshSharedView.channel, {
+          workspaceId: "existing",
+          trigger: pressBurst ? "press-burst" : "background",
+        });
+        opened.resolve();
+        pulled.resolve();
+        return (outcome as { changedPaths: number }).changedPaths > 0;
+      },
+    }),
+  );
   await act(async () => opened.promise);
   expect(f.h.syncNotices).not.toHaveBeenCalled();
-  f.h.reconcile.mockClear(); f.h.storeFor.mockClear(); f.h.status.mockClear();
-  f.h.recordIdentity.mockClear(); f.h.startup.mockClear();
+  f.h.reconcile.mockClear();
+  f.h.storeFor.mockClear();
+  f.h.status.mockClear();
+  f.h.recordIdentity.mockClear();
+  f.h.startup.mockClear();
   check.mockClear();
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
-  const buttons = createAutomationButtons({ workspaceId: "existing", of: { collectionPath: "docs" } });
+  const buttons = createAutomationButtons({
+    workspaceId: "existing",
+    of: { collectionPath: "docs" },
+  });
   await act(async () => buttons.press("Finish", { id: "docs/task.md", label: "task" }));
   expect(f.h.syncNotices).not.toHaveBeenCalled();
   const probe = async (delay: number, waitForNotices = true) => {
@@ -116,24 +218,58 @@ it("keeps the burst after a changed probe and delivers a failure after six secon
   const f = await pendingBurst(rootPath);
   const text = "Owner's first step finished.\n";
   const sha = createHash("sha256").update(text).digest("hex");
-  const ops = [{ relaySeq: 43, opKind: "moment.append", payload: { versionId: "main", path: "docs/task.md",
-    operation: "write", payloadAfterPath: "docs/task.md", payloadAfterBlobSha256: sha, metadata: { origin: "sync" } } }];
-  const pullFetch = vi.fn<typeof globalThis.fetch>(async input => new URL(String(input)).pathname.endsWith("/log")
-    ? Response.json({ ops, nextCursor: 43, hasMore: false }) : new Response(text));
-  const daemon = createShareViewDaemonHarness({ baseUrl: "https://relay.example.test", token: "token", fetch: pullFetch });
+  const ops = [
+    {
+      relaySeq: 43,
+      opKind: "moment.append",
+      payload: {
+        versionId: "main",
+        path: "docs/task.md",
+        operation: "write",
+        payloadAfterPath: "docs/task.md",
+        payloadAfterBlobSha256: sha,
+        metadata: { origin: "sync" },
+      },
+    },
+  ];
+  const pullFetch = vi.fn<typeof globalThis.fetch>(async (input) =>
+    new URL(String(input)).pathname.endsWith("/log")
+      ? Response.json({ ops, nextCursor: 43, hasMore: false })
+      : new Response(text),
+  );
+  const daemon = createShareViewDaemonHarness({
+    baseUrl: "https://relay.example.test",
+    token: "token",
+    fetch: pullFetch,
+  });
   // Writers of `.dohc/local` ask the engine's open, as the desktop's do.
   readLocalStateFrom(daemon.sessions);
-  const target: ResolvedShareViewFilesTarget = { kind: "standalone", workspaceId: "existing", storeWorkspaceId: "existing",
-    rootPath, schedulingRootPath: rootPath, shareId: "share", granterEmail: "owner@test",
-    grantedSelector: f.h.workspace.shareView!.grantedSelector, ended: false };
+  const target: ResolvedShareViewFilesTarget = {
+    kind: "standalone",
+    workspaceId: "existing",
+    storeWorkspaceId: "existing",
+    rootPath,
+    schedulingRootPath: rootPath,
+    shareId: "share",
+    granterEmail: "owner@test",
+    grantedSelector: f.h.workspace.shareView!.grantedSelector,
+    ended: false,
+  };
   const files = createShareViewFiles({
-    resolveTarget: () => target, openStore: () => daemon.openStore(target), resolveRelay: async () => daemon.relay,
+    resolveTarget: () => target,
+    openStore: () => daemon.openStore(target),
+    resolveRelay: async () => daemon.relay,
     pull: (_target, _relay, input) => daemon.pullFor(target)({ ...input, shareId: "share" }),
-    recordRefusals: async () => undefined, updateUnsavedPaths: async () => undefined, markEnded: async () => undefined,
-    retireTarget: async () => undefined, assertProjectionRoot: async () => undefined,
-    createMount: async () => undefined, removeMount: async () => ({ folderLeft: false }),
+    recordRefusals: async () => undefined,
+    updateUnsavedPaths: async () => undefined,
+    markEnded: async () => undefined,
+    retireTarget: async () => undefined,
+    assertProjectionRoot: async () => undefined,
+    createMount: async () => undefined,
+    removeMount: async () => ({ folderLeft: false }),
   });
-  const focus = vi.fn(); window.addEventListener("focus", focus);
+  const focus = vi.fn();
+  window.addEventListener("focus", focus);
   try {
     f.logFetch.mockResolvedValueOnce(Response.json({ ops, nextCursor: 43, hasMore: false }));
     f.h.reconcile.mockImplementationOnce(files.reconcile);
@@ -146,31 +282,69 @@ it("keeps the burst after a changed probe and delivers a failure after six secon
     f.arrive();
     await f.probe(4_000);
     expect(f.hook.result.current.toast?.noticeId).toBe(f.failed.noticeId);
-    expect(f.hook.result.current.notices).toEqual([expect.objectContaining({ noticeId: f.failed.noticeId })]);
+    expect(f.hook.result.current.notices).toEqual([
+      expect.objectContaining({ noticeId: f.failed.noticeId }),
+    ]);
     await f.probe(10_000);
     expect(f.h.probeLog).toHaveBeenCalledTimes(4);
     expect(f.logFetch).toHaveBeenCalledTimes(4);
     expect(f.h.syncNotices).toHaveBeenCalledTimes(4);
     expect(f.fetch).toHaveBeenCalledTimes(4);
-    expect(f.h.reconcile).toHaveBeenCalledOnce(); expect(f.h.status).toHaveBeenCalledOnce();
-    expect(f.h.startup).toHaveBeenCalledOnce(); expect(f.h.recordIdentity).not.toHaveBeenCalled();
-    expect(f.check).not.toHaveBeenCalled(); expect(focus).not.toHaveBeenCalled();
+    expect(f.h.reconcile).toHaveBeenCalledOnce();
+    expect(f.h.status).toHaveBeenCalledOnce();
+    expect(f.h.startup).toHaveBeenCalledOnce();
+    expect(f.h.recordIdentity).not.toHaveBeenCalled();
+    expect(f.check).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
     expect(pullFetch).toHaveBeenCalledTimes(2); // The full pull's log and blob.
     expect(daemon.transport.requests).toHaveLength(engineCalls);
-    process.stdout.write(JSON.stringify({ burst: "changed-first", requests: f.logFetch.mock.calls.length + pullFetch.mock.calls.length + f.fetch.mock.calls.length,
-      probeGETs: 4, fullPullGETs: 2, noticeGETs: 4, noticePasses: 4, engineRPCs: engineCalls,
-      captureStatusCalls: 1, methods: daemon.transport.requests.map(request => request.method) }) + "\n");
-    f.h.probeLog.mockClear(); f.h.syncNotices.mockClear(); f.fetch.mockClear(); f.logFetch.mockClear();
-    f.h.reconcile.mockClear(); f.h.storeFor.mockClear(); f.h.status.mockClear(); f.h.recordIdentity.mockClear();
+    process.stdout.write(
+      JSON.stringify({
+        burst: "changed-first",
+        requests:
+          f.logFetch.mock.calls.length + pullFetch.mock.calls.length + f.fetch.mock.calls.length,
+        probeGETs: 4,
+        fullPullGETs: 2,
+        noticeGETs: 4,
+        noticePasses: 4,
+        engineRPCs: engineCalls,
+        captureStatusCalls: 1,
+        methods: daemon.transport.requests.map((request) => request.method),
+      }) + "\n",
+    );
+    f.h.probeLog.mockClear();
+    f.h.syncNotices.mockClear();
+    f.fetch.mockClear();
+    f.logFetch.mockClear();
+    f.h.reconcile.mockClear();
+    f.h.storeFor.mockClear();
+    f.h.status.mockClear();
+    f.h.recordIdentity.mockClear();
     await f.probe(30_000);
     expect(f.h.probeLog).toHaveBeenCalledOnce();
     expect(f.logFetch).toHaveBeenCalledOnce();
-    expect(f.h.syncNotices).not.toHaveBeenCalled(); expect(f.fetch).not.toHaveBeenCalled();
-    expect(f.h.reconcile).not.toHaveBeenCalled(); expect(f.h.storeFor).not.toHaveBeenCalled();
-    expect(f.h.status).not.toHaveBeenCalled(); expect(f.h.recordIdentity).not.toHaveBeenCalled();
-    expect(daemon.transport.requests).toHaveLength(engineCalls); expect(pullFetch).toHaveBeenCalledTimes(2);
-    process.stdout.write(JSON.stringify({ poll: "idle-after-changed-burst", requests: 1, noticeGETs: 0, noticePasses: 0, engineRPCs: 0, captureStatusCalls: 0 }) + "\n");
-  } finally { window.removeEventListener("focus", focus); await daemon.closeAll(); }
+    expect(f.h.syncNotices).not.toHaveBeenCalled();
+    expect(f.fetch).not.toHaveBeenCalled();
+    expect(f.h.reconcile).not.toHaveBeenCalled();
+    expect(f.h.storeFor).not.toHaveBeenCalled();
+    expect(f.h.status).not.toHaveBeenCalled();
+    expect(f.h.recordIdentity).not.toHaveBeenCalled();
+    expect(daemon.transport.requests).toHaveLength(engineCalls);
+    expect(pullFetch).toHaveBeenCalledTimes(2);
+    process.stdout.write(
+      JSON.stringify({
+        poll: "idle-after-changed-burst",
+        requests: 1,
+        noticeGETs: 0,
+        noticePasses: 0,
+        engineRPCs: 0,
+        captureStatusCalls: 0,
+      }) + "\n",
+    );
+  } finally {
+    window.removeEventListener("focus", focus);
+    await daemon.closeAll();
+  }
 });
 
 it("coalesces four burst Notices requests into one flight and one follow-up", async () => {
@@ -181,11 +355,14 @@ it("coalesces four burst Notices requests into one flight and one follow-up", as
   expect(f.h.syncNotices).toHaveBeenCalledTimes(4);
   expect(f.fetch).toHaveBeenCalledOnce();
   await act(async () => {
-    response.resolve(Response.json({ ok: true, notices: [], nextCursor: "1", hasMore: false, replace: true }));
+    response.resolve(
+      Response.json({ ok: true, notices: [], nextCursor: "1", hasMore: false, replace: true }),
+    );
     await f.h.syncNotices.mock.results[0]!.value;
   });
   expect(f.fetch).toHaveBeenCalledTimes(2);
-  expect(f.h.reconcile).not.toHaveBeenCalled(); expect(f.h.storeFor).not.toHaveBeenCalled();
+  expect(f.h.reconcile).not.toHaveBeenCalled();
+  expect(f.h.storeFor).not.toHaveBeenCalled();
 });
 
 it("drops an unchanged burst's late Notice and toast after switching away", async () => {
@@ -196,7 +373,15 @@ it("drops an unchanged burst's late Notice and toast after switching away", asyn
   expect(f.fetch).toHaveBeenCalledOnce();
   await act(async () => {
     f.h.retireRenderer();
-    response.resolve(Response.json({ ok: true, notices: [f.failed], nextCursor: "1", hasMore: false, replace: true }));
+    response.resolve(
+      Response.json({
+        ok: true,
+        notices: [f.failed],
+        nextCursor: "1",
+        hasMore: false,
+        replace: true,
+      }),
+    );
     await f.h.syncNotices.mock.results[0]!.value;
   });
   expect(f.hook.result.current.notices).toEqual([]);

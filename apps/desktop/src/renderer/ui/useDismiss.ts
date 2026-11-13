@@ -53,8 +53,11 @@ export function listenForDismiss(options: {
   const ownerWindow = ownerDocument.defaultView;
   const inside = (node: EventTarget | null) => {
     const anchor = trigger();
-    return node === menu || node === anchor ||
-      (node instanceof Node && (menu.contains(node) || !!anchor?.contains(node)));
+    return (
+      node === menu ||
+      node === anchor ||
+      (node instanceof Node && (menu.contains(node) || !!anchor?.contains(node)))
+    );
   };
   function onPointerDown(event: PointerEvent) {
     if (event.composedPath().some(inside)) return;
@@ -68,7 +71,9 @@ export function listenForDismiss(options: {
       ownerDocument.removeEventListener("pointerup", settle, true);
       ownerDocument.removeEventListener("pointercancel", settle, true);
       const active = ownerDocument.activeElement;
-      const blank = active === ownerDocument.body || (active instanceof HTMLElement && active.dataset.focusSurface === "workspace");
+      const blank =
+        active === ownerDocument.body ||
+        (active instanceof HTMLElement && active.dataset.focusSurface === "workspace");
       if (end.type === "pointerup" && blank) trigger()?.focus();
     };
     ownerDocument.addEventListener("pointerup", settle, true);
@@ -120,6 +125,10 @@ export function useDismiss(options: {
   useEffect(() => {
     const menu = container.current;
     if (!open || !menu) return;
-    return listenForDismiss({ menu, trigger: () => trigger.current, onClose: () => onClose.current() });
+    return listenForDismiss({
+      menu,
+      trigger: () => trigger.current,
+      onClose: () => onClose.current(),
+    });
   }, [open, container, trigger]);
 }

@@ -35,7 +35,10 @@ describe("NoticeOwner", () => {
     row.dismiss();
     notice.failed();
     notice.show({ read: "last-changes" }, CAUSE);
-    expect(shown).toEqual([{ words: LAST_CHANGES, toast: true }, { words: LAST_CHANGES, toast: true }]);
+    expect(shown).toEqual([
+      { words: LAST_CHANGES, toast: true },
+      { words: LAST_CHANGES, toast: true },
+    ]);
   });
 
   it("files new words after a dismissal as a new toast", () => {
@@ -45,7 +48,10 @@ describe("NoticeOwner", () => {
     row.dismiss();
     notice.failed();
     notice.show({ read: "several" }, CAUSE);
-    expect(shown).toEqual([{ words: LAST_CHANGES, toast: true }, { words: SEVERAL, toast: true }]);
+    expect(shown).toEqual([
+      { words: LAST_CHANGES, toast: true },
+      { words: SEVERAL, toast: true },
+    ]);
   });
 
   it("keeps a dismissed row gone until the cause fails again", () => {
@@ -65,7 +71,10 @@ describe("NoticeOwner", () => {
     row.dismiss();
     notice.resolve();
     notice.show({ read: "last-changes" }, CAUSE);
-    expect(shown).toEqual([{ words: LAST_CHANGES, toast: true }, { words: LAST_CHANGES, toast: true }]);
+    expect(shown).toEqual([
+      { words: LAST_CHANGES, toast: true },
+      { words: LAST_CHANGES, toast: true },
+    ]);
   });
 
   it("counts a failure that arrived before the dismissal as dismissed", () => {
@@ -89,7 +98,11 @@ describe("NoticeOwner", () => {
     notice.failed();
     notice.show({ read: "last-changes" }, CAUSE);
     notice.resolve();
-    expect(shown).toEqual([{ words: LAST_CHANGES, toast: true }, { words: LAST_CHANGES, toast: true }, { cleared: true }]);
+    expect(shown).toEqual([
+      { words: LAST_CHANGES, toast: true },
+      { words: LAST_CHANGES, toast: true },
+      { cleared: true },
+    ]);
   });
 
   it("changes one row where it stands when the same cause gets new words", () => {
@@ -100,7 +113,10 @@ describe("NoticeOwner", () => {
     notice.show({ read: "several" }, CAUSE);
     notice.show({ read: "several" }, CAUSE);
     expect(notice.shown()).toEqual({ read: "several" });
-    expect(shown).toEqual([{ words: LAST_CHANGES, toast: true }, { words: SEVERAL, toast: false }]);
+    expect(shown).toEqual([
+      { words: LAST_CHANGES, toast: true },
+      { words: SEVERAL, toast: false },
+    ]);
   });
 
   it("takes the row back and runs no Try again once the view closes", () => {
@@ -117,8 +133,14 @@ describe("NoticeOwner", () => {
 
   it("files each opened notice under its own identity", () => {
     const identities: string[] = [];
-    const notices = new NoticeOwner({ report: (_words, _cause, _retry, identity) => identities.push(identity), clear: () => {} });
-    for (const notice of [notices.open("versions-reads", () => {}), notices.open("versions-reads", () => {})]) {
+    const notices = new NoticeOwner({
+      report: (_words, _cause, _retry, identity) => identities.push(identity),
+      clear: () => {},
+    });
+    for (const notice of [
+      notices.open("versions-reads", () => {}),
+      notices.open("versions-reads", () => {}),
+    ]) {
       notice.failed();
       notice.show({ read: "counts" }, CAUSE);
     }

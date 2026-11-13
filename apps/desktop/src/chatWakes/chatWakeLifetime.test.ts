@@ -2,12 +2,24 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChatWakeView, WaitingChatWake } from "@dohc/workspace-contracts/chat-wakes";
 import { RelayUnauthorizedError } from "@dohc/workspace-contracts/relay";
 import { deferred } from "../testing/deferred";
-import { ChatWakeMissingError, type ChatWakeClient, type ChatWakePageAnswer } from "./chatWakeClient";
-import type { ChatWakeWorkspace } from "./chatWakeConsumer";
-import { ChatWakeIntentsUnreadableError, type ChatWakeIntent, type ChatWakeIntents } from "./chatWakeIntents";
 import {
-  CHAT_WAKE_BACKOFF_MAX_MS, chatWakeBackoffMs, createChatWakeLifetime, sleepUnlessAborted,
-  type ChatWakeLifetimeDeps, type ChatWakeSession,
+  ChatWakeMissingError,
+  type ChatWakeClient,
+  type ChatWakePageAnswer,
+} from "./chatWakeClient";
+import type { ChatWakeWorkspace } from "./chatWakeConsumer";
+import {
+  ChatWakeIntentsUnreadableError,
+  type ChatWakeIntent,
+  type ChatWakeIntents,
+} from "./chatWakeIntents";
+import {
+  CHAT_WAKE_BACKOFF_MAX_MS,
+  chatWakeBackoffMs,
+  createChatWakeLifetime,
+  sleepUnlessAborted,
+  type ChatWakeLifetimeDeps,
+  type ChatWakeSession,
 } from "./chatWakeLifetime";
 import { createChatWakeNotices } from "./chatWakeNotices";
 import type { ChatRunnerRoster } from "./chatRunnerRoster";
@@ -25,7 +37,10 @@ afterEach(() => {
 const WAKE = `wake-${"a".repeat(32)}`;
 
 /** One event-loop turn: every step already queued runs. Used only to show that something did not happen. */
-const turn = () => new Promise<void>((resolve) => { setImmediate(resolve); });
+const turn = () =>
+  new Promise<void>((resolve) => {
+    setImmediate(resolve);
+  });
 
 function session(scope: string, installId = "mac") {
   let current = true;
@@ -33,24 +48,48 @@ function session(scope: string, installId = "mac") {
     account: { scope, userId: "ana", installId },
     relay: { baseUrl: "https://relay.test", token: `token-${scope}` },
     isCurrent: () => current,
-    unauthorized: vi.fn(() => { current = false; }),
-    end: () => { current = false; },
+    unauthorized: vi.fn(() => {
+      current = false;
+    }),
+    end: () => {
+      current = false;
+    },
   } satisfies ChatWakeSession & { end(): void };
   return value;
 }
 
-const candidate = { installId: "mac", agentId: "default", label: "Mac", matched: { handle: "claude" } };
+const candidate = {
+  installId: "mac",
+  agentId: "default",
+  label: "Mac",
+  matched: { handle: "claude" },
+};
 
 function intentOf(phase: ChatWakeIntent["phase"], scope = "A"): ChatWakeIntent {
   return {
-    account: scope, userId: "ana", installId: "mac", wakeId: WAKE, generation: 1, workspaceId: "ws", threadId: "t1",
-    messageId: "m1", prerequisiteMessageId: null, candidate, phase,
+    account: scope,
+    userId: "ana",
+    installId: "mac",
+    wakeId: WAKE,
+    generation: 1,
+    workspaceId: "ws",
+    threadId: "t1",
+    messageId: "m1",
+    prerequisiteMessageId: null,
+    candidate,
+    phase,
   };
 }
 
 const view = (state: ChatWakeView["state"]): ChatWakeView => ({
-  wakeId: WAKE, workspaceId: "ws", messageId: "m1", threadId: "t1", generation: 1, state,
-  prerequisiteMessageId: null, winnerLabel: "Mac",
+  wakeId: WAKE,
+  workspaceId: "ws",
+  messageId: "m1",
+  threadId: "t1",
+  generation: 1,
+  state,
+  prerequisiteMessageId: null,
+  winnerLabel: "Mac",
 });
 const waiting: WaitingChatWake = { ...view("waiting"), state: "waiting", candidate };
 
@@ -66,8 +105,12 @@ function fakeRelay() {
       watcher.resolve();
     }
   };
-  const until = (count: () => number, at: number) => count() >= at ? Promise.resolve()
-    : new Promise<void>((resolve) => { watchers.push({ count, at, resolve }); });
+  const until = (count: () => number, at: number) =>
+    count() >= at
+      ? Promise.resolve()
+      : new Promise<void>((resolve) => {
+          watchers.push({ count, at, resolve });
+        });
   const pages: ChatWakePageAnswer[] = [];
   const firstRead = new Map<string, () => Promise<never>>();
   const claims: string[] = [];
@@ -87,11 +130,15 @@ function fakeRelay() {
       reads.push(scope);
       notify();
       return await new Promise<never>((_, reject) => {
-        signal.addEventListener("abort", () => {
-          aborted.push(scope);
-          notify();
-          reject(new Error("aborted"));
-        }, { once: true });
+        signal.addEventListener(
+          "abort",
+          () => {
+            aborted.push(scope);
+            notify();
+            reject(new Error("aborted"));
+          },
+          { once: true },
+        );
       });
     },
     async claimWake() {
@@ -106,19 +153,36 @@ function fakeRelay() {
     },
   });
   return {
-    reads, aborted, pages, firstRead, claims, confirms, client,
+    reads,
+    aborted,
+    pages,
+    firstRead,
+    claims,
+    confirms,
+    client,
     /** Resolves once `count` reads have parked. */
     untilReads: (count: number) => until(() => reads.length, count),
     /** Resolves once `count` parked reads have ended. */
     untilAborted: (count: number) => until(() => aborted.length, count),
-    winClaims: () => { wins = true; },
+    winClaims: () => {
+      wins = true;
+    },
   };
 }
 
 function memoryIntents(rows: ChatWakeIntent[] = []) {
-  const state = { rows, unreadable: false, listGate: null as Promise<void> | null, listEntered: deferred<void>(), lists: 0 };
-  const same = (a: ChatWakeIntent, b: ChatWakeIntent) => a.account === b.account && a.installId === b.installId && a.wakeId === b.wakeId;
-  const check = () => { if (state.unreadable) throw new ChatWakeIntentsUnreadableError(); };
+  const state = {
+    rows,
+    unreadable: false,
+    listGate: null as Promise<void> | null,
+    listEntered: deferred<void>(),
+    lists: 0,
+  };
+  const same = (a: ChatWakeIntent, b: ChatWakeIntent) =>
+    a.account === b.account && a.installId === b.installId && a.wakeId === b.wakeId;
+  const check = () => {
+    if (state.unreadable) throw new ChatWakeIntentsUnreadableError();
+  };
   const store: ChatWakeIntents = {
     list: async () => {
       state.lists += 1;
@@ -131,8 +195,14 @@ function memoryIntents(rows: ChatWakeIntent[] = []) {
       check();
       return [...state.rows];
     },
-    save: async (intent) => { check(); state.rows = [...state.rows.filter((row) => !same(row, intent)), intent]; },
-    remove: async (intent) => { check(); state.rows = state.rows.filter((row) => !same(row, intent)); },
+    save: async (intent) => {
+      check();
+      state.rows = [...state.rows.filter((row) => !same(row, intent)), intent];
+    },
+    remove: async (intent) => {
+      check();
+      state.rows = state.rows.filter((row) => !same(row, intent));
+    },
   };
   return { state, store };
 }
@@ -142,7 +212,13 @@ function readyWorkspace(over: Partial<ChatWakeWorkspace> = {}): ChatWakeWorkspac
   return {
     current: () => true,
     requestSync: () => undefined,
-    message: async () => ({ id: "m1", workspaceId: "ws", threadId: "t1", author: { kind: "human", displayName: "Ana" }, authorUserId: "ana" }),
+    message: async () => ({
+      id: "m1",
+      workspaceId: "ws",
+      threadId: "t1",
+      author: { kind: "human", displayName: "Ana" },
+      authorUserId: "ana",
+    }),
     threadVisibility: async () => "visible",
     decisions: async () => [],
     agent: async () => ({ name: "Claude", enabled: true, launch: true, admitted: true }),
@@ -155,11 +231,16 @@ function readyWorkspace(over: Partial<ChatWakeWorkspace> = {}): ChatWakeWorkspac
 
 /** Records each publish and withdrawal, and whether that account's reader had stopped by then. */
 function fakeRoster(relay: ReturnType<typeof fakeRelay>) {
-  const calls: Array<{ kind: "reconcile" | "withdraw"; scope: string; readerStopped: boolean }> = [];
+  const calls: Array<{ kind: "reconcile" | "withdraw"; scope: string; readerStopped: boolean }> =
+    [];
   const watchers: Array<{ at: number; resolve: () => void }> = [];
   let withdrawal: Promise<void> = Promise.resolve();
   const record = (kind: "reconcile" | "withdraw", wakeSession: ChatWakeSession) => {
-    calls.push({ kind, scope: wakeSession.account.scope, readerStopped: relay.aborted.includes(wakeSession.account.scope) });
+    calls.push({
+      kind,
+      scope: wakeSession.account.scope,
+      readerStopped: relay.aborted.includes(wakeSession.account.scope),
+    });
     for (const watcher of [...watchers]) {
       if (calls.length < watcher.at) continue;
       watchers.splice(watchers.indexOf(watcher), 1);
@@ -167,7 +248,9 @@ function fakeRoster(relay: ReturnType<typeof fakeRelay>) {
     }
   };
   const roster = {
-    reconcile: async (wakeSession: ChatWakeSession) => { record("reconcile", wakeSession); },
+    reconcile: async (wakeSession: ChatWakeSession) => {
+      record("reconcile", wakeSession);
+    },
     withdraw: (wakeSession: ChatWakeSession) => {
       record("withdraw", wakeSession);
       return withdrawal;
@@ -176,11 +259,18 @@ function fakeRoster(relay: ReturnType<typeof fakeRelay>) {
     stop: vi.fn(async () => undefined),
   } satisfies ChatRunnerRoster;
   return {
-    calls, roster,
-    untilCalls: (at: number) => calls.length >= at ? Promise.resolve()
-      : new Promise<void>((resolve) => { watchers.push({ at, resolve }); }),
+    calls,
+    roster,
+    untilCalls: (at: number) =>
+      calls.length >= at
+        ? Promise.resolve()
+        : new Promise<void>((resolve) => {
+            watchers.push({ at, resolve });
+          }),
     /** Withdrawals from now on never answer, as when the server hangs. */
-    hangWithdrawals: () => { withdrawal = new Promise<void>(() => undefined); },
+    hangWithdrawals: () => {
+      withdrawal = new Promise<void>(() => undefined);
+    },
   };
 }
 
@@ -195,7 +285,10 @@ function setup(over: Partial<ChatWakeLifetimeDeps> = {}, rows: ChatWakeIntent[] 
     client: vi.fn(relay.client),
     openWorkspace: vi.fn(async () => null),
     // A backoff parks until its consumer stops.
-    sleep: (_ms, signal) => new Promise<void>((resolve) => { signal.addEventListener("abort", () => resolve(), { once: true }); }),
+    sleep: (_ms, signal) =>
+      new Promise<void>((resolve) => {
+        signal.addEventListener("abort", () => resolve(), { once: true });
+      }),
     backoffMs: chatWakeBackoffMs,
     nowMs: () => 0,
     report: vi.fn(),
@@ -268,9 +361,14 @@ describe("the chat wake lifetime", () => {
   it("ends only the session whose request got a 401", async () => {
     const w = setup();
     const a = session("A");
-    w.relay.firstRead.set("A", async () => { throw new RelayUnauthorizedError(); });
+    w.relay.firstRead.set("A", async () => {
+      throw new RelayUnauthorizedError();
+    });
     const ended = deferred<void>();
-    a.unauthorized.mockImplementation(() => { a.end(); ended.resolve(); });
+    a.unauthorized.mockImplementation(() => {
+      a.end();
+      ended.resolve();
+    });
     w.lifetime.credentialsChanged(a, true);
     w.lifetime.start();
     await ended.promise;
@@ -312,10 +410,19 @@ describe("the chat wake lifetime", () => {
     let arrived = false;
     let syncs = 0;
     const workspace = readyWorkspace({
-      requestSync: () => { syncs += 1; },
-      message: async () => arrived
-        ? { id: "m1", workspaceId: "ws", threadId: "t1", author: { kind: "human", displayName: "Ana" }, authorUserId: "ana" }
-        : null,
+      requestSync: () => {
+        syncs += 1;
+      },
+      message: async () =>
+        arrived
+          ? {
+              id: "m1",
+              workspaceId: "ws",
+              threadId: "t1",
+              author: { kind: "human", displayName: "Ana" },
+              authorUserId: "ana",
+            }
+          : null,
     });
     const w = setup({ openWorkspace: vi.fn(async () => workspace) });
     w.relay.pages.push({ cursor: 1, wakes: [waiting] });
@@ -345,11 +452,21 @@ describe("the chat wake lifetime", () => {
 describe("rows a person sees", () => {
   it("keeps a row through a credential load's placeholder and the same account's next snapshot", async () => {
     const reported = deferred<void>();
-    const w = setup({ report: vi.fn(() => reported.resolve()), openWorkspace: vi.fn(async () => readyWorkspace()) }, [intentOf("claim-pending")]);
+    const w = setup(
+      {
+        report: vi.fn(() => reported.resolve()),
+        openWorkspace: vi.fn(async () => readyWorkspace()),
+      },
+      [intentOf("claim-pending")],
+    );
     w.lifetime.credentialsChanged(session("A"), true);
     w.lifetime.start();
     await reported.promise;
-    expect(w.deps.report).toHaveBeenCalledExactlyOnceWith("ws", "dropped", intentOf("claim-pending"));
+    expect(w.deps.report).toHaveBeenCalledExactlyOnceWith(
+      "ws",
+      "dropped",
+      intentOf("claim-pending"),
+    );
     await w.relay.untilReads(1);
     w.lifetime.credentialsChanged(null, false);
     // The placeholder stopped A's reader.
@@ -363,10 +480,14 @@ describe("rows a person sees", () => {
   it("takes rows back at a settled sign-out", async () => {
     const reported = deferred<void>();
     const cleared = deferred<void>();
-    const w = setup({
-      report: vi.fn(() => reported.resolve()), clear: vi.fn(() => cleared.resolve()),
-      openWorkspace: vi.fn(async () => readyWorkspace()),
-    }, [intentOf("claim-pending")]);
+    const w = setup(
+      {
+        report: vi.fn(() => reported.resolve()),
+        clear: vi.fn(() => cleared.resolve()),
+        openWorkspace: vi.fn(async () => readyWorkspace()),
+      },
+      [intentOf("claim-pending")],
+    );
     w.lifetime.credentialsChanged(session("A"), true);
     w.lifetime.start();
     await reported.promise;
@@ -380,10 +501,14 @@ describe("rows a person sees", () => {
   it("takes rows back when another account signs in", async () => {
     const reported = deferred<void>();
     const cleared = deferred<void>();
-    const w = setup({
-      report: vi.fn(() => reported.resolve()), clear: vi.fn(() => cleared.resolve()),
-      openWorkspace: vi.fn(async () => readyWorkspace()),
-    }, [intentOf("claim-pending")]);
+    const w = setup(
+      {
+        report: vi.fn(() => reported.resolve()),
+        clear: vi.fn(() => cleared.resolve()),
+        openWorkspace: vi.fn(async () => readyWorkspace()),
+      },
+      [intentOf("claim-pending")],
+    );
     const a = session("A");
     w.lifetime.credentialsChanged(a, true);
     w.lifetime.start();
@@ -421,7 +546,12 @@ describe("rows a person sees", () => {
     const shown = vi.fn();
     const takenBack = vi.fn();
     const notices = createChatWakeNotices({
-      file: "/state/chat-wakes.json", ledgerFile: "/state/chat-runners.json", workspaces: () => workspaces, report: shown, clear: takenBack, log: vi.fn(),
+      file: "/state/chat-wakes.json",
+      ledgerFile: "/state/chat-runners.json",
+      workspaces: () => workspaces,
+      report: shown,
+      clear: takenBack,
+      log: vi.fn(),
     });
     const w = setup({ report: notices.report, clear: notices.clear });
     w.intents.state.unreadable = true;
@@ -432,7 +562,10 @@ describe("rows a person sees", () => {
     expect(shown).not.toHaveBeenCalled();
     workspaces = ["ws"];
     await w.lifetime.pulled(APPLIED);
-    expect(shown).toHaveBeenCalledExactlyOnceWith("ws", expect.objectContaining({ reason: "wake-unreadable", file: "/state/chat-wakes.json" }));
+    expect(shown).toHaveBeenCalledExactlyOnceWith(
+      "ws",
+      expect.objectContaining({ reason: "wake-unreadable", file: "/state/chat-wakes.json" }),
+    );
     await w.lifetime.pulled(APPLIED);
     expect(shown).toHaveBeenCalledOnce();
     w.intents.state.unreadable = false;
@@ -445,8 +578,10 @@ describe("rows a person sees", () => {
     const tried = deferred<void>();
     let workspace: ChatWakeWorkspace | null = null;
     const failure = new Error("The window could not take the row.");
-    const report = vi.fn<ChatWakeLifetimeDeps["report"]>()
-      .mockImplementationOnce(() => { tried.resolve(); throw failure; });
+    const report = vi.fn<ChatWakeLifetimeDeps["report"]>().mockImplementationOnce(() => {
+      tried.resolve();
+      throw failure;
+    });
     const w = setup({ report, openWorkspace: vi.fn(async () => workspace) }, [intentOf("won")]);
     w.relay.confirms.push(async () => view("queued"));
     w.lifetime.credentialsChanged(session("A"), true);
@@ -469,11 +604,15 @@ describe("rows a person sees", () => {
 
   it("logs nothing for a busy relay or a server without wake routes", async () => {
     const w = setup();
-    w.relay.firstRead.set("A", async () => { throw new ChatWakeMissingError(); });
+    w.relay.firstRead.set("A", async () => {
+      throw new ChatWakeMissingError();
+    });
     const slept = deferred<void>();
     w.deps.sleep = (_ms, signal) => {
       slept.resolve();
-      return new Promise<void>((resolve) => { signal.addEventListener("abort", () => resolve(), { once: true }); });
+      return new Promise<void>((resolve) => {
+        signal.addEventListener("abort", () => resolve(), { once: true });
+      });
     };
     const lifetime = createChatWakeLifetime(w.deps);
     lifetime.credentialsChanged(session("A"), true);
@@ -578,7 +717,13 @@ describe("publishing and withdrawing this computer's agents", () => {
 describe("Try again", () => {
   it("restarts once for presses made before the restart begins, and keeps a dropped wake's row", async () => {
     const reported = deferred<void>();
-    const w = setup({ report: vi.fn(() => reported.resolve()), openWorkspace: vi.fn(async () => readyWorkspace()) }, [intentOf("claim-pending")]);
+    const w = setup(
+      {
+        report: vi.fn(() => reported.resolve()),
+        openWorkspace: vi.fn(async () => readyWorkspace()),
+      },
+      [intentOf("claim-pending")],
+    );
     w.lifetime.credentialsChanged(session("A"), true);
     w.lifetime.start();
     await reported.promise;
@@ -615,7 +760,9 @@ describe("the production backoff", () => {
     vi.useFakeTimers();
     const controller = new AbortController();
     let woke = false;
-    const sleep = sleepUnlessAborted(60_000, controller.signal).then(() => { woke = true; });
+    const sleep = sleepUnlessAborted(60_000, controller.signal).then(() => {
+      woke = true;
+    });
     await vi.advanceTimersByTimeAsync(59_999);
     expect(woke).toBe(false);
     controller.abort();
@@ -624,7 +771,9 @@ describe("the production backoff", () => {
     expect(vi.getTimerCount()).toBe(0);
     await sleepUnlessAborted(60_000, controller.signal);
     let timed = false;
-    const plain = sleepUnlessAborted(1_000, new AbortController().signal).then(() => { timed = true; });
+    const plain = sleepUnlessAborted(1_000, new AbortController().signal).then(() => {
+      timed = true;
+    });
     await vi.advanceTimersByTimeAsync(1_000);
     await plain;
     expect(timed).toBe(true);

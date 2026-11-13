@@ -6,15 +6,25 @@ import type { ForgottenShareViews } from "./forgottenShareViews";
 import type { RegistryEntry } from "./registryStore";
 import { createWorkspaceTrust } from "./workspaceTrust";
 
-function harness(registeredInitially = true, confirmDraftRemoval?: (workspaceId: string) => Promise<boolean>) {
-  const workspace: RegistryEntry = {workspaceId: "workspace", rootPath: "root", kind: "personal", mode: "local-first"};
+function harness(
+  registeredInitially = true,
+  confirmDraftRemoval?: (workspaceId: string) => Promise<boolean>,
+) {
+  const workspace: RegistryEntry = {
+    workspaceId: "workspace",
+    rootPath: "root",
+    kind: "personal",
+    mode: "local-first",
+  };
   let registered: RegistryEntry | null = registeredInitially ? workspace : null;
   const owner = createWorkspaceAuthorityOwner({
     findWorkspace: () => registered,
-    canonicalizeRoot: path => path,
+    canonicalizeRoot: (path) => path,
     createState: () => ({}),
   });
-  const removeWorkspace = vi.fn(() => { registered = null; });
+  const removeWorkspace = vi.fn(() => {
+    registered = null;
+  });
   const removeDrafts = vi.fn(async (_workspaceId: string) => {});
   const onError = vi.fn();
   const clearNotices = vi.fn();
@@ -22,17 +32,22 @@ function harness(registeredInitially = true, confirmDraftRemoval?: (workspaceId:
   const remove = createPhysicalWorkspaceRemoval({
     retireBinding: (binding, retirement) => owner.retireBinding(binding, retirement),
     findWorkspace: () => registered,
-    removeWorkspace, removeDrafts, onError, confirmDraftRemoval,
+    removeWorkspace,
+    removeDrafts,
+    onError,
+    confirmDraftRemoval,
   });
   // The real trust store, with its file kept in memory.
   const files = new Map<string, string>();
-  const writeText = vi.fn(async (file: string, text: string) => { files.set(file, text); });
+  const writeText = vi.fn(async (file: string, text: string) => {
+    files.set(file, text);
+  });
   const trust = createWorkspaceTrust({
     file: "workspace-trust.json",
     identify: async () => "folder",
-    readText: async file => {
+    readText: async (file) => {
       const text = files.get(file);
-      if (text === undefined) throw Object.assign(new Error("no trust file"), {code: "ENOENT"});
+      if (text === undefined) throw Object.assign(new Error("no trust file"), { code: "ENOENT" });
       return text;
     },
     writeText: (file, text) => writeText(file, text),
@@ -40,38 +55,64 @@ function harness(registeredInitially = true, confirmDraftRemoval?: (workspaceId:
   const restrict = vi.spyOn(trust, "restrict");
   const remember = vi.fn<ForgottenShareViews["remember"]>(async () => {});
   const forget = createWorkspaceForget({
-    currentBinding: workspaceId => owner.currentBinding(workspaceId),
+    currentBinding: (workspaceId) => owner.currentBinding(workspaceId),
     findWorkspace: () => registered,
     removePhysicalWorkspace: remove,
-    trust, forgottenShareViews: {remember}, clearNotices, notifyRenderer,
+    trust,
+    forgottenShareViews: { remember },
+    clearNotices,
+    notifyRenderer,
   });
   return {
-    workspace, owner, remove, forget, removeWorkspace, removeDrafts, onError, trust, restrict, remember, writeText, files,
-    clearNotices, notifyRenderer,
-    trustIt: () => trust.trust(workspace, {folder: "folder"}),
-    grants: () => (JSON.parse(files.get("workspace-trust.json") ?? '{"trusted":[]}') as {trusted: {workspaceId: string}[]})
-      .trusted.map(grant => grant.workspaceId),
+    workspace,
+    owner,
+    remove,
+    forget,
+    removeWorkspace,
+    removeDrafts,
+    onError,
+    trust,
+    restrict,
+    remember,
+    writeText,
+    files,
+    clearNotices,
+    notifyRenderer,
+    trustIt: () => trust.trust(workspace, { folder: "folder" }),
+    grants: () =>
+      (
+        JSON.parse(files.get("workspace-trust.json") ?? '{"trusted":[]}') as {
+          trusted: { workspaceId: string }[];
+        }
+      ).trusted.map((grant) => grant.workspaceId),
     current: () => registered,
-    setRegistered: (next: RegistryEntry | null) => { registered = next; },
+    setRegistered: (next: RegistryEntry | null) => {
+      registered = next;
+    },
   };
 }
 
-it.each(["EPERM", "EBUSY"])("Forget resolves and notifies the renderer when draft cleanup fails with %s", async code => {
-  const h = harness();
-  const error = Object.assign(new Error("recovery record is busy"), {code});
-  h.removeDrafts.mockRejectedValueOnce(error);
-  await expect(h.forget(h.workspace.workspaceId)).resolves.toBeUndefined();
-  expect(h.current()).toBeNull();
-  expect(h.owner.workspaceIds()).toEqual([]);
-  expect(h.clearNotices).toHaveBeenCalledExactlyOnceWith(h.workspace.workspaceId);
-  expect(h.notifyRenderer).toHaveBeenCalledOnce();
-  expect(h.onError).toHaveBeenCalledExactlyOnceWith(h.workspace.workspaceId, error);
-});
+it.each(["EPERM", "EBUSY"])(
+  "Forget resolves and notifies the renderer when draft cleanup fails with %s",
+  async (code) => {
+    const h = harness();
+    const error = Object.assign(new Error("recovery record is busy"), { code });
+    h.removeDrafts.mockRejectedValueOnce(error);
+    await expect(h.forget(h.workspace.workspaceId)).resolves.toBeUndefined();
+    expect(h.current()).toBeNull();
+    expect(h.owner.workspaceIds()).toEqual([]);
+    expect(h.clearNotices).toHaveBeenCalledExactlyOnceWith(h.workspace.workspaceId);
+    expect(h.notifyRenderer).toHaveBeenCalledOnce();
+    expect(h.onError).toHaveBeenCalledExactlyOnceWith(h.workspace.workspaceId, error);
+  },
+);
 
 it("still rejects registry removal failures and does not report them as draft cleanup failures", async () => {
   const h = harness();
   const error = new Error("registry removal refused");
-  h.removeWorkspace.mockImplementationOnce(() => { throw error; });
+  h.removeWorkspace.mockImplementationOnce(() => {
+    throw error;
+  });
   await expect(h.forget(h.workspace.workspaceId)).rejects.toBe(error);
   expect(h.current()).toEqual(h.workspace);
   expect(h.removeDrafts).not.toHaveBeenCalled();
@@ -87,25 +128,34 @@ it("takes a failed join's entry out of the list without asking, and keeps its ty
   const joinError = new Error("join failed");
   const logError = vi.fn();
   const run = createJoinedWorkspaceRunner({
-    canonicalizeRoot: root => root,
-    reserve: input => h.owner.reserveBinding(input),
+    canonicalizeRoot: (root) => root,
+    reserve: (input) => h.owner.reserveBinding(input),
     createFolder: async () => h.workspace,
-    register: (reservation, workspace) => h.owner.registerReservedBinding(reservation, workspace, {
-      persist: () => h.setRegistered(workspace),
-      rollback: () => h.setRegistered(null),
-    }),
-    remove: async (binding, cleanup) => { await h.remove(binding, cleanup, undefined, {keepDrafts: true}); },
+    register: (reservation, workspace) =>
+      h.owner.registerReservedBinding(reservation, workspace, {
+        persist: () => h.setRegistered(workspace),
+        rollback: () => h.setRegistered(null),
+      }),
+    remove: async (binding, cleanup) => {
+      await h.remove(binding, cleanup, undefined, { keepDrafts: true });
+    },
     release: (reservation, finalize) => h.owner.releaseReservation(reservation, finalize),
     closeRelay: vi.fn(async () => {}),
     rollbackComplete: h.notifyRenderer,
     logError,
   });
-  await expect(run({
-    workspaceId: h.workspace.workspaceId, rootPath: h.workspace.rootPath,
-    populate: async () => { throw joinError; },
-    rollbackLabel: "join", cleanupFailureMessage: "rollback failed",
-    failure: () => joinError,
-  })).rejects.toBe(joinError);
+  await expect(
+    run({
+      workspaceId: h.workspace.workspaceId,
+      rootPath: h.workspace.rootPath,
+      populate: async () => {
+        throw joinError;
+      },
+      rollbackLabel: "join",
+      cleanupFailureMessage: "rollback failed",
+      failure: () => joinError,
+    }),
+  ).rejects.toBe(joinError);
   expect(h.current()).toBeNull();
   expect(h.owner.workspaceIds()).toEqual([]);
   expect(confirm).not.toHaveBeenCalled();
@@ -116,12 +166,20 @@ it("takes a failed join's entry out of the list without asking, and keeps its ty
 });
 
 it("warns before removing unresolved typing and leaves its trust, registry and copies when cancelled", async () => {
- const confirm = vi.fn(async () => false); const h = harness(true, confirm);
- await h.trustIt();
- await expect(h.forget("workspace")).resolves.toBeUndefined();
- expect(h.restrict).not.toHaveBeenCalled(); expect(h.grants()).toEqual(["workspace"]); expect(await h.trust.isTrusted(h.workspace)).toBe(true);
- expect(h.clearNotices).not.toHaveBeenCalled();expect(h.notifyRenderer).not.toHaveBeenCalled();expect(h.onError).not.toHaveBeenCalled();
- expect(confirm).toHaveBeenCalledExactlyOnceWith("workspace"); expect(h.removeWorkspace).not.toHaveBeenCalled(); expect(h.removeDrafts).not.toHaveBeenCalled(); expect(h.current()).toEqual(h.workspace);
+  const confirm = vi.fn(async () => false);
+  const h = harness(true, confirm);
+  await h.trustIt();
+  await expect(h.forget("workspace")).resolves.toBeUndefined();
+  expect(h.restrict).not.toHaveBeenCalled();
+  expect(h.grants()).toEqual(["workspace"]);
+  expect(await h.trust.isTrusted(h.workspace)).toBe(true);
+  expect(h.clearNotices).not.toHaveBeenCalled();
+  expect(h.notifyRenderer).not.toHaveBeenCalled();
+  expect(h.onError).not.toHaveBeenCalled();
+  expect(confirm).toHaveBeenCalledExactlyOnceWith("workspace");
+  expect(h.removeWorkspace).not.toHaveBeenCalled();
+  expect(h.removeDrafts).not.toHaveBeenCalled();
+  expect(h.current()).toEqual(h.workspace);
 });
 
 it("restricts a forgotten workspace after its typing question and while it is still open, and a failed restrict removes nothing", async () => {
@@ -145,8 +203,12 @@ it("restricts a forgotten workspace after its typing question and while it is st
 
   await h.forget("workspace");
   expect(h.restrict).toHaveBeenCalledTimes(3);
-  expect(h.restrict.mock.invocationCallOrder[1]).toBeLessThan(h.removeWorkspace.mock.invocationCallOrder[0]!);
-  expect(h.restrict.mock.invocationCallOrder[2]).toBeLessThan(h.removeWorkspace.mock.invocationCallOrder[0]!);
+  expect(h.restrict.mock.invocationCallOrder[1]).toBeLessThan(
+    h.removeWorkspace.mock.invocationCallOrder[0]!,
+  );
+  expect(h.restrict.mock.invocationCallOrder[2]).toBeLessThan(
+    h.removeWorkspace.mock.invocationCallOrder[0]!,
+  );
   expect(h.current()).toBeNull();
   expect(h.grants()).toEqual([]);
   expect(h.clearNotices).toHaveBeenCalledExactlyOnceWith("workspace");
@@ -154,7 +216,12 @@ it("restricts a forgotten workspace after its typing question and while it is st
 
 it("leaves no grant behind when a Trust is given during the typing question", async () => {
   let answer!: (forget: boolean) => void;
-  const confirm = vi.fn(() => new Promise<boolean>(resolve => { answer = resolve; }));
+  const confirm = vi.fn(
+    () =>
+      new Promise<boolean>((resolve) => {
+        answer = resolve;
+      }),
+  );
   const h = harness(true, confirm);
   const forgetting = h.forget("workspace");
   expect(confirm).toHaveBeenCalledOnce();
@@ -166,7 +233,10 @@ it("leaves no grant behind when a Trust is given during the typing question", as
 });
 
 it("leaves no grant behind when a Trust is given while Forget runs", async () => {
-  const h = harness(true, vi.fn(async () => true));
+  const h = harness(
+    true,
+    vi.fn(async () => true),
+  );
   await h.trustIt();
   let late: Promise<boolean> | undefined;
   h.writeText.mockImplementationOnce(async (file, text) => {
@@ -182,7 +252,10 @@ it("leaves no grant behind when a Trust is given while Forget runs", async () =>
 });
 
 it("keeps the workspace listed when the restrict after it closes fails, and Forget works on a second try", async () => {
-  const h = harness(true, vi.fn(async () => true));
+  const h = harness(
+    true,
+    vi.fn(async () => true),
+  );
   await h.trustIt();
   const error = new Error("trust file is busy");
   let late: Promise<boolean> | undefined;
@@ -191,8 +264,12 @@ it("keeps the workspace listed when the restrict after it closes fails, and Forg
       late = h.owner.withAuthority("workspace", () => h.trustIt());
       h.files.set(file, text);
     })
-    .mockImplementationOnce(async (file, text) => { h.files.set(file, text); })
-    .mockImplementationOnce(async () => { throw error; });
+    .mockImplementationOnce(async (file, text) => {
+      h.files.set(file, text);
+    })
+    .mockImplementationOnce(async () => {
+      throw error;
+    });
   await expect(h.forget("workspace")).rejects.toBe(error);
   expect(await late).toBe(true);
   expect(h.trust.isRevoked("workspace")).toBe(true);
@@ -207,7 +284,10 @@ it("keeps the workspace listed when the restrict after it closes fails, and Forg
 });
 
 it("leaves no grant behind when another window's Restrict fails while Forget runs", async () => {
-  const h = harness(true, vi.fn(async () => true));
+  const h = harness(
+    true,
+    vi.fn(async () => true),
+  );
   await h.trustIt();
   const error = new Error("trust file is busy");
   let late: Promise<boolean> | undefined;
@@ -222,7 +302,9 @@ it("leaves no grant behind when another window's Restrict fails while Forget run
       restricted = h.trust.restrict("workspace").catch((failure: unknown) => failure);
       h.files.set(file, text);
     })
-    .mockImplementationOnce(async () => { throw error; });
+    .mockImplementationOnce(async () => {
+      throw error;
+    });
   await h.forget("workspace");
   expect(await late).toBe(false);
   expect(await restricted).toBe(error);
@@ -231,32 +313,51 @@ it("leaves no grant behind when another window's Restrict fails while Forget run
 });
 
 const shareView = {
-  shareId: "share-1", granterEmail: "alex@example.com", genericChatWritable: false,
-  grantedSelector: {paths: ["itinerary.md"], versionId: null, access: "view" as const},
-  relayUrl: "https://relay.example.test", recipientUserId: "user-sam",
+  shareId: "share-1",
+  granterEmail: "alex@example.com",
+  genericChatWritable: false,
+  grantedSelector: { paths: ["itinerary.md"], versionId: null, access: "view" as const },
+  relayUrl: "https://relay.example.test",
+  recipientUserId: "user-sam",
 };
 
 it("saves a share view's record after it closes and before its row goes, and saves none for a workspace", async () => {
-  const h = harness(true, vi.fn(async () => true));
-  h.setRegistered({...h.workspace, shareView});
+  const h = harness(
+    true,
+    vi.fn(async () => true),
+  );
+  h.setRegistered({ ...h.workspace, shareView });
   await h.forget("workspace");
-  expect(h.remember).toHaveBeenCalledExactlyOnceWith({workspaceId: "workspace", rootPath: "root"}, shareView);
-  expect(h.restrict.mock.invocationCallOrder[1]).toBeLessThan(h.remember.mock.invocationCallOrder[0]!);
-  expect(h.remember.mock.invocationCallOrder[0]).toBeLessThan(h.removeWorkspace.mock.invocationCallOrder[0]!);
+  expect(h.remember).toHaveBeenCalledExactlyOnceWith(
+    { workspaceId: "workspace", rootPath: "root" },
+    shareView,
+  );
+  expect(h.restrict.mock.invocationCallOrder[1]).toBeLessThan(
+    h.remember.mock.invocationCallOrder[0]!,
+  );
+  expect(h.remember.mock.invocationCallOrder[0]).toBeLessThan(
+    h.removeWorkspace.mock.invocationCallOrder[0]!,
+  );
 
-  const plain = harness(true, vi.fn(async () => true));
+  const plain = harness(
+    true,
+    vi.fn(async () => true),
+  );
   await plain.forget("workspace");
   expect(plain.remember).not.toHaveBeenCalled();
   expect(plain.current()).toBeNull();
 });
 
 it("keeps a share view listed when its record can't be saved, and Forget works on a second try", async () => {
-  const h = harness(true, vi.fn(async () => true));
-  h.setRegistered({...h.workspace, shareView});
+  const h = harness(
+    true,
+    vi.fn(async () => true),
+  );
+  h.setRegistered({ ...h.workspace, shareView });
   const error = new Error("profile file is busy");
   h.remember.mockRejectedValueOnce(error);
   await expect(h.forget("workspace")).rejects.toBe(error);
-  expect(h.current()).toEqual({...h.workspace, shareView});
+  expect(h.current()).toEqual({ ...h.workspace, shareView });
   expect(h.removeWorkspace).not.toHaveBeenCalled();
   expect(h.clearNotices).not.toHaveBeenCalled();
   expect(h.notifyRenderer).not.toHaveBeenCalled();
@@ -267,9 +368,12 @@ it("keeps a share view listed when its record can't be saved, and Forget works o
 });
 
 it("saves nothing when the person goes back", async () => {
-  const h = harness(true, vi.fn(async () => false));
-  h.setRegistered({...h.workspace, shareView});
+  const h = harness(
+    true,
+    vi.fn(async () => false),
+  );
+  h.setRegistered({ ...h.workspace, shareView });
   await h.forget("workspace");
   expect(h.remember).not.toHaveBeenCalled();
-  expect(h.current()).toEqual({...h.workspace, shareView});
+  expect(h.current()).toEqual({ ...h.workspace, shareView });
 });

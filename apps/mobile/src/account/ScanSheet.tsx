@@ -4,7 +4,16 @@ import type { BarcodeScanningResult } from "expo-camera";
 import * as Haptics from "expo-haptics";
 import { CameraOff } from "lucide-react-native";
 import { useEffect, useState } from "react";
-import { AppState, Linking, Modal, Platform, Pressable, StyleSheet, Text, View } from "react-native";
+import {
+  AppState,
+  Linking,
+  Modal,
+  Platform,
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useTheme } from "../theme";
 import { Button } from "./Button";
@@ -23,20 +32,38 @@ const FRAME = "#ffffff";
 
 // Connect's scanner for a computer's Connect a phone code, as a system sheet over Connect. Each opening starts afresh:
 // `session` changes, so the camera is asked for again and no earlier scan counts.
-export function ScanSheet({ open, session, onClose, onScanned }: {
+export function ScanSheet({
+  open,
+  session,
+  onClose,
+  onScanned,
+}: {
   open: boolean;
   session: number;
   onClose(): void;
   onScanned(origin: string): void;
 }) {
   return (
-    <Modal visible={open} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
+    <Modal
+      visible={open}
+      animationType="slide"
+      presentationStyle="pageSheet"
+      onRequestClose={onClose}
+    >
       <ScanContent key={session} active={open} onClose={onClose} onScanned={onScanned} />
     </Modal>
   );
 }
 
-function ScanContent({ active, onClose, onScanned }: { active: boolean; onClose(): void; onScanned(origin: string): void }) {
+function ScanContent({
+  active,
+  onClose,
+  onScanned,
+}: {
+  active: boolean;
+  onClose(): void;
+  onScanned(origin: string): void;
+}) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
   const [step, setStep] = useState<Step>({ kind: "opening" });
@@ -46,8 +73,12 @@ function ScanContent({ active, onClose, onScanned }: { active: boolean; onClose(
   // Asks for the camera as the sheet opens, which is only ever after the person taps Scan code.
   useEffect(() => {
     let current = true;
-    void openCamera().then(next => { if (current) setStep(next); });
-    return () => { current = false; };
+    void openCamera().then((next) => {
+      if (current) setStep(next);
+    });
+    return () => {
+      current = false;
+    };
   }, []);
 
   // Android keeps the app running while the person allows the camera in Settings, so the scanner starts on return.
@@ -56,14 +87,19 @@ function ScanContent({ active, onClose, onScanned }: { active: boolean; onClose(
     if (step.kind !== "denied") return;
     const { camera } = step;
     let current = true;
-    const subscription = AppState.addEventListener("change", next => {
+    const subscription = AppState.addEventListener("change", (next) => {
       if (next !== "active") return;
       void camera.Camera.getCameraPermissionsAsync().then(
-        permission => { if (current && permission.granted) setStep({ kind: "scanning", camera }); },
+        (permission) => {
+          if (current && permission.granted) setStep({ kind: "scanning", camera });
+        },
         () => undefined,
       );
     });
-    return () => { current = false; subscription.remove(); };
+    return () => {
+      current = false;
+      subscription.remove();
+    };
   }, [step]);
 
   function scanned({ data }: BarcodeScanningResult) {
@@ -76,11 +112,22 @@ function ScanContent({ active, onClose, onScanned }: { active: boolean; onClose(
       onScanned(result.origin);
       return;
     }
-    setProblem(result.problem === "insecure" ? accountWords.insecureCode : accountWords.notServerCode);
+    setProblem(
+      result.problem === "insecure" ? accountWords.insecureCode : accountWords.notServerCode,
+    );
   }
 
   return (
-    <View style={[styles.sheet, { backgroundColor: theme.bg, paddingTop: Platform.OS === "ios" ? 8 : insets.top + 8, paddingBottom: insets.bottom + 16 }]}>
+    <View
+      style={[
+        styles.sheet,
+        {
+          backgroundColor: theme.bg,
+          paddingTop: Platform.OS === "ios" ? 8 : insets.top + 8,
+          paddingBottom: insets.bottom + 16,
+        },
+      ]}
+    >
       <View style={styles.header}>
         <Pressable accessibilityRole="button" onPress={onClose} hitSlop={8} style={styles.cancel}>
           <Text style={[styles.cancelLabel, { color: theme.ink }]}>{confirmWords.cancel}</Text>
@@ -90,27 +137,43 @@ function ScanContent({ active, onClose, onScanned }: { active: boolean; onClose(
         <>
           <View style={[styles.camera, { backgroundColor: CAMERA_FILL }]}>
             {step.kind === "scanning" ? (
-              <step.camera.CameraView style={StyleSheet.absoluteFill} facing="back" barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
-                onBarcodeScanned={active ? scanned : undefined} onMountError={() => setStep({ kind: "failed" })} />
+              <step.camera.CameraView
+                style={StyleSheet.absoluteFill}
+                facing="back"
+                barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
+                onBarcodeScanned={active ? scanned : undefined}
+                onMountError={() => setStep({ kind: "failed" })}
+              />
             ) : null}
             <View pointerEvents="none" style={[styles.frame, { borderColor: FRAME }]} />
           </View>
           {problem ? (
-            <Text style={[styles.line, { color: theme.danger }]} accessibilityRole="alert">{problem}</Text>
+            <Text style={[styles.line, { color: theme.danger }]} accessibilityRole="alert">
+              {problem}
+            </Text>
           ) : (
-            <Text style={[styles.line, { color: theme.muted }]} accessibilityLiveRegion="polite">{accountWords.scanHint}</Text>
+            <Text style={[styles.line, { color: theme.muted }]} accessibilityLiveRegion="polite">
+              {accountWords.scanHint}
+            </Text>
           )}
         </>
       ) : (
         <View style={styles.state}>
-          <View style={styles.icon}><CameraOff size={32} color={theme.muted} strokeWidth={1.9} /></View>
+          <View style={styles.icon}>
+            <CameraOff size={32} color={theme.muted} strokeWidth={1.9} />
+          </View>
           {step.kind === "denied" ? (
             <>
               <Text style={[styles.stateText, { color: theme.ink }]}>{accountWords.cameraOff}</Text>
-              <Button label={accountWords.openSettings} onPress={() => void Linking.openSettings()} />
+              <Button
+                label={accountWords.openSettings}
+                onPress={() => void Linking.openSettings()}
+              />
             </>
           ) : (
-            <Text style={[styles.stateText, { color: theme.danger }]} accessibilityRole="alert">{accountWords.cameraFailed}</Text>
+            <Text style={[styles.stateText, { color: theme.danger }]} accessibilityRole="alert">
+              {accountWords.cameraFailed}
+            </Text>
           )}
         </View>
       )}
@@ -138,10 +201,22 @@ const styles = StyleSheet.create({
   header: { flexDirection: "row" },
   cancel: { minHeight: 44, justifyContent: "center" },
   cancelLabel: { fontSize: 17 },
-  camera: { flex: 1, borderRadius: 16, overflow: "hidden", alignItems: "center", justifyContent: "center" },
+  camera: {
+    flex: 1,
+    borderRadius: 16,
+    overflow: "hidden",
+    alignItems: "center",
+    justifyContent: "center",
+  },
   frame: { width: 240, height: 240, borderRadius: 24, borderWidth: 2 },
   line: { fontSize: 15, lineHeight: 20, textAlign: "center", paddingHorizontal: 8 },
-  state: { flex: 1, alignItems: "stretch", justifyContent: "center", gap: 16, paddingHorizontal: 8 },
+  state: {
+    flex: 1,
+    alignItems: "stretch",
+    justifyContent: "center",
+    gap: 16,
+    paddingHorizontal: 8,
+  },
   icon: { alignItems: "center" },
   stateText: { fontSize: 17, lineHeight: 22, textAlign: "center" },
 });

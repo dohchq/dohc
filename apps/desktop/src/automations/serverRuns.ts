@@ -27,27 +27,53 @@ export type ServerAnswer = { status: number; body: unknown; asker: ServerAsker }
 
 export type ServerRequest =
   | { method: "GET"; action: "runs" | "holds"; query?: Record<string, string> }
-  | { method: "POST"; action: "retry" | "undo" | "restore" | "allow"; body: Record<string, unknown> };
+  | {
+      method: "POST";
+      action: "retry" | "undo" | "restore" | "allow";
+      body: Record<string, unknown>;
+    };
 
 const Run = z.object({
   sharedSettlementPending: z.boolean().optional(),
   sharedSettlementNotAccepted: z.boolean().optional(),
   undoSettlementPending: z.boolean().optional(),
   undoSettlementNotAccepted: z.boolean().optional(),
-  reversals: z.array(z.object({ recordId: z.string(), field: z.string(), path: z.string(),
-    state: z.enum(["pending", "settled", "not-accepted"]).optional() })).optional(),
+  reversals: z
+    .array(
+      z.object({
+        recordId: z.string(),
+        field: z.string(),
+        path: z.string(),
+        state: z.enum(["pending", "settled", "not-accepted"]).optional(),
+      }),
+    )
+    .optional(),
   claimId: z.string(),
   state: z.enum(["pending", "running", "done", "failed"]),
   error: z.string().nullable(),
   createdAtMs: z.number(),
   updatedAtMs: z.number(),
   trigger: z.object({
-    sharedAuthor: z.discriminatedUnion("kind", [
-      z.object({ kind: z.literal("named"), userId: z.string(), grantId: z.string(), grantGeneration: z.number().int() }),
-      z.object({ kind: z.literal("link"), grantId: z.string(), grantGeneration: z.number().int(), principalId: z.string() }),
-    ]).nullable(),
+    sharedAuthor: z
+      .discriminatedUnion("kind", [
+        z.object({
+          kind: z.literal("named"),
+          userId: z.string(),
+          grantId: z.string(),
+          grantGeneration: z.number().int(),
+        }),
+        z.object({
+          kind: z.literal("link"),
+          grantId: z.string(),
+          grantGeneration: z.number().int(),
+          principalId: z.string(),
+        }),
+      ])
+      .nullable(),
     kind: z.enum(["added", "changed", "removed", "message", "button", "schedule"]).nullable(),
-    recordId: z.string().nullable(), by: z.enum(["human", "agent", "automation"]).nullable(), depth: z.number().int().nonnegative(),
+    recordId: z.string().nullable(),
+    by: z.enum(["human", "agent", "automation"]).nullable(),
+    depth: z.number().int().nonnegative(),
   }),
   writes: z.array(WriteSchema),
   definitionChanged: z.boolean(),
@@ -68,16 +94,41 @@ const Undo = z.discriminatedUnion("status", [
   z.object({
     status: z.literal("undone"),
     sharedReversals: SharedReversalsSchema.optional(),
-    reverted: Count, removed: Count, kept: Count, changedSince: Count, missing: Count, irreversible: Count, actions: Count, actionsReversed: Count,
-    deleted: Count, keptChanged: Count, gone: Count,
+    reverted: Count,
+    removed: Count,
+    kept: Count,
+    changedSince: Count,
+    missing: Count,
+    irreversible: Count,
+    actions: Count,
+    actionsReversed: Count,
+    deleted: Count,
+    keptChanged: Count,
+    gone: Count,
   }),
-  z.object({ status: z.literal("confirm"), preview: z.object({
-    deletes: Count, unchecked: Count, kept: Count, keptChanged: Count, gone: Count, reverts: Count,
-    irreversible: Count, reverses: Count, actions: Count, token: z.string(),
-    choices: z.array(z.object({ key: z.string(), table: z.string(), records: Count,
-      operations: z.array(z.object({ operationId: z.string(), label: z.string() })),
-    })),
-  }) }),
+  z.object({
+    status: z.literal("confirm"),
+    preview: z.object({
+      deletes: Count,
+      unchecked: Count,
+      kept: Count,
+      keptChanged: Count,
+      gone: Count,
+      reverts: Count,
+      irreversible: Count,
+      reverses: Count,
+      actions: Count,
+      token: z.string(),
+      choices: z.array(
+        z.object({
+          key: z.string(),
+          table: z.string(),
+          records: Count,
+          operations: z.array(z.object({ operationId: z.string(), label: z.string() })),
+        }),
+      ),
+    }),
+  }),
   z.object({ status: z.literal("refused"), reason: z.string() }),
 ]);
 const Hold = z.object({
@@ -98,10 +149,16 @@ const Hold = z.object({
 const GONE = "Your server no longer has this run.";
 
 /** The relay's owner routes to a server's runs, over `send`. */
-export function createServerRuns(send: (workspaceId: string, request: ServerRequest) => Promise<ServerAnswer>) {
+export function createServerRuns(
+  send: (workspaceId: string, request: ServerRequest) => Promise<ServerAnswer>,
+) {
   // The answer's body when it is the relay's success; null for no copy of
   // the workspace on the server, or no way to ask as its owner.
-  async function ask<T>(workspaceId: string, request: ServerRequest, schema: z.ZodType<T>): Promise<T | null> {
+  async function ask<T>(
+    workspaceId: string,
+    request: ServerRequest,
+    schema: z.ZodType<T>,
+  ): Promise<T | null> {
     return read(await send(workspaceId, request), schema);
   }
   function read<T>(answer: ServerAnswer, schema: z.ZodType<T>): T | null {
@@ -116,34 +173,85 @@ export function createServerRuns(send: (workspaceId: string, request: ServerRequ
   return {
     /** False means the workspace's owner cannot ask yet; keep the durable release queued. */
     async releaseRestore(workspaceId: string, retentionId: string): Promise<boolean> {
-      const answer = await send(workspaceId, {method: "POST", action: "restore", body: {definitions: [], again: false, retentionId}});
+      const answer = await send(workspaceId, {
+        method: "POST",
+        action: "restore",
+        body: { definitions: [], again: false, retentionId },
+      });
       if (answer === null || !answer.asker.current()) return false;
-      const result = read(answer, z.object({errorMessage: z.string().nullable()}));
+      const result = read(answer, z.object({ errorMessage: z.string().nullable() }));
       if (result?.errorMessage) throw new Error(result.errorMessage);
       return true;
     },
     /** One automation's newest runs on the server, or null when it has no copy of the workspace. */
-    async runs(workspaceId: string, automationId: string, before?: string): Promise<{ runs: CollectionAutomationRun[]; next: string | null } | null> {
-      return ask(workspaceId, { method: "GET", action: "runs", query: { automationId, ...(before === undefined ? {} : { before }) } }, z.object({ runs: z.array(Run), next: z.string().nullable() }));
+    async runs(
+      workspaceId: string,
+      automationId: string,
+      before?: string,
+    ): Promise<{ runs: CollectionAutomationRun[]; next: string | null } | null> {
+      return ask(
+        workspaceId,
+        {
+          method: "GET",
+          action: "runs",
+          query: { automationId, ...(before === undefined ? {} : { before }) },
+        },
+        z.object({ runs: z.array(Run), next: z.string().nullable() }),
+      );
     },
     /**
      * Whether the server shows this computer's sign-in a run, and who asked,
      * for a yes or a no alike. Null when this computer cannot ask as the owner.
      */
-    async shownTo(workspaceId: string, automationId: string, claimId: string): Promise<{ shown: boolean; asker: ServerAsker } | null> {
-      const answer = await send(workspaceId, { method: "GET", action: "runs", query: { automationId, claimId } });
+    async shownTo(
+      workspaceId: string,
+      automationId: string,
+      claimId: string,
+    ): Promise<{ shown: boolean; asker: ServerAsker } | null> {
+      const answer = await send(workspaceId, {
+        method: "GET",
+        action: "runs",
+        query: { automationId, claimId },
+      });
       if (answer === null) return null;
-      return { shown: Boolean(read(answer, z.object({ run: Run.nullable() }))?.run), asker: answer.asker };
+      return {
+        shown: Boolean(read(answer, z.object({ run: Run.nullable() }))?.run),
+        asker: answer.asker,
+      };
     },
-    async get(workspaceId: string, automationId: string, claimId: string): Promise<CollectionAutomationRun | null> {
-      const answer = await ask(workspaceId, { method: "GET", action: "runs", query: { automationId, claimId } }, z.object({ run: Run.nullable() }));
+    async get(
+      workspaceId: string,
+      automationId: string,
+      claimId: string,
+    ): Promise<CollectionAutomationRun | null> {
+      const answer = await ask(
+        workspaceId,
+        { method: "GET", action: "runs", query: { automationId, claimId } },
+        z.object({ run: Run.nullable() }),
+      );
       return answer?.run ?? null;
     },
-    async retry(workspaceId: string, input: { automationId: string; claimId: string; startOver: boolean }): Promise<CollectionAutomationRetry> {
-      return (await ask(workspaceId, { method: "POST", action: "retry", body: input }, Retry)) ?? { status: "refused", reason: GONE };
+    async retry(
+      workspaceId: string,
+      input: { automationId: string; claimId: string; startOver: boolean },
+    ): Promise<CollectionAutomationRetry> {
+      return (
+        (await ask(workspaceId, { method: "POST", action: "retry", body: input }, Retry)) ?? {
+          status: "refused",
+          reason: GONE,
+        }
+      );
     },
-    async undo(workspaceId: string, input: { automationId: string; claimId: string; deletes: DatasetUndoConfirmed | null }): Promise<CollectionAutomationUndo> {
-      return (await ask(workspaceId, { method: "POST", action: "undo", body: input }, Undo)) ?? { status: "refused", reason: GONE };
+    async undo(
+      workspaceId: string,
+      input: { automationId: string; claimId: string; deletes: DatasetUndoConfirmed | null },
+    ): Promise<CollectionAutomationUndo> {
+      return (
+        (await ask(workspaceId, { method: "POST", action: "undo", body: input }, Undo)) ?? {
+          status: "refused",
+          reason: GONE,
+        }
+      );
     },
     /**
      * Stop and restore's pass over every run on the server under these
@@ -155,21 +263,66 @@ export function createServerRuns(send: (workspaceId: string, request: ServerRequ
       definitions: ReadonlyArray<{ collectionPath: string; id: string; definitionHash: string }>,
       again: boolean,
       retentionId: string,
-    ): Promise<{ undone: number; left: number; reverted: number; missing: number; keptFields: KeptAutomationField[]; otherKept: number; sharedReversals?: z.infer<typeof SharedReversalsSchema>; errorMessage: string | null }> {
-      const answer = await ask(workspaceId, { method: "POST", action: "restore", body: { definitions, again, retentionId } },
-        z.object({ undone: Count, left: Count, reverted: Count, missing: Count, keptFields: z.array(KeptAutomationFieldShape), otherKept: Count, sharedReversals: SharedReversalsSchema.optional(), errorMessage: z.string().nullable() }));
-      return answer ?? { undone: 0, left: 0, reverted: 0, missing: 0, keptFields: [], otherKept: 0, errorMessage: null };
+    ): Promise<{
+      undone: number;
+      left: number;
+      reverted: number;
+      missing: number;
+      keptFields: KeptAutomationField[];
+      otherKept: number;
+      sharedReversals?: z.infer<typeof SharedReversalsSchema>;
+      errorMessage: string | null;
+    }> {
+      const answer = await ask(
+        workspaceId,
+        { method: "POST", action: "restore", body: { definitions, again, retentionId } },
+        z.object({
+          undone: Count,
+          left: Count,
+          reverted: Count,
+          missing: Count,
+          keptFields: z.array(KeptAutomationFieldShape),
+          otherKept: Count,
+          sharedReversals: SharedReversalsSchema.optional(),
+          errorMessage: z.string().nullable(),
+        }),
+      );
+      return (
+        answer ?? {
+          undone: 0,
+          left: 0,
+          reverted: 0,
+          missing: 0,
+          keptFields: [],
+          otherKept: 0,
+          errorMessage: null,
+        }
+      );
     },
     /** The steps the server holds until a current editor allows them. */
     async holds(workspaceId: string): Promise<CollectionAutomationHold[]> {
-      const answer = await ask(workspaceId, { method: "GET", action: "holds" }, z.object({ holds: z.array(Hold) }));
+      const answer = await ask(
+        workspaceId,
+        { method: "GET", action: "holds" },
+        z.object({ holds: z.array(Hold) }),
+      );
       return answer?.holds ?? [];
     },
     async allow(
       workspaceId: string,
-      input: { automationId: string; definitionHash: string; step: string; seq: number; recipient?: string },
+      input: {
+        automationId: string;
+        definitionHash: string;
+        step: string;
+        seq: number;
+        recipient?: string;
+      },
     ): Promise<"confirmed" | "changed"> {
-      const answer = await ask(workspaceId, { method: "POST", action: "allow", body: input }, z.object({ status: z.enum(["confirmed", "changed"]) }));
+      const answer = await ask(
+        workspaceId,
+        { method: "POST", action: "allow", body: input },
+        z.object({ status: z.enum(["confirmed", "changed"]) }),
+      );
       // A server that no longer has the copy holds nothing.
       return answer?.status ?? "changed";
     },

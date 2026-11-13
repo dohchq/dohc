@@ -39,15 +39,11 @@ describe("PageIdentity", () => {
           filenameStem="weekly"
         />,
       );
-      expect((screen.getByTestId("page-title") as HTMLTextAreaElement).value).toBe(
-        "Weekly Plan",
-      );
+      expect((screen.getByTestId("page-title") as HTMLTextAreaElement).value).toBe("Weekly Plan");
     });
 
     it("falls back to the filename stem as an empty-state placeholder", () => {
-      render(
-        <PageIdentity body={"Body text\n"} onChange={() => {}} filenameStem="2026-plan" />,
-      );
+      render(<PageIdentity body={"Body text\n"} onChange={() => {}} filenameStem="2026-plan" />);
       const input = screen.getByTestId("page-title") as HTMLTextAreaElement;
       expect(input.value).toBe("");
       expect(input.placeholder).toBe("2026-plan");
@@ -82,7 +78,14 @@ describe("PageIdentity", () => {
       // The alias reads the title's anchor, so a new title would rewrite it.
       const body = "---\ntitle: &t Plan\nalias: *t\n---\n\n# Body\n";
       const onChange = vi.fn();
-      render(<PageIdentity body={body} onChange={onChange} filenameStem="plan" file={{ workspaceId: "ws", path: "plan.md" }} />);
+      render(
+        <PageIdentity
+          body={body}
+          onChange={onChange}
+          filenameStem="plan"
+          file={{ workspaceId: "ws", path: "plan.md" }}
+        />,
+      );
       expect(screen.queryByText("Title and icon are read-only")).toBeNull();
 
       await user.type(screen.getByTestId("page-title"), "!");
@@ -101,33 +104,49 @@ describe("PageIdentity", () => {
       expect(flag.contains(open)).toBe(true);
     });
 
-    it.each([false, true])("shows a locked block's title read-only, with no flag (shared: %s)", async (shared) => {
-      const user = userEvent.setup();
-      // Written on one line, the block cannot change one property without
-      // rewriting the others.
-      const body = "---\n{title: Plan, owner: Sam}\n---\n\n# Body\n";
-      const doc = markdownToYDoc(body);
-      const onChange = vi.fn();
-      try {
-        render(
-          shared
-            ? <PageIdentity ydoc={doc} filenameStem="plan" file={{ workspaceId: "ws", path: "plan.md" }} />
-            : <PageIdentity body={body} onChange={onChange} filenameStem="plan" file={{ workspaceId: "ws", path: "plan.md" }} />,
-        );
-        const title = screen.getByRole("textbox", { name: "Page title" }) as HTMLTextAreaElement;
-        expect(title.value).toBe("Plan");
-        expect(title.readOnly).toBe(true);
-        expect(screen.queryByTestId("page-icon-add")).toBeNull();
-        expect(screen.queryByRole("status")).toBeNull();
+    it.each([false, true])(
+      "shows a locked block's title read-only, with no flag (shared: %s)",
+      async (shared) => {
+        const user = userEvent.setup();
+        // Written on one line, the block cannot change one property without
+        // rewriting the others.
+        const body = "---\n{title: Plan, owner: Sam}\n---\n\n# Body\n";
+        const doc = markdownToYDoc(body);
+        const onChange = vi.fn();
+        try {
+          render(
+            shared ? (
+              <PageIdentity
+                ydoc={doc}
+                filenameStem="plan"
+                file={{ workspaceId: "ws", path: "plan.md" }}
+              />
+            ) : (
+              <PageIdentity
+                body={body}
+                onChange={onChange}
+                filenameStem="plan"
+                file={{ workspaceId: "ws", path: "plan.md" }}
+              />
+            ),
+          );
+          const title = screen.getByRole("textbox", { name: "Page title" }) as HTMLTextAreaElement;
+          expect(title.value).toBe("Plan");
+          expect(title.readOnly).toBe(true);
+          expect(screen.queryByTestId("page-icon-add")).toBeNull();
+          expect(screen.queryByRole("status")).toBeNull();
 
-        await user.type(title, "!");
+          await user.type(title, "!");
 
-        expect(title.value).toBe("Plan");
-        expect(onChange).not.toHaveBeenCalled();
-        expect(screen.queryByRole("status")).toBeNull();
-        expect(screen.queryByText("Title and icon are read-only")).toBeNull();
-      } finally { doc.destroy(); }
-    });
+          expect(title.value).toBe("Plan");
+          expect(onChange).not.toHaveBeenCalled();
+          expect(screen.queryByRole("status")).toBeNull();
+          expect(screen.queryByText("Title and icon are read-only")).toBeNull();
+        } finally {
+          doc.destroy();
+        }
+      },
+    );
 
     it("shows the title read-only when the block locks before the page listens", () => {
       const doc = markdownToYDoc("---\ntitle: Plan\n---\n\n# Body\n");
@@ -135,23 +154,35 @@ describe("PageIdentity", () => {
       // Another device's change lands after the title renders, before its effect listens.
       function LocksOnCommit() {
         useLayoutEffect(() => {
-          doc.getMap("meta").set(FRONTMATTER_SOURCE_META_KEY, locked.getMap("meta").get(FRONTMATTER_SOURCE_META_KEY));
+          doc
+            .getMap("meta")
+            .set(
+              FRONTMATTER_SOURCE_META_KEY,
+              locked.getMap("meta").get(FRONTMATTER_SOURCE_META_KEY),
+            );
         }, []);
         return null;
       }
       try {
-        render(<><PageIdentity ydoc={doc} filenameStem="plan" /><LocksOnCommit /></>);
-        expect((screen.getByRole("textbox", { name: "Page title" }) as HTMLTextAreaElement).readOnly).toBe(true);
-      } finally { doc.destroy(); locked.destroy(); }
+        render(
+          <>
+            <PageIdentity ydoc={doc} filenameStem="plan" />
+            <LocksOnCommit />
+          </>,
+        );
+        expect(
+          (screen.getByRole("textbox", { name: "Page title" }) as HTMLTextAreaElement).readOnly,
+        ).toBe(true);
+      } finally {
+        doc.destroy();
+        locked.destroy();
+      }
     });
 
     it("removes the title key when the field is cleared", async () => {
       const user = userEvent.setup();
       render(
-        <ControlledPageIdentity
-          initialBody={"---\ntitle: Draft\n---\n\n# Body\n"}
-          stem="note"
-        />,
+        <ControlledPageIdentity initialBody={"---\ntitle: Draft\n---\n\n# Body\n"} stem="note" />,
       );
 
       await user.clear(screen.getByTestId("page-title"));
@@ -164,10 +195,7 @@ describe("PageIdentity", () => {
     it("sets an icon from the picker grid and orders it after the title", async () => {
       const user = userEvent.setup();
       render(
-        <ControlledPageIdentity
-          initialBody={"---\ntitle: Plan\n---\n\n# Body\n"}
-          stem="note"
-        />,
+        <ControlledPageIdentity initialBody={"---\ntitle: Plan\n---\n\n# Body\n"} stem="note" />,
       );
 
       await user.click(screen.getByTestId("page-icon-add"));
@@ -227,7 +255,10 @@ describe("PageIdentity", () => {
       expect(screen.queryByTestId("page-icon-add")).toBeNull();
       expect(screen.queryByRole("button", { name: "Add icon" })).toBeNull();
       const held = view.container.querySelector("button[aria-hidden]") as HTMLButtonElement | null;
-      expect(held?.textContent, "`) : opening ? (` → `) : null}`. The opening row lacks Add icon's box and is shorter than the ready row, so the page moves when it opens.").toBe("Add icon");
+      expect(
+        held?.textContent,
+        "`) : opening ? (` → `) : null}`. The opening row lacks Add icon's box and is shorter than the ready row, so the page moves when it opens.",
+      ).toBe("Add icon");
       expect(held?.classList.contains("invisible")).toBe(true);
       expect(held?.disabled).toBe(true);
       expect(held?.tabIndex).toBe(-1);
@@ -245,7 +276,9 @@ describe("PageIdentity", () => {
 
       await user.click(screen.getByTestId("page-icon-add"));
 
-      expect(screen.getByRole("dialog", { name: "Choose an icon" }).getAttribute("aria-modal")).toBe("true");
+      expect(
+        screen.getByRole("dialog", { name: "Choose an icon" }).getAttribute("aria-modal"),
+      ).toBe("true");
       expect(document.activeElement).toBe(screen.getByLabelText("Use 📄"));
     });
 
@@ -299,7 +332,15 @@ describe("PageIdentity", () => {
             onOpenConflicts={ignore}
             onRefreshShareView={ignore}
             onRebuildEngineStore={ignore}
-            workspaceErrors={[{ id: "e", message: "dohc could not reach this server.", atMs: 1, canRetry: true, seen: !toastShown }]}
+            workspaceErrors={[
+              {
+                id: "e",
+                message: "dohc could not reach this server.",
+                atMs: 1,
+                canRetry: true,
+                seen: !toastShown,
+              },
+            ]}
             onRetryWorkspaceError={ignore}
             onHideWorkspaceError={ignore}
           />
@@ -341,7 +382,15 @@ describe("PageIdentity", () => {
             onOpenConflicts={ignore}
             onRefreshShareView={ignore}
             onRebuildEngineStore={ignore}
-            workspaceErrors={[{ id: "e", message: "dohc could not reach this server.", atMs: 1, canRetry: true, seen: true }]}
+            workspaceErrors={[
+              {
+                id: "e",
+                message: "dohc could not reach this server.",
+                atMs: 1,
+                canRetry: true,
+                seen: true,
+              },
+            ]}
             onRetryWorkspaceError={ignore}
             onHideWorkspaceError={ignore}
           />
@@ -419,7 +468,12 @@ describe("PageIdentity", () => {
     it("keeps Enter for an input method while it composes, and Shift+ArrowDown for selecting", () => {
       const onEnterBody = vi.fn();
       render(
-        <PageIdentity body={"# Body\n"} onChange={() => {}} filenameStem="note" onEnterBody={onEnterBody} />,
+        <PageIdentity
+          body={"# Body\n"}
+          onChange={() => {}}
+          filenameStem="note"
+          onEnterBody={onEnterBody}
+        />,
       );
       const title = screen.getByTestId("page-title");
 
@@ -433,7 +487,11 @@ describe("PageIdentity", () => {
       const user = userEvent.setup();
       const onChange = vi.fn();
       render(
-        <PageIdentity body={"---\ntitle: Trip plan\n---\n# Body\n"} onChange={onChange} filenameStem="note" />,
+        <PageIdentity
+          body={"---\ntitle: Trip plan\n---\n# Body\n"}
+          onChange={onChange}
+          filenameStem="note"
+        />,
       );
       const title = screen.getByTestId("page-title") as HTMLTextAreaElement;
       title.focus();
@@ -484,7 +542,8 @@ describe("PageIdentity", () => {
     });
 
     // A long first block with no blank line: 5,000 lines of one paragraph.
-    const longLines = (word: string) => Array.from({ length: 5_000 }, (_, line) => `${word} ${line}`).join("\n");
+    const longLines = (word: string) =>
+      Array.from({ length: 5_000 }, (_, line) => `${word} ${line}`).join("\n");
 
     it.each([
       ["an H1 first and no title", "# Plan\n\nBody\n", true],
@@ -509,7 +568,11 @@ describe("PageIdentity", () => {
       ["a list item before ===", "- Plan\n===\n", false],
       ["inline HTML with an underline", "<em>Plan</em>\n===\n", true],
       ["an HTML block holding ===", "<div>\n===\n</div>\n", false],
-      ["an underline after 17 lines", `${Array.from({ length: 17 }, (_, line) => `Line ${line}`).join("\n")}\n===\n`, true],
+      [
+        "an underline after 17 lines",
+        `${Array.from({ length: 17 }, (_, line) => `Line ${line}`).join("\n")}\n===\n`,
+        true,
+      ],
       ["# then a no-break space", "# Plan\n", true],
       ["lone CR line ends", "Plan\r===\r", true],
       ["a title property", "---\ntitle: Plan\n---\n\n# Plan\n", false],
@@ -526,9 +589,13 @@ describe("PageIdentity", () => {
       const lex = vi.spyOn(Lexer, "lex");
       try {
         const body = (edit: string) => `# Plan\n${longLines(edit)}\n`;
-        const view = render(<PageIdentity body={body("Body")} onChange={() => {}} filenameStem="plan" />);
+        const view = render(
+          <PageIdentity body={body("Body")} onChange={() => {}} filenameStem="plan" />,
+        );
         expect(folded()).toBe(true);
-        view.rerender(<PageIdentity body={body("Edited")} onChange={() => {}} filenameStem="plan" />);
+        view.rerender(
+          <PageIdentity body={body("Edited")} onChange={() => {}} filenameStem="plan" />,
+        );
         expect(folded()).toBe(true);
         view.unmount();
 
@@ -546,14 +613,24 @@ describe("PageIdentity", () => {
       const lex = vi.spyOn(Lexer, "lex");
       try {
         const body = (edit: string) => `First line\nSecond line\n===\n${longLines(edit)}\n`;
-        const view = render(<PageIdentity body={body("Body")} onChange={() => {}} filenameStem="plan" />);
+        const view = render(
+          <PageIdentity body={body("Body")} onChange={() => {}} filenameStem="plan" />,
+        );
         expect(folded()).toBe(true);
-        view.rerender(<PageIdentity body={body("Edited")} onChange={() => {}} filenameStem="plan" />);
+        view.rerender(
+          <PageIdentity body={body("Edited")} onChange={() => {}} filenameStem="plan" />,
+        );
         expect(folded()).toBe(true);
         expect(lex.mock.calls).toEqual([["First line\nSecond line\n==="]]);
 
         // A long paragraph with no underline needs no lexer at all.
-        view.rerender(<PageIdentity body={`Intro\n${longLines("Body")}\n`} onChange={() => {}} filenameStem="plan" />);
+        view.rerender(
+          <PageIdentity
+            body={`Intro\n${longLines("Body")}\n`}
+            onChange={() => {}}
+            filenameStem="plan"
+          />,
+        );
         expect(folded()).toBe(false);
         expect(lex).toHaveBeenCalledTimes(1);
       } finally {
@@ -575,10 +652,15 @@ describe("PageIdentity", () => {
       );
       const field = titleField();
       const elsewhere = screen.getByRole("button", { name: "elsewhere" });
-      const writeOutside = (title: string) => act(() => void doc.getMap("frontmatter").set("title", title));
+      const writeOutside = (title: string) =>
+        act(() => void doc.getMap("frontmatter").set("title", title));
       act(() => field.focus());
       fireEvent.compositionStart(field);
-      fireEvent.input(field, { target: { value: "東" }, isComposing: true, inputType: "insertCompositionText" });
+      fireEvent.input(field, {
+        target: { value: "東" },
+        isComposing: true,
+        inputType: "insertCompositionText",
+      });
       act(() => elsewhere.focus());
       return { doc, field, elsewhere, writeOutside };
     }
@@ -599,7 +681,10 @@ describe("PageIdentity", () => {
     // and later blurs count again.
     it.each([
       ["a click elsewhere", () => fireEvent.pointerDown(document.body)],
-      ["a key elsewhere", () => fireEvent.keyDown(screen.getByRole("button", { name: "elsewhere" }), { key: "a" })],
+      [
+        "a key elsewhere",
+        () => fireEvent.keyDown(screen.getByRole("button", { name: "elsewhere" }), { key: "a" }),
+      ],
       ["the window's focus", () => window.dispatchEvent(new Event("focus"))],
     ])("ends a composition that never ends on %s", (_, move) => {
       const { doc, field, elsewhere, writeOutside } = renderComposing();
@@ -631,7 +716,11 @@ describe("PageIdentity", () => {
     it("keeps a held composition through interim text, even empty, until it ends", () => {
       const { doc, field, writeOutside } = renderComposing();
       expect(folded()).toBe(false);
-      fireEvent.input(field, { target: { value: "" }, isComposing: true, inputType: "insertCompositionText" });
+      fireEvent.input(field, {
+        target: { value: "" },
+        isComposing: true,
+        inputType: "insertCompositionText",
+      });
       // Text opened the title, so empty interim text does not fold it.
       expect(folded()).toBe(false);
       writeOutside("Outside");
@@ -648,9 +737,17 @@ describe("PageIdentity", () => {
       const field = titleField();
       act(() => field.focus());
       fireEvent.compositionStart(field);
-      fireEvent.input(field, { target: { value: "東" }, isComposing: true, inputType: "insertCompositionText" });
+      fireEvent.input(field, {
+        target: { value: "東" },
+        isComposing: true,
+        inputType: "insertCompositionText",
+      });
       expect(folded()).toBe(false);
-      fireEvent.input(field, { target: { value: "" }, isComposing: true, inputType: "insertCompositionText" });
+      fireEvent.input(field, {
+        target: { value: "" },
+        isComposing: true,
+        inputType: "insertCompositionText",
+      });
       expect(folded()).toBe(false);
 
       fireEvent.compositionEnd(field);

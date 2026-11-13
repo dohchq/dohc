@@ -2,7 +2,11 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { AutomationStoreFolder } from "@dohc/automation-executor/automation-run-store";
 import { localAutomationStoreFolder } from "../automations/localAutomationStore";
-import { readLocalStateFrom, readOwnedLocalState, type LocalStateWorkspace } from "../workspaces/workspaceLocalState";
+import {
+  readLocalStateFrom,
+  readOwnedLocalState,
+  type LocalStateWorkspace,
+} from "../workspaces/workspaceLocalState";
 
 // An open that holds `.dohc/local` for as long as the test runs.
 const HELD = { current: () => true };
@@ -23,8 +27,14 @@ export function fakeLocalStateOpens() {
     },
     // An open that could not keep the folder out of iCloud Drive prepared it.
     localStateOpenAt: async (rootPath) => {
-      await Promise.all([...underWay].filter(([at]) => at.endsWith(`\0${rootPath}`)).map(([, opening]) => opening.catch(() => undefined)));
-      const open = [...opens.values()].find((candidate) => candidate.workspace.rootPath === rootPath);
+      await Promise.all(
+        [...underWay]
+          .filter(([at]) => at.endsWith(`\0${rootPath}`))
+          .map(([, opening]) => opening.catch(() => undefined)),
+      );
+      const open = [...opens.values()].find(
+        (candidate) => candidate.workspace.rootPath === rootPath,
+      );
       return open ? { current: () => opens.get(key(open.workspace)) === open } : null;
     },
   });
@@ -37,10 +47,19 @@ export function fakeLocalStateOpens() {
     /** An open that is under way until `finish` answers it. */
     start(workspace: LocalStateWorkspace) {
       let finish!: () => void;
-      const answered = new Promise<void>((resolve) => { finish = resolve; });
-      const opening = answered.then(() => fake.open(workspace)).finally(() => underWay.delete(key(workspace)));
+      const answered = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      const opening = answered
+        .then(() => fake.open(workspace))
+        .finally(() => underWay.delete(key(workspace)));
       underWay.set(key(workspace), opening);
-      return { finish: async () => { finish(); await opening; } };
+      return {
+        finish: async () => {
+          finish();
+          await opening;
+        },
+      };
     },
     /** How many times a writer waited for an open under way. */
     waits: () => waits,
@@ -55,7 +74,8 @@ export function fakeLocalStateOpens() {
 // again on each call so a file that stood in its own opens meanwhile still
 // finds these.
 const opened = new Map<string, { localStateReady: boolean }>();
-const openedKey = (workspace: LocalStateWorkspace) => `${workspace.workspaceId}\0${workspace.rootPath}`;
+const openedKey = (workspace: LocalStateWorkspace) =>
+  `${workspace.workspaceId}\0${workspace.rootPath}`;
 
 /**
  * For a test that is not about the open: the engine's open of this workspace

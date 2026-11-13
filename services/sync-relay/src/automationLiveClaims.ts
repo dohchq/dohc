@@ -1,4 +1,8 @@
-import { isInvalidInputRefusal, VersionedLiveAdapter, type AutomationClaim } from "@dohc/workspace-engine-client";
+import {
+  isInvalidInputRefusal,
+  VersionedLiveAdapter,
+  type AutomationClaim,
+} from "@dohc/workspace-engine-client";
 import type { SyncRelayStorage } from "./storage";
 
 // A live-shared record changes on the live host: its engine accepts each
@@ -8,10 +12,19 @@ import type { SyncRelayStorage } from "./storage";
 // loses none. The server's executor drains them beside its own copy's
 // claims and runs each against its copy, once its copy has pulled the change.
 
-type Ledger = Pick<VersionedLiveAdapter,
-  | "subscribeAutomation" | "unsubscribeAutomation" | "claimNextAutomation" | "settleAutomationClaim"
-  | "releaseAutomationClaim" | "retryAutomationClaim" | "listAutomationClaims" | "listAutomationFailures"
-  | "getAutomationClaim" | "pruneAutomationHistory">;
+type Ledger = Pick<
+  VersionedLiveAdapter,
+  | "subscribeAutomation"
+  | "unsubscribeAutomation"
+  | "claimNextAutomation"
+  | "settleAutomationClaim"
+  | "releaseAutomationClaim"
+  | "retryAutomationClaim"
+  | "listAutomationClaims"
+  | "listAutomationFailures"
+  | "getAutomationClaim"
+  | "pruneAutomationHistory"
+>;
 
 /** The live host's claim ledger for one workspace, while the live host holds its live-shared documents. */
 export interface LiveClaimLedger {
@@ -51,7 +64,10 @@ export class ServerClaimEngine extends VersionedLiveAdapter {
     copy: ConstructorParameters<typeof VersionedLiveAdapter>,
     private readonly live: {
       ledger(): LiveClaimLedger | null;
-      storage: Pick<SyncRelayStorage, "automationWorkspaceLogSeq" | "automationWorkspaceLogHead" | "liveClaimLogSeq">;
+      storage: Pick<
+        SyncRelayStorage,
+        "automationWorkspaceLogSeq" | "automationWorkspaceLogHead" | "liveClaimLogSeq"
+      >;
       /** Pulls the copy through at least the relay log head at the call. */
       sync(): Promise<void>;
       onFailuresChanged(): void;
@@ -75,7 +91,9 @@ export class ServerClaimEngine extends VersionedLiveAdapter {
     return result;
   }
 
-  override async unsubscribeAutomation(input: Parameters<VersionedLiveAdapter["unsubscribeAutomation"]>[0]) {
+  override async unsubscribeAutomation(
+    input: Parameters<VersionedLiveAdapter["unsubscribeAutomation"]>[0],
+  ) {
     const result = await super.unsubscribeAutomation(input);
     this.wanted.delete(input.automationId);
     this.dropped.set(input.automationId, input.path);
@@ -83,7 +101,9 @@ export class ServerClaimEngine extends VersionedLiveAdapter {
     return result;
   }
 
-  override async claimNextAutomation(input: Parameters<VersionedLiveAdapter["claimNextAutomation"]>[0]) {
+  override async claimNextAutomation(
+    input: Parameters<VersionedLiveAdapter["claimNextAutomation"]>[0],
+  ) {
     const own = await super.claimNextAutomation(input);
     if (own !== null) return own;
     const ledger = this.live.ledger();
@@ -101,8 +121,12 @@ export class ServerClaimEngine extends VersionedLiveAdapter {
       const next = this.held[0]!;
       if (liveCursorOf(next) === null && !("originId" in next.trigger)) {
         if (!(await this.pullThrough(0))) return null;
-        await this.settleAutomationClaim({ claimId: next.claimId, state: "failed",
-          error: "This automation could not run because the live host did not record which change triggered it. Update your dohc server, then change the record again." });
+        await this.settleAutomationClaim({
+          claimId: next.claimId,
+          state: "failed",
+          error:
+            "This automation could not run because the live host did not record which change triggered it. Update your dohc server, then change the record again.",
+        });
         this.held.shift();
         this.live.onFailuresChanged();
         continue;
@@ -113,19 +137,25 @@ export class ServerClaimEngine extends VersionedLiveAdapter {
     }
   }
 
-  override async makeAutomationWritesDurable(input: Parameters<VersionedLiveAdapter["makeAutomationWritesDurable"]>[0] = {}) {
+  override async makeAutomationWritesDurable(
+    input: Parameters<VersionedLiveAdapter["makeAutomationWritesDurable"]>[0] = {},
+  ) {
     // Effects write the server's copy, even when the live host served the claim.
     await super.makeAutomationWritesDurable(this.fromLive.has(input.claimId ?? "") ? {} : input);
   }
 
-  override async settleAutomationClaim(input: Parameters<VersionedLiveAdapter["settleAutomationClaim"]>[0]) {
+  override async settleAutomationClaim(
+    input: Parameters<VersionedLiveAdapter["settleAutomationClaim"]>[0],
+  ) {
     if (!this.fromLive.has(input.claimId)) return await super.settleAutomationClaim(input);
     const settled = await this.ledgerFor("settle").settleAutomationClaim(input);
     this.fromLive.delete(input.claimId);
     return settled;
   }
 
-  override async releaseAutomationClaim(input: Parameters<VersionedLiveAdapter["releaseAutomationClaim"]>[0]) {
+  override async releaseAutomationClaim(
+    input: Parameters<VersionedLiveAdapter["releaseAutomationClaim"]>[0],
+  ) {
     if (!this.fromLive.has(input.claimId)) return await super.releaseAutomationClaim(input);
     const released = await this.ledgerFor("release").releaseAutomationClaim(input);
     this.fromLive.delete(input.claimId);
@@ -133,7 +163,9 @@ export class ServerClaimEngine extends VersionedLiveAdapter {
   }
 
   /** A failed claim from either engine, however old: the copy's first. */
-  override async retryAutomationClaim(input: Parameters<VersionedLiveAdapter["retryAutomationClaim"]>[0]) {
+  override async retryAutomationClaim(
+    input: Parameters<VersionedLiveAdapter["retryAutomationClaim"]>[0],
+  ) {
     try {
       return await super.retryAutomationClaim(input);
     } catch (error) {
@@ -144,25 +176,36 @@ export class ServerClaimEngine extends VersionedLiveAdapter {
   }
 
   /** Both engines' claims of an automation, newest first. The live host's count only while it answers. */
-  override async listAutomationClaims(input: Parameters<VersionedLiveAdapter["listAutomationClaims"]>[0]) {
+  override async listAutomationClaims(
+    input: Parameters<VersionedLiveAdapter["listAutomationClaims"]>[0],
+  ) {
     const own = await super.listAutomationClaims(input);
     const live = await this.fromLedger((ledger) => ledger.listAutomationClaims(input));
     if (live === null) return own;
     const limit = input.limit ?? 20;
-    const combined = [...own.claims, ...live.claims].sort((left, right) =>
-      right.createdAtMs - left.createdAtMs || Buffer.compare(Buffer.from(right.claimId), Buffer.from(left.claimId)));
+    const combined = [...own.claims, ...live.claims].sort(
+      (left, right) =>
+        right.createdAtMs - left.createdAtMs ||
+        Buffer.compare(Buffer.from(right.claimId), Buffer.from(left.claimId)),
+    );
     const claims = combined.slice(0, limit);
     const last = claims.at(-1);
     const more = combined.length > limit || own.next !== null || live.next !== null;
     return { claims, next: more && last ? `${last.createdAtMs}:${last.claimId}` : null };
   }
 
-  override async getAutomationClaim(input: Parameters<VersionedLiveAdapter["getAutomationClaim"]>[0]) {
+  override async getAutomationClaim(
+    input: Parameters<VersionedLiveAdapter["getAutomationClaim"]>[0],
+  ) {
     const own = await super.getAutomationClaim(input);
-    return own.claim !== null ? own : await this.fromLedger((ledger) => ledger.getAutomationClaim(input)) ?? own;
+    return own.claim !== null
+      ? own
+      : ((await this.fromLedger((ledger) => ledger.getAutomationClaim(input))) ?? own);
   }
 
-  override async pruneAutomationHistory(input: Parameters<VersionedLiveAdapter["pruneAutomationHistory"]>[0]) {
+  override async pruneAutomationHistory(
+    input: Parameters<VersionedLiveAdapter["pruneAutomationHistory"]>[0],
+  ) {
     const own = await super.pruneAutomationHistory(input);
     const live = await this.fromLedger((ledger) => ledger.pruneAutomationHistory(input));
     return live === null ? own : { pruned: own.pruned + live.pruned, more: own.more || live.more };
@@ -176,7 +219,8 @@ export class ServerClaimEngine extends VersionedLiveAdapter {
     const newest = new Map(own.failures.map((failure) => [failure.automationId, failure]));
     for (const failure of live.failures) {
       const other = newest.get(failure.automationId);
-      if (!other || failure.updatedAtMs > other.updatedAtMs) newest.set(failure.automationId, failure);
+      if (!other || failure.updatedAtMs > other.updatedAtMs)
+        newest.set(failure.automationId, failure);
     }
     return { ...own, failures: [...newest.values()] };
   }
@@ -193,7 +237,8 @@ export class ServerClaimEngine extends VersionedLiveAdapter {
     const ledger = this.live.ledger();
     for (const claimId of [...this.fromLive]) {
       this.fromLive.delete(claimId);
-      await ledger?.engine.releaseAutomationClaim({ claimId })
+      await ledger?.engine
+        .releaseAutomationClaim({ claimId })
         .catch((error: unknown) => this.live.onError(`hand back live claim "${claimId}"`, error));
     }
   }
@@ -201,7 +246,8 @@ export class ServerClaimEngine extends VersionedLiveAdapter {
   private ledgerFor(action: string): Ledger {
     const ledger = this.live.ledger();
     // The executor keeps the claim owed and answers again at its next drain.
-    if (ledger === null) throw new Error(`The live host is not running, so the ${action} waits for it.`);
+    if (ledger === null)
+      throw new Error(`The live host is not running, so the ${action} waits for it.`);
     return ledger.engine;
   }
 
@@ -222,11 +268,15 @@ export class ServerClaimEngine extends VersionedLiveAdapter {
    * unsubscribes it has not had. A failure leaves the rest for the next
    * drain; the copy's own subscriptions stand either way.
    */
-  private async mirror(ledger: LiveClaimLedger | null, changed: readonly Subscription[]): Promise<void> {
+  private async mirror(
+    ledger: LiveClaimLedger | null,
+    changed: readonly Subscription[],
+  ): Promise<void> {
     if (ledger === null) return;
     const fresh = ledger.incarnation !== this.mirrored;
     try {
-      for (const subscription of fresh ? this.wanted.values() : changed) await ledger.engine.subscribeAutomation(subscription);
+      for (const subscription of fresh ? this.wanted.values() : changed)
+        await ledger.engine.subscribeAutomation(subscription);
       for (const [automationId, path] of [...this.dropped]) {
         await ledger.engine.unsubscribeAutomation({ automationId, path });
         this.dropped.delete(automationId);
@@ -251,11 +301,16 @@ export class ServerClaimEngine extends VersionedLiveAdapter {
     const { workspaceId } = this;
     const trigger = claim.trigger;
     const liveCursor = liveCursorOf(claim);
-    const seq = liveCursor !== null
-      ? this.live.storage.liveClaimLogSeq({ workspaceId, liveCursor })
-      : "originId" in trigger
-        ? this.live.storage.automationWorkspaceLogSeq({ workspaceId, originId: trigger.originId, originSeq: trigger.originSeq })
-        : null;
+    const seq =
+      liveCursor !== null
+        ? this.live.storage.liveClaimLogSeq({ workspaceId, liveCursor })
+        : "originId" in trigger
+          ? this.live.storage.automationWorkspaceLogSeq({
+              workspaceId,
+              originId: trigger.originId,
+              originSeq: trigger.originSeq,
+            })
+          : null;
     if (seq === null) return false;
     return this.pullThrough(seq);
   }

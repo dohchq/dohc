@@ -1,8 +1,21 @@
-import { chmod, link, lstat, mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  link,
+  lstat,
+  mkdir,
+  readdir,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DaemonRefusalError, type Request, type Response } from "@dohc/workspace-engine-client";
-import { EngineWorkspaceSessions, type EngineDaemonClient } from "@dohc/workspace-engine-client/daemon";
+import {
+  EngineWorkspaceSessions,
+  type EngineDaemonClient,
+} from "@dohc/workspace-engine-client/daemon";
 import {
   existingLocalStateDir,
   localStateDir,
@@ -20,7 +33,8 @@ import { createTestScratch } from "./testTemp";
 
 // The folder a reader is given.
 const ownedLocalStateDir = (rootPath: string) => readOwnedLocalState(rootPath, async (dir) => dir);
-const existingLocalStateFolder = (rootPath: string, name: string) => readOwnedLocalStateFolder(rootPath, name, async (dir) => dir);
+const existingLocalStateFolder = (rootPath: string, name: string) =>
+  readOwnedLocalStateFolder(rootPath, name, async (dir) => dir);
 
 // A daemon whose opens answer as the engine's do: it prepares the folder,
 // then says whether it is ready.
@@ -35,7 +49,10 @@ class Daemon implements EngineDaemonClient {
       await this.hold;
       if (this.busy > 0) {
         this.busy -= 1;
-        throw new DaemonRefusalError({ code: "OVERLOADED", message: "engine-store-busy", retry: "afterBackoff" }, undefined);
+        throw new DaemonRefusalError(
+          { code: "OVERLOADED", message: "engine-store-busy", retry: "afterBackoff" },
+          undefined,
+        );
       }
       if (this.fail) throw new Error("open refused");
       const { rootDir } = request.params as { rootDir: string };
@@ -61,13 +78,19 @@ async function engine(sleep: (ms: number) => Promise<void> = async () => undefin
   opened.push(sessions);
   readLocalStateFrom(sessions);
   workspaces += 1;
-  const workspace = { workspaceId: `local-state-${workspaces}`, rootPath: await createTestScratch("dohc-local-state-") };
+  const workspace = {
+    workspaceId: `local-state-${workspaces}`,
+    rootPath: await createTestScratch("dohc-local-state-"),
+  };
   const open = () => sessions.run(workspace, async () => undefined);
   return { daemon, sessions, workspace, open };
 }
 
 async function refusal(promise: Promise<unknown>) {
-  const error = await promise.then(() => null, (caught: unknown) => caught);
+  const error = await promise.then(
+    () => null,
+    (caught: unknown) => caught,
+  );
   expect(error).toBeInstanceOf(LocalStateUnavailableError);
   return (error as LocalStateUnavailableError).refusal;
 }
@@ -174,12 +197,17 @@ describe("this computer's .dohc/local", () => {
       const dohc = join(workspace.rootPath, ".dohc");
       await chmod(dohc, 0o600);
       try {
-        const refused = await ownedLocalStateDir(workspace.rootPath).then(() => null, (error: unknown) => error);
+        const refused = await ownedLocalStateDir(workspace.rootPath).then(
+          () => null,
+          (error: unknown) => error,
+        );
         expect(refused).toBeInstanceOf(LocalStateFolderError);
         expect((refused as Error).message).toBe(
           "This workspace's .dohc/local can't be read. Make sure you can open it, then try again.",
         );
-        await expect(existingLocalStateFolder(workspace.rootPath, "trash")).rejects.toBeInstanceOf(LocalStateFolderError);
+        await expect(existingLocalStateFolder(workspace.rootPath, "trash")).rejects.toBeInstanceOf(
+          LocalStateFolderError,
+        );
       } finally {
         await chmod(dohc, 0o700);
       }
@@ -190,46 +218,84 @@ describe("this computer's .dohc/local", () => {
   it("makes each folder on the way to a nested one private, and refuses a link on the way to writers and readers", async () => {
     const { workspace, open } = await engine();
     await open();
-    const guard = { path: ".dohc/local/datasets/workers", lead: "dohc could not open this Collection's records." };
+    const guard = {
+      path: ".dohc/local/datasets/workers",
+      lead: "dohc could not open this Collection's records.",
+    };
     const made = await localStateFolder(workspace, "datasets/workers", guard);
     expect(made).toBe(join(workspace.rootPath, ".dohc", "local", "datasets", "workers"));
-    if (process.platform !== "win32") for (const folder of [join(made, ".."), made]) expect((await lstat(folder)).mode & 0o777).toBe(0o700);
+    if (process.platform !== "win32")
+      for (const folder of [join(made, ".."), made])
+        expect((await lstat(folder)).mode & 0o777).toBe(0o700);
     expect(await existingLocalStateFolder(workspace.rootPath, "datasets/workers")).toBe(made);
     expect(await existingLocalStateFolder(workspace.rootPath, "datasets/exports")).toBeNull();
     const outside = await createTestScratch("dohc-local-state-outside-");
     await rm(join(workspace.rootPath, ".dohc", "local", "datasets"), { recursive: true });
     await symlink(outside, join(workspace.rootPath, ".dohc", "local", "datasets"), "dir");
     await expect(localStateFolder(workspace, "datasets/workers", guard)).rejects.toThrow(
-      "dohc could not open this Collection's records. A link is at .dohc/local/datasets, which must be a real folder.");
+      "dohc could not open this Collection's records. A link is at .dohc/local/datasets, which must be a real folder.",
+    );
     expect(await existingLocalStateFolder(workspace.rootPath, "datasets/workers")).toBe("unusable");
     expect(await readdir(outside)).toEqual([]);
   });
 
   // A SQLite database in `.dohc/local` can decide what dohc does, such as the
   // next operation number, so each of its files must be one only this user can change.
-  it.skipIf(process.platform === "win32")("trusts a SQLite database only when it and each of its files is this user's alone", async () => {
-    const folder = await createTestScratch("dohc-local-sqlite-");
-    const elsewhere = await createTestScratch("dohc-local-sqlite-elsewhere-");
-    expect(await ownedSqliteFiles(folder, "state.sqlite")).toBe(true);
-    for (const name of ["state.sqlite", "state.sqlite-wal", "state.sqlite-shm", "state.sqlite-journal"]) await writeFile(join(folder, name), "", { mode: 0o644 });
-    expect(await ownedSqliteFiles(folder, "state.sqlite")).toBe(true);
-    const someoneElse = vi.spyOn(process, "getuid").mockReturnValue(process.getuid!() + 1);
-    try {
-      expect(await ownedSqliteFiles(folder, "state.sqlite")).toBe(false);
-    } finally { someoneElse.mockRestore(); }
-    for (const [name, untrust, restore] of [
-      ["state.sqlite", () => chmod(join(folder, "state.sqlite"), 0o664), () => chmod(join(folder, "state.sqlite"), 0o644)],
-      ["state.sqlite-wal", () => link(join(folder, "state.sqlite-wal"), join(elsewhere, "wal")), () => rm(join(elsewhere, "wal"))],
-      ["state.sqlite-shm", async () => { await rm(join(folder, "state.sqlite-shm")); await symlink(join(elsewhere, "shm"), join(folder, "state.sqlite-shm")); },
-        async () => { await rm(join(folder, "state.sqlite-shm")); await writeFile(join(folder, "state.sqlite-shm"), ""); }],
-      ["state.sqlite-journal", () => chmod(join(folder, "state.sqlite-journal"), 0o646), () => chmod(join(folder, "state.sqlite-journal"), 0o644)],
-    ] as const) {
-      await untrust();
-      expect(await ownedSqliteFiles(folder, "state.sqlite"), name).toBe(false);
-      await restore();
-      expect(await ownedSqliteFiles(folder, "state.sqlite"), name).toBe(true);
-    }
-  });
+  it.skipIf(process.platform === "win32")(
+    "trusts a SQLite database only when it and each of its files is this user's alone",
+    async () => {
+      const folder = await createTestScratch("dohc-local-sqlite-");
+      const elsewhere = await createTestScratch("dohc-local-sqlite-elsewhere-");
+      expect(await ownedSqliteFiles(folder, "state.sqlite")).toBe(true);
+      for (const name of [
+        "state.sqlite",
+        "state.sqlite-wal",
+        "state.sqlite-shm",
+        "state.sqlite-journal",
+      ])
+        await writeFile(join(folder, name), "", { mode: 0o644 });
+      expect(await ownedSqliteFiles(folder, "state.sqlite")).toBe(true);
+      const someoneElse = vi.spyOn(process, "getuid").mockReturnValue(process.getuid!() + 1);
+      try {
+        expect(await ownedSqliteFiles(folder, "state.sqlite")).toBe(false);
+      } finally {
+        someoneElse.mockRestore();
+      }
+      for (const [name, untrust, restore] of [
+        [
+          "state.sqlite",
+          () => chmod(join(folder, "state.sqlite"), 0o664),
+          () => chmod(join(folder, "state.sqlite"), 0o644),
+        ],
+        [
+          "state.sqlite-wal",
+          () => link(join(folder, "state.sqlite-wal"), join(elsewhere, "wal")),
+          () => rm(join(elsewhere, "wal")),
+        ],
+        [
+          "state.sqlite-shm",
+          async () => {
+            await rm(join(folder, "state.sqlite-shm"));
+            await symlink(join(elsewhere, "shm"), join(folder, "state.sqlite-shm"));
+          },
+          async () => {
+            await rm(join(folder, "state.sqlite-shm"));
+            await writeFile(join(folder, "state.sqlite-shm"), "");
+          },
+        ],
+        [
+          "state.sqlite-journal",
+          () => chmod(join(folder, "state.sqlite-journal"), 0o646),
+          () => chmod(join(folder, "state.sqlite-journal"), 0o644),
+        ],
+      ] as const) {
+        await untrust();
+        expect(await ownedSqliteFiles(folder, "state.sqlite"), name).toBe(false);
+        await restore();
+        expect(await ownedSqliteFiles(folder, "state.sqlite"), name).toBe(true);
+      }
+    },
+  );
 
   it("gives a reader the folder whatever the engine said, and null when it is missing", async () => {
     const { workspace } = await engine();
@@ -243,7 +309,8 @@ describe("this computer's .dohc/local", () => {
 // `.dohc/local` only while the engine's open holds it.
 describe("this computer's .dohc/local for a reader on Windows", () => {
   const platform = process.platform;
-  const runOn = (system: NodeJS.Platform) => Object.defineProperty(process, "platform", { value: system });
+  const runOn = (system: NodeJS.Platform) =>
+    Object.defineProperty(process, "platform", { value: system });
   afterEach(() => runOn(platform));
   // The test scratch is made for the system the tests run on.
   async function windowsEngine(sleep?: (ms: number) => Promise<void>) {
@@ -256,11 +323,15 @@ describe("this computer's .dohc/local for a reader on Windows", () => {
     const { sessions, workspace, open } = await windowsEngine();
     await mkdir(join(workspace.rootPath, ".dohc", "local", "automations"), { recursive: true });
     expect(await refusal(ownedLocalStateDir(workspace.rootPath))).toBe("not-opened");
-    expect(await refusal(existingLocalStateFolder(workspace.rootPath, "automations"))).toBe("not-opened");
+    expect(await refusal(existingLocalStateFolder(workspace.rootPath, "automations"))).toBe(
+      "not-opened",
+    );
 
     await open();
     expect(await ownedLocalStateDir(workspace.rootPath)).toMatch(/local$/);
-    expect(await existingLocalStateFolder(workspace.rootPath, "automations")).toMatch(/automations$/);
+    expect(await existingLocalStateFolder(workspace.rootPath, "automations")).toMatch(
+      /automations$/,
+    );
 
     await sessions.closeWorkspace(workspace);
     expect(await refusal(ownedLocalStateDir(workspace.rootPath))).toBe("not-opened");
@@ -287,8 +358,12 @@ describe("this computer's .dohc/local for a reader on Windows", () => {
   });
 
   it("reads the saved layout when it asks while the open waits for a busy store", async () => {
-    const paused = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
-    const { daemon, sessions, workspace, open } = await windowsEngine(async () => { paused.resolve(); await resume.promise; });
+    const paused = Promise.withResolvers<void>(),
+      resume = Promise.withResolvers<void>();
+    const { daemon, sessions, workspace, open } = await windowsEngine(async () => {
+      paused.resolve();
+      await resume.promise;
+    });
     const local = join(workspace.rootPath, ".dohc", "local");
     await mkdir(local, { recursive: true });
     await writeFile(join(local, "ui-state.json"), JSON.stringify({ sidebarOpen: true }));
@@ -311,17 +386,25 @@ describe("this computer's .dohc/local for a reader on Windows", () => {
     await writeFile(join(local, "settings.local.json"), "{}");
     const settings = (dir: string | null) => readFile(join(dir!, "settings.local.json"), "utf8");
     await open();
-    expect(await refusal(readOwnedLocalState(workspace.rootPath, async (dir) => {
-      await sessions.closeWorkspaceBinding(workspace);
-      return settings(dir);
-    }))).toBe("not-opened");
+    expect(
+      await refusal(
+        readOwnedLocalState(workspace.rootPath, async (dir) => {
+          await sessions.closeWorkspaceBinding(workspace);
+          return settings(dir);
+        }),
+      ),
+    ).toBe("not-opened");
 
     await open();
-    expect(await refusal(readOwnedLocalState(workspace.rootPath, async (dir) => {
-      await sessions.closeWorkspaceBinding(workspace);
-      await open();
-      return settings(dir);
-    }))).toBe("not-opened");
+    expect(
+      await refusal(
+        readOwnedLocalState(workspace.rootPath, async (dir) => {
+          await sessions.closeWorkspaceBinding(workspace);
+          await open();
+          return settings(dir);
+        }),
+      ),
+    ).toBe("not-opened");
     expect(await readOwnedLocalState(workspace.rootPath, settings)).toBe("{}");
   });
 
@@ -378,11 +461,20 @@ describe("this computer's .dohc/local for a reader on Windows", () => {
     const { workspace, open } = await windowsEngine();
     const local = join(workspace.rootPath, ".dohc", "local");
     await mkdir(local, { recursive: true });
-    await writeFile(join(local, "settings.local.json"), JSON.stringify({ privacy: { confirmExternalLinks: false } }));
-    expect(await readWorkspaceSettingsFile(workspace)).toMatchObject({ source: "recovered", notOpened: true });
+    await writeFile(
+      join(local, "settings.local.json"),
+      JSON.stringify({ privacy: { confirmExternalLinks: false } }),
+    );
+    expect(await readWorkspaceSettingsFile(workspace)).toMatchObject({
+      source: "recovered",
+      notOpened: true,
+    });
     await open();
     const read = await readWorkspaceSettingsFile(workspace);
-    expect(read).toMatchObject({ source: "stored", settings: { privacy: { confirmExternalLinks: false } } });
+    expect(read).toMatchObject({
+      source: "stored",
+      settings: { privacy: { confirmExternalLinks: false } },
+    });
     expect(read).not.toHaveProperty("notOpened");
   });
 

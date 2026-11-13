@@ -1,13 +1,23 @@
 import { describe, expect, it } from "vitest";
 import type { ChatChannelRecord } from "../../ipc/bridgeContract";
-import { agentChatIdentity, orderAgentChats, withListedAgent, type SettingsAgent } from "./agentChat";
+import {
+  agentChatIdentity,
+  orderAgentChats,
+  withListedAgent,
+  type SettingsAgent,
+} from "./agentChat";
 import { goneAgentPresentation } from "./actorPresentation";
 
 const AGENTS: SettingsAgent[] = [
   { id: "default", name: "Nova", hue: "olive" },
   { id: "scout", name: "Scout", hue: "teal" },
 ];
-const chat = (agentId: string, name: string) => ({ id: `${agentId}-chat`, kind: "agent" as const, agentId, name });
+const chat = (agentId: string, name: string) => ({
+  id: `${agentId}-chat`,
+  kind: "agent" as const,
+  agentId,
+  name,
+});
 
 describe("agentChatIdentity", () => {
   it("names a Settings agent's chat after it, in its hue", () => {
@@ -22,7 +32,9 @@ describe("agentChatIdentity", () => {
   });
 
   it("shows a renamed agent's current name, not the one its chat stored", () => {
-    expect(agentChatIdentity(chat("scout", "Scout"), [{ id: "scout", name: "Ranger", hue: "plum" }])).toEqual({
+    expect(
+      agentChatIdentity(chat("scout", "Scout"), [{ id: "scout", name: "Ranger", hue: "plum" }]),
+    ).toEqual({
       label: "Ranger",
       presentation: { group: "", hue: "plum", self: false },
     });
@@ -70,13 +82,27 @@ describe("orderAgentChats", () => {
 });
 
 describe("withListedAgent", () => {
-  const listed = (id: string, kind: ChatChannelRecord["kind"], agentId?: string): ChatChannelRecord => ({
-    id, name: id, slug: id, kind, createdAtMs: 0, updatedAtMs: 0, threadCount: 0, unreadCount: 0, ...(agentId ? { agentId } : {}),
+  const listed = (
+    id: string,
+    kind: ChatChannelRecord["kind"],
+    agentId?: string,
+  ): ChatChannelRecord => ({
+    id,
+    name: id,
+    slug: id,
+    kind,
+    createdAtMs: 0,
+    updatedAtMs: 0,
+    threadCount: 0,
+    unreadCount: 0,
+    ...(agentId ? { agentId } : {}),
   });
   const channels = [listed("nova-chat", "agent", "default"), listed("general", "channel")];
 
   it("gives an agent's chat opened without its agent the listed chat", () => {
-    expect(withListedAgent({ id: "nova-chat", kind: "agent" as const, name: "My agent" }, channels)).toBe(channels[0]);
+    expect(
+      withListedAgent({ id: "nova-chat", kind: "agent" as const, name: "My agent" }, channels),
+    ).toBe(channels[0]);
   });
 
   it("keeps a chat that names its agent, a group, and a chat that isn't listed", () => {

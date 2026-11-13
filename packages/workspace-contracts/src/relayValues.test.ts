@@ -1,15 +1,9 @@
 import { describe, expect, it } from "vitest";
-import {
-  canonicalRelayUrl,
-  MAX_RELAY_URL_LENGTH,
-  relayUrlsMatch,
-} from "./relayValues";
+import { canonicalRelayUrl, MAX_RELAY_URL_LENGTH, relayUrlsMatch } from "./relayValues";
 
 describe("relay URL identity", () => {
   it("canonicalizes HTTP(S) host casing and trailing slashes", () => {
-    expect(canonicalRelayUrl("https://Relay.Example.Test///")).toBe(
-      "https://relay.example.test",
-    );
+    expect(canonicalRelayUrl("https://Relay.Example.Test///")).toBe("https://relay.example.test");
     expect(canonicalRelayUrl("http://Relay.Example.Test/path///")).toBe(
       "http://relay.example.test/path",
     );
@@ -32,9 +26,7 @@ describe("relay URL identity", () => {
     const value = `https://relay.example.test/${"é".repeat(400)}`;
 
     expect(value.length).toBeLessThanOrEqual(MAX_RELAY_URL_LENGTH);
-    expect(new URL(value).toString().length).toBeGreaterThan(
-      MAX_RELAY_URL_LENGTH,
-    );
+    expect(new URL(value).toString().length).toBeGreaterThan(MAX_RELAY_URL_LENGTH);
     expect(canonicalRelayUrl(value) === null).toBe(true);
   });
 
@@ -47,9 +39,7 @@ describe("relay URL identity", () => {
   });
 
   it("is fixed after one canonicalization", () => {
-    const canonical = canonicalRelayUrl(
-      "  HTTPS://Relay.Example.Test:443/path///  ",
-    );
+    const canonical = canonicalRelayUrl("  HTTPS://Relay.Example.Test:443/path///  ");
 
     expect(canonical).toBe("https://relay.example.test/path");
     expect(canonicalRelayUrl(canonical!)).toBe(canonical);
@@ -65,24 +55,14 @@ describe("relay URL identity", () => {
   });
 
   it("matches canonical equivalents and refuses invalid identities", () => {
-    expect(
-      relayUrlsMatch(
-        "https://Relay.Example.Test///",
-        "https://relay.example.test",
-      ),
-    ).toBe(true);
-    expect(
-      relayUrlsMatch(
-        "https://relay-a.example.test",
-        "https://relay-b.example.test",
-      ),
-    ).toBe(false);
+    expect(relayUrlsMatch("https://Relay.Example.Test///", "https://relay.example.test")).toBe(
+      true,
+    );
+    expect(relayUrlsMatch("https://relay-a.example.test", "https://relay-b.example.test")).toBe(
+      false,
+    );
     expect(relayUrlsMatch("not-a-url", "not-a-url")).toBe(false);
-    expect(
-      relayUrlsMatch("not-a-url", "https://relay.example.test"),
-    ).toBe(false);
-    expect(
-      relayUrlsMatch("https://relay.example.test", "not-a-url"),
-    ).toBe(false);
+    expect(relayUrlsMatch("not-a-url", "https://relay.example.test")).toBe(false);
+    expect(relayUrlsMatch("https://relay.example.test", "not-a-url")).toBe(false);
   });
 });

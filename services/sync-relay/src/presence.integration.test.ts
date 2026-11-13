@@ -70,9 +70,12 @@ function packageRoot(): string {
 it("ignores inherited device-delivery config in a presence relay child", async () => {
   vi.stubEnv("DOHC_RELAY_DEVICE_DELIVERY_CONFIG", "inherited-device-delivery-must-not-open.json");
   try {
-    const root = await mkdtemp(join(tmpdir(), "dohc-presence-env-")); roots.push(root);
+    const root = await mkdtemp(join(tmpdir(), "dohc-presence-env-"));
+    roots.push(root);
     expect(await spawnRelay(join(root, "relay.sqlite"))).toMatch(/^http:\/\/127\.0\.0\.1:/);
-  } finally { vi.unstubAllEnvs(); }
+  } finally {
+    vi.unstubAllEnvs();
+  }
 }, 60_000);
 
 async function spawnRelay(dbPath: string): Promise<string> {
@@ -366,7 +369,7 @@ describe("two-client presence over a real relay child", () => {
       state: { displayName: "Member", typing: true },
     });
     expect(memberView).toHaveLength(2);
-    expect(memberView.filter(p => p.isSelf)).toHaveLength(1);
+    expect(memberView.filter((p) => p.isSelf)).toHaveLength(1);
     const memberPoll = await fetch(
       `${baseUrl}/sync/shares/${shareId}/presence?topic=${encodeURIComponent(wireId)}&clientId=member-1&hold=0`,
       { headers: bearer("member") },
@@ -403,7 +406,7 @@ describe("two-client presence over a real relay child", () => {
     // the owner + the member.
     const afterProbe = await poll(baseUrl, "owner", ownerWs, wireId, 0, 0);
     expect(afterProbe.peers).toHaveLength(2);
-    expect(afterProbe.peers.every(p => !Object.hasOwn(p, "userId"))).toBe(true);
+    expect(afterProbe.peers.every((p) => !Object.hasOwn(p, "userId"))).toBe(true);
   }, 90_000);
 
   it("converges owner + participant on a thread topic bound to the granted channel, and isolates other/unknown threads", async () => {
@@ -441,8 +444,10 @@ describe("two-client presence over a real relay child", () => {
       state: { displayName: "Member", typing: true },
     });
     expect(memberView).toHaveLength(2);
-    expect(memberView.filter(p => p.isSelf)).toHaveLength(1);
-    expect(memberView.every(p => !Object.hasOwn(p, "userId") && !Object.hasOwn(p, "clientId"))).toBe(true);
+    expect(memberView.filter((p) => p.isSelf)).toHaveLength(1);
+    expect(
+      memberView.every((p) => !Object.hasOwn(p, "userId") && !Object.hasOwn(p, "clientId")),
+    ).toBe(true);
 
     // …and the OWNER, reading its workspace scope, now sees the PARTICIPANT.
     const ownerRead = await poll(baseUrl, "owner", ownerWs, threadTopic, 0, 0);
@@ -485,7 +490,7 @@ describe("two-client presence over a real relay child", () => {
     // The rejected thread probes left the shared thread scope untouched.
     const afterProbe = await poll(baseUrl, "owner", ownerWs, threadTopic, 0, 0);
     expect(afterProbe.peers).toHaveLength(2);
-    expect(afterProbe.peers.every(p => !Object.hasOwn(p, "userId"))).toBe(true);
+    expect(afterProbe.peers.every((p) => !Object.hasOwn(p, "userId"))).toBe(true);
   }, 90_000);
 
   it("a non-owner cannot read another workspace's presence (isolation)", async () => {
@@ -535,11 +540,7 @@ describe("two-client presence over a real relay child", () => {
 
 // Poll the test-seam health endpoint until the hub reports `expected` parked
 // waiters (bounded; fails the test with a clear message on timeout).
-async function waitForWaiters(
-  baseUrl: string,
-  expected: number,
-  budgetMs = 25_000,
-): Promise<void> {
+async function waitForWaiters(baseUrl: string, expected: number, budgetMs = 25_000): Promise<void> {
   // 10s lost the race under contention — this polls a real relay child over HTTP,
   // so it is wall-clock bound. 25s by default, and the callers raise their
   // own `it` budget to contain a slow spawn plus two of these waits; a deadline

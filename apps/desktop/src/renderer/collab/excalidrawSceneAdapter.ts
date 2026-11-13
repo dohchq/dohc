@@ -14,9 +14,7 @@ import {
 } from "@dohc/excalidraw-scene";
 import * as Y from "yjs";
 
-const LOCAL_EXCALIDRAW_ORIGIN: unique symbol = Symbol(
-  "dohc.localExcalidrawChange",
-);
+const LOCAL_EXCALIDRAW_ORIGIN: unique symbol = Symbol("dohc.localExcalidrawChange");
 
 type SceneRemoteEchoes = {
   // Revision tuples of the elements the last remote render handed the canvas.
@@ -116,15 +114,11 @@ export class ExcalidrawSceneBinding {
           const winner = this.fold.element(identity.id);
           if (
             winner &&
-            revisionKey(winner.id, winner.version, winner.versionNonce) ===
-              identity.key
+            revisionKey(winner.id, winner.version, winner.versionNonce) === identity.key
           ) {
             continue;
           }
-          if (
-            winner &&
-            revisionDominates(winner, identity.version, identity.versionNonce)
-          ) {
+          if (winner && revisionDominates(winner, identity.version, identity.versionNonce)) {
             // A delayed Excalidraw callback can replay a render whose echo
             // identity a newer remote render already replaced. The fold would
             // discard this revision; writing it would journal and transmit a
@@ -153,10 +147,7 @@ export class ExcalidrawSceneBinding {
           const rememberedRemote = this.remoteEchoes.appState.get(key);
           const isRememberedRemote = rememberedRemote?.has(encoded) ?? false;
           const currentValue = current.appState[key];
-          if (
-            currentValue !== undefined &&
-            stableJson(currentValue) === encoded
-          ) {
+          if (currentValue !== undefined && stableJson(currentValue) === encoded) {
             // The callback confirms the value the fold already holds. If that
             // value came from a remote render, this IS its echo — consume it
             // now so a later intentional local reversion to the same value
@@ -213,9 +204,7 @@ function rememberRemoteScene(
 ): void {
   echoes.elements.clear();
   for (const element of scene.elements) {
-    echoes.elements.add(
-      revisionKey(element.id, element.version, element.versionNonce),
-    );
+    echoes.elements.add(revisionKey(element.id, element.version, element.versionNonce));
   }
   for (const key of EXCALIDRAW_EXPORTABLE_APP_STATE) {
     const value = scene.appState[key];
@@ -265,19 +254,12 @@ function hasUnsupportedFileBytes(
     file !== null &&
     "dataURL" in file &&
     typeof (file as { dataURL?: unknown }).dataURL === "string";
-  return (
-    carriesBytes &&
-    (!assets[element.fileId] || !hydratedFileIds?.has(element.fileId))
-  );
+  return carriesBytes && (!assets[element.fileId] || !hydratedFileIds?.has(element.fileId));
 }
 
 function jsonObject(value: unknown): JsonObject {
   const normalized = jsonValueOf(value);
-  if (
-    normalized === null ||
-    Array.isArray(normalized) ||
-    typeof normalized !== "object"
-  ) {
+  if (normalized === null || Array.isArray(normalized) || typeof normalized !== "object") {
     throw new Error("The drawing element is not valid JSON.");
   }
   return normalized;

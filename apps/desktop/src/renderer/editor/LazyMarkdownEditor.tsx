@@ -6,11 +6,7 @@ import {
   loadCollaborationExtensions,
   preloadCollaborationExtensions,
 } from "./collaborationExtensions";
-import type {
-  MarkdownEditor,
-  MarkdownEditorHandle,
-  MarkdownEditorProps,
-} from "./MarkdownEditor";
+import type { MarkdownEditor, MarkdownEditorHandle, MarkdownEditorProps } from "./MarkdownEditor";
 
 type MarkdownEditorComponent = typeof MarkdownEditor;
 

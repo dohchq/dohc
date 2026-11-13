@@ -11,7 +11,8 @@ import {
 export const WORKSPACE_TRASH = ".dohc/local/trash";
 
 /** Where a staged entry is, for a reader that has already found the trash. */
-export const stagedTrashEntry = (rootPath: string, staged: string) => join(rootPath, ".dohc", "local", "trash", staged);
+export const stagedTrashEntry = (rootPath: string, staged: string) =>
+  join(rootPath, ".dohc", "local", "trash", staged);
 
 /** What dohc says when it did not do `what` because the engine has not prepared `.dohc/local`. */
 function trashNotReady(what: string, refusal: LocalStateRefusal): string {
@@ -26,7 +27,10 @@ function trashNotReady(what: string, refusal: LocalStateRefusal): string {
  * current open prepared `.dohc/local`. Refuses anything at the path but a
  * folder in the workspace only this user can change.
  */
-export async function workspaceTrashForWrite(workspace: LocalStateWorkspace, what: string): Promise<string> {
+export async function workspaceTrashForWrite(
+  workspace: LocalStateWorkspace,
+  what: string,
+): Promise<string> {
   try {
     return await localStateFolder(workspace, "trash", DOHC_TRASH_GUARD);
   } catch (error) {

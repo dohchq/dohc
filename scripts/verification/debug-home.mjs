@@ -24,9 +24,13 @@ export function makeDebugHome(directory, platform = process.platform, temp = tmp
   if (platform === "win32") return { files, home: files, link: null };
   const limit = SOCKET_PATH_BYTES[platform] ?? SOCKET_PATH_BYTES.darwin;
   // mkdtemp adds six characters to the prefix.
-  const fits = (base) => Buffer.byteLength(join(base, `${LINK_PREFIX}XXXXXX`, "home", SOCKET)) <= limit;
+  const fits = (base) =>
+    Buffer.byteLength(join(base, `${LINK_PREFIX}XXXXXX`, "home", SOCKET)) <= limit;
   const base = [temp, "/tmp"].find(fits);
-  if (!base) throw new Error(`The temp folder ${temp} is too long for the desktop's CLI socket. Set TMPDIR to a shorter folder.`);
+  if (!base)
+    throw new Error(
+      `The temp folder ${temp} is too long for the desktop's CLI socket. Set TMPDIR to a shorter folder.`,
+    );
   const link = mkdtempSync(join(base, LINK_PREFIX));
   const home = join(link, "home");
   try {

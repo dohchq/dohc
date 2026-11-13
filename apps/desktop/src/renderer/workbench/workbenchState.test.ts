@@ -83,7 +83,9 @@ function withTabs(...paths: string[]): WorkbenchState {
 
 describe("tabs", () => {
   it("finds the next and previous tab in a group, wrapping at the ends", () => {
-    const group = activeGroup(activateTab(withTabs("a.md", "b.md", "c.md"), DEFAULT_EDITOR_GROUP_ID, "a.md"));
+    const group = activeGroup(
+      activateTab(withTabs("a.md", "b.md", "c.md"), DEFAULT_EDITOR_GROUP_ID, "a.md"),
+    );
     expect(adjacentTabPath(group, 1)).toBe("b.md");
     expect(adjacentTabPath(group, -1)).toBe("c.md");
     expect(adjacentTabPath({ ...group, activeTab: "c.md" }, 1)).toBe("a.md");
@@ -116,15 +118,26 @@ describe("tabs", () => {
     let state = openMomentDiff(withTabs("a.md"), "m-1");
     state = openTab(state, "b.md");
     state = openMomentDiff(state, "m-2");
-    expect(allTabs(state).map((tab) => tab.path)).toEqual(["a.md", momentDiffTabPath("m-2"), "b.md"]);
+    expect(allTabs(state).map((tab) => tab.path)).toEqual([
+      "a.md",
+      momentDiffTabPath("m-2"),
+      "b.md",
+    ]);
     expect(activeTabPath(state)).toBe(momentDiffTabPath("m-2"));
     // A change already open is activated where it is.
     state = openTab(state, "b.md");
-    expect(openMomentDiff(state, "m-2")).toEqual(activateTab(state, DEFAULT_EDITOR_GROUP_ID, momentDiffTabPath("m-2")));
+    expect(openMomentDiff(state, "m-2")).toEqual(
+      activateTab(state, DEFAULT_EDITOR_GROUP_ID, momentDiffTabPath("m-2")),
+    );
   });
 
   it("reuses the active diff tab first, and keeps another group's diff tab", () => {
-    let state = moveTabToNewGroup(withTabs(momentDiffTabPath("left"), "a.md"), DEFAULT_EDITOR_GROUP_ID, "a.md", "right");
+    let state = moveTabToNewGroup(
+      withTabs(momentDiffTabPath("left"), "a.md"),
+      DEFAULT_EDITOR_GROUP_ID,
+      "a.md",
+      "right",
+    );
     const right = state.activeEditorGroup;
     state = openMomentDiff(state, "m-1");
     expect(state.editorGroups.map((group) => group.tabs.map((tab) => tab.path))).toEqual([
@@ -134,7 +147,11 @@ describe("tabs", () => {
     // Two diff tabs persisted in one group: the active one follows.
     state = openTab(state, momentDiffTabPath("m-2"), right);
     state = openMomentDiff(state, "m-3", right);
-    expect(activeGroup(state).tabs.map((tab) => tab.path)).toEqual(["a.md", momentDiffTabPath("m-1"), momentDiffTabPath("m-3")]);
+    expect(activeGroup(state).tabs.map((tab) => tab.path)).toEqual([
+      "a.md",
+      momentDiffTabPath("m-1"),
+      momentDiffTabPath("m-3"),
+    ]);
   });
 
   it("openTab at the cap drops the oldest tab instead of refusing", () => {
@@ -177,10 +194,7 @@ describe("tabs", () => {
     const original = withTabs("a.md", "b.md");
     const moved = original.editorGroups[0].tabs[1];
     const state = moveTabToNewGroup(original, DEFAULT_EDITOR_GROUP_ID, "b.md", "right");
-    expect(state.editorGroups.map((group) => group.id)).toEqual([
-      DEFAULT_EDITOR_GROUP_ID,
-      "right",
-    ]);
+    expect(state.editorGroups.map((group) => group.id)).toEqual([DEFAULT_EDITOR_GROUP_ID, "right"]);
     expect(state.editorGroups.map((group) => group.size)).toEqual([0.5, 0.5]);
     expect(state.editorGroups[0].tabs.map((tab) => tab.path)).toEqual(["a.md"]);
     expect(state.editorGroups[1].tabs[0]).toBe(moved);
@@ -190,23 +204,14 @@ describe("tabs", () => {
 
   it("copies the active tab into a focused group right without hiding the source", () => {
     const original = withTabs("a.md");
-    const state = createEditorGroupRight(
-      original,
-      DEFAULT_EDITOR_GROUP_ID,
-      "right",
-    );
-    expect(state.editorGroups.map((group) => group.id)).toEqual([
-      DEFAULT_EDITOR_GROUP_ID,
-      "right",
-    ]);
+    const state = createEditorGroupRight(original, DEFAULT_EDITOR_GROUP_ID, "right");
+    expect(state.editorGroups.map((group) => group.id)).toEqual([DEFAULT_EDITOR_GROUP_ID, "right"]);
     expect(state.editorGroups[0].activeTab).toBe("a.md");
     expect(state.editorGroups[1]).toMatchObject({
       tabs: [{ path: "a.md" }],
       activeTab: "a.md",
     });
-    expect(state.editorGroups[1].tabs[0]).not.toBe(
-      original.editorGroups[0].tabs[0],
-    );
+    expect(state.editorGroups[1].tabs[0]).not.toBe(original.editorGroups[0].tabs[0]);
     expect(state.activeEditorGroup).toBe("right");
   });
 
@@ -222,11 +227,7 @@ describe("tabs", () => {
 
     const state = createEditorGroupRight(original, "left", "split", "preserve");
 
-    expect(state.editorGroups.map((group) => group.id)).toEqual([
-      "left",
-      "split",
-      "right",
-    ]);
+    expect(state.editorGroups.map((group) => group.id)).toEqual(["left", "split", "right"]);
     expect(state.activeEditorGroup).toBe("right");
     expect(activeTabPath(state)).toBe("b.md");
   });
@@ -234,13 +235,7 @@ describe("tabs", () => {
   it("keeps the current tab focused when a delayed move creates a group", () => {
     const original = withTabs("a.md", "b.md");
 
-    const state = moveTabToNewGroup(
-      original,
-      DEFAULT_EDITOR_GROUP_ID,
-      "a.md",
-      "right",
-      "preserve",
-    );
+    const state = moveTabToNewGroup(original, DEFAULT_EDITOR_GROUP_ID, "a.md", "right", "preserve");
 
     expect(state.editorGroups[0].activeTab).toBe("b.md");
     expect(state.activeEditorGroup).toBe(DEFAULT_EDITOR_GROUP_ID);
@@ -248,15 +243,12 @@ describe("tabs", () => {
   });
 
   it("keeps a delayed move within the group cap when an empty group gained focus", () => {
-    const editorGroups = Array.from(
-      { length: MAX_OPEN_TABS },
-      (_, index) => ({
-        id: `group-${index}`,
-        tabs: [{ path: `file-${index}.md` }],
-        activeTab: `file-${index}.md`,
-        size: 1 / MAX_EDITOR_GROUPS,
-      }),
-    );
+    const editorGroups = Array.from({ length: MAX_OPEN_TABS }, (_, index) => ({
+      id: `group-${index}`,
+      tabs: [{ path: `file-${index}.md` }],
+      activeTab: `file-${index}.md`,
+      size: 1 / MAX_EDITOR_GROUPS,
+    }));
     const state: WorkbenchState = {
       ...defaultWorkbenchState(),
       editorGroups: [
@@ -271,41 +263,22 @@ describe("tabs", () => {
       activeEditorGroup: "focused-empty",
     };
 
-    const moved = moveTabToNewGroup(
-      state,
-      "group-0",
-      "file-0.md",
-      "delayed-split",
-      "preserve",
-    );
+    const moved = moveTabToNewGroup(state, "group-0", "file-0.md", "delayed-split", "preserve");
 
     expect(moved.editorGroups).toHaveLength(MAX_EDITOR_GROUPS);
-    expect(moved.editorGroups.some((group) => group.id === "group-0")).toBe(
-      false,
-    );
-    expect(
-      moved.editorGroups.find((group) => group.id === "delayed-split"),
-    ).toMatchObject({
+    expect(moved.editorGroups.some((group) => group.id === "group-0")).toBe(false);
+    expect(moved.editorGroups.find((group) => group.id === "delayed-split")).toMatchObject({
       tabs: [{ path: "file-0.md" }],
       activeTab: "file-0.md",
     });
     expect(allTabs(moved)).toHaveLength(MAX_OPEN_TABS);
     expect(new Set(allTabs(moved).map((tab) => tab.path))).toEqual(
-      new Set(
-        Array.from(
-          { length: MAX_OPEN_TABS },
-          (_, index) => `file-${index}.md`,
-        ),
-      ),
+      new Set(Array.from({ length: MAX_OPEN_TABS }, (_, index) => `file-${index}.md`)),
     );
     expect(moved.activeEditorGroup).toBe("focused-empty");
     expect(activeTabPath(moved)).toBeNull();
-    expect(
-      moved.editorGroups.reduce((sum, group) => sum + group.size, 0),
-    ).toBeCloseTo(1);
-    expect(serializeUiState(moved).editorGroups).toHaveLength(
-      MAX_EDITOR_GROUPS,
-    );
+    expect(moved.editorGroups.reduce((sum, group) => sum + group.size, 0)).toBeCloseTo(1);
+    expect(serializeUiState(moved).editorGroups).toHaveLength(MAX_EDITOR_GROUPS);
   });
 
   it("keeps the destination tab focused when a delayed cross-group move completes", () => {
@@ -323,20 +296,9 @@ describe("tabs", () => {
       activeEditorGroup: "right",
     };
 
-    const state = moveTabToGroup(
-      original,
-      "left",
-      "right",
-      "a.md",
-      0,
-      "preserve",
-    );
+    const state = moveTabToGroup(original, "left", "right", "a.md", 0, "preserve");
 
-    expect(state.editorGroups[1].tabs.map((tab) => tab.path)).toEqual([
-      "a.md",
-      "b.md",
-      "c.md",
-    ]);
+    expect(state.editorGroups[1].tabs.map((tab) => tab.path)).toEqual(["a.md", "b.md", "c.md"]);
     expect(state.editorGroups[1].activeTab).toBe("c.md");
     expect(state.activeEditorGroup).toBe("right");
     expect(state.editorGroups[0].tabs).toEqual([]);
@@ -349,12 +311,24 @@ describe("tabs", () => {
     state = moveTabToNewGroup(state, DEFAULT_EDITOR_GROUP_ID, "a.md", "right");
     state = openTab(state, dm, "right");
     state = openTab(state, channel, "right");
-    expect(allTabs(state).filter((tab) => (parseTab(tab.path)?.kind === "chat")).map((tab) => tab.path)).toEqual([CHATS_TAB_PATH, channel, dm]);
+    expect(
+      allTabs(state)
+        .filter((tab) => parseTab(tab.path)?.kind === "chat")
+        .map((tab) => tab.path),
+    ).toEqual([CHATS_TAB_PATH, channel, dm]);
     expect(state.activeEditorGroup).toBe(DEFAULT_EDITOR_GROUP_ID);
-    expect(parseTab(channel)).toMatchObject({ kind: "chat", target: { kind: "channel", id: "channel/with spaces" } });
+    expect(parseTab(channel)).toMatchObject({
+      kind: "chat",
+      target: { kind: "channel", id: "channel/with spaces" },
+    });
     const restored = parseUiState(serializeUiState(state));
     expect(allTabs(restored).map((tab) => tab.path)).toEqual(allTabs(state).map((tab) => tab.path));
-    expect(SetWorkspaceUiStatePayload.safeParse({ workspaceId: "workspace", state: serializeUiState(state) }).success).toBe(true);
+    expect(
+      SetWorkspaceUiStatePayload.safeParse({
+        workspaceId: "workspace",
+        state: serializeUiState(state),
+      }).success,
+    ).toBe(true);
   });
 
   it("goes to the open Versions tab from another group instead of opening a second", () => {
@@ -368,77 +342,48 @@ describe("tabs", () => {
     // With none open, it opens in the focused group.
     state = closeTab(state, DEFAULT_EDITOR_GROUP_ID, VERSIONS_TAB_PATH);
     state = openTabOnce(state, VERSIONS_TAB_PATH, "right");
-    expect(state.editorGroups.find((group) => group.id === "right")?.activeTab).toBe(VERSIONS_TAB_PATH);
+    expect(state.editorGroups.find((group) => group.id === "right")?.activeTab).toBe(
+      VERSIONS_TAB_PATH,
+    );
   });
 
   it("keeps Chats in its existing editor group", () => {
     let state = withTabs(CHATS_TAB_PATH, "a.md");
-    state = moveTabToNewGroup(
-      state,
-      DEFAULT_EDITOR_GROUP_ID,
-      "a.md",
-      "right",
-    );
+    state = moveTabToNewGroup(state, DEFAULT_EDITOR_GROUP_ID, "a.md", "right");
 
     state = openTab(state, CHATS_TAB_PATH, "right");
 
-    expect(
-      allTabs(state).filter((tab) => tab.path === CHATS_TAB_PATH),
-    ).toHaveLength(1);
+    expect(allTabs(state).filter((tab) => tab.path === CHATS_TAB_PATH)).toHaveLength(1);
     expect(state.activeEditorGroup).toBe(DEFAULT_EDITOR_GROUP_ID);
     expect(activeTabPath(state)).toBe(CHATS_TAB_PATH);
-    expect(
-      createEditorGroupRight(
-        state,
-        DEFAULT_EDITOR_GROUP_ID,
-        "split",
-      ),
-    ).toBe(state);
+    expect(createEditorGroupRight(state, DEFAULT_EDITOR_GROUP_ID, "split")).toBe(state);
   });
 
-  it.each([
-    ["site preview", siteTabPath("client-portal"), "tab://app/%63lient-portal"],
-  ])("keeps a process-owning %s in its existing editor group", (_label, path, alias) => {
-    let state = withTabs(path, "a.md");
-    state = moveTabToNewGroup(
-      state,
-      DEFAULT_EDITOR_GROUP_ID,
-      "a.md",
-      "right",
-    );
+  it.each([["site preview", siteTabPath("client-portal"), "tab://app/%63lient-portal"]])(
+    "keeps a process-owning %s in its existing editor group",
+    (_label, path, alias) => {
+      let state = withTabs(path, "a.md");
+      state = moveTabToNewGroup(state, DEFAULT_EDITOR_GROUP_ID, "a.md", "right");
 
-    state = openTab(state, alias, "right");
+      state = openTab(state, alias, "right");
 
-    expect(allTabs(state).filter((tab) => tab.path === path)).toHaveLength(1);
-    expect(allTabs(state).some((tab) => tab.path === alias)).toBe(false);
-    expect(state.activeEditorGroup).toBe(DEFAULT_EDITOR_GROUP_ID);
-    expect(activeTabPath(state)).toBe(path);
-    expect(
-      createEditorGroupRight(
-        state,
-        DEFAULT_EDITOR_GROUP_ID,
-        "split",
-      ),
-    ).toBe(state);
-  });
+      expect(allTabs(state).filter((tab) => tab.path === path)).toHaveLength(1);
+      expect(allTabs(state).some((tab) => tab.path === alias)).toBe(false);
+      expect(state.activeEditorGroup).toBe(DEFAULT_EDITOR_GROUP_ID);
+      expect(activeTabPath(state)).toBe(path);
+      expect(createEditorGroupRight(state, DEFAULT_EDITOR_GROUP_ID, "split")).toBe(state);
+    },
+  );
 
   it("repeated single-tab splits replace the obsolete empty drop target", () => {
-    let state = moveTabToNewGroup(
-      withTabs("a.md"),
-      DEFAULT_EDITOR_GROUP_ID,
-      "a.md",
-      "right-1",
-    );
+    let state = moveTabToNewGroup(withTabs("a.md"), DEFAULT_EDITOR_GROUP_ID, "a.md", "right-1");
     expect(state.editorGroups.map((group) => group.id)).toEqual([
       DEFAULT_EDITOR_GROUP_ID,
       "right-1",
     ]);
 
     state = moveTabToNewGroup(state, "right-1", "a.md", "right-2");
-    expect(state.editorGroups.map((group) => group.id)).toEqual([
-      "right-1",
-      "right-2",
-    ]);
+    expect(state.editorGroups.map((group) => group.id)).toEqual(["right-1", "right-2"]);
     expect(state.editorGroups.filter((group) => group.tabs.length === 0)).toHaveLength(1);
     expect(state.editorGroups.reduce((sum, group) => sum + group.size, 0)).toBe(1);
   });
@@ -453,10 +398,7 @@ describe("tabs", () => {
     state = focusEditorGroup(state, DEFAULT_EDITOR_GROUP_ID);
     state = openTab(state, "b.md");
     expect(allTabs(state).filter((tab) => tab.path === "b.md")).toHaveLength(2);
-    expect(state.editorGroups[0].tabs.map((tab) => tab.path)).toEqual([
-      "a.md",
-      "b.md",
-    ]);
+    expect(state.editorGroups[0].tabs.map((tab) => tab.path)).toEqual(["a.md", "b.md"]);
     expect(state.editorGroups[1].tabs.map((tab) => tab.path)).toEqual(["b.md"]);
     expect(state.activeEditorGroup).toBe(DEFAULT_EDITOR_GROUP_ID);
     expect(openTab(state, "b.md")).toBe(state);
@@ -479,10 +421,7 @@ describe("tabs", () => {
     };
     const next = openTab(state, "new.md", "group-0");
     expect(allTabs(next)).toHaveLength(MAX_OPEN_TABS);
-    expect(next.editorGroups[0].tabs.map((tab) => tab.path)).toEqual([
-      "file-0.md",
-      "new.md",
-    ]);
+    expect(next.editorGroups[0].tabs.map((tab) => tab.path)).toEqual(["file-0.md", "new.md"]);
     expect(next.editorGroups[1].activeTab).toBe("file-1.md");
   });
 
@@ -508,64 +447,31 @@ describe("tabs", () => {
       state = openTab(state, `file-${index}.md`);
     }
     const active = state.editorGroups[0].tabs.at(-1)!;
-    const split = createEditorGroupRight(
-      state,
-      DEFAULT_EDITOR_GROUP_ID,
-      "right",
-    );
+    const split = createEditorGroupRight(state, DEFAULT_EDITOR_GROUP_ID, "right");
     expect(allTabs(split)).toHaveLength(MAX_OPEN_TABS);
-    expect(split.editorGroups[0].tabs.some((tab) => tab.path === "file-0.md")).toBe(
-      false,
-    );
+    expect(split.editorGroups[0].tabs.some((tab) => tab.path === "file-0.md")).toBe(false);
     expect(split.editorGroups[1].tabs[0].path).toBe(active.path);
     expect(split.editorGroups[1].tabs[0]).not.toBe(active);
   });
 
   it("moves a tab between groups, repairs focus, and inserts at the drop slot", () => {
     let state = withTabs("a.md", "b.md", "c.md", "d.md");
-    state = moveTabToNewGroup(
-      state,
-      DEFAULT_EDITOR_GROUP_ID,
-      "d.md",
-      "right",
-    );
+    state = moveTabToNewGroup(state, DEFAULT_EDITOR_GROUP_ID, "d.md", "right");
     state = activateTab(state, DEFAULT_EDITOR_GROUP_ID, "b.md");
     const moved = state.editorGroups[0].tabs[1];
-    const next = moveTabToGroup(
-      state,
-      DEFAULT_EDITOR_GROUP_ID,
-      "right",
-      "b.md",
-      0,
-    );
-    expect(next.editorGroups[0].tabs.map((tab) => tab.path)).toEqual([
-      "a.md",
-      "c.md",
-    ]);
+    const next = moveTabToGroup(state, DEFAULT_EDITOR_GROUP_ID, "right", "b.md", 0);
+    expect(next.editorGroups[0].tabs.map((tab) => tab.path)).toEqual(["a.md", "c.md"]);
     expect(next.editorGroups[0].activeTab).toBe("c.md");
-    expect(next.editorGroups[1].tabs.map((tab) => tab.path)).toEqual([
-      "b.md",
-      "d.md",
-    ]);
+    expect(next.editorGroups[1].tabs.map((tab) => tab.path)).toEqual(["b.md", "d.md"]);
     expect(next.editorGroups[1].tabs[0]).toBe(moved);
     expect(next.editorGroups[1].activeTab).toBe("b.md");
     expect(next.activeEditorGroup).toBe("right");
   });
 
   it("moves onto an existing destination copy without duplicating it", () => {
-    const split = createEditorGroupRight(
-      withTabs("a.md"),
-      DEFAULT_EDITOR_GROUP_ID,
-      "right",
-    );
+    const split = createEditorGroupRight(withTabs("a.md"), DEFAULT_EDITOR_GROUP_ID, "right");
     const destination = split.editorGroups[1].tabs[0];
-    const next = moveTabToGroup(
-      split,
-      DEFAULT_EDITOR_GROUP_ID,
-      "right",
-      "a.md",
-      1,
-    );
+    const next = moveTabToGroup(split, DEFAULT_EDITOR_GROUP_ID, "right", "a.md", 1);
     expect(next.editorGroups[0]).toMatchObject({ tabs: [], activeTab: null });
     expect(next.editorGroups[1].tabs).toEqual([destination]);
     expect(next.activeEditorGroup).toBe("right");
@@ -619,9 +525,21 @@ describe("tabs", () => {
     const path = momentDiffTabPath("moment id/with strange chars");
     expect(parseTab(path).kind).toBe("momentDiff");
     expect(TAB_KINDS[parseTab(path).kind].virtual).toBe(true);
-    expect(parseTab(path)).toEqual({ kind: "momentDiff", path, momentId: "moment id/with strange chars" });
-    expect(parseTab("tab://moment-diff/")).toEqual({ kind: "momentDiff", path: "tab://moment-diff/", momentId: null });
-    expect(parseTab("tab://moment-diff/%ZZ")).toEqual({ kind: "momentDiff", path: "tab://moment-diff/%ZZ", momentId: null });
+    expect(parseTab(path)).toEqual({
+      kind: "momentDiff",
+      path,
+      momentId: "moment id/with strange chars",
+    });
+    expect(parseTab("tab://moment-diff/")).toEqual({
+      kind: "momentDiff",
+      path: "tab://moment-diff/",
+      momentId: null,
+    });
+    expect(parseTab("tab://moment-diff/%ZZ")).toEqual({
+      kind: "momentDiff",
+      path: "tab://moment-diff/%ZZ",
+      momentId: null,
+    });
     expect(parseTab("notes/today.md")).toEqual({ kind: "file", path: "notes/today.md" });
     expect(parseTab(null)).toBeNull();
   });
@@ -630,7 +548,11 @@ describe("tabs", () => {
     const path = collectionTabPath("projects/road trips");
     expect(parseTab(path).kind).toBe("collection");
     expect(TAB_KINDS[parseTab(path).kind].virtual).toBe(true);
-    expect(parseTab(path)).toEqual({ kind: "collection", path, collectionPath: "projects/road trips" });
+    expect(parseTab(path)).toEqual({
+      kind: "collection",
+      path,
+      collectionPath: "projects/road trips",
+    });
     expect(TAB_KINDS.collection.title(parseTab(path))).toBe("road trips");
     expect(TAB_KINDS.collection.tooltip(parseTab(path))).toBe("projects/road trips");
     expect(TAB_KINDS.collection.explorerTitle(parseTab(path))).toBe("road trips");
@@ -639,8 +561,16 @@ describe("tabs", () => {
       expect(TAB_KINDS.collection.title(literal)).toBe(name);
       expect(TAB_KINDS.collection.tooltip(literal)).toBe(`projects/${name}`);
     }
-    expect(parseTab("tab://collection/")).toEqual({ kind: "collection", path: "tab://collection/", collectionPath: null });
-    expect(parseTab("tab://collection/%ZZ")).toEqual({ kind: "collection", path: "tab://collection/%ZZ", collectionPath: null });
+    expect(parseTab("tab://collection/")).toEqual({
+      kind: "collection",
+      path: "tab://collection/",
+      collectionPath: null,
+    });
+    expect(parseTab("tab://collection/%ZZ")).toEqual({
+      kind: "collection",
+      path: "tab://collection/%ZZ",
+      collectionPath: null,
+    });
     expect(parseTab("notes/today.md")).toEqual({ kind: "file", path: "notes/today.md" });
     expect(parseTab(null)).toBeNull();
   });
@@ -667,9 +597,21 @@ describe("tabs", () => {
     const path = versionCompareTabPath("version id/with strange chars");
     expect(parseTab(path).kind).toBe("versionCompare");
     expect(TAB_KINDS[parseTab(path).kind].virtual).toBe(true);
-    expect(parseTab(path)).toEqual({ kind: "versionCompare", path, versionId: "version id/with strange chars" });
-    expect(parseTab("tab://versions/compare/")).toEqual({ kind: "versionCompare", path: "tab://versions/compare/", versionId: null });
-    expect(parseTab("tab://versions/compare/%ZZ")).toEqual({ kind: "versionCompare", path: "tab://versions/compare/%ZZ", versionId: null });
+    expect(parseTab(path)).toEqual({
+      kind: "versionCompare",
+      path,
+      versionId: "version id/with strange chars",
+    });
+    expect(parseTab("tab://versions/compare/")).toEqual({
+      kind: "versionCompare",
+      path: "tab://versions/compare/",
+      versionId: null,
+    });
+    expect(parseTab("tab://versions/compare/%ZZ")).toEqual({
+      kind: "versionCompare",
+      path: "tab://versions/compare/%ZZ",
+      versionId: null,
+    });
     expect(parseTab("notes/today.md")).toEqual({ kind: "file", path: "notes/today.md" });
     expect(parseTab(null)).toBeNull();
   });
@@ -684,22 +626,39 @@ describe("tabs", () => {
     expect(parseTab("not-a-site-path")).toEqual({ kind: "file", path: "not-a-site-path" });
 
     const reservedRoot = "clients/site/nested?view=main#summary";
-    expect(parseTab(siteTabPath(reservedRoot))).toEqual({ kind: "site", path: siteTabPath(reservedRoot), siteRoot: reservedRoot });
+    expect(parseTab(siteTabPath(reservedRoot))).toEqual({
+      kind: "site",
+      path: siteTabPath(reservedRoot),
+      siteRoot: reservedRoot,
+    });
   });
 
   it("recognizes new pages as virtual tabs with the folder they were made in", () => {
     const path = newPageTabPath("page-1", "Trip/day 2");
     expect(TAB_KINDS[parseTab(path).kind].virtual).toBe(true);
     expect(parseTab(path)).toEqual({ kind: "newPage", path, id: "page-1", folder: "Trip/day 2" });
-    expect(parseTab(newPageTabPath("page-2", ""))).toEqual({ kind: "newPage", path: newPageTabPath("page-2", ""), id: "page-2", folder: "" });
+    expect(parseTab(newPageTabPath("page-2", ""))).toEqual({
+      kind: "newPage",
+      path: newPageTabPath("page-2", ""),
+      id: "page-2",
+      folder: "",
+    });
     expect(parseTab("tab://new-page/page-3").kind).toBe("removed");
   });
 
   it("turns a new page's tab into its file's tab where it stands", () => {
     const page = newPageTabPath("page-1", "");
     const state = withTabs("notes/a.md", page, "notes/b.md");
-    const opened = replaceTab(activateTab(state, DEFAULT_EDITOR_GROUP_ID, page), page, "Untitled.md");
-    expect(allTabs(opened).map((tab) => tab.path)).toEqual(["notes/a.md", "Untitled.md", "notes/b.md"]);
+    const opened = replaceTab(
+      activateTab(state, DEFAULT_EDITOR_GROUP_ID, page),
+      page,
+      "Untitled.md",
+    );
+    expect(allTabs(opened).map((tab) => tab.path)).toEqual([
+      "notes/a.md",
+      "Untitled.md",
+      "notes/b.md",
+    ]);
     expect(activeTabPath(opened)).toBe("Untitled.md");
 
     const shown = replaceTab(withTabs(page, "Untitled.md"), page, "Untitled.md");
@@ -714,13 +673,23 @@ describe("tabs", () => {
     ["clients/acme/portal", "portal"],
     ["apps/100% done", "100% done"],
   ])("names the app at %s by its folder", (root, name) => {
-    const tab = parseTab(siteTabPath(root)), rules = TAB_KINDS.site;
-    expect([rules.title(tab), rules.tooltip(tab), rules.explorerTitle(tab)]).toEqual([name, root, name]);
+    const tab = parseTab(siteTabPath(root)),
+      rules = TAB_KINDS.site;
+    expect([rules.title(tab), rules.tooltip(tab), rules.explorerTitle(tab)]).toEqual([
+      name,
+      root,
+      name,
+    ]);
   });
 
   it("keeps the tab address for an app folder that cannot be decoded", () => {
-    const tab = parseTab("tab://app/%ZZ"), rules = TAB_KINDS.site;
-    expect([rules.title(tab), rules.tooltip(tab), rules.explorerTitle(tab)]).toEqual(["%ZZ", "tab://app/%ZZ", "%ZZ"]);
+    const tab = parseTab("tab://app/%ZZ"),
+      rules = TAB_KINDS.site;
+    expect([rules.title(tab), rules.tooltip(tab), rules.explorerTitle(tab)]).toEqual([
+      "%ZZ",
+      "tab://app/%ZZ",
+      "%ZZ",
+    ]);
   });
 
   it("refuses a virtual tab at the open-tab cap, which is what the shell reports", () => {
@@ -744,7 +713,9 @@ describe("tabs", () => {
 
   it("activateTab only activates an open tab", () => {
     const state = withTabs("a.md", "b.md");
-    expect(activateTab(state, DEFAULT_EDITOR_GROUP_ID, "a.md").editorGroups[0].activeTab).toBe("a.md");
+    expect(activateTab(state, DEFAULT_EDITOR_GROUP_ID, "a.md").editorGroups[0].activeTab).toBe(
+      "a.md",
+    );
     expect(activateTab(state, DEFAULT_EDITOR_GROUP_ID, "ghost.md")).toBe(state);
   });
 
@@ -785,7 +756,9 @@ describe("tabs", () => {
 
   it("moveTab clamps the target and no-ops invalid or same-slot moves (same reference)", () => {
     const state = withTabs("a.md", "b.md");
-    expect(moveTab(state, DEFAULT_EDITOR_GROUP_ID, 0, 99).editorGroups[0].tabs.map((tab) => tab.path)).toEqual(["b.md", "a.md"]);
+    expect(
+      moveTab(state, DEFAULT_EDITOR_GROUP_ID, 0, 99).editorGroups[0].tabs.map((tab) => tab.path),
+    ).toEqual(["b.md", "a.md"]);
     expect(moveTab(state, DEFAULT_EDITOR_GROUP_ID, 0, -5)).toBe(state); // clamps to 0 === from
     expect(moveTab(state, DEFAULT_EDITOR_GROUP_ID, -1, 1)).toBe(state);
     expect(moveTab(state, DEFAULT_EDITOR_GROUP_ID, 5, 0)).toBe(state);
@@ -803,7 +776,10 @@ describe("mergeSavedTabs (Restore tabs)", () => {
       { id: DEFAULT_EDITOR_GROUP_ID, tabs: [{ path: "b.md" }], activeTab: "b.md", size: 0.5 },
       {
         id: "right",
-        tabs: [...Array.from({ length: 98 }, (_, i) => ({ path: `saved-${i}.md` })), { path: "b.md" }],
+        tabs: [
+          ...Array.from({ length: 98 }, (_, i) => ({ path: `saved-${i}.md` })),
+          { path: "b.md" },
+        ],
         activeTab: "b.md",
         size: 0.5,
       },
@@ -813,14 +789,20 @@ describe("mergeSavedTabs (Restore tabs)", () => {
   const paths = (state: WorkbenchState) => allTabs(state).map((tab) => tab.path);
 
   it("keeps every tab open now when they fill the limit", () => {
-    const shown = withTabs(...Array.from({ length: MAX_OPEN_TABS }, (_, i) => newPageTabPath(`typed-${i}`, "")));
+    const shown = withTabs(
+      ...Array.from({ length: MAX_OPEN_TABS }, (_, i) => newPageTabPath(`typed-${i}`, "")),
+    );
     const merged = mergeSavedTabs(saved, shown);
     expect(new Set(paths(merged))).toEqual(new Set(paths(shown)));
     expect(activeTabPath(merged)).toBe(activeTabPath(shown));
   });
 
   it("closes a second copy of a saved file before a tab open now", () => {
-    const shown = withTabs(...Array.from({ length: 98 }, (_, i) => `saved-${i}.md`), "b.md", newPageTabPath("typed", ""));
+    const shown = withTabs(
+      ...Array.from({ length: 98 }, (_, i) => `saved-${i}.md`),
+      "b.md",
+      newPageTabPath("typed", ""),
+    );
     const merged = mergeSavedTabs(saved, shown);
     expect(paths(merged)).toHaveLength(MAX_OPEN_TABS);
     expect(new Set(paths(merged))).toEqual(new Set(paths(shown)));
@@ -841,10 +823,16 @@ describe("mergeSavedTabs (Restore tabs)", () => {
     const app = siteTabPath("trip");
     const savedApp: WorkbenchState = {
       ...saved,
-      editorGroups: [saved.editorGroups[0], { ...saved.editorGroups[1], tabs: [{ path: "b.md" }, { path: app }], activeTab: app }],
+      editorGroups: [
+        saved.editorGroups[0],
+        { ...saved.editorGroups[1], tabs: [{ path: "b.md" }, { path: app }], activeTab: app },
+      ],
     };
     const merged = mergeSavedTabs(savedApp, withTabs(app));
-    expect(merged.editorGroups.map((group) => group.tabs.map((tab) => tab.path))).toEqual([["b.md", app], ["b.md"]]);
+    expect(merged.editorGroups.map((group) => group.tabs.map((tab) => tab.path))).toEqual([
+      ["b.md", app],
+      ["b.md"],
+    ]);
     expect(merged.activeEditorGroup).toBe(DEFAULT_EDITOR_GROUP_ID);
   });
 
@@ -852,18 +840,28 @@ describe("mergeSavedTabs (Restore tabs)", () => {
     const app = siteTabPath("trip");
     const savedApp: WorkbenchState = {
       ...saved,
-      editorGroups: [saved.editorGroups[0], { ...saved.editorGroups[1], tabs: [{ path: "b.md" }, { path: app }], activeTab: app }],
+      editorGroups: [
+        saved.editorGroups[0],
+        { ...saved.editorGroups[1], tabs: [{ path: "b.md" }, { path: app }], activeTab: app },
+      ],
     };
     const shown: WorkbenchState = {
       ...defaultWorkbenchState(),
       editorGroups: [
-        { id: DEFAULT_EDITOR_GROUP_ID, tabs: [{ path: app }, { path: "c.md" }], activeTab: "c.md", size: 0.5 },
+        {
+          id: DEFAULT_EDITOR_GROUP_ID,
+          tabs: [{ path: app }, { path: "c.md" }],
+          activeTab: "c.md",
+          size: 0.5,
+        },
         { id: "right", tabs: [{ path: "d.md" }], activeTab: "d.md", size: 0.5 },
       ],
       activeEditorGroup: "right",
     };
     const merged = mergeSavedTabs(savedApp, shown);
-    expect(merged.editorGroups.map((group) => [group.tabs.map((tab) => tab.path), group.activeTab])).toEqual([
+    expect(
+      merged.editorGroups.map((group) => [group.tabs.map((tab) => tab.path), group.activeTab]),
+    ).toEqual([
       [["b.md", app], "b.md"],
       [["b.md", "c.md", "d.md"], "d.md"],
     ]);
@@ -954,9 +952,7 @@ describe("rail widths", () => {
     expect(clampOpenEditorsHeight(300)).toBe(300);
     expect(clampOpenEditorsHeight(300.6)).toBe(301);
     expect(clampOpenEditorsHeight(Number.NaN)).toBe(OPEN_EDITORS_DEFAULT_HEIGHT);
-    expect(clampOpenEditorsHeight(Number.POSITIVE_INFINITY)).toBe(
-      OPEN_EDITORS_DEFAULT_HEIGHT,
-    );
+    expect(clampOpenEditorsHeight(Number.POSITIVE_INFINITY)).toBe(OPEN_EDITORS_DEFAULT_HEIGHT);
   });
 
   it("setOpenEditorsHeight stores the clamped height and no-ops on no change", () => {
@@ -982,10 +978,7 @@ describe("ui-state persistence round-trip", () => {
       ],
     });
 
-    expect(allTabs(restored).map((tab) => tab.path)).toEqual([
-      "notes/a.md",
-      sitePath,
-    ]);
+    expect(allTabs(restored).map((tab) => tab.path)).toEqual(["notes/a.md", sitePath]);
     expect(restored.editorGroups[0]!.activeTab).toBe(sitePath);
     expect(parseTab(sitePath).kind).toBe("site");
     expect(parseTab(removedPath).kind).toBe("removed");
@@ -1024,34 +1017,39 @@ describe("ui-state persistence round-trip", () => {
 
   it("keeps Chats open across a restart, through the stored file's schema", () => {
     const stored = serializeUiState(setView(defaultWorkbenchState(), "chats"));
-    expect(SetWorkspaceUiStatePayload.parse({ workspaceId: "workspace", state: stored }).state.activeView).toBe("chats");
+    expect(
+      SetWorkspaceUiStatePayload.parse({ workspaceId: "workspace", state: stored }).state
+        .activeView,
+    ).toBe("chats");
     expect(parseUiState(stored).activeView).toBe("chats");
   });
 
   it("falls back to the explorer for a stored view this build does not know", () => {
     expect(
-      parseUiState({ ...serializeUiState(defaultWorkbenchState()), activeView: "plugins" }).activeView,
+      parseUiState({ ...serializeUiState(defaultWorkbenchState()), activeView: "plugins" })
+        .activeView,
     ).toBe("explorer");
   });
 
   it("keeps Sharing open across a restart, through the stored file's schema", () => {
     const stored = serializeUiState(setView(defaultWorkbenchState(), "sharing"));
-    expect(SetWorkspaceUiStatePayload.parse({ workspaceId: "workspace", state: stored }).state.activeView).toBe("sharing");
+    expect(
+      SetWorkspaceUiStatePayload.parse({ workspaceId: "workspace", state: stored }).state
+        .activeView,
+    ).toBe("sharing");
     expect(parseUiState(stored).activeView).toBe("sharing");
   });
 
   it("does not migrate or alias the version-1 flat-tab contract", () => {
-    expect(
-      parseUiState({ version: 1, tabs: ["a.md"], activeTab: "a.md" }),
-    ).toEqual(defaultWorkbenchState());
+    expect(parseUiState({ version: 1, tabs: ["a.md"], activeTab: "a.md" })).toEqual(
+      defaultWorkbenchState(),
+    );
   });
 
   it("a version-3 file without openEditorsHeight falls back to the default", () => {
     const raw = {
       version: 3,
-      editorGroups: [
-        { id: "primary", tabs: ["a.md"], activeTab: "a.md", size: 1 },
-      ],
+      editorGroups: [{ id: "primary", tabs: ["a.md"], activeTab: "a.md", size: 1 }],
       activeEditorGroup: "primary",
     };
     expect(parseUiState(raw).openEditorsHeight).toBe(OPEN_EDITORS_DEFAULT_HEIGHT);
@@ -1098,10 +1096,7 @@ describe("ui-state persistence round-trip", () => {
     expect(state.editorGroups.map((group) => group.id)).toEqual(["left", "right"]);
     expect(state.editorGroups[0].tabs.map((tab) => tab.path)).toEqual(["a.md", "b.md"]);
     expect(state.editorGroups[0].activeTab).toBe("a.md");
-    expect(state.editorGroups[1].tabs.map((tab) => tab.path)).toEqual([
-      "b.md",
-      "c.md",
-    ]);
+    expect(state.editorGroups[1].tabs.map((tab) => tab.path)).toEqual(["b.md", "c.md"]);
     expect(state.editorGroups[1].activeTab).toBe("c.md");
     expect(state.editorGroups.map((group) => group.size)).toEqual([0.75, 0.25]);
     expect(state.activeEditorGroup).toBe("left");
@@ -1132,50 +1127,43 @@ describe("ui-state persistence round-trip", () => {
       "shared.md",
     ]);
     expect(state.editorGroups[0].activeTab).toBe(CHATS_TAB_PATH);
-    expect(state.editorGroups[1].tabs.map((tab) => tab.path)).toEqual([
-      "shared.md",
-      "right.md",
-    ]);
+    expect(state.editorGroups[1].tabs.map((tab) => tab.path)).toEqual(["shared.md", "right.md"]);
     expect(state.editorGroups[1].activeTab).toBe("shared.md");
     expect(state.activeEditorGroup).toBe("left");
-    expect(
-      allTabs(state).filter((tab) => tab.path === CHATS_TAB_PATH),
-    ).toHaveLength(1);
+    expect(allTabs(state).filter((tab) => tab.path === CHATS_TAB_PATH)).toHaveLength(1);
   });
 
-  it.each([
-    ["site preview", siteTabPath("client-portal"), "tab://app/%63lient-portal"],
-  ])("keeps the first restored %s owner", (_label, path, alias) => {
-    const state = parseUiState({
-      version: 3,
-      editorGroups: [
-        {
-          id: "left",
-          tabs: [path, "left.md"],
-          activeTab: "left.md",
-          size: 0.5,
-        },
-        {
-          id: "right",
-          tabs: [alias, "right.md"],
-          activeTab: alias,
-          size: 0.5,
-        },
-      ],
-      activeEditorGroup: "right",
-    });
+  it.each([["site preview", siteTabPath("client-portal"), "tab://app/%63lient-portal"]])(
+    "keeps the first restored %s owner",
+    (_label, path, alias) => {
+      const state = parseUiState({
+        version: 3,
+        editorGroups: [
+          {
+            id: "left",
+            tabs: [path, "left.md"],
+            activeTab: "left.md",
+            size: 0.5,
+          },
+          {
+            id: "right",
+            tabs: [alias, "right.md"],
+            activeTab: alias,
+            size: 0.5,
+          },
+        ],
+        activeEditorGroup: "right",
+      });
 
-    expect(allTabs(state).filter((tab) => tab.path === path)).toHaveLength(1);
-    expect(state.activeEditorGroup).toBe("left");
-    expect(state.editorGroups[0].activeTab).toBe(path);
-    expect(state.editorGroups[1].activeTab).toBe("right.md");
-  });
+      expect(allTabs(state).filter((tab) => tab.path === path)).toHaveLength(1);
+      expect(state.activeEditorGroup).toBe("left");
+      expect(state.editorGroups[0].activeTab).toBe(path);
+      expect(state.editorGroups[1].activeTab).toBe("right.md");
+    },
+  );
 
   it("does not charge discarded duplicate Chats entries against the tab cap", () => {
-    const realFiles = Array.from(
-      { length: MAX_OPEN_TABS - 1 },
-      (_, index) => `file-${index}.md`,
-    );
+    const realFiles = Array.from({ length: MAX_OPEN_TABS - 1 }, (_, index) => `file-${index}.md`);
     const state = parseUiState({
       version: 3,
       editorGroups: [
@@ -1208,9 +1196,7 @@ describe("ui-state persistence round-trip", () => {
         activeView: "history",
         sidebarVisible: false,
         sidebarWidth: 480,
-        editorGroups: [
-          { id: "evil", tabs: ["evil.md"], activeTab: "evil.md", size: 1 },
-        ],
+        editorGroups: [{ id: "evil", tabs: ["evil.md"], activeTab: "evil.md", size: 1 }],
         activeEditorGroup: "evil",
         aboutVisible: true,
       }),
@@ -1236,22 +1222,17 @@ describe("ui-state persistence round-trip", () => {
     });
     expect(allTabs(state)).toHaveLength(MAX_OPEN_TABS);
     expect(allTabs(state)[0].path).toBe("f0.md");
-    expect(allTabs(state)[MAX_OPEN_TABS - 1].path).toBe(
-      `f${MAX_OPEN_TABS - 1}.md`,
-    );
+    expect(allTabs(state)[MAX_OPEN_TABS - 1].path).toBe(`f${MAX_OPEN_TABS - 1}.md`);
     expect(activeTabPath(state)).toBe("f0.md");
   });
 
   it("parse caps editor groups and repairs focus beyond the retained prefix", () => {
-    const rawGroups = Array.from(
-      { length: MAX_EDITOR_GROUPS + 1 },
-      (_, index) => ({
-        id: `group-${index}`,
-        tabs: [],
-        activeTab: null,
-        size: 1,
-      }),
-    );
+    const rawGroups = Array.from({ length: MAX_EDITOR_GROUPS + 1 }, (_, index) => ({
+      id: `group-${index}`,
+      tabs: [],
+      activeTab: null,
+      size: 1,
+    }));
     const state = parseUiState({
       version: 3,
       editorGroups: rawGroups,
@@ -1259,9 +1240,7 @@ describe("ui-state persistence round-trip", () => {
     });
 
     expect(state.editorGroups).toHaveLength(MAX_EDITOR_GROUPS);
-    expect(state.editorGroups.at(-1)?.id).toBe(
-      `group-${MAX_EDITOR_GROUPS - 1}`,
-    );
+    expect(state.editorGroups.at(-1)?.id).toBe(`group-${MAX_EDITOR_GROUPS - 1}`);
     expect(state.activeEditorGroup).toBe("group-0");
   });
 
@@ -1305,9 +1284,7 @@ describe("explorer expansion + pins", () => {
       state = togglePinned(state, `pin-${i}.md`);
     }
     expect(state.pinned).toHaveLength(MAX_PINNED_PATHS);
-    expect(state.pinned[MAX_PINNED_PATHS - 1]).toBe(
-      `pin-${MAX_PINNED_PATHS + 4}.md`,
-    );
+    expect(state.pinned[MAX_PINNED_PATHS - 1]).toBe(`pin-${MAX_PINNED_PATHS + 4}.md`);
   });
 
   it("expansion caps at its bound the same way", () => {
@@ -1356,9 +1333,7 @@ describe("recent files", () => {
     let state = withTabs("a.md");
     state = recordRecentFile(state, "a.md");
     expect(parseUiState(serializeUiState(state)).recentFiles).toEqual(["a.md"]);
-    expect(
-      parseUiState({ version: 1, tabs: ["a.md"], activeTab: "a.md" }).recentFiles,
-    ).toEqual([]);
+    expect(parseUiState({ version: 1, tabs: ["a.md"], activeTab: "a.md" }).recentFiles).toEqual([]);
   });
 });
 
@@ -1395,16 +1370,13 @@ describe("collection views", () => {
     expect(parseUiState(serializeUiState(state)).collectionViews).toEqual({
       tasks: "Board",
     });
-    const { collectionViews: _dropped, ...withoutField } =
-      serializeUiState(state);
+    const { collectionViews: _dropped, ...withoutField } = serializeUiState(state);
     expect(parseUiState(withoutField).collectionViews).toEqual({});
   });
 
   it("parse drops foreign entries and stops collecting at the cap", () => {
     const serialized = serializeUiState(defaultWorkbenchState());
-    expect(
-      parseUiState({ ...serialized, collectionViews: ["Board"] }).collectionViews,
-    ).toEqual({});
+    expect(parseUiState({ ...serialized, collectionViews: ["Board"] }).collectionViews).toEqual({});
     expect(
       parseUiState({
         ...serialized,
@@ -1419,18 +1391,13 @@ describe("collection views", () => {
     const flood: Record<string, string> = {};
     for (let i = 0; i < MAX_COLLECTION_VIEWS + 50; i++) flood[`c-${i}`] = "Board";
     expect(
-      Object.keys(
-        parseUiState({ ...serialized, collectionViews: flood }).collectionViews,
-      ),
+      Object.keys(parseUiState({ ...serialized, collectionViews: flood }).collectionViews),
     ).toHaveLength(MAX_COLLECTION_VIEWS);
   });
 
   it("parse keeps a collection folder named __proto__", () => {
     const serialized = serializeUiState(defaultWorkbenchState());
-    const views = JSON.parse('{"__proto__":"Board","tasks":"Table"}') as Record<
-      string,
-      string
-    >;
+    const views = JSON.parse('{"__proto__":"Board","tasks":"Table"}') as Record<string, string>;
     const parsed = parseUiState({ ...serialized, collectionViews: views }).collectionViews;
     expect(Object.hasOwn(parsed, "__proto__")).toBe(true);
     expect(parsed["__proto__"]).toBe("Board");
@@ -1458,17 +1425,11 @@ describe("remapWorkbenchPaths (rename/move/delete projection)", () => {
     );
     state = openTab(state, "right-second.md", "right");
     const remapped = remapWorkbenchPaths(state, (path) =>
-      path === "left.md"
-        ? "left-renamed.md"
-        : path === "right-second.md"
-          ? null
-          : path,
+      path === "left.md" ? "left-renamed.md" : path === "right-second.md" ? null : path,
     );
     expect(remapped.editorGroups[0].tabs[0].path).toBe("left-renamed.md");
     expect(remapped.editorGroups[0].activeTab).toBe("left-renamed.md");
-    expect(remapped.editorGroups[1].tabs.map((tab) => tab.path)).toEqual([
-      "right.md",
-    ]);
+    expect(remapped.editorGroups[1].tabs.map((tab) => tab.path)).toEqual(["right.md"]);
     expect(remapped.editorGroups[1].activeTab).toBe("right.md");
   });
 
@@ -1479,10 +1440,7 @@ describe("remapWorkbenchPaths (rename/move/delete projection)", () => {
     const remapped = remapWorkbenchPaths(state, (path) =>
       path === "team" ? "org/team" : path.startsWith("team/") ? `org/${path}` : path,
     );
-    expect(allTabs(remapped).map((tab) => tab.path)).toEqual([
-      "org/team/anna.md",
-      "readme.md",
-    ]);
+    expect(allTabs(remapped).map((tab) => tab.path)).toEqual(["org/team/anna.md", "readme.md"]);
     expect(activeTabPath(remapped)).toBe("readme.md");
     expect(remapped.expandedFolders).toEqual(["org/team"]);
     expect(remapped.pinned).toEqual(["org/team/anna.md"]);
@@ -1491,9 +1449,7 @@ describe("remapWorkbenchPaths (rename/move/delete projection)", () => {
   it("a deleted active tab falls back to the last surviving tab; deletions drop pins", () => {
     let state = withTabs("a.md", "junk.md");
     state = togglePinned(state, "junk.md");
-    const remapped = remapWorkbenchPaths(state, (path) =>
-      path === "junk.md" ? null : path,
-    );
+    const remapped = remapWorkbenchPaths(state, (path) => (path === "junk.md" ? null : path));
     expect(allTabs(remapped).map((tab) => tab.path)).toEqual(["a.md"]);
     expect(activeTabPath(remapped)).toBe("a.md");
     expect(remapped.pinned).toEqual([]);
@@ -1507,15 +1463,12 @@ describe("remapWorkbenchPaths (rename/move/delete projection)", () => {
   });
 
   it("keeps the same remapped path open once in each group", () => {
-    const state = createEditorGroupRight(
-      withTabs("a.md"),
-      DEFAULT_EDITOR_GROUP_ID,
-      "right",
-    );
+    const state = createEditorGroupRight(withTabs("a.md"), DEFAULT_EDITOR_GROUP_ID, "right");
     const remapped = remapWorkbenchPaths(state, () => "renamed.md");
-    expect(
-      remapped.editorGroups.map((group) => group.tabs.map((tab) => tab.path)),
-    ).toEqual([["renamed.md"], ["renamed.md"]]);
+    expect(remapped.editorGroups.map((group) => group.tabs.map((tab) => tab.path))).toEqual([
+      ["renamed.md"],
+      ["renamed.md"],
+    ]);
     expect(remapped.editorGroups.map((group) => group.activeTab)).toEqual([
       "renamed.md",
       "renamed.md",
@@ -1530,7 +1483,11 @@ describe("remapWorkbenchPaths (rename/move/delete projection)", () => {
     let state = withTabs(collectionTabPath("tasks"), "readme.md");
     state = setCollectionActiveView(state, "tasks", "Board");
     const remapped = remapWorkbenchPaths(state, (path) =>
-      path === "tasks" ? "org tasks" : path.startsWith("tasks/") ? `org tasks/${path.slice("tasks/".length)}` : path,
+      path === "tasks"
+        ? "org tasks"
+        : path.startsWith("tasks/")
+          ? `org tasks/${path.slice("tasks/".length)}`
+          : path,
     );
     expect(allTabs(remapped).map((tab) => tab.path)).toEqual([
       collectionTabPath("org tasks"),
@@ -1549,9 +1506,7 @@ describe("remapWorkbenchPaths (rename/move/delete projection)", () => {
     const remapped = remapWorkbenchPaths(state, (path) =>
       path === "team" ? "org/team" : path.startsWith("team/") ? `org/${path}` : path,
     );
-    expect(
-      remapped.editorGroups.map((group) => group.tabs.map((tab) => tab.path)),
-    ).toEqual([
+    expect(remapped.editorGroups.map((group) => group.tabs.map((tab) => tab.path))).toEqual([
       [collectionTabPath("org/team/tasks")],
       [collectionTabPath("org/team/tasks")],
     ]);
@@ -1572,16 +1527,11 @@ describe("remapWorkbenchPaths (rename/move/delete projection)", () => {
   });
 
   it("a move that collides two collection tabs onto one folder dedupes them", () => {
-    const state = withTabs(
-      collectionTabPath("tasks"),
-      collectionTabPath("org/tasks"),
-    );
+    const state = withTabs(collectionTabPath("tasks"), collectionTabPath("org/tasks"));
     const remapped = remapWorkbenchPaths(state, (path) =>
       path === "tasks" ? "org/tasks" : path.startsWith("tasks/") ? `org/${path}` : path,
     );
-    expect(allTabs(remapped).map((tab) => tab.path)).toEqual([
-      collectionTabPath("org/tasks"),
-    ]);
+    expect(allTabs(remapped).map((tab) => tab.path)).toEqual([collectionTabPath("org/tasks")]);
   });
 });
 
@@ -1614,28 +1564,20 @@ describe("pruneMissingRestoredTabs (restored tabs whose file is gone)", () => {
     );
     expect(pruned.editorGroups[0].tabs).toEqual([]);
     expect(pruned.editorGroups[0].activeTab).toBeNull();
-    expect(pruned.editorGroups[1].tabs.map((tab) => tab.path)).toEqual([
-      "right-survivor.md",
-    ]);
+    expect(pruned.editorGroups[1].tabs.map((tab) => tab.path)).toEqual(["right-survivor.md"]);
     expect(pruned.editorGroups[1].activeTab).toBe("right-survivor.md");
   });
 
   it("keeps every tab whose file is still listed (same reference)", () => {
     const state = withTabs("a.md", "b.md");
-    expect(pruneMissingRestoredTabs(state, restored("a.md", "b.md"), () => true)).toBe(
-      state,
-    );
+    expect(pruneMissingRestoredTabs(state, restored("a.md", "b.md"), () => true)).toBe(state);
   });
 
   // The whole point of the scoping: a listing that raced a create omits the
   // new file, and must not be allowed to close the tab the user just opened.
   it("never touches a tab opened this session, whatever the listing says", () => {
     const state = withTabs("restored.md", "opened-now.md");
-    const pruned = pruneMissingRestoredTabs(
-      state,
-      restored("restored.md"),
-      () => false,
-    );
+    const pruned = pruneMissingRestoredTabs(state, restored("restored.md"), () => false);
     expect(allTabs(pruned).map((tab) => tab.path)).toEqual(["opened-now.md"]);
     expect(activeTabPath(pruned)).toBe("opened-now.md");
   });
@@ -1652,10 +1594,7 @@ describe("pruneMissingRestoredTabs (restored tabs whose file is gone)", () => {
       restored(CHATS_TAB_PATH, HISTORY_TAB_PATH, "a.md"),
       () => false,
     );
-    expect(allTabs(pruned).map((tab) => tab.path)).toEqual([
-      CHATS_TAB_PATH,
-      HISTORY_TAB_PATH,
-    ]);
+    expect(allTabs(pruned).map((tab) => tab.path)).toEqual([CHATS_TAB_PATH, HISTORY_TAB_PATH]);
     expect(activeTabPath(pruned)).toBe(HISTORY_TAB_PATH);
   });
 
@@ -1664,11 +1603,7 @@ describe("pruneMissingRestoredTabs (restored tabs whose file is gone)", () => {
     state = setFolderExpanded(state, "assets", true);
     state = togglePinned(state, "assets");
     state = recordRecentFile(state, "a.md");
-    const pruned = pruneMissingRestoredTabs(
-      state,
-      restored("a.md"),
-      (path) => path === "a.md",
-    );
+    const pruned = pruneMissingRestoredTabs(state, restored("a.md"), (path) => path === "a.md");
     expect(pruned.expandedFolders).toEqual(["assets"]);
     expect(pruned.pinned).toEqual(["assets"]);
     expect(pruned.recentFiles).toEqual(["a.md"]);
@@ -1677,26 +1612,34 @@ describe("pruneMissingRestoredTabs (restored tabs whose file is gone)", () => {
   it("a pruned active tab hands over to the last survivor; an empty result nulls it", () => {
     const state = withTabs("a.md", "b.md", "gone.md");
     const all = restored("a.md", "b.md", "gone.md");
-    expect(
-      activeTabPath(pruneMissingRestoredTabs(state, all, (path) => path !== "gone.md")),
-    ).toBe("b.md");
+    expect(activeTabPath(pruneMissingRestoredTabs(state, all, (path) => path !== "gone.md"))).toBe(
+      "b.md",
+    );
     const empty = pruneMissingRestoredTabs(state, all, () => false);
     expect(allTabs(empty)).toEqual([]);
     expect(activeTabPath(empty)).toBeNull();
   });
 });
 
-
 it("uses the dataset.json address for Collection tabs and rejects old ID-only addresses", () => {
   const tableId = "00000000-0000-4000-8000-000000000002";
   const datasetPath = "旅行/Equipment list/dataset.json";
-  expect(parseTab(transactionalCollectionTabPath(datasetPath, tableId))).toMatchObject({ kind: "transactionalCollection", datasetPath, tableId });
-  expect(parseTab(transactionalCollectionTabPath("00000000-0000-4000-8000-000000000001", tableId)).kind).toBe("removed");
+  expect(parseTab(transactionalCollectionTabPath(datasetPath, tableId))).toMatchObject({
+    kind: "transactionalCollection",
+    datasetPath,
+    tableId,
+  });
+  expect(
+    parseTab(transactionalCollectionTabPath("00000000-0000-4000-8000-000000000001", tableId)).kind,
+  ).toBe("removed");
   expect(parseTab(transactionalCollectionTabPath("../dataset.json", tableId)).kind).toBe("removed");
 });
 
 describe("the record a Collection tab shows open, and the record panel's width", () => {
-  const data = transactionalCollectionTabPath("data/dataset.json", "123e4567-e89b-42d3-a456-426614174002");
+  const data = transactionalCollectionTabPath(
+    "data/dataset.json",
+    "123e4567-e89b-42d3-a456-426614174002",
+  );
   const tasks = collectionTabPath("tasks");
 
   it("stores, replaces, and clears the open record per tab", () => {
@@ -1744,19 +1687,31 @@ describe("the record a Collection tab shows open, and the record panel's width",
     state = setCollectionOpenRecord(state, data, long);
     expect(state.openRecords).toEqual({});
     expect(setCollectionOpenRecord(state, data, long)).toBe(state);
-    expect(SetWorkspaceUiStatePayload.safeParse({ workspaceId: "workspace-a", state: serializeUiState(state) }).success).toBe(true);
+    expect(
+      SetWorkspaceUiStatePayload.safeParse({
+        workspaceId: "workspace-a",
+        state: serializeUiState(state),
+      }).success,
+    ).toBe(true);
     // A key as long as the bound is stored.
     const longest = "x".repeat(MAX_OPEN_RECORD_CHARS);
     state = setCollectionOpenRecord(state, data, longest);
     expect(state.openRecords).toEqual({ [data]: longest });
-    expect(SetWorkspaceUiStatePayload.safeParse({ workspaceId: "workspace-a", state: serializeUiState(state) }).success).toBe(true);
+    expect(
+      SetWorkspaceUiStatePayload.safeParse({
+        workspaceId: "workspace-a",
+        state: serializeUiState(state),
+      }).success,
+    ).toBe(true);
   });
 
   it("follows a Collection's tab through a rename and goes with a deleted one", () => {
     let state = setCollectionOpenRecord(withTabs(tasks, "a.md"), tasks, "tasks/a.md");
     state = remapWorkbenchPaths(state, (path) => (path === "tasks" ? "org/tasks" : path));
     expect(state.openRecords).toEqual({ [collectionTabPath("org/tasks")]: "tasks/a.md" });
-    expect(remapWorkbenchPaths(state, (path) => (path === "org/tasks" ? null : path)).openRecords).toEqual({});
+    expect(
+      remapWorkbenchPaths(state, (path) => (path === "org/tasks" ? null : path)).openRecords,
+    ).toEqual({});
   });
 
   it("clamps and stores the panel's width", () => {
@@ -1773,7 +1728,9 @@ describe("the record a Collection tab shows open, and the record panel's width",
     let state = setCollectionOpenRecord(withTabs(data, "a.md"), data, "7");
     state = setRecordPanelWidth(state, 512);
     const saved = serializeUiState(state);
-    expect(SetWorkspaceUiStatePayload.safeParse({ workspaceId: "workspace-a", state: saved }).success).toBe(true);
+    expect(
+      SetWorkspaceUiStatePayload.safeParse({ workspaceId: "workspace-a", state: saved }).success,
+    ).toBe(true);
     const restored = parseUiState(JSON.parse(JSON.stringify(saved)));
     expect(restored.openRecords).toEqual({ [data]: "7" });
     expect(restored.recordPanelWidth).toBe(512);
@@ -1785,11 +1742,19 @@ describe("the record a Collection tab shows open, and the record panel's width",
 
   it("restores no record for a tab that is not open, a foreign value, or a foreign width", () => {
     const saved = serializeUiState(withTabs(data));
-    const foreign = parseUiState({ ...saved, recordPanelWidth: "wide", openRecords: { [data]: 7, [tasks]: "tasks/a.md", "": "x" } });
+    const foreign = parseUiState({
+      ...saved,
+      recordPanelWidth: "wide",
+      openRecords: { [data]: 7, [tasks]: "tasks/a.md", "": "x" },
+    });
     expect(foreign.openRecords).toEqual({});
     expect(foreign.recordPanelWidth).toBe(RECORD_PANEL_DEFAULT_WIDTH);
     expect(parseUiState({ ...saved, openRecords: [data] }).openRecords).toEqual({});
-    expect(parseUiState({ ...saved, openRecords: { [data]: "x".repeat(5000) } }).openRecords).toEqual({});
-    expect(parseUiState({ ...saved, recordPanelWidth: 5 }).recordPanelWidth).toBe(RECORD_PANEL_MIN_WIDTH);
+    expect(
+      parseUiState({ ...saved, openRecords: { [data]: "x".repeat(5000) } }).openRecords,
+    ).toEqual({});
+    expect(parseUiState({ ...saved, recordPanelWidth: 5 }).recordPanelWidth).toBe(
+      RECORD_PANEL_MIN_WIDTH,
+    );
   });
 });

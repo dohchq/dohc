@@ -52,17 +52,15 @@ describe("workspaceFiles through an in-workspace alias", () => {
   });
 
   it("createFolder refuses a mkdir that lands in .dohc", async () => {
-    await expect(createFolder(root, "meta/evil")).rejects.toThrow(
-      /reserved area/,
-    );
+    await expect(createFolder(root, "meta/evil")).rejects.toThrow(/reserved area/);
     expect(existsSync(join(root, ".dohc", "evil"))).toBe(false);
   });
 
   it("movePath refuses a move INTO .dohc", async () => {
     await writeFile(join(root, "notes", "plan.md"), "plan");
-    await expect(
-      movePath(root, "notes/plan.md", "meta/plan.md"),
-    ).rejects.toThrow(/Move destination leads to a reserved area/);
+    await expect(movePath(root, "notes/plan.md", "meta/plan.md")).rejects.toThrow(
+      /Move destination leads to a reserved area/,
+    );
     expect(existsSync(join(root, ".dohc", "plan.md"))).toBe(false);
     expect(existsSync(join(root, "notes", "plan.md"))).toBe(true);
   });
@@ -70,22 +68,22 @@ describe("workspaceFiles through an in-workspace alias", () => {
   it("movePath refuses a move out of .dohc into the visible tree", async () => {
     // The leak the containment check can never see: both ends are inside the
     // root, and the destination is an ordinary, syncable, exportable path.
-    await expect(
-      movePath(root, "meta/settings.json", "leak.json"),
-    ).rejects.toThrow(/Move source leads to a reserved area/);
-    expect(existsSync(join(root, "leak.json"))).toBe(false);
-    expect(await readFile(join(root, ".dohc", "settings.json"), "utf8")).toBe(
-      SETTINGS,
+    await expect(movePath(root, "meta/settings.json", "leak.json")).rejects.toThrow(
+      /Move source leads to a reserved area/,
     );
+    expect(existsSync(join(root, "leak.json"))).toBe(false);
+    expect(await readFile(join(root, ".dohc", "settings.json"), "utf8")).toBe(SETTINGS);
   });
 
   it("deletePath refuses to trash workspace state", async () => {
     await expect(
-      deletePath({ workspaceId: "real-path", rootPath: root }, "meta/settings.json", rejectingTrash),
+      deletePath(
+        { workspaceId: "real-path", rootPath: root },
+        "meta/settings.json",
+        rejectingTrash,
+      ),
     ).rejects.toThrow(/Delete path leads to a reserved area/);
-    expect(await readFile(join(root, ".dohc", "settings.json"), "utf8")).toBe(
-      SETTINGS,
-    );
+    expect(await readFile(join(root, ".dohc", "settings.json"), "utf8")).toBe(SETTINGS);
   });
 
   it("collectZipEntries refuses to export .dohc through the alias", async () => {
@@ -111,9 +109,7 @@ describe("workspaceFiles through an in-workspace alias", () => {
   it("renames through a benign alias without losing the destination spelling", async () => {
     await symlink(join(root, "notes"), join(root, "inbox"), "dir");
     await writeFile(join(root, "notes", "readme.md"), "body");
-    expect(await movePath(root, "inbox/readme.md", "inbox/plan.md")).toBe(
-      "inbox/plan.md",
-    );
+    expect(await movePath(root, "inbox/readme.md", "inbox/plan.md")).toBe("inbox/plan.md");
     expect(await readFile(join(root, "notes", "plan.md"), "utf8")).toBe("body");
     expect(existsSync(join(root, "notes", "readme.md"))).toBe(false);
   });
@@ -130,31 +126,27 @@ describe("workspaceFiles through an in-workspace alias", () => {
     await expect(createFile(root, "mine/alex/note.md", "")).rejects.toThrow(
       /File path leads to a reserved area/,
     );
-    expect(existsSync(join(root, "shared-with-me", "alex", "note.md"))).toBe(
-      false,
-    );
+    expect(existsSync(join(root, "shared-with-me", "alex", "note.md"))).toBe(false);
   });
 });
 
 describe("workspaceAssets through an in-workspace alias", () => {
   it("resolveWorkspaceFile refuses a read that lands in .dohc", async () => {
-    await expect(
-      resolveWorkspaceFile(root, "meta/settings.json", "read"),
-    ).rejects.toThrow(/Asset path leads to a reserved area/);
+    await expect(resolveWorkspaceFile(root, "meta/settings.json", "read")).rejects.toThrow(
+      /Asset path leads to a reserved area/,
+    );
   });
 
   it("writeWorkspaceAsset refuses a write that lands in .dohc", async () => {
-    await expect(
-      writeWorkspaceAsset(root, "meta/pixel.png", new Uint8Array([1])),
-    ).rejects.toThrow(/reserved area/);
+    await expect(writeWorkspaceAsset(root, "meta/pixel.png", new Uint8Array([1]))).rejects.toThrow(
+      /reserved area/,
+    );
     expect(existsSync(join(root, ".dohc", "pixel.png"))).toBe(false);
   });
 
   it("refuses an asset write through a dangling link into .dohc", async () => {
     await symlink(join(root, ".dohc", "planted.png"), join(root, "note.png"));
-    await expect(
-      writeWorkspaceAsset(root, "note.png", new Uint8Array([1])),
-    ).rejects.toThrow();
+    await expect(writeWorkspaceAsset(root, "note.png", new Uint8Array([1]))).rejects.toThrow();
     expect(existsSync(join(root, ".dohc", "planted.png"))).toBe(false);
   });
 });
@@ -203,9 +195,7 @@ describe("the static directory preview through an in-workspace alias", () => {
       expect(denied.status).toBe(403);
       expect(await denied.text()).not.toContain("engine");
       // The ordinary page still serves.
-      await expect(
-        fetch(preview.url).then((res) => res.text()),
-      ).resolves.toContain("page");
+      await expect(fetch(preview.url).then((res) => res.text())).resolves.toContain("page");
     } finally {
       await preview.stop();
     }
@@ -239,16 +229,14 @@ describe("the static directory preview through an in-workspace alias", () => {
 describe("engine disk writer through an in-workspace alias", () => {
   it("refuses engine text and deletes that land in .dohc", async () => {
     const writer = createDefaultDiskWriter(root);
-    await expect(
-      writer.writeTextFile(join(root, "meta", "owned.md"), "engine"),
-    ).rejects.toThrow(/Engine write path leads to a reserved area/);
-    expect(existsSync(join(root, ".dohc", "owned.md"))).toBe(false);
-    await expect(
-      writer.deletePath(join(root, "meta", "settings.json")),
-    ).rejects.toThrow(/Engine delete path leads to a reserved area/);
-    expect(await readFile(join(root, ".dohc", "settings.json"), "utf8")).toBe(
-      SETTINGS,
+    await expect(writer.writeTextFile(join(root, "meta", "owned.md"), "engine")).rejects.toThrow(
+      /Engine write path leads to a reserved area/,
     );
+    expect(existsSync(join(root, ".dohc", "owned.md"))).toBe(false);
+    await expect(writer.deletePath(join(root, "meta", "settings.json"))).rejects.toThrow(
+      /Engine delete path leads to a reserved area/,
+    );
+    expect(await readFile(join(root, ".dohc", "settings.json"), "utf8")).toBe(SETTINGS);
   });
 
   // The writer now mkdirs, checks, and writes on the resolution the guard
@@ -263,21 +251,14 @@ describe("engine disk writer through an in-workspace alias", () => {
     await symlink(join(root, "notes"), join(root, "inbox"), "dir");
     const writer = createDefaultDiskWriter(root);
     await writer.writeTextFile(join(root, "inbox", "owned.md"), "engine text");
-    expect(await readFile(join(root, "notes", "owned.md"), "utf8")).toBe(
-      "engine text",
-    );
+    expect(await readFile(join(root, "notes", "owned.md"), "utf8")).toBe("engine text");
   });
 
   it("creates a still-absent parent chain under the resolved parent", async () => {
     await symlink(join(root, "notes"), join(root, "inbox"), "dir");
     const writer = createDefaultDiskWriter(root);
-    await writer.writeTextFile(
-      join(root, "inbox", "a", "b", "deep.md"),
-      "nested",
-    );
-    expect(
-      await readFile(join(root, "notes", "a", "b", "deep.md"), "utf8"),
-    ).toBe("nested");
+    await writer.writeTextFile(join(root, "inbox", "a", "b", "deep.md"), "nested");
+    expect(await readFile(join(root, "notes", "a", "b", "deep.md"), "utf8")).toBe("nested");
   });
 
   it("deletes at the resolved location, leaving the alias itself alone", async () => {

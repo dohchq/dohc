@@ -2,7 +2,10 @@
 import { act, cleanup, renderHook } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, expect, it, vi } from "vitest";
-import type { ListCollectionFieldMarksPayload, ListCollectionFieldMarksResult } from "../../ipc/bridgeContract";
+import type {
+  ListCollectionFieldMarksPayload,
+  ListCollectionFieldMarksResult,
+} from "../../ipc/bridgeContract";
 import {
   automationFieldMarkLabel,
   CollectionFieldMarksProvider,
@@ -15,7 +18,9 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function stubBridge(answer: (payload: ListCollectionFieldMarksPayload) => Promise<ListCollectionFieldMarksResult>) {
+function stubBridge(
+  answer: (payload: ListCollectionFieldMarksPayload) => Promise<ListCollectionFieldMarksResult>,
+) {
   const listeners: Array<(event: { workspaceId: string }) => void> = [];
   const listCollectionFieldMarks = vi.fn(answer);
   vi.stubGlobal("dohcDesktop", {
@@ -25,22 +30,40 @@ function stubBridge(answer: (payload: ListCollectionFieldMarksPayload) => Promis
       return () => undefined;
     },
   });
-  return { listCollectionFieldMarks, changed: (workspaceId: string) => { for (const listener of listeners) listener({ workspaceId }); } };
+  return {
+    listCollectionFieldMarks,
+    changed: (workspaceId: string) => {
+      for (const listener of listeners) listener({ workspaceId });
+    },
+  };
 }
 
 function wrapperFor(workspace: { id: string }) {
   return ({ children }: { children: ReactNode }) => (
-    <CollectionFieldMarksProvider workspaceId={workspace.id}>{children}</CollectionFieldMarksProvider>
+    <CollectionFieldMarksProvider workspaceId={workspace.id}>
+      {children}
+    </CollectionFieldMarksProvider>
   );
 }
 
 it("reads a Collection once for every view of it, and again only when main's automations change", async () => {
   let names = ["Stamp"];
   const bridge = stubBridge(async (payload) => ({
-    marks: [{ field: "Finished on", automations: names.map((name) => `${name} ${"collectionPath" in payload ? payload.collectionPath : payload.table}`) }],
+    marks: [
+      {
+        field: "Finished on",
+        automations: names.map(
+          (name) =>
+            `${name} ${"collectionPath" in payload ? payload.collectionPath : payload.table}`,
+        ),
+      },
+    ],
   }));
   const wrapper = wrapperFor({ id: "ws-1" });
-  const { result } = renderHook(() => [useCollectionFieldMarks("Tasks"), useCollectionFieldMarks("Tasks")] as const, { wrapper });
+  const { result } = renderHook(
+    () => [useCollectionFieldMarks("Tasks"), useCollectionFieldMarks("Tasks")] as const,
+    { wrapper },
+  );
   await act(async () => undefined);
   const [table, record] = result.current;
   expect([...table]).toEqual([["Finished on", ["Stamp Tasks"]]]);
@@ -61,20 +84,30 @@ it("reads a Collection once for every view of it, and again only when main's aut
 
 it("never shows one workspace's marks in another, and asks nothing for null", async () => {
   const answers: Array<() => void> = [];
-  const bridge = stubBridge(({ workspaceId }) =>
-    new Promise<ListCollectionFieldMarksResult>((resolve) =>
-      answers.push(() => resolve({ marks: [{ field: "Done", automations: [workspaceId] }] }))));
+  const bridge = stubBridge(
+    ({ workspaceId }) =>
+      new Promise<ListCollectionFieldMarksResult>((resolve) =>
+        answers.push(() => resolve({ marks: [{ field: "Done", automations: [workspaceId] }] })),
+      ),
+  );
   const workspace = { id: "ws-1" };
-  const { result, rerender } = renderHook(({ path }: { path: string | null }) => useCollectionFieldMarks(path), {
-    initialProps: { path: "Tasks" as string | null },
-    wrapper: ({ children }: { children: ReactNode }) => (
-      <CollectionFieldMarksProvider workspaceId={workspace.id}>{children}</CollectionFieldMarksProvider>
-    ),
-  });
+  const { result, rerender } = renderHook(
+    ({ path }: { path: string | null }) => useCollectionFieldMarks(path),
+    {
+      initialProps: { path: "Tasks" as string | null },
+      wrapper: ({ children }: { children: ReactNode }) => (
+        <CollectionFieldMarksProvider workspaceId={workspace.id}>
+          {children}
+        </CollectionFieldMarksProvider>
+      ),
+    },
+  );
   workspace.id = "ws-2";
   rerender({ path: "Tasks" });
   // ws-1 answers after the window moved to ws-2.
-  await act(async () => { for (const answer of answers.splice(0)) answer(); });
+  await act(async () => {
+    for (const answer of answers.splice(0)) answer();
+  });
   expect([...result.current]).toEqual([["Done", ["ws-2"]]]);
 
   const reads = bridge.listCollectionFieldMarks.mock.calls.length;
@@ -85,11 +118,22 @@ it("never shows one workspace's marks in another, and asks nothing for null", as
 
 it("reads one dataset table's marks by the dataset's id and the table's name, apart from a folder of the same name", async () => {
   const bridge = stubBridge(async (payload) => ({
-    marks: [{ field: "Status", automations: ["datasetId" in payload ? `${payload.datasetId} ${payload.table}` : payload.collectionPath] }],
+    marks: [
+      {
+        field: "Status",
+        automations: [
+          "datasetId" in payload ? `${payload.datasetId} ${payload.table}` : payload.collectionPath,
+        ],
+      },
+    ],
   }));
-  const { result } = renderHook(() => [useDatasetFieldMarks("dataset-1", "Invoices"), useCollectionFieldMarks("Invoices")] as const, {
-    wrapper: wrapperFor({ id: "ws-1" }),
-  });
+  const { result } = renderHook(
+    () =>
+      [useDatasetFieldMarks("dataset-1", "Invoices"), useCollectionFieldMarks("Invoices")] as const,
+    {
+      wrapper: wrapperFor({ id: "ws-1" }),
+    },
+  );
   await act(async () => undefined);
   expect(bridge.listCollectionFieldMarks.mock.calls.map(([payload]) => payload)).toEqual([
     { workspaceId: "ws-1", datasetId: "dataset-1", table: "Invoices" },
@@ -101,5 +145,7 @@ it("reads one dataset table's marks by the dataset's id and the table's name, ap
 
 it("says what is true of the field: which automations set it", () => {
   expect(automationFieldMarkLabel(["Stamp"])).toBe('"Stamp" sets this field');
-  expect(automationFieldMarkLabel(["Stamp", "Tidy", "Bump"])).toBe('"Stamp", "Tidy", and "Bump" set this field');
+  expect(automationFieldMarkLabel(["Stamp", "Tidy", "Bump"])).toBe(
+    '"Stamp", "Tidy", and "Bump" set this field',
+  );
 });

@@ -38,7 +38,8 @@ export function placeNodes(
   count: number,
   seed: (index: number) => { x: number; y: number } | undefined,
 ): { x: Float64Array; y: Float64Array; alpha: number } {
-  const x = new Float64Array(count), y = new Float64Array(count);
+  const x = new Float64Array(count),
+    y = new Float64Array(count);
   let seeded = 0;
   for (let i = 0; i < count; i++) {
     const previous = seed(i);
@@ -56,16 +57,24 @@ export function placeNodes(
   return { x, y, alpha: count > 0 && seeded / count > 0.8 ? 0.3 : 1 };
 }
 
-export function createLayout(x: Float64Array, y: Float64Array, source: Uint32Array, target: Uint32Array, alpha = 1): GraphLayout {
+export function createLayout(
+  x: Float64Array,
+  y: Float64Array,
+  source: Uint32Array,
+  target: Uint32Array,
+  alpha = 1,
+): GraphLayout {
   const count = x.length;
   const degree = new Uint32Array(count);
   for (let l = 0; l < source.length; l++) {
     degree[source[l]!]!++;
     degree[target[l]!]!++;
   }
-  const linkBias = new Float64Array(source.length), linkStrength = new Float64Array(source.length);
+  const linkBias = new Float64Array(source.length),
+    linkStrength = new Float64Array(source.length);
   for (let l = 0; l < source.length; l++) {
-    const ds = Math.max(1, degree[source[l]!]!), dt = Math.max(1, degree[target[l]!]!);
+    const ds = Math.max(1, degree[source[l]!]!),
+      dt = Math.max(1, degree[target[l]!]!);
     linkBias[l] = ds / (ds + dt);
     linkStrength[l] = 1 / Math.min(ds, dt);
   }
@@ -137,7 +146,10 @@ function newQuad(t: Tree, size: number): number {
 function buildTree(layout: GraphLayout): Tree {
   const { count, x, y } = layout;
   let t = ensureTree(count);
-  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  let x0 = Infinity,
+    y0 = Infinity,
+    x1 = -Infinity,
+    y1 = -Infinity;
   for (let i = 0; i < count; i++) {
     if (x[i]! < x0) x0 = x[i]!;
     if (x[i]! > x1) x1 = x[i]!;
@@ -151,7 +163,10 @@ function buildTree(layout: GraphLayout): Tree {
     let overflow = false;
     for (let i = 0; i < count && !overflow; i++) {
       t.next[i] = -1;
-      let q = 0, qx = x0, qy = y0, qs = size;
+      let q = 0,
+        qx = x0,
+        qy = y0,
+        qs = size;
       let pending = i;
       while (pending >= 0) {
         const p = t.point[q]!;
@@ -170,20 +185,27 @@ function buildTree(layout: GraphLayout): Tree {
           t.point[q] = -2;
           const half = qs / 2;
           const quadrant = (x[p]! >= qx + half ? 1 : 0) | (y[p]! >= qy + half ? 2 : 0);
-          if (t.used >= t.mass.length) { overflow = true; break; }
+          if (t.used >= t.mass.length) {
+            overflow = true;
+            break;
+          }
           const c = newQuad(t, half);
           t.child[q * 4 + quadrant] = c;
           t.point[c] = p;
         } else {
           const half = qs / 2;
-          const right = x[pending]! >= qx + half, below = y[pending]! >= qy + half;
+          const right = x[pending]! >= qx + half,
+            below = y[pending]! >= qy + half;
           const quadrant = (right ? 1 : 0) | (below ? 2 : 0);
           if (right) qx += half;
           if (below) qy += half;
           qs = half;
           const existing = t.child[q * 4 + quadrant]!;
           if (existing === -1) {
-            if (t.used >= t.mass.length) { overflow = true; break; }
+            if (t.used >= t.mass.length) {
+              overflow = true;
+              break;
+            }
             const c = newQuad(t, half);
             t.child[q * 4 + quadrant] = c;
             t.point[c] = pending;
@@ -210,7 +232,9 @@ function buildTree(layout: GraphLayout): Tree {
       t.my[q] = y[p]!;
       continue;
     }
-    let mass = 0, mx = 0, my = 0;
+    let mass = 0,
+      mx = 0,
+      my = 0;
     for (let k = 0; k < 4; k++) {
       const c = t.child[q * 4 + k]!;
       if (c < 0) continue;
@@ -242,7 +266,8 @@ export function tick(layout: GraphLayout, forces: GraphForces): void {
   const distance = 20 + forces.distance * 120;
   const linkScale = forces.link * 2;
   for (let l = 0; l < layout.source.length; l++) {
-    const s = layout.source[l]!, t = layout.target[l]!;
+    const s = layout.source[l]!,
+      t = layout.target[l]!;
     let dx = x[t]! + vx[t]! - x[s]! - vx[s]!;
     let dy = y[t]! + vy[t]! - y[s]! - vy[s]!;
     let length = Math.hypot(dx, dy) || 1e-6;
@@ -263,22 +288,30 @@ export function tick(layout: GraphLayout, forces: GraphForces): void {
   let items = stack.items;
   if (items.length < t.used) items = stack.items = new Int32Array(t.used * 2);
   for (let i = 0; i < count; i++) {
-    const xi = x[i]!, yi = y[i]!;
-    let fx = 0, fy = 0, top = 0;
+    const xi = x[i]!,
+      yi = y[i]!;
+    let fx = 0,
+      fy = 0,
+      top = 0;
     items[top++] = 0;
     while (top > 0) {
       const q = items[--top]!;
-      const dx = t.mx[q]! - xi, dy = t.my[q]! - yi;
+      const dx = t.mx[q]! - xi,
+        dy = t.my[q]! - yi;
       let d2 = dx * dx + dy * dy;
       const p = t.point[q]!;
       if (p >= 0) {
         for (let j = p; j >= 0; j = t.next[j]!) {
           if (j === i) continue;
-          let jx = x[j]! - xi, jy = y[j]! - yi, jd2 = jx * jx + jy * jy;
+          let jx = x[j]! - xi,
+            jy = y[j]! - yi,
+            jd2 = jx * jx + jy * jy;
           if (jd2 < 1e-6) {
             // Nudge coincident points apart: one direction per pair, taken
             // from its indexes, with opposite signs for its two points.
-            const lo = Math.min(i, j), hi = Math.max(i, j), sign = i < j ? 1 : -1;
+            const lo = Math.min(i, j),
+              hi = Math.max(i, j),
+              sign = i < j ? 1 : -1;
             jx = sign * (((lo * 7 + hi * 13) % 11) / 11 - 0.5);
             jy = sign * (((lo * 11 + hi * 7) % 13) / 13 - 0.5);
             jd2 = jx * jx + jy * jy;
@@ -335,7 +368,15 @@ export function tick(layout: GraphLayout, forces: GraphForces): void {
 // as many as fit in a few milliseconds, so it settles in about a quarter of
 // the frames. A held node takes one step per frame, to follow the pointer.
 export type LayoutRequest =
-  | { type: "model"; generation: number; x: Float64Array; y: Float64Array; source: Uint32Array; target: Uint32Array; alpha: number }
+  | {
+      type: "model";
+      generation: number;
+      x: Float64Array;
+      y: Float64Array;
+      source: Uint32Array;
+      target: Uint32Array;
+      alpha: number;
+    }
   | { type: "frame"; generation: number; positions: Float32Array }
   | { type: "forces"; forces: GraphForces }
   | { type: "reduced"; reduced: boolean }
@@ -348,7 +389,10 @@ export type LayoutFrame = { generation: number; positions: Float32Array; settled
 const STEPS_PER_FRAME = 4;
 const STEP_BUDGET_MS = 8;
 
-export function createLayoutEngine(post: (frame: LayoutFrame) => void, later: (run: () => void) => void) {
+export function createLayoutEngine(
+  post: (frame: LayoutFrame) => void,
+  later: (run: () => void) => void,
+) {
   let layout: GraphLayout | null = null;
   let generation = -1;
   let forces = DEFAULT_FORCES;
@@ -399,7 +443,13 @@ export function createLayoutEngine(post: (frame: LayoutFrame) => void, later: (r
       switch (request.type) {
         case "model":
           generation = request.generation;
-          layout = createLayout(request.x, request.y, request.source, request.target, request.alpha);
+          layout = createLayout(
+            request.x,
+            request.y,
+            request.source,
+            request.target,
+            request.alpha,
+          );
           free = new Float32Array(layout.count * 2);
           break;
         case "frame":

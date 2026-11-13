@@ -148,8 +148,7 @@ export async function startStaticDirectoryPreview(
       }
       if (
         hasIgnoredSegment(relativePath) ||
-        (options.forbidSharedWithMePaths &&
-          isSharedWithMePath(containmentSpelledPath))
+        (options.forbidSharedWithMePaths && isSharedWithMePath(containmentSpelledPath))
       ) {
         response.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
         response.end("Forbidden");
@@ -197,14 +196,8 @@ export async function startStaticDirectoryPreview(
         response.end("Forbidden");
         return;
       }
-      const containmentRelative = relative(containmentRoot, realTarget).replaceAll(
-        "\\",
-        "/",
-      );
-      if (
-        options.forbidSharedWithMePaths &&
-        isSharedWithMePath(containmentRelative)
-      ) {
+      const containmentRelative = relative(containmentRoot, realTarget).replaceAll("\\", "/");
+      if (options.forbidSharedWithMePaths && isSharedWithMePath(containmentRelative)) {
         response.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
         response.end("Forbidden");
         return;

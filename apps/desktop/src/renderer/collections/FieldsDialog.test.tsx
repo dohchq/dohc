@@ -23,7 +23,9 @@ it("closes from its X", () => {
 it("saves an option's color with the field's options", async () => {
   const select: CollectionSchema = {
     ...schema,
-    fields: [{ name: "Stage", type: "select", options: ["Todo", "Done"], colors: { Done: "teal" } }],
+    fields: [
+      { name: "Stage", type: "select", options: ["Todo", "Done"], colors: { Done: "teal" } },
+    ],
   };
   let written: CollectionSchema | null = null;
   const apply = vi.fn(async (mutate: (current: CollectionSchema) => CollectionSchema) => {
@@ -33,9 +35,20 @@ it("saves an option's color with the field's options", async () => {
   render(<FieldsDialog schema={select} relationTargets={[]} apply={apply} onClose={vi.fn()} />);
   fireEvent.click(screen.getByRole("button", { name: "Edit field Stage" }));
   const done = screen.getByRole("radiogroup", { name: "Color for Done" });
-  expect(within(done).getByRole("radio", { name: "Teal" }).getAttribute("aria-checked")).toBe("true");
-  fireEvent.click(within(screen.getByRole("radiogroup", { name: "Color for Todo" })).getByRole("radio", { name: "Rose" }));
+  expect(within(done).getByRole("radio", { name: "Teal" }).getAttribute("aria-checked")).toBe(
+    "true",
+  );
+  fireEvent.click(
+    within(screen.getByRole("radiogroup", { name: "Color for Todo" })).getByRole("radio", {
+      name: "Rose",
+    }),
+  );
   fireEvent.click(screen.getByRole("button", { name: "Save field" }));
   await waitFor(() => expect(apply).toHaveBeenCalledTimes(1));
-  expect(written!.fields[0]).toEqual({ name: "Stage", type: "select", options: ["Todo", "Done"], colors: { Todo: "rose", Done: "teal" } });
+  expect(written!.fields[0]).toEqual({
+    name: "Stage",
+    type: "select",
+    options: ["Todo", "Done"],
+    colors: { Todo: "rose", Done: "teal" },
+  });
 });

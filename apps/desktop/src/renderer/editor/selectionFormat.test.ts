@@ -99,7 +99,17 @@ describe("selectionFormat", () => {
 
   it("names the block the selection starts in", () => {
     const editor = makeEditor(
-      ["## Section", "", "- item one", "", "> quoted", "", "> - quoted item", "", "- [ ] task"].join("\n"),
+      [
+        "## Section",
+        "",
+        "- item one",
+        "",
+        "> quoted",
+        "",
+        "> - quoted item",
+        "",
+        "- [ ] task",
+      ].join("\n"),
     );
     const expected: Array<[string, string]> = [
       ["Section", "heading-2"],

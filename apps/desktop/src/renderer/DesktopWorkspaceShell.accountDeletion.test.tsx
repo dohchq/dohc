@@ -8,7 +8,12 @@ import { deferred } from "../testing/deferred";
 import { CollectionFieldWriteHost } from "./collections/recordFieldWrites";
 import { DesktopRoot } from "./DesktopRoot";
 import type { Workspace } from "./DesktopWorkspaceShell";
-import { makeBridge, OTHER_WORKSPACE, renderShell, WORKSPACE } from "./DesktopWorkspaceShell.testHarness";
+import {
+  makeBridge,
+  OTHER_WORKSPACE,
+  renderShell,
+  WORKSPACE,
+} from "./DesktopWorkspaceShell.testHarness";
 
 // Settings mounts without its lazy boundary. Each open suspends on a fresh
 // lazy(), and React holds the revealed content 300 ms of real time past its
@@ -31,11 +36,22 @@ function announceSession(sessionKey: string | null) {
 }
 
 const server = "https://cloud.dohc.test";
-const SIGNED_IN = { connected: true, email: "me@dohc.test", serverUrl: server, workspaceSynced: false };
+const SIGNED_IN = {
+  connected: true,
+  email: "me@dohc.test",
+  serverUrl: server,
+  workspaceSynced: false,
+};
 const SIGNED_OUT = { connected: false, email: "", serverUrl: "", workspaceSynced: false };
 const preview: ServerAccountDeletionPreview = {
-  email: "me@dohc.test", server, workspaces: [{ workspaceId: "ws-notes", name: "Notes" }],
-  workspacesElsewhere: 0, storedBytes: 1024, ownedShareCount: 0, heldGrantCount: 0, previewToken: "token-1",
+  email: "me@dohc.test",
+  server,
+  workspaces: [{ workspaceId: "ws-notes", name: "Notes" }],
+  workspacesElsewhere: 0,
+  storedBytes: 1024,
+  ownedShareCount: 0,
+  heldGrantCount: 0,
+  previewToken: "token-1",
 };
 const DELETED = `Deleted me@dohc.test on ${server}. Workspaces on this computer stay.`;
 
@@ -44,12 +60,16 @@ function deletionBridge(deleteAccount: () => Promise<DeleteResult>) {
   const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
     previewServerAccountDeletion: vi.fn(async () => preview),
     deleteServerAccount: vi.fn(deleteAccount),
-    retryServerAccountDisconnect: vi.fn(async (_input: Record<string, never>): Promise<null> => null),
+    retryServerAccountDisconnect: vi.fn(
+      async (_input: Record<string, never>): Promise<null> => null,
+    ),
     cloudLogout: vi.fn(async () => undefined),
   });
   bridge.onCloudSessionChanged = vi.fn((listener: (event: SessionEvent) => void) => {
     sessionListeners.add(listener);
-    return () => { sessionListeners.delete(listener); };
+    return () => {
+      sessionListeners.delete(listener);
+    };
   });
   bridge.cloudStatus = vi.fn(async () => (signedIn ? SIGNED_IN : SIGNED_OUT));
   // Main's own disconnect after the server deleted the account: it announces
@@ -76,7 +96,9 @@ function chooseDeleteAccount(row: HTMLElement) {
 async function sendDelete(bridge: ReturnType<typeof deletionBridge>["bridge"]) {
   chooseDeleteAccount(await openSyncSettings());
   await screen.findByTestId("server-account-delete-scope");
-  fireEvent.change(screen.getByTestId("server-account-delete-password"), { target: { value: "correct horse" } });
+  fireEvent.change(screen.getByTestId("server-account-delete-password"), {
+    target: { value: "correct horse" },
+  });
   fireEvent.click(screen.getByTestId("server-account-delete-confirm"));
   await waitFor(() => expect(bridge.deleteServerAccount).toHaveBeenCalledTimes(1));
 }
@@ -87,26 +109,40 @@ async function sendDelete(bridge: ReturnType<typeof deletionBridge>["bridge"]) {
 describe("deleting the server account from Settings", () => {
   it.each([
     [true, DELETED],
-    [false, `${server} blocked me@dohc.test and will finish deleting its data. Workspaces on this computer stay.`],
-  ])("reports the answer after its disconnect removed the account row (finished: %s)", async (finished, notice) => {
-    const answer = deferred<DeleteResult>();
-    const { bridge, disconnect } = deletionBridge(() => answer.promise);
-    renderShell(bridge);
-    await sendDelete(bridge);
+    [
+      false,
+      `${server} blocked me@dohc.test and will finish deleting its data. Workspaces on this computer stay.`,
+    ],
+  ])(
+    "reports the answer after its disconnect removed the account row (finished: %s)",
+    async (finished, notice) => {
+      const answer = deferred<DeleteResult>();
+      const { bridge, disconnect } = deletionBridge(() => answer.promise);
+      renderShell(bridge);
+      await sendDelete(bridge);
 
-    disconnect();
-    await waitFor(() => expect(screen.queryByTestId("settings-row-account")).toBeNull());
-    expect(screen.getByTestId("server-account-delete")).toBeTruthy();
+      disconnect();
+      await waitFor(() => expect(screen.queryByTestId("settings-row-account")).toBeNull());
+      expect(screen.getByTestId("server-account-delete")).toBeTruthy();
 
-    await act(async () => answer.resolve({ ok: true, finished, email: "me@dohc.test", server, disconnectError: null }));
-    expect((await screen.findAllByText(notice)).length).toBeGreaterThan(0);
-    expect(screen.queryByTestId("server-account-delete")).toBeNull();
-    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
-    // Settings shows the signed-out page, and the workspace stays open.
-    expect(await screen.findByTestId("settings-cloud-connect")).toBeTruthy();
-    expect(screen.getByTestId("workspace-shell")).toBeTruthy();
-    expect(bridge.cloudLogout).not.toHaveBeenCalled();
-  });
+      await act(async () =>
+        answer.resolve({
+          ok: true,
+          finished,
+          email: "me@dohc.test",
+          server,
+          disconnectError: null,
+        }),
+      );
+      expect((await screen.findAllByText(notice)).length).toBeGreaterThan(0);
+      expect(screen.queryByTestId("server-account-delete")).toBeNull();
+      expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+      // Settings shows the signed-out page, and the workspace stays open.
+      expect(await screen.findByTestId("settings-cloud-connect")).toBeTruthy();
+      expect(screen.getByTestId("workspace-shell")).toBeTruthy();
+      expect(bridge.cloudLogout).not.toHaveBeenCalled();
+    },
+  );
 
   it("keeps the deletion's message and reports a failed disconnect, whose Try again disconnects again", async () => {
     const DISCONNECT_FAILED = `dohc could not finish disconnecting from ${server}.`;
@@ -117,11 +153,23 @@ describe("deleting the server account from Settings", () => {
     await sendDelete(bridge);
 
     disconnect();
-    await act(async () => answer.resolve({ ok: true, finished: true, email: "me@dohc.test", server, disconnectError: "store failed" }));
+    await act(async () =>
+      answer.resolve({
+        ok: true,
+        finished: true,
+        email: "me@dohc.test",
+        server,
+        disconnectError: "store failed",
+      }),
+    );
     // The toast shows the failure, and Notices keeps the deletion's message.
-    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(DISCONNECT_FAILED);
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
+      DISCONNECT_FAILED,
+    );
     fireEvent.click(screen.getByTestId("notice-center-toggle"));
-    expect(within(await screen.findByTestId("notice-center")).getAllByText(DELETED).length).toBeGreaterThan(0);
+    expect(
+      within(await screen.findByTestId("notice-center")).getAllByText(DELETED).length,
+    ).toBeGreaterThan(0);
     fireEvent.click(screen.getByTestId("notice-center-toggle"));
     await screen.findByTestId("notice-toasts");
     expect(bridge.retryServerAccountDisconnect).not.toHaveBeenCalled();
@@ -129,7 +177,9 @@ describe("deleting the server account from Settings", () => {
     // The first retry fails too, so the notice comes back with Try again.
     fireEvent.click(screen.getByTestId("workspace-shell-error-retry"));
     expect(bridge.retryServerAccountDisconnect).toHaveBeenCalledWith({});
-    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(DISCONNECT_FAILED);
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
+      DISCONNECT_FAILED,
+    );
     fireEvent.click(screen.getByTestId("workspace-shell-error-retry"));
     expect(bridge.retryServerAccountDisconnect).toHaveBeenCalledTimes(2);
     await act(async () => {});
@@ -143,18 +193,24 @@ describe("deleting the server account from Settings", () => {
     renderShell(bridge);
     fireEvent.click(within(await openSyncSettings()).getByTestId("cloud-disconnect"));
     await screen.findByTestId("workspace-shell-error");
-    await waitFor(() => expect((screen.getByTestId("cloud-disconnect") as HTMLButtonElement).disabled).toBe(false));
+    await waitFor(() =>
+      expect((screen.getByTestId("cloud-disconnect") as HTMLButtonElement).disabled).toBe(false),
+    );
 
     chooseDeleteAccount(screen.getByTestId("settings-row-account"));
     await screen.findByTestId("server-account-delete-scope");
-    fireEvent.change(screen.getByTestId("server-account-delete-password"), { target: { value: "correct horse" } });
+    fireEvent.change(screen.getByTestId("server-account-delete-password"), {
+      target: { value: "correct horse" },
+    });
     fireEvent.click(screen.getByTestId("server-account-delete-confirm"));
     await waitFor(() => expect(bridge.deleteServerAccount).toHaveBeenCalledTimes(1));
 
     // Notices closes when a row's action runs, so each look opens it again.
     const row = async () => {
       fireEvent.click(screen.getByTestId("notice-center-toggle"));
-      return within(await screen.findByTestId("notice-center")).getByText("dohc could not finish disconnecting.").closest("li")!;
+      return within(await screen.findByTestId("notice-center"))
+        .getByText("dohc could not finish disconnecting.")
+        .closest("li")!;
     };
     fireEvent.click(within(await row()).getByRole("button", { name: "Try again" }));
     await act(async () => {});
@@ -164,40 +220,71 @@ describe("deleting the server account from Settings", () => {
     expect(screen.getByTestId("server-account-delete")).toBeTruthy();
 
     disconnect();
-    await act(async () => answer.resolve({ ok: true, finished: true, email: "me@dohc.test", server, disconnectError: null }));
+    await act(async () =>
+      answer.resolve({
+        ok: true,
+        finished: true,
+        email: "me@dohc.test",
+        server,
+        disconnectError: null,
+      }),
+    );
     expect((await screen.findAllByText(DELETED)).length).toBeGreaterThan(0);
   });
 
-  it.each([false, true])("keeps a sync change's notice, and does not retry it, during deletion review (synced: %s)", async synced => {
-    const { bridge } = deletionBridge(async () => ({ ok: true, finished: true, email: "me@dohc.test", server, disconnectError: null }));
-    const changeSync = vi.fn(async () => { throw new Error("dohc could not change this workspace's sync."); });
-    Object.assign(bridge, { cloudEnableSync: changeSync, cloudStopSync: changeSync });
-    bridge.cloudStatus = vi.fn(async () => ({ ...SIGNED_IN, workspaceSynced: synced, workspaceSyncConnected: synced }));
-    renderShell(bridge);
-    await openSyncSettings();
-    fireEvent.click(screen.getByRole("switch", { name: "Sync this workspace" }));
-    await screen.findByTestId("workspace-shell-error");
+  it.each([false, true])(
+    "keeps a sync change's notice, and does not retry it, during deletion review (synced: %s)",
+    async (synced) => {
+      const { bridge } = deletionBridge(async () => ({
+        ok: true,
+        finished: true,
+        email: "me@dohc.test",
+        server,
+        disconnectError: null,
+      }));
+      const changeSync = vi.fn(async () => {
+        throw new Error("dohc could not change this workspace's sync.");
+      });
+      Object.assign(bridge, { cloudEnableSync: changeSync, cloudStopSync: changeSync });
+      bridge.cloudStatus = vi.fn(async () => ({
+        ...SIGNED_IN,
+        workspaceSynced: synced,
+        workspaceSyncConnected: synced,
+      }));
+      renderShell(bridge);
+      await openSyncSettings();
+      fireEvent.click(screen.getByRole("switch", { name: "Sync this workspace" }));
+      await screen.findByTestId("workspace-shell-error");
 
-    chooseDeleteAccount(screen.getByTestId("settings-row-account"));
-    await screen.findByTestId("server-account-delete-scope");
-    fireEvent.click(screen.getByTestId("workspace-shell-error-retry"));
-    await act(async () => {});
+      chooseDeleteAccount(screen.getByTestId("settings-row-account"));
+      await screen.findByTestId("server-account-delete-scope");
+      fireEvent.click(screen.getByTestId("workspace-shell-error-retry"));
+      await act(async () => {});
 
-    expect(changeSync).toHaveBeenCalledTimes(1);
-    expect(screen.getByTestId("workspace-shell-error-retry")).toBeTruthy();
-    expect(bridge.cloudLogout).not.toHaveBeenCalled();
-    expect(bridge.deleteServerAccount).not.toHaveBeenCalled();
-    expect(screen.getByTestId("server-account-delete")).toBeTruthy();
-  });
+      expect(changeSync).toHaveBeenCalledTimes(1);
+      expect(screen.getByTestId("workspace-shell-error-retry")).toBeTruthy();
+      expect(bridge.cloudLogout).not.toHaveBeenCalled();
+      expect(bridge.deleteServerAccount).not.toHaveBeenCalled();
+      expect(screen.getByTestId("server-account-delete")).toBeTruthy();
+    },
+  );
 
   it("reads the status again when the review is cancelled", async () => {
-    const { bridge } = deletionBridge(async () => ({ ok: true, finished: true, email: "me@dohc.test", server, disconnectError: null }));
+    const { bridge } = deletionBridge(async () => ({
+      ok: true,
+      finished: true,
+      email: "me@dohc.test",
+      server,
+      disconnectError: null,
+    }));
     renderShell(bridge);
     chooseDeleteAccount(await openSyncSettings());
     await screen.findByTestId("server-account-delete-scope");
     const reads = vi.mocked(bridge.cloudStatus).mock.calls.length;
 
-    fireEvent.click(within(screen.getByTestId("server-account-delete")).getByRole("button", { name: "Cancel" }));
+    fireEvent.click(
+      within(screen.getByTestId("server-account-delete")).getByRole("button", { name: "Cancel" }),
+    );
     expect(screen.queryByTestId("server-account-delete")).toBeNull();
     await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalledTimes(reads + 1));
     expect(screen.getByTestId("settings-row-account")).toBeTruthy();
@@ -211,13 +298,17 @@ describe("deleting the server account from Settings", () => {
     renderShell(bridge);
     await sendDelete(bridge);
 
-    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain("dohc could not reach this server.");
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
+      "dohc could not reach this server.",
+    );
     expect(screen.queryByTestId("server-account-delete")).toBeNull();
 
     fireEvent.click(screen.getByTestId("workspace-shell-error-retry"));
     await screen.findByTestId("server-account-delete-scope");
     expect(bridge.previewServerAccountDeletion).toHaveBeenCalledTimes(2);
-    expect((screen.getByTestId("server-account-delete-password") as HTMLInputElement).value).toBe("");
+    expect((screen.getByTestId("server-account-delete-password") as HTMLInputElement).value).toBe(
+      "",
+    );
   });
 
   // The notice names one account. A Try again after someone signed in reviews
@@ -284,9 +375,10 @@ describe("a workspace switch while a delete is pending", () => {
         registry = [];
         await act(async () => root.emitWorkspaceActivity());
       },
-      activate: (workspace: Workspace) => act(() => {
-        for (const callback of [...activated]) callback(workspace);
-      }),
+      activate: (workspace: Workspace) =>
+        act(() => {
+          for (const callback of [...activated]) callback(workspace);
+        }),
     };
   }
 
@@ -307,7 +399,10 @@ describe("a workspace switch while a delete is pending", () => {
 
   it.each([
     [true, DELETED],
-    [false, `${server} blocked me@dohc.test and will finish deleting its data. Workspaces on this computer stay.`],
+    [
+      false,
+      `${server} blocked me@dohc.test and will finish deleting its data. Workspaces on this computer stay.`,
+    ],
   ])("reports the answer in the workspace switched to (finished: %s)", async (finished, notice) => {
     const answer = deferred<DeleteResult>();
     const { bridge, disconnect } = renderRoot(() => answer.promise);
@@ -315,7 +410,9 @@ describe("a workspace switch while a delete is pending", () => {
     const shellB = screen.getByTestId("workspace-shell");
 
     disconnect();
-    await act(async () => answer.resolve({ ok: true, finished, email: "me@dohc.test", server, disconnectError: null }));
+    await act(async () =>
+      answer.resolve({ ok: true, finished, email: "me@dohc.test", server, disconnectError: null }),
+    );
     expect((await screen.findAllByText(notice)).length).toBeGreaterThan(0);
     expect(screen.queryByTestId("server-account-delete")).toBeNull();
     expect(screen.getByTestId("workspace-shell")).toBe(shellB);
@@ -327,7 +424,9 @@ describe("a workspace switch while a delete is pending", () => {
     await switchWhileDeleting(bridge);
 
     await act(async () => answer.reject(new Error("dohc could not reach this server.")));
-    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain("dohc could not reach this server.");
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
+      "dohc could not reach this server.",
+    );
     expect(screen.queryByTestId("server-account-delete")).toBeNull();
 
     fireEvent.click(screen.getByTestId("workspace-shell-error-retry"));
@@ -345,7 +444,15 @@ describe("a workspace switch while a delete is pending", () => {
     expect(screen.getByTestId("server-account-delete-confirm").textContent).toBe("Deleting…");
 
     disconnect();
-    await act(async () => answer.resolve({ ok: true, finished: true, email: "me@dohc.test", server, disconnectError: null }));
+    await act(async () =>
+      answer.resolve({
+        ok: true,
+        finished: true,
+        email: "me@dohc.test",
+        server,
+        disconnectError: null,
+      }),
+    );
     expect(screen.queryByTestId("server-account-delete")).toBeNull();
 
     activate(OTHER_WORKSPACE);

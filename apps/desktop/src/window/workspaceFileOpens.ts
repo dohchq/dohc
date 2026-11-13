@@ -4,7 +4,11 @@
  * listening, so an open goes then, never into a page that is still loading. A
  * window keeps only its latest open, and opening any workspace there settles it.
  */
-export function createWorkspaceFileOpens<Contents extends object, Workspace extends { workspaceId: string }, Open = string>(deps: {
+export function createWorkspaceFileOpens<
+  Contents extends object,
+  Workspace extends { workspaceId: string },
+  Open = string,
+>(deps: {
   shownWorkspaceId(contents: Contents): string | undefined;
   send(contents: Contents, workspace: Workspace, open: Open): void;
 }) {
@@ -22,7 +26,8 @@ export function createWorkspaceFileOpens<Contents extends object, Workspace exte
       const request = waiting.get(contents);
       if (!request) return;
       waiting.delete(contents);
-      if (request.workspace.workspaceId === workspaceId) deps.send(contents, request.workspace, request.open);
+      if (request.workspace.workspaceId === workspaceId)
+        deps.send(contents, request.workspace, request.open);
     },
   };
 }

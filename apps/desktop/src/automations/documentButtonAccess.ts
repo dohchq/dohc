@@ -13,13 +13,22 @@ import { shareViewTakesLocalWrites } from "../workspaces/shareWriteGate";
  * owner's schedules (ADR 0012); the relay checks the same rule. Edit on one
  * record's file, a version share, or a lower level is not enough.
  */
-export function documentButtonAccess(shareView: unknown, collectionPath: string): "press" | "relayed" | "no-access" {
+export function documentButtonAccess(
+  shareView: unknown,
+  collectionPath: string,
+): "press" | "relayed" | "no-access" {
   if (!shareViewIsPresent(shareView)) return "press";
   const marker = isRecord(shareView) ? shareView : {};
   const grant = recordedShareSelector(marker.grantedSelector);
-  if (!grant || !shareViewIdentityIsIntact(marker) ||
-    !shareViewTakesLocalWrites({ access: grant.access, ended: marker.ended === true })) return "no-access";
+  if (
+    !grant ||
+    !shareViewIdentityIsIntact(marker) ||
+    !shareViewTakesLocalWrites({ access: grant.access, ended: marker.ended === true })
+  )
+    return "no-access";
   if (grant.versionId !== null || grant.paths.length === 0) return "no-access";
-  const covers = grant.paths.some((path) => collectionPath === path || collectionPath.startsWith(`${path}/`));
+  const covers = grant.paths.some(
+    (path) => collectionPath === path || collectionPath.startsWith(`${path}/`),
+  );
   return covers ? "relayed" : "no-access";
 }

@@ -15,11 +15,22 @@ it("clears the Notice when recovery copies are removed", () => {
 
 function mount(workspaceId: string, paths: readonly (readonly [string, string])[]) {
   const openFolder = vi.fn();
-  return { openFolder, ...renderHook(({ paths }: { paths: readonly (readonly [string, string])[] }) => {
-    const shell = useShellError(workspaceId);
-    const notice = useKeptFilesNotice({ workspaceId, paths, report: shell.reportKeptFiles, openFolder });
-    return { shell, notice };
-  }, { initialProps: { paths } }) };
+  return {
+    openFolder,
+    ...renderHook(
+      ({ paths }: { paths: readonly (readonly [string, string])[] }) => {
+        const shell = useShellError(workspaceId);
+        const notice = useKeptFilesNotice({
+          workspaceId,
+          paths,
+          report: shell.reportKeptFiles,
+          openFolder,
+        });
+        return { shell, notice };
+      },
+      { initialProps: { paths } },
+    ),
+  };
 }
 
 it("shows one recovery Notice with copy paths and a working folder action", () => {
@@ -48,7 +59,12 @@ it("keeps dismissal for the same copies and reports newly recovered files", () =
   first.unmount();
   const again = mount("recovery-dismiss", [["a.md", ".dohc/engine/displaced/6a31.0"]] as const);
   expect(again.result.current.shell.shellErrors).toHaveLength(0);
-  again.rerender({ paths: [["a.md", ".dohc/engine/displaced/6a31.0"], ["b.md", ".dohc/engine/displaced/6a32.0"]] });
+  again.rerender({
+    paths: [
+      ["a.md", ".dohc/engine/displaced/6a31.0"],
+      ["b.md", ".dohc/engine/displaced/6a32.0"],
+    ],
+  });
   expect(again.result.current.shell.shellErrors).toHaveLength(1);
   expect(again.result.current.shell.shellErrors[0].seen).toBe(false);
 });

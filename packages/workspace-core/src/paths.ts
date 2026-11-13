@@ -8,11 +8,7 @@ type FolderValidation = { ok: true } | { ok: false; reason: string };
 
 // POSIX absolute, Windows drive-qualified (C:\ or C:/), or UNC (\\server).
 function isAbsolutePathLike(path: string): boolean {
-  return (
-    path.startsWith("/") ||
-    /^[A-Za-z]:[\\/]/.test(path) ||
-    path.startsWith("\\\\")
-  );
+  return path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path) || path.startsWith("\\\\");
 }
 
 const NOT_ABSOLUTE_REFUSAL = "attached folders must be absolute paths";
@@ -24,7 +20,18 @@ export function validateAttachedFolder(path: string): FolderValidation {
   return { ok: true };
 }
 
-export { stripWindowsAliasSuffix, isDohcMetadataPath, isSharedWithMePath, isReservedPath, hasEngineIgnoredSegment, hasIgnoredSegment, validateUserWritePath, validateUserMaterializePath, validateUserReadPath, type WritePathValidation } from "@dohc/workspace-contracts/workspace-paths";
+export {
+  stripWindowsAliasSuffix,
+  isDohcMetadataPath,
+  isSharedWithMePath,
+  isReservedPath,
+  hasEngineIgnoredSegment,
+  hasIgnoredSegment,
+  validateUserWritePath,
+  validateUserMaterializePath,
+  validateUserReadPath,
+  type WritePathValidation,
+} from "@dohc/workspace-contracts/workspace-paths";
 
 export function isSiteSourcePath(relativePath: string): boolean {
   const normalized = relativePath.replaceAll("\\", "/");
@@ -78,12 +85,12 @@ export function normalizeRootPath(path: string, platform: string): string {
   return `/${segments.join("/")}`;
 }
 
-type RootChoiceValidation =
-  | { ok: true; normalized: string }
-  | { ok: false; reason: string };
+type RootChoiceValidation = { ok: true; normalized: string } | { ok: false; reason: string };
 
-export const HOME_FOLDER_REFUSAL = "Your home folder cannot be a workspace. Choose a folder inside it.";
-export const DISK_ROOT_REFUSAL = "The top folder of a disk cannot be a workspace. Open a folder inside it.";
+export const HOME_FOLDER_REFUSAL =
+  "Your home folder cannot be a workspace. Choose a folder inside it.";
+export const DISK_ROOT_REFUSAL =
+  "The top folder of a disk cannot be a workspace. Open a folder inside it.";
 
 // Registry policy: a workspace root must be a real folder choice — never the
 // filesystem root or the home directory itself, which would hand workspace
@@ -99,7 +106,8 @@ export function validateWorkspaceRootChoice(
   const attached = validateAttachedFolder(rootPath);
   if (!attached.ok) return attached;
   // Outside Windows only a path from "/" is absolute.
-  if (platform !== "win32" && !rootPath.startsWith("/")) return { ok: false, reason: NOT_ABSOLUTE_REFUSAL };
+  if (platform !== "win32" && !rootPath.startsWith("/"))
+    return { ok: false, reason: NOT_ABSOLUTE_REFUSAL };
   const normalized = normalizeRootPath(rootPath, platform);
   const home = normalizeRootPath(homeDir, platform);
   // Filesystem root, a drive root (C:), or a UNC server/share root (//server,
@@ -130,7 +138,10 @@ export class WorkspaceFolderRefusalError extends Error {
 export type StateFolderOverlap = "holds" | "inside";
 
 export function stateFolderRefusal(overlap: StateFolderOverlap): string {
-  const where = overlap === "holds" ? "holds dohc's own settings" : "is inside the folder that holds dohc's own settings";
+  const where =
+    overlap === "holds"
+      ? "holds dohc's own settings"
+      : "is inside the folder that holds dohc's own settings";
   return `This folder ${where}, so it cannot be a workspace.`;
 }
 
@@ -138,17 +149,20 @@ export function stateFolderRefusal(overlap: StateFolderOverlap): string {
 // and records: it is or holds that folder, or sits inside it. Callers pass
 // both as real paths, so a link to either is judged by where it leads.
 // Case-insensitive, as the home check is.
-export function stateFolderOverlap(rootPath: string, stateDir: string, platform: string): StateFolderOverlap | null {
+export function stateFolderOverlap(
+  rootPath: string,
+  stateDir: string,
+  platform: string,
+): StateFolderOverlap | null {
   const root = normalizeRootPath(rootPath, platform).toLowerCase();
   const state = normalizeRootPath(stateDir, platform).toLowerCase();
-  const within = (path: string, folder: string) => path.startsWith(folder.endsWith("/") ? folder : `${folder}/`);
+  const within = (path: string, folder: string) =>
+    path.startsWith(folder.endsWith("/") ? folder : `${folder}/`);
   if (state === root || within(state, root)) return "holds";
   return within(root, state) ? "inside" : null;
 }
 
-export type PathClassification =
-  | { kind: "database" }
-  | { kind: "file" };
+export type PathClassification = { kind: "database" } | { kind: "file" };
 
 const DATABASE_EXTENSIONS = [".sqlite", ".sqlite3", ".db"];
 

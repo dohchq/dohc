@@ -1,13 +1,20 @@
-import {openSync, readSync, closeSync} from "node:fs";
-import {isAbsolute} from "node:path";
-import {createLiveFrameSession, LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, type LiveFrameSessionPolicy} from "@dohc/live-session-contract/live-frame";
-import {parseLiveObjectBinding, type LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
-import {parseLiveUpdateIdentifier} from "@dohc/live-session-contract/live-update-admission";
-import {canonicalRelayUrl} from "./syncCode";
-import type {OwnerYDocDrainResult} from "./ownerYDocOutbox";
+import { openSync, readSync, closeSync } from "node:fs";
+import { isAbsolute } from "node:path";
+import {
+  createLiveFrameSession,
+  LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES,
+  type LiveFrameSessionPolicy,
+} from "@dohc/live-session-contract/live-frame";
+import {
+  parseLiveObjectBinding,
+  type LiveObjectBinding,
+} from "@dohc/live-session-contract/live-object-binding";
+import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
+import { canonicalRelayUrl } from "./syncCode";
+import type { OwnerYDocDrainResult } from "./ownerYDocOutbox";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
-import {ownerDeliveryWait} from "./ownerDeliveryWait";
+import { ownerDeliveryWait } from "./ownerDeliveryWait";
 
 export interface DesktopOwnerDeliveryDocument {
   binding: LiveObjectBinding;
@@ -15,7 +22,7 @@ export interface DesktopOwnerDeliveryDocument {
 }
 export interface DesktopOwnerDeliveryConfig {
   nativeConfigPath: string;
-  nativeClient: {aggregateBytes: number; maxUploads: number};
+  nativeClient: { aggregateBytes: number; maxUploads: number };
   relayUrl: string;
   frames: LiveFrameSessionPolicy;
   attemptTimeoutMs: number;
@@ -24,76 +31,159 @@ export interface DesktopOwnerDeliveryConfig {
 }
 
 function fields(input: unknown, expected: string[]): asserts input is Record<string, unknown> {
-  if (!input || typeof input !== "object" || Array.isArray(input) || Object.keys(input).sort().join() !== expected.sort().join()) throw new TypeError("Invalid private owner delivery configuration.");
+  if (
+    !input ||
+    typeof input !== "object" ||
+    Array.isArray(input) ||
+    Object.keys(input).sort().join() !== expected.sort().join()
+  )
+    throw new TypeError("Invalid private owner delivery configuration.");
 }
 function delay(value: unknown): number {
-  if (!Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > 2_147_483_647) throw new TypeError("Invalid owner delivery interval.");
+  if (!Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > 2_147_483_647)
+    throw new TypeError("Invalid owner delivery interval.");
   return value as number;
 }
 
 /** Main-owned document selection; authenticated sync and native checks enroll each target. */
 export function parseDesktopOwnerDeliveryConfig(value: unknown): DesktopOwnerDeliveryConfig {
-  fields(value, ["version", "nativeConfigPath", "nativeClient", "relayUrl", "frames", "attemptTimeoutMs", "retryDelayMs", "documents"]);
+  fields(value, [
+    "version",
+    "nativeConfigPath",
+    "nativeClient",
+    "relayUrl",
+    "frames",
+    "attemptTimeoutMs",
+    "retryDelayMs",
+    "documents",
+  ]);
   const relayUrl = typeof value.relayUrl === "string" ? canonicalRelayUrl(value.relayUrl) : null;
-  if (value.version !== 1 || !relayUrl || !Array.isArray(value.documents) || value.documents.length === 0) throw new TypeError("Invalid owner delivery targets.");
+  if (
+    value.version !== 1 ||
+    !relayUrl ||
+    !Array.isArray(value.documents) ||
+    value.documents.length === 0
+  )
+    throw new TypeError("Invalid owner delivery targets.");
   const frames = structuredClone(value.frames) as LiveFrameSessionPolicy;
   createLiveFrameSession("client", frames).close();
-  if (frames.receive.maxFrameBytes < LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES || frames.maxControlBytes < LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES) throw new TypeError("Owner delivery frames must carry the largest declared submission.");
-  if (typeof value.nativeConfigPath !== "string" || !isAbsolute(value.nativeConfigPath)) throw new TypeError("Native owner ingress configuration path must be absolute.");
+  if (
+    frames.receive.maxFrameBytes < LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES ||
+    frames.maxControlBytes < LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES
+  )
+    throw new TypeError("Owner delivery frames must carry the largest declared submission.");
+  if (typeof value.nativeConfigPath !== "string" || !isAbsolute(value.nativeConfigPath))
+    throw new TypeError("Native owner ingress configuration path must be absolute.");
   fields(value.nativeClient, ["aggregateBytes", "maxUploads"]);
-  const nativeClient = {aggregateBytes: value.nativeClient.aggregateBytes as number, maxUploads: value.nativeClient.maxUploads as number};
-  if (!Number.isSafeInteger(nativeClient.aggregateBytes) || nativeClient.aggregateBytes < 1 ||
-    !Number.isSafeInteger(nativeClient.maxUploads) || nativeClient.maxUploads < 1) throw new TypeError("Invalid native owner client budget.");
-  const documents = value.documents.map(raw => {
+  const nativeClient = {
+    aggregateBytes: value.nativeClient.aggregateBytes as number,
+    maxUploads: value.nativeClient.maxUploads as number,
+  };
+  if (
+    !Number.isSafeInteger(nativeClient.aggregateBytes) ||
+    nativeClient.aggregateBytes < 1 ||
+    !Number.isSafeInteger(nativeClient.maxUploads) ||
+    nativeClient.maxUploads < 1
+  )
+    throw new TypeError("Invalid native owner client budget.");
+  const documents = value.documents.map((raw) => {
     fields(raw, ["binding", "relayDatabaseNamespace"]);
     const binding = parseLiveObjectBinding(raw.binding);
     if (binding.mainVersionId !== "main") throw new TypeError("Owner delivery requires main.");
-    return {binding, relayDatabaseNamespace: parseLiveUpdateIdentifier(raw.relayDatabaseNamespace)};
+    return {
+      binding,
+      relayDatabaseNamespace: parseLiveUpdateIdentifier(raw.relayDatabaseNamespace),
+    };
   });
-  const ids = documents.map(document => JSON.stringify([document.binding.workspaceId, document.binding.mainVersionId, document.binding.objectId]));
+  const ids = documents.map((document) =>
+    JSON.stringify([
+      document.binding.workspaceId,
+      document.binding.mainVersionId,
+      document.binding.objectId,
+    ]),
+  );
   if (new Set(ids).size !== ids.length) throw new TypeError("Duplicate owner delivery target.");
-  return {nativeConfigPath: value.nativeConfigPath, nativeClient, relayUrl, frames, documents, attemptTimeoutMs: delay(value.attemptTimeoutMs), retryDelayMs: delay(value.retryDelayMs)};
+  return {
+    nativeConfigPath: value.nativeConfigPath,
+    nativeClient,
+    relayUrl,
+    frames,
+    documents,
+    attemptTimeoutMs: delay(value.attemptTimeoutMs),
+    retryDelayMs: delay(value.retryDelayMs),
+  };
 }
 
 export function readDesktopOwnerDeliveryConfig(path: string): DesktopOwnerDeliveryConfig {
   if (!isAbsolute(path)) throw new TypeError("Owner delivery configuration path must be absolute.");
-  const bytes = Buffer.alloc(1_048_577), fd = openSync(path, "r");
+  const bytes = Buffer.alloc(1_048_577),
+    fd = openSync(path, "r");
   let offset = 0;
-  try {while (offset < bytes.length) {const count = readSync(fd, bytes, offset, bytes.length - offset, null); if (!count) break; offset += count;}}
-  finally {closeSync(fd);}
-  if (offset === bytes.length) throw new TypeError("Owner delivery configuration exceeds its byte limit.");
+  try {
+    while (offset < bytes.length) {
+      const count = readSync(fd, bytes, offset, bytes.length - offset, null);
+      if (!count) break;
+      offset += count;
+    }
+  } finally {
+    closeSync(fd);
+  }
+  if (offset === bytes.length)
+    throw new TypeError("Owner delivery configuration exceeds its byte limit.");
   return parseDesktopOwnerDeliveryConfig(JSON.parse(bytes.subarray(0, offset).toString("utf8")));
 }
 
 /** One bounded native/network pass at a time, rotated across existing targets. */
 export function startDesktopOwnerDelivery(options: {
   config: DesktopOwnerDeliveryConfig;
-  runPass(document: DesktopOwnerDeliveryDocument, signal: AbortSignal): Promise<OwnerYDocDrainResult>;
+  runPass(
+    document: DesktopOwnerDeliveryDocument,
+    signal: AbortSignal,
+  ): Promise<OwnerYDocDrainResult>;
   onError(error: unknown): void;
 }) {
-  const config = structuredClone(options.config), lifetime = new AbortController();
+  const config = structuredClone(options.config),
+    lifetime = new AbortController();
   let next = 0;
-  const finished = Effect.runPromiseExit(Effect.gen(function* () {
-    yield* ownerDeliveryWait(0);
-    while (!lifetime.signal.aborted) {
-      const document = config.documents[next]!; next = (next + 1) % config.documents.length;
-      const signal = AbortSignal.any([lifetime.signal, AbortSignal.timeout(config.attemptTimeoutMs)]);
-      // Abort the actual pass, then await its native/network resource release.
-      const result = yield* Effect.uninterruptible(Effect.tryPromise({
-        try: () => options.runPass(document, signal),
-        catch: error => error,
-      })).pipe(Effect.catch(error => {
-        if (!lifetime.signal.aborted) {try {options.onError(error);} catch { /* Logging cannot abandon retries. */ }}
-        return Effect.succeed<OwnerYDocDrainResult>("retry");
-      }));
-      yield* ownerDeliveryWait(result === "acknowledged" ? 0 : config.retryDelayMs);
-    }
-  }), {signal: lifetime.signal});
+  const finished = Effect.runPromiseExit(
+    Effect.gen(function* () {
+      yield* ownerDeliveryWait(0);
+      while (!lifetime.signal.aborted) {
+        const document = config.documents[next]!;
+        next = (next + 1) % config.documents.length;
+        const signal = AbortSignal.any([
+          lifetime.signal,
+          AbortSignal.timeout(config.attemptTimeoutMs),
+        ]);
+        // Abort the actual pass, then await its native/network resource release.
+        const result = yield* Effect.uninterruptible(
+          Effect.tryPromise({
+            try: () => options.runPass(document, signal),
+            catch: (error) => error,
+          }),
+        ).pipe(
+          Effect.catch((error) => {
+            if (!lifetime.signal.aborted) {
+              try {
+                options.onError(error);
+              } catch {
+                /* Logging cannot abandon retries. */
+              }
+            }
+            return Effect.succeed<OwnerYDocDrainResult>("retry");
+          }),
+        );
+        yield* ownerDeliveryWait(result === "acknowledged" ? 0 : config.retryDelayMs);
+      }
+    }),
+    { signal: lifetime.signal },
+  );
   return {
     async stop(): Promise<void> {
       lifetime.abort();
       const exit = await finished;
-      if (exit._tag === "Failure" && !Cause.hasInterruptsOnly(exit.cause)) throw Cause.squash(exit.cause);
+      if (exit._tag === "Failure" && !Cause.hasInterruptsOnly(exit.cause))
+        throw Cause.squash(exit.cause);
     },
   };
 }

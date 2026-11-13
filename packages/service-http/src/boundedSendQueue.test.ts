@@ -4,10 +4,21 @@ import { BoundedSendQueue } from "./boundedSendQueue";
 describe("bounded transport send queue", () => {
   function fixture(maxBytes = 100) {
     const sent: { bytes: Buffer; binary: boolean; callback: (error?: Error) => void }[] = [];
-    let drains = 0, errors = 0;
-    const queue = new BoundedSendQueue({ maxBytes, maxSegmentBytes: 8,
-      send(bytes, binary, callback) { sent.push({ bytes, binary, callback }); },
-      onDrain() { drains++; }, onError() { errors++; } });
+    let drains = 0,
+      errors = 0;
+    const queue = new BoundedSendQueue({
+      maxBytes,
+      maxSegmentBytes: 8,
+      send(bytes, binary, callback) {
+        sent.push({ bytes, binary, callback });
+      },
+      onDrain() {
+        drains++;
+      },
+      onError() {
+        errors++;
+      },
+    });
     return { queue, sent, drains: () => drains, errors: () => errors };
   }
   it("segments byte streams without changing order and drains only after callbacks", () => {
@@ -22,7 +33,9 @@ describe("bounded transport send queue", () => {
     expect(run.sent).toHaveLength(3);
     expect(run.drains()).toBe(0);
     run.sent[2]!.callback();
-    expect(Buffer.concat(run.sent.map(item => item.bytes)).toString()).toBe("0123456789abcdefghi");
+    expect(Buffer.concat(run.sent.map((item) => item.bytes)).toString()).toBe(
+      "0123456789abcdefghi",
+    );
     expect(run.drains()).toBe(1);
   });
   it("counts the stalled active send and refuses queued overflow", () => {
@@ -45,11 +58,22 @@ describe("bounded transport send queue", () => {
     const sent: Buffer[] = [];
     const callbacks: (() => void)[] = [];
     let errors = 0;
-    const queue = new BoundedSendQueue({ maxBytes: 24, maxSegmentBytes: 1,
-      send(bytes, _binary, done) { sent.push(Buffer.from(bytes)); callbacks.push(done); }, onDrain() {}, onError() { errors++; } });
+    const queue = new BoundedSendQueue({
+      maxBytes: 24,
+      maxSegmentBytes: 1,
+      send(bytes, _binary, done) {
+        sent.push(Buffer.from(bytes));
+        callbacks.push(done);
+      },
+      onDrain() {},
+      onError() {
+        errors++;
+      },
+    });
     queue.write(Buffer.from("12345678"), true);
     for (let n = 0; n < 8; n++) callbacks[n]!();
-    expect(Buffer.concat(sent).toString()).toBe("12345678"); expect(errors).toBe(0);
+    expect(Buffer.concat(sent).toString()).toBe("12345678");
+    expect(errors).toBe(0);
   });
   it("keeps text controls whole and rejects oversize controls", () => {
     const run = fixture();

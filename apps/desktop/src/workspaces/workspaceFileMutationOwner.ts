@@ -24,15 +24,9 @@ import {
   type ShareViewFileChangeValue,
   type ShareViewFiles,
 } from "./shareViewFiles";
-import {
-  shareMountRegistryIsPresent,
-  storedShareMounts,
-} from "./shareViewFilesTarget";
+import { shareMountRegistryIsPresent, storedShareMounts } from "./shareViewFilesTarget";
 import { shareViewIsPresent } from "./shareViewMarker";
-import {
-  SHARE_VIEW_EMPTY_FOLDER_REFUSAL,
-  workspaceWriteRefusal,
-} from "./shareWriteGate";
+import { SHARE_VIEW_EMPTY_FOLDER_REFUSAL, workspaceWriteRefusal } from "./shareWriteGate";
 import {
   normalizeWorkspaceImageAssetPath,
   resolveWorkspaceFile,
@@ -44,14 +38,18 @@ import {
 } from "./workspaceAssets";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import type { LocalPersonAuthor } from "./desktopRecordEdits";
-import { readWorkspaceHistoryOperation, undoWorkspaceHistoryOperation, type OperationHistory } from "./workspaceHistoryOperations";
-import { beginPendingRecovery, type DeleteUndoResult } from "./workspaceDeleteRecovery";
-import { assertMoveDocumentKind, deleteWorkspacePathByHand, moveWorkspacePathByHand } from "./workspaceFileMoves";
 import {
-  createFile,
-  createFolder,
-  normalizeWorkspaceMovePaths,
-} from "./workspaceFiles";
+  readWorkspaceHistoryOperation,
+  undoWorkspaceHistoryOperation,
+  type OperationHistory,
+} from "./workspaceHistoryOperations";
+import { beginPendingRecovery, type DeleteUndoResult } from "./workspaceDeleteRecovery";
+import {
+  assertMoveDocumentKind,
+  deleteWorkspacePathByHand,
+  moveWorkspacePathByHand,
+} from "./workspaceFileMoves";
+import { createFile, createFolder, normalizeWorkspaceMovePaths } from "./workspaceFiles";
 
 type WorkspaceFileMutationIpcHandler<Event, Result = void> = (
   event: Event,
@@ -59,22 +57,19 @@ type WorkspaceFileMutationIpcHandler<Event, Result = void> = (
 ) => Promise<Result>;
 
 export interface WorkspaceFileMutationOwner<Event> {
-  createFile: WorkspaceFileMutationIpcHandler<
+  createFile: WorkspaceFileMutationIpcHandler<Event, CreateWorkspaceFileResult>;
+  createFolder: WorkspaceFileMutationIpcHandler<Event, CreateWorkspaceFileResult>;
+  duplicateFile: WorkspaceFileMutationIpcHandler<
     Event,
-    CreateWorkspaceFileResult
+    import("zod").infer<typeof DuplicateWorkspaceFileResult>
   >;
-  createFolder: WorkspaceFileMutationIpcHandler<
-    Event,
-    CreateWorkspaceFileResult
-  >;
-  duplicateFile: WorkspaceFileMutationIpcHandler<Event, import("zod").infer<typeof DuplicateWorkspaceFileResult>>;
   movePath: WorkspaceFileMutationIpcHandler<Event, MoveWorkspacePathResult>;
-  deletePath: WorkspaceFileMutationIpcHandler<
-    Event,
-    DeleteWorkspacePathResult
-  >;
+  deletePath: WorkspaceFileMutationIpcHandler<Event, DeleteWorkspacePathResult>;
   undoHistoryOperation: WorkspaceFileMutationIpcHandler<Event, DeleteUndoResult>;
-  readHistoryOperation: WorkspaceFileMutationIpcHandler<Event, import("zod").infer<typeof ReadHistoryOperationResult>>;
+  readHistoryOperation: WorkspaceFileMutationIpcHandler<
+    Event,
+    import("zod").infer<typeof ReadHistoryOperationResult>
+  >;
   writeText: WorkspaceFileMutationIpcHandler<Event, WriteWorkspaceTextResult>;
   writeAsset: WorkspaceFileMutationIpcHandler<Event>;
 }
@@ -87,20 +82,11 @@ export interface WorkspaceFileMutationWorkspace {
 }
 
 export interface WorkspaceFileMutationYDocPort {
-  withDocumentUnowned<T>(
-    authorityId: symbol,
-    path: string,
-    mutation: () => Promise<T>,
-  ): Promise<T>;
-  markDeletedUnderPath(
-    authorityId: symbol,
-    pathOrPrefix: string,
-  ): void;
+  withDocumentUnowned<T>(authorityId: symbol, path: string, mutation: () => Promise<T>): Promise<T>;
+  markDeletedUnderPath(authorityId: symbol, pathOrPrefix: string): void;
 }
 
-export interface WorkspaceFileMutationAuthority<
-  Workspace extends WorkspaceFileMutationWorkspace,
-> {
+export interface WorkspaceFileMutationAuthority<Workspace extends WorkspaceFileMutationWorkspace> {
   readonly authorityId: symbol;
   readonly workspace: Readonly<Workspace>;
   readonly signal: AbortSignal;
@@ -111,9 +97,7 @@ export interface WorkspaceFileMutationAuthority<
 
 type MutationCapture = Pick<WorkspaceEngineCapture, "changePathsAs" | "beginFileRename">;
 
-function assertWritableWorkspace(
-  workspace: WorkspaceFileMutationWorkspace,
-): void {
+function assertWritableWorkspace(workspace: WorkspaceFileMutationWorkspace): void {
   const refusal = workspaceWriteRefusal(workspace.shareView);
   if (refusal) throw new Error(refusal);
 }
@@ -132,9 +116,7 @@ export function createWorkspaceFileMutationOwner<
   withRendererWorkspaceOperation<Result>(
     event: IpcEvent,
     workspaceId: string,
-    work: (
-      authority: WorkspaceFileMutationAuthority<Workspace>,
-    ) => Promise<Result>,
+    work: (authority: WorkspaceFileMutationAuthority<Workspace>) => Promise<Result>,
   ): Promise<Result>;
   shareViewFiles: Pick<ShareViewFiles, "change">;
   trashItem(path: string): Promise<void>;
@@ -175,10 +157,7 @@ export function createWorkspaceFileMutationOwner<
       return outcome.value;
     }
     dependencies.notifyRenderer(workspaceId);
-    dependencies.logError(
-      "[desktop] shared file change did not finish cleanly",
-      outcome,
-    );
+    dependencies.logError("[desktop] shared file change did not finish cleanly", outcome);
     if (outcome.status === "partial") {
       throw new Error(
         "Part of the shared file change completed before the operation stopped. Refresh the shared view before you continue.",
@@ -257,35 +236,25 @@ export function createWorkspaceFileMutationOwner<
         CreateWorkspaceFilePayload.parse,
         async ({ input, workspace, receivedShare }) => {
           if (!receivedShare) assertWritableWorkspace(workspace);
-      return withStaleSensitiveWorkspaceOperation(
-        workspace.rootPath,
-        async (lease) => {
-          const path = receivedShare
-            ? editedShareViewValue(
-                workspace.workspaceId,
-                await dependencies.shareViewFiles.change(
-                  lease,
-                  shareTarget(workspace),
-                  {
+          return withStaleSensitiveWorkspaceOperation(workspace.rootPath, async (lease) => {
+            const path = receivedShare
+              ? editedShareViewValue(
+                  workspace.workspaceId,
+                  await dependencies.shareViewFiles.change(lease, shareTarget(workspace), {
                     kind: "create",
                     path: input.relativePath,
                     initialText: input.initialText,
-                  },
-                ),
-              )
-            : await createFile(
-                workspace.rootPath,
-                input.relativePath,
-                input.initialText,
-                { exclusive: input.exclusive },
-              );
-          if (typeof path !== "string") {
-            throw new Error("Shared file create returned an invalid result.");
-          }
-          return CreateWorkspaceFileResult.parse({ path });
+                  }),
+                )
+              : await createFile(workspace.rootPath, input.relativePath, input.initialText, {
+                  exclusive: input.exclusive,
+                });
+            if (typeof path !== "string") {
+              throw new Error("Shared file create returned an invalid result.");
+            }
+            return CreateWorkspaceFileResult.parse({ path });
+          });
         },
-      );
-    },
       );
     },
 
@@ -296,65 +265,122 @@ export function createWorkspaceFileMutationOwner<
         CreateWorkspaceFolderPayload.parse,
         async ({ input, workspace, receivedShare }) => {
           if (receivedShare) throw new Error(SHARE_VIEW_EMPTY_FOLDER_REFUSAL);
-      assertWritableWorkspace(workspace);
-      return withStaleSensitiveWorkspaceOperation(
-        workspace.rootPath,
-        async () =>
-          CreateWorkspaceFileResult.parse({
-            path: await createFolder(workspace.rootPath, input.relativePath, { exclusive: input.exclusive }),
-          }),
-      );
-    },
+          assertWritableWorkspace(workspace);
+          return withStaleSensitiveWorkspaceOperation(workspace.rootPath, async () =>
+            CreateWorkspaceFileResult.parse({
+              path: await createFolder(workspace.rootPath, input.relativePath, {
+                exclusive: input.exclusive,
+              }),
+            }),
+          );
+        },
       );
     },
 
     duplicateFile: async (event, payload) => {
       const request = admitMutation(event, payload, DuplicateWorkspaceFilePayload.parse);
       const person = await dependencies.localPerson();
-      return runAdmittedMutation(event, request, async ({input, workspace, assertCurrent, capture}) => {
-        if (!capture) throw new Error("Restart dohc before duplicating this file.");
-        return DuplicateWorkspaceFileResult.parse(await duplicateWorkspaceFile({workspace, assertCurrent}, input.relativePath, person, capture));
-      });
+      return runAdmittedMutation(
+        event,
+        request,
+        async ({ input, workspace, assertCurrent, capture }) => {
+          if (!capture) throw new Error("Restart dohc before duplicating this file.");
+          return DuplicateWorkspaceFileResult.parse(
+            await duplicateWorkspaceFile(
+              { workspace, assertCurrent },
+              input.relativePath,
+              person,
+              capture,
+            ),
+          );
+        },
+      );
     },
     movePath: async (event, payload) => {
       const request = admitMutation(event, payload, MoveWorkspacePathPayload.parse);
       const person = await dependencies.localPerson();
       let published = false;
       let resolve!: (value: MoveWorkspacePathResult) => void, reject!: (error: unknown) => void;
-      const result = new Promise<MoveWorkspacePathResult>((done, failed) => { resolve = done; reject = failed; });
-      const recording = runAdmittedMutation(event, request, async ({ input, workspace, signal, receivedShare, capture, authorityId, yDocSessions, assertCurrent }) => {
-        if (!receivedShare) {
-          assertWritableWorkspace(workspace);
-          const history = dependencies.historyFor(workspace);
-          return MoveWorkspacePathResult.parse(await moveWorkspacePathByHand({ workspace, assertCurrent }, input, person, {
-            capture, requestId: randomUUID(), trashItem: dependencies.trashItem,
-            ...(dependencies.beforeMove ? { beforeMove: (storedSpelling: () => Promise<string>) => dependencies.beforeMove!(workspace.workspaceId, storedSpelling) } : {}),
-            linkRewrites: history.rewriteHistoryLinks ? {
-              workspaceId: workspace.workspaceId, signal,
-              history: {rewriteHistoryLinks: history.rewriteHistoryLinks.bind(history)},
-            } : undefined,
-            onRecorded: (path, operationId) => {
-              const value = MoveWorkspacePathResult.parse({ path, operationId, undo: { available: true } });
-              const release = beginPendingRecovery(operationId, { signal, waitForReads: true });
-              published = true;
-              resolve(value);
-              return release;
-            },
-            markDeleted: path => yDocSessions.markDeletedUnderPath(authorityId, path),
-            admit: () => refuseMoveAcrossShareMount(workspace.rootPath, input.fromPath, input.toPath,
-              storedShareMounts(workspace), shareMountRegistryIsPresent(workspace)),
-          }));
-        }
-        return withExclusiveWorkspaceOperation(workspace.rootPath, async (markChanged, lease) => {
-          const { fromPath, toPath } = normalizeWorkspaceMovePaths(input.fromPath, input.toPath);
-          assertMoveDocumentKind(fromPath, toPath, "rename");
-          const path = structuralShareViewChangeValue(workspace.workspaceId,
-            await dependencies.shareViewFiles.change(lease, shareTarget(workspace), { kind: "move", fromPath, toPath }), markChanged);
-          if (typeof path !== "string") throw new Error("Shared file move returned an invalid result.");
-          return MoveWorkspacePathResult.parse({ path });
-        });
+      const result = new Promise<MoveWorkspacePathResult>((done, failed) => {
+        resolve = done;
+        reject = failed;
       });
-      void recording.then(resolve, error => {
+      const recording = runAdmittedMutation(
+        event,
+        request,
+        async ({
+          input,
+          workspace,
+          signal,
+          receivedShare,
+          capture,
+          authorityId,
+          yDocSessions,
+          assertCurrent,
+        }) => {
+          if (!receivedShare) {
+            assertWritableWorkspace(workspace);
+            const history = dependencies.historyFor(workspace);
+            return MoveWorkspacePathResult.parse(
+              await moveWorkspacePathByHand({ workspace, assertCurrent }, input, person, {
+                capture,
+                requestId: randomUUID(),
+                trashItem: dependencies.trashItem,
+                ...(dependencies.beforeMove
+                  ? {
+                      beforeMove: (storedSpelling: () => Promise<string>) =>
+                        dependencies.beforeMove!(workspace.workspaceId, storedSpelling),
+                    }
+                  : {}),
+                linkRewrites: history.rewriteHistoryLinks
+                  ? {
+                      workspaceId: workspace.workspaceId,
+                      signal,
+                      history: { rewriteHistoryLinks: history.rewriteHistoryLinks.bind(history) },
+                    }
+                  : undefined,
+                onRecorded: (path, operationId) => {
+                  const value = MoveWorkspacePathResult.parse({
+                    path,
+                    operationId,
+                    undo: { available: true },
+                  });
+                  const release = beginPendingRecovery(operationId, { signal, waitForReads: true });
+                  published = true;
+                  resolve(value);
+                  return release;
+                },
+                markDeleted: (path) => yDocSessions.markDeletedUnderPath(authorityId, path),
+                admit: () =>
+                  refuseMoveAcrossShareMount(
+                    workspace.rootPath,
+                    input.fromPath,
+                    input.toPath,
+                    storedShareMounts(workspace),
+                    shareMountRegistryIsPresent(workspace),
+                  ),
+              }),
+            );
+          }
+          return withExclusiveWorkspaceOperation(workspace.rootPath, async (markChanged, lease) => {
+            const { fromPath, toPath } = normalizeWorkspaceMovePaths(input.fromPath, input.toPath);
+            assertMoveDocumentKind(fromPath, toPath, "rename");
+            const path = structuralShareViewChangeValue(
+              workspace.workspaceId,
+              await dependencies.shareViewFiles.change(lease, shareTarget(workspace), {
+                kind: "move",
+                fromPath,
+                toPath,
+              }),
+              markChanged,
+            );
+            if (typeof path !== "string")
+              throw new Error("Shared file move returned an invalid result.");
+            return MoveWorkspacePathResult.parse({ path });
+          });
+        },
+      );
+      void recording.then(resolve, (error) => {
         if (published) dependencies.logError("Could not finish recording the file move", error);
         reject(error);
       });
@@ -364,39 +390,81 @@ export function createWorkspaceFileMutationOwner<
     readHistoryOperation: async (event, payload) => {
       const request = admitMutation(event, payload, ReadHistoryOperationPayload.parse);
       return runAdmittedMutation(event, request, ({ input, workspace, signal, assertCurrent }) =>
-        readWorkspaceHistoryOperation({ workspace, signal, assertCurrent }, input, dependencies.historyFor(workspace), { agent: false }));
+        readWorkspaceHistoryOperation(
+          { workspace, signal, assertCurrent },
+          input,
+          dependencies.historyFor(workspace),
+          { agent: false },
+        ),
+      );
     },
 
     undoHistoryOperation: async (event, payload) => {
       const request = admitMutation(event, payload, UndoHistoryOperationPayload.parse);
       const person = await dependencies.localPerson();
       return runAdmittedMutation(event, request, ({ input, workspace, signal, assertCurrent }) =>
-        undoWorkspaceHistoryOperation({ workspace, signal, assertCurrent }, input, person, { history: dependencies.historyFor(workspace), agent: false }));
+        undoWorkspaceHistoryOperation({ workspace, signal, assertCurrent }, input, person, {
+          history: dependencies.historyFor(workspace),
+          agent: false,
+        }),
+      );
     },
 
     deletePath: async (event, payload) => {
       const request = admitMutation(event, payload, DeleteWorkspacePathPayload.parse);
       // History credits whoever asked, read before the delete waits for its workspace.
       const person = await dependencies.localPerson();
-      return await runAdmittedMutation(event, request,
-        async ({ input, workspace, receivedShare, authorityId, capture, yDocSessions, assertCurrent }) => {
-          if (receivedShare && input.emptyFolderOnly) throw new Error(SHARE_VIEW_EMPTY_FOLDER_REFUSAL);
+      return await runAdmittedMutation(
+        event,
+        request,
+        async ({
+          input,
+          workspace,
+          receivedShare,
+          authorityId,
+          capture,
+          yDocSessions,
+          assertCurrent,
+        }) => {
+          if (receivedShare && input.emptyFolderOnly)
+            throw new Error(SHARE_VIEW_EMPTY_FOLDER_REFUSAL);
           if (!receivedShare) {
             assertWritableWorkspace(workspace);
-            return DeleteWorkspacePathResult.parse(await deleteWorkspacePathByHand({ workspace, assertCurrent },
-              input.relativePath, person, { capture, emptyFolderOnly: input.emptyFolderOnly, confirmNotVersioned: input.confirmNotVersioned, requestId: randomUUID(), trashItem: dependencies.trashItem,
-                markDeleted: path => yDocSessions.markDeletedUnderPath(authorityId, path) }));
+            return DeleteWorkspacePathResult.parse(
+              await deleteWorkspacePathByHand(
+                { workspace, assertCurrent },
+                input.relativePath,
+                person,
+                {
+                  capture,
+                  emptyFolderOnly: input.emptyFolderOnly,
+                  confirmNotVersioned: input.confirmNotVersioned,
+                  requestId: randomUUID(),
+                  trashItem: dependencies.trashItem,
+                  markDeleted: (path) => yDocSessions.markDeletedUnderPath(authorityId, path),
+                },
+              ),
+            );
           }
-          return await withExclusiveWorkspaceOperation(workspace.rootPath, async (markWorkspaceChanged, lease) => {
-            const result = structuralShareViewChangeValue(workspace.workspaceId,
-              await dependencies.shareViewFiles.change(lease, shareTarget(workspace),
-                { kind: "delete", path: input.relativePath }), markWorkspaceChanged);
-            if (typeof result !== "object" || result === null || !("trashed" in result)) {
-              throw new Error("Shared file delete returned an invalid result.");
-            }
-            return DeleteWorkspacePathResult.parse(result);
-          });
-        });
+          return await withExclusiveWorkspaceOperation(
+            workspace.rootPath,
+            async (markWorkspaceChanged, lease) => {
+              const result = structuralShareViewChangeValue(
+                workspace.workspaceId,
+                await dependencies.shareViewFiles.change(lease, shareTarget(workspace), {
+                  kind: "delete",
+                  path: input.relativePath,
+                }),
+                markWorkspaceChanged,
+              );
+              if (typeof result !== "object" || result === null || !("trashed" in result)) {
+                throw new Error("Shared file delete returned an invalid result.");
+              }
+              return DeleteWorkspacePathResult.parse(result);
+            },
+          );
+        },
+      );
     },
 
     writeText: async (event, payload) => {
@@ -404,71 +472,54 @@ export function createWorkspaceFileMutationOwner<
         event,
         payload,
         WriteWorkspaceTextPayload.parse,
-        async ({
-          input,
-          workspace,
-          receivedShare,
-          authorityId,
-          yDocSessions,
-        }) => {
+        async ({ input, workspace, receivedShare, authorityId, yDocSessions }) => {
           if (!receivedShare) assertWritableWorkspace(workspace);
-      if (receivedShare) {
-        const result = await withStaleSensitiveWorkspaceOperation(
-          workspace.rootPath,
-          async (lease) =>
-            editedShareViewValue(
-              workspace.workspaceId,
-              await dependencies.shareViewFiles.change(
-                lease,
-                shareTarget(workspace),
-                {
-                  kind: "save",
-                  path: input.relativePath,
-                  text: input.text,
-                  expectedContentHash: input.expectedContentHash,
-                },
-              ),
-            ),
-        );
-        return WriteWorkspaceTextResult.parse(result);
-      }
-      const result = await withStaleSensitiveWorkspaceOperation(
-        workspace.rootPath,
-        async (lease) => {
-          let path: string;
-          try {
-            path = (
-              await resolveWorkspaceFile(
-                workspace.rootPath,
-                input.relativePath,
-                "write",
-              )
-            ).resolvedPath;
-          } catch (error) {
-            const code = (error as NodeJS.ErrnoException)?.code;
-            if (code === "ENOENT" || code === "ENOTDIR") {
-              return {
-                status: "conflict" as const,
-                currentContentHash: null,
-              };
-            }
-            throw error;
+          if (receivedShare) {
+            const result = await withStaleSensitiveWorkspaceOperation(
+              workspace.rootPath,
+              async (lease) =>
+                editedShareViewValue(
+                  workspace.workspaceId,
+                  await dependencies.shareViewFiles.change(lease, shareTarget(workspace), {
+                    kind: "save",
+                    path: input.relativePath,
+                    text: input.text,
+                    expectedContentHash: input.expectedContentHash,
+                  }),
+                ),
+            );
+            return WriteWorkspaceTextResult.parse(result);
           }
-          return yDocSessions.withDocumentUnowned(authorityId,
-            path,
-            () =>
-              writeWorkspaceTextInLease(
-                workspace.rootPath,
-                lease,
-                path,
-                input.text,
-                input.expectedContentHash,
-              ),
+          const result = await withStaleSensitiveWorkspaceOperation(
+            workspace.rootPath,
+            async (lease) => {
+              let path: string;
+              try {
+                path = (await resolveWorkspaceFile(workspace.rootPath, input.relativePath, "write"))
+                  .resolvedPath;
+              } catch (error) {
+                const code = (error as NodeJS.ErrnoException)?.code;
+                if (code === "ENOENT" || code === "ENOTDIR") {
+                  return {
+                    status: "conflict" as const,
+                    currentContentHash: null,
+                  };
+                }
+                throw error;
+              }
+              return yDocSessions.withDocumentUnowned(authorityId, path, () =>
+                writeWorkspaceTextInLease(
+                  workspace.rootPath,
+                  lease,
+                  path,
+                  input.text,
+                  input.expectedContentHash,
+                ),
+              );
+            },
           );
+          return WriteWorkspaceTextResult.parse(result);
         },
-      );
-      return WriteWorkspaceTextResult.parse(result);
-    },
       );
     },
 
@@ -479,35 +530,17 @@ export function createWorkspaceFileMutationOwner<
         WriteWorkspaceAssetPayload.parse,
         async ({ input, workspace, authorityId, yDocSessions }) => {
           assertWritableWorkspace(workspace);
-      await withStaleSensitiveWorkspaceOperation(
-        workspace.rootPath,
-        async (lease) => {
-          const requestedPath = normalizeWorkspaceImageAssetPath(
-            input.relativePath,
-          );
-          const path = await resolveWorkspaceMaterializePath(
-            workspace.rootPath,
-            requestedPath,
-          );
-          if (liveDocumentKindForPath(path.resolvedPath) !== null) {
-            throw new Error(
-              "A live document cannot be replaced by an image attachment.",
+          await withStaleSensitiveWorkspaceOperation(workspace.rootPath, async (lease) => {
+            const requestedPath = normalizeWorkspaceImageAssetPath(input.relativePath);
+            const path = await resolveWorkspaceMaterializePath(workspace.rootPath, requestedPath);
+            if (liveDocumentKindForPath(path.resolvedPath) !== null) {
+              throw new Error("A live document cannot be replaced by an image attachment.");
+            }
+            await yDocSessions.withDocumentUnowned(authorityId, path.resolvedPath, () =>
+              writeWorkspaceAssetInLease(workspace.rootPath, lease, path, input.bytes),
             );
-          }
-          await yDocSessions.withDocumentUnowned(
-                authorityId,
-            path.resolvedPath,
-            () =>
-              writeWorkspaceAssetInLease(
-                workspace.rootPath,
-                lease,
-                path,
-                input.bytes,
-              ),
-          );
+          });
         },
-      );
-    },
       );
     },
   };

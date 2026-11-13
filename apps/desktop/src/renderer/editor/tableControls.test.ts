@@ -309,12 +309,17 @@ describe("table gestures while the note changes", () => {
   }
 
   function expectNoDragChrome(editor: Editor) {
-    expect(editor.view.dom.querySelector(
-      ".is-reordering, .is-dragging, .is-drop-target, .dohc-table-drag-source, .dohc-table-drop-before, .dohc-table-drop-after, [aria-grabbed='true']",
-    )).toBeNull();
-    expect(document.body.querySelector(".dohc-table-drag-preview, .dohc-table-drop-indicator")).toBeNull();
-    expect(document.body.querySelector("[data-dohc-table-drag-status]")?.textContent)
-      .toBe("Table reorder cancelled.");
+    expect(
+      editor.view.dom.querySelector(
+        ".is-reordering, .is-dragging, .is-drop-target, .dohc-table-drag-source, .dohc-table-drop-before, .dohc-table-drop-after, [aria-grabbed='true']",
+      ),
+    ).toBeNull();
+    expect(
+      document.body.querySelector(".dohc-table-drag-preview, .dohc-table-drop-indicator"),
+    ).toBeNull();
+    expect(document.body.querySelector("[data-dohc-table-drag-status]")?.textContent).toBe(
+      "Table reorder cancelled.",
+    );
   }
 
   const gestures = [
@@ -335,54 +340,69 @@ describe("table gestures while the note changes", () => {
     return { selector, source };
   }
 
-  it.each(gestures)("finishes a $band grip drag after a $origin edit above the table", async ({ band, origin }) => {
-    const { editor, collaborator } = await setup();
-    const before = tableTextGrid(editor);
-    const { selector, source } = startGripDrag(editor, band);
+  it.each(gestures)(
+    "finishes a $band grip drag after a $origin edit above the table",
+    async ({ band, origin }) => {
+      const { editor, collaborator } = await setup();
+      const before = tableTextGrid(editor);
+      const { selector, source } = startGripDrag(editor, band);
 
-    editAbove(origin === "synced" ? collaborator : editor);
-    expect(editor.state.doc.firstChild?.textContent).toBe("New text Intro");
-    expect(source.getAttribute("aria-grabbed")).toBe("true");
-    elementFromPointResult = editor.view.dom.querySelectorAll(selector)[2]!;
-    dispatchPointer(editor.view.dom, "pointerup", { clientX: 10, clientY: 10 });
+      editAbove(origin === "synced" ? collaborator : editor);
+      expect(editor.state.doc.firstChild?.textContent).toBe("New text Intro");
+      expect(source.getAttribute("aria-grabbed")).toBe("true");
+      elementFromPointResult = editor.view.dom.querySelectorAll(selector)[2]!;
+      dispatchPointer(editor.view.dom, "pointerup", { clientX: 10, clientY: 10 });
 
-    expect(errors).toEqual([]);
-    const moved = band === "row"
-      ? [before[1]!, before[2]!, before[0]!]
-      : before.map((row) => [row[1]!, row[2]!, row[0]!]);
-    expect(tableTextGrid(editor)).toEqual(moved);
-    expect(tableTextGrid(collaborator)).toEqual(moved);
-    expect(source.getAttribute("aria-grabbed")).toBe("false");
-  });
+      expect(errors).toEqual([]);
+      const moved =
+        band === "row"
+          ? [before[1]!, before[2]!, before[0]!]
+          : before.map((row) => [row[1]!, row[2]!, row[0]!]);
+      expect(tableTextGrid(editor)).toEqual(moved);
+      expect(tableTextGrid(collaborator)).toEqual(moved);
+      expect(source.getAttribute("aria-grabbed")).toBe("false");
+    },
+  );
 
-  it.each(gestures)("cancels a $band grip drag after a $origin edit in its table", async ({ band, origin }) => {
-    const { editor, collaborator } = await setup();
-    const { selector, source } = startGripDrag(editor, band);
+  it.each(gestures)(
+    "cancels a $band grip drag after a $origin edit in its table",
+    async ({ band, origin }) => {
+      const { editor, collaborator } = await setup();
+      const { selector, source } = startGripDrag(editor, band);
 
-    editCell(origin === "synced" ? collaborator : editor, "C3");
-    const before = tableTextGrid(editor);
-    expect(before[2]![2]).toBe("xC3");
-    expectNoDragChrome(editor);
-    elementFromPointResult = editor.view.dom.querySelectorAll(selector)[2]!;
-    dispatchPointer(editor.view.dom, "pointerup", { clientX: 10, clientY: 10 });
+      editCell(origin === "synced" ? collaborator : editor, "C3");
+      const before = tableTextGrid(editor);
+      expect(before[2]![2]).toBe("xC3");
+      expectNoDragChrome(editor);
+      elementFromPointResult = editor.view.dom.querySelectorAll(selector)[2]!;
+      dispatchPointer(editor.view.dom, "pointerup", { clientX: 10, clientY: 10 });
 
-    expect(errors).toEqual([]);
-    expect(tableTextGrid(editor)).toEqual(before);
-    expect(tableTextGrid(collaborator)).toEqual(before);
-    expect(source.getAttribute("aria-grabbed")).toBe("false");
-    expectNoDragChrome(editor);
+      expect(errors).toEqual([]);
+      expect(tableTextGrid(editor)).toEqual(before);
+      expect(tableTextGrid(collaborator)).toEqual(before);
+      expect(source.getAttribute("aria-grabbed")).toBe("false");
+      expectNoDragChrome(editor);
 
-    // The grip stays in place through the edit, so a new drag from it works.
-    drag(source, editor.view.dom.querySelectorAll(selector)[2]!);
-    const moved = band === "row"
-      ? [before[1]!, before[2]!, before[0]!]
-      : before.map((row) => [row[1]!, row[2]!, row[0]!]);
-    expect(tableTextGrid(editor)).toEqual(moved);
-    expect(tableTextGrid(collaborator)).toEqual(moved);
-  });
+      // The grip stays in place through the edit, so a new drag from it works.
+      drag(source, editor.view.dom.querySelectorAll(selector)[2]!);
+      const moved =
+        band === "row"
+          ? [before[1]!, before[2]!, before[0]!]
+          : before.map((row) => [row[1]!, row[2]!, row[0]!]);
+      expect(tableTextGrid(editor)).toEqual(moved);
+      expect(tableTextGrid(collaborator)).toEqual(moved);
+    },
+  );
 
   function mouse(target: EventTarget, type: string, clientX: number) {
-    const event = new MouseEvent(type, { bubbles: true, cancelable: true, clientX, clientY: 20, button: 0, buttons: 1 });
+    const event = new MouseEvent(type, {
+      bubbles: true,
+      cancelable: true,
+      clientX,
+      clientY: 20,
+      button: 0,
+      buttons: 1,
+    });
     Object.defineProperty(event, "which", { value: 1 });
     target.dispatchEvent(event);
   }
@@ -403,7 +423,9 @@ describe("table gestures while the note changes", () => {
   }
 
   function widths(editor: Editor) {
-    return tableNode(editor).content?.map((row) => row.content?.map((cell) => cell.attrs?.colwidth ?? null));
+    return tableNode(editor).content?.map((row) =>
+      row.content?.map((cell) => cell.attrs?.colwidth ?? null),
+    );
   }
 
   it("cancels a column width resize after a synced edit in its table", async () => {
@@ -422,29 +444,40 @@ describe("table gestures while the note changes", () => {
     expect(columnResizingPluginKey.getState(editor.state)?.dragging).toBeFalsy();
     expect(tableNode(editor)).toEqual(before);
     expect(tableNode(collaborator)).toEqual(before);
-    expect(Array.from(editor.view.dom.querySelectorAll("col"), (col) => col.style.width)).toEqual(["", "", ""]);
+    expect(Array.from(editor.view.dom.querySelectorAll("col"), (col) => col.style.width)).toEqual([
+      "",
+      "",
+      "",
+    ]);
     const currentTable = editor.view.dom.querySelector("table")!;
     expect([currentTable.style.width, currentTable.style.minWidth]).toEqual(beforeSize);
-    expect(editor.view.dom.querySelector(".column-resize-dragging, .column-resize-handle")).toBeNull();
+    expect(
+      editor.view.dom.querySelector(".column-resize-dragging, .column-resize-handle"),
+    ).toBeNull();
   });
 
-  it.each(["synced"])("finishes a column width resize on the same column after a %s edit above the table", async (origin) => {
-    const { editor, collaborator } = await setup();
-    const before = tableTextGrid(editor);
-    const handle = startColumnResize(editor);
+  it.each(["synced"])(
+    "finishes a column width resize on the same column after a %s edit above the table",
+    async (origin) => {
+      const { editor, collaborator } = await setup();
+      const before = tableTextGrid(editor);
+      const handle = startColumnResize(editor);
 
-    editAbove(origin === "synced" ? collaborator : editor);
-    expect(columnResizingPluginKey.getState(editor.state)?.activeHandle).toBe(handle + "New text ".length);
-    expect(columnResizingPluginKey.getState(editor.state)?.dragging).toBeTruthy();
-    mouse(window, "mousemove", 259);
-    mouse(window, "mouseup", 259);
+      editAbove(origin === "synced" ? collaborator : editor);
+      expect(columnResizingPluginKey.getState(editor.state)?.activeHandle).toBe(
+        handle + "New text ".length,
+      );
+      expect(columnResizingPluginKey.getState(editor.state)?.dragging).toBeTruthy();
+      mouse(window, "mousemove", 259);
+      mouse(window, "mouseup", 259);
 
-    expect(errors).toEqual([]);
-    expect(columnResizingPluginKey.getState(editor.state)?.dragging).toBeFalsy();
-    expect(widths(editor)).toEqual(Array.from({ length: 3 }, () => [null, [160], null]));
-    expect(widths(collaborator)).toEqual(widths(editor));
-    expect(tableTextGrid(editor)).toEqual(before);
-  });
+      expect(errors).toEqual([]);
+      expect(columnResizingPluginKey.getState(editor.state)?.dragging).toBeFalsy();
+      expect(widths(editor)).toEqual(Array.from({ length: 3 }, () => [null, [160], null]));
+      expect(widths(collaborator)).toEqual(widths(editor));
+      expect(tableTextGrid(editor)).toEqual(before);
+    },
+  );
 
   function startRowResize(editor: Editor) {
     const row = editor.view.dom.querySelector("tr")!;
@@ -471,8 +504,9 @@ describe("table gestures while the note changes", () => {
     expect(row.style.height).toBe("");
     expect(handle.classList.contains("is-resizing")).toBe(false);
     expect(editor.view.dom.querySelector(".is-resizing, [aria-grabbed='true']")).toBeNull();
-    expect(document.body.querySelector("[data-dohc-table-drag-status]")?.textContent)
-      .toBe("Row 1 resize cancelled.");
+    expect(document.body.querySelector("[data-dohc-table-drag-status]")?.textContent).toBe(
+      "Row 1 resize cancelled.",
+    );
   });
 });
 
@@ -515,9 +549,9 @@ describe("table controls grips", () => {
   }
 
   function dragStatusText(): (string | null)[] {
-    return Array.from(
-      document.body.querySelectorAll("[data-dohc-table-drag-status]"),
-    ).map((region) => region.textContent);
+    return Array.from(document.body.querySelectorAll("[data-dohc-table-drag-status]")).map(
+      (region) => region.textContent,
+    );
   }
 
   it("gives each mounted editor its own live region", () => {
@@ -584,9 +618,11 @@ describe("table controls grips", () => {
     expect(source.getAttribute("aria-grabbed")).toBe("true");
     elementFromPointResult = null;
 
-    editorWindow.dispatchEvent(ending === "release"
-      ? new MouseEvent("mouseup", { button: 0 })
-      : new KeyboardEvent("keydown", { key: "Escape" }));
+    editorWindow.dispatchEvent(
+      ending === "release"
+        ? new MouseEvent("mouseup", { button: 0 })
+        : new KeyboardEvent("keydown", { key: "Escape" }),
+    );
 
     expect(source.getAttribute("aria-grabbed")).toBe("false");
     expect(tableTextGrid(editor).map((row) => row[0])).toEqual(
@@ -596,9 +632,7 @@ describe("table controls grips", () => {
 
   it("uses logical TableMap columns when a target cell follows a colspan", () => {
     editor = createColspanTableEditor();
-    const source = editor.view.dom.querySelector(
-      '[data-table-column="0"]',
-    ) as HTMLElement;
+    const source = editor.view.dom.querySelector('[data-table-column="0"]') as HTMLElement;
     const targetCell = editor.view.dom.querySelectorAll("tr")[0]?.cells[2];
     if (!targetCell) throw new Error("colspan target cell missing");
     Object.defineProperty(targetCell, "getBoundingClientRect", {
@@ -658,9 +692,7 @@ describe("table controls grips", () => {
     expect(bodyCells).toHaveLength(4);
     expect(headerCells).toHaveLength(2);
     expect(headerCells[0]?.attrs?.colspan).toBe(3);
-    expect(
-      headerCells.reduce((width, cell) => width + (cell.attrs?.colspan ?? 1), 0),
-    ).toBe(4);
+    expect(headerCells.reduce((width, cell) => width + (cell.attrs?.colspan ?? 1), 0)).toBe(4);
     expect(bodyCells.map((cell) => cell.content?.[0]?.content?.[0]?.text)).toEqual([
       "a",
       "a",
@@ -904,6 +936,5 @@ describe("table controls grips", () => {
       expect(rowHeights(editor)).toEqual([null, 38, null, null]);
       expect(tableTextGrid(peer)).toEqual(tableTextGrid(editor));
     });
-
   });
 });

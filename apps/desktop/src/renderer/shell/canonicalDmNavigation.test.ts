@@ -23,7 +23,8 @@ describe("targeted chat navigation", () => {
         messageId: "message-dm",
         threadId: "dm-thread",
         targetKind: "file",
-        objectId: "object-1", pathHint: "docs/plan.md",
+        objectId: "object-1",
+        pathHint: "docs/plan.md",
         createdAtMs: 0,
       },
       message: {
@@ -52,23 +53,23 @@ describe("targeted chat navigation", () => {
     });
     if (mentionTarget.surface !== "dm") throw new Error("Expected DM target");
     expect(resolveCanonicalDm(mentionTarget, [dm])).toEqual(dm);
-    expect(resolveCanonicalDm({ ...mentionTarget, threadId: "other-thread" }, [dm]))
-      .toBeNull();
-    expect(resolveCanonicalDm({ ...mentionTarget, channelWireId: "other-wire" }, [dm]))
-      .toBeNull();
+    expect(resolveCanonicalDm({ ...mentionTarget, threadId: "other-thread" }, [dm])).toBeNull();
+    expect(resolveCanonicalDm({ ...mentionTarget, channelWireId: "other-wire" }, [dm])).toBeNull();
 
-    expect(graphChatOpenTarget({
-      path: "chat-thread:dm-thread",
-      kind: "chat-thread",
-      threadId: "dm-thread",
-      channelId: "dm-local",
-      channelWireId: "dm-wire",
-      channelName: "alice@example.com",
-      channelKind: "dm",
-      title: "Direct message",
-      incoming: 1,
-      outgoing: 0,
-    })).toEqual({
+    expect(
+      graphChatOpenTarget({
+        path: "chat-thread:dm-thread",
+        kind: "chat-thread",
+        threadId: "dm-thread",
+        channelId: "dm-local",
+        channelWireId: "dm-wire",
+        channelName: "alice@example.com",
+        channelKind: "dm",
+        title: "Direct message",
+        incoming: 1,
+        outgoing: 0,
+      }),
+    ).toEqual({
       surface: "dm",
       channelId: "dm-local",
       channelWireId: "dm-wire",
@@ -179,17 +180,19 @@ describe("targeted chat navigation", () => {
     current = false;
     delayed.resolve({
       available: true,
-      dms: [{
-        channelId: "dm-local",
-        channelWireId: "dm-wire",
-        name: "alice@example.com",
-        peerLabel: "Alice",
-        role: "owner",
-        shareId: null,
-        threadId: "dm-thread",
-        unreadCount: 0,
-        connected: true,
-      }],
+      dms: [
+        {
+          channelId: "dm-local",
+          channelWireId: "dm-wire",
+          name: "alice@example.com",
+          peerLabel: "Alice",
+          role: "owner",
+          shareId: null,
+          threadId: "dm-thread",
+          unreadCount: 0,
+          connected: true,
+        },
+      ],
     });
     await pending;
     expect(open).not.toHaveBeenCalled();

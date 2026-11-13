@@ -2,11 +2,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  AppErrorBoundary,
-  ErrorBoundary,
-  installGlobalErrorReporters,
-} from "./ErrorBoundary";
+import { AppErrorBoundary, ErrorBoundary, installGlobalErrorReporters } from "./ErrorBoundary";
 
 function Bomb({ when = true }: { when?: boolean }) {
   if (when) throw new Error("kaboom in a view");
@@ -42,9 +38,7 @@ describe("ErrorBoundary (scoped)", () => {
     expect(
       vi
         .mocked(console.error)
-        .mock.calls.some((call) =>
-          String(call[0]).includes('contained by the "editor" boundary'),
-        ),
+        .mock.calls.some((call) => String(call[0]).includes('contained by the "editor" boundary')),
     ).toBe(true);
   });
 
@@ -53,11 +47,7 @@ describe("ErrorBoundary (scoped)", () => {
       const [broken, setBroken] = useState(true);
       return (
         <ErrorBoundary scope="side-panel">
-          <button
-            type="button"
-            data-testid="disarm"
-            onClick={() => setBroken(false)}
-          />
+          <button type="button" data-testid="disarm" onClick={() => setBroken(false)} />
           <Bomb when={broken} />
         </ErrorBoundary>
       );
@@ -150,11 +140,7 @@ describe("installGlobalErrorReporters", () => {
     rejection.reason = new Error("loose rejection");
     target.dispatchEvent(rejection);
     const logged = vi.mocked(console.error).mock.calls.map((call) => String(call[0]));
-    expect(logged.some((entry) => entry.includes("uncaught renderer error"))).toBe(
-      true,
-    );
-    expect(
-      logged.some((entry) => entry.includes("unhandled promise rejection")),
-    ).toBe(true);
+    expect(logged.some((entry) => entry.includes("uncaught renderer error"))).toBe(true);
+    expect(logged.some((entry) => entry.includes("unhandled promise rejection"))).toBe(true);
   });
 });

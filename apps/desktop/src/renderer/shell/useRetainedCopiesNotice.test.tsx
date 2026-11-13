@@ -1,7 +1,19 @@
 // @vitest-environment jsdom
-import { act, cleanup, configure, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  configure,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { DeleteRetainedCopiesResult, ListRetainedCopiesResult, RetainedCopiesSummary } from "../../ipc/bridgeContract";
+import type {
+  DeleteRetainedCopiesResult,
+  ListRetainedCopiesResult,
+  RetainedCopiesSummary,
+} from "../../ipc/bridgeContract";
 import {
   RETAINED_COPIES_ACTION,
   RETAINED_COPIES_NOTICE_BYTES,
@@ -18,22 +30,36 @@ const above: RetainedCopiesSummary = { count: 1200, bytes: RETAINED_COPIES_NOTIC
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => { resolve = done; });
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
   return { promise, resolve };
 }
 
 function harness(initial: { workspaceId: string; summary: RetainedCopiesSummary | undefined }) {
   const bridge = {
-    listRetainedCopies: vi.fn(async (_: { workspaceId: string }): Promise<ListRetainedCopiesResult> => ({
-      copies: [{ id: 3, revision: 10 }, { id: 4, revision: 11 }],
-      more: false,
-      total: { count: 2, bytes: 2 * 200 * MB },
-    })),
-    deleteRetainedCopies: vi.fn(async (_: {
-      workspaceId: string;
-      copies: { id: number; revision: number }[];
-      acceptLateWriteRisk: true;
-    }): Promise<DeleteRetainedCopiesResult> => ({ deleted: 2, skipped: 0, failed: 0, remaining: { count: 0, bytes: 0 } })),
+    listRetainedCopies: vi.fn(
+      async (_: { workspaceId: string }): Promise<ListRetainedCopiesResult> => ({
+        copies: [
+          { id: 3, revision: 10 },
+          { id: 4, revision: 11 },
+        ],
+        more: false,
+        total: { count: 2, bytes: 2 * 200 * MB },
+      }),
+    ),
+    deleteRetainedCopies: vi.fn(
+      async (_: {
+        workspaceId: string;
+        copies: { id: number; revision: number }[];
+        acceptLateWriteRisk: true;
+      }): Promise<DeleteRetainedCopiesResult> => ({
+        deleted: 2,
+        skipped: 0,
+        failed: 0,
+        remaining: { count: 0, bytes: 0 },
+      }),
+    ),
   };
   vi.stubGlobal("dohcDesktop", bridge);
   const shell: { current: ReturnType<typeof useShellError> | null } = { current: null };
@@ -74,21 +100,29 @@ afterEach(() => {
 
 describe("useRetainedCopiesNotice", () => {
   it("shows one warning above the size, toasts once, and updates it in place", () => {
-    const h = harness({ workspaceId: "ws-a", summary: { count: 900, bytes: RETAINED_COPIES_NOTICE_BYTES - 1 } });
+    const h = harness({
+      workspaceId: "ws-a",
+      summary: { count: 900, bytes: RETAINED_COPIES_NOTICE_BYTES - 1 },
+    });
     expect(h.row()).toBeUndefined();
     h.rerender({ workspaceId: "ws-a", summary: above });
     const row = h.row()!;
     expect(row).toMatchObject({
       tone: "warning",
       title: "1,200 old file copies",
-      message: "They take up 300 MB. dohc can't check whether another program still uses these copies on this drive.",
+      message:
+        "They take up 300 MB. dohc can't check whether another program still uses these copies on this drive.",
       action: { label: RETAINED_COPIES_ACTION },
       retry: null,
       seen: false,
     });
     h.rerender({ workspaceId: "ws-a", summary: { count: 2400, bytes: 2.5 * 1024 * MB } });
     expect(h.errors().filter((error) => error.kind === "retained-copies")).toHaveLength(1);
-    expect(h.row()).toMatchObject({ id: row.id, title: "2,400 old file copies", message: expect.stringContaining("They take up 2.5 GB.") });
+    expect(h.row()).toMatchObject({
+      id: row.id,
+      title: "2,400 old file copies",
+      message: expect.stringContaining("They take up 2.5 GB."),
+    });
     h.rerender({ workspaceId: "ws-a", summary: { count: 0, bytes: 0 } });
     expect(h.row()).toBeUndefined();
   });
@@ -127,10 +161,15 @@ describe("useRetainedCopiesNotice", () => {
     await waitFor(() => expect(h.errors().some((error) => error.tone === "success")).toBe(true));
     expect(h.bridge.deleteRetainedCopies).toHaveBeenCalledExactlyOnceWith({
       workspaceId: "ws-a",
-      copies: [{ id: 3, revision: 10 }, { id: 4, revision: 11 }],
+      copies: [
+        { id: 3, revision: 10 },
+        { id: 4, revision: 11 },
+      ],
       acceptLateWriteRisk: true,
     });
-    expect(h.errors().find((error) => error.tone === "success")?.message).toBe("Deleted 2 old file copies");
+    expect(h.errors().find((error) => error.tone === "success")?.message).toBe(
+      "Deleted 2 old file copies",
+    );
     expect(h.row()).toBeUndefined();
   });
 
@@ -139,15 +178,30 @@ describe("useRetainedCopiesNotice", () => {
     const copies = Array.from({ length: 150 }, (_, id) => ({ id, revision: 1 }));
     h.bridge.listRetainedCopies.mockResolvedValueOnce({ copies, more: false, total: above });
     h.bridge.deleteRetainedCopies
-      .mockResolvedValueOnce({ deleted: 99, skipped: 1, failed: 0, remaining: { count: 1051, bytes: above.bytes } })
-      .mockResolvedValueOnce({ deleted: 49, skipped: 1, failed: 0, remaining: { count: 1002, bytes: above.bytes } });
+      .mockResolvedValueOnce({
+        deleted: 99,
+        skipped: 1,
+        failed: 0,
+        remaining: { count: 1051, bytes: above.bytes },
+      })
+      .mockResolvedValueOnce({
+        deleted: 49,
+        skipped: 1,
+        failed: 0,
+        remaining: { count: 1002, bytes: above.bytes },
+      });
     h.run(h.row()!.id);
-    expect((await screen.findByTestId("retained-copies-confirm")).textContent).toContain("Delete 150 old file copies");
+    expect((await screen.findByTestId("retained-copies-confirm")).textContent).toContain(
+      "Delete 150 old file copies",
+    );
     fireEvent.click(screen.getByTestId("retained-copies-delete"));
     await waitFor(() => expect(h.errors().some((error) => error.tone === "success")).toBe(true));
-    expect(h.bridge.deleteRetainedCopies.mock.calls.map(([input]) => input.copies.length)).toEqual([100, 50]);
-    expect(h.errors().find((error) => error.tone === "success")?.message)
-      .toBe("Deleted 148 old file copies. 2 stay because they changed or dohc still needs them.");
+    expect(h.bridge.deleteRetainedCopies.mock.calls.map(([input]) => input.copies.length)).toEqual([
+      100, 50,
+    ]);
+    expect(h.errors().find((error) => error.tone === "success")?.message).toBe(
+      "Deleted 148 old file copies. 2 stay because they changed or dohc still needs them.",
+    );
     expect(h.row()?.title).toBe("1,002 old file copies");
   });
 
@@ -159,7 +213,9 @@ describe("useRetainedCopiesNotice", () => {
     await waitFor(() => expect(h.errors().some((error) => error.retry !== null)).toBe(true));
     const failure = h.errors().find((error) => error.retry !== null)!;
     expect(failure.message).toContain("dohc could not delete old file copies.");
-    act(() => { failure.retry!(); });
+    act(() => {
+      failure.retry!();
+    });
     expect(await screen.findByTestId("retained-copies-confirm")).toBeTruthy();
     expect(h.bridge.listRetainedCopies).toHaveBeenCalledTimes(2);
   });
@@ -170,7 +226,9 @@ describe("useRetainedCopiesNotice", () => {
     h.bridge.listRetainedCopies.mockReturnValueOnce(listing.promise);
     h.run(h.row()!.id);
     h.rerender({ workspaceId: "ws-b", summary: undefined });
-    await act(async () => listing.resolve({ copies: [{ id: 3, revision: 10 }], more: false, total: above }));
+    await act(async () =>
+      listing.resolve({ copies: [{ id: 3, revision: 10 }], more: false, total: above }),
+    );
     expect(screen.queryByTestId("retained-copies-confirm")).toBeNull();
     expect(h.errors()).toEqual([]);
   });

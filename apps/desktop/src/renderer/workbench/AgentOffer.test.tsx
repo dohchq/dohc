@@ -17,11 +17,21 @@ vi.mock("./ChatAvatar", async (importOriginal) => {
 });
 
 const candidates = [
-  { id: "agent:default", kind: "agent" as const, handle: "Nova", label: "Nova", description: "your agent" },
+  {
+    id: "agent:default",
+    kind: "agent" as const,
+    handle: "Nova",
+    label: "Nova",
+    description: "your agent",
+  },
   { id: "user:you", kind: "user" as const, handle: "you", label: "You", description: "you" },
 ];
 const ready: AgentSetupSummary = {
-  workspaceId: "ws-a", agentName: "Nova", runnerConfigured: true, runnerEnabled: true, agentRunActive: false,
+  workspaceId: "ws-a",
+  agentName: "Nova",
+  runnerConfigured: true,
+  runnerEnabled: true,
+  agentRunActive: false,
   agents: [{ id: "default", name: "Nova", enabled: true }],
 };
 
@@ -40,9 +50,20 @@ function Composer(props: {
     reach: "C:\\work\\trip-planner",
   });
   return (
-    <MentionComposer testIdPrefix="chats" composerId="chats-composer" value={value} sending={false}
-      placeholder="Write a comment…" sendLabel="Send message" candidates={candidates} onChange={setValue}
-      onSend={() => setValue("")} onRosterPick={onRosterPick} rosterScope={scope} agentOffer={offer} />
+    <MentionComposer
+      testIdPrefix="chats"
+      composerId="chats-composer"
+      value={value}
+      sending={false}
+      placeholder="Write a comment…"
+      sendLabel="Send message"
+      candidates={candidates}
+      onChange={setValue}
+      onSend={() => setValue("")}
+      onRosterPick={onRosterPick}
+      rosterScope={scope}
+      agentOffer={offer}
+    />
   );
 }
 
@@ -53,8 +74,12 @@ async function pickAgent(user: ReturnType<typeof userEvent.setup>) {
 
 function offer(state: AgentOfferState, working = state === "working"): AgentAddressedOffer {
   return {
-    kind: "agent-addressed", agent: candidates[0]!, presentation: { group: "", hue: null, self: false },
-    state, working, reach: "C:\\work\\trip-planner",
+    kind: "agent-addressed",
+    agent: candidates[0]!,
+    presentation: { group: "", hue: null, self: false },
+    state,
+    working,
+    reach: "C:\\work\\trip-planner",
   };
 }
 
@@ -87,10 +112,19 @@ describe("the agent offer", () => {
 
   it("sits in a stream composer's bar just before Send, clear of its reply bar", () => {
     render(
-      <MentionComposer testIdPrefix="chats" composerId="chats-composer" value="@Nova " sending={false}
-        placeholder="Write a comment…" sendLabel="Send message" candidates={candidates} onChange={() => {}}
-        onSend={() => {}} agentOffer={offer("runs")}
-        above={<div data-testid="chats-replying-mode">Replying to Sam</div>} />,
+      <MentionComposer
+        testIdPrefix="chats"
+        composerId="chats-composer"
+        value="@Nova "
+        sending={false}
+        placeholder="Write a comment…"
+        sendLabel="Send message"
+        candidates={candidates}
+        onChange={() => {}}
+        onSend={() => {}}
+        agentOffer={offer("runs")}
+        above={<div data-testid="chats-replying-mode">Replying to Sam</div>}
+      />,
     );
     const offerNode = screen.getByTestId("composer-agent-offer");
     expect(offerNode.nextElementSibling).toBe(screen.getByTestId("chats-send"));
@@ -119,9 +153,22 @@ describe("the agent offer", () => {
     const view = render(<Composer dispatch={null} />);
     await pickAgent(user);
     expect(screen.getByTestId("composer-agent-offer").dataset.state).toBe("unknown");
-    view.rerender(<Composer dispatch={{ liveRunId: null, liveTriggerMessageId: null, pendingCount: 0, paused: true }} />);
+    view.rerender(
+      <Composer
+        dispatch={{ liveRunId: null, liveTriggerMessageId: null, pendingCount: 0, paused: true }}
+      />,
+    );
     expect(screen.getByTestId("composer-agent-offer").dataset.state).toBe("paused");
-    view.rerender(<Composer dispatch={{ liveRunId: "run-1", liveTriggerMessageId: null, pendingCount: 0, paused: false }} />);
+    view.rerender(
+      <Composer
+        dispatch={{
+          liveRunId: "run-1",
+          liveTriggerMessageId: null,
+          pendingCount: 0,
+          paused: false,
+        }}
+      />,
+    );
     expect(screen.getByTestId("composer-agent-offer").dataset.state).toBe("working");
   });
 

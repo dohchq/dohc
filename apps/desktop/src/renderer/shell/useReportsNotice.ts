@@ -5,7 +5,12 @@ import { bridge } from "../bridge";
 
 /** The notice's words for the reports it names. */
 export function reportsNoticeText(reports: ReportKinds): string {
-  const named = reports.usage && reports.errors ? "usage and error reports" : reports.usage ? "usage reports" : "error reports";
+  const named =
+    reports.usage && reports.errors
+      ? "usage and error reports"
+      : reports.usage
+        ? "usage reports"
+        : "error reports";
   const id = reports.usage ? " Usage reports include a random ID for this installation." : "";
   return `dohc sends ${named} to its developers.${id} Reports hold no file names, content, chats, or links.`;
 }
@@ -50,6 +55,9 @@ export function useReportsNotice(input: {
 
   return useCallback((toastId: string) => {
     const shown = notice.current;
-    if (shown?.id === toastId) void bridge().acknowledgeReportsNotice(shown.reports).catch(() => undefined);
+    if (shown?.id === toastId)
+      void bridge()
+        .acknowledgeReportsNotice(shown.reports)
+        .catch(() => undefined);
   }, []);
 }

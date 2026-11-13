@@ -1,13 +1,20 @@
 import { describe, expect, it, vi } from "vitest";
-import { compareAppVersions, guardedMoveToApplications, installedAppVersion, offerMoveToApplications } from "./moveToApplications";
+import {
+  compareAppVersions,
+  guardedMoveToApplications,
+  installedAppVersion,
+  offerMoveToApplications,
+} from "./moveToApplications";
 
-function harness(overrides: {
-  inApplications?: boolean;
-  declined?: boolean;
-  installedVersion?: string | null;
-  response?: number;
-  bundlePath?: string;
-} = {}) {
+function harness(
+  overrides: {
+    inApplications?: boolean;
+    declined?: boolean;
+    installedVersion?: string | null;
+    response?: number;
+    bundlePath?: string;
+  } = {},
+) {
   return {
     bundlePath: overrides.bundlePath ?? "/Volumes/dohc 0.2.0/dohc.app",
     runningVersion: "0.2.0",
@@ -25,8 +32,12 @@ describe("compareAppVersions", () => {
   it("orders releases and nightly prereleases as semver does", () => {
     expect(compareAppVersions("0.2.0", "0.1.9")).toBeGreaterThan(0);
     expect(compareAppVersions("0.1.1", "0.1.1-nightly.20261017.3.1")).toBeGreaterThan(0);
-    expect(compareAppVersions("0.1.1-nightly.20261017.3.1", "0.1.1-nightly.20261017.12.1")).toBeLessThan(0);
-    expect(compareAppVersions("0.1.1-nightly.20261018.1.1", "0.1.1-nightly.20261017.12.1")).toBeGreaterThan(0);
+    expect(
+      compareAppVersions("0.1.1-nightly.20261017.3.1", "0.1.1-nightly.20261017.12.1"),
+    ).toBeLessThan(0);
+    expect(
+      compareAppVersions("0.1.1-nightly.20261018.1.1", "0.1.1-nightly.20261017.12.1"),
+    ).toBeGreaterThan(0);
     expect(compareAppVersions("1.0.0", "1.0.0")).toBe(0);
     expect(compareAppVersions("1.0.0", "")).toBeNull();
   });
@@ -34,13 +45,19 @@ describe("compareAppVersions", () => {
 
 describe("installedAppVersion", () => {
   const app = "/Applications/dohc.app";
-  const failing = (code: string) => async () => { throw Object.assign(new Error(code), { code }); };
+  const failing = (code: string) => async () => {
+    throw Object.assign(new Error(code), { code });
+  };
 
   it("says nothing is installed only when the path does not exist", async () => {
     const readVersion = vi.fn(async () => "0.1.0\n");
-    await expect(installedAppVersion(app, { lstat: failing("ENOENT"), readVersion })).resolves.toBeNull();
+    await expect(
+      installedAppVersion(app, { lstat: failing("ENOENT"), readVersion }),
+    ).resolves.toBeNull();
     expect(readVersion).not.toHaveBeenCalled();
-    await expect(installedAppVersion(app, { lstat: async () => ({}), readVersion })).resolves.toBe("0.1.0");
+    await expect(installedAppVersion(app, { lstat: async () => ({}), readVersion })).resolves.toBe(
+      "0.1.0",
+    );
   });
 
   it("calls a copy unreadable when its path cannot be checked or its version read, so no move replaces it", async () => {
@@ -48,11 +65,18 @@ describe("installedAppVersion", () => {
     for (const code of ["EACCES", "EIO"]) {
       const installed = await installedAppVersion(app, { lstat: failing(code), readVersion });
       expect(installed).toBe("");
-      await expect(guardedMoveToApplications({ runningVersion: "0.2.0", installedVersion: async () => installed, move: vi.fn() }))
-        .rejects.toThrow("dohc cannot read the version of the dohc already in Applications.");
+      await expect(
+        guardedMoveToApplications({
+          runningVersion: "0.2.0",
+          installedVersion: async () => installed,
+          move: vi.fn(),
+        }),
+      ).rejects.toThrow("dohc cannot read the version of the dohc already in Applications.");
     }
     expect(readVersion).not.toHaveBeenCalled();
-    await expect(installedAppVersion(app, { lstat: async () => ({}), readVersion: failing("EPERM") })).resolves.toBe("");
+    await expect(
+      installedAppVersion(app, { lstat: async () => ({}), readVersion: failing("EPERM") }),
+    ).resolves.toBe("");
   });
 });
 
@@ -61,7 +85,8 @@ describe("guardedMoveToApplications", () => {
     let installed: string | null = null;
     const installedVersion = vi.fn(async () => installed);
     const move = vi.fn();
-    const attempt = () => guardedMoveToApplications({ runningVersion: "0.2.0", installedVersion, move });
+    const attempt = () =>
+      guardedMoveToApplications({ runningVersion: "0.2.0", installedVersion, move });
 
     await attempt();
     installed = "0.1.0";
@@ -69,9 +94,13 @@ describe("guardedMoveToApplications", () => {
     expect(move).toHaveBeenCalledTimes(2);
     // A newer copy arrived since, as before a Try again.
     installed = "0.3.0";
-    await expect(attempt()).rejects.toThrow("Applications already has dohc 0.3.0. Open that copy instead.");
+    await expect(attempt()).rejects.toThrow(
+      "Applications already has dohc 0.3.0. Open that copy instead.",
+    );
     installed = "";
-    await expect(attempt()).rejects.toThrow("dohc cannot read the version of the dohc already in Applications.");
+    await expect(attempt()).rejects.toThrow(
+      "dohc cannot read the version of the dohc already in Applications.",
+    );
     expect(installedVersion).toHaveBeenCalledTimes(4);
     expect(move).toHaveBeenCalledTimes(2);
   });
@@ -80,8 +109,11 @@ describe("guardedMoveToApplications", () => {
 describe("offerMoveToApplications", () => {
   it("asks nothing in Applications, after a decline, or over the same, a newer, or an unreadable dohc there", async () => {
     for (const deps of [
-      harness({ inApplications: true }), harness({ declined: true }),
-      harness({ installedVersion: "0.2.0" }), harness({ installedVersion: "0.3.0" }), harness({ installedVersion: "" }),
+      harness({ inApplications: true }),
+      harness({ declined: true }),
+      harness({ installedVersion: "0.2.0" }),
+      harness({ installedVersion: "0.3.0" }),
+      harness({ installedVersion: "" }),
     ]) {
       await offerMoveToApplications(deps);
       expect(deps.showMessageBox).not.toHaveBeenCalled();
@@ -95,8 +127,9 @@ describe("offerMoveToApplications", () => {
     expect(deps.showMessageBox).toHaveBeenCalledWith({
       type: "question",
       message: "Move dohc to Applications?",
-      detail: "dohc is running from a disk image or a temporary copy. dohc moves itself to Applications and opens again. "
-        + "It replaces the older dohc 0.1.0 already there.",
+      detail:
+        "dohc is running from a disk image or a temporary copy. dohc moves itself to Applications and opens again. " +
+        "It replaces the older dohc 0.1.0 already there.",
       buttons: ["Move to Applications", "Don't move"],
       defaultId: 0,
       cancelId: 1,
@@ -109,9 +142,11 @@ describe("offerMoveToApplications", () => {
   it("remembers Don't move, and does not call a lasting folder temporary", async () => {
     const deps = harness({ response: 1, bundlePath: "/Users/sam/Tools/dohc.app" });
     await offerMoveToApplications(deps);
-    expect(deps.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({
-      detail: "dohc moves itself to Applications and opens again.",
-    }));
+    expect(deps.showMessageBox).toHaveBeenCalledWith(
+      expect.objectContaining({
+        detail: "dohc moves itself to Applications and opens again.",
+      }),
+    );
     expect(deps.recordDecline).toHaveBeenCalledTimes(1);
     expect(deps.move).not.toHaveBeenCalled();
   });

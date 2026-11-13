@@ -3,69 +3,178 @@ import { request as httpRequest } from "node:http";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { relayProcessFixture, loopbackListenDenied, WORKSPACE_ID, USER_ID, TEST_SHUTDOWN_GRACE_PERIOD_MS, SHUTDOWN_EXIT_WAIT_MS } from "./mainProcessTestSupport";
+import {
+  relayProcessFixture,
+  loopbackListenDenied,
+  WORKSPACE_ID,
+  USER_ID,
+  TEST_SHUTDOWN_GRACE_PERIOD_MS,
+  SHUTDOWN_EXIT_WAIT_MS,
+} from "./mainProcessTestSupport";
 
-const { tempRoot, spawnRelay, spawnRunningRelay, authHeaders, postJson, exchangeLink, putBytes, sha256, settleWithin, sendTerminationSignal } = relayProcessFixture();
+const {
+  tempRoot,
+  spawnRelay,
+  spawnRunningRelay,
+  authHeaders,
+  postJson,
+  exchangeLink,
+  putBytes,
+  sha256,
+  settleWithin,
+  sendTerminationSignal,
+} = relayProcessFixture();
 
 describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
+  it.each(["2"])(
+    "wires app publication and collection approval opt-ins with quota %s",
+    async (quota) => {
+      const root = await tempRoot("app-publication-config");
+      const disabled = await spawnRelay(join(root, "disabled.sqlite"));
+      expect(
+        (await postJson(disabled, "/sync/workspaces", { workspaceId: WORKSPACE_ID })).status,
+      ).toBe(200);
+      expect(
+        (
+          await fetch(`${disabled}/sync/${WORKSPACE_ID}/app-publications`, {
+            headers: authHeaders(),
+          })
+        ).status,
+      ).toBe(404);
 
-  it.each(["2"])("wires app publication and collection approval opt-ins with quota %s", async (quota) => {
-    const root = await tempRoot("app-publication-config");
-    const disabled = await spawnRelay(join(root, "disabled.sqlite"));
-    expect((await postJson(disabled, "/sync/workspaces", {workspaceId: WORKSPACE_ID})).status).toBe(200);
-    expect((await fetch(`${disabled}/sync/${WORKSPACE_ID}/app-publications`, {headers: authHeaders()})).status).toBe(404);
-
-    const enabled = await spawnRelay(join(root, "enabled.sqlite"), {DOHC_RELAY_APP_PUBLICATIONS: "1", DOHC_RELAY_APP_COLLECTION_MAX_CREATES_PER_GRANT: quota});
-    expect((await postJson(enabled, "/sync/workspaces", {workspaceId: WORKSPACE_ID})).status).toBe(200);
-    const path = `/sync/${WORKSPACE_ID}/app-publications`;
-    expect((await fetch(`${enabled}${path}`, {headers: authHeaders()})).status).toBe(200);
-    expect((await fetch(`${enabled}${path}`)).status).toBe(404);
-    expect((await fetch(`${enabled}${path}`, {headers: {authorization: "Bearer test:other-owner"}})).status).toBe(404);
-    const shareResponse = await postJson(enabled, `/sync/${WORKSPACE_ID}/shares`, {recipientUserId: "recipient", paths: ["app"], access: "view"});
-    expect(shareResponse.status).toBe(200);
-    const share = await shareResponse.json() as {shareId: string; grantId: string; generation: number};
-    const script = Buffer.from("document.body.textContent='Trip poll';");
-    const scriptHash = sha256(script);
-    expect((await putBytes(enabled, `/sync/${WORKSPACE_ID}/blobs/${scriptHash}`, script)).status).toBe(200);
-    const digest = (domain: string, value: unknown) => sha256(Buffer.from(JSON.stringify([domain, value])));
-    const inputs = [{path: "app/main.js", sha256: "4".repeat(64), byteLength: 20}];
-    const files = [{path: "bundle.js", sha256: scriptHash, byteLength: script.byteLength, contentType: "text/javascript; charset=utf-8"}];
-    const compiler = {recipe: "closed-esbuild", version: "0.28.1", binarySha256: "3".repeat(64)};
-    const sourceDigest = digest("dohc-app-source-v2", {entry: "app/main.js", files: inputs, packages: []});
-    const dependencyLockDigest = digest("dohc-app-dependencies-v1", inputs);
-    const bundleDigest = digest("dohc-app-bundle-v1", files);
-    const candidate = {versionId: "main", appRoot: "app", entryPath: "app/main.js", packageMap: {}, sourceRevision: "1".repeat(64),
-      sourceDigest, dependencyLockDigest, bundleDigest,
-      buildDigest: digest("dohc-app-build-v1", {sourceDigest, dependencyLockDigest, compiler, bundleDigest}),
-      compilerIdentity: compiler, inputs, dependencies: ["app/main.js"], files, capabilities: []};
-    const publishedResponse = await postJson(enabled, path, {shareId: share.shareId, grantId: share.grantId,
-      expectedGrantGeneration: share.generation, candidate});
-    expect(publishedResponse.status, await publishedResponse.clone().text()).toBe(200);
-    const published = await publishedResponse.json() as {publicationId: string; authorityRevision: number};
-    const approvalPath = `${path}/${published.publicationId}/collection-approval`;
-    expect((await postJson(enabled, approvalPath, {
-      expectedAuthorityRevision: published.authorityRevision, capability: {},
-    })).status).toBe(quota === "2" ? 400 : 404);
-    const approval = await postJson(enabled, approvalPath, {
-      expectedAuthorityRevision: published.authorityRevision, capability: null,
-    });
-    expect(approval.status).toBe(200);
-    const approved = await approval.json() as {authorityRevision: number; capability: null};
-    expect(approved.capability).toBeNull();
-    expect(approved.authorityRevision).toBe(published.authorityRevision + 1);
-    published.authorityRevision = approved.authorityRevision;
-    const read = await fetch(`${enabled}${path}/${published.publicationId}`, {headers: authHeaders()});
-    expect(read.status).toBe(200);
-    expect((await read.json() as {active: boolean}).active).toBe(true);
-    expect((await postJson(enabled, `${path}/${published.publicationId}/withdraw`, {expectedAuthorityRevision: published.authorityRevision})).status).toBe(200);
-    const withdrawn = await fetch(`${enabled}${path}/${published.publicationId}`, {headers: authHeaders()});
-    expect((await withdrawn.json() as {active: boolean}).active).toBe(false);
-    // Deployment opt-in alone grants neither collection authority nor public Edit.
-    const collectionRefusal = await postJson(enabled, `/sync/link/app-publications/${published.publicationId}/collection`, {fields: {destination: "Tokyo"}});
-    expect(collectionRefusal.status).toBe(404);
-    expect(await collectionRefusal.json()).toEqual({ok: false, error: "not found"});
-    expect((await postJson(enabled, "/sync/live/link-tickets", {})).status).toBe(404);
-  });
+      const enabled = await spawnRelay(join(root, "enabled.sqlite"), {
+        DOHC_RELAY_APP_PUBLICATIONS: "1",
+        DOHC_RELAY_APP_COLLECTION_MAX_CREATES_PER_GRANT: quota,
+      });
+      expect(
+        (await postJson(enabled, "/sync/workspaces", { workspaceId: WORKSPACE_ID })).status,
+      ).toBe(200);
+      const path = `/sync/${WORKSPACE_ID}/app-publications`;
+      expect((await fetch(`${enabled}${path}`, { headers: authHeaders() })).status).toBe(200);
+      expect((await fetch(`${enabled}${path}`)).status).toBe(404);
+      expect(
+        (
+          await fetch(`${enabled}${path}`, {
+            headers: { authorization: "Bearer test:other-owner" },
+          })
+        ).status,
+      ).toBe(404);
+      const shareResponse = await postJson(enabled, `/sync/${WORKSPACE_ID}/shares`, {
+        recipientUserId: "recipient",
+        paths: ["app"],
+        access: "view",
+      });
+      expect(shareResponse.status).toBe(200);
+      const share = (await shareResponse.json()) as {
+        shareId: string;
+        grantId: string;
+        generation: number;
+      };
+      const script = Buffer.from("document.body.textContent='Trip poll';");
+      const scriptHash = sha256(script);
+      expect(
+        (await putBytes(enabled, `/sync/${WORKSPACE_ID}/blobs/${scriptHash}`, script)).status,
+      ).toBe(200);
+      const digest = (domain: string, value: unknown) =>
+        sha256(Buffer.from(JSON.stringify([domain, value])));
+      const inputs = [{ path: "app/main.js", sha256: "4".repeat(64), byteLength: 20 }];
+      const files = [
+        {
+          path: "bundle.js",
+          sha256: scriptHash,
+          byteLength: script.byteLength,
+          contentType: "text/javascript; charset=utf-8",
+        },
+      ];
+      const compiler = {
+        recipe: "closed-esbuild",
+        version: "0.28.1",
+        binarySha256: "3".repeat(64),
+      };
+      const sourceDigest = digest("dohc-app-source-v2", {
+        entry: "app/main.js",
+        files: inputs,
+        packages: [],
+      });
+      const dependencyLockDigest = digest("dohc-app-dependencies-v1", inputs);
+      const bundleDigest = digest("dohc-app-bundle-v1", files);
+      const candidate = {
+        versionId: "main",
+        appRoot: "app",
+        entryPath: "app/main.js",
+        packageMap: {},
+        sourceRevision: "1".repeat(64),
+        sourceDigest,
+        dependencyLockDigest,
+        bundleDigest,
+        buildDigest: digest("dohc-app-build-v1", {
+          sourceDigest,
+          dependencyLockDigest,
+          compiler,
+          bundleDigest,
+        }),
+        compilerIdentity: compiler,
+        inputs,
+        dependencies: ["app/main.js"],
+        files,
+        capabilities: [],
+      };
+      const publishedResponse = await postJson(enabled, path, {
+        shareId: share.shareId,
+        grantId: share.grantId,
+        expectedGrantGeneration: share.generation,
+        candidate,
+      });
+      expect(publishedResponse.status, await publishedResponse.clone().text()).toBe(200);
+      const published = (await publishedResponse.json()) as {
+        publicationId: string;
+        authorityRevision: number;
+      };
+      const approvalPath = `${path}/${published.publicationId}/collection-approval`;
+      expect(
+        (
+          await postJson(enabled, approvalPath, {
+            expectedAuthorityRevision: published.authorityRevision,
+            capability: {},
+          })
+        ).status,
+      ).toBe(quota === "2" ? 400 : 404);
+      const approval = await postJson(enabled, approvalPath, {
+        expectedAuthorityRevision: published.authorityRevision,
+        capability: null,
+      });
+      expect(approval.status).toBe(200);
+      const approved = (await approval.json()) as { authorityRevision: number; capability: null };
+      expect(approved.capability).toBeNull();
+      expect(approved.authorityRevision).toBe(published.authorityRevision + 1);
+      published.authorityRevision = approved.authorityRevision;
+      const read = await fetch(`${enabled}${path}/${published.publicationId}`, {
+        headers: authHeaders(),
+      });
+      expect(read.status).toBe(200);
+      expect(((await read.json()) as { active: boolean }).active).toBe(true);
+      expect(
+        (
+          await postJson(enabled, `${path}/${published.publicationId}/withdraw`, {
+            expectedAuthorityRevision: published.authorityRevision,
+          })
+        ).status,
+      ).toBe(200);
+      const withdrawn = await fetch(`${enabled}${path}/${published.publicationId}`, {
+        headers: authHeaders(),
+      });
+      expect(((await withdrawn.json()) as { active: boolean }).active).toBe(false);
+      // Deployment opt-in alone grants neither collection authority nor public Edit.
+      const collectionRefusal = await postJson(
+        enabled,
+        `/sync/link/app-publications/${published.publicationId}/collection`,
+        { fields: { destination: "Tokyo" } },
+      );
+      expect(collectionRefusal.status).toBe(404);
+      expect(await collectionRefusal.json()).toEqual({ ok: false, error: "not found" });
+      expect((await postJson(enabled, "/sync/live/link-tickets", {})).status).toBe(404);
+    },
+  );
 
   it("exits with code 0 on SIGTERM when the Postgres pool rejects shutdown", async () => {
     const relayRoot = await tempRoot("relay-pool-shutdown-rejection");
@@ -80,8 +189,8 @@ describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
       },
       { rejectPoolEnd: true, emptyDeletionJobs: true },
     );
-    const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
-      (resolve) => relay.child.once("close", (code, signal) => resolve({ code, signal })),
+    const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) =>
+      relay.child.once("close", (code, signal) => resolve({ code, signal })),
     );
 
     sendTerminationSignal(relay.child);
@@ -250,27 +359,16 @@ describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
 
     const secret = "z".repeat(43);
     const firstClientStatuses = await Promise.all(
-      Array.from({ length: LINK_EXCHANGE_BUCKET_CAPACITY + 1 }, async () =>
-        (
-          await exchangeLink(
-            baseUrl,
-            secret,
-            "198.51.100.10",
-            relayExchangeKey,
-          )
-        ).status,
+      Array.from(
+        { length: LINK_EXCHANGE_BUCKET_CAPACITY + 1 },
+        async () => (await exchangeLink(baseUrl, secret, "198.51.100.10", relayExchangeKey)).status,
       ),
     );
 
     // Prove the first address's bucket is exhausted within one batch before
     // asserting the second address succeeds — otherwise one larger shared
     // bucket passes.
-    const secondClient = await exchangeLink(
-      baseUrl,
-      secret,
-      "198.51.100.11",
-      relayExchangeKey,
-    );
+    const secondClient = await exchangeLink(baseUrl, secret, "198.51.100.11", relayExchangeKey);
     expect({
       firstClientStatuses: [...firstClientStatuses].sort(
         (left: number, right: number) => left - right,
@@ -294,8 +392,9 @@ describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
 
     const secret = "z".repeat(43);
     const firstClientStatuses = await Promise.all(
-      Array.from({ length: LINK_EXCHANGE_BUCKET_CAPACITY + 1 }, async () =>
-        (await exchangeLink(baseUrl, secret, "203.0.113.10")).status,
+      Array.from(
+        { length: LINK_EXCHANGE_BUCKET_CAPACITY + 1 },
+        async () => (await exchangeLink(baseUrl, secret, "203.0.113.10")).status,
       ),
     );
 

@@ -7,12 +7,16 @@ export function isCodeBlockNode(node: { type: { name: string } }): boolean {
   return node.type.name === "code_block" || node.type.name === "codeBlock";
 }
 
-export function isCodeBlock(node: { type: { name: string; spec?: { code?: boolean } } } | null): boolean {
+export function isCodeBlock(
+  node: { type: { name: string; spec?: { code?: boolean } } } | null,
+): boolean {
   return !!node && (isCodeBlockNode(node) || node.type.spec?.code === true);
 }
 
 export function isCodeMark(mark: { type: { name: string; spec?: { code?: boolean } } }): boolean {
-  return mark.type.name === "inlineCode" || mark.type.name === "code" || mark.type.spec?.code === true;
+  return (
+    mark.type.name === "inlineCode" || mark.type.name === "code" || mark.type.spec?.code === true
+  );
 }
 
 /** What changed between two documents, found by comparing them rather than

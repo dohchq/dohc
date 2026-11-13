@@ -1,7 +1,4 @@
-import type {
-  PresenceResult,
-  PresenceScopeInput,
-} from "../../ipc/bridgeContract";
+import type { PresenceResult, PresenceScopeInput } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import type { PresenceSnapshot, PresenceTransport } from "./presenceChannel";
 
@@ -30,9 +27,7 @@ function toSnapshot(snapshot: Extract<PresenceResult, { ok: true }>["snapshot"])
   };
 }
 
-export function createIpcPresenceTransport(
-  scope: PresenceScopeInput,
-): PresenceTransport {
+export function createIpcPresenceTransport(scope: PresenceScopeInput): PresenceTransport {
   return {
     async publish({ topic, clientId, incarnationId, state }): Promise<PresenceSnapshot> {
       const result = await bridge().presencePublish({
@@ -62,7 +57,9 @@ export function createIpcPresenceTransport(
       const pollId = nextPollId();
       const onAbort = () => {
         // Tell main to abort the in-flight relay long-poll for this poll id.
-        void bridge().presenceCancel({ pollId }).catch(() => undefined);
+        void bridge()
+          .presenceCancel({ pollId })
+          .catch(() => undefined);
       };
       signal.addEventListener("abort", onAbort, { once: true });
       try {

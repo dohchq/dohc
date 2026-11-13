@@ -9,7 +9,11 @@ export async function readStdinText(
   const chunks: Buffer[] = [];
   let bytesRead = 0;
   for await (const chunk of stream) {
-    const bytes = Buffer.isBuffer(chunk) ? chunk : typeof chunk === "string" ? Buffer.from(chunk, "utf8") : Buffer.from(chunk);
+    const bytes = Buffer.isBuffer(chunk)
+      ? chunk
+      : typeof chunk === "string"
+        ? Buffer.from(chunk, "utf8")
+        : Buffer.from(chunk);
     bytesRead += bytes.length;
     if (limit !== undefined && bytesRead > limit.bytes) {
       throw new DohcCliError(limit.message);
@@ -28,7 +32,10 @@ export async function readPassword(
   prompt: NodeJS.WritableStream,
 ): Promise<string> {
   if (!stdin.isTTY) {
-    const text = await readStdinText(stdin, { bytes: MAX_PASSWORD_BYTES + 2, message: "the password is at most 1024 bytes" });
+    const text = await readStdinText(stdin, {
+      bytes: MAX_PASSWORD_BYTES + 2,
+      message: "the password is at most 1024 bytes",
+    });
     return text.replace(/\r?\n$/u, "");
   }
   prompt.write("Server account password: ");
@@ -49,7 +56,10 @@ export async function readPassword(
       for (const char of chunk) {
         if (char === "\r" || char === "\n" || char === "\u0004") return finish();
         if (char === "\u0003") return finish(new DohcCliError("cancelled"));
-        password = char === "\u007f" || char === "\b" ? [...password].slice(0, -1).join("") : password + char;
+        password =
+          char === "\u007f" || char === "\b"
+            ? [...password].slice(0, -1).join("")
+            : password + char;
       }
     };
     stdin.on("data", onData);

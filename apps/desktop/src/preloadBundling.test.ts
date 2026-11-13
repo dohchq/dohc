@@ -31,13 +31,15 @@ it("bundles every package reached by the preload's local runtime import graph", 
     logLevel: "silent",
   });
   const allowed = new Set(["electron", ...preloadBundledRuntimeDeps]);
-  const missing = [...new Set(
-    Object.values(metafile.outputs)
-      .flatMap((output) => output.imports)
-      .filter((dependency) => dependency.external)
-      .map((dependency) => packageRootOf(dependency.path))
-      .filter((packageName) => !allowed.has(packageName)),
-  )].sort();
+  const missing = [
+    ...new Set(
+      Object.values(metafile.outputs)
+        .flatMap((output) => output.imports)
+        .filter((dependency) => dependency.external)
+        .map((dependency) => packageRootOf(dependency.path))
+        .filter((packageName) => !allowed.has(packageName)),
+    ),
+  ].sort();
 
   expect(
     missing,

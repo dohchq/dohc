@@ -2,7 +2,16 @@
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DELETED_FILE_DRAFT_NOTICE, DocumentControls, OPENING_TITLE, OPENING_WORDS_DELAY_MS, OpeningState, OrphanedDraftNotices, REPLACED_HISTORY_DRAFT_NOTICE, ViewActions } from "./fileInspectorUi";
+import {
+  DELETED_FILE_DRAFT_NOTICE,
+  DocumentControls,
+  OPENING_TITLE,
+  OPENING_WORDS_DELAY_MS,
+  OpeningState,
+  OrphanedDraftNotices,
+  REPLACED_HISTORY_DRAFT_NOTICE,
+  ViewActions,
+} from "./fileInspectorUi";
 import { captureOrphanedDraft, loadLiveDraftRecovery, resetOrphanedDrafts } from "./orphanedDrafts";
 import { PENDING_SHARE_WORDS_DELAY_MS, StateMark, type SaveStateKey } from "./ui/StateMark";
 import { EditorTabs } from "./workbench/EditorTabs";
@@ -14,21 +23,28 @@ const noop = () => undefined;
 const NO_RECOVERY: ReadonlySet<string> = new Set();
 
 describe("DocumentControls", () => {
-  it.each(["dohc could not open this file.", "This note has parts dohc can't show.", OPENING_TITLE])(
-    "keeps a disabled toggle reachable and describes why: %s", async (reason) => {
-      const user = userEvent.setup();
-      const onClick = vi.fn();
-      render(<DocumentControls toggle={{ label: "Edit", disabled: true, title: reason, onClick }} menu={null} />);
-      const toggle = screen.getByRole("button", { name: "Edit", description: reason });
-      expect(toggle.getAttribute("title")).toBe(reason);
-      expect(toggle.getAttribute("aria-disabled")).toBe("true");
-      await user.tab();
-      expect(document.activeElement).toBe(toggle);
-      await user.keyboard("{Enter} ");
-      await user.click(toggle);
-      expect(onClick).not.toHaveBeenCalled();
-    },
-  );
+  it.each([
+    "dohc could not open this file.",
+    "This note has parts dohc can't show.",
+    OPENING_TITLE,
+  ])("keeps a disabled toggle reachable and describes why: %s", async (reason) => {
+    const user = userEvent.setup();
+    const onClick = vi.fn();
+    render(
+      <DocumentControls
+        toggle={{ label: "Edit", disabled: true, title: reason, onClick }}
+        menu={null}
+      />,
+    );
+    const toggle = screen.getByRole("button", { name: "Edit", description: reason });
+    expect(toggle.getAttribute("title")).toBe(reason);
+    expect(toggle.getAttribute("aria-disabled")).toBe("true");
+    await user.tab();
+    expect(document.activeElement).toBe(toggle);
+    await user.keyboard("{Enter} ");
+    await user.click(toggle);
+    expect(onClick).not.toHaveBeenCalled();
+  });
 });
 
 // One editor group as the shell lays it out: its tab row, then the view.
@@ -117,9 +133,13 @@ describe("ViewActions", () => {
   // left of Share, so Share and the controls right of it stay put.
   it("puts Run for an app's entry left of Share, and nothing without one", () => {
     const onRun = vi.fn();
-    const { rerender } = render(<ViewActions onShare={noop} actions={<button type="button">Source</button>} />);
+    const { rerender } = render(
+      <ViewActions onShare={noop} actions={<button type="button">Source</button>} />,
+    );
     expect(screen.queryByRole("button", { name: "Run app" })).toBeNull();
-    rerender(<ViewActions onShare={noop} onRun={onRun} actions={<button type="button">Source</button>} />);
+    rerender(
+      <ViewActions onShare={noop} onRun={onRun} actions={<button type="button">Source</button>} />,
+    );
     const run = screen.getByRole("button", { name: "Run app" });
     expect(run.dataset.testid).toBe("file-run-app");
     expect(precedes(run, screen.getByRole("button", { name: "Share file" }))).toBe(true);
@@ -133,7 +153,15 @@ describe("ViewActions", () => {
   it.each(["saved", "saving", "saved-to-host"] as const)(
     "keeps a calm %s state for screen readers only, with no box beside Share",
     (saveState) => {
-      render(<Group id="left" groupNumber={1} path="trip/plan.md" onShare={noop} saveState={saveState} />);
+      render(
+        <Group
+          id="left"
+          groupNumber={1}
+          path="trip/plan.md"
+          onShare={noop}
+          saveState={saveState}
+        />,
+      );
       const mark = screen.getByTestId("status-left");
       expect(mark.classList.contains("sr-only")).toBe(true);
       expect(mark.dataset.state).toBe(saveState);
@@ -147,7 +175,9 @@ describe("ViewActions", () => {
     ["error", "Couldn't save"],
     ["changed-on-disk", "Changed outside dohc"],
   ] as const)("shows a %s state in words beside Share", (saveState, words) => {
-    render(<Group id="left" groupNumber={1} path="trip/plan.md" onShare={noop} saveState={saveState} />);
+    render(
+      <Group id="left" groupNumber={1} path="trip/plan.md" onShare={noop} saveState={saveState} />,
+    );
     const mark = screen.getByTestId("status-left");
     expect(mark.classList.contains("sr-only")).toBe(false);
     expect(mark.textContent).toBe(words);
@@ -162,7 +192,15 @@ describe("ViewActions", () => {
     afterEach(() => vi.useRealTimers());
 
     it("shows its words once it has lasted", () => {
-      render(<Group id="left" groupNumber={1} path="trip/plan.md" onShare={noop} saveState="pending-share" />);
+      render(
+        <Group
+          id="left"
+          groupNumber={1}
+          path="trip/plan.md"
+          onShare={noop}
+          saveState="pending-share"
+        />,
+      );
       expect(screen.getByTestId("status-left").classList.contains("sr-only")).toBe(true);
       act(() => vi.advanceTimersByTime(PENDING_SHARE_WORDS_DELAY_MS));
       const mark = screen.getByTestId("status-left");
@@ -215,7 +253,9 @@ describe("ViewActions", () => {
         rerender(group("saved-to-host"));
         rerender(group("saving"));
       }
-      expect(screen.getByTestId("status-left").parentElement?.className.split(" ")[0]).toBe("contents");
+      expect(screen.getByTestId("status-left").parentElement?.className.split(" ")[0]).toBe(
+        "contents",
+      );
     });
   });
 
@@ -227,20 +267,28 @@ describe("ViewActions", () => {
     afterEach(() => vi.useRealTimers());
 
     it("draws no words and keeps the actions in place for a quick open", () => {
-      const { rerender } = render(<Group id="left" groupNumber={1} path="trip/plan.md" onShare={noop} saveState="opening" />);
+      const { rerender } = render(
+        <Group id="left" groupNumber={1} path="trip/plan.md" onShare={noop} saveState="opening" />,
+      );
       const opening = screen.getByTestId("markdown-open-state");
       expect(opening.classList.contains("sr-only")).toBe(true);
       expect(opening.textContent).toBe("Opening…");
       expect(opening.parentElement?.className.split(" ")[0]).toBe("contents");
       act(() => vi.advanceTimersByTime(OPENING_WORDS_DELAY_MS - 1));
       expect(screen.getByTestId("markdown-open-state").classList.contains("sr-only")).toBe(true);
-      rerender(<Group id="left" groupNumber={1} path="trip/plan.md" onShare={noop} saveState="saved" />);
+      rerender(
+        <Group id="left" groupNumber={1} path="trip/plan.md" onShare={noop} saveState="saved" />,
+      );
       expect(screen.queryByTestId("markdown-open-state")).toBeNull();
-      expect(screen.getByTestId("status-left").parentElement?.className.split(" ")[0]).toBe("contents");
+      expect(screen.getByTestId("status-left").parentElement?.className.split(" ")[0]).toBe(
+        "contents",
+      );
     });
 
     it("says Opening… in words once the open is slow", () => {
-      render(<Group id="left" groupNumber={1} path="trip/plan.md" onShare={noop} saveState="opening" />);
+      render(
+        <Group id="left" groupNumber={1} path="trip/plan.md" onShare={noop} saveState="opening" />,
+      );
       act(() => vi.advanceTimersByTime(OPENING_WORDS_DELAY_MS));
       const opening = screen.getByTestId("markdown-open-state");
       expect(opening.getAttribute("role")).toBe("status");
@@ -267,7 +315,9 @@ describe("ViewActions", () => {
       </>,
     );
     const left = within(within(screen.getByTestId("group-left")).getByTestId("editor-tab-actions"));
-    const right = within(within(screen.getByTestId("group-right")).getByTestId("editor-tab-actions"));
+    const right = within(
+      within(screen.getByTestId("group-right")).getByTestId("editor-tab-actions"),
+    );
     expect(left.getByTestId("status-left")).toBeTruthy();
     expect(left.queryByTestId("status-right")).toBeNull();
     expect(right.getByTestId("status-right")).toBeTruthy();
@@ -297,19 +347,40 @@ describe("OrphanedDraftNotices", () => {
   it("says a replaced history's edits are set aside only once storage keeps them", async () => {
     const kept = captureOrphanedDraft("ws-1", "kept.md", "earlier edits");
     render(<OrphanedDraftNotices workspaceId="ws-1" path="kept.md" replacedDraftIds={[kept]} />);
-    expect((await screen.findByTestId("orphaned-draft-notice")).textContent).toContain(REPLACED_HISTORY_DRAFT_NOTICE);
+    expect((await screen.findByTestId("orphaned-draft-notice")).textContent).toContain(
+      REPLACED_HISTORY_DRAFT_NOTICE,
+    );
   });
 
   // dohc#2308. Main sets the text of a file deleted outside dohc aside while
   // its document is still open, and the banner says what the save notice says.
   it("says a deleted file's set-aside text is the file's, not a reopened document's", async () => {
-    const record = {path: "notes/gone.md", objectId: "object", text: "typed", updateBase64: "AAA="};
-    vi.stubGlobal("dohcDesktop", new Proxy({}, { get: (_target, name) => name === "listLiveDraftRecovery"
-      ? async () => [{...record, recordId: "a".repeat(64), reason: "deleted"}, {...record, path: "notes/reopened.md", recordId: "b".repeat(64)}]
-      : () => undefined }));
+    const record = {
+      path: "notes/gone.md",
+      objectId: "object",
+      text: "typed",
+      updateBase64: "AAA=",
+    };
+    vi.stubGlobal(
+      "dohcDesktop",
+      new Proxy(
+        {},
+        {
+          get: (_target, name) =>
+            name === "listLiveDraftRecovery"
+              ? async () => [
+                  { ...record, recordId: "a".repeat(64), reason: "deleted" },
+                  { ...record, path: "notes/reopened.md", recordId: "b".repeat(64) },
+                ]
+              : () => undefined,
+        },
+      ),
+    );
     await loadLiveDraftRecovery("ws-1", () => true);
     render(<OrphanedDraftNotices workspaceId="ws-1" path="notes/gone.md" />);
-    expect((await screen.findByTestId("orphaned-draft-notice")).textContent).toContain(DELETED_FILE_DRAFT_NOTICE);
+    expect((await screen.findByTestId("orphaned-draft-notice")).textContent).toContain(
+      DELETED_FILE_DRAFT_NOTICE,
+    );
     cleanup();
     render(<OrphanedDraftNotices workspaceId="ws-1" path="notes/reopened.md" />);
     const reopened = (await screen.findByTestId("orphaned-draft-notice")).textContent;
@@ -322,7 +393,9 @@ describe("OrphanedDraftNotices", () => {
       throw new DOMException("The quota has been exceeded.", "QuotaExceededError");
     });
     const refused = captureOrphanedDraft("ws-1", "refused.md", "earlier edits");
-    render(<OrphanedDraftNotices workspaceId="ws-1" path="refused.md" replacedDraftIds={[refused]} />);
+    render(
+      <OrphanedDraftNotices workspaceId="ws-1" path="refused.md" replacedDraftIds={[refused]} />,
+    );
     const row = await screen.findByTestId("orphaned-draft-notice");
     expect(row.textContent).not.toContain(REPLACED_HISTORY_DRAFT_NOTICE);
     expect(row.textContent).toContain("Copy your edits to keep them.");

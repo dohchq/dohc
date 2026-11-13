@@ -56,9 +56,7 @@ export async function settle(condition: () => boolean): Promise<void> {
     });
     if (condition()) return;
     if (now() - started >= SETTLE_TIME_LIMIT_MS) {
-      throw new Error(
-        `Condition did not settle within ${String(SETTLE_TIME_LIMIT_MS)} ms`,
-      );
+      throw new Error(`Condition did not settle within ${String(SETTLE_TIME_LIMIT_MS)} ms`);
     }
   }
 }

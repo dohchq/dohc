@@ -21,17 +21,15 @@ export function liveJournalHistoryNamespace(storage: StorageContext): string {
 }
 
 /** The attached history's namespace, for reads that change nothing. Undefined while none is attached. */
-export const attachedLiveJournalHistoryNamespace = (storage: StorageContext): string | undefined => attached.get(storage)?.namespace;
+export const attachedLiveJournalHistoryNamespace = (storage: StorageContext): string | undefined =>
+  attached.get(storage)?.namespace;
 
 /** Private provisioning; the caller owns history continuity outside the relay backup. */
 export function createLiveJournalHistoryAuthority(input: {
   namespace: string;
   reconciled: boolean;
 }): LiveJournalHistoryAuthority {
-  const namespace = parseLiveUpdateIdentifier(
-    input.namespace,
-    "relay history namespace",
-  );
+  const namespace = parseLiveUpdateIdentifier(input.namespace, "relay history namespace");
   if (typeof input.reconciled !== "boolean")
     throw new TypeError("History reconciliation state is required.");
   const state = { namespace, reconciled: input.reconciled };
@@ -54,8 +52,7 @@ export function attachLiveJournalHistory(
   storage: StorageContext,
   authority: LiveJournalHistoryAuthority,
 ): void {
-  if (!authorities.has(authority))
-    throw new TypeError("Unknown relay history authority.");
+  if (!authorities.has(authority)) throw new TypeError("Unknown relay history authority.");
   const existing = attached.get(storage);
   if (existing && existing !== authority)
     throw new Error("Relay history authority is already attached.");

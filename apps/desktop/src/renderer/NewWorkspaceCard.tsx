@@ -31,9 +31,7 @@ function folderNameError(name: string, platform: string): string | null {
   return workspaceNameError(trimmed, platform);
 }
 
-export function NewWorkspaceCard(props: {
-  onWorkspaceReady: (workspace: Workspace) => void;
-}) {
+export function NewWorkspaceCard(props: { onWorkspaceReady: (workspace: Workspace) => void }) {
   const [root, setRoot] = useState<string | null>(null);
   const [folderName, setFolderName] = useState(DEFAULT_FOLDER_NAME);
   const [creating, setCreating] = useState(false);
@@ -88,7 +86,8 @@ export function NewWorkspaceCard(props: {
 
   // A new suggestion stays selected in the focused field.
   useLayoutEffect(() => {
-    if (!nameTyped.current && document.activeElement === nameField.current) nameField.current?.select();
+    if (!nameTyped.current && document.activeElement === nameField.current)
+      nameField.current?.select();
   }, [folderName]);
 
   async function chooseFolder() {
@@ -189,17 +188,29 @@ export function NewWorkspaceCard(props: {
           <Pencil size={13} strokeWidth={1.9} aria-hidden className="shrink-0 text-subtle" />
         </label>
         {/* The open path sits over the tab, so the card rises above it. */}
-        <div className={`dohc-elevated relative ${pathShown ? "z-4" : "z-2"} flex flex-col gap-4 rounded-xl rounded-tl-none border border-line bg-panel p-5`}>
+        <div
+          className={`dohc-elevated relative ${pathShown ? "z-4" : "z-2"} flex flex-col gap-4 rounded-xl rounded-tl-none border border-line bg-panel p-5`}
+        >
           {/* The name's error sits right under its tab. */}
           {nameError ? (
             <FieldError id="new-workspace-name-error" className="-mb-2">
               {nameError}
             </FieldError>
           ) : null}
-          <div {...locationTooltip.hoverProps} className="relative flex min-w-0 items-center gap-2 text-subtle">
+          <div
+            {...locationTooltip.hoverProps}
+            className="relative flex min-w-0 items-center gap-2 text-subtle"
+          >
             <Folder size={13} strokeWidth={1.9} aria-hidden className="shrink-0" />
-            <span data-testid="new-workspace-location" className="flex min-w-0 flex-1 text-[12px] leading-5 text-muted">
-              {path ? <PathLine path={path} /> : <span className="truncate">{error ? "Choose a folder" : "…"}</span>}
+            <span
+              data-testid="new-workspace-location"
+              className="flex min-w-0 flex-1 text-[12px] leading-5 text-muted"
+            >
+              {path ? (
+                <PathLine path={path} />
+              ) : (
+                <span className="truncate">{error ? "Choose a folder" : "…"}</span>
+              )}
             </span>
             {/* It stays live when no default arrived, so the person can still
                 choose a folder by hand. */}
@@ -224,7 +235,11 @@ export function NewWorkspaceCard(props: {
           </div>
 
           {error ? (
-            <p id="new-workspace-error" role="alert" className="-mt-2 text-xs leading-relaxed text-danger">
+            <p
+              id="new-workspace-error"
+              role="alert"
+              className="-mt-2 text-xs leading-relaxed text-danger"
+            >
               {error}
             </p>
           ) : null}

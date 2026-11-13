@@ -1,15 +1,40 @@
 import type { ChatLinksEnginePage } from "@dohc/workspace-contracts/chat-links";
 import { createHmac, randomBytes } from "node:crypto";
-import { actorHueInput, canonicalClaimedName, createActorIssuer, deriveLocalActor, deriveMomentActor, deriveRelayChatActor, parseActorKey, serializeActorKey } from "@dohc/workspace-contracts/actor-identity";
-import type { ActorIssuer, ActorRef, ActorKey, LocalActorIdentity } from "@dohc/workspace-contracts/actor-identity";
-import { ACTOR_HUES, actorHueSlot, isConnectedAgentId } from "@dohc/workspace-contracts/actor-presentation";
+import {
+  actorHueInput,
+  canonicalClaimedName,
+  createActorIssuer,
+  deriveLocalActor,
+  deriveMomentActor,
+  deriveRelayChatActor,
+  parseActorKey,
+  serializeActorKey,
+} from "@dohc/workspace-contracts/actor-identity";
+import type {
+  ActorIssuer,
+  ActorRef,
+  ActorKey,
+  LocalActorIdentity,
+} from "@dohc/workspace-contracts/actor-identity";
+import {
+  ACTOR_HUES,
+  actorHueSlot,
+  isConnectedAgentId,
+} from "@dohc/workspace-contracts/actor-presentation";
 import type { ChatMessage, MomentAuthor } from "@dohc/workspace-contracts/engine";
 import type { ActorPresentation } from "../ipc/bridgeContract";
 import type { AgentColors } from "../settings/userSettings";
 import type { CloudCredentials } from "./cloudCredentialStore";
-import { readLocalChatActor, resolveThreadActorSource, type ThreadActorSource } from "./chatRelayIdentity";
+import {
+  readLocalChatActor,
+  resolveThreadActorSource,
+  type ThreadActorSource,
+} from "./chatRelayIdentity";
 
-type DisplayMessage = Pick<ChatMessage, "author" | "authorActorKey" | "authorUserId" | "origin" | "authorAgentId">;
+type DisplayMessage = Pick<
+  ChatMessage,
+  "author" | "authorActorKey" | "authorUserId" | "origin" | "authorAgentId"
+>;
 const groups = new Map<string, { known: Map<string, string>; unknownSecret: Buffer }>();
 let nextGroup = 0;
 
@@ -23,9 +48,15 @@ function groupFor(workspaceId: string, identity: string, unknown: boolean): stri
     groups.set(workspaceId, workspace);
   }
   // Untrusted labels get stable opaque groups without retaining each label.
-  if (unknown) return "unknown:" + createHmac("sha256", workspace.unknownSecret).update(identity).digest("hex");
+  if (unknown)
+    return (
+      "unknown:" + createHmac("sha256", workspace.unknownSecret).update(identity).digest("hex")
+    );
   let group = workspace.known.get(identity);
-  if (group === undefined) { group = String(nextGroup++); workspace.known.set(identity, group); }
+  if (group === undefined) {
+    group = String(nextGroup++);
+    workspace.known.set(identity, group);
+  }
   return group;
 }
 type AgentColorSource = () => AgentColors | undefined;
@@ -34,7 +65,10 @@ function agentColorsReader(source: AgentColorSource | undefined) {
   let colors = admittedAgentColors();
   return () => {
     const current = source?.();
-    if (current !== previous) { previous = current; colors = admittedAgentColors(current); }
+    if (current !== previous) {
+      previous = current;
+      colors = admittedAgentColors(current);
+    }
     return colors;
   };
 }
@@ -42,13 +76,16 @@ function admittedAgentColors(colors: AgentColors = {}): Map<string, ActorPresent
   const admitted = new Map<string, ActorPresentation["hue"]>();
   for (const [serialized, hue] of Object.entries(colors)) {
     const key = parseActorKey(serialized);
-    if (key?.kind === "agent" && serializeActorKey(key) === serialized) admitted.set(serialized, hue);
+    if (key?.kind === "agent" && serializeActorKey(key) === serialized)
+      admitted.set(serialized, hue);
   }
   return admitted;
 }
 
 export function agentKeyForGroup(workspaceId: string, group: string): string {
-  const serialized = [...(groups.get(workspaceId)?.known ?? [])].find(([, issued]) => issued === group)?.[0];
+  const serialized = [...(groups.get(workspaceId)?.known ?? [])].find(
+    ([, issued]) => issued === group,
+  )?.[0];
   if (serialized === undefined || parseActorKey(serialized)?.kind !== "agent") {
     throw new Error("Choose an agent shown in this workspace.");
   }
@@ -56,7 +93,8 @@ export function agentKeyForGroup(workspaceId: string, group: string): string {
 }
 
 export function agentColorChanges(previous: AgentColors = {}, next: AgentColors = {}) {
-  const before = admittedAgentColors(previous), after = admittedAgentColors(next);
+  const before = admittedAgentColors(previous),
+    after = admittedAgentColors(next);
   const changes: Array<{ workspaceId: string; group: string; hue: ActorPresentation["hue"] }> = [];
   for (const [workspaceId, workspace] of groups) {
     for (const [key, group] of workspace.known) {
@@ -68,61 +106,103 @@ export function agentColorChanges(previous: AgentColors = {}, next: AgentColors 
 }
 
 function humanHue(key: ActorKey): ActorPresentation["hue"] {
-  const human = key.kind === "account" || key.kind === "installation" || key.kind === "legacy-human";
+  const human =
+    key.kind === "account" || key.kind === "installation" || key.kind === "legacy-human";
   const input = human ? actorHueInput(key) : null;
   return input ? ACTOR_HUES[actorHueSlot(input.value)]! : null;
 }
 function localAccount(credentials: CloudCredentials | null): LocalActorIdentity["account"] {
   if (!credentials) return null;
-  try { return { issuer: createActorIssuer(credentials.serverUrl), userId: credentials.userId }; }
-  catch { /* Invalid account metadata leaves the installation hue and cannot establish self. */ return null; }
+  try {
+    return { issuer: createActorIssuer(credentials.serverUrl), userId: credentials.userId };
+  } catch {
+    /* Invalid account metadata leaves the installation hue and cannot establish self. */ return null;
+  }
 }
 function localPersonKey(installationId: string, account: LocalActorIdentity["account"]): ActorKey {
-  return deriveLocalActor({ identity: { installationId, account },
-    workspaceId: "", author: { kind: "human" }, displayName: "", origin: "renderer" }).key;
+  return deriveLocalActor({
+    identity: { installationId, account },
+    workspaceId: "",
+    author: { kind: "human" },
+    displayName: "",
+    origin: "renderer",
+  }).key;
 }
 // This computer's person signed out and signed in. The two keys stay apart.
 function localPersonKeys(installationId: string, account: LocalActorIdentity["account"]): string[] {
-  return [localPersonKey(installationId, null), ...(account ? [localPersonKey(installationId, account)] : [])].map(serializeActorKey);
+  return [
+    localPersonKey(installationId, null),
+    ...(account ? [localPersonKey(installationId, account)] : []),
+  ].map(serializeActorKey);
 }
-function presentationFor(workspaceId: string, key: ActorKey, unknownIdentity: () => string, own: readonly string[], colors: Map<string, ActorPresentation["hue"]>, connected: ActorPresentation["connected"] | false, agentId?: string): ActorPresentation {
+function presentationFor(
+  workspaceId: string,
+  key: ActorKey,
+  unknownIdentity: () => string,
+  own: readonly string[],
+  colors: Map<string, ActorPresentation["hue"]>,
+  connected: ActorPresentation["connected"] | false,
+  agentId?: string,
+): ActorPresentation {
   const serialized = serializeActorKey(key);
   const unknown = key.kind === "unknown";
   const group = groupFor(workspaceId, unknown ? unknownIdentity() : serialized, unknown);
   const ownerKey = key.kind === "agent" ? serializeActorKey(key.ownerKey) : serialized;
-  const human = key.kind === "account" || key.kind === "installation" || key.kind === "legacy-human";
+  const human =
+    key.kind === "account" || key.kind === "installation" || key.kind === "legacy-human";
   const self = (human || key.kind === "agent") && own.includes(ownerKey);
-  return { group, hue: key.kind === "agent" ? colors.get(serialized) ?? null : humanHue(key), self,
+  return {
+    group,
+    hue: key.kind === "agent" ? (colors.get(serialized) ?? null) : humanHue(key),
+    self,
     ...(self && key.kind === "agent" && agentId !== undefined ? { agentId } : {}),
-    ...(connected ? { connected } : {}) };
+    ...(connected ? { connected } : {}),
+  };
 }
-export function ownActorPresentation(installationId: string, credentials: CloudCredentials | null): ActorPresentation {
-  return { group: "own", hue: humanHue(localPersonKey(installationId, localAccount(credentials))), self: true };
+export function ownActorPresentation(
+  installationId: string,
+  credentials: CloudCredentials | null,
+): ActorPresentation {
+  return {
+    group: "own",
+    hue: humanHue(localPersonKey(installationId, localAccount(credentials))),
+    self: true,
+  };
 }
 
-export function chatActorForPresentation(message: DisplayMessage, issuer: ActorIssuer | null): ActorRef {
+export function chatActorForPresentation(
+  message: DisplayMessage,
+  issuer: ActorIssuer | null,
+): ActorRef {
   // A link holder is its link alone: no local key, issuer, or account.
   if (message.author.kind === "link") {
     const { displayName, grantId, principalId } = message.author;
     return deriveRelayChatActor({ issuer: null, kind: "link", grantId, principalId, displayName });
   }
-  return readLocalChatActor(message) ?? deriveRelayChatActor({
-    issuer, authorUserId: message.authorUserId, displayName: message.author.displayName,
-    ...(message.origin ? { origin: message.origin } : {}),
-    // Another device's agent post names its run's agent and no key. It is keyed
-    // as that device keys it: the run's agent, else the unnamed agent.
-    ...(message.author.kind === "agent"
-      ? { kind: "agent", claimedName: canonicalClaimedName(message.authorAgentId) }
-      : { kind: message.author.kind }),
-  });
+  return (
+    readLocalChatActor(message) ??
+    deriveRelayChatActor({
+      issuer,
+      authorUserId: message.authorUserId,
+      displayName: message.author.displayName,
+      ...(message.origin ? { origin: message.origin } : {}),
+      // Another device's agent post names its run's agent and no key. It is keyed
+      // as that device keys it: the run's agent, else the unnamed agent.
+      ...(message.author.kind === "agent"
+        ? { kind: "agent", claimedName: canonicalClaimedName(message.authorAgentId) }
+        : { kind: message.author.kind }),
+    })
+  );
 }
 
 // A request owns one issuer lookup per thread, including one retry for registry replacement.
-export function createActorPresentationRequest(input: Omit<Parameters<typeof resolveThreadActorSource>[0], "threadId"> & {
-  installationId: string;
-  credentials: CloudCredentials | null;
-  agentColors?: AgentColorSource;
-}) {
+export function createActorPresentationRequest(
+  input: Omit<Parameters<typeof resolveThreadActorSource>[0], "threadId"> & {
+    installationId: string;
+    credentials: CloudCredentials | null;
+    agentColors?: AgentColorSource;
+  },
+) {
   const colors = agentColorsReader(input.agentColors);
   const sources = new Map<string, Promise<ThreadActorSource>>();
   const own = localPersonKeys(input.installationId, localAccount(input.credentials));
@@ -145,11 +225,26 @@ export function createActorPresentationRequest(input: Omit<Parameters<typeof res
     if (workspaceId === undefined) throw new Error("Chat workspace closed.");
     // A share serves no run id, so an agent post that came through one could be a run's or a
     // connected agent's. This device's own posts keep the key it wrote.
-    const connected = message.author.kind === "agent"
-      && (shared && message.authorActorKey === undefined ? "unknown" : isConnectedAgentId(key.kind === "agent" ? key.claimedName : message.authorAgentId));
-    return presentationFor(workspaceId, key,
-      () => JSON.stringify(["unknown", threadId, message.authorUserId ?? null, message.author.displayName]), own, colors(), connected,
-      message.authorAgentId);
+    const connected =
+      message.author.kind === "agent" &&
+      (shared && message.authorActorKey === undefined
+        ? "unknown"
+        : isConnectedAgentId(key.kind === "agent" ? key.claimedName : message.authorAgentId));
+    return presentationFor(
+      workspaceId,
+      key,
+      () =>
+        JSON.stringify([
+          "unknown",
+          threadId,
+          message.authorUserId ?? null,
+          message.author.displayName,
+        ]),
+      own,
+      colors(),
+      connected,
+      message.authorAgentId,
+    );
   };
 }
 
@@ -158,30 +253,56 @@ export function createActorPresentationRequest(input: Omit<Parameters<typeof res
  * and the current account on the workspace's server, and make the named-author issuer from that server once.
  * Received authors get no issuer and never borrow credentials, so they stay owner-asserted and never self.
  */
-export function createHistoryPresentationRequest(input: { workspaceId: string; assertCurrent(): void; agentColors?: AgentColorSource } & (
-  | { source: "own-store"; serverUrl: string | undefined; synced: boolean; installationId: string; credentials: CloudCredentials | null }
-  | { source: "received" }
-)): (authors: readonly MomentAuthor[]) => ActorPresentation[] {
+export function createHistoryPresentationRequest(
+  input: { workspaceId: string; assertCurrent(): void; agentColors?: AgentColorSource } & (
+    | {
+        source: "own-store";
+        serverUrl: string | undefined;
+        synced: boolean;
+        installationId: string;
+        credentials: CloudCredentials | null;
+      }
+    | { source: "received" }
+  ),
+): (authors: readonly MomentAuthor[]) => ActorPresentation[] {
   const colors = agentColorsReader(input.agentColors);
   let context: Parameters<typeof deriveMomentActor>[1] = { source: "received" };
   let own: string[] = [];
   if (input.source === "own-store") {
     let relayIssuer: ActorIssuer | undefined;
-    try { relayIssuer = input.serverUrl === undefined ? undefined : createActorIssuer(input.serverUrl); }
-    catch { /* An invalid server leaves named authors neutral. */ }
+    try {
+      relayIssuer = input.serverUrl === undefined ? undefined : createActorIssuer(input.serverUrl);
+    } catch {
+      /* An invalid server leaves named authors neutral. */
+    }
     // Moments name people by user id alone. A synced store's ids belong to its server, so an
     // account on another server, beside a server that can't be read, or in a folder that
     // synced and has no remote now, is not you here.
     const signedIn = localAccount(input.credentials);
-    const account = signedIn && (input.serverUrl === undefined ? !input.synced : signedIn.issuer === relayIssuer) ? signedIn : null;
-    context = { source: "own-store", identity: { installationId: input.installationId, account },
-      workspaceId: input.workspaceId, ...(relayIssuer ? { relayIssuer } : {}) };
+    const account =
+      signedIn && (input.serverUrl === undefined ? !input.synced : signedIn.issuer === relayIssuer)
+        ? signedIn
+        : null;
+    context = {
+      source: "own-store",
+      identity: { installationId: input.installationId, account },
+      workspaceId: input.workspaceId,
+      ...(relayIssuer ? { relayIssuer } : {}),
+    };
     own = localPersonKeys(input.installationId, account);
   }
   return (authors) => {
     input.assertCurrent();
-    return authors.map(author => presentationFor(input.workspaceId, deriveMomentActor(author, context, "").key,
-      () => JSON.stringify(["unknown", author]), own, colors(), author.kind === "agent" && isConnectedAgentId(author.agentId)));
+    return authors.map((author) =>
+      presentationFor(
+        input.workspaceId,
+        deriveMomentActor(author, context, "").key,
+        () => JSON.stringify(["unknown", author]),
+        own,
+        colors(),
+        author.kind === "agent" && isConnectedAgentId(author.agentId),
+      ),
+    );
   };
 }
 
@@ -189,7 +310,14 @@ export function chatLinkMessageForPresentation(
   author: NonNullable<ChatLinksEnginePage>["entries"][number]["author"],
 ): DisplayMessage {
   if (author.authorKind === "link") {
-    return { author: { kind: "link", displayName: author.authorDisplayName, grantId: author.linkGrantId, principalId: author.linkPrincipalId } };
+    return {
+      author: {
+        kind: "link",
+        displayName: author.authorDisplayName,
+        grantId: author.linkGrantId,
+        principalId: author.linkPrincipalId,
+      },
+    };
   }
   // Relay origin changes assurance, not the key used for grouping, hue and self.
   return {

@@ -42,11 +42,13 @@ const items = (count: number, marker: (item: number) => string) =>
 
 describe("a match deep in a long block lands the matched line", () => {
   // 1 "Intro"  2 ""  3.. "- Item 1" .. "- Item 100"  103 ""  104 "After"
-  const LONG_LIST = ["Intro", "", ...items(100, (n) => `- Item ${n}`), "", "After"]
-    .join("\n");
+  const LONG_LIST = ["Intro", "", ...items(100, (n) => `- Item ${n}`), "", "After"].join("\n");
 
   it("lands the ninetieth item of a hundred-item bullet list", () => {
-    expect(revealed(LONG_LIST, 92), "return null from listItemRange (or from intraBlockRange outright) -> null here, which is the reveal landing on 'Item 1' again.").toBe("Item 90");
+    expect(
+      revealed(LONG_LIST, 92),
+      "return null from listItemRange (or from intraBlockRange outright) -> null here, which is the reveal landing on 'Item 1' again.",
+    ).toBe("Item 90");
     expect(revealed(LONG_LIST, 102)).toBe("Item 100");
   });
 
@@ -58,16 +60,12 @@ describe("a match deep in a long block lands the matched line", () => {
   });
 
   it("lands a bold list item, not the block start", () => {
-    const body = items(40, (n) =>
-      n === 20 ? "- **Beta** second" : `- Item ${n}`,
-    ).join("\n");
+    const body = items(40, (n) => (n === 20 ? "- **Beta** second" : `- Item ${n}`)).join("\n");
     expect(revealed(body, 20)).toBe("Beta second");
   });
 
   it("lands a list item with a code span, not the block start", () => {
-    const body = items(40, (n) =>
-      n === 20 ? "- `code span` second" : `- Item ${n}`,
-    ).join("\n");
+    const body = items(40, (n) => (n === 20 ? "- `code span` second" : `- Item ${n}`)).join("\n");
     expect(revealed(body, 20)).toBe("code span second");
   });
 
@@ -79,23 +77,19 @@ describe("a match deep in a long block lands the matched line", () => {
   });
 
   it("lands an emphasized ordered-list item, not the block start", () => {
-    const body = items(40, (n) =>
-      n === 20 ? "20. *Beta* second" : `${n}. Item ${n}`,
-    ).join("\n");
+    const body = items(40, (n) => (n === 20 ? "20. *Beta* second" : `${n}. Item ${n}`)).join("\n");
     expect(revealed(body, 20)).toBe("Beta second");
   });
 
   it("lands a bold task item, not the block start", () => {
-    const body = items(40, (n) =>
-      n === 20 ? "- [ ] **Beta** task" : `- [ ] Task ${n}`,
-    ).join("\n");
+    const body = items(40, (n) => (n === 20 ? "- [ ] **Beta** task" : `- [ ] Task ${n}`)).join(
+      "\n",
+    );
     expect(revealed(body, 20)).toBe("Beta task");
   });
 
   it("lands a wikilink list item, not the block start", () => {
-    const body = items(40, (n) =>
-      n === 20 ? "- [[Beta]]" : `- Item ${n}`,
-    ).join("\n");
+    const body = items(40, (n) => (n === 20 ? "- [[Beta]]" : `- Item ${n}`)).join("\n");
     const landing = revealed(body, 20);
     expect(landing).not.toBeNull();
     expect(landing).toBe(editorDoc("[[Beta]]").textContent);
@@ -113,9 +107,7 @@ describe("a match deep in a long block lands the matched line", () => {
     expect(list.childCount).toBe(2);
     expect(list.child(1).textContent).toBe("b");
     expect(
-      intraBlockRange(list, 0, target.match!, (source) =>
-        editorDoc(source).textContent,
-      ),
+      intraBlockRange(list, 0, target.match!, (source) => editorDoc(source).textContent),
     ).toBeNull();
   });
 
@@ -146,13 +138,15 @@ describe("a match deep in a long block lands the matched line", () => {
       "3. Item three",
     ].join("\n");
 
-    const targetLine = editorDoc(body)
-      .child(0)
-      .child(1)
-      .child(1)
-      .textContent.split("\n")[249];
-    expect(targetLine?.trimStart(), "number the wrong fence line -> this fixture no longer pins line 250.").toBe("const value250 = 250;");
-    expect(revealed(body, 253), "keep the item-wide range -> the reveal starts at 'Item two'.").toBe(targetLine);
+    const targetLine = editorDoc(body).child(0).child(1).child(1).textContent.split("\n")[249];
+    expect(
+      targetLine?.trimStart(),
+      "number the wrong fence line -> this fixture no longer pins line 250.",
+    ).toBe("const value250 = 250;");
+    expect(
+      revealed(body, 253),
+      "keep the item-wide range -> the reveal starts at 'Item two'.",
+    ).toBe(targetLine);
   });
 
   it("lands a fenced-code line in the first item of a nested list", () => {
@@ -187,7 +181,10 @@ describe("a match deep in a long block lands the matched line", () => {
     const targetLine = codeBlock.textContent.split("\n")[149];
     expect(targetLine?.trimStart()).toBe("const nested150 = 150;");
 
-    expect(revealed(body, 154), "apply the first-item guard at every recursion depth. The reveal then falls back to the whole 'Outer two' item.").toBe(targetLine);
+    expect(
+      revealed(body, 154),
+      "apply the first-item guard at every recursion depth. The reveal then falls back to the whole 'Outer two' item.",
+    ).toBe(targetLine);
   });
 
   it("lands a fenced-code line when a later list item has no text of its own", () => {
@@ -214,7 +211,10 @@ describe("a match deep in a long block lands the matched line", () => {
     expect(item.child(1).type.name).toBe("codeBlock");
     const targetLine = item.child(1).textContent.split("\n")[249];
     expect(targetLine?.trimStart()).toBe("const value250 = 250;");
-    expect(revealed(body, 253), "require nested block index 1 even when the item's own source line is empty. The reveal then keeps the whole item range.").toBe(targetLine);
+    expect(
+      revealed(body, 253),
+      "require nested block index 1 even when the item's own source line is empty. The reveal then keeps the whole item range.",
+    ).toBe(targetLine);
   });
 
   it("lands a nested fenced-code line when a tab crosses the list indent", () => {
@@ -253,8 +253,14 @@ describe("a match deep in a long block lands the matched line", () => {
     const item = editorDoc(body).child(0).child(1);
     const itemText = item.textBetween(0, item.content.size, "\n");
 
-    expect(item.childCount, "accept an item with extra children -> this shape refines anyway.").toBe(4);
-    expect(revealed(body, 7), "narrow an unproved shape -> this loses the item-wide fallback.").toBe(itemText);
+    expect(
+      item.childCount,
+      "accept an item with extra children -> this shape refines anyway.",
+    ).toBe(4);
+    expect(
+      revealed(body, 7),
+      "narrow an unproved shape -> this loses the item-wide fallback.",
+    ).toBe(itemText);
   });
 
   it("keeps the item range when a valid nested fence has trailing item content", () => {
@@ -274,7 +280,10 @@ describe("a match deep in a long block lands the matched line", () => {
     expect(item.childCount).toBe(3);
     expect(item.child(1).type.name).toBe("codeBlock");
     expect(item.child(2).type.name).toBe("paragraph");
-    expect(revealed(body, 4), "loosen `childCount !== 2` to `< 2` -> the fence line narrows even though the trailing paragraph makes the item shape unprovable.").toBe(itemText);
+    expect(
+      revealed(body, 4),
+      "loosen `childCount !== 2` to `< 2` -> the fence line narrows even though the trailing paragraph makes the item shape unprovable.",
+    ).toBe(itemText);
     expect(revealed(body, 7)).toBe(itemText);
   });
 
@@ -288,7 +297,10 @@ describe("a match deep in a long block lands the matched line", () => {
   ].join("\n");
 
   it("lands the matched line of a three-hundred-line fenced block", () => {
-    expect(revealed(LONG_FENCE, 251), "return null from codeLineRange -> null here, which is the reveal landing on the opening fence with the match 250 lines below it.").toBe("const value250 = 250;");
+    expect(
+      revealed(LONG_FENCE, 251),
+      "return null from codeLineRange -> null here, which is the reveal landing on the opening fence with the match 250 lines below it.",
+    ).toBe("const value250 = 250;");
     expect(revealed(LONG_FENCE, 2)).toBe("const value1 = 1;");
     expect(revealed(LONG_FENCE, 301)).toBe("const value300 = 300;");
   });
@@ -318,16 +330,9 @@ describe("a match deep in a long block lands the matched line", () => {
   });
 
   it("keeps body indentation beyond the fence opener's indent", () => {
-    const body = [
-      "Intro",
-      "",
-      " ```",
-      "  extra indent kept",
-      " more",
-      " ```",
-      "",
-      "After",
-    ].join("\n");
+    const body = ["Intro", "", " ```", "  extra indent kept", " more", " ```", "", "After"].join(
+      "\n",
+    );
     const expected = editorDoc(body).child(1).textContent.split("\n")[0];
     expect(revealed(body, 4)).toBe(expected);
     expect(expected).toBe(" extra indent kept");
@@ -387,7 +392,10 @@ describe("an unsure intra-block match falls back to the block start", () => {
 
   for (const document of unsure) {
     it(document.name, () => {
-      expect(revealed(document.body, document.line), "drop the body equality in codeLineRange -> the indented code case lands a line the parse never held. Dropping the count gate in listItemRange shows up in the drift test below instead: these documents all agree with the parse, which is why they are here.").toBeNull();
+      expect(
+        revealed(document.body, document.line),
+        "drop the body equality in codeLineRange -> the indented code case lands a line the parse never held. Dropping the count gate in listItemRange shows up in the drift test below instead: these documents all agree with the parse, which is why they are here.",
+      ).toBeNull();
     });
   }
 
@@ -399,18 +407,14 @@ describe("an unsure intra-block match falls back to the block start", () => {
     expect(intraBlockRange(doc.child(0), 0, drifted)).toBeNull();
 
     const list = editorDoc("- a\n- b\n- c");
-    expect(
-      intraBlockRange(list.child(0), 0, { lines: ["- a", "- b"], offset: 1 }),
-    ).toBeNull();
+    expect(intraBlockRange(list.child(0), 0, { lines: ["- a", "- b"], offset: 1 })).toBeNull();
   });
 
   it("does not apply list rules to a blockquote container", () => {
     const quote = editorDoc("> - a\n>\n> * b").child(0);
     expect(quote.type.name).toBe("blockquote");
     expect(quote.childCount).toBe(2);
-    expect(
-      intraBlockRange(quote, 0, { lines: ["- a", "", "* b"], offset: 2 }),
-    ).toBeNull();
+    expect(intraBlockRange(quote, 0, { lines: ["- a", "", "* b"], offset: 2 })).toBeNull();
   });
 });
 

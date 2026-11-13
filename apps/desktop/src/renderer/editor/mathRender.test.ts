@@ -58,9 +58,11 @@ function mathNode(tex: string): ProseMirrorNode {
   } as unknown as ProseMirrorNode;
 }
 
-function makeNodeView(
-  tex: string,
-): { nodeView: NodeView; view: EditorView; dispatched: MarkupCall[] } {
+function makeNodeView(tex: string): {
+  nodeView: NodeView;
+  view: EditorView;
+  dispatched: MarkupCall[];
+} {
   const { view, dispatched } = makeFakeView();
   const nodeView = makeMathNodeView(false)(mathNode(tex), view, () => 0);
   document.body.appendChild(nodeView.dom);

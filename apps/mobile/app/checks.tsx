@@ -16,8 +16,12 @@ function ProbeScreen() {
 
   useEffect(() => {
     let live = true;
-    void runProbes().then(next => { if (live) setResults(next); });
-    return () => { live = false; };
+    void runProbes().then((next) => {
+      if (live) setResults(next);
+    });
+    return () => {
+      live = false;
+    };
   }, []);
 
   // Measure on the first frame that shows the results.
@@ -32,21 +36,33 @@ function ProbeScreen() {
       <Stack.Screen options={{ title: "dohc checks" }} />
       <FlatList
         data={results ?? []}
-        keyExtractor={item => item.name}
+        keyExtractor={(item) => item.name}
         contentInsetAdjustmentBehavior="automatic"
-        ListFooterComponent={startupMs !== undefined ? (
-          <View>
-            <Text style={[styles.footer, { color: muted }]} selectable>
-              {startupMs === null ? "Start time not recorded" : `Start to content ${startupMs.toFixed(0)} ms`}
-            </Text>
-          </View>
-        ) : undefined}
+        ListFooterComponent={
+          startupMs !== undefined ? (
+            <View>
+              <Text style={[styles.footer, { color: muted }]} selectable>
+                {startupMs === null
+                  ? "Start time not recorded"
+                  : `Start to content ${startupMs.toFixed(0)} ms`}
+              </Text>
+            </View>
+          ) : undefined
+        }
         renderItem={({ item }) => (
-          <View style={styles.row} accessible accessibilityLabel={`${item.name}, ${item.ok ? "passed" : "failed"}`}>
-            <Text style={[styles.mark, { color: item.ok ? "#2f7d4f" : "#b3261e" }]}>{item.ok ? "✓" : "✕"}</Text>
+          <View
+            style={styles.row}
+            accessible
+            accessibilityLabel={`${item.name}, ${item.ok ? "passed" : "failed"}`}
+          >
+            <Text style={[styles.mark, { color: item.ok ? "#2f7d4f" : "#b3261e" }]}>
+              {item.ok ? "✓" : "✕"}
+            </Text>
             <View style={styles.body}>
               <Text style={[styles.name, { color: ink }]}>{item.name}</Text>
-              <Text style={[styles.detail, { color: muted }]} selectable>{item.detail} · {item.ms.toFixed(1)} ms</Text>
+              <Text style={[styles.detail, { color: muted }]} selectable>
+                {item.detail} · {item.ms.toFixed(1)} ms
+              </Text>
             </View>
           </View>
         )}

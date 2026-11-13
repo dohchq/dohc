@@ -1,4 +1,12 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { WorkspacePathOpenFailure } from "../../ipc/bridgeContract";
 import { needsNewerDohc, withErrorWords } from "../../ipc/errorWords";
 import { bridge } from "../bridge";
@@ -7,7 +15,10 @@ import type { ErrorDetailField } from "./copyDetails";
 
 // What a failed launch open says: the folder by name, then why and what to
 // do in dohc's words. Copy details keep the error as it arrived.
-export function workspacePathOpenNotice(path: string, cause: unknown): { message: string; canRetry: boolean } {
+export function workspacePathOpenNotice(
+  path: string,
+  cause: unknown,
+): { message: string; canRetry: boolean } {
   return {
     message: withErrorWords(`dohc could not open ${workspaceName({ rootPath: path })}.`, cause),
     canRetry: !needsNewerDohc(cause),
@@ -19,7 +30,10 @@ interface HeldFailures {
   take(taken: readonly WorkspacePathOpenFailure[]): void;
 }
 
-export const WorkspacePathOpenFailures = createContext<HeldFailures>({ failures: [], take: () => undefined });
+export const WorkspacePathOpenFailures = createContext<HeldFailures>({
+  failures: [],
+  take: () => undefined,
+});
 
 /**
  * The window's root takes each failure main holds for this window, then
@@ -32,9 +46,14 @@ export function useHeldWorkspacePathOpenFailures(): HeldFailures {
   useEffect(() => {
     let live = true;
     const takeFromMain = () => {
-      void bridge().takeWorkspacePathOpenFailures({}).then((taken) => {
-        if (live && taken.length > 0) setFailures((held) => [...held, ...taken]);
-      }, (error: unknown) => console.error("[dohc] could not take folder open failures:", error));
+      void bridge()
+        .takeWorkspacePathOpenFailures({})
+        .then(
+          (taken) => {
+            if (live && taken.length > 0) setFailures((held) => [...held, ...taken]);
+          },
+          (error: unknown) => console.error("[dohc] could not take folder open failures:", error),
+        );
     };
     const unsubscribe = bridge().onWorkspacePathOpenFailed(takeFromMain);
     takeFromMain();
@@ -62,7 +81,10 @@ type ReportFailure = (failure: {
  * row with Details, and with Try again unless only a newer dohc can open it.
  * `workspaceId` is the workspace this owner shows, or null for none.
  */
-export function useWorkspacePathOpenFailures(workspaceId: string | null, report: ReportFailure): void {
+export function useWorkspacePathOpenFailures(
+  workspaceId: string | null,
+  report: ReportFailure,
+): void {
   const { failures, take } = useContext(WorkspacePathOpenFailures);
   // A Try again that answers after this owner is gone must not report into
   // whatever replaced it.
@@ -83,13 +105,18 @@ export function useWorkspacePathOpenFailures(workspaceId: string | null, report:
         message: notice.message,
         cause,
         details: [["Folder", failure.path, failure.path.length]],
-        retry: canRetry && notice.canRetry ? () => {
-          // Main answers a failure with a new report, and an opened folder
-          // by switching to it. Only a refused request lands here.
-          void bridge().retryWorkspacePathOpen({ attemptId: failure.attemptId }).catch((error: unknown) => {
-            if (live.current) reportFailure(failure, error, false);
-          });
-        } : null,
+        retry:
+          canRetry && notice.canRetry
+            ? () => {
+                // Main answers a failure with a new report, and an opened folder
+                // by switching to it. Only a refused request lands here.
+                void bridge()
+                  .retryWorkspacePathOpen({ attemptId: failure.attemptId })
+                  .catch((error: unknown) => {
+                    if (live.current) reportFailure(failure, error, false);
+                  });
+              }
+            : null,
         identity: `workspace-path-open:${failure.path}`,
       });
     };
@@ -98,11 +125,15 @@ export function useWorkspacePathOpenFailures(workspaceId: string | null, report:
       report({
         message: withErrorWords("dohc could not move itself to Applications.", cause),
         cause,
-        retry: canRetry ? () => {
-          void bridge().retryWorkspacePathOpen({ attemptId: failure.attemptId }).catch((error: unknown) => {
-            if (live.current) reportMoveFailure(failure, error, false);
-          });
-        } : null,
+        retry: canRetry
+          ? () => {
+              void bridge()
+                .retryWorkspacePathOpen({ attemptId: failure.attemptId })
+                .catch((error: unknown) => {
+                  if (live.current) reportMoveFailure(failure, error, false);
+                });
+            }
+          : null,
         identity: "move-to-applications",
       });
     };
@@ -125,7 +156,9 @@ export function useWorkspacePathOpenFailures(workspaceId: string | null, report:
         message: `dohc could not open ${failure.count} more ${failure.count === 1 ? "folder" : "folders"}. Copy the details to list them.`,
         details: [
           ...failure.paths.map((path): ErrorDetailField => ["Folder", path, path.length]),
-          ...(unlisted > 0 ? [["Not listed", `${unlisted} more, named in dohc's log`] as const] : []),
+          ...(unlisted > 0
+            ? [["Not listed", `${unlisted} more, named in dohc's log`] as const]
+            : []),
         ],
         retry: null,
         identity: `workspace-path-open-more:${failure.attemptId}`,

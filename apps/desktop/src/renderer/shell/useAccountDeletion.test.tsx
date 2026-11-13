@@ -6,12 +6,24 @@ import type { ServerAccountDeletionPreview } from "@dohc/cli/account";
 import { deferred } from "../../testing/deferred";
 import { useAccountDeletion, type AccountDeletion } from "./useAccountDeletion";
 
-type DeleteResult = { ok: true; finished: boolean; email: string; server: string; disconnectError: string | null };
+type DeleteResult = {
+  ok: true;
+  finished: boolean;
+  email: string;
+  server: string;
+  disconnectError: string | null;
+};
 
 const server = "https://cloud.dohc.test";
 const preview: ServerAccountDeletionPreview = {
-  email: "me@dohc.test", server, workspaces: [], workspacesElsewhere: 0, storedBytes: 0,
-  ownedShareCount: 0, heldGrantCount: 0, previewToken: "token-1",
+  email: "me@dohc.test",
+  server,
+  workspaces: [],
+  workspacesElsewhere: 0,
+  storedBytes: 0,
+  ownedShareCount: 0,
+  heldGrantCount: 0,
+  previewToken: "token-1",
 };
 const DELETED = `Deleted me@dohc.test on ${server}. Workspaces on this computer stay.`;
 
@@ -45,7 +57,9 @@ function Shell({ name, deletion }: { name: string; deletion: AccountDeletion }) 
   }, [deletion]);
   return (
     <section data-testid={`shell-${name}`}>
-      {notices.map((notice) => <p key={notice}>{notice}</p>)}
+      {notices.map((notice) => (
+        <p key={notice}>{notice}</p>
+      ))}
     </section>
   );
 }
@@ -60,7 +74,9 @@ function Owner() {
   return (
     <>
       <Shell key={workspace} name={workspace} deletion={deletion} />
-      <button onClick={() => deletion.start({ email: "me@dohc.test", server })}>Delete account</button>
+      <button onClick={() => deletion.start({ email: "me@dohc.test", server })}>
+        Delete account
+      </button>
       {dialog}
     </>
   );
@@ -79,7 +95,9 @@ describe("useAccountDeletion", () => {
     render(<Owner />);
     fireEvent.click(screen.getByRole("button", { name: "Delete account" }));
     await screen.findByTestId("server-account-delete-scope");
-    fireEvent.change(screen.getByTestId("server-account-delete-password"), { target: { value: "correct horse" } });
+    fireEvent.change(screen.getByTestId("server-account-delete-password"), {
+      target: { value: "correct horse" },
+    });
     fireEvent.click(screen.getByTestId("server-account-delete-confirm"));
     await waitFor(() => expect(bridgeMock.deleteServerAccount).toHaveBeenCalledTimes(1));
 
@@ -88,7 +106,13 @@ describe("useAccountDeletion", () => {
     const observer = new MutationObserver(() => {
       if (answeredBeforeEffects !== null || !screen.queryByTestId("shell-b")) return;
       answeredBeforeEffects = !started.has("b");
-      answer.resolve({ ok: true, finished: true, email: "me@dohc.test", server, disconnectError: null });
+      answer.resolve({
+        ok: true,
+        finished: true,
+        email: "me@dohc.test",
+        server,
+        disconnectError: null,
+      });
     });
     observer.observe(document.body, { childList: true, subtree: true });
     // Outside act, so React schedules the switch's effects as it does in the app.

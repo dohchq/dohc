@@ -53,13 +53,9 @@ describe("createOwnedStaticSiteFileSource", () => {
 
     expect(source.contains("index.html")).toBe(true);
     expect(source.contains("recipient-only.js")).toBe(false);
-    await expect(source.read("assets/app.js")).resolves.toEqual(
-      Buffer.from("owner bytes"),
-    );
+    await expect(source.read("assets/app.js")).resolves.toEqual(Buffer.from("owner bytes"));
     expect(read).toHaveBeenCalledWith(target, "site/dist/assets/app.js");
-    await expect(source.read("recipient-only.js")).rejects.toThrow(
-      /unavailable/i,
-    );
+    await expect(source.read("recipient-only.js")).rejects.toThrow(/unavailable/i);
     expect(read).toHaveBeenCalledTimes(1);
   });
 
@@ -99,18 +95,13 @@ describe("createOwnedStaticSiteFileSource", () => {
     expect(preview.root).toBe("shared-with-me/owner/portal/dist");
     expect(preview.entry).toBe("index.html");
     expect(resolveOwner).toHaveBeenCalledOnce();
-    expect(resolveOwner).toHaveBeenCalledWith(
-      "shared-with-me/owner/portal/dist",
-    );
+    expect(resolveOwner).toHaveBeenCalledWith("shared-with-me/owner/portal/dist");
     expect(preview.fileSource?.contains("assets/app.js")).toBe(true);
     expect(preview.fileSource?.contains("recipient-only.js")).toBe(false);
-    await expect(
-      preview.fileSource?.read("assets/app.js"),
-    ).resolves.toEqual(Buffer.from("owner bytes"));
-    expect(readOwner).toHaveBeenCalledWith(
-      target,
-      "portal/dist/assets/app.js",
+    await expect(preview.fileSource?.read("assets/app.js")).resolves.toEqual(
+      Buffer.from("owner bytes"),
     );
+    expect(readOwner).toHaveBeenCalledWith(target, "portal/dist/assets/app.js");
     expect(resolveOwner).toHaveBeenCalledOnce();
   });
 

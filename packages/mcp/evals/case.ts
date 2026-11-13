@@ -54,7 +54,10 @@ export interface Expectation {
   /** Regular expressions the final answer does not match. */
   notText?: string[];
   /** The workspace's files after the run. */
-  files?: Record<string, { contains?: string[]; lacks?: string[]; times?: Record<string, number>; absent?: true }>;
+  files?: Record<
+    string,
+    { contains?: string[]; lacks?: string[]; times?: Record<string, number>; absent?: true }
+  >;
 }
 
 export interface RecordedCall {

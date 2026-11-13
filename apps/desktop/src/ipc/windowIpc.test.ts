@@ -15,31 +15,51 @@ const frame = { url: "http://localhost:5173/app" };
 function sender(id: number) {
   let destroyed = false;
   return {
-    id, isDestroyed: () => destroyed, destroy: () => { destroyed = true; }, reload: vi.fn(),
-    once(_event: "destroyed", _listener: () => void) { return this; },
+    id,
+    isDestroyed: () => destroyed,
+    destroy: () => {
+      destroyed = true;
+    },
+    reload: vi.fn(),
+    once(_event: "destroyed", _listener: () => void) {
+      return this;
+    },
   };
 }
 type Sender = ReturnType<typeof sender>;
 type Event = { sender: Sender; senderFrame?: { url: string } | null };
 
 async function harness(isPackaged = false) {
-  const first = sender(1), second = sender(2);
+  const first = sender(1),
+    second = sender(2);
   let retirement = Promise.resolve();
-  const retiring = vi.fn(() => ({ requiredForAdmission: retirement, detachedFromAdmission: Promise.resolve() }));
-  const sessions = new RendererWorkspaceSessionOwner<Sender>({ retirement: {
-    retireSender: retiring, retireWorkspace: async () => undefined,
-  } });
+  const retiring = vi.fn(() => ({
+    requiredForAdmission: retirement,
+    detachedFromAdmission: Promise.resolve(),
+  }));
+  const sessions = new RendererWorkspaceSessionOwner<Sender>({
+    retirement: {
+      retireSender: retiring,
+      retireWorkspace: async () => undefined,
+    },
+  });
   await sessions.open(first, { workspaceId: "a", attachmentId: Symbol("a") }, DOCUMENT);
   await sessions.open(second, { workspaceId: "b", attachmentId: Symbol("b") }, DOCUMENT);
-  const prepareForRendererReload = vi.fn((value: Sender, document: string) => sessions.retireForReload(value, document));
-  const quit = vi.fn(), forceQuit = vi.fn(), ask = vi.fn();
+  const prepareForRendererReload = vi.fn((value: Sender, document: string) =>
+    sessions.retireForReload(value, document),
+  );
+  const quit = vi.fn(),
+    forceQuit = vi.fn(),
+    ask = vi.fn();
   const quitGuard = createQuitGuard({ ask, quit, forceQuit });
   const requestIds: number[] = [];
   const confirmProceed = vi.fn(async () => false);
   const exitRounds = createExitRounds<Sender>({
     participants: () => [first, second],
     participantId: (value) => value.id,
-    send: (_value, message) => { if (message.kind === "request") requestIds.push(message.roundId); },
+    send: (_value, message) => {
+      if (message.kind === "request") requestIds.push(message.roundId);
+    },
     confirmProceed,
   });
   // The settings file owner computes, saves, and applies the step; its tests
@@ -54,72 +74,151 @@ async function harness(isPackaged = false) {
   const shell = { openExternal: vi.fn(async (_url: string) => undefined) };
   const overlay = vi.fn();
   const background = vi.fn((_color: string) => undefined);
-  const windows = new Map<Sender, { setBackgroundColor: typeof background; setTitleBarOverlay?: typeof overlay }>([
-    [first, { setBackgroundColor: background, setTitleBarOverlay: overlay }],
-  ]);
+  const windows = new Map<
+    Sender,
+    { setBackgroundColor: typeof background; setTitleBarOverlay?: typeof overlay }
+  >([[first, { setBackgroundColor: background, setTitleBarOverlay: overlay }]]);
   const BrowserWindow = { fromWebContents: vi.fn((value: Sender) => windows.get(value) ?? null) };
   const rememberChromeTheme = vi.fn();
-  const titleBarOverlayOptions = vi.fn((_theme: "light" | "dark") => ({ height: 32, color: "paper", symbolColor: "ink" }));
+  const titleBarOverlayOptions = vi.fn((_theme: "light" | "dark") => ({
+    height: 32,
+    color: "paper",
+    symbolColor: "ink",
+  }));
   const launchSnapshot = { appReadyMs: 1, firstWindowMs: 2, firstPaintMs: 3 };
   const launchMarks = { firstPaint: vi.fn(), snapshot: vi.fn(() => launchSnapshot) };
   let clock = 10;
   const desktopMarks = createMarkRecorder(() => clock++);
   const logLaunchMarksOnce = vi.fn();
-  const isTrustedFrame = (url: string) => decideNavigation(url, { httpOrigins: ["http://localhost:5173"], fileUrlPrefix: null }).action === "allow";
+  const isTrustedFrame = (url: string) =>
+    decideNavigation(url, { httpOrigins: ["http://localhost:5173"], fileUrlPrefix: null })
+      .action === "allow";
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
   const events = new Map<string, (event: Event) => void>();
   const order: string[] = [];
   const capability = createWindowIpc<Sender, Event, Event>({
     registerHandler: (channel, handler) => {
       if (handlers.has(channel)) throw new Error(`Duplicate handler: ${channel}`);
-      handlers.set(channel, handler); order.push(channel);
+      handlers.set(channel, handler);
+      order.push(channel);
     },
-    registerEvent: (channel, handler) => { events.set(channel, handler); order.push(channel); },
-    assertTrustedSender: event => { if (!isTrustedFrame(event.senderFrame?.url ?? "")) throw new Error("untrusted"); },
-    prepareForRendererReload, shell, BrowserWindow, rememberChromeTheme,
-    titleBarOverlayOptions, stepWindowZoom, exitRounds, quitGuard, isTrustedFrame,
-    launchMarks, desktopMarks, logLaunchMarksOnce, app: { isPackaged }, versionRounds: { answer: vi.fn() },
+    registerEvent: (channel, handler) => {
+      events.set(channel, handler);
+      order.push(channel);
+    },
+    assertTrustedSender: (event) => {
+      if (!isTrustedFrame(event.senderFrame?.url ?? "")) throw new Error("untrusted");
+    },
+    prepareForRendererReload,
+    shell,
+    BrowserWindow,
+    rememberChromeTheme,
+    titleBarOverlayOptions,
+    stepWindowZoom,
+    exitRounds,
+    quitGuard,
+    isTrustedFrame,
+    launchMarks,
+    desktopMarks,
+    logLaunchMarksOnce,
+    app: { isPackaged },
+    versionRounds: { answer: vi.fn() },
   });
   return {
-    ...capability, first, second, handlers, events, order, sessions, retiring,
-    prepareForRendererReload, setRetirement: (next: Promise<void>) => { retirement = next; },
-    quit, forceQuit, ask, quitGuard, exitRounds, requestIds, confirmProceed,
-    stepWindowZoom, shell, overlay, background, windows,
-    BrowserWindow, rememberChromeTheme, titleBarOverlayOptions, launchMarks, desktopMarks,
+    ...capability,
+    first,
+    second,
+    handlers,
+    events,
+    order,
+    sessions,
+    retiring,
+    prepareForRendererReload,
+    setRetirement: (next: Promise<void>) => {
+      retirement = next;
+    },
+    quit,
+    forceQuit,
+    ask,
+    quitGuard,
+    exitRounds,
+    requestIds,
+    confirmProceed,
+    stepWindowZoom,
+    shell,
+    overlay,
+    background,
+    windows,
+    BrowserWindow,
+    rememberChromeTheme,
+    titleBarOverlayOptions,
+    launchMarks,
+    desktopMarks,
     logLaunchMarksOnce,
-    registerAll() { capability.registerReload(); capability.registerExternalUrl(); capability.registerWindowControls(); capability.registerQuitAndMarks(); },
-    invoke: async (channel: string, payload?: unknown, value = first, senderFrame: Event["senderFrame"] = frame) => {
+    registerAll() {
+      capability.registerReload();
+      capability.registerExternalUrl();
+      capability.registerWindowControls();
+      capability.registerQuitAndMarks();
+    },
+    invoke: async (
+      channel: string,
+      payload?: unknown,
+      value = first,
+      senderFrame: Event["senderFrame"] = frame,
+    ) => {
       const handler = handlers.get(channel);
       if (!handler) throw new Error(`Missing handler: ${channel}`);
       return handler({ sender: value, senderFrame }, payload);
     },
-    paint: (senderFrame: Event["senderFrame"]) => events.get(CHANNELS.firstPaint)!({ sender: first, senderFrame }),
+    paint: (senderFrame: Event["senderFrame"]) =>
+      events.get(CHANNELS.firstPaint)!({ sender: first, senderFrame }),
   };
 }
 
-afterEach(() => { vi.unstubAllEnvs(); vi.useRealTimers(); });
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.useRealTimers();
+});
 
 describe("registered window IPC", () => {
   it("registers each group in place with the test mark handlers last", async () => {
     vi.stubEnv("DOHC_DESKTOP_TEST", "1");
     const h = await harness();
-    h.registerReload(); h.order.push("registry");
-    h.registerExternalUrl(); h.order.push("handoff");
-    h.registerWindowControls(); h.order.push("ui-state", "updates");
+    h.registerReload();
+    h.order.push("registry");
+    h.registerExternalUrl();
+    h.order.push("handoff");
+    h.registerWindowControls();
+    h.order.push("ui-state", "updates");
     h.registerQuitAndMarks();
     expect(h.order).toEqual([
-      CHANNELS.reloadRenderer, "registry", CHANNELS.openExternalUrl, "handoff",
-      CHANNELS.setTitlebarTheme, CHANNELS.stepWindowZoom,
-      "ui-state", "updates", CHANNELS.exitRoundAnswer, CHANNELS.versionRoundAnswer, CHANNELS.holdQuit,
-      CHANNELS.resumeQuit, CHANNELS.firstPaint, CHANNELS.getLaunchMarks, CHANNELS.getDesktopMarks,
+      CHANNELS.reloadRenderer,
+      "registry",
+      CHANNELS.openExternalUrl,
+      "handoff",
+      CHANNELS.setTitlebarTheme,
+      CHANNELS.stepWindowZoom,
+      "ui-state",
+      "updates",
+      CHANNELS.exitRoundAnswer,
+      CHANNELS.versionRoundAnswer,
+      CHANNELS.holdQuit,
+      CHANNELS.resumeQuit,
+      CHANNELS.firstPaint,
+      CHANNELS.getLaunchMarks,
+      CHANNELS.getDesktopMarks,
     ]);
   });
 
   it("rejects every invoke from an untrusted frame before side effects", async () => {
     vi.stubEnv("DOHC_DESKTOP_TEST", "1");
-    const h = await harness(); h.registerAll();
+    const h = await harness();
+    h.registerAll();
     for (const channel of h.handlers.keys()) {
-      await expect(h.invoke(channel, undefined, h.first, { url: "http://localhost:5173.evil.test" })).rejects.toThrow("untrusted");
+      await expect(
+        h.invoke(channel, undefined, h.first, { url: "http://localhost:5173.evil.test" }),
+      ).rejects.toThrow("untrusted");
     }
     expect(h.prepareForRendererReload).not.toHaveBeenCalled();
     expect(h.shell.openExternal).not.toHaveBeenCalled();
@@ -130,13 +229,15 @@ describe("registered window IPC", () => {
   });
 
   it("validates payloads before admitting reload, theme, zoom or URL work", async () => {
-    const h = await harness(); h.registerAll();
+    const h = await harness();
+    h.registerAll();
     for (const [channel, payload] of [
       [CHANNELS.reloadRenderer, { rendererDocumentId: "invalid" }],
       [CHANNELS.setTitlebarTheme, { theme: "other" }],
       [CHANNELS.stepWindowZoom, { step: "twice" }],
       [CHANNELS.openExternalUrl, { url: 1 }],
-    ] as const) await expect(h.invoke(channel, payload)).rejects.toThrow();
+    ] as const)
+      await expect(h.invoke(channel, payload)).rejects.toThrow();
     expect(h.prepareForRendererReload).not.toHaveBeenCalled();
     expect(h.rememberChromeTheme).not.toHaveBeenCalled();
     expect(h.stepWindowZoom).not.toHaveBeenCalled();
@@ -144,8 +245,10 @@ describe("registered window IPC", () => {
   });
 
   it("reloads only the captured sender after its real session retirement drains", async () => {
-    const h = await harness(); h.registerReload();
-    const held = deferred(); h.setRetirement(held.promise);
+    const h = await harness();
+    h.registerReload();
+    const held = deferred();
+    h.setRetirement(held.promise);
     const reload = h.invoke(CHANNELS.reloadRenderer, { rendererDocumentId: DOCUMENT });
     try {
       expect(h.sessions.current(h.first)).toBeUndefined();
@@ -163,7 +266,8 @@ describe("registered window IPC", () => {
   });
 
   it("refuses an obsolete document without retiring the current session", async () => {
-    const h = await harness(); h.registerReload();
+    const h = await harness();
+    h.registerReload();
     await h.invoke(CHANNELS.reloadRenderer, { rendererDocumentId: OTHER_DOCUMENT });
     expect(h.sessions.current(h.first)?.rendererDocumentId).toBe(DOCUMENT);
     expect(h.retiring).not.toHaveBeenCalled();
@@ -171,43 +275,66 @@ describe("registered window IPC", () => {
   });
 
   it("does not reload a sender destroyed while retirement is held", async () => {
-    const h = await harness(); h.registerReload();
-    const held = deferred(); h.setRetirement(held.promise);
+    const h = await harness();
+    h.registerReload();
+    const held = deferred();
+    h.setRetirement(held.promise);
     const reload = h.invoke(CHANNELS.reloadRenderer, { rendererDocumentId: DOCUMENT });
-    h.first.destroy(); held.resolve(); await reload;
+    h.first.destroy();
+    held.resolve();
+    await reload;
     expect(h.first.reload).not.toHaveBeenCalled();
   });
 
   it("propagates reload preparation failure without reloading", async () => {
-    const h = await harness(); h.registerReload();
+    const h = await harness();
+    h.registerReload();
     h.prepareForRendererReload.mockRejectedValueOnce(new Error("retirement failed"));
-    await expect(h.invoke(CHANNELS.reloadRenderer, { rendererDocumentId: DOCUMENT })).rejects.toThrow("retirement failed");
+    await expect(
+      h.invoke(CHANNELS.reloadRenderer, { rendererDocumentId: DOCUMENT }),
+    ).rejects.toThrow("retirement failed");
     expect(h.first.reload).not.toHaveBeenCalled();
   });
 
-  it.each(["https://example.test/path", "http://example.test", "mailto:ice@example.test"])("opens an allowed external URL: %s", async url => {
-    const h = await harness(); h.registerExternalUrl();
-    await h.invoke(CHANNELS.openExternalUrl, { url });
-    expect(h.shell.openExternal).toHaveBeenCalledWith(url);
-  });
+  it.each(["https://example.test/path", "http://example.test", "mailto:ice@example.test"])(
+    "opens an allowed external URL: %s",
+    async (url) => {
+      const h = await harness();
+      h.registerExternalUrl();
+      await h.invoke(CHANNELS.openExternalUrl, { url });
+      expect(h.shell.openExternal).toHaveBeenCalledWith(url);
+    },
+  );
 
-  it.each(["file:///private/file", "javascript:alert(1)", "custom:action"])("refuses an external protocol: %s", async url => {
-    const h = await harness(); h.registerExternalUrl();
-    await expect(h.invoke(CHANNELS.openExternalUrl, { url })).rejects.toThrow("Refusing to open non-http(s) URL externally");
-    expect(h.shell.openExternal).not.toHaveBeenCalled();
-  });
+  it.each(["file:///private/file", "javascript:alert(1)", "custom:action"])(
+    "refuses an external protocol: %s",
+    async (url) => {
+      const h = await harness();
+      h.registerExternalUrl();
+      await expect(h.invoke(CHANNELS.openExternalUrl, { url })).rejects.toThrow(
+        "Refusing to open non-http(s) URL externally",
+      );
+      expect(h.shell.openExternal).not.toHaveBeenCalled();
+    },
+  );
 
   it("propagates a failed OS browser request", async () => {
-    const h = await harness(); h.registerExternalUrl();
+    const h = await harness();
+    h.registerExternalUrl();
     h.shell.openExternal.mockRejectedValueOnce(new Error("browser failed"));
-    await expect(h.invoke(CHANNELS.openExternalUrl, { url: "https://example.test" })).rejects.toThrow("browser failed");
+    await expect(
+      h.invoke(CHANNELS.openExternalUrl, { url: "https://example.test" }),
+    ).rejects.toThrow("browser failed");
   });
 
   it("persists theme before tinting only the sender's window", async () => {
-    const h = await harness(); h.registerWindowControls();
+    const h = await harness();
+    h.registerWindowControls();
     await h.invoke(CHANNELS.setTitlebarTheme, { theme: "dark" });
     expect(h.rememberChromeTheme).toHaveBeenCalledWith("dark");
-    expect(h.rememberChromeTheme.mock.invocationCallOrder[0]).toBeLessThan(h.overlay.mock.invocationCallOrder[0]!);
+    expect(h.rememberChromeTheme.mock.invocationCallOrder[0]).toBeLessThan(
+      h.overlay.mock.invocationCallOrder[0]!,
+    );
     expect(h.BrowserWindow.fromWebContents).toHaveBeenCalledWith(h.first);
     expect(h.titleBarOverlayOptions).toHaveBeenCalledWith("dark");
     expect(h.overlay).toHaveBeenCalledWith({ height: 32, color: "paper", symbolColor: "ink" });
@@ -217,7 +344,8 @@ describe("registered window IPC", () => {
   });
 
   it("repaints the sender window's background in the new theme's paper", async () => {
-    const h = await harness(); h.registerWindowControls();
+    const h = await harness();
+    h.registerWindowControls();
     h.windows.set(h.first, { setBackgroundColor: h.background });
     await h.invoke(CHANNELS.setTitlebarTheme, { theme: "dark" });
     expect(h.background).toHaveBeenLastCalledWith(palette.dark.bg);
@@ -228,19 +356,24 @@ describe("registered window IPC", () => {
   });
 
   it("tolerates absent and throwing platform overlays", async () => {
-    const h = await harness(); h.registerWindowControls();
+    const h = await harness();
+    h.registerWindowControls();
     h.windows.set(h.first, { setBackgroundColor: h.background });
     await expect(h.invoke(CHANNELS.setTitlebarTheme, { theme: "dark" })).resolves.toBeUndefined();
     h.windows.set(h.first, { setBackgroundColor: h.background, setTitleBarOverlay: h.overlay });
-    h.overlay.mockImplementationOnce(() => { throw new Error("unsupported"); });
+    h.overlay.mockImplementationOnce(() => {
+      throw new Error("unsupported");
+    });
     await expect(h.invoke(CHANNELS.setTitlebarTheme, { theme: "light" })).resolves.toBeUndefined();
     expect(h.rememberChromeTheme).toHaveBeenCalledTimes(2);
   });
 
   it("hands a zoom step to the settings file owner and answers its result", async () => {
-    const h = await harness(); h.registerWindowControls();
+    const h = await harness();
+    h.registerWindowControls();
     await expect(h.invoke(CHANNELS.stepWindowZoom, { step: "in" })).resolves.toMatchObject({
-      source: "stored", settings: { appearance: { zoomLevel: 1 } },
+      source: "stored",
+      settings: { appearance: { zoomLevel: 1 } },
     });
     expect(h.stepWindowZoom).toHaveBeenCalledExactlyOnceWith("in");
     h.stepWindowZoom.mockRejectedValueOnce(new Error("disk failed"));
@@ -248,7 +381,8 @@ describe("registered window IPC", () => {
   });
 
   it("holds an approved quit until the registered resume answer", async () => {
-    const h = await harness(); h.registerQuitAndMarks();
+    const h = await harness();
+    h.registerQuitAndMarks();
     const event = { preventDefault: vi.fn() };
     h.quitGuard.beforeQuit(event);
     expect(event.preventDefault).toHaveBeenCalledOnce();
@@ -264,12 +398,19 @@ describe("registered window IPC", () => {
 
   it("keys round answers to the sender and round, and ignores malformed answers", async () => {
     vi.useFakeTimers();
-    const h = await harness(); h.registerQuitAndMarks();
+    const h = await harness();
+    h.registerQuitAndMarks();
     const round = h.exitRounds.begin("update");
     const settled = vi.fn();
     void round.outcome.then(settled);
     const roundId = round.roundId;
-    for (const payload of [null, undefined, {}, { roundId, decision: "yes" }, { roundId: "1", decision: "clear" }]) {
+    for (const payload of [
+      null,
+      undefined,
+      {},
+      { roundId, decision: "yes" },
+      { roundId: "1", decision: "clear" },
+    ]) {
       await h.invoke(CHANNELS.exitRoundAnswer, payload);
     }
     // A stale round, and a sender that is not in the round.
@@ -283,9 +424,15 @@ describe("registered window IPC", () => {
     expect(h.confirmProceed).not.toHaveBeenCalled();
   });
 
-  it.each([["0", false], ["1", true], ["0", true], ["1", false]] as const)("gates mark snapshots for test=%s packaged=%s", async (flag, packaged) => {
+  it.each([
+    ["0", false],
+    ["1", true],
+    ["0", true],
+    ["1", false],
+  ] as const)("gates mark snapshots for test=%s packaged=%s", async (flag, packaged) => {
     vi.stubEnv("DOHC_DESKTOP_TEST", flag);
-    const h = await harness(packaged); h.registerQuitAndMarks();
+    const h = await harness(packaged);
+    h.registerQuitAndMarks();
     expect(h.handlers.has(CHANNELS.getLaunchMarks)).toBe(flag === "1" && !packaged);
     expect(h.handlers.has(CHANNELS.getDesktopMarks)).toBe(flag === "1" && !packaged);
     expect(h.events.has(CHANNELS.firstPaint)).toBe(true);
@@ -293,16 +440,30 @@ describe("registered window IPC", () => {
 
   it("records only trusted first paint and returns parsed mark snapshots", async () => {
     vi.stubEnv("DOHC_DESKTOP_TEST", "1");
-    const h = await harness(); h.registerQuitAndMarks();
-    h.paint(null); h.paint({ url: "https://outside.test" });
+    const h = await harness();
+    h.registerQuitAndMarks();
+    h.paint(null);
+    h.paint({ url: "https://outside.test" });
     expect(h.launchMarks.firstPaint).not.toHaveBeenCalled();
     expect(h.desktopMarks.snapshot().marks).toEqual({});
-    h.paint(frame); h.paint(frame);
+    h.paint(frame);
+    h.paint(frame);
     expect(h.launchMarks.firstPaint).toHaveBeenCalledTimes(2);
     expect(h.logLaunchMarksOnce).toHaveBeenCalledTimes(2);
-    await expect(h.invoke(CHANNELS.getDesktopMarks)).resolves.toEqual({ marks: { "first-renderer-paint": 10 }, measures: {} });
-    await expect(h.invoke(CHANNELS.getLaunchMarks)).resolves.toEqual({ appReadyMs: 1, firstWindowMs: 2, firstPaintMs: 3 });
-    h.launchMarks.snapshot.mockReturnValueOnce({ appReadyMs: -1, firstWindowMs: 2, firstPaintMs: 3 });
+    await expect(h.invoke(CHANNELS.getDesktopMarks)).resolves.toEqual({
+      marks: { "first-renderer-paint": 10 },
+      measures: {},
+    });
+    await expect(h.invoke(CHANNELS.getLaunchMarks)).resolves.toEqual({
+      appReadyMs: 1,
+      firstWindowMs: 2,
+      firstPaintMs: 3,
+    });
+    h.launchMarks.snapshot.mockReturnValueOnce({
+      appReadyMs: -1,
+      firstWindowMs: 2,
+      firstPaintMs: 3,
+    });
     await expect(h.invoke(CHANNELS.getLaunchMarks)).rejects.toThrow();
   });
 

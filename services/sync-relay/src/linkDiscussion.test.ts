@@ -1,10 +1,8 @@
-import {linkRefusalBody} from "@dohc/security-contract/link-refusal";
+import { linkRefusalBody } from "@dohc/security-contract/link-refusal";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { hashLinkBearer } from "./linkSecurity";
 import { DiscussionActivityHub } from "./discussionActivity";
-import {
-  type SyncRelayHandler,
-} from "./server";
+import { type SyncRelayHandler } from "./server";
 import type { OpenSyncRelayStorageOptions, SyncRelayStorage } from "./storage";
 import {
   seedDependentGrant,
@@ -64,9 +62,7 @@ function secret(character: string): string {
 
 async function fixture(
   overrides: {
-    lookupUserDisplayName?: (
-      userId: string,
-    ) => Promise<string | null> | string | null;
+    lookupUserDisplayName?: (userId: string) => Promise<string | null> | string | null;
     workspaceQuotaBytes?: number;
     namedRecipient?: string;
     discussionActivity?: DiscussionActivityHub;
@@ -147,8 +143,7 @@ async function fixture(
 
   let id = 0;
   let clock = 10_000;
-  const discussionActivity =
-    overrides.discussionActivity ?? new DiscussionActivityHub();
+  const discussionActivity = overrides.discussionActivity ?? new DiscussionActivityHub();
   const names: Record<string, string> = {
     [OWNER]: "Owner Name",
     [COMMENTER]: "Commenter Name",
@@ -160,8 +155,7 @@ async function fixture(
       discussionActivity,
       resolveUserIdByEmail: undefined,
       lookupUserEmail: (userId) => `${userId}@email-sentinel.test`,
-      lookupUserDisplayName:
-        overrides.lookupUserDisplayName ?? ((userId) => names[userId] ?? null),
+      lookupUserDisplayName: overrides.lookupUserDisplayName ?? ((userId) => names[userId] ?? null),
       nowMs: overrides.nowMs ?? (() => clock++),
       newId: () => `http-id-${++id}`,
       linkKey: LINK_KEY,
@@ -198,7 +192,8 @@ function seedDiscussionLink(
     access,
     createdAtMs,
     credentialId: `credential-${suffix}-sentinel`,
-    secretSealed: null, secretHash: hashLinkBearer(linkSecret, LINK_KEY),
+    secretSealed: null,
+    secretHash: hashLinkBearer(linkSecret, LINK_KEY),
   });
   seedLinkSession(storage, {
     grantId,
@@ -209,11 +204,7 @@ function seedDiscussionLink(
   return { access, grantId, secret: linkSecret, capabilityToken };
 }
 
-function request(
-  userId: string | null,
-  path: string,
-  init: RequestInit = {},
-): Request {
+function request(userId: string | null, path: string, init: RequestInit = {}): Request {
   const url = new URL(path, "http://relay.test");
   let boundInit = init;
   if (
@@ -260,12 +251,10 @@ function trustedAppend(
   body: Record<string, unknown>,
   profileSecret = PROFILE_A,
 ): Request {
-  return linkRequest(
-    link,
-    "/sync/link/discussion",
-    jsonRequest(body),
-    { relayKey: RELAY_KEY, profileSecret },
-  );
+  return linkRequest(link, "/sync/link/discussion", jsonRequest(body), {
+    relayKey: RELAY_KEY,
+    profileSecret,
+  });
 }
 
 function moderationRequest(
@@ -273,17 +262,13 @@ function moderationRequest(
   action: Record<string, unknown>,
   init: RequestInit = {},
 ): Request {
-  return request(
-    userId,
-    `/sync/shares/${SHARE}/discussion/moderation`,
-    { ...jsonRequest({ workspaceId: WORKSPACE, ...action }), ...init },
-  );
+  return request(userId, `/sync/shares/${SHARE}/discussion/moderation`, {
+    ...jsonRequest({ workspaceId: WORKSPACE, ...action }),
+    ...init,
+  });
 }
 
-async function exchangeLink(
-  test: Fixture,
-  linkSecret: string,
-): Promise<string> {
+async function exchangeLink(test: Fixture, linkSecret: string): Promise<string> {
   const response = await test.handler(
     request(null, "/sync/link-exchange", {
       ...jsonRequest({ secret: linkSecret }),
@@ -308,9 +293,7 @@ function discussionUsage(dbPath: string): number {
     );
     const principals = Number(
       db
-        .prepare(
-          "SELECT COALESCE(SUM(storage_bytes), 0) AS bytes FROM sync_relay_link_principals",
-        )
+        .prepare("SELECT COALESCE(SUM(storage_bytes), 0) AS bytes FROM sync_relay_link_principals")
         .get()?.bytes ?? 0,
     );
     return messages + principals;
@@ -321,9 +304,7 @@ function workspaceUsage(dbPath: string, workspaceId: string): number {
   return inspect(dbPath, (db) => {
     return Number(
       db
-        .prepare(
-          "SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id = ?",
-        )
+        .prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id = ?")
         .get(workspaceId)?.usage_bytes ?? 0,
     );
   });
@@ -352,11 +333,10 @@ function discussionIdempotencyRows(
 function updateWorkspaceOwner(dbPath: string, ownerUserId: string): void {
   const db = inspectDatabase(dbPath);
   try {
-    db
-      .prepare(
-        "UPDATE sync_relay_workspaces SET owner_user_id = ? WHERE workspace_id = ?",
-      )
-      .run(ownerUserId, WORKSPACE);
+    db.prepare("UPDATE sync_relay_workspaces SET owner_user_id = ? WHERE workspace_id = ?").run(
+      ownerUserId,
+      WORKSPACE,
+    );
   } finally {
     db.close();
   }
@@ -365,32 +345,27 @@ function updateWorkspaceOwner(dbPath: string, ownerUserId: string): void {
 function updateShareWorkspace(dbPath: string, workspaceId: string): void {
   const db = inspectDatabase(dbPath);
   try {
-    db
-      .prepare("UPDATE sync_relay_shares SET workspace_id = ? WHERE share_id = ?")
-      .run(workspaceId, SHARE);
+    db.prepare("UPDATE sync_relay_shares SET workspace_id = ? WHERE share_id = ?").run(
+      workspaceId,
+      SHARE,
+    );
   } finally {
     db.close();
   }
 }
 
-function transferShareOwnership(
-  dbPath: string,
-  workspaceId: string,
-  ownerUserId: string,
-): void {
+function transferShareOwnership(dbPath: string, workspaceId: string, ownerUserId: string): void {
   const db = inspectDatabase(dbPath);
   try {
     db.exec("BEGIN IMMEDIATE");
-    db
-      .prepare(
-        "UPDATE sync_relay_workspaces SET owner_user_id = ? WHERE workspace_id = ?",
-      )
-      .run(ownerUserId, workspaceId);
-    db
-      .prepare(
-        "UPDATE sync_relay_shares SET granter_user_id = ? WHERE share_id = ?",
-      )
-      .run(ownerUserId, SHARE);
+    db.prepare("UPDATE sync_relay_workspaces SET owner_user_id = ? WHERE workspace_id = ?").run(
+      ownerUserId,
+      workspaceId,
+    );
+    db.prepare("UPDATE sync_relay_shares SET granter_user_id = ? WHERE share_id = ?").run(
+      ownerUserId,
+      SHARE,
+    );
     db.exec("COMMIT");
   } catch (error) {
     try {
@@ -470,7 +445,8 @@ function seedCrossShareHandles(storage: SyncRelayStorage): {
     access: "comment",
     createdAtMs: 2_001,
     credentialId: "cross-share-credential-sentinel",
-    secretSealed: null, secretHash: "cross-share-secret-hash",
+    secretSealed: null,
+    secretHash: "cross-share-secret-hash",
   });
   seedLinkSession(storage, {
     grantId,
@@ -494,7 +470,6 @@ function seedCrossShareHandles(storage: SyncRelayStorage): {
 }
 
 describe("share discussion HTTP boundary", () => {
-
   it("rejects missing and same-account wrong-workspace owner discussion operations before work starts", async () => {
     const lookupUserDisplayName = vi.fn(() => "Owner Name");
     const test = await fixture({ lookupUserDisplayName });
@@ -517,16 +492,10 @@ describe("share discussion HTTP boundary", () => {
     const refusals = [
       await test.handler(rawRequest(OWNER, `/sync/shares/${SHARE}/discussion`)),
       await test.handler(
-        rawRequest(
-          OWNER,
-          `/sync/shares/${SHARE}/discussion?workspaceId=${OTHER_WORKSPACE}`,
-        ),
+        rawRequest(OWNER, `/sync/shares/${SHARE}/discussion?workspaceId=${OTHER_WORKSPACE}`),
       ),
       await test.handler(
-        rawRequest(
-          OWNER,
-          `/sync/shares/${SHARE}/discussion/activity?since=0&hold=0&limit=100`,
-        ),
+        rawRequest(OWNER, `/sync/shares/${SHARE}/discussion/activity?since=0&hold=0&limit=100`),
       ),
       await test.handler(
         rawRequest(
@@ -565,9 +534,7 @@ describe("share discussion HTTP boundary", () => {
     revision.mockRestore();
     activity.mockRestore();
     append.mockRestore();
-    expect(count(test.dbPath, "sync_relay_share_discussion_messages")).toBe(
-      beforeRows,
-    );
+    expect(count(test.dbPath, "sync_relay_share_discussion_messages")).toBe(beforeRows);
     expect(test.storage.getShareDiscussionRevision(SHARE)).toBe(beforeRevision);
     expect(discussionUsage(test.dbPath)).toBe(beforeUsage);
 
@@ -576,10 +543,7 @@ describe("share discussion HTTP boundary", () => {
         OWNER,
         `/sync/shares/${SHARE}/discussion?workspaceId=${WORKSPACE}&workspaceId=${WORKSPACE}`,
       ),
-      rawRequest(
-        OWNER,
-        `/sync/shares/${SHARE}/discussion?workspaceId=${WORKSPACE}&extra=1`,
-      ),
+      rawRequest(OWNER, `/sync/shares/${SHARE}/discussion?workspaceId=${WORKSPACE}&extra=1`),
       rawRequest(
         OWNER,
         `/sync/shares/${SHARE}/discussion/activity?workspaceId=${WORKSPACE}&workspaceId=${WORKSPACE}&since=0&hold=0&limit=100`,
@@ -627,18 +591,12 @@ describe("share discussion HTTP boundary", () => {
         ),
       );
       const idempotencyKey = `binding-owner-${transition}`;
-      const beforeRows = count(
-        test.dbPath,
-        "sync_relay_share_discussion_messages",
-      );
+      const beforeRows = count(test.dbPath, "sync_relay_share_discussion_messages");
       const beforeRevision = test.storage.getShareDiscussionRevision(SHARE);
       const beforeUsage = discussionUsage(test.dbPath);
       const beforeOriginalUsage = workspaceUsage(test.dbPath, WORKSPACE);
       const beforeOtherUsage = workspaceUsage(test.dbPath, OTHER_WORKSPACE);
-      const append = vi.spyOn(
-        test.storage,
-        "appendAuthenticatedDiscussionMessage",
-      );
+      const append = vi.spyOn(test.storage, "appendAuthenticatedDiscussionMessage");
       const pending = test.handler(
         rawRequest(
           OWNER,
@@ -661,24 +619,14 @@ describe("share discussion HTTP boundary", () => {
 
       expect(await genericRefusal(await pending), transition).toBe(baseline);
       expect(append, transition).toHaveBeenCalledOnce();
-      expect(
-        count(test.dbPath, "sync_relay_share_discussion_messages"),
-        transition,
-      ).toBe(beforeRows);
-      expect(test.storage.getShareDiscussionRevision(SHARE), transition).toBe(
-        beforeRevision,
+      expect(count(test.dbPath, "sync_relay_share_discussion_messages"), transition).toBe(
+        beforeRows,
       );
+      expect(test.storage.getShareDiscussionRevision(SHARE), transition).toBe(beforeRevision);
       expect(discussionUsage(test.dbPath), transition).toBe(beforeUsage);
-      expect(workspaceUsage(test.dbPath, WORKSPACE), transition).toBe(
-        beforeOriginalUsage,
-      );
-      expect(workspaceUsage(test.dbPath, OTHER_WORKSPACE), transition).toBe(
-        beforeOtherUsage,
-      );
-      expect(
-        discussionIdempotencyRows(test.dbPath, OWNER, idempotencyKey),
-        transition,
-      ).toBe(0);
+      expect(workspaceUsage(test.dbPath, WORKSPACE), transition).toBe(beforeOriginalUsage);
+      expect(workspaceUsage(test.dbPath, OTHER_WORKSPACE), transition).toBe(beforeOtherUsage);
+      expect(discussionIdempotencyRows(test.dbPath, OWNER, idempotencyKey), transition).toBe(0);
     }
   });
 
@@ -732,16 +680,11 @@ describe("share discussion HTTP boundary", () => {
       ),
     );
     expect(laterChronological.activityRevision).toBe(3);
-    expect(messages(laterChronological).map((message) => message.body)).toEqual([
-      "activity third",
-    ]);
+    expect(messages(laterChronological).map((message) => message.body)).toEqual(["activity third"]);
 
     const newestPublic = await body(
       await test.handler(
-        linkRequest(
-          test.view,
-          "/sync/link/discussion?direction=newest-first&limit=2",
-        ),
+        linkRequest(test.view, "/sync/link/discussion?direction=newest-first&limit=2"),
       ),
     );
     expect(newestPublic.activityRevision).toBe(3);
@@ -758,16 +701,11 @@ describe("share discussion HTTP boundary", () => {
       ),
     );
     expect(earlierPublic.activityRevision).toBe(3);
-    expect(messages(earlierPublic).map((message) => message.body)).toEqual([
-      "activity first",
-    ]);
+    expect(messages(earlierPublic).map((message) => message.body)).toEqual(["activity first"]);
 
     const newestOwner = await body(
       await test.handler(
-        request(
-          OWNER,
-          `/sync/shares/${SHARE}/discussion?direction=newest-first&limit=2`,
-        ),
+        request(OWNER, `/sync/shares/${SHARE}/discussion?direction=newest-first&limit=2`),
       ),
     );
     expect(newestOwner.activityRevision).toBe(3);
@@ -785,10 +723,7 @@ describe("share discussion HTTP boundary", () => {
       ),
     );
     const ownerWait = test.handler(
-      request(
-        OWNER,
-        `/sync/shares/${SHARE}/discussion/activity?since=3&hold=30000&limit=100`,
-      ),
+      request(OWNER, `/sync/shares/${SHARE}/discussion/activity?since=3&hold=30000&limit=100`),
     );
     await Promise.resolve();
     await Promise.resolve();
@@ -911,9 +846,7 @@ describe("share discussion HTTP boundary", () => {
       principals: [{ principalId: rawLink.linkPrincipalId, blocked: true }],
     });
 
-    expect(
-      (await test.handler(moderationRequest(OWNER, { action: "pause" }))).status,
-    ).toBe(200);
+    expect((await test.handler(moderationRequest(OWNER, { action: "pause" }))).status).toBe(200);
     expect(await changedPublic(6)).toMatchObject({
       access: "comment",
       cursorRevision: 7,
@@ -941,9 +874,7 @@ describe("share discussion HTTP boundary", () => {
       composerState: "paused",
     });
 
-    expect(
-      (await test.handler(moderationRequest(OWNER, { action: "resume" }))).status,
-    ).toBe(200);
+    expect((await test.handler(moderationRequest(OWNER, { action: "resume" }))).status).toBe(200);
     const resumed = await changedPublic(8);
     expect(resumed).toMatchObject({
       access: "comment",
@@ -1057,21 +988,16 @@ describe("share discussion HTTP boundary", () => {
       ),
     );
     const ownerAbortedWait = restarted(
-      request(
-        OWNER,
-        `/sync/shares/${SHARE}/discussion/activity?since=10&hold=30000&limit=100`,
-        { signal: ownerAbort.signal },
-      ),
+      request(OWNER, `/sync/shares/${SHARE}/discussion/activity?since=10&hold=30000&limit=100`, {
+        signal: ownerAbort.signal,
+      }),
     );
     await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
     expect(activityHub.stats()).toEqual({ shares: 1, waiters: 2 });
     const overflow = await restarted(
-      request(
-        COMMENTER,
-        `/sync/shares/${SHARE}/discussion/activity?since=10&hold=30000&limit=100`,
-      ),
+      request(COMMENTER, `/sync/shares/${SHARE}/discussion/activity?since=10&hold=30000&limit=100`),
     );
     expect(overflow.status).toBe(429);
     expect(await body(overflow)).toMatchObject({ code: "link_read_rate_limited" });
@@ -1118,12 +1044,8 @@ describe("share discussion HTTP boundary", () => {
     expect(ownerAppend.status).toBe(200);
     expectPrivate(ownerAppend);
 
-    const viewRead = await test.handler(
-      linkRequest(test.view, "/sync/link/discussion"),
-    );
-    const commentRead = await test.handler(
-      linkRequest(test.comment, "/sync/link/discussion"),
-    );
+    const viewRead = await test.handler(linkRequest(test.view, "/sync/link/discussion"));
+    const commentRead = await test.handler(linkRequest(test.comment, "/sync/link/discussion"));
     expect(viewRead.status).toBe(200);
     expect(commentRead.status).toBe(200);
     expectPrivate(viewRead);
@@ -1132,53 +1054,34 @@ describe("share discussion HTTP boundary", () => {
 
     const rowsBefore = count(test.dbPath, "sync_relay_share_discussion_messages");
     const viewWrite = await test.handler(
-      trustedAppend(
-        test.view,
-        { body: "must not land", idempotencyKey: "view-write" },
-        PROFILE_A,
-      ),
+      trustedAppend(test.view, { body: "must not land", idempotencyKey: "view-write" }, PROFILE_A),
     );
     expect(viewWrite.status).toBe(403);
     expect(await viewWrite.json()).toEqual(linkRefusalBody("link_view_access"));
-    expect(count(test.dbPath, "sync_relay_share_discussion_messages")).toBe(
-      rowsBefore,
-    );
+    expect(count(test.dbPath, "sync_relay_share_discussion_messages")).toBe(rowsBefore);
   });
 
   it("requires the trusted backend and a raw protected profile while keeping the append body closed", async () => {
     const test = await fixture();
     const validBody = { body: "hello", idempotencyKey: "closed-body" };
     const missingKey = await test.handler(
-      linkRequest(
-        test.comment,
-        "/sync/link/discussion",
-        jsonRequest(validBody),
-        { profileSecret: PROFILE_A },
-      ),
+      linkRequest(test.comment, "/sync/link/discussion", jsonRequest(validBody), {
+        profileSecret: PROFILE_A,
+      }),
     );
     const missingProfile = await test.handler(
-      linkRequest(
-        test.comment,
-        "/sync/link/discussion",
-        jsonRequest(validBody),
-        { relayKey: RELAY_KEY },
-      ),
+      linkRequest(test.comment, "/sync/link/discussion", jsonRequest(validBody), {
+        relayKey: RELAY_KEY,
+      }),
     );
     const malformedProfile = await test.handler(
-      linkRequest(
-        test.comment,
-        "/sync/link/discussion",
-        jsonRequest(validBody),
-        { relayKey: RELAY_KEY, profileSecret: "not-a-profile" },
-      ),
+      linkRequest(test.comment, "/sync/link/discussion", jsonRequest(validBody), {
+        relayKey: RELAY_KEY,
+        profileSecret: "not-a-profile",
+      }),
     );
     const malformedProfileRead = await test.handler(
-      linkRequest(
-        test.comment,
-        "/sync/link/discussion",
-        {},
-        { profileSecret: "not-a-profile" },
-      ),
+      linkRequest(test.comment, "/sync/link/discussion", {}, { profileSecret: "not-a-profile" }),
     );
     const invalidCredential = await test.handler(
       linkRequest(
@@ -1281,9 +1184,7 @@ describe("share discussion HTTP boundary", () => {
     expect(viewWrite.status).toBe(403);
     expectPrivate(viewWrite);
 
-    const ownerRead = await test.handler(
-      request(OWNER, `/sync/shares/${SHARE}/discussion`),
-    );
+    const ownerRead = await test.handler(request(OWNER, `/sync/shares/${SHARE}/discussion`));
     const serialized = JSON.stringify(await body(ownerRead));
     expect(serialized).toContain("Owner Name");
     expect(serialized).toContain("Commenter Name");
@@ -1302,14 +1203,10 @@ describe("share discussion HTTP boundary", () => {
       { authorKind: "named", authorUserId: COMMENTER },
       { authorKind: "named", authorUserId: EDITOR },
     ]);
-    const projected = (await body(
-      await test.handler(request(COMMENTER, `/sync/shares/${SHARE}/discussion`)),
-    )).messages as Array<{ author: { kind: string } }>;
-    expect(projected.map((message) => message.author.kind)).toEqual([
-      "named",
-      "named",
-      "named",
-    ]);
+    const projected = (
+      await body(await test.handler(request(COMMENTER, `/sync/shares/${SHARE}/discussion`)))
+    ).messages as Array<{ author: { kind: string } }>;
+    expect(projected.map((message) => message.author.kind)).toEqual(["named", "named", "named"]);
   });
 
   it("keeps exact retries idempotent and rechecks revoke, retune, pause, and block inside storage", async () => {
@@ -1356,8 +1253,7 @@ describe("share discussion HTTP boundary", () => {
         );
         expect(seeded.status).toBe(200);
         await seeded.arrayBuffer();
-        principalId = test.storage
-          .listShareDiscussionMessages({ shareId: SHARE, limit: 100 })
+        principalId = test.storage.listShareDiscussionMessages({ shareId: SHARE, limit: 100 })
           .messages[0]!.linkPrincipalId;
       }
       const beforeRows = count(test.dbPath, "sync_relay_share_discussion_messages");
@@ -1405,19 +1301,12 @@ describe("share discussion HTTP boundary", () => {
         }),
       );
       if (transition === "pause" || transition === "block") {
-        await discussionStateRefusal(
-          response,
-          transition === "pause" ? "paused" : "blocked",
-        );
+        await discussionStateRefusal(response, transition === "pause" ? "paused" : "blocked");
       } else {
         expect(await genericRefusal(response), transition).toContain("404:");
       }
-      expect(count(test.dbPath, "sync_relay_share_discussion_messages")).toBe(
-        beforeRows,
-      );
-      expect(count(test.dbPath, "sync_relay_link_principals")).toBe(
-        beforePrincipals,
-      );
+      expect(count(test.dbPath, "sync_relay_share_discussion_messages")).toBe(beforeRows);
+      expect(count(test.dbPath, "sync_relay_link_principals")).toBe(beforePrincipals);
     }
 
     const named = await fixture();
@@ -1473,16 +1362,10 @@ describe("share discussion HTTP boundary", () => {
     ).toBe(200);
 
     const publicJson = JSON.stringify(
-      await body(
-        await test.handler(linkRequest(test.view, "/sync/link/discussion")),
-      ),
+      await body(await test.handler(linkRequest(test.view, "/sync/link/discussion"))),
     );
     const namedJson = JSON.stringify(
-      await body(
-        await test.handler(
-          request(COMMENTER, `/sync/shares/${SHARE}/discussion`),
-        ),
-      ),
+      await body(await test.handler(request(COMMENTER, `/sync/shares/${SHARE}/discussion`))),
     );
     for (const serialized of [publicJson, namedJson]) {
       for (const sentinel of [
@@ -1527,11 +1410,7 @@ describe("share discussion HTTP boundary", () => {
         )
       ).status,
     ).toBe(200);
-    expect(
-      (
-        await test.handler(moderationRequest(OWNER, { action: "pause" }))
-      ).status,
-    ).toBe(200);
+    expect((await test.handler(moderationRequest(OWNER, { action: "pause" }))).status).toBe(200);
 
     expect(
       test.storage.deleteShareDiscussionMessage({
@@ -1543,9 +1422,7 @@ describe("share discussion HTTP boundary", () => {
       }),
     ).toMatchObject({ messageId: rawLink.messageId });
     const publicTombstone = messages(
-      await body(
-        await test.handler(linkRequest(test.view, "/sync/link/discussion")),
-      ),
+      await body(await test.handler(linkRequest(test.view, "/sync/link/discussion"))),
     )[0]!;
     expect(publicTombstone).toEqual({
       messageId: rawLink.messageId,
@@ -1639,30 +1516,18 @@ describe("share discussion HTTP boundary", () => {
         ),
       ).toMatchObject({ principalId });
     }
-    const messagesBeforeBlock = count(
-      test.dbPath,
-      "sync_relay_share_discussion_messages",
-    );
+    const messagesBeforeBlock = count(test.dbPath, "sync_relay_share_discussion_messages");
     const usageBeforeBlock = discussionUsage(test.dbPath);
     const principalsBeforeBlock = count(test.dbPath, "sync_relay_link_principals");
 
-    const blocked = await test.handler(
-      moderationRequest(OWNER, { action: "block", principalId }),
-    );
+    const blocked = await test.handler(moderationRequest(OWNER, { action: "block", principalId }));
     expect(blocked.status).toBe(200);
     expect(await body(blocked)).toEqual({ ok: true, blocked: true });
     const refreshedSecond = await test.handler(
-      linkRequest(
-        secondSession,
-        "/sync/link-refresh",
-        { method: "POST" },
-        { relayKey: RELAY_KEY },
-      ),
+      linkRequest(secondSession, "/sync/link-refresh", { method: "POST" }, { relayKey: RELAY_KEY }),
     );
     expect(refreshedSecond.status).toBe(200);
-    secondSession.capabilityToken = String(
-      (await body(refreshedSecond)).capabilityToken,
-    );
+    secondSession.capabilityToken = String((await body(refreshedSecond)).capabilityToken);
     const revisionAfterBlock = test.storage.getShareDiscussionRevision(SHARE);
     const genericBaseline = await genericRefusal(
       await test.handler(
@@ -1720,13 +1585,9 @@ describe("share discussion HTTP boundary", () => {
       ).toMatchObject({ principalId });
     }
 
-    expect(
-      count(test.dbPath, "sync_relay_share_discussion_messages"),
-    ).toBe(messagesBeforeBlock);
+    expect(count(test.dbPath, "sync_relay_share_discussion_messages")).toBe(messagesBeforeBlock);
     expect(discussionUsage(test.dbPath)).toBe(usageBeforeBlock);
-    expect(count(test.dbPath, "sync_relay_link_principals")).toBe(
-      principalsBeforeBlock,
-    );
+    expect(count(test.dbPath, "sync_relay_link_principals")).toBe(principalsBeforeBlock);
     expect(test.storage.getShareDiscussionRevision(SHARE)).toBe(revisionAfterBlock);
 
     const freshSession = {
@@ -1747,8 +1608,7 @@ describe("share discussion HTTP boundary", () => {
     await freshAppend.arrayBuffer();
     const freshPrincipalId = test.storage
       .listShareDiscussionMessages({ shareId: SHARE, limit: 100 })
-      .messages.find((message) => message.body === "fresh profile after block")!
-      .linkPrincipalId;
+      .messages.find((message) => message.body === "fresh profile after block")!.linkPrincipalId;
     expect(freshPrincipalId).not.toBe(principalId);
 
     const unblocked = await test.handler(
@@ -1771,8 +1631,7 @@ describe("share discussion HTTP boundary", () => {
     expect(
       test.storage
         .listShareDiscussionMessages({ shareId: SHARE, limit: 100 })
-        .messages.find((message) => message.body === "same session restored")!
-        .linkPrincipalId,
+        .messages.find((message) => message.body === "same session restored")!.linkPrincipalId,
     ).toBe(principalId);
   });
 
@@ -1824,17 +1683,9 @@ describe("share discussion HTTP boundary", () => {
           messageId: crossShare.messageId,
         }),
       ),
-      test.handler(
-        moderationRequest(OWNER, { action: "pause", ownerUserId: OWNER }),
-      ),
+      test.handler(moderationRequest(OWNER, { action: "pause", ownerUserId: OWNER })),
       test.handler(moderationRequest(OWNER, { action: "mute" })),
-      test.handler(
-        moderationRequest(
-          OWNER,
-          { action: "pause" },
-          { method: "GET", body: null },
-        ),
-      ),
+      test.handler(moderationRequest(OWNER, { action: "pause" }, { method: "GET", body: null })),
     ];
     for (const response of await Promise.all(refusals)) {
       expect(await genericRefusal(response)).toBe(baseline);
@@ -1851,9 +1702,7 @@ describe("share discussion HTTP boundary", () => {
       return originalPause(input);
     };
     expect(
-      await genericRefusal(
-        await test.handler(moderationRequest(OWNER, { action: "pause" })),
-      ),
+      await genericRefusal(await test.handler(moderationRequest(OWNER, { action: "pause" }))),
     ).toBe(baseline);
     expect(linkWritesPausedAtMs(storagePath(test.storage), SHARE)).toBeNull();
     expect(
@@ -1867,9 +1716,7 @@ describe("share discussion HTTP boundary", () => {
       ),
     ).toBe(baseline);
 
-    const currentOwner = await test.handler(
-      moderationRequest(NEW_OWNER, { action: "pause" }),
-    );
+    const currentOwner = await test.handler(moderationRequest(NEW_OWNER, { action: "pause" }));
     expect(currentOwner.status).toBe(200);
     expectPrivate(currentOwner);
     const serialized = JSON.stringify(await body(currentOwner));
@@ -1891,9 +1738,7 @@ describe("share discussion HTTP boundary", () => {
       expect(serialized, sentinel).not.toContain(sentinel);
     }
 
-    const newOwnerRead = await test.handler(
-      request(NEW_OWNER, `/sync/shares/${SHARE}/discussion`),
-    );
+    const newOwnerRead = await test.handler(request(NEW_OWNER, `/sync/shares/${SHARE}/discussion`));
     expect(newOwnerRead.status).toBe(200);
     const newOwnerPage = await body(newOwnerRead);
     expect(newOwnerPage.linkCommentsPaused).toBe(true);
@@ -1926,9 +1771,7 @@ describe("share discussion HTTP boundary", () => {
       );
 
       if (transition === "delete") {
-        const original = test.storage.deleteShareDiscussionMessage.bind(
-          test.storage,
-        );
+        const original = test.storage.deleteShareDiscussionMessage.bind(test.storage);
         test.storage.deleteShareDiscussionMessage = (input) => {
           updateShareWorkspace(test.dbPath, OTHER_WORKSPACE);
           return original(input);
@@ -1959,8 +1802,7 @@ describe("share discussion HTTP boundary", () => {
       );
       expect(await genericRefusal(response), transition).toBe(baseline);
       expect(
-        test.storage.listShareDiscussionMessages({ shareId: SHARE, limit: 100 })
-          .messages[0],
+        test.storage.listShareDiscussionMessages({ shareId: SHARE, limit: 100 }).messages[0],
       ).toMatchObject({
         messageId: target.messageId,
         body: `workspace-race-${transition}`,
@@ -1972,5 +1814,4 @@ describe("share discussion HTTP boundary", () => {
       expect(discussionUsage(test.dbPath)).toBe(beforeUsage);
     }
   });
-
 });

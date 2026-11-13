@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { SyncStatusResult } from "../../ipc/bridgeContract";
-import { chatsOffCopy, fileObservationFailureCopy, historyOffPlaceholderCopy, versionCompareOffCopy } from "./capabilityOffCopy";
+import {
+  chatsOffCopy,
+  fileObservationFailureCopy,
+  historyOffPlaceholderCopy,
+  versionCompareOffCopy,
+} from "./capabilityOffCopy";
 
 describe("file observation failure copy", () => {
   it("names a failed read and its recovery without claiming history stopped", () => {
@@ -16,16 +21,28 @@ describe("file observation failure copy", () => {
 describe("refused data store copy", () => {
   it.each([
     ["foreign-database", "dohc cannot read this workspace's data store."],
-    ["unsupported-fingerprint", "This workspace's data store is not in the format this version of dohc uses."],
+    [
+      "unsupported-fingerprint",
+      "This workspace's data store is not in the format this version of dohc uses.",
+    ],
   ] as const)("directs every unavailable surface to recovery for %s", (cause, sentence) => {
     const status: SyncStatusResult = {
-      state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null,
-      liveSessionsGeneration: 0, historyRecordingUnavailable: false, historyShareView: false,
-      historyCaptureFailed: true, engineStoreRefused: cause,
+      state: "synced",
+      pendingChangeCount: 0,
+      lastSyncedAtMs: null,
+      liveSessionsGeneration: 0,
+      historyRecordingUnavailable: false,
+      historyShareView: false,
+      historyCaptureFailed: true,
+      engineStoreRefused: cause,
     };
     // A shared view's refused store takes the same line: it reads history, so it has no history-free cause.
-    for (const copy of [historyOffPlaceholderCopy(status), historyOffPlaceholderCopy({ ...status, historyShareView: true }),
-      versionCompareOffCopy(status), chatsOffCopy(status)]) {
+    for (const copy of [
+      historyOffPlaceholderCopy(status),
+      historyOffPlaceholderCopy({ ...status, historyShareView: true }),
+      versionCompareOffCopy(status),
+      chatsOffCopy(status),
+    ]) {
       expect(copy).toBe(`${sentence} Open Notices and choose Rebuild to review recovery options.`);
     }
   });
@@ -34,11 +51,20 @@ describe("refused data store copy", () => {
 describe("migration failure copy", () => {
   it("directs every unavailable surface to an update, not a rebuild", () => {
     const status: SyncStatusResult = {
-      state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null,
-      liveSessionsGeneration: 0, historyRecordingUnavailable: false, historyShareView: false,
-      historyCaptureFailed: true, engineStoreRefused: "migration-failed",
+      state: "synced",
+      pendingChangeCount: 0,
+      lastSyncedAtMs: null,
+      liveSessionsGeneration: 0,
+      historyRecordingUnavailable: false,
+      historyShareView: false,
+      historyCaptureFailed: true,
+      engineStoreRefused: "migration-failed",
     };
-    for (const copy of [historyOffPlaceholderCopy(status), versionCompareOffCopy(status), chatsOffCopy(status)]) {
+    for (const copy of [
+      historyOffPlaceholderCopy(status),
+      versionCompareOffCopy(status),
+      chatsOffCopy(status),
+    ]) {
       expect(copy).toBe(
         "dohc could not update this workspace's data store to this version. Update dohc to continue. Your files are unchanged.",
       );

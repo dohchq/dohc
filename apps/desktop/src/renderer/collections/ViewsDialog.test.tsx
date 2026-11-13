@@ -8,14 +8,24 @@ const schema: CollectionSchema = {
   name: null,
   description: null,
   fields: [{ name: "Status", type: "text" }],
-  views: [{ name: "Board", kind: "table", groupBy: null, sort: [], visibleFields: null, dateField: null }],
+  views: [
+    { name: "Board", kind: "table", groupBy: null, sort: [], visibleFields: null, dateField: null },
+  ],
 };
 
 afterEach(cleanup);
 
 it("closes from its X", () => {
   const onClose = vi.fn();
-  render(<ViewsDialog schema={schema} apply={vi.fn()} onClose={onClose} onRenamed={vi.fn()} onDeleted={vi.fn()} />);
+  render(
+    <ViewsDialog
+      schema={schema}
+      apply={vi.fn()}
+      onClose={onClose}
+      onRenamed={vi.fn()}
+      onDeleted={vi.fn()}
+    />,
+  );
   fireEvent.click(screen.getByRole("button", { name: "Close" }));
   expect(onClose).toHaveBeenCalledTimes(1);
 });
@@ -26,7 +36,15 @@ it("keeps keyboard focus on the delete control while it arms, then deletes", asy
     return null;
   });
   const onDeleted = vi.fn();
-  render(<ViewsDialog schema={schema} apply={apply} onClose={vi.fn()} onRenamed={vi.fn()} onDeleted={onDeleted} />);
+  render(
+    <ViewsDialog
+      schema={schema}
+      apply={apply}
+      onClose={vi.fn()}
+      onRenamed={vi.fn()}
+      onDeleted={onDeleted}
+    />,
+  );
 
   const arm = screen.getByRole("button", { name: "Delete view Board" });
   arm.focus();

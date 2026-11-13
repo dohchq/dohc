@@ -7,8 +7,14 @@ import type {
   ChatDispatchStateForThreadResult,
   ChatMessageRecord,
 } from "../../ipc/bridgeContract";
-import { extractChatFileReferences, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
-import { CHAT_DISPATCH_POST_THREADS_MAX, type WorkspaceHeadingRecord } from "../../ipc/bridgeContract";
+import {
+  extractChatFileReferences,
+  type MentionCandidate,
+} from "@dohc/workspace-contracts/chat-mentions";
+import {
+  CHAT_DISPATCH_POST_THREADS_MAX,
+  type WorkspaceHeadingRecord,
+} from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 import { withErrorWords } from "../../ipc/errorWords";
@@ -16,7 +22,11 @@ import type { ChatMessageListHandle, ChatReactionControls } from "./chatMessages
 import { FailedRunLine, failedRunEnd, WaitingLine, type ChatWorking } from "./ChatThreadPanel";
 import { ThreadedChat } from "./ThreadedChat";
 import { useReactions } from "./reactionStore";
-import { MentionComposer, type FileMentionCandidate, type MentionComposerHandle } from "./MentionComposer";
+import {
+  MentionComposer,
+  type FileMentionCandidate,
+  type MentionComposerHandle,
+} from "./MentionComposer";
 import { agentMentionId } from "../../settings/userSettings";
 import { useAgentOffer } from "./AgentOffer";
 import { DecisionStatus } from "./ChatPosts";
@@ -32,7 +42,10 @@ import { compareMessageOrder } from "@dohc/workspace-contracts/chat-order";
 
 // The change to a Collection's rules a message asks a person to apply.
 const changeFileOf = (message: ChatMessageRecord) =>
-  message.attachments?.find((attachment) => attachment.pathHint !== undefined && COLLECTION_CHANGE_FILE.test(attachment.pathHint))?.pathHint;
+  message.attachments?.find(
+    (attachment) =>
+      attachment.pathHint !== undefined && COLLECTION_CHANGE_FILE.test(attachment.pathHint),
+  )?.pathHint;
 
 type PaintedLane = {
   threadId: string | null;
@@ -48,7 +61,9 @@ type PaintedLane = {
 function postAsThread(messages: readonly ChatMessageRecord[]): ChatMessageRecord[] {
   const first = messages[0];
   if (!first) return [];
-  return messages.map((message, at) => (at === 0 || message.parentMessageId ? message : { ...message, parentMessageId: first.id }));
+  return messages.map((message, at) =>
+    at === 0 || message.parentMessageId ? message : { ...message, parentMessageId: first.id },
+  );
 }
 
 // A conversation: a group's chat lane or an agent DM. The lane is the
@@ -137,144 +152,239 @@ export function ChatLane(props: {
   const agentDm = props.channel.kind === "agent";
   const chatAgentId = agentDm ? props.channel.agentId : undefined;
   const agentOffer = useAgentOffer({
-    workspaceId, scope: `${workspaceId}:lane:${channelId}`, setup: props.agentSetup, dispatch: null, reach: props.workspacePath,
+    workspaceId,
+    scope: `${workspaceId}:lane:${channelId}`,
+    setup: props.agentSetup,
+    dispatch: null,
+    reach: props.workspacePath,
   });
 
-  const markRead = useCallback((painted: PaintedLane) => {
-    const laneId = painted.threadId;
-    if (painted.readState !== "retry" || laneId === null) return;
-    const current = token.current;
-    const isCurrent = () => current === token.current && paintedRevision.current === painted;
-    painted.readState = "pending";
-    void bridge().markChatThreadRead({
-      workspaceId, threadId: laneId, upToSequence: painted.messageCount,
-    }).then(() => {
-      if (!isCurrent()) return;
-      painted.readState = "done";
-      onThreadRead.current?.();
-    }, () => {
-      if (isCurrent()) painted.readState = "retry";
-    });
-  }, [workspaceId]);
+  const markRead = useCallback(
+    (painted: PaintedLane) => {
+      const laneId = painted.threadId;
+      if (painted.readState !== "retry" || laneId === null) return;
+      const current = token.current;
+      const isCurrent = () => current === token.current && paintedRevision.current === painted;
+      painted.readState = "pending";
+      void bridge()
+        .markChatThreadRead({
+          workspaceId,
+          threadId: laneId,
+          upToSequence: painted.messageCount,
+        })
+        .then(
+          () => {
+            if (!isCurrent()) return;
+            painted.readState = "done";
+            onThreadRead.current?.();
+          },
+          () => {
+            if (isCurrent()) painted.readState = "retry";
+          },
+        );
+    },
+    [workspaceId],
+  );
 
-  const load = useCallback(async (force = false) => {
-    const current = token.current;
-    const sequence = ++loadSequence.current;
-    const isCurrent = () => current === token.current && sequence === loadSequence.current;
-    try {
-      const [listed, listedPosts] = await Promise.all([
-        bridge().listChannelThreads({ workspaceId, channelId, lane: "chat" }),
-        agentDm ? bridge().listChannelThreads({ workspaceId, channelId, lane: "posts" }) : null,
-      ]);
-      if (!isCurrent()) return;
-      const lane = [...listed.threads].sort((left, right) =>
-        left.createdAtMs - right.createdAtMs || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0),
-      )[0];
-      const posts = listedPosts?.threads ?? [];
-      const postsKey = posts.map((post) => `${post.id}:${post.updatedAtMs}:${post.messageCount}`).join("|");
-      if (!lane && posts.length === 0) {
-        paintedRevision.current = null;
-        setThreadId(null);
-        setMessages([]);
-        setDecisions([]);
-        setRuns({});
-        setDispatch(null);
-        setLoading(false);
-        return;
-      }
-      // Read the watermark before content so a concurrent write cannot be
-      // remembered as painted until its content has actually been loaded.
-      // A run can start or end without a new message, so the dispatch is
-      // read on every pass. Without it the lane shows no Stop, not no chat.
-      // A reply to an earlier post can wait for the agent too, so the one
-      // read covers the posts.
-      const laneId = lane?.id ?? null;
-      const postIds = posts.slice(0, CHAT_DISPATCH_POST_THREADS_MAX).map((post) => post.id);
-      const [revision, nextDispatch] = await Promise.all([
-        laneId ? bridge().getChatThreadRevision({ workspaceId, threadId: laneId }).then((read) => read.revision) : 0,
-        agentDm ? bridge().chatDispatchStateForThread({
-          workspaceId, threadId: laneId, ...(postIds.length > 0 ? { postThreadIds: postIds } : {}),
-        }).catch(() => null) : null,
-      ]);
-      if (!isCurrent()) return;
-      setDispatch(nextDispatch);
-      const nextRunId = nextDispatch?.liveRunId ?? null;
-      const painted = paintedRevision.current;
-      if (!force && painted?.threadId === laneId && painted.revision === revision && painted.postsKey === postsKey && painted.liveRunId === nextRunId) {
-        markRead(painted);
-        return;
-      }
-      const ticket = reactions.ticket();
-      const readThread = async (id: string) => {
-        const [page, reacted, polled, ran] = await Promise.all([
-          bridge().listChatMessages({ workspaceId, threadId: id }),
-          bridge().listChatReactions({ workspaceId, threadId: id }),
-          bridge().listChatThreadDecisions({ workspaceId, threadId: id }),
-          // Only an agent's replies have runs. Without them the chat still shows.
-          agentDm ? bridge().chatRunRecordsForThread({ workspaceId, threadId: id }).catch(() => null) : null,
+  const load = useCallback(
+    async (force = false) => {
+      const current = token.current;
+      const sequence = ++loadSequence.current;
+      const isCurrent = () => current === token.current && sequence === loadSequence.current;
+      try {
+        const [listed, listedPosts] = await Promise.all([
+          bridge().listChannelThreads({ workspaceId, channelId, lane: "chat" }),
+          agentDm ? bridge().listChannelThreads({ workspaceId, channelId, lane: "posts" }) : null,
         ]);
-        return { id, messages: page.messages, reacted, decisions: polled.decisions, runs: ran?.runs ?? {} };
-      };
-      const [laneRead, ...postReads] = await Promise.all([
-        laneId ? readThread(laneId) : null,
-        ...posts.map((post) => readThread(post.id)),
-      ]);
-      const reads = laneRead ? [laneRead, ...postReads] : postReads;
-      reactions.ingest(reads.map((read) => ({ threadId: read.id, ...read.reacted, ticket })));
-      if (!isCurrent()) return;
-      const laneMessages = laneRead?.messages ?? [];
-      if (lane && paintedRevision.current?.threadId !== lane.id) {
-        const firstUnread = lane.unreadCount > 0 ? laneMessages[lane.lastReadSequence] : undefined;
-        setFirstUnreadMessageId(firstUnread?.id ?? null);
+        if (!isCurrent()) return;
+        const lane = [...listed.threads].sort(
+          (left, right) =>
+            left.createdAtMs - right.createdAtMs ||
+            (left.id < right.id ? -1 : left.id > right.id ? 1 : 0),
+        )[0];
+        const posts = listedPosts?.threads ?? [];
+        const postsKey = posts
+          .map((post) => `${post.id}:${post.updatedAtMs}:${post.messageCount}`)
+          .join("|");
+        if (!lane && posts.length === 0) {
+          paintedRevision.current = null;
+          setThreadId(null);
+          setMessages([]);
+          setDecisions([]);
+          setRuns({});
+          setDispatch(null);
+          setLoading(false);
+          return;
+        }
+        // Read the watermark before content so a concurrent write cannot be
+        // remembered as painted until its content has actually been loaded.
+        // A run can start or end without a new message, so the dispatch is
+        // read on every pass. Without it the lane shows no Stop, not no chat.
+        // A reply to an earlier post can wait for the agent too, so the one
+        // read covers the posts.
+        const laneId = lane?.id ?? null;
+        const postIds = posts.slice(0, CHAT_DISPATCH_POST_THREADS_MAX).map((post) => post.id);
+        const [revision, nextDispatch] = await Promise.all([
+          laneId
+            ? bridge()
+                .getChatThreadRevision({ workspaceId, threadId: laneId })
+                .then((read) => read.revision)
+            : 0,
+          agentDm
+            ? bridge()
+                .chatDispatchStateForThread({
+                  workspaceId,
+                  threadId: laneId,
+                  ...(postIds.length > 0 ? { postThreadIds: postIds } : {}),
+                })
+                .catch(() => null)
+            : null,
+        ]);
+        if (!isCurrent()) return;
+        setDispatch(nextDispatch);
+        const nextRunId = nextDispatch?.liveRunId ?? null;
+        const painted = paintedRevision.current;
+        if (
+          !force &&
+          painted?.threadId === laneId &&
+          painted.revision === revision &&
+          painted.postsKey === postsKey &&
+          painted.liveRunId === nextRunId
+        ) {
+          markRead(painted);
+          return;
+        }
+        const ticket = reactions.ticket();
+        const readThread = async (id: string) => {
+          const [page, reacted, polled, ran] = await Promise.all([
+            bridge().listChatMessages({ workspaceId, threadId: id }),
+            bridge().listChatReactions({ workspaceId, threadId: id }),
+            bridge().listChatThreadDecisions({ workspaceId, threadId: id }),
+            // Only an agent's replies have runs. Without them the chat still shows.
+            agentDm
+              ? bridge()
+                  .chatRunRecordsForThread({ workspaceId, threadId: id })
+                  .catch(() => null)
+              : null,
+          ]);
+          return {
+            id,
+            messages: page.messages,
+            reacted,
+            decisions: polled.decisions,
+            runs: ran?.runs ?? {},
+          };
+        };
+        const [laneRead, ...postReads] = await Promise.all([
+          laneId ? readThread(laneId) : null,
+          ...posts.map((post) => readThread(post.id)),
+        ]);
+        const reads = laneRead ? [laneRead, ...postReads] : postReads;
+        reactions.ingest(reads.map((read) => ({ threadId: read.id, ...read.reacted, ticket })));
+        if (!isCurrent()) return;
+        const laneMessages = laneRead?.messages ?? [];
+        if (lane && paintedRevision.current?.threadId !== lane.id) {
+          const firstUnread =
+            lane.unreadCount > 0 ? laneMessages[lane.lastReadSequence] : undefined;
+          setFirstUnreadMessageId(firstUnread?.id ?? null);
+        }
+        const next: PaintedLane = {
+          threadId: laneId,
+          revision,
+          postsKey,
+          liveRunId: nextRunId,
+          messageCount: laneMessages.length,
+          readState: "retry",
+        };
+        paintedRevision.current = next;
+        setThreadId(laneId);
+        setPostThreadIds(posts.map((post) => post.id));
+        setMessages(
+          [...postReads.flatMap((read) => postAsThread(read.messages)), ...laneMessages].sort(
+            compareMessageOrder,
+          ),
+        );
+        setDecisions(reads.flatMap((read) => read.decisions));
+        setRuns(Object.assign({}, ...reads.map((read) => read.runs)));
+        setLoading(false);
+        markRead(next);
+        // A post shown here is read: there's nowhere else to open it.
+        posts.forEach((post, at) => {
+          const read = postReads[at];
+          if (post.unreadCount === 0 || !read) return;
+          void bridge()
+            .markChatThreadRead({
+              workspaceId,
+              threadId: post.id,
+              upToSequence: read.messages.length,
+            })
+            .then(
+              () => {
+                if (isCurrent()) onThreadRead.current?.();
+              },
+              () => {},
+            );
+        });
+      } catch (error) {
+        if (!isCurrent()) return;
+        setLoading(false);
+        onError(ipcErrorMessage(error, "Could not load the chat."), error);
       }
-      const next: PaintedLane = { threadId: laneId, revision, postsKey, liveRunId: nextRunId, messageCount: laneMessages.length, readState: "retry" };
-      paintedRevision.current = next;
-      setThreadId(laneId);
-      setPostThreadIds(posts.map((post) => post.id));
-      setMessages([...postReads.flatMap((read) => postAsThread(read.messages)), ...laneMessages]
-        .sort(compareMessageOrder));
-      setDecisions(reads.flatMap((read) => read.decisions));
-      setRuns(Object.assign({}, ...reads.map((read) => read.runs)));
-      setLoading(false);
-      markRead(next);
-      // A post shown here is read: there's nowhere else to open it.
-      posts.forEach((post, at) => {
-        const read = postReads[at];
-        if (post.unreadCount === 0 || !read) return;
-        void bridge().markChatThreadRead({ workspaceId, threadId: post.id, upToSequence: read.messages.length })
-          .then(() => { if (isCurrent()) onThreadRead.current?.(); }, () => {});
-      });
-    } catch (error) {
-      if (!isCurrent()) return;
-      setLoading(false);
-      onError(ipcErrorMessage(error, "Could not load the chat."), error);
-    }
-  }, [agentDm, channelId, markRead, onError, reactions, workspaceId]);
+    },
+    [agentDm, channelId, markRead, onError, reactions, workspaceId],
+  );
 
   // A message that saved while a later step failed. Try again reloads the
   // conversation it saved in, while this lane still shows it.
-  const reportUnshown = useCallback((words: string, failure: string) => {
-    const current = token.current;
-    onError(words, failure, () => { if (current === token.current) void load(true); });
-  }, [load, onError]);
+  const reportUnshown = useCallback(
+    (words: string, failure: string) => {
+      const current = token.current;
+      onError(words, failure, () => {
+        if (current === token.current) void load(true);
+      });
+    },
+    [load, onError],
+  );
 
   // An answer whose reply saved while its question stayed open. Try again
   // marks the question answered with that reply, while this lane still shows
   // it, and never posts the reply again. A failed try offers Try again again.
-  const reportStillOpen = useCallback((words: string, failure: unknown, answer: {
-    threadId: string; messageId: string; resolvedByMessageId: string; chosenOption?: string;
-  }) => {
-    const current = token.current;
-    const report = (cause: unknown) => onError(words, cause, () => {
-      if (current !== token.current) return;
-      void bridge().resolveChatDecision({ workspaceId, ...answer }).then(({ resolved }) => {
-        if (current !== token.current) return;
-        setDecisions(existing => existing.map(entry => entry.messageId === resolved.messageId ? resolved : entry));
-        void load(true);
-      }, (error: unknown) => { if (current === token.current) report(error); });
-    });
-    report(failure);
-  }, [load, onError, workspaceId]);
+  const reportStillOpen = useCallback(
+    (
+      words: string,
+      failure: unknown,
+      answer: {
+        threadId: string;
+        messageId: string;
+        resolvedByMessageId: string;
+        chosenOption?: string;
+      },
+    ) => {
+      const current = token.current;
+      const report = (cause: unknown) =>
+        onError(words, cause, () => {
+          if (current !== token.current) return;
+          void bridge()
+            .resolveChatDecision({ workspaceId, ...answer })
+            .then(
+              ({ resolved }) => {
+                if (current !== token.current) return;
+                setDecisions((existing) =>
+                  existing.map((entry) =>
+                    entry.messageId === resolved.messageId ? resolved : entry,
+                  ),
+                );
+                void load(true);
+              },
+              (error: unknown) => {
+                if (current === token.current) report(error);
+              },
+            );
+        });
+      report(failure);
+    },
+    [load, onError, workspaceId],
+  );
 
   useEffect(() => {
     setThreadId(null);
@@ -291,16 +401,25 @@ export function ChatLane(props: {
     setFirstUnreadMessageId(null);
     paintedRevision.current = null;
     setLoading(true);
-    return () => { token.current += 1; };
+    return () => {
+      token.current += 1;
+    };
   }, [channelId, workspaceId]);
 
   useEffect(() => {
     void load();
-    return () => { loadSequence.current += 1; };
+    return () => {
+      loadSequence.current += 1;
+    };
   }, [load, props.revision]);
 
   useEffect(() => {
-    if (focusMessageId === undefined || loading || !messages.some((message) => message.id === focusMessageId)) return;
+    if (
+      focusMessageId === undefined ||
+      loading ||
+      !messages.some((message) => message.id === focusMessageId)
+    )
+      return;
     const key = `${channelId}:${focusMessageId}`;
     if (landed.current === key) return;
     const frame = requestAnimationFrame(() => {
@@ -340,7 +459,10 @@ export function ChatLane(props: {
         if (active) void load();
       });
     });
-    return () => { active = false; unsubscribe(); };
+    return () => {
+      active = false;
+      unsubscribe();
+    };
   }, [load, workspaceId]);
 
   const send = useCallback(async () => {
@@ -364,12 +486,17 @@ export function ChatLane(props: {
         });
         if (current !== token.current) return;
         // The message saved, so it is not sent again. The reload below shows it.
-        if ("failure" in result) reportUnshown("Sent your message. dohc could not show it yet.", result.failure);
+        if ("failure" in result)
+          reportUnshown("Sent your message. dohc could not show it yet.", result.failure);
         else {
           if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
           loadSequence.current += 1;
           listRef.current?.scrollToEnd();
-          setMessages((existing) => existing.some(message => message.id === result.message.id) ? existing : [...existing, result.message]);
+          setMessages((existing) =>
+            existing.some((message) => message.id === result.message.id)
+              ? existing
+              : [...existing, result.message],
+          );
         }
       } else {
         const ticket = reactions.ticket();
@@ -386,13 +513,15 @@ export function ChatLane(props: {
           reportUnshown("Sent your message. dohc could not show it yet.", result.failure);
         } else {
           // The new message has no reactions yet; the start names the viewer.
-          reactions.ingest([{
-            threadId: result.thread.id,
-            messageIds: [result.message.id],
-            reactions: [],
-            viewerAuthorId: result.viewerAuthorId,
-            ticket,
-          }]);
+          reactions.ingest([
+            {
+              threadId: result.thread.id,
+              messageIds: [result.message.id],
+              reactions: [],
+              viewerAuthorId: result.viewerAuthorId,
+              ticket,
+            },
+          ]);
           if (current !== token.current) return;
           if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
           loadSequence.current += 1;
@@ -410,114 +539,212 @@ export function ChatLane(props: {
     } finally {
       if (current === token.current) setSending(false);
     }
-  }, [channelId, composer, load, loading, onError, poll, props.locked, props.onAgentWaitsForTrust, reactions, reportUnshown, sending, threadId, workspaceId]);
+  }, [
+    channelId,
+    composer,
+    load,
+    loading,
+    onError,
+    poll,
+    props.locked,
+    props.onAgentWaitsForTrust,
+    reactions,
+    reportUnshown,
+    sending,
+    threadId,
+    workspaceId,
+  ]);
 
   // A reply goes under the message the thread hangs from. A reply to an
   // earlier post goes on in that post. A reply after Answer answers its question.
-  const sendReply = useCallback(async (rootId: string, body: string, answers?: string) => {
-    const post = messages.find((message) => message.id === rootId && message.threadId !== threadId)?.threadId;
-    const target = post ?? threadId;
-    if (!target || props.locked) return false;
-    const current = token.current;
-    try {
-      const references = extractChatFileReferences(body);
-      const result = await bridge().sendChatMessage({
+  const sendReply = useCallback(
+    async (rootId: string, body: string, answers?: string) => {
+      const post = messages.find(
+        (message) => message.id === rootId && message.threadId !== threadId,
+      )?.threadId;
+      const target = post ?? threadId;
+      if (!target || props.locked) return false;
+      const current = token.current;
+      try {
+        const references = extractChatFileReferences(body);
+        const result = await bridge().sendChatMessage({
+          workspaceId,
+          threadId: target,
+          body,
+          ...(post ? {} : { parentMessageId: rootId }),
+          ...(references.length > 0 ? { fileReferences: references } : {}),
+          ...(answers ? { resolves: { messageId: answers } } : {}),
+        });
+        if (current !== token.current) return false;
+        if (!("failure" in result)) {
+          if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
+          loadSequence.current += 1;
+          const reply = post ? { ...result.message, parentMessageId: rootId } : result.message;
+          setMessages((existing) =>
+            existing.some((message) => message.id === reply.id) ? existing : [...existing, reply],
+          );
+          const resolved = result.resolved;
+          if (resolved)
+            setDecisions((existing) =>
+              existing.map((entry) => (entry.messageId === resolved.messageId ? resolved : entry)),
+            );
+        }
+        if (answers && result.resolveFailure) {
+          reportStillOpen(
+            "Sent your reply. dohc could not mark the question answered.",
+            result.resolveFailure,
+            {
+              threadId: target,
+              messageId: answers,
+              resolvedByMessageId: result.message.id,
+            },
+          );
+        } else if ("failure" in result)
+          reportUnshown("Sent your reply. dohc could not show it yet.", result.failure);
+        void load(true);
+        return true;
+      } catch (error) {
+        if (current === token.current)
+          onError(ipcErrorMessage(error, "Could not send that reply."), error);
+        return false;
+      }
+    },
+    [
+      load,
+      messages,
+      onError,
+      props.locked,
+      props.onAgentWaitsForTrust,
+      reportStillOpen,
+      reportUnshown,
+      threadId,
+      workspaceId,
+    ],
+  );
+
+  const chooseOption = useCallback(
+    async (decision: ChatDecisionRecord, option: string) => {
+      // The answer goes where the poll is: its thread, or its earlier post.
+      const asked = messages.find((message) => message.id === decision.messageId);
+      const post = asked && asked.threadId !== threadId ? asked.threadId : undefined;
+      const target = post ?? threadId;
+      if (!target || sending || loading || props.locked) return;
+      const parentMessageId = post ? undefined : asked?.parentMessageId;
+      const current = token.current;
+      const input = {
         workspaceId,
         threadId: target,
-        body,
-        ...(post ? {} : { parentMessageId: rootId }),
-        ...(references.length > 0 ? { fileReferences: references } : {}),
-        ...(answers ? { resolves: { messageId: answers } } : {}),
-      });
-      if (current !== token.current) return false;
-      if (!("failure" in result)) {
-        if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
-        loadSequence.current += 1;
-        const reply = post ? { ...result.message, parentMessageId: rootId } : result.message;
-        setMessages((existing) => existing.some(message => message.id === reply.id) ? existing : [...existing, reply]);
-        const resolved = result.resolved;
-        if (resolved) setDecisions(existing => existing.map(entry => entry.messageId === resolved.messageId ? resolved : entry));
+        body: option,
+        ...(parentMessageId ? { parentMessageId } : {}),
+        resolves: { messageId: decision.messageId, chosenOption: option },
+      };
+      setSending(true);
+      try {
+        const result = await bridge().sendChatMessage(input);
+        if (current !== token.current) return;
+        if (!("failure" in result)) {
+          if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
+          loadSequence.current += 1;
+          listRef.current?.scrollToEnd();
+          setMessages((existing) =>
+            existing.some((message) => message.id === result.message.id)
+              ? existing
+              : [...existing, result.message],
+          );
+          const resolved = result.resolved;
+          if (resolved)
+            setDecisions((existing) =>
+              existing.map((entry) => (entry.messageId === decision.messageId ? resolved : entry)),
+            );
+        }
+        if (result.resolveFailure) {
+          reportStillOpen(
+            "Sent your choice. dohc could not mark the question answered.",
+            result.resolveFailure,
+            {
+              threadId: target,
+              messageId: decision.messageId,
+              resolvedByMessageId: result.message.id,
+              chosenOption: option,
+            },
+          );
+        } else if ("failure" in result)
+          reportUnshown("Sent your choice. dohc could not show it yet.", result.failure);
+      } catch (error) {
+        // A choice that saved answers, so a refused one saved nothing.
+        if (current === token.current)
+          onError(ipcErrorMessage(error, "Could not send that choice."), error);
+      } finally {
+        if (current === token.current) {
+          setSending(false);
+          void load(true);
+        }
       }
-      if (answers && result.resolveFailure) {
-        reportStillOpen("Sent your reply. dohc could not mark the question answered.", result.resolveFailure, {
-          threadId: target, messageId: answers, resolvedByMessageId: result.message.id,
-        });
-      } else if ("failure" in result) reportUnshown("Sent your reply. dohc could not show it yet.", result.failure);
-      void load(true);
-      return true;
-    } catch (error) {
-      if (current === token.current) onError(ipcErrorMessage(error, "Could not send that reply."), error);
-      return false;
-    }
-  }, [load, messages, onError, props.locked, props.onAgentWaitsForTrust, reportStillOpen, reportUnshown, threadId, workspaceId]);
-
-  const chooseOption = useCallback(async (decision: ChatDecisionRecord, option: string) => {
-    // The answer goes where the poll is: its thread, or its earlier post.
-    const asked = messages.find((message) => message.id === decision.messageId);
-    const post = asked && asked.threadId !== threadId ? asked.threadId : undefined;
-    const target = post ?? threadId;
-    if (!target || sending || loading || props.locked) return;
-    const parentMessageId = post ? undefined : asked?.parentMessageId;
-    const current = token.current;
-    const input = {
-      workspaceId, threadId: target, body: option,
-      ...(parentMessageId ? { parentMessageId } : {}),
-      resolves: { messageId: decision.messageId, chosenOption: option },
-    };
-    setSending(true);
-    try {
-      const result = await bridge().sendChatMessage(input);
-      if (current !== token.current) return;
-      if (!("failure" in result)) {
-        if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
-        loadSequence.current += 1;
-        listRef.current?.scrollToEnd();
-        setMessages(existing => existing.some(message => message.id === result.message.id) ? existing : [...existing, result.message]);
-        const resolved = result.resolved;
-        if (resolved) setDecisions(existing => existing.map(entry => entry.messageId === decision.messageId ? resolved : entry));
-      }
-      if (result.resolveFailure) {
-        reportStillOpen("Sent your choice. dohc could not mark the question answered.", result.resolveFailure, {
-          threadId: target, messageId: decision.messageId, resolvedByMessageId: result.message.id, chosenOption: option,
-        });
-      } else if ("failure" in result) reportUnshown("Sent your choice. dohc could not show it yet.", result.failure);
-    } catch (error) {
-      // A choice that saved answers, so a refused one saved nothing.
-      if (current === token.current) onError(ipcErrorMessage(error, "Could not send that choice."), error);
-    } finally {
-      if (current === token.current) {
-        setSending(false);
-        void load(true);
-      }
-    }
-  }, [threadId, sending, loading, props.locked, props.onAgentWaitsForTrust, workspaceId, onError, load, messages, reportStillOpen, reportUnshown]);
+    },
+    [
+      threadId,
+      sending,
+      loading,
+      props.locked,
+      props.onAgentWaitsForTrust,
+      workspaceId,
+      onError,
+      load,
+      messages,
+      reportStillOpen,
+      reportUnshown,
+    ],
+  );
 
   // Applying or undoing a change answers in the change's own place, as the person who clicked.
   // Apply answers the message's question, attaching the change a review applied instead. Undo attaches the change file again.
-  const replyToChange = useCallback(async (asked: ChatMessageRecord, path: string, input: { body: string; resolves: boolean; attach?: string }) => {
-    const post = asked.threadId !== threadId ? asked.threadId : undefined;
-    const target = post ?? threadId;
-    if (!target) throw new Error("dohc couldn't find this chat.");
-    const parentMessageId = post ? undefined : asked.parentMessageId;
-    const current = token.current;
-    const result = await bridge().sendChatMessage({
-      workspaceId, threadId: target, body: input.body,
-      ...(parentMessageId ? { parentMessageId } : {}),
-      ...(input.resolves ? { resolves: { messageId: asked.id } } : {}),
-      ...(input.attach || !input.resolves ? { fileReferences: [{ path: input.attach ?? path }] } : {}),
-    });
-    if (current !== token.current) return;
-    // A reply that saved is not posted again, so this does not throw for it.
-    if (!("failure" in result)) {
-      loadSequence.current += 1;
-      setMessages(existing => existing.some(message => message.id === result.message.id) ? existing : [...existing, result.message]);
-      const resolved = result.resolved;
-      if (resolved) setDecisions(existing => existing.map(entry => entry.messageId === asked.id ? resolved : entry));
-    }
-    if (result.resolveFailure) onError(ipcErrorMessage(result.resolveFailure, "dohc couldn't mark this message answered."), result.resolveFailure);
-    else if ("failure" in result) reportUnshown("Sent your reply. dohc could not show it yet.", result.failure);
-    void load(true);
-  }, [load, onError, reportUnshown, threadId, workspaceId]);
+  const replyToChange = useCallback(
+    async (
+      asked: ChatMessageRecord,
+      path: string,
+      input: { body: string; resolves: boolean; attach?: string },
+    ) => {
+      const post = asked.threadId !== threadId ? asked.threadId : undefined;
+      const target = post ?? threadId;
+      if (!target) throw new Error("dohc couldn't find this chat.");
+      const parentMessageId = post ? undefined : asked.parentMessageId;
+      const current = token.current;
+      const result = await bridge().sendChatMessage({
+        workspaceId,
+        threadId: target,
+        body: input.body,
+        ...(parentMessageId ? { parentMessageId } : {}),
+        ...(input.resolves ? { resolves: { messageId: asked.id } } : {}),
+        ...(input.attach || !input.resolves
+          ? { fileReferences: [{ path: input.attach ?? path }] }
+          : {}),
+      });
+      if (current !== token.current) return;
+      // A reply that saved is not posted again, so this does not throw for it.
+      if (!("failure" in result)) {
+        loadSequence.current += 1;
+        setMessages((existing) =>
+          existing.some((message) => message.id === result.message.id)
+            ? existing
+            : [...existing, result.message],
+        );
+        const resolved = result.resolved;
+        if (resolved)
+          setDecisions((existing) =>
+            existing.map((entry) => (entry.messageId === asked.id ? resolved : entry)),
+          );
+      }
+      if (result.resolveFailure)
+        onError(
+          ipcErrorMessage(result.resolveFailure, "dohc couldn't mark this message answered."),
+          result.resolveFailure,
+        );
+      else if ("failure" in result)
+        reportUnshown("Sent your reply. dohc could not show it yet.", result.failure);
+      void load(true);
+    },
+    [load, onError, reportUnshown, threadId, workspaceId],
+  );
 
   const liveRunId = dispatch?.liveRunId ?? null;
   const stopRun = useCallback(async () => {
@@ -528,7 +755,8 @@ export function ChatLane(props: {
       await bridge().stopAgentRun({ workspaceId, runId: liveRunId });
       if (current === token.current) void load();
     } catch (error) {
-      if (current === token.current) onError(ipcErrorMessage(error, "Could not stop this agent run."), error);
+      if (current === token.current)
+        onError(ipcErrorMessage(error, "Could not stop this agent run."), error);
     } finally {
       if (current === token.current) setStopping(false);
     }
@@ -543,15 +771,18 @@ export function ChatLane(props: {
     if (!failedRun?.retryable || retrying || threadId === null) return;
     const current = token.current;
     const input = { workspaceId, threadId, runId: failedRun.runId };
-    const failed = (error: unknown) => withErrorWords(`dohc could not start ${props.agentName ?? "your agent"}'s run again.`, error);
+    const failed = (error: unknown) =>
+      withErrorWords(`dohc could not start ${props.agentName ?? "your agent"}'s run again.`, error);
     setRetrying(true);
     try {
       await bridge().retryStoppedRun(input);
       if (current === token.current) void load();
     } catch (error) {
       if (current !== token.current) return;
-      const again = () => void bridge().retryStoppedRun(input)
-        .catch((retryError: unknown) => onError(failed(retryError), retryError, again));
+      const again = () =>
+        void bridge()
+          .retryStoppedRun(input)
+          .catch((retryError: unknown) => onError(failed(retryError), retryError, again));
       onError(failed(error), error, again);
     } finally {
       if (current === token.current) setRetrying(false);
@@ -560,108 +791,187 @@ export function ChatLane(props: {
 
   // The agent at work. Its answer lands in the thread it was asked in, or at
   // the end of the conversation.
-  const working = useMemo<ChatWorking | null>(() => liveRunId === null ? null : {
-    agentName: props.agentName ?? "Your agent",
-    presentation: props.agentPresentation ?? { group: "", hue: null, self: false },
-    stopping,
-    ...(props.locked ? {} : { onStop: () => void stopRun() }),
-  }, [liveRunId, props.agentName, props.agentPresentation, props.locked, stopping, stopRun]);
+  const working = useMemo<ChatWorking | null>(
+    () =>
+      liveRunId === null
+        ? null
+        : {
+            agentName: props.agentName ?? "Your agent",
+            presentation: props.agentPresentation ?? { group: "", hue: null, self: false },
+            stopping,
+            ...(props.locked ? {} : { onStop: () => void stopRun() }),
+          },
+    [liveRunId, props.agentName, props.agentPresentation, props.locked, stopping, stopRun],
+  );
   // The messages that wait for the agent to end its run, which none do while
   // a pause holds them. Another agent asked here takes the default agent color.
   const waiting = dispatchPaused ? undefined : dispatch?.waiting;
   const waitingIds = useMemo(() => new Set(waiting?.triggerMessageIds), [waiting]);
-  const waitingPresentation = (waiting && waiting.agentId === chatAgentId ? props.agentPresentation : undefined) ?? neutralPresentation;
+  const waitingPresentation =
+    (waiting && waiting.agentId === chatAgentId ? props.agentPresentation : undefined) ??
+    neutralPresentation;
   // Reactions live with each message's own thread: the conversation's, or an
   // earlier post's.
-  const reactionThreads = useMemo(() => (threadId ? [threadId, ...postThreadIds] : postThreadIds), [postThreadIds, threadId]);
+  const reactionThreads = useMemo(
+    () => (threadId ? [threadId, ...postThreadIds] : postThreadIds),
+    [postThreadIds, threadId],
+  );
   const reactionViews = reactionThreads.map((id) => reactions.view(id));
   const viewerAuthorId = reactionViews.find((view) => view.viewerAuthorId)?.viewerAuthorId ?? "";
-  const reactionControls: ChatReactionControls | undefined = reactionViews.length > 0
-    ? {
-        // One thread keeps its list as it is, so rows only redraw on a change.
-        reactions: reactionViews.length === 1 ? reactionViews[0]!.reactions : reactionViews.flatMap((view) => view.reactions),
-        viewerAuthorId,
-        readOnly: props.locked,
-        onToggle: (input) => {
-          const target = messages.find((message) => message.id === input.messageId)?.threadId;
-          if (!viewerAuthorId || !target) return;
-          const current = token.current;
-          reactions.toggle({
-            ...input,
-            threadId: target,
-            viewerAuthorId,
-            onError: (message, cause) => {
-              if (current === token.current) onError(message, cause);
-            },
-          });
-        },
-      }
-    : undefined;
+  const reactionControls: ChatReactionControls | undefined =
+    reactionViews.length > 0
+      ? {
+          // One thread keeps its list as it is, so rows only redraw on a change.
+          reactions:
+            reactionViews.length === 1
+              ? reactionViews[0]!.reactions
+              : reactionViews.flatMap((view) => view.reactions),
+          viewerAuthorId,
+          readOnly: props.locked,
+          onToggle: (input) => {
+            const target = messages.find((message) => message.id === input.messageId)?.threadId;
+            if (!viewerAuthorId || !target) return;
+            const current = token.current;
+            reactions.toggle({
+              ...input,
+              threadId: target,
+              viewerAuthorId,
+              onError: (message, cause) => {
+                if (current === token.current) onError(message, cause);
+              },
+            });
+          },
+        }
+      : undefined;
 
-  const decisionsByMessage = useMemo(() => new Map(decisions.map(decision => [decision.messageId, decision])), [decisions]);
-  const failedEnd = useMemo(() => failedRun ? failedRunEnd(failedRun, runs, messages) : null, [failedRun, messages, runs]);
+  const decisionsByMessage = useMemo(
+    () => new Map(decisions.map((decision) => [decision.messageId, decision])),
+    [decisions],
+  );
+  const failedEnd = useMemo(
+    () => (failedRun ? failedRunEnd(failedRun, runs, messages) : null),
+    [failedRun, messages, runs],
+  );
   // Under a message: its question, and why the agent didn't answer it. A
   // choice answers at once. Answer starts a reply in the question's thread.
   // Where a change card's reply posts, as a reply that fails to post names it.
-  const replyPlace = agentDm ? `your chat with ${props.agentName ?? "your agent"}` : `#${props.channel.name}`;
+  const replyPlace = agentDm
+    ? `your chat with ${props.agentName ?? "your agent"}`
+    : `#${props.channel.name}`;
   // A failed run's ask-again readies this composer; it never sends.
   const composerHandle = useRef<MentionComposerHandle>(null);
   const askAgain = useCallback((agentId: string, mention: boolean) => {
     if (mention) composerHandle.current?.mention(agentMentionId(agentId));
     else composerHandle.current?.focus();
   }, []);
-  const renderFooter = useCallback((message: ChatMessageRecord, answer: () => void, place: "stream" | "thread") => {
-    const decision = decisionsByMessage.get(message.id);
-    const asked = decision ? changeFileOf(message) : undefined;
-    const appliedBy = decision?.state === "resolved" ? messages.find((reply) => reply.id === decision.resolvedByMessageId) : undefined;
-    // The change a review applied, when it wasn't the one asked.
-    const changeFile = asked === undefined ? undefined : (appliedBy && changeFileOf(appliedBy)) ?? asked;
-    const undoneBy = changeFile === undefined ? undefined : messages.filter((reply) => reply.id !== appliedBy?.id &&
-      reply.createdAtMs > message.createdAtMs && reply.authorKind === "human" && changeFileOf(reply) === changeFile).at(-1);
-    const resolve = props.locked ? undefined
-      : !decision?.options?.length ? answer
-        : sending ? undefined
-          : (option?: string) => { if (option) void chooseOption(decision, option); };
-    return <>
-      {changeFile !== undefined ? <CollectionChangeCard
-        key={`${workspaceId}:${message.id}:${asked}`}
-        workspaceId={workspaceId}
-        message={message}
-        path={changeFile}
-        appliedBy={appliedBy}
-        undoneBy={undoneBy}
-        locked={props.locked}
-        onOpenPath={props.onOpenPath}
-        onReply={(input) => replyToChange(message, changeFile, input)}
-        onError={onError}
-        onNotice={props.onNotice}
-        chatName={replyPlace}
-        testIdPrefix="chats-lane"
-      /> : decision ? <DecisionStatus
-        decision={decision}
-        testIdPrefix="chats-lane"
-        {...(resolve ? { onResolve: resolve } : {})}
-      /> : null}
-      {message.work ? <WorkStatus testIdPrefix="chats-lane" work={message.work} /> : null}
-      {failedRun && message.id === failedEnd ? <FailedRunLine
-        testIdPrefix="chats-lane"
-        failed={failedRun}
-        busy={retrying}
-        className="mt-1"
-        {...(failedRun.retryable && !props.locked ? { onRetry: () => void retryRun() } : {})}
-        {...(props.onOpenAgentSettings ? { onOpenAgentSettings: props.onOpenAgentSettings } : {})}
-        {...(chatAgentId ? { chatAgentId } : {})}
-        {...(!props.locked && !sending && place === "stream" ? { onAskAgain: askAgain } : {})}
-      /> : null}
-      {waiting && waitingIds.has(message.id) ? <WaitingLine
-        testIdPrefix="chats-lane"
-        agentName={waiting.name}
-        presentation={waitingPresentation}
-        className="mt-1"
-      /> : null}
-    </>;
-  }, [decisionsByMessage, messages, workspaceId, props.locked, props.onOpenPath, props.onOpenAgentSettings, chatAgentId, onError, props.onNotice, replyPlace, replyToChange, sending, chooseOption, failedRun, failedEnd, retrying, retryRun, askAgain, waiting, waitingIds, waitingPresentation]);
-  const place = agentDm ? props.agentName ?? "Your agent" : `# ${props.channel.name}`;
+  const renderFooter = useCallback(
+    (message: ChatMessageRecord, answer: () => void, place: "stream" | "thread") => {
+      const decision = decisionsByMessage.get(message.id);
+      const asked = decision ? changeFileOf(message) : undefined;
+      const appliedBy =
+        decision?.state === "resolved"
+          ? messages.find((reply) => reply.id === decision.resolvedByMessageId)
+          : undefined;
+      // The change a review applied, when it wasn't the one asked.
+      const changeFile =
+        asked === undefined ? undefined : ((appliedBy && changeFileOf(appliedBy)) ?? asked);
+      const undoneBy =
+        changeFile === undefined
+          ? undefined
+          : messages
+              .filter(
+                (reply) =>
+                  reply.id !== appliedBy?.id &&
+                  reply.createdAtMs > message.createdAtMs &&
+                  reply.authorKind === "human" &&
+                  changeFileOf(reply) === changeFile,
+              )
+              .at(-1);
+      const resolve = props.locked
+        ? undefined
+        : !decision?.options?.length
+          ? answer
+          : sending
+            ? undefined
+            : (option?: string) => {
+                if (option) void chooseOption(decision, option);
+              };
+      return (
+        <>
+          {changeFile !== undefined ? (
+            <CollectionChangeCard
+              key={`${workspaceId}:${message.id}:${asked}`}
+              workspaceId={workspaceId}
+              message={message}
+              path={changeFile}
+              appliedBy={appliedBy}
+              undoneBy={undoneBy}
+              locked={props.locked}
+              onOpenPath={props.onOpenPath}
+              onReply={(input) => replyToChange(message, changeFile, input)}
+              onError={onError}
+              onNotice={props.onNotice}
+              chatName={replyPlace}
+              testIdPrefix="chats-lane"
+            />
+          ) : decision ? (
+            <DecisionStatus
+              decision={decision}
+              testIdPrefix="chats-lane"
+              {...(resolve ? { onResolve: resolve } : {})}
+            />
+          ) : null}
+          {message.work ? <WorkStatus testIdPrefix="chats-lane" work={message.work} /> : null}
+          {failedRun && message.id === failedEnd ? (
+            <FailedRunLine
+              testIdPrefix="chats-lane"
+              failed={failedRun}
+              busy={retrying}
+              className="mt-1"
+              {...(failedRun.retryable && !props.locked ? { onRetry: () => void retryRun() } : {})}
+              {...(props.onOpenAgentSettings
+                ? { onOpenAgentSettings: props.onOpenAgentSettings }
+                : {})}
+              {...(chatAgentId ? { chatAgentId } : {})}
+              {...(!props.locked && !sending && place === "stream" ? { onAskAgain: askAgain } : {})}
+            />
+          ) : null}
+          {waiting && waitingIds.has(message.id) ? (
+            <WaitingLine
+              testIdPrefix="chats-lane"
+              agentName={waiting.name}
+              presentation={waitingPresentation}
+              className="mt-1"
+            />
+          ) : null}
+        </>
+      );
+    },
+    [
+      decisionsByMessage,
+      messages,
+      workspaceId,
+      props.locked,
+      props.onOpenPath,
+      props.onOpenAgentSettings,
+      chatAgentId,
+      onError,
+      props.onNotice,
+      replyPlace,
+      replyToChange,
+      sending,
+      chooseOption,
+      failedRun,
+      failedEnd,
+      retrying,
+      retryRun,
+      askAgain,
+      waiting,
+      waitingIds,
+      waitingPresentation,
+    ],
+  );
+  const place = agentDm ? (props.agentName ?? "Your agent") : `# ${props.channel.name}`;
 
   return (
     <ThreadedChat
@@ -673,49 +983,61 @@ export function ChatLane(props: {
       loading={loading}
       emptyLabel={agentDm ? "No messages yet." : `No messages in #${props.channel.name} yet.`}
       place={place}
-      header={(
+      header={
         <>
           {props.header}
           <DispatchAnnouncement
             testId="chats-lane-dispatch-announcement"
-            text={dispatch && liveRunId !== null ? dispatchAnnouncement(true, dispatch.pendingCount) : ""}
+            text={
+              dispatch && liveRunId !== null
+                ? dispatchAnnouncement(true, dispatch.pendingCount)
+                : ""
+            }
           />
         </>
-      )}
+      }
       notice={props.notice}
-      composer={(inset) => props.locked ? (
-        <ComposerNotice testId="chats-lane-readonly">
-          This group is read-only for you.
-        </ComposerNotice>
-      ) : (
-        <MentionComposer
-          pinned
-          testIdPrefix="chats-lane"
-          composerId="chats-lane-composer"
-          value={composer}
-          sending={sending}
-          disabled={loading}
-          placeholder={agentDm ? `Message ${props.agentName ?? "your agent"}` : `Message #${props.channel.name}`}
-          sendLabel="Send message"
-          candidates={props.mentionCandidates}
-          fileCandidates={props.fileCandidates}
-          loadFileHeadings={props.loadFileHeadings}
-          onChange={setComposer}
-          poll={poll}
-          onPollChange={setPoll}
-          onSend={() => void send()}
-          onRosterPick={agentOffer.onRosterPick}
-          rosterScope={agentOffer.scope}
-          agentOffer={agentOffer.offer}
-          inset={inset}
-          handle={composerHandle}
-        />
-      )}
-      replyNotice={props.locked ? (
-        <ComposerNotice testId="chats-lane-thread-readonly">
-          This group is read-only for you.
-        </ComposerNotice>
-      ) : undefined}
+      composer={(inset) =>
+        props.locked ? (
+          <ComposerNotice testId="chats-lane-readonly">
+            This group is read-only for you.
+          </ComposerNotice>
+        ) : (
+          <MentionComposer
+            pinned
+            testIdPrefix="chats-lane"
+            composerId="chats-lane-composer"
+            value={composer}
+            sending={sending}
+            disabled={loading}
+            placeholder={
+              agentDm
+                ? `Message ${props.agentName ?? "your agent"}`
+                : `Message #${props.channel.name}`
+            }
+            sendLabel="Send message"
+            candidates={props.mentionCandidates}
+            fileCandidates={props.fileCandidates}
+            loadFileHeadings={props.loadFileHeadings}
+            onChange={setComposer}
+            poll={poll}
+            onPollChange={setPoll}
+            onSend={() => void send()}
+            onRosterPick={agentOffer.onRosterPick}
+            rosterScope={agentOffer.scope}
+            agentOffer={agentOffer.offer}
+            inset={inset}
+            handle={composerHandle}
+          />
+        )
+      }
+      replyNotice={
+        props.locked ? (
+          <ComposerNotice testId="chats-lane-thread-readonly">
+            This group is read-only for you.
+          </ComposerNotice>
+        ) : undefined
+      }
       onSendReply={sendReply}
       mentionCandidates={props.mentionCandidates}
       fileCandidates={props.fileCandidates}

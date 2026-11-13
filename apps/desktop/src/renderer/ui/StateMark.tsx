@@ -28,8 +28,16 @@ export const REPLACED_WITHOUT_SET_ASIDE_EDIT_NOTICE =
 // take edits for a reason its own notice states, and a file the bounded read
 // cut short so the editor is disabled.
 export type SaveStateKey =
-  | "saved" | "saving" | "error" | "saved-to-host" | "pending-share" | "file-locked" | "changed-on-disk"
-  | "deleted" | "object-changed" | "read-only"
+  | "saved"
+  | "saving"
+  | "error"
+  | "saved-to-host"
+  | "pending-share"
+  | "file-locked"
+  | "changed-on-disk"
+  | "deleted"
+  | "object-changed"
+  | "read-only"
   | "recovery"
   | "reloaded"
   | "read-only-transition"
@@ -124,21 +132,32 @@ export const ACCESS_STATE: Record<AccessStateKey, StatePresentation> = {
   "access-unknown": {
     label: "Unknown",
     mark: "attention",
-    title: "Access information is unavailable for this file. This does not mean that no one has access.",
+    title:
+      "Access information is unavailable for this file. This does not mean that no one has access.",
   },
 };
 
-const PRESENTATIONS: Record<SaveStateKey | AccessStateKey, StatePresentation> = { ...SAVE_STATE, ...ACCESS_STATE };
+const PRESENTATIONS: Record<SaveStateKey | AccessStateKey, StatePresentation> = {
+  ...SAVE_STATE,
+  ...ACCESS_STATE,
+};
 
 export function saveStatePresentationKey(state: SaveState): SaveStateKey | null {
   switch (state.kind) {
-    case "saved-here": return "saved";
-    case "unknown": return null;
-    default: return state.kind;
+    case "saved-here":
+      return "saved";
+    case "unknown":
+      return null;
+    default:
+      return state.kind;
   }
 }
 
-const CALM: ReadonlySet<SaveStateKey | AccessStateKey> = new Set(["saved", "saving", "saved-to-host"]);
+const CALM: ReadonlySet<SaveStateKey | AccessStateKey> = new Set([
+  "saved",
+  "saving",
+  "saved-to-host",
+]);
 
 export const PENDING_SHARE_WORDS_DELAY_MS = 2_000;
 
@@ -157,7 +176,9 @@ function Mark(props: { kind: StateMarkKind }) {
     case "dated":
       return <Clock size={12} aria-hidden className="shrink-0" />;
     case "working":
-      return <span aria-hidden className="size-2 shrink-0 rounded-full border-[1.5px] border-current" />;
+      return (
+        <span aria-hidden className="size-2 shrink-0 rounded-full border-[1.5px] border-current" />
+      );
     case "held":
       return <Lock size={12} aria-hidden className="shrink-0" />;
     case "attention":
@@ -190,11 +211,15 @@ export function StateMark(props: {
   quietWhenCalm?: boolean;
   action?: { label: string; run: () => void };
 }) {
-  const storedKey = typeof props.shown === "string" ? props.shown : saveStatePresentationKey(props.shown);
+  const storedKey =
+    typeof props.shown === "string" ? props.shown : saveStatePresentationKey(props.shown);
   const quiet = props.quietWhenCalm === true;
   const [shareHeld, setShareHeld] = useState(false);
   const shownKey = quiet && shareHeld && storedKey === "saving" ? "pending-share" : storedKey;
-  const pendingShareLasted = useShownAfter(quiet && shownKey === "pending-share", PENDING_SHARE_WORDS_DELAY_MS);
+  const pendingShareLasted = useShownAfter(
+    quiet && shownKey === "pending-share",
+    PENDING_SHARE_WORDS_DELAY_MS,
+  );
   useEffect(() => {
     if (pendingShareLasted) setShareHeld(true);
     else if (storedKey !== "pending-share" && storedKey !== "saving") setShareHeld(false);
@@ -221,9 +246,14 @@ export function StateMark(props: {
     const position = () => {
       const box = chipElement.getBoundingClientRect();
       const width = tooltip.current?.offsetWidth ?? 0;
-      const left = Math.max(TOOLTIP_GAP_PX, Math.min(box.right - width, window.innerWidth - TOOLTIP_GAP_PX - width));
+      const left = Math.max(
+        TOOLTIP_GAP_PX,
+        Math.min(box.right - width, window.innerWidth - TOOLTIP_GAP_PX - width),
+      );
       const top = box.bottom + TOOLTIP_GAP_PX;
-      setPlace((current) => (current?.left === left && current.top === top ? current : { left, top }));
+      setPlace((current) =>
+        current?.left === left && current.top === top ? current : { left, top },
+      );
     };
     position();
     window.addEventListener("resize", position);
@@ -237,9 +267,27 @@ export function StateMark(props: {
     };
   }, [shown]);
   if (!presentation) return null;
-  const dataState = typeof props.state === "string" ? props.state : props.state.kind === "unknown" ? "unknown" : saveStatePresentationKey(props.state);
-  if (quiet && shownKey !== null && (CALM.has(shownKey) || (shownKey === "pending-share" && !pendingShareLasted))) {
-    return <span data-testid={props.testId} data-state={dataState ?? undefined} title={title} className="sr-only">{presentation.label}</span>;
+  const dataState =
+    typeof props.state === "string"
+      ? props.state
+      : props.state.kind === "unknown"
+        ? "unknown"
+        : saveStatePresentationKey(props.state);
+  if (
+    quiet &&
+    shownKey !== null &&
+    (CALM.has(shownKey) || (shownKey === "pending-share" && !pendingShareLasted))
+  ) {
+    return (
+      <span
+        data-testid={props.testId}
+        data-state={dataState ?? undefined}
+        title={title}
+        className="sr-only"
+      >
+        {presentation.label}
+      </span>
+    );
   }
   const chip = (
     <span
@@ -280,11 +328,22 @@ export function StateMark(props: {
   );
   // One line at its natural width: the chip beside it gives way instead.
   const step = props.action ? (
-    <SecondaryButton size="compact" data-testid={`${props.testId}-action`} onClick={props.action.run} className="shrink-0 whitespace-nowrap">
+    <SecondaryButton
+      size="compact"
+      data-testid={`${props.testId}-action`}
+      onClick={props.action.run}
+      className="shrink-0 whitespace-nowrap"
+    >
       {props.action.label}
     </SecondaryButton>
   ) : null;
-  if (!props.truncate) return <>{chip}{step}</>;
+  if (!props.truncate)
+    return (
+      <>
+        {chip}
+        {step}
+      </>
+    );
   // The tooltip sits beside the chip, not in it, so the chip's text stays its
   // label while the tooltip is open. Beside its step, the chip keeps the
   // header's 28px for its mark and an ellipsis.
@@ -305,12 +364,21 @@ export function StateMark(props: {
           className={`dohc-popover fixed z-50 flex w-max max-w-72 flex-col gap-1 rounded-xl border border-line bg-panel p-3 text-[12px] font-normal text-ink ${place ? "dohc-pop-in" : "invisible"}`}
         >
           <span className="font-medium">{presentation.label}</span>
-          {title ? <span id={explanationId} className="text-muted">{title}</span> : null}
+          {title ? (
+            <span id={explanationId} className="text-muted">
+              {title}
+            </span>
+          ) : null}
         </span>
       ) : null}
     </span>
   );
-  return <>{explained}{step}</>;
+  return (
+    <>
+      {explained}
+      {step}
+    </>
+  );
 }
 
 // Between the chip and its tooltip, and between the tooltip and the window's edge.

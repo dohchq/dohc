@@ -14,10 +14,7 @@ async function workspaceRoot(): Promise<string> {
   await mkdir(join(root, "notes"), { recursive: true });
   await writeFile(join(root, "notes", "local.md"), "local");
   await mkdir(join(root, "shared-with-me", "owner"), { recursive: true });
-  await writeFile(
-    join(root, "shared-with-me", "owner", "stale.md"),
-    "recipient cache",
-  );
+  await writeFile(join(root, "shared-with-me", "owner", "stale.md"), "recipient cache");
   return root;
 }
 
@@ -36,12 +33,8 @@ describe("ownedZipProjectionPlan", () => {
     });
 
     expect(plan.keepDiskEntry("notes/local.md")).toBe(true);
-    expect(plan.keepDiskEntry("shared-with-me/owner/recipient-only.md")).toBe(
-      false,
-    );
-    expect(plan.mountArchivePrefix("owner")).toBe(
-      "shared-with-me/owner",
-    );
+    expect(plan.keepDiskEntry("shared-with-me/owner/recipient-only.md")).toBe(false);
+    expect(plan.mountArchivePrefix("owner")).toBe("shared-with-me/owner");
   });
 
   it("uses resolved workspace ownership under an aliased archive root", () => {
@@ -51,14 +44,10 @@ describe("ownedZipProjectionPlan", () => {
     });
 
     expect(plan.keepDiskEntry("workspace-alias/notes/local.md")).toBe(true);
-    expect(
-      plan.keepDiskEntry(
-        "workspace-alias/shared-with-me/owner/recipient-only.md",
-      ),
-    ).toBe(false);
-    expect(plan.mountArchivePrefix("owner")).toBe(
-      "workspace-alias/shared-with-me/owner",
+    expect(plan.keepDiskEntry("workspace-alias/shared-with-me/owner/recipient-only.md")).toBe(
+      false,
     );
+    expect(plan.mountArchivePrefix("owner")).toBe("workspace-alias/shared-with-me/owner");
   });
 
   it("replaces every raw entry when the selection aliases the projection root", () => {
@@ -81,10 +70,7 @@ describe("ownedZipProjectionPlan", () => {
 
   it("excludes every cached projection when an empty registry tombstone remains", async () => {
     const root = await workspaceRoot();
-    await truncate(
-      join(root, "shared-with-me", "owner", "stale.md"),
-      MAX_ZIP_TOTAL_BYTES + 1,
-    );
+    await truncate(join(root, "shared-with-me", "owner", "stale.md"), MAX_ZIP_TOTAL_BYTES + 1);
     const collectShare = canonicalShareCollector();
 
     const exported = await collectOwnedWorkspaceZipEntries({
@@ -96,9 +82,7 @@ describe("ownedZipProjectionPlan", () => {
       collectShare,
     });
 
-    expect(exported.entries.map((entry) => entry.path)).toEqual([
-      "notes/local.md",
-    ]);
+    expect(exported.entries.map((entry) => entry.path)).toEqual(["notes/local.md"]);
     expect(collectShare).not.toHaveBeenCalled();
   });
 
@@ -118,9 +102,7 @@ describe("ownedZipProjectionPlan", () => {
       collectShare,
     });
 
-    expect(exported.entries.map((entry) => entry.path)).toEqual([
-      "notes/local.md",
-    ]);
+    expect(exported.entries.map((entry) => entry.path)).toEqual(["notes/local.md"]);
     expect(collectShare).not.toHaveBeenCalled();
   });
 
@@ -176,11 +158,7 @@ describe("ownedZipProjectionPlan", () => {
 
   it("never reads cached bytes through an alias to the projection root", async () => {
     const root = await workspaceRoot();
-    await symlink(
-      join(root, "shared-with-me"),
-      join(root, "inbox"),
-      "dir",
-    );
+    await symlink(join(root, "shared-with-me"), join(root, "inbox"), "dir");
     const collectShare = canonicalShareCollector();
 
     const exported = await collectOwnedWorkspaceZipEntries({
@@ -193,9 +171,7 @@ describe("ownedZipProjectionPlan", () => {
       collectShare,
     });
 
-    expect(exported.entries.map((entry) => entry.path)).toEqual([
-      "inbox/owner/canonical.md",
-    ]);
+    expect(exported.entries.map((entry) => entry.path)).toEqual(["inbox/owner/canonical.md"]);
   });
 
   it("exports an exact mount root without inventing an empty owner path", async () => {

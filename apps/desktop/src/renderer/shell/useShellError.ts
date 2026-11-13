@@ -4,11 +4,28 @@ import type { ShareUnconfirmedChanges } from "../../workspaces/shareViewInfo";
 import { CreationPartialError, creationPartialNotice } from "@dohc/cli/creation";
 import { cutText } from "@dohc/workspace-contracts/names";
 import type { ReportKinds } from "../../ipc/bridgeContract";
-import { isLiveEditingRefusal, isPrivacyDenied, isStoppedWorkspaceCall, isStoppedWorkspaceRead, KEEPABLE_COLLECTIONS_REFUSALS, readCollectionsRefusal, readError, refusalCode, UNKNOWN_ERROR_WORDS, USE_THIS_COMPUTER, waitedForCollectionMove, VOLUME_SHARES_NEW_FILES_WORDS, withErrorWords } from "../../ipc/errorWords";
+import {
+  isLiveEditingRefusal,
+  isPrivacyDenied,
+  isStoppedWorkspaceCall,
+  isStoppedWorkspaceRead,
+  KEEPABLE_COLLECTIONS_REFUSALS,
+  readCollectionsRefusal,
+  readError,
+  refusalCode,
+  UNKNOWN_ERROR_WORDS,
+  USE_THIS_COMPUTER,
+  waitedForCollectionMove,
+  VOLUME_SHARES_NEW_FILES_WORDS,
+  withErrorWords,
+} from "../../ipc/errorWords";
 import { NoticeOwner, type NoticeSink } from "../../notices/noticeOwner";
 import type { NoticeTarget } from "../../notices/noticeTarget";
 import { bridge } from "../bridge";
-import { SETTLEMENT_ATTRIBUTION_REFUSED, SETTLEMENT_BINDING_CHANGED } from "../../notices/settlementRefusal";
+import {
+  SETTLEMENT_ATTRIBUTION_REFUSED,
+  SETTLEMENT_BINDING_CHANGED,
+} from "../../notices/settlementRefusal";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
 import { TextNotSavedError, type ErrorDetailField } from "./copyDetails";
 import { reportsNoticeText } from "./useReportsNotice";
@@ -118,7 +135,14 @@ export interface ShellError {
   // `ends` the notice removes its row when it runs; one that `reads` it
   // closes its toast and keeps the row.
   // afterRetry puts the action after Try again, so F6 lands on Try again.
-  action?: { label: string; run: () => void; ends?: boolean; reads?: boolean; afterRetry?: true; additional?: {label: string; run: () => void}[] };
+  action?: {
+    label: string;
+    run: () => void;
+    ends?: boolean;
+    reads?: boolean;
+    afterRetry?: true;
+    additional?: { label: string; run: () => void }[];
+  };
   // Where a press on the row goes: what it is about. Opening never runs
   // the row's action, so it never retries or ends the row.
   target?: NoticeTarget;
@@ -223,7 +247,10 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
   // replace it files one without a toast.
   // A row that tests and other surfaces name passes a fixed `id`.
   const push = useCallback(
-    (error: Omit<ShellError, "id" | "atMs" | "seen"> & { id?: string }, seen: boolean | "keep" | "repeat" | "reader" | "quiet" = false) => {
+    (
+      error: Omit<ShellError, "id" | "atMs" | "seen"> & { id?: string },
+      seen: boolean | "keep" | "repeat" | "reader" | "quiet" = false,
+    ) => {
       if (currentWorkspace.current !== workspaceId) return;
       nextId.current += 1;
       const id = error.id ?? `shell-error-${nextId.current}`;
@@ -233,11 +260,20 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
         const matches = (existing: ShellError) =>
           error.identity !== undefined || existing.identity !== undefined
             ? error.identity === existing.identity
-            : existing.message === message || (error.kind !== undefined && existing.kind === error.kind);
+            : existing.message === message ||
+              (error.kind !== undefined && existing.kind === error.kind);
         const replaced = current.find(matches);
         if (seen === "quiet" && replaced) {
-          const updated: ShellError = { ...error, message, id: replaced.id, atMs: replaced.atMs, seen: replaced.seen };
-          return current.flatMap((existing) => existing === replaced ? [updated] : matches(existing) ? [] : [existing]);
+          const updated: ShellError = {
+            ...error,
+            message,
+            id: replaced.id,
+            atMs: replaced.atMs,
+            seen: replaced.seen,
+          };
+          return current.flatMap((existing) =>
+            existing === replaced ? [updated] : matches(existing) ? [] : [existing],
+          );
         }
         const repeat = seen === "repeat" || seen === "reader";
         const repeated = repeat && replaced?.message === message ? replaced : undefined;
@@ -247,12 +283,13 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
           message,
           id: repeated?.id ?? id,
           atMs: repeated?.atMs ?? atMs,
-          seen: repeat ? (repeated?.seen ?? false) : seen === "keep" || seen === "quiet" ? (replaced?.seen ?? true) : seen,
+          seen: repeat
+            ? (repeated?.seen ?? false)
+            : seen === "keep" || seen === "quiet"
+              ? (replaced?.seen ?? true)
+              : seen,
         };
-        return [
-          ...current.filter((existing) => !matches(existing)),
-          next,
-        ];
+        return [...current.filter((existing) => !matches(existing)), next];
       });
     },
     [workspaceId],
@@ -263,16 +300,18 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
   const privacySettingsAction = useMemo<NonNullable<ShellError["action"]>>(() => {
     const run = (): void => {
       const owner = currentWorkspace.current;
-      bridge().openSystemPrivacySettings({}).catch((error: unknown) => {
-        if (currentWorkspace.current !== owner) return;
-        const { cause } = readError(error);
-        push({
-          message: withErrorWords("dohc could not open System Settings.", error),
-          ...(cause ? { details: [["Cause", cause]] } : {}),
-          retry: run,
-          identity: "open-system-settings",
+      bridge()
+        .openSystemPrivacySettings({})
+        .catch((error: unknown) => {
+          if (currentWorkspace.current !== owner) return;
+          const { cause } = readError(error);
+          push({
+            message: withErrorWords("dohc could not open System Settings.", error),
+            ...(cause ? { details: [["Cause", cause]] } : {}),
+            retry: run,
+            identity: "open-system-settings",
+          });
         });
-      });
     };
     return { label: "Open System Settings", run };
   }, [push]);
@@ -280,27 +319,40 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
   // such as the step that was refused. Main asks first when another
   // computer may have them, and nothing runs when the person cancels. A
   // failure files its own row.
-  const keepCollectionsHere = useCallback((then: (() => void) | null) => {
-    const owner = currentWorkspace.current;
-    const run = (): void => {
-      bridge().keepCollectionsHere({ workspaceId: owner }).then(({ kept }) => {
-        if (kept && currentWorkspace.current === owner) then?.();
-      }, (error: unknown) => {
-        if (currentWorkspace.current !== owner) return;
-        const { cause } = readError(error);
-        push({
-          message: withErrorWords("dohc could not keep the Collections on this computer.", error),
-          ...(cause ? { details: [["Cause", cause]] } : {}),
-          retry: run,
-          identity: "keep-collections",
-        });
-      });
-    };
-    run();
-  }, [push]);
+  const keepCollectionsHere = useCallback(
+    (then: (() => void) | null) => {
+      const owner = currentWorkspace.current;
+      const run = (): void => {
+        bridge()
+          .keepCollectionsHere({ workspaceId: owner })
+          .then(
+            ({ kept }) => {
+              if (kept && currentWorkspace.current === owner) then?.();
+            },
+            (error: unknown) => {
+              if (currentWorkspace.current !== owner) return;
+              const { cause } = readError(error);
+              push({
+                message: withErrorWords(
+                  "dohc could not keep the Collections on this computer.",
+                  error,
+                ),
+                ...(cause ? { details: [["Cause", cause]] } : {}),
+                retry: run,
+                identity: "keep-collections",
+              });
+            },
+          );
+      };
+      run();
+    },
+    [push],
+  );
   const clearIdentity = useCallback((identity: string) => {
     setShellErrors((current) =>
-      current.some((error) => error.identity === identity) ? current.filter((error) => error.identity !== identity) : current,
+      current.some((error) => error.identity === identity)
+        ? current.filter((error) => error.identity !== identity)
+        : current,
     );
   }, []);
   const clearKind = useCallback((...kinds: ShellErrorKind[]) => {
@@ -312,39 +364,84 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
   }, []);
 
   const filedShareCapture = useRef<string | null>(null);
-  const reportShareCapture = useCallback((shareId: string, paths: readonly string[] | null | undefined,
-    snapshot?: ShareUnconfirmedChanges, ended = true) => {
-    const identity = `share-capture:${workspaceId}:${shareId}`;
-    const { filePaths: sortedPaths, unchecked, checked, key } = shareCaptureNoticeState(paths, snapshot, ended);
-    if (snapshot?.dismissedKey === key || (!unchecked && sortedPaths.length === 0)) {
-      shareCaptureNotices.delete(identity);
-      filedShareCapture.current = null;
-      clearKind("share-capture");
-      return;
-    }
-    const previous = shareCaptureNotices.get(identity);
-    if (previous?.key === key && (previous.dismissed || filedShareCapture.current === `${identity}:${key}`)) return;
-    const notice = { key, dismissed: false };
-    shareCaptureNotices.set(identity, notice);
-    filedShareCapture.current = `${identity}:${key}`;
-    push({
-      identity,
-      kind: "share-capture",
-      title: sortedPaths.length ? ended ? "Changes kept on this computer" : "Changes to copy now" : "Share check incomplete",
-      message: [
-        ...(unchecked ? [checked > 0 || sortedPaths.length > 0
-          ? "dohc checked only some of this share's files." : "dohc couldn't check this share's files."] : []),
-        ...(sortedPaths.length ? ["dohc couldn't confirm these changes reached the share.",
-          ...(ended ? ["They are kept on this computer."]
-            : ["A later change from the owner can replace these files.", "Your saved changes stay in History."])] : []),
-        unchecked ? sortedPaths.length ? "Copy these files and any others you changed to another workspace now." : "Copy any files you changed to another workspace now."
-          : ended ? "Copy these files to another workspace." : "Copy these files to another workspace now.",
-      ].join(" "),
-      details: sortedPaths.length ? sortedPaths.map(path => ["File", path, path.length] as const) : undefined,
-      retry: null,
-      onDismiss: () => { notice.dismissed = true; },
-    }, previous?.key === key ? true : false);
-  }, [workspaceId, clearKind, push]);
+  const reportShareCapture = useCallback(
+    (
+      shareId: string,
+      paths: readonly string[] | null | undefined,
+      snapshot?: ShareUnconfirmedChanges,
+      ended = true,
+    ) => {
+      const identity = `share-capture:${workspaceId}:${shareId}`;
+      const {
+        filePaths: sortedPaths,
+        unchecked,
+        checked,
+        key,
+      } = shareCaptureNoticeState(paths, snapshot, ended);
+      if (snapshot?.dismissedKey === key || (!unchecked && sortedPaths.length === 0)) {
+        shareCaptureNotices.delete(identity);
+        filedShareCapture.current = null;
+        clearKind("share-capture");
+        return;
+      }
+      const previous = shareCaptureNotices.get(identity);
+      if (
+        previous?.key === key &&
+        (previous.dismissed || filedShareCapture.current === `${identity}:${key}`)
+      )
+        return;
+      const notice = { key, dismissed: false };
+      shareCaptureNotices.set(identity, notice);
+      filedShareCapture.current = `${identity}:${key}`;
+      push(
+        {
+          identity,
+          kind: "share-capture",
+          title: sortedPaths.length
+            ? ended
+              ? "Changes kept on this computer"
+              : "Changes to copy now"
+            : "Share check incomplete",
+          message: [
+            ...(unchecked
+              ? [
+                  checked > 0 || sortedPaths.length > 0
+                    ? "dohc checked only some of this share's files."
+                    : "dohc couldn't check this share's files.",
+                ]
+              : []),
+            ...(sortedPaths.length
+              ? [
+                  "dohc couldn't confirm these changes reached the share.",
+                  ...(ended
+                    ? ["They are kept on this computer."]
+                    : [
+                        "A later change from the owner can replace these files.",
+                        "Your saved changes stay in History.",
+                      ]),
+                ]
+              : []),
+            unchecked
+              ? sortedPaths.length
+                ? "Copy these files and any others you changed to another workspace now."
+                : "Copy any files you changed to another workspace now."
+              : ended
+                ? "Copy these files to another workspace."
+                : "Copy these files to another workspace now.",
+          ].join(" "),
+          details: sortedPaths.length
+            ? sortedPaths.map((path) => ["File", path, path.length] as const)
+            : undefined,
+          retry: null,
+          onDismiss: () => {
+            notice.dismissed = true;
+          },
+        },
+        previous?.key === key ? true : false,
+      );
+    },
+    [workspaceId, clearKind, push],
+  );
 
   const showTabLimitError = useCallback(
     (
@@ -383,18 +480,24 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
     filedShareCapture.current = null;
   }, [workspaceId]);
 
-  const reportSharedViewRefusal = useCallback((error: unknown) => {
-    if (!retrySharedView || refusalCode(error) !== "share-collision-record") return false;
-    const { words } = readError(error);
-    push({
-      message: words ?? UNKNOWN_ERROR_WORDS,
-      retry: retrySharedView,
-      noDismiss: true,
-      kind: "share-collision-record",
-      identity: "share-collision-record",
-    }, "reader");
-    return true;
-  }, [push, retrySharedView]);
+  const reportSharedViewRefusal = useCallback(
+    (error: unknown) => {
+      if (!retrySharedView || refusalCode(error) !== "share-collision-record") return false;
+      const { words } = readError(error);
+      push(
+        {
+          message: words ?? UNKNOWN_ERROR_WORDS,
+          retry: retrySharedView,
+          noDismiss: true,
+          kind: "share-collision-record",
+          identity: "share-collision-record",
+        },
+        "reader",
+      );
+      return true;
+    },
+    [push, retrySharedView],
+  );
 
   const reportShellError = useCallback(
     (
@@ -413,29 +516,59 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
       const { cause, title, words, canRetry, details: explanation } = readError(error);
       const sharedFileRefusal = refusalCode(error) === "share-collision-record";
       const partial = error instanceof CreationPartialError ? error.partial : undefined;
-      const details: ReadonlyArray<ErrorDetailField> = partial ? [
-        ...partial.created.map((path): ErrorDetailField => ["Created", path, path.length]),
-        ["Stage", partial.failedStage],
-        ["Record ID", partial.retry.recordId],
-        ["Reason", partial.reason, partial.reason.length],
-        ["Next", partial.retry.instruction, partial.retry.instruction.length],
-      ] : error instanceof TextNotSavedError ? [["You typed", error.typed, error.typed.length]]
-        : [...(explanation ? [["Reason", explanation] as const] : []), ...(cause && !sharedFileRefusal ? [["Cause", cause] as const] : [])];
+      const details: ReadonlyArray<ErrorDetailField> = partial
+        ? [
+            ...partial.created.map((path): ErrorDetailField => ["Created", path, path.length]),
+            ["Stage", partial.failedStage],
+            ["Record ID", partial.retry.recordId],
+            ["Reason", partial.reason, partial.reason.length],
+            ["Next", partial.retry.instruction, partial.retry.instruction.length],
+          ]
+        : error instanceof TextNotSavedError
+          ? [["You typed", error.typed, error.typed.length]]
+          : [
+              ...(explanation ? [["Reason", explanation] as const] : []),
+              ...(cause && !sharedFileRefusal ? [["Cause", cause] as const] : []),
+            ];
       // The request that ran a Collection's move reports its stop with the toast. One that only waited for it files a row.
-      push({
-        ...(title ? { title } : {}),
-        message: (sharedFileRefusal || title) && words ? words : partial ? creationPartialNotice(partial) : withErrorWords(fallback, error),
-        ...(partial ? { identity: partial.retry.recordId
-          ? `record:${partial.retry.recordId}`
-          : `form:${partial.created[0]!.split("/").slice(0, -1).join("/")}` } : identity !== undefined ? { identity } : {}),
-        ...(details.length ? { details } : {}),
-        retry: canRetry === false || isStoppedWorkspaceCall(error) ? null : retry,
-        ...(isPrivacyDenied(error) ? { action: privacySettingsAction }
-          : KEEPABLE_COLLECTIONS_REFUSALS.includes(readCollectionsRefusal(error)?.kind ?? "changed") ? { action: { label: USE_THIS_COMPUTER, run: () => keepCollectionsHere(retry), ends: true } }
-          : {}),
-        ...(kind ? { kind } : {}),
-        ...(onDismiss ? { onDismiss } : {}),
-      }, quiet || waitedForCollectionMove(error) ? "quiet" : false);
+      push(
+        {
+          ...(title ? { title } : {}),
+          message:
+            (sharedFileRefusal || title) && words
+              ? words
+              : partial
+                ? creationPartialNotice(partial)
+                : withErrorWords(fallback, error),
+          ...(partial
+            ? {
+                identity: partial.retry.recordId
+                  ? `record:${partial.retry.recordId}`
+                  : `form:${partial.created[0]!.split("/").slice(0, -1).join("/")}`,
+              }
+            : identity !== undefined
+              ? { identity }
+              : {}),
+          ...(details.length ? { details } : {}),
+          retry: canRetry === false || isStoppedWorkspaceCall(error) ? null : retry,
+          ...(isPrivacyDenied(error)
+            ? { action: privacySettingsAction }
+            : KEEPABLE_COLLECTIONS_REFUSALS.includes(
+                  readCollectionsRefusal(error)?.kind ?? "changed",
+                )
+              ? {
+                  action: {
+                    label: USE_THIS_COMPUTER,
+                    run: () => keepCollectionsHere(retry),
+                    ends: true,
+                  },
+                }
+              : {}),
+          ...(kind ? { kind } : {}),
+          ...(onDismiss ? { onDismiss } : {}),
+        },
+        quiet || waitedForCollectionMove(error) ? "quiet" : false,
+      );
     },
     [push, privacySettingsAction, keepCollectionsHere, reportSharedViewRefusal],
   );
@@ -475,32 +608,51 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
       identity?: string;
     }) => {
       if (isStoppedWorkspaceRead(failure.cause) || isStoppedWorkspaceRead(failure.message)) return;
-      if (reportSharedViewRefusal(failure.cause) || reportSharedViewRefusal(failure.message)) return;
-      const refusal = [failure.cause, failure.message].find(error => refusalCode(error) === "share-collision-record");
+      if (reportSharedViewRefusal(failure.cause) || reportSharedViewRefusal(failure.message))
+        return;
+      const refusal = [failure.cause, failure.message].find(
+        (error) => refusalCode(error) === "share-collision-record",
+      );
       const shown = readError(refusal ?? failure.message);
-      const cause = refusal !== undefined ? null : failure.cause === undefined ? shown.cause : readError(failure.cause).cause;
-      const title = failure.title ?? (isLiveEditingRefusal(failure.cause) ? readError(failure.cause).title : undefined);
-      const action = failure.action ??
-        (isPrivacyDenied(failure.message) || isPrivacyDenied(failure.cause) ? privacySettingsAction : undefined);
+      const cause =
+        refusal !== undefined
+          ? null
+          : failure.cause === undefined
+            ? shown.cause
+            : readError(failure.cause).cause;
+      const title =
+        failure.title ??
+        (isLiveEditingRefusal(failure.cause) ? readError(failure.cause).title : undefined);
+      const action =
+        failure.action ??
+        (isPrivacyDenied(failure.message) || isPrivacyDenied(failure.cause)
+          ? privacySettingsAction
+          : undefined);
       const details: ReadonlyArray<ErrorDetailField> = [
         ...(failure.details ?? []),
         ...(cause ? [["Cause", cause] as const] : []),
       ];
-      push({
-        ...(title ? { title } : {}),
-        ...(failure.tone ? { tone: failure.tone } : {}),
-        message: shown.words ?? UNKNOWN_ERROR_WORDS,
-        retry: isStoppedWorkspaceCall(failure.cause) || isStoppedWorkspaceCall(failure.message) ? null : failure.retry ?? null,
-        ...(failure.command ? { command: failure.command } : {}),
-        ...(failure.paths?.length ? { paths: failure.paths } : {}),
-        ...(details.length ? { details } : {}),
-        ...(failure.onDismiss ? { onDismiss: failure.onDismiss } : {}),
-        ...(action ? { action } : {}),
-        ...(failure.target ? { target: failure.target } : {}),
-        ...(failure.noDismiss ? { noDismiss: true } : {}),
-        ...(failure.kind ? { kind: failure.kind } : {}),
-        ...(failure.identity !== undefined ? { identity: failure.identity } : {}),
-      }, failure.quiet ? "quiet" : failure.repeat ? "repeat" : false);
+      push(
+        {
+          ...(title ? { title } : {}),
+          ...(failure.tone ? { tone: failure.tone } : {}),
+          message: shown.words ?? UNKNOWN_ERROR_WORDS,
+          retry:
+            isStoppedWorkspaceCall(failure.cause) || isStoppedWorkspaceCall(failure.message)
+              ? null
+              : (failure.retry ?? null),
+          ...(failure.command ? { command: failure.command } : {}),
+          ...(failure.paths?.length ? { paths: failure.paths } : {}),
+          ...(details.length ? { details } : {}),
+          ...(failure.onDismiss ? { onDismiss: failure.onDismiss } : {}),
+          ...(action ? { action } : {}),
+          ...(failure.target ? { target: failure.target } : {}),
+          ...(failure.noDismiss ? { noDismiss: true } : {}),
+          ...(failure.kind ? { kind: failure.kind } : {}),
+          ...(failure.identity !== undefined ? { identity: failure.identity } : {}),
+        },
+        failure.quiet ? "quiet" : failure.repeat ? "repeat" : false,
+      );
     },
     [push, privacySettingsAction, reportSharedViewRefusal],
   );
@@ -520,7 +672,9 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
         message: words ?? "dohc could not open that folder.",
         ...(details.length ? { details } : {}),
         retry: null,
-        action: isPrivacyDenied(error) ? { ...privacySettingsAction, additional: [choose] } : choose,
+        action: isPrivacyDenied(error)
+          ? { ...privacySettingsAction, additional: [choose] }
+          : choose,
         identity: "open-folder",
       });
     },
@@ -531,12 +685,7 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
   // they must not look like a successful search with no matches.
   const reportSearchError = useCallback(
     (error: unknown, retry: () => void) =>
-      reportShellError(
-        "dohc could not search this workspace.",
-        error,
-        retry,
-        "workspace-search",
-      ),
+      reportShellError("dohc could not search this workspace.", error, retry, "workspace-search"),
     [reportShellError],
   );
   const clearSearchError = useCallback(() => clearKind("workspace-search"), [clearKind]);
@@ -548,7 +697,13 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
       retry: () => void,
     ) =>
       push(
-        { ...(notice.title ? { title: notice.title } : {}), message: notice.message, details: [["Detail", notice.detail]], retry, kind: "cloud-sync" },
+        {
+          ...(notice.title ? { title: notice.title } : {}),
+          message: notice.message,
+          details: [["Detail", notice.detail]],
+          retry,
+          kind: "cloud-sync",
+        },
         notice.toast ? false : "quiet",
       ),
     [push],
@@ -558,7 +713,11 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
   // report replaces it, keeping its toast unless the report toasts. The wait
   // itself is a warning; a reopen that failed is a failure.
   const reportCollectionsWaiting = useCallback(
-    (notice: { title: string; message: string; toast: boolean; failed: boolean }, retry: () => void, openSyncSettings: () => void) =>
+    (
+      notice: { title: string; message: string; toast: boolean; failed: boolean },
+      retry: () => void,
+      openSyncSettings: () => void,
+    ) =>
       push(
         {
           ...(notice.failed ? {} : { tone: "warning" as const }),
@@ -574,37 +733,66 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
     [push],
   );
   const clearCollectionsWaiting = useCallback(() => clearKind("collections-waiting"), [clearKind]);
-  const showSyncRefusals = useCallback((notices: readonly import("../../ipc/bridgeContract").NoticeRow[], retry: () => void, openFile?: (path: string) => void, openHistory?: () => void, read?: (id: string) => void) => {
-    setShellErrors(current => [
-      ...current.filter(error => error.kind !== "sync-refusal"),
-      ...notices.map(notice => {
-        const prior = current.find(error => error.id === notice.noticeId);
-        const markdownHeld = notice.kind === "markdown-write-held";
-        const reason = notice.detail?.split("\n")[0];
-        const bindingChanged = reason === SETTLEMENT_BINDING_CHANGED;
-        // Sync has moved past the refused saves, so there is nothing to try again.
-        const attributionRefused = reason === SETTLEMENT_ATTRIBUTION_REFUSED;
-        const path = notice.target?.path;
-        // Taking a step reads the row, so its toast closes and doesn't come back at the next start.
-        const step = (label: string, run: () => void) =>
-          ({ action: { label, reads: true, run: () => { run(); read?.(notice.noticeId); } } });
-        return { id: notice.noticeId, kind: "sync-refusal" as const, message: notice.body.slice(0, SHELL_ERROR_MAX_CHARS),
-          title: bindingChanged || attributionRefused || markdownHeld ? notice.title : undefined,
-          // The whole path: a title names only the file, and two folders can hold one name.
-          details: [...(path ? [["File", path, path.length] as const] : []), ["Detail", notice.detail ?? notice.body]] as const,
-          atMs: notice.createdAtMs, seen: prior?.seen === true || notice.readAtMs !== null,
-          // The list holds a read until main answers and lets go of one main refused.
-          read: notice.readAtMs !== null,
-          retry: bindingChanged || attributionRefused || markdownHeld ? null : retry,
-          // A hold is on purpose: nothing failed.
-          ...(attributionRefused || markdownHeld ? { tone: "warning" as const } : {}),
-          ...(bindingChanged && path && openFile ? step("Open", () => openFile(path)) : {}),
-          ...(markdownHeld && path && openFile ? step("Open note", () => openFile(path)) : {}),
-          ...(attributionRefused && openHistory ? step("Open History", openHistory) : {}),
-          ...(attributionRefused ? { target: { to: "history" } as const } : path ? { target: { to: "file", path } as const } : {}) };
-      }),
-    ]);
-  }, []);
+  const showSyncRefusals = useCallback(
+    (
+      notices: readonly import("../../ipc/bridgeContract").NoticeRow[],
+      retry: () => void,
+      openFile?: (path: string) => void,
+      openHistory?: () => void,
+      read?: (id: string) => void,
+    ) => {
+      setShellErrors((current) => [
+        ...current.filter((error) => error.kind !== "sync-refusal"),
+        ...notices.map((notice) => {
+          const prior = current.find((error) => error.id === notice.noticeId);
+          const markdownHeld = notice.kind === "markdown-write-held";
+          const reason = notice.detail?.split("\n")[0];
+          const bindingChanged = reason === SETTLEMENT_BINDING_CHANGED;
+          // Sync has moved past the refused saves, so there is nothing to try again.
+          const attributionRefused = reason === SETTLEMENT_ATTRIBUTION_REFUSED;
+          const path = notice.target?.path;
+          // Taking a step reads the row, so its toast closes and doesn't come back at the next start.
+          const step = (label: string, run: () => void) => ({
+            action: {
+              label,
+              reads: true,
+              run: () => {
+                run();
+                read?.(notice.noticeId);
+              },
+            },
+          });
+          return {
+            id: notice.noticeId,
+            kind: "sync-refusal" as const,
+            message: notice.body.slice(0, SHELL_ERROR_MAX_CHARS),
+            title: bindingChanged || attributionRefused || markdownHeld ? notice.title : undefined,
+            // The whole path: a title names only the file, and two folders can hold one name.
+            details: [
+              ...(path ? [["File", path, path.length] as const] : []),
+              ["Detail", notice.detail ?? notice.body],
+            ] as const,
+            atMs: notice.createdAtMs,
+            seen: prior?.seen === true || notice.readAtMs !== null,
+            // The list holds a read until main answers and lets go of one main refused.
+            read: notice.readAtMs !== null,
+            retry: bindingChanged || attributionRefused || markdownHeld ? null : retry,
+            // A hold is on purpose: nothing failed.
+            ...(attributionRefused || markdownHeld ? { tone: "warning" as const } : {}),
+            ...(bindingChanged && path && openFile ? step("Open", () => openFile(path)) : {}),
+            ...(markdownHeld && path && openFile ? step("Open note", () => openFile(path)) : {}),
+            ...(attributionRefused && openHistory ? step("Open History", openHistory) : {}),
+            ...(attributionRefused
+              ? { target: { to: "history" } as const }
+              : path
+                ? { target: { to: "file", path } as const }
+                : {}),
+          };
+        }),
+      ]);
+    },
+    [],
+  );
   // A drive limit: one row that a remount files again without a toast.
   const reportDriveLimit = useCallback(
     (notice: { message: string; toast: boolean }) =>
@@ -643,7 +831,8 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
         return;
       }
       push({
-        message: "dohc could not read the recovery folder. File recovery is waiting. Check folder access, then try again.",
+        message:
+          "dohc could not read the recovery folder. File recovery is waiting. Check folder access, then try again.",
         details: [["Folder", ".dohc/engine/displaced"]],
         retry,
         action: { label: "Show recovery folder", run: openFolder },
@@ -660,14 +849,20 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
         clearKind("secret-key-unavailable");
         return;
       }
-      push({
-        title: "History could not save protected files",
-        message: secretKeyWords(reason),
-        details: [["File", SECRET_KEY_FILE], ["Reason", reason]],
-        retry,
-        noDismiss: true,
-        kind: "secret-key-unavailable",
-      }, "repeat");
+      push(
+        {
+          title: "History could not save protected files",
+          message: secretKeyWords(reason),
+          details: [
+            ["File", SECRET_KEY_FILE],
+            ["Reason", reason],
+          ],
+          retry,
+          noDismiss: true,
+          kind: "secret-key-unavailable",
+        },
+        "repeat",
+      );
     },
     [clearKind, push],
   );
@@ -680,44 +875,61 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
   // files, or `paths`, the pages whose live editing stopped, empty when
   // something else keeps History paused.
   const showHistoryPaused = useCallback(
-    (notice: {
-      retry: () => void | false; openHistory: () => void; toast?: boolean;
-      stillPaused?: "catching-up" | { paths: readonly string[] };
-      cause?: string; reasons?: ReadonlyArray<ErrorDetailField>;
-    } | null) => {
+    (
+      notice: {
+        retry: () => void | false;
+        openHistory: () => void;
+        toast?: boolean;
+        stillPaused?: "catching-up" | { paths: readonly string[] };
+        cause?: string;
+        reasons?: ReadonlyArray<ErrorDetailField>;
+      } | null,
+    ) => {
       const identity = `history-capture:${workspaceId}`;
       if (notice === null) {
         clearIdentity(identity);
         return;
       }
-      const details: ErrorDetailField[] = [...(notice.reasons ?? []), ...(notice.cause ? [["Cause", notice.cause] as const] : [])];
+      const details: ErrorDetailField[] = [
+        ...(notice.reasons ?? []),
+        ...(notice.cause ? [["Cause", notice.cause] as const] : []),
+      ];
       const paused = notice.stillPaused;
       const stopped = paused === undefined || paused === "catching-up" ? [] : paused.paths;
-      push({
-        id: "history-capture-failed",
-        identity,
-        title: "History paused",
-        message: paused === undefined
-          ? "Your files still save normally. Open files may not show changes made outside dohc until History records again."
-          : paused === "catching-up"
-            ? "History is still catching up. Try again in a few minutes."
-            : stopped.length === 0
-              ? "History is still paused. Restart dohc to try again."
-              : stopped.length === 1
-                ? `Close every tab showing "${stopped[0]}", then reopen it and try again. Live editing on that page stopped.`
-                : `History is still paused because live editing stopped on ${stopped.length} pages. Restart dohc to try again.`,
-        ...(details.length ? { details } : {}),
-        retry: notice.retry,
-        action: { label: "Open History", run: notice.openHistory, reads: true },
-        target: { to: "history" },
-      }, notice.toast ? false : "repeat");
+      push(
+        {
+          id: "history-capture-failed",
+          identity,
+          title: "History paused",
+          message:
+            paused === undefined
+              ? "Your files still save normally. Open files may not show changes made outside dohc until History records again."
+              : paused === "catching-up"
+                ? "History is still catching up. Try again in a few minutes."
+                : stopped.length === 0
+                  ? "History is still paused. Restart dohc to try again."
+                  : stopped.length === 1
+                    ? `Close every tab showing "${stopped[0]}", then reopen it and try again. Live editing on that page stopped.`
+                    : `History is still paused because live editing stopped on ${stopped.length} pages. Restart dohc to try again.`,
+          ...(details.length ? { details } : {}),
+          retry: notice.retry,
+          action: { label: "Open History", run: notice.openHistory, reads: true },
+          target: { to: "history" },
+        },
+        notice.toast ? false : "repeat",
+      );
     },
     [clearIdentity, push, workspaceId],
   );
   // An import that skipped sources: a title, then a line for each one. dohc
   // wrote every line, so the lines are shown as they are.
   const reportImportSkips = useCallback(
-    (notice: { title: string; lines: readonly string[]; lastLine?: string; details: ReadonlyArray<ErrorDetailField> }) => {
+    (notice: {
+      title: string;
+      lines: readonly string[];
+      lastLine?: string;
+      details: ReadonlyArray<ErrorDetailField>;
+    }) => {
       push({
         title: notice.title,
         message: notice.lines.join("\n"),
@@ -730,18 +942,25 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
     [push],
   );
   const reportKeptFiles = useCallback(
-    (notice: { paths: readonly (readonly [string, string])[]; toast: boolean }, openFolder: () => void) => {
+    (
+      notice: { paths: readonly (readonly [string, string])[]; toast: boolean },
+      openFolder: () => void,
+    ) => {
       if (!notice.paths.length) {
         clearKind("kept-files");
         return;
       }
-      push({
-        message: "dohc kept recovery copies of files. Review the copies in .dohc/engine/displaced inside your workspace folder.",
-        details: notice.paths.map(([original, copy]) => [original || "Copy", copy] as const),
-        retry: null,
-        action: { label: "Show recovery folder", run: openFolder },
-        kind: "kept-files",
-      }, !notice.toast);
+      push(
+        {
+          message:
+            "dohc kept recovery copies of files. Review the copies in .dohc/engine/displaced inside your workspace folder.",
+          details: notice.paths.map(([original, copy]) => [original || "Copy", copy] as const),
+          retry: null,
+          action: { label: "Show recovery folder", run: openFolder },
+          kind: "kept-files",
+        },
+        !notice.toast,
+      );
     },
     [clearKind, push],
   );
@@ -750,25 +969,31 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
   // `toast` files it with a toast, once each time the copies pass the size;
   // otherwise it updates the row, or files it quietly. Null clears it.
   const showRetainedCopies = useCallback(
-    (notice: {
-      title: string;
-      message: string;
-      action: { label: string; run: () => void };
-      onDismiss: () => void;
-    } | null, toast: boolean) => {
+    (
+      notice: {
+        title: string;
+        message: string;
+        action: { label: string; run: () => void };
+        onDismiss: () => void;
+      } | null,
+      toast: boolean,
+    ) => {
       if (notice === null) {
         clearKind("retained-copies");
         return;
       }
-      push({
-        tone: "warning",
-        title: notice.title,
-        message: notice.message,
-        retry: null,
-        action: notice.action,
-        onDismiss: notice.onDismiss,
-        kind: "retained-copies",
-      }, toast ? false : "quiet");
+      push(
+        {
+          tone: "warning",
+          title: notice.title,
+          message: notice.message,
+          retry: null,
+          action: notice.action,
+          onDismiss: notice.onDismiss,
+          kind: "retained-copies",
+        },
+        toast ? false : "quiet",
+      );
     },
     [clearKind, push],
   );
@@ -776,20 +1001,31 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
   // stands. `toast` files it with a toast; otherwise it updates the row, or
   // files it quietly. Only Restore tabs ends the row that offers it. Null
   // takes back the row and its toast.
-  const showSavedTabsNotice = useCallback((notice: SavedTabsNotice | null) => {
-    if (notice === null) {
-      clearKind("saved-tabs");
-      return;
-    }
-    push({
-      tone: "warning",
-      title: SAVED_TABS_TITLE,
-      message: notice.message,
-      retry: null,
-      ...(notice.restore ? { action: { label: "Restore tabs", run: notice.restore, ends: true }, noDismiss: true } : {}),
-      kind: "saved-tabs",
-    }, notice.toast ? false : "quiet");
-  }, [clearKind, push]);
+  const showSavedTabsNotice = useCallback(
+    (notice: SavedTabsNotice | null) => {
+      if (notice === null) {
+        clearKind("saved-tabs");
+        return;
+      }
+      push(
+        {
+          tone: "warning",
+          title: SAVED_TABS_TITLE,
+          message: notice.message,
+          retry: null,
+          ...(notice.restore
+            ? {
+                action: { label: "Restore tabs", run: notice.restore, ends: true },
+                noDismiss: true,
+              }
+            : {}),
+          kind: "saved-tabs",
+        },
+        notice.toast ? false : "quiet",
+      );
+    },
+    [clearKind, push],
+  );
   // Snapshot lanes share one surface. Keep the lane in the message so the
   // user can tell which value went stale, then show the cause and a retry.
   //
@@ -801,7 +1037,11 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
     (lane: string, error: unknown, retry: () => void) => {
       if (isStoppedWorkspaceRead(error)) return;
       const { cause } = readError(error);
-      push({ message: withErrorWords(lane, error), ...(cause ? { details: [["Cause", cause]] } : {}), retry: isStoppedWorkspaceCall(error) ? null : retry });
+      push({
+        message: withErrorWords(lane, error),
+        ...(cause ? { details: [["Cause", cause]] } : {}),
+        retry: isStoppedWorkspaceCall(error) ? null : retry,
+      });
     },
     [push],
   );
@@ -840,7 +1080,11 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
               action: {
                 label: send.label,
                 run: () => {
-                  clearKind("direct-write-stale", "direct-write-refused", "direct-write-unavailable");
+                  clearKind(
+                    "direct-write-stale",
+                    "direct-write-refused",
+                    "direct-write-unavailable",
+                  );
                   send.run();
                 },
               },
@@ -855,15 +1099,27 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
   // saves it. An Undo's row goes, so it runs once.
   const runShellErrorAction = useCallback((id: string, index = 0) => {
     const target = shellErrorsRef.current.find((error) => error.id === id);
-    if (index > 0) {target?.action?.additional?.[index - 1]?.run(); return;}
-    if (target?.action?.ends) setShellErrors((current) => current.filter((error) => error.id !== id));
+    if (index > 0) {
+      target?.action?.additional?.[index - 1]?.run();
+      return;
+    }
+    if (target?.action?.ends)
+      setShellErrors((current) => current.filter((error) => error.id !== id));
     else if (target?.action?.reads) {
-      setShellErrors((current) => current.map((error) => (error.id === id ? { ...error, seen: true, read: true } : error)));
+      setShellErrors((current) =>
+        current.map((error) => (error.id === id ? { ...error, seen: true, read: true } : error)),
+      );
     }
     target?.action?.run();
   }, []);
   const showSuccessNotice = useCallback(
-    (message: string, undo?: () => void, kind?: ShellErrorKind, action?: ShellError["action"], target?: NoticeTarget) => {
+    (
+      message: string,
+      undo?: () => void,
+      kind?: ShellErrorKind,
+      action?: ShellError["action"],
+      target?: NoticeTarget,
+    ) => {
       push({
         message,
         retry: null,
@@ -879,41 +1135,55 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
   // person: a warning while another computer runs them, and an error, with
   // Try again, while none does. A read that says the same keeps its toast's
   // state; null clears the row.
-  const showScheduleHostNotice = useCallback((notice: {
-    message: string;
-    failed: boolean;
-    cause?: string;
-    retry: () => void;
-    takeOver: () => void;
-  } | null) => {
-    if (notice === null) {
-      clearKind("schedule-host");
-      return;
-    }
-    push({
-      message: notice.message,
-      ...(notice.failed ? {} : { tone: "warning" as const }),
-      ...(notice.cause ? { details: [["Cause", notice.cause]] } : {}),
-      retry: notice.failed ? notice.retry : null,
-      action: { label: "Take over now", run: notice.takeOver, ends: true },
-      kind: "schedule-host",
-    }, "repeat");
-  }, [clearKind, push]);
-  const showWarningNotice = useCallback((message: string) => {
-    push({message, retry: null, tone: "warning"});
-  }, [push]);
-  const showReportsNotice = useCallback((reports: ReportKinds, openPrivacy: () => void) => {
-    push({
-      message: reportsNoticeText(reports),
-      retry: null,
-      tone: "success",
-      stays: true,
-      kind: "reports",
-      reports,
-      action: { label: "Privacy settings", run: openPrivacy },
-      target: { to: "privacy-settings" },
-    });
-  }, [push]);
+  const showScheduleHostNotice = useCallback(
+    (
+      notice: {
+        message: string;
+        failed: boolean;
+        cause?: string;
+        retry: () => void;
+        takeOver: () => void;
+      } | null,
+    ) => {
+      if (notice === null) {
+        clearKind("schedule-host");
+        return;
+      }
+      push(
+        {
+          message: notice.message,
+          ...(notice.failed ? {} : { tone: "warning" as const }),
+          ...(notice.cause ? { details: [["Cause", notice.cause]] } : {}),
+          retry: notice.failed ? notice.retry : null,
+          action: { label: "Take over now", run: notice.takeOver, ends: true },
+          kind: "schedule-host",
+        },
+        "repeat",
+      );
+    },
+    [clearKind, push],
+  );
+  const showWarningNotice = useCallback(
+    (message: string) => {
+      push({ message, retry: null, tone: "warning" });
+    },
+    [push],
+  );
+  const showReportsNotice = useCallback(
+    (reports: ReportKinds, openPrivacy: () => void) => {
+      push({
+        message: reportsNoticeText(reports),
+        retry: null,
+        tone: "success",
+        stays: true,
+        kind: "reports",
+        reports,
+        action: { label: "Privacy settings", run: openPrivacy },
+        target: { to: "privacy-settings" },
+      });
+    },
+    [push],
+  );
   // One row per kept copy the engine lists. A copy listed for the first time
   // arrives as a toast; several at once arrive as one summary toast instead.
   // A copy no longer listed, because it was saved, loses its row. `more`
@@ -928,20 +1198,24 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
     const arrived = copies.filter((copy) => !shownKeptCopies.current.has(copy.id));
     for (const copy of arrived) shownKeptCopies.current.add(copy.id);
     const summarized = arrived.length > 1;
-    const fresh: ShellError[] = arrived.map((copy) => row({
-      message: copy.message,
-      retry: null,
-      action: { label: "Save copy", run: copy.save },
-      keptCopyId: copy.id,
-      seen: summarized,
-    }));
-    if (summarized) {
-      fresh.push(row({
-        message: `dohc kept ${arrived.length} copies of files other programs changed.`,
+    const fresh: ShellError[] = arrived.map((copy) =>
+      row({
+        message: copy.message,
         retry: null,
-        kind: "kept-copies-summary",
-        seen: false,
-      }));
+        action: { label: "Save copy", run: copy.save },
+        keptCopyId: copy.id,
+        seen: summarized,
+      }),
+    );
+    if (summarized) {
+      fresh.push(
+        row({
+          message: `dohc kept ${arrived.length} copies of files other programs changed.`,
+          retry: null,
+          kind: "kept-copies-summary",
+          seen: false,
+        }),
+      );
     }
     const addMore = more && !shownKeptCopiesMore.current;
     shownKeptCopiesMore.current = more;
@@ -953,13 +1227,13 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
     });
     setShellErrors((current) => {
       const added = addMore ? [...fresh, moreRow] : fresh;
-      const stays = current.filter((error) =>
-        (error.keptCopyId === undefined || listed.has(error.keptCopyId)) &&
-        (error.kind !== "kept-copies-more" || more) &&
-        (error.kind !== "kept-copies-summary" || (copies.length > 0 && !summarized)));
-      return added.length === 0 && stays.length === current.length
-        ? current
-        : [...stays, ...added];
+      const stays = current.filter(
+        (error) =>
+          (error.keptCopyId === undefined || listed.has(error.keptCopyId)) &&
+          (error.kind !== "kept-copies-more" || more) &&
+          (error.kind !== "kept-copies-summary" || (copies.length > 0 && !summarized)),
+      );
+      return added.length === 0 && stays.length === current.length ? current : [...stays, ...added];
     });
   }, []);
   // One row per kept typing the engine lists. One listed for the first time,
@@ -976,77 +1250,129 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
       if (shownCaptureRecoveries.current.has(recovery.momentId) && !recovery.raise) return [];
       shownCaptureRecoveries.current.add(recovery.momentId);
       nextId.current += 1;
-      return [{
-        id: `shell-error-${nextId.current}`,
-        identity: identityOf(recovery.momentId),
-        kind: "capture-recovery",
-        tone: "warning",
-        title: recovery.title,
-        message: recovery.message,
-        details: [["File", recovery.path, recovery.path.length], ["Change id", recovery.momentId]],
-        retry: null,
-        action: { label: "Open History", run: recovery.open },
-        target: { to: "history-change", moment: recovery.momentId, path: recovery.path },
-        onDismiss: recovery.dismiss,
-        atMs,
-        seen: false,
-      }];
+      return [
+        {
+          id: `shell-error-${nextId.current}`,
+          identity: identityOf(recovery.momentId),
+          kind: "capture-recovery",
+          tone: "warning",
+          title: recovery.title,
+          message: recovery.message,
+          details: [
+            ["File", recovery.path, recovery.path.length],
+            ["Change id", recovery.momentId],
+          ],
+          retry: null,
+          action: { label: "Open History", run: recovery.open },
+          target: { to: "history-change", moment: recovery.momentId, path: recovery.path },
+          onDismiss: recovery.dismiss,
+          atMs,
+          seen: false,
+        },
+      ];
     });
     const replaced = new Set(fresh.map((error) => error.identity));
     setShellErrors((current) => {
-      const stays = current.filter((error) => error.kind !== "capture-recovery" ||
-        (listed.has(error.identity ?? "") && !replaced.has(error.identity)));
+      const stays = current.filter(
+        (error) =>
+          error.kind !== "capture-recovery" ||
+          (listed.has(error.identity ?? "") && !replaced.has(error.identity)),
+      );
       return fresh.length === 0 && stays.length === current.length ? current : [...stays, ...fresh];
     });
   }, []);
   // Visible sibling copies open directly; native displacements use Save copy.
-  const showOutsideCopies = useCallback((copies: readonly (readonly [string, string, string])[], open: (path: string) => void) => {
-    const key = `dohc:outside-write-copies:${workspaceId}`;
-    let saved: Record<string, { copy: string; dismissed: boolean }> = {};
-    let stored = "{}";
-    try {
-      stored = localStorage.getItem(key) ?? stored;
-      const parsed: unknown = JSON.parse(stored);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        for (const [path, value] of Object.entries(parsed)) {
-          if (value && typeof value === "object" && "copy" in value && typeof value.copy === "string" &&
-              "dismissed" in value && typeof value.dismissed === "boolean") saved[path] = { copy: value.copy, dismissed: value.dismissed };
+  const showOutsideCopies = useCallback(
+    (copies: readonly (readonly [string, string, string])[], open: (path: string) => void) => {
+      const key = `dohc:outside-write-copies:${workspaceId}`;
+      let saved: Record<string, { copy: string; dismissed: boolean }> = {};
+      let stored = "{}";
+      try {
+        stored = localStorage.getItem(key) ?? stored;
+        const parsed: unknown = JSON.parse(stored);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          for (const [path, value] of Object.entries(parsed)) {
+            if (
+              value &&
+              typeof value === "object" &&
+              "copy" in value &&
+              typeof value.copy === "string" &&
+              "dismissed" in value &&
+              typeof value.dismissed === "boolean"
+            )
+              saved[path] = { copy: value.copy, dismissed: value.dismissed };
+          }
         }
+      } catch {
+        /* A denied browser store leaves notices usable in this run. */
       }
-    } catch { /* A denied browser store leaves notices usable in this run. */ }
-    const persist = () => {
-      try { localStorage.setItem(key, JSON.stringify(saved)); } catch { /* Keep the in-session notice. */ }
-    };
-    const latest = new Map(copies.map(([path, copy, id]) => [path, { copy, id }]));
-    const present = new Set(copies.map(([, , id]) => id));
-    for (const entry of Object.keys(saved)) if (!present.has(entry)) delete saved[entry];
-    for (const path of shownOutsideCopies.current.keys()) if (!latest.has(path)) shownOutsideCopies.current.delete(path);
-    const listed = new Set([...latest].filter(([, { id }]) => !saved[id]?.dismissed).map(([path]) => `outside-copy:${path}`));
-    // Each status answer repeats the list, so an unchanged one renders and writes nothing.
-    const stays = (row: ShellError) => !row.identity?.startsWith("outside-copy:") || listed.has(row.identity);
-    if (!shellErrorsRef.current.every(stays)) setShellErrors(current => current.filter(stays));
-    for (const [path, { copy, id }] of latest) {
-      const identity = `outside-copy:${path}`;
-      const shownKey = id;
-      if (shownOutsideCopies.current.get(path) === id) continue;
-      shownOutsideCopies.current.set(path, id);
-      const previous = saved[shownKey];
-      if (previous?.copy === copy && previous.dismissed) continue;
-      const seen = previous?.copy === copy;
-      saved[shownKey] = { copy, dismissed: false };
-      const dismiss = () => {
-        // Read current state so an old row cannot dismiss a newer copy.
-        try { saved = JSON.parse(localStorage.getItem(key) ?? "{}"); } catch { /* Use the current run's state. */ }
-        if (saved[shownKey]?.copy === copy) { saved[shownKey]!.dismissed = true; persist(); }
+      const persist = () => {
+        try {
+          localStorage.setItem(key, JSON.stringify(saved));
+        } catch {
+          /* Keep the in-session notice. */
+        }
       };
-      push({ identity, title: `Kept a copy of ${path}`,
-        message: `It changed outside dohc. That change is now in ${copy}.`,
-        retry: null, tone: "warning", onDismiss: dismiss,
-        action: { label: "Open copy", run: () => { open(copy); dismiss(); }, ends: true },
-        target: { to: "file", path: copy } }, seen);
-    }
-    if (JSON.stringify(saved) !== stored) persist();
-  }, [push, workspaceId]);
+      const latest = new Map(copies.map(([path, copy, id]) => [path, { copy, id }]));
+      const present = new Set(copies.map(([, , id]) => id));
+      for (const entry of Object.keys(saved)) if (!present.has(entry)) delete saved[entry];
+      for (const path of shownOutsideCopies.current.keys())
+        if (!latest.has(path)) shownOutsideCopies.current.delete(path);
+      const listed = new Set(
+        [...latest]
+          .filter(([, { id }]) => !saved[id]?.dismissed)
+          .map(([path]) => `outside-copy:${path}`),
+      );
+      // Each status answer repeats the list, so an unchanged one renders and writes nothing.
+      const stays = (row: ShellError) =>
+        !row.identity?.startsWith("outside-copy:") || listed.has(row.identity);
+      if (!shellErrorsRef.current.every(stays)) setShellErrors((current) => current.filter(stays));
+      for (const [path, { copy, id }] of latest) {
+        const identity = `outside-copy:${path}`;
+        const shownKey = id;
+        if (shownOutsideCopies.current.get(path) === id) continue;
+        shownOutsideCopies.current.set(path, id);
+        const previous = saved[shownKey];
+        if (previous?.copy === copy && previous.dismissed) continue;
+        const seen = previous?.copy === copy;
+        saved[shownKey] = { copy, dismissed: false };
+        const dismiss = () => {
+          // Read current state so an old row cannot dismiss a newer copy.
+          try {
+            saved = JSON.parse(localStorage.getItem(key) ?? "{}");
+          } catch {
+            /* Use the current run's state. */
+          }
+          if (saved[shownKey]?.copy === copy) {
+            saved[shownKey]!.dismissed = true;
+            persist();
+          }
+        };
+        push(
+          {
+            identity,
+            title: `Kept a copy of ${path}`,
+            message: `It changed outside dohc. That change is now in ${copy}.`,
+            retry: null,
+            tone: "warning",
+            onDismiss: dismiss,
+            action: {
+              label: "Open copy",
+              run: () => {
+                open(copy);
+                dismiss();
+              },
+              ends: true,
+            },
+            target: { to: "file", path: copy },
+          },
+          seen,
+        );
+      }
+      if (JSON.stringify(saved) !== stored) persist();
+    },
+    [push, workspaceId],
+  );
   // A native copy that was saved opens from its new path.
   const showKeptCopySaved = useCallback(
     (message: string, saved: { path: string; open: () => void } | null) => {
@@ -1054,7 +1380,12 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
         message,
         retry: null,
         tone: "success",
-        ...(saved ? { action: { label: "Open", run: saved.open, ends: true }, target: { to: "file", path: saved.path } as const } : {}),
+        ...(saved
+          ? {
+              action: { label: "Open", run: saved.open, ends: true },
+              target: { to: "file", path: saved.path } as const,
+            }
+          : {}),
       });
     },
     [push],
@@ -1069,33 +1400,56 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
     shellErrorsRef.current.find((error) => error.id === id)?.onDismiss?.();
     setShellErrors((current) => current.filter((error) => error.id !== id));
   }, []);
-  const showCaptureHolds = useCallback((files: readonly { path: string; message: string; retry: () => void }[]) => {
-    const listed = new Set(files.map(file => file.path));
-    for (const path of shownCaptureHolds.current) {
-      if (!listed.has(path)) shownCaptureHolds.current.delete(path);
-    }
-    const arrived = files.filter(file => !shownCaptureHolds.current.has(file.path));
-    for (const file of arrived) shownCaptureHolds.current.add(file.path);
-    const fresh = arrived.map((file): ShellError => ({
-      id: `shell-error-${++nextId.current}`, identity: `capture-held:${file.path}`, kind: "capture-held", tone: "warning",
-      title: "Outside edit not recorded", message: file.message,
-      details: [["File", file.path, file.path.length]], retry: file.retry, target: { to: "file", path: file.path }, atMs: Date.now(), seen: false,
-    }));
-    setShellErrors(current => {
-      const stays = current.filter(row => row.kind !== "capture-held" || listed.has(row.identity!.slice("capture-held:".length)));
-      return fresh.length === 0 && stays.length === current.length ? current : [...stays, ...fresh];
-    });
-  }, []);
+  const showCaptureHolds = useCallback(
+    (files: readonly { path: string; message: string; retry: () => void }[]) => {
+      const listed = new Set(files.map((file) => file.path));
+      for (const path of shownCaptureHolds.current) {
+        if (!listed.has(path)) shownCaptureHolds.current.delete(path);
+      }
+      const arrived = files.filter((file) => !shownCaptureHolds.current.has(file.path));
+      for (const file of arrived) shownCaptureHolds.current.add(file.path);
+      const fresh = arrived.map((file): ShellError => ({
+        id: `shell-error-${++nextId.current}`,
+        identity: `capture-held:${file.path}`,
+        kind: "capture-held",
+        tone: "warning",
+        title: "Outside edit not recorded",
+        message: file.message,
+        details: [["File", file.path, file.path.length]],
+        retry: file.retry,
+        target: { to: "file", path: file.path },
+        atMs: Date.now(),
+        seen: false,
+      }));
+      setShellErrors((current) => {
+        const stays = current.filter(
+          (row) =>
+            row.kind !== "capture-held" || listed.has(row.identity!.slice("capture-held:".length)),
+        );
+        return fresh.length === 0 && stays.length === current.length
+          ? current
+          : [...stays, ...fresh];
+      });
+    },
+    [],
+  );
 
-  const setShellRetryBusy = useCallback((identity: string, busy: boolean): boolean => {
-    if (currentWorkspace.current !== workspaceId) return false;
-    const target = shellErrorsRef.current.find(error => error.identity === identity);
-    if (!target || (busy && target.retryBusy)) return false;
-    if (!!target.retryBusy === busy) return true;
-    shellErrorsRef.current = shellErrorsRef.current.map(error => error === target ? {...error, retryBusy: busy} : error);
-    setShellErrors(current => current.map(error => error.id === target.id ? {...error, retryBusy: busy} : error));
-    return true;
-  }, [workspaceId]);
+  const setShellRetryBusy = useCallback(
+    (identity: string, busy: boolean): boolean => {
+      if (currentWorkspace.current !== workspaceId) return false;
+      const target = shellErrorsRef.current.find((error) => error.identity === identity);
+      if (!target || (busy && target.retryBusy)) return false;
+      if (!!target.retryBusy === busy) return true;
+      shellErrorsRef.current = shellErrorsRef.current.map((error) =>
+        error === target ? { ...error, retryBusy: busy } : error,
+      );
+      setShellErrors((current) =>
+        current.map((error) => (error.id === target.id ? { ...error, retryBusy: busy } : error)),
+      );
+      return true;
+    },
+    [workspaceId],
+  );
   const retryShellError = useCallback((id: string) => {
     const target = shellErrorsRef.current.find((error) => error.id === id);
     // A retry that could not run leaves every row where it stands.
@@ -1105,15 +1459,21 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
     // surface knows. The retry runs once, outside the updater. Only the row
     // retried goes, so a failure the retry has already reported again stays.
     // A share's collision-record row stays until a refresh completes.
-    setShellErrors(current => target?.kind === "sync-refusal" || target?.kind === "capture-held" || target?.kind === "outside-copy-read" ||
-      target?.kind === "protected-copy-read" || target?.kind === "share-collision-record"
-      ? current
-      : current.filter(error => error !== target));
+    setShellErrors((current) =>
+      target?.kind === "sync-refusal" ||
+      target?.kind === "capture-held" ||
+      target?.kind === "outside-copy-read" ||
+      target?.kind === "protected-copy-read" ||
+      target?.kind === "share-collision-record"
+        ? current
+        : current.filter((error) => error !== target),
+    );
   }, []);
 
   // The workspace's notice owner, which files its rows here.
   const noticeOwner = useNoticeOwner(workspaceId, {
-    report: (words, cause, retry, identity, quiet, onDismiss) => reportShellError(words, cause, retry, undefined, identity, quiet, onDismiss),
+    report: (words, cause, retry, identity, quiet, onDismiss) =>
+      reportShellError(words, cause, retry, undefined, identity, quiet, onDismiss),
     clear: clearIdentity,
   });
 

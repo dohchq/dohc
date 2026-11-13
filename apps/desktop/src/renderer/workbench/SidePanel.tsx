@@ -1,11 +1,7 @@
 import { desktopPins } from "../../testPins";
 import { useRef } from "react";
 import { SectionLabel } from "../ui/controls";
-import {
-  clampSidebarWidth,
-  SIDEBAR_MAX_WIDTH,
-  SIDEBAR_MIN_WIDTH,
-} from "./workbenchState";
+import { clampSidebarWidth, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH } from "./workbenchState";
 import { useFocusReturn } from "../ui/focusReturn";
 import { useCommitOnRelease } from "./useCommitOnRelease";
 

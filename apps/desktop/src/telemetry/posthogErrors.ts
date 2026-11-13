@@ -11,7 +11,8 @@ import type { ErrorService } from "./reportingConfig";
 
 // The trailer `posthog-cli sourcemap inject` appends to each file it
 // injects. PostHog finds the file's uploaded source map by this ID.
-const CHUNK_ID = /\n\/\/# chunkId=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\s*$/;
+const CHUNK_ID =
+  /\n\/\/# chunkId=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\s*$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // Carry a report's time and whether dohc caught its error to before_send,
 // which moves them to the event and its first exception.
@@ -22,11 +23,17 @@ const HANDLED = "dohc_handled";
 // the SDK also opens each frame's file to quote lines around it.
 class ErrorReportClient extends PostHog {
   protected override createErrorPropertiesBuilder(): ErrorPropertiesBuilder {
-    return new ErrorPropertiesBuilder([new ErrorCoercer()], createStackParser("node:javascript", nodeStackLineParser));
+    return new ErrorPropertiesBuilder(
+      [new ErrorCoercer()],
+      createStackParser("node:javascript", nodeStackLineParser),
+    );
   }
 }
 
-export type ErrorSender = (report: ErrorReport, signal: AbortSignal) => Promise<Response | undefined>;
+export type ErrorSender = (
+  report: ErrorReport,
+  signal: AbortSignal,
+) => Promise<Response | undefined>;
 
 /**
  * Sends each report as one PostHog exception through the SDK's
@@ -73,7 +80,9 @@ export function createErrorSender(input: {
       if (frames.length === 0) delete exception.stacktrace;
       for (const frame of frames) {
         // dohc's own code is the app; a dependency bundled into it is not.
-        frame.in_app = Boolean(frame.filename?.startsWith("app:///") && !frame.filename.includes("/node_modules/"));
+        frame.in_app = Boolean(
+          frame.filename?.startsWith("app:///") && !frame.filename.includes("/node_modules/"),
+        );
         const chunkId = frame.filename ? chunkIds.get(frame.filename) : undefined;
         if (chunkId) frame.chunk_id = chunkId;
       }

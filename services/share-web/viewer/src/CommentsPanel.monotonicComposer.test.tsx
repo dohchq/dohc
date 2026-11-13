@@ -1,11 +1,5 @@
 // @vitest-environment jsdom
-import {
-  jsonResponse,
-  heldJsonResponse,
-  requestPath,
-  settle,
-  setControlValue,
-} from "./testing";
+import { jsonResponse, heldJsonResponse, requestPath, settle, setControlValue } from "./testing";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -30,12 +24,14 @@ const NEW_MESSAGE = {
   author: { kind: "named" as const, displayName: "Owner" },
 };
 
-function page(input: {
-  activityRevision?: number;
-  messages?: readonly unknown[];
-  nextCursor?: string | null;
-  profileName?: string | null;
-} = {}): Response {
+function page(
+  input: {
+    activityRevision?: number;
+    messages?: readonly unknown[];
+    nextCursor?: string | null;
+    profileName?: string | null;
+  } = {},
+): Response {
   return jsonResponse({
     ok: true,
     activityRevision: input.activityRevision ?? 7,
@@ -103,8 +99,9 @@ describe("CommentsPanel monotonic composer", () => {
   }
 
   function button(label: string): HTMLButtonElement {
-    const match = [...container.querySelectorAll("button")]
-      .find((candidate) => candidate.textContent === label);
+    const match = [...container.querySelectorAll("button")].find(
+      (candidate) => candidate.textContent === label,
+    );
     if (!match) throw new Error(`${label} button is missing`);
     return match;
   }
@@ -117,34 +114,37 @@ describe("CommentsPanel monotonic composer", () => {
 
   it("admits only normalized names and reports body errors before name errors", async () => {
     const posted: Array<Record<string, unknown>> = [];
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
-      if (init?.method === "POST") {
-        const intent = JSON.parse(String(init.body)) as Record<string, unknown>;
-        posted.push(intent);
-        return jsonResponse({
-          ok: true,
-          message: {
-            messageId: `posted-${String(posted.length)}`,
-            createdAtMs: 3_000 + posted.length,
-            deleted: false,
-            body: intent.body,
-            author: {
-              kind: "link",
-              displayName: intent.claimedName ?? "Anonymous",
-              unverified: true,
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>(async (input, init) => {
+        if (init?.method === "POST") {
+          const intent = JSON.parse(String(init.body)) as Record<string, unknown>;
+          posted.push(intent);
+          return jsonResponse({
+            ok: true,
+            message: {
+              messageId: `posted-${String(posted.length)}`,
+              createdAtMs: 3_000 + posted.length,
+              deleted: false,
+              body: intent.body,
+              author: {
+                kind: "link",
+                displayName: intent.claimedName ?? "Anonymous",
+                unverified: true,
+              },
             },
-          },
-        });
-      }
-      const path = requestPath(input);
-      if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
-        return activity({ cursorRevision: 7 });
-      }
-      if (path.includes("/activity?")) {
-        return await new Promise<Response>(() => undefined);
-      }
-      return page();
-    }));
+          });
+        }
+        const path = requestPath(input);
+        if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+          return activity({ cursorRevision: 7 });
+        }
+        if (path.includes("/activity?")) {
+          return await new Promise<Response>(() => undefined);
+        }
+        return page();
+      }),
+    );
 
     await render();
     await settle(() => bodyInput().disabled === false);
@@ -176,10 +176,8 @@ describe("CommentsPanel monotonic composer", () => {
     await act(async () => {
       root.render(<CommentsPanel access="comment" session={SECOND_SESSION} />);
     });
-    await settle(() =>
-      nameInput().value === "" &&
-      bodyInput().value === "" &&
-      bodyInput().disabled === false
+    await settle(
+      () => nameInput().value === "" && bodyInput().value === "" && bodyInput().disabled === false,
     );
     setControlValue(bodyInput(), "No claimed name");
     click("Post comment");
@@ -191,27 +189,27 @@ describe("CommentsPanel monotonic composer", () => {
     const namedActivity = heldJsonResponse(200);
     const nullActivity = heldJsonResponse(200);
     let activityCalls = 0;
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input) => {
-      const path = requestPath(input);
-      if (path === "/api/view/discussion?direction=newest-first") {
-        return page({ nextCursor: "old_cursor" });
-      }
-      if (
-        path ===
-          "/api/view/discussion?direction=newest-first&cursor=old_cursor"
-      ) {
-        return page({ profileName: "Wrong Earlier Name" });
-      }
-      if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
-        activityCalls += 1;
-        return namedActivity.response;
-      }
-      if (path === "/api/view/discussion/activity?since=8&hold=30000&limit=100") {
-        activityCalls += 1;
-        return nullActivity.response;
-      }
-      return await new Promise<Response>(() => undefined);
-    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>(async (input) => {
+        const path = requestPath(input);
+        if (path === "/api/view/discussion?direction=newest-first") {
+          return page({ nextCursor: "old_cursor" });
+        }
+        if (path === "/api/view/discussion?direction=newest-first&cursor=old_cursor") {
+          return page({ profileName: "Wrong Earlier Name" });
+        }
+        if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+          activityCalls += 1;
+          return namedActivity.response;
+        }
+        if (path === "/api/view/discussion/activity?since=8&hold=30000&limit=100") {
+          activityCalls += 1;
+          return nullActivity.response;
+        }
+        return await new Promise<Response>(() => undefined);
+      }),
+    );
 
     await render();
     await settle(namedActivity.bodyStarted);
@@ -257,33 +255,36 @@ describe("CommentsPanel monotonic composer", () => {
     const heldActivity = heldJsonResponse(200);
     const heldRefusal = heldJsonResponse(403);
     const posted: Array<Record<string, unknown>> = [];
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
-      const path = requestPath(input);
-      if (init?.method === "POST") {
-        posted.push(JSON.parse(String(init.body)) as Record<string, unknown>);
-        if (posted.length === 1) return heldRefusal.response;
-        return jsonResponse({
-          ok: true,
-          message: {
-            messageId: "retried",
-            createdAtMs: 4_000,
-            deleted: false,
-            body: "Held draft",
-            author: { kind: "link", displayName: "Visitor", unverified: true },
-          },
-        });
-      }
-      if (path === "/api/view/discussion?direction=newest-first") return page();
-      if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
-        return activity({ cursorRevision: 7 });
-      }
-      if (path === "/api/view/discussion/activity?since=7&hold=30000&limit=100") {
-        return heldActivity.bodyStarted()
-          ? await new Promise<Response>(() => undefined)
-          : heldActivity.response;
-      }
-      return await new Promise<Response>(() => undefined);
-    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>(async (input, init) => {
+        const path = requestPath(input);
+        if (init?.method === "POST") {
+          posted.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+          if (posted.length === 1) return heldRefusal.response;
+          return jsonResponse({
+            ok: true,
+            message: {
+              messageId: "retried",
+              createdAtMs: 4_000,
+              deleted: false,
+              body: "Held draft",
+              author: { kind: "link", displayName: "Visitor", unverified: true },
+            },
+          });
+        }
+        if (path === "/api/view/discussion?direction=newest-first") return page();
+        if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+          return activity({ cursorRevision: 7 });
+        }
+        if (path === "/api/view/discussion/activity?since=7&hold=30000&limit=100") {
+          return heldActivity.bodyStarted()
+            ? await new Promise<Response>(() => undefined)
+            : heldActivity.response;
+        }
+        return await new Promise<Response>(() => undefined);
+      }),
+    );
 
     await render();
     await settle(() => heldActivity.bodyStarted() && bodyInput().disabled === false);
@@ -304,7 +305,9 @@ describe("CommentsPanel monotonic composer", () => {
       await Promise.resolve();
     });
     heldRefusal.release({ ok: false, state: "blocked", activityRevision: 8 });
-    await settle(() => container.textContent?.includes("The comment didn't post. Try again.") === true);
+    await settle(
+      () => container.textContent?.includes("The comment didn't post. Try again.") === true,
+    );
 
     expect(bodyInput().value).toBe("Held draft");
     expect(bodyInput().disabled).toBe(false);
@@ -317,18 +320,21 @@ describe("CommentsPanel monotonic composer", () => {
   it("applies an equal or newer refusal without clearing the draft", async () => {
     const heldActivity = heldJsonResponse(200);
     const heldRefusal = heldJsonResponse(403);
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
-      const path = requestPath(input);
-      if (init?.method === "POST") return heldRefusal.response;
-      if (path === "/api/view/discussion?direction=newest-first") return page();
-      if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
-        return activity({ cursorRevision: 7 });
-      }
-      if (path === "/api/view/discussion/activity?since=7&hold=30000&limit=100") {
-        return heldActivity.response;
-      }
-      return await new Promise<Response>(() => undefined);
-    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>(async (input, init) => {
+        const path = requestPath(input);
+        if (init?.method === "POST") return heldRefusal.response;
+        if (path === "/api/view/discussion?direction=newest-first") return page();
+        if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+          return activity({ cursorRevision: 7 });
+        }
+        if (path === "/api/view/discussion/activity?since=7&hold=30000&limit=100") {
+          return heldActivity.response;
+        }
+        return await new Promise<Response>(() => undefined);
+      }),
+    );
 
     await render();
     await settle(() => heldActivity.bodyStarted() && bodyInput().disabled === false);
@@ -349,9 +355,10 @@ describe("CommentsPanel monotonic composer", () => {
       await Promise.resolve();
     });
     heldRefusal.release({ ok: false, state: "blocked", activityRevision: 9 });
-    await settle(() => container.textContent?.includes(
-      "The owner turned off comments for this browser.",
-    ) === true);
+    await settle(
+      () =>
+        container.textContent?.includes("The owner turned off comments for this browser.") === true,
+    );
 
     expect(bodyInput().value).toBe("Refused draft");
     expect(bodyInput().disabled).toBe(true);
@@ -361,20 +368,23 @@ describe("CommentsPanel monotonic composer", () => {
   it("keeps a newer blocked refusal after an older activity body arrives", async () => {
     const heldActivity = heldJsonResponse(200);
     const heldRefusal = heldJsonResponse(403);
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
-      const path = requestPath(input);
-      if (init?.method === "POST") return heldRefusal.response;
-      if (path === "/api/view/discussion?direction=newest-first") return page();
-      if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
-        return activity({ cursorRevision: 7 });
-      }
-      if (path === "/api/view/discussion/activity?since=7&hold=30000&limit=100") {
-        return heldActivity.bodyStarted()
-          ? await new Promise<Response>(() => undefined)
-          : heldActivity.response;
-      }
-      return await new Promise<Response>(() => undefined);
-    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>(async (input, init) => {
+        const path = requestPath(input);
+        if (init?.method === "POST") return heldRefusal.response;
+        if (path === "/api/view/discussion?direction=newest-first") return page();
+        if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+          return activity({ cursorRevision: 7 });
+        }
+        if (path === "/api/view/discussion/activity?since=7&hold=30000&limit=100") {
+          return heldActivity.bodyStarted()
+            ? await new Promise<Response>(() => undefined)
+            : heldActivity.response;
+        }
+        return await new Promise<Response>(() => undefined);
+      }),
+    );
 
     await render();
     await settle(() => heldActivity.bodyStarted() && bodyInput().disabled === false);
@@ -382,9 +392,10 @@ describe("CommentsPanel monotonic composer", () => {
     click("Post comment");
     await settle(heldRefusal.bodyStarted);
     heldRefusal.release({ ok: false, state: "blocked", activityRevision: 8 });
-    await settle(() => container.textContent?.includes(
-      "The owner turned off comments for this browser.",
-    ) === true);
+    await settle(
+      () =>
+        container.textContent?.includes("The owner turned off comments for this browser.") === true,
+    );
 
     expect(bodyInput().value).toBe("Blocked draft");
     expect(bodyInput().disabled).toBe(true);
@@ -405,9 +416,7 @@ describe("CommentsPanel monotonic composer", () => {
 
     expect(bodyInput().value).toBe("Blocked draft");
     expect(bodyInput().disabled).toBe(true);
-    expect(container.textContent).toContain(
-      "The owner turned off comments for this browser.",
-    );
+    expect(container.textContent).toContain("The owner turned off comments for this browser.");
   });
 
   it("recovers from a terminal follower only after a newest page and valid activity", async () => {
@@ -428,54 +437,57 @@ describe("CommentsPanel monotonic composer", () => {
     };
     const posted: Array<Record<string, unknown>> = [];
     let newestLoads = 0;
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
-      const path = requestPath(input);
-      if (init?.method === "POST") {
-        posted.push(JSON.parse(String(init.body)) as Record<string, unknown>);
-        return posted.length === 1
-          ? new Response(null, { status: 404 })
-          : jsonResponse({ ok: false, state: "blocked", activityRevision: 11 }, 403);
-      }
-      if (path === "/api/view/discussion?direction=newest-first") {
-        newestLoads += 1;
-        return newestLoads === 1
-          ? page({ messages: [OLD_MESSAGE], nextCursor: "old_cursor" })
-          : recoveryPage.response;
-      }
-      if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
-        return jsonResponse({
-          ok: true,
-          access: "comment",
-          latestRevision: 8,
-          cursorRevision: 8,
-          hasMore: false,
-          messages: [hiddenTombstone],
-          composerState: "available",
-          profileName: null,
-        });
-      }
-      if (path === "/api/view/discussion/activity?since=8&hold=30000&limit=100") {
-        return terminal.response;
-      }
-      if (path === "/api/view/discussion/activity?since=12&hold=0&limit=100") {
-        return recoveryActivity.response;
-      }
-      if (
-        path ===
-          "/api/view/discussion?direction=newest-first&cursor=new_cursor"
-      ) {
-        return page({ messages: [hiddenLive] });
-      }
-      return await new Promise<Response>(() => undefined);
-    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>(async (input, init) => {
+        const path = requestPath(input);
+        if (init?.method === "POST") {
+          posted.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+          return posted.length === 1
+            ? new Response(null, { status: 404 })
+            : jsonResponse({ ok: false, state: "blocked", activityRevision: 11 }, 403);
+        }
+        if (path === "/api/view/discussion?direction=newest-first") {
+          newestLoads += 1;
+          return newestLoads === 1
+            ? page({ messages: [OLD_MESSAGE], nextCursor: "old_cursor" })
+            : recoveryPage.response;
+        }
+        if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+          return jsonResponse({
+            ok: true,
+            access: "comment",
+            latestRevision: 8,
+            cursorRevision: 8,
+            hasMore: false,
+            messages: [hiddenTombstone],
+            composerState: "available",
+            profileName: null,
+          });
+        }
+        if (path === "/api/view/discussion/activity?since=8&hold=30000&limit=100") {
+          return terminal.response;
+        }
+        if (path === "/api/view/discussion/activity?since=12&hold=0&limit=100") {
+          return recoveryActivity.response;
+        }
+        if (path === "/api/view/discussion?direction=newest-first&cursor=new_cursor") {
+          return page({ messages: [hiddenLive] });
+        }
+        return await new Promise<Response>(() => undefined);
+      }),
+    );
 
     await render();
     await settle(terminal.bodyStarted);
     setControlValue(nameInput(), "Typed Name");
     setControlValue(bodyInput(), "Preserved draft");
     click("Post comment");
-    await settle(() => posted.length === 1 &&
-      container.textContent?.includes("The comment didn't post. Try again.") === true);
+    await settle(
+      () =>
+        posted.length === 1 &&
+        container.textContent?.includes("The comment didn't post. Try again.") === true,
+    );
     expect(posted[0]?.body).toBe("Preserved draft");
     expect(posted[0]?.claimedName).toBe("Typed Name");
 
@@ -515,8 +527,11 @@ describe("CommentsPanel monotonic composer", () => {
       composerState: "available",
       profileName: "Stable Name",
     });
-    await settle(() => !container.textContent?.includes("Comments stopped updating.") &&
-      nameInput().value === "Stable Name");
+    await settle(
+      () =>
+        !container.textContent?.includes("Comments stopped updating.") &&
+        nameInput().value === "Stable Name",
+    );
     expect(nameInput().disabled).toBe(true);
     expect(bodyInput().value).toBe("Preserved draft");
     expect(bodyInput().disabled).toBe(false);
@@ -558,53 +573,56 @@ describe("CommentsPanel monotonic composer", () => {
         author: { kind: "named" as const, displayName: "Owner" },
       };
       let newestLoads = 0;
-      vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input) => {
-        const path = requestPath(input);
-        if (path === "/api/view/discussion?direction=newest-first") {
-          newestLoads += 1;
-          return newestLoads === 1
-            ? page({ messages: [OLD_MESSAGE], nextCursor: "old_cursor" })
-            : page({
-                activityRevision: 12,
-                messages: [NEW_MESSAGE],
-                nextCursor: "new_cursor",
-              });
-        }
-        if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
-          return terminal.response;
-        }
-        if (path === "/api/view/discussion/activity?since=12&hold=0&limit=100") {
-          return activity({ cursorRevision: 12 });
-        }
-        if (path.includes("/api/view/discussion?direction=newest-first&cursor=")) {
-          earlierRequests.push(path);
-          if (path.endsWith("cursor=old_cursor")) return heldEarlier.response;
-          if (path.endsWith("cursor=new_cursor")) {
-            return page({ messages: [recoveredEarlier] });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn<typeof fetch>(async (input) => {
+          const path = requestPath(input);
+          if (path === "/api/view/discussion?direction=newest-first") {
+            newestLoads += 1;
+            return newestLoads === 1
+              ? page({ messages: [OLD_MESSAGE], nextCursor: "old_cursor" })
+              : page({
+                  activityRevision: 12,
+                  messages: [NEW_MESSAGE],
+                  nextCursor: "new_cursor",
+                });
           }
-        }
-        return await new Promise<Response>(() => undefined);
-      }));
+          if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+            return terminal.response;
+          }
+          if (path === "/api/view/discussion/activity?since=12&hold=0&limit=100") {
+            return activity({ cursorRevision: 12 });
+          }
+          if (path.includes("/api/view/discussion?direction=newest-first&cursor=")) {
+            earlierRequests.push(path);
+            if (path.endsWith("cursor=old_cursor")) return heldEarlier.response;
+            if (path.endsWith("cursor=new_cursor")) {
+              return page({ messages: [recoveredEarlier] });
+            }
+          }
+          return await new Promise<Response>(() => undefined);
+        }),
+      );
 
       await render();
       await settle(terminal.bodyStarted);
       click("Load earlier comments");
       await settle(heldEarlier.bodyStarted);
       terminal.release({ ok: true, internal: true });
-      await settle(() => container.textContent?.includes(
-        "Comments stopped updating.",
-      ) === true);
+      await settle(() => container.textContent?.includes("Comments stopped updating.") === true);
 
       await act(async () => {
-        heldEarlier.release(settlement === "success"
-          ? {
-              ok: true,
-              activityRevision: 7,
-              messages: [staleEarlier],
-              nextCursor: "held_cursor",
-              profileName: null,
-            }
-          : { ok: true, internal: true });
+        heldEarlier.release(
+          settlement === "success"
+            ? {
+                ok: true,
+                activityRevision: 7,
+                messages: [staleEarlier],
+                nextCursor: "held_cursor",
+                profileName: null,
+              }
+            : { ok: true, internal: true },
+        );
         await Promise.resolve();
       });
 
@@ -615,9 +633,10 @@ describe("CommentsPanel monotonic composer", () => {
 
       if (settlement === "success") {
         click("Try again");
-        await settle(() =>
-          container.textContent?.includes("Comments stopped updating.") === false &&
-          container.textContent?.includes("Recovered timeline") === true
+        await settle(
+          () =>
+            container.textContent?.includes("Comments stopped updating.") === false &&
+            container.textContent?.includes("Recovered timeline") === true,
         );
         click("Load earlier comments");
         await settle(() => earlierRequests.length === 2);
@@ -638,37 +657,42 @@ describe("CommentsPanel monotonic composer", () => {
     const recoveryActivity = heldJsonResponse(200);
     const earlierRequests: string[] = [];
     let newestLoads = 0;
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input) => {
-      const path = requestPath(input);
-      if (path === "/api/view/discussion?direction=newest-first") {
-        newestLoads += 1;
-        return newestLoads === 1
-          ? page({ messages: [OLD_MESSAGE], nextCursor: "old_cursor" })
-          : recoveryPage.response;
-      }
-      if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
-        return terminal.response;
-      }
-      if (path === "/api/view/discussion/activity?since=12&hold=0&limit=100") {
-        return recoveryActivity.response;
-      }
-      if (path.includes("/api/view/discussion?direction=newest-first&cursor=")) {
-        earlierRequests.push(path);
-        if (path.endsWith("cursor=new_cursor")) {
-          return page({
-            messages: [{
-              messageId: "message-earlier-recovered",
-              createdAtMs: 1_500,
-              deleted: false,
-              body: "Earlier recovered timeline",
-              author: { kind: "named", displayName: "Owner" },
-            }],
-          });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>(async (input) => {
+        const path = requestPath(input);
+        if (path === "/api/view/discussion?direction=newest-first") {
+          newestLoads += 1;
+          return newestLoads === 1
+            ? page({ messages: [OLD_MESSAGE], nextCursor: "old_cursor" })
+            : recoveryPage.response;
+        }
+        if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+          return terminal.response;
+        }
+        if (path === "/api/view/discussion/activity?since=12&hold=0&limit=100") {
+          return recoveryActivity.response;
+        }
+        if (path.includes("/api/view/discussion?direction=newest-first&cursor=")) {
+          earlierRequests.push(path);
+          if (path.endsWith("cursor=new_cursor")) {
+            return page({
+              messages: [
+                {
+                  messageId: "message-earlier-recovered",
+                  createdAtMs: 1_500,
+                  deleted: false,
+                  body: "Earlier recovered timeline",
+                  author: { kind: "named", displayName: "Owner" },
+                },
+              ],
+            });
+          }
+          return await new Promise<Response>(() => undefined);
         }
         return await new Promise<Response>(() => undefined);
-      }
-      return await new Promise<Response>(() => undefined);
-    }));
+      }),
+    );
 
     await render();
     await settle(terminal.bodyStarted);
@@ -715,9 +739,7 @@ describe("CommentsPanel monotonic composer", () => {
     expect(earlierRequests).toEqual([
       "/api/view/discussion?direction=newest-first&cursor=new_cursor",
     ]);
-    await settle(() =>
-      container.textContent?.includes("Earlier recovered timeline") === true
-    );
+    await settle(() => container.textContent?.includes("Earlier recovered timeline") === true);
     expect(container.textContent).toContain("Recovered timeline");
     expect(container.textContent).not.toContain("Old timeline");
   });
@@ -727,24 +749,27 @@ describe("CommentsPanel monotonic composer", () => {
     const terminal = heldJsonResponse(200);
     const recoveryActivity = heldJsonResponse(200);
     let newestLoads = 0;
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
-      const path = requestPath(input);
-      if (init?.method === "POST") return heldPost.response;
-      if (path === "/api/view/discussion?direction=newest-first") {
-        newestLoads += 1;
-        return page({ activityRevision: newestLoads === 1 ? 7 : 9 });
-      }
-      if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
-        return activity({ cursorRevision: 7 });
-      }
-      if (path === "/api/view/discussion/activity?since=7&hold=30000&limit=100") {
-        return terminal.response;
-      }
-      if (path === "/api/view/discussion/activity?since=9&hold=0&limit=100") {
-        return recoveryActivity.response;
-      }
-      return await new Promise<Response>(() => undefined);
-    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>(async (input, init) => {
+        const path = requestPath(input);
+        if (init?.method === "POST") return heldPost.response;
+        if (path === "/api/view/discussion?direction=newest-first") {
+          newestLoads += 1;
+          return page({ activityRevision: newestLoads === 1 ? 7 : 9 });
+        }
+        if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+          return activity({ cursorRevision: 7 });
+        }
+        if (path === "/api/view/discussion/activity?since=7&hold=30000&limit=100") {
+          return terminal.response;
+        }
+        if (path === "/api/view/discussion/activity?since=9&hold=0&limit=100") {
+          return recoveryActivity.response;
+        }
+        return await new Promise<Response>(() => undefined);
+      }),
+    );
 
     await render();
     await settle(() => terminal.bodyStarted() && bodyInput().disabled === false);
@@ -780,39 +805,46 @@ describe("CommentsPanel monotonic composer", () => {
     expect(button("Post comment").disabled).toBe(true);
 
     heldPost.release({ ok: false, state: "blocked", activityRevision: 8 });
-    await settle(() => container.textContent?.includes("The comment didn't post. Try again.") === true);
+    await settle(
+      () => container.textContent?.includes("The comment didn't post. Try again.") === true,
+    );
     expect(button("Post comment").disabled).toBe(false);
   });
 
   it("keeps a durable limit latched across stopped recovery", async () => {
     const terminal = heldJsonResponse(200);
     let newestLoads = 0;
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
-      const path = requestPath(input);
-      if (init?.method === "POST") {
-        return jsonResponse({ ok: false, state: "limit-reached" }, 413);
-      }
-      if (path === "/api/view/discussion?direction=newest-first") {
-        newestLoads += 1;
-        return page({ activityRevision: newestLoads === 1 ? 7 : 10 });
-      }
-      if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
-        return activity({ cursorRevision: 7 });
-      }
-      if (path === "/api/view/discussion/activity?since=7&hold=30000&limit=100") {
-        return terminal.response;
-      }
-      if (path === "/api/view/discussion/activity?since=10&hold=0&limit=100") {
-        return activity({ cursorRevision: 10, composerState: "available" });
-      }
-      return await new Promise<Response>(() => undefined);
-    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>(async (input, init) => {
+        const path = requestPath(input);
+        if (init?.method === "POST") {
+          return jsonResponse({ ok: false, state: "limit-reached" }, 413);
+        }
+        if (path === "/api/view/discussion?direction=newest-first") {
+          newestLoads += 1;
+          return page({ activityRevision: newestLoads === 1 ? 7 : 10 });
+        }
+        if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+          return activity({ cursorRevision: 7 });
+        }
+        if (path === "/api/view/discussion/activity?since=7&hold=30000&limit=100") {
+          return terminal.response;
+        }
+        if (path === "/api/view/discussion/activity?since=10&hold=0&limit=100") {
+          return activity({ cursorRevision: 10, composerState: "available" });
+        }
+        return await new Promise<Response>(() => undefined);
+      }),
+    );
 
     await render();
     await settle(() => terminal.bodyStarted() && bodyInput().disabled === false);
     setControlValue(bodyInput(), "Limited body");
     click("Post comment");
-    await settle(() => container.textContent?.includes("You can't post more comments here.") === true);
+    await settle(
+      () => container.textContent?.includes("You can't post more comments here.") === true,
+    );
     terminal.release({ ok: true, internal: true });
     await settle(() => container.textContent?.includes("Comments stopped updating.") === true);
     click("Try again");
@@ -831,27 +863,30 @@ describe("CommentsPanel monotonic composer", () => {
     async (failure) => {
       const terminal = heldJsonResponse(200);
       let newestLoads = 0;
-      vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input) => {
-        const path = requestPath(input);
-        if (path === "/api/view/discussion?direction=newest-first") {
-          newestLoads += 1;
-          if (newestLoads === 1) return page({ messages: [OLD_MESSAGE] });
-          return failure === "page"
-            ? new Response(null, { status: 503 })
-            : page({
-                activityRevision: 9,
-                messages: [NEW_MESSAGE],
-                profileName: "Committed Recovery Name",
-              });
-        }
-        if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
-          return terminal.response;
-        }
-        if (path === "/api/view/discussion/activity?since=9&hold=0&limit=100") {
-          return new Response(null, { status: 404 });
-        }
-        return await new Promise<Response>(() => undefined);
-      }));
+      vi.stubGlobal(
+        "fetch",
+        vi.fn<typeof fetch>(async (input) => {
+          const path = requestPath(input);
+          if (path === "/api/view/discussion?direction=newest-first") {
+            newestLoads += 1;
+            if (newestLoads === 1) return page({ messages: [OLD_MESSAGE] });
+            return failure === "page"
+              ? new Response(null, { status: 503 })
+              : page({
+                  activityRevision: 9,
+                  messages: [NEW_MESSAGE],
+                  profileName: "Committed Recovery Name",
+                });
+          }
+          if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+            return terminal.response;
+          }
+          if (path === "/api/view/discussion/activity?since=9&hold=0&limit=100") {
+            return new Response(null, { status: 404 });
+          }
+          return await new Promise<Response>(() => undefined);
+        }),
+      );
 
       await render();
       await settle(terminal.bodyStarted);
@@ -860,9 +895,10 @@ describe("CommentsPanel monotonic composer", () => {
       terminal.release({ ok: true, internal: true });
       await settle(() => container.textContent?.includes("Comments stopped updating.") === true);
       click("Try again");
-      await settle(() =>
-        container.textContent?.includes("Comments stopped updating.") === true &&
-        button("Try again").disabled === false
+      await settle(
+        () =>
+          container.textContent?.includes("Comments stopped updating.") === true &&
+          button("Try again").disabled === false,
       );
 
       expect(container.textContent).toContain(

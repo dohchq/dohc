@@ -42,7 +42,9 @@ function renderDialog(onCreated: (ref: CollectionRef) => void = () => undefined,
 describe("NewCollectionDialog", () => {
   it("previews the collection name and fields without inventing records", () => {
     renderDialog(() => undefined, false);
-    fireEvent.change(screen.getByLabelText("Collection name"), { target: { value: "events/registrations" } });
+    fireEvent.change(screen.getByLabelText("Collection name"), {
+      target: { value: "events/registrations" },
+    });
     fireEvent.change(screen.getByLabelText("Field name"), { target: { value: "Player" } });
     const preview = within(screen.getByRole("region", { name: "Collection preview" }));
     expect(preview.getByText("registrations")).toBeTruthy();
@@ -55,11 +57,16 @@ describe("NewCollectionDialog", () => {
   });
 
   it("defaults to data and creates a typed backend without an app or SQL input", async () => {
-    bridgeMock.dataset.mockImplementation(async (request: { definition: DatasetDefinition }) => ({ kind: "approved", revision: { datasetId: request.definition.datasetId, definition: request.definition } }));
+    bridgeMock.dataset.mockImplementation(async (request: { definition: DatasetDefinition }) => ({
+      kind: "approved",
+      revision: { datasetId: request.definition.datasetId, definition: request.definition },
+    }));
     const onCreated = vi.fn();
     renderDialog(onCreated, false);
     expect((screen.getByLabelText("Data") as HTMLInputElement).checked).toBe(true);
-    fireEvent.change(screen.getByLabelText("Collection name"), { target: { value: "events/registrations" } });
+    fireEvent.change(screen.getByLabelText("Collection name"), {
+      target: { value: "events/registrations" },
+    });
     fireEvent.click(screen.getByLabelText("Require Name"));
     fireEvent.click(screen.getByLabelText("Unique Name"));
     fireEvent.click(screen.getByText("Add field"));
@@ -72,17 +79,28 @@ describe("NewCollectionDialog", () => {
     await waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1));
     const request = bridgeMock.dataset.mock.calls[0]![0];
     const definition = parseDatasetDefinition(request.definition);
-    expect(request.action).toBe("create"); expect(request.workspaceId).toBe("ws-1");
+    expect(request.action).toBe("create");
+    expect(request.workspaceId).toBe("ws-1");
     expect(definition.schemaPath).toBe("events/registrations/schema.sql");
-    expect(definition.tables[0]!.fields[1]).toMatchObject({ name: "Name", required: true, unique: true });
+    expect(definition.tables[0]!.fields[1]).toMatchObject({
+      name: "Name",
+      required: true,
+      unique: true,
+    });
     expect(definition.tables[0]!.fields[2]).toMatchObject({ name: "Status", default: "New" });
-    expect(onCreated).toHaveBeenCalledWith({ kind: "transactional", datasetPath: "events/registrations/dataset.json", tableId: definition.tables[0]!.tableId });
+    expect(onCreated).toHaveBeenCalledWith({
+      kind: "transactional",
+      datasetPath: "events/registrations/dataset.json",
+      tableId: definition.tables[0]!.tableId,
+    });
     expect(bridgeMock.createWorkspaceFile).not.toHaveBeenCalled();
   });
 
   it("offers file fields and rejects an invalid default before creating sources", async () => {
     renderDialog(() => undefined, false);
-    fireEvent.change(screen.getByLabelText("Collection name"), { target: { value: "registrations" } });
+    fireEvent.change(screen.getByLabelText("Collection name"), {
+      target: { value: "registrations" },
+    });
     fireEvent.change(screen.getByLabelText("Field type"), { target: { value: "attachment" } });
     expect(screen.queryByLabelText("Default for Name")).toBeNull();
     fireEvent.change(screen.getByLabelText("Field type"), { target: { value: "number" } });
@@ -95,13 +113,24 @@ describe("NewCollectionDialog", () => {
   it("sends creation failures to Notices and ignores completion in another workspace", async () => {
     const pending = deferred<unknown>();
     bridgeMock.dataset.mockReturnValue(pending.promise);
-    const onCreated = vi.fn(), onError = vi.fn();
+    const onCreated = vi.fn(),
+      onError = vi.fn();
     const props = { workspaceId: "ws-1", onCreated, onError, onClose: () => undefined };
     const { rerender } = render(<NewCollectionDialog {...props} />);
-    fireEvent.change(screen.getByLabelText("Collection name"), { target: { value: "registrations" } });
+    fireEvent.change(screen.getByLabelText("Collection name"), {
+      target: { value: "registrations" },
+    });
     fireEvent.click(screen.getByTestId("new-collection-create"));
     rerender(<NewCollectionDialog {...props} workspaceId="ws-2" />);
-    await act(async () => { pending.resolve({ kind: "approved", revision: { datasetId: bridgeMock.dataset.mock.calls[0]![0].definition.datasetId, definition: bridgeMock.dataset.mock.calls[0]![0].definition } }); });
+    await act(async () => {
+      pending.resolve({
+        kind: "approved",
+        revision: {
+          datasetId: bridgeMock.dataset.mock.calls[0]![0].definition.datasetId,
+          definition: bridgeMock.dataset.mock.calls[0]![0].definition,
+        },
+      });
+    });
     expect(onCreated).not.toHaveBeenCalled();
     bridgeMock.dataset.mockRejectedValue(new Error("Storage unavailable"));
     fireEvent.change(screen.getByLabelText("Collection name"), { target: { value: "new-data" } });
@@ -127,7 +156,9 @@ describe("NewCollectionDialog", () => {
     expect(screen.queryByLabelText("Documents")).toBeNull();
     fireEvent.change(screen.getByLabelText("Collection name"), { target: { value: "trip/ideas" } });
     fireEvent.click(screen.getByTestId("new-collection-create"));
-    await waitFor(() => expect(onCreated).toHaveBeenCalledWith({ kind: "document", path: "trip/ideas" }));
+    await waitFor(() =>
+      expect(onCreated).toHaveBeenCalledWith({ kind: "document", path: "trip/ideas" }),
+    );
     expect(bridgeMock.dataset).not.toHaveBeenCalled();
   });
 
@@ -151,9 +182,7 @@ describe("NewCollectionDialog", () => {
     });
     fireEvent.click(screen.getByTestId("new-collection-create"));
 
-    await waitFor(() =>
-      expect(bridgeMock.createWorkspaceFile).toHaveBeenCalledOnce(),
-    );
+    await waitFor(() => expect(bridgeMock.createWorkspaceFile).toHaveBeenCalledOnce());
     const payload = bridgeMock.createWorkspaceFile.mock.calls[0]?.[0] as {
       workspaceId: string;
       relativePath: string;
@@ -185,9 +214,7 @@ describe("NewCollectionDialog", () => {
     fireEvent.change(names[1] as Element, { target: { value: "Name" } });
     fireEvent.click(screen.getByTestId("new-collection-create"));
     expect(
-      await screen.findByText(
-        'A field named "Name" already exists. Choose another name.',
-      ),
+      await screen.findByText('A field named "Name" already exists. Choose another name.'),
     ).toBeDefined();
 
     fireEvent.change(names[1] as Element, { target: { value: "id" } });
@@ -209,15 +236,11 @@ describe("NewCollectionDialog", () => {
     const types = screen.getAllByLabelText("Field type");
     fireEvent.change(types[1] as Element, { target: { value: "relation" } });
     fireEvent.click(screen.getByTestId("new-collection-create"));
-    expect(
-      await screen.findByText("Choose a collection to relate to."),
-    ).toBeDefined();
+    expect(await screen.findByText("Choose a collection to relate to.")).toBeDefined();
 
     fireEvent.change(types[1] as Element, { target: { value: "select" } });
     fireEvent.click(screen.getByTestId("new-collection-create"));
-    expect(
-      await screen.findByText("Give the field at least one option."),
-    ).toBeDefined();
+    expect(await screen.findByText("Give the field at least one option.")).toBeDefined();
     expect(bridgeMock.createWorkspaceFile).not.toHaveBeenCalled();
   });
 });

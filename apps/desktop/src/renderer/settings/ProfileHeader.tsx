@@ -69,7 +69,12 @@ export function ProfileHeader(props: {
   return (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-3">
       <span data-testid={`${prefix}-preview`} className="flex shrink-0">
-        <ChatAvatar presentation={props.presentation ?? ownPresentation} name={preview} kind="human" size="post" />
+        <ChatAvatar
+          presentation={props.presentation ?? ownPresentation}
+          name={preview}
+          kind="human"
+          size="post"
+        />
         <span className="sr-only">Your messages appear as {preview}</span>
       </span>
       <div className="min-w-0 flex-[1_1_14rem]">
@@ -93,7 +98,11 @@ export function ProfileHeader(props: {
         />
         <p className="m-0 mt-0.5 text-[12px] text-muted">Shown beside your chat messages.</p>
         {error ? (
-          <p data-testid={`${prefix}-error`} role="alert" className="m-0 mt-1 text-[12px] text-danger">
+          <p
+            data-testid={`${prefix}-error`}
+            role="alert"
+            className="m-0 mt-1 text-[12px] text-danger"
+          >
             {error}
           </p>
         ) : null}

@@ -1,28 +1,48 @@
-import { EmptyState, GhostButton, Pill, RetryRow, SecondaryButton, PrimaryButton } from "../ui/controls";
+import {
+  EmptyState,
+  GhostButton,
+  Pill,
+  RetryRow,
+  SecondaryButton,
+  PrimaryButton,
+} from "../ui/controls";
 import { EMPTY_ART } from "./EmptyArt";
 import { useRequestSequence } from "../useRequestSequence";
 import { ipcErrorMessage } from "../ipcError";
-import { isMergeStoppedPartway, isWorkspaceUpdatingError, isConflictStaleTarget, readError, versionNameRefusal } from "../../ipc/errorWords";
-import { SyncedDeletionRevivalError, SyncedDeletionStaleError } from "../../workspaces/syncedDeletionRefusal";
-import { ChevronDown, ChevronsUpDown, CircleAlert, Diff, FileArchive, FileText, Hourglass, Layers, Lock, Merge, Plus, RefreshCw, Share2 } from "lucide-react";
 import {
-  type ReactNode,
-  useCallback,
-  useEffect,
-  useId,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+  isMergeStoppedPartway,
+  isWorkspaceUpdatingError,
+  isConflictStaleTarget,
+  readError,
+  versionNameRefusal,
+} from "../../ipc/errorWords";
+import {
+  SyncedDeletionRevivalError,
+  SyncedDeletionStaleError,
+} from "../../workspaces/syncedDeletionRefusal";
+import {
+  ChevronDown,
+  ChevronsUpDown,
+  CircleAlert,
+  Diff,
+  FileArchive,
+  FileText,
+  Hourglass,
+  Layers,
+  Lock,
+  Merge,
+  Plus,
+  RefreshCw,
+  Share2,
+} from "lucide-react";
+import { type ReactNode, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import type {
   ResolveWorkspaceVersionConflictResult,
   WorkspaceVersionConflict,
   WorkspaceVersionFileChange,
   WorkspaceVersionRecord,
 } from "../../ipc/bridgeContract";
-import {
-  exceedsUtf8Bytes,
-} from "../../workspaces/workspaceTextLimits";
+import { exceedsUtf8Bytes } from "../../workspaces/workspaceTextLimits";
 import { bridge } from "../bridge";
 import { Overlay } from "../Overlay";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
@@ -46,14 +66,9 @@ export interface WorkspaceVersionsSnapshot {
   activeVersionId: string;
 }
 
-function versionName(
-  snapshot: WorkspaceVersionsSnapshot | null,
-  versionId: string | null,
-): string {
+function versionName(snapshot: WorkspaceVersionsSnapshot | null, versionId: string | null): string {
   if (!versionId) return "Main";
-  return (
-    snapshot?.versions.find((version) => version.id === versionId)?.name ?? "Main"
-  );
+  return snapshot?.versions.find((version) => version.id === versionId)?.name ?? "Main";
 }
 
 const VERSION_LOAD_RETRY_MS = 1_000;
@@ -74,8 +89,14 @@ export function withDeadline<T>(read: Promise<T>, what: string): Promise<T> {
       reject(error);
     }, READ_DEADLINE_MS);
     read.then(
-      (value) => { clearTimeout(timer); resolve(value); },
-      (error: unknown) => { clearTimeout(timer); reject(error); },
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
     );
   });
 }
@@ -118,14 +139,22 @@ export interface VersionMergeNotice {
 
 // Whether a merge from this version still has files to decide. It reads the
 // open conflicts page by page and stops at the first one.
-export async function mergeFilesWait(workspaceId: string, sourceVersionId: string): Promise<boolean> {
+export async function mergeFilesWait(
+  workspaceId: string,
+  sourceVersionId: string,
+): Promise<boolean> {
   let afterConflictId: string | undefined;
   do {
     const page = await bridge().listWorkspaceVersionConflicts({
       workspaceId,
       ...(afterConflictId === undefined ? {} : { afterConflictId }),
     });
-    if (page.conflicts.some((conflict) => conflict.origin === "merge" && conflict.sourceVersionId === sourceVersionId)) return true;
+    if (
+      page.conflicts.some(
+        (conflict) => conflict.origin === "merge" && conflict.sourceVersionId === sourceVersionId,
+      )
+    )
+      return true;
     afterConflictId = page.nextAfterConflictId ?? undefined;
   } while (afterConflictId !== undefined);
   return false;
@@ -150,23 +179,43 @@ function mergeNotice(
     if (isMergeStoppedPartway(answer.error)) {
       const title = `dohc could not finish merging ${source.name} into Main`;
       return retry === null
-        ? { identity, title, message: `Some of ${source.name}'s changes are in Main. ${AFTER_STORE_FIX}`, cause: answer.error }
-        : { identity, title, message: `Some of ${source.name}'s changes are in Main, and History shows which.`, cause: answer.error, retry, offersHistory: true };
+        ? {
+            identity,
+            title,
+            message: `Some of ${source.name}'s changes are in Main. ${AFTER_STORE_FIX}`,
+            cause: answer.error,
+          }
+        : {
+            identity,
+            title,
+            message: `Some of ${source.name}'s changes are in Main, and History shows which.`,
+            cause: answer.error,
+            retry,
+            offersHistory: true,
+          };
     }
     const title = `dohc could not merge ${source.name} into Main`;
     if (retry === null) return { identity, title, message: AFTER_STORE_FIX, cause: answer.error };
     const { words } = readError(answer.error);
-    return { identity, ...(words ? { title, message: words } : { message: `${title}.` }), cause: answer.error, retry };
+    return {
+      identity,
+      ...(words ? { title, message: words } : { message: `${title}.` }),
+      cause: answer.error,
+      retry,
+    };
   }
   const protectedPaths = answer.replacedProtectedPaths;
-  const protectedLine = protectedPaths.length > 0 ? protectedCopyWords(protectedPaths, source.name) : null;
+  const protectedLine =
+    protectedPaths.length > 0 ? protectedCopyWords(protectedPaths, source.name) : null;
   const paths = protectedPaths.length > 0 ? { paths: protectedPaths } : {};
   if (answer.kind === "decide") {
     return {
       identity,
       tone: "warning",
       title: `Merging ${source.name} into Main needs a decision`,
-      message: [conflictCountCopy(answer.conflictCount, false), protectedLine].filter(Boolean).join(" "),
+      message: [conflictCountCopy(answer.conflictCount, false), protectedLine]
+        .filter(Boolean)
+        .join(" "),
       ...paths,
       decideFrom: source.id,
     };
@@ -181,7 +230,9 @@ function mergeNotice(
   return {
     identity,
     tone: "success",
-    ...(protectedLine === null ? { message: said } : { title: said, message: protectedLine, ...paths }),
+    ...(protectedLine === null
+      ? { message: said }
+      : { title: said, message: protectedLine, ...paths }),
   };
 }
 
@@ -251,7 +302,9 @@ export function useWorkspaceVersions(props: WorkspaceVersionsOptions): Workspace
   const [draft, setDraft] = useState<{ name: string; error: ReactNode } | null>(null);
   // The version the merge dialog is open for, and whether it merges as it
   // opens, for a notice's Try again.
-  const [merge, setMerge] = useState<{ source: WorkspaceVersionRecord; runOnOpen: boolean } | null>(null);
+  const [merge, setMerge] = useState<{ source: WorkspaceVersionRecord; runOnOpen: boolean } | null>(
+    null,
+  );
   const mergeOpen = useRef(false);
   mergeOpen.current = merge !== null;
   const { onMergeOpenChange } = props;
@@ -302,7 +355,10 @@ export function useWorkspaceVersions(props: WorkspaceVersionsOptions): Workspace
 
   const refresh = useCallback(async () => {
     const token = snapshotToken.current;
-    const result = await withDeadline(bridge().listWorkspaceVersions({ workspaceId }), "listWorkspaceVersions");
+    const result = await withDeadline(
+      bridge().listWorkspaceVersions({ workspaceId }),
+      "listWorkspaceVersions",
+    );
     if (token !== snapshotToken.current) return null;
     setSnapshot(result);
     return result;
@@ -341,9 +397,7 @@ export function useWorkspaceVersions(props: WorkspaceVersionsOptions): Workspace
             failureAttempts += 1;
             if (failureAttempts >= VERSION_LOAD_FAILURE_ATTEMPTS) break;
           }
-          await new Promise((resolveDelay) =>
-            setTimeout(resolveDelay, VERSION_LOAD_RETRY_MS),
-          );
+          await new Promise((resolveDelay) => setTimeout(resolveDelay, VERSION_LOAD_RETRY_MS));
         }
       }
       // Every attempt failed: say so instead of silently dropping the whole
@@ -364,9 +418,7 @@ export function useWorkspaceVersions(props: WorkspaceVersionsOptions): Workspace
   const reload = useCallback(() => setLoadAttempt((attempt) => attempt + 1), []);
 
   const active = useMemo(
-    () =>
-      snapshot?.versions.find((version) => version.id === snapshot.activeVersionId) ??
-      null,
+    () => snapshot?.versions.find((version) => version.id === snapshot.activeVersionId) ?? null,
     [snapshot],
   );
   const onMain = (active?.kind ?? "main") === "main";
@@ -434,11 +486,7 @@ export function useWorkspaceVersions(props: WorkspaceVersionsOptions): Workspace
         // failed too) also announces: showing an uncertain reality beats
         // staying blind.
         if (announced) return;
-        if (
-          !switchIssued &&
-          recovered !== null &&
-          recovered.activeVersionId === before
-        ) {
+        if (!switchIssued && recovered !== null && recovered.activeVersionId === before) {
           return;
         }
         props.onWorkspaceStateChanged(
@@ -451,7 +499,15 @@ export function useWorkspaceVersions(props: WorkspaceVersionsOptions): Workspace
         if (operationToken.isCurrent(token)) setBusy(null);
       }
     },
-    [beginOperation, operationRunning, props.beginLineageOperation, props.onError, props.onWorkspaceStateChanged, refresh, workspaceId],
+    [
+      beginOperation,
+      operationRunning,
+      props.beginLineageOperation,
+      props.onError,
+      props.onWorkspaceStateChanged,
+      refresh,
+      workspaceId,
+    ],
   );
 
   const requestSwitch = useCallback(
@@ -501,22 +557,42 @@ export function useWorkspaceVersions(props: WorkspaceVersionsOptions): Workspace
         if (!operationToken.isCurrent(token)) return;
         const refusal = versionNameRefusal(error);
         if (refusal !== null) {
-          refuse(refusal === "taken"
-            ? <>Another version is called <span className="font-medium">{trimmed}</span>. Choose another name.</>
-            : "dohc can't use that name. Choose another name.");
+          refuse(
+            refusal === "taken" ? (
+              <>
+                Another version is called <span className="font-medium">{trimmed}</span>. Choose
+                another name.
+              </>
+            ) : (
+              "dohc can't use that name. Choose another name."
+            ),
+          );
           return;
         }
-        props.onError(ipcErrorMessage(error, `dohc could not create the version ${trimmed}.`), error, () => {
-          setDraft({ name: trimmed, error: null });
-          void performCreate(trimmed);
-        }, identity);
+        props.onError(
+          ipcErrorMessage(error, `dohc could not create the version ${trimmed}.`),
+          error,
+          () => {
+            setDraft({ name: trimmed, error: null });
+            void performCreate(trimmed);
+          },
+          identity,
+        );
       } finally {
         releaseOperation?.();
         if (runningOperation.current === token) runningOperation.current = null;
         if (operationToken.isCurrent(token)) setBusy(null);
       }
     },
-    [beginOperation, operationRunning, props.beginLineageOperation, props.clearError, props.onError, props.onWorkspaceStateChanged, workspaceId],
+    [
+      beginOperation,
+      operationRunning,
+      props.beginLineageOperation,
+      props.clearError,
+      props.onError,
+      props.onWorkspaceStateChanged,
+      workspaceId,
+    ],
   );
   const openCreate = useCallback(() => setDraft({ name: "", error: null }), []);
 
@@ -531,75 +607,98 @@ export function useWorkspaceVersions(props: WorkspaceVersionsOptions): Workspace
         if (!captureLive.current || mergeOpen.current) return false;
         setMerge({ source: version, runOnOpen: true });
       };
-      props.onMergeNotice(mergeNotice(mergeIdentity(workspaceId, version.id), version, answer, captureLive.current ? retry : null));
+      props.onMergeNotice(
+        mergeNotice(
+          mergeIdentity(workspaceId, version.id),
+          version,
+          answer,
+          captureLive.current ? retry : null,
+        ),
+      );
     },
     [props.onMergeNotice, workspaceId],
   );
-  const openMerge = useCallback((version: WorkspaceVersionRecord) => setMerge({ source: version, runOnOpen: false }), []);
-
-  const activeName = active?.name ?? "Main";
-  const dialogs = !enabled || snapshot === null ? null : (
-    <>
-      {draft !== null ? (
-        <NewVersionDialog
-          workspaceId={workspaceId}
-          start={active}
-          name={draft.name}
-          error={draft.error}
-          busy={busy === "create"}
-          saveFirst={props.activeTabDirty}
-          onNameChange={(name) => setDraft({ name, error: null })}
-          onCreate={() => {
-            setDraft({ name: draft.name, error: null });
-            void performCreate(draft.name);
-          }}
-          onCancel={() => setDraft(null)}
-        />
-      ) : null}
-      {pendingSwitch !== null ? (
-        // The panel holds focus, so a screen reader reads the title and body
-        // before Tab reaches Cancel.
-        <ConfirmDialog
-          icon={Layers}
-          title={`Switch to ${versionName(snapshot, pendingSwitch)}?`}
-          confirmLabel="Save and switch"
-          testId="version-switch-save-confirm"
-          cancelTestId="version-switch-save-cancel"
-          confirmTestId="version-switch-save-continue"
-          onCancel={() => setPendingSwitch(null)}
-          onConfirm={() => {
-            const target = pendingSwitch;
-            setPendingSwitch(null);
-            if (target) void performSwitch(target);
-          }}
-        >
-          <p>
-            dohc saves your changes in <span className="font-medium text-ink">{activeName}</span> first.
-          </p>
-        </ConfirmDialog>
-      ) : null}
-
-      {merge ? (
-        <VersionMergeDialog
-          workspaceId={workspaceId}
-          source={merge.source}
-          runOnOpen={merge.runOnOpen}
-          {...(props.onOpenHistory ? { onOpenHistory: props.onOpenHistory } : {})}
-          beginLineageOperation={props.beginLineageOperation}
-          onWorkspaceStateChanged={props.onWorkspaceStateChanged}
-          onMerged={() => props.clearError(mergeIdentity(workspaceId, merge.source.id))}
-          onAnsweredAway={(answer) => answerMergeAway(merge.source, answer)}
-          onConflictError={props.onConflictError}
-          onClose={() => {
-            setMerge(null);
-            void refresh().catch(() => undefined);
-          }}
-        />
-      ) : null}
-    </>
+  const openMerge = useCallback(
+    (version: WorkspaceVersionRecord) => setMerge({ source: version, runOnOpen: false }),
+    [],
   );
 
-  return { snapshot, active, onMain, busy, loadFailed, reload, requestSwitch, openCreate, openMerge, dialogs };
+  const activeName = active?.name ?? "Main";
+  const dialogs =
+    !enabled || snapshot === null ? null : (
+      <>
+        {draft !== null ? (
+          <NewVersionDialog
+            workspaceId={workspaceId}
+            start={active}
+            name={draft.name}
+            error={draft.error}
+            busy={busy === "create"}
+            saveFirst={props.activeTabDirty}
+            onNameChange={(name) => setDraft({ name, error: null })}
+            onCreate={() => {
+              setDraft({ name: draft.name, error: null });
+              void performCreate(draft.name);
+            }}
+            onCancel={() => setDraft(null)}
+          />
+        ) : null}
+        {pendingSwitch !== null ? (
+          // The panel holds focus, so a screen reader reads the title and body
+          // before Tab reaches Cancel.
+          <ConfirmDialog
+            icon={Layers}
+            title={`Switch to ${versionName(snapshot, pendingSwitch)}?`}
+            confirmLabel="Save and switch"
+            testId="version-switch-save-confirm"
+            cancelTestId="version-switch-save-cancel"
+            confirmTestId="version-switch-save-continue"
+            onCancel={() => setPendingSwitch(null)}
+            onConfirm={() => {
+              const target = pendingSwitch;
+              setPendingSwitch(null);
+              if (target) void performSwitch(target);
+            }}
+          >
+            <p>
+              dohc saves your changes in <span className="font-medium text-ink">{activeName}</span>{" "}
+              first.
+            </p>
+          </ConfirmDialog>
+        ) : null}
+
+        {merge ? (
+          <VersionMergeDialog
+            workspaceId={workspaceId}
+            source={merge.source}
+            runOnOpen={merge.runOnOpen}
+            {...(props.onOpenHistory ? { onOpenHistory: props.onOpenHistory } : {})}
+            beginLineageOperation={props.beginLineageOperation}
+            onWorkspaceStateChanged={props.onWorkspaceStateChanged}
+            onMerged={() => props.clearError(mergeIdentity(workspaceId, merge.source.id))}
+            onAnsweredAway={(answer) => answerMergeAway(merge.source, answer)}
+            onConflictError={props.onConflictError}
+            onClose={() => {
+              setMerge(null);
+              void refresh().catch(() => undefined);
+            }}
+          />
+        ) : null}
+      </>
+    );
+
+  return {
+    snapshot,
+    active,
+    onMain,
+    busy,
+    loadFailed,
+    reload,
+    requestSwitch,
+    openCreate,
+    openMerge,
+    dialogs,
+  };
 }
 
 export function VersionMenu(props: {
@@ -635,7 +734,9 @@ export function VersionMenu(props: {
       ),
       checked: version.id === snapshot.activeVersionId,
       // With only Main, one line under it says what a version is for.
-      ...(snapshot.versions.length === 1 ? { description: "Try changes without touching Main." } : {}),
+      ...(snapshot.versions.length === 1
+        ? { description: "Try changes without touching Main." }
+        : {}),
       testId: "version-item",
       data: { "data-version-id": version.id, "data-version-name": version.name },
       onSelect: () => {
@@ -670,7 +771,9 @@ export function VersionMenu(props: {
         icon: <Merge size={14} aria-hidden />,
         testId: "version-merge",
         disabled: !active.canMergeIntoMain,
-        description: active.canMergeIntoMain ? undefined : "Only versions made from Main can merge into Main.",
+        description: active.canMergeIntoMain
+          ? undefined
+          : "Only versions made from Main can merge into Main.",
         onSelect: () => {
           props.versions.openMerge(active);
         },
@@ -724,7 +827,11 @@ export function VersionMenu(props: {
           >
             <Layers size={12} aria-hidden className="shrink-0" />
             {active !== null && !onMain ? (
-              <span data-testid="version-menu-dot" aria-hidden className={`size-1.5 shrink-0 rounded-full ${versionDotClass(active.id)}`} />
+              <span
+                data-testid="version-menu-dot"
+                aria-hidden
+                className={`size-1.5 shrink-0 rounded-full ${versionDotClass(active.id)}`}
+              />
             ) : null}
             <span data-testid="version-menu-active" className="min-w-0 truncate">
               {busy === "switch" ? "Switching…" : activeName}
@@ -773,7 +880,9 @@ export function VersionMergeDialog(props: {
   onClose: () => void;
 }) {
   const { workspaceId, source } = props;
-  const [stage, setStage] = useState<MergeStage>({ stage: props.runOnOpen ? "running" : "confirm" });
+  const [stage, setStage] = useState<MergeStage>({
+    stage: props.runOnOpen ? "running" : "confirm",
+  });
   // The person closed the dialog while it merged. The merge keeps going.
   const closedWhileMerging = useRef(false);
   // Protected files this merge gave the version's copy. They never become
@@ -818,7 +927,11 @@ export function VersionMergeDialog(props: {
         props.onAnsweredAway(
           decide
             ? { kind: "decide", conflictCount: result.conflictCount, replacedProtectedPaths }
-            : { kind: "merged", mergedFileCount: result.conflictCount > 0 ? null : result.mergedFileCount, replacedProtectedPaths },
+            : {
+                kind: "merged",
+                mergedFileCount: result.conflictCount > 0 ? null : result.mergedFileCount,
+                replacedProtectedPaths,
+              },
         );
         return;
       }
@@ -844,7 +957,14 @@ export function VersionMergeDialog(props: {
     } finally {
       releaseOperation?.();
     }
-  }, [props.beginLineageOperation, props.onAnsweredAway, props.onMerged, props.onWorkspaceStateChanged, source.id, workspaceId]);
+  }, [
+    props.beginLineageOperation,
+    props.onAnsweredAway,
+    props.onMerged,
+    props.onWorkspaceStateChanged,
+    source.id,
+    workspaceId,
+  ]);
 
   // A notice's Try again merges once, as the dialog opens.
   useEffect(() => {
@@ -863,21 +983,18 @@ export function VersionMergeDialog(props: {
     if (failure !== undefined) confirmButton.current?.focus();
   }, [failure]);
 
-  const onResolved = useCallback(
-    (remaining: ResolveWorkspaceVersionConflictResult) => {
-      windowGeneration.current += 1;
-      setStage(
-        remaining.conflicts.length > 0 || remaining.nextAfterConflictId !== null
-          ? {
-              stage: "conflicts",
-              conflicts: remaining.conflicts,
-              nextAfterConflictId: remaining.nextAfterConflictId,
-            }
-          : { stage: "resolved-all" },
-      );
-    },
-    [],
-  );
+  const onResolved = useCallback((remaining: ResolveWorkspaceVersionConflictResult) => {
+    windowGeneration.current += 1;
+    setStage(
+      remaining.conflicts.length > 0 || remaining.nextAfterConflictId !== null
+        ? {
+            stage: "conflicts",
+            conflicts: remaining.conflicts,
+            nextAfterConflictId: remaining.nextAfterConflictId,
+          }
+        : { stage: "resolved-all" },
+    );
+  }, []);
 
   const loadMoreConflicts = useCallback(async () => {
     if (stage.stage !== "conflicts" || stage.nextAfterConflictId === null) return;
@@ -935,13 +1052,21 @@ export function VersionMergeDialog(props: {
             <h3 id="version-merge-title" className="m-0 text-base font-semibold text-ink">
               Decide what Main should keep
             </h3>
-            <p className="m-0 mt-1 text-[13px] leading-5 text-muted" role="status" data-testid="version-merge-status">
+            <p
+              className="m-0 mt-1 text-[13px] leading-5 text-muted"
+              role="status"
+              data-testid="version-merge-status"
+            >
               {conflictCountCopy(stage.conflicts.length, stage.nextAfterConflictId !== null)}
             </p>
           </header>
           <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-6">
             {hasProtected ? (
-              <ReplacedProtectedFiles paths={replacedProtectedPaths} sourceName={source.name} collapsible />
+              <ReplacedProtectedFiles
+                paths={replacedProtectedPaths}
+                sourceName={source.name}
+                collapsible
+              />
             ) : null}
             <ConflictList
               workspaceId={workspaceId}
@@ -988,7 +1113,10 @@ export function VersionMergeDialog(props: {
       >
         <div>
           <div {...(result ? { role: "status", "data-testid": "version-merge-status" } : {})}>
-            <h3 id="version-merge-title" className="m-0 break-words text-base font-semibold text-ink">
+            <h3
+              id="version-merge-title"
+              className="m-0 break-words text-base font-semibold text-ink"
+            >
               {title}
             </h3>
           </div>
@@ -1004,7 +1132,9 @@ export function VersionMergeDialog(props: {
             </p>
           )}
         </div>
-        {failure !== undefined ? <MergeFailure wordsId={failureId} error={failure.error} sourceName={source.name} /> : null}
+        {failure !== undefined ? (
+          <MergeFailure wordsId={failureId} error={failure.error} sourceName={source.name} />
+        ) : null}
         <div className="flex justify-end gap-2">
           {partway && props.onOpenHistory ? (
             <SecondaryButton
@@ -1027,7 +1157,11 @@ export function VersionMergeDialog(props: {
           ) : (
             <>
               {/* Closing doesn't stop a merge, so it isn't Cancel while one runs. */}
-              <SecondaryButton ref={closeButton} data-testid="version-merge-cancel" onClick={finish}>
+              <SecondaryButton
+                ref={closeButton}
+                data-testid="version-merge-cancel"
+                onClick={finish}
+              >
                 {stage.stage === "running" ? "Close" : "Cancel"}
               </SecondaryButton>
               <PrimaryButton
@@ -1037,7 +1171,11 @@ export function VersionMergeDialog(props: {
                 disabled={stage.stage === "running"}
                 onClick={() => void runMerge()}
               >
-                {stage.stage === "running" ? "Merging…" : partway ? "Merge again" : "Merge into Main"}
+                {stage.stage === "running"
+                  ? "Merging…"
+                  : partway
+                    ? "Merge again"
+                    : "Merge into Main"}
               </PrimaryButton>
             </>
           )}
@@ -1056,10 +1194,17 @@ function MergeFailure(props: { wordsId: string; error: unknown; sourceName: stri
     ? `dohc could not finish the merge. Some of ${props.sourceName}'s changes are in Main, and History shows which.`
     : ipcErrorMessage(props.error, `dohc could not merge ${props.sourceName} into Main.`);
   const { cause } = readError(props.error);
-  const details = errorDetails([["Error", words], ["Cause", cause]]);
+  const details = errorDetails([
+    ["Error", words],
+    ["Cause", cause],
+  ]);
   return (
     <div data-testid="version-merge-failure">
-      <p id={props.wordsId} data-testid="version-merge-failure-words" className="m-0 flex items-start gap-2 text-[13px] leading-5 text-ink">
+      <p
+        id={props.wordsId}
+        data-testid="version-merge-failure-words"
+        className="m-0 flex items-start gap-2 text-[13px] leading-5 text-ink"
+      >
         <CircleAlert size={14} aria-hidden className="mt-[3px] shrink-0 text-danger" />
         <span className="min-w-0 flex-1 break-words">{words}</span>
       </p>
@@ -1073,11 +1218,17 @@ function MergeFailure(props: { wordsId: string; error: unknown; sourceName: stri
             onClick={() => setOpen((current) => !current)}
           >
             Details
-            <ChevronDown size={12} aria-hidden className={`transition-transform ${open ? "rotate-180" : ""}`} />
+            <ChevronDown
+              size={12}
+              aria-hidden
+              className={`transition-transform ${open ? "rotate-180" : ""}`}
+            />
           </GhostButton>
           {open ? (
             <div id={detailsId} className="ml-2 mt-1 flex items-start gap-2">
-              <p className="m-0 min-w-0 flex-1 select-text whitespace-pre-wrap break-words text-[12px] leading-4 text-muted">{details}</p>
+              <p className="m-0 min-w-0 flex-1 select-text whitespace-pre-wrap break-words text-[12px] leading-4 text-muted">
+                {details}
+              </p>
               <CopyButton iconOnly label="Copy error details" getText={() => details} />
             </div>
           ) : null}
@@ -1093,7 +1244,11 @@ function MergeFailure(props: { wordsId: string; error: unknown; sourceName: stri
 // before its file name, with the whole path on hover, and the box scrolls
 // after five rows. The box is open on every result. Only the conflict stage,
 // where the cards are the task, keeps it behind "Show files".
-function ReplacedProtectedFiles(props: { paths: string[]; sourceName: string; collapsible?: boolean }) {
+function ReplacedProtectedFiles(props: {
+  paths: string[];
+  sourceName: string;
+  collapsible?: boolean;
+}) {
   const [open, setOpen] = useState(!props.collapsible);
   const count = props.paths.length;
   return (
@@ -1112,7 +1267,11 @@ function ReplacedProtectedFiles(props: { paths: string[]; sourceName: string; co
             onClick={() => setOpen((current) => !current)}
           >
             {open ? "Hide files" : "Show files"}
-            <ChevronDown size={12} aria-hidden className={`transition-transform ${open ? "rotate-180" : ""}`} />
+            <ChevronDown
+              size={12}
+              aria-hidden
+              className={`transition-transform ${open ? "rotate-180" : ""}`}
+            />
           </GhostButton>
         ) : null}
       </div>
@@ -1126,11 +1285,17 @@ function ReplacedProtectedFiles(props: { paths: string[]; sourceName: string; co
           {props.paths.map((path) => {
             const slash = path.lastIndexOf("/");
             return (
-              <li key={path} title={path} className="flex h-7 min-w-0 items-center gap-2 px-2 text-[13px]">
+              <li
+                key={path}
+                title={path}
+                className="flex h-7 min-w-0 items-center gap-2 px-2 text-[13px]"
+              >
                 <Lock size={12} aria-hidden className="shrink-0 text-subtle" />
                 <span className="flex min-w-0">
                   <span className="min-w-0 truncate text-muted">{path.slice(0, slash + 1)}</span>
-                  <span className="max-w-full shrink-0 truncate text-ink">{path.slice(slash + 1)}</span>
+                  <span className="max-w-full shrink-0 truncate text-ink">
+                    {path.slice(slash + 1)}
+                  </span>
                 </span>
               </li>
             );
@@ -1162,9 +1327,7 @@ function ConflictSidePane(props: {
         {props.heading}
       </SectionLabel>
       {preview === null ? (
-        <p className="m-0 px-2 py-2 text-[11px] italic leading-4 text-subtle">
-          {props.note}
-        </p>
+        <p className="m-0 px-2 py-2 text-[11px] italic leading-4 text-subtle">{props.note}</p>
       ) : (
         <>
           <pre
@@ -1179,8 +1342,7 @@ function ConflictSidePane(props: {
                 data-testid="version-conflict-side-hidden"
                 className="text-[10px] leading-4 text-subtle"
               >
-                {preview.hiddenChars.toLocaleString("en-US")} more characters
-                hidden
+                {preview.hiddenChars.toLocaleString("en-US")} more characters hidden
               </span>
               <button
                 type="button"
@@ -1202,10 +1364,7 @@ function ConflictSidePane(props: {
 // copy, or the side's own "no file here" line. A side is never described by
 // its sibling's kind — a mixed conflict shows the readable text on one side
 // and the size on the other.
-function sideNote(
-  binary: { byteLength: number } | null | undefined,
-  missingNote: string,
-): string {
+function sideNote(binary: { byteLength: number } | null | undefined, missingNote: string): string {
   return binary ? `Binary copy, ${binary.byteLength} bytes` : missingNote;
 }
 
@@ -1391,18 +1550,38 @@ function ConflictResolver(props: {
       } catch (caught) {
         if (resolveIssued) props.onWorkspaceStateChanged();
         if (!liveToken.isCurrent(token)) return;
-        const error = readError(caught).refusal === "synced-deletion"
-          ? new SyncedDeletionRevivalError(conflict.path, { cause: caught })
-          : conflict.origin === "sync" && conflict.contentKind === "text" && conflict.currentText !== null && conflict.incomingText === null && isConflictStaleTarget(caught)
-            ? new SyncedDeletionStaleError(conflict.path, { cause: caught }) : caught;
-        setError(readError(error).title ?? ipcErrorMessage(error, "dohc could not apply that choice."));
+        const error =
+          readError(caught).refusal === "synced-deletion"
+            ? new SyncedDeletionRevivalError(conflict.path, { cause: caught })
+            : conflict.origin === "sync" &&
+                conflict.contentKind === "text" &&
+                conflict.currentText !== null &&
+                conflict.incomingText === null &&
+                isConflictStaleTarget(caught)
+              ? new SyncedDeletionStaleError(conflict.path, { cause: caught })
+              : caught;
+        setError(
+          readError(error).title ?? ipcErrorMessage(error, "dohc could not apply that choice."),
+        );
         props.onError?.("dohc could not apply that choice.", error);
         setBusy(false);
       } finally {
         releaseOperation?.();
       }
     },
-    [conflict.conflictId, conflict.path, conflict.origin, conflict.contentKind, conflict.currentText, conflict.incomingText, props.beginLineageOperation, props.onError, props.onResolved, props.onWorkspaceStateChanged, workspaceId],
+    [
+      conflict.conflictId,
+      conflict.path,
+      conflict.origin,
+      conflict.contentKind,
+      conflict.currentText,
+      conflict.incomingText,
+      props.beginLineageOperation,
+      props.onError,
+      props.onResolved,
+      props.onWorkspaceStateChanged,
+      workspaceId,
+    ],
   );
 
   return (
@@ -1424,9 +1603,7 @@ function ConflictResolver(props: {
         ) : (
           <FileText size={12} aria-hidden className="shrink-0 text-subtle" />
         )}
-        <span className="min-w-0 flex-1 truncate text-[12px] text-ink">
-          {conflict.path}
-        </span>
+        <span className="min-w-0 flex-1 truncate text-[12px] text-ink">{conflict.path}</span>
         {!expanded && combined !== null ? (
           <span
             data-testid="version-conflict-draft-marker"
@@ -1449,7 +1626,8 @@ function ConflictResolver(props: {
               className="mb-2 mt-0 flex items-start gap-1.5 text-[11px] leading-4 text-muted"
             >
               <Hourglass size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
-              A newer version from another computer is waiting. It comes in after you resolve this conflict.
+              A newer version from another computer is waiting. It comes in after you resolve this
+              conflict.
             </p>
           ) : null}
           {isBinary ? (
@@ -1467,7 +1645,8 @@ function ConflictResolver(props: {
                 text={conflict.currentText}
                 note={sideNote(conflict.currentBinary, labels.currentMissing)}
               />
-              <SecondaryButton size="compact"
+              <SecondaryButton
+                size="compact"
                 type="button"
                 data-testid="version-conflict-keep-current"
                 disabled={busy}
@@ -1483,7 +1662,8 @@ function ConflictResolver(props: {
                 text={conflict.incomingText}
                 note={sideNote(conflict.incomingBinary, labels.incomingMissing)}
               />
-              <SecondaryButton size="compact"
+              <SecondaryButton
+                size="compact"
                 type="button"
                 data-testid="version-conflict-keep-incoming"
                 disabled={busy}
@@ -1506,10 +1686,7 @@ function ConflictResolver(props: {
             </button>
           ) : !isBinary ? (
             <div className="mt-2 flex flex-col gap-1.5">
-              <label
-                className="dohc-section-label"
-                htmlFor={`combined-${conflict.conflictId}`}
-              >
+              <label className="dohc-section-label" htmlFor={`combined-${conflict.conflictId}`}>
                 Combined copy
               </label>
               {combineSeed !== null ? (
@@ -1535,11 +1712,9 @@ function ConflictResolver(props: {
                   role="alert"
                   className="mb-0 text-[11px] leading-4 text-danger"
                 >
-                  That change would make the combined copy{" "}
-                  {refusedBytes.toLocaleString("en-US")} bytes. Combining by hand
-                  works up to{" "}
-                  {CONFLICT_COMBINED_EDIT_MAX_BYTES.toLocaleString("en-US")} bytes.
-                  Add less text.
+                  That change would make the combined copy {refusedBytes.toLocaleString("en-US")}{" "}
+                  bytes. Combining by hand works up to{" "}
+                  {CONFLICT_COMBINED_EDIT_MAX_BYTES.toLocaleString("en-US")} bytes. Add less text.
                 </p>
               ) : null}
               <div className="flex justify-end gap-2">
@@ -1552,7 +1727,8 @@ function ConflictResolver(props: {
                 >
                   Cancel
                 </button>
-                <PrimaryButton size="compact"
+                <PrimaryButton
+                  size="compact"
                   type="button"
                   data-testid="version-conflict-apply-combined"
                   disabled={busy}
@@ -1637,9 +1813,7 @@ function ConflictList(props: {
     void onLoadMore()
       .catch((error) => {
         if (token !== loadToken.current) return;
-        setLoadMoreError(
-          ipcErrorMessage(error, "dohc could not load more files."),
-        );
+        setLoadMoreError(ipcErrorMessage(error, "dohc could not load more files."));
       })
       .finally(() => {
         if (token === loadToken.current) setLoadingMore(false);
@@ -1658,15 +1832,14 @@ function ConflictList(props: {
           conflict={conflict}
           sourceName={props.sourceNameFor(conflict)}
           expanded={conflict.conflictId === openId}
-          onToggle={() =>
-            setChosenId(conflict.conflictId === openId ? null : conflict.conflictId)
-          }
+          onToggle={() => setChosenId(conflict.conflictId === openId ? null : conflict.conflictId)}
           onResolved={props.onResolved}
         />
       ))}
       {props.hasMore ? (
         <div className="flex flex-col items-start gap-1">
-          <SecondaryButton size="compact"
+          <SecondaryButton
+            size="compact"
             type="button"
             data-testid="conflict-list-show-more"
             disabled={loadingMore}
@@ -1696,9 +1869,7 @@ export function conflictCountCopy(count: number, hasMore: boolean): string {
       ? "More than one file has two copies."
       : `More than ${count} files have two copies.`;
   }
-  return count === 1
-    ? "One file has two copies."
-    : `${count} files have two copies.`;
+  return count === 1 ? "One file has two copies." : `${count} files have two copies.`;
 }
 
 /// Which conflict is expanded. Exported for its own tests: the three states it
@@ -1714,9 +1885,7 @@ export function openConflictId(
   if (chosenId === null) return null;
   // A resolved conflict leaves the list, so a chosen id that is no longer in
   // it hands the turn to the next file to decide.
-  return conflicts.some((conflict) => conflict.conflictId === chosenId)
-    ? chosenId
-    : firstId;
+  return conflicts.some((conflict) => conflict.conflictId === chosenId) ? chosenId : firstId;
 }
 
 function changeStatusLabel(status: WorkspaceVersionFileChange["status"]): string {
@@ -1739,10 +1908,7 @@ function CompareFileDiff(props: { currentText?: string; incomingText?: string })
 // Full-page comparison of a version against Main (virtual editor tab).
 // Mirrors the history diff page's rendering so diffs look the same
 // everywhere.
-export function VersionComparePage(props: {
-  workspaceId: string;
-  versionId: string;
-}) {
+export function VersionComparePage(props: { workspaceId: string; versionId: string }) {
   const { workspaceId, versionId } = props;
   const [state, setState] = useState<
     | { status: "loading" }
@@ -1783,8 +1949,7 @@ export function VersionComparePage(props: {
     {
       onSuccess: ([versions, comparison]) => {
         const name =
-          versions.versions.find((version) => version.id === versionId)?.name ??
-          "This version";
+          versions.versions.find((version) => version.id === versionId)?.name ?? "This version";
         setState({
           status: "ready",
           versionName: name,
@@ -1827,9 +1992,7 @@ export function VersionComparePage(props: {
       })
       .catch((error) => {
         if (windowGeneration.current !== generation) return;
-        setLoadMoreError(
-          ipcErrorMessage(error, "Couldn't load more changed files."),
-        );
+        setLoadMoreError(ipcErrorMessage(error, "Couldn't load more changed files."));
       })
       .finally(() => {
         // Only this generation's pending flag: the effect already cleared it
@@ -1852,7 +2015,12 @@ export function VersionComparePage(props: {
           {state.status === "ready" ? (
             <>
               <span className="min-w-0 truncate">{state.versionName}</span>{" "}
-              <span data-testid="version-compare-subject" className="shrink-0 text-[12px] font-normal text-muted">Differences with Main</span>
+              <span
+                data-testid="version-compare-subject"
+                className="shrink-0 text-[12px] font-normal text-muted"
+              >
+                Differences with Main
+              </span>
             </>
           ) : (
             <span className="min-w-0 truncate">Comparing with Main</span>
@@ -1863,7 +2031,9 @@ export function VersionComparePage(props: {
             <Pill>
               {state.nextAfterPath !== null
                 ? `${state.files.length}+ files`
-                : state.files.length === 1 ? "1 file" : `${state.files.length} files`}
+                : state.files.length === 1
+                  ? "1 file"
+                  : `${state.files.length} files`}
             </Pill>
           </span>
         ) : null}
@@ -1915,9 +2085,7 @@ export function VersionComparePage(props: {
                   ) : (
                     <FileText size={13} aria-hidden className="shrink-0 text-subtle" />
                   )}
-                  <span className="min-w-0 flex-1 truncate text-[12px] text-ink">
-                    {file.path}
-                  </span>
+                  <span className="min-w-0 flex-1 truncate text-[12px] text-ink">{file.path}</span>
                   <span className="shrink-0 text-[11px] text-subtle">
                     {changeStatusLabel(file.status)}
                   </span>
@@ -1931,8 +2099,8 @@ export function VersionComparePage(props: {
                     <Lock size={14} aria-hidden className="text-subtle" />
                     <span className="text-sm text-muted">Protected file changed</span>
                     <span className="text-xs text-subtle">
-                      This file follows the version, but its contents are never
-                      shown in comparisons.
+                      This file follows the version, but its contents are never shown in
+                      comparisons.
                     </span>
                   </div>
                 ) : file.binary ? (
@@ -1943,8 +2111,8 @@ export function VersionComparePage(props: {
                     <FileArchive size={14} aria-hidden className="text-subtle" />
                     <span className="text-sm text-muted">Binary file changed</span>
                     <span className="text-xs text-subtle">
-                      This file follows the version byte-for-byte, but contents are
-                      not shown in text diffs.
+                      This file follows the version byte-for-byte, but contents are not shown in
+                      text diffs.
                     </span>
                   </div>
                 ) : (
@@ -2036,9 +2204,7 @@ export function ConflictReviewDialog(props: {
         ]);
         if (!liveToken.isCurrent(token)) return;
         setVersionNames(
-          new Map(
-            (versions?.versions ?? []).map((version) => [version.id, version.name]),
-          ),
+          new Map((versions?.versions ?? []).map((version) => [version.id, version.name])),
         );
         windowGeneration.current += 1;
         setState({
@@ -2054,18 +2220,15 @@ export function ConflictReviewDialog(props: {
     })();
   }, [workspaceId, loadAttempt]);
 
-  const onResolved = useCallback(
-    (remaining: ResolveWorkspaceVersionConflictResult) => {
-      windowGeneration.current += 1;
-      setState({
-        status: "ready",
-        conflicts: remaining.conflicts,
-        nextAfterConflictId: remaining.nextAfterConflictId,
-        resolvedAny: true,
-      });
-    },
-    [],
-  );
+  const onResolved = useCallback((remaining: ResolveWorkspaceVersionConflictResult) => {
+    windowGeneration.current += 1;
+    setState({
+      status: "ready",
+      conflicts: remaining.conflicts,
+      nextAfterConflictId: remaining.nextAfterConflictId,
+      resolvedAny: true,
+    });
+  }, []);
 
   const loadMoreConflicts = useCallback(async () => {
     if (state.status !== "ready" || state.nextAfterConflictId === null) return;
@@ -2159,8 +2322,7 @@ export function ConflictReviewDialog(props: {
   }, [workspaceId]);
 
   const conflicts = state.status === "ready" ? state.conflicts : [];
-  const hasMoreConflicts =
-    state.status === "ready" && state.nextAfterConflictId !== null;
+  const hasMoreConflicts = state.status === "ready" && state.nextAfterConflictId !== null;
   // A continuation with an empty window still means open conflicts exist —
   // the empty state and the close discipline must not read it as "all done".
   const anyOpen = conflicts.length > 0 || hasMoreConflicts;
@@ -2210,9 +2372,7 @@ export function ConflictReviewDialog(props: {
               className="m-0 text-[13px] leading-5 text-muted"
               role="status"
             >
-              {state.resolvedAny
-                ? "You chose a copy for every file."
-                : "No files have two copies."}
+              {state.resolvedAny ? "You chose a copy for every file." : "No files have two copies."}
             </p>
           ) : null}
           {state.status === "ready" && conflicts.length > 0 ? (

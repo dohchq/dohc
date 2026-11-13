@@ -9,26 +9,16 @@ import type {
   DmRecord,
   PresenceScopeInput,
 } from "../../ipc/bridgeContract";
-import {
-  ChatsView as ProductionChatsView,
-  type ChatPresenceCollaboration,
-} from "./ChatsView";
+import { ChatsView as ProductionChatsView, type ChatPresenceCollaboration } from "./ChatsView";
 import { ReactionStoreProvider } from "./reactionStore";
 import type { DesktopUserSettings } from "../../settings/userSettings";
 import { settingsWithAgent } from "../../testing/agentSettings";
-import type {
-  PresencePeer,
-  PresenceSnapshot,
-  PresenceTransport,
-} from "../collab/presenceChannel";
+import type { PresencePeer, PresenceSnapshot, PresenceTransport } from "../collab/presenceChannel";
 
 // MU-C1 — presence in the Chats surface: gated by collaboration, calm, and
 // dormant for solo.
 
-type TestChatsViewProps = Omit<
-  Parameters<typeof ProductionChatsView>[0],
-  "workspaces"
-> & {
+type TestChatsViewProps = Omit<Parameters<typeof ProductionChatsView>[0], "workspaces"> & {
   workspaces?: Parameters<typeof ProductionChatsView>[0]["workspaces"];
 };
 
@@ -157,8 +147,7 @@ function topicAwareTransport() {
   const snapshots = new Map<string, PresenceSnapshot>();
   const waiters = new Map<string, Set<(snapshot: PresenceSnapshot) => void>>();
   const topics: string[] = [];
-  const snapshotFor = (topic: string) =>
-    snapshots.get(topic) ?? { version: 0, peers: [] };
+  const snapshotFor = (topic: string) => snapshots.get(topic) ?? { version: 0, peers: [] };
   function set(topic: string, peers: PresencePeer[]) {
     const current = snapshotFor(topic);
     const snapshot = { version: current.version + 1, peers };
@@ -183,11 +172,7 @@ function topicAwareTransport() {
         };
         topicWaiters.add(finish);
         waiters.set(topic, topicWaiters);
-        signal.addEventListener(
-          "abort",
-          () => finish(snapshotFor(topic)),
-          { once: true },
-        );
+        signal.addEventListener("abort", () => finish(snapshotFor(topic)), { once: true });
       });
     },
   };
@@ -245,7 +230,10 @@ function collabWith(transport: PresenceTransport): ChatPresenceCollaboration {
   return { transportForScope: () => transport, clientId: "me", displayName: "Me" };
 }
 
-function renderView(collaboration: ChatPresenceCollaboration | null, userSettings?: DesktopUserSettings) {
+function renderView(
+  collaboration: ChatPresenceCollaboration | null,
+  userSettings?: DesktopUserSettings,
+) {
   render(
     <ChatsView
       workspaceId="workspace-a"
@@ -288,8 +276,24 @@ describe("ChatsView presence (MU-C1)", () => {
     await waitFor(() => expect(t.publishes.length).toBeGreaterThan(0));
     act(() => {
       t.set([
-        { faceToken: "me", sessionToken: "me", isSelf: true, displayName: "Me", paletteSlot: 0, state: { displayName: "Me" }, updatedAtMs: 0 },
-        { faceToken: "bob", sessionToken: "cb", isSelf: false, displayName: "Bob", paletteSlot: 0, state: { displayName: "Bob", typing: true }, updatedAtMs: 0 },
+        {
+          faceToken: "me",
+          sessionToken: "me",
+          isSelf: true,
+          displayName: "Me",
+          paletteSlot: 0,
+          state: { displayName: "Me" },
+          updatedAtMs: 0,
+        },
+        {
+          faceToken: "bob",
+          sessionToken: "cb",
+          isSelf: false,
+          displayName: "Bob",
+          paletteSlot: 0,
+          state: { displayName: "Bob", typing: true },
+          updatedAtMs: 0,
+        },
       ]);
     });
     expect(await screen.findByLabelText("Bob is here")).toBeTruthy();
@@ -317,7 +321,8 @@ describe("ChatsView presence (MU-C1)", () => {
 
   it("publishes typing while composing and clears it on send", async () => {
     bridgeMock.sendChatMessage.mockResolvedValue({
-      message: { presentation: { group: "fixture", hue: null, self: false },
+      message: {
+        presentation: { group: "fixture", hue: null, self: false },
         id: "message-9",
         threadId: "thread-1",
         authorKind: "human",
@@ -335,16 +340,14 @@ describe("ChatsView presence (MU-C1)", () => {
     // Typing into the composer publishes typing: true…
     await user.type(screen.getByTestId("chats-composer"), "hi");
     await waitFor(() =>
-      expect(
-        t.publishes.some((state) => (state as { typing?: boolean }).typing === true),
-      ).toBe(true),
+      expect(t.publishes.some((state) => (state as { typing?: boolean }).typing === true)).toBe(
+        true,
+      ),
     );
     // …and sending clears it.
     await user.keyboard("{Enter}");
     await waitFor(() => expect(bridgeMock.sendChatMessage).toHaveBeenCalled());
-    await waitFor(() =>
-      expect((t.publishes.at(-1) as { typing?: boolean }).typing).toBe(false),
-    );
+    await waitFor(() => expect((t.publishes.at(-1) as { typing?: boolean }).typing).toBe(false));
   });
 
   it("shows validated agent working/idle hints on the agent's chat", async () => {
@@ -362,10 +365,21 @@ describe("ChatsView presence (MU-C1)", () => {
 
     act(() => {
       t.set("chat:agent", [
-        { faceToken: "me", sessionToken: "me", isSelf: true, displayName: "Me", paletteSlot: 0, state: { displayName: "Me" }, updatedAtMs: 0 },
         {
           faceToken: "me",
-          sessionToken: "agent:workspace-a", isSelf: false, displayName: "Me", paletteSlot: 0,
+          sessionToken: "me",
+          isSelf: true,
+          displayName: "Me",
+          paletteSlot: 0,
+          state: { displayName: "Me" },
+          updatedAtMs: 0,
+        },
+        {
+          faceToken: "me",
+          sessionToken: "agent:workspace-a",
+          isSelf: false,
+          displayName: "Me",
+          paletteSlot: 0,
           state: { displayName: "Me", agent: true, activity: "busy" },
           updatedAtMs: 0,
         },
@@ -379,10 +393,21 @@ describe("ChatsView presence (MU-C1)", () => {
     // The workspace's runner working for another agent says nothing here.
     act(() => {
       t.set("chat:agent", [
-        { faceToken: "me", sessionToken: "me", isSelf: true, displayName: "Me", paletteSlot: 0, state: { displayName: "Me" }, updatedAtMs: 0 },
         {
           faceToken: "me",
-          sessionToken: "agent:workspace-a", isSelf: false, displayName: "Me", paletteSlot: 0,
+          sessionToken: "me",
+          isSelf: true,
+          displayName: "Me",
+          paletteSlot: 0,
+          state: { displayName: "Me" },
+          updatedAtMs: 0,
+        },
+        {
+          faceToken: "me",
+          sessionToken: "agent:workspace-a",
+          isSelf: false,
+          displayName: "Me",
+          paletteSlot: 0,
           state: { displayName: "Scout", agent: true, activity: "working" },
           updatedAtMs: 0,
         },
@@ -395,24 +420,48 @@ describe("ChatsView presence (MU-C1)", () => {
 
     act(() => {
       t.set("chat:agent", [
-        { faceToken: "me", sessionToken: "me", isSelf: true, displayName: "Me", paletteSlot: 0, state: { displayName: "Me" }, updatedAtMs: 0 },
         {
           faceToken: "me",
-          sessionToken: "agent:workspace-a", isSelf: false, displayName: "Me", paletteSlot: 0,
+          sessionToken: "me",
+          isSelf: true,
+          displayName: "Me",
+          paletteSlot: 0,
+          state: { displayName: "Me" },
+          updatedAtMs: 0,
+        },
+        {
+          faceToken: "me",
+          sessionToken: "agent:workspace-a",
+          isSelf: false,
+          displayName: "Me",
+          paletteSlot: 0,
           state: { displayName: "Me", agent: true, activity: "working" },
           updatedAtMs: 0,
         },
       ]);
     });
     expect(await screen.findByLabelText("Agent is working")).toBeTruthy();
-    expect(screen.getByTestId("chats-my-agent-presence").textContent).toBe("Running node agent.mjs");
+    expect(screen.getByTestId("chats-my-agent-presence").textContent).toBe(
+      "Running node agent.mjs",
+    );
 
     act(() => {
       t.set("chat:agent", [
-        { faceToken: "me", sessionToken: "me", isSelf: true, displayName: "Me", paletteSlot: 0, state: { displayName: "Me" }, updatedAtMs: 0 },
         {
           faceToken: "me",
-          sessionToken: "agent:workspace-a", isSelf: false, displayName: "Me", paletteSlot: 0,
+          sessionToken: "me",
+          isSelf: true,
+          displayName: "Me",
+          paletteSlot: 0,
+          state: { displayName: "Me" },
+          updatedAtMs: 0,
+        },
+        {
+          faceToken: "me",
+          sessionToken: "agent:workspace-a",
+          isSelf: false,
+          displayName: "Me",
+          paletteSlot: 0,
           state: { displayName: "Me", agent: true, activity: "idle" },
           updatedAtMs: 0,
         },
@@ -528,7 +577,7 @@ describe("ChatsView presence scope selection (participant vs owner)", () => {
         },
       ],
       sessionKey: "session-a",
-    relay: { state: "answered" as const, granted: [], received: [], removed: [] },
+      relay: { state: "answered" as const, granted: [], received: [], removed: [] },
     });
     const rec = recordingCollab();
     const user = userEvent.setup();
@@ -602,7 +651,7 @@ describe("ChatsView presence scope selection (participant vs owner)", () => {
         },
       ],
       sessionKey: "session-a",
-    relay: { state: "answered" as const, granted: [], received: [], removed: [] },
+      relay: { state: "answered" as const, granted: [], received: [], removed: [] },
     });
     const rec = recordingCollab();
     const user = userEvent.setup();
@@ -702,9 +751,7 @@ describe("ChatsView presence scope selection (DM)", () => {
       />,
     );
     await openDmByChannelId(user, "dm-owned");
-    await waitFor(() =>
-      expect(rec.publishes.some((p) => p.topic === "wire-dm-owned")).toBe(true),
-    );
+    await waitFor(() => expect(rec.publishes.some((p) => p.topic === "wire-dm-owned")).toBe(true));
     expect(rec.publishes.find((p) => p.topic === "wire-dm-owned")?.scope).toEqual({
       kind: "workspace",
       workspaceId: "workspace-a",
@@ -849,9 +896,7 @@ describe("ChatsView presence scope selection (DM)", () => {
     // Still on the DM (leaveDm failed, goBack never ran) — and a fresh
     // channel has published again for the same topic/scope.
     expect(await screen.findByTestId("chats-dm-view")).toBeTruthy();
-    await waitFor(() =>
-      expect(rec.publishes.length).toBeGreaterThan(publishesBeforeLeave),
-    );
+    await waitFor(() => expect(rec.publishes.length).toBeGreaterThan(publishesBeforeLeave));
     expect(rec.publishes.at(-1)).toEqual({
       scope: {
         kind: "share",
@@ -903,7 +948,10 @@ describe("ChatsView presence scope gating (loaded share state)", () => {
   }
 
   it("stays dormant while the overview/share load is in flight, then uses SHARE scope once it lands", async () => {
-    let releaseOverview: (value: { channels: ChatChannelRecord[]; fileThreads: [] }) => void = () => {};
+    let releaseOverview: (value: {
+      channels: ChatChannelRecord[];
+      fileThreads: [];
+    }) => void = () => {};
     bridgeMock.listChatChannels.mockReturnValue(
       new Promise((resolve) => {
         releaseOverview = resolve;
@@ -924,7 +972,7 @@ describe("ChatsView presence scope gating (loaded share state)", () => {
         },
       ],
       sessionKey: "session-a",
-    relay: { state: "answered" as const, granted: [], received: [], removed: [] },
+      relay: { state: "answered" as const, granted: [], received: [], removed: [] },
     });
     const rec = recordingCollab();
     const user = userEvent.setup();
@@ -991,9 +1039,7 @@ describe("ChatsView presence scope gating (loaded share state)", () => {
       for (let i = 0; i < 10; i += 1) await Promise.resolve();
     });
     expect(
-      rec.publishes.some(
-        (p) => p.topic === "wire-owned" && scopeKey(p.scope) === "ws:workspace-b",
-      ),
+      rec.publishes.some((p) => p.topic === "wire-owned" && scopeKey(p.scope) === "ws:workspace-b"),
     ).toBe(false);
   });
 });
@@ -1041,15 +1087,11 @@ describe("ChatsView presence when the first share lookup never answers", () => {
       readRevision,
     });
     const view = render(<ChatsView {...props(0)} />);
-    await waitFor(() =>
-      expect(bridgeMock.listChatChannelShares).toHaveBeenCalledTimes(1),
-    );
+    await waitFor(() => expect(bridgeMock.listChatChannelShares).toHaveBeenCalledTimes(1));
 
     // A read lands. Its background refresh supersedes the stalled initial one.
     view.rerender(<ChatsView {...props(1)} />);
-    await waitFor(() =>
-      expect(bridgeMock.listChatChannelShares).toHaveBeenCalledTimes(2),
-    );
+    await waitFor(() => expect(bridgeMock.listChatChannelShares).toHaveBeenCalledTimes(2));
 
     // Unknown share metadata fails closed, but the scope is resolved, so
     // presence runs instead of waiting on a request that will never answer.

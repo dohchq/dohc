@@ -1,75 +1,171 @@
 import { invalidateDatasetAddresses } from "./datasetAddress";
 import { describe, expect, it, vi } from "vitest";
 import { compileClosedApp } from "./closedAppCompiler";
-import { parseAppPublicationDeclaration, prepareLocalAppPublication, prepareOwnerAppPublication, readLocalAppSource } from "./ownerAppPublication";
+import {
+  parseAppPublicationDeclaration,
+  prepareLocalAppPublication,
+  prepareOwnerAppPublication,
+  readLocalAppSource,
+} from "./ownerAppPublication";
 import { type AppDatasetBinding, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
 
-const backend = { entryPath: "app/backend.ts", schemaPath: "app/schema.sql", dataPath: "private/registrations.sqlite", schemaVersion: 1,
-  operations: [{ name: "register", access: "link", readOnly: false }, { name: "list", access: "owner", readOnly: true }],
-  tables: [{ name: "registrations", primaryKey: "id", readOperation: "list", writeOperation: "register" }] };
-function harness(resolveDatasetRevision?: (binding: AppDatasetBinding) => Promise<DatasetRevision>) {
-  const declaration = { entryPath: "main.ts", inputs: ["main.ts", "backend.ts", "schema.sql", "rules.ts"], packageMap: {}, backend };
+const backend = {
+  entryPath: "app/backend.ts",
+  schemaPath: "app/schema.sql",
+  dataPath: "private/registrations.sqlite",
+  schemaVersion: 1,
+  operations: [
+    { name: "register", access: "link", readOnly: false },
+    { name: "list", access: "owner", readOnly: true },
+  ],
+  tables: [
+    { name: "registrations", primaryKey: "id", readOperation: "list", writeOperation: "register" },
+  ],
+};
+function harness(
+  resolveDatasetRevision?: (binding: AppDatasetBinding) => Promise<DatasetRevision>,
+) {
+  const declaration = {
+    entryPath: "main.ts",
+    inputs: ["main.ts", "backend.ts", "schema.sql", "rules.ts"],
+    packageMap: {},
+    backend,
+  };
   const sources = new Map([
     ["app/app.publish.json", JSON.stringify(declaration)],
     ["app/main.ts", "document.body.textContent = 'Register';"],
-    ["app/backend.ts", "import { capacity } from './rules.ts'; globalThis.operations = { register: () => capacity, list: () => [] };"],
+    [
+      "app/backend.ts",
+      "import { capacity } from './rules.ts'; globalThis.operations = { register: () => capacity, list: () => [] };",
+    ],
     ["app/rules.ts", "export const capacity: number = 20;"],
     ["app/schema.sql", "CREATE TABLE registrations(id TEXT PRIMARY KEY);"],
   ]);
-  const capturePaths: string[][] = [], listCalls: Record<string, unknown>[] = [];
+  const capturePaths: string[][] = [],
+    listCalls: Record<string, unknown>[] = [];
   const hooks = { onCapture: () => {}, deferredWrites: [] as string[] };
-  const adapter = sourceCaptureAdapter(sources, { onRequest(method, params) {
-    if (method === "versionedText.list") listCalls.push(params);
-    if (method === "versionedText.captureSources") { capturePaths.push(params.paths as string[]); if (capturePaths.length > 1) hooks.onCapture(); }
-  } });
+  const adapter = sourceCaptureAdapter(sources, {
+    onRequest(method, params) {
+      if (method === "versionedText.list") listCalls.push(params);
+      if (method === "versionedText.captureSources") {
+        capturePaths.push(params.paths as string[]);
+        if (capturePaths.length > 1) hooks.onCapture();
+      }
+    },
+  });
   const compile = vi.fn(compileClosedApp);
   const controller = new AbortController();
-  const prepare = (appRoot = "app", shared = [appRoot]) => prepareOwnerAppPublication({ workspaceId: "w", appRoot, shareId: "s", grantId: "g" },
-    { shareId: "s", grantId: "g", generation: 1, status: "active", revokedAtMs: null, selector: { paths: shared, versionId: null } },
-    { adapter, compile, signal: controller.signal, assertCurrent() {}, resolveDatasetRevision, deferredWrites: hooks.deferredWrites });
-  return { declaration, sources, adapter, compile, capturePaths, listCalls, hooks, prepare, controller,
-    setDeclaration(value: unknown) { invalidateDatasetAddresses({ workspaceId: "w" }); sources.set("app/app.publish.json", JSON.stringify(value)); } };
+  const prepare = (appRoot = "app", shared = [appRoot]) =>
+    prepareOwnerAppPublication(
+      { workspaceId: "w", appRoot, shareId: "s", grantId: "g" },
+      {
+        shareId: "s",
+        grantId: "g",
+        generation: 1,
+        status: "active",
+        revokedAtMs: null,
+        selector: { paths: shared, versionId: null },
+      },
+      {
+        adapter,
+        compile,
+        signal: controller.signal,
+        assertCurrent() {},
+        resolveDatasetRevision,
+        deferredWrites: hooks.deferredWrites,
+      },
+    );
+  return {
+    declaration,
+    sources,
+    adapter,
+    compile,
+    capturePaths,
+    listCalls,
+    hooks,
+    prepare,
+    controller,
+    setDeclaration(value: unknown) {
+      invalidateDatasetAddresses({ workspaceId: "w" });
+      sources.set("app/app.publish.json", JSON.stringify(value));
+    },
+  };
 }
 
 it("refuses retired app-owned backend declarations before compilation", async () => {
   const h = harness();
-  await expect(h.prepare()).rejects.toThrow("app/app.publish.json has an unknown key: backend. Remove it or correct its name.");
+  await expect(h.prepare()).rejects.toThrow(
+    "app/app.publish.json has an unknown key: backend. Remove it or correct its name.",
+  );
   expect(h.compile).not.toHaveBeenCalled();
 });
 
-it.each(["app/index.html", "app/new-file.js", "shared/theme.css"])("refuses a waiting app source %s before reading stale sources", async (path) => {
-  const h = harness();
-  h.setDeclaration({ entryPath: "main.ts", inputs: ["main.ts", "../shared/theme.css"], packageMap: {} });
-  h.sources.set("shared/theme.css", "body {}");
-  h.hooks.deferredWrites.push(path);
-  await expect(h.prepare("app", ["app", "shared"])).rejects.toThrow(path);
-  expect(h.compile).not.toHaveBeenCalled();
-});
+it.each(["app/index.html", "app/new-file.js", "shared/theme.css"])(
+  "refuses a waiting app source %s before reading stale sources",
+  async (path) => {
+    const h = harness();
+    h.setDeclaration({
+      entryPath: "main.ts",
+      inputs: ["main.ts", "../shared/theme.css"],
+      packageMap: {},
+    });
+    h.sources.set("shared/theme.css", "body {}");
+    h.hooks.deferredWrites.push(path);
+    await expect(h.prepare("app", ["app", "shared"])).rejects.toThrow(path);
+    expect(h.compile).not.toHaveBeenCalled();
+  },
+);
 
 it("refuses to approve a folder without app.publish.json on this device, before reading its sources", async () => {
   const h = harness();
   h.sources.delete("app/app.publish.json");
   h.sources.set("app/index.html", "<p>Notes</p>");
-  await expect(prepareLocalAppPublication({ workspaceId: "w", appRoot: "app" }, { adapter: h.adapter, signal: h.controller.signal, assertCurrent() {}, deferredWrites: [], compile: h.compile }))
-    .rejects.toThrow("Add app.publish.json to app before approving it on this device.");
+  await expect(
+    prepareLocalAppPublication(
+      { workspaceId: "w", appRoot: "app" },
+      {
+        adapter: h.adapter,
+        signal: h.controller.signal,
+        assertCurrent() {},
+        deferredWrites: [],
+        compile: h.compile,
+      },
+    ),
+  ).rejects.toThrow("Add app.publish.json to app before approving it on this device.");
   expect(h.capturePaths).toEqual([]);
   expect(h.compile).not.toHaveBeenCalled();
 });
 
 describe("local app source revision", () => {
-  const local = (h: ReturnType<typeof harness>) => ({ adapter: h.adapter, signal: h.controller.signal, assertCurrent() {}, deferredWrites: h.hooks.deferredWrites });
+  const local = (h: ReturnType<typeof harness>) => ({
+    adapter: h.adapter,
+    signal: h.controller.signal,
+    assertCurrent() {},
+    deferredWrites: h.hooks.deferredWrites,
+  });
   const app = { workspaceId: "w", appRoot: "app" };
 
   it("matches the approved revision until a source file changes, and compiles nothing", async () => {
     const h = harness();
     h.setDeclaration({ entryPath: "main.ts", inputs: ["main.ts", "rules.ts"], packageMap: {} });
-    h.sources.set("app/main.ts", "import { capacity } from './rules.ts'; document.body.textContent = String(capacity);");
-    const { candidate } = await prepareLocalAppPublication(app, { ...local(h), compile: h.compile });
+    h.sources.set(
+      "app/main.ts",
+      "import { capacity } from './rules.ts'; document.body.textContent = String(capacity);",
+    );
+    const { candidate } = await prepareLocalAppPublication(app, {
+      ...local(h),
+      compile: h.compile,
+    });
     h.compile.mockClear();
-    expect(await readLocalAppSource(app, local(h))).toEqual({ sourceRevision: candidate.sourceRevision, sourcePaths: candidate.inputs.map(file => file.path) });
+    expect(await readLocalAppSource(app, local(h))).toEqual({
+      sourceRevision: candidate.sourceRevision,
+      sourcePaths: candidate.inputs.map((file) => file.path),
+    });
     h.sources.set("app/rules.ts", "export const capacity: number = 30;");
-    expect((await readLocalAppSource(app, local(h))).sourceRevision).not.toBe(candidate.sourceRevision);
+    expect((await readLocalAppSource(app, local(h))).sourceRevision).not.toBe(
+      candidate.sourceRevision,
+    );
     expect(h.compile).not.toHaveBeenCalled();
   });
 
@@ -87,7 +183,9 @@ describe("local app source revision", () => {
 
   it("refuses an app in shared-with-me and a source waiting to be written", async () => {
     const h = harness();
-    await expect(readLocalAppSource({ workspaceId: "w", appRoot: "shared-with-me/app" }, local(h))).rejects.toThrow();
+    await expect(
+      readLocalAppSource({ workspaceId: "w", appRoot: "shared-with-me/app" }, local(h)),
+    ).rejects.toThrow();
     h.hooks.deferredWrites.push("app/main.ts");
     await expect(readLocalAppSource(app, local(h))).rejects.toThrow("app/main.ts");
     expect(h.capturePaths).toEqual([]);
@@ -96,67 +194,124 @@ describe("local app source revision", () => {
 
 describe("app.publish.json paths", () => {
   it.each([undefined, 1])("reads version %s", (version) => {
-    const bytes = new TextEncoder().encode(JSON.stringify({ version, entryPath: "main.ts", inputs: ["main.ts"], packageMap: {} }));
+    const bytes = new TextEncoder().encode(
+      JSON.stringify({ version, entryPath: "main.ts", inputs: ["main.ts"], packageMap: {} }),
+    );
     expect(parseAppPublicationDeclaration(bytes, "app").entryPath).toBe("app/main.ts");
   });
 
-  it.each([[undefined, "colection"], [1, "colection"], [1, ""]] as const)("rejects unknown keys before publishing version %s: %s", async (version, key) => {
+  it.each([
+    [undefined, "colection"],
+    [1, "colection"],
+    [1, ""],
+  ] as const)("rejects unknown keys before publishing version %s: %s", async (version, key) => {
     const h = harness();
-    h.setDeclaration({ version, entryPath: "main.ts", inputs: ["main.ts"], packageMap: {}, [key]: {} });
+    h.setDeclaration({
+      version,
+      entryPath: "main.ts",
+      inputs: ["main.ts"],
+      packageMap: {},
+      [key]: {},
+    });
     await expect(h.prepare()).rejects.toThrow(`app/app.publish.json has an unknown key: ${key}.`);
     expect(h.compile).not.toHaveBeenCalled();
   });
 
   it("refuses a newer version before interpreting fields", () => {
-    expect(() => parseAppPublicationDeclaration(new TextEncoder().encode('{"version":2}'), "app"))
-      .toThrow("app/app.publish.json uses a newer version. Update dohc to read this file.");
+    expect(() =>
+      parseAppPublicationDeclaration(new TextEncoder().encode('{"version":2}'), "app"),
+    ).toThrow("app/app.publish.json uses a newer version. Update dohc to read this file.");
   });
-  const manifest = { entryPath: "main.ts", inputs: ["main.ts", "deps/greeting.js", "../shared/theme.css"], packageMap: { greeting: "deps/greeting.js" } };
-  const place = (h: ReturnType<typeof harness>, root: string, parent: string, value: unknown = manifest) => {
+  const manifest = {
+    entryPath: "main.ts",
+    inputs: ["main.ts", "deps/greeting.js", "../shared/theme.css"],
+    packageMap: { greeting: "deps/greeting.js" },
+  };
+  const place = (
+    h: ReturnType<typeof harness>,
+    root: string,
+    parent: string,
+    value: unknown = manifest,
+  ) => {
     h.sources.clear();
     h.sources.set(`${root}/app.publish.json`, JSON.stringify(value));
-    h.sources.set(`${root}/main.ts`, "import greeting from 'greeting'; import '../shared/theme.css'; document.body.textContent = greeting;");
+    h.sources.set(
+      `${root}/main.ts`,
+      "import greeting from 'greeting'; import '../shared/theme.css'; document.body.textContent = greeting;",
+    );
     h.sources.set(`${root}/deps/greeting.js`, "export default 'Hello';");
     h.sources.set(`${parent}shared/theme.css`, "body { color: teal }");
   };
 
-  it.each([["app", ""], ["trip/app", "trip/"]])("resolves every path from the app folder at %s, so a moved folder publishes unchanged", async (root, parent) => {
-    const h = harness(); place(h, root, parent);
-    const { candidate, files } = await h.prepare(root, [root, `${parent}shared`]);
-    expect(candidate.entryPath).toBe(`${root}/main.ts`);
-    expect(candidate.inputs.map(file => file.path)).toEqual([`${root}/app.publish.json`, `${root}/deps/greeting.js`, `${root}/main.ts`, `${parent}shared/theme.css`].sort());
-    expect(candidate.packageMap).toEqual({ greeting: `${root}/deps/greeting.js` });
-    expect(files.map(file => file.path)).toEqual(["bundle.css", "bundle.js"]);
-    expect(h.listCalls).toEqual([{ versionId: "main", limit: 500, afterPath: `${root}/` }]);
-  });
+  it.each([
+    ["app", ""],
+    ["trip/app", "trip/"],
+  ])(
+    "resolves every path from the app folder at %s, so a moved folder publishes unchanged",
+    async (root, parent) => {
+      const h = harness();
+      place(h, root, parent);
+      const { candidate, files } = await h.prepare(root, [root, `${parent}shared`]);
+      expect(candidate.entryPath).toBe(`${root}/main.ts`);
+      expect(candidate.inputs.map((file) => file.path)).toEqual(
+        [
+          `${root}/app.publish.json`,
+          `${root}/deps/greeting.js`,
+          `${root}/main.ts`,
+          `${parent}shared/theme.css`,
+        ].sort(),
+      );
+      expect(candidate.packageMap).toEqual({ greeting: `${root}/deps/greeting.js` });
+      expect(files.map((file) => file.path)).toEqual(["bundle.css", "bundle.js"]);
+      expect(h.listCalls).toEqual([{ versionId: "main", limit: 500, afterPath: `${root}/` }]);
+    },
+  );
 
   it("names a listed file that does not exist, such as a path written from the workspace root", async () => {
-    const h = harness(); place(h, "app", "", { entryPath: "app/main.ts", inputs: ["app/main.ts"], packageMap: {} });
-    await expect(h.prepare("app", ["app", "shared"])).rejects.toThrow("app/app.publish.json lists app/app/main.ts, which does not exist. Write its paths relative to app.");
-    expect(h.capturePaths).toEqual([["app/app.publish.json"], ["app/app.publish.json", "app/app/main.ts"]]);
+    const h = harness();
+    place(h, "app", "", { entryPath: "app/main.ts", inputs: ["app/main.ts"], packageMap: {} });
+    await expect(h.prepare("app", ["app", "shared"])).rejects.toThrow(
+      "app/app.publish.json lists app/app/main.ts, which does not exist. Write its paths relative to app.",
+    );
+    expect(h.capturePaths).toEqual([
+      ["app/app.publish.json"],
+      ["app/app.publish.json", "app/app/main.ts"],
+    ]);
     expect(h.compile).not.toHaveBeenCalled();
   });
 
   it.each([
     ["../../main.ts", "app/app.publish.json lists ../../main.ts, which is outside the workspace."],
-    ["/main.ts", "app/app.publish.json lists /main.ts. Write the path relative to app, without a leading /."],
+    [
+      "/main.ts",
+      "app/app.publish.json lists /main.ts. Write the path relative to app, without a leading /.",
+    ],
     ["", "app/app.publish.json names no file in entryPath."],
   ])("names the path in %j and why it cannot be published", async (entryPath, message) => {
-    const h = harness(); place(h, "app", "", { entryPath, inputs: [entryPath], packageMap: {} });
+    const h = harness();
+    place(h, "app", "", { entryPath, inputs: [entryPath], packageMap: {} });
     await expect(h.prepare("app", ["app", "shared"])).rejects.toThrow(message);
     expect(h.compile).not.toHaveBeenCalled();
   });
 
   it("names a file beside the folder that the chosen link does not share", async () => {
-    const h = harness(); place(h, "app", "");
-    await expect(h.prepare("app", ["app"])).rejects.toThrow("app/app.publish.json lists shared/theme.css, which is outside this link's shared files. Choose a link that includes it.");
+    const h = harness();
+    place(h, "app", "");
+    await expect(h.prepare("app", ["app"])).rejects.toThrow(
+      "app/app.publish.json lists shared/theme.css, which is outside this link's shared files. Choose a link that includes it.",
+    );
     expect(h.capturePaths).toEqual([["app/app.publish.json"]]);
   });
 
   it("names the missing app.publish.json after the engine refuses to capture it", async () => {
-    const h = harness(); place(h, "app", "");
-    h.hooks.onCapture = () => { h.sources.delete("app/app.publish.json"); };
-    await expect(h.prepare("app", ["app", "shared"])).rejects.toThrow("app/app.publish.json changed while dohc prepared the app. Prepare the app again.");
+    const h = harness();
+    place(h, "app", "");
+    h.hooks.onCapture = () => {
+      h.sources.delete("app/app.publish.json");
+    };
+    await expect(h.prepare("app", ["app", "shared"])).rejects.toThrow(
+      "app/app.publish.json changed while dohc prepared the app. Prepare the app again.",
+    );
     expect(h.listCalls).toEqual([
       { versionId: "main", limit: 500, afterPath: "app/" },
       { versionId: "main", limit: 500 },
@@ -165,9 +320,14 @@ describe("app.publish.json paths", () => {
   });
 
   it("names a file that disappears while dohc captures the app", async () => {
-    const h = harness(); place(h, "app", "");
-    h.hooks.onCapture = () => { h.sources.delete("app/deps/greeting.js"); };
-    await expect(h.prepare("app", ["app", "shared"])).rejects.toThrow("app/app.publish.json lists app/deps/greeting.js, which does not exist. Write its paths relative to app.");
+    const h = harness();
+    place(h, "app", "");
+    h.hooks.onCapture = () => {
+      h.sources.delete("app/deps/greeting.js");
+    };
+    await expect(h.prepare("app", ["app", "shared"])).rejects.toThrow(
+      "app/app.publish.json lists app/deps/greeting.js, which does not exist. Write its paths relative to app.",
+    );
   });
 });
 
@@ -179,35 +339,56 @@ describe("app without app.publish.json", () => {
 
   it("publishes its folder as a static page with no capabilities", async () => {
     const h = harness();
-    page(h, { "app/index.html": '<!doctype html><link rel="stylesheet" href="style.css"><h1>Trip</h1><script src="App.JS"></script>',
-      "app/style.css": "h1 { color: red }", "app/App.JS": "document.title = 'Trip';", "app/notes.md": "# Notes", "app/dohc.json": "{}",
-      "app/my notes.js": "", "other/index.html": "<p>Other</p>" });
+    page(h, {
+      "app/index.html":
+        '<!doctype html><link rel="stylesheet" href="style.css"><h1>Trip</h1><script src="App.JS"></script>',
+      "app/style.css": "h1 { color: red }",
+      "app/App.JS": "document.title = 'Trip';",
+      "app/notes.md": "# Notes",
+      "app/dohc.json": "{}",
+      "app/my notes.js": "",
+      "other/index.html": "<p>Other</p>",
+    });
     const { candidate, files } = await h.prepare();
     expect(h.capturePaths).toEqual([["app/index.html", "app/App.JS", "app/style.css"]]);
     expect(candidate.entryPath).toBe("app/index.html");
     expect(candidate.capabilities).toEqual([]);
     expect(candidate.dependencies).toEqual(["app/App.JS", "app/index.html", "app/style.css"]);
-    expect(files.map(file => file.path)).toEqual(["bundle.js", "page.json"]);
+    expect(files.map((file) => file.path)).toEqual(["bundle.js", "page.json"]);
   });
 
   it("names the missing page before capturing anything", async () => {
     const h = harness();
     page(h, { "app/style.css": "h1 { color: red }" });
-    await expect(h.prepare()).rejects.toThrow("dohc found no index.html or app.publish.json in app. Add one to publish this app.");
+    await expect(h.prepare()).rejects.toThrow(
+      "dohc found no index.html or app.publish.json in app. Add one to publish this app.",
+    );
     expect(h.capturePaths).toEqual([]);
   });
 
   it("names a file the page links but the folder cannot publish", async () => {
     const h = harness();
-    page(h, { "app/index.html": '<!doctype html><img alt="Map" src="my%20map.png">', "app/my map.png": "png" });
-    await expect(h.prepare()).rejects.toThrow("app/index.html links my map.png. Rename it without spaces or symbols, then publish again.");
+    page(h, {
+      "app/index.html": '<!doctype html><img alt="Map" src="my%20map.png">',
+      "app/my map.png": "png",
+    });
+    await expect(h.prepare()).rejects.toThrow(
+      "app/index.html links my map.png. Rename it without spaces or symbols, then publish again.",
+    );
   });
 
   it("includes every type the compiler accepts, and leaves out build configuration and installed packages", async () => {
     const h = harness();
-    page(h, { "app/index.html": '<!doctype html><script type="module" src="main.ts"></script>', "app/main.ts": "import data from './data.json'; document.title = data.title;",
-      "app/data.json": '{"title":"Trip"}', "app/package.json": "{}", "app/tsconfig.json": "{}", "app/dohc.json": "{}",
-      "app/node_modules/x/index.js": "", "app/.cache/x.js": "" });
+    page(h, {
+      "app/index.html": '<!doctype html><script type="module" src="main.ts"></script>',
+      "app/main.ts": "import data from './data.json'; document.title = data.title;",
+      "app/data.json": '{"title":"Trip"}',
+      "app/package.json": "{}",
+      "app/tsconfig.json": "{}",
+      "app/dohc.json": "{}",
+      "app/node_modules/x/index.js": "",
+      "app/.cache/x.js": "",
+    });
     const { candidate } = await h.prepare();
     expect(h.capturePaths).toEqual([["app/index.html", "app/data.json", "app/main.ts"]]);
     expect(candidate.dependencies).toEqual(["app/data.json", "app/index.html", "app/main.ts"]);
@@ -215,33 +396,97 @@ describe("app without app.publish.json", () => {
 
   it("names a linked file of a type the compiler does not take", async () => {
     const h = harness();
-    page(h, { "app/index.html": '<!doctype html><script type="module" src="main.ts"></script>', "app/main.ts": "import './notes.yaml';", "app/notes.yaml": "a: 1" });
-    await expect(h.prepare()).rejects.toThrow("app/main.ts imports ./notes.yaml. Published apps can include only JavaScript, TypeScript, JSON, CSS, images, and WOFF2 fonts, not .yaml.");
+    page(h, {
+      "app/index.html": '<!doctype html><script type="module" src="main.ts"></script>',
+      "app/main.ts": "import './notes.yaml';",
+      "app/notes.yaml": "a: 1",
+    });
+    await expect(h.prepare()).rejects.toThrow(
+      "app/main.ts imports ./notes.yaml. Published apps can include only JavaScript, TypeScript, JSON, CSS, images, and WOFF2 fonts, not .yaml.",
+    );
   });
 });
 
 describe("owner dataset publication", () => {
   const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
-  const approved: DatasetRevision = { datasetId: id(1), revision: 1, revisionSha256: "a".repeat(64), definitionSha256: "b".repeat(64),
-    schemaSha256: "c".repeat(64), operationsSha256: "d".repeat(64), definition: {
-      formatVersion: 1, datasetId: id(1), name: "Registrations", schemaPath: "private/schema.sql", operationsPath: "private/operations.js",
-      tables: [{ tableId: id(2), name: "People", sqlName: "people", primaryKey: "id", fields: [
-        { fieldId: id(3), name: "ID", sqlColumn: "id", type: "text", required: true, unique: true },
-      ] }], operations: [
-        { operationId: id(4), name: "submit", label: "Submit", tableId: id(2), kind: "create", access: "link", readOnly: false, fieldIds: [] },
-        { operationId: id(5), name: "list", label: "List", tableId: id(2), kind: "read", access: "owner", readOnly: true, fieldIds: [id(3)] },
+  const approved: DatasetRevision = {
+    datasetId: id(1),
+    revision: 1,
+    revisionSha256: "a".repeat(64),
+    definitionSha256: "b".repeat(64),
+    schemaSha256: "c".repeat(64),
+    operationsSha256: "d".repeat(64),
+    definition: {
+      formatVersion: 1,
+      datasetId: id(1),
+      name: "Registrations",
+      schemaPath: "private/schema.sql",
+      operationsPath: "private/operations.js",
+      tables: [
+        {
+          tableId: id(2),
+          name: "People",
+          sqlName: "people",
+          primaryKey: "id",
+          fields: [
+            {
+              fieldId: id(3),
+              name: "ID",
+              sqlColumn: "id",
+              type: "text",
+              required: true,
+              unique: true,
+            },
+          ],
+        },
       ],
-    } };
-  const binding: AppDatasetBinding = { kind: "dataset", datasetId: approved.datasetId, revision: approved.revision,
-    revisionSha256: approved.revisionSha256, operationIds: [id(4)] };
+      operations: [
+        {
+          operationId: id(4),
+          name: "submit",
+          label: "Submit",
+          tableId: id(2),
+          kind: "create",
+          access: "link",
+          readOnly: false,
+          fieldIds: [],
+        },
+        {
+          operationId: id(5),
+          name: "list",
+          label: "List",
+          tableId: id(2),
+          kind: "read",
+          access: "owner",
+          readOnly: true,
+          fieldIds: [id(3)],
+        },
+      ],
+    },
+  };
+  const binding: AppDatasetBinding = {
+    kind: "dataset",
+    datasetId: approved.datasetId,
+    revision: approved.revision,
+    revisionSha256: approved.revisionSha256,
+    operationIds: [id(4)],
+  };
   const { datasetId: _, ...fields } = binding;
   const reference = { ...fields, datasetPath: "private/dataset.json" };
-  const declaration = { entryPath: "main.ts", inputs: ["main.ts"], packageMap: {}, dataset: reference };
+  const declaration = {
+    entryPath: "main.ts",
+    inputs: ["main.ts"],
+    packageMap: {},
+    dataset: reference,
+  };
 
   it("refuses a waiting Collection descriptor before reading its stale address", async () => {
     const resolve = vi.fn(async () => approved);
     const h = harness(resolve);
-    h.sources.set("private/dataset.json", JSON.stringify({ ...approved.definition, name: "Waiting Collection" }));
+    h.sources.set(
+      "private/dataset.json",
+      JSON.stringify({ ...approved.definition, name: "Waiting Collection" }),
+    );
     h.setDeclaration(declaration);
     h.hooks.deferredWrites.push("private/dataset.json");
     await expect(h.prepare()).rejects.toThrow("private/dataset.json");
@@ -253,21 +498,40 @@ describe("owner dataset publication", () => {
   it("reads a Collection app's source revision without reading the Collection", async () => {
     const h = harness();
     h.setDeclaration(declaration);
-    const source = await readLocalAppSource({ workspaceId: "w", appRoot: "app" }, { adapter: h.adapter, signal: h.controller.signal, assertCurrent() {}, deferredWrites: h.hooks.deferredWrites });
+    const source = await readLocalAppSource(
+      { workspaceId: "w", appRoot: "app" },
+      {
+        adapter: h.adapter,
+        signal: h.controller.signal,
+        assertCurrent() {},
+        deferredWrites: h.hooks.deferredWrites,
+      },
+    );
     expect(source.sourcePaths.length).toBeGreaterThan(0);
     expect(h.capturePaths.flat()).not.toContain("private/dataset.json");
   });
 
   it("captures and compiles only frontend sources and derives dispatch metadata from the catalog", async () => {
     const resolve = vi.fn(async () => approved);
-    const h = harness(resolve); h.sources.set("private/dataset.json", JSON.stringify(approved.definition));
+    const h = harness(resolve);
+    h.sources.set("private/dataset.json", JSON.stringify(approved.definition));
     h.setDeclaration(declaration);
     const { candidate, files } = await h.prepare();
     expect(resolve).toHaveBeenCalledWith(binding);
     expect(h.compile).toHaveBeenCalledTimes(1);
-    expect(h.capturePaths).toEqual([["app/app.publish.json"], ["app/app.publish.json", "app/main.ts"], ["private/dataset.json"]]);
-    expect(files.map(file => file.path)).toEqual(["bundle.js"]);
-    expect(candidate.capabilities).toEqual([{ ...binding, name: approved.definition.name, operations: [{ operationId: id(4), name: "submit", access: "link", readOnly: false }] }]);
+    expect(h.capturePaths).toEqual([
+      ["app/app.publish.json"],
+      ["app/app.publish.json", "app/main.ts"],
+      ["private/dataset.json"],
+    ]);
+    expect(files.map((file) => file.path)).toEqual(["bundle.js"]);
+    expect(candidate.capabilities).toEqual([
+      {
+        ...binding,
+        name: approved.definition.name,
+        operations: [{ operationId: id(4), name: "submit", access: "link", readOnly: false }],
+      },
+    ]);
   });
 
   it("does not accept link read approval from app source", async () => {
@@ -275,13 +539,21 @@ describe("owner dataset publication", () => {
     revision.definition.operations[1]!.access = "helper";
     const h = harness(async () => revision);
     h.sources.set("private/dataset.json", JSON.stringify(approved.definition));
-    h.setDeclaration({ ...declaration, dataset: { ...reference, operationIds: [id(5)], linkReads: [{ operationId: id(5), fieldIds: [id(3)] }] } });
+    h.setDeclaration({
+      ...declaration,
+      dataset: {
+        ...reference,
+        operationIds: [id(5)],
+        linkReads: [{ operationId: id(5), fieldIds: [id(3)] }],
+      },
+    });
     const { candidate } = await h.prepare();
     expect(candidate.capabilities[0]).not.toHaveProperty("linkReads");
   });
 
   it("does not treat a source declaration as dataset approval", async () => {
-    const h = harness(); h.sources.set("private/dataset.json", JSON.stringify(approved.definition));
+    const h = harness();
+    h.sources.set("private/dataset.json", JSON.stringify(approved.definition));
     h.setDeclaration(declaration);
     await expect(h.prepare()).rejects.toThrow(/Collection is unavailable/);
     expect(h.compile).not.toHaveBeenCalled();
@@ -294,28 +566,49 @@ describe("owner dataset publication", () => {
     h.setDeclaration(declaration);
     await expect(h.prepare()).rejects.toThrow("Collection reference broken: private/dataset.json");
     expect(resolve).not.toHaveBeenCalled();
-    h.setDeclaration({ ...declaration, dataset: { ...reference, datasetPath: "moved/dataset.json" } });
-    expect((await h.prepare()).candidate.capabilities[0]).toMatchObject({ datasetId: approved.datasetId });
+    h.setDeclaration({
+      ...declaration,
+      dataset: { ...reference, datasetPath: "moved/dataset.json" },
+    });
+    expect((await h.prepare()).candidate.capabilities[0]).toMatchObject({
+      datasetId: approved.datasetId,
+    });
   });
 
-  it.each(["stale", "unknown", "source", "operations", "backend"])("refuses %s dataset bindings before compilation", async kind => {
-    const resolve = vi.fn(async () => approved);
-    const h = harness(resolve);
-    let value: unknown = declaration;
-    if (kind === "stale") value = { ...declaration, dataset: { ...reference, revision: 2 } };
-    if (kind === "unknown") value = { ...declaration, dataset: { ...reference, operationIds: [id(99)] } };
-    if (kind === "source") value = { ...declaration, dataset: { ...reference, source: "replace rules" } };
-    if (kind === "operations") value = { ...declaration, dataset: { ...reference, operations: [{ name: "submit", access: "link", readOnly: true }] } };
-    if (kind === "backend") value = { ...declaration, backend };
-    h.sources.set("private/dataset.json", JSON.stringify(approved.definition));
-    h.setDeclaration(value);
-    await expect(h.prepare()).rejects.toThrow();
-    expect(h.compile).not.toHaveBeenCalled();
-    if (["source", "operations", "backend"].includes(kind)) expect(resolve).not.toHaveBeenCalled();
-  });
+  it.each(["stale", "unknown", "source", "operations", "backend"])(
+    "refuses %s dataset bindings before compilation",
+    async (kind) => {
+      const resolve = vi.fn(async () => approved);
+      const h = harness(resolve);
+      let value: unknown = declaration;
+      if (kind === "stale") value = { ...declaration, dataset: { ...reference, revision: 2 } };
+      if (kind === "unknown")
+        value = { ...declaration, dataset: { ...reference, operationIds: [id(99)] } };
+      if (kind === "source")
+        value = { ...declaration, dataset: { ...reference, source: "replace rules" } };
+      if (kind === "operations")
+        value = {
+          ...declaration,
+          dataset: {
+            ...reference,
+            operations: [{ name: "submit", access: "link", readOnly: true }],
+          },
+        };
+      if (kind === "backend") value = { ...declaration, backend };
+      h.sources.set("private/dataset.json", JSON.stringify(approved.definition));
+      h.setDeclaration(value);
+      await expect(h.prepare()).rejects.toThrow();
+      expect(h.compile).not.toHaveBeenCalled();
+      if (["source", "operations", "backend"].includes(kind))
+        expect(resolve).not.toHaveBeenCalled();
+    },
+  );
 
   it("honors cancellation after catalog resolution", async () => {
-    const h = harness(async () => { h.controller.abort(); return approved; });
+    const h = harness(async () => {
+      h.controller.abort();
+      return approved;
+    });
     h.sources.set("private/dataset.json", JSON.stringify(approved.definition));
     h.setDeclaration(declaration);
     await expect(h.prepare()).rejects.toMatchObject({ name: "AbortError" });
@@ -323,9 +616,18 @@ describe("owner dataset publication", () => {
   });
 });
 
-it.each(["会议", "Cafe\u0301"])("publishes Unicode source names from disk without renaming %s", root => {
-  const h = harness(); h.sources.clear();
-  h.sources.set(root + "/index.html", '<!doctype html><script src="' + encodeURIComponent("скрипт.js") + '"></script>');
-  h.sources.set(root + "/скрипт.js", 'document.title = "Ready";');
-  return expect(h.prepare(root)).resolves.toMatchObject({ candidate: { appRoot: root, entryPath: root + "/index.html" } });
-});
+it.each(["会议", "Cafe\u0301"])(
+  "publishes Unicode source names from disk without renaming %s",
+  (root) => {
+    const h = harness();
+    h.sources.clear();
+    h.sources.set(
+      root + "/index.html",
+      '<!doctype html><script src="' + encodeURIComponent("скрипт.js") + '"></script>',
+    );
+    h.sources.set(root + "/скрипт.js", 'document.title = "Ready";');
+    return expect(h.prepare(root)).resolves.toMatchObject({
+      candidate: { appRoot: root, entryPath: root + "/index.html" },
+    });
+  },
+);

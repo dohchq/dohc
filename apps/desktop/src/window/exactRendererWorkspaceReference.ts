@@ -48,23 +48,18 @@ export function createExactRendererWorkspaceReferenceOwner<
     inactiveMessage: string,
     work: (operation: Operation) => Result | Promise<Result>,
   ): Promise<Result> =>
-    withOperation(
-      sender,
-      reference.workspaceId,
-      inactiveMessage,
-      (operation) => {
-        const workspace = operation.workspace;
-        if (
-          workspace.workspaceId !== reference.workspaceId ||
-          workspace.attachmentId !== reference.attachmentId ||
-          workspace.rootPath !== reference.canonicalRootPath ||
-          operation.session.generation !== reference.rendererGeneration
-        ) {
-          throw new Error(inactiveMessage);
-        }
-        return work(operation);
-      },
-    );
+    withOperation(sender, reference.workspaceId, inactiveMessage, (operation) => {
+      const workspace = operation.workspace;
+      if (
+        workspace.workspaceId !== reference.workspaceId ||
+        workspace.attachmentId !== reference.attachmentId ||
+        workspace.rootPath !== reference.canonicalRootPath ||
+        operation.session.generation !== reference.rendererGeneration
+      ) {
+        throw new Error(inactiveMessage);
+      }
+      return work(operation);
+    });
 
   return Object.freeze({ capture, withReference });
 }

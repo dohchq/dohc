@@ -1,22 +1,33 @@
-import { decodeOrdinarySyncResult, type OrdinarySyncMethodResultMap } from "@dohc/workspace-engine-client/relay-wire";
+import {
+  decodeOrdinarySyncResult,
+  type OrdinarySyncMethodResultMap,
+} from "@dohc/workspace-engine-client/relay-wire";
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
 import type { SharingDeclined } from "@dohc/workspace-contracts/relay";
 
 export interface ServiceOrdinaryReplicationConfig {
   readonly relay: { readonly baseUrl: string; readonly bearerToken: string };
-  readonly identity: { readonly kind: "claim" } | {
-    readonly kind: "join"; readonly replicationEpoch: string; readonly streamIdentity: string;
-  };
+  readonly identity:
+    | { readonly kind: "claim" }
+    | {
+        readonly kind: "join";
+        readonly replicationEpoch: string;
+        readonly streamIdentity: string;
+      };
   readonly maxPagesPerPull: number;
 }
 
 function record(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid ordinary replication response.");
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("Invalid ordinary replication response.");
   return value as Record<string, unknown>;
 }
 function fields(value: unknown, keys: readonly string[]): Record<string, unknown> {
   const row = record(value);
-  if (keys.some(key => !Object.hasOwn(row, key)) || Object.keys(row).some(key => !keys.includes(key))) {
+  if (
+    keys.some((key) => !Object.hasOwn(row, key)) ||
+    Object.keys(row).some((key) => !keys.includes(key))
+  ) {
     throw new Error("Invalid ordinary replication configuration.");
   }
   return row;
@@ -28,22 +39,32 @@ function text(value: unknown): string {
   return value;
 }
 function integer(value: unknown, minimum = 0): number {
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < minimum) throw new Error("Invalid ordinary replication count.");
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < minimum)
+    throw new Error("Invalid ordinary replication count.");
   return value;
 }
 
 /** The relay a service replica reaches and the credential it presents there. */
-export function parseServiceRelayAttachment(value: unknown): ServiceOrdinaryReplicationConfig["relay"] {
+export function parseServiceRelayAttachment(
+  value: unknown,
+): ServiceOrdinaryReplicationConfig["relay"] {
   const relay = fields(value, ["baseUrl", "bearerToken"]);
   const baseUrl = text(relay.baseUrl);
   let url: URL;
-  try { url = new URL(baseUrl); } catch { throw new Error("Invalid service relay URL."); }
-  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) throw new Error("Invalid service relay URL.");
-  return Object.freeze({baseUrl, bearerToken: text(relay.bearerToken)});
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    throw new Error("Invalid service relay URL.");
+  }
+  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash)
+    throw new Error("Invalid service relay URL.");
+  return Object.freeze({ baseUrl, bearerToken: text(relay.bearerToken) });
 }
 
 /** Private operator inputs; the relay authenticates the supplied owner credential. */
-export function parseServiceOrdinaryReplicationConfig(value: unknown): ServiceOrdinaryReplicationConfig | undefined {
+export function parseServiceOrdinaryReplicationConfig(
+  value: unknown,
+): ServiceOrdinaryReplicationConfig | undefined {
   if (value === undefined) return undefined;
   const row = fields(value, ["relay", "identity", "maxPagesPerPull"]);
   const relay = parseServiceRelayAttachment(row.relay);
@@ -51,19 +72,30 @@ export function parseServiceOrdinaryReplicationConfig(value: unknown): ServiceOr
   let identity: ServiceOrdinaryReplicationConfig["identity"];
   if (rawIdentity.kind === "claim") {
     fields(rawIdentity, ["kind"]);
-    identity = Object.freeze({kind: "claim"});
+    identity = Object.freeze({ kind: "claim" });
   } else if (rawIdentity.kind === "join") {
     fields(rawIdentity, ["kind", "replicationEpoch", "streamIdentity"]);
-    identity = Object.freeze({kind: "join", replicationEpoch: text(rawIdentity.replicationEpoch), streamIdentity: text(rawIdentity.streamIdentity)});
+    identity = Object.freeze({
+      kind: "join",
+      replicationEpoch: text(rawIdentity.replicationEpoch),
+      streamIdentity: text(rawIdentity.streamIdentity),
+    });
   } else throw new Error("Invalid ordinary relay identity.");
   const maxPagesPerPull = integer(row.maxPagesPerPull, 1);
-  return Object.freeze({relay, identity, maxPagesPerPull});
+  return Object.freeze({ relay, identity, maxPagesPerPull });
 }
 
-type OrdinaryRefusal = Extract<OrdinarySyncMethodResultMap["sync.applyPull"], {status: "complete"}>["refusals"][number];
+type OrdinaryRefusal = Extract<
+  OrdinarySyncMethodResultMap["sync.applyPull"],
+  { status: "complete" }
+>["refusals"][number];
 export interface ServiceOrdinaryPullPage {
   readonly nextCursor: number;
-  readonly fetched: number; readonly applied: number; readonly refused: number; readonly skipped: number; readonly conflictsOpened: number;
+  readonly fetched: number;
+  readonly applied: number;
+  readonly refused: number;
+  readonly skipped: number;
+  readonly conflictsOpened: number;
   readonly refusals: readonly OrdinaryRefusal[];
   readonly sharingDeclined: readonly SharingDeclined[];
   /** The paths the page wrote or deleted, in any version. */
@@ -74,77 +106,146 @@ export class ServiceOrdinaryReplication {
   readonly #config: ServiceOrdinaryReplicationConfig;
   #initialized = false;
   #running = false;
-  constructor(readonly connection: {
-    client: Pick<EngineClient, "sendRequest">; workspace: string; workspaceId: string;
-    nextRequestId(): number; deadlineMs: number; signal: AbortSignal; assertCurrent(): void;
-  }, config: ServiceOrdinaryReplicationConfig) {
+  constructor(
+    readonly connection: {
+      client: Pick<EngineClient, "sendRequest">;
+      workspace: string;
+      workspaceId: string;
+      nextRequestId(): number;
+      deadlineMs: number;
+      signal: AbortSignal;
+      assertCurrent(): void;
+    },
+    config: ServiceOrdinaryReplicationConfig,
+  ) {
     this.#config = parseServiceOrdinaryReplicationConfig(config)!;
   }
-  #check(signal: AbortSignal): void { signal.throwIfAborted(); this.connection.assertCurrent(); }
-  async #request(method: string, params: Record<string, string | {kind: string; token: string}>, signal: AbortSignal) {
+  #check(signal: AbortSignal): void {
+    signal.throwIfAborted();
+    this.connection.assertCurrent();
+  }
+  async #request(
+    method: string,
+    params: Record<string, string | { kind: string; token: string }>,
+    signal: AbortSignal,
+  ) {
     this.#check(signal);
     const c = this.connection;
-    const response = await c.client.sendRequest({id: c.nextRequestId(), workspace: c.workspace,
-      deadlineMs: c.deadlineMs, method, params: {workspaceId: c.workspaceId, ...params}}, signal);
+    const response = await c.client.sendRequest(
+      {
+        id: c.nextRequestId(),
+        workspace: c.workspace,
+        deadlineMs: c.deadlineMs,
+        method,
+        params: { workspaceId: c.workspaceId, ...params },
+      },
+      signal,
+    );
     this.#check(signal);
     return response.result;
   }
-  async #run<T>(callerSignal: AbortSignal | undefined, task: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  async #run<T>(
+    callerSignal: AbortSignal | undefined,
+    task: (signal: AbortSignal) => Promise<T>,
+  ): Promise<T> {
     if (this.#running) throw new Error("Ordinary replication is already running.");
     this.#running = true;
-    const signal = callerSignal ? AbortSignal.any([this.connection.signal, callerSignal]) : this.connection.signal;
+    const signal = callerSignal
+      ? AbortSignal.any([this.connection.signal, callerSignal])
+      : this.connection.signal;
     try {
       this.#check(signal);
       if (!this.#initialized) {
         const identity = this.#config.identity;
         const joined = identity.kind === "join";
-        const result = record(await this.#request(joined ? "sync.adoptJoinIdentity" : "sync.claim",
-          joined ? {replicationEpoch: identity.replicationEpoch, streamIdentity: identity.streamIdentity} : {}, signal));
-        if (result[joined ? "adopted" : "claimed"] !== true) throw new Error("Ordinary relay identity setup did not complete.");
+        const result = record(
+          await this.#request(
+            joined ? "sync.adoptJoinIdentity" : "sync.claim",
+            joined
+              ? {
+                  replicationEpoch: identity.replicationEpoch,
+                  streamIdentity: identity.streamIdentity,
+                }
+              : {},
+            signal,
+          ),
+        );
+        if (result[joined ? "adopted" : "claimed"] !== true)
+          throw new Error("Ordinary relay identity setup did not complete.");
         this.#initialized = true;
       }
       return await task(signal);
-    } finally { this.#running = false; }
+    } finally {
+      this.#running = false;
+    }
   }
   /** Pulls up to maxPagesPerPull pages. `onPage` hears each page once its cursor committed, before the next is asked for. */
   async pull(callerSignal?: AbortSignal, onPage?: (page: ServiceOrdinaryPullPage) => void) {
-    return this.#run(callerSignal, async signal => {
+    return this.#run(callerSignal, async (signal) => {
       const pages: ServiceOrdinaryPullPage[] = [];
       let previous: number | undefined;
       for (let index = 0; index < this.#config.maxPagesPerPull;) {
-        const {pageToken} = decodeOrdinarySyncResult("sync.fetchPull", await this.#request("sync.fetchPull", {}, signal));
-        const result = decodeOrdinarySyncResult("sync.applyPull", await this.#request("sync.applyPull", {pageToken}, signal));
+        const { pageToken } = decodeOrdinarySyncResult(
+          "sync.fetchPull",
+          await this.#request("sync.fetchPull", {}, signal),
+        );
+        const result = decodeOrdinarySyncResult(
+          "sync.applyPull",
+          await this.#request("sync.applyPull", { pageToken }, signal),
+        );
         if (result.status === "retry") continue;
         index += 1;
-        const {nextCursor, pendingCursor: cursor} = result;
-        if (previous !== undefined && (nextCursor < previous || (result.hasMore && nextCursor === previous))) {
+        const { nextCursor, pendingCursor: cursor } = result;
+        if (
+          previous !== undefined &&
+          (nextCursor < previous || (result.hasMore && nextCursor === previous))
+        ) {
           throw new Error("Ordinary pull made no cursor progress.");
         }
-        const page = {nextCursor, fetched: result.fetched, applied: result.applied, refused: result.refused,
-          skipped: result.skipped, conflictsOpened: result.conflictsOpened, refusals: result.refusals,
-          sharingDeclined: result.sharingDeclined, changedPaths: result.changedPaths.map(row => row.path)};
-        decodeOrdinarySyncResult("sync.materializePendingCursor",
-          await this.#request("sync.materializePendingCursor", {pendingCursor: cursor}, signal));
+        const page = {
+          nextCursor,
+          fetched: result.fetched,
+          applied: result.applied,
+          refused: result.refused,
+          skipped: result.skipped,
+          conflictsOpened: result.conflictsOpened,
+          refusals: result.refusals,
+          sharingDeclined: result.sharingDeclined,
+          changedPaths: result.changedPaths.map((row) => row.path),
+        };
+        decodeOrdinarySyncResult(
+          "sync.materializePendingCursor",
+          await this.#request("sync.materializePendingCursor", { pendingCursor: cursor }, signal),
+        );
         this.#check(signal);
-        const committed = decodeOrdinarySyncResult("sync.commitCursor",
-          await this.#request("sync.commitCursor", {pendingCursor: cursor}, signal));
+        const committed = decodeOrdinarySyncResult(
+          "sync.commitCursor",
+          await this.#request("sync.commitCursor", { pendingCursor: cursor }, signal),
+        );
         page.sharingDeclined.push(...committed.sharingDeclined);
         pages.push(page);
         onPage?.(page);
         previous = nextCursor;
-        if (!result.hasMore) return {nextCursor, hasMore: false, pages};
+        if (!result.hasMore) return { nextCursor, hasMore: false, pages };
       }
-      return {nextCursor: previous ?? 0, hasMore: true, pages};
+      return { nextCursor: previous ?? 0, hasMore: true, pages };
     });
   }
   async #push(signal: AbortSignal) {
-    const result = decodeOrdinarySyncResult("sync.push", await this.#request("sync.push", {}, signal));
-    return {pushed: result.pushed, hasMore: result.hasMore, sharingDeclined: result.sharingDeclined,
-      admissionPending: result.ownerAdmissionPending.length > 0};
+    const result = decodeOrdinarySyncResult(
+      "sync.push",
+      await this.#request("sync.push", {}, signal),
+    );
+    return {
+      pushed: result.pushed,
+      hasMore: result.hasMore,
+      sharingDeclined: result.sharingDeclined,
+      admissionPending: result.ownerAdmissionPending.length > 0,
+    };
   }
   async push(callerSignal?: AbortSignal) {
-    return this.#run(callerSignal, async signal => {
-      const {admissionPending, ...page} = await this.#push(signal);
+    return this.#run(callerSignal, async (signal) => {
+      const { admissionPending, ...page } = await this.#push(signal);
       if (admissionPending) throw new Error("Ordinary publication is waiting for owner admission.");
       return page;
     });
@@ -154,14 +255,16 @@ export class ServiceOrdinaryReplication {
    * waits for owner admission. The caller checks what it needed reached the relay.
    */
   async publish(callerSignal?: AbortSignal) {
-    return this.#run(callerSignal, async signal => {
-      let pushed = 0, hasMore = true;
+    return this.#run(callerSignal, async (signal) => {
+      let pushed = 0,
+        hasMore = true;
       for (let index = 0; index < this.#config.maxPagesPerPull && hasMore; index++) {
         const page = await this.#push(signal);
-        pushed += page.pushed; hasMore = page.hasMore;
+        pushed += page.pushed;
+        hasMore = page.hasMore;
         if (page.pushed === 0 || page.admissionPending) break;
       }
-      return {pushed, hasMore};
+      return { pushed, hasMore };
     });
   }
 }

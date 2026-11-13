@@ -6,17 +6,27 @@ import { DEFAULT_LIMITS } from "./protocol.ts";
 
 function request(body: string, overrides: Partial<GuestRequest> = {}): GuestRequest {
   return {
-    tables: ["items"], source: `globalThis.operations = { run(ctx, input) { ${body} } };`,
-    operation: "run", callerJson: '{"kind":"owner"}', inputJson: "null",
-    nowMs: 1000, requestId: "request-1", secret: "", readOnly: false,
-    files: [], limits: { ...DEFAULT_LIMITS }, ...overrides,
+    tables: ["items"],
+    source: `globalThis.operations = { run(ctx, input) { ${body} } };`,
+    operation: "run",
+    callerJson: '{"kind":"owner"}',
+    inputJson: "null",
+    nowMs: 1000,
+    requestId: "request-1",
+    secret: "",
+    readOnly: false,
+    files: [],
+    limits: { ...DEFAULT_LIMITS },
+    ...overrides,
   };
 }
 
 async function withDatabase(run: (db: DatabaseSync) => Promise<void>): Promise<void> {
   const db = new DatabaseSync(":memory:");
   try {
-    db.exec("CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT NOT NULL); CREATE TABLE dohc_receipts(id INTEGER PRIMARY KEY);");
+    db.exec(
+      "CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT NOT NULL); CREATE TABLE dohc_receipts(id INTEGER PRIMARY KEY);",
+    );
     db.exec("INSERT INTO dohc_receipts VALUES(42)");
     db.exec("BEGIN IMMEDIATE");
     await run(db);
@@ -33,7 +43,7 @@ describe("reusable guest evaluator", () => {
     { body: "return null;", source: "while (true) {}" },
     { body: "return { toJSON() { while (true) {} } };", source: undefined },
   ])("names the time limit when the guest interrupts: $body", async ({ body, source }) => {
-    await withDatabase(async db => {
+    await withDatabase(async (db) => {
       const operation = request(body, {
         limits: { ...DEFAULT_LIMITS, evaluationMs: 100 },
         ...(source === undefined ? {} : { source }),
@@ -48,64 +58,102 @@ describe("reusable guest evaluator", () => {
   it("names the time limit for an expired database callback before preparing SQL", async () => {
     const clock = vi.spyOn(performance, "now").mockReturnValue(0);
     try {
-      await withDatabase(async db => {
+      await withDatabase(async (db) => {
         const prepare = vi.spyOn(db, "prepare");
         const operation = request("return ctx.db.query('SELECT * FROM items');", {
           limits: {
-            ...DEFAULT_LIMITS, evaluationMs: 1250,
+            ...DEFAULT_LIMITS,
+            evaluationMs: 1250,
             // Cross the deadline inside the callback, after any guest interrupt check.
-            get statements() { clock.mockReturnValue(1251); return DEFAULT_LIMITS.statements; },
+            get statements() {
+              clock.mockReturnValue(1251);
+              return DEFAULT_LIMITS.statements;
+            },
           },
         });
         const failure = await evaluate(db, operation).catch((error: unknown) => error);
         expect(prepare).not.toHaveBeenCalled();
-        expect(failure).toMatchObject({ message: "App operation took longer than its 1.25-second time limit, so it stopped." });
+        expect(failure).toMatchObject({
+          message: "App operation took longer than its 1.25-second time limit, so it stopped.",
+        });
       });
-    } finally { clock.mockRestore(); }
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it("names the time limit for a bootstrap failure before loading app source", async () => {
     const clock = vi.spyOn(performance, "now").mockReturnValue(0);
     try {
-      await withDatabase(async db => {
+      await withDatabase(async (db) => {
         const operation = request("return null;", {
           source: "invalid app source!",
           inputJson: JSON.stringify(Array.from({ length: 10000 }, () => [1])),
           limits: {
             ...DEFAULT_LIMITS,
             // Start the clock at zero, then expire it before bootstrap checks the deadline.
-            get evaluationMs() { clock.mockReturnValue(1251); return 1250; },
+            get evaluationMs() {
+              clock.mockReturnValue(1251);
+              return 1250;
+            },
           },
         });
-        await expect(evaluate(db, operation)).rejects.toThrow("App operation took longer than its 1.25-second time limit, so it stopped.");
+        await expect(evaluate(db, operation)).rejects.toThrow(
+          "App operation took longer than its 1.25-second time limit, so it stopped.",
+        );
       });
-    } finally { clock.mockRestore(); }
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it.each([
-    { cause: "memory", inputJson: JSON.stringify("x".repeat(8 * 1024 * 1024)), message: "App operation needed more than its 16 MiB memory limit, so it stopped." },
-    { cause: "invalid JSON", inputJson: "{", message: "App operation context could not be initialized." },
-  ])("keeps a bootstrap failure's $cause cause before loading app source", async ({ inputJson, message }) => {
-    const clock = vi.spyOn(performance, "now").mockReturnValue(0);
-    try {
-      await withDatabase(async db => {
-        await expect(evaluate(db, request("return null;", {
-          source: "invalid app source!", inputJson,
-          limits: { ...DEFAULT_LIMITS, memoryBytes: 16 * 1024 * 1024 },
-        }))).rejects.toThrow(message);
-      });
-    } finally { clock.mockRestore(); }
-  });
+    {
+      cause: "memory",
+      inputJson: JSON.stringify("x".repeat(8 * 1024 * 1024)),
+      message: "App operation needed more than its 16 MiB memory limit, so it stopped.",
+    },
+    {
+      cause: "invalid JSON",
+      inputJson: "{",
+      message: "App operation context could not be initialized.",
+    },
+  ])(
+    "keeps a bootstrap failure's $cause cause before loading app source",
+    async ({ inputJson, message }) => {
+      const clock = vi.spyOn(performance, "now").mockReturnValue(0);
+      try {
+        await withDatabase(async (db) => {
+          await expect(
+            evaluate(
+              db,
+              request("return null;", {
+                source: "invalid app source!",
+                inputJson,
+                limits: { ...DEFAULT_LIMITS, memoryBytes: 16 * 1024 * 1024 },
+              }),
+            ),
+          ).rejects.toThrow(message);
+        });
+      } finally {
+        clock.mockRestore();
+      }
+    },
+  );
 
   it("keeps a guest exception named interrupted separate from a time limit", async () => {
-    await withDatabase(async db => {
-      await expect(evaluate(db, request("throw new Error('interrupted');"))).rejects.toThrow(/^App operation failed\.$/);
+    await withDatabase(async (db) => {
+      await expect(evaluate(db, request("throw new Error('interrupted');"))).rejects.toThrow(
+        /^App operation failed\.$/,
+      );
     });
   });
 
-  it.each(["changes", "total_changes", "last_insert_rowid"])("hides retained %s counters through every authorizer reset", async counter => {
-    await withDatabase(async db => {
-      const operation = request(`
+  it.each(["changes", "total_changes", "last_insert_rowid"])(
+    "hides retained %s counters through every authorizer reset",
+    async (counter) => {
+      await withDatabase(async (db) => {
+        const operation = request(`
         const blocked = [];
         function check() { try { ctx.db.query('SELECT ${counter}()'); blocked.push(false); } catch { blocked.push(true); } }
         check();
@@ -115,66 +163,128 @@ describe("reusable guest evaluator", () => {
         check();
         return {blocked, changed};
       `);
-      const session = db.createSession();
-      try {
-        const result = await evaluate(db, operation, { persistentConnection: true });
-        expect(JSON.parse(result.resultJson)).toEqual({ blocked: [true, true, true], changed: 1 });
-        db.setAuthorizer(null);
-        expect(session.changeset().byteLength).toBeGreaterThan(0);
-      } finally { session.close(); }
-    });
-  });
+        const session = db.createSession();
+        try {
+          const result = await evaluate(db, operation, { persistentConnection: true });
+          expect(JSON.parse(result.resultJson)).toEqual({
+            blocked: [true, true, true],
+            changed: 1,
+          });
+          db.setAuthorizer(null);
+          expect(session.changeset().byteLength).toBeGreaterThan(0);
+        } finally {
+          session.close();
+        }
+      });
+    },
+  );
 
   it("preserves snapshot SQL counter behavior", async () => {
-    await withDatabase(async db => {
-      const result = await evaluate(db, request("return ctx.db.query('SELECT last_insert_rowid() AS id');"));
+    await withDatabase(async (db) => {
+      const result = await evaluate(
+        db,
+        request("return ctx.db.query('SELECT last_insert_rowid() AS id');"),
+      );
       expect(JSON.parse(result.resultJson)).toEqual([{ id: 42 }]);
     });
   });
 
   it("finds a statement only where SQLite would prepare one", () => {
-    for (const sql of ["", " \t\v\f\r\n", ";", " ; ;", "-- note", "-- note\rSELECT 1", "/* note */", "/* unfinished", "\0SELECT 1", " \0SELECT 1",
-      "-- note\0\nSELECT 1", "\uFEFF", "\uFEFF;-- note", " \uFEFF/* note */;\uFEFF"]) {
+    for (const sql of [
+      "",
+      " \t\v\f\r\n",
+      ";",
+      " ; ;",
+      "-- note",
+      "-- note\rSELECT 1",
+      "/* note */",
+      "/* unfinished",
+      "\0SELECT 1",
+      " \0SELECT 1",
+      "-- note\0\nSELECT 1",
+      "\uFEFF",
+      "\uFEFF;-- note",
+      " \uFEFF/* note */;\uFEFF",
+    ]) {
       expect(hasStatement(sql), JSON.stringify(sql)).toBe(false);
     }
-    for (const sql of ["SELECT 1", "-- note\nSELECT 1", "/* note */SELECT 1", ";SELECT 1", "SELECT 1\0", "x", "\uFEFFSELECT 1"]) {
+    for (const sql of [
+      "SELECT 1",
+      "-- note\nSELECT 1",
+      "/* note */SELECT 1",
+      ";SELECT 1",
+      "SELECT 1\0",
+      "x",
+      "\uFEFFSELECT 1",
+    ]) {
       expect(hasStatement(sql), JSON.stringify(sql)).toBe(true);
     }
   });
 
   it("refuses SQL with no statement before SQLite prepares it", async () => {
-    await withDatabase(async db => {
-      const result = await evaluate(db, request(`
+    await withDatabase(async (db) => {
+      const result = await evaluate(
+        db,
+        request(`
         const messages = [];
         for (const sql of ['', '  ', ';', '-- note', '/* note */', '\\uFEFF', '\\uFEFF;-- note', ' \\uFEFF/* note */;\\uFEFF']) {
           try { ctx.db.query(sql); messages.push('prepared'); } catch (error) { messages.push(error.message); }
           try { ctx.db.execute(sql); messages.push('prepared'); } catch (error) { messages.push(error.message); }
         }
         return messages;
-      `), { persistentConnection: true });
-      expect(JSON.parse(result.resultJson)).toEqual(Array.from({ length: 16 }, () => "SQL statement is empty."));
+      `),
+        { persistentConnection: true },
+      );
+      expect(JSON.parse(result.resultJson)).toEqual(
+        Array.from({ length: 16 }, () => "SQL statement is empty."),
+      );
     });
   });
 
   it("isolates guest globals and enforces each operation's table and write permissions", async () => {
-    await withDatabase(async db => {
-      await evaluate(db, request("globalThis.prior = 'private'; ctx.db.execute(\"INSERT INTO items VALUES(1, 'saved')\"); return true;"), { persistentConnection: true });
-      const result = await evaluate(db, request(`
+    await withDatabase(async (db) => {
+      await evaluate(
+        db,
+        request(
+          "globalThis.prior = 'private'; ctx.db.execute(\"INSERT INTO items VALUES(1, 'saved')\"); return true;",
+        ),
+        { persistentConnection: true },
+      );
+      const result = await evaluate(
+        db,
+        request(
+          `
         const blocked = [];
         for (const sql of ["SELECT * FROM dohc_receipts", "DELETE FROM items", "PRAGMA table_xinfo(items)"]) {
           try { ctx.db.execute(sql); blocked.push(false); } catch { blocked.push(true); }
         }
         return { prior: typeof globalThis.prior, blocked, rows: ctx.db.query('SELECT * FROM items') };
-      `, { readOnly: true }), { persistentConnection: true });
-      expect(JSON.parse(result.resultJson)).toEqual({ prior: "undefined", blocked: [true, true, true], rows: [{ id: 1, value: "saved" }] });
+      `,
+          { readOnly: true },
+        ),
+        { persistentConnection: true },
+      );
+      expect(JSON.parse(result.resultJson)).toEqual({
+        prior: "undefined",
+        blocked: [true, true, true],
+        rows: [{ id: 1, value: "saved" }],
+      });
     });
   });
 
   it("preserves structured refusal across reused connections", async () => {
-    await withDatabase(async db => {
-      await expect(evaluate(db, request("ctx.refuse('full', 'No spaces remain.');"), { persistentConnection: true }))
-        .rejects.toMatchObject({ name: "AppBackendRuntimeError", refusal: { code: "full", message: "No spaces remain." } });
-      expect((await evaluate(db, request("return 'next';"), { persistentConnection: true })).resultJson).toBe('"next"');
+    await withDatabase(async (db) => {
+      await expect(
+        evaluate(db, request("ctx.refuse('full', 'No spaces remain.');"), {
+          persistentConnection: true,
+        }),
+      ).rejects.toMatchObject({
+        name: "AppBackendRuntimeError",
+        refusal: { code: "full", message: "No spaces remain." },
+      });
+      expect(
+        (await evaluate(db, request("return 'next';"), { persistentConnection: true })).resultJson,
+      ).toBe('"next"');
     });
   });
 });
@@ -188,7 +298,7 @@ describe("guest memory", () => {
     for (let filled = ${marker.length}; filled < bytes.length; filled *= 2) bytes.copyWithin(filled, 0, filled);
     return copies.length;`;
   // The search holds each byte of the marker plus one, so the marker exists only in memory another operation wrote.
-  const shifted = String.fromCharCode(...[...marker].map(char => char.charCodeAt(0) + 1));
+  const shifted = String.fromCharCode(...[...marker].map((char) => char.charCodeAt(0) + 1));
   const find = `(bytes => { const m = ${JSON.stringify(shifted)}, first = m.charCodeAt(0) - 1;
     for (let i = bytes.indexOf(first); i >= 0; i = bytes.indexOf(first, i + 1)) {
       let j = 1; while (j < m.length && bytes[i + j] === m.charCodeAt(j) - 1) j++;
@@ -211,50 +321,97 @@ describe("guest memory", () => {
     `(() => { const b = new SharedArrayBuffer(16, { maxByteLength: ${size} }); b.grow(${size}); return new Uint8Array(b); })()`,
   ];
 
-  it.each(probes)("keeps a record an earlier operation read out of a later operation's buffer: %s", async probe => {
-    await withDatabase(async db => {
-      db.prepare("INSERT INTO items VALUES(1, ?)").run(marker.repeat(40));
-      expect((await evaluate(db, request(plant), { persistentConnection: true })).resultJson).toBe("4000");
-      // The later operation cannot read items, so the record can reach it only through memory.
-      const later = request(`return ${find}(${probe});`, { tables: ["dohc_receipts"], readOnly: true });
-      expect((await evaluate(db, later, { persistentConnection: true })).resultJson).toBe("false");
-    });
-  });
+  it.each(probes)(
+    "keeps a record an earlier operation read out of a later operation's buffer: %s",
+    async (probe) => {
+      await withDatabase(async (db) => {
+        db.prepare("INSERT INTO items VALUES(1, ?)").run(marker.repeat(40));
+        expect(
+          (await evaluate(db, request(plant), { persistentConnection: true })).resultJson,
+        ).toBe("4000");
+        // The later operation cannot read items, so the record can reach it only through memory.
+        const later = request(`return ${find}(${probe});`, {
+          tables: ["dohc_receipts"],
+          readOnly: true,
+        });
+        expect((await evaluate(db, later, { persistentConnection: true })).resultJson).toBe(
+          "false",
+        );
+      });
+    },
+  );
 
   it("stops an operation at its memory limit, however it allocates, and runs the next one", async () => {
-    await withDatabase(async db => {
-      const many = (count: number) => `const held = []; for (let i = 0; i < ${count}; i++) held.push(new Uint8Array(1 << 20)); return held.length;`;
-      const strings = "const held = []; for (let i = 0; i < 64; i++) held.push('x'.repeat(1 << 20) + i); return held.length;";
-      for (const body of [many(64), strings, "return new Uint8Array(64 << 20).length;", "return new Uint8Array(2 ** 30).length;",
+    await withDatabase(async (db) => {
+      const many = (count: number) =>
+        `const held = []; for (let i = 0; i < ${count}; i++) held.push(new Uint8Array(1 << 20)); return held.length;`;
+      const strings =
+        "const held = []; for (let i = 0; i < 64; i++) held.push('x'.repeat(1 << 20) + i); return held.length;";
+      for (const body of [
+        many(64),
+        strings,
+        "return new Uint8Array(64 << 20).length;",
+        "return new Uint8Array(2 ** 30).length;",
         // Emscripten refuses to grow memory past 2 GiB before it asks the memory.
-        "return new ArrayBuffer(2 ** 31 - 1).byteLength;"]) {
-        await expect(evaluate(db, request(body), { persistentConnection: true }))
-          .rejects.toThrow("App operation needed more than its 24 MiB memory limit, so it stopped.");
+        "return new ArrayBuffer(2 ** 31 - 1).byteLength;",
+      ]) {
+        await expect(evaluate(db, request(body), { persistentConnection: true })).rejects.toThrow(
+          "App operation needed more than its 24 MiB memory limit, so it stopped.",
+        );
       }
       // QuickJS uses part of the memory, so an operation holds most of its limit.
-      expect((await evaluate(db, request(many(16)), { persistentConnection: true })).resultJson).toBe("16");
+      expect(
+        (await evaluate(db, request(many(16)), { persistentConnection: true })).resultJson,
+      ).toBe("16");
       const lowered = { limits: { ...DEFAULT_LIMITS, memoryBytes: 16 << 20 } };
-      await expect(evaluate(db, request(many(16), lowered), { persistentConnection: true }))
-        .rejects.toThrow("App operation needed more than its 16 MiB memory limit, so it stopped.");
+      await expect(
+        evaluate(db, request(many(16), lowered), { persistentConnection: true }),
+      ).rejects.toThrow("App operation needed more than its 16 MiB memory limit, so it stopped.");
       // An operation that runs out of memory can still refuse, and one that recovers returns normally.
-      await expect(evaluate(db, request(`try { ${many(64)} } catch { ctx.refuse('full', 'No memory.'); }`), { persistentConnection: true }))
-        .rejects.toMatchObject({ refusal: { code: "full", message: "No memory." } });
-      expect((await evaluate(db, request(`try { ${many(64)} } catch { return 'recovered'; }`), { persistentConnection: true })).resultJson).toBe('"recovered"');
-      expect((await evaluate(db, request("return 'next';"), { persistentConnection: true })).resultJson).toBe('"next"');
+      await expect(
+        evaluate(db, request(`try { ${many(64)} } catch { ctx.refuse('full', 'No memory.'); }`), {
+          persistentConnection: true,
+        }),
+      ).rejects.toMatchObject({ refusal: { code: "full", message: "No memory." } });
+      expect(
+        (
+          await evaluate(db, request(`try { ${many(64)} } catch { return 'recovered'; }`), {
+            persistentConnection: true,
+          })
+        ).resultJson,
+      ).toBe('"recovered"');
+      expect(
+        (await evaluate(db, request("return 'next';"), { persistentConnection: true })).resultJson,
+      ).toBe('"next"');
     });
   });
 
   it("names the memory limit only for a failure the full memory caused", async () => {
-    await withDatabase(async db => {
+    await withDatabase(async (db) => {
       const persistent = { persistentConnection: true };
       const fill = "let held = []; try { for (;;) held.push(new Uint8Array(1 << 20)); } catch {}";
-      await expect(evaluate(db, request(`${fill} while (true) {}`, { limits: { ...DEFAULT_LIMITS, evaluationMs: 100 } }), persistent))
-        .rejects.toThrow("App operation took longer than its 0.1-second time limit, so it stopped.");
+      await expect(
+        evaluate(
+          db,
+          request(`${fill} while (true) {}`, { limits: { ...DEFAULT_LIMITS, evaluationMs: 100 } }),
+          persistent,
+        ),
+      ).rejects.toThrow("App operation took longer than its 0.1-second time limit, so it stopped.");
       // A host check keeps its own error.
-      await expect(evaluate(db, request(`${fill} held = null; return 'x'.repeat(100);`, { limits: { ...DEFAULT_LIMITS, resultBytes: 10 } }), persistent))
-        .rejects.toThrow(/^Operation result exceeds the app runtime limit\.$/);
-      await expect(evaluate(db, request(`${fill} throw new Error('later');`), persistent))
-        .rejects.toThrow(/^App operation needed more than its 24 MiB memory limit, so it stopped\.$/);
+      await expect(
+        evaluate(
+          db,
+          request(`${fill} held = null; return 'x'.repeat(100);`, {
+            limits: { ...DEFAULT_LIMITS, resultBytes: 10 },
+          }),
+          persistent,
+        ),
+      ).rejects.toThrow(/^Operation result exceeds the app runtime limit\.$/);
+      await expect(
+        evaluate(db, request(`${fill} throw new Error('later');`), persistent),
+      ).rejects.toThrow(
+        /^App operation needed more than its 24 MiB memory limit, so it stopped\.$/,
+      );
       // A query whose result does not fit answers with the limit before the host copies it.
       db.prepare("INSERT INTO items VALUES(1, ?)").run("x".repeat(200 * 1024));
       const read = `let held = [];
@@ -265,14 +422,24 @@ describe("guest memory", () => {
         try { ctx.db.query('SELECT * FROM items'); } catch (error) { message = error.message; }
         held = null;
         return [message, ctx.db.query('SELECT length(value) AS size FROM items')];`;
-      expect(JSON.parse((await evaluate(db, request(read), persistent)).resultJson))
-        .toEqual(["App operation needed more than its 24 MiB memory limit, so it stopped.", [{ size: 200 * 1024 }]]);
-      expect((await evaluate(db, request("return ctx.db.query('SELECT * FROM items')[0].value.length;"), persistent)).resultJson).toBe(String(200 * 1024));
+      expect(JSON.parse((await evaluate(db, request(read), persistent)).resultJson)).toEqual([
+        "App operation needed more than its 24 MiB memory limit, so it stopped.",
+        [{ size: 200 * 1024 }],
+      ]);
+      expect(
+        (
+          await evaluate(
+            db,
+            request("return ctx.db.query('SELECT * FROM items')[0].value.length;"),
+            persistent,
+          )
+        ).resultJson,
+      ).toBe(String(200 * 1024));
     });
   });
 
   it("answers a failed database call with a readable error however full the shape table and memory are", async () => {
-    await withDatabase(async db => {
+    await withDatabase(async (db) => {
       const limit = "App operation needed more than its 24 MiB memory limit, so it stopped.";
       // Many shapes make QuickJS's shape table large. Each step frees a little memory and fails a query with a 1 KiB message.
       const body = `const sql = 'SELECT ' + 'c'.repeat(1000) + ' FROM items';
@@ -299,8 +466,9 @@ describe("guest memory", () => {
         }
         held = null;
         return { limited: limited > 0, named: named > 0, other, shapes: shapes.length, rows: ctx.db.query('SELECT count(*) AS n FROM items') };`;
-      expect(JSON.parse((await evaluate(db, request(body), { persistentConnection: true })).resultJson))
-        .toEqual({ limited: true, named: true, other: 0, shapes: 20000, rows: [{ n: 0 }] });
+      expect(
+        JSON.parse((await evaluate(db, request(body), { persistentConnection: true })).resultJson),
+      ).toEqual({ limited: true, named: true, other: 0, shapes: 20000, rows: [{ n: 0 }] });
     });
   });
 });

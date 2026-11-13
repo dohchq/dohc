@@ -6,10 +6,7 @@ import {
   shareMountRecordsForId,
   usableShareMountRecord,
 } from "./shareMounts";
-import type {
-  ResolvedShareViewFilesTarget,
-  ShareViewFilesTarget,
-} from "./shareViewFiles";
+import type { ResolvedShareViewFilesTarget, ShareViewFilesTarget } from "./shareViewFiles";
 import { shareViewIsPresent } from "./shareViewMarker";
 
 export interface ShareViewFilesWorkspaceRecord {
@@ -28,21 +25,13 @@ export function storedShareMounts(
   // the reserved projection has share history. Decode it as an empty owner
   // set so ordinary local files remain usable while projection reads/listings
   // continue to fail closed through workspaceHasReceivedShareState.
-  return Array.isArray(workspace.shareMounts)
-    ? (workspace.shareMounts as ShareMountRecord[])
-    : [];
+  return Array.isArray(workspace.shareMounts) ? (workspace.shareMounts as ShareMountRecord[]) : [];
 }
 
 export function workspaceHasReceivedShareState(
-  workspace: Pick<
-    ShareViewFilesWorkspaceRecord,
-    "shareView" | "shareMounts"
-  >,
+  workspace: Pick<ShareViewFilesWorkspaceRecord, "shareView" | "shareMounts">,
 ): boolean {
-  return (
-    shareViewIsPresent(workspace.shareView) ||
-    shareMountRegistryIsPresent(workspace)
-  );
+  return shareViewIsPresent(workspace.shareView) || shareMountRegistryIsPresent(workspace);
 }
 
 export function shareMountRegistryIsPresent(
@@ -75,24 +64,22 @@ export function resolveRegisteredShareViewFilesTarget(
         typeof shareView.shareId === "string" && shareView.shareId.length > 0
           ? shareView.shareId
           : null,
-      granterEmail:
-        typeof shareView.granterEmail === "string"
-          ? shareView.granterEmail
-          : null,
+      granterEmail: typeof shareView.granterEmail === "string" ? shareView.granterEmail : null,
       grantedSelector: shareView.grantedSelector,
-      recipientUserId: typeof shareView.recipientUserId === "string" ? shareView.recipientUserId : undefined,
+      recipientUserId:
+        typeof shareView.recipientUserId === "string" ? shareView.recipientUserId : undefined,
       ended: shareView.ended === true,
-      unconfirmedChanges: ShareUnconfirmedChangesSchema.safeParse(shareView.unconfirmedChanges).data,
-      unsavedPaths: shareView.unsavedPaths === undefined
-        ? undefined
-        : Array.isArray(shareView.unsavedPaths) && shareView.unsavedPaths.every(path => typeof path === "string")
-          ? shareView.unsavedPaths
-          : null,
-      relayUrl:
-        typeof shareView.relayUrl === "string" ? shareView.relayUrl : null,
-      ...(workspace.attachmentId === undefined
-        ? {}
-        : { attachmentId: workspace.attachmentId }),
+      unconfirmedChanges: ShareUnconfirmedChangesSchema.safeParse(shareView.unconfirmedChanges)
+        .data,
+      unsavedPaths:
+        shareView.unsavedPaths === undefined
+          ? undefined
+          : Array.isArray(shareView.unsavedPaths) &&
+              shareView.unsavedPaths.every((path) => typeof path === "string")
+            ? shareView.unsavedPaths
+            : null,
+      relayUrl: typeof shareView.relayUrl === "string" ? shareView.relayUrl : null,
+      ...(workspace.attachmentId === undefined ? {} : { attachmentId: workspace.attachmentId }),
     };
   }
 
@@ -106,10 +93,7 @@ export function resolveRegisteredShareViewFilesTarget(
   return {
     kind: "mount",
     workspaceId: workspace.workspaceId,
-    storeWorkspaceId: mountStoreWorkspaceIdFor(
-      workspace.workspaceId,
-      mount.shareId,
-    ),
+    storeWorkspaceId: mountStoreWorkspaceIdFor(workspace.workspaceId, mount.shareId),
     schedulingRootPath: workspace.rootPath,
     rootPath: mountRootFor(workspace.rootPath, mount.label),
     shareId: mount.shareId,

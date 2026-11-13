@@ -18,19 +18,25 @@ vi.mock("node:fs/promises", async (actual) => {
 
 function errno(code: string, path?: string): NodeJS.ErrnoException {
   return Object.assign(new Error(`${code}: operation not permitted, open '${path ?? ""}'`), {
-    code, ...(path === undefined ? {} : { path }),
+    code,
+    ...(path === undefined ? {} : { path }),
   });
 }
 
 // What a macOS privacy refusal does to every call on the folder: the read
 // check fails with EPERM too.
 function refuseReads(): void {
-  vi.mocked(fs.accessSync).mockImplementation(() => { throw errno("EPERM", "/Users/me/Documents/Trip"); });
+  vi.mocked(fs.accessSync).mockImplementation(() => {
+    throw errno("EPERM", "/Users/me/Documents/Trip");
+  });
 }
 
 describe("macOS privacy refusals", () => {
   // Back to the real calls: a Finder lock below needs them.
-  afterEach(() => { vi.mocked(fs.accessSync).mockReset(); vi.mocked(fsPromises.opendir).mockReset(); });
+  afterEach(() => {
+    vi.mocked(fs.accessSync).mockReset();
+    vi.mocked(fsPromises.opendir).mockReset();
+  });
 
   it("names an EPERM that also refuses reads, on macOS only", () => {
     refuseReads();
@@ -38,27 +44,41 @@ describe("macOS privacy refusals", () => {
     expect(isPrivacyDenial(error, "darwin")).toBe(true);
     expect(isPrivacyDenial(error, "linux")).toBe(false);
     expect(isPrivacyDenial(error, "win32")).toBe(false);
-    expect(isPrivacyDenial(errno("EACCES", "/Users/me/Documents/Trip/notes.md"), "darwin")).toBe(false);
+    expect(isPrivacyDenial(errno("EACCES", "/Users/me/Documents/Trip/notes.md"), "darwin")).toBe(
+      false,
+    );
     // A worker hands back the message alone.
-    expect(isPrivacyDenial(new Error("EPERM: operation not permitted, scandir '/Users/me/Documents/Trip'"), "darwin")).toBe(true);
+    expect(
+      isPrivacyDenial(
+        new Error("EPERM: operation not permitted, scandir '/Users/me/Documents/Trip'"),
+        "darwin",
+      ),
+    ).toBe(true);
   });
 
-  it.runIf(process.platform === "darwin")("keeps a file locked in Finder apart: it refuses writes and still reads", () => {
-    const dir = fs.mkdtempSync(join(tmpdir(), "dohc-privacy-"));
-    const file = join(dir, "locked.md");
-    fs.writeFileSync(file, "# Locked\n");
-    execFileSync("chflags", ["uchg", file]);
-    try {
-      let refused: unknown;
-      try { fs.writeFileSync(file, "# Changed\n"); } catch (error) { refused = error; }
-      expect((refused as NodeJS.ErrnoException).code).toBe("EPERM");
-      expect(isPrivacyDenial(refused, "darwin")).toBe(false);
-      expect(withPrivacyDenial(refused, "darwin")).toBe(refused);
-    } finally {
-      execFileSync("chflags", ["nouchg", file]);
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
-  });
+  it.runIf(process.platform === "darwin")(
+    "keeps a file locked in Finder apart: it refuses writes and still reads",
+    () => {
+      const dir = fs.mkdtempSync(join(tmpdir(), "dohc-privacy-"));
+      const file = join(dir, "locked.md");
+      fs.writeFileSync(file, "# Locked\n");
+      execFileSync("chflags", ["uchg", file]);
+      try {
+        let refused: unknown;
+        try {
+          fs.writeFileSync(file, "# Changed\n");
+        } catch (error) {
+          refused = error;
+        }
+        expect((refused as NodeJS.ErrnoException).code).toBe("EPERM");
+        expect(isPrivacyDenial(refused, "darwin")).toBe(false);
+        expect(withPrivacyDenial(refused, "darwin")).toBe(refused);
+      } finally {
+        execFileSync("chflags", ["nouchg", file]);
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("crosses the IPC boundary as words a person can act on, keeping the error for Copy details", () => {
     refuseReads();
@@ -75,12 +95,20 @@ describe("macOS privacy refusals", () => {
   it("fails a macOS open whose root refuses reads, and leaves any other answer to the open", async () => {
     refuseReads();
     vi.mocked(fsPromises.opendir).mockRejectedValueOnce(errno("EPERM", "/Users/me/Documents/Trip"));
-    await expect(assertRootNotPrivacyDenied("/Users/me/Documents/Trip", "darwin")).rejects.toMatchObject({ code: "EPERM" });
+    await expect(
+      assertRootNotPrivacyDenied("/Users/me/Documents/Trip", "darwin"),
+    ).rejects.toMatchObject({ code: "EPERM" });
 
-    vi.mocked(fsPromises.opendir).mockRejectedValueOnce(errno("ENOENT", "/Users/me/Documents/Gone"));
-    await expect(assertRootNotPrivacyDenied("/Users/me/Documents/Gone", "darwin")).resolves.toBeUndefined();
+    vi.mocked(fsPromises.opendir).mockRejectedValueOnce(
+      errno("ENOENT", "/Users/me/Documents/Gone"),
+    );
+    await expect(
+      assertRootNotPrivacyDenied("/Users/me/Documents/Gone", "darwin"),
+    ).resolves.toBeUndefined();
 
-    await expect(assertRootNotPrivacyDenied("/Users/me/Documents/Trip", "linux")).resolves.toBeUndefined();
+    await expect(
+      assertRootNotPrivacyDenied("/Users/me/Documents/Trip", "linux"),
+    ).resolves.toBeUndefined();
     expect(fsPromises.opendir).toHaveBeenCalledTimes(2);
   });
 });

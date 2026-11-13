@@ -1,9 +1,26 @@
 import { createHash } from "node:crypto";
-import { access, chmod, constants, copyFile, lstat, mkdir, open, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  access,
+  chmod,
+  constants,
+  copyFile,
+  lstat,
+  mkdir,
+  open,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { atomicReplaceFile } from "../atomicReplaceFile";
 import { join } from "node:path";
 import { Worker } from "node:worker_threads";
-import { agentRuntimeTarget, bundledPosixLauncher, posixMcpLauncher } from "../../scripts/mcp-launchers.mjs";
+import {
+  agentRuntimeTarget,
+  bundledPosixLauncher,
+  posixMcpLauncher,
+} from "../../scripts/mcp-launchers.mjs";
 import { PINNED_NODE } from "../../scripts/pinned-node.mjs";
 
 // After a crash, the launcher must not name a file whose bytes never reached
@@ -25,11 +42,15 @@ async function publishAtomically(
   targetPath: string,
   mode?: number,
 ): Promise<void> {
-  await atomicReplaceFile(targetPath, async (tempPath) => {
-    await copyFile(sourcePath, tempPath);
-    if (mode !== undefined) await chmod(tempPath, mode);
-    await flushFile(tempPath);
-  }, DURABLE_RENAME);
+  await atomicReplaceFile(
+    targetPath,
+    async (tempPath) => {
+      await copyFile(sourcePath, tempPath);
+      if (mode !== undefined) await chmod(tempPath, mode);
+      await flushFile(tempPath);
+    },
+    DURABLE_RENAME,
+  );
 }
 
 async function publishContentAtomically(
@@ -37,15 +58,22 @@ async function publishContentAtomically(
   targetPath: string,
   mode?: number,
 ): Promise<void> {
-  await atomicReplaceFile(targetPath, async (tempPath) => {
-    await writeFile(tempPath, content);
-    if (mode !== undefined) await chmod(tempPath, mode);
-    await flushFile(tempPath);
-  }, DURABLE_RENAME);
+  await atomicReplaceFile(
+    targetPath,
+    async (tempPath) => {
+      await writeFile(tempPath, content);
+      if (mode !== undefined) await chmod(tempPath, mode);
+      await flushFile(tempPath);
+    },
+    DURABLE_RENAME,
+  );
 }
 
 async function contentHash(filePath: string): Promise<string> {
-  return createHash("sha256").update(await readFile(filePath)).digest("hex").slice(0, 16);
+  return createHash("sha256")
+    .update(await readFile(filePath))
+    .digest("hex")
+    .slice(0, 16);
 }
 
 // Hashing dohc's 120 MB Node.js on Electron's main thread held up the first
@@ -64,7 +92,9 @@ function sha256InWorker(filePath: string): Promise<string> {
     const worker = new Worker(SHA256_WORKER_SOURCE, { eval: true, workerData: filePath });
     worker.once("message", (digest: string) => resolve(digest));
     worker.once("error", reject);
-    worker.once("exit", (code) => reject(new Error(`The Node.js hash worker stopped with code ${code}.`)));
+    worker.once("exit", (code) =>
+      reject(new Error(`The Node.js hash worker stopped with code ${code}.`)),
+    );
   });
 }
 
@@ -83,16 +113,24 @@ async function isExecutableFile(filePath: string): Promise<boolean> {
 // pinned release isn't published yet. Its name holds that release's hash,
 // and a published copy was checked before its rename.
 async function publishNode(sourcePath: string, targetPath: string, sha256: string): Promise<void> {
-  const [source, published] = await Promise.all([stat(sourcePath), lstat(targetPath).catch(() => undefined)]);
-  if (published?.isFile() && published.size === source.size && await isExecutableFile(targetPath)) return;
-  await atomicReplaceFile(targetPath, async (tempPath) => {
-    await copyFile(sourcePath, tempPath);
-    await chmod(tempPath, 0o755);
-    if (await sha256InWorker(tempPath) !== sha256) {
-      throw new Error("dohc's Node.js does not match its pinned release.");
-    }
-    await flushFile(tempPath);
-  }, DURABLE_RENAME);
+  const [source, published] = await Promise.all([
+    stat(sourcePath),
+    lstat(targetPath).catch(() => undefined),
+  ]);
+  if (published?.isFile() && published.size === source.size && (await isExecutableFile(targetPath)))
+    return;
+  await atomicReplaceFile(
+    targetPath,
+    async (tempPath) => {
+      await copyFile(sourcePath, tempPath);
+      await chmod(tempPath, 0o755);
+      if ((await sha256InWorker(tempPath)) !== sha256) {
+        throw new Error("dohc's Node.js does not match its pinned release.");
+      }
+      await flushFile(tempPath);
+    },
+    DURABLE_RENAME,
+  );
 }
 
 const LAUNCHER_NODE = /^NODE="\$\{0%\/\*\}\/(node-[0-9a-f]{64})"$/m;
@@ -104,13 +142,14 @@ const LAUNCHER_NODE = /^NODE="\$\{0%\/\*\}\/(node-[0-9a-f]{64})"$/m;
 // A missing launcher names nothing. A launcher that exists but can't be read
 // may name any Node.js here, so that refresh removes nothing.
 async function removeLeftovers(targetDir: string, currentNode: string | undefined): Promise<void> {
-  const launcher = await readFile(join(targetDir, "dohc-mcp"), "utf8").catch((cause: NodeJS.ErrnoException) =>
-    cause.code === "ENOENT" ? "" : undefined,
+  const launcher = await readFile(join(targetDir, "dohc-mcp"), "utf8").catch(
+    (cause: NodeJS.ErrnoException) => (cause.code === "ENOENT" ? "" : undefined),
   );
   if (launcher === undefined) return;
   const namedNode = LAUNCHER_NODE.exec(launcher)?.[1];
   for (const name of await readdir(targetDir)) {
-    const earlierNode = /^node-[0-9a-f]{64}$/.test(name) && name !== namedNode && name !== currentNode;
+    const earlierNode =
+      /^node-[0-9a-f]{64}$/.test(name) && name !== namedNode && name !== currentNode;
     if (name.includes(".tmp-") || earlierNode) {
       await rm(join(targetDir, name), { force: true }).catch(() => undefined);
     }
@@ -124,9 +163,10 @@ export async function syncLinuxStableCliBin(input: {
 }): Promise<void> {
   await mkdir(input.targetDir, { recursive: true });
   const arch = input.arch ?? process.arch;
-  const pinned = agentRuntimeTarget("linux", arch) === "bundled"
-    ? PINNED_NODE[`linux-${arch}` as keyof typeof PINNED_NODE]
-    : undefined;
+  const pinned =
+    agentRuntimeTarget("linux", arch) === "bundled"
+      ? PINNED_NODE[`linux-${arch}` as keyof typeof PINNED_NODE]
+      : undefined;
   const nodeFileName = pinned ? `node-${pinned.sha256}` : undefined;
   await removeLeftovers(input.targetDir, nodeFileName);
   const hash = await contentHash(join(input.resourcesCliBinDir, "dohc-mcp.mjs"));
@@ -165,14 +205,19 @@ export async function hasIntactStableCliBin(targetDir: string): Promise<boolean>
       readFile(launcherPath, "utf8"),
     ]);
     if (!launcherStat.isFile() || launcherStat.size === 0) return false;
-    const referencedModule = /"\$\{0%\/\*\}\/(dohc-mcp-[^"/]+\.mjs)" "\$@"/.exec(launcherContent)?.[1];
+    const referencedModule = /"\$\{0%\/\*\}\/(dohc-mcp-[^"/]+\.mjs)" "\$@"/.exec(
+      launcherContent,
+    )?.[1];
     if (!referencedModule) return false;
     const moduleStat = await stat(join(targetDir, referencedModule));
     if (!moduleStat.isFile() || moduleStat.size === 0) return false;
     const referencedNode = LAUNCHER_NODE.exec(launcherContent)?.[1];
     if (referencedNode === undefined) return true;
     const nodePath = join(targetDir, referencedNode);
-    return await isExecutableFile(nodePath) && await sha256InWorker(nodePath) === referencedNode.slice("node-".length);
+    return (
+      (await isExecutableFile(nodePath)) &&
+      (await sha256InWorker(nodePath)) === referencedNode.slice("node-".length)
+    );
   } catch {
     return false;
   }

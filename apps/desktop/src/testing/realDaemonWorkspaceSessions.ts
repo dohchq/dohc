@@ -9,7 +9,8 @@ import { installedReaderConfig } from "../workspaces/installedReaderConfig";
 
 export function realDaemonReaderConfig(): string {
   const config = installedReaderConfig(fileURLToPath(new URL("../../resources", import.meta.url)));
-  if (!config) throw new Error("The test daemon needs the prepared Markdown reader. Run pnpm qa:prepare.");
+  if (!config)
+    throw new Error("The test daemon needs the prepared Markdown reader. Run pnpm qa:prepare.");
   return config;
 }
 
@@ -30,8 +31,7 @@ export function createRealDaemonWorkspaceSessions(
   options: { workspaceOpenDeadlineMs?: number } = {},
 ): EngineWorkspaceSessions {
   return new EngineWorkspaceSessions(source, {
-    workspaceOpenDeadlineMs:
-      options.workspaceOpenDeadlineMs ?? REAL_DAEMON_DEADLINE_MS,
+    workspaceOpenDeadlineMs: options.workspaceOpenDeadlineMs ?? REAL_DAEMON_DEADLINE_MS,
   });
 }
 

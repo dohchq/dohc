@@ -94,9 +94,7 @@ export function shareViewWriteScopeOf(
   const marker = isRecord(shareView) ? shareView : {};
   return {
     granterEmail: shareViewGranterEmail(marker),
-    access: shareViewIdentityIsIntact(marker)
-      ? readableShareLevel(marker.grantedSelector)
-      : null,
+    access: shareViewIdentityIsIntact(marker) ? readableShareLevel(marker.grantedSelector) : null,
     ended: marker.ended === true,
   };
 }

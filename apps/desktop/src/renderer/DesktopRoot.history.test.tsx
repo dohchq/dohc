@@ -49,7 +49,8 @@ it("remounts the shell when main activates B and keeps A's late history answer o
   bridge.listHistory = vi.fn(async (payload?: { workspaceId: string }) => {
     const workspaceId = payload?.workspaceId;
     if (workspaceId === OTHER_WORKSPACE.workspaceId) return historyPage(workspaceId, "m-b", B_ONLY);
-    if (workspaceId !== WORKSPACE.workspaceId) throw new Error(`Unexpected workspace ${workspaceId}`);
+    if (workspaceId !== WORKSPACE.workspaceId)
+      throw new Error(`Unexpected workspace ${workspaceId}`);
     return holdA ? heldA.promise : historyPage(workspaceId, "m-a", A_CONTROL);
   });
   vi.stubGlobal("dohcDesktop", bridge);

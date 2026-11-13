@@ -41,10 +41,7 @@ export interface NavigationPolicy {
 // The renderer may only navigate within the app itself: the packaged
 // bundle directory or the dev server's exact origin. Everything else,
 // including unparseable URLs, is denied.
-export function decideNavigation(
-  targetUrl: string,
-  policy: NavigationPolicy,
-): NavigationDecision {
+export function decideNavigation(targetUrl: string, policy: NavigationPolicy): NavigationDecision {
   try {
     const url = new URL(targetUrl);
     if (url.protocol === "http:" || url.protocol === "https:") {
@@ -83,10 +80,7 @@ export function isSafeExternalUrl(targetUrl: string): boolean {
 // set must never load (or IPC-trust) an arbitrary origin.
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
 
-export function validateDevServerUrl(
-  raw: string | undefined,
-  isPackaged: boolean,
-): string | null {
+export function validateDevServerUrl(raw: string | undefined, isPackaged: boolean): string | null {
   if (!raw || isPackaged) return null;
   try {
     const url = new URL(raw);

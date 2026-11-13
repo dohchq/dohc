@@ -63,7 +63,13 @@ describe.skipIf(!(await postgresReachable()))("startup", () => {
     await client.query(`create schema "${schema}"`);
     await client.query(`set search_path to "${schema}"`);
     await client.query(
-      await readFile(new URL("../../../packages/workspace-postgres/src/db/migrations/0001_better_auth.sql", import.meta.url), "utf8"),
+      await readFile(
+        new URL(
+          "../../../packages/workspace-postgres/src/db/migrations/0001_better_auth.sql",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
     );
     pool = new pg.Pool({ connectionString: schemaUrl });
   });
@@ -76,10 +82,25 @@ describe.skipIf(!(await postgresReachable()))("startup", () => {
 
   /** One verified and one unverified account, each signed in while sign-up was open. */
   async function signedInAccounts(): Promise<{ verified: string; unverified: string }> {
-    await pool.query(await readFile(new URL("../../../packages/workspace-postgres/src/db/migrations/0004_account_deletion.sql", import.meta.url), "utf8"));
-    const auth = createWorkspaceAuth({ pool, baseURL: "http://localhost:1786", secret: SECRET, sendEmail: async () => undefined });
+    await pool.query(
+      await readFile(
+        new URL(
+          "../../../packages/workspace-postgres/src/db/migrations/0004_account_deletion.sql",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    );
+    const auth = createWorkspaceAuth({
+      pool,
+      baseURL: "http://localhost:1786",
+      secret: SECRET,
+      sendEmail: async () => undefined,
+    });
     const signUp = (name: string) =>
-      auth.api.signUpEmail({ body: { email: `${name}-${Date.now()}@dohc.test`, password: "a-real-password-123", name } });
+      auth.api.signUpEmail({
+        body: { email: `${name}-${Date.now()}@dohc.test`, password: "a-real-password-123", name },
+      });
     const verified = (await signUp("verified")).user.id;
     const unverified = (await signUp("unverified")).user.id;
     await pool.query('update "user" set "emailVerified" = true where id = $1', [verified]);
@@ -109,7 +130,9 @@ describe.skipIf(!(await postgresReachable()))("startup", () => {
         probe.close(() => resolve(port));
       });
     });
-    const inherited = Object.entries(process.env).filter(([key]) => !/^(DOHC_|WORKSPACE_API_|BETTER_AUTH_|POSTGRES_)/.test(key));
+    const inherited = Object.entries(process.env).filter(
+      ([key]) => !/^(DOHC_|WORKSPACE_API_|BETTER_AUTH_|POSTGRES_)/.test(key),
+    );
     const child = spawn(process.execPath, ["--import", "tsx", "src/main.ts"], {
       cwd: SERVICE_ROOT,
       env: {
@@ -118,7 +141,9 @@ describe.skipIf(!(await postgresReachable()))("startup", () => {
         POSTGRES_URL: schemaUrl,
         BETTER_AUTH_SECRET: SECRET,
         WORKSPACE_API_PORT: String(port),
-        ...(signUpEmails ? { DOHC_SIGN_UP_EMAILS: signUpEmails, WORKSPACE_API_RELAY_URL: "http://127.0.0.1:9" } : {}),
+        ...(signUpEmails
+          ? { DOHC_SIGN_UP_EMAILS: signUpEmails, WORKSPACE_API_RELAY_URL: "http://127.0.0.1:9" }
+          : {}),
       },
       windowsHide: true,
     });
@@ -132,7 +157,9 @@ describe.skipIf(!(await postgresReachable()))("startup", () => {
         child.stderr.on("data", (chunk: Buffer) => {
           output += chunk.toString();
         });
-        child.on("exit", (code) => reject(new Error(`workspace-api exited with ${code} before it listened:\n${output}`)));
+        child.on("exit", (code) =>
+          reject(new Error(`workspace-api exited with ${code} before it listened:\n${output}`)),
+        );
       });
     } finally {
       if (child.exitCode === null && child.signalCode === null) {
@@ -148,5 +175,4 @@ describe.skipIf(!(await postgresReachable()))("startup", () => {
     assert.deepEqual(await signIns(unverified), { sessions: 0, deviceCodes: 0 });
     assert.deepEqual(await signIns(verified), { sessions: 1, deviceCodes: 0 });
   }, 60_000);
-
 });

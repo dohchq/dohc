@@ -73,11 +73,7 @@ function stateDirCandidates(input: {
     // Packaged: userData is %APPDATA%\<productName>. Unpackaged: Electron uses
     // the package name, which is where a developer's app writes its endpoint.
     return appData
-      ? [
-          join(appData, "dohc"),
-          join(appData, "@dohc", "desktop"),
-          join(appData, "Electron"),
-        ]
+      ? [join(appData, "dohc"), join(appData, "@dohc", "desktop"), join(appData, "Electron")]
       : [];
   }
   const configHome = input.env.XDG_CONFIG_HOME ?? join(input.homeDir, ".config");
@@ -96,16 +92,10 @@ interface EndpointCandidate {
   tokenPath: string;
 }
 
-function candidateForStateDir(
-  stateDir: string,
-  platform: NodeJS.Platform,
-): EndpointCandidate {
+function candidateForStateDir(stateDir: string, platform: NodeJS.Platform): EndpointCandidate {
   return {
     stateDir,
-    descriptorPath: join(
-      stateDir,
-      platform === "win32" ? ENDPOINT_FILE : SOCKET_FILE,
-    ),
+    descriptorPath: join(stateDir, platform === "win32" ? ENDPOINT_FILE : SOCKET_FILE),
     tokenPath: join(stateDir, TOKEN_FILE),
   };
 }
@@ -164,11 +154,9 @@ async function locateCliEndpoint(options: CliClientOptions = {}): Promise<CliEnd
   // No live endpoint. A unix path is still nameable, so hand back the preferred
   // one and let the connection report the failure. A pipe name is not.
   if (platform === "win32") throw new DohcCliError("desktop app not running");
-  const fallback = candidates[0] ??
-    candidateForStateDir(
-      join(options.homeDir ?? homedir(), ".config", "dohc"),
-      platform,
-    );
+  const fallback =
+    candidates[0] ??
+    candidateForStateDir(join(options.homeDir ?? homedir(), ".config", "dohc"), platform);
   return {
     stateDir: fallback.stateDir,
     socketPath: fallback.descriptorPath,
@@ -196,7 +184,12 @@ async function readToken(path: string): Promise<string> {
 }
 
 // A version change waits up to 30 s for open windows to save before it runs.
-export const VERSION_CHANGE_VERBS: ReadonlySet<CliVerb> = new Set(["versionCreate", "versionSwitch", "versionMerge", "versionResolve"]);
+export const VERSION_CHANGE_VERBS: ReadonlySet<CliVerb> = new Set([
+  "versionCreate",
+  "versionSwitch",
+  "versionMerge",
+  "versionResolve",
+]);
 
 function readResponseLine(
   verb: CliVerb,
@@ -206,7 +199,10 @@ function readResponseLine(
   signal?: AbortSignal,
 ): Promise<unknown> {
   return new Promise((resolveResponse, rejectResponse) => {
-    if (signal?.aborted) { rejectResponse(new DohcCliError("Chat wait cancelled.")); return; }
+    if (signal?.aborted) {
+      rejectResponse(new DohcCliError("Chat wait cancelled."));
+      return;
+    }
     const socket = createConnection(socketPath);
     let settled = false;
     let buffer = "";
@@ -241,11 +237,15 @@ function readResponseLine(
       }
     });
     socket.once("timeout", () => {
-      rejectOnce(new DohcCliError(verb === "historyUndo"
-        ? "Undo may still be finishing. Run the same command again to get its result."
-        : VERSION_CHANGE_VERBS.has(verb)
-          ? "The version change may still be finishing. Run dohc version list or dohc version conflicts before you try again."
-          : "desktop app did not respond"));
+      rejectOnce(
+        new DohcCliError(
+          verb === "historyUndo"
+            ? "Undo may still be finishing. Run the same command again to get its result."
+            : VERSION_CHANGE_VERBS.has(verb)
+              ? "The version change may still be finishing. Run dohc version list or dohc version conflicts before you try again."
+              : "desktop app did not respond",
+        ),
+      );
     });
     socket.once("error", () => {
       rejectOnce(new DohcCliError("desktop app not running"));
@@ -265,10 +265,13 @@ export async function sendCliRequest<Verb extends CliVerb>(
   const platform = options.platform ?? process.platform;
   const automaticDiscovery = options.stateDir === undefined;
   const endpoints = automaticDiscovery
-    ? (await Promise.all(
-        endpointCandidates(options, platform).map((candidate) =>
-          resolveEndpoint(candidate, platform)),
-      )).filter((endpoint): endpoint is CliEndpoint => endpoint !== null)
+    ? (
+        await Promise.all(
+          endpointCandidates(options, platform).map((candidate) =>
+            resolveEndpoint(candidate, platform),
+          ),
+        )
+      ).filter((endpoint): endpoint is CliEndpoint => endpoint !== null)
     : [await locateCliEndpoint(options)];
   if (endpoints.length === 0) throw new DohcCliError("desktop app not running");
 
@@ -276,12 +279,17 @@ export async function sendCliRequest<Verb extends CliVerb>(
     const endpoint = endpoints[index]!;
     try {
       const token = await readToken(endpoint.tokenPath);
-      const request: CliRequest = cliRequestSchema.parse({ ...requestWithoutToken, door: requestWithoutToken.door ?? "cli", token, ...runSecretOf(options) });
-      const rawResponse = await (options.transport ?? ((path: string, line: string, timeout: number | undefined) => readResponseLine(request.verb, path, line, timeout, options.signal)))(
-        endpoint.socketPath,
-        JSON.stringify(request),
-        options.timeoutMs,
-      );
+      const request: CliRequest = cliRequestSchema.parse({
+        ...requestWithoutToken,
+        door: requestWithoutToken.door ?? "cli",
+        token,
+        ...runSecretOf(options),
+      });
+      const rawResponse = await (
+        options.transport ??
+        ((path: string, line: string, timeout: number | undefined) =>
+          readResponseLine(request.verb, path, line, timeout, options.signal))
+      )(endpoint.socketPath, JSON.stringify(request), options.timeoutMs);
       const responseVersion = responseVersionEnvelopeSchema.safeParse(rawResponse);
       if (!responseVersion.success) {
         throw new DohcCliError("desktop app returned an invalid response");
@@ -298,7 +306,8 @@ export async function sendCliRequest<Verb extends CliVerb>(
         throw new DohcCliError("desktop app returned an invalid response");
       }
     } catch (error) {
-      const canTryNext = automaticDiscovery &&
+      const canTryNext =
+        automaticDiscovery &&
         index < endpoints.length - 1 &&
         error instanceof DohcCliError &&
         error.message === "desktop app not running";

@@ -19,125 +19,398 @@ const PROJECT = resolve("/workspace/project");
 
 const TOKEN = "a".repeat(64);
 it("stops sync through main without a caller-supplied workspace or identity", async () => {
-  const request = vi.fn(async () => ({ ok: true, workspaceId: "workspace", workspaceSynced: false }));
-  const result = await executeCli({ argv: ["sync", "stop", "--json", "--as-agent", "--agent", "Claude"], cwd: "/workspace", env: {}, request });
-  expect(result.exitCode).toBe(0);
-  expect(request).toHaveBeenCalledWith(expect.objectContaining({
-    verb: "stopSync", args: { cwd: resolve("/workspace"), actor: "agent", agent: "Claude" },
+  const request = vi.fn(async () => ({
+    ok: true,
+    workspaceId: "workspace",
+    workspaceSynced: false,
   }));
+  const result = await executeCli({
+    argv: ["sync", "stop", "--json", "--as-agent", "--agent", "Claude"],
+    cwd: "/workspace",
+    env: {},
+    request,
+  });
+  expect(result.exitCode).toBe(0);
+  expect(request).toHaveBeenCalledWith(
+    expect.objectContaining({
+      verb: "stopSync",
+      args: { cwd: resolve("/workspace"), actor: "agent", agent: "Claude" },
+    }),
+  );
   expect(JSON.parse(result.stdout)).toMatchObject({ workspaceSynced: false });
-  expect((await executeCli({ argv: ["sync", "stop", "other-workspace"], env: {}, request })).exitCode).toBe(1);
+  expect(
+    (await executeCli({ argv: ["sync", "stop", "other-workspace"], env: {}, request })).exitCode,
+  ).toBe(1);
 });
 
 it("lists live documents with each state and reason, and pages with the list's cursor", async () => {
-  const live = { ok: true, nextCursor: "notes/old.md", documents: [
-    { path: "plan.md", objectId: "object-plan", status: "ready", canResume: false, quarantine: "stopping", storedOn: "this-computer", incident: "release:a:0" },
-    { path: "held.md", objectId: "object-held", status: "unavailable", reason: "conflict-parent-withheld", canResume: false },
-    { path: "long.md", objectId: "object-long", status: "unavailable", reason: "live-history-over-budget", canResume: true },
-    { path: "failing.md", objectId: "object-failing", status: "unavailable", reason: "live-start-failing", failure: { word: "engine-refused", since: "2026-11-13T01:00:00.000Z" }, canResume: true },
-    { path: "old.md", objectId: "object-old", status: "retired", canResume: true, deferredStop: { unsentEdits: 1, editable: false } },
-  ] };
+  const live = {
+    ok: true,
+    nextCursor: "notes/old.md",
+    documents: [
+      {
+        path: "plan.md",
+        objectId: "object-plan",
+        status: "ready",
+        canResume: false,
+        quarantine: "stopping",
+        storedOn: "this-computer",
+        incident: "release:a:0",
+      },
+      {
+        path: "held.md",
+        objectId: "object-held",
+        status: "unavailable",
+        reason: "conflict-parent-withheld",
+        canResume: false,
+      },
+      {
+        path: "long.md",
+        objectId: "object-long",
+        status: "unavailable",
+        reason: "live-history-over-budget",
+        canResume: true,
+      },
+      {
+        path: "failing.md",
+        objectId: "object-failing",
+        status: "unavailable",
+        reason: "live-start-failing",
+        failure: { word: "engine-refused", since: "2026-11-13T01:00:00.000Z" },
+        canResume: true,
+      },
+      {
+        path: "old.md",
+        objectId: "object-old",
+        status: "retired",
+        canResume: true,
+        deferredStop: { unsentEdits: 1, editable: false },
+      },
+    ],
+  };
   const request = vi.fn<(request: CliRequestWithoutToken) => Promise<unknown>>(async () => live);
-  expect(await executeCli({ argv: ["document", "live"], cwd: "/workspace", env: {}, request }))
-    .toEqual({ exitCode: 0, stdout: [
-      "plan.md · live · kept edits stopping",
-      "held.md · can't resume",
-      "long.md · history too long · can resume",
-      "failing.md · can't start · server's reason engine-refused since 2026-11-13T01:00:00.000Z · can resume",
-      "old.md · stopped · can resume · Stop waits for 1 unsent edit",
-      "More documents; use --cursor notes/old.md",
-    ].join("\n") + "\n", stderr: "" });
-  expect((await executeCli({ argv: ["document", "live", "--cursor", "notes/old.md"], cwd: "/workspace", env: {}, request })).exitCode).toBe(0);
+  expect(
+    await executeCli({ argv: ["document", "live"], cwd: "/workspace", env: {}, request }),
+  ).toEqual({
+    exitCode: 0,
+    stdout:
+      [
+        "plan.md · live · kept edits stopping",
+        "held.md · can't resume",
+        "long.md · history too long · can resume",
+        "failing.md · can't start · server's reason engine-refused since 2026-11-13T01:00:00.000Z · can resume",
+        "old.md · stopped · can resume · Stop waits for 1 unsent edit",
+        "More documents; use --cursor notes/old.md",
+      ].join("\n") + "\n",
+    stderr: "",
+  });
+  expect(
+    (
+      await executeCli({
+        argv: ["document", "live", "--cursor", "notes/old.md"],
+        cwd: "/workspace",
+        env: {},
+        request,
+      })
+    ).exitCode,
+  ).toBe(0);
   expect(request.mock.calls.map(([sent]) => [sent.verb, sent.args])).toEqual([
     ["liveDocuments", { cwd: WORKSPACE, actor: "agent" }],
     ["liveDocuments", { cwd: WORKSPACE, actor: "agent", cursor: "notes/old.md" }],
   ]);
-  expect((await executeCli({ argv: ["document", "live", "extra"], env: {}, request })).exitCode).toBe(1);
-  expect(await executeCli({ argv: ["document", "live", "--json"], env: {},
-    request: async () => ({ ok: false, reason: "Live documents can be listed, stopped, and resumed only in the original workspace. Open it to continue." }) }))
-    .toEqual({ exitCode: 1, stdout: "", stderr: "dohc: Live documents can be listed, stopped, and resumed only in the original workspace. Open it to continue.\n" });
+  expect(
+    (await executeCli({ argv: ["document", "live", "extra"], env: {}, request })).exitCode,
+  ).toBe(1);
+  expect(
+    await executeCli({
+      argv: ["document", "live", "--json"],
+      env: {},
+      request: async () => ({
+        ok: false,
+        reason:
+          "Live documents can be listed, stopped, and resumed only in the original workspace. Open it to continue.",
+      }),
+    }),
+  ).toEqual({
+    exitCode: 1,
+    stdout: "",
+    stderr:
+      "dohc: Live documents can be listed, stopped, and resumed only in the original workspace. Open it to continue.\n",
+  });
 });
 
 it("says when live editing was already stopped or live", async () => {
   const request = vi.fn<(request: CliRequestWithoutToken) => Promise<unknown>>(async ({ verb }) =>
-    verb === "liveStop" ? { ok: true, path: "plan.md", keptEdits: "none", already: true } : { ok: true, path: "plan.md", already: true });
-  expect((await executeCli({ argv: ["document", "stop", "plan.md"], cwd: "/workspace", env: {}, request })).stdout)
-    .toBe("Live editing for plan.md was already stopped.\n");
-  expect((await executeCli({ argv: ["document", "resume", "plan.md"], cwd: "/workspace", env: {}, request })).stdout).toBe("plan.md was already live.\n");
+    verb === "liveStop"
+      ? { ok: true, path: "plan.md", keptEdits: "none", already: true }
+      : { ok: true, path: "plan.md", already: true },
+  );
+  expect(
+    (
+      await executeCli({
+        argv: ["document", "stop", "plan.md"],
+        cwd: "/workspace",
+        env: {},
+        request,
+      })
+    ).stdout,
+  ).toBe("Live editing for plan.md was already stopped.\n");
+  expect(
+    (
+      await executeCli({
+        argv: ["document", "resume", "plan.md"],
+        cwd: "/workspace",
+        env: {},
+        request,
+      })
+    ).stdout,
+  ).toBe("plan.md was already live.\n");
 });
 
 it("stops and resumes live editing with only the caller's path", async () => {
   const request = vi.fn<(request: CliRequestWithoutToken) => Promise<unknown>>(async ({ verb }) =>
-    verb === "liveStop" ? { ok: true, path: "plan.md", keptEdits: "kept" } : { ok: true, path: "plan.md" });
-  expect(await executeCli({ argv: ["document", "stop", "plan.md"], cwd: "/workspace", env: {}, request }))
-    .toEqual({ exitCode: 0, stdout: "Stopped live editing for plan.md. dohc still keeps edits the server refused. Run kept-edits to check them.\n", stderr: "" });
-  expect((await executeCli({ argv: ["document", "stop", "plan.md", "--object-id", "object-plan"], cwd: "/workspace", env: {}, request })).exitCode).toBe(0);
-  expect(await executeCli({ argv: ["document", "resume", "plan.md"], cwd: "/workspace", env: {}, request }))
-    .toEqual({ exitCode: 0, stdout: "Resuming live editing for plan.md\n", stderr: "" });
+    verb === "liveStop"
+      ? { ok: true, path: "plan.md", keptEdits: "kept" }
+      : { ok: true, path: "plan.md" },
+  );
+  expect(
+    await executeCli({
+      argv: ["document", "stop", "plan.md"],
+      cwd: "/workspace",
+      env: {},
+      request,
+    }),
+  ).toEqual({
+    exitCode: 0,
+    stdout:
+      "Stopped live editing for plan.md. dohc still keeps edits the server refused. Run kept-edits to check them.\n",
+    stderr: "",
+  });
+  expect(
+    (
+      await executeCli({
+        argv: ["document", "stop", "plan.md", "--object-id", "object-plan"],
+        cwd: "/workspace",
+        env: {},
+        request,
+      })
+    ).exitCode,
+  ).toBe(0);
+  expect(
+    await executeCli({
+      argv: ["document", "resume", "plan.md"],
+      cwd: "/workspace",
+      env: {},
+      request,
+    }),
+  ).toEqual({ exitCode: 0, stdout: "Resuming live editing for plan.md\n", stderr: "" });
   expect(request.mock.calls.map(([sent]) => [sent.verb, sent.args])).toEqual([
     ["liveStop", { cwd: WORKSPACE, actor: "agent", path: "plan.md" }],
     ["liveStop", { cwd: WORKSPACE, actor: "agent", path: "plan.md", objectId: "object-plan" }],
     ["liveResume", { cwd: WORKSPACE, actor: "agent", path: "plan.md" }],
   ]);
-  expect(await executeCli({ argv: ["document", "stop"], env: {}, request }))
-    .toEqual({ exitCode: 1, stdout: "", stderr: "dohc: document stop requires a path\n" });
-  expect((await executeCli({ argv: ["document", "resume", "plan.md", "extra"], env: {}, request })).exitCode).toBe(1);
+  expect(await executeCli({ argv: ["document", "stop"], env: {}, request })).toEqual({
+    exitCode: 1,
+    stdout: "",
+    stderr: "dohc: document stop requires a path\n",
+  });
+  expect(
+    (await executeCli({ argv: ["document", "resume", "plan.md", "extra"], env: {}, request }))
+      .exitCode,
+  ).toBe(1);
 });
 
 it("lists, saves, tries again and stops again kept edits with only the caller's path and incident", async () => {
-  const kept = { ok: true, keptEdits: [
-    { path: "plan.md", reason: "invalid-update", storedOn: "server", incident: "outbox:delivery:0", recovery: "paused" },
-    { path: "note.md", reason: "restore-fenced", storedOn: "this-computer", incident: "old-1:delivery:0", recovery: "paused", saveOnly: true },
-    { path: "old.md", reason: "restore-fenced", storedOn: "server", incident: "earlier:0", recovery: "copied", earlier: true },
-  ], pendingShare: ["notes/waiting.md"] };
+  const kept = {
+    ok: true,
+    keptEdits: [
+      {
+        path: "plan.md",
+        reason: "invalid-update",
+        storedOn: "server",
+        incident: "outbox:delivery:0",
+        recovery: "paused",
+      },
+      {
+        path: "note.md",
+        reason: "restore-fenced",
+        storedOn: "this-computer",
+        incident: "old-1:delivery:0",
+        recovery: "paused",
+        saveOnly: true,
+      },
+      {
+        path: "old.md",
+        reason: "restore-fenced",
+        storedOn: "server",
+        incident: "earlier:0",
+        recovery: "copied",
+        earlier: true,
+      },
+    ],
+    pendingShare: ["notes/waiting.md"],
+  };
   const request = vi.fn<(request: CliRequestWithoutToken) => Promise<unknown>>(async ({ verb }) =>
-    verb === "liveKeptEdits" ? kept
-      : verb === "saveRecoveryCopy" ? { ok: true, copyPath: null, packagePath: "plan (recovered).dohc-recovery.json", folder: ".", storedOn: "server", keptEdits: "copied" }
-        : verb === "stopAgain" ? { ok: true, path: "plan.md", keptEdits: "recovered" }
-          : { ok: true, path: "plan.md" });
-  expect(await executeCli({ argv: ["document", "kept-edits"], cwd: "/workspace", env: {}, request }))
-    .toEqual({ exitCode: 0, stdout: [
-      "plan.md · server · paused · outbox:delivery:0",
-      "note.md · this-computer · paused · saveOnly · old-1:delivery:0",
-      "old.md · server · copied · earlier · earlier:0",
-      "notes/waiting.md · pending share: the file holds older text",
-    ].join("\n") + "\n", stderr: "" });
-  const json = await executeCli({ argv: ["document", "kept-edits", "--json"], cwd: "/workspace", env: {}, request: async () => kept });
+    verb === "liveKeptEdits"
+      ? kept
+      : verb === "saveRecoveryCopy"
+        ? {
+            ok: true,
+            copyPath: null,
+            packagePath: "plan (recovered).dohc-recovery.json",
+            folder: ".",
+            storedOn: "server",
+            keptEdits: "copied",
+          }
+        : verb === "stopAgain"
+          ? { ok: true, path: "plan.md", keptEdits: "recovered" }
+          : { ok: true, path: "plan.md" },
+  );
+  expect(
+    await executeCli({ argv: ["document", "kept-edits"], cwd: "/workspace", env: {}, request }),
+  ).toEqual({
+    exitCode: 0,
+    stdout:
+      [
+        "plan.md · server · paused · outbox:delivery:0",
+        "note.md · this-computer · paused · saveOnly · old-1:delivery:0",
+        "old.md · server · copied · earlier · earlier:0",
+        "notes/waiting.md · pending share: the file holds older text",
+      ].join("\n") + "\n",
+    stderr: "",
+  });
+  const json = await executeCli({
+    argv: ["document", "kept-edits", "--json"],
+    cwd: "/workspace",
+    env: {},
+    request: async () => kept,
+  });
   expect(JSON.parse(json.stdout)).toMatchObject({ ok: true, pendingShare: ["notes/waiting.md"] });
-  expect(await executeCli({ argv: ["document", "save-recovery-copy", "plan.md"], cwd: "/workspace", env: {}, request }))
-    .toEqual({ exitCode: 0, stdout: "Saved plan (recovered).dohc-recovery.json\ndohc could not make a readable copy.\n", stderr: "" });
+  expect(
+    await executeCli({
+      argv: ["document", "save-recovery-copy", "plan.md"],
+      cwd: "/workspace",
+      env: {},
+      request,
+    }),
+  ).toEqual({
+    exitCode: 0,
+    stdout: "Saved plan (recovered).dohc-recovery.json\ndohc could not make a readable copy.\n",
+    stderr: "",
+  });
   // An incident names exactly which kept edits to save.
-  expect((await executeCli({ argv: ["document", "save-recovery-copy", "plan.md", "outbox:delivery:0"], cwd: "/workspace", env: {}, request })).exitCode).toBe(0);
-  expect(await executeCli({ argv: ["document", "retry-kept-edits", "plan.md", "outbox:delivery:0"], cwd: "/workspace", env: {}, request }))
-    .toEqual({ exitCode: 0, stdout: "Trying again for plan.md\n", stderr: "" });
-  expect(await executeCli({ argv: ["document", "stop-again", "plan.md", "release:a:0"], cwd: "/workspace", env: {}, request }))
-    .toEqual({ exitCode: 0, stdout: "Stopped live editing for plan.md. dohc wrote your kept edits into the file.\n", stderr: "" });
+  expect(
+    (
+      await executeCli({
+        argv: ["document", "save-recovery-copy", "plan.md", "outbox:delivery:0"],
+        cwd: "/workspace",
+        env: {},
+        request,
+      })
+    ).exitCode,
+  ).toBe(0);
+  expect(
+    await executeCli({
+      argv: ["document", "retry-kept-edits", "plan.md", "outbox:delivery:0"],
+      cwd: "/workspace",
+      env: {},
+      request,
+    }),
+  ).toEqual({ exitCode: 0, stdout: "Trying again for plan.md\n", stderr: "" });
+  expect(
+    await executeCli({
+      argv: ["document", "stop-again", "plan.md", "release:a:0"],
+      cwd: "/workspace",
+      env: {},
+      request,
+    }),
+  ).toEqual({
+    exitCode: 0,
+    stdout: "Stopped live editing for plan.md. dohc wrote your kept edits into the file.\n",
+    stderr: "",
+  });
   expect(request.mock.calls.map(([sent]) => [sent.verb, sent.args])).toEqual([
     ["liveKeptEdits", { cwd: WORKSPACE, actor: "agent" }],
     ["saveRecoveryCopy", { cwd: WORKSPACE, actor: "agent", path: "plan.md" }],
-    ["saveRecoveryCopy", { cwd: WORKSPACE, actor: "agent", path: "plan.md", incident: "outbox:delivery:0" }],
-    ["retryKeptEdits", { cwd: WORKSPACE, actor: "agent", path: "plan.md", incident: "outbox:delivery:0" }],
+    [
+      "saveRecoveryCopy",
+      { cwd: WORKSPACE, actor: "agent", path: "plan.md", incident: "outbox:delivery:0" },
+    ],
+    [
+      "retryKeptEdits",
+      { cwd: WORKSPACE, actor: "agent", path: "plan.md", incident: "outbox:delivery:0" },
+    ],
     ["stopAgain", { cwd: WORKSPACE, actor: "agent", path: "plan.md", incident: "release:a:0" }],
   ]);
-  expect((await executeCli({ argv: ["document", "save-recovery-copy", "plan.md", "outbox:delivery:0", "extra"], env: {}, request })).exitCode).toBe(1);
-  expect(await executeCli({ argv: ["document", "retry-kept-edits", "plan.md"], env: {}, request }))
-    .toEqual({ exitCode: 1, stdout: "", stderr: "dohc: retry-kept-edits requires a path and an incident\n" });
-  expect(await executeCli({ argv: ["document", "stop-again", "plan.md"], env: {}, request }))
-    .toEqual({ exitCode: 1, stdout: "", stderr: "dohc: stop-again requires a path and an incident\n" });
-  const refused = await executeCli({ argv: ["document", "save-recovery-copy", "plan.md", "--json"], env: {},
-    request: async () => ({ ok: false, reason: "dohc has no kept edits for this file." }) });
-  expect(refused).toEqual({ exitCode: 1, stdout: "", stderr: "dohc: dohc has no kept edits for this file.\n" });
+  expect(
+    (
+      await executeCli({
+        argv: ["document", "save-recovery-copy", "plan.md", "outbox:delivery:0", "extra"],
+        env: {},
+        request,
+      })
+    ).exitCode,
+  ).toBe(1);
+  expect(
+    await executeCli({ argv: ["document", "retry-kept-edits", "plan.md"], env: {}, request }),
+  ).toEqual({
+    exitCode: 1,
+    stdout: "",
+    stderr: "dohc: retry-kept-edits requires a path and an incident\n",
+  });
+  expect(
+    await executeCli({ argv: ["document", "stop-again", "plan.md"], env: {}, request }),
+  ).toEqual({
+    exitCode: 1,
+    stdout: "",
+    stderr: "dohc: stop-again requires a path and an incident\n",
+  });
+  const refused = await executeCli({
+    argv: ["document", "save-recovery-copy", "plan.md", "--json"],
+    env: {},
+    request: async () => ({ ok: false, reason: "dohc has no kept edits for this file." }),
+  });
+  expect(refused).toEqual({
+    exitCode: 1,
+    stdout: "",
+    stderr: "dohc: dohc has no kept edits for this file.\n",
+  });
 });
 
 it("lists Button inspection states and confirmations through the desktop socket", async () => {
-  const result = { ok: true, buttons: [{ field: "Send", state: { kind: "ready", automationId: "collection:Billing#send", irreversible: [{ name: "destination/send", label: "Send" }] } },
-    { field: "Later", state: { kind: "unchecked", reason: "Host unavailable" } }] };
+  const result = {
+    ok: true,
+    buttons: [
+      {
+        field: "Send",
+        state: {
+          kind: "ready",
+          automationId: "collection:Billing#send",
+          irreversible: [{ name: "destination/send", label: "Send" }],
+        },
+      },
+      { field: "Later", state: { kind: "unchecked", reason: "Host unavailable" } },
+    ],
+  };
   const request = vi.fn(async () => result);
-  const printed = await executeCli({ argv: ["automation", "buttons", "Billing", "--table", "Invoices", "--json"], env: {}, request });
+  const printed = await executeCli({
+    argv: ["automation", "buttons", "Billing", "--table", "Invoices", "--json"],
+    env: {},
+    request,
+  });
   expect(printed.exitCode).toBe(0);
   expect(JSON.parse(printed.stdout)).toMatchObject(result);
-  expect(request).toHaveBeenCalledWith(expect.objectContaining({ verb: "automationButtons", args: expect.objectContaining({ collectionPath: "Billing", table: "Invoices" }) }));
-  const refused = await executeCli({ argv: ["automation", "buttons", "Billing"], env: {}, request: async () => ({ ok: false, reason: "Collection unavailable" }) });
+  expect(request).toHaveBeenCalledWith(
+    expect.objectContaining({
+      verb: "automationButtons",
+      args: expect.objectContaining({ collectionPath: "Billing", table: "Invoices" }),
+    }),
+  );
+  const refused = await executeCli({
+    argv: ["automation", "buttons", "Billing"],
+    env: {},
+    request: async () => ({ ok: false, reason: "Collection unavailable" }),
+  });
   expect(refused).toEqual({ exitCode: 1, stdout: "", stderr: "dohc: Collection unavailable\n" });
 });
 const cleanupDirs: string[] = [];
@@ -185,16 +458,21 @@ describe("executeCli", () => {
     expect(result).toEqual({
       exitCode: 0,
       stderr: "",
-      stdout: `${JSON.stringify({
-        schemaVersion: 3,
-        threadIds: ["th_one", "th_two"],
-      }, null, 2)}\n`,
+      stdout: `${JSON.stringify(
+        {
+          schemaVersion: 3,
+          threadIds: ["th_one", "th_two"],
+        },
+        null,
+        2,
+      )}\n`,
     });
   });
 
   it("preserves multiline Markdown from stdin and sends agent attribution", async () => {
     const requests: CliRequestWithoutToken[] = [];
-    const report = '# Updated "Kyoto"\n\n- Added November packing.\n- It\'s ready. `$HOME` and $(whoami) stay literal.\n';
+    const report =
+      '# Updated "Kyoto"\n\n- Added November packing.\n- It\'s ready. `$HOME` and $(whoami) stay literal.\n';
     const result = await executeCli({
       argv: ["chat", "reply", "th_8f", "--as-agent", "-"],
       cwd: "/workspace/project",
@@ -227,18 +505,25 @@ describe("executeCli", () => {
   // run's id goes with it, and a refusal exits with its reason.
   it("sends the run's id with chat retry and exits on a refusal", async () => {
     const requests: CliRequestWithoutToken[] = [];
-    const answers = [{ ok: true, status: "queued", threadId: "th_8f" }, { ok: false, reason: "No agent request in this conversation has stopped." }];
-    const retry = () => executeCli({
-      argv: ["chat", "retry", "th_8f", "--as-agent"],
-      cwd: "/workspace/project",
-      env: { DOHC_RUN_ID: "run_ambient" },
-      request: async (request) => {
-        requests.push(request);
-        return answers.shift();
-      },
-    });
+    const answers = [
+      { ok: true, status: "queued", threadId: "th_8f" },
+      { ok: false, reason: "No agent request in this conversation has stopped." },
+    ];
+    const retry = () =>
+      executeCli({
+        argv: ["chat", "retry", "th_8f", "--as-agent"],
+        cwd: "/workspace/project",
+        env: { DOHC_RUN_ID: "run_ambient" },
+        request: async (request) => {
+          requests.push(request);
+          return answers.shift();
+        },
+      });
     expect(await retry()).toMatchObject({ exitCode: 0 });
-    expect(await retry()).toMatchObject({ exitCode: 1, stderr: expect.stringContaining("No agent request in this conversation has stopped.") });
+    expect(await retry()).toMatchObject({
+      exitCode: 1,
+      stderr: expect.stringContaining("No agent request in this conversation has stopped."),
+    });
     expect(requests[0]).toEqual({
       protocolVersion: CLI_PROTOCOL_VERSION,
       verb: "chatRetry",
@@ -247,14 +532,38 @@ describe("executeCli", () => {
   });
 
   it("names the agent with --agent on a post and a reply, and refuses a name with a slash", async () => {
-    const request = vi.fn<(request: CliRequestWithoutToken) => Promise<unknown>>(async () => ({ threadId: "th_1", messageId: "msg_1" }));
-    await executeCli({ argv: ["chat", "post", "general", "--as-agent", "--agent", "Scout", "done"], cwd: "/workspace", env: {}, request });
-    await executeCli({ argv: ["chat", "reply", "th_8f", "--as-agent", "--agent", "Scout", "done"], cwd: "/workspace", env: {}, request });
+    const request = vi.fn<(request: CliRequestWithoutToken) => Promise<unknown>>(async () => ({
+      threadId: "th_1",
+      messageId: "msg_1",
+    }));
+    await executeCli({
+      argv: ["chat", "post", "general", "--as-agent", "--agent", "Scout", "done"],
+      cwd: "/workspace",
+      env: {},
+      request,
+    });
+    await executeCli({
+      argv: ["chat", "reply", "th_8f", "--as-agent", "--agent", "Scout", "done"],
+      cwd: "/workspace",
+      env: {},
+      request,
+    });
     expect(request.mock.calls.map(([sent]) => [sent.verb, sent.args])).toEqual([
-      ["post", expect.objectContaining({ actor: "agent", group: "general", body: "done", agent: "Scout" })],
-      ["reply", expect.objectContaining({ actor: "agent", thread: "th_8f", body: "done", agent: "Scout" })],
+      [
+        "post",
+        expect.objectContaining({ actor: "agent", group: "general", body: "done", agent: "Scout" }),
+      ],
+      [
+        "reply",
+        expect.objectContaining({ actor: "agent", thread: "th_8f", body: "done", agent: "Scout" }),
+      ],
     ]);
-    const refused = await executeCli({ argv: ["chat", "reply", "th_8f", "--as-agent", "--agent", "auto/run", "done"], cwd: "/workspace", env: {}, request });
+    const refused = await executeCli({
+      argv: ["chat", "reply", "th_8f", "--as-agent", "--agent", "auto/run", "done"],
+      cwd: "/workspace",
+      env: {},
+      request,
+    });
     expect(refused.exitCode).not.toBe(0);
     expect(request).toHaveBeenCalledTimes(2);
   });
@@ -312,37 +621,84 @@ describe("executeCli", () => {
     );
   });
 
-  it.each([undefined, 1234])("waits up to 90 seconds for Undo, preserving an explicit timeout (%s)", async timeoutMs => {
-    const stateDir = await tempStateDir();
-    const transport = vi.fn(async () => ({
-      protocolVersion: CLI_PROTOCOL_VERSION, ok: true,
-      result: { ok: true, tracked: { state: "restored", momentCount: 1 }, restored: [], remaining: [] },
-    }));
-    const result = await executeCli({
-      argv: ["history", "undo", "dohc-operation:11111111-1111-4111-8111-111111111111"],
-      env: {}, client: { stateDir, transport, platform: "linux", ...(timeoutMs === undefined ? {} : { timeoutMs }) },
-    });
-    expect(result.exitCode).toBe(0);
-    expect(transport).toHaveBeenCalledWith(join(stateDir, "dohc-cli.sock"), expect.any(String), timeoutMs ?? 90_000);
-  });
+  it.each([undefined, 1234])(
+    "waits up to 90 seconds for Undo, preserving an explicit timeout (%s)",
+    async (timeoutMs) => {
+      const stateDir = await tempStateDir();
+      const transport = vi.fn(async () => ({
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        ok: true,
+        result: {
+          ok: true,
+          tracked: { state: "restored", momentCount: 1 },
+          restored: [],
+          remaining: [],
+        },
+      }));
+      const result = await executeCli({
+        argv: ["history", "undo", "dohc-operation:11111111-1111-4111-8111-111111111111"],
+        env: {},
+        client: {
+          stateDir,
+          transport,
+          platform: "linux",
+          ...(timeoutMs === undefined ? {} : { timeoutMs }),
+        },
+      });
+      expect(result.exitCode).toBe(0);
+      expect(transport).toHaveBeenCalledWith(
+        join(stateDir, "dohc-cli.sock"),
+        expect.any(String),
+        timeoutMs ?? 90_000,
+      );
+    },
+  );
 
   it("waits for a recovery copy the server takes longer than 30 seconds to prepare", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
       const stateDir = await tempStateDir();
       // As the socket's deadline would: the reply comes after 40 seconds, unless the deadline is shorter.
-      const transport = vi.fn((_path: string, _body: string, timeoutMs: number | undefined) => new Promise<unknown>((resolve, reject) => {
-        if (timeoutMs !== undefined && timeoutMs < 40_000) setTimeout(() => reject(new Error("desktop app did not respond")), timeoutMs);
-        setTimeout(() => resolve({ protocolVersion: CLI_PROTOCOL_VERSION, ok: true,
-          result: { ok: true, copyPath: null, packagePath: "plan (recovered).dohc-recovery.json", folder: ".", storedOn: "server", keptEdits: "copied" } }), 40_000);
-      }));
-      const pending = executeCli({ argv: ["document", "save-recovery-copy", "plan.md"], cwd: "/workspace", env: {},
-        client: { stateDir, transport, platform: "linux" } });
+      const transport = vi.fn(
+        (_path: string, _body: string, timeoutMs: number | undefined) =>
+          new Promise<unknown>((resolve, reject) => {
+            if (timeoutMs !== undefined && timeoutMs < 40_000)
+              setTimeout(() => reject(new Error("desktop app did not respond")), timeoutMs);
+            setTimeout(
+              () =>
+                resolve({
+                  protocolVersion: CLI_PROTOCOL_VERSION,
+                  ok: true,
+                  result: {
+                    ok: true,
+                    copyPath: null,
+                    packagePath: "plan (recovered).dohc-recovery.json",
+                    folder: ".",
+                    storedOn: "server",
+                    keptEdits: "copied",
+                  },
+                }),
+              40_000,
+            );
+          }),
+      );
+      const pending = executeCli({
+        argv: ["document", "save-recovery-copy", "plan.md"],
+        cwd: "/workspace",
+        env: {},
+        client: { stateDir, transport, platform: "linux" },
+      });
       await vi.waitFor(() => expect(transport).toHaveBeenCalled());
       await vi.advanceTimersByTimeAsync(40_000);
       expect((await pending).exitCode).toBe(0);
-      expect(transport).toHaveBeenCalledWith(join(stateDir, "dohc-cli.sock"), expect.any(String), 420_000);
-    } finally { vi.useRealTimers(); }
+      expect(transport).toHaveBeenCalledWith(
+        join(stateDir, "dohc-cli.sock"),
+        expect.any(String),
+        420_000,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("passes the ambient run id through every chat write request only", async () => {
@@ -445,8 +801,15 @@ describe("executeCli", () => {
     });
     expect(result.stdout).toContain("msg_one");
     expect(result.stdout).toContain('dispatch: {"paused":"budget","lastRun":null}');
-    const json = await executeCli({ argv: ["chat", "show", "th_o", "--peek", "--json"], cwd: "/workspace", env: {}, request });
-    expect(JSON.parse(json.stdout)).toMatchObject({ dispatch: { paused: "budget", lastRun: null } });
+    const json = await executeCli({
+      argv: ["chat", "show", "th_o", "--peek", "--json"],
+      cwd: "/workspace",
+      env: {},
+      request,
+    });
+    expect(JSON.parse(json.stdout)).toMatchObject({
+      dispatch: { paused: "budget", lastRun: null },
+    });
   });
 
   it("lists one file's history and prints the text one change left", async () => {
@@ -460,8 +823,19 @@ describe("executeCli", () => {
       authors: [{ kind: "agent" as const, agentId: "claude", onBehalfOf: "user:ice" }],
       fileCount: 1 as const,
     };
-    const list = vi.fn(async () => ({ changes: [change], count: 1, totalAvailable: 3, hasMore: true, cursorMs: change.recordedAtMs }));
-    const listed = await executeCli({ argv: ["history", "list", "plan.md", "--limit", "1"], cwd: "/workspace/notes", env: {}, request: list });
+    const list = vi.fn(async () => ({
+      changes: [change],
+      count: 1,
+      totalAvailable: 3,
+      hasMore: true,
+      cursorMs: change.recordedAtMs,
+    }));
+    const listed = await executeCli({
+      argv: ["history", "list", "plan.md", "--limit", "1"],
+      cwd: "/workspace/notes",
+      env: {},
+      request: list,
+    });
     expect(list).toHaveBeenCalledWith({
       protocolVersion: CLI_PROTOCOL_VERSION,
       verb: "moments",
@@ -470,7 +844,8 @@ describe("executeCli", () => {
     expect(listed).toEqual({
       exitCode: 0,
       stderr: "",
-      stdout: "moment-2 · 2026-09-25T12:00:00.000Z · write · notes/plan.md · agent claude\n2 more; raise --limit to list them\n",
+      stdout:
+        "moment-2 · 2026-09-25T12:00:00.000Z · write · notes/plan.md · agent claude\n2 more; raise --limit to list them\n",
     });
 
     const detail = {
@@ -483,7 +858,14 @@ describe("executeCli", () => {
       },
     };
     const show = vi.fn(async () => detail);
-    expect(await executeCli({ argv: ["history", "show", "moment-2"], cwd: "/workspace", env: {}, request: show })).toEqual({
+    expect(
+      await executeCli({
+        argv: ["history", "show", "moment-2"],
+        cwd: "/workspace",
+        env: {},
+        request: show,
+      }),
+    ).toEqual({
       exitCode: 0,
       stderr: "",
       stdout: "# Plan\n\nShip Friday.\n",
@@ -493,27 +875,65 @@ describe("executeCli", () => {
       verb: "moment",
       args: { cwd: WORKSPACE, actor: "human", id: "moment-2" },
     });
-    expect((await executeCli({ argv: ["history", "show", "moment-2", "--before"], env: {}, request: show })).stdout).toBe("# Plan\n");
+    expect(
+      (
+        await executeCli({
+          argv: ["history", "show", "moment-2", "--before"],
+          env: {},
+          request: show,
+        })
+      ).stdout,
+    ).toBe("# Plan\n");
 
     // Text prints byte for byte, so a redirect reproduces a file with no final newline.
-    const bare = { ...detail, change: { ...detail.change, after: { path: "notes/plan.md", text: "abc" } } };
-    expect((await executeCli({ argv: ["history", "show", "moment-2"], env: {}, request: async () => bare })).stdout).toBe("abc");
+    const bare = {
+      ...detail,
+      change: { ...detail.change, after: { path: "notes/plan.md", text: "abc" } },
+    };
+    expect(
+      (
+        await executeCli({
+          argv: ["history", "show", "moment-2"],
+          env: {},
+          request: async () => bare,
+        })
+      ).stdout,
+    ).toBe("abc");
 
     const created = { ...detail, change: { ...detail.change, before: null } };
-    expect(await executeCli({ argv: ["history", "show", "moment-2", "--before"], env: {}, request: async () => created })).toEqual({
+    expect(
+      await executeCli({
+        argv: ["history", "show", "moment-2", "--before"],
+        env: {},
+        request: async () => created,
+      }),
+    ).toEqual({
       exitCode: 1,
       stdout: "",
       stderr: "dohc: moment-2 created notes/plan.md; it has no text before it\n",
     });
-    expect(await executeCli({ argv: ["history", "show", "moment-9", "--json"], env: {}, request: async () => ({ ok: false, reason: "change not found: moment-9" }) })).toEqual({
+    expect(
+      await executeCli({
+        argv: ["history", "show", "moment-9", "--json"],
+        env: {},
+        request: async () => ({ ok: false, reason: "change not found: moment-9" }),
+      }),
+    ).toEqual({
       exitCode: 1,
       stdout: "",
       stderr: "dohc: change not found: moment-9\n",
     });
     // Unreadable History rules: the list refuses instead of saying there is no History.
-    const hidden = { ok: false, status: "policy-unreadable", unreadable: [".dohc/visibility.toml"],
-      reason: "History is hidden because dohc can't read .dohc/visibility.toml" };
-    for (const argv of [["history", "list"], ["history", "list", "--json"]]) {
+    const hidden = {
+      ok: false,
+      status: "policy-unreadable",
+      unreadable: [".dohc/visibility.toml"],
+      reason: "History is hidden because dohc can't read .dohc/visibility.toml",
+    };
+    for (const argv of [
+      ["history", "list"],
+      ["history", "list", "--json"],
+    ]) {
       expect(await executeCli({ argv, env: {}, request: async () => hidden })).toEqual({
         exitCode: 1,
         stdout: "",
@@ -524,115 +944,319 @@ describe("executeCli", () => {
 
   it("lists an automation's runs and shows what one run's steps changed", async () => {
     const run = {
-      run: "atc_1", state: "failed" as const, error: "The record is open elsewhere.",
-      createdAtMs: Date.UTC(2026, 8, 27, 9), updatedAtMs: Date.UTC(2026, 8, 27, 9),
-      trigger: { kind: "changed" as const, recordId: "rec_1", by: "agent" as const, sharedAuthor: null, depth: 1 },
-      definitionChanged: false, neverStarted: false, chainStopped: false, undone: false,
+      run: "atc_1",
+      state: "failed" as const,
+      error: "The record is open elsewhere.",
+      createdAtMs: Date.UTC(2026, 8, 27, 9),
+      updatedAtMs: Date.UTC(2026, 8, 27, 9),
+      trigger: {
+        kind: "changed" as const,
+        recordId: "rec_1",
+        by: "agent" as const,
+        sharedAuthor: null,
+        depth: 1,
+      },
+      definitionChanged: false,
+      neverStarted: false,
+      chainStopped: false,
+      undone: false,
     };
     const list = vi.fn(async () => ({ ok: true, runs: [{ ...run, changes: 1 }], next: null }));
     // A live change through an Edit link names the link, never a person.
     const linked = {
       ...run,
-      trigger: { ...run.trigger, by: null, depth: 0, sharedAuthor: { kind: "link" as const, grantId: "grant-link", grantGeneration: 2, principalId: "holder-1" } },
+      trigger: {
+        ...run.trigger,
+        by: null,
+        depth: 0,
+        sharedAuthor: {
+          kind: "link" as const,
+          grantId: "grant-link",
+          grantGeneration: 2,
+          principalId: "holder-1",
+        },
+      },
     };
-    expect((await executeCli({ argv: ["automation", "runs", "tasks", "stamp"], cwd: "/workspace", env: {}, request: async () => ({ ok: true, runs: [{ ...linked, changes: 0 }], next: null }) })).stdout)
-      .toBe("atc_1 · 2026-09-27T09:00:00.000Z · failed · record changed · record rec_1 · through Edit link grant-link · 0 changes · The record is open elsewhere.\n");
-    expect(await executeCli({ argv: ["automation", "runs", "tasks", "stamp"], cwd: "/workspace", env: {}, request: list })).toEqual({
+    expect(
+      (
+        await executeCli({
+          argv: ["automation", "runs", "tasks", "stamp"],
+          cwd: "/workspace",
+          env: {},
+          request: async () => ({ ok: true, runs: [{ ...linked, changes: 0 }], next: null }),
+        })
+      ).stdout,
+    ).toBe(
+      "atc_1 · 2026-09-27T09:00:00.000Z · failed · record changed · record rec_1 · through Edit link grant-link · 0 changes · The record is open elsewhere.\n",
+    );
+    expect(
+      await executeCli({
+        argv: ["automation", "runs", "tasks", "stamp"],
+        cwd: "/workspace",
+        env: {},
+        request: list,
+      }),
+    ).toEqual({
       exitCode: 0,
       stderr: "",
-      stdout: "atc_1 · 2026-09-27T09:00:00.000Z · failed · record changed · record rec_1 · by agent · depth 1 · 1 change · The record is open elsewhere.\n",
+      stdout:
+        "atc_1 · 2026-09-27T09:00:00.000Z · failed · record changed · record rec_1 · by agent · depth 1 · 1 change · The record is open elsewhere.\n",
     });
     // A run that could not start says so, as the panel offers it no Try again.
-    const unclaimed = { ...run, error: "This change was too large for dohc to start automations for every record. Change fewer records at a time.", neverStarted: true };
-    const unstarted = vi.fn(async () => ({ ok: true, runs: [{ ...unclaimed, changes: 0 }], next: null }));
-    expect((await executeCli({ argv: ["automation", "runs", "tasks", "stamp"], cwd: "/workspace", env: {}, request: unstarted })).stdout)
-      .toContain(" · never started · ");
+    const unclaimed = {
+      ...run,
+      error:
+        "This change was too large for dohc to start automations for every record. Change fewer records at a time.",
+      neverStarted: true,
+    };
+    const unstarted = vi.fn(async () => ({
+      ok: true,
+      runs: [{ ...unclaimed, changes: 0 }],
+      next: null,
+    }));
+    expect(
+      (
+        await executeCli({
+          argv: ["automation", "runs", "tasks", "stamp"],
+          cwd: "/workspace",
+          env: {},
+          request: unstarted,
+        })
+      ).stdout,
+    ).toContain(" · never started · ");
     expect(list).toHaveBeenCalledWith({
       protocolVersion: CLI_PROTOCOL_VERSION,
       verb: "automationRuns",
       args: { cwd: WORKSPACE, actor: "human", collectionPath: "tasks", automation: "stamp" },
     });
     // Older runs remain: the last line names the page that lists them.
-    const paged = vi.fn(async () => ({ ok: true, runs: [{ ...run, changes: 1 }], next: "1:atc_1" }));
-    const older = await executeCli({ argv: ["automation", "runs", "tasks", "stamp", "--page", "2:atc_2"], cwd: "/workspace", env: {}, request: paged });
+    const paged = vi.fn(async () => ({
+      ok: true,
+      runs: [{ ...run, changes: 1 }],
+      next: "1:atc_1",
+    }));
+    const older = await executeCli({
+      argv: ["automation", "runs", "tasks", "stamp", "--page", "2:atc_2"],
+      cwd: "/workspace",
+      env: {},
+      request: paged,
+    });
     expect(older.stdout.trimEnd().split("\n").at(-1)).toBe("Older runs: --page 1:atc_1");
-    expect(paged).toHaveBeenCalledWith(expect.objectContaining({ args: expect.objectContaining({ page: "2:atc_2" }) }));
+    expect(paged).toHaveBeenCalledWith(
+      expect.objectContaining({ args: expect.objectContaining({ page: "2:atc_2" }) }),
+    );
 
     const steps = [
-      { step: 1, changes: [{ kind: "field", recordId: "rec_1", path: "tasks/one.md", field: "Done", before: null, after: "2026-09-27" }] },
+      {
+        step: 1,
+        changes: [
+          {
+            kind: "field",
+            recordId: "rec_1",
+            path: "tasks/one.md",
+            field: "Done",
+            before: null,
+            after: "2026-09-27",
+          },
+        ],
+      },
       { step: 3, changes: [{ kind: "message", messageId: "message-1", name: "Team" }] },
-      { step: 4, changes: [{
-        kind: "dataset-action", rules: { datasetId: "ds_1", revision: 2, revisionSha256: "a".repeat(64) },
-        operationId: "op_send", tableId: "tbl_invoices", name: "Send invoice", revision: 3,
-      }] },
+      {
+        step: 4,
+        changes: [
+          {
+            kind: "dataset-action",
+            rules: { datasetId: "ds_1", revision: 2, revisionSha256: "a".repeat(64) },
+            operationId: "op_send",
+            tableId: "tbl_invoices",
+            name: "Send invoice",
+            revision: 3,
+          },
+        ],
+      },
     ];
-    const show = vi.fn(async () => ({ ok: true, run: { ...run, steps, failedStep: 3, startsOver: false } }));
-    expect((await executeCli({ argv: ["automation", "run", "tasks", "stamp", "atc_1"], cwd: "/workspace", env: {}, request: show })).stdout).toBe([
-      "atc_1 · 2026-09-27T09:00:00.000Z · failed",
-      "trigger: record changed · record rec_1 · by agent · depth 1",
-      "error: The record is open elsewhere.",
-      "step 3 failed",
-      "Try again resumes at step 3.",
-      "step 1:",
-      '  set Done on tasks/one.md: null -> "2026-09-27"',
-      "step 3:",
-      "  posted to Team · message-1",
-      "step 4:",
-      "  ran Send invoice in table tbl_invoices",
-      "",
-    ].join("\n"));
-    expect(JSON.parse((await executeCli({ argv: ["automation", "run", "tasks", "stamp", "atc_1", "--json"], env: {}, request: show })).stdout))
-      .toEqual({ schemaVersion: 3, ok: true, run: { ...run, steps, failedStep: 3, startsOver: false } });
+    const show = vi.fn(async () => ({
+      ok: true,
+      run: { ...run, steps, failedStep: 3, startsOver: false },
+    }));
+    expect(
+      (
+        await executeCli({
+          argv: ["automation", "run", "tasks", "stamp", "atc_1"],
+          cwd: "/workspace",
+          env: {},
+          request: show,
+        })
+      ).stdout,
+    ).toBe(
+      [
+        "atc_1 · 2026-09-27T09:00:00.000Z · failed",
+        "trigger: record changed · record rec_1 · by agent · depth 1",
+        "error: The record is open elsewhere.",
+        "step 3 failed",
+        "Try again resumes at step 3.",
+        "step 1:",
+        '  set Done on tasks/one.md: null -> "2026-09-27"',
+        "step 3:",
+        "  posted to Team · message-1",
+        "step 4:",
+        "  ran Send invoice in table tbl_invoices",
+        "",
+      ].join("\n"),
+    );
+    expect(
+      JSON.parse(
+        (
+          await executeCli({
+            argv: ["automation", "run", "tasks", "stamp", "atc_1", "--json"],
+            env: {},
+            request: show,
+          })
+        ).stdout,
+      ),
+    ).toEqual({
+      schemaVersion: 3,
+      ok: true,
+      run: { ...run, steps, failedStep: 3, startsOver: false },
+    });
     // A changed automation's run does not resume; Try again starts over.
-    const changed = async () => ({ ok: true, run: { ...run, definitionChanged: true, steps, failedStep: 3, startsOver: true } });
-    const changedText = (await executeCli({ argv: ["automation", "run", "tasks", "stamp", "atc_1"], env: {}, request: changed })).stdout;
-    expect(changedText).toContain("step 3 failed\nTry again starts over from step 1 and needs --start-over.\n");
+    const changed = async () => ({
+      ok: true,
+      run: { ...run, definitionChanged: true, steps, failedStep: 3, startsOver: true },
+    });
+    const changedText = (
+      await executeCli({
+        argv: ["automation", "run", "tasks", "stamp", "atc_1"],
+        env: {},
+        request: changed,
+      })
+    ).stdout;
+    expect(changedText).toContain(
+      "step 3 failed\nTry again starts over from step 1 and needs --start-over.\n",
+    );
     expect(changedText).not.toContain("resumes");
-    expect(await executeCli({ argv: ["automation", "run", "tasks", "stamp"], env: {}, request: show })).toEqual({
-      exitCode: 1, stdout: "", stderr: "dohc: automation run requires a run id\n",
+    expect(
+      await executeCli({ argv: ["automation", "run", "tasks", "stamp"], env: {}, request: show }),
+    ).toEqual({
+      exitCode: 1,
+      stdout: "",
+      stderr: "dohc: automation run requires a run id\n",
     });
   });
 
   it("presses a button, prints the run it started, and exits with the actions to confirm", async () => {
     const send = vi.fn(async (request: CliRequestWithoutToken) =>
       request.verb === "automationPress" && request.args.confirm.includes("sendInvoice")
-        ? { ok: true, run: "atc_1", outcome: null, error: null, waiting: "Waiting to check who can edit this Collection." }
+        ? {
+            ok: true,
+            run: "atc_1",
+            outcome: null,
+            error: null,
+            waiting: "Waiting to check who can edit this Collection.",
+          }
         : {
             ok: false,
-            reason: 'This press runs actions dohc cannot undo: "Send invoice" (--confirm sendInvoice). Confirm each by name to run them.',
+            reason:
+              'This press runs actions dohc cannot undo: "Send invoice" (--confirm sendInvoice). Confirm each by name to run them.',
             confirm: [{ name: "sendInvoice", label: "Send invoice" }],
-          });
-    expect(await executeCli({ argv: ["automation", "press", "Billing", "Send", "12"], env: {}, request: send })).toEqual({
+          },
+    );
+    expect(
+      await executeCli({
+        argv: ["automation", "press", "Billing", "Send", "12"],
+        env: {},
+        request: send,
+      }),
+    ).toEqual({
       exitCode: 1,
       stdout: "",
-      stderr: 'dohc: This press runs actions dohc cannot undo: "Send invoice" (--confirm sendInvoice). Confirm each by name to run them.\n',
+      stderr:
+        'dohc: This press runs actions dohc cannot undo: "Send invoice" (--confirm sendInvoice). Confirm each by name to run them.\n',
     });
-    expect(await executeCli({
-      argv: ["automation", "press", "Billing", "Send", "12", "--table", "Invoices", "--confirm", "sendInvoice", "--request-id", "press-1"],
-      cwd: "/workspace",
-      env: {},
-      request: send,
-    })).toEqual({ exitCode: 0, stderr: "", stdout: "started run atc_1\nWaiting to check who can edit this Collection.\n" });
+    expect(
+      await executeCli({
+        argv: [
+          "automation",
+          "press",
+          "Billing",
+          "Send",
+          "12",
+          "--table",
+          "Invoices",
+          "--confirm",
+          "sendInvoice",
+          "--request-id",
+          "press-1",
+        ],
+        cwd: "/workspace",
+        env: {},
+        request: send,
+      }),
+    ).toEqual({
+      exitCode: 0,
+      stderr: "",
+      stdout: "started run atc_1\nWaiting to check who can edit this Collection.\n",
+    });
     expect(send).toHaveBeenLastCalledWith({
       protocolVersion: CLI_PROTOCOL_VERSION,
       verb: "automationPress",
       args: {
-        cwd: WORKSPACE, actor: "human", collectionPath: "Billing", field: "Send", record: "12",
-        table: "Invoices", confirm: ["sendInvoice"], requestId: "press-1",
+        cwd: WORKSPACE,
+        actor: "human",
+        collectionPath: "Billing",
+        field: "Send",
+        record: "12",
+        table: "Invoices",
+        confirm: ["sendInvoice"],
+        requestId: "press-1",
       },
     });
-    const ended = async () => ({ ok: true, run: "atc_1", outcome: "failed", error: "Paid is not a field.", waiting: null });
-    expect((await executeCli({ argv: ["automation", "press", "Billing", "Send", "12"], env: {}, request: ended })).stdout)
-      .toBe("run atc_1 failed: Paid is not a field.\n");
+    const ended = async () => ({
+      ok: true,
+      run: "atc_1",
+      outcome: "failed",
+      error: "Paid is not a field.",
+      waiting: null,
+    });
+    expect(
+      (
+        await executeCli({
+          argv: ["automation", "press", "Billing", "Send", "12"],
+          env: {},
+          request: ended,
+        })
+      ).stdout,
+    ).toBe("run atc_1 failed: Paid is not a field.\n");
     const relayed = async () => ({ ok: true, relayed: true });
-    expect((await executeCli({ argv: ["automation", "press", "Trip", "Book", "rec_1"], env: {}, request: relayed })).stdout)
-      .toBe("sent to the owner's computer, which runs it\n");
+    expect(
+      (
+        await executeCli({
+          argv: ["automation", "press", "Trip", "Book", "rec_1"],
+          env: {},
+          request: relayed,
+        })
+      ).stdout,
+    ).toBe("sent to the owner's computer, which runs it\n");
     // A flag value that looks like a global flag stays the flag's value.
     const record = vi.fn(send);
-    await executeCli({ argv: ["automation", "press", "Billing", "Send", "12", "--confirm", "--json"], env: {}, request: record });
-    expect(record).toHaveBeenLastCalledWith(expect.objectContaining({ args: expect.objectContaining({ confirm: ["--json"] }) }));
-    expect(await executeCli({ argv: ["automation", "press", "Billing", "Send"], env: {}, request: send })).toEqual({
-      exitCode: 1, stdout: "", stderr: "dohc: automation press requires a Collection, a button, and a record\n",
+    await executeCli({
+      argv: ["automation", "press", "Billing", "Send", "12", "--confirm", "--json"],
+      env: {},
+      request: record,
+    });
+    expect(record).toHaveBeenLastCalledWith(
+      expect.objectContaining({ args: expect.objectContaining({ confirm: ["--json"] }) }),
+    );
+    expect(
+      await executeCli({
+        argv: ["automation", "press", "Billing", "Send"],
+        env: {},
+        request: send,
+      }),
+    ).toEqual({
+      exitCode: 1,
+      stdout: "",
+      stderr: "dohc: automation press requires a Collection, a button, and a record\n",
     });
   });
 
@@ -640,34 +1264,78 @@ describe("executeCli", () => {
     const send = vi.fn(async (request: CliRequestWithoutToken) =>
       request.verb === "automationRetry" && request.args.startOver
         ? { ok: true, status: "queued" }
-        : { ok: false, status: "definition-changed", repeatsMessages: false, reason: "This automation changed since the run failed. To do that, try again with --start-over, or startOver: true." });
-    expect(await executeCli({ argv: ["automation", "retry", "tasks", "stamp", "atc_1"], env: {}, request: send })).toEqual({
+        : {
+            ok: false,
+            status: "definition-changed",
+            repeatsMessages: false,
+            reason:
+              "This automation changed since the run failed. To do that, try again with --start-over, or startOver: true.",
+          },
+    );
+    expect(
+      await executeCli({
+        argv: ["automation", "retry", "tasks", "stamp", "atc_1"],
+        env: {},
+        request: send,
+      }),
+    ).toEqual({
       exitCode: 1,
       stdout: "",
-      stderr: "dohc: This automation changed since the run failed. To do that, try again with --start-over, or startOver: true.\n",
+      stderr:
+        "dohc: This automation changed since the run failed. To do that, try again with --start-over, or startOver: true.\n",
     });
-    expect(await executeCli({ argv: ["automation", "retry", "tasks", "stamp", "atc_1", "--start-over"], cwd: "/workspace", env: {}, request: send })).toEqual({
-      exitCode: 0, stderr: "", stdout: "queued\n",
+    expect(
+      await executeCli({
+        argv: ["automation", "retry", "tasks", "stamp", "atc_1", "--start-over"],
+        cwd: "/workspace",
+        env: {},
+        request: send,
+      }),
+    ).toEqual({
+      exitCode: 0,
+      stderr: "",
+      stdout: "queued\n",
     });
     expect(send).toHaveBeenLastCalledWith({
       protocolVersion: CLI_PROTOCOL_VERSION,
       verb: "automationRetry",
-      args: { cwd: WORKSPACE, actor: "human", collectionPath: "tasks", automation: "stamp", run: "atc_1", startOver: true },
+      args: {
+        cwd: WORKSPACE,
+        actor: "human",
+        collectionPath: "tasks",
+        automation: "stamp",
+        run: "atc_1",
+        startOver: true,
+      },
     });
 
     const elsewhere = async () => ({
       ok: false,
-      reason: "Only the computer this run failed on can try it again. The notice names that computer.",
-      notice: { title: 'Automation "Stamp" failed', body: "The record is open elsewhere. It ran on Laptop." },
+      reason:
+        "Only the computer this run failed on can try it again. The notice names that computer.",
+      notice: {
+        title: 'Automation "Stamp" failed',
+        body: "The record is open elsewhere. It ran on Laptop.",
+      },
     });
-    expect((await executeCli({ argv: ["automation", "retry", "tasks", "stamp", "atc_1"], env: {}, request: elsewhere })).stderr).toBe(
+    expect(
+      (
+        await executeCli({
+          argv: ["automation", "retry", "tasks", "stamp", "atc_1"],
+          env: {},
+          request: elsewhere,
+        })
+      ).stderr,
+    ).toBe(
       'dohc: Only the computer this run failed on can try it again. The notice names that computer. Automation "Stamp" failed: The record is open elsewhere. It ran on Laptop.\n',
     );
   });
 
   it("refuses a history list limit past the desktop's bound before sending", async () => {
     const send = vi.fn();
-    expect(await executeCli({ argv: ["history", "list", "--limit", "501"], env: {}, request: send })).toEqual({
+    expect(
+      await executeCli({ argv: ["history", "list", "--limit", "501"], env: {}, request: send }),
+    ).toEqual({
       exitCode: 1,
       stdout: "",
       stderr: "dohc: --limit accepts at most 500\n",
@@ -724,11 +1392,27 @@ describe("executeCli", () => {
 });
 
 it.each([
-  ["accessObject", ["access", "object", JSON.stringify({ kind: "path", path: "Notes/a.md", versionId: null }), "--json"]],
+  [
+    "accessObject",
+    [
+      "access",
+      "object",
+      JSON.stringify({ kind: "path", path: "Notes/a.md", versionId: null }),
+      "--json",
+    ],
+  ],
   ["accessSharing", ["access", "sharing", "received", "--json"]],
 ] as const)("prints the unknown reason for %s", async (verb, argv) => {
-  const request = vi.fn(async () => ({ ref: null, rows: [], visibility: "unknown", freshness: "unknown", checkedAtMs: null,
-    unknownReason: "other-account", nextCursor: null, coverage: { kind: "unavailable", complete: false, observation: "interval" } }));
+  const request = vi.fn(async () => ({
+    ref: null,
+    rows: [],
+    visibility: "unknown",
+    freshness: "unknown",
+    checkedAtMs: null,
+    unknownReason: "other-account",
+    nextCursor: null,
+    coverage: { kind: "unavailable", complete: false, observation: "interval" },
+  }));
   const result = await executeCli({ argv: [...argv], env: {}, request });
   expect(result.exitCode).toBe(0);
   expect(JSON.parse(result.stdout)).toHaveProperty("unknownReason", "other-account");
@@ -736,27 +1420,52 @@ it.each([
 });
 
 it("prints an absent incoming subject as JSON null", async () => {
-  const result = await executeCli({ argv: ["links", "in", JSON.stringify({ path: "missing.md" }), "--json"], cwd: "/tmp/links", env: {}, request: async () => null });
+  const result = await executeCli({
+    argv: ["links", "in", JSON.stringify({ path: "missing.md" }), "--json"],
+    cwd: "/tmp/links",
+    env: {},
+    request: async () => null,
+  });
   expect(result).toEqual({ exitCode: 0, stdout: "null\n", stderr: "" });
 });
 
-
 it("adds schemaVersion to incoming JSON and keeps an absent subject null", async () => {
-  const page = { versionId: "main", subject: { path: "target.md", objectId: "target" },
-    entries: [], unchecked: ["large.md"], complete: false, indexBuilding: false,
-    mountsCovered: false, nextCursor: null };
+  const page = {
+    versionId: "main",
+    subject: { path: "target.md", objectId: "target" },
+    entries: [],
+    unchecked: ["large.md"],
+    complete: false,
+    indexBuilding: false,
+    mountsCovered: false,
+    nextCursor: null,
+  };
   const argv = ["links", "in", JSON.stringify({ path: "target.md" }), "--json"];
   const result = await executeCli({ argv, env: {}, request: async () => page });
   expect(result.exitCode).toBe(0);
   expect(JSON.parse(result.stdout)).toEqual({ schemaVersion: CLI_JSON_SCHEMA_VERSION, ...page });
-  expect(await executeCli({ argv, env: {}, request: async () => null }))
-    .toEqual({ exitCode: 0, stdout: "null\n", stderr: "" });
+  expect(await executeCli({ argv, env: {}, request: async () => null })).toEqual({
+    exitCode: 0,
+    stdout: "null\n",
+    stderr: "",
+  });
 });
 
-it.each([false, true])("requests Sharing refresh with JSON output %s", async json => {
+it.each([false, true])("requests Sharing refresh with JSON output %s", async (json) => {
   const request = vi.fn(async () => ({ status: "paced" }));
-  const result = await executeCli({ argv: ["access", "refresh", ...(json ? ["--json"] : [])], cwd: WORKSPACE, env: {}, request });
-  expect(request).toHaveBeenCalledExactlyOnceWith({ protocolVersion: CLI_PROTOCOL_VERSION, verb: "accessRefresh", args: { cwd: WORKSPACE, actor: "human" } });
+  const result = await executeCli({
+    argv: ["access", "refresh", ...(json ? ["--json"] : [])],
+    cwd: WORKSPACE,
+    env: {},
+    request,
+  });
+  expect(request).toHaveBeenCalledExactlyOnceWith({
+    protocolVersion: CLI_PROTOCOL_VERSION,
+    verb: "accessRefresh",
+    args: { cwd: WORKSPACE, actor: "human" },
+  });
   expect(result.exitCode).toBe(0);
-  expect(JSON.parse(result.stdout)).toEqual(json ? { schemaVersion: CLI_JSON_SCHEMA_VERSION, status: "paced" } : { status: "paced" });
+  expect(JSON.parse(result.stdout)).toEqual(
+    json ? { schemaVersion: CLI_JSON_SCHEMA_VERSION, status: "paced" } : { status: "paced" },
+  );
 });

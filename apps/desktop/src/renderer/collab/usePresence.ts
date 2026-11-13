@@ -105,10 +105,7 @@ export function usePresence(input: UsePresenceInput): PresenceResult {
     };
   }, [active, transport, topic, clientId, displayName, restartGeneration]);
 
-  const others = useMemo(
-    () => peers.filter((peer) => !peer.isSelf),
-    [peers, clientId],
-  );
+  const others = useMemo(() => peers.filter((peer) => !peer.isSelf), [peers, clientId]);
   const typingNames = useMemo(
     () =>
       others
@@ -143,15 +140,9 @@ export function usePresence(input: UsePresenceInput): PresenceResult {
     };
   }, [displayName, typingIdleMs]);
 
-  const leave = useMemo(
-    () => () => channelRef.current?.stop() ?? Promise.resolve(),
-    [],
-  );
+  const leave = useMemo(() => () => channelRef.current?.stop() ?? Promise.resolve(), []);
 
-  const restart = useMemo(
-    () => () => setRestartGeneration((generation) => generation + 1),
-    [],
-  );
+  const restart = useMemo(() => () => setRestartGeneration((generation) => generation + 1), []);
 
   return { others, typingNames, setTyping, leave, restart };
 }

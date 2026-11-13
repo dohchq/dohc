@@ -7,8 +7,14 @@ import type {
 
 export interface StorageContext extends SyncRelayStorage {
   workReferenceDatasetAccess?: (input: {
-    workspaceId: string; userId?: string; grantId?: string; linkAuth?: Extract<import("../appBackendAuthority").AppBackendAuth, {kind: "link"}>;
-    target: Extract<import("@dohc/workspace-engine-client/daemon").WorkTarget, {kind: "transactionalCollection" | "transactionalRecord"}>;
+    workspaceId: string;
+    userId?: string;
+    grantId?: string;
+    linkAuth?: Extract<import("../appBackendAuthority").AppBackendAuth, { kind: "link" }>;
+    target: Extract<
+      import("@dohc/workspace-engine-client/daemon").WorkTarget,
+      { kind: "transactionalCollection" | "transactionalRecord" }
+    >;
   }) => Promise<(() => boolean) | null>;
   readonly db: SqliteDb;
   readonly options: Required<Omit<OpenSyncRelayStorageOptions, "liveTickets">>;

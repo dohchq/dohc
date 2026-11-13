@@ -61,20 +61,29 @@ test.describe("shared restore review with a notice toast", () => {
   });
 
   test.afterAll(async () => {
-    if (server) await new Promise<void>((resolve, reject) => {
-      server.httpServer.close((error) => error ? reject(error) : resolve());
-    });
+    if (server)
+      await new Promise<void>((resolve, reject) => {
+        server.httpServer.close((error) => (error ? reject(error) : resolve()));
+      });
     if (output) await removeTestScratch(output);
   });
 
   // Open the review with the toast already showing, then expand the removed
   // changes, as a person does before choosing to restore. `beforeOpen` acts on
   // the loaded page before the review opens.
-  async function openReview(page: Page, setup: (typeof cases)[number], expand = true, beforeOpen?: () => Promise<void>) {
+  async function openReview(
+    page: Page,
+    setup: (typeof cases)[number],
+    expand = true,
+    beforeOpen?: () => Promise<void>,
+  ) {
     await page.setViewportSize(viewports[setup.viewport]);
     await page.emulateMedia({ reducedMotion: setup.motion, colorScheme: setup.theme });
     await page.goto(server.resolvedUrls!.local[0]);
-    await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), setup.theme);
+    await page.evaluate(
+      (value) => document.documentElement.setAttribute("data-theme", value),
+      setup.theme,
+    );
     await expect(page.getByTestId("workspace-shell-error")).toBeVisible();
     // Nothing may move under a measurement when Inter arrives.
     await page.evaluate(() => document.fonts.ready.then(() => undefined));
@@ -92,7 +101,9 @@ test.describe("shared restore review with a notice toast", () => {
   }
 
   for (const setup of cases) {
-    test(`a pointer reaches Restore file at the ${setup.viewport} size in ${setup.theme} with ${setup.motion} motion`, async ({ page }) => {
+    test(`a pointer reaches Restore file at the ${setup.viewport} size in ${setup.theme} with ${setup.motion} motion`, async ({
+      page,
+    }) => {
       for (const key of buildEnvironmentKeys) {
         expect(process.env[key]).toBe(buildEnvironment[key]);
       }
@@ -103,7 +114,9 @@ test.describe("shared restore review with a notice toast", () => {
       await page.mouse.move(width / 2, height / 2);
       await page.mouse.wheel(0, 20_000);
       await expect(restore).toBeInViewport({ ratio: 1 });
-      await page.screenshot({ path: test.info().outputPath(`restore-review-${setup.viewport}-${setup.theme}.png`) });
+      await page.screenshot({
+        path: test.info().outputPath(`restore-review-${setup.viewport}-${setup.theme}.png`),
+      });
       // An ordinary click: Playwright refuses when another element receives it.
       await restore.click({ timeout: 2_000 });
       await expect(page.getByRole("dialog", { name: "File restored" })).toBeVisible();
@@ -115,19 +128,35 @@ test.describe("shared restore review with a notice toast", () => {
   // every point it covers, including its title and path, once it has settled.
   for (const setup of cases) {
     for (const scrolled of [false, true]) {
-      test(`the restore review covers History's ${scrolled ? "scrolled " : ""}day heading at the ${setup.viewport} size in ${setup.theme} with ${setup.motion} motion`, async ({ page }) => {
+      test(`the restore review covers History's ${scrolled ? "scrolled " : ""}day heading at the ${setup.viewport} size in ${setup.theme} with ${setup.motion} motion`, async ({
+        page,
+      }) => {
         const history = page.getByTestId("engine-history-list");
-        const { dialog } = await openReview(page, setup, false, scrolled ? async () => {
-          await history.hover();
-          await page.mouse.wheel(0, 700);
-          // A later day's heading is pinned to the top of the list.
-          await expect.poll(() => history.evaluate((list) => {
-            const top = list.getBoundingClientRect().top;
-            return [...list.querySelectorAll("[data-testid='engine-history-day-heading']")]
-              .find((heading) => Math.abs(heading.closest("li")!.getBoundingClientRect().top - top) < 1)
-              ?.textContent;
-          })).toMatch(/September 1[0-6]/);
-        } : undefined);
+        const { dialog } = await openReview(
+          page,
+          setup,
+          false,
+          scrolled
+            ? async () => {
+                await history.hover();
+                await page.mouse.wheel(0, 700);
+                // A later day's heading is pinned to the top of the list.
+                await expect
+                  .poll(() =>
+                    history.evaluate((list) => {
+                      const top = list.getBoundingClientRect().top;
+                      return [
+                        ...list.querySelectorAll("[data-testid='engine-history-day-heading']"),
+                      ].find(
+                        (heading) =>
+                          Math.abs(heading.closest("li")!.getBoundingClientRect().top - top) < 1,
+                      )?.textContent;
+                    }),
+                  )
+                  .toMatch(/September 1[0-6]/);
+              }
+            : undefined,
+        );
         await waitForVisibleAnimations(page);
 
         const { overlaps, misses } = await dialog.evaluate((review) => {
@@ -135,10 +164,16 @@ test.describe("shared restore review with a notice toast", () => {
           const points: Array<{ label: string; x: number; y: number }> = [];
           for (const part of [review.querySelector("h2")!, review.querySelector("p")!]) {
             const rect = part.getBoundingClientRect();
-            points.push({ label: part.textContent ?? "", x: rect.left + 2, y: rect.top + rect.height / 2 });
+            points.push({
+              label: part.textContent ?? "",
+              x: rect.left + 2,
+              y: rect.top + rect.height / 2,
+            });
           }
           let overlaps = 0;
-          for (const heading of document.querySelectorAll("[data-testid='engine-history-day-heading']")) {
+          for (const heading of document.querySelectorAll(
+            "[data-testid='engine-history-day-heading']",
+          )) {
             const rect = heading.closest("li")!.getBoundingClientRect();
             const left = Math.max(rect.left, bounds.left);
             const right = Math.min(rect.right, bounds.right);
@@ -146,14 +181,24 @@ test.describe("shared restore review with a notice toast", () => {
             const bottom = Math.min(rect.bottom, bounds.bottom);
             if (left >= right || top >= bottom) continue;
             overlaps += 1;
-            points.push({ label: heading.textContent ?? "", x: (left + right) / 2, y: (top + bottom) / 2 });
+            points.push({
+              label: heading.textContent ?? "",
+              x: (left + right) / 2,
+              y: (top + bottom) / 2,
+            });
           }
           const misses = points
             .filter((point) => !review.contains(document.elementFromPoint(point.x, point.y)))
             .map((point) => `${point.label} at ${Math.round(point.x)},${Math.round(point.y)}`);
           return { overlaps, misses };
         });
-        await page.screenshot({ path: test.info().outputPath(`restore-over-history-${setup.viewport}-${setup.theme}${scrolled ? "-scrolled" : ""}.png`) });
+        await page.screenshot({
+          path: test
+            .info()
+            .outputPath(
+              `restore-over-history-${setup.viewport}-${setup.theme}${scrolled ? "-scrolled" : ""}.png`,
+            ),
+        });
         // The large window leaves the review clear of the sidebar.
         expect(overlaps > 0).toBe(setup.viewport !== "large");
         expect(misses).toEqual([]);
@@ -162,15 +207,23 @@ test.describe("shared restore review with a notice toast", () => {
   }
 
   for (const setup of cases.filter((candidate) => candidate.viewport === "minimum")) {
-    test(`the toast is on top of the open review and takes a click in ${setup.theme}`, async ({ page }) => {
+    test(`the toast is on top of the open review and takes a click in ${setup.theme}`, async ({
+      page,
+    }) => {
       const { dialog } = await openReview(page, setup, false);
       const toast = page.getByTestId("workspace-shell-error");
       // What a pointer at the toast's middle hits is the toast, not the review or its scrim.
-      expect(await toast.evaluate((element) => {
-        const box = element.getBoundingClientRect();
-        return element.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
-      })).toBe(true);
-      await page.screenshot({ path: test.info().outputPath(`toast-over-review-${setup.theme}.png`) });
+      expect(
+        await toast.evaluate((element) => {
+          const box = element.getBoundingClientRect();
+          return element.contains(
+            document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2),
+          );
+        }),
+      ).toBe(true);
+      await page.screenshot({
+        path: test.info().outputPath(`toast-over-review-${setup.theme}.png`),
+      });
       // An ordinary click: Playwright refuses when another element receives it.
       await toast.getByRole("button", { name: "Try again" }).click();
       await expect(page.getByLabel("Toast retries")).toHaveText("1");
@@ -187,16 +240,23 @@ test.describe("shared restore review with a notice toast", () => {
   // review's actions sit above the toast: a pointer at their centres and a
   // keyboard focus both reach them without scrolling.
   for (const setup of cases.filter((candidate) => candidate.viewport === "minimum")) {
-    test(`the review's actions clear the toast at rest at the minimum size in ${setup.theme}`, async ({ page }) => {
+    test(`the review's actions clear the toast at rest at the minimum size in ${setup.theme}`, async ({
+      page,
+    }) => {
       const { dialog, restore } = await openReview(page, setup, false);
       const close = dialog.getByRole("button", { name: "Close", exact: true });
-      const atCentre = (button: typeof restore) => button.evaluate((element) => {
-        const box = element.getBoundingClientRect();
-        return element.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
-      });
+      const atCentre = (button: typeof restore) =>
+        button.evaluate((element) => {
+          const box = element.getBoundingClientRect();
+          return element.contains(
+            document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2),
+          );
+        });
       expect(await atCentre(restore)).toBe(true);
       expect(await atCentre(close)).toBe(true);
-      await page.screenshot({ path: test.info().outputPath(`review-at-rest-minimum-${setup.theme}.png`) });
+      await page.screenshot({
+        path: test.info().outputPath(`review-at-rest-minimum-${setup.theme}.png`),
+      });
 
       // Keyboard focus lands on Restore file where it can be seen.
       await page.keyboard.press("Shift+Tab");
@@ -223,27 +283,40 @@ test.describe("shared restore review with a notice toast", () => {
   // Its toasts still rise above a warning dialog, such as the one that asks
   // before dohc closes, and take clicks there.
   for (const theme of ["light", "dark"] as const) {
-    test(`a corner toast is on top of a warning dialog and takes a click in ${theme}`, async ({ page }) => {
+    test(`a corner toast is on top of a warning dialog and takes a click in ${theme}`, async ({
+      page,
+    }) => {
       await page.setViewportSize(viewports.minimum);
       await page.emulateMedia({ colorScheme: theme });
       await page.goto(`${server.resolvedUrls!.local[0]}?host=corner`);
-      await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
+      await page.evaluate(
+        (value) => document.documentElement.setAttribute("data-theme", value),
+        theme,
+      );
       const toast = page.getByTestId("workspace-shell-error");
       await expect(toast).toBeVisible();
       await page.getByRole("button", { name: "Open warning" }).press("Enter");
       await expect(page.getByRole("dialog", { name: "Close dohc?" })).toBeVisible();
-      expect(await toast.evaluate((element) => {
-        const box = element.getBoundingClientRect();
-        return element.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
-      })).toBe(true);
-      await page.screenshot({ path: test.info().outputPath(`corner-toast-over-warning-${theme}.png`) });
+      expect(
+        await toast.evaluate((element) => {
+          const box = element.getBoundingClientRect();
+          return element.contains(
+            document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2),
+          );
+        }),
+      ).toBe(true);
+      await page.screenshot({
+        path: test.info().outputPath(`corner-toast-over-warning-${theme}.png`),
+      });
       await toast.getByRole("button", { name: "Try again" }).click();
       await expect(page.getByLabel("Toast retries")).toHaveText("1");
       await expect(page.getByRole("dialog", { name: "Close dohc?" })).toBeVisible();
     });
   }
 
-  test("F6 reaches the toast from the review and comes back, and Tab never leaves the two", async ({ page }) => {
+  test("F6 reaches the toast from the review and comes back, and Tab never leaves the two", async ({
+    page,
+  }) => {
     const { dialog, restore } = await openReview(page, cases[1], false);
     await page.keyboard.press("Shift+Tab");
     await expect(restore).toBeFocused();

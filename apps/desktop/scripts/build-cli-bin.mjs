@@ -7,9 +7,14 @@ export { cliLaunchers } from "./mcp-launchers.mjs";
 
 async function bundle(input) {
   await build({
-    configFile: false, root: input.repoDir, logLevel: "info",
+    configFile: false,
+    root: input.repoDir,
+    logLevel: "info",
     build: {
-      target: "node22", ssr: input.entry, outDir: input.outputDir, emptyOutDir: input.emptyOutDir,
+      target: "node22",
+      ssr: input.entry,
+      outDir: input.outputDir,
+      emptyOutDir: input.emptyOutDir,
       rollupOptions: {
         output: {
           format: "es",
@@ -30,8 +35,20 @@ export async function buildCliBin(options = {}) {
   const repoDir = resolve(desktopDir, "../..");
   const outputDir = options.outputDir ?? join(desktopDir, "resources", "cli-bin");
   const launchers = cliLaunchers(options);
-  await bundle({ repoDir, outputDir, entry: "packages/cli/src/index.ts", name: "dohc.mjs", emptyOutDir: true });
-  await bundle({ repoDir, outputDir, entry: "packages/mcp/src/server.ts", name: "dohc-mcp.mjs", emptyOutDir: false });
+  await bundle({
+    repoDir,
+    outputDir,
+    entry: "packages/cli/src/index.ts",
+    name: "dohc.mjs",
+    emptyOutDir: true,
+  });
+  await bundle({
+    repoDir,
+    outputDir,
+    entry: "packages/mcp/src/server.ts",
+    name: "dohc-mcp.mjs",
+    emptyOutDir: false,
+  });
   for (const [name, content] of Object.entries(launchers)) {
     await writeFile(join(outputDir, name), content, { mode: 0o755 });
     await chmod(join(outputDir, name), 0o755);

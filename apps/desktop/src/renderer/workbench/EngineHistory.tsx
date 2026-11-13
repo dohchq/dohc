@@ -1,13 +1,37 @@
 import { formatChatDay, formatChatTime, formatClock, formatDayClock } from "../time";
 import { basenameOf, dirnameOf } from "../path";
-import { ChevronDown, ChevronRight, Cloud, Database, FileArchive, FilePen, Info, Keyboard, Layers, Lock, PenLine, Plug, RotateCcw, Search, TriangleAlert, X, Zap, type LucideIcon } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  Cloud,
+  Database,
+  FileArchive,
+  FilePen,
+  Info,
+  Keyboard,
+  Layers,
+  Lock,
+  PenLine,
+  Plug,
+  RotateCcw,
+  Search,
+  TriangleAlert,
+  X,
+  Zap,
+  type LucideIcon,
+} from "lucide-react";
 import { EmptyState, SecondaryButton } from "../ui/controls";
 import { EMPTY_ART } from "./EmptyArt";
 import { NameLine } from "../ui/NameLine";
 import { useCallback, useId, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { LegendList } from "@legendapp/list/react";
 import { isCaptureRecoveryOrigin } from "@dohc/workspace-contracts/engine";
-import { HISTORY_MAX_SOURCES, type EngineMomentRecord, type SyncStatusResult, type TimelineEntry } from "../../ipc/bridgeContract";
+import {
+  HISTORY_MAX_SOURCES,
+  type EngineMomentRecord,
+  type SyncStatusResult,
+  type TimelineEntry,
+} from "../../ipc/bridgeContract";
 import { chatAuthorLabel, usePersonalAgentNames } from "./chatMessages";
 import { ChatAvatar, LinkMark } from "./ChatAvatar";
 import { neutralPresentation } from "./actorPresentation";
@@ -34,17 +58,24 @@ export type TimelineItem =
 // The Collections a timeline can name and open on their History, with each
 // operation's label by its name. A Collection this computer cannot open has
 // no `openHistory`.
-export type HistoryCollections = ReadonlyMap<string, {
-  name: string;
-  operationLabels?: ReadonlyMap<string, string>;
-  openHistory?: () => void;
-}>;
+export type HistoryCollections = ReadonlyMap<
+  string,
+  {
+    name: string;
+    operationLabels?: ReadonlyMap<string, string>;
+    openHistory?: () => void;
+  }
+>;
 
 // History still taking in recent changes. Nothing failed and the reader has
 // nothing to do, so it offers no control: the next read replaces it.
 export function HistoryUpdating(props: { testId: string; className?: string }) {
   return (
-    <p role="status" data-testid={props.testId} className={`m-0 flex items-center gap-2 text-xs text-muted ${props.className ?? ""}`}>
+    <p
+      role="status"
+      data-testid={props.testId}
+      className={`m-0 flex items-center gap-2 text-xs text-muted ${props.className ?? ""}`}
+    >
       <span aria-hidden className={MARK_BOX}>
         <span className="size-2 animate-pulse rounded-full bg-accent" />
       </span>
@@ -65,7 +96,11 @@ export function isHistoryPaused(syncStatus: SyncStatusResult | null | undefined)
 // dot sits in a row's icon slot, so the words start where the names do.
 export function HistoryPaused(props: { testId: string; className?: string }) {
   return (
-    <p role="status" data-testid={props.testId} className={`m-0 flex items-center gap-2 text-xs text-muted ${props.className ?? ""}`}>
+    <p
+      role="status"
+      data-testid={props.testId}
+      className={`m-0 flex items-center gap-2 text-xs text-muted ${props.className ?? ""}`}
+    >
       <span aria-hidden className={MARK_BOX}>
         <span className="size-2 rounded-full bg-warning" />
       </span>
@@ -131,31 +166,60 @@ export function engineMomentSourceLabel(moment: SourcedMoment): string {
   return sourceName(moment) ?? engineOriginLabel(moment.origin);
 }
 
-type SourcedMoment = Pick<EngineMomentRecord, "origin" | "correlationId" | "agentAuthorName" | "personAuthorName" | "liveAuthorName" | "publicAuthor" | "linkAuthor" | "automationAuthor" | "namedAuthor" | "authorLabels" | "authors" | "authorPresentations">;
+type SourcedMoment = Pick<
+  EngineMomentRecord,
+  | "origin"
+  | "correlationId"
+  | "agentAuthorName"
+  | "personAuthorName"
+  | "liveAuthorName"
+  | "publicAuthor"
+  | "linkAuthor"
+  | "automationAuthor"
+  | "namedAuthor"
+  | "authorLabels"
+  | "authors"
+  | "authorPresentations"
+>;
 
 // Your personal agent's id when it made the moment, so its name and color come
 // from your roster. Only main can say an author is yours. Anyone who can write
 // to a workspace can claim an agent id, so a claim alone keeps its own name.
-function personalAuthorId(moment: Pick<EngineMomentRecord, "authors" | "authorPresentations">): string | undefined {
+function personalAuthorId(
+  moment: Pick<EngineMomentRecord, "authors" | "authorPresentations">,
+): string | undefined {
   const author = moment.authors?.[0];
-  return author?.kind === "agent" && isPersonalAgentId(author.agentId) && moment.authorPresentations?.[0]?.self === true
-    ? author.agentId : undefined;
+  return author?.kind === "agent" &&
+    isPersonalAgentId(author.agentId) &&
+    moment.authorPresentations?.[0]?.self === true
+    ? author.agentId
+    : undefined;
 }
 
 function isHeldChangeMoment(moment: SourcedMoment): boolean {
-  return moment.origin === "capture-recovery-cleared"
-    && (moment.correlationId?.startsWith("held-change:drop:") === true || moment.correlationId?.startsWith("held-change:undo:") === true);
+  return (
+    moment.origin === "capture-recovery-cleared" &&
+    (moment.correlationId?.startsWith("held-change:drop:") === true ||
+      moment.correlationId?.startsWith("held-change:undo:") === true)
+  );
 }
 
 function sourceName(moment: SourcedMoment): string | undefined {
-  if ((moment.origin === "restore" || isHeldChangeMoment(moment)) && moment.personAuthorName !== undefined) return moment.personAuthorName;
+  if (
+    (moment.origin === "restore" || isHeldChangeMoment(moment)) &&
+    moment.personAuthorName !== undefined
+  )
+    return moment.personAuthorName;
   if (moment.authorLabels) {
     const [first, second, third, ...rest] = moment.authorLabels;
-    const shown = [first, second, third].filter((label): label is string => label !== undefined).join(", ");
+    const shown = [first, second, third]
+      .filter((label): label is string => label !== undefined)
+      .join(", ");
     return rest.length ? `${shown} and ${rest.length} more` : shown;
   }
   if (moment.liveAuthorName) return moment.liveAuthorName;
-  if (moment.publicAuthor) return `Link holder ${moment.publicAuthor.principalId.replace(/^public_/, "").slice(0, 8)}`;
+  if (moment.publicAuthor)
+    return `Link holder ${moment.publicAuthor.principalId.replace(/^public_/, "").slice(0, 8)}`;
   if (moment.linkAuthor) return `Edit link · holder ${moment.linkAuthor.principalId.slice(0, 8)}`;
   if (moment.automationAuthor) {
     const { name, collection } = moment.automationAuthor;
@@ -163,7 +227,11 @@ function sourceName(moment: SourcedMoment): string | undefined {
   }
   if (moment.namedAuthor) return moment.namedAuthor.label;
   return moment.agentAuthorName !== undefined
-    ? chatAuthorLabel({ authorKind: "agent", authorDisplayName: moment.agentAuthorName, authorAgentId: personalAuthorId(moment) })
+    ? chatAuthorLabel({
+        authorKind: "agent",
+        authorDisplayName: moment.agentAuthorName,
+        authorAgentId: personalAuthorId(moment),
+      })
     : undefined;
 }
 
@@ -175,13 +243,20 @@ export function groupAgentAuthorName(
 ): string | undefined {
   const first = moments[0];
   if (first?.agentAuthorName === undefined) return undefined;
-  return moments.every((moment) => moment.agentAuthorName === first.agentAuthorName && connectedAuthor(moment, 0) === connectedAuthor(first, 0))
+  return moments.every(
+    (moment) =>
+      moment.agentAuthorName === first.agentAuthorName &&
+      connectedAuthor(moment, 0) === connectedAuthor(first, 0),
+  )
     ? first.agentAuthorName
     : undefined;
 }
 
 // Whether a moment's author at `index` is a connected agent, which takes the plug.
-function connectedAuthor(moment: Pick<EngineMomentRecord, "authorPresentations">, index: number): boolean {
+function connectedAuthor(
+  moment: Pick<EngineMomentRecord, "authorPresentations">,
+  index: number,
+): boolean {
   return moment.authorPresentations?.[index]?.connected === true;
 }
 
@@ -203,16 +278,25 @@ function soleAuthorKey(moment: EngineMomentRecord): string | undefined {
 // An edit a run can hold. A restore and kept typing each keep a row of
 // their own, so they are never folded out of sight.
 function runEdit(moment: EngineMomentRecord): boolean {
-  return moment.operation === "write" && moment.origin !== "restore" && !isCaptureRecoveryOrigin(moment.origin);
+  return (
+    moment.operation === "write" &&
+    moment.origin !== "restore" &&
+    !isCaptureRecoveryOrigin(moment.origin)
+  );
 }
 
 // Whether `older` continues the run `newer` is in: the same agent or person
 // editing the same file, on the same day.
 function continuesRun(newer: EngineMomentRecord, older: EngineMomentRecord): boolean {
   const author = soleAuthorKey(newer);
-  return author !== undefined && author === soleAuthorKey(older) &&
-    newer.path === older.path && runEdit(newer) && runEdit(older) &&
-    dayKey(newer.recordedAtMs) === dayKey(older.recordedAtMs);
+  return (
+    author !== undefined &&
+    author === soleAuthorKey(older) &&
+    newer.path === older.path &&
+    runEdit(newer) &&
+    runEdit(older) &&
+    dayKey(newer.recordedAtMs) === dayKey(older.recordedAtMs)
+  );
 }
 
 // When a change happened. Only a Collection change can be undated.
@@ -229,7 +313,8 @@ function ownTime(entry: TimelineEntry): number | null {
 // those dated changes under their own day, and puts undated changes last.
 function byOwnTime(entries: readonly TimelineEntry[]): TimelineEntry[] {
   return [...entries].sort((a, b) => {
-    const at = ownTime(a), bt = ownTime(b);
+    const at = ownTime(a),
+      bt = ownTime(b);
     if (at === bt) return 0;
     if (at === null) return 1;
     return bt === null ? -1 : bt - at;
@@ -252,7 +337,11 @@ export function groupTimeline(loaded: readonly TimelineEntry[]): TimelineItem[] 
       continue;
     }
     if (entry.kind === "collection") {
-      items.push({ kind: "collection", key: `collection:${entry.datasetId}:${entry.change.revision}`, entry });
+      items.push({
+        kind: "collection",
+        key: `collection:${entry.datasetId}:${entry.change.revision}`,
+        entry,
+      });
       continue;
     }
     const { moment } = entry;
@@ -266,9 +355,16 @@ export function groupTimeline(loaded: readonly TimelineEntry[]): TimelineItem[] 
       continue;
     }
     const next = entries[index + 1];
-    const startsPass = moment.correlationId !== undefined && next?.kind === "file" && next.moment.correlationId === moment.correlationId;
-    if (previous?.kind === "files" && (previous.group.run || previous.group.moments.length === 1) && !startsPass &&
-      continuesRun(previous.group.moments[previous.group.moments.length - 1]!, moment)) {
+    const startsPass =
+      moment.correlationId !== undefined &&
+      next?.kind === "file" &&
+      next.moment.correlationId === moment.correlationId;
+    if (
+      previous?.kind === "files" &&
+      (previous.group.run || previous.group.moments.length === 1) &&
+      !startsPass &&
+      continuesRun(previous.group.moments[previous.group.moments.length - 1]!, moment)
+    ) {
       previous.group.moments.push(moment);
       previous.group.run = true;
       previous.key = previous.group.key = moment.id;
@@ -282,9 +378,7 @@ export function groupTimeline(loaded: readonly TimelineEntry[]): TimelineItem[] 
         run: false,
         summary: engineMomentSummary(moment),
         recordedAtMs: moment.recordedAtMs,
-        ...(moment.correlationId !== undefined
-          ? { correlationId: moment.correlationId }
-          : {}),
+        ...(moment.correlationId !== undefined ? { correlationId: moment.correlationId } : {}),
         moments: [moment],
       },
     });
@@ -312,7 +406,9 @@ export function fileMomentSteps(entries: readonly TimelineEntry[]): Map<string, 
 }
 
 function automationName(automation: NonNullable<CollectionEntry["change"]["automation"]>): string {
-  return automation.name ?? automation.automationId.slice(automation.automationId.lastIndexOf("#") + 1);
+  return (
+    automation.name ?? automation.automationId.slice(automation.automationId.lastIndexOf("#") + 1)
+  );
 }
 
 // Main is where the workspace starts, not a version someone created.
@@ -331,15 +427,27 @@ export function collectionChangeTitle(entry: CollectionEntry, label: string | un
 // The agent that approved a Collection's rules, if one did.
 function approvalAgentName(change: CollectionEntry["change"]): string | undefined {
   const agent = change.approvalAgent;
-  return agent ? chatAuthorLabel({ authorKind: "agent", authorDisplayName: agent.label ?? "Agent" }) : undefined;
+  return agent
+    ? chatAuthorLabel({ authorKind: "agent", authorDisplayName: agent.label ?? "Agent" })
+    : undefined;
 }
 
-function timelineSearchText(item: TimelineItem, labelOf: (entry: CollectionEntry) => string | undefined): string {
+function timelineSearchText(
+  item: TimelineItem,
+  labelOf: (entry: CollectionEntry) => string | undefined,
+): string {
   if (item.kind === "version") return versionMarkerTitle(item.version).toLowerCase();
   if (item.kind === "collection") {
     const { name, change } = item.entry;
-    return [collectionChangeTitle(item.entry, labelOf(item.entry)), name, change.operation,
-      approvalAgentName(change) ?? "", change.automation ? automationName(change.automation) : ""].join("\n").toLowerCase();
+    return [
+      collectionChangeTitle(item.entry, labelOf(item.entry)),
+      name,
+      change.operation,
+      approvalAgentName(change) ?? "",
+      change.automation ? automationName(change.automation) : "",
+    ]
+      .join("\n")
+      .toLowerCase();
   }
   return [
     item.group.summary,
@@ -403,7 +511,9 @@ function missingSourcesShort(
   nameOf: (datasetId: string) => string | undefined,
 ): string | null {
   const names = unavailable.flatMap((source) => nameOf(source.datasetId) ?? []);
-  return unavailable.length ? `dohc could not load ${collectionListPhrase(names, unavailable.length)}` : null;
+  return unavailable.length
+    ? `dohc could not load ${collectionListPhrase(names, unavailable.length)}`
+    : null;
 }
 
 // The sentences that say what a partial timeline is missing.
@@ -417,9 +527,10 @@ export function missingSourcesWords(
     unavailable: unavailable.length
       ? `dohc could not load changes from ${collectionListPhrase(names, unavailable.length)}.`
       : null,
-    omitted: omitted > 0
-      ? `History includes ${countFormat.format(HISTORY_MAX_SOURCES)} of ${countFormat.format(HISTORY_MAX_SOURCES + omitted)} Collections. For another Collection, open it and choose History.`
-      : null,
+    omitted:
+      omitted > 0
+        ? `History includes ${countFormat.format(HISTORY_MAX_SOURCES)} of ${countFormat.format(HISTORY_MAX_SOURCES + omitted)} Collections. For another Collection, open it and choose History.`
+        : null,
   };
 }
 
@@ -428,18 +539,28 @@ const TWO_LINES = `grid h-12 w-full min-w-0 grid-cols-[18px_minmax(0,1fr)] conte
 const WHEN = "col-span-2 min-w-0 truncate text-[13px] font-medium leading-5 tabular-nums text-ink";
 const LINE_TWO = "flex min-w-0 items-center gap-2 text-[12px] leading-4 text-muted";
 const ONE_LINE = `flex h-7 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75 dohc-focus-row`;
-const rowTone = (selected: boolean) => (selected ? "bg-selected text-ink font-medium" : "text-muted hover:bg-hover hover:text-ink");
+const rowTone = (selected: boolean) =>
+  selected ? "bg-selected text-ink font-medium" : "text-muted hover:bg-hover hover:text-ink";
 const countFormat = new Intl.NumberFormat();
 
 // A count of what has loaded: "3,029", or "49+" read as "49 or more" while
 // earlier changes remain.
 function LoadedCount(props: { count: number; more?: boolean; noun: string }) {
   const count = countFormat.format(props.count);
-  if (!props.more) return <span className="tabular-nums">{count} {props.noun}</span>;
+  if (!props.more)
+    return (
+      <span className="tabular-nums">
+        {count} {props.noun}
+      </span>
+    );
   return (
     <span className="tabular-nums">
-      <span aria-hidden>{count}+ {props.noun}</span>
-      <span className="sr-only">{count} or more {props.noun}</span>
+      <span aria-hidden>
+        {count}+ {props.noun}
+      </span>
+      <span className="sr-only">
+        {count} or more {props.noun}
+      </span>
     </span>
   );
 }
@@ -456,15 +577,43 @@ export function MomentAuthor(props: { moment: CreditedMoment; fallback: ReactNod
   const presentation = moment.authorPresentations?.[0] ?? neutralPresentation;
   if (moment.agentAuthorName !== undefined) {
     const personal = personalAuthorId(moment);
-    return personal === undefined
-      ? <ChatAvatar presentation={presentation} name={moment.agentAuthorName} kind="agent" size="strip" />
-      : <ChatAvatar presentation={{ ...presentation, agentId: personal }} name={chatAuthorLabel({ authorKind: "agent", authorDisplayName: moment.agentAuthorName, authorAgentId: personal })} kind="agent" size="strip" />;
+    return personal === undefined ? (
+      <ChatAvatar
+        presentation={presentation}
+        name={moment.agentAuthorName}
+        kind="agent"
+        size="strip"
+      />
+    ) : (
+      <ChatAvatar
+        presentation={{ ...presentation, agentId: personal }}
+        name={chatAuthorLabel({
+          authorKind: "agent",
+          authorDisplayName: moment.agentAuthorName,
+          authorAgentId: personal,
+        })}
+        kind="agent"
+        size="strip"
+      />
+    );
   }
-  if (moment.automationAuthor) return <ChatAvatar presentation={presentation} name={moment.automationAuthor.name} kind="automation" size="strip" />;
-  const person = moment.namedAuthor?.label ?? moment.personAuthorName
-    ?? (moment.authors?.[0]?.kind === "human" ? moment.liveAuthorName : undefined);
-  if (person !== undefined) return <ChatAvatar presentation={presentation} name={person} kind="human" size="strip" />;
-  if (moment.publicAuthor || moment.linkAuthor || moment.liveAuthorName !== undefined) return <LinkMark />;
+  if (moment.automationAuthor)
+    return (
+      <ChatAvatar
+        presentation={presentation}
+        name={moment.automationAuthor.name}
+        kind="automation"
+        size="strip"
+      />
+    );
+  const person =
+    moment.namedAuthor?.label ??
+    moment.personAuthorName ??
+    (moment.authors?.[0]?.kind === "human" ? moment.liveAuthorName : undefined);
+  if (person !== undefined)
+    return <ChatAvatar presentation={presentation} name={person} kind="human" size="strip" />;
+  if (moment.publicAuthor || moment.linkAuthor || moment.liveAuthorName !== undefined)
+    return <LinkMark />;
   return <>{props.fallback}</>;
 }
 
@@ -482,15 +631,25 @@ const ORIGIN_MARKS: Partial<Record<EngineMomentRecord["origin"], LucideIcon>> = 
 export function OriginMark(props: { moment: CreditedMoment }) {
   const Icon = ORIGIN_MARKS[props.moment.origin];
   return (
-    <span aria-hidden title={engineMomentSourceLabel(props.moment)} className={`${MARK_BOX} text-subtle`}>
-      {Icon ? <Icon size={14} strokeWidth={1.9} /> : <span className="size-1 rounded-full bg-subtle" />}
+    <span
+      aria-hidden
+      title={engineMomentSourceLabel(props.moment)}
+      className={`${MARK_BOX} text-subtle`}
+    >
+      {Icon ? (
+        <Icon size={14} strokeWidth={1.9} />
+      ) : (
+        <span className="size-1 rounded-full bg-subtle" />
+      )}
     </span>
   );
 }
 
 // What a change did, in one file's History, where the file goes without
 // saying: its own summary, else its operation.
-export function fileMomentSummary(moment: Pick<EngineMomentRecord, "summary" | "operation" | "path">): string {
+export function fileMomentSummary(
+  moment: Pick<EngineMomentRecord, "summary" | "operation" | "path">,
+): string {
   if (moment.summary) return moment.summary;
   if (moment.operation === "rename") return `Renamed to ${basenameOf(moment.path)}`;
   return moment.operation === "delete" ? "Deleted" : "Edited";
@@ -505,16 +664,27 @@ function momentAuthorLabel(moment: CreditedMoment): string {
 
 /** The name a History row gives whoever made a change, or undefined when the row says only where it came from. */
 export function engineMomentAuthorName(moment: SourcedMoment): string | undefined {
-  return (isCaptureRecoveryOrigin(moment.origin) && !isHeldChangeMoment(moment) ? undefined : moment.personAuthorName) ?? sourceName(moment);
+  return (
+    (isCaptureRecoveryOrigin(moment.origin) && !isHeldChangeMoment(moment)
+      ? undefined
+      : moment.personAuthorName) ?? sourceName(moment)
+  );
 }
 
-function authorWords(kind: "agent" | "connected agent" | "automation" | undefined, label: string): string {
-  if (kind === "connected agent") return label === "Agent" ? "Connected agent" : `Connected agent ${label}`;
+function authorWords(
+  kind: "agent" | "connected agent" | "automation" | undefined,
+  label: string,
+): string {
+  if (kind === "connected agent")
+    return label === "Agent" ? "Connected agent" : `Connected agent ${label}`;
   if (kind === "agent") return label === "Agent" ? label : `Agent ${label}`;
   return kind === "automation" ? `Automation ${label}` : label;
 }
 
-function agentOrAutomation(kind: string | undefined, connected: boolean): "agent" | "connected agent" | "automation" | undefined {
+function agentOrAutomation(
+  kind: string | undefined,
+  connected: boolean,
+): "agent" | "connected agent" | "automation" | undefined {
   if (kind === "agent") return connected ? "connected agent" : "agent";
   return kind === "automation" ? kind : undefined;
 }
@@ -524,22 +694,43 @@ function agentOrAutomation(kind: string | undefined, connected: boolean): "agent
 // order the change recorded them.
 export function momentDescription(moment: EngineMomentRecord): string {
   const who = moment.authorLabels
-    ? moment.authorLabels.map((label, index) => authorWords(agentOrAutomation(moment.authors?.[index]?.kind, connectedAuthor(moment, index)), label)).join(", ")
+    ? moment.authorLabels
+        .map((label, index) =>
+          authorWords(
+            agentOrAutomation(moment.authors?.[index]?.kind, connectedAuthor(moment, index)),
+            label,
+          ),
+        )
+        .join(", ")
     : authorWords(
-      moment.agentAuthorName !== undefined ? agentOrAutomation("agent", connectedAuthor(moment, 0)) : moment.automationAuthor ? "automation" : undefined,
-      momentAuthorLabel(moment),
-    );
+        moment.agentAuthorName !== undefined
+          ? agentOrAutomation("agent", connectedAuthor(moment, 0))
+          : moment.automationAuthor
+            ? "automation"
+            : undefined,
+        momentAuthorLabel(moment),
+      );
   return `${engineMomentSummary(moment)}, ${who}, ${formatChatTime(moment.recordedAtMs).label}`;
 }
 
 // Who made a change, beside their face. The face carries an agent's hue, so
 // the name stays in the line's ink; an automation says what it is to a
 // screen reader.
-export function MomentName(props: { moment: CreditedMoment; testId?: string; className?: string; title?: string; style?: CSSProperties }) {
+export function MomentName(props: {
+  moment: CreditedMoment;
+  testId?: string;
+  className?: string;
+  title?: string;
+  style?: CSSProperties;
+}) {
   const { moment } = props;
   return (
-    <span data-testid={props.testId ?? "engine-moment-source"} title={props.title} style={props.style}
-      className={`min-w-0 truncate ${props.className ?? ""}`}>
+    <span
+      data-testid={props.testId ?? "engine-moment-source"}
+      title={props.title}
+      style={props.style}
+      className={`min-w-0 truncate ${props.className ?? ""}`}
+    >
       {moment.automationAuthor ? <span className="sr-only">Automation </span> : null}
       {momentAuthorLabel(moment)}
     </span>
@@ -549,22 +740,43 @@ export function MomentName(props: { moment: CreditedMoment; testId?: string; cla
 // A protected file's change shows no contents; a binary one shows bytes.
 function ContentMark(props: { moment: EngineMomentRecord }) {
   if (props.moment.protected) {
-    return <Lock size={12} aria-hidden data-testid="engine-moment-lock" className="shrink-0 text-subtle" />;
+    return (
+      <Lock
+        size={12}
+        aria-hidden
+        data-testid="engine-moment-lock"
+        className="shrink-0 text-subtle"
+      />
+    );
   }
-  return props.moment.contentKind === "binary"
-    ? <FileArchive size={12} aria-hidden data-testid="engine-moment-binary" className="shrink-0 text-subtle" />
-    : null;
+  return props.moment.contentKind === "binary" ? (
+    <FileArchive
+      size={12}
+      aria-hidden
+      data-testid="engine-moment-binary"
+      className="shrink-0 text-subtle"
+    />
+  ) : null;
 }
 
 // Origins whose label already says what happened, such as "Local file edit".
-const ACTION_ORIGINS = new Set<EngineMomentRecord["origin"]>(["local-file", "ydoc", "restore", "capture-recovery", "capture-recovery-cleared"]);
+const ACTION_ORIGINS = new Set<EngineMomentRecord["origin"]>([
+  "local-file",
+  "ydoc",
+  "restore",
+  "capture-recovery",
+  "capture-recovery-cleared",
+]);
 
 // What changed, in one file's History, where the file goes without saying.
 // A bare "Edited" goes unsaid after a name that already says it.
 function FileMomentWhat(props: { moment: EngineMomentRecord }) {
   const { moment } = props;
-  const saysIt = !moment.summary && moment.operation === "write" && ACTION_ORIGINS.has(moment.origin)
-    && momentAuthorLabel(moment) === engineOriginLabel(moment.origin);
+  const saysIt =
+    !moment.summary &&
+    moment.operation === "write" &&
+    ACTION_ORIGINS.has(moment.origin) &&
+    momentAuthorLabel(moment) === engineOriginLabel(moment.origin);
   return saysIt ? null : <span className="min-w-0 truncate">{fileMomentSummary(moment)}</span>;
 }
 
@@ -576,7 +788,9 @@ function FileMomentWhat(props: { moment: EngineMomentRecord }) {
 const ACTOR_FLOOR: CSSProperties = { minWidth: "calc-size(max-content, min(size, 48px))" };
 const LEAD_FLOOR: CSSProperties = { minWidth: "calc-size(max-content, min(size, 48px, 50%))" };
 const PART_FLOOR: CSSProperties = { minWidth: "calc-size(max-content, min(size, 48px, 25%))" };
-const COLLECTION_FLOOR: CSSProperties = { minWidth: "calc-size(max-content, min(size, 72px, 35%))" };
+const COLLECTION_FLOOR: CSSProperties = {
+  minWidth: "calc-size(max-content, min(size, 72px, 35%))",
+};
 // How soon a part gives way. A line shares its shortfall by each part's width
 // times its factor and rounds each share to 1/64 px, so each step is a
 // million times the next: the part that should hold rounds to no loss.
@@ -593,9 +807,20 @@ function NamedSummary(props: { summary: string; name: string }) {
   const after = props.summary.slice(at + props.name.length);
   return (
     <span data-testid="engine-moment-summary" className="flex min-w-0">
-      {before ? <span className={`min-w-0 ${GIVES_THIRD} overflow-hidden text-ellipsis whitespace-pre`} style={LEAD_FLOOR}>{before}</span> : null}
+      {before ? (
+        <span
+          className={`min-w-0 ${GIVES_THIRD} overflow-hidden text-ellipsis whitespace-pre`}
+          style={LEAD_FLOOR}
+        >
+          {before}
+        </span>
+      ) : null}
       <NameLine name={props.name} className="text-ink" />
-      {after ? <span className={`min-w-0 ${GIVES_SECOND} overflow-hidden text-ellipsis whitespace-pre`}>{after}</span> : null}
+      {after ? (
+        <span className={`min-w-0 ${GIVES_SECOND} overflow-hidden text-ellipsis whitespace-pre`}>
+          {after}
+        </span>
+      ) : null}
     </span>
   );
 }
@@ -612,23 +837,43 @@ function NamedSummary(props: { summary: string; name: string }) {
 function WorkspaceMomentLine(props: { moment: EngineMomentRecord; fileOnly?: boolean }) {
   const { moment } = props;
   const name = basenameOf(moment.path);
-  const summary = props.fileOnly || (!moment.summary && moment.operation === "write") ? null : engineMomentSummary(moment);
+  const summary =
+    props.fileOnly || (!moment.summary && moment.operation === "write")
+      ? null
+      : engineMomentSummary(moment);
   const namesFile = summary !== null && summary.includes(name);
   const folder = summary === null ? dirnameOf(moment.path) : "";
   return (
-    <span data-testid="engine-moment-line" className="flex h-4 min-w-0 flex-wrap content-start items-center gap-x-2 overflow-hidden text-[12px] leading-4 text-muted">
+    <span
+      data-testid="engine-moment-line"
+      className="flex h-4 min-w-0 flex-wrap content-start items-center gap-x-2 overflow-hidden text-[12px] leading-4 text-muted"
+    >
       <span className="flex min-w-0 items-center gap-2">
-        <MomentName moment={moment} title={momentAuthorLabel(moment)} style={ACTOR_FLOOR} className={GIVES_THIRD} />
-        {namesFile
-          ? <NamedSummary summary={summary} name={name} />
-          : <NameLine name={name} className="text-ink" />}
-        {summary !== null && !namesFile
-          ? <span data-testid="engine-moment-summary" className={`min-w-0 ${GIVES_SECOND} truncate`}>{summary}</span>
-          : null}
+        <MomentName
+          moment={moment}
+          title={momentAuthorLabel(moment)}
+          style={ACTOR_FLOOR}
+          className={GIVES_THIRD}
+        />
+        {namesFile ? (
+          <NamedSummary summary={summary} name={name} />
+        ) : (
+          <NameLine name={name} className="text-ink" />
+        )}
+        {summary !== null && !namesFile ? (
+          <span data-testid="engine-moment-summary" className={`min-w-0 ${GIVES_SECOND} truncate`}>
+            {summary}
+          </span>
+        ) : null}
         <ContentMark moment={moment} />
       </span>
       {folder ? (
-        <span data-testid="engine-moment-folder" className="min-w-0 max-w-max grow basis-6 truncate text-subtle">{folder}</span>
+        <span
+          data-testid="engine-moment-folder"
+          className="min-w-0 max-w-max grow basis-6 truncate text-subtle"
+        >
+          {folder}
+        </span>
       ) : null}
     </span>
   );
@@ -637,7 +882,11 @@ function WorkspaceMomentLine(props: { moment: EngineMomentRecord; fileOnly?: boo
 // Words a control's description reads, kept out of the page: a referenced
 // hidden element still describes, and nothing reads it twice.
 function HiddenWords(props: { id: string; children: string }) {
-  return <span id={props.id} hidden>{props.children}</span>;
+  return (
+    <span id={props.id} hidden>
+      {props.children}
+    </span>
+  );
 }
 
 // What a collapsed run or pass says when the open change is inside it.
@@ -655,7 +904,13 @@ export function HistoryRow(props: {
   nested?: "pass" | "run";
   // The change open in the focused editor group.
   selected?: boolean;
-  fold?: { count: number; more?: boolean; expanded: boolean; holdsOpen?: boolean; onToggle: () => void };
+  fold?: {
+    count: number;
+    more?: boolean;
+    expanded: boolean;
+    holdsOpen?: boolean;
+    onToggle: () => void;
+  };
   onOpen: (momentId: string, filePath: string) => void;
 }) {
   const { moment, nested, fold } = props;
@@ -665,9 +920,16 @@ export function HistoryRow(props: {
   const descriptionId = useId();
   const holdsOpenId = useId();
   const time = (className: string) => (
-    <time data-testid="engine-moment-recorded-at" dateTime={recordedAt.iso} title={recordedAt.label} className={className}>
+    <time
+      data-testid="engine-moment-recorded-at"
+      dateTime={recordedAt.iso}
+      title={recordedAt.label}
+      className={className}
+    >
       {/* The workspace's History heads each day; one file's dates each row. */}
-      {props.context === "file" ? formatDayClock(moment.recordedAtMs) : formatClock(moment.recordedAtMs)}
+      {props.context === "file"
+        ? formatDayClock(moment.recordedAtMs)
+        : formatClock(moment.recordedAtMs)}
     </time>
   );
   const shared = {
@@ -689,15 +951,21 @@ export function HistoryRow(props: {
           <span aria-hidden className={MARK_BOX} />
           {nested === "pass" ? (
             <span className="flex min-w-0 flex-1 items-center gap-2">
-              <span className="min-w-0 max-w-[70%] shrink-0 truncate text-ink">{basenameOf(moment.path)}</span>
-              <span className="min-w-0 truncate text-[12px] text-subtle">{dirnameOf(moment.path)}</span>
+              <span className="min-w-0 max-w-[70%] shrink-0 truncate text-ink">
+                {basenameOf(moment.path)}
+              </span>
+              <span className="min-w-0 truncate text-[12px] text-subtle">
+                {dirnameOf(moment.path)}
+              </span>
             </span>
           ) : (
             // An earlier edit in a run leads with its time, as its head
             // does; the head already names who made them all.
             <span className="flex min-w-0 flex-1 items-center gap-2">
               {time("shrink-0 font-medium tabular-nums text-ink")}
-              <span className="min-w-0 truncate text-[12px] text-muted">{fileMomentSummary(moment)}</span>
+              <span className="min-w-0 truncate text-[12px] text-muted">
+                {fileMomentSummary(moment)}
+              </span>
             </span>
           )}
           <ContentMark moment={moment} />
@@ -729,14 +997,22 @@ export function HistoryRow(props: {
       )}
     </button>
   );
-  if (!fold) return <>{open}{description}</>;
+  if (!fold)
+    return (
+      <>
+        {open}
+        {description}
+      </>
+    );
   // A collapsed run holding the open change takes the selected ink; the
   // change keeps aria-current for itself, and the count says where it is.
   const holdsOpen = fold.holdsOpen === true;
   const countWords = `${countFormat.format(fold.count)}${fold.more ? " or more" : ""} changes`;
   const Chevron = fold.expanded ? ChevronDown : ChevronRight;
   return (
-    <div className={`relative rounded-md transition-colors duration-75 ${rowTone(selected || holdsOpen)}`}>
+    <div
+      className={`relative rounded-md transition-colors duration-75 ${rowTone(selected || holdsOpen)}`}
+    >
       {open}
       <button
         type="button"
@@ -775,7 +1051,13 @@ function RunRow(props: {
         moment={newest!}
         context="workspace"
         selected={newest!.id === props.openMomentId}
-        fold={{ count: props.group.moments.length, more: props.more, expanded: props.expanded, holdsOpen, onToggle: props.onToggle }}
+        fold={{
+          count: props.group.moments.length,
+          more: props.more,
+          expanded: props.expanded,
+          holdsOpen,
+          onToggle: props.onToggle,
+        }}
         onOpen={props.onOpenMoment}
       />
       {props.expanded ? (
@@ -812,7 +1094,8 @@ function GroupRow(props: {
   // Uniform agent authorship surfaces on the group row itself; mixed or
   // neutral groups show no author (never a guess).
   const agentAuthorName = groupAgentAuthorName(group.moments);
-  const groupConnected = agentAuthorName !== undefined && group.moments.every((moment) => connectedAuthor(moment, 0));
+  const groupConnected =
+    agentAuthorName !== undefined && group.moments.every((moment) => connectedAuthor(moment, 0));
   const Chevron = expanded ? ChevronDown : ChevronRight;
   // A collapsed pass holding the open change says so, as a run does.
   const holdsOpen = !expanded && group.moments.some((moment) => moment.id === props.openMomentId);
@@ -835,14 +1118,23 @@ function GroupRow(props: {
         </span>
         <span className={LINE_TWO}>
           {agentAuthorName !== undefined ? (
-            <span data-testid="engine-moment-group-source" className="inline-flex min-w-0 max-w-[45%] shrink-0 items-center gap-1">
+            <span
+              data-testid="engine-moment-group-source"
+              className="inline-flex min-w-0 max-w-[45%] shrink-0 items-center gap-1"
+            >
               {groupConnected ? (
                 <span data-agent-mark="connected" className="inline-flex shrink-0 text-subtle">
                   <Plug size={12} strokeWidth={1.9} aria-hidden />
                   <span className="sr-only">Connected agent </span>
                 </span>
               ) : null}
-              <span className="min-w-0 truncate">{chatAuthorLabel({ authorKind: "agent", authorDisplayName: agentAuthorName, authorAgentId: personalAuthorId(group.moments[0] ?? {}) })}</span>
+              <span className="min-w-0 truncate">
+                {chatAuthorLabel({
+                  authorKind: "agent",
+                  authorDisplayName: agentAuthorName,
+                  authorAgentId: personalAuthorId(group.moments[0] ?? {}),
+                })}
+              </span>
             </span>
           ) : null}
           <span className="min-w-0 truncate">{group.summary}</span>
@@ -885,16 +1177,24 @@ function VersionMarkerRow(props: { version: VersionEntry["version"] }) {
       <span className={LINE_TWO}>
         {/* The version's name takes the ink a file's name does. */}
         <span className="min-w-0 truncate">
-          {props.version.kind === "main"
-            ? versionMarkerTitle(props.version)
-            : <>Created version <span className="text-ink">{props.version.name}</span></>}
+          {props.version.kind === "main" ? (
+            versionMarkerTitle(props.version)
+          ) : (
+            <>
+              Created version <span className="text-ink">{props.version.name}</span>
+            </>
+          )}
         </span>
       </span>
     </div>
   );
 }
 
-function CollectionChangeRow(props: { entry: CollectionEntry; label?: string; openHistory?: () => void }) {
+function CollectionChangeRow(props: {
+  entry: CollectionEntry;
+  label?: string;
+  openHistory?: () => void;
+}) {
   const { name, change } = props.entry;
   const agent = approvalAgentName(change);
   const title = collectionChangeTitle(props.entry, props.label);
@@ -910,14 +1210,20 @@ function CollectionChangeRow(props: { entry: CollectionEntry; label?: string; op
     change.automation ? authorWords("automation", automationName(change.automation)) : undefined,
     unlabelled ? change.operation : name,
     change.recordedAtMs === null ? undefined : formatChatTime(change.recordedAtMs).label,
-  ].filter((part) => part !== undefined).join(", ");
+  ]
+    .filter((part) => part !== undefined)
+    .join(", ");
   // An undated change sits under the Date unknown heading, so it is one
   // line with no time.
   const frame = change.recordedAtMs === null ? ONE_LINE : TWO_LINES;
   const body = (
     <>
       {change.recordedAtMs === null ? null : (
-        <time dateTime={formatChatTime(change.recordedAtMs).iso} title={formatChatTime(change.recordedAtMs).label} className={WHEN}>
+        <time
+          dateTime={formatChatTime(change.recordedAtMs).iso}
+          title={formatChatTime(change.recordedAtMs).label}
+          className={WHEN}
+        >
           {formatClock(change.recordedAtMs)}
         </time>
       )}
@@ -926,23 +1232,47 @@ function CollectionChangeRow(props: { entry: CollectionEntry; label?: string; op
       </span>
       {/* An undated row is one line, and this takes all of it beside the mark. */}
       <span data-testid="history-collection-line" className={`${LINE_TWO} flex-1 overflow-hidden`}>
-        <span data-testid="history-collection-title" className={`min-w-0 ${GIVES_THIRD} truncate`} style={PART_FLOOR}>
+        <span
+          data-testid="history-collection-title"
+          className={`min-w-0 ${GIVES_THIRD} truncate`}
+          style={PART_FLOOR}
+        >
           {title}
         </span>
         {agent !== undefined ? (
-          <span data-testid="history-collection-agent" className={`min-w-0 ${GIVES_SECOND} truncate`} style={PART_FLOOR}>{agent}</span>
+          <span
+            data-testid="history-collection-agent"
+            className={`min-w-0 ${GIVES_SECOND} truncate`}
+            style={PART_FLOOR}
+          >
+            {agent}
+          </span>
         ) : null}
         {change.automation ? (
-          <span className={`inline-flex min-w-0 ${GIVES_SECOND} items-center gap-1`} style={PART_FLOOR}>
+          <span
+            className={`inline-flex min-w-0 ${GIVES_SECOND} items-center gap-1`}
+            style={PART_FLOOR}
+          >
             <Zap size={12} strokeWidth={1.9} aria-hidden className="shrink-0" />
             <span className="sr-only">Automation </span>
             <span className="truncate">{automationName(change.automation)}</span>
           </span>
         ) : null}
         {unlabelled ? (
-          <span data-testid="history-collection-operation" className={`min-w-0 ${GIVES_FIRST} truncate text-subtle`}>{change.operation}</span>
+          <span
+            data-testid="history-collection-operation"
+            className={`min-w-0 ${GIVES_FIRST} truncate text-subtle`}
+          >
+            {change.operation}
+          </span>
         ) : (
-          <span data-testid="history-collection-name" className="min-w-0 truncate text-subtle" style={COLLECTION_FLOOR}>{name}</span>
+          <span
+            data-testid="history-collection-name"
+            className="min-w-0 truncate text-subtle"
+            style={COLLECTION_FLOOR}
+          >
+            {name}
+          </span>
         )}
       </span>
     </>
@@ -976,29 +1306,50 @@ function HistorySourcesNotice(props: {
   return (
     <div data-testid="history-sources-notice" className="flex shrink-0 flex-col gap-1 px-1 pb-1">
       {words.unavailable ? (
-        <p title={words.unavailable} className="m-0 flex min-w-0 items-start gap-2 px-2 py-1 text-[12px] leading-4 text-ink">
+        <p
+          title={words.unavailable}
+          className="m-0 flex min-w-0 items-start gap-2 px-2 py-1 text-[12px] leading-4 text-ink"
+        >
           {/* The mark and the words' first line center on Try again. */}
           <span aria-hidden className="flex h-6 shrink-0 items-center">
             <span className={MARK_BOX}>
               <TriangleAlert size={12} className="text-warning" />
             </span>
           </span>
-          <span aria-hidden data-testid="history-sources-unavailable-words" className="min-w-0 flex-1 break-words py-1">{short}</span>
-          <span data-testid="history-sources-unavailable" className="sr-only">{words.unavailable}</span>
-          <SecondaryButton size="row" data-testid="history-sources-retry" onClick={props.onRetry} className="shrink-0">
+          <span
+            aria-hidden
+            data-testid="history-sources-unavailable-words"
+            className="min-w-0 flex-1 break-words py-1"
+          >
+            {short}
+          </span>
+          <span data-testid="history-sources-unavailable" className="sr-only">
+            {words.unavailable}
+          </span>
+          <SecondaryButton
+            size="row"
+            data-testid="history-sources-retry"
+            onClick={props.onRetry}
+            className="shrink-0"
+          >
             Try again
           </SecondaryButton>
         </p>
       ) : null}
       {words.omitted ? (
-        <p data-testid="history-sources-limit" className="m-0 flex min-w-0 items-start gap-2 rounded-md bg-panel-2 px-2 py-1.5 text-[12px] leading-4 text-muted">
+        <p
+          data-testid="history-sources-limit"
+          className="m-0 flex min-w-0 items-start gap-2 rounded-md bg-panel-2 px-2 py-1.5 text-[12px] leading-4 text-muted"
+        >
           {/* The mark centers on the first line. */}
           <span aria-hidden className="flex h-4 shrink-0 items-center">
             <span className={MARK_BOX}>
               <Info size={12} className="text-subtle" />
             </span>
           </span>
-          <span data-testid="history-sources-omitted" className="min-w-0 flex-1 break-words">{words.omitted}</span>
+          <span data-testid="history-sources-omitted" className="min-w-0 flex-1 break-words">
+            {words.omitted}
+          </span>
         </p>
       ) : null}
     </div>
@@ -1032,9 +1383,10 @@ export function EngineHistoryView(props: {
   // While earlier changes remain, the oldest dated row may continue on the
   // next page, so its count is only a lower bound. Undated changes list
   // after it.
-  const moreKey = props.hasMore ? oldestDated(items)?.key ?? null : null;
+  const moreKey = props.hasMore ? (oldestDated(items)?.key ?? null) : null;
   const labelOf = useCallback(
-    (entry: CollectionEntry) => collections?.get(entry.datasetId)?.operationLabels?.get(entry.change.operation),
+    (entry: CollectionEntry) =>
+      collections?.get(entry.datasetId)?.operationLabels?.get(entry.change.operation),
     [collections],
   );
   const filteredItems = useMemo(
@@ -1059,11 +1411,18 @@ export function EngineHistoryView(props: {
     return result;
   }, [filteredItems]);
   const [words, shortWords] = useMemo(() => {
-    const nameOf = (datasetId: string) => collections?.get(datasetId)?.name ??
-      entries.find((entry): entry is CollectionEntry => entry.kind === "collection" && entry.datasetId === datasetId)?.name;
+    const nameOf = (datasetId: string) =>
+      collections?.get(datasetId)?.name ??
+      entries.find(
+        (entry): entry is CollectionEntry =>
+          entry.kind === "collection" && entry.datasetId === datasetId,
+      )?.name;
     const unavailable = props.unavailableSources ?? [];
     const omitted = props.omittedSources ?? 0;
-    return [missingSourcesWords(unavailable, omitted, nameOf), missingSourcesShort(unavailable, nameOf)] as const;
+    return [
+      missingSourcesWords(unavailable, omitted, nameOf),
+      missingSourcesShort(unavailable, nameOf),
+    ] as const;
   }, [props.unavailableSources, props.omittedSources, collections, entries]);
   const retry = props.onRetry ?? (() => undefined);
   const stickyHeaderIndices = useMemo(
@@ -1072,24 +1431,44 @@ export function EngineHistoryView(props: {
   );
   const focusedIndex = rows.findIndex((row) => row.key === focusedKey);
   // Retain the adjacent groups too, so Tab can leave a row after it scrolls away.
-  const retainedKeys = focusedIndex < 0
-    ? []
-    : rows.slice(Math.max(0, focusedIndex - 2), focusedIndex + 3).map((row) => row.key);
+  const retainedKeys =
+    focusedIndex < 0
+      ? []
+      : rows.slice(Math.max(0, focusedIndex - 2), focusedIndex + 3).map((row) => row.key);
   const headerItemCount = 0;
   const listItemCount = headerItemCount + rows.length + (props.hasMore ? 1 : 0);
   const openMomentId = props.openMomentId ?? null;
   // Personal agents' names come from the roster, so a rename repaints the rows.
   const personalNames = usePersonalAgentNames();
   const rowPresentation = useMemo(
-    () => ({ expandedGroups, headerItemCount, listItemCount, onOpenMoment: props.onOpenMoment, collections, openMomentId, moreKey, personalNames }),
-    [expandedGroups, headerItemCount, listItemCount, props.onOpenMoment, collections, openMomentId, moreKey, personalNames],
+    () => ({
+      expandedGroups,
+      headerItemCount,
+      listItemCount,
+      onOpenMoment: props.onOpenMoment,
+      collections,
+      openMomentId,
+      moreKey,
+      personalNames,
+    }),
+    [
+      expandedGroups,
+      headerItemCount,
+      listItemCount,
+      props.onOpenMoment,
+      collections,
+      openMomentId,
+      moreKey,
+      personalNames,
+    ],
   );
-  const toggleGroup = (key: string) => setExpandedGroups((current) => {
-    const next = new Set(current);
-    if (next.has(key)) next.delete(key);
-    else next.add(key);
-    return next;
-  });
+  const toggleGroup = (key: string) =>
+    setExpandedGroups((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
   const partial = words.unavailable !== null || words.omitted !== null;
 
   // A known page with no rows. The caller renders this view only when it
@@ -1109,12 +1488,18 @@ export function EngineHistoryView(props: {
           data-testid="history-collections-unavailable"
           icon={words.unavailable ? TriangleAlert : Info}
           tone={words.unavailable ? "danger" : "ghost"}
-          title={words.unavailable ? (
-            <>
-              {words.unavailable}
-              {words.omitted ? <span className="mt-1 block text-[11px] text-subtle">{words.omitted}</span> : null}
-            </>
-          ) : words.omitted}
+          title={
+            words.unavailable ? (
+              <>
+                {words.unavailable}
+                {words.omitted ? (
+                  <span className="mt-1 block text-[11px] text-subtle">{words.omitted}</span>
+                ) : null}
+              </>
+            ) : (
+              words.omitted
+            )
+          }
         >
           {props.paused ? <HistoryPaused testId="history-paused" /> : null}
           {words.unavailable ? (
@@ -1138,7 +1523,10 @@ export function EngineHistoryView(props: {
   return (
     <>
       <div className="relative shrink-0 px-1 pb-1">
-        <span aria-hidden className={`${MARK_BOX} pointer-events-none absolute left-3 top-[5px] text-subtle`}>
+        <span
+          aria-hidden
+          className={`${MARK_BOX} pointer-events-none absolute left-3 top-[5px] text-subtle`}
+        >
           <Search size={14} />
         </span>
         <input
@@ -1163,7 +1551,9 @@ export function EngineHistoryView(props: {
         ) : null}
       </div>
       {partial ? <HistorySourcesNotice words={words} short={shortWords} onRetry={retry} /> : null}
-      {props.paused ? <HistoryPaused testId="history-paused" className="h-7 shrink-0 px-3" /> : null}
+      {props.paused ? (
+        <HistoryPaused testId="history-paused" className="h-7 shrink-0 px-3" />
+      ) : null}
       <LegendList
         role="list"
         data-testid="engine-history-list"
@@ -1179,103 +1569,113 @@ export function EngineHistoryView(props: {
         alwaysRender={{ keys: retainedKeys }}
         onFocusCapture={(event) =>
           setFocusedKey(
-            (event.target as HTMLElement).closest<HTMLElement>("[data-history-key]")
-              ?.dataset.historyKey ?? null,
+            (event.target as HTMLElement).closest<HTMLElement>("[data-history-key]")?.dataset
+              .historyKey ?? null,
           )
         }
         onBlurCapture={(event) => {
-          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocusedKey(null);
+          if (!event.currentTarget.contains(event.relatedTarget as Node | null))
+            setFocusedKey(null);
         }}
         extraData={rowPresentation}
-        renderItem={({ item, index }) => item.day ? (
-          <li
-            role="listitem"
-            aria-posinset={headerItemCount + index + 1}
-            aria-setsize={listItemCount}
-            // The day's label sits over its first row, on the panel, so a
-            // stuck label covers the rows that scroll under it.
-            className="flex h-8 items-end bg-panel px-3 pb-1"
-          >
-            {item.day.dateTime === null ? (
-              <span data-testid="engine-history-day-heading" className="dohc-section-label">
-                {item.day.label}
-              </span>
-            ) : (
-              <time
-                data-testid="engine-history-day-heading"
-                dateTime={item.day.dateTime}
-                className="dohc-section-label"
-              >
-                {item.day.label}
-              </time>
-            )}
-          </li>
-        ) : (
-          <li
-            role="listitem"
-            aria-posinset={headerItemCount + index + 1}
-            aria-setsize={listItemCount}
-            data-testid={item.item.kind === "files" ? "engine-moment"
-              : item.item.kind === "version" ? "history-version" : "history-collection-change"}
-            data-history-key={item.key}
-            className="px-1"
-          >
-            {item.item.kind === "version" ? (
-              <VersionMarkerRow version={item.item.version} />
-            ) : item.item.kind === "collection" ? (
-              <CollectionChangeRow
-                entry={item.item.entry}
-                label={labelOf(item.item.entry)}
-                openHistory={collections?.get(item.item.entry.datasetId)?.openHistory}
-              />
-            ) : item.item.group.moments.length > 1 ? (
-              item.item.group.run ? (
-                <RunRow
-                  group={item.item.group}
-                  more={item.key === moreKey}
-                  expanded={expandedGroups.has(item.key)}
-                  onToggle={() => toggleGroup(item.key)}
-                  openMomentId={openMomentId}
-                  onOpenMoment={props.onOpenMoment}
-                />
-              ) : (
-                <GroupRow
-                  group={item.item.group}
-                  more={item.key === moreKey}
-                  expanded={expandedGroups.has(item.key)}
-                  onToggle={() => toggleGroup(item.key)}
-                  openMomentId={openMomentId}
-                  onOpenMoment={props.onOpenMoment}
-                />
-              )
-            ) : (
-              <HistoryRow
-                moment={item.item.group.moments[0]}
-                context="workspace"
-                selected={item.item.group.moments[0].id === openMomentId}
-                onOpen={props.onOpenMoment}
-              />
-            )}
-          </li>
-        )}
-        ListFooterComponent={props.hasMore ? (
-          <li
-            role="listitem"
-            aria-posinset={listItemCount}
-            aria-setsize={listItemCount}
-            className="px-1 pb-1"
-          >
-            <button
-              type="button"
-              data-testid="engine-history-load-more"
-              disabled={props.loadingMore}
-              onClick={props.onLoadMore}
-              className="dohc-focus-row block h-8 w-full cursor-pointer rounded-md px-2 text-center text-[12px] text-muted hover:bg-hover hover:text-ink disabled:cursor-wait disabled:opacity-60"
+        renderItem={({ item, index }) =>
+          item.day ? (
+            <li
+              role="listitem"
+              aria-posinset={headerItemCount + index + 1}
+              aria-setsize={listItemCount}
+              // The day's label sits over its first row, on the panel, so a
+              // stuck label covers the rows that scroll under it.
+              className="flex h-8 items-end bg-panel px-3 pb-1"
             >
-              {props.loadingMore ? "Loading…" : "Show earlier changes"}
-            </button>
-          </li>
-        ) : null}
+              {item.day.dateTime === null ? (
+                <span data-testid="engine-history-day-heading" className="dohc-section-label">
+                  {item.day.label}
+                </span>
+              ) : (
+                <time
+                  data-testid="engine-history-day-heading"
+                  dateTime={item.day.dateTime}
+                  className="dohc-section-label"
+                >
+                  {item.day.label}
+                </time>
+              )}
+            </li>
+          ) : (
+            <li
+              role="listitem"
+              aria-posinset={headerItemCount + index + 1}
+              aria-setsize={listItemCount}
+              data-testid={
+                item.item.kind === "files"
+                  ? "engine-moment"
+                  : item.item.kind === "version"
+                    ? "history-version"
+                    : "history-collection-change"
+              }
+              data-history-key={item.key}
+              className="px-1"
+            >
+              {item.item.kind === "version" ? (
+                <VersionMarkerRow version={item.item.version} />
+              ) : item.item.kind === "collection" ? (
+                <CollectionChangeRow
+                  entry={item.item.entry}
+                  label={labelOf(item.item.entry)}
+                  openHistory={collections?.get(item.item.entry.datasetId)?.openHistory}
+                />
+              ) : item.item.group.moments.length > 1 ? (
+                item.item.group.run ? (
+                  <RunRow
+                    group={item.item.group}
+                    more={item.key === moreKey}
+                    expanded={expandedGroups.has(item.key)}
+                    onToggle={() => toggleGroup(item.key)}
+                    openMomentId={openMomentId}
+                    onOpenMoment={props.onOpenMoment}
+                  />
+                ) : (
+                  <GroupRow
+                    group={item.item.group}
+                    more={item.key === moreKey}
+                    expanded={expandedGroups.has(item.key)}
+                    onToggle={() => toggleGroup(item.key)}
+                    openMomentId={openMomentId}
+                    onOpenMoment={props.onOpenMoment}
+                  />
+                )
+              ) : (
+                <HistoryRow
+                  moment={item.item.group.moments[0]}
+                  context="workspace"
+                  selected={item.item.group.moments[0].id === openMomentId}
+                  onOpen={props.onOpenMoment}
+                />
+              )}
+            </li>
+          )
+        }
+        ListFooterComponent={
+          props.hasMore ? (
+            <li
+              role="listitem"
+              aria-posinset={listItemCount}
+              aria-setsize={listItemCount}
+              className="px-1 pb-1"
+            >
+              <button
+                type="button"
+                data-testid="engine-history-load-more"
+                disabled={props.loadingMore}
+                onClick={props.onLoadMore}
+                className="dohc-focus-row block h-8 w-full cursor-pointer rounded-md px-2 text-center text-[12px] text-muted hover:bg-hover hover:text-ink disabled:cursor-wait disabled:opacity-60"
+              >
+                {props.loadingMore ? "Loading…" : "Show earlier changes"}
+              </button>
+            </li>
+          ) : null
+        }
       />
     </>
   );

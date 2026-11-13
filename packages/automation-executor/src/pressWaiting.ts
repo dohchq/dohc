@@ -6,4 +6,3 @@ export const PRESS_WAITING = {
   busy: "Waiting for other automations to finish.",
   session: "Sign in to send this automation's chat messages.",
 } as const;
-

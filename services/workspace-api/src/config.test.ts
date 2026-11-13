@@ -36,21 +36,42 @@ describe("readConfig", () => {
     expect(config.emailTransport).toBe("smtp");
     expect(config.smtp?.port).toBe(587);
     expect(config.trustedOrigins).toEqual(["https://auth.example.com"]);
-    expect(config.allowedOrigins).toEqual([
-      "https://auth.example.com",
-    ]);
+    expect(config.allowedOrigins).toEqual(["https://auth.example.com"]);
   });
 
   it("requires one HTTPS public origin and validates descriptor metadata", () => {
     const publicOrigin = "https://server.example.test";
-    expect(() => readConfig(env({ WORKSPACE_API_BASE_URL: publicOrigin, DOHC_WEB_ORIGIN: "https://other.example.test" }))).toThrow(/one public origin/);
-    expect(() => readConfig(env({ WORKSPACE_API_BASE_URL: "http://server.example.test" }))).toThrow(/HTTPS/);
-    expect(() => readConfig(env({ DOHC_SERVER_NETWORK_ACCESS: "auto" }))).toThrow(/private or public/);
-    const config = readConfig(env({ WORKSPACE_API_BASE_URL: publicOrigin, DOHC_SERVER_NAME: "Team server", DOHC_SERVER_NETWORK_ACCESS: "private" }));
+    expect(() =>
+      readConfig(
+        env({
+          WORKSPACE_API_BASE_URL: publicOrigin,
+          DOHC_WEB_ORIGIN: "https://other.example.test",
+        }),
+      ),
+    ).toThrow(/one public origin/);
+    expect(() => readConfig(env({ WORKSPACE_API_BASE_URL: "http://server.example.test" }))).toThrow(
+      /HTTPS/,
+    );
+    expect(() => readConfig(env({ DOHC_SERVER_NETWORK_ACCESS: "auto" }))).toThrow(
+      /private or public/,
+    );
+    const config = readConfig(
+      env({
+        WORKSPACE_API_BASE_URL: publicOrigin,
+        DOHC_SERVER_NAME: "Team server",
+        DOHC_SERVER_NETWORK_ACCESS: "private",
+      }),
+    );
     expect(config.descriptor).toMatchObject({ name: "Team server", networkAccess: "private" });
   });
 
-  it.each(["Team\tserver", "Team\u0000server", "Team\u001fserver", "Team\u007fserver", "Team\nserver"])("rejects server-name control characters %j", (name) => {
+  it.each([
+    "Team\tserver",
+    "Team\u0000server",
+    "Team\u001fserver",
+    "Team\u007fserver",
+    "Team\nserver",
+  ])("rejects server-name control characters %j", (name) => {
     expect(() => readConfig(env({ DOHC_SERVER_NAME: name }))).toThrow(/without control characters/);
   });
 
@@ -108,13 +129,24 @@ describe("readConfig", () => {
 
   it("opens sign-up when the allowlist is omitted or empty", () => {
     expect(readConfig(env()).signUp).toBeNull();
-    expect(readConfig(env({ DOHC_SIGN_UP_EMAILS: "", WORKSPACE_API_RELAY_URL: "http://sync-relay:1788" })).signUp).toBeNull();
-    expect(readConfig(env({ DOHC_SIGN_UP_EMAILS: " , ", WORKSPACE_API_RELAY_URL: "http://sync-relay:1788" })).signUp).toBeNull();
+    expect(
+      readConfig(
+        env({ DOHC_SIGN_UP_EMAILS: "", WORKSPACE_API_RELAY_URL: "http://sync-relay:1788" }),
+      ).signUp,
+    ).toBeNull();
+    expect(
+      readConfig(
+        env({ DOHC_SIGN_UP_EMAILS: " , ", WORKSPACE_API_RELAY_URL: "http://sync-relay:1788" }),
+      ).signUp,
+    ).toBeNull();
   });
 
   it("closes sign-up to the normalized approved list and the relay's pending invites", () => {
     const config = readConfig(
-      env({ DOHC_SIGN_UP_EMAILS: " Owner@Example.com ,friend@example.com,", WORKSPACE_API_RELAY_URL: "http://sync-relay:1788" }),
+      env({
+        DOHC_SIGN_UP_EMAILS: " Owner@Example.com ,friend@example.com,",
+        WORKSPACE_API_RELAY_URL: "http://sync-relay:1788",
+      }),
     );
     expect(config.signUp).toEqual({
       emails: new Set(["owner@example.com", "friend@example.com"]),
@@ -123,15 +155,29 @@ describe("readConfig", () => {
   });
 
   it("refuses a closed sign-up it cannot run", () => {
-    expect(() => readConfig(env({ DOHC_SIGN_UP_EMAILS: "owner@example.com" }))).toThrow(/WORKSPACE_API_RELAY_URL/);
+    expect(() => readConfig(env({ DOHC_SIGN_UP_EMAILS: "owner@example.com" }))).toThrow(
+      /WORKSPACE_API_RELAY_URL/,
+    );
     expect(() =>
-      readConfig(env({ DOHC_SIGN_UP_EMAILS: "owner@example.com; friend@example.com", WORKSPACE_API_RELAY_URL: "http://sync-relay:1788" })),
+      readConfig(
+        env({
+          DOHC_SIGN_UP_EMAILS: "owner@example.com; friend@example.com",
+          WORKSPACE_API_RELAY_URL: "http://sync-relay:1788",
+        }),
+      ),
     ).toThrow(/separated by commas/);
     expect(() =>
-      readConfig(env({ DOHC_SIGN_UP_EMAILS: "owner", WORKSPACE_API_RELAY_URL: "http://sync-relay:1788" })),
+      readConfig(
+        env({ DOHC_SIGN_UP_EMAILS: "owner", WORKSPACE_API_RELAY_URL: "http://sync-relay:1788" }),
+      ),
     ).toThrow(/separated by commas/);
     expect(() =>
-      readConfig(env({ DOHC_SIGN_UP_EMAILS: "owner@example.com", WORKSPACE_API_RELAY_URL: "http://sync-relay:1788/sync" })),
+      readConfig(
+        env({
+          DOHC_SIGN_UP_EMAILS: "owner@example.com",
+          WORKSPACE_API_RELAY_URL: "http://sync-relay:1788/sync",
+        }),
+      ),
     ).toThrow(/no path or credentials/);
   });
 
@@ -139,6 +185,8 @@ describe("readConfig", () => {
     expect(readConfig(env()).crashReports).toBe(false);
     expect(readConfig(env({ DOHC_CRASH_REPORTS: "0" })).crashReports).toBe(false);
     expect(readConfig(env({ DOHC_CRASH_REPORTS: "1" })).crashReports).toBe(true);
-    expect(() => readConfig(env({ DOHC_CRASH_REPORTS: "true" }))).toThrow("DOHC_CRASH_REPORTS must be 0 or 1");
+    expect(() => readConfig(env({ DOHC_CRASH_REPORTS: "true" }))).toThrow(
+      "DOHC_CRASH_REPORTS must be 0 or 1",
+    );
   });
 });

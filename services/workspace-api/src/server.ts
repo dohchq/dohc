@@ -16,7 +16,12 @@ export interface RequestTimeouts {
 }
 
 // Every body this service reads is small: auth JSON, or one crash report.
-export const REQUEST_TIMEOUTS: RequestTimeouts = { headersMs: 10_000, requestMs: 30_000, checkEveryMs: 1_000, idleMs: 30_000 };
+export const REQUEST_TIMEOUTS: RequestTimeouts = {
+  headersMs: 10_000,
+  requestMs: 30_000,
+  checkEveryMs: 1_000,
+  idleMs: 30_000,
+};
 
 /**
  * The node:http server in front of the router. The client address is derived
@@ -30,7 +35,11 @@ export function createWorkspaceServer(
   timeouts: RequestTimeouts = REQUEST_TIMEOUTS,
 ): Server {
   const server = createServer(
-    { headersTimeout: timeouts.headersMs, requestTimeout: timeouts.requestMs, connectionsCheckingInterval: timeouts.checkEveryMs },
+    {
+      headersTimeout: timeouts.headersMs,
+      requestTimeout: timeouts.requestMs,
+      connectionsCheckingInterval: timeouts.checkEveryMs,
+    },
     (request, response) => {
       const arrivedAtMs = Date.now();
       // The request the router saw, whose route it marked.
@@ -39,11 +48,18 @@ export function createWorkspaceServer(
       const log = () => {
         if (logged) return;
         logged = true;
-        WORKSPACE_API_REQUEST_LOG.write(routed, request.method ?? "GET", response.statusCode, arrivedAtMs);
+        WORKSPACE_API_REQUEST_LOG.write(
+          routed,
+          request.method ?? "GET",
+          response.statusCode,
+          arrivedAtMs,
+        );
       };
       // An answer counts once its headers are sent, even when its client leaves before the body ends.
       response.once("finish", log);
-      response.once("close", () => { if (response.headersSent) log(); });
+      response.once("close", () => {
+        if (response.headersSent) log();
+      });
       // Node closes a connection idle past `idleMs` unless something listens
       // for its timeout. This keeps one open while the router works on its
       // answer, and closes one whose answer stopped moving. On the server, a

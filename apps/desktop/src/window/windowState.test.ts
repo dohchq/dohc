@@ -28,18 +28,12 @@ describe("parseWindowState", () => {
     expect(parseWindowState("not json")).toBeNull();
     expect(parseWindowState("{}")).toBeNull();
     expect(parseWindowState('{"bounds":{"x":0,"y":0}}')).toBeNull();
-    expect(
-      parseWindowState('{"bounds":{"x":"0","y":0,"width":1280,"height":800}}'),
-    ).toBeNull();
-    expect(
-      parseWindowState('{"bounds":{"x":0,"y":0,"width":1e999,"height":800}}'),
-    ).toBeNull();
+    expect(parseWindowState('{"bounds":{"x":"0","y":0,"width":1280,"height":800}}')).toBeNull();
+    expect(parseWindowState('{"bounds":{"x":0,"y":0,"width":1e999,"height":800}}')).toBeNull();
   });
 
   it("rejects bounds below the window minimum", () => {
-    expect(
-      parseWindowState('{"bounds":{"x":0,"y":0,"width":200,"height":100}}'),
-    ).toBeNull();
+    expect(parseWindowState('{"bounds":{"x":0,"y":0,"width":200,"height":100}}')).toBeNull();
   });
 
   it("round-trips the manager default against the manager minimum", () => {
@@ -86,9 +80,7 @@ describe("planWindowPlacement", () => {
 
   it("keeps bounds on a secondary display", () => {
     const onSecond = { ...saved, bounds: { ...saved.bounds, x: 2000 } };
-    expect(planWindowPlacement(onSecond, [PRIMARY, SECOND]).bounds).toEqual(
-      onSecond.bounds,
-    );
+    expect(planWindowPlacement(onSecond, [PRIMARY, SECOND]).bounds).toEqual(onSecond.bounds);
   });
 
   it("keeps a window larger than the display (still grabbable)", () => {
@@ -136,9 +128,7 @@ describe("planWindowPlacement", () => {
       ...saved,
       bounds: { x: 100, y: 1100, width: 1280, height: 800 },
     };
-    expect(planWindowPlacement(belowBoth, [above, PRIMARY]).bounds).toEqual(
-      belowBoth.bounds,
-    );
+    expect(planWindowPlacement(belowBoth, [above, PRIMARY]).bounds).toEqual(belowBoth.bounds);
     expect(planWindowPlacement(fullyBelow, [above, PRIMARY]).bounds).toBeNull();
   });
 

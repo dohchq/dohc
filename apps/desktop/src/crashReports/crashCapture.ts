@@ -3,7 +3,13 @@ import type { CrashEvent } from "./crashReport";
 // The reasons Electron gives that are crashes. A clean exit is not one,
 // "killed" means something outside dohc ended the process, and
 // "memory-eviction" is Chromium discarding a page on purpose.
-const CRASH_REASONS = new Set(["crashed", "oom", "abnormal-exit", "launch-failed", "integrity-failure"]);
+const CRASH_REASONS = new Set([
+  "crashed",
+  "oom",
+  "abnormal-exit",
+  "launch-failed",
+  "integrity-failure",
+]);
 
 // The service name of every utility process dohc forks itself. Those run
 // plugin and app code, and their owners already report their failures.
@@ -46,7 +52,10 @@ export interface CrashCaptureTarget<Contents> {
       listener: (event: unknown, details: ChildProcessGoneDetails) => void,
     ): unknown;
     on(event: "will-quit", listener: () => void): unknown;
-    on(event: "browser-window-created", listener: (event: unknown, window: SessionWindow) => void): unknown;
+    on(
+      event: "browser-window-created",
+      listener: (event: unknown, window: SessionWindow) => void,
+    ): unknown;
   };
   // Whether the contents are a dohc window's own page, not an app or plugin
   // page shown inside one.
@@ -63,9 +72,13 @@ export interface CrashCaptureTarget<Contents> {
  */
 export function installCrashCapture<Contents>(target: CrashCaptureTarget<Contents>): void {
   let ending = false;
-  target.app.on("will-quit", () => { ending = true; });
+  target.app.on("will-quit", () => {
+    ending = true;
+  });
   target.app.on("browser-window-created", (_event, window) => {
-    window.on("session-end", () => { ending = true; });
+    window.on("session-end", () => {
+      ending = true;
+    });
   });
   const crashed = ({ reason, exitCode }: ProcessGoneDetails) =>
     !ending && CRASH_REASONS.has(reason) && exitCode >>> 0 !== LOGOFF_EXIT_CODE;
@@ -76,8 +89,11 @@ export function installCrashCapture<Contents>(target: CrashCaptureTarget<Content
   target.app.on("render-process-gone", (_event, contents, details) => {
     if (!crashed(details) || !target.isWindowPage(contents)) return;
     target.record({
-      kind: "process-gone", source: "window", name: null,
-      reason: details.reason, exitCode: details.exitCode,
+      kind: "process-gone",
+      source: "window",
+      name: null,
+      reason: details.reason,
+      exitCode: details.exitCode,
     });
   });
   target.app.on("child-process-gone", (_event, details) => {

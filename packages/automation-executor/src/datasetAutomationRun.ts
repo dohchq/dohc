@@ -3,13 +3,15 @@ import type { RunSource } from "./automationRecordBackend";
 import { coordinateSourceRun } from "./automationStepRun";
 import { isDeepStrictEqual } from "node:util";
 import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
-import type {
-  JsonObject,
-  JsonValue,
-} from "@dohc/app-backend-runtime/automation";
+import type { JsonObject, JsonValue } from "@dohc/app-backend-runtime/automation";
 import type { DatasetAutomationClaim } from "@dohc/app-backend-runtime/dataset-automation-claims";
 import type { DatasetInvocationResult } from "@dohc/app-backend-runtime/supervisor";
-import type { DatasetColumnFieldType, DatasetOperation, DatasetRevision, DatasetTable } from "@dohc/security-contract/dataset";
+import type {
+  DatasetColumnFieldType,
+  DatasetOperation,
+  DatasetRevision,
+  DatasetTable,
+} from "@dohc/security-contract/dataset";
 import type { Automation } from "@dohc/workspace-contracts/automations";
 import type { AutomationClaim } from "@dohc/workspace-engine-client";
 import { isNoticeLine, NOTICE_TARGET_FIELD_MAX_CHARS } from "@dohc/workspace-contracts/relay";
@@ -28,11 +30,14 @@ import {
   type ReachDatasetGrants,
   type ReachRoster,
 } from "./automationReach";
-import type { DatasetEffect, DatasetReplan, RunWrite, StoredRun, StoredStep } from "./automationRunStore";
-import {
-  KEPT_CHANGING_ERROR,
-  MAX_REREADS,
-} from "./automationStepRun";
+import type {
+  DatasetEffect,
+  DatasetReplan,
+  RunWrite,
+  StoredRun,
+  StoredStep,
+} from "./automationRunStore";
+import { KEPT_CHANGING_ERROR, MAX_REREADS } from "./automationStepRun";
 import {
   claimPerson,
   RULES_CHANGED_ERROR,
@@ -90,12 +95,19 @@ import {
 // datasets are its person's own, so the run never does more than the
 // presser could.
 
-export const ACCESS_NARROWED_ERROR = "Someone who edits this automation can no longer read a field it used, so dohc stopped the rest of this run.";
+export const ACCESS_NARROWED_ERROR =
+  "Someone who edits this automation can no longer read a field it used, so dohc stopped the rest of this run.";
 // Reads keep no receipt, so they share one key.
 const READ_KEY = "automation-read";
 
 /** The caller a dataset host gives one run: every invocation the run makes carries it. */
-export interface DatasetAutomationContext { readonly automationId: string; readonly claimId: string; readonly depth: number; readonly person: string | null; readonly authorizeOperation?: (datasetId: string, operationId: string) => void }
+export interface DatasetAutomationContext {
+  readonly automationId: string;
+  readonly claimId: string;
+  readonly depth: number;
+  readonly person: string | null;
+  readonly authorizeOperation?: (datasetId: string, operationId: string) => void;
+}
 
 /** One invocation of an approved operation, as a run or an Undo sends it. */
 export interface DatasetInvocation {
@@ -112,17 +124,46 @@ export interface DatasetInvocation {
 export interface DatasetRunHost {
   /** The context a run's dataset calls go through, at `depth`, for `person`. */
   context(input: DatasetAutomationContext): DatasetAutomationContext;
-  invoke(context: DatasetAutomationContext, input: DatasetInvocation): Promise<DatasetInvocationResult>;
+  invoke(
+    context: DatasetAutomationContext,
+    input: DatasetInvocation,
+  ): Promise<DatasetInvocationResult>;
   revision(datasetId: string): DatasetRevision;
   generated(datasetId: string): boolean;
   resolves(reference: { datasetId: string; revision: number; revisionSha256: string }): boolean;
   dataGrants(datasetId: string): ReachDatasetGrants;
 }
 
-export interface DatasetAutomationRunDependencies extends Pick<
-  CollectionAutomationRunDependencies,
-  "makeDurable" | "targets" | "evaluator" | "store" | "nowMs" | "personName" | "chat" | "postNotice" | "recipientVerdicts" | "readMessageBody" | "readCode" | "onUsageSuccess" | "beforeEffect" | "onRunEnded"
->, Partial<Pick<CollectionAutomationRunDependencies, "withReads" | "withRecordWrites" | "collectionIdOf" | "collectionPathOf" | "isIndexReading" | "checkReach">> {
+export interface DatasetAutomationRunDependencies
+  extends
+    Pick<
+      CollectionAutomationRunDependencies,
+      | "makeDurable"
+      | "targets"
+      | "evaluator"
+      | "store"
+      | "nowMs"
+      | "personName"
+      | "chat"
+      | "postNotice"
+      | "recipientVerdicts"
+      | "readMessageBody"
+      | "readCode"
+      | "onUsageSuccess"
+      | "beforeEffect"
+      | "onRunEnded"
+    >,
+    Partial<
+      Pick<
+        CollectionAutomationRunDependencies,
+        | "withReads"
+        | "withRecordWrites"
+        | "collectionIdOf"
+        | "collectionPathOf"
+        | "isIndexReading"
+        | "checkReach"
+      >
+    > {
   /** The dataset host; resolves null when it is not open. */
   withHost<T>(work: (host: DatasetRunHost) => T | Promise<T>): Promise<T | null>;
   /** Who can edit the workspace's Collections now, as last read, for the check before each record effect. */
@@ -136,7 +177,7 @@ export interface DatasetAutomationRunDependencies extends Pick<
  */
 export function datasetPerson(claim: Pick<DatasetAutomationClaim, "actor">): string | null {
   const { actor } = claim;
-  return actor.kind === "link" ? null : actor.userId ?? null;
+  return actor.kind === "link" ? null : (actor.userId ?? null);
 }
 
 /** The person a run's writes are made for, so the changes they cause name them too. */
@@ -145,9 +186,13 @@ function runPerson(held: DatasetRunClaim): string | null {
 }
 
 /** The person who pressed the button a claim runs for, or null for a change. */
-export function datasetPresser(claim: Pick<DatasetAutomationClaim, "fact" | "actor">): string | null {
+export function datasetPresser(
+  claim: Pick<DatasetAutomationClaim, "fact" | "actor">,
+): string | null {
   const { actor } = claim;
-  return claim.fact?.kind === "button" && (actor.kind === "owner" || actor.kind === "named") ? actor.userId ?? null : null;
+  return claim.fact?.kind === "button" && (actor.kind === "owner" || actor.kind === "named")
+    ? (actor.userId ?? null)
+    : null;
 }
 
 /**
@@ -172,24 +217,46 @@ export interface DatasetAutomationRunInput {
   stopped: AbortSignal;
 }
 
-const failed = (error: string, timedOut = false): CollectionAutomationRunOutcome => ({ kind: "failed", error, timedOut });
+const failed = (error: string, timedOut = false): CollectionAutomationRunOutcome => ({
+  kind: "failed",
+  error,
+  timedOut,
+});
 
 type Rules = { datasetId: string; revision: number; revisionSha256: string };
 /** A record as a generated read returns it: its id, version, and values by field id. */
-export type DatasetRow = { id: DatasetRecordId; version: number; values: Record<string, JsonValue> };
+export type DatasetRow = {
+  id: DatasetRecordId;
+  version: number;
+  values: Record<string, JsonValue>;
+};
 type Row = DatasetRow;
 
 /** Rows from a generated read's result. */
 export function rowsOf(result: DatasetInvocationResult): Row[] {
   const value = result.result;
-  const rows = value !== null && typeof value === "object" && !Array.isArray(value) ? value.rows : undefined;
-  if (!Array.isArray(rows)) throw new Error("This Collection returned an invalid record list. Ask the owner to check its rules.");
+  const rows =
+    value !== null && typeof value === "object" && !Array.isArray(value) ? value.rows : undefined;
+  if (!Array.isArray(rows))
+    throw new Error(
+      "This Collection returned an invalid record list. Ask the owner to check its rules.",
+    );
   return rows.map((row) => {
-    if (row === null || typeof row !== "object" || Array.isArray(row)) throw new Error("This Collection returned an invalid record list. Ask the owner to check its rules.");
+    if (row === null || typeof row !== "object" || Array.isArray(row))
+      throw new Error(
+        "This Collection returned an invalid record list. Ask the owner to check its rules.",
+      );
     const { id, version, values } = row;
-    if ((typeof id !== "string" && typeof id !== "number") || typeof version !== "number" ||
-      values === null || typeof values !== "object" || Array.isArray(values)) {
-      throw new Error("This Collection returned an invalid record list. Ask the owner to check its rules.");
+    if (
+      (typeof id !== "string" && typeof id !== "number") ||
+      typeof version !== "number" ||
+      values === null ||
+      typeof values !== "object" ||
+      Array.isArray(values)
+    ) {
+      throw new Error(
+        "This Collection returned an invalid record list. Ask the owner to check its rules.",
+      );
     }
     return { id, version, values };
   });
@@ -199,19 +266,38 @@ export function rowsOf(result: DatasetInvocationResult): Row[] {
  * A row as planning reads it: values by field name, the id as text for
  * formulas, and the record's whole identity where a document has its path.
  */
-export function datasetRunRecordOf(row: Row, datasetId: string, table: DatasetTable, readable: ReadonlySet<string>): RunRecord {
+export function datasetRunRecordOf(
+  row: Row,
+  datasetId: string,
+  table: DatasetTable,
+  readable: ReadonlySet<string>,
+): RunRecord {
   const values: JsonObject = {};
   for (const field of table.fields) {
     // Formulas see only what every editor can read.
-    if (Object.hasOwn(row.values, field.fieldId) && readable.has(datasetFieldKey(datasetId, table.tableId, field.fieldId))) values[field.name] = row.values[field.fieldId] ?? null;
+    if (
+      Object.hasOwn(row.values, field.fieldId) &&
+      readable.has(datasetFieldKey(datasetId, table.tableId, field.fieldId))
+    )
+      values[field.name] = row.values[field.fieldId] ?? null;
   }
-  return { id: String(row.id), key: row.id, path: datasetRecordKey(datasetId, table.tableId, row.id), values };
+  return {
+    id: String(row.id),
+    key: row.id,
+    path: datasetRecordKey(datasetId, table.tableId, row.id),
+    values,
+  };
 }
 
 // What a field holds, as a Find's refusal names it, and the values its read
 // compares it with. The read checks the rest, such as a select's options.
-const FIELD_HOLDS: Partial<Record<DatasetColumnFieldType, { holds: string; accepts: (value: JsonValue) => boolean }>> = {
-  number: { holds: "a number", accepts: (value) => typeof value === "number" && Number.isFinite(value) },
+const FIELD_HOLDS: Partial<
+  Record<DatasetColumnFieldType, { holds: string; accepts: (value: JsonValue) => boolean }>
+> = {
+  number: {
+    holds: "a number",
+    accepts: (value) => typeof value === "number" && Number.isFinite(value),
+  },
   checkbox: { holds: "true or false", accepts: (value) => typeof value === "boolean" },
   text: { holds: "text", accepts: (value) => typeof value === "string" },
   date: { holds: "a date", accepts: (value) => typeof value === "string" },
@@ -223,10 +309,14 @@ function kindOfValue(value: JsonValue): string {
   if (value === null) return "nothing";
   if (Array.isArray(value)) return "a list";
   switch (typeof value) {
-    case "number": return "a number";
-    case "boolean": return "true or false";
-    case "string": return "text";
-    default: return "an object";
+    case "number":
+      return "a number";
+    case "boolean":
+      return "true or false";
+    case "string":
+      return "text";
+    default:
+      return "an object";
   }
 }
 
@@ -235,13 +325,21 @@ function kindOfValue(value: JsonValue): string {
  * fields, or null. The Find then reads nothing, and the run fails only if
  * its branch runs.
  */
-export function findValueProblem(ordinal: number, field: DatasetTable["fields"][number], value: JsonValue): string | null {
+export function findValueProblem(
+  ordinal: number,
+  field: DatasetTable["fields"][number],
+  value: JsonValue,
+): string | null {
   if (field.type === "button") return null;
   const step = `The Find in step ${ordinal + 1}`;
-  if (value === null) return field.required ? `${step} compares ${field.name}, which every record fills in, with nothing.` : null;
+  if (value === null)
+    return field.required
+      ? `${step} compares ${field.name}, which every record fills in, with nothing.`
+      : null;
   const expected = FIELD_HOLDS[field.type];
   if (expected === undefined || expected.accepts(value)) return null;
-  const hint = field.type === "number" && typeof value === "string" ? " Wrap the value in Number()." : "";
+  const hint =
+    field.type === "number" && typeof value === "string" ? " Wrap the value in Number()." : "";
   return `${step} compares ${field.name}, ${expected.holds}, with ${kindOfValue(value)}.${hint}`;
 }
 
@@ -275,7 +373,12 @@ function readRecord(
   recordId: DatasetRecordId,
   signal: AbortSignal,
 ): Promise<DatasetRow | null> {
-  return readDatasetRecord((operationId, input) => invoke(host, context, rules, operationId, input, READ_KEY, signal), read, table, recordId);
+  return readDatasetRecord(
+    (operationId, input) => invoke(host, context, rules, operationId, input, READ_KEY, signal),
+    read,
+    table,
+    recordId,
+  );
 }
 
 /** One record by its id through `call`, as readRecord describes. */
@@ -285,11 +388,16 @@ export async function readDatasetRecord(
   table: DatasetTable,
   recordId: DatasetRecordId,
 ): Promise<DatasetRow | null> {
-  const key = table.fields.find((field) => field.type !== "button" && field.sqlColumn === table.primaryKey)!;
-  const input: JsonObject = read.fieldIds.includes(key.fieldId) ? { limit: 1, filters: [{ fieldId: key.fieldId, value: recordId }] }
-    : typeof recordId === "number" ? { limit: 1, after: { id: recordId, value: recordId - 1 } }
-    : recordId === "\u0000" ? { limit: 1 }
-    : { limit: 1, after: { id: "\u0000", value: recordId } };
+  const key = table.fields.find(
+    (field) => field.type !== "button" && field.sqlColumn === table.primaryKey,
+  )!;
+  const input: JsonObject = read.fieldIds.includes(key.fieldId)
+    ? { limit: 1, filters: [{ fieldId: key.fieldId, value: recordId }] }
+    : typeof recordId === "number"
+      ? { limit: 1, after: { id: recordId, value: recordId - 1 } }
+      : recordId === "\u0000"
+        ? { limit: 1 }
+        : { limit: 1, after: { id: "\u0000", value: recordId } };
   const [row] = rowsOf(await call(read.operationId, input));
   return row !== undefined && row.id === recordId ? row : null;
 }
@@ -299,30 +407,51 @@ export async function readDatasetRecord(
  * owner through the read its runs find their record with.
  */
 export async function datasetRecordExists(
-  host: Pick<DatasetRunHost, "revision"> & { invokeAsOwner(input: DatasetInvocation): Promise<DatasetInvocationResult> },
+  host: Pick<DatasetRunHost, "revision"> & {
+    invokeAsOwner(input: DatasetInvocation): Promise<DatasetInvocationResult>;
+  },
   datasetId: string,
   automation: Automation,
   recordId: DatasetRecordId,
 ): Promise<boolean> {
   const approved = host.revision(datasetId);
-  const { trigger } = datasetStepsOf(automation, { definition: approved.definition, generated: true, sourceCollection: datasetBaseFolder(approved.definition) });
+  const { trigger } = datasetStepsOf(automation, {
+    definition: approved.definition,
+    generated: true,
+    sourceCollection: datasetBaseFolder(approved.definition),
+  });
   if (trigger?.read == null) return false;
   const rules = { datasetId, revision: approved.revision, revisionSha256: approved.revisionSha256 };
-  return (await readDatasetRecord((operationId, input) => host.invokeAsOwner({ ...rules, operationId, input, idempotencyKey: READ_KEY }), trigger.read, trigger.table, recordId)) !== null;
+  return (
+    (await readDatasetRecord(
+      (operationId, input) =>
+        host.invokeAsOwner({ ...rules, operationId, input, idempotencyKey: READ_KEY }),
+      trigger.read,
+      trigger.table,
+      recordId,
+    )) !== null
+  );
 }
 
-const datasetIdOf = (held: DatasetRunClaim) => (held.source === "dataset" ? held.claim.datasetId : held.datasetId);
+const datasetIdOf = (held: DatasetRunClaim) =>
+  held.source === "dataset" ? held.claim.datasetId : held.datasetId;
 
 export async function runDatasetAutomation(
   dependencies: DatasetAutomationRunDependencies,
   input: DatasetAutomationRunInput,
 ): Promise<CollectionAutomationRunOutcome> {
-  return coordinateSourceRun(dependencies, { ...input, claim: input.held.claim }, datasetSource(input));
+  return coordinateSourceRun(
+    dependencies,
+    { ...input, claim: input.held.claim },
+    datasetSource(input),
+  );
 }
 
 /** A record id the code wrote as text, as `table`'s primary key holds it, or null when it cannot be one. */
 export function datasetRecordIdOf(table: DatasetTable, text: string): DatasetRecordId | null {
-  const key = table.fields.find((field) => field.type !== "button" && field.sqlColumn === table.primaryKey);
+  const key = table.fields.find(
+    (field) => field.type !== "button" && field.sqlColumn === table.primaryKey,
+  );
   if (key?.type !== "number") return text;
   const id = /^-?\d+$/u.test(text) ? Number(text) : NaN;
   return Number.isSafeInteger(id) ? id : null;
@@ -336,20 +465,33 @@ export function datasetRecordIdOf(table: DatasetTable, text: string): DatasetRec
  */
 export function unreadComparison(automation: Automation, claim: RunClaim): string | null {
   const trigger = automation.when;
-  if (trigger.kind !== "field-changed" || trigger.to === null || claim.change.kind !== "changed") return null;
+  if (trigger.kind !== "field-changed" || trigger.to === null || claim.change.kind !== "changed")
+    return null;
   const fact = claim.change.fields.find((candidate) => candidate.field === trigger.field);
-  const truncated = fact === undefined ? claim.change.fieldsOmitted > 0 : fact.next !== null && "truncated" in fact.next;
-  return truncated ? `The new value of ${trigger.field} is too large for dohc to compare without reading the record.` : null;
+  const truncated =
+    fact === undefined
+      ? claim.change.fieldsOmitted > 0
+      : fact.next !== null && "truncated" in fact.next;
+  return truncated
+    ? `The new value of ${trigger.field} is too large for dohc to compare without reading the record.`
+    : null;
 }
 
 /**
  * A notice about a dataset record: it names the Collection, since the
  * record has no file, and the record by its id when that id fits a notice.
  */
-function datasetNotice(effect: Extract<PlannedEffect, { kind: "notice" }>, collectionPath: string): Extract<PlannedEffect, { kind: "notice" }> {
+function datasetNotice(
+  effect: Extract<PlannedEffect, { kind: "notice" }>,
+  collectionPath: string,
+): Extract<PlannedEffect, { kind: "notice" }> {
   const { record, ...target } = effect.notice.target;
-  const named = record !== undefined && isNoticeLine(record, NOTICE_TARGET_FIELD_MAX_CHARS) ? { record } : {};
-  return { ...effect, notice: { ...effect.notice, target: { ...target, path: collectionPath, ...named } } };
+  const named =
+    record !== undefined && isNoticeLine(record, NOTICE_TARGET_FIELD_MAX_CHARS) ? { record } : {};
+  return {
+    ...effect,
+    notice: { ...effect.notice, target: { ...target, path: collectionPath, ...named } },
+  };
 }
 
 /**
@@ -362,7 +504,12 @@ export function datasetStepEffects(
   ordinal: number,
   planned: readonly PlannedEffect[],
   steps: DatasetSteps,
-  codeOperation: ((effect: Extract<PlannedEffect, { kind: "add" | "set" }>) => { table: DatasetTable; operation: DatasetOperation }) | null,
+  codeOperation:
+    | ((effect: Extract<PlannedEffect, { kind: "add" | "set" }>) => {
+        table: DatasetTable;
+        operation: DatasetOperation;
+      })
+    | null,
   rules: Rules,
   versions: ReadonlyMap<string, { id: DatasetRecordId; version: number }>,
   collectionPath: string,
@@ -377,12 +524,21 @@ export function datasetStepEffects(
   }
   return own;
 
-  function datasetEffect(effect: PlannedEffect): StoredStep["effects"][number] | { problem: string } {
+  function datasetEffect(
+    effect: PlannedEffect,
+  ): StoredStep["effects"][number] | { problem: string } {
     if (effect.kind === "message" || effect.kind === "wake") return effect;
     if (effect.kind === "notice") return datasetNotice(effect, collectionPath);
     if (effect.kind === "invoke") {
       const { operation, table } = steps.steps.get(ordinal)!;
-      return { kind: "dataset-action", collectionPath, rules, operationId: operation.operationId, tableId: table.tableId, input: effect.input };
+      return {
+        kind: "dataset-action",
+        collectionPath,
+        rules,
+        operationId: operation.operationId,
+        tableId: table.tableId,
+        input: effect.input,
+      };
     }
     let operation: DatasetOperation, table: DatasetTable;
     if (codeOperation !== null) {
@@ -393,17 +549,32 @@ export function datasetStepEffects(
     const fieldId = (name: string) => table.fields.find((field) => field.name === name)!.fieldId;
     if (effect.kind === "add") {
       return {
-        kind: "dataset-create", rules, operationId: operation.operationId, tableId: table.tableId,
-        values: effect.fields.map(({ field, value }) => ({ fieldId: fieldId(field), field, value })),
+        kind: "dataset-create",
+        rules,
+        operationId: operation.operationId,
+        tableId: table.tableId,
+        values: effect.fields.map(({ field, value }) => ({
+          fieldId: fieldId(field),
+          field,
+          value,
+        })),
         deletes: deletes(table.tableId),
       };
     }
     const known = versions.get(effect.target.path);
     if (known === undefined) throw new Error("dohc lost track of a record this run read.");
     return {
-      kind: "dataset-edit", rules, operationId: operation.operationId, tableId: table.tableId,
+      kind: "dataset-edit",
+      rules,
+      operationId: operation.operationId,
+      tableId: table.tableId,
       target: { recordId: known.id, version: known.version },
-      fields: effect.fields.map(({ field, before, after }) => ({ fieldId: fieldId(field), field, before, after })),
+      fields: effect.fields.map(({ field, before, after }) => ({
+        fieldId: fieldId(field),
+        field,
+        before,
+        after,
+      })),
     };
   }
 }
@@ -427,32 +598,106 @@ export async function applyDatasetEffect(
   automation: Automation,
 ): Promise<RunWrite[]> {
   const { dependencies, host, run, index, ordinal, part, signal } = context;
-  const keyOf = (recordId: DatasetRecordId | null, replan: number) => datasetEffectKey(run.claimId, run.keySeed, ordinal, part, recordId, replan, effect.rules.datasetId !== run.rules?.datasetId ? { datasetId: effect.rules.datasetId, tableId: effect.tableId } : undefined);
+  const keyOf = (recordId: DatasetRecordId | null, replan: number) =>
+    datasetEffectKey(
+      run.claimId,
+      run.keySeed,
+      ordinal,
+      part,
+      recordId,
+      replan,
+      effect.rules.datasetId !== run.rules?.datasetId
+        ? { datasetId: effect.rules.datasetId, tableId: effect.tableId }
+        : undefined,
+    );
   if (effect.kind === "dataset-action") {
     // One invocation per step. Its key and input are saved in the plan, so a
     // resumed run sends the same request, and a commit that landed before a
     // crash replays its receipt instead of running twice. A refusal commits
     // nothing, so Try again runs the action again under the same key.
-    const action = context.datasetRules.definition.operations.find((operation) => operation.operationId === effect.operationId);
+    const action = context.datasetRules.definition.operations.find(
+      (operation) => operation.operationId === effect.operationId,
+    );
     const label = action?.label ?? "The action";
-    const result = await send(() => invoke(host, context.context, effect.rules, effect.operationId, effect.input, keyOf(null, 0), signal));
-    if ("refused" in result) throw new Error(`${label} refused this run: ${result.refused.message}`);
+    const result = await send(() =>
+      invoke(
+        host,
+        context.context,
+        effect.rules,
+        effect.operationId,
+        effect.input,
+        keyOf(null, 0),
+        signal,
+      ),
+    );
+    if ("refused" in result)
+      throw new Error(`${label} refused this run: ${result.refused.message}`);
     // The host commits a reversible action only with its undo, so Undo can run the reverse.
     const landed = result.value.result;
-    const undo = action?.reversedBy !== undefined && landed !== null && typeof landed === "object" && !Array.isArray(landed) ? landed.undo : undefined;
-    const reverse = context.datasetRules.definition.operations.find((operation) => operation.name === action?.reversedBy && operation.kind === "action");
-    return [{ kind: "dataset-action", rules: effect.rules, operationId: effect.operationId, tableId: effect.tableId, name: label, revision: result.value.revision,
-      ...(undo === undefined || reverse === undefined ? {} : { undo, reverseOperationId: reverse.operationId }) }];
+    const undo =
+      action?.reversedBy !== undefined &&
+      landed !== null &&
+      typeof landed === "object" &&
+      !Array.isArray(landed)
+        ? landed.undo
+        : undefined;
+    const reverse = context.datasetRules.definition.operations.find(
+      (operation) => operation.name === action?.reversedBy && operation.kind === "action",
+    );
+    return [
+      {
+        kind: "dataset-action",
+        rules: effect.rules,
+        operationId: effect.operationId,
+        tableId: effect.tableId,
+        name: label,
+        revision: result.value.revision,
+        ...(undo === undefined || reverse === undefined
+          ? {}
+          : { undo, reverseOperationId: reverse.operationId }),
+      },
+    ];
   }
   if (effect.kind === "dataset-create") {
-    const values: JsonObject = Object.fromEntries(effect.values.map(({ fieldId, value }) => [fieldId, value]));
-    const result = await send(() => invoke(host, context.context, effect.rules, effect.operationId, { values }, keyOf(null, 0), signal));
+    const values: JsonObject = Object.fromEntries(
+      effect.values.map(({ fieldId, value }) => [fieldId, value]),
+    );
+    const result = await send(() =>
+      invoke(
+        host,
+        context.context,
+        effect.rules,
+        effect.operationId,
+        { values },
+        keyOf(null, 0),
+        signal,
+      ),
+    );
     if ("refused" in result) throw new Error(result.refused.message);
     const created = result.value.result;
-    const id = created !== null && typeof created === "object" && !Array.isArray(created) ? created.id : undefined;
-    const version = created !== null && typeof created === "object" && !Array.isArray(created) ? created.version : undefined;
-    if ((typeof id !== "string" && typeof id !== "number") || typeof version !== "number") throw new Error("This Collection did not identify the record it added. Ask the owner to check its rules.");
-    return [{ kind: "dataset-created", rules: effect.rules, operationId: effect.operationId, tableId: effect.tableId, recordId: id, version, deletes: effect.deletes }];
+    const id =
+      created !== null && typeof created === "object" && !Array.isArray(created)
+        ? created.id
+        : undefined;
+    const version =
+      created !== null && typeof created === "object" && !Array.isArray(created)
+        ? created.version
+        : undefined;
+    if ((typeof id !== "string" && typeof id !== "number") || typeof version !== "number")
+      throw new Error(
+        "This Collection did not identify the record it added. Ask the owner to check its rules.",
+      );
+    return [
+      {
+        kind: "dataset-created",
+        rules: effect.rules,
+        operationId: effect.operationId,
+        tableId: effect.tableId,
+        recordId: id,
+        version,
+        deletes: effect.deletes,
+      },
+    ];
   }
 
   const { recordId } = effect.target;
@@ -462,42 +707,128 @@ export async function applyDatasetEffect(
   let fields = latest?.fields ?? effect.fields;
   let kept: RunWrite[] = latest?.kept ?? [];
   for (;;) {
-    const values: JsonObject = Object.fromEntries(fields.map(({ fieldId, after }) => [fieldId, after]));
-    const result = await send(() => invoke(host, context.context, effect.rules, effect.operationId,
-      { id: recordId, expectedVersion: version, values }, keyOf(recordId, replan), signal));
+    const values: JsonObject = Object.fromEntries(
+      fields.map(({ fieldId, after }) => [fieldId, after]),
+    );
+    const result = await send(() =>
+      invoke(
+        host,
+        context.context,
+        effect.rules,
+        effect.operationId,
+        { id: recordId, expectedVersion: version, values },
+        keyOf(recordId, replan),
+        signal,
+      ),
+    );
     if (!("refused" in result)) {
       const landed = result.value.result;
-      const prior = landed !== null && typeof landed === "object" && !Array.isArray(landed) ? landed.priorValues : undefined;
-      const next = landed !== null && typeof landed === "object" && !Array.isArray(landed) ? landed.version : undefined;
-      if (typeof next !== "number") throw new Error("This Collection did not return the updated record's version. Ask the owner to check its rules.");
-      const priorValues = prior !== null && typeof prior === "object" && !Array.isArray(prior) ? prior : {};
-      return [...kept, {
-        kind: "dataset-edit", rules: effect.rules, operationId: effect.operationId, tableId: effect.tableId, recordId, expectedVersion: version, version: next,
-        fields: fields.map((field) => ({ ...field, before: priorValues[field.fieldId] ?? null })),
-      }];
+      const prior =
+        landed !== null && typeof landed === "object" && !Array.isArray(landed)
+          ? landed.priorValues
+          : undefined;
+      const next =
+        landed !== null && typeof landed === "object" && !Array.isArray(landed)
+          ? landed.version
+          : undefined;
+      if (typeof next !== "number")
+        throw new Error(
+          "This Collection did not return the updated record's version. Ask the owner to check its rules.",
+        );
+      const priorValues =
+        prior !== null && typeof prior === "object" && !Array.isArray(prior) ? prior : {};
+      return [
+        ...kept,
+        {
+          kind: "dataset-edit",
+          rules: effect.rules,
+          operationId: effect.operationId,
+          tableId: effect.tableId,
+          recordId,
+          expectedVersion: version,
+          version: next,
+          fields: fields.map((field) => ({ ...field, before: priorValues[field.fieldId] ?? null })),
+        },
+      ];
     }
     if (result.refused.code === "not_found") {
-      return [...kept, { kind: "dataset-skipped", datasetId: effect.rules.datasetId, tableId: effect.tableId, recordId, reason: "The record is no longer in the Collection." }];
+      return [
+        ...kept,
+        {
+          kind: "dataset-skipped",
+          datasetId: effect.rules.datasetId,
+          tableId: effect.tableId,
+          recordId,
+          reason: "The record is no longer in the Collection.",
+        },
+      ];
     }
     if (result.refused.code !== "stale_record") throw new Error(result.refused.message);
     // Someone changed the record since the plan read it. Read it again.
-    const table = context.datasetRules.definition.tables.find((candidate) => candidate.tableId === effect.tableId);
+    const table = context.datasetRules.definition.tables.find(
+      (candidate) => candidate.tableId === effect.tableId,
+    );
     if (table === undefined) throw new Error(RULES_CHANGED_ERROR);
     const code = codeStepOrdinals(automation).has(ordinal)
-      ? datasetCodeOperation(context.datasetRules.definition, table, "read", effect.fields.map(({ fieldId }) => table.fields.find((field) => field.fieldId === fieldId)!.name))
+      ? datasetCodeOperation(
+          context.datasetRules.definition,
+          table,
+          "read",
+          effect.fields.map(
+            ({ fieldId }) => table.fields.find((field) => field.fieldId === fieldId)!.name,
+          ),
+        )
       : null;
-    const reader = context.reader ?? (code === null ? datasetStepsOf(automation, context.datasetRules).rereads.get(ordinal) : "problem" in code ? undefined : code);
-    if (reader === undefined) throw new Error(`${table.name} changed, and dohc has no approved read of it to check the record again.`);
-    const row = await readRecord(host, context.context, effect.rules, reader, table, recordId, signal);
-    if (row === null) return [...kept, { kind: "dataset-skipped", datasetId: effect.rules.datasetId, tableId: effect.tableId, recordId, reason: "The record is no longer in the Collection." }];
+    const reader =
+      context.reader ??
+      (code === null
+        ? datasetStepsOf(automation, context.datasetRules).rereads.get(ordinal)
+        : "problem" in code
+          ? undefined
+          : code);
+    if (reader === undefined)
+      throw new Error(
+        `${table.name} changed, and dohc has no approved read of it to check the record again.`,
+      );
+    const row = await readRecord(
+      host,
+      context.context,
+      effect.rules,
+      reader,
+      table,
+      recordId,
+      signal,
+    );
+    if (row === null)
+      return [
+        ...kept,
+        {
+          kind: "dataset-skipped",
+          datasetId: effect.rules.datasetId,
+          tableId: effect.tableId,
+          recordId,
+          reason: "The record is no longer in the Collection.",
+        },
+      ];
     const remaining: typeof fields = [];
     const found: RunWrite[] = [];
     for (const field of fields) {
       const current = row.values[field.fieldId] ?? null;
-      if (isDeepStrictEqual(current, field.before) && !isDeepStrictEqual(current, field.after)) remaining.push(field);
+      if (isDeepStrictEqual(current, field.before) && !isDeepStrictEqual(current, field.after))
+        remaining.push(field);
       // It already holds the planned value, or someone gave it another:
       // either way it stays as it is.
-      else found.push({ kind: "dataset-kept", datasetId: effect.rules.datasetId, tableId: effect.tableId, recordId, fieldId: field.fieldId, field: field.field, planned: field.after, current });
+      else
+        found.push({
+          kind: "dataset-kept",
+          datasetId: effect.rules.datasetId,
+          tableId: effect.tableId,
+          recordId,
+          fieldId: field.fieldId,
+          field: field.field,
+          planned: field.after,
+          current,
+        });
     }
     kept = [...kept, ...found];
     if (remaining.length === 0) return kept;
@@ -514,7 +845,9 @@ export async function applyDatasetEffect(
 }
 
 /** An invocation's result, or the refusal an operation answered with. */
-export async function send(call: () => Promise<DatasetInvocationResult>): Promise<{ value: DatasetInvocationResult } | { refused: { code: string; message: string } }> {
+export async function send(
+  call: () => Promise<DatasetInvocationResult>,
+): Promise<{ value: DatasetInvocationResult } | { refused: { code: string; message: string } }> {
   try {
     return { value: await call() };
   } catch (error) {
@@ -527,40 +860,60 @@ function datasetSource(input: DatasetAutomationRunInput): RunSource {
   const { held, automation, collection } = input;
   const datasetId = datasetIdOf(held);
   return {
-    kind: "dataset", datasetId, engineClaim: held.source === "engine" ? held.claim : null,
+    kind: "dataset",
+    datasetId,
+    engineClaim: held.source === "engine" ? held.claim : null,
     personId: held.source === "dataset" ? datasetPerson(held.claim) : null,
     writeAuthorId: runPerson(held),
     decode(inventory, readable, resuming) {
       const { rules, steps } = inventory.datasets.get(collection.path)!;
-      if ((held.source === "engine") !== (steps.trigger === null)) return { outcome: { kind: "skipped" } };
+      if ((held.source === "engine") !== (steps.trigger === null))
+        return { outcome: { kind: "skipped" } };
       if (held.source === "dataset") {
         const fact = held.claim.fact;
-        if (fact === null) return { outcome: failed(held.claim.error ?? "This change cannot be read.") };
+        if (fact === null)
+          return { outcome: failed(held.claim.error ?? "This change cannot be read.") };
         if (fact.tableId !== steps.trigger?.table.tableId) return { outcome: { kind: "skipped" } };
         if (fact.kind === "button" && !resuming) {
           const button = datasetButtonOf(automation, rules.definition);
-          if (button?.tableId !== fact.tableId || button.fieldId !== fact.fieldId || definitionDigest(automation) !== fact.definitionHash) {
-            const name = rules.definition.tables.flatMap((table) => table.fields).find((field) => field.fieldId === fact.fieldId)?.name;
+          if (
+            button?.tableId !== fact.tableId ||
+            button.fieldId !== fact.fieldId ||
+            definitionDigest(automation) !== fact.definitionHash
+          ) {
+            const name = rules.definition.tables
+              .flatMap((table) => table.fields)
+              .find((field) => field.fieldId === fact.fieldId)?.name;
             return { outcome: failed(changedSincePressed(name ?? "This button")) };
           }
         }
       }
-      const claim = held.source === "engine" ? { ...held.claim, collectionPath: collection.path }
-        : datasetRunClaim(held.claim, collection.path, steps.trigger!.table, readable);
+      const claim =
+        held.source === "engine"
+          ? { ...held.claim, collectionPath: collection.path }
+          : datasetRunClaim(held.claim, collection.path, steps.trigger!.table, readable);
       const problem = rules.generated ? null : unreadComparison(automation, claim);
       return problem === null ? claim : { outcome: failed(problem) };
     },
     reads({ dataset, remember }, inventory) {
       const { rules, steps } = inventory.datasets.get(collection.path)!;
-      const read = (operation: DatasetOperation, table: DatasetTable, id: DatasetRecordId) => dataset(collection.path, operation, table, id);
+      const read = (operation: DatasetOperation, table: DatasetTable, id: DatasetRecordId) =>
+        dataset(collection.path, operation, table, id);
       const keep = (row: DatasetRow, table: DatasetTable) => remember(collection.path, row, table);
       return {
         async trigger() {
           const fact = held.source === "dataset" ? held.claim.fact : null;
           if (fact === null || fact.kind === "removed" || steps.trigger === null) return null;
           const { table, read: operation } = steps.trigger;
-          if (operation === null) return rules.generated ? null
-            : { id: String(fact.recordId), key: fact.recordId, path: datasetRecordKey(datasetId, table.tableId, fact.recordId), values: {} };
+          if (operation === null)
+            return rules.generated
+              ? null
+              : {
+                  id: String(fact.recordId),
+                  key: fact.recordId,
+                  path: datasetRecordKey(datasetId, table.tableId, fact.recordId),
+                  values: {},
+                };
           const row = await read(operation, table, fact.recordId);
           return row === null ? null : keep(row, table);
         },

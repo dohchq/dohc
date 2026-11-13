@@ -1,21 +1,11 @@
 // @vitest-environment jsdom
-import {
-  act,
-  cleanup,
-  render,
-  renderHook,
-  screen,
-  waitFor,
-} from "@testing-library/react";
+import { act, cleanup, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { useRef, useState } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type * as Y from "yjs";
 import { insertElementRevision, putSceneAsset } from "@dohc/excalidraw-scene";
 import { ENGINE_YDOC_UPDATE_MAX_BYTES } from "../../ipc/channels";
-import {
-  resetOrphanedDrafts,
-  useOrphanedDrafts,
-} from "../orphanedDrafts";
+import { resetOrphanedDrafts, useOrphanedDrafts } from "../orphanedDrafts";
 import { disposeEngineDocLeasesForTests } from "./engineDocLease";
 import { useEngineDoc } from "./useEngineDoc";
 import { useAuthorCapacityNotice } from "./useAuthorCapacityNotice";
@@ -23,7 +13,7 @@ import { harnessBridge, IMAGE_DESCRIPTOR } from "./engineDocSaveStateTestHarness
 import { parseExcalidrawDocument } from "../excalidrawDocument";
 
 vi.mock("../../ipc/channels", async (importOriginal) => ({
-  ...await importOriginal<typeof import("../../ipc/channels")>(),
+  ...(await importOriginal<typeof import("../../ipc/channels")>()),
   ENGINE_YDOC_UPDATE_MAX_BYTES: 4 * 1024,
 }));
 
@@ -64,9 +54,12 @@ function Harness(props: {
     retryKey,
   });
   useAuthorCapacityNotice({
-    workspaceId: props.workspaceId, path: props.path,
-    authorCapacity: engine.authorCapacity, saveState: engine.saveState,
-    reportError: props.reportError, retry: () => setRetryKey((n) => n + 1),
+    workspaceId: props.workspaceId,
+    path: props.path,
+    authorCapacity: engine.authorCapacity,
+    saveState: engine.saveState,
+    reportError: props.reportError,
+    retry: () => setRetryKey((n) => n + 1),
   });
   if (engine.doc !== null) lastBoundDoc = engine.doc;
   const drafts = useOrphanedDrafts(props.workspaceId, props.path);
@@ -75,16 +68,10 @@ function Harness(props: {
       <span data-testid="state">{engine.goneCause ?? engine.saveState.kind}</span>
       <span data-testid="save-error">{engine.saveError ?? "none"}</span>
       <span data-testid="available">{String(engine.available)}</span>
-      <span data-testid="artifact-assets-invalid">
-        {String(engine.artifactAssetsInvalid)}
-      </span>
-      <span data-testid="engine-may-hold-document">
-        {String(engine.engineMayHoldDocument)}
-      </span>
+      <span data-testid="artifact-assets-invalid">{String(engine.artifactAssetsInvalid)}</span>
+      <span data-testid="engine-may-hold-document">{String(engine.engineMayHoldDocument)}</span>
       <span data-testid="deleted">{String(engine.deletedWhileEditing)}</span>
-      <span data-testid="read-only-transition">
-        {String(engine.readOnlyWhileEditing)}
-      </span>
+      <span data-testid="read-only-transition">{String(engine.readOnlyWhileEditing)}</span>
       <span data-testid="read-only-cause">{engine.readOnlyCause ?? "none"}</span>
       <span data-testid="permanent-failure-transition">
         {String(engine.permanentFailureWhileEditing)}
@@ -94,11 +81,9 @@ function Harness(props: {
           ? drafts.at(-1)
             ? "present"
             : "none"
-          : drafts.at(-1)?.text ?? "none"}
+          : (drafts.at(-1)?.text ?? "none")}
       </span>
-      <span data-testid="draft-size">
-        {String(drafts.at(-1)?.text.length ?? 0)}
-      </span>
+      <span data-testid="draft-size">{String(drafts.at(-1)?.text.length ?? 0)}</span>
       <span data-testid="draft-count">{drafts.length}</span>
       <span data-testid="asset-recovery">
         {engine.recoveryAssets
@@ -115,20 +100,16 @@ function Harness(props: {
         data-testid="hydrate-assets"
         onClick={() => {
           void Promise.all(
-            engine.artifactAssets.map((asset) =>
-              engine.readArtifactAsset(asset),
-            ),
-          ).then((loaded) => setHydratedAssets(loaded.map(({ descriptor }) => descriptor.id).join(",")));
+            engine.artifactAssets.map((asset) => engine.readArtifactAsset(asset)),
+          ).then((loaded) =>
+            setHydratedAssets(loaded.map(({ descriptor }) => descriptor.id).join(",")),
+          );
         }}
       >
         hydrate assets
       </button>
-      <span data-testid="removal-operation">
-        {engine.removalInProgress?.operation ?? "none"}
-      </span>
-      <span data-testid="removal-message">
-        {engine.removalInProgress?.message ?? "none"}
-      </span>
+      <span data-testid="removal-operation">{engine.removalInProgress?.operation ?? "none"}</span>
+      <span data-testid="removal-message">{engine.removalInProgress?.message ?? "none"}</span>
       <button
         type="button"
         data-testid="type"
@@ -173,9 +154,7 @@ function Harness(props: {
             });
             return;
           }
-          engine.doc
-            ?.getText("plainText")
-            .insert(0, "x".repeat(ENGINE_YDOC_UPDATE_MAX_BYTES + 1));
+          engine.doc?.getText("plainText").insert(0, "x".repeat(ENGINE_YDOC_UPDATE_MAX_BYTES + 1));
         }}
       >
         type oversized
@@ -282,15 +261,11 @@ it("keeps a failed lineage handoff visible and read-only", async () => {
   act(() => screen.getByTestId("type").click());
   harness.emitLineageReplacement("winner");
 
-  await waitFor(() =>
-    expect(screen.getByTestId("state").textContent).toBe("error"),
-  );
+  await waitFor(() => expect(screen.getByTestId("state").textContent).toBe("error"));
   expect(screen.getByTestId("available").textContent).toBe("true");
   expect(screen.getByTestId("read-only-transition").textContent).toBe("true");
   expect(screen.getByTestId("read-only-cause").textContent).toBe("lineage-failure");
-  expect(screen.getByTestId("save-error").textContent).toContain(
-    "acknowledgement refused",
-  );
+  expect(screen.getByTestId("save-error").textContent).toContain("acknowledgement refused");
   expect(screen.getByTestId("draft").textContent).toBe("seed!");
   expect(lastBoundDoc).toBe(retired);
 
@@ -312,19 +287,11 @@ it("does not reuse a losing lineage asset when the winner reuses its file ID", a
     ref: "assets/winner.png",
     sha256: "b".repeat(64),
   };
-  let resolveLoser!: (value: {
-    descriptor: typeof loser;
-    bytes: Uint8Array;
-  }) => void;
-  let resolveWinner!: (value: {
-    descriptor: typeof winner;
-    bytes: Uint8Array;
-  }) => void;
-  const loserRead = new Promise<{ descriptor: typeof loser; bytes: Uint8Array }>(
-    (resolve) => {
-      resolveLoser = resolve;
-    },
-  );
+  let resolveLoser!: (value: { descriptor: typeof loser; bytes: Uint8Array }) => void;
+  let resolveWinner!: (value: { descriptor: typeof winner; bytes: Uint8Array }) => void;
+  const loserRead = new Promise<{ descriptor: typeof loser; bytes: Uint8Array }>((resolve) => {
+    resolveLoser = resolve;
+  });
   const winnerRead = new Promise<{
     descriptor: typeof winner;
     bytes: Uint8Array;
@@ -348,12 +315,8 @@ it("does not reuse a losing lineage asset when the winner reuses its file ID", a
     index: "a1",
   });
   vi.stubGlobal("dohcDesktop", harness.api);
-  render(
-    <Harness workspaceId="ws-1" path="drawing.excalidraw" kind="scene" />,
-  );
-  await waitFor(() =>
-    expect(screen.getByTestId("available").textContent).toBe("true"),
-  );
+  render(<Harness workspaceId="ws-1" path="drawing.excalidraw" kind="scene" />);
+  await waitFor(() => expect(screen.getByTestId("available").textContent).toBe("true"));
 
   const retired = lastBoundDoc!;
   act(() => screen.getByTestId("type").click());
@@ -389,9 +352,7 @@ it("does not reuse a losing lineage asset when the winner reuses its file ID", a
     await winnerRead;
   });
   await waitFor(() => {
-    const recovered = parseExcalidrawDocument(
-      screen.getByTestId("draft").textContent!,
-    );
+    const recovered = parseExcalidrawDocument(screen.getByTestId("draft").textContent!);
     expect(recovered.files[winner.id]).toMatchObject({
       dataURL: "data:image/png;base64,AQID",
     });
@@ -401,12 +362,8 @@ it("does not reuse a losing lineage asset when the winner reuses its file ID", a
 });
 
 it("delivers the final mirror state before the final consumer closes and reopens", async () => {
-  const view = render(
-    <Harness workspaceId="ws-1" path="notes/big.md" enabled />,
-  );
-  await waitFor(() =>
-    expect(screen.getByTestId("available").textContent).toBe("true"),
-  );
+  const view = render(<Harness workspaceId="ws-1" path="notes/big.md" enabled />);
+  await waitFor(() => expect(screen.getByTestId("available").textContent).toBe("true"));
   harness.rejectNextApplyAttempts(1);
 
   act(() => {
@@ -419,21 +376,15 @@ it("delivers the final mirror state before the final consumer closes and reopens
   await waitFor(() => expect(harness.closed).toHaveLength(1));
 
   render(<Harness workspaceId="ws-1" path="notes/big.md" enabled />);
-  await waitFor(() =>
-    expect(screen.getByTestId("available").textContent).toBe("true"),
-  );
+  await waitFor(() => expect(screen.getByTestId("available").textContent).toBe("true"));
   expect(screen.getByTestId("text").textContent).toBe("seed!");
   expect(harness.applyAttempts).toHaveLength(2);
   expect(harness.applied).toHaveLength(1);
 });
 
 it("sets aside the final mirror when live repair and final delivery fail", async () => {
-  const view = render(
-    <Harness workspaceId="ws-1" path="notes/big.md" enabled />,
-  );
-  await waitFor(() =>
-    expect(screen.getByTestId("available").textContent).toBe("true"),
-  );
+  const view = render(<Harness workspaceId="ws-1" path="notes/big.md" enabled />);
+  await waitFor(() => expect(screen.getByTestId("available").textContent).toBe("true"));
   harness.rejectNextApplyAttempts(3);
 
   act(() => {
@@ -444,9 +395,7 @@ it("sets aside the final mirror when live repair and final delivery fail", async
   await waitFor(() => expect(harness.closed).toHaveLength(1));
 
   render(<Harness workspaceId="ws-1" path="notes/big.md" enabled />);
-  await waitFor(() =>
-    expect(screen.getByTestId("available").textContent).toBe("true"),
-  );
+  await waitFor(() => expect(screen.getByTestId("available").textContent).toBe("true"));
   expect(screen.getByTestId("text").textContent).toBe("seed");
   expect(screen.getByTestId("draft").textContent).toBe("seed!");
   expect(harness.applyAttempts).toHaveLength(2);
@@ -456,12 +405,8 @@ it("sets aside the final mirror when live repair and final delivery fail", async
 it("sets aside a refused scene, freezes writes, and releases the session", async () => {
   harness = harnessBridge("scene");
   vi.stubGlobal("dohcDesktop", harness.api);
-  render(
-    <Harness workspaceId="ws-1" path="drawing.excalidraw" kind="scene" />,
-  );
-  await waitFor(() =>
-    expect(screen.getByTestId("available").textContent).toBe("true"),
-  );
+  render(<Harness workspaceId="ws-1" path="drawing.excalidraw" kind="scene" />);
+  await waitFor(() => expect(screen.getByTestId("available").textContent).toBe("true"));
 
   act(() => screen.getByTestId("type").click());
   await flushLocalBatch();
@@ -513,9 +458,7 @@ async function replaceAfterDeliveredEdit(options: { saved: boolean }) {
 
 it("sets aside a winner edit beside the retired draft when read-only follows it", async () => {
   const drafts = await replaceAfterDeliveredEdit({ saved: false });
-  await waitFor(() =>
-    expect(drafts.result.current.map((draft) => draft.text)).toEqual(["seed!"]),
-  );
+  await waitFor(() => expect(drafts.result.current.map((draft) => draft.text)).toEqual(["seed!"]));
   const retired = drafts.result.current[0]!;
   act(() => screen.getByTestId("type").click());
   await flushLocalBatch();
@@ -563,9 +506,7 @@ it("host acknowledgement recovery keeps a draft when read-only precedes the deli
 
   expect(hook.result.current.readOnlyWhileEditing).toBe(true);
   expect(hook.result.current.saveState.kind).toBe("unknown");
-  await waitFor(() =>
-    expect(drafts.result.current.map((draft) => draft.text)).toEqual(["seed!"]),
-  );
+  await waitFor(() => expect(drafts.result.current.map((draft) => draft.text)).toEqual(["seed!"]));
   // Close waits for the withheld response.
   expect(harness.closed).toEqual([]);
 
@@ -595,55 +536,55 @@ it("host acknowledgement recovery sets nothing aside when the delivery response 
 it.each([
   ["completes", false],
   ["fails", true],
-])("names a keystroke's draft after a clean read-only status when projection %s", async (_, fails) => {
-  const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
-  const { hook, drafts, typeAndDeliver } = await mountHostAcknowledgedDocument();
-  await typeAndDeliver(1);
-  act(() => harness.emitNow("saved", harness.applied.at(-1)!.seq));
-  expect(hook.result.current.saveState.kind).toBe("saved-here");
-  const doc = hook.result.current.doc!;
-  projectionFails = fails;
+])(
+  "names a keystroke's draft after a clean read-only status when projection %s",
+  async (_, fails) => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const { hook, drafts, typeAndDeliver } = await mountHostAcknowledgedDocument();
+    await typeAndDeliver(1);
+    act(() => harness.emitNow("saved", harness.applied.at(-1)!.seq));
+    expect(hook.result.current.saveState.kind).toBe("saved-here");
+    const doc = hook.result.current.doc!;
+    projectionFails = fails;
 
-  act(() => {
-    harness.emitNow("read-only", 0);
-    const text = doc.getText("plainText");
-    text.insert(text.length, "!");
-  });
+    act(() => {
+      harness.emitNow("read-only", 0);
+      const text = doc.getText("plainText");
+      text.insert(text.length, "!");
+    });
 
-  const draftId = hook.result.current.readOnlyDraftId;
-  expect(hook.result.current.readOnlyWhileEditing).toBe(true);
-  expect(draftId).not.toBeNull();
-  await waitFor(() =>
+    const draftId = hook.result.current.readOnlyDraftId;
+    expect(hook.result.current.readOnlyWhileEditing).toBe(true);
+    expect(draftId).not.toBeNull();
+    await waitFor(() =>
+      expect(drafts.result.current.map(({ id, text }) => ({ id, text }))).toEqual([
+        { id: draftId, text: "seed!!" },
+      ]),
+    );
+    await waitFor(() => expect(harness.closed).toHaveLength(1));
+    const refineFailure = [
+      expect.stringContaining("could not refine the recovery draft"),
+      expect.any(Error),
+    ];
+    if (fails) {
+      await waitFor(() => expect(consoleError).toHaveBeenCalledWith(...refineFailure));
+    } else {
+      expect(consoleError).not.toHaveBeenCalledWith(...refineFailure);
+    }
+    expect(hook.result.current.readOnlyDraftId).toBe(draftId);
     expect(drafts.result.current.map(({ id, text }) => ({ id, text }))).toEqual([
       { id: draftId, text: "seed!!" },
-    ]),
-  );
-  await waitFor(() => expect(harness.closed).toHaveLength(1));
-  const refineFailure = [
-    expect.stringContaining("could not refine the recovery draft"),
-    expect.any(Error),
-  ];
-  if (fails) {
-    await waitFor(() => expect(consoleError).toHaveBeenCalledWith(...refineFailure));
-  } else {
-    expect(consoleError).not.toHaveBeenCalledWith(...refineFailure);
-  }
-  expect(hook.result.current.readOnlyDraftId).toBe(draftId);
-  expect(drafts.result.current.map(({ id, text }) => ({ id, text }))).toEqual([
-    { id: draftId, text: "seed!!" },
-  ]);
-  consoleError.mockRestore();
-});
+    ]);
+    consoleError.mockRestore();
+  },
+);
 
 it("upgrades one deleted-scene draft with its verified image bytes", async () => {
   harness = harnessBridge("scene");
   const bytes = new Uint8Array(50 * 1024 + 8);
   bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
   expect(bytes.byteLength).toBeGreaterThan(48 * 1024);
-  let resolveAsset!: (value: {
-    descriptor: typeof IMAGE_DESCRIPTOR;
-    bytes: Uint8Array;
-  }) => void;
+  let resolveAsset!: (value: { descriptor: typeof IMAGE_DESCRIPTOR; bytes: Uint8Array }) => void;
   const asset = new Promise<{
     descriptor: typeof IMAGE_DESCRIPTOR;
     bytes: Uint8Array;
@@ -663,12 +604,8 @@ it("upgrades one deleted-scene draft with its verified image bytes", async () =>
     index: "a1",
   });
   vi.stubGlobal("dohcDesktop", harness.api);
-  render(
-    <Harness workspaceId="ws-1" path="drawing.excalidraw" kind="scene" />,
-  );
-  await waitFor(() =>
-    expect(screen.getByTestId("available").textContent).toBe("true"),
-  );
+  render(<Harness workspaceId="ws-1" path="drawing.excalidraw" kind="scene" />);
+  await waitFor(() => expect(screen.getByTestId("available").textContent).toBe("true"));
 
   act(() => screen.getByTestId("type").click());
   await flushLocalBatch();
@@ -680,9 +617,7 @@ it("upgrades one deleted-scene draft with its verified image bytes", async () =>
   const immediate = JSON.parse(screen.getByTestId("draft").textContent!);
   expect(immediate.files).toEqual({});
   expect(
-    immediate.elements.find((element: { id: string }) =>
-      element.id === "image-element",
-    ).fileId,
+    immediate.elements.find((element: { id: string }) => element.id === "image-element").fileId,
   ).toBeNull();
 
   // One last canvas callback can land before the read-only render commits.
@@ -692,9 +627,7 @@ it("upgrades one deleted-scene draft with its verified image bytes", async () =>
   await waitFor(() => {
     const latest = JSON.parse(screen.getByTestId("draft").textContent!);
     expect(
-      latest.elements.find((element: { id: string }) =>
-        element.id === "recovered-shape",
-      ).x,
+      latest.elements.find((element: { id: string }) => element.id === "recovered-shape").x,
     ).toBe(20);
   });
 
@@ -744,23 +677,15 @@ it("keeps missing images explicit and never exposes a dangling recovery ref", as
     index: "a1",
   });
   vi.stubGlobal("dohcDesktop", harness.api);
-  render(
-    <Harness workspaceId="ws-1" path="drawing.excalidraw" kind="scene" />,
-  );
-  await waitFor(() =>
-    expect(screen.getByTestId("available").textContent).toBe("true"),
-  );
+  render(<Harness workspaceId="ws-1" path="drawing.excalidraw" kind="scene" />);
+  await waitFor(() => expect(screen.getByTestId("available").textContent).toBe("true"));
 
   act(() => screen.getByTestId("type").click());
   await flushLocalBatch();
   harness.emit("deleted", harness.applied.at(-1)!.seq);
 
-  await waitFor(() =>
-    expect(screen.getByTestId("asset-recovery").textContent).toBe("missing:1"),
-  );
-  const recovered = parseExcalidrawDocument(
-    screen.getByTestId("draft").textContent!,
-  );
+  await waitFor(() => expect(screen.getByTestId("asset-recovery").textContent).toBe("missing:1"));
+  const recovered = parseExcalidrawDocument(screen.getByTestId("draft").textContent!);
   expect(recovered.files).toEqual({});
   expect(recovered.elements).toContainEqual(
     expect.objectContaining({ id: "image-element", fileId: null }),
@@ -771,42 +696,24 @@ it("keeps invalid scene asset authority as a distinct unavailable outcome", asyn
   harness = harnessBridge("scene");
   harness.setArtifactAssetsInvalid(true);
   vi.stubGlobal("dohcDesktop", harness.api);
-  render(
-    <Harness workspaceId="ws-1" path="drawing.excalidraw" kind="scene" />,
-  );
+  render(<Harness workspaceId="ws-1" path="drawing.excalidraw" kind="scene" />);
 
   await waitFor(() =>
-    expect(screen.getByTestId("artifact-assets-invalid").textContent).toBe(
-      "true",
-    ),
+    expect(screen.getByTestId("artifact-assets-invalid").textContent).toBe("true"),
   );
   expect(screen.getByTestId("available").textContent).toBe("false");
-  expect(screen.getByTestId("engine-may-hold-document").textContent).toBe(
-    "false",
-  );
+  expect(screen.getByTestId("engine-may-hold-document").textContent).toBe("false");
   expect(screen.getByTestId("removal-operation").textContent).toBe("none");
 });
 
 it.each([
   { kind: "richdoc" as const, path: "notes/big.md" },
   { kind: "scene" as const, path: "drawing.excalidraw" },
-])("sets aside an oversized $kind edit and reports the measured limit", async ({
-  kind,
-  path,
-}) => {
+])("sets aside an oversized $kind edit and reports the measured limit", async ({ kind, path }) => {
   harness = harnessBridge(kind);
   vi.stubGlobal("dohcDesktop", harness.api);
-  render(
-    <Harness
-      workspaceId="ws-1"
-      path={path}
-      kind={kind}
-      compactDraft
-    />,
-  );
-  await waitFor(() =>
-    expect(screen.getByTestId("available").textContent).toBe("true"),
-  );
+  render(<Harness workspaceId="ws-1" path={path} kind={kind} compactDraft />);
+  await waitFor(() => expect(screen.getByTestId("available").textContent).toBe("true"));
 
   act(() => screen.getByTestId("type-oversized").click());
   await flushLocalBatch();
@@ -816,12 +723,8 @@ it.each([
   expect(screen.getByTestId("save-error").textContent).toContain(
     `ENGINE_YDOC_UPDATE_MAX_BYTES is ${ENGINE_YDOC_UPDATE_MAX_BYTES} bytes`,
   );
-  expect(screen.getByTestId("save-error").textContent).toMatch(
-    /the update is \d+ bytes/,
-  );
-  await waitFor(() =>
-    expect(screen.getByTestId("draft").textContent).toBe("present"),
-  );
+  expect(screen.getByTestId("save-error").textContent).toMatch(/the update is \d+ bytes/);
+  await waitFor(() => expect(screen.getByTestId("draft").textContent).toBe("present"));
   expect(Number(screen.getByTestId("draft-size").textContent)).toBeGreaterThan(
     ENGINE_YDOC_UPDATE_MAX_BYTES,
   );
@@ -834,7 +737,9 @@ it("reports a capacity refusal once with a guarded retry and keeps the edit", as
   act(() => screen.getByTestId("type").click());
   await flushLocalBatch();
   harness.emit("error", 1, undefined, true);
-  expect(screen.getByTestId("save-error").textContent).toContain("too many authors have unsaved edits");
+  expect(screen.getByTestId("save-error").textContent).toContain(
+    "too many authors have unsaved edits",
+  );
   expect(reportError).toHaveBeenCalledTimes(1);
   const [message, error, retry] = reportError.mock.calls[0]!;
   expect(message).toContain("notes/a.md");

@@ -47,11 +47,7 @@ describe("desktop workspace data-key custody", () => {
       code: "key-corrupt",
       message: expect.stringContaining("refusing to overwrite protected state"),
     });
-    await expect(readFile(join(root, SECRET_KEY_RELATIVE_PATH), "utf8")).resolves.toBe(
-      installed,
-    );
-    await expect(
-      loadSecretDataKey(root, { createIfMissing: false }),
-    ).resolves.toEqual(firstKey);
+    await expect(readFile(join(root, SECRET_KEY_RELATIVE_PATH), "utf8")).resolves.toBe(installed);
+    await expect(loadSecretDataKey(root, { createIfMissing: false })).resolves.toEqual(firstKey);
   });
 });

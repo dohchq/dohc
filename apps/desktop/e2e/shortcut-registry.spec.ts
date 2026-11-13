@@ -2,7 +2,12 @@ import { expect, test } from "@playwright/test";
 import { editorTabTestId } from "../src/testPins";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
-  cleanupDesktopWorkspace, createTempWorkspace, explorerRow, openWorkspaceFromFirstRun, waitForWorkspaceFile, writeWorkspaceFiles,
+  cleanupDesktopWorkspace,
+  createTempWorkspace,
+  explorerRow,
+  openWorkspaceFromFirstRun,
+  waitForWorkspaceFile,
+  writeWorkspaceFiles,
 } from "./helpers/workspace";
 
 // Physical keys go through Electron's accelerator handling, unlike jsdom's
@@ -70,7 +75,14 @@ test("shell shortcut ownership runs actions without native menu messages", async
     if (process.platform === "darwin") {
       // macOS keeps Control chords for text editing, so none runs a shell command.
       await focusShell();
-      for (const chord of ["Control+b", "Control+k", "Control+p", "Control+n", "Control+w", "Control+,"]) {
+      for (const chord of [
+        "Control+b",
+        "Control+k",
+        "Control+p",
+        "Control+n",
+        "Control+w",
+        "Control+,",
+      ]) {
         await page.keyboard.press(chord);
         await assertNoNativeCommand();
       }
@@ -115,14 +127,20 @@ test("switches editor tabs with the platform's chords", async () => {
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {
     const files = ["one.md", "two.md", "three.md"];
-    await writeWorkspaceFiles(temp, files.map((path) => ({ path, contents: `# ${path}\n\nBody.\n` })));
+    await writeWorkspaceFiles(
+      temp,
+      files.map((path) => ({ path, contents: `# ${path}\n\nBody.\n` })),
+    );
     desktop = await launchDesktopApp({ workspace: temp });
     const page = desktop.page;
     const workspace = await openWorkspaceFromFirstRun(page, temp);
     for (const path of files) {
       await waitForWorkspaceFile(page, workspace.workspaceId, path);
       await explorerRow(page, path).click();
-      await expect(page.getByTestId(editorTabTestId(path))).toHaveAttribute("aria-selected", "true");
+      await expect(page.getByTestId(editorTabTestId(path))).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
     }
     await page.evaluate(() => {
       const commands: string[] = [];
@@ -130,7 +148,10 @@ test("switches editor tabs with the platform's chords", async () => {
       window.dohcDesktop!.onMenuCommand((command) => commands.push(command));
     });
     const expectActive = async (path: string) => {
-      await expect(page.getByTestId(editorTabTestId(path))).toHaveAttribute("aria-selected", "true");
+      await expect(page.getByTestId(editorTabTestId(path))).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
       const commands = await page.evaluate(async () => {
         await window.dohcDesktop!.getUserSettings();
         return Reflect.get(window, "shortcutNativeCommands");
@@ -163,7 +184,9 @@ test("finds the next and previous match with the platform's chords", async () =>
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {
-    await writeWorkspaceFiles(temp, [{ path: "notes.md", contents: "# Notes\n\nOne cat, two cat, three cat.\n" }]);
+    await writeWorkspaceFiles(temp, [
+      { path: "notes.md", contents: "# Notes\n\nOne cat, two cat, three cat.\n" },
+    ]);
     desktop = await launchDesktopApp({ workspace: temp });
     const page = desktop.page;
     const workspace = await openWorkspaceFromFirstRun(page, temp);

@@ -13,13 +13,7 @@ const MAX_WORKSPACE_PATH_BYTES = 1_024;
 const MAX_METADATA_FIELD_BYTES = 16 * 1024;
 const MAX_AUTHOR_FIELD_BYTES = 512;
 
-const METADATA_ORIGINS = new Set([
-  "api",
-  "local-file",
-  "restore",
-  "sync",
-  "unknown",
-]);
+const METADATA_ORIGINS = new Set(["api", "local-file", "restore", "sync", "unknown"]);
 
 export interface ConflictResolveEnvelopeContext {
   workspaceId: string;
@@ -131,10 +125,7 @@ function exactKeys(
   const record = requireRecord(value, label);
   const actual = Object.keys(record).sort();
   const wanted = [...expected].sort();
-  if (
-    actual.length !== wanted.length ||
-    actual.some((key, index) => key !== wanted[index])
-  ) {
+  if (actual.length !== wanted.length || actual.some((key, index) => key !== wanted[index])) {
     invalid(`${label} has unknown or missing fields`);
   }
   return record;
@@ -213,20 +204,13 @@ function nullableMetadataField(value: unknown, label: string): string | null {
 }
 
 function metadata(value: unknown): Metadata {
-  const record = exactKeys(
-    value,
-    ["origin", "summary", "correlationId"],
-    "effectContext.metadata",
-  );
+  const record = exactKeys(value, ["origin", "summary", "correlationId"], "effectContext.metadata");
   if (typeof record.origin !== "string" || !METADATA_ORIGINS.has(record.origin)) {
     invalid("effectContext.metadata.origin is invalid");
   }
   return {
     origin: record.origin,
-    summary: nullableMetadataField(
-      record.summary,
-      "effectContext.metadata.summary",
-    ),
+    summary: nullableMetadataField(record.summary, "effectContext.metadata.summary"),
     correlationId: nullableMetadataField(
       record.correlationId,
       "effectContext.metadata.correlationId",
@@ -260,10 +244,10 @@ function author(value: unknown): AgentAuthor | null {
   return {
     kind: "agent",
     agentId: authorField(record.agentId, "effectContext.author.agentId"),
-    onBehalfOf: record.onBehalfOf === null ? null : authorField(
-      record.onBehalfOf,
-      "effectContext.author.onBehalfOf",
-    ),
+    onBehalfOf:
+      record.onBehalfOf === null
+        ? null
+        : authorField(record.onBehalfOf, "effectContext.author.onBehalfOf"),
     agentRunId:
       record.agentRunId === null
         ? null
@@ -339,10 +323,7 @@ function side(value: unknown, count: number, label: string): Side {
     present: true,
     pathRef: pathRef(present.pathRef, count, `${label}.pathRef`),
     objectId: identifier(present.objectId, `${label}.objectId`),
-    latestMomentId: identifier(
-      present.latestMomentId,
-      `${label}.latestMomentId`,
-    ),
+    latestMomentId: identifier(present.latestMomentId, `${label}.latestMomentId`),
     contentKind: present.contentKind,
     blobSha256: sha256(present.blobSha256, `${label}.blobSha256`),
     byteLength: wireInteger(present.byteLength, `${label}.byteLength`),
@@ -353,13 +334,7 @@ function side(value: unknown, count: number, label: string): Side {
 function effectContext(value: unknown): EffectContext {
   const record = exactKeys(
     value,
-    [
-      "recordedAtMs",
-      "metadata",
-      "author",
-      "currentObjectCreatedAtMs",
-      "resultObjectCreatedAtMs",
-    ],
+    ["recordedAtMs", "metadata", "author", "currentObjectCreatedAtMs", "resultObjectCreatedAtMs"],
     "effectContext",
   );
   return {
@@ -382,21 +357,14 @@ function effects(value: unknown): Effect[] {
     invalid("effects must contain at most two entries");
   }
   return value.map((raw, index) => {
-    const record = exactKeys(
-      raw,
-      ["kind", "momentId", "payloadSha256"],
-      `effects[${index}]`,
-    );
+    const record = exactKeys(raw, ["kind", "momentId", "payloadSha256"], `effects[${index}]`);
     if (record.kind !== "delete" && record.kind !== "write") {
       invalid(`effects[${index}].kind is invalid`);
     }
     return {
       kind: record.kind,
       momentId: identifier(record.momentId, `effects[${index}].momentId`),
-      payloadSha256: sha256(
-        record.payloadSha256,
-        `effects[${index}].payloadSha256`,
-      ),
+      payloadSha256: sha256(record.payloadSha256, `effects[${index}].payloadSha256`),
     };
   });
 }
@@ -423,14 +391,8 @@ function successor(value: unknown): Successor | null {
     epochTag: sha256(record.epochTag, "successor.epochTag"),
     contentKind: record.contentKind,
     resultSha256: sha256(record.resultSha256, "successor.resultSha256"),
-    updateBlobSha256: sha256(
-      record.updateBlobSha256,
-      "successor.updateBlobSha256",
-    ),
-    stateVectorBlobSha256: sha256(
-      record.stateVectorBlobSha256,
-      "successor.stateVectorBlobSha256",
-    ),
+    updateBlobSha256: sha256(record.updateBlobSha256, "successor.updateBlobSha256"),
+    stateVectorBlobSha256: sha256(record.stateVectorBlobSha256, "successor.stateVectorBlobSha256"),
   };
 }
 
@@ -448,10 +410,7 @@ function lineageTransition(value: unknown): LineageTransition | null {
     "lineageTransition",
   );
   return {
-    predecessorClaimId: sha256(
-      record.predecessorClaimId,
-      "lineageTransition.predecessorClaimId",
-    ),
+    predecessorClaimId: sha256(record.predecessorClaimId, "lineageTransition.predecessorClaimId"),
     predecessorDeleteSetSha256: sha256(
       record.predecessorDeleteSetSha256,
       "lineageTransition.predecessorDeleteSetSha256",
@@ -490,12 +449,14 @@ function sameObjectAndProjectedContent(left: Side, right: Side): boolean {
 // The effect moment's authors: the resolving agent as a list of one.
 function canonicalAuthors(value: AgentAuthor | null): Record<string, unknown>[] | null {
   if (value === null) return null;
-  return [{
-    kind: "agent",
-    agentId: value.agentId,
-    ...(value.onBehalfOf === null ? {} : { onBehalfOf: value.onBehalfOf }),
-    ...(value.agentRunId === null ? {} : { agentRunId: value.agentRunId }),
-  }];
+  return [
+    {
+      kind: "agent",
+      agentId: value.agentId,
+      ...(value.onBehalfOf === null ? {} : { onBehalfOf: value.onBehalfOf }),
+      ...(value.agentRunId === null ? {} : { agentRunId: value.agentRunId }),
+    },
+  ];
 }
 
 function deleteShadow(
@@ -552,9 +513,7 @@ function writeShadow(
   }
   const resultPath = payload.paths[result.pathRef];
   const before =
-    payload.current.present && payload.current.pathRef === result.pathRef
-      ? payload.current
-      : null;
+    payload.current.present && payload.current.pathRef === result.pathRef ? payload.current : null;
   return {
     conflictId: payload.conflictId,
     conflictEffectIndex: effectIndex,
@@ -597,14 +556,20 @@ function effectShadow(
   effect: Effect,
   effectIndex: number,
 ): Record<string, unknown> {
-  const shadow = effect.kind === "delete"
-    ? deleteShadow(payload, effect, effectIndex)
-    : writeShadow(payload, effect, effectIndex);
+  const shadow =
+    effect.kind === "delete"
+      ? deleteShadow(payload, effect, effectIndex)
+      : writeShadow(payload, effect, effectIndex);
   const exported = payload.exportedBefore;
   if (exported && payload.current.present && shadow.objectId === payload.current.objectId) {
-    const before = exported.present && !(effect.kind === "write" &&
-      payload.effects.slice(0, effectIndex).some((previous) => previous.kind === "delete"))
-      ? exported : null;
+    const before =
+      exported.present &&
+      !(
+        effect.kind === "write" &&
+        payload.effects.slice(0, effectIndex).some((previous) => previous.kind === "delete")
+      )
+        ? exported
+        : null;
     const path = before === null ? null : payload.paths[before.pathRef];
     Object.assign(shadow, {
       payloadBeforeBlobSha256: before?.blobSha256 ?? null,
@@ -644,8 +609,12 @@ function validateBindings(payload: ParsedResolve): void {
   ]);
   if (usedPaths.size !== payload.paths.length) invalid("paths contains an unused entry");
   const exported = payload.exportedBefore;
-  if (exported && (payload.lineageTransition !== null || !payload.current.present ||
-    (exported.present && exported.objectId !== payload.current.objectId))) {
+  if (
+    exported &&
+    (payload.lineageTransition !== null ||
+      !payload.current.present ||
+      (exported.present && exported.objectId !== payload.current.objectId))
+  ) {
     invalid("exported preimage must name its unclaimed object");
   }
 
@@ -716,7 +685,11 @@ function validateBindings(payload: ParsedResolve): void {
   if (write && (!payload.result.present || payload.result.latestMomentId !== write.momentId)) {
     invalid("the write effect does not match the result latestMomentId");
   }
-  if (write && payload.result.present && payload.result.updatedAtMs !== payload.effectContext.recordedAtMs) {
+  if (
+    write &&
+    payload.result.present &&
+    payload.result.updatedAtMs !== payload.effectContext.recordedAtMs
+  ) {
     invalid("the write result timestamp does not match effectContext.recordedAtMs");
   }
 
@@ -726,9 +699,7 @@ function validateBindings(payload: ParsedResolve): void {
       invalid("lineageTransition requires a present current side");
     }
     if (lineage.artifactPreimageSha256 !== payload.current.blobSha256) {
-      invalid(
-        "lineageTransition.artifactPreimageSha256 does not match the current blob",
-      );
+      invalid("lineageTransition.artifactPreimageSha256 does not match the current blob");
     }
   }
   const next = lineage?.successor ?? null;
@@ -829,11 +800,7 @@ export function conflictResolveBlobShas(
   const workspaceId = identifier(record.workspaceId, "workspaceId");
   if (workspaceId !== envelope.workspaceId) invalid("workspaceId does not match the envelope");
   const parsedPaths = paths(record.paths);
-  const transition = exactKeys(
-    record.transition,
-    ["current", "incoming", "result"],
-    "transition",
-  );
+  const transition = exactKeys(record.transition, ["current", "incoming", "result"], "transition");
   const context = effectContext(record.effectContext);
   if (context.recordedAtMs !== envelope.recordedAtMs) {
     invalid("effectContext.recordedAtMs does not match the envelope");
@@ -853,7 +820,8 @@ export function conflictResolveBlobShas(
     effects: effects(record.effects),
     lineageTransition: lineageTransition(record.lineageTransition),
     exportedBefore: Object.hasOwn(record, "exportedBefore")
-      ? side(record.exportedBefore, parsedPaths.length, "exportedBefore") : undefined,
+      ? side(record.exportedBefore, parsedPaths.length, "exportedBefore")
+      : undefined,
   };
   validateBindings(payload);
 
@@ -864,10 +832,7 @@ export function conflictResolveBlobShas(
   if (payload.exportedBefore?.present) roots.push(payload.exportedBefore.blobSha256);
   const next = payload.lineageTransition?.successor;
   if (next) {
-    roots.push(
-      next.updateBlobSha256,
-      next.stateVectorBlobSha256,
-    );
+    roots.push(next.updateBlobSha256, next.stateVectorBlobSha256);
   }
   return roots;
 }

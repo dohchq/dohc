@@ -1,14 +1,9 @@
-import {fetchShareWeb} from "./apiVersion";
+import { fetchShareWeb } from "./apiVersion";
 import {
   normalizeShareDiscussionBody,
   normalizeShareDiscussionDisplayName,
 } from "@dohc/security-contract/share-discussion";
-import {
-  type FormEvent,
-  useEffect,
-  useRef,
-  useState,
-} from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 import {
   mergeDiscussionMessages,
   mergeDiscussionWindowMessages,
@@ -21,22 +16,35 @@ import {
   type PublicDiscussionPage,
   type ShareAccess,
 } from "./model";
-import {
-  RETRY_BUDGET_MS,
-  RETRY_INITIAL_MS,
-  RETRY_MAX_MS,
-} from "./retry";
-import {LINK_REFUSALS, parseLinkRefusal} from "@dohc/security-contract/link-refusal";
+import { RETRY_BUDGET_MS, RETRY_INITIAL_MS, RETRY_MAX_MS } from "./retry";
+import { LINK_REFUSALS, parseLinkRefusal } from "@dohc/security-contract/link-refusal";
 
 class VerifiedLinkRefusal extends Error {
-  constructor(message: string, readonly retryable: boolean) {super(message);}
+  constructor(
+    message: string,
+    readonly retryable: boolean,
+  ) {
+    super(message);
+  }
 }
 async function readLinkRefusal(response: Response): Promise<VerifiedLinkRefusal | null> {
   if (response.ok) return null;
-  const code = parseLinkRefusal(await response.clone().json().catch(() => null), response.status);
-  return code ? new VerifiedLinkRefusal(LINK_REFUSALS[code].error, response.status === 429 || response.status === 503) : null;
+  const code = parseLinkRefusal(
+    await response
+      .clone()
+      .json()
+      .catch(() => null),
+    response.status,
+  );
+  return code
+    ? new VerifiedLinkRefusal(
+        LINK_REFUSALS[code].error,
+        response.status === 429 || response.status === 503,
+      )
+    : null;
 }
-const refusalMessage = (error: unknown, fallback: string) => error instanceof VerifiedLinkRefusal ? error.message : fallback;
+const refusalMessage = (error: unknown, fallback: string) =>
+  error instanceof VerifiedLinkRefusal ? error.message : fallback;
 
 const SESSION_HEADER = "x-dohc-link-session";
 const DISCUSSION_ACTIVITY_HOLD_MS = 30_000;
@@ -93,7 +101,8 @@ async function boundedRequest(
       if (!shouldRetry(response)) return response;
       await response.body?.cancel().catch(() => undefined);
     } catch (error: unknown) {
-      if (error instanceof VerifiedLinkRefusal || !retryThrownFailures || signal.aborted) throw error;
+      if (error instanceof VerifiedLinkRefusal || !retryThrownFailures || signal.aborted)
+        throw error;
     }
     if (waitedMs + delayMs > RETRY_BUDGET_MS) throw lastRefusal ?? new Error("refused");
     await waitForRetry(delayMs, signal);
@@ -202,7 +211,10 @@ async function followDiscussionActivity(
       body = await response.json();
     } catch (error: unknown) {
       if (!isCurrent() || signal.aborted) return "cancelled";
-      if (error instanceof SyntaxError) {refused(null);return "stopped";}
+      if (error instanceof SyntaxError) {
+        refused(null);
+        return "stopped";
+      }
       await waitForRetry(retryDelayMs, signal).catch(() => undefined);
       retryDelayMs = Math.min(retryDelayMs * 2, RETRY_MAX_MS);
       continue;
@@ -237,11 +249,7 @@ function exactIntent(
   claimedName: string,
 ): SubmitIntent {
   const nextClaimedName = claimedName.length === 0 ? undefined : claimedName;
-  if (
-    previous &&
-    previous.body === body &&
-    previous.claimedName === nextClaimedName
-  ) {
+  if (previous && previous.body === body && previous.claimedName === nextClaimedName) {
     return previous;
   }
   return {
@@ -296,9 +304,7 @@ export function CommentsPanel(props: {
   const earlierPendingRef = useRef(false);
   const hasEarlierHistoryRef = useRef(false);
   const seenEarlierCursorsRef = useRef(new Set<string>());
-  const withheldTombstonesRef = useRef(
-    new Map<string, DeletedDiscussionMessage>(),
-  );
+  const withheldTombstonesRef = useRef(new Map<string, DeletedDiscussionMessage>());
   const submitTokenRef = useRef<symbol | null>(null);
   const submitControllerRef = useRef<AbortController | null>(null);
   const pendingRef = useRef(false);
@@ -308,9 +314,8 @@ export function CommentsPanel(props: {
   const onAccessChangeRef = useRef(props.onAccessChange);
   const normalizedBody = normalizeShareDiscussionBody(body);
   const bodyInvalid = body.length > 0 && normalizedBody === null;
-  const normalizedName = claimedName.length === 0
-    ? null
-    : normalizeShareDiscussionDisplayName(claimedName);
+  const normalizedName =
+    claimedName.length === 0 ? null : normalizeShareDiscussionDisplayName(claimedName);
   const nameInvalid = normalizedName?.ok === false ? normalizedName.reason : null;
   sessionRef.current = props.session;
   onAccessChangeRef.current = props.onAccessChange;
@@ -334,10 +339,7 @@ export function CommentsPanel(props: {
     if (!messagesRef.current) return false;
     let merged: PublicDiscussionMessage[] | null;
     if (hasEarlierHistoryRef.current) {
-      const windowMerge = mergeDiscussionWindowMessages(
-        messagesRef.current,
-        activity.messages,
-      );
+      const windowMerge = mergeDiscussionWindowMessages(messagesRef.current, activity.messages);
       if (!windowMerge) return false;
       const retained = mergeDiscussionMessages(
         [...withheldTombstonesRef.current.values()],
@@ -361,10 +363,7 @@ export function CommentsPanel(props: {
     messagesRef.current = merged;
     setMessages(merged);
     const priorComposerRevision = composerRevisionRef.current;
-    composerRevisionRef.current = Math.max(
-      priorComposerRevision,
-      activity.latestRevision,
-    );
+    composerRevisionRef.current = Math.max(priorComposerRevision, activity.latestRevision);
     adoptProfileName(activity.profileName);
     setComposerState((current) => {
       if (current === "limit-reached") return current;
@@ -426,8 +425,7 @@ export function CommentsPanel(props: {
     setSubmitError(null);
     setFollowerPhase("live");
     setFollowerError(null);
-    const isCurrent = () =>
-      pageTokenRef.current === token && sessionRef.current === props.session;
+    const isCurrent = () => pageTokenRef.current === token && sessionRef.current === props.session;
     void loadDiscussionPage(props.session, null, controller.signal, isCurrent)
       .then((loaded) => {
         if (!isCurrent()) return;
@@ -442,13 +440,7 @@ export function CommentsPanel(props: {
         setClaimedName(loaded.profileName ?? "");
         setNameLocked(loaded.profileName !== null);
         setLoadState("ready");
-        startFollower(
-          props.session,
-          loaded.activityRevision,
-          controller,
-          isCurrent,
-          false,
-        );
+        startFollower(props.session, loaded.activityRevision, controller, isCurrent, false);
       })
       .catch((error: unknown) => {
         if (isCurrent() && !controller.signal.aborted) {
@@ -490,33 +482,18 @@ export function CommentsPanel(props: {
     setEarlierPending(true);
     setEarlierError(null);
     try {
-      const page = await loadDiscussionPage(
-        session,
-        cursor,
-        controller.signal,
-        isCurrent,
-      );
-      if (
-        !isCurrent() ||
-        followerPhaseRef.current !== "live" ||
-        !messagesRef.current
-      ) {
+      const page = await loadDiscussionPage(session, cursor, controller.signal, isCurrent);
+      if (!isCurrent() || followerPhaseRef.current !== "live" || !messagesRef.current) {
         return;
       }
-      if (
-        page.nextCursor !== null &&
-        seenEarlierCursorsRef.current.has(page.nextCursor)
-      ) {
+      if (page.nextCursor !== null && seenEarlierCursorsRef.current.has(page.nextCursor)) {
         throw new Error("refused");
       }
       const pageIds = new Set(page.messages.map((message) => message.messageId));
-      const retained = [...withheldTombstonesRef.current.values()].filter(
-        (message) => pageIds.has(message.messageId),
+      const retained = [...withheldTombstonesRef.current.values()].filter((message) =>
+        pageIds.has(message.messageId),
       );
-      const merged = mergeDiscussionMessages(
-        page.messages,
-        [...messagesRef.current, ...retained],
-      );
+      const merged = mergeDiscussionMessages(page.messages, [...messagesRef.current, ...retained]);
       if (!merged) throw new Error("refused");
       if (page.nextCursor !== null) {
         seenEarlierCursorsRef.current.add(page.nextCursor);
@@ -573,13 +550,7 @@ export function CommentsPanel(props: {
           loaded.activityRevision,
         );
         adoptProfileName(loaded.profileName);
-        startFollower(
-          session,
-          loaded.activityRevision,
-          controller,
-          isCurrent,
-          true,
-        );
+        startFollower(session, loaded.activityRevision, controller, isCurrent, true);
       })
       .catch((error: unknown) => {
         if (isCurrent()) {
@@ -623,8 +594,7 @@ export function CommentsPanel(props: {
     pendingRef.current = true;
     setPending(true);
 
-    const isCurrent = () =>
-      submitTokenRef.current === token && sessionRef.current === session;
+    const isCurrent = () => submitTokenRef.current === token && sessionRef.current === session;
     try {
       const serialized = JSON.stringify({
         body: intent.body,
@@ -632,16 +602,17 @@ export function CommentsPanel(props: {
         ...(intent.claimedName === undefined ? {} : { claimedName: intent.claimedName }),
       });
       const response = await boundedRequest(
-        () => discussionRequest(
-          session,
-          "/api/view/discussion",
-          {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: serialized,
-          },
-          controller.signal,
-        ),
+        () =>
+          discussionRequest(
+            session,
+            "/api/view/discussion",
+            {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: serialized,
+            },
+            controller.signal,
+          ),
         (candidate) => candidate.status === 429 || candidate.status >= 500,
         true,
         controller.signal,
@@ -683,9 +654,10 @@ export function CommentsPanel(props: {
         const result = await response.json();
         if (!isCurrent()) return;
         const acknowledgement = parseDiscussionAppendResult(result);
-        const merged = acknowledgement && messagesRef.current
-          ? mergeDiscussionMessages(messagesRef.current, [acknowledgement.message])
-          : null;
+        const merged =
+          acknowledgement && messagesRef.current
+            ? mergeDiscussionMessages(messagesRef.current, [acknowledgement.message])
+            : null;
         if (acknowledgement && merged) {
           messagesRef.current = merged;
           setMessages(merged);
@@ -719,21 +691,22 @@ export function CommentsPanel(props: {
 
   const currentLoadState = loadStateSession === props.session ? loadState : "loading";
   const disabled = pending || composerState !== "available" || followerPhase !== "live";
-  const stateCopy = composerState === "blocked"
-    ? "The owner turned off comments for this browser."
-    : composerState === "paused"
-      ? "The owner paused comments. You can still read everything."
-      : composerState === "limit-reached"
-        ? "You can't post more comments here. You can still read everything."
-        : bodyInvalid
-          ? "This comment is too long. Shorten it before posting."
-          : nameInvalid === "too-long"
-            ? "This name is too long. Use 40 characters or fewer."
-            : nameInvalid === "empty"
-              ? "This name has no visible characters. Type a name or clear the field."
-              : submitError
-                ? submitError
-                : "";
+  const stateCopy =
+    composerState === "blocked"
+      ? "The owner turned off comments for this browser."
+      : composerState === "paused"
+        ? "The owner paused comments. You can still read everything."
+        : composerState === "limit-reached"
+          ? "You can't post more comments here. You can still read everything."
+          : bodyInvalid
+            ? "This comment is too long. Shorten it before posting."
+            : nameInvalid === "too-long"
+              ? "This name is too long. Use 40 characters or fewer."
+              : nameInvalid === "empty"
+                ? "This name has no visible characters. Type a name or clear the field."
+                : submitError
+                  ? submitError
+                  : "";
   return (
     <aside className="comments-panel" aria-labelledby="comments-title">
       <h2 id="comments-title">Comments</h2>
@@ -745,7 +718,9 @@ export function CommentsPanel(props: {
       {currentLoadState === "ready" && earlierCursor !== null ? (
         <div>
           {earlierError ? (
-            <p className="comments-empty" role="status">{earlierError}</p>
+            <p className="comments-empty" role="status">
+              {earlierError}
+            </p>
           ) : null}
           <div className="comment-submit-row">
             <button
@@ -779,7 +754,9 @@ export function CommentsPanel(props: {
         </ol>
       )}
       {currentLoadState === "ready" && followerPhase === "live" && followerError ? (
-        <p className="comment-submit-status" role="status">{followerError}</p>
+        <p className="comment-submit-status" role="status">
+          {followerError}
+        </p>
       ) : null}
       {currentLoadState === "ready" && followerPhase !== "live" ? (
         <div>
@@ -834,7 +811,12 @@ export function CommentsPanel(props: {
               Post comment
             </button>
           </div>
-          <p id={SUBMIT_STATUS_ID} className="comment-submit-status" role="status" aria-atomic="true">
+          <p
+            id={SUBMIT_STATUS_ID}
+            className="comment-submit-status"
+            role="status"
+            aria-atomic="true"
+          >
             {stateCopy}
           </p>
         </form>

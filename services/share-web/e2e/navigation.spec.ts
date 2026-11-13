@@ -1,9 +1,5 @@
 import { type Page } from "@playwright/test";
-import {
-  expect,
-  seedShare,
-  test,
-} from "./harness";
+import { expect, seedShare, test } from "./harness";
 
 const JAVASCRIPT_SENTINEL = "__dohcIso6NavigationJavascriptAttack_4f72a18c";
 const DATA_SENTINEL = "__dohcIso6NavigationDataAttack_4f72a18c";
@@ -87,9 +83,7 @@ test("keeps authored navigation inert until the user follows an allowed link", a
     await expect(dataText).toBeVisible();
     await expect(article.getByRole("link", { name: "Run JavaScript attack" })).toHaveCount(0);
     await expect(article.getByRole("link", { name: "Open data attack" })).toHaveCount(0);
-    await expect(
-      article.locator('[href^="javascript:" i], [href^="data:" i]'),
-    ).toHaveCount(0);
+    await expect(article.locator('[href^="javascript:" i], [href^="data:" i]')).toHaveCount(0);
     await javascriptText.click();
     await dataText.click();
     expect(page.url()).toBe(viewerUrl);
@@ -101,9 +95,9 @@ test("keeps authored navigation inert until the user follows an allowed link", a
     await internalLink.click();
     expect(page.url()).toBe(viewerUrl);
     await expect(page.locator("article.markdown")).toContainText(NEXT_FILE_MARKER);
-    await expect(
-      navigation.getByRole("button", { name: "next.md", exact: true }),
-    ).toHaveClass(/\bselected\b/u);
+    await expect(navigation.getByRole("button", { name: "next.md", exact: true })).toHaveClass(
+      /\bselected\b/u,
+    );
     await expectAttackSentinelsUnchanged(page);
     expect(probe.requests).toEqual([]);
 
@@ -117,9 +111,9 @@ test("keeps authored navigation inert until the user follows an allowed link", a
 
     await externalLink.click();
     await expect(page).toHaveURL(externalUrl);
-    await expect.poll(
-      () => probe.requests.filter((request) => request.path === EXTERNAL_PROBE_PATH).length,
-    ).toBe(1);
+    await expect
+      .poll(() => probe.requests.filter((request) => request.path === EXTERNAL_PROBE_PATH).length)
+      .toBe(1);
     expect(probe.requests.filter((request) => request.path === EXTERNAL_PROBE_PATH)).toEqual([
       expect.objectContaining({
         method: "GET",

@@ -45,9 +45,10 @@ test.describe("history virtualization", () => {
   });
 
   test.afterAll(async () => {
-    if (server) await new Promise<void>((resolve, reject) => {
-      server.httpServer.close((error) => error ? reject(error) : resolve());
-    });
+    if (server)
+      await new Promise<void>((resolve, reject) => {
+        server.httpServer.close((error) => (error ? reject(error) : resolve()));
+      });
     if (output) await removeTestScratch(output);
   });
 
@@ -58,7 +59,9 @@ test.describe("history virtualization", () => {
     await expect(page.getByLabel("Opened moment")).toHaveText("moment-3");
     const originalElement = await moment.elementHandle();
     await page.getByRole("button", { name: "Replace open callback" }).click();
-    expect(await moment.evaluate((element, original) => element === original, originalElement)).toBe(true);
+    expect(
+      await moment.evaluate((element, original) => element === original, originalElement),
+    ).toBe(true);
     await moment.click();
     await expect(page.getByLabel("Opened moment")).toHaveText("1:moment-3");
   });
@@ -71,71 +74,99 @@ test.describe("history virtualization", () => {
       await page.setViewportSize({ width: 420, height: 800 });
       await page.emulateMedia({ reducedMotion: "reduce" });
       await page.goto(server.resolvedUrls!.local[0]);
-      await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
+      await page.evaluate(
+        (value) => document.documentElement.setAttribute("data-theme", value),
+        theme,
+      );
       const list = page.getByTestId("engine-history-list");
       const firstGroup = page.locator('[data-history-key="moment-0"]');
       const toggle = firstGroup.getByTestId("engine-moment-group-toggle");
       // 4,000 correlated groups, 36 day headings and a load-more row.
       await expect(firstGroup).toHaveAttribute("aria-posinset", "2");
       await expect(firstGroup).toHaveAttribute("aria-setsize", "4037");
-      await expect(page.getByTestId("engine-history-day-heading").first().locator(".."))
-        .toHaveAttribute("aria-posinset", "1");
+      await expect(
+        page.getByTestId("engine-history-day-heading").first().locator(".."),
+      ).toHaveAttribute("aria-posinset", "1");
       await toggle.click();
       await expect(toggle).toHaveAttribute("aria-expanded", "true");
       await page.getByTestId("engine-history-search").focus();
-      await list.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+      await list.evaluate((element) => {
+        element.scrollTop = element.scrollHeight;
+      });
       await expect(firstGroup).toHaveCount(0);
       await page.getByTestId("engine-history-load-more").focus();
-      await expect(page.getByTestId("engine-history-load-more").locator(".."))
-        .toHaveAttribute("aria-posinset", "4037");
+      await expect(page.getByTestId("engine-history-load-more").locator("..")).toHaveAttribute(
+        "aria-posinset",
+        "4037",
+      );
       await page.keyboard.press("Shift+Tab");
       await expect(page.locator('[data-moment-id="moment-4999"]')).toBeFocused();
       await page.getByTestId("engine-history-load-more").click();
       await expect(page.getByTestId("engine-history-load-more")).toHaveCount(0);
       await expect(page.locator('[data-moment-id="earlier-moment"]')).toBeVisible();
-      await list.evaluate((element) => { element.scrollTop = 0; });
+      await list.evaluate((element) => {
+        element.scrollTop = 0;
+      });
       await expect(toggle).toHaveAttribute("aria-expanded", "true");
 
       await firstGroup.locator('[data-moment-id="moment-1"]').focus();
       // The list places rows it hasn't drawn at an estimated height, so a fixed
       // offset doesn't reach the same moment everywhere. Start near moment-399,
       // under four day headings, then move half a screen at a time toward it.
-      const onScreen = () => list.evaluate((element) => {
-        const box = element.getBoundingClientRect();
-        return [...element.querySelectorAll<HTMLElement>("[data-moment-id^='moment-']")]
-          .filter((row) => row.getBoundingClientRect().bottom > box.top && row.getBoundingClientRect().top < box.bottom)
-          .map((row) => Number(row.dataset.momentId!.slice("moment-".length)));
+      const onScreen = () =>
+        list.evaluate((element) => {
+          const box = element.getBoundingClientRect();
+          return [...element.querySelectorAll<HTMLElement>("[data-moment-id^='moment-']")]
+            .filter(
+              (row) =>
+                row.getBoundingClientRect().bottom > box.top &&
+                row.getBoundingClientRect().top < box.bottom,
+            )
+            .map((row) => Number(row.dataset.momentId!.slice("moment-".length)));
+        });
+      await list.evaluate((element) => {
+        element.scrollTop = 15_200;
       });
-      await list.evaluate((element) => { element.scrollTop = 15_200; });
       for (let step = 0; ; step += 1) {
         await expect.poll(onScreen).not.toEqual([]);
         const shown = await onScreen();
         if (shown.includes(399)) break;
         expect(step).toBeLessThan(40);
-        await list.evaluate((element, down) => element.scrollBy(0, (down ? 1 : -1) * element.clientHeight / 2), Math.max(...shown) < 399);
+        await list.evaluate(
+          (element, down) => element.scrollBy(0, ((down ? 1 : -1) * element.clientHeight) / 2),
+          Math.max(...shown) < 399,
+        );
         await expect.poll(async () => (await onScreen()).join()).not.toBe(shown.join());
       }
       await expect(page.locator('[data-moment-id="moment-399"]')).toBeVisible();
       await expect(firstGroup.locator('[data-moment-id="moment-1"]')).toBeFocused();
       await expect(firstGroup).toHaveAttribute("aria-posinset", "2");
       await expect(firstGroup).toHaveAttribute("aria-setsize", "4037");
-      await expect.poll(() => list.evaluate((element) => {
-        const top = element.getBoundingClientRect().top;
-        return [...element.querySelectorAll('[data-testid="engine-history-day-heading"]')]
-          .some((heading) => {
-            const rect = heading.getBoundingClientRect();
-            return rect.top >= top && rect.top < top + 30;
-          });
-      })).toBe(true);
-      const mountedPositions = await list.getByRole("listitem").evaluateAll((items) =>
-        items.map((item) => Number(item.getAttribute("aria-posinset"))),
-      );
+      await expect
+        .poll(() =>
+          list.evaluate((element) => {
+            const top = element.getBoundingClientRect().top;
+            return [...element.querySelectorAll('[data-testid="engine-history-day-heading"]')].some(
+              (heading) => {
+                const rect = heading.getBoundingClientRect();
+                return rect.top >= top && rect.top < top + 30;
+              },
+            );
+          }),
+        )
+        .toBe(true);
+      const mountedPositions = await list
+        .getByRole("listitem")
+        .evaluateAll((items) => items.map((item) => Number(item.getAttribute("aria-posinset"))));
       expect(new Set(mountedPositions).size).toBe(mountedPositions.length);
       expect(mountedPositions.every((position) => position >= 1 && position <= 4037)).toBe(true);
-      const dayHeadings = await list.getByTestId("engine-history-day-heading").evaluateAll((headings) =>
-        headings.filter((heading) => !heading.closest('[aria-hidden="true"]'))
-          .map((heading) => heading.getAttribute("datetime")),
-      );
+      const dayHeadings = await list
+        .getByTestId("engine-history-day-heading")
+        .evaluateAll((headings) =>
+          headings
+            .filter((heading) => !heading.closest('[aria-hidden="true"]'))
+            .map((heading) => heading.getAttribute("datetime")),
+        );
       expect(new Set(dayHeadings).size).toBe(dayHeadings.length);
       // The virtualizer can retain focus while its DOM pool is in scroll order.
       // Tab must still move to the next logical moment, not the current viewport.

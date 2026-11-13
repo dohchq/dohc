@@ -7,8 +7,17 @@ import { createWorkspaceAuthorityOwner } from "./workspaceAuthorityOwner";
 import { createTestScratch } from "./testTemp";
 import type { RegistryEntry } from "./registryStore";
 
-const createRealFolder = async (input: { rootPath: string; workspaceId: string; kind: "personal" }) =>
-  createWorkspaceFolder({ ...input, homeDir: await createTestScratch("dohc-join-home-"), stateDir: await createTestScratch("dohc-join-state-"), computer: { installId: "install-here", label: "This Mac" } });
+const createRealFolder = async (input: {
+  rootPath: string;
+  workspaceId: string;
+  kind: "personal";
+}) =>
+  createWorkspaceFolder({
+    ...input,
+    homeDir: await createTestScratch("dohc-join-home-"),
+    stateDir: await createTestScratch("dohc-join-state-"),
+    computer: { installId: "install-here", label: "This Mac" },
+  });
 
 function harness(rootPath = "/joined", canonicalizeRoot = (root: string) => root) {
   const registry = new Map<string, RegistryEntry>();
@@ -24,10 +33,12 @@ function harness(rootPath = "/joined", canonicalizeRoot = (root: string) => root
     kind: "personal",
     mode: "local-first",
   };
-  const createFolder = vi.fn(async (_input: { rootPath: string; workspaceId: string; kind: "personal" }) => {
-    events.push("create");
-    return workspace;
-  });
+  const createFolder = vi.fn(
+    async (_input: { rootPath: string; workspaceId: string; kind: "personal" }) => {
+      events.push("create");
+      return workspace;
+    },
+  );
   const cleanup = vi.fn(async () => {
     events.push("cleanup");
   });
@@ -57,8 +68,7 @@ function harness(rootPath = "/joined", canonicalizeRoot = (root: string) => root
           registry.delete(binding.workspaceId);
         },
       }),
-    release: (reservation, finalize) =>
-      authorities.releaseReservation(reservation, finalize),
+    release: (reservation, finalize) => authorities.releaseReservation(reservation, finalize),
     closeRelay: cleanup,
     rollbackComplete,
     logError: vi.fn(),
@@ -100,37 +110,44 @@ describe("joined workspace creation", () => {
     expect(h.cleanup).toHaveBeenCalledWith("joined");
   });
 
-  it.each(["prepare", "populate"] as const)("preserves files added during %s and permits retry in another empty folder", async (phase) => {
-    const root = await createTestScratch("dohc-join-preserve-");
-    const h = harness(root, canonicalWorkspaceRoot);
-    h.createFolder.mockImplementation(createRealFolder);
-    const entered = Promise.withResolvers<void>();
-    const resumed = Promise.withResolvers<void>();
-    const fail = async () => {
-      entered.resolve();
-      await resumed.promise;
-      throw new Error("download interrupted");
-    };
-    const result = h.run({ ...h.input, [phase]: fail });
-    const refusal = expect(result).rejects.toThrow("download failed");
-    await entered.promise;
-    const manifest = await readFile(join(root, ".dohc", "manifest.json"), "utf8");
-    await writeFile(join(root, "local-work.md"), "unsynced local work");
-    await writeFile(join(root, "partial.md"), "downloaded before interruption");
-    resumed.resolve();
-    await refusal;
+  it.each(["prepare", "populate"] as const)(
+    "preserves files added during %s and permits retry in another empty folder",
+    async (phase) => {
+      const root = await createTestScratch("dohc-join-preserve-");
+      const h = harness(root, canonicalWorkspaceRoot);
+      h.createFolder.mockImplementation(createRealFolder);
+      const entered = Promise.withResolvers<void>();
+      const resumed = Promise.withResolvers<void>();
+      const fail = async () => {
+        entered.resolve();
+        await resumed.promise;
+        throw new Error("download interrupted");
+      };
+      const result = h.run({ ...h.input, [phase]: fail });
+      const refusal = expect(result).rejects.toThrow("download failed");
+      await entered.promise;
+      const manifest = await readFile(join(root, ".dohc", "manifest.json"), "utf8");
+      await writeFile(join(root, "local-work.md"), "unsynced local work");
+      await writeFile(join(root, "partial.md"), "downloaded before interruption");
+      resumed.resolve();
+      await refusal;
 
-    expect(await readFile(join(root, "local-work.md"), "utf8")).toBe("unsynced local work");
-    expect(await readFile(join(root, "partial.md"), "utf8")).toBe("downloaded before interruption");
-    expect(await readFile(join(root, ".dohc", "manifest.json"), "utf8")).toBe(manifest);
-    expect(h.registry.size).toBe(0);
-    expect(h.cleanup).toHaveBeenCalledWith("joined");
+      expect(await readFile(join(root, "local-work.md"), "utf8")).toBe("unsynced local work");
+      expect(await readFile(join(root, "partial.md"), "utf8")).toBe(
+        "downloaded before interruption",
+      );
+      expect(await readFile(join(root, ".dohc", "manifest.json"), "utf8")).toBe(manifest);
+      expect(h.registry.size).toBe(0);
+      expect(h.cleanup).toHaveBeenCalledWith("joined");
 
-    const retryRoot = await createTestScratch("dohc-join-retry-");
-    await expect(h.run({ ...h.input, rootPath: retryRoot })).resolves.toMatchObject({ rootPath: canonicalWorkspaceRoot(retryRoot) });
-    expect(h.registry.get("joined")?.rootPath).toBe(canonicalWorkspaceRoot(retryRoot));
-    expect(await readFile(join(root, "local-work.md"), "utf8")).toBe("unsynced local work");
-  });
+      const retryRoot = await createTestScratch("dohc-join-retry-");
+      await expect(h.run({ ...h.input, rootPath: retryRoot })).resolves.toMatchObject({
+        rootPath: canonicalWorkspaceRoot(retryRoot),
+      });
+      expect(h.registry.get("joined")?.rootPath).toBe(canonicalWorkspaceRoot(retryRoot));
+      expect(await readFile(join(root, "local-work.md"), "utf8")).toBe("unsynced local work");
+    },
+  );
 
   it("reserves, creates, and registers a folder chosen through a link under its real path", async () => {
     const real = await createTestScratch("dohc-join-real-");
@@ -192,13 +209,7 @@ describe("joined workspace creation", () => {
       h.events.push("cleanup");
     });
     await expect(h.run(h.input)).rejects.toThrow("download failed");
-    expect(h.events).toEqual([
-      "create",
-      "register",
-      "cleanup",
-      "remove",
-      "notify",
-    ]);
+    expect(h.events).toEqual(["create", "register", "cleanup", "remove", "notify"]);
     expect(h.registry.size).toBe(0);
   });
 

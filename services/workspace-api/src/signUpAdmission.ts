@@ -29,7 +29,9 @@ export function createSignUpAdmission(
       const body = response.ok ? ((await response.json()) as { invited?: unknown }) : null;
       if (body?.invited === true) return "admitted";
       if (body?.invited === false) return "refused";
-      console.error(`[workspace-api] The relay answered the sign-up invite check with ${response.status}.`);
+      console.error(
+        `[workspace-api] The relay answered the sign-up invite check with ${response.status}.`,
+      );
     } catch {
       console.error("[workspace-api] The relay did not answer the sign-up invite check.");
     }

@@ -59,23 +59,51 @@ describe("site package derived facts", () => {
 
 describe("discoverSites", () => {
   it("detects a declared app without other web signals", () => {
-    expect(discoverSites([{ path: "declared/dohc.json", body: '{"version":1,"type":"app"}' }]))
-      .toMatchObject([{ root: "declared", kind: "configured", confidence: "high", diagnostics: [] }]);
+    expect(
+      discoverSites([{ path: "declared/dohc.json", body: '{"version":1,"type":"app"}' }]),
+    ).toMatchObject([
+      { root: "declared", kind: "configured", confidence: "high", diagnostics: [] },
+    ]);
   });
 
-  it.each(["workflow", "site"])("excludes explicit %s types without independent app signals", type => {
-    expect(discoverSites([{ path: "other/dohc.json", body: JSON.stringify({ type, build: { output: "dist" } }) }]))
-      .toEqual([]);
-  });
+  it.each(["workflow", "site"])(
+    "excludes explicit %s types without independent app signals",
+    (type) => {
+      expect(
+        discoverSites([
+          { path: "other/dohc.json", body: JSON.stringify({ type, build: { output: "dist" } }) },
+        ]),
+      ).toEqual([]);
+    },
+  );
 
   it("discovers an app declared only by app.publish.json", () => {
-    expect(discoverSites(["trip/trip-poll/app.publish.json", "trip/trip-poll/main.tsx", "trip/trip-poll/responses/collection.yaml"])).toEqual([
-      { root: "trip/trip-poll", title: "Trip Poll", kind: "configured", confidence: "high", scripts: {}, buildOutputs: [], diagnostics: [] },
+    expect(
+      discoverSites([
+        "trip/trip-poll/app.publish.json",
+        "trip/trip-poll/main.tsx",
+        "trip/trip-poll/responses/collection.yaml",
+      ]),
+    ).toEqual([
+      {
+        root: "trip/trip-poll",
+        title: "Trip Poll",
+        kind: "configured",
+        confidence: "high",
+        scripts: {},
+        buildOutputs: [],
+        diagnostics: [],
+      },
     ]);
   });
 
   it("keeps an app with app.publish.json even when its dohc.json names another type", () => {
-    expect(discoverSites([{ path: "poll/dohc.json", body: '{"type":"plugin"}' }, "poll/app.publish.json"]).map(site => site.root)).toEqual(["poll"]);
+    expect(
+      discoverSites([
+        { path: "poll/dohc.json", body: '{"type":"plugin"}' },
+        "poll/app.publish.json",
+      ]).map((site) => site.root),
+    ).toEqual(["poll"]);
   });
 
   it("discovers a plain static website from index.html", () => {
@@ -332,12 +360,7 @@ describe("discoverSites", () => {
   });
 
   it("discovers a site in a folder named plugins like any other folder", () => {
-    expect(
-      discoverSites([
-        "plugins/index.html",
-        "plugins/chart.js",
-      ]),
-    ).toEqual([
+    expect(discoverSites(["plugins/index.html", "plugins/chart.js"])).toEqual([
       {
         root: "plugins",
         title: "Plugins",
@@ -423,9 +446,7 @@ describe("discoverSites", () => {
 
     expect(site?.title).toHaveLength(200);
     expect(site?.title).toBe(longTitle.slice(0, 200));
-    expect(site?.diagnostics).toEqual([
-      expect.objectContaining({ code: "title-too-long" }),
-    ]);
+    expect(site?.diagnostics).toEqual([expect.objectContaining({ code: "title-too-long" })]);
   });
 
   it("does not let an over-length package.json-derived title escape as the site's own title", () => {
@@ -439,29 +460,46 @@ describe("discoverSites", () => {
     ]);
 
     expect(site?.title).toHaveLength(200);
-    expect(site?.diagnostics).toEqual([
-      expect.objectContaining({ code: "title-too-long" }),
-    ]);
+    expect(site?.diagnostics).toEqual([expect.objectContaining({ code: "title-too-long" })]);
   });
 });
 
 describe("parseDohcSiteConfig", () => {
   it.each(["1", 0, -1, 1.5, null])("identifies invalid version %s", (version) => {
-    const parsed = parseDohcSiteConfig(JSON.stringify({ version, type: "app", title: "Unused" }), "trip/dohc.json");
+    const parsed = parseDohcSiteConfig(
+      JSON.stringify({ version, type: "app", title: "Unused" }),
+      "trip/dohc.json",
+    );
     expect(parsed.config).toBeUndefined();
-    expect(parsed.diagnostics).toEqual([{ path: "trip/dohc.json", severity: "error", code: "invalid-version",
-      message: "trip/dohc.json has an invalid version. Set version to 1." }]);
+    expect(parsed.diagnostics).toEqual([
+      {
+        path: "trip/dohc.json",
+        severity: "error",
+        code: "invalid-version",
+        message: "trip/dohc.json has an invalid version. Set version to 1.",
+      },
+    ]);
   });
   it.each([undefined, 1])("reads version %s", (version) => {
-    expect(parseDohcSiteConfig(JSON.stringify({ version, type: "app", title: "Trip" })))
-      .toMatchObject({ config: { type: "app", title: "Trip" }, diagnostics: [] });
+    expect(
+      parseDohcSiteConfig(JSON.stringify({ version, type: "app", title: "Trip" })),
+    ).toMatchObject({ config: { type: "app", title: "Trip" }, diagnostics: [] });
   });
 
   it("refuses a newer version before applying configuration", () => {
-    const parsed = parseDohcSiteConfig('{"version":2,"type":"app","preview":{"command":"run-new-format"}}', "trip/dohc.json");
+    const parsed = parseDohcSiteConfig(
+      '{"version":2,"type":"app","preview":{"command":"run-new-format"}}',
+      "trip/dohc.json",
+    );
     expect(parsed.config).toBeUndefined();
-    expect(parsed.diagnostics).toEqual([{ path: "trip/dohc.json", severity: "error", code: "unsupported-version",
-      message: "trip/dohc.json uses a newer version. Update dohc to read this file." }]);
+    expect(parsed.diagnostics).toEqual([
+      {
+        path: "trip/dohc.json",
+        severity: "error",
+        code: "unsupported-version",
+        message: "trip/dohc.json uses a newer version. Update dohc to read this file.",
+      },
+    ]);
   });
   it("parses optional site metadata and commands", () => {
     expect(
@@ -565,9 +603,9 @@ describe("parseDohcSiteConfig", () => {
 
 describe("package helpers", () => {
   it("detects package managers from lockfiles before package metadata", () => {
-    expect(
-      detectSitePackageManager(new Set(["yarn.lock"]), { packageManager: "npm@10.0.0" }),
-    ).toBe("yarn");
+    expect(detectSitePackageManager(new Set(["yarn.lock"]), { packageManager: "npm@10.0.0" })).toBe(
+      "yarn",
+    );
     expect(detectSitePackageManager(new Set(), { packageManager: "pnpm@10.0.0" })).toBe("pnpm");
   });
 
@@ -598,9 +636,7 @@ describe("MCP-facing site helpers", () => {
   });
 
   it("finds framework config names", () => {
-    expect(frameworkConfigName(new Set(["next.config.mjs", "README.md"]))).toBe(
-      "next.config.mjs",
-    );
+    expect(frameworkConfigName(new Set(["next.config.mjs", "README.md"]))).toBe("next.config.mjs");
     expect(frameworkConfigName(new Set(["package.json"]))).toBeUndefined();
   });
 
@@ -610,8 +646,6 @@ describe("MCP-facing site helpers", () => {
         packageManager: "npm@10.0.0",
       }),
     ).toBe("yarn");
-    expect(
-      packageManagerFromFiles(new Set(), { packageManager: "pnpm@10.0.0" }),
-    ).toBe("pnpm");
+    expect(packageManagerFromFiles(new Set(), { packageManager: "pnpm@10.0.0" })).toBe("pnpm");
   });
 });

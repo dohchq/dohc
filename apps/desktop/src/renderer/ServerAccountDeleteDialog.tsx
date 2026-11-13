@@ -5,7 +5,12 @@ import { bridge } from "./bridge";
 import { ipcErrorMessage } from "./ipcError";
 import { Overlay } from "./Overlay";
 import { DangerButton, SecondaryButton } from "./ui/controls";
-import { ConfirmActions, ConfirmationCard, ConfirmationHead, confirmPanel } from "./ui/ConfirmDialog";
+import {
+  ConfirmActions,
+  ConfirmationCard,
+  ConfirmationHead,
+  confirmPanel,
+} from "./ui/ConfirmDialog";
 import { SkeletonRows } from "./ui/SkeletonRows";
 
 export interface ServerAccountDeleted {
@@ -45,11 +50,13 @@ function Delete(props: ServerAccountDeleteDialogProps) {
   const [changed, setChanged] = useState<string | null>(null);
   // Every response checks that it answers the newest request of a dialog
   // still open, so a slow answer never repaints a later one.
-  const alive = useRef(true), request = useRef(0);
+  const alive = useRef(true),
+    request = useRef(0);
   // A review belongs to the session that produced it, so a session change
   // ends it. A sent delete still answers: the answer names the account it
   // deleted, and that deletion's own disconnect changes the session.
-  const sent = useRef(false), sessionChanged = useRef(false);
+  const sent = useRef(false),
+    sessionChanged = useRef(false);
 
   async function load(changedReason?: string) {
     const token = ++request.current;
@@ -75,17 +82,24 @@ function Delete(props: ServerAccountDeleteDialogProps) {
   useEffect(() => {
     alive.current = true;
     void load();
-    return () => { alive.current = false; request.current++; };
+    return () => {
+      alive.current = false;
+      request.current++;
+    };
   }, []);
 
-  useEffect(() => bridge().onCloudSessionChanged(() => {
-    if (sent.current) {
-      sessionChanged.current = true;
-      return;
-    }
-    request.current++;
-    props.onClose();
-  }), []);
+  useEffect(
+    () =>
+      bridge().onCloudSessionChanged(() => {
+        if (sent.current) {
+          sessionChanged.current = true;
+          return;
+        }
+        request.current++;
+        props.onClose();
+      }),
+    [],
+  );
 
   async function deleteAccount() {
     if (!preview || busy || !password) return;
@@ -96,10 +110,19 @@ function Delete(props: ServerAccountDeleteDialogProps) {
     setDeleting(true);
     setPasswordProblem(null);
     try {
-      const result = await bridge().deleteServerAccount({ server: preview.server, previewToken: preview.previewToken, password });
+      const result = await bridge().deleteServerAccount({
+        server: preview.server,
+        previewToken: preview.previewToken,
+        password,
+      });
       if (!alive.current || request.current !== token) return;
       if (result.ok) {
-        props.onDeleted({ finished: result.finished, email: result.email, server: result.server, disconnectError: result.disconnectError });
+        props.onDeleted({
+          finished: result.finished,
+          email: result.email,
+          server: result.server,
+          disconnectError: result.disconnectError,
+        });
         return;
       }
       if (sessionChanged.current) {
@@ -135,7 +158,9 @@ function Delete(props: ServerAccountDeleteDialogProps) {
       onClose={deleting ? undefined : props.onClose}
       panelProps={confirmPanel(
         "delete-server-account-title",
-        preview ? "delete-server-account-server delete-server-account-facts" : "delete-server-account-server",
+        preview
+          ? "delete-server-account-server delete-server-account-facts"
+          : "delete-server-account-server",
       )}
     >
       <ConfirmationCard icon={UserX} intent="danger" testId="server-account-delete">
@@ -147,32 +172,59 @@ function Delete(props: ServerAccountDeleteDialogProps) {
             void deleteAccount();
           }}
         >
-          <ConfirmationHead titleId="delete-server-account-title" bodyId="delete-server-account-server" title={`Delete ${preview?.email ?? props.email} on this server?`}>
-            <p className="font-mono text-[11px] text-subtle" data-testid="server-account-delete-server">{server}</p>
+          <ConfirmationHead
+            titleId="delete-server-account-title"
+            bodyId="delete-server-account-server"
+            title={`Delete ${preview?.email ?? props.email} on this server?`}
+          >
+            <p
+              className="font-mono text-[11px] text-subtle"
+              data-testid="server-account-delete-server"
+            >
+              {server}
+            </p>
           </ConfirmationHead>
           {changed ? (
-            <p role="status" data-testid="server-account-delete-changed" className="m-0 text-[13px] text-warning">{changed}</p>
+            <p
+              role="status"
+              data-testid="server-account-delete-changed"
+              className="m-0 text-[13px] text-warning"
+            >
+              {changed}
+            </p>
           ) : null}
           {!preview ? (
             <SkeletonRows rows={3} label="Listing what deletion removes…" />
           ) : (
             <>
-              <section data-testid="server-account-delete-scope" className="flex flex-col gap-2 text-[13px]">
+              <section
+                data-testid="server-account-delete-scope"
+                className="flex flex-col gap-2 text-[13px]"
+              >
                 <h3 className="m-0 text-[12px] font-semibold">The server deletes</h3>
                 {preview.workspaces.length === 0 && preview.workspacesElsewhere === 0 ? (
                   <p className="m-0 text-muted">The account and no workspaces</p>
                 ) : (
-                  <ul className="m-0 flex list-none flex-col gap-1 p-0" aria-label="Workspaces the server deletes">
+                  <ul
+                    className="m-0 flex list-none flex-col gap-1 p-0"
+                    aria-label="Workspaces the server deletes"
+                  >
                     {preview.workspaces.map((workspace) => (
                       <li key={workspace.workspaceId} className="flex items-center gap-1.5">
                         <Folder size={13} aria-hidden className="shrink-0 text-subtle" />
-                        <span className="truncate" title={workspace.name}>{workspace.name}</span>
+                        <span className="truncate" title={workspace.name}>
+                          {workspace.name}
+                        </span>
                       </li>
                     ))}
                     {preview.workspacesElsewhere > 0 ? (
-                      <li data-testid="server-account-delete-elsewhere" className="flex items-center gap-1.5 text-muted">
+                      <li
+                        data-testid="server-account-delete-elsewhere"
+                        className="flex items-center gap-1.5 text-muted"
+                      >
                         <CloudOff size={13} aria-hidden className="shrink-0 text-subtle" />
-                        {counted(preview.workspacesElsewhere, "workspace", "workspaces")} not on this computer
+                        {counted(preview.workspacesElsewhere, "workspace", "workspaces")} not on
+                        this computer
                       </li>
                     ) : null}
                   </ul>
@@ -181,16 +233,21 @@ function Delete(props: ServerAccountDeleteDialogProps) {
                   {formatStoredBytes(preview.storedBytes)} of files, data, apps, chats, and history
                 </p>
                 <p className="m-0 text-muted" data-testid="server-account-delete-shares">
-                  {counted(preview.ownedShareCount, "share", "shares")} you own end. People you shared with lose access and keep their copies.
+                  {counted(preview.ownedShareCount, "share", "shares")} you own end. People you
+                  shared with lose access and keep their copies.
                 </p>
                 <p className="m-0 text-muted" data-testid="server-account-delete-grants">
                   Your access to shares others gave you ends.
                 </p>
               </section>
-              <div id="delete-server-account-facts" className="flex flex-col gap-1 text-[13px] text-muted">
+              <div
+                id="delete-server-account-facts"
+                className="flex flex-col gap-1 text-[13px] text-muted"
+              >
                 <p className="m-0">Workspaces on this computer stay, with their files.</p>
                 <p className="m-0 text-danger">
-                  This cannot be undone. If you create an account again later, this server will not accept your old copies of these workspaces.
+                  This cannot be undone. If you create an account again later, this server will not
+                  accept your old copies of these workspaces.
                 </p>
                 <p className="m-0">The server's backups keep this data until they expire.</p>
               </div>
@@ -204,7 +261,11 @@ function Delete(props: ServerAccountDeleteDialogProps) {
                     value={password}
                     disabled={busy}
                     aria-invalid={passwordProblem !== null}
-                    aria-describedby={passwordProblem !== null ? "server-account-delete-password-problem" : undefined}
+                    aria-describedby={
+                      passwordProblem !== null
+                        ? "server-account-delete-password-problem"
+                        : undefined
+                    }
                     onChange={(event) => {
                       setPassword(event.currentTarget.value);
                       setPasswordProblem(null);
@@ -213,7 +274,12 @@ function Delete(props: ServerAccountDeleteDialogProps) {
                   />
                 </label>
                 {passwordProblem ? (
-                  <p id="server-account-delete-password-problem" role="alert" data-testid="server-account-delete-password-problem" className="m-0 text-xs text-danger">
+                  <p
+                    id="server-account-delete-password-problem"
+                    role="alert"
+                    data-testid="server-account-delete-password-problem"
+                    className="m-0 text-xs text-danger"
+                  >
                     {passwordProblem}
                   </p>
                 ) : null}
@@ -221,8 +287,14 @@ function Delete(props: ServerAccountDeleteDialogProps) {
             </>
           )}
           <ConfirmActions>
-            <SecondaryButton disabled={deleting} onClick={props.onClose}>Cancel</SecondaryButton>
-            <DangerButton type="submit" data-testid="server-account-delete-confirm" disabled={busy || !preview || !password}>
+            <SecondaryButton disabled={deleting} onClick={props.onClose}>
+              Cancel
+            </SecondaryButton>
+            <DangerButton
+              type="submit"
+              data-testid="server-account-delete-confirm"
+              disabled={busy || !preview || !password}
+            >
               {deleting ? "Deleting…" : "Delete account"}
             </DangerButton>
           </ConfirmActions>

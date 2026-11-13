@@ -20,7 +20,10 @@ export interface DeviceSignIn {
   readonly expiresAtMs: number;
 }
 
-export type DeviceOutcome = { readonly kind: "token"; readonly token: string } | { readonly kind: "denied" } | { readonly kind: "expired" };
+export type DeviceOutcome =
+  | { readonly kind: "token"; readonly token: string }
+  | { readonly kind: "denied" }
+  | { readonly kind: "expired" };
 
 interface Runtime {
   readonly fetch: Fetch;
@@ -32,16 +35,29 @@ interface Runtime {
 
 const isFields = (value: unknown): value is Readonly<Record<string, unknown>> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
-const positive = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value > 0;
+const positive = (value: unknown): value is number =>
+  typeof value === "number" && Number.isFinite(value) && value > 0;
 
-export async function startDeviceSignIn(origin: string, runtime: Pick<Runtime, "fetch" | "signal" | "now">): Promise<DeviceSignIn> {
+export async function startDeviceSignIn(
+  origin: string,
+  runtime: Pick<Runtime, "fetch" | "signal" | "now">,
+): Promise<DeviceSignIn> {
   const { status, body } = await exchange(runtime.fetch, `${origin}/api/auth/device/code`, {
-    method: "POST", body: { client_id: DEVICE_CLIENT_ID }, signal: runtime.signal,
+    method: "POST",
+    body: { client_id: DEVICE_CLIENT_ID },
+    signal: runtime.signal,
   });
   if (status !== 200) throw new ServerError(statusProblem(status), status);
-  if (!isFields(body) || typeof body.device_code !== "string" || !body.device_code || body.device_code.length > 2048 ||
-      typeof body.user_code !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(body.user_code) || !positive(body.expires_in) ||
-      (body.interval !== undefined && !positive(body.interval))) {
+  if (
+    !isFields(body) ||
+    typeof body.device_code !== "string" ||
+    !body.device_code ||
+    body.device_code.length > 2048 ||
+    typeof body.user_code !== "string" ||
+    !/^[A-Za-z0-9_-]{1,128}$/.test(body.user_code) ||
+    !positive(body.expires_in) ||
+    (body.interval !== undefined && !positive(body.interval))
+  ) {
     throw new ServerError("invalid", status);
   }
   // The page is built on the address the person typed, never taken from the answer, so the phone opens only that
@@ -61,17 +77,28 @@ export async function startDeviceSignIn(origin: string, runtime: Pick<Runtime, "
  * Polls until the person approves or denies the code, or it expires. A token that arrives is returned even when the
  * sign-in was cancelled while it was on its way, so the caller can end the session the server just made.
  */
-export async function waitForDeviceToken(origin: string, start: DeviceSignIn, runtime: Runtime): Promise<DeviceOutcome> {
+export async function waitForDeviceToken(
+  origin: string,
+  start: DeviceSignIn,
+  runtime: Runtime,
+): Promise<DeviceOutcome> {
   let intervalMs = start.intervalMs;
   for (;;) {
     await runtime.sleep(intervalMs, runtime.signal);
     if (runtime.now() >= start.expiresAtMs) return { kind: "expired" };
     const { status, body } = await exchange(runtime.fetch, `${origin}/api/auth/device/token`, {
-      method: "POST", body: { grant_type: GRANT_TYPE, device_code: start.deviceCode, client_id: DEVICE_CLIENT_ID }, signal: runtime.signal,
+      method: "POST",
+      body: { grant_type: GRANT_TYPE, device_code: start.deviceCode, client_id: DEVICE_CLIENT_ID },
+      signal: runtime.signal,
       keepAnswer: true,
     });
     if (status === 200) {
-      if (!isFields(body) || typeof body.access_token !== "string" || !body.access_token || body.access_token.length > 4096) {
+      if (
+        !isFields(body) ||
+        typeof body.access_token !== "string" ||
+        !body.access_token ||
+        body.access_token.length > 4096
+      ) {
         throw new ServerError("invalid", status);
       }
       return { kind: "token", token: body.access_token };

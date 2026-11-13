@@ -1,14 +1,6 @@
 // @vitest-environment jsdom
 import { registerYDocDelivery } from "./pendingYDocDeliveries";
-import {
-  act,
-  cleanup,
-  render,
-  renderHook,
-  screen,
-  waitFor,
-  within,
-} from "@testing-library/react";
+import { act, cleanup, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -45,15 +37,13 @@ import { deferred } from "../testing/deferred";
 function seedStoredDraft(): void {
   localStorage.setItem(
     `${ORPHANED_DRAFT_STORAGE_PREFIX}previous-run`,
-    JSON.stringify(
-      {
-        id: 7,
-        workspaceId: "ws-1",
-        path: "notes/a.md",
-        text: "Survived the quit",
-        capturedAtMs: Date.now(),
-      },
-    ),
+    JSON.stringify({
+      id: 7,
+      workspaceId: "ws-1",
+      path: "notes/a.md",
+      text: "Survived the quit",
+      capturedAtMs: Date.now(),
+    }),
   );
 }
 
@@ -64,7 +54,7 @@ function seedStoredDraft(): void {
 function stubBridge(overrides: Record<string, unknown> = {}): void {
   vi.stubGlobal("dohcDesktop", {
     platform: "linux" as const,
-    typingRecovery: async () => ({failures: []}),
+    typingRecovery: async () => ({ failures: [] }),
     onExitRound: () => () => undefined,
     onWindowFullScreen: () => () => undefined,
     onWindowFocused: () => () => undefined,
@@ -79,7 +69,9 @@ function stubBridge(overrides: Record<string, unknown> = {}): void {
 // in through the listener, and the answers go out through the bridge.
 function roundBridge(overrides: Record<string, unknown> = {}) {
   let listener: ((message: ExitRoundMessage) => void) | null = null;
-  const answerExitRound = vi.fn(async (_payload: { roundId: number; decision: string }) => undefined);
+  const answerExitRound = vi.fn(
+    async (_payload: { roundId: number; decision: string }) => undefined,
+  );
   stubBridge({
     answerExitRound,
     onExitRound: (next: (message: ExitRoundMessage) => void) => {
@@ -199,20 +191,22 @@ describe("RecoveryCloseGuard", () => {
     act(() => {
       window.dispatchEvent(first);
     });
-    expect(first.defaultPrevented, "close guard: remove the beforeunload interception. The close proceeds unannounced and every set-aside edit dies with it.").toBe(true);
+    expect(
+      first.defaultPrevented,
+      "close guard: remove the beforeunload interception. The close proceeds unannounced and every set-aside edit dies with it.",
+    ).toBe(true);
     await screen.findByTestId("recovery-close-warning");
 
     // The dialog carries the recovery itself: Copy works
     // right here, path-labeled, whether or not the file still exists — and
     // both workspaces' drafts are listed.
     const rows = screen.getAllByTestId("recovery-list-row");
-    expect(rows, "dialog list: drop <RecoveryList /> from the dialog — the warning then demands actions it does not offer.").toHaveLength(2);
-    const row = rows.find((candidate) =>
-      candidate.textContent?.includes("a.md"),
-    )!;
-    expect(rows.some((candidate) => candidate.textContent?.includes("other.md"))).toBe(
-      true,
-    );
+    expect(
+      rows,
+      "dialog list: drop <RecoveryList /> from the dialog — the warning then demands actions it does not offer.",
+    ).toHaveLength(2);
+    const row = rows.find((candidate) => candidate.textContent?.includes("a.md"))!;
+    expect(rows.some((candidate) => candidate.textContent?.includes("other.md"))).toBe(true);
     // The GLOBAL list names each row's workspace — two workspaces can hold
     // the same path, and Copy/Dismiss must be tellable apart (#579 review,
     // r7) — with the NAME the UI shows, not the raw UUID (#579 review,
@@ -220,21 +214,20 @@ describe("RecoveryCloseGuard", () => {
     const labels = screen
       .getAllByTestId("recovery-list-workspace")
       .map((label) => label.textContent);
-    expect(labels, "workspace labels: drop the label span or show the raw id. Identical paths from two workspaces are indistinguishable.").toContain("Personal notes");
+    expect(
+      labels,
+      "workspace labels: drop the label span or show the raw id. Identical paths from two workspaces are indistinguishable.",
+    ).toContain("Personal notes");
     expect(labels).toContain("ws-2");
     await user.click(within(row).getByTestId("recovery-list-copy"));
-    await waitFor(async () =>
-      expect(await navigator.clipboard.readText()).toBe("Kept!"),
-    );
+    await waitFor(async () => expect(await navigator.clipboard.readText()).toBe("Kept!"));
 
     // Go back keeps everything.
     await user.click(screen.getByTestId("recovery-close-goback"));
     expect(screen.queryByTestId("recovery-close-warning")).toBeNull();
 
     // Close anyway releases the guard and re-runs the close.
-    const closeSpy = vi
-      .spyOn(window, "close")
-      .mockImplementation(() => undefined);
+    const closeSpy = vi.spyOn(window, "close").mockImplementation(() => undefined);
     const second = new Event("beforeunload", { cancelable: true });
     act(() => {
       window.dispatchEvent(second);
@@ -267,7 +260,10 @@ describe("RecoveryCloseGuard", () => {
     // confirm step: the first click arms it and deletes
     // nothing, and Keep backs out whole.
     await user.click(screen.getByTestId("recovery-dismiss"));
-    expect(screen.getByTestId("recovery-list-row"), "confirm gate: make the Dismiss button delete directly. The row is gone right here and the assertions below fail.").toBeTruthy();
+    expect(
+      screen.getByTestId("recovery-list-row"),
+      "confirm gate: make the Dismiss button delete directly. The row is gone right here and the assertions below fail.",
+    ).toBeTruthy();
     await user.click(screen.getByTestId("recovery-dismiss-cancel"));
     expect(screen.getByTestId("recovery-list-row")).toBeTruthy();
     expect(screen.queryByTestId("recovery-dismiss-confirm")).toBeNull();
@@ -275,9 +271,7 @@ describe("RecoveryCloseGuard", () => {
     await user.click(screen.getByTestId("recovery-dismiss"));
     await user.click(screen.getByTestId("recovery-dismiss-confirm"));
     // The last draft resolved: the dialog retires itself.
-    await waitFor(() =>
-      expect(screen.queryByTestId("recovery-close-warning")).toBeNull(),
-    );
+    await waitFor(() => expect(screen.queryByTestId("recovery-close-warning")).toBeNull());
 
     const second = new Event("beforeunload", { cancelable: true });
     act(() => {
@@ -296,9 +290,7 @@ describe("RecoveryCloseGuard", () => {
     const Thrower = (): never => {
       throw new Error("boom");
     };
-    const consoleError = vi
-      .spyOn(console, "error")
-      .mockImplementation(() => undefined);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
     render(
       <RecoveryCloseGuard>
         <AppErrorBoundary>
@@ -318,15 +310,14 @@ describe("RecoveryCloseGuard", () => {
     });
     expect(blocked.defaultPrevented).toBe(true);
     await screen.findByTestId("recovery-close-warning");
-    expect(screen.getByTestId("recovery-close-anyway").textContent).toBe(
-      "Reload anyway",
-    );
+    expect(screen.getByTestId("recovery-close-anyway").textContent).toBe("Reload anyway");
 
-    const closeSpy = vi
-      .spyOn(window, "close")
-      .mockImplementation(() => undefined);
+    const closeSpy = vi.spyOn(window, "close").mockImplementation(() => undefined);
     await user.click(screen.getByTestId("recovery-close-anyway"));
-    expect(reloadRenderer, "retain the action: make the confirm call window.close() unconditionally. The user asked to reload and gets an exit.").toHaveBeenCalledTimes(2);
+    expect(
+      reloadRenderer,
+      "retain the action: make the confirm call window.close() unconditionally. The user asked to reload and gets an exit.",
+    ).toHaveBeenCalledTimes(2);
     expect(closeSpy).not.toHaveBeenCalled();
     closeSpy.mockRestore();
   });
@@ -359,7 +350,10 @@ describe("RecoveryCloseGuard", () => {
     await waitFor(() => expect(main.answers()).toContainEqual({ roundId: 1, decision: "clear" }));
     main.proceed(1);
     await act(async () => answer.resolve({ accepted: false, state: READY_STATE }));
-    expect(await installing, "own round: a request that increments exitRequest must not make the initiator's result stale").toEqual({ accepted: false, state: READY_STATE });
+    expect(
+      await installing,
+      "own round: a request that increments exitRequest must not make the initiator's result stale",
+    ).toEqual({ accepted: false, state: READY_STATE });
   });
 
   // With two windows, a late draft in window B can stop the approved
@@ -387,7 +381,10 @@ describe("RecoveryCloseGuard", () => {
     const stopped = vi.fn();
     const unsubscribe = onRestartStopped(stopped);
     await user.click(await screen.findByTestId("recovery-close-goback"));
-    expect(main.answers(), "Go back after the round proceeded must tell main, or the window that asked keeps showing Restarting…").toContainEqual({ roundId: 1, decision: "cancel" });
+    expect(
+      main.answers(),
+      "Go back after the round proceeded must tell main, or the window that asked keeps showing Restarting…",
+    ).toContainEqual({ roundId: 1, decision: "cancel" });
     // Main's retraction reaches this window too, which already stopped.
     main.cancelled(1);
     unsubscribe();
@@ -412,7 +409,10 @@ describe("RecoveryCloseGuard", () => {
     await user.click(screen.getByTestId("recovery-dismiss-confirm"));
     await waitFor(() => expect(screen.queryByTestId("recovery-close-warning")).toBeNull());
     await waitFor(() =>
-      expect(main.answers(), "no silent held round may remain").toContainEqual({ roundId: 4, decision: "clear" }),
+      expect(main.answers(), "no silent held round may remain").toContainEqual({
+        roundId: 4,
+        decision: "clear",
+      }),
     );
   });
 
@@ -452,7 +452,10 @@ describe("RecoveryCloseGuard", () => {
     act(() => {
       window.dispatchEvent(event);
     });
-    expect(event.defaultPrevented, "stale approval: Go back must re-arm, or D1 is bypassed for an unrelated close").toBe(true);
+    expect(
+      event.defaultPrevented,
+      "stale approval: Go back must re-arm, or D1 is bypassed for an unrelated close",
+    ).toBe(true);
   });
 
   // The bypass is scoped to the one resumed unload attempt.
@@ -493,7 +496,10 @@ describe("RecoveryCloseGuard", () => {
     act(() => {
       window.dispatchEvent(second);
     });
-    expect(second.defaultPrevented, "scoped bypass: leave the bypass set after a failed resume. This close then passes unguarded and the drafts die silently.").toBe(true);
+    expect(
+      second.defaultPrevented,
+      "scoped bypass: leave the bypass set after a failed resume. This close then passes unguarded and the drafts die silently.",
+    ).toBe(true);
     expect(await screen.findByTestId("recovery-close-warning")).toBeTruthy();
   });
 
@@ -567,9 +573,7 @@ describe("RecoveryCloseGuard", () => {
   // and quitAndInstall is one-shot — so the boundary re-check reads the live
   // store instead of trusting the confirm, and a draft that appears after it
   // brings the decision back to the user with its text intact.
-  function confirmedRestartHarness(
-    options: { accepted?: boolean; onInstall?: () => void } = {},
-  ) {
+  function confirmedRestartHarness(options: { accepted?: boolean; onInstall?: () => void } = {}) {
     const accepted = options.accepted ?? true;
     const readyState = {
       status: "ready" as const,
@@ -623,7 +627,10 @@ describe("RecoveryCloseGuard", () => {
 
     harness.askBoundaryCheck(1);
     await waitFor(() =>
-      expect(harness.answers(), "stale bypass: answer `!bypassCloseGuard.current && atRiskOrphanedDraftIds().length > 0`. The re-check reports clear and destroys the only copy of a draft that was in no warning.").toContainEqual({
+      expect(
+        harness.answers(),
+        "stale bypass: answer `!bypassCloseGuard.current && atRiskOrphanedDraftIds().length > 0`. The re-check reports clear and destroys the only copy of a draft that was in no warning.",
+      ).toContainEqual({
         roundId: 1,
         decision: "hold",
       }),
@@ -637,16 +644,17 @@ describe("RecoveryCloseGuard", () => {
     // ...and it is still the restart the user asked for.
     // A warning that cannot tell close from restart passes either way, so
     // assert the action, not just its presence.
-    expect(screen.getByTestId("recovery-close-anyway").textContent, "update intent: stop claiming pendingUnload in beginInstall. The warning degrades to 'Close', and confirming calls window.close() instead of resuming the quit quitAndInstall already started — whose one-shot latch is spent, so no later confirm can ever restart.").toBe(
-      "Restart anyway",
-    );
-    const closeSpy = vi
-      .spyOn(window, "close")
-      .mockImplementation(() => undefined);
+    expect(
+      screen.getByTestId("recovery-close-anyway").textContent,
+      "update intent: stop claiming pendingUnload in beginInstall. The warning degrades to 'Close', and confirming calls window.close() instead of resuming the quit quitAndInstall already started — whose one-shot latch is spent, so no later confirm can ever restart.",
+    ).toBe("Restart anyway");
+    const closeSpy = vi.spyOn(window, "close").mockImplementation(() => undefined);
     // Confirming clears this window's part of the round; the original
     // install is what proceeds, never a window close.
     await user.click(screen.getByTestId("recovery-close-anyway"));
-    await waitFor(() => expect(harness.answers()).toContainEqual({ roundId: 1, decision: "clear" }));
+    await waitFor(() =>
+      expect(harness.answers()).toContainEqual({ roundId: 1, decision: "clear" }),
+    );
     expect(closeSpy).not.toHaveBeenCalled();
     expect(harness.resumeQuit).not.toHaveBeenCalled();
     expect(harness.installUpdate).toHaveBeenCalledTimes(1);
@@ -683,12 +691,11 @@ describe("RecoveryCloseGuard", () => {
     });
     expect(event.defaultPrevented).toBe(true);
 
-    expect(screen.getByTestId("recovery-close-anyway").textContent, "quit intent: stop claiming pendingUnload before answering clear. The warning degrades to 'Close', and confirming calls window.close() — which does not quit on macOS.").toBe(
-      "Quit anyway",
-    );
-    const closeSpy = vi
-      .spyOn(window, "close")
-      .mockImplementation(() => undefined);
+    expect(
+      screen.getByTestId("recovery-close-anyway").textContent,
+      "quit intent: stop claiming pendingUnload before answering clear. The warning degrades to 'Close', and confirming calls window.close() — which does not quit on macOS.",
+    ).toBe("Quit anyway");
+    const closeSpy = vi.spyOn(window, "close").mockImplementation(() => undefined);
     await user.click(screen.getByTestId("recovery-close-anyway"));
     await waitFor(() => expect(resumeQuit).toHaveBeenCalledTimes(1));
     expect(closeSpy).not.toHaveBeenCalled();
@@ -727,10 +734,12 @@ describe("RecoveryCloseGuard with working storage", () => {
     expect(event.defaultPrevented).toBe(true);
     await screen.findByTestId("recovery-close-warning");
     const rows = screen.getAllByTestId("recovery-list-row");
-    expect(rows, "dialog list: hand <RecoveryList/> every row instead of `liveDrafts`. The warning then lists a draft it is not warning about.").toHaveLength(1);
+    expect(
+      rows,
+      "dialog list: hand <RecoveryList/> every row instead of `liveDrafts`. The warning then lists a draft it is not warning about.",
+    ).toHaveLength(1);
     expect(rows[0].textContent).toContain(".env");
   });
-
 });
 
 // The wiring, not just the components: main.tsx must restore the stored
@@ -783,9 +792,7 @@ describe("main.tsx composition", () => {
     // commit before the guard's passive effect adds this listener — wait for
     // the registration itself rather than a fixed number of flushes.
     const addEventListenerSpy = vi.spyOn(window, "addEventListener");
-    const consoleError = vi
-      .spyOn(console, "error")
-      .mockImplementation(() => undefined);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
       await import("./main");
       await screen.findByTestId("app-crash-screen");
@@ -793,10 +800,7 @@ describe("main.tsx composition", () => {
       consoleError.mockRestore();
     }
     await waitFor(() =>
-      expect(addEventListenerSpy).toHaveBeenCalledWith(
-        "beforeunload",
-        expect.any(Function),
-      ),
+      expect(addEventListenerSpy).toHaveBeenCalledWith("beforeunload", expect.any(Function)),
     );
 
     const event = new Event("beforeunload", { cancelable: true });
@@ -810,14 +814,12 @@ describe("main.tsx composition", () => {
     const listed = screen.getAllByTestId("recovery-list-row");
     expect(listed).toHaveLength(1);
     expect(listed[0].textContent).toContain("a.md");
-    expect(
-      screen.getByTestId("recovery-close-warning").textContent,
-    ).not.toContain("notes/a.md");
+    expect(screen.getByTestId("recovery-close-warning").textContent).not.toContain("notes/a.md");
     // ...and the restored draft IS in the store, because main.tsx put it there.
     const restored = renderHook(() => useAllOrphanedDrafts());
-    expect(
-      restored.result.current.map((row) => `${row.path}:${row.persisted}`),
-    ).toContain("notes/a.md:true");
+    expect(restored.result.current.map((row) => `${row.path}:${row.persisted}`)).toContain(
+      "notes/a.md:true",
+    );
     restored.unmount();
     act(() => mountedRoot?.unmount());
     container.remove();
@@ -854,9 +856,7 @@ describe("RecoveryCloseGuard with pending collection writes", () => {
     const applied = vi.fn(async (_payload: { sessionId: string; seq: number }) => ({
       accepted: true as const,
     }));
-    const saveStateListeners = new Set<
-      (event: EngineYDocSaveStateEvent) => void
-    >();
+    const saveStateListeners = new Set<(event: EngineYDocSaveStateEvent) => void>();
     stubBridge({
       // A field write checks its record's file before the session opens.
       readWorkspaceText: vi.fn(async (payload: { relativePath: string }) => ({
@@ -864,30 +864,26 @@ describe("RecoveryCloseGuard with pending collection writes", () => {
         truncated: false,
         contentHash: payload.relativePath === "tasks/one.md" ? "1".repeat(64) : "2".repeat(64),
       })),
-      openEngineYDocSession: vi.fn(
-        async (payload: { path: string; sessionId: string }) => {
-          sessionsByPath.set(payload.path, payload.sessionId);
-          const doc = new Y.Doc();
-          doc.getMap("frontmatter").set("id", payload.path === "tasks/one.md" ? "rec-1" : "rec-2");
-          return {
-            available: true,
-            initialUpdate: Y.encodeStateAsUpdate(doc),
-            lineageGeneration: 1,
-          };
-        },
-      ),
+      openEngineYDocSession: vi.fn(async (payload: { path: string; sessionId: string }) => {
+        sessionsByPath.set(payload.path, payload.sessionId);
+        const doc = new Y.Doc();
+        doc.getMap("frontmatter").set("id", payload.path === "tasks/one.md" ? "rec-1" : "rec-2");
+        return {
+          available: true,
+          initialUpdate: Y.encodeStateAsUpdate(doc),
+          lineageGeneration: 1,
+        };
+      }),
       applyEngineYDocUpdate: applied,
       closeEngineYDocSession: vi.fn(async () => undefined),
       onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
       onEngineYDocOwnerHandoff: () => () => undefined,
       prepareEngineYDocOwnerHandoff: async () => undefined,
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
-      onEngineYDocSaveState: vi.fn(
-        (listener: (event: EngineYDocSaveStateEvent) => void) => {
-          saveStateListeners.add(listener);
-          return () => saveStateListeners.delete(listener);
-        },
-      ),
+      onEngineYDocSaveState: vi.fn((listener: (event: EngineYDocSaveStateEvent) => void) => {
+        saveStateListeners.add(listener);
+        return () => saveStateListeners.delete(listener);
+      }),
       ...overrides,
     });
     const settleSave = (path: string) => {
@@ -901,7 +897,13 @@ describe("RecoveryCloseGuard with pending collection writes", () => {
         );
         expect(seq).toBeGreaterThan(0);
         for (const listener of [...saveStateListeners]) {
-          listener({ sessionId: sessionId!, workspaceId: "ws-1", path: "notes/a.md", state: { kind: "saved-here" }, seq });
+          listener({
+            sessionId: sessionId!,
+            workspaceId: "ws-1",
+            path: "notes/a.md",
+            state: { kind: "saved-here" },
+            seq,
+          });
         }
       });
     };
@@ -909,9 +911,7 @@ describe("RecoveryCloseGuard with pending collection writes", () => {
       waitFor(() => {
         const sessionId = sessionsByPath.get(path);
         expect(sessionId).toBeTruthy();
-        expect(
-          applied.mock.calls.some(([payload]) => payload.sessionId === sessionId),
-        ).toBe(true);
+        expect(applied.mock.calls.some(([payload]) => payload.sessionId === sessionId)).toBe(true);
       });
     return { settleSave, awaitStaged };
   }
@@ -941,9 +941,7 @@ describe("RecoveryCloseGuard with pending collection writes", () => {
     });
     await awaitStaged("tasks/one.md");
 
-    const closeSpy = vi
-      .spyOn(window, "close")
-      .mockImplementation(() => undefined);
+    const closeSpy = vi.spyOn(window, "close").mockImplementation(() => undefined);
     // MUTATION (write hold): drop the pending-writes branch from
     // onBeforeUnload. The close proceeds here and the queued tail dies with
     // the renderer.
@@ -964,20 +962,29 @@ describe("RecoveryCloseGuard with pending collection writes", () => {
   // listener, and the write engine is the controllable one above.
   function stubRoundWriteBridge(overrides: Record<string, unknown> = {}) {
     let listener: ((message: ExitRoundMessage) => void) | null = null;
-    const answerExitRound = vi.fn(async (_payload: { roundId: number; decision: string }) => undefined);
+    const answerExitRound = vi.fn(
+      async (_payload: { roundId: number; decision: string }) => undefined,
+    );
     const engine = stubWriteBridge({
       answerExitRound,
       onExitRound: (next: (message: ExitRoundMessage) => void) => {
         listener = next;
-        return () => { listener = null; };
+        return () => {
+          listener = null;
+        };
       },
       ...overrides,
     });
-    const send = (message: ExitRoundMessage) => { act(() => { listener?.(message); }); };
+    const send = (message: ExitRoundMessage) => {
+      act(() => {
+        listener?.(message);
+      });
+    };
     return {
       ...engine,
       answers: () => answerExitRound.mock.calls.map(([payload]) => payload),
-      request: (roundId: number, exit: "quit" | "update") => send({ kind: "request", roundId, exit }),
+      request: (roundId: number, exit: "quit" | "update") =>
+        send({ kind: "request", roundId, exit }),
       proceed: (roundId: number) => send({ kind: "proceed", roundId }),
       cancelled: (roundId: number) => send({ kind: "cancelled", roundId }),
     };
@@ -1025,16 +1032,23 @@ describe("RecoveryCloseGuard with pending collection writes", () => {
     await waitFor(() => expect(main.answers()).toContainEqual({ roundId: 1, decision: "clear" }));
 
     // A accepts a collection edit, then the person closes A's window.
-    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE_ONE); });
+    act(() => {
+      enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE_ONE);
+    });
     await main.awaitStaged("tasks/one.md");
     expect(dispatchUnload().defaultPrevented).toBe(true);
     main.settleSave("tasks/one.md");
     // The drain resumes the round's intent: a second clear for round 1, and
     // no quit resumed past B.
     await waitFor(() =>
-      expect(main.answers().filter((answer) => answer.roundId === 1 && answer.decision === "clear")).toHaveLength(2),
+      expect(
+        main.answers().filter((answer) => answer.roundId === 1 && answer.decision === "clear"),
+      ).toHaveLength(2),
     );
-    expect(resumeQuit, "a held round must not be bypassed by a window closing").not.toHaveBeenCalled();
+    expect(
+      resumeQuit,
+      "a held round must not be bypassed by a window closing",
+    ).not.toHaveBeenCalled();
     expect(installUpdate).toHaveBeenCalledTimes(1);
 
     // B clears; main proceeds and stages exactly the one install.
@@ -1085,8 +1099,13 @@ describe("RecoveryCloseGuard with pending collection writes", () => {
   it("keeps a local approval until a failed drain cancels the round, then re-arms", async () => {
     const user = userEvent.setup();
     let resolveOpen: ((result: { available: false }) => void) | null = null;
-    const open = new Promise<{ available: false }>((resolve) => { resolveOpen = resolve; });
-    const installUpdate = vi.fn(async () => ({ accepted: false, state: { status: "ready" as const } }));
+    const open = new Promise<{ available: false }>((resolve) => {
+      resolveOpen = resolve;
+    });
+    const installUpdate = vi.fn(async () => ({
+      accepted: false,
+      state: { status: "ready" as const },
+    }));
     const main = stubRoundWriteBridge({ openEngineYDocSession: vi.fn(() => open), installUpdate });
     captureOrphanedDraft("ws-1", "d1.md", "First");
     renderGuardWithHost();
@@ -1096,19 +1115,27 @@ describe("RecoveryCloseGuard with pending collection writes", () => {
     await user.click(await screen.findByTestId("recovery-close-anyway"));
     await waitFor(() => expect(installUpdate).toHaveBeenCalledTimes(1));
     // A collection edit is accepted before main's round arrives.
-    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE_ONE); });
+    act(() => {
+      enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE_ONE);
+    });
     main.request(6, "update");
     expect(main.answers()).toContainEqual({ roundId: 6, decision: "hold" });
     // The approval still stands while the drain runs: no warning over D1.
     expect(screen.queryByTestId("recovery-close-warning")).toBeNull();
 
-    await act(async () => { resolveOpen!({ available: false }); await open; });
+    await act(async () => {
+      resolveOpen!({ available: false });
+      await open;
+    });
     await screen.findByTestId("collection-write-failure");
     await waitFor(() => expect(main.answers()).toContainEqual({ roundId: 6, decision: "cancel" }));
     // Discard the failed write; D1 is still at risk and must guard the close.
     await user.click(screen.getByRole("button", { name: "Discard unsaved change" }));
     const event = dispatchUnload();
-    expect(event.defaultPrevented, "stale approval: a failed-drain cancellation must re-arm, or D1 is bypassed until the fail-safe timer").toBe(true);
+    expect(
+      event.defaultPrevented,
+      "stale approval: a failed-drain cancellation must re-arm, or D1 is bypassed until the fail-safe timer",
+    ).toBe(true);
     expect((await screen.findByTestId("recovery-close-anyway")).textContent).toBe("Close anyway");
   });
 
@@ -1118,12 +1145,18 @@ describe("RecoveryCloseGuard with pending collection writes", () => {
       // A save that never reports "saved": the drain stalls at its deadline.
       const main = stubRoundWriteBridge();
       renderGuardWithHost();
-      act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE_ONE); });
+      act(() => {
+        enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE_ONE);
+      });
       await main.awaitStaged("tasks/one.md");
       main.request(5, "update");
       expect(main.answers()).toContainEqual({ roundId: 5, decision: "hold" });
-      await act(async () => { await vi.advanceTimersByTimeAsync(COLLECTION_WRITE_STALL_MS + 1); });
-      await waitFor(() => expect(main.answers()).toContainEqual({ roundId: 5, decision: "cancel" }));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(COLLECTION_WRITE_STALL_MS + 1);
+      });
+      await waitFor(() =>
+        expect(main.answers()).toContainEqual({ roundId: 5, decision: "cancel" }),
+      );
       expect(main.answers()).not.toContainEqual({ roundId: 5, decision: "clear" });
     } finally {
       vi.useRealTimers();
@@ -1132,15 +1165,25 @@ describe("RecoveryCloseGuard with pending collection writes", () => {
 
   it("drains an edit accepted during main's install check and retries the same restart", async () => {
     let refuse!: (result: { accepted: false }) => void;
-    const refused = new Promise<{ accepted: false }>((resolve) => { refuse = resolve; });
-    const installUpdate = vi.fn().mockReturnValueOnce(refused).mockResolvedValue({ accepted: true });
+    const refused = new Promise<{ accepted: false }>((resolve) => {
+      refuse = resolve;
+    });
+    const installUpdate = vi
+      .fn()
+      .mockReturnValueOnce(refused)
+      .mockResolvedValue({ accepted: true });
     const { settleSave, awaitStaged } = stubWriteBridge({ installUpdate });
     renderGuardWithHost();
     const installing = requestGuardedUpdateInstall();
     expect(installUpdate).toHaveBeenCalledTimes(1);
-    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE_ONE); });
+    act(() => {
+      enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE_ONE);
+    });
     await awaitStaged("tasks/one.md");
-    await act(async () => { refuse({ accepted: false }); await refused; });
+    await act(async () => {
+      refuse({ accepted: false });
+      await refused;
+    });
     expect(installUpdate).toHaveBeenCalledTimes(1);
     settleSave("tasks/one.md");
     expect(await installing).toEqual({ accepted: true });
@@ -1148,35 +1191,52 @@ describe("RecoveryCloseGuard with pending collection writes", () => {
     expect(screen.queryByTestId("recovery-close-warning")).toBeNull();
   });
 
-  it.each([false, true])("a newer reload supersedes an install retry drain (confirmed: %s)", async (confirmed) => {
-    let refuse!: (result: { accepted: false }) => void;
-    const refused = new Promise<{ accepted: false }>((resolve) => { refuse = resolve; });
-    const installUpdate = vi.fn().mockReturnValueOnce(refused).mockResolvedValue({ accepted: true });
-    const reloadRenderer = vi.fn(async () => { dispatchUnload(); });
-    const { settleSave, awaitStaged } = stubWriteBridge({ installUpdate, reloadRenderer });
-    if (confirmed) captureOrphanedDraft("ws-1", "old.md", "Before restart");
-    renderGuardWithHost();
-    let installing: Promise<unknown>;
-    if (confirmed) {
-      expect(await requestGuardedUpdateInstall()).toBeNull();
-      await userEvent.click(await screen.findByTestId("recovery-close-anyway"));
-      installing = Promise.resolve();
-    } else {
-      installing = requestGuardedUpdateInstall();
-    }
-    expect(installUpdate).toHaveBeenCalledTimes(1);
-    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE_ONE); });
-    await awaitStaged("tasks/one.md");
-    await act(async () => { refuse({ accepted: false }); await refused; });
-    act(() => {
-      captureOrphanedDraft("ws-1", "new.md", "During restart");
-      requestGuardedReload();
-    });
-    settleSave("tasks/one.md");
-    await installing;
-    await waitFor(() => expect(screen.getByTestId("recovery-close-anyway").textContent).toBe("Reload anyway"));
-    expect(installUpdate).toHaveBeenCalledTimes(1);
-  });
+  it.each([false, true])(
+    "a newer reload supersedes an install retry drain (confirmed: %s)",
+    async (confirmed) => {
+      let refuse!: (result: { accepted: false }) => void;
+      const refused = new Promise<{ accepted: false }>((resolve) => {
+        refuse = resolve;
+      });
+      const installUpdate = vi
+        .fn()
+        .mockReturnValueOnce(refused)
+        .mockResolvedValue({ accepted: true });
+      const reloadRenderer = vi.fn(async () => {
+        dispatchUnload();
+      });
+      const { settleSave, awaitStaged } = stubWriteBridge({ installUpdate, reloadRenderer });
+      if (confirmed) captureOrphanedDraft("ws-1", "old.md", "Before restart");
+      renderGuardWithHost();
+      let installing: Promise<unknown>;
+      if (confirmed) {
+        expect(await requestGuardedUpdateInstall()).toBeNull();
+        await userEvent.click(await screen.findByTestId("recovery-close-anyway"));
+        installing = Promise.resolve();
+      } else {
+        installing = requestGuardedUpdateInstall();
+      }
+      expect(installUpdate).toHaveBeenCalledTimes(1);
+      act(() => {
+        enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE_ONE);
+      });
+      await awaitStaged("tasks/one.md");
+      await act(async () => {
+        refuse({ accepted: false });
+        await refused;
+      });
+      act(() => {
+        captureOrphanedDraft("ws-1", "new.md", "During restart");
+        requestGuardedReload();
+      });
+      settleSave("tasks/one.md");
+      await installing;
+      await waitFor(() =>
+        expect(screen.getByTestId("recovery-close-anyway").textContent).toBe("Reload anyway"),
+      );
+      expect(installUpdate).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it("a write that fails while the unload waits keeps the app open", async () => {
     let resolveOpen: ((result: { available: false }) => void) | null = null;
@@ -1191,9 +1251,7 @@ describe("RecoveryCloseGuard with pending collection writes", () => {
       enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE_ONE);
     });
 
-    const closeSpy = vi
-      .spyOn(window, "close")
-      .mockImplementation(() => undefined);
+    const closeSpy = vi.spyOn(window, "close").mockImplementation(() => undefined);
     expect(dispatchUnload().defaultPrevented).toBe(true);
 
     // The record's open settles without a session: the write FAILS while the
@@ -1214,17 +1272,37 @@ describe("RecoveryCloseGuard with pending collection writes", () => {
     expect(dispatchUnload().defaultPrevented).toBe(false);
     closeSpy.mockRestore();
   });
-
 });
 
 it("holds last-window unload until pending Y.Doc deliveries and their main checkpoint land", async () => {
- const gate = deferred<void>(); let pending = true;
- const unregister = registerYDocDelivery({pending: () => pending, flush: async () => {await gate.promise; pending = false;}});
- const close = vi.spyOn(window, "close").mockImplementation(() => undefined);
- try {
-  render(<RecoveryCloseGuard><span>Workspace</span></RecoveryCloseGuard>);
-  const unload = new Event("beforeunload", {cancelable: true}); act(() => {window.dispatchEvent(unload);});
-  expect(unload.defaultPrevented).toBe(true); expect(close).not.toHaveBeenCalled();
-  await act(async () => {gate.resolve(); await gate.promise;}); await waitFor(() => expect(close).toHaveBeenCalledOnce());
- } finally {unregister();}
+  const gate = deferred<void>();
+  let pending = true;
+  const unregister = registerYDocDelivery({
+    pending: () => pending,
+    flush: async () => {
+      await gate.promise;
+      pending = false;
+    },
+  });
+  const close = vi.spyOn(window, "close").mockImplementation(() => undefined);
+  try {
+    render(
+      <RecoveryCloseGuard>
+        <span>Workspace</span>
+      </RecoveryCloseGuard>,
+    );
+    const unload = new Event("beforeunload", { cancelable: true });
+    act(() => {
+      window.dispatchEvent(unload);
+    });
+    expect(unload.defaultPrevented).toBe(true);
+    expect(close).not.toHaveBeenCalled();
+    await act(async () => {
+      gate.resolve();
+      await gate.promise;
+    });
+    await waitFor(() => expect(close).toHaveBeenCalledOnce());
+  } finally {
+    unregister();
+  }
 });

@@ -44,12 +44,7 @@ export function currentUiAuditBundles(desktopRoot, platform = process.platform) 
 }
 
 function validateBundles(actual, expected, label) {
-  for (const key of [
-    "mainTreeSha256",
-    "preloadTreeSha256",
-    "rendererTreeSha256",
-    "engineSha256",
-  ]) {
+  for (const key of ["mainTreeSha256", "preloadTreeSha256", "rendererTreeSha256", "engineSha256"]) {
     if (typeof actual?.[key] !== "string" || !/^[0-9a-f]{64}$/.test(actual[key])) {
       throw new Error(`${label} has invalid ${key}`);
     }

@@ -135,11 +135,7 @@ export function planJoinedCommit(
     // A channel this read named is answered by a read from now on.
     for (const answer of answers) order.local.delete(answer.channelWireId);
     if (shown !== null) {
-      keep = new Set([
-        ...answers.map((answer) => answer.channelWireId),
-        ...shown,
-        ...order.local,
-      ]);
+      keep = new Set([...answers.map((answer) => answer.channelWireId), ...shown, ...order.local]);
       // The watermarks are the same cache. Ordering kept for a channel the
       // view no longer shows would grow exactly what evicting the answers
       // stopped growing.

@@ -5,7 +5,18 @@ import { spawnSyncRelay } from "../../e2e/helpers/syncRelay";
 import { createTestScratch } from "./testTemp";
 import { createRelaySyncEngine, type CloudSyncEngine } from "./relaySyncEngine";
 import { createRelayLogWait } from "./relayLogWait";
-import { engine, compiledRelayMain, LiveDaemonCapture, pullCaptured, openLiveDaemonCapture, openJoinedDaemonCapture, OpenEditor, openEditor, typeAtEnd, shown } from "./twoDaemonSync.fixture";
+import {
+  engine,
+  compiledRelayMain,
+  LiveDaemonCapture,
+  pullCaptured,
+  openLiveDaemonCapture,
+  openJoinedDaemonCapture,
+  OpenEditor,
+  openEditor,
+  typeAtEnd,
+  shown,
+} from "./twoDaemonSync.fixture";
 
 it.skipIf(engine.missing)(
   "shows each device's edit in the other device's idle open editor",
@@ -16,7 +27,10 @@ it.skipIf(engine.missing)(
     const rootA = await createTestScratch("dohc-idle-editor-a-");
     const rootB = await createTestScratch("dohc-idle-editor-b-");
     const relayRoot = await createTestScratch("dohc-idle-editor-relay-");
-    const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay", "relay.sqlite"), compiledMain: compiledRelayMain });
+    const relay = await spawnSyncRelay({
+      dbPath: join(relayRoot, "relay", "relay.sqlite"),
+      compiledMain: compiledRelayMain,
+    });
     const relayConnection = { baseUrl: relay.baseUrl, token };
     // Generous against one push, one held read's answer, one pull, and one
     // resync on a loaded machine.
@@ -62,7 +76,7 @@ it.skipIf(engine.missing)(
       await syncA.start();
       expect(pushes[0]).toMatchObject({ pushed: 0, hasMore: true });
       await vi.waitFor(() => {
-        expect(pushes.some(push => push.pushed > 0)).toBe(true);
+        expect(pushes.some((push) => push.pushed > 0)).toBe(true);
         expect(pushes.at(-1)?.hasMore).toBe(false);
       }, arrival);
 

@@ -2,7 +2,11 @@
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { useShellError } from "./useShellError";
-import { forgetNetworkShareNoticesForTests, networkShareNotice, useNetworkShareNotice } from "./useNetworkShareNotice";
+import {
+  forgetNetworkShareNoticesForTests,
+  networkShareNotice,
+  useNetworkShareNotice,
+} from "./useNetworkShareNotice";
 
 afterEach(() => {
   cleanup();
@@ -12,11 +16,20 @@ afterEach(() => {
 
 // The shell's error hook and the network-share notice, as the workspace
 // shell wires them.
-function mountShell(workspaceId: string, onNetworkShare: boolean, platform: NodeJS.Platform = "darwin") {
+function mountShell(
+  workspaceId: string,
+  onNetworkShare: boolean,
+  platform: NodeJS.Platform = "darwin",
+) {
   return renderHook(
     (props: { onNetworkShare: boolean }) => {
       const shell = useShellError(workspaceId);
-      const notice = useNetworkShareNotice({ workspaceId, onNetworkShare: props.onNetworkShare, platform, report: shell.reportNetworkShare });
+      const notice = useNetworkShareNotice({
+        workspaceId,
+        onNetworkShare: props.onNetworkShare,
+        platform,
+        report: shell.reportNetworkShare,
+      });
       return { shell, notice };
     },
     { initialProps: { onNetworkShare } },
@@ -49,26 +62,33 @@ describe("useNetworkShareNotice", () => {
 
     // A workspace switch remounts the shell: the row again, no second toast.
     const second = mountShell("ws-nas", true);
-    expect(second.result.current.shell.shellErrors).toMatchObject([{ kind: "network-share", seen: true }]);
+    expect(second.result.current.shell.shellErrors).toMatchObject([
+      { kind: "network-share", seen: true },
+    ]);
     second.unmount();
 
     // Another workspace gets its own toast.
     const other = mountShell("ws-team", true);
-    expect(other.result.current.shell.shellErrors).toMatchObject([{ ...networkShareNotice("darwin"), seen: false }]);
+    expect(other.result.current.shell.shellErrors).toMatchObject([
+      { ...networkShareNotice("darwin"), seen: false },
+    ]);
   });
 
   it("names the place that keeps History private on this computer", () => {
-    const sentence = "Anyone who can read the share can read its History, including text deleted from its files.";
+    const sentence =
+      "Anyone who can read the share can read its History, including text deleted from its files.";
     for (const [platform, destination] of [
       ["darwin", "to this computer's disk"],
       ["linux", "to this computer's disk"],
       ["win32", "into your user folder on this computer"],
     ] as const) {
       const shell = mountShell(`ws-${platform}`, true, platform);
-      expect(shell.result.current.shell.shellErrors).toMatchObject([{
-        title: "This workspace is on a network share",
-        message: `${sentence} To keep History private, move the workspace ${destination}.`,
-      }]);
+      expect(shell.result.current.shell.shellErrors).toMatchObject([
+        {
+          title: "This workspace is on a network share",
+          message: `${sentence} To keep History private, move the workspace ${destination}.`,
+        },
+      ]);
       shell.unmount();
     }
   });
@@ -100,7 +120,9 @@ describe("useNetworkShareNotice", () => {
     try {
       mountShell("ws-full", true).unmount();
       relaunch();
-      expect(mountShell("ws-full", true).result.current.shell.shellErrors).toMatchObject([{ seen: false }]);
+      expect(mountShell("ws-full", true).result.current.shell.shellErrors).toMatchObject([
+        { seen: false },
+      ]);
     } finally {
       Storage.prototype.setItem = setItem;
     }

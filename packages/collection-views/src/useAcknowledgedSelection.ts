@@ -29,11 +29,19 @@ export function withoutDiscarded(pending: PendingSelection[], writeId: number): 
   const next = kept[index + 1];
   // The next queued full value includes this edit. Carry its net changes
   // forward while retaining delta replay against external updates.
-  if (next) kept[index + 1] = {
-    ...next,
-    added: [...new Set([...discarded.added.filter(id => !next.removed.includes(id)), ...next.added])],
-    removed: [...new Set([...discarded.removed.filter(id => !next.added.includes(id)), ...next.removed])],
-  };
+  if (next)
+    kept[index + 1] = {
+      ...next,
+      added: [
+        ...new Set([...discarded.added.filter((id) => !next.removed.includes(id)), ...next.added]),
+      ],
+      removed: [
+        ...new Set([
+          ...discarded.removed.filter((id) => !next.added.includes(id)),
+          ...next.removed,
+        ]),
+      ],
+    };
   kept.splice(index, 1);
   return kept;
 }
@@ -50,7 +58,8 @@ export function useCarriedSelections(
   useEffect(
     () =>
       subscribeToDiscardedWrites?.((writeId) => {
-        for (const carried of cells.current.values()) carried.pending = withoutDiscarded(carried.pending, writeId);
+        for (const carried of cells.current.values())
+          carried.pending = withoutDiscarded(carried.pending, writeId);
       }),
     [subscribeToDiscardedWrites],
   );
@@ -62,7 +71,11 @@ export function useCarriedSelections(
 }
 
 /** `observed` after each pending change in turn: the selection now, and every value on the way to it. */
-export function replayedSelection(value: CollectionValue, observed: readonly string[], pending: readonly PendingSelection[]) {
+export function replayedSelection(
+  value: CollectionValue,
+  observed: readonly string[],
+  pending: readonly PendingSelection[],
+) {
   const previousValues: CollectionValue[] = [value];
   let selected = [...observed];
   for (const change of pending) {
@@ -75,7 +88,14 @@ export function replayedSelection(value: CollectionValue, observed: readonly str
   return { selected, previousValues };
 }
 
-export function useAcknowledgedSelection({ value, ids, acknowledgedWriteId, subscribeToDiscardedWrites, emit, carried }: {
+export function useAcknowledgedSelection({
+  value,
+  ids,
+  acknowledgedWriteId,
+  subscribeToDiscardedWrites,
+  emit,
+  carried,
+}: {
   value: CollectionValue;
   ids: string[];
   acknowledgedWriteId: number;
@@ -89,15 +109,22 @@ export function useAcknowledgedSelection({ value, ids, acknowledgedWriteId, subs
     acknowledgedWriteId,
     pending: carried?.pending.filter((change) => change.writeId > acknowledgedWriteId) ?? [],
   }));
-  useEffect(() => subscribeToDiscardedWrites?.((writeId) => {
-    setSelection((current) => {
-      const pending = withoutDiscarded(current.pending, writeId);
-      return pending === current.pending ? current : { ...current, pending };
-    });
-  }), [subscribeToDiscardedWrites]);
+  useEffect(
+    () =>
+      subscribeToDiscardedWrites?.((writeId) => {
+        setSelection((current) => {
+          const pending = withoutDiscarded(current.pending, writeId);
+          return pending === current.pending ? current : { ...current, pending };
+        });
+      }),
+    [subscribeToDiscardedWrites],
+  );
   const observed = ids;
   let current = selection;
-  if (acknowledgedWriteId !== selection.acknowledgedWriteId || !sameSelection(observed, selection.observed)) {
+  if (
+    acknowledgedWriteId !== selection.acknowledgedWriteId ||
+    !sameSelection(observed, selection.observed)
+  ) {
     current = {
       observed,
       acknowledgedWriteId,
@@ -113,15 +140,21 @@ export function useAcknowledgedSelection({ value, ids, acknowledgedWriteId, subs
    */
   const select = (
     next: string[],
-    send: (value: CollectionValue, previousValues: readonly CollectionValue[]) => number | void = emit,
+    send: (
+      value: CollectionValue,
+      previousValues: readonly CollectionValue[],
+    ) => number | void = emit,
   ) => {
     const writeId = send(next, previousValues);
     if (typeof writeId !== "number") return;
-    const pending = [...current.pending, {
-      writeId,
-      added: next.filter((option) => !selected.includes(option)),
-      removed: selected.filter((option) => !next.includes(option)),
-    }];
+    const pending = [
+      ...current.pending,
+      {
+        writeId,
+        added: next.filter((option) => !selected.includes(option)),
+        removed: selected.filter((option) => !next.includes(option)),
+      },
+    ];
     if (carried) carried.pending = pending;
     setSelection({ ...current, pending });
   };

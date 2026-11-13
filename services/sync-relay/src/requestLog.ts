@@ -86,7 +86,8 @@ export const RELAY_ROUTE_PATTERNS = {
   presence: "/sync/:workspaceId/presence",
   keys: "/sync/:workspaceId/keys",
   "share-link-agents": "/sync/:workspaceId/shares/:shareId/links/:grantId/agents",
-  "share-link-agent-disconnect": "/sync/:workspaceId/shares/:shareId/links/:grantId/agents/:connectionId/disconnect",
+  "share-link-agent-disconnect":
+    "/sync/:workspaceId/shares/:shareId/links/:grantId/agents/:connectionId/disconnect",
   "share-copy": "/sync/:workspaceId/shares/:shareId/grants/:grantId/copy",
   "shares-create": "/sync/:workspaceId/shares",
   "share-link-create-atomic": "/sync/:workspaceId/shares/links",
@@ -121,19 +122,40 @@ export const RELAY_ENTRY_PATTERNS = [
   "replication",
 ] as const;
 
-export const SYNC_RELAY_REQUEST_LOG = createRequestLog("sync-relay", [...Object.values(RELAY_ROUTE_PATTERNS), ...RELAY_ENTRY_PATTERNS]);
+export const SYNC_RELAY_REQUEST_LOG = createRequestLog("sync-relay", [
+  ...Object.values(RELAY_ROUTE_PATTERNS),
+  ...RELAY_ENTRY_PATTERNS,
+]);
 
 type RelayEntryPattern = (typeof RELAY_ENTRY_PATTERNS)[number];
 // main.ts answers these four before relayHandler and marks them in their own branches.
-const MARKED_IN_MAIN: ReadonlySet<string> = new Set(["/internal/account-deletion", "/internal/sign-up-invite", "/ready", "/health"]);
-const LITERAL_ENTRIES: ReadonlySet<string> = new Set(RELAY_ENTRY_PATTERNS.filter(pattern =>
-  pattern.startsWith("/") && !/[:*]/u.test(pattern) && !MARKED_IN_MAIN.has(pattern)));
+const MARKED_IN_MAIN: ReadonlySet<string> = new Set([
+  "/internal/account-deletion",
+  "/internal/sign-up-invite",
+  "/ready",
+  "/health",
+]);
+const LITERAL_ENTRIES: ReadonlySet<string> = new Set(
+  RELAY_ENTRY_PATTERNS.filter(
+    (pattern) => pattern.startsWith("/") && !/[:*]/u.test(pattern) && !MARKED_IN_MAIN.has(pattern),
+  ),
+);
 
 /** The pattern of a route relayHandler answers before dispatch parses one, in relayHandler's own order: the bearer first. */
-export function relayEntryPattern(authorization: string | null, pathname: string): RelayEntryPattern | undefined {
-  if (authorization?.startsWith("Bearer dohc-service-v1.") || authorization?.startsWith(`Bearer ${AUTOMATION_REPLICA_BEARER_PREFIX}`)) return "replication";
-  if (isServiceHostEnrollmentPath(pathname)) return pathname.endsWith("/kept-edits") ? "/sync/:workspaceId/live-host/kept-edits" : "/sync/:workspaceId/live-host";
+export function relayEntryPattern(
+  authorization: string | null,
+  pathname: string,
+): RelayEntryPattern | undefined {
+  if (
+    authorization?.startsWith("Bearer dohc-service-v1.") ||
+    authorization?.startsWith(`Bearer ${AUTOMATION_REPLICA_BEARER_PREFIX}`)
+  )
+    return "replication";
+  if (isServiceHostEnrollmentPath(pathname))
+    return pathname.endsWith("/kept-edits")
+      ? "/sync/:workspaceId/live-host/kept-edits"
+      : "/sync/:workspaceId/live-host";
   if (pathname.startsWith("/sync/named-chat/")) return "/sync/named-chat/*";
   if (pathname.startsWith("/sync/push/")) return "/sync/push/*";
-  return LITERAL_ENTRIES.has(pathname) ? pathname as RelayEntryPattern : undefined;
+  return LITERAL_ENTRIES.has(pathname) ? (pathname as RelayEntryPattern) : undefined;
 }

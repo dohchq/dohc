@@ -74,13 +74,16 @@ export function useAccountDeletion(): { deletion: AccountDeletion; dialog: React
   function deleted(result: ServerAccountDeleted) {
     end((to) => {
       if (result.finished) {
-        to.showSuccess(`Deleted ${result.email} on ${result.server}. Workspaces on this computer stay.`);
+        to.showSuccess(
+          `Deleted ${result.email} on ${result.server}. Workspaces on this computer stay.`,
+        );
       } else {
         to.showWarning(
           `${result.server} blocked ${result.email} and will finish deleting its data. Workspaces on this computer stay.`,
         );
       }
-      if (result.disconnectError !== null) disconnectFailed(to, result.server, new Error(result.disconnectError));
+      if (result.disconnectError !== null)
+        disconnectFailed(to, result.server, new Error(result.disconnectError));
     });
   }
 
@@ -92,9 +95,11 @@ export function useAccountDeletion(): { deletion: AccountDeletion; dialog: React
       cause,
       serverUrl: null,
       retry: () => {
-        void bridge().retryServerAccountDisconnect({}).catch((next: unknown) => {
-          if (shell.current) disconnectFailed(shell.current, server, next);
-        });
+        void bridge()
+          .retryServerAccountDisconnect({})
+          .catch((next: unknown) => {
+            if (shell.current) disconnectFailed(shell.current, server, next);
+          });
         return true;
       },
     });
@@ -110,7 +115,11 @@ export function useAccountDeletion(): { deletion: AccountDeletion; dialog: React
         cause,
         serverUrl: null,
         retry: () => {
-          if (signInCount() !== failedReview.signIns || shell.current?.cloudStatus?.connected !== true) return false;
+          if (
+            signInCount() !== failedReview.signIns ||
+            shell.current?.cloudStatus?.connected !== true
+          )
+            return false;
           start(failedReview);
           return true;
         },

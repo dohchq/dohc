@@ -25,7 +25,8 @@ export function createShareDirectWriteQueue(dependencies: {
   const again = new Set<string>();
 
   function report(workspaceId: string, result: PushShareDirectWritesResult): void {
-    if (result.status === "pushed" && result.writes.every((write) => write.result === "written")) return;
+    if (result.status === "pushed" && result.writes.every((write) => write.result === "written"))
+      return;
     dependencies.report(workspaceId, result);
   }
 
@@ -68,10 +69,13 @@ export function createShareDirectWriteQueue(dependencies: {
     edited(workspaceId: string): void {
       const timer = timers.get(workspaceId);
       if (timer !== undefined) clearTimeout(timer);
-      timers.set(workspaceId, setTimeout(() => {
-        timers.delete(workspaceId);
-        void run(workspaceId);
-      }, delayMs));
+      timers.set(
+        workspaceId,
+        setTimeout(() => {
+          timers.delete(workspaceId);
+          void run(workspaceId);
+        }, delayMs),
+      );
     },
     /**
      * Pushes now and answers only completion. Feedback always uses report,

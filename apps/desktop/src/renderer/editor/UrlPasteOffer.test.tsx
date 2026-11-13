@@ -9,25 +9,43 @@ import type { UrlPasteOfferState } from "./urlPaste";
 afterEach(cleanup);
 
 const OFFER: UrlPasteOfferState = {
-  from: 1, to: 25, url: "https://example.com/trip", text: "https://example.com/trip",
-  form: "link", chosen: false, anchors: null,
+  from: 1,
+  to: 25,
+  url: "https://example.com/trip",
+  text: "https://example.com/trip",
+  form: "link",
+  chosen: false,
+  anchors: null,
 };
 
 function renderOffer(offer: UrlPasteOfferState | null = OFFER) {
-  const view = { coordsAtPos: () => ({ left: 40, top: 100, bottom: 118 }), focus: vi.fn() } as unknown as EditorView;
-  const props = { view, rowRef: createRef<HTMLDivElement>(), onChoose: vi.fn(), onUndo: vi.fn(), onDismiss: vi.fn() };
+  const view = {
+    coordsAtPos: () => ({ left: 40, top: 100, bottom: 118 }),
+    focus: vi.fn(),
+  } as unknown as EditorView;
+  const props = {
+    view,
+    rowRef: createRef<HTMLDivElement>(),
+    onChoose: vi.fn(),
+    onUndo: vi.fn(),
+    onDismiss: vi.fn(),
+  };
   const result = render(
     <>
       <button type="button">elsewhere</button>
       <UrlPasteOffer offer={offer} {...props} />
     </>,
   );
-  return { ...props, rerender: (next: UrlPasteOfferState | null) => result.rerender(
-    <>
-      <button type="button">elsewhere</button>
-      <UrlPasteOffer offer={next} {...props} />
-    </>,
-  ) };
+  return {
+    ...props,
+    rerender: (next: UrlPasteOfferState | null) =>
+      result.rerender(
+        <>
+          <button type="button">elsewhere</button>
+          <UrlPasteOffer offer={next} {...props} />
+        </>,
+      ),
+  };
 }
 
 describe("URL paste offer row", () => {

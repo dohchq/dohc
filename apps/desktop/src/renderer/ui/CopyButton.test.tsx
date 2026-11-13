@@ -11,8 +11,14 @@ import { COPY_FEEDBACK_MS, CopyButton, CopyField, createCopy, type CopySecret } 
 
 const REFUSED = "Document is not focused.";
 const refusal = () => new Error(REFUSED);
-const LINK: CopySecret = { what: "the share link", again: "Reset the link in Share to get a new one." };
-const CODE: CopySecret = { what: "the share code", again: "Copy it again from Shared by me while the share is active." };
+const LINK: CopySecret = {
+  what: "the share link",
+  again: "Reset the link in Share to get a new one.",
+};
+const CODE: CopySecret = {
+  what: "the share code",
+  again: "Copy it again from Shared by me while the share is active.",
+};
 
 setFlagsFromString("--expose-gc");
 const gc = runInNewContext("gc") as () => void;
@@ -40,7 +46,9 @@ function retryOf(report: Mock<ReportShellFailure>, call = -1): () => void {
 // its source leaves this function.
 async function failThenClose(report: Mock<ReportShellFailure>): Promise<WeakRef<object>> {
   const source = { link: "https://share.example.test/s/secret" };
-  const view = render(withReporter(report, <CopyButton getText={() => source.link} sensitive={LINK} testId="copy" />));
+  const view = render(
+    withReporter(report, <CopyButton getText={() => source.link} sensitive={LINK} testId="copy" />),
+  );
   await click(screen.getByTestId("copy"));
   view.unmount();
   cleanup();
@@ -80,7 +88,10 @@ describe("CopyButton feedback", () => {
     async (feedback) => {
       const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
       if (feedback === "Could not copy") writeText.mockRejectedValueOnce(new Error("unavailable"));
-      const getText = vi.fn<() => string | null>().mockReturnValueOnce("first").mockReturnValue(null);
+      const getText = vi
+        .fn<() => string | null>()
+        .mockReturnValueOnce("first")
+        .mockReturnValue(null);
       render(<CopyButton getText={getText} testId="copy" />);
       const button = screen.getByTestId("copy");
 
@@ -103,7 +114,8 @@ describe("CopyButton feedback", () => {
     const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
     const nextText = deferred<string>();
     const nextWrite = deferred();
-    const getText = vi.fn<() => string | Promise<string>>()
+    const getText = vi
+      .fn<() => string | Promise<string>>()
       .mockReturnValueOnce("first")
       .mockReturnValue(nextText.promise);
     render(<CopyButton getText={getText} testId="copy" />);
@@ -138,7 +150,9 @@ describe("CopyButton feedback", () => {
     writeText.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
     const report = vi.fn<ReportShellFailure>();
     const texts = ["old", "new"];
-    render(withReporter(report, <CopyButton getText={() => texts.shift() ?? null} testId="copy" />));
+    render(
+      withReporter(report, <CopyButton getText={() => texts.shift() ?? null} testId="copy" />),
+    );
     const button = screen.getByTestId("copy");
 
     await click(button);
@@ -207,14 +221,21 @@ describe("CopyButton feedback", () => {
       </>,
     );
     expect(screen.getByRole("button", { name: "Copy code" })).toBe(screen.getByTestId("code"));
-    expect(screen.getByRole("button", { name: "Copy browser invitation" })).toBe(screen.getByTestId("invitation"));
+    expect(screen.getByRole("button", { name: "Copy browser invitation" })).toBe(
+      screen.getByTestId("invitation"),
+    );
 
     await click(screen.getByTestId("code"));
     await click(screen.getByTestId("invitation"));
     expect(screen.getByRole("button", { name: "Copied" })).toBe(screen.getByTestId("code"));
-    expect(screen.getByRole("button", { name: "Browser invitation copied" })).toBe(screen.getByTestId("invitation"));
+    expect(screen.getByRole("button", { name: "Browser invitation copied" })).toBe(
+      screen.getByTestId("invitation"),
+    );
     await act(() => vi.advanceTimersByTimeAsync(0));
-    expect(screen.getAllByRole("status").map((region) => region.textContent)).toEqual(["Copied", "Browser invitation copied"]);
+    expect(screen.getAllByRole("status").map((region) => region.textContent)).toEqual([
+      "Copied",
+      "Browser invitation copied",
+    ]);
   });
 
   it("writes in the same task as the click when the text is at hand", () => {
@@ -229,7 +250,9 @@ describe("CopyButton feedback", () => {
 describe("CopyButton tone", () => {
   // Every class on the control and inside it.
   const classes = (id: string) =>
-    [screen.getByTestId(id), ...screen.getByTestId(id).querySelectorAll("*")].map((el) => el.getAttribute("class") ?? "").join(" ");
+    [screen.getByTestId(id), ...screen.getByTestId(id).querySelectorAll("*")]
+      .map((el) => el.getAttribute("class") ?? "")
+      .join(" ");
 
   it("keeps the control's own tone at Copied, and danger for a failed copy", async () => {
     const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
@@ -253,7 +276,9 @@ describe("CopyButton tone", () => {
     await click(screen.getByTestId("words"));
     await click(screen.getByTestId("tile"));
     expect(screen.getByTestId("words").textContent).toBe("Could not copy");
-    expect(screen.getByTestId("words").querySelector("svg")?.getAttribute("class")).toContain("text-danger");
+    expect(screen.getByTestId("words").querySelector("svg")?.getAttribute("class")).toContain(
+      "text-danger",
+    );
     expect(screen.getByTestId("tile").getAttribute("title")).toBe("Could not copy");
     expect(screen.getByTestId("tile").getAttribute("class")).toContain("bg-hover text-danger");
   });
@@ -287,7 +312,9 @@ describe("CopyButton failure", () => {
     const writeText = vi.spyOn(navigator.clipboard, "writeText");
     const report = vi.fn<ReportShellFailure>();
     const projection = new Error("The draft could not be read.");
-    render(withReporter(report, <CopyButton getText={() => Promise.reject(projection)} testId="copy" />));
+    render(
+      withReporter(report, <CopyButton getText={() => Promise.reject(projection)} testId="copy" />),
+    );
 
     await click(screen.getByTestId("copy"));
     expect(screen.getByTestId("copy").textContent).toBe("Could not copy");
@@ -312,7 +339,16 @@ describe("CopyButton failure", () => {
   it("names a secret in its failure and offers Try again while its button is on screen", async () => {
     const writeText = vi.spyOn(navigator.clipboard, "writeText").mockRejectedValueOnce(refusal());
     const report = vi.fn<ReportShellFailure>();
-    render(withReporter(report, <CopyButton getText={() => "https://share.example.test/s/a"} sensitive={LINK} testId="copy" />));
+    render(
+      withReporter(
+        report,
+        <CopyButton
+          getText={() => "https://share.example.test/s/a"}
+          sensitive={LINK}
+          testId="copy"
+        />,
+      ),
+    );
 
     await click(screen.getByTestId("copy"));
     expect(report).toHaveBeenCalledExactlyOnceWith({
@@ -331,7 +367,9 @@ describe("CopyButton after it is gone", () => {
     const writeText = vi.spyOn(navigator.clipboard, "writeText");
     const report = vi.fn<ReportShellFailure>();
     const text = deferred<string>();
-    const view = render(withReporter(report, <CopyButton getText={() => text.promise} testId="copy" />));
+    const view = render(
+      withReporter(report, <CopyButton getText={() => text.promise} testId="copy" />),
+    );
 
     await click(screen.getByTestId("copy"));
     view.unmount();
@@ -344,7 +382,9 @@ describe("CopyButton after it is gone", () => {
     const write = deferred();
     const writeText = vi.spyOn(navigator.clipboard, "writeText").mockReturnValueOnce(write.promise);
     const report = vi.fn<ReportShellFailure>();
-    const view = render(withReporter(report, <CopyButton getText={() => "details"} testId="copy" />));
+    const view = render(
+      withReporter(report, <CopyButton getText={() => "details"} testId="copy" />),
+    );
 
     await click(screen.getByTestId("copy"));
     view.unmount();
@@ -364,7 +404,9 @@ describe("CopyButton after it is gone", () => {
   it("copies the text that failed when Try again comes after the button closed", async () => {
     const writeText = vi.spyOn(navigator.clipboard, "writeText").mockRejectedValueOnce(refusal());
     const report = vi.fn<ReportShellFailure>();
-    const view = render(withReporter(report, <CopyButton getText={() => "error details"} testId="copy" />));
+    const view = render(
+      withReporter(report, <CopyButton getText={() => "error details"} testId="copy" />),
+    );
 
     await click(screen.getByTestId("copy"));
     const retry = retryOf(report);
@@ -394,7 +436,9 @@ describe("CopyButton after it is gone", () => {
     const writeText = vi.spyOn(navigator.clipboard, "writeText").mockRejectedValueOnce(refusal());
     const report = vi.fn<ReportShellFailure>();
     const getText = vi.fn(() => "secret link");
-    const view = render(withReporter(report, <CopyButton getText={getText} sensitive={LINK} testId="copy" />));
+    const view = render(
+      withReporter(report, <CopyButton getText={getText} sensitive={LINK} testId="copy" />),
+    );
 
     await click(screen.getByTestId("copy"));
     const retry = retryOf(report);
@@ -415,7 +459,10 @@ describe("CopyButton after it is gone", () => {
     vi.spyOn(navigator.clipboard, "writeText").mockReturnValueOnce(write.promise);
     const report = vi.fn<ReportShellFailure>();
     const view = render(
-      withReporter(report, <CopyButton getText={() => "dohc-share:a:relay"} sensitive={CODE} testId="copy" />),
+      withReporter(
+        report,
+        <CopyButton getText={() => "dohc-share:a:relay"} sensitive={CODE} testId="copy" />,
+      ),
     );
 
     await click(screen.getByTestId("copy"));
@@ -434,11 +481,12 @@ describe("CopyButton after it is gone", () => {
     const writeText = vi.spyOn(navigator.clipboard, "writeText").mockRejectedValueOnce(refusal());
     const report = vi.fn<ReportShellFailure>();
     const field = (link: string) =>
-      withReporter(report, (
+      withReporter(
+        report,
         <CopyField copyTestId="copy" getText={() => link} sensitive={LINK}>
           <code>{link}</code>
-        </CopyField>
-      ));
+        </CopyField>,
+      );
     const view = render(field("https://share.example.test/s/old"));
 
     await click(screen.getByTestId("copy"));
@@ -475,7 +523,9 @@ describe("CopyButton after it is gone", () => {
     const writeText = vi.spyOn(navigator.clipboard, "writeText");
     const report = vi.fn<ReportShellFailure>();
     const unreadable = new Error("The draft could not be read.");
-    const view = render(withReporter(report, <CopyButton getText={() => Promise.reject(unreadable)} testId="copy" />));
+    const view = render(
+      withReporter(report, <CopyButton getText={() => Promise.reject(unreadable)} testId="copy" />),
+    );
 
     await click(screen.getByTestId("copy"));
     const retry = retryOf(report);
@@ -493,7 +543,9 @@ describe("CopyButton after it is gone", () => {
     const write = deferred();
     vi.spyOn(navigator.clipboard, "writeText").mockReturnValueOnce(write.promise);
     const report = vi.fn<ReportShellFailure>();
-    const view = render(withReporter(report, <CopyButton getText={() => "details"} testId="copy" />));
+    const view = render(
+      withReporter(report, <CopyButton getText={() => "details"} testId="copy" />),
+    );
 
     await click(screen.getByTestId("copy"));
     view.unmount();

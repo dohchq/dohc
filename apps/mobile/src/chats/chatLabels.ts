@@ -3,7 +3,10 @@ import type { ChatKind, ChatRowData } from "./sample";
 
 // The words for a chat's header, from the desktop's AgentBadge.tsx and reportedAgent.ts. The header shows no reported
 // text: the claim is on the agent's card, with its "(as reported)".
-export const chatWords = { connectedAgent: agentCardWords.connected, unnamedAgent: agentCardWords.unnamed } as const;
+export const chatWords = {
+  connectedAgent: agentCardWords.connected,
+  unnamedAgent: agentCardWords.unnamed,
+} as const;
 
 /** A chat's shown name: "#" marks a group only, as on the desktop; a file's chat, a person or an agent goes by its name,
  * and an agent that gave no name is "Agent". */
@@ -14,7 +17,10 @@ export function chatTitle(kind: ChatKind, name: string): string {
 
 /** The header's second line: the member count for a group or a file's chat; "Connected agent" for a chat with one
  * connected agent; nothing for a chat with one person or with your own agent. */
-export function chatSubtitle(chat: Pick<ChatRowData, "kind" | "connected">, members: number): string | undefined {
+export function chatSubtitle(
+  chat: Pick<ChatRowData, "kind" | "connected">,
+  members: number,
+): string | undefined {
   if (chat.kind === "agent") return chat.connected ? chatWords.connectedAgent : undefined;
   if (chat.kind === "person") return undefined;
   return `${members} members`;

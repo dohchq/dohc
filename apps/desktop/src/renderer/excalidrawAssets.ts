@@ -38,11 +38,7 @@ export function binaryFileDataFromArtifact(
   },
 ): BinaryFileData | null {
   if (!sameArtifactAssetDescriptor(loaded.descriptor, expected)) return null;
-  if (
-    !EXCALIDRAW_ASSET_MIME_TYPES.has(
-      expected.mimeType as BinaryFileData["mimeType"],
-    )
-  ) {
+  if (!EXCALIDRAW_ASSET_MIME_TYPES.has(expected.mimeType as BinaryFileData["mimeType"])) {
     return null;
   }
   const mimeType = expected.mimeType as BinaryFileData["mimeType"];
@@ -51,9 +47,7 @@ export function binaryFileDataFromArtifact(
     mimeType,
     dataURL: `data:${mimeType};base64,${bytesToBase64(loaded.bytes)}` as BinaryFileData["dataURL"],
     created: expected.created,
-    ...(expected.lastRetrieved === undefined
-      ? {}
-      : { lastRetrieved: expected.lastRetrieved }),
+    ...(expected.lastRetrieved === undefined ? {} : { lastRetrieved: expected.lastRetrieved }),
     ...(expected.version === undefined ? {} : { version: expected.version }),
   };
 }

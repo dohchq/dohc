@@ -39,7 +39,11 @@ const LOAD_ABORTED = -3;
 // Focus is on the page, or on the focused editor group's own area.
 function focusWentNowhere(): boolean {
   const active = document.activeElement;
-  return !active || active === document.body || active.matches('[data-focus-surface="editor"][data-active]');
+  return (
+    !active ||
+    active === document.body ||
+    active.matches('[data-focus-surface="editor"][data-active]')
+  );
 }
 
 type ViewState =
@@ -99,40 +103,64 @@ export function useAppView(options: {
     wantsFocus.current = false;
     // A dialog that opened while the app was opening keeps focus. Shift+Tab into the app passes through its page's
     // end stop, and the browser goes on from there into the app's last control.
-    if (!hasBlockingModal() && !document.activeElement?.matches("[data-app-stop]")) webview.current.focus();
+    if (!hasBlockingModal() && !document.activeElement?.matches("[data-app-stop]"))
+      webview.current.focus();
   }, []);
 
-  const fail = useCallback((message: string, cause: unknown) => {
-    setState({ status: "failed" });
-    setLoading(false);
-    latest.current.notices?.report({ identity: failureId, message, cause, retry: () => void launchRef.current() });
-  }, [failureId]);
+  const fail = useCallback(
+    (message: string, cause: unknown) => {
+      setState({ status: "failed" });
+      setLoading(false);
+      latest.current.notices?.report({
+        identity: failureId,
+        message,
+        cause,
+        retry: () => void launchRef.current(),
+      });
+    },
+    [failureId],
+  );
 
   const launch = useCallback(async () => {
     if (!alive.current) return;
     const mine = ++request.current;
     const { workspaceId, appRoot, notices } = latest.current;
-    const current = () => alive.current && mine === request.current &&
-      latest.current.workspaceId === workspaceId && latest.current.appRoot === appRoot;
+    const current = () =>
+      alive.current &&
+      mine === request.current &&
+      latest.current.workspaceId === workspaceId &&
+      latest.current.appRoot === appRoot;
     sessionEnded.current = false;
     setState({ status: "checking" });
     setLoading(false);
     setPainted(false);
     try {
-      const result = await bridge().appView({ action: "open", workspaceId, appRoot, viewId, colorScheme: readColorScheme() });
+      const result = await bridge().appView({
+        action: "open",
+        workspaceId,
+        appRoot,
+        viewId,
+        colorScheme: readColorScheme(),
+      });
       if (!current()) return;
       if (result.kind === "unapproved" && result.viewId === viewId) {
         notices?.clear(failureId);
         setState({ status: "unapproved", ended: opened.current });
         return;
       }
-      if (result.kind !== "opened" || result.viewId !== viewId || !localLaunchUrl(result.url)) throw new Error(APP_OPEN_FAILED);
+      if (result.kind !== "opened" || result.viewId !== viewId || !localLaunchUrl(result.url))
+        throw new Error(APP_OPEN_FAILED);
       opened.current = true;
       notices?.clear(failureId);
       notices?.clear(sessionId);
       setPublicationId(result.publicationId);
       setLoading(true);
-      setState({ status: "open", url: result.url, partition: result.partition, launch: ++launches.current });
+      setState({
+        status: "open",
+        url: result.url,
+        partition: result.partition,
+        launch: ++launches.current,
+      });
     } catch (error) {
       if (!current()) return;
       fail(ipcErrorMessage(error, "").includes(APP_LIMIT) ? APP_LIMIT : APP_OPEN_FAILED, error);
@@ -153,7 +181,9 @@ export function useAppView(options: {
     return () => {
       alive.current = false;
       request.current += 1;
-      void bridge().appView({ action: "close", workspaceId, viewId }).catch(() => undefined);
+      void bridge()
+        .appView({ action: "close", workspaceId, viewId })
+        .catch(() => undefined);
       // Their Try again, Reload and Open in browser act on this view.
       latest.current.notices?.clear(failureId);
       latest.current.notices?.clear(sessionId);
@@ -170,7 +200,10 @@ export function useAppView(options: {
   const openInBrowser = useCallback(async () => {
     if (!publicationId || !alive.current) return;
     const { workspaceId, appRoot, reportError } = latest.current;
-    const current = () => alive.current && latest.current.workspaceId === workspaceId && latest.current.appRoot === appRoot;
+    const current = () =>
+      alive.current &&
+      latest.current.workspaceId === workspaceId &&
+      latest.current.appRoot === appRoot;
     const again = () => void openInBrowserRef.current();
     try {
       await openLocalApp(bridge(), workspaceId, publicationId, current);
@@ -189,23 +222,33 @@ export function useAppView(options: {
   }, []);
 
   // Keys typed in the app never reach dohc's window. Main forwards these, and dohc handles them as if they had.
-  const onShortcut = useCallback((event: Shortcut) => {
-    const primary = event.ctrlKey || event.metaKey;
-    if (event.key === "F5" || (primary && event.key.toLowerCase() === "r")) reload();
-    else if (event.altKey && event.key === "ArrowLeft") navigate("back");
-    else if (event.altKey && event.key === "ArrowRight") navigate("forward");
-    else if (event.key === "F6") {
-      // F6 moves with the keyboard, so the toolbar shows where focus landed.
-      document.documentElement.toggleAttribute(KEYBOARD_NAV_ATTRIBUTE, true);
-      toolbarStart.current?.focus();
-    }
-    else {
-      window.dispatchEvent(new KeyboardEvent("keydown", {
-        key: event.key, code: event.code, ctrlKey: event.ctrlKey, shiftKey: event.shiftKey,
-        altKey: event.altKey, metaKey: event.metaKey, bubbles: true, cancelable: true,
-      }));
-    }
-  }, [navigate, reload]);
+  const onShortcut = useCallback(
+    (event: Shortcut) => {
+      const primary = event.ctrlKey || event.metaKey;
+      if (event.key === "F5" || (primary && event.key.toLowerCase() === "r")) reload();
+      else if (event.altKey && event.key === "ArrowLeft") navigate("back");
+      else if (event.altKey && event.key === "ArrowRight") navigate("forward");
+      else if (event.key === "F6") {
+        // F6 moves with the keyboard, so the toolbar shows where focus landed.
+        document.documentElement.toggleAttribute(KEYBOARD_NAV_ATTRIBUTE, true);
+        toolbarStart.current?.focus();
+      } else {
+        window.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key: event.key,
+            code: event.code,
+            ctrlKey: event.ctrlKey,
+            shiftKey: event.shiftKey,
+            altKey: event.altKey,
+            metaKey: event.metaKey,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      }
+    },
+    [navigate, reload],
+  );
 
   useEffect(() => {
     if (!enabled) return;
@@ -226,11 +269,24 @@ export function useAppView(options: {
           return;
         }
         sessionEnded.current = true;
-        notices?.report({ identity: sessionId, message: APP_SESSION_ENDED, retry: null,
-          action: { label: "Reload", run: () => void launchRef.current(), ends: true } });
+        notices?.report({
+          identity: sessionId,
+          message: APP_SESSION_ENDED,
+          retry: null,
+          action: { label: "Reload", run: () => void launchRef.current(), ends: true },
+        });
       } else if (event.kind === "download-blocked") {
-        notices?.report({ identity: downloadId, title: `dohc didn't download ${event.filename}`, message: APP_DOWNLOAD_BLOCKED, retry: null,
-          action: { label: "Open in browser", run: () => void openInBrowserRef.current(), ends: true } });
+        notices?.report({
+          identity: downloadId,
+          title: `dohc didn't download ${event.filename}`,
+          message: APP_DOWNLOAD_BLOCKED,
+          retry: null,
+          action: {
+            label: "Open in browser",
+            run: () => void openInBrowserRef.current(),
+            ends: true,
+          },
+        });
       } else if (event.kind === "external-link") {
         void openLinkExternally(event.url);
       } else if (event.kind === "shortcut") {
@@ -250,7 +306,9 @@ export function useAppView(options: {
     if (sentTheme.current === theme) return;
     sentTheme.current = theme;
     if (!enabled) return;
-    void bridge().appView({ action: "colorScheme", workspaceId, colorScheme: theme }).catch(() => undefined);
+    void bridge()
+      .appView({ action: "colorScheme", workspaceId, colorScheme: theme })
+      .catch(() => undefined);
   }, [enabled, theme, workspaceId]);
 
   // Switching to the tab puts focus in the app. Focus that only makes the app's group the focused one, such as Tab
@@ -261,20 +319,31 @@ export function useAppView(options: {
     const switched = !wasVisible.current;
     wasVisible.current = options.visible;
     // Focus that moved elsewhere before the app finished opening stays there.
-    if (!options.focused) { wantsFocus.current = false; return; }
+    if (!options.focused) {
+      wantsFocus.current = false;
+      return;
+    }
     if (!switched && !focusWentNowhere()) return;
     wantsFocus.current = true;
-    if (switched) { tryFocus(); return; }
+    if (switched) {
+      tryFocus();
+      return;
+    }
     // A press on the group's blank area makes it the focused one before the browser focuses that area, and focus
     // stays where the person pressed. Focus that something put back, such as a closing palette, stays there too.
-    const press = () => { wantsFocus.current = false; };
+    const press = () => {
+      wantsFocus.current = false;
+    };
     document.addEventListener("mousedown", press, { capture: true, once: true });
     const later = setTimeout(() => {
       document.removeEventListener("mousedown", press, true);
       if (focusWentNowhere()) tryFocus();
       else wantsFocus.current = false;
     });
-    return () => { clearTimeout(later); document.removeEventListener("mousedown", press, true); };
+    return () => {
+      clearTimeout(later);
+      document.removeEventListener("mousedown", press, true);
+    };
   }, [options.visible, options.focused, tryFocus]);
   // A click on the app's tab, or Enter or Space on it, puts focus in the app, also when the tab was already shown.
   const pressSeen = useRef(options.focusRequest);
@@ -299,34 +368,42 @@ export function useAppView(options: {
     void launch();
   }, [options.approvals, state.status, launch]);
 
-  const attach = useCallback((element: Electron.WebviewTag | null) => {
-    if (!element) return;
-    webview.current = element;
-    const started = () => setLoading(true);
-    const stopped = () => {
-      setLoading(false);
-      setPainted(true);
-    };
-    const failed = (event: Event) => {
-      const { isMainFrame, errorCode, errorDescription } = event as Electron.DidFailLoadEvent;
-      if (!isMainFrame || errorCode === LOAD_ABORTED) return;
-      fail(APP_OPEN_FAILED, new Error(`${errorDescription} (${errorCode})`));
-    };
-    const gone = (event: Event) =>
-      fail(APP_CRASHED, new Error(`Reason: ${(event as Electron.RenderProcessGoneEvent).details?.reason ?? "unknown"}`));
-    element.addEventListener("did-start-loading", started);
-    element.addEventListener("did-stop-loading", stopped);
-    element.addEventListener("did-fail-load", failed);
-    element.addEventListener("render-process-gone", gone);
-    tryFocus();
-    return () => {
-      element.removeEventListener("did-start-loading", started);
-      element.removeEventListener("did-stop-loading", stopped);
-      element.removeEventListener("did-fail-load", failed);
-      element.removeEventListener("render-process-gone", gone);
-      if (webview.current === element) webview.current = null;
-    };
-  }, [fail, tryFocus]);
+  const attach = useCallback(
+    (element: Electron.WebviewTag | null) => {
+      if (!element) return;
+      webview.current = element;
+      const started = () => setLoading(true);
+      const stopped = () => {
+        setLoading(false);
+        setPainted(true);
+      };
+      const failed = (event: Event) => {
+        const { isMainFrame, errorCode, errorDescription } = event as Electron.DidFailLoadEvent;
+        if (!isMainFrame || errorCode === LOAD_ABORTED) return;
+        fail(APP_OPEN_FAILED, new Error(`${errorDescription} (${errorCode})`));
+      };
+      const gone = (event: Event) =>
+        fail(
+          APP_CRASHED,
+          new Error(
+            `Reason: ${(event as Electron.RenderProcessGoneEvent).details?.reason ?? "unknown"}`,
+          ),
+        );
+      element.addEventListener("did-start-loading", started);
+      element.addEventListener("did-stop-loading", stopped);
+      element.addEventListener("did-fail-load", failed);
+      element.addEventListener("render-process-gone", gone);
+      tryFocus();
+      return () => {
+        element.removeEventListener("did-start-loading", started);
+        element.removeEventListener("did-stop-loading", stopped);
+        element.removeEventListener("did-fail-load", failed);
+        element.removeEventListener("render-process-gone", gone);
+        if (webview.current === element) webview.current = null;
+      };
+    },
+    [fail, tryFocus],
+  );
 
   return {
     state,
@@ -335,7 +412,8 @@ export function useAppView(options: {
     attach,
     toolbarStart,
     canReload: state.status === "open" || state.status === "failed",
-    canOpenInBrowser: publicationId !== null && (state.status === "open" || state.status === "failed"),
+    canOpenInBrowser:
+      publicationId !== null && (state.status === "open" || state.status === "failed"),
     reload,
     stop: () => webview.current?.stop(),
     relaunch: () => void launch(),
@@ -348,16 +426,26 @@ export function useAppView(options: {
 export function AppViewBody(props: { view: AppView; onReview: () => void }) {
   const { view } = props;
   const { state } = view;
-  if (state.status === "checking") return <div data-testid="app-view-checking" className="flex-1 bg-bg" />;
+  if (state.status === "checking")
+    return <div data-testid="app-view-checking" className="flex-1 bg-bg" />;
   if (state.status === "failed") {
-    return <div className="flex flex-1 items-center justify-center px-6"><RetryRow testId="app-view-retry" onRetry={view.relaunch} /></div>;
+    return (
+      <div className="flex flex-1 items-center justify-center px-6">
+        <RetryRow testId="app-view-retry" onRetry={view.relaunch} />
+      </div>
+    );
   }
   if (state.status === "unapproved") {
     return (
-      <div data-testid="app-view-unapproved" className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
+      <div
+        data-testid="app-view-unapproved"
+        className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center"
+      >
         <AppWindow size={24} aria-hidden className="text-subtle" />
         <p className="m-0 max-w-sm text-sm text-muted">
-          {state.ended ? "This app's approval ended. Review it to open it again." : "Review this app to open it here."}
+          {state.ended
+            ? "This app's approval ended. Review it to open it again."
+            : "Review this app to open it here."}
         </p>
         <PrimaryButton onClick={props.onReview}>Review and open app</PrimaryButton>
       </div>
@@ -366,11 +454,21 @@ export function AppViewBody(props: { view: AppView; onReview: () => void }) {
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
       {/* Main attaches only this view's loopback address in this view's partition. */}
-      <webview key={state.launch} ref={view.attach} data-testid="app-view-webview" src={state.url} partition={state.partition}
-        className={`min-h-0 flex-1 bg-bg ${view.painted ? "" : "opacity-0"}`} />
+      <webview
+        key={state.launch}
+        ref={view.attach}
+        data-testid="app-view-webview"
+        src={state.url}
+        partition={state.partition}
+        className={`min-h-0 flex-1 bg-bg ${view.painted ? "" : "opacity-0"}`}
+      />
       {view.loading ? (
-        <div data-testid="app-view-loading" role="progressbar" aria-label="Loading app"
-          className="dohc-reveal-if-slow pointer-events-none absolute inset-x-0 top-0 h-0.5 overflow-hidden">
+        <div
+          data-testid="app-view-loading"
+          role="progressbar"
+          aria-label="Loading app"
+          className="dohc-reveal-if-slow pointer-events-none absolute inset-x-0 top-0 h-0.5 overflow-hidden"
+        >
           <div className="dohc-progress-slide h-full bg-accent" />
         </div>
       ) : null}

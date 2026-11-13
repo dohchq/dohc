@@ -20,10 +20,16 @@ class TestWindow extends EventEmitter {
     destroyed: false,
     setWindowOpenHandler: vi.fn(),
     send: vi.fn(),
-    isDestroyed() { return this.destroyed; },
+    isDestroyed() {
+      return this.destroyed;
+    },
   });
-  isFullScreen() { return this.fullScreen; }
-  isFocused() { return this.focused; }
+  isFullScreen() {
+    return this.fullScreen;
+  }
+  isFocused() {
+    return this.focused;
+  }
   show = vi.fn();
   loadFile = vi.fn();
 }
@@ -72,7 +78,9 @@ describe("main-window full-screen state", () => {
     const window = createMainWindow() as unknown as TestWindow;
     window.fullScreen = true;
     window.webContents.emit("dom-ready");
-    expect(sentOn(window, CHANNELS.windowFullScreen)).toEqual([[CHANNELS.windowFullScreen, { fullScreen: true }]]);
+    expect(sentOn(window, CHANNELS.windowFullScreen)).toEqual([
+      [CHANNELS.windowFullScreen, { fullScreen: true }],
+    ]);
   });
 
   it("sends nothing once its renderer is gone", () => {
@@ -110,7 +118,9 @@ describe("main-window focus", () => {
     const window = createMainWindow() as unknown as TestWindow;
     window.focused = true;
     window.webContents.emit("dom-ready");
-    expect(sentOn(window, CHANNELS.windowFocused)).toEqual([[CHANNELS.windowFocused, { focused: true }]]);
+    expect(sentOn(window, CHANNELS.windowFocused)).toEqual([
+      [CHANNELS.windowFocused, { focused: true }],
+    ]);
   });
 
   it("sends nothing once its renderer is gone", () => {

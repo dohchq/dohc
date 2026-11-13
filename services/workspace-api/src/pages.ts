@@ -100,7 +100,9 @@ ${STATUS}
   });
 }
 
-export function verifyEmailPage(options: { token?: string; email?: string; next?: string; closed?: boolean } = {}): string {
+export function verifyEmailPage(
+  options: { token?: string; email?: string; next?: string; closed?: boolean } = {},
+): string {
   const { token, email, next, closed } = options;
   const heading = closed ? "Choose your password" : "Verify your email";
   return shell({
@@ -137,7 +139,9 @@ ${STATUS}
 // A closed server's first emailed link finishes setting up the account, so the
 // page also asks for the name other people see. The server ignores the name
 // once the address is verified.
-export function resetPasswordPage(options: { token?: string; next?: string; setup?: boolean } = {}): string {
+export function resetPasswordPage(
+  options: { token?: string; next?: string; setup?: boolean } = {},
+): string {
   const { token, next, setup } = options;
   if (!token) {
     return shell({
@@ -229,7 +233,10 @@ ${field("user_code", "Device code", `type="text" name="user_code" autocomplete="
   });
 }
 
-export function accountPage(user: { name: string; email: string; emailVerified: boolean }, closed = false): string {
+export function accountPage(
+  user: { name: string; email: string; emailVerified: boolean },
+  closed = false,
+): string {
   return shell({
     title: "Your account",
     page: "account",

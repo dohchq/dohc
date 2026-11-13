@@ -37,7 +37,11 @@ export interface TokenCipher {
  * unpackaged test run on a Mac never asks the keychain, and the store keeps the
  * token with its plain fallback in the test's own profile.
  */
-export function mayUseKeychain(run: { isPackaged: boolean; platform: NodeJS.Platform; env: NodeJS.ProcessEnv }): boolean {
+export function mayUseKeychain(run: {
+  isPackaged: boolean;
+  platform: NodeJS.Platform;
+  env: NodeJS.ProcessEnv;
+}): boolean {
   return run.isPackaged || run.platform !== "darwin" || run.env.DOHC_DESKTOP_TEST !== "1";
 }
 
@@ -58,10 +62,7 @@ export function isCloudCredentialEmail(value: unknown): value is string {
   );
 }
 
-export function createCloudCredentialStore(options: {
-  dir: string;
-  cipher?: TokenCipher;
-}) {
+export function createCloudCredentialStore(options: { dir: string; cipher?: TokenCipher }) {
   const { dir, cipher } = options;
   const file = join(dir, FILE_NAME);
   const invalidFile = join(dir, INVALID_FILE_NAME);
@@ -115,7 +116,9 @@ export function createCloudCredentialStore(options: {
       return {
         serverUrl: obj.serverUrl,
         ...(nonEmptyString(obj.relayUrl) ? { relayUrl: obj.relayUrl } : {}),
-        ...(obj.networkAccess === "private" || obj.networkAccess === "public" ? { networkAccess: obj.networkAccess } : {}),
+        ...(obj.networkAccess === "private" || obj.networkAccess === "public"
+          ? { networkAccess: obj.networkAccess }
+          : {}),
         email: obj.email,
         userId: obj.userId,
         token,
@@ -129,9 +132,9 @@ export function createCloudCredentialStore(options: {
         !isCloudCredentialEmail(credentials.email) ||
         !nonEmptyString(credentials.userId) ||
         !nonEmptyString(credentials.token) ||
-        (credentials.relayUrl !== undefined &&
-          !nonEmptyString(credentials.relayUrl)) ||
-        (credentials.networkAccess !== undefined && !["private", "public"].includes(credentials.networkAccess))
+        (credentials.relayUrl !== undefined && !nonEmptyString(credentials.relayUrl)) ||
+        (credentials.networkAccess !== undefined &&
+          !["private", "public"].includes(credentials.networkAccess))
       ) {
         throw new Error(
           "Cannot save cloud credentials: serverUrl, email, userId, and token must be non-empty strings; relayUrl must be non-empty when set.",
@@ -160,7 +163,9 @@ export function createCloudCredentialStore(options: {
       // Atomic: write a temp file then rename over the target so a crash or
       // concurrent reader never sees a half-written credential file. The 0600
       // mode is set on the temp file so the rename preserves it.
-      await atomicReplaceFile(file, (tmp) => writeFile(tmp, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 }));
+      await atomicReplaceFile(file, (tmp) =>
+        writeFile(tmp, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 }),
+      );
     },
 
     async clear(): Promise<void> {
@@ -202,14 +207,12 @@ export function createCloudCredentialStore(options: {
       };
     },
 
-    async saveInvalidMarker(marker: {
-      serverUrl: string;
-      userId: string;
-      tokenHash: string;
-    }) {
+    async saveInvalidMarker(marker: { serverUrl: string; userId: string; tokenHash: string }) {
       await mkdir(dir, { recursive: true, mode: 0o700 });
       const payload = { version: 1, ...marker };
-      await atomicReplaceFile(invalidFile, (tmp) => writeFile(tmp, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 }));
+      await atomicReplaceFile(invalidFile, (tmp) =>
+        writeFile(tmp, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 }),
+      );
     },
 
     async clearInvalidMarker() {
@@ -251,7 +254,9 @@ export function createCloudCredentialStore(options: {
         version: 1,
         accounts: accounts.map(({ serverUrl, userId }) => ({ serverUrl, userId })),
       };
-      await atomicReplaceFile(deletedFile, (tmp) => writeFile(tmp, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 }));
+      await atomicReplaceFile(deletedFile, (tmp) =>
+        writeFile(tmp, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 }),
+      );
     },
   };
 }

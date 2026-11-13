@@ -8,8 +8,14 @@ vi.mock("electron", () => ({ Menu: { buildFromTemplate } }));
 import { installTextContextMenu, textMenuTemplate } from "./textContextMenu";
 
 const noFlags = {
-  canUndo: false, canRedo: false, canCut: false, canCopy: false,
-  canPaste: false, canDelete: false, canSelectAll: false, canEditRichly: false,
+  canUndo: false,
+  canRedo: false,
+  canCut: false,
+  canCopy: false,
+  canPaste: false,
+  canDelete: false,
+  canSelectAll: false,
+  canEditRichly: false,
 };
 
 function params(overrides: Partial<ContextMenuParams> = {}) {
@@ -31,7 +37,7 @@ function actions() {
 // Each item as one readable word: its label, its role, or "-".
 function shape(template: MenuItemConstructorOptions[]): string[] {
   return template.map((item) =>
-    item.type === "separator" ? "-" : item.label ?? `role:${item.role}`,
+    item.type === "separator" ? "-" : (item.label ?? `role:${item.role}`),
   );
 }
 
@@ -42,21 +48,36 @@ function click(template: MenuItemConstructorOptions[], label: string): void {
   Reflect.apply(item.click, item, []);
 }
 
-const editable = { isEditable: true, editFlags: { ...noFlags, canPaste: true, canSelectAll: true } };
+const editable = {
+  isEditable: true,
+  editFlags: { ...noFlags, canPaste: true, canSelectAll: true },
+};
 
 describe("text menu template", () => {
   it("offers spelling suggestions and Add to dictionary above the edit roles", () => {
     const run = actions();
-    const template = textMenuTemplate(params({
-      ...editable,
-      misspelledWord: "teh",
-      selectionText: "teh",
-      dictionarySuggestions: ["the", "ten"],
-    }), "win32", run);
+    const template = textMenuTemplate(
+      params({
+        ...editable,
+        misspelledWord: "teh",
+        selectionText: "teh",
+        dictionarySuggestions: ["the", "ten"],
+      }),
+      "win32",
+      run,
+    );
     expect(shape(template)).toEqual([
-      "the", "ten", "Add to dictionary", "-",
-      "role:undo", "role:redo", "-",
-      "role:cut", "role:copy", "role:paste", "role:selectAll",
+      "the",
+      "ten",
+      "Add to dictionary",
+      "-",
+      "role:undo",
+      "role:redo",
+      "-",
+      "role:cut",
+      "role:copy",
+      "role:paste",
+      "role:selectAll",
     ]);
     click(template, "ten");
     expect(run.replaceMisspelling).toHaveBeenCalledExactlyOnceWith("ten");
@@ -66,64 +87,110 @@ describe("text menu template", () => {
 
   it("offers only the edit roles in a field with nothing misspelled", () => {
     expect(shape(textMenuTemplate(params(editable), "linux", actions()))).toEqual([
-      "role:undo", "role:redo", "-",
-      "role:cut", "role:copy", "role:paste", "role:selectAll",
+      "role:undo",
+      "role:redo",
+      "-",
+      "role:cut",
+      "role:copy",
+      "role:paste",
+      "role:selectAll",
     ]);
   });
 
   it("enables each edit role only when Chromium says it applies", () => {
-    const template = textMenuTemplate(params({
-      isEditable: true,
-      editFlags: { ...noFlags, canRedo: true, canCopy: true },
-    }), "win32", actions());
+    const template = textMenuTemplate(
+      params({
+        isEditable: true,
+        editFlags: { ...noFlags, canRedo: true, canCopy: true },
+      }),
+      "win32",
+      actions(),
+    );
     const enabled = Object.fromEntries(
       template.filter((item) => item.role).map((item) => [item.role, item.enabled]),
     );
     expect(enabled).toEqual({
-      undo: false, redo: true, cut: false, copy: true, paste: false, selectAll: false,
+      undo: false,
+      redo: true,
+      cut: false,
+      copy: true,
+      paste: false,
+      selectAll: false,
     });
   });
 
   it("follows the macOS text menu: Look up, Substitutions and Speech, no Undo or Redo, and Paste and Match Style", () => {
     const run = actions();
-    const template = textMenuTemplate(params({
-      ...editable,
-      misspelledWord: "teh",
-      selectionText: "teh",
-      dictionarySuggestions: ["the"],
-    }), "darwin", run);
+    const template = textMenuTemplate(
+      params({
+        ...editable,
+        misspelledWord: "teh",
+        selectionText: "teh",
+        dictionarySuggestions: ["the"],
+      }),
+      "darwin",
+      run,
+    );
     expect(shape(template)).toEqual([
-      "the", "Add to dictionary", "-",
-      "Look up “teh”", "-",
-      "role:cut", "role:copy", "role:paste", "role:pasteAndMatchStyle", "role:selectAll", "-",
-      "Substitutions", "Speech",
+      "the",
+      "Add to dictionary",
+      "-",
+      "Look up “teh”",
+      "-",
+      "role:cut",
+      "role:copy",
+      "role:paste",
+      "role:pasteAndMatchStyle",
+      "role:selectAll",
+      "-",
+      "Substitutions",
+      "Speech",
     ]);
     // The same items as Edit > Substitutions and Edit > Speech.
     expect(template.at(-2)?.submenu).toEqual([
-      { role: "showSubstitutions" }, { type: "separator" },
-      { role: "toggleSmartQuotes" }, { role: "toggleSmartDashes" }, { role: "toggleTextReplacement" },
+      { role: "showSubstitutions" },
+      { type: "separator" },
+      { role: "toggleSmartQuotes" },
+      { role: "toggleSmartDashes" },
+      { role: "toggleTextReplacement" },
     ]);
     expect(template.at(-1)?.submenu).toEqual([{ role: "startSpeaking" }, { role: "stopSpeaking" }]);
     click(template, "Look up “teh”");
     expect(run.lookUp).toHaveBeenCalledOnce();
 
-    const long = textMenuTemplate(params({
-      selectionText: "  a selection that runs\nwell past the label  ",
-      editFlags: { ...noFlags, canCopy: true },
-    }), "darwin", actions());
+    const long = textMenuTemplate(
+      params({
+        selectionText: "  a selection that runs\nwell past the label  ",
+        editFlags: { ...noFlags, canCopy: true },
+      }),
+      "darwin",
+      actions(),
+    );
     expect(long[0]?.label).toBe("Look up “a selection that runs we…”");
 
-    const atSpace = textMenuTemplate(params({
-      selectionText: `${"a".repeat(23)} bcd`,
-      editFlags: { ...noFlags, canCopy: true },
-    }), "darwin", actions());
+    const atSpace = textMenuTemplate(
+      params({
+        selectionText: `${"a".repeat(23)} bcd`,
+        editFlags: { ...noFlags, canCopy: true },
+      }),
+      "darwin",
+      actions(),
+    );
     expect(atSpace[0]?.label).toBe(`Look up “${"a".repeat(23)}…”`);
   });
 
   it("offers Paste and Match Style on macOS only while Paste applies", () => {
-    const nothingToPaste = params({ isEditable: true, editFlags: { ...noFlags, canSelectAll: true } });
+    const nothingToPaste = params({
+      isEditable: true,
+      editFlags: { ...noFlags, canSelectAll: true },
+    });
     expect(shape(textMenuTemplate(nothingToPaste, "darwin", actions()))).toEqual([
-      "role:cut", "role:copy", "role:paste", "role:selectAll", "-", "Substitutions",
+      "role:cut",
+      "role:copy",
+      "role:paste",
+      "role:selectAll",
+      "-",
+      "Substitutions",
     ]);
   });
 
@@ -140,7 +207,11 @@ describe("text menu template", () => {
     const selected = params({ selectionText: "plan", editFlags: { ...noFlags, canCopy: true } });
     expect(shape(textMenuTemplate(selected, "win32", actions()))).toEqual(["role:copy"]);
     expect(shape(textMenuTemplate(selected, "darwin", actions()))).toEqual([
-      "Look up “plan”", "-", "role:copy", "-", "Speech",
+      "Look up “plan”",
+      "-",
+      "role:copy",
+      "-",
+      "Speech",
     ]);
   });
 
@@ -156,11 +227,15 @@ describe("text menu template", () => {
   });
 
   it("never puts a password field's selection in the menu", () => {
-    const template = textMenuTemplate(params({
-      ...editable,
-      selectionText: "hunter2",
-      formControlType: "input-password",
-    }), "darwin", actions());
+    const template = textMenuTemplate(
+      params({
+        ...editable,
+        selectionText: "hunter2",
+        formControlType: "input-password",
+      }),
+      "darwin",
+      actions(),
+    );
     expect(template.some((item) => item.label?.includes("hunter2"))).toBe(false);
     expect(template.some((item) => item.label === "Speech")).toBe(false);
   });
@@ -189,10 +264,19 @@ describe("text menu on a window", () => {
 
   it("pops the menu over the window and its page for a right-click in the app's own page", () => {
     const { window, contents } = windowWithContents();
-    contents.emit("context-menu", {}, {
-      ...params({ ...editable, misspelledWord: "teh", selectionText: "teh", dictionarySuggestions: ["the"] }),
-      frame: mainFrame,
-    });
+    contents.emit(
+      "context-menu",
+      {},
+      {
+        ...params({
+          ...editable,
+          misspelledWord: "teh",
+          selectionText: "teh",
+          dictionarySuggestions: ["the"],
+        }),
+        frame: mainFrame,
+      },
+    );
     expect(popup).toHaveBeenCalledExactlyOnceWith({ window, frame: mainFrame });
     const template = buildFromTemplate.mock.calls[0]![0] as MenuItemConstructorOptions[];
     click(template, "the");
@@ -205,10 +289,14 @@ describe("text menu on a window", () => {
 
   it("keeps macOS's own items, such as Services, out of a password field's menu", () => {
     const { window, contents } = windowWithContents();
-    contents.emit("context-menu", {}, {
-      ...params({ ...editable, selectionText: "hunter2", formControlType: "input-password" }),
-      frame: mainFrame,
-    });
+    contents.emit(
+      "context-menu",
+      {},
+      {
+        ...params({ ...editable, selectionText: "hunter2", formControlType: "input-password" }),
+        frame: mainFrame,
+      },
+    );
     expect(popup).toHaveBeenCalledExactlyOnceWith({ window });
   });
 

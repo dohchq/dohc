@@ -42,52 +42,63 @@ export function useWorkspaceTrust(
       setReadFailedFor(null);
       setAnswer(event);
     });
-    void bridge().readWorkspaceTrust({ workspaceId }).then(
-      (read) => {
-        if (changes.current !== atStart.changes || applied.current !== atStart.applied) return;
-        if (read.workspaceId !== workspaceId) return;
-        setReadFailedFor(null);
-        setAnswer(read);
-      },
-      (error: unknown) => {
-        if (changes.current !== atStart.changes) return;
-        setReadFailedFor(workspaceId);
-        onReadErrorRef.current?.(error, () => setReadAttempt((attempt) => attempt + 1));
-      },
-    );
+    void bridge()
+      .readWorkspaceTrust({ workspaceId })
+      .then(
+        (read) => {
+          if (changes.current !== atStart.changes || applied.current !== atStart.applied) return;
+          if (read.workspaceId !== workspaceId) return;
+          setReadFailedFor(null);
+          setAnswer(read);
+        },
+        (error: unknown) => {
+          if (changes.current !== atStart.changes) return;
+          setReadFailedFor(workspaceId);
+          onReadErrorRef.current?.(error, () => setReadAttempt((attempt) => attempt + 1));
+        },
+      );
     return () => {
       changes.current += 1;
       unsubscribe();
     };
   }, [enabled, readAttempt, workspaceId]);
 
-  const act = useCallback(async (call: (workspaceId: string) => Promise<WorkspaceTrustAnswer>) => {
-    const token = ++actions.current;
-    const changesAtStart = changes.current;
-    setAsking({ workspaceId, token });
-    try {
-      const next = await call(workspaceId);
-      if (token === actions.current && changes.current === changesAtStart && next.workspaceId === workspaceRef.current) {
-        applied.current += 1;
-        setReadFailedFor(null);
-        setAnswer(next);
+  const act = useCallback(
+    async (call: (workspaceId: string) => Promise<WorkspaceTrustAnswer>) => {
+      const token = ++actions.current;
+      const changesAtStart = changes.current;
+      setAsking({ workspaceId, token });
+      try {
+        const next = await call(workspaceId);
+        if (
+          token === actions.current &&
+          changes.current === changesAtStart &&
+          next.workspaceId === workspaceRef.current
+        ) {
+          applied.current += 1;
+          setReadFailedFor(null);
+          setAnswer(next);
+        }
+        return next.trusted;
+      } finally {
+        setAsking((current) => (current?.token === token ? null : current));
       }
-      return next.trusted;
-    } finally {
-      setAsking((current) => (current?.token === token ? null : current));
-    }
-  }, [workspaceId]);
+    },
+    [workspaceId],
+  );
 
   // Opens main's dialog. Only the person's answer there trusts the workspace.
   // Automatic: a send asked for it, so main opens it only once.
   const requestTrust = useCallback(
-    (automatic?: true) => act((id) => bridge().requestWorkspaceTrust({ workspaceId: id, ...(automatic ? { automatic } : {}) })),
+    (automatic?: true) =>
+      act((id) =>
+        bridge().requestWorkspaceTrust({ workspaceId: id, ...(automatic ? { automatic } : {}) }),
+      ),
     [act],
   );
-  const restrict = useCallback(
-    async () => { await act((id) => bridge().restrictWorkspace({ workspaceId: id })); },
-    [act],
-  );
+  const restrict = useCallback(async () => {
+    await act((id) => bridge().restrictWorkspace({ workspaceId: id }));
+  }, [act]);
 
   const shown = enabled && answer?.workspaceId === workspaceId ? answer.trusted : null;
   return {

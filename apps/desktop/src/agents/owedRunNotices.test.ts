@@ -11,21 +11,41 @@ describe("owed run notices", () => {
     let completed = 0;
     let beginSync!: () => void;
     let releaseSync!: () => void;
-    const started = new Promise<void>(resolve => { beginSync = resolve; });
-    const released = new Promise<void>(resolve => { releaseSync = resolve; });
+    const started = new Promise<void>((resolve) => {
+      beginSync = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      releaseSync = resolve;
+    });
     const owed = createOwedRunNotices(() => path, {
       platform: "win32",
       open: async (...args) => {
         const handle = await open(...args);
         return {
-          writeFile: async (data) => { events.push("write"); await handle.writeFile(data); },
-          sync: async () => { events.push("sync"); beginSync(); await released; await handle.sync(); },
-          close: async () => { events.push("close"); await handle.close(); },
+          writeFile: async (data) => {
+            events.push("write");
+            await handle.writeFile(data);
+          },
+          sync: async () => {
+            events.push("sync");
+            beginSync();
+            await released;
+            await handle.sync();
+          },
+          close: async () => {
+            events.push("close");
+            await handle.close();
+          },
         };
       },
-      rename: async (...args) => { events.push("rename"); await rename(...args); },
+      rename: async (...args) => {
+        events.push("rename");
+        await rename(...args);
+      },
     });
-    const saved = owed.add("trip", "run-1").then(() => { completed += 1; });
+    const saved = owed.add("trip", "run-1").then(() => {
+      completed += 1;
+    });
     try {
       await Promise.race([started, saved]);
       expect(events).toEqual(["write", "sync"]);
@@ -38,29 +58,41 @@ describe("owed run notices", () => {
     expect(await createOwedRunNotices(() => path).list("trip")).toEqual(["run-1"]);
   });
 
-  it.each(["add", "remove"] as const)("reloads after directory sync fails following an %s rename", async (operation) => {
-    const path = join(await createTestScratch("owed-directory-sync-failure-"), "owed.json");
-    await writeFile(path, JSON.stringify([["trip", "first"]]));
-    const error = new Error("directory sync failed");
-    let fail = true;
-    const directoryClose = vi.fn(async () => {});
-    const owed = createOwedRunNotices(() => path, {
-      platform: "linux",
-      open: async (path, flags, mode) => flags === "r"
-        ? { writeFile: async () => {}, sync: async () => { if (fail) throw error; }, close: directoryClose }
-        : open(path, flags, mode),
-    });
-    expect(await owed.list("trip")).toEqual(["first"]);
-    await expect(operation === "add" ? owed.add("trip", "second") : owed.remove("trip", "first")).rejects.toBe(error);
-    expect(directoryClose).toHaveBeenCalledOnce();
-    const replaced = operation === "add" ? ["first", "second"] : [];
-    expect(await createOwedRunNotices(() => path).list("trip")).toEqual(replaced);
-    fail = false;
-    // Go straight to another change, so stale cache contents would overwrite the renamed file.
-    await owed.add("trip", "next");
-    expect(await owed.list("trip")).toEqual([...replaced, "next"]);
-    expect(await createOwedRunNotices(() => path).list("trip")).toEqual([...replaced, "next"]);
-  });
+  it.each(["add", "remove"] as const)(
+    "reloads after directory sync fails following an %s rename",
+    async (operation) => {
+      const path = join(await createTestScratch("owed-directory-sync-failure-"), "owed.json");
+      await writeFile(path, JSON.stringify([["trip", "first"]]));
+      const error = new Error("directory sync failed");
+      let fail = true;
+      const directoryClose = vi.fn(async () => {});
+      const owed = createOwedRunNotices(() => path, {
+        platform: "linux",
+        open: async (path, flags, mode) =>
+          flags === "r"
+            ? {
+                writeFile: async () => {},
+                sync: async () => {
+                  if (fail) throw error;
+                },
+                close: directoryClose,
+              }
+            : open(path, flags, mode),
+      });
+      expect(await owed.list("trip")).toEqual(["first"]);
+      await expect(
+        operation === "add" ? owed.add("trip", "second") : owed.remove("trip", "first"),
+      ).rejects.toBe(error);
+      expect(directoryClose).toHaveBeenCalledOnce();
+      const replaced = operation === "add" ? ["first", "second"] : [];
+      expect(await createOwedRunNotices(() => path).list("trip")).toEqual(replaced);
+      fail = false;
+      // Go straight to another change, so stale cache contents would overwrite the renamed file.
+      await owed.add("trip", "next");
+      expect(await owed.list("trip")).toEqual([...replaced, "next"]);
+      expect(await createOwedRunNotices(() => path).list("trip")).toEqual([...replaced, "next"]);
+    },
+  );
 
   it("keeps disk and memory unchanged when temp sync fails and allows a retry", async () => {
     const path = join(await createTestScratch("owed-sync-failure-"), "owed.json");
@@ -71,8 +103,18 @@ describe("owed run notices", () => {
     const owed = createOwedRunNotices(() => path, {
       open: async (...args) => {
         const handle = await open(...args);
-        return { writeFile: handle.writeFile.bind(handle), sync: async () => { if (fail) throw error; await handle.sync(); },
-          close: async () => { close(); await handle.close(); if (fail) throw new Error("close also failed"); } };
+        return {
+          writeFile: handle.writeFile.bind(handle),
+          sync: async () => {
+            if (fail) throw error;
+            await handle.sync();
+          },
+          close: async () => {
+            close();
+            await handle.close();
+            if (fail) throw new Error("close also failed");
+          },
+        };
       },
     });
     await expect(owed.remove("trip", "first")).rejects.toBe(error);
@@ -85,9 +127,17 @@ describe("owed run notices", () => {
     expect(await createOwedRunNotices(() => path).list("trip")).toEqual([]);
   });
   it("keeps each owed run in its file until it is removed", async () => {
-    const path = join(await createTestScratch("dohc-owed-run-notices-"), "state", "owed-run-notices.json");
+    const path = join(
+      await createTestScratch("dohc-owed-run-notices-"),
+      "state",
+      "owed-run-notices.json",
+    );
     const owed = createOwedRunNotices(() => path);
-    await Promise.all([owed.add("trip", "run-1"), owed.add("trip", "run-1"), owed.add("work", "run-2")]);
+    await Promise.all([
+      owed.add("trip", "run-1"),
+      owed.add("trip", "run-1"),
+      owed.add("work", "run-2"),
+    ]);
 
     const reopened = createOwedRunNotices(() => path);
     expect(await reopened.list("trip")).toEqual(["run-1"]);
@@ -123,6 +173,9 @@ describe("owed run notices", () => {
     expect(await owed.list("trip")).toEqual([]);
     await owed.add("trip", "run-1");
     expect(await createOwedRunNotices(() => path).list("trip")).toEqual(["run-1"]);
-    expect((await readdir(root)).sort()).toEqual(["owed-run-notices.json", "owed-run-notices.json.damaged"]);
+    expect((await readdir(root)).sort()).toEqual([
+      "owed-run-notices.json",
+      "owed-run-notices.json.damaged",
+    ]);
   });
 });

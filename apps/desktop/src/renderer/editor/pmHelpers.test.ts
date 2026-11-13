@@ -45,10 +45,9 @@ describe("documentChange", () => {
     const pos = positionOfChild(state, 10);
     const tr = state.tr.split(pos + 2);
 
-    expect(documentChange(tr.before, tr.doc).textblocks.map(({ node }) => node.textContent)).toEqual([
-      "p",
-      "10",
-    ]);
+    expect(
+      documentChange(tr.before, tr.doc).textblocks.map(({ node }) => node.textContent),
+    ).toEqual(["p", "10"]);
   });
 
   it("names every block of a paste", () => {
@@ -102,7 +101,11 @@ describe("documentChange", () => {
 
   it("maps nothing for a replacement with equal content", () => {
     const state = longState();
-    const tr = state.tr.replaceWith(0, state.doc.content.size, schema.nodeFromJSON(state.doc.toJSON()).content);
+    const tr = state.tr.replaceWith(
+      0,
+      state.doc.content.size,
+      schema.nodeFromJSON(state.doc.toJSON()).content,
+    );
 
     const change = documentChange(tr.before, tr.doc);
     expect(change.textblocks).toEqual([]);

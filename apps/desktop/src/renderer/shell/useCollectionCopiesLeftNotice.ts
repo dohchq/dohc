@@ -12,13 +12,18 @@ export function collectionCopiesLeftMessage(left: CollectionCopiesLeft): string 
     ? `dohc could not remove offline copies of Collections from a previous account. They are still in ${names}.`
     : null;
   // What dohc could not find out, as the end of a sentence that starts "dohc could not".
-  const unknown = left.recordUnreadable && left.sweepPending
-    ? "read its list of offline copies of Collections to remove, or check every workspace for them"
-    : left.recordUnreadable ? "read its list of offline copies of Collections to remove"
-    : left.sweepPending ? "check every workspace for offline copies of Collections from a previous account"
-    : null;
+  const unknown =
+    left.recordUnreadable && left.sweepPending
+      ? "read its list of offline copies of Collections to remove, or check every workspace for them"
+      : left.recordUnreadable
+        ? "read its list of offline copies of Collections to remove"
+        : left.sweepPending
+          ? "check every workspace for offline copies of Collections from a previous account"
+          : null;
   if (unknown === null) return removed;
-  return removed ? `${removed} dohc also could not ${unknown}.` : `dohc could not ${unknown}. Some may still be on this computer.`;
+  return removed
+    ? `${removed} dohc also could not ${unknown}.`
+    : `dohc could not ${unknown}. Some may still be on this computer.`;
 }
 
 // What this window filed last. Module state, because the shell remounts on
@@ -57,13 +62,22 @@ export function useCollectionCopiesLeftNotice(input: {
     };
     const read = () => {
       const request = ++latest;
-      void bridge().readCollectionCopiesLeft({}).then((left) => answer(request, left, false), () => undefined);
+      void bridge()
+        .readCollectionCopiesLeft({})
+        .then(
+          (left) => answer(request, left, false),
+          () => undefined,
+        );
     };
     const retry = () => {
       const request = ++latest;
-      void bridge().removeCollectionCopiesLeft({})
+      void bridge()
+        .removeCollectionCopiesLeft({})
         .catch(() => bridge().readCollectionCopiesLeft({}))
-        .then((left) => answer(request, left, true), () => undefined);
+        .then(
+          (left) => answer(request, left, true),
+          () => undefined,
+        );
     };
     read();
     const unsubscribe = bridge().onCollectionCopiesLeftChanged(read);

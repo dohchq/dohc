@@ -20,45 +20,76 @@ function AboutProbe(props: { workspaceId: string; tabPath: string }) {
   );
 }
 
-function renderTab(tabPath: string, options: { workspaceId?: string; collaboration?: ChatPresenceCollaboration; userSettings?: DesktopUserSettings } = {}) {
+function renderTab(
+  tabPath: string,
+  options: {
+    workspaceId?: string;
+    collaboration?: ChatPresenceCollaboration;
+    userSettings?: DesktopUserSettings;
+  } = {},
+) {
   return render(
     <>
-      <ChatsView workspaceId={options.workspaceId ?? "workspace-a"} onOpenFileChat={vi.fn()} onError={vi.fn()}
-        variant="page" editorTabPath={tabPath} collaboration={options.collaboration ?? null} userSettings={options.userSettings} />
+      <ChatsView
+        workspaceId={options.workspaceId ?? "workspace-a"}
+        onOpenFileChat={vi.fn()}
+        onError={vi.fn()}
+        variant="page"
+        editorTabPath={tabPath}
+        collaboration={options.collaboration ?? null}
+        userSettings={options.userSettings}
+      />
       <AboutProbe workspaceId="workspace-a" tabPath={tabPath} />
       <AboutProbe workspaceId="workspace-b" tabPath={tabPath} />
     </>,
   );
 }
 
-const probe = (workspaceId = "workspace-a") => screen.getByTestId(`about-probe-${workspaceId}`).textContent;
+const probe = (workspaceId = "workspace-a") =>
+  screen.getByTestId(`about-probe-${workspaceId}`).textContent;
 const published = (workspaceId = "workspace-a") => JSON.parse(probe(workspaceId) ?? "") as unknown;
 
 // One presence snapshot for every topic, pushed by the test.
 function presenceWith(peers: PresencePeer[]): ChatPresenceCollaboration {
   const snapshot: PresenceSnapshot = { version: 1, peers };
   const transport: PresenceTransport = {
-    async publish() { return snapshot; },
+    async publish() {
+      return snapshot;
+    },
     async leave() {},
     poll({ since, signal }) {
       if (since !== snapshot.version) return Promise.resolve(snapshot);
-      return new Promise((resolve) => signal.addEventListener("abort", () => resolve(snapshot), { once: true }));
+      return new Promise((resolve) =>
+        signal.addEventListener("abort", () => resolve(snapshot), { once: true }),
+      );
     },
   };
   return { transportForScope: () => transport, clientId: "me", displayName: "Me" };
 }
 
 const peer = (sessionToken: string, displayName: string, state: unknown): PresencePeer => ({
-  faceToken: sessionToken, sessionToken, isSelf: false, displayName, paletteSlot: 1, state, updatedAtMs: 0,
+  faceToken: sessionToken,
+  sessionToken,
+  isSelf: false,
+  displayName,
+  paletteSlot: 1,
+  state,
+  updatedAtMs: 0,
 });
 
 describe("a conversation tab tells About what it shows", () => {
   it("publishes a Group with its wire identity, once shares say it is this workspace's own", async () => {
     const tabPath = chatTabPath({ kind: "channel", id: "channel-1" });
     renderTab(tabPath);
-    await waitFor(() => expect(published()).toEqual({
-      kind: "group", name: "general", channelWireId: "channel-1", received: false, present: [],
-    }));
+    await waitFor(() =>
+      expect(published()).toEqual({
+        kind: "group",
+        name: "general",
+        channelWireId: "channel-1",
+        received: false,
+        present: [],
+      }),
+    );
   });
 
   it("publishes a person's direct message, read through their share", async () => {
@@ -68,32 +99,61 @@ describe("a conversation tab tells About what it shows", () => {
     });
     const tabPath = chatTabPath({ kind: "dm", id: dm().channelId });
     renderTab(tabPath);
-    await waitFor(() => expect(published()).toEqual({
-      kind: "person", name: "Sam Rivera", channelWireId: "wire-dm-1", received: true, present: [],
-    }));
+    await waitFor(() =>
+      expect(published()).toEqual({
+        kind: "person",
+        name: "Sam Rivera",
+        channelWireId: "wire-dm-1",
+        received: true,
+        present: [],
+      }),
+    );
   });
 
   it("publishes an agent's chat under that agent's name, as its tab shows it", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({
       channels: [
         channel(),
-        channel({ id: "agent-1", name: "My agent", slug: "agent", kind: "agent", agentId: "default" }),
-        channel({ id: "agent-2", name: "Scout", slug: "agent-scout", kind: "agent", agentId: "scout" }),
+        channel({
+          id: "agent-1",
+          name: "My agent",
+          slug: "agent",
+          kind: "agent",
+          agentId: "default",
+        }),
+        channel({
+          id: "agent-2",
+          name: "Scout",
+          slug: "agent-scout",
+          kind: "agent",
+          agentId: "scout",
+        }),
       ],
       fileThreads: [],
     });
     const settings = settingsWithAgent({ name: "Nova" });
     renderTab(chatTabPath({ kind: "channel", id: "agent-2" }), {
-      userSettings: { ...settings, agents: { ...settings.agents, scout: testAgent({ name: "Ranger", hue: "teal" }) } },
+      userSettings: {
+        ...settings,
+        agents: { ...settings.agents, scout: testAgent({ name: "Ranger", hue: "teal" }) },
+      },
     });
-    await waitFor(() => expect(published()).toMatchObject({
-      kind: "agent", name: "Ranger", channelWireId: "agent-2", received: false,
-    }));
+    await waitFor(() =>
+      expect(published()).toMatchObject({
+        kind: "agent",
+        name: "Ranger",
+        channelWireId: "agent-2",
+        received: false,
+      }),
+    );
   });
 
   it("leaves the agent out of the faces in its own chat, as the page's header does", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({
-      channels: [channel(), channel({ id: "agent-1", name: "agent", slug: "agent", kind: "agent", agentId: "default" })],
+      channels: [
+        channel(),
+        channel({ id: "agent-1", name: "agent", slug: "agent", kind: "agent", agentId: "default" }),
+      ],
       fileThreads: [],
     });
     const collaboration = presenceWith([
@@ -127,7 +187,9 @@ describe("a conversation tab tells About what it shows", () => {
   it("publishes under its own workspace only, and withdraws when it unmounts", async () => {
     const tabPath = chatTabPath({ kind: "channel", id: "channel-1" });
     const view = renderTab(tabPath, { workspaceId: "workspace-b" });
-    await waitFor(() => expect(published("workspace-b")).toMatchObject({ kind: "group", name: "general" }));
+    await waitFor(() =>
+      expect(published("workspace-b")).toMatchObject({ kind: "group", name: "general" }),
+    );
     expect(probe("workspace-a")).toBe("loading");
 
     view.unmount();

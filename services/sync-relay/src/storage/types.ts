@@ -1,21 +1,41 @@
-import type {ShareLabels} from "@dohc/security-contract/share-labels";
-import type {ShareLabelReader} from "../shareFilter";
+import type { ShareLabels } from "@dohc/security-contract/share-labels";
+import type { ShareLabelReader } from "../shareFilter";
 import type { LiveAuthorSnapshot } from "@dohc/live-session-contract/live-authorship";
 import type { ServiceActivationAccess } from "./serviceActivationAccess";
 import type { ServiceActivationStore } from "./serviceActivation";
 import type { LiveCommittedDeliveryStore } from "./liveCommittedDelivery";
-import type {OwnerRestoreOptions, OwnerRestoreOptionsInput, OwnerRestoreStatus, OwnerUnfinishedRestores} from "./ownerRestoreOptions";
-import type { StopRestoreIntent, StopRestoreLookup, StopRestoreOperation, StopRestorePlan, StopRestorePlanInput } from "./liveRestoreOperation";
+import type {
+  OwnerRestoreOptions,
+  OwnerRestoreOptionsInput,
+  OwnerRestoreStatus,
+  OwnerUnfinishedRestores,
+} from "./ownerRestoreOptions";
+import type {
+  StopRestoreIntent,
+  StopRestoreLookup,
+  StopRestoreOperation,
+  StopRestorePlan,
+  StopRestorePlanInput,
+} from "./liveRestoreOperation";
 import type { LiveJournalHistoryAuthority } from "./liveJournalHistory";
-import type {ReplicaLiveJournalRead, ReplicaLiveJournalPage} from "./liveUpdateJournal";
-import type { AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, LiveUpdateSubmissionMetadata, LiveUpdateAcceptResult } from "@dohc/live-session-contract/live-update-admission";
+import type { ReplicaLiveJournalRead, ReplicaLiveJournalPage } from "./liveUpdateJournal";
+import type {
+  AdmittedLiveUpdate,
+  AdmittedLiveUpdateMetadata,
+  LiveUpdateSubmissionMetadata,
+  LiveUpdateAcceptResult,
+} from "@dohc/live-session-contract/live-update-admission";
 import type {
   HostControlSnapshot,
   HostMode,
   HostEpoch,
   HostTransitionGeneration,
 } from "@dohc/live-session-contract/host-control";
-import type { LiveDocumentKey, LiveUpdateStructRange, ServerDerivedLiveUpdateAuthority } from "@dohc/live-session-contract/live-update-admission";
+import type {
+  LiveDocumentKey,
+  LiveUpdateStructRange,
+  ServerDerivedLiveUpdateAuthority,
+} from "@dohc/live-session-contract/live-update-admission";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import type { RedeemedLiveTicket } from "@dohc/live-session-contract/live-ticket";
 import type { DeviceHostCredential } from "../deviceHostCredential";
@@ -55,14 +75,32 @@ export interface CurrentLiveBindingRequest {
   readonly actor:
     | { readonly kind: "owner"; readonly userId: string }
     | { readonly kind: "named"; readonly userId: string; readonly grantId: string }
-    | { readonly kind: "link"; readonly sessionId: string;
-        readonly profileTokenHash: string; readonly grantId: string; readonly workspaceId: string }
+    | {
+        readonly kind: "link";
+        readonly sessionId: string;
+        readonly profileTokenHash: string;
+        readonly grantId: string;
+        readonly workspaceId: string;
+      }
     // An agent connected through its link edits as the link principal its connection holds.
-    | { readonly kind: "link"; readonly agentConnectionId: string; readonly accessTokenHash: string;
-        readonly resourceHash: string; readonly grantId: string; readonly workspaceId: string }
+    | {
+        readonly kind: "link";
+        readonly agentConnectionId: string;
+        readonly accessTokenHash: string;
+        readonly resourceHash: string;
+        readonly grantId: string;
+        readonly workspaceId: string;
+      }
     // A personal agent edits in its owner's workspace, at the fence its last fresh read returned.
-    | { readonly kind: "personal"; readonly workspaceId: string; readonly agentId: string; readonly connectionId: string;
-        readonly accessTokenHash: string; readonly resourceHash: string; readonly fenceEpoch: number };
+    | {
+        readonly kind: "personal";
+        readonly workspaceId: string;
+        readonly agentId: string;
+        readonly connectionId: string;
+        readonly accessTokenHash: string;
+        readonly resourceHash: string;
+        readonly fenceEpoch: number;
+      };
 }
 
 export interface LiveDocumentBaselineRegistrationInput {
@@ -71,7 +109,10 @@ export interface LiveDocumentBaselineRegistrationInput {
     readonly version: 1;
     readonly document: LiveDocumentKey;
     readonly currentPath: string;
-    readonly checkpoint: { readonly updateDigest: string; readonly ranges: readonly LiveUpdateStructRange[] };
+    readonly checkpoint: {
+      readonly updateDigest: string;
+      readonly ranges: readonly LiveUpdateStructRange[];
+    };
     readonly projectedMarkdownSha256: string;
     readonly projectedMarkdownByteLength: number;
   };
@@ -80,10 +121,24 @@ export interface LiveDocumentBaselineRegistrationInput {
 }
 
 export type RelayBaselineRegistrationResult =
-  | { readonly kind: "registered"; readonly document: LiveDocumentKey; readonly currentPath: string;
-      readonly restoreFenceGeneration: number; readonly registeredAtMs: number; readonly replayed: boolean }
-  | { readonly kind: "refused"; readonly reason: "invalid-baseline" | "host-unavailable" | "stale-host" |
-      "stale-document" | "lineage-conflict" | "baseline-conflict" };
+  | {
+      readonly kind: "registered";
+      readonly document: LiveDocumentKey;
+      readonly currentPath: string;
+      readonly restoreFenceGeneration: number;
+      readonly registeredAtMs: number;
+      readonly replayed: boolean;
+    }
+  | {
+      readonly kind: "refused";
+      readonly reason:
+        | "invalid-baseline"
+        | "host-unavailable"
+        | "stale-host"
+        | "stale-document"
+        | "lineage-conflict"
+        | "baseline-conflict";
+    };
 
 export type CurrentLiveBindingResult =
   | {
@@ -142,7 +197,13 @@ export interface AppendLogBatchResult {
   inserted: number;
   skipped: number;
   currentMaxOriginSeq: number;
-  settlementRefusals?: {originId:string;originSeq:number;momentId:string;settlementId:string;reason:string}[];
+  settlementRefusals?: {
+    originId: string;
+    originSeq: number;
+    momentId: string;
+    settlementId: string;
+    reason: string;
+  }[];
   // Copies of retained work this batch published again, each with the creation the log accepted first.
   redundantRecoveries?: RedundantRecovery[];
 }
@@ -191,7 +252,11 @@ export interface KeyEnvelopeRow {
 }
 
 export interface SyncRelayShareRow {
-  creationProvenance?: { agent: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null; selector: unknown; access: string };
+  creationProvenance?: {
+    agent: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null;
+    selector: unknown;
+    access: string;
+  };
   labels?: ShareLabels;
   shareId: string;
   workspaceId: string;
@@ -277,8 +342,7 @@ export interface SyncRelayShareDiscussionCursor {
   messageId: string;
 }
 
-export interface SyncRelayShareDiscussionPageMessage
-  extends SyncRelayShareDiscussionMessageRow {
+export interface SyncRelayShareDiscussionPageMessage extends SyncRelayShareDiscussionMessageRow {
   linkPrincipalBlocked: boolean | null;
 }
 
@@ -289,9 +353,7 @@ export interface SyncRelayShareDiscussionPage {
   activityRevision: number;
 }
 
-export type SyncRelayShareDiscussionPageDirection =
-  | "oldest-first"
-  | "newest-first";
+export type SyncRelayShareDiscussionPageDirection = "oldest-first" | "newest-first";
 
 export interface SyncRelayShareDiscussionActivityPage {
   latestRevision: number;
@@ -360,8 +422,7 @@ export interface SyncRelayLinkHandoffCodeRow {
   expiresAtMs: number;
 }
 
-export interface StoredSyncRelayLinkHandoffCodeRow
-  extends SyncRelayLinkHandoffCodeRow {
+export interface StoredSyncRelayLinkHandoffCodeRow extends SyncRelayLinkHandoffCodeRow {
   resultGrantId: string | null;
 }
 
@@ -405,7 +466,9 @@ export interface SyncRelayGrantedInventoryPage {
   nextCursor: SyncRelayGrantedInventoryCursor | null;
 }
 
-export interface SyncRelayReceivedInventoryCursor { shareId: string }
+export interface SyncRelayReceivedInventoryCursor {
+  shareId: string;
+}
 export interface SyncRelayReceivedInventoryPage {
   shareIds: string[];
   nextCursor: SyncRelayReceivedInventoryCursor | null;
@@ -521,14 +584,9 @@ export type ClaimWorkspaceIdentityResult =
   | "epoch-unknown"
   | "stream-mismatch";
 
-export type VerifyWorkspaceIdentityResult = Exclude<
-  ClaimWorkspaceIdentityResult,
-  "claimed"
->;
+export type VerifyWorkspaceIdentityResult = Exclude<ClaimWorkspaceIdentityResult, "claimed">;
 
-export type EnforceWorkspaceIdentityResult =
-  | ClaimWorkspaceIdentityResult
-  | "identity-required";
+export type EnforceWorkspaceIdentityResult = ClaimWorkspaceIdentityResult | "identity-required";
 
 export type RotateWorkspaceIdentityResult =
   | "rotated"
@@ -537,9 +595,7 @@ export type RotateWorkspaceIdentityResult =
   | "epoch-superseded";
 
 export interface AppendLogBatchGuardContext {
-  enforceWorkspaceIdentity(
-    identity: WorkspaceSyncIdentity | null,
-  ): EnforceWorkspaceIdentityResult;
+  enforceWorkspaceIdentity(identity: WorkspaceSyncIdentity | null): EnforceWorkspaceIdentityResult;
 }
 
 export interface StoredLiveDocumentAuthority {
@@ -577,8 +633,13 @@ export interface LiveUpdateJournalCut {
     readonly registeredAtMs: number;
     readonly replacesLineageClaimId: string | null;
   };
-  readonly checkpoint: { readonly cursor: number | null; readonly digest: string; readonly bytes: Uint8Array;
-    readonly metadata: AdmittedLiveUpdateMetadata | null; readonly updateBytes: Uint8Array | null };
+  readonly checkpoint: {
+    readonly cursor: number | null;
+    readonly digest: string;
+    readonly bytes: Uint8Array;
+    readonly metadata: AdmittedLiveUpdateMetadata | null;
+    readonly updateBytes: Uint8Array | null;
+  };
   readonly suffix: readonly LiveJournalStoredUpdate[];
   readonly highWater: number | null;
   readonly suffixCount: number;
@@ -590,31 +651,48 @@ export type AcceptedLiveDocument =
   | { readonly kind: "none" };
 export type LiveUpdateJournalCutResult =
   | { readonly kind: "cut"; readonly cut: LiveUpdateJournalCut }
-  | { readonly kind: "refused"; readonly reason: "baseline-missing" | "authority-refused" | "stale-binding" };
+  | {
+      readonly kind: "refused";
+      readonly reason: "baseline-missing" | "authority-refused" | "stale-binding";
+    };
 export type LiveJournalValidation =
-  | { readonly kind: "accepted"; readonly evidence: {
-      readonly version: 1;
-      readonly document: LiveDocumentKey;
-      readonly currentPath: string;
-      readonly checkpointDigest: string;
-      readonly checkpointRanges: readonly LiveUpdateStructRange[];
-      readonly suffixDigests: readonly string[];
-      readonly candidate: { readonly updateDigest: string; readonly ranges: readonly LiveUpdateStructRange[];
-        readonly firstSeen: readonly LiveUpdateStructRange[]; readonly firstSeenDeletes: readonly LiveUpdateStructRange[] };
-      readonly stateUpdate?: Uint8Array;
-      readonly stateUpdateSha256: string;
-      readonly stateUpdateByteLength: number;
-      readonly projectedMarkdownSha256: string;
-      readonly projectedMarkdownByteLength: number;
-  } }
-  | { readonly kind: "refused";
-      readonly reason: "invalid-input" | "invalid-update" | "invalid-schema" | "projection-mutated" | "capacity-refused";
-      readonly source: "call" | "admitted-cut" | "candidate" | "final" };
+  | {
+      readonly kind: "accepted";
+      readonly evidence: {
+        readonly version: 1;
+        readonly document: LiveDocumentKey;
+        readonly currentPath: string;
+        readonly checkpointDigest: string;
+        readonly checkpointRanges: readonly LiveUpdateStructRange[];
+        readonly suffixDigests: readonly string[];
+        readonly candidate: {
+          readonly updateDigest: string;
+          readonly ranges: readonly LiveUpdateStructRange[];
+          readonly firstSeen: readonly LiveUpdateStructRange[];
+          readonly firstSeenDeletes: readonly LiveUpdateStructRange[];
+        };
+        readonly stateUpdate?: Uint8Array;
+        readonly stateUpdateSha256: string;
+        readonly stateUpdateByteLength: number;
+        readonly projectedMarkdownSha256: string;
+        readonly projectedMarkdownByteLength: number;
+      };
+    }
+  | {
+      readonly kind: "refused";
+      readonly reason:
+        | "invalid-input"
+        | "invalid-update"
+        | "invalid-schema"
+        | "projection-mutated"
+        | "capacity-refused";
+      readonly source: "call" | "admitted-cut" | "candidate" | "final";
+    };
 export interface LiveUpdateJournalCommitInput {
-  readonly trustedAccount?: {readonly accountId: string; readonly name: string};
+  readonly trustedAccount?: { readonly accountId: string; readonly name: string };
   readonly trustedAutomation?: import("@dohc/live-session-contract/live-authorship").AutomationDeclaration;
-  readonly trustedAutomationPress?: {readonly hostPressId: string; readonly automationId: string};
-  readonly trustedAutomationGrant?: {readonly grantId: string; readonly grantGeneration: number};
+  readonly trustedAutomationPress?: { readonly hostPressId: string; readonly automationId: string };
+  readonly trustedAutomationGrant?: { readonly grantId: string; readonly grantGeneration: number };
   readonly host: LiveHostConnectionCoordinate;
   readonly actor: CurrentLiveBindingRequest["actor"];
   readonly expectedAuthority: ServerDerivedLiveUpdateAuthority;
@@ -625,8 +703,14 @@ export interface LiveUpdateJournalCommitInput {
   readonly receivedAtMs: number;
 }
 export type RelayLiveUpdateJournalResult =
-  | { readonly result: Extract<LiveUpdateAcceptResult, { kind: "accepted" }>; readonly admitted: AdmittedLiveUpdate }
-  | { readonly result: Exclude<LiveUpdateAcceptResult, { kind: "accepted" }>; readonly admitted: null };
+  | {
+      readonly result: Extract<LiveUpdateAcceptResult, { kind: "accepted" }>;
+      readonly admitted: AdmittedLiveUpdate;
+    }
+  | {
+      readonly result: Exclude<LiveUpdateAcceptResult, { kind: "accepted" }>;
+      readonly admitted: null;
+    };
 export type CommittedLiveUpdateResult =
   | { readonly kind: "committed"; readonly admitted: AdmittedLiveUpdate }
   | { readonly kind: "missing" }
@@ -634,115 +718,321 @@ export type CommittedLiveUpdateResult =
   | { readonly kind: "retry"; readonly reason: "host-unavailable" };
 
 export interface SyncRelayStorage {
-  indexReceivedWorkTargets(rows: Parameters<typeof import("./workReferences").indexReceivedWorkTargets>[1]): void;
-  prepareWorkReferenceRegistration(input: Parameters<typeof import("./workReferences").prepareWorkReferenceRegistration>[1]): ReturnType<typeof import("./workReferences").prepareWorkReferenceRegistration>;
-  makeWorkReference(input: Parameters<typeof import("./workReferences").makeWorkReference>[1]): ReturnType<typeof import("./workReferences").makeWorkReference>;
-  resolveWorkReference(input: Parameters<typeof import("./workReferences").resolveWorkReference>[1]): ReturnType<typeof import("./workReferences").resolveWorkReference>;
-  listWorkReferences(input: Parameters<typeof import("./workReferences").listWorkReferences>[1]): ReturnType<typeof import("./workReferences").listWorkReferences>;
-  createDatasetHost(options: Omit<import("../datasetHost").RelayDatasetHostOptions, "storage">): Promise<import("../datasetHost").RelayDatasetHost>;
-  ensureOwnedLiveDocuments(inputs: readonly import("./serviceHostEnrollment").EnsureOwnedLiveDocumentInput[]): readonly import("./serviceHostEnrollment").ServiceHostEnrollment[];
-  ensureOwnedLiveDocument(input: import("./serviceHostEnrollment").EnsureOwnedLiveDocumentInput): import("./serviceHostEnrollment").ServiceHostEnrollment;
-  renewPersonalSessionDemand(input: {workspaceId: string; objectId: string; nowMs: number}): boolean;
+  indexReceivedWorkTargets(
+    rows: Parameters<typeof import("./workReferences").indexReceivedWorkTargets>[1],
+  ): void;
+  prepareWorkReferenceRegistration(
+    input: Parameters<typeof import("./workReferences").prepareWorkReferenceRegistration>[1],
+  ): ReturnType<typeof import("./workReferences").prepareWorkReferenceRegistration>;
+  makeWorkReference(
+    input: Parameters<typeof import("./workReferences").makeWorkReference>[1],
+  ): ReturnType<typeof import("./workReferences").makeWorkReference>;
+  resolveWorkReference(
+    input: Parameters<typeof import("./workReferences").resolveWorkReference>[1],
+  ): ReturnType<typeof import("./workReferences").resolveWorkReference>;
+  listWorkReferences(
+    input: Parameters<typeof import("./workReferences").listWorkReferences>[1],
+  ): ReturnType<typeof import("./workReferences").listWorkReferences>;
+  createDatasetHost(
+    options: Omit<import("../datasetHost").RelayDatasetHostOptions, "storage">,
+  ): Promise<import("../datasetHost").RelayDatasetHost>;
+  ensureOwnedLiveDocuments(
+    inputs: readonly import("./serviceHostEnrollment").EnsureOwnedLiveDocumentInput[],
+  ): readonly import("./serviceHostEnrollment").ServiceHostEnrollment[];
+  ensureOwnedLiveDocument(
+    input: import("./serviceHostEnrollment").EnsureOwnedLiveDocumentInput,
+  ): import("./serviceHostEnrollment").ServiceHostEnrollment;
+  renewPersonalSessionDemand(input: {
+    workspaceId: string;
+    objectId: string;
+    nowMs: number;
+  }): boolean;
   /** Reclaims the documents only recorded demand keeps that went unused for the retention period. Returns those it reclaimed. */
-  reclaimIdleLiveDocuments(nowMs: number): readonly import("./serviceHostEnrollment").ServiceHostEnrollment[];
-  listServiceHostEnrollments(workspaceId?: string): readonly import("./serviceHostEnrollment").ServiceHostEnrollment[];
-  listUndrainedServiceHostEnrollments(after?: import("./serviceHostEnrollment").ServiceHostEnrollmentCursor): {
-    documents: readonly import("./serviceHostEnrollment").ServiceHostEnrollment[]; nextCursor: import("./serviceHostEnrollment").ServiceHostEnrollmentCursor | null;
+  reclaimIdleLiveDocuments(
+    nowMs: number,
+  ): readonly import("./serviceHostEnrollment").ServiceHostEnrollment[];
+  listServiceHostEnrollments(
+    workspaceId?: string,
+  ): readonly import("./serviceHostEnrollment").ServiceHostEnrollment[];
+  listUndrainedServiceHostEnrollments(
+    after?: import("./serviceHostEnrollment").ServiceHostEnrollmentCursor,
+  ): {
+    documents: readonly import("./serviceHostEnrollment").ServiceHostEnrollment[];
+    nextCursor: import("./serviceHostEnrollment").ServiceHostEnrollmentCursor | null;
   };
   hasKeptServiceHostEnrollment(workspaceId: string, path: string): boolean;
-  readServiceHostEnrollment(workspaceId: string, path: string): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
-  readServiceHostEnrollmentByObjectId(workspaceId: string, objectId: string): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
-  listRetiredServiceHostEnrollments(workspaceId: string, after?: string): {documents: readonly import("./serviceHostEnrollment").ServiceHostEnrollment[]; nextCursor: string | null};
-  currentServiceHostWorkspace(workspaceId: string, includeUndrained?: boolean): import("./serviceHostEnrollment").ServiceHostWorkspace | null;
-  readServiceHostFeedScope(workspaceId: string): import("./serviceHostFeed").ServiceHostFeedScope | null;
-  listServiceHostDocumentRows(input: {workspaceId: string; objectId: string; afterRelaySeq: number; limit: number}): SyncRelayLogRow[];
+  readServiceHostEnrollment(
+    workspaceId: string,
+    path: string,
+  ): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
+  readServiceHostEnrollmentByObjectId(
+    workspaceId: string,
+    objectId: string,
+  ): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
+  listRetiredServiceHostEnrollments(
+    workspaceId: string,
+    after?: string,
+  ): {
+    documents: readonly import("./serviceHostEnrollment").ServiceHostEnrollment[];
+    nextCursor: string | null;
+  };
+  currentServiceHostWorkspace(
+    workspaceId: string,
+    includeUndrained?: boolean,
+  ): import("./serviceHostEnrollment").ServiceHostWorkspace | null;
+  readServiceHostFeedScope(
+    workspaceId: string,
+  ): import("./serviceHostFeed").ServiceHostFeedScope | null;
+  listServiceHostDocumentRows(input: {
+    workspaceId: string;
+    objectId: string;
+    afterRelaySeq: number;
+    limit: number;
+  }): SyncRelayLogRow[];
   /** The relay sequence of the document's latest Y.Doc update, or 0 while it has none. */
-  latestServiceHostDocumentUpdate(input: {workspaceId: string; objectId: string}): number;
-  hasServiceHostConflictEffect(input: {workspaceId: string; objectId: string}): boolean;
+  latestServiceHostDocumentUpdate(input: { workspaceId: string; objectId: string }): number;
+  hasServiceHostConflictEffect(input: { workspaceId: string; objectId: string }): boolean;
   /** Stores blob bytes the service host uploaded, with its proof of holding them. */
-  putServiceHostBlob(input: {workspaceId: string; sha256: string; content: Uint8Array; createdAtMs: number}): PutBlobResult;
+  putServiceHostBlob(input: {
+    workspaceId: string;
+    sha256: string;
+    content: Uint8Array;
+    createdAtMs: number;
+  }): PutBlobResult;
   serviceHostUploaded(workspaceId: string, sha256: string): boolean;
   /** Proves a settling document's settlement audits before the append's writer. */
-  prepareSettlementAudits(input: {workspaceId: string; ops: SyncRelayLogInput[]; batched: boolean}, signal?: AbortSignal): Promise<void>;
+  prepareSettlementAudits(
+    input: { workspaceId: string; ops: SyncRelayLogInput[]; batched: boolean },
+    signal?: AbortSignal,
+  ): Promise<void>;
   /** Under the append's writer: null for a settling document's verified retirement output, otherwise why it is refused. */
-  admitRetirementPublication(retirement: import("./serviceActivationRetirement").ServiceActivationRetirement, op: SyncRelayLogInput,
-    batch: import("./serviceActivationPublication").RetirementBatch): import("./serviceActivationPublication").RetirementRefusal | null;
+  admitRetirementPublication(
+    retirement: import("./serviceActivationRetirement").ServiceActivationRetirement,
+    op: SyncRelayLogInput,
+    batch: import("./serviceActivationPublication").RetirementBatch,
+  ): import("./serviceActivationPublication").RetirementRefusal | null;
   /** After confirmation: whether what that row's admission waited on was confirmed. */
   retirementPublicationConfirmed(op: SyncRelayLogInput): boolean;
   /** Owner queues the service host keeps refused, until they are delivered or the host no longer holds them. */
-  recordServiceKeptEdits(input: {identity: import("./serviceKeptEdits").ServiceKeptEditsIdentity; outboxId: string;
-    binding: import("@dohc/live-session-contract/live-object-binding").LiveObjectBinding; reason: string; headDeliveryId: string; refusalKey: string; nowMs: number}): void;
+  recordServiceKeptEdits(input: {
+    identity: import("./serviceKeptEdits").ServiceKeptEditsIdentity;
+    outboxId: string;
+    binding: import("@dohc/live-session-contract/live-object-binding").LiveObjectBinding;
+    reason: string;
+    headDeliveryId: string;
+    refusalKey: string;
+    nowMs: number;
+  }): void;
   forgetServiceKeptEdits(queue: import("./serviceKeptEdits").ServiceKeptEditsQueue): void;
-  releaseServiceKeptEdits(document: {workspaceId: string; objectId: string}): void;
-  listServiceKeptEdits(workspaceId: string, after?: number): {keptEdits: readonly import("./serviceKeptEdits").ServiceKeptEdits[]; nextCursor: number | null};
-  readServiceKeptEdits(queue: import("./serviceKeptEdits").ServiceKeptEditsQueue): import("./serviceKeptEdits").ServiceKeptEdits | null;
-  readServiceKeptEditsRefusal(input: {workspaceId: string; outboxId: string; generation: number}): import("./serviceKeptEdits").ServiceKeptEdits | null;
-  serviceKeptEditsOf(document: {workspaceId: string; objectId: string}, after?: number): {keptEdits: readonly import("./serviceKeptEdits").ServiceKeptEdits[]; nextCursor: number | null};
-  markServiceKeptEditsRetrying(input: {workspaceId: string; outboxId: string; generation: number}): boolean;
+  releaseServiceKeptEdits(document: { workspaceId: string; objectId: string }): void;
+  listServiceKeptEdits(
+    workspaceId: string,
+    after?: number,
+  ): {
+    keptEdits: readonly import("./serviceKeptEdits").ServiceKeptEdits[];
+    nextCursor: number | null;
+  };
+  readServiceKeptEdits(
+    queue: import("./serviceKeptEdits").ServiceKeptEditsQueue,
+  ): import("./serviceKeptEdits").ServiceKeptEdits | null;
+  readServiceKeptEditsRefusal(input: {
+    workspaceId: string;
+    outboxId: string;
+    generation: number;
+  }): import("./serviceKeptEdits").ServiceKeptEdits | null;
+  serviceKeptEditsOf(
+    document: { workspaceId: string; objectId: string },
+    after?: number,
+  ): {
+    keptEdits: readonly import("./serviceKeptEdits").ServiceKeptEdits[];
+    nextCursor: number | null;
+  };
+  markServiceKeptEditsRetrying(input: {
+    workspaceId: string;
+    outboxId: string;
+    generation: number;
+  }): boolean;
   endServiceKeptEditsRetry(queue: import("./serviceKeptEdits").ServiceKeptEditsQueue): void;
-  confirmServiceKeptEditsCopy(input: {workspaceId: string; outboxId: string; generation: number; checkpointDigest: string | null}): boolean;
-  observeServiceKeptEditsCheckpoint(queue: import("./serviceKeptEdits").ServiceKeptEditsQueue, frozenCheckpoint: string | null): void;
-  serviceKeptEditsHeld(document: {workspaceId: string; objectId: string}, identity: import("./serviceKeptEdits").ServiceKeptEditsIdentity): boolean;
-  serviceKeptEditsStoreHeld(workspaceId: string, identity: import("./serviceKeptEdits").ServiceKeptEditsIdentity): boolean;
-  scanServiceHostCandidateShares(after?: import("./serviceHostEnrollment").ServiceHostCandidateCursor, workspaceId?: string): import("./serviceHostEnrollment").ServiceHostCandidatePage;
-  checkServiceHostDocuments(input: {workspaceId: string; ownerUserId: string; shareId: string; paths: readonly string[]}): void;
-  setServiceHostEnrollmentEnabled(input: import("./serviceHostEnrollment").SetServiceHostEnrollmentEnabledInput): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
+  confirmServiceKeptEditsCopy(input: {
+    workspaceId: string;
+    outboxId: string;
+    generation: number;
+    checkpointDigest: string | null;
+  }): boolean;
+  observeServiceKeptEditsCheckpoint(
+    queue: import("./serviceKeptEdits").ServiceKeptEditsQueue,
+    frozenCheckpoint: string | null,
+  ): void;
+  serviceKeptEditsHeld(
+    document: { workspaceId: string; objectId: string },
+    identity: import("./serviceKeptEdits").ServiceKeptEditsIdentity,
+  ): boolean;
+  serviceKeptEditsStoreHeld(
+    workspaceId: string,
+    identity: import("./serviceKeptEdits").ServiceKeptEditsIdentity,
+  ): boolean;
+  scanServiceHostCandidateShares(
+    after?: import("./serviceHostEnrollment").ServiceHostCandidateCursor,
+    workspaceId?: string,
+  ): import("./serviceHostEnrollment").ServiceHostCandidatePage;
+  checkServiceHostDocuments(input: {
+    workspaceId: string;
+    ownerUserId: string;
+    shareId: string;
+    paths: readonly string[];
+  }): void;
+  setServiceHostEnrollmentEnabled(
+    input: import("./serviceHostEnrollment").SetServiceHostEnrollmentEnabledInput,
+  ): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
   /** Whether an Edit grant of its owner, or the owner's restore that kept its live session, keeps the enrolled document live. */
-  serviceHostEnrollmentCovered(enrollment: Pick<import("./serviceHostEnrollment").ServiceHostEnrollment, "workspaceId" | "objectId" | "ownerUserId" | "shareId" | "path">): boolean;
+  serviceHostEnrollmentCovered(
+    enrollment: Pick<
+      import("./serviceHostEnrollment").ServiceHostEnrollment,
+      "workspaceId" | "objectId" | "ownerUserId" | "shareId" | "path"
+    >,
+  ): boolean;
   /** With `restoring`, the owner's unfinished restore that kept the live session also counts. Live admission never passes it. */
-  serviceHostDocumentEnabled(document: {workspaceId: string; objectId: string}, owner?: {userId: string}, restoring?: boolean): boolean;
+  serviceHostDocumentEnabled(
+    document: { workspaceId: string; objectId: string },
+    owner?: { userId: string },
+    restoring?: boolean,
+  ): boolean;
   /** The document's open retirement obligation, if Stop recorded one its activation has not completed. */
-  serviceActivationRetirement(document: {workspaceId: string; objectId: string}): import("./serviceActivationRetirement").ServiceActivationRetirement | null;
+  serviceActivationRetirement(document: {
+    workspaceId: string;
+    objectId: string;
+  }): import("./serviceActivationRetirement").ServiceActivationRetirement | null;
   /** The workspace's open retirement obligations, by object. */
-  serviceActivationRetirements(workspaceId: string): import("./serviceActivationRetirement").ServiceActivationRetirement[];
+  serviceActivationRetirements(
+    workspaceId: string,
+  ): import("./serviceActivationRetirement").ServiceActivationRetirement[];
   /** Whether the document has a restore that has neither resumed nor been declined. */
-  serviceRestoreInProgress(document: {workspaceId: string; objectId: string}): boolean;
-  serviceActivationRetirementDecision(document: {workspaceId: string; objectId: string}, activation: import("./serviceActivationRetirement").RetirableServiceActivation):
-    import("./serviceActivationRetirement").ServiceActivationRetirement | null;
+  serviceRestoreInProgress(document: { workspaceId: string; objectId: string }): boolean;
+  serviceActivationRetirementDecision(
+    document: { workspaceId: string; objectId: string },
+    activation: import("./serviceActivationRetirement").RetirableServiceActivation,
+  ): import("./serviceActivationRetirement").ServiceActivationRetirement | null;
   /** The prepared activation a new Stop of the document would retire, once no retirement is open. */
-  retirableServiceActivation(document: {workspaceId: string; objectId: string}): import("./serviceActivationRetirement").RetirableServiceActivation | null;
+  retirableServiceActivation(document: {
+    workspaceId: string;
+    objectId: string;
+  }): import("./serviceActivationRetirement").RetirableServiceActivation | null;
   /** The live journal's answer, for a retirement's reconciliation, for the deliveries it names. */
-  retirementJournalEvidence(retirement: import("./serviceActivationRetirement").ServiceActivationRetirement, deliveryIds: readonly string[]):
-    {receipts: import("@dohc/live-session-contract/live-update-admission").LiveUpdateReceipt[]; absent: string[]};
+  retirementJournalEvidence(
+    retirement: import("./serviceActivationRetirement").ServiceActivationRetirement,
+    deliveryIds: readonly string[],
+  ): {
+    receipts: import("@dohc/live-session-contract/live-update-admission").LiveUpdateReceipt[];
+    absent: string[];
+  };
   /** Opens the retirement of a live session the owner's restore kept, once nothing covers its document. Returns whether it opened one. */
-  endLapsedServiceHostRun(enrollment: import("./serviceHostEnrollment").ServiceHostEnrollment, nowMs: number): boolean;
-  releaseServiceHostEnrollment(input: {workspaceId: string; objectId: string; nowMs: number}): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
-  readPushSubscription(installationId: string): import("./pushSubscriptions").PushSubscriptionRow | null;
-  bindPushSubscription(input: import("./pushSubscriptions").BindPushSubscriptionInput): import("./pushSubscriptions").PushSubscriptionRow;
-  removePushSubscription(input: {installationId: string; userId: string}): void;
+  endLapsedServiceHostRun(
+    enrollment: import("./serviceHostEnrollment").ServiceHostEnrollment,
+    nowMs: number,
+  ): boolean;
+  releaseServiceHostEnrollment(input: {
+    workspaceId: string;
+    objectId: string;
+    nowMs: number;
+  }): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
+  readPushSubscription(
+    installationId: string,
+  ): import("./pushSubscriptions").PushSubscriptionRow | null;
+  bindPushSubscription(
+    input: import("./pushSubscriptions").BindPushSubscriptionInput,
+  ): import("./pushSubscriptions").PushSubscriptionRow;
+  removePushSubscription(input: { installationId: string; userId: string }): void;
   postNotice(input: import("./notices").PostNoticeInput): void;
-  postAutomationWake(input: import("./notices").PostAutomationWakeInput): import("./notices").PostedAutomationWake;
-  readNoticeChanges(input: import("./notices").ReadNoticeChangesInput): import("@dohc/workspace-contracts/relay").RelayNoticePage;
+  postAutomationWake(
+    input: import("./notices").PostAutomationWakeInput,
+  ): import("./notices").PostedAutomationWake;
+  readNoticeChanges(
+    input: import("./notices").ReadNoticeChangesInput,
+  ): import("@dohc/workspace-contracts/relay").RelayNoticePage;
   /** The recipient's Notice change head; zero for a list that never changed. */
   noticeHead(recipientUserId: string): number;
   markNotices(input: import("./notices").MarkNoticesInput): string[];
   noticeShareReceived(input: import("./notices").NoticeShareReceivedInput): void;
   pendingShareNotices(recipientUserId: string): { grantId: string; granterUserId: string }[];
-  readAutomationHost(input: import("./automationHosts").AutomationHostReadInput): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
-  checkInAutomationComputer(input: import("./automationHosts").AutomationHostCheckInInput): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
-  chooseAutomationHost(input: import("./automationHosts").AutomationHostChooseInput): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
-  releaseAutomationHost(input: import("./automationHosts").AutomationHostReleaseInput): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
-  takeOverAutomationHost(input: import("./automationHosts").AutomationHostTakeOverInput): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
-  readAutomationGroupHandover(input: import("./automationHosts").AutomationGroupHandoverInput): import("./automationHosts").AutomationGroupHandover;
-  authorizeLinkCollectionWrite(input: Parameters<typeof import("./collectionWrites").authorizeLinkCollectionWrite>[1]): import("../shareAuthorization").AuthorizedShareAction;
-  authorizeAgentCollectionWrite(input: Parameters<typeof import("./collectionWrites").authorizeAgentCollectionWrite>[1]): import("../shareAuthorization").AuthorizedShareAction;
-  automationHostRecord(workspaceId: string): import("@dohc/workspace-contracts/relay").RelayAutomationHost | null;
-  readAutomationServerSchedules(workspaceId: string): import("./automationHosts").AutomationServerSchedules | null;
+  readAutomationHost(
+    input: import("./automationHosts").AutomationHostReadInput,
+  ): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
+  checkInAutomationComputer(
+    input: import("./automationHosts").AutomationHostCheckInInput,
+  ): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
+  chooseAutomationHost(
+    input: import("./automationHosts").AutomationHostChooseInput,
+  ): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
+  releaseAutomationHost(
+    input: import("./automationHosts").AutomationHostReleaseInput,
+  ): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
+  takeOverAutomationHost(
+    input: import("./automationHosts").AutomationHostTakeOverInput,
+  ): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
+  readAutomationGroupHandover(
+    input: import("./automationHosts").AutomationGroupHandoverInput,
+  ): import("./automationHosts").AutomationGroupHandover;
+  authorizeLinkCollectionWrite(
+    input: Parameters<typeof import("./collectionWrites").authorizeLinkCollectionWrite>[1],
+  ): import("../shareAuthorization").AuthorizedShareAction;
+  authorizeAgentCollectionWrite(
+    input: Parameters<typeof import("./collectionWrites").authorizeAgentCollectionWrite>[1],
+  ): import("../shareAuthorization").AuthorizedShareAction;
+  automationHostRecord(
+    workspaceId: string,
+  ): import("@dohc/workspace-contracts/relay").RelayAutomationHost | null;
+  readAutomationServerSchedules(
+    workspaceId: string,
+  ): import("./automationHosts").AutomationServerSchedules | null;
   beginAutomationServerCopy(input: { workspaceId: string; incarnation: number }): void;
-  recordAutomationServerStart(input: { workspaceId: string; incarnation: number; generation: number; releasedThroughMs: number | null }): void;
+  recordAutomationServerStart(input: {
+    workspaceId: string;
+    incarnation: number;
+    generation: number;
+    releasedThroughMs: number | null;
+  }): void;
   recordAutomationServerTaken(input: { workspaceId: string; generation: number }): void;
   recordAutomationServerProgress(input: { workspaceId: string; throughMs: number }): void;
-  recordAutomationServerRunChanging(input: Parameters<typeof import("./automationHosts").recordAutomationServerRunChanging>[1]): void;
+  recordAutomationServerRunChanging(
+    input: Parameters<typeof import("./automationHosts").recordAutomationServerRunChanging>[1],
+  ): void;
   endAutomationServerRun(input: import("./automationHosts").AutomationServerRun): boolean;
-  endedAutomationServerRuns(input: { workspaceId: string; incarnation: number }): Array<{ automationId: string; claimId: string; touch: number }>;
-  confirmAutomationServerRunsSent(input: Parameters<typeof import("./automationHosts").confirmAutomationServerRunsSent>[1]): void;
-  markAutomationServerRunsLost(input: { workspaceId: string; incarnation: number; nowMs: number }): void;
-  lostAutomationServerRuns(input: Parameters<typeof import("./automationHosts").lostAutomationServerRuns>[1]): import("./automationHosts").LostAutomationServerRun[];
-  unreportedLostAutomationServerRuns(input: { workspaceId: string; nowMs: number }): ReturnType<typeof import("./automationHosts").unreportedLostAutomationServerRuns>;
-  reportAutomationServerRunsLost(input: Parameters<typeof import("./automationHosts").reportAutomationServerRunsLost>[1]): void;
-  joinAutomationWorkspace(input: { workspaceId: string; nowMs: number; reasons: readonly import("./automationWorkspaces").CopyReason[] }): import("./automationWorkspaces").AutomationWorkspace | null;
-  replaceLostAutomationReplica(input: { workspaceId: string; incarnation: number; nowMs: number }): import("./automationWorkspaces").AutomationWorkspace | null;
-  unwantAutomationWorkspace(input: { workspaceId: string; nowMs: number }): import("./automationWorkspaces").AutomationWorkspace | null;
+  endedAutomationServerRuns(input: {
+    workspaceId: string;
+    incarnation: number;
+  }): Array<{ automationId: string; claimId: string; touch: number }>;
+  confirmAutomationServerRunsSent(
+    input: Parameters<typeof import("./automationHosts").confirmAutomationServerRunsSent>[1],
+  ): void;
+  markAutomationServerRunsLost(input: {
+    workspaceId: string;
+    incarnation: number;
+    nowMs: number;
+  }): void;
+  lostAutomationServerRuns(
+    input: Parameters<typeof import("./automationHosts").lostAutomationServerRuns>[1],
+  ): import("./automationHosts").LostAutomationServerRun[];
+  unreportedLostAutomationServerRuns(input: {
+    workspaceId: string;
+    nowMs: number;
+  }): ReturnType<typeof import("./automationHosts").unreportedLostAutomationServerRuns>;
+  reportAutomationServerRunsLost(
+    input: Parameters<typeof import("./automationHosts").reportAutomationServerRunsLost>[1],
+  ): void;
+  joinAutomationWorkspace(input: {
+    workspaceId: string;
+    nowMs: number;
+    reasons: readonly import("./automationWorkspaces").CopyReason[];
+  }): import("./automationWorkspaces").AutomationWorkspace | null;
+  replaceLostAutomationReplica(input: {
+    workspaceId: string;
+    incarnation: number;
+    nowMs: number;
+  }): import("./automationWorkspaces").AutomationWorkspace | null;
+  unwantAutomationWorkspace(input: {
+    workspaceId: string;
+    nowMs: number;
+  }): import("./automationWorkspaces").AutomationWorkspace | null;
   listAutomationWorkspaces(): import("./automationWorkspaces").AutomationWorkspace[];
   forgetAutomationWorkspace(input: { workspaceId: string; incarnation: number }): void;
   forgetAutomationWorkspaces(kept?: readonly string[]): void;
@@ -750,81 +1040,209 @@ export interface SyncRelayStorage {
   endCopyReason(workspaceId: string, reason: import("./automationWorkspaces").CopyReason): void;
   listAccountWorkspaces(ownerUserId: string): import("./accountWorkspaces").AccountWorkspace[];
   showsOnPhone(ownerUserId: string, workspaceId: string): boolean;
-  setShowOnPhone(input: { ownerUserId: string; workspaceId: string; showOnPhone: boolean }): boolean;
+  setShowOnPhone(input: {
+    ownerUserId: string;
+    workspaceId: string;
+    showOnPhone: boolean;
+  }): boolean;
   endAccountReasonsOfHiddenOrDisownedCopies(): void;
-  recordAccountOperation(input: import("./operationRecords").RecordOperationInput): import("./operationRecords").OperationClaim;
-  lookupAccountOperation(input: { accountId: string; operationId: string; binding: import("./operationRecords").OperationBinding }): import("./operationRecords").OperationLookup;
-  advanceAccountOperation(input: import("./operationRecords").AdvanceOperationInput): { moved: boolean; record: import("./operationRecords").OperationRecord } | null;
-  listUnfinishedAccountOperations(input: { workspaceId: string; incarnation?: number }): import("./operationRecords").OperationRecord[];
+  recordAccountOperation(
+    input: import("./operationRecords").RecordOperationInput,
+  ): import("./operationRecords").OperationClaim;
+  lookupAccountOperation(input: {
+    accountId: string;
+    operationId: string;
+    binding: import("./operationRecords").OperationBinding;
+  }): import("./operationRecords").OperationLookup;
+  advanceAccountOperation(
+    input: import("./operationRecords").AdvanceOperationInput,
+  ): { moved: boolean; record: import("./operationRecords").OperationRecord } | null;
+  listUnfinishedAccountOperations(input: {
+    workspaceId: string;
+    incarnation?: number;
+  }): import("./operationRecords").OperationRecord[];
   listUnfinishedOperationCopies(): Array<{ workspaceId: string; incarnation: number }>;
   /** Each workspace with phone writes still to finish, with the earliest end of their active time. */
   unfinishedOperationActiveEnds(): Array<{ workspaceId: string; activeUntilMs: number }>;
   /** The relay's row at a phone write's coordinate, only within the log rows the write's own epoch and stream could make. */
-  fetchAccountOperationLogRow(input: Parameters<typeof import("./operationRecords").operationLogRow>[1]): SyncRelayLogRow | null;
+  fetchAccountOperationLogRow(
+    input: Parameters<typeof import("./operationRecords").operationLogRow>[1],
+  ): SyncRelayLogRow | null;
   /** The copies whose phone writes may still publish, those with a write not yet stalled first, then oldest write first. */
   publishingCopies(): import("./operationRecords").PublishingCopy[];
   /** Gives exactly those copies the `publication` reason. */
   restorePublicationReasons(): void;
   tombstoneSettledAccountOperations(nowMs: number): number;
   /** Replaces one computer's declared agents in a workspace the account owns. False, writing nothing, when it doesn't own it. */
-  replaceChatRunners(input: Parameters<typeof import("./chatWakes").replaceChatRunners>[1]): boolean;
-  enabledChatRunners(input: { accountId: string; workspaceId: string; nowMs: number }): import("./chatWakes").ChatRunner[];
+  replaceChatRunners(
+    input: Parameters<typeof import("./chatWakes").replaceChatRunners>[1],
+  ): boolean;
+  enabledChatRunners(input: {
+    accountId: string;
+    workspaceId: string;
+    nowMs: number;
+  }): import("./chatWakes").ChatRunner[];
   chatWakeHead(accountId: string): number;
-  listWaitingChatWakes(input: Parameters<typeof import("./chatWakes").listWaitingChatWakes>[1]): ReturnType<typeof import("./chatWakes").listWaitingChatWakes>;
-  claimChatWake(input: Parameters<typeof import("./chatWakes").claimChatWake>[1]): ReturnType<typeof import("./chatWakes").claimChatWake>;
-  confirmChatWakeQueued(input: Parameters<typeof import("./chatWakes").confirmChatWakeQueued>[1]): import("@dohc/workspace-contracts/chat-wakes").ChatWakeView | null;
+  listWaitingChatWakes(
+    input: Parameters<typeof import("./chatWakes").listWaitingChatWakes>[1],
+  ): ReturnType<typeof import("./chatWakes").listWaitingChatWakes>;
+  claimChatWake(
+    input: Parameters<typeof import("./chatWakes").claimChatWake>[1],
+  ): ReturnType<typeof import("./chatWakes").claimChatWake>;
+  confirmChatWakeQueued(
+    input: Parameters<typeof import("./chatWakes").confirmChatWakeQueued>[1],
+  ): import("@dohc/workspace-contracts/chat-wakes").ChatWakeView | null;
   /** The threads of every wake a retry could answer: the wake it names, and the generation its binding answered. */
   retryWakeThreads(input: Parameters<typeof import("./chatWakes").retryWakeThreads>[1]): string[];
-  retryChatWake(input: Parameters<typeof import("./chatWakes").retryChatWake>[1]): import("./chatWakes").ChatWakeRetry;
+  retryChatWake(
+    input: Parameters<typeof import("./chatWakes").retryChatWake>[1],
+  ): import("./chatWakes").ChatWakeRetry;
   /** Ends wakes whose wait ran out and deletes those ended long ago, a batch at a time. Answers how many rows changed. */
   sweepChatWakes(nowMs: number): number;
   accountFeedStanding(workspaceId: string): import("./accountFeed").AccountFeedStanding | null;
-  accountFeedLogRows(input: { workspaceId: string; after: number; through: number; limit: number }): import("./accountFeed").AccountFeedLogRow[];
-  accountFeedJournalRows(input: { workspaceId: string; after: number; through: number; limit: number }): Array<{ journalCursor: number; objectId: string; path: string }>;
-  accountFeedThreadPaths(workspaceId: string, threadId: string): { lastKnownPath: string | null; named: string[] };
-  currentAutomationWorkspace(workspaceId: string): import("./automationWorkspaces").AutomationWorkspace | null;
-  automationWorkspaceLogSeq(input: { workspaceId: string; originId: string; originSeq: number }): number | null;
+  accountFeedLogRows(input: {
+    workspaceId: string;
+    after: number;
+    through: number;
+    limit: number;
+  }): import("./accountFeed").AccountFeedLogRow[];
+  accountFeedJournalRows(input: {
+    workspaceId: string;
+    after: number;
+    through: number;
+    limit: number;
+  }): Array<{ journalCursor: number; objectId: string; path: string }>;
+  accountFeedThreadPaths(
+    workspaceId: string,
+    threadId: string,
+  ): { lastKnownPath: string | null; named: string[] };
+  currentAutomationWorkspace(
+    workspaceId: string,
+  ): import("./automationWorkspaces").AutomationWorkspace | null;
+  automationWorkspaceLogSeq(input: {
+    workspaceId: string;
+    originId: string;
+    originSeq: number;
+  }): number | null;
   liveClaimLogSeq(input: { workspaceId: string; liveCursor: number }): number | null;
   serverHostedWorkspaces(): string[];
   automationWorkspaceLogHead(workspaceId: string): number;
   automationWorkspaceInfo(workspaceId: string): { ownerUserId: string; everShared: boolean } | null;
-  restoreAutomationWorkspaceTimes(input: { workspaceId: string; incarnation: number; unwantedSinceMs: number; leftAtMs: number | null }): void;
-  commitCollectionWrite(input: import("./collectionWrites").CommitCollectionWriteInput): import("./collectionWrites").CommittedCollectionWrite;
-  checkPersonalCollectionWriter(input: import("./collectionWrites").PersonalWriterInput, nowMs: number): void;
-  commitPersonalCollectionWrite(input: import("./collectionWrites").CommitPersonalCollectionWriteInput): import("./collectionWrites").CommittedCollectionWrite;
+  restoreAutomationWorkspaceTimes(input: {
+    workspaceId: string;
+    incarnation: number;
+    unwantedSinceMs: number;
+    leftAtMs: number | null;
+  }): void;
+  commitCollectionWrite(
+    input: import("./collectionWrites").CommitCollectionWriteInput,
+  ): import("./collectionWrites").CommittedCollectionWrite;
+  checkPersonalCollectionWriter(
+    input: import("./collectionWrites").PersonalWriterInput,
+    nowMs: number,
+  ): void;
+  commitPersonalCollectionWrite(
+    input: import("./collectionWrites").CommitPersonalCollectionWriteInput,
+  ): import("./collectionWrites").CommittedCollectionWrite;
   automationSwitchableFolder(workspaceId: string, folder: string): boolean;
-  readOwnerCollectionWrites(input: import("./ownerCollectionWrites").OwnerCollectionWritesInput): import("./ownerCollectionWrites").OwnerCollectionWritesPage;
-  recordAutomationPress(input: import("./automationPresses").RecordAutomationPressInput): import("@dohc/workspace-contracts/relay").RelayAutomationPressReceipt;
-  resolveAutomationPress(input: Parameters<typeof import("./automationPresses").resolveAutomationPress>[1]): import("@dohc/workspace-contracts/relay").RelayButtonAuthority;
-  inspectAutomationButton(input: import("../automationButtonInspections").ButtonInspectionInput): Promise<import("@dohc/workspace-contracts/relay").RelayButtonInspection>;
+  readOwnerCollectionWrites(
+    input: import("./ownerCollectionWrites").OwnerCollectionWritesInput,
+  ): import("./ownerCollectionWrites").OwnerCollectionWritesPage;
+  recordAutomationPress(
+    input: import("./automationPresses").RecordAutomationPressInput,
+  ): import("@dohc/workspace-contracts/relay").RelayAutomationPressReceipt;
+  resolveAutomationPress(
+    input: Parameters<typeof import("./automationPresses").resolveAutomationPress>[1],
+  ): import("@dohc/workspace-contracts/relay").RelayButtonAuthority;
+  inspectAutomationButton(
+    input: import("../automationButtonInspections").ButtonInspectionInput,
+  ): Promise<import("@dohc/workspace-contracts/relay").RelayButtonInspection>;
   parkButtonInspectionHost(scope: import("./automationPresses").HostScope): () => void;
-  listButtonInspections(input: import("./automationPresses").HostScope): import("@dohc/workspace-contracts/relay").RelayButtonInspectionRequest[];
-  resolveButtonInspection(input: Parameters<typeof import("../automationButtonInspections").resolveButtonInspection>[1]): import("@dohc/workspace-contracts/relay").RelayButtonAuthority;
-  answerButtonInspection(input: Parameters<typeof import("../automationButtonInspections").answerButtonInspection>[1], result: import("@dohc/workspace-contracts/relay").RelayButtonInspection): void;
-  listAutomationPresses(input: import("./automationPresses").HostScope & { nowMs: number }): import("@dohc/workspace-contracts/relay").RelayAutomationPress[];
-  automationPressWait(input: import("./automationPresses").HostScope & { nowMs: number }): "not-host" | "waiting" | "empty";
+  listButtonInspections(
+    input: import("./automationPresses").HostScope,
+  ): import("@dohc/workspace-contracts/relay").RelayButtonInspectionRequest[];
+  resolveButtonInspection(
+    input: Parameters<typeof import("../automationButtonInspections").resolveButtonInspection>[1],
+  ): import("@dohc/workspace-contracts/relay").RelayButtonAuthority;
+  answerButtonInspection(
+    input: Parameters<typeof import("../automationButtonInspections").answerButtonInspection>[1],
+    result: import("@dohc/workspace-contracts/relay").RelayButtonInspection,
+  ): void;
+  listAutomationPresses(
+    input: import("./automationPresses").HostScope & { nowMs: number },
+  ): import("@dohc/workspace-contracts/relay").RelayAutomationPress[];
+  automationPressWait(
+    input: import("./automationPresses").HostScope & { nowMs: number },
+  ): "not-host" | "waiting" | "empty";
   pruneExpiredAutomationPresses(nowMs: number): number;
-  acceptAutomationPresses(input: Parameters<typeof import("./automationPresses").acceptAutomationPresses>[1]): string[];
-  settleAutomationPress(input: Parameters<typeof import("./automationPresses").settleAutomationPress>[1]): import("@dohc/workspace-contracts/relay").RelayAutomationPressReceipt;
-  publishAppPublication(input: import("./publications").PublishAppPublicationInput): import("./publications").AppPublicationRow;
-  approveAppCollection(input: import("./appCollections").ApproveAppCollectionInput): {publicationId:string;authorityRevision:number;capability:import("@dohc/security-contract/app-publication").AppCollectionCapability|null};
-  acceptAppCollection(input: import("./appCollections").AcceptAppCollectionInput, policy: import("./appCollections").AppCollectionAcceptancePolicy): import("./appCollections").AppCollectionReceipt;
-  readAppCollection(input: import("./appCollections").ReadAppCollectionInput): import("./appCollections").AppCollectionPage;
-  readOwnerAppCollectionAcceptances(input: import("./appCollectionModeration").OwnerAppCollectionAcceptancesInput): import("./appCollectionModeration").OwnerAppCollectionAcceptancesPage;
-  authorizeLinkAppCollection(input:import("./publications").LinkAppPublicationInput):import("./publications").LinkAppPublicationAuthority;
-  readAppPublication(input: import("./publications").ReadAppPublicationInput): import("./publications").AppPublicationRow;
-  listAppPublications(input: import("./publications").ListAppPublicationsInput): ReturnType<typeof import("./publications").listAppPublications>;
-  listLinkAppPublications(input: import("./publications").ListLinkAppPublicationsInput): ReturnType<typeof import("./publications").listLinkAppPublications>;
-  withdrawAppPublication(input: import("./publications").WithdrawAppPublicationInput): import("./publications").AppPublicationState;
-  disableAppPublication(input: import("./publications").DisableAppPublicationInput): import("./publications").AppPublicationTakedownResult;
+  acceptAutomationPresses(
+    input: Parameters<typeof import("./automationPresses").acceptAutomationPresses>[1],
+  ): string[];
+  settleAutomationPress(
+    input: Parameters<typeof import("./automationPresses").settleAutomationPress>[1],
+  ): import("@dohc/workspace-contracts/relay").RelayAutomationPressReceipt;
+  publishAppPublication(
+    input: import("./publications").PublishAppPublicationInput,
+  ): import("./publications").AppPublicationRow;
+  approveAppCollection(input: import("./appCollections").ApproveAppCollectionInput): {
+    publicationId: string;
+    authorityRevision: number;
+    capability: import("@dohc/security-contract/app-publication").AppCollectionCapability | null;
+  };
+  acceptAppCollection(
+    input: import("./appCollections").AcceptAppCollectionInput,
+    policy: import("./appCollections").AppCollectionAcceptancePolicy,
+  ): import("./appCollections").AppCollectionReceipt;
+  readAppCollection(
+    input: import("./appCollections").ReadAppCollectionInput,
+  ): import("./appCollections").AppCollectionPage;
+  readOwnerAppCollectionAcceptances(
+    input: import("./appCollectionModeration").OwnerAppCollectionAcceptancesInput,
+  ): import("./appCollectionModeration").OwnerAppCollectionAcceptancesPage;
+  authorizeLinkAppCollection(
+    input: import("./publications").LinkAppPublicationInput,
+  ): import("./publications").LinkAppPublicationAuthority;
+  readAppPublication(
+    input: import("./publications").ReadAppPublicationInput,
+  ): import("./publications").AppPublicationRow;
+  listAppPublications(
+    input: import("./publications").ListAppPublicationsInput,
+  ): ReturnType<typeof import("./publications").listAppPublications>;
+  listLinkAppPublications(
+    input: import("./publications").ListLinkAppPublicationsInput,
+  ): ReturnType<typeof import("./publications").listLinkAppPublications>;
+  withdrawAppPublication(
+    input: import("./publications").WithdrawAppPublicationInput,
+  ): import("./publications").AppPublicationState;
+  disableAppPublication(
+    input: import("./publications").DisableAppPublicationInput,
+  ): import("./publications").AppPublicationTakedownResult;
   liftAppPublishingHold(publicationId: string): boolean;
-  reactivateAppPublication(input: import("./publications").ReactivateAppPublicationInput): import("./publications").AppPublicationState;
-  authorizeLinkAppPublication(input: import("./publications").LinkAppPublicationInput): import("./publications").LinkAppPublicationAuthority;
-  createLinkAppPublicationGuard(input: import("./publications").LinkAppPublicationInput): (nowMs: number) => void;
-  readLinkAppPublicationBlob(input: import("./publications").LinkAppPublicationInput & {sha256: string; expectedAuthorityRevision: number}): import("./publications").LinkAppPublicationAuthority & {file: import("@dohc/security-contract/app-publication").AppPublicationCandidate["files"][number]; bytes: Uint8Array};
+  reactivateAppPublication(
+    input: import("./publications").ReactivateAppPublicationInput,
+  ): import("./publications").AppPublicationState;
+  authorizeLinkAppPublication(
+    input: import("./publications").LinkAppPublicationInput,
+  ): import("./publications").LinkAppPublicationAuthority;
+  createLinkAppPublicationGuard(
+    input: import("./publications").LinkAppPublicationInput,
+  ): (nowMs: number) => void;
+  readLinkAppPublicationBlob(
+    input: import("./publications").LinkAppPublicationInput & {
+      sha256: string;
+      expectedAuthorityRevision: number;
+    },
+  ): import("./publications").LinkAppPublicationAuthority & {
+    file: import("@dohc/security-contract/app-publication").AppPublicationCandidate["files"][number];
+    bytes: Uint8Array;
+  };
   readOwnerRestoreOptions(input: OwnerRestoreOptionsInput): OwnerRestoreOptions;
   readOwnerRestoreStatus(input: StopRestoreLookup): OwnerRestoreStatus;
-  readOwnerUnfinishedRestores(input: {workspaceId: string; ownerUserId: string; after?: string}): OwnerUnfinishedRestores;
+  readOwnerUnfinishedRestores(input: {
+    workspaceId: string;
+    ownerUserId: string;
+    after?: string;
+  }): OwnerUnfinishedRestores;
   readStopRestorePlan(input: StopRestorePlanInput): StopRestorePlan;
   beginStopRestore(input: StopRestoreIntent, now: number): StopRestoreOperation;
   advanceStopRestoreFence(input: StopRestoreLookup, now: number): StopRestoreOperation;
@@ -832,22 +1250,50 @@ export interface SyncRelayStorage {
   readStopRestore(input: StopRestoreLookup): StopRestoreOperation | null;
   readonly unavailable: AbortSignal;
   captureStanding(): () => void;
-  createLiveCommittedDeliveryStore(history: LiveJournalHistoryAuthority, activation?: ServiceActivationAccess): LiveCommittedDeliveryStore;
+  createLiveCommittedDeliveryStore(
+    history: LiveJournalHistoryAuthority,
+    activation?: ServiceActivationAccess,
+  ): LiveCommittedDeliveryStore;
   createServiceActivationStore(history: LiveJournalHistoryAuthority): ServiceActivationStore;
-  readLiveUpdateJournalCut(input: { document: LiveDocumentKey }, reserveBytes?: (size: number) => void): LiveUpdateJournalCutResult;
-  commitLiveUpdateJournal(input: LiveUpdateJournalCommitInput, activation?: ServiceActivationAccess): RelayLiveUpdateJournalResult;
-  readCommittedLiveUpdate(input: { host: LiveHostConnectionCoordinate; document: LiveDocumentKey; journalCursor: number }): CommittedLiveUpdateResult;
+  readLiveUpdateJournalCut(
+    input: { document: LiveDocumentKey },
+    reserveBytes?: (size: number) => void,
+  ): LiveUpdateJournalCutResult;
+  commitLiveUpdateJournal(
+    input: LiveUpdateJournalCommitInput,
+    activation?: ServiceActivationAccess,
+  ): RelayLiveUpdateJournalResult;
+  readCommittedLiveUpdate(input: {
+    host: LiveHostConnectionCoordinate;
+    document: LiveDocumentKey;
+    journalCursor: number;
+  }): CommittedLiveUpdateResult;
   readReplicaLiveJournal(input: ReplicaLiveJournalRead): Promise<ReplicaLiveJournalPage>;
 
   close(): void;
   invalidate(): void;
-  resolveCurrentLiveDocumentBinding(input: CurrentLiveBindingRequest, activation?: ServiceActivationAccess): CurrentLiveBindingResult;
+  resolveCurrentLiveDocumentBinding(
+    input: CurrentLiveBindingRequest,
+    activation?: ServiceActivationAccess,
+  ): CurrentLiveBindingResult;
   /** The same check from the live row's metadata, reading no baseline bytes. */
-  resolveCurrentLiveDocumentBindingFromMetadata(input: CurrentLiveBindingRequest): CurrentLiveBindingResult;
-  automationRecordWriteAllowed(input: {workspaceId: string; ownerUserId: string; currentPath: string;
+  resolveCurrentLiveDocumentBindingFromMetadata(
+    input: CurrentLiveBindingRequest,
+  ): CurrentLiveBindingResult;
+  automationRecordWriteAllowed(input: {
+    workspaceId: string;
+    ownerUserId: string;
+    currentPath: string;
     declaration: import("@dohc/live-session-contract/live-authorship").AutomationDeclaration;
-    authority: {readonly hostPressId: string; readonly automationId: string} | {readonly grantId: string; readonly grantGeneration: number}}): boolean;
-  automationRecordBinding(workspaceId: string, ownerUserId: string, path: string): {binding: LiveObjectBinding} | null;
+    authority:
+      | { readonly hostPressId: string; readonly automationId: string }
+      | { readonly grantId: string; readonly grantGeneration: number };
+  }): boolean;
+  automationRecordBinding(
+    workspaceId: string,
+    ownerUserId: string,
+    path: string,
+  ): { binding: LiveObjectBinding } | null;
   /**
    * The accepted state of the live document now at `path` in main: its
    * journal cut, "restoring" while a restore keeps the relay from cutting it,
@@ -857,32 +1303,56 @@ export interface SyncRelayStorage {
   automationRecordJournalCursor(binding: LiveObjectBinding): number;
   /** Groups synchronous authority checks in one current read snapshot. */
   readLiveAuthority<T>(run: () => T): T;
-  resolveLiveObjectHostBinding(scope: LiveTicketScope, objectId: string): import("./liveDocumentAuthority").LiveObjectHostBindingResult;
-  registerLiveDocumentBaseline(input: LiveDocumentBaselineRegistrationInput): RelayBaselineRegistrationResult;
+  resolveLiveObjectHostBinding(
+    scope: LiveTicketScope,
+    objectId: string,
+  ): import("./liveDocumentAuthority").LiveObjectHostBindingResult;
+  registerLiveDocumentBaseline(
+    input: LiveDocumentBaselineRegistrationInput,
+  ): RelayBaselineRegistrationResult;
   mintLiveTicket(input: LiveTicketMint): { expiresAtMs: number; publicPrincipalId?: string } | null;
   readLiveTicketTarget(input: LiveTicketLookup): { workspaceId: string; objectId: string } | null;
   redeemLiveTicket(input: LiveTicketRedemption): RedeemedLiveTicket | null;
   getLiveHostControl(): HostControlSnapshot | null;
   // Local deployment-operator operations. Account and device requests cannot call these.
-  provisionDeviceHostCredential(input: { credential: DeviceHostCredential; updatedAtMs: number }): DeviceHostCredentialResult;
-  revokeDeviceHostCredential(input: { hostId: string; instanceId: string; updatedAtMs: number }): DeviceHostCredentialResult;
+  provisionDeviceHostCredential(input: {
+    credential: DeviceHostCredential;
+    updatedAtMs: number;
+  }): DeviceHostCredentialResult;
+  revokeDeviceHostCredential(input: {
+    hostId: string;
+    instanceId: string;
+    updatedAtMs: number;
+  }): DeviceHostCredentialResult;
   // The authenticated transport supplies a fresh connection ID, never the device.
-  registerDeviceHost(input: { credential: DeviceHostCredential; connectionId: string; updatedAtMs: number }): DeviceHostCredentialResult;
-  disconnectDeviceHost(input: { credential: DeviceHostCredential; connectionId: string; updatedAtMs: number }): DeviceHostCredentialResult;
+  registerDeviceHost(input: {
+    credential: DeviceHostCredential;
+    connectionId: string;
+    updatedAtMs: number;
+  }): DeviceHostCredentialResult;
+  disconnectDeviceHost(input: {
+    credential: DeviceHostCredential;
+    connectionId: string;
+    updatedAtMs: number;
+  }): DeviceHostCredentialResult;
   provisionLiveHostControl(input: {
     mode: HostMode;
     hostId: string;
     updatedAtMs: number;
     guard: () => void;
   }): LiveHostControlResult;
-  registerLiveHost(input: LiveHostConnectionCoordinate & {
-    updatedAtMs: number;
-    guard: () => void;
-  }): LiveHostControlResult;
-  disconnectLiveHost(input: LiveHostConnectionCoordinate & {
-    updatedAtMs: number;
-    guard: () => void;
-  }): LiveHostControlResult;
+  registerLiveHost(
+    input: LiveHostConnectionCoordinate & {
+      updatedAtMs: number;
+      guard: () => void;
+    },
+  ): LiveHostControlResult;
+  disconnectLiveHost(
+    input: LiveHostConnectionCoordinate & {
+      updatedAtMs: number;
+      guard: () => void;
+    },
+  ): LiveHostControlResult;
   beginLiveHostTransition(input: BeginLiveHostTransitionInput): LiveHostControlResult;
   abortLiveHostTransition(input: {
     transitionId: string;
@@ -926,23 +1396,70 @@ export interface SyncRelayStorage {
   discardReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease): void;
   releaseReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease): void;
   bindReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease): void;
-  replicaCurrentViewSelectors(workspaceId: string): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentViewSelector[];
-  stageReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease, view: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView, observations?: import("./replicaHistoryPins").ReplicaHistoryObservation[]): import("./replicaCurrentViews").StagedCurrentView;
-  flipReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease, staged: import("./replicaCurrentViews").StagedCurrentView): void;
+  replicaCurrentViewSelectors(
+    workspaceId: string,
+  ): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentViewSelector[];
+  stageReplicaCurrentView(
+    lease: import("../replicaReadPrincipal").ReplicaReadLease,
+    view: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView,
+    observations?: import("./replicaHistoryPins").ReplicaHistoryObservation[],
+  ): import("./replicaCurrentViews").StagedCurrentView;
+  flipReplicaCurrentView(
+    lease: import("../replicaReadPrincipal").ReplicaReadLease,
+    staged: import("./replicaCurrentViews").StagedCurrentView,
+  ): void;
   /** Supervisor only. The caller must prove that the stored files and omissions equal this view. */
-  advanceReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease, view: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView, previous: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView;
-  storeReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease, view: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView, observations?: import("./replicaHistoryPins").ReplicaHistoryObservation[]): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView;
+  advanceReplicaCurrentView(
+    lease: import("../replicaReadPrincipal").ReplicaReadLease,
+    view: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView,
+    previous: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView,
+  ): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView;
+  storeReplicaCurrentView(
+    lease: import("../replicaReadPrincipal").ReplicaReadLease,
+    view: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView,
+    observations?: import("./replicaHistoryPins").ReplicaHistoryObservation[],
+  ): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView;
   nextReplicaHistoryPinAt(workspaceId: string): number | null;
   sampleReplicaHistory(lease: import("../replicaReadPrincipal").ReplicaReadLease): void;
-  createReplicaLinkReadService(source:import("../replicaLinkReadService").DevelopmentReplicaReads,watches:Pick<import("../replicaWatches").ReplicaWatches,"holdReader">,activity:Pick<import("../discussionActivity").DiscussionActivityHub,"wakeLog">,freshness:ReturnType<typeof import("../shareReadQueries").createShareReadQueries>["newestFilteredOpFreshness"],key?:string|Uint8Array):ReturnType<typeof import("../replicaLinkReadService").createReplicaLinkReadService>;
-  listReplicaHistoryPins(input: import("../replicaCurrentViewReads").ReplicaCurrentViewReadInput, source?: import("../replicaCurrentViewReads").ReplicaCurrentViewSource): import("../replicaHistoryReads").ReplicaHistoryList;
-  readReplicaHistoryPin(input: import("../replicaCurrentViewReads").ReplicaCurrentViewReadInput & {pinId: string}, source?: import("../replicaCurrentViewReads").ReplicaCurrentViewSource): import("../replicaHistoryReads").ReplicaHistoryRead;
-  readReplicaCurrentView(workspaceId: string): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView | null;
-  currentViewFilesAtFences(workspaceId: string, files: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView["files"], previous: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView["files"], omitted: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView["omitted"]): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView["files"];
-  readReplicaCurrentViewText(workspaceId: string,sha: string): string | null;
-  readReplicaStanding(workspaceId: string, shareGrantBindings?: string): ReturnType<typeof import("./replicaReads").readReplicaStanding>;
-  listReplicaCurrentViewFiles(input: Parameters<typeof import("../replicaCurrentViewReads").listReplicaCurrentViewFiles>[1], source?: import("../replicaCurrentViewReads").ReplicaCurrentViewSource): import("../replicaCurrentViewReads").ReplicaCurrentViewList;
-  readReplicaCurrentViewFile(input: import("../replicaCurrentViewReads").ReplicaCurrentViewReadInput & {path: string}, source?: import("../replicaCurrentViewReads").ReplicaCurrentViewSource): import("../replicaCurrentViewReads").ReplicaCurrentViewRead;
+  createReplicaLinkReadService(
+    source: import("../replicaLinkReadService").DevelopmentReplicaReads,
+    watches: Pick<import("../replicaWatches").ReplicaWatches, "holdReader">,
+    activity: Pick<import("../discussionActivity").DiscussionActivityHub, "wakeLog">,
+    freshness: ReturnType<
+      typeof import("../shareReadQueries").createShareReadQueries
+    >["newestFilteredOpFreshness"],
+    key?: string | Uint8Array,
+  ): ReturnType<typeof import("../replicaLinkReadService").createReplicaLinkReadService>;
+  listReplicaHistoryPins(
+    input: import("../replicaCurrentViewReads").ReplicaCurrentViewReadInput,
+    source?: import("../replicaCurrentViewReads").ReplicaCurrentViewSource,
+  ): import("../replicaHistoryReads").ReplicaHistoryList;
+  readReplicaHistoryPin(
+    input: import("../replicaCurrentViewReads").ReplicaCurrentViewReadInput & { pinId: string },
+    source?: import("../replicaCurrentViewReads").ReplicaCurrentViewSource,
+  ): import("../replicaHistoryReads").ReplicaHistoryRead;
+  readReplicaCurrentView(
+    workspaceId: string,
+  ): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView | null;
+  currentViewFilesAtFences(
+    workspaceId: string,
+    files: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView["files"],
+    previous: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView["files"],
+    omitted: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView["omitted"],
+  ): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView["files"];
+  readReplicaCurrentViewText(workspaceId: string, sha: string): string | null;
+  readReplicaStanding(
+    workspaceId: string,
+    shareGrantBindings?: string,
+  ): ReturnType<typeof import("./replicaReads").readReplicaStanding>;
+  listReplicaCurrentViewFiles(
+    input: Parameters<typeof import("../replicaCurrentViewReads").listReplicaCurrentViewFiles>[1],
+    source?: import("../replicaCurrentViewReads").ReplicaCurrentViewSource,
+  ): import("../replicaCurrentViewReads").ReplicaCurrentViewList;
+  readReplicaCurrentViewFile(
+    input: import("../replicaCurrentViewReads").ReplicaCurrentViewReadInput & { path: string },
+    source?: import("../replicaCurrentViewReads").ReplicaCurrentViewSource,
+  ): import("../replicaCurrentViewReads").ReplicaCurrentViewRead;
   putBlob(input: {
     workspaceId: string;
     sha256: string;
@@ -971,7 +1488,10 @@ export interface SyncRelayStorage {
     expectedSha256: string | null;
   }): { sha256: string };
   getKeyEnvelope(workspaceId: string): KeyEnvelopeRow | null;
-  prepareLogAppend(input:{workspaceId:string;originId:string;ops:SyncRelayLogInput[]},signal?:AbortSignal):Promise<void>;
+  prepareLogAppend(
+    input: { workspaceId: string; originId: string; ops: SyncRelayLogInput[] },
+    signal?: AbortSignal,
+  ): Promise<void>;
   appendLogBatch(input: {
     workspaceId: string;
     originId: string;
@@ -994,7 +1514,11 @@ export interface SyncRelayStorage {
     // The owner's publication lane: a copy of retained work another device
     // already published keeps its coordinate and changes nothing else.
     classifyRedundantRecoveries?: boolean;
-    workReferences?: {userId: string; references: readonly import("@dohc/workspace-engine-client/daemon").WorkReferenceMapping[]; datasetAccess?: import("./workReferences").DatasetReferenceAccess};
+    workReferences?: {
+      userId: string;
+      references: readonly import("@dohc/workspace-engine-client/daemon").WorkReferenceMapping[];
+      datasetAccess?: import("./workReferences").DatasetReferenceAccess;
+    };
   }): AppendLogBatchResult;
   fetchLogPage(input: {
     workspaceId: string;
@@ -1002,74 +1526,163 @@ export interface SyncRelayStorage {
     limit: number;
   }): FetchLogPageResult;
   /** Whether `fetchLogPage` with `limit: count` would report `hasMore`, without reading the rows. */
-  logHasMoreThan(input: {workspaceId: string; sinceRelaySeq: number; count: number}): boolean;
+  logHasMoreThan(input: { workspaceId: string; sinceRelaySeq: number; count: number }): boolean;
   fetchLogPageDescending(input: {
     workspaceId: string;
     beforeRelaySeq: number | null;
     limit: number;
   }): SyncRelayLogRow[];
   fetchChatMessages(input: {
-    workspaceId: string; channelWireId: string; cursor: number | null; direction: "older" | "newer"; limit: number;
-  }): FetchLogPageResult & {latestCursor: number};
+    workspaceId: string;
+    channelWireId: string;
+    cursor: number | null;
+    direction: "older" | "newer";
+    limit: number;
+  }): FetchLogPageResult & { latestCursor: number };
   fetchCommentMessages(input: {
-    workspaceId: string; objectId: string; path: string; cursor: number | null; direction: "older" | "newer"; limit: number;
-  }): FetchLogPageResult & {latestCursor: number};
+    workspaceId: string;
+    objectId: string;
+    path: string;
+    cursor: number | null;
+    direction: "older" | "newer";
+    limit: number;
+  }): FetchLogPageResult & { latestCursor: number };
   fetchThreadMessages(input: {
-    workspaceId: string; threadId: string; cursor: number | null; direction: "older" | "newer"; limit: number;
-  }): FetchLogPageResult & {latestCursor: number};
+    workspaceId: string;
+    threadId: string;
+    cursor: number | null;
+    direction: "older" | "newer";
+    limit: number;
+  }): FetchLogPageResult & { latestCursor: number };
   fetchChatMessage(input: {
-    workspaceId: string; originId: string; messageId: string;
+    workspaceId: string;
+    originId: string;
+    messageId: string;
   }): SyncRelayLogRow | null;
   appendBrowserChatBatch(input: {
-    workspaceId: string; originId: string; messageId: string; ops: SyncRelayLogInput[];
+    workspaceId: string;
+    originId: string;
+    messageId: string;
+    ops: SyncRelayLogInput[];
     guard?: (context: AppendLogBatchGuardContext) => void;
   }): AppendLogBatchResult;
-  appendLinkChatPost(input: Parameters<typeof import("./linkChat").appendLinkChatPost>[1]): import("./linkChat").AppendLinkChatPostResult;
-  appendAgentChatPost(input: Parameters<typeof import("./linkChat").appendAgentChatPost>[1]): import("./linkChat").AppendAgentChatPostResult;
+  appendLinkChatPost(
+    input: Parameters<typeof import("./linkChat").appendLinkChatPost>[1],
+  ): import("./linkChat").AppendLinkChatPostResult;
+  appendAgentChatPost(
+    input: Parameters<typeof import("./linkChat").appendAgentChatPost>[1],
+  ): import("./linkChat").AppendAgentChatPostResult;
   linkPrincipalThreadIds(workspaceId: string, principalId: string): Set<string>;
-  registerAgentClient(input: Parameters<typeof import("./agentConnections").registerAgentClient>[1]): boolean;
+  registerAgentClient(
+    input: Parameters<typeof import("./agentConnections").registerAgentClient>[1],
+  ): boolean;
   getAgentClient(clientId: string): import("./agentConnections").AgentClientRow | null;
-  beginAgentAuthorization(input: Parameters<typeof import("./agentConnections").beginAgentAuthorization>[1]): boolean;
-  readAgentAuthorization(requestHash: string, nowMs: number): import("./agentConnections").AgentAuthorizationRow | null;
-  decideAgentAuthorization(input: Parameters<typeof import("./agentConnections").decideAgentAuthorization>[1]): import("./agentConnections").AgentAuthorizationDecision;
-  redeemAgentAuthorizationCode(input: Parameters<typeof import("./agentConnections").redeemAgentAuthorizationCode>[1]): import("./agentConnections").AgentTokenGrantResult;
-  refreshAgentTokens(input: Parameters<typeof import("./agentConnections").refreshAgentTokens>[1]): import("./agentConnections").AgentTokenGrantResult;
-  authenticateAgentAccessToken(accessTokenHash: string, nowMs: number): import("./agentConnections").AgentConnectionRow | null;
-  authenticateAgentAuthority(check: import("./agentConnections").AgentAccessCheck, nowMs: number): import("./agentConnections").AgentConnectionRow | null;
+  beginAgentAuthorization(
+    input: Parameters<typeof import("./agentConnections").beginAgentAuthorization>[1],
+  ): boolean;
+  readAgentAuthorization(
+    requestHash: string,
+    nowMs: number,
+  ): import("./agentConnections").AgentAuthorizationRow | null;
+  decideAgentAuthorization(
+    input: Parameters<typeof import("./agentConnections").decideAgentAuthorization>[1],
+  ): import("./agentConnections").AgentAuthorizationDecision;
+  redeemAgentAuthorizationCode(
+    input: Parameters<typeof import("./agentConnections").redeemAgentAuthorizationCode>[1],
+  ): import("./agentConnections").AgentTokenGrantResult;
+  refreshAgentTokens(
+    input: Parameters<typeof import("./agentConnections").refreshAgentTokens>[1],
+  ): import("./agentConnections").AgentTokenGrantResult;
+  authenticateAgentAccessToken(
+    accessTokenHash: string,
+    nowMs: number,
+  ): import("./agentConnections").AgentConnectionRow | null;
+  authenticateAgentAuthority(
+    check: import("./agentConnections").AgentAccessCheck,
+    nowMs: number,
+  ): import("./agentConnections").AgentConnectionRow | null;
   recordAgentConnectionAction(connectionId: string, atMs: number): void;
-  listAgentConnections(input: Parameters<typeof import("./agentConnections").listAgentConnections>[1]): import("./agentConnections").AgentConnectionPage;
-  disconnectAgentConnection(input: Parameters<typeof import("./agentConnections").disconnectAgentConnection>[1]): import("./agentConnections").AgentConnectionRow | null;
-  beginPersonalAuthorization(input: Parameters<typeof import("./personalAgents").beginPersonalAuthorization>[1]): boolean;
-  readPersonalAuthorization(requestHash: string, nowMs: number): import("./personalAgents").PersonalAuthorizationRow | null;
-  cancelPersonalAuthorization(requestHash: string, nowMs: number): import("./personalAgents").PersonalAuthorizationRow | null;
-  allowPersonalAuthorization(input: Parameters<typeof import("./personalAgents").allowPersonalAuthorization>[1]): import("./personalAgents").PersonalAuthorizationRow | null;
-  personalCredentialOwner(credential: Parameters<typeof import("./personalAgents").personalCredentialOwner>[1]): string | null;
-  redeemPersonalAuthorizationCode(input: Parameters<typeof import("./personalAgents").redeemPersonalAuthorizationCode>[1]): import("./personalAgents").PersonalTokenGrant;
-  refreshPersonalTokens(input: Parameters<typeof import("./personalAgents").refreshPersonalTokens>[1]): import("./personalAgents").PersonalTokenGrant;
-  authenticatePersonalAuthority(check: import("./agentConnections").AgentAccessCheck, fenceEpoch: number, nowMs: number): import("./personalAgents").PersonalConnectionRow | null;
+  listAgentConnections(
+    input: Parameters<typeof import("./agentConnections").listAgentConnections>[1],
+  ): import("./agentConnections").AgentConnectionPage;
+  disconnectAgentConnection(
+    input: Parameters<typeof import("./agentConnections").disconnectAgentConnection>[1],
+  ): import("./agentConnections").AgentConnectionRow | null;
+  beginPersonalAuthorization(
+    input: Parameters<typeof import("./personalAgents").beginPersonalAuthorization>[1],
+  ): boolean;
+  readPersonalAuthorization(
+    requestHash: string,
+    nowMs: number,
+  ): import("./personalAgents").PersonalAuthorizationRow | null;
+  cancelPersonalAuthorization(
+    requestHash: string,
+    nowMs: number,
+  ): import("./personalAgents").PersonalAuthorizationRow | null;
+  allowPersonalAuthorization(
+    input: Parameters<typeof import("./personalAgents").allowPersonalAuthorization>[1],
+  ): import("./personalAgents").PersonalAuthorizationRow | null;
+  personalCredentialOwner(
+    credential: Parameters<typeof import("./personalAgents").personalCredentialOwner>[1],
+  ): string | null;
+  redeemPersonalAuthorizationCode(
+    input: Parameters<typeof import("./personalAgents").redeemPersonalAuthorizationCode>[1],
+  ): import("./personalAgents").PersonalTokenGrant;
+  refreshPersonalTokens(
+    input: Parameters<typeof import("./personalAgents").refreshPersonalTokens>[1],
+  ): import("./personalAgents").PersonalTokenGrant;
+  authenticatePersonalAuthority(
+    check: import("./agentConnections").AgentAccessCheck,
+    fenceEpoch: number,
+    nowMs: number,
+  ): import("./personalAgents").PersonalConnectionRow | null;
   listPersonalAgents(ownerUserId: string): import("./personalAgents").PersonalRoster;
   // Opens no transaction, so a read inside another read uses its snapshot.
   personalRosterRevision(ownerUserId: string): number;
-  changePersonalAgent(input: Parameters<typeof import("./personalAgents").changePersonalAgent>[1]): import("./personalAgents").PersonalAgentChangeResult;
+  changePersonalAgent(
+    input: Parameters<typeof import("./personalAgents").changePersonalAgent>[1],
+  ): import("./personalAgents").PersonalAgentChangeResult;
   revokePersonalCredentialsBelowFence(ownerUserId: string, epoch: number): string[];
   signOutAccountPersonalAgents(ownerUserId: string): string[];
   readCredentialFencePosition(): number;
   advanceCredentialFencePosition(changedAtMs: number): void;
-  setWorkspaceDisplayName(input: Parameters<typeof import("./personalAgents").setWorkspaceDisplayName>[1]): boolean;
-  readPersonalScope(credential: import("./personalAgentChat").PersonalCredential, nowMs: number): import("./personalAgentChat").PersonalScope | null;
-  readPersonalReach(credential: import("./personalAgentChat").PersonalCredential, workspaceId: string, nowMs: number): import("./personalAgents").PersonalReach | null;
-  readPersonalWorkspaces(credential: import("./personalAgentChat").PersonalCredential, nowMs: number): import("./personalAgentChat").PersonalWorkspaces | null;
-  appendPersonalChatPost(input: Parameters<typeof import("./personalAgentChat").appendPersonalChatPost>[1]): import("./personalAgentChat").AppendPersonalChatPostResult;
-  personalAgentPostedIn(input: Parameters<typeof import("./personalAgentChat").personalAgentPostedIn>[1]): boolean;
-  readPersonalWaitWindow(input: Parameters<typeof import("./personalAgentChat").readPersonalWaitWindow>[1]): import("./personalAgentChat").PersonalWaitWindow;
+  setWorkspaceDisplayName(
+    input: Parameters<typeof import("./personalAgents").setWorkspaceDisplayName>[1],
+  ): boolean;
+  readPersonalScope(
+    credential: import("./personalAgentChat").PersonalCredential,
+    nowMs: number,
+  ): import("./personalAgentChat").PersonalScope | null;
+  readPersonalReach(
+    credential: import("./personalAgentChat").PersonalCredential,
+    workspaceId: string,
+    nowMs: number,
+  ): import("./personalAgents").PersonalReach | null;
+  readPersonalWorkspaces(
+    credential: import("./personalAgentChat").PersonalCredential,
+    nowMs: number,
+  ): import("./personalAgentChat").PersonalWorkspaces | null;
+  appendPersonalChatPost(
+    input: Parameters<typeof import("./personalAgentChat").appendPersonalChatPost>[1],
+  ): import("./personalAgentChat").AppendPersonalChatPostResult;
+  personalAgentPostedIn(
+    input: Parameters<typeof import("./personalAgentChat").personalAgentPostedIn>[1],
+  ): boolean;
+  readPersonalWaitWindow(
+    input: Parameters<typeof import("./personalAgentChat").readPersonalWaitWindow>[1],
+  ): import("./personalAgentChat").PersonalWaitWindow;
   fetchLogCoordinate(input: {
     workspaceId: string;
     originId: string;
     originSeq: number;
   }): SyncRelayLogRow | null;
   hasRefusedSettlement(input: {
-    workspaceId: string; originId: string; originSeq: number;
-    settlementId: string; momentId: string; reason: string;
+    workspaceId: string;
+    originId: string;
+    originSeq: number;
+    settlementId: string;
+    momentId: string;
+    reason: string;
   }): boolean;
   readCurrentFileState(input: {
     workspaceId: string;
@@ -1092,9 +1705,22 @@ export interface SyncRelayStorage {
     epochLogFloor: number;
   }): SyncRelayLogRow[];
   captureReadRevisionMatches(): () => boolean;
-  currentObjectFile(input: { workspaceId: string; versionId: string; objectId: string; epochLogFloor: number }): CurrentFileStateRow | null | "reset";
-  currentFileObjectId(input: { workspaceId: string; versionId: string; path: string }): string | undefined;
-  currentObjectPath(input: { workspaceId: string; versionId: string; objectId: string }): string | null;
+  currentObjectFile(input: {
+    workspaceId: string;
+    versionId: string;
+    objectId: string;
+    epochLogFloor: number;
+  }): CurrentFileStateRow | null | "reset";
+  currentFileObjectId(input: {
+    workspaceId: string;
+    versionId: string;
+    path: string;
+  }): string | undefined;
+  currentObjectPath(input: {
+    workspaceId: string;
+    versionId: string;
+    objectId: string;
+  }): string | null;
   currentObjectBlobByteLength(input: {
     workspaceId: string;
     versionId: string;
@@ -1111,11 +1737,12 @@ export interface SyncRelayStorage {
     limit: number;
   }): Array<string | null>;
   /** False, with nothing written, when the recipient account is being deleted. */
-  createShare(input: {
-    share: SyncRelayShareRow;
-    grant: SyncRelayShareGrantRow;
-  }): boolean;
-  readLinkCreation(workspaceId: string, operationId: string, ownerUserId: string): { shareId: string; grantId: string; requestJson: string } | null;
+  createShare(input: { share: SyncRelayShareRow; grant: SyncRelayShareGrantRow }): boolean;
+  readLinkCreation(
+    workspaceId: string,
+    operationId: string,
+    ownerUserId: string,
+  ): { shareId: string; grantId: string; requestJson: string } | null;
   createFileLinkShare(input: {
     operation?: { operationId: string; requestJson: string };
     share: SyncRelayShareRow;
@@ -1129,9 +1756,7 @@ export interface SyncRelayStorage {
   }): boolean;
   getShareGrant(grantId: string): SyncRelayShareGrantRow | null;
   getCurrentLinkCredential(grantId: string): SyncRelayLinkCredentialRow | null;
-  findLinkGrantByCredentialHash(
-    secretHash: string,
-  ): SyncRelayLinkCredentialGrantRow | null;
+  findLinkGrantByCredentialHash(secretHash: string): SyncRelayLinkCredentialGrantRow | null;
   rotateLinkGrant(input: {
     shareId: string;
     grantId: string;
@@ -1172,10 +1797,10 @@ export interface SyncRelayStorage {
     session: Omit<SyncRelayLinkSessionRow, "principalId">;
     guard: () => void;
   }): boolean;
-  findLinkSessionByCapabilityHash(
-    capabilityHash: string,
-  ): SyncRelayLinkSessionRow | null;
-  appendLinkDiscussionMessage(input: import("./discussion").AppendLinkDiscussionMessageInput): AppendLinkDiscussionMessageResult;
+  findLinkSessionByCapabilityHash(capabilityHash: string): SyncRelayLinkSessionRow | null;
+  appendLinkDiscussionMessage(
+    input: import("./discussion").AppendLinkDiscussionMessageInput,
+  ): AppendLinkDiscussionMessageResult;
   appendAuthenticatedDiscussionMessage(input: {
     shareId: string;
     authorUserId: string;
@@ -1224,10 +1849,7 @@ export interface SyncRelayStorage {
     deletedAtMs: number;
     actorUserId: string;
   }): SyncRelayDeletedDiscussionMessage | null;
-  mintLinkHandoffCode(input: {
-    code: SyncRelayLinkHandoffCodeRow;
-    guard: () => boolean;
-  }): boolean;
+  mintLinkHandoffCode(input: { code: SyncRelayLinkHandoffCodeRow; guard: () => boolean }): boolean;
   hasLinkHandoffCode(codeHash: string): boolean;
   redeemLinkHandoffCode(input: {
     codeHash: string;
@@ -1253,12 +1875,20 @@ export interface SyncRelayStorage {
     recipientUserId: string,
   ): SyncRelayShareGrantRow[];
   listSharesGrantedBy(granterUserId: string): SyncRelayGrantedShareRow[];
-  listSharesGrantedPage(granterUserId: string, workspaceId: string, cursor?: SyncRelayGrantedInventoryCursor): SyncRelayGrantedInventoryPage;
+  listSharesGrantedPage(
+    granterUserId: string,
+    workspaceId: string,
+    cursor?: SyncRelayGrantedInventoryCursor,
+  ): SyncRelayGrantedInventoryPage;
   listLinkGrantsByWorkspace(
     workspaceId: string,
     cursor?: SyncRelayLinkInventoryCursor,
   ): SyncRelayLinkInventoryPage;
-  lookupHistoryAccounts(workspaceId: string, grantIds: readonly string[], userIds: readonly string[]): SyncRelayHistoryAccount[];
+  lookupHistoryAccounts(
+    workspaceId: string,
+    grantIds: readonly string[],
+    userIds: readonly string[],
+  ): SyncRelayHistoryAccount[];
   listActiveIndependentShareGrants(input: {
     workspaceId: string;
     shareIds: readonly string[];
@@ -1267,11 +1897,19 @@ export interface SyncRelayStorage {
   // Active listings never disclose revoked selectors. Removed named recipients
   // receive only their grant ID, share ID, removal time, and an explanation.
   listSharesReceivedBy(recipientUserId: string): SyncRelayShareWithGrantRow[];
-  listReceivedShareIdsPage(recipientUserId: string, cursor?: SyncRelayReceivedInventoryCursor): SyncRelayReceivedInventoryPage;
-  removeShareAccess(input: import("./shareRemoval").ShareRemovalInput): ReturnType<typeof import("./shareRemoval").removeShareAccess>;
+  listReceivedShareIdsPage(
+    recipientUserId: string,
+    cursor?: SyncRelayReceivedInventoryCursor,
+  ): SyncRelayReceivedInventoryPage;
+  removeShareAccess(
+    input: import("./shareRemoval").ShareRemovalInput,
+  ): ReturnType<typeof import("./shareRemoval").removeShareAccess>;
   undoShareRemoval(input: Parameters<typeof import("./shareRemoval").undoShareRemoval>[1]): void;
   purgeExpiredShareRemovals(nowMs: number): void;
-  listRemovedSharesForRecipient(userId: string, shareId?: string): ReturnType<typeof import("./shareRemoval").listRemovedSharesForRecipient>;
+  listRemovedSharesForRecipient(
+    userId: string,
+    shareId?: string,
+  ): ReturnType<typeof import("./shareRemoval").listRemovedSharesForRecipient>;
   // Idempotent; returns false only when the share does not exist.
   revokeShare(shareId: string, revokedAtMs: number): boolean;
   // Candidate moment rows for the shared-blob allowlist. Both semantics start
@@ -1300,10 +1938,7 @@ export interface SyncRelayStorage {
   // exists but carries no shareable channel binding. Earliest-wins mirrors the
   // engine's insert-if-absent thread apply, so a later forged re-create can
   // never re-bind an existing thread across a share boundary.
-  findThreadCreateChannelWireId(
-    workspaceId: string,
-    threadId: string,
-  ): string | null | undefined;
+  findThreadCreateChannelWireId(workspaceId: string, threadId: string): string | null | undefined;
   // The kind claimed by the earliest chat.channel.create op for this wire id.
   // undefined means no create exists; null means the earliest exact create is
   // malformed/unshareable. Later duplicate creates never override the first.
@@ -1379,9 +2014,7 @@ export interface SyncRelayStorage {
     ops: ShareProposalOpRow[];
     guard?: () => void;
   }): { proposalId: string; created: boolean };
-  getShareProposal(
-    proposalId: string,
-  ): (ShareProposalRow & { ops: ShareProposalOpRow[] }) | null;
+  getShareProposal(proposalId: string): (ShareProposalRow & { ops: ShareProposalOpRow[] }) | null;
   listShareProposalsForShare(shareId: string): Array<ShareProposalRow & { opCount: number }>;
   // The granter's open proposals, as counts rather than op rows. The review
   // surface polls this on a timer and renders a sender and a count from it, so
@@ -1457,8 +2090,9 @@ export interface OpenSyncRelayStorageOptions {
   newDiscussionId?: () => string;
 }
 
-export type DeviceHostCredentialResult = LiveHostControlResult |
-  { readonly ok: false; readonly reason: "credential-refused" };
+export type DeviceHostCredentialResult =
+  | LiveHostControlResult
+  | { readonly ok: false; readonly reason: "credential-refused" };
 
 export interface TicketHostReport {
   readonly connection: LiveHostConnectionCoordinate;

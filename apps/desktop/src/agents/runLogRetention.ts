@@ -2,7 +2,11 @@ import { readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { atomicReplaceFile } from "../atomicReplaceFile";
 import { MAX_IGNORED_SETTINGS } from "../settings/settingsFile";
-import { DEFAULT_RUN_LOG_KEEP_DAYS, type AgentRunLogsSettings, type StoredUserSettingsResult } from "../settings/userSettings";
+import {
+  DEFAULT_RUN_LOG_KEEP_DAYS,
+  type AgentRunLogsSettings,
+  type StoredUserSettingsResult,
+} from "../settings/userSettings";
 
 // Each agent run writes its output to run-logs/<runId>.log in dohc's state
 // folder, with the files its launch writes beside it. dohc removes a run's
@@ -23,7 +27,9 @@ const RUN_FILE = /^(?<runId>[^.]+)\.log(?:\.node|\.mcp\.json|\.ended)?$/u;
 export function runLogKeepDays(
   result: Pick<StoredUserSettingsResult, "settings" | "source" | "ignored">,
 ): AgentRunLogsSettings["keepDays"] {
-  const unread = result.source === "recovered" || (result.ignored?.length ?? 0) >= MAX_IGNORED_SETTINGS ||
+  const unread =
+    result.source === "recovered" ||
+    (result.ignored?.length ?? 0) >= MAX_IGNORED_SETTINGS ||
     result.ignored?.some(({ key }) => key === "agentRunLogs" || key.startsWith("agentRunLogs."));
   return unread ? "forever" : result.settings.agentRunLogs.keepDays;
 }
@@ -32,10 +38,11 @@ export function runLogKeepDays(
 // a run's age from it, and keeps every file of a run that has none: that run
 // may still be running, or dohc stopped before it could record the end.
 export async function markRunLogEnded(logPath: string, nowMs: number): Promise<void> {
-  await atomicReplaceFile(`${logPath}${ENDED}`, (tmp) => writeFile(tmp, `${nowMs}\n`, { mode: 0o600 }))
-    .catch((error: NodeJS.ErrnoException) => {
-      if (error.code !== "ENOENT") throw error;
-    });
+  await atomicReplaceFile(`${logPath}${ENDED}`, (tmp) =>
+    writeFile(tmp, `${nowMs}\n`, { mode: 0o600 }),
+  ).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== "ENOENT") throw error;
+  });
 }
 
 async function readEnd(path: string): Promise<number | undefined> {
@@ -67,15 +74,19 @@ export async function removeExpiredRunLogs(input: {
   const runs = new Map<string, string[]>();
   for (const name of names) {
     const runId = RUN_FILE.exec(name)?.groups?.runId;
-    if (runId !== undefined) runs.set(runId, [...runs.get(runId) ?? [], name]);
+    if (runId !== undefined) runs.set(runId, [...(runs.get(runId) ?? []), name]);
   }
   const before = input.nowMs - input.keepDays * DAY_MS;
   const failures: unknown[] = [];
-  const remove = (name: string) => unlink(join(folder, name)).then(() => true, (error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") return true;
-    failures.push(error);
-    return false;
-  });
+  const remove = (name: string) =>
+    unlink(join(folder, name)).then(
+      () => true,
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return true;
+        failures.push(error);
+        return false;
+      },
+    );
   for (const [runId, files] of runs) {
     const endRecord = `${runId}.log${ENDED}`;
     if (!files.includes(endRecord) || input.isRunning(runId)) continue;
@@ -89,5 +100,9 @@ export async function removeExpiredRunLogs(input: {
     const removed = await Promise.all(files.filter((name) => name !== endRecord).map(remove));
     if (removed.every(Boolean)) await remove(endRecord);
   }
-  if (failures.length > 0) throw new AggregateError(failures, `dohc could not remove ${failures.length} old agent run log files.`);
+  if (failures.length > 0)
+    throw new AggregateError(
+      failures,
+      `dohc could not remove ${failures.length} old agent run log files.`,
+    );
 }

@@ -326,8 +326,7 @@ export const CHANNELS = {
   engineYDocApplyUpdate: "desktop:engine-ydoc-apply-update",
   engineYDocOwnerHandoff: "desktop:engine-ydoc-owner-handoff",
   engineYDocPrepareOwnerHandoff: "desktop:engine-ydoc-prepare-owner-handoff",
-  engineYDocAcknowledgeLineageReplacement:
-    "desktop:engine-ydoc-acknowledge-lineage-replacement",
+  engineYDocAcknowledgeLineageReplacement: "desktop:engine-ydoc-acknowledge-lineage-replacement",
   engineYDocClose: "desktop:engine-ydoc-close",
   engineYDocRemoteUpdate: "desktop:engine-ydoc-remote-update",
   engineYDocLineageReplacement: "desktop:engine-ydoc-lineage-replacement",

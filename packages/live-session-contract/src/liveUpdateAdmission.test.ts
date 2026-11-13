@@ -119,7 +119,9 @@ describe("live-update shared vectors", () => {
       // These vectors distinguish parser normalization from the Rust consumer's
       // raw immutable-record check. The shared parser does not prove a commit.
       const canonical = isDeepStrictEqual(parsed.metadata, row.metadata);
-      const digestMatches = createHash("sha256").update(bytes).digest("hex") === parsed.metadata.accepted.receipt.updateDigest;
+      const digestMatches =
+        createHash("sha256").update(bytes).digest("hex") ===
+        parsed.metadata.accepted.receipt.updateDigest;
       expect(canonical && digestMatches).toBe(row.committedValid);
     });
   }
@@ -211,10 +213,9 @@ describe("strict JSON objects", () => {
       canonical: admittedMetadata,
       requiredField: "firstSeen",
       addNestedUnknown: (value) => {
-        ((value.accepted as Record<string, unknown>).authority as Record<
-          string,
-          unknown
-        >).unexpected = true;
+        (
+          (value.accepted as Record<string, unknown>).authority as Record<string, unknown>
+        ).unexpected = true;
       },
     },
     {
@@ -278,12 +279,7 @@ describe("live-update text and digest fields", () => {
 
   it("accepts only lowercase 64-character SHA-256 digests", () => {
     expect(parseLiveUpdateDigest(digestA)).toBe(digestA);
-    for (const value of [
-      "A".repeat(64),
-      "a".repeat(63),
-      "a".repeat(65),
-      `${"a".repeat(63)}g`,
-    ]) {
+    for (const value of ["A".repeat(64), "a".repeat(63), "a".repeat(65), `${"a".repeat(63)}g`]) {
       expect(() => parseLiveUpdateDigest(value)).toThrow();
     }
   });
@@ -333,14 +329,25 @@ describe("agent declarations", () => {
   });
 
   it("records declarations only in submission context and admitted snapshots", () => {
-    const agent = {agentId: "trip-agent-ü", onBehalfOf: "人", depth: 2};
-    const authorContext = {kind: "account", accountId: "owner-1", agent};
-    const submission = {deliveryId: "delivery-1", updateDigest: digestA, binding};
-    expect(parseLiveUpdateSubmissionMetadata({...submission, authorContext}).authorContext).toEqual(authorContext);
+    const agent = { agentId: "trip-agent-ü", onBehalfOf: "人", depth: 2 };
+    const authorContext = { kind: "account", accountId: "owner-1", agent };
+    const submission = { deliveryId: "delivery-1", updateDigest: digestA, binding };
+    expect(
+      parseLiveUpdateSubmissionMetadata({ ...submission, authorContext }).authorContext,
+    ).toEqual(authorContext);
     expect(parseLiveUpdateSubmissionMetadata(submission)).not.toHaveProperty("authorContext");
-    const metadata = {...admittedMetadata, canonicalVersion: 2, authorSnapshot: [{kind: "agent", ...agent}], firstSeenDeletes: []};
-    expect(parseAdmittedLiveUpdateMetadata(metadata).authorSnapshot).toEqual(metadata.authorSnapshot);
-    expect(() => parseRelayAcceptedLiveUpdate({...accepted, agentDeclaration: {...agent}})).toThrow(TypeError);
+    const metadata = {
+      ...admittedMetadata,
+      canonicalVersion: 2,
+      authorSnapshot: [{ kind: "agent", ...agent }],
+      firstSeenDeletes: [],
+    };
+    expect(parseAdmittedLiveUpdateMetadata(metadata).authorSnapshot).toEqual(
+      metadata.authorSnapshot,
+    );
+    expect(() =>
+      parseRelayAcceptedLiveUpdate({ ...accepted, agentDeclaration: { ...agent } }),
+    ).toThrow(TypeError);
   });
 
   it("refuses the engine's out-of-bounds values and any other field", () => {
@@ -406,12 +413,24 @@ describe("server-derived authority", () => {
   });
 
   it("admits a new personal update that credits only its own agent, and no personal agent under other authority", () => {
-    const agent = (agentId: string, onBehalfOf?: string): LiveAuthorEntry =>
-      ({ kind: "agent", agentId, ...(onBehalfOf === undefined ? {} : { onBehalfOf }) });
-    const personal = parseServerDerivedLiveUpdateAuthority({ principalKind: "personal", principalId: "p-agent-1", grantId: null, grantGeneration: null });
+    const agent = (agentId: string, onBehalfOf?: string): LiveAuthorEntry => ({
+      kind: "agent",
+      agentId,
+      ...(onBehalfOf === undefined ? {} : { onBehalfOf }),
+    });
+    const personal = parseServerDerivedLiveUpdateAuthority({
+      principalKind: "personal",
+      principalId: "p-agent-1",
+      grantId: null,
+      grantGeneration: null,
+    });
     expect(admitsLiveAuthorship(personal, [agent("p-agent-1", "owner-1")])).toBe(true);
-    const refused: LiveAuthorEntry[][] = [[], [agent("p-agent-2", "owner-1")], [agent("p-agent-1")],
-      [{ kind: "human", humanId: "owner-1", humanName: "Owner" }, agent("p-agent-1", "owner-1")]];
+    const refused: LiveAuthorEntry[][] = [
+      [],
+      [agent("p-agent-2", "owner-1")],
+      [agent("p-agent-1")],
+      [{ kind: "human", humanId: "owner-1", humanName: "Owner" }, agent("p-agent-1", "owner-1")],
+    ];
     for (const authors of refused) expect(admitsLiveAuthorship(personal, authors)).toBe(false);
     for (const authority of [
       { principalKind: "owner", principalId: "owner-1", grantId: null, grantGeneration: null },
@@ -429,7 +448,12 @@ describe("server-derived authority", () => {
       { principalKind: "owner", principalId: "owner-1", grantId: null, grantGeneration: 1 },
       { principalKind: "owner", principalId: "owner-1", grantId: "grant-1", grantGeneration: null },
       { principalKind: "named", principalId: "person-1", grantId: null, grantGeneration: null },
-      { principalKind: "named", principalId: "person-1", grantId: "grant-1", grantGeneration: null },
+      {
+        principalKind: "named",
+        principalId: "person-1",
+        grantId: "grant-1",
+        grantGeneration: null,
+      },
       { principalKind: "named", principalId: "person-1", grantId: null, grantGeneration: 1 },
       { principalKind: "link", principalId: "link-1", grantId: "grant-1", grantGeneration: 0 },
     ];
@@ -471,16 +495,10 @@ describe("binary composition boundaries", () => {
     expect(parsed.metadata).toEqual(metadata);
     expect(parsed.metadata).not.toBe(metadata);
     expect(parsed.updateBytes).toBe(bytes);
-    expect(Object.keys(parsed.metadata)).toEqual([
-      "deliveryId",
-      "updateDigest",
-      "binding",
-    ]);
+    expect(Object.keys(parsed.metadata)).toEqual(["deliveryId", "updateDigest", "binding"]);
 
     for (const field of ["update", "updateBase64"] as const) {
-      expect(() =>
-        parseLiveUpdateSubmission({ ...metadata, [field]: "AQ==" }, bytes),
-      ).toThrow();
+      expect(() => parseLiveUpdateSubmission({ ...metadata, [field]: "AQ==" }, bytes)).toThrow();
     }
     expect(() => parseLiveUpdateSubmission(metadata, new Uint8Array())).toThrow();
     expect(() => parseLiveUpdateSubmission(metadata, [1] as never)).toThrow();
@@ -493,23 +511,14 @@ describe("binary composition boundaries", () => {
     expect(parsed.metadata).not.toBe(admittedMetadata);
     expect(parsed.updateBytes).toBe(bytes);
     expect(Object.keys(parsed.metadata)).toEqual(["accepted", "firstSeen"]);
-    expect(() =>
-      parseAdmittedLiveUpdate({ ...admittedMetadata, update: [4] }, bytes),
-    ).toThrow();
+    expect(() => parseAdmittedLiveUpdate({ ...admittedMetadata, update: [4] }, bytes)).toThrow();
     expect(() => parseAdmittedLiveUpdate(admittedMetadata, new Uint8Array())).toThrow();
     expect(() => parseAdmittedLiveUpdate(admittedMetadata, "AQ==" as never)).toThrow();
   });
 });
 
 describe("portable integer boundaries", () => {
-  const invalidIntegers = [
-    "1",
-    -1,
-    1.5,
-    Number.MAX_SAFE_INTEGER + 1,
-    Infinity,
-    NaN,
-  ];
+  const invalidIntegers = ["1", -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Infinity, NaN];
 
   it("pins receipt, authority, time, and local-sequence safe integers", () => {
     expect(
@@ -547,9 +556,7 @@ describe("portable integer boundaries", () => {
 
     for (const value of [0, ...invalidIntegers]) {
       expect(() => parseLiveUpdateReceipt({ ...receipt, journalCursor: value })).toThrow();
-      expect(() =>
-        parseLiveUpdateReceipt({ ...receipt, acceptingHostEpoch: value }),
-      ).toThrow();
+      expect(() => parseLiveUpdateReceipt({ ...receipt, acceptingHostEpoch: value })).toThrow();
       expect(() =>
         parseServerDerivedLiveUpdateAuthority({ ...authority, grantGeneration: value }),
       ).toThrow();
@@ -611,7 +618,11 @@ describe("Yjs struct ranges", () => {
       { clientId: 1, startClock: 1, endClock: 1 },
       { clientId: 1, startClock: 2, endClock: 1 },
       { clientId: LIVE_UPDATE_YJS_CLIENT_ID_MAX + 1, startClock: 0, endClock: 1 },
-      { clientId: 1, startClock: LIVE_UPDATE_YJS_START_CLOCK_MAX + 1, endClock: LIVE_UPDATE_YJS_END_CLOCK_MAX },
+      {
+        clientId: 1,
+        startClock: LIVE_UPDATE_YJS_START_CLOCK_MAX + 1,
+        endClock: LIVE_UPDATE_YJS_END_CLOCK_MAX,
+      },
       { clientId: 1, startClock: 0, endClock: LIVE_UPDATE_YJS_END_CLOCK_MAX + 1 },
       { clientId: "1", startClock: 0, endClock: 1 },
       { clientId: 1, startClock: -1, endClock: 1 },
@@ -660,57 +671,106 @@ describe("receipt and relay admission records", () => {
     expect(parsed.receipt).not.toBe(receipt);
     expect(parsed.binding).not.toBe(binding);
     expect(parsed.authority).not.toBe(authority);
-    expect(Object.keys(parsed)).toEqual([
-      "receipt",
-      "binding",
-      "authority",
-      "receivedAtMs",
-    ]);
+    expect(Object.keys(parsed)).toEqual(["receipt", "binding", "authority", "receivedAtMs"]);
     expect(() => parseRelayAcceptedLiveUpdate({ ...accepted, route: "device" })).toThrow();
     expect(() => parseRelayAcceptedLiveUpdate({ ...accepted, updateBytes: [1] })).toThrow();
   });
 });
 
 describe("canonical admitted metadata", () => {
-  const human = {kind: "human" as const, humanId: "alice", humanName: "Alice"};
-  const valid = [{clientId: 7, startClock: 0, endClock: 3}, {clientId: 7, startClock: 5, endClock: 10}];
+  const human = { kind: "human" as const, humanId: "alice", humanName: "Alice" };
+  const valid = [
+    { clientId: 7, startClock: 0, endClock: 3 },
+    { clientId: 7, startClock: 5, endClock: 10 },
+  ];
   const invalid = [
-    [{clientId: 7, startClock: 0, endClock: 3}, {clientId: 7, startClock: 3, endClock: 10}],
-    [{clientId: 7, startClock: 0, endClock: 6}, {clientId: 7, startClock: 5, endClock: 10}],
-    [{clientId: 7, startClock: 0, endClock: 3}, {clientId: 6, startClock: 5, endClock: 10}],
-    [{clientId: -1, startClock: 0, endClock: 3}],
+    [
+      { clientId: 7, startClock: 0, endClock: 3 },
+      { clientId: 7, startClock: 3, endClock: 10 },
+    ],
+    [
+      { clientId: 7, startClock: 0, endClock: 6 },
+      { clientId: 7, startClock: 5, endClock: 10 },
+    ],
+    [
+      { clientId: 7, startClock: 0, endClock: 3 },
+      { clientId: 6, startClock: 5, endClock: 10 },
+    ],
+    [{ clientId: -1, startClock: 0, endClock: 3 }],
   ];
 
-  it.each([undefined, 2] as const)("refuses non-canonical firstSeen for version %s", canonicalVersion => {
-    for (const firstSeen of invalid) {
-      expect(() => parseCanonicalAdmittedLiveUpdateMetadata({accepted, firstSeen,
-        ...(canonicalVersion === 2 ? {canonicalVersion, authorSnapshot: [human], firstSeenDeletes: []} : {})}))
-        .toThrow("Invalid live application range.");
-    }
-  });
+  it.each([undefined, 2] as const)(
+    "refuses non-canonical firstSeen for version %s",
+    (canonicalVersion) => {
+      for (const firstSeen of invalid) {
+        expect(() =>
+          parseCanonicalAdmittedLiveUpdateMetadata({
+            accepted,
+            firstSeen,
+            ...(canonicalVersion === 2
+              ? { canonicalVersion, authorSnapshot: [human], firstSeenDeletes: [] }
+              : {}),
+          }),
+        ).toThrow("Invalid live application range.");
+      }
+    },
+  );
 
-  it.each(["firstSeenDeletes", "structRanges", "deletionRanges"])("refuses non-canonical v2 %s", field => {
-    for (const ranges of invalid) {
-      expect(() => parseCanonicalAdmittedLiveUpdateMetadata({accepted, firstSeen: valid, canonicalVersion: 2,
-        authorSnapshot: [human], firstSeenDeletes: field === "firstSeenDeletes" ? ranges : [],
-        checkpointCoverage: [{author: human, structRanges: field === "structRanges" ? ranges : valid,
-          deletionRanges: field === "deletionRanges" ? ranges : []}]}))
-        .toThrow("Invalid live application range.");
-    }
-  });
+  it.each(["firstSeenDeletes", "structRanges", "deletionRanges"])(
+    "refuses non-canonical v2 %s",
+    (field) => {
+      for (const ranges of invalid) {
+        expect(() =>
+          parseCanonicalAdmittedLiveUpdateMetadata({
+            accepted,
+            firstSeen: valid,
+            canonicalVersion: 2,
+            authorSnapshot: [human],
+            firstSeenDeletes: field === "firstSeenDeletes" ? ranges : [],
+            checkpointCoverage: [
+              {
+                author: human,
+                structRanges: field === "structRanges" ? ranges : valid,
+                deletionRanges: field === "deletionRanges" ? ranges : [],
+              },
+            ],
+          }),
+        ).toThrow("Invalid live application range.");
+      }
+    },
+  );
 
-  it.each(["structRanges", "deletionRanges"])("refuses retained non-canonical checkpoint %s", field => {
-    for (const ranges of invalid) {
-      expect(() => parseLiveCheckpointCoverage([{author: human, structRanges: field === "structRanges" ? ranges : valid,
-        deletionRanges: field === "deletionRanges" ? ranges : []}])).toThrow("Invalid live application range.");
-    }
-    expect(parseLiveCheckpointCoverage([{author: human, structRanges: valid, deletionRanges: valid}]))
-      .toEqual([{author: human, structRanges: valid, deletionRanges: valid}]);
-  });
+  it.each(["structRanges", "deletionRanges"])(
+    "refuses retained non-canonical checkpoint %s",
+    (field) => {
+      for (const ranges of invalid) {
+        expect(() =>
+          parseLiveCheckpointCoverage([
+            {
+              author: human,
+              structRanges: field === "structRanges" ? ranges : valid,
+              deletionRanges: field === "deletionRanges" ? ranges : [],
+            },
+          ]),
+        ).toThrow("Invalid live application range.");
+      }
+      expect(
+        parseLiveCheckpointCoverage([
+          { author: human, structRanges: valid, deletionRanges: valid },
+        ]),
+      ).toEqual([{ author: human, structRanges: valid, deletionRanges: valid }]);
+    },
+  );
 
   it("preserves canonical ranges and owns every copy", () => {
-    const metadata = {accepted, firstSeen: valid, canonicalVersion: 2, authorSnapshot: [human], firstSeenDeletes: valid,
-      checkpointCoverage: [{author: human, structRanges: valid, deletionRanges: valid}]};
+    const metadata = {
+      accepted,
+      firstSeen: valid,
+      canonicalVersion: 2,
+      authorSnapshot: [human],
+      firstSeenDeletes: valid,
+      checkpointCoverage: [{ author: human, structRanges: valid, deletionRanges: valid }],
+    };
     const parsed = parseCanonicalAdmittedLiveUpdateMetadata(metadata);
     expect(parsed).toEqual(metadata);
     expect(parsed.firstSeen).not.toBe(valid);
@@ -875,10 +935,12 @@ describe("replay identity fixture integrity", () => {
       ["notes/b.md", "notes/a.md"],
       ["notes/b.md", "notes/a.md", "notes/b.md"],
     ]) {
-      expect(parseLiveUpdateSubmissionMetadata({
-        ...canonical,
-        binding: { ...binding, selectorPaths },
-      })).toEqual(canonical);
+      expect(
+        parseLiveUpdateSubmissionMetadata({
+          ...canonical,
+          binding: { ...binding, selectorPaths },
+        }),
+      ).toEqual(canonical);
     }
   });
 
@@ -926,16 +988,15 @@ describe("replay identity fixture integrity", () => {
       "authority.grantId",
       "authority.grantGeneration",
     ];
-    expect(vectors.replayIdentityConflicts.map((row) => row.changedField)).toEqual(
-      expectedFields,
-    );
+    expect(vectors.replayIdentityConflicts.map((row) => row.changedField)).toEqual(expectedFields);
 
     for (const row of vectors.replayIdentityConflicts) {
       const original = normalizedIdentity(row.original);
       const conflicting = normalizedIdentity(row.conflicting);
       expect(conflicting.deliveryId, row.case).toBe(original.deliveryId);
       const changed = Object.keys(original).filter(
-        (field) => !Object.is(original[field], conflicting[field]) &&
+        (field) =>
+          !Object.is(original[field], conflicting[field]) &&
           JSON.stringify(original[field]) !== JSON.stringify(conflicting[field]),
       );
       expect(changed, row.case).toEqual([row.changedField]);

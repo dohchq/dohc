@@ -1,5 +1,11 @@
-import { SAVED_HERE, SAVING, UNKNOWN_SAVE_STATE, saveProblem, saveStateEqual, type SaveState } from "@dohc/workspace-contracts/save-state";
-
+import {
+  SAVED_HERE,
+  SAVING,
+  UNKNOWN_SAVE_STATE,
+  saveProblem,
+  saveStateEqual,
+  type SaveState,
+} from "@dohc/workspace-contracts/save-state";
 
 export type LocalDocumentSnapshot = {
   initialized: boolean;
@@ -88,13 +94,9 @@ export class SharedLocalDocument {
 
   getSnapshot = (): LocalDocumentSnapshot => this.snapshot;
 
-  getPendingDraftSource = (): object | null =>
-    this.pendingDraft?.source ?? null;
+  getPendingDraftSource = (): object | null => this.pendingDraft?.source ?? null;
 
-  setPendingDraft(pending: {
-    source: object;
-    materialize: () => string;
-  }): void {
+  setPendingDraft(pending: { source: object; materialize: () => string }): void {
     const wasPending = this.pendingDraft !== null;
     this.pendingDraft = pending;
     if (!wasPending) this.notify();
@@ -137,8 +139,7 @@ export class SharedLocalDocument {
   retireCapturedDraft(source: object): void {
     if (this.writers !== 0) return;
     const ownsPendingDraft = this.pendingDraft?.source === source;
-    const ownsDirtySnapshot =
-      this.snapshot.dirty && this.snapshot.source === source;
+    const ownsDirtySnapshot = this.snapshot.dirty && this.snapshot.source === source;
     if (!ownsPendingDraft && !ownsDirtySnapshot) return;
     if (ownsPendingDraft) this.pendingDraft = null;
     if (ownsDirtySnapshot) {
@@ -159,11 +160,7 @@ export class SharedLocalDocument {
     return this.latestReadTicket;
   }
 
-  initializeRead(
-    body: string,
-    contentHash: string | null,
-    readTicket: number,
-  ): boolean {
+  initializeRead(body: string, contentHash: string | null, readTicket: number): boolean {
     if (
       readTicket < this.latestAcceptedReadTicket ||
       (this.initialized && readTicket === this.latestAcceptedReadTicket)
@@ -171,11 +168,7 @@ export class SharedLocalDocument {
       return false;
     }
     this.latestAcceptedReadTicket = readTicket;
-    if (
-      this.snapshot.dirty ||
-      this.writers > 0 ||
-      this.pendingDraft !== null
-    ) {
+    if (this.snapshot.dirty || this.writers > 0 || this.pendingDraft !== null) {
       return false;
     }
     this.initialized = true;
@@ -190,12 +183,7 @@ export class SharedLocalDocument {
 
   publishDraft(body: string, source: object): void {
     this.initialized = true;
-    this.replace(
-      { body, contentHash: this.snapshot.contentHash },
-      source,
-      true,
-      SAVING,
-    );
+    this.replace({ body, contentHash: this.snapshot.contentHash }, source, true, SAVING);
   }
 
   acceptRead(
@@ -211,13 +199,10 @@ export class SharedLocalDocument {
     this.latestAcceptedReadTicket = readTicket;
     const pendingDraft = this.pendingDraft;
     if (this.snapshot.dirty || this.writers > 0 || pendingDraft !== null) {
-      const ownsDirtySnapshot =
-        !this.snapshot.dirty || this.snapshot.source === source;
-      const ownsPendingDraft =
-        pendingDraft === null || pendingDraft.source === source;
+      const ownsDirtySnapshot = !this.snapshot.dirty || this.snapshot.source === source;
+      const ownsPendingDraft = pendingDraft === null || pendingDraft.source === source;
       const ownsAllDrafts = ownsDirtySnapshot && ownsPendingDraft;
-      const canReplaceOwnDraft =
-        force && ownsAllDrafts && this.writers === 0;
+      const canReplaceOwnDraft = force && ownsAllDrafts && this.writers === 0;
       if (!canReplaceOwnDraft) {
         if (force && !ownsAllDrafts) this.markError();
         return false;
@@ -225,12 +210,7 @@ export class SharedLocalDocument {
       if (this.pendingDraft === pendingDraft) this.pendingDraft = null;
     }
     this.initialized = true;
-    this.replace(
-      { body, contentHash },
-      source,
-      false,
-      SAVED_HERE,
-    );
+    this.replace({ body, contentHash }, source, false, SAVED_HERE);
     this.deleteWhenUnused();
     return true;
   }
@@ -246,10 +226,7 @@ export class SharedLocalDocument {
 
   async write(
     source: object,
-    writer: (
-      body: string,
-      expectedContentHash: string,
-    ) => Promise<WorkspaceTextWriteResult>,
+    writer: (body: string, expectedContentHash: string) => Promise<WorkspaceTextWriteResult>,
   ): Promise<LocalDocumentWriteResult> {
     const runsNow = this.writers === 0;
     this.writers += 1;
@@ -358,8 +335,7 @@ export class SharedLocalDocument {
     if (
       this.refs !== 0 ||
       this.writers !== 0 ||
-      ((this.snapshot.dirty || this.pendingDraft !== null) &&
-        !this.releaseDirtyWhenUnused)
+      ((this.snapshot.dirty || this.pendingDraft !== null) && !this.releaseDirtyWhenUnused)
     ) {
       return;
     }

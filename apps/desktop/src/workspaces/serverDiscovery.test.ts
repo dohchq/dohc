@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { discoverServer } from "./serverDiscovery";
 
-const descriptor = { version: 1, authUrl: "https://server.test", relayUrl: "https://server.test", shareUrl: "https://server.test" };
+const descriptor = {
+  version: 1,
+  authUrl: "https://server.test",
+  relayUrl: "https://server.test",
+  shareUrl: "https://server.test",
+};
 
 describe("server discovery", () => {
   it("discovers endpoints without sending credentials or following redirects", async () => {
@@ -29,31 +34,51 @@ describe("server discovery", () => {
     { ...descriptor, name: "Bad\nname" },
     null,
     [],
-  ])("rejects invalid or cross-origin auth descriptions", async value => {
+  ])("rejects invalid or cross-origin auth descriptions", async (value) => {
     const fetcher = vi.fn<typeof fetch>(async () => Response.json(value));
-    await expect(discoverServer("https://server.test", fetcher)).rejects.toThrow("connection description");
+    await expect(discoverServer("https://server.test", fetcher)).rejects.toThrow(
+      "connection description",
+    );
     expect(fetcher).toHaveBeenCalledOnce();
   });
 
   // The server may name itself; the desktop shows its address instead.
   it("permits optional validated display metadata, and keeps the network scope", async () => {
-    const fetcher = vi.fn<typeof fetch>(async () => Response.json({ ...descriptor, name: "My server", networkAccess: "private" }));
-    await expect(discoverServer("https://server.test", fetcher)).resolves.toEqual({ ...descriptor, networkAccess: "private" });
+    const fetcher = vi.fn<typeof fetch>(async () =>
+      Response.json({ ...descriptor, name: "My server", networkAccess: "private" }),
+    );
+    await expect(discoverServer("https://server.test", fetcher)).resolves.toEqual({
+      ...descriptor,
+      networkAccess: "private",
+    });
   });
 
   it("rejects a remote deployment advertising loopback plaintext endpoints", async () => {
-    await expect(discoverServer("https://server.test", async () => Response.json({ ...descriptor, relayUrl: "http://localhost:1788" }))).rejects.toThrow("unsupported connection description");
+    await expect(
+      discoverServer("https://server.test", async () =>
+        Response.json({ ...descriptor, relayUrl: "http://localhost:1788" }),
+      ),
+    ).rejects.toThrow("unsupported connection description");
   });
 
   it("refuses a plain http server on this machine before contacting it", async () => {
     const fetcher = vi.fn<typeof fetch>();
-    await expect(discoverServer("http://localhost:1786", fetcher)).rejects.toThrow("Enter the server's https address");
+    await expect(discoverServer("http://localhost:1786", fetcher)).rejects.toThrow(
+      "Enter the server's https address",
+    );
     expect(fetcher).not.toHaveBeenCalled();
   });
 
   it("allows a loopback deployment under the e2e switch", async () => {
-    const local = { version: 1, authUrl: "http://localhost:1786", relayUrl: "http://localhost:1786", shareUrl: "http://localhost:1786" };
-    await expect(discoverServer(local.authUrl, async () => Response.json(local), true)).resolves.toEqual(local);
+    const local = {
+      version: 1,
+      authUrl: "http://localhost:1786",
+      relayUrl: "http://localhost:1786",
+      shareUrl: "http://localhost:1786",
+    };
+    await expect(
+      discoverServer(local.authUrl, async () => Response.json(local), true),
+    ).resolves.toEqual(local);
   });
 
   it.each([
@@ -61,12 +86,20 @@ describe("server discovery", () => {
     () => new Response("not json", { headers: { "content-type": "application/json" } }),
     () => Response.json({ ...descriptor, padding: "x".repeat(16 * 1024) }),
     () => new Response(null, { status: 204, headers: { "content-type": "application/json" } }),
-  ])("rejects malformed and oversized response bodies", async response => {
-    await expect(discoverServer("https://server.test", async () => response())).rejects.toThrow("invalid connection description");
+  ])("rejects malformed and oversized response bodies", async (response) => {
+    await expect(discoverServer("https://server.test", async () => response())).rejects.toThrow(
+      "invalid connection description",
+    );
   });
 
   it("reports a missing endpoint separately from network failure", async () => {
-    await expect(discoverServer("https://server.test", async () => new Response(null, { status: 404 }))).rejects.toThrow("does not provide a dohc server connection");
-    await expect(discoverServer("https://server.test", async () => { throw new Error("TLS"); })).rejects.toThrow("could not reach this server");
+    await expect(
+      discoverServer("https://server.test", async () => new Response(null, { status: 404 })),
+    ).rejects.toThrow("does not provide a dohc server connection");
+    await expect(
+      discoverServer("https://server.test", async () => {
+        throw new Error("TLS");
+      }),
+    ).rejects.toThrow("could not reach this server");
   });
 });

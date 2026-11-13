@@ -1,10 +1,10 @@
-import { comparePresence } from './packaged-presence.mjs';
-import { compareDocumentSize } from './document-size-summary.mjs';
-import { createHash } from 'node:crypto';
-import { readFile, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
-import { summarize } from './summarize-packaged-benchmark.mjs';
+import { comparePresence } from "./packaged-presence.mjs";
+import { compareDocumentSize } from "./document-size-summary.mjs";
+import { createHash } from "node:crypto";
+import { readFile, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import { summarize } from "./summarize-packaged-benchmark.mjs";
 
 export const DEFAULT_MARGIN = { percent: 10, automationPercent: 25, floorMs: 17 };
 // Bump when a measurement's start or end changes. A receipt without the setting is version 1.
@@ -14,16 +14,41 @@ const MIN_AUTOMATION_RUNS = 5;
 
 // Settings that change what a receipt measures. The limits may differ: they decide which cases are
 // comparable, through each case's fixture digest.
-const COMPARED_SETTINGS = ['scenario', 'runCount', 'keystrokes', 'fixtureFiles', 'records', 'idleSeconds', 'switches', 'profileRenderer', 'profileMain', 'documentMiB', 'relaySessions', 'updatesPerSecond', 'churnEdits', 'documentMode', 'presencePeers', 'selectionHz', 'peerTypingHz', 'presenceTiming', 'typingTrace'];
+const COMPARED_SETTINGS = [
+  "scenario",
+  "runCount",
+  "keystrokes",
+  "fixtureFiles",
+  "records",
+  "idleSeconds",
+  "switches",
+  "profileRenderer",
+  "profileMain",
+  "documentMiB",
+  "relaySessions",
+  "updatesPerSecond",
+  "churnEdits",
+  "documentMode",
+  "presencePeers",
+  "selectionHz",
+  "peerTypingHz",
+  "presenceTiming",
+  "typingTrace",
+];
 
-function check(metric, baseline, candidate, margin, percentile = 'p95') {
-  const field = percentile === 'p50' ? 'P50' : 'P95';
-  const row = { metric, [`baseline${field}`]: baseline?.[percentile] ?? null, [`candidate${field}`]: candidate?.[percentile] ?? null };
-  if (!baseline?.count && !candidate?.count) return { ...row, verdict: 'unmeasured' };
-  if (!candidate?.count) return { ...row, verdict: 'missing' };
-  if (!baseline?.count) return { ...row, verdict: 'new' };
-  const limit = baseline[percentile] + Math.max(baseline[percentile] * margin.percent / 100, margin.floorMs);
-  return { ...row, limit, verdict: candidate[percentile] > limit ? 'regressed' : 'pass' };
+function check(metric, baseline, candidate, margin, percentile = "p95") {
+  const field = percentile === "p50" ? "P50" : "P95";
+  const row = {
+    metric,
+    [`baseline${field}`]: baseline?.[percentile] ?? null,
+    [`candidate${field}`]: candidate?.[percentile] ?? null,
+  };
+  if (!baseline?.count && !candidate?.count) return { ...row, verdict: "unmeasured" };
+  if (!candidate?.count) return { ...row, verdict: "missing" };
+  if (!baseline?.count) return { ...row, verdict: "new" };
+  const limit =
+    baseline[percentile] + Math.max((baseline[percentile] * margin.percent) / 100, margin.floorMs);
+  return { ...row, limit, verdict: candidate[percentile] > limit ? "regressed" : "pass" };
 }
 
 /**
@@ -35,86 +60,178 @@ function check(metric, baseline, candidate, margin, percentile = 'p95') {
 export function compareSummaries(baseline, candidate, margin = DEFAULT_MARGIN) {
   margin = { ...DEFAULT_MARGIN, ...margin };
   const problems = [];
-  for (const [label, summary] of [['baseline', baseline], ['candidate', candidate]]) {
-    if (summary.status !== 'complete') problems.push(`The ${label} receipt is ${summary.status}, not complete.`);
+  for (const [label, summary] of [
+    ["baseline", baseline],
+    ["candidate", candidate],
+  ]) {
+    if (summary.status !== "complete")
+      problems.push(`The ${label} receipt is ${summary.status}, not complete.`);
   }
-  const version = summary => summary.settings?.metricVersion ?? 1;
+  const version = (summary) => summary.settings?.metricVersion ?? 1;
   if (version(baseline) !== version(candidate)) {
-    problems.push(`The baseline uses metric version ${version(baseline)} and the candidate version ${version(candidate)}. Measure both packages with the same harness.`);
+    problems.push(
+      `The baseline uses metric version ${version(baseline)} and the candidate version ${version(candidate)}. Measure both packages with the same harness.`,
+    );
   }
-  for (const key of COMPARED_SETTINGS.filter(key => candidate.settings?.scenario !== 'document-size' || !['runCount'].includes(key))) {
-    if (JSON.stringify(baseline.settings?.[key]) !== JSON.stringify(candidate.settings?.[key])) problems.push(`The receipts differ in ${key}.`);
+  for (const key of COMPARED_SETTINGS.filter(
+    (key) => candidate.settings?.scenario !== "document-size" || !["runCount"].includes(key),
+  )) {
+    if (JSON.stringify(baseline.settings?.[key]) !== JSON.stringify(candidate.settings?.[key]))
+      problems.push(`The receipts differ in ${key}.`);
   }
-  if (baseline.diagnostic || candidate.diagnostic) problems.push('A profiled receipt cannot serve as a performance comparison.');
-  if (baseline.settings?.scenario === 'presence' || candidate.settings?.scenario === 'presence') {
+  if (baseline.diagnostic || candidate.diagnostic)
+    problems.push("A profiled receipt cannot serve as a performance comparison.");
+  if (baseline.settings?.scenario === "presence" || candidate.settings?.scenario === "presence") {
     const presence = comparePresence(baseline.presence, candidate.presence, candidate.settings);
-    return { ...presence, pass: presence.pass && problems.length === 0, problems: [...problems, ...presence.problems], cases: [] };
+    return {
+      ...presence,
+      pass: presence.pass && problems.length === 0,
+      problems: [...problems, ...presence.problems],
+      cases: [],
+    };
   }
-  const fewestRuns = summary => {
-    const counts = ['document', 'dataset'].flatMap(kind => Object.values(summary.collectionAutomations?.[kind] ?? {}).map(item => item.runs));
+  const fewestRuns = (summary) => {
+    const counts = ["document", "dataset"].flatMap((kind) =>
+      Object.values(summary.collectionAutomations?.[kind] ?? {}).map((item) => item.runs),
+    );
     return counts.length ? Math.min(...counts) : null;
   };
-  const baselineRuns = fewestRuns(baseline), candidateRuns = fewestRuns(candidate);
-  if ([baselineRuns, candidateRuns].some(count => count !== null && count < MIN_AUTOMATION_RUNS)) {
-    problems.push(`Automation cases need at least ${MIN_AUTOMATION_RUNS} runs on each side; the fewest recorded are baseline: ${baselineRuns ?? 'no cases'}, candidate: ${candidateRuns ?? 'no cases'}.`);
+  const baselineRuns = fewestRuns(baseline),
+    candidateRuns = fewestRuns(candidate);
+  if (
+    [baselineRuns, candidateRuns].some((count) => count !== null && count < MIN_AUTOMATION_RUNS)
+  ) {
+    problems.push(
+      `Automation cases need at least ${MIN_AUTOMATION_RUNS} runs on each side; the fewest recorded are baseline: ${baselineRuns ?? "no cases"}, candidate: ${candidateRuns ?? "no cases"}.`,
+    );
   }
-  if (candidate.settings?.scenario === 'document-size') {
+  if (candidate.settings?.scenario === "document-size") {
     const documentSize = compareDocumentSize(baseline, candidate, margin);
-    return { ...documentSize, pass: problems.length === 0 && documentSize.pass, margin, problems: [...problems, ...documentSize.problems], documentSize };
+    return {
+      ...documentSize,
+      pass: problems.length === 0 && documentSize.pass,
+      margin,
+      problems: [...problems, ...documentSize.problems],
+      documentSize,
+    };
   }
   const checks = [];
-  if (baseline.collection || candidate.collection) checks.push(check('collection open to rows painted', baseline.collection?.openToRowsPaintedMs, candidate.collection?.openToRowsPaintedMs, margin));
+  if (baseline.collection || candidate.collection)
+    checks.push(
+      check(
+        "collection open to rows painted",
+        baseline.collection?.openToRowsPaintedMs,
+        candidate.collection?.openToRowsPaintedMs,
+        margin,
+      ),
+    );
   for (const name of Object.keys(candidate.typing ?? {})) {
-    checks.push(check(`typing ${name} dispatch to two frames`, baseline.typing?.[name]?.dispatchToTwoRafObservedMs, candidate.typing[name].dispatchToTwoRafObservedMs, margin));
+    checks.push(
+      check(
+        `typing ${name} dispatch to two frames`,
+        baseline.typing?.[name]?.dispatchToTwoRafObservedMs,
+        candidate.typing[name].dispatchToTwoRafObservedMs,
+        margin,
+      ),
+    );
   }
   const cases = [];
-  for (const kind of ['document', 'dataset']) {
-    const before = baseline.collectionAutomations?.[kind] ?? {}, after = candidate.collectionAutomations?.[kind] ?? {};
+  for (const kind of ["document", "dataset"]) {
+    const before = baseline.collectionAutomations?.[kind] ?? {},
+      after = candidate.collectionAutomations?.[kind] ?? {};
     for (const name of new Set([...Object.keys(before), ...Object.keys(after)])) {
-      const was = before[name], is = after[name];
-      if (!is) { checks.push({ metric: `${kind} ${name}`, verdict: 'missing' }); continue; }
-      if (is.failures > 0) problems.push(`The candidate's ${kind} ${name} case failed its checks in ${is.failures} of ${is.runs} runs.`);
+      const was = before[name],
+        is = after[name];
+      if (!is) {
+        checks.push({ metric: `${kind} ${name}`, verdict: "missing" });
+        continue;
+      }
+      if (is.failures > 0)
+        problems.push(
+          `The candidate's ${kind} ${name} case failed its checks in ${is.failures} of ${is.runs} runs.`,
+        );
       // A receipt without one digest per case cannot say whether the case measured the same work.
-      const digests = [was, is].filter(Boolean).map(summary => summary.fixtureSha256);
-      if (digests.some(digest => digest.length !== 1)) { problems.push(`The ${kind} ${name} case has no single fixture digest in both receipts.`); continue; }
+      const digests = [was, is].filter(Boolean).map((summary) => summary.fixtureSha256);
+      if (digests.some((digest) => digest.length !== 1)) {
+        problems.push(`The ${kind} ${name} case has no single fixture digest in both receipts.`);
+        continue;
+      }
       const comparable = was !== undefined && was.fixtureSha256[0] === is.fixtureSha256[0];
       cases.push({ kind, name, compared: comparable, outcomes: is.outcomes });
       if (!comparable) continue;
-      const settled = check(`${kind} ${name} press to settled`, was.triggerToSettledPaintedMs, is.triggerToSettledPaintedMs,
-        { percent: margin.automationPercent, floorMs: margin.floorMs }, 'p50');
-      if (settled.verdict === 'pass' || settled.verdict === 'regressed') {
-        if (is.contention) settled.verdict = 'reported';
-        else if (was.runs < MIN_AUTOMATION_RUNS || is.runs < MIN_AUTOMATION_RUNS) settled.verdict = 'insufficient-runs';
+      const settled = check(
+        `${kind} ${name} press to settled`,
+        was.triggerToSettledPaintedMs,
+        is.triggerToSettledPaintedMs,
+        { percent: margin.automationPercent, floorMs: margin.floorMs },
+        "p50",
+      );
+      if (settled.verdict === "pass" || settled.verdict === "regressed") {
+        if (is.contention) settled.verdict = "reported";
+        else if (was.runs < MIN_AUTOMATION_RUNS || is.runs < MIN_AUTOMATION_RUNS)
+          settled.verdict = "insufficient-runs";
       }
       checks.push(settled);
       if (was.typingDuringRun || is.typingDuringRun) {
-        checks.push(check(`${kind} ${name} typing during the run`, was.typingDuringRun?.dispatchToTwoRafObservedMs, is.typingDuringRun?.dispatchToTwoRafObservedMs, margin));
+        checks.push(
+          check(
+            `${kind} ${name} typing during the run`,
+            was.typingDuringRun?.dispatchToTwoRafObservedMs,
+            is.typingDuringRun?.dispatchToTwoRafObservedMs,
+            margin,
+          ),
+        );
       }
     }
   }
-  for (const row of checks) if (row.verdict === 'regressed' || row.verdict === 'missing') problems.push(`${row.metric}: ${row.verdict}`);
+  for (const row of checks)
+    if (row.verdict === "regressed" || row.verdict === "missing")
+      problems.push(`${row.metric}: ${row.verdict}`);
   return { pass: problems.length === 0, margin, problems, checks, cases };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const args = process.argv.slice(2);
-  const directories = [], margin = { ...DEFAULT_MARGIN };
+  const directories = [],
+    margin = { ...DEFAULT_MARGIN };
   for (let index = 0; index < args.length; index++) {
-    const flag = { '--margin-percent': 'percent', '--automation-margin-percent': 'automationPercent', '--floor-ms': 'floorMs' }[args[index]];
-    if (!flag) { directories.push(args[index]); continue; }
+    const flag = {
+      "--margin-percent": "percent",
+      "--automation-margin-percent": "automationPercent",
+      "--floor-ms": "floorMs",
+    }[args[index]];
+    if (!flag) {
+      directories.push(args[index]);
+      continue;
+    }
     margin[flag] = Number(args[++index]);
-    if (!Number.isFinite(margin[flag]) || margin[flag] < 0) throw Error(`${args[index - 1]} needs a number of at least 0`);
+    if (!Number.isFinite(margin[flag]) || margin[flag] < 0)
+      throw Error(`${args[index - 1]} needs a number of at least 0`);
   }
-  if (directories.length !== 2 || directories.some(value => value.startsWith('--'))) {
-    throw Error('Usage: node compare-packaged-benchmark.mjs <baseline-directory> <candidate-directory> [--margin-percent 10] [--automation-margin-percent 25] [--floor-ms 17]');
+  if (directories.length !== 2 || directories.some((value) => value.startsWith("--"))) {
+    throw Error(
+      "Usage: node compare-packaged-benchmark.mjs <baseline-directory> <candidate-directory> [--margin-percent 10] [--automation-margin-percent 25] [--floor-ms 17]",
+    );
   }
   // A document-size candidate records the hash of the baseline receipt its extensions used.
-  const [baseline, candidate] = await Promise.all(directories.map(async directory => {
-    const text = await readFile(join(resolve(directory), 'result.json'));
-    return { ...(await summarize(JSON.parse(text))), resultSha256: createHash('sha256').update(text).digest('hex') };
-  }));
-  const comparison = { baseline: resolve(directories[0]), candidate: resolve(directories[1]), ...compareSummaries(baseline, candidate, margin) };
-  await writeFile(join(resolve(directories[1]), 'comparison.json'), JSON.stringify(comparison, null, 2));
+  const [baseline, candidate] = await Promise.all(
+    directories.map(async (directory) => {
+      const text = await readFile(join(resolve(directory), "result.json"));
+      return {
+        ...(await summarize(JSON.parse(text))),
+        resultSha256: createHash("sha256").update(text).digest("hex"),
+      };
+    }),
+  );
+  const comparison = {
+    baseline: resolve(directories[0]),
+    candidate: resolve(directories[1]),
+    ...compareSummaries(baseline, candidate, margin),
+  };
+  await writeFile(
+    join(resolve(directories[1]), "comparison.json"),
+    JSON.stringify(comparison, null, 2),
+  );
   console.log(JSON.stringify(comparison, null, 2));
   if (!comparison.pass) process.exitCode = 1;
 }

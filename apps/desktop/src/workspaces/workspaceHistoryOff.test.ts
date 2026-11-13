@@ -3,7 +3,11 @@ import { basename, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { HISTORY_OFF_FOLDER_BODY, HISTORY_OFF_PAGE_BODY, historyOffTitle } from "../ipc/errorWords";
 import { createTestScratch } from "./testTemp";
-import { HistoryOffError, deleteWorkspacePathByHand, moveWorkspacePathByHand } from "./workspaceFileMoves";
+import {
+  HistoryOffError,
+  deleteWorkspacePathByHand,
+  moveWorkspacePathByHand,
+} from "./workspaceFileMoves";
 
 const person = { kind: "human", humanId: "local:test" } as const;
 
@@ -18,8 +22,14 @@ async function workspace() {
   await writeFile(join(rootPath, "notes", "plain.txt"), "plain file");
   await writeFile(join(rootPath, "images", "a.png"), "png");
   const operation = { workspace: { workspaceId: "history-off", rootPath }, assertCurrent: vi.fn() };
-  const options = { capture: null, requestId: "history-off", markDeleted: vi.fn(), trashItem: vi.fn(async (_path: string) => undefined) };
-  const move = (fromPath: string, toPath: string) => moveWorkspacePathByHand(operation, { fromPath, toPath }, person, options);
+  const options = {
+    capture: null,
+    requestId: "history-off",
+    markDeleted: vi.fn(),
+    trashItem: vi.fn(async (_path: string) => undefined),
+  };
+  const move = (fromPath: string, toPath: string) =>
+    moveWorkspacePathByHand(operation, { fromPath, toPath }, person, options);
   const remove = (path: string) => deleteWorkspacePathByHand(operation, path, person, options);
   const notes = async () => (await readdir(join(rootPath, "notes"))).sort();
   return { rootPath, move, remove, notes, trashItem: options.trashItem };
@@ -30,7 +40,9 @@ describe("an app move while History is off", () => {
     const { rootPath, move, notes } = await workspace();
     const moving = move("notes/box", "notes/moved");
     await expect(moving).rejects.toBeInstanceOf(HistoryOffError);
-    await expect(moving).rejects.toThrow(`${historyOffTitle("notes/box", "move")}\n${HISTORY_OFF_FOLDER_BODY}`);
+    await expect(moving).rejects.toThrow(
+      `${historyOffTitle("notes/box", "move")}\n${HISTORY_OFF_FOLDER_BODY}`,
+    );
     expect(await readFile(join(rootPath, "notes", "box", "page.md"), "utf8")).toBe("owned page");
     expect(await notes()).toEqual(["box", "page.md", "plain.txt"]);
   });
@@ -39,14 +51,20 @@ describe("an app move while History is off", () => {
     const { move, notes } = await workspace();
     const renaming = move("notes/page.md", "notes/renamed.md");
     await expect(renaming).rejects.toBeInstanceOf(HistoryOffError);
-    await expect(renaming).rejects.toThrow(`dohc can't rename "notes/page.md" while History is off\n${HISTORY_OFF_PAGE_BODY}`);
-    await expect(move("notes/page.md", "page.md")).rejects.toThrow(`dohc can't move "notes/page.md" while History is off\n${HISTORY_OFF_PAGE_BODY}`);
+    await expect(renaming).rejects.toThrow(
+      `dohc can't rename "notes/page.md" while History is off\n${HISTORY_OFF_PAGE_BODY}`,
+    );
+    await expect(move("notes/page.md", "page.md")).rejects.toThrow(
+      `dohc can't move "notes/page.md" while History is off\n${HISTORY_OFF_PAGE_BODY}`,
+    );
     expect(await notes()).toEqual(["box", "page.md", "plain.txt"]);
   });
 
   it("still moves an ordinary file", async () => {
     const { rootPath, move, notes } = await workspace();
-    await expect(move("notes/plain.txt", "notes/renamed.txt")).resolves.toMatchObject({ path: "notes/renamed.txt" });
+    await expect(move("notes/plain.txt", "notes/renamed.txt")).resolves.toMatchObject({
+      path: "notes/renamed.txt",
+    });
     expect(await readFile(join(rootPath, "notes", "renamed.txt"), "utf8")).toBe("plain file");
     expect(await notes()).toEqual(["box", "page.md", "renamed.txt"]);
   });
@@ -57,8 +75,12 @@ describe("an app delete while History is off", () => {
     const { remove, notes, trashItem } = await workspace();
     const page = remove("notes/page.md");
     await expect(page).rejects.toBeInstanceOf(HistoryOffError);
-    await expect(page).rejects.toThrow(`dohc can't delete "notes/page.md" while History is off\n${HISTORY_OFF_PAGE_BODY}`);
-    await expect(remove("notes")).rejects.toThrow(`dohc can't delete "notes" while History is off\n${HISTORY_OFF_FOLDER_BODY}`);
+    await expect(page).rejects.toThrow(
+      `dohc can't delete "notes/page.md" while History is off\n${HISTORY_OFF_PAGE_BODY}`,
+    );
+    await expect(remove("notes")).rejects.toThrow(
+      `dohc can't delete "notes" while History is off\n${HISTORY_OFF_FOLDER_BODY}`,
+    );
     expect(trashItem).not.toHaveBeenCalled();
     expect(await notes()).toEqual(["box", "page.md", "plain.txt"]);
   });

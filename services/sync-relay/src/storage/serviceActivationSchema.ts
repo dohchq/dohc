@@ -1,7 +1,7 @@
 import type { SqliteDb } from "./types";
-import {initializeOrdinaryActivationBasis} from "./ordinaryActivationBasis";
-import {initializeOrdinaryCheckpoints} from "./ordinaryActivationCheckpoint";
-import {rebuildTables} from "./rebuildTables";
+import { initializeOrdinaryActivationBasis } from "./ordinaryActivationBasis";
+import { initializeOrdinaryCheckpoints } from "./ordinaryActivationCheckpoint";
+import { rebuildTables } from "./rebuildTables";
 
 export const SERVICE_ACTIVATIONS = "sync_relay_service_activations";
 export const LIVE_DELIVERY_OWNER_HISTORY = "sync_relay_live_delivery_owner_history";
@@ -9,7 +9,8 @@ const V1_MIGRATION = "service-activation-v1";
 const V2_MIGRATION = "service-activation-v2";
 const MIGRATION = "service-activation-v3";
 const SAFE = 9_007_199_254_740_991;
-const optionalInteger = (name: string) => `${name} INTEGER CHECK (${name} IS NULL OR ${name} BETWEEN 0 AND ${SAFE})`;
+const optionalInteger = (name: string) =>
+  `${name} INTEGER CHECK (${name} IS NULL OR ${name} BETWEEN 0 AND ${SAFE})`;
 const sql = `CREATE TABLE ${SERVICE_ACTIVATIONS} (
   relay_database_namespace TEXT NOT NULL,
   activation_id TEXT NOT NULL,
@@ -121,14 +122,22 @@ const historySql = `CREATE TABLE ${LIVE_DELIVERY_OWNER_HISTORY} (
 const normalized = (value: string) => value.replace(/\s+/g, " ").trim();
 const exact = (db: SqliteDb, name: string, type: string, expected: string) => {
   const row = db.prepare("SELECT type,sql FROM sqlite_schema WHERE name=?").get(name);
-  return !!row && row.type === type && typeof row.sql === "string" && normalized(row.sql) === normalized(expected);
+  return (
+    !!row &&
+    row.type === type &&
+    typeof row.sql === "string" &&
+    normalized(row.sql) === normalized(expected)
+  );
 };
 
 export function initializeServiceActivationSchema(db: SqliteDb): void {
   initializeOrdinaryActivationBasis(db);
   initializeOrdinaryCheckpoints(db);
-  const marked = (migration: string) => db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(migration) !== undefined;
-  const present = (name: string) => db.prepare("SELECT 1 FROM sqlite_schema WHERE name=?").get(name) !== undefined;
+  const marked = (migration: string) =>
+    db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(migration) !==
+    undefined;
+  const present = (name: string) =>
+    db.prepare("SELECT 1 FROM sqlite_schema WHERE name=?").get(name) !== undefined;
   const create = () => {
     db.exec(sql);
     for (const index of Object.values(indexes)) db.exec(index);
@@ -136,7 +145,10 @@ export function initializeServiceActivationSchema(db: SqliteDb): void {
   };
   const current = marked(MIGRATION);
   if (!current && marked(V2_MIGRATION)) {
-    if (!exact(db, SERVICE_ACTIVATIONS, "table", v2Sql) || !exact(db, LIVE_DELIVERY_OWNER_HISTORY, "table", historySql)) {
+    if (
+      !exact(db, SERVICE_ACTIVATIONS, "table", v2Sql) ||
+      !exact(db, LIVE_DELIVERY_OWNER_HISTORY, "table", historySql)
+    ) {
       throw new Error("Service activation storage is damaged.");
     }
     assertConstraints(db);
@@ -144,9 +156,15 @@ export function initializeServiceActivationSchema(db: SqliteDb): void {
     // verify the predecessor chain and each history row's activation when it
     // commits. Every column but `share_id` returns.
     db.exec("PRAGMA defer_foreign_keys=ON");
-    rebuildTables(db, [SERVICE_ACTIVATIONS, LIVE_DELIVERY_OWNER_HISTORY], table => table === SERVICE_ACTIVATIONS ? sql : historySql, ["share_id"]);
+    rebuildTables(
+      db,
+      [SERVICE_ACTIVATIONS, LIVE_DELIVERY_OWNER_HISTORY],
+      (table) => (table === SERVICE_ACTIVATIONS ? sql : historySql),
+      ["share_id"],
+    );
   } else if (!current && marked(V1_MIGRATION)) {
-    if (!exact(db, SERVICE_ACTIVATIONS, "table", v1Sql) || present(LIVE_DELIVERY_OWNER_HISTORY)) throw new Error("Service activation storage is damaged.");
+    if (!exact(db, SERVICE_ACTIVATIONS, "table", v1Sql) || present(LIVE_DELIVERY_OWNER_HISTORY))
+      throw new Error("Service activation storage is damaged.");
     assertV1Constraints(db);
     // Every v1 activation is current: Stop recorded no obligation before v2.
     db.exec(`ALTER TABLE ${SERVICE_ACTIVATIONS} RENAME TO ${SERVICE_ACTIVATIONS}_v1`);
@@ -157,15 +175,22 @@ export function initializeServiceActivationSchema(db: SqliteDb): void {
         source_json,binding_json,state_digest,state_bytes,owner_user_id,completion_json,accounted_bytes FROM ${SERVICE_ACTIVATIONS}_v1;
       DROP TABLE ${SERVICE_ACTIVATIONS}_v1;`);
   } else if (!current) {
-    if (present(SERVICE_ACTIVATIONS) || present(LIVE_DELIVERY_OWNER_HISTORY)) throw new Error("Unmarked service activation storage exists.");
+    if (present(SERVICE_ACTIVATIONS) || present(LIVE_DELIVERY_OWNER_HISTORY))
+      throw new Error("Unmarked service activation storage exists.");
     create();
   }
-  if (!exact(db, SERVICE_ACTIVATIONS, "table", sql) || !exact(db, LIVE_DELIVERY_OWNER_HISTORY, "table", historySql)) {
+  if (
+    !exact(db, SERVICE_ACTIVATIONS, "table", sql) ||
+    !exact(db, LIVE_DELIVERY_OWNER_HISTORY, "table", historySql)
+  ) {
     throw new Error("Service activation storage is damaged.");
   }
   assertConstraints(db);
   for (const migration of [V2_MIGRATION, MIGRATION]) {
-    if (!marked(migration)) db.prepare("INSERT INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES (?,?)").run(migration, Date.now());
+    if (!marked(migration))
+      db.prepare(
+        "INSERT INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES (?,?)",
+      ).run(migration, Date.now());
   }
 }
 
@@ -173,22 +198,40 @@ export function initializeServiceActivationSchema(db: SqliteDb): void {
 function assertConstraints(db: SqliteDb): void {
   const activationIndexes = db.prepare(`PRAGMA index_list(${SERVICE_ACTIVATIONS})`).all();
   const historyIndexes = db.prepare(`PRAGMA index_list(${LIVE_DELIVERY_OWNER_HISTORY})`).all();
-  if (activationIndexes.length !== 4 || activationIndexes.some(row => row.origin === "pk"
-      ? row.unique !== 1 || row.partial !== 0
-      : row.origin !== "c" || !Object.hasOwn(indexes, String(row.name)) || !exact(db, String(row.name), "index", indexes[row.name as keyof typeof indexes])) ||
-      historyIndexes.length !== 1 || historyIndexes[0]!.origin !== "pk" || historyIndexes[0]!.partial !== 0 ||
-      db.prepare(`PRAGMA foreign_key_check(${SERVICE_ACTIVATIONS})`).all().length ||
-      db.prepare(`PRAGMA foreign_key_check(${LIVE_DELIVERY_OWNER_HISTORY})`).all().length ||
-      db.prepare("SELECT 1 FROM sqlite_schema WHERE type='trigger' AND tbl_name IN (?,?)").get(SERVICE_ACTIVATIONS, LIVE_DELIVERY_OWNER_HISTORY)) {
+  if (
+    activationIndexes.length !== 4 ||
+    activationIndexes.some((row) =>
+      row.origin === "pk"
+        ? row.unique !== 1 || row.partial !== 0
+        : row.origin !== "c" ||
+          !Object.hasOwn(indexes, String(row.name)) ||
+          !exact(db, String(row.name), "index", indexes[row.name as keyof typeof indexes]),
+    ) ||
+    historyIndexes.length !== 1 ||
+    historyIndexes[0]!.origin !== "pk" ||
+    historyIndexes[0]!.partial !== 0 ||
+    db.prepare(`PRAGMA foreign_key_check(${SERVICE_ACTIVATIONS})`).all().length ||
+    db.prepare(`PRAGMA foreign_key_check(${LIVE_DELIVERY_OWNER_HISTORY})`).all().length ||
+    db
+      .prepare("SELECT 1 FROM sqlite_schema WHERE type='trigger' AND tbl_name IN (?,?)")
+      .get(SERVICE_ACTIVATIONS, LIVE_DELIVERY_OWNER_HISTORY)
+  ) {
     throw new Error("Service activation constraints are damaged.");
   }
 }
 
 function assertV1Constraints(db: SqliteDb): void {
   const indexes = db.prepare(`PRAGMA index_list(${SERVICE_ACTIVATIONS})`).all();
-  if (indexes.length !== 2 || indexes.some(row => row.unique !== 1 || row.partial !== 0 || (row.origin !== "pk" && row.origin !== "u")) ||
-      db.prepare(`PRAGMA foreign_key_check(${SERVICE_ACTIVATIONS})`).all().length ||
-      db.prepare("SELECT 1 FROM sqlite_schema WHERE type='trigger' AND tbl_name=?").get(SERVICE_ACTIVATIONS)) {
+  if (
+    indexes.length !== 2 ||
+    indexes.some(
+      (row) => row.unique !== 1 || row.partial !== 0 || (row.origin !== "pk" && row.origin !== "u"),
+    ) ||
+    db.prepare(`PRAGMA foreign_key_check(${SERVICE_ACTIVATIONS})`).all().length ||
+    db
+      .prepare("SELECT 1 FROM sqlite_schema WHERE type='trigger' AND tbl_name=?")
+      .get(SERVICE_ACTIVATIONS)
+  ) {
     throw new Error("Service activation constraints are damaged.");
   }
 }

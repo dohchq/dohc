@@ -1,4 +1,8 @@
-import type { DatasetDescribedField, DatasetDescription, DatasetOperationKind } from "@dohc/security-contract/dataset";
+import type {
+  DatasetDescribedField,
+  DatasetDescription,
+  DatasetOperationKind,
+} from "@dohc/security-contract/dataset";
 import type { CollectionFieldType, FieldDefinition } from "@dohc/workspace-contracts";
 import type { Automation, AutomationStep, AutomationValue } from "./automationSentence";
 
@@ -121,7 +125,13 @@ export function valueKindsFor(type: CollectionFieldType | null, allowAny: boolea
 export function literalFor(type: CollectionFieldType | null, text: string): AutomationValue {
   if (type === "checkbox") return { kind: "literal", value: text === "true" };
   if (type === "multi-select") {
-    return { kind: "literal", value: text.split(",").map((item) => item.trim()).filter((item) => item.length > 0) };
+    return {
+      kind: "literal",
+      value: text
+        .split(",")
+        .map((item) => item.trim())
+        .filter((item) => item.length > 0),
+    };
   }
   return { kind: "literal", value: text };
 }
@@ -130,7 +140,10 @@ export function literalFor(type: CollectionFieldType | null, text: string): Auto
  * A number field's typed text as the number it stores, or undefined when it
  * is not a number yet. Any other value is itself.
  */
-export function numberValue<Value>(type: CollectionFieldType | null, value: Value): Value | number | undefined {
+export function numberValue<Value>(
+  type: CollectionFieldType | null,
+  value: Value,
+): Value | number | undefined {
   if (type !== "number" || typeof value !== "string") return value;
   const number = Number(value);
   return value.trim() === "" || !Number.isFinite(number) ? undefined : number;
@@ -153,11 +166,12 @@ export function defaultValueFor(field: FieldDefinition | undefined): AutomationV
 
 /** A new automation's id: its name as a slug, such as "stamp-the-finish-date", not yet taken. */
 export function idFor(name: string, taken: ReadonlySet<string>): string {
-  const slug = name
-    .normalize("NFKD")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "") || "automation";
+  const slug =
+    name
+      .normalize("NFKD")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "automation";
   for (let index = 1; ; index += 1) {
     const suffix = index === 1 ? "" : `-${index}`;
     const candidate = `${slug.slice(0, MAX_ID_LENGTH - suffix.length).replace(/-+$/, "")}${suffix}`;
@@ -212,17 +226,35 @@ export function builderFields(fields: readonly DatasetDescribedField[]): FieldDe
 
 /** A dataset as the builder reads it, going by `name`: its tables' fields, their operations, and its actions. */
 export function automationTableOf(dataset: DatasetDescription, name: string): AutomationTable {
-  const tableName = (tableId: string) => dataset.tables.find((candidate) => candidate.tableId === tableId)?.name ?? "";
+  const tableName = (tableId: string) =>
+    dataset.tables.find((candidate) => candidate.tableId === tableId)?.name ?? "";
   return {
     name,
-    tables: new Map(dataset.tables.map((candidate) => [candidate.name, {
-      fields: builderFields(candidate.fields),
-      operations: dataset.operations.flatMap((operation) =>
-        (operation.tableId === candidate.tableId ? [{ name: operation.name, kind: operation.kind }] : [])),
-    }])),
-    actions: dataset.operations.flatMap((operation) => operation.kind === "action"
-      ? [{ name: operation.name, label: operation.label, table: tableName(operation.tableId), reversible: operation.reversedBy !== undefined }]
-      : []),
+    tables: new Map(
+      dataset.tables.map((candidate) => [
+        candidate.name,
+        {
+          fields: builderFields(candidate.fields),
+          operations: dataset.operations.flatMap((operation) =>
+            operation.tableId === candidate.tableId
+              ? [{ name: operation.name, kind: operation.kind }]
+              : [],
+          ),
+        },
+      ]),
+    ),
+    actions: dataset.operations.flatMap((operation) =>
+      operation.kind === "action"
+        ? [
+            {
+              name: operation.name,
+              label: operation.label,
+              table: tableName(operation.tableId),
+              reversible: operation.reversedBy !== undefined,
+            },
+          ]
+        : [],
+    ),
   };
 }
 
@@ -231,8 +263,19 @@ export function automationTableOf(dataset: DatasetDescription, name: string): Au
  * its trigger filled in and `steps` to start from. `table` is the dataset
  * table the button is on, or null for a document Collection.
  */
-export function buttonAutomation(field: string, table: string | null, steps: Automation["do"]): Automation {
-  return { id: "", name: field, enabled: true, when: { kind: "button", field, table }, if: null, do: steps };
+export function buttonAutomation(
+  field: string,
+  table: string | null,
+  steps: Automation["do"],
+): Automation {
+  return {
+    id: "",
+    name: field,
+    enabled: true,
+    when: { kind: "button", field, table },
+    if: null,
+    do: steps,
+  };
 }
 
 /**
@@ -245,15 +288,24 @@ export function buttonAutomation(field: string, table: string | null, steps: Aut
 export function newAutomation(all: readonly FieldDefinition[], table: string | null): Automation {
   const fields = all.filter((field) => field.type !== "button");
   const watched = fields.find((field) => field.type === "select") ?? fields[0];
-  const set = fields.find((field) => field.type === "date" && field !== watched) ??
-    fields.find((field) => field !== watched) ?? watched;
+  const set =
+    fields.find((field) => field.type === "date" && field !== watched) ??
+    fields.find((field) => field !== watched) ??
+    watched;
   return {
     id: "",
     name: "",
     enabled: true,
     when: { kind: "field-changed", field: watched?.name ?? "", to: null, table },
     if: null,
-    do: [{ kind: "set", values: [{ field: set?.name ?? "", value: defaultValueFor(set) }], records: null, operation: null }],
+    do: [
+      {
+        kind: "set",
+        values: [{ field: set?.name ?? "", value: defaultValueFor(set) }],
+        records: null,
+        operation: null,
+      },
+    ],
   };
 }
 
@@ -266,8 +318,16 @@ export function reachPlaces(steps: readonly AutomationStep[], first = 0): number
   let next = first;
   const walk = (list: readonly AutomationStep[], into: number[]) => {
     for (const step of list) {
-      if (step.kind === "set" || step.kind === "add-record" || step.kind === "find" || step.kind === "post" || step.kind === "wake-agent" ||
-        step.kind === "run" || step.kind === "run-file") into.push(next++);
+      if (
+        step.kind === "set" ||
+        step.kind === "add-record" ||
+        step.kind === "find" ||
+        step.kind === "post" ||
+        step.kind === "wake-agent" ||
+        step.kind === "run" ||
+        step.kind === "run-file"
+      )
+        into.push(next++);
       if (step.kind === "direct-message" || step.kind === "notify") {
         for (const person of step.to) {
           if (person.kind === "literal" && typeof person.value === "string") into.push(next++);

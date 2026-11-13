@@ -48,7 +48,10 @@ export function disconnectedAgentKey(agent: DisconnectedLinkAgent): string {
   return `${agent.workspaceId}\n${agentDisconnectIdentity(agent.grantId, agent.connectionId)}`;
 }
 
-function addDisconnectedAgent(current: ReadonlySet<string>, agent: DisconnectedLinkAgent): ReadonlySet<string> {
+function addDisconnectedAgent(
+  current: ReadonlySet<string>,
+  agent: DisconnectedLinkAgent,
+): ReadonlySet<string> {
   const key = disconnectedAgentKey(agent);
   return current.has(key) ? current : new Set(current).add(key);
 }
@@ -94,7 +97,13 @@ export function useShareRemovalNotices(input: {
 }): ShareRemovalNotices {
   const workspaceIdRef = useRef(input.workspaceId);
   workspaceIdRef.current = input.workspaceId;
-  const { showSuccessNotice, reportShellFailure, clearIdentity, onSharesChanged, onAgentDisconnected } = input;
+  const {
+    showSuccessNotice,
+    reportShellFailure,
+    clearIdentity,
+    onSharesChanged,
+    onAgentDisconnected,
+  } = input;
   const removed = useCallback<ReportShareRemoval>(
     (removal) => {
       // A switch clears the shell's list, so an answer for the workspace this
@@ -155,9 +164,13 @@ export function useShareRemovalNotices(input: {
   const agentDisconnected = useCallback(
     (agent: DisconnectedLinkAgent) => {
       onAgentDisconnected?.(agent);
-      if (workspaceIdRef.current === agent.workspaceId) clearIdentity(agentDisconnectIdentity(agent.grantId, agent.connectionId));
+      if (workspaceIdRef.current === agent.workspaceId)
+        clearIdentity(agentDisconnectIdentity(agent.grantId, agent.connectionId));
     },
     [clearIdentity, onAgentDisconnected],
   );
-  return useMemo(() => ({ removed, failed, agentDisconnected }), [removed, failed, agentDisconnected]);
+  return useMemo(
+    () => ({ removed, failed, agentDisconnected }),
+    [removed, failed, agentDisconnected],
+  );
 }

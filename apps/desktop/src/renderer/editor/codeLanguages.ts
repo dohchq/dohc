@@ -21,8 +21,5 @@ export const CODE_LANGUAGE_OPTIONS = [
 ] as const;
 
 export function cleanCodeLanguage(value: string): string {
-  return (value.trim().match(/^[A-Za-z0-9_+#.-]{0,48}/)?.[0] ?? "").slice(
-    0,
-    48,
-  );
+  return (value.trim().match(/^[A-Za-z0-9_+#.-]{0,48}/)?.[0] ?? "").slice(0, 48);
 }

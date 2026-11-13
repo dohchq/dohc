@@ -1,9 +1,5 @@
 import { type Page, type Request, type Response } from "@playwright/test";
-import {
-  expect,
-  seedShare,
-  test,
-} from "./harness";
+import { expect, seedShare, test } from "./harness";
 
 const EXECUTION_MARKER = "ISO5WORKER_EXECUTED_76b91e4a";
 const EXECUTION_SENTINEL = "__dohcIso5WorkerExecutionSentinel_76b91e4a";
@@ -19,27 +15,29 @@ interface RegistrationSnapshot {
 
 function hostileWorker(probeUrl: string): Uint8Array {
   const installProbeUrl = `${probeUrl}/iso5worker-install?marker=76b91e4a`;
-  return new TextEncoder().encode([
-    `const EXECUTION_MARKER = ${JSON.stringify(EXECUTION_MARKER)};`,
-    `const INSTALL_PROBE_URL = ${JSON.stringify(installProbeUrl)};`,
-    `const FETCH_PROBE_PATH = ${JSON.stringify(FETCH_PROBE_PATH)};`,
-    "async function notifyClients(phase) {",
-    '  const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });',
-    "  for (const client of windows) client.postMessage({ marker: EXECUTION_MARKER, phase });",
-    "}",
-    'self.addEventListener("install", (event) => {',
-    "  void fetch(INSTALL_PROBE_URL).catch(() => undefined);",
-    '  event.waitUntil(Promise.all([self.skipWaiting(), notifyClients("install")]));',
-    "});",
-    'self.addEventListener("activate", (event) => {',
-    '  event.waitUntil(Promise.all([self.clients.claim(), notifyClients("activate")]));',
-    "});",
-    'self.addEventListener("fetch", (event) => {',
-    "  if (new URL(event.request.url).pathname === FETCH_PROBE_PATH) {",
-    '    event.respondWith(new Response(EXECUTION_MARKER, { headers: { "content-type": "text/plain" } }));',
-    "  }",
-    "});",
-  ].join("\n"));
+  return new TextEncoder().encode(
+    [
+      `const EXECUTION_MARKER = ${JSON.stringify(EXECUTION_MARKER)};`,
+      `const INSTALL_PROBE_URL = ${JSON.stringify(installProbeUrl)};`,
+      `const FETCH_PROBE_PATH = ${JSON.stringify(FETCH_PROBE_PATH)};`,
+      "async function notifyClients(phase) {",
+      '  const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });',
+      "  for (const client of windows) client.postMessage({ marker: EXECUTION_MARKER, phase });",
+      "}",
+      'self.addEventListener("install", (event) => {',
+      "  void fetch(INSTALL_PROBE_URL).catch(() => undefined);",
+      '  event.waitUntil(Promise.all([self.skipWaiting(), notifyClients("install")]));',
+      "});",
+      'self.addEventListener("activate", (event) => {',
+      '  event.waitUntil(Promise.all([self.clients.claim(), notifyClients("activate")]));',
+      "});",
+      'self.addEventListener("fetch", (event) => {',
+      "  if (new URL(event.request.url).pathname === FETCH_PROBE_PATH) {",
+      '    event.respondWith(new Response(EXECUTION_MARKER, { headers: { "content-type": "text/plain" } }));',
+      "  }",
+      "});",
+    ].join("\n"),
+  );
 }
 
 function registrationSnapshots(page: Page): Promise<RegistrationSnapshot[]> {
@@ -59,10 +57,12 @@ function matchesWorker(
   workerScriptUrl: string,
   workerScopeUrl: string,
 ): boolean {
-  return registration.scope === workerScopeUrl ||
+  return (
+    registration.scope === workerScopeUrl ||
     registration.activeScriptUrl === workerScriptUrl ||
     registration.installingScriptUrl === workerScriptUrl ||
-    registration.waitingScriptUrl === workerScriptUrl;
+    registration.waitingScriptUrl === workerScriptUrl
+  );
 }
 
 test("keeps a shared JavaScript file from becoming a service worker", async ({
@@ -140,7 +140,9 @@ test("keeps a shared JavaScript file from becoming a service worker", async ({
     );
     await expect(page.locator("article.markdown, img.preview-image")).toHaveCount(0);
     await expect(
-      page.locator(`script[src*="${workerFile.blobSha256}"], link[href*="${workerFile.blobSha256}"]`),
+      page.locator(
+        `script[src*="${workerFile.blobSha256}"], link[href*="${workerFile.blobSha256}"]`,
+      ),
     ).toHaveCount(0);
     expect(await page.content()).not.toContain(EXECUTION_MARKER);
     expect(observedWorkerRequests).toEqual([]);
@@ -183,11 +185,12 @@ test("keeps a shared JavaScript file from becoming a service worker", async ({
 
     const registrations = await registrationSnapshots(page);
     const matchingRegistrations = registrations.filter((registration) =>
-      matchesWorker(registration, workerScriptUrl!, workerScopeUrl!)
+      matchesWorker(registration, workerScriptUrl!, workerScopeUrl!),
     );
     expect(matchingRegistrations).toHaveLength(0);
-    expect(await page.evaluate((sentinel) => Reflect.get(window, sentinel), EXECUTION_SENTINEL))
-      .toBe(SENTINEL_BASELINE);
+    expect(
+      await page.evaluate((sentinel) => Reflect.get(window, sentinel), EXECUTION_SENTINEL),
+    ).toBe(SENTINEL_BASELINE);
     expect(probe.requests).toEqual([]);
     expect(workerResponse.headers()["content-type"]).toBe("application/octet-stream");
     expect(workerResponse.headers()["content-disposition"]).toBe("attachment");

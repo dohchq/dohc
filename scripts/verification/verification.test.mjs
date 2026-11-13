@@ -1,12 +1,37 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import childProcess, { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { buildEnvironment, directoryFingerprint, engineArtifactMatches, hashFile, repairOwnedEngineExecutable, sourceFingerprint } from "./build.mjs";
-import { changedFiles, desktopProofCommand, desktopProofTags, postgres, readSelfHostNativeProof } from "./verify.mjs";
+import {
+  buildEnvironment,
+  directoryFingerprint,
+  engineArtifactMatches,
+  hashFile,
+  repairOwnedEngineExecutable,
+  sourceFingerprint,
+} from "./build.mjs";
+import {
+  changedFiles,
+  desktopProofCommand,
+  desktopProofTags,
+  postgres,
+  readSelfHostNativeProof,
+} from "./verify.mjs";
 import { selectedGates } from "./selection.mjs";
 import { repoRoot, run } from "./process.mjs";
 import { requireE2eEngine } from "../../apps/desktop/scripts/require-e2e-engine.mjs";
@@ -16,101 +41,214 @@ import { copyFlakyFixture } from "./flaky-fixture.mjs";
 
 // Native tests include these files from outside crates; the daemon never does.
 const nativeTestFixtures = [
-  "packages/excalidraw-scene/fixtures/canonical-json.json", "packages/live-session-contract/src/liveObjectBinding.vectors.json",
-  "packages/live-session-contract/vectors/live-update-admission-vectors.json", "packages/security-contract/vectors/share-grant-vectors.json",
-  "packages/workspace-contracts/src/relayValues.ts", "packages/workspace-fs/text-media-cases.json",
-  "services/sync-relay/relay-error-codes.json", "tools/rust-engine-program/capture-fixtures.json", "tools/rust-engine-program/capture-goldens.json",
-  "tools/rust-engine-program/ydoc-replay-fixtures.json", "tools/rust-engine-program/ydoc-replay-goldens.json",
+  "packages/excalidraw-scene/fixtures/canonical-json.json",
+  "packages/live-session-contract/src/liveObjectBinding.vectors.json",
+  "packages/live-session-contract/vectors/live-update-admission-vectors.json",
+  "packages/security-contract/vectors/share-grant-vectors.json",
+  "packages/workspace-contracts/src/relayValues.ts",
+  "packages/workspace-fs/text-media-cases.json",
+  "services/sync-relay/relay-error-codes.json",
+  "tools/rust-engine-program/capture-fixtures.json",
+  "tools/rust-engine-program/capture-goldens.json",
+  "tools/rust-engine-program/ydoc-replay-fixtures.json",
+  "tools/rust-engine-program/ydoc-replay-goldens.json",
 ];
 
 function withFixedCompilerIdentity(action) {
   const original = childProcess.execFileSync;
-  childProcess.execFileSync = (command, ...args) => command === "rustc" ? Buffer.from("fixture rustc") : original(command, ...args);
+  childProcess.execFileSync = (command, ...args) =>
+    command === "rustc" ? Buffer.from("fixture rustc") : original(command, ...args);
   syncBuiltinESMExports();
-  try { return action(); }
-  finally { childProcess.execFileSync = original; syncBuiltinESMExports(); }
+  try {
+    return action();
+  } finally {
+    childProcess.execFileSync = original;
+    syncBuiltinESMExports();
+  }
 }
 
 test("desktop proof gets an isolated display only on headless Linux", () => {
   const args = ["--config", "apps/desktop/playwright.config.ts", "--grep", "@verification-smoke"];
   const direct = [process.execPath, ["apps/desktop/scripts/run-playwright.mjs", ...args]];
-  assert.deepEqual(desktopProofCommand(args, {platform: "linux", env: {}}), ["xvfb-run", ["-a", direct[0], ...direct[1]]]);
-  for (const platform of ["win32", "darwin"]) assert.deepEqual(desktopProofCommand(args, {platform, env: {}}), direct);
-  assert.deepEqual(desktopProofCommand(args, {platform: "linux", env: {DISPLAY: ":99"}}), direct);
-  assert.deepEqual(desktopProofCommand(args, {platform: "linux", env: {WAYLAND_DISPLAY: "wayland-0"}}), direct);
+  assert.deepEqual(desktopProofCommand(args, { platform: "linux", env: {} }), [
+    "xvfb-run",
+    ["-a", direct[0], ...direct[1]],
+  ]);
+  for (const platform of ["win32", "darwin"])
+    assert.deepEqual(desktopProofCommand(args, { platform, env: {} }), direct);
+  assert.deepEqual(
+    desktopProofCommand(args, { platform: "linux", env: { DISPLAY: ":99" } }),
+    direct,
+  );
+  assert.deepEqual(
+    desktopProofCommand(args, { platform: "linux", env: { WAYLAND_DISPLAY: "wayland-0" } }),
+    direct,
+  );
 });
 
 test("desktop proofs require each restart proof, smoke, onboarding, the agent sign-in, the owner open and the New page Edit link everywhere and the pixel baseline on Windows", () => {
-  const restart = ["@restart-durability-idle-external", "@restart-durability-overlapping-typing", "@restart-durability-capture-before-reopen", "@restart-durability-person-agent"];
-  const everywhere = ["@verification-smoke", ...restart, "@self-host-onboarding", "@share-link-agent-sign-in", "@live-owner-open", "@new-page-edit-link"];
-  assert.deepEqual(desktopProofTags({platform: "win32"}), {
+  const restart = [
+    "@restart-durability-idle-external",
+    "@restart-durability-overlapping-typing",
+    "@restart-durability-capture-before-reopen",
+    "@restart-durability-person-agent",
+  ];
+  const everywhere = [
+    "@verification-smoke",
+    ...restart,
+    "@self-host-onboarding",
+    "@share-link-agent-sign-in",
+    "@live-owner-open",
+    "@new-page-edit-link",
+  ];
+  assert.deepEqual(desktopProofTags({ platform: "win32" }), {
     selected: [...everywhere, "@states-page"],
     required: [...everywhere, "@states-baselines"],
   });
   for (const platform of ["linux", "darwin"]) {
-    assert.deepEqual(desktopProofTags({platform}), { selected: everywhere, required: everywhere });
+    assert.deepEqual(desktopProofTags({ platform }), {
+      selected: everywhere,
+      required: everywhere,
+    });
   }
 });
 
 test("native proof evidence rejects skips, wrong binaries, and incomplete delivery", () => {
   const output = mkdtempSync(join(tmpdir(), "dohc-native-proof-verdict-"));
-  const executable = join(output, "engine"), sha256 = "a".repeat(64), path = join(output, "self-host-live-fixture");
+  const executable = join(output, "engine"),
+    sha256 = "a".repeat(64),
+    path = join(output, "self-host-live-fixture");
   mkdirSync(path);
-  const tests = {success: true, numTotalTests: 1, numPassedTests: 1, numFailedTests: 0, numPendingTests: 0, numTodoTests: 0};
-  const proof = {verdict: "PASS", executable, sha256, results: {ownerDelivery: {restartPreservedDraft: true, concurrentOwnerAndNamedEditsMerged: true,
-    idleOwnerPulledRecipientEdit: true}, settledAndPublished: {ordinaryOwnerReadMatched: true}}};
+  const tests = {
+    success: true,
+    numTotalTests: 1,
+    numPassedTests: 1,
+    numFailedTests: 0,
+    numPendingTests: 0,
+    numTodoTests: 0,
+  };
+  const proof = {
+    verdict: "PASS",
+    executable,
+    sha256,
+    results: {
+      ownerDelivery: {
+        restartPreservedDraft: true,
+        concurrentOwnerAndNamedEditsMerged: true,
+        idleOwnerPulledRecipientEdit: true,
+      },
+      settledAndPublished: { ordinaryOwnerReadMatched: true },
+    },
+  };
   const write = (report = tests, evidence = proof) => {
     writeFileSync(join(output, "vitest.json"), JSON.stringify(report));
     writeFileSync(join(path, "result.json"), JSON.stringify(evidence));
   };
   try {
-    write(); assert.equal(readSelfHostNativeProof(output, executable, sha256).sha256, sha256);
-    write({...tests, numTotalTests: 5, numPassedTests: 5}); assert.equal(readSelfHostNativeProof(output, executable, sha256).tests.passed, 5);
+    write();
+    assert.equal(readSelfHostNativeProof(output, executable, sha256).sha256, sha256);
+    write({ ...tests, numTotalTests: 5, numPassedTests: 5 });
+    assert.equal(readSelfHostNativeProof(output, executable, sha256).tests.passed, 5);
     // Missing or non-integer counters compare equal or slip past `< 1`, so they must fail too.
-    for (const delta of [{numPendingTests: 1}, {numTotalTests: 0, numPassedTests: 0}, {success: false}, {numTodoTests: 1}, {numTotalTests: 5, numPassedTests: 4},
-      {numTotalTests: undefined, numPassedTests: undefined}, {numTotalTests: "5", numPassedTests: "5"}, {numTotalTests: 1.5, numPassedTests: 1.5}]) {
-      write({...tests, ...delta}); assert.throws(() => readSelfHostNativeProof(output, executable, sha256), /mandatory test/);
+    for (const delta of [
+      { numPendingTests: 1 },
+      { numTotalTests: 0, numPassedTests: 0 },
+      { success: false },
+      { numTodoTests: 1 },
+      { numTotalTests: 5, numPassedTests: 4 },
+      { numTotalTests: undefined, numPassedTests: undefined },
+      { numTotalTests: "5", numPassedTests: "5" },
+      { numTotalTests: 1.5, numPassedTests: 1.5 },
+    ]) {
+      write({ ...tests, ...delta });
+      assert.throws(() => readSelfHostNativeProof(output, executable, sha256), /mandatory test/);
     }
-    for (const delta of [{sha256: "b".repeat(64)}, {executable: join(output, "different")}, {results: {}}, {acceptance: "diagnostic only"}]) {
-      write(tests, {...proof, ...delta}); assert.throws(() => readSelfHostNativeProof(output, executable, sha256), /prepared engine/);
+    for (const delta of [
+      { sha256: "b".repeat(64) },
+      { executable: join(output, "different") },
+      { results: {} },
+      { acceptance: "diagnostic only" },
+    ]) {
+      write(tests, { ...proof, ...delta });
+      assert.throws(() => readSelfHostNativeProof(output, executable, sha256), /prepared engine/);
     }
-    write(); rmSync(join(path, "result.json")); assert.throws(() => readSelfHostNativeProof(output, executable, sha256), /ENOENT/);
-  } finally { rmSync(output, {recursive: true, force: true}); }
+    write();
+    rmSync(join(path, "result.json"));
+    assert.throws(() => readSelfHostNativeProof(output, executable, sha256), /ENOENT/);
+  } finally {
+    rmSync(output, { recursive: true, force: true });
+  }
 });
 
-test("Windows setup uses pnpm.cmd and stops after failed or missing installation", { skip: process.platform !== "win32" }, () => {
-  const root = mkdtempSync(join(tmpdir(), "dohc-setup-windows-"));
-  const put = (path, contents) => {
-    mkdirSync(dirname(join(root, path)), { recursive: true });
-    writeFileSync(join(root, path), contents);
-  };
-  try {
-    put("apps/desktop/package.json", "{}");
-    put("tools/rust-engine-program/git-read.mjs", readFileSync(new URL("../../tools/rust-engine-program/git-read.mjs", import.meta.url)));
-    for (const name of ["setup.mjs", "process.mjs", "windows-command.mjs", "windows-job.ps1"]) {
-      mkdirSync(join(root, "scripts/verification"), { recursive: true });
-      copyFileSync(new URL(`./${name}`, import.meta.url), join(root, "scripts/verification", name));
+test(
+  "Windows setup uses pnpm.cmd and stops after failed or missing installation",
+  { skip: process.platform !== "win32" },
+  () => {
+    const root = mkdtempSync(join(tmpdir(), "dohc-setup-windows-"));
+    const put = (path, contents) => {
+      mkdirSync(dirname(join(root, path)), { recursive: true });
+      writeFileSync(join(root, path), contents);
+    };
+    try {
+      put("apps/desktop/package.json", "{}");
+      put(
+        "tools/rust-engine-program/git-read.mjs",
+        readFileSync(new URL("../../tools/rust-engine-program/git-read.mjs", import.meta.url)),
+      );
+      for (const name of ["setup.mjs", "process.mjs", "windows-command.mjs", "windows-job.ps1"]) {
+        mkdirSync(join(root, "scripts/verification"), { recursive: true });
+        copyFileSync(
+          new URL(`./${name}`, import.meta.url),
+          join(root, "scripts/verification", name),
+        );
+      }
+      put(
+        "apps/desktop/scripts/ensure-electron-installed.mjs",
+        "import {writeFileSync} from 'node:fs';writeFileSync('electron-ran', 'yes');",
+      );
+      put(
+        "scripts/verification/doctor.mjs",
+        "import {writeFileSync} from 'node:fs';writeFileSync('doctor-ran', 'yes');",
+      );
+      put("bin/pnpm.ps1", "throw 'Setup must use the command shim, not the PowerShell shim.'");
+      const pwsh = execFileSync("where.exe", ["pwsh.exe"], { encoding: "utf8" })
+        .trim()
+        .split(/\r?\n/)[0];
+      const env = { ...process.env };
+      for (const key of Object.keys(env)) if (key.toLowerCase() === "path") delete env[key];
+      env.PATH = [
+        join(root, "bin"),
+        dirname(pwsh),
+        join(process.env.SystemRoot, "System32"),
+        join(process.env.SystemRoot, "System32/WindowsPowerShell/v1.0"),
+      ].join(";");
+      for (const exitCode of [0, 23, null]) {
+        for (const path of ["electron-ran", "doctor-ran", "install-args", "bin/pnpm.cmd"])
+          rmSync(join(root, path), { force: true });
+        if (exitCode !== null)
+          put("bin/pnpm.cmd", `@echo off\r\necho %* > install-args\r\nexit /b ${exitCode}\r\n`);
+        const result = spawnSync(process.execPath, ["scripts/verification/setup.mjs"], {
+          cwd: root,
+          env,
+          encoding: "utf8",
+          timeout: 30_000,
+        });
+        assert.equal(result.error, undefined);
+        assert.equal(result.status, exitCode === 0 ? 0 : 1, result.stdout + result.stderr);
+        assert.equal(existsSync(join(root, "electron-ran")), exitCode === 0);
+        assert.equal(existsSync(join(root, "doctor-ran")), exitCode === 0);
+        if (exitCode !== null)
+          assert.equal(
+            readFileSync(join(root, "install-args"), "utf8").trim(),
+            "install --frozen-lockfile --config.confirm-modules-purge=false",
+          );
+        if (exitCode === 23) assert.match(result.stderr, /failed \(23\)/);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
-    put("apps/desktop/scripts/ensure-electron-installed.mjs", "import {writeFileSync} from 'node:fs';writeFileSync('electron-ran', 'yes');");
-    put("scripts/verification/doctor.mjs", "import {writeFileSync} from 'node:fs';writeFileSync('doctor-ran', 'yes');");
-    put("bin/pnpm.ps1", "throw 'Setup must use the command shim, not the PowerShell shim.'");
-    const pwsh = execFileSync("where.exe", ["pwsh.exe"], { encoding: "utf8" }).trim().split(/\r?\n/)[0];
-    const env = { ...process.env };
-    for (const key of Object.keys(env)) if (key.toLowerCase() === "path") delete env[key];
-    env.PATH = [join(root, "bin"), dirname(pwsh), join(process.env.SystemRoot, "System32"), join(process.env.SystemRoot, "System32/WindowsPowerShell/v1.0")].join(";");
-    for (const exitCode of [0, 23, null]) {
-      for (const path of ["electron-ran", "doctor-ran", "install-args", "bin/pnpm.cmd"]) rmSync(join(root, path), { force: true });
-      if (exitCode !== null) put("bin/pnpm.cmd", `@echo off\r\necho %* > install-args\r\nexit /b ${exitCode}\r\n`);
-      const result = spawnSync(process.execPath, ["scripts/verification/setup.mjs"], { cwd: root, env, encoding: "utf8", timeout: 30_000 });
-      assert.equal(result.error, undefined);
-      assert.equal(result.status, exitCode === 0 ? 0 : 1, result.stdout + result.stderr);
-      assert.equal(existsSync(join(root, "electron-ran")), exitCode === 0);
-      assert.equal(existsSync(join(root, "doctor-ran")), exitCode === 0);
-      if (exitCode !== null) assert.equal(readFileSync(join(root, "install-args"), "utf8").trim(), "install --frozen-lockfile --config.confirm-modules-purge=false");
-      if (exitCode === 23) assert.match(result.stderr, /failed \(23\)/);
-    }
-  } finally { rmSync(root, { recursive: true, force: true }); }
-});
+  },
+);
 
 test("doctor requires a disk measurement only when a build budget is configured", () => {
   const root = mkdtempSync(join(tmpdir(), "dohc-doctor-disk-"));
@@ -122,15 +260,30 @@ test("doctor requires a disk measurement only when a build budget is configured"
     put("package.json", '{"type":"module","engines":{"pnpm":"11.20.0"}}');
     put("apps/desktop/package.json", "{}");
     put("scripts/verification/build.mjs", "export const preparedStatus=()=>true;");
-    put("scripts/verification/process.mjs", "import {resolve} from 'node:path';export const repoRoot=resolve(import.meta.dirname,'../..');export const git=args=>args[0]==='rev-parse'?'fixture-commit':'';");
+    put(
+      "scripts/verification/process.mjs",
+      "import {resolve} from 'node:path';export const repoRoot=resolve(import.meta.dirname,'../..');export const git=args=>args[0]==='rev-parse'?'fixture-commit':'';",
+    );
     put("node_modules/pnpm/index.js", "exports.version='11.20.0';");
-    for (const name of ["electron", "playwright"]) put(`node_modules/${name}/package.json`, '{"version":"fixture"}');
+    for (const name of ["electron", "playwright"])
+      put(`node_modules/${name}/package.json`, '{"version":"fixture"}');
     put("node_modules/electron/path.txt", "fixture-runtime");
     put("node_modules/electron/dist/fixture-runtime", "fixture");
-    copyFileSync(new URL("./doctor.mjs", import.meta.url), join(root, "scripts/verification/doctor.mjs"));
+    copyFileSync(
+      new URL("./doctor.mjs", import.meta.url),
+      join(root, "scripts/verification/doctor.mjs"),
+    );
     mkdirSync(join(root, "tools/rust-engine-program"), { recursive: true });
-    copyFileSync(new URL("../../tools/rust-engine-program/build-slot.mjs", import.meta.url), join(root, "tools/rust-engine-program/build-slot.mjs"));
-    const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+    copyFileSync(
+      new URL("../../tools/rust-engine-program/build-slot.mjs", import.meta.url),
+      join(root, "tools/rust-engine-program/build-slot.mjs"),
+    );
+    const result = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `
       import assert from 'node:assert/strict';
       import fs from 'node:fs';
       import cp from 'node:child_process';
@@ -163,17 +316,27 @@ test("doctor requires a disk measurement only when a build budget is configured"
       const selective=doctor({engine:false,desktop:false,browser:false});
       assert.ok(selective.checks.every(check=>check.state!=='FAIL'));
       assert.ok(!selective.checks.some(check=>['rustc','cargo','electron','playwright','engine build','desktop build'].includes(check.name)));
-    `], { cwd: root, encoding: "utf8", timeout: 20_000 });
+    `,
+      ],
+      { cwd: root, encoding: "utf8", timeout: 20_000 },
+    );
     assert.equal(result.error, undefined);
     assert.equal(result.status, 0, result.stderr);
-  } finally { rmSync(root, { recursive: true, force: true }); }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("engine-only readiness validates the native artifact without requiring a desktop build", () => {
   const root = mkdtempSync(join(tmpdir(), "dohc-engine-only-ready-"));
   try {
     createPrepareFixture(root, new URL("./build.mjs", import.meta.url));
-    const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+    const result = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `
       import assert from 'node:assert/strict';
       import cp from 'node:child_process';
       import {writeFileSync,copyFileSync,mkdirSync,linkSync,rmSync} from 'node:fs';
@@ -199,18 +362,29 @@ test("engine-only readiness validates the native artifact without requiring a de
       rmSync(stagedEnginePath);
       linkSync(enginePath,stagedEnginePath);
       assert.throws(()=>assertIndependentStagedEngine(),/independent staged engine copy/);
-    `], {cwd:root,encoding:"utf8",timeout:20_000});
+    `,
+      ],
+      { cwd: root, encoding: "utf8", timeout: 20_000 },
+    );
     assert.equal(result.error, undefined);
     assert.equal(result.status, 0, result.stderr);
-  } finally { rmSync(root,{recursive:true,force:true}); }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
-for (const [signal, status] of [["SIGINT", 130], ["SIGTERM", 143]]) {
+for (const [signal, status] of [
+  ["SIGINT", 130],
+  ["SIGTERM", 143],
+]) {
   test(`queued preparation ${signal} removes its lock without touching occupied slots`, () => {
     const root = mkdtempSync(join(tmpdir(), "dohc-prepare-queue-"));
     try {
       createPrepareFixture(root, new URL("./build.mjs", import.meta.url));
-      copyFileSync(new URL("../../tools/rust-engine-program/build-slot.mjs", import.meta.url), join(root, "tools/rust-engine-program/build-slot.mjs"));
+      copyFileSync(
+        new URL("../../tools/rust-engine-program/build-slot.mjs", import.meta.url),
+        join(root, "tools/rust-engine-program/build-slot.mjs"),
+      );
       const slots = join(root, ".dohc-dev/slots");
       const owner = JSON.stringify({ pid: process.pid, start: new Date().toISOString() });
       for (let index = 1; index <= 4; index++) {
@@ -218,7 +392,12 @@ for (const [signal, status] of [["SIGINT", 130], ["SIGTERM", 143]]) {
         mkdirSync(slot, { recursive: true });
         writeFileSync(join(slot, "owner.json"), owner);
       }
-      const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+      const result = spawnSync(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          `
         import cp from 'node:child_process';
         import {syncBuiltinESMExports} from 'node:module';
         const exec=cp.execFileSync;
@@ -239,18 +418,37 @@ for (const [signal, status] of [["SIGINT", 130], ["SIGTERM", 143]]) {
         };
         try { await (await import('./scripts/verification/build.mjs')).prepare(); }
         catch (error) { console.error(error.message); }
-      `], { cwd: root, encoding: "utf8", timeout: 20_000,
-        env: { ...process.env, DOHC_BUILD_SLOT_ROOT: slots, DOHC_GATE_DISK_FLOOR_GB: "0" } });
+      `,
+        ],
+        {
+          cwd: root,
+          encoding: "utf8",
+          timeout: 20_000,
+          env: { ...process.env, DOHC_BUILD_SLOT_ROOT: slots, DOHC_GATE_DISK_FLOOR_GB: "0" },
+        },
+      );
       assert.equal(result.error, undefined);
       assert.match(result.stdout, /waiting for a build slot:/);
-      assert.equal(existsSync(join(root, ".dohc-dev/verification/build.json.lock")), false, result.stderr);
+      assert.equal(
+        existsSync(join(root, ".dohc-dev/verification/build.json.lock")),
+        false,
+        result.stderr,
+      );
       assert.equal(result.status, status, result.stderr);
-      const calls = readFileSync(join(root, ".dohc-dev/calls.jsonl"), "utf8").trim().split(/\r?\n/).map(JSON.parse);
-      assert.deepEqual(calls.map(({ command }) => command), ["pnpm"]);
+      const calls = readFileSync(join(root, ".dohc-dev/calls.jsonl"), "utf8")
+        .trim()
+        .split(/\r?\n/)
+        .map(JSON.parse);
+      assert.deepEqual(
+        calls.map(({ command }) => command),
+        ["pnpm"],
+      );
       for (let index = 1; index <= 4; index++) {
         assert.equal(readFileSync(join(slots, `build-slot-${index}`, "owner.json"), "utf8"), owner);
       }
-    } finally { rmSync(root, { recursive: true, force: true }); }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 }
 
@@ -258,42 +456,61 @@ test("command text decodes UTF-8 across pipe chunks while retaining raw log byte
   const root = mkdtempSync(join(tmpdir(), "dohc-utf8-pipes-"));
   try {
     const log = join(root, "output.log");
-    const result = await run(process.execPath, ["-e", `process.stdout.write(JSON.stringify({path:'雪/😀'}));process.stderr.write('é診断');`], {
-      log, quietStdout: true, timeoutMs: 20_000,
-      onSpawn: (child) => {
-        for (const stream of [child.stdout, child.stderr]) {
-          const emit = stream.emit;
-          stream.emit = function (event, ...args) {
-            if (event !== "data") return emit.call(this, event, ...args);
-            for (const byte of args[0]) emit.call(this, "data", Buffer.from([byte]));
-            return true;
-          };
-        }
+    const result = await run(
+      process.execPath,
+      ["-e", `process.stdout.write(JSON.stringify({path:'雪/😀'}));process.stderr.write('é診断');`],
+      {
+        log,
+        quietStdout: true,
+        timeoutMs: 20_000,
+        onSpawn: (child) => {
+          for (const stream of [child.stdout, child.stderr]) {
+            const emit = stream.emit;
+            stream.emit = function (event, ...args) {
+              if (event !== "data") return emit.call(this, event, ...args);
+              for (const byte of args[0]) emit.call(this, "data", Buffer.from([byte]));
+              return true;
+            };
+          }
+        },
       },
-    });
+    );
     assert.deepEqual(JSON.parse(result.stdout), { path: "雪/😀" });
     assert.equal(result.stderr, "é診断");
     const bytes = readFileSync(log);
     assert.equal(bytes.includes(Buffer.from(result.stdout)), true);
     assert.equal(bytes.includes(Buffer.from(result.stderr)), true);
     assert.equal(bytes.includes(Buffer.from("�")), false);
-  } finally { rmSync(root, { recursive: true, force: true }); }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("command decoders flush incomplete final UTF-8 without altering log bytes", async () => {
   const root = mkdtempSync(join(tmpdir(), "dohc-utf8-flush-"));
   try {
     const log = join(root, "output.log");
-    const result = await run(process.execPath, ["-e", "process.stdout.write(Buffer.from([0xe2,0x82]));process.stderr.write(Buffer.from([0xc3]));"], {
-      log, quietStdout: true, timeoutMs: 20_000,
-    });
+    const result = await run(
+      process.execPath,
+      [
+        "-e",
+        "process.stdout.write(Buffer.from([0xe2,0x82]));process.stderr.write(Buffer.from([0xc3]));",
+      ],
+      {
+        log,
+        quietStdout: true,
+        timeoutMs: 20_000,
+      },
+    );
     assert.equal(result.stdout, "�");
     assert.equal(result.stderr, "�");
     const bytes = readFileSync(log);
     assert.equal(bytes.length, 3);
     assert.equal(bytes.includes(Buffer.from([0xe2, 0x82])), true);
     assert.equal(bytes.includes(0xc3), true);
-  } finally { rmSync(root, { recursive: true, force: true }); }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("debug retains evidence when the app or child closes during startup", () => {
@@ -302,7 +519,12 @@ test("debug retains evidence when the app or child closes during startup", () =>
     assert.equal(result.error, undefined);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /Evidence retained at/);
-    assert.deepEqual(result.files.sort(), ["desktop.jsonl", "instance.json", "last-screen.png", "trace.zip"]);
+    assert.deepEqual(result.files.sort(), [
+      "desktop.jsonl",
+      "instance.json",
+      "last-screen.png",
+      "trace.zip",
+    ]);
   }
 });
 
@@ -311,7 +533,10 @@ test("standalone preparation installs frozen dependencies before building, seali
   try {
     const invoke = createPrepareFixture(root, new URL("./build.mjs", import.meta.url));
     mkdirSync(join(root, "apps/desktop/resources/cli-bin"), { recursive: true });
-    for (const name of ["dohc", "dohc-mcp"]) writeFileSync(join(root, "apps/desktop/resources/cli-bin", name), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    for (const name of ["dohc", "dohc-mcp"])
+      writeFileSync(join(root, "apps/desktop/resources/cli-bin", name), "#!/bin/sh\nexit 0\n", {
+        mode: 0o755,
+      });
     const output = join(root, ".dohc-dev/verification");
     mkdirSync(output, { recursive: true });
     writeFileSync(join(output, "install.log"), "verifier install output");
@@ -319,11 +544,18 @@ test("standalone preparation installs frozen dependencies before building, seali
     assert.equal(first.error, undefined);
     assert.equal(first.status, 0, first.stderr);
     assert.equal(readFileSync(join(output, "install.log"), "utf8"), "verifier install output");
-    assert.equal(readFileSync(join(output, "prepare-install.log"), "utf8"), "preparation install output");
+    assert.equal(
+      readFileSync(join(output, "prepare-install.log"), "utf8"),
+      "preparation install output",
+    );
     assert.match(first.stdout, /"desktopPrepared":true/);
     assert.equal(readFileSync(join(root, "apps/desktop/dist/built.txt"), "utf8"), "new-lock");
-    const calls = () => readFileSync(join(root, ".dohc-dev/calls.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
-    assert.deepEqual(calls()[0], { command: "pnpm", args: ["install", "--frozen-lockfile", "--config.confirm-modules-purge=false"] });
+    const calls = () =>
+      readFileSync(join(root, ".dohc-dev/calls.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
+    assert.deepEqual(calls()[0], {
+      command: "pnpm",
+      args: ["install", "--frozen-lockfile", "--config.confirm-modules-purge=false"],
+    });
     const initialCalls = calls().length;
     writeFileSync(join(root, "node_modules/installed.txt"), "stale-again");
     const reused = invoke();
@@ -331,11 +563,18 @@ test("standalone preparation installs frozen dependencies before building, seali
     assert.match(reused.stdout, /reuse desktop/);
     assert.equal(readFileSync(join(root, "node_modules/installed.txt"), "utf8"), "new-lock");
     assert.equal(calls().length, initialCalls + 1);
-    assert.deepEqual(calls().at(-1), { command: "pnpm", args: ["install", "--frozen-lockfile", "--config.confirm-modules-purge=false"] });
+    assert.deepEqual(calls().at(-1), {
+      command: "pnpm",
+      args: ["install", "--frozen-lockfile", "--config.confirm-modules-purge=false"],
+    });
     const installed = invoke({ install: false });
     assert.equal(installed.status, 0, installed.stderr);
     assert.match(installed.stdout, /reuse desktop/);
-    assert.equal(calls().length, initialCalls + 1, "the canonical verifier can reuse its completed frozen install");
+    assert.equal(
+      calls().length,
+      initialCalls + 1,
+      "the canonical verifier can reuse its completed frozen install",
+    );
     rmSync(join(root, ".dohc-dev/verification/build.json"));
     const failed = invoke({ failInstall: true });
     assert.notEqual(failed.status, 0);
@@ -343,7 +582,9 @@ test("standalone preparation installs frozen dependencies before building, seali
     assert.equal(calls().length, initialCalls + 2);
     assert.equal(existsSync(join(root, ".dohc-dev/verification/build.json")), false);
     assert.equal(existsSync(join(root, ".dohc-dev/verification/build.json.lock")), false);
-  } finally { rmSync(root, { recursive: true, force: true }); }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("preparation builds and reuses the share viewer, rebuilding missing or stale assets", () => {
@@ -351,10 +592,17 @@ test("preparation builds and reuses the share viewer, rebuilding missing or stal
   try {
     const invoke = createPrepareFixture(root, new URL("./build.mjs", import.meta.url));
     mkdirSync(join(root, "apps/desktop/resources/cli-bin"), { recursive: true });
-    for (const name of ["dohc", "dohc-mcp"]) writeFileSync(join(root, "apps/desktop/resources/cli-bin", name), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    for (const name of ["dohc", "dohc-mcp"])
+      writeFileSync(join(root, "apps/desktop/resources/cli-bin", name), "#!/bin/sh\nexit 0\n", {
+        mode: 0o755,
+      });
     const viewer = join(root, "services/share-web/viewer");
-    const calls = () => readFileSync(join(root, ".dohc-dev/calls.jsonl"), "utf8").trim().split("\n").map(JSON.parse)
-      .filter(({ args }) => args[1] === "@dohc/share-web");
+    const calls = () =>
+      readFileSync(join(root, ".dohc-dev/calls.jsonl"), "utf8")
+        .trim()
+        .split("\n")
+        .map(JSON.parse)
+        .filter(({ args }) => args[1] === "@dohc/share-web");
     const prepare = () => {
       const result = invoke();
       assert.equal(result.status, 0, result.stderr);
@@ -375,7 +623,9 @@ test("preparation builds and reuses the share viewer, rebuilding missing or stal
     writeFileSync(join(viewer, "main.ts"), "changed viewer source");
     prepare();
     assert.equal(calls().length, 4, "changed viewer source is rebuilt");
-  } finally { rmSync(root, { recursive: true, force: true }); }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("vendored native edits invalidate preparation and rebuild the engine", () => {
@@ -386,22 +636,31 @@ test("vendored native edits invalidate preparation and rebuild the engine", () =
     const vendor = join(root, "vendor/yrs/src/lib.rs");
     writeFileSync(vendor, "original native source");
     execFileSync("git", ["add", "vendor"], { cwd: root });
-    const run = options => {
+    const run = (options) => {
       const result = invoke(options);
       assert.equal(result.status, 0, result.stderr);
       return JSON.parse(result.stdout.trim().split(/\r?\n/).at(-1));
     };
     const options = { platform: "win32" };
     assert.equal(run(options).enginePrepared, true);
-    const original = JSON.parse(readFileSync(join(root, ".dohc-dev/verification/build.json"), "utf8")).engine.source;
+    const original = JSON.parse(
+      readFileSync(join(root, ".dohc-dev/verification/build.json"), "utf8"),
+    ).engine.source;
     writeFileSync(vendor, "changed native source");
     assert.equal(run({ ...options, statusOnly: true }).enginePrepared, false);
     assert.equal(run(options).enginePrepared, true);
-    const updated = JSON.parse(readFileSync(join(root, ".dohc-dev/verification/build.json"), "utf8")).engine.source;
+    const updated = JSON.parse(
+      readFileSync(join(root, ".dohc-dev/verification/build.json"), "utf8"),
+    ).engine.source;
     assert.notEqual(updated, original);
-    const calls = readFileSync(join(root, ".dohc-dev/calls.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
+    const calls = readFileSync(join(root, ".dohc-dev/calls.jsonl"), "utf8")
+      .trim()
+      .split("\n")
+      .map(JSON.parse);
     assert.equal(calls.filter(({ command }) => command === "cargo").length, 2);
-  } finally { rmSync(root, { recursive: true, force: true }); }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("preparation reuses artifacts across proof edits and rebuilds for production inputs", () => {
@@ -409,8 +668,16 @@ test("preparation reuses artifacts across proof edits and rebuilds for productio
   try {
     createPrepareFixture(root, new URL("./build.mjs", import.meta.url));
     mkdirSync(join(root, "apps/desktop/resources/cli-bin"), { recursive: true });
-    for (const name of ["dohc", "dohc-mcp"]) writeFileSync(join(root, "apps/desktop/resources/cli-bin", name), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-    const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+    for (const name of ["dohc", "dohc-mcp"])
+      writeFileSync(join(root, "apps/desktop/resources/cli-bin", name), "#!/bin/sh\nexit 0\n", {
+        mode: 0o755,
+      });
+    const result = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `
       import assert from 'node:assert/strict';
       import cp from 'node:child_process';
       import {appendFileSync,existsSync,mkdirSync,readFileSync,rmSync,writeFileSync} from 'node:fs';
@@ -530,39 +797,82 @@ test("preparation reuses artifacts across proof edits and rebuilds for productio
       writeFileSync(receiptPath,JSON.stringify(old));
       await expectBuilds('receipt without production identity',['engine','desktop']);
       await expectBuilds('unchanged checkout',[]);
-    `], { cwd: root, encoding: "utf8", timeout: 300_000 });
+    `,
+      ],
+      { cwd: root, encoding: "utf8", timeout: 300_000 },
+    );
     assert.equal(result.error, undefined);
     assert.equal(result.status, 0, result.stderr);
-  } finally { rmSync(root, { recursive: true, force: true }); }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("proof edits during preparation reject full source provenance", () => {
   const root = mkdtempSync(join(tmpdir(), "dohc-prepare-provenance-"));
   try {
-    const invoke = createPrepareFixture(root, new URL("./build.mjs", import.meta.url), { commit: false });
+    const invoke = createPrepareFixture(root, new URL("./build.mjs", import.meta.url), {
+      commit: false,
+    });
     mkdirSync(join(root, "apps/desktop/resources/cli-bin"), { recursive: true });
-    for (const name of ["dohc", "dohc-mcp"]) writeFileSync(join(root, "apps/desktop/resources/cli-bin", name), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    for (const name of ["dohc", "dohc-mcp"])
+      writeFileSync(join(root, "apps/desktop/resources/cli-bin", name), "#!/bin/sh\nexit 0\n", {
+        mode: 0o755,
+      });
     const adapter = join(root, "scripts/verification/process.mjs");
-    writeFileSync(adapter, readFileSync(adapter, "utf8").replace("export async function run(", "async function fixtureRun(") + `
+    writeFileSync(
+      adapter,
+      readFileSync(adapter, "utf8").replace(
+        "export async function run(",
+        "async function fixtureRun(",
+      ) +
+        `
       import {rmSync} from 'node:fs';
       export async function run(command,args,options) {
         const marker=join(repoRoot,'.dohc-dev/edit-during-cargo');
         if(command==='cargo' && existsSync(marker)) { appendFileSync(join(repoRoot,readFileSync(marker,'utf8')),'// changed\\n'); rmSync(marker); }
         return fixtureRun(command,args,options);
       }
-    `);
-    for (const path of ["scripts/verification/verification.test.mjs", "tools/perf-profiling/run-profiles.mjs"]) {
+    `,
+    );
+    for (const path of [
+      "scripts/verification/verification.test.mjs",
+      "tools/perf-profiling/run-profiles.mjs",
+    ]) {
       mkdirSync(dirname(join(root, path)), { recursive: true });
       writeFileSync(join(root, path), "original\n");
     }
     execFileSync("git", ["add", "."], { cwd: root });
-    execFileSync("git", ["-c", "commit.gpgsign=false", "-c", `core.hooksPath=${join(root, "no-hooks")}`,
-      "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "Provenance fixture"], { cwd: root, stdio: "ignore" });
+    execFileSync(
+      "git",
+      [
+        "-c",
+        "commit.gpgsign=false",
+        "-c",
+        `core.hooksPath=${join(root, "no-hooks")}`,
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "commit",
+        "-m",
+        "Provenance fixture",
+      ],
+      { cwd: root, stdio: "ignore" },
+    );
     const receiptPath = join(root, ".dohc-dev/verification/build.json");
     const receipt = () => JSON.parse(readFileSync(receiptPath, "utf8"));
-    const cargoBuilds = () => readFileSync(join(root, ".dohc-dev/calls.jsonl"), "utf8").trim().split(/\r?\n/).map(JSON.parse)
-      .filter(({ command }) => command === "cargo").length;
-    const enginePath = join(root, "target/debug", `dohc-workspace-engine${process.platform === "win32" ? ".exe" : ""}`);
+    const cargoBuilds = () =>
+      readFileSync(join(root, ".dohc-dev/calls.jsonl"), "utf8")
+        .trim()
+        .split(/\r?\n/)
+        .map(JSON.parse)
+        .filter(({ command }) => command === "cargo").length;
+    const enginePath = join(
+      root,
+      "target/debug",
+      `dohc-workspace-engine${process.platform === "win32" ? ".exe" : ""}`,
+    );
     const first = invoke();
     assert.equal(first.status, 0, first.stderr);
     for (const [path, reason] of [
@@ -571,33 +881,57 @@ test("proof edits during preparation reject full source provenance", () => {
       // Only the reused desktop's source changes.
       ["tools/perf-profiling/run-profiles.mjs", /desktop inputs changed during preparation/],
     ]) {
-      const previous = receipt(), builds = cargoBuilds();
+      const previous = receipt(),
+        builds = cargoBuilds();
       writeFileSync(enginePath, "corrupt engine");
       writeFileSync(join(root, ".dohc-dev/edit-during-cargo"), path);
       const failed = invoke();
       assert.notEqual(failed.status, 0, path);
       assert.match(failed.stderr, reason);
       assert.equal(cargoBuilds(), builds + 1, path);
-      assert.deepEqual(receipt().desktop, previous.desktop, `${path} keeps the reused desktop receipt`);
-      if (path.startsWith("scripts/")) assert.deepEqual(receipt().engine, previous.engine, `${path} records no engine receipt`);
+      assert.deepEqual(
+        receipt().desktop,
+        previous.desktop,
+        `${path} keeps the reused desktop receipt`,
+      );
+      if (path.startsWith("scripts/"))
+        assert.deepEqual(receipt().engine, previous.engine, `${path} records no engine receipt`);
       // The proof edit alone leaves the rebuilt artifact reusable.
       const reused = invoke();
       assert.equal(reused.status, 0, reused.stderr);
       assert.match(reused.stdout, /reuse engine[\s\S]*reuse desktop/);
       assert.equal(cargoBuilds(), builds + 1, path);
     }
-  } finally { rmSync(root, { recursive: true, force: true }); }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("prepared desktop checks staged compiler bytes on Windows x64, Apple silicon macOS, and Linux", () => {
-  for (const [platform, arch] of [["win32", "x64"], ["win32", "arm64"], ["darwin", "arm64"], ["darwin", "x64"], ["linux", "x64"], ["linux", "arm64"], ["linux", "arm"]]) {
-    const supported = platform === "win32" ? arch === "x64" : platform === "darwin" ? arch === "arm64" : arch !== "arm";
+  for (const [platform, arch] of [
+    ["win32", "x64"],
+    ["win32", "arm64"],
+    ["darwin", "arm64"],
+    ["darwin", "x64"],
+    ["linux", "x64"],
+    ["linux", "arm64"],
+    ["linux", "arm"],
+  ]) {
+    const supported =
+      platform === "win32"
+        ? arch === "x64"
+        : platform === "darwin"
+          ? arch === "arm64"
+          : arch !== "arm";
     const root = mkdtempSync(join(tmpdir(), "dohc-prepare-compiler-"));
     try {
       const invoke = createPrepareFixture(root, new URL("./build.mjs", import.meta.url));
       mkdirSync(join(root, "apps/desktop/resources/cli-bin"), { recursive: true });
-      for (const name of ["dohc", "dohc-mcp"]) writeFileSync(join(root, "apps/desktop/resources/cli-bin", name), "launcher", { mode: 0o755 });
-      const run = options => {
+      for (const name of ["dohc", "dohc-mcp"])
+        writeFileSync(join(root, "apps/desktop/resources/cli-bin", name), "launcher", {
+          mode: 0o755,
+        });
+      const run = (options) => {
         const result = invoke({ platform, arch, ...options });
         assert.equal(result.status, 0, result.stderr);
         return JSON.parse(result.stdout.trim().split(/\r?\n/).at(-1));
@@ -606,38 +940,68 @@ test("prepared desktop checks staged compiler bytes on Windows x64, Apple silico
       const compiler = join(root, "apps/desktop/resources/app-compiler");
       mkdirSync(compiler, { recursive: true });
       writeFileSync(join(compiler, "built.txt"), "changed compiler");
-      assert.equal(run({ statusOnly: true }).desktopPrepared, !supported, `${platform}/${arch} changed compiler`);
+      assert.equal(
+        run({ statusOnly: true }).desktopPrepared,
+        !supported,
+        `${platform}/${arch} changed compiler`,
+      );
       rmSync(compiler, { recursive: true });
-      assert.equal(run({ statusOnly: true }).desktopPrepared, !supported, `${platform}/${arch} missing compiler`);
+      assert.equal(
+        run({ statusOnly: true }).desktopPrepared,
+        !supported,
+        `${platform}/${arch} missing compiler`,
+      );
       assert.equal(run().desktopPrepared, true);
-      const calls = readFileSync(join(root, ".dohc-dev/calls.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
-      assert.equal(calls.filter(({ command, args }) => command === "pnpm" && args[0] === "--filter" && args[1] === "@dohc/desktop").length, supported ? 2 : 1);
-    } finally { rmSync(root, { recursive: true, force: true }); }
+      const calls = readFileSync(join(root, ".dohc-dev/calls.jsonl"), "utf8")
+        .trim()
+        .split("\n")
+        .map(JSON.parse);
+      assert.equal(
+        calls.filter(
+          ({ command, args }) =>
+            command === "pnpm" && args[0] === "--filter" && args[1] === "@dohc/desktop",
+        ).length,
+        supported ? 2 : 1,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   }
 });
 
-
-
-test("POSIX prepared desktop rejects CLI execute drift and restages unchanged launcher bytes", { skip: process.platform === "win32" }, () => {
-  const root = mkdtempSync(join(tmpdir(), "dohc-cli-mode-"));
-  try {
-    createPrepareFixture(root, new URL("./build.mjs", import.meta.url));
-    const directory = join(root, "apps/desktop/resources/cli-bin");
-    mkdirSync(directory, { recursive: true });
-    for (const name of ["dohc", "dohc-mcp"]) writeFileSync(join(directory, name), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-    // The adapter models build-cli-bin.mjs's explicit chmod on both generated launchers.
-    const adapter = join(root, "scripts/verification/process.mjs");
-    const source = readFileSync(adapter, "utf8");
-    assert.ok(source.includes("export async function run("));
-    writeFileSync(adapter, source.replace("export async function run(", "async function fixtureRun(") + `
+test(
+  "POSIX prepared desktop rejects CLI execute drift and restages unchanged launcher bytes",
+  { skip: process.platform === "win32" },
+  () => {
+    const root = mkdtempSync(join(tmpdir(), "dohc-cli-mode-"));
+    try {
+      createPrepareFixture(root, new URL("./build.mjs", import.meta.url));
+      const directory = join(root, "apps/desktop/resources/cli-bin");
+      mkdirSync(directory, { recursive: true });
+      for (const name of ["dohc", "dohc-mcp"])
+        writeFileSync(join(directory, name), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+      // The adapter models build-cli-bin.mjs's explicit chmod on both generated launchers.
+      const adapter = join(root, "scripts/verification/process.mjs");
+      const source = readFileSync(adapter, "utf8");
+      assert.ok(source.includes("export async function run("));
+      writeFileSync(
+        adapter,
+        source.replace("export async function run(", "async function fixtureRun(") +
+          `
       export async function run(command,args,options) {
         const result=await fixtureRun(command,args,options);
         if(command==='pnpm' && args[0]==='--filter')
           for(const name of ['dohc','dohc-mcp']) chmodSync(join(repoRoot,'apps/desktop/resources/cli-bin',name),0o755);
         return result;
       }
-    `);
-    const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+    `,
+      );
+      const result = spawnSync(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          `
       import assert from 'node:assert/strict';
       import cp from 'node:child_process';
       import {chmodSync,readFileSync} from 'node:fs';
@@ -664,17 +1028,28 @@ test("POSIX prepared desktop rejects CLI execute drift and restages unchanged la
         assert.equal(preparedStatus('desktop'),true);
         assert.equal(JSON.parse(readFileSync(receiptPath,'utf8')).desktop.artifact,receipt.desktop.artifact);
       }
-    `], { cwd: root, encoding: "utf8", timeout: 20_000 });
-    assert.equal(result.error, undefined);
-    assert.equal(result.status, 0, result.stderr);
-  } finally { rmSync(root, { recursive: true, force: true }); }
-});
+    `,
+        ],
+        { cwd: root, encoding: "utf8", timeout: 20_000 },
+      );
+      assert.equal(result.error, undefined);
+      assert.equal(result.status, 0, result.stderr);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
 
 test("engine source identity includes the real compiler identity and rejects compiler drift", () => {
   const root = mkdtempSync(join(tmpdir(), "dohc-toolchain-identity-"));
   try {
     execFileSync("git", ["init"], { cwd: root, stdio: "ignore" });
-    const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+    const result = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `
       import assert from 'node:assert/strict';
       import cp from 'node:child_process';
       import {syncBuiltinESMExports} from 'node:module';
@@ -696,16 +1071,27 @@ test("engine source identity includes the real compiler identity and rejects com
       cp.execFileSync=(command,...args)=>command==='rustc'?compiler:original(command,...args);
       syncBuiltinESMExports();
       assert.equal(sourceFingerprint('engine',root),before);
-    `, root], { encoding: "utf8", timeout: 20_000 });
+    `,
+        root,
+      ],
+      { encoding: "utf8", timeout: 20_000 },
+    );
     assert.equal(result.error, undefined);
     assert.equal(result.status, 0, result.stderr);
-  } finally { rmSync(root, { recursive: true, force: true }); }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("source fingerprints follow the host's environment key casing", () => {
   const root = mkdtempSync(join(tmpdir(), "dohc-env-key-"));
   try {
-    const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+    const result = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `
       import assert from 'node:assert/strict';
       import cp from 'node:child_process';
       import {syncBuiltinESMExports} from 'node:module';
@@ -731,16 +1117,28 @@ test("source fingerprints follow the host's environment key casing", () => {
         process.env[upper]='1';
         assert.notEqual(sourceFingerprint('engine',root,[]),after);
       }
-    `, root], { encoding: "utf8", timeout: 20_000 });
+    `,
+        root,
+      ],
+      { encoding: "utf8", timeout: 20_000 },
+    );
     assert.equal(result.error, undefined);
     assert.equal(result.status, 0, result.stderr);
-  } finally { rmSync(root, { recursive: true, force: true }); }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
-for (const kind of ["engine", "desktop"]) test(`${kind} source identity scopes environment settings to its build and ignores build parallelism`, () => {
-  const root = mkdtempSync(join(tmpdir(), "dohc-env-kind-"));
-  try {
-    const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+for (const kind of ["engine", "desktop"])
+  test(`${kind} source identity scopes environment settings to its build and ignores build parallelism`, () => {
+    const root = mkdtempSync(join(tmpdir(), "dohc-env-kind-"));
+    try {
+      const result = spawnSync(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          `
       import assert from 'node:assert/strict';
       import cp from 'node:child_process';
       import {syncBuiltinESMExports} from 'node:module';
@@ -776,11 +1174,18 @@ for (const kind of ["engine", "desktop"]) test(`${kind} source identity scopes e
           delete process.env[mixed];
         }
       }
-    `, root, kind], { encoding: "utf8", timeout: 30_000 });
-    assert.equal(result.error, undefined);
-    assert.equal(result.status, 0, result.stderr);
-  } finally { rmSync(root, { recursive: true, force: true }); }
-});
+    `,
+          root,
+          kind,
+        ],
+        { encoding: "utf8", timeout: 30_000 },
+      );
+      assert.equal(result.error, undefined);
+      assert.equal(result.status, 0, result.stderr);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 
 test("source identity changes for dirty, untracked, deleted, and ignored build configuration", () => {
   const root = mkdtempSync(join(tmpdir(), "dohc-provenance-"));
@@ -790,13 +1195,19 @@ test("source identity changes for dirty, untracked, deleted, and ignored build c
     mkdirSync(join(root, "apps/desktop"), { recursive: true });
     const source = join(root, "apps/desktop/main.ts");
     writeFileSync(join(root, ".gitignore"), ".env.local\n");
-    writeFileSync(source, "original"); git(["add", "."]);
+    writeFileSync(source, "original");
+    git(["add", "."]);
     const original = sourceFingerprint("desktop", root);
-    writeFileSync(source, "changed"); assert.notEqual(sourceFingerprint("desktop", root), original);
-    writeFileSync(source, "original"); assert.equal(sourceFingerprint("desktop", root), original);
+    writeFileSync(source, "changed");
+    assert.notEqual(sourceFingerprint("desktop", root), original);
+    writeFileSync(source, "original");
+    assert.equal(sourceFingerprint("desktop", root), original);
     const added = join(root, "apps/desktop/extra.ts");
-    writeFileSync(added, "new import"); assert.notEqual(sourceFingerprint("desktop", root), original);
-    rmSync(added); rmSync(source); assert.notEqual(sourceFingerprint("desktop", root), original);
+    writeFileSync(added, "new import");
+    assert.notEqual(sourceFingerprint("desktop", root), original);
+    rmSync(added);
+    rmSync(source);
+    assert.notEqual(sourceFingerprint("desktop", root), original);
     writeFileSync(source, "original");
     writeFileSync(join(root, "apps/desktop/.env.local"), "VITE_FIXTURE=one");
     git(["check-ignore", "apps/desktop/.env.local"]);
@@ -813,7 +1224,9 @@ test("source identity changes for dirty, untracked, deleted, and ignored build c
       if (previousDebug === undefined) delete process.env.VITE_FIXTURE_DEBUG;
       else process.env.VITE_FIXTURE_DEBUG = previousDebug;
     }
-  } finally { rmSync(root, { recursive: true, force: true }); }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 for (const [kind, configurations] of Object.entries({
@@ -822,138 +1235,187 @@ for (const [kind, configurations] of Object.entries({
     [".pnpmfile.cjs", "module.exports = {};\n", "module.exports = { hooks: {} };\n"],
     [".pnpmfile.mjs", "export default {};\n", "export default { hooks: {} };\n"],
     ...[".env", ".env.local", ".env.production", ".env.production.local"].map((name) => [
-      `apps/desktop/${name}`, "VITE_FIXTURE=one\n", "VITE_FIXTURE=two\n",
+      `apps/desktop/${name}`,
+      "VITE_FIXTURE=one\n",
+      "VITE_FIXTURE=two\n",
     ]),
     ...[".env", ".env.local", ".env.production", ".env.production.local"].map((name) => [
-      `services/share-web/viewer/${name}`, "VITE_FIXTURE=one\n", "VITE_FIXTURE=two\n",
+      `services/share-web/viewer/${name}`,
+      "VITE_FIXTURE=one\n",
+      "VITE_FIXTURE=two\n",
     ]),
   ],
   engine: [
     [".cargo/config", "[build]\njobs = 1\n", "[build]\njobs = 2\n"],
     [".cargo/config.toml", "[build]\njobs = 1\n", "[build]\njobs = 2\n"],
   ],
-})) test(`${kind} source identity tracks tool configuration regardless of Git state`, () => withFixedCompilerIdentity(() => {
-  for (const ignored of [false, true]) {
-    const root = mkdtempSync(join(tmpdir(), "dohc-build-config-"));
-    const git = (args) => execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
-    try {
-      git(["init"]);
-      mkdirSync(join(root, ".cargo"));
-      mkdirSync(join(root, "apps/desktop"), { recursive: true });
-      const excludes = join(root, ".git/info/exclude");
-      writeFileSync(excludes, ignored ? configurations.map(([name]) => name).join("\n") + "\n" : "");
-      git(["config", "core.excludesFile", excludes]);
-      for (const [name, first, second] of configurations) {
-        const path = join(root, name);
-        mkdirSync(dirname(path), { recursive: true });
-        const fingerprint = () => sourceFingerprint(kind, root);
-        const absent = fingerprint();
-        writeFileSync(path, first);
-        if (ignored) git(["check-ignore", name]);
-        else assert.equal(git(["ls-files", "--others", "--exclude-standard", "--", name]), name);
-        const created = fingerprint();
-        assert.notEqual(created, absent, `${name} creation (ignored=${ignored})`);
-        writeFileSync(path, second);
-        const edited = fingerprint();
-        assert.notEqual(edited, created, `${name} edit (ignored=${ignored})`);
-        rmSync(path);
-        assert.equal(fingerprint(), absent, `${name} disappearance (ignored=${ignored})`);
+}))
+  test(`${kind} source identity tracks tool configuration regardless of Git state`, () =>
+    withFixedCompilerIdentity(() => {
+      for (const ignored of [false, true]) {
+        const root = mkdtempSync(join(tmpdir(), "dohc-build-config-"));
+        const git = (args) => execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
+        try {
+          git(["init"]);
+          mkdirSync(join(root, ".cargo"));
+          mkdirSync(join(root, "apps/desktop"), { recursive: true });
+          const excludes = join(root, ".git/info/exclude");
+          writeFileSync(
+            excludes,
+            ignored ? configurations.map(([name]) => name).join("\n") + "\n" : "",
+          );
+          git(["config", "core.excludesFile", excludes]);
+          for (const [name, first, second] of configurations) {
+            const path = join(root, name);
+            mkdirSync(dirname(path), { recursive: true });
+            const fingerprint = () => sourceFingerprint(kind, root);
+            const absent = fingerprint();
+            writeFileSync(path, first);
+            if (ignored) git(["check-ignore", name]);
+            else
+              assert.equal(git(["ls-files", "--others", "--exclude-standard", "--", name]), name);
+            const created = fingerprint();
+            assert.notEqual(created, absent, `${name} creation (ignored=${ignored})`);
+            writeFileSync(path, second);
+            const edited = fingerprint();
+            assert.notEqual(edited, created, `${name} edit (ignored=${ignored})`);
+            rmSync(path);
+            assert.equal(fingerprint(), absent, `${name} disappearance (ignored=${ignored})`);
 
-        writeFileSync(path, first);
-        git(["add", "--force", "--", name]);
-        assert.equal(fingerprint(), created, `${name} staged creation (ignored=${ignored})`);
-        writeFileSync(path, second);
-        assert.equal(fingerprint(), edited, `${name} unstaged edit (ignored=${ignored})`);
-        git(["add", "--force", "--", name]);
-        assert.equal(fingerprint(), edited, `${name} staged edit (ignored=${ignored})`);
-        rmSync(path);
-        assert.equal(fingerprint(), absent, `${name} unstaged deletion (ignored=${ignored})`);
-        git(["add", "--update", "--", name]);
-        assert.equal(fingerprint(), absent, `${name} staged deletion (ignored=${ignored})`);
+            writeFileSync(path, first);
+            git(["add", "--force", "--", name]);
+            assert.equal(fingerprint(), created, `${name} staged creation (ignored=${ignored})`);
+            writeFileSync(path, second);
+            assert.equal(fingerprint(), edited, `${name} unstaged edit (ignored=${ignored})`);
+            git(["add", "--force", "--", name]);
+            assert.equal(fingerprint(), edited, `${name} staged edit (ignored=${ignored})`);
+            rmSync(path);
+            assert.equal(fingerprint(), absent, `${name} unstaged deletion (ignored=${ignored})`);
+            git(["add", "--update", "--", name]);
+            assert.equal(fingerprint(), absent, `${name} staged deletion (ignored=${ignored})`);
+          }
+        } finally {
+          rmSync(root, { recursive: true, force: true });
+        }
       }
-    } finally { rmSync(root, { recursive: true, force: true }); }
-  }
-}));
+    }));
 
 test("source identity excludes unused environment files from preparation", () => {
   const root = mkdtempSync(join(tmpdir(), "dohc-env-scope-"));
   const git = (args) => execFileSync("git", args, { cwd: root, stdio: "ignore" });
   const unused = [
-    ".env", ".env.local", ".env.production", ".env.production.local",
-    ".env.self-host", ".env.self-host.example",
-    "apps/desktop/.env.self-host", "apps/desktop/.env.development", "apps/desktop/.env.development.local",
+    ".env",
+    ".env.local",
+    ".env.production",
+    ".env.production.local",
+    ".env.self-host",
+    ".env.self-host.example",
+    "apps/desktop/.env.self-host",
+    "apps/desktop/.env.development",
+    "apps/desktop/.env.development.local",
   ];
   try {
     git(["init"]);
     mkdirSync(join(root, "apps/desktop"), { recursive: true });
     writeFileSync(join(root, ".gitignore"), ".env\n.env.*\n");
     git(["add", ".gitignore"]);
-    const baseline = Object.fromEntries(["engine", "desktop"].map((kind) => [kind, sourceFingerprint(kind, root)]));
+    const baseline = Object.fromEntries(
+      ["engine", "desktop"].map((kind) => [kind, sourceFingerprint(kind, root)]),
+    );
     for (const name of unused) writeFileSync(join(root, name), "VITE_FIXTURE=one\n");
     // The repository's self-host example is tracked; local deployment files are ignored.
     git(["add", "--force", ".env.self-host.example"]);
-    for (const kind of ["engine", "desktop"]) assert.equal(sourceFingerprint(kind, root), baseline[kind], `${kind} unused env creation`);
+    for (const kind of ["engine", "desktop"])
+      assert.equal(sourceFingerprint(kind, root), baseline[kind], `${kind} unused env creation`);
     for (const name of unused) writeFileSync(join(root, name), "VITE_FIXTURE=two\n");
-    for (const kind of ["engine", "desktop"]) assert.equal(sourceFingerprint(kind, root), baseline[kind], `${kind} unused env edit`);
+    for (const kind of ["engine", "desktop"])
+      assert.equal(sourceFingerprint(kind, root), baseline[kind], `${kind} unused env edit`);
     for (const name of unused) rmSync(join(root, name));
-    for (const kind of ["engine", "desktop"]) assert.equal(sourceFingerprint(kind, root), baseline[kind], `${kind} unused env removal`);
+    for (const kind of ["engine", "desktop"])
+      assert.equal(sourceFingerprint(kind, root), baseline[kind], `${kind} unused env removal`);
     for (const name of [".env", ".env.local", ".env.production", ".env.production.local"]) {
       writeFileSync(join(root, "apps/desktop", name), "VITE_FIXTURE=three\n");
     }
-    assert.equal(sourceFingerprint("engine", root), baseline.engine, "Cargo does not load desktop env files");
-    assert.notEqual(sourceFingerprint("desktop", root), baseline.desktop, "desktop production env remains an input");
-  } finally { rmSync(root, { recursive: true, force: true }); }
+    assert.equal(
+      sourceFingerprint("engine", root),
+      baseline.engine,
+      "Cargo does not load desktop env files",
+    );
+    assert.notEqual(
+      sourceFingerprint("desktop", root),
+      baseline.desktop,
+      "desktop production env remains an input",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
-test("engine source identity tracks ancestor and Cargo home configuration outside Git", () => withFixedCompilerIdentity(() => {
-  const fixture = mkdtempSync(join(tmpdir(), "dohc-cargo-ancestors-"));
-  const parent = join(fixture, "parent");
-  const root = join(parent, "checkout");
-  const cargoHome = join(fixture, "cargo-home");
-  const previousCargoHome = process.env.CARGO_HOME;
-  try {
-    mkdirSync(root, { recursive: true });
-    execFileSync("git", ["init"], { cwd: root, stdio: "ignore" });
-    process.env.CARGO_HOME = cargoHome;
-    for (const directory of [join(parent, ".cargo"), join(fixture, ".cargo"), cargoHome]) {
-      mkdirSync(directory, { recursive: true });
-      for (const name of ["config", "config.toml"]) {
-        const path = join(directory, name);
-        const fingerprint = () => sourceFingerprint("engine", root);
-        const absent = fingerprint();
-        writeFileSync(path, '[build]\nrustflags = ["--cfg", "fixture_one"]\n');
-        const created = fingerprint();
-        assert.match(created, /^[a-f0-9]{64}$/);
-        assert.notEqual(created, absent, `${path} creation`);
-        writeFileSync(path, '[build]\nrustflags = ["--cfg", "fixture_two"]\n');
-        assert.notEqual(fingerprint(), created, `${path} edit`);
-        rmSync(path);
-        assert.equal(fingerprint(), absent, `${path} removal`);
-        assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8" }), "");
+test("engine source identity tracks ancestor and Cargo home configuration outside Git", () =>
+  withFixedCompilerIdentity(() => {
+    const fixture = mkdtempSync(join(tmpdir(), "dohc-cargo-ancestors-"));
+    const parent = join(fixture, "parent");
+    const root = join(parent, "checkout");
+    const cargoHome = join(fixture, "cargo-home");
+    const previousCargoHome = process.env.CARGO_HOME;
+    try {
+      mkdirSync(root, { recursive: true });
+      execFileSync("git", ["init"], { cwd: root, stdio: "ignore" });
+      process.env.CARGO_HOME = cargoHome;
+      for (const directory of [join(parent, ".cargo"), join(fixture, ".cargo"), cargoHome]) {
+        mkdirSync(directory, { recursive: true });
+        for (const name of ["config", "config.toml"]) {
+          const path = join(directory, name);
+          const fingerprint = () => sourceFingerprint("engine", root);
+          const absent = fingerprint();
+          writeFileSync(path, '[build]\nrustflags = ["--cfg", "fixture_one"]\n');
+          const created = fingerprint();
+          assert.match(created, /^[a-f0-9]{64}$/);
+          assert.notEqual(created, absent, `${path} creation`);
+          writeFileSync(path, '[build]\nrustflags = ["--cfg", "fixture_two"]\n');
+          assert.notEqual(fingerprint(), created, `${path} edit`);
+          rmSync(path);
+          assert.equal(fingerprint(), absent, `${path} removal`);
+          assert.equal(
+            execFileSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8" }),
+            "",
+          );
+        }
       }
+    } finally {
+      if (previousCargoHome === undefined) delete process.env.CARGO_HOME;
+      else process.env.CARGO_HOME = previousCargoHome;
+      rmSync(fixture, { recursive: true, force: true });
     }
-  } finally {
-    if (previousCargoHome === undefined) delete process.env.CARGO_HOME;
-    else process.env.CARGO_HOME = previousCargoHome;
-    rmSync(fixture, { recursive: true, force: true });
-  }
-}));
+  }));
 
 test("artifact identity includes nested file bytes and names", () => {
   const root = mkdtempSync(join(tmpdir(), "dohc-artifact-"));
   try {
     mkdirSync(join(root, "nested"));
     const file = join(root, "nested/bundle.js");
-    writeFileSync(file, "one"); const original = directoryFingerprint(root);
-    writeFileSync(file, "two"); assert.notEqual(directoryFingerprint(root), original);
-    writeFileSync(file, "one"); assert.equal(directoryFingerprint(root), original);
-    writeFileSync(join(root, "injected.js"), "extra"); assert.notEqual(directoryFingerprint(root), original);
-  } finally { rmSync(root, { recursive: true, force: true }); }
+    writeFileSync(file, "one");
+    const original = directoryFingerprint(root);
+    writeFileSync(file, "two");
+    assert.notEqual(directoryFingerprint(root), original);
+    writeFileSync(file, "one");
+    assert.equal(directoryFingerprint(root), original);
+    writeFileSync(join(root, "injected.js"), "extra");
+    assert.notEqual(directoryFingerprint(root), original);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("gate selection covers root self-host deployment inputs", () => {
   const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
-  for (const file of ["docker-compose.self-host.yml", ".env.self-host.example", ".dockerignore", "scripts/self-host-health.test.mjs", "tools/self-host/health.mjs"]) {
+  for (const file of [
+    "docker-compose.self-host.yml",
+    ".env.self-host.example",
+    ".dockerignore",
+    "scripts/self-host-health.test.mjs",
+    "tools/self-host/health.mjs",
+  ]) {
     assert.deepEqual(selectedGates([file], workflow), { rust: false, js: true }, file);
   }
 });
@@ -961,22 +1423,57 @@ test("gate selection covers root self-host deployment inputs", () => {
 test("gate selection follows workflow inputs, including shared and gate implementation files", () => {
   const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
   assert.deepEqual(selectedGates(["docs/guide.md"], workflow), { rust: false, js: false });
-  assert.deepEqual(selectedGates(["apps/desktop/src/main.ts"], workflow), { rust: false, js: true });
-  assert.deepEqual(selectedGates(["patches/prosemirror-view@1.42.2.patch"], workflow), { rust: true, js: true });
+  assert.deepEqual(selectedGates(["apps/desktop/src/main.ts"], workflow), {
+    rust: false,
+    js: true,
+  });
+  assert.deepEqual(selectedGates(["patches/prosemirror-view@1.42.2.patch"], workflow), {
+    rust: true,
+    js: true,
+  });
   assert.deepEqual(selectedGates([".config/nextest.toml"], workflow), { rust: true, js: false });
-  assert.deepEqual(selectedGates(["packages/excalidraw-scene/fixtures/canonical-json.json"], workflow), { rust: true, js: true });
+  assert.deepEqual(
+    selectedGates(["packages/excalidraw-scene/fixtures/canonical-json.json"], workflow),
+    { rust: true, js: true },
+  );
   for (const file of ["examples/fundraiser/backend.ts", "examples/stock-orders/schema.sql"]) {
     assert.deepEqual(selectedGates([file], workflow), { rust: false, js: true }, file);
   }
-  for (const file of ["crates/example/src/lib.rs", "pnpm-lock.yaml", ".github/workflows/pr-checks.yml", ".gitignore", "tools/rust-engine-program/build-slot.mjs", "scripts/verification/verify.mjs", "scripts/verification/verification-matrix.test.mjs", "scripts/verification/ordered-delivery-fixture.test.mjs", ".cargo/config.toml", "package.json", "pnpm-workspace.yaml", ".npmrc", "packages/security-contract/src/effectivePolicy.ts", "packages/workspace-contracts/src/collections.ts", "packages/workspace-core/src/paths.ts", "packages/workspace-auth/src/session.ts", "packages/service-http/src/runtime.ts", "packages/app-backend-runtime/src/child.ts", "examples/fundraiser/package.json", "examples/stock-orders/tsconfig.json", "apps/desktop/package.json", "tsconfig.base.json"]) {
+  for (const file of [
+    "crates/example/src/lib.rs",
+    "pnpm-lock.yaml",
+    ".github/workflows/pr-checks.yml",
+    ".gitignore",
+    "tools/rust-engine-program/build-slot.mjs",
+    "scripts/verification/verify.mjs",
+    "scripts/verification/verification-matrix.test.mjs",
+    "scripts/verification/ordered-delivery-fixture.test.mjs",
+    ".cargo/config.toml",
+    "package.json",
+    "pnpm-workspace.yaml",
+    ".npmrc",
+    "packages/security-contract/src/effectivePolicy.ts",
+    "packages/workspace-contracts/src/collections.ts",
+    "packages/workspace-core/src/paths.ts",
+    "packages/workspace-auth/src/session.ts",
+    "packages/service-http/src/runtime.ts",
+    "packages/app-backend-runtime/src/child.ts",
+    "examples/fundraiser/package.json",
+    "examples/stock-orders/tsconfig.json",
+    "apps/desktop/package.json",
+    "tsconfig.base.json",
+  ]) {
     assert.deepEqual(selectedGates([file], workflow), { rust: true, js: true }, file);
   }
 });
 
 test("gate selection covers provenance inputs without selecting Rust for ordinary scripts", () => {
   const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
-  for (const file of ["vendor/yrs-0.27.3/src/lib.rs", "vendor/file-guard/src/lib.rs",
-    "tools/rust-engine-program/run-rust-checks.mjs"]) {
+  for (const file of [
+    "vendor/yrs-0.27.3/src/lib.rs",
+    "vendor/file-guard/src/lib.rs",
+    "tools/rust-engine-program/run-rust-checks.mjs",
+  ]) {
     assert.deepEqual(selectedGates([file], workflow), { rust: true, js: true }, file);
   }
   assert.deepEqual(selectedGates(["scripts/check-brand.mjs"], workflow), { rust: false, js: true });
@@ -984,7 +1481,8 @@ test("gate selection covers provenance inputs without selecting Rust for ordinar
 
 test("shared native test fixtures select the Rust gate", () => {
   const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
-  for (const file of nativeTestFixtures) assert.equal(selectedGates([file], workflow).rust, true, file);
+  for (const file of nativeTestFixtures)
+    assert.equal(selectedGates([file], workflow).rust, true, file);
 });
 
 test("path folding data and fixtures select Rust and their TypeScript drift checks", () => {
@@ -1001,18 +1499,32 @@ test("path folding data and fixtures select Rust and their TypeScript drift chec
 
 test("gate selection includes the old path of committed, staged, and unstaged renames", () => {
   const root = mkdtempSync(join(tmpdir(), "dohc-gate-rename-"));
-  const git = (args) => execFileSync("git", [
-    "-c", `core.hooksPath=${join(root, "no-hooks")}`, "-c", "commit.gpgsign=false",
-    "-c", "user.name=Verification Fixture", "-c", "user.email=fixture@example.invalid", ...args,
-  ], { cwd: root, encoding: "utf8" }).trim();
+  const git = (args) =>
+    execFileSync(
+      "git",
+      [
+        "-c",
+        `core.hooksPath=${join(root, "no-hooks")}`,
+        "-c",
+        "commit.gpgsign=false",
+        "-c",
+        "user.name=Verification Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        ...args,
+      ],
+      { cwd: root, encoding: "utf8" },
+    ).trim();
   try {
     git(["init"]);
     mkdirSync(join(root, "crates"));
     mkdirSync(join(root, "docs"));
     const oldPath = "crates/renamed fixture.rs";
-    const newPath = process.platform === "win32" ? "docs/renamed fixture.rs" : "docs/renamed\nfixture.rs";
+    const newPath =
+      process.platform === "win32" ? "docs/renamed fixture.rs" : "docs/renamed\nfixture.rs";
     writeFileSync(join(root, oldPath), "fn main() {}\n");
-    git(["add", "."]); git(["commit", "-m", "Fixture base"]);
+    git(["add", "."]);
+    git(["commit", "-m", "Fixture base"]);
     const base = git(["rev-parse", "HEAD"]);
     const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
     const assertRenameGates = (files) => {
@@ -1026,37 +1538,70 @@ test("gate selection includes the old path of committed, staged, and unstaged re
     assertRenameGates(changedFiles(base, true, root));
     git(["commit", "-m", "Move fixture outside code filters"]);
     assertRenameGates(changedFiles(base, false, root));
-  } finally { rmSync(root, { recursive: true, force: true }); }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("a docs-only PR records clean provenance without code tools, while dirty heads and forced gates still fail", () => {
   const root = mkdtempSync(join(tmpdir(), "dohc-no-code-gate-"));
-  const git = (args) => execFileSync("git", [
-    "-c", `core.hooksPath=${join(root, "no-hooks")}`, "-c", "commit.gpgsign=false",
-    "-c", "user.name=Verification Fixture", "-c", "user.email=fixture@example.invalid", ...args,
-  ], { cwd: root, encoding: "utf8" }).trim();
+  const git = (args) =>
+    execFileSync(
+      "git",
+      [
+        "-c",
+        `core.hooksPath=${join(root, "no-hooks")}`,
+        "-c",
+        "commit.gpgsign=false",
+        "-c",
+        "user.name=Verification Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        ...args,
+      ],
+      { cwd: root, encoding: "utf8" },
+    ).trim();
   try {
     copyFlakyFixture(root);
     for (const file of [
-      "scripts/verification/verify.mjs", "scripts/verification/ticket-evidence.mjs", "scripts/verification/queue.mjs", "scripts/verification/queue-supervisor.mjs", "scripts/verification/timing.mjs", "scripts/verification/build.mjs", "scripts/verification/process.mjs", "scripts/verification/doctor.mjs",
-      "scripts/verification/cancellation.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/selection.mjs", "scripts/verification/admission.mjs", "scripts/verification/rust-reuse.mjs",
-      "scripts/verification/linux.mjs", "tools/rust-engine-program/build-slot.mjs", "tools/rust-engine-program/tree-provenance.mjs",
-      "tools/rust-engine-program/git-read.mjs", "tools/rust-engine-program/gate-commands.mjs", "tools/rust-engine-program/require-ci-pass-verdict.mjs",
-      "apps/desktop/scripts/require-e2e-engine.mjs", ".github/workflows/pr-checks.yml",
+      "scripts/verification/verify.mjs",
+      "scripts/verification/ticket-evidence.mjs",
+      "scripts/verification/queue.mjs",
+      "scripts/verification/queue-supervisor.mjs",
+      "scripts/verification/timing.mjs",
+      "scripts/verification/build.mjs",
+      "scripts/verification/process.mjs",
+      "scripts/verification/doctor.mjs",
+      "scripts/verification/cancellation.mjs",
+      "scripts/verification/js-tests.mjs",
+      "scripts/verification/selection.mjs",
+      "scripts/verification/admission.mjs",
+      "scripts/verification/rust-reuse.mjs",
+      "scripts/verification/linux.mjs",
+      "tools/rust-engine-program/build-slot.mjs",
+      "tools/rust-engine-program/tree-provenance.mjs",
+      "tools/rust-engine-program/git-read.mjs",
+      "tools/rust-engine-program/gate-commands.mjs",
+      "tools/rust-engine-program/require-ci-pass-verdict.mjs",
+      "apps/desktop/scripts/require-e2e-engine.mjs",
+      ".github/workflows/pr-checks.yml",
     ]) {
       mkdirSync(dirname(join(root, file)), { recursive: true });
       copyFileSync(join(repoRoot, file), join(root, file));
     }
     writeFileSync(join(root, ".gitignore"), ".agent-artifacts/\n.dohc-dev/\n");
     writeFileSync(join(root, "package.json"), '{"type":"module"}\n');
-    writeFileSync(join(root, "apps/desktop/package.json"), '{}\n');
-    git(["init"]); git(["config", "core.logAllRefUpdates", "true"]);
-    git(["add", "."]); git(["commit", "-m", "Fixture base"]);
+    writeFileSync(join(root, "apps/desktop/package.json"), "{}\n");
+    git(["init"]);
+    git(["config", "core.logAllRefUpdates", "true"]);
+    git(["add", "."]);
+    git(["commit", "-m", "Fixture base"]);
     const base = git(["rev-parse", "HEAD"]);
     mkdirSync(join(root, "docs"));
     const document = join(root, "docs/guide.md");
     writeFileSync(document, "Documentation only.\n");
-    git(["add", "."]); git(["commit", "-m", "Document the fixture"]);
+    git(["add", "."]);
+    git(["commit", "-m", "Document the fixture"]);
     const head = git(["rev-parse", "HEAD"]);
     const require = createRequire(join(repoRoot, "apps/desktop/package.json"));
     const childScript = `
@@ -1119,10 +1664,22 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
       const report = await verify(process.argv.slice(1));
       console.log(JSON.stringify(report));
     `;
-    const invoke = (extra = [], fault = "") => spawnSync(process.execPath, ["--input-type=module", "-e", childScript, "pr", "--base", base, ...extra], {
-      cwd: root, encoding: "utf8", timeout: 120_000,
-      env: { ...process.env, NODE_PATH: dirname(dirname(require.resolve("js-yaml/package.json"))), DOHC_BUILD_SLOT_ROOT: join(root, "slots"), FIXTURE_PROVENANCE_FAULT: fault },
-    });
+    const invoke = (extra = [], fault = "") =>
+      spawnSync(
+        process.execPath,
+        ["--input-type=module", "-e", childScript, "pr", "--base", base, ...extra],
+        {
+          cwd: root,
+          encoding: "utf8",
+          timeout: 120_000,
+          env: {
+            ...process.env,
+            NODE_PATH: dirname(dirname(require.resolve("js-yaml/package.json"))),
+            DOHC_BUILD_SLOT_ROOT: join(root, "slots"),
+            FIXTURE_PROVENANCE_FAULT: fault,
+          },
+        },
+      );
     const clean = invoke();
     assert.equal(clean.error, undefined);
     assert.equal(clean.status, 0, clean.stderr);
@@ -1134,7 +1691,10 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
     assert.deepEqual(report.gates, { rust: false, js: false });
     assert.deepEqual(report.steps, []);
     assert.ok(report.seconds >= 0 && report.startedAt && report.finishedAt);
-    assert.deepEqual(report.timings.map(phase => phase.name), ["selection", "checkout", "source-check:finish"]);
+    assert.deepEqual(
+      report.timings.map((phase) => phase.name),
+      ["selection", "checkout", "source-check:finish"],
+    );
     assert.equal(report.doctor, undefined);
     assert.equal(report.build, undefined);
     assert.match(report.reason, /No code gate applies/);
@@ -1144,19 +1704,27 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
         const result = invoke([], behavior + ":" + target);
         assert.equal(result.error, undefined);
         assert.equal(result.status, 0, result.stderr);
-        assert.equal(JSON.parse(result.stdout.trim().split(/\r?\n/).at(-1)).verdict, behavior === "transient" ? "PASS" : "FAIL");
+        assert.equal(
+          JSON.parse(result.stdout.trim().split(/\r?\n/).at(-1)).verdict,
+          behavior === "transient" ? "PASS" : "FAIL",
+        );
       }
     }
 
     const headLog = join(root, ".git/logs/HEAD");
     const originalLog = readFileSync(headLog);
-    for (const [fault, reason] of [["removed-log", /keeps no HEAD reflog/], ["returned-head", /HEAD was updated 2 times/]]) {
+    for (const [fault, reason] of [
+      ["removed-log", /keeps no HEAD reflog/],
+      ["returned-head", /HEAD was updated 2 times/],
+    ]) {
       try {
         const refused = invoke([], fault);
         assert.equal(refused.error, undefined);
         assert.notEqual(refused.status, 0);
         assert.match(refused.stderr, reason);
-      } finally { writeFileSync(headLog, originalLog); }
+      } finally {
+        writeFileSync(headLog, originalLog);
+      }
     }
     const recovered = invoke([], "path-recovery");
     assert.equal(recovered.error, undefined);
@@ -1170,8 +1738,15 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
     writeFileSync(document, "Documentation only.\n");
     const forced = invoke(["--job", "rust"]);
     assert.notEqual(forced.status, 0);
-    assert.match(forced.stderr, process.platform === "win32" ? /Unavailable code tool: pwsh\.exe/ : /Unavailable code tool: rustc/);
-  } finally { rmSync(root, { recursive: true, force: true }); }
+    assert.match(
+      forced.stderr,
+      process.platform === "win32"
+        ? /Unavailable code tool: pwsh\.exe/
+        : /Unavailable code tool: rustc/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("Postgres startup rejection cleans its created container and preserves startup and cleanup failures", async () => {
@@ -1184,7 +1759,10 @@ test("Postgres startup rejection cleans its created container and preserves star
       assert.equal(executable, "docker");
       calls.push({ args, options });
       if (args[0] === "run") {
-        assert.equal(args[args.indexOf("--health-cmd") + 1], "pg_isready -h 127.0.0.1 -U dohc -d dohc");
+        assert.equal(
+          args[args.indexOf("--health-cmd") + 1],
+          "pg_isready -h 127.0.0.1 -U dohc -d dohc",
+        );
         assert.equal(args[args.indexOf("--health-start-period") + 1], "90s");
         assert.equal(args[args.indexOf("--health-start-interval") + 1], "1s");
         ownedName = args[args.indexOf("--name") + 1];
@@ -1198,7 +1776,11 @@ test("Postgres startup rejection cleans its created container and preserves star
     };
     await assert.rejects(postgres("unused-output", command), (error) => {
       assert.equal(error, startupError);
-      if (cleanupFails) assert.match(error.cleanupError, /Could not remove verification Postgres.*Docker cleanup is unavailable/);
+      if (cleanupFails)
+        assert.match(
+          error.cleanupError,
+          /Could not remove verification Postgres.*Docker cleanup is unavailable/,
+        );
       else assert.equal(error.cleanupError, undefined);
       return true;
     });
@@ -1210,46 +1792,59 @@ test("Postgres startup rejection cleans its created container and preserves star
   }
 });
 
-test("POSIX engine permission loss rejects unchanged bytes and repairs only owned artifacts", { skip: process.platform === "win32" }, () => {
-  const root = mkdtempSync(join(tmpdir(), "dohc-engine-permission-"));
-  try {
-    const source = join(root, "dohc-workspace-engine");
-    const stagedDirectory = join(root, "staged");
-    mkdirSync(stagedDirectory);
-    const staged = join(stagedDirectory, "dohc-workspace-engine");
-    writeFileSync(source, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-    copyFileSync(source, staged);
-    const expectedHash = hashFile(source);
-    assert.equal(engineArtifactMatches(source, expectedHash), true);
-    assert.equal(engineArtifactMatches(staged, expectedHash), true);
+test(
+  "POSIX engine permission loss rejects unchanged bytes and repairs only owned artifacts",
+  { skip: process.platform === "win32" },
+  () => {
+    const root = mkdtempSync(join(tmpdir(), "dohc-engine-permission-"));
+    try {
+      const source = join(root, "dohc-workspace-engine");
+      const stagedDirectory = join(root, "staged");
+      mkdirSync(stagedDirectory);
+      const staged = join(stagedDirectory, "dohc-workspace-engine");
+      writeFileSync(source, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+      copyFileSync(source, staged);
+      const expectedHash = hashFile(source);
+      assert.equal(engineArtifactMatches(source, expectedHash), true);
+      assert.equal(engineArtifactMatches(staged, expectedHash), true);
 
-    chmodSync(source, 0o644);
-    assert.equal(hashFile(source), expectedHash);
-    assert.equal(engineArtifactMatches(source, expectedHash), false);
-    repairOwnedEngineExecutable(source);
-    assert.equal(engineArtifactMatches(source, expectedHash), true);
+      chmodSync(source, 0o644);
+      assert.equal(hashFile(source), expectedHash);
+      assert.equal(engineArtifactMatches(source, expectedHash), false);
+      repairOwnedEngineExecutable(source);
+      assert.equal(engineArtifactMatches(source, expectedHash), true);
 
-    chmodSync(staged, 0o644);
-    assert.equal(hashFile(staged), expectedHash);
-    assert.equal(engineArtifactMatches(staged, expectedHash), false);
-    requireE2eEngine({ override: source, desktopTargetDir: stagedDirectory, platform: "linux" });
-    assert.equal(engineArtifactMatches(staged, expectedHash), true);
+      chmodSync(staged, 0o644);
+      assert.equal(hashFile(staged), expectedHash);
+      assert.equal(engineArtifactMatches(staged, expectedHash), false);
+      requireE2eEngine({ override: source, desktopTargetDir: stagedDirectory, platform: "linux" });
+      assert.equal(engineArtifactMatches(staged, expectedHash), true);
 
-    const external = join(root, "external-engine");
-    const link = join(root, "linked-engine");
-    writeFileSync(external, "foreign artifact", { mode: 0o644 });
-    symlinkSync(external, link);
-    assert.throws(() => repairOwnedEngineExecutable(link), /unowned engine artifact/);
-    assert.equal(statSync(external).mode & 0o777, 0o644);
-  } finally { rmSync(root, { recursive: true, force: true }); }
-});
+      const external = join(root, "external-engine");
+      const link = join(root, "linked-engine");
+      writeFileSync(external, "foreign artifact", { mode: 0o644 });
+      symlinkSync(external, link);
+      assert.throws(() => repairOwnedEngineExecutable(link), /unowned engine artifact/);
+      assert.equal(statSync(external).mode & 0o777, 0o644);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
 
 test("build children use owned output paths and cannot expand the compiler budget", () => {
   for (const requested of ["-1", "0", "default", "invalid", "1", "999"]) {
-    const source = { CARGO_BUILD_JOBS: requested, Cargo_Target_Dir: "foreign", CARGO_BUILD_BUILD_DIR: "foreign", CARGO_BUILD_TARGET: "other-host", PATH: "retained" };
+    const source = {
+      CARGO_BUILD_JOBS: requested,
+      Cargo_Target_Dir: "foreign",
+      CARGO_BUILD_BUILD_DIR: "foreign",
+      CARGO_BUILD_TARGET: "other-host",
+      PATH: "retained",
+    };
     const env = buildEnvironment(8, source);
     assert.equal(env.CARGO_BUILD_JOBS, requested === "1" ? "1" : "8");
-    for (const key of ["CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR", "CARGO_BUILD_BUILD_DIR"]) assert.equal(env[key], join(repoRoot, "target"));
+    for (const key of ["CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR", "CARGO_BUILD_BUILD_DIR"])
+      assert.equal(env[key], join(repoRoot, "target"));
     assert.equal(env.Cargo_Target_Dir, undefined);
     assert.equal(env.CARGO_BUILD_TARGET, undefined);
     assert.equal(env.PATH, "retained");
@@ -1261,34 +1856,59 @@ test("failed commands retain their output and reject instead of reporting succes
   const root = mkdtempSync(join(tmpdir(), "dohc-command-"));
   const log = join(root, "failure.log");
   try {
-    await assert.rejects(run(process.execPath, ["-e", "console.error('failure-evidence');process.exit(7)"], { log }), /failed \(7\)/);
+    await assert.rejects(
+      run(process.execPath, ["-e", "console.error('failure-evidence');process.exit(7)"], { log }),
+      /failed \(7\)/,
+    );
     assert.match(readFileSync(log, "utf8"), /failure-evidence/);
-  } finally { rmSync(root, { recursive: true, force: true }); }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
-test("a stalled command times out, stops its process, and retains its output", { timeout: 30_000 }, async (t) => {
-  const root = mkdtempSync(join(tmpdir(), "dohc-command-timeout-"));
-  const log = join(root, "timeout.log");
-  let child;
-  const timeoutMs = 1000;
-  // The mocked deadline expires only once the command has printed, so a loaded
-  // host cannot time it out before the output the test checks for exists.
-  t.mock.timers.enable({ apis: ["setTimeout"] });
-  t.after(() => { if (child?.exitCode === null && child.signalCode === null) child.kill(); });
-  try {
-    await assert.rejects(run(process.execPath, ["-e", "console.log('waiting-for-service');setInterval(() => {}, 1000)"], {
-      log, timeoutMs, onSpawn: (spawned) => {
-        child = spawned;
-        let stdout = "";
-        spawned.stdout.on("data", function ready(chunk) {
-          stdout += chunk;
-          if (!stdout.includes("waiting-for-service")) return;
-          spawned.stdout.off("data", ready);
-          t.mock.timers.tick(timeoutMs);
-        });
-      },
-    }), new RegExp(`timed out after ${timeoutMs}ms`));
-    assert.ok(child.exitCode !== null || child.signalCode !== null, "the timed-out process must have exited");
-    assert.match(readFileSync(log, "utf8"), /waiting-for-service/);
-  } finally { rmSync(root, { recursive: true, force: true }); }
-});
+test(
+  "a stalled command times out, stops its process, and retains its output",
+  { timeout: 30_000 },
+  async (t) => {
+    const root = mkdtempSync(join(tmpdir(), "dohc-command-timeout-"));
+    const log = join(root, "timeout.log");
+    let child;
+    const timeoutMs = 1000;
+    // The mocked deadline expires only once the command has printed, so a loaded
+    // host cannot time it out before the output the test checks for exists.
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    t.after(() => {
+      if (child?.exitCode === null && child.signalCode === null) child.kill();
+    });
+    try {
+      await assert.rejects(
+        run(
+          process.execPath,
+          ["-e", "console.log('waiting-for-service');setInterval(() => {}, 1000)"],
+          {
+            log,
+            timeoutMs,
+            onSpawn: (spawned) => {
+              child = spawned;
+              let stdout = "";
+              spawned.stdout.on("data", function ready(chunk) {
+                stdout += chunk;
+                if (!stdout.includes("waiting-for-service")) return;
+                spawned.stdout.off("data", ready);
+                t.mock.timers.tick(timeoutMs);
+              });
+            },
+          },
+        ),
+        new RegExp(`timed out after ${timeoutMs}ms`),
+      );
+      assert.ok(
+        child.exitCode !== null || child.signalCode !== null,
+        "the timed-out process must have exited",
+      );
+      assert.match(readFileSync(log, "utf8"), /waiting-for-service/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);

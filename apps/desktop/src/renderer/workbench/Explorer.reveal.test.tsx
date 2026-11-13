@@ -80,8 +80,9 @@ describe("Explorer reveal", () => {
     render(<Explorer {...explorerProps({ revealPaths: ["apps/gone"], onRevealed })} />);
 
     expect(onRevealed).toHaveBeenCalledTimes(1);
-    expect(screen.queryAllByTestId("tree-row").some((candidate) => candidate === document.activeElement))
-      .toBe(false);
+    expect(
+      screen.queryAllByTestId("tree-row").some((candidate) => candidate === document.activeElement),
+    ).toBe(false);
   });
 
   it("waits until the shell's expansion renders the row", () => {

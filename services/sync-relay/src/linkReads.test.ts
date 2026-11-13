@@ -5,20 +5,18 @@ import {
   filesFromAccumulator,
   foldLogOps,
   type FileAccumulator,
-  type RelayOp } from "../../share-web/viewer/src/model";
+  type RelayOp,
+} from "../../share-web/viewer/src/model";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DiscussionActivityHub } from "./discussionActivity";
-import {
-  LinkEgressRateLimiter,
-  LINK_SESSION_TTL_MS } from "./linkSecurity";
-import {
-  filterOpForShare } from "./shareFilter";
-import {
-  type SyncRelayHandler } from "./server";
+import { LinkEgressRateLimiter, LINK_SESSION_TTL_MS } from "./linkSecurity";
+import { filterOpForShare } from "./shareFilter";
+import { type SyncRelayHandler } from "./server";
 import {
   currentFileBlobByteLengthQuery,
   currentFileStateQuery,
-  type SyncRelayStorage } from "./storage";
+  type SyncRelayStorage,
+} from "./storage";
 
 import {
   appendLog,
@@ -38,7 +36,8 @@ import {
   storagePath,
   testHandler,
   testStorage as newStorage,
-  type HandlerOverrides } from "./testing";
+  type HandlerOverrides,
+} from "./testing";
 
 const OWNER = "owner";
 const RECIPIENT = "recipient";
@@ -47,7 +46,11 @@ const receivedIdentity = createReceivedIdentity(LINK_KEY);
 function withoutReceivedIdentity(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(withoutReceivedIdentity);
   if (!value || typeof value !== "object") return value;
-  return Object.fromEntries(Object.entries(value).filter(([key]) => key !== "objectId" && key !== "receivedSource").map(([key, item]) => [key, withoutReceivedIdentity(item)]));
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => key !== "objectId" && key !== "receivedSource")
+      .map(([key, item]) => [key, withoutReceivedIdentity(item)]),
+  );
 }
 const UNKNOWN_CAPABILITY = "z".repeat(43);
 
@@ -59,9 +62,7 @@ it.each(["view"] as const)(
     const h = handler(storage, { discussionActivity: activity });
     const link = await seed(h, access);
     const agent = await json(
-      await h(
-        request(null, "/sync/link-exchange", jsonBody({ secret: link.secret })),
-      ),
+      await h(request(null, "/sync/link-exchange", jsonBody({ secret: link.secret }))),
     );
     const latest = "current body",
       latestSha = await putBlob(h, latest);
@@ -73,30 +74,19 @@ it.each(["view"] as const)(
       }),
     ]);
     for (const capability of [link.capability, String(agent.capabilityToken)]) {
-      expect(
-        (await h(linkRequest(capability, `/sync/link/blobs/${link.sharedSha}`)))
-          .status,
-      ).toBe(404);
-      expect(
-        (await h(linkRequest(capability, "/sync/link/log?since=0"))).status,
-      ).toBe(404);
-      const current = await json(
-        await h(linkRequest(capability, "/sync/link/current")),
+      expect((await h(linkRequest(capability, `/sync/link/blobs/${link.sharedSha}`))).status).toBe(
+        404,
       );
-      expect(current.files).toEqual([
-        expect.objectContaining({ blobSha256: latestSha }),
-      ]);
-      expect(
-        await (
-          await h(linkRequest(capability, `/sync/link/blobs/${latestSha}`))
-        ).text(),
-      ).toBe(latest);
+      expect((await h(linkRequest(capability, "/sync/link/log?since=0"))).status).toBe(404);
+      const current = await json(await h(linkRequest(capability, "/sync/link/current")));
+      expect(current.files).toEqual([expect.objectContaining({ blobSha256: latestSha })]);
+      expect(await (await h(linkRequest(capability, `/sync/link/blobs/${latestSha}`))).text()).toBe(
+        latest,
+      );
       const changes = await json(
         await h(linkRequest(capability, "/sync/link/log?current=true&since=0")),
       );
-      expect(JSON.stringify(changes)).not.toMatch(
-        /payloadBefore|forkSnapshots|recordedAtMs/,
-      );
+      expect(JSON.stringify(changes)).not.toMatch(/payloadBefore|forkSnapshots|recordedAtMs/);
       expect(JSON.stringify(changes)).not.toContain(link.sharedSha);
       expect(changes.ops).toContainEqual(
         expect.objectContaining({
@@ -124,9 +114,7 @@ it.each(["view"] as const)(
         }),
       ]);
       const woke = await json(await pending);
-      expect(JSON.stringify(woke)).not.toMatch(
-        /payloadBefore|forkSnapshots|recordedAtMs/,
-      );
+      expect(JSON.stringify(woke)).not.toMatch(/payloadBefore|forkSnapshots|recordedAtMs/);
       expect(JSON.stringify(woke)).not.toContain(latestSha);
       expect(woke.ops).toContainEqual(
         expect.objectContaining({
@@ -135,10 +123,7 @@ it.each(["view"] as const)(
           }),
         }),
       );
-      expect(
-        (await h(linkRequest(capability, `/sync/link/blobs/${latestSha}`)))
-          .status,
-      ).toBe(404);
+      expect((await h(linkRequest(capability, `/sync/link/blobs/${latestSha}`))).status).toBe(404);
       // Restore the current body before the next independent holder follows it.
       if (capability === link.capability)
         await appendMoments(
@@ -156,21 +141,38 @@ it.each(["view"] as const)(
   },
 );
 it("serves one link-grant identity to browser and agent holders, separated from other grants and named users", async () => {
-  const storage = await newStorage(), h = handler(storage);
+  const storage = await newStorage(),
+    h = handler(storage);
   const first = await seed(h);
   const second = await createLink(h, { paths: ["docs"], access: "view" });
-  const exchange = await json(await h(request(null, "/sync/link-exchange", jsonBody({ secret: first.secret }))));
+  const exchange = await json(
+    await h(request(null, "/sync/link-exchange", jsonBody({ secret: first.secret }))),
+  );
   const read = async (capability: string) => {
     const meta = await json(await h(linkRequest(capability, "/sync/link/share")));
     const current = await json(await h(linkRequest(capability, "/sync/link/current")));
-    const log = await json(await h(linkRequest(capability, "/sync/link/log?current=true&since=0&limit=100")));
-    const files = new Map(); foldLogOps(files, log.ops as RelayOp[]);
+    const log = await json(
+      await h(linkRequest(capability, "/sync/link/log?current=true&since=0&limit=100")),
+    );
+    const files = new Map();
+    foldLogOps(files, log.ops as RelayOp[]);
     expect(filesFromAccumulator(files)).toEqual(current.files);
     return { receivedSource: meta.receivedSource, files: current.files };
   };
-  const browser = await read(first.capability), agent = await read(String(exchange.capabilityToken));
+  const browser = await read(first.capability),
+    agent = await read(String(exchange.capabilityToken));
   expect(agent).toEqual(browser);
-  expect(browser).toEqual({ receivedSource: receivedIdentity.source(["link", first.grantId], WORKSPACE), files: [{ path: "docs/shared.md", blobSha256: first.sharedSha, contentKind: "text", objectId: receivedIdentity.object(["link", first.grantId], WORKSPACE, "object-shared") }] });
+  expect(browser).toEqual({
+    receivedSource: receivedIdentity.source(["link", first.grantId], WORKSPACE),
+    files: [
+      {
+        path: "docs/shared.md",
+        blobSha256: first.sharedSha,
+        contentKind: "text",
+        objectId: receivedIdentity.object(["link", first.grantId], WORKSPACE, "object-shared"),
+      },
+    ],
+  });
   const other = await read(second.capability);
   expect(other.receivedSource).not.toBe(browser.receivedSource);
   expect(other.files).not.toEqual(browser.files);
@@ -192,12 +194,28 @@ type TestWorkspaceIdentity = {
 afterEach(closeTestStorages);
 
 function handler(storage: SyncRelayStorage, options: HandlerOverrides = {}): SyncRelayHandler {
-  return testHandler(storage, { resolveUserIdByEmail: undefined, lookupUserEmail: undefined, lookupVerifiedUserEmail: undefined, ...options });
+  return testHandler(storage, {
+    resolveUserIdByEmail: undefined,
+    lookupUserEmail: undefined,
+    lookupVerifiedUserEmail: undefined,
+    ...options,
+  });
 }
 
 function editHandler(storage: SyncRelayStorage, options: HandlerOverrides = {}): SyncRelayHandler {
-  return handler(storage,{publicEditRelease:{version:1},relayExchangeKey:"link-read-preflight-relay-key-at-least-32",
-    namedBrowserSessionLimits:{maxSessions:8,retentionMs:60_000,maxPendingRequests:4,maxRequestBytes:8192,maxResponseBytes:16384,timeoutMs:1000},...options});
+  return handler(storage, {
+    publicEditRelease: { version: 1 },
+    relayExchangeKey: "link-read-preflight-relay-key-at-least-32",
+    namedBrowserSessionLimits: {
+      maxSessions: 8,
+      retentionMs: 60_000,
+      maxPendingRequests: 4,
+      maxRequestBytes: 8192,
+      maxResponseBytes: 16384,
+      timeoutMs: 1000,
+    },
+    ...options,
+  });
 }
 
 class KeyIgnoringLinkReadRateLimiter extends TokenBucketLimiter {
@@ -210,7 +228,10 @@ async function putBlob(h: SyncRelayHandler, content: string): Promise<string> {
   return upload(h, OWNER, WORKSPACE, content);
 }
 
-type MomentOptions = Omit<NonNullable<Parameters<typeof buildMoment>[2]>, "originSeq" | "recordedAtMs">;
+type MomentOptions = Omit<
+  NonNullable<Parameters<typeof buildMoment>[2]>,
+  "originSeq" | "recordedAtMs"
+>;
 
 function moment(
   originSeq: number,
@@ -236,10 +257,7 @@ async function appendMoments(
   });
 }
 
-function appendStoredMoments(
-  storage: SyncRelayStorage,
-  ops: ReturnType<typeof moment>[],
-): void {
+function appendStoredMoments(storage: SyncRelayStorage, ops: ReturnType<typeof moment>[]): void {
   storage.appendLogBatch({
     workspaceId: WORKSPACE,
     originId: "origin-a",
@@ -289,7 +307,15 @@ async function createLink(
   );
   const secret = linkSecret(link.url);
   const exchange = await json(
-    await h(request(null, "/sync/link-exchange", {...jsonBody({ secret }), headers: {"content-type":"application/json", "x-dohc-relay-exchange-key":"link-read-preflight-relay-key-at-least-32"}})),
+    await h(
+      request(null, "/sync/link-exchange", {
+        ...jsonBody({ secret }),
+        headers: {
+          "content-type": "application/json",
+          "x-dohc-relay-exchange-key": "link-read-preflight-relay-key-at-least-32",
+        },
+      }),
+    ),
   );
   return {
     capability: String(exchange.capabilityToken),
@@ -331,13 +357,16 @@ async function seed(
           jsonBody({
             originId: "origin-a",
             ops: [
-              { originSeq: 0, opKind: "workspace.init", payload: { private: true }, recordedAtMs: 900 },
+              {
+                originSeq: 0,
+                opKind: "workspace.init",
+                payload: { private: true },
+                recordedAtMs: 900,
+              },
               moment(1, "docs/shared.md", "# shared\n", 1_100, {
                 versionId: selector.sharedVersionId,
                 objectId:
-                  selector.sharedObjectId === undefined
-                    ? "object-shared"
-                    : selector.sharedObjectId,
+                  selector.sharedObjectId === undefined ? "object-shared" : selector.sharedObjectId,
               }),
               moment(2, "private/hidden.md", "hidden\n", 1_200),
             ],
@@ -360,10 +389,15 @@ async function seed(
 }
 
 async function seedThenRotate(h: SyncRelayHandler, access: "view" | "edit" = "view") {
-  const seeded = await seed(h, access, {}, {
-    replicationEpoch: EPOCH_1,
-    streamIdentity: STREAM_1,
-  });
+  const seeded = await seed(
+    h,
+    access,
+    {},
+    {
+      replicationEpoch: EPOCH_1,
+      streamIdentity: STREAM_1,
+    },
+  );
   await rotateWorkspaceIdentity(h);
   return seeded;
 }
@@ -466,21 +500,36 @@ describe("LinkEgressRateLimiter", () => {
 });
 
 describe("relay capability reads", () => {
-
   it("keeps exact object results at the 32-moment boundary and above the epoch floor", async () => {
     const storage = await newStorage();
     const h = handler(storage);
     const seeded = await seed(h, "view");
-    const lookup = (epochLogFloor = 0) => storage.currentObjectFile({ workspaceId: WORKSPACE, versionId: "main", objectId: "object-shared", epochLogFloor });
+    const lookup = (epochLogFloor = 0) =>
+      storage.currentObjectFile({
+        workspaceId: WORKSPACE,
+        versionId: "main",
+        objectId: "object-shared",
+        epochLogFloor,
+      });
     const current = await json(await h(linkRequest(seeded.capability, "/sync/link/current")));
     const floor = Number(current.nextCursor);
     await putBlob(h, "refused\n");
     await putBlob(h, "wrong before\n");
-    const refused = (index: number) => moment(index + 3, "docs/shared.md", "refused\n", 1_300 + index, {
-      objectId: "object-shared", beforePath: "docs/shared.md", beforeContent: "wrong before\n",
+    const refused = (index: number) =>
+      moment(index + 3, "docs/shared.md", "refused\n", 1_300 + index, {
+        objectId: "object-shared",
+        beforePath: "docs/shared.md",
+        beforeContent: "wrong before\n",
+      });
+    appendStoredMoments(
+      storage,
+      Array.from({ length: 31 }, (_, index) => refused(index)),
+    );
+    expect(lookup()).toEqual({
+      path: "docs/shared.md",
+      blobSha256: seeded.sharedSha,
+      contentKind: "text",
     });
-    appendStoredMoments(storage, Array.from({ length: 31 }, (_, index) => refused(index)));
-    expect(lookup()).toEqual({ path: "docs/shared.md", blobSha256: seeded.sharedSha, contentKind: "text" });
     expect(lookup(floor)).toBeNull();
     appendStoredMoments(storage, [refused(31)]);
     expect(lookup()).toBe("reset");
@@ -528,11 +577,13 @@ describe("relay capability reads", () => {
     const response = await h(linkRequest(seeded.capability, "/sync/link/current"));
     expect(response.status).toBe(200);
     const current = await json(response);
-    expect(current.files).toMatchObject([{
-      path: "docs/😀.md",
-      blobSha256: acceptedSha,
-      contentKind: "text",
-    }]);
+    expect(current.files).toMatchObject([
+      {
+        path: "docs/😀.md",
+        blobSha256: acceptedSha,
+        contentKind: "text",
+      },
+    ]);
     expect(JSON.stringify(current)).not.toContain(staleSha);
     expect(JSON.stringify(current)).not.toContain(neighborSha);
     expect(JSON.stringify(current)).not.toContain(sideSha);
@@ -547,14 +598,9 @@ describe("relay capability reads", () => {
     const inspection = inspectDatabase(storagePath(storage), { readOnly: true });
     try {
       const query = currentFileStateQuery(["docs"]);
-      const plan = inspection.prepare(`EXPLAIN QUERY PLAN ${query.sql}`).all(
-        WORKSPACE,
-        "main",
-        0,
-        Number.MAX_SAFE_INTEGER,
-        ...query.selectorParams,
-        5_001,
-      );
+      const plan = inspection
+        .prepare(`EXPLAIN QUERY PLAN ${query.sql}`)
+        .all(WORKSPACE, "main", 0, Number.MAX_SAFE_INTEGER, ...query.selectorParams, 5_001);
       const details = plan.map((row) => String(row.detail)).join("\n");
       expect(details).toMatch(
         /SEARCH sync_relay_current_files USING INDEX idx_sync_relay_current_files_path/u,
@@ -563,20 +609,14 @@ describe("relay capability reads", () => {
       expect(details).not.toContain("sync_relay_object_moments");
 
       const blobQuery = currentFileBlobByteLengthQuery(["docs"]);
-      const blobPlan = inspection.prepare(`EXPLAIN QUERY PLAN ${blobQuery.sql}`).all(
-        WORKSPACE,
-        "main",
-        acceptedSha,
-        0,
-        ...blobQuery.selectorParams,
-      );
+      const blobPlan = inspection
+        .prepare(`EXPLAIN QUERY PLAN ${blobQuery.sql}`)
+        .all(WORKSPACE, "main", acceptedSha, 0, ...blobQuery.selectorParams);
       const blobDetails = blobPlan.map((row) => String(row.detail)).join("\n");
       expect(blobDetails).toMatch(
         /SEARCH sync_relay_current_files USING COVERING INDEX idx_sync_relay_current_files_blob/u,
       );
-      expect(blobDetails).toMatch(
-        /SEARCH blob USING INDEX sqlite_autoindex_sync_relay_blobs_1/u,
-      );
+      expect(blobDetails).toMatch(/SEARCH blob USING INDEX sqlite_autoindex_sync_relay_blobs_1/u);
     } finally {
       inspection.close();
     }
@@ -630,17 +670,17 @@ describe("relay capability reads", () => {
       const current = await json(
         await currentHandler(linkRequest(seeded.capability, "/sync/link/current")),
       );
-      const expectedFiles = [{
-        path: "docs/shared.md",
-        blobSha256: seeded.sharedSha,
-        contentKind: "text",
-      }];
+      const expectedFiles = [
+        {
+          path: "docs/shared.md",
+          blobSha256: seeded.sharedSha,
+          contentKind: "text",
+        },
+      ];
       expect(current).toMatchObject({ files: expectedFiles, nextCursor: 5 });
 
       const fullReplay = await json(
-        await currentHandler(
-          linkRequest(seeded.capability, "/sync/link/log?since=0&limit=100"),
-        ),
+        await currentHandler(linkRequest(seeded.capability, "/sync/link/log?since=0&limit=100")),
       );
       const replayed: FileAccumulator = new Map();
       foldLogOps(replayed, fullReplay.ops as RelayOp[]);
@@ -648,15 +688,11 @@ describe("relay capability reads", () => {
 
       const missingSha = sha256("missing");
       const missing = await denialBytes(
-        await currentHandler(
-          linkRequest(seeded.capability, `/sync/link/blobs/${missingSha}`),
-        ),
+        await currentHandler(linkRequest(seeded.capability, `/sync/link/blobs/${missingSha}`)),
       );
       expect(
         await denialBytes(
-          await currentHandler(
-            linkRequest(seeded.capability, `/sync/link/blobs/${forgedSha}`),
-          ),
+          await currentHandler(linkRequest(seeded.capability, `/sync/link/blobs/${forgedSha}`)),
         ),
       ).toBe(missing);
       const sharedBlob = await currentHandler(
@@ -667,7 +703,6 @@ describe("relay capability reads", () => {
     };
 
     await expectConsistentDenial(h);
-
   });
 
   it("applies the current-file cap after selector filtering and refuses overflow generically", async () => {
@@ -677,11 +712,13 @@ describe("relay capability reads", () => {
 
     const oneSelected = await h(linkRequest(seeded.capability, "/sync/link/current"));
     expect(oneSelected.status).toBe(200);
-    expect((await json(oneSelected)).files).toMatchObject([{
-      path: "docs/shared.md",
-      blobSha256: seeded.sharedSha,
-      contentKind: "text",
-    }]);
+    expect((await json(oneSelected)).files).toMatchObject([
+      {
+        path: "docs/shared.md",
+        blobSha256: seeded.sharedSha,
+        contentKind: "text",
+      },
+    ]);
 
     const secondContent = "second selected\n";
     await putBlob(h, secondContent);
@@ -694,9 +731,7 @@ describe("relay capability reads", () => {
       await h(linkRequest(seeded.capability, "/sync/link/current")),
     );
     const missing = await denialBytes(
-      await h(
-        linkRequest(seeded.capability, `/sync/link/blobs/${"f".repeat(64)}`),
-      ),
+      await h(linkRequest(seeded.capability, `/sync/link/blobs/${"f".repeat(64)}`)),
     );
     expect(overflow).toBe(missing);
   });
@@ -724,116 +759,92 @@ describe("relay capability reads", () => {
     grantId = seeded.grantId;
     revokeOnRead = true;
 
-    const response = await h(
-      linkRequest(seeded.capability, "/sync/link/current"),
-    );
+    const response = await h(linkRequest(seeded.capability, "/sync/link/current"));
     expect(await capabilityRefusalBody(response)).toBe(
-      await capabilityRefusalBody(
-        await h(linkRequest(UNKNOWN_CAPABILITY, "/sync/link/current")),
-      ),
+      await capabilityRefusalBody(await h(linkRequest(UNKNOWN_CAPABILITY, "/sync/link/current"))),
     );
   });
 
-  it.each(["rotate"] as const)(
-    "charges only emitted blob bytes after stream %s",
-    async () => {
-      const chunkBytes = 64 * 1024;
-      const largeContent = "l".repeat(3 * chunkBytes);
-      const exactRefundContent = "r".repeat(2 * chunkBytes);
-      const finalByteContent = "f";
-      const storage = await newStorage();
-      const egress = new LinkEgressRateLimiter(largeContent.length, 0.000_001, 10);
-      const h = handler(storage, {
-        nowMs: () => 2_000,
-        linkGrantEgressRateLimiter: egress,
-      });
-      const seeded = await seed(h);
-      const largeSha = await putBlob(h, largeContent);
-      const exactRefundSha = await putBlob(h, exactRefundContent);
-      const finalByteSha = await putBlob(h, finalByteContent);
-      await appendMoments(h, [
-        moment(3, "docs/large.bin", largeContent, 1_300),
-        moment(4, "docs/refund.bin", exactRefundContent, 1_400),
-        moment(5, "docs/final-byte.bin", finalByteContent, 1_500),
-      ]);
+  it.each(["rotate"] as const)("charges only emitted blob bytes after stream %s", async () => {
+    const chunkBytes = 64 * 1024;
+    const largeContent = "l".repeat(3 * chunkBytes);
+    const exactRefundContent = "r".repeat(2 * chunkBytes);
+    const finalByteContent = "f";
+    const storage = await newStorage();
+    const egress = new LinkEgressRateLimiter(largeContent.length, 0.000_001, 10);
+    const h = handler(storage, {
+      nowMs: () => 2_000,
+      linkGrantEgressRateLimiter: egress,
+    });
+    const seeded = await seed(h);
+    const largeSha = await putBlob(h, largeContent);
+    const exactRefundSha = await putBlob(h, exactRefundContent);
+    const finalByteSha = await putBlob(h, finalByteContent);
+    await appendMoments(h, [
+      moment(3, "docs/large.bin", largeContent, 1_300),
+      moment(4, "docs/refund.bin", exactRefundContent, 1_400),
+      moment(5, "docs/final-byte.bin", finalByteContent, 1_500),
+    ]);
 
-      const largePath = `/sync/link/blobs/${largeSha}`;
-      const partial = await h(linkRequest(seeded.capability, largePath));
-      expect(partial.status).toBe(200);
-      const reader = partial.body!.getReader();
-      const first = await reader.read();
-      expect(first.done).toBe(false);
-      if (first.done) return;
-      expect(first.value.byteLength).toBe(chunkBytes);
+    const largePath = `/sync/link/blobs/${largeSha}`;
+    const partial = await h(linkRequest(seeded.capability, largePath));
+    expect(partial.status).toBe(200);
+    const reader = partial.body!.getReader();
+    const first = await reader.read();
+    expect(first.done).toBe(false);
+    if (first.done) return;
+    expect(first.value.byteLength).toBe(chunkBytes);
 
-      let capability = seeded.capability;
+    let capability = seeded.capability;
 
-      const rotation = await json(
-        await h(
-          request(
-            OWNER,
-            `/sync/shares/share-0/links/${seeded.grantId}/rotate`,
-            jsonBody({ workspaceId: WORKSPACE, expectedDependentGrantIds: [] }),
-          ),
+    const rotation = await json(
+      await h(
+        request(
+          OWNER,
+          `/sync/shares/share-0/links/${seeded.grantId}/rotate`,
+          jsonBody({ workspaceId: WORKSPACE, expectedDependentGrantIds: [] }),
         ),
-      );
-      const terminated = await reader.read().then(
-        () => ({ kind: "delivered" as const }),
-        (error: unknown) => ({
-          kind: "terminated" as const,
-          message: error instanceof Error ? error.message : String(error),
-        }),
-      );
-      expect(terminated).toEqual({
-        kind: "terminated",
-        message: "link grant changed during stream",
-      });
-      await reader.cancel().catch(() => undefined);
-      const exchange = await json(
-        await h(
-          request(
-            null,
-            "/sync/link-exchange",
-            jsonBody({ secret: linkSecret(rotation.url) }),
-          ),
-        ),
-      );
-      expect(exchange.grantId).toBe(seeded.grantId);
-      capability = String(exchange.capabilityToken);
+      ),
+    );
+    const terminated = await reader.read().then(
+      () => ({ kind: "delivered" as const }),
+      (error: unknown) => ({
+        kind: "terminated" as const,
+        message: error instanceof Error ? error.message : String(error),
+      }),
+    );
+    expect(terminated).toEqual({
+      kind: "terminated",
+      message: "link grant changed during stream",
+    });
+    await reader.cancel().catch(() => undefined);
+    const exchange = await json(
+      await h(request(null, "/sync/link-exchange", jsonBody({ secret: linkSecret(rotation.url) }))),
+    );
+    expect(exchange.grantId).toBe(seeded.grantId);
+    capability = String(exchange.capabilityToken);
 
-      const overRefunded = await h(linkRequest(capability, largePath));
-      expect(overRefunded.status).toBe(429);
-      expect(await json(overRefunded)).toMatchObject({
-        code: "link_read_rate_limited",
-      });
+    const overRefunded = await h(linkRequest(capability, largePath));
+    expect(overRefunded.status).toBe(429);
+    expect(await json(overRefunded)).toMatchObject({
+      code: "link_read_rate_limited",
+    });
 
-      const exactRefund = await h(
-        linkRequest(capability, `/sync/link/blobs/${exactRefundSha}`),
-      );
-      expect(exactRefund.status).toBe(200);
-      expect(new Uint8Array(await exactRefund.arrayBuffer())).toHaveLength(
-        exactRefundContent.length,
-      );
+    const exactRefund = await h(linkRequest(capability, `/sync/link/blobs/${exactRefundSha}`));
+    expect(exactRefund.status).toBe(200);
+    expect(new Uint8Array(await exactRefund.arrayBuffer())).toHaveLength(exactRefundContent.length);
 
-      const completionRefunded = await h(
-        linkRequest(capability, `/sync/link/blobs/${finalByteSha}`),
-      );
-      expect(completionRefunded.status).toBe(429);
-      expect(await json(completionRefunded)).toMatchObject({
-        code: "link_read_rate_limited",
-      });
-    },
-  );
+    const completionRefunded = await h(linkRequest(capability, `/sync/link/blobs/${finalByteSha}`));
+    expect(completionRefunded.status).toBe(429);
+    expect(await json(completionRefunded)).toMatchObject({
+      code: "link_read_rate_limited",
+    });
+  });
 
   it.each([
     [
       "keyed revocation",
-      async (
-        h: SyncRelayHandler,
-        shareId: string,
-        grantId: string,
-        _storage: SyncRelayStorage,
-      ) =>
+      async (h: SyncRelayHandler, shareId: string, grantId: string, _storage: SyncRelayStorage) =>
         await h(
           request(
             OWNER,
@@ -860,17 +871,13 @@ describe("relay capability reads", () => {
       const target = await createLink(h, { paths: ["docs"], access: "view" });
       const untouched = await createLink(h, { paths: ["docs"], access: "view" });
 
-      const targetResponse = await h(
-        linkRequest(target.capability, `/sync/link/blobs/${blobSha}`),
-      );
+      const targetResponse = await h(linkRequest(target.capability, `/sync/link/blobs/${blobSha}`));
       const untouchedResponse = await h(
         linkRequest(untouched.capability, `/sync/link/blobs/${blobSha}`),
       );
       expect(targetResponse.status).toBe(200);
       expect(untouchedResponse.status).toBe(200);
-      expect(targetResponse.headers.get("content-length")).toBe(
-        String(Buffer.byteLength(content)),
-      );
+      expect(targetResponse.headers.get("content-length")).toBe(String(Buffer.byteLength(content)));
       expect(untouchedResponse.headers.get("content-length")).toBe(
         String(Buffer.byteLength(content)),
       );
@@ -898,10 +905,7 @@ describe("relay capability reads", () => {
         kind: "terminated",
         message: "link grant changed during stream",
       });
-      const untouchedBytes = await readRemainingBytes(
-        untouchedReader,
-        untouchedFirst.value,
-      );
+      const untouchedBytes = await readRemainingBytes(untouchedReader, untouchedFirst.value);
       expect(new TextDecoder().decode(untouchedBytes)).toBe(content);
     },
   );
@@ -932,17 +936,23 @@ describe("relay capability reads", () => {
     expect(linkMeta).not.toHaveProperty("participants");
 
     const recipientLog = await json(
-      await h(request(RECIPIENT, "/sync/shares/share-0/log?since=0&limit=100&originId=recipient-replica")),
+      await h(
+        request(RECIPIENT, "/sync/shares/share-0/log?since=0&limit=100&originId=recipient-replica"),
+      ),
     );
     const linkLog = await json(
       await h(linkRequest(capability, "/sync/link/log?since=0&limit=100")),
     );
     const recipientOps = recipientLog.ops as Array<Record<string, unknown>>;
-    const stored = storage.fetchLogCoordinate({ workspaceId: WORKSPACE, originId: "origin-a", originSeq: 1 })!;
+    const stored = storage.fetchLogCoordinate({
+      workspaceId: WORKSPACE,
+      originId: "origin-a",
+      originSeq: 1,
+    })!;
     expect(stored.admittedAuthorSnapshot).toBeUndefined();
     expect(JSON.parse(stored.payloadJson)).not.toHaveProperty("authors");
     expect(stored.settlementAdmission).toBeUndefined();
-    expect(recipientOps.find(op => op.opKind === "moment.append")?.payload).toMatchObject({
+    expect(recipientOps.find((op) => op.opKind === "moment.append")?.payload).toMatchObject({
       authors: [{ kind: "unattributed" }],
     });
     // This named-reader fallback is not a relay-journal snapshot; accountless replay omits authors.
@@ -951,7 +961,8 @@ describe("relay capability reads", () => {
       return { ...op, payload: artifact };
     });
     // Named sync carries reference mappings; link logs keep their file replay contract.
-    const { ownOriginId, workReferences, nextReferenceAfter, referenceHasMore, ...recipientPage } = recipientLog;
+    const { ownOriginId, workReferences, nextReferenceAfter, referenceHasMore, ...recipientPage } =
+      recipientLog;
     expect(ownOriginId).toMatch(/^relay:share-member:[a-f0-9]{64}$/);
     expect(workReferences).toEqual([]);
     expect(nextReferenceAfter).toBeTypeOf("string");
@@ -959,23 +970,21 @@ describe("relay capability reads", () => {
     expect(linkLog).not.toHaveProperty("workReferences");
     expect(linkLog).not.toHaveProperty("nextReferenceAfter");
     expect(linkLog).not.toHaveProperty("referenceHasMore");
-    expect(withoutReceivedIdentity(linkLog)).toEqual(withoutReceivedIdentity({ ...recipientPage, ops: linkOps, epochLogFloor: 0 }));
+    expect(withoutReceivedIdentity(linkLog)).toEqual(
+      withoutReceivedIdentity({ ...recipientPage, ops: linkOps, epochLogFloor: 0 }),
+    );
     expect(linkLog).not.toHaveProperty("ownOriginId");
     expect(linkOps.every((op) => !Object.hasOwn(op, "originId"))).toBe(true);
     expect(JSON.stringify(linkLog)).not.toContain('"authors"');
     expect(JSON.stringify(linkLog)).not.toContain("private/hidden.md");
 
-    const recipientBlob = await h(
-      request(RECIPIENT, `/sync/shares/share-0/blobs/${sharedSha}`),
-    );
+    const recipientBlob = await h(request(RECIPIENT, `/sync/shares/share-0/blobs/${sharedSha}`));
     const linkBlob = await h(linkRequest(capability, `/sync/link/blobs/${sharedSha}`));
     expect(linkBlob.status).toBe(recipientBlob.status);
     expect(await linkBlob.arrayBuffer()).toEqual(await recipientBlob.arrayBuffer());
 
     const missingSha = sha256("missing");
-    await denialBytes(
-      await h(request(RECIPIENT, `/sync/shares/share-0/blobs/${missingSha}`)),
-    );
+    await denialBytes(await h(request(RECIPIENT, `/sync/shares/share-0/blobs/${missingSha}`)));
     expect(
       await denialBytes(await h(linkRequest(capability, `/sync/link/blobs/${hiddenSha}`))),
     ).toBe('404:{"ok":false,"error":"not found"}');
@@ -989,12 +998,7 @@ describe("relay capability reads", () => {
     const h = editHandler(storage);
     const seeded = await seed(h, "edit");
     const initialLog = await json(
-      await h(
-        linkRequest(
-          seeded.capability,
-          "/sync/link/log?since=0&limit=100",
-        ),
-      ),
+      await h(linkRequest(seeded.capability, "/sync/link/log?since=0&limit=100")),
     );
     const initialOps = initialLog.ops as RelayOp[];
     const initialFiles: FileAccumulator = new Map();
@@ -1045,9 +1049,7 @@ describe("relay capability reads", () => {
       },
     ]);
 
-    const current = await json(
-      await h(linkRequest(seeded.capability, "/sync/link/current")),
-    );
+    const current = await json(await h(linkRequest(seeded.capability, "/sync/link/current")));
     const expectedFiles = [
       {
         path: "docs/arrived.md",
@@ -1178,24 +1180,22 @@ describe("relay capability reads", () => {
       await h(linkRequest(seeded.capability, "/sync/link/log?since=0&limit=100")),
     );
     const expectedLinkOps = authenticatedOps
-      .filter((op) =>
-        ["workspace.init", "moment.append", "version.create"].includes(op.opKind),
-      )
+      .filter((op) => ["workspace.init", "moment.append", "version.create"].includes(op.opKind))
       .map(({ originId: _originId, payload, ...op }) => {
         const { authors: _authors, ...artifact } = payload;
         return { ...op, payload: artifact };
       });
-    expect(withoutReceivedIdentity(linkLog)).toEqual(withoutReceivedIdentity({
-      ok: true,
-      ops: expectedLinkOps,
-      nextCursor: authenticatedLog.nextCursor,
-      hasMore: authenticatedLog.hasMore,
-      epochLogFloor: 0,
-    }));
+    expect(withoutReceivedIdentity(linkLog)).toEqual(
+      withoutReceivedIdentity({
+        ok: true,
+        ops: expectedLinkOps,
+        nextCursor: authenticatedLog.nextCursor,
+        hasMore: authenticatedLog.hasMore,
+        epochLogFloor: 0,
+      }),
+    );
     expect(
-      (linkLog.ops as Array<Record<string, unknown>>).every(
-        (op) => !Object.hasOwn(op, "originId"),
-      ),
+      (linkLog.ops as Array<Record<string, unknown>>).every((op) => !Object.hasOwn(op, "originId")),
     ).toBe(true);
     expect(JSON.stringify(linkLog)).not.toContain('"authors"');
     // The excluded kinds by name: a widened accountless boundary must fail
@@ -1208,9 +1208,7 @@ describe("relay capability reads", () => {
       "chat.attachment.add",
     ];
     expect(
-      (linkLog.ops as Array<{ opKind: string }>).some((op) =>
-        chatKinds.includes(op.opKind),
-      ),
+      (linkLog.ops as Array<{ opKind: string }>).some((op) => chatKinds.includes(op.opKind)),
     ).toBe(false);
 
     const skippedChatRows = await json(
@@ -1228,10 +1226,15 @@ describe("relay capability reads", () => {
   it("keeps link log pages and freshness above the workspace epoch floor", async () => {
     const storage = await newStorage();
     const h = editHandler(storage);
-    const seeded = await seed(h, "edit", {}, {
-      replicationEpoch: EPOCH_1,
-      streamIdentity: STREAM_1,
-    });
+    const seeded = await seed(
+      h,
+      "edit",
+      {},
+      {
+        replicationEpoch: EPOCH_1,
+        streamIdentity: STREAM_1,
+      },
+    );
 
     const originalLog = await json(
       await h(linkRequest(seeded.capability, "/sync/link/log?since=0&limit=100")),
@@ -1250,9 +1253,7 @@ describe("relay capability reads", () => {
       hasMore: false,
     });
 
-    const rotatedShare = await json(
-      await h(linkRequest(seeded.capability, "/sync/link/share")),
-    );
+    const rotatedShare = await json(await h(linkRequest(seeded.capability, "/sync/link/share")));
     expect(rotatedShare.lastSettledAtMs).toBeNull();
     expect(rotatedShare.lastSettledKnown).toBe(true);
 
@@ -1266,9 +1267,7 @@ describe("relay capability reads", () => {
         (op) => op.payload.payloadAfterPath,
       ),
     ).toEqual(["docs/after-rotation.md"]);
-    const currentShare = await json(
-      await h(linkRequest(seeded.capability, "/sync/link/share")),
-    );
+    const currentShare = await json(await h(linkRequest(seeded.capability, "/sync/link/share")));
     expect(currentShare.lastSettledAtMs).toBe(1_300);
     expect(currentShare.lastSettledKnown).toBe(true);
   });
@@ -1292,14 +1291,14 @@ describe("relay capability reads", () => {
       },
     );
 
-    const current = await json(
-      await h(linkRequest(seeded.capability, "/sync/link/current")),
-    );
-    expect(current.files).toMatchObject([{
-      path: "docs/shared.md",
-      blobSha256: recreatedSha,
-      contentKind: "text",
-    }]);
+    const current = await json(await h(linkRequest(seeded.capability, "/sync/link/current")));
+    expect(current.files).toMatchObject([
+      {
+        path: "docs/shared.md",
+        blobSha256: recreatedSha,
+        contentKind: "text",
+      },
+    ]);
     const recreatedBlob = await h(
       linkRequest(seeded.capability, `/sync/link/blobs/${recreatedSha}`),
     );
@@ -1307,9 +1306,7 @@ describe("relay capability reads", () => {
     expect(await recreatedBlob.text()).toBe(recreatedContent);
     expect(
       await denialBytes(
-        await h(
-          linkRequest(seeded.capability, `/sync/link/blobs/${seeded.sharedSha}`),
-        ),
+        await h(linkRequest(seeded.capability, `/sync/link/blobs/${seeded.sharedSha}`)),
       ),
     ).toBe(`404:${LINK_REFUSAL_BODY}`);
   });
@@ -1320,33 +1317,59 @@ describe("relay capability reads", () => {
     const seeded = await seed(h, "edit");
     const replacement = "# replacement\n";
     const replacementSha = await putBlob(h, replacement);
-    await appendMoments(h, [moment(3, "docs/shared.md", replacement, 1_300, {
-      objectId: "object-shared", beforePath: "docs/shared.md", beforeContent: "# shared\n",
-    })]);
-    const initial = await json(await h(linkRequest(seeded.capability, "/sync/link/log?since=0&limit=100")));
+    await appendMoments(h, [
+      moment(3, "docs/shared.md", replacement, 1_300, {
+        objectId: "object-shared",
+        beforePath: "docs/shared.md",
+        beforeContent: "# shared\n",
+      }),
+    ]);
+    const initial = await json(
+      await h(linkRequest(seeded.capability, "/sync/link/log?since=0&limit=100")),
+    );
     const imported: FileAccumulator = new Map();
     foldLogOps(imported, initial.ops as RelayOp[]);
-    expect(filesFromAccumulator(imported).map(file => file.path)).toEqual(["docs/shared.md"]);
+    expect(filesFromAccumulator(imported).map((file) => file.path)).toEqual(["docs/shared.md"]);
     for (const sha of [seeded.sharedSha, replacementSha]) {
       expect((await h(linkRequest(seeded.capability, "/sync/link/blobs/" + sha))).status).toBe(200);
     }
 
     // CaptureDriver policy narrowing retires the old head with a delete moment.
-    await appendMoments(h, [moment(4, "docs/shared.md", replacement, 1_400, {
-      objectId: "object-shared", operation: "delete", beforePath: "docs/shared.md", beforeContent: replacement,
-      payload: { metadata: { origin: "local-file", summary: "Stopped tracking by policy" } },
-    })]);
-    const delta = await json(await h(linkRequest(seeded.capability, "/sync/link/log?since=" + String(initial.nextCursor) + "&limit=100")));
-    expect(delta.ops).toEqual([expect.objectContaining({ opKind: "moment.append", payload: expect.objectContaining({
-      operation: "delete", path: "docs/shared.md", payloadBeforePath: "docs/shared.md",
-    }) })]);
+    await appendMoments(h, [
+      moment(4, "docs/shared.md", replacement, 1_400, {
+        objectId: "object-shared",
+        operation: "delete",
+        beforePath: "docs/shared.md",
+        beforeContent: replacement,
+        payload: { metadata: { origin: "local-file", summary: "Stopped tracking by policy" } },
+      }),
+    ]);
+    const delta = await json(
+      await h(
+        linkRequest(
+          seeded.capability,
+          "/sync/link/log?since=" + String(initial.nextCursor) + "&limit=100",
+        ),
+      ),
+    );
+    expect(delta.ops).toEqual([
+      expect.objectContaining({
+        opKind: "moment.append",
+        payload: expect.objectContaining({
+          operation: "delete",
+          path: "docs/shared.md",
+          payloadBeforePath: "docs/shared.md",
+        }),
+      }),
+    ]);
     foldLogOps(imported, delta.ops as RelayOp[]);
     expect(filesFromAccumulator(imported)).toEqual([]);
     const current = await json(await h(linkRequest(seeded.capability, "/sync/link/current")));
     expect(current.files).toMatchObject([]);
     for (const sha of [seeded.sharedSha, replacementSha]) {
-      expect(await denialBytes(await h(linkRequest(seeded.capability, "/sync/link/blobs/" + sha))))
-        .toBe("404:" + LINK_REFUSAL_BODY);
+      expect(
+        await denialBytes(await h(linkRequest(seeded.capability, "/sync/link/blobs/" + sha))),
+      ).toBe("404:" + LINK_REFUSAL_BODY);
     }
   });
 
@@ -1402,18 +1425,28 @@ describe("relay capability reads", () => {
             `/sync/${WORKSPACE}/log`,
             jsonBody({
               originId: "origin-a",
-              ops: [{
-                originSeq: 3,
-                opKind: "version.create",
-                payload: {
-                  versionId: "snapshot-1",
-                  forkSnapshots: [
-                    { objectId: "object-pinned", path: "docs/pinned.md", blobSha256: snapshotSha },
-                    { objectId: "object-private", path: "private/hidden.md", blobSha256: seeded.hiddenSha },
-                  ],
+              ops: [
+                {
+                  originSeq: 3,
+                  opKind: "version.create",
+                  payload: {
+                    versionId: "snapshot-1",
+                    forkSnapshots: [
+                      {
+                        objectId: "object-pinned",
+                        path: "docs/pinned.md",
+                        blobSha256: snapshotSha,
+                      },
+                      {
+                        objectId: "object-private",
+                        path: "private/hidden.md",
+                        blobSha256: seeded.hiddenSha,
+                      },
+                    ],
+                  },
+                  recordedAtMs: 1_300,
                 },
-                recordedAtMs: 1_300,
-              }],
+              ],
             }),
           ),
         )
@@ -1428,7 +1461,9 @@ describe("relay capability reads", () => {
       }),
     ]);
 
-    expect((await h(linkRequest(seeded.capability, `/sync/link/blobs/${snapshotSha}`))).status).toBe(404);
+    expect(
+      (await h(linkRequest(seeded.capability, `/sync/link/blobs/${snapshotSha}`))).status,
+    ).toBe(404);
     for (const [sha, content] of [[editedSha, edited]] as const) {
       const response = await h(linkRequest(seeded.capability, `/sync/link/blobs/${sha}`));
       expect(response.status).toBe(200);
@@ -1480,11 +1515,7 @@ describe("relay capability reads", () => {
 
     const secondLink = await json(
       await h(
-        request(
-          OWNER,
-          `/sync/${WORKSPACE}/shares/share-0/links`,
-          jsonBody({ access: "view" }),
-        ),
+        request(OWNER, `/sync/${WORKSPACE}/shares/share-0/links`, jsonBody({ access: "view" })),
       ),
     );
     const secondExchange = await json(
@@ -1517,11 +1548,7 @@ describe("relay capability reads", () => {
 
     const thirdLink = await json(
       await h(
-        request(
-          OWNER,
-          `/sync/${WORKSPACE}/shares/share-0/links`,
-          jsonBody({ access: "view" }),
-        ),
+        request(OWNER, `/sync/${WORKSPACE}/shares/share-0/links`, jsonBody({ access: "view" })),
       ),
     );
     const thirdExchange = await json(
@@ -1584,13 +1611,7 @@ describe("relay capability reads", () => {
       ),
     );
     const exchange = await json(
-      await h(
-        request(
-          null,
-          "/sync/link-exchange",
-          jsonBody({ secret: linkSecret(rotation.url) }),
-        ),
-      ),
+      await h(request(null, "/sync/link-exchange", jsonBody({ secret: linkSecret(rotation.url) }))),
     );
     expect(exchange.grantId).toBe(seeded.grantId);
     const rotatedCapability = String(exchange.capabilityToken);
@@ -1643,13 +1664,17 @@ describe("relay capability reads", () => {
     expect(
       (
         await h(
-          request(null, "/sync/link-exchange", {...jsonBody({ secret: seeded.secret }),headers:{"content-type":"application/json","x-dohc-relay-exchange-key":"link-read-preflight-relay-key-at-least-32"}}),
+          request(null, "/sync/link-exchange", {
+            ...jsonBody({ secret: seeded.secret }),
+            headers: {
+              "content-type": "application/json",
+              "x-dohc-relay-exchange-key": "link-read-preflight-relay-key-at-least-32",
+            },
+          }),
         )
       ).status,
-     ).toBe(429);
-    const callsAfterPublicExhaustion = limiterCalls.map(
-      (spy) => spy.mock.calls.length,
-    );
+    ).toBe(429);
+    const callsAfterPublicExhaustion = limiterCalls.map((spy) => spy.mock.calls.length);
 
     const ownerContent = "# owner still syncing\n";
     const ownerSha = await putBlob(h, ownerContent);
@@ -1658,19 +1683,13 @@ describe("relay capability reads", () => {
         objectId: "object-owner",
       }),
     ]);
-    const ownerBlob = await h(
-      request(OWNER, `/sync/${WORKSPACE}/blobs/${ownerSha}`),
-    );
+    const ownerBlob = await h(request(OWNER, `/sync/${WORKSPACE}/blobs/${ownerSha}`));
     expect(ownerBlob.status).toBe(200);
     expect(await ownerBlob.text()).toBe(ownerContent);
-    const ownerLog = await h(
-      request(OWNER, `/sync/${WORKSPACE}/log?since=0&limit=100`),
-    );
+    const ownerLog = await h(request(OWNER, `/sync/${WORKSPACE}/log?since=0&limit=100`));
     expect(ownerLog.status).toBe(200);
     expect(((await json(ownerLog)).ops as unknown[]).length).toBeGreaterThan(0);
 
-    expect(limiterCalls.map((spy) => spy.mock.calls.length)).toEqual(
-      callsAfterPublicExhaustion,
-    );
+    expect(limiterCalls.map((spy) => spy.mock.calls.length)).toEqual(callsAfterPublicExhaustion);
   });
 });

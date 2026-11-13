@@ -7,7 +7,8 @@ import { useCallback, useEffect } from "react";
  * private on this computer's own disk.
  */
 export function networkShareNotice(platform: NodeJS.Platform): { title: string; message: string } {
-  const destination = platform === "win32" ? "into your user folder on this computer" : "to this computer's disk";
+  const destination =
+    platform === "win32" ? "into your user folder on this computer" : "to this computer's disk";
   return {
     title: "This workspace is on a network share",
     message: `Anyone who can read the share can read its History, including text deleted from its files. To keep History private, move the workspace ${destination}.`,

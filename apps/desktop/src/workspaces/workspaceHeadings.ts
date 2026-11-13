@@ -51,9 +51,7 @@ function visibleHeadingText(value: string): string {
 // Unicode letters and numbers remain readable instead of being transliterated.
 export function headingAnchorBase(text: string): string {
   const visible = visibleHeadingText(text).normalize("NFC").toLocaleLowerCase();
-  const slug = visible
-    .replace(/[^\p{L}\p{N}\p{M}\s_-]/gu, "")
-    .replace(/\s+/g, "-");
+  const slug = visible.replace(/[^\p{L}\p{N}\p{M}\s_-]/gu, "").replace(/\s+/g, "-");
   if (slug) return slug;
 
   // Emoji- and punctuation-only headings are still valid Markdown headings.
@@ -98,10 +96,7 @@ export function allocateWorkspaceHeadingAnchors(
  * a real repeated `foo-1` heading is never remapped to a repeated `foo`. */
 export function resolveWorkspaceHeadingAnchorTarget<
   Heading extends WorkspaceHeadingAnchorCandidate,
->(
-  headings: readonly Heading[],
-  target: { anchor: string; occurrence?: number },
-): Heading | null {
+>(headings: readonly Heading[], target: { anchor: string; occurrence?: number }): Heading | null {
   let anchor = target.anchor;
   try {
     anchor = decodeURIComponent(anchor);
@@ -112,16 +107,13 @@ export function resolveWorkspaceHeadingAnchorTarget<
   const occurrence = target.occurrence;
   const canonical = headings.find(
     (heading) =>
-      heading.anchor === anchor &&
-      (occurrence === undefined || heading.occurrence === occurrence),
+      heading.anchor === anchor && (occurrence === undefined || heading.occurrence === occurrence),
   );
   if (canonical) return canonical;
   if (occurrence === undefined) return null;
 
   const literalBase = headings.find(
-    (heading) =>
-      headingAnchorBase(heading.text) === anchor &&
-      heading.occurrence === occurrence,
+    (heading) => headingAnchorBase(heading.text) === anchor && heading.occurrence === occurrence,
   );
   if (literalBase) return literalBase;
 
@@ -135,21 +127,27 @@ export function resolveWorkspaceHeadingAnchorTarget<
   if (!anchor.endsWith(allocatedSuffix)) return null;
   const allocatedBase = anchor.slice(0, -allocatedSuffix.length);
   if (!allocatedBase) return null;
-  return headings.find(
-    (heading) =>
-      headingAnchorBase(heading.text) === allocatedBase &&
-      heading.occurrence === occurrence,
-  ) ?? null;
+  return (
+    headings.find(
+      (heading) =>
+        headingAnchorBase(heading.text) === allocatedBase && heading.occurrence === occurrence,
+    ) ?? null
+  );
 }
 
-function lineRecords(markdown: string): Array<{ text: string; line: number; offset: number; end: number }> {
+function lineRecords(
+  markdown: string,
+): Array<{ text: string; line: number; offset: number; end: number }> {
   const records: Array<{ text: string; line: number; offset: number; end: number }> = [];
   let offset = 0;
   const lines = markdown.split(/\r?\n/);
   for (let index = 0; index < lines.length; index += 1) {
     const text = lines[index] ?? "";
-    const newlineLength = markdown.startsWith("\r\n", offset + text.length) ? 2 :
-      markdown.startsWith("\n", offset + text.length) ? 1 : 0;
+    const newlineLength = markdown.startsWith("\r\n", offset + text.length)
+      ? 2
+      : markdown.startsWith("\n", offset + text.length)
+        ? 1
+        : 0;
     records.push({ text, line: index + 1, offset, end: offset + text.length + newlineLength });
     offset += text.length + newlineLength;
   }
@@ -194,9 +192,7 @@ export function extractWorkspaceHeadings(markdown: string): WorkspaceHeading[] {
     }
     if (fence || /^(?: {4}|\t)/.test(row.text)) continue;
 
-    const atx = row.text.match(
-      /^[ \t]{0,3}(#{1,6})[ \t]+(.+?)(?:[ \t]+#+[ \t]*)?$/,
-    );
+    const atx = row.text.match(/^[ \t]{0,3}(#{1,6})[ \t]+(.+?)(?:[ \t]+#+[ \t]*)?$/);
     if (atx?.[1] && atx[2]) {
       const text = visibleHeadingText(atx[2]);
       if (text) {
@@ -212,11 +208,7 @@ export function extractWorkspaceHeadings(markdown: string): WorkspaceHeading[] {
     }
 
     const underline = lines[index + 1];
-    if (
-      !underline ||
-      row.text.trim().length === 0 ||
-      !canBeSetextHeadingText(row.text)
-    ) continue;
+    if (!underline || row.text.trim().length === 0 || !canBeSetextHeadingText(row.text)) continue;
     const setext = underline.text.match(/^[ \t]{0,3}(=+|-+)[ \t]*$/);
     if (!setext?.[1]) continue;
     const text = visibleHeadingText(row.text.trim());

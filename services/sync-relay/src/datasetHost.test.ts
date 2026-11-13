@@ -1,4 +1,4 @@
-import {createDatasetAppRoutes} from "./datasetRoutes";
+import { createDatasetAppRoutes } from "./datasetRoutes";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -10,13 +10,19 @@ import { resolveAppDatasetCapability } from "@dohc/security-contract/dataset-aut
 import { fixture as appFixture, limits, owner, pushFile } from "./datasetTestFixture";
 import type { AppBackendAuth } from "./appBackendAuthority";
 import type { PublicEditRelease } from "@dohc/security-contract";
-import { createRelayDatasetHost, datasetReferenceReadContainsRecord, type RelayDatasetHost } from "./datasetHost";
+import {
+  createRelayDatasetHost,
+  datasetReferenceReadContainsRecord,
+  type RelayDatasetHost,
+} from "./datasetHost";
 import { workspaceUsageBytes } from "./storage/workspaces";
 import { createDatasetJournal } from "@dohc/app-backend-runtime/journal";
 import { encodeRecoveryManifest } from "@dohc/app-backend-runtime/recovery";
 
 const cleanups: Array<() => Promise<void>> = [];
-afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
+afterEach(async () => {
+  for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+});
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const schemaSql = "CREATE TABLE people(id TEXT PRIMARY KEY NOT NULL,name TEXT NOT NULL);";
 const operationSource = `globalThis.operations={
@@ -25,304 +31,843 @@ const operationSource = `globalThis.operations={
   edit(ctx,input){ctx.db.execute('UPDATE people SET name=? WHERE id=?',[input.name,input.id]);return true;}
 };`;
 const definition: DatasetDefinition = {
-  formatVersion: 1, datasetId: id(1), name: "Registrations", schemaPath: "registrations/schema.sql", operationsPath: "registrations/operations.js",
-  tables: [{tableId: id(2), name: "People", sqlName: "people", primaryKey: "id", fields: [
-    {fieldId: id(3), name: "ID", sqlColumn: "id", type: "text", required: true, unique: true},
-    {fieldId: id(4), name: "Name", sqlColumn: "name", type: "text", required: true, unique: false},
-  ]}], operations: [
-    {operationId: id(5), name: "submit", label: "Submit", tableId: id(2), kind: "create", access: "link", readOnly: false, fieldIds: [id(4)]},
-    {operationId: id(6), name: "read", label: "Read", tableId: id(2), kind: "read", access: "helper", readOnly: true, fieldIds: [id(3), id(4)]},
-    {operationId: id(7), name: "edit", label: "Edit", tableId: id(2), kind: "edit", access: "helper", readOnly: false, fieldIds: [id(4)]},
+  formatVersion: 1,
+  datasetId: id(1),
+  name: "Registrations",
+  schemaPath: "registrations/schema.sql",
+  operationsPath: "registrations/operations.js",
+  tables: [
+    {
+      tableId: id(2),
+      name: "People",
+      sqlName: "people",
+      primaryKey: "id",
+      fields: [
+        { fieldId: id(3), name: "ID", sqlColumn: "id", type: "text", required: true, unique: true },
+        {
+          fieldId: id(4),
+          name: "Name",
+          sqlColumn: "name",
+          type: "text",
+          required: true,
+          unique: false,
+        },
+      ],
+    },
+  ],
+  operations: [
+    {
+      operationId: id(5),
+      name: "submit",
+      label: "Submit",
+      tableId: id(2),
+      kind: "create",
+      access: "link",
+      readOnly: false,
+      fieldIds: [id(4)],
+    },
+    {
+      operationId: id(6),
+      name: "read",
+      label: "Read",
+      tableId: id(2),
+      kind: "read",
+      access: "helper",
+      readOnly: true,
+      fieldIds: [id(3), id(4)],
+    },
+    {
+      operationId: id(7),
+      name: "edit",
+      label: "Edit",
+      tableId: id(2),
+      kind: "edit",
+      access: "helper",
+      readOnly: false,
+      fieldIds: [id(4)],
+    },
   ],
 };
-const revision = describeDatasetRevision({definition, revision: 1, schemaSql, operationSource});
-const scope = {workspaceId: "w", datasetId: definition.datasetId};
-const helper: AppBackendAuth = {kind: "named", workspaceId: "w", userId: "helper", grantId: "helper-grant"};
+const revision = describeDatasetRevision({ definition, revision: 1, schemaSql, operationSource });
+const scope = { workspaceId: "w", datasetId: definition.datasetId };
+const helper: AppBackendAuth = {
+  kind: "named",
+  workspaceId: "w",
+  userId: "helper",
+  grantId: "helper-grant",
+};
 
 it("tests the filtered primary key field rather than the row envelope id", () => {
-  expect(datasetReferenceReadContainsRecord({rows: [{id: "wrong", values: {[id(3)]: "record"}}]}, id(3), "record")).toBe(true);
-  expect(datasetReferenceReadContainsRecord({rows: [{id: "record", values: {[id(3)]: "wrong"}}]}, id(3), "record")).toBe(false);
-  expect(datasetReferenceReadContainsRecord({rows: [{id: 7, values: {[id(3)]: "7"}}]}, id(3), 7)).toBe(false);
+  expect(
+    datasetReferenceReadContainsRecord(
+      { rows: [{ id: "wrong", values: { [id(3)]: "record" } }] },
+      id(3),
+      "record",
+    ),
+  ).toBe(true);
+  expect(
+    datasetReferenceReadContainsRecord(
+      { rows: [{ id: "record", values: { [id(3)]: "wrong" } }] },
+      id(3),
+      "record",
+    ),
+  ).toBe(false);
+  expect(
+    datasetReferenceReadContainsRecord({ rows: [{ id: 7, values: { [id(3)]: "7" } }] }, id(3), 7),
+  ).toBe(false);
 });
 
-async function fixture(startupExclusive = false, prepared = { revision, schemaSql, operationSource }, publicEditRelease?: PublicEditRelease) {
+async function fixture(
+  startupExclusive = false,
+  prepared = { revision, schemaSql, operationSource },
+  publicEditRelease?: PublicEditRelease,
+) {
   const { revision, schemaSql, operationSource } = prepared;
-  const base = appFixture(), directory = await mkdtemp(join(tmpdir(), "relay-dataset-test-"));
+  const base = appFixture(),
+    directory = await mkdtemp(join(tmpdir(), "relay-dataset-test-"));
   let host: RelayDatasetHost;
   const shutdownErrors: unknown[] = [];
   let now = 10;
-  const create = () => createRelayDatasetHost({publicEditRelease, storage: base.storage, directory, limits, startupExclusive, nowMs: () => now, onShutdownError(error) {shutdownErrors.push(error);}});
+  const create = () =>
+    createRelayDatasetHost({
+      publicEditRelease,
+      storage: base.storage,
+      directory,
+      limits,
+      startupExclusive,
+      nowMs: () => now,
+      onShutdownError(error) {
+        shutdownErrors.push(error);
+      },
+    });
   host = await create();
-  cleanups.push(async () => {await host.close(); await rm(directory, {recursive: true, force: true, maxRetries: 8, retryDelay: 25}); expect(shutdownErrors).toEqual([]);});
-  const activate = () => host.activate(owner, {...scope, revision, schemaSql, operationSource, capacityBytes: 1024 * 1024});
-  const invoke = (auth: AppBackendAuth, operationId: string, input = {}, publicationId?: string, key = "request") => host.invoke(auth,
-    {...scope, revision: revision.revision, revisionSha256: revision.revisionSha256, operationId, input, idempotencyKey: key,
-      ...(publicationId ? {access: {kind: "app" as const, appId: publicationId}} : {})});
+  cleanups.push(async () => {
+    await host.close();
+    await rm(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 });
+    expect(shutdownErrors).toEqual([]);
+  });
+  const activate = () =>
+    host.activate(owner, {
+      ...scope,
+      revision,
+      schemaSql,
+      operationSource,
+      capacityBytes: 1024 * 1024,
+    });
+  const invoke = (
+    auth: AppBackendAuth,
+    operationId: string,
+    input = {},
+    publicationId?: string,
+    key = "request",
+  ) =>
+    host.invoke(auth, {
+      ...scope,
+      revision: revision.revision,
+      revisionSha256: revision.revisionSha256,
+      operationId,
+      input,
+      idempotencyKey: key,
+      ...(publicationId ? { access: { kind: "app" as const, appId: publicationId } } : {}),
+    });
   function addHelper() {
-    base.storage.tx(() => base.storage.db.prepare(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
-      VALUES('helper-grant','s','user','helper',NULL,'view',1,'active',1,NULL,NULL)`).run());
+    base.storage.tx(() =>
+      base.storage.db
+        .prepare(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
+      VALUES('helper-grant','s','user','helper',NULL,'view',1,'active',1,NULL,NULL)`)
+        .run(),
+    );
   }
   function publish(operationIds = [id(5)], linkReads?: AppDatasetBinding["linkReads"]) {
-    const previous = base.storage.readAppPublication({...scope, publicationId: base.publicationId, ownerUserId: "owner", limits});
-    const capability = resolveAppDatasetCapability({kind: "dataset", datasetId: id(1), revision: 1, revisionSha256: revision.revisionSha256, operationIds, ...(linkReads ? {linkReads} : {})}, revision);
-    const candidate = {...previous.candidate, capabilities: [capability], files: previous.candidate.files.filter(file => file.path === "bundle.js")};
-    const digest = (domain: string, value: unknown) => createHash("sha256").update(JSON.stringify([domain, value])).digest("hex");
+    const previous = base.storage.readAppPublication({
+      ...scope,
+      publicationId: base.publicationId,
+      ownerUserId: "owner",
+      limits,
+    });
+    const capability = resolveAppDatasetCapability(
+      {
+        kind: "dataset",
+        datasetId: id(1),
+        revision: 1,
+        revisionSha256: revision.revisionSha256,
+        operationIds,
+        ...(linkReads ? { linkReads } : {}),
+      },
+      revision,
+    );
+    const candidate = {
+      ...previous.candidate,
+      capabilities: [capability],
+      files: previous.candidate.files.filter((file) => file.path === "bundle.js"),
+    };
+    const digest = (domain: string, value: unknown) =>
+      createHash("sha256")
+        .update(JSON.stringify([domain, value]))
+        .digest("hex");
     candidate.bundleDigest = digest("dohc-app-bundle-v1", candidate.files);
-    candidate.buildDigest = digest("dohc-app-build-v1", {sourceDigest: candidate.sourceDigest, dependencyLockDigest: candidate.dependencyLockDigest,
-      compiler: candidate.compilerIdentity, bundleDigest: candidate.bundleDigest});
-    const result = base.storage.publishAppPublication({workspaceId: "w", ownerUserId: "owner", shareId: "s", grantId: "g", generation: 1,
-      candidate, blobs: [], limits, nowMs: 10});
-    host.bindPublication(owner, {...scope, publicationId: result.publicationId});
+    candidate.buildDigest = digest("dohc-app-build-v1", {
+      sourceDigest: candidate.sourceDigest,
+      dependencyLockDigest: candidate.dependencyLockDigest,
+      compiler: candidate.compilerIdentity,
+      bundleDigest: candidate.bundleDigest,
+    });
+    const result = base.storage.publishAppPublication({
+      workspaceId: "w",
+      ownerUserId: "owner",
+      shareId: "s",
+      grantId: "g",
+      generation: 1,
+      candidate,
+      blobs: [],
+      limits,
+      nowMs: 10,
+    });
+    host.bindPublication(owner, { ...scope, publicationId: result.publicationId });
     return result.publicationId;
   }
   // These tests move the clock by minutes, so their link sessions outlast it.
-  return {...base, link: (id: string) => base.link(id, Number.MAX_SAFE_INTEGER), get storage() {return base.storage;}, directory, get host() {return host;}, activate, invoke, publish, addHelper,
-    async reopen() {await host.close(); host = await create();}, advance(ms: number) {now += ms;}};
+  return {
+    ...base,
+    link: (id: string) => base.link(id, Number.MAX_SAFE_INTEGER),
+    get storage() {
+      return base.storage;
+    },
+    directory,
+    get host() {
+      return host;
+    },
+    activate,
+    invoke,
+    publish,
+    addHelper,
+    async reopen() {
+      await host.close();
+      host = await create();
+    },
+    advance(ms: number) {
+      now += ms;
+    },
+  };
 }
 
 it("permanently deletes at the owner authority and releases private storage without deleting source publications", async () => {
-  const f = await fixture(); await f.activate(); const publicationId = f.publish(), link = f.link("friend");
-  await f.invoke(link,id(5),{name:"Deleted"},publicationId);
-  f.host.archiveDataset(owner,scope);
-  const preview = f.host.deletePreview(owner,scope);
-  const request = {...scope,expected:preview.cursor,reviewToken:preview.reviewToken,acknowledge:true as const};
-  await expect(f.host.deleteDataset(link,request)).rejects.toThrow();
-  const usage = Number(f.storage.db.prepare("SELECT storage_bytes FROM sync_relay_dataset_usage WHERE workspace_id=? AND dataset_id=?").get(scope.workspaceId,scope.datasetId)!.storage_bytes);
-  const before = workspaceUsageBytes(f.storage,"w");
-  await expect(f.host.deleteDataset(owner,request)).resolves.toEqual({deleted:true,datasetId:scope.datasetId});
-  expect(workspaceUsageBytes(f.storage,"w")).toBe(before-usage);
-  for(const table of ["dohc_dataset_catalog","dohc_dataset_bindings","dohc_dataset_events","dohc_dataset_checkpoint_chunks","sync_relay_dataset_files","sync_relay_dataset_usage"])
+  const f = await fixture();
+  await f.activate();
+  const publicationId = f.publish(),
+    link = f.link("friend");
+  await f.invoke(link, id(5), { name: "Deleted" }, publicationId);
+  f.host.archiveDataset(owner, scope);
+  const preview = f.host.deletePreview(owner, scope);
+  const request = {
+    ...scope,
+    expected: preview.cursor,
+    reviewToken: preview.reviewToken,
+    acknowledge: true as const,
+  };
+  await expect(f.host.deleteDataset(link, request)).rejects.toThrow();
+  const usage = Number(
+    f.storage.db
+      .prepare(
+        "SELECT storage_bytes FROM sync_relay_dataset_usage WHERE workspace_id=? AND dataset_id=?",
+      )
+      .get(scope.workspaceId, scope.datasetId)!.storage_bytes,
+  );
+  const before = workspaceUsageBytes(f.storage, "w");
+  await expect(f.host.deleteDataset(owner, request)).resolves.toEqual({
+    deleted: true,
+    datasetId: scope.datasetId,
+  });
+  expect(workspaceUsageBytes(f.storage, "w")).toBe(before - usage);
+  for (const table of [
+    "dohc_dataset_catalog",
+    "dohc_dataset_bindings",
+    "dohc_dataset_events",
+    "dohc_dataset_checkpoint_chunks",
+    "sync_relay_dataset_files",
+    "sync_relay_dataset_usage",
+  ])
     expect(f.storage.db.prepare(`SELECT count(*) n FROM ${table}`).get()!.n).toBe(0);
-  expect(f.storage.db.prepare("SELECT 1 FROM sync_relay_app_publications WHERE publication_id=?").get(publicationId)).toBeTruthy();
+  expect(
+    f.storage.db
+      .prepare("SELECT 1 FROM sync_relay_app_publications WHERE publication_id=?")
+      .get(publicationId),
+  ).toBeTruthy();
   await f.reopen();
   await expect(f.activate()).rejects.toThrow("deleted");
-  await expect(f.invoke(link,id(5),{name:"Deleted"},publicationId)).rejects.toThrow();
+  await expect(f.invoke(link, id(5), { name: "Deleted" }, publicationId)).rejects.toThrow();
 });
 
 it("keeps public submission separate from discovery and rejects forged cross-workspace bindings", async () => {
-  const f = await fixture(); await f.activate();
-  const publicationId = f.publish(), link = f.link("friend");
-  expect(() => f.host.list(link, {workspaceId: "w"})).toThrow();
+  const f = await fixture();
+  await f.activate();
+  const publicationId = f.publish(),
+    link = f.link("friend");
+  expect(() => f.host.list(link, { workspaceId: "w" })).toThrow();
   expect(() => f.host.describe(link, scope)).toThrow();
   await expect(f.invoke(link, id(6), {}, publicationId)).rejects.toThrow();
-  await expect(f.invoke(link, id(5), {name: "friend"})).rejects.toThrow();
-  const otherOwner: AppBackendAuth = {kind: "named", workspaceId: "other", userId: "other-owner"};
-  f.storage.claimWorkspace({workspaceId: "other", ownerUserId: "other-owner", createdAtMs: 1});
-  await expect(f.host.activate(otherOwner, {...scope, revision, schemaSql, operationSource})).rejects.toThrow();
-  await expect(f.host.invoke(link, {...scope, workspaceId: "other", revision: 1, revisionSha256: revision.revisionSha256,
-    operationId: id(5), input: {name: "bad"}, idempotencyKey: "bad", access: {kind: "app", appId: publicationId}})).rejects.toThrow();
-  expect(() => f.host.bindPublication(otherOwner, {...scope, publicationId})).toThrow();
-  expect(f.host.list(otherOwner, {workspaceId: "other"}).datasets).toEqual([]);
+  await expect(f.invoke(link, id(5), { name: "friend" })).rejects.toThrow();
+  const otherOwner: AppBackendAuth = { kind: "named", workspaceId: "other", userId: "other-owner" };
+  f.storage.claimWorkspace({ workspaceId: "other", ownerUserId: "other-owner", createdAtMs: 1 });
+  await expect(
+    f.host.activate(otherOwner, { ...scope, revision, schemaSql, operationSource }),
+  ).rejects.toThrow();
+  await expect(
+    f.host.invoke(link, {
+      ...scope,
+      workspaceId: "other",
+      revision: 1,
+      revisionSha256: revision.revisionSha256,
+      operationId: id(5),
+      input: { name: "bad" },
+      idempotencyKey: "bad",
+      access: { kind: "app", appId: publicationId },
+    }),
+  ).rejects.toThrow();
+  expect(() => f.host.bindPublication(otherOwner, { ...scope, publicationId })).toThrow();
+  expect(f.host.list(otherOwner, { workspaceId: "other" }).datasets).toEqual([]);
 });
 
 it("allows only explicitly granted helper operations with view-only source access", async () => {
-  const f = await fixture(); await f.activate(); f.addHelper();
+  const f = await fixture();
+  await f.activate();
+  f.addHelper();
   const publicationId = f.publish([id(5), id(6), id(7)]);
-  expect(f.host.list(helper, {workspaceId: "w"}).datasets).toEqual([]);
+  expect(f.host.list(helper, { workspaceId: "w" }).datasets).toEqual([]);
   await expect(f.invoke(helper, id(6), {}, publicationId)).rejects.toThrow();
-  f.host.setDataGrant(owner, {...scope, grantId: "helper-grant", grant: {operationIds: [id(6)], discover: true, revision: 1, revisionSha256: revision.revisionSha256}});
+  f.host.setDataGrant(owner, {
+    ...scope,
+    grantId: "helper-grant",
+    grant: {
+      operationIds: [id(6)],
+      discover: true,
+      revision: 1,
+      revisionSha256: revision.revisionSha256,
+    },
+  });
   expect((await f.invoke(helper, id(6), {}, publicationId)).result).toEqual([]);
-  await expect(f.invoke(helper, id(7), {id: "other", name: "bad"}, publicationId)).rejects.toThrow();
-  expect(f.host.describe(helper, scope).operations.map(operation => operation.name)).toEqual(["read"]);
-  expect(() => f.host.bindPublication(helper, {...scope, publicationId})).toThrow();
-  f.storage.tx(() => f.storage.db.prepare("UPDATE sync_relay_share_grants SET status='revoked',revoked_at_ms=10 WHERE grant_id='helper-grant'").run());
-  expect(() => f.host.list(helper, {workspaceId: "w"})).toThrow();
+  await expect(
+    f.invoke(helper, id(7), { id: "other", name: "bad" }, publicationId),
+  ).rejects.toThrow();
+  expect(f.host.describe(helper, scope).operations.map((operation) => operation.name)).toEqual([
+    "read",
+  ]);
+  expect(() => f.host.bindPublication(helper, { ...scope, publicationId })).toThrow();
+  f.storage.tx(() =>
+    f.storage.db
+      .prepare(
+        "UPDATE sync_relay_share_grants SET status='revoked',revoked_at_ms=10 WHERE grant_id='helper-grant'",
+      )
+      .run(),
+  );
+  expect(() => f.host.list(helper, { workspaceId: "w" })).toThrow();
   await expect(f.invoke(helper, id(6), {}, publicationId)).rejects.toThrow();
 });
 
-it.each(["invalid principal", "revoked parent", "stale generation"] as const)("refuses named publication access with a %s", async reason => {
-  const f = await fixture(); await f.activate(); f.addHelper();
-  const publicationId = f.publish([id(6)]);
-  f.host.setDataGrant(owner, {...scope, grantId: "helper-grant", grant: {operationIds: [id(6)], discover: true, revision: 1, revisionSha256: revision.revisionSha256}});
-  if (reason === "revoked parent") {
-    f.storage.tx(() => {
-      f.storage.db.prepare(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
-        VALUES('publication-parent','s','link',NULL,NULL,'view',1,'active',1,NULL,NULL)`).run();
-      f.storage.db.prepare("UPDATE sync_relay_share_grants SET principal_kind='user',principal_user_id='reader',parent_grant_id='publication-parent' WHERE grant_id='g'").run();
+it.each(["invalid principal", "revoked parent", "stale generation"] as const)(
+  "refuses named publication access with a %s",
+  async (reason) => {
+    const f = await fixture();
+    await f.activate();
+    f.addHelper();
+    const publicationId = f.publish([id(6)]);
+    f.host.setDataGrant(owner, {
+      ...scope,
+      grantId: "helper-grant",
+      grant: {
+        operationIds: [id(6)],
+        discover: true,
+        revision: 1,
+        revisionSha256: revision.revisionSha256,
+      },
     });
-  }
-  for (const auth of [owner, helper]) expect(f.host.publication(auth, publicationId)).toBeTruthy();
-  const readGrant = f.storage.getShareGrant.bind(f.storage);
-  const storedGrant = vi.spyOn(f.storage, "getShareGrant");
-  try {
-    if (reason === "invalid principal") {
-      storedGrant.mockImplementation(grantId => {
-        const grant = readGrant(grantId);
-        return grantId === "g" && grant ? {...grant, principalUserId: "unexpected-user"} : grant;
+    if (reason === "revoked parent") {
+      f.storage.tx(() => {
+        f.storage.db
+          .prepare(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
+        VALUES('publication-parent','s','link',NULL,NULL,'view',1,'active',1,NULL,NULL)`)
+          .run();
+        f.storage.db
+          .prepare(
+            "UPDATE sync_relay_share_grants SET principal_kind='user',principal_user_id='reader',parent_grant_id='publication-parent' WHERE grant_id='g'",
+          )
+          .run();
       });
-    } else if (reason === "revoked parent") {
-      f.storage.tx(() => f.storage.db.prepare("UPDATE sync_relay_share_grants SET status='revoked',revoked_at_ms=10 WHERE grant_id='publication-parent'").run());
-    } else {
-      f.storage.tx(() => f.storage.db.prepare("UPDATE sync_relay_share_grants SET generation=2 WHERE grant_id='g'").run());
     }
-    for (const auth of [owner, helper]) {
-      expect(() => f.host.publication(auth, publicationId)).toThrow();
-      await expect(f.invoke(auth, id(6), {}, publicationId)).rejects.toThrow();
+    for (const auth of [owner, helper])
+      expect(f.host.publication(auth, publicationId)).toBeTruthy();
+    const readGrant = f.storage.getShareGrant.bind(f.storage);
+    const storedGrant = vi.spyOn(f.storage, "getShareGrant");
+    try {
+      if (reason === "invalid principal") {
+        storedGrant.mockImplementation((grantId) => {
+          const grant = readGrant(grantId);
+          return grantId === "g" && grant
+            ? { ...grant, principalUserId: "unexpected-user" }
+            : grant;
+        });
+      } else if (reason === "revoked parent") {
+        f.storage.tx(() =>
+          f.storage.db
+            .prepare(
+              "UPDATE sync_relay_share_grants SET status='revoked',revoked_at_ms=10 WHERE grant_id='publication-parent'",
+            )
+            .run(),
+        );
+      } else {
+        f.storage.tx(() =>
+          f.storage.db
+            .prepare("UPDATE sync_relay_share_grants SET generation=2 WHERE grant_id='g'")
+            .run(),
+        );
+      }
+      for (const auth of [owner, helper]) {
+        expect(() => f.host.publication(auth, publicationId)).toThrow();
+        await expect(f.invoke(auth, id(6), {}, publicationId)).rejects.toThrow();
+      }
+      expect(f.host.describe(helper, scope).operations.map((operation) => operation.name)).toEqual([
+        "read",
+      ]);
+    } finally {
+      storedGrant.mockRestore();
     }
-    expect(f.host.describe(helper, scope).operations.map(operation => operation.name)).toEqual(["read"]);
-  } finally { storedGrant.mockRestore(); }
-});
+  },
+);
 
 it("rejects cross-workspace grant targets and returns metadata quota on revocation", async () => {
-  const f = await fixture(); await f.activate(); f.addHelper();
+  const f = await fixture();
+  await f.activate();
+  f.addHelper();
   const before = workspaceUsageBytes(f.storage, "w");
-  f.host.setDataGrant(owner, {...scope, grantId: "helper-grant", grant: {operationIds: [id(6)], discover: true, revision: 1, revisionSha256: revision.revisionSha256}});
+  f.host.setDataGrant(owner, {
+    ...scope,
+    grantId: "helper-grant",
+    grant: {
+      operationIds: [id(6)],
+      discover: true,
+      revision: 1,
+      revisionSha256: revision.revisionSha256,
+    },
+  });
   expect(workspaceUsageBytes(f.storage, "w")).toBeGreaterThan(before);
-  f.host.setDataGrant(owner, {...scope, grantId: "helper-grant", grant: null});
+  f.host.setDataGrant(owner, { ...scope, grantId: "helper-grant", grant: null });
   expect(workspaceUsageBytes(f.storage, "w")).toBe(before);
-  f.storage.claimWorkspace({workspaceId: "other", ownerUserId: "other-owner", createdAtMs: 1});
-  f.storage.createShare({share: {shareId: "other-share", workspaceId: "other", granterUserId: "other-owner", selectorJson: JSON.stringify({paths: ["app"], versionId: null}), createdAtMs: 1},
-    grant: {grantId: "other-grant", shareId: "other-share", principalKind: "user", principalUserId: "helper", principalEmail: null,
-      access: "view", generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null, parentGrantId: null}});
-  expect(() => f.host.setDataGrant(owner, {...scope, grantId: "other-grant", grant: {operationIds: [id(6)], discover: true, revision: 1, revisionSha256: revision.revisionSha256}})).toThrow();
-  expect(() => f.host.setDataGrant(owner, {...scope, grantId: "missing", grant: {operationIds: [id(6)], discover: true, revision: 1, revisionSha256: revision.revisionSha256}})).toThrow();
+  f.storage.claimWorkspace({ workspaceId: "other", ownerUserId: "other-owner", createdAtMs: 1 });
+  f.storage.createShare({
+    share: {
+      shareId: "other-share",
+      workspaceId: "other",
+      granterUserId: "other-owner",
+      selectorJson: JSON.stringify({ paths: ["app"], versionId: null }),
+      createdAtMs: 1,
+    },
+    grant: {
+      grantId: "other-grant",
+      shareId: "other-share",
+      principalKind: "user",
+      principalUserId: "helper",
+      principalEmail: null,
+      access: "view",
+      generation: 1,
+      status: "active",
+      createdAtMs: 1,
+      revokedAtMs: null,
+      parentGrantId: null,
+    },
+  });
+  expect(() =>
+    f.host.setDataGrant(owner, {
+      ...scope,
+      grantId: "other-grant",
+      grant: {
+        operationIds: [id(6)],
+        discover: true,
+        revision: 1,
+        revisionSha256: revision.revisionSha256,
+      },
+    }),
+  ).toThrow();
+  expect(() =>
+    f.host.setDataGrant(owner, {
+      ...scope,
+      grantId: "missing",
+      grant: {
+        operationIds: [id(6)],
+        discover: true,
+        revision: 1,
+        revisionSha256: revision.revisionSha256,
+      },
+    }),
+  ).toThrow();
 });
 
 it("rolls quota refusal back with the event and receipt, then accepts the same retry", async () => {
-  const f = await fixture(); await f.activate();
-  const before = workspaceUsageBytes(f.storage, "w"), quota = f.storage.options.workspaceQuotaBytes;
+  const f = await fixture();
+  await f.activate();
+  const before = workspaceUsageBytes(f.storage, "w"),
+    quota = f.storage.options.workspaceQuotaBytes;
   f.storage.options.workspaceQuotaBytes = before + 10;
-  await expect(f.invoke(owner, id(5), {name: "pending"})).rejects.toThrow("quota");
+  await expect(f.invoke(owner, id(5), { name: "pending" })).rejects.toThrow("quota");
   expect(workspaceUsageBytes(f.storage, "w")).toBe(before);
   expect(f.storage.db.prepare("SELECT COUNT(*) AS n FROM dohc_dataset_events").get()?.n).toBe(0);
   expect(f.storage.db.prepare("SELECT COUNT(*) AS n FROM dohc_dataset_receipts").get()?.n).toBe(0);
   f.storage.options.workspaceQuotaBytes = quota;
-  expect((await f.invoke(owner, id(5), {name: "pending"})).revision).toBe(1);
-  expect((await f.invoke(owner, id(6))).result).toMatchObject([{name: "pending"}]);
+  expect((await f.invoke(owner, id(5), { name: "pending" })).revision).toBe(1);
+  expect((await f.invoke(owner, id(6))).result).toMatchObject([{ name: "pending" }]);
 });
 
 it("rechecks app access after the account sender lookup", async () => {
-  const f = await fixture(); await f.activate(); const publicationId = f.publish(); f.addHelper();
-  const route = createDatasetAppRoutes(f.host, f.storage, {nowMs: () => 10, shareSenderLabel: async () => {
-    f.storage.revokeShareGrant({shareId: "s", grantId: "helper-grant", revokedAtMs: 11});
-    return "Ana (owner@dohc.test)";
-  }});
-  await expect(route(new Request("https://relay.test/summary"), {route: "app-backend", action: "summary", publicationId, workspaceId: "w"}, helper)).rejects.toThrow();
+  const f = await fixture();
+  await f.activate();
+  const publicationId = f.publish();
+  f.addHelper();
+  const route = createDatasetAppRoutes(f.host, f.storage, {
+    nowMs: () => 10,
+    shareSenderLabel: async () => {
+      f.storage.revokeShareGrant({ shareId: "s", grantId: "helper-grant", revokedAtMs: 11 });
+      return "Ana (owner@dohc.test)";
+    },
+  });
+  await expect(
+    route(
+      new Request("https://relay.test/summary"),
+      { route: "app-backend", action: "summary", publicationId, workspaceId: "w" },
+      helper,
+    ),
+  ).rejects.toThrow();
 });
 
 it("keeps a published form and its original capability alive after a field rename without republishing", async () => {
-  const f = await fixture(); await f.activate();
-  const publicationId = f.publish(), link = f.link("rename-friend");
-  const published = f.host.publication(link,publicationId)!;
-  await f.invoke(link,id(5),{name:"Before rename"},publicationId,"before");
-  const next = structuredClone(definition); next.tables[0].fields[1].name = "Full name";
-  next.schemaPath="registrations/revision-2/schema.sql"; next.operationsPath="registrations/revision-2/operations.js";
-  const renamed = describeDatasetRevision({definition:next,revision:2,schemaSql,operationSource});
-  const renamePreview = await f.host.prepareMigration(owner,{workspaceId:"w",revision:renamed,schemaSql,operationSource,expected:f.host.approvedArtifacts(owner,scope).cursor,migrationSql:"SELECT 1;"});
-  await f.host.approveMigration(owner,{...scope,candidateId:renamePreview.candidateId,checkpointSha256:renamePreview.checkpointSha256});
-  expect(f.host.publication(link,publicationId)!.capability).toEqual(published.capability);
-  expect(f.host.publication(link,publicationId)!.authorityRevision).toBe(published.authorityRevision);
-  await expect(f.invoke(link,id(5),{name:"After rename"},publicationId,"after")).resolves.toMatchObject({result:{accepted:true}});
-  await expect(f.invoke(link,id(5),{name:"Before rename"},publicationId,"before")).resolves.toMatchObject({replayed:true});
-  expect((await f.invoke(owner,id(6),{},undefined,"read")).result).toHaveLength(2);
+  const f = await fixture();
+  await f.activate();
+  const publicationId = f.publish(),
+    link = f.link("rename-friend");
+  const published = f.host.publication(link, publicationId)!;
+  await f.invoke(link, id(5), { name: "Before rename" }, publicationId, "before");
+  const next = structuredClone(definition);
+  next.tables[0].fields[1].name = "Full name";
+  next.schemaPath = "registrations/revision-2/schema.sql";
+  next.operationsPath = "registrations/revision-2/operations.js";
+  const renamed = describeDatasetRevision({
+    definition: next,
+    revision: 2,
+    schemaSql,
+    operationSource,
+  });
+  const renamePreview = await f.host.prepareMigration(owner, {
+    workspaceId: "w",
+    revision: renamed,
+    schemaSql,
+    operationSource,
+    expected: f.host.approvedArtifacts(owner, scope).cursor,
+    migrationSql: "SELECT 1;",
+  });
+  await f.host.approveMigration(owner, {
+    ...scope,
+    candidateId: renamePreview.candidateId,
+    checkpointSha256: renamePreview.checkpointSha256,
+  });
+  expect(f.host.publication(link, publicationId)!.capability).toEqual(published.capability);
+  expect(f.host.publication(link, publicationId)!.authorityRevision).toBe(
+    published.authorityRevision,
+  );
+  await expect(
+    f.invoke(link, id(5), { name: "After rename" }, publicationId, "after"),
+  ).resolves.toMatchObject({ result: { accepted: true } });
+  await expect(
+    f.invoke(link, id(5), { name: "Before rename" }, publicationId, "before"),
+  ).resolves.toMatchObject({ replayed: true });
+  expect((await f.invoke(owner, id(6), {}, undefined, "read")).result).toHaveLength(2);
   await f.reopen();
-  expect(f.host.publication(link,publicationId)!.capability).toEqual(published.capability);
-  await expect(f.invoke(link,id(5),{name:"After restart"},publicationId,"restart")).resolves.toMatchObject({result:{accepted:true}});
+  expect(f.host.publication(link, publicationId)!.capability).toEqual(published.capability);
+  await expect(
+    f.invoke(link, id(5), { name: "After restart" }, publicationId, "restart"),
+  ).resolves.toMatchObject({ result: { accepted: true } });
   next.operations[0].fieldIds.push(id(3));
-  const widened = describeDatasetRevision({definition:next,revision:3,schemaSql,operationSource});
-  const widenPreview = await f.host.prepareMigration(owner,{workspaceId:"w",revision:widened,schemaSql,operationSource,expected:f.host.approvedArtifacts(owner,scope).cursor,migrationSql:"SELECT 1;"});
-  await f.host.approveMigration(owner,{...scope,candidateId:widenPreview.candidateId,checkpointSha256:widenPreview.checkpointSha256});
-  expect(()=>f.host.publication(link,publicationId)).toThrow("Its owner must approve this access again");
-  await expect(f.invoke(link,id(5),{name:"Forbidden"},publicationId,"forbidden")).rejects.toThrow();
+  const widened = describeDatasetRevision({
+    definition: next,
+    revision: 3,
+    schemaSql,
+    operationSource,
+  });
+  const widenPreview = await f.host.prepareMigration(owner, {
+    workspaceId: "w",
+    revision: widened,
+    schemaSql,
+    operationSource,
+    expected: f.host.approvedArtifacts(owner, scope).cursor,
+    migrationSql: "SELECT 1;",
+  });
+  await f.host.approveMigration(owner, {
+    ...scope,
+    candidateId: widenPreview.candidateId,
+    checkpointSha256: widenPreview.checkpointSha256,
+  });
+  expect(() => f.host.publication(link, publicationId)).toThrow(
+    "Its owner must approve this access again",
+  );
+  await expect(
+    f.invoke(link, id(5), { name: "Forbidden" }, publicationId, "forbidden"),
+  ).rejects.toThrow();
 });
 
-const receiptSchemaSql = "CREATE TABLE people(id TEXT PRIMARY KEY NOT NULL,name TEXT NOT NULL,receipt TEXT);";
+const receiptSchemaSql =
+  "CREATE TABLE people(id TEXT PRIMARY KEY NOT NULL,name TEXT NOT NULL,receipt TEXT);";
 const receiptSource = `globalThis.operations={
   submit(ctx,input){if(input.fileId)ctx.files.attach(input.fileId);ctx.db.execute('INSERT INTO people VALUES(?,?,?)',[ctx.requestId,input.name,input.fileId??null]);return {accepted:true};},
   read(ctx){return ctx.db.query('SELECT * FROM people ORDER BY id');},
   edit(ctx,input){ctx.db.execute('UPDATE people SET name=? WHERE id=?',[input.name,input.id]);return true;}
 };`;
-const receiptDefinition: DatasetDefinition = {...definition, tables: [{...definition.tables[0]!, fields: [...definition.tables[0]!.fields,
-  {fieldId: id(8), name: "Receipt", sqlColumn: "receipt", type: "attachment", required: false, unique: false}]}]};
-const receipts = {revision: describeDatasetRevision({definition: receiptDefinition, revision: 1, schemaSql: receiptSchemaSql, operationSource: receiptSource}),
-  schemaSql: receiptSchemaSql, operationSource: receiptSource};
+const receiptDefinition: DatasetDefinition = {
+  ...definition,
+  tables: [
+    {
+      ...definition.tables[0]!,
+      fields: [
+        ...definition.tables[0]!.fields,
+        {
+          fieldId: id(8),
+          name: "Receipt",
+          sqlColumn: "receipt",
+          type: "attachment",
+          required: false,
+          unique: false,
+        },
+      ],
+    },
+  ],
+};
+const receipts = {
+  revision: describeDatasetRevision({
+    definition: receiptDefinition,
+    revision: 1,
+    schemaSql: receiptSchemaSql,
+    operationSource: receiptSource,
+  }),
+  schemaSql: receiptSchemaSql,
+  operationSource: receiptSource,
+};
 const receiptBytes = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3]).toString("base64");
 
 /** A fenced Collection with one record and its attachment, saved for a move to the relay. */
 async function movingCollection() {
-  const source = await fixture(false, receipts); await source.activate();
-  const {file} = source.host.ownerUpload(owner, {...scope, revision: 1, revisionSha256: receipts.revision.revisionSha256,
-    idempotencyKey: "receipt-upload", name: "receipt.png", contentType: "image/png", bytesBase64: receiptBytes});
-  await source.invoke(owner, id(5), {name: "Kept", fileId: file.fileId});
-  const journal = createDatasetJournal({db: source.storage.db, transaction: run => source.storage.tx(run)});
+  const source = await fixture(false, receipts);
+  await source.activate();
+  const { file } = source.host.ownerUpload(owner, {
+    ...scope,
+    revision: 1,
+    revisionSha256: receipts.revision.revisionSha256,
+    idempotencyKey: "receipt-upload",
+    name: "receipt.png",
+    contentType: "image/png",
+    bytesBase64: receiptBytes,
+  });
+  await source.invoke(owner, id(5), { name: "Kept", fileId: file.fileId });
+  const journal = createDatasetJournal({
+    db: source.storage.db,
+    transaction: (run) => source.storage.tx(run),
+  });
   const sourceCursor = journal.head(scope, () => {}).cursor;
-  journal.fence({expected: sourceCursor, authorize() {}});
-  const archive = await source.host.exportRecovery(owner, scope), chunks: Uint8Array[] = [];
-  const manifestSha256 = createHash("sha256").update(encodeRecoveryManifest(archive.manifest, {maxTotalBytes: source.storage.options.workspaceQuotaBytes})).digest("hex");
-  try { for await (const bytes of archive.stream()) chunks.push(bytes); } finally { await archive.dispose(); }
+  journal.fence({ expected: sourceCursor, authorize() {} });
+  const archive = await source.host.exportRecovery(owner, scope),
+    chunks: Uint8Array[] = [];
+  const manifestSha256 = createHash("sha256")
+    .update(
+      encodeRecoveryManifest(archive.manifest, {
+        maxTotalBytes: source.storage.options.workspaceQuotaBytes,
+      }),
+    )
+    .digest("hex");
+  try {
+    for await (const bytes of archive.stream()) chunks.push(bytes);
+  } finally {
+    await archive.dispose();
+  }
   const body = Buffer.concat(chunks);
-  return {fileId: file.fileId, sourceCursor,
-    importInto: (host: RelayDatasetHost, activate: boolean, signal?: AbortSignal) => host.importRecovery(owner, {...scope, transferId: "move", manifestSha256, sourceCursor, activate,
-      signal, stream: (async function* () { yield body; })()})};
+  return {
+    fileId: file.fileId,
+    sourceCursor,
+    importInto: (host: RelayDatasetHost, activate: boolean, signal?: AbortSignal) =>
+      host.importRecovery(owner, {
+        ...scope,
+        transferId: "move",
+        manifestSha256,
+        sourceCursor,
+        activate,
+        signal,
+        stream: (async function* () {
+          yield body;
+        })(),
+      }),
+  };
 }
 
 it("finishes a move whose import stopped when the relay stopped, once the relay starts again (#2903)", async () => {
-  const moved = await movingCollection(), target = await fixture(true, receipts);
+  const moved = await movingCollection(),
+    target = await fixture(true, receipts);
   const usageBefore = workspaceUsageBytes(target.storage, "w");
   const leftover = () => ({
-    imports: Number(target.storage.db.prepare("SELECT count(*) n FROM dohc_dataset_imports").get()!.n),
-    attachments: Number(target.storage.db.prepare("SELECT count(*) n FROM sync_relay_dataset_import_files").get()!.n),
-    stages: Number(target.storage.db.prepare("SELECT count(*) n FROM dohc_dataset_checkpoints").get()!.n),
+    imports: Number(
+      target.storage.db.prepare("SELECT count(*) n FROM dohc_dataset_imports").get()!.n,
+    ),
+    attachments: Number(
+      target.storage.db.prepare("SELECT count(*) n FROM sync_relay_dataset_import_files").get()!.n,
+    ),
+    stages: Number(
+      target.storage.db.prepare("SELECT count(*) n FROM dohc_dataset_checkpoints").get()!.n,
+    ),
     usage: workspaceUsageBytes(target.storage, "w"),
     // A usage row left for the Collection refuses creating it on this relay.
-    usageRows: Number(target.storage.db.prepare("SELECT count(*) n FROM sync_relay_dataset_usage WHERE workspace_id=? AND dataset_id=?")
-      .get(scope.workspaceId, scope.datasetId)!.n),
+    usageRows: Number(
+      target.storage.db
+        .prepare(
+          "SELECT count(*) n FROM sync_relay_dataset_usage WHERE workspace_id=? AND dataset_id=?",
+        )
+        .get(scope.workspaceId, scope.datasetId)!.n,
+    ),
   });
   // The relay stops inside the final install transaction. Records, checkpoints, and the attachment are
   // durable and charged, the transaction rolls back, and the stopped storage cannot run the import's cleanup.
-  const stopped = target.storage, prepare = stopped.db.prepare.bind(stopped.db);
-  const stop = vi.spyOn(stopped.db, "prepare").mockImplementation(sql => {
-    if (sql.startsWith("SELECT 1 FROM dohc_dataset_import_checkpoints m JOIN")) stopped.invalidate();
+  const stopped = target.storage,
+    prepare = stopped.db.prepare.bind(stopped.db);
+  const stop = vi.spyOn(stopped.db, "prepare").mockImplementation((sql) => {
+    if (sql.startsWith("SELECT 1 FROM dohc_dataset_import_checkpoints m JOIN"))
+      stopped.invalidate();
     return prepare(sql);
   });
   await expect(moved.importInto(target.host, true)).rejects.toThrow();
   stop.mockRestore();
   const interrupted = leftover();
-  expect(stopped.db.prepare("SELECT phase FROM dohc_dataset_imports").get()).toMatchObject({phase: "staging"});
-  expect(interrupted).toMatchObject({imports: 1, attachments: 1, usageRows: 1});
+  expect(stopped.db.prepare("SELECT phase FROM dohc_dataset_imports").get()).toMatchObject({
+    phase: "staging",
+  });
+  expect(interrupted).toMatchObject({ imports: 1, attachments: 1, usageRows: 1 });
   expect(interrupted.stages).toBeGreaterThan(0);
   expect(interrupted.usage).toBeGreaterThan(usageBefore);
 
-  target.restart(); await target.reopen();
+  target.restart();
+  await target.reopen();
   const restarted = leftover();
-  await expect(moved.importInto(target.host, true)).resolves.toMatchObject({transferId: "move", sourceCursor: moved.sourceCursor,
-    targetCursor: {revision: moved.sourceCursor.revision + 1}});
+  await expect(moved.importInto(target.host, true)).resolves.toMatchObject({
+    transferId: "move",
+    sourceCursor: moved.sourceCursor,
+    targetCursor: { revision: moved.sourceCursor.revision + 1 },
+  });
   // Startup released the stopped import's quota, attachment, and checkpoints before the retry.
-  expect(restarted).toEqual({imports: 0, attachments: 0, stages: 0, usage: usageBefore, usageRows: 0});
-  expect((await target.invoke(owner, id(6))).result).toMatchObject([{name: "Kept", receipt: moved.fileId}]);
-  expect(target.host.ownerReadFile(owner, {...scope, revision: 1, revisionSha256: receipts.revision.revisionSha256, fileId: moved.fileId}))
-    .toMatchObject({bytesBase64: receiptBytes});
+  expect(restarted).toEqual({
+    imports: 0,
+    attachments: 0,
+    stages: 0,
+    usage: usageBefore,
+    usageRows: 0,
+  });
+  expect((await target.invoke(owner, id(6))).result).toMatchObject([
+    { name: "Kept", receipt: moved.fileId },
+  ]);
+  expect(
+    target.host.ownerReadFile(owner, {
+      ...scope,
+      revision: 1,
+      revisionSha256: receipts.revision.revisionSha256,
+      fileId: moved.fileId,
+    }),
+  ).toMatchObject({ bytesBase64: receiptBytes });
 });
 
-const collectionFile = (path = "registrations/dataset.json") => ({path, text: JSON.stringify({datasetId: id(1)})});
-const collectionMissing = {code: "app_collection_missing", statusCode: 410};
+const collectionFile = (path = "registrations/dataset.json") => ({
+  path,
+  text: JSON.stringify({ datasetId: id(1) }),
+});
+const collectionMissing = { code: "app_collection_missing", statusCode: 410 };
 
 it("keeps an app working, on its own records only, when another Collection takes its moved Collection's old folder (#3186)", async () => {
-  const f = await fixture(); await f.activate(); f.addHelper(); pushFile(f.storage, "dataset", null, collectionFile());
-  const other = {workspaceId: "w", datasetId: id(9)};
-  const otherRevision = describeDatasetRevision({definition: {...definition, datasetId: id(9), name: "Other"}, revision: 1, schemaSql, operationSource});
-  const invokeOther = (auth: AppBackendAuth, operationId: string, input: Record<string, string>, key: string, appId?: string) => f.host.invoke(auth, {...other,
-    revision: 1, revisionSha256: otherRevision.revisionSha256, operationId, input, idempotencyKey: key, ...(appId ? {access: {kind: "app" as const, appId}} : {})});
-  await f.host.activate(owner, {...other, revision: otherRevision, schemaSql, operationSource, capacityBytes: 1024 * 1024});
-  await invokeOther(owner, id(5), {name: "Other record"}, "other");
-  const publicationId = f.publish([id(5), id(6)]), link = f.link("friend");
-  f.host.setDataGrant(owner, {...scope, grantId: "helper-grant", grant: {operationIds: [id(6)], discover: true, revision: 1, revisionSha256: revision.revisionSha256}});
-  pushFile(f.storage, "dataset", collectionFile(), collectionFile("archive/registrations/dataset.json"));
-  pushFile(f.storage, "other", null, {path: "registrations/dataset.json", text: JSON.stringify({datasetId: id(9)})});
-  await f.invoke(link, id(5), {name: "Moved"}, publicationId, "moved");
+  const f = await fixture();
+  await f.activate();
+  f.addHelper();
+  pushFile(f.storage, "dataset", null, collectionFile());
+  const other = { workspaceId: "w", datasetId: id(9) };
+  const otherRevision = describeDatasetRevision({
+    definition: { ...definition, datasetId: id(9), name: "Other" },
+    revision: 1,
+    schemaSql,
+    operationSource,
+  });
+  const invokeOther = (
+    auth: AppBackendAuth,
+    operationId: string,
+    input: Record<string, string>,
+    key: string,
+    appId?: string,
+  ) =>
+    f.host.invoke(auth, {
+      ...other,
+      revision: 1,
+      revisionSha256: otherRevision.revisionSha256,
+      operationId,
+      input,
+      idempotencyKey: key,
+      ...(appId ? { access: { kind: "app" as const, appId } } : {}),
+    });
+  await f.host.activate(owner, {
+    ...other,
+    revision: otherRevision,
+    schemaSql,
+    operationSource,
+    capacityBytes: 1024 * 1024,
+  });
+  await invokeOther(owner, id(5), { name: "Other record" }, "other");
+  const publicationId = f.publish([id(5), id(6)]),
+    link = f.link("friend");
+  f.host.setDataGrant(owner, {
+    ...scope,
+    grantId: "helper-grant",
+    grant: {
+      operationIds: [id(6)],
+      discover: true,
+      revision: 1,
+      revisionSha256: revision.revisionSha256,
+    },
+  });
+  pushFile(
+    f.storage,
+    "dataset",
+    collectionFile(),
+    collectionFile("archive/registrations/dataset.json"),
+  );
+  pushFile(f.storage, "other", null, {
+    path: "registrations/dataset.json",
+    text: JSON.stringify({ datasetId: id(9) }),
+  });
+  await f.invoke(link, id(5), { name: "Moved" }, publicationId, "moved");
   f.advance(120_000);
-  await f.invoke(link, id(5), {name: "Still moved"}, publicationId, "still-moved");
-  const names = (result: unknown) => (result as {name: string}[]).map(row => row.name).sort();
-  expect(names((await f.invoke(helper, id(6), {}, publicationId, "read")).result)).toEqual(["Moved", "Still moved"]);
+  await f.invoke(link, id(5), { name: "Still moved" }, publicationId, "still-moved");
+  const names = (result: unknown) => (result as { name: string }[]).map((row) => row.name).sort();
+  expect(names((await f.invoke(helper, id(6), {}, publicationId, "read")).result)).toEqual([
+    "Moved",
+    "Still moved",
+  ]);
   // The app can't reach the Collection that took its old folder.
-  await expect(invokeOther(link, id(5), {name: "Leaked"}, "leaked", publicationId)).rejects.toMatchObject({statusCode: 404});
-  await expect(invokeOther(helper, id(6), {}, "leaked-read", publicationId)).rejects.toMatchObject({statusCode: 404});
-  expect(names((await invokeOther(owner, id(6), {}, "other-read")).result)).toEqual(["Other record"]);
+  await expect(
+    invokeOther(link, id(5), { name: "Leaked" }, "leaked", publicationId),
+  ).rejects.toMatchObject({ statusCode: 404 });
+  await expect(invokeOther(helper, id(6), {}, "leaked-read", publicationId)).rejects.toMatchObject({
+    statusCode: 404,
+  });
+  expect(names((await invokeOther(owner, id(6), {}, "other-read")).result)).toEqual([
+    "Other record",
+  ]);
   // A file that names the other Collection never stands in for this one, at the old folder or where the moved file went.
-  pushFile(f.storage, "dataset", collectionFile("archive/registrations/dataset.json"), {path: "archive/registrations/dataset.json", text: JSON.stringify({datasetId: id(9)})});
-  await f.invoke(link, id(5), {name: "Renamed"}, publicationId, "renamed");
+  pushFile(f.storage, "dataset", collectionFile("archive/registrations/dataset.json"), {
+    path: "archive/registrations/dataset.json",
+    text: JSON.stringify({ datasetId: id(9) }),
+  });
+  await f.invoke(link, id(5), { name: "Renamed" }, publicationId, "renamed");
   f.advance(120_000);
-  await expect(f.invoke(link, id(5), {name: "Refused"}, publicationId, "refused")).rejects.toMatchObject(collectionMissing);
-  await expect(f.invoke(helper, id(6), {}, publicationId, "read-refused")).rejects.toMatchObject(collectionMissing);
+  await expect(
+    f.invoke(link, id(5), { name: "Refused" }, publicationId, "refused"),
+  ).rejects.toMatchObject(collectionMissing);
+  await expect(f.invoke(helper, id(6), {}, publicationId, "read-refused")).rejects.toMatchObject(
+    collectionMissing,
+  );
   expect(names((await f.invoke(owner, id(6))).result)).toEqual(["Moved", "Renamed", "Still moved"]);
 });

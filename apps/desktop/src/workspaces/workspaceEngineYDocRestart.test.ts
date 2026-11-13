@@ -1,5 +1,12 @@
 import { EngineCaptureNotSettledError } from "./workspaceEngineCaptureLiveStore";
-import { flushTypingCheckpointsSync, writeTypingCheckpointSync, flushTypingCheckpoints, readTypingCheckpoints, retireTypingCheckpoint, writeTypingCheckpoint } from "./outageTypingRecovery";
+import {
+  flushTypingCheckpointsSync,
+  writeTypingCheckpointSync,
+  flushTypingCheckpoints,
+  readTypingCheckpoints,
+  retireTypingCheckpoint,
+  writeTypingCheckpoint,
+} from "./outageTypingRecovery";
 import * as Y from "yjs";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -19,10 +26,7 @@ import {
   type Request,
   type Response,
 } from "@dohc/workspace-engine-client";
-import {
-  VersionedLoopbackEngine,
-  YdocLoopbackEngine,
-} from "@dohc/workspace-engine-client/testing";
+import { VersionedLoopbackEngine, YdocLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import {
   EngineDaemonUnavailableError,
   EngineWorkspaceSessions,
@@ -37,7 +41,11 @@ import {
 import { createTestScratch } from "./testTemp";
 import { HistoryStillPausedError } from "../ipc/errorWords";
 import { daemonCaptureLifecycleAnswer } from "../testing/liveEngineSessions";
-import { createWorkspaceActivity, settleYDocsAfterFileObservation, WorkspaceActivityState } from "./workspaceActivity";
+import {
+  createWorkspaceActivity,
+  settleYDocsAfterFileObservation,
+  WorkspaceActivityState,
+} from "./workspaceActivity";
 import { idleObservation } from "./workspaceActivity.testSupport";
 import {
   createEngineYDocSaveSeqState,
@@ -60,7 +68,9 @@ function uncertainFailureClock(): () => void {
   let now = 0;
   const clock = vi.spyOn(performance, "now").mockImplementation(() => now);
   onTestFinished(() => clock.mockRestore());
-  return () => { now += YDOC_UNCERTAIN_FAILURE_BACKOFF_MS; };
+  return () => {
+    now += YDOC_UNCERTAIN_FAILURE_BACKOFF_MS;
+  };
 }
 
 // The capture exposes no retry hook, so a test that asserts a retry did NOT
@@ -121,22 +131,36 @@ async function reconnectFailureCapture(prefix: string) {
         return { id: request.id, result: { closed: true } };
       }
       if (request.method === "versionedText.checkMove") {
-        const params = request.params as { path: string; change?: "movePage" | "moveFolder" | "delete" };
+        const params = request.params as {
+          path: string;
+          change?: "movePage" | "moveFolder" | "delete";
+        };
         state.checkedFolders.push({ path: params.path, folder: params.change === "moveFolder" });
-        if (params.change === "moveFolder" && state.ownedUnder !== null && state.ownedUnder.startsWith(`${params.path}/`)) {
+        if (
+          params.change === "moveFolder" &&
+          state.ownedUnder !== null &&
+          state.ownedUnder.startsWith(`${params.path}/`)
+        ) {
           state.moveRequests.push(request.method);
           throw new DaemonRefusalError(
             { code: "INVALID_PARAMS", message: "live-folder-page-owned", retry: "no" },
             new Error("daemon response"),
           );
         }
-        if (params.change === "delete" && state.ownedUnder !== null && state.ownedUnder.startsWith(`${params.path}/`)) {
+        if (
+          params.change === "delete" &&
+          state.ownedUnder !== null &&
+          state.ownedUnder.startsWith(`${params.path}/`)
+        ) {
           throw new DaemonRefusalError(
             { code: "INVALID_PARAMS", message: "live-folder-page-owned", retry: "no" },
             new Error("daemon response"),
           );
         }
-        if ((params.change === "movePage" || params.change === "delete") && params.path === state.ownedPage) {
+        if (
+          (params.change === "movePage" || params.change === "delete") &&
+          params.path === state.ownedPage
+        ) {
           state.moveRequests.push(request.method);
           throw new DaemonRefusalError(
             { code: "INVALID_PARAMS", message: "live-page-owned", retry: "no" },
@@ -144,9 +168,15 @@ async function reconnectFailureCapture(prefix: string) {
           );
         }
       }
-      if (request.method === "versionedText.checkMove" || request.method === "versionedText.rename") {
+      if (
+        request.method === "versionedText.checkMove" ||
+        request.method === "versionedText.rename"
+      ) {
         state.moveRequests.push(request.method);
-        if (state.moveRefusalAt === (request.method === "versionedText.checkMove" ? "preflight" : "native")) {
+        if (
+          state.moveRefusalAt ===
+          (request.method === "versionedText.checkMove" ? "preflight" : "native")
+        ) {
           throw new DaemonRefusalError(
             { code: "INVALID_PARAMS", message: "live-document-binding-active", retry: "no" },
             new Error("daemon response"),
@@ -155,15 +185,32 @@ async function reconnectFailureCapture(prefix: string) {
       }
       const answer = state.captureAnswer;
       const lifecycle = daemonCaptureLifecycleAnswer(request, () => ({
-        deferredWrites: [], heldFiles: [], degraded: false,
-        settled: answer === null || answer === "rescanning", running: answer === null || answer === "unsettled",
+        deferredWrites: [],
+        heldFiles: [],
+        degraded: false,
+        settled: answer === null || answer === "rescanning",
+        running: answer === null || answer === "unsettled",
       }));
-      if (lifecycle && (answer === "scanning" || answer === "stopped") && request.method === "watcher.status") {
-        return { ...lifecycle, result: { ...(lifecycle.result as { [key: string]: JsonValue }),
-          running: false, degraded: answer === "stopped", phase: "degraded" } };
+      if (
+        lifecycle &&
+        (answer === "scanning" || answer === "stopped") &&
+        request.method === "watcher.status"
+      ) {
+        return {
+          ...lifecycle,
+          result: {
+            ...(lifecycle.result as { [key: string]: JsonValue }),
+            running: false,
+            degraded: answer === "stopped",
+            phase: "degraded",
+          },
+        };
       }
       if (lifecycle && answer === "rescanning" && request.method === "watcher.status") {
-        return { ...lifecycle, result: { ...(lifecycle.result as { [key: string]: JsonValue }), running: false } };
+        return {
+          ...lifecycle,
+          result: { ...(lifecycle.result as { [key: string]: JsonValue }), running: false },
+        };
       }
       if (lifecycle) return lifecycle;
       return await loopback.sendRequest(request);
@@ -215,9 +262,7 @@ async function reconnectFailureCapture(prefix: string) {
         if (state.adoptOnClose) state.moveRefusalAt = "preflight";
         state.releaseCalls.push({
           generation: openedGeneration,
-          ...(closeOptions?.settle !== undefined
-            ? { settle: closeOptions.settle }
-            : {}),
+          ...(closeOptions?.settle !== undefined ? { settle: closeOptions.settle } : {}),
         });
         leased.delete(options.path);
         state.leaseActive = leased.size > 0;
@@ -237,16 +282,23 @@ async function reconnectFailureCapture(prefix: string) {
 }
 
 it("refuses a folder delete when owner adoption finishes during teardown and releases its reservation", async () => {
-  const { capture, state, rootPath } = await reconnectFailureCapture("dohc-adopted-owner-delete-race-");
+  const { capture, state, rootPath } = await reconnectFailureCapture(
+    "dohc-adopted-owner-delete-race-",
+  );
   await mkdir(join(rootPath, "notes"));
   await writeFile(join(rootPath, "notes/note.md"), "original");
   await capture.openYDocSession({ path: "notes/note.md", onRemoteUpdate: () => undefined });
   state.adoptOnClose = true;
-  await expect(capture.settleAndCloseLiveSessionsForPath("notes")).rejects.toThrow("dohc could not delete notes.");
+  await expect(capture.settleAndCloseLiveSessionsForPath("notes")).rejects.toThrow(
+    "dohc could not delete notes.",
+  );
   expect(state.releaseCalls).toHaveLength(1);
   expect(state.moveRequests).toEqual(["versionedText.checkMove", "versionedText.checkMove"]);
   expect(await readFile(join(rootPath, "notes/note.md"), "utf8")).toBe("original");
-  const reopened = await capture.openYDocSession({ path: "notes/note.md", onRemoteUpdate: () => undefined });
+  const reopened = await capture.openYDocSession({
+    path: "notes/note.md",
+    onRemoteUpdate: () => undefined,
+  });
   await reopened.close();
   state.moveRefusalAt = null;
   const finish = await capture.settleAndCloseLiveSessionsForPath("notes");
@@ -257,25 +309,34 @@ it("refuses a folder delete when owner adoption finishes during teardown and rel
 const MOVE_AUTHOR = { kind: "human" as const, humanId: "local-person" };
 const MOVE_OPERATION = "dohc-operation:44444444-4444-4444-8444-444444444444";
 
-
 it("refuses deleting an owned page, or a folder that holds one, before anything closes", async () => {
   const { capture, state, rootPath } = await reconnectFailureCapture("dohc-owned-folder-delete-");
   await mkdir(join(rootPath, "notes"));
   await writeFile(join(rootPath, "notes/page.md"), "original");
   state.ownedUnder = "notes/page.md";
   state.ownedPage = "notes/page.md";
-  await expect(capture.settleAndCloseLiveSessionsForPath("notes")).rejects.toMatchObject({ name: "LiveFolderError",
-    message: [`dohc can't delete "notes" while a page in it has live editing on`,
-      "In Live documents, stop live editing for every page in this folder, then delete the folder again."].join(String.fromCharCode(10)) });
-  await expect(capture.settleAndCloseLiveSessionsForPath("notes/page.md")).rejects.toMatchObject({ name: "LivePageOwnedError",
-    message: [`dohc can't delete "notes/page.md" while it has live editing on`,
-      "In Live documents, stop live editing for this page, then delete it again."].join(String.fromCharCode(10)) });
+  await expect(capture.settleAndCloseLiveSessionsForPath("notes")).rejects.toMatchObject({
+    name: "LiveFolderError",
+    message: [
+      `dohc can't delete "notes" while a page in it has live editing on`,
+      "In Live documents, stop live editing for every page in this folder, then delete the folder again.",
+    ].join(String.fromCharCode(10)),
+  });
+  await expect(capture.settleAndCloseLiveSessionsForPath("notes/page.md")).rejects.toMatchObject({
+    name: "LivePageOwnedError",
+    message: [
+      `dohc can't delete "notes/page.md" while it has live editing on`,
+      "In Live documents, stop live editing for this page, then delete it again.",
+    ].join(String.fromCharCode(10)),
+  });
   expect(await readFile(join(rootPath, "notes/page.md"), "utf8")).toBe("original");
   await capture.stop();
 });
 
 it("refuses a move that would replace an owned page or a folder that holds one, before anything closes or moves", async () => {
-  const { capture, state, rootPath } = await reconnectFailureCapture("dohc-owned-move-destination-");
+  const { capture, state, rootPath } = await reconnectFailureCapture(
+    "dohc-owned-move-destination-",
+  );
   await mkdir(join(rootPath, "notes"));
   await mkdir(join(rootPath, "box"));
   await writeFile(join(rootPath, "notes/page.md"), "source");
@@ -283,16 +344,34 @@ it("refuses a move that would replace an owned page or a folder that holds one, 
   await writeFile(join(rootPath, "box/page.md"), "owned in a folder");
   state.ownedPage = "notes/target.md";
   state.ownedUnder = "box/page.md";
-  const session = await capture.openYDocSession({ path: "notes/target.md", onRemoteUpdate: () => undefined });
+  const session = await capture.openYDocSession({
+    path: "notes/target.md",
+    onRemoteUpdate: () => undefined,
+  });
   const work = vi.fn(async () => "moved");
-  const replace = (to: string) => capture.changePathsAs(["notes/page.md", to], { operation: "move", author: MOVE_AUTHOR, operationId: MOVE_OPERATION },
-    work, () => []).catch((error: unknown) => error);
-  expect(await replace("notes/target.md")).toMatchObject({ name: "LivePageOwnedError",
-    message: [`dohc can't replace "notes/target.md" while it has live editing on`,
-      "In Live documents, stop live editing for this page, then try again."].join(String.fromCharCode(10)) });
-  expect(await replace("box")).toMatchObject({ name: "LiveFolderError",
-    message: [`dohc can't replace "box" while a page in it has live editing on`,
-      "In Live documents, stop live editing for every page in this folder, then try again."].join(String.fromCharCode(10)) });
+  const replace = (to: string) =>
+    capture
+      .changePathsAs(
+        ["notes/page.md", to],
+        { operation: "move", author: MOVE_AUTHOR, operationId: MOVE_OPERATION },
+        work,
+        () => [],
+      )
+      .catch((error: unknown) => error);
+  expect(await replace("notes/target.md")).toMatchObject({
+    name: "LivePageOwnedError",
+    message: [
+      `dohc can't replace "notes/target.md" while it has live editing on`,
+      "In Live documents, stop live editing for this page, then try again.",
+    ].join(String.fromCharCode(10)),
+  });
+  expect(await replace("box")).toMatchObject({
+    name: "LiveFolderError",
+    message: [
+      `dohc can't replace "box" while a page in it has live editing on`,
+      "In Live documents, stop live editing for every page in this folder, then try again.",
+    ].join(String.fromCharCode(10)),
+  });
   expect(work).not.toHaveBeenCalled();
   expect(state.releaseCalls).toEqual([]);
   expect(await readFile(join(rootPath, "notes/page.md"), "utf8")).toBe("source");
@@ -318,9 +397,7 @@ async function failRendererUpdate(
 // the page of each one; closing a page releases its session, and History runs
 // once none is left.
 it("names every page whose live editing stopped when Try again leaves History paused, until those pages close", async () => {
-  const { capture, outcomes } = await reconnectFailureCapture(
-    "dohc-ydoc-history-retry-dead-",
-  );
+  const { capture, outcomes } = await reconnectFailureCapture("dohc-ydoc-history-retry-dead-");
   const plan = await capture.openYDocSession({
     path: "notes/plan.md",
     onRemoteUpdate: () => undefined,
@@ -333,9 +410,15 @@ it("names every page whose live editing stopped when Try again leaves History pa
   await failRendererUpdate(agenda);
   expect(outcomes.at(-1)).toBe(false);
 
-  const refused = await capture.retryHistoryCapture().then(() => null, (error: unknown) => error);
+  const refused = await capture.retryHistoryCapture().then(
+    () => null,
+    (error: unknown) => error,
+  );
   expect(refused).toBeInstanceOf(HistoryStillPausedError);
-  expect(refused).toMatchObject({ code: "live-editing-stopped", paths: ["notes/agenda.md", "notes/plan.md"] });
+  expect(refused).toMatchObject({
+    code: "live-editing-stopped",
+    paths: ["notes/agenda.md", "notes/plan.md"],
+  });
   expect(outcomes.at(-1)).toBe(false);
 
   // Close each page as the renderer's release does
@@ -359,7 +442,10 @@ it("keeps History paused when Try again finds capture stopped again, and catchin
   state.captureAnswer = "scanning";
   await expect(capture.retryHistoryCapture()).rejects.toBeInstanceOf(EngineCaptureNotSettledError);
   state.captureAnswer = "stopped";
-  const refused = await capture.retryHistoryCapture().then(() => null, (error: unknown) => error);
+  const refused = await capture.retryHistoryCapture().then(
+    () => null,
+    (error: unknown) => error,
+  );
   expect(refused).toBeInstanceOf(HistoryStillPausedError);
   expect(refused).toMatchObject({ paths: [] });
   state.captureAnswer = null;
@@ -368,7 +454,6 @@ it("keeps History paused when Try again finds capture stopped again, and catchin
 
 // A deliberate rescan right after Try again reads not running while ready,
 // and neither degraded nor terminal. History runs.
-
 
 it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", async () => {
   const rootPath = await createTestScratch("dohc-ydoc-restart-");
@@ -415,11 +500,7 @@ it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", 
     Y.applyUpdate(doc, Y.encodeStateAsUpdate(durableDoc));
     openedDocs.push(doc);
     const generation =
-      options.transport === firstClient
-        ? 1
-        : options.transport === secondClient
-          ? 2
-          : 3;
+      options.transport === firstClient ? 1 : options.transport === secondClient ? 2 : 3;
     return {
       doc,
       initialUpdate: Y.encodeStateAsUpdate(doc),
@@ -434,10 +515,7 @@ it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", 
         Y.applyUpdate(durableDoc, update);
         if (generation === 2 && secondGenerationApplyCount++ === 0) {
           const beforeRemote = Y.encodeStateVector(doc);
-          doc.getText("plainText").insert(
-            doc.getText("plainText").length,
-            " remote",
-          );
+          doc.getText("plainText").insert(doc.getText("plainText").length, " remote");
           const remote = Y.encodeStateAsUpdate(doc, beforeRemote);
           Y.applyUpdate(durableDoc, remote);
           options.onRemoteUpdate(remote);
@@ -496,34 +574,20 @@ it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", 
   const settled = await session.settleNow();
   expect(settled?.content).toBe("seed survives remote");
   expect(openedDocs).toHaveLength(2);
-  expect(openedDocs[1].getText("plainText").toString()).toBe(
-    "seed survives remote",
-  );
+  expect(openedDocs[1].getText("plainText").toString()).toBe("seed survives remote");
   expect(session.doc).toBe(stableDoc);
-  expect(stableDoc.getText("plainText").toString()).toBe(
-    "seed survives remote",
-  );
+  expect(stableDoc.getText("plainText").toString()).toBe("seed survives remote");
 
   const beforeSecondRestart = Y.encodeStateVector(rendererDoc);
   rendererDoc.getText("plainText").insert(13, " twice");
-  session.applyLocalUpdate(
-    Y.encodeStateAsUpdate(rendererDoc, beforeSecondRestart),
-  );
+  session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, beforeSecondRestart));
 
   const settledAfterSecondRestart = await session.settleNow();
-  expect(settledAfterSecondRestart?.content).toBe(
-    "seed survives twice remote",
-  );
+  expect(settledAfterSecondRestart?.content).toBe("seed survives twice remote");
   expect(openedDocs).toHaveLength(3);
-  expect(openedDocs[2].getText("plainText").toString()).toBe(
-    "seed survives twice remote",
-  );
-  expect(stableDoc.getText("plainText").toString()).toBe(
-    "seed survives twice remote",
-  );
-  expect(rendererDoc.getText("plainText").toString()).toBe(
-    "seed survives twice remote",
-  );
+  expect(openedDocs[2].getText("plainText").toString()).toBe("seed survives twice remote");
+  expect(stableDoc.getText("plainText").toString()).toBe("seed survives twice remote");
+  expect(rendererDoc.getText("plainText").toString()).toBe("seed survives twice remote");
 
   await session.close({ settle: false });
   await capture.stop();
@@ -681,10 +745,7 @@ async function typeIntoLostGeneration(input: {
     const unclaimed = options.transport === unclaimedClient;
     if (!unclaimed) {
       reopenObjectIds.push(options.expectedObjectId);
-      if (
-        options.expectedObjectId !== undefined &&
-        options.expectedObjectId !== claimedObjectId
-      ) {
+      if (options.expectedObjectId !== undefined && options.expectedObjectId !== claimedObjectId) {
         throw new DaemonRefusalError(
           { code: "INVALID_PARAMS", message: "ydoc-object-changed", retry: "no" },
           new Error("daemon response"),
@@ -875,139 +936,137 @@ it("refuses to reopen onto another object that moved onto the path", async () =>
 // after adoption has already run: its settle waits out a delay, and the drop
 // can arrive first through a session event. Both orders must settle.
 for (const order of ["settle failure first", "drop first"] as const) {
-it(`settles a recorded word whose settle was lost with its generation (${order})`, async () => {
-  const rootPath = await createTestScratch("dohc-ydoc-lineage-owed-settle-");
-  const loopback = new VersionedLoopbackEngine();
-  const client = (): EngineDaemonClient & EngineTransport => ({
-    close: () => undefined,
-    onEvent: () => () => undefined,
-    async sendRequest(request: Request): Promise<Response> {
-      if (request.method === "workspace.open") {
-        return { id: request.id, result: { workspace: "owed-settle" } };
-      }
-      if (request.method === "workspace.close") {
-        return { id: request.id, result: { closed: true } };
-      }
-      const lifecycle = daemonCaptureLifecycleAnswer(request);
-      if (lifecycle) return lifecycle;
-      return await loopback.sendRequest(request);
-    },
-  });
-  const unclaimedClient = client();
-  const claimedClient = client();
-  let currentClient = unclaimedClient;
-  const sessions = new EngineWorkspaceSessions(
-    { currentClient: () => currentClient },
-    { sleep: async () => undefined },
-  );
-  // What the engine holds for this lineage.
-  const engineDoc = new Y.Doc();
-  engineDoc.getText("plainText").insert(0, "recorded");
-  let recorded!: () => void;
-  const wordRecorded = new Promise<void>((resolve) => {
-    recorded = resolve;
-  });
-  let settledOnClaim!: (content: string) => void;
-  const claimSettled = new Promise<string>((resolve) => {
-    settledOnClaim = resolve;
-  });
-  let lostOptions: EngineYdocProviderSessionOptions | undefined;
-  let claimedOpens = 0;
-  const openProvider = async (
-    options: EngineYdocProviderSessionOptions,
-  ): Promise<EngineYdocProviderSession> => {
-    const unclaimed = options.transport === unclaimedClient;
-    const doc = new Y.Doc();
-    Y.applyUpdate(doc, Y.encodeStateAsUpdate(engineDoc));
-    const claimId = createHash("sha256")
-      .update(Y.encodeStateAsUpdate(engineDoc))
-      .digest("hex");
-    if (unclaimed) lostOptions = options;
-    else claimedOpens += 1;
-    return {
-      doc,
-      initialUpdate: Y.encodeStateAsUpdate(doc),
-      objectId: "original-object",
-      lineageClaimId: unclaimed ? null : claimId,
-      lineageOriginatedHere: !unclaimed,
-      contentKind: "plaintext",
-      path: options.path,
-      head: "present",
-      lineage: "existing",
-      unsettled: false,
-      evict: async () => undefined,
-      async applyLocalUpdate(update) {
-        Y.applyUpdate(doc, update);
-        Y.applyUpdate(engineDoc, update);
-        recorded();
+  it(`settles a recorded word whose settle was lost with its generation (${order})`, async () => {
+    const rootPath = await createTestScratch("dohc-ydoc-lineage-owed-settle-");
+    const loopback = new VersionedLoopbackEngine();
+    const client = (): EngineDaemonClient & EngineTransport => ({
+      close: () => undefined,
+      onEvent: () => () => undefined,
+      async sendRequest(request: Request): Promise<Response> {
+        if (request.method === "workspace.open") {
+          return { id: request.id, result: { workspace: "owed-settle" } };
+        }
+        if (request.method === "workspace.close") {
+          return { id: request.id, result: { closed: true } };
+        }
+        const lifecycle = daemonCaptureLifecycleAnswer(request);
+        if (lifecycle) return lifecycle;
+        return await loopback.sendRequest(request);
       },
-      async settleNow() {
-        const markdown = doc.getText("plainText").toString();
-        if (!unclaimed) settledOnClaim(markdown);
-        return {
-          momentId: "owed-moment",
-          path: options.path,
-          content: markdown,
-          sha256: createHash("sha256").update(markdown).digest("hex"),
-          materialized: true,
-          projection: {
-            contentKind: "plaintext",
-            sourceStateVectorSha256: "a".repeat(64),
-            destructive: false,
-          },
-        };
-      },
-      async close() {
-        return;
-      },
+    });
+    const unclaimedClient = client();
+    const claimedClient = client();
+    let currentClient = unclaimedClient;
+    const sessions = new EngineWorkspaceSessions(
+      { currentClient: () => currentClient },
+      { sleep: async () => undefined },
+    );
+    // What the engine holds for this lineage.
+    const engineDoc = new Y.Doc();
+    engineDoc.getText("plainText").insert(0, "recorded");
+    let recorded!: () => void;
+    const wordRecorded = new Promise<void>((resolve) => {
+      recorded = resolve;
+    });
+    let settledOnClaim!: (content: string) => void;
+    const claimSettled = new Promise<string>((resolve) => {
+      settledOnClaim = resolve;
+    });
+    let lostOptions: EngineYdocProviderSessionOptions | undefined;
+    let claimedOpens = 0;
+    const openProvider = async (
+      options: EngineYdocProviderSessionOptions,
+    ): Promise<EngineYdocProviderSession> => {
+      const unclaimed = options.transport === unclaimedClient;
+      const doc = new Y.Doc();
+      Y.applyUpdate(doc, Y.encodeStateAsUpdate(engineDoc));
+      const claimId = createHash("sha256").update(Y.encodeStateAsUpdate(engineDoc)).digest("hex");
+      if (unclaimed) lostOptions = options;
+      else claimedOpens += 1;
+      return {
+        doc,
+        initialUpdate: Y.encodeStateAsUpdate(doc),
+        objectId: "original-object",
+        lineageClaimId: unclaimed ? null : claimId,
+        lineageOriginatedHere: !unclaimed,
+        contentKind: "plaintext",
+        path: options.path,
+        head: "present",
+        lineage: "existing",
+        unsettled: false,
+        evict: async () => undefined,
+        async applyLocalUpdate(update) {
+          Y.applyUpdate(doc, update);
+          Y.applyUpdate(engineDoc, update);
+          recorded();
+        },
+        async settleNow() {
+          const markdown = doc.getText("plainText").toString();
+          if (!unclaimed) settledOnClaim(markdown);
+          return {
+            momentId: "owed-moment",
+            path: options.path,
+            content: markdown,
+            sha256: createHash("sha256").update(markdown).digest("hex"),
+            materialized: true,
+            projection: {
+              contentKind: "plaintext",
+              sourceStateVectorSha256: "a".repeat(64),
+              destructive: false,
+            },
+          };
+        },
+        async close() {
+          return;
+        },
+      };
     };
-  };
-  const capture = createWorkspaceEngineCapture({
-    workspaceId: "owed-settle",
-    rootPath,
-    rustEngineSessions: sessions,
-    openRustYDocProviderSession: openProvider,
-  });
-  const replacements: Y.Doc[] = [];
-  const session = await capture.openYDocSession({
-    path: "note.md",
-    onRemoteUpdate: () => undefined,
-    onLineageReplaced: (update) => {
-      const replacement = new Y.Doc();
-      Y.applyUpdate(replacement, update);
-      replacements.push(replacement);
-    },
-  });
-  const rendererDoc = new Y.Doc();
-  Y.applyUpdate(rendererDoc, session.initialUpdate);
-  const before = Y.encodeStateVector(rendererDoc);
-  rendererDoc.getText("plainText").insert("recorded".length, " typed");
-  session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
-  await wordRecorded;
+    const capture = createWorkspaceEngineCapture({
+      workspaceId: "owed-settle",
+      rootPath,
+      rustEngineSessions: sessions,
+      openRustYDocProviderSession: openProvider,
+    });
+    const replacements: Y.Doc[] = [];
+    const session = await capture.openYDocSession({
+      path: "note.md",
+      onRemoteUpdate: () => undefined,
+      onLineageReplaced: (update) => {
+        const replacement = new Y.Doc();
+        Y.applyUpdate(replacement, update);
+        replacements.push(replacement);
+      },
+    });
+    const rendererDoc = new Y.Doc();
+    Y.applyUpdate(rendererDoc, session.initialUpdate);
+    const before = Y.encodeStateVector(rendererDoc);
+    rendererDoc.getText("plainText").insert("recorded".length, " typed");
+    session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+    await wordRecorded;
 
-  // Sync turns on: the binding closes and the generation's own settle fails.
-  currentClient = claimedClient;
-  const lost = Object.assign(new Error("workspace handle is unavailable"), {
-    code: "transport-error",
-  });
-  if (order === "settle failure first") {
-    lostOptions?.onSettleError?.(lost, 1);
-    lostOptions?.onSessionError?.(lost);
-  } else {
-    lostOptions?.onSessionError?.(lost);
-    // The lost generation's delayed settle fails only once the rebind has
-    // already adopted the replacement.
-    await expect.poll(() => claimedOpens, { timeout: 5_000 }).toBe(1);
-    await new Promise((resolve) => setImmediate(resolve));
-    lostOptions?.onSettleStart?.(1);
-    lostOptions?.onSettleError?.(lost, 1);
-  }
+    // Sync turns on: the binding closes and the generation's own settle fails.
+    currentClient = claimedClient;
+    const lost = Object.assign(new Error("workspace handle is unavailable"), {
+      code: "transport-error",
+    });
+    if (order === "settle failure first") {
+      lostOptions?.onSettleError?.(lost, 1);
+      lostOptions?.onSessionError?.(lost);
+    } else {
+      lostOptions?.onSessionError?.(lost);
+      // The lost generation's delayed settle fails only once the rebind has
+      // already adopted the replacement.
+      await expect.poll(() => claimedOpens, { timeout: 5_000 }).toBe(1);
+      await new Promise((resolve) => setImmediate(resolve));
+      lostOptions?.onSettleStart?.(1);
+      lostOptions?.onSettleError?.(lost, 1);
+    }
 
-  await expect(claimSettled).resolves.toBe("recorded typed");
-  expect(replacements).toEqual([]);
-  await session.close({ settle: false });
-  await capture.stop();
-});
+    await expect(claimSettled).resolves.toBe("recorded typed");
+    expect(replacements).toEqual([]);
+    await session.close({ settle: false });
+    await capture.stop();
+  });
 }
 
 it("evicts a failed generation before accepting the next edit", async () => {
@@ -1091,9 +1150,7 @@ it("evicts a failed generation before accepting the next edit", async () => {
         providerClosed = true;
         closeAttempts.push({
           generation: openedGeneration,
-          ...(closeOptions?.settle !== undefined
-            ? { settle: closeOptions.settle }
-            : {}),
+          ...(closeOptions?.settle !== undefined ? { settle: closeOptions.settle } : {}),
         });
         if (openedGeneration === 1 && closeOptions?.settle === false) {
           throw unsettledClose;
@@ -1131,9 +1188,7 @@ it("evicts a failed generation before accepting the next edit", async () => {
     content: "seed first second",
   });
 
-  expect(closeAttempts).toEqual([
-    { generation: 1, settle: false },
-  ]);
+  expect(closeAttempts).toEqual([{ generation: 1, settle: false }]);
   expect(journaledGenerations).toEqual([2, 2]);
   expect(generation).toBe(2);
   expect(leaseActive).toBe(true);
@@ -1359,9 +1414,7 @@ async function daemonDeathCapture(
 ): Promise<{
   rootPath: string;
   sessions: EngineWorkspaceSessions;
-  openProvider: (
-    options: EngineYdocProviderSessionOptions,
-  ) => Promise<EngineYdocProviderSession>;
+  openProvider: (options: EngineYdocProviderSessionOptions) => Promise<EngineYdocProviderSession>;
   state: {
     daemonAlive: boolean;
     generation: number;
@@ -1369,7 +1422,13 @@ async function daemonDeathCapture(
     durableUpdates: Uint8Array[];
     recoveryBases: Uint8Array[];
     journalKeys: Array<string | null>;
-    applyFaults: Array<"drop" | "commit-then-drop" | "commit-then-die" | "commit-then-cancel" | "commit-then-internal">;
+    applyFaults: Array<
+      | "drop"
+      | "commit-then-drop"
+      | "commit-then-die"
+      | "commit-then-cancel"
+      | "commit-then-internal"
+    >;
     applyRefusals: unknown[];
     diskMarkdown: string;
     settled: string[];
@@ -1398,7 +1457,13 @@ async function daemonDeathCapture(
     // daemon died before recording, and is already back for the rebind.
     // "commit-then-drop": it recorded, then the response was lost the same
     // way. "commit-then-die": it recorded, then died and stays down.
-    applyFaults: [] as Array<"drop" | "commit-then-drop" | "commit-then-die" | "commit-then-cancel" | "commit-then-internal">,
+    applyFaults: [] as Array<
+      | "drop"
+      | "commit-then-drop"
+      | "commit-then-die"
+      | "commit-then-cancel"
+      | "commit-then-internal"
+    >,
     applyRefusals: [] as unknown[],
     diskMarkdown: "",
     settled: [] as string[],
@@ -1449,9 +1514,7 @@ async function daemonDeathCapture(
       // than production's.
       currentClient: () => {
         if (!state.daemonAlive) {
-          throw new EngineDaemonUnavailableError(
-            "Rust engine daemon is not available.",
-          );
+          throw new EngineDaemonUnavailableError("Rust engine daemon is not available.");
         }
         return daemonClient;
       },
@@ -1487,9 +1550,7 @@ async function daemonDeathCapture(
       // Existing means durable state, as in the daemon: a lineage with no
       // updates yet is absent.
       const reported =
-        state.lineage === "present" && state.durableUpdates.length > 0
-          ? "existing"
-          : "absent";
+        state.lineage === "present" && state.durableUpdates.length > 0 ? "existing" : "absent";
       state.reportedLineage.push(reported);
       return reported;
     };
@@ -1555,8 +1616,14 @@ async function daemonDeathCapture(
         state.durableUpdates.push(update);
         state.journalKeys.push(key ?? null);
         if (fault === "commit-then-cancel" || fault === "commit-then-internal") {
-          throw new DaemonRefusalError({ code: fault === "commit-then-cancel" ? "CANCELLED" : "INTERNAL",
-            message: "answer lost after commit", retry: "no" }, undefined);
+          throw new DaemonRefusalError(
+            {
+              code: fault === "commit-then-cancel" ? "CANCELLED" : "INTERNAL",
+              message: "answer lost after commit",
+              retry: "no",
+            },
+            undefined,
+          );
         }
         if (fault === "commit-then-die") state.daemonAlive = false;
         if (fault !== undefined) throw transportDeath();
@@ -1622,8 +1689,10 @@ function typeInto(
 }
 
 it("keeps every keystroke typed while the daemon is dead and replays them into the replacement", async () => {
-  const { rootPath, sessions, openProvider, state, generations } =
-    await daemonDeathCapture("dohc-ydoc-daemon-death-", "ydoc-daemon-death");
+  const { rootPath, sessions, openProvider, state, generations } = await daemonDeathCapture(
+    "dohc-ydoc-daemon-death-",
+    "ydoc-daemon-death",
+  );
   const outcomes: boolean[] = [];
   const capture = createWorkspaceEngineCapture({
     workspaceId: "ydoc-daemon-death",
@@ -1683,52 +1752,79 @@ function keyedUpdate(rendererDoc: Y.Doc, text: string): Uint8Array {
   return Y.encodeStateAsUpdate(scratch, before);
 }
 
-it.each(["insert", "delete"] as const)("acknowledges a durable %s after its third spaced answer is lost", async kind => {
-  const advanceBackoff = uncertainFailureClock();
-  const fixture = await daemonDeathCapture("dohc-ydoc-third-commit-", "ydoc-third-commit");
-  const notices = vi.fn();
-  const capture = createWorkspaceEngineCapture({
-    workspaceId: "ydoc-third-commit", rootPath: fixture.rootPath,
-    rustEngineSessions: fixture.sessions, openRustYDocProviderSession: fixture.openProvider,
-    onError: () => undefined,
-  });
-  const session = await capture.openYDocSession({
-    path: "note.md", onRemoteUpdate: () => undefined, onEditRefused: notices,
-  });
-  await session.applyDecidedLocalUpdate(() => keyedUpdate(session.doc, "Base"));
-  const mirror = new Y.Doc();
-  Y.applyUpdate(mirror, Y.encodeStateAsUpdate(session.doc));
-  const before = Y.encodeStateVector(mirror);
-  if (kind === "delete") mirror.getText("plainText").delete(0, 4);
-  else mirror.getText("plainText").insert(4, " saved once");
-  const original = Y.encodeStateAsUpdate(mirror, before);
-  const fail = () => fixture.state.applyRefusals.push(new DaemonRefusalError({
-    code: "INTERNAL", message: "answer lost", retry: "no",
-  }, undefined));
-  fail(); fail(); fail();
-  session.applyLocalUpdate(original, undefined, { idempotencyKey: "third-commit" });
-  await expect(session.settleNow()).rejects.toThrow(/closed/i);
-  advanceBackoff(); fail();
-  await expect(session.settleNow()).rejects.toThrow(/closed/i);
-  advanceBackoff();
-  fixture.state.applyFaults.push("commit-then-internal");
-  expect((await session.settleNow())?.content).toBe(kind === "delete" ? "" : "Base saved once");
-  expect(fixture.state.journalKeys.filter(key => key === "third-commit")).toHaveLength(1);
-  expect(notices).not.toHaveBeenCalled();
-  mirror.destroy(); await session.close({ settle: false }); await capture.stop();
-});
+it.each(["insert", "delete"] as const)(
+  "acknowledges a durable %s after its third spaced answer is lost",
+  async (kind) => {
+    const advanceBackoff = uncertainFailureClock();
+    const fixture = await daemonDeathCapture("dohc-ydoc-third-commit-", "ydoc-third-commit");
+    const notices = vi.fn();
+    const capture = createWorkspaceEngineCapture({
+      workspaceId: "ydoc-third-commit",
+      rootPath: fixture.rootPath,
+      rustEngineSessions: fixture.sessions,
+      openRustYDocProviderSession: fixture.openProvider,
+      onError: () => undefined,
+    });
+    const session = await capture.openYDocSession({
+      path: "note.md",
+      onRemoteUpdate: () => undefined,
+      onEditRefused: notices,
+    });
+    await session.applyDecidedLocalUpdate(() => keyedUpdate(session.doc, "Base"));
+    const mirror = new Y.Doc();
+    Y.applyUpdate(mirror, Y.encodeStateAsUpdate(session.doc));
+    const before = Y.encodeStateVector(mirror);
+    if (kind === "delete") mirror.getText("plainText").delete(0, 4);
+    else mirror.getText("plainText").insert(4, " saved once");
+    const original = Y.encodeStateAsUpdate(mirror, before);
+    const fail = () =>
+      fixture.state.applyRefusals.push(
+        new DaemonRefusalError(
+          {
+            code: "INTERNAL",
+            message: "answer lost",
+            retry: "no",
+          },
+          undefined,
+        ),
+      );
+    fail();
+    fail();
+    fail();
+    session.applyLocalUpdate(original, undefined, { idempotencyKey: "third-commit" });
+    await expect(session.settleNow()).rejects.toThrow(/closed/i);
+    advanceBackoff();
+    fail();
+    await expect(session.settleNow()).rejects.toThrow(/closed/i);
+    advanceBackoff();
+    fixture.state.applyFaults.push("commit-then-internal");
+    expect((await session.settleNow())?.content).toBe(kind === "delete" ? "" : "Base saved once");
+    expect(fixture.state.journalKeys.filter((key) => key === "third-commit")).toHaveLength(1);
+    expect(notices).not.toHaveBeenCalled();
+    mirror.destroy();
+    await session.close({ settle: false });
+    await capture.stop();
+  },
+);
 
 it("retires an unanswered deletion whose clocks are durable but whose delete set is missing", async () => {
   const advanceBackoff = uncertainFailureClock();
-  const fixture = await daemonDeathCapture("dohc-ydoc-unrecorded-delete-", "ydoc-unrecorded-delete");
+  const fixture = await daemonDeathCapture(
+    "dohc-ydoc-unrecorded-delete-",
+    "ydoc-unrecorded-delete",
+  );
   const notices = vi.fn();
   const capture = createWorkspaceEngineCapture({
-    workspaceId: "ydoc-unrecorded-delete", rootPath: fixture.rootPath,
-    rustEngineSessions: fixture.sessions, openRustYDocProviderSession: fixture.openProvider,
+    workspaceId: "ydoc-unrecorded-delete",
+    rootPath: fixture.rootPath,
+    rustEngineSessions: fixture.sessions,
+    openRustYDocProviderSession: fixture.openProvider,
     onError: () => undefined,
   });
   const session = await capture.openYDocSession({
-    path: "note.md", onRemoteUpdate: () => undefined, onEditRefused: notices,
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+    onEditRefused: notices,
   });
   await session.applyDecidedLocalUpdate(() => keyedUpdate(session.doc, "Keep me"));
   const mirror = new Y.Doc();
@@ -1743,97 +1839,146 @@ it("retires an unanswered deletion whose clocks are durable but whose delete set
   fixture.state.daemonAlive = true;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     advanceBackoff();
-    fixture.state.applyRefusals.push(new DaemonRefusalError({
-      code: "INTERNAL", message: "unanswered deletion", retry: "no",
-    }, undefined));
+    fixture.state.applyRefusals.push(
+      new DaemonRefusalError(
+        {
+          code: "INTERNAL",
+          message: "unanswered deletion",
+          retry: "no",
+        },
+        undefined,
+      ),
+    );
     if (attempt < 2) await expect(session.settleNow()).rejects.toThrow(/closed/i);
     else expect((await session.settleNow())?.content).toBe("Keep me");
   }
   expect(notices).toHaveBeenCalledTimes(1);
   expect(notices.mock.calls[0]?.[1]).toContain("No answer after three attempts.");
-  mirror.destroy(); await session.close({ settle: false }); await capture.stop();
+  mirror.destroy();
+  await session.close({ settle: false });
+  await capture.stop();
 });
 
 // "frozen": typing after the server refused this file's earlier edits. The
 // engine refuses it, the notice says why, and the recovery row keeps it.
-it.each(["definitive", "frozen", "uncertain", "uncertain-after-busy"])("reports one %s replay refusal batch and preserves an independent client", async kind => {
-  const advanceBackoff = uncertainFailureClock();
-  const fixture = await daemonDeathCapture("dohc-ydoc-causal-refusal-", "ydoc-causal-refusal");
-  const notices: string[] = [];
-  const paused: (boolean | undefined)[] = [];
-  const capture = createWorkspaceEngineCapture({
-    workspaceId: "ydoc-causal-refusal", rootPath: fixture.rootPath,
-    rustEngineSessions: fixture.sessions, openRustYDocProviderSession: fixture.openProvider,
-    onError: () => undefined,
-  });
-  const mirror = new Y.Doc();
-  const session = await capture.openYDocSession({
-    path: "note.md", onRemoteUpdate: () => undefined,
-    onEditRefused: (_id, message, isPaused) => { notices.push(message); paused.push(isPaused); },
-    onLineageReplaced: update => {
-      const fresh = new Y.Doc();
-      Y.applyUpdate(fresh, update);
-      expect(fresh.getText("plainText").toString()).toBe("Saved independent");
-      fresh.destroy();
-    },
-  });
-  Y.applyUpdate(mirror, session.initialUpdate);
-  typeInto(mirror, session, "Saved ");
-  await session.settleNow();
-  const independent = keyedUpdate(mirror, "independent");
-  fixture.state.daemonAlive = false;
-  for (const text of ["refused", " dependent", " tail"]) typeInto(mirror, session, text);
-  session.applyLocalUpdate(independent, undefined, { idempotencyKey: "other-client", actorOriginId: "other-agent" });
-  await expect(session.settleNow()).rejects.toThrow(/closed/i);
-  fixture.state.daemonAlive = true;
-  const attempts = kind === "uncertain-after-busy" ? 5 : kind === "uncertain" ? 3 : 1;
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    const busy = kind === "uncertain-after-busy" && attempt === 1;
-    fixture.state.applyRefusals.push(new DaemonRefusalError({
-      code: busy ? "OVERLOADED" : kind === "definitive" || kind === "frozen" ? "INVALID_PARAMS" : "INTERNAL",
-      message: busy ? "engine-store-busy" : kind === "frozen" ? "owner-outbox-frozen" : "future-refusal", retry: busy ? "afterBackoff" : "no",
-    }, undefined));
-  }
-  for (let attempt = 0; attempt < attempts - 1; attempt += 1) {
+it.each(["definitive", "frozen", "uncertain", "uncertain-after-busy"])(
+  "reports one %s replay refusal batch and preserves an independent client",
+  async (kind) => {
+    const advanceBackoff = uncertainFailureClock();
+    const fixture = await daemonDeathCapture("dohc-ydoc-causal-refusal-", "ydoc-causal-refusal");
+    const notices: string[] = [];
+    const paused: (boolean | undefined)[] = [];
+    const capture = createWorkspaceEngineCapture({
+      workspaceId: "ydoc-causal-refusal",
+      rootPath: fixture.rootPath,
+      rustEngineSessions: fixture.sessions,
+      openRustYDocProviderSession: fixture.openProvider,
+      onError: () => undefined,
+    });
+    const mirror = new Y.Doc();
+    const session = await capture.openYDocSession({
+      path: "note.md",
+      onRemoteUpdate: () => undefined,
+      onEditRefused: (_id, message, isPaused) => {
+        notices.push(message);
+        paused.push(isPaused);
+      },
+      onLineageReplaced: (update) => {
+        const fresh = new Y.Doc();
+        Y.applyUpdate(fresh, update);
+        expect(fresh.getText("plainText").toString()).toBe("Saved independent");
+        fresh.destroy();
+      },
+    });
+    Y.applyUpdate(mirror, session.initialUpdate);
+    typeInto(mirror, session, "Saved ");
+    await session.settleNow();
+    const independent = keyedUpdate(mirror, "independent");
+    fixture.state.daemonAlive = false;
+    for (const text of ["refused", " dependent", " tail"]) typeInto(mirror, session, text);
+    session.applyLocalUpdate(independent, undefined, {
+      idempotencyKey: "other-client",
+      actorOriginId: "other-agent",
+    });
     await expect(session.settleNow()).rejects.toThrow(/closed/i);
-    expect(notices).toHaveLength(0);
-    advanceBackoff();
-  }
-  expect((await session.settleNow())?.content).toBe("Saved independent");
-  expect(notices).toHaveLength(1);
-  expect(notices[0]).toContain('could not save edits to "note.md"');
-  expect(notices[0]).toContain("Open Notices. Use Save copy on this file's recovery row.");
-  expect(notices[0]).toContain(kind === "definitive" ? "dohc refused this edit."
-    : kind === "frozen" ? "Live editing is paused for this file." : "No answer after three attempts.");
-  // #2719: the workspace notice hears which refusal paused the file.
-  expect(paused).toEqual([kind === "frozen"]);
-  expect(fixture.state.journalKeys).toContain("other-client");
-  mirror.destroy(); await session.close({ settle: false }); await capture.stop();
-});
+    fixture.state.daemonAlive = true;
+    const attempts = kind === "uncertain-after-busy" ? 5 : kind === "uncertain" ? 3 : 1;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const busy = kind === "uncertain-after-busy" && attempt === 1;
+      fixture.state.applyRefusals.push(
+        new DaemonRefusalError(
+          {
+            code: busy
+              ? "OVERLOADED"
+              : kind === "definitive" || kind === "frozen"
+                ? "INVALID_PARAMS"
+                : "INTERNAL",
+            message: busy
+              ? "engine-store-busy"
+              : kind === "frozen"
+                ? "owner-outbox-frozen"
+                : "future-refusal",
+            retry: busy ? "afterBackoff" : "no",
+          },
+          undefined,
+        ),
+      );
+    }
+    for (let attempt = 0; attempt < attempts - 1; attempt += 1) {
+      await expect(session.settleNow()).rejects.toThrow(/closed/i);
+      expect(notices).toHaveLength(0);
+      advanceBackoff();
+    }
+    expect((await session.settleNow())?.content).toBe("Saved independent");
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toContain('could not save edits to "note.md"');
+    expect(notices[0]).toContain("Open Notices. Use Save copy on this file's recovery row.");
+    expect(notices[0]).toContain(
+      kind === "definitive"
+        ? "dohc refused this edit."
+        : kind === "frozen"
+          ? "Live editing is paused for this file."
+          : "No answer after three attempts.",
+    );
+    // #2719: the workspace notice hears which refusal paused the file.
+    expect(paused).toEqual([kind === "frozen"]);
+    expect(fixture.state.journalKeys).toContain("other-client");
+    mirror.destroy();
+    await session.close({ settle: false });
+    await capture.stop();
+  },
+);
 
 it("names the pending queue limit and releases its byte budget after draining", async () => {
   const fixture = await daemonDeathCapture("dohc-ydoc-queue-limit-", "ydoc-queue-limit");
   const notices: string[] = [];
   const capture = createWorkspaceEngineCapture({
-    workspaceId: "ydoc-queue-limit", rootPath: fixture.rootPath,
-    rustEngineSessions: fixture.sessions, openRustYDocProviderSession: fixture.openProvider,
+    workspaceId: "ydoc-queue-limit",
+    rootPath: fixture.rootPath,
+    rustEngineSessions: fixture.sessions,
+    openRustYDocProviderSession: fixture.openProvider,
     onError: () => undefined,
   });
   const session = await capture.openYDocSession({
-    path: "note.md", onRemoteUpdate: () => undefined,
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
     onEditRefused: (_id, message) => notices.push(message),
   });
   const empty = new Uint8Array([0, 0]);
-  for (let count = 0; count <= YDOC_PENDING_MAX_RECORDS; count += 1) session.applyLocalUpdate(empty);
+  for (let count = 0; count <= YDOC_PENDING_MAX_RECORDS; count += 1)
+    session.applyLocalUpdate(empty);
   await session.settleNow();
   expect(notices).toHaveLength(1);
   expect(notices[0]).toContain("Too many edits are waiting to save.");
   expect(notices[0]).not.toContain("too large");
   expect(notices[0]).toContain("Open Notices. Use Save copy on this file's recovery row.");
-  await session.applyDecidedLocalUpdate(doc => keyedUpdate(doc, "later"), undefined, { idempotencyKey: "after-drain" });
+  await session.applyDecidedLocalUpdate((doc) => keyedUpdate(doc, "later"), undefined, {
+    idempotencyKey: "after-drain",
+  });
   expect((await session.settleNow())?.content).toBe("later");
   expect(notices).toHaveLength(1);
-  await session.close({ settle: false }); await capture.stop();
+  await session.close({ settle: false });
+  await capture.stop();
 });
 
 it("sends a keyed write again under its key after its daemon died, so the key still refuses changed content", async () => {
@@ -1893,9 +2038,7 @@ async function keyedFaultCapture(prefix: string) {
 }
 
 it("says a keyed write may have been recorded when its retry's answer is lost with the daemon", async () => {
-  const { capture, session, state, errors } = await keyedFaultCapture(
-    "dohc-ydoc-keyed-uncertain-",
-  );
+  const { capture, session, state, errors } = await keyedFaultCapture("dohc-ydoc-keyed-uncertain-");
   state.applyFaults.push("drop", "commit-then-die");
   await expect(
     session.applyDecidedLocalUpdate((doc) => keyedUpdate(doc, "KEYED"), undefined, {
@@ -1953,8 +2096,10 @@ it("a workspace close fails while the daemon is still down, and reopens nothing"
 // The reconcile half of adoptGeneration: a replacement generation carrying
 // daemon-side work the canonical doc never saw must be merged in, exactly once.
 it("merges a daemon-side edit made during the outage into the canonical doc once", async () => {
-  const { rootPath, sessions, openProvider, state, applyDaemonSideEdit } =
-    await daemonDeathCapture("dohc-ydoc-death-merge-", "ydoc-death-merge");
+  const { rootPath, sessions, openProvider, state, applyDaemonSideEdit } = await daemonDeathCapture(
+    "dohc-ydoc-death-merge-",
+    "ydoc-death-merge",
+  );
   const remoteUpdates: Uint8Array[] = [];
   const capture = createWorkspaceEngineCapture({
     workspaceId: "ydoc-death-merge",
@@ -2001,13 +2146,10 @@ it("merges a daemon-side edit made during the outage into the canonical doc once
 // of the whole file. Every generation after the first must therefore open
 // without seeding and let the replay re-establish the content.
 it("does not duplicate the document when the reopen finds no durable lineage", async () => {
-  const {
-    rootPath,
-    sessions,
-    openProvider,
-    state,
-    loseDurableLineage,
-  } = await daemonDeathCapture("dohc-ydoc-death-absent-", "ydoc-death-absent");
+  const { rootPath, sessions, openProvider, state, loseDurableLineage } = await daemonDeathCapture(
+    "dohc-ydoc-death-absent-",
+    "ydoc-death-absent",
+  );
   const capture = createWorkspaceEngineCapture({
     workspaceId: "ydoc-death-absent",
     rootPath,
@@ -2055,15 +2197,19 @@ it("does not duplicate the document when the reopen finds no durable lineage", a
 it("does not adopt an absent lineage as the winner of an acknowledged claim", async () => {
   const fixture = await daemonDeathCapture("dohc-ydoc-lost-claim-", "ydoc-lost-claim");
   const capture = createWorkspaceEngineCapture({
-    workspaceId: "ydoc-lost-claim", rootPath: fixture.rootPath,
+    workspaceId: "ydoc-lost-claim",
+    rootPath: fixture.rootPath,
     rustEngineSessions: fixture.sessions,
-    openRustYDocProviderSession: async options => ({
-      ...await fixture.openProvider(options),
+    openRustYDocProviderSession: async (options) => ({
+      ...(await fixture.openProvider(options)),
       lineageClaimId: fixture.state.generation === 1 ? "saved-claim" : null,
     }),
     onError: () => undefined,
   });
-  const session = await capture.openYDocSession({ path: "note.md", onRemoteUpdate: () => undefined });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
   const mirror = new Y.Doc();
   Y.applyUpdate(mirror, session.initialUpdate);
   typeInto(mirror, session, "Saved ");
@@ -2100,8 +2246,10 @@ it("does not adopt an absent lineage as the winner of an acknowledged claim", as
 const BOUNDED_CLOSE_BACKOFF_MS = [100];
 
 it("a settling close of a DEAD session against a down daemon takes one bounded backoff, not the ladder", async () => {
-  const { rootPath, sessions, openProvider, state, backoff } =
-    await daemonDeathCapture("dohc-ydoc-death-budget-", "ydoc-death-budget");
+  const { rootPath, sessions, openProvider, state, backoff } = await daemonDeathCapture(
+    "dohc-ydoc-death-budget-",
+    "ydoc-death-budget",
+  );
   const capture = createWorkspaceEngineCapture({
     workspaceId: "ydoc-death-budget",
     rootPath,
@@ -2166,9 +2314,10 @@ it.each(["failure", "success"] as const)(
       onEvent: (handler) => engine.onEvent(handler),
       async sendRequest(request) {
         if (request.method === "workspace.open") return { id: request.id, result: { workspace } };
-        if (request.method === "workspace.close") return { id: request.id, result: { closed: true } };
+        if (request.method === "workspace.close")
+          return { id: request.id, result: { closed: true } };
         if (!request.method.startsWith("ydoc.")) {
-          return daemonCaptureLifecycleAnswer(request) ?? await versioned.sendRequest(request);
+          return daemonCaptureLifecycleAnswer(request) ?? (await versioned.sendRequest(request));
         }
         if (index === 0 && restarted) {
           currentClient = clients[1]!;
@@ -2211,7 +2360,9 @@ it.each(["failure", "success"] as const)(
           scheduleSettle: (fire) => {
             const timer = { generation: opened, fire, cancelled: false };
             timers.push(timer);
-            return () => { timer.cancelled = true; };
+            return () => {
+              timer.cancelled = true;
+            };
           },
         });
       },
@@ -2222,9 +2373,12 @@ it.each(["failure", "success"] as const)(
       contentKind: "plaintext",
       onRemoteUpdate: () => undefined,
       onSaveState: (state, token, event) => {
-        const seq = event === "start"
-          ? noteSettleStart(saveSeq, token)
-          : event === "outcome" ? noteSettleOutcome(saveSeq, token) : 0;
+        const seq =
+          event === "start"
+            ? noteSettleStart(saveSeq, token)
+            : event === "outcome"
+              ? noteSettleOutcome(saveSeq, token)
+              : 0;
         reported.push({ state, seq });
       },
     });
@@ -2251,32 +2405,40 @@ it.each(["failure", "success"] as const)(
       oldReadHeld = true;
       // The old settle RPC succeeds before the daemon restarts. Its capture
       // callback is still awaiting the file check, which can be slow or fail.
-      return Readable.from((async function* () {
-        oldReached.resolve();
-        await oldResponse.promise;
-        if (oldOutcome === "failure") {
-          throw Object.assign(new Error("file check refused"), { code: "EACCES" });
-        }
-        yield* createReadStream(path, options);
-      })()) as ReturnType<typeof createReadStream>;
+      return Readable.from(
+        (async function* () {
+          oldReached.resolve();
+          await oldResponse.promise;
+          if (oldOutcome === "failure") {
+            throw Object.assign(new Error("file check refused"), { code: "EACCES" });
+          }
+          yield* createReadStream(path, options);
+        })(),
+      ) as ReturnType<typeof createReadStream>;
     });
     try {
       type("old edit");
-      await expect.poll(() => timers.find((timer) => timer.generation === 1 && !timer.cancelled)).toBeDefined();
+      await expect
+        .poll(() => timers.find((timer) => timer.generation === 1 && !timer.cancelled))
+        .toBeDefined();
       timers.find((timer) => timer.generation === 1 && !timer.cancelled)!.fire();
       await oldReached.promise;
       expect(reported).toEqual([{ state: "settling", seq: 1 }]);
 
       restarted = true;
       type(" plus new edit");
-      await expect.poll(() => timers.find((timer) => timer.generation === 2 && !timer.cancelled)).toBeDefined();
+      await expect
+        .poll(() => timers.find((timer) => timer.generation === 2 && !timer.cancelled))
+        .toBeDefined();
       timers.find((timer) => timer.generation === 2 && !timer.cancelled)!.fire();
       await newReached.promise;
       expect(reported.at(-1)).toEqual({ state: "settling", seq: 2 });
       expect([...saveSeq.inFlight.values()]).toEqual([1, 2]);
 
       oldResponse.resolve();
-      await expect.poll(() => reported.filter((entry) => entry.state !== "settling").length).toBe(1);
+      await expect
+        .poll(() => reported.filter((entry) => entry.state !== "settling").length)
+        .toBe(1);
       expect(await readFile(join(rootPath, "note.md"), "utf8")).toBe("old edit");
       expect.soft(reported.at(-1)).toEqual({
         state: oldOutcome === "success" ? "saved" : "error",
@@ -2295,7 +2457,9 @@ it.each(["failure", "success"] as const)(
 
       replacementBusy = false;
       await session.settleNow();
-      await expect.poll(() => reported.filter((entry) => entry.state !== "settling").length).toBe(2);
+      await expect
+        .poll(() => reported.filter((entry) => entry.state !== "settling").length)
+        .toBe(2);
       expect(reported.at(-1)).toEqual({ state: "saved", seq: rendererSeq });
       expect(await readFile(join(rootPath, "note.md"), "utf8")).toBe("old edit plus new edit");
       expect(saveSeq.inFlight.size).toBe(0);
@@ -2326,12 +2490,8 @@ async function lockedRebindCapture(
     // reusing everything else — the shared `state`'s locking, failure
     // injection, and bookkeeping all keep working unmodified.
     wrapProvider?: (
-      base: (
-        openOptions: EngineYdocProviderSessionOptions,
-      ) => Promise<EngineYdocProviderSession>,
-    ) => (
-      openOptions: EngineYdocProviderSessionOptions,
-    ) => Promise<EngineYdocProviderSession>;
+      base: (openOptions: EngineYdocProviderSessionOptions) => Promise<EngineYdocProviderSession>,
+    ) => (openOptions: EngineYdocProviderSessionOptions) => Promise<EngineYdocProviderSession>;
   },
 ) {
   // the scratch, like every other harness in this file: the run root is
@@ -2548,10 +2708,7 @@ async function lockedRebindCapture(
           // settling close so pending edits survive a transient failure — and
           // that close materializes the artifact on its way out.
           // `settleOnRefusal: false` is the only thing that turns it off.
-          if (
-            closeOptions?.settle === false &&
-            closeOptions?.settleOnRefusal !== false
-          ) {
+          if (closeOptions?.settle === false && closeOptions?.settleOnRefusal !== false) {
             state.settleCalls.push(gen);
             if (!state.locked && !state.unmaterialized) {
               state.settledContents.push(doc.getText("plainText").toString());
@@ -2565,10 +2722,7 @@ async function lockedRebindCapture(
           // this error; a local-only lineage refuses and the raw refusal is
           // what the escalated settling close ends up throwing.
           if (state.replicated) {
-            throw new YdocReleasedWithSettleFailureError(
-              options.path,
-              preCloseError,
-            );
+            throw new YdocReleasedWithSettleFailureError(options.path, preCloseError);
           }
           throw preCloseError;
         }
@@ -2584,9 +2738,7 @@ async function lockedRebindCapture(
       : openProvider,
     onError: (context, error) => {
       state.errors.push(context);
-      state.errorMessages.push(
-        error instanceof Error ? error.message : String(error),
-      );
+      state.errorMessages.push(error instanceof Error ? error.message : String(error));
     },
     ...(options?.monotonic ? { monotonic: options.monotonic } : {}),
     ...(options?.teardownRetryMs ? { teardownRetryMs: options.teardownRetryMs } : {}),
@@ -2629,12 +2781,10 @@ async function expectRemovalOpenRefused(
   path: string,
   inProgress: string,
 ): Promise<void> {
-  const refusal = await capture
-    .openYDocSession({ path, onRemoteUpdate: () => undefined })
-    .then(
-      () => null,
-      (error: unknown) => error,
-    );
+  const refusal = await capture.openYDocSession({ path, onRemoteUpdate: () => undefined }).then(
+    () => null,
+    (error: unknown) => error,
+  );
   expect(refusal).toMatchObject({
     name: "YDocRemovalInProgressError",
     code: "removal-in-progress",
@@ -2664,7 +2814,10 @@ it("absorbs a busy journal refusal instead of rebinding the generation", async (
   //
   const { capture, state } = await lockedRebindCapture("dohc-ydoc-busy-journal-");
   const { session, mirror } = await openWithOneEdit(capture, "first edit ");
-  expect(state.generation, "drop the `isTransientEngineCause` branch from the local-update catch -> the generation count climbs with every edit.").toBe(1);
+  expect(
+    state.generation,
+    "drop the `isTransientEngineCause` branch from the local-update catch -> the generation count climbs with every edit.",
+  ).toBe(1);
 
   state.recordFailure = busyRefusal();
   typeInto(mirror, session, "second ");
@@ -2720,9 +2873,7 @@ it("re-arms a pending locked settle on the generation that replaces a dead one",
   // The replacement generation settles BY ITSELF, and the settle carries the
   // journaled edit the lock blocked.
   await expect.poll(() => state.settleCalls).toEqual([1, 2]);
-  await expect.poll(() => state.settledContents).toEqual([
-    "locked edit",
-  ]);
+  await expect.poll(() => state.settledContents).toEqual(["locked edit"]);
 
   await session.close({ settle: false }).catch(() => undefined);
   await capture.stop();
@@ -2778,9 +2929,7 @@ it("pays a locked close debt by itself once the lock releases", async () => {
   // The lock releases after the renderer already gave up. No reopen and no
   // restart: the capture layer's own retry pays the debt.
   state.locked = false;
-  await expect
-    .poll(() => state.settledContents, { timeout: 15_000 })
-    .toEqual(["closing edit"]);
+  await expect.poll(() => state.settledContents, { timeout: 15_000 }).toEqual(["closing edit"]);
   await capture.stop();
 });
 
@@ -2790,21 +2939,15 @@ it("pays a locked close debt even when a replicated release succeeds", async () 
   // settle — the session and its entry are gone, and the per-entry ladder
   // with them. The detached retry reopens enough state to settle once the
   // lock releases: no reopen by anyone else, no restart.
-  const { capture, state } = await lockedRebindCapture(
-    "dohc-ydoc-replicated-close-",
-  );
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-replicated-close-");
   const { session } = await openWithOneEdit(capture, "replicated edit");
 
   state.locked = true;
   state.replicated = true;
-  await expect(session.close()).rejects.toThrow(
-    /released, but its pre-close settle failed/,
-  );
+  await expect(session.close()).rejects.toThrow(/released, but its pre-close settle failed/);
 
   state.locked = false;
-  await expect
-    .poll(() => state.settledContents, { timeout: 15_000 })
-    .toEqual(["replicated edit"]);
+  await expect.poll(() => state.settledContents, { timeout: 15_000 }).toEqual(["replicated edit"]);
   await capture.stop();
 });
 
@@ -2830,9 +2973,7 @@ it("a rename after a version-switch stand-down refuses instead of saving stale c
 
   state.locked = true;
   state.replicated = true;
-  await expect(session.close()).rejects.toThrow(
-    /released, but its pre-close settle failed/,
-  );
+  await expect(session.close()).rejects.toThrow(/released, but its pre-close settle failed/);
 
   const ensured = await loopback.sendRequest({
     id: 9_101,
@@ -2862,17 +3003,14 @@ it("a rename after a version-switch stand-down refuses instead of saving stale c
   state.locked = false;
 
   await expect
-    .poll(
-      () => state.errors.filter((context) => context.includes("close retry")),
-      { timeout: 15_000 },
-    )
+    .poll(() => state.errors.filter((context) => context.includes("close retry")), {
+      timeout: 15_000,
+    })
     .toHaveLength(1);
 
   // RED against current main: absence read as landed, so this resolved and
   // recorded renamed.md from the stale pre-lock text instead of refusing.
-  await expect(
-    capture.beginFileRename("note.md", "renamed.md"),
-  ).rejects.toThrow(
+  await expect(capture.beginFileRename("note.md", "renamed.md")).rejects.toThrow(
     "dohc could not rename note.md. dohc gave up on writing note.md earlier, so its last edits never reached disk. The edits stay in the document's history. Open note.md to write them again. Then rename note.md again.",
   );
   await expect(readFile(join(rootPath, "renamed.md"), "utf8")).rejects.toThrow();
@@ -2886,9 +3024,7 @@ it("a reopen before the timer fires receives the locked debt, not silence", asyn
 
   state.locked = true;
   state.replicated = true;
-  await expect(session.close()).rejects.toThrow(
-    /released, but its pre-close settle failed/,
-  );
+  await expect(session.close()).rejects.toThrow(/released, but its pre-close settle failed/);
 
   // The user reopens the document before the retry fires, then the lock
   // releases. No edit ever happens in the reopened session.
@@ -2899,9 +3035,7 @@ it("a reopen before the timer fires receives the locked debt, not silence", asyn
   expect(state.generation).toBe(2);
   state.locked = false;
 
-  await expect
-    .poll(() => state.settledContents, { timeout: 15_000 })
-    .toEqual(["transferred edit"]);
+  await expect.poll(() => state.settledContents, { timeout: 15_000 }).toEqual(["transferred edit"]);
   // The debt was paid through the live session — no detached reopen.
   expect(state.generation).toBe(2);
   await reopened.close({ settle: false });
@@ -2914,17 +3048,13 @@ it("a rename drains the detached locked debt before touching disk", async () => 
   // path, leaving the retry aimed at the moved-from file. Rename is another
   // lifecycle edge: it finds the debt in the registry and pays it first, on
   // the same chain, before reading anything from disk.
-  const { capture, state, rootPath } = await lockedRebindCapture(
-    "dohc-ydoc-rename-drain-",
-  );
+  const { capture, state, rootPath } = await lockedRebindCapture("dohc-ydoc-rename-drain-");
   await writeFile(join(rootPath, "note.md"), "stale pre-lock artifact\n", "utf8");
   const { session } = await openWithOneEdit(capture, "renamed edit");
 
   state.locked = true;
   state.replicated = true;
-  await expect(session.close()).rejects.toThrow(
-    /released, but its pre-close settle failed/,
-  );
+  await expect(session.close()).rejects.toThrow(/released, but its pre-close settle failed/);
 
   // The lock releases; before the timer fires, the user renames the file.
   state.locked = false;
@@ -2943,9 +3073,7 @@ it("a destructive delete cancels the detached locked debt instead of recreating 
 
   state.locked = true;
   state.replicated = true;
-  await expect(session.close()).rejects.toThrow(
-    /released, but its pre-close settle failed/,
-  );
+  await expect(session.close()).rejects.toThrow(/released, but its pre-close settle failed/);
 
   // The user deletes the file, then the lock releases.
   const finishDelete = await capture.settleAndCloseLiveSessionsForPath("note.md");
@@ -2955,9 +3083,7 @@ it("a destructive delete cancels the detached locked debt instead of recreating 
   // The cancel left a trace, and the retry window passes with no reopen and
   // no settle: the deleted file is not recreated.
   await expect
-    .poll(
-      () => state.errors.filter((context) => context.includes("close retry")),
-    )
+    .poll(() => state.errors.filter((context) => context.includes("close retry")))
     .toHaveLength(1);
   await pastRetryRungs();
   expect(state.generation).toBe(1);
@@ -2966,10 +3092,9 @@ it("a destructive delete cancels the detached locked debt instead of recreating 
 });
 
 it("an external delete observed before a debt registers cancels it at the door instead of arming a resurrecting ladder", async () => {
-  const { capture, state } = await lockedRebindCapture(
-    "dohc-ydoc-late-registration-",
-    { monotonic: frozenClock },
-  );
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-late-registration-", {
+    monotonic: frozenClock,
+  });
   const { session } = await openWithOneEdit(capture, "would resurrect this");
 
   // The watcher observes the external delete before this session's own
@@ -2982,9 +3107,7 @@ it("an external delete observed before a debt registers cancels it at the door i
 
   // RED before the fix: nothing remembered the earlier delete, so this
   // close's own registration armed a fresh, un-cancelled debt.
-  await expect(session.close()).rejects.toThrow(
-    /released, but its pre-close settle failed/,
-  );
+  await expect(session.close()).rejects.toThrow(/released, but its pre-close settle failed/);
   state.locked = false;
 
   // The cancel trace names the absence, not a fabricated lock.
@@ -3016,9 +3139,7 @@ it("a recreated path's own session arms its debt normally instead of being cance
   // delete (this one) was never the delete's victim, so it must arm
   // normally regardless of whether a recreation happened at all — see the
   // sibling pin for the old session, which must still cancel.
-  const { capture, state } = await lockedRebindCapture(
-    "dohc-ydoc-tombstone-recreate-",
-  );
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-tombstone-recreate-");
 
   // The path is deleted (no debt exists yet, so the tombstone is set),
   // then recreated — both before this test's own session ever opens.
@@ -3032,9 +3153,7 @@ it("a recreated path's own session arms its debt normally instead of being cance
   const { session } = await openWithOneEdit(capture, "a real pending edit");
   state.locked = true;
   state.replicated = true;
-  await expect(session.close()).rejects.toThrow(
-    /released, but its pre-close settle failed/,
-  );
+  await expect(session.close()).rejects.toThrow(/released, but its pre-close settle failed/);
 
   // RED before the fix: the stale tombstone, still armed, was consumed
   // here and cancelled this genuine pending write instead of arming it.
@@ -3052,31 +3171,48 @@ it("a recreated path's own session arms its debt normally instead of being cance
   await capture.stop();
 });
 
-it.each(["quit", "close"] as const)("a failed observation drain probes deletion before %s settles live sessions", async mode => {
-  const { capture, state, rootPath, workspaceId } = await lockedRebindCapture("dohc-file-feed-failed-drain-");
-  await writeFile(join(rootPath, "note.md"), "Original.");
-  const activityState = new WorkspaceActivityState();
-  const workspace = { workspaceId, rootPath, attachmentId: Symbol("failed-drain"), kind: "personal" as const, mode: "local-first" as const };
-  const activity = createWorkspaceActivity(() => {}, {
-    captureFor: () => ({ shareView: false, capture }),
-    observationFor: () => ({ ...idleObservation(workspace, {} as never), stop: async () => { throw new Error("drain unavailable"); } }),
-  });
-  await activity.open(workspace, activityState);
-  const { session } = await openWithOneEdit(capture, "must stay deleted");
-  state.locked = true;
-  await expect(session.close()).rejects.toThrow("file-locked");
-  await rm(join(rootPath, "note.md"));
-  state.locked = false;
-  if (mode === "quit") {
-    await settleYDocsAfterFileObservation([activity.drainObservations(activityState)],
-      () => capture.settleAndCloseAllLiveSessions());
-    await capture.stop();
-  } else {
-    await expect(activity.close(workspace, activityState)).rejects.toThrow("drain unavailable");
-  }
-  expect(state.settledContents).toEqual([]);
-  await expect(readFile(join(rootPath, "note.md"))).rejects.toMatchObject({ code: "ENOENT" });
-});
+it.each(["quit", "close"] as const)(
+  "a failed observation drain probes deletion before %s settles live sessions",
+  async (mode) => {
+    const { capture, state, rootPath, workspaceId } = await lockedRebindCapture(
+      "dohc-file-feed-failed-drain-",
+    );
+    await writeFile(join(rootPath, "note.md"), "Original.");
+    const activityState = new WorkspaceActivityState();
+    const workspace = {
+      workspaceId,
+      rootPath,
+      attachmentId: Symbol("failed-drain"),
+      kind: "personal" as const,
+      mode: "local-first" as const,
+    };
+    const activity = createWorkspaceActivity(() => {}, {
+      captureFor: () => ({ shareView: false, capture }),
+      observationFor: () => ({
+        ...idleObservation(workspace, {} as never),
+        stop: async () => {
+          throw new Error("drain unavailable");
+        },
+      }),
+    });
+    await activity.open(workspace, activityState);
+    const { session } = await openWithOneEdit(capture, "must stay deleted");
+    state.locked = true;
+    await expect(session.close()).rejects.toThrow("file-locked");
+    await rm(join(rootPath, "note.md"));
+    state.locked = false;
+    if (mode === "quit") {
+      await settleYDocsAfterFileObservation([activity.drainObservations(activityState)], () =>
+        capture.settleAndCloseAllLiveSessions(),
+      );
+      await capture.stop();
+    } else {
+      await expect(activity.close(workspace, activityState)).rejects.toThrow("drain unavailable");
+    }
+    expect(state.settledContents).toEqual([]);
+    await expect(readFile(join(rootPath, "note.md"))).rejects.toMatchObject({ code: "ENOENT" });
+  },
+);
 
 it("a suppressed retry's dirty-session refusal discharges through evict instead of wedging the lease", async () => {
   // Codex P1-B on #746. Forcing `settleOnRefusal: false` on a suppressed
@@ -3129,14 +3265,10 @@ it("a suppressed retry's dirty-session refusal discharges through evict instead 
 });
 
 it("a delete delivered while the capture chain is busy still suppresses a retry that fires before the chain drains", async () => {
-  const { capture, state } = await lockedRebindCapture(
-    "dohc-ydoc-close-retry-chain-busy-",
-    { teardownRetryMs: { initial: 300, cap: 300 } },
-  );
-  const { session } = await openWithOneEdit(
-    capture,
-    "would resurrect via chain race",
-  );
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-close-retry-chain-busy-", {
+    teardownRetryMs: { initial: 300, cap: 300 },
+  });
+  const { session } = await openWithOneEdit(capture, "would resurrect via chain race");
 
   state.locked = true;
   await expect(session.close()).rejects.toThrow("file-locked");
@@ -3167,11 +3299,10 @@ it("a delete delivered while the capture chain is busy still suppresses a retry 
   // resettles the doc onto the path the user just deleted. The retry's own
   // stand-down trace is the signal that it fired and met the tombstone.
   await expect
-    .poll(
-      () =>
-        state.errorMessages.some((message) =>
-          message.includes("an external delete of note.md removed the path"),
-        ),
+    .poll(() =>
+      state.errorMessages.some((message) =>
+        message.includes("an external delete of note.md removed the path"),
+      ),
     )
     .toBe(true);
   expect(state.settledContents).toEqual([]);
@@ -3181,12 +3312,8 @@ it("a delete delivered while the capture chain is busy still suppresses a retry 
   await capture.stop();
 });
 
-
-
 it("a recreated path's fresh close-retry ladder still settles normally despite an earlier delete", async () => {
-  const { capture, state } = await lockedRebindCapture(
-    "dohc-ydoc-close-retry-recreate-",
-  );
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-close-retry-recreate-");
 
   capture.observeFileEvents([{ path: "note.md", operation: "delete" }]);
   await capture.flush();
@@ -3203,8 +3330,6 @@ it("a recreated path's fresh close-retry ladder still settles normally despite a
     .toEqual(["a real pending edit"]);
   await capture.stop();
 });
-
-
 
 it("a delete refuses the open that could register a debt while disk work is in flight", async () => {
   // #696 rescanned for debts registered after its suspension snapshot. #697
@@ -3224,9 +3349,7 @@ it("a delete refuses the open that could register a debt while disk work is in f
 
   state.locked = true;
   state.replicated = true;
-  await expect(first.close()).rejects.toThrow(
-    /released, but its pre-close settle failed/,
-  );
+  await expect(first.close()).rejects.toThrow(/released, but its pre-close settle failed/);
 
   // The delete starts: live sessions are vacated and the debt is suspended.
   // The disk work has not finished, so the finisher has not been called.
@@ -3234,11 +3357,7 @@ it("a delete refuses the open that could register a debt while disk work is in f
 
   // The former second debt is refused before the daemon opens a generation.
   const generationAtDelete = state.generation;
-  await expectRemovalOpenRefused(
-    capture,
-    "note.md",
-    "dohc is still deleting note.md.",
-  );
+  await expectRemovalOpenRefused(capture, "note.md", "dohc is still deleting note.md.");
 
   // The delete succeeded. Both debts are cancelled: the path is provably gone.
   finishDelete(true);
@@ -3249,9 +3368,7 @@ it("a delete refuses the open that could register a debt while disk work is in f
   expect(state.generation).toBe(generationAtDelete);
   expect(state.settledContents).toEqual([]);
   // The one debt that existed before the window said so out loud.
-  expect(
-    state.errors.filter((context) => context.includes("close retry")),
-  ).toHaveLength(1);
+  expect(state.errors.filter((context) => context.includes("close retry"))).toHaveLength(1);
   await capture.stop();
 });
 
@@ -3266,9 +3383,7 @@ it("a failed delete restores the detached locked debt instead of cancelling it",
 
   state.locked = true;
   state.replicated = true;
-  await expect(session.close()).rejects.toThrow(
-    /released, but its pre-close settle failed/,
-  );
+  await expect(session.close()).rejects.toThrow(/released, but its pre-close settle failed/);
 
   const finishDelete = await capture.settleAndCloseLiveSessionsForPath("note.md");
   finishDelete(false);
@@ -3288,17 +3403,13 @@ it("a rename refuses while its debt payment is still locked", async () => {
   // with pre-lock text, which the finisher's path rollback cannot undo. The
   // registry is the proof: still named means it did not land, so the rename
   // refuses and the debt stays.
-  const { capture, state, rootPath } = await lockedRebindCapture(
-    "dohc-ydoc-rename-locked-",
-  );
+  const { capture, state, rootPath } = await lockedRebindCapture("dohc-ydoc-rename-locked-");
   await writeFile(join(rootPath, "note.md"), "stale pre-lock artifact\n", "utf8");
   const { session } = await openWithOneEdit(capture, "must not be lost");
 
   state.locked = true;
   state.replicated = true;
-  await expect(session.close()).rejects.toThrow(
-    /released, but its pre-close settle failed/,
-  );
+  await expect(session.close()).rejects.toThrow(/released, but its pre-close settle failed/);
 
   // The lock still holds when the rename runs: it must refuse, naming the
   // blocker and the way out, and nothing may be written.
@@ -3309,9 +3420,7 @@ it("a rename refuses while its debt payment is still locked", async () => {
 
   // The debt survived the refusal: releasing the lock still lands the write.
   state.locked = false;
-  await expect
-    .poll(() => state.settledContents, { timeout: 15_000 })
-    .toEqual(["must not be lost"]);
+  await expect.poll(() => state.settledContents, { timeout: 15_000 }).toEqual(["must not be lost"]);
   await capture.stop();
 });
 
@@ -3338,9 +3447,7 @@ it("a folder move settles and closes a live child session before opening its win
   // GREEN proof 1: the child's edit landed through the move's own vacate
   // settle, before the window ever opened — not through some later,
   // racing settle.
-  expect(state.settledContents).toEqual([
-    "child settles before the window opens",
-  ]);
+  expect(state.settledContents).toEqual(["child settles before the window opens"]);
   // GREEN proof 2: the session is already gone, so closing it again is a
   // harmless no-op instead of a fresh settle racing the window.
   const settlesAtClose = state.settleCalls.length;
@@ -3356,7 +3463,10 @@ it("a folder move settles and closes a live child session before opening its win
     () => null,
     (error: unknown) => error,
   );
-  expect(settleRefusal, "drop the removal-window check from the settle door (capture.ts ~2137-2145) -> this settle reaches the daemon instead of refusing.").toMatchObject({
+  expect(
+    settleRefusal,
+    "drop the removal-window check from the settle door (capture.ts ~2137-2145) -> this settle reaches the daemon instead of refusing.",
+  ).toMatchObject({
     name: "YDocRemovalInProgressError",
     code: "removal-in-progress",
     workspacePath: "dir/note.md",
@@ -3370,11 +3480,7 @@ it("a folder move settles and closes a live child session before opening its win
   // Refusal side, on the open door: the window still covers the child by
   // prefix, so a reopen cannot slip in and recreate the very race the
   // vacate just closed off.
-  await expectRemovalOpenRefused(
-    capture,
-    "dir/note.md",
-    "dohc is still moving dir.",
-  );
+  await expectRemovalOpenRefused(capture, "dir/note.md", "dohc is still moving dir.");
 
   await finishMove(true);
   await capture.stop();
@@ -3388,9 +3494,7 @@ it("a failed move holds its window across the rollback, not just up to it", asyn
   // Two mutations, one per assertion:
   //   - close the window before rollback -> the queued open enters the gap.
   //   - never close it -> the open after rollback is still refused.
-  const { capture, state, rootPath } = await lockedRebindCapture(
-    "dohc-ydoc-move-rollback-gap-",
-  );
+  const { capture, state, rootPath } = await lockedRebindCapture("dohc-ydoc-move-rollback-gap-");
   await writeFile(join(rootPath, "note.md"), "stale artifact\n", "utf8");
 
   // An engine-coordinated rename, so a rollback exists at all.
@@ -3436,8 +3540,6 @@ it("a failed move holds its window across the rollback, not just up to it", asyn
   await capture.stop();
 });
 
-
-
 it("a folder move fences late live opens on the no-op finisher path", async () => {
   // `beginFileRename` returns a NO-OP finisher for everything the engine
   // rename declines — folders, binary, untracked paths — but the disk move
@@ -3446,19 +3548,13 @@ it("a folder move fences late live opens on the no-op finisher path", async () =
   // no-op path carries the fix untested (verified: mutating only the no-op
   // finisher leaves the test above green).
   //
-  const { capture, state, rootPath } = await lockedRebindCapture(
-    "dohc-ydoc-foldermove-race-",
-  );
+  const { capture, state, rootPath } = await lockedRebindCapture("dohc-ydoc-foldermove-race-");
   await mkdir(join(rootPath, "dir"), { recursive: true });
   await writeFile(join(rootPath, "dir", "note.md"), "stale artifact\n", "utf8");
 
   const finishMove = await capture.beginFileRename("dir", "moved");
   const generationAtMove = state.generation;
-  await expectRemovalOpenRefused(
-    capture,
-    "dir/note.md",
-    "dohc is still moving dir.",
-  );
+  await expectRemovalOpenRefused(capture, "dir/note.md", "dohc is still moving dir.");
 
   await finishMove(true);
 
@@ -3469,10 +3565,9 @@ it("a folder move fences late live opens on the no-op finisher path", async () =
 });
 
 it("refused renames never stack more than one retry ladder", async () => {
-  const { capture, state, rootPath } = await lockedRebindCapture(
-    "dohc-ydoc-one-timer-",
-    { teardownRetryMs: { initial: 1_000, cap: 10_000 } },
-  );
+  const { capture, state, rootPath } = await lockedRebindCapture("dohc-ydoc-one-timer-", {
+    teardownRetryMs: { initial: 1_000, cap: 10_000 },
+  });
   await writeFile(join(rootPath, "note.md"), "stale artifact\n", "utf8");
   const { session } = await openWithOneEdit(capture, "one ladder only");
 
@@ -3487,9 +3582,7 @@ it("refused renames never stack more than one retry ladder", async () => {
   try {
     state.locked = true;
     state.replicated = true;
-    await expect(session.close()).rejects.toThrow(
-      /released, but its pre-close settle failed/,
-    );
+    await expect(session.close()).rejects.toThrow(/released, but its pre-close settle failed/);
 
     // Four refused renames while the lock holds: each pays, fails, and arms.
     for (let attempt = 0; attempt < 4; attempt += 1) {
@@ -3507,7 +3600,11 @@ it("refused renames never stack more than one retry ladder", async () => {
 
     // Keep the original recovery budget, then observe two more seconds for duplicates.
     state.locked = false;
-    for (let elapsed = 0; elapsed < 15_000 && state.settledContents.length === 0; elapsed += 1_000) {
+    for (
+      let elapsed = 0;
+      elapsed < 15_000 && state.settledContents.length === 0;
+      elapsed += 1_000
+    ) {
       await advanceAndDrain(1_000);
     }
     expect(state.settledContents).toEqual(["one ladder only"]);
@@ -3528,16 +3625,12 @@ it("a failing active-version read re-arms instead of stranding the debt", async 
   // the debt in the registry with NO timer — stranded until an unrelated
   // lifecycle action or a restart. Inside the block it re-arms like any
   // other failure.
-  const { capture, state, loopback } = await lockedRebindCapture(
-    "dohc-ydoc-version-read-fails-",
-  );
+  const { capture, state, loopback } = await lockedRebindCapture("dohc-ydoc-version-read-fails-");
   const { session } = await openWithOneEdit(capture, "survives a failed read");
 
   state.locked = true;
   state.replicated = true;
-  await expect(session.close()).rejects.toThrow(
-    /released, but its pre-close settle failed/,
-  );
+  await expect(session.close()).rejects.toThrow(/released, but its pre-close settle failed/);
 
   // The active-version read fails while the retry ladder runs.
   const realSend = loopback.sendRequest.bind(loopback);
@@ -3551,10 +3644,9 @@ it("a failing active-version read re-arms instead of stranding the debt", async 
   state.locked = false;
 
   await expect
-    .poll(
-      () => state.errors.filter((context) => context.includes("close retry")),
-      { timeout: 15_000 },
-    )
+    .poll(() => state.errors.filter((context) => context.includes("close retry")), {
+      timeout: 15_000,
+    })
     .not.toHaveLength(0);
   failVersionReads = false;
   await expect
@@ -3563,17 +3655,13 @@ it("a failing active-version read re-arms instead of stranding the debt", async 
   await capture.stop();
 }, 30_000);
 
-
-
 it("cancelling a debt releases the session whose close was refused", async () => {
   const { capture, state } = await lockedRebindCapture("dohc-ydoc-discard-lease-");
   const { session } = await openWithOneEdit(capture, "leased edit");
 
   state.locked = true;
   state.replicated = true;
-  await expect(session.close()).rejects.toThrow(
-    /released, but its pre-close settle failed/,
-  );
+  await expect(session.close()).rejects.toThrow(/released, but its pre-close settle failed/);
 
   // The retry opens a session and its RELEASE is refused: the debt now holds
   // the only session that can free the lease.
@@ -3582,10 +3670,9 @@ it("cancelling a debt releases the session whose close was refused", async () =>
   // Wait for the retry's own release to be refused — generation 2's close,
   // not the original session's, which already ran above.
   await expect
-    .poll(
-      () => state.closeCalls.filter((generation) => generation === 2).length,
-      { timeout: 15_000 },
-    )
+    .poll(() => state.closeCalls.filter((generation) => generation === 2).length, {
+      timeout: 15_000,
+    })
     .toBeGreaterThan(0);
   const releasesBeforeCancel = state.closesWithSettleFalse;
 
@@ -3599,18 +3686,13 @@ it("cancelling a debt releases the session whose close was refused", async () =>
   await capture.stop();
 }, 30_000);
 
-
-
-
 it("a cancelled debt whose release is refused keeps retrying that release", async () => {
   const { capture, state } = await lockedRebindCapture("dohc-ydoc-lease-owner-");
   const { session } = await openWithOneEdit(capture, "leased twice");
 
   state.locked = true;
   state.replicated = true;
-  await expect(session.close()).rejects.toThrow(
-    /released, but its pre-close settle failed/,
-  );
+  await expect(session.close()).rejects.toThrow(/released, but its pre-close settle failed/);
 
   // The retry settles, a peer update outruns it, and the release is refused.
   // The debt now holds the only session that can free the lease and still
@@ -3619,10 +3701,9 @@ it("a cancelled debt whose release is refused keeps retrying that release", asyn
   state.emitUpdateAfterSettle = true;
   state.closeFailure = new Error("ydoc-unsettled-close");
   await expect
-    .poll(
-      () => state.closeCalls.filter((generation) => generation === 2).length,
-      { timeout: 15_000 },
-    )
+    .poll(() => state.closeCalls.filter((generation) => generation === 2).length, {
+      timeout: 15_000,
+    })
     .toBeGreaterThan(0);
   const releasesBeforeCancel = state.closesWithSettleFalse;
   const generationBeforeCancel = state.generation;
@@ -3675,9 +3756,7 @@ it("a settle the engine refuses for good stops the ladder and says why", async (
 
   state.locked = true;
   state.replicated = true;
-  await expect(session.close()).rejects.toThrow(
-    /released, but its pre-close settle failed/,
-  );
+  await expect(session.close()).rejects.toThrow(/released, but its pre-close settle failed/);
 
   // The lock releases, but the file it guarded is no longer the one the
   // pending write was built against.
@@ -3687,13 +3766,9 @@ it("a settle the engine refuses for good stops the ladder and says why", async (
     new Error("daemon response"),
   );
   await expect
-    .poll(
-      () =>
-        state.errorMessages.filter((message) =>
-          message.includes("changed outside dohc"),
-        ),
-      { timeout: 15_000 },
-    )
+    .poll(() => state.errorMessages.filter((message) => message.includes("changed outside dohc")), {
+      timeout: 15_000,
+    })
     .not.toHaveLength(0);
   const [stopMessage] = state.errorMessages.filter((message) =>
     message.includes("changed outside dohc"),
@@ -3729,23 +3804,18 @@ it("a settle that committed but wrote nothing stops the ladder and names the sym
 
   state.locked = true;
   state.replicated = true;
-  await expect(session.close()).rejects.toThrow(
-    /released, but its pre-close settle failed/,
-  );
+  await expect(session.close()).rejects.toThrow(/released, but its pre-close settle failed/);
 
   // The lock releases, but the target became unsafe: every settle now
   // commits and writes nothing.
   state.locked = false;
   state.unmaterialized = true;
   await expect
-    .poll(
-      () => state.errorMessages.filter((message) => message.includes("symlink")),
-      { timeout: 15_000 },
-    )
+    .poll(() => state.errorMessages.filter((message) => message.includes("symlink")), {
+      timeout: 15_000,
+    })
     .not.toHaveLength(0);
-  const [stopMessage] = state.errorMessages.filter((message) =>
-    message.includes("symlink"),
-  );
+  const [stopMessage] = state.errorMessages.filter((message) => message.includes("symlink"));
   // The blocking condition is named, with the path and the way back — not
   // "the engine cannot write note.md (workspace operation failed)", which is
   // what the generic terminal stop says one rung later.
@@ -3789,17 +3859,14 @@ it("a materialized settle after reopening a stood-down path clears the marker an
 
   state.locked = true;
   state.replicated = true;
-  await expect(session.close()).rejects.toThrow(
-    /released, but its pre-close settle failed/,
-  );
+  await expect(session.close()).rejects.toThrow(/released, but its pre-close settle failed/);
 
   state.locked = false;
   state.unmaterialized = true;
   await expect
-    .poll(
-      () => state.errorMessages.filter((message) => message.includes("symlink")),
-      { timeout: 15_000 },
-    )
+    .poll(() => state.errorMessages.filter((message) => message.includes("symlink")), {
+      timeout: 15_000,
+    })
     .not.toHaveLength(0);
 
   state.unmaterialized = false;
@@ -3816,9 +3883,7 @@ it("a materialized settle after reopening a stood-down path clears the marker an
   // Anti-vacuity: this settle is what cleared it, not some unrelated path.
   // (The doc carries the journaled "never written" text too — the recovery
   // session's seed, per the fake's own replay of durable state.)
-  expect(
-    state.settledContents.some((text) => text.includes("recovered edit")),
-  ).toBe(true);
+  expect(state.settledContents.some((text) => text.includes("recovered edit"))).toBe(true);
 
   // The marker is gone: the rename now proceeds like any ordinary one.
   const finish = await capture.beginFileRename("note.md", "renamed.md");
@@ -3826,13 +3891,6 @@ it("a materialized settle after reopening a stood-down path clears the marker an
   await reopened.close({ settle: false });
   await capture.stop();
 });
-
-
-
-
-
-
-
 
 it("a materialization the engine refuses for good stops the ladder and says why", async () => {
   // A locked file that turns read-only stops answering
@@ -3844,9 +3902,7 @@ it("a materialization the engine refuses for good stops the ladder and says why"
 
   state.locked = true;
   state.replicated = true;
-  await expect(session.close()).rejects.toThrow(
-    /released, but its pre-close settle failed/,
-  );
+  await expect(session.close()).rejects.toThrow(/released, but its pre-close settle failed/);
 
   state.locked = false;
   state.settleFailure = new DaemonRefusalError(
@@ -3854,17 +3910,11 @@ it("a materialization the engine refuses for good stops the ladder and says why"
     new Error("daemon response"),
   );
   await expect
-    .poll(
-      () =>
-        state.errorMessages.filter((message) =>
-          message.includes("cannot write"),
-        ),
-      { timeout: 15_000 },
-    )
+    .poll(() => state.errorMessages.filter((message) => message.includes("cannot write")), {
+      timeout: 15_000,
+    })
     .not.toHaveLength(0);
-  const [stopMessage] = state.errorMessages.filter((message) =>
-    message.includes("cannot write"),
-  );
+  const [stopMessage] = state.errorMessages.filter((message) => message.includes("cannot write"));
   expect(stopMessage).toContain("note.md");
   expect(stopMessage).toContain("workspace operation failed");
   expect(stopMessage).toContain("history");
@@ -3883,9 +3933,7 @@ it("a release the daemon refuses terminally still keeps the write ladder alive",
 
   state.locked = true;
   state.replicated = true;
-  await expect(session.close()).rejects.toThrow(
-    /released, but its pre-close settle failed/,
-  );
+  await expect(session.close()).rejects.toThrow(/released, but its pre-close settle failed/);
 
   state.locked = false;
   state.emitUpdateAfterSettle = true;
@@ -3894,10 +3942,9 @@ it("a release the daemon refuses terminally still keeps the write ladder alive",
     new Error("daemon response"),
   );
   await expect
-    .poll(
-      () => state.closeCalls.filter((generation) => generation === 2).length,
-      { timeout: 15_000 },
-    )
+    .poll(() => state.closeCalls.filter((generation) => generation === 2).length, {
+      timeout: 15_000,
+    })
     .toBeGreaterThan(0);
 
   // The ladder is still alive, and it retries the retained session rather
@@ -3922,48 +3969,94 @@ it("a release the daemon refuses terminally still keeps the write ladder alive",
 }, 60_000);
 
 it("checkpoints outage typing before quit and flushes edits queued behind reconnect without daemon calls", async () => {
- const {rootPath, sessions, openProvider, state} = await daemonDeathCapture("outage-checkpoint-", "outage-checkpoint");
- const directory = join(rootPath, "recovery"); const writes = vi.fn(checkpoint => writeTypingCheckpoint(directory, checkpoint));
- const capture = createWorkspaceEngineCapture({workspaceId: "outage-checkpoint", rootPath, rustEngineSessions: sessions, openRustYDocProviderSession: async options => ({...await openProvider(options), objectId: "object", versionId: "main"}), onError: () => undefined, writeTypingCheckpoint: writes});
- const session = await capture.openYDocSession({path: "note.md", onRemoteUpdate: () => undefined});
- const renderer = new Y.Doc(); Y.applyUpdate(renderer, session.initialUpdate);
- typeInto(renderer, session, "base "); await session.settleNow();
- state.daemonAlive = false; typeInto(renderer, session, "OUTAGE_ONE");
- await expect(session.settleNow()).rejects.toThrow(/closed/i);
- await expect.poll(() => writes.mock.calls.length).toBeGreaterThan(0);
- typeInto(renderer, session, " OUTAGE_TWO"); typeInto(renderer, session, " OUTAGE_THREE");
- await flushTypingCheckpoints("outage-checkpoint");
- const saved = (await readTypingCheckpoints(directory, "outage-checkpoint"))[0]!.checkpoint;
- expect(saved.text).toBe("base OUTAGE_ONE OUTAGE_TWO OUTAGE_THREE");
- expect(saved.updates).toHaveLength(3); expect(new Set(saved.updates.map(u => u.requestId)).size).toBe(3);
- expect(state.generation).toBe(1);
- await session.close({shuttingDown: true});
- expect((await readTypingCheckpoints(directory, "outage-checkpoint"))[0]!.checkpoint.text).toBe(saved.text);
- state.daemonAlive = true; await capture.stop(); renderer.destroy();
+  const { rootPath, sessions, openProvider, state } = await daemonDeathCapture(
+    "outage-checkpoint-",
+    "outage-checkpoint",
+  );
+  const directory = join(rootPath, "recovery");
+  const writes = vi.fn((checkpoint) => writeTypingCheckpoint(directory, checkpoint));
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "outage-checkpoint",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: async (options) => ({
+      ...(await openProvider(options)),
+      objectId: "object",
+      versionId: "main",
+    }),
+    onError: () => undefined,
+    writeTypingCheckpoint: writes,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const renderer = new Y.Doc();
+  Y.applyUpdate(renderer, session.initialUpdate);
+  typeInto(renderer, session, "base ");
+  await session.settleNow();
+  state.daemonAlive = false;
+  typeInto(renderer, session, "OUTAGE_ONE");
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+  await expect.poll(() => writes.mock.calls.length).toBeGreaterThan(0);
+  typeInto(renderer, session, " OUTAGE_TWO");
+  typeInto(renderer, session, " OUTAGE_THREE");
+  await flushTypingCheckpoints("outage-checkpoint");
+  const saved = (await readTypingCheckpoints(directory, "outage-checkpoint"))[0]!.checkpoint;
+  expect(saved.text).toBe("base OUTAGE_ONE OUTAGE_TWO OUTAGE_THREE");
+  expect(saved.updates).toHaveLength(3);
+  expect(new Set(saved.updates.map((u) => u.requestId)).size).toBe(3);
+  expect(state.generation).toBe(1);
+  await session.close({ shuttingDown: true });
+  expect((await readTypingCheckpoints(directory, "outage-checkpoint"))[0]!.checkpoint.text).toBe(
+    saved.text,
+  );
+  state.daemonAlive = true;
+  await capture.stop();
+  renderer.destroy();
 });
 
 it("upgrades a renderer close started before the outage checkpoint existed", async () => {
-  const {rootPath, sessions, openProvider, state} = await daemonDeathCapture("outage-late-close-", "outage-late-close");
+  const { rootPath, sessions, openProvider, state } = await daemonDeathCapture(
+    "outage-late-close-",
+    "outage-late-close",
+  );
   const directory = join(rootPath, "recovery");
-  const writes = vi.fn(checkpoint => writeTypingCheckpoint(directory, checkpoint));
+  const writes = vi.fn((checkpoint) => writeTypingCheckpoint(directory, checkpoint));
   let closeStarted!: () => void;
-  const started = new Promise<void>(resolve => {closeStarted = resolve;});
+  const started = new Promise<void>((resolve) => {
+    closeStarted = resolve;
+  });
   let releaseClose!: () => void;
-  const closeGate = new Promise<void>(resolve => {releaseClose = resolve;});
+  const closeGate = new Promise<void>((resolve) => {
+    releaseClose = resolve;
+  });
   let notifyDeath!: (error: unknown) => void;
-  const capture = createWorkspaceEngineCapture({workspaceId: "outage-late-close", rootPath,
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "outage-late-close",
+    rootPath,
     rustEngineSessions: sessions,
-    openRustYDocProviderSession: async options => {
+    openRustYDocProviderSession: async (options) => {
       notifyDeath = options.onSessionError!;
       const provider = await openProvider(options);
-      return {...provider, objectId: "object", versionId: "main", close: async closeOptions => {
-        closeStarted();
-        await closeGate;
-        await provider.close(closeOptions);
-      }};
+      return {
+        ...provider,
+        objectId: "object",
+        versionId: "main",
+        close: async (closeOptions) => {
+          closeStarted();
+          await closeGate;
+          await provider.close(closeOptions);
+        },
+      };
     },
-    onError: () => undefined, writeTypingCheckpoint: writes});
-  const session = await capture.openYDocSession({path: "note.md", onRemoteUpdate: () => undefined});
+    onError: () => undefined,
+    writeTypingCheckpoint: writes,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
   const renderer = new Y.Doc();
   Y.applyUpdate(renderer, session.initialUpdate);
   typeInto(renderer, session, "base ");
@@ -3973,11 +4066,17 @@ it("upgrades a renderer close started before the outage checkpoint existed", asy
   await started;
   state.daemonAlive = false;
   typeInto(renderer, session, "OUTAGE_LATE_CLOSE");
-  notifyDeath(Object.assign(new Error("The engine client is closed: transport closed."), {code: "transport-error"}));
+  notifyDeath(
+    Object.assign(new Error("The engine client is closed: transport closed."), {
+      code: "transport-error",
+    }),
+  );
   await expect.poll(() => writes.mock.calls.length).toBeGreaterThan(0);
   capture.beginShutdown();
   await closing;
-  expect((await readTypingCheckpoints(directory, "outage-late-close"))[0]!.checkpoint.text).toContain("OUTAGE_LATE_CLOSE");
+  expect(
+    (await readTypingCheckpoints(directory, "outage-late-close"))[0]!.checkpoint.text,
+  ).toContain("OUTAGE_LATE_CLOSE");
   releaseClose();
   state.daemonAlive = true;
   await capture.stop();
@@ -3986,37 +4085,56 @@ it("upgrades a renderer close started before the outage checkpoint existed", asy
 
 it("retires already admitted typing without losing later outage edits", async () => {
   const workspaceId = "outage-admitted-retirement";
-  const {rootPath, sessions, openProvider, state} = await daemonDeathCapture("outage-admitted-retirement-", workspaceId);
+  const { rootPath, sessions, openProvider, state } = await daemonDeathCapture(
+    "outage-admitted-retirement-",
+    workspaceId,
+  );
   const directory = join(rootPath, "recovery");
   let notifyDeath!: (error: unknown) => void;
-  const capture = createWorkspaceEngineCapture({workspaceId, rootPath, rustEngineSessions: sessions,
-    openRustYDocProviderSession: async options => {
+  const capture = createWorkspaceEngineCapture({
+    workspaceId,
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: async (options) => {
       notifyDeath = options.onSessionError!;
-      return {...await openProvider(options), objectId: "object", versionId: "main"};
+      return { ...(await openProvider(options)), objectId: "object", versionId: "main" };
     },
     onError: () => undefined,
-    writeTypingCheckpoint: checkpoint => writeTypingCheckpoint(directory, checkpoint),
-    retireTypingCheckpoint: async checkpoint => {
+    writeTypingCheckpoint: (checkpoint) => writeTypingCheckpoint(directory, checkpoint),
+    retireTypingCheckpoint: async (checkpoint) => {
       for (const row of await readTypingCheckpoints(directory, workspaceId)) {
         if (row.content === JSON.stringify(checkpoint)) await retireTypingCheckpoint(row);
       }
     },
   });
   const renderer = new Y.Doc();
-  onTestFinished(async () => {state.daemonAlive = true; await capture.stop(); renderer.destroy();});
-  const session = await capture.openYDocSession({path: "note.md", onRemoteUpdate: () => undefined});
+  onTestFinished(async () => {
+    state.daemonAlive = true;
+    await capture.stop();
+    renderer.destroy();
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
   Y.applyUpdate(renderer, session.initialUpdate);
   typeInto(renderer, session, "admitted ");
   await session.settleNow();
   const admittedCount = state.durableUpdates.length;
   state.daemonAlive = false;
-  notifyDeath(Object.assign(new Error("The engine client is closed: transport closed."), {code: "transport-error"}));
+  notifyDeath(
+    Object.assign(new Error("The engine client is closed: transport closed."), {
+      code: "transport-error",
+    }),
+  );
   await flushTypingCheckpoints(workspaceId);
   expect(state.durableUpdates).toHaveLength(admittedCount);
   expect(await readTypingCheckpoints(directory, workspaceId)).toEqual([]);
   typeInto(renderer, session, "LATER_OUTAGE");
   await flushTypingCheckpoints(workspaceId);
-  expect((await readTypingCheckpoints(directory, workspaceId))[0]!.checkpoint.text).toBe("admitted LATER_OUTAGE");
+  expect((await readTypingCheckpoints(directory, workspaceId))[0]!.checkpoint.text).toBe(
+    "admitted LATER_OUTAGE",
+  );
   state.daemonAlive = true;
   await session.settleNow();
   await flushTypingCheckpoints(workspaceId);
@@ -4025,107 +4143,313 @@ it("retires already admitted typing without losing later outage edits", async ()
   expect(await readTypingCheckpoints(directory, workspaceId)).toEqual([]);
 });
 
-it("warns before quit when drawing edits cannot enter a text checkpoint",async()=>{
- const workspaceId="scene-outage-warning";const {rootPath,sessions,openProvider,state}=await daemonDeathCapture("scene-outage-warning-",workspaceId);const failure=vi.fn();
- const capture=createWorkspaceEngineCapture({workspaceId,rootPath,rustEngineSessions:sessions,openRustYDocProviderSession:async options=>({...await openProvider(options),contentKind:"scene" as const,objectId:"scene",versionId:"main"}),onError:()=>{},writeTypingCheckpoint:async()=>{},onTypingCheckpointFailure:failure});
- const session=await capture.openYDocSession({path:"note.md",contentKind:"scene",onRemoteUpdate:()=>{}});const renderer=new Y.Doc();Y.applyUpdate(renderer,session.initialUpdate);
- onTestFinished(async()=>{state.daemonAlive=true;await capture.stop();renderer.destroy();});
- state.daemonAlive=false;typeInto(renderer,session,"DRAWING_OUTAGE");await expect(session.settleNow()).rejects.toThrow();
- await expect(flushTypingCheckpoints(workspaceId)).rejects.toThrow("dohc cannot keep drawing changes while it reconnects.");expect(failure).toHaveBeenCalledWith("note.md",expect.any(Error));
+it("warns before quit when drawing edits cannot enter a text checkpoint", async () => {
+  const workspaceId = "scene-outage-warning";
+  const { rootPath, sessions, openProvider, state } = await daemonDeathCapture(
+    "scene-outage-warning-",
+    workspaceId,
+  );
+  const failure = vi.fn();
+  const capture = createWorkspaceEngineCapture({
+    workspaceId,
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: async (options) => ({
+      ...(await openProvider(options)),
+      contentKind: "scene" as const,
+      objectId: "scene",
+      versionId: "main",
+    }),
+    onError: () => {},
+    writeTypingCheckpoint: async () => {},
+    onTypingCheckpointFailure: failure,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    contentKind: "scene",
+    onRemoteUpdate: () => {},
+  });
+  const renderer = new Y.Doc();
+  Y.applyUpdate(renderer, session.initialUpdate);
+  onTestFinished(async () => {
+    state.daemonAlive = true;
+    await capture.stop();
+    renderer.destroy();
+  });
+  state.daemonAlive = false;
+  typeInto(renderer, session, "DRAWING_OUTAGE");
+  await expect(session.settleNow()).rejects.toThrow();
+  await expect(flushTypingCheckpoints(workspaceId)).rejects.toThrow(
+    "dohc cannot keep drawing changes while it reconnects.",
+  );
+  expect(failure).toHaveBeenCalledWith("note.md", expect.any(Error));
 });
 
-it("retires the final synchronous checkpoint after an aborted OS session end", async()=>{
- const workspaceId="outage-aborted-os-end";
- const {rootPath,sessions,openProvider,state}=await daemonDeathCapture("outage-aborted-os-end-",workspaceId);
- const directory=join(rootPath,"recovery");let notifyDeath!:(error:unknown)=>void;
- let entered!:()=>void;const writing=new Promise<void>(r=>{entered=r;});let release!:()=>void;const gate=new Promise<void>(r=>{release=r;});let held=false;
- const capture=createWorkspaceEngineCapture({workspaceId,rootPath,rustEngineSessions:sessions,openRustYDocProviderSession:async options=>{notifyDeath=options.onSessionError!;return {...await openProvider(options),objectId:"object",versionId:"main"};},onError:()=>{},
- writeTypingCheckpoint:async checkpoint=>{const write=writeTypingCheckpoint(directory,checkpoint);if(held){held=false;entered();await gate;}await write;},
- writeTypingCheckpointSync:checkpoint=>writeTypingCheckpointSync(directory,checkpoint),
- retireTypingCheckpoint:async checkpoint=>{for(const row of await readTypingCheckpoints(directory,workspaceId))if(row.content === JSON.stringify(checkpoint))await retireTypingCheckpoint(row);}});
- const renderer=new Y.Doc();onTestFinished(async()=>{release();state.daemonAlive=true;await capture.stop();renderer.destroy();});
- const session=await capture.openYDocSession({path:"note.md",onRemoteUpdate:()=>{}});Y.applyUpdate(renderer,session.initialUpdate);
- state.daemonAlive=false;notifyDeath(Object.assign(Error("The engine client is closed: transport closed."),{code:"transport-error"}));await flushTypingCheckpoints(workspaceId);
- typeInto(renderer,session,"BEFORE_END ");held=true;const pending=flushTypingCheckpoints(workspaceId);await writing;
- typeInto(renderer,session,"QUEUED_OLDER ");const queued=flushTypingCheckpoints(workspaceId);
- typeInto(renderer,session,"FINAL_OS_TYPING");flushTypingCheckpointsSync(workspaceId);release();await pending;await queued;
- expect((await readTypingCheckpoints(directory,workspaceId))[0]!.checkpoint.text).toContain("FINAL_OS_TYPING");
- state.daemonAlive=true;await session.settleNow();await flushTypingCheckpoints(workspaceId);
- expect(state.diskMarkdown).toContain("FINAL_OS_TYPING");expect(await readTypingCheckpoints(directory,workspaceId)).toEqual([]);
+it("retires the final synchronous checkpoint after an aborted OS session end", async () => {
+  const workspaceId = "outage-aborted-os-end";
+  const { rootPath, sessions, openProvider, state } = await daemonDeathCapture(
+    "outage-aborted-os-end-",
+    workspaceId,
+  );
+  const directory = join(rootPath, "recovery");
+  let notifyDeath!: (error: unknown) => void;
+  let entered!: () => void;
+  const writing = new Promise<void>((r) => {
+    entered = r;
+  });
+  let release!: () => void;
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  let held = false;
+  const capture = createWorkspaceEngineCapture({
+    workspaceId,
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: async (options) => {
+      notifyDeath = options.onSessionError!;
+      return { ...(await openProvider(options)), objectId: "object", versionId: "main" };
+    },
+    onError: () => {},
+    writeTypingCheckpoint: async (checkpoint) => {
+      const write = writeTypingCheckpoint(directory, checkpoint);
+      if (held) {
+        held = false;
+        entered();
+        await gate;
+      }
+      await write;
+    },
+    writeTypingCheckpointSync: (checkpoint) => writeTypingCheckpointSync(directory, checkpoint),
+    retireTypingCheckpoint: async (checkpoint) => {
+      for (const row of await readTypingCheckpoints(directory, workspaceId))
+        if (row.content === JSON.stringify(checkpoint)) await retireTypingCheckpoint(row);
+    },
+  });
+  const renderer = new Y.Doc();
+  onTestFinished(async () => {
+    release();
+    state.daemonAlive = true;
+    await capture.stop();
+    renderer.destroy();
+  });
+  const session = await capture.openYDocSession({ path: "note.md", onRemoteUpdate: () => {} });
+  Y.applyUpdate(renderer, session.initialUpdate);
+  state.daemonAlive = false;
+  notifyDeath(
+    Object.assign(Error("The engine client is closed: transport closed."), {
+      code: "transport-error",
+    }),
+  );
+  await flushTypingCheckpoints(workspaceId);
+  typeInto(renderer, session, "BEFORE_END ");
+  held = true;
+  const pending = flushTypingCheckpoints(workspaceId);
+  await writing;
+  typeInto(renderer, session, "QUEUED_OLDER ");
+  const queued = flushTypingCheckpoints(workspaceId);
+  typeInto(renderer, session, "FINAL_OS_TYPING");
+  flushTypingCheckpointsSync(workspaceId);
+  release();
+  await pending;
+  await queued;
+  expect((await readTypingCheckpoints(directory, workspaceId))[0]!.checkpoint.text).toContain(
+    "FINAL_OS_TYPING",
+  );
+  state.daemonAlive = true;
+  await session.settleNow();
+  await flushTypingCheckpoints(workspaceId);
+  expect(state.diskMarkdown).toContain("FINAL_OS_TYPING");
+  expect(await readTypingCheckpoints(directory, workspaceId)).toEqual([]);
 });
 
-it("combines queued checkpoint flushes and waits for the newest disk write", async()=>{
- const workspaceId="outage-queued-flush";
- const {rootPath,sessions,openProvider,state}=await daemonDeathCapture("outage-queued-flush-",workspaceId);
- const directory=join(rootPath,"recovery");let notifyDeath!:(error:unknown)=>void;
- const first=Promise.withResolvers<void>();const firstEntered=Promise.withResolvers<void>();
- const older=Promise.withResolvers<void>();const newer=Promise.withResolvers<void>();
- const olderEntered=Promise.withResolvers<"older">();const newerEntered=Promise.withResolvers<"newer">();
- let writes=0;
- const capture=createWorkspaceEngineCapture({workspaceId,rootPath,rustEngineSessions:sessions,openRustYDocProviderSession:async options=>{notifyDeath=options.onSessionError!;return {...await openProvider(options),objectId:"object",versionId:"main"};},onError:()=>{},
- writeTypingCheckpoint:async checkpoint=>{
-   writes += 1;
-   if(writes === 1){firstEntered.resolve();await first.promise;}
-   else if(checkpoint.text.includes("NEWER")){newerEntered.resolve("newer");await newer.promise;}
-   else if(checkpoint.text.includes("OLDER")){olderEntered.resolve("older");await older.promise;}
-   await writeTypingCheckpoint(directory,checkpoint);
- }});
- const renderer=new Y.Doc();let olderFlush=Promise.resolve();let newerFlush=Promise.resolve();
- onTestFinished(async()=>{first.resolve();older.resolve();newer.resolve();await Promise.allSettled([olderFlush,newerFlush]);state.daemonAlive=true;await capture.stop();renderer.destroy();});
- const session=await capture.openYDocSession({path:"note.md",onRemoteUpdate:()=>{}});Y.applyUpdate(renderer,session.initialUpdate);
- state.daemonAlive=false;notifyDeath(Object.assign(Error("The engine client is closed: transport closed."),{code:"transport-error"}));
- typeInto(renderer,session,"INITIAL ");const firstFlush=flushTypingCheckpoints(workspaceId);await firstEntered.promise;
- typeInto(renderer,session,"OLDER ");olderFlush=flushTypingCheckpoints(workspaceId);
- typeInto(renderer,session,"NEWER");newerFlush=flushTypingCheckpoints(workspaceId);
- let olderDone=false;void olderFlush.then(()=>{olderDone=true;});first.resolve();
- expect(await Promise.race([olderEntered.promise,newerEntered.promise])).toBe("newer");
- expect(olderDone).toBe(false);
- expect(writes).toBe(2);
- newer.resolve();await firstFlush;await olderFlush;await newerFlush;expect((await readTypingCheckpoints(directory,workspaceId))[0]!.checkpoint.text).toContain("NEWER");
+it("combines queued checkpoint flushes and waits for the newest disk write", async () => {
+  const workspaceId = "outage-queued-flush";
+  const { rootPath, sessions, openProvider, state } = await daemonDeathCapture(
+    "outage-queued-flush-",
+    workspaceId,
+  );
+  const directory = join(rootPath, "recovery");
+  let notifyDeath!: (error: unknown) => void;
+  const first = Promise.withResolvers<void>();
+  const firstEntered = Promise.withResolvers<void>();
+  const older = Promise.withResolvers<void>();
+  const newer = Promise.withResolvers<void>();
+  const olderEntered = Promise.withResolvers<"older">();
+  const newerEntered = Promise.withResolvers<"newer">();
+  let writes = 0;
+  const capture = createWorkspaceEngineCapture({
+    workspaceId,
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: async (options) => {
+      notifyDeath = options.onSessionError!;
+      return { ...(await openProvider(options)), objectId: "object", versionId: "main" };
+    },
+    onError: () => {},
+    writeTypingCheckpoint: async (checkpoint) => {
+      writes += 1;
+      if (writes === 1) {
+        firstEntered.resolve();
+        await first.promise;
+      } else if (checkpoint.text.includes("NEWER")) {
+        newerEntered.resolve("newer");
+        await newer.promise;
+      } else if (checkpoint.text.includes("OLDER")) {
+        olderEntered.resolve("older");
+        await older.promise;
+      }
+      await writeTypingCheckpoint(directory, checkpoint);
+    },
+  });
+  const renderer = new Y.Doc();
+  let olderFlush = Promise.resolve();
+  let newerFlush = Promise.resolve();
+  onTestFinished(async () => {
+    first.resolve();
+    older.resolve();
+    newer.resolve();
+    await Promise.allSettled([olderFlush, newerFlush]);
+    state.daemonAlive = true;
+    await capture.stop();
+    renderer.destroy();
+  });
+  const session = await capture.openYDocSession({ path: "note.md", onRemoteUpdate: () => {} });
+  Y.applyUpdate(renderer, session.initialUpdate);
+  state.daemonAlive = false;
+  notifyDeath(
+    Object.assign(Error("The engine client is closed: transport closed."), {
+      code: "transport-error",
+    }),
+  );
+  typeInto(renderer, session, "INITIAL ");
+  const firstFlush = flushTypingCheckpoints(workspaceId);
+  await firstEntered.promise;
+  typeInto(renderer, session, "OLDER ");
+  olderFlush = flushTypingCheckpoints(workspaceId);
+  typeInto(renderer, session, "NEWER");
+  newerFlush = flushTypingCheckpoints(workspaceId);
+  let olderDone = false;
+  void olderFlush.then(() => {
+    olderDone = true;
+  });
+  first.resolve();
+  expect(await Promise.race([olderEntered.promise, newerEntered.promise])).toBe("newer");
+  expect(olderDone).toBe(false);
+  expect(writes).toBe(2);
+  newer.resolve();
+  await firstFlush;
+  await olderFlush;
+  await newerFlush;
+  expect((await readTypingCheckpoints(directory, workspaceId))[0]!.checkpoint.text).toContain(
+    "NEWER",
+  );
 });
 
 it("retires the checkpoint actually stored by A when newer B fails", async () => {
- const workspaceId="outage-newer-write-failed";
- const {rootPath,sessions,openProvider,state}=await daemonDeathCapture("outage-newer-write-failed-",workspaceId);
- const directory=join(rootPath,"recovery");let notifyDeath!:(error:unknown)=>void;
- const gate=Promise.withResolvers<void>();const entered=Promise.withResolvers<void>();
- const capture=createWorkspaceEngineCapture({workspaceId,rootPath,rustEngineSessions:sessions,
- openRustYDocProviderSession:async options=>{notifyDeath=options.onSessionError!;return {...await openProvider(options),objectId:"object",versionId:"main"};},onError:()=>{},
- writeTypingCheckpoint:async checkpoint=>{
-   if(checkpoint.text.includes("FAILED_B"))throw Error("disk full");
-   if(checkpoint.text.includes("STORED_A")){entered.resolve();await gate.promise;}
-   await writeTypingCheckpoint(directory,checkpoint);
- },
- retireTypingCheckpoint:async checkpoint=>{for(const row of await readTypingCheckpoints(directory,workspaceId))if(row.content === JSON.stringify(checkpoint))await retireTypingCheckpoint(row);}});
- const renderer=new Y.Doc();onTestFinished(async()=>{gate.resolve();state.daemonAlive=true;await capture.stop();renderer.destroy();});
- const session=await capture.openYDocSession({path:"note.md",onRemoteUpdate:()=>{}});Y.applyUpdate(renderer,session.initialUpdate);
- state.daemonAlive=false;notifyDeath(Object.assign(Error("The engine client is closed: transport closed."),{code:"transport-error"}));await flushTypingCheckpoints(workspaceId);
- typeInto(renderer,session,"STORED_A ");const first=flushTypingCheckpoints(workspaceId);await entered.promise;
- typeInto(renderer,session,"FAILED_B");const failed=expect(flushTypingCheckpoints(workspaceId)).rejects.toThrow("disk full");
- gate.resolve();await first;await failed;
- const stored=(await readTypingCheckpoints(directory,workspaceId))[0]!.checkpoint.text;expect(stored).toContain("STORED_A");expect(stored).not.toContain("FAILED_B");
- state.daemonAlive=true;await session.settleNow();await flushTypingCheckpoints(workspaceId);
- expect(state.diskMarkdown).toContain("FAILED_B");expect(await readTypingCheckpoints(directory,workspaceId)).toEqual([]);
+  const workspaceId = "outage-newer-write-failed";
+  const { rootPath, sessions, openProvider, state } = await daemonDeathCapture(
+    "outage-newer-write-failed-",
+    workspaceId,
+  );
+  const directory = join(rootPath, "recovery");
+  let notifyDeath!: (error: unknown) => void;
+  const gate = Promise.withResolvers<void>();
+  const entered = Promise.withResolvers<void>();
+  const capture = createWorkspaceEngineCapture({
+    workspaceId,
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: async (options) => {
+      notifyDeath = options.onSessionError!;
+      return { ...(await openProvider(options)), objectId: "object", versionId: "main" };
+    },
+    onError: () => {},
+    writeTypingCheckpoint: async (checkpoint) => {
+      if (checkpoint.text.includes("FAILED_B")) throw Error("disk full");
+      if (checkpoint.text.includes("STORED_A")) {
+        entered.resolve();
+        await gate.promise;
+      }
+      await writeTypingCheckpoint(directory, checkpoint);
+    },
+    retireTypingCheckpoint: async (checkpoint) => {
+      for (const row of await readTypingCheckpoints(directory, workspaceId))
+        if (row.content === JSON.stringify(checkpoint)) await retireTypingCheckpoint(row);
+    },
+  });
+  const renderer = new Y.Doc();
+  onTestFinished(async () => {
+    gate.resolve();
+    state.daemonAlive = true;
+    await capture.stop();
+    renderer.destroy();
+  });
+  const session = await capture.openYDocSession({ path: "note.md", onRemoteUpdate: () => {} });
+  Y.applyUpdate(renderer, session.initialUpdate);
+  state.daemonAlive = false;
+  notifyDeath(
+    Object.assign(Error("The engine client is closed: transport closed."), {
+      code: "transport-error",
+    }),
+  );
+  await flushTypingCheckpoints(workspaceId);
+  typeInto(renderer, session, "STORED_A ");
+  const first = flushTypingCheckpoints(workspaceId);
+  await entered.promise;
+  typeInto(renderer, session, "FAILED_B");
+  const failed = expect(flushTypingCheckpoints(workspaceId)).rejects.toThrow("disk full");
+  gate.resolve();
+  await first;
+  await failed;
+  const stored = (await readTypingCheckpoints(directory, workspaceId))[0]!.checkpoint.text;
+  expect(stored).toContain("STORED_A");
+  expect(stored).not.toContain("FAILED_B");
+  state.daemonAlive = true;
+  await session.settleNow();
+  await flushTypingCheckpoints(workspaceId);
+  expect(state.diskMarkdown).toContain("FAILED_B");
+  expect(await readTypingCheckpoints(directory, workspaceId)).toEqual([]);
 });
 
 it("Duplicate settles the source and leaves its session and write admission intact", async () => {
   const summaries: (string | undefined)[] = [];
-  const {capture, state} = await lockedRebindCapture("dohc-duplicate-live-", {wrapProvider: base => async opts => {
-    const session = await base(opts);
-    return {...session, settleNow: async options => {summaries.push(options?.summary); return session.settleNow(options);}};
-  }});
-  const {session, mirror} = await openWithOneEdit(capture, "first edit");
+  const { capture, state } = await lockedRebindCapture("dohc-duplicate-live-", {
+    wrapProvider: (base) => async (opts) => {
+      const session = await base(opts);
+      return {
+        ...session,
+        settleNow: async (options) => {
+          summaries.push(options?.summary);
+          return session.settleNow(options);
+        },
+      };
+    },
+  });
+  const { session, mirror } = await openWithOneEdit(capture, "first edit");
   try {
-    await capture.changePathsAs(["note.md"], {operation:"duplicate",operationId:"dohc-operation:11111111-1111-4111-8111-111111111111",author:{kind:"human",humanId:"person"}}, async () => {
-      expect(state.closeCalls).toEqual([]);
-      expect(state.settledContents).toContain("first edit");
-      const before = Y.encodeStateVector(mirror);
-      mirror.getText("plainText").insert(0,"still typing ");
-      await session.applyLocalUpdate(Y.encodeStateAsUpdate(mirror,before));
-    }, () => []);
+    await capture.changePathsAs(
+      ["note.md"],
+      {
+        operation: "duplicate",
+        operationId: "dohc-operation:11111111-1111-4111-8111-111111111111",
+        author: { kind: "human", humanId: "person" },
+      },
+      async () => {
+        expect(state.closeCalls).toEqual([]);
+        expect(state.settledContents).toContain("first edit");
+        const before = Y.encodeStateVector(mirror);
+        mirror.getText("plainText").insert(0, "still typing ");
+        await session.applyLocalUpdate(Y.encodeStateAsUpdate(mirror, before));
+      },
+      () => [],
+    );
     expect(state.closeCalls).toEqual([]);
     expect(state.generation).toBe(1);
     expect(summaries).toContain("Saved latest edits before duplicating the file");
     expect(summaries.join(" ")).not.toMatch(/moving|deleting|rename/);
-  } finally {mirror.destroy(); await capture.stop();}
+  } finally {
+    mirror.destroy();
+    await capture.stop();
+  }
 });

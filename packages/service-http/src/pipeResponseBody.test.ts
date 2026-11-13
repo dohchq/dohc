@@ -108,7 +108,12 @@ describe("pipeResponseBody", () => {
           { highWaterMark: 0 },
         );
         const outgoing = new ControlledResponse();
-        return { source, body, outgoing, piping: pipeResponseBody(new Response(body, { headers }), response(outgoing)) };
+        return {
+          source,
+          body,
+          outgoing,
+          piping: pipeResponseBody(new Response(body, { headers }), response(outgoing)),
+        };
       };
       const held = piped({ [DRAIN_TIMEOUT_HEADER]: "1" });
       const download = piped({});
@@ -150,7 +155,10 @@ describe("pipeResponseBody", () => {
 
   it("ends a response without a body", async () => {
     const outgoing = new ControlledResponse();
-    await pipeResponseBody(new Response(null, { headers: { [DRAIN_TIMEOUT_HEADER]: "1" } }), response(outgoing));
+    await pipeResponseBody(
+      new Response(null, { headers: { [DRAIN_TIMEOUT_HEADER]: "1" } }),
+      response(outgoing),
+    );
     expect(outgoing.writableFinished).toBe(true);
   });
 });

@@ -1,7 +1,13 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { MenuCommand, ShareHandoffStatus, UpdateCheckResult, UpdateStateEvent, WorkspaceActivityEvent } from "../ipc/bridgeContract";
+import type {
+  MenuCommand,
+  ShareHandoffStatus,
+  UpdateCheckResult,
+  UpdateStateEvent,
+  WorkspaceActivityEvent,
+} from "../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import { ipcWireError } from "../ipc/errorWords";
 import { RegistryReadError } from "../workspaces/registryReadFailure";
@@ -11,7 +17,9 @@ import type { ReactionStore } from "./workbench/reactionStore";
 import { deferred, type Deferred } from "../testing/deferred";
 import type { NoticeTarget } from "../notices/noticeTarget";
 const shellRenders = vi.hoisted(() => ({ count: 0 }));
-const shellCommits = vi.hoisted(() => ({ onCommit: null as ((workspace: Workspace) => void) | null }));
+const shellCommits = vi.hoisted(() => ({
+  onCommit: null as ((workspace: Workspace) => void) | null,
+}));
 
 vi.mock("./dev/StatesPage", () => ({
   StatesPage: () => <div data-testid="states-page" />,
@@ -54,53 +62,68 @@ vi.mock("./WorkspaceManager", () => ({
 vi.mock("./DesktopWorkspaceShell", async () => {
   const { useLayoutEffect } = await import("react");
   const { useReactions } = await import("./workbench/reactionStore");
-  return { DesktopWorkspaceShell: (props: {
-    workspace: Workspace;
-    workspaces: Workspace[];
-    handoffStatus: ShareHandoffStatus;
-    onDismissShareHandoff: () => void;
-    onShareHandoffOpened: () => void;
-    onSwitchWorkspace: (workspace: Workspace, open?: NoticeTarget) => void;
-    openOnReady?: NoticeTarget;
-    oldWindow?: { openElsewhere: boolean } | null;
-  }) => {
-    shellRenders.count += 1;
-    shellReactions.current = useReactions();
-    useLayoutEffect(() => {
-      shellCommits.onCommit?.(props.workspace);
-    }, [props.workspace]);
-    return (
-    <div data-testid="workspace-shell">
-      <span data-testid="active-workspace">{props.workspace.workspaceId}</span>
-      <span data-testid="share-summary">{JSON.stringify(props.workspace.shareView ?? null)}</span>
-      <span data-testid="workspace-count">{props.workspaces.length}</span>
-      <span data-testid="open-on-ready">{JSON.stringify(props.openOnReady ?? null)}</span>
-      <span data-testid="old-window">{JSON.stringify(props.oldWindow ?? null)}</span>
-      {props.workspaces.map((next) => (
-        <span key={next.workspaceId}>
-          <button type="button" onClick={() => props.onSwitchWorkspace(next)}>
-            {`Switch to ${next.workspaceId}`}
+  return {
+    DesktopWorkspaceShell: (props: {
+      workspace: Workspace;
+      workspaces: Workspace[];
+      handoffStatus: ShareHandoffStatus;
+      onDismissShareHandoff: () => void;
+      onShareHandoffOpened: () => void;
+      onSwitchWorkspace: (workspace: Workspace, open?: NoticeTarget) => void;
+      openOnReady?: NoticeTarget;
+      oldWindow?: { openElsewhere: boolean } | null;
+    }) => {
+      shellRenders.count += 1;
+      shellReactions.current = useReactions();
+      useLayoutEffect(() => {
+        shellCommits.onCommit?.(props.workspace);
+      }, [props.workspace]);
+      return (
+        <div data-testid="workspace-shell">
+          <span data-testid="active-workspace">{props.workspace.workspaceId}</span>
+          <span data-testid="share-summary">
+            {JSON.stringify(props.workspace.shareView ?? null)}
+          </span>
+          <span data-testid="workspace-count">{props.workspaces.length}</span>
+          <span data-testid="open-on-ready">{JSON.stringify(props.openOnReady ?? null)}</span>
+          <span data-testid="old-window">{JSON.stringify(props.oldWindow ?? null)}</span>
+          {props.workspaces.map((next) => (
+            <span key={next.workspaceId}>
+              <button type="button" onClick={() => props.onSwitchWorkspace(next)}>
+                {`Switch to ${next.workspaceId}`}
+              </button>
+              <button
+                type="button"
+                onClick={() => props.onSwitchWorkspace(next, { to: "file", path: "trip/day-1.md" })}
+              >
+                {`Open a notice in ${next.workspaceId}`}
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  props.onSwitchWorkspace(next, {
+                    to: "automation-controls",
+                    automation: "collection:tasks#stamp",
+                  })
+                }
+              >
+                {`Open an automation in ${next.workspaceId}`}
+              </button>
+            </span>
+          ))}
+          {props.handoffStatus.status !== "idle" ? (
+            <span data-testid="handoff-active">{props.handoffStatus.status}</span>
+          ) : null}
+          <button type="button" onClick={props.onDismissShareHandoff}>
+            Dismiss handoff
           </button>
-          <button type="button" onClick={() => props.onSwitchWorkspace(next, { to: "file", path: "trip/day-1.md" })}>
-            {`Open a notice in ${next.workspaceId}`}
+          <button type="button" onClick={props.onShareHandoffOpened}>
+            Complete handoff
           </button>
-          <button type="button" onClick={() => props.onSwitchWorkspace(next, { to: "automation-controls", automation: "collection:tasks#stamp" })}>
-            {`Open an automation in ${next.workspaceId}`}
-          </button>
-        </span>
-      ))}
-      {props.handoffStatus.status !== "idle" ? (
-        <span data-testid="handoff-active">{props.handoffStatus.status}</span>
-      ) : null}
-      <button type="button" onClick={props.onDismissShareHandoff}>
-        Dismiss handoff
-      </button>
-      <button type="button" onClick={props.onShareHandoffOpened}>
-        Complete handoff
-      </button>
-    </div>
-    );
-  } };
+        </div>
+      );
+    },
+  };
 });
 
 // What DesktopRoot keeps for the window: the notice list, folders a launch
@@ -140,13 +163,21 @@ describe("workspace summary changes", () => {
       getUserSettings: vi.fn(async () => ({ settings: DEFAULT_USER_SETTINGS, source: "default" })),
       onAgentColorChanged: vi.fn(() => () => undefined),
       onUserSettingsChanged: vi.fn(() => () => undefined),
-      onWorkspaceActivity: vi.fn((listener: typeof emit) => { emit = listener; return () => undefined; }),
+      onWorkspaceActivity: vi.fn((listener: typeof emit) => {
+        emit = listener;
+        return () => undefined;
+      }),
       onWorkspaceActivated: vi.fn(() => () => undefined),
       onShareHandoffStatus: vi.fn(() => () => undefined),
       getShareHandoffStatus: vi.fn(async () => ({ status: "idle" })),
     });
-    return { getWorkspaceRegistry, emit: (event: WorkspaceActivityEvent) => emit?.(event),
-      replace: (next: Workspace[]) => { registry = { workspaces: next }; } };
+    return {
+      getWorkspaceRegistry,
+      emit: (event: WorkspaceActivityEvent) => emit?.(event),
+      replace: (next: Workspace[]) => {
+        registry = { workspaces: next };
+      },
+    };
   }
 
   it("keeps all registry changes when a summary refresh overtakes a full refresh", async () => {
@@ -159,30 +190,36 @@ describe("workspace summary changes", () => {
     const shareView = { granterEmail: null, ended: true };
     h.replace([{ ...workspace("a"), shareView }, workspace("b"), workspace("c")]);
     await act(async () => h.emit({ workspaceId: "a", summaryChanged: true }));
-    await act(async () => read.resolve({ workspaces: [workspace("a"), workspace("b"), workspace("c")] }));
+    await act(async () =>
+      read.resolve({ workspaces: [workspace("a"), workspace("b"), workspace("c")] }),
+    );
     expect(JSON.parse(screen.getByTestId("share-summary").textContent!)).toEqual(shareView);
     expect(screen.getByRole("button", { name: "Switch to c" })).toBeTruthy();
   });
 
-  it.each([false, true])("retains a pending summary across a switch (return: %s)", async returnToA => {
-    const h = setup();
-    render(<DesktopRoot />);
-    await screen.findByTestId("workspace-shell");
-    const read = deferred<{ workspaces: Workspace[] }>();
-    h.getWorkspaceRegistry.mockReturnValueOnce(read.promise);
-    act(() => h.emit({ workspaceId: "a", summaryChanged: true }));
-    fireEvent.click(screen.getByRole("button", { name: "Switch to b" }));
-    if (returnToA) fireEvent.click(screen.getByRole("button", { name: "Switch to a" }));
-    const shareView = { granterEmail: null, ended: true };
-    await act(async () => read.resolve({ workspaces: [{ ...workspace("a"), shareView }, workspace("b")] }));
-    expect(screen.getByTestId("active-workspace").textContent).toBe(returnToA ? "a" : "b");
-    if (!returnToA) {
-      expect(screen.getByTestId("share-summary").textContent).toBe("null");
-      fireEvent.click(screen.getByRole("button", { name: "Switch to a" }));
-    }
-    expect(JSON.parse(screen.getByTestId("share-summary").textContent!)).toEqual(shareView);
-  });
-
+  it.each([false, true])(
+    "retains a pending summary across a switch (return: %s)",
+    async (returnToA) => {
+      const h = setup();
+      render(<DesktopRoot />);
+      await screen.findByTestId("workspace-shell");
+      const read = deferred<{ workspaces: Workspace[] }>();
+      h.getWorkspaceRegistry.mockReturnValueOnce(read.promise);
+      act(() => h.emit({ workspaceId: "a", summaryChanged: true }));
+      fireEvent.click(screen.getByRole("button", { name: "Switch to b" }));
+      if (returnToA) fireEvent.click(screen.getByRole("button", { name: "Switch to a" }));
+      const shareView = { granterEmail: null, ended: true };
+      await act(async () =>
+        read.resolve({ workspaces: [{ ...workspace("a"), shareView }, workspace("b")] }),
+      );
+      expect(screen.getByTestId("active-workspace").textContent).toBe(returnToA ? "a" : "b");
+      if (!returnToA) {
+        expect(screen.getByTestId("share-summary").textContent).toBe("null");
+        fireEvent.click(screen.getByRole("button", { name: "Switch to a" }));
+      }
+      expect(JSON.parse(screen.getByTestId("share-summary").textContent!)).toEqual(shareView);
+    },
+  );
 });
 
 beforeEach(() => {
@@ -217,13 +254,11 @@ describe("DesktopRoot", () => {
       onUserSettingsChanged: vi.fn(() => () => undefined),
       onWorkspaceActivity: vi.fn(() => () => undefined),
       onWorkspaceActivated: vi.fn(() => () => undefined),
-      onShareHandoffStatus: vi.fn(
-        (callback: (status: ShareHandoffStatus) => void) => {
-          calls.push("subscribe");
-          handoffEvent = callback;
-          return () => undefined;
-        },
-      ),
+      onShareHandoffStatus: vi.fn((callback: (status: ShareHandoffStatus) => void) => {
+        calls.push("subscribe");
+        handoffEvent = callback;
+        return () => undefined;
+      }),
       getShareHandoffStatus: vi.fn(() => {
         calls.push("snapshot");
         return snapshot.promise;
@@ -239,9 +274,7 @@ describe("DesktopRoot", () => {
       snapshot.resolve({ status: "failed-refused", statusId: "status-old" });
     });
 
-    expect((await screen.findByTestId("handoff-active")).textContent).toBe(
-      "redeeming",
-    );
+    expect((await screen.findByTestId("handoff-active")).textContent).toBe("redeeming");
   });
 
   it("keeps an idle handoff out of the ordinary first-run product", async () => {
@@ -327,12 +360,10 @@ describe("DesktopRoot", () => {
       onUserSettingsChanged: vi.fn(() => () => undefined),
       onWorkspaceActivity: vi.fn(() => () => undefined),
       onWorkspaceActivated: vi.fn(() => () => undefined),
-      onShareHandoffStatus: vi.fn(
-        (callback: (status: ShareHandoffStatus) => void) => {
-          handoffEvent = callback;
-          return () => undefined;
-        },
-      ),
+      onShareHandoffStatus: vi.fn((callback: (status: ShareHandoffStatus) => void) => {
+        handoffEvent = callback;
+        return () => undefined;
+      }),
       getShareHandoffStatus: vi.fn(async () => ({
         status: "failed-network" as const,
         statusId: "status-a",
@@ -345,9 +376,7 @@ describe("DesktopRoot", () => {
     fireEvent.click(screen.getByRole("button", { name: "Dismiss handoff" }));
 
     expect(dismissShareHandoff).toHaveBeenCalledWith({ statusId: "status-a" });
-    act(() =>
-      handoffEvent?.({ status: "redeeming", statusId: "status-b" }),
-    );
+    act(() => handoffEvent?.({ status: "redeeming", statusId: "status-b" }));
     expect(screen.getByTestId("handoff-active").textContent).toBe("redeeming");
 
     await act(async () => dismissal.resolve());
@@ -388,7 +417,6 @@ describe("DesktopRoot", () => {
     expect((await screen.findByTestId("active-workspace")).textContent).toBe("activated");
     expect(screen.getByTestId("workspace-count").textContent).toBe("2");
   });
-
 });
 
 describe("a settings file save", () => {
@@ -491,16 +519,25 @@ describe("startup selection", () => {
 describe("registry read failure", () => {
   it("tells the person to update dohc when a newer dohc wrote the registry", async () => {
     const file = "C:dohcdohc-workspaces.json";
-    const refusal = new RegistryReadError(`Workspace registry version 2 is newer than supported (${file}); refusing to overwrite it.`, file, true);
+    const refusal = new RegistryReadError(
+      `Workspace registry version 2 is newer than supported (${file}); refusing to overwrite it.`,
+      file,
+      true,
+    );
     vi.stubGlobal("dohcDesktop", {
       windowRole: "workspace",
       platform: "win32",
       getWorkspaceRegistry: vi.fn(async () => {
-        throw new Error(`Error invoking remote method 'desktop:get-workspace-registry': ${String(ipcWireError(refusal))}`);
+        throw new Error(
+          `Error invoking remote method 'desktop:get-workspace-registry': ${String(ipcWireError(refusal))}`,
+        );
       }),
       cloudStatus: vi.fn(async () => ({ connected: false })),
       onCloudSessionChanged: vi.fn(() => () => undefined),
-      getUserSettings: vi.fn(async () => ({ settings: DEFAULT_USER_SETTINGS, source: "default" as const })),
+      getUserSettings: vi.fn(async () => ({
+        settings: DEFAULT_USER_SETTINGS,
+        source: "default" as const,
+      })),
       onAgentColorChanged: vi.fn(() => () => undefined),
       onUserSettingsChanged: vi.fn(() => () => undefined),
       onWorkspaceActivity: vi.fn(() => () => undefined),
@@ -514,11 +551,14 @@ describe("registry read failure", () => {
     });
     render(<DesktopRoot />);
 
-    expect(await screen.findByText("Your files are untouched. A newer version of dohc wrote this registry. Update dohc to open it.")).toBeTruthy();
+    expect(
+      await screen.findByText(
+        "Your files are untouched. A newer version of dohc wrote this registry. Update dohc to open it.",
+      ),
+    ).toBeTruthy();
     expect(screen.getByText(refusal.message)).toBeTruthy();
     expect(document.body.textContent).not.toContain("Fix or move");
   });
-
 });
 
 describe("registry grows under an idle first-run window", () => {
@@ -572,7 +612,7 @@ describe("registry emptied under an open workspace", () => {
       kind: "personal" as const,
       mode: "local-first" as const,
     };
-    let registry: { workspaces: typeof workspace[] } = { workspaces: [workspace] };
+    let registry: { workspaces: (typeof workspace)[] } = { workspaces: [workspace] };
     let emitActivity: ((event: { workspaceId?: string }) => void) | null = null;
     vi.stubGlobal("dohcDesktop", {
       windowRole: "workspace",
@@ -604,7 +644,6 @@ describe("registry emptied under an open workspace", () => {
     });
     expect(await screen.findByTestId("first-run")).toBeTruthy();
   });
-
 });
 
 describe("reaction writes across first run", () => {
@@ -642,7 +681,14 @@ describe("reaction writes across first run", () => {
     });
     const toggle = (store: ReactionStore, nextState: "added" | "removed") =>
       act(() =>
-        store.toggle({ threadId: "thread-1", messageId: "m1", emoji: "👍", nextState, viewerAuthorId: "you@x", onError: vi.fn() }),
+        store.toggle({
+          threadId: "thread-1",
+          messageId: "m1",
+          emoji: "👍",
+          nextState,
+          viewerAuthorId: "you@x",
+          onError: vi.fn(),
+        }),
       );
     const toFirstRun = async () => {
       registry = { workspaces: [] };
@@ -708,7 +754,9 @@ describe("opening a notice in another workspace", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Open a notice in b" }));
     expect(screen.getByTestId("active-workspace").textContent).toBe("b");
-    expect(screen.getByTestId("open-on-ready").textContent).toBe(JSON.stringify({ to: "file", path: "trip/day-1.md" }));
+    expect(screen.getByTestId("open-on-ready").textContent).toBe(
+      JSON.stringify({ to: "file", path: "trip/day-1.md" }),
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "Switch to a" }));
     fireEvent.click(screen.getByRole("button", { name: "Switch to b" }));
@@ -717,7 +765,9 @@ describe("opening a notice in another workspace", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Switch to a" }));
     fireEvent.click(screen.getByRole("button", { name: "Open an automation in b" }));
-    expect(screen.getByTestId("open-on-ready").textContent).toBe(JSON.stringify({ to: "automation-controls", automation: "collection:tasks#stamp" }));
+    expect(screen.getByTestId("open-on-ready").textContent).toBe(
+      JSON.stringify({ to: "automation-controls", automation: "collection:tasks#stamp" }),
+    );
   });
 });
 
@@ -731,19 +781,30 @@ describe("the window's title and menu commands", () => {
   }) {
     let menu: ((command: MenuCommand) => void) | null = null;
     const closeThisWindow = vi.fn(async () => undefined);
-    const downloadUpdate = vi.fn(async (_payload: object) => ({ accepted: true, state: options.update }));
+    const downloadUpdate = vi.fn(async (_payload: object) => ({
+      accepted: true,
+      state: options.update,
+    }));
     vi.stubGlobal("dohcDesktop", {
       windowRole: options.windowRole,
       platform: options.platform,
       ...windowBridge(),
       onMenuCommand: vi.fn((listener: (command: MenuCommand) => void) => {
         menu = listener;
-        return () => { if (menu === listener) menu = null; };
+        return () => {
+          if (menu === listener) menu = null;
+        };
       }),
       closeThisWindow,
       downloadUpdate,
       checkForUpdates: vi.fn(async (): Promise<UpdateCheckResult> => ({
-        checked: true, state: { status: "error", message: "feed returned 500", canCheck: true, failure: { step: "check", id: 1 } },
+        checked: true,
+        state: {
+          status: "error",
+          message: "feed returned 500",
+          canCheck: true,
+          failure: { step: "check", id: 1 },
+        },
       })),
       getWorkspaceRegistry: vi.fn(async () => {
         if (options.registryFails) throw new Error("dohc could not read dohc-workspaces.json.");
@@ -751,7 +812,10 @@ describe("the window's title and menu commands", () => {
       }),
       cloudStatus: vi.fn(async () => ({ connected: false })),
       onCloudSessionChanged: vi.fn(() => () => undefined),
-      getUserSettings: vi.fn(async () => ({ settings: DEFAULT_USER_SETTINGS, source: "default" as const })),
+      getUserSettings: vi.fn(async () => ({
+        settings: DEFAULT_USER_SETTINGS,
+        source: "default" as const,
+      })),
       onAgentColorChanged: vi.fn(() => () => undefined),
       onUserSettingsChanged: vi.fn(() => () => undefined),
       onWorkspaceActivity: vi.fn(() => () => undefined),
@@ -759,7 +823,8 @@ describe("the window's title and menu commands", () => {
       onShareHandoffStatus: vi.fn(() => () => undefined),
       getShareHandoffStatus: vi.fn(async () => ({ status: "idle" as const })),
       dismissShareHandoff: vi.fn(async () => undefined),
-      getUpdateState: () => options.update ? Promise.resolve(options.update) : new Promise(() => {}),
+      getUpdateState: () =>
+        options.update ? Promise.resolve(options.update) : new Promise(() => {}),
       onUpdateState: () => () => {},
     });
     return {
@@ -770,19 +835,23 @@ describe("the window's title and menu commands", () => {
     };
   }
 
-  it.each(["darwin", "win32"] as const)("answers menu commands on the registry error screen (%s)", async (platform) => {
-    const root = stub({ windowRole: "workspace", platform, workspaces: [], registryFails: true });
-    render(<DesktopRoot />);
-    await screen.findByText("dohc couldn't read its workspace registry");
-    expect(document.title).toBe("dohc");
-    // The screen subscribes to menu commands in an effect after it paints.
-    await waitFor(() => expect(root.listening()).toBe(true));
+  it.each(["darwin", "win32"] as const)(
+    "answers menu commands on the registry error screen (%s)",
+    async (platform) => {
+      const root = stub({ windowRole: "workspace", platform, workspaces: [], registryFails: true });
+      render(<DesktopRoot />);
+      await screen.findByText("dohc couldn't read its workspace registry");
+      expect(document.title).toBe("dohc");
+      // The screen subscribes to menu commands in an effect after it paints.
+      await waitFor(() => expect(root.listening()).toBe(true));
 
-    root.send("check-updates");
-    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain("dohc could not check for updates. feed returned 500");
+      root.send("check-updates");
+      expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
+        "dohc could not check for updates. feed returned 500",
+      );
 
-    root.send("close-tab");
-    expect(root.closeThisWindow).toHaveBeenCalledTimes(platform === "darwin" ? 1 : 0);
-  });
-
+      root.send("close-tab");
+      expect(root.closeThisWindow).toHaveBeenCalledTimes(platform === "darwin" ? 1 : 0);
+    },
+  );
 });

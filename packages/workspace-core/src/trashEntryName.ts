@@ -74,8 +74,7 @@ function utf16CutAt(value: string, budget: number): number {
   if (end <= 0 || end >= value.length) return Math.max(0, end);
   const before = value.charCodeAt(end - 1);
   const after = value.charCodeAt(end);
-  const splitsPair =
-    before >= 0xd800 && before <= 0xdbff && after >= 0xdc00 && after <= 0xdfff;
+  const splitsPair = before >= 0xd800 && before <= 0xdbff && after >= 0xdc00 && after <= 0xdfff;
   return splitsPair ? end - 1 : end;
 }
 
@@ -148,9 +147,7 @@ export function trashEntryPlan(
   if (!exhausted && Number.isFinite(maxEntryChars)) {
     rungs.push(`${prefix}${fitWithinNameMax(name, prefix, options)}`);
   }
-  const candidates = rungs.filter(
-    (rung, index) => index === 0 || rung !== rungs[index - 1],
-  );
+  const candidates = rungs.filter((rung, index) => index === 0 || rung !== rungs[index - 1]);
   return { candidates, exhausted };
 }
 

@@ -1,5 +1,10 @@
 import type { SignIn } from "./account";
-import { cacheScope, createWorkspaceData, type ReadCache, type WorkspaceData } from "./workspaceData";
+import {
+  cacheScope,
+  createWorkspaceData,
+  type ReadCache,
+  type WorkspaceData,
+} from "./workspaceData";
 import type { WorkspaceListStore } from "./workspaceList";
 
 export interface OpenWorkspaceState {
@@ -34,7 +39,9 @@ export function createOpenWorkspace(options: {
 
   function open(workspaceId: string): WorkspaceData {
     const data = createWorkspaceData({
-      signIn, workspaceId, cache,
+      signIn,
+      workspaceId,
+      cache,
       onGone: () => list.reload(),
       // Only the store open now reopens; a later one has replaced any other.
       reopen: () => {
@@ -56,9 +63,13 @@ export function createOpenWorkspace(options: {
   function update() {
     if (stopped) return;
     const listed = list.state();
-    const openable = listed.status === "ready"
-      ? listed.workspaces.filter(entry => entry.showOnPhone && entry.canOpen).map(entry => entry.workspaceId) : [];
-    const current = openable.find(workspaceId => workspaceId === chosen) ?? openable[0] ?? null;
+    const openable =
+      listed.status === "ready"
+        ? listed.workspaces
+            .filter((entry) => entry.showOnPhone && entry.canOpen)
+            .map((entry) => entry.workspaceId)
+        : [];
+    const current = openable.find((workspaceId) => workspaceId === chosen) ?? openable[0] ?? null;
     if (current !== state.currentWorkspaceId) show(current);
   }
 

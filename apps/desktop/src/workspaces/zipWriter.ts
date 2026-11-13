@@ -34,10 +34,7 @@ export function crc32(data: Uint8Array): number {
 function dosDateTime(date: Date): { time: number; date: number } {
   const year = Math.max(date.getFullYear(), 1980);
   return {
-    time:
-      (date.getHours() << 11) |
-      (date.getMinutes() << 5) |
-      Math.floor(date.getSeconds() / 2),
+    time: (date.getHours() << 11) | (date.getMinutes() << 5) | Math.floor(date.getSeconds() / 2),
     date: ((year - 1980) << 9) | ((date.getMonth() + 1) << 5) | date.getDate(),
   };
 }

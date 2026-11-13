@@ -45,8 +45,6 @@ export function utf8ByteLength(value: string): number {
   return utf8Bytes(value, Number.POSITIVE_INFINITY);
 }
 
-export function exceedsLiveMarkdownLimit(
-  projectedMarkdown: string,
-): boolean {
+export function exceedsLiveMarkdownLimit(projectedMarkdown: string): boolean {
   return exceedsUtf8Bytes(projectedMarkdown, LIVE_MARKDOWN_MAX_BYTES);
 }

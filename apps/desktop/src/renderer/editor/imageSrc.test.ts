@@ -31,21 +31,15 @@ describe("isWorkspaceRelativeSrc", () => {
 
 describe("joinWorkspacePath", () => {
   it("resolves relative to the document's folder", () => {
-    expect(joinWorkspacePath("notes/plan.md", "assets/pic.png")).toBe(
-      "notes/assets/pic.png",
-    );
+    expect(joinWorkspacePath("notes/plan.md", "assets/pic.png")).toBe("notes/assets/pic.png");
   });
 
   it("resolves against the workspace root for a top-level document", () => {
-    expect(joinWorkspacePath("plan.md", "assets/pic.png")).toBe(
-      "assets/pic.png",
-    );
+    expect(joinWorkspacePath("plan.md", "assets/pic.png")).toBe("assets/pic.png");
   });
 
   it("collapses leading ./ segments", () => {
-    expect(joinWorkspacePath("notes/plan.md", "./assets/pic.png")).toBe(
-      "notes/assets/pic.png",
-    );
+    expect(joinWorkspacePath("notes/plan.md", "./assets/pic.png")).toBe("notes/assets/pic.png");
   });
 
   it("resolves `..` by popping the parent folder (global-folder attachments)", () => {
@@ -60,9 +54,7 @@ describe("joinWorkspacePath", () => {
   it("preserves leading `..` when a path climbs above the workspace root", () => {
     // notes/ pops once, then the extra `..` underflows and is kept so callers
     // can detect the escape.
-    expect(joinWorkspacePath("notes/plan.md", "../../escape.png")).toBe(
-      "../escape.png",
-    );
+    expect(joinWorkspacePath("notes/plan.md", "../../escape.png")).toBe("../escape.png");
     expect(joinWorkspacePath("plan.md", "../escape.png")).toBe("../escape.png");
   });
 });
@@ -91,10 +83,7 @@ describe("resolveWorkspaceImageSrc", () => {
 
   it("falls back to the desktop asset URL when a browser resolver has no match", () => {
     expect(
-      resolveWorkspaceImageSrc(
-        { ...ctx, resolveWorkspaceAssetUrl: () => null },
-        "assets/pic.png",
-      ),
+      resolveWorkspaceImageSrc({ ...ctx, resolveWorkspaceAssetUrl: () => null }, "assets/pic.png"),
     ).toBe("dohc-file://ws1/notes/assets/pic.png");
   });
 
@@ -122,9 +111,9 @@ describe("resolveWorkspaceImageSrc", () => {
   });
 
   it("leaves http(s) srcs untouched", () => {
-    expect(
-      resolveWorkspaceImageSrc(ctx, "https://example.com/x.png"),
-    ).toBe("https://example.com/x.png");
+    expect(resolveWorkspaceImageSrc(ctx, "https://example.com/x.png")).toBe(
+      "https://example.com/x.png",
+    );
   });
 
   it("resolves an upward-relative src to a dohc-file URL under the root", () => {
@@ -138,33 +127,29 @@ describe("resolveWorkspaceImageSrc", () => {
     // path would not contain anything: the renderer page has its own base URL
     // (file:// when packaged), so the browser would resolve the escape against
     // the APP directory and decode whatever it found. Blocked → no src at all.
-    expect(resolveWorkspaceImageSrc(ctx, "../../outside.png")).toBe(
-      BLOCKED_IMAGE_SRC,
-    );
-    expect(resolveWorkspaceImageSrc(ctx, "../../../../etc/pic.png")).toBe(
-      BLOCKED_IMAGE_SRC,
-    );
+    expect(resolveWorkspaceImageSrc(ctx, "../../outside.png")).toBe(BLOCKED_IMAGE_SRC);
+    expect(resolveWorkspaceImageSrc(ctx, "../../../../etc/pic.png")).toBe(BLOCKED_IMAGE_SRC);
     // A root-level document: even a single `..` already escapes.
     expect(
-      resolveWorkspaceImageSrc(
-        { workspaceId: "ws1", docPath: "plan.md" },
-        "../outside.png",
-      ),
+      resolveWorkspaceImageSrc({ workspaceId: "ws1", docPath: "plan.md" }, "../outside.png"),
     ).toBe(BLOCKED_IMAGE_SRC);
   });
 
   it("blocks a src that normalizes to nothing", () => {
     // A root-level document: "./" normalizes away entirely, leaving no path to
     // serve — never mint `dohc-file://ws1/` for the workspace root itself.
-    expect(
-      resolveWorkspaceImageSrc({ workspaceId: "ws1", docPath: "plan.md" }, "./"),
-    ).toBe(BLOCKED_IMAGE_SRC);
+    expect(resolveWorkspaceImageSrc({ workspaceId: "ws1", docPath: "plan.md" }, "./")).toBe(
+      BLOCKED_IMAGE_SRC,
+    );
   });
 });
 
 describe("makeImageNodeView", () => {
   const node = (src: string): ProseMirrorNode =>
-    ({ type: { name: "image" }, attrs: { src, alt: "alt text", title: null } }) as unknown as ProseMirrorNode;
+    ({
+      type: { name: "image" },
+      attrs: { src, alt: "alt text", title: null },
+    }) as unknown as ProseMirrorNode;
 
   it("renders a servable src as a dohc-file URL", () => {
     const view = makeImageNodeView(() => ({
@@ -207,6 +192,10 @@ describe("makeImageNodeView", () => {
 });
 
 it("percent-encodes Unicode image paths once at the URL boundary", () => {
-  expect(resolveWorkspaceImageSrc({ workspaceId: "ws1", docPath: "notes/plan.md" }, "assets/会议-фото.png"))
-    .toBe("dohc-file://ws1/notes/assets/%E4%BC%9A%E8%AE%AE-%D1%84%D0%BE%D1%82%D0%BE.png");
+  expect(
+    resolveWorkspaceImageSrc(
+      { workspaceId: "ws1", docPath: "notes/plan.md" },
+      "assets/会议-фото.png",
+    ),
+  ).toBe("dohc-file://ws1/notes/assets/%E4%BC%9A%E8%AE%AE-%D1%84%D0%BE%D1%82%D0%BE.png");
 });
