@@ -2249,11 +2249,12 @@ async fn bookmark_state_filter_claim_command_default_and_path_floor() {
         .await;
     }
 
-    // Canonical Check-A floor: a percent-DISGUISED traversal has no literal
-    // ".." bytes, so the old `validate_path` floor accepted it. Mutation
-    // check: restore `crate::store::validate_path` in `save_bookmark` — this
-    // refusal fails (the save succeeds) and the dotted destination below
-    // persists un-normalized.
+    // `save_bookmark` decodes percent escapes before it checks the
+    // destination for traversal. A percent-DISGUISED traversal has no literal
+    // ".." bytes, so `crate::store::validate_path`, which reads the path as
+    // written, accepts it. Mutation check: use `crate::store::validate_path`
+    // in `save_bookmark` — this refusal fails (the save succeeds) and the
+    // dotted destination below persists un-normalized.
     let disguised = call_error(
         &transport,
         &handle,

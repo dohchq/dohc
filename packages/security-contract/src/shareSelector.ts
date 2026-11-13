@@ -89,23 +89,6 @@ export function isValidShareVersionId(value: unknown): value is string {
 }
 
 /**
- * Whether `value` is a path the relay could have issued in a share selector.
- *
- * The relay accepts a path only if it is a non-empty string that validates,
- * normalizes to itself, and classifies as tracked — it stores the NORMALIZED
- * form, so anything else is a path it never wrote (`validateShareSelector` in
- * `services/sync-relay/src/shareFilter.ts`, which expands the same rule into
- * separate branches because it owes distinct error codes at create time).
- *
- * The length cap lives here too, so the minting side and every reading side
- * agree on one number instead of two that can drift.
- *
- * Every surface that reads a selector back applies this, for the same reason
- * the version rule lives here: a reader that accepts more than the writer
- * issues will accept damage, and `""` is the path-shaped version of the empty
- * version id that got through once already.
- */
-/**
  * How many paths one selector may carry, and how long each may be.
  *
  * Both live here so the minting side and every reading side agree on one
@@ -126,6 +109,23 @@ export function isShareablePathList(paths: readonly unknown[]): boolean {
   return paths.length <= MAX_SHARE_PATHS && paths.every(isShareablePath);
 }
 
+/**
+ * Whether `value` is a path the relay could have issued in a share selector.
+ *
+ * The relay accepts a path only if it is a non-empty string that validates,
+ * normalizes to itself, and classifies as tracked — it stores the NORMALIZED
+ * form, so anything else is a path it never wrote (`validateShareSelector` in
+ * `services/sync-relay/src/shareFilter.ts`, which expands the same rule into
+ * separate branches because it owes distinct error codes at create time).
+ *
+ * The length cap lives here too, so the minting side and every reading side
+ * agree on one number instead of two that can drift.
+ *
+ * Every surface that reads a selector back applies this, for the same reason
+ * the version rule lives here: a reader that accepts more than the writer
+ * issues will accept damage, and `""` is the path-shaped version of the empty
+ * version id that got through once already.
+ */
 export function isShareablePath(value: unknown): value is string {
   if (typeof value !== "string" || value.length === 0 || value.length > MAX_SHARE_PATH_CHARS) {
     return false;

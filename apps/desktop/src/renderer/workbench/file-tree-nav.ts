@@ -1,9 +1,8 @@
 // WAI-ARIA tree navigation. The keyboard
 // behavior is extracted as a pure function so it's testable without
-// a DOM (vitest is node + edge-runtime; no jsdom). The FileTree
-// component flattens its visible rows in order, calls `navigateTree`
-// on each keydown, and dispatches the returned action (focus a row,
-// expand/collapse a folder, open a leaf).
+// a DOM. The FileTree component flattens its visible rows in order,
+// calls `navigateTree` on each keydown, and dispatches the returned
+// action (focus a row, expand/collapse a folder, open a leaf).
 //
 // Spec source: WAI-ARIA Authoring Practices — tree pattern.
 // https://www.w3.org/WAI/ARIA/apg/patterns/treeview/

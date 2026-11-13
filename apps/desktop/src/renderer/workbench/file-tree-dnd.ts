@@ -1,8 +1,8 @@
 import { basenameOf, dirnameOf } from "../path";
 // Drag-and-drop planning. A pure function for the same reason as
-// `navigateTree`: the test harness is node-only, with no DOM. The
-// component sets up HTML5 DnD events; this function computes the
-// move semantics from {source, target}.
+// `navigateTree`: its tests need no DOM. The component sets up HTML5
+// DnD events; this function computes the move semantics from
+// {source, target}.
 //
 // Drop semantics (the VSCode and Finder convention), for a file or
 // a folder as the source:

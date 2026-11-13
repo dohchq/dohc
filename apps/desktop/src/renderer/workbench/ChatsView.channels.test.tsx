@@ -194,14 +194,6 @@ describe("ChatsView panel navigator unread badges", () => {
     expect(screen.getByTestId("chats-channel-name").textContent).toBe("general");
   });
 
-  // liveToken means "everything in flight is now stale", and the mutations
-  // capture it to decide whether their own completion still counts. A badge
-  // refresh is not that: it must not throw away a channel the user just made.
-
-  // The share lookup is optional, so a failure returns "unknown" — which is
-  // not the same as "there are none". A badge refresh must not spend a
-  // teammate's pending invitation on a transient signed-out blip.
-
   it("keeps cached relay share rows when a catch-up refresh resolves with the relay unreachable", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({
       channels: [channel({ unreadCount: 2 })],
@@ -241,9 +233,6 @@ describe("ChatsView panel navigator unread badges", () => {
     });
     expect(screen.getByTestId("chats-join-shared")).toBeTruthy();
   });
-
-  // The counterpart that keeps the distinction honest: when the relay answers
-  // with no rows, that is the truth, and the cached rows go.
 
   // Keeping the cached rows is only half of honest. An unreachable
   // listing with nothing cached committed no rows and said nothing, so the
@@ -343,16 +332,6 @@ describe("ChatsView panel navigator unread badges", () => {
       expect(screen.queryByTestId("chats-shares-unreadable")).toBeNull();
     });
   });
-
-  // An over-limit listing is not an outage: the same request
-  // answers the same way forever. Reporting it as unreachable would give the
-  // surface a Try again that could never work and no way to say what was
-  // wrong, for the one condition dohc's own cap creates.
-
-  // The failure is account-scoped, and unlike a stale row
-  // it is a PERSISTENT claim: an over-limit answer names the previous
-  // account's share counts. Leaving it up shows account A's numbers under
-  // account B for as long as B's listing takes — or for good, if it stalls.
 
   // Over-limit is non-authoritative for the same reason unreachable is: dohc
   // has no listing it can stand behind, so the cached rows are still the best

@@ -16,10 +16,11 @@
 //!   errors, enforced by both encoder and decoder.
 //! - **No panics on malformed input**: [`frame::FrameDecoder`] and
 //!   [`wire::decode_control`] return typed errors for arbitrary input.
-//! - **Transports**: [`transport::EngineTransport`] is implemented both by a
-//!   framed IPC client (future) and by [`transport::InProcessTransport`],
-//!   which passes typed structs to the service directly, so same-process
-//!   callers never serialize.
+//! - **Transports**: [`transport::EngineTransport`] is the client-side trait.
+//!   [`transport::InProcessTransport`] implements it and passes typed structs
+//!   to the service directly, so same-process callers never serialize. The
+//!   framed IPC client is TypeScript (`EngineClient` in
+//!   `packages/workspace-engine-client`), so it does not implement this trait.
 //! - **Supervision**: [`supervisor::Supervisor`] (feature `supervisor`) is a
 //!   tokio-based bounded dispatch skeleton: bounded queue + bounded
 //!   in-flight concurrency, deadlines, cooperative cancellation, and typed

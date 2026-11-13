@@ -186,6 +186,16 @@ impl StorageError {
         }
     }
 
+    /// The question `is_busy` answers, for a caller holding a raw
+    /// `rusqlite::Error`.
+    ///
+    /// `SearchError::Storage` keeps the rusqlite failure rather than wrapping
+    /// it in this taxonomy, so it never reaches this type's constructors and
+    /// would answer a busy index maintenance as a terminal search failure.
+    pub fn is_transient_lock(error: &rusqlite::Error) -> bool {
+        Self::is_busy(error)
+    }
+
     /// Whether SQLite refused this operation because the database was busy,
     /// rather than because anything is wrong with it.
     ///
@@ -200,15 +210,6 @@ impl StorageError {
     /// result code is unreadable, so a busy database would reach callers as
     /// `persist-failed` or `state-corrupt`: both terminal, both wrong about a
     /// condition that clears by waiting.
-    /// The same question for a caller holding a raw `rusqlite::Error`.
-    ///
-    /// `SearchError::Storage` keeps the rusqlite failure rather than wrapping
-    /// it in this taxonomy, so it never reaches the constructors below and
-    /// would answer a busy index maintenance as a terminal search failure.
-    pub fn is_transient_lock(error: &rusqlite::Error) -> bool {
-        Self::is_busy(error)
-    }
-
     fn is_busy(source: &(dyn std::error::Error + 'static)) -> bool {
         source
             .downcast_ref::<rusqlite::Error>()
