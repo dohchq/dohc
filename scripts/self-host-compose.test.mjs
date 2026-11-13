@@ -292,9 +292,10 @@ test("sign-up stays open by default and asks the relay about invites on the inte
   );
 
   assert.equal(settings().DOHC_INVITE_LINK_SIGN_UP, "on");
+  // Only an unset value means on. An empty one reaches the relay, which refuses to start.
   assert.equal(
     compose.services["sync-relay"].environment.DOHC_INVITE_LINK_SIGN_UP,
-    "${DOHC_INVITE_LINK_SIGN_UP:-on}",
+    "${DOHC_INVITE_LINK_SIGN_UP-on}",
   );
 });
 
