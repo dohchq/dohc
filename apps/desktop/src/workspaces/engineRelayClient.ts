@@ -503,7 +503,7 @@ function translateRelayError(method: string, error: unknown): never {
     throw new RelayOriginDivergedError();
   }
   if (
-    method === "share.channel.push" &&
+    (method === "share.channel.push" || method === "share.view.pushChat") &&
     error.wireCode === "INVALID_PARAMS" &&
     error.message === "share-read-only"
   ) {
@@ -554,6 +554,11 @@ export interface EngineRelayWorkspaceClient {
   pushSharedChannel(input: {
     shareId: string;
     channelWireId: string;
+  }): Promise<PushSharedChannelResult>;
+  // A joined workspace's own posts in its Groups, at Comment or Edit.
+  pushShareViewChat(input: {
+    shareId: string;
+    grantedSelector: GrantedSelector;
   }): Promise<PushSharedChannelResult>;
   pullShareView(input: {
     shareId: string;
@@ -988,6 +993,19 @@ export class EngineRelayClient {
         );
         return {
           pushed: numberField(result, "pushed", "share.channel.push"),
+        };
+      },
+      pushShareViewChat: async ({ shareId, grantedSelector }) => {
+        const result = resultRecord(
+          await request("share.view.pushChat", {
+            workspaceId: workspace.workspaceId,
+            shareId,
+            grantedSelector: engineGrantedSelector(grantedSelector),
+          }),
+          "share.view.pushChat",
+        );
+        return {
+          pushed: numberField(result, "pushed", "share.view.pushChat"),
         };
       },
       recordShareViewIdentity: async ({ grantedSelector }) => {

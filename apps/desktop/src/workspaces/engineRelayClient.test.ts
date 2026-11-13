@@ -145,6 +145,8 @@ class MockDaemon implements EngineDaemonClient {
           };
         case "share.channel.push":
           return { pushed: 6 };
+        case "share.view.pushChat":
+          return { pushed: 3 };
         case "share.view.pull":
           return {
             fetched: 2,
@@ -480,8 +482,12 @@ describe("EngineRelayClient", () => {
       const paths = pages[pulls]!;
       pulls += 1;
       return {
-        fetched: paths.length, applied: paths.length, skipped: 0, refusals: [],
-        hasMore: pulls < pages.length, nextCursor: pulls,
+        fetched: paths.length,
+        applied: paths.length,
+        skipped: 0,
+        refusals: [],
+        hasMore: pulls < pages.length,
+        nextCursor: pulls,
         changedPaths: paths.map((path) => ({ path, operation: "write", contentKind: "text" })),
         pendingCursor: { kind: "shareView", token: `share-cursor-${pulls}` },
       };
@@ -574,6 +580,26 @@ describe("EngineRelayClient", () => {
       };
     });
     const { sessions, client } = await harness(daemon);
+  it("sends a joined workspace's Group posts with its pinned selector", async () => {
+    const { daemon, sessions, client } = await harness();
+    await expect(
+      client.pushShareViewChat({
+        shareId: "share-membership",
+        grantedSelector: { paths: [], versionId: null, access: "comment", wholeWorkspace: true },
+      }),
+    ).resolves.toEqual({ pushed: 3 });
+    expect(
+      daemon.requests
+        .filter((request) => request.method === "share.view.pushChat")
+        .map((request) => request.params),
+    ).toEqual([{
+      workspaceId: "workspace-a",
+      shareId: "share-membership",
+      grantedSelector: { paths: [], versionId: null, access: "comment", wholeWorkspace: true },
+    }]);
+    await sessions.closeAll();
+  });
+
     const recorded: string[] = [];
 
     await expect(
