@@ -1216,6 +1216,31 @@ test("every gateway refuses internal paths before proxy handles", () => {
   );
 });
 
+test("every gateway bounds relay bodies at the relay's largest cap, except Collection imports", () => {
+  for (const file of ["Caddyfile", "Caddyfile.private", "Caddyfile.cloudflare"]) {
+    const config = readFileSync(`tools/self-host/${file}`, "utf8");
+    const relay = config.slice(
+      config.indexOf("handle @relay {"),
+      config.indexOf("reverse_proxy sync-relay"),
+    );
+    const bounded =
+      /@relayBounded not path_regexp (\S+)\n\s+request_body @relayBounded \{\s+max_size 21MiB\s+\}/.exec(
+        relay,
+      );
+    assert.ok(bounded, file);
+    const unbounded = new RegExp(bounded[1]);
+    assert.ok(unbounded.test("/sync/w1/datasets/d1/imports/t1"), file);
+    for (const path of [
+      "/sync/w1/log",
+      "/sync/w1/blobs/abc",
+      "/sync/w1/datasets/d1/upload",
+      "/sync/w1/datasets/d1/imports/t1/x",
+    ]) {
+      assert.ok(!unbounded.test(path), `${file}: ${path}`);
+    }
+  }
+});
+
 test("automatic initialization cannot overwrite orphaned data or continuity", () => {
   const root = mkdtempSync(join(tmpdir(), "dohc-bootstrap-"));
   try {

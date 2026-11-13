@@ -48,7 +48,12 @@ import { errorBody, errorResponse, notFound } from "./errors";
 import { RELAY_API_VERSIONS, relayApiVersionRefusal } from "./apiVersion";
 import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity";
 import { PresenceHub } from "./presence";
-import { MAX_BLOB_BYTES, createSyncRelayHandler, streamsRequestBody } from "./server";
+import {
+  createSyncRelayHandler,
+  maxRequestBodyBytes,
+  requestBodyCaller,
+  streamsRequestBody,
+} from "./server";
 import { DiscussionActivityHub } from "./discussionActivity";
 import type { OwnerRestoreHost } from "./ownerRestoreRoutes";
 import type { HeldDocumentHost } from "./heldDocumentRoutes";
@@ -844,10 +849,16 @@ const fetchHandler = async (request: Request): Promise<Response> => {
   return normalizeLinkRefusal(result, path, isLinkLivePath(path));
 };
 
-// Headroom over the blob cap so a maximal valid blob PUT still passes; the
-// adapter refuses anything larger as it arrives, before it is buffered.
-const MAX_BODY_BYTES = MAX_BLOB_BYTES + 1024 * 1024;
 const MAX_LINK_EXCHANGE_BODY_BYTES = 4096;
+// Bodies that handlers have read and not yet answered. Handlers read only
+// after checking the caller's credential; past either limit the caller gets
+// server_busy and retries. One credential's share covers the uploads and log
+// push a desktop sends at once.
+const BODIES_IN_FLIGHT = {
+  maxBytes: 256 * 1024 * 1024,
+  maxBytesPerCaller: 128 * 1024 * 1024,
+  caller: requestBodyCaller,
+};
 
 function loadNamedBrowserSessionLimits(): NamedLiveBrowserHttpLimits | undefined {
   const value =
@@ -927,6 +938,8 @@ const server = serveFetchHandler({
   handler: fetchHandler,
   streamBody: streamsRequestBody,
   requestLog: SYNC_RELAY_REQUEST_LOG,
+  bodiesInFlight: BODIES_IN_FLIGHT,
+  busy: () => errorBody("server_busy"),
   maxBodyBytes: (url) =>
     automationHostMaxBodyBytes(url.pathname) ??
     (isServiceHostEnrollmentPath(url.pathname)
@@ -954,7 +967,7 @@ const server = serveFetchHandler({
                     ? namedBrowserSessionLimits.maxRequestBytes
                     : isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
                       ? MAX_LINK_EXCHANGE_BODY_BYTES
-                      : MAX_BODY_BYTES),
+                      : maxRequestBodyBytes(url)),
   oversized: (url) =>
     isLinkEndpointPath(url.pathname)
       ? opaqueLinkRefusal()

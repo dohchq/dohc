@@ -5,6 +5,8 @@ import {
   MAX_BLOB_BYTES,
   MAX_KEY_ENVELOPE_BYTES,
   MAX_PAYLOAD_JSON_BYTES,
+  maxRequestBodyBytes,
+  requestBodyCaller,
   type CreateSyncRelayHandlerOptions,
   type SyncRelayHandler,
 } from "./server";
@@ -1220,6 +1222,105 @@ describe("sync relay handler", () => {
     } finally {
       errorSpy.mockRestore();
     }
+  });
+
+  it("caps each route's body at the largest one its senders send", () => {
+    const cap = (path: string) => maxRequestBodyBytes(new URL(`http://relay.test${path}`));
+    const dataset = "/sync/w1/datasets/0b5f3c1e-2a4d-4f6b-8c9d-1e2f3a4b5c6d";
+    const publication = "0".repeat(64);
+    const largest = MAX_BLOB_BYTES + 1024 * 1024;
+    expect({
+      log: cap("/sync/w1/log"),
+      blob: cap(`/sync/w1/blobs/${"a".repeat(64)}`),
+      shareLog: cap("/sync/shares/s1/log"),
+      shareBlob: cap(`/sync/shares/s1/blobs/${"a".repeat(64)}`),
+      shareProposals: cap("/sync/shares/s1/proposals"),
+      hostedLog: cap("/sync/w1/hosted/log"),
+      datasetUpload: cap(`${dataset}/upload`),
+      datasetActivate: cap(`${dataset}/activate`),
+      datasetInvoke: cap(`${dataset}/invoke`),
+      datasetReplicaBlob: cap(`${dataset}/replica/blob`),
+      namedDatasetUpload: cap(
+        `/sync/shares/s1/datasets/0b5f3c1e-2a4d-4f6b-8c9d-1e2f3a4b5c6d/upload`,
+      ),
+      appBackendUpload: cap(`/sync/link/app-publications/${publication}/backend/upload`),
+      appBackendInvoke: cap(`/sync/link/app-publications/${publication}/backend/invoke`),
+      linkAppCollection: cap(`/sync/link/app-publications/${publication}/collection`),
+      sharesCreate: cap("/sync/w1/shares"),
+      shareLinkCreateAtomic: cap("/sync/w1/shares/links"),
+      notices: cap("/sync/notices"),
+      blobHave: cap("/sync/w1/blobs/have"),
+      presence: cap("/sync/w1/presence"),
+      moderation: cap("/sync/shares/s1/discussion/moderation"),
+    }).toEqual({
+      log: largest,
+      blob: largest,
+      shareLog: largest,
+      shareBlob: largest,
+      shareProposals: largest,
+      hostedLog: largest,
+      datasetUpload: 8 * 1024 * 1024,
+      datasetActivate: 1024 * 1024,
+      datasetInvoke: 256 * 1024,
+      datasetReplicaBlob: 1024 * 1024,
+      namedDatasetUpload: 8 * 1024 * 1024,
+      appBackendUpload: 8 * 1024 * 1024,
+      appBackendInvoke: 256 * 1024,
+      linkAppCollection: 16 * 1024,
+      sharesCreate: 1024 * 1024,
+      shareLinkCreateAtomic: 1024 * 1024,
+      notices: 256 * 1024,
+      blobHave: 256 * 1024,
+      presence: 256 * 1024,
+      moderation: 256 * 1024,
+    });
+    // The largest bodies shipped desktops send here: 100 paths of 1,024 three-byte
+    // characters, and a full batch of blob hashes.
+    const paths = Array.from({ length: 100 }, () => "☃".repeat(1024));
+    expect(
+      Buffer.byteLength(JSON.stringify({ recipientUserId: "u2", paths, access: "edit" })),
+    ).toBeLessThan(cap("/sync/w1/shares"));
+    const hashes = Array.from({ length: 2000 }, () => "a".repeat(64));
+    expect(Buffer.byteLength(JSON.stringify({ sha256s: hashes }))).toBeLessThan(
+      cap("/sync/w1/blobs/have"),
+    );
+  });
+
+  it("keys a request's bodies in flight on the one sign-in it presents", () => {
+    const caller = (headers: Record<string, string>) =>
+      requestBodyCaller(new Headers({ "x-dohc-relay-client-ip": "10.0.0.1", ...headers }));
+    const cookie = "better-auth.session_token";
+    // Each spelling of one sign-in shares one key.
+    expect(
+      new Set([
+        caller({ authorization: "Bearer token1" }),
+        caller({ authorization: "bearer  token1.signature " }),
+        caller({ cookie: `${cookie}=token1.signature%3D; theme=dark` }),
+        caller({ cookie: `theme=light; __Secure-${cookie}=token1.other` }),
+        caller({ cookie: `${cookie}=  token1.signature ` }),
+        caller({ cookie: `${cookie}="token1.signature"` }),
+      ]),
+    ).toEqual(new Set(["session token1"]));
+    // A header the handler would ignore cannot pick a new key.
+    expect(
+      new Set([
+        caller({}),
+        caller({ authorization: "Bearer junk.1", cookie: `${cookie}=token1.signature` }),
+        caller({ cookie: `${cookie}=junk.2; __Secure-${cookie}=token1.signature` }),
+        caller({ cookie: `${cookie} =token1.signature; ${cookie}=junk.3` }),
+      ]),
+    ).toEqual(new Set(["address 10.0.0.1"]));
+    // Link capabilities are minted freely, so they share one share.
+    expect(
+      new Set([
+        caller({ authorization: "LinkCapability link1" }),
+        caller({ authorization: "LinkCapability link2", cookie: `${cookie}=token1.signature` }),
+      ]),
+    ).toEqual(new Set(["link"]));
+    // Each service host's credential keeps its own share.
+    expect(caller({ authorization: "Bearer dohc-service-v1.host1" })).not.toBe(
+      caller({ authorization: "Bearer dohc-service-v1.host2" }),
+    );
   });
 
   it("rejects a blob PUT above MAX_BLOB_BYTES with 413 and stores nothing", async () => {
