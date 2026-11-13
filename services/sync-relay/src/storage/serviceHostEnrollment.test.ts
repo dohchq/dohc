@@ -856,10 +856,6 @@ async function kept() {
   return { ...f, restore, enrolled, enabled, asOwner, covered, retireKept, afterRestart };
 }
 
-// The owner's restore revoking the last Edit grant, as `beginStopRestore` does, keeping `activationId`.
-
-// A synthetic later restore of the kept note, begun at fence 8 and not yet fenced, carrying the current run's marker. The test ends it before its fence.
-
 it("keeps a note live for its owner after their restore, and for no one else", async () => {
   const f = await kept();
   expect(f.retirement()).toBeNull();
@@ -883,9 +879,6 @@ it("keeps a note live for its owner after their restore, and for no one else", a
     }).kind,
   ).toBe("refused");
 });
-
-// A live sibling note under the same folder share, enrolled and with its own
-// activation, as the fixture's note has.
 
 // Proves: Stop opens a new retirement only with the host's preparation of
 // exactly that activation and restore generation, checked while the
