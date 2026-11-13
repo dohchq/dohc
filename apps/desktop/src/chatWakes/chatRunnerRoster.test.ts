@@ -579,7 +579,7 @@ describe("keeping the relay's lease", () => {
     await r.server.untilDone(4);
     expect(r.server.putTimes.map((at) => at - started)).toEqual([0, 24 * HOUR, 48 * HOUR, 72 * HOUR]);
     // By reference: the session replaced at 20 h renewed at 24 h, the next at 48 h, and so on.
-    expect(r.server.putSessions.map((each) => sessions.indexOf(each))).toEqual([0, 1, 2, 3]);
+    expect(r.server.putSessions.map((each) => sessions.findIndex((made) => made === each))).toEqual([0, 1, 2, 3]);
     expect(r.server.putCurrent).toEqual([true, true, true, true]);
     await r.roster.stop();
   });
