@@ -12,10 +12,8 @@ describe("useWorkspaceQuery", () => {
   it("reads when it starts, and a new key drops the old key's late answer and failure", async () => {
     const answers = { a: deferred<string>(), b: deferred<string>() };
     const signals: AbortSignal[] = [];
-    const report = vi.fn();
     const hook = renderHook(({ key }) => useWorkspaceQuery(useWorkspaceSession(), {
       key,
-      report,
       load: (signal) => { signals.push(signal); return answers[key].promise; },
     }), { wrapper, initialProps: { key: "a" as "a" | "b" } });
     expect(hook.result.current.pending).toBe(true);
@@ -24,14 +22,13 @@ describe("useWorkspaceQuery", () => {
     await act(async () => { answers.b.resolve("b"); });
     await act(async () => { answers.a.reject(Error("late")); });
     expect(hook.result.current).toMatchObject({ value: "b", pending: false, error: null });
-    expect(report).not.toHaveBeenCalled();
   });
 
   it("drops an answer from an earlier visit to the same workspace", async () => {
     const first = deferred<string>();
     const read = vi.fn().mockReturnValueOnce(first.promise).mockResolvedValueOnce("B").mockResolvedValue("second visit");
     const sessions = new Set<WorkspaceSession>();
-    let mounts = 0, files!: WorkspaceQuery<string, never>;
+    let mounts = 0, files!: WorkspaceQuery<string>;
     function Files() {
       useState(() => { mounts += 1; });
       const session = useWorkspaceSession();
@@ -56,7 +53,7 @@ describe("useWorkspaceQuery", () => {
   async function hideAndShowWhileReading(manual: boolean) {
     const first = deferred<string>();
     const load = vi.fn().mockReturnValueOnce(first.promise).mockResolvedValue("after show");
-    let files!: WorkspaceQuery<string, never>;
+    let files!: WorkspaceQuery<string>;
     function Files() {
       files = useWorkspaceQuery(useWorkspaceSession(), { key: "files", manual, load });
       return null;
@@ -74,8 +71,6 @@ describe("useWorkspaceQuery", () => {
     const { files, load } = await hideAndShowWhileReading(true);
     expect(files).toMatchObject({ value: undefined, pending: false, error: null });
     expect(load).toHaveBeenCalledOnce();
-    await act(() => files.retryIfIdle());
-    expect(load).toHaveBeenCalledTimes(2);
   });
   it("a query that reads on start reads again when shown again during a read", async () => {
     const { files, load } = await hideAndShowWhileReading(false);
@@ -95,18 +90,6 @@ describe("useWorkspaceQuery", () => {
     expect(hook.result.current).toMatchObject({ value: undefined, pending: true });
     await act(async () => { newer.resolve("newer"); });
     expect(hook.result.current).toMatchObject({ value: "newer", pending: false });
-  });
-
-  it("retryIfIdle sends nothing while a read is in flight, even before a render", async () => {
-    const answers = [deferred<string>(), deferred<string>()];
-    const load = vi.fn(() => answers[load.mock.calls.length - 1]!.promise);
-    const hook = renderHook(() => useWorkspaceQuery(useWorkspaceSession(), { key: "files", manual: true, load }), { wrapper });
-    act(() => { void hook.result.current.retry(); void hook.result.current.retryIfIdle(); });
-    expect(load).toHaveBeenCalledTimes(1);
-    await act(async () => { answers[0]!.resolve("first"); });
-    await act(() => { void hook.result.current.retryIfIdle(); void hook.result.current.retryIfIdle(); answers[1]!.resolve("second"); return Promise.resolve(); });
-    expect(load).toHaveBeenCalledTimes(2);
-    expect(hook.result.current).toMatchObject({ value: "second", pending: false });
   });
 
   it("needs the shell's session", () => {

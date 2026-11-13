@@ -1,55 +1,49 @@
 import { useLayoutEffect, useReducer, useState } from "react";
 import type { WorkspaceSession } from "./workspaceSession";
 
-export type WorkspaceQueryOptions<T, A> = {
+export type WorkspaceQueryOptions<T> = {
   // What is read in this session. A new key retires the old key's reads and
   // starts from no value.
   key: string;
   // A newer read aborts this signal, and only the newest read sets the value,
   // the error, or the end of pending. An answer that ignores the signal is
   // still dropped.
-  load: (signal: AbortSignal, argument: A | undefined) => Promise<T>;
+  load: (signal: AbortSignal) => Promise<T>;
   // Read only when retry is called, not when the query starts.
   manual?: boolean;
-  // Hears each failure that sets the error, in the same update.
-  report?: (error: unknown) => void;
 };
 
-export type WorkspaceQuery<T, A> = {
+export type WorkspaceQuery<T> = {
   value: T | undefined;
   pending: boolean;
   // The newest read's failure, or null.
   error: unknown;
   // Reads again. Resolves when that read settles or is dropped; never rejects.
-  retry: (argument?: A) => Promise<void>;
-  // Reads again unless a read is in flight. It checks when called, not at the
-  // last render, so two calls before React renders again send one read.
-  retryIfIdle: (argument?: A) => Promise<void>;
+  retry: () => Promise<void>;
 };
 
-type Owner<T, A> = {
+type Owner<T> = {
   session: WorkspaceSession;
   key: string;
-  options: WorkspaceQueryOptions<T, A>;
-  state: Omit<WorkspaceQuery<T, A>, "retry" | "retryIfIdle">;
+  options: WorkspaceQueryOptions<T>;
+  state: Omit<WorkspaceQuery<T>, "retry">;
   start: () => void;
   retire: () => void;
-  retry: (argument?: A) => Promise<void>;
-  retryIfIdle: (argument?: A) => Promise<void>;
+  retry: () => Promise<void>;
 };
 
-function createOwner<T, A>(
+function createOwner<T>(
   session: WorkspaceSession,
-  options: WorkspaceQueryOptions<T, A>,
+  options: WorkspaceQueryOptions<T>,
   repaint: () => void,
-): Owner<T, A> {
+): Owner<T> {
   let live = false;
   let newest: AbortController | null = null;
-  const publish = (next: Partial<Owner<T, A>["state"]>) => {
+  const publish = (next: Partial<Owner<T>["state"]>) => {
     owner.state = { ...owner.state, ...next };
     repaint();
   };
-  const owner: Owner<T, A> = {
+  const owner: Owner<T> = {
     session,
     key: options.key,
     options,
@@ -67,7 +61,7 @@ function createOwner<T, A>(
       newest?.abort();
       newest = null;
     },
-    retry: async (argument) => {
+    retry: async () => {
       if (!live) return;
       newest?.abort();
       const read = new AbortController();
@@ -75,7 +69,7 @@ function createOwner<T, A>(
       publish({ pending: true, error: null });
       let answer: { ok: true; value: T } | { ok: false; error: unknown };
       try {
-        answer = { ok: true, value: await owner.options.load(read.signal, argument) };
+        answer = { ok: true, value: await owner.options.load(read.signal) };
       } catch (error) {
         answer = { ok: false, error };
       }
@@ -85,10 +79,8 @@ function createOwner<T, A>(
         publish({ value: answer.value, pending: false });
       } else {
         publish({ error: answer.error, pending: false });
-        owner.options.report?.(answer.error);
       }
     },
-    retryIfIdle: (argument) => newest ? Promise.resolve() : owner.retry(argument),
   };
   return owner;
 }
@@ -97,10 +89,10 @@ function createOwner<T, A>(
 // caller gets no setter and no request token, so a late answer cannot reach
 // state the query does not own. A loader that writes other state itself can
 // still write it late: keep loaders to reading and returning.
-export function useWorkspaceQuery<T, A = never>(
+export function useWorkspaceQuery<T>(
   session: WorkspaceSession,
-  options: WorkspaceQueryOptions<T, A>,
-): WorkspaceQuery<T, A> {
+  options: WorkspaceQueryOptions<T>,
+): WorkspaceQuery<T> {
   const [, repaint] = useReducer((count: number) => count + 1, 0);
   const [held, hold] = useState(() => createOwner(session, options, repaint));
   let owner = held;
@@ -116,5 +108,5 @@ export function useWorkspaceQuery<T, A = never>(
     owner.start();
     return owner.retire;
   }, [owner]);
-  return { ...owner.state, retry: owner.retry, retryIfIdle: owner.retryIfIdle };
+  return { ...owner.state, retry: owner.retry };
 }

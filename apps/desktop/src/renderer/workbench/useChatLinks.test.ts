@@ -1,9 +1,7 @@
 // @vitest-environment jsdom
 import { act, renderHook } from "@testing-library/react";
-import { createElement, type ReactNode } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 import { deferred } from "../../testing/deferred";
-import { WorkspaceSessionProvider } from "../workspace/workspaceSession";
 import { useChatLinks } from "./useChatLinks";
 
 function page(wire="a", nextCursor:string|null="next") {
@@ -14,7 +12,7 @@ function setup() {
   const read=vi.fn(),onError=vi.fn();
   vi.stubGlobal("dohcDesktop",{chatLinks:read});
   const hook=renderHook(({workspaceId,channelWireId})=>useChatLinks({workspaceId,channelWireId,onError}),
-    {initialProps:{workspaceId:"w",channelWireId:"a"},wrapper:({children}:{children?:ReactNode})=>createElement(WorkspaceSessionProvider,{workspaceId:"w"},children)});
+    {initialProps:{workspaceId:"w",channelWireId:"a"}});
   return {...hook,read,onError};
 }
 afterEach(()=>vi.unstubAllGlobals());
@@ -53,50 +51,6 @@ it("a refresh supersedes pagination and duplicate pagination does not consume th
   await act(()=>h.result.current.load());
   await act(async()=>{older.resolve(page("old"));await pending;});
   expect(h.result.current.pages.map(p=>p.subject.channelWireId)).toEqual(["refresh"]);
-});
-it("two page reads before a render send one request",async()=>{
-  const h=setup(),next=deferred<ReturnType<typeof page>>();
-  h.read.mockResolvedValueOnce(page()).mockReturnValueOnce(next.promise);
-  await act(()=>h.result.current.load());
-  let first!:Promise<void>,second!:Promise<void>;
-  act(()=>{first=h.result.current.loadMore();second=h.result.current.loadMore();});
-  expect(h.read).toHaveBeenCalledTimes(2);
-  await act(async()=>{next.resolve(page("a",null));await Promise.all([first,second]);});
-  expect(h.result.current.pages).toHaveLength(2);
-});
-it("a refresh and a page read before a render send only the refresh",async()=>{
-  const h=setup(),refresh=deferred<ReturnType<typeof page>>();
-  h.read.mockResolvedValueOnce(page()).mockReturnValueOnce(refresh.promise);
-  await act(()=>h.result.current.load());
-  let first!:Promise<void>,second!:Promise<void>;
-  act(()=>{first=h.result.current.load();second=h.result.current.loadMore();});
-  expect(h.read).toHaveBeenCalledTimes(2);
-  expect(h.read).toHaveBeenLastCalledWith({workspaceId:"w",channelWireId:"a"});
-  await act(async()=>{refresh.resolve(page("fresh",null));await Promise.all([first,second]);});
-  expect(h.result.current.pages.map(p=>p.subject.channelWireId)).toEqual(["fresh"]);
-});
-it("callbacks kept from an earlier render page from the pages shown now",async()=>{
-  const h=setup();
-  h.read.mockResolvedValueOnce(page("a","c1")).mockResolvedValueOnce(page("b","c2")).mockResolvedValueOnce(page("c",null));
-  const {load,loadMore}=h.result.current;
-  await act(()=>load());
-  await act(()=>loadMore());
-  expect(h.read).toHaveBeenLastCalledWith({workspaceId:"w",channelWireId:"a",cursor:"c1"});
-  await act(()=>loadMore());
-  expect(h.read).toHaveBeenLastCalledWith({workspaceId:"w",channelWireId:"a",cursor:"c2"});
-  expect(h.result.current.pages.map(p=>p.subject.channelWireId)).toEqual(["a","b","c"]);
-});
-it("pages again after a refresh that superseded a page read fails",async()=>{
-  const h=setup(),older=deferred<ReturnType<typeof page>>();
-  h.read.mockResolvedValueOnce(page()).mockReturnValueOnce(older.promise).mockRejectedValueOnce(Error("refresh")).mockResolvedValueOnce(page("a",null));
-  await act(()=>h.result.current.load());
-  act(()=>{void h.result.current.loadMore();});
-  await act(()=>h.result.current.load());
-  expect(h.result.current.loading).toBe(false);
-  await act(()=>h.result.current.loadMore());
-  expect(h.read).toHaveBeenCalledTimes(4);
-  expect(h.read).toHaveBeenLastCalledWith({workspaceId:"w",channelWireId:"a",cursor:"next"});
-  expect(h.result.current.pages).toHaveLength(2);
 });
 it("reports current errors but suppresses errors after unmount",async()=>{
   const h=setup(),pending=deferred<never>();

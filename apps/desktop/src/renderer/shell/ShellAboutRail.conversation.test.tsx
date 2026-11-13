@@ -14,7 +14,6 @@ import { settingsWithAgent } from "../../testing/agentSettings";
 import { ReactionStoreProvider } from "../workbench/reactionStore";
 import { CHATS_TAB_PATH, GRAPH_TAB_PATH, chatTabPath, defaultWorkbenchState } from "../workbench/workbenchState";
 import { ShellAboutRail, type AboutSearchHit } from "./ShellAboutRail";
-import { WorkspaceSessionProvider } from "../workspace/workspaceSession";
 
 const bridgeMock = {
   getObjectAccess: vi.fn<(input: { workspaceId: string; ref: unknown }) => Promise<AccessAnswer>>(),
@@ -91,10 +90,9 @@ function publish(workspaceId: string, tabPath: string, entry: AboutConversation 
   return withdraw;
 }
 
-// The workspace shell provides the session and the reaction store in production.
+// The workspace shell provides the reaction store in production.
 function Rail(props: Partial<ComponentProps<typeof ShellAboutRail>>) {
   return (
-    <WorkspaceSessionProvider workspaceId={props.workspaceId ?? "workspace-a"}>
     <ReactionStoreProvider workspaceId={props.workspaceId ?? "workspace-a"}>
       <ShellAboutRail
         wb={defaultWorkbenchState()}
@@ -124,7 +122,6 @@ function Rail(props: Partial<ComponentProps<typeof ShellAboutRail>>) {
         {...props}
       />
     </ReactionStoreProvider>
-    </WorkspaceSessionProvider>
   );
 }
 

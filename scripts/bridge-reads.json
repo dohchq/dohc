@@ -241,6 +241,7 @@
     "apps/desktop/src/renderer/workbench/WorkspaceVersions.tsx | listWorkspaceVersions #3",
     "apps/desktop/src/renderer/workbench/pinnedApps.ts | getSitePackage",
     "apps/desktop/src/renderer/workbench/reactionStore.tsx | listChatReactions",
+    "apps/desktop/src/renderer/workbench/useChatLinks.ts | chatLinks",
     "apps/desktop/src/renderer/workbench/usePersonalChatFeed.ts | listPersonalChatFeed"
   ]
 }
