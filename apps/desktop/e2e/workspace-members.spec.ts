@@ -625,6 +625,8 @@ test("@two-client a member posts in a Group, follows a level change, and sees an
     await expect(composer).toBeVisible();
 
     // --- The owner moves members to View while Sam's window is open ---------
+    // The toast's dark picture comes from the pages test.
+    await setTheme(mine, "Light");
     const members = await openMembers(page);
     await members.getByTestId("settings-members-level-control").getByRole("radio", { name: "View" }).click();
     await expect.poll(async () => (await membersView(relay!, OWNER.token, workspaceId)).memberLevel).toBe("view");
@@ -636,7 +638,7 @@ test("@two-client a member posts in a Group, follows a level change, and sees an
     const changed = `${OWNER.user} changed members to View.`;
     const toast = mine.getByTestId("notice-toasts").getByTestId("workspace-shell-notice").filter({ hasText: changed });
     await expect(toast).toBeVisible({ timeout: 30_000 });
-    await mine.screenshot({ path: shot("level-toast-dark") });
+    await mine.screenshot({ path: shot("level-toast-light") });
     for (const theme of ["Light", "Dark"] as const) {
       await setTheme(mine, theme);
       await mine.getByTestId("notice-center-toggle").click();
@@ -669,6 +671,122 @@ test("@two-client a member posts in a Group, follows a level change, and sees an
     expect(admin.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
   } finally {
     await cleanupDesktopWorkspace(admin, adminTemp);
+    await cleanupDesktopWorkspace(member, memberTemp);
+    await cleanupDesktopWorkspace(owner, ownerTemp);
+    await relay?.stop();
+  }
+});
+
+// Mention and reply Notices in a joined workspace. A member mentions the
+// owner in a Group thread, and the owner's Notice opens that message. The
+// owner replies in the thread, and the member's Notice opens the reply in
+// the joined workspace. Each row reads once opened.
+test("@two-client a member mentions the owner, the owner replies, and each Notice opens the message", async () => {
+  test.setTimeout(600_000);
+  const ownerTemp = await createTempWorkspace();
+  const memberTemp = await createTempWorkspace();
+  const workspaceId = "members-notices";
+  const syncEnv = { DOHC_TEST_SYNC_DEBOUNCE_MS: "150", DOHC_TEST_SYNC_BACKOFF_MS: "250" };
+  let relay: SyncRelayHandle | null = null;
+  let owner: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  let member: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  const shot = (name: string) => test.info().outputPath(`${name}.png`);
+  // The test relay names each account by its id, so a handle is the id.
+  const mention = `@${OWNER.user} can you check the budget?`;
+  const reply = "The budget is fine. Book the hall.";
+
+  // Opens Notices, finds the row, takes light and dark pictures of it, and
+  // opens it at the message. The panel closes with its toggle: Escape would
+  // reach the open thread and take it back to the Group.
+  const openNotice = async (page: Page, title: string, name: string, message: string) => {
+    const center = page.getByTestId("notice-center");
+    const row = center.locator('li[data-testid^="sent-notice-"]').filter({ hasText: title });
+    await expect(async () => {
+      if (!(await center.isVisible())) await page.getByTestId("notice-center-toggle").click();
+      await expect(row).toBeVisible({ timeout: 5_000 });
+    }).toPass({ timeout: 120_000, intervals: [2_000] });
+    for (const theme of ["Light", "Dark"] as const) {
+      await setTheme(page, theme);
+      await page.getByTestId("notice-center-toggle").click();
+      await expect(row).toBeVisible();
+      await page.screenshot({ path: shot(`${name}-${theme.toLowerCase()}`) });
+      await page.keyboard.press("Escape");
+    }
+    await page.getByTestId("notice-center-toggle").click();
+    await row.click();
+    await expect(center).toHaveCount(0);
+    await expect(page.getByTestId("chats-message-body").filter({ hasText: message })).toBeVisible({ timeout: 30_000 });
+    // Opened, it reads: the row stays, with no unread mark.
+    await page.getByTestId("notice-center-toggle").click();
+    await expect(row).toBeVisible();
+    await expect(row.getByTestId(/-unread$/u)).toHaveCount(0);
+    await page.getByTestId("notice-center-toggle").click();
+    await expect(center).toHaveCount(0);
+  };
+
+  try {
+    relay = await spawnSyncRelay({ dbPath: join(ownerTemp.baseDir, "relay", "relay.sqlite") });
+    await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: OWNER.token, workspaceId });
+    await seedWorkspaceManifest(ownerTemp, workspaceId);
+    await writeWorkspaceFiles(ownerTemp, [{ path: "notes/plan.md", contents: "# Plan\n" }]);
+    await seedWorkspaceRegistry(ownerTemp, [
+      { workspaceId, rootPath: ownerTemp.rootPath, remote: { serverUrl: relay.baseUrl, ownerUserId: OWNER.user } },
+    ]);
+    await seedCloudCredentials(ownerTemp, { serverUrl: relay.baseUrl, relayUrl: relay.baseUrl, email: OWNER.email, userId: OWNER.user, token: OWNER.token });
+    owner = await launchDesktopApp({ workspace: ownerTemp, env: syncEnv });
+    const { page } = owner;
+    await openWorkspaceFromFirstRun(page, ownerTemp);
+    await page.emulateMedia({ reducedMotion: "reduce" });
+
+    // --- The owner's Group, a first post, and Sam at Comment ----------------
+    await openChatsView(page);
+    await page.getByTestId("chats-new-channel").click();
+    await page.getByTestId("chats-new-channel-name").fill("Events");
+    await page.getByTestId("chats-new-channel-type-both").click();
+    await page.getByTestId("chats-new-channel-submit").click();
+    await expect(page.getByTestId("chats-channel-title")).toHaveText("Events");
+    await page.getByTestId("chats-new-thread-composer").fill("Fundraiser: who checks the budget?");
+    await page.getByTestId("chats-new-thread-composer").press("Enter");
+    await expect(page.getByTestId("chats-message-body")).toContainText("Fundraiser: who checks the budget?");
+    await page.getByTestId("chats-thread-back").click();
+    const invited = await relayJson(relay.baseUrl, OWNER.token, `/sync/${workspaceId}/members/invites`, { method: "POST", body: JSON.stringify({ email: MEMBER.email, workspaceName: "Members notices" }) });
+    expect(invited.status, invited.body).toBe(200);
+    const workspaceName = (await membersView(relay, OWNER.token, workspaceId)).workspaceName;
+
+    // --- Sam mentions the owner in the thread -------------------------------
+    member = await openMembership(relay, memberTemp, MEMBER, workspaceName, syncEnv);
+    const mine = member.page;
+    const samPanel = await openChatsView(mine);
+    const samGroup = samPanel.getByTestId("chats-channel").filter({ hasText: "Events" });
+    await expect(samGroup).toBeVisible({ timeout: 60_000 });
+    await samGroup.click();
+    const thread = (where: Page) => where.getByTestId("chats-thread").filter({ hasText: "Fundraiser: who checks the budget?" });
+    await expect(thread(mine)).toBeVisible({ timeout: 60_000 });
+    await thread(mine).click();
+    await mine.getByTestId("chats-composer").fill(mention);
+    await mine.getByTestId("chats-composer").press("Enter");
+    await expect(mine.getByTestId("chats-message-body").filter({ hasText: "can you check the budget?" })).toBeVisible();
+    // Away from the thread, so the reply's Notice is not read on arrival.
+    await mine.getByTestId("chats-thread-back").click();
+    await openExplorerView(mine);
+
+    // --- The owner's Notice opens Sam's message in the owned workspace ------
+    await openExplorerView(page);
+    await openNotice(page, `${MEMBER.user} mentioned you in #Events`, "notice-mention", "can you check the budget?");
+    // It opens the post's thread, so the reply goes under Sam's comment.
+    await expect(page.getByRole("tab", { name: /^Events/u })).toHaveAttribute("aria-selected", "true");
+
+    // --- The owner replies; Sam's Notice opens the reply in the joined view --
+    await page.getByTestId("chats-composer").fill(reply);
+    await page.getByTestId("chats-composer").press("Enter");
+    await expect(page.getByTestId("chats-message-body").filter({ hasText: reply })).toBeVisible();
+    await openNotice(mine, `${OWNER.user} replied in #Events`, "notice-reply", reply);
+    await expect(mine.getByTestId("status-workspace")).toHaveText(workspaceName);
+    await expect(mine.getByRole("tab", { name: /^Events/u })).toHaveAttribute("aria-selected", "true");
+
+    expect(owner.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
+    expect(member.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
+  } finally {
     await cleanupDesktopWorkspace(member, memberTemp);
     await cleanupDesktopWorkspace(owner, ownerTemp);
     await relay?.stop();
@@ -782,9 +900,12 @@ test("@two-client a member creates a page that reaches the owner, and an admin c
     await folderName.press("Enter");
     await expect(kai.getByLabel("Page title")).toBeFocused();
     await kai.keyboard.type("Kickoff");
+    // Until the page is written, the tree shows the folder it goes in.
+    const pendingFolder = explorerRow(kai, "Plans").or(explorerRow(kai, "notes/Plans")).first();
     await themed(kai, "admin-new-folder-page", async () => {
       await openExplorerView(kai);
       await expect(kai.getByLabel("Page title")).toHaveValue("Kickoff");
+      await expect(pendingFolder).toBeVisible();
     });
     await kai.getByLabel("Page title").click();
     await kai.keyboard.press("ControlOrMeta+w");
@@ -803,17 +924,75 @@ test("@two-client a member creates a page that reaches the owner, and an admin c
     await member.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.show());
     await expect.poll(() => mine.evaluate(() => document.visibilityState)).toBe("visible");
     await setLevel("comment");
-    await expect(header.getByRole("button", { name: "New page" })).toHaveCount(0, { timeout: 120_000 });
+    // A level change that lands between held pulls waits for the next look
+    // at the window. Here and below, a focus event stands in for that look.
+    await expect(async () => {
+      await mine.evaluate(() => window.dispatchEvent(new Event("focus")));
+      await expect(header.getByRole("button", { name: "New page" })).toHaveCount(0, { timeout: 10_000 });
+    }).toPass({ timeout: 120_000, intervals: [1_000] });
+    // The toast names who changed the level. Its light picture comes from the Group test.
+    const changed = `${OWNER.user} changed members to Comment.`;
+    await expect(mine.getByTestId("notice-toasts").getByTestId("workspace-shell-notice").filter({ hasText: changed })).toBeVisible({ timeout: 30_000 });
+    await mine.screenshot({ path: shot("level-toast-dark") });
     await explorerRow(mine, "notes/plan.md").click();
-    // The page opens to read, and Edit does not open the editor.
+    // The page opens to read, with no Edit toggle and no editor.
     const page = mine.getByRole("main");
     await expect(page.getByText("Read this first.")).toBeVisible({ timeout: 60_000 });
-    await expect(mine.getByTestId("markdown-edit-toggle")).toBeDisabled();
+    await expect(mine.getByTestId("markdown-edit-toggle")).toHaveCount(0);
     await expect(mine.getByTestId("markdown-editor")).toHaveCount(0);
     await themed(mine, "comment-read-only", async () => {
       await openExplorerView(mine);
       await expect(page.getByText("Read this first.")).toBeVisible();
+      await expect(mine.getByTestId("markdown-edit-toggle")).toHaveCount(0);
     });
+
+    // --- A page Sam wrote stays until members can edit again -------------
+    // Sam writes a page while the relay is down, and the owner moves members
+    // to Comment as it comes back. The page waits with no proposal to send,
+    // and it goes on its own once members are back at Edit.
+    await setLevel("edit");
+    await expect(async () => {
+      await mine.evaluate(() => window.dispatchEvent(new Event("focus")));
+      await expect(header.getByRole("button", { name: "New page" })).toBeVisible({ timeout: 10_000 });
+    }).toPass({ timeout: 120_000, intervals: [1_000] });
+    const relayPort = relay.port;
+    await relay.stop();
+    relay = null;
+    await header.getByRole("button", { name: "New page" }).click();
+    await expect(mine.getByLabel("Page title")).toBeFocused();
+    await mine.keyboard.type("Budget");
+    await mine.keyboard.press("ControlOrMeta+w");
+    await expect(mine.getByTestId("new-page")).toHaveCount(0);
+    relay = await spawnSyncRelay({ dbPath: join(ownerTemp.baseDir, "relay", "relay.sqlite"), port: relayPort });
+    await setLevel("comment");
+    const unsent = "You can no longer edit in this workspace. Your unsent pages stay on this computer and send when members can edit again.";
+    const notices = mine.getByTestId("notice-center");
+    const unsentRow = notices.locator("li").filter({ hasText: unsent }).first();
+    // The failed send offers Try again. At Comment, trying again finds the level changed.
+    const failedRow = notices.locator("li").filter({ hasText: "could not send your" }).first();
+    await expect(async () => {
+      if (!(await notices.isVisible())) await mine.getByTestId("notice-center-toggle").click();
+      if (await unsentRow.count() === 0) {
+        const retry = failedRow.getByRole("button", { name: "Try again" });
+        if (await retry.isVisible()) await retry.click();
+      }
+      await expect(unsentRow).toBeVisible({ timeout: 5_000 });
+    }).toPass({ timeout: 120_000, intervals: [2_000] });
+    await expect(unsentRow.getByRole("button", { name: "Send as proposal" })).toHaveCount(0);
+    for (const theme of ["Light", "Dark"] as const) {
+      await mine.keyboard.press("Escape");
+      await setTheme(mine, theme);
+      await mine.getByTestId("notice-center-toggle").click();
+      await expect(unsentRow).toBeVisible();
+      await mine.screenshot({ path: shot(`unsent-pages-${theme.toLowerCase()}`) });
+    }
+    await mine.keyboard.press("Escape");
+    await setLevel("edit");
+    await expect.poll(async () => {
+      await mine.evaluate(() => window.dispatchEvent(new Event("focus")));
+      for (const path of ["notes/Budget.md", "Budget.md"]) if (/title: Budget/.test(await ownerFile(path))) return path;
+      return "missing";
+    }, { timeout: 120_000, intervals: [2_000] }).not.toBe("missing");
 
     expect(member.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
     expect(owner.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
