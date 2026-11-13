@@ -35,9 +35,14 @@ const schema=`CREATE TABLE ${ORDINARY_CHECKPOINTS} (
   tail_json TEXT NOT NULL CHECK (json_valid(tail_json) AND json_type(tail_json)='array'),
   moments_json TEXT NOT NULL CHECK (json_valid(moments_json) AND json_type(moments_json)='array'),
   moments_from_seq INTEGER NOT NULL CHECK (moments_from_seq BETWEEN base_relay_seq AND through_relay_seq+1),
+  latest_rename_seq INTEGER CHECK (latest_rename_seq BETWEEN base_relay_seq+1 AND through_relay_seq),
+  latest_write_seq INTEGER CHECK (latest_write_seq BETWEEN base_relay_seq+1 AND through_relay_seq),
+  latest_write_sha256 TEXT ${hex("latest_write_sha256")},
+  latest_write_byte_length INTEGER CHECK (latest_write_byte_length BETWEEN 0 AND 2097152),
   policy_sha256 TEXT NOT NULL ${hex("policy_sha256")},
   accounted_bytes INTEGER NOT NULL CHECK (accounted_bytes BETWEEN 1 AND ${SAFE}),
   folded_at_ms INTEGER NOT NULL CHECK (folded_at_ms BETWEEN 0 AND ${SAFE}),
+  CHECK ((latest_write_seq IS NULL)=(latest_write_sha256 IS NULL) AND (latest_write_seq IS NULL)=(latest_write_byte_length IS NULL)),
   PRIMARY KEY (workspace_id,main_version_id,object_id,lineage_claim_id),
   FOREIGN KEY (workspace_id) REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE
 ) STRICT`;
@@ -84,6 +89,12 @@ export interface OrdinaryCheckpoint {
   readonly tail:readonly OrdinaryCheckpointRow[];
   /** The newest folded file moments, at most CHECKPOINT_MOMENTS, oldest first, and the row from which none was dropped. */
   readonly moments:readonly OrdinaryCheckpointMoment[];readonly momentsFromSeq:number;
+  /**
+   * The latest folded rename and the latest folded write the relay recorded as this object's moment, or null when the
+   * fold found none since the base. They stay when older moments are dropped.
+   */
+  readonly latestRename:number|null;
+  readonly latestWrite:{readonly relaySeq:number;readonly blobSha256:string;readonly byteLength:number}|null;
 }
 export const CHECKPOINT_TAIL_ROWS=32,CHECKPOINT_MOMENTS=256;
 const hash=(bytes:Uint8Array|string)=>createHash("sha256").update(bytes).digest("hex");
@@ -104,7 +115,9 @@ export function readOrdinaryCheckpoint(storage:StorageContext,scope:OrdinaryChec
     row.policy_sha256!==scope.policySha256||!state||hash(state)!==row.state_sha256)return null;
   return {throughRelaySeq:Number(row.through_relay_seq),foldedEntries:Number(row.folded_entries),state:new Uint8Array(state),stateSha256:String(row.state_sha256),
     currentPath:String(row.current_path),projection:{projectedMarkdownSha256:String(row.projected_sha256),projectedMarkdownByteLength:Number(row.projected_byte_length)},
-    tail:JSON.parse(String(row.tail_json)),moments:JSON.parse(String(row.moments_json)),momentsFromSeq:Number(row.moments_from_seq)};
+    tail:JSON.parse(String(row.tail_json)),moments:JSON.parse(String(row.moments_json)),momentsFromSeq:Number(row.moments_from_seq),
+    latestRename:row.latest_rename_seq===null?null:Number(row.latest_rename_seq),
+    latestWrite:row.latest_write_seq===null?null:{relaySeq:Number(row.latest_write_seq),blobSha256:String(row.latest_write_sha256),byteLength:Number(row.latest_write_byte_length)}};
 }
 
 /**
@@ -122,22 +135,26 @@ export function replaceOrdinaryCheckpoint(storage:StorageContext,input:{scope:Or
   if(!cursor||Number(cursor.cursor)<checkpoint.throughRelaySeq)return false;
   if(hash(checkpoint.state)!==checkpoint.stateSha256)throw new Error("Ordinary checkpoint state differs from its digest.");
   const fields=[scope.namespace,scope.replicationEpoch,scope.streamIdentity,scope.base.originId,checkpoint.stateSha256,checkpoint.currentPath,
-    checkpoint.projection.projectedMarkdownSha256,scope.policySha256,...key(document)];
+    checkpoint.projection.projectedMarkdownSha256,scope.policySha256,checkpoint.latestWrite?.blobSha256??null,...key(document)];
   const tailJson=JSON.stringify(checkpoint.tail),momentsJson=JSON.stringify(checkpoint.moments);
-  const accounted=checkpoint.state.length+Buffer.byteLength(JSON.stringify(fields))+Buffer.byteLength(tailJson)+Buffer.byteLength(momentsJson)+8*8;
+  const accounted=checkpoint.state.length+Buffer.byteLength(JSON.stringify(fields))+Buffer.byteLength(tailJson)+Buffer.byteLength(momentsJson)+11*8;
   const charge=accounted-(prior?Number(prior.accounted_bytes):0);
   assertWorkspaceQuota(storage,document.workspaceId,charge);
   storage.db.prepare(`INSERT INTO ${ORDINARY_CHECKPOINTS}(workspace_id,main_version_id,object_id,lineage_claim_id,relay_database_namespace,replication_epoch,stream_identity,
       base_relay_seq,base_origin_id,base_origin_seq,through_relay_seq,folded_entries,state_bytes,state_sha256,current_path,projected_sha256,projected_byte_length,
-      tail_json,moments_json,moments_from_seq,policy_sha256,accounted_bytes,folded_at_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      tail_json,moments_json,moments_from_seq,latest_rename_seq,latest_write_seq,latest_write_sha256,latest_write_byte_length,policy_sha256,accounted_bytes,folded_at_ms)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT(workspace_id,main_version_id,object_id,lineage_claim_id) DO UPDATE SET relay_database_namespace=excluded.relay_database_namespace,
       replication_epoch=excluded.replication_epoch,stream_identity=excluded.stream_identity,base_relay_seq=excluded.base_relay_seq,base_origin_id=excluded.base_origin_id,
       base_origin_seq=excluded.base_origin_seq,through_relay_seq=excluded.through_relay_seq,folded_entries=excluded.folded_entries,state_bytes=excluded.state_bytes,
       state_sha256=excluded.state_sha256,current_path=excluded.current_path,projected_sha256=excluded.projected_sha256,projected_byte_length=excluded.projected_byte_length,
-      tail_json=excluded.tail_json,moments_json=excluded.moments_json,moments_from_seq=excluded.moments_from_seq,policy_sha256=excluded.policy_sha256,accounted_bytes=excluded.accounted_bytes,folded_at_ms=excluded.folded_at_ms`)
+      tail_json=excluded.tail_json,moments_json=excluded.moments_json,moments_from_seq=excluded.moments_from_seq,
+      latest_rename_seq=excluded.latest_rename_seq,latest_write_seq=excluded.latest_write_seq,latest_write_sha256=excluded.latest_write_sha256,
+      latest_write_byte_length=excluded.latest_write_byte_length,policy_sha256=excluded.policy_sha256,accounted_bytes=excluded.accounted_bytes,folded_at_ms=excluded.folded_at_ms`)
     .run(...key(document),scope.namespace,scope.replicationEpoch,scope.streamIdentity,scope.base.relaySeq,scope.base.originId,scope.base.originSeq,
       checkpoint.throughRelaySeq,checkpoint.foldedEntries,checkpoint.state,checkpoint.stateSha256,checkpoint.currentPath,checkpoint.projection.projectedMarkdownSha256,
-      checkpoint.projection.projectedMarkdownByteLength,tailJson,momentsJson,checkpoint.momentsFromSeq,scope.policySha256,accounted,input.nowMs);
+      checkpoint.projection.projectedMarkdownByteLength,tailJson,momentsJson,checkpoint.momentsFromSeq,checkpoint.latestRename,
+      checkpoint.latestWrite?.relaySeq??null,checkpoint.latestWrite?.blobSha256??null,checkpoint.latestWrite?.byteLength??null,scope.policySha256,accounted,input.nowMs);
   const usage=storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+? WHERE workspace_id=?").run(charge,document.workspaceId);
   if(usage.changes!==1)throw new Error("Ordinary checkpoint usage is damaged.");
   return true;

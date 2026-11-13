@@ -103,7 +103,7 @@ export function readOrdinaryFoldPage(storage:StorageContext,scope:OrdinaryCheckp
       if(!(payload.payloadAfterContentKind==="text"&&typeof payload.momentId==="string"&&payload.momentId.length>0&&digest(payload.payloadAfterBlobSha256)&&
         integer(payload.payloadAfterByteLength)&&payload.payloadAfterByteLength<=2_097_152)){stopped=relaySeq;break;}
       if(payload.operation==="rename"){
-        if(!(typeof payload.payloadAfterPath==="string"&&payload.path===payload.payloadAfterPath&&payload.payloadBeforePath===path&&
+        if(!(typeof payload.payloadAfterPath==="string"&&payload.payloadAfterPath.length>0&&payload.path===payload.payloadAfterPath&&payload.payloadBeforePath===path&&
           payload.payloadBeforeContentKind==="text"&&payload.payloadBeforeBlobSha256===payload.payloadAfterBlobSha256)){stopped=relaySeq;break;}
         path=String(payload.payloadAfterPath);
         moments.push({relaySeq,operation:"rename",write:null});
@@ -154,9 +154,16 @@ export function foldedOrdinaryCheckpoint(page:Extract<OrdinaryFoldPage,{kind:"pa
   let moments=[...(prior?prior.moments:[]),...page.moments.map(moment=>({...moment,...start}))];
   let momentsFromSeq=prior?prior.momentsFromSeq:page.base.relaySeq;
   if(moments.length>CHECKPOINT_MOMENTS){momentsFromSeq=moments[moments.length-CHECKPOINT_MOMENTS-1]!.relaySeq+1;moments=moments.slice(-CHECKPOINT_MOMENTS);}
+  // Activation's reader takes the same latest rename and object write from the rows it walks.
+  let latestRename=prior?prior.latestRename:null,latestWrite=prior?prior.latestWrite:null;
+  for(const {relaySeq,operation,write} of page.moments){
+    if(operation==="rename")latestRename=relaySeq;
+    else if(write?.objectMoment)latestWrite={relaySeq,blobSha256:write.blobSha256,byteLength:write.byteLength};
+  }
   const state=rows.length>0||!prior?result!.state:prior.state;
   return {throughRelaySeq:page.throughRelaySeq,foldedEntries:(prior?prior.foldedEntries:1)+rows.length,state,
-    stateSha256:rows.length>0||!prior?result!.stateSha256:prior.stateSha256,currentPath:page.currentPath,projection:end,tail,moments,momentsFromSeq};
+    stateSha256:rows.length>0||!prior?result!.stateSha256:prior.stateSha256,currentPath:page.currentPath,projection:end,tail,moments,momentsFromSeq,
+    latestRename,latestWrite};
 }
 
 export type OrdinaryFoldValidator=(work:OrdinaryFoldWork,signal?:AbortSignal)=>Promise<OrdinaryFoldResult|{kind:"capacity-refused"}|{kind:"retry";reason:"admission-unavailable"}>;

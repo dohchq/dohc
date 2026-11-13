@@ -1,6 +1,6 @@
 import {createHash} from "node:crypto";
 import {afterAll, expect, it} from "vitest";
-import {closeTestStorages, testStorage} from "../testing";
+import {closeTestStorage, closeTestStorages, reopenTestStorage, storagePath, testStorage} from "../testing";
 import type {StorageContext} from "./context";
 import {checkpointPolicySha256, readOrdinaryCheckpoint, replaceOrdinaryCheckpoint, type OrdinaryCheckpoint, type OrdinaryCheckpointScope} from "./ordinaryActivationCheckpoint";
 
@@ -15,7 +15,7 @@ const checkpoint = (throughRelaySeq: number, text: string): OrdinaryCheckpoint =
     projection: {projectedMarkdownSha256: sha256(`${text}.md`), projectedMarkdownByteLength: text.length},
     tail: [{relaySeq: throughRelaySeq, originId: "typist", originSeq: throughRelaySeq - 1, ordinary: true, projection: null}],
     moments: [{relaySeq: 2, operation: "write", projectedMarkdownSha256: sha256(""), projectedMarkdownByteLength: 0,
-      write: {blobSha256: sha256("saved"), byteLength: 5, objectMoment: true}}], momentsFromSeq: throughRelaySeq};
+      write: {blobSha256: sha256("saved"), byteLength: 5, objectMoment: true}}], momentsFromSeq: throughRelaySeq, latestRename: null, latestWrite: null};
 };
 
 /** A workspace whose relay log holds `rows` rows, so the committed cursor is `rows`. */
@@ -27,7 +27,14 @@ async function relay(rows: number) {
   const usage = () => Number(context.db.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='workspace'").get()!.usage_bytes);
   const save = (expected: number | null, next: OrdinaryCheckpoint, at = scope) =>
     context.tx(() => replaceOrdinaryCheckpoint(context, {scope: at, expected, checkpoint: next, nowMs: 5}));
-  return {context, usage, save, read: (at = scope) => readOrdinaryCheckpoint(context, at)};
+  const read = (at = scope) => readOrdinaryCheckpoint(context, at);
+  /** Closes the relay database and reads the checkpoint through a new handle on the same file, as after a restart. */
+  const reopened = () => {
+    const path = storagePath(storage);
+    closeTestStorage(storage);
+    return readOrdinaryCheckpoint(reopenTestStorage(path) as unknown as StorageContext, scope);
+  };
+  return {context, usage, save, read, reopened};
 }
 
 it("a lineage keeps one checkpoint, advanced only from the position it was folded from", async () => {
@@ -81,5 +88,29 @@ it("a checkpoint whose state no longer matches its digest is not used", async ()
   const r = await relay(10);
   expect(r.save(null, checkpoint(4, "four"))).toBe(true);
   r.context.db.prepare("UPDATE sync_relay_ordinary_checkpoints SET state_bytes=?").run(new TextEncoder().encode("fore"));
+  expect(r.read()).toBeNull();
+});
+
+it("a checkpoint keeps its latest rename and object write, or none since its base, across a restart, and is charged for them", async () => {
+  const latest = {...checkpoint(9, "nine"), latestRename: 3, latestWrite: {relaySeq: 2, blobSha256: sha256("saved"), byteLength: 5}};
+  const none = await relay(10), kept = await relay(10), charged = (r: typeof none, next: OrdinaryCheckpoint) => {
+    const before = r.usage();
+    expect(r.save(null, next)).toBe(true);
+    return r.usage() - before;
+  };
+  // The kept write's digest is the only stored text the two differ by.
+  expect(charged(kept, latest) - charged(none, checkpoint(9, "nine"))).toBe(JSON.stringify(sha256("saved")).length - JSON.stringify(null).length);
+  expect(none.reopened()).toEqual(checkpoint(9, "nine"));
+  expect(kept.reopened()).toEqual(latest);
+});
+
+it.each([
+  ["a rename at the base", {latestRename: 1}],
+  ["a rename past the checkpoint", {latestRename: 10}],
+  ["a write past the checkpoint", {latestWrite: {relaySeq: 10, blobSha256: sha256("saved"), byteLength: 5}}],
+  ["a write without its digest", {latestWrite: {relaySeq: 2, blobSha256: null, byteLength: 5}}],
+] as const)("a checkpoint naming %s is not saved", async (_, change) => {
+  const r = await relay(10);
+  expect(() => r.save(null, {...checkpoint(9, "nine"), ...change} as unknown as OrdinaryCheckpoint)).toThrow("CHECK constraint failed");
   expect(r.read()).toBeNull();
 });

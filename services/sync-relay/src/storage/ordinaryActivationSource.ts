@@ -158,14 +158,14 @@ export function readOrdinaryActivationHistory(storage:StorageContext,input:Histo
   if(checkpoint){
     // The walk proved each move back to the path the checkpoint left; the fold proved the moves before it.
     if(provedPath!==checkpoint.currentPath)return {kind:"base"};
-    for(const kept of [...checkpoint.moments].reverse()){
-      if(kept.operation==="rename")latestMove??=kept.relaySeq;
-      else if(latestWrite===null&&kept.write?.objectMoment&&objectRow.get(document.workspaceId,document.objectId,kept.relaySeq,document.mainVersionId)){
-        latestWrite=kept.relaySeq;latestWriteBlobSha256=kept.write.blobSha256;latestWriteByteLength=kept.write.byteLength;
-      }
+    // The fold kept the latest rename and object write it folded, however many older moments it dropped.
+    latestMove??=checkpoint.latestRename;
+    const kept=checkpoint.latestWrite;
+    if(latestWrite===null&&kept){
+      // A write no longer recorded as this object's moment leaves the latest one to a read from the base.
+      if(!objectRow.get(document.workspaceId,document.objectId,kept.relaySeq,document.mainVersionId))return {kind:"base"};
+      latestWrite=kept.relaySeq;latestWriteBlobSha256=kept.blobSha256;latestWriteByteLength=kept.byteLength;
     }
-    // The checkpoint keeps its latest file moments; past those, only a read from the base knows the latest move and write.
-    if(checkpoint.momentsFromSeq>source.baseRelaySeq&&(latestMove===null||latestWrite===null))return {kind:"base"};
     // The base row itself, sized before it is read.
     const baseSize=storage.db.prepare("SELECT octet_length(payload_json) AS payload_bytes FROM sync_relay_log WHERE workspace_id=? AND relay_seq=?").get(document.workspaceId,source.baseRelaySeq);
     requireValue(baseSize&&integer(baseSize.payload_bytes),"Ordinary activation base history is unavailable.");

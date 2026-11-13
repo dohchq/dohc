@@ -2,13 +2,14 @@
 // not what its edit count costs. These tests drive the activation itself (`prepare`) with production settings, assert
 // that it accepts the note, and report how long it took, the longest time it held the relay's event loop, and the work
 // on the main thread inside its longest holds.
+import { createHash } from "node:crypto";
 import { afterEach, expect, it } from "vitest";
 import { createLiveValidationExecutor } from "./liveValidation.js";
 import type { StorageContext } from "./storage/context.js";
-import { readOrdinaryCheckpoint, type OrdinaryCheckpointScope } from "./storage/ordinaryActivationCheckpoint.js";
+import { CHECKPOINT_MOMENTS, readOrdinaryCheckpoint, type OrdinaryCheckpointScope } from "./storage/ordinaryActivationCheckpoint.js";
 import { foldOrdinaryCheckpointPages, ORDINARY_FOLD_PAGE_ROWS, ORDINARY_FOLD_RUN_PAGES, type OrdinaryFoldValidator } from "./storage/ordinaryActivationFold.js";
 import { ServiceActivationStaleCut } from "./storage/ordinaryActivationSource.js";
-import { ACTIVATION, typedRelayNote as seedTypedRelayNote, type TypedRelayNote } from "./testing/typedNotes.js";
+import { ACTIVATION, typedNote, typedRelayNote as seedTypedRelayNote, type TypedRelayNote } from "./testing/typedNotes.js";
 
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {for (const close of cleanup.splice(0).reverse()) await close();});
@@ -92,11 +93,11 @@ function staged(note: TypedRelayNote, validate: Validate) {
 }
 
 /** One activation with the self-hosted profile's settings, timed, with the event loop watched and its work staged. */
-async function activate(note: TypedRelayNote, validate = validation()) {
+async function activate(note: TypedRelayNote, validate = validation(), capture = note.capture) {
   const store = note.deployment.storage.createServiceActivationStore(note.deployment.history);
   const stages = staged(note, validate);
   const start = performance.now();
-  const {value: outcome, longestMs, holds, all} = await longestHold(() => store.prepare({capture: note.capture, host: note.host, registeredAtMs: 3,
+  const {value: outcome, longestMs, holds, all} = await longestHold(() => store.prepare({capture, host: note.host, registeredAtMs: 3,
     guard() {}, validate: stages.validate, bounds: {maxCaptureBytes: ACTIVATION.maxCaptureBytes, maxHistoryEntries: ACTIVATION.maxActivationHistoryEntries,
       maxBytesPerDrain: ACTIVATION.maxBytesPerDrain}}).then(value => value, (error: unknown) => error));
   return {outcome, elapsedMs: performance.now() - start, holdMs: longestMs, holds, all, spans: stages.spans, writes: stages.writes};
@@ -197,6 +198,68 @@ it("an activation whose lineage folds further between its read and its transacti
   expect((await activate(note, folding)).outcome).toBeInstanceOf(ServiceActivationStaleCut);
   expect(folded).toBe(true);
   expect((await activate(note, validate)).outcome).toEqual({document: note.document, replayed: false, completed: false});
+});
+
+const activated = (note: TypedRelayNote) => ({document: note.document, replayed: false, completed: false});
+const storageOf = (note: TypedRelayNote) => note.deployment.storage as unknown as StorageContext;
+/**
+ * A note typed past today's entry limit, so only a read that continues from a checkpoint can activate it, whose file was
+ * saved after its first 100 keystrokes more often than a checkpoint keeps file moments. `before` runs first, on the
+ * seeded note. Returns the note and its complete typing, which a capture names once any more rows are appended.
+ */
+async function savedOften(before?: (note: TypedRelayNote) => void) {
+  const longer = typedNote(ACTIVATION.maxActivationHistoryEntries + 100), note = await typedRelayNote(100);
+  before?.(note);
+  for (let save = 0; save <= CHECKPOINT_MOMENTS; save++) note.appendWrite(`saved-${save}`, note.end, true);
+  for (const update of longer.updates.slice(100)) note.appendUpdate(update);
+  return {note, longer};
+}
+
+it("a note saved more often than its checkpoint keeps file moments activates past today's entry limit", {timeout: 120_000}, async () => {
+  const validate = validation(), {note, longer} = await savedOften(), capture = note.captureAt(longer.fullState);
+  expect((await activate(note, validate, capture)).outcome).toEqual(activated(note));
+  const checkpoint = readOrdinaryCheckpoint(storageOf(note), lineageOf(note, validate))!;
+  expect(checkpoint.momentsFromSeq).toBeGreaterThan(capture.source.baseRelaySeq);
+  expect(checkpoint).toMatchObject({latestRename: null, latestWrite: {blobSha256: note.end.projectedMarkdownSha256}});
+});
+
+// The move back is older than every moment the checkpoint keeps, so the read takes it from the checkpoint and still
+// checks the saved file against the note's latest moment.
+it.each([
+  {file: "keeps the note's text", text: undefined},
+  {file: "holds other text", text: "Other text\n"},
+])("a note moved away and back before the moments its checkpoint keeps activates only while its saved file $file", {timeout: 120_000}, async ({text}) => {
+  const validate = validation(), {note, longer} = await savedOften(seeded => {
+    seeded.appendRename(seeded.path, "notes/elsewhere.md", seeded.end);
+    seeded.appendRename("notes/elsewhere.md", seeded.path, seeded.end);
+  });
+  const capture = note.captureAt(longer.fullState);
+  note.raw.prepare("INSERT INTO sync_relay_current_files(workspace_id,version_id,path,blob_sha256,content_kind,state_relay_seq) VALUES ('workspace','main',?,?,'text',?)")
+    .run(note.path, text === undefined ? note.end.projectedMarkdownSha256 : createHash("sha256").update(text).digest("hex"), capture.source.committedCursor);
+  const {outcome} = await activate(note, validate, capture);
+  if (text === undefined) expect(outcome).toEqual(activated(note));
+  else expect(outcome).toMatchObject({message: "Ordinary activation found a later ordinary file moment with a divergent projection."});
+});
+
+// The relay saves a fold's checkpoint before the activation registers. A relay that stops between the two, and starts
+// again, continues from that checkpoint and validates no fold page twice.
+it.each([false, true])("an activation that stopped after its fold saved continues from the saved checkpoint, restarted: %s", {timeout: 120_000}, async restarted => {
+  const validate = validation(), {note, longer} = await savedOften(), capture = note.captureAt(longer.fullState), scope = lineageOf(note, validate);
+  let pages = 0;
+  const counted = (stop: boolean): Validate => Object.assign(async (...[work, signal]: Parameters<Validate>) => {
+    if (stop && "cut" in work) throw new Error("The relay stopped before it registered the activation.");
+    if ("page" in work) pages++;
+    return validate(work, signal);
+  }, validate);
+  expect((await activate(note, counted(true), capture)).outcome).toMatchObject({message: "The relay stopped before it registered the activation."});
+  expect(pages).toBeGreaterThan(0);
+  const saved = readOrdinaryCheckpoint(storageOf(note), scope)!;
+  expect(saved).toMatchObject({throughRelaySeq: capture.source.committedCursor, latestWrite: {blobSha256: note.end.projectedMarkdownSha256}});
+  if (restarted) note.reopen();
+  expect(readOrdinaryCheckpoint(storageOf(note), scope)).toEqual(saved);
+  pages = 0;
+  expect((await activate(note, counted(false), capture)).outcome).toEqual(activated(note));
+  expect(pages).toBe(0);
 });
 
 // The plan's bars, 1 s to activate and 100 ms of held event loop, are reported here rather than asserted: a shared

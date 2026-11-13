@@ -7,6 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 import * as Y from "yjs";
 import type { NativeOwnerActivation } from "@dohc/workspace-engine-client/daemon";
 import { openEmptyRelayTestDeployment } from "./emptyRelayDeployment.js";
+import { openRelayDeployment } from "../relayDeployment.js";
 import { selfHostLiveProfile } from "../selfHostLiveProfile.js";
 import { markdownToYDoc } from "../../../../packages/ydoc-projection/src/import-export.js";
 import { createLiveMarkdownRegistrationValidator } from "../../../../packages/ydoc-projection/src/liveDocumentValidation.js";
@@ -49,12 +50,13 @@ export function typedNote(keystrokes: number) {
  * `cleanup` receives the work that closes and removes it.
  */
 export async function typedRelayNote(keystrokes: number, cleanup: (close: () => Promise<void>) => void) {
-  const root = await mkdtemp(join(tmpdir(), "activation-typed-history-"));
-  const deployment = openEmptyRelayTestDeployment({configPath: join(root, "deployment.json"), relayPath: join(root, "relay", "relay.sqlite"),
-    continuityDirectory: join(root, "continuity")});
+  const root = await mkdtemp(join(tmpdir(), "activation-typed-history-")), configPath = join(root, "deployment.json");
+  let deployment = openEmptyRelayTestDeployment({configPath, relayPath: join(root, "relay", "relay.sqlite"), continuityDirectory: join(root, "continuity")});
   deployment.storage.provisionLiveHostControl({mode: "service", hostId: "service", updatedAtMs: 1, guard() {}});
   const raw = new DatabaseSync(join(root, "relay", "relay.sqlite"));
   cleanup(async () => {raw.close(); deployment.storage.close(); await rm(root, {recursive: true, force: true});});
+  /** Closes the relay database and opens the same files again, as a relay restart does. */
+  const reopen = () => {deployment.storage.close(); deployment = openRelayDeployment(configPath);};
 
   const note = typedNote(keystrokes), path = "notes/typed.md", origin = "typist";
   const document = {workspaceId: "workspace", mainVersionId: "main" as const, objectId: "object", lineageClaimId: sha256(note.baseline)};
@@ -78,7 +80,32 @@ export async function typedRelayNote(keystrokes: number, cleanup: (close: () => 
     log.run(origin, originSeq, "moment.append", JSON.stringify({versionId: "main", objectId: document.objectId, ...payload}), originSeq);
     return relaySeq(originSeq++);
   };
+  type Text = {projectedMarkdownSha256: string; projectedMarkdownByteLength: number};
+  /**
+   * Appends a write of the note's file with `text`, with the fields the engine's own writes carry, and returns its relay
+   * position. With `objectMoment` the relay also records it as the object's moment, as it does for an accepted write.
+   */
+  const appendWrite = (momentId: string, text: Text, objectMoment = false) => {
+    const at = appendMoment({momentId, path, operation: "write", payloadAfterPath: path, payloadAfterContentKind: "text",
+      payloadAfterBlobSha256: text.projectedMarkdownSha256, payloadAfterByteLength: text.projectedMarkdownByteLength,
+      recordedAtMs: 0, metadata: {}, beforePresent: true});
+    if (objectMoment) raw.prepare(`INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,
+      byte_length,recorded_at_ms) VALUES ('workspace',?,?,?,'main',?,?,'text',?,0)`).run(document.objectId, at, momentId, path, text.projectedMarkdownSha256, text.projectedMarkdownByteLength);
+    return at;
+  };
+  /** Appends a move of the note from `from` to `to` with its text unchanged, recorded as the object's moment at `to`, and returns its relay position. */
+  const appendRename = (from: string, to: string, text: Text) => {
+    const momentId = `move-${originSeq}`;
+    const at = appendMoment({momentId, path: to, operation: "rename", payloadBeforePath: from, payloadAfterPath: to,
+      payloadBeforeContentKind: "text", payloadAfterContentKind: "text", payloadBeforeBlobSha256: text.projectedMarkdownSha256,
+      payloadAfterBlobSha256: text.projectedMarkdownSha256, payloadAfterByteLength: text.projectedMarkdownByteLength});
+    raw.prepare(`INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,
+      byte_length,recorded_at_ms) VALUES ('workspace',?,?,?,'main',?,?,'text',?,0)`).run(document.objectId, at, momentId, to, text.projectedMarkdownSha256, text.projectedMarkdownByteLength);
+    return at;
+  };
   const relaySeq = (seq: number) => Number(raw.prepare("SELECT relay_seq FROM sync_relay_log WHERE origin_id=? AND origin_seq=?").get(origin, seq)!.relay_seq);
+  /** The engine's name for the moment of the typist's Y.Doc row `seq`. */
+  const named = (seq: number) => `moment-ydoc-apply-${sha256(["workspace", "main", document.objectId, path, origin, String(seq)].join("\0"))}`;
   raw.exec("BEGIN");
   try {
     raw.exec("INSERT INTO sync_relay_workspaces(workspace_id,owner_user_id,created_at_ms,replication_epoch,stream_identity) VALUES ('workspace','owner',0,'epoch','stream')");
@@ -96,11 +123,22 @@ export async function typedRelayNote(keystrokes: number, cleanup: (close: () => 
     baselineBytes: Buffer.from(note.baseline), fullState: Buffer.from(note.fullState),
     source: {version: 1, relayDatabaseNamespace: deployment.history.namespace, ...document, currentPath: path, replicationEpoch: "epoch",
       streamIdentity: "stream", committedCursor: relaySeq(last), baseOriginId: origin, baseOriginSeq: 1, baseRelaySeq: relaySeq(1),
-      sourceMomentId: `moment-ydoc-apply-${sha256(["workspace", "main", document.objectId, path, origin, String(last)].join("\0"))}`,
+      sourceMomentId: named(last),
       sourceDigest: end.evidence.projectedMarkdownSha256, sourceByteLength: end.evidence.projectedMarkdownByteLength,
       nativeHeadSequence: last, fullStateDigest: sha256(note.fullState), fullStateByteLength: note.fullState.length}};
   const host = {mode: "service" as const, hostId: "service", hostEpoch: deployment.storage.getLiveHostControl()!.hostEpoch,
     instanceId: "instance", connectionId: "connection"};
-  return {deployment, document, capture, host, note, path, raw, appendUpdate, appendMoment, end: end.evidence};
+  /** The owner's capture once rows were appended: `fullState`, named after the typist's last Y.Doc row, at the relay's cursor. */
+  const captureAt = (fullState: Uint8Array): NativeOwnerActivation => {
+    const projected = project({document, currentPath: path, checkpoint: fullState});
+    if (projected.kind !== "accepted") throw new Error("Invalid typed note capture.");
+    const head = Number(raw.prepare("SELECT max(origin_seq) AS seq FROM sync_relay_log WHERE origin_id=? AND op_kind='ydoc.update'").get(origin)!.seq);
+    return {...capture, fullState: Buffer.from(fullState), source: {...capture.source,
+      committedCursor: Number(raw.prepare("SELECT max(relay_seq) AS cursor FROM sync_relay_log").get()!.cursor), sourceMomentId: named(head),
+      sourceDigest: projected.evidence.projectedMarkdownSha256, sourceByteLength: projected.evidence.projectedMarkdownByteLength,
+      nativeHeadSequence: head, fullStateDigest: sha256(fullState), fullStateByteLength: fullState.length}};
+  };
+  return {get deployment() {return deployment;}, reopen, document, capture, captureAt, host, note, path, raw, appendUpdate, appendMoment, appendWrite, appendRename,
+    end: end.evidence};
 }
 export type TypedRelayNote = Awaited<ReturnType<typeof typedRelayNote>>;

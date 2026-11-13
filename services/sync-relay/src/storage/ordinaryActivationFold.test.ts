@@ -1,7 +1,7 @@
 import { afterEach, expect, it } from "vitest";
 import * as Y from "yjs";
 import type { StorageContext } from "./context";
-import { checkpointPolicySha256, readOrdinaryCheckpoint, type OrdinaryCheckpointScope } from "./ordinaryActivationCheckpoint";
+import { CHECKPOINT_MOMENTS, checkpointPolicySha256, readOrdinaryCheckpoint, type OrdinaryCheckpointScope } from "./ordinaryActivationCheckpoint";
 import { foldOrdinaryCheckpointPages, type OrdinaryFoldBounds, type OrdinaryFoldValidator } from "./ordinaryActivationFold";
 import { validateOrdinaryActivation } from "./ordinaryActivationValidation";
 import { ACTIVATION, typedNote, typedRelayNote, type TypedRelayNote } from "../testing/typedNotes";
@@ -68,6 +68,26 @@ it("a file moment ends a page, and the checkpoint keeps the projection the momen
   expect(checkpoint.moments).toEqual([{relaySeq: moment, operation: "write", ...projection(before),
     write: {blobSha256: before.projectedMarkdownSha256, byteLength: before.projectedMarkdownByteLength, objectMoment: false}}]);
   expect(checkpoint.stateSha256).toBe(replayed({...note, note: longer}, 100).stateUpdateSha256);
+});
+
+it("the fold stops at a rename to an empty path, as activation's reader refuses the move back from it", async () => {
+  const note = await seed(20), f = folding(note, {pageRows: 128, pageBytes: ACTIVATION.maxBytesPerDrain});
+  const renamed = note.appendRename(note.path, "", replayed(note, 20));
+  expect(await f.all()).toEqual({kind: "blocked", relaySeq: renamed});
+  expect(f.read()!.throughRelaySeq).toBe(renamed - 1);
+});
+
+it("the checkpoint keeps its latest rename and object write after it drops the moments before them", async () => {
+  const note = await seed(20), f = folding(note, {pageRows: 1_024, pageBytes: ACTIVATION.maxBytesPerDrain}), text = replayed(note, 20);
+  note.appendRename(note.path, "notes/elsewhere.md", text);
+  const back = note.appendRename("notes/elsewhere.md", note.path, text), saved = note.appendWrite("saved", text, true);
+  for (let later = 0; later < CHECKPOINT_MOMENTS; later++) note.appendWrite(`later-${later}`, text);
+  expect(await f.all()).toEqual({kind: "current"});
+  const checkpoint = f.read()!;
+  expect(checkpoint.moments).toHaveLength(CHECKPOINT_MOMENTS);
+  expect(checkpoint.momentsFromSeq).toBe(saved + 1);
+  expect(checkpoint).toMatchObject({latestRename: back,
+    latestWrite: {relaySeq: saved, blobSha256: text.projectedMarkdownSha256, byteLength: text.projectedMarkdownByteLength}});
 });
 
 it("the fold stops before a row activation would refuse, and never folds past it", async () => {
