@@ -2,7 +2,9 @@ import { afterEach, expect, it } from "vitest";
 import { closeTestStorage, closeTestStorages, inspectDatabase, reopenTestStorage, storagePath, testStorage } from "../testing";
 import type { SyncRelayStorage } from "../storage";
 import { initializeAccountDeletion, purgeAccountRows } from "./accountDeletion";
-import { CHAT_WAKE_CLAIM_MS, CHAT_WAKE_CONFIRM_MS, CHAT_WAKE_KEEP_MS, chatWakeId, type ChatWakeTarget, type OperationWakeChange } from "./chatWakes";
+import {
+  CHAT_RUNNER_LEASE_MS, CHAT_WAKE_CLAIM_MS, CHAT_WAKE_CONFIRM_MS, CHAT_WAKE_KEEP_MS, chatWakeId, type ChatWakeTarget, type OperationWakeChange,
+} from "./chatWakes";
 import type { StorageContext } from "./context";
 
 afterEach(closeTestStorages);
@@ -74,7 +76,7 @@ it("creates the chat wake tables on an older relay once, and refuses an unmarked
   expect(first).toEqual({ migration_id: MARKER, completed_at_ms: expect.any(Number) });
   // Marked, it is checked and kept as it is.
   const reopened = reopenTestStorage(path);
-  expect(reopened.enabledChatRunners({ accountId: "ana", workspaceId: "trip" })).toHaveLength(1);
+  expect(reopened.enabledChatRunners({ accountId: "ana", workspaceId: "trip", nowMs: NOW })).toHaveLength(1);
   closeTestStorage(reopened);
   expect(marker()).toEqual(first);
 
@@ -264,4 +266,29 @@ it("retries a wake that didn't start or wasn't confirmed once per generation, bo
   publish(storage, "op-other", "message-other", [target("claude", "mac")], { workspaceId: "other" });
   expect(retry("retry-4", wakeOf("message-other", "claude", 1, "other"))).toEqual({ kind: "missing" });
   expect(retry("retry-5", source, "trip", "ben")).toEqual({ kind: "missing" });
+});
+
+it("names a computer as a wake target only while its declaration's lease holds, and starts the lease again on every declaration", async () => {
+  const storage = await relay();
+  const declare = (installId: string, nowMs: number, displayName = "Claude") => storage.replaceChatRunners({
+    accountId: "ana", workspaceId: "trip", installId, computerLabel: installId,
+    runners: [{ agentId: "default", handle: displayName.toLowerCase(), displayName, enabled: true }], nowMs,
+  });
+  const targets = (nowMs: number) =>
+    storage.enabledChatRunners({ accountId: "ana", workspaceId: "trip", nowMs }).map((runner) => runner.installId);
+  declare("mac", NOW);
+  declare("laptop", NOW);
+  // The boundary: a lease holds up to, not at, CHAT_RUNNER_LEASE_MS after its declaration.
+  expect(targets(NOW + CHAT_RUNNER_LEASE_MS - 1)).toEqual(["laptop", "mac"]);
+  expect(targets(NOW + CHAT_RUNNER_LEASE_MS)).toEqual([]);
+  // The same declaration again starts the lease again: the refresh a signed-in computer sends about daily.
+  declare("mac", NOW + CHAT_RUNNER_LEASE_MS - 1);
+  const updated = (storage as StorageContext).db.prepare(
+    "SELECT install_id, updated_at_ms FROM sync_relay_chat_runners WHERE install_id = 'mac'").get();
+  expect(updated).toEqual({ install_id: "mac", updated_at_ms: NOW + CHAT_RUNNER_LEASE_MS - 1 });
+  expect(targets(NOW + CHAT_RUNNER_LEASE_MS)).toEqual(["mac"]);
+  // An expired computer's rows stay, read as absent, until it declares again.
+  expect(count(storage, "sync_relay_chat_runners")).toBe(2);
+  declare("laptop", NOW + 2 * CHAT_RUNNER_LEASE_MS, "Nova");
+  expect(targets(NOW + 2 * CHAT_RUNNER_LEASE_MS).sort()).toEqual(["laptop"]);
 });

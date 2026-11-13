@@ -17,9 +17,18 @@ import type { ChatWakeSession } from "./chatWakeLifetime";
 // another's. The ledger names every workspace that may still hold a
 // declaration, so a withdrawal that fails is tried again the next time that
 // account signs in here.
+//
+// The relay names a computer as a wake target only for a lease after its last
+// declaration (the relay's CHAT_RUNNER_LEASE_MS, 3 days). So while a session
+// publishes, it declares everything again about daily, past what the server
+// already confirmed. That keeps a running computer's lease, and repairs a
+// declaration an older, late request overwrote. A computer that quits after
+// signing out, or never comes back, drops out when its lease ends.
 
 /** How long a sign-out's or account change's withdrawals may take, all together. */
 export const CHAT_RUNNER_WITHDRAW_MS = 15_000;
+/** How often a publishing session declares everything again, well inside the relay's lease. */
+export const CHAT_RUNNER_REFRESH_MS = 24 * 60 * 60 * 1000;
 
 export interface ChatRunnerRosterDeps {
   ledger: ChatRunnerLedger;
@@ -28,7 +37,10 @@ export interface ChatRunnerRosterDeps {
   workspaces(session: ChatWakeSession): readonly string[];
   agents(): Promise<readonly Pick<Agent, "id" | "name" | "enabled" | "launch">[]>;
   computerLabel(): string;
+  /** A retry's backoff. Resolves after `ms`, or when `signal` aborts. */
   sleep(ms: number, signal: AbortSignal): Promise<void>;
+  /** The wait between refreshes, apart from `sleep` so a test can hold one and not the other. Same contract. */
+  refreshSleep(ms: number, signal: AbortSignal): Promise<void>;
   backoffMs(failures: number): number;
   /** A signal that aborts after `ms`. */
   timeout(ms: number): AbortSignal;
@@ -38,8 +50,8 @@ export interface ChatRunnerRosterDeps {
   accepted(workspaceId: string): void;
   /** The ledger can't be read, so nothing is declared or withdrawn: the account's workspaces show a row. */
   ledgerUnreadable(): void;
-  /** The ledger read: takes that row back. */
-  ledgerReadable(): void;
+  /** Takes that row back: the ledger read, or the account it was shown for left. */
+  clearLedgerUnreadable(): void;
   log(error: unknown): void;
 }
 
@@ -48,7 +60,7 @@ export interface ChatRunnerRoster {
   reconcile(session: ChatWakeSession): Promise<void>;
   /** Withdraws everything this install declared under the session's account, with its token, within CHAT_RUNNER_WITHDRAW_MS. */
   withdraw(session: ChatWakeSession): Promise<void>;
-  /** Quit: cancels what is in flight and starts nothing more. Declarations stay. */
+  /** Quit: cancels what is in flight and the refresh, and starts nothing more. Declarations stay. */
   stop(): Promise<void>;
 }
 
@@ -68,6 +80,10 @@ export function createChatRunnerRoster(deps: ChatRunnerRosterDeps): ChatRunnerRo
   // The one session owed a retry, its failures in a row, and its backoff while it sleeps. Another session's
   // failure replaces it and starts its count again, so an old session's backoff never stands in for a current one.
   let owed: { session: ChatWakeSession; failures: number; sleep: AbortController | null } | null = null;
+  // The one session that refreshes, and how to end its wait. A pass for another session takes it over.
+  let refreshing: { session: ChatWakeSession; stop: AbortController } | null = null;
+  // The session whose next pass declares everything again, past `sent`.
+  let refreshDue: ChatWakeSession | null = null;
 
   const keyOf = (entry: ChatRunnerLedgerEntry) => JSON.stringify([entry.account, entry.installId, entry.workspaceId]);
   const withdrawal = (session: ChatWakeSession, computerLabel: string): ChatRunnerDeclaration =>
@@ -91,12 +107,12 @@ export function createChatRunnerRoster(deps: ChatRunnerRosterDeps): ChatRunnerRo
   // Sends one declaration and keeps the ledger true to it. Answers whether the step is settled.
   async function put(
     session: ChatWakeSession, client: ChatWakeClient, entry: ChatRunnerLedgerEntry,
-    declaration: ChatRunnerDeclaration, signal: AbortSignal,
+    declaration: ChatRunnerDeclaration, signal: AbortSignal, refresh: boolean,
   ): Promise<boolean> {
     const key = keyOf(entry);
     const body = JSON.stringify(declaration);
     const declaring = declaration.runners.length > 0;
-    if (sent.get(key) === body) {
+    if (!refresh && sent.get(key) === body) {
       // The server already confirmed this withdrawal; only the ledger row may be left, if removing it failed.
       if (!declaring) await deps.ledger.remove(entry);
       return true;
@@ -151,6 +167,10 @@ export function createChatRunnerRoster(deps: ChatRunnerRosterDeps): ChatRunnerRo
 
   // Answers whether every step settled. Throws when the settings or the ledger can't be read, before anything goes out.
   async function pass(session: ChatWakeSession): Promise<boolean> {
+    keepFresh(session);
+    // Taken when the pass starts: a failed refresh's retry sends again only what failed, which `sent` no longer holds.
+    const refresh = refreshDue === session;
+    if (refresh) refreshDue = null;
     const { scope: account, installId } = session.account;
     const client = deps.client(session);
     const computerLabel = deps.computerLabel();
@@ -158,7 +178,7 @@ export function createChatRunnerRoster(deps: ChatRunnerRosterDeps): ChatRunnerRo
     const wanted = new Set(deps.workspaces(session));
     const ledgered = new Set((await deps.ledger.list())
       .filter((entry) => entry.account === account && entry.installId === installId).map((entry) => entry.workspaceId));
-    report(() => deps.ledgerReadable());
+    report(() => deps.clearLedgerUnreadable());
     let settled = true;
     // A workspace with a refusal row is checked too, so its row goes when it stops syncing here.
     for (const workspaceId of new Set([...wanted, ...ledgered, ...rows.keys()])) {
@@ -171,7 +191,7 @@ export function createChatRunnerRoster(deps: ChatRunnerRosterDeps): ChatRunnerRo
       // Nothing declared and nothing to take back.
       if (declaration.runners.length === 0 && !ledgered.has(workspaceId)) continue;
       try {
-        if (!(await put(session, client, entry, declaration, abort.signal))) settled = false;
+        if (!(await put(session, client, entry, declaration, abort.signal, refresh))) settled = false;
       } catch (error) {
         failed(error);
         settled = false;
@@ -197,6 +217,30 @@ export function createChatRunnerRoster(deps: ChatRunnerRosterDeps): ChatRunnerRo
     });
   }
 
+  // Every CHAT_RUNNER_REFRESH_MS while the session is current, a pass that declares everything again, on the queue
+  // with the rest and with the same retry. It ends with the session, when another session takes over, or at stop.
+  function keepFresh(session: ChatWakeSession): void {
+    if (refreshing?.session === session) return;
+    refreshing?.stop.abort();
+    const mine = { session, stop: new AbortController() };
+    refreshing = mine;
+    const signal = AbortSignal.any([abort.signal, mine.stop.signal]);
+    void (async () => {
+      for (;;) {
+        await deps.refreshSleep(CHAT_RUNNER_REFRESH_MS, signal);
+        if (signal.aborted || !session.isCurrent()) break;
+        refreshDue = session;
+        await roster.reconcile(session);
+      }
+      if (refreshing === mine) refreshing = null;
+    })().catch(deps.log);
+  }
+  function endRefresh(session: ChatWakeSession): void {
+    if (refreshing?.session !== session) return;
+    refreshing.stop.abort();
+    refreshing = null;
+  }
+
   const roster: ChatRunnerRoster = {
     reconcile(session) {
       if (abort.signal.aborted) return Promise.resolve();
@@ -214,9 +258,12 @@ export function createChatRunnerRoster(deps: ChatRunnerRosterDeps): ChatRunnerRo
     withdraw(session) {
       // Anything queued after this belongs to the next session.
       pending = null;
+      endRefresh(session);
       return serial(async () => {
-        // Its rows belong to the account that left.
+        // Its rows belong to the account that left: the refusals, and an unreadable ledger's, which the next
+        // account's first pass shows again if the file still can't be read.
         for (const workspaceId of [...rows.keys()]) show(workspaceId, null);
+        report(() => deps.clearLedgerUnreadable());
         const signal = AbortSignal.any([abort.signal, deps.timeout(CHAT_RUNNER_WITHDRAW_MS)]);
         const { scope: account, installId } = session.account;
         const client = deps.client(session);

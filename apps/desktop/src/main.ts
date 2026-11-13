@@ -1212,12 +1212,13 @@ const chatRunners = createChatRunnerRoster({
     return isChatWakeLine(label, CHAT_RUNNER_COMPUTER_LABEL_MAX_CHARS) ? label : "This computer";
   },
   sleep: sleepUnlessAborted,
+  refreshSleep: sleepUnlessAborted,
   backoffMs: chatWakeBackoffMs,
   timeout: (ms) => AbortSignal.timeout(ms),
   refused: (workspaceId, refusal) => chatWakeNotices.refused(workspaceId, refusal),
   accepted: (workspaceId) => chatWakeNotices.accepted(workspaceId),
   ledgerUnreadable: () => chatWakeNotices.ledgerUnreadable(),
-  ledgerReadable: () => chatWakeNotices.ledgerReadable(),
+  clearLedgerUnreadable: () => chatWakeNotices.clearLedgerUnreadable(),
   log: (error) => console.error("[desktop] chat runners:", error),
 });
 const chatWakes = createChatWakeLifetime({

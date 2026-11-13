@@ -72,7 +72,11 @@ export type ChatWakeView = z.infer<typeof ChatWakeView>;
 export const WaitingChatWake = z.strictObject({ ...viewShape, state: z.literal("waiting"), candidate: ChatWakeCandidate });
 export type WaitingChatWake = z.infer<typeof WaitingChatWake>;
 
-/** `PUT /sync/workspaces/:workspaceId/runners`. The relay derives each handle from the display name. */
+/**
+ * `PUT /sync/workspaces/:workspaceId/runners`. The relay derives each handle from the display name. A declaration
+ * names its computer as a wake target for a lease of 3 days (the relay's CHAT_RUNNER_LEASE_MS), which every PUT
+ * starts again, the same list included; a signed-in desktop sends it again about daily.
+ */
 export interface ChatRunnerDeclaration {
   installId: string;
   computerLabel: string;

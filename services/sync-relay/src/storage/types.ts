@@ -765,7 +765,7 @@ export interface SyncRelayStorage {
   tombstoneSettledAccountOperations(nowMs: number): number;
   /** Replaces one computer's declared agents in a workspace the account owns. False, writing nothing, when it doesn't own it. */
   replaceChatRunners(input: Parameters<typeof import("./chatWakes").replaceChatRunners>[1]): boolean;
-  enabledChatRunners(input: { accountId: string; workspaceId: string }): import("./chatWakes").ChatRunner[];
+  enabledChatRunners(input: { accountId: string; workspaceId: string; nowMs: number }): import("./chatWakes").ChatRunner[];
   chatWakeHead(accountId: string): number;
   listWaitingChatWakes(input: Parameters<typeof import("./chatWakes").listWaitingChatWakes>[1]): ReturnType<typeof import("./chatWakes").listWaitingChatWakes>;
   claimChatWake(input: Parameters<typeof import("./chatWakes").claimChatWake>[1]): ReturnType<typeof import("./chatWakes").claimChatWake>;

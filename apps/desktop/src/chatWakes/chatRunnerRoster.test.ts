@@ -1,12 +1,12 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChatRunnerDeclaration } from "@dohc/workspace-contracts/chat-wakes";
 import { RelayUnauthorizedError } from "@dohc/workspace-contracts/relay";
 import type { Agent } from "../settings/userSettings";
 import { deferred } from "../testing/deferred";
 import { ChatWakeBusyError, ChatWakeMissingError, type ChatWakeClient } from "./chatWakeClient";
 import { ChatRunnerLedgerUnreadableError, type ChatRunnerLedger, type ChatRunnerLedgerEntry } from "./chatRunnerLedger";
-import { CHAT_RUNNER_WITHDRAW_MS, createChatRunnerRoster, type ChatRunnerRosterDeps } from "./chatRunnerRoster";
-import type { ChatWakeSession } from "./chatWakeLifetime";
+import { CHAT_RUNNER_REFRESH_MS, CHAT_RUNNER_WITHDRAW_MS, createChatRunnerRoster, type ChatRunnerRosterDeps } from "./chatRunnerRoster";
+import { sleepUnlessAborted, type ChatWakeSession } from "./chatWakeLifetime";
 
 // The server, the ledger, and settings are fakes. A held or hanging PUT waits
 // on a gate or its signal, never on time.
@@ -162,12 +162,14 @@ function setup(over: Partial<ChatRunnerRosterDeps> = {}) {
     computerLabel: () => "Mac",
     // A retry waits until the roster stops, unless a test passes its own.
     sleep: (_ms, signal) => new Promise<void>((resolve) => { signal.addEventListener("abort", () => resolve(), { once: true }); }),
+    // The daily refresh waits until the roster stops, unless a test passes its own.
+    refreshSleep: (_ms, signal) => new Promise<void>((resolve) => { signal.addEventListener("abort", () => resolve(), { once: true }); }),
     backoffMs: (failures) => 1_000 * failures,
     timeout: vi.fn(() => deadline.signal),
     refused: vi.fn(),
     accepted: vi.fn(),
     ledgerUnreadable: vi.fn(),
-    ledgerReadable: vi.fn(),
+    clearLedgerUnreadable: vi.fn(),
     log: vi.fn(),
     ...over,
   };
@@ -344,7 +346,7 @@ describe("publishing this computer's agents", () => {
     // The person repairs the file and chooses Try again.
     r.ledger.state.listFails = null;
     await r.roster.reconcile(a);
-    expect(r.deps.ledgerReadable).toHaveBeenCalled();
+    expect(r.deps.clearLedgerUnreadable).toHaveBeenCalled();
     expect(r.server.row("A", "ws1")).toEqual(CLAUDE_ON);
     // That pass settled, so the sleeping backoff was called off.
     expect(backoffs.sleeps[1]!.signal.aborted).toBe(true);
@@ -488,5 +490,114 @@ describe("withdrawing an account that left", () => {
     await r.roster.reconcile(a);
     await r.roster.withdraw(a);
     expect(r.deps.accepted).toHaveBeenCalledExactlyOnceWith("ws1");
+  });
+});
+
+/** The production sleep on the (fake) timer clock, counting how many waits have started. */
+function countedSleep() {
+  let started = 0;
+  const watchers: Array<{ at: number; resolve: () => void }> = [];
+  return {
+    sleep: (ms: number, signal: AbortSignal) => {
+      started += 1;
+      for (const watcher of [...watchers]) {
+        if (started < watcher.at) continue;
+        watchers.splice(watchers.indexOf(watcher), 1);
+        watcher.resolve();
+      }
+      return sleepUnlessAborted(ms, signal);
+    },
+    /** Resolves once `count` waits have started, so their timers are on the clock. */
+    until: (count: number) => started >= count ? Promise.resolve()
+      : new Promise<void>((resolve) => { watchers.push({ at: count, resolve }); }),
+  };
+}
+
+describe("keeping the relay's lease", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("declares everything again about daily, past what the server confirmed, and stops when its session ends", async () => {
+    vi.useFakeTimers();
+    const refreshes = countedSleep();
+    const r = setup({ refreshSleep: refreshes.sleep });
+    const a = session("A");
+    await r.roster.reconcile(a);
+    expect(r.server.puts).toHaveLength(2);
+    await refreshes.until(1);
+    await vi.advanceTimersByTimeAsync(CHAT_RUNNER_REFRESH_MS - 1);
+    expect(r.server.puts).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(1);
+    await r.server.untilDone(4);
+    // The same declarations again: the relay starts each lease again.
+    expect(r.server.puts.slice(2)).toEqual(r.server.puts.slice(0, 2));
+    await refreshes.until(2);
+    await vi.advanceTimersByTimeAsync(CHAT_RUNNER_REFRESH_MS);
+    await r.server.untilDone(6);
+    await refreshes.until(3);
+    // An ordinary reconciliation in between still sends nothing the server confirmed.
+    await r.roster.reconcile(a);
+    expect(r.server.puts).toHaveLength(6);
+    a.end();
+    await vi.advanceTimersByTimeAsync(2 * CHAT_RUNNER_REFRESH_MS);
+    expect(r.server.puts).toHaveLength(6);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("ends a session's refresh when it is withdrawn, starts the next session's, and ends that at stop", async () => {
+    vi.useFakeTimers();
+    const refreshes = countedSleep();
+    const r = setup({ refreshSleep: refreshes.sleep });
+    r.owned.B = ["ws9"];
+    const a = session("A");
+    await r.roster.reconcile(a);
+    a.end();
+    await r.roster.withdraw(a);
+    const b = session("B");
+    await r.roster.reconcile(b);
+    await refreshes.until(2);
+    // A's wait was called off with it; only B's is on the clock.
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(CHAT_RUNNER_REFRESH_MS);
+    // A's two declarations, A's two withdrawals, B's declaration, and B's refresh.
+    await r.server.untilDone(6);
+    expect(r.server.puts.at(-1)).toEqual({ scope: "B", workspaceId: "ws9", declaration: declared(CLAUDE_ON) });
+    expect(r.server.puts.filter((put) => put.scope === "A")).toHaveLength(4);
+    await r.roster.stop();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("retries a refresh the server was too busy for, with the same backoff", async () => {
+    vi.useFakeTimers();
+    const refreshes = countedSleep();
+    const backoffs = countedSleep();
+    const r = setup({ refreshSleep: refreshes.sleep, sleep: backoffs.sleep });
+    r.owned.A = ["ws1"];
+    await r.roster.reconcile(session("A"));
+    r.server.refuse(new ChatWakeBusyError());
+    await refreshes.until(1);
+    await vi.advanceTimersByTimeAsync(CHAT_RUNNER_REFRESH_MS);
+    await backoffs.until(1);
+    expect(r.server.puts).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await r.server.untilDone(2);
+    expect(r.server.puts).toHaveLength(3);
+    expect(r.server.row("A", "ws1")).toEqual(CLAUDE_ON);
+  });
+});
+
+describe("an unreadable ledger's row", () => {
+  it("is taken back when its account leaves, though the file still can't be read", async () => {
+    const r = setup();
+    const a = session("A");
+    r.ledger.state.listFails = { error: new ChatRunnerLedgerUnreadableError(), once: false };
+    await r.roster.reconcile(a);
+    expect(r.deps.ledgerUnreadable).toHaveBeenCalledOnce();
+    expect(r.deps.clearLedgerUnreadable).not.toHaveBeenCalled();
+    a.end();
+    await r.roster.withdraw(a);
+    expect(r.deps.clearLedgerUnreadable).toHaveBeenCalledOnce();
+    expect(r.server.puts).toEqual([]);
   });
 });

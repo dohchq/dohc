@@ -118,6 +118,8 @@ export function createAccountOperationRoute(options: {
       const { result, cursor } = await runAccountWrite({ storage, copies }, {
         workspaceId: route.workspaceId, write: parsed, visitor, authorize,
         writer: { accountId: caller.userId, displayName, serverUrl: options.serverUrl },
+        // One clock with the runner declarations, so their leases read the same here.
+        nowMs: () => options.nowMs(),
       });
       return jsonResponse({ ok: true, result, cursor });
     }

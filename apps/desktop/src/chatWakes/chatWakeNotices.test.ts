@@ -89,7 +89,7 @@ describe("an unreadable declarations ledger", () => {
     notices.ledgerUnreadable();
     expect(deps.report).toHaveBeenCalledExactlyOnceWith("ws", {
       reason: "wake-runners-unreadable",
-      message: "Your phone cannot wake agents here until it can. Restore or repair the file in Details before you try again.",
+      message: "Your phone cannot wake agents here until it can. dohc keeps trying. If this stays, restore or repair the file in Details.",
       file: LEDGER,
     });
     workspaces = ["ws", "later"];
@@ -98,7 +98,7 @@ describe("an unreadable declarations ledger", () => {
     // The intent file's row is another row.
     notices.clear(null, "unreadable");
     expect(deps.clear).not.toHaveBeenCalled();
-    notices.ledgerReadable();
+    notices.clearLedgerUnreadable();
     expect(deps.clear.mock.calls).toEqual([["ws", "wake-runners-unreadable"], ["later", "wake-runners-unreadable"]]);
   });
 });
