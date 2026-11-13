@@ -2959,13 +2959,13 @@ function Pane(props: { theme: "light" | "dark" }) {
 
       {/* The Explorer's Home, at the sidebar's narrowest. */}
       <Section part="explorer-home" title="Explorer Home" menusAtRest>
-        <Specimen label="open editors with one unsaved, pinned, pages in folders, Collections, apps, other files; a page open; a row hovered">
+        <Specimen label="open editors with one unsaved, apps, pinned, pages in folders, Collections, other files; a page open; a row hovered">
           <div className="w-60 rounded-lg border border-line bg-panel" data-force-state="hover"
             data-force-target='[data-section="pages"]:nth-of-type(1)'>
             <Explorer {...HOME_SPECIMEN} />
           </div>
         </Specimen>
-        <Specimen label="a new workspace: no open editors, and Pages, Collections and Apps each say they have nothing">
+        <Specimen label="a new workspace: no open editors, and Apps, Pages and Collections each say they have nothing">
           <div className="w-60 rounded-lg border border-line bg-panel">
             <Explorer {...HOME_SPECIMEN} editorGroups={HOME_NO_EDITORS} files={[]} folders={[]} pinned={[]} apps={HOME_NO_APPS}
               appFolders={new Set()} dataCollections={[]} onIncludeArchivedCollections={noop} />
