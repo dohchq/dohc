@@ -849,10 +849,10 @@ export function LiveDocumentsDialog({
                       : "You can keep editing it in dohc, but your edits may not reach them."}
                   </p>
                 ) : null}
-                {/* Resume can't help because ordinary edits never give the document a new base, so the row doesn't offer it. */}
+                {/* Resume tries again now. Some histories never start, and an older server doesn't try again by itself, so the words promise no more. */}
                 {row.reason === "live-history-over-budget" && !pendingStops.has(row.objectId) && !(busy?.kind === "stop" && busy.objectId === row.objectId) ? (
                   <p className="m-0 basis-full text-[12px] text-muted">
-                    This document's edit history is too long for the server to check, so live editing can't start. You can keep editing it in dohc, and your edits keep syncing. People you shared it with can't edit it live.
+                    This document's edit history is too long for the server to check, so live editing can't start. You can keep editing it in dohc and your edits keep syncing, but people you shared it with can't edit it live. Resume live editing to try again.
                   </p>
                 ) : null}
                 {/* The server keeps trying it. Resume tries now, and Stop ends live editing for it. */}

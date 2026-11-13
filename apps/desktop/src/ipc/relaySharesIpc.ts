@@ -186,7 +186,8 @@ function liveStopWaits(refusal: LiveStopRefusal): boolean {
 
 function ownerLiveDocumentCanResume(document: {reason?: string; status: string}): boolean {
   return document.reason === "session-host-refused" || document.reason === "live-document-without-lineage" ||
-    document.reason === "live-edit-unadmitted" || document.reason === "live-start-failing" || (!document.reason && (document.status === "retired" || document.status === "paused"));
+    document.reason === "live-edit-unadmitted" || document.reason === "live-start-failing" || document.reason === "live-history-over-budget" ||
+    (!document.reason && (document.status === "retired" || document.status === "paused"));
 }
 
 /**
@@ -485,7 +486,8 @@ export function createOwnerLiveDocumentActions<
       // Resume is also how the owner tries again a document the server refused,
       // one it could not start until the owner opened it, or one whose server
       // copy is missing an owner edit: Resume retires the held session so the
-      // edit can apply. For one whose start keeps failing, Resume tries now.
+      // edit can apply. For one whose start keeps failing, or whose history is
+      // too long to check, Resume tries now.
       const documents = new Map([...stopped.documents, ...current.documents].map(document => [document.path, {
         ...document, canResume: ownerLiveDocumentCanResume(document),
       }]));
@@ -495,7 +497,7 @@ export function createOwnerLiveDocumentActions<
         // Each row speaks for the server's document, never for another that had or has its path.
         const deferred = localStops.find(stop => stop.document.objectId === row.objectId)?.deferred;
         if (deferred) Object.assign(row, {deferredStop: deferred,
-          canResume: row.reason !== "session-host-diverged" && row.reason !== "conflict-parent-withheld" && row.reason !== "live-history-over-budget"});
+          canResume: row.reason !== "session-host-diverged" && row.reason !== "conflict-parent-withheld"});
         // A record of edits a Stop could not write goes first: it holds the next Stop until it is saved.
         const kept = quarantines.filter(candidate => candidate.objectId === row.objectId && !candidate.saveOnly);
         const quarantine = kept.find(candidate => candidate.recovery === "not-written" || candidate.recovery === "cannot-write") ?? kept[0];

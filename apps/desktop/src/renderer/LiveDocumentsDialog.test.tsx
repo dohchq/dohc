@@ -82,15 +82,17 @@ it("distinguishes retired and hosted held notes and offers no Resume or Stop on 
   expect(actions("docs/diverged.md")).toEqual([]);
 });
 
-// Resume fails the same way because ordinary edits never give the document a new base, so the row offers only Stop and says why.
-it("shows a document whose edit history the server can't check, with Stop and no Resume", async () => {
-  const h = harness();
-  h.load.mockResolvedValue(page([row("docs/long.md", {status: "unavailable", reason: "live-history-over-budget", canResume: false})]));
+// Resume tries again now. The words promise no start, because some histories never start.
+it("shows a document whose edit history the server can't check, with Resume and Stop", async () => {
+  const h = harness(), user = userEvent.setup();
+  h.load.mockResolvedValue(page([row("docs/long.md", {status: "unavailable", reason: "live-history-over-budget", canResume: true})]));
   render(<LiveDocumentsDialog workspaceId="ws-1" {...h} />);
   const long = await screen.findByTestId("live-document-row-docs/long.md");
   expect(long.children[1]?.textContent).toBe("History too long");
-  expect(within(long).getByText("This document's edit history is too long for the server to check, so live editing can't start. You can keep editing it in dohc, and your edits keep syncing. People you shared it with can't edit it live.")).toBeDefined();
-  expect(actions("docs/long.md")).toEqual(["Stop live editing"]);
+  expect(within(long).getByText("This document's edit history is too long for the server to check, so live editing can't start. You can keep editing it in dohc and your edits keep syncing, but people you shared it with can't edit it live. Resume live editing to try again.")).toBeDefined();
+  expect(actions("docs/long.md").filter(name => name?.endsWith("live editing"))).toEqual(["Resume live editing", "Stop live editing"]);
+  await user.click(within(long).getByRole("button", {name: "Resume live editing for docs/long.md"}));
+  expect(h.resume).toHaveBeenCalledWith("ws-1", "docs/long.md");
 });
 
 // The server keeps trying it; the row says why in the server's word, and Resume tries now.
