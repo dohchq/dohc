@@ -2042,8 +2042,9 @@ fn desktop_automation_draft_without_server_declaration_can_stop_and_restore() {
 
 /// A waiting group the relay accepted before this computer saved its receipt
 /// is restored row by row under each row's own delivery id, the id the relay's
-/// restore check derives. Neither side finds an acceptance under that id, so
-/// each row carries none, and the relay subtracts what the group delivered.
+/// restore check derives. Neither side finds an acceptance under a grouped
+/// row's id, so each carries none, and the relay subtracts what the group
+/// delivered. The head, delivered alone, keeps its acceptance as before.
 #[test]
 fn a_group_accepted_before_its_receipt_was_saved_restores_row_by_row() {
     use crate::owner_outbox::draft::{ObservedOwnerBinding, OwnerDraftAppendInput};
@@ -2141,7 +2142,15 @@ fn a_group_accepted_before_its_receipt_was_saved_restores_row_by_row() {
             .unwrap()
             .entries
     };
-    let head = pending(&f).remove(0);
+    let mut waiting = pending(&f);
+    assert_eq!(
+        waiting.len(),
+        2,
+        "the head goes alone and the two edits behind it as one delivery"
+    );
+    let (group, head) = (waiting.pop().unwrap(), waiting.pop().unwrap());
+    assert_ne!(group.delivery_id, typed[1].delivery_id);
+    // The relay accepts both; this computer saved neither receipt.
     let head_receipt = LiveUpdateReceipt {
         delivery_id: head.delivery_id.clone(),
         update_digest: head.update_digest.clone(),
@@ -2149,27 +2158,6 @@ fn a_group_accepted_before_its_receipt_was_saved_restores_row_by_row() {
         accepting_host_epoch: 1,
     };
     accept(&mut f, &head_receipt, head.update);
-    crate::owner_outbox::acknowledge(
-        &mut f.store,
-        "workspace",
-        &outbox,
-        &[crate::owner_outbox::OwnerDeliveryReceipt {
-            delivery_id: head_receipt.delivery_id.clone(),
-            update_digest: head_receipt.update_digest.clone(),
-            journal_cursor: 1,
-            accepting_host_epoch: 1,
-        }],
-    )
-    .unwrap();
-    let waiting = pending(&f);
-    assert_eq!(
-        waiting.len(),
-        1,
-        "the two edits behind the head wait as one delivery"
-    );
-    let group = waiting[0].clone();
-    assert_ne!(group.delivery_id, typed[1].delivery_id);
-    // The relay accepts the group; this computer has not saved its receipt.
     let group_receipt = LiveUpdateReceipt {
         delivery_id: group.delivery_id.clone(),
         update_digest: group.update_digest.clone(),
@@ -2185,18 +2173,22 @@ fn a_group_accepted_before_its_receipt_was_saved_restores_row_by_row() {
             .iter()
             .map(|source| (source.outbox_sequence, source.delivery_id.as_str()))
             .collect::<Vec<_>>(),
-        typed[1..]
+        typed
             .iter()
             .map(|row| (row.sequence, row.delivery_id.as_str()))
             .collect::<Vec<_>>()
     );
-    for (source, row) in sources.iter().zip(&typed[1..]) {
+    for (source, row) in sources.iter().zip(&typed) {
         assert_eq!(
             source.delivery_id,
             crate::owner_outbox::delivery_id(&outbox, row.sequence, &row.update_digest)
         );
-        assert!(source.accepted_receipt.is_none());
     }
+    // The head is found under its own id; a grouped row is not.
+    assert_eq!(sources[0].accepted_receipt.as_ref(), Some(&head_receipt));
+    assert!(sources[1..]
+        .iter()
+        .all(|source| source.accepted_receipt.is_none()));
     let restored = Ydoc::wire();
     restored.apply(proposal.frozen_state_bytes()).unwrap();
     restored.apply(proposal.candidate_bytes()).unwrap();
