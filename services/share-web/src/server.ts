@@ -232,6 +232,8 @@ export interface CreateShareWebApplicationOptions {
   accountAuth?: AccountAuthConfig;
   fetchAuth?: RelayFetch;
   namedBrowserSessionLimits?: NamedLiveBrowserClientLimits;
+  /** How often the named gateway checks an open editor's session. */
+  namedSessionCheckIntervalMs?: number;
   namedLiveTickets?: boolean;
   namedRecipientBrowserLimits?: NamedLiveBrowserLimits;
   deleteAccountGateways?(userId: string, workspaceIds: readonly string[]): void;
@@ -1057,6 +1059,7 @@ export function createShareWebApplication({
   accountAuth,
   fetchAuth,
   namedBrowserSessionLimits,
+  namedSessionCheckIntervalMs,
   namedLiveTickets,
   namedRecipientBrowserLimits,
   deleteAccountGateways,
@@ -1092,6 +1095,7 @@ export function createShareWebApplication({
         exchangeKey: relayExchangeKey!,
         limits: namedBrowserSessionLimits,
         fetchRelay,
+        checkIntervalMs: namedSessionCheckIntervalMs,
       })
     : undefined;
   if (namedLiveTickets && !namedBrowser)

@@ -26,9 +26,14 @@ import {
   scope,
 } from "../../sync-relay/src/liveTickets.test-helper.js";
 import { createShareWebApplication } from "./server.js";
-import { createLiveGateway } from "./liveGateway.js";
+import { createLiveGateway, namedSessionCheckIntervalMs } from "./liveGateway.js";
+import {
+  NAMED_SESSION_CHECK_HEADER,
+  NAMED_SESSION_FIRST_WINDOW_MS,
+} from "@dohc/live-session-contract/named-session-check";
 import { createNamedLiveRelayRoute, namedLiveGatewayRequest } from "./namedLiveRelayRoute.js";
 import { createNamedLiveProvider } from "@dohc/ydoc-projection/named-live-provider";
+import { createNamedLiveBrowserTransport } from "@dohc/ydoc-projection/named-live-browser-transport";
 
 const exchangeKey = "network-test-key-".repeat(3),
   cookieName = getCookies({ baseURL: audience }).sessionToken.name;
@@ -133,7 +138,11 @@ async function post(port: number, path: string, body: unknown, account = cookie)
 }
 
 /** Real public/relay HTTP and WS hops; native methods deliberately remain synthetic. */
-async function fixture() {
+async function fixture(options: { idleTimeoutMs?: number; retentionMs?: number } = {}) {
+  // The relay's clock. Each gateway check moves it on by `step`, so a test can stand for minutes.
+  const clock = { now: 1000, step: 0 };
+  let checked = deferred<void>();
+  const checkStatuses: number[] = [];
   const stored = await ticketFixture(),
     sharedChanges = createNamedFrameChanges(8),
     invalidated = new AbortController();
@@ -227,8 +236,13 @@ async function fixture() {
     resolveActor,
     shareWebOrigin: audience,
     relayExchangeKey: exchangeKey,
-    nowMs: () => 1000,
-    namedBrowserSessionLimits: { ...browserLimits, maxSessions: 8, retentionMs: 30000 },
+    nowMs: () => clock.now,
+    elapsedMs: () => clock.now,
+    namedBrowserSessionLimits: {
+      ...browserLimits,
+      maxSessions: 8,
+      retentionMs: options.retentionMs ?? 30000,
+    },
   });
   let routes!: ReturnType<typeof createNamedLiveRoutes>;
   const relayHttp = serveFetchHandler({
@@ -274,6 +288,23 @@ async function fixture() {
   relayHttp.on("upgrade", (request, socket, head) => {
     upgrades.push(routes.handleUpgrade(request, socket, head));
   });
+  const gatewayLimits = {
+    maxConnections: 4,
+    maxConnectionsPerWorkspace: 96,
+    reservedOwnerConnections: 0,
+    maxConnectionsPerSession: 2,
+    maxConnectionsPerPrincipal: 3,
+    maxConnectionsPerGrant: 4,
+    maxBufferedBytes: 134217728,
+    maxFrameBytes: 1024,
+    maxPendingBytes: 4 * 1024 * 1024,
+    maxPendingFrames: 32,
+    maxFragments: 8,
+    maxBufferedChunks: 16,
+    upgradeTimeoutMs: 10_000,
+    idleTimeoutMs: options.idleTimeoutMs ?? 10000,
+    drainTimeoutMs: 100,
+  };
   const application = createShareWebApplication({
     relayUrl,
     publicRelayUrl: audience,
@@ -281,28 +312,24 @@ async function fixture() {
     publicHosts: new Set([new URL(audience).host]),
     accountAuth: { publicOrigin: audience, upstreamUrl: "http://127.0.0.1:1" },
     namedBrowserSessionLimits: browserLimits,
+    namedSessionCheckIntervalMs: namedSessionCheckIntervalMs(gatewayLimits),
     namedLiveTickets: true,
+    fetchRelay: async (request) => {
+      const check = new URL(request.url).pathname === "/sync/live/named-sessions/resolve";
+      if (check) clock.now += clock.step;
+      const response = await fetch(request);
+      if (check) {
+        checkStatuses.push(response.status);
+        checked.resolve();
+        checked = deferred<void>();
+      }
+      return response;
+    },
   });
   const gateway = createLiveGateway({
     publicOrigin: audience,
     publicHosts: new Set([new URL(audience).host]),
-    limits: {
-      maxConnections: 4,
-      maxConnectionsPerWorkspace: 96,
-      reservedOwnerConnections: 0,
-      maxConnectionsPerSession: 2,
-      maxConnectionsPerPrincipal: 3,
-      maxConnectionsPerGrant: 4,
-      maxBufferedBytes: 134217728,
-      maxFrameBytes: 1024,
-      maxPendingBytes: 4 * 1024 * 1024,
-      maxPendingFrames: 32,
-      maxFragments: 8,
-      maxBufferedChunks: 16,
-      upgradeTimeoutMs: 10_000,
-      idleTimeoutMs: 10000,
-      drainTimeoutMs: 100,
-    },
+    limits: gatewayLimits,
     resolveSession: async (request, discriminator, signal) => {
       const authenticated = namedLiveGatewayRequest(request, audience, signal);
       return authenticated
@@ -416,7 +443,27 @@ async function fixture() {
   }
   return {
     ...stored,
+    port,
     native,
+    clock,
+    checkStatuses,
+    nextCheck: () => checked.promise,
+    /** The relay's answer to a check share-web would send now. */
+    async check() {
+      const response = await fetch(`${relayUrl}/sync/live/named-sessions/resolve`, {
+        method: "POST",
+        headers: {
+          origin: audience,
+          "content-type": "application/json",
+          "x-dohc-relay-exchange-key": exchangeKey,
+          [NAMED_SESSION_CHECK_HEADER]: String(namedSessionCheckIntervalMs(gatewayLimits)),
+          cookie,
+        },
+        body: JSON.stringify({ discriminator }),
+      });
+      await response.body?.cancel();
+      return response.status;
+    },
     changes,
     invalidated,
     doc,
@@ -493,6 +540,126 @@ it("runs public ticket mint, one relay redemption, initial sync, and accepted fe
   await f.noListeners.promise;
   expect(f.invalidated.signal.aborted).toBe(false);
   expect(f.changes.listenerCount()).toBe(0);
+});
+
+it("keeps an open editor's session through 20 minutes of checks, and releases it once the page closes", async () => {
+  // Checks every second of real time; each one moves the relay's clock on most of the
+  // 3-minute window that share-web's announced interval, clamped to 1 minute, gives.
+  const f = await fixture({ idleTimeoutMs: 200, retentionMs: 12 * 60 * 60 * 1000 }),
+    minted = await f.mint();
+  const { token } = (await minted.json()) as { token: string };
+  const browser = f.connect(token);
+  expect(await browser.status).toBe(101);
+  const provider = browser.attach();
+  await untilLive(provider);
+  await f.waitingRead.promise;
+  let ended = false;
+  const closed = once(browser.ws, "close").then(() => {
+    ended = true;
+  });
+  f.clock.step = 170_000;
+  for (let frame = 0; f.clock.now < 1000 + 20 * 60 * 1000; frame++) {
+    await Promise.race([f.nextCheck(), closed]);
+    const applied = untilBody(provider, ` frame${frame}`);
+    f.publish(` frame${frame}`);
+    await Promise.race([applied, closed]);
+    expect(ended, `the gateway closed the page after ${f.checkStatuses.length} checks`).toBe(false);
+  }
+  expect(f.checkStatuses.length).toBeGreaterThanOrEqual(8);
+  expect(f.checkStatuses.every((status) => status === 200)).toBe(true);
+  expect(browser.ws.readyState).toBe(WebSocket.OPEN);
+
+  f.clock.step = 0;
+  browser.ws.close();
+  await closed;
+  f.clock.now += 180_000 - 1;
+  expect(await f.check()).toBe(200);
+  f.clock.now += 180_000;
+  expect(await f.check()).toBe(404);
+});
+
+it("brings a page back with one new session after a sleep longer than its session's window", async () => {
+  const f = await fixture({ retentionMs: 12 * 60 * 60 * 1000 });
+  const asked: string[] = [];
+  const sockets: WebSocket[] = [];
+  const manager = createNamedLiveBrowserTransport({
+    publicOrigin: audience,
+    limits: {
+      provider: {
+        frames,
+        maxPendingUpdateBytes: 8192,
+        maxPendingUpdates: 4,
+        maxDeliveryAttempts: 3,
+      },
+      maxHttpResponseBytes: 8192,
+      maxSocketBufferedBytes: 65536,
+      connectTimeoutMs: 10_000,
+      sendTimeoutMs: 10_000,
+      drainPollMs: 10,
+    },
+    fetch: async (input, init) => {
+      const path = new URL(input instanceof Request ? input.url : input.toString()).pathname;
+      asked.push(path);
+      if (path === "/api/account/session")
+        return Response.json({ user: { id: scope.userId, name: "Reader" } });
+      return post(f.port, path, JSON.parse(String(init?.body)));
+    },
+    openSocket: (input, protocols) => {
+      const url = new URL(input);
+      const socket = new WebSocket(
+        `ws://127.0.0.1:${f.port}${url.pathname}${url.search}`,
+        protocols,
+        {
+          headers: { host: new URL(audience).host, origin: audience, cookie },
+          perMessageDeflate: false,
+        },
+      );
+      sockets.push(socket);
+      socket.on("error", () => undefined);
+      socket.once("unexpected-response", (_request, response) => {
+        response.resume();
+        socket.terminate();
+      });
+      return socket as unknown as ReturnType<
+        NonNullable<Parameters<typeof createNamedLiveBrowserTransport>[0]["openSocket"]>
+      >;
+    },
+  });
+  cleanups.push(async () => {
+    manager.close();
+    sockets.forEach((socket) => socket.terminate());
+  });
+  const page = manager.select({
+    accountId: scope.userId,
+    workspaceId: `named:${scope.grantId}`,
+    grantId: scope.grantId,
+    objectId: binding.objectId,
+  });
+  const until = (live: boolean) =>
+    new Promise<void>((done) => {
+      if ((page.state().status === "live") === live) return done();
+      const unsubscribe = page.subscribe((state) => {
+        if ((state.status === "live") === live) {
+          unsubscribe();
+          done();
+        }
+      });
+    });
+  await page.reconnect();
+  await until(true);
+  const sessions = () => asked.filter((path) => path === "/api/live/named-session").length;
+  expect(sessions()).toBe(1);
+
+  // The computer sleeps past the window a session no check has reached, and its socket drops.
+  f.clock.now += NAMED_SESSION_FIRST_WINDOW_MS + 60_000;
+  const before = asked.length;
+  const dropped = until(false);
+  sockets.at(-1)!.terminate();
+  await dropped;
+  await until(true);
+  expect(asked.slice(before)).toContain("/api/live/named-ticket");
+  expect(sessions()).toBe(2);
+  expect(page.state().status).toBe("live");
 });
 
 it("requires the current named account at the public ticket and upgrade boundaries", async () => {
