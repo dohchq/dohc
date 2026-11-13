@@ -54,6 +54,10 @@ export interface LiveGatewayLimits {
   readonly maxFrameBytes: number;
   readonly maxPendingBytes: number;
   readonly maxBufferedBytes: number;
+  /** The frame bytes one person, one share, or the people other than the owner in one workspace may hold. */
+  readonly maxBufferedBytesPerPrincipal: number;
+  readonly maxBufferedBytesPerShare: number;
+  readonly maxBufferedBytesPerWorkspace: number;
   readonly maxPendingFrames: number;
   readonly maxFragments: number;
   readonly maxBufferedChunks: number;
@@ -95,6 +99,9 @@ export function parseLiveGatewayLimits(value: unknown): LiveGatewayLimits {
     "maxConnectionsPerGrant",
     "maxFrameBytes",
     "maxBufferedBytes",
+    "maxBufferedBytesPerPrincipal",
+    "maxBufferedBytesPerShare",
+    "maxBufferedBytesPerWorkspace",
     "maxPendingBytes",
     "maxPendingFrames",
     "maxFragments",
@@ -126,7 +133,12 @@ export function parseLiveGatewayLimits(value: unknown): LiveGatewayLimits {
   }
   if (
     limits.reservedOwnerConnections >=
-    Math.min(limits.maxConnections, limits.maxConnectionsPerWorkspace)
+      Math.min(limits.maxConnections, limits.maxConnectionsPerWorkspace) ||
+    Math.max(
+      limits.maxBufferedBytesPerPrincipal,
+      limits.maxBufferedBytesPerShare,
+      limits.maxBufferedBytesPerWorkspace,
+    ) > limits.maxBufferedBytes
   )
     throw new TypeError("Invalid live gateway limits.");
   if (limits.maxPendingBytes < 4 * 1024 * 1024)
@@ -454,43 +466,18 @@ export function createLiveGateway(options: LiveGatewayOptions) {
         return;
       }
       const bufferScopes: [string, number][] = [
-        [
-          JSON.stringify(["workspace", session.workspaceId]),
-          Math.max(
-            1,
-            Math.floor(
-              limits.maxBufferedBytes *
-                Math.min(
-                  1,
-                  (limits.maxConnectionsPerWorkspace - limits.reservedOwnerConnections) /
-                    limits.maxConnections,
-                ),
-            ),
-          ),
-        ],
+        [JSON.stringify(["workspace", session.workspaceId]), limits.maxBufferedBytesPerWorkspace],
         [
           JSON.stringify(
             session.kind === "named"
               ? ["principal", "named", session.userId]
               : ["principal", "link", session.workspaceId, session.grantId, session.principalId],
           ),
-          Math.max(
-            1,
-            Math.floor(
-              limits.maxBufferedBytes *
-                Math.min(1, limits.maxConnectionsPerPrincipal / limits.maxConnections),
-            ),
-          ),
+          limits.maxBufferedBytesPerPrincipal,
         ],
         [
           JSON.stringify(["share", session.workspaceId, session.shareId]),
-          Math.max(
-            1,
-            Math.floor(
-              limits.maxBufferedBytes *
-                Math.min(1, limits.maxConnectionsPerGrant / limits.maxConnections),
-            ),
-          ),
+          limits.maxBufferedBytesPerShare,
         ],
       ];
       // No asynchronous step may separate this invalidation check from the 101.

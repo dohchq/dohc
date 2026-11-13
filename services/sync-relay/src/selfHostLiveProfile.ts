@@ -23,6 +23,8 @@ export function selfHostLiveProfile() {
     maxResponseBytes: 64 * 1024,
     timeoutMs: 30_000,
   };
+  // A person can hold three 4 MiB syncs, and one share or one workspace's
+  // recipients leave 48 MiB of the 128 MiB for everyone else.
   const connections = {
     maxConnections: 128,
     maxConnectionsPerWorkspace: 96,
@@ -31,6 +33,9 @@ export function selfHostLiveProfile() {
     maxConnectionsPerPrincipal: 12,
     maxConnectionsPerGrant: 80,
     maxBufferedBytes: 128 * MiB,
+    maxBufferedBytesPerPrincipal: 12 * MiB,
+    maxBufferedBytesPerShare: 80 * MiB,
+    maxBufferedBytesPerWorkspace: 80 * MiB,
     maxPendingBytes: 256 * 1024,
     maxFragments: 16,
     maxBufferedChunks: 128,

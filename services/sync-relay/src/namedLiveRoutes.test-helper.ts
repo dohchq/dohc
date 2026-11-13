@@ -30,7 +30,7 @@ export const frames = { receive: { maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX
 export const bounds = { maxClientVectorBytes: 1024, maxSyncOutputBytes: 4096, maxAppliedUpdateBytes: 4096, maxSubmissionBytes: 4096, maxAdmissionBytes: 16384 };
 export const policy = { maxStructVisits: 10000, maxValueNodeVisits: 10000, maxDecodedPayloadByteVisits: 1000000, maxStructClientGroupVisits: 10000,
   maxDeleteClientGroupVisits: 10000, maxDeleteIntervalVisits: 10000, maxIndexOperations: 100000 };
-export const limits: NamedLiveRouteLimits = { maxConnections: 8, maxConnectionsPerWorkspace: 96, reservedOwnerConnections: 0, maxConnectionsPerSession: 2, maxConnectionsPerPrincipal: 3, maxConnectionsPerGrant: 4, maxBufferedBytes: 134217728,
+export const limits: NamedLiveRouteLimits = { maxConnections: 8, maxConnectionsPerWorkspace: 96, reservedOwnerConnections: 0, maxConnectionsPerSession: 2, maxConnectionsPerPrincipal: 3, maxConnectionsPerGrant: 4, maxBufferedBytes: 134217728, maxBufferedBytesPerPrincipal: 50331648, maxBufferedBytesPerShare: 67108864, maxBufferedBytesPerWorkspace: 134217728,
   maxPendingRequests: 4, maxRequestBytes: 4096, maxResponseBytes: 4096, maxPendingBytes: 4096, maxFragments: 8, maxBufferedChunks: 16,
   // Open routes idle between frames while a test sets up its next peer over real
   // sockets; a loaded gate host can stretch that past 5 s.

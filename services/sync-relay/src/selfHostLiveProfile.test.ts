@@ -1,6 +1,7 @@
 import { expect, it } from "vitest";
 import { parseNamedLiveBrowserLimits } from "@dohc/ydoc-projection/named-live-browser-transport";
 import { parseNamedLiveConfig } from "./namedLiveConfig";
+import { parseNamedLiveRouteLimits } from "./namedLiveRoutes";
 import { parseNamedLiveBrowserHttpLimits } from "./namedLiveBrowserHttp";
 import { parseLiveRestoreConfig } from "./liveRestorePreparation";
 import { parseNativeLiveSyncConfig } from "./liveSyncConfig";
@@ -55,4 +56,34 @@ it("uses one policy for journal admission, activation and restores", () => {
   });
   profile.validation.maxIndexOperations = 1;
   expect(selfHostLiveProfile().validation.maxIndexOperations).toBe(100_000_000);
+});
+
+it("keeps each byte portion when the connection caps rise", () => {
+  const { namedLive, gateway } = selfHostLiveProfile(),
+    MiB = 1024 * 1024;
+  // A person still takes three 4 MiB syncs, and a share or a workspace's
+  // recipients still leave 48 MiB for other workspaces.
+  const portions = {
+    maxBufferedBytes: 128 * MiB,
+    maxBufferedBytesPerPrincipal: 12 * MiB,
+    maxBufferedBytesPerShare: 80 * MiB,
+    maxBufferedBytesPerWorkspace: 80 * MiB,
+  };
+  expect(parseNamedLiveRouteLimits({ ...namedLive.transport })).toMatchObject(portions);
+  expect(parseLiveGatewayLimits({ ...gateway })).toMatchObject(portions);
+  for (const name of [
+    "maxBufferedBytesPerPrincipal",
+    "maxBufferedBytesPerShare",
+    "maxBufferedBytesPerWorkspace",
+  ] as const) {
+    expect(() =>
+      parseNamedLiveRouteLimits({
+        ...namedLive.transport,
+        [name]: namedLive.transport.maxBufferedBytes + 1,
+      }),
+    ).toThrow("Invalid named route limits");
+    expect(() =>
+      parseLiveGatewayLimits({ ...gateway, [name]: gateway.maxBufferedBytes + 1 }),
+    ).toThrow("Invalid live gateway limits");
+  }
 });

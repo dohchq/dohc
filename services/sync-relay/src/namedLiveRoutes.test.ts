@@ -117,6 +117,9 @@ const limits: NamedLiveRouteLimits = {
   maxConnectionsPerPrincipal: 3,
   maxConnectionsPerGrant: 4,
   maxBufferedBytes: 134217728,
+    maxBufferedBytesPerPrincipal: 100663296,
+    maxBufferedBytesPerShare: 134217728,
+    maxBufferedBytesPerWorkspace: 134217728,
   maxPendingRequests: 4,
   maxRequestBytes: 4096,
   maxResponseBytes: 4096,
@@ -1779,7 +1782,13 @@ it.each([
 it("refuses aggregate frame pressure and releases it on close", async () => {
   const admission = createLiveConnectionAdmission();
   const f = await fixture(
-    { ...limits, maxBufferedBytes: 10_000 },
+    {
+      ...limits,
+      maxBufferedBytes: 10_000,
+      maxBufferedBytesPerPrincipal: 3750,
+      maxBufferedBytesPerShare: 5000,
+      maxBufferedBytesPerWorkspace: 10_000,
+    },
     false,
     undefined,
     false,
