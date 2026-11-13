@@ -49,6 +49,12 @@ function forgetJoinToken(): void {
   try { sessionStorage.removeItem(TOKEN_KEY); } catch { /* Nothing kept. */ }
 }
 
+// The account a sign-in answer names, or null to read the session instead.
+function signedInAccount(value: unknown): Account | null {
+  if (!value || typeof value !== "object" || !("user" in value)) return null;
+  try { return accountUser({user: value.user}); } catch { return null; }
+}
+
 class JoinRefused extends Error {
   constructor(readonly code: JoinRefusal) { super(code); }
 }
@@ -118,9 +124,10 @@ export default function JoinApp(props: {token: string | null}) {
     settle(controller, {kind: "refused", account: known.current, code});
   };
 
-  const preview = async (controller: AbortController) => {
+  // After sign-in, its answer names the account, so the page asks only for the preview.
+  const preview = async (controller: AbortController, signedIn: Account | null = null) => {
     if (!token) return;
-    const account = accountUser(await namedRequest("/api/account/session", controller.signal));
+    const account = signedIn ?? accountUser(await namedRequest("/api/account/session", controller.signal));
     if (request.current !== controller) return;
     known.current = account;
     if (!account) return settle(controller, {kind: "signed-out", ended: false});
@@ -140,7 +147,7 @@ export default function JoinApp(props: {token: string | null}) {
   const signIn = (credentials: {email: string; password: string}) => {
     const controller = begin();
     void namedRequest("/api/account/sign-in", controller.signal, credentials).then(
-      () => preview(controller).catch(cause => failed(controller, cause, load, true)),
+      (value) => preview(controller, signedInAccount(value)).catch(cause => failed(controller, cause, load, true)),
       (cause: unknown) => { if (!controller.signal.aborted) settle(controller, null, {message: signInErrorMessage(cause), retry: null}); },
     );
   };

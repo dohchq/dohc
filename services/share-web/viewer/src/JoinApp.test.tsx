@@ -121,6 +121,27 @@ it("signs in, then previews; and offers an account to someone new, keeping the l
   await settle(() => heading()?.textContent === "Join Community");
 });
 
+it("says who signed in, with Sign out, when the server fails right after sign-in", async () => {
+  let session = false, up = false;
+  server({
+    "/api/account/session": () => !session ? signedOut() : up ? signedIn() : jsonResponse({error: "unavailable"}, 503),
+    "/api/account/sign-in": () => { session = true; return jsonResponse({ok: true, user: {id: "user-sam", name: "Sam"}}); },
+    "/api/members/join-preview": () => {
+      if (!up) throw new TypeError("Failed to fetch");
+      return jsonResponse(PREVIEW);
+    },
+  });
+  await render();
+  await signInAs("sam@example.com", "pw");
+  await settle(() => heading()?.textContent === "dohc could not check this invite link");
+  await settle(ready);
+  expect(text()).toContain("Signed in as Sam · Sign out");
+  up = true;
+  await click("Try again");
+  expect(heading()?.textContent).toBe("Join Community");
+  expect(text()).toContain("Signed in as Sam · Sign out");
+});
+
 it("keeps the sign-in form with the reason when sign-in fails", async () => {
   server({"/api/account/session": signedOut, "/api/account/sign-in": () => jsonResponse({ok: false}, 401)});
   await render();
