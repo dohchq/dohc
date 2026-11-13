@@ -218,7 +218,6 @@ function driveHost({
         return { status: mountStatus, stdout: "" };
       }
       if (command === process.execPath) {
-        // Arrives in two chunks that split a line, as a pipe can deliver it.
         options.onOutput(child.slice(0, 7));
         options.onOutput(child.slice(7));
         return { status: childStatus, stdout: child };
@@ -433,7 +432,6 @@ test("start runs a first start only when asked, and every other start as a norma
   assert.ok(first.calls.findIndex(accountsCheck) < first.calls.indexOf(releaseCall(first.calls)));
   assert.match(first.output(), /First start: the release creates a new relay deployment/);
   assertSafe(first.calls);
-  // Check and start never mount: an unmounted volume refuses before the release runs.
   for (const command of ["check", "start"]) {
     const { host, calls } = driveHost({ mounted: false });
     await assert.rejects(
@@ -485,7 +483,6 @@ test("move mounts the attached volume by UUID, keeps every deployment folder, th
   );
   assert.match(output(), new RegExp(`Mounting volume ${uuid} at /mnt/drive\\.`));
   assertSafe(calls);
-  // A volume that is already mounted in place is used as it is.
   const mounted = driveHost();
   await runDrive(options("move"), mounted.host);
   assert.ok(!mounted.calls.some((call) => call.command === "mount"));
@@ -784,7 +781,6 @@ test("no secret reaches the terminal, in release output or in errors", async () 
   for (const secret of secrets) assert.ok(!output.includes(secret), secret);
   assert.match(output, /\[redacted\]/);
   assert.match(output, /last line without newline\n$/);
-  // An error that quotes a setting is redacted as well.
   const redact = redactor(settings);
   assert.equal(
     redact(`token ${settings.DOHC_SMTP_PASSWORD} and ${settings.DOHC_SNAPSHOT_HEARTBEAT_URL}`),
@@ -794,7 +790,6 @@ test("no secret reaches the terminal, in release output or in errors", async () 
 });
 
 test("a short secret is redacted too, even when the output splits it", async () => {
-  // The release accepts an external database password of any length.
   const short = "Qz7k9",
     { host, calls, output } = driveHost({
       settings: { ...baseSettings(), POSTGRES_PASSWORD: short },
@@ -915,7 +910,6 @@ test("disk-watch tries a report three times, and refuses without the disk check'
     [diskUrl, diskUrl, diskUrl],
   );
 
-  // A failed request, then a refusal, then success: the third try is the last, and nothing follows it.
   const recovers = driveHost({ pingStatus: [undefined, 503, 200] });
   await runDrive(watch(), recovers.host);
   assert.deepEqual(
@@ -924,7 +918,6 @@ test("disk-watch tries a report three times, and refuses without the disk check'
   );
   assert.match(recovers.output(), /Pinged the disk check\.\n$/);
 
-  // A failure report that never arrives is retried at the failure URL only.
   const full = driveHost({
     disk: { blocks: 1000, bfree: 300, bavail: 300 },
     pingStatus: [503, 503, 503],

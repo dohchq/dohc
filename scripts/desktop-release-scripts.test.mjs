@@ -183,7 +183,6 @@ test("stable publication preserves every platform previously published on its ch
   // The Mac release command adds the macOS manifest after the workflow publishes.
   for (const platforms of ["windows", "linux", "windows-linux"])
     assert.doesNotThrow(() => check(platforms, [publishedRelease("v0.0.9", ["latest-mac.yml"])]));
-  // A draft and the other channel's manifests deliver no update to this channel.
   for (const releases of [
     [],
     [draftRelease("v0.0.9", ["latest-linux.yml"])],
@@ -218,7 +217,6 @@ test("at most one nightly publishes per nightly day, which starts at 18:00 UTC, 
       releases,
       now: at,
     });
-  // Last night's scheduled nightly refuses a morning dispatch, and says when the next one can publish.
   const lastNight = publishedRelease(
     "v0.1.1-nightly.20261018.37.1",
     ["nightly.yml"],
@@ -241,7 +239,6 @@ test("at most one nightly publishes per nightly day, which starts at 18:00 UTC, 
       ]),
     /can publish from 2026-10-19 18:00 UTC/,
   );
-  // A nightly published by hand before 18:00 UTC doesn't hold back that evening's scheduled one.
   const manual = publishedRelease(
     "v0.1.1-nightly.20261019.38.1",
     ["nightly.yml"],
@@ -249,14 +246,12 @@ test("at most one nightly publishes per nightly day, which starts at 18:00 UTC, 
   );
   assert.throws(() => check([manual]), /can publish from 2026-10-19 18:00 UTC/);
   assert.doesNotThrow(() => check([manual], new Date("2026-10-19T20:00:00Z")));
-  // On 26 October a nightly dispatched by hand published at about 07:00 UTC, and that evening's run still publishes.
   const morning = publishedRelease(
     "v0.1.1-nightly.20261026.152.1",
     ["nightly.yml", "nightly-linux.yml"],
     "2026-10-26T07:00:00Z",
   );
   assert.doesNotThrow(() => check([morning], new Date("2026-10-26T20:00:00Z")));
-  // The day turns at 18:00 UTC exactly.
   const beforeTurn = publishedRelease(
     "v0.1.1-nightly.20261019.39.1",
     ["nightly.yml"],
@@ -728,7 +723,6 @@ test("desktop releases start only by dispatch, use pinned GitHub images, and pre
   );
   assert.equal(desktopTests.env.DOHC_REQUIRE_ENGINE_E2E, "1");
 
-  // Draft and published versions must both be refused before packaging.
   assert.ok([jobs["unused-version"].needs].flat().includes("preflight"));
   assert.equal(jobs["unused-version"].permissions.contents, "write");
   // Publishing checks the release history: a nightly ships every workflow platform at
@@ -848,7 +842,6 @@ test("desktop releases start only by dispatch, use pinned GitHub images, and pre
     const secrets = Object.fromEntries(
       [...expression.matchAll(/secrets\.(\w+)/gu)].map(([, name]) => [name, `configured-${name}`]),
     );
-    // Signing secrets belong to one platform. Every other secret serves all targets.
     const owner = /secrets\.WIN_/u.test(expression) ? "Windows" : null;
     for (const target of desktopReleaseTargets("windows-linux")) {
       const matrix = { os: target.os };
@@ -1139,7 +1132,6 @@ const SOURCE_MAP_ENV = {
 };
 const CHUNK_ID = "0192f5b8-7c3a-5e1d-9a2b-3c4d5e6f7a8b";
 
-// The files a production build writes, before and after the CLI injects them.
 async function builtDist({ injected }) {
   const root = await mkdtemp(join(tmpdir(), "dohc-source-maps-"));
   const trailer = injected ? `\n//# chunkId=${CHUNK_ID}` : "";
@@ -1332,7 +1324,6 @@ test("the release injects source maps for every build that names PostHog before 
   assert.equal(upload.if, undefined);
   assert.equal(upload.env.DOHC_SOURCE_MAPS_DRY_RUN, "${{ needs.preflight.outputs.dry_run }}");
   assert.equal(upload.run, "node scripts/upload-desktop-source-maps.mjs");
-  // The upload sees the key and dist the build compiled in.
   for (const name of ["DOHC_POSTHOG_KEY", "DOHC_DESKTOP_DIST"]) {
     assert.ok(build.env[name], `the build sets ${name}`);
     assert.equal(upload.env[name], build.env[name], `the upload reads the build's ${name}`);
@@ -3123,7 +3114,6 @@ test("a nightly adds missing macOS files to the newest nightly first, except to 
     /node scripts\/release-desktop-macos\.mjs --version v0\.1\.1-nightly\.20261019\.41\.1 --channel nightly/,
   );
 
-  // A later step that fails still reports the repair.
   const thenFails = fakeNightly({
     lastNightly: { ...YESTERDAY, assets: ["nightly.yml"] },
     dispatchFails: true,
@@ -3227,7 +3217,6 @@ test(
       if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error(`${role}.pid holds no pid`);
       return pid;
     };
-    // Whatever the outcome, stop every command this test started.
     t.after(() => {
       for (const role of ["parent", "child", "other", "graceful"]) {
         try {
@@ -3300,7 +3289,6 @@ setInterval(() => {}, 1000);
     process.kill(pidOf("child"), "SIGKILL");
     await until(() => !releaseLockHeld(lock), "the lock outlived the last process holding it");
 
-    // A signal sent to the command someone started reaches the run under the lock, which cleans up before the command exits.
     const started = spawn(process.execPath, [script, lock, "graceful", dir], {
       stdio: "ignore",
       env: clean,

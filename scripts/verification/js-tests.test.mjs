@@ -561,7 +561,6 @@ function isolatedRetry(t) {
     "test-record-reporter.mjs",
   ])
     copyFileSync(new URL(file, import.meta.url), join(root, "scripts/verification", file));
-  // The repository script's last command tests a and b, and the tree set's tests b; source runs in an earlier command.
   const manifest = JSON.stringify({
     scripts: {
       "test:repo":
@@ -570,7 +569,6 @@ function isolatedRetry(t) {
         "pnpm test:repo:source && node --test --test-concurrency=2 scripts/b.test.mjs",
     },
   });
-  // b's second test can set the exit code, which fails its file without failing a test.
   writeFileSync(
     join(root, "scripts/b.test.mjs"),
     `
@@ -740,7 +738,6 @@ test("vitest files whose tests failed both tries pass alone, so the step passes 
     "@dohc/sibling": "PASS",
     "@dohc/tail": "PASS",
   });
-  // Each keeps what it threw when it failed both tries.
   assert.deepEqual(
     passed.flaky,
     [
@@ -960,7 +957,6 @@ test("an interrupted step gets no isolated retry, and an interrupted run alone p
     ["@dohc/tail"],
     "only the step that failed by itself ran a file alone",
   );
-  // The sibling's failure stops the run while the tail's file runs alone.
   const cut = drive("alone-interrupted");
   assert.equal(cut.stoppedBy, "@dohc/sibling");
   assert.equal(cut.steps["@dohc/tail"], "FAIL");
@@ -1497,7 +1493,6 @@ for (const {
   },
 ])
   test(name, () => {
-    // The inventory's package without a test script is not scheduled.
     const expectedPackages = onlyDesktop
       ? ["@dohc/desktop"]
       : ["@dohc/desktop", "@dohc/app-backend-runtime", "@dohc/new-package"];

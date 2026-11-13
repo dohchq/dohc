@@ -188,7 +188,6 @@ test(
       assert.deepEqual(listing("/backup/saved"), [...names].sort());
       assert.deepEqual(listing("/snapshots"), ["snapshot.lock"]);
 
-      // One snapshot at a time across containers. The holder takes the lock like a run, then stages an unfinished copy.
       const holder = node(
         [
           "-e",
@@ -206,13 +205,11 @@ test(
       assert.notEqual(refused.status, 0);
       assert.match(refused.stderr, /Another snapshot is running/);
       assert.deepEqual(listing("/snapshots/staging"), ["unfinished"]);
-      // A killed holder frees the lock; the next run clears its staging.
       docker(["kill", holder]);
       docker(["wait", holder]);
       assert.ok(savedName(snapshot()));
       assert.deepEqual(listing("/snapshots"), ["snapshot.lock"]);
 
-      // No network and no deployment volume: only the package and the key.
       const verify = (file, output, snapshotKey = key) =>
         node(["/proof/relay-snapshot.js", "verify", "--file", file, "--output", output], {
           mounts: [mount("out", "/backup"), proof],
@@ -235,8 +232,6 @@ test(
         JSON.stringify(copies),
       );
       writesPast(copies[2].tally);
-      // check-backup's own check: integrity, the deployment marker against continuity, and the manifest checksum.
-      // Like recovery.mjs, it runs on the stopped deployment with its relay and continuity volumes.
       docker(["stop", writer]);
       // A relay that stops cleanly closes its database, which folds the WAL in and removes it. The killed writer can't,
       // and maintenance refuses a leftover WAL as unsettled continuity. SQLite touches the WAL only on its first read.

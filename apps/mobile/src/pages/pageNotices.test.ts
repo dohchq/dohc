@@ -34,7 +34,6 @@ describe("a page's actions", () => {
   });
 });
 
-// The sheet names what History said, as the desktop's dialog does, and says nothing about History before it answers.
 describe("Edit anyway's message", () => {
   const cost = "Saving rewrites the parts dohc can't show, such as raw HTML or reference links.";
   it("gives each History answer its own line", () => {

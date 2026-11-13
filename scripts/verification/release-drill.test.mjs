@@ -181,7 +181,6 @@ test("records dialogs and requests, presses Download only once the drill answers
       pressed = true;
       return result;
     });
-  // A download that does not wait for the answer.
   assert.deepEqual(net.request(installer), { sent: installer });
   t.mock.timers.tick(1_000);
   await new Promise((done) => setImmediate(done));
@@ -300,8 +299,6 @@ test("a failure after linking the real app deletes the links, not what they poin
   assert.equal(readFileSync(join(source, "node_modules", "kept", "index.js"), "utf8"), "kept\n");
 });
 
-// A stand-in for the job owner: it exits by itself after `exitAfterMs`, or
-// when it is killed.
 function fakeLaunch({ exitAfterMs = null } = {}) {
   const events = [];
   const child = {

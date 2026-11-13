@@ -141,7 +141,6 @@ describe("signing in", () => {
     });
     const signing = account.signIn(server.origin, () => {});
     await vi.waitFor(() => expect(server.paths()).toContain("POST /api/auth/device/token"));
-    // Cancel just after the person approved: the server has made the session, and its answer is on its way.
     account.cancelSignIn();
     held.resolve({ status: 200, body: { access_token: "tok-late" } });
     expect(await signing).toBe("cancelled");
@@ -164,7 +163,6 @@ describe("the sign-in generation", () => {
     const listing = listWorkspaces(signIn.client);
     await vi.waitFor(() => expect(server.calls).toHaveLength(1));
     const signingOut = account.signOut();
-    // Synchronously: the generation moved, and the request aborted.
     expect(signIn.isCurrent()).toBe(false);
     expect(server.calls[0]!.signal.aborted).toBe(true);
     expect(account.state()).toEqual({
@@ -276,14 +274,12 @@ describe("signing out", () => {
     });
     expect(tokens.current()).toEqual(SAVED);
     expect(server.paths()).toContain("POST /sync/account/sessions/s-phone/revoke");
-    // Reading the store again doesn't bring the account back while its delete is still owed.
     await account.restore();
     expect(account.state()).toMatchObject({ status: "signed-out", forgetFailed: true });
 
     await account.retryForget();
     expect(account.state()).toMatchObject({ status: "signed-out", forgetFailed: false });
     expect(tokens.current()).toBeNull();
-    // The next launch finds nothing to sign in with.
     const relaunched = createAccount({ store: tokens.store, fetch: server.fetch });
     await relaunched.restore();
     expect(relaunched.state()).toMatchObject({ status: "signed-out" });

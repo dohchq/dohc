@@ -241,7 +241,6 @@ function readJson(path) {
 }
 
 const quiet = { memoryPeak: 1, oomKills: 0, fetched: true };
-/** The scope's command as it ends: an optional receipt and log, the scope's record, then an optional failure. */
 const ends =
   ({ receipt, log, scope = quiet, exitCode } = {}) =>
   (output) => {
@@ -274,7 +273,6 @@ test(
       bundle.args.slice(3).map((arg) => arg.replace(/linux\/\w+\//u, "linux/<run>/")),
       ["refs/verification-linux/<run>/head", "refs/verification-linux/<run>/base", `^${known}`],
     );
-    // The stale ref and the run's own refs are gone afterwards.
     assert.equal(result.refs.size, 0);
     const wsl = result.calls
       .filter((call) => call.executable === "wsl.exe")
@@ -511,7 +509,6 @@ test("cargo's last error decides a network failure: one cargo retries, not the w
     ),
     true,
   );
-  // A retry that worked, then a missing crate or the lockfile.
   assert.equal(networkFailed(warned(http(503)) + causedBy(http(404))), false);
   assert.equal(networkFailed(warned(resolveHost) + stale), false);
   assert.equal(networkFailed(stale), false);
@@ -664,7 +661,6 @@ test(
     const short = await job({ synced: "cached 0\n", freeMemory: () => 1, waitMs: 300 });
     assert.equal(short.error.environment, "linux admission");
     assert.deepEqual(short.slotsLeft, []);
-    // The stop arrives during the memory wait: the hold's first look at memory sends it.
     const stop = new AbortController();
     let looked = false;
     const { error, calls } = await job({

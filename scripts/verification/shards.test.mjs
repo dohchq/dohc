@@ -1704,7 +1704,6 @@ test("delayed job creation in run 43235841741 is unmeasured in both timing check
   );
   const origin = Date.parse(fixture.origin),
     commit = fixture.headSha;
-  // Only the two timing verdicts change; the recorded task and proof jobs passed.
   const jobs = fixture.jobs.map(([name, created, started, completed]) => ({
     name,
     head_sha: commit,

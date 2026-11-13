@@ -351,7 +351,6 @@ it("turns sync to the state whose word is clicked, and leaves it there", async (
     .callback([{ isIntersecting: true }]);
   await vi.advanceTimersByTimeAsync(100);
   const shown = editor.value;
-  // Clicking the current state also stops autoplay, which would go offline within 5 s.
   click("online");
   await vi.advanceTimersByTimeAsync(5000);
   expect(toggle.checked).toBe(true);
