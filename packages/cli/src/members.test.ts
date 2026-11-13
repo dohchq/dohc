@@ -69,9 +69,12 @@ describe("dohc members", () => {
   });
 
   it("exits with the refusal when the server lists no Members page", async () => {
-    const result = await executeCli({ argv: ["members", "list"], cwd: "/workspace", env: {}, request: async () => ({ status: "refused" }) });
-    expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain("Your server does not list Members for this workspace and account.");
+    for (const argv of [["members", "list"], ["members", "list", "--json"]]) {
+      const result = await executeCli({ argv, cwd: "/workspace", env: {}, request: async () => ({ status: "refused" }) });
+      expect(result.exitCode, argv.join(" ")).toBe(1);
+      expect(result.stdout, argv.join(" ")).toBe("");
+      expect(result.stderr, argv.join(" ")).toContain("Your server does not list Members for this workspace and account.");
+    }
   });
 
   it("refuses a caller-supplied workspace or leave at socket parsing", () => {
