@@ -19,7 +19,8 @@ export interface CauseNotice<Code extends FailureCode> {
   // again change nothing. After a dismissal, it files only if the cause
   // failed again since. `cause` is the error as it arrived, for Copy details.
   show(facts: FailureFacts[Code], cause: unknown): void;
-  // The facts the notice shows now, if it shows one.
+  // The facts last filed, if a notice is filed. The shell can drop a report,
+  // so a filed notice may have no row.
   shown(): FailureFacts[Code] | undefined;
   // The cause works again: the row goes, and so does a dismissal.
   resolve(): void;
@@ -55,10 +56,7 @@ export class NoticeOwner {
       },
       show: (facts, cause) => {
         if (run === null) return;
-        if (dismissedAt !== null) {
-          if (failures <= dismissedAt) return;
-          dismissedAt = null;
-        }
+        if (dismissedAt !== null && failures <= dismissedAt) return;
         const words = failureSentence({ code, facts });
         if (filed?.words === words) return;
         const quiet = filed !== null;

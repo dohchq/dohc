@@ -58,6 +58,16 @@ describe("NoticeOwner", () => {
     expect(shown).toHaveLength(1);
   });
 
+  it("ends a dismissal once the cause works", () => {
+    const { shown, row, notice } = opened();
+    notice.failed();
+    notice.show({ read: "last-changes" }, CAUSE);
+    row.dismiss();
+    notice.resolve();
+    notice.show({ read: "last-changes" }, CAUSE);
+    expect(shown).toEqual([{ words: LAST_CHANGES, toast: true }, { words: LAST_CHANGES, toast: true }]);
+  });
+
   it("counts a failure that arrived before the dismissal as dismissed", () => {
     const { shown, row, notice } = opened();
     notice.failed();
