@@ -142,7 +142,8 @@ struct Model {
     /// A local edit is in the note but not yet settled to its file.
     unsettled: bool,
     /// Peer edits entered the note without their file writes: a resync, an
-    /// open or a refused settle drained them. The writes stay owed.
+    /// open or a refused settle drained them. The writes stay owed until a
+    /// settle, a draining close, or a pull with no session writes the note.
     owed: bool,
     /// What the file holds once every write the engine committed lands: the
     /// note as of its last settle, drain, close that wrote, or pull with no
@@ -834,7 +835,7 @@ impl Run {
         match command {
             Command::Open => self.open()?,
             Command::LocalEdit => self.local_edit()?,
-            Command::RemoteApply => self.remote_apply(),
+            Command::RemoteApply => self.remote_apply()?,
             Command::Settle => drop(self.settle()?),
             Command::Close => self.close()?,
             Command::CrashAndReopen(crash) => self.crash(*crash)?,
@@ -897,7 +898,7 @@ impl Run {
         Ok(())
     }
 
-    fn remote_apply(&mut self) {
+    fn remote_apply(&mut self) -> Result<(), TestCaseError> {
         self.model.peer_seq += 1;
         let token = format!(" r{}", self.model.peer_seq);
         let update = self
@@ -913,12 +914,16 @@ impl Run {
         self.engine.pull(live);
         if live {
             self.model.parked.push(update);
-        } else {
-            // An update that does not park first drains any that did.
-            self.drain_owed();
-            self.model.text.apply(&update).expect("model remote");
-            self.model.file = self.model.text.plaintext_string();
+            return Ok(());
         }
+        // An update that does not park first drains any that did. The pull
+        // then writes the whole note and ends every write queued before it.
+        self.drain_parked();
+        self.model.text.apply(&update).expect("model remote");
+        self.model.owed = false;
+        self.model.unsettled = false;
+        self.model.file = self.model.text.plaintext_string();
+        self.check_file("pull")
     }
 
     /// Answers whether the note settled.
@@ -983,6 +988,8 @@ impl Run {
             return Ok(());
         };
         let behind = !self.model.parked.is_empty();
+        // A current settle replays the owed writes before it writes.
+        let replays_owed = matches!(crash, Crash::AfterSettleCommit) && !behind && self.model.owed;
         let point = match crash {
             Crash::DuringEdit | Crash::DuringSettle => FaultPoint::StorageBeforePersist,
             Crash::AfterSettleCommit => FaultPoint::MaterializeAfterJobCommit,
@@ -1043,12 +1050,21 @@ impl Run {
             }
         };
         // A drain answers the sync layer's crash, everything else the
-        // runtime's.
+        // runtime's. A crash in an owed write older than the head's stops
+        // the settle with that write still pending.
         let crashed = matches!(
             answer,
             Err(RuntimeError::OperationCrashed
                 | RuntimeError::Sync(dohc_engine_sync::SyncError::FaultCrash))
-        );
+        ) || (replays_owed
+            && matches!(
+                answer,
+                Err(RuntimeError::Sync(
+                    dohc_engine_sync::SyncError::RetryableState {
+                        reason: "settlement-materialization-pending"
+                    }
+                ))
+            ));
         let fired = faults.fired();
         self.check(fired == stops && crashed == stops, || {
             format!("{crash:?}: the fault fired {fired}, the engine answered {answer:?}")
@@ -1214,6 +1230,19 @@ fn replay(replica: Replica, history: &[Command]) {
     }
 }
 
+/// Replay `history` on both replicas, and report every one that fails.
+fn replay_both(history: &[Command]) {
+    let failures: Vec<String> = [Replica::Device, Replica::Hosted]
+        .into_iter()
+        .filter_map(|replica| {
+            run(replica, history)
+                .err()
+                .map(|error| format!("{replica:?}: {error}"))
+        })
+        .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// #3729: a settle after a drain wrote only the newest owed write, so the
 /// file fell behind the note.
 #[test]
@@ -1228,4 +1257,63 @@ fn a_settle_after_a_drain_writes_every_owed_edit() {
 #[test]
 fn a_pull_that_writes_the_file_ends_its_queued_writes() {
     replay(Replica::Device, &[Command::RemoteApply]);
+}
+
+/// A pull with no session writes the whole note and ends the writes that
+/// earlier drains left owed, so the next settle has nothing to replay.
+#[test]
+fn a_pull_with_no_session_ends_the_writes_drains_left_owed() {
+    use Command::{Close, CrashAndReopen, Open, RemoteApply};
+    let history = [
+        Open,
+        RemoteApply,
+        Open,
+        Close,
+        RemoteApply,
+        Open,
+        CrashAndReopen(Crash::AfterSettleCommit),
+    ];
+    replay_both(&history);
+}
+
+/// The same, with a local edit the settle commits before the crash.
+#[test]
+fn a_settle_after_a_pull_with_no_session_commits_its_own_write() {
+    use Command::{Close, CrashAndReopen, LocalEdit, Open, RemoteApply};
+    let history = [
+        Open,
+        RemoteApply,
+        Open,
+        Close,
+        RemoteApply,
+        Open,
+        LocalEdit,
+        CrashAndReopen(Crash::AfterSettleCommit),
+    ];
+    replay_both(&history);
+}
+
+/// Two drains leave two owed writes. A crash in the earlier one stops the
+/// settle.
+#[test]
+fn a_crash_in_an_earlier_owed_write_stops_the_settle() {
+    use Command::{CrashAndReopen, Open, RemoteApply};
+    let history = [
+        Open,
+        RemoteApply,
+        Open,
+        RemoteApply,
+        Open,
+        CrashAndReopen(Crash::AfterSettleCommit),
+    ];
+    replay_both(&history);
+}
+
+/// A close that drains peer edits writes the local edit with them.
+/// Generation seldom reaches this history.
+#[test]
+fn a_draining_close_writes_the_local_edit() {
+    use Command::{Close, LocalEdit, Open, RemoteApply};
+    let history = [Open, LocalEdit, RemoteApply, Close];
+    replay_both(&history);
 }
