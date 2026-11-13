@@ -31,8 +31,13 @@ test('production services use built images without source mounts or install comm
     assert.ok(service.healthcheck.test);
     assert.ok(!(service.volumes ?? []).some(value => value.startsWith('.:')));
     assert.equal(service.ports, undefined);
-    assert.deepEqual(service.logging, { driver: 'json-file', options: { 'max-size': '10m', 'max-file': '5' } });
   }
+});
+
+test('Docker keeps each long-running container\'s lines up to its own size', () => {
+  const sizes = { 'sync-relay': '10m', 'share-web': '4m', 'workspace-api': '2m', gateway: '10m' };
+  for (const [name, size] of Object.entries(sizes))
+    assert.deepEqual(compose.services[name].logging, { driver: 'json-file', options: { 'max-size': size, 'max-file': '5' } }, name);
 });
 
 test('startup gates data services on their single-use initialization jobs', () => {

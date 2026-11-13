@@ -222,6 +222,8 @@ export interface CreateSyncRelayHandlerOptions {
 }
 
 const MAX_LINK_CURRENT_FILES = 5_000;
+/** The status a request line shows when the client closed the request before its answer (nginx's 499). */
+const CLIENT_CLOSED_REQUEST = 499;
 
 export function createSyncRelayHandler({
   appPublicationLimits,
@@ -1230,6 +1232,11 @@ export function createSyncRelayHandler({
 
       throw relayError("method_not_allowed");
     } catch (error) {
+      // A client that closed its request is not a server fault, and nobody reads this answer. Only the request's
+      // own abort reason is answered quietly; a timeout, storage loss or any other error still logs.
+      if (request.signal.aborted && error === request.signal.reason && !storage.unavailable.aborted) {
+        return new Response(null, {status: CLIENT_CLOSED_REQUEST, headers: {"cache-control": "no-store"}});
+      }
       return errorResponse(error);
     }
   };

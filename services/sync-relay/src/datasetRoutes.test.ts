@@ -125,6 +125,22 @@ it("exposes bounded owner history and denies helpers, strangers, and malformed c
   expect((await f.http(`${f.path}/history?after=x`)).status).toBe(400);
 });
 
+it("answers a dataset read its client closed as closed, without an error line, and still logs any other failure", async () => {
+  const f = await httpFixture();
+  const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const closed = new AbortController(); closed.abort();
+    const read = (handler: typeof f.handler) => handler(new Request(`https://relay/sync/${f.path}`, {headers: {authorization: "Bearer owner"}, signal: closed.signal}));
+    expect((await read(f.handler)).status).toBe(499);
+    expect(errors).not.toHaveBeenCalled();
+    // Only the request's own abort is quiet: another failure after the client left still logs and answers 500.
+    const failing = createSyncRelayHandler({storage: f.storage, datasetHost: f.host, appPublicationLimits: limits, linkKey: "dataset-http-test-key", nowMs: () => 10,
+      resolveActor() {throw new Error("actor lookup failed");}});
+    expect((await read(failing)).status).toBe(500);
+    expect(errors).toHaveBeenCalledWith("[sync-relay] unhandled error", expect.objectContaining({message: "actor lookup failed"}));
+  } finally {errors.mockRestore();}
+});
+
 it("returns the pending-response sentence when another app cannot bind", async () => {
   const f = await httpFixture(); await f.activate();
   const publicationId = f.publish();
