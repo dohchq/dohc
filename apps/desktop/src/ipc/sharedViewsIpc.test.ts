@@ -353,6 +353,40 @@ describe("metadata-only access checks", () => {
     ).toEqual({ status: "current", access: "view" });
     expect(h.reconcile).not.toHaveBeenCalled();
   });
+  // A membership's level is the owner's member level now, not the one it
+  // opened with, so it follows the relay both ways. Its scope never moves.
+  it("follows a membership's level up and down, keeping the whole-workspace pin", async () => {
+    const h = await harness();
+    h.workspace.shareView!.grantedSelector = {
+      paths: [],
+      versionId: null,
+      access: "view",
+      wholeWorkspace: true,
+    };
+    h.fetchAccess.mockResolvedValue("edit");
+    expect(
+      await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload),
+    ).toEqual({ status: "current", access: "edit" });
+    expect(h.workspace.shareView!.grantedSelector).toEqual({
+      paths: [],
+      versionId: null,
+      access: "edit",
+      wholeWorkspace: true,
+    });
+    expect(h.narrow).not.toHaveBeenCalled();
+    expect(h.notify).toHaveBeenCalledWith({ workspaceId: "existing", summaryChanged: true });
+    h.fetchAccess.mockResolvedValue("comment");
+    expect(
+      await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload),
+    ).toEqual({ status: "current", access: "comment" });
+    expect(h.narrow).toHaveBeenCalledOnce();
+    expect(h.workspace.shareView!.grantedSelector).toEqual({
+      paths: [],
+      versionId: null,
+      access: "comment",
+      wholeWorkspace: true,
+    });
+  });
   it.each(["workspace", "credentials", "close"])(
     "discards a deferred 404 after %s changes",
     async (change) => {
@@ -644,48 +678,72 @@ describe("registered received-view handlers", () => {
   // arrived, and opening the same folder again continues the pull.
   describe("a membership", () => {
     const member: ShareViewInfo = {
-      ...info, subjectName: "Community", role: "member",
+      ...info,
+      subjectName: "Community",
+      role: "member",
       selector: { paths: [], versionId: null, access: "comment", wholeWorkspace: true },
     };
 
     it("keeps what a failed first pull brought, and Try again continues it in place", async () => {
-      const h = await harness(); h.fetchInfo.mockResolvedValue(member);
+      const h = await harness();
+      h.fetchInfo.mockResolvedValue(member);
       h.reconcile.mockRejectedValueOnce(new Error("relay went away"));
       const first = h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload);
-      await expect(first).rejects.toThrow("dohc could not finish reading Community: relay went away.");
-      await expect(first).rejects.toThrow(`What arrived stays in ${h.openPayload.rootPath}. Try again continues from there.`);
+      await expect(first).rejects.toThrow(
+        "dohc could not finish reading Community: relay went away.",
+      );
+      await expect(first).rejects.toThrow(
+        `What arrived stays in ${h.openPayload.rootPath}. Try again continues from there.`,
+      );
       expect(h.cleanup).not.toHaveBeenCalled();
       expect(h.registry.size).toBe(2);
-      const kept = [...h.registry.values()].find(entry => entry.workspaceId !== "existing")!;
+      const kept = [...h.registry.values()].find((entry) => entry.workspaceId !== "existing")!;
       expect(kept.shareView?.grantedSelector).toEqual(member.selector);
       // The view is usable with what arrived: it opens and the list shows it.
       expect(h.open).toHaveBeenCalledOnce();
       // The folder now holds what arrived, and the same folder continues the pull.
       h.readDir.mockResolvedValue(["notes.md"]);
-      await expect(h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload))
-        .resolves.toMatchObject({ workspace: { workspaceId: kept.workspaceId, rootPath: h.openPayload.rootPath } });
+      await expect(
+        h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload),
+      ).resolves.toMatchObject({
+        workspace: { workspaceId: kept.workspaceId, rootPath: h.openPayload.rootPath },
+      });
       expect(h.createFolder).toHaveBeenCalledOnce();
       expect(h.reconcile).toHaveBeenCalledTimes(2);
       expect(h.registry.size).toBe(2);
     });
 
     it("continues only its own copy: another share or account still needs an empty folder", async () => {
-      const h = await harness(); h.fetchInfo.mockResolvedValue(member);
+      const h = await harness();
+      h.fetchInfo.mockResolvedValue(member);
       h.reconcile.mockRejectedValueOnce(new Error("relay went away"));
-      await expect(h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload)).rejects.toThrow("Try again");
-      const kept = [...h.registry.values()].find(entry => entry.workspaceId !== "existing")!;
+      await expect(
+        h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload),
+      ).rejects.toThrow("Try again");
+      const kept = [...h.registry.values()].find((entry) => entry.workspaceId !== "existing")!;
       h.readDir.mockResolvedValue(["notes.md"]);
       kept.shareView = { ...kept.shareView!, recipientUserId: "someone-else" };
-      await expect(h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload)).rejects.toThrow("empty folder");
-      kept.shareView = { ...kept.shareView, recipientUserId: credentials.userId, shareId: "another" };
-      await expect(h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload)).rejects.toThrow("empty folder");
+      await expect(
+        h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload),
+      ).rejects.toThrow("empty folder");
+      kept.shareView = {
+        ...kept.shareView,
+        recipientUserId: credentials.userId,
+        shareId: "another",
+      };
+      await expect(
+        h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload),
+      ).rejects.toThrow("empty folder");
       expect(h.createFolder).toHaveBeenCalledOnce();
     });
 
     it("still rolls back when the membership ended before it opened", async () => {
-      const h = await harness(); h.fetchInfo.mockResolvedValue(member);
+      const h = await harness();
+      h.fetchInfo.mockResolvedValue(member);
       h.reconcile.mockResolvedValue({ kind: "refresh", outcome: { ...outcome, status: "ended" } });
-      await expect(h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload)).rejects.toThrow("ended before it could be opened");
+      await expect(
+        h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload),
+      ).rejects.toThrow("ended before it could be opened");
       expect(h.registry.size).toBe(1);
     });
   });

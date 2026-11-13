@@ -908,12 +908,25 @@ export function registerSharedViewsIpcHandlers<
               clearTimeout(timeout);
               // Preserve the file/version pin. A metadata read can narrow access,
               // but cannot expand the scope this local copy was admitted with.
+              // A membership's level is the owner's member level now, so it also
+              // rises; its whole-workspace scope stays as pinned.
               const currentView = operation.workspace.shareView;
               const currentPin = recordedShareSelector(currentView?.grantedSelector);
               if (!currentView || currentView.shareId !== view.shareId || !currentPin)
                 return { status: "unverified" };
               if (currentView.ended) return { status: "ended" };
               const ranks = { view: 0, comment: 1, edit: 2 };
+              if (
+                currentPin.wholeWorkspace === true &&
+                ranks[statedAccess] > ranks[currentPin.access]
+              ) {
+                await setWorkspaceShareView(workspace.workspaceId, {
+                  ...currentView,
+                  grantedSelector: { ...currentPin, access: statedAccess },
+                });
+                refreshNativeWorkspaceSurfaces();
+                notifyRenderer({ workspaceId: workspace.workspaceId, summaryChanged: true });
+              }
               const access =
                 ranks[statedAccess] < ranks[currentPin.access] ? statedAccess : currentPin.access;
               if (access !== currentPin.access) {
