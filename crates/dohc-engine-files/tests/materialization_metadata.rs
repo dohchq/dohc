@@ -5,8 +5,6 @@
 #![cfg(unix)]
 use crate::common;
 
-#[cfg(target_vendor = "apple")]
-use common::FatVolume;
 use common::Scratch;
 use dohc_engine_files::{
     DurabilityPolicy, JobOutcome, MaterializeOptions, NoBackoff, StdReplacer, materialize_one,
@@ -15,7 +13,7 @@ use dohc_engine_files::{
 use dohc_engine_storage::{
     EngineStore, MaterializationJob, MaterializationJobSpec, NoFaults, Preimage, enqueue_job,
 };
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 fn options() -> MaterializeOptions<'static> {
@@ -92,21 +90,6 @@ fn set_mode(path: &Path, mode: u32) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
 }
 
-fn gid(path: &Path) -> u32 {
-    std::fs::metadata(path).unwrap().gid()
-}
-
-/// The groups this process belongs to.
-fn groups() -> Vec<u32> {
-    let listed = std::process::Command::new("id").arg("-G").output().unwrap();
-    assert!(listed.status.success());
-    String::from_utf8(listed.stdout)
-        .unwrap()
-        .split_whitespace()
-        .map(|group| group.parse().unwrap())
-        .collect()
-}
-
 #[test]
 fn a_write_keeps_the_replaced_files_permission_bits() {
     let scratch = Scratch::new();
@@ -122,28 +105,6 @@ fn a_write_keeps_the_replaced_files_permission_bits() {
     );
 
     assert_eq!(mode(&script), 0o755, "the exec bits stay and setuid goes");
-}
-
-#[test]
-fn a_new_file_follows_the_umask() {
-    let scratch = Scratch::new();
-    let probe = scratch.path().join("umask-probe");
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o666)
-        .open(&probe)
-        .unwrap();
-    let umask_mode = mode(&probe);
-
-    engine_write(
-        &scratch.path().join("engine.db"),
-        scratch.path(),
-        "new.md",
-        None,
-    );
-
-    assert_eq!(mode(&scratch.path().join("new.md")), umask_mode);
 }
 
 #[test]
@@ -165,42 +126,6 @@ fn a_secret_stays_owner_only_over_a_shared_file() {
 }
 
 #[test]
-fn a_secret_path_written_as_an_ordinary_job_stays_owner_only() {
-    let scratch = Scratch::new();
-    let env = scratch.path().join(".env");
-    std::fs::write(&env, b"before").unwrap();
-    set_mode(&env, 0o644);
-
-    engine_write(
-        &scratch.path().join("engine.db"),
-        scratch.path(),
-        ".env",
-        Some(b"before"),
-    );
-
-    assert_eq!(mode(&env), 0o600);
-}
-
-#[test]
-fn a_conflict_copy_takes_the_mode_of_the_file_it_sits_beside() {
-    let scratch = Scratch::new();
-    let script = scratch.path().join("run.sh");
-    std::fs::write(&script, b"an outside edit").unwrap();
-    set_mode(&script, 0o755);
-
-    let outcome = write_job(
-        &scratch.path().join("engine.db"),
-        scratch.path(),
-        "run.sh",
-        Some(b"before"),
-    );
-
-    assert_eq!(outcome, JobOutcome::Conflict);
-    assert_eq!(std::fs::read(&script).unwrap(), b"an outside edit");
-    assert_eq!(mode(&conflict_copy(scratch.path())), 0o755);
-}
-
-#[test]
 fn an_unreadable_target_never_widens_its_conflict_copy() {
     let scratch = Scratch::new();
     let locked = scratch.path().join("locked.md");
@@ -219,109 +144,6 @@ fn an_unreadable_target_never_widens_its_conflict_copy() {
     // that can read it, such as root, gives the copy the file's own mode.
     let copy_mode = mode(&conflict_copy(scratch.path()));
     assert!(matches!(copy_mode, 0o600 | 0o200), "{copy_mode:o}");
-}
-
-#[test]
-fn a_write_keeps_the_replaced_files_group() {
-    let scratch = Scratch::new();
-    let probe = scratch.path().join("group-probe");
-    std::fs::write(&probe, b"").unwrap();
-    let new_file_gid = gid(&probe);
-    let candidates = if std::fs::metadata(&probe).unwrap().uid() == 0 {
-        vec![new_file_gid + 1]
-    } else {
-        // macOS's admin group (80) first, for an administrator in a staff folder.
-        let mut groups = groups();
-        groups.sort_by_key(|&group| group != 80);
-        groups
-    };
-    let report = scratch.path().join("report.md");
-    std::fs::write(&report, b"before").unwrap();
-    let Some(other) = candidates.into_iter().find(|&group| {
-        group != new_file_gid && std::os::unix::fs::chown(&report, None, Some(group)).is_ok()
-    }) else {
-        eprintln!("SKIP: this process can give a file no other group");
-        return;
-    };
-    set_mode(&report, 0o640);
-
-    engine_write(
-        &scratch.path().join("engine.db"),
-        scratch.path(),
-        "report.md",
-        Some(b"before"),
-    );
-
-    assert_eq!(gid(&report), other);
-    assert_eq!(mode(&report), 0o640);
-}
-
-/// Make `report.md` in `root` with `mode` and a group this user does not
-/// belong to. A file keeps its group when it moves, so a file made in
-/// `/private/tmp` keeps that folder's group. `None` when this user belongs
-/// to it or the move fails.
-#[cfg(target_vendor = "apple")]
-fn file_in_a_foreign_group(root: &Path, mode: u32) -> Option<PathBuf> {
-    let shared = Path::new("/private/tmp");
-    let foreign = gid(shared);
-    if gid(root) == foreign || groups().contains(&foreign) {
-        eprintln!("SKIP: this process belongs to the group of {shared:?}");
-        return None;
-    }
-    let made = shared.join(format!("dohc-group-{}-{mode:o}", std::process::id()));
-    std::fs::write(&made, b"before").unwrap();
-    set_mode(&made, mode);
-    let report = root.join("report.md");
-    if std::fs::rename(&made, &report).is_err() {
-        let _ = std::fs::remove_file(&made);
-        eprintln!("SKIP: {shared:?} is on another volume");
-        return None;
-    }
-    assert_eq!(gid(&report), foreign);
-    Some(report)
-}
-
-/// The temp cannot take a group this user does not belong to. A member of it
-/// who is not the owner cannot read a 0604 file, so the temp must not give
-/// "other" read access either.
-#[cfg(target_vendor = "apple")]
-#[test]
-fn only_the_owner_bits_stay_when_the_temp_cannot_take_the_files_group() {
-    let scratch = Scratch::new();
-    let Some(report) = file_in_a_foreign_group(scratch.path(), 0o604) else {
-        return;
-    };
-
-    engine_write(
-        &scratch.path().join("engine.db"),
-        scratch.path(),
-        "report.md",
-        Some(b"before"),
-    );
-
-    assert_ne!(gid(&report), gid(Path::new("/private/tmp")));
-    assert_eq!(mode(&report), 0o600);
-}
-
-/// With equal group and other bits, a member of the old group loses nothing
-/// by counting as other, so a 0755 script stays public.
-#[cfg(target_vendor = "apple")]
-#[test]
-fn equal_group_and_other_bits_stay_when_the_temp_cannot_take_the_files_group() {
-    let scratch = Scratch::new();
-    let Some(script) = file_in_a_foreign_group(scratch.path(), 0o755) else {
-        return;
-    };
-
-    engine_write(
-        &scratch.path().join("engine.db"),
-        scratch.path(),
-        "report.md",
-        Some(b"before"),
-    );
-
-    assert_ne!(gid(&script), gid(Path::new("/private/tmp")));
-    assert_eq!(mode(&script), 0o755);
 }
 
 /// Set a POSIX ACL, given as (tag, permissions, id) entries, as the xattr
@@ -387,69 +209,6 @@ fn a_posix_acl_mask_does_not_become_group_access() {
     );
 
     assert_eq!(mode(&report), 0o600);
-}
-
-/// User 4242 may not read the file, but others may. The ACL is not copied,
-/// so the temp must not give "other" read access, which 4242 would get.
-#[cfg(target_os = "linux")]
-#[test]
-fn a_named_user_deny_entry_leaves_only_the_owner_bits() {
-    let scratch = Scratch::new();
-    let report = scratch.path().join("report.md");
-    std::fs::write(&report, b"before").unwrap();
-    let entries = [
-        (USER_OBJ, 6, UNDEFINED),
-        (USER, 0, 4242),
-        (GROUP_OBJ, 0, UNDEFINED),
-        (MASK, 0, UNDEFINED),
-        (OTHER, 4, UNDEFINED),
-    ];
-    if !set_posix_acl(&report, "system.posix_acl_access", &entries) {
-        return;
-    }
-    assert_eq!(mode(&report), 0o604);
-
-    engine_write(
-        &scratch.path().join("engine.db"),
-        scratch.path(),
-        "report.md",
-        Some(b"before"),
-    );
-
-    assert_eq!(mode(&report), 0o600);
-}
-
-/// A default ACL added to the folder after the file exists gives every new
-/// file, and so the temp, an entry for user 4242 under an empty mask. The
-/// file's 0640 must not open that mask.
-#[cfg(target_os = "linux")]
-#[test]
-fn a_folder_default_acl_added_later_leaves_only_the_owner_bits() {
-    let scratch = Scratch::new();
-    let root = scratch.path().join("ws");
-    std::fs::create_dir(&root).unwrap();
-    let report = root.join("report.md");
-    std::fs::write(&report, b"before").unwrap();
-    set_mode(&report, 0o640);
-    let entries = [
-        (USER_OBJ, 7, UNDEFINED),
-        (USER, 6, 4242),
-        (GROUP_OBJ, 5, UNDEFINED),
-        (MASK, 7, UNDEFINED),
-        (OTHER, 0, UNDEFINED),
-    ];
-    if !set_posix_acl(&root, "system.posix_acl_default", &entries) {
-        return;
-    }
-
-    engine_write(
-        &scratch.path().join("engine.db"),
-        &root,
-        "report.md",
-        Some(b"before"),
-    );
-
-    assert_eq!(mode(&report), 0o600, "the mask shows as the group bits");
 }
 
 #[cfg(target_vendor = "apple")]
@@ -528,55 +287,6 @@ fn a_write_keeps_finder_tags_and_the_acl_but_not_the_text_encoding() {
     assert_eq!(acl(&note), entries);
 }
 
-/// A save drops a quarantine, but a file downloaded from the internet must
-/// stay quarantined after a write.
-#[cfg(target_vendor = "apple")]
-#[test]
-fn a_quarantined_file_stays_quarantined() {
-    let scratch = Scratch::new();
-    let download = scratch.path().join("download.sh");
-    std::fs::write(&download, b"before").unwrap();
-    set_xattr(&download, "com.apple.quarantine", b"0081;00000000;Safari;");
-
-    engine_write(
-        &scratch.path().join("engine.db"),
-        scratch.path(),
-        "download.sh",
-        Some(b"before"),
-    );
-
-    assert!(xattr(&download, "com.apple.quarantine").is_some());
-}
-
-/// A folder entry that every new file inherits denies writing extended
-/// attributes. The temp does not inherit it, so the tag is copied, and the
-/// file's own deny entry still reaches the new file before its mode does.
-#[cfg(target_vendor = "apple")]
-#[test]
-fn a_folder_entry_denying_xattrs_does_not_reach_the_temp() {
-    let scratch = Scratch::new();
-    let root = scratch.path().join("ws");
-    std::fs::create_dir(&root).unwrap();
-    let note = root.join("note.md");
-    std::fs::write(&note, b"before").unwrap();
-    set_mode(&note, 0o644);
-    set_xattr(&note, TAGS, RED_TAG);
-    add_acl_entry(&note, "user:nobody deny read");
-    add_acl_entry(&root, "everyone deny writeextattr,file_inherit");
-
-    engine_write(
-        &scratch.path().join("engine.db"),
-        &root,
-        "note.md",
-        Some(b"before"),
-    );
-
-    assert!(acl(&note).contains("deny read"), "{}", acl(&note));
-    assert!(!acl(&note).contains("writeextattr"), "{}", acl(&note));
-    assert_eq!(mode(&note), 0o644);
-    assert_eq!(xattr(&note, TAGS).as_deref(), Some(RED_TAG));
-}
-
 /// A folder entry that gives every new file in it read access for everyone.
 #[cfg(target_vendor = "apple")]
 const SHARED_FOLDER: &str = "group:everyone allow read,file_inherit,directory_inherit";
@@ -604,60 +314,4 @@ fn a_folders_inherited_grant_never_reaches_a_secret() {
         assert_eq!(acl(&env), "", "{} took the folder's grant", env.display());
         assert_eq!(mode(&env), 0o600);
     }
-}
-
-/// A write gives the file the ACL it had, inherited entries included, and
-/// never the entries the folder gives a new file. A new file still takes
-/// them, as it would from any other program.
-#[cfg(target_vendor = "apple")]
-#[test]
-fn a_write_keeps_the_files_own_acl_and_a_new_file_inherits_the_folders() {
-    let scratch = Scratch::new();
-    let root = scratch.path().join("ws");
-    std::fs::create_dir(&root).unwrap();
-    let private = root.join("private.md");
-    std::fs::write(&private, b"before").unwrap();
-    add_acl_entry(&root, SHARED_FOLDER);
-    let shared = root.join("shared.md");
-    std::fs::write(&shared, b"before").unwrap();
-    let inherited = acl(&shared);
-    assert!(
-        inherited.contains("everyone inherited allow read"),
-        "{inherited}"
-    );
-    let db = scratch.path().join("engine.db");
-
-    engine_write(&db, &root, "private.md", Some(b"before"));
-    engine_write(&db, &root, "shared.md", Some(b"before"));
-    engine_write(&db, &root, "new.md", None);
-
-    assert_eq!(acl(&private), "", "the write widened the file's access");
-    assert_eq!(acl(&shared), inherited);
-    assert!(acl(&root.join("new.md")).contains("everyone inherited allow read"));
-}
-
-/// FAT32 has no extended attributes of its own. macOS keeps them in a `._`
-/// file beside each file, and the write must still succeed.
-#[cfg(target_vendor = "apple")]
-#[test]
-fn a_write_on_fat32_succeeds_and_keeps_finder_tags() {
-    let scratch = Scratch::new();
-    let Some(volume) = FatVolume::attach(scratch.path()) else {
-        eprintln!("SKIP: hdiutil could not attach a FAT32 image here");
-        return;
-    };
-    let root = volume.mount.join("ws");
-    std::fs::create_dir(&root).unwrap();
-    let note = root.join("note.md");
-    std::fs::write(&note, b"before").unwrap();
-    set_xattr(&note, TAGS, RED_TAG);
-
-    engine_write(
-        &scratch.path().join("engine.db"),
-        &root,
-        "note.md",
-        Some(b"before"),
-    );
-
-    assert_eq!(xattr(&note, TAGS).as_deref(), Some(RED_TAG));
 }

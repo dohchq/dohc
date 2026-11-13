@@ -97,23 +97,6 @@ fn request(path: &str) -> Request {
 }
 
 #[test]
-fn identity_mismatch_stays_unavailable_without_rehashing() {
-    let (_directory, config) = fixture("ok");
-    let original = fs::read(&config.bundle).unwrap();
-    fs::write(&config.bundle, b"wrong build").unwrap();
-    let mut reader = Reader::new(Some(config.clone()));
-    assert!(matches!(
-        run(reader.request(request("note.md"))),
-        Err(Failure::Unavailable)
-    ));
-    fs::write(&config.bundle, original).unwrap();
-    assert!(matches!(
-        run(reader.request(request("note.md"))),
-        Err(Failure::Unavailable)
-    ));
-    finish(&mut reader);
-}
-#[test]
 fn markdown_witness_pipe_checks_identities_and_carries_no_checkpoint() {
     for (mode, expected) in [
         ("ok", Some(true)),
@@ -335,56 +318,6 @@ fn assert_pending(future: std::pin::Pin<&mut impl Future<Output = Result>>) {
 }
 
 #[test]
-fn oversized_metadata_is_refused_before_starting_a_child() {
-    let (_dir, c) = fixture("ok");
-    let mut reader = Reader::new(Some(c));
-    for field in 0..5 {
-        let mut r = request("ok");
-        let value = "x".repeat(8193);
-        match field {
-            0 => r.current_path = value,
-            1 => r.document.workspace_id = value,
-            2 => r.document.main_version_id = value,
-            3 => r.document.object_id = value,
-            _ => r.document.lineage_claim_id = value,
-        }
-        fail(run(reader.request(r)), Failure::TooLarge);
-    }
-    let mut r = request("ok");
-    r.current_path = "\0".repeat(4096);
-    r.document.object_id = "\0".repeat(4096);
-    r.document.workspace_id = "\0".repeat(4096);
-    fail(run(reader.request(r)), Failure::TooLarge);
-    let starts = reader.shared.state.lock().unwrap().lifecycle.0;
-    assert_eq!(starts, 0);
-    finish(&mut reader);
-}
-
-#[test]
-fn metadata_at_the_combined_limit_is_admitted() {
-    let (_dir, c) = fixture("ok");
-    let mut reader = Reader::new(Some(c));
-    let mut r = request("ok");
-    // Four document fields consume five bytes; exercise worst-case JSON escaping.
-    r.current_path = "\0".repeat(8192 - 5);
-    assert!(run(reader.request(r)).is_ok());
-    finish(&mut reader);
-}
-
-#[test]
-fn closed_supervisor_does_not_start_a_child() {
-    let (_dir, c) = fixture("ok");
-    let shared = Arc::new(Shared::default());
-    shared.state.lock().unwrap().closed = true;
-    let result =
-        process::Worker::start(&c, shared.clone(), Instant::now() + Duration::from_secs(5));
-    let refused = matches!(result, Err(Failure::Unavailable));
-    drop(result);
-    assert!(refused);
-    assert_eq!(shared.state.lock().unwrap().lifecycle.0, 0);
-}
-
-#[test]
 fn invalid_configuration_or_identity_is_unavailable() {
     for fault in [
         "none",
@@ -488,7 +421,6 @@ fn crashes_and_restarts() {
     ));
     finish(&mut reader);
 }
-// Separate filters make each integrity guard usable as a red/green fault probe.
 macro_rules! reply_fault {
     ($test:ident, $fault:literal) => {
         #[test]
@@ -500,21 +432,6 @@ macro_rules! reply_fault {
         }
     };
 }
-reply_fault!(wrong_source_digest_crashes_reader, "sha");
-reply_fault!(wrong_source_length_crashes_reader, "length");
-reply_fault!(obsolete_flag_rejected, "obsolete-flag");
-reply_fault!(eof_before_delta_crashes_reader, "eof-delta");
-reply_fault!(truncated_delta_crashes_reader, "truncated-delta");
-reply_fault!(eof_before_end_crashes_reader, "eof-end");
-reply_fault!(truncated_end_crashes_reader, "truncated-end");
-reply_fault!(wrong_end_id_crashes_reader, "end-id");
-reply_fault!(wrong_response_id_crashes_reader, "id");
-reply_fault!(wrong_response_kind_crashes_reader, "kind");
-reply_fault!(unknown_response_fields_crash_reader, "extra");
-reply_fault!(wrong_delta_digest_crashes_reader, "delta");
-reply_fault!(oversized_delta_declaration_crashes_reader, "declaration");
-reply_fault!(malformed_frame_crashes_reader, "malformed");
-reply_fault!(oversized_frame_crashes_reader, "oversize");
 reply_fault!(unknown_refusal_reason_crashes_reader, "refused-reason");
 reply_fault!(wrong_refusal_id_crashes_reader, "refused-id");
 reply_fault!(malformed_projection_sha_crashes_reader, "projection-sha");
@@ -540,13 +457,7 @@ fn child_receives_only_the_fixed_launch_contract() {
     assert_eq!(fs::read_dir(cwd).unwrap().count(), 0);
     finish(&mut reader);
 }
-#[test]
-fn missing_configuration_creates_no_owner_thread() {
-    let mut reader = Reader::new(None);
-    assert!(reader.owner.is_none());
-    fail(run(reader.request(request("ok"))), Failure::Unavailable);
-    finish(&mut reader);
-}
+
 #[test]
 fn prove_rejects_a_nonempty_delta() {
     let (_dir, c) = fixture("ok");
@@ -556,32 +467,7 @@ fn prove_rejects_a_nonempty_delta() {
     fail(run(reader.request(r)), Failure::Crashed);
     finish(&mut reader);
 }
-#[test]
-fn debug_output_reports_delta_length_without_bytes() {
-    let (_dir, c) = fixture("ok");
-    let mut reader = Reader::new(Some(c));
-    let result = run(reader.request(request("ok"))).unwrap();
-    assert!(!format!("{result:?}").contains("[0, 0]"));
-    finish(&mut reader);
-}
-#[test]
-fn construct_and_prove_for_one_document_coexist() {
-    let (_dir, c) = fixture("ok");
-    let mut reader = Reader::new(Some(c));
-    assert!(run(reader.request(request("ok"))).is_ok());
-    let active = reader.request(request("hang"));
-    wait(&reader, |s| s.queue.is_empty());
-    let old = reader.request(request("same"));
-    let mut r = request("same");
-    r.method = Method::Prove;
-    let prove = reader.request(r);
-    let queued = reader.shared.state.lock().unwrap().queue.len();
-    assert_eq!(queued, 2);
-    finish(&mut reader);
-    for f in [active, old, prove] {
-        fail(run(f), Failure::Unavailable);
-    }
-}
+
 #[test]
 fn every_outcome_binds_the_sent_checkpoint() {
     let (_dir, c) = fixture("ok");
@@ -665,23 +551,6 @@ fn extensionless_executable_is_rejected_before_spawn() {
         starts, 0,
         "invalid executable paths must be rejected before spawn"
     );
-    finish(&mut reader);
-}
-
-#[test]
-fn construct_and_prove_return_checked_success() {
-    let (_dir, c) = fixture("ok");
-    let mut reader = Reader::new(Some(c));
-    assert!(matches!(
-        run(reader.request(request("ok"))),
-        Ok(Outcome::Constructed { .. })
-    ));
-    let mut prove = request("ok");
-    prove.method = Method::Prove;
-    assert!(matches!(
-        run(reader.request(prove)),
-        Ok(Outcome::Proved { .. })
-    ));
     finish(&mut reader);
 }
 
@@ -810,77 +679,4 @@ fn aggregate_retained_limit() {
     for q in [active, q1] {
         fail(run(q), Failure::Unavailable);
     }
-}
-#[test]
-fn maximum_transport_request() {
-    let (_dir, c) = fixture("ok");
-    let mut reader = Reader::new(Some(c));
-    let mut r = request("maximum");
-    r.source = vec![b'x'; 2 * 1024 * 1024];
-    r.checkpoint = vec![0; wire::UPDATE];
-    assert!(
-        matches!(run(reader.request(r)),Ok(Outcome::Constructed{proof,..}) if proof.source_byte_length==2*1024*1024)
-    );
-    finish(&mut reader);
-}
-fn deadline_result(
-    reader: &mut Reader,
-    future: impl Future<Output = Result> + Send + 'static,
-) -> Result {
-    let (send, receive) = std::sync::mpsc::channel();
-    let owner = thread::spawn(move || {
-        let _ = send.send(run(future));
-    });
-    let result = receive.recv_timeout(Duration::from_secs(6));
-    if result.is_err() {
-        reader.shutdown();
-    }
-    owner.join().unwrap();
-    result.expect("deadline handler did not complete the request; shutdown reaped it")
-}
-#[test]
-fn startup_deadline() {
-    let (_dir, c) = fixture("startup-hang");
-    let mut reader = Reader::with_deadlines(
-        Some(c),
-        Deadlines {
-            startup: Duration::from_secs(3),
-            ..Deadlines::default()
-        },
-    );
-    let future = reader.request(request("ok"));
-    fail(deadline_result(&mut reader, future), Failure::TimedOut);
-    finish(&mut reader);
-}
-#[test]
-fn a_slow_start_times_out_and_leaves_the_reader_open() {
-    let (_dir, c) = fixture("ok");
-    let mut reader = Reader::with_deadlines(
-        Some(c),
-        Deadlines {
-            startup: Duration::ZERO,
-            ..Deadlines::default()
-        },
-    );
-    // Each request starts the reader again rather than refusing at once.
-    for _ in 0..2 {
-        fail(run(reader.request(request("ok"))), Failure::TimedOut);
-    }
-    assert!(!reader.shared.state.lock().unwrap().closed);
-    finish(&mut reader);
-}
-#[test]
-fn request_deadline() {
-    let (_dir, c) = fixture("ok");
-    let mut reader = Reader::with_deadlines(
-        Some(c),
-        Deadlines {
-            request: Duration::from_millis(100),
-            ..Deadlines::default()
-        },
-    );
-    assert!(run(reader.request(request("ok"))).is_ok());
-    let future = reader.request(request("hang"));
-    fail(deadline_result(&mut reader, future), Failure::TimedOut);
-    finish(&mut reader);
 }

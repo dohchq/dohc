@@ -16,8 +16,6 @@ pub use held::{
     inspect_held_document, list_held_documents, prove_held_document, release_held_proof,
     shared_proof_failure,
 };
-#[cfg(test)]
-pub(crate) use park::OCCUPANTS_READ;
 pub use park::{
     DepartedDocument, DepartedHead, RetiredFile, departed_hosted_documents,
     departed_hosted_materialization, departed_hosted_object_ids, forget_retired_hosted_file,
