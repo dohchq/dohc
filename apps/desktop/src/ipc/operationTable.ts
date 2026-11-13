@@ -1,4 +1,5 @@
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
+import type { OperationDeclaration, OperationFamily } from "@dohc/workspace-contracts/operation-declaration";
 import type { z } from "zod";
 
 // One row per renderer-to-main operation: the channel, the payload main
@@ -32,6 +33,37 @@ export type OperationDefinition =
     });
 
 export type OperationTable = Readonly<Record<string, OperationDefinition>>;
+
+type DeclaredRow<Declaration extends OperationDeclaration> = {
+  readonly capabilityId: CapabilityId;
+  readonly channel: Declaration["ipc"]["channel"];
+  readonly scope: "workspace";
+  readonly guard: "active-workspace";
+  readonly inactiveMessage: string;
+  readonly payload: z.ZodType<
+    z.output<Declaration["input"]> & { workspaceId: string },
+    z.input<Declaration["input"]> & { workspaceId: string }
+  >;
+  readonly result: Declaration["ipc"] extends { readonly result: infer Result extends z.ZodType } ? Result : Declaration["result"];
+};
+
+// The rows of declared operations. Each runs inside the sending window's
+// active workspace; a declaration cannot choose another guard.
+export function declaredRows<Family extends OperationFamily & { readonly [Name in keyof Family]: { readonly capabilityId: CapabilityId } }>(
+  family: Family,
+  workspaceId: z.ZodType<string>,
+): { readonly [Name in keyof Family]: DeclaredRow<Family[Name]> } {
+  const rows: Record<string, unknown> = Object.fromEntries(Object.entries(family).map(([name, declaration]) => [name, {
+    capabilityId: declaration.capabilityId,
+    channel: declaration.ipc.channel,
+    scope: "workspace",
+    guard: "active-workspace",
+    inactiveMessage: declaration.ipc.inactiveMessage,
+    payload: declaration.input.extend({ workspaceId }),
+    result: declaration.ipc.result ?? declaration.result,
+  }]));
+  return rows as { readonly [Name in keyof Family]: DeclaredRow<Family[Name]> };
+}
 
 type Reply<Definition> =
   Definition extends { readonly result: infer Result extends z.ZodType }

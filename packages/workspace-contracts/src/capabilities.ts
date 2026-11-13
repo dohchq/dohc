@@ -1,9 +1,12 @@
 // Metadata describes existing doors and drives desktop MCP registration. It never invokes a handler or admits a call.
+import { CHAT_DECLARATIONS } from "./chatDeclarations";
+import { LINKS_DECLARATIONS } from "./linksDeclarations";
+import type { McpAccessLevel, OperationDeclaration } from "./operationDeclaration";
+
 export const CAPABILITY_WAYS = ["control", "palette", "menu", "shortcut", "cli", "mcp", "app"] as const;
 export const CAPABILITY_ID_PATTERN = /^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)+$/;
 export const RETIRED_CAPABILITY_IDS: readonly string[] = ["version.try", "version.try.read", "version.try.dismiss"];
 
-type McpAccessLevel = "owner" | "view" | "comment" | "edit";
 export interface CapabilityMetadata {
   readonly description: string;
   readonly ipc: { readonly operations: readonly string[]; readonly reason: string };
@@ -28,10 +31,11 @@ function capability(description: string, exposure: {
   };
 }
 
-export const CAPABILITIES = {
-  "links.edges": capability("Read a bounded page of file links.", { ipc: ["linksEdges"], mcp: { owner: ["dohc_links_edges"], view: ["dohc_links_edges"], comment: ["dohc_links_edges"], edit: ["dohc_links_edges"] } }),
-  "links.in": capability("Read documents that link to a file.", { ipc: ["linksIn"], mcp: { owner: ["dohc_links_in"], view: ["dohc_links_in"], comment: ["dohc_links_in"], edit: ["dohc_links_in"] } }),
-  "links.resolve": capability("Resolve links from one document.", { ipc: ["linksResolve"], mcp: { owner: ["dohc_links_resolve"], view: ["dohc_links_resolve"], comment: ["dohc_links_resolve"], edit: ["dohc_links_resolve"] } }),
+const LISTED_CAPABILITIES = {
+  // withDeclarations adds the IPC rows and MCP tools of the operations declared with these.
+  "links.edges": capability("Read a bounded page of file links.", { ipc: [], mcp: {} }),
+  "links.in": capability("Read documents that link to a file.", { ipc: [], mcp: {} }),
+  "links.resolve": capability("Resolve links from one document.", { ipc: [], mcp: {} }),
   "settings.user.read": capability("Read this computer's user settings.", {ipc: ["getUserSettings"]}),
   "settings.user.reload": capability("Reload and apply this computer's user settings file.", {ipc: ["reloadUserSettings"]}),
   "settings.user.write": capability("Save changes to this computer's user settings.", {ipc: ["setUserSettings"]}),
@@ -225,7 +229,7 @@ export const CAPABILITIES = {
   "history.operation.undo": capability("Undo a delete, move, or rename recorded in History.", {ipc: ["undoHistoryOperation"], mcp: {owner: ["dohc_undo_operation"]}, mcpReason: "Shared profiles omit this owner write. Socket read-only admission and per-verb checks remain the gates."}),
   "history.read": capability("Print a file's text as one change left it.", {ipcReason: "Hand-registered IPC channel readEngineMoment has no operation-table row.", mcp: {owner: ["dohc_read_change"], view: ["dohc_read_change"], comment: ["dohc_read_change"], edit: ["dohc_read_change"]}}),
   "file.chats.list": capability("List chats linked to a workspace file.", {ipc: ["listFileChats"], mcp: {owner: ["dohc_list_file_chats"], view: ["dohc_list_file_chats"], comment: ["dohc_list_file_chats"], edit: ["dohc_list_file_chats"]}}),
-  "chat.read": capability("Read a chat thread.", {ipc: ["listChatMessages", "chatLinks", "chatFileMentionsPage"], mcp: {owner: ["dohc_read_chat", "dohc_chat_links", "dohc_chat_file_mentions"], view: ["dohc_read_chat", "dohc_chat_links", "dohc_chat_file_mentions"], comment: ["dohc_read_chat", "dohc_chat_links", "dohc_chat_file_mentions"], edit: ["dohc_read_chat", "dohc_chat_links", "dohc_chat_file_mentions"]}}),
+  "chat.read": capability("Read a chat thread.", {ipc: ["listChatMessages"], mcp: {owner: ["dohc_read_chat"], view: ["dohc_read_chat"], comment: ["dohc_read_chat"], edit: ["dohc_read_chat"]}}),
   "collection.query": capability("Query a Collection.", {ipcReason: "Hand-registered IPC channel queryCollectionRecords has no operation-table row.", mcp: {owner: ["dohc_query_collection"], view: ["dohc_query_collection"], comment: ["dohc_query_collection"], edit: ["dohc_query_collection"]}}),
   "collection.record.read": capability("Read one Collection record.", {ipcReason: "CLI and MCP action with no IPC channel.", mcp: {owner: ["dohc_read_record"], view: ["dohc_read_record"], comment: ["dohc_read_record"], edit: ["dohc_read_record"]}}),
   "collection.record.edit": capability("Edit fields on a Collection record.", {ipcReason: "CLI and MCP action with no IPC channel.", mcp: {owner: ["dohc_set_record_fields"]}, mcpReason: "Shared profiles omit this owner write. Socket read-only admission and per-verb checks remain the gates."}),
@@ -324,5 +328,28 @@ export const CAPABILITIES = {
   "account.delete.preview": capability("Review what deleting the connected server account removes.", {ipc: ["previewServerAccountDeletion"], mcpReason: "No desktop MCP tool; account deletion needs the account password."}),
   "account.delete": capability("Delete the connected server account with its password.", {ipc: ["deleteServerAccount", "retryServerAccountDisconnect"], mcpReason: "No desktop MCP tool; account deletion needs the account password."}),
 } as const;
+
+// Each declared operation joins its capability after the listed rows and tools.
+function withDeclarations<Listed extends Readonly<Record<string, CapabilityMetadata>>>(
+  listed: Listed,
+  ...families: readonly Readonly<Record<string, OperationDeclaration & { readonly capabilityId: keyof Listed }>>[]
+): Listed {
+  const joined: Record<string, CapabilityMetadata> = { ...listed };
+  for (const family of families) {
+    for (const [name, { capabilityId, mcp }] of Object.entries(family)) {
+      const id = capabilityId as string;
+      const meta = joined[id];
+      if (!meta) throw new Error(`${name} names an unknown capability ${id}.`);
+      joined[id] = {
+        ...meta,
+        ipc: { ...meta.ipc, operations: [...meta.ipc.operations, name] },
+        mcp: { ...meta.mcp, ...Object.fromEntries(mcp.levels.map(level => [level, [...meta.mcp[level], mcp.tool]])) },
+      };
+    }
+  }
+  return joined as Listed;
+}
+
+export const CAPABILITIES = withDeclarations(LISTED_CAPABILITIES, LINKS_DECLARATIONS, CHAT_DECLARATIONS);
 
 export type CapabilityId = keyof typeof CAPABILITIES;

@@ -32,9 +32,6 @@ import {
   ListChatReactionsResult,
   SetChatReactionPayload,
   SetChatReactionResult,
-  ChatLinksPayload, ChatLinksResult,
-  ChatFileMentionsPagePayload,
-  ChatFileMentionsPageResult,
   ListChatMessagesPayload,
   ListChatMessagesResult,
   SendChatMessagePayload,
@@ -47,8 +44,11 @@ import {
   ListChannelThreadsResult,
   StartChannelThreadPayload,
   StartChannelThreadResult,
+  WORKSPACE_ID,
 } from "./bridgeContract";
-import type { OperationTable } from "./operationTable";
+import { CHAT_DECLARATIONS } from "@dohc/workspace-contracts/chat-declarations";
+import { distinct } from "@dohc/workspace-contracts/operation-declaration";
+import { declaredRows, type OperationTable } from "./operationTable";
 
 export const CHATS_STOPPED = "Chats stopped because this window changed workspaces.";
 // A send holds the sending window's workspace operation itself, so a step
@@ -57,7 +57,7 @@ export const CHATS_STOPPED = "Chats stopped because this window changed workspac
 const SEND_ADMISSION = "Only the sending window's active workspace can send. A send that saved answers with that message's ids alone when a later step fails.";
 const ANSWER_ADMISSION = "Only the answering window's active workspace can mark its question answered, under the same workspace operation a send holds.";
 
-export const chatOperations = {
+const listedChatOperations = {
   listFileChats: {
     capabilityId: "file.chats.list", channel: "desktop:list-file-chats",
     scope: "workspace", guard: "active-workspace",
@@ -160,18 +160,6 @@ export const chatOperations = {
     inactiveMessage: "This workspace is no longer active.",
     payload: SetChatReactionPayload, result: SetChatReactionResult,
   },
-  chatLinks: {
-    capabilityId: "chat.read", channel: "desktop:chat-links",
-    scope: "workspace", guard: "active-workspace",
-    inactiveMessage: "Chats stopped because this window changed workspaces.",
-    payload: ChatLinksPayload, result: ChatLinksResult,
-  },
-  chatFileMentionsPage: {
-    capabilityId: "chat.read", channel: "desktop:chat-file-mentions-page",
-    scope: "workspace", guard: "active-workspace",
-    inactiveMessage: "Chats stopped because this window changed workspaces.",
-    payload: ChatFileMentionsPagePayload, result: ChatFileMentionsPageResult,
-  },
   listChatMessages: {
     capabilityId: "chat.read", channel: "desktop:list-chat-messages",
     scope: "workspace", guard: "active-workspace",
@@ -209,3 +197,5 @@ export const chatOperations = {
     payload: StartChannelThreadPayload, result: StartChannelThreadResult,
   },
 } as const satisfies OperationTable;
+
+export const chatOperations = distinct(listedChatOperations, declaredRows(CHAT_DECLARATIONS, WORKSPACE_ID)) satisfies OperationTable;
