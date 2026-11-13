@@ -9,7 +9,6 @@ use dohc_engine_storage::{
 use dohc_test_scratch::ScratchDir;
 
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
 
 fn options(replacer: &dyn AtomicReplacer) -> MaterializeOptions<'_> {
     MaterializeOptions {
@@ -73,7 +72,7 @@ fn p0_real_cross_volume_save_uses_sibling_staging() {
     let name = scratch.path().file_name().unwrap().to_str().unwrap();
     let parent = format!("dev/shm/{name}");
     let rel = format!("{parent}/notes.md");
-    let root = Path::new("/");
+    let root = std::path::Path::new("/");
     std::fs::create_dir(root.join(&parent)).unwrap();
     std::fs::write(root.join(&rel), b"before").unwrap();
     let mut store = EngineStore::open(&scratch.path().join("engine.db"), 0).unwrap();
