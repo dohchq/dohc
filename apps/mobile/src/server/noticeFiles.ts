@@ -24,6 +24,9 @@ export const NOTICE_LIST_FOLDER = "dohc-notices";
 export const NOTICE_MARKS_FOLDER = "dohc-notice-marks";
 export const NOTICE_WRITE_DELAY_MS = 1000;
 
+/** How an ordered save of the list, then the marks, ended. */
+export type ListThenMarks = "saved" | "list-failed" | "marks-failed";
+
 export interface NoticeFiles {
   /** The scope's saved list, unchecked, or null. It never rejects. */
   readList(scope: string): Promise<unknown>;
@@ -31,17 +34,20 @@ export interface NoticeFiles {
   writeList(scope: string, rows: () => readonly unknown[]): void;
   /** The scope's waiting marks, unchecked, or null. It never rejects. */
   readMarks(scope: string): Promise<unknown>;
-  /** Saves the waiting marks now, after every change before it. It never rejects. */
-  writeMarks(scope: string, marks: readonly unknown[]): Promise<void>;
+  /**
+   * Saves the waiting marks now, after every change before it. Resolves false when the save failed, so the disk still
+   * holds an older queue; a clear that drops the save counts as no failure. It never rejects.
+   */
+  writeMarks(scope: string, marks: readonly unknown[]): Promise<boolean>;
   /**
    * Saves the list now, after every change before it, in place of a save that waits. Only once that has landed does it
-   * save the marks `marks` answers then. Resolves whether the list landed; it never rejects.
+   * save the marks `marks` answers then. A list that fails leaves the marks unsaved and unasked. It never rejects.
    */
   writeListThenMarks(
     scope: string,
     rows: readonly unknown[],
     marks: () => readonly unknown[],
-  ): Promise<boolean>;
+  ): Promise<ListThenMarks>;
   /** Saves now a list that waits to be saved. */
   flush(): Promise<void>;
   /** Deletes every scope's files, and drops every write that hasn't landed. */
@@ -143,11 +149,11 @@ export function createNoticeFiles(
     return found?.marks ?? null;
   }
 
-  /** Writes the marks to the slot that doesn't hold the newest, unless a clear came first. */
+  /** Writes the marks to the slot that doesn't hold the newest, unless a clear came first. False if it failed. */
   async function writeSlot(scope: string, list: readonly unknown[], expected: number) {
-    if (epoch !== expected) return;
+    if (epoch !== expected) return true;
     const known = newest.has(scope) ? (newest.get(scope) ?? null) : await readSlots(scope);
-    if (epoch !== expected) return;
+    if (epoch !== expected) return true;
     const next: Slot = {
       slot: known === null || known.slot === 1 ? 0 : 1,
       generation: (known?.generation ?? 0) + 1,
@@ -162,9 +168,11 @@ export function createNoticeFiles(
       if (!marks.exists) marks.create({ intermediates: true });
       await slotFile(scope, next.slot).write(text);
       if (epoch === expected) newest.set(scope, next);
+      return true;
     } catch {
       // That slot may hold part of this save; the other still holds the last whole one, and the next save goes here.
       newest.set(scope, known && { slot: known.slot, generation: known.generation });
+      return false;
     }
   }
 
@@ -192,17 +200,16 @@ export function createNoticeFiles(
     readMarks: (scope) => serial(() => readMarksFile(scope), null),
     writeMarks(scope, list) {
       const expected = epoch;
-      return serial(() => writeSlot(scope, list, expected), undefined);
+      return serial(() => writeSlot(scope, list, expected), false);
     },
     writeListThenMarks(scope, rows, list) {
       const expected = epoch;
       waiting.delete(scope);
       const text = JSON.stringify({ format: NOTICE_LIST_FORMAT, scope, rows });
-      return serial(async () => {
-        if (epoch !== expected || !(await replaceList(scope, text, expected))) return false;
-        await writeSlot(scope, list(), expected);
-        return true;
-      }, false);
+      return serial<ListThenMarks>(async () => {
+        if (epoch !== expected || !(await replaceList(scope, text, expected))) return "list-failed";
+        return (await writeSlot(scope, list(), expected)) ? "saved" : "marks-failed";
+      }, "marks-failed");
     },
     flush: () => saveLists(),
     clear() {

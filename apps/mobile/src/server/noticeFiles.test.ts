@@ -9,7 +9,8 @@ import {
 } from "./noticeFiles";
 
 // A file system in memory, as expo-file-system 58 behaves: a write lands half its text first and can be held there,
-// as a closed app would leave it, and a move over a file deletes that file first, then can fail before it moves.
+// as a closed app would leave it, or fail there, as a full disk would. A move over a file deletes that file first, then
+// can fail before it moves.
 const disk = vi.hoisted(() => ({
   files: new Map<string, string>(),
   folders: new Set<string>(),
@@ -17,6 +18,8 @@ const disk = vi.hoisted(() => ({
   /** Called when a write stops at the hold. */
   onHeld: null as (() => void) | null,
   failMoveAfterDelete: false,
+  /** Writes to files under this folder fail after their first half lands. */
+  failWritesIn: null as string | null,
 }));
 vi.mock("expo-file-system", () => {
   type Part = string | { readonly uri: string };
@@ -39,6 +42,8 @@ vi.mock("expo-file-system", () => {
     async write(text: string) {
       if (!disk.folders.has(parentOf(this.uri))) throw new Error("The folder doesn't exist.");
       disk.files.set(this.uri, text.slice(0, Math.floor(text.length / 2)));
+      if (disk.failWritesIn !== null && this.uri.startsWith(`${disk.failWritesIn}/`))
+        throw new Error("No space left on device.");
       if (disk.heldWrites) {
         disk.onHeld?.();
         await disk.heldWrites;
@@ -113,6 +118,7 @@ beforeEach(() => {
   disk.heldWrites = null;
   disk.onHeld = null;
   disk.failMoveAfterDelete = false;
+  disk.failWritesIn = null;
 });
 
 describe("the Notice files", () => {
@@ -162,6 +168,17 @@ describe("the Notice files", () => {
     held.release();
   });
 
+  it("say whether a marks save landed, and keep the last whole save when one fails", async () => {
+    const files = createNoticeFiles();
+    expect(await files.writeMarks(SCOPE, [mark(1)])).toBe(true);
+    disk.failWritesIn = MARKS;
+    expect(await files.writeMarks(SCOPE, [mark(2)])).toBe(false);
+    expect(await createNoticeFiles().readMarks(SCOPE)).toEqual([mark(1)]);
+    disk.failWritesIn = null;
+    expect(await files.writeMarks(SCOPE, [mark(3)])).toBe(true);
+    expect(await createNoticeFiles().readMarks(SCOPE)).toEqual([mark(3)]);
+  });
+
   it("save the marks only once the list has landed, and keep the last marks when it doesn't", async () => {
     disk.folders.add(MARKS);
     disk.files.set(slotPath(0), slotText(1, [{ ...mark(1), taken: 1 }]));
@@ -173,14 +190,22 @@ describe("the Notice files", () => {
     disk.failMoveAfterDelete = true;
     const files = createNoticeFiles();
     const marks = vi.fn(() => []);
-    expect(await files.writeListThenMarks(SCOPE, [{ noticeId: "a" }], marks)).toBe(false);
+    expect(await files.writeListThenMarks(SCOPE, [{ noticeId: "a" }], marks)).toBe("list-failed");
     expect(marks).not.toHaveBeenCalled();
     // The move deleted the old list, so a relaunch reads none and asks the server; the taken mark is still on disk.
     expect(await createNoticeFiles().readList(SCOPE)).toBeNull();
     expect(await createNoticeFiles().readMarks(SCOPE)).toEqual([{ ...mark(1), taken: 1 }]);
 
     disk.failMoveAfterDelete = false;
-    expect(await files.writeListThenMarks(SCOPE, [{ noticeId: "a" }], marks)).toBe(true);
+    // The list lands, and the marks save after it fails: the taken mark is still on disk.
+    disk.failWritesIn = MARKS;
+    expect(await files.writeListThenMarks(SCOPE, [{ noticeId: "a" }], marks)).toBe("marks-failed");
+    expect(marks).toHaveBeenCalledTimes(1);
+    expect(await createNoticeFiles().readList(SCOPE)).toEqual([{ noticeId: "a" }]);
+    expect(await createNoticeFiles().readMarks(SCOPE)).toEqual([{ ...mark(1), taken: 1 }]);
+
+    disk.failWritesIn = null;
+    expect(await files.writeListThenMarks(SCOPE, [{ noticeId: "a" }], marks)).toBe("saved");
     expect(await createNoticeFiles().readList(SCOPE)).toEqual([{ noticeId: "a" }]);
     expect(await createNoticeFiles().readMarks(SCOPE)).toEqual([]);
   });
@@ -190,6 +215,7 @@ describe("the Notice files", () => {
     const held = hold();
     const writing = files.writeMarks(SCOPE, [mark(1)]);
     files.writeList(SCOPE, () => [{ noticeId: "a" }]);
+    await held.reached;
     const cleared = files.clear();
     held.release();
     await writing;

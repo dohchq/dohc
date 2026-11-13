@@ -241,7 +241,10 @@ function useReport(
       remove(id);
     }
     if (!step.show || state.problem === null) return;
-    const body = accountWords.problem(state.problem, server);
+    const body =
+      state.problem === "storage"
+        ? noticesWords.marksNotStored
+        : accountWords.problem(state.problem, server);
     showToast({
       id,
       tone: "failure",

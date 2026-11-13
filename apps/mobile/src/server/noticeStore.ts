@@ -47,6 +47,9 @@ import type { WorkspaceList, WorkspaceListStore } from "./workspaceList";
 // stays on disk, marked taken with what it left the row as sent (expiry included), until a list saved after it has
 // landed. A relaunch in between gives the list file's row that recorded result, if the row is the one sent or older,
 // and never sends the mark again. One whose row the list file lacks stays on disk until the next whole list is saved.
+// A failed save of the marks file is owed: the store tries it again, backing off, until a save lands, and shows the
+// failure meanwhile, since a close then loses every mark the disk doesn't hold. Each save writes the whole queue, so
+// any later save pays it.
 
 export const NOTICE_RETRY_MS = 1000;
 export const NOTICE_RETRY_MAX_MS = 30_000;
@@ -79,9 +82,12 @@ interface TakenMark extends PendingMark {
 /** The longest wait a timer takes; a later expiry is checked again then. */
 const TIMER_MAX_MS = 2 ** 31 - 1;
 
+/** Why reads or marks are failing: the server's answer, or, for marks, a save to this phone's storage. */
+export type NoticeProblem = ServerProblemKind | "storage";
+
 /** Whether reads or marks are failing: why, and how many times the store has shown so, to report each once. */
 export interface NoticeFailure {
-  readonly problem: ServerProblemKind | null;
+  readonly problem: NoticeProblem | null;
   readonly failures: number;
 }
 
@@ -105,7 +111,7 @@ export interface NoticeStore {
   stop(): void;
   /** Reads the whole list again at once. */
   refresh(): void;
-  /** Sends the waiting marks again at once. */
+  /** Sends the waiting marks again at once, and saves them again if a save is owed. */
   retryMarks(): void;
   mark(noticeId: string, mark: NoticeMark): void;
   /** Marks read every row shown unread. */
@@ -263,6 +269,12 @@ export function createNoticeStore(options: {
   let sending = false;
   /** Ends the marks' wait between tries: Try again, and a move to the background. */
   let kick = new AbortController();
+  /** Failed saves of the marks file since the last one landed. While above 0, a save is owed. */
+  let saveFailures = 0;
+  /** The send's failure, shown unless an owed save's failure is. */
+  let sendProblem: ServerProblemKind | null = null;
+  /** Ends the wait before an owed save's next try: a newer save, or the store's end. */
+  let saveWait: AbortController | null = null;
   let lastKey: string | null = null;
   let unsubscribe: (() => void) | null = null;
   /** Shows the list again when its soonest row expires, while the store runs. */
@@ -325,7 +337,42 @@ export function createNoticeStore(options: {
 
   /** The marks file: taken marks still settling, then the waiting ones, in order. */
   function saveMarks() {
-    if (live()) void files?.writeMarks(scope, [...unplaced, ...settling, ...marks]);
+    if (!live() || !files) return;
+    void files.writeMarks(scope, [...unplaced, ...settling, ...marks]).then(marksSaved);
+  }
+
+  /**
+   * Takes how a save of the whole marks queue ended. The files answer in the order the saves were made, so the last
+   * answer is the newest queue's. A failure shows at once and is tried again; a save that lands takes the failure back.
+   */
+  function marksSaved(landed: boolean) {
+    saveWait?.abort();
+    saveWait = null;
+    if (!live()) return;
+    if (landed) {
+      if (saveFailures === 0) return;
+      saveFailures = 0;
+      // A send failure it covered shows again as a new report.
+      markFailure =
+        sendProblem === null
+          ? { ...markFailure, problem: null }
+          : { problem: sendProblem, failures: markFailure.failures + 1 };
+      return publish();
+    }
+    saveFailures += 1;
+    if (saveFailures === 1) {
+      markFailure = { problem: "storage", failures: markFailure.failures + 1 };
+      publish();
+    }
+    const own = new AbortController();
+    saveWait = own;
+    const delay = Math.min(NOTICE_RETRY_MS * 2 ** (saveFailures - 1), NOTICE_RETRY_MAX_MS);
+    void wait(delay, own.signal).then(
+      () => {
+        if (saveWait === own) saveMarks();
+      },
+      () => undefined,
+    );
   }
 
   /** Saves the list now, and only once it has landed drops the taken marks it holds from the marks file. */
@@ -336,10 +383,15 @@ export function createNoticeStore(options: {
       return saveMarks();
     }
     const done = new Set(settling);
-    void files.writeListThenMarks(scope, [...rows.values()], () => {
-      settling = settling.filter((entry) => !done.has(entry));
-      return [...unplaced, ...settling, ...marks];
-    });
+    void files
+      .writeListThenMarks(scope, [...rows.values()], () => {
+        settling = settling.filter((entry) => !done.has(entry));
+        return [...unplaced, ...settling, ...marks];
+      })
+      .then((result) => {
+        // A list that fails leaves the marks file as it was, owed or not.
+        if (result !== "list-failed") marksSaved(result === "saved");
+      });
   }
 
   // Reading.
@@ -462,6 +514,12 @@ export function createNoticeStore(options: {
     void send();
   }
 
+  /** Reports a send failure. While a save is owed, its failure stays shown instead: a close would lose marks. */
+  function sendFailed(problem: ServerProblemKind) {
+    sendProblem = problem;
+    if (saveFailures === 0) markFailure = { problem, failures: markFailure.failures + 1 };
+  }
+
   function nudge() {
     kick.abort();
     kick = new AbortController();
@@ -528,7 +586,7 @@ export function createNoticeStore(options: {
           // Only a refusal the relay means for good, a 4xx, drops the request's marks. It says so, and the list is
           // read again. A server failure, an answer the phone can't read, or no answer keeps them for the next try.
           refused = error instanceof ServerError && error.problem === "refused";
-          if (refused) markFailure = { problem: "refused", failures: markFailure.failures + 1 };
+          if (refused) sendFailed("refused");
           else {
             failures += 1;
             const delay = Math.min(NOTICE_RETRY_MS * 2 ** (failures - 1), NOTICE_RETRY_MAX_MS);
@@ -539,7 +597,7 @@ export function createNoticeStore(options: {
               (failures >= NOTICE_FAILURES_SHOWN || delay >= NOTICE_RETRY_MAX_MS)
             ) {
               shown = true;
-              markFailure = { problem, failures: markFailure.failures + 1 };
+              sendFailed(problem);
               publish();
             }
             try {
@@ -556,8 +614,11 @@ export function createNoticeStore(options: {
         // A failure after this one is reported again.
         failures = 0;
         shown = false;
-        if (!refused && markFailure.problem !== null)
-          markFailure = { ...markFailure, problem: null };
+        if (!refused) {
+          sendProblem = null;
+          if (markFailure.problem !== null && saveFailures === 0)
+            markFailure = { ...markFailure, problem: null };
+        }
         // The sent marks go. Marks made meanwhile wait for the next request.
         const sent = new Set(batch);
         marks = marks.filter((entry) => !sent.has(entry));
@@ -670,6 +731,7 @@ export function createNoticeStore(options: {
       expiry = null;
       unsubscribe?.();
       kick.abort();
+      saveWait?.abort();
       pull?.abort();
       everything.abort();
     },
@@ -678,6 +740,7 @@ export function createNoticeStore(options: {
     },
     retryMarks() {
       nudge();
+      if (saveFailures > 0) saveMarks();
       void send();
     },
     mark(noticeId, next) {

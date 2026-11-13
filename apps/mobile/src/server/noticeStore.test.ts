@@ -12,7 +12,9 @@ import {
   clearNoticesOnSignInChange,
   createNoticeStore,
   NOTICE_FAILURES_SHOWN,
+  NOTICE_RETRY_MS,
   noticeScope,
+  type NoticeListState,
   type NoticeStore,
 } from "./noticeStore";
 import { noticePageBody, relayRow } from "./testServer";
@@ -134,6 +136,8 @@ type MemoryFiles = NoticeFiles & {
   hold: { beforeList?: ReturnType<typeof gate>; beforeMarks?: ReturnType<typeof gate> };
   /** An ordered save's list write fails. */
   failList: boolean;
+  /** Every save of the marks fails, as on a full disk. */
+  failMarks: boolean;
   /** A list save waits for its debounce, which a closed app never lets run. */
   deferList: boolean;
 };
@@ -147,6 +151,7 @@ function memoryFiles(): MemoryFiles {
     marks,
     hold: {},
     failList: false,
+    failMarks: false,
     deferList: false,
     readList: async (scope) => lists.get(scope) ?? null,
     writeList(scope, rows) {
@@ -154,16 +159,20 @@ function memoryFiles(): MemoryFiles {
     },
     readMarks: async (scope) => marks.get(scope) ?? null,
     async writeMarks(scope, list) {
+      if (files.failMarks) return false;
       marks.set(scope, list);
+      return true;
     },
     // With nothing held, it all lands before the call returns.
     async writeListThenMarks(scope, rows, list) {
       if (files.hold.beforeList) await files.hold.beforeList.pass();
-      if (files.failList) return false;
+      if (files.failList) return "list-failed";
       lists.set(scope, rows);
       if (files.hold.beforeMarks) await files.hold.beforeMarks.pass();
-      marks.set(scope, list());
-      return true;
+      const next = list();
+      if (files.failMarks) return "marks-failed";
+      marks.set(scope, next);
+      return "saved";
     },
     flush: async () => undefined,
     async clear() {
@@ -253,6 +262,18 @@ function setup(
     });
   };
   return { server, timers, files, list, store, ids, signIn, signOut };
+}
+
+/** Resolves once the store's state passes `check`. */
+function until(store: NoticeStore, check: (state: NoticeListState) => boolean) {
+  return new Promise<void>((done) => {
+    if (check(store.state())) return done();
+    const off = store.subscribe(() => {
+      if (!check(store.state())) return;
+      off();
+      done();
+    });
+  });
 }
 
 /** Answers a read with a page, and resolves with the store's next read: by then it has taken the page. */
@@ -699,6 +720,67 @@ describe("marks on the account's Notices", () => {
       { noticeId: "a", mark: "dismissed", atMs: NOW, taken: 1, result: DONE_RESULT },
       { noticeId: "b", mark: "read", atMs: NOW },
     ]);
+  });
+
+  it("shows a marks save that failed, saves again until one lands, and keeps the mark for a relaunch", async () => {
+    const files = memoryFiles();
+    const first = setup({ files });
+    first.store.resume();
+    await reply(first.server, first.server.read(), [relayRow("a")], { replace: true });
+    files.failMarks = true;
+    first.store.mark("a", "dismissed");
+    // The relay hasn't answered the mark; only the save waits to try again.
+    const retry = await first.timers.next();
+    expect(retry.ms).toBe(NOTICE_RETRY_MS);
+    expect(first.store.state().marks).toEqual({ problem: "storage", failures: 1 });
+    expect(files.marks.has(scope)).toBe(false);
+    files.failMarks = false;
+    retry.done();
+    await until(first.store, (state) => state.marks.problem === null);
+    expect(first.store.state().marks).toEqual({ problem: null, failures: 1 });
+    expect(files.marks.get(scope)).toEqual([{ noticeId: "a", mark: "dismissed", atMs: NOW }]);
+    first.store.stop();
+
+    const second = setup({ files });
+    second.store.resume();
+    expect((await second.server.marks()).body).toEqual({
+      marks: [{ noticeId: "a", mark: "dismissed" }],
+    });
+    expect(second.ids()).toEqual([]);
+  });
+
+  it("shows a failed marks save before a relaunch, though no save ever lands", async () => {
+    const files = memoryFiles();
+    const first = setup({ files });
+    first.store.resume();
+    await reply(first.server, first.server.read(), [relayRow("a")], { replace: true });
+    files.failMarks = true;
+    const shown = until(first.store, (state) => state.marks.problem === "storage");
+    first.store.mark("a", "dismissed");
+    await shown;
+    expect(first.store.state().marks).toEqual({ problem: "storage", failures: 1 });
+    // The app closes before any save lands, and before the relay answers.
+    first.store.stop();
+
+    // A disk that never takes a save can't keep the mark; the person was told while dohc was open.
+    const second = setup({ files });
+    second.store.resume();
+    await second.server.read();
+    expect(second.ids()).toEqual(["a"]);
+  });
+
+  it("drops an owed marks save when the sign-in ends", async () => {
+    const { server, timers, store, files, signOut } = setup();
+    store.resume();
+    await reply(server, server.read(), [relayRow("a")], { replace: true });
+    files.failMarks = true;
+    store.mark("a", "dismissed");
+    const retry = await timers.next();
+    const checked = signOut();
+    files.failMarks = false;
+    retry.done();
+    await checked;
+    expect(files.marks.has(scope)).toBe(false);
   });
 
   it("keeps marks a server error failed, and sends them again", async () => {
