@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { DatabaseSync, backup } from "node:sqlite";
 import { mkdtempSync, rmSync, readFileSync, renameSync, copyFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -79,6 +80,78 @@ describe("relay deployment continuity", () => {
       expect(second.storage.claimWorkspace({ workspaceId: "w", ownerUserId: "u", createdAtMs: 1 })).toBe("owned");
     } finally { second.storage.close(); }
   }, 2 * TSX_CHILD_TIMEOUT_MS + 10_000);
+
+  it.each(["relay", "continuity", "lock"])("refuses a missing %s file without recreating it", missing => {
+    const f = fixture();
+    const path = missing === "relay" ? f.relayPath : join(f.continuityDirectory, `${missing}.sqlite`);
+    renameSync(path, path + ".preserved");
+    expect(() => openRelayDeployment(f.configPath)).toThrow();
+    expect(existsSync(path)).toBe(false);
+  });
+
+  it("refuses foreign metadata and leaves the lock available for inspection", () => {
+    const f = fixture(), side = new DatabaseSync(join(f.continuityDirectory, "continuity.sqlite"));
+    side.exec("UPDATE continuity SET namespace='foreign'"); side.close();
+    expect(() => openRelayDeployment(f.configPath)).toThrow(/continuity/);
+    const lock = new DatabaseSync(join(f.continuityDirectory, "lock.sqlite"));
+    try { lock.exec("BEGIN EXCLUSIVE; ROLLBACK"); } finally { lock.close(); }
+  });
+
+  it.each(["older", "ahead", "same-stamp-foreign-nonce", "successor-foreign-lineage", "matching-nonce-wrong-stamp", "foreign-namespace", "foreign-generation"])("refuses a %s database", mismatch => {
+    const f = fixture(), live = openRelayDeployment(f.configPath);
+    live.storage.claimWorkspace({ workspaceId: "acknowledged", ownerUserId: "owner", createdAtMs: 1 });
+    live.storage.close();
+    const sidePath = join(f.continuityDirectory, "continuity.sqlite");
+    const before = read(sidePath, "continuity"), stamp = Number(before.confirmed_stamp);
+    const relay = new DatabaseSync(f.relayPath);
+    try {
+      if (mismatch === "older") relay.prepare("UPDATE sync_relay_continuity SET stamp=?,previous_nonce=?").run(stamp - 1, before.confirmed_nonce);
+      else if (mismatch === "ahead") relay.prepare("UPDATE sync_relay_continuity SET stamp=?,nonce=?,previous_nonce=?").run(stamp + 2, randomUUID(), before.confirmed_nonce);
+      else if (mismatch === "same-stamp-foreign-nonce") relay.prepare("UPDATE sync_relay_continuity SET nonce=?").run(randomUUID());
+      else if (mismatch === "successor-foreign-lineage") relay.prepare("UPDATE sync_relay_continuity SET stamp=?,nonce=?,previous_nonce=?").run(stamp + 1, randomUUID(), randomUUID());
+      else if (mismatch === "matching-nonce-wrong-stamp") relay.prepare("UPDATE sync_relay_continuity SET stamp=?").run(stamp + 2);
+      else if (mismatch === "foreign-namespace") relay.exec("UPDATE sync_relay_continuity SET namespace='foreign'");
+      else relay.exec("UPDATE sync_relay_continuity SET generation=generation+1");
+    } finally { relay.close(); }
+    const prepare = DatabaseSync.prototype.prepare;
+    let checkpointed = false;
+    DatabaseSync.prototype.prepare = function(sql: string) {
+      if (sql === "PRAGMA wal_checkpoint(FULL)" && prepare.call(this, "SELECT 1 FROM sqlite_schema WHERE name='sync_relay_continuity'").get()) checkpointed = true;
+      return prepare.call(this, sql);
+    };
+    try { expect(() => openRelayDeployment(f.configPath)).toThrow(/continuity/); }
+    finally { DatabaseSync.prototype.prepare = prepare; }
+    expect(checkpointed).toBe(false);
+    expect(read(sidePath, "continuity")).toEqual(before);
+  });
+
+  it.each(["negative-stamp", "unsafe-stamp", "invalid-nonce", "null-nonce"])("refuses an invalid record: %s", invalid => {
+    const f = fixture(), live = openRelayDeployment(f.configPath);
+    live.storage.close();
+    const sidePath = join(f.continuityDirectory, "continuity.sqlite"), side = new DatabaseSync(sidePath);
+    try {
+      if (invalid === "negative-stamp") side.exec("UPDATE continuity SET confirmed_stamp=-1");
+      else if (invalid === "unsafe-stamp") side.prepare("UPDATE continuity SET confirmed_stamp=?").run(Number.MAX_SAFE_INTEGER + 1);
+      else if (invalid === "invalid-nonce") side.exec("UPDATE continuity SET confirmed_nonce='invalid'");
+      else side.exec("ALTER TABLE continuity RENAME TO old; CREATE TABLE continuity AS SELECT singleton,namespace,generation,confirmed_stamp,NULL AS confirmed_nonce FROM old; DROP TABLE old");
+    } finally { side.close(); }
+    const before = read(sidePath, "continuity", invalid === "unsafe-stamp");
+    expect(() => openRelayDeployment(f.configPath)).toThrow(/continuity|too large/);
+    expect(read(sidePath, "continuity", invalid === "unsafe-stamp")).toEqual(before);
+  });
+
+  it.each(["round-one-record", "original-record", "old-marker"])("refuses the obsolete %s format without migration", format => {
+    const f = fixture();
+    const db = new DatabaseSync(format === "old-marker" ? f.relayPath : join(f.continuityDirectory, "continuity.sqlite"));
+    try {
+      if (format === "old-marker") db.exec("ALTER TABLE sync_relay_continuity DROP COLUMN previous_nonce; ALTER TABLE sync_relay_continuity DROP COLUMN nonce");
+      else {
+        db.exec("ALTER TABLE continuity DROP COLUMN confirmed_nonce; ALTER TABLE continuity ADD COLUMN next_stamp INTEGER NOT NULL DEFAULT 1");
+        if (format === "round-one-record") db.exec("ALTER TABLE continuity ADD COLUMN pending_stamp INTEGER");
+      }
+    } finally { db.close(); }
+    expect(() => openRelayDeployment(f.configPath)).toThrow("Relay deployment continuity is unavailable.");
+  });
 
   it.each(["before", "after"])("reopens committed data when confirmation throws %s its durable commit", async boundary => {
     const f = fixture(), live = openRelayDeployment(f.configPath);

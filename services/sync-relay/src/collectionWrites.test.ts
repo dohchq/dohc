@@ -1006,6 +1006,22 @@ describe("direct writes through an Edit share link", () => {
     await expectOpaque(await linkWrite(r, [linkCreate("private/automations.yaml", "invalid content")]));
   });
 
+  it.each([
+    ["the session expired", (r: Relay) => sql(r, `UPDATE sync_relay_link_sessions SET expires_at_ms = ${CLOCK}`)],
+  ] as const)("refuses a write and its retry once %s", async (_case, change) => {
+    const r = await linkRelay();
+    const one = automations(STAMP);
+    expect((await linkWrite(r, [linkCreate(`${PACKING}/automations.yaml`, one)])).status).toBe(200);
+    change(r);
+    const two = automations(STAMP.replace("Packed", "Ready"));
+    const next = [linkEdit(`${PACKING}/automations.yaml`, one, two)];
+    await expectOpaque(await linkWrite(r, next, { submitId: "submit-2" }));
+    await expectOpaque(await linkWrite(r, null, { body: "{" }));
+    // A retry of the write that landed learns nothing either.
+    await expectOpaque(await linkWrite(r, [linkCreate(`${PACKING}/automations.yaml`, one)]));
+    expect((await r.owner.directMoments()).length).toBe(1);
+  });
+
   it("refuses a write whose link is revoked inside the write, after the route read its capability", async () => {
     const r = await linkRelay();
     const one = automations(STAMP);
@@ -1056,6 +1072,30 @@ describe("direct writes through an Edit share link", () => {
     expect(await r.owner.directMoments()).toEqual([]);
     expect(principals(r)).toBe(0);
     expect(r.storage.getBlob(WORKSPACE, sha256(one))).toBeNull();
+  });
+
+  it("refuses a session that expires while the write waits, reading the clock inside the write", async () => {
+    let now = CLOCK;
+    const r = await linkRelay({ overrides: { nowMs: () => now } });
+    sql(r, `UPDATE sync_relay_link_sessions SET expires_at_ms = ${CLOCK + 1}`);
+    const one = automations(STAMP);
+    const decision = filterCollectionWriteForShare(
+      { versionId: null, paths: ["trip"], access: "edit" },
+      [create(`${PACKING}/automations.yaml`, one)],
+    );
+    if (!decision.allowed) throw new Error("expected the write to be allowed");
+    now = CLOCK + 1;
+    expect(() => r.storage.commitCollectionWrite({
+      shareId: r.shareId, grantId: LINK_GRANT, grantGeneration: 1,
+      writer: {
+        kind: "link", capabilityHash: hashLinkBearer(TOKEN, LINK_KEY), profileTokenHash: "profile-hash",
+        content: new Map([[sha256(one), Buffer.from(one)]]), now: () => now,
+      },
+      submitId: "submit-1", rawChanges: decision.write.kind === "automations" ? [decision.write.change] : [], write: decision.write,
+      // Sampled before the write waited.
+      nowMs: CLOCK, newId: () => "id",
+    })).toThrow(expect.objectContaining({ code: "not_found" }));
+    expect(await r.owner.directMoments()).toEqual([]);
   });
 
   it("tells a guessed base apart from no other: any base that is not the current file is stale", async () => {

@@ -85,6 +85,25 @@ it("authorizes link publication descriptors from the server session and exact bu
   expect(() => f.storage.authorizeLinkAppPublication({publicEditRelease: undefined, publicationId: published.publicationId, capabilityHash: hashLinkBearer(token, key), profileTokenHash: "profile", nowMs: 3, limits})).toThrow();
 });
 
+it.each(["view", "comment", "edit"] as const)("admits %s links to their app exactly when they may read its files", access => {
+  const f = fixture(), published = f.storage.publishAppPublication(request());
+  f.raw.prepare("UPDATE sync_relay_share_grants SET principal_kind='link', principal_user_id=NULL, principal_email=NULL, access=? WHERE grant_id='g'").run(access);
+  const capabilityHash = hashLinkBearer("A".repeat(43), "test-key");
+  f.storage.mintLinkSession({session: {sessionId: "session", capabilityHash, grantId: "g", generation: 1, mintedAtMs: 2, expiresAtMs: 100}, guard: () => undefined});
+  for (const publicEditRelease of [undefined, {version: 1} as const]) {
+    const input = {publicEditRelease, capabilityHash, profileTokenHash: "profile", nowMs: 3, limits};
+    const admit = () => f.storage.authorizeLinkAppPublication({...input, publicationId: published.publicationId});
+    const list = () => f.storage.listLinkAppPublications(input).page.publications.map(value => value.publicationId);
+    if (access === "edit" && !publicEditRelease) {
+      expect(admit).toThrow(expect.objectContaining({code: "not_found"}));
+      expect(list).toThrow(expect.objectContaining({code: "not_found"}));
+    } else {
+      expect(admit().descriptor.publicationId).toBe(published.publicationId);
+      expect(list()).toEqual([published.publicationId]);
+    }
+  }
+});
+
 it.each(["workspace", "revoked"])("rechecks %s authority before committing", kind => {
   const f = fixture({paths: kind === "selector" ? ["app"] : undefined}), input = request();
   if (kind === "owner") input.ownerUserId = "reader";
@@ -215,7 +234,30 @@ it("serves only public bundle descriptors and verified bytes through the existin
   expect((await f.http(`${f.path}/blobs/${manifest}?authorityRevision=1`)).status).toBe(404);
 });
 
-it.each(["grant", "abort"])("stops a backpressured publication stream after %s", async kind => {
+it.each(["session", "expired", "grant", "generation", "owner", "selector", "version", "withdrawn", "principal", "other-grant", "corrupt-length", "corrupt-hash"])("refuses recipient publication reads after %s changes", async kind => {
+  const f = linkFixture();
+  if (kind === "session") f.raw.prepare("DELETE FROM sync_relay_link_sessions").run();
+  if (kind === "expired") f.setTime(100);
+  if (kind === "grant") f.storage.revokeShareGrant({shareId: "s", grantId: "g", revokedAtMs: 20});
+  if (kind === "generation") f.raw.prepare("UPDATE sync_relay_share_grants SET generation=2").run();
+  if (kind === "owner") f.raw.prepare("UPDATE sync_relay_workspaces SET owner_user_id='lost' WHERE workspace_id='w'").run();
+  if (kind === "selector") f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({paths: ["app"], versionId: null}));
+  if (kind === "version") f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({paths: ["app", "shared"], versionId: "fork"}));
+  if (kind === "withdrawn") f.storage.withdrawAppPublication({workspaceId: "w", publicationId: f.published.publicationId, ownerUserId: "owner", expectedAuthorityRevision: 1});
+  if (kind === "principal") {
+    f.raw.prepare("INSERT INTO sync_relay_link_principals(principal_id,grant_id,mint_generation,profile_token_hash,created_at_ms,blocked_at_ms,storage_bytes) VALUES('p','g',1,'profile',1,2,1)").run();
+    f.raw.prepare("UPDATE sync_relay_link_sessions SET principal_id='p'").run();
+  }
+  if (kind === "other-grant") {
+    f.raw.prepare("INSERT INTO sync_relay_share_grants SELECT 'different',share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id FROM sync_relay_share_grants WHERE grant_id='g'").run();
+    f.raw.prepare("UPDATE sync_relay_app_publications SET grant_id='different'").run();
+  }
+  if (kind === "corrupt-length") f.raw.prepare("UPDATE sync_relay_blobs SET content=x'00' WHERE sha256=?").run(digest(script));
+  if (kind === "corrupt-hash") f.raw.prepare("UPDATE sync_relay_blobs SET content=? WHERE sha256=?").run(Buffer.alloc(script.byteLength), digest(script));
+  expect((await f.http(f.blobPath)).status).toBe(404);
+});
+
+it.each(["withdrawal", "expiry", "abort", "grant", "selector", "principal", "generation", "owner"])("stops a backpressured publication stream after %s", async kind => {
   const f = linkFixture({large: true}), controller = new AbortController();
   const response = await f.http(f.blobPath, {signal: controller.signal});
   expect(response.status).toBe(200);
@@ -401,6 +443,12 @@ it("holds the owner of a takedown made before the hold existed", () => {
   expect(() => f.storage.publishAppPublication({...request(), candidate: edited()})).toThrow(held);
   expect(f.raw.prepare("SELECT owner_user_id,publication_id,held_at_ms FROM sync_relay_app_publishing_holds").all())
     .toEqual([{owner_user_id: "owner", publication_id: p.publicationId, held_at_ms: 30}]);
+it("refuses to recreate a missing marked hold table", () => {
+  const f = fixture();
+  f.raw.exec("DROP TABLE sync_relay_app_publishing_holds");
+  expect(() => openSyncRelayStorage(f.path)).toThrow("App publishing hold schema is missing or damaged.");
+});
+
 });
 
 it("upgrades the existing publication schema without changing publications", () => {
@@ -411,4 +459,9 @@ it("upgrades the existing publication schema without changing publications", () 
   f.storage.disableAppPublication({publicationId: p.publicationId, reason: "Malware", nowMs: 30});
   f.restart();
   expect(f.storage.readAppPublication({...owner, publicationId: p.publicationId, limits}).operatorTakedown?.reason).toBe("Malware");
+});
+it("refuses to recreate a missing marked takedown table", () => {
+  const f = fixture();
+  f.raw.exec("DROP TABLE sync_relay_app_publication_takedowns");
+  expect(() => openSyncRelayStorage(f.path)).toThrow("Publication takedown schema is missing or damaged.");
 });

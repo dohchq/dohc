@@ -172,7 +172,7 @@ it.each(['usage'] as readonly ('journal' | 'provenance' | 'usage')[])('rolls bac
   } finally { f.close() }
 })
 
-it.each(['grant', 'fence'] as readonly ('host' | 'generation' | 'grant' | 'fence' | 'path' | 'owner')[])('checks current %s before exact replay', guard => {
+it.each(['generation', 'grant', 'fence'] as readonly ('host' | 'generation' | 'grant' | 'fence' | 'path' | 'owner')[])('checks current %s before exact replay', guard => {
   const f = registered()
   try {
     const input = f.capture(f.update(), 'delivery', { kind: 'named', userId: 'reader', grantId: 'grant' })
@@ -346,6 +346,20 @@ it.each(['connectionId'] as const)('rejects a different host %s before exact rep
     expect(f.storage.commitLiveUpdateJournal({ ...input, host: changed as typeof input.host }).result)
       .toEqual({ kind: 'refused', reason: 'stale-session' })
     expect(f.journalRows()).toEqual(before)
+it.each(['principalId','grantId','grantGeneration','principalKind'] as const)('compares the captured authority %s before replay', field => {
+  const f = registered()
+  try {
+    const input = f.capture(f.update(), 'delivery', { kind: 'named', userId: 'reader', grantId: 'grant' })
+    expect(f.storage.commitLiveUpdateJournal(input).result.kind).toBe('accepted')
+    const changed = field === 'principalKind' ? { principalKind: 'owner' as const, principalId: 'reader', grantId: null, grantGeneration: null }
+      : { ...input.expectedAuthority, [field]: field === 'grantGeneration' ? 5 : 'other' }
+    const before = f.journalRows()
+    expect(f.storage.commitLiveUpdateJournal({ ...input, expectedAuthority: changed }).result)
+      .toEqual({ kind: 'refused', reason: 'authority-refused' })
+    expect(f.journalRows()).toEqual(before)
+  } finally { f.close() }
+})
+
   } finally { f.close() }
 })
 

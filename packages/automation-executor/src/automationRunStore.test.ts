@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { appendFile, chmod, link, lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, chmod, link, lstat, mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { createTestScratch, testStoreFolder } from "./testScratch";
@@ -148,6 +148,21 @@ describe("the automation run store", () => {
     expect(loaded).toMatchObject({sharedSettlements, undoWrites});
     await restarted.updateState(loaded, {sharedSettlements: [{draft: undoWrites[0]!.draft, state: "not-accepted"}]});
     expect((await restarted.runsOf(AUTOMATION, "settlement")).runs[0]?.sharedSettlements).toHaveLength(2);
+  it.each([11, 12])("saves version 13 and refuses version %s without a compatibility reader", async version => {
+    const root = await createTestScratch("dohc-automation-runs-");
+    const store = createAutomationRunStore(testStoreFolder(root));
+    await store.save({...run("atc_one", "done", 1), undoKept: [{recordId: "rec_a", field: "A", path: "Tasks/a.md", fieldName: "A", datasetRecordId: null}]});
+    const folder = join(root, ".dohc", "local", "automations", "runs", hashOf(AUTOMATION));
+    const path = join(folder, (await readdir(folder)).find(file => file.endsWith(".json"))!);
+    const lines = (await readFile(path, "utf8")).split("\n");
+    const header = JSON.parse(lines[0]!);
+    expect(header.version).toBe(13);
+    header.version = version;
+    lines[0] = JSON.stringify(header);
+    await writeFile(path, lines.join("\n"));
+    await expect(store.runsOf(AUTOMATION, "atc_one")).resolves.toEqual({runs: [], unreadable: true});
+  });
+
   });
 
   it("keeps each claim's runs under the workspace's metadata folder and reads them back as written", async () => {
@@ -334,6 +349,25 @@ describe("the automation run store", () => {
     const reach = { verdicts: [verdict], hostRecord: 7, unproven: [JSON.stringify([AUTOMATION, "h1"])], unprovenAll: true, unprovenPaths: ["Unknown"], unprovenFolders: ["Tasks"], pending: 9, taken: 8 };
     await store.saveReachVerdicts(reach);
     await expect(store.readReachVerdicts()).resolves.toEqual({ ...reach, unreadable: false, missing: false });
+  });
+
+  it("rejects the old two-file layout, a partial header, and a renamed run", async () => {
+    const root = await createTestScratch("dohc-automation-runs-");
+    const store = createAutomationRunStore(testStoreFolder(root));
+    const saved = { ...run("atc_one", null, 1), applied: [] };
+    await store.save(saved);
+    const folder = join(root, ".dohc", "local", "automations", "runs", hashOf(AUTOMATION));
+    const name = (await readdir(folder))[0]!;
+    const path = join(folder, name);
+    const text = await readFile(path, "utf8");
+    const { kind: _kind, ...oldHeader } = JSON.parse(text.split("\n")[0]!);
+    await writeFile(path, JSON.stringify(oldHeader) + "\n");
+    await expect(store.runsOf(AUTOMATION, "atc_one")).resolves.toEqual({ runs: [], unreadable: true });
+    await writeFile(path, text.slice(0, text.indexOf("\n")));
+    await expect(store.runsOf(AUTOMATION, "atc_one")).resolves.toEqual({ runs: [], unreadable: true });
+    await writeFile(path, text);
+    await rename(path, join(folder, name.replace(".json", "x.json")));
+    await expect(store.runsOf(AUTOMATION, "atc_one")).resolves.toEqual({ runs: [], unreadable: true });
   });
 
 });

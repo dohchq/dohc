@@ -243,6 +243,16 @@ it("blocks queued operations and receipt disclosure after binding or data grant 
   const read = f.invoke("helper", id(7));
   f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: null });
   await expect(read).rejects.toThrow("You do not have access to this Collection.");
+it("intersects admin app operations with the explicit data grant and refuses stale views", async () => {
+  const f = await fixture(); await f.activate();
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding([id(6), id(7), id(8)]) });
+  f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { revision: 1, revisionSha256: prepared.revision.revisionSha256, operationIds: [id(7)], discover: false } });
+  await expect(f.invoke("helper", id(7), {}, "form")).resolves.toMatchObject({ result: [] });
+  await expect(f.invoke("helper", id(8), {}, "form")).rejects.toThrow("You do not have access to this Collection.");
+  expect(() => f.host.describe("helper", scope)).toThrow("You do not have access to this Collection.");
+  await expect(f.host.invoke("owner", { ...scope, revision: 1, revisionSha256: "0".repeat(64), operationId: id(6), input: {}, idempotencyKey: "request" })).rejects.toThrow("Its owner must approve this access again.");
+});
+
 });
 
 it("accounts binding and grant replacements by retained size and rolls back quota failures", async () => {
@@ -368,6 +378,36 @@ it("refuses file disclosure when a committed row change removes visibility after
   await expect(f.host.readOperation("owner",{...base,operationId:id(7),input:{},idempotencyKey:"read-visible"},()=>{disclosed=true;return "private receipt";})).rejects.toThrow("The Collection changed before dohc opened this file");
   expect(disclosed).toBe(false);
   expect((await invoke("owner",{...base,operationId:id(7),input:{},idempotencyKey:"check-hidden"})).result).toEqual([]);
+it("lets only owners acknowledge an exact committed response without exposing participant retry secrets", async () => {
+  let refunded = 0;
+  const f = await fixture({accountMetadata(_context, allocation) {refunded += allocation.bytes;}}); await f.activate();
+  f.host.setBinding("owner", {...scope, appId: "form", binding: f.binding()});
+  const attempts = createDatasetAttempts({db: f.db, transaction: f.transaction, account() {}});
+  const attemptScope = {...scope, appId: "form", principalKey: "friend", operationId: id(6), revisionSha256: prepared.revision.revisionSha256};
+  const pending = attempts.request(attemptScope, {action: "save", idempotencyKey: "request", input: {value: "private answer"}}, () => {});
+  const unconfirmed = f.host.pendingAttempts("owner", scope).entries[0]!;
+  expect(unconfirmed).toMatchObject({operation: "Submit", outcome: "unconfirmed", revision: null, recordedAtMs: null});
+  expect(() => f.host.reconcileAttempt("owner", {...scope, reference: unconfirmed.reference, acknowledge: true})).toThrow("unconfirmed");
+  await f.invoke("friend", id(6), {value: "private answer"}, "form");
+  const review = f.host.pendingAttempts("owner", scope);
+  expect(review.entries[0]).toMatchObject({reference: unconfirmed.reference, operation: "Submit", outcome: "committed", revision: 1, attachmentCount: 0});
+  expect(JSON.stringify(review)).not.toMatch(/private answer|friend|idempotency|principal|token/);
+  for (const caller of ["friend", "helper"] as const) {
+    expect(() => f.host.pendingAttempts(caller, scope)).toThrow("You do not have access to this Collection.");
+    expect(() => f.host.reconcileAttempt(caller, {...scope, reference: unconfirmed.reference, acknowledge: true})).toThrow("You do not have access to this Collection.");
+  }
+  expect(() => f.host.reconcileAttempt("owner", {...scope, reference: unconfirmed.reference, acknowledge: false as true})).toThrow("Review");
+  const before = refunded;
+  expect(f.host.reconcileAttempt("owner", {...scope, reference: unconfirmed.reference, acknowledge: true})).toEqual({cleared: true});
+  expect(refunded).toBeLessThan(before);
+  expect(attempts.request(attemptScope, {action: "get"}, () => {})).toEqual({attempt: null});
+  expect((await f.invoke("friend", id(6), {value: "private answer"}, "form")).replayed).toBe(true);
+  const next = attempts.request(attemptScope, {action: "save", idempotencyKey: "new", input: {value: "Next"}}, () => {});
+  f.host.reconcileAttempt("owner", {...scope, reference: unconfirmed.reference, acknowledge: true});
+  expect(attempts.request(attemptScope, {action: "get"}, () => {})).toEqual(next);
+  expect(next.attempt!.token).not.toBe(pending.attempt!.token);
+});
+
 });
 
 it("cancels an unconfirmed retry before queued execution and permanently refuses its key", async () => {
@@ -475,6 +515,18 @@ it("reads approved fields for link and named recipients, preserves form creates,
   f.host.setBinding("owner", { ...scope, appId: "form", binding: null });
   await expect(f.invoke("friend", id(7))).rejects.toThrow("access");
 });
+it("confines approved reads to their own table after a full-table operation", async () => {
+  const f = await linkReadFixture();
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.approved });
+  await f.invoke("owner", id(6), { values: { [id(4)]: "First" } }, false);
+  const original = f.supervisor.invoke.bind(f.supervisor);
+  vi.spyOn(f.supervisor, "invoke").mockImplementation(input => {
+    expect(input.tables).toEqual(["items"]);
+    return original(input);
+  });
+  await expect(f.invoke("friend", id(7))).resolves.toMatchObject({ result: { rows: [{ values: { [id(4)]: "First" } }] } });
+});
+
 
 it("refuses executable source that differs from the verified generated artifact", async () => {
   const f = await linkReadFixture();
@@ -508,6 +560,53 @@ it("attributes an owner's write to its agent at any depth from 0, through an app
   agent = { depth: 0 }; named = true;
   await expect(invoke("named", "form")).rejects.toThrow("You do not have access to this Collection.");
   expect(f.host.automationClaims.next(scope.workspaceId)).toBeNull();
+it("names the person a commit is made for from the host's context, never the owner key, and none for a link", async () => {
+  type Caller = "owner" | "named" | "link" | "automation";
+  let caller: Caller = "owner", person: string | undefined, agent: { depth: number; agentId?: string } | undefined;
+  const callers = {
+    owner: { kind: "owner", userId: "owner-key" },
+    named: { kind: "named", userId: "user-ana", grantId: "member", access: "edit", helper: false },
+    link: { kind: "link", principalId: "visitor", grantId: "link" },
+    automation: { kind: "automation", automationId: "collection:orders#stamp" },
+  } as const;
+  const f = await fixture({ resolveAuthority: (_context, request) => ({ principalKey: caller, caller: callers[caller],
+    ...(request.access.kind === "app" ? { appId: "form" } : {}),
+    ...(caller === "automation" ? { chainDepth: 1 } : {}), ...(agent ? { agent } : {}), ...(person === undefined ? {} : { person }) }) });
+  await f.activate();
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding() });
+  f.host.automationClaims.subscribe(scope, { automationId: "watch", tableId: id(2), kinds: ["added"], fieldIds: null, definitionHash: "a".repeat(64) });
+  // A named person or a link writes through the app the owner shared.
+  const commit = async (idempotencyKey: string) => {
+    const app = caller === "named" || caller === "link" ? { access: { kind: "app" as const, appId: "form" } } : {};
+    await f.host.invoke("owner", { ...scope, revision: 1, revisionSha256: prepared.revision.revisionSha256, operationId: id(6), input: { value: idempotencyKey }, idempotencyKey, ...app });
+    return f.host.automationClaims.next(scope.workspaceId)?.actor;
+  };
+  // The owner's own commit and its agent's name the person main gave, not the owner key.
+  person = "user-ice";
+  expect(await commit("owner")).toEqual({ kind: "owner", userId: "user-ice" });
+  agent = { depth: 0 };
+  expect(await commit("agent")).toEqual({ kind: "agent", depth: 0, userId: "user-ice" });
+  // An agent the person runs themselves names its id.
+  agent = { depth: 0, agentId: "terminal" };
+  expect(await commit("agent-you-run")).toEqual({ kind: "agent", depth: 0, agentId: "terminal", userId: "user-ice" });
+  agent = undefined;
+  // An automation's commit names the person whose change started its run.
+  caller = "automation";
+  expect(await commit("automation")).toEqual({ kind: "automation", automationId: "collection:orders#stamp", depth: 1, userId: "user-ice" });
+  // With no person known, the owner's commit names nobody.
+  caller = "owner"; person = undefined;
+  expect(await commit("nobody")).toEqual({ kind: "owner" });
+  // A named person is their own person, and a link names nobody: neither may name another.
+  caller = "named";
+  expect(await commit("named")).toEqual({ kind: "named", userId: "user-ana", appId: "form" });
+  caller = "link";
+  expect(await commit("link")).toEqual({ kind: "link", appId: "form" });
+  for (const refused of ["named", "link"] as const) {
+    caller = refused; person = "user-ice";
+    await expect(commit(`claimed-${refused}`)).rejects.toThrow("You do not have access to this Collection.");
+  }
+});
+
 });
 
 it("keeps a Collection still importing, and names only the asking workspace's Collections and imports", async () => {

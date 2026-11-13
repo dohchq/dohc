@@ -58,6 +58,16 @@ it("a persist error clears the pending view before reporting a failed restore fl
   } finally {await supervisor.close();vi.restoreAllMocks();}
 });
 
+it.each(["replication_epoch","stream_identity"])("current reads fail closed on a mismatched floor %s",async column=>{
+  const f=await fixture();f.save();const source={currentReadView:()=>({view:f.latest})};
+  f.db.exec(`UPDATE sync_relay_history_grant_floors SET ${column}='previous' WHERE grant_id='g'`);
+  for(const current of [undefined,source]) {
+    expect(f.storage.readReplicaCurrentViewFile({...f.input,path:"docs/a.md"},current)).toEqual({status:"updating"});
+    expect(f.storage.listReplicaCurrentViewFiles(f.input,current)).toEqual({status:"updating"});
+    expect(f.storage.listReplicaHistoryPins(f.input,current)).toEqual({status:"updating"});
+  }
+});
+
 it("Undo raises the restored grant floor past private edits made during removal",async()=>{
   const f=await fixture();f.save();
   const removal=f.storage.removeShareAccess({shareId:"g",grantId:"g",actorUserId:"owner",nowMs:100_000});
@@ -162,6 +172,22 @@ function replacementEvidence(db: ReturnType<typeof inspectDatabase>, stream: str
     VALUES (?,?, 'w','main',?,?,'docs/a.md','["docs"]',1,'owner','owner',1,1,x'01','ns',1,?,1,2,'[{"clientId":1,"startClock":0,"endClock":1}]')
     RETURNING journal_cursor`).get(`delivery-${object}-${db.prepare("SELECT count(*) AS n FROM sync_relay_live_update_journal").get()!.n}`,sha256("update"),object,sha256("lineage"),sha256("evidence"))!.journal_cursor);
 }
+it("does not carry snapshot.previous below the grant floor through a restore fence",async()=>{
+  const f=await fixture(false),lineage=sha256("lineage");
+  f.db.exec(`INSERT INTO sync_relay_live_documents
+    (workspace_id,main_version_id,object_id,lineage_claim_id,current_path,lineage_state,admission_state,restore_fence_generation,registered_at_ms,
+    baseline_moment_relay_seq,baseline_projected_sha256,baseline_projected_byte_length,baseline_digest,baseline_bytes)
+    VALUES ('w','main','object','${lineage}','docs/a.md','current','open',2,1,1,'${lineage}',0,'${lineage}',x'01')`);
+  const previous=f.view("private paragraph",{lineageClaimId:lineage,restoreGeneration:2});f.save(previous);
+  replacementEvidence(f.db,"log");f.grant("late");
+  const view=f.view("public",{lineageClaimId:lineage,restoreGeneration:1}),input={...f.input,grantId:"late",path:"docs/a.md"};
+  expect(f.storage.readReplicaCurrentViewFile(input,{currentReadView:()=>({view,previous})})).toEqual({status:"updating"});
+  expect(f.storage.listReplicaCurrentViewFiles(input,{currentReadView:()=>({view,previous})}))
+    .toMatchObject({files:[{path:"docs/a.md",status:"updating"}]});
+  expect(f.storage.readReplicaCurrentViewFile(input,{currentReadView:()=>({view,previous:{...previous,logCursor:view.logCursor}})}))
+    .toMatchObject({text:"private paragraph"});
+});
+
 
 it("captures link and redeemed dependent floors in their grant transactions and rolls them back",async()=>{
   const f=await fixture();f.save();f.at(130_000);f.save();const id=String(f.pins()[0]!.pin_id);
@@ -253,6 +279,18 @@ it("keeps pins, text references and the policy clock across a relay restart", as
   f.at(130_000); f.save(); const id = String(f.pins()[0]!.pin_id);
   f.at(140_000); replacementEvidence(f.db,"log"); f.save(f.view("next")); f.restart(); expect(f.read(id)).toMatchObject({text:"initial"});
   expect(f.db.prepare("SELECT ref_count FROM sync_relay_replica_cut_text_refs WHERE sha256=?").get(sha256("initial"))).toMatchObject({ref_count:1});
+});
+
+it.each(["workspace-owner","share-delete","share-owner"])("deletes pin data on %s", async change => {
+  const f = await fixture(); f.save(); f.at(130_000); f.save(); expect(f.pins()).toHaveLength(1);
+  if (change === "last-share") for (const id of ["g","wide"]) f.storage.revokeShareGrant({shareId:id,grantId:id,revokedAtMs:140_000});
+  else if (change === "share-delete") f.db.exec("DELETE FROM sync_relay_shares");
+  else if (change === "share-owner") f.db.exec("UPDATE sync_relay_shares SET granter_user_id='other'");
+  else if (change === "workspace-owner") f.db.exec("UPDATE sync_relay_workspaces SET owner_user_id='other'");
+  else f.db.exec(`UPDATE sync_relay_workspaces SET ${change === "epoch" ? "replication_epoch" : "stream_identity"}='new'`);
+  expect(f.pins()).toHaveLength(0);
+  expect(f.db.prepare("SELECT count(*) AS n FROM sync_relay_replica_cut_texts").get()).toMatchObject({n:0});
+  expect(f.db.prepare("SELECT * FROM sync_relay_replica_cut_text_refs").all()).toEqual([]);
 });
 
 it("accountless History projects paths and omits authors, without internal cursors", async () => {

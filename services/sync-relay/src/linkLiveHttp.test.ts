@@ -65,6 +65,23 @@ it("derives gateway authority only after ticket enrollment and refuses a differe
   expect((await f.handle(request({discriminator}, "/sync/live/link-session", {"x-dohc-link-profile-secret": other}))).status).toBe(404);
   for (const secret of [bearer, profile, f.context.capabilityHash, f.context.profileTokenHash]) expect(JSON.stringify(value)).not.toContain(secret);
 });
+it.each([
+  {origin: "https://foreign.test"}, {host: "foreign.test"}, {"x-dohc-relay-exchange-key": "wrong"},
+  {authorization: ""}, {"x-dohc-link-profile-secret": ""},
+] as Record<string, string>[])("refuses missing or mismatched private authority %j", async headers => {
+  const f = await fixture(); expect((await f.handle(request(undefined, undefined, headers))).status).toBe(404);
+});
+
+it.each(["revoked", "expired", "pinned"])("refuses current authority after %s transition", async mode => {
+  const f = await fixture();
+  if (mode === "revoked") f.storage.revokeShareGrant({shareId: scope.shareId, grantId: scope.grantId, revokedAtMs: 1000});
+  if (mode === "expired") vi.mocked(Date.now).mockReturnValue(61_000);
+  if (mode === "pinned") f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({paths: ["docs"], versionId: "side"}));
+  const response = await f.handle(request());
+  expect(response.status).toBe(404);
+  expect(await response.text()).toBe('{"ok":false,"error":"not found"}');
+});
+
 
 it.each(["view"] as const)("explains %s access only for an existing file in scope", async access => {
   const f = await fixture();
@@ -94,4 +111,3 @@ it("explains a document the session host blocked as unavailable until the block 
 // A link sees each share root by its own name, so a nested folder named
 // shared-with-me shows as the reserved top-level folder, which no binding can
 // hold. The share is valid and covers the file, so only the link's view refuses.
-

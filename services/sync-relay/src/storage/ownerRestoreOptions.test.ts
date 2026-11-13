@@ -161,6 +161,18 @@ describe("owner restore options", () => {
     expect(f.read().grants.map(g => g.grantId)).toEqual([scope.grantId]);
   });
 
+  it("returns safe link and email recipient summaries without credentials", async () => {
+    const f = await fixture();
+    f.raw.prepare(`INSERT INTO sync_relay_share_grants (grant_id,share_id,principal_kind,principal_email,access,generation,status,created_at_ms)
+      VALUES ('email',?,'email','person@example.test','edit',1,'active',0)`).run(scope.shareId);
+    f.raw.prepare(`INSERT INTO sync_relay_share_grants (grant_id,share_id,principal_kind,access,generation,status,created_at_ms)
+      VALUES ('link',?,'link','edit',1,'active',0)`).run(scope.shareId);
+    expect(f.read().grants).toContainEqual({shareId: scope.shareId, grantId: "email", generation: 1,
+      principalKind: "email", userId: null, email: "person@example.test"});
+    expect(f.read().grants).toContainEqual({shareId: scope.shareId, grantId: "link", generation: 1,
+      principalKind: "link", userId: null, email: null});
+  });
+
   it("recovers the pending operation even after its grant is revoked", async () => {
     const f = await fixture(); f.begin();
     expect(f.read().pendingOperation).toEqual({operationId: "restore", phase: "authority-invalidated", proposalDigest: null});

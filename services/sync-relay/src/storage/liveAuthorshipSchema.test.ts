@@ -10,9 +10,12 @@ import {
   testStorage,
   type InspectionDatabase } from "../testing";
 import {
+  initializeLiveAuthorshipSchema,
   LIVE_AUTHOR_CLIENTS,
   LIVE_AUTHOR_COLUMNS,
   LIVE_AUTHOR_MIGRATION } from "./liveAuthorshipSchema";
+
+import type {SqliteDb} from "./types";
 
 afterEach(closeTestStorages);
 
@@ -82,6 +85,16 @@ it("refuses declared v1 relay evidence before migration and preserves its rows a
   const check = inspectDatabase(path);
   expect(schemaSnapshot(check)).toEqual(before);
   expect(check.prepare("SELECT * FROM sync_relay_live_update_agent_declarations").all()).toEqual(rows);
+});
+
+it("refuses a missing marker without adopting or repairing migrated objects", async () => {
+  const {path, db} = await closedDatabase();
+  db.prepare("DELETE FROM sync_relay_migrations WHERE migration_id=?").run(LIVE_AUTHOR_MIGRATION);
+  const before = schemaSnapshot(db);
+  expect(() => initializeLiveAuthorshipSchema(db as SqliteDb)).toThrow("live author schema is missing or damaged");
+  db.close();
+  expect(() => reopenTestStorage(path)).toThrow(/schema is missing or damaged/);
+  expect(schemaSnapshot(inspectDatabase(path))).toEqual(before);
 });
 
 it.each([LIVE_AUTHOR_CLIENTS])("refuses missing migrated object %s", async name => {

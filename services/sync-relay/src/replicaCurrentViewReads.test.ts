@@ -146,6 +146,12 @@ it.each(["wrong-text"])("an unpersisted %s view cannot return text", async corru
   if (corruption === "wrong-text") view.texts[0]!.text="wrong text";
   const source = {currentReadView:() => ({view})};
   expect(f.storage.readReplicaCurrentViewFile({...f.input,path:"docs/a.md"},source)).toEqual({status:"updating"});
+it("rejects a previous snapshot from another workspace", async () => {
+  const f = await fixture();
+  const view = f.view(), previous = {...f.view(), workspaceId:"other"};
+  expect(f.storage.readReplicaCurrentViewFile({...f.input,path:"docs/a.md"},{currentReadView:()=>({view,previous})})).toEqual({status:"updating"});
+});
+
 });
 
 it("a pending restore without a saved row reads as updating", () => {
@@ -263,4 +269,3 @@ it("round1: a cached manifest stays attached to its SQLite read snapshot", async
   expect(f.storage.readReplicaCurrentViewFile({...f.input,path:"docs/a.md"},source)).toMatchObject({text:"current"});
   expect(f.read()).toEqual({status:"not-found"}); expect(f.read("docs/new.md")).toMatchObject({text:"current"});
 });
-

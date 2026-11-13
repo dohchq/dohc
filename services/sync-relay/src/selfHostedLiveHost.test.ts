@@ -4,7 +4,7 @@ import {createHash} from "node:crypto";
 import {basename, join} from "node:path";
 import {tmpdir} from "node:os";
 import {afterEach, expect, it, vi} from "vitest";
-import {startSelfHostedLiveHost} from "./selfHostedLiveHost";
+import {startSelfHostedLiveHost, deleteSelfHostedWorkspaceRoots} from "./selfHostedLiveHost";
 import {stopWithoutSessionHost} from "./sessionHostStop";
 import {fenceAccount, initializeAccountDeletion} from "./storage/accountDeletion";
 import type {ServiceHostedSet} from "./serviceLiveHost";
@@ -433,6 +433,23 @@ it("waits for a late daemon start and its close before every concurrent close re
   await expect(readFile(f.starts[0]!.configPath)).rejects.toMatchObject({code: "ENOENT"});
   expect(f.host.current()).toBeUndefined();
   expect(hasRelayWriteObservers(f.storage)).toBe(false);
+it("removes a deleted account's hosted stores and markers while no session host runs, idempotently", async () => {
+  const root = await mkdtemp(join(tmpdir(), "dohc-deleted-live-root-"));
+  cleanup.push(() => rm(root, {recursive: true, force: true}));
+  const current = {workspaceId: "deleted-workspace", replicationEpoch: "epoch", streamIdentity: "stream"};
+  const earlier = {...current, replicationEpoch: "epoch-0", streamIdentity: "stream-0"};
+  for (const row of [current, earlier]) {
+    const store = join(root, storeName(row.workspaceId, row.replicationEpoch, row.streamIdentity));
+    await mkdir(store); await writeFile(join(store, "replica.sqlite"), "parked live state");
+  }
+  await writeFile(join(root, `${storeName(current.workspaceId)}.diverged`), JSON.stringify({workspaceId: current.workspaceId}));
+  const kept = [storeName("workspace-2"), `${storeName("workspace-2")}.diverged`, "automations"];
+  await mkdir(join(root, kept[0]!)); await writeFile(join(root, kept[1]!), "{}"); await mkdir(join(root, kept[2]!));
+  await deleteSelfHostedWorkspaceRoots(root, namespace, [current, earlier]);
+  await deleteSelfHostedWorkspaceRoots(root, namespace, [current, earlier]);
+  expect((await readdir(root)).sort()).toEqual(kept.sort());
+});
+
   expect(f.onError).not.toHaveBeenCalled();
 });
 

@@ -258,6 +258,18 @@ describeWithPostgres("closed sign-up", () => {
     expect(signin.user.emailVerified).toBe(true);
   });
 
+  it("takes the account's name from the owner's emailed link, never from an earlier sign-up", async () => {
+    const email = `${unique()}@dohc.test`;
+    const closed = closedAuth("admitted");
+    const { user } = await closed.api.signUpEmail({ body: { email, password: "attacker-password-aaa", name: "Mallory" } });
+    await closed.api.signUpEmail({ body: { email, password: "owner-password-bbb", name: "Owner" } });
+    expect(linkIn(lastEmailTo(email)).searchParams.get("setup")).toBe("1");
+
+    const response = await submitResetPage(closed, email, { newPassword: "owner-password-bbb", name: "  Ada   Lovelace " });
+    expect(response.status).toBe(200);
+    expect(await nameOf(user.id)).toBe("Ada Lovelace");
+  });
+
   it("keeps each concurrent setup's name to its own account", async () => {
     const closed = closedAuth("admitted");
     const named = `${unique()}@dohc.test`;
@@ -272,6 +284,20 @@ describeWithPostgres("closed sign-up", () => {
     expect(responses.map((response) => response.status)).toEqual([200, 200]);
     expect(await nameOf(first.user.id)).toBe("Ada");
     expect(await nameOf(second.user.id)).toBe("");
+  it("never renames a verified account from a password reset, even with a name in the request", async () => {
+    const email = `${unique()}@dohc.test`;
+    const closed = closedAuth("admitted");
+    const { user } = await closed.api.signUpEmail({ body: { email, password: PASSWORD, name: "" } });
+    await submitResetPage(closed, email, { newPassword: "owner-password-bbb", name: "Ada" });
+
+    await closed.api.requestPasswordReset({ body: { email } });
+    expect(linkIn(lastEmailTo(email)).searchParams.get("setup")).toBeNull();
+    // A setup flag added to the page's address only makes the page send a name.
+    const response = await submitResetPage(closed, email, { newPassword: "another-password-ddd", name: "Mallory" });
+    expect(response.status).toBe(200);
+    expect(await nameOf(user.id)).toBe("Ada");
+  });
+
   });
 
   it("signs out every session before it verifies the address, so a failure between the two leaves nobody signed in", async () => {
@@ -298,6 +324,19 @@ describeWithPostgres("closed sign-up", () => {
       [user.id],
     );
     expect(state.rows).toEqual([{ emailVerified: false, sessions: 0 }]);
+  });
+
+  it("refuses a verification link sent while sign-up was open", async () => {
+    const email = `${unique()}@dohc.test`;
+    await signUp(email);
+    const token = linkIn(lastEmailTo(email)).searchParams.get("token") ?? "";
+    await expect(closedAuth("admitted").api.verifyEmail({ query: { token } })).rejects.toMatchObject({
+      statusCode: 403,
+      body: { code: "PASSWORD_LINK_REQUIRED" },
+    });
+    await expect(auth.api.signInEmail({ body: { email, password: PASSWORD } })).resolves.toMatchObject({
+      user: { emailVerified: false },
+    });
   });
 
   it("asks the person to try again when the server cannot check invites", async () => {

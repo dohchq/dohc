@@ -1,5 +1,6 @@
 
 import type { StorageContext } from "./storage/context";
+import { createNamedLiveBrowserResolver } from "./namedLiveBrowserAuth";
 import { afterEach, expect, it, vi } from "vitest";
 import { closeTestStorages, testStorage, testHandler, request, seedLinkGrant, seedDependentGrant,
   closeTestStorage, storagePath, reopenTestStorage } from "./testing";
@@ -97,6 +98,17 @@ it("returns an owner-only undo receipt and minimal removed-recipient facts over 
   expect((await h(request("reader", "/sync/shares/s"))).status).toBe(200);
 });
 
+it("only explains a browser revocation after verifying the named account and exact scope", async () => {
+  const {storage} = await fixture(); storage.removeShareAccess({...removal, grantId: "named"});
+  const scope = {workspaceId: "w", shareId: "s", grantId: "named"};
+  for (const userId of ["reader", "stranger"]) {
+    const resolve = createNamedLiveBrowserResolver({storage, explainRemoval: true, resolveActor: (_request, workspaceId) => ({userId, workspaceId})});
+    if (userId === "reader") await expect(resolve(new Request("https://relay.test"), scope)).rejects.toThrow("owner removed your access");
+    else expect(await resolve(new Request("https://relay.test"), scope)).toBeNull();
+    expect(await resolve(new Request("https://relay.test"), {...scope, shareId: "other"})).toBeNull();
+  }
+});
+
 it("retries each removal with the same receipt and cannot replay an older Undo after another removal", async () => {
   const {storage} = await fixture(); const h = testHandler(storage, {nowMs: () => 3000});
   for (const path of ["/sync/shares/s/grants/named/revoke", "/sync/shares/s/revoke"]) {
@@ -111,6 +123,20 @@ it("retries each removal with the same receipt and cannot replay an older Undo a
   }
 });
 
+it("refuses Bob's Undo after Stop sharing an empty share that had only Bob's access", async () => {
+  const {storage} = await fixture();
+  storage.createShare({
+    share: {...storage.getShare("s")!, shareId: "bob-share"},
+    grant: {...storage.getShareGrant("named")!, shareId: "bob-share", grantId: "bob", principalUserId: "bob"},
+  });
+  const input = {...removal, shareId: "bob-share"};
+  const removed = storage.removeShareAccess({...input, grantId: "bob"});
+  if (!removed.ok || !removed.undo) throw Error("removal failed");
+  expect(storage.removeShareAccess({...input, nowMs: 4000})).toEqual({ok: true, grant: null});
+  expect(() => storage.undoShareRemoval({...input, nowMs: 4000, undoId: removed.undo!.undoId})).toThrow("Access changed");
+  expect(storage.getShareGrant("bob")?.status).toBe("revoked");
+});
+
 it("refuses a dependent Undo if the owner narrowed its parent link", async () => {
   const {storage} = await fixture();
   const result = storage.removeShareAccess({...removal, grantId: "dependent"}); if (!result.ok || !result.undo) throw Error("failed");
@@ -118,6 +144,23 @@ it("refuses a dependent Undo if the owner narrowed its parent link", async () =>
     expectedDependentGrantIds: [], guard: storage.captureStanding()})).toMatchObject({ok: true});
   expect(() => storage.undoShareRemoval({...removal, undoId: result.undo!.undoId})).toThrow("parent link no longer allows");
   expect(storage.getShareGrant("dependent")?.status).toBe("revoked");
+it.each(["startup", "sweep", "failed removal", "failed guard"])("purges expired receipts on %s", async action => {
+  let {storage} = await fixture();
+  storage.removeShareAccess({...removal, grantId: "named"});
+  const nowMs = removal.nowMs + SHARE_REMOVAL_UNDO_MS;
+  const retained = storage.removeShareAccess({...removal, grantId: "link", nowMs: removal.nowMs + 1});
+  if (!retained.ok || !retained.undo) throw Error("removal failed");
+  if (action === "startup") {
+    vi.spyOn(Date, "now").mockReturnValue(nowMs);
+    const path = storagePath(storage); closeTestStorage(storage); storage = reopenTestStorage(path);
+  } else if (action === "sweep") storage.purgeExpiredShareRemovals(nowMs);
+  else if (action === "failed guard") {
+    expect(() => storage.removeShareAccess({...removal, nowMs, guard: () => {throw Error("guard failed");}})).toThrow("guard failed");
+  } else expect(() => storage.removeShareAccess({...removal, nowMs, grantId: "missing"})).toThrow("not found");
+  expect((storage as StorageContext).db.prepare("SELECT undo_id FROM sync_relay_share_removals").all())
+    .toEqual([{undo_id: retained.undo.undoId}]);
+});
+
 });
 
 it.each([false, true])("retains proposal content for Undo and releases it at expiry (%s)", async expire => {

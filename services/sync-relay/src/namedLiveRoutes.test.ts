@@ -302,6 +302,14 @@ it.each(["anonymous", "account=other"])("refuses %s on HTTP and WebSocket withou
   expect(await f.connect(minted.token).status).toBe(101);
 });
 
+it.each(["grant", "fence", "host"])("refuses a %s change between mint and upgrade", async changed => {
+  const f = await fixture(), minted = await f.mint();
+  if (changed === "grant") f.raw.exec("UPDATE sync_relay_share_grants SET generation=generation+1");
+  if (changed === "fence") f.raw.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=restore_fence_generation+1");
+  if (changed === "host") f.invalidated.abort();
+  expect(await f.connect(minted.token).status).toBe(404);
+});
+
 it.each<Record<string, string>>([{ origin: "https://foreign.example" }, { "x-dohc-relay-exchange-key": "wrong" }, { host: "foreign.example" }])("rejects untrusted forwarded route headers %j", async headers => {
   const f = await fixture(), minted = await f.mint();
   expect((await f.post("/sync/live/named-tickets", { discriminator: f.discriminator, objectId: binding.objectId }, "account=reader", headers)).status).toBe(404);
@@ -529,6 +537,17 @@ it.each([
   await reopened.until(() => reopened.provider.state().status === "live");
   expect(reopened.provider.state().binding).toMatchObject({currentPath, selectorPaths, objectId: binding.objectId});
 });
+it.each(["named", "link", "owner", "desktop"])("deletion closes a running %s live connection", async kind => {
+  const f = await fixture(limits, kind === "link", undefined, kind === "owner", kind === "desktop");
+  const minted = kind === "owner" ? {token: ""} : await f.mint();
+  const connection = f.connect(minted.token);
+  expect(await connection.status).toBe(101);
+  const closed = once(connection.ws, "close");
+  f.routes.deleteAccount("owner-1", [binding.workspaceId]);
+  await closed;
+  expect(connection.ws.readyState).toBe(WebSocket.CLOSED);
+});
+
 
 it.each([
   ["maxConnections", "live_total_limit"], ["maxConnectionsPerWorkspace", "live_workspace_limit"], ["maxConnectionsPerGrant", "live_grant_limit"],
@@ -707,4 +726,13 @@ it("returns only the named grant binding in live frames", async () => {
     expect(provider.state().binding).toMatchObject({...binding, workspaceId: `named:${scope.grantId}`, selectorPaths: ["docs"]});
     expect(JSON.stringify(provider.state().binding)).not.toContain(scope.workspaceId);
     expect(f.native.binding.workspaceId).toBe(scope.workspaceId);
+});
+it.each(["view", "comment"] as const)("keeps %s recipients out of desktop admission and named live frames", async access => {
+  const f = await fixture(limits, false, undefined, false, true), minted = await f.mint();
+  f.raw.prepare("UPDATE sync_relay_share_grants SET access=?").run(access);
+  const response = await f.post("/sync/live/desktop-open", {shareId: scope.shareId, path: binding.currentPath});
+  expect(response.status).toBe(404);
+  expect(await response.json()).toEqual({ok: false});
+  expect(await f.connect(minted.token).status).not.toBe(101);
+  expect(f.native.client.openLiveAppliedSync).not.toHaveBeenCalled();
 });

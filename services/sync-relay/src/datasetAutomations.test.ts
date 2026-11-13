@@ -106,6 +106,14 @@ it("uses registered callers, scopes authority, and preserves chain depth and rec
   f.ledger.release(running);
   expect(f.ledger.claim(automationId, running.claimId)?.state).toBe("pending");
   await expect(Promise.resolve().then(() => f.ledger.invoke(context, input))).rejects.toThrow();
+it.each(["view", "wrong-folder", "derived", "no-data"])("refuses a %s presser", async kind => {
+  const f = await fixture(); f.addEditor(kind === "view" ? "view" : "edit", kind === "wrong-folder" ? ["Elsewhere"] : ["People"]);
+  if (kind === "derived") f.storage.tx(() => f.storage.db.prepare("UPDATE sync_relay_share_grants SET parent_grant_id='g' WHERE grant_id=?").run(editor.grantId));
+  if (kind === "no-data") f.host.setDataGrant(owner, { ...scope, grantId: editor.grantId, grant: null });
+  await expect(f.host.automations.press(editor, DATASET, f.lifetime.signal, async () => f.ledger.press(DATASET, { ...f.press, pressedBy: "editor" }))).rejects.toThrow();
+  expect(f.ledger.claims(automationId).claims).toEqual([]);
+});
+
 });
 
 async function executorFor(f: Awaited<ReturnType<typeof fixture>>, button = false, serverCopy?: string, sharedSteps?: string, extraFiles: Record<string, string> = {}, native = false) {
@@ -502,4 +510,3 @@ it("leaves claims pending without an executor and forgets their private press re
     expect(f.storage.db.prepare("SELECT COUNT(*) AS n FROM " + table).get()!.n).toBe(0);
   }
 });
-

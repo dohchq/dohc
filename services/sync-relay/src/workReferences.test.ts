@@ -70,6 +70,16 @@ describe("work reference registration and resolution", () => {
     expect(await denialBytes(await handler(request("owner", `/sync/work-references/${ref}`)))).toBe(deleted);
   });
 
+  it("does not resolve a pinned version through a grant on another version", async () => {
+    const {handler} = await fixture();
+    await appendLog(handler, "owner", ws, [moment("notes/plan.md", "Plan", {originSeq: 1, objectId: "plan", versionId: "draft"})], {originId: "device"});
+    const pinned = {...target, versionId: "draft"};
+    await handler(request("owner", `/sync/${ws}/log`, jsonBody({originId: "reference-probe", ops: [], workReferences: [{reference: ref, target: pinned, createdAtMs: 1}]})));
+    await createShare(handler, "owner", ws, {paths: ["notes"], recipientUserId: "reader", access: "view", versionId: "main"});
+    expect((await handler(request("reader", `/sync/work-references/${ref}`))).status).toBe(404);
+    expect(await json(await handler(request("owner", `/sync/work-references/${ref}`)))).toMatchObject({status: "found", target: pinned});
+  });
+
   it("requires the reader's own received token when minting through a share", async () => {
     const {handler} = await fixture();
     await handler(request("owner", `/sync/${ws}/log`, jsonBody({originId: "reference-probe", ops: [], workReferences: [{reference: ref, target, createdAtMs: 1}]})));

@@ -19,6 +19,7 @@ import { createTestScratch, testStoreFolder } from "./testScratch";
 import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
 import type { ReachRoster } from "./automationReach";
 import type { AutomationTarget } from "./automationTargets";
+import { automationInventory, canPressInventory, irreversibleActionsOf } from "./automationInventory";
 import { checkAutomationReach } from "./automationReach";
 
 const evaluator = createAutomationFormulaEvaluator();
@@ -355,6 +356,18 @@ describe("cross-Collection code changes", () => {
     expect(f.calls).toHaveLength(before);
   });
 
+  it("requires the button caller's destination grants even when the caller is not an editor", async () => {
+    const f = await fixture();
+    if (f.held.source !== "document") throw new Error("claim");
+    f.held.claim.change.kind = "button";
+    f.held.claim.change.onBehalfOf = "visitor";
+    f.setRoster({ kind: "owner", ownerUserId: "owner", grants: [] });
+    const definition = changes({ action: "change", collection: "Target", id: "same", fields: { Status: "Closed" } });
+    definition.when = { kind: "button", field: "Run", table: null };
+    expect(await f.run(definition)).toMatchObject({ kind: "failed", error: expect.stringContaining("person who pressed") });
+    expect(f.calls).toEqual([]);
+  });
+
   it("rechecks grants before each effect and retains earlier writes", async () => {
     const f = await fixture();
     f.hooks.afterEffect = () => f.setRoster({ kind: "owner", ownerUserId: "owner", grants: [{ grantId: "editor", recipientUserId: "editor", recipientEmail: "editor@example.com", files: { paths: ["Source"], versionId: null, access: "edit" }, channel: null }] });
@@ -460,6 +473,25 @@ describe("cross-Collection authored actions", () => {
     expect(checkAutomationReach(roster, { id: "test", collection: { path: "Source", name: "Source" }, codeFiles: [], steps: allowed }))
       .toMatchObject([{ allowed: true }]);
     expect(await f.undo()).toMatchObject({ undone: { actionsReversed: 1 } });
+  });
+
+  it("requires the presser's destination operation and distinguishes confirmations across datasets", async () => {
+    const f = await fixture();
+    const target = authored(f, "Target", false);
+    const other = authored(f, "Other", false);
+    const definition = automation(actionStep("Target") + actionStep("Other"));
+    const inventory = automationInventory(definition, "Source", (path) => f.targets.get(path)!, null);
+    const describe = async (id: string) => {
+      const own = id === target.approved.datasetId ? target : other;
+      return { ...own.approved, name: own.collection.name, tables: own.approved.definition.tables, operations: own.approved.definition.operations };
+    };
+    expect(await canPressInventory(inventory)).toBe(false);
+    expect(await canPressInventory(inventory, describe)).toBe(true);
+    expect(await canPressInventory(inventory, async (id) => ({ ...await describe(id), operations: id === other.approved.datasetId ? [] : (await describe(id)).operations }))).toBe(false);
+    expect(await canPressInventory(inventory, async () => describe(target.approved.datasetId))).toBe(false);
+    expect(irreversibleActionsOf(definition, "Source", inventory)).toEqual([
+      { name: "Target-dataset/rows.act", label: "Target: Act" }, { name: "Other-dataset/rows.act", label: "Other: Act" },
+    ]);
   });
 
 });

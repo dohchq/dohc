@@ -1995,6 +1995,82 @@ describe("YdocLiveAdapter", () => {
     expect(engine.activeSessionIds()).toHaveLength(0);
   });
 
+  it("rejects a local update that arrives after the session released", async () => {
+    // A released session cannot save a late edit. Report that to its caller.
+    const engine = seedPlaintextEngine();
+    const provider = await openEngineYdocProviderSession({
+      transport: engine,
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+      onRemoteUpdate: () => undefined,
+      scheduleSettle: () => () => undefined,
+    });
+
+    await provider.close({ settle: false });
+    await expect(
+      provider.applyLocalUpdate(
+        plaintextUpdate(provider.initialUpdate, (text) => {
+          text.insert(0, "typed after teardown");
+        }),
+      ),
+    ).rejects.toThrow("closed");
+
+    expect(engine.recordedUpdates).toHaveLength(0);
+    expect(engine.requests.map((request) => request.method)).toEqual([
+      YDOC_METHOD.open,
+      YDOC_METHOD.close,
+    ]);
+  });
+
+  it("reports a JOURNAL failure to onSettleError too — the edit never reached the engine", async () => {
+    // Round 2 (D2b). runSettle aborts on a journal failure before the settle
+    // chain, so onSettleStart/onSettleError never fired and the error routed
+    // only to onSessionError — the same reconnect-only sink this PR exists to
+    // stop relying on. A recordUpdate that failed is worse than a settle that
+    // failed: the edit is not even in the engine.
+    const engine = seedPlaintextEngine();
+    const recordFailure = new Error("injected record failure");
+    const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.recordUpdate) throw recordFailure;
+        return engine.sendRequest(request);
+      },
+    };
+    const settleErrors: unknown[] = [];
+    const provider = await openEngineYdocProviderSession({
+      transport,
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+      onRemoteUpdate: () => undefined,
+      onSettleError: (error) => settleErrors.push(error),
+      scheduleSettle: () => () => undefined,
+    });
+
+    const update = plaintextUpdate(provider.initialUpdate, (text) => {
+      text.insert(0, "never journaled");
+    });
+    await provider.applyLocalUpdate(update).catch(() => undefined);
+    await provider.settleNow().catch(() => undefined);
+
+    // The failure that reaches the save-state channel is the real cause —
+    // the refused recordUpdate — not some generic wrapper.
+    expect(settleErrors.length).toBeGreaterThan(0);
+    expect(
+      settleErrors.some(
+        (error) =>
+          error === recordFailure ||
+          (error instanceof Error && error.cause === recordFailure),
+      ),
+    ).toBe(true);
+    await provider.close({ settle: false }).catch(() => undefined);
+  });
+
   it("never escalates to a settling close when the caller forbids it", async () => {
     const engine = seedPlaintextEngine();
     const unsettledClose = new Error("injected unsettled close");
@@ -2585,6 +2661,38 @@ describe("no-edit settle skip", () => {
       content: "prior edit seeded body",
     });
   });
+});
+
+it("notifies durable owner observers only after commit and preserves lost-response recovery", async () => {
+  const engine = seedPlaintextEngine();
+  let release!: () => void, entered!: () => void;
+  const blocked = new Promise<void>(resolve => {release = resolve;});
+  const started = new Promise<void>(resolve => {entered = resolve;});
+  let loseResponse = true;
+  const transport: EngineTransport = {
+    ...forwardYdocBlobEgress(engine), onEvent: handler => engine.onEvent(handler),
+    async sendRequest(request) {
+      if (request.method === YDOC_METHOD.recordUpdate && loseResponse) {
+        entered(); await blocked;
+        await engine.sendRequest(request); loseResponse = false;
+        throw new Error("committed response lost");
+      }
+      return engine.sendRequest(request);
+    },
+  };
+  const adapter = new YdocLiveAdapter(transport);
+  const session = await adapter.openSession({workspace: WORKSPACE, versionId: VERSION, path: PATH, contentKind: "plaintext"});
+  const changed = vi.fn(() => {expect(engine.sessionText(session.sessionId)).toBe("durable");});
+  const stop = session.onDurableLocalChange(changed);
+  try {
+    const recorded = session.applyLocalTextEdit({root: "plainText", index: 0, insert: "durable"});
+    await started; expect(changed).not.toHaveBeenCalled();
+    release(); await recorded;
+    expect(changed).toHaveBeenCalledTimes(1); expect(engine.recordedUpdates).toHaveLength(1);
+    stop(); stop();
+    await session.applyLocalTextEdit({root: "plainText", index: 7, insert: "!"});
+    expect(changed).toHaveBeenCalledTimes(1);
+  } finally {release(); await session.close(); adapter.dispose();}
 });
 
 describe("immutable original-record recovery", () => {

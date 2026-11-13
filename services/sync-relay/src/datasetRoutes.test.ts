@@ -108,6 +108,20 @@ async function httpFixture(maxParticipantsPerGrant?: number) {
   return {...f, host, handler, http, path, activate, invoke, publish, publicHeaders, advance(ms: number) {now += ms;}};
 }
 
+it("exposes bounded owner history and denies helpers, strangers, and malformed cursors", async () => {
+  const f = await httpFixture(); await f.activate();
+  const result = await f.http(`${f.path}/invoke`, { revision: 1, revisionSha256: revision.revisionSha256, operationId: id(5), input: { name: "Private name" }, idempotencyKey: "private-retry" });
+  expect(result.status).toBe(200);
+  const response = await f.http(`${f.path}/history?limit=1`); expect(response.status).toBe(200);
+  const page = await response.json(); expect(page.entries).toHaveLength(1); expect(page.entries[0].operation).toBe("submit");
+  expect(JSON.stringify(page)).not.toMatch(/private-retry|Private name|idempotencyKey|resultJson/);
+  expect((await f.http(`${f.path}/history`, undefined, { authorization: "Bearer helper" })).status).toBe(404);
+  expect((await f.http(`${f.path}/history`, undefined, { authorization: "Bearer stranger" })).status).toBe(404);
+  expect((await f.http(`${f.path}/history?beforeRevision=0`)).status).toBe(400);
+  expect((await f.http(`${f.path}/history?limit=101`)).status).toBe(400);
+  expect((await f.http(`${f.path}/history?after=x`)).status).toBe(400);
+});
+
 it("creates and manages one dataset through authenticated routes and the public app broker", async () => {
   const f = await httpFixture();
   expect((await f.activate()).status).toBe(200);
@@ -167,6 +181,36 @@ it("archives and restores a dataset with its rows, app bindings, and retry recei
   expect(await (await f.http(`${f.path}/lifecycle`)).json()).toMatchObject({archived: false, generation: 2, apps: expect.arrayContaining([{appId: publicationId, binding: expect.any(Object)}, {appId: secondPublicationId, binding: expect.any(Object)}])});
   f.storage.tx(() => f.storage.db.prepare("DELETE FROM sync_relay_dataset_usage WHERE workspace_id='w' AND dataset_id=?").run(id(1)));
   expect(f.storage.db.prepare("SELECT count(*) AS n FROM dohc_dataset_lifecycle").get()!.n).toBe(0);
+});
+
+it("restricts lifecycle management and archived discovery to owners and rejects malformed requests", async () => {
+  const f = await httpFixture(); await f.activate();
+  f.storage.tx(() => f.storage.db.prepare(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
+    VALUES('helper-grant','s','user','helper',NULL,'view',1,'active',1,NULL,NULL)`).run());
+  const helper = {authorization: "Bearer helper", "x-dohc-dataset-grant": "helper-grant"};
+  expect((await f.http(`${f.path}/grants`, {grantId: "helper-grant", grant: {revision: 1, revisionSha256: revision.revisionSha256, operationIds: [id(6)], discover: true}})).status).toBe(200);
+  for (const headers of [helper, {authorization: "Bearer stranger"}]) {
+    expect((await f.http(`${f.path}/lifecycle`, undefined, headers)).status).toBe(404);
+    for (const action of ["archive", "restore"]) expect((await f.http(`${f.path}/${action}`, {}, headers)).status).toBe(404);
+    expect((await f.http("w/datasets?includeArchived=true", undefined, headers)).status).toBe(404);
+    expect((await f.http(`${f.path}?includeArchived=true`, undefined, headers)).status).toBe(404);
+  }
+  for (const query of ["includeArchived=1", "includeArchived=", "includeArchived=TRUE", "includeArchived=true&includeArchived=false"]) {
+    expect((await f.http(`w/datasets?${query}`)).status).toBe(400);
+    expect((await f.http(`${f.path}?${query}`)).status).toBe(400);
+  }
+  for (const suffix of ["?limit=1", "?after=x", "/lifecycle?includeArchived=true", "/lifecycle?limit=101", "/lifecycle?after=", "/lifecycle?limit=1&limit=2"]) {
+    expect((await f.http(`${f.path}${suffix}`)).status).toBe(400);
+  }
+  for (const action of ["archive", "restore"]) {
+    expect((await f.http(`${f.path}/${action}`)).status).toBe(405);
+    expect((await f.http(`${f.path}/${action}`, {userId: "owner"})).status).toBe(400);
+    expect((await f.http(`${f.path}/${action}?includeArchived=true`, {})).status).toBe(400);
+  }
+  expect((await f.http(`${f.path}/lifecycle`, {})).status).toBe(405);
+  expect((await f.http("w/datasets?includeArchived=false", undefined, helper)).status).toBe(200);
+  await f.http(`${f.path}/archive`, {});
+  expect(await (await f.http("w/datasets", undefined, helper)).json()).toEqual({datasets: [], nextCursor: null});
 });
 
 it("rejects ambient credentials and forged request authority before changing data", async () => {
@@ -247,4 +291,28 @@ it("keeps staged files private to their caller and rolls attachment back with a 
   expect(f.storage.db.prepare("SELECT file_id FROM sync_relay_dataset_files WHERE file_id=?").get(file.fileId)).toBeUndefined();
   f.storage.tx(() => f.storage.db.prepare("DELETE FROM sync_relay_dataset_usage WHERE workspace_id='w'").run());
   expect(f.storage.db.prepare("SELECT count(*) AS n FROM sync_relay_dataset_files").get()!.n).toBe(0);
+});
+it("exposes immutable approved rule history only through the owner route", async () => {
+  const f = await httpFixture(); expect((await f.activate()).status).toBe(200);
+  const path = `${f.path}/history-revision?revisionSha256=${revision.revisionSha256}`;
+  const response = await f.http(path); expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({ revision, schemaSql, operationSource });
+  expect(response.headers.get("cache-control")).toBe("private, no-store");
+  expect((await f.http(path, undefined, { authorization: "Bearer helper" })).status).toBe(404);
+  expect((await f.http(path, undefined, { authorization: "Bearer stranger" })).status).toBe(404);
+  expect((await f.http(`${f.path}/history-revision?revisionSha256=invalid`)).status).toBe(400);
+  expect((await f.http(`${path}&revisionSha256=${revision.revisionSha256}`)).status).toBe(400);
+
+});
+
+it("serves owner-only metadata History and validates its boolean query", async () => {
+  const f = await httpFixture();
+  expect((await f.activate()).status).toBe(200);
+  await f.host.invoke({ kind: "named", workspaceId: "w", userId: "owner" }, { workspaceId: "w", datasetId: id(1), revision: 1, revisionSha256: revision.revisionSha256, operationId: id(5), input: { name: "Private" }, idempotencyKey: "metadata" });
+  const response = await f.http(`${f.path}/history?metadataOnly=true`);
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({ lineage: expect.stringMatching(/^[a-f0-9]{64}$/), archived: false, olderRecordedAtMs: expect.any(Number), entries: [{ revision: 1 }] });
+  expect((await f.http(`${f.path}/history?metadataOnly=false`)).status).toBe(200);
+  for (const query of ["metadataOnly=1", "metadataOnly=true&metadataOnly=false"]) expect((await f.http(`${f.path}/history?${query}`)).status).toBe(400);
+  expect((await f.http(`${f.path}/history?metadataOnly=true`, undefined, { authorization: "Bearer helper" })).status).toBe(404);
 });

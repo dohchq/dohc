@@ -156,6 +156,23 @@ it("recovers expired leases after reopening, fences old workers, and stops at th
   expect(claimPushDelivery(reopened, now + 400_000)).toBeNull();
 });
 
+it.each(["revoked", "session", "generation", "account", "message", "expired"])("drops %s work before transport", async reason => {
+  const f = await fixture(); f.message();
+  if (reason === "revoked") f.storage.revokeShare(shareId, Date.now());
+  if (reason === "generation") f.bind({sessionId: "new-session"});
+  if (reason === "account") f.bind({userId: "bob", sessionId: "session-bob"});
+  if (reason === "expired") f.storage.replicaViewTx(() => f.storage.db.prepare(
+    "UPDATE sync_relay_push_subscriptions SET expires_at_ms = ?").run(Date.now() + 1000));
+  if (reason === "message") f.storage.tx(() => f.storage.db.prepare("DELETE FROM sync_relay_log WHERE op_kind='chat.message.append'").run());
+  const transport = vi.fn<PushTransport>(async () => 201);
+  const sender = createPushSender({storage: f.storage, config, lookup, transport,
+    sessionIsValid: async () => reason !== "session", now: () => Date.now() + (reason === "expired" ? 2000 : 0),
+    resolveAlertLink: () => "/l/opaque-reference"});
+  await sender.runOnce(); await sender.close();
+  expect(transport).not.toHaveBeenCalled();
+  expect(rows(f.storage)[0]!.state).toBe("dropped");
+});
+
 it.each(["access"])("rechecks %s after asynchronous DNS and session reads", async change => {
   const f = await fixture(); f.message();
   const transport = vi.fn<PushTransport>(async () => 201);
@@ -342,6 +359,24 @@ it.each([
   await sender.close();
   expect(transport).toHaveBeenCalledOnce();
   expect(rows(f.storage)[0]!.state).toBe("sent");
+it.each(["rename", "delete"] as const)("drops a queued file-chat alert after the file %s", async operation => {
+  const f = await fileChatFixture();
+  f.message();
+  expect(rows(f.storage)).toHaveLength(1);
+  f.append([moment(operation === "rename" ? "private/plan.md" : "docs/plan.md", "plan", {
+    objectId: "plan", operation, beforePath: "docs/plan.md", beforeContent: "plan",
+    afterPath: operation === "rename" ? "private/plan.md" : null,
+    afterContent: operation === "rename" ? "plan" : null,
+  })]);
+  const transport = vi.fn<PushTransport>(async () => 201);
+  const sender = createPushSender({storage: f.storage, config, lookup, transport,
+    sessionIsValid: async () => true, resolveAlertLink: () => "/l/opaque-reference"});
+  await sender.runOnce();
+  await sender.close();
+  expect(rows(f.storage)[0]!.state).toBe("dropped");
+  expect(transport).not.toHaveBeenCalled();
+});
+
 });
 
 it("drops a queued alert when the dependent grant's parent is revoked", async () => {

@@ -1,3 +1,4 @@
+import { LINK_EXCHANGE_BUCKET_CAPACITY } from "./linkSecurity";
 import { request as httpRequest } from "node:http";
 import { access } from "node:fs/promises";
 import { join } from "node:path";
@@ -172,6 +173,148 @@ describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
     // cannot see a wiring regression here.
     const anonymous = await fetch(`${baseUrl}/sync/${WORKSPACE_ID}/log?since=0`);
     expect(anonymous.status).toBe(401);
+  });
+
+  it("caps link exchanges at 4096 bytes before buffering the route body", async () => {
+    const relayRoot = await tempRoot("link-exchange-cap");
+    const baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"), {
+      DOHC_RELAY_LINK_KEY: "integration-link-key-with-at-least-thirty-two-bytes",
+      DOHC_RELAY_EXCHANGE_KEY: "integration-relay-exchange-key-at-least-32",
+    });
+
+    const workspaceId = "workspace-link-exchange-cap";
+    expect((await postJson(baseUrl, "/sync/workspaces", { workspaceId })).status).toBe(200);
+    const shareResponse = await postJson(baseUrl, `/sync/${workspaceId}/shares`, {
+      recipientUserId: "link-recipient",
+      paths: ["docs"],
+      access: "view",
+    });
+    expect(shareResponse.status).toBe(200);
+    const share = (await shareResponse.json()) as { shareId: string };
+    const linkResponse = await postJson(
+      baseUrl,
+      `/sync/${workspaceId}/shares/${share.shareId}/links`,
+      { access: "view" },
+    );
+    expect(linkResponse.status).toBe(200);
+    const link = (await linkResponse.json()) as { url: string };
+    const linkSecret = new URL(link.url).hash.slice(1);
+
+    const missing = await fetch(`${baseUrl}/sync/link-exchange`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ secret: "g".repeat(43) }),
+    });
+    expect(missing.status).toBe(404);
+    const missingBody = await missing.text();
+
+    const missingWorkloadIdentity = await fetch(`${baseUrl}/sync/link-exchange`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ secret: linkSecret }),
+    });
+    expect(missingWorkloadIdentity.status).toBe(404);
+    expect(await missingWorkloadIdentity.text()).toBe(missingBody);
+
+    const emptyPaddingBody = JSON.stringify({ secret: linkSecret, padding: "" });
+    const oversizedBody = JSON.stringify({
+      secret: linkSecret,
+      padding: "x".repeat(4097 - Buffer.byteLength(emptyPaddingBody)),
+    });
+    expect(Buffer.byteLength(oversizedBody)).toBe(4097);
+    const oversized = await fetch(`${baseUrl}/sync/link-exchange`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: oversizedBody,
+    });
+    expect(oversized.status).toBe(404);
+    expect(await oversized.text()).toBe(missingBody);
+
+    const small = await fetch(`${baseUrl}/sync/link-exchange`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-dohc-relay-exchange-key": "integration-relay-exchange-key-at-least-32",
+      },
+      body: JSON.stringify({ secret: linkSecret }),
+    });
+    expect(small.status).toBe(200);
+  });
+
+  it("keeps keyed forwarded client addresses in separate exchange buckets", async () => {
+    const relayRoot = await tempRoot("keyed-exchange-buckets");
+    const relayExchangeKey = "integration-relay-exchange-key-at-least-32";
+    const baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"), {
+      DOHC_RELAY_LINK_KEY: "integration-link-key-with-at-least-thirty-two-bytes",
+      DOHC_RELAY_EXCHANGE_KEY: relayExchangeKey,
+    });
+
+    const secret = "z".repeat(43);
+    const firstClientStatuses = await Promise.all(
+      Array.from({ length: LINK_EXCHANGE_BUCKET_CAPACITY + 1 }, async () =>
+        (
+          await exchangeLink(
+            baseUrl,
+            secret,
+            "198.51.100.10",
+            relayExchangeKey,
+          )
+        ).status,
+      ),
+    );
+
+    // Prove the first address's bucket is exhausted within one batch before
+    // asserting the second address succeeds — otherwise one larger shared
+    // bucket passes.
+    const secondClient = await exchangeLink(
+      baseUrl,
+      secret,
+      "198.51.100.11",
+      relayExchangeKey,
+    );
+    expect({
+      firstClientStatuses: [...firstClientStatuses].sort(
+        (left: number, right: number) => left - right,
+      ),
+      secondClientStatus: secondClient.status,
+    }).toEqual({
+      firstClientStatuses: [
+        ...Array.from({ length: LINK_EXCHANGE_BUCKET_CAPACITY }, () => 404),
+        429,
+      ],
+      secondClientStatus: 404,
+    });
+  });
+
+  it("ignores a forwarded client address when no exchange key is configured", async () => {
+    const relayRoot = await tempRoot("unkeyed-exchange-bucket");
+    const baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"), {
+      DOHC_RELAY_LINK_KEY: "integration-link-key-with-at-least-thirty-two-bytes",
+      DOHC_RELAY_EXCHANGE_KEY: undefined,
+    });
+
+    const secret = "z".repeat(43);
+    const firstClientStatuses = await Promise.all(
+      Array.from({ length: LINK_EXCHANGE_BUCKET_CAPACITY + 1 }, async () =>
+        (await exchangeLink(baseUrl, secret, "203.0.113.10")).status,
+      ),
+    );
+
+    // Prove the shared bucket is exhausted within one batch before asserting
+    // the spoofed address shares it.
+    const spoofedSecondClient = await exchangeLink(baseUrl, secret, "203.0.113.11");
+    expect({
+      firstClientStatuses: [...firstClientStatuses].sort(
+        (left: number, right: number) => left - right,
+      ),
+      secondClientStatus: spoofedSecondClient.status,
+    }).toEqual({
+      firstClientStatuses: [
+        ...Array.from({ length: LINK_EXCHANGE_BUCKET_CAPACITY }, () => 404),
+        429,
+      ],
+      secondClientStatus: 429,
+    });
   });
 
   it("emits a canonical public URL without writing its bearer to process output", async () => {

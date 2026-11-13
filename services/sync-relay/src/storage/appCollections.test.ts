@@ -120,6 +120,20 @@ it.each(["Sam"])("snapshots the app link holder's name %j for authenticated read
   expect(f.storage.fetchLogPage({workspaceId: "w", sinceRelaySeq: since, limit: 10}).rows[0]!.admittedAuthorSnapshot).toEqual(authors);
 });
 
+it("keeps private grant metadata out of app-created share blobs", () => {
+  const f = fixture();
+  f.accept();
+  const queries = createShareReadQueries(f.storage, 500);
+  const selector = {paths: ["responses"], versionId: null, access: "view" as const};
+  for (const audience of ["authenticated", "accountless"] as const) {
+    const page = queries.filteredLogPage("w", "s", selector, 1, 10, audience);
+    const payload = page.ops[0]!.payload as Record<string, unknown>;
+    const blob = queries.historicalSharedBlob("w", selector, String(payload.payloadAfterBlobSha256));
+    expect(blob).not.toBeNull();
+    expect(parseCollectionRecordFields(Buffer.from(blob!).toString())).not.toHaveProperty("grant_id");
+  }
+});
+
 it("accepts one durable workspace moment and payload-bound receipt across retries and restart",()=>{
   const f=fixture(), receipt=f.accept();
   expect(receipt.kind).toBe("accepted");expect(receipt.path).toMatch(/^responses\/accepted_/);expect(receipt).not.toHaveProperty("recordId");
@@ -189,6 +203,12 @@ it("serializes concurrent retry acceptance on independent SQLite connections",as
   expect(first.kind).toBe("accepted");expect(second).toEqual(first);
   expect(f.raw.prepare("SELECT COUNT(*) AS n FROM sync_relay_app_collection_receipts").get()!.n).toBe(1);
   expect(f.storage.maxOriginSeq("w","relay:collection-create:g")).toBe(0);
+it("refuses a worker request prepared before owner withdrawal",async()=>{
+  f.storage.withdrawAppPublication({...f.owner,expectedAuthorityRevision:2});
+  const result=await a.send(f.input);expect(result.kind).toBe("refused");
+  expect(f.storage.maxOriginSeq("w","relay:collection-create:g")).toBe(-1);
+});
+
 });
 });
 
@@ -376,4 +396,3 @@ it("operator takedown refuses Collection writes and receipt retries from an exis
   expect(f.storage.maxOriginSeq("w", "relay:collection-create:g")).toBe(before);
   expect(f.raw.prepare("SELECT COUNT(*) n FROM sync_relay_app_collection_receipts").get()!.n).toBe(1);
 });
-

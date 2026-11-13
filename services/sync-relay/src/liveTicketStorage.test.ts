@@ -17,6 +17,14 @@ function reopenForSchemaCheck(path: string): void {
 const tokenHash = hashLiveTicketToken("01".repeat(32), key);
 const mint = { objectId: binding.objectId, scope, report, audience, ticketId: "ticket-1", tokenHash };
 const redeem = { tokenHash, scope, report, audience };
+it("creates and validates the complete private named-ticket schema", async () => {
+  const state = await fixture();
+  try {
+    expect(state.raw.prepare("SELECT migration_id FROM sync_relay_migrations WHERE migration_id=?").get(marker)).toEqual({ migration_id: marker });
+    expect(state.raw.prepare(`PRAGMA table_info(${table})`).all()).toHaveLength(21);
+  } finally { await state.close(); }
+});
+
 it("replaces a v1 ticket table, whose tickets expire within 30 seconds, instead of copying it", async () => {
   const state = await fixture();
   try {
@@ -29,6 +37,17 @@ it("replaces a v1 ticket table, whose tickets expire within 30 seconds, instead 
     expect(state.raw.prepare(`PRAGMA table_info(${table})`).all()).toHaveLength(21);
     expect(rows(state)).toEqual([]);
     expect(state.storage.mintLiveTicket(mint)).toEqual({ expiresAtMs: 31000 });
+it("refuses a link ticket that names both a link session and an agent connection, or neither", async () => {
+  const state = await fixture();
+  try {
+    state.storage.mintLiveTicket(mint);
+    expect(() => state.raw.exec(`UPDATE ${table} SET agent_connection_id='connection-1'`)).toThrow(/CHECK/);
+    expect(() => state.raw.exec(`UPDATE ${table} SET principal_kind='link'`)).toThrow(/CHECK/);
+    expect(() => state.raw.exec(`UPDATE ${table} SET principal_kind='link', agent_connection_id='connection-1'`)).not.toThrow();
+    expect(() => state.raw.exec(`UPDATE ${table} SET link_session_id='session-1'`)).toThrow(/CHECK/);
+  } finally { await state.close(); }
+});
+
   } finally { await state.close(); }
 });
 it("commits a ticket and consumes the hashed credential once in real storage", async () => {
@@ -152,6 +171,32 @@ it.each([
     state.raw.prepare(`UPDATE ${table} SET ${column}=?`).run(value);
     expect(() => state.storage.readLiveTicketTarget({ tokenHash, scope, audience })).toThrow(/stored live ticket is damaged|too large to be represented/);
     expect(() => state.storage.redeemLiveTicket(redeem)).toThrow(/stored live ticket is damaged|too large to be represented/);
+it.each([
+  `DROP INDEX idx_sync_relay_live_session_tickets_hash`,
+  `CREATE INDEX extra_ticket_index ON ${table}(audience)`,
+  `CREATE TRIGGER extra_ticket_trigger AFTER INSERT ON ${table} BEGIN SELECT 1; END`,
+  `DROP TABLE ${table}`,
+])("refuses marked schema damage without repair: %s", async sql => {
+  const state = await fixture();
+  try {
+    state.raw.exec(sql);
+    const before = state.raw.prepare("SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name").all();
+    expect(() => reopenForSchemaCheck(state.path)).toThrow("live-ticket schema is missing or damaged");
+    expect(state.raw.prepare("SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name").all()).toEqual(before);
+  } finally { await state.close(); }
+});
+
+it("rejects an unmarked complete schema and a same-name trigger without adopting either", async () => {
+  const state = await fixture();
+  try {
+    state.raw.prepare("DELETE FROM sync_relay_migrations WHERE migration_id=?").run(marker);
+    expect(() => reopenForSchemaCheck(state.path)).toThrow("unmarked live-ticket schema");
+    state.raw.exec(`DROP TABLE ${table}; CREATE TRIGGER ${table} AFTER INSERT ON sync_relay_workspaces BEGIN SELECT 1; END`);
+    expect(() => reopenForSchemaCheck(state.path)).toThrow("unmarked live-ticket schema");
+    expect(state.raw.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(marker)).toBeUndefined();
+  } finally { await state.close(); }
+});
+
   } finally { await state.close(); }
 });
 
@@ -187,6 +232,16 @@ it("rolls back redemption on commit failure and recovers after reopening", async
     try {
       expect(reopened.redeemLiveTicket(redeem)).not.toBeNull();
     } finally { reopened.close(); }
+  } finally { await state.close(); }
+});
+
+it("requires a changed row from the conditional consumption update", async () => {
+  const state = await fixture();
+  try {
+    state.storage.mintLiveTicket(mint);
+    state.raw.exec(`CREATE TRIGGER refuse_redemption BEFORE UPDATE ON ${table} BEGIN SELECT RAISE(IGNORE); END`);
+    expect(state.storage.redeemLiveTicket(redeem)).toBeNull();
+    expect(rows(state)).toEqual([{ ticket_id: "ticket-1", redeemed_at_ms: null }]);
   } finally { await state.close(); }
 });
 
@@ -236,6 +291,26 @@ it("compares frozen binding with a fresh report after a fence change", async () 
     const fresh = { ...report, binding: { ...binding, restoreFenceGeneration: 8 } };
     expect(state.storage.redeemLiveTicket({ ...redeem, report: fresh })).toBeNull();
     expect(state.storage.mintLiveTicket({ ...another(2), report: fresh })).not.toBeNull();
+it.each([
+  "CREATE INDEX idx_sync_relay_live_session_tickets_hash ON sync_relay_live_session_tickets(token_hash)",
+  "CREATE UNIQUE INDEX idx_sync_relay_live_session_tickets_hash ON sync_relay_live_session_tickets(token_hash) WHERE redeemed_at_ms IS NULL",
+  "CREATE UNIQUE INDEX idx_sync_relay_live_session_tickets_hash ON sync_relay_live_session_tickets(audience)",
+])("refuses altered index definitions: %s", async sql => {
+  const state = await fixture();
+  try {
+    state.raw.exec(`DROP INDEX idx_sync_relay_live_session_tickets_hash; ${sql}`);
+    expect(() => reopenForSchemaCheck(state.path)).toThrow("live-ticket schema is missing or damaged");
+  } finally { await state.close(); }
+});
+
+it("refuses same-name trigger collisions even when the reserved index exists", async () => {
+  const state = await fixture();
+  try {
+    state.raw.exec("CREATE TRIGGER idx_sync_relay_live_session_tickets_hash AFTER INSERT ON sync_relay_workspaces BEGIN SELECT 1; END");
+    expect(() => reopenForSchemaCheck(state.path)).toThrow("live-ticket schema is missing or damaged");
+  } finally { await state.close(); }
+});
+
   } finally { await state.close(); }
 });
 

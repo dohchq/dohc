@@ -401,6 +401,51 @@ describe("secret files through the server's copy", () => {
     expect(JSON.stringify(stream)).not.toContain("object-env");
   });
 
+  it("keeps a chat on a deleted file readable, and hides one on a file the relay last saw at a secret path", async () => {
+    const { storage, engine, h } = await relay();
+    const { planning } = await seedTrip(engine);
+    // The relay's log puts each object somewhere, then deletes it; none is in the copy now.
+    const moment = (objectId: string, relaySeq: number, path: string | null) => (storage as StorageContext).db.prepare(
+      `INSERT INTO sync_relay_object_moments (workspace_id, object_id, relay_seq, moment_id, version_id, path, recorded_at_ms)
+       VALUES ('trip', ?, ?, ?, 'main', ?, 1)`).run(objectId, relaySeq, `moment-${relaySeq}`, path);
+    moment("object-old", 1, "docs/old.md");
+    moment("object-old", 2, null);
+    moment("object-dotenv", 3, ".env");
+    moment("object-dotenv", 4, null);
+    moment("object-renamed", 5, "docs/keys.md");
+    moment("object-renamed", 6, ".env.local");
+    const chats = new ChatsLiveAdapter(engine, "trip", { workspaceId: "trip" });
+    const author = { kind: "human" as const, displayName: "Ana" };
+    const thread = async (objectId: string, pathHint: string) => {
+      const created = await chats.createThread({ workspaceId: "trip", title: objectId, linkedFile: { objectId, pathHint } });
+      await chats.sendMessage({ workspaceId: "trip", threadId: created.id, author, authorActorKey: null, body: `On ${objectId}` });
+      return created;
+    };
+    const deleted = await thread("object-old", "docs/old.md");
+    // Each hint names an ordinary file; the relay's own record decides.
+    const dotenv = await thread("object-dotenv", "docs/notes.md");
+    const renamed = await thread("object-renamed", "docs/keys.md");
+
+    const read = await answer(await h(op("trip", "chat", { threadId: deleted.id })));
+    expect(read).toMatchObject({ ok: true, thread: { title: "object-old" }, messages: [{ body: "On object-old" }] });
+    expect((read.projection as { text: string }).text).toContain("Linked file: unavailable");
+    expect(await answer(await h(op("trip", "show", { target: cliThreadId(deleted.id), peek: true }))))
+      .toMatchObject({ thread: { title: "object-old" }, messages: [{ body: "On object-old" }] });
+    for (const hidden of [dotenv, renamed]) {
+      expect(await answer(await h(op("trip", "chat", { threadId: hidden.id }))), hidden.title)
+        .toEqual({ ok: false, reason: `chat thread not found: ${hidden.id}`, refusal: "missing" });
+      expect(await json(await h(op("trip", "show", { target: cliThreadId(hidden.id), peek: true }))))
+        .toMatchObject({ code: "bad_request", error: `dohc: no such thread or message: ${cliThreadId(hidden.id)}` });
+    }
+
+    await chats.startChannelThread({
+      workspaceId: "trip", channelId: planning.channelId, threadId: "thread-files", messageId: "message-files", author, authorActorKey: null,
+      body: "Files", attachments: [{ objectId: "object-old", pathHint: "docs/old.md" }, { objectId: "object-dotenv", pathHint: "docs/notes.md" }],
+    });
+    const shown = await answer(await h(op("trip", "show", { target: "th_files", peek: true })));
+    expect(shown.messages).toMatchObject([{ body: "Files", attachments: [{ objectId: "object-old", pathHint: "docs/old.md" }] }]);
+  });
+
 });
 
 describe("pages the relay hosts live", () => {
@@ -453,6 +498,33 @@ describe("file reads through the server's copy", () => {
     engine.listedHidden.push(".env", "docs/.env.local", "a/.env/b.md", "docs/.DS_Store.");
     engine.files.seedBinaryFile({ workspace: "trip", path: "photo.png", bytes: [1, 2, 3], objectId: "object-photo" });
   }
+  it("lists the copy's files in lexical order without hidden ones, and reads a text file", async () => {
+    const { engine, h, syncs } = await relay();
+    seedFiles(engine);
+    const listed = await answer(await h(op("trip", "listFiles")));
+    expect(paths(listed)).toEqual({ files: ["Docs/old.md", "docs/plan.md", "docs/trips/lisbon.md", "photo.png"], folders: ["Docs", "docs", "docs/trips"] });
+    expect((listed.files as unknown[])[3]).toEqual({ path: "photo.png", objectId: "object-photo", contentKind: "binary", byteLength: 3 });
+    expect(paths(await answer(await h(op("trip", "listFiles", { path: "docs", recursive: false })))))
+      .toEqual({ files: ["docs/plan.md"], folders: ["docs", "docs/trips"] });
+    expect(await answer(await h(op("trip", "readText", { path: "./docs//plan.md" })))).toEqual({ ok: true, path: "docs/plan.md", text: "# Plan\n" });
+    expect(await answer(await h(op("trip", "readText", { path: "photo.png" }))))
+      .toEqual({ ok: false, reason: "dohc: photo.png is not a text file.", refusal: "binary" });
+    expect(syncs).toEqual(["trip", "trip", "trip", "trip"]);
+  });
+
+  it("reads a secret file exactly as a missing one, without asking the engine", async () => {
+    const { engine, h } = await relay();
+    seedFiles(engine);
+    const missing = (path: string) => ({ ok: false, reason: `dohc: No file at ${path}.` });
+    expect(await answer(await h(op("trip", "readText", { path: "docs/missing.md" })))).toEqual(missing("docs/missing.md"));
+    const reads = engine.files.requests.length;
+    for (const [path, normalized] of [[".env", ".env"], ["%2Eenv", ".env"], ["docs/.env.local", "docs/.env.local"], ["a/.env/b.md", "a/.env/b.md"]] as const) {
+      expect(await answer(await h(op("trip", "readText", { path }))), path).toEqual(missing(normalized));
+    }
+    expect(engine.files.requests.slice(reads).map((request) => request.method)).toEqual([]);
+    expect(JSON.stringify(await answer(await h(op("trip", "listFiles", { path: "a" }))))).not.toContain(".env");
+  });
+
   it("takes exactly the file reads' arguments, and words an engine failure without its detail", async () => {
     const { engine, h } = await relay();
     seedFiles(engine);

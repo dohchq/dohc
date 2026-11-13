@@ -138,6 +138,12 @@ it("does not replace a retained object when its path is reused or follow its ren
   f.seed(scope.workspaceId, "replacement-object", binding.currentPath, "replacement-share");
   expect(() => f.enroll({shareId: "replacement-share"})).toThrow("another document");
   expect(f.storage.listServiceHostEnrollments()[0]!.objectId).toBe(binding.objectId);
+it("refuses altered enrollment schema on reopen", async () => {
+  const f = await fixture(); f.enroll();
+  f.raw.exec(`CREATE TRIGGER unexpected_enrollment_trigger AFTER UPDATE ON ${SERVICE_HOST_ENROLLMENTS} BEGIN SELECT 1; END`);
+  expect(() => openSyncRelayStorage(f.path, f.config)).toThrow("constraints are damaged");
+});
+
 });
 
 // The enrollment table as relays created it before `owner_stop`.
@@ -331,6 +337,16 @@ it("migrates v1 enrollments in place and keeps the enabled document hosted", asy
   }
   expect(f.raw.prepare("SELECT migration_id FROM sync_relay_migrations WHERE migration_id LIKE 'service-host-enrollments-%' ORDER BY migration_id").all()
     .map(row => row.migration_id)).toEqual(["service-host-enrollments-v1", "service-host-enrollments-v2", "service-host-enrollments-v3", "service-host-enrollments-v4"]);
+});
+
+it("refuses an enrollment table it does not recognize", async () => {
+  const unmarked = await fixture(); unmarked.enroll();
+  downgradeToV1(unmarked, V1_SQL, null);
+  expect(() => openSyncRelayStorage(unmarked.path, unmarked.config)).toThrow("Unmarked service host enrollment storage exists.");
+  const altered = await fixture(); altered.enroll();
+  downgradeToV1(altered, V1_SQL.replace("STRICT", ""));
+  expect(() => openSyncRelayStorage(altered.path, altered.config)).toThrow("Service host enrollment storage is damaged.");
+  for (const f of [unmarked, altered]) expect(f.raw.prepare(`SELECT count(*) AS count FROM ${SERVICE_HOST_ENROLLMENTS}`).get()!.count).toBe(1);
 });
 
 // Proves: live admission needs an Edit grant of the enrollment's owner that
@@ -548,4 +564,3 @@ it("never reclaims a note the owner's restore kept live, and reclaims it once th
   expect(f.storage.reclaimIdleLiveDocuments(past)).toMatchObject([{objectId: binding.objectId, ...reclaimed}]);
   expect(f.retirement()).toMatchObject({activationId: f.restore.activationId, requestedAtMs: past});
 });
-

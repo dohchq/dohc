@@ -127,6 +127,37 @@ it("serves hosted rows unchanged and refuses private files, their blobs and coor
   expect(await coordinate(6)).toEqual({ok: true, status: "absent"});
 });
 
+it("keeps documents shared only with View or Comment access out of the feed", async () => {
+  const f = await fixture();
+  // Enrolling needs Edit, so the share drops to View after it enrolls.
+  f.share("view-share", ["view"], "edit");
+  f.enroll("view/c.md", "view-share");
+  f.setGrant("view-share", "access='view'");
+  expect((await f.page()).scope.documents.map(row => row.objectId)).toEqual([binding.objectId]);
+  expect(f.objects(await f.read())).not.toContain("object-view");
+  expect(await f.blobStatus(C.sha256)).toBe(404);
+  f.setGrant("view-share", "access='comment'");
+  expect(f.objects(await f.read())).not.toContain("object-view");
+  f.setGrant("view-share", "access='edit'");
+  expect(f.objects(await f.read())).toContain("object-view");
+  expect(await f.blobStatus(C.sha256)).toBe(200);
+});
+
+it("serves the union of overlapping Edit grants until the last covering grant is revoked", async () => {
+  const f = await fixture();
+  f.share("single-share", ["docs/a.md"], "edit");
+  f.enroll("docs/b.md");
+  expect(f.objects(await f.read())).toEqual(["workspace", binding.objectId, "object-b"]);
+  f.setGrant(scope.shareId, "status='revoked',revoked_at_ms=20");
+  expect(f.objects(await f.read())).toEqual(["workspace", binding.objectId]);
+  expect(await f.blobStatus(B.sha256)).toBe(404);
+  f.setGrant("single-share", "status='revoked',revoked_at_ms=20");
+  const empty = await f.read();
+  expect(empty.scope.documents).toEqual([]);
+  expect(f.objects(empty)).toEqual(["workspace"]);
+  expect(await f.blobStatus(A.sha256)).toBe(404);
+});
+
 it("announces a grown scope before any row and backfills the new document below the cursor", async () => {
   const f = await fixture();
   const before = await f.read();

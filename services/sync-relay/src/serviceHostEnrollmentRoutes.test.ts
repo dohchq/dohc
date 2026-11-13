@@ -365,6 +365,16 @@ function deferredBody(method: string, url: string, headers: Record<string,string
   const request = new Request(url, {method, headers, body: stream, duplex: "half"} as RequestInit);
   return {request, started, finish(body: Uint8Array) {controller.enqueue(body); controller.close();}};
 }
+it("rechecks ownership after an enrollment request body finishes", async () => {
+  const f = await fixture();
+  const pending = deferredBody("POST", f.request().url, {authorization: "Bearer account-token", "content-type": "application/json"});
+  const result = f.handle(pending.request); await pending.started;
+  await vi.waitFor(() => expect(f.resolveActor).toHaveBeenCalled());
+  f.raw.prepare("UPDATE sync_relay_workspaces SET owner_user_id='other' WHERE workspace_id=?").run(scope.workspaceId);
+  pending.finish(new TextEncoder().encode(JSON.stringify({shareId: scope.shareId})));
+  expect((await result).status).toBe(404); expect(f.storage.listServiceHostEnrollments()).toEqual([]);
+});
+
 
 it("service replication refuses foreign workspaces and account administration", async () => {
   const f = await fixture(), bearer = deriveServiceHostBearer(f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input}), {key, namespace});
