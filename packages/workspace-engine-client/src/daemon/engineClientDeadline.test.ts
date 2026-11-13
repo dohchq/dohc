@@ -10,7 +10,7 @@ const send = envelope => {
   frame.write("DOP1", 0, "ascii"); frame[4] = 1; frame[5] = 0; frame.writeUInt16LE(0, 6); frame.writeUInt32LE(payload.length, 8);
   payload.copy(frame, 12); process.stdout.write(frame);
 };
-const limits = {maxFrameBytes: 1048576, maxBlobChunkBytes: 65536, maxStringBytes: 65536, maxCollectionLen: 1024, maxBatchLen: 64, maxJsonDepth: 32};
+const limits = {maxFrameBytes: 1048576, maxBlobChunkBytes: 65536, maxStringBytes: 1048576, maxCollectionLen: 1024, maxBatchLen: 64, maxJsonDepth: 32};
 process.stdin.on("data", bytes => {
   if (!reading) return;
   buffered = Buffer.concat([buffered, bytes]);
@@ -84,11 +84,12 @@ it("fails a request it could not write before its deadline as unsent", async () 
   await ask(client);
   const { late } = await new Promise<{ late: Promise<unknown> }>((resolve) =>
     setImmediate(() => {
-      // Larger than the stream's 16 KB buffer, so the client holds the next request until this write drains.
+      // Larger than a pipe and the stream's buffer on every platform, so the client holds the next request until this
+      // write drains.
       const large = client.sendRequest({
         id: ++id,
         method: "answer",
-        params: { filler: "x".repeat(40_000) },
+        params: { filler: "x".repeat(200_000) },
         deadlineMs: 10_000,
       });
       large.catch(() => {});
