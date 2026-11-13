@@ -265,15 +265,6 @@ describe("an account's reads through the server's copy", () => {
 
 });
 
-describe("an account's share of the server", () => {
-
-});
-
-describe("failures through the server's copy", () => {
-  const engineFailure = () => new Error("The engine could not open /srv/dohc/automations/trip/.dohc/engine/engine.db.");
-
-});
-
 describe("secret files through the server's copy", () => {
 
   it("lists a secret file's chats exactly as a missing file's, and reads its threads and attachments as missing", async () => {
@@ -342,20 +333,6 @@ describe("pages the relay hosts live", () => {
     expect(response.status).toBe(409);
     // This route's own words, not the code's default, which is live editing's.
     expect(await json(response)).toEqual({ ok: false, code: "restore-in-progress", error: "This page is being restored. Try again once it finishes." });
-  });
-
-});
-
-describe("file reads through the server's copy", () => {
-  function seedFiles(engine: TestEngine) {
-    for (const [path, text] of [["docs/plan.md", "# Plan\n"], ["docs/trips/lisbon.md", "Alfama\n"], ["Docs/old.md", "Old\n"]] as const) {
-      engine.files.seedTextFile({ workspace: "trip", path, text, objectId: `object-${path}` });
-    }
-    engine.listedHidden.push(".env", "docs/.env.local", "a/.env/b.md", "docs/.DS_Store.");
-    engine.files.seedBinaryFile({ workspace: "trip", path: "photo.png", bytes: [1, 2, 3], objectId: "object-photo" });
-  }
-  const paths = (result: Record<string, unknown>) => ({
-    files: (result.files as Array<{ path: string }>).map((file) => file.path), folders: result.folders,
   });
 
 });

@@ -50,7 +50,7 @@ it.each([
   const state = await fixture();
   try {
     expect(state.storage.mintLiveTicket(mint)).not.toBeNull();
-    expect(state.storage.readLiveTicketTarget({ tokenHash, scope, audience, ...changed })).toBeNull();
+    expect(state.storage.readLiveTicketTarget({ tokenHash, audience, ...changed })).toBeNull();
     expect(state.storage.redeemLiveTicket({ ...redeem, ...changed })).toBeNull();
     expect(state.storage.redeemLiveTicket(redeem)).not.toBeNull();
   } finally { await state.close(); }

@@ -624,19 +624,6 @@ describe("over the HTTP adapter", () => {
   });
 });
 
-// The owner's reach check keeps a revoked recipient who wrote automations as
-// a former editor, so the owner's share listing says who did, and under
-// which generation, after the grant ends too.
-describe("a grant's automations writes in the owner's share listing", () => {
-  async function grantedRow(r: Relay): Promise<Record<string, unknown>> {
-    const response = await r.h(request(OWNER, "/sync/shares"));
-    expect(response.status).toBe(200);
-    const granted = (await json(response)).granted as Array<Record<string, unknown>>;
-    return granted.find((row) => row.grantId === r.grantId)!;
-  }
-
-});
-
 describe("the owner's read of a grant's direct writes", () => {
   async function ownerRead(r: Relay, grantId: string, query = "", as = OWNER): Promise<Response> {
     return await r.h(request(as, `/sync/${WORKSPACE}/collection-writes/${grantId}${query}`));

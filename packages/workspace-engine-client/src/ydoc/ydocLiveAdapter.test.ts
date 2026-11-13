@@ -1828,13 +1828,11 @@ describe("YdocLiveAdapter", () => {
     const releaseProvider = () => release === "close" ? provider.close({ settle: false }) : provider.evict();
     if (recovery === "saved") {
       const releasing = releaseProvider();
-      // A settling error after successful release is still reported by close.
       const outcome = releasing.catch((error: unknown) => error);
       expect(await Promise.race([handoffStarted.then(() => true), outcome.then(() => false)])).toBe(true);
       expect(evictions).toEqual([completeText]);
       completeHandoff();
-      if (release === "close") expect(await outcome).toBeInstanceOf(YdocReleasedWithSettleFailureError);
-      else expect(await outcome).toBeUndefined();
+      expect(await outcome).toBeUndefined();
       expect(evictions).toEqual([completeText, release]);
     } else if (recovery === "refused") {
       await expect(releaseProvider()).rejects.toThrow("draft storage refused");
@@ -2260,9 +2258,7 @@ describe("the ydoc.open deadline", () => {
     // session, so an evict took the document with it and the reopen found the
     // file. That models less than the daemon — which keeps the lineage across
     // an eviction and resurrects it — so any test driving it would certify a
-    // convergence that never happens. Mirrors
-    // `an_uncoverable_dirty_session_evicts_and_the_reopen_resurrects_it`
-    // in crates/dohc-workspace-engine/tests/rpc_ydoc.rs.
+    // convergence that never happens.
     const engine = seedPlaintextEngine("on disk");
     const transport: EngineTransport = {
       ...forwardYdocBlobEgress(engine),

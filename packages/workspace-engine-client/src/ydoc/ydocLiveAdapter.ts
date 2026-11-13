@@ -332,7 +332,7 @@ export interface YdocLocalTextEdit {
 const ILL_FORMED_UTF16_PATTERN =
   /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
-export function isWellFormedUtf16(value: string): boolean {
+function isWellFormedUtf16(value: string): boolean {
   return typeof value.isWellFormed === "function"
     ? value.isWellFormed()
     : !ILL_FORMED_UTF16_PATTERN.test(value);

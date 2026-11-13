@@ -1204,10 +1204,7 @@ it.each([
   expect(large, `characters read: ${small} -> ${large}`).toBeLessThan(small * 2.2)
 })
 
-// The engine's projector finds links with no text and definitions by marked's
-// rules too. Its test marked_literal_source_readings in
-// crates/dohc-engine-collab/src/ydoc.rs repeats these readings.
-it('pins the markedReadings the engine repeats', () => {
+it('pins marked readings for empty links and definitions', () => {
   const probe = new Tokenizer()
   probe.lexer = new Lexer({ ...getDefaults(), tokenizer: probe })
   const links: Array<[string, string | null]> = [

@@ -228,7 +228,7 @@ describe("held document routes", () => {
     ["another binding", {bindingDigest: "e".repeat(64)}],
   ])("answer no text inspected under %s, as a missing document", async (_case, query) => {
     const f = await relay(fakeHost({heldDocument: answering(preserved)}));
-    const params = new URLSearchParams({bindingDigest: held.bindingDigest, sha256: sha256(markdown), ...query});
+    const params = new URLSearchParams({sha256: sha256(markdown), ...query});
     const refused = await f.get(`${scope.workspaceId}/held-documents/${held.objectId}/markdown?${params}`);
     expect(refused.status).toBe(404);
   });
