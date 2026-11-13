@@ -1173,6 +1173,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restore_resume_refuses_a_pending_materialization_job_even_when_disk_matches() {
+        let mut f = Fixture::new().await;
+        let header = f.settled_resume_header().await;
+        let db =
+            rusqlite::Connection::open(f._scratch.path().join(".dohc/engine/engine.db")).unwrap();
+        let moment: String = db
+            .query_row(
+                "SELECT moment_id FROM live_device_settlements WHERE settlement_id=?1",
+                [header["settlementId"].as_str().unwrap()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let job = format!("ydoc-mat_{moment}");
+        let path = f._scratch.path().join("notes/a.md");
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(db.execute("UPDATE materialization_jobs SET status='pending' WHERE job_id=?1 AND status='complete'",[&job]).unwrap(),1);
+        assert!(
+            f.try_restore("liveApplication.resumeRestore", &header, 1_000_000)
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let resumed: bool = db
+            .query_row(
+                "SELECT resume_receipt_json IS NOT NULL FROM live_restore_fences",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!resumed);
+        assert_eq!(db.execute("UPDATE materialization_jobs SET status='complete' WHERE job_id=?1 AND status='pending'",[&job]).unwrap(),1);
+        drop(f.restore("liveApplication.resumeRestore", &header).await);
+        drop(db);
+        f.close().await;
+    }
+
+    #[tokio::test]
     async fn restore_resume_output_refusal_keeps_one_receipt_and_releases_reserved_capacity() {
         let mut f = Fixture::new().await;
         let header = f.settled_resume_header().await;

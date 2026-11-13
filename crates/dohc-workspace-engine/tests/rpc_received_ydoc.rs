@@ -258,6 +258,11 @@ async fn received_live_application_provision_owner_dispatch() {
 }
 
 #[tokio::test]
+async fn received_live_application_provision_owner_trusted() {
+    received_live_application_provision(true).await;
+}
+
+#[tokio::test]
 async fn received_ydoc_guard_keeps_configured_outbox_read() {
     let scratch = ScratchDir::new().unwrap();
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));

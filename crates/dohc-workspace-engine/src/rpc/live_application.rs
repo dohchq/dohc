@@ -3113,6 +3113,49 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn reconciliation_is_only_for_the_configured_host_and_its_budget() {
+        let (_scratch, service, owner, workspace, document, _) = retirement_fixture(true).await;
+        let before = teardown(&service, &owner, &workspace, document);
+        let stranger = dohc_engine_protocol::transport::ConnectionOwner::authenticated();
+        let request = || reconcile_request(&workspace, retirement_key("activation"));
+        assert_eq!(
+            service
+                .call(host_context(&stranger), request())
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::SessionExpired
+        );
+        let ordinary = EngineService::new();
+        let mut unbound = request();
+        unbound.workspace = None;
+        assert_eq!(
+            ordinary
+                .call(host_context(&stranger), unbound)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Forbidden,
+            "an engine with no configured host has no retirement"
+        );
+        for budget in [0, 5] {
+            let mut key = retirement_key("activation");
+            key["maxApplications"] = json!(budget);
+            assert_eq!(
+                service
+                    .call(host_context(&owner), reconcile_request(&workspace, key))
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::InvalidParams,
+                "budget {budget}"
+            );
+        }
+        assert_eq!(teardown(&service, &owner, &workspace, document), before);
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
     /// Every shared guard refuses before Phase A, for an adopted activation
     /// and a never-adopted source alike: nothing it would tear down goes.
     #[tokio::test]

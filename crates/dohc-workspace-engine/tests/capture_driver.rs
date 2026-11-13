@@ -448,6 +448,81 @@ async fn binary_and_secret_content_capture_autonomously() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn policy_narrowed_while_closed_retires_on_reopen() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    write_file(scratch.path(), "private/journal.md", b"personal");
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    wait_for_text(&transport, &handle, "private/journal.md", Some("personal")).await;
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(2, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+
+    // files.toml narrowed while the daemon was down: the policy-aware seed
+    // must re-offer the unchanged path so the sink retires it on reopen.
+    write_file(
+        scratch.path(),
+        ".dohc/files.toml",
+        b"[[rule]]\npath = \"private/**\"\ntracked = false\n",
+    );
+
+    let handle = open_workspace(&transport, &scratch, 3).await;
+    wait_for_text(&transport, &handle, "private/journal.md", None).await;
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(9_000, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn offline_delete_and_narrow_in_the_same_window_still_retires() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    write_file(scratch.path(), "private/journal.md", b"personal");
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    wait_for_text(&transport, &handle, "private/journal.md", Some("personal")).await;
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(2, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+
+    // Both in the closed window: the file is deleted and policy narrows it.
+    // A seed that dropped narrowed entries would leave this head orphaned —
+    // the path appears in neither the scan listing (deleted) nor the
+    // manifest (dropped), so nothing could ever emit its Retire.
+    std::fs::remove_file(scratch.path().join("private/journal.md")).expect("offline delete");
+    write_file(
+        scratch.path(),
+        ".dohc/files.toml",
+        b"[[rule]]\npath = \"private/**\"\ntracked = false\n",
+    );
+
+    let handle = open_workspace(&transport, &scratch, 3).await;
+    wait_for_text(&transport, &handle, "private/journal.md", None).await;
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(9_000, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn foreign_origin_secret_tip_is_never_claimed_or_retired_by_capture() {
     use dohc_engine_crypto::create_key_file;
     use dohc_engine_domain::{
@@ -890,6 +965,186 @@ async fn fresh_import_opens_early_fences_partial_reads_and_preserves_foreign_hea
         )
         .await
         .expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn existing_store_and_unreadable_policy_keep_the_strict_open_barrier() {
+    for unreadable_policy in [false, true] {
+        let scratch = ScratchDir::new().expect("scratch");
+        write_root_binding(scratch.path(), TOKEN).expect("root binding");
+        let probe = CaptureApplyProbe::default();
+        let service = Arc::new(EngineService::with_capture_apply_probe_for_harness(
+            probe.clone(),
+        ));
+        let transport = Arc::new(InProcessTransport::new(service));
+
+        if !unreadable_policy {
+            let seed = call_with_busy_retry(
+                &transport,
+                RequestContext::unbounded(),
+                request(
+                    1,
+                    "workspace.open",
+                    None,
+                    json!({
+                        "rootDir": scratch.path().to_string_lossy(),
+                        "workspaceId": WORKSPACE_ID,
+                        "captureMode": "none"
+                    }),
+                ),
+            )
+            .await
+            .expect("seed existing store");
+            let seed_handle: WorkspaceHandle =
+                serde_json::from_value(seed.result["workspace"].clone()).expect("seed handle");
+            transport
+                .call(
+                    RequestContext::unbounded(),
+                    request(2, "workspace.close", Some(seed_handle), json!({})),
+                )
+                .await
+                .expect("close seed");
+        } else {
+            std::fs::create_dir(scratch.path().join(".dohc/files.toml"))
+                .expect("unreadable policy shape");
+        }
+        write_file(scratch.path(), "seed.md", b"baseline bytes");
+        probe.pause_next_apply();
+
+        let opening_transport = Arc::clone(&transport);
+        let root = scratch.path().to_path_buf();
+        let opening = tokio::spawn(async move {
+            call_with_busy_retry(
+                &opening_transport,
+                RequestContext::unbounded(),
+                request(
+                    3,
+                    "workspace.open",
+                    None,
+                    json!({
+                        "rootDir": root.to_string_lossy(),
+                        "workspaceId": WORKSPACE_ID
+                    }),
+                ),
+            )
+            .await
+        });
+        tokio::time::timeout(WAIT, async {
+            probe.wait_until_paused().await;
+            probe.wait_until_open_waiting().await;
+        })
+        .await
+        .expect("strict open must park at the readiness barrier while the baseline is paused");
+        assert!(
+            !probe.is_open_ready(),
+            "the paused strict baseline must keep the readiness barrier closed"
+        );
+        assert!(
+            !opening.is_finished(),
+            "{} must not release before its baseline",
+            if unreadable_policy {
+                "unknown policy"
+            } else {
+                "existing store"
+            }
+        );
+        probe.release();
+        let opened = tokio::time::timeout(WAIT, opening)
+            .await
+            .expect("strict open must finish after releasing the baseline")
+            .expect("open task")
+            .expect("workspace open after baseline");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
+        let status = transport
+            .call(
+                RequestContext::unbounded(),
+                request(4, "watcher.status", Some(handle.clone()), json!({})),
+            )
+            .await
+            .expect("watcher.status");
+        assert_ne!(status.result["phase"], json!("importing"));
+        if unreadable_policy {
+            assert_eq!(status.result["phase"], json!("degraded"));
+            let versions = transport
+                .call(
+                    RequestContext::unbounded(),
+                    request(5, "versions.list", Some(handle.clone()), json!({})),
+                )
+                .await
+                .expect("bounded degraded startup must release safe reads");
+            assert_eq!(versions.result["versions"], json!([]));
+            let main = transport
+                .call(
+                    RequestContext::unbounded(),
+                    request(6, "versions.ensureMain", Some(handle.clone()), json!({})),
+                )
+                .await
+                .expect("main version bootstrap remains available");
+            assert_eq!(main.result["id"], json!("main"));
+            let versions = transport
+                .call(
+                    RequestContext::unbounded(),
+                    request(7, "versions.list", Some(handle.clone()), json!({})),
+                )
+                .await
+                .expect("bootstrapped version must be readable");
+            assert_eq!(versions.result["versions"][0]["versionId"], json!("main"));
+            let files = transport
+                .call(
+                    RequestContext::unbounded(),
+                    request(
+                        8,
+                        "versionedText.list",
+                        Some(handle.clone()),
+                        json!({ "versionId": "main" }),
+                    ),
+                )
+                .await
+                .expect("bounded degraded startup must release file reads");
+            assert_eq!(files.result["files"], json!([]));
+
+            // Restore a readable policy, then make the admitted Degraded
+            // handle drive its own recovery. The renderer's fileObjectId
+            // path is flush-dependent; returning `settled: false` directly
+            // from the RPC gate until the background cadence happens to run
+            // makes an already-open workspace unusable for Linked Chats.
+            std::fs::remove_dir(scratch.path().join(".dohc/files.toml"))
+                .expect("restore readable policy");
+            let mut settled = false;
+            for id in 80..84 {
+                let flush = transport
+                    .call(
+                        RequestContext::unbounded(),
+                        request(id, "capture.flush", Some(handle.clone()), json!({})),
+                    )
+                    .await
+                    .expect("degraded capture flush");
+                settled = flush.result["settled"] == json!(true);
+                if settled {
+                    break;
+                }
+            }
+            assert!(
+                settled,
+                "an admitted degraded handle must let flush drive a clean recovery"
+            );
+            assert_eq!(
+                read_text(&transport, &handle, 84, "seed.md")
+                    .await
+                    .as_deref(),
+                Some("baseline bytes"),
+                "the settling flush must install the baseline before dependent reads"
+            );
+        }
+        transport
+            .call(
+                RequestContext::unbounded(),
+                request(90, "workspace.close", Some(handle), json!({})),
+            )
+            .await
+            .expect("close");
+    }
 }
 
 const FIRST_IMPORT_SUMMARY: &str = "Added existing files";

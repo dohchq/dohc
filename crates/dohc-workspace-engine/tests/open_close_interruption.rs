@@ -162,7 +162,7 @@ async fn an_interrupted_open_or_close_never_strands_the_workspace_db() {
     });
 
     let mut seed = 0x9e3779b97f4a7c15_u64;
-    for iteration in 0..8_u32 {
+    for iteration in 0..150_u32 {
         // An open whose future is dropped mid-flight, like a
         // deadline-expired wire request.
         let open_harness = Arc::clone(&harness);

@@ -615,6 +615,37 @@ fn list_moments_keyset_pagination_edges() {
     );
 }
 
+// oracle: versions-delete-text-file is version-local; a sibling fork keeps the
+// shared object's inherited snapshot.
+#[test]
+fn delete_text_file_does_not_affect_sibling_fork() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+    let mut vt = VersionedTextStore::new(&mut store);
+    vt.write_text(&write("main", "a.md", "one", "m1", "o1", 10), &NO_FAULTS)
+        .expect("write");
+    vt.create_named_version(
+        &CreateNamedVersion {
+            workspace_id: WS.to_owned(),
+            new_version_id: "feat".to_owned(),
+            name: "feature".to_owned(),
+            from_version_id: "main".to_owned(),
+            now_ms: 20,
+            request_id: None,
+        },
+        &NO_FAULTS,
+    )
+    .expect("fork");
+    vt.delete_text_file(&delete("main", "a.md", "m2", 30), &NO_FAULTS)
+        .expect("delete");
+    assert!(vt.read_text(WS, "main", "a.md").unwrap().is_none());
+    let sibling = vt.read_text(WS, "feat", "a.md").unwrap().unwrap();
+    assert_eq!(sibling.object_id, "o1");
+    assert_eq!(sibling.text, "one");
+}
+
 // oracle: versions-rollback-text-file-mutation restores deleted content.
 #[test]
 fn rollback_delete_restores_deleted_content() {
@@ -734,6 +765,29 @@ fn rollback_rejects_migrated_null_link_dependent() {
             .expect_err("unresolved dependent")
             .code(),
         "invalid-input"
+    );
+}
+
+// oracle: versions-rollback-text-file-mutation refuses a rename rollback when
+// its source path has since been occupied by a different object.
+#[test]
+fn rollback_rejects_occupied_restore_path() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+    let mut vt = VersionedTextStore::new(&mut store);
+    vt.write_text(&write("main", "a.md", "one", "m1", "o1", 10), &NO_FAULTS)
+        .expect("write");
+    vt.rename_text_file(&rename("main", "a.md", "b.md", "m2", 20), &NO_FAULTS)
+        .expect("rename");
+    vt.write_text(&write("main", "a.md", "other", "m3", "o2", 30), &NO_FAULTS)
+        .expect("occupy source");
+    assert_eq!(
+        vt.rollback_text_file_mutation(&rollback("main", "b.md", "m2"), &NO_FAULTS)
+            .expect_err("occupied")
+            .code(),
+        "target-path-exists"
     );
 }
 

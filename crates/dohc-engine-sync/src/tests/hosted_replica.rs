@@ -415,6 +415,64 @@ fn hosted_outbound_sequences_survive_purged_journal_rows_and_reopen() {
     assert_eq!(last_outbound_seq(&store), 3);
 }
 
+/// The slice-1 review's reproduction: chat on a hosted replica allocated from
+/// the journal's maximum while the sync journal allocated from the counter, so
+/// the next sync append collided with a chat coordinate.
+#[test]
+fn a_hosted_replica_writes_no_chat_and_its_journal_keeps_one_counter() {
+    let (_scratch, path, mut store) = hosted_store();
+    host_document(&mut store, "doc-a");
+    {
+        let mut chats = LinkedChatStore::new(&mut store);
+        for refused in [
+            chats.ensure_general_channel("ws", "general-local", 2_000, &NoFaults),
+            chats.ensure_agent_channel(
+                "ws",
+                "agent-local",
+                "default",
+                "My agent",
+                2_000,
+                &NoFaults,
+            ),
+        ] {
+            assert!(matches!(
+                refused,
+                Err(dohc_engine_domain::DomainError::InvalidInput { .. })
+            ));
+        }
+    }
+    for table in ["replication_log", "chat_channels", "chat_channel_wire_ids"] {
+        assert_eq!(
+            count(&store, &format!("SELECT COUNT(*) FROM {table}")),
+            0,
+            "{table} stays empty"
+        );
+    }
+    assert_eq!(last_outbound_seq(&store), -1);
+
+    let append = |store: &mut EngineStore| {
+        store
+            .write_with(&NoFaults, |tx| {
+                journal_local_op_in_tx(
+                    tx,
+                    "ws",
+                    "ydoc.update",
+                    &json!({"objectId": "doc-a"}),
+                    3_000,
+                )
+            })
+            .unwrap()
+    };
+    assert_eq!(append(&mut store), TxnOutcome::Committed(0));
+    drop(store);
+    let mut store = EngineStore::open(&path, 4_000).unwrap();
+    assert_eq!(append(&mut store), TxnOutcome::Committed(1));
+    assert_eq!(
+        coordinates(&store),
+        [(HOST.to_owned(), 0), (HOST.to_owned(), 1)]
+    );
+}
+
 /// Every kind the session host does not write is refused before it takes a
 /// sequence, through both journal paths; every kind it writes, for a document
 /// it hosts, takes the next one from the counter.
@@ -2908,6 +2966,36 @@ fn a_return_interrupted_at_its_unparking_finishes_once_after_a_restart() {
         assert_eq!(coordinates(&store), journal, "{unparked}");
         assert_eq!(count(&store, parked_heads), 0);
     }
+}
+
+/// Parking (G4): a parked document is no longer hosted. The replica refuses
+/// to write for it before it takes a sequence.
+#[test]
+fn a_write_for_a_parked_document_is_refused() {
+    let (_scratch, _path, mut store, client) = departing_b();
+    client.transport().unshare("doc-b");
+    sync_parking(&client, &mut store);
+    assert!(is_parked(&store, "doc-b"));
+    let before = last_outbound_seq(&store);
+    for (kind, payload) in [
+        ("ydoc.update", json!({"objectId": "doc-b"})),
+        ("moment.append", json!({"objectId": "doc-b"})),
+        ("live.audit.application", json!({"objectId": "doc-b"})),
+    ] {
+        let refused = store.write_with(&NoFaults, |tx| {
+            journal_local_op_in_tx(tx, "ws", kind, &payload, 3_000)
+        });
+        assert!(
+            matches!(
+                refused,
+                Err(SyncError::InvalidInput {
+                    reason: dohc_engine_domain::HOSTED_REPLICA_WRITE_REFUSED
+                })
+            ),
+            "{kind}: {refused:?}"
+        );
+    }
+    assert_eq!(last_outbound_seq(&store), before);
 }
 
 /// Round 3b's deferred input, through the whole retirement: a Y.Doc update

@@ -456,6 +456,51 @@ mod tests {
         }
     }
 
+    #[test]
+    fn reader_bootstrap_conflicts_with_other_occupants() {
+        for case in [
+            "own",
+            "alias",
+            "other-object",
+            "other-path",
+            "file-only",
+            "fork",
+        ] {
+            let vector = reader_vector();
+            let (_dir, mut store, mut cache, _owner, handle) = fixture(&vector);
+            receive_reader_file(&mut store, &vector);
+            store.write_with(&NoFaults, |tx| {
+                match case {
+                    "alias" => { tx.execute("INSERT INTO path_aliases VALUES('workspace','main','other.md','object')", []).unwrap(); }
+                    "other-object" => {
+                        tx.execute("INSERT INTO file_objects VALUES('workspace','foreign',0)", []).unwrap();
+                        tx.execute("INSERT INTO snapshots SELECT workspace_id,version_id,'foreign',path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin,content_kind,binary_sha256,metadata_summary,metadata_correlation_id FROM snapshots", []).unwrap();
+                    }
+                    "other-path" => { tx.execute("UPDATE snapshots SET path='other.md'", []).unwrap(); }
+                    "file-only" => { tx.execute("DELETE FROM snapshots", []).unwrap(); }
+                    "fork" => { tx.execute("INSERT INTO fork_base_snapshots SELECT * FROM snapshots", []).unwrap(); }
+                    _ => {}
+                }
+                Ok::<_, StorageError>(())
+            }).unwrap();
+            let result = run(&mut store, &mut cache, &handle, &vector, &NoFaults);
+            if case == "own" {
+                assert!(matches!(
+                    result,
+                    Err(Error::Application(ApplicationError::Collab(
+                        CollabError::MarkdownReaderUnavailable
+                    )))
+                ));
+            } else {
+                assert!(
+                    matches!(result, Err(Error::Application(ApplicationError::Conflict))),
+                    "{case}: {result:?}"
+                );
+            }
+            assert_eq!(store.table_row_count("ydoc_docs").unwrap(), 0);
+        }
+    }
+
     fn fixture(
         vector: &Vector,
     ) -> (
@@ -1261,6 +1306,32 @@ mod tests {
         assert!(run(&mut store, &mut cache, &handle, &nonpublic, &NoFaults).is_err());
         assert_eq!(counts(&store), (0, 0, 0, 0));
     }
+    #[test]
+    fn existing_domain_object_and_retired_registration_cannot_be_bootstrapped() {
+        let vector = vectors().remove(1);
+        let (_dir, mut store, mut cache, mut owner, handle) = fixture(&vector);
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO file_objects VALUES ('workspace','object',0)",
+                    [],
+                )
+                .unwrap();
+                Ok::<_, StorageError>(())
+            })
+            .unwrap();
+        assert!(matches!(
+            run(&mut store, &mut cache, &handle, &vector, &NoFaults),
+            Err(Error::Application(ApplicationError::Conflict))
+        ));
+        assert_eq!(counts(&store), (0, 0, 0, 0));
+        owner.invalidate(&mut store).unwrap();
+        assert_eq!(
+            run(&mut store, &mut cache, &handle, &vector, &NoFaults).unwrap(),
+            BootstrapResult::Pending(ApplicationPending::ApplicabilityUnavailable)
+        );
+    }
+
     #[test]
     fn lost_commit_ack_replays_and_precommit_crash_has_no_partial_rows() {
         use dohc_engine_storage::{FaultAction, FaultPoint};

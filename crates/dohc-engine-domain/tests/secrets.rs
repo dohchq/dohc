@@ -879,6 +879,200 @@ fn capture_secret_ownership_is_enforced_in_both_directions() {
     assert!(retired.is_some(), "capture retires the tip it owns");
 }
 
+/// The three capture-ownership decisions used to key on
+/// `metadata_origin == "local-file"`, which is a member of the closed origin
+/// set an RPC caller or a replication peer may supply — so a remote writer
+/// could claim disk ownership it never had. Ownership now rides the
+/// engine-stamped `capture_owned` column, and the `write()` helper here writes
+/// exactly the spoof shape: origin `local-file` with
+/// `SecretDiskIntent::Materialize` (plaintext not observed on disk).
+#[test]
+fn capture_ownership_does_not_follow_from_the_caller_supplied_origin() {
+    use dohc_engine_domain::{CaptureSecret, CaptureSecretRetire, capture_secret_retire_with};
+
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    seed_version(&db, WS);
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    let key = key();
+
+    write(&mut store, &key, ".env", "TOKEN=from-api", "sm-api", 10);
+
+    let refused = SecretFileStore::new(&mut store, &key).capture_secret(
+        &CaptureSecret {
+            workspace_id: WS.to_owned(),
+            version_id: "main".to_owned(),
+            path: ".env".to_owned(),
+            text: "TOKEN=from-disk".to_owned(),
+            metadata_origin: "local-file".to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            now_ms: 20,
+            claim_foreign_head: false,
+        },
+        &NO_FAULTS,
+    );
+    assert!(
+        matches!(
+            refused,
+            Err(dohc_engine_domain::DomainError::CaptureNotOwned)
+        ),
+        "a matching origin string must not make an API-written tip capture-owned"
+    );
+
+    let retired = capture_secret_retire_with(
+        &mut store,
+        &CaptureSecretRetire {
+            workspace_id: WS.to_owned(),
+            version_id: "main".to_owned(),
+            path: ".env".to_owned(),
+            metadata_origin: "local-file".to_owned(),
+            metadata_correlation_id: None,
+            now_ms: 30,
+            only_if_own_origin: true,
+        },
+        &NO_FAULTS,
+        |_, _| Ok(()),
+    )
+    .expect("keyless retire");
+    assert!(
+        retired.is_none(),
+        "a matching origin string must not let a disk-driven retire destroy an \
+         API-written tip"
+    );
+
+    let plaintext = SecretFileStore::new(&mut store, &key)
+        .materialize_secret_file(WS, "main", ".env")
+        .expect("materialize")
+        .expect("tip present");
+    assert_eq!(plaintext.into_utf8().expect("utf8"), "TOKEN=from-api");
+
+    // Positive control: a tip capture actually put on disk stays claimable.
+    SecretFileStore::new(&mut store, &key)
+        .capture_secret(
+            &CaptureSecret {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                path: ".env.local".to_owned(),
+                text: "TOKEN=observed".to_owned(),
+                metadata_origin: "local-file".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                now_ms: 40,
+                claim_foreign_head: true,
+            },
+            &NO_FAULTS,
+        )
+        .expect("first capture");
+    SecretFileStore::new(&mut store, &key)
+        .capture_secret(
+            &CaptureSecret {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                path: ".env.local".to_owned(),
+                text: "TOKEN=observed-again".to_owned(),
+                metadata_origin: "local-file".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                now_ms: 50,
+                claim_foreign_head: false,
+            },
+            &NO_FAULTS,
+        )
+        .expect("capture must still claim a tip it put on disk itself");
+}
+
+/// The rehydration seed states what CAPTURE believes is on disk: a seeded path
+/// that the baseline scan cannot find is diffed as removed and RETIRED. Seeding
+/// an API-written secret — whose plaintext may never have reached disk — would
+/// therefore delete it, so the seed must not accept the caller's origin string
+/// as proof of disk ownership either.
+#[test]
+fn capture_manifest_seed_only_carries_secrets_capture_put_on_disk() {
+    use dohc_engine_domain::{CaptureSecret, SECRET_SEED_SENTINEL_SHA, capture_manifest_seed};
+
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    seed_version(&db, WS);
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    let key = key();
+
+    write(&mut store, &key, ".env", "TOKEN=from-api", "sm-api", 10);
+    SecretFileStore::new(&mut store, &key)
+        .capture_secret(
+            &CaptureSecret {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                path: ".env.local".to_owned(),
+                text: "TOKEN=from-disk".to_owned(),
+                metadata_origin: "local-file".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                now_ms: 20,
+                claim_foreign_head: true,
+            },
+            &NO_FAULTS,
+        )
+        .expect("capture write");
+
+    let seeded: Vec<String> = capture_manifest_seed(&store, WS, "main")
+        .expect("seed")
+        .into_iter()
+        .inspect(|entry| assert_eq!(entry.sha256, SECRET_SEED_SENTINEL_SHA))
+        .map(|entry| entry.path)
+        .collect();
+    assert_eq!(
+        seeded,
+        vec![".env.local".to_owned()],
+        "only the capture-observed secret may be seeded"
+    );
+}
+
+/// The materializer writing a secret's plaintext to disk is the engine
+/// projecting API state outward, not capture observing the user's file. It must
+/// not confer capture ownership: otherwise deleting the projected file would
+/// retire an API-written secret. Pins the narrow scope of the ownership marker.
+#[test]
+fn materializing_an_api_secret_does_not_confer_capture_ownership() {
+    use dohc_engine_domain::{CaptureSecretRetire, capture_secret_retire_with};
+
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    seed_version(&db, WS);
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    let key = key();
+
+    write(&mut store, &key, ".env", "TOKEN=from-api", "sm-api", 10);
+    store
+        .mark_materialization_complete("secret-mat_sm-api", 20)
+        .expect("the materializer wrote the plaintext to disk");
+
+    let retired = capture_secret_retire_with(
+        &mut store,
+        &CaptureSecretRetire {
+            workspace_id: WS.to_owned(),
+            version_id: "main".to_owned(),
+            path: ".env".to_owned(),
+            metadata_origin: "local-file".to_owned(),
+            metadata_correlation_id: None,
+            now_ms: 30,
+            only_if_own_origin: true,
+        },
+        &NO_FAULTS,
+        |_, _| Ok(()),
+    )
+    .expect("keyless retire");
+    assert!(
+        retired.is_none(),
+        "a disk delete must not retire a secret capture never observed"
+    );
+    let plaintext = SecretFileStore::new(&mut store, &key)
+        .materialize_secret_file(WS, "main", ".env")
+        .expect("materialize")
+        .expect("tip present");
+    assert_eq!(plaintext.into_utf8().expect("utf8"), "TOKEN=from-api");
+}
+
 /// `secret_moments` is keyed by `(workspace_id, moment_id)`, so a same-named
 /// moment can exist in another workspace — replication inserts secret moments
 /// with ids chosen elsewhere and enqueues no materialization job, so nothing

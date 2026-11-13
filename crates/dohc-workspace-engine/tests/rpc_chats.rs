@@ -2429,6 +2429,56 @@ async fn bookmark_state_filter_claim_command_default_and_path_floor() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unknown_fields_and_null_optionals_are_rejected() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-b2-strict").await;
+    let mut id = 10;
+    let unknown = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.listPending",
+        json!({ "surprise": true }),
+    )
+    .await;
+    let null_optional = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.setThreadPaused",
+        json!({ "threadId": "thread", "paused": true, "reason": null }),
+    )
+    .await;
+    assert_eq!(
+        (unknown.code, null_optional.code),
+        (ErrorCode::InvalidParams, ErrorCode::InvalidParams),
+        "remove deny_unknown/non-null optional decoders -> malformed calls enter domain.",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn workspace_handle_overrides_a_spoofed_workspace_identity() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-b2-scope").await;
+    let mut id = 10;
+    let spoofed = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.listPending",
+        json!({ "workspaceId": "foreign" }),
+    )
+    .await;
+    assert_eq!(
+        spoofed.code,
+        ErrorCode::InvalidParams,
+        "trust a params workspace id -> caller can select foreign rows."
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_agent_you_run_pages_its_persons_requests_under_its_own_reader() {
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));

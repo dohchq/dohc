@@ -6,8 +6,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome, hex_sha256};
+use dohc_engine_storage::{EngineStore, NoFaults, StorageError, TxnOutcome, hex_sha256};
 use dohc_engine_sync::{
+    read_pushed_seq,
     BlobDownloadBatchRequest, BlobDownloadSpec, BlobHaveRequest, BlobKind, BlobUploadRequest,
     ClaimRequest, EpochRequest, HostedPullRequest, HostedPullResponse, HostedScope,
     HostedScopeDocument, KeyEnvelopeDownloadRequest, KeyEnvelopeRequest, LogCoordinateRequest,
@@ -432,6 +433,166 @@ fn log_page(ops: Vec<Value>, next_cursor: i64, has_more: bool) -> TestResponse {
 }
 
 #[test]
+fn push_conflict_probes_empty_ops_rewinds_and_retries_once() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine, &json!({"index": 0}));
+    journal_local_replication_op(
+        &mut engine,
+        "ws",
+        "local",
+        "epoch-1",
+        "stream-1",
+        "probe.local",
+        &json!({"index": 1}),
+        1_001,
+        &NoFaults,
+    )
+    .expect("second op");
+    engine
+        .write_with(&NoFaults, |transaction| {
+            transaction
+                .execute(
+                    "INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq) \
+                 VALUES ('ws','local',0)",
+                    [],
+                )
+                .map_err(StorageError::persist_public)?;
+            Ok::<(), StorageError>(())
+        })
+        .expect("seed pushed cursor");
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let handler_calls = Arc::clone(&calls);
+    let server = FakeServer::start(move |request| {
+        let body = request.json();
+        let ops = body["ops"].as_array().expect("ops");
+        let call_index = {
+            let mut calls = handler_calls.lock().expect("calls");
+            calls.push(ops.len());
+            calls.len()
+        };
+        match call_index {
+            1 => TestResponse::json(409, json!({"ok": false, "code": "conflict"})),
+            2 => TestResponse::json(
+                200,
+                json!({
+                    "ok": true,
+                    "accepted": 0,
+                    "inserted": 0,
+                    "skipped": 0,
+                    "currentMaxOriginSeq": -1
+                }),
+            ),
+            _ => {
+                let current = ops.last().and_then(|op| op["originSeq"].as_i64()).unwrap();
+                TestResponse::json(
+                    200,
+                    json!({
+                        "ok": true,
+                        "accepted": ops.len(),
+                        "inserted": ops.len(),
+                        "skipped": 0,
+                        "currentMaxOriginSeq": current
+                    }),
+                )
+            }
+        }
+    });
+    let outcome = RelaySyncClient::new(transport(&server))
+        .push_workspace(
+            &mut engine,
+            "ws",
+            &NoFaults,
+            &dohc_engine_sync::NoLiveLeases,
+            1_000,
+            0,
+        )
+        .expect("rewind retry");
+    assert!(matches!(
+        outcome,
+        SyncPassOutcome::Complete { pushed: 2, .. }
+    ));
+    assert_eq!(*calls.lock().expect("calls"), [1, 0, 2]);
+    assert_eq!(
+        read_pushed_seq(&engine, "ws", "local").expect("pushed seq"),
+        1
+    );
+}
+
+#[test]
+fn push_rewind_is_durable_before_a_failed_retry() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine, &json!({"index": 0}));
+    journal_local_replication_op(
+        &mut engine,
+        "ws",
+        "local",
+        "epoch-1",
+        "stream-1",
+        "probe.local",
+        &json!({"index": 1}),
+        1_001,
+        &NoFaults,
+    )
+    .expect("second op");
+    engine
+        .write_with(&NoFaults, |transaction| {
+            transaction
+                .execute(
+                    "INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq) \
+                     VALUES ('ws','local',0)",
+                    [],
+                )
+                .map_err(StorageError::persist_public)?;
+            Ok::<(), StorageError>(())
+        })
+        .expect("seed pushed cursor");
+    let calls = Arc::new(Mutex::new(0_usize));
+    let handler_calls = Arc::clone(&calls);
+    let server = FakeServer::start(move |request| {
+        let call = {
+            let mut calls = handler_calls.lock().expect("calls");
+            *calls += 1;
+            *calls
+        };
+        match call {
+            1 => TestResponse::json(409, json!({"ok": false, "code": "conflict"})),
+            2 => TestResponse::json(
+                200,
+                json!({
+                    "ok": true,
+                    "accepted": 0,
+                    "inserted": 0,
+                    "skipped": 0,
+                    "currentMaxOriginSeq": -1
+                }),
+            ),
+            3 => {
+                assert_eq!(request.json()["ops"].as_array().expect("ops").len(), 2);
+                TestResponse::json(500, json!({"ok": false, "code": "internal_error"}))
+            }
+            _ => panic!("unexpected retry"),
+        }
+    });
+
+    assert_eq!(
+        RelaySyncClient::new(transport(&server)).push_workspace(
+            &mut engine,
+            "ws",
+            &NoFaults,
+            &dohc_engine_sync::NoLiveLeases,
+            1_000,
+            0,
+        ),
+        Err(RelayError::ServerInternal)
+    );
+    assert_eq!(
+        read_pushed_seq(&engine, "ws", "local").expect("rewound state"),
+        -1,
+        "the lower probe result must survive a process stop before retry success"
+    );
+}
+
+#[test]
 fn pull_rejects_rows_without_the_mandatory_relay_sequence() {
     let server = FakeServer::start(|_| {
         log_page(
@@ -499,6 +660,36 @@ fn exact_log_coordinate_lookup_is_authenticated_and_preserves_relay_order() {
         panic!("expected a present coordinate");
     };
     assert_eq!(envelope.relay_seq, Some(11));
+}
+
+#[test]
+fn direct_transport_rejects_an_oversized_outbound_payload_before_io() {
+    let server = FakeServer::start(|_| panic!("oversized payload reached the network"));
+    let overhead = br#"{"data":""}"#.len();
+    let payload =
+        json!({"data": "x".repeat(dohc_engine_sync::MAX_PAYLOAD_JSON_BYTES - overhead + 1)});
+    let error = transport(&server)
+        .push(dohc_engine_sync::PushRequest {
+            work_references: Vec::new(),
+            workspace_id: "ws".to_owned(),
+            replication_epoch: "epoch".to_owned(),
+            stream_identity: "stream".to_owned(),
+            origin_id: "local".to_owned(),
+            after_seq: -1,
+            ops: vec![ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
+                workspace_id: "ws".to_owned(),
+                origin_id: "local".to_owned(),
+                origin_seq: 0,
+                relay_seq: None,
+                op_kind: "workspace.init".to_owned(),
+                payload,
+                recorded_at_ms: 1,
+            }],
+        })
+        .expect_err("relay-oversized payload");
+    assert_eq!(error, RelayError::PayloadTooLarge);
 }
 
 #[test]

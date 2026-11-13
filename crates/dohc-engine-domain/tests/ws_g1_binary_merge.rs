@@ -407,6 +407,55 @@ fn an_empty_text_head_over_a_binary_base_is_not_a_binary_fast_forward() {
     );
 }
 
+/// The other direction of a source-only change: the target holds bytes it has
+/// not touched since the fork, and the source replaced them with TEXT. Only the
+/// source moved, so the comparison reads `IncomingChanged` — but the merge
+/// still goes to the user: the binary fast-forward writes bytes, and the TEXT
+/// fast-forward does not hand its seam a binary current. Resolving does
+/// — one click later, `ApplyIncoming` writes the incoming text over the bytes.
+///
+#[test]
+fn text_replacing_an_untouched_binary_head_opens_a_conflict() {
+    let (_scratch, mut store) = open();
+    write_text(&mut store, "main", "seed.md", "seed", "seed-moment");
+    let main_sha = write_binary(
+        &mut store,
+        "main",
+        "notes.md",
+        b"\x89PNG\x01",
+        "obj-notes",
+        "m-1",
+    );
+    fork(&mut store);
+    // Main keeps the bytes it forked with; the source replaces them with text.
+    write_text(&mut store, "feat", "notes.md", "feature text\n", "f-1");
+
+    let result = VersionedTextStore::new(&mut store)
+        .merge_text_file_from_version_with(
+            &merge_input("notes.md", "merge-1", "conflict-1", "obj-merge-1"),
+            &NO_FAULTS,
+            |_, _| Ok(()),
+        )
+        .expect("text replacing an untouched binary head");
+    match result {
+        MergeTextFileResult::Conflict {
+            conflict,
+            comparison,
+            ..
+        } => {
+            assert_eq!(comparison.status, ComparisonStatus::IncomingChanged);
+            assert_eq!(conflict.current.content_kind, ConflictContentKind::Binary);
+            assert_eq!(conflict.incoming.content_kind, ConflictContentKind::Text);
+        }
+        other => panic!("expected a conflict, got {other:?}"),
+    }
+    assert_eq!(
+        binary_head_sha(&store, "main", "notes.md"),
+        main_sha,
+        "the target keeps its bytes until the user chooses"
+    );
+}
+
 /// The source removed a binary asset the target still holds. Applying the
 /// incoming side must remove it from the target's head and from the folder.
 ///

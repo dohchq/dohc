@@ -735,6 +735,17 @@ fn document_state(scratch: &ScratchDir, object_id: &str) -> Option<String> {
     .ok()
 }
 
+/// The path of the document's head on the hosted replica.
+fn head_path(scratch: &ScratchDir, object_id: &str) -> Option<String> {
+    let conn = Connection::open(engine_db_path(scratch).expect("db path")).expect("open db");
+    conn.query_row(
+        "SELECT path FROM snapshots WHERE workspace_id=?1 AND object_id=?2",
+        [WORKSPACE, object_id],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
 /// Journal a live Y.Doc update of `object_id` as its session would.
 fn journal_live_update(scratch: &ScratchDir, object_id: &str, path: &str, update: &[u8]) -> i64 {
     let mut conn = Connection::open(engine_db_path(scratch).expect("db path")).expect("open db");
@@ -1204,6 +1215,218 @@ async fn an_interrupted_move_is_finished_by_the_documents_held_return() {
     host.sync().await;
     assert_eq!(document_state(&scratch, "doc-c").as_deref(), Some("ready"));
     assert_eq!(read("x.md/child.md").as_deref(), Some("hosted c"));
+}
+
+/// Every file under the root but the engine's own, with its text, and every
+/// empty folder.
+fn disk(root: &std::path::Path) -> (BTreeMap<String, String>, Vec<String>) {
+    fn walk(
+        root: &std::path::Path,
+        dir: &std::path::Path,
+        files: &mut BTreeMap<String, String>,
+        empty: &mut Vec<String>,
+    ) {
+        let relative = |path: &std::path::Path| {
+            path.strip_prefix(root)
+                .expect("under the root")
+                .to_string_lossy()
+                .replace('\\', "/")
+        };
+        let mut any = false;
+        for entry in std::fs::read_dir(dir).expect("read folder") {
+            let path = entry.expect("entry").path();
+            any = true;
+            if dir == root && relative(&path).starts_with('.') {
+                continue;
+            }
+            if std::fs::symlink_metadata(&path).expect("metadata").is_dir() {
+                walk(root, &path, files, empty);
+            } else {
+                files.insert(
+                    relative(&path),
+                    std::fs::read_to_string(&path).expect("text"),
+                );
+            }
+        }
+        if !any {
+            empty.push(relative(dir));
+        }
+    }
+    let (mut files, mut empty) = (BTreeMap::new(), Vec::new());
+    walk(root, root, &mut files, &mut empty);
+    empty.sort();
+    (files, empty)
+}
+
+async fn reopen(host: Host, scratch: &ScratchDir, relay: &FakeRelay) -> Host {
+    let mut host = host;
+    host.call("workspace.close", json!({})).await;
+    drop(host);
+    let transport = InProcessTransport::new(Arc::new(hosted_service()));
+    let handle = open_workspace(&transport, scratch, relay).await;
+    Host {
+        transport,
+        handle,
+        id: 1,
+    }
+}
+
+/// Sol's fifth park review: the host applied the deletion of `x.md` and
+/// closed before materializing it, then `doc-x` left the scope. Parking
+/// checked only its heads, of which it had none, so `doc-x` parked and
+/// `x.md` stayed on disk with no document. Parking now finishes the
+/// deletion first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_deletion_applied_before_a_restart_lands_when_its_document_parks() {
+    let mut relay = HostedRelay::default();
+    relay.log.push(json!({
+        "relaySeq": 1, "workspaceId": WORKSPACE, "originId": "owner", "originSeq": 0,
+        "opKind": "workspace.init", "payload": {}, "recordedAtMs": 1_001,
+    }));
+    relay.create("owner", 1, "doc-x", "x.md", "hosted x");
+    relay.share("doc-x", "x.md");
+    let relay = FakeRelay::start(relay);
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(hosted_service()));
+    let handle = open_workspace(&transport, &scratch, &relay).await;
+    let mut host = Host {
+        transport,
+        handle,
+        id: 1,
+    };
+    host.create().await;
+    host.sync().await;
+    let x = BTreeMap::from([("x.md".to_owned(), "hosted x".to_owned())]);
+    assert_eq!(disk(scratch.path()), (x.clone(), vec![]));
+
+    relay
+        .relay()
+        .delete("owner", 2, "doc-x", "x.md", "hosted x", "moment-owner-1");
+    assert!(host.pull().await["pendingCursor"].is_object());
+    assert_eq!(head_path(&scratch, "doc-x"), None, "the deletion applied");
+    assert_eq!(disk(scratch.path()), (x, vec![]), "and never landed");
+    host = reopen(host, &scratch, &relay).await;
+
+    relay.relay().unshare("doc-x");
+    host.sync().await;
+    assert_eq!(document_state(&scratch, "doc-x").as_deref(), Some("parked"));
+    assert_eq!(disk(scratch.path()), (BTreeMap::new(), vec![]));
+}
+
+/// The durability review of parking, on disk: a return held at its path
+/// wrote its file only in the pass that unparked it, so a host that stopped
+/// after that pass and before materializing it made `doc-b` ready on the
+/// next pass with no file. `doc-b` returns to `a.txt` while `doc-a` holds
+/// it; `doc-a` moves, the next pass unparks `doc-b`, and the host closes
+/// before materializing. After it reopens, `doc-b` is ready only once its
+/// file holds its head. With `settled`, that head was last written by the
+/// host's own settlement of a live edit, which no row of the feed carries.
+async fn held_return_interrupted_after_unparking_writes_its_file_after_a_restart(settled: bool) {
+    let mut relay = HostedRelay::default();
+    relay.log.push(json!({
+        "relaySeq": 1, "workspaceId": WORKSPACE, "originId": "owner", "originSeq": 0,
+        "opKind": "workspace.init", "payload": {}, "recordedAtMs": 1_001,
+    }));
+    relay.create("owner", 1, "doc-b", "a.txt", "hosted b");
+    relay.share("doc-b", "a.txt");
+    let relay = FakeRelay::start(relay);
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(hosted_service()));
+    let handle = open_workspace(&transport, &scratch, &relay).await;
+    let mut host = Host {
+        transport,
+        handle,
+        id: 1,
+    };
+    host.create().await;
+    host.sync().await;
+    if settled {
+        let session = host
+            .call(
+                "ydoc.open",
+                json!({"versionId": "main", "path": "a.txt", "contentKind": "plaintext",
+                    "seedFromArtifact": false}),
+            )
+            .await["sessionId"]
+            .clone();
+        let edit = base64::engine::general_purpose::STANDARD
+            .encode(dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "settled "));
+        host.call(
+            "ydoc.recordUpdate",
+            json!({ "expectedLineageClaimId": null, "sessionId": session, "updateBase64": edit}),
+        )
+        .await;
+        host.call("ydoc.settle", json!({"sessionId": session}))
+            .await;
+        host.call("ydoc.close", json!({"sessionId": session})).await;
+        host.call("sync.push", json!({"workspaceId": WORKSPACE}))
+            .await;
+    }
+    let file = scratch.path().join("a.txt");
+    let head = std::fs::read_to_string(&file).expect("a.txt");
+    assert_eq!(head != "hosted b", settled, "{head}");
+
+    relay.relay().unshare("doc-b");
+    host.sync().await;
+    assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("parked"));
+    assert!(!file.exists());
+    {
+        let mut relay = relay.relay();
+        relay.create("owner", 2, "doc-a", "a.txt", "hosted a");
+        relay.share("doc-a", "a.txt");
+    }
+    host.sync().await;
+    relay.relay().share("doc-b", "a.txt");
+    host.sync().await;
+    assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("held"));
+
+    relay.relay().rename(
+        "owner",
+        3,
+        "doc-a",
+        "a.txt",
+        "c.txt",
+        "hosted a",
+        "moment-owner-2",
+    );
+    let freed = host.pull().await;
+    assert_eq!(freed["hasMore"], true);
+    assert!(host.commit(&freed["pendingCursor"]).await);
+    assert!(!file.exists());
+    // This pass unparks doc-b; the host closes before materializing it.
+    let unparked = host.pull().await;
+    assert!(unparked["pendingCursor"].is_object());
+    host.call("workspace.close", json!({})).await;
+    drop(host);
+
+    let transport = InProcessTransport::new(Arc::new(hosted_service()));
+    let handle = open_workspace(&transport, &scratch, &relay).await;
+    let mut host = Host {
+        transport,
+        handle,
+        id: 1,
+    };
+    let pass = host.pull().await;
+    assert_eq!(pass["held"], json!([]));
+    assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("held"));
+    assert!(!file.exists());
+    assert!(host.commit(&pass["pendingCursor"]).await);
+    assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("ready"));
+    assert_eq!(std::fs::read_to_string(&file).expect("a.txt"), head);
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("c.txt")).expect("c.txt"),
+        "hosted a"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_held_return_interrupted_after_unparking_writes_its_file_after_a_restart() {
+    held_return_interrupted_after_unparking_writes_its_file_after_a_restart(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_settled_head_interrupted_after_unparking_writes_its_file_after_a_restart() {
+    held_return_interrupted_after_unparking_writes_its_file_after_a_restart(true).await;
 }
 
 /// The session host's live host on a hosted replica: the trusted owner of its

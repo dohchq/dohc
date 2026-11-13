@@ -2192,6 +2192,41 @@ fn personal_collection_origin_refuses_other_paths_and_any_other_author() {
 }
 
 #[test]
+fn a_personal_agent_author_is_refused_from_every_other_origin() {
+    let (_scratch, mut store) = test_store();
+    seed_trip_collection(&mut store);
+    hydrate_texts(&mut store, &["version: 1\n"]);
+    for origin in [
+        "device-origin",
+        NAMED_ORIGIN,
+        "relay:collection-create:grant",
+        "relay:personal-agent:p-abcdefghijklmnopqrstuvwxyz",
+        "shared:share-1:device-origin",
+        "shared:share-1:relay:personal-collection:p-abcdefghijklmnopqrstuvwxyz",
+    ] {
+        let payload = with_author(
+            absent_text_payload(
+                "automations-create",
+                "trip-automations",
+                "trip/automations.yaml",
+                "version: 1\n",
+            ),
+            personal_author(PERSONAL_AGENT),
+        );
+        let seq = read_replication_acked_seq(&store, "ws", origin).expect("ack") + 1;
+        let outcome =
+            apply_moment_envelope(&mut store, &envelope(origin, seq, "ws", payload), &NoFaults)
+                .expect("refusal is recorded");
+        assert_eq!(
+            refusal_reason(outcome),
+            "personal agent author requires its relay personal-collection origin",
+            "{origin}"
+        );
+    }
+    assert!(snapshot(&store, "trip-automations").is_none());
+}
+
+#[test]
 fn a_ydoc_update_cannot_name_a_personal_agent() {
     let (_scratch, mut store) = test_store();
     let doc = Ydoc::wire();

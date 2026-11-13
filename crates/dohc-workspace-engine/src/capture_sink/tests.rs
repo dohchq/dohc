@@ -1,6 +1,7 @@
 use super::*;
 use dohc_engine_collab::{ContentKind, Ydoc};
 use dohc_engine_domain::{
+    RECORD_ID_FRONTMATTER_KEY,
     CollectionQuery, CollectionQueryResult, CollectionRecordDetails, SecretDiskIntent,
     SecretFileStore, SecretWrite, VersionedTextStore, get_collection_record, is_record_id,
     query_collection_records,
@@ -11,6 +12,7 @@ use dohc_engine_files::{
 use dohc_engine_runtime::WorkspaceSupervisor;
 use dohc_engine_storage::{EngineStore, NoFaults as FilesNoFaults};
 use dohc_engine_testkit::ScratchDir;
+use proptest::prelude::*;
 use rusqlite::{Connection, OptionalExtension};
 use std::sync::Condvar;
 use std::time::Duration;

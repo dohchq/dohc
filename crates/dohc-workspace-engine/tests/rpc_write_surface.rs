@@ -532,6 +532,116 @@ async fn active_secret_delete_adopts_modified_disk_without_plaintext_conflict() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn non_active_secret_delete_does_not_remove_active_disk_secret() {
+    let (scratch, transport, handle) = fixture("secret-cross-version-order").await;
+    let workspace = "ws-rpcd-secret-cross-version-order";
+    call(
+        &transport,
+        &handle,
+        20,
+        "versions.ensureMain",
+        json!({ "workspaceId": workspace }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "secrets.write",
+        json!({
+            "workspaceId": workspace,
+            "versionId": "main",
+            "path": ".env",
+            "text": "MAIN=must-survive\n",
+            "origin": "api",
+            "momentId": "stale-main-write",
+        }),
+    )
+    .await;
+    let named = call(
+        &transport,
+        &handle,
+        3,
+        "versions.createNamed",
+        json!({
+            "workspaceId": workspace,
+            "name": "other",
+            "fromVersionId": "main",
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        4,
+        "secrets.fork",
+        json!({
+            "workspaceId": workspace,
+            "fromVersionId": "main",
+            "toVersionId": named["id"],
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        5,
+        "secrets.delete",
+        json!({
+            "workspaceId": workspace,
+            "versionId": named["id"],
+            "path": ".env",
+            "origin": "api",
+            "momentId": "newer-other-delete",
+        }),
+    )
+    .await;
+    call(&transport, &handle, 6, "workspace.close", json!({})).await;
+    let reopened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            7,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace,
+            }),
+        ),
+    )
+    .await
+    .expect("open replay");
+    let reopened_handle: WorkspaceHandle =
+        serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(".env")).expect("active secret"),
+        "MAIN=must-survive\n",
+        "a non-active delete is DB-only"
+    );
+    let connection =
+        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let status: String = connection
+        .query_row(
+            "SELECT status FROM materialization_jobs \
+             WHERE job_id = 'secret-mat_stale-main-write'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("stale job status");
+    assert_eq!(status, "complete");
+    drop(connection);
+    call(
+        &transport,
+        &reopened_handle,
+        8,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn non_active_secret_write_survives_until_activation_and_reopen() {
     let (scratch, transport, handle) = fixture("secret-non-active-write").await;
     let workspace = "ws-rpcd-secret-non-active-write";
@@ -1160,6 +1270,63 @@ async fn request_id_replay_is_deduped_and_reuse_mismatch_is_refused() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn origin_closed_set_rejects_capture_and_ydoc() {
+    let (_scratch, transport, handle) = fixture("origins").await;
+    for (offset, origin) in ["api", "local-file", "restore", "sync", "unknown"]
+        .into_iter()
+        .enumerate()
+    {
+        call_keyed(
+            &transport,
+            &handle,
+            2 + offset as u64,
+            "versionedText.write",
+            &format!("accepted-{origin}"),
+            json!({
+                "versionId": "main",
+                "path": format!("accepted-{origin}.md"),
+                "text": "x",
+                "origin": origin,
+            }),
+        )
+        .await;
+    }
+    for (id, origin) in [(20, "capture"), (21, "ydoc")] {
+        let error = transport
+            .call(
+                RequestContext::unbounded(),
+                keyed_request(id, "versionedText.write", Some(handle.clone()), &format!("origin-{origin}"), json!({ "versionId": "main", "path": format!("{origin}.md"), "text": "x", "origin": origin })),
+            )
+            .await
+            .expect_err("reserved origin");
+        assert_eq!(error.message, "invalid-metadata");
+    }
+    let conflict_origin = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                22,
+                "conflicts.resolve",
+                Some(handle),
+                json!({ "local": {
+                    "conflictId": "missing",
+                    "resolution": "keep-current",
+                    "objectId": "resolve-object",
+                    "writeMomentId": "resolve-write",
+                    "deleteMomentId": "resolve-delete",
+                    "metadataOrigin": "capture",
+                }}),
+            ),
+        )
+        .await
+        .expect_err("conflicts.resolve reserved origin");
+    assert_eq!(
+        conflict_origin.message, "invalid-metadata",
+        "forward LocalResolveDto.metadata_origin without validated_origin. The actor sees the missing conflict instead."
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn raw_text_and_secret_bodies_round_trip_byte_identical() {
     let (_scratch, transport, handle) = fixture("raw-bodies").await;
     let body = "  leading\r\ntrailing  ";
@@ -1426,6 +1593,123 @@ async fn leased_doc_rejects_write_rename_delete_and_rollback() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn absent_path_lease_uses_the_domain_canonical_path() {
+    let (_scratch, transport, handle) = fixture("absent-path-canonical-lease").await;
+    let opened = call(
+        &transport,
+        &handle,
+        2,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": "notes/draft.md" }),
+    )
+    .await;
+
+    let error = transport
+        .call(
+            RequestContext::unbounded(),
+            keyed_request(
+                3,
+                "versionedText.write",
+                Some(handle.clone()),
+                "canonical-lease-write",
+                json!({
+                    "versionId": "main",
+                    "path": "notes//draft.md",
+                    "text": "must remain in the live editor",
+                    "origin": "api",
+                }),
+            ),
+        )
+        .await
+        .expect_err("canonical spelling must share the absent-path lease");
+    assert_eq!(error.message, "ydoc-session-busy");
+
+    call(
+        &transport,
+        &handle,
+        4,
+        "ydoc.close",
+        json!({ "sessionId": opened["sessionId"], "settle": false }),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rollback_rename_rejects_a_lease_on_the_restore_path() {
+    let (_scratch, transport, handle) = fixture("rollback-rename-restore-lease").await;
+    write(
+        &transport,
+        &handle,
+        2,
+        "a.md",
+        "rename preimage",
+        "rollback-rename-seed",
+    )
+    .await;
+    let renamed = call_keyed(
+        &transport,
+        &handle,
+        3,
+        "versionedText.rename",
+        "rollback-rename-move",
+        json!({
+            "versionId": "main",
+            "fromPath": "a.md",
+            "toPath": "b.md",
+            "origin": "api",
+        }),
+    )
+    .await;
+    let opened = call(
+        &transport,
+        &handle,
+        4,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": "a.md" }),
+    )
+    .await;
+
+    let error = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                5,
+                "versionedText.rollback",
+                Some(handle.clone()),
+                json!({
+                    "versionId": "main",
+                    "path": "b.md",
+                    "mutationMomentId": renamed["moment"]["momentId"],
+                    "origin": "restore",
+                }),
+            ),
+        )
+        .await
+        .expect_err("leased restore path must block rename rollback");
+    assert_eq!(error.message, "ydoc-session-busy");
+    assert_eq!(
+        call(
+            &transport,
+            &handle,
+            6,
+            "versionedText.read",
+            json!({ "versionId": "main", "path": "b.md" }),
+        )
+        .await["text"],
+        "rename preimage"
+    );
+
+    call(
+        &transport,
+        &handle,
+        7,
+        "ydoc.close",
+        json!({ "sessionId": opened["sessionId"], "settle": false }),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fts_is_maintained_in_each_mutation_transaction() {
     let (scratch, transport, handle) = fixture("fts").await;
     write(
@@ -1467,6 +1751,71 @@ async fn fts_is_maintained_in_each_mutation_transaction() {
     .await;
     let binary_gone = search(&transport, &handle, 11, "uniqueterm").await;
     assert!(binary_gone.as_array().expect("results").is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inactive_version_binary_rename_and_delete_leave_the_working_tree_untouched() {
+    let (scratch, transport, handle) = fixture("inactive-binary-disk").await;
+    let workspace_id = "ws-rpcd-inactive-binary-disk";
+    let bytes = [9_u8, 8, 7, 6];
+    call(
+        &transport,
+        &handle,
+        2,
+        "versionedBinary.write",
+        json!({ "versionId": "main", "path": "old.bin", "bytes": bytes, "origin": "api" }),
+    )
+    .await;
+    let named = call(
+        &transport,
+        &handle,
+        3,
+        "versions.createNamed",
+        json!({
+            "workspaceId": workspace_id,
+            "name": "feature",
+            "fromVersionId": "main",
+        }),
+    )
+    .await;
+    let feature = named["id"].as_str().expect("feature id");
+    call_keyed(
+        &transport,
+        &handle,
+        4,
+        "versionedText.rename",
+        "inactive-binary-rename",
+        json!({
+            "versionId": feature,
+            "fromPath": "old.bin",
+            "toPath": "new.bin",
+            "origin": "api",
+        }),
+    )
+    .await;
+    assert_eq!(
+        std::fs::read(scratch.path().join("old.bin")).expect("active binary remains"),
+        bytes
+    );
+    assert!(!scratch.path().join("new.bin").exists());
+    call_keyed(
+        &transport,
+        &handle,
+        5,
+        "versionedText.delete",
+        "inactive-binary-delete",
+        json!({
+            "versionId": feature,
+            "path": "new.bin",
+            "origin": "api",
+        }),
+    )
+    .await;
+    assert_eq!(
+        std::fs::read(scratch.path().join("old.bin")).expect("active binary still remains"),
+        bytes
+    );
+    assert!(!scratch.path().join("new.bin").exists());
 }
 
 fn seed_versions(root: &Path, workspace_id: &str) {
@@ -1696,6 +2045,65 @@ async fn compare_and_merge_carry_a_binary_head_through_the_wire() {
     assert_eq!(conflict["current"]["contentKind"], "binary");
     assert_eq!(conflict["current"]["binarySha256"], other);
     assert_eq!(conflict["current"]["binaryByteLength"], 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn merge_on_a_leased_target_is_refused() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    seed_versions(scratch.path(), "ws-rpcd-merge-lease");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": "ws-rpcd-merge-lease",
+            }),
+        ),
+    )
+    .await
+    .expect("open");
+    let handle = serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
+    let opened = call(
+        &transport,
+        &handle,
+        2,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": "merge.md" }),
+    )
+    .await;
+    let error = transport
+        .call(
+            RequestContext::unbounded(),
+            keyed_request(
+                3,
+                "versionedText.merge",
+                Some(handle.clone()),
+                "merge-leased",
+                json!({
+                    "path": "merge.md",
+                    "sourceVersionId": "feature",
+                    "targetVersionId": "main",
+                    "origin": "api",
+                }),
+            ),
+        )
+        .await
+        .expect_err("leased merge");
+    assert_eq!(error.message, "ydoc-session-busy");
+    call(
+        &transport,
+        &handle,
+        4,
+        "ydoc.close",
+        json!({ "sessionId": opened["sessionId"], "settle": false }),
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

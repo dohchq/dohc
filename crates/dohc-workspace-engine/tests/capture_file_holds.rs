@@ -288,6 +288,99 @@ async fn capture_hold_refuses_live_open() {
     f.close().await;
 }
 
+async fn switch_hold_release(action: &str) {
+    let mut f = Fixture::new().await;
+    f.call(
+        "versions.setActive",
+        json!({"workspaceId":WS,"versionId":"later"}),
+    )
+    .await;
+    let repaired = "Repaired in the source version.\n";
+    match action {
+        "delete" => std::fs::remove_file(f.scratch.path().join(HELD)).unwrap(),
+        "rename" => std::fs::rename(
+            f.scratch.path().join(HELD),
+            f.scratch.path().join("renamed.md"),
+        )
+        .unwrap(),
+        _ => {
+            std::fs::write(f.scratch.path().join(HELD), repaired).unwrap();
+            if action == "retry" {
+                f.call("capture.retryHeld", json!({"path":HELD})).await;
+            }
+        }
+    }
+    f.scan().await;
+    assert_eq!(f.status().await["heldFiles"], json!([]));
+    let conn = rusqlite::Connection::open(engine_db_path(&f.scratch).unwrap()).unwrap();
+    let texts: Vec<(String, String)> = conn.prepare("SELECT s.version_id,b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.workspace_id=?1 AND s.path=?2 ORDER BY s.version_id").unwrap()
+        .query_map([WS,HELD], |r| Ok((r.get(0)?,r.get(1)?))).unwrap().collect::<Result<_,_>>().unwrap();
+    if action == "delete" || action == "rename" {
+        assert!(texts.is_empty(), "{texts:?}");
+    } else {
+        assert_eq!(texts, vec![("main".to_owned(), repaired.to_owned())]);
+    }
+    let pending: i64 = conn.query_row("SELECT COUNT(*) FROM materialization_jobs WHERE workspace_id=?1 AND target_path=?2 AND status='pending'", [WS,HELD], |r| r.get(0)).unwrap();
+    assert_eq!(pending, 0, "release must drain the parked delete");
+    assert!(
+        !f.scratch.path().join(HELD).exists(),
+        "the selected version has no held path"
+    );
+    f.reopen().await;
+    let target_count: i64 = conn.query_row("SELECT COUNT(*) FROM snapshots WHERE workspace_id=?1 AND version_id='later' AND path=?2", [WS,HELD], |r| r.get(0)).unwrap();
+    assert_eq!(
+        target_count, 0,
+        "reseed must not adopt the source version's repaired bytes"
+    );
+    assert!(!f.scratch.path().join(HELD).exists());
+    f.call(
+        "versions.setActive",
+        json!({"workspaceId":WS,"versionId":"main"}),
+    )
+    .await;
+    if action == "change" || action == "retry" {
+        assert_eq!(
+            std::fs::read_to_string(f.scratch.path().join(HELD)).unwrap(),
+            repaired
+        );
+    }
+    f.reopen().await;
+    let source_text: Option<String> = conn.query_row("SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.workspace_id=?1 AND s.version_id='main' AND s.path=?2", [WS,HELD], |r| r.get(0)).optional().unwrap();
+    assert_eq!(
+        source_text.as_deref(),
+        if action == "change" || action == "retry" {
+            Some(repaired)
+        } else {
+            None
+        }
+    );
+    assert_eq!(
+        std::fs::read_to_string(f.scratch.path().join(HELD)).ok(),
+        source_text
+    );
+    f.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn switch_hold_change_recovers_the_source_version() {
+    switch_hold_release("change").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn switch_hold_delete_recovers_the_source_version() {
+    switch_hold_release("delete").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn switch_hold_rename_recovers_the_source_version() {
+    switch_hold_release("rename").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn switch_hold_retry_recovers_the_source_version() {
+    switch_hold_release("retry").await;
+}
+
 async fn switch_hold_rewrite_release(target_path: &str) {
     let mut f = Fixture::with_target(Some(target_path)).await;
     if target_path != HELD && !f.scratch.path().join(target_path).exists() {

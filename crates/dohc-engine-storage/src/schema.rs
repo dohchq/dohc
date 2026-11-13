@@ -770,6 +770,28 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_fullfsync_is_set_for_the_connection_lifetime() {
+        let directory = dohc_test_scratch::ScratchDir::new_named("checkpoint-sync").unwrap();
+        let path = directory.path().join("store.sqlite");
+        let expected = i64::from(cfg!(target_os = "macos"));
+        let setting = |conn: &rusqlite::Connection| -> rusqlite::Result<i64> {
+            conn.pragma_query_value(None, "checkpoint_fullfsync", |row| row.get(0))
+        };
+        for _ in 0..2 {
+            let store = crate::EngineStore::open(&path, 0).unwrap();
+            store
+                .read_with(|conn| {
+                    assert_eq!(setting(conn)?, expected);
+                    Ok::<_, rusqlite::Error>(())
+                })
+                .unwrap();
+        }
+        // The background checkpointer copies WAL pages too.
+        let background = crate::checkpoint::Checkpoints::connection(&path).unwrap();
+        assert_eq!(setting(&background).unwrap(), expected);
+    }
+
+    #[test]
     fn current_schema_rejects_each_missing_added_column() {
         let image = closed_schema_image();
         for (table, column) in super::REQUIRED_COLUMNS {

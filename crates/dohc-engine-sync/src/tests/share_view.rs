@@ -1217,6 +1217,79 @@ fn share_view_pull_enforces_every_path_of_a_multi_path_grant() {
         "the ungranted path's blob is downloaded before the scope is checked"
     );
 }
+fn share_view_version_create_op(
+    seq: i64,
+    version_id: &str,
+    path: &str,
+    sha: &str,
+) -> ShareReplicationEnvelope {
+    ShareReplicationEnvelope {
+        origin_id: "peer".to_owned(),
+        origin_seq: seq,
+        op_kind: "version.create".to_owned(),
+        payload: json!({
+            "versionId": version_id,
+            "forkSnapshots": [{ "path": path, "blobSha256": sha, "contentKind": "text" }]
+        }),
+        recorded_at_ms: 10 + seq,
+    }
+}
+
+/// A path share follows main and is never entitled to a `version.create` —
+/// the relay refuses to serve one (`shareFilter.ts`: `selector.versionId ===
+/// null` is `allowed: false`), so a recipient that replays one is trusting a
+/// relay that just broke its own rule. The snapshot path here is inside the
+/// granted paths, so only the version rule can refuse it.
+#[test]
+fn share_view_pull_refuses_a_version_create_to_a_share_that_granted_only_paths() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_replication_version(&mut engine, "main", "main");
+    let body = b"forked into a path share".to_vec();
+    let sha = dohc_engine_storage::hex_sha256(&body);
+    let client = RelaySyncClient::new(
+        PagedShareRelay::new(
+            [],
+            [(
+                0,
+                ShareViewResponse {
+                    work_references: Vec::new(),
+                    next_reference_after: None,
+                    reference_has_more: false,
+                    ops: vec![share_view_version_create_op(0, "v1", "docs/a.md", &sha)],
+                    next_cursor: 1,
+                    has_more: false,
+                },
+            )],
+        )
+        .with_view_blobs([(sha, body)]),
+    );
+
+    let outcome = client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &tracked_grant(["docs"]),
+            &NoFaults,
+        )
+        .expect("an unentitled version.create is skipped, not fatal");
+
+    assert_eq!(
+        (outcome.applied, outcome.skipped),
+        (0, 1),
+        "an unconstrained version reading as 'any version' replays a fork the share never granted"
+    );
+    assert!(
+        client
+            .transport()
+            .share_blob_calls
+            .lock()
+            .expect("share blob calls")
+            .is_empty(),
+        "the fork's blob is downloaded before the version is checked"
+    );
+}
+
 fn share_view_binary_write_op(seq: i64, path: &str, sha256: &str) -> ShareReplicationEnvelope {
     ShareReplicationEnvelope {
         origin_id: "peer".to_owned(),

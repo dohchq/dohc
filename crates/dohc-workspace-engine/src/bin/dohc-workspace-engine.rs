@@ -1575,6 +1575,21 @@ fn constant_time_eq(candidate: &[u8], expected: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn replica_startup_ignores_reader_environment() {
+        for value in [
+            "invalid",
+            r#"{"node":"/runtime/node","bundle":"/reader/reader.cjs","manifest":"/reader/manifest.json"}"#,
+        ] {
+            assert!(
+                super::reader_config(true, Some(value.into()), |_| {
+                    panic!("replica must not parse reader configuration")
+                })
+                .is_none()
+            );
+        }
+    }
+
+    #[test]
     fn reader_environment_is_optional_and_invalid_values_warn_once() {
         let mut warnings = Vec::new();
         assert!(
@@ -3131,6 +3146,31 @@ mod tests {
         run.await
             .expect("transport task")
             .expect("transport succeeds");
+    }
+
+    #[test]
+    fn hello_frame_limit_clamps_into_the_negotiable_range_and_echoes() {
+        let ack_for = |requested: Option<u32>| {
+            authenticate(
+                Envelope::Hello(Hello {
+                    protocol_version: PROTOCOL_VERSION,
+                    auth_token: TEST_AUTH_TOKEN.to_owned(),
+                    capabilities: vec![],
+                    last_session_generation: None,
+                    max_frame_bytes: requested,
+                }),
+                TEST_AUTH_TOKEN,
+            )
+            .expect("authenticated hello")
+            .limits
+            .max_frame_bytes
+        };
+        let default = WireLimits::default().max_frame_bytes;
+        let floor = dohc_engine_protocol::limits::MIN_NEGOTIABLE_FRAME_BYTES;
+        assert_eq!(ack_for(None), default);
+        assert_eq!(ack_for(Some(2 * 1024 * 1024)), 2 * 1024 * 1024);
+        assert_eq!(ack_for(Some(1024)), floor);
+        assert_eq!(ack_for(Some(u32::MAX)), default);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

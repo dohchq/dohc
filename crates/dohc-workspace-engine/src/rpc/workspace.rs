@@ -1650,6 +1650,24 @@ mod tests {
     use std::time::Duration;
 
     #[tokio::test]
+    async fn passive_store_refuses_read_only_attach() {
+        let scratch = ScratchDir::new().unwrap();
+        let service = EngineService::new();
+        let params = json!({"rootDir":scratch.path(), "workspaceId":"passive", "captureMode":"none", "storeMode":"passive"});
+        let opened = service
+            .workspace_open(&RequestContext::unbounded(), params)
+            .await
+            .unwrap();
+        let handle = serde_json::from_value(opened["workspace"].clone()).unwrap();
+        let attach = service.workspace_open(&RequestContext::unbounded(), json!({"rootDir":scratch.path(), "workspaceId":"passive", "skipStartupMaintenance":true})).await;
+        service.workspace_close(Some(handle)).await.unwrap();
+        assert!(
+            attach.is_err(),
+            "a passive binding must not expose raw history through an attach"
+        );
+    }
+
+    #[tokio::test]
     async fn passive_store_refuses_owner_reopen_after_restart() {
         let scratch = ScratchDir::new().unwrap();
         let passive = json!({"rootDir":scratch.path(), "workspaceId":"passive", "captureMode":"none", "storeMode":"passive"});
@@ -1682,6 +1700,33 @@ mod tests {
                 .workspace_open(&RequestContext::unbounded(), owner)
                 .await
                 .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn passive_store_refuses_existing_owner_root() {
+        let scratch = ScratchDir::new().unwrap();
+        let params = json!({"rootDir":scratch.path(), "workspaceId":"owner", "captureMode":"none"});
+        let service = EngineService::new();
+        let opened = service
+            .workspace_open(&RequestContext::unbounded(), params.clone())
+            .await
+            .unwrap();
+        service
+            .workspace_close(Some(
+                serde_json::from_value(opened["workspace"].clone()).unwrap(),
+            ))
+            .await
+            .unwrap();
+        let service = EngineService::new();
+        let mut passive = params;
+        passive["storeMode"] = json!("passive");
+        assert!(
+            service
+                .workspace_open(&RequestContext::unbounded(), passive)
+                .await
+                .is_err(),
+            "an owner root cannot become a passive store"
         );
     }
 

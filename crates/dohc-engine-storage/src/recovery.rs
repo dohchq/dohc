@@ -535,7 +535,7 @@ mod tests {
     #[test]
     fn a_refused_ledger_or_store_is_never_read_or_copied() {
         type Damage = fn(&Path);
-        let cases: [(&str, Damage, &str); 3] = [
+        let cases: [(&str, Damage, &str); 5] = [
             (
                 "unknown",
                 |source| {
@@ -552,6 +552,30 @@ mod tests {
                         .unwrap()
                         .execute_batch(
                             "UPDATE engine_migrations SET checksum='other' WHERE ordinal=1",
+                        )
+                        .unwrap();
+                },
+                "migration-failed",
+            ),
+            (
+                "ordinal",
+                |source| {
+                    Connection::open(source)
+                        .unwrap()
+                        .execute_batch(
+                            "UPDATE engine_migrations SET ordinal=ordinal+1000 WHERE ordinal=2",
+                        )
+                        .unwrap();
+                },
+                "migration-failed",
+            ),
+            (
+                "integrity",
+                |source| {
+                    Connection::open(source)
+                        .unwrap()
+                        .execute_batch(
+                            "UPDATE engine_migrations SET integrity_ok=0 WHERE ordinal=3",
                         )
                         .unwrap();
                 },

@@ -8,17 +8,35 @@ use dohc_engine_files::{
     ScanManifest, Scanner,
 };
 use dohc_engine_runtime::{
+    SelfWriteRecorder,
     ActiveVersionSwitch, CancellationToken, NoFaults, PostCommitMaterializeOutcome,
     WorkspaceSupervisor,
 };
 use dohc_engine_storage::FaultPoint;
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const WORKSPACE: &str = "ws-binary-rollback-disk";
 const BYTES: &[u8] = &[0, 1, 2, 3, 0xff];
 const UPDATED_BYTES: &[u8] = &[9, 8, 7, 6, 0xfe];
 const OTHER_LINEAGE_BYTES: &[u8] = &[4, 3, 2, 1, 0xfd];
+
+#[derive(Default)]
+struct CountingRecorder {
+    records: AtomicUsize,
+    retracts: AtomicUsize,
+}
+
+impl SelfWriteRecorder for CountingRecorder {
+    fn record(&self, _workspace_id: &str, _path: &str, _sha256: &str) {
+        self.records.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn retract(&self, _workspace_id: &str, _path: &str, _sha256: &str) {
+        self.retracts.fetch_add(1, Ordering::AcqRel);
+    }
+}
 
 fn binary_write(path: &str, moment_id: &str) -> WriteBinary {
     binary_write_for("main", path, moment_id, BYTES)
@@ -710,6 +728,148 @@ async fn rollback_replay_cannot_delete_another_workspaces_file() {
         )
         .expect("workspace A restore job");
     assert_eq!(status, "pending");
+    drop(connection);
+    supervisor.close(&db).expect("close actor");
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inactive_delete_rollback_reprojects_the_still_active_version() {
+    const BRANCH: &str = "inactive-delete-branch";
+    const PATH: &str = "inactive-shared.bin";
+
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).expect("open actor").actor;
+    actor
+        .ensure_main_version(
+            WORKSPACE.to_owned(),
+            1,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("main");
+    actor
+        .versioned_binary_write(
+            binary_write_for("main", PATH, "active-seed", BYTES),
+            scratch.path().to_path_buf(),
+            Arc::new(()),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("active seed");
+    actor
+        .create_named_version(
+            CreateNamedVersion {
+                workspace_id: WORKSPACE.to_owned(),
+                new_version_id: BRANCH.to_owned(),
+                name: "Inactive delete branch".to_owned(),
+                from_version_id: "main".to_owned(),
+                now_ms: 11,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("branch");
+    actor
+        .set_active_version(
+            ActiveVersionSwitch {
+                workspace_id: WORKSPACE.to_owned(),
+                version_id: BRANCH.to_owned(),
+                root_dir: scratch.path().to_path_buf(),
+                self_writes: Arc::new(()),
+                now_ms: 12,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("activate branch");
+    actor
+        .versioned_text_delete(
+            DeleteTextFile {
+                workspace_id: WORKSPACE.to_owned(),
+                version_id: BRANCH.to_owned(),
+                path: PATH.to_owned(),
+                moment_id: "inactive-delete-mutation".to_owned(),
+                request_id: None,
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 20,
+            },
+            scratch.path().to_path_buf(),
+            Arc::new(()),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("branch delete");
+    assert!(
+        !scratch.path().join(PATH).exists(),
+        "the branch mutation must reach the shared disk projection"
+    );
+    let switch_faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit);
+    actor
+        .set_active_version(
+            ActiveVersionSwitch {
+                workspace_id: WORKSPACE.to_owned(),
+                version_id: "main".to_owned(),
+                root_dir: scratch.path().to_path_buf(),
+                self_writes: Arc::new(()),
+                now_ms: 21,
+            },
+            switch_faults.clone(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("switch projection is interrupted after the active row commits");
+    assert!(switch_faults.fired());
+
+    let rollback_recorder = Arc::new(CountingRecorder::default());
+    let rolled_back = actor
+        .versioned_text_rollback(
+            rollback(BRANCH, PATH, "inactive-delete-mutation"),
+            scratch.path().to_path_buf(),
+            rollback_recorder.clone(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("inactive rollback");
+    assert!(rolled_back.materialize_enqueued);
+    assert_eq!(
+        rolled_back.materialize_outcome,
+        PostCommitMaterializeOutcome::Skipped
+    );
+    assert_eq!(
+        std::fs::read(scratch.path().join(PATH)).expect("reprojected active file"),
+        BYTES,
+        "rollback must restore the active version's bytes without activating the branch"
+    );
+    assert_eq!(
+        rollback_recorder.records.load(Ordering::Acquire),
+        1,
+        "the active-version reprojection must register its self-write suppression"
+    );
+    assert_eq!(
+        rollback_recorder.retracts.load(Ordering::Acquire),
+        0,
+        "a completed reprojection must leave its suppression available to capture"
+    );
+    let connection = rusqlite::Connection::open(&db).expect("read active version");
+    let active_version_id: String = connection
+        .query_row(
+            "SELECT version_id FROM active_versions WHERE workspace_id = ?1",
+            [WORKSPACE],
+            |row| row.get(0),
+        )
+        .expect("active version");
+    assert_eq!(active_version_id, "main");
     drop(connection);
     supervisor.close(&db).expect("close actor");
 }

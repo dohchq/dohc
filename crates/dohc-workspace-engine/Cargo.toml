@@ -77,6 +77,7 @@ dohc-engine-storage = { path = "../dohc-engine-storage", features = ["test-suppo
 # costs the suite nothing) instead of asserting on the tracker beside it.
 tokio = { version = "1", features = ["test-util", "net"] }
 dohc-engine-testkit = { path = "../dohc-engine-testkit" }
+proptest = "1"
 # Self-dependency so integration tests compile the library with the
 # harness-only hooks; production builds never do.
 dohc-workspace-engine = { path = ".", features = ["harness"] }

@@ -339,6 +339,28 @@ fn imported_thread_rejects_invalid_owner_shape_and_linked_path() {
     }
 }
 
+#[test]
+fn imported_thread_with_forged_agent_slug_is_refused() {
+    let (_scratch, _path, mut engine) = open_store();
+    let operation = envelope(
+        "forged-agent-slug",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "forged-agent-thread",
+            "title": "",
+            "createdAtMs": 20,
+            "channelSlug": channel_slug_for_name(AGENT_CHANNEL_NAME)
+        }),
+    );
+    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &operation, &NoFaults));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "forged-agent-slug").expect("ack"),
+        0,
+        "dropping the canonical-agent-slug iff reserved-wire invariant lets an ordinary channel impersonate the dispatch channel.",
+    );
+}
+
 fn imported_chat_fixture(engine: &mut EngineStore, origin: &str) {
     let operations = [
         envelope(
@@ -867,6 +889,45 @@ fn a_link_message_with_an_account_or_without_its_link_is_refused() {
         apply_chat_envelope(&mut engine, &at_cap, &NoFaults).expect("link message at the cap"),
         ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
     );
+}
+
+/// Only the relay names a message with the link message prefix. A device's
+/// message that takes such an id first is refused, so the link post that
+/// later arrives with it still applies.
+#[test]
+fn a_message_that_takes_a_link_message_id_is_refused() {
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "peer");
+    let id = format!("{}taken", dohc_engine_domain::chats::LINK_MESSAGE_ID_PREFIX);
+    let mut taken = link_message_payload(&id, "First");
+    taken["authorKind"] = json!("human");
+    let fields = taken.as_object_mut().expect("payload");
+    fields.remove("linkGrantId");
+    fields.remove("linkPrincipalId");
+    let op = envelope("peer", 3, "chat.message.append", taken);
+    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &op, &NoFaults));
+
+    let post = envelope(
+        LINK_ORIGIN,
+        0,
+        "chat.message.append",
+        link_message_payload(&id, "Hi"),
+    );
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &post, &NoFaults).expect("link post"),
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
+    );
+    let stored: (String, String) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT author_kind, body FROM chat_messages WHERE message_id = ?1",
+                [&id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("link post");
+    assert_eq!(stored, ("link".to_owned(), "Hi".to_owned()));
 }
 
 /// A personal agent, and the relay's origin for its chat.
@@ -2953,6 +3014,65 @@ fn refused_chat_mutation_rolls_back_all_fts_rows() {
 }
 
 #[test]
+fn imported_attachment_refuses_a_message_resolved_in_another_thread_without_parking() {
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "attachment-cross-thread-owner");
+    let other_thread = envelope(
+        "attachment-cross-thread-target",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "attachment-other-thread",
+            "title": "Other thread",
+            "createdAtMs": 30,
+            "linkedObjectId": "attachment-other-object",
+            "linkedAtMs": 30
+        }),
+    );
+    let other_message = envelope(
+        "attachment-cross-thread-target",
+        1,
+        "chat.message.append",
+        json!({
+            "messageId": "attachment-other-message",
+            "threadId": "attachment-other-thread",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "Other",
+            "createdAtMs": 31
+        }),
+    );
+    apply_chat_envelope(&mut engine, &other_thread, &NoFaults).expect("other thread");
+    apply_chat_envelope(&mut engine, &other_message, &NoFaults).expect("other message");
+    let attachment = envelope(
+        "attachment-cross-thread",
+        0,
+        "chat.attachment.add",
+        json!({
+            "attachmentId": attachment_id_for(
+                "attachment-other-message",
+                "object",
+                None,
+                None
+            ),
+            "threadId": "thread-imported",
+            "messageId": "attachment-other-message",
+            "targetKind": "file",
+            "objectId": "object",
+            "createdAtMs": 32
+        }),
+    );
+
+    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &attachment, &NoFaults));
+    assert_eq!(pending_chat_coordinate_count(&engine), 0);
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "attachment-cross-thread")
+            .expect("attachment refusal ack"),
+        0
+    );
+}
+
+#[test]
 fn imported_follow_reuses_local_target_visibility_and_prevents_metadata_leaks() {
     let (_scratch, _path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "follow-fixture");
@@ -3271,6 +3391,52 @@ fn reserved_agent_channel_shapes_rejected() {
             sharing_declined: ref outcome_sharing_declined,
         }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
+}
+
+/// A thread whose agent's wire id maps to a group is refused, and the next op
+/// from its device still applies.
+#[test]
+fn a_thread_for_an_agent_wire_id_that_maps_to_a_group_is_refused() {
+    let (_scratch, _path, mut engine) = open_store();
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch(
+                "INSERT INTO chat_channels \
+                 (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms) \
+                 VALUES ('ws', 'group', 'Group', 'group', 'channel', 1, 1); \
+                 INSERT INTO chat_channel_wire_ids (workspace_id, wire_id, channel_id) \
+                 VALUES ('ws', 'channel_wire_agent_v1_codex', 'group');",
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("a group mapped from codex's wire id");
+    let refused = envelope(
+        "device-a",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "codex-thread", "title": "Codex", "createdAtMs": 20,
+            "channelSlug": "my-agent-codex", "channelWireId": "channel_wire_agent_v1_codex"
+        }),
+    );
+    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &refused, &NoFaults));
+    let next = envelope(
+        "device-a",
+        1,
+        "chat.thread.create",
+        json!({
+            "threadId": "group-thread", "title": "Group", "createdAtMs": 21, "channelSlug": "group"
+        }),
+    );
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &next, &NoFaults).expect("the next thread"),
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
+    );
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "device-a").expect("ack"),
+        1
+    );
 }
 
 /// An earlier build's group named "My agent notes".

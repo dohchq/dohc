@@ -5,6 +5,7 @@
 
 use dohc_engine_domain::normalize;
 use dohc_engine_domain::{
+    CompareTextFileVersions, ComparisonStatus, ConflictContentKind,
     ConflictChoice, ConflictFileState, ConflictMetadata, ConflictStatus, CreateNamedVersion,
     DeleteTextFile, DomainError, MergeTextFileFromVersion, MergeTextFileResult,
     MergeUnchangedReason, NoFaults, ResolveConflictKind, ResolveTextConflict, SnapshotContent,
@@ -1004,6 +1005,123 @@ fn merge_job_crash_then_external_edit_is_preserved_on_recovery() {
             .status,
         JobStatus::Conflict
     );
+}
+
+/// M2 (BINHEAD) + WS-G1: the three-way text merge must never clobber a binary
+/// head. A fork forked before `a.md` existed (base absent) adds TEXT at `a.md`,
+/// while the target grows a binary head at `a.md`. The pre-fix merge read the
+/// binary head as absent (its `JOIN blobs` is binary-blind), saw
+/// current == base == absent, fast-forwarded, and overwrote the binary head
+/// with text. It must open a conflict instead, and the binary head must survive
+/// until the user picks a side.
+#[test]
+fn merge_opens_a_conflict_instead_of_clobbering_a_binary_head_at_the_target() {
+    let (_scratch, mut store) = open();
+    // Seed an unrelated file on main so the fork carries a non-empty durable
+    // fork base (else the merge short-circuits with `fork-base-not-found` before
+    // reaching the binary-head gate). `a.md` itself does not exist yet, so its
+    // fork base is genuinely absent.
+    VersionedTextStore::new(&mut store)
+        .write_text(
+            &write("main", "seed.md", "seed", "seed-moment", "obj-seed"),
+            &NO_FAULTS,
+        )
+        .expect("seed file");
+    let mut vt = VersionedTextStore::new(&mut store);
+    fork(&mut vt);
+    drop(vt);
+
+    // Target (main) grows a binary head at a.md after the fork.
+    let bin_bytes = b"\x00binary head\xff";
+    let bin_sha = hex_sha256(bin_bytes);
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            let sha = put_binary_blob(tx, bin_bytes)?;
+            write_binary_file_in_tx(
+                tx,
+                &WriteBinaryFile {
+                    workspace_id: WS.to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "obj-a".to_owned(),
+                    path: "a.md".to_owned(),
+                    binary_sha256: sha,
+                    moment_id: "bin-a-job".to_owned(),
+                    metadata_origin: "sync".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    materialize: Some(Preimage::Absent),
+                    now_ms: 120,
+                },
+            )?;
+            Ok::<_, DomainError>(())
+        })
+        .expect("write binary head on main");
+
+    // The fork adds TEXT at the same path.
+    VersionedTextStore::new(&mut store)
+        .write_text(
+            &write("feat", "a.md", "fork text", "feat-a", "obj-feat-a"),
+            &NO_FAULTS,
+        )
+        .expect("fork text at a.md");
+
+    // The comparison reports the binary head as present, not as an empty path.
+    let comparison = VersionedTextStore::new(&mut store)
+        .compare_text_file_versions(&CompareTextFileVersions {
+            workspace_id: WS.to_owned(),
+            target_version_id: "main".to_owned(),
+            source_version_id: "feat".to_owned(),
+            path: "a.md".to_owned(),
+        })
+        .expect("compare reads a binary head");
+    let current = comparison.current.as_ref().expect("binary head is present");
+    assert!(current.binary);
+    assert_eq!(current.snapshot.blob_sha256, bin_sha);
+    assert_eq!(current.byte_length, bin_bytes.len() as i64);
+    assert_eq!(comparison.status, ComparisonStatus::Diverged);
+
+    // The merge opens a conflict — never a clobbering fast-forward.
+    let result = VersionedTextStore::new(&mut store)
+        .merge_text_file_from_version_with(
+            &merge_input("a.md", "merge-a", "merge-a-conflict", "obj-merge-a"),
+            &NO_FAULTS,
+            |_, _| Ok(()),
+        )
+        .expect("merge opens a binary conflict");
+    match result {
+        MergeTextFileResult::Conflict { conflict, .. } => {
+            assert_eq!(conflict.current.content_kind, ConflictContentKind::Binary);
+            assert_eq!(
+                conflict.current.binary_sha256.as_deref(),
+                Some(bin_sha.as_str())
+            );
+            assert_eq!(
+                conflict.current.binary_byte_length,
+                Some(bin_bytes.len() as i64)
+            );
+            assert_eq!(conflict.incoming.content_kind, ConflictContentKind::Text);
+        }
+        other => panic!("expected a binary conflict, got {other:?}"),
+    }
+
+    // The binary head survives on main, unchanged.
+    let (kind, blob, bin): (String, Option<String>, Option<String>) = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT content_kind, blob_sha256, binary_sha256 FROM snapshots \
+                 WHERE workspace_id = ?1 AND version_id = 'main' AND path = 'a.md'",
+                [WS],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+        })
+        .expect("main head after refused merge");
+    assert_eq!(
+        kind, "binary",
+        "the binary head must survive the refused merge"
+    );
+    assert_eq!(blob, None, "a surviving binary head has no text blob");
+    assert_eq!(bin.as_deref(), Some(bin_sha.as_str()));
 }
 
 /// S2 (BINHEAD): the exact-head gate must not defer forever on a legacy binary

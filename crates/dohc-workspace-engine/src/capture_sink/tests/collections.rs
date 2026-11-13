@@ -95,6 +95,25 @@ fn unsupported_collection_keeps_record_bytes_and_ids_untouched() {
     assert_eq!(ydoc_update_count(&db, "tasks/new.md"), updates);
 }
 
+fn enable_sync_for_collection_test(db: &Path) {
+    let connection = Connection::open(db).expect("open collection test database");
+    connection
+        .execute(
+            "INSERT INTO sync_identity \
+                 (workspace_id, origin_id, replication_epoch, stream_identity, created_at_ms) \
+                 VALUES (?1, 'local-origin', 'epoch', 'stream', 1)",
+            [WORKSPACE_ID],
+        )
+        .expect("seed collection test sync identity");
+    connection
+        .execute(
+            "INSERT INTO sync_relay_push_state (workspace_id, origin_id, pushed_seq) \
+                 VALUES (?1, 'local-origin', 0)",
+            [WORKSPACE_ID],
+        )
+        .expect("enable collection test sync");
+}
+
 fn adopted_record_id(db: &Path, path: &str) -> String {
     let (record_id, state) = collection_record(db, path).expect("record binding");
     assert_eq!(state, "adopted");
@@ -264,6 +283,158 @@ fn engine_ydoc_update_count(db: &Path, path: &str) -> i64 {
         .expect("engine Y.Doc update count")
 }
 
+#[derive(Clone, Copy, Debug)]
+enum GeneratedFrontmatter {
+    None,
+    Valid,
+    Malformed,
+}
+
+#[derive(Clone, Debug)]
+struct GeneratedAdoptionCase {
+    markdown: String,
+    frontmatter: GeneratedFrontmatter,
+    first_line_len: Option<usize>,
+    line_ending: &'static str,
+    replicated: bool,
+    id_collision_copy: bool,
+}
+
+impl GeneratedAdoptionCase {
+    fn expected_adoption(&self, record_id: &str) -> Option<String> {
+        match self.frontmatter {
+            GeneratedFrontmatter::Malformed => None,
+            GeneratedFrontmatter::Valid => {
+                let first_line_len = self.first_line_len.expect("frontmatter opener");
+                let mut adopted = String::with_capacity(
+                    self.markdown.len() + RECORD_ID_FRONTMATTER_KEY.len() + record_id.len() + 3,
+                );
+                adopted.push_str(&self.markdown[..first_line_len]);
+                adopted.push_str(RECORD_ID_FRONTMATTER_KEY);
+                adopted.push_str(": ");
+                adopted.push_str(record_id);
+                adopted.push_str(self.line_ending);
+                adopted.push_str(&self.markdown[first_line_len..]);
+                Some(adopted)
+            }
+            GeneratedFrontmatter::None => {
+                let mut adopted = String::new();
+                adopted.push_str("---");
+                adopted.push_str(self.line_ending);
+                adopted.push_str(RECORD_ID_FRONTMATTER_KEY);
+                adopted.push_str(": ");
+                adopted.push_str(record_id);
+                adopted.push_str(self.line_ending);
+                adopted.push_str("---");
+                if !self.markdown.is_empty() {
+                    adopted.push_str(self.line_ending);
+                    adopted.push_str(self.line_ending);
+                    adopted.push_str(&self.markdown);
+                }
+                Some(adopted)
+            }
+        }
+    }
+}
+
+fn collection_adoption_cases() -> impl Strategy<Value = GeneratedAdoptionCase> {
+    (
+        0u8..3,
+        prop::bool::ANY,
+        0u8..3,
+        0u8..3,
+        any::<bool>(),
+        any::<i32>(),
+        prop::collection::vec(
+            any::<char>().prop_filter("body line content", |character| {
+                !matches!(character, '\r' | '\n')
+            }),
+            0..96,
+        ),
+        prop::collection::vec(
+            any::<char>().prop_filter("table cell line content", |character| {
+                !matches!(character, '\r' | '\n')
+            }),
+            0..32,
+        ),
+        prop::bool::ANY,
+        prop::bool::ANY,
+        prop::bool::ANY,
+    )
+        .prop_map(
+            |(
+                frontmatter_kind,
+                crlf,
+                opener_whitespace,
+                closer_whitespace,
+                done,
+                estimate,
+                paragraph_chars,
+                cell_chars,
+                trailing_newline,
+                replicated,
+                id_collision_copy,
+            )| {
+                let line_ending = if crlf { "\r\n" } else { "\n" };
+                let whitespace = |kind| match kind {
+                    0 => "",
+                    1 => " ",
+                    _ => "\t",
+                };
+                let paragraph: String = paragraph_chars.into_iter().collect();
+                let cell: String = cell_chars.into_iter().collect();
+                let mut body = format!(
+                    "Paragraph: {paragraph}{line_ending}{line_ending}| Key | Value |{line_ending}| --- | --- |{line_ending}| generated | {cell} |{line_ending}{line_ending}**bold** _italic_ `code` [link](https://example.com)"
+                );
+                if trailing_newline {
+                    body.push_str(line_ending);
+                }
+
+                let frontmatter = match frontmatter_kind {
+                    0 => GeneratedFrontmatter::None,
+                    1 => GeneratedFrontmatter::Valid,
+                    _ => GeneratedFrontmatter::Malformed,
+                };
+                if matches!(frontmatter, GeneratedFrontmatter::None) {
+                    return GeneratedAdoptionCase {
+                        markdown: body,
+                        frontmatter,
+                        first_line_len: None,
+                        line_ending,
+                        replicated,
+                        id_collision_copy,
+                    };
+                }
+
+                let opener = format!("---{}{line_ending}", whitespace(opener_whitespace));
+                let yaml = if matches!(frontmatter, GeneratedFrontmatter::Valid) {
+                    format!(
+                        "done: {done}{line_ending}estimate: {estimate}{line_ending}tags: [alpha, beta]{line_ending}nested:{line_ending}  enabled: true{line_ending}"
+                    )
+                } else {
+                    format!("broken: [{line_ending}")
+                };
+                let closer = format!("---{}", whitespace(closer_whitespace));
+                let eof_shape = (opener_whitespace + closer_whitespace) % 3;
+                let markdown = match eof_shape {
+                    0 => format!("{opener}{yaml}{closer}"),
+                    1 => format!("{opener}{yaml}{closer}{line_ending}"),
+                    _ => format!(
+                        "{opener}{yaml}{closer}{line_ending}{line_ending}{body}"
+                    ),
+                };
+                GeneratedAdoptionCase {
+                    first_line_len: Some(opener.len()),
+                    markdown,
+                    frontmatter,
+                    line_ending,
+                    replicated,
+                    id_collision_copy,
+                }
+            },
+        )
+}
+
 fn copied_collection_adoption_sink(
     scratch: &ScratchDir,
     supervisor: &WorkspaceSupervisor,
@@ -375,6 +546,125 @@ fn copied_collection_adoption_stores_are_isolated_and_survive_reopen() {
         drop(store);
         drop(reopened);
         supervisor.close(db).expect("close reopened actor");
+    }
+}
+
+proptest! {
+    // The repository default is 256 cases and honors PROPTEST_CASES.
+    #![proptest_config(ProptestConfig::default())]
+
+    #[test]
+    fn collection_record_adoption_is_lossless_or_side_effect_free(
+        case in collection_adoption_cases()
+    ) {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor = WorkspaceSupervisor::new();
+        let (db, mut sink) = copied_collection_adoption_sink(&scratch, &supervisor);
+        write_file(scratch.path(), "tasks/collection.yaml", b"name: Tasks\n");
+        write_file(scratch.path(), "tasks/generated.md", case.markdown.as_bytes());
+        ingest(&mut sink, "tasks/collection.yaml").expect("capture schema");
+        ingest(&mut sink, "tasks/generated.md").expect("capture generated record");
+        let (original_moments, original_updates) = {
+            let store = EngineStore::open_read_only(&db).expect("read captured record");
+            (
+                moment_count_from_store(&store, "tasks/generated.md"),
+                ydoc_update_count_from_store(&store, "tasks/generated.md"),
+            )
+        };
+
+        sink.reconcile_collections_observed(None).expect("first adoption pass");
+        if case.expected_adoption("placeholder").is_some() {
+            if case.replicated {
+                enable_sync_for_collection_test(&db);
+            }
+            seed_captured_richdoc_lineage(&sink, "tasks/generated.md");
+            sink.reconcile_collections_observed(None).expect("seeded adoption pass");
+        }
+
+        let original_binding = {
+            let store = EngineStore::open_read_only(&db).expect("read adopted binding");
+            collection_record_from_store(&store, "tasks/generated.md")
+        };
+        if case.id_collision_copy
+            && let Some((Some(original_id), state)) = original_binding.as_ref()
+            && state == "adopted"
+        {
+            let original = std::fs::read_to_string(
+                scratch.path().join("tasks/generated.md"),
+            )
+            .expect("read adopted generated record");
+            std::fs::copy(
+                scratch.path().join("tasks/generated.md"),
+                scratch.path().join("tasks/generated-copy.md"),
+            )
+            .expect("copy adopted generated record");
+            ingest(&mut sink, "tasks/generated-copy.md").expect("capture generated copy");
+            seed_captured_richdoc_lineage(&sink, "tasks/generated-copy.md");
+            sink.reconcile_collections_observed(None).expect("adopt generated copy");
+
+            let (copy_id, copy_stored) = {
+                let mut store = EngineStore::open_read_only(&db).expect("read adopted copy");
+                let (copy_id, state) = collection_record_from_store(&store, "tasks/generated-copy.md")
+                    .expect("record binding");
+                assert_eq!(state, "adopted");
+                let copy_id = copy_id.expect("adopted record id");
+                assert!(is_record_id(&copy_id), "WP1 record id format");
+                let copy_stored = snapshot_from_store(&mut store, "tasks/generated-copy.md")
+                    .expect("generated copy snapshot");
+                (copy_id, copy_stored)
+            };
+            prop_assert_ne!(copy_id.as_str(), original_id.as_str());
+            let id_line = format!("id: {original_id}{}", case.line_ending);
+            let replacement = format!("id: {copy_id}{}", case.line_ending);
+            let expected_copy = original.replacen(&id_line, &replacement, 1);
+            prop_assert_ne!(expected_copy.as_str(), original.as_str());
+            let copy_disk = std::fs::read_to_string(
+                scratch.path().join("tasks/generated-copy.md"),
+            )
+            .expect("read adopted generated copy");
+            prop_assert_eq!(copy_disk.as_str(), expected_copy.as_str());
+            prop_assert_eq!(copy_stored.text.as_str(), expected_copy.as_str());
+            let original_after_copy =
+                std::fs::read_to_string(scratch.path().join("tasks/generated.md"))
+                    .expect("reread adopted generated record");
+            prop_assert_eq!(original_after_copy.as_str(), original.as_str());
+        }
+
+        let disk = std::fs::read(scratch.path().join("tasks/generated.md"))
+            .expect("read generated record");
+        let (stored, binding, final_moments, final_updates) = {
+            let mut store = EngineStore::open_read_only(&db).expect("read adopted record");
+            (
+                snapshot_from_store(&mut store, "tasks/generated.md").expect("generated snapshot"),
+                collection_record_from_store(&store, "tasks/generated.md"),
+                moment_count_from_store(&store, "tasks/generated.md"),
+                ydoc_update_count_from_store(&store, "tasks/generated.md"),
+            )
+        };
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+
+        match binding {
+            Some((Some(record_id), state)) if state == "adopted" => {
+                let expected = case.expected_adoption(&record_id).unwrap_or_else(|| {
+                    panic!("malformed frontmatter must not acquire a binding")
+                });
+                prop_assert_eq!(disk.as_slice(), expected.as_bytes());
+                prop_assert_eq!(stored.text.as_bytes(), expected.as_bytes());
+                prop_assert_eq!(final_moments, original_moments + 1);
+                prop_assert_eq!(final_updates, original_updates + 2);
+            }
+            None => {
+                prop_assert!(case.expected_adoption("placeholder").is_none());
+                prop_assert_eq!(disk.as_slice(), case.markdown.as_bytes());
+                prop_assert_eq!(stored.text.as_bytes(), case.markdown.as_bytes());
+                prop_assert_eq!(final_moments, original_moments);
+                prop_assert_eq!(final_updates, original_updates);
+            }
+            third => {
+                prop_assert!(false, "forbidden adoption outcome: {third:?}");
+            }
+        }
     }
 }
 

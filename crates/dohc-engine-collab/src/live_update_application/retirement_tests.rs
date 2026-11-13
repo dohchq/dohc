@@ -1557,6 +1557,42 @@ fn a_committed_restore_fence_ends_in_its_terminal_cancellation_until_admission()
     assert_eq!(f.store.table_row_count("live_restore_cancellations").unwrap(), 0);
 }
 
+/// Sol: a released activation never regains live authority, after a
+/// reconnect (a new owner, whose retired set is empty) or a restart (the
+/// store reopened), whether it adopted or not.
+#[test]
+fn a_released_activation_never_regains_live_authority() {
+    for adopted in [true, false] {
+        let mut f = if adopted {
+            let mut f = Fixture::new();
+            f.adopt().unwrap();
+            f
+        } else {
+            never_adopted()
+        };
+        host_document(&mut f, true, true);
+        assert!(matches!(release_through(&mut f, 10).unwrap(), Release::Released { .. }), "adopted={adopted}");
+        host_document(&mut f, true, false);
+        drop(f.store);
+        f.store = EngineStore::open(&f._scratch.join("engine.db"), 31).unwrap();
+        let mut owner = ApplicationOwner::new("workspace".into()).unwrap();
+        let id = f.cut.adoption_id.clone();
+        assert!(matches!(
+            owner.register_activation(&mut f.store, "namespace".into(), retirement_host(), f.binding.clone(), id),
+            Err(ApplicationError::Conflict)
+        ), "adopted={adopted}");
+        // Unnamed, an adopted lineage refuses; a lineage never adopted takes
+        // an ordinary registration that serves no activation.
+        let unnamed = owner.register(&mut f.store, "namespace".into(), retirement_host(), f.binding.clone());
+        if adopted {
+            assert!(matches!(unnamed, Err(ApplicationError::Conflict)));
+            assert_eq!(f.store.table_row_count("live_device_application_bindings").unwrap(), 0);
+        } else {
+            assert_eq!(unnamed.unwrap().activation_id(), None);
+        }
+    }
+}
+
 /// Sol's round 3b blocker: after Phase A and a restart, no owner retired the
 /// activation in memory, but its durable intent still refuses every way back
 /// to live authority, whether it adopted or not. A named or unnamed

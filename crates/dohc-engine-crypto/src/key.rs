@@ -566,6 +566,25 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn freshly_minted_key_file_is_0600() {
+        // `load_retightens_lax_permissions_to_0600` chmods the file to 0644 itself
+        // before loading, so it can only prove the re-tighten on load — deleting
+        // the create-time mode leaves it green. This asserts the mode the mint
+        // chose, with no `set_permissions` step in between.
+        //
+        use std::os::unix::fs::PermissionsExt;
+        let dir = dohc_test_scratch::ScratchDir::new_named("keymint-mode-test").unwrap();
+        let _key = create_key_file(&dir).expect("mint");
+        let path = dir.join(SECRET_KEY_FILE_NAME);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "a freshly minted key file must not be readable by other local users"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn load_retightens_lax_permissions_to_0600() {
         use std::os::unix::fs::PermissionsExt;
         let dir = dohc_test_scratch::ScratchDir::new_named("keyperm-test").unwrap();

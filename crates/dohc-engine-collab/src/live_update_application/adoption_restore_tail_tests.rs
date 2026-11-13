@@ -846,6 +846,70 @@ fn relay_bound_owner_agent_draft_applies_and_restores_after_same_client_depth_ch
 }
 
 #[test]
+fn relay_bound_owner_agent_draft_refuses_other_principals_and_changed_agents() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let source = native_tail_edit_for(&mut f, "agent edit", 11, Some("installation-person"));
+    let original = native_tail_event(&f, source.update, source.delivery_id, 7);
+    let before = native_tail_inventory(&f.store);
+    for variant in ["named", "link", "wrong-person", "missing-person", "agent"] {
+        let mut event = original.clone();
+        let LiveAuthorEntry::Agent {
+            agent_id,
+            on_behalf_of,
+            ..
+        } = &mut event.metadata.author_snapshot.as_mut().unwrap()[0]
+        else {
+            panic!("expected agent")
+        };
+        match variant {
+            "named" => {
+                event.metadata.accepted.authority = ServerDerivedLiveUpdateAuthority::Named {
+                    principal_id: "recipient".into(),
+                    grant_id: "grant".into(),
+                    grant_generation: 1,
+                };
+                *on_behalf_of = Some("recipient".into());
+            }
+            "link" => {
+                event.metadata.accepted.authority = ServerDerivedLiveUpdateAuthority::Link {
+                    principal_id: "private-link".into(),
+                    grant_id: "grant".into(),
+                    grant_generation: 1,
+                };
+                *on_behalf_of = Some("public-link".into());
+            }
+            "wrong-person" => *on_behalf_of = Some("recipient".into()),
+            "missing-person" => *on_behalf_of = None,
+            "agent" => *agent_id = "other-agent".into(),
+            _ => unreachable!(),
+        }
+        assert!(
+            matches!(
+                apply_committed(
+                    &mut f.store,
+                    &mut WriterDocCache::new(),
+                    &f.handle,
+                    event,
+                    &NoFaults,
+                    100_000_000,
+                    |_, _, _, _| Ok(())
+                ),
+                Err(ApplicationError::Conflict)
+            ),
+            "{variant}"
+        );
+        assert_eq!(native_tail_inventory(&f.store), before);
+        assert_eq!(
+            f.store
+                .table_row_count("live_device_update_applications")
+                .unwrap(),
+            0
+        );
+    }
+}
+
+#[test]
 fn native_restore_tail_retains_interleaved_pending_context_with_descending_terminal_ack() {
     for compact in [false, true] {
         let mut f = Fixture::new();

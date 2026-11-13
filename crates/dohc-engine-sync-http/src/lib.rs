@@ -2327,6 +2327,23 @@ mod tests {
     }
 
     #[test]
+    fn relay_base_url_rejects_query_and_fragment_components() {
+        assert_eq!(
+            HttpRelayTransport::new("https://relay.example?tenant=a", "token").err(),
+            Some(RelayError::InvalidResponse),
+            "a malformed https address must not tell the person to use https"
+        );
+        assert_eq!(
+            HttpRelayTransport::new("HTTPS://relay.example/#fragment", "token").err(),
+            Some(RelayError::InvalidResponse)
+        );
+        assert!(
+            HttpRelayTransport::new("https://relay.example/base", "token").is_ok(),
+            "ordinary path prefixes remain supported"
+        );
+    }
+
+    #[test]
     fn https_base_redirect_to_http_is_refused() {
         let cert = base64::engine::general_purpose::STANDARD
             .decode(TEST_CERT_DER_BASE64)

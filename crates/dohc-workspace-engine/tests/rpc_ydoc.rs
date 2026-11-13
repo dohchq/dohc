@@ -1887,6 +1887,175 @@ async fn settle_recovers_after_a_transient_replace_failure() {
 
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_inactive_versions_delete_does_not_cancel_the_active_versions_pending_job() {
+    // Follow-up: `cancel_pending_jobs_for_path` is path-keyed
+    // but materialization jobs carry no version identity — they mirror the
+    // active version's working tree only (the same gate `enqueue_binary_delete`
+    // applies to its own job). A delete in a named, inactive version must not
+    // touch `main`'s own pending job for a same-named path.
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let scratch = ScratchDir::new().expect("scratch");
+    write_file(scratch.path(), "notes/seed.md", b"seed");
+
+    let workspace_id = "ws-rpc-ydoc-inactive-delete-preserves-active";
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, workspace_id, 1).await;
+
+    // The named version forks main first, before main ever has anything
+    // pending: `versions.createNamed` reconciles its source version's disk
+    // projection as part of the fork, so forking while a job is stuck behind
+    // a lock fails the fork itself rather than leaving the fork clean of it.
+    let feature = call(
+        &transport,
+        &handle,
+        2,
+        "versions.createNamed",
+        json!({
+            "workspaceId": workspace_id,
+            "name": "feature",
+            "fromVersionId": "main",
+        }),
+    )
+    .await["id"]
+        .as_str()
+        .expect("feature id")
+        .to_owned();
+    // Feature gets its own, independently-written "notes/shared.md" — not
+    // main's, so deleting it can never race main's later lock.
+    call_keyed(
+        &transport,
+        &handle,
+        3,
+        "versionedText.write",
+        "feature-seed",
+        json!({
+            "versionId": feature,
+            "path": "notes/shared.md",
+            "text": "feature copy",
+            "origin": "api",
+        }),
+    )
+    .await;
+
+    // main: settle v1, then lock and leave a pending v2 job — same shape as
+    // the sibling pin above.
+    let opened = call(
+        &transport,
+        &handle,
+        4,
+        "ydoc.open",
+        json!({
+            "versionId": "main",
+            "path": "notes/shared.md",
+            "contentKind": "plaintext"
+        }),
+    )
+    .await;
+    let session_id = opened["sessionId"].as_str().expect("session id").to_owned();
+    let doc = Ydoc::wire();
+    let first = base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0, "v1"));
+    call(
+        &transport,
+        &handle,
+        5,
+        "ydoc.recordUpdate",
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": first }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        6,
+        "ydoc.settle",
+        json!({ "sessionId": session_id, "summary": "v1" }),
+    )
+    .await;
+
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(scratch.path().join("notes/shared.md"))
+        .expect("exclusive lock");
+    let second = base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0, "v2 "));
+    call(
+        &transport,
+        &handle,
+        7,
+        "ydoc.recordUpdate",
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": second }),
+    )
+    .await;
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                8,
+                "ydoc.settle",
+                Some(handle.clone()),
+                json!({ "sessionId": session_id, "summary": "v2 blocked" }),
+            ),
+        )
+        .await
+        .expect_err("a locked target must fail the settle");
+    drop(lock);
+    call(
+        &transport,
+        &handle,
+        9,
+        "ydoc.evict",
+        json!({ "sessionId": session_id }),
+    )
+    .await;
+
+    // Deletes feature's own "notes/shared.md" — a different object at the
+    // same path string in a different, inactive version. This must never
+    // reach main's own pending job.
+    call_keyed(
+        &transport,
+        &handle,
+        10,
+        "versionedText.delete",
+        "inactive-delete",
+        json!({
+            "versionId": feature,
+            "path": "notes/shared.md",
+            "origin": "api",
+        }),
+    )
+    .await;
+
+    call(&transport, &handle, 11, "workspace.close", json!({})).await;
+    drop(transport);
+
+    let restarted_service = Arc::new(EngineService::new());
+    let restarted_transport = InProcessTransport::new(restarted_service);
+    let restarted_handle = open_workspace(&restarted_transport, &scratch, workspace_id, 1).await;
+
+    // RED (bug): the inactive version's delete cancels main's pending job by
+    // path alone, so replay never applies it — disk stays "v1".
+    //
+    // GREEN (fix): the cancel only runs for an ACTIVE-version delete, so
+    // main's job is untouched and replay applies it normally.
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("notes/shared.md")).expect("v2 after replay"),
+        "v2 v1",
+        "an inactive version's delete must not cancel the active version's own pending job"
+    );
+
+    call(
+        &restarted_transport,
+        &restarted_handle,
+        2,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn deleting_a_committed_renames_locked_destination_still_lets_its_paired_source_delete_run() {
     // Follow-up: a binary rename enqueues a paired job pair —
     // a write for the new path, a delete for the old one — and startup replay
@@ -2044,6 +2213,150 @@ async fn wait_for_captured_head(
         }
     }
     panic!("capture never ingested {path} as {text:?}; last head: {head}");
+}
+
+/// #665, part B: a session that can neither settle nor prune evicts, and the
+/// reopen resurrects its edits.
+///
+/// The desktop reaches this on two populations `captureOnePath` never captures
+/// — a policy-excluded path, and a file between the 128 KiB capture limit and
+/// the 2 MiB editor limit. The daemon has no policy notion at `ydoc.open`, so
+/// this stages the state those two share and nothing else: a dirty local-only
+/// lineage whose head does not hold its bytes, which no capture will ever fix.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_uncoverable_dirty_session_evicts_and_the_reopen_resurrects_it() {
+    const PATH: &str = "notes/evict.md";
+
+    let scratch = ScratchDir::new().expect("scratch");
+    write_file(scratch.path(), PATH, b"base");
+
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, "ws-665-b", 1).await;
+    wait_for_captured_head(&transport, &handle, PATH, "base", 1_000).await;
+
+    let opened = call(
+        &transport,
+        &handle,
+        2,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": PATH, "contentKind": "plaintext" }),
+    )
+    .await;
+    let session_id = opened["sessionId"].as_str().expect("session id").to_owned();
+    call(
+        &transport,
+        &handle,
+        3,
+        "ydoc.recordUpdate",
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": plaintext_update("what the user typed") }),
+    )
+    .await;
+
+    // The prune still refuses, and it must: the head holds "base" and the
+    // document holds what the user typed, so pruning would discard the only
+    // copy of it. Part A widened the guard's PROOF, not its verdict.
+    let refused = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                4,
+                "ydoc.close",
+                Some(handle.clone()),
+                json!({ "sessionId": session_id, "settle": false }),
+            ),
+        )
+        .await
+        .expect_err("a head holding other bytes cannot cover this prune");
+    assert_eq!(refused.message, "ydoc-unsettled-close");
+
+    // And the refused close reinserted the session, so the retry's open is
+    // still locked out. Without an evict this is where the document stays.
+    let busy = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                5,
+                "ydoc.open",
+                Some(handle.clone()),
+                json!({ "versionId": "main", "path": PATH, "contentKind": "plaintext" }),
+            ),
+        )
+        .await
+        .expect_err("the refused close holds the lease");
+    assert_eq!(busy.message, "ydoc-session-busy");
+
+    let evicted = call(
+        &transport,
+        &handle,
+        6,
+        "ydoc.evict",
+        json!({ "sessionId": session_id }),
+    )
+    .await;
+    assert_eq!(evicted["evicted"], json!(true));
+
+    // An id the daemon does not hold is still a refusal, so a caller can never
+    // read "evicted" for a session that is somebody else's.
+    let unknown = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                7,
+                "ydoc.evict",
+                Some(handle.clone()),
+                json!({ "sessionId": "no-such-session" }),
+            ),
+        )
+        .await
+        .expect_err("an unknown session id must refuse");
+    assert_eq!(unknown.code, ErrorCode::InvalidParams);
+    assert_eq!(unknown.message, "ydoc-session-not-found");
+
+    // Nothing was written and nothing was discarded: the lineage resurrects
+    // with the user's edits, and it can now be settled.
+    let reopened = call(
+        &transport,
+        &handle,
+        8,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": PATH, "contentKind": "plaintext" }),
+    )
+    .await;
+    assert_eq!(
+        reopened["lineage"],
+        json!("existing"),
+        "the evicted lineage survives — an evict settles nothing and prunes nothing"
+    );
+    let settled = call(
+        &transport,
+        &handle,
+        9,
+        "ydoc.settle",
+        json!({
+            "sessionId": reopened["sessionId"].as_str().expect("session id"),
+            "summary": "after the evict",
+        }),
+    )
+    .await;
+    assert_eq!(settled["content"], json!("what the user typed"));
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(PATH)).expect("on disk"),
+        "what the user typed"
+    );
+
+    call(
+        &transport,
+        &handle,
+        10,
+        "ydoc.close",
+        json!({
+            "sessionId": reopened["sessionId"].as_str().expect("session id"),
+            "settle": false,
+        }),
+    )
+    .await;
+    call(&transport, &handle, 11, "workspace.close", json!({})).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

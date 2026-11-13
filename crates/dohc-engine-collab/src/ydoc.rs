@@ -9101,6 +9101,13 @@ mod projection_tests {
         }
         assert_eq!(doc.encode_full_state(), expected);
     }
+    fn scene_map_set(doc: &Ydoc, root: &str, key: &str, value: &str) -> Vec<u8> {
+        let map = doc.doc.get_or_insert_map(root);
+        doc.with_delta(|txn| {
+            map.insert(txn, key, value);
+        })
+    }
+
     #[test]
     fn batch_gate_rejects_clock_redefinition_and_continues_with_valid_edits() {
         let source = Ydoc::with_client_id(41);
@@ -9183,6 +9190,27 @@ mod projection_tests {
                 .expect("reverse projection")
                 .source_state_vector_sha256,
         );
+    }
+
+    #[test]
+    fn oversized_scene_projection_is_refused_at_the_existing_byte_cap() {
+        let doc = Ydoc::wire();
+        let oversized_color = serde_json::to_string(&"x".repeat(MAX_PROJECTION_BYTES))
+            .expect("encode oversized app state");
+        scene_map_set(
+            &doc,
+            ROOT_SCENE_APP_STATE,
+            "viewBackgroundColor",
+            &oversized_color,
+        );
+
+        assert!(matches!(
+            doc.project(ContentKind::Scene),
+            Err(CollabError::ProjectionTooLarge {
+                actual,
+                max: MAX_PROJECTION_BYTES
+            }) if actual > MAX_PROJECTION_BYTES
+        ));
     }
 
     #[test]

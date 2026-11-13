@@ -264,6 +264,60 @@ fn vector(name: &str) -> Vec<u8> {
     .unwrap()
 }
 
+async fn unload(f: &Fixture) -> Option<UnloadPending> {
+    f.owner
+        .unload(
+            f.binding.object_id.clone(),
+            f.handle.activation_id(),
+            vec![dohc_engine_collab::DocKey::new("workspace", "main", "object").unwrap()],
+            f.root.path().to_owned(),
+            40,
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn unload_waits_for_a_committed_settlement_whose_file_write_failed() {
+    for crash in [false, true] {
+        let f = Fixture::new().await;
+        let terminal = if crash {
+            let terminal = f.apply(2, vector("ordinary-frontmatter-order")).await;
+            let _interrupted = f
+                .settle(
+                    Some(terminal.clone()),
+                    4,
+                    Arc::new(Crash(FaultPoint::MaterializeAfterJobCommit)),
+                )
+                .await;
+            Some(terminal)
+        } else {
+            std::fs::write(f.root.path().join("notes"), "owned file").unwrap();
+            assert!(f.settle(None, 4, Arc::new(NoFaults)).await.is_err());
+            None
+        };
+        // Only the accepted edit records a settlement; the first baseline does not.
+        assert_eq!(f.counts().0, i64::from(crash), "crash={crash}");
+        assert_eq!(
+            unload(&f).await,
+            Some(UnloadPending::Materialization),
+            "crash={crash}"
+        );
+        if !crash {
+            std::fs::remove_file(f.root.path().join("notes")).unwrap();
+        }
+        // The refusal kept the registration, so the normal retry lands the file.
+        assert!(
+            f.settle(terminal, 4, Arc::new(NoFaults))
+                .await
+                .unwrap()
+                .materialized
+        );
+        f.assert_projection();
+        assert_eq!(unload(&f).await, None, "crash={crash}");
+    }
+}
+
 const HISTORY_INTERVAL: usize = 32;
 
 const HISTORY_MAX_APPLICATIONS: usize = 128;

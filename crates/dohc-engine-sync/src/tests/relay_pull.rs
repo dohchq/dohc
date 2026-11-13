@@ -1746,6 +1746,51 @@ fn relay_pull_recovers_only_a_diverged_local_origin() {
 }
 
 #[test]
+fn journal_rejects_payloads_above_the_relay_contract() {
+    let (_scratch, _path, mut engine) = open_store();
+    let overhead = br#"{"data":""}"#.len();
+    let exact = json!({"data": "x".repeat(MAX_PAYLOAD_JSON_BYTES - overhead)});
+    assert_eq!(
+        serde_json::to_vec(&exact).expect("exact payload").len(),
+        MAX_PAYLOAD_JSON_BYTES,
+        "restoring the former 10 MiB journal limit accepts `oversized`.",
+    );
+    assert_eq!(
+        journal_local_replication_op(
+            &mut engine,
+            "ws",
+            "local",
+            "epoch-1",
+            "stream-1",
+            "probe.local",
+            &exact,
+            1_000,
+            &NoFaults,
+        )
+        .expect("exact-limit payload"),
+        TxnOutcome::Committed(0)
+    );
+
+    let oversized = json!({"data": "x".repeat(MAX_PAYLOAD_JSON_BYTES - overhead + 1)});
+    assert!(matches!(
+        journal_local_replication_op(
+            &mut engine,
+            "ws",
+            "local",
+            "epoch-1",
+            "stream-1",
+            "probe.local",
+            &oversized,
+            1_001,
+            &NoFaults,
+        ),
+        Err(SyncError::InvalidInput {
+            reason: "payload exceeds the relay limit"
+        })
+    ));
+}
+
+#[test]
 fn fault_sync_between_apply_and_cursor_commit_refetches_and_dedups() {
     let (_scratch, path, mut engine) = open_store();
     seed_identity(&mut engine);

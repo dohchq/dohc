@@ -720,6 +720,71 @@ fn lane_many_settles_deliver_one_head_and_keep_owner_history() {
 }
 
 #[test]
+fn lane_prune_reenrollment_and_epoch_reset_never_leak_intermediate_settles() {
+    let (_scratch, _, mut source) = owner();
+    write(&mut source, "doc", "seed", "doc.md", "seed", "ydoc", 10);
+    lane(&mut source, "doc");
+    for n in 0..3 {
+        write(
+            &mut source,
+            "doc",
+            &format!("settle-{n}"),
+            "doc.md",
+            &format!("saved {n}"),
+            "ydoc",
+            20 + n,
+        );
+    }
+    drain(&mut source);
+    let selected = exports(&source);
+    let (_scratch_peer, _, mut peer) = open_store();
+    seed_replication_version(&mut peer, "main", "main");
+    adopt_join_identity(
+        &mut peer,
+        "ws",
+        "recipient",
+        "epoch-1",
+        "stream-1",
+        1,
+        &NoFaults,
+    )
+    .unwrap();
+    hydrate(&source, &mut peer);
+    apply(&mut peer, &selected[0]);
+    for epoch in ["epoch-1", "epoch-reset"] {
+        source
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE ydoc_docs SET head_update_seq=0,head_snapshot_seq=0",
+                    [],
+                )
+                .map_err(SyncError::persist)?;
+                crate::enrolment::backfill_enrolment_window_in_tx(tx, "ws", &NoLiveLeases, 200)?;
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+        commit_relay_cursor(
+            &mut source,
+            "ws",
+            &RelayCursor {
+                cursor: 0,
+                replication_epoch: epoch.into(),
+                stream_identity: "stream-1".into(),
+                bootstrap_complete: true,
+                settlement_report_id: None,
+                ordinary_pull: None,
+            },
+            &NoFaults,
+            &NoLiveLeases,
+            201,
+        )
+        .unwrap();
+        assert_eq!(exports(&source).len(), 1);
+        assert_eq!(count(&peer, "moments"), 1);
+    }
+}
+
+#[test]
 fn lane_recovery_copies_unpushed_export_and_next_preimage_follows_it() {
     let (_scratch, _, mut source) = owner();
     write(&mut source, "doc", "a", "doc.md", "A", "ydoc", 10);
@@ -768,6 +833,117 @@ fn lane_recovery_copies_unpushed_export_and_next_preimage_follows_it() {
     assert_eq!(count(&peer, "moments"), 3);
     assert_eq!(count(&peer, "conflicts"), 0);
 }
+#[test]
+fn former_lane_delete_restore_never_backfills_intermediate_settles() {
+    let (_scratch, _, mut source) = owner();
+    write(&mut source, "doc", "seed", "doc.md", "seed", "ydoc", 10);
+    lane(&mut source, "doc");
+    write(
+        &mut source,
+        "doc",
+        "intermediate",
+        "doc.md",
+        "intermediate",
+        "ydoc",
+        20,
+    );
+    write(
+        &mut source,
+        "doc",
+        "exported",
+        "doc.md",
+        "exported",
+        "ydoc",
+        30,
+    );
+    drain(&mut source);
+    VersionedTextStore::new(&mut source)
+        .delete_text_file(
+            &DeleteTextFile {
+                workspace_id: "ws".into(),
+                version_id: "main".into(),
+                path: "doc.md".into(),
+                moment_id: "deleted".into(),
+                request_id: None,
+                metadata_origin: "api".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 40,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    source
+        .write_with(&NoFaults, |tx| {
+            journal_moment_append_in_tx(tx, "ws", "deleted")
+        })
+        .unwrap();
+    VersionedTextStore::new(&mut source)
+        .rollback_text_file_mutation(
+            &dohc_engine_domain::RollbackTextFileMutation {
+                workspace_id: "ws".into(),
+                version_id: "main".into(),
+                path: "doc.md".into(),
+                mutation_moment_id: "deleted".into(),
+                metadata_origin: "restore".into(),
+                author_json: None,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    let key = DocKey::new("ws", "main", "doc").unwrap();
+    assert!(
+        !dohc_engine_collab::read_marker(&source, &key)
+            .unwrap()
+            .unwrap()
+            .file_export_lane
+            .is_enabled()
+    );
+    source
+        .write_with(&NoFaults, |tx| {
+            crate::enrolment::backfill_enrolment_window_in_tx(tx, "ws", &NoLiveLeases, 60)
+        })
+        .unwrap();
+    let all = exports(&source);
+    assert_eq!(
+        all.iter()
+            .map(|op| op.payload["momentId"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "exported",
+            "deleted",
+            &dohc_engine_domain::rollback_compensating_moment_id("ws", "main", "deleted")
+        ]
+    );
+    assert_eq!(
+        dohc_engine_collab::read_marker(&source, &key)
+            .unwrap()
+            .unwrap()
+            .file_export_lane,
+        dohc_engine_collab::FileExportLane::Retired
+    );
+    let (_peer_scratch, _, mut peer) = open_store();
+    seed_replication_version(&mut peer, "main", "main");
+    adopt_join_identity(
+        &mut peer,
+        "ws",
+        "recipient",
+        "epoch-1",
+        "stream-1",
+        1,
+        &NoFaults,
+    )
+    .unwrap();
+    hydrate(&source, &mut peer);
+    for op in all {
+        apply(&mut peer, &op);
+    }
+    assert_eq!(count(&peer, "moments"), 3);
+    assert_eq!(count(&peer, "conflicts"), 0);
+}
+
 #[test]
 fn lane_journal_transaction_survives_crash_and_offline_restart() {
     for point in [
