@@ -217,6 +217,48 @@ describe("signing out", () => {
     expect(seen).toEqual(["signed-in", "signed-out, token gone"]);
   });
 
+  it("shares one cleanup between overlapping sign-outs of the same sign-in", async () => {
+    const { server, tokens } = setup();
+    server.on("GET", "/sync/account/sessions", "offline");
+    const cleanup = deferred<void>();
+    const cleaned = vi.fn(async (leave: () => Promise<void>) => { await cleanup.promise; await leave(); });
+    const account = createAccount({ store: tokens.store, fetch: server.fetch, onSignOut: cleaned });
+    await account.restore();
+    const first = account.signOut();
+    const second = account.signOut();
+    cleanup.resolve();
+    await Promise.all([first, second]);
+    expect(cleaned).toHaveBeenCalledTimes(1);
+    expect(tokens.current()).toBeNull();
+    expect(account.state()).toMatchObject({ status: "signed-out" });
+  });
+
+  it("ends a newer sign-in even while an earlier sign-out still waits on its revoke", async () => {
+    const { server, tokens } = setup();
+    const revoking = deferred<Answer>();
+    // Only the first sign-out's revoke is held; a later one finds the server offline.
+    let sessionsAsked = 0;
+    server.on("GET", "/sync/account/sessions", () => (sessionsAsked++ === 0 ? revoking.promise : "offline"));
+    const cleaned = vi.fn(async (leave: () => Promise<void>) => { await leave(); });
+    const account = createAccount({ store: tokens.store, fetch: server.fetch, sleep: async () => {}, onSignOut: cleaned });
+    await account.restore();
+    const earlier = account.signOut();
+    // The first sign-out has left, and now waits on the server to revoke tok-1.
+    await vi.waitFor(() => expect(server.paths()).toContain("GET /sync/account/sessions"));
+    expect(account.state()).toMatchObject({ status: "signed-out" });
+    serveSignIn(server);
+    expect(await account.signIn(server.origin, () => {})).toBe("signed-in");
+    expect(tokens.current()?.token).toBe("tok-2");
+    // Signing out again ends tok-2's sign-in with its own cleanup, not the old attempt's.
+    await account.signOut();
+    expect(cleaned).toHaveBeenCalledTimes(2);
+    expect(tokens.current()).toBeNull();
+    expect(account.state()).toMatchObject({ status: "signed-out" });
+    revoking.resolve({ status: 200, body: { ok: true, sessions: [] } });
+    await earlier;
+    expect(account.state()).toMatchObject({ status: "signed-out" });
+  });
+
   it("refuses to sign in again while signed in, keeping the sign-in and the outbox", async () => {
     const { server, tokens } = setup();
     const cleaned = vi.fn(async () => {});

@@ -174,10 +174,17 @@ export function createAccount(options: {
     };
   }
 
-  let signingOut: Promise<void> | null = null;
+  // A sign-out in progress, shared only by calls that end the same sign-in. A call after a newer sign-in starts its
+  // own, so a slow revoke for an old session never stands in for ending the new one.
+  let signingOut: { readonly ending: StoredSignIn | null; readonly done: Promise<void> } | null = null;
   function signOut(): Promise<void> {
-    signingOut ??= endSignIn().finally(() => { signingOut = null; });
-    return signingOut;
+    if (signingOut !== null && signingOut.ending === saved) return signingOut.done;
+    const ending = saved;
+    const done: Promise<void> = endSignIn().finally(() => {
+      if (signingOut?.done === done) signingOut = null;
+    });
+    signingOut = { ending, done };
+    return done;
   }
 
   async function endSignIn(): Promise<void> {
