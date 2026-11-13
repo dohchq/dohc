@@ -607,6 +607,15 @@ function insertNotice(storage: StorageContext, row: NoticeRowInput): void {
  * whole list with `replace` set, paged under a cursor that remembers the
  * head the pull began at. That pull starts over only if a row changed after
  * it began is deleted.
+ *
+ * The phone's scope also starts the list over when a row read through a
+ * share loses its target after the cursor, or after a whole pull began. The
+ * phone may hold that row's words, and its scope can't send the row as
+ * removed: a posted row's ID is the sender's text and can name a file the
+ * phone never saw. The whole list leaves the row out, so the phone stops
+ * showing it. The restarted pull begins at the head and ends with a cursor at
+ * the head, so a row starts the list over again only after another change,
+ * such as a mark.
  */
 export function readNoticeChanges(
   storage: StorageContext,
@@ -635,13 +644,29 @@ export function readNoticeChanges(
           .get(input.recipientUserId, input.nowMs)?.seq ?? 0,
       ),
     );
+    // Only settlement leaves a live row read through a share without a target.
+    const lostAfter = (seq: number) =>
+      input.scope === "phone" &&
+      Number(
+        storage.db
+          .prepare(
+            `SELECT EXISTS (SELECT 1 FROM sync_relay_notices
+           WHERE recipient_user_id = ? AND change_seq > ? AND recipient_share_id IS NOT NULL
+             AND target_json IS NULL AND removed_at_ms IS NULL AND expires_at_ms > ?) AS lost`,
+          )
+          .get(input.recipientUserId, seq, input.nowMs)?.lost,
+      ) === 1;
     let replace: boolean;
     if (cursor === null) {
       replace = true;
     } else if (cursor.snapshotHead !== null) {
-      replace = cursor.snapshotHead > head || cursor.seq > head || deleted > cursor.snapshotHead;
+      replace =
+        cursor.snapshotHead > head ||
+        cursor.seq > head ||
+        deleted > cursor.snapshotHead ||
+        lostAfter(cursor.snapshotHead);
     } else {
-      replace = cursor.seq > head || cursor.seq < deleted;
+      replace = cursor.seq > head || cursor.seq < deleted || lostAfter(cursor.seq);
     }
     const since = replace ? 0 : cursor!.seq;
     const snapshotHead = replace ? head : cursor!.snapshotHead;
@@ -659,7 +684,7 @@ export function readNoticeChanges(
     const scanned = rows.slice(0, input.limit).map(rowToNotice);
     const notices =
       input.scope === "phone"
-        ? phoneNotices(storage, input.recipientUserId, scanned, snapshotHead ?? 0)
+        ? phoneNotices(storage, input.recipientUserId, scanned)
         : withWakes(storage, input.recipientUserId, scanned);
     // Every change after the last row read is expired or replaced by a later
     // change, so a finished pull can move its cursor to the head. The phone's
@@ -756,19 +781,15 @@ const PHONE_NOTICE_KINDS = {
  *   only by scanning its log;
  * - a row whose kind `PHONE_NOTICE_KINDS` doesn't let it show, or whose
  *   target doesn't name the place that kind needs to confirm its words.
- * A removed row stays, so a phone drops what it holds. So does a row of a
- * "shown" kind whose target reach settlement took: the phone could hold it,
- * and its title names who shared and what. Like a removed row, a pull taking
- * the whole list sends it only when it changed after the pull began, at
- * `removedAfter`. Either carries no title, body, sender name, or target.
- * Other rows the scope leaves out send nothing: their IDs could name what
- * the phone never saw.
+ * A removed row stays, without its title, body, sender name, or target, so a
+ * phone drops what it holds. Other rows the scope leaves out send nothing:
+ * their IDs could name what the phone never saw. A row whose target reach
+ * settlement took instead starts the list over in `readNoticeChanges`.
  */
 function phoneNotices(
   storage: StorageContext,
   recipientUserId: string,
   notices: RelayNotice[],
-  removedAfter: number,
 ): RelayNotice[] {
   const gone = (notice: RelayNotice): RelayNotice => ({
     ...notice,
@@ -870,8 +891,6 @@ function phoneNotices(
     const rule = Object.hasOwn(PHONE_NOTICE_KINDS, notice.kind)
       ? PHONE_NOTICE_KINDS[notice.kind]
       : "never";
-    if (rule === "shown" && notice.target === null)
-      return notice.changeSeq > removedAfter ? [gone(notice)] : [];
     const named =
       rule === "shown" ||
       (rule === "path" && notice.target?.path !== undefined) ||

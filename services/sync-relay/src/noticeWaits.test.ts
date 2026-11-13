@@ -689,53 +689,144 @@ it("answers a held read at once when a named share arrives during its last sign-
   ]);
 });
 
-it("sends a lost share's Notice to the phone as removed, without its words, and keeps it on the computer", async () => {
-  const { storage, read, full } = await relay();
+// A mention Ana's computer posted about a file in Ben's shared notes.
+const SHARED_MENTION = {
+  reach: { shareId: "share-ben" },
+  title: "Mentioned in Ben's notes",
+  body: "Bring the packing list",
+  target: { path: "notes/list.md" },
+} as const;
+
+it("starts the phone's list over without a share's Notices once the share is lost", async () => {
+  const { storage, read, post } = await relay();
   shareNotesWithAna(storage, { deliver: true });
+  post("kept");
+  post("share-mention", SHARED_MENTION);
   const before = await page(await read("scope=phone"));
+  expect(ids(before)).toEqual(expect.arrayContaining(["kept", "share-mention"]));
   const shared = before.notices.find((notice) => notice.kind === "share-received")!;
   expect(shared).toMatchObject({ removed: false, target: { share: "share-ben" } });
   expect(storage.revokeShare("share-ben", NOW)).toBe(true);
 
   const response = await read(`scope=phone&cursor=${before.nextCursor}`);
   const text = await response.clone().text();
-  const next = await page(response);
-  expect(next.replace).toBe(false);
-  expect(next.notices).toEqual([
-    expect.objectContaining({
-      noticeId: shared.noticeId,
-      removed: true,
-      title: "",
-      body: "",
-      senderLabel: "",
-      target: null,
-    }),
-  ]);
-  expect(next.notices[0]!.changeSeq).toBeGreaterThan(shared.changeSeq);
-  for (const left of [shared.title, shared.body]) expect(text).not.toContain(left);
-  // The computer's whole list keeps the row and its words, without its target.
-  expect(
-    (await full()).notices.find((notice) => notice.noticeId === shared.noticeId),
-  ).toMatchObject({ removed: false, title: shared.title, body: shared.body, target: null });
-  // A whole read leaves it out: the phone drops every row it held first.
-  expect(ids(await page(await read("scope=phone")))).toEqual([]);
+  const after = await page(response);
+  expect(after).toMatchObject({ replace: true, hasMore: false });
+  expect(ids(after)).toEqual(["kept"]);
+  for (const left of [
+    "share-mention",
+    SHARED_MENTION.title,
+    SHARED_MENTION.body,
+    shared.noticeId,
+    shared.title,
+  ])
+    expect(text).not.toContain(left);
 });
 
-it("sends a lost share's Notice as removed to a whole-list pull that took it before the loss", async () => {
+it("starts a phone's whole pull over when a share it took a row through is lost between pages", async () => {
   const { storage, read, post } = await relay();
   shareNotesWithAna(storage, { deliver: true });
   await read("scope=phone");
+  post("share-mention", SHARED_MENTION);
   post("later");
+  const first = await page(await read("scope=phone&limit=2"));
+  expect(first).toMatchObject({ hasMore: true, replace: true });
+  expect(first.notices.map((notice) => notice.kind)).toEqual(["share-received", "mention"]);
+  expect(ids(first)).toContain("share-mention");
+  expect(storage.revokeShare("share-ben", NOW)).toBe(true);
+
+  const second = await page(await read(`scope=phone&limit=10&cursor=${first.nextCursor}`));
+  expect(second).toMatchObject({ replace: true, hasMore: false });
+  expect(ids(second)).toEqual(["later"]);
+});
+
+it("never names a share's secret or ignored row on the phone, before or after the share is lost", async () => {
+  const { storage, read, post } = await relay();
+  shareNotesWithAna(storage, { deliver: true });
+  post("share-mention", SHARED_MENTION);
+  // The share admits neither path, so the first read's reach check takes each target and keeps the words.
+  post("payroll-env", {
+    reach: { shareId: "share-ben" },
+    title: "Payroll keys",
+    body: "KEY=hunter2",
+    target: { path: "notes/.env" },
+  });
+  post("vendored-dep", {
+    reach: { shareId: "share-ben" },
+    title: "Vendored package",
+    body: "left-pad changed",
+    target: { path: "notes/node_modules/left-pad.md" },
+  });
+  const texts: string[] = [];
+  const phone = async (query: string) => {
+    const response = await read(`scope=phone&${query}`);
+    texts.push(await response.clone().text());
+    return await page(response);
+  };
+  const before = await phone("");
+  expect(ids(before)).toContain("share-mention");
+  // Rows settled before a whole read never start the list over again.
+  const caughtUp = await phone(`cursor=${before.nextCursor}`);
+  expect(caughtUp).toMatchObject({ replace: false, notices: [] });
+  expect(storage.revokeShare("share-ben", NOW)).toBe(true);
+  const after = await phone(`cursor=${caughtUp.nextCursor}`);
+  expect(after).toMatchObject({ replace: true, notices: [] });
+  await phone(`cursor=${after.nextCursor}`);
+  await phone("");
+  expect(texts).toHaveLength(5);
+  for (const text of texts) {
+    for (const hidden of ["payroll-env", "Payroll keys", "hunter2", "vendored-dep", "left-pad"])
+      expect(text).not.toContain(hidden);
+  }
+});
+
+it("keeps a lost share's rows, words and all, on the computer's list without starting it over", async () => {
+  const { storage, h, post } = await relay();
+  shareNotesWithAna(storage, { deliver: true });
+  post("share-mention", SHARED_MENTION);
+  const before = await page(await h(request("ana", "/sync/notices")));
+  expect(before.notices.map((notice) => notice.kind)).toEqual(["mention", "share-received"]);
+  expect(storage.revokeShare("share-ben", NOW)).toBe(true);
+
+  const after = await page(await h(request("ana", `/sync/notices?cursor=${before.nextCursor}`)));
+  expect(after).toMatchObject({ replace: false, hasMore: false });
+  expect(after.notices).toEqual(
+    before.notices.map((notice) => ({
+      ...notice,
+      changeSeq: expect.any(Number),
+      target: null,
+    })),
+  );
+});
+
+it("finishes a restarted phone pull, then reads on without starting over again", async () => {
+  const { storage, read, post } = await relay();
+  shareNotesWithAna(storage, { deliver: true });
+  await read("scope=phone");
+  post("share-mention", SHARED_MENTION);
+  post("later");
+  const next = async (cursor: string) =>
+    await page(await read(`scope=phone&limit=1&cursor=${cursor}`));
   const first = await page(await read("scope=phone&limit=1"));
   expect(first).toMatchObject({ hasMore: true, replace: true });
-  const [shared] = first.notices;
-  expect(shared).toMatchObject({ kind: "share-received", removed: false });
   expect(storage.revokeShare("share-ben", NOW)).toBe(true);
-  const second = await page(await read(`scope=phone&limit=2&cursor=${first.nextCursor}`));
-  expect(second.notices.map((notice) => [notice.noticeId, notice.removed, notice.title])).toEqual([
-    ["later", false, "Title later"],
-    [shared!.noticeId, true, ""],
+
+  // The restart takes "later", then the two settled rows one page each, and leaves both out.
+  const restarted = await next(first.nextCursor);
+  const settled = await next(restarted.nextCursor);
+  const last = await next(settled.nextCursor);
+  const parts = [restarted, settled, last].map((part) => [ids(part), part.replace, part.hasMore]);
+  expect(parts).toEqual([
+    [["later"], true, true],
+    [[], false, true],
+    [[], false, false],
   ]);
+  expect(await next(last.nextCursor)).toMatchObject({
+    notices: [],
+    replace: false,
+    hasMore: false,
+    nextCursor: last.nextCursor,
+  });
 });
 
 it("moves the phone's cursor past the rows it leaves out", async () => {
