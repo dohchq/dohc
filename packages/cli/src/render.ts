@@ -6,6 +6,7 @@ import type {
 import { renderAuthorDisplayName } from "./chatIdentity";
 import { formatStreamPosition, messageMetadata, renderDecisionOptions, renderThreadMarkdown } from "./threadMarkdown";
 import { DohcCliError } from "./errors";
+import { MEMBERS_REFUSED } from "./members";
 import { formatStoredBytes } from "./account";
 
 type GroupsResult = CliResultByVerb["groups"];
@@ -372,7 +373,7 @@ const ROLE_WORDS = { owner: "Owner", admin: "Admin", member: "Member" } as const
 // The Members page as lines: who is in the workspace, then invites and
 // removed accounts, each with the id the other verbs take.
 function renderMembers(result: CliResultByVerb["members"]): string {
-  if (result.status === "refused") throw new DohcCliError("Your server does not list Members for this workspace and account.");
+  if (result.status === "refused") throw new DohcCliError(MEMBERS_REFUSED);
   if (result.status === "done") return "Membership ended. Members and admins no longer have access. Copies already on their computers stay.";
   const { view } = result;
   const row = (person: (typeof view.people)[number]) => [

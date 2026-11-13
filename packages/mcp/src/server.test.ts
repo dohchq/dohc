@@ -665,6 +665,8 @@ it("routes the owner's Members actions with no workspace id, and refuses leave b
   const { client } = await connectedToolNames({ root: "/workspace", home: "/home", request });
   const result = await client.callTool({ name: "dohc_members", arguments: { request: { action: "role", person: "ana@example.com", role: "admin" } } });
   expect(result.structuredContent).toEqual(view);
+  // The CLI exits with an error for the same answer.
+  expect(result.isError).toBe(true);
   expect(request).toHaveBeenCalledWith(expect.objectContaining({ verb: "members", args: { cwd: "/workspace", actor: "agent", request: { action: "role", person: "ana@example.com", role: "admin" } } }));
   for (const bad of [{ action: "leave" }, { action: "list", workspaceId: "w" }, { action: "invite", email: "nobody" }]) {
     expect(await client.callTool({ name: "dohc_members", arguments: { request: bad } })).toMatchObject({ isError: true });

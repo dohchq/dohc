@@ -76,3 +76,4 @@ export const MembersResult = z.discriminatedUnion("status", [
   z.object({ status: z.literal("done") }).strict(),
 ]);
 export type MembersResult = z.infer<typeof MembersResult>;
+export const MEMBERS_REFUSED = "Your server does not list Members for this workspace and account.";
