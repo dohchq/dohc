@@ -16,13 +16,18 @@ function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+const MESSAGE_KEYS =
+  "authorDisplayName,authorKind,authorOwnerDisplayName,authorUserId,body,bodyTooLarge,createdAtMs,linkAgent,messageId,relaySeq,threadId";
+
+/** A message in a follow of every Group a workspace share reaches also names its Group. */
+function groupMessage(value: unknown): boolean {
+  if (!record(value) || typeof value.channelWireId !== "string") return false;
+  const { channelWireId: _group, ...rest } = value;
+  return message(rest);
+}
+
 function message(value: unknown): boolean {
-  if (
-    !record(value) ||
-    Object.keys(value).sort().join() !==
-      "authorDisplayName,authorKind,authorOwnerDisplayName,authorUserId,body,bodyTooLarge,createdAtMs,linkAgent,messageId,relaySeq,threadId"
-  )
-    return false;
+  if (!record(value) || Object.keys(value).sort().join() !== MESSAGE_KEYS) return false;
   return (
     ["messageId", "threadId", "authorDisplayName"].every((key) => typeof value[key] === "string") &&
     (value.authorUserId === null || typeof value.authorUserId === "string") &&
@@ -46,8 +51,18 @@ function resultMatches(
   channels: boolean,
   write: boolean,
   following: boolean,
+  everyGroup: boolean,
 ): boolean {
   if (typeof value.shareId !== "string") return false;
+  if (everyGroup)
+    return (
+      Object.keys(value).sort().join() === "hasMore,messages,nextCursor,shareId" &&
+      Array.isArray(value.messages) &&
+      value.messages.every(groupMessage) &&
+      Number.isSafeInteger(value.nextCursor) &&
+      Number(value.nextCursor) >= 0 &&
+      typeof value.hasMore === "boolean"
+    );
   if (channels)
     return (
       Object.keys(value).sort().join() === "channels,maxBodyBytes,maxPostBytes,shareId,userId" &&
@@ -212,12 +227,15 @@ export function createNamedRecipientChatClient(options: {
           const result = await readBoundedJson(response, limits.maxResponseBytes, signal);
           if (!record(result)) return refuse();
           if (response.status === 200) {
+            // A workspace share's follow names no Group and gets every Group it reaches.
+            const everyGroup = following && !url.searchParams.has("channelWireId");
             if (
               !resultMatches(
                 result,
                 url.pathname.endsWith("/channels"),
                 write,
-                url.searchParams.has("since"),
+                following,
+                everyGroup,
               )
             )
               return refuse();
@@ -225,7 +243,7 @@ export function createNamedRecipientChatClient(options: {
               !write &&
               !url.pathname.endsWith("/channels") &&
               (result.shareId !== url.searchParams.get("shareId") ||
-                result.channelWireId !== url.searchParams.get("channelWireId"))
+                (!everyGroup && result.channelWireId !== url.searchParams.get("channelWireId")))
             )
               return refuse();
           } else if (
