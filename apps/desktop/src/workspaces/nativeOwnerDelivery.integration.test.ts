@@ -30,11 +30,17 @@ const receipt = {deliveryId: "delivery", updateDigest: hash(update), journalCurs
 const cleanups: (() => void)[] = [];
 afterEach(() => {for (const close of cleanups.splice(0).reverse()) close(); vi.restoreAllMocks(); transport.connect.mockReset();});
 
-async function deliver(accountId: string, declared: typeof agentDeclaration | null = agentDeclaration) {
+type Entry = NonNullable<Awaited<ReturnType<OwnerYDocOutbox["readHead"]>>["entry"]>;
+const head = (entry: Entry | null): Awaited<ReturnType<OwnerYDocOutbox["readHead"]>> => ({outboxId: "outbox", binding, baseUpdate, baseUpdateDigest: hash(baseUpdate),
+  state: "active", pendingBytes: entry?.byteLength ?? 0, oldestEntryAtMs: entry ? 0 : null, quarantineReason: null, observedBinding: null, retryDeliveryId: null, entry});
+
+// The relay's real frame session over an in-memory transport. Each accepted submission gets the next journal cursor, from 9.
+function serve() {
   const lifetime = new AbortController();
-  let server: ReturnType<typeof createNamedLiveFrameSession> | undefined;
+  let server: ReturnType<typeof createNamedLiveFrameSession> | undefined, accepted = 0;
   cleanups.push(() => {lifetime.abort(); server?.close();});
-  const submit = vi.fn<NamedFrameHostSession["submit"]>(async () => ({result: "success", ack: {...receipt, localYDocSequence: 4, applicationReplayed: false}}));
+  const submit = vi.fn<NamedFrameHostSession["submit"]>(async input => ({result: "success", ack: {deliveryId: input.deliveryId, updateDigest: input.updateDigest,
+    journalCursor: receipt.journalCursor + accepted++, acceptingHostEpoch: receipt.acceptingHostEpoch, localYDocSequence: 4, applicationReplayed: false}}));
   transport.connect.mockImplementation(async input => {
     server = createNamedLiveFrameSession({frames, host: {hostEpoch: parseHostEpoch(1), invalidated: input.signal,
       assertCurrent: () => input.signal.throwIfAborted(), close() {}, submit,
@@ -45,21 +51,56 @@ async function deliver(accountId: string, declared: typeof agentDeclaration | nu
         })})}, transport: {send: async bytes => input.receive(bytes), close: input.closed}});
     return {send: async bytes => server!.receive(bytes), close: () => server!.close()};
   });
-  vi.spyOn(OwnerYDocOutbox.prototype, "readHead").mockResolvedValue({outboxId: "outbox", binding, baseUpdate, baseUpdateDigest: hash(baseUpdate),
-    state: "active", pendingBytes: update.length, oldestEntryAtMs: 0, quarantineReason: null, observedBinding: null, retryDeliveryId: null,
-    entry: {personEdit: true, sequence: 4, appendKey: "edit", deliveryId: receipt.deliveryId, updateDigest: hash(update), update, byteLength: update.length, createdAtMs: 0,
-      ...(declared ? {agentDeclaration: declared} : {}), ...{accountId: "forged-outbox-account", authorContext: {kind: "account", accountId: "forged-outbox-account"}}}});
-  const acknowledge = vi.spyOn(OwnerYDocOutbox.prototype, "acknowledge").mockResolvedValue({acknowledged: 1, pendingBytes: 0, oldestEntryAtMs: null});
   const client = {ownerYDocPrepareEnrollment: vi.fn(async () => ({status: "observed", draft: {outboxId: "outbox"}})),
     ownerYDocReadState: vi.fn(async () => ({revision: 1, acceptedCursor: 0, nativeHeadSequence: 1, stateVector: Uint8Array.of(0)})),
     ownerYDocApplyInitialSync: vi.fn(async () => ({revision: 2, acceptedCursor: 0, nativeHeadSequence: 2})),
-    ownerYDocIsReceiptApplied: vi.fn(async () => true)};
-  const options = {client: client as unknown as EngineClient, workspaceHandle: "handle", config, refusals: new OwnerKnownRefusals(), document: config.documents[0]!,
-    signal: lifetime.signal, bearer: "session-bearer", accountId, assertCurrent() {lifetime.signal.throwIfAborted();}};
-  expect(await runNativeOwnerDeliveryPass(options)).toBe("acknowledged");
-  expect(acknowledge).toHaveBeenCalledWith("outbox", [receipt]);
+    ownerYDocIsReceiptApplied: vi.fn(async (_request: unknown, _input: {receipt: unknown}) => true)};
+  const pass = (accountId: string) => runNativeOwnerDeliveryPass({client: client as unknown as EngineClient, workspaceHandle: "handle", config,
+    refusals: new OwnerKnownRefusals(), document: config.documents[0]!, signal: lifetime.signal, bearer: "session-bearer", accountId,
+    assertCurrent() {lifetime.signal.throwIfAborted();}});
+  return {submit, client, pass};
+}
+
+// Like the engine, acknowledging the head's receipt moves the queue to its next entry.
+function outbox(entries: Entry[]) {
+  let next = 0;
+  vi.spyOn(OwnerYDocOutbox.prototype, "readHead").mockImplementation(async () => head(entries[next] ?? null));
+  return vi.spyOn(OwnerYDocOutbox.prototype, "acknowledge").mockImplementation(async () => {
+    next++;
+    return {acknowledged: 1, pendingBytes: entries.slice(next).reduce((sum, entry) => sum + entry.byteLength, 0), oldestEntryAtMs: null};
+  });
+}
+
+async function deliver(accountId: string, declared: typeof agentDeclaration | null = agentDeclaration) {
+  const {submit, pass} = serve();
+  const acknowledge = outbox([{personEdit: true, sequence: 4, appendKey: "edit", deliveryId: receipt.deliveryId, updateDigest: hash(update), update, byteLength: update.length, createdAtMs: 0,
+    ...(declared ? {agentDeclaration: declared} : {}), ...{accountId: "forged-outbox-account", authorContext: {kind: "account", accountId: "forged-outbox-account"}}}]);
+  expect(await pass(accountId)).toBe("acknowledged");
+  expect(acknowledge).toHaveBeenCalledExactlyOnceWith("outbox", [receipt]);
+  expect(submit).toHaveBeenCalledOnce();
   return submit.mock.calls[0]![0];
 }
+
+// #2337: one pass, one connection, and every waiting edit, each with its own receipt.
+it("delivers every waiting edit over one owner connection, each with its own receipt and author", async () => {
+  const {submit, client, pass} = serve();
+  const entries = Array.from({length: 20}, (_, index): Entry => {
+    const bytes = Uint8Array.of(index + 1);
+    return {personEdit: true, sequence: index + 4, appendKey: `edit-${index}`, deliveryId: `delivery-${index}`, updateDigest: hash(bytes), update: bytes, byteLength: 1, createdAtMs: 0};
+  });
+  const acknowledge = outbox(entries);
+  expect(await pass("authenticated-owner")).toBe("acknowledged");
+  expect(transport.connect).toHaveBeenCalledOnce();
+  expect(client.ownerYDocPrepareEnrollment).toHaveBeenCalledOnce();
+  expect(client.ownerYDocReadState).toHaveBeenCalledOnce();
+  expect(client.ownerYDocApplyInitialSync).toHaveBeenCalledOnce();
+  expect(submit.mock.calls.map(([input]) => [input.deliveryId, input.updateDigest, input.authorContext])).toEqual(
+    entries.map(entry => [entry.deliveryId, entry.updateDigest, {kind: "account", accountId: "authenticated-owner"}]));
+  const receipts = entries.map((entry, index) => ({deliveryId: entry.deliveryId, updateDigest: entry.updateDigest, journalCursor: receipt.journalCursor + index,
+    acceptingHostEpoch: receipt.acceptingHostEpoch}));
+  expect(client.ownerYDocIsReceiptApplied.mock.calls.map(([, input]) => input.receipt)).toEqual(receipts);
+  expect(acknowledge.mock.calls).toEqual(receipts.map(proved => ["outbox", [proved]]));
+});
 
 it("delivers the hosted declaration to the relay under the credential account", async () => {
   const submitted = await deliver("authenticated-owner");
