@@ -58,6 +58,19 @@ it("uses one policy for journal admission, activation and restores", () => {
   expect(selfHostLiveProfile().validation.maxIndexOperations).toBe(100_000_000);
 });
 
+it("holds live connections for a community of 100 members, and keeps 16 for the owner", () => {
+  const {namedLive, gateway} = selfHostLiveProfile();
+  const transport = parseNamedLiveRouteLimits({...namedLive.transport});
+  expect(transport).toMatchObject({maxConnections: 384, maxConnectionsPerWorkspace: 192, reservedOwnerConnections: 16,
+    maxConnectionsPerGrant: 80, maxConnectionsPerPrincipal: 12, maxBufferedBytes: 128 * 1024 * 1024});
+  // Members and other recipients share what the owner's 16 leave.
+  expect(transport.maxConnectionsPerWorkspace - transport.reservedOwnerConnections).toBe(176);
+  expect(gateway).toMatchObject({maxConnections: 384, maxConnectionsPerWorkspace: 192, reservedOwnerConnections: 16});
+  // Each connection holds two frame listeners; the rest serve desktop opens and readiness waits.
+  expect(namedLive.maxListeners).toBeGreaterThanOrEqual(2 * transport.maxConnections);
+  expect(parseNamedLiveConfig(namedLive).maxListeners).toBe(namedLive.maxListeners);
+});
+
 it("keeps each byte portion when the connection caps rise", () => {
   const { namedLive, gateway } = selfHostLiveProfile(),
     MiB = 1024 * 1024;
