@@ -46,7 +46,7 @@ function wakes(storage: SyncRelayStorage) {
   return (storage as StorageContext).db.prepare(
     `SELECT wake_id, account_id, workspace_id, message_id, thread_id, target, generation, state, candidates_json, prerequisite_message_id,
        winner_install_id, change_seq FROM sync_relay_chat_wakes ORDER BY account_id, workspace_id, message_id, generation`,
-  ).all().map((row) => ({ ...row, candidates_json: JSON.parse(String(row.candidates_json)) as unknown }));
+  ).all().map((row): Record<string, unknown> => ({ ...row, candidates_json: JSON.parse(String(row.candidates_json)) as unknown }));
 }
 
 const count = (storage: SyncRelayStorage, table: string) =>
@@ -127,7 +127,7 @@ it("deletes runners and wakes with their workspace, keeps retries' bindings, and
   expect(bindings(), "a binding outlives its wake's workspace").toEqual([
     { account_id: "ana", workspace_id: "trip" }, { account_id: "ben", workspace_id: "bens" }, { account_id: "ben", workspace_id: "other" },
   ]);
-  expect(storage.retryChatWake({ accountId: "ana", workspaceId: "trip", operationId: "retry-trip", wakeId: wakeOf("message-trip"), nowMs: NOW }))
+  expect(storage.retryChatWake({ accountId: "ana", workspaceId: "trip", operationId: "retry-trip", wakeId: wakeOf("message-trip", "claude"), nowMs: NOW }))
     .toEqual({ kind: "too-old" });
 
   initializeAccountDeletion(context, "account-deletion-test-key");

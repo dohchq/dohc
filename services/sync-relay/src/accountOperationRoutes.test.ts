@@ -1434,7 +1434,7 @@ describe("an account's chat writes through the server's copy", () => {
         after = page.nextAfterMessageOrder;
       } while (after !== null);
       const arrived = [...all.filter((message) => message.id !== "dm-import"), ...all.filter((message) => message.id === "dm-import")
-        .map((message) => ({ ...message, createdAtMs: 0 }))];
+        .map((message): Record<string, JsonValue> => ({ ...message, createdAtMs: 0 }))];
       const start = (typeof params.afterMessageOrder === "number" ? params.afterMessageOrder : -1) + 1;
       const rows = arrived.slice(start, start + Number(params.limit));
       return { id: request.id, result: { messages: rows, nextAfterMessageOrder: start + rows.length < arrived.length ? start + rows.length - 1 : null } };
@@ -1555,7 +1555,7 @@ describe("an account's chat writes through the server's copy", () => {
       VALUES ('trip', 'another-device', 1, 'moment.append', '{}', 1) RETURNING relay_seq`).get()!.relay_seq);
     db.prepare(`INSERT INTO sync_relay_object_moments (workspace_id, object_id, relay_seq, moment_id, version_id, path, recorded_at_ms)
       VALUES ('trip', 'object-notes', ?, 'moment-env', 'main', '.env', 1)`).run(relaySeq);
-    await new VersionedLiveAdapter(f.engine.files, "trip", { workspaceId: "trip" })
+    await new VersionedLiveAdapter(f.engine, "trip", { workspaceId: "trip" })
       .deleteTextFile({ workspaceId: "trip", versionId: "main", path: "notes.md", metadata: { origin: "api" } });
     held.release();
     expect(await answer(await retrying)).toEqual({ ok: false, reason: `no such wake: ${wakeId}`, refusal: "missing" });
