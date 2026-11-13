@@ -48,7 +48,7 @@ const sha256 = (text: string) => createHash("sha256").update(text).digest("hex")
 
 async function ownerLog(relay: SyncRelayHandle): Promise<LogOp[]> {
   const identity = relayAdoptedIdentity(relay.dbPath, WORKSPACE_ID);
-  const query = new URLSearchParams({ since: "0", limit: "1000", ...(identity ?? {}) });
+  const query = new URLSearchParams({ since: "0", limit: "1000", ...identity });
   const read = await relayJson(relay.baseUrl, OWNER_TOKEN, `/sync/${WORKSPACE_ID}/log?${query.toString()}`);
   expect(read.status, read.body).toBe(200);
   return (JSON.parse(read.body) as { ops: LogOp[] }).ops;

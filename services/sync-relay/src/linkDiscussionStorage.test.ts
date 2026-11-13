@@ -1092,7 +1092,7 @@ describe("durable link discussion storage", () => {
 
     closeTestStorage(storage);
     closeTestStorage(second);
-    const reopened = reopenTestStorage(dbPath, {
+    reopenTestStorage(dbPath, {
       blobGraceMs: 0,
       newDiscussionId: () => "usage-rejected-message",
     });

@@ -1,7 +1,7 @@
 import { parseAppBackendJson, type AppBackendJson } from "@dohc/security-contract/app-backend";
 import type { DatasetOperation } from "@dohc/security-contract/dataset";
 import type { TransactionalInvoke } from "./TransactionalCollectionPage";
-import { parsePage, type TransactionalCursor, type TransactionalDatasetDescription, type TransactionalField } from "./transactionalCollectionModel";
+import { parsePage, type TransactionalCursor, type TransactionalField } from "./transactionalCollectionModel";
 
 export const CSV_IMPORT_MAX_BYTES = 4 * 1024 * 1024;
 export const CSV_IMPORT_MAX_ROWS = 10_000;

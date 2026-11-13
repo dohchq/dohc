@@ -863,7 +863,7 @@ test("delayed job creation in run 43235841741 is unmeasured in both timing check
     t.after(() => rmSync(root, { recursive: true, force: true }));
     writeTimingReceipts(root, scope, commit);
     const env = { GITHUB_SHA: commit, DOHC_WORKFLOW_HEAD_SHA: commit, GITHUB_STEP_SUMMARY: join(root, "summary.md") };
-    const final = jobs.find(job => job.name === name), verify = final.steps.find(step => /^Require complete proof/u.test(step.name));
+    const final = jobs.find(job => job.name === name), verify = final.steps.find(step => step.name.startsWith('Require complete proof'));
     const warningCount = warn.mock.calls.length;
     const aggregate = await aggregateCloud(scope, root.replaceAll("\\", "/"), { env, outputDirectory,
       now: () => Date.parse(verify.completed_at), readJobs: async () => jobs });
@@ -894,7 +894,7 @@ test("job creation waits use dependency completion and the last matrix member", 
     for (const wait of [30, 31]) {
       const jobs = withoutWaits(), start = Date.parse(jobs[0].started_at);
       if (scope === "rust") {
-        const workers = jobs.filter(job => /^JS worker /u.test(job.name));
+        const workers = jobs.filter(job => job.name.startsWith('JS worker '));
         workers.at(-1).completed_at = new Date(Math.max(...workers.map(job => Date.parse(job.completed_at))) + 10_000).toISOString();
       }
       const job = jobs.find(job => job.name === name), ready = dependencyFinishedAt(jobs, name);
@@ -993,7 +993,7 @@ test("Rust-only scheduling ignores skipped needs but requires evidence for an ab
       head_sha: mode === "wrong head" ? "other-head" : commit, conclusion: "skipped", status: "completed" });
     if (mode === "partial") jobs.push(workers[0]);
     const dependencyReady = mode === "one named skip" ? Math.max(ready, ...workers.slice(0, -1).map(job => Date.parse(job.completed_at))) : ready;
-    for (const job of jobs.filter(job => /^Rust tests /u.test(job.name) || job.name === "engine gate")) {
+    for (const job of jobs.filter(job => job.name.startsWith('Rust tests ') || job.name === "engine gate")) {
       job.created_at = new Date(dependencyReady + 117_000).toISOString();
       job.started_at = new Date(dependencyReady + 122_000).toISOString();
       job.completed_at = new Date(dependencyReady + 123_000).toISOString();

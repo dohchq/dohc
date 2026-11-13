@@ -1,4 +1,4 @@
-import { desktopPins, activityPin } from "../src/testPins";
+import { activityPin } from "../src/testPins";
 import { DOCUMENT_END } from "./helpers/keys";
 import { expect, test } from "@playwright/test";
 import { execFileSync } from "node:child_process";

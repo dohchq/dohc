@@ -8,7 +8,7 @@ import { promisify } from 'node:util';
 import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
-import { mkdir, readFile, writeFile, stat } from 'node:fs/promises';
+import { mkdir, writeFile, stat } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { DocumentValidationPool } from './document-size-pool.mjs';
 import {
@@ -478,6 +478,7 @@ export async function runRelayCase(options) {
         result.pool = pool.usage();
       } finally {
         clearInterval(sampler);
+        // oxlint-disable-next-line typescript/await-thenable -- await needed: samplePrivate() assigns sampling, which TypeScript's narrowing misses
         await sampling;
         await samplePrivate();
         result.privateSamples = privateSamples;

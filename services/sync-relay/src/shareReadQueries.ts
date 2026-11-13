@@ -8,7 +8,6 @@ import {
   groupChannelIsOrdinary,
   hasValidShareMomentShape,
   fileSideOf,
-  isChatChannelSelector,
   isGroupSelector,
   parseShareOpPayloadWithReferencedPaths,
   pathVisibleThroughShare,

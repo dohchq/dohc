@@ -321,6 +321,8 @@ export function CollectionRecordFieldWrite({
             : null,
         );
         return;
+      case "unknown":
+        break;
     }
   }, [
     docState.doc,

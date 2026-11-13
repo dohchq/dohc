@@ -45,7 +45,6 @@ import type {
   CollectionAutomationRun,
   CollectionAutomationShareStop,
   CollectionAutomationsFile,
-  CollectionAutomationStop,
   CollectionFieldMark,
   CollectionAutomationGroup,
   CollectionAutomationPeople,
@@ -2957,7 +2956,7 @@ const PRESENCE_STATE_MAX_DEPTH = 32;
 // JSON.stringify. Returns false for cycles, over-depth nesting, and non-JSON
 // values (bigint), which the relay would reject or main would throw on anyway.
 // Printable ASCII minus `"` and `\` — characters JSON serializes verbatim.
-const SAFE_JSON_STRING_CHARS = /^[ !#-\[\]-~]*$/;
+const SAFE_JSON_STRING_CHARS = /^[ !#-[\]-~]*$/;
 
 export function presenceStateWithinCap(
   value: unknown,

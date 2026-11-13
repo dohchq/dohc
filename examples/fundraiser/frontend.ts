@@ -442,7 +442,7 @@ function createRegisterView(client: FundraiserClient, context: AppContext, hooks
       }
       else if (context.pendingAttempt) restoreDraft(context.pendingAttempt);
       else { messages.replaceChildren(); setBusy(false); }
-    } catch (error) { setBusy(false); submitButton.disabled = true; messages.replaceChildren(notice("dohc could not check your saved response. Try again before registering.", "error", button("Check saved response", {class: "primary", click: () => void loadRetained()}))); }
+    } catch { setBusy(false); submitButton.disabled = true; messages.replaceChildren(notice("dohc could not check your saved response. Try again before registering.", "error", button("Check saved response", {class: "primary", click: () => void loadRetained()}))); }
   }
   async function clearRetained(): Promise<boolean> {
     try {

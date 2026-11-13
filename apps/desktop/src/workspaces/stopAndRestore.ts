@@ -498,7 +498,8 @@ export async function restoreDirectWrites(
       runs = undone;
       if (undone.errorMessage !== null) return done(undone.errorMessage);
     }
-  } catch (error) {
+  } catch (caught) {
+    let error = caught;
     try { await receipts.flush(); await removeRecoveredFolders(); }
     catch (flushError) { error = flushError; }
     if (error instanceof UndoRunsStopped) runs = error.runs;

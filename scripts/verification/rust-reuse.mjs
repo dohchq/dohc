@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { availableParallelism, hostname, release } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { readGit } from "../../tools/rust-engine-program/git-read.mjs";
 import { requireCiPassVerdict } from "../../tools/rust-engine-program/require-ci-pass-verdict.mjs";
 import { classifyTreeProvenance } from "../../tools/rust-engine-program/tree-provenance.mjs";

@@ -1,4 +1,4 @@
-import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
+import { historyPageFields } from "../testing/historyPageFixture";
 import { describe, expect, it, vi } from "vitest";
 import {
   engineMomentDetailForIpc,

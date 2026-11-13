@@ -455,6 +455,7 @@ function harness(t, { timeLimitMs = 60_000, docker = async () => true, sweep = a
     // Each behavior verifies its own commit: one commit with the same gates is one piece of work.
     if (!fields.head) fixture.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", behavior);
     const head = fields.head ?? fixture.git("rev-parse", "HEAD");
+    // oxlint-disable-next-line eslint/no-dupe-keys -- the first head fixes the key's position and the last its value
     const key = await submit(root, { head, base: fixture.base, scope: "all", gates: { rust: true, js: true }, branch: `refs/heads/${behavior}`, checkout: behavior, ...fields, head });
     return waitFor(() => readJson(join(queuePaths(root).keys, key)), `submission ${behavior} was not answered`);
   };
@@ -1124,7 +1125,7 @@ test("an attempt keeps its lane until what it left running has stopped, and stat
   const { root, request, settled } = harness(t, { strays, holdLane, strayRetryMs: 500, heartbeatMs: 20 });
   const first = await request("pass");
   const second = await request("pass", { branch: "refs/heads/second" });
-  await waitFor(() => /^held: could not stop what the run left running \(processes 4242 did not stop after SIGKILL\)/u.test(readJson(queuePaths(root).service)?.running?.[0]?.phase ?? "") || null, "status must say the lane is held");
+  await waitFor(() => String(readJson(queuePaths(root).service)?.running?.[0]?.phase ?? "").startsWith("held: could not stop what the run left running (processes 4242 did not stop after SIGKILL)") || null, "status must say the lane is held");
   assert.ok(!events.includes(`lane ${second.id}`), "the next request waits while the lane is held");
   await settled(second.id);
   assert.deepEqual(events, [`lane ${first.id}`, `sweep ${first.id}`, `sweep ${first.id}`, `sweep ${first.id}`, `release ${first.id}`, `lane ${second.id}`, `sweep ${second.id}`, `release ${second.id}`]);
@@ -1299,6 +1300,7 @@ test("on a Mac, the supervisor stops everything a dead service started, whatever
   await waitFor(() => zero.every(pid => !running(pid)), "everything the dead service started must stop", 15_000);
   const one = await generation(1);
   // launchd kills the supervisor's group, which leaves the service and everything it started running.
+  // oxlint-disable-next-line typescript/no-unsafe-unary-minus -- pid is set: the supervisor has already started a generation
   process.kill(-first.pid, "SIGKILL");
   await once(first, "exit");
   assert.ok(one.every(running), "killing the supervisor alone stops nothing below it");

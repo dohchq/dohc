@@ -1,6 +1,6 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, posix, resolve, win32 } from "node:path";
+import { join, posix, win32 } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Request, Response } from "../protocol";
 import { type EngineClientSpawnOptions } from "./engineClient";

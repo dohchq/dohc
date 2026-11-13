@@ -41,14 +41,12 @@ import {
   type VersionRecord,
   type VersionedTextConflictRecord,
   type VersionedTextMoment,
-  type VersionedTextMomentSummary,
   type VersionedTextStore,
 } from "@dohc/workspace-contracts/engine";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import { pathCollisionKey } from "@dohc/workspace-contracts/path-floor";
 import type {
   MaterializeRelayPullPage,
-  RelayMaterializedPath,
 } from "@dohc/workspace-contracts/relay";
 import {
   openEngineYdocProviderSession,
@@ -98,7 +96,7 @@ import {
   mediaTypeForPath,
 } from "@dohc/workspace-fs";
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream, existsSync, type Stats } from "node:fs";
+import { createReadStream, type Stats } from "node:fs";
 import { lstat, mkdir, open, readdir, readFile, realpath, rm, rmdir, type FileHandle } from "node:fs/promises";
 import { atomicReplaceFile } from "../atomicReplaceFile";
 import { folderEntriesOrNone } from "./folderEntries";

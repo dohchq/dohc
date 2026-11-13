@@ -684,7 +684,7 @@ describe("local usage store", () => {
   it.each(steps)("keeps both records after dohc stops at file change %i of a Restore", async step => {
     const older = seed(false);
     older.counts.push({ ...pair, day: today(), count: 7 });
-    const { store, disk, path, restart, crashOn } = memoryStore();
+    const { store, disk, restart, crashOn } = memoryStore();
     disk.set(join("isolated-state", usageAsideName(1)), JSON.stringify(older));
     await store.load();
     for (let i = 0; i < 3; i++) store.recordSuccess(pair);

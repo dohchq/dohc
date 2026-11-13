@@ -22,6 +22,7 @@ export async function forwardAppCollection(input:{request:Request;relayUrl:strin
     }else return opaqueLinkRefusal();
   }catch{return opaqueLinkRefusal();}
   let relay:Response;
+  // oxlint-disable-next-line unicorn/no-invalid-fetch-options -- payload is set only together with method POST
   try{relay=await input.fetchRelay(new Request(url,{method,body:payload,redirect:'manual',signal:input.signal,headers:{authorization:`LinkCapability ${input.capability}`,'x-dohc-link-profile-secret':input.profileSecret,...(payload?{'content-type':'application/json'}:{})}}));}catch{return opaqueLinkRefusal();}
   try{
     if(relay.status!==200||relay.redirected||relay.headers.has('location'))return await relayLinkRefusal(relay,input.signal);

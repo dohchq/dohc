@@ -190,7 +190,7 @@ export function createSyncDemo(syncDemo) {
       if (!canAutoplay()) {
         const pausedAt = performance.now();
         typeFrame = null;
-        whenVisible().then(() => { t0 += performance.now() - pausedAt; typeFrame = tick(frame); });
+        void whenVisible().then(() => { t0 += performance.now() - pausedAt; typeFrame = tick(frame); });
         return;
       }
       const want = Math.min(text.length, Math.floor((now - t0) / 42));
@@ -276,7 +276,7 @@ export function createSyncDemo(syncDemo) {
     // Start when the section is close to view so the loop isn't half over
     // by the time anyone sees it.
     let started = false;
-    const start = () => { if (!started) { started = true; play(); } };
+    const start = () => { if (!started) { started = true; void play(); } };
     document.addEventListener('visibilitychange', resumeAutoplay);
     if ('IntersectionObserver' in window) {
       const io = new IntersectionObserver((entries) => {

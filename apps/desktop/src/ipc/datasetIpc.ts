@@ -217,6 +217,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         try {
           await flushSourceCapture(); current();
           invalidateDatasetAddresses({ workspaceId: input.workspaceId });
+          // oxlint-disable-next-line typescript/await-thenable -- await kept: removing it changes scheduling
           const approved = await host.approvedArtifacts(receipt.targetCursor.datasetId); current();
           const description = { datasetId: approved.revision.datasetId, name: approved.revision.definition.name,
             revision: approved.revision.revision, revisionSha256: approved.revision.revisionSha256, tables: [], operations: [] };

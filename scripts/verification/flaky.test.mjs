@@ -213,7 +213,7 @@ test("the vitest reporter records the tests that passed on retry, failed both tr
   const previous = process.env.DOHC_TEST_RECORD;
   process.env.DOHC_TEST_RECORD = log;
   t.after(() => { rmSync(root, { recursive: true, force: true }); if (previous === undefined) delete process.env.DOHC_TEST_RECORD; else process.env.DOHC_TEST_RECORD = previous; });
-  const testCase = (fullName, flaky, duration, state = "passed", errors = undefined) => ({ fullName, module: { moduleId: join(process.cwd(), "src", "a.test.ts") },
+  const testCase = (fullName, flaky, duration, state = "passed", errors) => ({ fullName, module: { moduleId: join(process.cwd(), "src", "a.test.ts") },
     diagnostic: () => state === "skipped" ? undefined : { flaky, duration }, result: () => ({ state, errors }) });
   const reporter = new TestRecordReporter();
   reporter.onTestCaseResult(testCase("steady", false, 30));

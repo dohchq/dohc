@@ -2,7 +2,7 @@ import { samplePresenceClock, validatePresenceClocks } from './presence-owner.mj
 import assert from 'node:assert/strict';
 import { _electron } from '@playwright/test';
 import { createRequire } from 'node:module';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve, relative, isAbsolute } from 'node:path';
 import { createEvidenceDirectory } from './packaged-benchmark-options.mjs';

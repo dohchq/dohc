@@ -454,7 +454,7 @@ export async function listWorkspaceFiles(
     let dirents;
     try {
       dirents = await readdir(absolute, { withFileTypes: true });
-    } catch (error) {
+    } catch {
       return;
     }
     for (const dirent of dirents) {

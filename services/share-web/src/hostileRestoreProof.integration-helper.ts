@@ -63,7 +63,7 @@ export async function prepareHostileRestoreProof(input: {
     function until(condition: () => boolean) {
       return new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => finish(new Error(`${label}: condition deadline`)), 30000);
-        const finish = (error?: Error) => {clearTimeout(timeout); waiters.delete(check); error ? reject(error) : resolve();};
+        const finish = (error?: Error) => {clearTimeout(timeout); waiters.delete(check); if (error) reject(error); else resolve();};
         const check = () => {if (condition()) finish(); else if (failure) finish(failure); else if (closed !== undefined) finish(new Error(`${label}: socket closed ${closed}`));};
         waiters.add(check); check();
       });

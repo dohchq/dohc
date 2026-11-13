@@ -383,7 +383,7 @@ interface ActiveMentionQuery {
 
 export function activeMentionQuery(value: string, caret: number): ActiveMentionQuery | null {
   const before = value.slice(0, Math.max(0, Math.min(caret, value.length)));
-  const match = /(^|[\s(\[{])@([\p{L}\p{N}\p{M}._-]*)$/u.exec(before);
+  const match = /(^|[\s([{])@([\p{L}\p{N}\p{M}._-]*)$/u.exec(before);
   if (!match || nameByteLength(normalizeHandle(match[2]!)) > 200) return null;
   return { start: match.index + match[1]!.length, query: match[2]! };
 }

@@ -2,7 +2,6 @@ import { agentColorsForPresentation } from "../settings/userSettingsStore";
 import { createWorkspaceHandler } from "./rendererWorkspaceHandler";
 import { shareRecordStatuses } from "../workspaces/shareRecordStatus";
 import { WorkspaceDaemonRequester, type HistoryCursor, type VersionedLiveAdapter } from "@dohc/workspace-engine-client";
-import { z } from "zod";
 import type { EngineWorkspace, EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import {
   historyOperations,

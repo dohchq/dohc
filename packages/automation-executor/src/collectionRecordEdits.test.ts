@@ -497,9 +497,6 @@ function fakeEngine() {
   };
 }
 
-const ADOPTION_TIMEOUT_MESSAGE =
-  "The record file was created at tasks/two.md, but the engine did not adopt it as a collection record in time. Look for it in the Collection before you create it again.";
-
 afterEach(() => {
   vi.useRealTimers();
 });

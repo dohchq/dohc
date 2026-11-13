@@ -1025,7 +1025,7 @@ function markdownLists(projected = false) {
         }),
       }
     }
-    if (/^(?:(?:[-+*]|[0-9]{1,9}[.)]) (?![ \t]*(?:\n|$))[^\n\[]+(?:\n|$))+(?:\n|$)(?![ \t\n0-9*+-])/u.test(src)) return undefined
+    if (/^(?:(?:[-+*]|[0-9]{1,9}[.)]) (?![ \t]*(?:\n|$))[^\n[]+(?:\n|$))+(?:\n|$)(?![ \t\n0-9*+-])/u.test(src)) return undefined
     // Marked otherwise strips a checkbox from ordered item text as GFM tasks.
     tokenizer.options.gfm = !/^ {0,3}[0-9]/u.test(src)
     const list = tokenizer.list(src)
@@ -1104,11 +1104,6 @@ function prepareRenderedTableCell(markdown: string): string {
   }
 
   return output
-}
-
-function firstLine(source: string): string {
-  const newline = source.indexOf('\n')
-  return newline < 0 ? source : source.slice(0, newline)
 }
 
 const tableTokenizer = Table.config.markdownTokenizer!

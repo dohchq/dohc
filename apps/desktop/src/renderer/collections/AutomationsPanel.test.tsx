@@ -583,8 +583,6 @@ describe("the builder's people", () => {
     { userId: "user-ana", name: "ana@dohc.test", you: false, dmStopped: null, noticeStopped: "ana@dohc.test cannot view Tasks." },
     { userId: "user-bob", name: "bob@dohc.test", you: false, dmStopped: NO_DM_BOB, noticeStopped: null },
   ];
-  const options = (name: string) => [...(screen.getByRole("combobox", { name }) as HTMLSelectElement).options]
-    .map((option) => [option.textContent, option.disabled]);
   const chosen = (name: string) => {
     const select = screen.getByRole("combobox", { name }) as HTMLSelectElement;
     return select.options[select.selectedIndex]?.textContent;

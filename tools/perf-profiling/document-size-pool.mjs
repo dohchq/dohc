@@ -112,6 +112,7 @@ export class DocumentValidationPool {
       });
       const slotMs = performance.now() - started;
       occupiedMs = slotMs;
+      // oxlint-disable-next-line typescript/await-thenable -- await needed: sample() assigns sampling, which TypeScript's narrowing misses
       await sampling;
       await sample();
       return {

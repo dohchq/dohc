@@ -10,7 +10,7 @@ import { workspaceName } from "../Titlebar";
 import type { SentNotice } from "../workbench/NoticeCenter";
 import { inputCount } from "../ui/inputCount";
 import type { ShellErrorKind } from "./useShellError";
-import { sentNoticeFolder, sentNoticePlace, serverRunOfNotice, type SentNoticePlace } from "../../notices/sentNoticePlace";
+import { sentNoticeFolder, sentNoticePlace, serverRunOfNotice } from "../../notices/sentNoticePlace";
 import { ACCESS_ENDED_NOTE, AUTOMATION_NOTICE_KINDS, opensControls, sentNoticeTarget, targetLookupFailedNote, type NoticeTarget } from "../../notices/noticeTarget";
 import { sentNoticeRef, type SentNotices } from "./useSentNotices";
 import { chatOnScreen } from "../workbench/chatsOnScreen";

@@ -227,6 +227,7 @@ describe("live-ticket descriptor snapshots", () => {
       const input = claim();
       const selectors = input.binding.selectorPaths;
       let calls = 0;
+      // oxlint-disable-next-line typescript/no-array-delete -- the test needs a sparse array
       if (["sparse", "inherited", "accessor"].includes(kind)) delete selectors[0];
       if (kind === "inherited") Object.setPrototypeOf(selectors, { 0: "notes/owner.md" });
       if (kind === "accessor") Object.defineProperty(selectors, "0", { get() { calls += 1; return "notes/owner.md"; } });

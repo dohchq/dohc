@@ -191,6 +191,7 @@ async function notVersionedAt(rootPath: string, capture: Partial<Pick<WorkspaceE
   const unaddressed: string[] = [];
   const untracked = await capture.notVersioned(async () => {
     const allowed = agent ? historyPathAdmission(await readWorkspaceEnginePolicy(rootPath)) : () => true;
+    // oxlint-disable-next-line typescript/await-thenable -- await needed: some entries are promises
     return (await Promise.all((await spell()).map(entry => entry === null ? []
       : historyFilesUnder(rootPath, entry, allowed, () => false, agent ? undefined : path => unaddressed.push(path)).catch(() => [])))).flat();
   });
@@ -608,7 +609,8 @@ async function prepareMoveWorkspacePath(operation: PathChangeOperation,
         ...(replaced === undefined ? {} : { replaced: { ...replaced,
           ...(replaced.trashed || staged === undefined ? {} : { trashPath: workspaceTrashPath(staged) }) } }) };
     };
-  } catch (error) {
+  } catch (caught) {
+    let error = caught;
     // Explorer reads these refusals by their names, to split the words and offer what each allows.
     if (options.byHand && (isLivePageOwnedRefusal(error) || error instanceof HistoryOffError)) throw error;
     if (error instanceof StoredEntryIdentityUnavailable) error = moveIdentityUnavailable(input.fromPath, input.toPath);
@@ -836,7 +838,8 @@ export async function prepareDeleteWorkspacePathAs<Workspace extends PathChangeW
           ...(withoutHistory.length ? { withoutHistory } : {}) };
       } finally { releaseRecovery(); }
     };
-  } catch (error) {
+  } catch (caught) {
+    let error = caught;
     releaseRecovery();
     if (error instanceof StoredEntryIdentityUnavailable) error = deleteIdentityUnavailable(path);
     return async () => ({ ok: false, deleted: [], path, reason: reason(error, failed) });

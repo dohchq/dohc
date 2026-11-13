@@ -7,7 +7,6 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "outDir": "dist",
     "types": ["node", "vitest"]
   },
   "include": ["src/**/*.ts"]

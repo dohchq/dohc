@@ -33,6 +33,7 @@ export async function runHistoryBenchmark({ exe, mode, root = process.cwd() }, {
   const saveReceipt = () => writeFileSync(join(output, "result.json"), JSON.stringify(receipt, null, 2) + "\n");
   let lane;
   try {
+    // oxlint-disable-next-line typescript/await-thenable -- await kept: removing it changes scheduling
     await saveReceipt();
     lane = admit(process.env, { metadata: { purpose: "History query and write benchmark", checkout: root, mode } });
     lane.check();
@@ -67,6 +68,7 @@ export async function runHistoryBenchmark({ exe, mode, root = process.cwd() }, {
     receipt.finishedAt = new Date().toISOString();
     receipt.hostContext ??= lane?.evidence;
     lane?.release();
+    // oxlint-disable-next-line typescript/await-thenable -- await kept: removing it changes scheduling
     await saveReceipt();
     console.log(`Evidence: ${join(output, "result.json")}`);
   }

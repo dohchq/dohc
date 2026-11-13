@@ -429,7 +429,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
         if(input.signal?.aborted||lane.lifecycle.signal.aborted)abort();
         timer=setTimeout(()=>reject(new Error("This Collection stayed busy too long, so dohc stopped waiting. Try again.")),remaining);
         // A different dataset's cleanup error does not determine this request's authority.
-        Promise.race(pending.map(promise=>promise.catch(()=>{}))).then(resolve);
+        void Promise.race(pending.map(promise=>promise.catch(()=>{}))).then(resolve);
       });
     } finally {
       if(timer)clearTimeout(timer);

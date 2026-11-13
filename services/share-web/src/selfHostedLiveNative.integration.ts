@@ -1808,7 +1808,7 @@ for (const ending of ["its owner stops live editing", "its last link ends"] as c
 // before anyone edits: the workspace detaches, no capture runs, and the relay
 // keeps exactly what the host pushed.
 it("detaches a store restored from an older copy before anyone edits it", () => withSelfHostProof("self-host-restored", async proof => {
-  const objectId = proof.activation()!.source.objectId, document = {workspaceId: "workspace", objectId};
+  const objectId = proof.activation()!.source.objectId;
   // A link holder with Edit, asking the relay to open docs/a.md live.
   const linkKey = Buffer.alloc(32, 7), bearer = Buffer.alloc(32, 1).toString("base64url"), now = Date.now();
   expect(proof.storage.createLinkGrant({grant: {grantId: "link-grant", shareId: "share", principalKind: "link", principalUserId: null, principalEmail: null,

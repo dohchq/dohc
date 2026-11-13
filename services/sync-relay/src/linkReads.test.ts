@@ -232,7 +232,7 @@ async function appendMoments(
 ): Promise<void> {
   await appendLog(h, OWNER, WORKSPACE, ops, {
     originId: options.originId ?? "origin-a",
-    ...(options.identity ?? {}),
+    ...options.identity,
   });
 }
 
@@ -341,7 +341,7 @@ async function seed(
               }),
               moment(2, "private/hidden.md", "hidden\n", 1_200),
             ],
-            ...(identity ?? {}),
+            ...identity,
           }),
         ),
       )

@@ -16,7 +16,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SharedFileReadOnlyError, ShareUnavailableError } from "@dohc/workspace-contracts/relay";
 import {
   createShareViewFiles,
-  ShareViewMountRollbackError,
   type ResolvedShareViewFilesTarget,
   type PreparedShareViewFilesMount,
   type ShareViewFileChange,

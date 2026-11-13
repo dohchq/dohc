@@ -152,6 +152,7 @@ export function orderSteps(steps: readonly AutomationStep[], counter = { next: 0
     const ordinal = counter.next++;
     if (step.kind !== "if") return { ordinal, step };
     const then = orderSteps(step.do, counter);
+    // oxlint-disable-next-line unicorn/no-thenable -- then holds the if step's branch, an array, so nothing can await this object
     return { ordinal, step, then, otherwise: orderSteps(step.otherwise, counter) };
   });
 }
@@ -613,6 +614,9 @@ export function shapeProblem(
             }
           }
         }
+        break;
+      case "run":
+      case "run-file":
         break;
     }
   }

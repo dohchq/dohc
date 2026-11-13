@@ -1,5 +1,4 @@
 import { accountWords, type ServerProblemKind } from "@dohc/interface-words/account";
-import { confirmWords } from "@dohc/interface-words/confirmations";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Pressable, ScrollView, StyleSheet, Switch, Text, View } from "react-native";
 import { useAccount, useSignIn } from "../src/account/AccountProvider";

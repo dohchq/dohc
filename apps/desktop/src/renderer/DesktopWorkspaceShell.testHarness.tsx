@@ -1,4 +1,4 @@
-import { historyCursor, historyPageFields, timelinePage } from "../testing/historyPageFixture";
+import { historyPageFields, timelinePage } from "../testing/historyPageFixture";
 import { defaultWorkbenchState, serializeUiState } from "./workbench/workbenchState";
 import "../testing/legendListMock";
 import {

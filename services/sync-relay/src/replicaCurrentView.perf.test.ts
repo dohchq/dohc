@@ -102,7 +102,7 @@ it.skipIf(process.platform!=="linux"||binary.missing||process.env.DOHC_REPLICA_M
     relay.stdout!.resume();relay.stderr!.on("data",bytes=>process.stderr.write(bytes));
     const ready=await new Promise<{baseUrl:string}>(resolve=>relay.once("message",message=>resolve(message as {baseUrl:string})));
     let commandId=0;
-    const command=(command:string)=>new Promise<any>((resolve,reject)=>{const id=++commandId;const receive=(message:any)=>{if(message.id!==id)return;relay.off("message",receive);message.error?reject(Error(message.error)):resolve(message.result);};relay.on("message",receive);relay.send({id,command});});
+    const command=(command:string)=>new Promise<any>((resolve,reject)=>{const id=++commandId;const receive=(message:any)=>{if(message.id!==id)return;relay.off("message",receive);if(message.error)reject(Error(message.error));else resolve(message.result);};relay.on("message",receive);relay.send({id,command});});
     const ownerDir=await tempRoot("view-perf-owner"),token="view-perf-owner";
     const processChild=spawn(binary.require(),[],{windowsHide:true,stdio:["pipe","pipe","pipe"],env:{DOHC_ENGINE_AUTH_TOKEN:token,SystemRoot:process.env.SystemRoot}});
     const exited=new Promise<void>(resolve=>processChild.once("close",()=>resolve()));

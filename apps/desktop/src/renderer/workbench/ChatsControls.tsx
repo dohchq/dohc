@@ -1,8 +1,7 @@
-import { Archive, ArrowLeft, Bot, PowerOff, TriangleAlert } from "lucide-react";
+import { Archive, ArrowLeft, PowerOff, TriangleAlert } from "lucide-react";
 import type * as React from "react";
 import type { JoinedSharedChannelRow } from "../../ipc/bridgeContract";
 import type { AgentPresenceActivity } from "../../collab/agentPresence";
-import { SectionLabel } from "../ui/controls";
 import { WorkLinkText } from "./workReferences";
 
 // Why a committed share read carried no rows. "unreachable" covers both a

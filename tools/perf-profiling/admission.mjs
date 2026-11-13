@@ -24,7 +24,7 @@ export function acquireProfilingSlot(env = process.env, {
   metadata,
   pollMs = 1000,
   observe = () => profilingHostContext(env),
-  schedule = callback => setInterval(callback, pollMs),
+  schedule = (/** @type {() => void} */ callback) => setInterval(callback, pollMs),
   unschedule = clearInterval,
 } = {}) {
   const budget = resolveBuildBudget(env);

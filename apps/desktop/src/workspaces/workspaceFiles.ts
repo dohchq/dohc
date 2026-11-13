@@ -42,7 +42,6 @@ import {
   rmdir,
   stat,
   unlink,
-  writeFile,
   type FileHandle,
 } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, parse, relative, sep } from "node:path";

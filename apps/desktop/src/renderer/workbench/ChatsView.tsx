@@ -72,7 +72,6 @@ import type { ShareRemovalNotices } from "../shell/useShareRemovalNotices";
 import { inputCount, onNextInput } from "../ui/inputCount";
 import {
   Archive,
-  ArchiveRestore,
   AtSign,
   ChevronDown,
   ChevronRight,
