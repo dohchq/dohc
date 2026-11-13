@@ -411,7 +411,7 @@ function shareReceivedTitle(storage: StorageContext, share: SyncRelayShareRow): 
     if (kind === "dm") return senderLabel => `${senderLabel} sent you a message request`;
     if (kind !== "channel") return null;
   }
-  const what = storage.getShareLabels(share.shareId).subjectName ?? shareSubjectFallback(selector);
+  const what = storage.getShareLabels(share.shareId, "member").subjectName ?? shareSubjectFallback(selector);
   return (senderLabel) => {
     const room = NOTICE_TITLE_MAX_CHARS - [...`${senderLabel} shared  with you`].length;
     return `${senderLabel} shared ${cutText(what, room)} with you`;

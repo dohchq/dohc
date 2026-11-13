@@ -194,7 +194,7 @@ export function createNamedRecipientChat(options: {
           let writable = false;
           try {requireShareAction(shareId, actor.userId, "append"); writable = true;}
           catch (error) {if (!(error instanceof RelayError && error.code === "share_read_only")) throw error;}
-          const labels = storage.getShareLabels(shareId);
+          const labels = storage.getShareLabels(shareId, "member");
           recheck();
           return json({shareId, userId: actor.userId, maxPostBytes: limits.maxRequestBytes, maxBodyBytes: MAX_MESSAGE_BODY_BYTES, channels: [{channelWireId: chat.channelWireId, name: labels.subjectName,
             kind: storage.findChannelCreateKind(share.workspaceId, chat.channelWireId) ?? null, access: writable ? "read-write" : "read-only"}]});

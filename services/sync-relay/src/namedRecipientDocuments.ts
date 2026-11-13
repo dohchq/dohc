@@ -64,7 +64,7 @@ export function createNamedRecipientDocuments(options: {storage: SyncRelayStorag
         controller.signal.throwIfAborted();
         const body = JSON.stringify({ userId: context.userId, workspaceId: `named:${context.grantId}`,
           shareId: context.shareId, grantId: context.grantId, files, access: current.grant.access,
-          ...storage.getShareLabels(context.shareId), sharerName });
+          ...storage.getShareLabels(context.shareId, "member"), sharerName });
         if (Buffer.byteLength(body) > limits.maxResponseBytes) return refuse();
         return new Response(body, {headers: {"content-type": "application/json", "cache-control": "private, no-store"}});
       } catch (error) { if (error instanceof RelayError && error.code === "share_access_removed") {

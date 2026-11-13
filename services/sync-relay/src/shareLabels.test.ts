@@ -14,9 +14,9 @@ it.each(["named", "link"])("clears labels when the last %s grant is revoked thro
   const revokeNamed = () => handler(request("owner", `/sync/shares/${shareId}/grants/${named.grantId}/revoke`, jsonBody({workspaceId: "workspace"})));
   const revokeLink = () => handler(request("owner", `/sync/shares/${shareId}/revoke`, jsonBody({workspaceId: "workspace", grantId: "link", expectedDependentGrantIds: ["dependent"]})));
   expect((await (kind === "named" ? revokeLink() : revokeNamed())).status).toBe(200);
-  expect(storage.getShareLabels(shareId).subjectName).toBe("Trip");
+  expect(storage.getShareLabels(shareId, "member").subjectName).toBe("Trip");
   expect((await (kind === "named" ? revokeNamed() : revokeLink())).status).toBe(200);
-  expect(storage.getShareLabels(shareId).subjectName).toBeNull();
+  expect(storage.getShareLabels(shareId, "member").subjectName).toBeNull();
   expect(storage.getShareGrant("dependent")?.status).toBe("revoked");
   expect((await handler(request("owner", `/sync/shares/${shareId}`, {...jsonBody({subjectName: "Resurrected"}), method: "PUT"}))).status).toBe(404);
 });
@@ -31,21 +31,21 @@ it("rolls back the grant revocation when clearing its label fails", async () => 
   db.close();
   expect(() => storage.revokeShareGrant({shareId, grantId: grant.grantId, revokedAtMs: 3000})).toThrow("label delete failed");
   expect(storage.getShareGrant(grant.grantId)?.status).toBe("active");
-  expect(storage.getShareLabels(shareId).subjectName).toBe("Trip");
+  expect(storage.getShareLabels(shareId, "member").subjectName).toBe("Trip");
 });
 it("stores bounded display labels, updates only for the owner, and cascades with the share", async () => {
   const storage = await testStorage(), handler = testHandler(storage);
   await claimWorkspace(handler, "owner", "workspace");
   const shareId = await createShare(handler, "owner", "workspace", {paths: ["trip"], recipientUserId: "ana", access: "comment",
     subjectName: " Trip\n\u202e "});
-  expect(storage.getShareLabels(shareId)).toEqual({subjectName: "Trip"});
+  expect(storage.getShareLabels(shareId, "member")).toEqual({subjectName: "Trip"});
   const received = await json(await handler(request("ana", `/sync/shares/${shareId}`)));
   expect(received).toMatchObject({subjectName: "Trip", sharerName: "owner@dohc.test", granterEmail: "owner@dohc.test", access: "comment"});
   const update = {...jsonBody({subjectName: "Holiday"}), method: "PUT"};
   expect((await handler(request("owner", `/sync/shares/${shareId}`, {...jsonBody({subjectName: "partial", sharerName: "IT Security"}), method: "PUT"}))).status).toBe(400);
   expect((await handler(request("ana", `/sync/shares/${shareId}`, update))).status).toBe(404);
   expect((await handler(request("owner", `/sync/shares/${shareId}`, update))).status).toBe(200);
-  expect(storage.getShareLabels(shareId)).toEqual({subjectName: "Holiday"});
+  expect(storage.getShareLabels(shareId, "member")).toEqual({subjectName: "Holiday"});
   const denial = await handler(request("stranger", `/sync/shares/${shareId}`));
   expect(denial.status).toBe(404); expect(await denial.text()).not.toContain("Holiday");
   const db = inspectDatabase(storagePath(storage), {foreignKeys: true});
@@ -57,10 +57,10 @@ it("leaves old shares neutral until the owner refreshes them", async () => {
   const storage = await testStorage(), handler = testHandler(storage);
   await claimWorkspace(handler, "owner", "workspace");
   const shareId = await createShare(handler, "owner", "workspace", {versionId: "main", recipientUserId: "ana"});
-  expect(storage.getShareLabels(shareId)).toEqual({subjectName: null});
+  expect(storage.getShareLabels(shareId, "member")).toEqual({subjectName: null});
   storage.setShareLabels(shareId, {subjectName: "😀".repeat(200)}, 99);
-  expect(Array.from(storage.getShareLabels(shareId).subjectName!)).toHaveLength(160);
-  expect(storage.getShareLabels(shareId)).not.toHaveProperty("sharerName");
+  expect(Array.from(storage.getShareLabels(shareId, "member").subjectName!)).toHaveLength(160);
+  expect(storage.getShareLabels(shareId, "member")).not.toHaveProperty("sharerName");
 });
 
 it("keeps only the file links a Group's files cover in its label, which its members read as its name", async () => {
@@ -82,20 +82,20 @@ it("keeps only the file links a Group's files cover in its label, which its memb
   const db = inspectDatabase(storagePath(storage));
   expect(db.prepare("SELECT subject_name FROM sync_relay_share_labels WHERE share_id = 'group'").get()).toEqual({subject_name: name});
   db.close();
-  expect(storage.getShareLabels("group").subjectName).toBe(`Q3 @[team/plan.md] ${W}`);
+  expect(storage.getShareLabels("group", "member").subjectName).toBe(`Q3 @[team/plan.md] ${W}`);
   // A Group shared without files covers none.
-  expect(storage.getShareLabels("chat").subjectName).toBe(`Q3 ${W} ${W}`);
+  expect(storage.getShareLabels("chat", "member").subjectName).toBe(`Q3 ${W} ${W}`);
   // A file share's label is no Group's name.
-  expect(storage.getShareLabels("files").subjectName).toBe("@[finance/budget.md]");
+  expect(storage.getShareLabels("files", "member").subjectName).toBe("@[finance/budget.md]");
   // A link reader reads a covered link from the shared folder down, as its files show it.
-  expect(storage.getShareLabels("nested").subjectName).toBe(`Plan @[clients/acme/team/plan.md] ${W}`);
+  expect(storage.getShareLabels("nested", "member").subjectName).toBe(`Plan @[clients/acme/team/plan.md] ${W}`);
   expect(storage.getShareLabels("nested", "link").subjectName).toBe(`Plan @[team/plan.md] ${W}`);
   // The owner's listing shows the name as written, so its refresh finds nothing to change.
   const granted = (await json(await handler(request("owner", "/sync/shares")))).granted as Array<Record<string, unknown>>;
   expect(granted.find(row => row.shareId === "group")?.subjectName).toBe(name);
   // A rename reads the same way, cut short or not.
   expect((await handler(request("owner", "/sync/shares/group", {...jsonBody({subjectName: `Q4 @[finance/${"x".repeat(200)}.md]`}), method: "PUT"}))).status).toBe(200);
-  expect(storage.getShareLabels("group").subjectName).toBe(`Q4 ${W}`);
+  expect(storage.getShareLabels("group", "member").subjectName).toBe(`Q4 ${W}`);
 });
 
 it("stores labels with an atomic link share and refuses former or replacement owners", async () => {
@@ -104,13 +104,13 @@ it("stores labels with an atomic link share and refuses former or replacement ow
   const created = await handler(request("owner", "/sync/workspace/shares/links", jsonBody({paths: ["app"], access: "view", subjectName: "Trip app"})));
   expect(created.status).toBe(200);
   const body = await json(created), shareId = String(body.shareId);
-  expect(storage.getShareLabels(shareId)).toEqual({subjectName: "Trip app"});
+  expect(storage.getShareLabels(shareId, "member")).toEqual({subjectName: "Trip app"});
   const db = inspectDatabase(storagePath(storage));
   db.prepare("UPDATE sync_relay_workspaces SET owner_user_id = 'replacement' WHERE workspace_id = 'workspace'").run();
   for (const actor of ["owner", "replacement"]) {
     expect((await handler(request(actor, `/sync/shares/${shareId}`, {...jsonBody({subjectName: "Changed"}), method: "PUT"}))).status).toBe(404);
   }
-  expect(storage.getShareLabels(shareId).subjectName).toBe("Trip app");
+  expect(storage.getShareLabels(shareId, "member").subjectName).toBe("Trip app");
 });
 
 it("rejects owner supplied sender identity on named and link creation", async () => {
@@ -130,9 +130,9 @@ it.each(["named", "link"])("clears %s labels on whole-share revocation and refus
   expect((await handler(request("owner", "/sync/shares/" + shareId, {...jsonBody({subjectName: "Renamed"}), method: "PUT"}))).status).toBe(200);
   expect(storage.revokeShare(shareId, 3000)).toBe(true);
   expect(storage.getShare(shareId)).toBeTruthy();
-  expect(storage.getShareLabels(shareId)).toEqual({subjectName: null});
+  expect(storage.getShareLabels(shareId, "member")).toEqual({subjectName: null});
   expect((await handler(request("owner", "/sync/shares/" + shareId, {...jsonBody({subjectName: "Resurrected"}), method: "PUT"}))).status).toBe(404);
-  expect(storage.getShareLabels(shareId)).toEqual({subjectName: null});
+  expect(storage.getShareLabels(shareId, "member")).toEqual({subjectName: null});
 });
 
 it("answers with the account sender and keeps owner content as the subject", async () => {

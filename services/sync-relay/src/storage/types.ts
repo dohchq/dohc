@@ -1243,7 +1243,7 @@ export interface SyncRelayStorage {
   // same normalized address a claim uses.
   hasPendingInvite(email: string): boolean;
   shareHasActiveGrants(shareId: string): boolean;
-  getShareLabels(shareId: string, reader?: ShareLabelReader): ShareLabels;
+  getShareLabels(shareId: string, reader: ShareLabelReader): ShareLabels;
   setShareLabels(shareId: string, labels: ShareLabels, updatedAtMs: number): void;
   getShare(shareId: string): SyncRelayShareRow | null;
   listActiveShareGrantsForRecipient(
