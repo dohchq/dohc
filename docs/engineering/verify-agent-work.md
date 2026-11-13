@@ -127,7 +127,8 @@ Receipts record the target as `targetSeconds` and the ceiling as `budgetSeconds`
   A receipt transfer above 30 s excuses only its own seconds. The run still fails if it is above the ceiling without them.
 
 `"unmeasured"` excuses time only. Failed tests, incomplete inventory or coverage, wrong commits, and missing, duplicated, cancelled, or failed jobs still fail.
-The organisation's Team plan permits 60 concurrent standard-runner jobs, so three combined runs fit and a fourth can queue.
+The organisation's Team plan permits 60 concurrent standard-runner jobs.
+A combined run peaks at 26 jobs, so two combined runs fit and a third can queue.
 The workflow holds the job graph, wait caps, and job timeouts.
 [`cloud.mjs`](../../scripts/verification/cloud.mjs) and [`cloud-rust.mjs`](../../scripts/verification/cloud-rust.mjs) run each job's tests. [`cloud-aggregate.mjs`](../../scripts/verification/cloud-aggregate.mjs) checks the receipts and computes the timing verdict.
 
