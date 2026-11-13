@@ -50,6 +50,9 @@ notify = { path = "vendor/notify-8.2.0" }
 [workspace.package]
 version = "0.1.0"
 license = "AGPL-3.0-only"
+# time 0.3.47 needs this floor. The resolver still prefers versions that build
+# on the lowest member floor (1.82), so a plain `cargo update` can move `time`
+# back. Pin it with `cargo update -p time --precise`; cargo-audit fails if it slips.
 rust-version = "1.88"
 publish = false
 
