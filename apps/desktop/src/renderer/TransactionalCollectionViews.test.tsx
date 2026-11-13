@@ -346,8 +346,10 @@ it("offers layout changes to readers without owner view-source controls",async()
   fireEvent.keyDown(screen.getByRole("menu"),{key:"Escape"});
   expect(screen.getByRole("button",{name:"Date Date"}).title).toBe("Calendar date");
   // A board groups by the first select field, and its field changes here only.
+  await waitFor(()=>expect(tab("Board").disabled).toBe(false));
   fireEvent.click(tab("Board"));
-  fireEvent.click(await screen.findByRole("button",{name:"Group by Status"}));
+  await enabled("Group by Status");
+  fireEvent.click(screen.getByRole("button",{name:"Group by Status"}));
   expect(within(screen.getByRole("menu",{name:"Group board by"})).getAllByRole("menuitemradio").map(row=>[row.textContent,row.getAttribute("aria-checked")])).toEqual([["Name","false"],["Status","true"],["Date","false"]]);
   fireEvent.click(screen.getByRole("menuitemradio",{name:"Name"}));
   expect(await screen.findByRole("button",{name:"Group by Name"})).toBeTruthy();
@@ -358,7 +360,8 @@ it("saves the field a saved board groups by, and changes nothing here until its 
   const views={list:[board],busy:false,select:vi.fn(),create:vi.fn(async()=>null),rename:vi.fn(async()=>null),remove:vi.fn(),setField:vi.fn(),edit:vi.fn(),manage:vi.fn()};
   const result=setup(invoke,board);
   result.rerender(<TransactionalCollectionPage {...result.props} views={views}/>);
-  fireEvent.click(await screen.findByRole("button",{name:"Group by Status"}));
+  await enabled("Group by Status");
+  fireEvent.click(screen.getByRole("button",{name:"Group by Status"}));
   fireEvent.click(screen.getByRole("menuitemradio",{name:"Name"}));
   expect(views.setField).toHaveBeenCalledExactlyOnceWith("board",{groupBy:"name"});
   expect(screen.getByRole("button",{name:"Group by Status"})).toBeTruthy();
@@ -372,7 +375,8 @@ it("saves the date field of a saved calendar",async()=>{
   const views={list:[calendar],busy:false,select:vi.fn(),create:vi.fn(async()=>null),rename:vi.fn(async()=>null),remove:vi.fn(),setField:vi.fn(),edit:vi.fn(),manage:vi.fn()};
   const result=setup(invoke,calendar);
   result.rerender(<TransactionalCollectionPage {...result.props} dataset={dated} views={views}/>);
-  fireEvent.click(await screen.findByRole("button",{name:"Date Date"}));
+  await enabled("Date Date");
+  fireEvent.click(screen.getByRole("button",{name:"Date Date"}));
   fireEvent.click(screen.getByRole("menuitemradio",{name:"Due"}));
   expect(views.setField).toHaveBeenCalledExactlyOnceWith("calendar",{dateField:"due"});
 });
