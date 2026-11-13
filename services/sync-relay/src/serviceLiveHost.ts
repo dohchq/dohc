@@ -404,6 +404,9 @@ export function readServiceLiveHostConfig(
 
 // Held reads running at once, waiting, and sharing one engine request.
 const HELD_READS = { maxRunning: 2, maxQueued: 16, maxWaiters: 8 } as const;
+// A held read's last caller leaves at the request deadline and cancels it, and an engine answers a cancel at once, even
+// mid-proof. The engine is stopped only if it has not answered this much later.
+const HELD_READ_CANCEL_GRACE_MS = 5_000;
 const held = new WeakSet<SyncRelayStorage>();
 // An earlier store's recovery handle closes after this long without a page read.
 const RECOVERY_IDLE_MS = 60_000;
@@ -2231,7 +2234,7 @@ export async function startServiceLiveHost(options: {
                       method,
                       workspace: attached.handle,
                       params: { workspaceId, ...params },
-                      deadlineMs: config.client.requestDeadlineMs,
+                      deadlineMs: config.client.requestDeadlineMs + HELD_READ_CANCEL_GRACE_MS,
                     },
                     undefined,
                     undefined,
@@ -2241,6 +2244,12 @@ export async function startServiceLiveHost(options: {
                     result: decodeHostedSyncResult(method, response.result),
                     ...(streamed ? { streamed } : {}),
                   };
+                } catch (error) {
+                  // The engine received the read and answered neither it nor its cancel, so it is stopped as a
+                  // queued request's engine is, whether or not a caller still waits.
+                  if (changes && error instanceof EngineRequestDeadlineError && !error.unsent)
+                    unanswered(error);
+                  throw error;
                 } finally {
                   stop();
                 }
@@ -2248,9 +2257,6 @@ export async function startServiceLiveHost(options: {
             );
             available();
           } catch (error) {
-            // A held read the engine received and did not answer in time stops it, as a queued request does.
-            if (changes && error instanceof EngineRequestDeadlineError && !error.unsent)
-              unanswered(error);
             const invalidated = ended();
             if (invalidated) return invalidated;
             // The engine runs one proof per workspace and refuses other reads beside it,
