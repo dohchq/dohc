@@ -5378,5 +5378,4 @@ mod tests {
             (samples[14] + samples[15]) / 2
         );
     }
-
 }

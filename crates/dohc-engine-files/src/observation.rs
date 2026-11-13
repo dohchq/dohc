@@ -1410,5 +1410,4 @@ mod tests {
             times[10].as_secs_f64() * 1000.0,
         );
     }
-
 }

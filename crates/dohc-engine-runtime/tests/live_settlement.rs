@@ -1945,6 +1945,102 @@ async fn configured_settlement_recovers_committed_projection_and_pending_materia
     }
 }
 
+impl Fixture {
+    /// Admit `updates` at the cursors after `after`, every eighth with link
+    /// authority, and return the last receipt.
+    async fn admit(&self, after: usize, updates: &[Vec<u8>]) -> LiveUpdateReceipt {
+        let mut terminal = None;
+        for (index, update) in updates.iter().enumerate() {
+            let cursor = after + index + 1;
+            let authority = if cursor.is_multiple_of(8) {
+                ServerDerivedLiveUpdateAuthority::Link {
+                    principal_id: "link-principal".into(),
+                    grant_id: "link-grant".into(),
+                    grant_generation: 1,
+                }
+            } else {
+                ServerDerivedLiveUpdateAuthority::Owner {
+                    principal_id: "owner".into(),
+                }
+            };
+            terminal = Some(
+                self.apply_as(cursor as i64, update.clone(), authority, 2)
+                    .await,
+            );
+        }
+        terminal.unwrap()
+    }
+
+    async fn settle_interval(
+        &self,
+        terminal: Option<LiveUpdateReceipt>,
+    ) -> Result<LiveSettlementResult, RuntimeError> {
+        self.settle(terminal, HISTORY_MAX_APPLICATIONS, Arc::new(NoFaults))
+            .await
+    }
+
+    /// Close the actor, then reacquire the owner and register the binding, as
+    /// a restarted process would.
+    async fn reopen(&mut self) {
+        self.supervisor.close(&self.db).unwrap();
+        (self.owner, self.handle) = open_owner(&self.supervisor, &self.db, &self.binding).await;
+    }
+
+    /// Close this actor and open a separate fixture on a byte copy of the
+    /// quiesced workspace, its database and Markdown artifact included.
+    async fn copy(&self) -> Fixture {
+        self.supervisor.close(&self.db).unwrap();
+        let root = ScratchDir::new().unwrap();
+        copy_dir(self.root.path(), root.path());
+        let db = engine_db_path(&root).unwrap();
+        let supervisor = WorkspaceSupervisor::new();
+        let (owner, handle) = open_owner(&supervisor, &db, &self.binding).await;
+        let doc = Ydoc::wire();
+        doc.apply(&self.doc.encode_full_state()).unwrap();
+        Fixture {
+            root,
+            db,
+            supervisor,
+            owner,
+            handle,
+            binding: self.binding.clone(),
+            doc,
+        }
+    }
+}
+
+async fn open_owner(
+    supervisor: &WorkspaceSupervisor,
+    db: &std::path::Path,
+    binding: &LiveObjectBinding,
+) -> (ActorLiveApplicationOwner, ActorLiveApplicationHandle) {
+    let owner = supervisor
+        .open(db, 20)
+        .unwrap()
+        .actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    let handle = owner
+        .register("relay".into(), restore_coordinate(), binding.clone())
+        .await
+        .unwrap();
+    (owner, handle)
+}
+
+fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            std::fs::create_dir(&target).unwrap();
+            copy_dir(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
 /// Manual measurement of native accepted-history publication and settlement.
 /// Raw samples only, no timing assertions; correctness checks run after each
 /// timer stops.
