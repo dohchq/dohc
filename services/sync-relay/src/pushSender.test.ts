@@ -327,6 +327,24 @@ it("retries after the send deadline aborts the transport", async () => {
   expect(rows(f.storage)[0]).toMatchObject({state: "sent", attempts: 2});
 });
 
+it("names another person's agent by the server account name, with a file link in its name withheld", async () => {
+  const f = await fixture();
+  f.append([chatMessageAppend("label", threadId, "@Alice", {
+    authorUserId: "owner", authorKind: "agent", authorDisplayName: "Bot @[finance/budget.md]", authorOwnerDisplayName: "Claimed owner",
+  })]);
+  const transport = vi.fn<PushTransport>(async prepared => {
+    expect(decryptedPayload(prepared.body).label).toBe("Bot (a file not shared here) (Kim's agent) mentioned you in Team");
+    return 201;
+  });
+  const sender = createPushSender({storage: f.storage, config, lookup, transport,
+    lookupAccountName: userId => userId === "owner" ? "Kim" : null,
+    sessionIsValid: async () => true, resolveAlertLink: () => "/l/opaque-reference"});
+  await sender.runOnce();
+  await sender.close();
+  expect(transport).toHaveBeenCalledOnce();
+  expect(rows(f.storage)[0]!.state).toBe("sent");
+});
+
 it.each([
   ["agent", "mention"], ["automation", "dm"],
 ] as const)("sends one %s alert to its owner for a %s", async (authorKind, reason) => {

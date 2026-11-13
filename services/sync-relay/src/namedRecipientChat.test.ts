@@ -90,6 +90,22 @@ describe("named browser chat authorization and replication", () => {
     expect(followed.messages).toContainEqual(message);
   });
 
+  it("serves a stored message's file links to its recipient as plain words, and to the owner as written", async () => {
+    const f = await fixture();
+    const body = "Read @[finance/budget.md#Q3] first";
+    f.storage.appendLogBatch({workspaceId, originId: "owner", ops: [{originSeq: f.storage.maxOriginSeq(workspaceId, "owner") + 1,
+      opKind: "chat.message.append", recordedAtMs: 9,
+      payloadJson: JSON.stringify({messageId: "owner-link", threadId: "thread-team", body, authorKind: "human", authorDisplayName: "Owner",
+        authorUserId: "owner", createdAtMs: 9})}]});
+    const page = await json(await f.call(history));
+    expect(page.messages).toContainEqual(expect.objectContaining({messageId: "owner-link", body: "Read (a file not shared here) first"}));
+    expect(JSON.stringify(page)).not.toContain("finance");
+    const shared = await json(await f.handler(request("alice", `/sync/shares/${shareId}/log?since=0&limit=100&channelWireId=${channelWireId}`)));
+    expect(JSON.stringify(shared)).not.toContain("finance");
+    const own = await json(await f.handler(request("owner", `/sync/${workspaceId}/log?since=0&limit=100`)));
+    expect(own.ops).toContainEqual(expect.objectContaining({payload: expect.objectContaining({messageId: "owner-link", body})}));
+  });
+
   it("lets read-only recipients read and refuses writes at both relay entry points", async () => {
     const f = await fixture();
     expect((await f.call(history, "reader")).status).toBe(200);

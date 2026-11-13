@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { createActorIssuer, deriveMomentActor, parseActorKey } from "@dohc/workspace-contracts/actor-identity";
 import { isConnectedAgentId } from "@dohc/workspace-contracts/actor-presentation";
-import type { ChatMessage, ChatReaction } from "@dohc/workspace-contracts/engine";
+import type { ChatChannelSummary, ChatMessage, ChatReaction } from "@dohc/workspace-contracts/engine";
+import type { ListedGrant } from "@dohc/automation-executor/roster-listing";
 import { createChatWrites, type ChatWriter, type PersonWriter, type ChatWriteStore } from "./chatWrites";
 import { answerDecision, answerWithReply, reactToMessage, replyInThread } from "@dohc/workspace-operations/chat-writes";
 import { AutomationChatSessionWait } from "@dohc/automation-executor/automation-chat";
@@ -34,10 +35,15 @@ function fixture() {
     hold.entered.resolve();
     await hold.held.promise;
   }
-  const row: Pick<RegistryEntry, "remote" | "pausedRemote" | "shareView" | "sharedChannels"> = {
+  const row: Pick<RegistryEntry, "remote" | "pausedRemote" | "shareView" | "sharedChannels" | "shareRoster"> = {
     remote: { serverUrl: "https://cloud.test", ownerUserId: "user-1" },
   };
   const reactions: ChatReaction[] = [];
+  // The channel every target is in: a Group whose files live in Trip.
+  const channel: ChatChannelSummary = {
+    id: "channel", workspaceId: "workspace", name: "Trip", slug: "trip", kind: "channel", type: "both", purpose: "",
+    folderPath: "Trip", createdAtMs: 1, updatedAtMs: 1, threadCount: 1, unreadCount: 0,
+  };
   const message = ({ automation: _automation, authorActorKey, ...input }: Parameters<ChatWriteStore["sendMessage"]>[0]): ChatMessage => ({
     ...input, ...(authorActorKey !== null ? { authorActorKey } : {}), id: "message", createdAtMs: 2,
     attachments: (input.attachments ?? []).map((attachment, index) => ({
@@ -61,6 +67,7 @@ function fixture() {
       await reach("wire");
       return "wire";
     }),
+    listChannels: vi.fn(async (): Promise<ChatChannelSummary[]> => [channel]),
     createThread: vi.fn<ChatWriteStore["createThread"]>(async (input) => ({
       id: "file-thread", workspaceId: input.workspaceId, title: input.title, createdAtMs: 1,
       updatedAtMs: 1, linkedFile: { ...input.linkedFile, linkedAtMs: 1 },
@@ -143,7 +150,7 @@ function fixture() {
     return [{ objectId: "object", pathHint: "notes.md" }];
   });
   return {
-    events, row, reactions, store, warmCredentials, effects, writes, place, attachments,
+    events, row, reactions, store, warmCredentials, effects, writes, place, attachments, channel,
     setDisplayName: (name: string) => { displayName = name; },
     setCredentials: (value: CloudCredentials | null) => {
       credentials = value;
@@ -938,6 +945,101 @@ describe("chat writes", () => {
     expect(test.effects.syncSharedChannelsForChatTarget).toHaveBeenCalledWith("workspace", { threadId: "thread" });
     expect(test.effects.projectChatBookmarks).not.toHaveBeenCalled();
     expect(test.effects.scanChatDispatch).not.toHaveBeenCalled();
+  });
+
+  // The owner's Group, shared with one person, through the relay's listing.
+  const groupGrant = (paths: string[], fileScope: "served" | "not-served" = "served", channelWireId = "wire"): ListedGrant => ({
+    granterUserId: "user-1", granterEmail: null, subjectName: null, sharerName: null,
+    shareId: "share-trip", grantId: "grant-trip", generation: 1, status: "active",
+    recipientUserId: "user-2", recipientEmail: null,
+    selector: { kind: "group", channelWireId, paths, versionId: null },
+    access: "read-write", fileScope,
+  });
+  const sharedRow = (test: ReturnType<typeof fixture>, grants: ListedGrant[]) => {
+    test.row.shareRoster = { grants, links: [], formerGrants: [], endedGrants: [], version: 1, listedAtMs: 1 };
+  };
+  const SHARE_REFUSAL = "This Group's share doesn't include Budget/plan.md. Remove the link or share the file first.";
+
+  it("refuses a file link the Group's share does not cover, and posts a covered one", async () => {
+    const test = fixture();
+    sharedRow(test, [groupGrant(["Trip"])]);
+    await expect(test.writes.sendMessage(test.place, {
+      writer: PERSON, threadId: "thread", body: "See @[Budget/plan.md]", resolveAttachments: test.attachments,
+    })).rejects.toThrow(SHARE_REFUSAL);
+    await expect(test.writes.startThread(test.place, {
+      writer: AGENT, channelId: "channel", title: "Plan @[Budget/plan.md]", body: "Hi", resolveAttachments: test.attachments,
+    })).rejects.toThrow(SHARE_REFUSAL);
+    await expect(answerDecision(test.writes.host(test.place, { writer: PERSON, resolveAttachments: test.attachments }), {
+      threadId: "thread", body: "Monday @[Budget/plan.md]", resolves: { messageId: "question", chosenOption: "Monday" },
+    })).rejects.toThrow(SHARE_REFUSAL);
+    expectNothingWritten(test);
+    expect(test.attachments).not.toHaveBeenCalled();
+    await expect(test.writes.sendMessage(test.place, {
+      writer: PERSON, threadId: "thread", body: "See @[Trip/plan.md] and `@[Budget/plan.md]`", resolveAttachments: test.attachments,
+    })).resolves.toMatchObject({ body: "See @[Trip/plan.md] and `@[Budget/plan.md]`" });
+  });
+
+  it("refuses a poll option that links a file the Group's share does not cover", async () => {
+    const test = fixture();
+    sharedRow(test, [groupGrant(["Trip"])]);
+    await expect(test.writes.startThread(test.place, {
+      writer: AGENT, channelId: "channel", body: "Which?", needsDecision: true,
+      options: ["@[Trip/plan.md]", "@[Budget/plan.md]"], resolveAttachments: test.attachments,
+    })).rejects.toThrow(SHARE_REFUSAL);
+    expectNothingWritten(test);
+  });
+
+  it("refuses every file link in a Group shared without its files", async () => {
+    const test = fixture();
+    sharedRow(test, [groupGrant(["Trip"], "not-served")]);
+    await expect(test.writes.sendMessage(test.place, {
+      writer: PERSON, threadId: "thread", body: "See @[Trip/plan.md]", resolveAttachments: test.attachments,
+    })).rejects.toThrow("This Group's share doesn't include Trip/plan.md. Remove the link or share the file first.");
+    expectNothingWritten(test);
+  });
+
+  it("posts any file link in a Group that is not shared, and checks it once the Group is", async () => {
+    const test = fixture();
+    sharedRow(test, [groupGrant(["Trip"], "served", "wire-other")]);
+    const send = () => test.writes.sendMessage(test.place, {
+      writer: PERSON, threadId: "thread", body: "See @[Budget/plan.md]", resolveAttachments: test.attachments,
+    });
+    await expect(send()).resolves.toMatchObject({ body: "See @[Budget/plan.md]" });
+    sharedRow(test, [groupGrant(["Trip"])]);
+    await expect(send()).rejects.toThrow(SHARE_REFUSAL);
+  });
+
+  it("refuses a file link outside a joined Group's folder, and posts one inside it", async () => {
+    const test = fixture();
+    test.row.sharedChannels = [joined];
+    await expect(test.writes.sendMessage(test.place, {
+      writer: PERSON, threadId: "thread", body: "See @[Budget/plan.md]", resolveAttachments: test.attachments,
+    })).rejects.toThrow(SHARE_REFUSAL);
+    expectNothingWritten(test);
+    await expect(test.writes.sendMessage(test.place, {
+      writer: PERSON, threadId: "thread", body: "See @[Trip/plan.md]", resolveAttachments: test.attachments,
+    })).resolves.toMatchObject({ body: "See @[Trip/plan.md]" });
+  });
+
+  it("refuses a file link in a direct message, posts a malformed one, and posts any in the owner's agent chat", async () => {
+    const test = fixture();
+    test.channel.kind = "dm";
+    delete test.channel.folderPath;
+    await expect(test.writes.sendMessage(test.place, {
+      writer: PERSON, threadId: "thread", body: "See @[notes.md]", resolveAttachments: test.attachments,
+    })).rejects.toThrow("Files can't be linked in a direct message.");
+    await expect(test.writes.startThread(test.place, {
+      writer: AGENT, channelId: "channel", body: "Made @[notes.md]", resolveAttachments: test.attachments,
+    })).rejects.toThrow("Files can't be linked in a direct message.");
+    expectNothingWritten(test);
+    await expect(test.writes.sendMessage(test.place, {
+      writer: PERSON, threadId: "thread", body: "See @[notes.md", resolveAttachments: test.attachments,
+    })).resolves.toMatchObject({ body: "See @[notes.md" });
+    test.channel.kind = "agent";
+    test.channel.agentId = "default";
+    await expect(test.writes.startThread(test.place, {
+      writer: AGENT, channelId: "channel", body: "Made @[Budget/plan.md]", resolveAttachments: test.attachments,
+    })).resolves.toMatchObject({ message: { body: "Made @[Budget/plan.md]" } });
   });
 
   it("links a file chat to the object the adapter resolved and syncs its new thread", async () => {

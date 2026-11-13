@@ -576,4 +576,44 @@ describe("ChatsView shared channels (MU-C4)", () => {
       "You left this group. You can still read it.",
     );
   });
+  it("offers only the files a joined Group's folder holds, and every file in a Group not shared", async () => {
+    const workspaceFiles = [
+      { path: "team/plan.md", kind: "file" as const },
+      { path: "finance/budget.md", kind: "file" as const },
+    ];
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ id: "channel-team", name: "team", slug: "team", wireId: "wire-team", folderPath: "team" })],
+      fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockResolvedValue(
+      shareListing({
+        joined: [
+          {
+            shareId: "share-in",
+            channelWireId: "wire-team",
+            access: "read-write",
+            granterEmail: "owner@example.com",
+            ended: false,
+          },
+        ],
+      }),
+    );
+    const offered = async () => {
+      await userEvent.type(await screen.findByTestId("chats-new-thread-composer"), "@");
+      await screen.findByTestId("chats-new-thread-mention-menu");
+      return screen
+        .queryAllByTestId("chats-new-thread-file-mention-option")
+        .map((option) => option.getAttribute("data-path"));
+    };
+    renderView(vi.fn(), vi.fn(), { workspaceFiles });
+    await userEvent.click(await screen.findByTestId("chats-channel"));
+    await screen.findByTestId("chats-joined-banner");
+    expect(await offered()).toEqual(["team/plan.md"]);
+    cleanup();
+
+    bridgeMock.listChatChannelShares.mockResolvedValue(shareListing());
+    renderView(vi.fn(), vi.fn(), { workspaceFiles });
+    await userEvent.click(await screen.findByTestId("chats-channel"));
+    expect((await offered()).sort()).toEqual(["finance/budget.md", "team/plan.md"]);
+  });
 });
