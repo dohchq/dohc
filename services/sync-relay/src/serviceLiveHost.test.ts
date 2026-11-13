@@ -26,6 +26,7 @@ import {LiveCommittedDeliveryStore} from "./storage/liveCommittedDelivery.js";
 import {initialAcceptedHistoryDigest} from "./liveAcceptedHistory.js";
 import {nativeRestoreFence} from "./storage/liveRestoreOperation.js";
 import {ServiceActivationDriver} from "./serviceActivationDriver.js";
+import {ServiceHostedReplication} from "./serviceHostedReplication.js";
 import {startSelfHostedLiveHost} from "./selfHostedLiveHost.js";
 import {type ServiceKeptEdits} from "./storage/serviceKeptEdits.js";
 import {liveEditors} from "./liveEditors.js";
@@ -184,6 +185,46 @@ it("joins deadline-expired activation work before removing the native directory"
   expect(existsSync(captured.nativePath)).toBe(false);
 });
 
+it("logs a pass over a second at most once a minute, with cut ids, timings and fixed words only",async () => {
+  const f = await fixture(); await configureActivation(f,{pollIntervalMs: 100});
+  spawn.mockImplementation(async options => clientFrom(options).client);
+  let clock = 0;
+  const document = {workspaceId: "workspace",mainVersionId: "main",objectId: "object-with-a-longer-id",lineageClaimId: "a".repeat(64)};
+  let settlesSent = 0,failSettle = false;
+  const consumer = {get settlesSent() {return settlesSent;},async settle() {
+    settlesSent++;
+    if (failSettle) throw new Error("Engine settle failed.");
+    return {settlementId: null,previousCursor: 0,terminalCursor: 0,materialized: true};
+  }};
+  // Each activation takes a second and a half, and its settlement goes to the engine.
+  const activate = vi.spyOn(ServiceActivationDriver.prototype,"activate").mockImplementation(async (_target,signal,settle) => {
+    clock += 1500; await settle?.(consumer as never,document,signal);
+    return {kind: "pending",reason: "Waiting for its restore to finish."};
+  });
+  const pull = vi.spyOn(ServiceHostedReplication.prototype,"pull").mockResolvedValue({hasMore: false,pages: []});
+  const log = vi.spyOn(console,"error").mockImplementation(() => {});
+  vi.useFakeTimers();
+  const host = await startServiceLiveHost({...f,nowMs: () => clock});
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(100);
+    // The third pass's settlement reaches the engine and then fails.
+    clock += 60_000; failSettle = true;
+    await vi.advanceTimersByTimeAsync(100);
+    expect(activate).toHaveBeenCalledTimes(3);
+    const slow = log.mock.calls.filter(([message]) => message === "Live host pass was slow.");
+    // The second pass falls inside the first one's minute.
+    expect(slow).toHaveLength(2);
+    const workspaces = [{workspace: "workspac",pullMs: 0,pulls: {unready: 1}}];
+    expect(slow[0]![1]).toMatchObject({passMs: 1500,workspaces,
+      targets: [{object: "object-w",ms: 1500,outcome: "pending",settle: "sent",materialized: true}]});
+    expect(slow[1]![1]).toMatchObject({passMs: 1500,workspaces,
+      targets: [{object: "object-w",ms: 1500,outcome: "error",settle: "sent",materialized: null}]});
+    const shown = JSON.stringify(slow);
+    for (const hidden of ["file.md","object-with","Waiting for its restore","Engine settle failed"]) expect(shown).not.toContain(hidden);
+  } finally {await host.close(); vi.useRealTimers(); log.mockRestore(); activate.mockRestore(); pull.mockRestore();}
+});
+
 const {DatabaseSync} = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
 type DrainLimits = {maxEntriesPerDrain?: number; maxBytesPerDrain?: number};
 const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
@@ -197,7 +238,8 @@ type IdleClock = {nowMs: () => number; schedule: (atMs: number, fire: () => void
 // `pollIntervalMs` replaces the pause between passes, and `idleClock` the clock idle unloading reads and arms.
 // `paced` puts the pauses on its manual clock, with its poll and idle intervals.
 async function completedServiceOwner(options: {empty?: boolean; frameChanges?: boolean; maxDocumentsPerPass?: number; polling?: boolean; adopted?: boolean;
-  maxApplications?: number; limits?: DrainLimits; pollIntervalMs?: number; selfHosted?: boolean; restore?: boolean; idleClock?: IdleClock; paced?: Paced} = {}) {
+  maxApplications?: number; limits?: DrainLimits; pollIntervalMs?: number; selfHosted?: boolean; restore?: boolean; idleClock?: IdleClock; paced?: Paced;
+  nowMs?: () => number} = {}) {
   const adopted = options.adopted ?? true;
   const f = await fixture({selfHosted: options.selfHosted}), raw = new DatabaseSync(join(f.root, "relay", "relay.sqlite"));
   cleanup.push(async () => raw.close());
@@ -698,7 +740,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
     native.outboxId = NATIVE;
   };
   const host = await startServiceLiveHost({...f, ...(options.frameChanges ? {frameChanges: createNamedFrameChanges(16)} : {}),
-    ...(options.idleClock ? {idleClock: options.idleClock} : {}), ...options.paced?.timers});
+    ...(options.idleClock ? {idleClock: options.idleClock} : {}), ...options.paced?.timers, ...(options.nowMs ? {nowMs: options.nowMs} : {})});
   cleanup.push(() => host.close());
   // The activation pass publishes readiness before it pushes the hosted replica.
   if (!options.empty) await pushed.promise;
@@ -769,6 +811,27 @@ it.each(["drain"] as const)("fails an in-flight public %s and queued public call
     expect(drains).not.toHaveBeenCalled();
     expect(settles).not.toHaveBeenCalled();
   } finally { drains.mockRestore(); settles.mockRestore(); }
+});
+
+// Opus's security review: each drain queued behind a document's work logged
+// its wait, so someone with Edit submitting from several connections could fill
+// the log. Proves: a document's application waits log once a minute (the
+// submit line's test proves the shared cap's `repeated` count).
+it("logs drains that waited over 100 ms for their document once a minute, with fixed words only", async () => {
+  let clock = 0;
+  const o = await completedServiceOwner({nowMs: () => clock});
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  cleanup.push(async () => log.mockRestore());
+  const parked = o.park("liveApplication.ownerState"), inflight = o.host.drain(o.document);
+  await parked.entered.promise;
+  // Drains name their wait; a settlement does not.
+  const queued = [o.host.drain(o.document), o.host.drain(o.document), o.host.drain(o.document)], settled = o.host.settle(o.document);
+  clock += 150;
+  parked.release.resolve();
+  await Promise.allSettled([inflight, ...queued, settled]);
+  const waits = log.mock.calls.filter(([message]) => message === "Live document waited for its lock.");
+  expect(waits.filter(([, line]) => line.waiter === "application"))
+    .toEqual([["Live document waited for its lock.", {object: "object", waiter: "application", waitedMs: 150}]]);
 });
 
 const stopLookup = {operationId: "restore", workspaceId: "workspace", ownerUserId: "owner"};
