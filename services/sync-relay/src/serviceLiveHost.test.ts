@@ -7992,13 +7992,79 @@ it.each([250, 2_000])("runs one hosted, ready note for a minute at an idle inter
   expect(o.host.isDocumentReady(o.document)).toBe(true);
 });
 
-// Proves: an editor that opens a note on an idle host is served without a pass, and the pass after it runs at once.
-it("serves an editor that opens a note on an idle host at once, with the fixed pass held back", async () => {
-  const {o, passes, held} = await idleNote();
+// Proves: an editor that opens a note on an idle host is served without a pass. With nothing to deliver, the
+// connection asks for no pass either, and the pause the host waits in stands.
+it("serves an editor that opens a note on an idle host at once, and runs no pass for a connection with nothing to deliver", async () => {
+  const {paced, o, passes, held} = await idleNote();
+  const close = liveEditors(o.f.storage).acquire(o.sibling);
   const native = await o.host.captureNative(o.binding);
   expect(native.coordinate).toEqual(o.host.coordinate);
-  await vi.waitFor(() => expect(passes()).toBeGreaterThanOrEqual(1));
+  await expect(native.drain(o.document)).resolves.toMatchObject({kind: "done"});
+  close();
+  await new Promise(resolve => setImmediate(resolve));
+  expect(passes()).toBe(0);
+  expect(paced.resting()).toBe(paced.ceiling - paced.poll);
   expect(held()).toBe(true);
+});
+
+// What the host sees of an owner's desktop connection that delivers nothing: the owner route counts the connection,
+// captures the note, which drains it, the session drains it again as it opens its sync, and the connection closes.
+// The session's read of the applied state is left out: the test engine does not answer it.
+const idleOwnerConnection = async (o: Enrolled) => {
+  const close = liveEditors(o.f.storage).acquire(o.sibling);
+  try {
+    const native = await o.host.captureNative(o.binding);
+    await native.drain(o.document);
+  } finally {close();}
+};
+
+// An idle desktop with a live note opens an owner connection about every 2 s and closes it. Each one counted as an
+// editor change and asked for a pass, so the pause between passes never grew on a server with one desktop connected.
+// Proves: with a desktop that reconnects every 2 s and delivers nothing, the pause grows to its idle interval and
+// stays there.
+it("lets the pause grow to its idle interval while an idle desktop reconnects every two seconds", async () => {
+  const paced = pacedPasses(), o = await enrolledServiceHost({paced, frameChanges: true});
+  // How long the pause the host waits in has left, once it waits in one.
+  const resting = () => vi.waitFor(() => {const left = paced.resting(); expect(left).toBeDefined(); return left!;}, {interval: 1, timeout: 5_000});
+  const pauses: number[] = [];
+  let connections = 0, next = paced.clock.nowMs();
+  while (connections < 10) {
+    // A pass that falls due before the desktop's next connection runs first.
+    if (paced.clock.nowMs() + await resting() <= next) {
+      await paced.step(o.f);
+      pauses.push(await resting());
+      continue;
+    }
+    paced.clock.advance(next);
+    await idleOwnerConnection(o);
+    connections++; next += 2_000;
+  }
+  console.info(`Idle desktop reconnecting every 2 s: the pauses between passes were ${pauses.join(", ")} ms`);
+  expect(pauses.slice(-5)).toEqual(Array.from({length: 5}, () => paced.ceiling));
+  expect(o.host.isDocumentReady(o.document)).toBe(true);
+});
+
+// Proves: a connection whose drain applies an accepted edit still asks for a pass as that drain ends, so the edit
+// is settled and published at once. The edit's own relay write asked for a pass long before: passes left the
+// note's delivery to the connection, and the host went back to its idle interval with the edit unapplied.
+it("settles an edit a connection applies on an idle host at once, with the fixed pass held back", async () => {
+  const paced = pacedPasses(), o = await enrolledServiceHost({paced, frameChanges: true});
+  o.passes.deliver = false;
+  const edit = o.acceptEdit("typed");
+  await paced.until(o.f, () => paced.resting() === paced.ceiling);
+  expect(paced.resting()).toBe(paced.ceiling);
+  expect(o.applied.has(edit.deliveryId)).toBe(false);
+  const idle = paced.clock.nowMs();
+  paced.clock.advance(idle + paced.poll);
+  let passes = 0;
+  o.f.passEnds.add(() => {passes++;});
+  o.passes.deliver = true;
+  await idleOwnerConnection(o);
+  expect(o.applied.has(edit.deliveryId)).toBe(true);
+  await vi.waitFor(() => expect(engineParams(o, "liveApplication.settle").at(-1)).toMatchObject({terminalReceipt: edit}));
+  expect(o.tip()).toEqual(edit);
+  expect(passes).toBeGreaterThanOrEqual(1);
+  expect(paced.clock.nowMs()).toBe(idle + paced.poll);
 });
 
 // Proves: an edit an editor's session commits and delivers on an idle host is settled and published by a pass the

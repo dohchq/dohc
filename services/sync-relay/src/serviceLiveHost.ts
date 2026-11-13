@@ -445,15 +445,19 @@ export async function startServiceLiveHost(options: {
   // A restore can fence the binding while a call waits for the document or the
   // engine. The call then fails as incomplete; cancellation, lost standing,
   // and damage on the same binding stay visible. A pass then settles or publishes
-  // what the call delivered or settled, as after an editor's accepted edit.
+  // what the call delivered or settled, as after an editor's accepted edit, so a
+  // call that sent the engine anything but what an idle pass sends asks for one
+  // as it ends. One that applied and settled nothing, as when an idle desktop's
+  // connection opens with nothing to deliver, left a pass nothing and asks for none.
   const deliver = <T>(document: LiveDocumentKey, callerSignal: AbortSignal | undefined,
     run: (consumer: ReturnType<typeof configuredConsumer>, joined: AbortSignal) => Promise<T>) => {
     configuredConsumer(document);
     return runDocument(document, callerSignal, async joined => {
-      const consumer = configuredConsumer(document);
+      const consumer = configuredConsumer(document), numbered = requestId, sent = sentRequests, counted = idleRequests;
       try { return await run(consumer, joined); }
       catch (error) { joined.throwIfAborted(); check(); configuredConsumer(document); throw error; }
-    }).finally(nudgePass);
+      finally { if (requestId - numbered !== idleRequests - counted || sentRequests - sent !== idleRequests - counted) nudgePass(); }
+    });
   };
   const drain = async (value: LiveDocumentKey, callerSignal?: AbortSignal): Promise<CommittedDeliveryOutcome> => {
     check();
@@ -477,10 +481,11 @@ export async function startServiceLiveHost(options: {
       signal.addEventListener("abort",stop,{once: true});
       return stop;
     }),stop => Effect.sync(() => signal.removeEventListener("abort",stop)));
-    // Every connection change restarts the document's idle period, and a pass follows it as soon as before.
+    // Every connection change restarts the document's idle period. It asks for no pass: a connection that opens and
+    // closes leaves a pass nothing, and what it delivers, or a reload it causes, asks for one itself.
     yield* Effect.acquireRelease(Effect.sync(() => editors.subscribe(document => {
       const key = hostedKey(document);
-      if (key) {touch(key); nudgePass();}
+      if (key) touch(key);
     })),stop => Effect.sync(stop));
     const temporary = yield* Effect.acquireRelease(
       Effect.promise(() => mkdtemp(join(tmpdir(), "dohc-service-live-host-"))),
@@ -1141,7 +1146,9 @@ export async function startServiceLiveHost(options: {
           throw new Error("Hosted replication has more pages.");
         }
         activation!.wake(row.target); touch(key);
-        await activation!.activate(row.target, joined, settleTarget);
+        // A pass publishes what the reload settled.
+        try {await activation!.activate(row.target, joined, settleTarget);}
+        finally {nudgePass();}
       }));
     };
     // A held-document read asks the engine for a workspace this daemon replicates,
