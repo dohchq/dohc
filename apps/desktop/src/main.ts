@@ -7817,9 +7817,9 @@ shareViewFiles = {
     withShareViewFilesOperation(target, (files) => files.list(target, options)),
   projectionStatus: (target) =>
     withShareViewFilesOperation(target, (files) => files.projectionStatus(target)),
-  reconcile: (lease, target, request, onCursorCommitted) =>
+  reconcile: (lease, target, request, onPullCommitted) =>
     withShareViewFilesOperation(target, (files) =>
-      files.reconcile(lease, target, request, onCursorCommitted),
+      files.reconcile(lease, target, request, onPullCommitted),
     ),
   unmount: (lease, target) =>
     withShareViewFilesOperation(target, (files) => files.unmount(lease, target)),
@@ -10562,6 +10562,7 @@ function registerIpcHandlers(): void {
       else memberRoles.delete(workspaceId);
     },
     recheckRemovedShares,
+    showsLive: (attachmentId, path) => engineYDocSessionIpc.showsLive(attachmentId, path),
   });
 
   // ---- Share mounts ----

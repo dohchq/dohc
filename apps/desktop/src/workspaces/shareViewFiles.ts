@@ -46,6 +46,7 @@ import {
   type CaptureSharedViewLocalDivergenceOutcome,
   type CaptureSharedViewRefreshOutcome,
   type RefreshSharedViewOutcome,
+  type ShareViewPullCommitted,
   setAsideCollisionRecord,
   standaloneShareViewFailureOutcome,
   type StandaloneShareViewRefreshOutcome,
@@ -242,7 +243,7 @@ export interface ShareViewFiles {
     target: ShareViewFilesTarget,
     request: ShareViewReconcileRequest,
     // Internal pull scheduling state; never part of the refresh result.
-    onCursorCommitted?: (cursor: number) => void,
+    onPullCommitted?: (pulled: ShareViewPullCommitted) => void,
   ): Promise<ShareViewReconcileOutcome>;
   unmount(
     lease: WorkspaceOperationLease,
@@ -868,7 +869,7 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
     target: ActiveShareViewFilesTarget,
     request: ShareViewReconcileRequest,
     owner: ShareViewFilesOwnerCapability,
-    onCursorCommitted?: (cursor: number) => void,
+    onPullCommitted?: (pulled: ShareViewPullCommitted) => void,
   ): Promise<ShareViewReconcileOutcome> {
     const lifecycle = createShareViewLifecycle(owner);
     if (target.kind === "mount") {
@@ -979,7 +980,7 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
                   recordRefusals,
                   captured: recovered,
                   preservedPaths: target.unsavedPaths,
-                  onCursorCommitted,
+                  onPullCommitted,
                 })
               : await lifecycle.refreshCaptured({
                   rootDir: target.rootPath,
@@ -992,7 +993,7 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
                   recordRefusals,
                   captured: recovered,
                   preservedPaths: target.unsavedPaths,
-                  onCursorCommitted,
+                  onPullCommitted,
                 });
         }
       }
@@ -1436,13 +1437,13 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
       });
     },
 
-    async reconcile(lease, requested, request, onCursorCommitted) {
+    async reconcile(lease, requested, request, onPullCommitted) {
       assertLease(lease);
       return withCurrentTarget(requested, async (target) => {
         assertLease(lease, target);
         assertActiveTarget(target);
         const outcome = await withOwnerCapability(lease, target, (owner) =>
-          reconcileWithOwner(lease, target, request, owner, onCursorCommitted),
+          reconcileWithOwner(lease, target, request, owner, onPullCommitted),
         );
         const settled = outcome.kind === "refresh" ? outcome.outcome : outcome;
         if ("unjournalablePaths" in settled) {

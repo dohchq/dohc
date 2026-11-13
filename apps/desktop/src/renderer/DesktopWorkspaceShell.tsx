@@ -6740,9 +6740,10 @@ export function DesktopWorkspaceShell(props: {
           } else {
             setShareExclusions({ workspaceId, paths: outcome.unjournalablePaths });
           }
-          if (outcome.changedPaths > 0) {
-            await repaintAfterChange();
-          }
+          // A live session already shows what the pull wrote, and reopening it
+          // drops what the person types while it reconnects.
+          if (outcome.shownLive) await refreshFiles();
+          else if (outcome.changedPaths > 0) await repaintAfterChange();
           if (!isCurrent()) return "stale";
           return outcome.status === "ended"
             ? "ended"
@@ -8561,7 +8562,10 @@ export function DesktopWorkspaceShell(props: {
                                         isMountedSharePath(path)
                                       }
                                       // The lists name this workspace's own notes, never a received share's.
-                                      levelReadOnly={membershipView && (shareAccess === "view" || shareAccess === "comment")}
+                                      levelReadOnly={
+                                        membershipView &&
+                                        (shareAccess === "view" || shareAccess === "comment")
+                                      }
                                       liveEditingPaused={
                                         shareView || isMountedSharePath(path)
                                           ? undefined

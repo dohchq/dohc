@@ -1150,24 +1150,46 @@ describe("background share pulls", () => {
   // this computer knows, and the relay answers at once when its own differs.
   it("names the level a membership knows in its held pull, once until the access check moves it", async () => {
     const h = await harness();
-    h.workspace.shareView!.grantedSelector = { paths: [], versionId: null, access: "comment", wholeWorkspace: true };
+    h.workspace.shareView!.grantedSelector = {
+      paths: [],
+      versionId: null,
+      access: "comment",
+      wholeWorkspace: true,
+    };
     await h.invoke(channel, { workspaceId: "existing" });
     vi.clearAllMocks();
-    const bodies = [{ ops: [], hasMore: false, nextCursor: 42, levelChanged: true }, { ops: [], hasMore: false, nextCursor: 42 },
-      { ops: [], hasMore: false, nextCursor: 42 }];
+    const bodies = [
+      { ops: [], hasMore: false, nextCursor: 42, levelChanged: true },
+      { ops: [], hasMore: false, nextCursor: 42 },
+      { ops: [], hasMore: false, nextCursor: 42 },
+    ];
     const fetch = vi.fn<typeof globalThis.fetch>(async () => Response.json(bodies.shift()));
-    h.probeLog.mockImplementation(input => probeShareViewLog({ ...input, relay: { ...input.relay, fetch } }));
+    h.probeLog.mockImplementation((input) =>
+      probeShareViewLog({ ...input, relay: { ...input.relay, fetch } }),
+    );
     const held = { ...payload, trigger: "held" };
     await expect(h.invoke(channel, held)).resolves.toMatchObject({ levelChanged: true });
-    expect(fetch).toHaveBeenLastCalledWith("https://relay.example.test/sync/shares/share/log?since=42&hold=25000&level=comment", expect.anything());
+    expect(fetch).toHaveBeenLastCalledWith(
+      "https://relay.example.test/sync/shares/share/log?since=42&hold=25000&level=comment",
+      expect.anything(),
+    );
     // Answered once: the next hold names no level, so a stale one cannot loop.
     await h.invoke(channel, held);
-    expect(fetch).toHaveBeenLastCalledWith("https://relay.example.test/sync/shares/share/log?since=42&hold=25000", expect.anything());
+    expect(fetch).toHaveBeenLastCalledWith(
+      "https://relay.example.test/sync/shares/share/log?since=42&hold=25000",
+      expect.anything(),
+    );
     h.fetchAccess.mockResolvedValue({ access: "edit" });
-    await expect(h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, { workspaceId: "existing" }))
-      .resolves.toMatchObject({ status: "current", access: "edit" });
+    await expect(
+      h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, {
+        workspaceId: "existing",
+      }),
+    ).resolves.toMatchObject({ status: "current", access: "edit" });
     await h.invoke(channel, held);
-    expect(fetch).toHaveBeenLastCalledWith("https://relay.example.test/sync/shares/share/log?since=42&hold=25000&level=edit", expect.anything());
+    expect(fetch).toHaveBeenLastCalledWith(
+      "https://relay.example.test/sync/shares/share/log?since=42&hold=25000&level=edit",
+      expect.anything(),
+    );
   });
   it("asks for the next held pull after a held pull brought changes", async () => {
     const h = await primed();
@@ -1182,8 +1204,8 @@ describe("background share pulls", () => {
   it("runs the full path once for new ops, keeps its committed cursor and skips metadata and identity", async () => {
     const h = await primed();
     h.probeLog.mockResolvedValue({ unchanged: false });
-    h.reconcile.mockImplementation(async (_lease, _target, _request, onCursorCommitted) => {
-      onCursorCommitted?.(57);
+    h.reconcile.mockImplementation(async (_lease, _target, _request, onPullCommitted) => {
+      onPullCommitted?.({ cursor: 57, changes: [] });
       return { kind: "refresh", outcome };
     });
     const result = await h.invoke(channel, payload);
@@ -1198,6 +1220,43 @@ describe("background share pulls", () => {
     await h.invoke(channel, payload);
     expect(h.probeLog).toHaveBeenLastCalledWith(expect.objectContaining({ since: 57 }));
     expect(h.reconcile).toHaveBeenCalledOnce();
+  });
+  it("says when every change a pull wrote is to a document its live session already shows", async () => {
+    const h = await primed();
+    h.probeLog.mockResolvedValue({ unchanged: false });
+    h.showsLive.mockImplementation(
+      (attachmentId, path) => attachmentId === h.attachmentId && path === "docs/plan.md",
+    );
+    const pulled = (
+      changedPaths: number,
+      changes: { path: string; operation: "write" | "delete" }[],
+    ) =>
+      h.reconcile.mockImplementation(async (_lease, _target, _request, onPullCommitted) => {
+        onPullCommitted?.({ cursor: 57, changes });
+        return { kind: "refresh", outcome: { ...outcome, changedPaths } };
+      });
+    pulled(1, [{ path: "docs/plan.md", operation: "write" }]);
+    await expect(h.invoke(channel, { ...payload, trigger: "held" })).resolves.toMatchObject({
+      ok: true,
+      status: "updated",
+      held: true,
+      shownLive: true,
+    });
+    // Another file, a delete, or a local change the capture found still repaints.
+    for (const [changedPaths, changes] of [
+      [
+        2,
+        [
+          { path: "docs/plan.md", operation: "write" },
+          { path: "docs/other.md", operation: "write" },
+        ],
+      ],
+      [1, [{ path: "docs/plan.md", operation: "delete" }]],
+      [2, [{ path: "docs/plan.md", operation: "write" }]],
+    ] as const) {
+      pulled(changedPaths, [...changes]);
+      expect(await h.invoke(channel, payload)).not.toHaveProperty("shownLive");
+    }
   });
   it.each(["manual", "background"] as const)(
     "syncs Notices after a changed %s pull commits",
@@ -1229,8 +1288,8 @@ describe("background share pulls", () => {
   });
   it("syncs content-neutral journal changes but leaves an unchanged manual pull alone", async () => {
     const h = await primed();
-    h.reconcile.mockImplementation(async (_lease, _target, _request, cursor) => {
-      cursor?.(42);
+    h.reconcile.mockImplementation(async (_lease, _target, _request, onPullCommitted) => {
+      onPullCommitted?.({ cursor: 42, changes: [] });
       return {
         kind: "refresh",
         outcome: { ...outcome, status: "unchanged", changedPaths: 0, refusedOps: 0 },
@@ -1240,8 +1299,8 @@ describe("background share pulls", () => {
     expect(h.syncNotices).not.toHaveBeenCalled();
     expect(h.notify).toHaveBeenLastCalledWith({ workspaceId: "existing" });
     h.probeLog.mockResolvedValue({ unchanged: false });
-    h.reconcile.mockImplementation(async (_lease, _target, _request, cursor) => {
-      cursor?.(57);
+    h.reconcile.mockImplementation(async (_lease, _target, _request, onPullCommitted) => {
+      onPullCommitted?.({ cursor: 57, changes: [] });
       return {
         kind: "refresh",
         outcome: { ...outcome, status: "unchanged", changedPaths: 0, refusedOps: 0 },

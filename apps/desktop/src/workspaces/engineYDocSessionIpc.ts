@@ -1438,6 +1438,17 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     }
   }
 
+  /** Whether a shared view has the document open in a live session, which shows each change as it lands. */
+  showsLive(authorityId: symbol, path: string): boolean {
+    const owned = this.#owner.documentSession(authorityId, path)?.session;
+    return (
+      !!owned &&
+      !owned.deleted &&
+      this.#isSharedView(owned.workspace) &&
+      owned.provider.liveWritable?.() === true
+    );
+  }
+
   async prepareOwnerHandoff(
     sender: EngineYDocIpcSender,
     payload: EngineYDocOwnerHandoff,

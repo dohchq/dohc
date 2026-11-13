@@ -603,9 +603,13 @@ describe("engine Y.Doc IPC adapter", () => {
     });
     h.setReadOnly(true);
     const sender = new FakeSender(7);
+    expect(h.ipc.showsLive(AUTHORITY_ID, openPayload.path)).toBe(false);
     const opened = await h.ipc.open(sender, openPayload);
     expect(opened.available).toBe(true);
     expect(h.capture.openYDocSession).not.toHaveBeenCalled();
+    expect(h.ipc.showsLive(AUTHORITY_ID, openPayload.path)).toBe(true);
+    expect(h.ipc.showsLive(Symbol("other attachment"), openPayload.path)).toBe(false);
+    expect(h.ipc.showsLive(AUTHORITY_ID, `other-${openPayload.path}`)).toBe(false);
     const update = {
       sessionId: openPayload.sessionId,
       update: new Uint8Array([0, 0]),
@@ -616,6 +620,7 @@ describe("engine Y.Doc IPC adapter", () => {
     expect(h.ipc.applyUpdate(sender, update)).toEqual({ accepted: true });
     expect(shared.applyLocalUpdate).toHaveBeenCalledOnce();
     live = false;
+    expect(h.ipc.showsLive(AUTHORITY_ID, openPayload.path)).toBe(false);
     expect(h.ipc.applyUpdate(sender, { ...update, seq: 2 })).toEqual({
       accepted: false,
       reason: "read-only",
@@ -744,9 +749,18 @@ describe("engine Y.Doc IPC adapter", () => {
   });
 
   it("keeps a named document read-only when the relay's host refuses to host it", async () => {
-    const h = harness(providerSession(), {sharedCaptureFor: async () => ({openYDocSession: async () => {throw new LiveHostRefusedError("live_host_full");}})});
+    const h = harness(providerSession(), {
+      sharedCaptureFor: async () => ({
+        openYDocSession: async () => {
+          throw new LiveHostRefusedError("live_host_full");
+        },
+      }),
+    });
     h.setReadOnly(true);
-    expect(await h.ipc.open(new FakeSender(7), openPayload)).toEqual({available: false, liveHostUnavailable: true});
+    expect(await h.ipc.open(new FakeSender(7), openPayload)).toEqual({
+      available: false,
+      liveHostUnavailable: true,
+    });
   });
 
   it("carries pending record delivery through a refused open", async () => {

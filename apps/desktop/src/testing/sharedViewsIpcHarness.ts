@@ -219,12 +219,13 @@ export async function createSharedViewsIpcHarness(
       >,
   );
   const reconcile = vi.fn<Dependencies["shareViewFiles"]["reconcile"]>(
-    async (_lease, _target, _request, onCursorCommitted) => {
+    async (_lease, _target, _request, onPullCommitted) => {
       steps.push("reconcile");
-      onCursorCommitted?.(42);
+      onPullCommitted?.({ cursor: 42, changes: [] });
       return { kind: "refresh", outcome };
     },
   );
+  const showsLive = vi.fn<Dependencies["showsLive"]>(() => false);
   const end = vi.fn<Dependencies["shareViewFiles"]["end"]>(
     async (_lease, target, assertCurrent) => {
       assertCurrent();
@@ -294,6 +295,7 @@ export async function createSharedViewsIpcHarness(
     recordShareViewStoreRefusal: recordRefusal,
     rememberMemberRole: rememberRole,
     syncNotices,
+    showsLive,
   });
   const invoke = (channel: string, payload: unknown, trusted = true) =>
     Promise.resolve().then(() => handlers.get(channel)!({ sender: "window", trusted }, payload));
@@ -325,6 +327,7 @@ export async function createSharedViewsIpcHarness(
     storeFor,
     reconcile,
     syncNotices,
+    showsLive,
     probeLog,
     registryRead,
     workspaceOperation,

@@ -48,6 +48,7 @@ import type { CreatedWorkspace } from "../workspaces/createWorkspaceFolder";
 import type { createJoinedWorkspaceRunner } from "../workspaces/createJoinedWorkspace";
 import type { WorkspaceAuthorityBinding } from "../workspaces/workspaceAuthorityOwner";
 import type { ShareViewFiles } from "../workspaces/shareViewFiles";
+import type { ShareViewPullCommitted } from "../workspaces/sharedView";
 import type { withStaleSensitiveWorkspaceOperation } from "../workspaces/workspaceAssets";
 import type { createReceivedShareEngineAccess } from "../workspaces/receivedShareEngineAccess";
 import type { setWorkspaceShareView } from "../workspaces/WorkspaceRegistry";
@@ -121,6 +122,9 @@ export function registerSharedViewsIpcHandlers<
   // still restore, so the view resumes. Decides for itself whether the
   // recheck is due; a refresh only says the view is ended.
   recheckRemovedShares?(workspaceId: string): Promise<void>;
+  // Whether this attachment has the document open in a live session, which
+  // shows each change as it lands.
+  showsLive(attachmentId: symbol, path: string): boolean;
 }): void {
   const {
     registerHandler,
@@ -731,6 +735,7 @@ export function registerSharedViewsIpcHandlers<
           }
           let outcome;
           let nextCursor: number | undefined;
+          let pulled: ShareViewPullCommitted["changes"] = [];
           try {
             const reconciled = await withStaleSensitiveWorkspaceOperation(
               workspace.rootPath,
@@ -739,8 +744,9 @@ export function registerSharedViewsIpcHandlers<
                   lease,
                   { kind: "standalone", workspaceId: workspace.workspaceId },
                   "refresh",
-                  (cursor) => {
-                    nextCursor = cursor;
+                  (committed) => {
+                    nextCursor = committed.cursor;
+                    pulled = committed.changes;
                   },
                 ),
             );
@@ -795,6 +801,17 @@ export function registerSharedViewsIpcHandlers<
             });
           } else clearCache(event.sender);
           if (outcome.status === "ended") refreshNativeWorkspaceSurfaces();
+          // Every change came from the pull and wrote a document open in a live
+          // session, which already shows it. Reopening that session would drop
+          // what the person types while it reconnects.
+          const shownLive =
+            outcome.changedPaths > 0 &&
+            pulled.length === outcome.changedPaths &&
+            pulled.every(
+              (change) =>
+                change.operation === "write" &&
+                dependencies.showsLive(workspace.attachmentId, change.path),
+            );
           if (
             pressBurst ||
             outcome.changedPaths > 0 ||
@@ -808,7 +825,9 @@ export function registerSharedViewsIpcHandlers<
           }
           notifyPull(changedSummary);
           return RefreshSharedViewResult.parse(
-            outcome.status === "ended" ? outcome : { ...outcome, ...heldResult },
+            outcome.status === "ended"
+              ? outcome
+              : { ...outcome, ...heldResult, ...(shownLive ? { shownLive: true } : {}) },
           );
         }),
     );

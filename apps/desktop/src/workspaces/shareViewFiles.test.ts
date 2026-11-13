@@ -1234,13 +1234,13 @@ describe("ShareViewFiles", () => {
   });
 
   it.each([false, true])(
-    "reports the cursor internally only after a successful commit (commit fails: %s)",
+    "reports the cursor and the pulled changes internally only after a successful commit (commit fails: %s)",
     async (commitFails) => {
       const rootPath = await workspaceRoot();
       const registered = target(rootPath, "view");
       const committing = deferred();
       const committed = deferred();
-      const onCursorCommitted = vi.fn();
+      const onPullCommitted = vi.fn();
       const files = createShareViewFiles({
         ...unusedReconcilePorts,
         resolveTarget: () => registered,
@@ -1252,7 +1252,9 @@ describe("ShareViewFiles", () => {
           skipped: 0,
           refusals: [],
           refusalCount: 0,
-          changedPaths: [],
+          changedPaths: [
+            { path: "gone.md", operation: "delete" as const, contentKind: "text" as const },
+          ],
           nextCursor: 57,
           commitCursor: async () => {
             committing.resolve();
@@ -1265,21 +1267,24 @@ describe("ShareViewFiles", () => {
           lease,
           { kind: "standalone", workspaceId: registered.workspaceId },
           "refresh",
-          onCursorCommitted,
+          onPullCommitted,
         ),
       );
       await committing.promise;
-      expect(onCursorCommitted).not.toHaveBeenCalled();
+      expect(onPullCommitted).not.toHaveBeenCalled();
       if (commitFails) committed.reject(new Error("cursor commit failed"));
       else committed.resolve();
       const reconciled = await result;
       expect(reconciled).toMatchObject({ kind: "refresh", outcome: { ok: !commitFails } });
       if (reconciled.kind !== "refresh") throw new Error("Expected a refresh result");
       expect(reconciled.outcome).not.toHaveProperty("nextCursor");
-      if (commitFails) expect(onCursorCommitted).not.toHaveBeenCalled();
+      if (commitFails) expect(onPullCommitted).not.toHaveBeenCalled();
       else {
-        expect(onCursorCommitted).toHaveBeenCalledOnce();
-        expect(onCursorCommitted).toHaveBeenCalledWith(57);
+        expect(onPullCommitted).toHaveBeenCalledOnce();
+        expect(onPullCommitted).toHaveBeenCalledWith({
+          cursor: 57,
+          changes: [{ path: "gone.md", operation: "delete" }],
+        });
       }
     },
   );

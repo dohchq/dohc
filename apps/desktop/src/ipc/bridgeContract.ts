@@ -6641,6 +6641,9 @@ const RefreshSharedViewSuccessResult = z.object({
   // The relay ended the hold because this account's level changed. The
   // renderer checks access again.
   levelChanged: z.literal(true).optional(),
+  // Every change is to a document open in a live session, which already
+  // shows it. The renderer lists the files again without reopening editors.
+  shownLive: z.literal(true).optional(),
 });
 
 const RefreshSharedViewFailureResult = z.object({

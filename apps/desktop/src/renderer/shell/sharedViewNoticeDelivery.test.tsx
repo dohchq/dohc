@@ -119,8 +119,8 @@ async function pendingBurst(rootPath?: string) {
     selector: { paths: ["docs"], access: "edit", versionId: null },
     createdAtMs: 1,
   });
-  f.h.reconcile.mockImplementation(async (_lease, _target, _mode, cursor) => {
-    cursor?.(42);
+  f.h.reconcile.mockImplementation(async (_lease, _target, _mode, onPullCommitted) => {
+    onPullCommitted?.({ cursor: 42, changes: [] });
     return {
       kind: "refresh",
       outcome: {
