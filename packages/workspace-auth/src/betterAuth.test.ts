@@ -1,7 +1,7 @@
 import { createHmac } from "node:crypto";
 import { Client, Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { createWorkspaceAuth, type WorkspaceAuth } from "./betterAuth";
+import { createWorkspaceAuth, emailedLinkNextPage, type WorkspaceAuth } from "./betterAuth";
 import { createPostgresCredentialFence } from "./credentialFence";
 import {
   createAccountSessionResolver,
@@ -64,6 +64,18 @@ try {
 }
 
 const describeWithPostgres = describe.skipIf(!pgAvailable);
+
+describe("the page an emailed link returns to", () => {
+  const link = (callbackURL: string) => `http://localhost:1786/api/auth/verify?token=t&callbackURL=${encodeURIComponent(callbackURL)}`;
+  it("keeps a device sign-in and the join page, and nothing else", () => {
+    expect(emailedLinkNextPage(link("/device?user_code=ABCD-EFGH"))).toBe("/device?user_code=ABCD-EFGH");
+    expect(emailedLinkNextPage(link("/join"))).toBe("/join");
+    for (const refused of ["//join", "/join?x", "/joinx", "/join#token", "/join/", "https://evil.example/join", "/account"]) {
+      expect(emailedLinkNextPage(link(refused)), refused).toBeNull();
+    }
+    expect(emailedLinkNextPage("http://localhost:1786/api/auth/verify?token=t")).toBeNull();
+  });
+});
 
 const PASSWORD = "a-real-password-123";
 const SECRET = "test-secret-0123456789abcdef0123456789abcdef";

@@ -273,9 +273,11 @@ it("marks Sign in busy while it signs in", async () => {
   expect(button("Sign in").getAttribute("aria-busy")).toBeNull();
 });
 
-it("says a link with no token is incomplete and asks the server nothing", async () => {
-  const fetch = server({});
+it("asks a person with no token in this tab to open the invite link again, and asks the server nothing", async () => {
+  // A person who confirmed their email in another tab arrives here signed in, without the token.
+  const fetch = server({"/api/account/session": signedIn});
   await render(null);
-  expect(heading()?.textContent).toBe("This invite link is incomplete");
+  expect(heading()?.textContent).toBe("Open your invite link again");
+  expect(text()).toContain("To join, open the whole invite link you were sent.");
   expect(fetch).not.toHaveBeenCalled();
 });
