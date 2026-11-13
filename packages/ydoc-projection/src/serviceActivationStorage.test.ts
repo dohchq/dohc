@@ -1306,8 +1306,10 @@ it('charges a typed note at the self-host activation limit well within the byte 
   const {maxCaptureBytes,maxActivationHistoryEntries,maxBytesPerDrain,validation}=selfHostActivation(),f=fixture();try{
     typeNote(f,maxActivationHistoryEntries)
     const input={source:f.capture.source,document:f.document,baselineBytes:f.capture.baselineBytes,fullState:f.capture.fullState,
-      bounds:{maxCaptureBytes,maxHistoryEntries:maxActivationHistoryEntries,maxBytesPerDrain}}
-    const history=readOrdinaryActivationHistory(f.storage as StorageContext,input)
+      bounds:{maxCaptureBytes,maxHistoryEntries:maxActivationHistoryEntries,maxBytesPerDrain},checkpoint:null}
+    const read=readOrdinaryActivationHistory(f.storage as StorageContext,input)
+    if(read.kind!=='history')throw new Error(`Expected a history read, not ${read.kind}.`)
+    const history=read.history
     const result=validateOrdinaryActivation({document:f.document,currentPath:'docs/a.md',baselineBytes:f.capture.baselineBytes,
       cut:{source:f.capture.source,fullState:f.capture.fullState,history,maxBytesPerDrain}},validation)
     if(result.kind!=='accepted')throw new Error(JSON.stringify(result))
