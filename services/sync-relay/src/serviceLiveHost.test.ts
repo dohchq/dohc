@@ -5386,8 +5386,10 @@ it.each([
 
 // A document whose fresh capture blocked with `block`, reclaimed while idle as
 // the idle reclaim retires it: with no owner Stop and no demand, and, unless
-// `shared`, with no Edit grant left. Resolves once it left the host.
-async function reclaimedBlocked(block: "refused" | "history-over-budget", {shared = false} = {}) {
+// `shared`, with no Edit grant left. Resolves once it left the host, or, with
+// `whileDeparting`, once that ran as the departure kept its block.
+async function reclaimedBlocked(block: "refused" | "history-over-budget",
+  {shared = false, whileDeparting}: {shared?: boolean; whileDeparting?: (o: Awaited<ReturnType<typeof emptyServiceHost>>) => void} = {}) {
   const o = await emptyServiceHost(), workspaces = [o.workspace];
   o.f.storage.ensureOwnedLiveDocument({intent: "share", workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 10, guard() {}});
   // The relay holds no activation for the document, so each pass captures it fresh, and the capture's check refuses it.
@@ -5403,9 +5405,18 @@ async function reclaimedBlocked(block: "refused" | "history-over-budget", {share
   // What the idle reclaim writes to the enrollment. The document has no activation, so it opens no retirement.
   o.raw.prepare("UPDATE sync_relay_service_host_enrollments SET enabled=0,retired=1,owner_demand=0,demand_at_ms=NULL WHERE workspace_id=? AND object_id=?")
     .run("workspace", o.sibling.objectId);
-  await o.host.update({workspaces, documents: [], departing: [o.sibling]});
-  await vi.waitFor(() => expect(o.host.retains(o.sibling)).toBe(false), {timeout: 10_000});
-  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true), {timeout: 10_000});
+  if (whileDeparting) {
+    const keep = ServiceActivationDriver.prototype.keep;
+    const kept = vi.spyOn(ServiceActivationDriver.prototype, "keep").mockImplementation(function (this: ServiceActivationDriver, ...args) {
+      keep.apply(this, args); whileDeparting(o);
+    });
+    await o.host.update({workspaces, documents: [], departing: [o.sibling]});
+    await vi.waitFor(() => expect(kept).toHaveBeenCalled());
+  } else {
+    await o.host.update({workspaces, documents: [], departing: [o.sibling]});
+    await vi.waitFor(() => expect(o.host.retains(o.sibling)).toBe(false), {timeout: 10_000});
+    await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true), {timeout: 10_000});
+  }
   return {...o, workspaces, captures,
     // Waits for the activation passes to visit the document a few more times.
     async passes() {const visited = visits(); await vi.waitFor(() => expect(visits()).toBeGreaterThan(visited + 2));},
@@ -5449,6 +5460,27 @@ it.each(["before", "after"] as const)("captures a document reclaimed while idle 
     expect(o.captures()).toBe(captured);
     expect(o.host.unblock(o.sibling)).toBe(true);
   }
+  await vi.waitFor(() => expect(o.captures()).toBe(captured + 1));
+  await o.passes();
+  expect(o.captures()).toBe(captured + 1);
+  expect(o.host.blocked(o.sibling)).toBe("refused");
+});
+
+// Proves: the owner's Resume of a document reclaimed while idle with a refused
+// block, pressed while the host still holds the departing document, also
+// clears the block kept for its return, so exactly one capture follows once it
+// is hosted again.
+it("captures a document reclaimed while idle with a refused block once after a Resume pressed while it departs", async () => {
+  let captured = -1, unblocked = false;
+  const o = await reclaimedBlocked("refused", {whileDeparting(held) {
+    if (captured >= 0) return;
+    captured = held.client().captureOwnerActivation.mock.calls.length;
+    // As the Resume route: it enrolls the document again, then unblocks it.
+    held.f.storage.ensureOwnedLiveDocument({intent: "owner-resume", workspaceId: "workspace", ownerUserId: "owner", path: held.sibling.path, nowMs: 40, guard() {}});
+    unblocked = held.host.unblock(held.sibling);
+  }});
+  expect(unblocked).toBe(true);
+  await o.host.update({workspaces: o.workspaces, documents: [o.sibling], ...stay});
   await vi.waitFor(() => expect(o.captures()).toBe(captured + 1));
   await o.passes();
   expect(o.captures()).toBe(captured + 1);
