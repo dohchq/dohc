@@ -234,6 +234,22 @@ describe("SitePreviewPage", () => {
     });
 
 
+    it("holds back Dev and Build chosen in Preview options", async () => {
+      trust.trusted = false;
+      bridgeMock.getSitePackage.mockResolvedValue({ ...packageApp, configuredPreviewMode: "static" });
+      render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+      await screen.findByTestId("site-preview-frame");
+      expect(screen.queryByTestId("restricted-mode-state")).toBeNull();
+
+      for (const mode of ["dev", "build"]) {
+        await userEvent.click(screen.getByTestId("site-preview-options"));
+        await userEvent.click(screen.getByTestId(`site-preview-${mode}`));
+        await screen.findByTestId("restricted-mode-state");
+      }
+      expect(starts()).toEqual(["static"]);
+      bridgeMock.getSitePackage.mockResolvedValue(site);
+    });
+
     it("starts over in Restricted Mode when the person restricts the workspace again", async () => {
       bridgeMock.getSitePackage.mockResolvedValue(packageApp);
       bridgeMock.startSitePreview.mockResolvedValueOnce(answer("dev")).mockResolvedValueOnce(answer("static", 2));
