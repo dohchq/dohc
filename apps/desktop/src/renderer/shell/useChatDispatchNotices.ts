@@ -13,6 +13,7 @@ const kinds = {
   "wake-parked": "chat-wake-parked",
   "wake-unconfirmed": "chat-wake-unconfirmed",
   "wake-runners-refused": "chat-wake-runners-refused",
+  "wake-runners-unreadable": "chat-wake-runners-unreadable",
 } as const satisfies Record<ChatDispatchNotice["reason"], ShellErrorKind>;
 
 // A message from your phone that this computer's agents can't take. Main's
@@ -23,6 +24,7 @@ const wakeTitles = {
   "wake-parked": "An agent could not start for a message from your phone",
   "wake-unconfirmed": "dohc could not confirm an agent request from your phone",
   "wake-runners-refused": "Your phone cannot wake agents on this computer",
+  "wake-runners-unreadable": "dohc could not read where this computer's agents are offered",
 } as const;
 type WakeReason = keyof typeof wakeTitles;
 const isWake = (reason: ChatDispatchNotice["reason"]): reason is WakeReason => reason in wakeTitles;

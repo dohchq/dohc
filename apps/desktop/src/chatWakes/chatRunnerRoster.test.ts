@@ -4,7 +4,7 @@ import { RelayUnauthorizedError } from "@dohc/workspace-contracts/relay";
 import type { Agent } from "../settings/userSettings";
 import { deferred } from "../testing/deferred";
 import { ChatWakeBusyError, ChatWakeMissingError, type ChatWakeClient } from "./chatWakeClient";
-import type { ChatRunnerLedger, ChatRunnerLedgerEntry } from "./chatRunnerLedger";
+import { ChatRunnerLedgerUnreadableError, type ChatRunnerLedger, type ChatRunnerLedgerEntry } from "./chatRunnerLedger";
 import { CHAT_RUNNER_WITHDRAW_MS, createChatRunnerRoster, type ChatRunnerRosterDeps } from "./chatRunnerRoster";
 import type { ChatWakeSession } from "./chatWakeLifetime";
 
@@ -37,6 +37,9 @@ function fakeServer() {
   const behaviors: Behavior[] = [];
   let inFlight = 0;
   let mostInFlight = 0;
+  // PUTs the server answered with success, and who waits for a count of them.
+  let done = 0;
+  const watchers: Array<{ at: number; resolve: () => void }> = [];
   const client = (wakeSession: ChatWakeSession): ChatWakeClient => ({
     async replaceRunners(workspaceId, declaration, signal) {
       const put = { scope: wakeSession.account.scope, workspaceId, declaration };
@@ -46,6 +49,12 @@ function fakeServer() {
       try {
         await behaviors.shift()?.(put, signal);
         rows.set(JSON.stringify([put.scope, workspaceId]), declaration.runners);
+        done += 1;
+        for (const watcher of [...watchers]) {
+          if (done < watcher.at) continue;
+          watchers.splice(watchers.indexOf(watcher), 1);
+          watcher.resolve();
+        }
       } finally {
         inFlight -= 1;
       }
@@ -57,6 +66,9 @@ function fakeServer() {
   return {
     puts, rows, behaviors, client,
     mostInFlight: () => mostInFlight,
+    /** Resolves once `count` PUTs have succeeded. */
+    untilDone: (count: number) => done >= count ? Promise.resolve()
+      : new Promise<void>((resolve) => { watchers.push({ at: count, resolve }); }),
     row: (scope: string, workspaceId: string) => rows.get(JSON.stringify([scope, workspaceId])),
     /** The next PUT waits until `release`, and resolves `entered` once it is in flight. */
     hold() {
@@ -83,15 +95,57 @@ function fakeServer() {
 }
 
 function memoryLedger(rows: ChatRunnerLedgerEntry[] = []) {
-  const state = { rows };
+  const state = {
+    rows,
+    /** Reads throw this while set; `once` clears it after one read. */
+    listFails: null as { error: Error; once: boolean } | null,
+    removeFailsOnce: false,
+    /** Resolves on the next removal that succeeds. */
+    removed: deferred<void>(),
+  };
   const same = (a: ChatRunnerLedgerEntry, b: ChatRunnerLedgerEntry) =>
     a.account === b.account && a.installId === b.installId && a.workspaceId === b.workspaceId;
   const ledger: ChatRunnerLedger = {
-    list: async () => [...state.rows],
+    list: async () => {
+      const failure = state.listFails;
+      if (failure) {
+        if (failure.once) state.listFails = null;
+        throw failure.error;
+      }
+      return [...state.rows];
+    },
     add: async (entry) => { if (!state.rows.some((row) => same(row, entry))) state.rows = [...state.rows, entry]; },
-    remove: async (entry) => { state.rows = state.rows.filter((row) => !same(row, entry)); },
+    remove: async (entry) => {
+      if (state.removeFailsOnce) {
+        state.removeFailsOnce = false;
+        throw new Error("The ledger could not be written just now.");
+      }
+      state.rows = state.rows.filter((row) => !same(row, entry));
+      state.removed.resolve();
+    },
   };
   return { state, ledger };
+}
+
+/** Backoffs the test ends: each records its length and signal, and waits for `release` or its signal. */
+function heldSleeps() {
+  const sleeps: Array<{ ms: number; signal: AbortSignal; release: () => void }> = [];
+  const watchers: Array<{ at: number; resolve: () => void }> = [];
+  const sleep = (ms: number, signal: AbortSignal) => new Promise<void>((resolve) => {
+    signal.addEventListener("abort", () => resolve(), { once: true });
+    sleeps.push({ ms, signal, release: resolve });
+    for (const watcher of [...watchers]) {
+      if (sleeps.length < watcher.at) continue;
+      watchers.splice(watchers.indexOf(watcher), 1);
+      watcher.resolve();
+    }
+  });
+  return {
+    sleeps, sleep,
+    /** Resolves once `count` backoffs have started. */
+    until: (count: number) => sleeps.length >= count ? Promise.resolve()
+      : new Promise<void>((resolve) => { watchers.push({ at: count, resolve }); }),
+  };
 }
 
 function setup(over: Partial<ChatRunnerRosterDeps> = {}) {
@@ -112,6 +166,8 @@ function setup(over: Partial<ChatRunnerRosterDeps> = {}) {
     timeout: vi.fn(() => deadline.signal),
     refused: vi.fn(),
     accepted: vi.fn(),
+    ledgerUnreadable: vi.fn(),
+    ledgerReadable: vi.fn(),
     log: vi.fn(),
     ...over,
   };
@@ -211,21 +267,106 @@ describe("publishing this computer's agents", () => {
     expect(r.server.row("A", "ws1")).toEqual(CLAUDE_ON);
   });
 
-  it("tries a busy server again after a backoff, quietly", async () => {
-    const slept = deferred<void>();
-    const wake = deferred<void>();
-    const r = setup({ sleep: vi.fn(() => { slept.resolve(); return wake.promise; }) });
+  it("tries a busy server again by itself after a backoff, quietly", async () => {
+    const backoffs = heldSleeps();
+    const r = setup({ sleep: backoffs.sleep });
     r.owned.A = ["ws1"];
     const a = session("A");
     r.server.refuse(new ChatWakeBusyError());
     await r.roster.reconcile(a);
-    await slept.promise;
+    await backoffs.until(1);
     expect(r.deps.log).not.toHaveBeenCalled();
-    wake.resolve();
-    // The backoff's pass, or this call that shares or follows it, sends the declaration again.
-    await r.roster.reconcile(a);
-    expect(r.server.puts.length).toBeGreaterThanOrEqual(2);
+    backoffs.sleeps[0]!.release();
+    // No other call: the backoff's own pass sends it.
+    await r.server.untilDone(1);
+    expect(r.server.puts).toHaveLength(2);
     expect(r.server.row("A", "ws1")).toEqual(CLAUDE_ON);
+  });
+
+  it.each([["a new token for the same account", "A"], ["another account", "B"]] as const)(
+    "retries for %s even while an older session's backoff sleeps",
+    async (_case, scope) => {
+      const backoffs = heldSleeps();
+      const r = setup({ sleep: backoffs.sleep });
+      r.owned.A = ["ws1"];
+      r.owned.B = ["ws1"];
+      const a = session("A");
+      r.server.refuse(new ChatWakeBusyError());
+      await r.roster.reconcile(a);
+      await backoffs.until(1);
+      // A's backoff is held. The next snapshot's first publication fails too.
+      a.end();
+      const next = session(scope);
+      r.server.refuse(new ChatWakeBusyError());
+      await r.roster.reconcile(next);
+      await backoffs.until(2);
+      // It took over the one backoff, and its count started again.
+      expect(backoffs.sleeps[0]!.signal.aborted).toBe(true);
+      expect(backoffs.sleeps[1]!.ms).toBe(1_000);
+      backoffs.sleeps[0]!.release();
+      backoffs.sleeps[1]!.release();
+      await r.server.untilDone(1);
+      expect(r.server.puts.at(-1)).toEqual({ scope, workspaceId: "ws1", declaration: declared(CLAUDE_ON) });
+      expect(r.deps.client).toHaveBeenLastCalledWith(next);
+    },
+  );
+
+  it("retries a pass whose ledger read failed once, by itself", async () => {
+    const backoffs = heldSleeps();
+    const r = setup({ sleep: backoffs.sleep });
+    r.owned.A = ["ws1"];
+    r.ledger.state.listFails = { error: new Error("The disk is busy."), once: true };
+    await r.roster.reconcile(session("A"));
+    expect(r.server.puts).toEqual([]);
+    await backoffs.until(1);
+    backoffs.sleeps[0]!.release();
+    await r.server.untilDone(1);
+    expect(r.server.row("A", "ws1")).toEqual(CLAUDE_ON);
+    expect(r.deps.ledgerUnreadable).not.toHaveBeenCalled();
+  });
+
+  it("shows an unreadable ledger, declares and withdraws nothing, and recovers once it is repaired and tried again", async () => {
+    const backoffs = heldSleeps();
+    const r = setup({ sleep: backoffs.sleep });
+    r.owned.A = ["ws1"];
+    const a = session("A");
+    r.ledger.state.listFails = { error: new ChatRunnerLedgerUnreadableError(), once: false };
+    await r.roster.reconcile(a);
+    expect(r.deps.ledgerUnreadable).toHaveBeenCalledOnce();
+    expect(r.deps.log).not.toHaveBeenCalled();
+    // Still unreadable on the backoff's pass: offered again, and still nothing goes out or is written.
+    await backoffs.until(1);
+    backoffs.sleeps[0]!.release();
+    await backoffs.until(2);
+    expect(r.deps.ledgerUnreadable).toHaveBeenCalledTimes(2);
+    expect(r.server.puts).toEqual([]);
+    expect(r.ledger.state.rows).toEqual([]);
+    // The person repairs the file and chooses Try again.
+    r.ledger.state.listFails = null;
+    await r.roster.reconcile(a);
+    expect(r.deps.ledgerReadable).toHaveBeenCalled();
+    expect(r.server.row("A", "ws1")).toEqual(CLAUDE_ON);
+    // That pass settled, so the sleeping backoff was called off.
+    expect(backoffs.sleeps[1]!.signal.aborted).toBe(true);
+  });
+
+  it("finishes removing a withdrawn workspace from the ledger after the first removal failed", async () => {
+    const backoffs = heldSleeps();
+    const r = setup({ sleep: backoffs.sleep });
+    r.owned.A = ["ws1"];
+    const a = session("A");
+    await r.roster.reconcile(a);
+    r.setAgents([]);
+    r.ledger.state.removeFailsOnce = true;
+    await r.roster.reconcile(a);
+    expect(r.server.row("A", "ws1")).toEqual([]);
+    expect(r.ledger.state.rows).toEqual([{ account: "A", installId: "mac", workspaceId: "ws1" }]);
+    await backoffs.until(1);
+    backoffs.sleeps[0]!.release();
+    await r.ledger.state.removed.promise;
+    expect(r.ledger.state.rows).toEqual([]);
+    // The server's confirmed withdrawal wasn't sent again.
+    expect(r.server.puts).toHaveLength(2);
   });
 
   it("ends the session whose declaration got a 401", async () => {

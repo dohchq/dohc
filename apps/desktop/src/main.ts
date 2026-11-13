@@ -1193,6 +1193,7 @@ const personalAgentRoster = createPersonalAgentRoster({
 // workspace of this account, read from the registry without opening any.
 const chatWakeNotices = createChatWakeNotices({
   file: chatWakeIntentsFile(),
+  ledgerFile: chatRunnerLedgerFile(),
   workspaces: () => chatWakeWorkspaceIds(cachedCredentials),
   report: (workspaceId, notice) => chatDispatchNotices.report(workspaceId, notice),
   clear: (workspaceId, reason) => chatDispatchNotices.clear(workspaceId, reason),
@@ -1202,7 +1203,7 @@ const chatWakeNotices = createChatWakeNotices({
 // session's workspaces are read with the cached credentials only while that
 // session is current, which is when the two agree.
 const chatRunners = createChatRunnerRoster({
-  ledger: createChatRunnerLedger(join(stateDir(), "chat-runners.json")),
+  ledger: createChatRunnerLedger(chatRunnerLedgerFile()),
   client: (wakeSession) => createChatWakeClient({ relay: wakeSession.relay }),
   workspaces: (wakeSession) => wakeSession.isCurrent() ? chatWakeWorkspaceIds(cachedCredentials) : [],
   agents: async () => listAgents((await readCachedUserSettingsFile(stateDir())).settings),
@@ -1215,6 +1216,8 @@ const chatRunners = createChatRunnerRoster({
   timeout: (ms) => AbortSignal.timeout(ms),
   refused: (workspaceId, refusal) => chatWakeNotices.refused(workspaceId, refusal),
   accepted: (workspaceId) => chatWakeNotices.accepted(workspaceId),
+  ledgerUnreadable: () => chatWakeNotices.ledgerUnreadable(),
+  ledgerReadable: () => chatWakeNotices.ledgerReadable(),
   log: (error) => console.error("[desktop] chat runners:", error),
 });
 const chatWakes = createChatWakeLifetime({
@@ -1232,6 +1235,9 @@ const chatWakes = createChatWakeLifetime({
 });
 function chatWakeIntentsFile(): string {
   return join(stateDir(), "chat-wakes.json");
+}
+function chatRunnerLedgerFile(): string {
+  return join(stateDir(), "chat-runners.json");
 }
 // The account's own synced workspaces on this computer, open in a window or
 // not: not shares, not paused, and not a folder inside dohc's own.

@@ -253,3 +253,16 @@ it("shows a refusal of this computer's agents with no Try again and no dismiss, 
   act(() => h.store.clear("a", "wake-runners-refused"));
   expect(view.result.current.shellErrors).toEqual([]);
 });
+
+it("offers Try again on an unreadable declarations ledger, with its file in Details and no dismiss", async () => {
+  const h = setup();
+  h.store.report("a", { reason: "wake-runners-unreadable", message: "Restore or repair the file in Details before you try again.", file: "/state/chat-runners.json" });
+  const view = h.mount();
+  await act(async () => {});
+  const row = view.result.current.shellErrors.find((item) => item.kind === "chat-wake-runners-unreadable")!;
+  expect(row).toMatchObject({
+    title: "dohc could not read where this computer's agents are offered", noDismiss: true, details: [["File", "/state/chat-runners.json"]],
+  });
+  act(() => { row.retry?.(); });
+  expect(h.retryWakes).toHaveBeenCalledExactlyOnceWith({ workspaceId: "a" });
+});

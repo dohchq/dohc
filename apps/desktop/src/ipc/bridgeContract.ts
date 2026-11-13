@@ -7272,15 +7272,17 @@ export const ChatDispatchNotice = z.object({
   // lists its claim, its workspace stopped syncing here, or the server no
   // longer knows its queued request.
   // wake-runners-refused: the server can't take this computer's agents as they are, so none of them is declared.
+  // wake-runners-unreadable: the file naming where they are declared can't be read, so nothing is declared or
+  // withdrawn until it can.
   reason: z.enum([
-    "no-runner", "budget-paused", "restricted",
-    "wake-unreadable", "wake-dropped", "wake-parked", "wake-unconfirmed", "wake-runners-refused",
+    "no-runner", "budget-paused", "restricted", "wake-unreadable", "wake-dropped", "wake-parked",
+    "wake-unconfirmed", "wake-runners-refused", "wake-runners-unreadable",
   ]),
   // Absent only for wake-unreadable, which is about a file rather than a thread.
   threadId: z.string().min(1).optional(),
   wakeId: z.string().min(1).optional(),
   messageId: z.string().min(1).optional(),
-  // The saved file wake-unreadable names.
+  // The saved file wake-unreadable or wake-runners-unreadable names.
   file: z.string().min(1).optional(),
   // The agent wake-runners-refused names, when it names one.
   agentId: z.string().min(1).optional(),

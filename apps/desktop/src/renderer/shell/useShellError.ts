@@ -52,6 +52,7 @@ export type ShellErrorKind =
   | "chat-wake-parked"
   | "chat-wake-unconfirmed"
   | "chat-wake-runners-refused"
+  | "chat-wake-runners-unreadable"
   | "singleton-tab-split"
   | "tab-limit"
   | "workspace-search"

@@ -3,7 +3,7 @@ import { RelayUnauthorizedError } from "@dohc/workspace-contracts/relay";
 import type { Agent } from "../settings/userSettings";
 import { ChatWakeBusyError, ChatWakeMissingError, type ChatWakeClient } from "./chatWakeClient";
 import { chatRunnerDeclaration, type ChatRunnerRefusal } from "./chatRunnerDeclaration";
-import type { ChatRunnerLedger, ChatRunnerLedgerEntry } from "./chatRunnerLedger";
+import { ChatRunnerLedgerUnreadableError, type ChatRunnerLedger, type ChatRunnerLedgerEntry } from "./chatRunnerLedger";
 import type { ChatWakeSession } from "./chatWakeLifetime";
 
 // Tells the server which of this computer's agents each of the account's
@@ -36,6 +36,10 @@ export interface ChatRunnerRosterDeps {
   refused(workspaceId: string, refusal: ChatRunnerRefusal): void;
   /** Takes that row back. */
   accepted(workspaceId: string): void;
+  /** The ledger can't be read, so nothing is declared or withdrawn: the account's workspaces show a row. */
+  ledgerUnreadable(): void;
+  /** The ledger read: takes that row back. */
+  ledgerReadable(): void;
   log(error: unknown): void;
 }
 
@@ -61,8 +65,9 @@ export function createChatRunnerRoster(deps: ChatRunnerRosterDeps): ChatRunnerRo
   // The refusal each workspace's row shows.
   const rows = new Map<string, string>();
   let pending: { session: ChatWakeSession; done: Promise<void> } | null = null;
-  let failures = 0;
-  let retrying = false;
+  // The one session owed a retry, its failures in a row, and its backoff while it sleeps. Another session's
+  // failure replaces it and starts its count again, so an old session's backoff never stands in for a current one.
+  let owed: { session: ChatWakeSession; failures: number; sleep: AbortController | null } | null = null;
 
   const keyOf = (entry: ChatRunnerLedgerEntry) => JSON.stringify([entry.account, entry.installId, entry.workspaceId]);
   const withdrawal = (session: ChatWakeSession, computerLabel: string): ChatRunnerDeclaration =>
@@ -90,8 +95,12 @@ export function createChatRunnerRoster(deps: ChatRunnerRosterDeps): ChatRunnerRo
   ): Promise<boolean> {
     const key = keyOf(entry);
     const body = JSON.stringify(declaration);
-    if (sent.get(key) === body) return true;
     const declaring = declaration.runners.length > 0;
+    if (sent.get(key) === body) {
+      // The server already confirmed this withdrawal; only the ledger row may be left, if removing it failed.
+      if (!declaring) await deps.ledger.remove(entry);
+      return true;
+    }
     // Saved before it goes out, so a declaration that reached the server is always one this computer can withdraw.
     if (declaring) await deps.ledger.add(entry);
     // A request that fails or times out may still land, so nothing counts as sent until one is confirmed.
@@ -114,8 +123,34 @@ export function createChatRunnerRoster(deps: ChatRunnerRosterDeps): ChatRunnerRo
     return true;
   }
 
+  // A step that failed. An unreadable ledger is the person's to restore, so it shows a row; the rest is logged.
+  function failed(error: unknown): void {
+    if (error instanceof ChatRunnerLedgerUnreadableError) report(() => deps.ledgerUnreadable());
+    else deps.log(error);
+  }
+  function report(work: () => void): void {
+    try { work(); }
+    catch (error) { deps.log(error); }
+  }
+
   async function publish(session: ChatWakeSession): Promise<void> {
     if (abort.signal.aborted || !session.isCurrent()) return;
+    let settled: boolean;
+    try { settled = await pass(session); }
+    catch (error) {
+      failed(error);
+      settled = false;
+    }
+    if (abort.signal.aborted || !session.isCurrent()) return;
+    if (!settled) retry(session);
+    else if (owed?.session === session) {
+      owed.sleep?.abort();
+      owed = null;
+    }
+  }
+
+  // Answers whether every step settled. Throws when the settings or the ledger can't be read, before anything goes out.
+  async function pass(session: ChatWakeSession): Promise<boolean> {
     const { scope: account, installId } = session.account;
     const client = deps.client(session);
     const computerLabel = deps.computerLabel();
@@ -123,10 +158,11 @@ export function createChatRunnerRoster(deps: ChatRunnerRosterDeps): ChatRunnerRo
     const wanted = new Set(deps.workspaces(session));
     const ledgered = new Set((await deps.ledger.list())
       .filter((entry) => entry.account === account && entry.installId === installId).map((entry) => entry.workspaceId));
+    report(() => deps.ledgerReadable());
     let settled = true;
     // A workspace with a refusal row is checked too, so its row goes when it stops syncing here.
     for (const workspaceId of new Set([...wanted, ...ledgered, ...rows.keys()])) {
-      if (abort.signal.aborted || !session.isCurrent()) return;
+      if (abort.signal.aborted || !session.isCurrent()) return settled;
       const entry = { account, installId, workspaceId };
       // Refused: nothing of this computer's stays declared there, so no old list wakes an agent it no longer has.
       const declaration = wanted.has(workspaceId) && declared.ok ? declared.declaration : withdrawal(session, computerLabel);
@@ -137,21 +173,26 @@ export function createChatRunnerRoster(deps: ChatRunnerRosterDeps): ChatRunnerRo
       try {
         if (!(await put(session, client, entry, declaration, abort.signal))) settled = false;
       } catch (error) {
-        deps.log(error);
+        failed(error);
         settled = false;
       }
     }
-    if (settled) failures = 0;
-    else retry(session);
+    return settled;
   }
 
   // A pass that left a step unsettled tries again after a capped backoff, for as long as its session is current.
   function retry(session: ChatWakeSession): void {
-    if (retrying) return;
-    retrying = true;
-    failures += 1;
-    void deps.sleep(deps.backoffMs(failures), abort.signal).then(() => {
-      retrying = false;
+    // Already sleeping for this session: that pass is the retry.
+    if (owed?.session === session && owed.sleep) return;
+    const failures = owed?.session === session ? owed.failures + 1 : 1;
+    owed?.sleep?.abort();
+    const sleep = new AbortController();
+    const mine: NonNullable<typeof owed> = { session, failures, sleep };
+    owed = mine;
+    void deps.sleep(deps.backoffMs(failures), AbortSignal.any([abort.signal, sleep.signal])).then(() => {
+      // Replaced by another session's retry, or settled meanwhile.
+      if (owed !== mine || sleep.signal.aborted) return;
+      mine.sleep = null;
       if (!abort.signal.aborted && session.isCurrent()) void roster.reconcile(session);
     });
   }

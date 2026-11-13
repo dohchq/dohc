@@ -420,7 +420,7 @@ describe("rows a person sees", () => {
     const shown = vi.fn();
     const takenBack = vi.fn();
     const notices = createChatWakeNotices({
-      file: "/state/chat-wakes.json", workspaces: () => workspaces, report: shown, clear: takenBack, log: vi.fn(),
+      file: "/state/chat-wakes.json", ledgerFile: "/state/chat-runners.json", workspaces: () => workspaces, report: shown, clear: takenBack, log: vi.fn(),
     });
     const w = setup({ report: notices.report, clear: notices.clear });
     w.intents.state.unreadable = true;

@@ -20,7 +20,7 @@ const ChatRunnerLedgerEntry = z.strictObject({
 export type ChatRunnerLedgerEntry = z.infer<typeof ChatRunnerLedgerEntry>;
 
 /** The saved declarations could not be read. Nothing is declared until it can be, and the file is left as it is. */
-class ChatRunnerLedgerUnreadableError extends Error {
+export class ChatRunnerLedgerUnreadableError extends Error {
   constructor() {
     super("dohc could not read which workspaces this computer declared its agents for.");
     this.name = "ChatRunnerLedgerUnreadableError";
