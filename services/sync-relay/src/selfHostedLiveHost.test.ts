@@ -292,10 +292,17 @@ it.each([
     if (test.name.includes("Edit grant")) relay.raw.prepare("UPDATE sync_relay_share_grants SET status='revoked', revoked_at_ms=20").run();
     if (test.name === "moved") relay.raw.prepare("UPDATE sync_relay_object_moments SET path='docs/moved.md' WHERE object_id=?").run(binding.objectId);
   }});
+  let restart: ReturnType<typeof f.holdNextUpdate> | undefined;
   try {
     if (test.name === "start failed") await vi.waitFor(() => expect(f.onError).toHaveBeenCalledWith(failure));
-    else if (test.name === "restarting") {await f.waitStarted(1); f.starts[0]!.controller.abort();}
-    else if (test.name === "not loaded") await f.waitStarted(1);
+    else if (test.name === "restarting") {
+      // The failed daemon stays current until a reconciliation replaces it.
+      // One held in its update keeps the abort's own reconciliation queued.
+      await f.waitUpdate([binding.currentPath]);
+      restart = f.holdNextUpdate(); f.add(); await restart.entered.promise;
+      f.starts[0]!.controller.abort();
+    }
+    else if (test.name === "not loaded") {await f.waitStarted(1); await vi.waitFor(() => expect(f.host.current()).toBeDefined());}
     else if (test.name === "starting") await entered.promise;
     else await f.waitPasses();
     if (test.name === "paused after relay restart") expect(f.host.current()).toBeUndefined();
@@ -318,7 +325,7 @@ it.each([
       [`Live editing Stop for workspace ${scope.workspaceId}, object ${binding.objectId}. Session host: ${test.state}`],
     ]);
     expect(log.mock.calls.flat().join(" ")).not.toContain(failure.message);
-  } finally {finish.resolve();}
+  } finally {finish.resolve(); restart?.release.resolve();}
 });
 
 // Proves: Stop names a failed start only while the daemon's last start failed.
