@@ -2176,6 +2176,22 @@ pub(super) mod tests {
         .unwrap();
     }
 
+    /// A copy that follows the relay could not delete a text file larger
+    /// than 5 MiB: a delete needs the file's current bytes, and the file probe
+    /// read no text past 5 MiB, so the page failed on every retry. The
+    /// delete now removes the file as it does a smaller one.
+    #[test]
+    fn a_pages_delete_removes_a_text_file_past_five_mebibytes() {
+        let (scratch, _, mut store) = dohc_engine_testkit::open_store();
+        ensure_mutation_version_on_store(&mut store, "ws", "main", 1, &NoFaults).unwrap();
+        let text = "x".repeat(dohc_engine_files::MAX_CAPTURE_BINARY_BYTES as usize + 95);
+        write_head(&mut store, "big", "big.md", &text, 2);
+        std::fs::write(scratch.join("big.md"), &text).unwrap();
+        delete_head(&mut store, "big.md", 3);
+        relay_page(&mut store, &scratch, "big.md", "delete", 3);
+        assert!(!scratch.join("big.md").exists());
+    }
+
     /// A peer whose disk keeps case apart can hold `notes.md` and `Notes.md`.
     /// When it creates `Notes.md` in one page and deletes `notes.md` in a
     /// later one, both spellings reach one file on a disk that ignores case.
