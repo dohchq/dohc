@@ -202,6 +202,9 @@ it("keeps storage failures internal and strips credential-bearing errors", async
         readLiveTicketTarget: () => {
           throw failure;
         },
+        resolveLiveObjectHostBinding: () => {
+          throw failure;
+        },
         redeemLiveTicket: () => {
           throw failure;
         },
@@ -298,6 +301,27 @@ it("gives simultaneous redemptions through two real database handles one winner"
     expect(results.filter((result) => result === null)).toHaveLength(1);
   } finally {
     second.close();
+    await state.close();
+  }
+});
+
+// A caller asks again after a failure but stops on a refusal, so a host that reconnects mid-mint is a failure.
+it("fails rather than refuses a mint while the live host changes, and writes no ticket", async () => {
+  const state = await fixture();
+  try {
+    const service = createLiveTickets({
+      storage: state.storage,
+      audience,
+      key,
+      hostReports: { currentBinding: async () => null },
+    });
+    await expect(service.mint({ objectId: binding.objectId }, scope)).rejects.toThrow(
+      "Live-ticket operation failed.",
+    );
+    expect(
+      state.raw.prepare("SELECT COUNT(*) AS count FROM sync_relay_live_session_tickets").get(),
+    ).toEqual({ count: 0 });
+  } finally {
     await state.close();
   }
 });

@@ -16,7 +16,9 @@ import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import {
   createNamedLiveBrowserTransport,
+  LiveHostUnavailableError,
   type NamedLiveBrowserLimits,
+  type NamedLiveSelection,
 } from "@dohc/ydoc-projection/named-live-browser-transport";
 
 const selection = {
@@ -124,7 +126,12 @@ class Socket extends EventTarget {
     this.dispatchEvent(new MessageEvent("message", { data: value }));
   }
 }
-function fixture(input = limits()) {
+function fixture(
+  input = limits(),
+  authorize?: Parameters<
+    typeof createNamedLiveBrowserTransport<NamedLiveSelection>
+  >[0]["authorize"],
+) {
   const sockets: Socket[] = [],
     requests: { path: string; init: RequestInit }[] = [],
     protocols: string[][] = [],
@@ -155,10 +162,11 @@ function fixture(input = limits()) {
       });
     throw new Error("Unexpected request.");
   });
-  const manager = createNamedLiveBrowserTransport({
+  const manager = createNamedLiveBrowserTransport<NamedLiveSelection>({
     publicOrigin: "https://share.example",
     limits: input,
     fetch: fetcher,
+    ...(authorize ? { authorize } : {}),
     openSocket(url, offered) {
       const socket = new Socket();
       sockets.push(socket);
@@ -325,8 +333,8 @@ function edit(value: Session, text: string) {
     content.insert(content.length, text);
   });
 }
-async function live() {
-  const f = fixture(),
+async function live(authorize?: Parameters<typeof fixture>[1]) {
+  const f = fixture(limits(), authorize),
     connecting = f.value.reconnect(),
     socket = await f.socketAt(0),
     peer = host(socket, f.value),
@@ -733,6 +741,41 @@ it("reconnects automatically with a fresh ticket and preserves the pending deliv
   peer.ack(retry, 1);
   await waitState(f.value, (state) => state.pendingUpdates === 0);
   expect(f.value.state().status).toBe("live");
+});
+// A link page's ticket answers 503 while the servers restart. The editor comes back by itself.
+it("brings a live editor back by itself after the server could not open the file for a while", async () => {
+  let busy = false,
+    tickets = 0;
+  const f = await live(async () => {
+    if (busy) throw new LiveHostUnavailableError("busy");
+    return {
+      discriminator: "abcdefghijkl",
+      ticketToken: Buffer.alloc(32, ++tickets).toString("hex"),
+      websocketUrl: "wss://share.example/api/live/link?session=abcdefghijkl",
+    };
+  });
+  vi.useFakeTimers();
+  edit(f.value, " draft");
+  const first = await f.peer.submitted();
+  Y.applyUpdate(f.doc, first.bytes);
+  busy = true;
+  f.socket.close();
+  await vi.advanceTimersByTimeAsync(250);
+  expect(f.value.state()).toMatchObject({ status: "disconnected", reason: "host-unavailable" });
+  expect(f.sockets).toHaveLength(1);
+  busy = false;
+  await vi.advanceTimersByTimeAsync(500);
+  const socket = await f.socketAt(1),
+    peer = host(socket, f.value, 2);
+  socket.open();
+  await peer.greet();
+  await peer.initial(f.doc, binding, 1);
+  const retry = await peer.submitted();
+  expect(retry.bytes).toEqual(first.bytes);
+  peer.ack(retry, 1);
+  await waitState(f.value, (state) => state.pendingUpdates === 0);
+  expect(f.value.state().status).toBe("live");
+  expect(edit(f.value, " more")).toBe(true);
 });
 it("backs off repeated connection failures and cancels recovery when paused or replaced", async () => {
   const f = await live();

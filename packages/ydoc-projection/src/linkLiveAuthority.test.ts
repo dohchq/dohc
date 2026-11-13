@@ -201,6 +201,7 @@ it.each(mutations.filter(([name]) => name === "revoked grant"))(
   },
 );
 
+// A report from a host connection that has since changed fails the mint, so the page asks again.
 it("rolls enrollment, profile binding, accounting and activity revision back if a later host comparison refuses", async () => {
   const f = setup(),
     before = f.enrollment(),
@@ -209,7 +210,7 @@ it("rolls enrollment, profile binding, accounting and activity revision back if 
     ...held!,
     connection: { ...held!.connection, connectionId: "stale" },
   });
-  expect(await f.mint()).toBeNull();
+  await expect(f.mint()).rejects.toThrow("Live-ticket operation failed.");
   expect(f.enrollment()).toEqual(before);
   expect(f.rowCount("sync_relay_live_session_tickets")).toBe(0);
 });
@@ -300,7 +301,7 @@ it("checks principal workspace quota before enrollment and keeps all its state o
     "UPDATE sync_relay_workspace_usage SET usage_bytes=999999 WHERE workspace_id='workspace'",
   );
   const before = f.enrollment();
-  await expect(f.mint()).rejects.toThrow("Live-ticket operation failed");
+  expect(await f.mint()).toBeNull();
   expect(f.enrollment()).toEqual(before);
   expect(f.rowCount("sync_relay_live_session_tickets")).toBe(0);
 });

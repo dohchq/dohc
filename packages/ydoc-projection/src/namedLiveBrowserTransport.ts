@@ -68,6 +68,8 @@ const exact = (value: unknown, keys: string): value is Record<string, unknown> =
 class Refused extends Error {}
 /** The server answered and would not authorize this document. The connection works. */
 export class LiveAuthorityUnavailableError extends Error {}
+/** The server answered that it cannot start editing now. The page tries again by itself. */
+export class LiveHostUnavailableError extends Error {}
 
 export function parseNamedLiveBrowserLimits(value: unknown): NamedLiveBrowserLimits {
   if (
@@ -470,7 +472,9 @@ export function createNamedLiveBrowserTransport<
             ? "account-changed"
             : error instanceof LiveAuthorityUnavailableError
               ? "authority-unavailable"
-              : "connection-failed",
+              : error instanceof LiveHostUnavailableError
+                ? "host-unavailable"
+                : "connection-failed",
         );
       }
     }

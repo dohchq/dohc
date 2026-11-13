@@ -1,5 +1,8 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { LiveAuthorityUnavailableError } from "@dohc/ydoc-projection/named-live-browser-transport";
+import {
+  LiveAuthorityUnavailableError,
+  LiveHostUnavailableError,
+} from "@dohc/ydoc-projection/named-live-browser-transport";
 import {
   LINK_REFUSALS,
   linkRefusalBody,
@@ -64,7 +67,7 @@ it.each(["link_unavailable", "link_live_unavailable"] as const)(
     const error = await namedRequest("/api/live/link-document", new AbortController().signal).catch(
       (cause: unknown) => cause,
     );
-    expect(error).toBeInstanceOf(Error);
+    expect(error).toBeInstanceOf(LiveHostUnavailableError);
     expect(error).toHaveProperty("message", LINK_REFUSALS[code].error);
     expect(error).not.toBeInstanceOf(LiveAuthorityUnavailableError);
     expect(error).not.toBeInstanceOf(ShareAccessRemovedError);

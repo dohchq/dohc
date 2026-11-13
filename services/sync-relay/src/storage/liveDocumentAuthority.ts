@@ -78,6 +78,7 @@ import type { LiveTicketScope } from "../liveBrowserContext";
 import { authorizeNamedLiveEditShareGrant } from "../shareAuthorization";
 import { readLiveHostControl, parseHostControlTimestamp } from "./hostControl";
 import { assertWorkspaceQuota } from "./workspaces";
+import { SyncRelayQuotaExceededError } from "./errors";
 import {
   prepareLiveDeliveryWorkspace,
   registerLiveDeliveryBaseline,
@@ -1089,7 +1090,18 @@ export function mintLiveTicket(
   const objectId = parseLiveUpdateIdentifier(raw.objectId, "object ID");
   const ticketId = parseLiveUpdateIdentifier(raw.ticketId, "ticket ID");
   const report = snapshotTicketHostReport(raw.report);
+  // A full workspace refuses a ticket the way a full link does, whichever record would not fit.
   return storage.ticketTransaction((now, policy) => {
+    try {
+      return mintInTransaction(now, policy);
+    } catch (error) {
+      throw error instanceof SyncRelayQuotaExceededError ? LIVE_TICKET_REFUSED : error;
+    }
+  });
+  function mintInTransaction(
+    now: number,
+    policy: LiveTicketStoragePolicy,
+  ): { expiresAtMs: number; publicPrincipalId?: string } {
     if (now > Number.MAX_SAFE_INTEGER - LIVE_TICKET_LIFETIME_MS) throw LIVE_TICKET_REFUSED;
     if (owned.scope.kind === "link") {
       const actor = liveBrowserActor(owned.scope);
@@ -1156,7 +1168,7 @@ export function mintLiveTicket(
         ? { publicPrincipalId: ensureLiveLinkPublicPrincipal(storage, current.authority) }
         : {}),
     };
-  });
+  }
 }
 
 /**
