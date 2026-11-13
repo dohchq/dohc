@@ -102,6 +102,7 @@ import {
 import { useCrashReport } from "./shell/useCrashReport";
 import { useAutomationHolds } from "./shell/useAutomationHolds";
 import { CollectionFieldMarksProvider } from "./collections/collectionFieldMarks";
+import { WorkspaceSessionProvider } from "./workspace/workspaceSession";
 import { useCloudPresence } from "./shell/useCloudPresence";
 import type { AccountDeletion } from "./shell/useAccountDeletion";
 import type { ConnectionErrorReport } from "./shell/connectionNotices";
@@ -6684,6 +6685,7 @@ export function DesktopWorkspaceShell(props: {
     : (version: { id: string; name: string }) =>
         setShareTarget({ kind: "version", versionId: version.id, versionName: version.name });
   return (
+    <WorkspaceSessionProvider>
     <AgentSettingsProvider settings={props.userSettings?.settings ?? null}>
     <AgentColorContext.Provider value={setAgentColor}>
     <CustomizeContext.Provider value={customizeContext}>
@@ -8314,5 +8316,6 @@ export function DesktopWorkspaceShell(props: {
     </CustomizeContext.Provider>
     </AgentColorContext.Provider>
     </AgentSettingsProvider>
+    </WorkspaceSessionProvider>
   );
 }
