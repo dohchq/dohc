@@ -103,6 +103,7 @@ import { useCrashReport } from "./shell/useCrashReport";
 import { useAutomationHolds } from "./shell/useAutomationHolds";
 import { CollectionFieldMarksProvider } from "./collections/collectionFieldMarks";
 import { WorkspaceSessionProvider } from "./workspace/workspaceSession";
+import { invalidateDmNavigation, useWorkspaceVisit } from "./workspace/workspaceVisit";
 import { useCloudPresence } from "./shell/useCloudPresence";
 import type { AccountDeletion } from "./shell/useAccountDeletion";
 import type { ConnectionErrorReport } from "./shell/connectionNotices";
@@ -148,8 +149,6 @@ import type { SearchResultsEventEntry } from "../ipc/bridgeContract";
 import {
   fileOpenStartMark,
   rendererMarks,
-  type SwitchCompletionPhase,
-  type SwitchPhaseDetails,
 } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
 import { useAsyncResponseEffect } from "./useAsyncResponseEffect";
@@ -302,7 +301,6 @@ import {
   openMomentDiff,
   collectionTabPath,
   transactionalCollectionTabPath,
-  defaultWorkbenchState,
   GRAPH_TAB_PATH,
   HISTORY_TAB_PATH,
   VERSIONS_TAB_PATH,
@@ -426,22 +424,6 @@ function groupsMountingNewDocument(
       ? [after.id]
       : [];
   });
-}
-
-/** The record a pending canonical DM navigation checks itself against. */
-type DmNavigationRequest = { workspaceId: string; sequence: number };
-
-// Cancel any in-flight canonical DM navigation so its late answer cannot land
-// a chat destination over wherever the user went meanwhile. REPLACE the
-// record, never increment it in place: openCanonicalDmInTab installs the very
-// object it then compares against, so an in-place increment moves the pending
-// navigation's captured sequence too, its isCurrent() compares the object with
-// itself, and the cancellation is a no-op.
-function invalidateDmNavigation(request: { current: DmNavigationRequest }): void {
-  request.current = {
-    workspaceId: request.current.workspaceId,
-    sequence: request.current.sequence + 1,
-  };
 }
 
 export function pendingHeadingTargetForOpen(
@@ -757,15 +739,6 @@ export function DesktopWorkspaceShell(props: {
   }, [handoffStatus.status]);
   // Inline folder creates routed INTO the explorer (palette/menu).
   const [newFolderRequest, setNewFolderRequest] = useState<number | null>(null);
-  const [wb, setWbState] = useState<WorkbenchState>(defaultWorkbenchState);
-  // wbRef holds the newest workbench, set with each write rather than after
-  // commit. Handlers read it to choose what to act on, and a keydown can
-  // arrive between a commit and React's passive effects.
-  const wbRef = useRef(wb);
-  const writeWb = useCallback((next: WorkbenchState) => {
-    wbRef.current = next;
-    setWbState(next);
-  }, []);
 
   // The Cloud and Live documents dialogs open above Settings. Settings asked
   // for from anywhere else, such as the app menu, takes their place, so the
@@ -798,6 +771,16 @@ export function DesktopWorkspaceShell(props: {
   const workspaceIdRef = useRef(workspaceId);
   workspaceIdRef.current = workspaceId;
   const workspaceStoppedRef = useRef(false);
+  const visit = useWorkspaceVisit(workspaceId);
+  const {
+    selection: workspaceSelectionGeneration,
+    latestSelection: workspaceSelection,
+    admission: workspaceAdmission,
+    ready: workspaceIsReady,
+    admit: admitWorkspace,
+    markSwitchPhase: markCurrentSwitchPhase,
+  } = visit;
+  const { state: wb, latest: wbRef, replace: writeWb, update: mutateWb, navigation: dmNavigationRequest } = visit.workbench;
   const openTabs = useMemo(() => allTabs(wb), [wb.editorGroups]);
   const {
     callbacksForEditor,
@@ -816,83 +799,6 @@ export function DesktopWorkspaceShell(props: {
   const recordBodies = useRef(new Map<string, { tab: WorkbenchTab; path: string }>());
   const collectionLineage = useCollectionWriteLineage(workspaceId);
 
-  // `openWorkspace` installs main's exact renderer session before it waits
-  // for watcher readiness. Its response is the renderer's existing proof that
-  // both happened; there is no separate admission IPC. Exact-session bootstrap
-  // reads wait for that proof before they reach main. The local
-  // generation also keeps an A -> B -> A prop sequence from reusing A's earlier
-  // proof (DesktopRoot normally gives each workspace a fresh keyed shell).
-  const workspaceSelection = useRef({ workspaceId, generation: 0 });
-  if (workspaceSelection.current.workspaceId !== workspaceId) {
-    workspaceSelection.current = {
-      workspaceId,
-      generation: workspaceSelection.current.generation + 1,
-    };
-  }
-  const workspaceSelectionGeneration = workspaceSelection.current.generation;
-  const switchTimelineToken = useRef<
-    ReturnType<typeof rendererMarks.startSwitch> | null
-  >(null);
-  // Passive effects run after the new keyed shell commits. Starting here
-  // excludes abandoned renders while still preceding every async readiness
-  // effect declared below.
-  useEffect(() => {
-    switchTimelineToken.current = rendererMarks.startSwitch(
-      workspaceSelectionGeneration,
-    );
-  }, [workspaceSelectionGeneration]);
-  const markCurrentSwitchPhase = useCallback(
-    (phase: SwitchCompletionPhase, details?: SwitchPhaseDetails) => {
-      const token = switchTimelineToken.current;
-      if (
-        token === null ||
-        token.selectionGeneration !== workspaceSelectionGeneration
-      ) {
-        return false;
-      }
-      return rendererMarks.markSwitchPhase(token, phase, details);
-    },
-    [workspaceSelectionGeneration],
-  );
-  const workspaceReadyGate = useRef<{
-    workspaceId: string;
-    selectionGeneration: number;
-    promise: Promise<void>;
-    resolve: () => void;
-    superseded: boolean;
-  } | null>(null);
-  if (
-    workspaceReadyGate.current?.workspaceId !== workspaceId ||
-    workspaceReadyGate.current.selectionGeneration !== workspaceSelectionGeneration
-  ) {
-    if (workspaceReadyGate.current) {
-      workspaceReadyGate.current.superseded = true;
-      workspaceReadyGate.current.resolve();
-    }
-    const { promise, resolve } = Promise.withResolvers<void>();
-    workspaceReadyGate.current = {
-      workspaceId,
-      selectionGeneration: workspaceSelectionGeneration,
-      promise,
-      resolve,
-      superseded: false,
-    };
-  }
-  const workspaceAdmission = workspaceReadyGate.current!;
-  useEffect(
-    () => () => {
-      workspaceAdmission.superseded = true;
-      workspaceAdmission.resolve();
-    },
-    [workspaceAdmission],
-  );
-  const [workspaceReadyFor, setWorkspaceReadyFor] = useState<{
-    workspaceId: string;
-    selectionGeneration: number;
-  } | null>(null);
-  const workspaceIsReady =
-    workspaceReadyFor?.workspaceId === workspaceId &&
-    workspaceReadyFor.selectionGeneration === workspaceSelectionGeneration;
   const { agentSetup } = useAgentSetup(
     workspaceId,
     props.userSettings,
@@ -947,16 +853,6 @@ export function DesktopWorkspaceShell(props: {
   useEffect(() => {
     noteWorkspaceLabel(workspaceId, workspaceName(props.workspace));
   }, [workspaceId, props.workspace]);
-  // Every workbench destination change invalidates an in-flight canonical DM
-  // lookup. Kept beside the central mutateWb seam so file/graph/history/tab
-  // navigation cannot be missed by a one-off opener.
-  const dmNavigationRequest = useRef({ workspaceId, sequence: 0 });
-  if (dmNavigationRequest.current.workspaceId !== workspaceId) {
-    dmNavigationRequest.current = {
-      workspaceId,
-      sequence: dmNavigationRequest.current.sequence + 1,
-    };
-  }
   const refreshShareViewRef = useRef<(trigger?: "manual" | "background" | "press-burst") => Promise<ShareViewRefresh>>(async () => "current");
   const retryRefusedSharedView = useCallback(() => {
     void refreshShareViewRef.current();
@@ -1694,30 +1590,6 @@ export function DesktopWorkspaceShell(props: {
   // when the restore lands.
   const [restoredTabPaths, setRestoredTabPaths] = useState<ReadonlySet<string>>(
     () => new Set<string>(),
-  );
-
-  // The one mutation seam for workbench state: every user-driven transition
-  // routes through here. Loading stored state and restored-tab pruning are
-  // the only other writers.
-  const mutateWb = useCallback(
-    (updater: (state: WorkbenchState) => WorkbenchState) => {
-      // A pending canonical DM navigation loses to a DESTINATION change, not
-      // to every workbench write. Most writes here are not one: a panel resize
-      // commits its final size, and the share-mount poll reaches this seam with
-      // no user involved at all — cancelling on those would silently discard a
-      // DM the user had just clicked.
-      const current = wbRef.current;
-      const next = updater(current);
-      if (next === current) return;
-      if (
-        next.activeEditorGroup !== current.activeEditorGroup ||
-        activeTabPath(next) !== activeTabPath(current)
-      ) {
-        invalidateDmNavigation(dmNavigationRequest);
-      }
-      writeWb(next);
-    },
-    [writeWb],
   );
 
   const sidebarSettings = props.userSettings?.settings.sidebar ?? DEFAULT_SIDEBAR_SETTINGS;
@@ -5016,11 +4888,7 @@ export function DesktopWorkspaceShell(props: {
       // as decided as this one.
       syncStatusLane.commit(token, status);
       setCaptureDecidedFor(workspaceId);
-      workspaceAdmission.resolve();
-      setWorkspaceReadyFor({
-        workspaceId,
-        selectionGeneration: workspaceSelectionGeneration,
-      });
+      admitWorkspace();
       setWorkspaceOpenFailedFor(null);
 
       const refreshInitialFiles = async () => {
@@ -5054,6 +4922,7 @@ export function DesktopWorkspaceShell(props: {
     setCaptureDecidedFor,
     syncStatusLane,
     workspaceAdmission,
+    admitWorkspace,
   ]);
 
   // Main also sets drafts aside while the workspace is open, such as the text
@@ -6682,7 +6551,7 @@ export function DesktopWorkspaceShell(props: {
     : (version: { id: string; name: string }) =>
         setShareTarget({ kind: "version", versionId: version.id, versionName: version.name });
   return (
-    <WorkspaceSessionProvider workspaceId={workspaceId}>
+    <WorkspaceSessionProvider workspaceId={workspaceId} stopped={workspaceStopped}>
     <AgentSettingsProvider settings={props.userSettings?.settings ?? null}>
     <AgentColorContext.Provider value={setAgentColor}>
     <CustomizeContext.Provider value={customizeContext}>

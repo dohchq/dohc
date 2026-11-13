@@ -48,6 +48,29 @@ describe("useWorkspaceQuery", () => {
     expect(sessions.size).toBe(3);
   });
 
+  it("drops an answer from before a stop once the workspace can be edited again", async () => {
+    const first = deferred<string>();
+    const read = vi.fn().mockReturnValueOnce(first.promise).mockResolvedValue("after the stop");
+    const sessions = new Set<WorkspaceSession>();
+    let files!: WorkspaceQuery<string>;
+    function Files() {
+      const session = useWorkspaceSession();
+      sessions.add(session);
+      files = useWorkspaceQuery(session, { key: "files", load: read });
+      return null;
+    }
+    const show = (stopped: boolean) => <WorkspaceSessionProvider workspaceId="A" stopped={stopped}><Files /></WorkspaceSessionProvider>;
+    // Forget stops the window, and activating the workspace again lets it edit, with the shell still mounted.
+    const view = render(show(false));
+    view.rerender(show(true));
+    expect(sessions.size).toBe(1);
+    view.rerender(show(false));
+    await act(async () => { first.resolve("before the stop"); });
+    expect(files).toMatchObject({ value: "after the stop", pending: false });
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(sessions.size).toBe(2);
+  });
+
   // React retires and starts the owner again when it hides and shows its
   // subtree: here with Activity, and also when a Suspense boundary suspends again.
   async function hideAndShowWhileReading(manual: boolean) {
