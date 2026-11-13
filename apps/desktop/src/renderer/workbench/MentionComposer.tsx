@@ -67,8 +67,11 @@ export interface MentionComposerHandle {
 }
 
 export interface FileMentionCandidate {
+  // The path the link names.
   path: string;
   label: string;
+  // Where this workspace keeps the file, when that differs from the link's path.
+  readPath?: string;
 }
 
 export type CatalogRowId = "poll" | "mention" | "file";
@@ -511,7 +514,7 @@ export function MentionComposer(props: {
         });
         return;
       }
-      void load(candidate.path)
+      void load(candidate.readPath ?? candidate.path)
         .then((headings) => {
           if (request !== fileRequest.current || load !== currentFileLoader.current) return;
           setFileStage({

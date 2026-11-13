@@ -11,6 +11,7 @@ import {
   emitCloudSessionChanged,
   renderView,
   navigatorView,
+  mentionRoster,
 } from "./ChatsView.testHarness";
 
 // --- Shared channels (MU-C4) -----------------------------------------------
@@ -596,11 +597,15 @@ describe("ChatsView shared channels (MU-C4)", () => {
       "You left this group. You can still read it.",
     );
   });
-  it("offers only the files a joined Group's folder holds, and every file in a Group not shared", async () => {
+  it("offers a joined Group's mounted files by the Group's paths, and every file in a Group not shared", async () => {
+    // This workspace's own team/ folder is not the Group's. The Group's files
+    // are its share's mount, which the Group's messages name by the owner's paths.
     const workspaceFiles = [
-      { path: "team/plan.md", kind: "file" as const },
+      { path: "team/mine.md", kind: "file" as const },
       { path: "finance/budget.md", kind: "file" as const },
+      { path: "shared-with-me/owner/team/plan.md", kind: "file" as const },
     ];
+    const shareMounts = [{ shareId: "share-in", label: "owner" }];
     bridgeMock.listChatChannels.mockResolvedValue({
       channels: [
         channel({
@@ -633,15 +638,27 @@ describe("ChatsView shared channels (MU-C4)", () => {
         .queryAllByTestId("chats-new-thread-file-mention-option")
         .map((option) => option.getAttribute("data-path"));
     };
-    renderView(vi.fn(), vi.fn(), { workspaceFiles });
+    renderView(vi.fn(), vi.fn(), { workspaceFiles, shareMounts });
     await userEvent.click(await screen.findByTestId("chats-channel"));
     await screen.findByTestId("chats-joined-banner");
     expect(await offered()).toEqual(["team/plan.md"]);
     cleanup();
 
+    // Without the Group's mount, it offers none of this workspace's own files.
+    // The roster keeps the menu open to show that.
+    renderView(vi.fn(), vi.fn(), { workspaceFiles, mentionCandidates: mentionRoster });
+    await userEvent.click(await screen.findByTestId("chats-channel"));
+    await screen.findByTestId("chats-joined-banner");
+    expect(await offered()).toEqual([]);
+    cleanup();
+
     bridgeMock.listChatChannelShares.mockResolvedValue(shareListing());
     renderView(vi.fn(), vi.fn(), { workspaceFiles });
     await userEvent.click(await screen.findByTestId("chats-channel"));
-    expect((await offered()).sort()).toEqual(["finance/budget.md", "team/plan.md"]);
+    expect((await offered()).sort()).toEqual([
+      "finance/budget.md",
+      "shared-with-me/owner/team/plan.md",
+      "team/mine.md",
+    ]);
   });
 });
