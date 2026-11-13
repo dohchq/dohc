@@ -88,7 +88,6 @@ export type AboutNotices = {
 
 export type AccessSetup = {
   reason: AccessReason;
-  // The server's address, when dohc knows it.
   server?: string | null;
   openSyncSettings: () => void;
   connect: () => void;
@@ -117,7 +116,6 @@ export const ABOUT_ROW_BUTTON = `${ABOUT_ROW} cursor-pointer hover:bg-hover hove
 const ABOUT_TWO_LINES =
   "grid h-12 w-full min-w-0 cursor-pointer grid-cols-[18px_minmax(0,1fr)_auto] content-center gap-x-2 rounded-md px-2 text-left text-[13px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink dohc-focus-row";
 
-// The open object: its mark, its name, then who is here.
 export function AboutHeader(props: { subject: { path: string } | AboutConversation }) {
   const { subject } = props;
   const name = "path" in subject ? basenameOf(subject.path) : subject.name;
@@ -238,7 +236,6 @@ export function AboutSection(props: {
   );
 }
 
-// An icon control in a section's head, as the Explorer's heads have.
 export function AboutSectionAction(props: {
   testId: string;
   label: string;
@@ -421,8 +418,6 @@ export function useSectionRead<View>(key: string, identity: string, notices: Abo
   return { view: state.key === key ? state.view : LOADING, begin, cancel };
 }
 
-// ---- Links ----
-
 type LinkEntry = NonNullable<LinksInResult>["entries"][number];
 
 // A list read a page at a time. A read again from the start reads on until it
@@ -475,7 +470,6 @@ function asksMore(guard: ReadGuard, seen: boolean | undefined): boolean {
   if (guard.reading === "start" && !seen) guard.moreAfter = true;
   return guard.reading === null;
 }
-// The read that ends, if it is still the newest: whether Show more waits on it.
 function readEnds(guard: ReadGuard, landed: boolean): boolean {
   const more = guard.moreAfter && landed;
   guard.reading = null;
@@ -497,7 +491,6 @@ export function AboutLinks(props: {
   expanded: boolean;
   onToggle: () => void;
   onOpenLink: (path: string, line: number) => void;
-  // Where this workspace's chats can be read: what opens a chat that links here.
   onOpenChat?: (mention: ChatFileMentionRecord) => void;
   notices: AboutNotices;
 }) {
@@ -583,7 +576,6 @@ export function AboutLinks(props: {
     async (from: { after?: ReadyChatLinks; again?: ReadyChatLinks; restarted?: boolean }) => {
       const request = beginChats();
       chatsGuard.current.reading = from.after ? "more" : "start";
-      // A row repeated across pages shows once.
       const rows = new Map(
         (from.after?.rows ?? []).map((row) => [row.attachment.attachmentId, row]),
       );
@@ -833,7 +825,6 @@ function LinkRow(props: { link: LinkEntry; onOpen: () => void }) {
 export const OFFSCREEN_ROW = "[content-visibility:auto] [contain-intrinsic-size:auto_28px]";
 const OFFSCREEN_TWO_LINES = "[content-visibility:auto] [contain-intrinsic-size:auto_48px]";
 
-// What makes a row the same row from one page to the next.
 const linkKey = (link: LinkEntry) => `${link.source}\0${link.ordinal}`;
 const chatLinkKey = (mention: ChatFileMentionRecord) => mention.attachment.attachmentId;
 
@@ -1052,8 +1043,6 @@ export function AboutLinksView(props: {
     </AboutSection>
   );
 }
-
-// ---- History ----
 
 // The file History asks about. Its object id comes from the file's chats
 // read: loading until that answers, updating while the engine still reads the
@@ -1304,8 +1293,6 @@ export function AboutHistoryView(props: {
   );
 }
 
-// ---- Access ----
-
 export type AccessView =
   | typeof LOADING
   | { status: "ready"; answer: AccessAnswer }
@@ -1350,7 +1337,6 @@ function emptyWithin(answer: AccessAnswer, noun: AccessNoun): EmptyWithin | null
   return answer.freshness === "unknown" || kind === "unavailable" ? null : EMPTY_WITHIN[kind](noun);
 }
 
-// The one row an answer with nobody else shows.
 function OnlyYou() {
   return (
     <span

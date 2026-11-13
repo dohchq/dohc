@@ -139,7 +139,6 @@ export function LinkedChatsPanel(props: {
     // History stopped recording, so its section says so.
     paused: boolean;
     onOpenMoment: (momentId: string, filePath: string) => void;
-    // Opens the workspace's History view.
     onOpenHistory: () => void;
   };
   // The links into the file, read again as `revision` changes. Chats that
@@ -171,7 +170,6 @@ export function LinkedChatsPanel(props: {
     token: number;
     focusMessageId?: string;
   } | null>(null);
-  // The comment being written on the whole file, while its composer is open.
   const [commenting, setCommenting] = useState<string | null>(null);
   const [composer, setComposer] = useState("");
   const [sending, setSending] = useState(false);

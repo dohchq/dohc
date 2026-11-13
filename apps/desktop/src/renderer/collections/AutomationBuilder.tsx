@@ -186,7 +186,6 @@ const OPERATOR_LABELS: Record<ConditionOperator, string> = {
   contains: "contains",
 };
 
-// What the file contract's codes mean for a person building an automation.
 const DIAGNOSTIC_SENTENCES: Partial<Record<AutomationDiagnostic["code"], string>> = {
   "empty-value": "Fill this in before you save.",
   "step-needs-record": "This trigger has no record to set fields on.",
@@ -488,7 +487,6 @@ const INPUT_KIND_LABELS: Record<InputKind, string> = {
   list: "List",
   formula: "Formula",
 };
-// What each kind starts from when a person picks it.
 const INPUT_KIND_STARTS: Record<InputKind, AutomationValue> = {
   text: { kind: "literal", value: "" },
   number: { kind: "literal", value: "" },
@@ -716,7 +714,6 @@ function ConditionEditor(props: {
           onChange((current) => ({
             ...current,
             mode,
-            // A formula starts from what the rows said.
             formula:
               mode === "formula" && current.mode === "rows"
                 ? (props.expression ?? "")
@@ -1027,7 +1024,6 @@ function withFindConditions(entries: StepEntry[], findKind: FindKind): StepEntry
   return changed ? next : entries;
 }
 
-/** Every other Collection a step names, once each, in reading order. */
 function pathsIn(entries: readonly StepEntry[]): string[] {
   return [
     ...new Set(
@@ -1091,7 +1087,6 @@ function entriesInOrder(
     index: number;
     number: number;
     scope: readonly Binding[];
-    /** The Ifs around the entry. */
     depth: number;
   }> = [];
   const walk = (
@@ -1115,7 +1110,6 @@ function entriesInOrder(
   return all;
 }
 
-/** `entries` with the list `id` changed by `change`. */
 function changeList(
   entries: StepEntry[],
   id: ListId,
@@ -1354,7 +1348,6 @@ function conditionDraftOf(
 interface Draft {
   name: string;
   when: AutomationTrigger;
-  /** Only if. */
   condition: ConditionDraft;
   /** What a record starts to match. While that trigger is chosen, its condition is built from this. */
   matching: ConditionDraft;
@@ -1525,7 +1518,6 @@ export function AutomationBuilder(props: {
     field: string,
   ): CollectionFieldType | null =>
     fields?.find((candidate) => candidate.name === field)?.type ?? null;
-  /** The Collection main lists at `path`, or undefined. */
   const targetAt = (path: string) => targets?.find((target) => target.path === path);
   /** Why the reach check stops a dataset's operation, as main lists it, or null. */
   const operationStop = (path: string, name: string) => {
@@ -2051,7 +2043,6 @@ export function AutomationBuilder(props: {
           (name) => !recordFields.some((field) => field.name === name),
         )
       : [];
-  // What Chosen fields lists, in the order it keeps them.
   const fieldChoices = [...missingFields, ...recordFields.map((field) => field.name)];
   const lacks = (fields: readonly FieldDefinition[], name: string) =>
     moved && name !== "" && !fields.some((field) => field.name === name);
@@ -2730,7 +2721,6 @@ export function AutomationBuilder(props: {
     const find = editableFindOf(entry);
     const action = actionOf(step);
     const wake = ownWake(step);
-    // Whose agent another person's Wake agent step wakes, as main lists them.
     const owner =
       step.kind === "wake-agent"
         ? people?.find((person) => person.userId === step.person)
@@ -3741,7 +3731,6 @@ export function AutomationBuilder(props: {
     const actions = target.operations.filter((operation) => operation.kind === "action");
     return (actions.find((operation) => operation.stopped === null) ?? actions[0])?.name;
   };
-  // Other datasets a new action step can run an action in.
   const actionTargets = (targets ?? []).filter(
     (target): target is DatasetTarget =>
       target.kind === "dataset" &&

@@ -7,7 +7,6 @@ export interface CommandContext {
   // The share view this workspace is, or null for an ordinary workspace.
   shareView: ShareViewWriteScope | null;
   activeDocumentKind: string | null;
-  // Whether the active editor's file has a Share button.
   activeDocumentShareable: boolean;
   pinnedApps: readonly { root: string; label: string }[];
   updateStatus: UpdateStateEvent["status"] | null;

@@ -119,7 +119,6 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
     !showsSearchHit &&
     tab?.kind === "chat" &&
     (tab.target.kind === "channel" || tab.target.kind === "dm");
-  // Null for a tab that is not a conversation's.
   const published = useAboutConversation(workspaceId, conversationTab ? focusedTabPath : null);
   const conversation = conversationTab ? published : null;
   const [conversationSections, setConversationSections] = useState(CONVERSATION_SECTIONS_OPEN);

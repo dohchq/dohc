@@ -25,7 +25,6 @@ export type FrontmatterEntry = {
   rawValue?: unknown;
   // A list of text, shown and edited as its items with commas between them.
   list?: true;
-  // Why the value shows but can't be edited here.
   readOnly?: string;
 };
 

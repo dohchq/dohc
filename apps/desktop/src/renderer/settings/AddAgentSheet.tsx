@@ -151,7 +151,6 @@ export function AddAgentSheet(props: {
   toolState: (tool: "claude" | "codex") => ToolTileState | null;
   detectionFailed: boolean;
   hue: AgentHue;
-  // The MCP config for an agent with this id, or null when this workspace has none.
   mcpConfig: (agentId: string) => string | null;
   mcpUnavailable: string | null;
   // The id an agent you run would get.

@@ -47,7 +47,6 @@ export const CONFLICT_COMBINED_EDIT_MAX_BYTES = 1024 * 1024;
 export const CONFLICT_HEALTHY_DOCUMENT_MAX_BYTES = 496_029;
 
 type ConflictPreview = {
-  /// The text the pane paints.
   text: string;
   /// How much the window held back, in UTF-16 code units. Zero means the pane
   /// shows the whole side.
@@ -107,8 +106,6 @@ function isHighSurrogate(code: number): boolean {
   return code >= 0xd800 && code < 0xdc00;
 }
 
-/// What one change to the combined copy does: it is taken, or it is refused
-/// for being past the editing bound and the attempted size is reported.
 type CombinedChange = { accepted: true; text: string } | { accepted: false; refusedBytes: number };
 
 /// The decision behind every keystroke in the combine textarea.

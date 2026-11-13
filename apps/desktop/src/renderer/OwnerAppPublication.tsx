@@ -452,7 +452,6 @@ function AccessRows({ access }: { access: Access }) {
         {access.name}
       </span>
       <dl className="col-start-2 m-0 mt-2 grid grid-cols-[88px_minmax(0,1fr)] gap-x-2 gap-y-1 text-[13px]">
-        {/* Each label sits on its first line. */}
         {access.reads.length ? (
           <>
             <dt className="flex items-center gap-2 self-start text-muted">

@@ -485,7 +485,6 @@ function AddPeople(props: {
     const pasted = event.clipboardData.getData("text");
     if (busy || !/[\s,;<]/.test(pasted.trim())) return;
     event.preventDefault();
-    // The paste replaces the selection, as it would in any field.
     const input = event.currentTarget;
     const before = text.slice(0, input.selectionStart ?? text.length);
     const after = text.slice(input.selectionEnd ?? text.length);

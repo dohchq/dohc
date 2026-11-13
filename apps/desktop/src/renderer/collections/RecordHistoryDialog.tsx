@@ -230,7 +230,6 @@ export function RecordHistoryDialog(props: {
   const [page, setPage] = useState<{ entries: RecordHistoryEntry[]; next: number | null } | null>(
     null,
   );
-  // The page being read: the first, or the one after the last shown.
   const [loading, setLoading] = useState<"first" | "older" | null>(null);
   // A page could not be read, so the dialog says so and offers Try again inside it; null when none failed.
   const [failed, setFailed] = useState<number | "first" | null>(null);

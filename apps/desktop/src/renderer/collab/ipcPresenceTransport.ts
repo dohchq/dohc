@@ -56,7 +56,6 @@ export function createIpcPresenceTransport(scope: PresenceScopeInput): PresenceT
       if (signal.aborted) throw new DOMException("Aborted", "AbortError");
       const pollId = nextPollId();
       const onAbort = () => {
-        // Tell main to abort the in-flight relay long-poll for this poll id.
         void bridge()
           .presenceCancel({ pollId })
           .catch(() => undefined);

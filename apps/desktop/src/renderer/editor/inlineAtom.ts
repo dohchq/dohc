@@ -143,7 +143,6 @@ function parseInner(inner: string, start: number, end: number, raw: string): Inl
   // expression-like braces remain ordinary prose.
   if (colon === -1) return null;
 
-  // Value: key : scalar
   const key = body.slice(0, colon).trim();
   const rawValue = body.slice(colon + 1).trim();
   if (!IDENT.test(key) || rawValue.length === 0) return null;
@@ -192,6 +191,5 @@ function parseInner(inner: string, start: number, end: number, raw: string): Inl
   if (DATE.test(rawValue)) {
     return { kind: "value", start, end, raw, key, value: rawValue, valueType: "date" };
   }
-  // Bare string.
   return { kind: "value", start, end, raw, key, value: rawValue, valueType: "string" };
 }

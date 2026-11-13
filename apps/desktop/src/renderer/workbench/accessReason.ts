@@ -19,7 +19,6 @@ export type AccessFacts = {
 };
 export type AccessContext = {
   facts: AccessFacts;
-  // The server this workspace syncs with, when it syncs.
   server?: string | null;
   openSyncSettings: () => void;
   connect: () => void;
@@ -29,7 +28,6 @@ export type AccessContext = {
   sharing?: boolean;
 };
 
-// A server by its host, as a person reads its address: sync.example.org.
 export function serverName(server: string): string {
   try {
     return new URL(server).host;

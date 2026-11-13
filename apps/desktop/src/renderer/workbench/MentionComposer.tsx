@@ -67,7 +67,6 @@ export interface MentionComposerHandle {
 }
 
 export interface FileMentionCandidate {
-  // The path the link names.
   path: string;
   label: string;
   // Where this workspace keeps the file, when that differs from the link's path.
@@ -216,7 +215,6 @@ export function MentionComposer(props: {
 }) {
   const [focused, setFocused] = useState(false);
   const pollDraft = props.onPollChange ? (props.poll ?? null) : null;
-  // The open poll's choices; null while no poll is open.
   const poll = openPollChoices(pollDraft);
   const expanded = props.surface !== "post" || focused || props.value.length > 0 || poll !== null;
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -1020,7 +1018,6 @@ export function MentionComposer(props: {
           }
           beforeInput.current = null;
           setCaret(nextCaret);
-          // Open the menu whenever the caret sits inside a mention or a / token.
           setMenuOpen(menuQueryAt(nextValue, nextCaret));
           setHighlight(0);
           props.onChange(nextValue);

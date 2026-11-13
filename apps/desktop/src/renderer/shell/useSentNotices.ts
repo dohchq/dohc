@@ -25,7 +25,6 @@ const noticeKey = (
   { store, noticeId, refusalCoordinates }: NoticeRef,
 ): string => JSON.stringify([account, store, noticeId, refusalCoordinates]);
 
-// One list from main: the signed-in account it shows, and its rows.
 interface Listed {
   account: string | null;
   notices: readonly NoticeRow[];
@@ -61,7 +60,6 @@ function without(held: HeldMarks, keys: readonly string[]): HeldMarks {
 }
 
 export interface SentNotices {
-  // The signed-in account the notices belong to.
   account: string | null;
   // Newest first, as main lists them.
   notices: readonly NoticeRow[];

@@ -252,7 +252,6 @@ export function groupAgentAuthorName(
     : undefined;
 }
 
-// Whether a moment's author at `index` is a connected agent, which takes the plug.
 function connectedAuthor(
   moment: Pick<EngineMomentRecord, "authorPresentations">,
   index: number,
@@ -270,7 +269,6 @@ function soleAuthorKey(moment: EngineMomentRecord): string | undefined {
   if (author.kind === "agent") {
     return `agent:${JSON.stringify([author.agentId, author.agentName ?? null, moment.authorPresentations?.[0]?.self === true])}`;
   }
-  // A person the owner shared with, writing directly.
   if (author.kind === "named") return `named:${author.userId}`;
   return author.kind === "human" ? `human:${author.humanId}` : undefined;
 }
@@ -516,7 +514,6 @@ function missingSourcesShort(
     : null;
 }
 
-// The sentences that say what a partial timeline is missing.
 export function missingSourcesWords(
   unavailable: readonly { datasetId: string }[],
   omitted: number,
@@ -737,7 +734,6 @@ export function MomentName(props: {
   );
 }
 
-// A protected file's change shows no contents; a binary one shows bytes.
 function ContentMark(props: { moment: EngineMomentRecord }) {
   if (props.moment.protected) {
     return (
@@ -889,7 +885,6 @@ function HiddenWords(props: { id: string; children: string }) {
   );
 }
 
-// What a collapsed run or pass says when the open change is inside it.
 const HOLDS_OPEN = "Includes the open change";
 
 // One change, in the workspace's History or in one file's. Selecting it
@@ -902,7 +897,6 @@ export function HistoryRow(props: {
   context: "workspace" | "file";
   // A file in a multi-file pass, or an earlier edit in a run.
   nested?: "pass" | "run";
-  // The change open in the focused editor group.
   selected?: boolean;
   fold?: {
     count: number;
@@ -1175,7 +1169,6 @@ function VersionMarkerRow(props: { version: VersionEntry["version"] }) {
         <Layers size={14} aria-hidden />
       </span>
       <span className={LINE_TWO}>
-        {/* The version's name takes the ink a file's name does. */}
         <span className="min-w-0 truncate">
           {props.version.kind === "main" ? (
             versionMarkerTitle(props.version)
@@ -1369,7 +1362,6 @@ export function EngineHistoryView(props: {
   unavailableSources?: readonly { datasetId: string }[];
   omittedSources?: number;
   collections?: HistoryCollections;
-  // Reads the newest page again, which starts a new source chain.
   onRetry?: () => void;
   // History stopped recording, so this page may be missing changes.
   paused?: boolean;

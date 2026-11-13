@@ -36,7 +36,6 @@ export function buildTree(
     childrenBySegment: new Map(),
   };
 
-  // Ensure every explicit folder has a node (even if empty).
   for (const folder of folders) ensurePathNode(root, folder);
 
   for (const file of files) {

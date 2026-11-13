@@ -139,7 +139,6 @@ export function SettingsDialog(props: {
     identity?: string,
   ) => void;
   onClearError?: (identity: string) => void;
-  /** A change that went through, with its Undo. */
   onNotice?: (message: string, undo?: () => void) => void;
   /** Each workspace settings answer, so the shell can say what the file ignored. */
   onWorkspaceSettingsRead?: (read: WorkspaceSettingsResult) => void;
@@ -164,7 +163,6 @@ export function SettingsDialog(props: {
   // the one a sign-in notice names. Each request is a new object.
   openAgent?: { agentId: string };
   onClose: () => void;
-  /** The shell's server connection for this workspace, for Sync and sharing. */
   cloud?: CloudSettings;
   /** Closes Settings and opens the Sharing view on a lane or a share search found. */
   onOpenSharing?: (target: SharingFocus) => void;

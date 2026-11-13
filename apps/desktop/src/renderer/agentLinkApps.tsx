@@ -74,7 +74,6 @@ export function AgentLinkAppMenu(props: {
   const picked = useRef<string | null>(null);
   const current = useRef(setups);
   current.current = setups;
-  // Whether the open list is showing a row's answer.
   const answered = useRef(false);
   const reportTo = useRef(report);
   reportTo.current = report;

@@ -292,7 +292,6 @@ export function StopAndRestoreDialog({
   start: StopAndRestoreStart;
   /** Files put back and the outcome shown, per person or link, kept by the shell across tries and closes. */
   receipts: ReturnType<typeof useStopAndRestore>["receipts"];
-  /** Opens the dialog again for `target` and runs `action`. */
   onRetry(workspaceId: string, target: StopTarget, action: "stop" | "undo"): void;
   onClose(): void;
   onBeforeRestore(): Promise<() => void>;

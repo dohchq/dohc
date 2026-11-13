@@ -7,7 +7,6 @@ import type { WorkspaceSummary } from "../ipc/bridgeContract";
 const SETTINGS_SYNC = "Settings › Sync and sharing";
 const READDED = "A share added again with its code arrives as a new folder.";
 
-// "A", "A and B", "A, B and C", then "A, B, C and 2 more".
 export function namesList(names: readonly string[]): string {
   if (names.length <= 1) return names[0] ?? "";
   if (names.length <= 3) return `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;

@@ -6,7 +6,6 @@
 // `failed` once one did not. A failure stands until a new reveal.
 export type InvitationList = "waiting" | "listed" | "failed";
 
-// What Chats has seen of the invitation since the reveal began.
 export interface InvitationProgress {
   // A row that stands for the invitation is mounted (ShareRowMark).
   rowMounted: boolean;

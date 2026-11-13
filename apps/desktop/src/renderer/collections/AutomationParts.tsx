@@ -2,8 +2,6 @@ import type { LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import type { SentencePart } from "./automationSentence";
 
-// Small parts the ⚡ panel and the builder share.
-
 /** How a schedule's next run reads, in this computer's time. */
 export const RUN_TIME: Intl.DateTimeFormatOptions = {
   weekday: "short",

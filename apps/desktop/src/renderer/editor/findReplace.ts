@@ -254,7 +254,6 @@ export function makeFindReplacePlugin() {
   });
 }
 
-// Find again works from the document while the bar has a query.
 function findAgain(view: EditorView, step: "next" | "prev"): boolean {
   const find = findReplaceKey.getState(view.state);
   if (!find?.open || !find.query) return false;

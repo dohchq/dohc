@@ -63,7 +63,6 @@ export type JoinedCommit = {
   ownsLane: boolean;
 };
 
-// What the joined lane remembers between reads.
 export type JoinedLaneOrder = {
   // The workspace these entries are about. They are cleared when it changes,
   // and the state carries the identity rather than a caller remembering to
@@ -110,7 +109,6 @@ export function answerLocally(
 export function planJoinedCommit(
   order: JoinedLaneOrder,
   input: {
-    // The workspace this response is about. The order forgets any other.
     workspaceId: string;
     ticket: number;
     answers: readonly JoinedChannelAnswer[];
@@ -132,7 +130,6 @@ export function planJoinedCommit(
   for (const answer of writable) order.answeredAt.set(answer.channelWireId, ticket);
   let keep: Set<string> | null = null;
   if (newestForLane) {
-    // A channel this read named is answered by a read from now on.
     for (const answer of answers) order.local.delete(answer.channelWireId);
     if (shown !== null) {
       keep = new Set([...answers.map((answer) => answer.channelWireId), ...shown, ...order.local]);

@@ -20,7 +20,6 @@ export interface DirectWriteNotice {
   kind: DirectWriteNoticeKind;
   message: string;
   retry: (() => void) | null;
-  // Sends the waiting changes for the owner to review.
   send: { label: string; run: () => void } | null;
 }
 

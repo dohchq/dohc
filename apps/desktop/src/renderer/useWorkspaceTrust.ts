@@ -14,7 +14,6 @@ import { bridge } from "./bridge";
 export function useWorkspaceTrust(
   workspaceId: string,
   enabled: boolean,
-  // A failed read, with a way to read again.
   onReadError?: (error: unknown, retry: () => void) => void,
 ) {
   const [answer, setAnswer] = useState<WorkspaceTrustAnswer | null>(null);

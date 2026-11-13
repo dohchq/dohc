@@ -59,7 +59,6 @@ export const volunteers: DatasetDefinition = {
     },
   ],
 };
-/** Ice made Email unique, then Claude Code added Due date and removed Notes. */
 const iceEdit: DatasetDefinition = structuredClone(volunteers);
 iceEdit.tables[0]!.fields[1] = {
   fieldId: id(4),

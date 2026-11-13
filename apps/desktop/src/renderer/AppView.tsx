@@ -196,7 +196,6 @@ export function useAppView(options: {
     else webview.current?.reload();
   }, [launch]);
 
-  // Today's path: launch the approved app for the browser and hand it its loopback address.
   const openInBrowser = useCallback(async () => {
     if (!publicationId || !alive.current) return;
     const { workspaceId, appRoot, reportError } = latest.current;

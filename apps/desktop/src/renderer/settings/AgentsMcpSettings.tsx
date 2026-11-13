@@ -13,9 +13,7 @@ import { AgentList } from "./AgentList";
 
 export function AgentsMcpSettings(props: {
   workspaceId: string;
-  // What the open workspace goes by, for its agent link.
   workspaceName: string;
-  // The personal agent whose page opens, by id, such as one a notice names.
   openAgent?: { agentId: string };
   onError?: (
     message: string,

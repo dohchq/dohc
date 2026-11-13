@@ -4,7 +4,6 @@ import { windowFocused } from "../windowFocus";
 // can already see is skipped.
 const shown = new Map<string, Set<Element>>();
 
-// Marks an element as showing a chat until the returned function runs.
 export function showChat(threadId: string, element: Element): () => void {
   const elements = shown.get(threadId) ?? new Set<Element>();
   elements.add(element);

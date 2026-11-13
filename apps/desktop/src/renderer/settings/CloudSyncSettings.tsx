@@ -47,7 +47,6 @@ export type CloudSettings = {
   // Reads the status again. The shell ignores a call made for a workspace
   // it no longer shows.
   onChanged: () => void;
-  // Opens the connect flow.
   onConnect: () => void;
   // The server stopped accepting this computer's sign-in, which only the
   // workspace's sync status knows: the saved session still matches.

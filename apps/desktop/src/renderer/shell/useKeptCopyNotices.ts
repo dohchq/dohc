@@ -78,7 +78,6 @@ export function useKeptCopyNotices(input: {
               null,
             );
           } else {
-            // The copy and its row stay; this says why.
             latest.current.reportFailure(keptCopyNoNameMessage(copy.path), () => save(copy));
           }
           await refresh();

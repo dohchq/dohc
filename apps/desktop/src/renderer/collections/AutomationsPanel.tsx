@@ -61,11 +61,9 @@ export const AUTOMATIONS_FILE = "automations.yaml";
 
 type ErrorReport = (fallback: string, error: unknown, retry?: (() => void) | null) => void;
 
-/** What the builder edits, and what it started from. */
 interface Editing {
   /** Keeps one builder mounted while its baseline changes after a conflict. */
   session: number;
-  /** The draft the builder opens with. */
   start: Automation;
   /** What counts as unchanged. */
   baseline: Automation;
@@ -167,7 +165,6 @@ export function AutomationsNote(props: { children?: ReactNode; onClose: () => vo
   );
 }
 
-/** A new slug for a copy: "stamp-copy", then "stamp-copy-2". */
 function copyId(id: string, taken: ReadonlySet<string>): string {
   for (let index = 1; ; index += 1) {
     const suffix = index === 1 ? "-copy" : `-copy-${index}`;
