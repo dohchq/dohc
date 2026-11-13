@@ -600,6 +600,9 @@ export function ChatsView(props: {
   onSaveUserSettings?: (settings: DesktopUserSettings, base: DesktopUserSettings) => Promise<void>;
   // What the agent reaches: the workspace folder its runner is started in.
   workspacePath?: string;
+  // Set in a joined workspace, where no one posts from this view yet: every
+  // Group shows this line in place of a composer, and New group is absent.
+  postingClosed?: string;
   // Ephemeral presence/typing transport, present only under collaboration.
   collaboration?: ChatPresenceCollaboration | null;
   // Where this view lives: the side panel (default) or a full editor tab.
@@ -670,7 +673,7 @@ export function ChatsView(props: {
   // id when it mounts, and again for each newer reveal.
   onShareRowMounted?: (shareId: string) => void;
 }) {
-  const { workspaceId, onNavChange, onDraftsChange, onThreadRead, onDmRead } = props;
+  const { workspaceId, onNavChange, onDraftsChange, onThreadRead, onDmRead, postingClosed } = props;
   const collaboration = props.collaboration ?? null;
   // A stable fallback: a fresh [] per render would defeat the message-list
   // memo boundaries below for every roster-less host.
@@ -2022,7 +2025,7 @@ export function ChatsView(props: {
       // or joined. If that authority is unavailable, fail closed: treating an
       // unknown joined channel as local would re-enable writes and read-cursor
       // mutations across a permission boundary.
-      if (channelShares === null) return true;
+      if (postingClosed !== undefined || channelShares === null) return true;
       // A channel with no wire identity cannot carry a grant at all.
       if (!channel.wireId) return false;
       const answer = joinedByWire.get(channel.wireId);
@@ -2034,7 +2037,7 @@ export function ChatsView(props: {
       if (answer === null) return false;
       return answer.access === "read-only" || answer.ended;
     },
-    [channelShares, joinedByWire],
+    [channelShares, joinedByWire, postingClosed],
   );
 
   const applyThreadSnapshot = useCallback(
@@ -5264,7 +5267,7 @@ export function ChatsView(props: {
             <ComposerNotice testId="chats-readonly-note">
               {threadJoined?.ended
                 ? endedGroupNotice(threadJoined)
-                : "This group is read-only for you."}
+                : (postingClosed ?? "This group is read-only for you.")}
             </ComposerNotice>
           ) : (
             <div
@@ -5721,7 +5724,7 @@ export function ChatsView(props: {
           <ComposerNotice testId="chats-readonly-note">
             {channelJoined?.ended
               ? endedGroupNotice(channelJoined)
-              : "This group is read-only for you."}
+              : (postingClosed ?? "This group is read-only for you.")}
           </ComposerNotice>
         ) : null}
       </div>
@@ -6013,13 +6016,15 @@ export function ChatsView(props: {
             <SectionLabel as="p" data-testid="chats-channels-heading" className="min-w-0 flex-1">
               Groups
             </SectionLabel>
-            <SectionActionButton
-              testId="chats-new-channel"
-              label="New group"
-              onClick={() => setCreatingGroup(true)}
-            >
-              <Plus size={12} aria-hidden />
-            </SectionActionButton>
+            {postingClosed === undefined ? (
+              <SectionActionButton
+                testId="chats-new-channel"
+                label="New group"
+                onClick={() => setCreatingGroup(true)}
+              >
+                <Plus size={12} aria-hidden />
+              </SectionActionButton>
+            ) : null}
           </div>
           <ul className="m-0 list-none p-0">
             {activeGroups.map((channel) => groupRow(channel, false))}

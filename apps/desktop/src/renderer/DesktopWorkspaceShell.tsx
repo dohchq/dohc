@@ -2046,17 +2046,19 @@ export function DesktopWorkspaceShell(props: {
   );
 
   const sidebarSettings = props.userSettings?.settings.sidebar ?? DEFAULT_SIDEBAR_SETTINGS;
-  // A shared view has chat per file, in About, and no workspace-wide listing,
-  // so its rail offers no Chats.
+  // A path share has chat per file, in About, and no workspace-wide listing,
+  // so its rail offers no Chats. A joined workspace has its Groups, as an
+  // owned one does.
+  const chatsHidden = isShareView && props.workspace.shareView?.membership !== true;
   const railViews = useMemo(
-    () => sidebarViews(sidebarSettings).filter((view) => !(isShareView && view === "chats")),
-    [isShareView, sidebarSettings],
+    () => sidebarViews(sidebarSettings).filter((view) => !(chatsHidden && view === "chats")),
+    [chatsHidden, sidebarSettings],
   );
   // A shared view restored with Chats selected shows the Explorer from its
   // first frame. The rail, the panel and its title read the shown view; the
   // write below then corrects the saved one, so the rail's own buttons act
   // on what the person sees.
-  const restoredSharedChats = isShareView && wb.activeView === "chats";
+  const restoredSharedChats = chatsHidden && wb.activeView === "chats";
   const shownView: ActivityViewId = restoredSharedChats ? "explorer" : wb.activeView;
   const shownWb = useMemo(
     () => (restoredSharedChats ? { ...wb, activeView: shownView } : wb),
@@ -3395,6 +3397,17 @@ export function DesktopWorkspaceShell(props: {
   // surface that re-derives it drifts.
   const captureDecided = captureDecidedFor === workspaceId;
   const captureAvailable = !shareView && captureDecided && !statusSaysNoRecorder(syncStatus);
+  // A joined workspace lists its Groups from the view's own store, which
+  // needs no capture. No one posts from it yet.
+  const chatsAvailable = captureAvailable || (membershipView && captureDecided);
+  const chatsPostingClosed = membershipView
+    ? {
+        postingClosed:
+          shareAccess === "view"
+            ? "Only people who can comment post here."
+            : "This group is read-only for you.",
+      }
+    : {};
   useEffect(() => {
     if (!workspaceIsReady) return;
     void refreshHistory().catch((error) => reportShellError("Could not refresh history.", error));
@@ -7360,6 +7373,7 @@ export function DesktopWorkspaceShell(props: {
     onSaveUserSettings: saveUserSettingsFromChats,
     workspacePath: props.workspace.rootPath,
     onAgentWaitsForTrust: trustForHeldAgent,
+    ...chatsPostingClosed,
   } as const;
   // The Chats view intentionally stays on the overview and only selects editor
   // destinations. Active chat pages own the live conversations: disable the
@@ -7408,6 +7422,7 @@ export function DesktopWorkspaceShell(props: {
     onSaveUserSettings: saveUserSettingsFromChats,
     workspacePath: props.workspace.rootPath,
     onAgentWaitsForTrust: trustForHeldAgent,
+    ...chatsPostingClosed,
   } as const;
   // Chats shows that Restricted Mode holds this workspace's agent back.
   const agentsRestricted =
@@ -8367,6 +8382,7 @@ export function DesktopWorkspaceShell(props: {
                                 openPathWithHeading={openPathWithHeading}
                                 openGraphChatThread={openGraphChatThread}
                                 captureAvailable={captureAvailable}
+                                chatsAvailable={chatsAvailable}
                                 captureDecided={captureDecided}
                                 syncStatus={syncStatus}
                                 chatsNavigatorProps={chatsNavigatorProps}
@@ -8771,7 +8787,7 @@ export function DesktopWorkspaceShell(props: {
                                                     // Each loading state of the tab puts its lines at the top, so
                                                     // each one takes over from the last without blinking.
                                                     <SkeletonSlot>
-                                                      {captureAvailable ? (
+                                                      {chatsAvailable ? (
                                                         <div className="flex min-h-0 flex-1 flex-col">
                                                           {agentsRestricted ? (
                                                             <RestrictedAgentsBand

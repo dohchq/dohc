@@ -585,20 +585,14 @@ export function registerChatsIpcHandlers<
       return ResolveChatDecisionResult.parse({ resolved: chatDecisionForIpc(answered.decision) });
     });
   const listChatThreadDecisions: ChatHandler<"listChatThreadDecisions"> = async (input) => {
-    const { workspace } = await requireEngineCapture(input.workspaceId, "Chats");
-    const decisions = await linkedChatStoreFor(workspace).listThreadDecisions(
-      workspace.workspaceId,
-      input.threadId,
-    );
+    const { workspace, store } = await requireChatScope(input.workspaceId);
+    const decisions = await store.listThreadDecisions(workspace.workspaceId, input.threadId);
     return ListChatThreadDecisionsResult.parse({ decisions: decisions.map(chatDecisionForIpc) });
   };
 
   const listChatThreadAttachments: ChatHandler<"listChatThreadAttachments"> = async (input) => {
-    const { workspace } = await requireEngineCapture(input.workspaceId, "Chats");
-    const attachments = await linkedChatStoreFor(workspace).listThreadAttachments(
-      workspace.workspaceId,
-      input.threadId,
-    );
+    const { workspace, store } = await requireChatScope(input.workspaceId);
+    const attachments = await store.listThreadAttachments(workspace.workspaceId, input.threadId);
     return ListChatThreadAttachmentsResult.parse({ attachments });
   };
 
@@ -1019,9 +1013,9 @@ export function registerChatsIpcHandlers<
     input,
     { event, operation },
   ) => {
-    const { workspace } = await requireEngineCapture(input.workspaceId, "Chats");
+    // A joined workspace reads its Groups from the view's own store.
+    const { workspace, store } = await requireChatScope(input.workspaceId);
     const localFallbackAuthorId = localInstallationId();
-    const store = linkedChatStoreFor(workspace);
     const presentation = await presentationRequest(workspace, store, operation.assertCurrent);
     const viewerAuthorId = await chatViewerAuthorId({
       localFallbackAuthorId,

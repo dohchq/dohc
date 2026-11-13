@@ -152,6 +152,24 @@ describe("ChatsView channels", () => {
     expect(view.dataset.groupType).toBe("both");
     expect(screen.getByTestId("chats-group-lane-chat")).toBeTruthy();
   });
+  it("shows a joined workspace's Groups with no way to post or add a Group", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ name: "Launch team" })],
+      fileThreads: [],
+    });
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    const user = userEvent.setup();
+    renderView(vi.fn(), vi.fn(), { postingClosed: "Only people who can comment post here." });
+    await user.click(await screen.findByTestId("chats-channel"));
+    expect((await screen.findByTestId("chats-readonly-note")).textContent).toBe(
+      "Only people who can comment post here.",
+    );
+    expect(screen.queryByTestId("chats-new-thread-composer")).toBeNull();
+    await user.click(screen.getByTestId("chats-channel-back"));
+    await screen.findByTestId("chats-channels-heading");
+    expect(screen.queryByTestId("chats-new-channel")).toBeNull();
+  });
 });
 
 describe("ChatsView panel navigator unread badges", () => {

@@ -33,9 +33,27 @@ describe("a joined workspace", () => {
     await waitFor(() => expect(bridge.refreshSharedView).toHaveBeenCalledWith({ workspaceId: JOINED.workspaceId, trigger: "held" }));
     expect(screen.queryByTestId("shared-view-banner")).toBeNull();
     expect(screen.queryByTestId("shared-view-refresh")).toBeNull();
+    expect(screen.getByTestId("activity-chats")).toBeTruthy();
     fireEvent.click(screen.getByTestId("workspace-switcher"));
     expect(screen.getByTestId("workspace-switcher-level").textContent).toBe("You can comment");
     expect(screen.getAllByText("You can comment")).toHaveLength(1);
+  });
+
+  it("lists the workspace's Groups in Chats with no way to post or add a Group", async () => {
+    const bridge = makeShareBridge();
+    bridge.listChatChannels.mockResolvedValue({ channels: [{
+      id: "launch", name: "Launch team", slug: "launch-team", kind: "channel",
+      createdAtMs: 1, updatedAtMs: 1, threadCount: 1, unreadCount: 0, wireId: "launch",
+    }], fileThreads: [] });
+    bridge.listChannelThreads.mockResolvedValue({ threads: [] });
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(shell(bridge, JOINED));
+    fireEvent.click(await screen.findByTestId("activity-chats"));
+    expect((await screen.findByTestId("chats-channel")).textContent).toContain("Launch team");
+    expect(screen.queryByTestId("chats-off")).toBeNull();
+    expect(screen.queryByTestId("chats-new-channel")).toBeNull();
+    fireEvent.click(screen.getByTestId("chats-channel"));
+    expect((await screen.findByTestId("chats-readonly-note")).textContent).toBe("This group is read-only for you.");
   });
 
   it("shows the ended band and keeps the copy readable after the membership ends", async () => {

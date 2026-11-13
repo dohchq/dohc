@@ -1215,6 +1215,19 @@ describe("registered chat reads and reader-local state", () => {
     );
     expect(test.resolveEngineFiles).not.toHaveBeenCalled();
   });
+
+  // A joined workspace lists its Groups as an owned one does, so a Group's
+  // threads and their parts read from the view's own store.
+  it.each([
+    { channel: chatOperations.listChannelThreads.channel, payload: { channelId: "channel" }, method: "listChannelThreads" },
+    { channel: chatOperations.listChatThreadDecisions.channel, payload: { threadId: "thread" }, method: "listThreadDecisions" },
+    { channel: chatOperations.listChatThreadAttachments.channel, payload: { threadId: "thread" }, method: "listThreadAttachments" },
+  ] as const)("reads $method from a share view's own store", async ({ channel, payload, method }) => {
+    const test = fixture("view");
+    await test.invoke(channel, { workspaceId: "workspace", ...payload });
+    expect(test.storeMethods[method]).toHaveBeenCalledOnce();
+    expect(test.requireEngineCapture).not.toHaveBeenCalled();
+  });
 });
 
 describe("registered channels and personal chat projections", () => {
