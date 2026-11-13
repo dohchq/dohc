@@ -18,7 +18,7 @@ import { isDeepStrictEqual } from "node:util";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Scope from "effect/Scope";
-import { createEngineClient, EngineRequestError, isHostedDocumentUnready, type EngineClient } from "@dohc/workspace-engine-client/daemon";
+import { createEngineClient, EngineRequestDeadlineError, EngineRequestError, isHostedDocumentUnready, type EngineClient } from "@dohc/workspace-engine-client/daemon";
 import { OwnerYDocOutbox, VersionedLiveAdapter, type Event, type JsonValue } from "@dohc/workspace-engine-client";
 import { RecoveryCopyRefusal, sameKeptEditsIdentity, type ServiceKeptEdits, type ServiceKeptEditsIdentity } from "./storage/serviceKeptEdits.js";
 import type { LiveClaimLedger } from "./automationLiveClaims.js";
@@ -435,6 +435,15 @@ export async function startServiceLiveHost(options: {
     return closing;
   };
   const abort = () => { if (!closing) void close().catch(error => console.error("Service host shutdown failed.", error)); };
+  // An operator learns which side ended the engine: the engine itself, or the relay after a request's deadline.
+  const exited = (code: number | null, exitSignal: NodeJS.Signals | null) => {
+    console.error(closing ? "Live host engine exited after the relay stopped it." : "Live host engine exited.", {code, signal: exitSignal});
+    abort();
+  };
+  const unanswered = (cause: EngineRequestDeadlineError) => {
+    if (!closing) console.error("Live host stopped an engine that did not answer in time.", {method: cause.method, deadlineMs: cause.deadlineMs});
+    abort();
+  };
   // `waiter` names a caller whose wait for the document is logged when it passes 100 ms.
   const runDocument = async <T>(document: LiveDocumentKey, callerSignal: AbortSignal | undefined, operation: (joined: AbortSignal) => Promise<T>,
     waiter?: "application" | "pass"): Promise<T> => {
@@ -527,7 +536,7 @@ export async function startServiceLiveHost(options: {
     const native = yield* Effect.acquireRelease(Effect.promise(() => createEngineClient({ command: config.engineExecutable, authToken: randomBytes(32).toString("base64url"),
       protocolVersion: 2, capabilities: ["blobs"], privateLiveApplication: config.client, connectTimeoutMs: config.client.connectTimeoutMs,
       env: { DOHC_ENGINE_LIVE_HOST_CONFIG: nativeConfig, DOHC_ENGINE_READER_CONFIG: process.env.DOHC_ENGINE_READER_CONFIG }, signal,
-      onExit: abort, onStderr: text => console.error("[service-live-host]", text.trimEnd()),
+      onExit: exited, onStderr: text => console.error("[service-live-host]", text.trimEnd()),
     })),value => Effect.promise(() => value.waitForExit()));
     yield* Effect.acquireRelease(Effect.sync(() => {
       const stop = () => native.close();
@@ -537,7 +546,7 @@ export async function startServiceLiveHost(options: {
     // Caller input retention and native upload buffers each have their own cap.
     const queued = changes ? queueLiveHostRequests(native, {maxPendingReads: changes.maxListeners, maxPendingWrites: changes.maxListeners,
       maxRetainedInputBytes: config.client.aggregateBytes,
-      deadlineMs: config.client.requestDeadlineMs, signal, retire: abort}) : native;
+      deadlineMs: config.client.requestDeadlineMs, signal, retire: unanswered}) : native;
     // Counts each request sent through the client, and those an idle pass sends. A request the host numbers takes one of
     // its numbers whichever client method sends it. One a caller numbers itself, as the automation ledger's are, takes
     // none and is counted here alone. A pass sent only idle requests when all three counts moved alike. A connection's

@@ -439,6 +439,19 @@ it("tells the operator a document whose history is past its budget tries again l
 // Proves: a divergence whose detach failed as its daemon exited keeps the
 // store out of the replacement daemon, and is reported once.
 
+// Proves: a daemon that replaces a failed one is logged once it starts. The first daemon's start is not.
+it("logs a replacement daemon once it starts", async () => {
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
+    const started = () => log.mock.calls.filter(([message]) => message === "Live host started again after its engine ended.");
+    expect(started()).toEqual([]);
+    f.starts[0]!.controller.abort();
+    await f.waitStarted(2);
+    await vi.waitFor(() => expect(started()).toEqual([["Live host started again after its engine ended."]]));
+  } finally {log.mockRestore();}
+});
+
 // Proves: a restarted relay keeps a diverged store detached from its start,
 // before any pull could find the divergence again, and its owner still reads
 // why live editing stopped. The operator hears of it once, and no daemon starts for it.

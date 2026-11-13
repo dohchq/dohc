@@ -176,6 +176,8 @@ export async function startSelfHostedLiveHost(options: {
     try {storage.reclaimIdleLiveDocuments(Date.now());}
     catch (error) {if (!signal.aborted) options.onError?.(error);}
   }
+  // Set once a failed daemon stops, until its replacement starts.
+  let replacing = false;
   async function stopCurrent() {
     const previous = current; current = undefined;
     if (previous) await previous.close();
@@ -254,7 +256,7 @@ export async function startSelfHostedLiveHost(options: {
         }
       }
       // Only a failed daemon restarts. Membership changes update the running one.
-      if (current?.invalidated.aborted) {await stopCurrent(); signature = "";}
+      if (current?.invalidated.aborted) {await stopCurrent(); signature = ""; replacing = true;}
       selected = selection();
       const {targets, departing} = selected, next = selectionSignature(selected);
       selectedDocuments = targets.length > 0;
@@ -265,6 +267,7 @@ export async function startSelfHostedLiveHost(options: {
         if (!current && (targets.length || departing.length)) {
           try {current = await start();} catch (error) {startFailed = !signal.aborted; throw error;}
           startFailed = false;
+          if (replacing) {replacing = false; console.error("Live host started again after its engine ended.");}
         }
         // A failed update may already have changed membership, so the next reconciliation updates again.
         signature = "";

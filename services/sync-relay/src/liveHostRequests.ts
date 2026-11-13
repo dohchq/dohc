@@ -36,7 +36,7 @@ function retainedInputCharge(values: unknown[], maximum: number) {
 /** One native RPC at a time. Callers keep borrowed inputs unchanged until completion. */
 export function queueLiveHostRequests(client: EngineClient, options: {
   maxPendingReads: number; maxPendingWrites: number; maxRetainedInputBytes: number;
-  deadlineMs: number; signal: AbortSignal; retire(): void;
+  deadlineMs: number; signal: AbortSignal; retire(cause: EngineRequestDeadlineError): void;
 }): EngineClient {
   for (const value of [options.maxPendingReads, options.maxPendingWrites, options.deadlineMs]) {
     if (!Number.isSafeInteger(value) || value < 1 || value > 2_147_483_647) throw new TypeError("Invalid native request queue bound.");
@@ -78,7 +78,7 @@ export function queueLiveHostRequests(client: EngineClient, options: {
               const value = await work();
               options.signal.throwIfAborted(); caller?.throwIfAborted(); resolve(value);
             } catch (error) {
-              if (error instanceof EngineRequestDeadlineError) options.retire();
+              if (error instanceof EngineRequestDeadlineError) options.retire(error);
               reject(error);
             } finally {releaseInput(); active = false; pump();}
           })();
