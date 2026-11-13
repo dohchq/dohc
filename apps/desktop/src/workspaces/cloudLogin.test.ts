@@ -473,6 +473,19 @@ describe("cloud device-flow login", () => {
     expect(await login.status()).toEqual({ connected: false });
   });
 
+  // Signing out withdraws this computer's chat runners afterwards, with the token it just forgot
+  // (chatWakeLifetime, chatRunnerRoster). A logout that revoked the session on the server first would turn
+  // every such withdrawal into a 401, so that change must wait for the withdrawal, and update this test.
+  it("logout() asks the server nothing, so the forgotten token can still withdraw this computer's agents", async () => {
+    const store = memoryStore();
+    store.saved = { serverUrl: "https://cloud.test", relayUrl: "https://cloud.test", email: "x@y.z", userId: "usr_x", token: "t" };
+    const fetch = vi.fn<typeof globalThis.fetch>(async () => { throw new Error("Logout reached the server."); });
+    const login = createCloudLogin({ store, fetch });
+    await login.logout();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(store.saved).toBeNull();
+  });
+
   it("orders logout after an in-flight save so poll cannot restore the session", async () => {
     const saveStarted = deferred<void>();
     const releaseSave = deferred<void>();

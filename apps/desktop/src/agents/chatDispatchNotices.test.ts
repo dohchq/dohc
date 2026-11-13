@@ -58,7 +58,10 @@ it("keeps a pause per thread, and takes back only the thread that resumed", () =
 
 it("keeps every snapshot within the IPC contract, however many chats pause", () => {
   const notices = createChatDispatchNotices(vi.fn());
-  const others = ["restricted", "no-runner", "wake-unreadable", "wake-dropped", "wake-parked", "wake-unconfirmed"] as const;
+  const others = [
+    "restricted", "no-runner", "wake-unreadable", "wake-dropped", "wake-parked", "wake-unconfirmed", "wake-runners-refused",
+    "wake-runners-unreadable",
+  ] as const;
   for (const reason of others) notices.report("a", { reason, threadId: reason, message: `${reason}.` });
   for (let index = 0; index <= CHAT_DISPATCH_NOTICES_MAX; index += 1) {
     notices.report("a", { reason: "budget-paused", threadId: `t${index}`, message: `Paused in t${index}.` });

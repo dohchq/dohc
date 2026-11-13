@@ -12,6 +12,8 @@ const kinds = {
   "wake-dropped": "chat-wake-dropped",
   "wake-parked": "chat-wake-parked",
   "wake-unconfirmed": "chat-wake-unconfirmed",
+  "wake-runners-refused": "chat-wake-runners-refused",
+  "wake-runners-unreadable": "chat-wake-runners-unreadable",
 } as const satisfies Record<ChatDispatchNotice["reason"], ShellErrorKind>;
 
 // A message from your phone that this computer's agents can't take. Main's
@@ -21,6 +23,8 @@ const wakeTitles = {
   "wake-dropped": "An agent did not start for a message from your phone",
   "wake-parked": "An agent could not start for a message from your phone",
   "wake-unconfirmed": "dohc could not confirm an agent request from your phone",
+  "wake-runners-refused": "Your phone cannot wake agents on this computer",
+  "wake-runners-unreadable": "dohc could not read where this computer's agents are offered",
 } as const;
 type WakeReason = keyof typeof wakeTitles;
 const isWake = (reason: ChatDispatchNotice["reason"]): reason is WakeReason => reason in wakeTitles;
@@ -94,13 +98,16 @@ export function useChatDispatchNotices(
         shown.set(row, notice.id);
         const pausedIn = notice.channelId;
         const pausedThread = notice.threadId;
-        // Dropped is over: nothing ran here. The others stay until they end or Try again clears them.
+        // Dropped is over: nothing ran here. The others stay until they end. Try again can end all but a refusal,
+        // which ends when the agents in Settings change.
         const stuck = isWake(reason) && reason !== "wake-dropped";
+        const retries = stuck && reason !== "wake-runners-refused";
         report({
           message: notice.message, kind: kinds[reason],
           ...(reason === "budget-paused" ? { identity: row } : {}),
           ...(isWake(reason) ? { title: wakeTitles[reason] } : {}),
-          ...(stuck ? { noDismiss: true, retry: () => { if (isCurrent()) retryWakes(); } } : {}),
+          ...(stuck ? { noDismiss: true } : {}),
+          ...(retries ? { retry: () => { if (isCurrent()) retryWakes(); } } : {}),
           // Nothing failed: the request waits for the person.
           ...(reason === "restricted" ? {
             tone: "warning" as const,
@@ -121,6 +128,7 @@ export function useChatDispatchNotices(
             ...(notice.messageId ? [["Message", notice.messageId] as const] : []),
             ...(notice.wakeId ? [["Wake", notice.wakeId] as const] : []),
             ...(notice.file ? [["File", notice.file] as const] : []),
+            ...(notice.agentId ? [["Agent", notice.agentId] as const] : []),
             ...(notice.runId ? [["Run", notice.runId] as const] : []),
             ...(notice.logPath ? [["Log", notice.logPath] as const] : []),
           ],

@@ -518,6 +518,8 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
       };
     },
 
+    // Forgets the session here only; the server session stays valid. Signing out's withdrawal of this computer's
+    // chat runners relies on that: it goes out afterwards with the forgotten token. See the logout test.
     async logout() {
       await mutateStore(async () => {
         attemptEpoch += 1;

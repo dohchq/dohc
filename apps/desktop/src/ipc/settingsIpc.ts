@@ -61,6 +61,9 @@ export function createSettingsIpc<
   // result; the other surfaces learn it here.
   broadcastAgentColor(event: AgentColorChangedEvent): void;
   broadcastUserSettings(result: DesktopUserSettingsResult): void;
+  // Tells the server again which agents this computer runs, so a last agent
+  // switched off or removed is taken back there too. It never waits or throws.
+  publishRunners(): void;
   withRendererWorkspaceOperation<Result>(
     sender: Sender, workspaceId: string, message: string,
     work: (operation: Operation) => Result | Promise<Result>,
@@ -74,7 +77,7 @@ export function createSettingsIpc<
     stateDir,
     setCachedNames, applyZoomLevelToWindows, applyThemeMode, setSpellCheckerEnabled, refreshDispatchTray,
     openDispatchWorkspaces, chatDispatchService, withRendererWorkspaceOperation,
-    broadcastUserSettings, broadcastAgentColor, notifyRenderer, openPath, knownWorkspaceIds,
+    broadcastUserSettings, broadcastAgentColor, notifyRenderer, openPath, knownWorkspaceIds, publishRunners,
   } = dependencies;
 
   // Every change to the user settings file runs here, one at a time, and each
@@ -103,6 +106,8 @@ export function createSettingsIpc<
     const publicResult = rendererUserSettingsResult(result);
     if (settingsDeepEqual(rendererUserSettingsResult(previous), publicResult)) return;
     broadcastUserSettings(publicResult);
+    // Before the tray, which can fail, and before the return for no agents dohc starts.
+    publishRunners();
     await refreshDispatchTray();
     const agents = runnableAgents(result.settings);
     if (agents.length === 0) return;
