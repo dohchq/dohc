@@ -527,8 +527,8 @@ fn is_group_wire_id(wire: &str) -> bool {
 
 /// The channel a thread belongs to, or `None` for a file's thread or a
 /// thread this store does not have.
-fn thread_channel(
-    tx: &Transaction<'_>,
+pub(crate) fn thread_channel(
+    tx: &rusqlite::Connection,
     workspace_id: &str,
     thread_id: &str,
 ) -> Result<Option<String>, SyncError> {
@@ -543,7 +543,11 @@ fn thread_channel(
 }
 
 /// Whether the channel this wire id names in this store is a Group.
-fn wire_is_group(tx: &Transaction<'_>, workspace_id: &str, wire: &str) -> Result<bool, SyncError> {
+pub(crate) fn wire_is_group(
+    tx: &rusqlite::Connection,
+    workspace_id: &str,
+    wire: &str,
+) -> Result<bool, SyncError> {
     let channel_id: Option<String> = tx
         .query_row(
             "SELECT channel_id FROM chat_channel_wire_ids WHERE workspace_id = ?1 AND wire_id = ?2",
@@ -561,8 +565,8 @@ fn wire_is_group(tx: &Transaction<'_>, workspace_id: &str, wire: &str) -> Result
 /// Whether a channel in this store is a Group: its create said
 /// `kind: channel`, and every wire id it carries is one a Group can carry.
 /// A channel with no wire id came from nowhere the relay serves.
-fn channel_is_group(
-    tx: &Transaction<'_>,
+pub(crate) fn channel_is_group(
+    tx: &rusqlite::Connection,
     workspace_id: &str,
     channel_id: &str,
 ) -> Result<bool, SyncError> {

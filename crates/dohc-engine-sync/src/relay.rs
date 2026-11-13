@@ -4829,14 +4829,64 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         channel_wire_id: &str,
         faults: &dyn FaultInjector,
     ) -> Result<SharedChannelPushOutcome, RelayError> {
+        let identity = read_sync_identity(store, workspace_id)
+            .map_err(local)?
+            .ok_or(RelayError::InvalidResponse)?;
+        self.push_shared_chat(
+            store,
+            workspace_id,
+            share_id,
+            &identity,
+            SharedPushScope::Channel(channel_wire_id),
+            faults,
+        )
+    }
+
+    /// Send a whole-workspace share view's own posts in its Groups to the
+    /// owner, through the share's append lane. Only a Comment or Edit grant
+    /// posts. A view that never posted has no identity and sends nothing.
+    pub fn push_share_view_groups(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        share_id: &str,
+        granted: &crate::ShareGrant,
+        faults: &dyn FaultInjector,
+    ) -> Result<SharedChannelPushOutcome, RelayError> {
+        if granted.scope != crate::share::ShareScope::Workspace
+            || granted.access == crate::share::ShareAccess::View
+        {
+            return Err(local(SyncError::InvalidInput {
+                reason: "only a Comment or Edit membership posts in its Groups",
+            }));
+        }
+        let Some(identity) = read_sync_identity(store, workspace_id).map_err(local)? else {
+            return Ok(SharedChannelPushOutcome { pushed: 0 });
+        };
+        self.push_shared_chat(
+            store,
+            workspace_id,
+            share_id,
+            &identity,
+            SharedPushScope::WorkspaceGroups,
+            faults,
+        )
+    }
+
+    fn push_shared_chat(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        share_id: &str,
+        identity: &crate::journal::SyncIdentity,
+        scope: SharedPushScope<'_>,
+        faults: &dyn FaultInjector,
+    ) -> Result<SharedChannelPushOutcome, RelayError> {
         if store.is_passive() {
             return Err(local(SyncError::InvalidInput {
                 reason: "passive store cannot write to the relay",
             }));
         }
-        let identity = read_sync_identity(store, workspace_id)
-            .map_err(local)?
-            .ok_or(RelayError::InvalidResponse)?;
         let state = read_shared_push_state(store, workspace_id, share_id)?;
         let scanned = state.scanned_seq;
         let mut dense_seq = match state.dense_seq {
@@ -4846,7 +4896,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     store,
                     workspace_id,
                     &identity.origin_id,
-                    channel_wire_id,
+                    scope,
                     scanned,
                 )?;
                 write_shared_push_state(store, workspace_id, share_id, scanned, dense_seq, faults)?;
@@ -4879,8 +4929,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 break;
             };
             for op in page {
-                let eligible =
-                    shared_channel_op_allowed(store, workspace_id, channel_wire_id, &op)?;
+                let eligible = shared_chat_op_allowed(store, workspace_id, scope, &op)?;
                 if eligible {
                     dense_seq = dense_seq
                         .checked_add(1)
@@ -7439,7 +7488,7 @@ fn shared_dense_seq_through(
     store: &EngineStore,
     workspace_id: &str,
     origin_id: &str,
-    channel_wire_id: &str,
+    scope: SharedPushScope<'_>,
     scanned_seq: i64,
 ) -> Result<i64, RelayError> {
     let mut dense_seq = -1_i64;
@@ -7457,7 +7506,7 @@ fn shared_dense_seq_through(
             // Eligibility only — this walk never sends anything, and building
             // a served payload per op just to drop it clones the whole
             // payload for every op in the log on every push.
-            if shared_channel_op_allowed(store, workspace_id, channel_wire_id, &op)? {
+            if shared_chat_op_allowed(store, workspace_id, scope, &op)? {
                 dense_seq = dense_seq
                     .checked_add(1)
                     .ok_or(RelayError::InvalidResponse)?;
@@ -7466,6 +7515,58 @@ fn shared_dense_seq_through(
         after = page_last;
     }
     Ok(dense_seq)
+}
+
+/// Which of this replica's own chat ops a share carries to the owner.
+#[derive(Debug, Clone, Copy)]
+enum SharedPushScope<'a> {
+    /// One joined channel, named by its wire id, including its create.
+    Channel(&'a str),
+    /// Every Group a whole-workspace share view reaches. Never a channel's
+    /// create: only the relay creates a Group for a member.
+    WorkspaceGroups,
+}
+
+fn shared_chat_op_allowed(
+    store: &EngineStore,
+    workspace_id: &str,
+    scope: SharedPushScope<'_>,
+    op: &ReplicationEnvelope,
+) -> Result<bool, RelayError> {
+    match scope {
+        SharedPushScope::Channel(channel_wire_id) => {
+            shared_channel_op_allowed(store, workspace_id, channel_wire_id, op)
+        }
+        SharedPushScope::WorkspaceGroups => store
+            .read_with(|conn| {
+                match op.op_kind.as_str() {
+                    "chat.thread.create" => match op
+                        .payload
+                        .get("channelWireId")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        Some(wire) => crate::share::wire_is_group(conn, workspace_id, wire),
+                        None => Ok(false),
+                    },
+                    "chat.message.append" | "chat.decision.set" | "chat.attachment.add"
+                    | "chat.reaction.set" => {
+                        let Some(thread_id) =
+                            op.payload.get("threadId").and_then(serde_json::Value::as_str)
+                        else {
+                            return Ok(false);
+                        };
+                        match crate::share::thread_channel(conn, workspace_id, thread_id)? {
+                            Some(channel_id) => {
+                                crate::share::channel_is_group(conn, workspace_id, &channel_id)
+                            }
+                            None => Ok(false),
+                        }
+                    }
+                    _ => Ok(false),
+                }
+            })
+            .map_err(local),
+    }
 }
 
 fn shared_channel_op_allowed(
