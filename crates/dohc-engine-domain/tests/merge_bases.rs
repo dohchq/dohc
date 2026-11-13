@@ -373,8 +373,6 @@ fn a_file_recreated_after_its_merged_delete_merges_as_new() {
     assert_eq!(main_text(&mut store, "d.md").as_deref(), Some("new"));
 }
 
-/// (e) A rename merges path by path: the new path arrives, the old path's
-/// deletion still merges, and a later edit at the new path merges cleanly.
 #[test]
 fn a_renamed_file_merges_by_path() {
     let (_scratch, mut store) = open();

@@ -706,19 +706,6 @@ fn watcher_thread(
     drop(watcher);
 }
 
-/// Bounded re-attach after the backend reports an error (including the
-/// watched root itself being deleted or replaced, a real case on both
-/// inotify and `ReadDirectoryChangesW`): retry `watch()` on the same owned
-/// `notify::Watcher` a fixed number of times with a small backoff, run
-/// inline on this dedicated watcher OS thread (never the async runtime, and
-/// never unbounded — a dead watch must not spin this thread forever).
-///
-/// On success, further events resume flowing normally; the disruption stays
-/// counted in [`NativeWatcher::disruption_count`] (a real disruption did
-/// happen), but [`NativeWatcher::is_unavailable`] stays false. On exhaustion, the watch is
-/// treated as permanently lost: `unavailable` is set so a supervisor can
-/// observe it and restart the watcher/workspace instead of silently running
-/// with a dead watch forever.
 fn attempt_reattach(
     watcher: &mut notify::RecommendedWatcher,
     root: &Path,

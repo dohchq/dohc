@@ -30,7 +30,6 @@ impl ScriptedFaults {
         })
     }
 
-    /// Whether the armed crash has already fired.
     pub fn fired(&self) -> bool {
         !self.armed.load(Ordering::Acquire)
     }

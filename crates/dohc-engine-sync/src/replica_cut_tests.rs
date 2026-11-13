@@ -189,7 +189,6 @@ fn replica_delta_removal_page_retains_scene_dependencies() {
     let mut request = request();
     let full = complete(&store, &mut request, &mut cache);
     let scene = ("main".to_string(), "o000000".to_string());
-    // Exercise scene dependency scheduling independently of scene projection.
     cache.scenes.insert(scene.clone());
     *cache.manifest.get_mut(&scene).unwrap() = "old scene projection".into();
     store

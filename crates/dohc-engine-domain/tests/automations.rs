@@ -2708,7 +2708,6 @@ fn an_automation_the_new_host_cannot_watch_yet_keeps_its_start() {
         .expect("release")
         .handover;
     desk.store_message(&post("m1", "/task One", 22));
-    // The desk can watch only ALL for now.
     watch_at(
         &mut desk.store,
         3,

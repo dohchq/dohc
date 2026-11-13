@@ -88,8 +88,6 @@ pub enum CollabError {
     #[error("Y.Doc content kind does not match the existing lineage")]
     ContentKindMismatch,
 
-    /// A durable marker names a content kind this engine cannot interpret.
-    /// The engine must not guess a projection schema for unknown state.
     #[error(
         "unsupported durable Y.Doc content kind `{kind}`; supported kinds are `plaintext`, `richdoc`, and `scene`"
     )]

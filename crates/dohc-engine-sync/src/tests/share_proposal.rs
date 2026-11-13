@@ -1125,19 +1125,6 @@ fn share_proposal_submit_at_exactly_the_bound_asks_for_no_second_press() {
     );
 }
 
-/// A pulled granter change must never be offered back to the granter.
-///
-/// The scan reads this replica's journal under the workspace's single
-/// `sync_identity` origin and filters per op by `op_kind` alone, so if the
-/// share-view pull journaled what it applied, the recipient's next submit
-/// would offer the granter its own edit back with a stale base.
-///
-/// It does not: `replay_share_write` writes through
-/// `VersionedTextStore::write_text` in `dohc-engine-domain`, and that door
-/// appends no `replication_log` row. The `replication_log` row the scan
-/// reads is appended by `journal_moment_outbound_in_tx`
-/// (`dohc-engine-runtime/src/actor.rs`), which sits on the LOCAL write path
-/// alone. This test is the standing proof of that gap.
 #[test]
 fn share_proposal_submit_never_offers_a_pulled_granter_change_back() {
     let (_scratch, _path, mut engine) = proposal_fixture(&["mine"]);

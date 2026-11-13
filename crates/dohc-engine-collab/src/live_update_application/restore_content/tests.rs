@@ -3197,7 +3197,6 @@ fn resumed_restore_settlement_moment_publishes_its_replaced_and_restored_images(
     let key = DocKey::new("workspace", "main", "object").unwrap();
     f.store
         .read_with(|conn| -> Result<(), ApplicationError> {
-            // The moment the restore settlement journals for publication.
             let (before, after): (String, String) = conn
                 .query_row(
                     "SELECT before_blob_sha256,after_blob_sha256 FROM moments WHERE moment_id='restore-moment'",
@@ -3846,9 +3845,6 @@ fn interval_keeps_declared_agents_through_dedupe_compaction_and_reopen() {
     assert_eq!(declared(&f), expected);
 }
 
-/// A new fence waits until the relay acknowledged this document's journaled
-/// settlement moments. The last one's before-image is publishable only before
-/// the fence; afterwards only the replaced head and restored image are.
 #[test]
 fn fence_waits_for_this_documents_settlement_moments_to_reach_the_relay() {
     use crate::owner_outbox::publication::{contains_in, PublicationContentKind, PublicationProof};

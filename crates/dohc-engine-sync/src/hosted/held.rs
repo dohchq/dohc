@@ -329,7 +329,6 @@ pub fn prove_held_document(
     object_id: &str,
 ) -> Result<HeldProof, SyncError> {
     let stop = job.stop();
-    // What the decoded binding holds, until the artifact names it.
     let mut working = stop.working();
     let mut reader = job.reader().map_err(protection_failure)?;
     let (tx, engine) = job.snapshot(&mut reader).map_err(protection_failure)?;

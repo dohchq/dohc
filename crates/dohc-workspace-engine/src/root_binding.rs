@@ -60,9 +60,6 @@ pub enum RootBindingError {
     NotPrivate(dohc_windows_files::NotPrivate),
 }
 
-/// A macOS privacy refusal at `path`, a volume that shares new files, or a
-/// folder dohc refuses to keep private names itself; any other io failure is
-/// `otherwise`.
 fn io_failure(
     path: &Path,
     otherwise: RootBindingError,
@@ -797,9 +794,6 @@ mod tests {
         );
     }
 
-    /// Where the engine can't reach its checked folder through the descriptor
-    /// it holds, as without `/proc`, minting and writing a binding are refused,
-    /// naming the folder, and no marker, lock or temporary file is written.
     #[cfg(target_os = "linux")]
     #[test]
     fn a_binding_whose_folder_cannot_be_held_is_refused_before_anything_is_written() {

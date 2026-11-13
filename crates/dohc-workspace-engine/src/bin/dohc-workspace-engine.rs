@@ -5278,10 +5278,6 @@ mod tests {
             },
         ));
 
-        // The request is now in flight (its handler is parked on `release`)
-        // and the finite reader has already hit EOF, so the daemon is
-        // already past `while keep_running` and into its shutdown path.
-        // Closing workspaces must not have happened yet.
         tokio::time::timeout(Duration::from_secs(5), started.notified())
             .await
             .expect("request started");
@@ -5389,13 +5385,6 @@ mod tests {
         assert_eq!(tasks.len(), 0, "the set is empty once all tasks are reaped");
     }
 
-    /// Pins the functional half of the contract: a correct prefix must not pass,
-    /// and a last-byte difference must be as rejected as a first-byte one.
-    ///
-    /// The timing half cannot be pinned by a unit test — swapping `ct_eq` back
-    /// for `==` keeps every assertion below green. Constant-time behavior comes
-    /// from `subtle`, not from this test; the test exists so a future edit
-    /// cannot quietly turn the comparison into a prefix match.
     #[test]
     fn token_comparison_rejects_prefixes_and_late_differences() {
         let expected = "b7f3a1c0d9e2f4a6b8c1d3e5f7a9b2c4d6e8f0a1b3c5d7e9f1a3b5c7d9e1f3a5";

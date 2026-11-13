@@ -1393,10 +1393,6 @@ async fn a_deleted_file_an_internal_attempt_holds_fails_and_is_retried() {
     harness.close();
 }
 
-// The held file carried typing the engine admitted but never settled. Once
-// the session lets go, the same capture pass records the outside edit as the
-// file, keeps the typing as an ordinary sibling, and writes that sibling to
-// disk. Its own write must not come back as an outside edit.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unsettled_typing_on_a_held_file_is_kept_beside_the_outside_edit() {
     let harness = Harness::new();
@@ -1676,13 +1672,6 @@ async fn stage_refused_recovery(harness: &Harness, files: &FilesHandle) -> Colli
     Collision { copy, job }
 }
 
-// A recovered copy's chosen name was taken on disk before the copy was
-// placed, so the materializer refused its write. The files manifest has
-// never held that name: the next scan sees the other program's file for the
-// first time, and first sight claims no head another origin wrote. The store
-// knows this head was never placed, so an ordinary pass records the
-// occupant, moves the copy to the next free name and writes it, with no
-// further edit, manual claim or restart.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_first_sight_occupant_of_a_recovered_name_is_recorded_and_the_copy_moves() {
     let harness = Harness::new();
@@ -2223,8 +2212,6 @@ async fn capture_file_hold_capture_and_idle_cost() {
     }
 }
 
-// A version switch or fork captures the whole workspace first. A new file an
-// editor still holds is not recorded, so the switch must not go ahead.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_switch_refuses_while_a_new_file_is_held_unrecorded() {
     let harness = Harness::new();
@@ -3400,10 +3387,6 @@ async fn close_env(env: RealEnv, layer: FilesLayer, supervisor: WorkspaceSupervi
         .expect("close actor");
 }
 
-// A rescan found a new file while the person's editor held it. The session
-// keeps the file out of capture and nothing else is dirty, so the layer
-// converges. The file stays carried until the session lets it go, then
-// records with the rescan's label.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_rescan_keeps_carrying_a_file_a_live_session_holds() {
     let store_scratch = ScratchDir::new().expect("store scratch");
@@ -3491,10 +3474,6 @@ async fn only_the_first_pass_under_changed_rules_records_as_a_rescan() {
     close_env(env, layer, supervisor, db).await;
 }
 
-// The first pass under changed rules found two files while the person's
-// editor held one. It records the other as a rescan. The held file keeps
-// that pass's label and group until the session lets it go, though the
-// passes after it compare against the new rules.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_file_the_first_pass_under_changed_rules_left_keeps_its_label() {
     let store_scratch = ScratchDir::new().expect("store scratch");

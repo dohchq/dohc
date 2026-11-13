@@ -2176,12 +2176,6 @@ async fn a_resolve_whose_withheld_answer_cannot_fit_is_refused_before_it_commits
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_worst_legitimate_resolve_is_admitted() {
-    // The measured-limits obligation for the bound above: it must not reject
-    // work anyone can legitimately do. The worst legitimate resolve is every
-    // free-form field at the 16 KiB cap the sibling write paths enforce, in
-    // the escaping-heaviest form (each quote encodes to two bytes), on the
-    // conflict and on the request, with UUID-length identifiers.
-    //
     let (_scratch, transport, handle, workspace_id) = fixture("worst-legitimate").await;
     let field = "\"".repeat(16 * 1024 - 1);
     let path = open_conflict_against_seeded_head_with(
@@ -2289,18 +2283,6 @@ async fn a_fully_withheld_resolve_answer_fits_its_scaffolding_allowance() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn side_metadata_is_measured_at_the_two_copies_the_row_actually_carries() {
-    // A side's metadata pair is stored once but served twice: the load reads
-    // one column pair into both the side and its snapshot, so the listing row
-    // carries two copies. A pre-persistence measure that counts one copy is
-    // an under-estimate, and an under-estimate is the one direction this
-    // bound must never err in — it would admit exactly the unlistable row the
-    // budget exists to refuse.
-    //
-    // Sized to separate the two rules: six fields of 1 MB each is 6 MB
-    // counted once (inside the budget, so a one-copy measure admits it) and
-    // 12 MB counted twice (past the budget, and past the row cap the row
-    // would actually have to fit).
-    //
     let (_scratch, transport, handle, workspace_id) = fixture("side-metadata-copies").await;
     let field = "s".repeat(1_000_000);
     let mut payload = conflict_payload(&workspace_id, 0, "small body");

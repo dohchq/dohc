@@ -538,19 +538,6 @@ fn record_update_lineage_guard_refuses_stale_sessions_before_any_mutation() {
 
 #[test]
 fn another_workspaces_pending_job_cannot_block_this_close() {
-    // Every file, chat and capture is scoped to a workspace, and this guard
-    // was not: it matched a pending `resolve-mat_<moment>` /
-    // `ydoc-mat_<moment>` job by moment id alone. Moment ids are
-    // caller-supplied and keyed `(workspace_id, moment_id)`, so two
-    // workspaces may hold the same one — and workspace B's unfinished job
-    // then held workspace A's settled local-only close in UnsettledClose
-    // until B drained. One workspace's backlog blocking another is the
-    // invariant break, not the delay.
-    //
-    // The fixture is the predicate, not the scenario: two rows that differ
-    // only by workspace. The job below is byte-identical to one that must
-    // block this close, except that it belongs to someone else.
-    //
     let mut ts = fresh_store("cross-workspace-pending");
     let key = test_key();
     seed_parents(&mut ts.store, &key, 1_000);
@@ -930,7 +917,6 @@ fn local_only_close_prunes_the_cache() {
         matches!(out, CloseOutcome::Pruned { .. }),
         "local-only prunes"
     );
-    // The CRDT cache is gone; the marker survives (the workspace file is the artifact).
     assert_eq!(count(&ts.store, "ydoc_updates", &key), 0, "updates pruned");
     assert_eq!(
         count(&ts.store, "ydoc_snapshots", &key),
@@ -1128,24 +1114,6 @@ fn a_head_holding_other_bytes_still_refuses_the_local_close() {
 
 #[test]
 fn a_head_the_engine_wrote_but_never_landed_still_refuses_the_local_close() {
-    // A settle advances the head and writes
-    // `last_settled_sha`, then its materialization job finds newer bytes on
-    // the file. `ydoc_settle_on_store` marks that job terminal and NULLs
-    // `last_settled_sha` — its own comment says why: "so close(settle:false)
-    // refuses UnsettledClose instead of pruning"
-    // (crates/dohc-engine-runtime/src/actor.rs).
-    //
-    // The head still holds the projection and the job is no longer pending,
-    // so a fallback that asked only "do the head's bytes match" would call
-    // this covered and prune the CRDT while the FILE holds someone else's
-    // content. Everything typed into the session would be gone.
-    //
-    // The direction is what the fallback reads, not the bytes. A capture is
-    // disk -> engine and mints no job, so its head's origin is "capture". A
-    // head the engine wrote has origin "ydoc", and only `last_settled_sha`
-    // says whether the file ever received it — this state is exactly the one
-    // where the settle withdrew that proof.
-    //
     let mut ts = fresh_store("engine-head-never-landed");
     let key = test_key();
     seed_parents(&mut ts.store, &key, 1_000);
@@ -1239,18 +1207,6 @@ fn a_head_the_engine_wrote_but_never_landed_still_refuses_the_local_close() {
 
 #[test]
 fn a_captured_reversion_discharges_despite_a_leftover_completed_job_row() {
-    // `captured_head_sha` used to answer "captured" with
-    // `NOT EXISTS (materialization_jobs WHERE content+path match)`. An
-    // earlier, unrelated engine settle for this exact content and path
-    // leaves its job row behind after it completes — the table is a ledger,
-    // not a lease — so a later, genuine capture that reverts the disk to
-    // those same bytes still finds that leftover row and reads as "not
-    // captured", refusing a discharge the direction plainly allows.
-    //
-    // `claim_foreign_head`'s dedupe (store.rs) is the real capture path: it
-    // flips `snapshots.metadata_origin` to "capture" and mints no job row at
-    // all, so the fixed predicate sees the capture directly.
-    //
     let mut ts = fresh_store("captured-reversion-leftover-job");
     let key = test_key();
     seed_parents(&mut ts.store, &key, 1_000);
@@ -1305,18 +1261,6 @@ fn a_captured_reversion_discharges_despite_a_leftover_completed_job_row() {
 
 #[test]
 fn a_binary_head_refuses_the_close_by_name_instead_of_failing_internally() {
-    // #713 substitution review. `snapshots.blob_sha256` is NULL for a binary
-    // head (schema v10), which a live path reaches: write bytes that stop
-    // round-tripping as UTF-8 and capture flips the head's kind. Reading that
-    // column as a non-optional String makes rusqlite raise InvalidColumnType,
-    // and `.optional()` absorbs only QueryReturnedNoRows — so the close
-    // answered `Internal: workspace operation failed`.
-    //
-    // It failed closed, so nothing was lost. It was still the wrong answer:
-    // an agent reading that cannot tell a corrupt store from a document it
-    // simply has to settle first (AGENTS.md: show agents the limits they
-    // hit). A NULL head sha covers nothing, and saying so is the whole fix.
-    //
     let mut ts = fresh_store("binary-head-refusal");
     let key = test_key();
     seed_parents(&mut ts.store, &key, 1_000);
@@ -1562,15 +1506,6 @@ fn append_self_bounds_the_log_at_threshold() {
 
 #[test]
 fn forced_compaction_with_nothing_pending_still_validates_the_snapshot() {
-    // #851 review finding: the cheap pending-count pre-check must never cover
-    // forced compaction (`threshold == 0`, the call `close_session` makes on
-    // a replicated/persist-closed lineage). A lineage that is already fully
-    // compacted has `pending == 0`, which is exactly the case the cheap path
-    // would report as a clean `Skipped { 0 }` — but forced compaction exists
-    // to guarantee a single validated snapshot, so it must still reach
-    // `load_persisted`'s blob-integrity check even when nothing is pending.
-    // Skipping that check would let `close_session` report a lineage with a
-    // corrupt or missing snapshot blob as cleanly closed.
     let mut ts = fresh_store("forced-compact-corrupt-snapshot");
     let key = test_key();
     seed_parents(&mut ts.store, &key, 1_000);
@@ -1648,16 +1583,6 @@ fn forced_compaction_with_nothing_pending_still_validates_the_snapshot() {
 
 #[test]
 fn forced_close_on_a_compacted_lineage_skips_without_reminting() {
-    // Certification: the counterweight to the test above. Guards against
-    // over-correcting the threshold==0 fix — forced compaction must still
-    // succeed cleanly on a healthy, already-compacted lineage by reporting
-    // Skipped { 0 }, never re-minting a snapshot it does not need (a wasted
-    // blob write) and never erroring. Two mutations would silently drop
-    // this: removing `below_threshold`'s `|| pending <= 0` arm, or removing
-    // `maybe_compact`'s second (authoritative, post-`load_persisted`)
-    // `below_threshold` check. Either lets the compaction write path run
-    // unconditionally at threshold == 0, turning every forced close on a
-    // healthy lineage into Compacted { pruned_updates: 0, .. }.
     let mut ts = fresh_store("forced-close-healthy-compacted");
     let key = test_key();
     seed_parents(&mut ts.store, &key, 1_000);
@@ -2301,7 +2226,6 @@ fn base_is_claimed_exactly_once() {
         2,
         "the rejected claim changes neither proof nor folded head"
     );
-    // The surviving base is the first one (byte-intact).
     let base_sha_now = ts
         .store
         .read_with(|c| -> Result<String, CollabError> {
@@ -3357,7 +3281,6 @@ fn truncated_update_is_rejected_and_never_journaled() {
 
     let doc = Ydoc::wire();
     let good = doc.plaintext_insert(0, "hello world this is a genuine update");
-    // Every non-empty prefix cut of a genuine update: none may be journaled.
     let mut rejected = 0;
     for cut in 1..good.len() {
         let truncated = &good[..cut];
@@ -3437,8 +3360,6 @@ fn yrs_abort_witness_is_rejected_fail_closed_on_both_ingestion_paths() {
         0xf6, 0xfc, 0xae, 0x1d, 0xbd, 0x17, 0xee, 0x48, 0x42, 0xb4, 0x02,
     ];
 
-    // Local edit path: `record_local_update` -> `validate_update_bytes`
-    // -> the pre-validator.
     let mut local = fresh_store("yrs-abort-witness-local");
     let local_key = test_key();
     seed_parents(&mut local.store, &local_key, 1_000);
@@ -4153,10 +4074,6 @@ fn remote_collection_apply_derives_facts_and_a_replay_derives_none() {
     );
 }
 
-// A synced update past the first in its lineage must not replay on the
-// seq-0 base. That replay re-deletes items earlier updates already replaced
-// while their inserts stay pending, so the authored pair reads a phantom
-// `field -> absent` removal and the resolved-away branch journals it.
 #[test]
 fn a_second_synced_update_records_only_its_real_change_and_no_phantom_removal() {
     let (mut a, _b, key, base) = two_collection_stores(

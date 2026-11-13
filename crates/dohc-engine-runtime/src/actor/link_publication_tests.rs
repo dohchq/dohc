@@ -774,7 +774,6 @@ async fn publication_turn_has_constant_store_work_with_twenty_or_two_thousand_pe
                 assert_eq!(actual, pending as i64, "measure exactly this pending population");
                 Ok::<_, rusqlite::Error>(())
             }).map_err(StorageError::corrupt_public)?;
-            // An unrelated editor marker write must not reload every hold.
             store.write_with(&NoFaults, |tx| tx.execute("UPDATE ydoc_docs SET updated_at_ms=updated_at_ms+1 WHERE workspace_id=?1 AND object_id='source-0000'",[&ws]).map_err(StorageError::persist_public))?;
             Ok(())
         }).await.unwrap();

@@ -1,8 +1,3 @@
-//! The service host's update of a live note can reach the note's owner by
-//! ordinary sync before the owner's feed accepts the same event. The owner
-//! holds it until its feed can say whether it is an echo, and refuses it,
-//! exactly as it would have on arrival, when the host's next op shows it was
-//! no live delivery, or when the binding ends.
 use super::*;
 use crate::ydoc_apply::{
     LIVE_UNADMITTED_UPDATE, decide_owner_holds, decide_owner_holds_in_workspace, unbind_owner_in_tx,
@@ -95,10 +90,6 @@ fn apply_audit_at(
     .unwrap();
 }
 
-/// The relay's journal is shared, so another note's events took cursors
-/// between this note's. The owner holds the host's update until its feed
-/// reaches the event's cursor, not its count: here its second event, at
-/// cursor 5, while the feed has accepted the first, at cursor 2.
 #[test]
 fn a_held_update_waits_for_its_events_journal_cursor_not_its_count() {
     let mut owner = restore_owner();
@@ -1653,9 +1644,6 @@ fn retiring_a_lineage_decides_a_held_update_its_feed_never_reached() {
     assert_ne!(notices(&owner), before);
 }
 
-/// The same retirement after the feed delivered the held update's bytes,
-/// before anything decided the hold: the update leaves as the echo it is, and
-/// retirement refuses nothing.
 #[test]
 fn retiring_a_lineage_lets_a_delivered_held_update_leave_as_an_echo() {
     let mut owner = restore_owner();
@@ -1726,9 +1714,6 @@ fn retire(owner: &mut RestoreOwner) -> Result<dohc_engine_storage::TxnOutcome<()
     })
 }
 
-/// The owner decides the host's updates in the order they arrived: one that
-/// arrives behind a held update queues behind it, and each leaves only once
-/// the feed reaches its own event.
 #[test]
 fn a_later_host_update_waits_behind_a_held_one() {
     let mut owner = restore_owner();
@@ -1784,7 +1769,6 @@ fn ending_the_binding_decides_what_the_owner_holds() {
     apply_audit(&mut owner, 1, &digest_of(&one), 1);
     let two = host_update(&owner, 2, &unreached);
     assert_held(arrive(&mut owner, &mut cache, &two));
-    // The feed reaches the first event; nothing has decided the holds yet.
     apply_test_owner_frame(&mut owner, reached, 1);
     owner
         .store

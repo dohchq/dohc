@@ -296,9 +296,6 @@ fn project_path(db: &Path, path: &str) -> Projection {
     }
 }
 
-/// Drive one step to visibility: flush until the persisted projection shows
-/// the step's effect. The only nondeterminism is the watcher noticing the
-/// disk write; once it has, one settled flush suffices — no blind sleeps.
 async fn drive_step_to_visibility(
     transport: &InProcessTransport<EngineService>,
     handle: &WorkspaceHandle,
@@ -331,23 +328,6 @@ fn capture_oracles_are_frozen_and_each_scenario_is_scheduled() {
     let fixtures: Fixtures = serde_json::from_str(FIXTURES).expect("fixtures parse");
     let goldens: Goldens = serde_json::from_str(GOLDENS).expect("goldens parse");
 
-    // === The freeze, enforced here rather than described in a document. ===
-    //
-    // R16 deletes the TypeScript oracle that produced these goldens. After that
-    // the only implementation able to regenerate them is the daemon this test
-    // grades, so an unenforced freeze means the daemon can certify itself by
-    // editing one file. These hashes are the anchor, and they live in Rust source
-    // precisely so that changing either JSON file cannot be a one-file diff.
-    //
-    // Both files are covered on purpose. Freezing only the goldens leaves the
-    // INPUTS mutable, and input coverage can vanish without changing any output:
-    // drop the first step of `update-coalesce` and the final projection is
-    // identical, so every value assertion passes while the update-transition case
-    // is gone.
-    //
-    // If you are here because one of these failed: do not update the hash to make
-    // it pass. Work out which behaviour changed, and why the new answer is right.
-    // See tools/rust-engine-program/capture-goldens.provenance.md.
     const FIXTURES_SHA256: &str =
         "ecf8710b19870fab090abfc2c6b78e80a050d245d60c42c21cc6eb62962122d7";
     const GOLDENS_SHA256: &str = "246655d8e2f697d069d121c50faec04222f7f45eecc970f1af4e0b4ee64e5292";

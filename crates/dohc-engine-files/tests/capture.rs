@@ -1024,10 +1024,6 @@ fn apply(
     apply_reconcile_plan_cancellable(plan, sink, &NoFaults, &CancellationToken::new(), None)
 }
 
-/// A peer must receive a respelled path's retire before its ingest, or a
-/// disk that ignores case deletes the new file. When the retire of
-/// `notes.md` must wait, here because an editor has it open, the ingest of
-/// `Notes.md` waits for a later pass; other paths go on.
 #[test]
 fn an_ingest_waits_for_the_waiting_retire_of_its_old_spelling() {
     let plan = plan_of(

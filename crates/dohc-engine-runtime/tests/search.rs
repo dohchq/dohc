@@ -1667,7 +1667,6 @@ fn bounds_query_length_and_limit() {
     // A pathologically long query is bounded (no results, no FTS blow-up).
     let long = "n".repeat(50_000);
     assert!(run_search(&store, &root, &long).is_empty());
-    // The candidate query also rejects an over-long query without scanning.
     let overlong = store
         .read_with(|conn| candidates(conn, &root, &long))
         .expect("q");

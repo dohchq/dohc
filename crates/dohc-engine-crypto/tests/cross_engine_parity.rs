@@ -58,7 +58,6 @@ fn ts_ciphertext_decrypts_byte_exact() {
         let ct_b64 = str_field(entry, "ciphertextBase64");
         let plaintext = str_field(entry, "plaintext");
 
-        // A TS ciphertext decrypts in Rust to the exact plaintext.
         let sealed = SealedSecret::from_base64(iv_b64, tag_b64, ct_b64, byte_length)
             .unwrap_or_else(|e| panic!("[{label}] from_base64: {}", e.code()));
         let opened = open(&key, workspace, path, &sealed)

@@ -406,7 +406,6 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
     assert_eq!(fetched["momentId"], newest["momentId"]);
     assert_eq!(fetched["path"], newest["path"]);
 
-    // Capture-sized text remains fully hydratable for desktop restores.
     let big_text_moment = moment_list
         .iter()
         .find(|moment| moment["path"] == "notes/big.md")

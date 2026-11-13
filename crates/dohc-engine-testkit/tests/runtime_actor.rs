@@ -18,8 +18,6 @@ use std::time::{Duration, Instant};
 
 const WS: &str = "ws";
 
-/// Spin (bounded) until the actor behind `handle` publishes `Closed`, so panic
-/// teardown is observed deterministically without a fixed sleep.
 fn wait_for_closed(handle: &ActorHandle) {
     let deadline = Instant::now() + Duration::from_secs(5);
     while handle.lifecycle() != LifecycleState::Closed {

@@ -529,7 +529,6 @@ async fn accepted_response_native_owner_undo_syncs_and_history_restores() {
     .await;
     assert_eq!(query["records"].as_array().unwrap().len(), 1);
     assert_eq!(query["records"][0]["id"], record_id);
-    // Retrying the completed delete must preserve the owner's history restore.
     let retry = call_keyed(
         &transport,
         &handle,

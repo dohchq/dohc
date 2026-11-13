@@ -747,7 +747,6 @@ impl EngineStore {
         blob::has_binary_blob(&self.conn, sha256)
     }
 
-    /// The number of distinct binary blobs.
     pub fn binary_blob_count(&self) -> Result<i64, StorageError> {
         blob::binary_blob_count(&self.conn)
     }

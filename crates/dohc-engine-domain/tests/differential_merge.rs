@@ -1,6 +1,3 @@
-//! TS-derived golden fixture for the pure R06 markdown merger. This is a
-//! literal oracle string, not a Rust round-trip through a second Rust helper.
-
 use dohc_engine_domain::{MarkdownMergeResult, merge_markdown};
 
 fn outcome(base: &str, local: &str, remote: &str) -> String {

@@ -136,7 +136,6 @@ fn generation(w: &RetainedWindow) -> i64 {
         .unwrap()
 }
 
-/// An update that changes nothing.
 const EMPTY_UPDATE: &[u8] = &[0, 0];
 
 /// The window document's journal row below its last, as `sql` names it.
@@ -1485,15 +1484,6 @@ async fn closing_the_store_stops_a_running_proof_and_waits_for_its_reader() {
     desktop.close().await;
 }
 
-/// Sol's and Opus's r2c-3c-2 finding 1: a proof's reader still open past the
-/// close bound fails close, which still closes the writer, so nothing
-/// replaces the store's files under it. The caller answers that the
-/// workspace is gone, and the reader closes once the proof goes on. Sol's
-/// and Opus's r2c-3c-4 finding 1: until then the store drains. Closing it
-/// again, one store or all, answers that it is in use, and so does opening
-/// or restarting it; once its reader closed, closing finds nothing to close
-/// and the store opens again. Opus's finding 6: the close bound is the
-/// test's, not ten seconds.
 #[tokio::test]
 async fn closing_with_a_reader_past_the_bound_fails() {
     let (w, desktop, _client) = held_for_a_queued_fold().await;
@@ -1548,11 +1538,6 @@ async fn closing_with_a_reader_past_the_bound_fails() {
     desktop.close().await;
 }
 
-/// Sol's r2c-3c-6 finding 1 and Opus's finding 2: a proof runs off the
-/// actor, so its worker's death stops none of it. While its reader stays
-/// open past the close bound, opening the store again evicts and closes the
-/// dead actor and answers that the store is in use, with no successor, and
-/// so does every open until the reader closes; then the store opens again.
 #[tokio::test]
 async fn a_dead_actors_reader_keeps_its_store_fenced() {
     let (w, desktop, _client) = held_for_a_queued_fold().await;

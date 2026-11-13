@@ -630,12 +630,6 @@ fn share_view_moment_from_an_ungranted_version_is_refused_naming_both_versions()
     }
 }
 
-/// Fail closed on shape, not only on value: a served moment whose `versionId`
-/// is not one the relay could have issued cannot be version-checked at all, so
-/// it is refused rather than applied unchecked. Otherwise a relay disarms the
-/// rule above by dropping or corrupting one field. The refusal does not depend
-/// on which version the share pinned, and it is counted as the share-boundary
-/// event it is rather than as a generic malformed payload.
 #[test]
 fn share_view_moment_without_a_version_identity_is_refused_as_malformed() {
     let (_scratch, _path, mut engine) = open_store();
@@ -3072,14 +3066,6 @@ fn an_oversized_shared_binary_is_refused_before_it_reaches_the_store() {
     );
 }
 
-/// One op the recipient will never apply must not take the whole share with it.
-///
-/// A binary over the kind ceiling is refused deterministically — the same body
-/// comes back on every pull — so aborting there left the share cursor at 0,
-/// re-fetched the identical refusal forever, and held every later op in the
-/// share behind it with no recipient-side recovery. The cursor records how far
-/// the share was read; the refusal records that this op never applied.
-///
 #[test]
 fn a_refused_shared_blob_does_not_freeze_the_share() {
     let (_scratch, _path, mut engine) = open_store();
@@ -3576,18 +3562,6 @@ fn an_oversized_body_that_is_not_the_named_blob_stops_the_pull() {
     );
 }
 
-/// The record unit must match the cursor unit.
-///
-/// The recipient's durable record is keyed by origin coordinate and by nothing
-/// else (`mergeShareSkippedOps` in `apps/desktop/src/workspaces/registryStore.ts`
-/// — membership in `counted` is the only duplicate test). Every blob in one
-/// `version.create` shares that coordinate, so one refusal per blob meant the
-/// record kept the first and dropped the rest UNCOUNTED: two files gone, a
-/// notice saying one, and the cursor already past both.
-///
-/// So the op is the record. The count leads the detail, because the detail is
-/// bounded and a truncated list must still say how many files it is short.
-///
 #[test]
 fn two_refused_snapshots_are_recorded_as_one_op_naming_both() {
     let (_scratch, _path, mut engine) = open_store();
@@ -3931,16 +3905,6 @@ fn a_long_path_does_not_cost_the_next_refusals_measurements() {
     );
 }
 
-/// One record per coordinate means one code for however many blobs an op
-/// refused, so a mixed op has to choose — and it must not choose the one that
-/// carries an instruction.
-///
-/// `share-blob-over-ceiling` sends the reader to the granter for a smaller
-/// file. That is right for the oversized snapshot and a false instruction for
-/// the one refused because its blob reference is not a sha256, which no
-/// smaller file repairs. So a mixed op reports the generic code, which claims
-/// nothing it cannot keep, and the detail still names both.
-///
 #[test]
 fn an_op_refusing_two_classes_at_once_claims_neither_instruction() {
     let (_scratch, _path, mut engine) = open_store();
@@ -4000,7 +3964,6 @@ fn an_op_refusing_two_classes_at_once_claims_neither_instruction() {
         refusal.code, "invalid-input",
         "a mixed op reports an instruction that is false for one of its blobs"
     );
-    // Both are still named, so nothing is hidden by the cautious code.
     for path in ["docs/over-cap.bin", "docs/unusable.md"] {
         assert!(
             refusal.detail.contains(path),
@@ -4010,19 +3973,6 @@ fn an_op_refusing_two_classes_at_once_claims_neither_instruction() {
     }
 }
 
-/// Bounding each path is not enough on its own: enough refusals still overrun
-/// the record. What must never happen is a HALF-written entry.
-///
-/// An op can refuse more blobs than the detail can name — a `version.create`
-/// carries a snapshot per file. Concatenating them all and letting
-/// `ShareViewRefusal::new` cut the tail leaves the last entry sliced through
-/// its measurements or its path, and says nothing about the ones past it. So
-/// entries are added only while the whole detail still fits, and the record
-/// says how many it did not list.
-///
-/// The invariant: every entry the record shows is complete, and the ones it
-/// cannot show are counted. Never a fragment.
-///
 #[test]
 fn a_record_too_small_for_every_refusal_lists_whole_ones_and_counts_the_rest() {
     let (_scratch, _path, mut engine) = open_store();
@@ -4316,8 +4266,6 @@ fn two_refused_paths_that_differ_past_the_budget_are_still_told_apart() {
     seed_replication_version(&mut engine, "main", "main");
     let (_constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
 
-    // A shared prefix far longer than one refusal's path budget, so the two
-    // paths are identical until well past the cut.
     let prefix = format!("docs/{}", "d".repeat(300));
     let first_path = format!("{prefix}/quarterly-report.bin");
     let second_path = format!("{prefix}/annual-report.bin");
@@ -4795,9 +4743,6 @@ fn share_view_refuses_a_thread_scoped_op_whose_thread_is_unknown_or_out_of_grant
 
 #[test]
 fn share_view_never_carries_the_readers_own_state_or_any_other_chat_kind() {
-    // The allowlist is exactly five kinds. `chat.follow.set` and
-    // `chat.feed.read.set` are the reader's own state and fall through to the
-    // file boundary's terminal deny, the same way they do for a channel share.
     let (_scratch, _path, mut engine, boundary) = share_view_chat_fixture();
     for (kind, payload) in [
         (
@@ -5130,9 +5075,6 @@ fn a_recipient_thread_create_arrives_object_bound_on_the_owner_lane() {
     assert_eq!(bound.as_deref(), Some("granter-object"));
 }
 
-/// The same composability question on the recipient's side, at both of its
-/// denial sites. `paths` and `versionId` are independent dimensions, so the
-/// paths-only rule must key on "names no paths" — never on "names a version".
 #[test]
 fn share_view_chat_composes_paths_with_a_version() {
     for (label, version_id, expect_chat) in [
@@ -5286,22 +5228,6 @@ fn enrolling_twice_keeps_the_first_identity() {
     );
 }
 
-/// Which lane makes a workspace journal, read through both real predicates.
-///
-/// The driver is the recorded Edit lane, because that is the fact. An earlier
-/// revision keyed the share term on `EXISTS(sync_identity)`. The unrelated
-/// identity row below is the case that proxy got wrong: an identity alone
-/// cannot prove that a share view may send file changes.
-///
-/// The OWNER-lane predicate — which the Y.Doc lanes, the conflict outbox and
-/// cursor advancement read — must stay false for every share view. Nothing
-/// drains a `ydoc.update` from one, so widening it would leave rows in the
-/// recipient's database forever.
-///
-/// The shared-channel rows are the term this PR deliberately did not add: a
-/// channel is joined by an ordinary workspace, so counting it would make
-/// every local file moment journal in a workspace whose owner never enabled
-/// cloud sync.
 #[test]
 fn only_the_file_moment_journal_reads_the_share_lane() {
     for (label, recorded, unrelated_identity, lane, expected) in [

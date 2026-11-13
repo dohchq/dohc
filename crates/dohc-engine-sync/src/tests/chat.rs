@@ -2178,8 +2178,6 @@ fn a_personal_agent_posts_only_where_the_relay_lets_it() {
     );
     assert_eq!(pending_chat_coordinate_count(&engine), 0);
 
-    // A thread that arrives before its chat stands in a Group until the
-    // chat's create arrives, so a post there waits for the create.
     for (seq, (thread_id, wire_id)) in [
         ("thread-before-dm", "dm-later-wire"),
         ("thread-before-group", "group-later-wire"),
@@ -2665,10 +2663,6 @@ fn group_message(
     envelope(origin, seq, "chat.message.append", payload)
 }
 
-/// A Group message claims in the transaction that applies it, dated when it
-/// was written, however it arrives: from the relay, again from a second
-/// lane, or parked until its thread lands. Another computer's automation
-/// arrives without its depth and counts as depth 1.
 #[test]
 fn an_applied_group_message_claims_once_however_it_arrives() {
     use dohc_engine_domain::{AutomationChangeKind, AutomationTrigger, ChangeActorKind};
@@ -5181,8 +5175,6 @@ fn refused_thread_log_cannot_suppress_the_current_thread_export() {
                     [],
                     |row| row.get(0),
                 )?,
-                // The replier's implicit follow parks until the placeholder
-                // channel is adopted; only the message's own park counts here.
                 conn.query_row(
                     "SELECT COUNT(*) FROM chat_pending_replication WHERE dependency_kind <> 'follow-target'",
                     [],
@@ -6543,8 +6535,6 @@ fn chat_reaction_lww_converges_across_origin_arrival_order() {
     assert_eq!(read(&first).0, "removed");
 }
 
-/// #5b (feed-read ranking): a delayed older read receipt with a newer wall clock
-/// must not move the read cursor backwards.
 #[test]
 fn feed_read_older_cursor_with_newer_clock_does_not_regress() {
     let (_scratch, _path, mut engine) = open_store();

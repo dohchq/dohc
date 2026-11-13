@@ -291,8 +291,6 @@ fn path_key(path: &str) -> Vec<String> {
         .collect()
 }
 
-/// Whether the path keyed `path` lies strictly inside the folder keyed
-/// `ancestor` ([`path_key`]).
 fn is_inside(path: &[String], ancestor: &[String]) -> bool {
     path.len() > ancestor.len() && path.starts_with(ancestor)
 }
@@ -1963,7 +1961,6 @@ pub(super) mod tests {
             const { RefCell::new(None) };
     }
 
-    /// A loaded relay head, counted in [`HEADS_HELD`] until it drops.
     pub(super) struct HeldHead;
 
     impl HeldHead {
@@ -2543,9 +2540,6 @@ pub(super) mod tests {
         );
     }
 
-    /// The same peer edits `notes.md` after creating `Notes.md`. The edit lands
-    /// on the one file both spellings reach, so when `notes.md` goes, the file
-    /// holds neither head's bytes until it gets `Notes.md`'s again.
     #[test]
     fn a_later_pages_delete_gives_the_file_back_to_the_other_spelling() {
         let (scratch, _, mut store) = dohc_engine_testkit::open_store();

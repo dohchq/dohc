@@ -4766,7 +4766,6 @@ fn projection_held_in_tx(
 
 /// What folding a file's text into its Y.Doc lineage did.
 pub(crate) enum LineageFold {
-    /// The lineage holds no content: the file alone carries the text.
     NoContent,
     /// The lineage holds the text now, with the record fields its append
     /// changed, if any. Boxed, since the facts dwarf the empty variant.
@@ -4899,7 +4898,6 @@ pub(crate) fn reconcile_imported_complete_resulting_head_in_tx(
     }
 }
 
-/// What an imported text head does to the object's closed Y.Doc lineage.
 pub(crate) enum ImportedTextHead {
     /// The lineage holds no content the text would replace. Settle its
     /// marker to the text, if there is a marker.
@@ -5113,12 +5111,6 @@ pub fn fold_resolution_into_ydoc_in_tx(
         DocKey::new(workspace_id, version_id, object_id).map_err(|_| SyncError::InvalidInput {
             reason: "conflict resolution coordinates are invalid",
         })?;
-    // Acked-but-parked remote updates for this object were never part of
-    // either reviewed side, and the drain that lands them runs after the
-    // review gate would have closed. Refuse the resolution while they are
-    // queued: a resync or session close drains them, the open conflict
-    // coalesces to the freshest incoming state, and the user resolves what
-    // they can actually see.
     let complete = match ydoc_lineage_completeness_in_tx(tx, &key)? {
         YdocLineageCompleteness::Complete(complete) => complete,
         YdocLineageCompleteness::DeferredUpdates => {

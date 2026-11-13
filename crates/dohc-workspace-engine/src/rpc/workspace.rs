@@ -923,13 +923,6 @@ impl EngineService {
                 }
                 attached
             };
-            // The normal close path drops pending cursors with the handle;
-            // eviction dropped the handle and the sessions but left them.
-            // Handles are minted from a monotonic counter, so the orphans were
-            // never CONSUMABLE — every reopen gets a new handle and
-            // consume_pending_cursor matches on it — they simply accumulated
-            // in the map for the life of the process, one per issued cursor
-            // per evicted binding, with nothing able to remove them.
             lock(&self.pending_cursors).retain(|_, pending| {
                 pending.handle != handle && !attached_handles.contains(&pending.handle)
             });
@@ -3348,7 +3341,6 @@ mod tests {
         }
         service.workspace_close(Some(handle)).await.expect("close");
 
-        // As the desktop's mkdir left it: 0755 with the workspace's entries.
         std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         add_entry(&engine);
         let handle = open().await;

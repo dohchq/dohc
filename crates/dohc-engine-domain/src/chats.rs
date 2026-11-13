@@ -111,7 +111,6 @@ pub const LINK_MESSAGE_ID_PREFIX: &str = "link-message:";
 pub const LINK_THREAD_ID_PREFIX: &str = "link-thread:";
 /// The relay's origin for one link holder's posts.
 pub const LINK_ORIGIN_PREFIX: &str = "relay:share-link:";
-/// The relay's origin for one personal agent's chat: its DM and its posts.
 pub const PERSONAL_AGENT_ORIGIN_PREFIX: &str = "relay:personal-agent:";
 /// The relay names a personal agent's messages and new threads with these
 /// prefixes; no other message or thread may use them.
@@ -1526,8 +1525,6 @@ pub fn bookmark_id_for(
     format!("bookmark_{}", base32_lowercase_no_padding(&digest[..16]))
 }
 
-/// The control-char class shared by the projection/heading/channel validators
-/// (`PROJECTION_FIELD_CONTROL_CHAR = /[\x00-\x1f\x7f]/u`).
 pub fn has_projection_control_char(value: &str) -> bool {
     value
         .chars()

@@ -65,7 +65,6 @@ pub fn wal_sidecar(db_path: &Path) -> std::path::PathBuf {
     sidecar(db_path, "-wal")
 }
 
-/// The `-shm` sidecar path for a database file.
 pub fn shm_sidecar(db_path: &Path) -> std::path::PathBuf {
     sidecar(db_path, "-shm")
 }

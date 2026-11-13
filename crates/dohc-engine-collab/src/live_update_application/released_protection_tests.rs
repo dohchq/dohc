@@ -402,8 +402,6 @@ fn contradictory_provenance_invalidates_the_whole_tail_and_names_its_work() {
     let [kept]: [RetainedContribution; 1] = only_unproven(&f).try_into().unwrap();
     assert_eq!((kept.locator(), kept.authors()), (locator, &native_agent()), "pending is no proof, and its acceptance no contradiction");
 
-    // A retained draft keeps the run its declared agent named beside the
-    // declaration.
     let mut f = unapplied();
     let (locator, delivery_id) = native_entry(&f);
     write_unchecked(&mut f, &format!("PRAGMA foreign_keys=OFF;

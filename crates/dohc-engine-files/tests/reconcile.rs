@@ -598,8 +598,6 @@ fn watcher_overflow_sets_dirty_and_full_rescan_converges() {
 
 #[test]
 fn overflow_during_cancelled_rescan_is_not_lost() {
-    // Regression for "coalescing never drops the only evidence of a change":
-    // a change marked dirty, then a cancelled rescan, must remain pending.
     let ws = Scratch::new();
     ws.write("a.md", b"one\n");
     let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
@@ -609,7 +607,6 @@ fn overflow_during_cancelled_rescan_is_not_lost() {
     ws.write("a.md", b"two\n");
     ctrl.mark_dirty();
 
-    // A cancelled rescan must not clear dirty.
     let cancelled = CancellationToken::new();
     cancelled.cancel();
     assert!(matches!(
@@ -954,8 +951,6 @@ fn rehydrated_manifest_reconciles_only_real_changes() {
             ManifestEntry {
                 size: unchanged_bytes.len() as u64,
                 sha256: dohc_engine_storage::hex_sha256(unchanged_bytes),
-                // A rehydration seed records no mtime observation (the domain
-                // stores none), so it must never authorize hash reuse.
                 mtime_ms: 0,
             },
         ),
@@ -1137,8 +1132,6 @@ fn forged_mtime_same_size_edit_is_unseen_but_a_size_change_is_not() {
 fn mtime_inside_the_granularity_margin_is_not_recorded() {
     let ws = Scratch::new();
     ws.write("a.md", b"alpha\n");
-    // Exactly "now": strictly below the imminent scan start (a strict fence
-    // would record it) but inside the 2000ms granularity margin (must not).
     ws.age_mtime("a.md", 0);
     let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
     let mut ctrl = ReconcileController::new();
@@ -1323,8 +1316,6 @@ fn an_evicted_file_edited_elsewhere_is_rehashed_once_it_downloads() {
     assert_eq!(evicted.retained_unread, ["resized.md", "same-size.md"]);
     apply_then_ack(&mut ctrl, &evicted, &mut AcceptAll, &NoFaults).expect("apply/ack");
 
-    // Another Mac edits both, and each downloads with the new bytes and a
-    // new mtime. One keeps its size, so only the mtime can reveal the edit.
     ws.write("resized.md", b"after, longer");
     ws.write("same-size.md", b"AFTER!");
     ws.age_mtime("resized.md", 30);

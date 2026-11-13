@@ -2762,8 +2762,6 @@ async fn markdown_hold_replaced_lineage_retires_old_debt_and_requires_a_new_gran
     f.supervisor.close(&f.db).unwrap();
 }
 
-/// Replaces the note's lineage with a relay base that adds a paragraph, and
-/// returns the new lineage's claim.
 async fn replace_lineage(f: &Fixture) -> String {
     let key = f.key.clone();
     f.actor

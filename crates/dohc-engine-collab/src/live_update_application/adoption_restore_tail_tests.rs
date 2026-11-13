@@ -2994,9 +2994,6 @@ fn a_recovery_copy_rebuilds_an_accepted_history_longer_than_one_update() {
         apply_recipient_edit(&mut f, &other, 1, &large),
         ApplicationResult::Applied(..)
     ));
-    // Overlapping full-state updates: the history grows by the whole state
-    // each time while the state itself barely does. Continue past a new
-    // checkpoint until it and its suffix together outgrow one update's limit.
     let history = |f: &Fixture| -> (i64, i64, i64) {
         f.store
             .read_with(|conn| {

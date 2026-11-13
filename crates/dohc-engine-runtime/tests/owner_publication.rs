@@ -1643,11 +1643,6 @@ async fn first_audited_settlement_publishes_its_own_moment_over_an_imported_prel
     supervisor.close_all().unwrap();
 }
 
-/// A New page note typed before #3790's fix had its first version claimed
-/// without a schema version. The fix writes the version only before a claim,
-/// so it does not repair such a note: sharing it after the fix is still
-/// refused. This pins that limit. The workaround: make the note as a file
-/// outside dohc, open it once in dohc, then share it.
 #[tokio::test]
 async fn a_new_page_note_claimed_without_its_schema_version_before_the_fix_stays_refused() {
     use dohc_engine_storage::StorageError;
@@ -5976,19 +5971,6 @@ fn deliveries(store: &EngineStore, table: &str) -> Vec<String> {
         .unwrap()
 }
 
-/// Sol's round 4b ruling, through the host's real lifecycle: Release, a
-/// fresh capture and adoption, Carried application, the first settlement and
-/// a restart, with no rewrite aligning the file and the Y.Doc. The root's
-/// owner edits C1 and C2 are accepted and never applied, and it retires at
-/// B, where its settlement writes the file without them. With `catch_up`, a
-/// peer's ordinary edit arrives after the release and ordinary sync projects
-/// the whole Y.Doc into the file; otherwise the file stays at B and only the
-/// settled-B proof explains the capture. The successor's registration holds
-/// C1 until it adopts, its seed's receipt is saved before anything applies,
-/// each settlement holds only what applied, a restart replays the settlement
-/// with no writes, and once everything applies the file holds the Y.Doc and
-/// accepted history holds each delivery once. This is the native lifecycle
-/// alone, not the relay's or a peer's convergence.
 #[tokio::test]
 async fn resume_after_carried_edits_through_the_host() {
     for catch_up in [false, true] {
@@ -7112,8 +7094,6 @@ impl HostWindow {
             .encode_full_state()
     }
 
-    /// Every row a capture could write, but the claimed origin of an
-    /// unchanged head.
     fn written(&self) -> Vec<String> {
         let mut rows: Vec<String> = [
             "SELECT * FROM moments",
@@ -8084,7 +8064,6 @@ struct HostedFeed {
     scope: std::sync::Mutex<dohc_engine_sync::HostedScope>,
     rows: std::sync::Mutex<Vec<dohc_engine_sync::ReplicationEnvelope>>,
     blobs: std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>,
-    /// Rows an earlier feed placed, which the relay still knows.
     placed: Vec<dohc_engine_sync::ReplicationEnvelope>,
     /// The relay position of the feed's first row.
     first: i64,
@@ -8139,7 +8118,6 @@ impl HostedFeed {
         op
     }
 
-    /// A text write that creates `object_id` at `path`.
     fn create(
         &self,
         object_id: &str,
@@ -10895,7 +10873,6 @@ async fn an_ingress_drains_facts_survive_a_later_ops_wait() {
 async fn an_inactive_drains_facts_survive_a_later_wait() {
     for after in [AfterWait::Resume, AfterWait::Abandon, AfterWait::Restart] {
         let (mut w, desktop, client, rows) = record_and_window_served().await;
-        // An earlier drain applied the change and stopped before its cleanup.
         let (stopped, _cleanup) = dohc_engine_sync::drain_deferred_ydoc_for_key_holding_cleanup(
             &mut w.store,
             &mut dohc_engine_collab::WriterDocCache::new(),
@@ -12550,13 +12527,6 @@ async fn the_heads_lineage_applies_while_an_archived_lineage_holds_its_document(
     w.close().await;
 }
 
-/// Sol's first two findings on 6ded1a22a, with Opus's second: a queued
-/// update of an archived lineage with no relay position, NULL or 0 as local
-/// and legacy rows may record, never stalls the workspace. Unprotected, it
-/// reaches the archive. Protected, it stays queued with its blob and the
-/// identity it recorded, and its document waits with no binding stored,
-/// through committed passes and a restart, while a neighbour's writes apply.
-/// Once nothing protects the lineage, the archive takes it.
 #[tokio::test]
 async fn archived_rows_with_no_relay_position_never_stall_the_workspace() {
     let free = |w: &RetainedWindow| {

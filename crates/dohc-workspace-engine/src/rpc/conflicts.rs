@@ -886,12 +886,6 @@ mod tests {
 
     #[test]
     fn encoded_length_agrees_with_the_encoder_that_builds_the_frame() {
-        // The merged-resolution budget is spent in ENCODED bytes, so this
-        // count must be the encoder's count, not an approximation of it. Every
-        // escape class serde_json has: the two-byte shorthands, the six-byte
-        // \u form for the other control bytes, DEL (which it does not escape),
-        // and multi-byte UTF-8 (which it passes through).
-        //
         let samples = [
             "plain ascii".to_owned(),
             "\"\\\n\r\t\u{08}\u{0c}".to_owned(),

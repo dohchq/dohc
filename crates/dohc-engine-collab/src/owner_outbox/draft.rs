@@ -1850,7 +1850,6 @@ mod tests {
         let owner = Ydoc::wire();
         owner.apply(&checkpoint).unwrap();
         let edit = owner.richdoc_append_paragraph("agent edit in a run");
-        // A run names only a declared agent's edit, and is a bounded identifier.
         for (declaration, run) in [
             (None, "run-1"),
             (declared.clone(), ""),

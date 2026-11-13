@@ -2802,7 +2802,6 @@ mod tests {
                     serde_json::from_value(authority.clone()).unwrap();
             }
             update.metadata.first_seen = serde_json::from_value(row["firstSeen"].clone()).unwrap();
-            // A v1 delivery carries no author snapshot and no deletion ranges.
             if row["canonicalVersion"] != 1 {
                 update.metadata.canonical_version = Some(2);
                 update.metadata.author_snapshot =
@@ -5059,11 +5058,6 @@ mod tests {
             persons(&store),
             vec![None, Some("guest-1".to_owned()), None]
         );
-        // The moment that settles these frames names the collaborator and the
-        // link once, from the same authority, so History says who changed the
-        // file, even when their own snapshot named them too. The owner's
-        // snapshot person stays. Frames without recording context also keep
-        // the unattributed gap.
         let interval = store
             .read_with(|conn| crate::author_coverage::interval_in(conn, &key(), i64::MAX))
             .unwrap()
@@ -5207,9 +5201,6 @@ mod tests {
             vec![Some(1), Some(2), Some(3), Some(5), Some(6)]
         );
 
-        // The claim still keys on its history row, so a frame retried after a
-        // restart claims nothing more, and the same change delivered again
-        // under another delivery id and cursor claims nothing either.
         let final_edit = source.frontmatter_set("status", "final").unwrap();
         let mut last = event("final-edit", 7, final_edit.clone());
         last.metadata.accepted.received_at_ms = 50;
@@ -5818,9 +5809,6 @@ mod tests {
                 native_sequence: cursor,
                 update_digest: draft.update_digest.clone(),
                 origin: crate::owner_outbox::OwnerOutboxNativeOrigin::NativeUpdate {
-                    // The entry declares the agent its native row recorded,
-                    // as an adopted append writes it, so the journal row and
-                    // the snapshot name one author.
                     actor_origin_id: Some("trip-agent".into()),
                     actor_kind: Some("agent".into()),
                     on_behalf_of: Some("owner-1".into()),

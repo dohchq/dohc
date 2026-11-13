@@ -951,7 +951,6 @@ async fn a_reviewed_deletion_retires_the_lineage_instead_of_being_reversed() {
         .expect("the deletion resolves after the deferred row clears");
     supervisor.close(&db).expect("close actor after retry");
 
-    // Nothing is left that could project the deleted content back.
     let store = EngineStore::open(&db, 12).expect("inspect");
     let (updates, snapshots, markers, deferred): (i64, i64, i64, i64) = store
         .read_with(|conn| {
@@ -1229,13 +1228,6 @@ async fn moved_text_and_binary_results_archive_the_full_predecessor_without_a_su
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_idempotent_retry_survives_a_live_session() {
-    // The live-lease guard must not outrank the idempotency contract. A
-    // resolution commits, its response is lost, the user opens the resolved
-    // document, and the client retries the same request_id. The request
-    // ledger replays the recorded result and rewrites nothing — so refusing
-    // that retry for a live lease would turn a lost response into a
-    // different answer.
-    //
     let scratch = ScratchDir::new().expect("scratch");
     let db = engine_db_path(&scratch).expect("db");
     let (key, _winner_base, _winner_doc, conflict_id) = {

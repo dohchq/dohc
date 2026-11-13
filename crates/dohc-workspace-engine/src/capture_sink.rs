@@ -80,11 +80,6 @@ const MAX_ADDED_TEXT_PREPARE_WORKERS: usize = 8;
 mod busy_retry;
 use busy_retry::CaptureBatchRetry;
 
-/// Per-run moment provenance, mirroring the TS capture metadata: a reconcile
-/// pass stamps one summary + correlation id across every moment it records
-/// ("Changed while dohc was closed"); a live watcher batch leaves both unset and
-/// each ingest falls back to a per-file "Updated <basename>" summary with no
-/// correlation id.
 #[derive(Clone, Default)]
 pub struct CaptureProvenance {
     pub summary: Option<String>,
@@ -1457,7 +1452,6 @@ impl StoreCaptureSink {
         candidate: AddedTextCandidate<'_>,
         prepared: PreparedTextContent,
     ) -> PreparedTextCapture {
-        // The batch path takes only `Added` ingests.
         let provenance = self
             .provenance
             .for_path(candidate.path)
@@ -2117,9 +2111,6 @@ fn read_contained_current(
         return Ok(CurrentContent::NonOwnable);
     }
     if !text_media {
-        // Non-text media is engine-ownable binary content: the TS oracle
-        // routes it to the binary store before any UTF-8 sniffing, so a
-        // UTF-8-clean `.png` must never land in the plaintext store.
         return Ok(CurrentContent::Binary(bytes));
     }
     match String::from_utf8(bytes) {

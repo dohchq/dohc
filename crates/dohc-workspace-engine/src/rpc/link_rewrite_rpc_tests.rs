@@ -493,8 +493,6 @@ async fn pending_rewrite_proof(sources: usize, later_edit: bool, publisher_in_ga
         )
         .await
         .unwrap();
-        // The publisher queued on the capture gate before Undo's fence took it, so
-        // this lock waits until the publisher's turn in the gap has ended.
         drop(open.capture_apply_gate.lock().await);
         assert_eq!(
             std::fs::read_to_string(root.join("source-0000.md")).unwrap(),

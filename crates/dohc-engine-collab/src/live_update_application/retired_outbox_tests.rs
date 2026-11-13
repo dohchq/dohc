@@ -605,11 +605,6 @@ fn an_empty_manifest_resolves_without_walking_the_chain() {
 /// A fixture a successor adopts as it is, by the case it shows.
 type QuarantineFixture = (&'static str, fn() -> Fixture);
 
-/// Sol's finding 2 on 4b3a2: a quarantined outbox counts only when all three
-/// of its pending totals show it drained, whichever permitted reason
-/// quarantined it, at the successor's binding or at an earlier one its chain
-/// held. Each fixture adopts as it is; one inconsistent total refuses it with
-/// no writes.
 #[test]
 fn every_pending_total_must_show_a_quarantined_outbox_drained() {
     let fixtures: [QuarantineFixture; 4] = [

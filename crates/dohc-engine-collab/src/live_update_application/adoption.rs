@@ -2674,7 +2674,6 @@ pub(super) struct AdoptedOrigin {
     pub source_digest: String,
     pub sequence: i64,
     pub terminal: Option<LiveUpdateReceipt>,
-    /// It adopted its released chain's retained prefix.
     pub successor: bool,
 }
 

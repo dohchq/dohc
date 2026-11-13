@@ -1142,7 +1142,6 @@ mod tests {
             after(&|| remove("note.md")),
             vec![fact("note.md", FileChangeKind::Disappeared)]
         );
-        // With one spelling left, a replacement must not read as a rename.
         let replaced = after(&|| {
             remove("Note.md");
             f.write("NOTE.md", "other");

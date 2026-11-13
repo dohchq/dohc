@@ -2046,10 +2046,6 @@ fn a_live_refusal_after_a_stopped_drain(restart: bool) {
 
 #[test]
 fn resolution_fold_refuses_while_deferred_updates_are_parked() {
-    // Acked-but-parked remote updates were never part of
-    // either reviewed side, and their drain runs after the review gate
-    // closes. The fold — and with it the whole resolution transaction —
-    // refuses until they drain.
     let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)

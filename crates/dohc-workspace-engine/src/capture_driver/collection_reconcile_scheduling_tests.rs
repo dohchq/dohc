@@ -223,8 +223,6 @@ fn collection_reconcile_predicate_matches_the_markdown_extension_case_insensitiv
     std::fs::write(collection_dir.join("collection.yaml"), b"name: Tasks\n")
         .expect("collection schema");
 
-    // The watcher path: adding NOTE.MD to a live collection must schedule
-    // the reconciliation that adopts it, exactly like note.md.
     assert!(collection_reconcile_required(
         scratch.path(),
         &plan_with(ingest("tasks/NOTE.MD", IngestReason::Added)),
@@ -1071,8 +1069,6 @@ async fn watcher_repairing_malformed_collection_record_adopts_and_indexes_it() {
         "the Changed watcher pass must bind and index the repaired record"
     );
 
-    // The desktop imports pending collection records into canonical
-    // rich-document lineage, then asks capture to reconcile again.
     seed_plain_richdoc_lineage(&actor, "tasks/alpha.md", REPAIRED).await;
     status.request_collection_reconcile();
     let converged_root = bind_capture_root(scratch.path()).expect("bind converged run root");

@@ -720,8 +720,6 @@ impl Integration {
     }
 }
 
-/// Each client's ranges of clocks, sorted by where each starts, none
-/// overlapping or touching another.
 #[derive(Default)]
 struct Deletes(HashMap<yrs::ClientID, BTreeMap<u32, u32>>);
 
@@ -734,7 +732,6 @@ impl Deletes {
         Ok(deleted)
     }
 
-    /// The ranges `state` keeps pending until their items arrive.
     fn pending(state: &Ydoc) -> Self {
         let mut pending = Self::default();
         if let Some(set) = state.pending_delete_set() {
@@ -1761,7 +1758,6 @@ mod tests {
         );
         assert_eq!(preserved.merged, [outbox(1, &added)]);
         let retained = preserved.retained_bytes() as u64;
-        // What the merge holds until it ends.
         let held = growth + deleting + copy;
         assert_eq!(
             peak,

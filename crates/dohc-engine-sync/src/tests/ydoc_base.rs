@@ -1533,12 +1533,6 @@ fn applied_ydoc_envelopes_materialize_the_projection_with_the_cursorable_ack() {
 
 #[test]
 fn first_inbound_base_over_divergent_plain_head_opens_conflict_not_overwrite() {
-    // The receiver's head came from capture/local writes and belongs to
-    // no shared lineage. The first inbound base must not silently replace it:
-    // the lineage lands (claimed, acked), the head stays, and one moment-lane
-    // shaped sync conflict opens. Mutation check: restore the unconditional
-    // `project_and_write_in_tx` call in the base branch — the head assertion
-    // and the conflict-count assertion below both fail.
     let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
@@ -1738,19 +1732,6 @@ fn first_inbound_base_over_divergent_plain_head_opens_conflict_not_overwrite() {
 
 #[test]
 fn a_base_over_an_unmerged_head_conflicts_even_when_the_lineage_holds_rows() {
-    // `lineage_has_state` was a proxy for "the head was merged", and the two
-    // come apart exactly where it matters. A local-only session crashes
-    // leaving durable unmaterialized rows; capture then records an external
-    // disk edit, so the visible head is newer than anything the lineage
-    // produced. The union is the crashed draft plus the peer's base — the
-    // captured head is in neither — yet the proxy said "rows exist, so the
-    // CRDT is the merge" and the projection overwrote the user's edit with
-    // no conflict at all.
-    //
-    // The fact is `last_settled_sha`: the content this lineage last put on
-    // disk. Same move as the resolve path, where `metadata_origin == "sync"`
-    // was replaced by the head ids the payload already carried.
-    //
     let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
@@ -5235,13 +5216,6 @@ fn changed_paths_of(changes: &[crate::MomentMaterializationChange]) -> Vec<Strin
     paths
 }
 
-/// Sol's second finding on 3409694c7: a pass's ingress drain applies a
-/// queued base that replaces the lineage and leaves its losing side at a
-/// recovered path. Nothing else reports those files, so the drain report
-/// carries the recovered path and the head, and an abandoned request or a
-/// restart reports them once. Opus's fifth: a drain that applied the base,
-/// then stopped before its cleanup while the head's file was written, loses
-/// neither when the next drain replays the base, and keeps one sibling.
 #[test]
 fn an_ingress_drains_recovered_sibling_and_head_reach_its_drain_report_once() {
     for stopped_first in [false, true] {
@@ -5479,10 +5453,6 @@ fn ingress_drain_reports_its_sibling(stopped_first: bool) {
     );
 }
 
-/// Sol's re-drain case and Opus's fifth finding on 3409694c7: a queued base
-/// that opened a conflict, applied by a drain that stopped before its
-/// cleanup, is replayed by a pass's ingress drain. The conflict is counted
-/// once, in the drain report, and nothing of it is applied twice.
 #[test]
 fn a_replayed_conflict_opening_base_reports_its_conflict_once() {
     use dohc_engine_collab::{ContentKind, DocKey, WriterDocCache, Ydoc};

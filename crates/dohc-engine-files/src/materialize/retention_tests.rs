@@ -155,8 +155,6 @@ fn p0_thousand_settles_bound_staging_and_save_latency() {
         "save latency grew: {early} -> {late}us"
     );
 }
-/// #2205: on a volume that cannot refuse to unlink an open file, a replace
-/// records why its original stays, and the sweep never releases it.
 #[cfg(all(unix, feature = "fault-injection"))]
 #[test]
 fn an_unchecked_volume_keeps_every_original_and_counts_it() {

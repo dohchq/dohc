@@ -1758,7 +1758,6 @@ async fn presses_and_schedule_steps_claim_through_rpc() {
             "liveCursor": null,
         })
     );
-    // A press names who made it; an automation never presses.
     for by in [
         json!(null),
         json!({ "kind": "automation" }),

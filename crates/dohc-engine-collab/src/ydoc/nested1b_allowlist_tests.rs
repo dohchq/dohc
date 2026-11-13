@@ -663,8 +663,6 @@ fn nested1b_forged_witness_is_not_authority() {
     doc.record_validated_markdown_source_reference("* forged\n  * child")
         .unwrap();
     assert!(doc.preserved_markdown_source(&canonical).is_none());
-    // Native baseline validation accepts well-formed metadata, but projection
-    // drops an unproved source. It must never become artifact authority.
     doc.validate_public_baseline(&doc.encode_full_state())
         .unwrap();
     assert_eq!(doc.project_richdoc().unwrap(), canonical);

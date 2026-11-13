@@ -361,7 +361,6 @@ impl Notes {
         elapsed
     }
 
-    /// One sync on A. Answers how long it took.
     async fn pull(&mut self) -> Duration {
         let started = std::time::Instant::now();
         pull_materialize_and_commit(&self.a_transport, &self.a, &mut self.a_id, WORKSPACE).await;

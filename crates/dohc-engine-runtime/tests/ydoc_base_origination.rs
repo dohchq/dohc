@@ -2003,15 +2003,6 @@ async fn merge_fast_forward_delete_retires_the_target_ydoc_lineage() {
     supervisor.close(&db).expect("close actor");
 }
 
-/// COLLISION. When a peer's base for the same lineage lands first, the local
-/// daemon must not mint a second one: it observes the claim and journals its
-/// edit as a delta instead. Within one database SQLite serializes writers, so
-/// the concurrent claim reduces to this ordering, and the claim's re-check
-/// reads the same transaction that would write the second base.
-///
-/// Mutation check: drop the exact-claim guard in
-/// `ydoc_originate_base_in_tx` and a second base appears — both the op-shape
-/// assertion and `base_ops_in_log` fail.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_peer_base_that_lands_first_leaves_the_local_edit_a_delta() {
     const WS: &str = "ws-originate-race";
@@ -2577,15 +2568,6 @@ async fn two_devices_that_seed_the_same_file_merge_into_one_lineage() {
     }
 }
 
-/// A lineage seeded again from a later head gets a new claim, even when the
-/// text is the same. Here a conflict review archives the first lineage, and
-/// the file is then deleted and written again with the same text. The second
-/// lineage must not reuse the first claim: peers would merge the retired
-/// lineage's late edits into it, and archiving it would collide with the
-/// first archive.
-///
-/// Mutation check: derive the seed client from the text alone and both rounds
-/// claim the same base.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_lineage_seeded_again_from_the_same_text_gets_a_new_claim() {
     const WS: &str = "ws-reseed-same-text";
@@ -3292,26 +3274,6 @@ async fn ordinary_text_write_sends_one_canonical_rewrite_before_its_moment() {
     assert_eq!(peer_doc.plaintext_string(), AFTER);
 }
 
-/// A lineage that grew LOCAL-ONLY past `MAX_YDOC_UPDATE_BYTES` and then reached
-/// a synced workspace must not lose the edit that tries to promote it.
-///
-/// `claim_base_in_tx` measures the base against a cap written for one update.
-/// A base is a full state, so a big enough lineage fails that check — and the
-/// claim runs inside the append transaction, so the refusal rolls the user's
-/// valid edit back with it, permanently: the claim stays unclaimed, so every
-/// later edit takes the same branch and fails the same way.
-///
-/// Origination declines instead. The document keeps working and keeps markdown
-/// as its artifact.
-///
-/// #549 measured the bound this lineage has to clear, so the size here is now
-/// far past any real document: 22.5 MB of state, against a cap that covers a
-/// rich document at `MAX_TEXT_BYTES` with churn headroom. The branch stays
-/// because churn has no upper bound, not because ordinary documents reach it.
-///
-/// Mutation check: drop the size check in `ydoc_originate_base_in_tx` and the
-/// promoting edit itself fails, before any assertion runs —
-/// `Collab(UpdateTooLarge { actual: 22500047, max: 20971520 })`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_lineage_too_large_to_originate_still_accepts_the_edit() {
     const WS: &str = "ws-originate-oversize";
@@ -3882,7 +3844,6 @@ async fn oversized_close_decline_survives_prune_and_restart() {
         })
         .unwrap();
     assert_eq!(pass(&mut store).len(), 1);
-    // An offline reopen keeps the lane until the fresh seed reaches its first sync pass.
     store
         .write_with(&NoFaults, |tx| {
             tx.execute(

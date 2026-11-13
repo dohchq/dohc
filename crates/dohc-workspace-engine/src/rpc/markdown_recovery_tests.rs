@@ -1536,8 +1536,6 @@ async fn markdown_recovery_asks_a_reader_that_cannot_start_again_until_the_resol
     assert!(super::super::error::reader_retryable(&error), "{error}");
     assert_eq!(fixture.reader.dispatch_count(), 2);
     let (cancel, mut passes, task) = fixture.recover();
-    // Without an edit, recovery asks the reader once per attempt until the
-    // resolver's six retries are spent: five more requests.
     let mut attempted = 0;
     while attempted < 5 {
         let attempts = next_pass(&mut passes).await;

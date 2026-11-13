@@ -952,10 +952,6 @@ async fn a_settle_whose_older_write_fails_keeps_the_head_for_the_retry() {
     supervisor.close(&db).expect("close actor");
 }
 
-/// When an older write fails for a reason that won't pass on its own, here a
-/// link in the file's place, the settle stops with that reason rather than
-/// asking the caller to retry forever. Once the file is back, a settle lands
-/// both writes.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_settle_whose_older_write_is_blocked_says_why() {

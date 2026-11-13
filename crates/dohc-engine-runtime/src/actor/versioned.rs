@@ -3718,7 +3718,6 @@ mod doc_cache_reset_tests {
             std::fs::rename(root.join("record.md"), root.join("renamed.md")).unwrap();
         }
         let path = if exported { "renamed.md" } else { "record.md" };
-        // Matching bytes let legacy recovery settle unless the current path's hold parks it.
         let outside = if exported {
             "recipient text\n".to_owned()
         } else {

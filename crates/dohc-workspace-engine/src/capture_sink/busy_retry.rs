@@ -326,7 +326,6 @@ mod tests {
         ));
     }
 
-    /// Busy until `until`, then healthy, with a fake clock that each wait advances.
     fn contend(
         retry: &CaptureBatchRetry,
         until: Duration,

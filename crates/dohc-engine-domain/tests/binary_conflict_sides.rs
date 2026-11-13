@@ -532,7 +532,6 @@ fn hydrate_idempotent_and_claim_canonicalized() {
         .expect_err("wrong-length claim must be rejected");
     assert_eq!(err.code(), "blob-integrity");
 
-    // Round-trip: the stored bytes come back verified.
     let fetched = store
         .read_with(|conn| get_binary_blob(conn, &sha))
         .expect("get blob")
@@ -903,11 +902,6 @@ fn text_side_with_binary_sha_rejected() {
     assert_invalid_input(&err, "text conflict side cannot reference a binary blob");
 }
 
-/// M3 regression: a TEXT conflict recorded while the path was absent must not be
-/// resolvable after a binary head appears at that path. The stale-target gate has
-/// to see the binary head (content-kind mismatch) and fail closed with
-/// `ConflictStaleTarget`, not invisibly treat the path as still-absent and let the
-/// incoming text overwrite/delete the newer binary head.
 #[test]
 fn text_resolve_over_now_binary_path_is_stale_not_clobber() {
     let (_scratch, mut store) = open_store();

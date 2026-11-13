@@ -1625,9 +1625,6 @@ mod held_reader_tests {
         }
     }
 
-    /// A History reader keeps the store's folder after the future that
-    /// started it is dropped, its handle is gone and its actor has closed,
-    /// and reads through it until it finishes.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_reader_keeps_the_store_folder_after_its_caller_and_actor_go() {
         let scratch = ScratchDir::new().unwrap();

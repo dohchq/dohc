@@ -169,14 +169,6 @@ fn applied_in_order(f: &Fixture, deliveries: &[&str]) {
     assert_eq!(accepted_deliveries(f), expected);
 }
 
-/// Sol's round 4b ruling, 2(b): the current activation answers for its
-/// released chain's Carried deliveries until it applies them. S1 adopts
-/// after a predecessor that carried C1 and C2, and is stopped before applying
-/// either, or after applying C1 alone. Its release lists the unapplied ones
-/// under their original identities and proves the applied one Covered. A
-/// capture of the lineage released without adopting keeps them, and S2's
-/// coverage accepts them. S1's release replays from what it stored, with no
-/// writes, once S2 holds the lineage and applied the earliest of them.
 #[test]
 fn a_repeated_stop_keeps_the_chains_carried_deliveries() {
     for (applied, captured) in [(false, false), (false, true), (true, false), (true, true)] {
@@ -974,7 +966,6 @@ fn a_predecessors_refusal_stays_private_on_replay() {
     }
 }
 
-/// A damage to the predecessor's refused entry.
 type ChainRefusalDamage = (&'static str, fn(&mut Fixture));
 
 /// Only a strict refusal by an activation of the released chain stays

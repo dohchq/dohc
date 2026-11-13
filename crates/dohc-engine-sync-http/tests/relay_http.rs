@@ -2005,9 +2005,6 @@ fn a_binary_blob_past_the_read_limit_names_the_binary_ceiling() {
         "this test is only meaningful while the binary ceiling is tighter than \
          the loosest ingest ceiling"
     );
-    // A SECRET file, not a Y.Doc update: `ydoc.update` referenced
-    // `BlobKind::Binary` until #549 gave a Y.Doc payload its own kind, and this
-    // test needs an op that genuinely references a captured binary.
     let claimed = hex_sha256(b"a binary blob the relay serves far too much of");
     let handler_claimed = claimed.clone();
     let server = FakeServer::start(move |request| match request.path() {

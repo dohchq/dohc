@@ -643,11 +643,6 @@ fn tampered_ciphertext_fails_closed_on_materialize() {
 
 #[test]
 fn ciphertext_spliced_from_another_secret_path_fails_closed() {
-    // The AAD is `dohc-secret-v1\0<workspace>\0<path>`, so a sealed row belongs to
-    // one path and must not open under another. `aead::tests::aad_is_byte_exact`
-    // proves the AAD bytes; nothing proved that the STORE threads the requested
-    // path into it on both the seal and the open side. This does.
-    //
     let scratch = ScratchDir::new().unwrap();
     let db = engine_db_path(&scratch).unwrap();
     seed_version(&db, WS);
@@ -1982,11 +1977,6 @@ fn capture_ownership_does_not_follow_from_the_caller_supplied_origin() {
         .expect("capture must still claim a tip it put on disk itself");
 }
 
-/// The rehydration seed states what CAPTURE believes is on disk: a seeded path
-/// that the baseline scan cannot find is diffed as removed and RETIRED. Seeding
-/// an API-written secret — whose plaintext may never have reached disk — would
-/// therefore delete it, so the seed must not accept the caller's origin string
-/// as proof of disk ownership either.
 #[test]
 fn capture_manifest_seed_only_carries_secrets_capture_put_on_disk() {
     use dohc_engine_domain::{CaptureSecret, SECRET_SEED_SENTINEL_SHA, capture_manifest_seed};

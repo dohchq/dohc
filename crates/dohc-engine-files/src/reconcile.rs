@@ -704,8 +704,6 @@ impl ReconcileController {
                 lstat_unconfirmed.push(path);
             }
         }
-        // A record the manifest never tracked retires the same way. One the
-        // probe can't confirm gone waits for a later scan without degrading.
         for path in gone_untracked(&self.manifest, &listing, &self.retire_candidates) {
             if absence_probe.confirms_absent(root, &path) {
                 confirmed_removed.push(path);

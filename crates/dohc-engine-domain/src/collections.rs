@@ -6065,9 +6065,6 @@ fn sort_value_expression(join: &str) -> String {
     )
 }
 
-/// One keyset level of the cursor predicate: the SQL expression, whether the
-/// scan ascends through it, the serialized cursor value (`None` = the cursor
-/// row had no value), and whether comparisons need the JSON collation.
 struct CursorLevel {
     expression: String,
     ascending: bool,

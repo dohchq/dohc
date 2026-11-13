@@ -1373,8 +1373,6 @@ fn watch_automation_groups_in_tx(
         workspace_id,
         now_ms.saturating_sub(AUTOMATION_GROUP_COVERAGE_MS),
     )?;
-    // The rows as they stand: running here, frozen here, or pending from an
-    // earlier handover, each with its start.
     let rows: Vec<(String, String, i64, bool)> = conn
         .prepare_cached(
             "SELECT automation_id, channel_id, created_at_ms, frozen \
@@ -2546,8 +2544,6 @@ pub enum AutomationPressed {
     Busy,
 }
 
-/// The Collection path of the Collection automation a button or schedule
-/// runs.
 fn button_or_schedule_automation(automation_id: &str) -> Result<(), DomainError> {
     if is_collection_automation_id(automation_id) {
         return Ok(());

@@ -821,7 +821,6 @@ mod tests {
         bytes
     }
 
-    /// Settle `header`'s restore and cancel it once the settlement committed.
     async fn settle_cancelled_after_commit(
         f: &mut Fixture,
         header: &Value,

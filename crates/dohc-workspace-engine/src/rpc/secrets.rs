@@ -764,10 +764,6 @@ impl EngineService {
         if stat.is_none() {
             return Ok(Value::Null);
         }
-        // Blocking filesystem work stays off the tokio worker — and the
-        // wait for it is cancellation/deadline-raced like every other
-        // await on this surface (the blocking task finishes on its own;
-        // only the caller's wait abandons).
         let held = open.actor.location();
         let key_task =
             tokio::task::spawn_blocking(move || dohc_engine_crypto::load_key_file(held.folder()));

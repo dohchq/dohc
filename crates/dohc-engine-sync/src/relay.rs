@@ -5122,13 +5122,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     continue;
                 }
             };
-            // The relay serves `workspace.init` to a path/version share as its
-            // bootstrap op (`services/sync-relay/src/shareFilter.ts`), and this
-            // recipient needs nothing from it: `replay_share_view_op` ensures
-            // the local main version itself. So it is skipped as expected, not
-            // refused — the boundary still admits only `moment.append` and
-            // `version.create`, and reporting this healthy skip as a refusal
-            // would make the first pull of every share look damaged.
             if envelope.op_kind == BOOTSTRAP_OP_KIND {
                 skipped += 1;
                 continue;
@@ -5140,14 +5133,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         refusals: nested_refusals,
                         sharing_declined,
                     } = outcome;
-                    // A share-view CHAT op does mutate chat
-                    // dependencies — that is what applying it means, and the
-                    // replay it unparks can refuse ops of its own. Those
-                    // refusals are recorded below rather than asserted about:
-                    // every coordinate `chat_pending_replication` can hold is
-                    // a chat kind by construction, so an assertion that they
-                    // are chat kinds proves nothing and is absent in release
-                    // anyway.
                     for refusal in nested_refusals {
                         refusals.push(ShareViewRefusal::new(
                             refusal.origin_id,
@@ -5169,11 +5154,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         }
                     }
                 }
-                // `share_disposition` decides, and it is exhaustive over
-                // `SyncError` — a new variant fails to compile there until its
-                // author chooses, rather than falling into a catch-all and
-                // wedging this pull. Listing the classes here instead would
-                // put that choice in a place nobody is forced to visit.
                 Err(error) => match error.share_disposition() {
                     // Skip and continue: one op the relay should not have
                     // served must not wedge the share. The reason travels with
@@ -7277,8 +7257,6 @@ fn collect_share_proposal_changes(
                 "moment.append" => Some(MomentRefs::read(&op.payload)),
                 _ => None,
             };
-            // An open write stops the scan at its file's first op past what
-            // is already settled; a settled op is read past as usual.
             if let Some(object_id) = moment.and_then(|moment| moment.object_id)
                 && skips.stop_at.contains(object_id)
                 && skips
@@ -7575,18 +7553,6 @@ struct RefusedBlob {
     path: String,
 }
 
-/// Turn an op's refused blobs into one durable record.
-///
-/// The recipient's record is keyed by origin coordinate and by nothing else
-/// (`mergeShareSkippedOps` in `apps/desktop/src/workspaces/registryStore.ts`),
-/// because a re-fetched page must not stack the same op up twice. Every blob
-/// in one op shares that coordinate, so emitting a refusal per blob does not
-/// give the reader more detail — the record keeps the first and drops the
-/// rest, uncounted. Two files would go missing and the notice would say one.
-///
-/// So the op is the record and the blobs are its contents. The count leads,
-/// because `ShareViewRefusal::new` bounds the detail and a list that stops
-/// short must still say how many files it is short.
 fn record_refused_blobs<T>(
     context: &mut ShareViewReplayContext<'_, T>,
     envelope: &ReplicationEnvelope,

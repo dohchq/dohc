@@ -1174,7 +1174,6 @@ fn a_write_whose_answer_was_lost_is_sent_again_as_the_same_request_after_another
         client.push_direct_writes(&mut engine, "ws", SHARE, &edit_grant(), &NoFaults, 0),
         Err(RelayError::HttpStatus(429)),
     );
-    // Another edit before the next push does not change the write in flight.
     journal_local_moment(
         &mut engine,
         &edit_moment("m-2", "object-schema", schema, "v2", "v3"),

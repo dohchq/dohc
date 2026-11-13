@@ -1,15 +1,3 @@
-//! A held document's proof, run off the store's actor. The proof reads one
-//! committed snapshot on a read-only connection of its own, which closes
-//! before its answer is handed over. What it read beyond the evidence the
-//! document's released tail generation covers, its caller names by bounded
-//! coordinates and compares again on the actor before releasing the answer.
-//! A workspace has one proof at a time until it ends, shared by the callers
-//! that ask the same of the same state, and stopped once none of them waits, its
-//! store closes, its store's WAL needs its reader gone, or its deadline
-//! passes. A daemon runs a few proofs at once, within a memory budget its
-//! proofs and their results share: a proof takes more of it before it holds
-//! more than its reservation, while it works or in what its result keeps,
-//! and a result keeps only what fits.
 use super::binding::MAX_ARTIFACT_BYTES;
 use super::*;
 use crate::ContentKind;
@@ -84,7 +72,6 @@ struct OpenReaders {
 }
 
 struct ProofState<K, T> {
-    /// Each workspace's proof, by workspace ID, until it ends.
     running: HashMap<String, Arc<Proof<K, T>>>,
     closed: bool,
     /// How long a proof admitted now may run.
@@ -426,7 +413,6 @@ impl ProofMemory {
         Ok(())
     }
 
-    /// The proof's work freed `bytes`. What it took stays held until it ends.
     fn worked(&self, bytes: u64) {
         let mut taken = lock(&self.taken);
         taken.working = taken.working.saturating_sub(bytes);
@@ -434,9 +420,6 @@ impl ProofMemory {
 }
 
 impl ProofPermit {
-    /// Turn the memory the proof holds into the charge of a result that
-    /// keeps `retained` bytes, unless that would pass capacity; the place
-    /// stays taken until the permit drops.
     fn charge(&self, retained: u64) -> Result<ProofCharge, HeldProofError> {
         let mut taken = lock(&self.memory.taken);
         lock(&self.memory.limit.0)
@@ -1308,10 +1291,6 @@ impl LineageCoordinates {
     }
 }
 
-/// What tests hold proofs with: a pause at one stage's checks, at a
-/// reader's open and at a last caller's leaving, a statement that runs
-/// until its proof stops, a stopped proof kept from ending, and counts of
-/// what proofs passed and opened.
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Default)]
 struct Gate {
@@ -1376,8 +1355,6 @@ impl Gate {
         }
     }
 
-    /// Hold a proof at `stage` while proofs pause there, past the checks to
-    /// skip, until they resume or the proof stops.
     fn at(&self, stage: ProofStage, halt: &Halt) {
         let mut state = lock(&self.state);
         if state.pause != Some(stage) || halt.reason().is_some() {
@@ -1769,7 +1746,6 @@ mod tests {
         Held::new(HeldProofLimit::default())
     }
 
-    /// Poll `future` on this thread until it completes.
     fn block_on<F: std::future::Future + Unpin>(mut future: F) -> F::Output {
         struct Unpark(std::thread::Thread);
         impl std::task::Wake for Unpark {
@@ -1817,8 +1793,6 @@ mod tests {
         }
     }
 
-    /// A proof that holds at its merge, its reader open, until it stops, and
-    /// answers whether it did.
     fn merging(run: Run) -> std::thread::JoinHandle<()> {
         std::thread::spawn(move || {
             run.prove(|job| {
@@ -1881,10 +1855,6 @@ mod tests {
         );
     }
 
-    /// Ruling B, item 6: the last caller to leave stops the running proof,
-    /// unlike [`ReleasedTails`], whose validation runs on. The workspace
-    /// stays busy until the proof ends, for an identical request too, and
-    /// the leaving caller can wait for that.
     #[test]
     fn the_last_caller_to_leave_stops_the_proof_which_keeps_its_workspace_until_it_ends() {
         let (_scratch, store) = store();
@@ -2156,11 +2126,6 @@ mod tests {
         assert_eq!(answer(first), Err(HeldProofError::Busy));
     }
 
-    /// Sol's r2c-3c-2 finding 5, and Opus's "old finding 3": a daemon runs at
-    /// most its limit of proofs, across its stores, and a third is busy at
-    /// once. A completed result keeps its memory charged until its last
-    /// caller drops it, as one waiting to stream would, so a proof that
-    /// needs that memory is busy until then.
     #[test]
     fn a_daemon_runs_a_bounded_number_of_proofs_and_results_keep_their_charge() {
         let (_scratch, store) = store();

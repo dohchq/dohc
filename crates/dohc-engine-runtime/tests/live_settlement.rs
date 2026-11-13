@@ -1262,9 +1262,6 @@ async fn settlement_moment_names_only_the_delivery_that_added_content() {
     f.assert_projection();
 }
 
-/// A delivery whose agent the next settlement could not name within the
-/// moment's author bounds waits for that settlement instead of being
-/// truncated. After it, the same delivery applies.
 #[tokio::test]
 async fn declared_agent_past_the_author_bound_waits_for_settlement() {
     let f = Fixture::new().await;

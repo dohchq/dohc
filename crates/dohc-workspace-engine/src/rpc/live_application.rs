@@ -2913,8 +2913,6 @@ mod tests {
             )
             .is_pending()
         );
-        // The spawned operation owns this lock until its terminal poll. Keep the
-        // RPC unpolled until that operation finishes, then cancel it.
         let serial =
             tokio::time::timeout(std::time::Duration::from_secs(5), open.session_ops.lock())
                 .await
@@ -2932,7 +2930,6 @@ mod tests {
             !answered.output_guard.as_ref().unwrap().is_current(),
             "the writer withholds an answer its caller stopped waiting for"
         );
-        // The answer holds its admission until the writer drops it.
         drop(answered);
         assert!(ingress.settlement_admission(4).unwrap().reserve().is_ok());
         if restore_fence {
@@ -4710,7 +4707,6 @@ mod tests {
             std::task::Poll::Ready(())
         })
         .await;
-        // The successor's capture takes the session while the unload waits.
         lock(&service.sessions)
             .get_mut("ydoc-unload-document")
             .unwrap()
@@ -4889,10 +4885,6 @@ mod tests {
         service.workspace_close(Some(workspace)).await.unwrap();
     }
 
-    /// A fence that committed ends in its terminal cancellation. The answer
-    /// names the fenced generation, the fence's stopped binding and the
-    /// receipt the relay journal carries, ending at the bootstrap's origin,
-    /// and a replay answers the same.
     #[tokio::test]
     async fn a_committed_fence_answers_its_terminal_cancellation() {
         use dohc_engine_collab::live_update_application::NativeRestoreCancellationReceipt;
@@ -5051,11 +5043,6 @@ mod tests {
         rows(service, workspace, "live_owner_retirements")
     }
 
-    /// Release is only for the configured host, and only for a document that
-    /// left the scope: until then it tears nothing down. An adopted activation
-    /// then ends its runtime and waits to park, releases, and answers a
-    /// duplicate from its stored release. After a reconnect, nothing registers
-    /// for it, named or not.
     #[tokio::test]
     async fn an_adopted_release_waits_to_park_and_answers_its_replay() {
         let (_scratch, service, owner, workspace, document, _) = retirement_fixture(true).await;

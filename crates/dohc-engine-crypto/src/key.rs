@@ -220,11 +220,6 @@ pub fn load_key_file(engine_dir: &std::path::Path) -> Result<Option<SecretDataKe
     Ok(Some(key))
 }
 
-/// The key folder must not resolve anywhere else: neither it nor the folder
-/// above it, `.dohc` in a workspace, may be reached through a link, as each
-/// load and mint checked on main. A folder the engine reaches as the folder it
-/// checked has no names to follow: by its ID on a Mac, and by the descriptor
-/// it holds on Linux. Shared by load and mint.
 fn verify_key_dir(engine_dir: &std::path::Path) -> Result<(), CryptoError> {
     #[cfg(target_vendor = "apple")]
     if dohc_macos_files::is_path_by_id(engine_dir) {
@@ -435,8 +430,6 @@ mod tests {
     use super::*;
     use zeroize::Zeroize;
 
-    /// A workspace folder whose ACL gives every new file read access for
-    /// everyone must not pass that grant to the data key.
     #[cfg(target_vendor = "apple")]
     #[test]
     fn a_folders_inherited_grant_never_reaches_the_key_file() {
@@ -596,11 +589,6 @@ mod tests {
         // silently orphan every sealed snapshot.
         std::fs::write(&file, "garbage").unwrap();
         assert!(load_key_file(&dir).is_err());
-        // "Fails closed" also means it LEAVES THE FILE ALONE. An error return that
-        // truncated, deleted, or re-minted over the file would read as fail-closed
-        // to the caller while destroying the only copy of the key — the operator's
-        // one chance to restore the real one.
-        //
         assert_eq!(
             std::fs::read_to_string(&file).expect("the malformed key file still exists"),
             "garbage",
@@ -611,11 +599,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn freshly_minted_key_file_is_0600() {
-        // `load_retightens_lax_permissions_to_0600` chmods the file to 0644 itself
-        // before loading, so it can only prove the re-tighten on load — deleting
-        // the create-time mode leaves it green. This asserts the mode the mint
-        // chose, with no `set_permissions` step in between.
-        //
         use std::os::unix::fs::PermissionsExt;
         let dir = dohc_test_scratch::ScratchDir::new_named("keymint-mode-test").unwrap();
         let _key = create_key_file(&dir).expect("mint");

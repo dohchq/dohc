@@ -549,7 +549,6 @@ fn only_a_genuine_durable_refusal_permits_the_next_attempt() {
         "{}",
         refused.recovered_path
     );
-    // The new attempt stands until it is itself refused.
     let again = keep(&mut store, MARKDOWN);
     assert_eq!((again.attempt, again.created), (1, false));
     assert_eq!(decisions(&store), 2);

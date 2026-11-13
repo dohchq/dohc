@@ -893,13 +893,6 @@ impl VersionFence {
         let events = self.events.clone();
         let detached_operation = operation.to_owned();
         let settle_summary = settle_summary.to_owned();
-        // The fence's forced reconcile is a capture pass (TS parity:
-        // `version-switch-${id}` / `version-create-${id}`): its moments carry
-        // the fence's own summary and one correlation id so the pre-switch
-        // "nothing is ever lost" capture groups in history instead of
-        // rendering as unrelated per-file rows. A file an unfinished first
-        // import has not recorded yet joins that import instead. The capture
-        // gate is held, so the live driver cannot finish it meanwhile.
         let first_import = open
             .actor
             .unfinished_first_import(open.workspace_id.clone())

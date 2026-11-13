@@ -153,7 +153,6 @@ fn every_fixture_converges_before_and_after_compaction() {
     let mut richdoc = 0;
     let mut compacted_count = 0;
     for fx in &fixtures {
-        // Probes have their own dedicated tests.
         if fx.kind.is_some() {
             continue;
         }
@@ -1146,20 +1145,6 @@ fn nested_frontmatter_keys_are_sorted_deterministically() {
     );
 }
 
-// ---- inductive content-parity sweep (residual class: hostile re-encode) ----
-//
-// The reviewer's residual: a peer re-encodes an already-known `(client,
-// clock)` with different content — without a clock shortfall (the
-// candidate-clock-coverage check sees full coverage) and without an interior-
-// scalar edit boundary named on the wire (the structural boundary pass sees
-// nothing). No honest peer ever redefines a clock it has already used, so
-// this corpus is adversarial-construction-only: for many base texts (plain
-// ASCII, ASCII interleaved with multi-unit emoji, accented Latin), corrupt
-// EVERY ASCII byte of the same wire update's string payload to a different
-// ASCII byte and drive it back through the gate as a "candidate" claiming the
-// identical (client, clock) range as the already-integrated base. Each must
-// be rejected; none may panic.
-
 /// Locate the string payload of a `plaintext_insert(0, text)` delta: the
 /// fixed `plainText` root-name marker, a 1-byte length prefix (valid for the
 /// short ASCII/emoji test strings used here, all under 128 UTF-8 bytes), then
@@ -1389,7 +1374,6 @@ fn replay_parity_rejects_cross_type_redefinition_on_both_paths() {
             "{name} local: rejected redefinition must not reach the blob store"
         );
 
-        // Remote path.
         let (mut remote, rkey) =
             setup_parity_store(&format!("xtype-{name}-remote"), Regime::Replicated);
         apply_remote_update(
@@ -1440,12 +1424,6 @@ fn replay_parity_rejects_cross_type_redefinition_on_both_paths() {
 
 #[test]
 fn replay_parity_accepts_same_kind_same_payload_resend_for_each_content_kind() {
-    // Positive control / no-false-positive: a full-state resend that re-encodes
-    // an existing clock with the same kind + same payload must ACCEPT. Build a
-    // single-item doc of each non-string content kind directly on an empty
-    // lineage (the item lands at clock 0), then resend the identical bytes; the
-    // gate must accept (the second record dedups). Covers a doc that
-    // legitimately contains embed / format content, plus binary and type.
     for (name, content_ref, payload) in cross_type_redefinition_cases() {
         // `deleted` is a lone tombstone, not a meaningful "content" doc.
         // `json` (legacy ContentJSON) cannot round-trip durably in yrs 0.27.3:
@@ -1532,24 +1510,8 @@ fn replay_parity_accepts_embed_resend_with_reordered_map_keys() {
         |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect("a same-map different-key-order embed resend must not be false-rejected");
-    // Same logical embed, re-encoded: the gate accepts. Whether yrs dedups the
-    // reordered bytes or journals them, it must not be a parity violation.
     assert!(matches!(outcome, TxnOutcome::Committed(_)));
 }
-
-// ---- honest delete+GC+resend must accept (regression guard) -----------------
-//
-// The reviewer's honest-corpus differential found a cutover-blocking false
-// positive: after a delete+GC, a normal reconnect/resync full-state resend
-// carries the deleted clock as `ContentDeleted` while the durable base still
-// holds it as a live `String`. Recording the deleted clock's identity as a
-// `Tombstone` made the gate flag established-live-vs-candidate-tombstone as a
-// hostile redefinition and reject the whole resend — dropping every insert
-// bundled in it and keeping deleted content, diverging from honest peers.
-//
-// The distinguisher: a legitimate delete/GC carries the clock in the
-// candidate's own delete-set; a hostile bare `ContentDeleted` has an empty
-// delete-set. Only the latter is rejected.
 
 #[test]
 fn replay_parity_accepts_honest_delete_gc_resend() {
