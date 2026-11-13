@@ -1628,4 +1628,3 @@ async fn a_rolled_back_claim_leaves_no_schema_version_and_its_retry_proposes_the
     );
     assert_first_version_names_its_schema_version(&store, "retried claim");
 }
-

@@ -596,4 +596,3 @@ async fn outside_reader_fold_requires_engine_serialization_to_match_the_file() {
         );
     }
 }
-

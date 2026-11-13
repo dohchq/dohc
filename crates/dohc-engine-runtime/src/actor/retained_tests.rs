@@ -493,4 +493,3 @@ fn an_explicit_delete_skips_a_row_naming_anything_but_a_staged_original() {
     }
     actor.close().unwrap();
 }
-

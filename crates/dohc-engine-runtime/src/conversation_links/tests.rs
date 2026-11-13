@@ -378,4 +378,3 @@ fn conversation_links_failed_repair_backs_off_without_releasing_its_barrier_or_s
     assert_eq!(entries(&s, "a").len(), 1);
     assert_eq!(page(&s, "a", None).unwrap()["indexBuilding"], false);
 }
-

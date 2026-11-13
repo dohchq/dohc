@@ -9,16 +9,16 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use common::*;
 use dohc_engine_collab::ContentKind;
+use dohc_engine_collab::WriterDocCache;
 use dohc_engine_collab::{
     apply_remote_update, claim_base, claim_base_at_relay, close_session, ensure_marker,
     fresh_successor_base, load_persisted, maybe_compact, read_marker, record_base_coordinate_in_tx,
     record_local_update, replace_lineage_with_successor, settle, BaseCoordinateRecord,
     BaseRelayCoordinate, ClaimOutcome, CloseOutcome, CollabError, CompactOutcome, DocKey,
     LeaseRegistry, LineageClaimStatus, LineageGuard, LocalAppend, MarkerCreation, Regime,
-    RemoteUpdate, SettleOutcome, SuccessorIdentity, SuccessorIdentityInput, SuccessorInstallOutcome,
-    SuccessorReplacement, Ydoc,
+    RemoteUpdate, SettleOutcome, SuccessorIdentity, SuccessorIdentityInput,
+    SuccessorInstallOutcome, SuccessorReplacement, Ydoc,
 };
-use dohc_engine_collab::WriterDocCache;
 use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
 use rusqlite::OptionalExtension;
 

@@ -1266,7 +1266,6 @@ mod tests {
         assert!(super::require_capture_hold(&open, reply["holdId"].as_str()).is_err());
         service.workspace_close(Some(handle)).await.expect("close");
     }
-
 }
 
 #[derive(Deserialize)]

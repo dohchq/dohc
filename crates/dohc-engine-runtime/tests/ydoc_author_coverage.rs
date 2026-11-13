@@ -253,4 +253,3 @@ async fn settlement_crashes_restart_without_losing_or_repeating_authors() {
         supervisor.close(&db).expect("stop actor");
     }
 }
-

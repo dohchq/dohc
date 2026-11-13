@@ -1051,4 +1051,3 @@ async fn capture_records_an_edit_made_while_a_switch_write_waits() {
     );
     supervisor.close(&database).expect("close");
 }
-

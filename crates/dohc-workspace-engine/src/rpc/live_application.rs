@@ -4031,5 +4031,4 @@ mod tests {
         );
         service.workspace_close(Some(workspace)).await.unwrap();
     }
-
 }

@@ -487,7 +487,6 @@ impl Fixture {
             .offer_captured_link_rewrites(&self.ws, &[path.into()]);
         self.actor.retry_pending_link_rewrites(&self.ws).await;
     }
-
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -616,4 +615,3 @@ async fn outside_retry_failure_keeps_pending_work_and_durable_progress() {
         f.close().await;
     }
 }
-

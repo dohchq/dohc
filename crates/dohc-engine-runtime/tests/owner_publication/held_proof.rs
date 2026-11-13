@@ -303,7 +303,6 @@ mod changed_proof {
         },
         false,
     );
-
 }
 
 /// Opus's r2c-3c-7 finding 2: a proof reads the state of the document its
@@ -563,4 +562,3 @@ async fn an_artifact_past_its_cap_leaves_the_preservation_answering() {
     desktop.close().await;
     w.close().await;
 }
-

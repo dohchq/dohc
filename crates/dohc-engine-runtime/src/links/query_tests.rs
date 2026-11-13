@@ -242,4 +242,3 @@ async fn pages_bound_bytes_and_do_not_repeat_unchecked_sources() {
     assert_eq!(entries.len(), 120);
     assert_eq!(unchecked, vec![json!("a.md")]);
 }
-

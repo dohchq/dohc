@@ -581,4 +581,3 @@ async fn cursor_committed_crash_invalidates_writer_cache() {
     assert_eq!(after.misses, before.misses + 1);
     supervisor.close(&path).unwrap();
 }
-

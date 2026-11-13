@@ -2525,10 +2525,7 @@ async fn stop_release_entry_and_byte_bounds_are_inclusive() {
         );
         supervisor.close_all().unwrap();
     }
-    for size in [
-        MAX_RELEASE_BYTES as usize,
-        MAX_RELEASE_BYTES as usize + 1,
-    ] {
+    for size in [MAX_RELEASE_BYTES as usize, MAX_RELEASE_BYTES as usize + 1] {
         let (mut f, supervisor, actor) = pending_release_fixture(1).await;
         f.doc = Ydoc::wire();
         f.doc.apply(&f.bytes).unwrap();
@@ -6747,4 +6744,3 @@ fn host_write(
     };
     (op, text.as_bytes().to_vec())
 }
-

@@ -6939,16 +6939,16 @@ mod tests {
     use serde_json::json;
 
     use super::{
+        CollectionFilter, CollectionFilterOperator, CollectionQuery, matches_collection_filter,
+        query_collection_records,
+    };
+    use super::{
         CollectionIndexedValue, CollectionIndexedValueValidation, CollectionRecord, CollectionSort,
         FieldValueReason, FieldValueReasonCode, ViewSortDirection, collection_value_key,
         collection_values_equal, compare_collection_records,
         ensure_historical_record_owners_backfilled, index_historical_record_owner_moment_in_tx,
         latest_historical_record_id, load_historical_record_owners, markdown_record_id,
         parse_markdown_frontmatter,
-    };
-    use super::{
-        CollectionFilter, CollectionFilterOperator, CollectionQuery, matches_collection_filter,
-        query_collection_records,
     };
     use serde_json::Value;
 

@@ -2263,4 +2263,3 @@ async fn never_synced_mutations_append_no_relay_ops() {
 
     assert!(local_ops(&db).is_empty());
 }
-

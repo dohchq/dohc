@@ -372,4 +372,3 @@ fn incoming_read_model_isolates_populated_workspaces_with_colliding_ids() {
     assert!(other.sources.is_empty());
     assert_eq!(other.unchecked, vec!["source.md"]);
 }
-

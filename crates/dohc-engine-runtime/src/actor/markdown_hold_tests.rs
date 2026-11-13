@@ -1369,7 +1369,6 @@ impl Fixture {
             .await
             .unwrap();
     }
-
 }
 
 #[tokio::test]
@@ -1502,4 +1501,3 @@ async fn held_drop_and_undo_work_with_only_a_sync_projection_hold() {
     );
     f.supervisor.close(&f.db).unwrap();
 }
-

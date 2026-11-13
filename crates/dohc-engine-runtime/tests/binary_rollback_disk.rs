@@ -732,4 +732,3 @@ async fn rollback_replay_cannot_delete_another_workspaces_file() {
     drop(connection);
     supervisor.close(&db).expect("close actor");
 }
-

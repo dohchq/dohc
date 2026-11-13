@@ -14,8 +14,8 @@ use dohc_engine_protocol::{
 use dohc_engine_storage::{EngineStore, NoFaults};
 use dohc_engine_testkit::ScratchDir;
 use dohc_workspace_engine::{
-    CAPTURE_INITIAL_SETTLED_EVENT, CaptureApplyProbe, EARLY_IMPORT_MIN_ADDED_FILES, EngineEventNotice,
-    EngineService, root_binding::write_root_binding,
+    CAPTURE_INITIAL_SETTLED_EVENT, CaptureApplyProbe, EARLY_IMPORT_MIN_ADDED_FILES,
+    EngineEventNotice, EngineService, root_binding::write_root_binding,
 };
 use serde_json::json;
 use std::path::Path;

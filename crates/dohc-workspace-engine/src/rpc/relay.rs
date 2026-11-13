@@ -4198,5 +4198,4 @@ mod tests {
         drop(supervisor);
         f.close().await;
     }
-
 }

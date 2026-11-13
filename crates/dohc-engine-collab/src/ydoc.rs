@@ -10521,7 +10521,6 @@ fn main() {}
             .expect("richdoc rewrite");
         assert_eq!(reread.frontmatter_json(), doc.frontmatter_json());
     }
-
 }
 
 #[cfg(test)]
@@ -10630,7 +10629,6 @@ mod fence_projection_tests {
             }
         }
     }
-
 }
 
 #[cfg(test)]

@@ -685,4 +685,3 @@ async fn a_checkpoint_from_another_serializer_is_refused_and_kept() {
     let outcome = import(&rich.actor, rich.scratch.path(), input).await;
     assert_eq!(assert_typing_kept(rich, &text, outcome).await, "refused");
 }
-
