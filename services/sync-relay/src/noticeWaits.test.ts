@@ -9,6 +9,8 @@ import {
 import {
   NOTICE_WAIT_MAX_MS,
   type AutomationWake,
+  type NoticeTarget,
+  type PostableNoticeKind,
   type RelayNotice,
   type RelayNoticePage,
 } from "@dohc/workspace-contracts/relay";
@@ -18,7 +20,11 @@ import { NOTICE_WAITS_PER_ACCOUNT, NOTICE_WAITS_PER_SESSION } from "./noticeRout
 import { notifyNoticeChange } from "./relayWriteChanges";
 import type { SyncRelayStorage } from "./storage";
 import type { StorageContext } from "./storage/context";
-import { advanceNoticeHead, type PostNoticeInput } from "./storage/notices";
+import {
+  advanceNoticeHead,
+  noticePersonalAgentSignedIn,
+  type PostNoticeInput,
+} from "./storage/notices";
 import {
   closeTestStorages,
   denialBytes,
@@ -141,7 +147,8 @@ async function relay(options: { seedFull?: boolean } = {}) {
       kind: "mention",
       title: `Title ${noticeId}`,
       body: `Body ${noticeId}`,
-      target: {},
+      // A mention shows on the phone only where its place is confirmed: an ordinary file in Trip.
+      target: { path: "inbox/today.md" },
       originInstallId: "install-a",
       senderUserId: "ana",
       senderLabel: "Ana",
@@ -476,12 +483,88 @@ it("leaves out an automation's rows whose Collection the relay can't place, and 
   expect((await full()).notices).toHaveLength(4);
 });
 
+it("shows each kind on the phone only as its rule allows, and leaves out a kind it doesn't know", async () => {
+  const { storage, read, full, post } = await relay();
+  logWriter(storage)("chat.thread.create", { threadId: "thread-chat" });
+  const automation = "collection:c1#digest";
+  const placed = { path: "lists/automations.yaml", automation };
+  // [noticeId, kind, target, shown on the phone]
+  const cases: Array<[string, PostableNoticeKind, NoticeTarget, boolean]> = [
+    ["mention-thread", "mention", { thread: "thread-chat", message: "m-1" }, true],
+    ["mention-path", "mention", { path: "docs/plan.md" }, true],
+    ["mention-nowhere", "mention", {}, false],
+    ["agent-run-thread", "agent-run", { thread: "thread-chat", run: "run-1" }, true],
+    ["agent-run-run-only", "agent-run", { run: "run-2" }, false],
+    [`schedule-skipped:trip:${automation}:1000`, "schedule-skipped", placed, true],
+    [`schedule-skipped:trip:${automation}:1001`, "schedule-skipped", { automation }, false],
+    ["failed", "automation-failed", { ...placed, run: "claim-1" }, true],
+    ["failed-hidden", "automation-failed", { path: ".env/automations.yaml", automation }, false],
+    ["failed-nameless", "automation-failed", { automation, run: "claim-1" }, false],
+    ["failed-blank", "automation-failed", {}, false],
+    [
+      "notify",
+      "automation-notify",
+      { path: "lists/milk.md", record: "r1", automation, run: "claim-1" },
+      true,
+    ],
+    ["notify-nameless", "automation-notify", { automation, run: "claim-1" }, false],
+    ["switched-off", "automation-switched-off", placed, true],
+    ["switched-off-nameless", "automation-switched-off", { automation }, false],
+  ];
+  for (const [noticeId, kind, target] of cases) post(noticeId, { kind, target });
+  // The relay's own kinds: a share received, and an agent's sign-in, both shown; a wake, never.
+  shareNotesWithAna(storage, { deliver: true });
+  noticePersonalAgentSignedIn(storage as StorageContext, {
+    ownerUserId: "ana",
+    workspaceId: "trip",
+    connectionId: "conn-1",
+    agentId: "p-nova",
+    agentName: "Nova",
+    nowMs: NOW,
+  });
+  const { noticeId: wakeId } = storage.postAutomationWake({
+    workspaceId: "trip",
+    ownerUserId: "ana",
+    effectId: "effect-1",
+    claimId: "claim-1",
+    keySeed: "seed-1",
+    startedAtMs: NOW,
+    wake: { automationId: automation, name: "Digest", depth: 1, body: "Summarize the day" },
+    senderLabel: "Digest",
+    nowMs: NOW,
+  });
+  // A kind this relay doesn't know, as a newer relay could have stored.
+  post("future");
+  const db = inspectDatabase(storagePath(storage));
+  db.prepare("UPDATE sync_relay_notices SET kind = 'future-kind' WHERE notice_id = 'future'").run();
+  db.close();
+
+  const response = await read("scope=phone&limit=200");
+  const text = await response.clone().text();
+  const phone = await page(response);
+  const shown = cases.flatMap(([noticeId, , , onPhone]) => (onPhone ? [noticeId] : []));
+  expect(
+    phone.notices.filter((notice) => notice.kind !== "share-received").map((n) => n.noticeId),
+  ).toEqual([...shown, "personal-agent-signed-in:conn-1"]);
+  expect(phone.notices.filter((notice) => notice.kind === "share-received")).toHaveLength(1);
+  const left = [
+    ...cases.flatMap(([noticeId, , , onPhone]) => (onPhone ? [] : [noticeId])),
+    wakeId,
+    "future",
+  ];
+  for (const noticeId of left) expect(text, noticeId).not.toContain(`"noticeId":"${noticeId}"`);
+  // The whole list keeps every row.
+  expect(ids(await full())).toEqual(expect.arrayContaining([...shown, ...left]));
+});
+
 it("decides a row in another account's workspace by a fixed rule that reads nothing there", async () => {
   const { storage, read, post } = await relay();
   // Ana's own notices can name any workspace ID, Ben's included.
   post("probe-path", { reach: { workspaceId: "bens" }, target: { path: "deploy/config.yaml" } });
   post("probe-thread", { reach: { workspaceId: "bens" }, target: { thread: "thread-ben" } });
+  // A row naming no place is left out whatever the workspace holds; Ana's own row shows.
   post("probe-plain", { reach: { workspaceId: "bens" }, target: {} });
+  post("own");
   const before = await (await read("scope=phone")).text();
   const write = logWriter(storage, "bens");
   write("moment.append", { objectId: "object-config", path: "deploy/config.yaml" });
@@ -489,7 +572,7 @@ it("decides a row in another account's workspace by a fixed rule that reads noth
   write("chat.thread.create", { threadId: "thread-ben", linkedPathHint: ".env" });
   const after = await read("scope=phone");
   expect(await after.clone().text()).toBe(before);
-  expect(ids(await page(after))).toEqual(["probe-plain"]);
+  expect(ids(await page(after))).toEqual(["own"]);
 });
 
 it("never looks up a thread named through a share, even beside a path the share admits", async () => {

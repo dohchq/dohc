@@ -701,6 +701,41 @@ function withWakes(
 }
 
 /**
+ * What the phone's scope may show of each kind, by what its title and body can
+ * carry. A kind's words may name an automation, a file, or a chat on a hidden
+ * file, so the row shows only once the place they come from is confirmed:
+ * - "shown": the relay writes the words from facts no hidden file decides;
+ * - "path": the words name an automation or what it wrote, so the target must
+ *   name its Collection's path, a record in it, or its automations.yaml, and
+ *   that path must pass;
+ * - "located": the words come from a chat or a file, so the target must name a
+ *   thread or a path, and each one it names must pass;
+ * - "never": the words can't be confirmed.
+ * Every kind needs a decision here. A kind stored by a newer relay, or one
+ * missing from this list, shows as "never".
+ */
+const PHONE_NOTICE_KINDS = {
+  // Who mentioned you, and where.
+  mention: "located",
+  // The agent's name, the thread's place, and its reply's opening words.
+  "agent-run": "located",
+  // The automation's name.
+  "schedule-skipped": "path",
+  // The automation's or button's name, and the step's error.
+  "automation-failed": "path",
+  // The automation's name, and the message it wrote from its records.
+  "automation-notify": "path",
+  // The automation's name.
+  "automation-switched-off": "path",
+  // Its row names no Collection the relay can map to a path.
+  "automation-wake": "never",
+  // The granter and what they shared, which a share can only name as a tracked path or a channel.
+  "share-received": "shown",
+  // The agent's name, chosen by the owner.
+  "personal-agent-signed-in": "shown",
+} as const satisfies Record<NoticeKind, "shown" | "path" | "located" | "never">;
+
+/**
  * The phone's scope of rows already read for the recipient. It never carries
  * a wake payload, and it serves a row only when it can confirm the row is safe
  * to show. It leaves out:
@@ -719,10 +754,8 @@ function withWakes(
  *   or links a file the relay can't place or last placed at a hidden path;
  * - a message target without its thread: the relay finds a message's thread
  *   only by scanning its log;
- * - an automation's own rows whose Collection it can't place: every
- *   automation wake, which names its automation by a Collection ID the
- *   relay can't map to a path, and a skipped schedule without the path of
- *   its automations.yaml. A skipped schedule with that path is judged by it.
+ * - a row whose kind `PHONE_NOTICE_KINDS` doesn't let it show, or whose
+ *   target doesn't name the place that kind needs to confirm its words.
  * A removed row stays, so a phone drops what it holds, without its title.
  */
 function phoneNotices(
@@ -819,12 +852,15 @@ function phoneNotices(
       !storage.showsOnPhone(recipientUserId, notice.workspaceId)
     )
       return [];
-    if (
-      notice.kind === "automation-wake" ||
-      (notice.kind === "schedule-skipped" && notice.target?.path === undefined)
-    )
-      return [];
-    return safeTarget(notice) ? [notice] : [];
+    const rule = Object.hasOwn(PHONE_NOTICE_KINDS, notice.kind)
+      ? PHONE_NOTICE_KINDS[notice.kind]
+      : "never";
+    const named =
+      rule === "shown" ||
+      (rule === "path" && notice.target?.path !== undefined) ||
+      (rule === "located" &&
+        (notice.target?.path !== undefined || notice.target?.thread !== undefined));
+    return named && safeTarget(notice) ? [notice] : [];
   });
 }
 
