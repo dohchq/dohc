@@ -5529,10 +5529,8 @@ async function reclaimedBlocked(block: "refused" | "history-over-budget",
     await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true), {timeout: 10_000});
   }
   // The owner's open or Resume, which enrolls the document again.
-  const enrol = (intent: "owner-open" | "owner-resume" = "owner-open") => {
-    if (intent === "owner-open") o.f.storage.ensureOwnedLiveDocument({intent, workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path, nowMs: 40, guard() {}});
-    else o.f.storage.ensureOwnedLiveDocument({intent, workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path, nowMs: 40, guard() {}});
-  };
+  const enrol = (intent: "owner-open" | "owner-resume" = "owner-open") =>
+    o.f.storage.ensureOwnedLiveDocument({intent, workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path, nowMs: 40, guard() {}});
   return {...o, workspaces, captures, passes, enrol,
     advance(ms: number) {now += ms;},
     // The block the host keeps for the document's return, read from its activation driver.
@@ -5568,6 +5566,24 @@ it.each(["refused", "history-over-budget"] as const)("keeps a %s block for a doc
     await o.passes();
     expect(o.captures()).toBe(captured + 1);
   }
+});
+
+// Proves: a document reclaimed while idle as the last its workspace hosted
+// keeps its block after the workspace drains and detaches and its enrollment
+// is released, as the supervisor does then, and the next open adds it with
+// that block and captures nothing.
+it.each(["refused", "history-over-budget"] as const)("keeps a %s block for a document reclaimed while idle as the last its workspace hosted, through the workspace's detach and the next open", async block => {
+  const o = await reclaimedBlocked(block);
+  await expect(o.host.detachDrained("workspace")).resolves.toBe(true);
+  expect(o.f.storage.releaseServiceHostEnrollment({workspaceId: "workspace", objectId: o.sibling.objectId, nowMs: 30})).not.toBeNull();
+  await o.host.update({workspaces: [], documents: [], ...stay});
+  expect(o.kept()).toBe(block);
+  const captured = o.captures();
+  await o.reopen();
+  expect(o.host.blocked(o.sibling)).toBe(block);
+  await o.passes();
+  expect(o.host.blocked(o.sibling)).toBe(block);
+  expect(o.captures()).toBe(captured);
 });
 
 // Proves: the owner's one Resume of a document reclaimed while idle with a

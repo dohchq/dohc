@@ -1457,11 +1457,11 @@ export async function startServiceLiveHost(options: {
         // A workspace stays wanted while anything of it may remain in its replica, so one that is not has nothing left to drain.
         for (const workspaceId of [...members.keys()]) if (!desired.has(workspaceId) || changed.includes(workspaceId)) await detach(workspaceId, joined);
         for (const workspace of workspaces) if (!members.has(workspace.workspaceId) && !diverged.has(workspace.root)) await attach(workspace, joined);
-        // A kept block and wait end once the owner stops or pauses the document, it leaves its path, or its workspace
-        // is no longer hosted.
+        // A kept block and wait end once the owner stops or pauses the document, it leaves its path, or its enrollment
+        // is gone. A workspace that drained detaches with its documents' enrollments still kept for their return.
         for (const document of activation.keptDocuments()) {
           const enrollment = storage.readServiceHostEnrollmentByObjectId(document.workspaceId, document.objectId);
-          if (!members.has(document.workspaceId) || !enrollment || enrollment.ownerStop !== null ||
+          if (!enrollment || enrollment.ownerStop !== null ||
             storage.objectIdAtPathInVersion({workspaceId: document.workspaceId, versionId: "main", path: enrollment.path}) !== document.objectId) activation.forgetKept(document);
         }
         for (const [key, document] of wanted) {
