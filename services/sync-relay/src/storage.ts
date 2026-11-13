@@ -388,6 +388,7 @@ export function openSyncRelayStorage(
     }
     owner = createOwner ? createOwner(db) : new RelayWriteOwner(db);
     owner.write(() => initializeSyncRelaySchema(db));
+    watchLiveAuthorityWrites(db);
     const storage = new SqliteSyncRelayStorage(
       reusePreparedStatements(db),
       {
@@ -2211,25 +2212,34 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
 
   /**
-   * `document` limits the write to that document's journal and delivery
+   * A document limits the write to that document's journal and delivery
    * state, which no connection on another document is authorized by. Live
    * connections on other documents then skip their standing check.
+   * `NO_LIVE_AUTHORITY` skips every live connection's check, unless the write
+   * changed the schema or a table in `LIVE_AUTHORITY_TABLES`.
    */
-  tx<T>(run: () => T, document?: LiveDocumentKey): T {
+  tx<T>(run: () => T, scope?: RelayWriteScope): T {
     if (!hasRelayWriteObservers(this)) return this.owner.write(run);
-    const revision = this.db.prepare(
-      "SELECT total_changes() AS changes,(SELECT schema_version FROM pragma_schema_version) AS schema_version",
-    );
-    const before = JSON.stringify(revision.get());
+    const revision = this.db
+      .prepare(`SELECT total_changes() AS changes,(SELECT schema_version FROM pragma_schema_version) AS schema_version,
+      ${LIVE_AUTHORITY_WRITE_COUNT} AS authority`);
+    const before = revision.get()!;
     try {
       return this.owner.write(run);
     } finally {
-      // A committed write must not fail because this read did, so a failed read counts as a change.
-      let changed = true;
       try {
-        changed = this.unavailable.aborted || JSON.stringify(revision.get()) !== before;
-      } catch {}
-      if (changed) notifyRelayWrite(this, this.unavailable.aborted ? undefined : document);
+      const after = this.unavailable.aborted ? undefined : revision.get()!;
+      if (!after) notifyRelayWrite(this);
+      else if (after.changes !== before.changes || after.schema_version !== before.schema_version) {
+        notifyRelayWrite(
+          this,
+          scope === NO_LIVE_AUTHORITY &&
+            (after.authority !== before.authority || after.schema_version !== before.schema_version)
+            ? undefined
+            : scope,
+        );
+      }
+      } catch { notifyRelayWrite(this); }
     }
   }
 
@@ -2726,5 +2736,14 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return hostControlStorage.revokeDeviceHostCredential(this, input);
   }
 }
-import { hasRelayWriteObservers, notifyRelayWrite } from "./relayWriteChanges";
+import {
+  hasRelayWriteObservers,
+  NO_LIVE_AUTHORITY,
+  notifyRelayWrite,
+  type RelayWriteScope,
+} from "./relayWriteChanges";
+import {
+  LIVE_AUTHORITY_WRITE_COUNT,
+  watchLiveAuthorityWrites,
+} from "./storage/liveAuthorityWrites";
 import { notifyDesktopReadiness } from "./desktopReadinessChanges";

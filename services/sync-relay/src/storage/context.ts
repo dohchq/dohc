@@ -4,7 +4,7 @@ import type {
   OpenSyncRelayStorageOptions,
   LiveTicketStoragePolicy,
 } from "./types";
-import type { LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
+import type { RelayWriteScope } from "../relayWriteChanges";
 
 export interface StorageContext extends SyncRelayStorage {
   workReferenceDatasetAccess?: (input: {
@@ -21,7 +21,7 @@ export interface StorageContext extends SyncRelayStorage {
   readonly options: Required<Omit<OpenSyncRelayStorageOptions, "liveTickets">>;
   readonly newDiscussionId: () => string;
   quietTx<T>(run: () => T): T;
-  tx<T>(run: () => T, document?: LiveDocumentKey): T;
+  tx<T>(run: () => T, scope?: RelayWriteScope): T;
   readTx<T>(run: () => T): T;
   ticketTransaction<T>(run: (now: number, policy: LiveTicketStoragePolicy) => T): T | null;
 }

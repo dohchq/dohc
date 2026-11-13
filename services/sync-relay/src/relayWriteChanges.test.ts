@@ -1,5 +1,5 @@
 import { expect, it, vi } from "vitest";
-import { notifyRelayWrite, observeRelayWrites } from "./relayWriteChanges";
+import { NO_LIVE_AUTHORITY, notifyRelayWrite, observeRelayWrites } from "./relayWriteChanges";
 
 it("coalesces writes after the transaction stack and removes closed hosts", async () => {
   const storage = {},
@@ -35,15 +35,52 @@ it("isolates a failing host observer", async () => {
 });
 
 it("names the documents coalesced writes were limited to, and none once any write was not", async () => {
-  const storage = {}, observed = vi.fn();
-  const a = {workspaceId: "workspace", mainVersionId: "main", objectId: "a", lineageClaimId: "lineage"}, b = {...a, objectId: "b"};
+  const storage = {},
+    observed = vi.fn();
+  const a = {
+      workspaceId: "workspace",
+      mainVersionId: "main",
+      objectId: "a",
+      lineageClaimId: "lineage",
+    },
+    b = { ...a, objectId: "b" };
   const stop = observeRelayWrites(storage, observed);
-  notifyRelayWrite(storage, a); notifyRelayWrite(storage, b); notifyRelayWrite(storage, {...a});
+  notifyRelayWrite(storage, a);
+  notifyRelayWrite(storage, b);
+  notifyRelayWrite(storage, { ...a });
   await new Promise<void>(queueMicrotask);
   expect(observed).toHaveBeenLastCalledWith([a, b]);
-  notifyRelayWrite(storage, a); notifyRelayWrite(storage); notifyRelayWrite(storage, b);
+  notifyRelayWrite(storage, a);
+  notifyRelayWrite(storage);
+  notifyRelayWrite(storage, b);
   await new Promise<void>(queueMicrotask);
   expect(observed).toHaveBeenLastCalledWith(undefined);
   expect(observed).toHaveBeenCalledTimes(2);
+  stop();
+});
+
+it("names no document for writes that changed no live authority, yet wakes every observer", async () => {
+  const storage = {},
+    observed = vi.fn();
+  const a = {
+    workspaceId: "workspace",
+    mainVersionId: "main",
+    objectId: "a",
+    lineageClaimId: "lineage",
+  };
+  const stop = observeRelayWrites(storage, observed);
+  notifyRelayWrite(storage, NO_LIVE_AUTHORITY);
+  notifyRelayWrite(storage, NO_LIVE_AUTHORITY);
+  await new Promise<void>(queueMicrotask);
+  expect(observed).toHaveBeenLastCalledWith([]);
+  notifyRelayWrite(storage, NO_LIVE_AUTHORITY);
+  notifyRelayWrite(storage, a);
+  await new Promise<void>(queueMicrotask);
+  expect(observed).toHaveBeenLastCalledWith([a]);
+  notifyRelayWrite(storage, NO_LIVE_AUTHORITY);
+  notifyRelayWrite(storage);
+  await new Promise<void>(queueMicrotask);
+  expect(observed).toHaveBeenLastCalledWith(undefined);
+  expect(observed).toHaveBeenCalledTimes(3);
   stop();
 });

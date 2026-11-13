@@ -8,8 +8,12 @@ export interface LiveHostChanges {
   notifyHost(workspaceIds: readonly string[]): void;
 }
 
-/** The documents a write was limited to, or undefined when it may have changed anything. */
+/** The documents a write was limited to, none when it changed no live authority, or undefined when it may have changed anything. */
 export type RelayWriteObserver = (documents?: readonly LiveDocumentKey[]) => void;
+/** A write that changed no table a live connection's authority is read from, such as a chat post. */
+export const NO_LIVE_AUTHORITY = "no-live-authority";
+/** What a write may have changed: one document's live state, no live authority, or, when absent, anything. */
+export type RelayWriteScope = LiveDocumentKey | typeof NO_LIVE_AUTHORITY;
 const observers = new WeakMap<object, Set<RelayWriteObserver>>();
 const pending = new WeakMap<object, Map<string, LiveDocumentKey> | "any">();
 export function hasRelayWriteObservers(storage: object): boolean {
@@ -148,7 +152,7 @@ export function notifyNoticeChange(storage: object, recipientUserId: string): vo
  * authority check. A write names `document` only when it changed nothing a
  * connection on another document is authorized by.
  */
-export function notifyRelayWrite(storage: object, document?: LiveDocumentKey): void {
+export function notifyRelayWrite(storage: object, document?: RelayWriteScope): void {
   if (!observers.has(storage)) return;
   const written = pending.get(storage);
   if (written === undefined) {
@@ -168,7 +172,7 @@ export function notifyRelayWrite(storage: object, document?: LiveDocumentKey): v
     });
   }
   const documents = pending.get(storage)!;
-  if (documents === "any") return;
+  if (documents === "any" || document === NO_LIVE_AUTHORITY) return;
   if (!document) {
     pending.set(storage, "any");
     return;
