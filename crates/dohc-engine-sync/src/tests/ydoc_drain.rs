@@ -570,7 +570,6 @@ fn an_applied_then_refused_update_after_a_stopped_drain(restart: bool) {
             ..
         })
     ));
-    // The queued payload names a path its document does not have.
     engine
         .write_with(&NoFaults, |tx| {
             tx.execute(
@@ -597,8 +596,6 @@ fn an_applied_then_refused_update_after_a_stopped_drain(restart: bool) {
             .expect("state")
     };
 
-    // The drain applies the bytes and refuses the row, then stops before
-    // its cleanup.
     let (stopped, _cleanup) = crate::drain_deferred_ydoc_for_key_holding_cleanup(
         &mut engine,
         &mut dohc_engine_collab::WriterDocCache::new(),
@@ -645,10 +642,6 @@ fn an_applied_then_refused_update_after_a_stopped_drain(restart: bool) {
     assert!(idle.record_facts.is_empty() && idle.refusals.is_empty());
 }
 
-/// A store holding the adopted Collection record `record_id` at `path`, its
-/// document's base claimed, and a peer's title change from `origin` queued
-/// behind a live session: the store's scratch tree and path, the store, the
-/// document and its lineage.
 fn queued_title_change(
     record_id: &str,
     object_id: &str,
@@ -802,8 +795,6 @@ fn a_released_drains_report_outlives_its_request_until_a_commit_acknowledges_it(
             "restart={restart}: the row went, its report stays"
         );
 
-        // The request is abandoned at its settlement drain's wait, or the
-        // store restarts; the next request claims the report.
         if restart {
             drop(engine);
             engine = EngineStore::open(&store_path, 3_000).expect("reopen");
@@ -824,8 +815,6 @@ fn a_released_drains_report_outlives_its_request_until_a_commit_acknowledges_it(
         );
         let first = first.expect("a report token");
 
-        // That request is abandoned before its commit too: the next one
-        // claims the report again under a token of its own, once.
         let mut second = None;
         let again = crate::drain_report::claim(&mut engine, "ws", &mut second, &NoFaults)
             .expect("claim again");
@@ -908,7 +897,6 @@ fn a_live_refusal_after_a_stopped_drain(restart: bool) {
     assert!(applied.refusals.is_empty(), "{applied:?}");
     assert_eq!(state(&engine), (1, 1, 0, 0), "the row keeps its facts");
 
-    // A device binding of the document appears before the next drain.
     engine
         .write_with(&NoFaults, |tx| {
             tx.execute(
@@ -1925,7 +1913,6 @@ fn an_unreadable_drain_report_fails_one_claim_and_the_rest_stay_owed() {
     assert_eq!(claimed.extras.conflicts_opened, 1);
 }
 
-/// The refusals of `origin` in `refusals`, as coordinate and reason.
 fn refusals_of(refusals: &[crate::ReplicationRefusal], origin: &str) -> Vec<(i64, String)> {
     refusals
         .iter()
@@ -2030,7 +2017,6 @@ fn a_refusal_its_projection_clears_stays_in_the_drain_report() {
             "restart={restart}: the projection cleared its notice"
         );
 
-        // The request is abandoned at a later wait, or the store restarts.
         if restart {
             drop(engine);
             engine = EngineStore::open(&store_path, 3_000).expect("reopen");
@@ -2043,7 +2029,6 @@ fn a_refusal_its_projection_clears_stays_in_the_drain_report() {
             owed,
             "restart={restart}: the report keeps the refusal"
         );
-        // That request is abandoned too: the next one reports it once more.
         let mut second = None;
         let again = crate::drain_report::claim(&mut engine, "ws", &mut second, &NoFaults)
             .expect("claim again");

@@ -38,7 +38,6 @@ fn seed_main_with_file(db: &std::path::Path) {
         &NO_FAULTS,
     )
     .expect("seed write");
-    // drop → simulated clean close
 }
 
 fn fork_input(request_id: Option<&str>) -> CreateNamedVersion {
@@ -119,8 +118,6 @@ fn rename_input() -> RenameTextFile {
     }
 }
 
-// oracle: crash before persist during create-named-version → atomic rollback.
-// Restart shows NO new version; a retry then applies cleanly.
 #[test]
 fn version_create_crash_before_persist_rolls_back() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -131,16 +128,12 @@ fn version_create_crash_before_persist_rolls_back() {
         let mut store = EngineStore::open(&db, 2).expect("reopen");
         let mut vt = VersionedTextStore::new(&mut store);
         let faults = ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist);
-        // The crash surfaces as a persist-failed error; durable truth is checked
-        // by reopening below.
         let err = vt
             .create_named_version(&fork_input(Some("req-fork")), faults.as_ref())
             .expect_err("crash before persist");
         assert_eq!(err.code(), "persist-failed");
-        // store dropped → simulated crash
     }
 
-    // Restart: the fork rolled back entirely.
     let mut store = EngineStore::open(&db, 3).expect("reopen after crash");
     let mut vt = VersionedTextStore::new(&mut store);
     assert!(
@@ -150,7 +143,6 @@ fn version_create_crash_before_persist_rolls_back() {
             .all(|v| v.version_id != "feat"),
         "rolled-back fork must not survive"
     );
-    // A retry with the same request id now applies (nothing was recorded).
     let fork = vt
         .create_named_version(&fork_input(Some("req-fork")), &NO_FAULTS)
         .expect("retry applies");
@@ -161,9 +153,6 @@ fn version_create_crash_before_persist_rolls_back() {
     );
 }
 
-// oracle: crash after commit before ack during create-named-version → the fork
-// is durable; an exactly-once retry (same request id) replays to the recorded
-// result without minting a second version.
 #[test]
 fn version_create_crash_after_commit_is_exactly_once() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -178,10 +167,8 @@ fn version_create_crash_after_commit_is_exactly_once() {
             .create_named_version(&fork_input(Some("req-fork")), faults.as_ref())
             .expect_err("crash after commit");
         assert_eq!(err.code(), "persist-failed");
-        // store dropped → simulated crash after the durable commit
     }
 
-    // Restart: the fork committed durably.
     let mut store = EngineStore::open(&db, 3).expect("reopen after crash");
     let mut vt = VersionedTextStore::new(&mut store);
     let versions = vt.list_versions(WS).expect("versions");
@@ -190,7 +177,6 @@ fn version_create_crash_after_commit_is_exactly_once() {
         1
     );
 
-    // Exactly-once retry: dedupes to the recorded fork, no second version.
     let replayed = vt
         .create_named_version(&fork_input(Some("req-fork")), &NO_FAULTS)
         .expect("retry replays");
@@ -203,14 +189,11 @@ fn version_create_crash_after_commit_is_exactly_once() {
     );
 }
 
-// oracle: crash before persist during restore (set-active-version) → the active
-// pointer is unchanged on restart.
 #[test]
 fn restore_crash_before_persist_leaves_active_unchanged() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = engine_db_path(&scratch).expect("db");
     seed_main_with_file(&db);
-    // Create a fork to switch to.
     {
         let mut store = EngineStore::open(&db, 2).expect("reopen");
         let mut vt = VersionedTextStore::new(&mut store);
@@ -230,7 +213,6 @@ fn restore_crash_before_persist_leaves_active_unchanged() {
         assert_eq!(err.code(), "persist-failed");
     }
 
-    // Restart: the restore rolled back — feat is still active.
     let mut store = EngineStore::open(&db, 4).expect("reopen after crash");
     let vt = VersionedTextStore::new(&mut store);
     assert_eq!(
@@ -240,8 +222,6 @@ fn restore_crash_before_persist_leaves_active_unchanged() {
     );
 }
 
-// oracle: versions-rollback-text-file-mutation at storage.before-persist rolls
-// the entire history surgery back; reopening shows the overwrite and m2 intact.
 #[test]
 fn rollback_crash_before_persist_leaves_mutation_intact() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -267,9 +247,6 @@ fn rollback_crash_before_persist_leaves_mutation_intact() {
     assert!(vt.get_moment(WS, "m2").expect("moment").is_some());
 }
 
-// oracle: versions-rollback-text-file-mutation at
-// storage.after-commit-before-ack is already durable; reopening shows m2 gone
-// and the prior snapshot restored.
 #[test]
 fn rollback_crash_after_commit_is_durable() {
     let scratch = ScratchDir::new().expect("scratch");

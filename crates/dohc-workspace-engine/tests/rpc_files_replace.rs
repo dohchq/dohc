@@ -93,7 +93,6 @@ async fn files_replace_writes_the_bytes_whole_and_leaves_no_temp() {
     );
     assert_eq!(names(&scratch.path().join("notes")), ["a.md"]);
 
-    // A file in folders that are not there yet.
     call(
         &transport,
         &handle,
@@ -145,7 +144,6 @@ async fn files_replace_refuses_a_path_or_temp_outside_the_workspace_files() {
 async fn files_replace_writes_a_secret_owner_only() {
     use std::os::unix::fs::PermissionsExt as _;
     let (scratch, transport, handle) = fixture("secret").await;
-    // A secret this machine doesn't hold yet, and one that others could read.
     write_file(scratch.path(), "config/.env.local", b"TOKEN=old\n");
     std::fs::set_permissions(
         scratch.path().join("config/.env.local"),
@@ -199,7 +197,6 @@ async fn files_replace_gives_a_file_none_of_its_folders_inherited_acl() {
         .status()
         .unwrap();
     assert!(added.success());
-    // A file made there the ordinary way takes the entry.
     write_file(scratch.path(), "shared/inheriting.md", b"");
     assert!(has_entries(&folder.join("inheriting.md")));
     assert!(!has_entries(&folder.join("private.md")));

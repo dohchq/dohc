@@ -260,7 +260,6 @@ fn writable_actor_drains_mount_store_and_read_only_actor_leaves_queue() {
         std::thread::yield_now();
     }
     assert_eq!(actor.link_drain_metrics().certified_sources, 0);
-    // A normal actor mutation wakes a parked drain without an external poll.
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -447,7 +446,6 @@ fn passive_links_never_queue_seed_or_drain_even_with_leftover_work() {
         assert_eq!(count(&store, "link_pending"), 0, "phase={phase}");
         assert_eq!(count(&store, "link_aliases"), 0, "phase={phase}");
     }
-    // Leftover derived work must remain inert on a passive store as well.
     store.read_with(|c| c.execute_batch("UPDATE link_index_state SET seed_phase='aliases'; INSERT INTO link_pending(workspace_id,version_id,object_id,queued_at_ms) VALUES('ws','main','note',1); INSERT INTO link_gc VALUES('ws','main','note','old');")).unwrap();
     let before = store
         .read_with(|c| Ok::<_, rusqlite::Error>(c.total_changes()))

@@ -11,7 +11,6 @@ use dohc_engine_collab::live_update_application::{
 const PATH: &str = "notes/plan.md";
 const MARKDOWN: &str = "# Plan\n\nKept from the stopped session.\n";
 
-/// An agent that works for the owner.
 fn agent(id: &str) -> RetainedAuthors {
     RetainedAuthors::credited(
         Some(id),
@@ -26,7 +25,6 @@ fn agent(id: &str) -> RetainedAuthors {
     .unwrap()
 }
 
-/// The binding a hold of `covered` names.
 fn binding_of(covered: Vec<RetainedContribution>) -> ReleasedLineageBinding {
     let commitment = UnprovenCommitment::of(covered).expect("covered work");
     ReleasedLineageBinding::from_json(&json!({
@@ -57,8 +55,6 @@ fn merged() -> Vec<RetainedContribution> {
     }]
 }
 
-/// Work the held document already holds: covered, though merging adds
-/// nothing of it.
 fn contained() -> RetainedContribution {
     RetainedContribution::Carried {
         delivery_id: "delivery-0".into(),
@@ -86,7 +82,6 @@ fn request(markdown: &str) -> KeepRetainedVersion {
     }
 }
 
-/// The agents an author list names, in its order.
 fn agents(author_json: &str) -> Vec<String> {
     let authors: serde_json::Value = serde_json::from_str(author_json).expect("authors");
     authors
@@ -162,7 +157,6 @@ fn count(store: &EngineStore, sql: &str, value: &str) -> i64 {
         .expect("count")
 }
 
-/// Every row `sql` selects, each column as it is stored.
 fn rows(store: &EngineStore, sql: &str) -> Vec<String> {
     store
         .read_with(|conn| {
@@ -293,8 +287,6 @@ fn a_copy_keeps_the_projection_without_touching_the_held_document() {
     );
     assert_eq!(copy.merged_contribution_ids, merged());
     assert_eq!(copy.resolution, None);
-    // The copy's creation names the binding and every covered author, as
-    // its decision does.
     let (correlation, authors, decided): (Option<String>, Option<String>, String) = store
         .read_with(|conn| {
             conn.query_row(
@@ -643,8 +635,6 @@ fn only_the_owner_lane_keeps_a_copy() {
     );
 }
 
-/// The probe and the copy's creation `store` journaled as `origin`, as the
-/// feed serves them, the creation at `relay_seq`.
 fn served(
     store: &EngineStore,
     origin: &str,
@@ -742,7 +732,6 @@ fn identical_creations_converge_when_one_device_pulls_before_publishing() {
         (0, false, CopyPublicationState::Accepted, Some(7))
     );
 
-    // A sees its own creation come back first, then B's redundant one.
     device_a
         .write_with(&NoFaults, |tx| {
             crate::ydoc_recovery::record_released_copy_echo_in_tx(tx, &creation)
@@ -760,8 +749,6 @@ fn identical_creations_converge_when_one_device_pulls_before_publishing() {
     assert_eq!(history(&device_a), 1);
 }
 
-/// The owner's log as [`FakeRelay`] answers it, naming `redundant` for the
-/// ops a push carries.
 struct RedundantRelay {
     inner: FakeRelay,
     redundant: Vec<RedundantRecovery>,

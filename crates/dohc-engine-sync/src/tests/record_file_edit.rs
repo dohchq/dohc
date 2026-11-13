@@ -1,6 +1,3 @@
-//! A Collection record saved as a file on a device that never held its
-//! Y.Doc reaches a device whose copy holds a lineage for that record.
-
 use super::*;
 use dohc_engine_collab::{
     ContentKind, DocKey, LeaseRegistry, LocalAppend, MarkerCreation, Regime, WriterDocCache, Ydoc,
@@ -34,7 +31,6 @@ fn key() -> DocKey {
     DocKey::new("ws", "main", RECORD).expect("record key")
 }
 
-/// A rich document holding `markdown`, as the desktop adopts a record.
 fn richdoc(markdown: &str) -> Ydoc {
     let doc = Ydoc::wire();
     doc.rewrite_content_to_markdown(ContentKind::Richdoc, markdown)
@@ -74,7 +70,6 @@ fn device(origin: &str) -> (ScratchDir, EngineStore) {
     (scratch, a)
 }
 
-/// Run `change` on A and return the envelope A journals for `moment`.
 fn a_journals(
     a: &mut EngineStore,
     moment: &str,
@@ -110,7 +105,6 @@ fn a_journals(
     .expect("A journals the moment")
 }
 
-/// Save `text` on A and return the envelope A journals for it.
 fn a_saves(
     a: &mut EngineStore,
     object: &str,
@@ -139,7 +133,6 @@ fn a_saves(
     })
 }
 
-/// A creates the Collection and Apollo holding `apollo`.
 fn a_creates_apollo(a: &mut EngineStore, apollo: &str) -> Vec<ReplicationEnvelope> {
     vec![
         a_saves(
@@ -154,8 +147,6 @@ fn a_creates_apollo(a: &mut EngineStore, apollo: &str) -> Vec<ReplicationEnvelop
     ]
 }
 
-/// Deliver `ops` to `b` through one relay page that starts at `from`, then
-/// commit the cursor the pull reached.
 fn pull(b: &mut EngineStore, from: i64, ops: &[ReplicationEnvelope], texts: &[&str]) {
     let next = from + ops.len() as i64;
     let mut relay = PagedRelay::new([(
@@ -196,7 +187,6 @@ fn pull(b: &mut EngineStore, from: i64, ops: &[ReplicationEnvelope], texts: &[&s
         .expect("commit the pull cursor");
 }
 
-/// Device B pulls the Collection and Apollo as A created them.
 fn device_b(
     created: &[ReplicationEnvelope],
     apollo: &str,
@@ -362,7 +352,6 @@ fn indexed_status(b: &EngineStore) -> Option<serde_json::Value> {
     .and_then(|fields| fields.get("Status").cloned())
 }
 
-/// The open conflicts' current and incoming bytes.
 fn open_conflicts(b: &EngineStore) -> Vec<(String, String)> {
     b.read_with(|conn| {
         conn.prepare(
@@ -380,7 +369,6 @@ fn count(b: &EngineStore, sql: &str) -> i64 {
         .expect(sql)
 }
 
-/// How many History moments hold `text`.
 fn history_holds(b: &EngineStore, text: &str) -> i64 {
     b.read_with(|conn| {
         conn.query_row(
@@ -510,7 +498,6 @@ fn record_file_edit_retires_a_pristine_unclaimed_seed_and_reseeds() {
     assert_eq!(lineage_rows(&b), 0, "the untouched seed retires");
     assert!(open_conflicts(&b).is_empty());
 
-    // The next open seeds a fresh lineage from the file A wrote.
     let flown_sha = sha(&flown);
     dohc_engine_collab::record_local_update(
         &mut b,
@@ -548,7 +535,6 @@ fn record_file_edit_retires_a_pristine_unclaimed_seed_and_reseeds() {
     assert!(open_conflicts(&b).is_empty());
 }
 
-/// B's lossy note, holding `typing` it never settled.
 fn b_opens_lossy(b: &mut EngineStore, typing: &[&str]) -> Ydoc {
     let doc = richdoc(LOSSY_CANONICAL);
     assert_ne!(projected(&doc), LOSSY, "the note is lossy");
@@ -599,7 +585,6 @@ fn lossy_record_file_edit_conflicts_keep_the_recovery_through_each_resolution() 
     }
 }
 
-/// A moves Apollo to MOVED_PATH and returns the envelope A journals.
 fn a_moves_apollo(a: &mut EngineStore) -> ReplicationEnvelope {
     let rename = RenameTextFile {
         workspace_id: "ws".into(),
@@ -1084,7 +1069,6 @@ fn a_save_from_the_head_of_a_claimed_record_comes_in() {
         "the claimed lineage is archived"
     );
 
-    // Device C keeps editing the lineage B archived.
     drop(b);
     let mut b = EngineStore::open(&b_path, 3_000).expect("restart B");
     let delta = replica.richdoc_append_paragraph(NOTES);
@@ -1206,8 +1190,6 @@ fn waiting(b: &EngineStore) -> Vec<(String, String, i64)> {
         .collect()
 }
 
-/// B holds an open conflict between its typing and A's Flown file. A and D
-/// hold the record as A created it.
 fn b_holds_a_conflict() -> (Vec<ScratchDir>, EngineStore, EngineStore, EngineStore) {
     let (planned, flown) = (md(PLANNED), md(FLOWN));
     let (a_scratch, mut a) = device("device-a");
@@ -1225,7 +1207,6 @@ fn b_holds_a_conflict() -> (Vec<ScratchDir>, EngineStore, EngineStore, EngineSto
     (vec![a_scratch, b_scratch, d_scratch], a, b, d)
 }
 
-/// `op` as the save at `seq` from a computer named `origin`.
 fn from_origin(op: &ReplicationEnvelope, origin: &str, seq: i64) -> ReplicationEnvelope {
     let mut op = op.clone();
     op.origin_id = origin.into();

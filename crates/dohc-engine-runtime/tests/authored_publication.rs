@@ -211,10 +211,8 @@ async fn replay_confirms_only_a_publication_that_reached_disk() {
                     Outcome::Applied
                 }
             );
-            // A confirmed publication stays confirmed and never rewrites the later edit.
             assert_eq!(applied(&actor, "older", "moment-older").await, !superseded);
             assert_eq!(std::fs::read(scratch.path().join(path)).unwrap(), newer);
-            // The request binds only to the moment it recorded, in its workspace.
             assert!(!applied(&actor, "older", "moment-newer").await);
             assert!(!applied(&actor, "newer", "moment-older").await);
             assert!(applied(&actor, "newer", "moment-newer").await);
@@ -620,7 +618,6 @@ async fn secret_capture_never_takes_a_binary_publication_job() {
             "MODE=second"
         );
 
-        // Later work on both paths keeps the publication confirmed.
         let later = WriteBinary {
             bytes: vec![7, 7],
             ..binary("later")

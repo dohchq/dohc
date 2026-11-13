@@ -49,12 +49,10 @@ fn land_settle_job(store: &mut EngineStore, outcome: &SettleOutcome) {
         .expect("land the settle's own job");
 }
 
-/// A small plaintext lineage: (base full-state bytes, a follow-up remote delta).
 fn plaintext_base_and_delta() -> (Vec<u8>, Vec<u8>) {
     let doc = Ydoc::wire();
     doc.plaintext_insert(0, "hello ");
     let base = doc.encode_full_state();
-    // A peer resumes the base and edits → the delta is a valid remote op.
     let peer = Ydoc::wire();
     peer.apply(&base).expect("peer base");
     let delta = peer.plaintext_insert(6, "world");
@@ -415,8 +413,6 @@ fn record_update_request_identity_binds_path_before_any_mutation() {
         "a path-mismatched replay must roll back every durable mutation"
     );
 }
-
-// ---- regimes ----------------------------------------------------------------
 
 #[test]
 fn another_workspaces_pending_job_cannot_block_this_close() {
@@ -879,8 +875,6 @@ fn a_captured_reversion_discharges_despite_a_leftover_completed_job_row() {
         .expect("rec"),
     );
 
-    // The earlier engine settle: a completed job for this exact content and
-    // path — the leftover row the old heuristic tripped on.
     seed_head(&mut ts.store, &key, "what the user typed", Some("complete"));
     // The later capture: disk reverted to the same bytes. `claim_foreign_head`
     // rewrites the snapshot's origin in place and mints no new job — `None`
@@ -1054,7 +1048,6 @@ fn forced_compaction_with_nothing_pending_still_validates_the_snapshot() {
         .expect("rec"),
     );
 
-    // Force a compaction: pending -> 0, a snapshot now covers the lineage.
     let compacted = maybe_compact(&mut ts.store, &key, 0, &NoFaults, 1_002).expect("compact");
     assert!(matches!(
         compacted,
@@ -1160,8 +1153,6 @@ fn forced_close_on_a_compacted_lineage_skips_without_reminting() {
         "close on a healthy lineage must not mint a second snapshot"
     );
 }
-
-// ---- base-once --------------------------------------------------------------
 
 const INDEX_RECORD_ID: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -1457,7 +1448,6 @@ fn base_is_claimed_exactly_once() {
         "exactly one base"
     );
 
-    // A second claim with the same bytes (crash-retry / redelivery) resumes.
     let second = committed(
         claim_base(
             &mut ts.store,
@@ -2242,8 +2232,6 @@ fn successor_cas_archives_the_exact_predecessor_and_replays_without_mutation() {
     assert_eq!(lineage_storage_fingerprint(&store, &key), before_mismatch);
 }
 
-// ---- constraint 5: never journal invalid bytes ------------------------------
-
 #[test]
 fn truncated_update_is_rejected_and_never_journaled() {
     let mut ts = fresh_store("truncate");
@@ -2288,7 +2276,6 @@ fn truncated_update_is_rejected_and_never_journaled() {
         }
     }
     assert!(rejected > 0, "truncated prefixes must be rejected");
-    // The empty update is rejected too.
     assert!(matches!(
         record_local_update(
             &mut ts.store,
@@ -2302,8 +2289,6 @@ fn truncated_update_is_rejected_and_never_journaled() {
         ),
         Err(CollabError::EmptyUpdate)
     ));
-    // The genuine update still lands cleanly afterward (rejection left no torn
-    // state).
     committed(
         record_local_update(
             &mut ts.store,
@@ -2418,8 +2403,6 @@ fn yrs_abort_witness_is_rejected_fail_closed_on_both_ingestion_paths() {
     );
 }
 
-// ---- leases -----------------------------------------------------------------
-
 #[test]
 fn a_lease_is_exclusive_and_releases_on_drop() {
     let registry = LeaseRegistry::new();
@@ -2428,15 +2411,12 @@ fn a_lease_is_exclusive_and_releases_on_drop() {
 
     let lease = registry.acquire(&key).expect("first lease");
     assert!(registry.is_held(&key));
-    // A second open of the same lineage is refused.
     assert!(matches!(
         registry.acquire(&key),
         Err(CollabError::LeaseHeld)
     ));
-    // A different lineage is independent.
     let _l2 = registry.acquire(&other).expect("other lease");
 
-    // Dropping releases deterministically; the lineage can be reopened.
     drop(lease);
     assert!(!registry.is_held(&key));
     let _released = registry.acquire(&key).expect("reacquire after drop");
@@ -2476,8 +2456,6 @@ fn a_release_moves_the_release_generation_of_its_own_workspace_only() {
         "the unscoped view is its own root"
     );
 
-    // Drop releases too, and another workspace under the same root moves
-    // only its own count.
     drop(
         root_a
             .acquire(&other_workspace)
@@ -2486,8 +2464,6 @@ fn a_release_moves_the_release_generation_of_its_own_workspace_only() {
     assert_eq!(root_a.release_generation("other-workspace"), 1);
     assert_eq!(root_a.release_generation(&workspace), 1);
 }
-
-// ---- settle -----------------------------------------------------------------
 
 fn assert_unknown_content_kind(error: CollabError) {
     assert_eq!(error.code(), "unsupported-content-kind");
@@ -2628,7 +2604,6 @@ mod crash {
             );
             let doc = Ydoc::wire();
             let update = doc.plaintext_insert(0, "committed-but-unacked");
-            // Kill after the durable commit but before the ack.
             let faults = OneShotCrash::at(FaultPoint::StorageAfterCommitBeforeAck);
             let out = record_local_update(
                 &mut store,
@@ -2650,7 +2625,6 @@ mod crash {
                 1,
                 "append durable after reopen"
             );
-            // The retry is exactly-once (content-addressed dedup), never a dup.
             let retry = record_local_update(
                 &mut store,
                 &mut WriterDocCache::new(),
@@ -2849,8 +2823,6 @@ fn a_second_synced_update_records_only_its_real_change_and_no_phantom_removal() 
     assert_eq!(field_history(&a.store, &key, "status").len(), 1);
 }
 
-/// The three attribution columns of every history row for `key`'s record, in
-/// history order.
 fn history_attribution(
     store: &EngineStore,
     key: &DocKey,
@@ -2961,9 +2933,6 @@ fn attribution_persists_and_rides_the_facts_on_local_and_remote_applies() {
         (expected_row.clone(), Some("run-triage".to_owned()))
     );
 
-    // Remote apply of the same bytes on the other device: the payload's
-    // attribution persists and returns identically, and the facts carry the
-    // envelope's coordinate as their source.
     let applied = apply_remote_update(
         &mut b.store,
         &mut WriterDocCache::new(),
@@ -2984,14 +2953,12 @@ fn attribution_persists_and_rides_the_facts_on_local_and_remote_applies() {
         .expect("a remote apply derives facts on the receiving device");
     assert_eq!(facts.attribution.as_ref(), Some(&attribution));
     assert_eq!(facts.source, Some(("origin-a".to_owned(), 7)));
-    // The owner's other device keeps the agent run its replicated update named.
     assert_eq!(
         update_row(&b.store),
         (expected_row.clone(), Some("run-triage".to_owned()))
     );
     assert_eq!(history_attribution(&b.store, &key), vec![expected_row]);
 
-    // An unattributed write stays NULL on every column: absent means absent.
     let plain = peer.frontmatter_set("status", "done").unwrap();
     let outcome = committed(
         record_local_update(
@@ -3016,7 +2983,6 @@ fn attribution_persists_and_rides_the_facts_on_local_and_remote_applies() {
         Some(&(None, None, None))
     );
 
-    // An out-of-bounds declared attribution is refused before any write.
     let bad = ChangeAttribution {
         actor_kind: ChangeActorKind::Automation,
         on_behalf_of: Some(String::new()),

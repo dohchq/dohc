@@ -4,10 +4,6 @@ use super::share_proposal::{
 use super::*;
 use dohc_engine_storage::hex_sha256;
 
-// ---------------------------------------------------------------------------
-// The recipient writes a Collection's own files directly (ADR 0013).
-// ---------------------------------------------------------------------------
-
 const SHARE: &str = "share-direct";
 
 fn edit_grant() -> ShareGrant {
@@ -76,7 +72,6 @@ fn create_moment(moment: &str, object: &str, path: &str, text: &str) -> serde_js
     local_moment_payload(moment, object, "write", None, path, text)
 }
 
-/// A schema this replica holds on main, as a pulled file would be.
 fn hold_schema(engine: &mut EngineStore, folder: &str) {
     VersionedTextStore::new(engine)
         .write_text(
@@ -699,7 +694,6 @@ fn a_write_whose_answer_was_lost_is_sent_again_as_the_same_request_after_another
         writes[0], writes[1],
         "a retry sends the request it recorded, under its submit id"
     );
-    // The later edit goes in the next push, based on what was written.
     assert_eq!(push(&client, &mut engine).writes.len(), 1);
     let writes = client
         .transport()
@@ -753,7 +747,6 @@ fn a_later_write_that_fails_keeps_an_earlier_one_delivered_and_holds_send_change
     assert_eq!(outcome.submitted, 0);
     assert!(outcome.more_pending);
 
-    // The next push sends only the open write, and reports both.
     let pushed = push(&client, &mut engine);
     assert_eq!(
         pushed

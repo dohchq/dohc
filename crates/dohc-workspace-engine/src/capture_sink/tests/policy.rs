@@ -42,7 +42,6 @@ fn an_unreadable_policy_holds_capture_instead_of_widening_or_retiring() {
     let scratch = ScratchDir::new().expect("scratch");
     let supervisor = WorkspaceSupervisor::new();
 
-    // Establish a capture-owned head under a healthy (absent) policy.
     write_file(scratch.path(), "kept.md", b"captured content");
     let (db, mut sink) = sink_for(&scratch, &supervisor);
     assert!(matches!(
@@ -118,7 +117,6 @@ fn ignored_binary_and_secret_routes_do_not_write() {
     assert_eq!(moment_count(&db, ".dohc/ignored.md"), 0);
     assert_eq!(moment_count(&db, "binary.md"), 1);
     assert!(binary_head(&db, "binary.md").is_some());
-    // The plaintext tables never see the secret; the encrypted tip does.
     assert_eq!(moment_count(&db, ".env"), 0);
     assert_eq!(secret_tip_len(&db, ".env"), Some(12));
 }
@@ -159,7 +157,6 @@ fn files_toml_tracked_false_narrows_and_retires() {
 
     drop(sink);
     supervisor.close(&db).expect("close actor");
-    // The opted-out path was retired, not left stale-but-authoritative.
     assert!(snapshot(&db, "private/journal.md").is_none());
     assert_eq!(
         snapshot(&db, "public.md").expect("public head").text,

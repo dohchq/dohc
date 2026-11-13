@@ -1,5 +1,3 @@
-/// The fixture's restore fence of `operation`, from its binding's generation
-/// to the next, at the tip its current activation holds.
 fn fence_next(f: &mut Fixture, operation: &str) -> Result<NativeRestoreFenceReceipt, ApplicationError> {
     let mut input = NativeRestoreFence {
         point: crate::live_update_application::NativeRestoreSelection {
@@ -25,7 +23,6 @@ fn fence_next(f: &mut Fixture, operation: &str) -> Result<NativeRestoreFenceRece
     f._owner.fence_restore(&mut f.store, None, input, coordinate, 40, &NoFaults, |_, _| Ok(()))
 }
 
-/// A restore of `fence` to the lineage's baseline.
 fn baseline_preparation(f: &Fixture, fence: NativeRestoreFenceReceipt) -> NativeRestorePreparation {
     let point = Ydoc::wire();
     point.apply(&f.cut.baseline_bytes).unwrap();
@@ -47,13 +44,11 @@ fn prepare_restore_for(f: &mut Fixture, input: NativeRestorePreparation, max_byt
     f._owner.prepare_restore(&mut f.store, None, input, coordinate, max_bytes, 100, &NoFaults)
 }
 
-/// The cancellation of `operation`'s fence from the fixture's generation.
 fn cancel_named(f: &mut Fixture, operation: &str) -> Result<RestoreFenceCancellationOutcome, ApplicationError> {
     let input = cancellation(f, operation);
     cancel(f, &input)
 }
 
-/// The fence's terminal cancellation, which must be what `cancel` answers.
 fn cancel_fenced(f: &mut Fixture, operation: &str) -> NativeRestoreCancellationReceipt {
     let RestoreFenceCancellationOutcome::FenceCancelled(cancelled) = cancel_named(f, operation).unwrap() else {
         panic!("the committed fence ends in its cancellation");
@@ -61,8 +56,6 @@ fn cancel_fenced(f: &mut Fixture, operation: &str) -> NativeRestoreCancellationR
     *cancelled
 }
 
-/// The fixture's application of `operation`'s prepared restore, admitted at
-/// `cursor` under the fence's new binding.
 fn restore_application(
     f: &Fixture,
     preparation: NativeRestorePreparation,
@@ -128,7 +121,6 @@ fn preserved(f: &Fixture) -> (Vec<u8>, i64, Vec<String>, RetainedPrefixBody) {
     (full_state(f), head, kept, endpoint)
 }
 
-/// The released generation and cursor of `activation`.
 fn released_generation(f: &Fixture, activation: &str) -> (i64, i64) {
     f.store
         .read_with(|conn| {
@@ -169,7 +161,6 @@ fn a_cancelled_restore_retires_and_releases_at_its_fenced_generation() {
         assert_eq!(cancelled.endpoint.event_count, i64::from(edited));
         assert_eq!(preserved(&f), fenced, "edited={edited}: only the generation moved");
         assert_eq!(bound(&f), (1, false));
-        // The answer outlives a restart, and nothing revives the operation.
         reopen_store(&mut f);
         assert_eq!(
             cancel_named(&mut f, "restore").unwrap(),
@@ -182,8 +173,6 @@ fn a_cancelled_restore_retires_and_releases_at_its_fenced_generation() {
         ));
         let preparation = baseline_preparation(&f, fence.clone());
         assert!(matches!(prepare_restore_for(&mut f, preparation, 2_000_000), Err(ApplicationError::Conflict)));
-        // The relay's key at the generation before refuses; the key at the
-        // fenced generation retires and releases.
         assert!(matches!(begin(&mut f, 10), Err(ApplicationError::Conflict)), "edited={edited}");
         f.binding.restore_fence_generation = 1;
         assert!(!begin(&mut f, 10).unwrap().released);
@@ -196,8 +185,6 @@ fn a_cancelled_restore_retires_and_releases_at_its_fenced_generation() {
         assert_eq!(f.store.table_row_count("live_device_application_bindings").unwrap(), 0);
         let released = preserved(&f);
         assert_eq!((&released.0, released.1, &released.3), (&fenced.0, fenced.1, &fenced.3), "edited={edited}");
-        // A replayed cancellation still answers its receipt after the
-        // release.
         f.binding.restore_fence_generation = 0;
         assert_eq!(
             cancel_named(&mut f, "restore").unwrap(),
@@ -215,8 +202,6 @@ fn a_cancelled_restore_retires_and_releases_at_its_fenced_generation() {
 fn a_cancellation_without_a_binding_holds_only_the_proven_generation() {
     let mut f = Fixture::new();
     f.adopt().unwrap();
-    // A cancellation before any fence, then another restore moves the
-    // document to generation 1.
     let early = cancellation(&f, "early");
     assert_eq!(
         cancel(&mut f, &early).unwrap(),
@@ -247,7 +232,6 @@ fn a_cancellation_without_a_binding_holds_only_the_proven_generation() {
     f.binding.restore_fence_generation = 1;
     host_document(&mut f, true, true);
     release_through(&mut f, 10).unwrap();
-    // Released at 1: only a key from 1 to 2, for this lineage, holds.
     let next = cancellation(&f, "after-release");
     let mut ahead = next.clone();
     ahead.new_fence = 7;
@@ -305,8 +289,6 @@ fn a_successor_adopts_after_consecutive_cancellations_and_a_later_restore_applie
         assert_eq!(full_state(&f), state);
         assert_eq!(binding_activation(&f), (Some(id), 1));
     }
-    // The genuine restore fences from generation 2 at the endpoint the
-    // cancellations kept, and its application crosses both.
     let fence = fence_next(&mut f, "genuine").unwrap();
     assert_eq!(fence.operation.terminal, endpoint.unwrap().terminal_receipt);
     let preparation = baseline_preparation(&f, fence);
@@ -333,7 +315,6 @@ fn a_successor_adopts_after_consecutive_cancellations_and_a_later_restore_applie
             Ok::<_, ApplicationError>(())
         })
         .unwrap();
-    // A cancellation of the admitted restore refuses.
     f.binding.restore_fence_generation = 2;
     assert!(matches!(cancel_named(&mut f, "genuine"), Err(ApplicationError::Conflict)));
 }
@@ -355,7 +336,6 @@ fn a_live_update_after_a_cancelled_generation_continues_the_accepted_chain() {
     returned(&mut f);
     successor(&mut f);
     f.adopt().unwrap();
-    // The update carries checkpoint coverage, so it checkpoints at its count.
     let mut event = remote_event(&mut f, 11);
     event.metadata.checkpoint_coverage = Some(vec![]);
     let metadata = event.metadata.clone();
@@ -407,7 +387,6 @@ fn a_live_update_after_a_cancelled_generation_continues_the_accepted_chain() {
             publication::require_restore_registration_in(conn, &f.key, "namespace", &f.binding, &mut 2_000_000)
         })
         .unwrap();
-    // A session that captured the generation before the cancellation.
     let current = std::mem::replace(&mut f.binding, stale);
     let old = remote_event(&mut f, 12);
     f.binding = current;
@@ -447,7 +426,6 @@ fn cancellation_proofs_refuse_when_missing_or_altered() {
         assert!(!matches!(refused, Ok(ApplicationResult::Applied(..))), "{case}: {refused:?}");
         assert_eq!(f.store.table_row_count("live_accepted_updates").unwrap(), 0, "{case}");
     }
-    // A restore resumed before the cancellation arrives refuses it.
     let mut f = Fixture::new();
     f.adopt().unwrap();
     let prep = native_tail_input(&mut f, None, 0);
@@ -475,8 +453,6 @@ fn cancellation_proofs_refuse_when_missing_or_altered() {
         )
         .unwrap();
     assert!(matches!(cancel_named(&mut f, "tail-restore"), Err(ApplicationError::Conflict)), "resumed");
-    // A fence that only prepared cancels; its proposal goes, and neither a
-    // replayed preparation nor an application revives it.
     let mut f = Fixture::new();
     f.adopt().unwrap();
     let prep = native_tail_input(&mut f, None, 0);
@@ -515,8 +491,6 @@ fn cancellation_proofs_refuse_when_missing_or_altered() {
     let input = restore_application(&f, prep, &proposal, 71);
     assert!(apply_restore(&mut f, input).is_err());
     assert_eq!(f.store.table_row_count("live_device_update_applications").unwrap(), 0);
-    // Limits that fail the restore's preparation never block its
-    // cancellation.
     let mut f = Fixture::new();
     f.edit(true);
     f.adopt().unwrap();
@@ -570,8 +544,6 @@ fn a_settlement_after_a_completed_restore_crosses_the_cancellations_after_it() {
             f.binding.restore_fence_generation += 1;
             f.handle = f._owner.register(&mut f.store, "namespace".into(), coordinate.clone(), f.binding.clone()).unwrap();
         }
-        // Before any update, a settlement at the restore's terminal replays
-        // the restore's own settlement.
         let saved: (String, String, String) = f
             .store
             .read_with(|conn| {
@@ -608,7 +580,6 @@ fn a_settlement_after_a_completed_restore_crosses_the_cancellations_after_it() {
             "{cancellations}: from the completed restore"
         );
         assert!(moment_text(&f, "after-cancellations").contains("Remote paragraph 80"));
-        // The completed restore keeps its own binding and identity.
         let kept: (String, i64) = f
             .store
             .read_with(|conn| {
@@ -645,7 +616,6 @@ fn a_cancellation_its_fence_row_disagrees_with_refuses_every_reader() {
     };
     for (case, altered) in &alterations {
         let alter = |f: &mut Fixture| write(f, &format!("UPDATE live_restore_fences SET cancelled_json={altered}"));
-        // Retirement at the fenced generation.
         let mut f = cancelled();
         alter(&mut f);
         let retired = match begin(&mut f, 10) {
@@ -656,14 +626,12 @@ fn a_cancellation_its_fence_row_disagrees_with_refuses_every_reader() {
             Err(error) => Err(error),
         };
         assert!(retired.is_err(), "{case}: retirement");
-        // A successor's adoption across the cancelled generation.
         let mut f = cancelled();
         release_parked(&mut f);
         returned(&mut f);
         successor(&mut f);
         alter(&mut f);
         assert!(f.adopt().is_err(), "{case}: adoption");
-        // Both history readers, for the first event after it.
         let mut f = cancelled();
         release_parked(&mut f);
         returned(&mut f);
@@ -777,7 +745,6 @@ fn a_crossing_reads_each_span_within_the_chain_limit() {
                 require_crossed_within(conn, "namespace", &f.binding, 0, 2),
                 Err(ApplicationError::Conflict)
             ));
-            // The whole history is cancellations, so only its length refuses.
             require_crossed_within(conn, "namespace", &f.binding, 0, 4)
         })
         .unwrap();
@@ -794,8 +761,6 @@ fn a_released_lineage_proves_its_own_generation_after_another_lineage_restores()
     cancel_fenced(&mut f, "restore");
     f.binding.restore_fence_generation = 1;
     release_parked(&mut f);
-    // Another lineage of the document fenced from 4 to 5 and cancelled
-    // there, at the origin this lineage's history starts from.
     let ours = f.binding.lineage_claim_id.clone();
     let other = "e".repeat(64);
     let relineaged = |column: &str, path: &str| {
@@ -826,7 +791,6 @@ fn a_released_lineage_proves_its_own_generation_after_another_lineage_restores()
         Some(5),
         "the other lineage settled at 5"
     );
-    // A key from 5 is the other lineage's generation, not this one's.
     let mut beyond = cancellation(&f, "beyond");
     beyond.new_fence = 6;
     assert!(matches!(cancel(&mut f, &beyond), Err(ApplicationError::Conflict)));

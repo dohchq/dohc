@@ -42,8 +42,6 @@ fn content_kind(fx: &Fixture) -> ContentKind {
     ContentKind::parse(&fx.content_kind).expect("fixture content kind")
 }
 
-/// Drive a fixture's yjs update lineage through the durable local-only pipeline
-/// and return the reconstructed doc + how many updates landed.
 fn ingest(fx: &Fixture) -> (TempStore, dohc_engine_collab::DocKey, i64) {
     let mut ts = fresh_store(&format!("xeng-{}", fx.seed));
     let key = test_key();
@@ -90,7 +88,6 @@ fn assert_matches_expectation(fx: &Fixture, doc: &Ydoc) {
                 "plaintext seed {}",
                 fx.seed
             );
-            // The projection of a plaintext doc IS the exact text.
             assert_eq!(
                 doc.project(ContentKind::Plaintext)
                     .expect("bounded plaintext projection")
@@ -173,7 +170,6 @@ fn every_fixture_converges_before_and_after_compaction() {
                 "compact committed seed {}",
                 fx.seed
             );
-            // The update log is now folded away; a single snapshot remains.
             assert_eq!(
                 count(&ts.store, "ydoc_updates", &key),
                 0,
@@ -353,7 +349,6 @@ fn assert_delete_boundary_rejected(tag: &str, base_hex: &str, candidate_hex: &st
     let candidate = decode_hex(candidate_hex);
     let candidate_sha = dohc_engine_collab::hex_sha256(&candidate);
 
-    // Local path.
     let (mut local, lkey) = setup_parity_store(&format!("{tag}-local"), Regime::LocalOnly);
     record_local_update(
         &mut local.store,
@@ -391,7 +386,6 @@ fn assert_delete_boundary_rejected(tag: &str, base_hex: &str, candidate_hex: &st
         "{tag} local: rejected delete must not reach the blob store"
     );
 
-    // Remote path.
     let (mut remote, rkey) = setup_parity_store(&format!("{tag}-remote"), Regime::Replicated);
     apply_remote_update(
         &mut remote.store,
@@ -677,8 +671,6 @@ fn redefine_string_clock_as(base: &[u8], content_ref: u8, content_payload: &[u8]
     out
 }
 
-/// The six cross-type redefinition payloads the reviewer named, each claiming
-/// the base's string clock as a different content kind.
 fn cross_type_redefinition_cases() -> Vec<(&'static str, u8, Vec<u8>)> {
     let deleted = vec![0x01u8]; // ContentDeleted: read_len = 1 (one tombstone clock)
     let json = {
@@ -715,7 +707,6 @@ fn replay_parity_rejects_cross_type_redefinition_on_both_paths() {
         let candidate = redefine_string_clock_as(&base, content_ref, &payload);
         let candidate_sha = dohc_engine_collab::hex_sha256(&candidate);
 
-        // Local path.
         let (mut local, lkey) =
             setup_parity_store(&format!("xtype-{name}-local"), Regime::LocalOnly);
         record_local_update(

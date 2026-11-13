@@ -1,4 +1,3 @@
-/// Each agent `[agentId, onBehalfOf]` that coverage names.
 fn agents(authors: &crate::author_coverage::Authors) -> Vec<Value> {
     let authors: Value = serde_json::from_str(&authors.json()).unwrap();
     authors
@@ -18,8 +17,6 @@ fn adopted_agent_edit_accepted_into_a_full_interval_settles_before_its_agent_ent
     };
     let mut f = Fixture::new();
     f.adopt().unwrap();
-    // The agent edits privately, then the accepted interval fills. The
-    // delivery's snapshot names only a person it already holds.
     let accepted = accepted_copy(&f.doc);
     let edit = native_tail_edit_for(&mut f, "agent edit", 11, Some("installation-person"));
     let full: Vec<Value> = std::iter::once(serde_json::to_value(&person).unwrap())
@@ -63,8 +60,6 @@ fn adopted_agent_edit_accepted_into_a_full_interval_settles_before_its_agent_ent
         )
         .unwrap()
     };
-    // Acceptance would move the agent into the interval, where it has no
-    // room. The relay settles and offers the same delivery again.
     let refused = apply(&mut f, event.clone());
     assert!(
         matches!(
@@ -94,7 +89,6 @@ fn adopted_agent_edit_accepted_into_a_full_interval_settles_before_its_agent_ent
     assert_eq!(settled.len(), 2);
 }
 
-/// One private edit by its own run of one agent.
 fn agent_run_edit(
     f: &mut Fixture,
     cache: &mut WriterDocCache,
@@ -103,7 +97,6 @@ fn agent_run_edit(
     agent_edit(f, cache, run, &agent_run(format!("run-{run}"), None))
 }
 
-/// One run of the agent `agent`, for a person when it names one.
 fn agent_run(
     agent_run_id: String,
     on_behalf_of: Option<String>,
@@ -117,7 +110,6 @@ fn agent_run(
     }
 }
 
-/// The `edit`th private edit of the agent `agent`.
 fn agent_edit(
     f: &mut Fixture,
     cache: &mut WriterDocCache,
@@ -157,7 +149,6 @@ fn agent_edit(
     .map(|_| ())
 }
 
-/// The agent runs an author list names, in order.
 fn agent_runs(json: &str) -> Vec<String> {
     let authors: Value = serde_json::from_str(json).unwrap();
     let mut runs: Vec<String> = authors
@@ -187,7 +178,6 @@ fn adopt_with_settled_edit(f: &mut Fixture) {
         .is_empty());
 }
 
-/// The relay's settlement of what it accepted while the lineage is held.
 fn settle_accepted_prefix(f: &mut Fixture) {
     f.store
         .write_with(&NoFaults, |tx| {
@@ -196,7 +186,6 @@ fn settle_accepted_prefix(f: &mut Fixture) {
         .unwrap();
 }
 
-/// Every table a private edit writes.
 const PRIVATE_EDIT_WRITES: [&str; 4] = [
     "ydoc_docs",
     "ydoc_updates",
@@ -256,8 +245,6 @@ fn a_held_lineage_refuses_the_agent_run_one_moment_has_no_bytes_for() {
     );
 }
 
-/// `count` people the relay accepted edits from, as their interval names
-/// them.
 fn people(count: usize) -> String {
     Value::Array(
         (0..count)
@@ -267,7 +254,6 @@ fn people(count: usize) -> String {
     .to_string()
 }
 
-/// Puts these authors in the interval, as accepted deliveries leave them.
 fn set_pending(f: &mut Fixture, authors: &str) {
     let key = f.key.clone();
     f.store
@@ -282,17 +268,12 @@ fn set_pending(f: &mut Fixture, authors: &str) {
         .unwrap();
 }
 
-/// The interval's authors, as a settlement would name them.
 fn interval_of(f: &Fixture) -> crate::author_coverage::Authors {
     f.store
         .read_with(|conn| crate::author_coverage::interval_in(conn, &f.key, i64::MAX))
         .unwrap()
 }
 
-/// The relay's settlement of a held lineage, as the host makes it: it
-/// projects the accepted prefix, names the interval and takes it in. The
-/// first attempt writes its moment and waits for the file write. A later one
-/// finds the file holds that moment, so it takes in the interval at once.
 fn relay_settlement(
     store: &mut EngineStore,
     audit: &LiveSettlementAudit,
@@ -367,8 +348,6 @@ fn a_held_release_waits_while_a_failed_settlement_returns_its_authors() {
         acknowledge_entry(&mut f, &covered);
         set_pending(&mut f, &people(returned));
         let named = interval_of(&f);
-        // A private edit makes the settlement project the accepted prefix,
-        // as its replay does.
         let mut cache = WriterDocCache::new();
         agent_run_edit(&mut f, &mut cache, 0).unwrap();
         let key = f.key.clone();
@@ -438,8 +417,6 @@ fn a_held_release_waits_while_a_failed_settlement_returns_its_authors() {
             |store, audit| relay_settlement(store, audit, &key, false),
         )
         .unwrap();
-        // With its interval empty and no attempt unresolved, the document
-        // parks.
         assert!(interval_of(&f).is_empty(), "{case}");
         assert!(
             !f.store
@@ -551,7 +528,6 @@ fn native_tail_event(
     delivery: String,
     cursor: i64,
 ) -> AdmittedLiveUpdate {
-    // The relay binds the declared agent to the authenticated owner.
     let declared: Option<Option<String>> = f
         .store
         .read_with(|conn| {
@@ -601,14 +577,12 @@ fn native_tail_event(
     }
 }
 
-/// A copy of the state the relay had accepted, for `relay_sees`.
 fn accepted_copy(doc: &Ydoc) -> Ydoc {
     let copy = Ydoc::wire();
     copy.apply(&doc.encode_full_state()).unwrap();
     copy
 }
 
-/// Names the ranges the relay finds new in `event` against `accepted`.
 fn relay_sees(event: &mut AdmittedLiveUpdate, accepted: &Ydoc) {
     let (structs, deletes) =
         crate::live_update_application::first_seen_for_test(accepted, &event.update_bytes);
@@ -762,7 +736,6 @@ fn relay_bound_owner_agent_draft_applies_and_restores_after_same_client_depth_ch
         .all(|(&id, &clock)| id == client || clock == first_vector.get(&id)));
     let mut event = native_tail_event(&f, second.update, second.delivery_id, 8);
     assert_eq!(event.metadata.admitted_declaration().unwrap().depth, 2);
-    // The relay keeps the first snapshot for this client's unchanged identity.
     event.metadata.author_snapshot = stored_snapshot;
     assert_eq!(event.metadata.admitted_declaration().unwrap().depth, 1);
     let before = native_tail_inventory(&f.store);
@@ -1158,8 +1131,6 @@ fn adopted_native_agent_edit_declares_its_recorded_agent() {
     let (declaration, revision, native_sequence) = stored(&f);
     assert_eq!(declaration, Some(serde_json::to_string(&expected).unwrap()));
     assert_eq!(revision, None);
-    // The source derives the declaration, so a retry of the same native
-    // update finds its entry unchanged.
     let key = f.key.clone();
     f.store
         .write_with(&NoFaults, |tx| {
@@ -1181,8 +1152,6 @@ fn adopted_native_agent_edit_declares_its_recorded_agent() {
             .unwrap(),
         1
     );
-    // Restore classifies the native source with its derived declaration, and
-    // refuses a stored one the source does not derive.
     let input = native_tail_input(&mut f, None, 0);
     let proposal = native_tail_prepare(&mut f, input.clone()).unwrap();
     assert_eq!(
@@ -1351,8 +1320,6 @@ fn native_restore_keeps_enrolled_owner_drafts_as_truthful_sources() {
                 .unwrap();
             (None, 0)
         };
-        // An enrollment observes this binding, and the entry keeps the agent
-        // its editor declared. Its draft proof is set below.
         let namespace = f.handle.registration.lock().unwrap().namespace.clone();
         let binding_json = serde_json::to_string(&f.binding).unwrap();
         let declaration_json = serde_json::to_string(&declaration).unwrap();
@@ -1374,9 +1341,6 @@ fn native_restore_keeps_enrolled_owner_drafts_as_truthful_sources() {
             .unwrap();
         let input = native_tail_input(&mut f, terminal.clone(), applied_sequence);
         let inventory = native_tail_inventory(&f.store);
-        // A generic entry queued before enrollment carries no draft proof.
-        // Neither does a revision the enrollment never reached, another
-        // relay's enrollment, or an enrollment observing another binding.
         let path = f.binding.current_path.clone();
         for mutation in [
             String::new(),
@@ -1428,8 +1392,6 @@ fn native_restore_keeps_enrolled_owner_drafts_as_truthful_sources() {
             })
         );
         assert_eq!(inventory, native_tail_inventory(&f.store));
-        // The draft's declaration is part of its identity: a changed one
-        // no longer matches its accepted receipt or the saved proposal.
         f.store
             .write_with(&NoFaults, |tx| {
                 tx.execute(
@@ -1443,14 +1405,10 @@ fn native_restore_keeps_enrolled_owner_drafts_as_truthful_sources() {
     }
 }
 
-/// Another person's edit on `other`, which the relay accepted at `cursor`
-/// after the adoption, applied as committed.
 fn apply_recipient_edit(f: &mut Fixture, other: &Ydoc, cursor: i64, text: &str) -> ApplicationResult {
     apply_recipient_update(f, other, cursor, text, false)
 }
 
-/// [`apply_recipient_edit`], sending `other`'s full state with the edit when
-/// `full_state` is set, as a client that resends what the host already has.
 fn apply_recipient_update(
     f: &mut Fixture,
     other: &Ydoc,
@@ -1471,7 +1429,6 @@ fn apply_recipient_update(
     .unwrap()
 }
 
-/// The recipient's edit of `other` as the relay accepted it at `cursor`.
 fn recipient_update(
     f: &Fixture,
     other: &Ydoc,
@@ -1529,7 +1486,6 @@ fn recipient_update(
     }
 }
 
-/// The adopted fixture's one queue, holding the owner's adoption seed.
 fn seed_outbox(f: &Fixture) -> String {
     f.store
         .read_with(|conn| conn.query_row("SELECT outbox_id FROM owner_ydoc_outboxes", [], |r| r.get(0)))
@@ -1550,8 +1506,6 @@ fn refuse_seed(f: &mut Fixture, outbox: &str) {
     .unwrap();
 }
 
-/// The header and the checkpoint a recovery read of `outbox` names, paged in
-/// `page` bytes. None once a part changed under it.
 fn read_recovery_checkpoint(
     f: &Fixture,
     outbox: &str,
@@ -1627,14 +1581,12 @@ fn a_recovery_copy_of_a_refused_seed_holds_every_accepted_edit_after_it() {
             })
             .unwrap()
     };
-    // Only the writer builds it, so a read before then names nothing.
     assert!(matches!(
         owner_outbox::read_pending_page(&f.store, "workspace", &outbox, None, 4096),
         Err(owner_outbox::OwnerOutboxError::RecoveryCheckpointOutdated)
     ));
     prepare(&mut f).unwrap();
     let (header, checkpoint) = read_recovery_checkpoint(&f, &outbox, 16).unwrap();
-    // Accepted frames only: the recipient's edit, never the refused seed.
     let text = checkpoint_text(&checkpoint);
     assert!(text.contains("Recipient text"), "{text}");
     assert!(!text.contains("edited before connecting"), "{text}");
@@ -1643,11 +1595,8 @@ fn a_recovery_copy_of_a_refused_seed_holds_every_accepted_edit_after_it() {
     let first = recorded(&f);
     assert_eq!(first.1, Some(1));
     assert_eq!(first.0.as_deref(), header["checkpointDigest"].as_str());
-    // Building again at the same cursor keeps the same bytes.
     prepare(&mut f).unwrap();
     assert_eq!(recorded(&f), first);
-    // A further accepted edit moves the cursor: a read under way restarts,
-    // and the next build names new bytes holding both edits.
     let header_cursor = owner_outbox::OwnerOutboxReadCursor {
         snapshot: {
             let owner_outbox::OwnerOutboxPageResult::Page(page) =
@@ -1688,7 +1637,6 @@ fn a_recovery_copy_of_a_refused_seed_holds_every_accepted_edit_after_it() {
         })
         .unwrap();
     assert_eq!(replaced, 0, "the older checkpoint's bytes go once nothing names them");
-    // An accepted update still waiting on a missing dependency refuses the copy.
     f.store
         .write_with(&NoFaults, |tx| {
             tx.execute(
@@ -1830,7 +1778,6 @@ fn a_restore_fence_waits_while_an_accepted_update_lacks_its_dependency() {
         .unwrap();
     let fenced = try_fence_next_generation(&mut f, "restore-while-deferred");
     assert!(matches!(fenced, Err(ApplicationError::AcceptedStateIncomplete)), "{fenced:?}");
-    // Nothing moved: the restore can ask again once the dependency arrives.
     let fences: i64 = f
         .store
         .read_with(|conn| conn.query_row("SELECT count(*) FROM live_restore_fences", [], |r| r.get(0)))
@@ -1851,7 +1798,6 @@ fn a_storage_failure_keeps_the_binding_until_the_earlier_seeds_final_state_is_ke
         ApplicationResult::Applied(..)
     ));
     refuse_seed(&mut f, &outbox);
-    // The accepted checkpoint the rebuild starts from fails its integrity check.
     let digest: String = f
         .store
         .read_with(|conn| {
@@ -1897,8 +1843,6 @@ fn a_storage_failure_keeps_the_binding_until_the_earlier_seeds_final_state_is_ke
         "{refused:?}"
     );
     assert_eq!(lineage(&f), f.binding.lineage_claim_id);
-    // Once the blob is repaired, the registration keeps the final accepted
-    // state as the queue's recovery checkpoint and moves the binding.
     store_bytes(&mut f, &kept);
     f._owner
         .register(&mut f.store, namespace, coordinate, moved)
@@ -2310,8 +2254,6 @@ fn a_new_settlement_refuses_an_equal_cursor_interval() {
     assert_eq!(f.store.table_row_count("moments").unwrap(), 1);
 }
 
-/// A read of `outbox`'s recovery checkpoint, built first by the writer
-/// whenever the read names an older one, as `ydoc.ownerOutbox.readPending` does.
 fn prepare_and_read_recovery(f: &mut Fixture, outbox: &str, page: usize) -> (serde_json::Value, Vec<u8>) {
     owner_outbox::prepare_recovery_checkpoint(&mut f.store, "workspace", outbox).unwrap();
     read_recovery_checkpoint(f, outbox, page).expect("unchanged queue")

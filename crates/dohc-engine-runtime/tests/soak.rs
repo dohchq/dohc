@@ -1,8 +1,3 @@
-//! Workspace open/close leaks no actor slot: `WorkspaceSupervisor::actor_count()`
-//! returns to exactly 0 after every close, whether one identity is reopened
-//! repeatedly or many distinct identities are released through `close_all`
-//! (the primitive the daemon's shutdown drain uses). Small-scale and fast.
-
 use dohc_engine_runtime::WorkspaceSupervisor;
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
 

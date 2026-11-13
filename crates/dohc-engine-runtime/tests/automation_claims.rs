@@ -30,7 +30,6 @@ const OBJECT: &str = "automation-claim-record-object";
 const RECORD: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
 const AUTOMATION: &str = "collection:tasks#triage";
 
-/// Added and changed records under "tasks", on any field or only `field`.
 fn subscription(automation_id: &str, field: Option<&str>) -> AutomationSubscription {
     AutomationSubscription {
         automation_id: automation_id.to_owned(),
@@ -551,7 +550,6 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
         Some(dohc_engine_domain::AUTOMATION_CHAIN_STOPPED),
     );
 
-    // A priority edit wakes both automations.
     let priority = handle
         .ydoc_record_update(
             key.clone(),
@@ -586,7 +584,6 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
             .collect::<Vec<_>>(),
         vec!["collection:tasks#priority", AUTOMATION],
     );
-    // Each prefix drains only its own claims.
     let (collection_claim, _) = handle
         .automation_claim_next(
             WS.to_owned(),
@@ -723,7 +720,6 @@ async fn an_automations_write_replicated_to_the_live_host_keeps_its_depth_and_cl
         )
         .await
         .expect("originate collection base");
-    // The server's automation sets the status at chain depth 2.
     let edit = doc.frontmatter_set("status", "stamped").unwrap();
     handle
         .ydoc_record_update(
@@ -753,7 +749,6 @@ async fn an_automations_write_replicated_to_the_live_host_keeps_its_depth_and_cl
         .expect("the automation's write");
     supervisor.close(&server_db).expect("close server actor");
 
-    // The live host watches the same Collection and pulls the writes.
     let mut host = EngineStore::open(&host_db, 300).expect("open live host store");
     subscribe_automation(
         &mut host,
@@ -819,12 +814,6 @@ async fn an_automations_write_replicated_to_the_live_host_keeps_its_depth_and_cl
         "a replicated write claims nothing on the live host"
     );
 }
-
-// ---------------------------------------------------------------------------
-// The claim ledger's crash tier: a claim is served at most once per attempt,
-// a crashed settle rolls back to running for the open-time reaper, and the
-// attempt bound turns an exhausted claim terminally failed.
-// ---------------------------------------------------------------------------
 
 const CRASH_CLAIM: &str = "atc_crash_recovery_claim";
 
@@ -1150,7 +1139,6 @@ async fn a_crashed_settle_stays_running_and_the_reaper_requeues_then_exhausts() 
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&db, 1).expect("open actor").actor;
 
-    // Attempt 1: the claim is served exactly once.
     let (claim, _) = handle
         .automation_claim_next(
             WS.to_owned(),
@@ -1232,9 +1220,6 @@ async fn a_crashed_settle_stays_running_and_the_reaper_requeues_then_exhausts() 
         .expect("the requeued claim is served again");
     assert_eq!(claim.attempts, 2, "the retry is a new attempt");
 
-    // A second crashed settle exhausts the attempt bound: the reaper turns
-    // the claim terminally failed with the reclaim-exhausted reason, and it
-    // is never served again.
     let faults = ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist);
     handle
         .automation_settle(
@@ -1320,7 +1305,6 @@ async fn a_crashed_claim_next_rolls_back_and_the_retry_serves_one_attempt() {
         "a crashed claim rolls back whole: still pending, no attempt spent"
     );
 
-    // Restart: the retry serves the claim exactly once, as attempt 1.
     let handle = supervisor.open(&db, 2).expect("reopen actor").actor;
     let (claim, _) = handle
         .automation_claim_next(

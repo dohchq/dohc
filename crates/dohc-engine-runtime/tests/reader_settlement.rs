@@ -244,7 +244,6 @@ async fn absent_snapshot_without_reader_metadata_reaches_markdown_hold() {
     let before = wire.transact().state_vector();
     let meta = wire.get_or_insert_map("meta");
     meta.remove(&mut wire.transact_mut(), "dohcMarkdownSourceReader");
-    // An incomplete witness is unsafe without asking a checker.
     meta.remove(
         &mut wire.transact_mut(),
         "dohcMarkdownSourceProjectionSha256",
@@ -424,20 +423,15 @@ async fn real_reader_refuses_a_note_over_its_capacity_once_without_a_crash() {
         .configure_reader_resolver(resolver.clone())
         .await
         .unwrap();
-    // Every path answers with the code the desktop and share page word, not a
-    // corrupt store or a retry.
     let refused = |result: Result<_, dohc_engine_runtime::RuntimeError>| match result {
         Err(error) => assert_eq!(error.code(), "document-too-dense", "{error:?}"),
         Ok(_) => panic!("a note over the reader's capacity settled"),
     };
     for _ in 0..2 {
         refused(settle(&actor, scratch.path(), &key, &source, &claim).await);
-        // One request, answered with a refusal rather than a crash, and not
-        // asked again for the same note.
         assert_eq!(reader.dispatch_count(), 1);
     }
     supervisor.close(&db).unwrap();
-    // Once the note changes, it is asked again.
     let mut store = EngineStore::open(&db, 4).unwrap();
     let update = doc.richdoc_append_paragraph("One more");
     store

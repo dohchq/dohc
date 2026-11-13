@@ -152,7 +152,6 @@ struct HostedRelay {
     revision: usize,
     epoch_log_floor: i64,
     requests: Vec<String>,
-    /// Every push that carried ops.
     pushed: Vec<Value>,
     /// Every empty push: the origin probe each `sync.createHostedReplica` sends.
     probes: Vec<Value>,
@@ -175,7 +174,6 @@ impl HostedRelay {
         self.revision += 1;
     }
 
-    /// A text write that creates `object_id`, with its bytes on the relay.
     fn create(&mut self, origin: &str, seq: i64, object_id: &str, path: &str, text: &str) {
         self.write(
             origin,
@@ -628,8 +626,6 @@ fn write_response(stream: &mut TcpStream, response: TestResponse) -> std::io::Re
     stream.flush()
 }
 
-/// A daemon that pulls the hosted feed under the namespace a configured
-/// live host would name, while its ordinary methods stay open to the test.
 fn hosted_service() -> EngineService {
     EngineService::with_hosted_feed_for_harness("hosted-relay")
 }
@@ -702,7 +698,6 @@ impl Host {
             .await
     }
 
-    /// Materialize and commit a pass's cursor, answering the commit.
     async fn commit_answer(&mut self, pending: &Value) -> Value {
         let params = json!({"workspaceId": WORKSPACE, "pendingCursor": pending});
         assert_eq!(
@@ -713,7 +708,6 @@ impl Host {
         self.call("sync.commitCursor", params).await
     }
 
-    /// Materialize and commit a pass's cursor, answering whether it committed.
     async fn commit(&mut self, pending: &Value) -> bool {
         self.commit_answer(pending).await["committed"]
             .as_bool()
@@ -741,7 +735,6 @@ impl Host {
     }
 }
 
-/// The document's state on the hosted replica.
 fn document_state(scratch: &ScratchDir, object_id: &str) -> Option<String> {
     let conn = Connection::open(engine_db_path(scratch).expect("db path")).expect("open db");
     conn.query_row(
@@ -752,7 +745,6 @@ fn document_state(scratch: &ScratchDir, object_id: &str) -> Option<String> {
     .ok()
 }
 
-/// The path of the document's head on the hosted replica.
 fn head_path(scratch: &ScratchDir, object_id: &str) -> Option<String> {
     let conn = Connection::open(engine_db_path(scratch).expect("db path")).expect("open db");
     conn.query_row(
@@ -842,7 +834,6 @@ async fn a_hosted_replica_pulls_its_documents_and_pushes_live_writes_to_the_host
         assert_eq!(origins[0], origins[1], "the replica keeps its origin");
     }
 
-    // The first pass learns the scope and applies nothing.
     let learned = host.pull().await;
     assert_eq!(
         (
@@ -879,8 +870,6 @@ async fn a_hosted_replica_pulls_its_documents_and_pushes_live_writes_to_the_host
         "hosted b"
     );
 
-    // A live write pushes to the hosted log under the service-host origin,
-    // with its bytes uploaded to the hosted feed.
     assert_eq!(
         journal_live_update(&scratch, "doc-a", "a.md", b"live update"),
         0
@@ -1226,8 +1215,6 @@ async fn an_interrupted_move_is_finished_by_the_documents_held_return() {
     assert_eq!(read("x.md/child.md").as_deref(), Some("hosted c"));
 }
 
-/// Every file under the root but the engine's own, with its text, and every
-/// empty folder.
 fn disk(root: &std::path::Path) -> (BTreeMap<String, String>, Vec<String>) {
     fn walk(
         root: &std::path::Path,
@@ -1494,7 +1481,6 @@ impl LiveHost {
         .map(|response| response.response.result)
     }
 
-    /// Register `object_id` under the lineage [`journal_live_update`] names.
     async fn register(&self, object_id: &str, path: &str) -> Result<Value, WireError> {
         let binding = json!({
             "workspaceId": WORKSPACE, "mainVersionId": self.main_version_id,
@@ -1506,7 +1492,6 @@ impl LiveHost {
             .map(|registered| registered["registrationId"].clone())
     }
 
-    /// Whether the registration still answers its owner.
     async fn registered(&self, registration: &Value) -> bool {
         self.output(registration).await.is_ok()
     }
@@ -1529,8 +1514,6 @@ impl LiveHost {
     }
 }
 
-/// Each live binding the writer holds for the hosted replica, and whether it
-/// is available.
 fn native_bindings(scratch: &ScratchDir) -> Vec<(String, bool)> {
     let conn = Connection::open(engine_db_path(scratch).expect("db path")).expect("open db");
     let mut statement = conn
@@ -1593,7 +1576,6 @@ async fn a_document_held_while_live_loses_its_registration_and_session_in_the_sa
         base64::engine::general_purpose::STANDARD
             .encode(dohc_engine_collab::Ydoc::wire().plaintext_insert(0, text))
     };
-    // An accepted live update of doc-a, journaled for the relay.
     journal_live_update(&scratch, "doc-a", "a.txt", b"accepted");
     let output_a = live.output(&registration_a).await.expect("output a");
     let output_b = live.output(&registration_b).await.expect("output b");
@@ -1622,7 +1604,6 @@ async fn a_document_held_while_live_loses_its_registration_and_session_in_the_sa
     )
     .await;
 
-    // Its accepted work stays, waiting for the relay.
     let outbox: i64 = Connection::open(engine_db_path(&scratch).expect("db path"))
         .expect("open db")
         .query_row(
@@ -1804,7 +1785,6 @@ impl SessionHost {
             .map_err(|error| (error.code, error.message))
     }
 
-    /// Detach the store and stop, as before a restart.
     async fn stop(mut self) {
         self.call("liveApplication.detachWorkspace", json!({}))
             .await
@@ -1900,8 +1880,6 @@ async fn an_unadmitted_owner_edit_holds_a_ready_document_across_a_restart() {
     assert_eq!((refused(&scratch), queued(&scratch)), (1, 1));
 }
 
-/// What a hosted replica's store holds that a pass can change: its scope,
-/// cursor and commits, its documents, and the work it journaled or keeps.
 fn hosted_store_state(scratch: &ScratchDir) -> String {
     let conn = Connection::open(engine_db_path(scratch).expect("db path")).expect("open db");
     conn.query_row(

@@ -308,7 +308,6 @@ fn prepared_pull_restart_replays_before_apply_during_apply_and_before_cursor_com
         }
         let client = RelaySyncClient::new(prepared_file_relay());
         let page = client.fetch_pull(&mut engine, "ws", &NoFaults).unwrap();
-        // Applying succeeds with a transport that has no pages or blobs to serve.
         let offline = RelaySyncClient::new(PagedRelay::new([]));
         let result = offline
             .apply_pull(
@@ -823,7 +822,6 @@ fn each_saved_claim_refusal_abandons_the_pull_and_a_pending_claim_does_not() {
             stream_identity: identity.stream_identity,
         };
         let client = RelaySyncClient::new(ClaimRelay::default());
-        // An unanswered claim saves only `pending`.
         *client.transport().refusal.lock().unwrap() = Some(RelayError::Partitioned);
         assert!(
             client
@@ -906,14 +904,11 @@ fn abandoning_the_pull_keeps_what_it_applied_and_where_it_stopped() {
     ));
     assert_eq!(applied(&engine), before);
     assert_eq!(read_relay_cursor(&engine, "ws").unwrap(), None);
-    // The abandoned pass's own cursor still commits its position.
     commit(&client, &mut engine, &cursor);
     assert_eq!(
         read_relay_cursor(&engine, "ws").unwrap().map(|c| c.cursor),
         Some(1)
     );
-    // Resuming sync pulls under a fresh token, replays what it already
-    // applied once, and finishes normally.
     let (has_more, next) = pass(&client, &mut engine);
     assert!(!has_more);
     assert_ne!(completion(&next).token, completion(&cursor).token);
@@ -1072,7 +1067,6 @@ fn a_rolled_back_transition_keeps_the_previous_state_and_its_pull() {
         seen: AtomicUsize::new(0),
     };
 
-    // The terminal commit.
     let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     let client = RelaySyncClient::new(padded_relay(1));
@@ -1087,7 +1081,6 @@ fn a_rolled_back_transition_keeps_the_previous_state_and_its_pull() {
     assert_eq!(read_relay_cursor(&engine, "ws").unwrap(), None);
     assert_eq!(pull_token(&engine).as_ref(), Some(&token));
 
-    // Abandoning it.
     assert!(matches!(
         abandon_ordinary_pull(&mut engine, "ws", &crash(0)).unwrap(),
         TxnOutcome::Crashed { committed: false }

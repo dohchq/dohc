@@ -22,7 +22,6 @@ fn op(seq: i64, body: &str) -> ReplicationEnvelope {
     envelope("owner", seq, "probe.remote", json!({ "body": body }))
 }
 
-/// Admit `op`, counting how often its mutation runs.
 fn admit(
     store: &mut EngineStore,
     op: &ReplicationEnvelope,
@@ -197,7 +196,6 @@ fn hosted_backfill_below_applied_coordinates_applies_exactly_once() {
     );
 }
 
-/// An op of `object_id` at relay position `relay_seq`.
 fn document_op(seq: i64, relay_seq: i64, object_id: &str) -> ReplicationEnvelope {
     let mut op = envelope(
         "owner",
@@ -209,8 +207,6 @@ fn document_op(seq: i64, relay_seq: i64, object_id: &str) -> ReplicationEnvelope
     op
 }
 
-/// The feed each retained op and deferred Y.Doc update of `store` recorded,
-/// by origin sequence: its ingress kind, namespace, epoch and stream.
 fn recorded_feeds(store: &EngineStore) -> Vec<(String, i64, String, Option<String>)> {
     store
         .read_with(|conn| {
@@ -225,7 +221,6 @@ fn recorded_feeds(store: &EngineStore) -> Vec<(String, i64, String, Option<Strin
         .unwrap()
 }
 
-/// Defer a Y.Doc update of `doc` at `seq` as a pull under `namespace` does.
 fn defer_update(
     store: &mut EngineStore,
     seq: i64,
@@ -315,7 +310,6 @@ fn hosted_deferrals_keep_the_feed_they_arrived_on() {
         Some(Some("relay".to_owned()))
     );
 
-    // The trusted configuration now names another namespace.
     crate::deferred::retain(
         &mut store,
         &identity,
@@ -341,7 +335,6 @@ fn hosted_deferrals_keep_the_feed_they_arrived_on() {
     );
 }
 
-/// Make `object_id` a document of the replica's current scope.
 fn host_document(store: &mut EngineStore, object_id: &str) {
     store
         .write_with(&NoFaults, |tx| {
@@ -560,7 +553,6 @@ struct HostedFeed {
     garble: Mutex<Option<fn(&mut PushResponse)>>,
     /// Loses the reply to the next push after the relay recorded its batch.
     lose_push_reply: AtomicBool,
-    /// Every blob a download asked for.
     downloads: Mutex<Vec<String>>,
 }
 
@@ -606,7 +598,6 @@ impl HostedFeed {
         format!("scope-{}", self.revision.load(Ordering::SeqCst))
     }
 
-    /// A text write that creates `object_id`, with its bytes on the relay.
     fn create(&self, origin: &str, seq: i64, object_id: &str, path: &str, text: &str) {
         let sha = dohc_engine_storage::hex_sha256(text.as_bytes());
         self.blobs
@@ -1017,8 +1008,6 @@ impl RelayTransport for HostedFeed {
     }
 }
 
-/// A feed holding a hosted document, a private file it withholds, and a
-/// document outside the scope until a test shares it.
 fn hosted_feed() -> HostedFeed {
     let feed = HostedFeed::new();
     feed.append(envelope("owner", 0, "workspace.init", json!({})));
@@ -1106,8 +1095,6 @@ fn sync_parking(client: &RelaySyncClient<HostedFeed>, store: &mut EngineStore) {
     panic!("the hosted replica did not catch up");
 }
 
-/// Whether `object_id` is parked: its row says so, and its heads and path
-/// aliases are in the parked tables and nowhere else.
 fn is_parked(store: &EngineStore, object_id: &str) -> bool {
     count(
         store,
@@ -1185,7 +1172,6 @@ fn coordinates(store: &EngineStore) -> Vec<(String, i64)> {
         .unwrap()
 }
 
-/// Each object's current text, and how many moments each moment id has.
 fn content(store: &EngineStore) -> (BTreeMap<String, String>, BTreeMap<String, i64>) {
     store
         .read_with(|conn| {
@@ -1218,7 +1204,6 @@ fn a_document_that_joins_the_scope_backfills_below_the_frozen_main_cursor() {
     let (_scratch, path, mut store) = hosted_store();
     let client = RelaySyncClient::new(hosted_feed());
 
-    // The first response names the scope and applies nothing.
     let learned = pass(&client, &mut store, &NoFaults).unwrap();
     assert_eq!(learned.pending_cursor, None);
     assert!(learned.has_more);
@@ -1236,7 +1221,6 @@ fn a_document_that_joins_the_scope_backfills_below_the_frozen_main_cursor() {
     );
     assert!(coordinates(&store).is_empty());
 
-    // Its backfill is ready only once committed.
     let backfill = pass(&client, &mut store, &NoFaults).unwrap();
     assert_eq!(
         client.transport().pull_requests()[1].object_id.as_deref(),
@@ -1292,7 +1276,6 @@ fn a_document_that_joins_the_scope_backfills_below_the_frozen_main_cursor() {
     );
     assert_eq!(replica(&store).main_cursor, 4);
 
-    // A restart resumes the backfill where it stopped.
     drop(store);
     let mut store = EngineStore::open(&path, 3_000).unwrap();
     let pulled = client.transport().pull_requests().len();
@@ -1345,7 +1328,6 @@ fn a_pass_fetched_under_an_older_scope_cannot_commit() {
     let client = RelaySyncClient::new(hosted_feed());
     pass(&client, &mut store, &NoFaults).unwrap();
     let backfill = pass(&client, &mut store, &NoFaults).unwrap();
-    // The pass is not committed before the scope moves.
     client.transport().share("doc-b", "b.md");
     assert_eq!(
         pass(&client, &mut store, &NoFaults).unwrap().pending_cursor,
@@ -1421,7 +1403,6 @@ fn finish_after(
         );
     }
     if restart {
-        // The pass is fetched again and names the same paths to materialize.
         drop(store);
         store = EngineStore::open(&path, 3_000).unwrap();
         let again = pass(&client, &mut store, &NoFaults).unwrap();
@@ -1519,7 +1500,6 @@ fn a_document_whose_ydoc_base_is_below_the_floor_stays_held() {
     assert!(content(&store).0.is_empty(), "no file is materialized");
 }
 
-/// Hold `texts` locally, as the hydration before retention left them.
 fn hydrated(store: &mut EngineStore, texts: &[String]) {
     store
         .write_with(&NoFaults, |tx| {
@@ -1757,7 +1737,6 @@ fn assert_conflict_child_hold_parity(
     );
 }
 
-/// What holds a document at the child of [`withheld_conflict`].
 fn parent_withheld() -> HostedHold {
     HostedHold::ConflictParentWithheld {
         conflict_id: "owner-conflict".to_owned(),
@@ -1894,7 +1873,6 @@ fn a_full_retention_limit_holds_a_document_instead_of_failing_the_pass() {
         other_seq - 1
     );
 
-    // The other editor closed.
     sync(&client, &mut store);
     assert!(ready(&store, "other-object"));
     assert_eq!(content(&store).0["other-object"], "other edited");
@@ -1902,7 +1880,6 @@ fn a_full_retention_limit_holds_a_document_instead_of_failing_the_pass() {
     assert_eq!(retained(&store), 0);
 }
 
-/// Journal one live Y.Doc update to a hosted document under the host's origin.
 fn journal_live_update(store: &mut EngineStore, object_id: &str, update: &[u8]) -> i64 {
     let key = dohc_engine_collab::DocKey::new("ws", "main", object_id).unwrap();
     let path = format!("{object_id}.md");
@@ -1989,7 +1966,6 @@ fn a_refused_hosted_write_keeps_its_coordinate_and_a_crashed_push_retries_to_the
             .unwrap()
     };
 
-    // The relay decides every coordinate, then the host stops before recording them.
     let crash = ScriptedFaults::crash_at(FaultPoint::SyncAfterPushBeforeCursorPersist);
     assert!(matches!(
         push(&mut store, crash.as_ref()),
@@ -2016,7 +1992,6 @@ fn a_refused_hosted_write_keeps_its_coordinate_and_a_crashed_push_retries_to_the
     assert_eq!(read_pushed_seq(&store, "ws", HOST).unwrap(), -1);
     assert!(recorded_refusals(&store).is_empty());
 
-    // The retry gets the first decisions back and records each once.
     let refusal = HostedPushRefusal {
         origin_id: HOST.to_owned(),
         origin_seq: 1,
@@ -2029,7 +2004,6 @@ fn a_refused_hosted_write_keeps_its_coordinate_and_a_crashed_push_retries_to_the
         "ydoc.update".to_owned(),
         "the relay refused this hosted write: outside-hosted-documents".to_owned(),
     )];
-    // Then a pass with nothing left to push reports nothing again.
     for reported in [
         vec![crate::hosted::push_refusal("ws", &refusal)],
         Vec::new(),
@@ -2069,7 +2043,6 @@ fn a_refused_hosted_write_keeps_its_coordinate_and_a_crashed_push_retries_to_the
         ]
     );
 
-    // Later work lands past the refused coordinate.
     journal_live_update(&mut store, "doc-a", b"a three");
     assert!(matches!(
         push(&mut store, &NoFaults),
@@ -2167,7 +2140,6 @@ fn a_push_response_refuses_only_its_own_batch_and_only_for_a_hosted_push() {
         );
     }
 
-    // Neither a probe nor a share log push refuses an op.
     let unrefused = PushResponse {
         registered_references: Vec::new(),
         hosted_refusals: Vec::new(),
@@ -2245,8 +2217,6 @@ fn text_sha(text: &str) -> String {
     dohc_engine_storage::hex_sha256(text.as_bytes())
 }
 
-/// A moment's stored before side: presence, text digest, object, and the
-/// payload-before digest.
 type StoredBefore = (i64, Option<String>, Option<String>, Option<String>);
 
 fn stored_before(store: &EngineStore, moment_id: &str) -> StoredBefore {
@@ -2365,7 +2335,6 @@ fn a_moment_that_replaced_a_withheld_object_applies_as_a_create() {
     );
 }
 
-/// `doc-b` is hosted at `a.md` and synced.
 fn departing_b() -> (
     ScratchDir,
     std::path::PathBuf,
@@ -2375,7 +2344,6 @@ fn departing_b() -> (
     departing_b_at("a.md")
 }
 
-/// `doc-b` is hosted at `at` and synced.
 fn departing_b_at(
     at: &str,
 ) -> (
@@ -2398,7 +2366,6 @@ fn departing_b_at(
     (scratch, path, store, client)
 }
 
-/// `doc-b` leaves the scope, and `doc-a` replaces it at `a.md`.
 fn replace_b_with_a(feed: &HostedFeed) {
     feed.unshare("doc-b");
     feed.replace(
@@ -2489,8 +2456,6 @@ fn accept_live_work(store: &mut EngineStore, object_id: &str) -> String {
     accept_live_update(store, object_id, "lineage", b"live update")
 }
 
-/// Accepted live `update` of `object_id` on `lineage`, as
-/// [`accept_live_work`] records it.
 fn accept_live_update(
     store: &mut EngineStore,
     object_id: &str,
@@ -2524,13 +2489,10 @@ fn accept_live_update(
     update
 }
 
-/// The settlement of `object_id`'s accepted work through journal cursor 7.
 fn settle_live_work(store: &mut EngineStore, object_id: &str) {
     settle_live_lineage(store, object_id, "lineage");
 }
 
-/// The settlement of `object_id`'s accepted work on `lineage` through
-/// journal cursor 7.
 fn settle_live_lineage(store: &mut EngineStore, object_id: &str, lineage: &str) {
     let digest = "d".repeat(64);
     store
@@ -2811,7 +2773,6 @@ fn parking_keeps_a_conflict_and_the_bytes_of_its_sides() {
 
 type Pairs = Vec<(String, String)>;
 
-/// Each object's head path, and the object each path names.
 fn paths(store: &EngineStore) -> (Pairs, Pairs) {
     store
         .read_with(|conn| {
@@ -3040,7 +3001,6 @@ fn ready_on_one_file(store: &EngineStore) -> Pairs {
         .unwrap()
 }
 
-/// Reports one document's live session.
 struct LiveSession(&'static str);
 
 impl LeaseProbe for LiveSession {
@@ -3094,7 +3054,6 @@ fn a_backfill_is_ready_only_once_its_waiting_work_applies() {
     assert_eq!(hold(&store, "doc-b"), Some(HostedHold::WorkWaiting));
     assert_eq!(retained(&store), 0);
 
-    // The session closed.
     sync(&client, &mut store);
     assert!(ready(&store, "doc-b"));
     assert_eq!(retained(&store), 0);
@@ -3475,8 +3434,6 @@ fn deferred_input_survives_parking_and_release_and_drains_after_the_return() {
     assert_eq!(coordinates(&store), expected, "only the base is new");
 }
 
-/// The restores of `doc-b` and the settlements that resumed them, as their
-/// rows hold them.
 fn restores(store: &EngineStore) -> String {
     store
         .read_with(|conn| {
@@ -3564,8 +3521,6 @@ fn a_restore_made_before_parking_survives_the_return() {
     assert_eq!((restores(&store), generation(&store)), before);
 }
 
-/// Serve a peer's `kind` Y.Doc update of `object_id` at `path`, `seq` in its
-/// origin, on `lineage`.
 fn peer_update(
     feed: &HostedFeed,
     kind: &str,
@@ -3594,7 +3549,6 @@ fn peer_update(
     ));
 }
 
-/// The queued Y.Doc updates of `doc-b`, with the feed each recorded.
 fn queued_b(store: &EngineStore) -> String {
     store
         .read_with(|conn| {
@@ -3609,7 +3563,6 @@ fn queued_b(store: &EngineStore) -> String {
         .unwrap()
 }
 
-/// The session's binding of `doc-b` goes, as at its release.
 fn release_b(store: &mut EngineStore) {
     store
         .write_with(&NoFaults, |tx| {
@@ -3622,8 +3575,6 @@ fn release_b(store: &mut EngineStore) {
         .unwrap();
 }
 
-/// A replica where `doc-b` is ready at `a.md` with a native live binding of
-/// its lineage, and never parks: as after Stop, before the replica pulled.
 fn ready_bound_b() -> (
     ScratchDir,
     std::path::PathBuf,
@@ -3796,7 +3747,6 @@ fn a_lost_push_reply_holds_parking_until_the_retry_is_acknowledged() {
     assert_eq!(content(&store).0, heads(&[("doc-b", "hosted b")]));
 }
 
-/// A binding of `object_id`'s lineage at `path` for an update at `relay_seq`.
 fn released_binding(
     object_id: &str,
     path: &str,
@@ -3825,8 +3775,6 @@ fn released_binding(
     }
 }
 
-/// Queue a Y.Doc update of `object_id` at this coordinate, as a hosted pull
-/// under the `relay` feed defers one.
 fn queue_update(store: &mut EngineStore, object_id: &str, origin_id: &str, origin_seq: i64) {
     let key = dohc_engine_collab::DocKey {
         workspace_id: "ws".to_owned(),
@@ -3967,8 +3915,6 @@ fn total_changes(store: &EngineStore) -> u64 {
         .unwrap()
 }
 
-/// Confirm the origin, and check that it sent exactly one empty push from
-/// the start of the host's origin and wrote nothing.
 fn confirm(client: &RelaySyncClient<HostedFeed>, store: &EngineStore) -> Result<(), RelayError> {
     let before = (
         client.transport().pushes.lock().unwrap().len(),
@@ -4053,8 +3999,6 @@ fn the_origin_probe_finds_commits_a_restored_store_lost_after_a_pull() {
     ));
 }
 
-/// Serve a Y.Doc base of `object_id` at `path` holding `text`, written by
-/// a peer.
 fn ydoc_base(feed: &HostedFeed, object_id: &str, path: &str, text: &str) {
     let ydoc = dohc_engine_collab::Ydoc::wire();
     ydoc.plaintext_insert(0, text);

@@ -23,8 +23,6 @@ use dohc_engine_testkit::{ScratchDir, engine_db_path};
 const NO_FAULTS: NoFaults = NoFaults;
 const WS: &str = "ws-diff";
 
-/// Apply the shared trace to a freshly-opened store and return its normalized
-/// canonical string.
 fn run_trace(db: &std::path::Path) -> String {
     let mut store = EngineStore::open(db, 1).expect("open");
     let mut vt = VersionedTextStore::new(&mut store);
@@ -195,7 +193,6 @@ fn golden() -> String {
     )
 }
 
-// oracle: the Rust engine's normalized state matches the golden fixture.
 #[test]
 fn restore_and_history_trace_matches_golden() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -204,8 +201,6 @@ fn restore_and_history_trace_matches_golden() {
     assert_eq!(actual, golden(), "normalized state diverged from golden");
 }
 
-// oracle: the capture is deterministic — a byte-identical replay on a fresh
-// store yields the same normalized state (a differential precondition).
 #[test]
 fn trace_is_deterministic_across_fresh_stores() {
     let a = ScratchDir::new().expect("scratch a");

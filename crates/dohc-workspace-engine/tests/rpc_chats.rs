@@ -1814,7 +1814,6 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         failed["bookmark"]["failureReason"],
         json!("disk unavailable")
     );
-    // A person's retry queues the failed archive again at its own generation.
     let retried = call(
         &transport,
         &first_handle,
@@ -1890,8 +1889,6 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
     .await;
     assert_eq!(invalid_generation.code, ErrorCode::InvalidParams);
 
-    // Complete, fail, and close/reopen reclaim each exercise a distinct
-    // terminal/recovery transition. A claim while another is running is null.
     let enqueued = call(
         &transport,
         &first_handle,
@@ -2105,7 +2102,6 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
     .await;
     assert_eq!(retry["dispatch"]["attemptCount"], json!(2));
 
-    // A second close/reopen reclaims the second crashed attempt as exhausted.
     call(
         &transport,
         &first_handle,
@@ -3091,10 +3087,6 @@ async fn thread_projection_read_only_notice_and_access_line_presence() {
     assert_eq!(null_access.code, ErrorCode::InvalidParams);
 }
 
-// A poll's choices and its answer cross the RPC boundary with the decision,
-// and a channel's lanes page apart: the posts lane is the default, the chat
-// lane is named, an unknown lane is refused, and one lane's cursor does not
-// open the other.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn polls_and_lanes_cross_the_rpc_boundary() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -3714,7 +3706,6 @@ async fn group_stream_and_thread_get_round_trip_with_agent_requests() {
     }
     let db_path = engine_db_path(&scratch).expect("db");
     let conn = rusqlite::Connection::open(db_path).expect("open db");
-    // One message asked two agents.
     conn.execute_batch(
         "INSERT INTO chat_dispatch_ledger (workspace_id, trigger_message_id, agent_id, thread_id, \
          state, run_id, failure_reason, attempt_count, created_at_ms, updated_at_ms) \
@@ -3832,8 +3823,6 @@ async fn group_stream_and_thread_get_round_trip_with_agent_requests() {
     assert_eq!(found["messageCount"], json!(2));
     assert_eq!(found.get("work"), None);
 
-    // An agent's work report rides on its message, and the post and its
-    // thread serve the same Work card.
     let report = call(
         &transport,
         &handle,

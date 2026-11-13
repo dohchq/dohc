@@ -117,7 +117,6 @@ struct RelayState {
     workspace_log_delay: Option<Duration>,
     workspace_log_started: Option<Arc<AtomicBool>>,
     workspace_page_limit: Option<usize>,
-    // Refuse every claim for good.
     refuse_claims: bool,
 }
 
@@ -717,10 +716,6 @@ fn absent_moment_payload(
     })
 }
 
-// The document stays open and idle when sync turns on. Its last record came
-// before enrollment, so no record claimed it. The push that makes enrollment
-// ready claims it through its session and requests a continuation. The session's next
-// write then succeeds under that claim.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn bounded_push_publishes_an_idle_open_document_and_its_next_edit_succeeds() {
     let relay = FakeRelay::start(RelayState::default());
@@ -829,7 +824,6 @@ async fn bounded_push_publishes_an_idle_open_document_and_its_next_edit_succeeds
     );
     drop(resynced);
 
-    // The open session writes and saves again, with nothing refused as stale.
     let recorded = call(
         &transport,
         &handle,
@@ -1200,7 +1194,6 @@ async fn assert_open_document_artifact_recovery_inner(
         "Before"
     );
     if integrated {
-        // Drain u1 into the live CRDT and publish the merged local/remote projection.
         a_id += 1;
         let resync = service_call_with_busy_retry(
             a_service.as_ref(),
@@ -1639,11 +1632,6 @@ async fn open_document_artifact_keeps_local_unsettled_edits() {
     assert_open_document_artifact_recovery("evict", true).await;
 }
 
-// The push that claims an idle open document can be dropped at any point:
-// the supervisor drops a request on cancellation or deadline. Wherever the
-// drop lands, the claim and its handover to the session happen together or
-// not at all, so the session's next write, under the claim its resync shows,
-// and its settle still succeed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_push_dropped_while_claiming_an_open_document_leaves_its_next_edit_working() {
     let relay = FakeRelay::start(RelayState::default());
@@ -2282,7 +2270,6 @@ async fn two_page_pull_keeps_relation_to_target_arriving_on_second_page() {
         }),
     )
     .await;
-    // The terminal commit ends the pull, and capture then reconciles.
     flush_capture(&transport, &handle, &mut id).await;
 
     let source_record = call(
@@ -2922,7 +2909,6 @@ async fn ordinary_publication_state_follows_a_keyed_post_through_push() {
     )
     .await
     .expect("keyed post");
-    // A desktop write keeps its key but asks for no receipt.
     id += 1;
     call_with_busy_retry(
         &transport,

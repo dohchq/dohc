@@ -1215,7 +1215,6 @@ impl FailingReaderSaves {
         }
     }
 
-    /// Starts recovery and wakes it. Each pass sends the saves it attempted.
     fn recover(
         &self,
     ) -> (

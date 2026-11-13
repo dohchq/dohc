@@ -39,8 +39,6 @@ use dohc_engine_storage::{NoFaults, hex_sha256};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
-// ---- fixture shapes (the accelerator's documented output) -------------------
-
 #[derive(Debug, Deserialize)]
 struct FxWorkspace {
     files: Vec<FxFile>,
@@ -112,8 +110,6 @@ struct FxReconcileExpected {
     removed: Vec<String>,
 }
 
-// ---- helpers ----------------------------------------------------------------
-
 fn fixture_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/workspace-kernel")
 }
@@ -157,8 +153,6 @@ fn scan_completed(scanner: &Scanner, root: &Path) -> ScanListing {
     }
 }
 
-// ---- goldens against the accelerator fixtures -------------------------------
-
 #[test]
 fn scan_matches_kernel_golden() {
     let fixture: ScanFixture = read_fixture("scan.json");
@@ -182,7 +176,6 @@ fn reconcile_matches_kernel_golden() {
     let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
     let listing = scan_completed(&scanner, ws.path());
 
-    // Reconstruct the prior generation from the fixture manifest.
     let prior = ScanManifest::from_entries(fixture.request.manifest.iter().map(|m| {
         (
             m.path.clone(),
@@ -203,8 +196,6 @@ fn reconcile_matches_kernel_golden() {
     assert_eq!(normalize(&diff.added), fixture.expected.added);
     assert_eq!(diff.removed, fixture.expected.removed);
 }
-
-// ---- engine-specific surface: media types + floor rules ---------------------
 
 #[test]
 fn scan_media_types_cover_every_branch() {
@@ -263,11 +254,9 @@ fn scan_media_types_cover_every_branch() {
 #[test]
 fn floor_rules_cover_keep_and_exclude() {
     let ws = Scratch::new();
-    // Kept:
     ws.write("keep/notes.md", b"a");
     ws.write("data/store.db", b"b"); // a db FILE is tracked (only sidecars are excluded)
     ws.write("logs/app-wal", b"c"); // NOT a db sidecar (no db base) → kept
-    // Excluded:
     ws.write(".dohc/engine/engine.db", b"x"); // reserved segment at root
     ws.write("a/b/.git/config", b"x"); // nested reserved
     ws.write("node_modules/p/i.js", b"x"); // reserved
@@ -281,14 +270,8 @@ fn floor_rules_cover_keep_and_exclude() {
     assert_eq!(paths, ["data/store.db", "keep/notes.md", "logs/app-wal"]);
 }
 
-// ---- harness-level sensitivity (a hash flip flips the plan) -----------------
-
 #[test]
 fn golden_is_sensitive_to_the_content_hash() {
-    // The tree is identical to the manifest except one file's CONTENT. If the
-    // diff (or the harness) ignored the hash, the plan would be empty; because
-    // it does not, the plan reports exactly that one file as changed. This is
-    // the harness proving the same property the seeded-bug unit test mutates.
     let ws = Scratch::new();
     ws.write("a.md", b"same\n");
     ws.write("b.md", b"EDITED\n");
@@ -326,8 +309,6 @@ fn golden_is_sensitive_to_the_content_hash() {
         "a same-size content edit MUST be detected via the hash"
     );
 }
-
-// ---- extended golden trace over divergence-prone paths ----------------------
 
 /// A normalized reconcile plan op, ordered and comparable — the NormalizedState
 /// for the reconcile plan. Every field a divergence could hide in is present.
@@ -405,7 +386,6 @@ fn extended_trace_covers_all_divergence_prone_paths() {
     let scanner = Scanner::new(bounds).expect("scanner");
     let mut ctrl = ReconcileController::new();
 
-    // --- checkpoint 1: cancellation mid-scan leaves resumable state ---------
     let cancelled = CancellationToken::new();
     cancelled.cancel();
     assert!(matches!(
@@ -416,7 +396,6 @@ fn extended_trace_covers_all_divergence_prone_paths() {
     assert_eq!(ctrl.generation().0, 0);
     assert!(ctrl.is_dirty());
 
-    // --- checkpoint 2: baseline reconcile (floor + size-cap exclusions) ------
     let base = match ctrl
         .reconcile(&scanner, ws.path(), &CancellationToken::new())
         .expect("baseline")
@@ -424,8 +403,6 @@ fn extended_trace_covers_all_divergence_prone_paths() {
         ReconcileRun::Completed(plan) => plan,
         other => panic!("expected Completed, got {other:?}"),
     };
-    // Only the two real tracked files are ingested; .dohc and the over-cap file
-    // never appear.
     assert_eq!(
         normalize_plan(&base),
         vec![
@@ -453,8 +430,6 @@ fn extended_trace_covers_all_divergence_prone_paths() {
     ws.write("keep.md", b"edited\n"); // changed, 7 bytes (≤ cap)
     ws.write("brand-new.md", b"hello\n"); // added
     ws.rename("rename-src.md", "rename-dst.md"); // rename = retire + add
-    // Shrink huge.bin under the cap so it now enters as "added" (boundary
-    // crossing from over-cap to tracked).
     ws.write("huge.bin", b"small"); // 5 bytes, now tracked
 
     let delta = match ctrl

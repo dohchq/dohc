@@ -2,7 +2,6 @@
 /// quarantine reason and observed binding.
 type OutboxState = (String, String, String, Option<String>, Option<LiveObjectBinding>);
 
-/// [`OutboxState`] as stored, its observed binding still JSON.
 type OutboxRow = (String, String, String, Option<String>, Option<String>);
 
 fn outbox_states(f: &Fixture) -> Vec<OutboxState> {
@@ -24,22 +23,18 @@ fn outbox_states(f: &Fixture) -> Vec<OutboxState> {
         .collect()
 }
 
-/// The fixture's binding, at `path`.
 fn binding_at(f: &Fixture, path: &str) -> LiveObjectBinding {
     LiveObjectBinding { current_path: path.into(), selector_paths: vec![path.into()], ..f.binding.clone() }
 }
 
-/// An open outbox's state at `path`.
 fn open_at(path: &str) -> OutboxState {
     (path.into(), format!("[\"{path}\"]"), "active".into(), None, None)
 }
 
-/// An outbox at `path` that a successor at `observed` retired.
 fn retired_at(path: &str, observed: LiveObjectBinding) -> OutboxState {
     (path.into(), format!("[\"{path}\"]"), "quarantined".into(), Some(SUCCESSION_RETIRED.into()), Some(observed))
 }
 
-/// Every entry of the outbox at `path`, as it is stored.
 fn entries_at(f: &Fixture, path: &str) -> Vec<String> {
     query_rows(
         f,
@@ -70,8 +65,6 @@ fn released_covered() -> Fixture {
     f
 }
 
-/// A released predecessor, with C1 and C2 Carried when `seeded`, and with
-/// nothing Carried and no seed to send otherwise.
 fn released(seeded: bool) -> Fixture {
     if seeded {
         released_carrying_twice(6).0
@@ -80,8 +73,6 @@ fn released(seeded: bool) -> Fixture {
     }
 }
 
-/// An empty open outbox at `path` and `selectors`, of P's lineage and
-/// generation, as `id`.
 fn extra_outbox(f: &mut Fixture, id: &str, path: &str, selectors: &[&str]) {
     write(
         f,
@@ -302,8 +293,6 @@ fn a_renamed_succession_commits_whole_and_replays_after_restart() {
     }
 }
 
-/// P, then S1, adopt and release at owner.md, and S2 registers there: a
-/// chain of two activations that held one binding.
 fn released_twice_at_one_binding() -> Fixture {
     let mut f = released_with_nothing_carried();
     let terminal = f.cut.terminal_receipt.clone();
@@ -399,5 +388,4 @@ fn every_pending_total_must_show_a_quarantined_outbox_drained() {
     }
 }
 
-/// A fixture a successor adopts as it is, by the case it shows.
 type QuarantineFixture = (&'static str, fn() -> Fixture);

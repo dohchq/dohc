@@ -1222,7 +1222,6 @@ fn a_group_accepted_before_its_receipt_was_saved_restores_row_by_row() {
     );
     let (group, head) = (waiting.pop().unwrap(), waiting.pop().unwrap());
     assert_ne!(group.delivery_id, typed[1].delivery_id);
-    // The relay accepts both; this computer saved neither receipt.
     let head_receipt = LiveUpdateReceipt {
         delivery_id: head.delivery_id.clone(),
         update_digest: head.update_digest.clone(),
@@ -1256,7 +1255,6 @@ fn a_group_accepted_before_its_receipt_was_saved_restores_row_by_row() {
             crate::owner_outbox::delivery_id(&outbox, row.sequence, &row.update_digest)
         );
     }
-    // The head is found under its own id; a grouped row is not.
     assert_eq!(sources[0].accepted_receipt.as_ref(), Some(&head_receipt));
     assert!(sources[1..]
         .iter()
@@ -1758,11 +1756,8 @@ fn resumed_restore_settlement_moment_publishes_its_replaced_and_restored_images(
             };
             assert_eq!(proof(&after), PublicationProof::Contained, "restored after-image");
             assert_eq!(proof(&before), PublicationProof::Contained, "replaced before-image");
-            // Neither unsettled history of the fenced generation nor unrelated text is proved.
             assert_eq!(proof(&unsettled.markdown_digest), PublicationProof::NotContained);
             assert_eq!(proof(&hex_sha256(b"unrelated private draft")), PublicationProof::NotContained);
-            // Only this registration's exact namespace and resumed binding read the evidence,
-            // and the evidence reads are charged to the caller's budget.
             let predecessor = |namespace: &str, binding: &LiveObjectBinding, remaining: usize| {
                 crate::live_update_application::read_restore_predecessor_in(conn, &key, namespace, binding, &mut { remaining })
             };
@@ -1776,7 +1771,6 @@ fn resumed_restore_settlement_moment_publishes_its_replaced_and_restored_images(
             Ok(())
         })
         .unwrap();
-    // Changed resume evidence no longer proves the replaced head.
     f.store
         .write_with(&NoFaults, |tx| {
             tx.execute(
@@ -1842,8 +1836,6 @@ fn fence_waits_for_this_documents_settlement_moments_to_reach_the_relay() {
         |store, audit| record_test_projection(store, audit, "second-moment"),
     )
     .unwrap();
-    // The local journal holds both settlement moments, then another object's
-    // moment. The relay acknowledged only the first.
     f.store
         .write_with(&NoFaults, |tx| {
             tx.execute("INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) VALUES ('workspace','origin','epoch','stream',1)", [])
@@ -1916,7 +1908,6 @@ fn fence_waits_for_this_documents_settlement_moments_to_reach_the_relay() {
         proof(&f, &first.markdown_digest),
         PublicationProof::Contained
     );
-    // Publication reached the second moment. The other object's moment does not block.
     publish(&f, 1);
     let fenced = f
         .owner
@@ -1930,7 +1921,6 @@ fn fence_waits_for_this_documents_settlement_moments_to_reach_the_relay() {
             |_, _| Ok(()),
         )
         .unwrap();
-    // The committed fence replays without asking about publication again.
     publish(&f, 0);
     assert_eq!(
         f.owner
@@ -2015,7 +2005,6 @@ fn fence_waits_for_retained_settlement_history_to_be_exported() {
         Err(ApplicationError::PublicationPending)
     ));
     assert_eq!(fences(&f), 0);
-    // Export journaled the settlement. Its stream stays open for later events.
     export(&f, "object", settled.terminal_cursor);
     f.owner
         .fence_restore(
@@ -2041,7 +2030,6 @@ fn damage(f: &Fixture, sql: &str) {
         .unwrap();
 }
 
-/// Restore to the baseline, settle and durably resume, then register the resumed binding.
 fn restore_and_resume(f: &mut Fixture) -> LiveSettlementResult {
     let prep = f.freeze(f.baseline_point.clone());
     let input = admitted_restore(f, prep);
@@ -2095,7 +2083,6 @@ fn explicit_resume_requires_settlement_and_keeps_historical_receipts_across_repe
     let prep = f.freeze(f.baseline_point.clone());
     let input = admitted_restore(&mut f, prep);
     apply_restore(&mut f, input.clone(), &NoFaults).unwrap();
-    // An applied but unresumed restore keeps every generation unpublishable.
     let document = DocKey::new("workspace", "main", "object").unwrap();
     f.store
         .read_with(|conn| -> Result<(), ApplicationError> {
@@ -2231,7 +2218,6 @@ fn explicit_resume_requires_settlement_and_keeps_historical_receipts_across_repe
             Ok(())
         })
         .unwrap();
-    // The resumed generation publishes the restore's accepted update; the one it replaced does not.
     {
         use crate::owner_outbox::publication::{
             contains_in, PublicationContentKind, PublicationProof,

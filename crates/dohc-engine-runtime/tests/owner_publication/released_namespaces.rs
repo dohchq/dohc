@@ -3,11 +3,8 @@
 
 use super::*;
 
-/// The namespace of the capture that never adopted.
 const ELSEWHERE: &str = "other";
 
-/// The document captured in [`ELSEWHERE`] and released there without
-/// adopting, once it left the hosted scope. It then returns to the scope.
 async fn release_elsewhere(host: &mut WindowHost) {
     let captured = host
         .actor
@@ -70,7 +67,6 @@ async fn release_elsewhere(host: &mut WindowHost) {
     owner.close().await.unwrap();
 }
 
-/// A synced update of the document fed from [`ELSEWHERE`].
 fn incoming() -> IncomingCoordinate {
     IncomingCoordinate {
         relay_namespace: Some(ELSEWHERE.into()),
@@ -82,9 +78,6 @@ fn incoming() -> IncomingCoordinate {
     }
 }
 
-/// The binding protection names for the document's `lineage` on `tails`,
-/// bound to `store`, after every validation it waits for; none while
-/// nothing protects it.
 fn decided(
     store: &EngineStore,
     lineage: &str,
@@ -133,7 +126,6 @@ async fn pass_elsewhere(
     }
 }
 
-/// The document's snapshot: its path and content digest.
 fn snapshot(store: &EngineStore) -> (String, String) {
     store
         .read_with(|conn| {
@@ -146,7 +138,6 @@ fn snapshot(store: &EngineStore) -> (String, String) {
         .unwrap()
 }
 
-/// `op` rebased over the host's head, as a peer that had seen it sends it.
 fn over_head(
     store: &EngineStore,
     mut op: dohc_engine_sync::ReplicationEnvelope,

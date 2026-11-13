@@ -1024,7 +1024,6 @@ fn merge_opens_a_conflict_instead_of_clobbering_a_binary_head_at_the_target() {
     fork(&mut vt);
     drop(vt);
 
-    // Target (main) grows a binary head at a.md after the fork.
     let bin_bytes = b"\x00binary head\xff";
     let bin_sha = hex_sha256(bin_bytes);
     store
@@ -1051,7 +1050,6 @@ fn merge_opens_a_conflict_instead_of_clobbering_a_binary_head_at_the_target() {
         })
         .expect("write binary head on main");
 
-    // The fork adds TEXT at the same path.
     VersionedTextStore::new(&mut store)
         .write_text(
             &write("feat", "a.md", "fork text", "feat-a", "obj-feat-a"),
@@ -1059,7 +1057,6 @@ fn merge_opens_a_conflict_instead_of_clobbering_a_binary_head_at_the_target() {
         )
         .expect("fork text at a.md");
 
-    // The comparison reports the binary head as present, not as an empty path.
     let comparison = VersionedTextStore::new(&mut store)
         .compare_text_file_versions(&CompareTextFileVersions {
             workspace_id: WS.to_owned(),
@@ -1074,7 +1071,6 @@ fn merge_opens_a_conflict_instead_of_clobbering_a_binary_head_at_the_target() {
     assert_eq!(current.byte_length, bin_bytes.len() as i64);
     assert_eq!(comparison.status, ComparisonStatus::Diverged);
 
-    // The merge opens a conflict — never a clobbering fast-forward.
     let result = VersionedTextStore::new(&mut store)
         .merge_text_file_from_version_with(
             &merge_input("a.md", "merge-a", "merge-a-conflict", "obj-merge-a"),
@@ -1098,7 +1094,6 @@ fn merge_opens_a_conflict_instead_of_clobbering_a_binary_head_at_the_target() {
         other => panic!("expected a binary conflict, got {other:?}"),
     }
 
-    // The binary head survives on main, unchanged.
     let (kind, blob, bin): (String, Option<String>, Option<String>) = store
         .read_with(|conn| {
             conn.query_row(
@@ -1122,22 +1117,18 @@ fn exact_head_gate_falls_back_for_legacy_null_identity_binary_sides() {
     let live =
         ConflictFileState::binary_head("a.md", "sha-bytes", 9, "obj-live", "moment-live", 10);
 
-    // Legacy recorded side (NULL identity) with matching path+bytes RESOLVES.
     let legacy = ConflictFileState::binary("a.md", "sha-bytes");
     assert!(
         live_state_matches_conflict_current(&live, &legacy),
         "a legacy NULL-identity side matching path+sha must resolve, not defer forever"
     );
 
-    // Legacy side whose bytes differ must still not match.
     let legacy_other = ConflictFileState::binary("a.md", "sha-other");
     assert!(
         !live_state_matches_conflict_current(&live, &legacy_other),
         "path+sha fallback must still reject a byte mismatch"
     );
 
-    // A recorded side that does carry identity keeps the strict check: same
-    // bytes but a recreated head (different object/moment) must not match.
     let strict_same =
         ConflictFileState::binary_head("a.md", "sha-bytes", 9, "obj-live", "moment-live", 10);
     assert!(

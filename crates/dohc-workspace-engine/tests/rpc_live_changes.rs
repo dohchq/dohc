@@ -1,4 +1,3 @@
-//! Who stopped or resumed live editing of an owner document, through the RPC.
 use crate::common;
 
 use common::*;
@@ -122,7 +121,6 @@ async fn an_applied_change_becomes_the_last_and_an_unrecorded_one_keeps_it() {
     assert!(finish(&transport, &handle, "doc", &stop, "applied").await);
     let stopped = json!([{ "objectId": "doc", "last": last("stopped", person(), &stop) }]);
     assert_eq!(list(&transport, &handle, &["doc"]).await, stopped);
-    // A finished change is not finished again.
     assert!(!finish(&transport, &handle, "doc", &stop, "unrecorded").await);
 
     let resume = begin(&transport, &handle, "doc", "resumed", agent(), "retired").await;
@@ -139,7 +137,6 @@ async fn an_action_the_relay_already_shows_records_nothing() {
     assert!(finish(&transport, &handle, "doc", &stop, "applied").await);
     let stopped = list(&transport, &handle, &["doc"]).await;
 
-    // An agent's Stop of a document a person already stopped takes no credit.
     assert_eq!(
         begin(&transport, &handle, "doc", "stopped", agent(), "retired").await,
         Value::Null
@@ -181,8 +178,6 @@ async fn a_pending_stop_is_never_replaced() {
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open(&transport, &scratch, false).await;
     let first = begin(&transport, &handle, "doc", "stopped", person(), "ready").await;
-    // Another Stop or a Resume while the first Stop is under way records
-    // nothing, so the first keeps its record if the relay applies it.
     for action in ["stopped", "resumed"] {
         assert_eq!(
             begin(&transport, &handle, "doc", action, agent(), "paused").await,
@@ -203,7 +198,6 @@ async fn a_pending_stop_is_never_replaced() {
     assert!(finish(&transport, &handle, "doc", &first, "applied").await);
     let next = begin(&transport, &handle, "doc", "resumed", agent(), "retired").await;
     assert_ne!(next["changeId"], first["changeId"]);
-    // A late finish of the settled change never settles the next one.
     assert!(!finish(&transport, &handle, "doc", &first, "unrecorded").await);
     let listed = list(&transport, &handle, &["doc"]).await;
     assert_eq!(listed[0]["pending"]["changeId"], next["changeId"]);
@@ -222,7 +216,6 @@ async fn a_stop_replaces_a_pending_resume() {
     );
     let stop = begin(&transport, &handle, "doc", "stopped", person(), "paused").await;
     assert_ne!(stop["changeId"], resume["changeId"]);
-    // The Resume's late response credits nobody and leaves the Stop pending.
     assert!(!finish(&transport, &handle, "doc", &resume, "applied").await);
     assert_eq!(
         list(&transport, &handle, &["doc"]).await[0]["pending"]["changeId"],

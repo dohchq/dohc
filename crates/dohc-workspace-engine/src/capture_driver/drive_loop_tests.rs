@@ -8,9 +8,7 @@ enum Script {
     ActorLost,
     ReconcileFails,
     Healthy,
-    /// Nothing dirty: the reconcile round-trips CONVERGED.
     Idle,
-    /// The reconcile is cancelled mid-scan (teardown racing the tick).
     CancelledTick,
     HealthyButDirtyApply,
     FileFailureWithCollectionPending,
@@ -18,16 +16,12 @@ enum Script {
     /// A healthy tick during which the watcher records one more
     /// disruption (backend error / root-identity blip that re-attached).
     Disrupted,
-    /// The root's policy fingerprint differs from the layer's.
     PolicyChanged,
     /// The fingerprint differs and the tick converges — the exact pass
     /// where a flush could settle over a mid-debounce policy edit.
     PolicyChangedIdle,
-    /// The policy files cannot be read right now (transient lock).
     PolicyUnreadable,
-    /// The sink holds work after the loop already read a valid fingerprint.
     SinkPolicyHeld,
-    /// Policy is unreadable at the loop sample, but recovers before the sink.
     PolicyRecoversDuringApply,
 }
 
@@ -134,7 +128,6 @@ impl DriverEnv for FakeEnv {
         {
             let mut journal = self.journal.lock().expect("journal");
             journal.ticks.push(self.elapsed());
-            // What a status RPC arriving mid-tick would observe.
             let snapshot = self.status.snapshot();
             journal.degraded_seen.push(snapshot.degraded);
             journal.running_seen.push(snapshot.running);
@@ -190,8 +183,6 @@ impl DriverEnv for FakeEnv {
 
 type FlushSender = tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<FlushOutcome>>;
 
-/// Spawn the loop under paused time; the caller drives, flushes, then
-/// finishes to collect the journal.
 fn spawn_loop(
     script: Vec<Script>,
 ) -> (
@@ -215,7 +206,6 @@ fn spawn_loop(
     (handle, cancel, journal, status, flush_tx)
 }
 
-/// Run the loop under paused time for `budget` of virtual time.
 async fn drive_for(
     script: Vec<Script>,
     budget: std::time::Duration,
@@ -231,8 +221,6 @@ async fn drive_for(
     (journal, status)
 }
 
-/// Send one flush after `lead` of virtual time and return its outcome
-/// plus how much virtual time the answer took.
 async fn flush_after(
     script: Vec<Script>,
     lead: std::time::Duration,
@@ -249,7 +237,6 @@ async fn flush_after(
     (outcome, waited)
 }
 
-/// Gaps between successive timestamps.
 fn gaps(stamps: &[std::time::Duration]) -> Vec<std::time::Duration> {
     stamps.windows(2).map(|w| w[1] - w[0]).collect()
 }
@@ -635,7 +622,6 @@ async fn a_flush_racing_teardown_never_claims_settled() {
 #[tokio::test(start_paused = true)]
 async fn cancellation_is_not_delayed_by_a_terminal_backoff() {
     let (handle, cancel, _journal, _status, _flush_tx) = spawn_loop(vec![Script::StartFails]);
-    // Let it escalate deep into the backoff.
     tokio::time::sleep(std::time::Duration::from_secs(120)).await;
     let before = tokio::time::Instant::now();
     cancel.cancel();
@@ -761,7 +747,6 @@ async fn a_flush_retries_file_failure_with_a_collection_reconcile_pending() {
         Script::Healthy,
         Script::Idle,
     ]);
-    // Wait for the initial tick, then queue flush before the next drive tick.
     while journal.lock().unwrap().ticks.is_empty() {
         tokio::task::yield_now().await;
     }

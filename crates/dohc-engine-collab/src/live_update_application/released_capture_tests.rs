@@ -1,4 +1,3 @@
-/// Accepted state at B=3, which the released chain's file at B shows.
 fn base_at_b(f: &Fixture) -> Ydoc {
     let held = f.handle.registration.lock().unwrap();
     f.store
@@ -8,8 +7,6 @@ fn base_at_b(f: &Fixture) -> Ydoc {
         .unwrap()
 }
 
-/// What a disk capture of `text` may do over `head`, decided before it
-/// ingests the file.
 fn disk_capture(f: &Fixture, text: &str, head: &Ydoc) -> Result<ReleasedCapture, ApplicationError> {
     disk_capture_within(f, text, head, RELEASED_CAPTURE_PROOF_BYTES)
 }
@@ -18,19 +15,14 @@ fn disk_capture_within(f: &Fixture, text: &str, head: &Ydoc, max_bytes: usize) -
     f.store.read_with(|conn| released_capture(conn, &f.key, &f.binding.lineage_claim_id, "owner.md", text, head, max_bytes))
 }
 
-/// The file the released chain settled at B, with a paragraph added on disk.
 fn edited_on_disk(f: &Fixture) -> String {
     edited_from(f, "retired")
 }
 
-/// The file the settlement recorded as `moment`, with a paragraph added.
 fn edited_from(f: &Fixture, moment: &str) -> String {
     format!("{}\nA disk edit.\n", moment_text(f, moment))
 }
 
-/// A root whose native update the host applied at B=3, settled at B and
-/// released with nothing Carried, its document back in the scope. Its file
-/// shows accepted state at B, which is its whole Y.Doc.
 fn released_without_carried() -> Fixture {
     let mut f = Fixture::new();
     f.adopt().unwrap();
@@ -90,7 +82,6 @@ fn a_released_window_folds_only_over_a_proven_base_equal_to_the_head() {
     assert_eq!(disk_capture(&f, "# Anything\n", &local_doc(&f)).unwrap(), ReleasedCapture::Ordinary, "no chain");
 }
 
-/// A damage the released-window proof must refuse.
 type ProofDamage = (&'static str, fn(&mut Fixture, &mut Ydoc));
 
 /// Each condition of the released-window proof, failing alone, refuses a
@@ -150,7 +141,6 @@ fn the_released_window_proof_refuses_each_unproven_base() {
     }
 }
 
-/// The accepted-history bytes the proof of the file at B reads.
 fn proof_bytes(f: &Fixture) -> usize {
     let digest = hex_sha256(moment_text(f, "retired").as_bytes());
     let length = moment_text(f, "retired").len() as i64;
@@ -191,7 +181,6 @@ fn a_released_window_refuses_a_disk_edit_over_content_its_file_never_showed() {
     let mut f = released_without_carried();
     catch_up_row(&mut f, 1);
     file_matches_local(&mut f, "caught-up");
-    // The file shows B again, while a moment of it holds the catch-up.
     write(&mut f, "UPDATE snapshots SET latest_moment_id='retired',
         blob_sha256=(SELECT after_blob_sha256 FROM moments WHERE moment_id='retired')");
     assert!(diverged(disk_capture(&f, &edited_on_disk(&f), &local_doc(&f))), "caught-up content a moment holds");

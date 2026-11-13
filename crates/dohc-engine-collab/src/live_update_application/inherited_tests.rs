@@ -1,4 +1,3 @@
-/// The Carried delivery `receipt` names, with its entry's native sequence.
 fn carried_delivery(f: &Fixture, receipt: &LiveUpdateReceipt) -> CarriedDelivery {
     let native_sequence = f
         .store
@@ -13,12 +12,10 @@ fn carried_delivery(f: &Fixture, receipt: &LiveUpdateReceipt) -> CarriedDelivery
     CarriedDelivery { receipt: receipt.clone(), native_sequence }
 }
 
-/// The Carried deliveries a released activation's manifest lists.
 fn manifest(f: &Fixture, id: &str) -> Vec<CarriedDelivery> {
     f.store.read_with(|conn| retirement::released_tail(conn, "namespace", id)).unwrap().1
 }
 
-/// How many inherited entries the chain ending at `tail` resolves to.
 fn resolve(f: &Fixture, tail: &str) -> Result<usize, ApplicationError> {
     f.store.read_with(|conn| {
         retirement::inherited_entries(conn, "namespace", &f.key, &f.binding.lineage_claim_id, Some(tail))
@@ -26,15 +23,10 @@ fn resolve(f: &Fixture, tail: &str) -> Result<usize, ApplicationError> {
     })
 }
 
-/// A released predecessor, `adoption`, whose native updates C1 and C2 the
-/// relay accepted at 5 and 6 after the update it applied at 3, and its
-/// successor S1, adopted with its seed pending and nothing applied. Returns
-/// the covered receipt and C1's and C2's Carried deliveries.
 fn carried_twice() -> (Fixture, LiveUpdateReceipt, CarriedDelivery, CarriedDelivery) {
     carried_twice_at(6)
 }
 
-/// [`carried_twice`], with C2 accepted at `cursor`.
 fn carried_twice_at(cursor: i64) -> (Fixture, LiveUpdateReceipt, CarriedDelivery, CarriedDelivery) {
     let (mut f, covered, c1, c2) = released_carrying_twice(cursor);
     successor(&mut f);
@@ -69,7 +61,6 @@ fn abandon_seed(f: &mut Fixture) {
     reconcile(f, 10, None, Some(&absent)).unwrap();
 }
 
-/// The relay accepts the current activation's seed at `cursor`.
 fn accept_seed(f: &mut Fixture, cursor: i64) -> LiveUpdateReceipt {
     let seed = pending_seed_delivery(f);
     let digest: String = f
@@ -83,19 +74,16 @@ fn accept_seed(f: &mut Fixture, cursor: i64) -> LiveUpdateReceipt {
     accepted
 }
 
-/// A Carried delivery as the relay delivers it, at its own cursor.
 fn carried_event(f: &Fixture, carried: &CarriedDelivery) -> AdmittedLiveUpdate {
     let delivery = carried.receipt.delivery_id.clone();
     native_tail_event(f, entry_update(f, &delivery), delivery, carried.receipt.journal_cursor)
 }
 
-/// The current activation applies a Carried delivery at its own cursor.
 fn apply_carried(f: &mut Fixture, carried: &CarriedDelivery) {
     let event = carried_event(f, carried);
     applies(f, event);
 }
 
-/// `event` applies for the first time.
 fn applies(f: &mut Fixture, event: AdmittedLiveUpdate) -> LiveUpdateHostApplicationAck {
     let ApplicationResult::Applied(ack, _) = apply_event(f, event).unwrap() else {
         panic!("applied");
@@ -122,7 +110,6 @@ const APPLICATION_WRITES: [&str; 14] = [
     "collection_field_history",
 ];
 
-/// `event` waits for an earlier delivery, and writes nothing.
 fn held(f: &mut Fixture, event: AdmittedLiveUpdate) {
     let before = rows(f, &APPLICATION_WRITES);
     let delivery = event.metadata.accepted.receipt.delivery_id.clone();
@@ -134,7 +121,6 @@ fn held(f: &mut Fixture, event: AdmittedLiveUpdate) {
     assert_eq!(rows(f, &APPLICATION_WRITES), before, "{delivery}");
 }
 
-/// The current activation's own seed, as the relay delivers it at `cursor`.
 fn own_seed_event(f: &Fixture, cursor: i64) -> AdmittedLiveUpdate {
     let seed: String = f
         .store
@@ -151,7 +137,6 @@ fn own_seed_event(f: &Fixture, cursor: i64) -> AdmittedLiveUpdate {
     native_tail_event(f, entry_update(f, &seed), seed, cursor)
 }
 
-/// Each delivery accepted history holds, in its order.
 fn accepted_deliveries(f: &Fixture) -> Vec<String> {
     f.store
         .read_with(|conn| {
@@ -162,7 +147,6 @@ fn accepted_deliveries(f: &Fixture) -> Vec<String> {
         .unwrap()
 }
 
-/// Each delivery, applied and recorded in accepted history in this order.
 fn applied_in_order(f: &Fixture, deliveries: &[&str]) {
     let expected: Vec<String> = deliveries.iter().map(|delivery| (*delivery).to_owned()).collect();
     assert_eq!(applied_deliveries(f), expected);
@@ -262,11 +246,8 @@ fn an_inherited_seed_is_proven_by_its_capture() {
     }
 }
 
-/// A damage to C2's inherited evidence, given the tail whose manifest lists
-/// it.
 type InheritedDamage = (&'static str, fn(&mut Fixture, &str, &CarriedDelivery));
 
-/// C2's entry, moved to a copy of its outbox that `change` rewrites.
 fn move_entry(f: &mut Fixture, c2: &CarriedDelivery, change: &str) {
     write_unchecked(f, &format!(
         "CREATE TEMP TABLE moved AS SELECT * FROM owner_ydoc_outboxes;
@@ -342,7 +323,6 @@ fn inherited_carried_evidence_refuses_without_writes() {
         ))),
     ];
     for (case, damage) in damages {
-        // S1's release, while its predecessor's manifest lists C1 and C2.
         let (mut f, _, _, c2) = carried_twice();
         abandon_seed(&mut f);
         assert_eq!(resolve(&f, "adoption").unwrap(), 2, "{case}");
@@ -353,7 +333,6 @@ fn inherited_carried_evidence_refuses_without_writes() {
         let released = release_through(&mut f, 10);
         assert!(matches!(released, Err(ApplicationError::Conflict | ApplicationError::Corrupt)), "{case}: {released:?}");
         assert_eq!(rows(&f, &RELEASE_WRITES), before, "{case}");
-        // S2's adoption, once S1's release lists them.
         let (mut f, _, _, c2) = carried_twice();
         let first = f.cut.adoption_id.clone();
         abandon_seed(&mut f);
@@ -570,7 +549,6 @@ fn resumed_after_catch_up(carried: bool, catch_up: i64) -> (Fixture, LiveUpdateR
     (f, covered, carried)
 }
 
-/// The text a settlement recorded as `moment`.
 fn moment_text(f: &Fixture, moment: &str) -> String {
     f.store
         .read_with(|conn| {
@@ -583,7 +561,6 @@ fn moment_text(f: &Fixture, moment: &str) -> String {
         .unwrap()
 }
 
-/// The native head the current activation's adoption verified.
 fn adopted_head(f: &Fixture) -> i64 {
     f.store
         .read_with(|conn| {
@@ -596,7 +573,6 @@ fn adopted_head(f: &Fixture) -> i64 {
         .unwrap()
 }
 
-/// The native sequence a stored settlement's coverage started after.
 fn coverage_floor(f: &Fixture, settlement: &str) -> i64 {
     f.store
         .read_with(|conn| {
@@ -617,8 +593,6 @@ const SETTLEMENT_WRITES: [&str; 4] = [
     "moments",
 ];
 
-/// `settle` replays `stored`, before and after a restart: the same result,
-/// with no writes.
 fn replays(f: &mut Fixture, stored: &LiveSettlementResult, settle: impl Fn(&mut Fixture) -> Result<LiveSettlementResult, ApplicationError>) {
     let stored = serde_json::to_value(stored).unwrap();
     for restart in [false, true] {
@@ -790,9 +764,6 @@ fn audited(f: &mut Fixture, retiring: bool, terminal: Option<LiveUpdateReceipt>)
     }
 }
 
-/// The settlement audit at the stored settlement's terminal B keeps the tail
-/// private and projects what that settlement stored as `moment`, before and
-/// after a restart, with no writes.
 fn audits_as_stored(f: &mut Fixture, retiring: bool, terminal: LiveUpdateReceipt, moment: &str, case: &str) {
     let stored = moment_text(f, moment);
     for restart in [false, true] {
@@ -806,8 +777,6 @@ fn audits_as_stored(f: &mut Fixture, retiring: bool, terminal: LiveUpdateReceipt
     }
 }
 
-/// `damage` leaves the settlement audit at B Corrupt, in the ordinary form,
-/// with no writes.
 fn audit_is_corrupt(f: &mut Fixture, terminal: Option<LiveUpdateReceipt>, damage: impl FnOnce(&mut Fixture), case: &str) {
     damage(f);
     let before = rows(f, &[&SETTLEMENT_WRITES[..], &APPLICATION_WRITES[..]].concat());
@@ -816,7 +785,6 @@ fn audit_is_corrupt(f: &mut Fixture, terminal: Option<LiveUpdateReceipt>, damage
     assert_eq!(rows(f, &[&SETTLEMENT_WRITES[..], &APPLICATION_WRITES[..]].concat()), before, "{case}");
 }
 
-/// The native sequence the entry `delivery` queued.
 fn native_sequence_of(f: &Fixture, delivery: &str) -> i64 {
     f.store
         .read_with(|conn| {
@@ -920,9 +888,6 @@ fn a_chain_seed_shares_its_predecessors_last_sequence() {
     audits_as_stored(&mut f, false, covered, "retired", "a chain seed");
 }
 
-/// P adopts with no seed, applies a remote prefix, and a host refuses its
-/// native update. P settles the prefix at B and releases. S adopts through the Refused
-/// coverage and its seed waits at the refused update's native sequence.
 fn refused_then_resumed() -> (Fixture, LiveUpdateReceipt) {
     let (mut f, covered) = refused_root_with_accepted_prefix();
     host_document(&mut f, true, true);

@@ -180,7 +180,6 @@ fn emit_any(out: &mut Vec<u8>, script: &[u8], pos: &mut usize, depth: usize) {
             *pos += 1;
             push_varint(out, n);
             for i in 0..n {
-                // Key: a short ASCII string (always valid UTF-8).
                 let key = [b'k', b'0' + (i as u8 % 10)];
                 push_varint(out, key.len() as u64);
                 out.extend_from_slice(&key);

@@ -288,7 +288,6 @@ fn expired_proofs_must_match_the_engine_projection() {
         proof.result.get()
     );
     drop(proof);
-    // An invalid proof is not retried after a backoff.
     for _ in 0..2 {
         assert!(matches!(
             lookup(&conn, &key, &doc, &resolver),
@@ -430,7 +429,6 @@ fn fail_next_request(
 fn exhausted_transient_proof_remains_retryable() {
     for failure in RETRIED {
         let (conn, key, doc, source, resolver) = fixture();
-        // The first request and its immediate retry both fail.
         fail_next_request(&conn, &key, &doc, &resolver, failure);
         fail_next_request(&conn, &key, &doc, &resolver, failure);
         assert!(
@@ -518,9 +516,6 @@ fn transient_retries_stay_bounded_when_proofs_evict_each_other() {
     }
 }
 
-/// A terminal failure ends the proof at once, whether it is the first answer
-/// or comes after a backoff, and the cached failure answers every later lookup
-/// without asking the reader again.
 fn assert_terminal(failure: Failure) {
     let expected = ended(&failure).code();
     for after_backoff in [false, true] {
@@ -572,19 +567,11 @@ fn deleted_reader_files_stay_terminal() {
     assert_terminal(Failure::Unavailable);
 }
 
-// A request too large to send, or a note the reader refused as over its
-// capacity (`PendingProof::resolve`), answers capacity rather than a stopped
-// reader. `real_reader_refuses_a_note_over_its_capacity_once_without_a_crash` drives the
-// refusal through a real reader.
 #[test]
 fn oversized_reader_requests_stay_terminal() {
     assert_terminal(Failure::TooLarge);
 }
 
-// A retry proves the note's current state, never the one that failed. A note
-// whose file or lineage no longer matches is refused before any request, and
-// an edit is a new proof with its own count. Superseded only ever names the
-// older of two requests, so it stays transient.
 #[test]
 fn stale_targets_stay_terminal_after_a_backoff() {
     for sql in [

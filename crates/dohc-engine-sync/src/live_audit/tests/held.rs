@@ -88,8 +88,6 @@ fn verified_through(store: &EngineStore) -> i64 {
         .unwrap()
 }
 
-/// An ordinary edit of another document, journaled as the store's next
-/// operation.
 fn write_other(store: &mut EngineStore, moment: &str, now_ms: i64) {
     save_other(store, moment, now_ms);
     store
@@ -99,7 +97,6 @@ fn write_other(store: &mut EngineStore, moment: &str, now_ms: i64) {
         .unwrap();
 }
 
-/// An ordinary saved edit of another document, not journaled.
 fn save_other(store: &mut EngineStore, moment: &str, now_ms: i64) {
     VersionedTextStore::new(store)
         .write_text(
@@ -122,8 +119,6 @@ fn save_other(store: &mut EngineStore, moment: &str, now_ms: i64) {
         .unwrap();
 }
 
-/// Origin `peer`'s ordinary edit of another document at `seq`, with its blobs
-/// copied into `receiver`.
 fn peer_edit(receiver: &mut EngineStore, seq: i64) -> ReplicationEnvelope {
     let (_scratch, _path, mut peer) = open_store();
     VersionedTextStore::new(&mut peer)
@@ -156,7 +151,6 @@ fn owner_ops(store: &EngineStore) -> Vec<ReplicationEnvelope> {
     crate::list_replication_ops(store, "ws", "service-origin", -1, 500).unwrap()
 }
 
-/// The owner's first application audit.
 fn owner_audit(store: &EngineStore) -> ReplicationEnvelope {
     owner_ops(store)
         .into_iter()
@@ -196,8 +190,6 @@ fn restore_source(
     })
 }
 
-/// Audits from origin `peer` at `count`, built from `template`'s `record`
-/// and written into `receiver`'s chunks.
 fn refused_audit(
     receiver: &mut EngineStore,
     template: &ReplicationEnvelope,
@@ -215,7 +207,6 @@ fn refused_audit(
     );
     let host = restore["hostId"].as_str().unwrap().to_owned();
     let restore: restore_record::RestoreSource = serde_json::from_value(restore).unwrap();
-    // Serialize through the native metadata and restore types, in native record order.
     let bytes = format!(
         "{{\"kind\":\"application\",\"relayDatabaseNamespace\":\"relay\",\"eventCount\":{count},\"evidenceDigest\":\"{evidence}\",\"updateByteLength\":{},\"metadata\":{},\"sourceApplication\":{{\"localYDocSequence\":2,\"hostCoordinate\":{{\"hostId\":\"{host}\",\"hostEpoch\":1,\"instanceId\":\"instance\",\"connectionId\":\"connection\"}}}},\"sourceRestore\":{},\"cancelledRestores\":[],\"contentCoordinate\":{}}}",
         record["updateByteLength"],
@@ -247,7 +238,6 @@ fn refused_audit(
     [audit, next]
 }
 
-/// Fences and cancels the owner's restore.
 fn cancel_owner_restore(f: &mut Fixture, activation: &str) {
     let first: LiveUpdateReceipt = f
         .store
@@ -356,8 +346,6 @@ fn accept_edit(f: &mut Fixture, cursor: i64, text: &str) {
     accept_named_event(f, cursor, format!("edit-{cursor}"));
 }
 
-/// A third replica that refuses one of the adopter's audits, and each of the
-/// adopter's operations with its outcome there.
 fn third_replica() -> (EngineStore, ScratchDir, Vec<(ReplicationEnvelope, String)>) {
     let (mut f, mut source, _, root) = imported_owner(false, false);
     cancel_owner_restore(&mut f, &root.activation_id);
@@ -402,8 +390,6 @@ fn report(outcomes: &[(ReplicationEnvelope, String)]) -> Vec<String> {
         .collect()
 }
 
-/// The audits a replica did not verify are exactly the ones it holds, and
-/// the edit of another document after them arrives.
 fn assert_contained(replica: &EngineStore, outcomes: &[(ReplicationEnvelope, String)]) {
     let (last, outcome) = outcomes.last().unwrap();
     assert_eq!(last.op_kind, "moment.append");
@@ -440,8 +426,6 @@ fn later_work_reaches_a_third_replica() {
     assert!(verified_through(&replica) < 2);
 }
 
-/// The new owner's store, with an audit it refuses, the next edit's audit,
-/// and origin `peer`'s edit of another document.
 fn new_owner_holds() -> (Fixture, [ReplicationEnvelope; 3]) {
     let (mut f, source, _, _) = imported_owner(false, true);
     assert_eq!(count(&f.store, "live_audit_bases"), 1);
@@ -571,7 +555,6 @@ fn a_crash_before_the_ack_leaves_the_audit_to_redeliver() {
 fn later_work_from_another_computer_arrives_after_an_upgrade() {
     let (mut f, [audit, mut next, mut edit]) = new_owner_holds();
     assert!(apply(&mut f.store, &audit).starts_with("refused: "));
-    // An earlier build kept only the refused log row.
     f.store
         .write_with(&NoFaults, |tx| {
             tx.execute_batch(
@@ -607,8 +590,6 @@ fn later_work_from_another_computer_arrives_after_an_upgrade() {
     assert_eq!(count(&f.store, "replication_pending_refusals"), 0);
 }
 
-/// Hold a refused audit of event `count` of `binding`'s lineage from
-/// `origin`.
 fn hold_event(store: &mut EngineStore, binding: &LiveObjectBinding, origin: &str, count: i64) {
     let payload = json!({
         "relayDatabaseNamespace": "relay",

@@ -447,7 +447,6 @@ async fn markdown_hold_held_change_stays_readable_after_its_notice_is_dismissed(
         })
         .await
         .unwrap();
-    // Dismissing the Notice deleted nothing: the save is still held.
     let Some(HeldMarkdownChange::Ready { file, held, .. }) = f.held_change("note.md").await else {
         panic!("a dismissed Notice must leave its held change readable");
     };
@@ -456,7 +455,6 @@ async fn markdown_hold_held_change_stays_readable_after_its_notice_is_dismissed(
     assert!(held.contains("Accepted text remains available"));
     assert_eq!(f.held_change("other.md").await, None);
     f.unchanged().await;
-    // What the review showed is exactly what consenting writes.
     assert!(
         f.settle(false, Some(f.consent()))
             .await

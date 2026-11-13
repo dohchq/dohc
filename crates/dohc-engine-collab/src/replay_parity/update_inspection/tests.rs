@@ -35,7 +35,6 @@ fn delta(doc: &Doc, edit: impl FnOnce(&mut TransactionMut)) -> Vec<u8> {
     doc.transact().encode_state_as_update_v1(&before)
 }
 
-/// A head holding `doc`'s current state.
 fn head(doc: &Doc) -> Ydoc {
     let head = Ydoc::wire();
     head.apply(&full_state(doc)).unwrap();
@@ -53,7 +52,6 @@ fn apply(doc: &Doc, update: &[u8]) {
         .unwrap();
 }
 
-/// Append a paragraph holding `text` to the body.
 fn append(
     body: &XmlFragmentRef,
     txn: &mut TransactionMut,
@@ -65,7 +63,6 @@ fn append(
     (element, text)
 }
 
-/// A peer whose body holds one paragraph of `text`.
 fn with_paragraph(client: u64, text: &str) -> (Doc, XmlElementRef, XmlTextRef) {
     let doc = peer(client);
     let body = doc.get_or_insert_xml_fragment(ROOT_BODY);
@@ -93,7 +90,6 @@ fn has_skip(update: &[u8]) -> bool {
         .any(|block| block.kind == BlockKind::Skip)
 }
 
-/// The text of the body's first paragraph.
 fn first_text(doc: &Doc) -> XmlTextRef {
     let body = doc.get_or_insert_xml_fragment(ROOT_BODY);
     let txn = doc.transact();
@@ -144,8 +140,6 @@ fn body_type(type_ref: &[u8]) -> Vec<u8> {
     .concat()
 }
 
-/// A head holding client 1's note "a" at 1:0 and client 2's frontmatter
-/// title at 2:0.
 fn note_and_title() -> Ydoc {
     let (note, title) = (peer(1), peer(2));
     let text = note.get_or_insert_text(ROOT_PLAINTEXT);
@@ -383,7 +377,6 @@ fn an_origin_in_a_collected_block_holds() {
     );
 }
 
-/// An otherwise admissible update into a fresh root text.
 fn unrelated_note() -> Vec<u8> {
     let doc = peer(3);
     let note = doc.get_or_insert_text(ROOT_PLAINTEXT);

@@ -208,8 +208,6 @@ fn is_secret_path(path: &str) -> bool {
 /// (everTracked, secret byte length, head (content_kind, binary sha)).
 type RawProjection = (bool, Option<u64>, Option<(String, Option<String>)>);
 
-/// Project one path from the persisted engine.db — the same source a fresh
-/// process would read, mirroring the TS emitter's projection exactly.
 fn project_path(db: &Path, path: &str) -> Projection {
     use rusqlite::OptionalExtension;
     let mut store = EngineStore::open(db, u32::MAX.into()).expect("open engine db");
@@ -431,7 +429,6 @@ async fn run_capture_scenario(name: &str) {
         close_workspace(&transport, handle.clone(), id).await;
     }
 
-    // The DIFFERENTIAL: normalized persisted state vs the TS golden.
     for path in &scenario.watch {
         let produced = project_path(&db, path);
         let expected = golden

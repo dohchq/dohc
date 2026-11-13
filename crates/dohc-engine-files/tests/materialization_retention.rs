@@ -1,4 +1,3 @@
-//! Behavioral proofs that also compile against the P0 main baseline.
 #![cfg(unix)]
 use dohc_engine_files::{
     AtomicReplacer, DurabilityPolicy, JobOutcome, MaterializeOptions, NoBackoff, StdReplacer,

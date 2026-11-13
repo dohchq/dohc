@@ -1,6 +1,3 @@
-//! A group's stream: where a new top-level message goes, and one listing of
-//! posts and conversation messages in a single order.
-
 use dohc_engine_domain::{
     ChatActorKind, ChatChannelKind, ChatThreadLane, ChatWorkReport, ChatWorkStatus, DomainError,
     LinkedChatStore, MarkThreadRead, NoFaults, SendMessage, StartChannelThread, StreamAgentRequest,
@@ -142,8 +139,6 @@ fn ids(page: &StreamPage) -> Vec<String> {
 fn the_stream_merges_both_lanes_in_one_order_and_pages_from_the_newest_end() {
     let (_scratch, mut store) = store();
     group(&mut store);
-    // Posts at 10, 30, 50; conversation messages at 20, 30, 40. At 30 the post
-    // sorts first.
     start(
         &mut store,
         "group",
@@ -190,8 +185,6 @@ fn the_stream_merges_both_lanes_in_one_order_and_pages_from_the_newest_end() {
     assert_eq!(ids(&older), ["p-10", "c-20"]);
     assert!(!older.has_older);
 
-    // A cursor on a conversation message in a millisecond that also holds a
-    // post keeps that post.
     let from_chat = page(&mut store, Some(&newest.items[1].position), 10);
     assert_eq!(ids(&from_chat), ["p-10", "c-20", "p-30"]);
 
@@ -310,7 +303,6 @@ fn a_threads_work_card_is_its_newest_report_with_that_reports_own_link() {
         "each message keeps its own report"
     );
 
-    // An older report that arrives late changes nothing.
     let mut late = reply_input("post", "late", 25);
     late.work = report(ChatWorkStatus::Failed, Some("http://example.com/threads/2"));
     send(&mut store, late);
@@ -433,7 +425,6 @@ fn the_page_carries_the_newest_read_item_across_both_lanes() {
         Some("post-10".to_owned())
     );
 
-    // Reading the conversation through its parented reply covers c-20 only.
     LinkedChatStore::new(&mut store)
         .mark_thread_read(&read_mark(&chat, 2, None, None, 51), &NO_FAULTS)
         .expect("read chat");
@@ -620,7 +611,6 @@ fn stream_timings() {
     }
 
     fn time(name: &str, store: &mut EngineStore, items: i64) {
-        // An older page starts halfway back.
         let mut before: Option<StreamPosition> = None;
         for _ in 0..items / 2 / 100 {
             before = Some(page(store, before.as_ref(), 100).items[0].position.clone());
@@ -648,7 +638,6 @@ fn stream_timings() {
         );
     }
 
-    // 10,000 posts, each with two replies.
     {
         let (_scratch, mut store) = store();
         group(&mut store);
@@ -675,7 +664,6 @@ fn stream_timings() {
         time("posts", &mut store, ITEMS);
     }
 
-    // One conversation of 10,000 messages.
     {
         let (_scratch, mut store) = store();
         group(&mut store);
@@ -696,7 +684,6 @@ fn stream_timings() {
         time("conversation messages", &mut store, ITEMS);
     }
 
-    // A conversation of 1,000 messages with 10,000 replies under them.
     {
         let (_scratch, mut store) = store();
         group(&mut store);

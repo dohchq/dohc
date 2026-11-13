@@ -650,7 +650,6 @@ fn startup_timeout_idle_and_cancel() {
     wait(&reader, |s| s.queue.is_empty());
     let cancelled = reader.request(request("cancelled"));
     drop(cancelled);
-    // Admission also sweeps cancelled tickets.
     let queued = reader.request(request("queued"));
     assert_eq!(reader.shared.state.lock().unwrap().queue.len(), 1);
     finish(&mut reader);

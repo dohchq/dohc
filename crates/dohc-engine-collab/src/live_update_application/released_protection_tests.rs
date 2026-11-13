@@ -1,4 +1,3 @@
-/// The synced update each protection decision here is made for.
 fn incoming() -> IncomingCoordinate {
     IncomingCoordinate {
         relay_namespace: Some("namespace".into()),
@@ -10,8 +9,6 @@ fn incoming() -> IncomingCoordinate {
     }
 }
 
-/// The binding a hold of the incoming update names, or none while nothing
-/// protects the lineage.
 fn protected(f: &Fixture) -> Option<ReleasedLineageBinding> {
     protected_from(f, &incoming())
 }
@@ -20,8 +17,6 @@ fn protected_from(f: &Fixture, incoming: &IncomingCoordinate) -> Option<Released
     protected_in(f, incoming, &ReleasedTails::default())
 }
 
-/// [`protected_from`], decided with the tails `tails` keeps for the
-/// fixture's store.
 fn protected_in(f: &Fixture, incoming: &IncomingCoordinate, tails: &ReleasedTails) -> Option<ReleasedLineageBinding> {
     let key = ProtectionKey { doc: &f.key, lineage_claim_id: &f.binding.lineage_claim_id, incoming };
     match decided(f, &key, tails) {
@@ -47,7 +42,6 @@ fn decided(f: &Fixture, key: &ProtectionKey<'_>, tails: &ReleasedTails) -> Prote
     }
 }
 
-/// The validation one decision of the fixture's lineage waits for.
 fn pending(f: &Fixture, tails: &ReleasedTails) -> PendingValidation {
     let key = ProtectionKey { doc: &f.key, lineage_claim_id: &f.binding.lineage_claim_id, incoming: &incoming() };
     let tails = tails.bound_to(&f.store);
@@ -57,7 +51,6 @@ fn pending(f: &Fixture, tails: &ReleasedTails) -> PendingValidation {
     }
 }
 
-/// Every protected tail the window names.
 fn listed(binding: ReleasedLineageBinding) -> Vec<ProtectedTail> {
     match std::sync::Arc::unwrap_or_clone(binding.tails) {
         ProtectedTails::Listed(tails) => tails,
@@ -65,7 +58,6 @@ fn listed(binding: ReleasedLineageBinding) -> Vec<ProtectedTail> {
     }
 }
 
-/// The coverage a binding names for exactly `unproven`.
 fn committed(unproven: Vec<RetainedContribution>) -> RetainedCoverage {
     RetainedCoverage::Unproven(UnprovenCommitment::of(unproven).expect("unproven work"))
 }
@@ -80,7 +72,6 @@ fn unproven_of(f: &Fixture, tail: &ProtectedTail) -> Vec<RetainedContribution> {
     unproven
 }
 
-/// What validating `tail` finds, contradictions included.
 fn tail_work(f: &Fixture, tail: &ProtectedTail) -> released_protection::TailWork {
     f.store
         .read_with(|conn| {
@@ -97,7 +88,6 @@ fn tail_work(f: &Fixture, tail: &ProtectedTail) -> released_protection::TailWork
         .unwrap()
 }
 
-/// The unproven work of the one tail that protects the lineage.
 fn only_unproven(f: &Fixture) -> Vec<RetainedContribution> {
     match <[ProtectedTail; 1]>::try_from(listed(protected(f).expect("protected"))) {
         Ok([tail]) if matches!(tail.coverage, RetainedCoverage::Unproven(_)) => unproven_of(f, &tail),
@@ -105,12 +95,10 @@ fn only_unproven(f: &Fixture) -> Vec<RetainedContribution> {
     }
 }
 
-/// What the release of the fixture's tail bound.
 fn owner_release() -> Option<TailRelease> {
     Some(TailRelease { path: "owner.md".into(), restore_generation: 0 })
 }
 
-/// A native update the fixture's agent made, Carried.
 fn carried(delivery: &CarriedDelivery) -> RetainedContribution {
     carried_by(delivery, native_agent())
 }
@@ -130,7 +118,6 @@ fn carried_by(delivery: &CarriedDelivery, authors: RetainedAuthors) -> RetainedC
     }
 }
 
-/// Who `native_tail_edit` credits: its agent, for the owner, at depth 1.
 fn native_agent() -> RetainedAuthors {
     RetainedAuthors::credited(
         Some("native-agent"),
@@ -175,7 +162,6 @@ fn a_released_tail_protects_its_lineage_while_its_retained_work_lacks_proof() {
             }])),
         }
     );
-    // A hold persists the binding as its canonical JSON, which reads back.
     assert_eq!(ReleasedLineageBinding::from_canonical_json(&binding.canonical_json()), Some(binding.clone()));
     // The feed's namespace is the binding's own: another names another hold.
     let elsewhere = IncomingCoordinate { relay_namespace: Some("elsewhere".into()), ..incoming() };
@@ -212,7 +198,6 @@ fn a_released_tail_protects_its_lineage_while_its_retained_work_lacks_proof() {
     assert!(protected(&Fixture::new()).is_none(), "no chain");
 }
 
-/// What inspecting `binding` finds of `f`, which must still be current.
 fn inspected(f: &Fixture, binding: &ReleasedLineageBinding) -> Preservation {
     match f.store.read_with(|conn| inspect_held(conn, binding, Stop::NEVER)).unwrap() {
         HeldInspection::Current(preservation) => preservation,
@@ -240,8 +225,6 @@ fn contradictory_provenance_invalidates_the_whole_tail_and_names_its_work() {
     };
     let [entry]: [RetainedContribution; 1] = only_unproven(&unapplied()).try_into().unwrap();
     assert_eq!(entry.authors(), &native_agent(), "the journal row's agent");
-    // Each fixture names its delivery anew: where its native entry is, and
-    // that delivery.
     let native_entry = |f: &Fixture| {
         let native: i64 = f.store.read_with(|conn| conn.query_row(
             "SELECT COUNT(*) FROM owner_ydoc_outbox_entries WHERE native_source_json IS NOT NULL", [], |row| row.get(0),
@@ -372,15 +355,12 @@ fn applied_exactly(f: &mut Fixture, receipt: &LiveUpdateReceipt) {
         receipt.delivery_id, receipt.update_digest, receipt.journal_cursor, receipt.accepting_host_epoch));
 }
 
-/// The tails `tails` answers for the fixture's lineage, decided now, and
-/// whether a fresh validation reads the same.
 fn kept_matches_fresh(f: &Fixture, tails: &ReleasedTails) -> Option<ReleasedLineageBinding> {
     let kept = protected_in(f, &incoming(), tails);
     assert_eq!(kept, protected_in(f, &incoming(), &ReleasedTails::uncached()), "kept tails read as fresh ones");
     kept
 }
 
-/// The fixture document's released tail generation.
 fn tail_generation_of(f: &Fixture) -> Option<i64> {
     f.store
         .read_with(|conn| {
@@ -419,12 +399,10 @@ fn validated_tails_stand_until_their_generation_moves() {
     assert_eq!(tails.validations(), 2);
 }
 
-/// The coverage of each tail `binding` lists.
 fn coverage_of(binding: ReleasedLineageBinding) -> Vec<RetainedCoverage> {
     listed(binding).into_iter().map(|tail| tail.coverage).collect()
 }
 
-/// Both Carried deliveries applied, in `tx`.
 fn apply_both_in(tx: &rusqlite::Transaction<'_>, receipts: [&LiveUpdateReceipt; 2]) -> Result<(), ApplicationError> {
     for receipt in receipts {
         tx.execute_batch(&format!(
@@ -487,8 +465,6 @@ fn a_rolled_back_change_keeps_no_tails() {
     assert_eq!(tails.validations(), 2);
 }
 
-/// Bump the generation of whichever fixture's is lower until both read the
-/// same.
 fn same_generation(first: &mut Fixture, second: &mut Fixture) {
     loop {
         let (a, b) = (tail_generation_of(first).unwrap(), tail_generation_of(second).unwrap());
@@ -830,8 +806,6 @@ fn a_window_that_does_not_read_protects_as_invalid() {
     }
 }
 
-/// What a held proof's `read` of `f` answers within `capacity` bytes of
-/// proof memory, with what it saw on the way.
 struct WithinMemory<T> {
     answer: Result<T, ApplicationError>,
     stopped: Option<ProofStop>,
@@ -869,8 +843,6 @@ fn within_memory<T>(
     WithinMemory { answer, stopped, windows, activations, checks: proofs.checks_passed(), peak: limit.peak_reserved_bytes() }
 }
 
-/// What reading the fixture's window holds, what reading the activation of
-/// each of `namespaces`' tails holds, and what validating each holds.
 fn window_workloads(f: &Fixture, namespaces: &[&str]) -> (u64, Vec<(u64, u64)>) {
     let lineage = &f.binding.lineage_claim_id;
     f.store
@@ -890,7 +862,6 @@ fn window_workloads(f: &Fixture, namespaces: &[&str]) -> (u64, Vec<(u64, u64)>) 
         .unwrap()
 }
 
-/// The fixture's window as a held proof reads it.
 fn window_of(conn: &rusqlite::Connection, f: &Fixture, stop: Stop<'_>) -> Result<Option<released_protection::WindowWork>, ApplicationError> {
     released_protection::window_work(conn, &f.key, &f.binding.lineage_claim_id, stop, &mut stop.working())
 }

@@ -137,9 +137,6 @@ async fn probe_root_delete_recreate_race_is_not_silently_missed() {
 
     wait_dirty(&handle).await;
 
-    // Prove the reattached watch is live on the new directory (not the dead
-    // object): after clearing dirty, a fresh write into the recreated root
-    // must produce new dirty evidence.
     let run = handle
         .reconcile_if_dirty(CancellationToken::new())
         .await

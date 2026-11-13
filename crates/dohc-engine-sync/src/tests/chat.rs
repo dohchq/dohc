@@ -163,7 +163,6 @@ fn imported_channel_carries_its_group_and_an_older_op_still_applies() {
             "createdAtMs": 10
         }),
     );
-    // An op written before the groups migration names no group fields.
     let older = envelope(
         "group-fields",
         1,
@@ -207,7 +206,6 @@ fn imported_channel_carries_its_group_and_an_older_op_still_applies() {
         ]
     );
 
-    // A group with a folder on a dm is refused.
     let bad = envelope(
         "group-fields-bad",
         0,
@@ -243,7 +241,6 @@ fn a_replicated_poll_names_its_answer_and_a_file_thread_has_no_chat_lane() {
         }),
     );
     assert_invalid_refusal!(apply_chat_envelope(&mut engine, &unanswered, &NoFaults));
-    // A bare question resolves with no choice, as before.
     let bare = envelope(
         "poll-no-answer",
         1,
@@ -261,7 +258,6 @@ fn a_replicated_poll_names_its_answer_and_a_file_thread_has_no_chat_lane() {
         ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
     );
 
-    // A file-linked thread is always a post, whatever lane the op claims.
     let file_chat_lane = envelope(
         "file-thread-lane",
         0,
@@ -594,8 +590,6 @@ fn another_computers_automation_message_applies_without_its_automation() {
         }),
     );
     apply_chat_envelope(&mut engine, &message, &NoFaults).expect("automation message");
-    // Only an automation's or an agent's message carries a chain depth,
-    // within the depth bound.
     for (seq, author_kind, owner, depth) in [
         (10, "human", None, json!(1)),
         (11, "automation", Some("Ana"), json!(0)),
@@ -664,7 +658,6 @@ fn another_computers_automation_message_applies_without_its_automation() {
     );
     assert_invalid_refusal!(apply_chat_envelope(&mut engine, &reaction, &NoFaults));
 
-    // An automation message that arrives before its thread is parked, then replays with its person.
     let early = envelope(
         "early-peer",
         0,
@@ -711,7 +704,6 @@ fn another_computers_automation_message_applies_without_its_automation() {
 /// The relay's origin for `link_message_payload`'s link principal.
 const LINK_ORIGIN: &str = "relay:share-link:principal-1";
 
-/// A link holder's post in the imported Group, as the relay writes it.
 fn link_message_payload(message_id: &str, body: &str) -> serde_json::Value {
     json!({
         "messageId": message_id,
@@ -851,7 +843,6 @@ fn a_link_message_with_an_account_or_without_its_link_is_refused() {
         let op = envelope(LINK_ORIGIN, seq as i64, "chat.message.append", payload);
         assert_invalid_refusal!(apply_chat_envelope(&mut engine, &op, &NoFaults));
     }
-    // The relay's post itself, from any origin but its link principal's.
     for origin in [
         "relay-link",
         "relay:share-link:principal-2",
@@ -930,7 +921,6 @@ fn a_message_that_takes_a_link_message_id_is_refused() {
     assert_eq!(stored, ("link".to_owned(), "Hi".to_owned()));
 }
 
-/// A personal agent, and the relay's origin for its chat.
 const PERSONAL_AGENT: &str = "p-aaaaaaaaaaaaaaaaaaaaaaaaaa";
 const PERSONAL_ORIGIN: &str = "relay:personal-agent:p-aaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -947,7 +937,6 @@ fn personal_dm_payload(agent_id: &str) -> serde_json::Value {
     })
 }
 
-/// The personal agent's post in the imported Group, as the relay writes it.
 fn personal_message_payload(message_id: &str, thread_id: &str) -> serde_json::Value {
     json!({
         "messageId": message_id,
@@ -972,7 +961,6 @@ fn personal_thread_payload(thread_id: &str, wire_id: &str) -> serde_json::Value 
     })
 }
 
-/// The stored connection columns of a message, link first.
 fn message_connections(engine: &EngineStore, message_id: &str) -> (Option<String>, Option<String>) {
     engine
         .read_with(|conn| {
@@ -987,7 +975,6 @@ fn message_connections(engine: &EngineStore, message_id: &str) -> (Option<String
         .expect("message connections")
 }
 
-/// The chats of one agent in `ws`.
 fn agent_chats(engine: &EngineStore, agent_id: &str) -> Vec<String> {
     engine
         .read_with(|conn| {
@@ -1076,7 +1063,6 @@ fn a_personal_agent_origin_writes_its_dm_threads_and_posts() {
         );
     }
 
-    // A named recipient stores the owner's op under the share.
     let shared = envelope(
         &format!("shared:s:{PERSONAL_ORIGIN}"),
         0,
@@ -1088,7 +1074,6 @@ fn a_personal_agent_origin_writes_its_dm_threads_and_posts() {
         applied()
     );
 
-    // A post that waits for its thread replays with its connection.
     apply_chat_envelope(
         &mut engine,
         &envelope(
@@ -1158,7 +1143,6 @@ fn a_personal_agent_post_that_is_not_the_agents_own_is_refused() {
         let op = envelope(PERSONAL_ORIGIN, seq as i64, "chat.message.append", payload);
         assert_invalid_refusal!(apply_chat_envelope(&mut engine, &op, &NoFaults));
     }
-    // The agent's post, from another agent's origin.
     let other = envelope(
         "relay:personal-agent:p-bbbbbbbbbbbbbbbbbbbbbbbbbb",
         0,
@@ -1294,7 +1278,6 @@ fn a_personal_agent_posts_only_where_the_relay_lets_it() {
         assert_invalid_refusal!(apply_chat_envelope(&mut engine, &op, &NoFaults));
     }
 
-    // A post that waits for its thread is checked when the thread arrives.
     let early = envelope(
         PERSONAL_ORIGIN,
         7,
@@ -1491,7 +1474,6 @@ fn a_personal_agent_origin_carries_only_its_chat() {
         })
         .expect("channel count");
     assert_eq!(channels, 0);
-    // The next op from the origin still applies.
     assert_eq!(
         apply_chat_envelope(
             &mut engine,
@@ -1516,8 +1498,6 @@ fn no_other_origin_writes_as_a_personal_agent() {
     let (_scratch, _path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "peer");
     let mut forged = Vec::new();
-    // A device's agent post that names the personal agent, with or without
-    // its connection.
     let mut named = personal_message_payload("forged-named", "thread-imported");
     named
         .as_object_mut()
@@ -1528,11 +1508,9 @@ fn no_other_origin_writes_as_a_personal_agent() {
         "forged-connected",
         "thread-imported",
     ));
-    // A device's own agent, naming a connection.
     let mut connected = personal_message_payload("forged-own", "thread-imported");
     connected["authorAgentId"] = json!("helper");
     forged.push(connected);
-    // A human post that takes the personal message prefix.
     let mut taken = personal_message_payload("personal-message:taken", "thread-imported");
     taken["authorKind"] = json!("human");
     let fields = taken.as_object_mut().expect("payload");
@@ -1570,7 +1548,6 @@ fn no_other_origin_writes_as_a_personal_agent() {
         apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("relay thread"),
         applied
     );
-    // A computer's own agent still posts as itself.
     let mut own = personal_message_payload("own-agent", "personal-thread:taken");
     own["authorAgentId"] = json!("helper");
     own.as_object_mut()
@@ -1629,8 +1606,6 @@ fn applied_claims(
     }
 }
 
-/// Subscribe `collection:object-tasks#task` to the imported Group's messages
-/// that start with `/task`.
 fn subscribe_imported_group(engine: &mut EngineStore) {
     let channel_id: String = engine
         .read_with(|conn| {
@@ -1660,7 +1635,6 @@ fn subscribe_imported_group(engine: &mut EngineStore) {
     .expect("watch");
 }
 
-/// Another member's message in the imported Group.
 fn group_message(
     origin: &str,
     seq: i64,
@@ -2162,7 +2136,6 @@ fn imported_thread_read_parks_until_its_message_arrives_then_keeps_the_later_coo
         Some((40, "message-late".to_owned()))
     );
 
-    // An older mark from another copy, and the same mark again, change nothing.
     let older = thread_read_op("desktop", 0, "thread-imported", 20, "message-imported");
     apply_chat_envelope(&mut engine, &older, &NoFaults).expect("older mark");
     apply_chat_envelope(
@@ -2236,7 +2209,6 @@ fn imported_thread_read_refuses_a_coordinate_outside_its_thread_and_takes_a_dm()
         })
         .expect("dm fixture");
 
-    // Another thread's message, and the right message at the wrong time.
     let cross_thread = thread_read_op("read-peer", 0, "dm-thread", 20, "message-imported");
     assert_invalid_refusal!(apply_chat_envelope(&mut engine, &cross_thread, &NoFaults));
     let wrong_time = thread_read_op("read-peer", 1, "thread-imported", 21, "message-imported");
@@ -2257,7 +2229,6 @@ fn imported_thread_read_refuses_a_coordinate_outside_its_thread_and_takes_a_dm()
     assert_eq!(account_thread_mark(&engine, "thread-imported"), None);
     assert_eq!(account_thread_mark(&engine, "dm-thread"), None);
 
-    // Unlike a feed mark, a mark in the owner's DM applies.
     let dm = thread_read_op("read-peer", 3, "dm-thread", 100, "dm-message");
     apply_chat_envelope(&mut engine, &dm, &NoFaults).expect("dm mark");
     assert_eq!(
@@ -3686,7 +3657,6 @@ fn feed_read_older_cursor_with_newer_clock_does_not_regress() {
             sharing_declined: ref outcome_sharing_declined,
         }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
-    // Older read position (50 < 100) but a newer clock (20 > 10).
     let behind = envelope(
         "peer",
         1,
@@ -3722,7 +3692,6 @@ fn feed_read_older_cursor_with_newer_clock_does_not_regress() {
 #[test]
 fn reserved_agent_channel_shapes_rejected() {
     let (_scratch, _path, mut engine) = open_store();
-    // kind=agent but a non-agent wire id -> rejected.
     let rogue_agent = envelope(
         "rogue-agent-peer",
         0,
@@ -3730,8 +3699,6 @@ fn reserved_agent_channel_shapes_rejected() {
         json!({"channelId":"c1","name":"My agent","slug":"my-agent","kind":"agent","createdAtMs":1,"wireId":"wire-not-agent"}),
     );
     assert_invalid_refusal!(apply_chat_envelope(&mut engine, &rogue_agent, &NoFaults));
-    // A normal channel squatting the reserved name is also retired as a
-    // refusal under its own origin.
     let name_squat = envelope(
         "squat-peer",
         0,
@@ -3739,8 +3706,6 @@ fn reserved_agent_channel_shapes_rejected() {
         json!({"channelId":"c2","name":"My agent","slug":"reserved-name","kind":"channel","createdAtMs":1}),
     );
     assert_invalid_refusal!(apply_chat_envelope(&mut engine, &name_squat, &NoFaults));
-    // The canonical agent channel (agent kind + reserved wire id + reserved
-    // name + canonical slug) applies.
     let canonical = envelope(
         "peer",
         0,
@@ -3807,7 +3772,6 @@ fn a_thread_for_an_agent_wire_id_that_maps_to_a_group_is_refused() {
     );
 }
 
-/// An earlier build's group named "My agent notes".
 fn seed_notes_group(engine: &mut EngineStore) {
     engine
         .write_with(&NoFaults, |tx| {
@@ -3841,7 +3805,6 @@ fn moved_notes_group() -> (String, String) {
     )
 }
 
-/// Start a thread in `channel_id` and return the thread create it journaled.
 fn journaled_thread(engine: &mut EngineStore, channel_id: &str) -> ReplicationEnvelope {
     LinkedChatStore::new(engine)
         .start_channel_thread(
@@ -4057,8 +4020,6 @@ fn imported_chat_names_drop_characters_that_hide_or_reorder_text() {
         .expect("stored reaction");
     assert_eq!(reacted, "Analisa");
 
-    // A name with nothing visible left is no name, for a post and for the
-    // person an agent posts for.
     for (seq, name, owner) in [
         (8, "\u{200B}\u{3164}", None),
         (9, "\u{200C}", None),
@@ -4377,8 +4338,6 @@ fn a_parked_agent_message_keeps_its_report_and_a_bad_parked_report_is_refused() 
 fn a_parked_agent_connection_stays_on_a_link_message_and_a_bad_one_is_refused() {
     use dohc_engine_domain::{ChatMessageLinkAuthor, LinkedChatStore};
 
-    // Parks `message` before its thread exists, then plants `connection`
-    // in its payload as an older build kept it.
     fn park(engine: &mut EngineStore, message: &ReplicationEnvelope, connection: &str) {
         imported_chat_fixture(engine, "peer");
         assert_eq!(
@@ -4489,8 +4448,6 @@ fn a_parked_agent_connection_stays_on_a_link_message_and_a_bad_one_is_refused() 
     }
 }
 
-// Owner-private records this build can't read yet.
-
 /// A kind no build knows yet. A later build in these tests reads it as a
 /// thread read mark.
 const FUTURE_PRIVATE_KIND: &str = "chat.future.private.set";
@@ -4528,7 +4485,6 @@ fn future_private_op(
     envelope(origin, seq, FUTURE_PRIVATE_KIND, payload)
 }
 
-/// One log row: kind, payload, recorded time, and disposition.
 fn log_row(engine: &EngineStore, origin: &str, seq: i64) -> Option<(String, String, i64, String)> {
     engine
         .read_with(|conn| {
@@ -4567,8 +4523,6 @@ fn stored_fingerprint(engine: &EngineStore) -> Option<String> {
         .expect("fingerprint")
 }
 
-/// Replays as a later build that knows the future kind, counting each time
-/// its applier runs.
 fn replay_as_later_build(
     engine: &mut EngineStore,
     faults: &dyn FaultInjector,
@@ -4656,7 +4610,6 @@ fn a_marked_private_record_this_build_cannot_read_is_kept_quietly_then_replayed_
     else {
         panic!("pull must complete with a cursor: {outcome:?}");
     };
-    // Only the known record counts as applied, and nothing is reported.
     assert_eq!((applied, refused, skipped), (1, 0, 1));
     assert!(refusals.is_empty());
     assert_eq!(pending_cursor.cursor, 2);
@@ -4677,8 +4630,6 @@ fn a_marked_private_record_this_build_cannot_read_is_kept_quietly_then_replayed_
         Some(2)
     );
 
-    // The exact record stays in the log, refused, with its origin acknowledged
-    // and no Notice.
     let (kind, payload, recorded_at_ms, disposition) =
         log_row(&engine, "phone", 0).expect("the record is kept");
     assert_eq!(kind, FUTURE_PRIVATE_KIND);
@@ -4711,7 +4662,6 @@ fn a_marked_private_record_this_build_cannot_read_is_kept_quietly_then_replayed_
     assert_eq!(later_message, 1, "the next record from the origin applied");
     assert_eq!(account_thread_mark(&engine, "thread-imported"), None);
 
-    // Delivered again, it stays quiet.
     assert_eq!(
         apply_replication_envelope(
             &mut engine,
@@ -4725,7 +4675,6 @@ fn a_marked_private_record_this_build_cannot_read_is_kept_quietly_then_replayed_
     );
     assert_eq!(pending_refusal_count(&engine), 0);
 
-    // After a reopen, this build still can't read the kind and leaves it.
     drop(engine);
     let mut reopened = EngineStore::open(&path, 3_001).expect("reopen");
     assert_eq!(
@@ -4734,7 +4683,6 @@ fn a_marked_private_record_this_build_cannot_read_is_kept_quietly_then_replayed_
     );
     assert_eq!(log_row(&reopened, "phone", 0).expect("kept").3, "refused");
 
-    // A later build applies it from the log, once, with no new delivery.
     let applies = std::cell::Cell::new(0);
     assert_eq!(
         replay_as_later_build(&mut reopened, &NoFaults, &applies).expect("later build"),
@@ -4860,7 +4808,6 @@ fn a_changed_quiet_record_at_its_coordinate_diverges() {
 #[test]
 fn an_unknown_record_without_the_owners_marker_is_refused_visibly() {
     let (_scratch, _path, mut engine) = open_store();
-    // A copy that hasn't recorded its owner keeps no record quietly.
     assert_refused_as_unsupported(
         &mut engine,
         &future_private_op("no-owner-yet", 0, Some(json!("owner"))),
@@ -4905,8 +4852,6 @@ fn a_marker_never_quiets_a_known_record() {
     let (_scratch, _path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "read-fixture");
     seed_owner_account(&mut engine, "owner");
-    // Content records carrying a forged marker are still checked, and their
-    // refusals are visible.
     for op in [
         envelope(
             "forged-chat",
@@ -4938,7 +4883,6 @@ fn a_marker_never_quiets_a_known_record() {
         assert_eq!(pending_refusal_count(&engine), before + 1, "{}", op.op_kind);
     }
 
-    // A known private kind's marker must name its own account.
     let mut mismatched = thread_read_op("marked", 0, "thread-imported", 20, "message-imported");
     mismatched.payload["ownerPrivateAccountId"] = json!("someone-else");
     assert_invalid_refusal!(apply_chat_envelope(&mut engine, &mismatched, &NoFaults));
@@ -5067,7 +5011,6 @@ fn replay_leaves_visible_refusals_and_a_refused_replay_alone() {
     assert_eq!(account_thread_mark(&engine, "thread-imported"), None);
 }
 
-/// Counts each statement that reads `replication_log` from now on.
 fn watch_log_reads(engine: &mut EngineStore) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
     use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
     let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -5122,7 +5065,6 @@ fn replay_reads_the_log_only_when_the_builds_kinds_change() {
         ApplyOutcome::new(ApplyDisposition::Skipped)
     );
 
-    // This build's first open scans once and stores its fingerprint.
     let reads = watch_log_reads(&mut engine);
     assert_eq!(
         replay_retained_owner_private(&mut engine, &NoFaults).expect("first open"),
@@ -5142,7 +5084,6 @@ fn replay_reads_the_log_only_when_the_builds_kinds_change() {
     );
     assert_eq!(log_reads(&reads), 0);
 
-    // A later build scans once, applies the record, and stores its own.
     let applies = std::cell::Cell::new(0);
     assert_eq!(
         replay_as_later_build(&mut engine, &NoFaults, &applies).expect("later build"),
@@ -5177,8 +5118,6 @@ fn replay_reads_the_log_only_when_the_builds_kinds_change() {
     assert_eq!(applies.get(), 1);
 }
 
-/// Replays as a build whose owner-private kinds are `kinds`, recording which
-/// origins reach the applier. The future kind applies as a thread read mark.
 fn replay_recording(
     engine: &mut EngineStore,
     kinds: &[&str],
@@ -5198,14 +5137,11 @@ fn replay_recording(
 fn a_dismissed_visible_refusal_never_replays_even_when_it_names_the_owner() {
     let (_scratch, _path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "read-fixture");
-    // Refused visibly before this copy recorded its owner.
     assert_refused_as_unsupported(
         &mut engine,
         &future_private_op("before-seed", 0, Some(json!("owner"))),
     );
     seed_owner_account(&mut engine, "owner");
-    // Refused visibly after it: a known owner-private kind its applier
-    // refuses, and a content kind, both marked for the owner.
     let mut known = thread_read_op(
         "known-private",
         0,
@@ -5222,7 +5158,6 @@ fn a_dismissed_visible_refusal_never_replays_even_when_it_names_the_owner() {
         json!({"messageId": 7, "ownerPrivateAccountId": "owner"}),
     );
     assert_invalid_refusal!(apply_chat_envelope(&mut engine, &content, &NoFaults));
-    // The person dismisses every Notice.
     engine
         .write_with(&NoFaults, |tx| {
             tx.execute(
@@ -5241,7 +5176,6 @@ fn a_dismissed_visible_refusal_never_replays_even_when_it_names_the_owner() {
             Ok::<_, SyncError>(())
         })
         .expect("admit the content record");
-    // One record kept quietly on arrival.
     assert_eq!(
         apply_replication_envelope(
             &mut engine,
@@ -5254,7 +5188,6 @@ fn a_dismissed_visible_refusal_never_replays_even_when_it_names_the_owner() {
         ApplyOutcome::new(ApplyDisposition::Skipped)
     );
 
-    // This build's own kinds: nothing reaches an applier.
     let tried = std::cell::RefCell::new(Vec::new());
     assert_eq!(
         replay_recording(&mut engine, crate::router::OWNER_PRIVATE_KINDS, &tried)
@@ -5263,7 +5196,6 @@ fn a_dismissed_visible_refusal_never_replays_even_when_it_names_the_owner() {
     );
     assert!(tried.borrow().is_empty(), "{:?}", tried.borrow());
 
-    // A later build that knows the future kind applies only the quiet record.
     assert_eq!(
         replay_recording(
             &mut engine,
@@ -5333,7 +5265,6 @@ fn a_record_that_fails_to_replay_stays_kept_and_the_rest_still_apply() {
     };
     let attempt = |count: u32| format!("{FUTURE_PRIVATE_KIND}\nattempt:{count}");
 
-    // The failure doesn't stop the record after it.
     assert_eq!(replay(&mut engine).expect("first"), 1);
     assert_eq!(
         *tried.borrow(),
@@ -5344,7 +5275,6 @@ fn a_record_that_fails_to_replay_stays_kept_and_the_rest_still_apply() {
     assert_eq!(pending_refusal_count(&engine), 0);
     assert_eq!(stored_fingerprint(&engine), Some(attempt(1)));
 
-    // The next opens try it again, a bounded number of times.
     assert_eq!(replay(&mut engine).expect("second"), 0);
     assert_eq!(stored_fingerprint(&engine), Some(attempt(2)));
     assert_eq!(replay(&mut engine).expect("third"), 0);

@@ -360,7 +360,6 @@ async fn publication_turn_has_constant_store_work_with_twenty_or_two_thousand_pe
         let ws = f.ws.clone();
         f.actor.run(move |store, _| {
             store.write_with(&NoFaults, |tx| {
-                // Model committed open-document attempts, all still awaiting disk.
                 tx.execute("INSERT INTO ydoc_docs(workspace_id,version_id,object_id,content_kind,settle_seq,last_settled_sha,updated_at_ms,settled_update_seq,settle_prior_update_seq)
                     SELECT m.workspace_id,m.version_id,m.object_id,'plaintext',m.moment_order,j.content_sha256,3,0,0
                     FROM moments m JOIN materialization_jobs j ON j.job_id='authored-mat_'||m.moment_id

@@ -103,7 +103,6 @@ fn read_base_ops_in_log(store: &EngineStore) -> i64 {
         .expect("count bases")
 }
 
-/// Durable CRDT rows for one lineage: `(updates, snapshots)`.
 fn read_lineage_rows(store: &EngineStore, key: &DocKey) -> (i64, i64) {
     store
         .read_with(|conn| {
@@ -335,7 +334,6 @@ fn replay_into_clean_peer(
     peer_text(&peer, workspace_id, path)
 }
 
-/// The text `peer` materialized for `path` on main.
 fn peer_text(peer: &EngineStore, workspace_id: &str, path: &str) -> String {
     peer.read_with(|conn| {
         conn.query_row(
@@ -555,8 +553,6 @@ async fn a_first_edit_on_a_synced_workspace_originates_one_base_then_deltas() {
     );
 }
 
-/// Edit a lineage twice on a workspace prepared by `prepare`, then assert it
-/// stayed private: no replication op, and a prunable local-only marker.
 async fn two_edits_originate_nothing(ws: &str, path: &str, prepare: fn(&Path, &str)) {
     let scratch = ScratchDir::new().expect("scratch");
     let db = engine_db_path(&scratch).expect("db");
@@ -920,7 +916,6 @@ async fn open_with_seed(
     (state.key, client_id, seed)
 }
 
-/// Record `update` as the editor's next write to `key`.
 async fn record_editor_update(
     handle: &dohc_engine_runtime::ActorHandle,
     key: &DocKey,
@@ -974,8 +969,6 @@ async fn open_and_type(db: &Path, path: &str, edit: &str) -> DocKey {
     key
 }
 
-/// `ops` as another device receives them from the relay: under `origin`,
-/// renumbered from zero, at `relay_seqs`, each with its blob.
 fn relayed(
     from: &Path,
     ops: &[LoggedOp],
@@ -1022,7 +1015,6 @@ fn deliver(
     }
 }
 
-/// The text of every moment recorded for `object_id`, oldest first.
 fn moment_texts(store: &EngineStore, object_id: &str) -> Vec<String> {
     store
         .read_with(|conn| {
@@ -1040,8 +1032,6 @@ fn moment_texts(store: &EngineStore, object_id: &str) -> Vec<String> {
         .expect("read moment texts")
 }
 
-/// The relay position a device holds for `key`'s base, and the local bases
-/// still waiting to learn theirs.
 fn base_position(store: &EngineStore, key: &DocKey) -> (Option<String>, Option<i64>, i64) {
     store
         .read_with(|conn| {
@@ -1161,7 +1151,6 @@ async fn two_devices_that_seed_the_same_file_merge_into_one_lineage() {
 
     let mut a_store = EngineStore::open(&a, 9_113).expect("open a");
     let mut b_store = EngineStore::open(&b, 9_114).expect("open b");
-    // Each device's edit reached its own file before the other's ops arrive.
     settle_head(&mut a_store, &key, PATH);
     settle_head(&mut b_store, &key, PATH);
     assert_eq!(
@@ -1170,7 +1159,6 @@ async fn two_devices_that_seed_the_same_file_merge_into_one_lineage() {
         "A's base awaits its position"
     );
 
-    // A has the document closed: B's ops apply as they arrive.
     deliver(&mut a_store, &from_b[..1], &NoLiveLeases);
     assert_eq!(
         moment_texts(&a_store, OBJECT).last().map(String::as_str),
@@ -1185,7 +1173,6 @@ async fn two_devices_that_seed_the_same_file_merge_into_one_lineage() {
     deliver(&mut a_store, &from_b[1..], &NoLiveLeases);
     // B pushed first, and its pull learns that before applying A's ops.
     learn_own_base_position(&mut b_store, &key, &b_ops[0], 1);
-    // B has the document open: A's ops wait until B closes it.
     deliver(&mut b_store, &from_a, &AlwaysLive);
     assert_eq!(deferred_rows(&b_store, &key), 2);
     drain_deferred_ydoc_for_key(
@@ -1278,7 +1265,6 @@ async fn a_lineage_too_large_to_originate_still_accepts_the_edit() {
             .expect("a local-only append under the per-update cap");
     }
 
-    // Sync turns on for a lineage that is already too large to encode as a base.
     enable_sync(&db, WS);
 
     let update = doc.plaintext_insert(0, "tiny");
@@ -1469,7 +1455,6 @@ async fn oversized_close_decline_survives_prune_and_restart() {
     let key = DocKey::new(WS, "main", &object).unwrap();
     supervisor.close(&db).unwrap();
     seed_unclaimed_oversized_lineage(&db, &key, PATH);
-    // Close-time origination runs with the local-only regime, then prunes.
     let mut store = EngineStore::open(&db, 200).unwrap();
     store
         .write_with(&NoFaults, |tx| {
@@ -1593,7 +1578,6 @@ async fn oversized_close_decline_survives_prune_and_restart() {
         )
         .unwrap();
     assert_eq!(pass(&mut store)[0].path, "notes/renamed.md");
-    // A stale or forbidden path cannot disclose even a valid stored refusal.
     store
         .write_with(&NoFaults, |tx| {
             tx.execute(
@@ -1784,7 +1768,6 @@ fn oversized_encoding_and_origination_lane_measurement() {
     );
 }
 
-/// The rich-document schema version a stored Y.Doc update names, if any.
 fn schema_version(update: &[u8]) -> Option<Any> {
     use yrs::Map;
     use yrs::updates::decoder::Decode;
@@ -1902,7 +1885,6 @@ fn assert_first_version_names_its_schema_version(store: &EngineStore, case: &str
     );
 }
 
-/// The rich-document schema version the stored lineage names, if any.
 fn stored_schema_version(store: &EngineStore, key: &DocKey) -> Option<Any> {
     let doc = store
         .read_with(|conn| dohc_engine_collab::load_doc_in(conn, key))
@@ -1910,7 +1892,6 @@ fn stored_schema_version(store: &EngineStore, key: &DocKey) -> Option<Any> {
     schema_version(&doc.encode_full_state())
 }
 
-/// `(settled_update_seq, head_update_seq)` for one lineage.
 fn settled_and_head(store: &EngineStore, key: &DocKey) -> (Option<i64>, i64) {
     store
         .read_with(|conn| {
@@ -1924,8 +1905,6 @@ fn settled_and_head(store: &EngineStore, key: &DocKey) -> (Option<i64>, i64) {
         .expect("read the lineage's positions")
 }
 
-/// A New page note typed and saved before its workspace synced, so nothing
-/// claimed it: its one update has no schema version, and its head is settled.
 async fn saved_unclaimed_new_page(db: &Path, root: &Path, ws: &str, path: &str) -> DocKey {
     std::fs::create_dir_all(root.join("notes")).expect("notes dir");
     std::fs::write(root.join(path), "").expect("New page's empty file");

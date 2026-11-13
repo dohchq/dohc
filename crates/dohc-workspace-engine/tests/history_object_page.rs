@@ -178,7 +178,6 @@ async fn history_object_page_includes_the_latest_external_save() {
     )
     .await
     .expect("watcher admits the pending save");
-    // Start History while the admitted save is paused before its actor write.
     let mut history = std::pin::pin!(transport.call(
         RequestContext::unbounded(),
         request(

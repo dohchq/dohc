@@ -24,7 +24,6 @@ fn binary_head_is_excluded_from_file_fts_and_rebuild_does_not_crash() {
     let mut vt = VersionedTextStore::new(&mut store);
     vt.ensure_main_version(WS, V, 1, &NoFaults)
         .expect("ensure version");
-    // A text file with a distinctive needle — proves the rebuild completes.
     vt.write_text(
         &WriteText {
             workspace_id: WS.to_owned(),
@@ -70,7 +69,6 @@ fn binary_head_is_excluded_from_file_fts_and_rebuild_does_not_crash() {
         })
         .expect("write binary head");
 
-    // Rebuild the index over both snapshots (a binary row is now present).
     store
         .write_with(&NoFaults, |tx| {
             ensure_search_index_for_version(tx, &root, WS, V, 4, &NoFaults)

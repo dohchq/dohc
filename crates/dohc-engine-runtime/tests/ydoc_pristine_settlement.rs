@@ -166,7 +166,6 @@ async fn pristine_cycles(sync: bool, edit: bool) -> ScratchDir {
                 Some(source_sha.clone())
             );
         }
-        // Repeated settles within one session must retain the same witness too.
         for _ in 0..2 {
             let settled = settle(&actor, &scratch, &state).await;
             assert_eq!(settled.sha256, source_sha, "sync={sync}, cycle {cycle}");

@@ -257,7 +257,6 @@ fn add_source(actor: &WorkspaceActor, scratch: &ScratchDir, job: &str, target: &
     )
 }
 
-/// A retained original of job `job` for `target` at `source`, holding `bytes`.
 fn add_source_at(
     actor: &WorkspaceActor,
     scratch: &ScratchDir,

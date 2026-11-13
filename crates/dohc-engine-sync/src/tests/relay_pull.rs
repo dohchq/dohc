@@ -1927,7 +1927,6 @@ fn seeded_relay_fault_model_converges_without_double_apply() {
     let mut b = EngineStore::open(&_path_b, 3_000).expect("b restart mid pull");
     apply_chat_envelope(&mut b, &ops[2], &NoFaults).expect("b after dropped middle");
 
-    // c is partitioned during the first pass and receives nothing.
     assert_eq!(
         read_replication_acked_seq(&c, "ws", "origin-a").expect("partition ack"),
         -1
@@ -3697,7 +3696,6 @@ fn a_ydoc_payload_cannot_be_reused_as_an_over_cap_captured_binary() {
          shared table"
     );
 
-    // And nothing of the theft persisted.
     let snapshots: i64 = engine
         .read_with(|conn| {
             conn.query_row(

@@ -18,10 +18,8 @@ const HISTORY_SEQUENCE: i64 = 1 << 40;
 
 const MEASURED_SAFE_ROWS: usize = 8;
 
-/// The unrelated documents created beside each pass of that phase.
 const UNRELATED_DOCUMENTS: usize = 4;
 
-/// The tail input each invalidated pass's setup changes, to itself.
 const INVALIDATION: &str =
     "UPDATE live_owner_activations SET source_byte_length=source_byte_length";
 
@@ -125,19 +123,13 @@ impl Spent {
 /// statement trace, by each statement's leading keyword.
 #[derive(Debug, Default)]
 struct Sql {
-    /// Reads of `released_tail_generations`.
     generation_reads: Spent,
-    /// Inserts, updates and deletes, with their triggers.
     mutations: Spent,
     /// `COMMIT`, `END` and `RELEASE`.
     commits: Spent,
     other: Spent,
-    /// Generation rows the store's triggers advanced.
     advances: u64,
-    /// Each advance, by the trigger that made it and the statement that
-    /// fired that trigger.
     invalidations: BTreeMap<(String, String), u64>,
-    /// The trigger whose program last began.
     trigger: Option<String>,
     /// When each running statement began, by its SQL text's address, which
     /// stays its own while it is prepared. SQLite's own profile counts
@@ -168,16 +160,12 @@ impl Sql {
 /// What each connection a segment used ran.
 #[derive(Debug, Default)]
 struct Traced {
-    /// The store's connection; for a setup, the connection it writes on.
     store: Sql,
-    /// The connections tails validation opened of its own.
     readers: Sql,
     readers_opened: u64,
-    /// The actor's own connection, which materializes a pass's changes.
     actor: Sql,
 }
 
-/// The trace of the segment being taken; none between segments.
 static TRACED: Mutex<Option<Traced>> = Mutex::new(None);
 
 #[derive(Clone, Copy)]
@@ -274,7 +262,6 @@ fn trace_off(conn: &mut rusqlite::Connection) {
         .unwrap();
 }
 
-/// Trace a connection tails validation opened.
 fn trace_reader(conn: &mut rusqlite::Connection) {
     if let Some(traced) = TRACED.lock().unwrap().as_mut() {
         traced.readers_opened += 1;
@@ -286,8 +273,6 @@ fn trace_actor(conn: &mut rusqlite::Connection) {
     trace_on(conn, traced_actor);
 }
 
-/// Trace the store's connection, the actor's and every connection tails
-/// validation opens, or stop.
 async fn trace(w: &mut RetainedWindow, on: bool) {
     w.store
         .hooks_with(|conn| {
@@ -306,8 +291,6 @@ async fn trace(w: &mut RetainedWindow, on: bool) {
         .unwrap();
 }
 
-/// The window document's released tail generation; none before its first
-/// activation, or in a store that keeps no generations.
 fn window_generation(store: &EngineStore) -> Option<i64> {
     let key = window_key();
     store
@@ -331,7 +314,6 @@ fn window_generation(store: &EngineStore) -> Option<i64> {
         .unwrap()
 }
 
-/// The actor operations of the segment being taken, in milliseconds.
 static OPERATIONS: Mutex<Vec<f64>> = Mutex::new(Vec::new());
 
 /// Run `work` as one uninterrupted actor operation of the segment being
@@ -343,9 +325,6 @@ pub(super) fn operation<T>(work: impl FnOnce() -> T) -> T {
     done
 }
 
-/// One timed part of a sample: its time, each uninterrupted actor operation
-/// it took, the tails scans the process ran meanwhile, and what each traced
-/// connection ran.
 struct Segment {
     ms: f64,
     operations: Vec<f64>,
@@ -366,7 +345,6 @@ impl Segment {
         })
     }
 
-    /// Each advance a traced connection made.
     fn invalidations(&self) -> impl Iterator<Item = (&'static str, &(String, String), u64)> {
         [
             ("store", &self.sql.store),
@@ -382,7 +360,6 @@ impl Segment {
     }
 }
 
-/// The clock, scan count, operations and trace of the segment being taken.
 struct Clock {
     started: Instant,
     scans: u64,
@@ -426,12 +403,9 @@ impl Clock {
     }
 }
 
-/// One measured pass or decision: its parts in order, and the window
-/// document's generation before and after it.
 struct Sample {
     segments: Vec<(&'static str, Segment)>,
     generation: (Option<i64>, Option<i64>),
-    /// The changes a pass materialized.
     materialized: Option<usize>,
 }
 
@@ -455,8 +429,6 @@ impl Sample {
     }
 }
 
-/// One decision on `store`, timed from just before it starts to when it
-/// returns.
 fn decision(store: &mut EngineStore, work: impl FnOnce(&mut EngineStore)) -> Sample {
     let before = window_generation(store);
     let clock = Clock::start();
@@ -469,9 +441,6 @@ fn decision(store: &mut EngineStore, work: impl FnOnce(&mut EngineStore)) -> Sam
     }
 }
 
-/// The setup of an invalidated pass: [`INVALIDATION`] written past the
-/// store's checks on a connection of its own, timed and traced apart from
-/// the pass, with the window document's generation before and after.
 struct Setup {
     write: Segment,
     generation: (Option<i64>, Option<i64>),
@@ -528,7 +497,6 @@ async fn measured_pass(
             (object, path)
         })
         .collect();
-    // The scope keeps every document an earlier pass created.
     let hosted: Vec<(String, String)> = w
         .store
         .read_with(|conn| {
@@ -605,7 +573,6 @@ async fn measured_pass(
         .await
         .unwrap_or_else(|error| panic!("{sample_name}: {error:?}"));
     let (mut materialization, clock) = clock.lap();
-    // One actor request, timed as its caller waits for it.
     materialization.operations.push(materialization.ms);
     let commit = measured_commit(
         &client,
@@ -637,10 +604,6 @@ async fn measured_pass(
     }
 }
 
-/// What one run measures, from the environment: `DOHC_MEASURE_PASSES`
-/// passes and decisions in each phase (100), `DOHC_MEASURE_ENTRIES` history
-/// sizes (0,1000,10000,50000), `DOHC_MEASURE_HISTORY` (proven,protected),
-/// and `DOHC_MEASURE_LABEL`, which every record carries.
 struct Plan {
     passes: usize,
     entries: Vec<usize>,
@@ -680,7 +643,6 @@ impl Plan {
     }
 }
 
-/// One scenario's phase, as every record of it names it.
 struct Phase<'a> {
     plan: &'a Plan,
     history: &'a str,
@@ -705,7 +667,6 @@ impl Phase<'_> {
         fields
     }
 
-    /// Print one sample as a JSON record, and add it to the phase's.
     fn record(&self, samples: &mut Vec<Sample>, sample: Sample) {
         let mut fields = self.json(samples.len());
         let segments: serde_json::Map<String, serde_json::Value> = sample
@@ -737,7 +698,6 @@ impl Phase<'_> {
         samples.push(sample);
     }
 
-    /// Print one setup as a JSON record, and add it to the phase's.
     fn record_setup(&self, setups: &mut Vec<Setup>, setup: Setup) {
         let mut fields = self.json(setups.len());
         let delta = setup
@@ -770,10 +730,6 @@ impl Phase<'_> {
         setups.push(setup);
     }
 
-    /// Print the phase's summary: the nearest-rank percentiles of its
-    /// samples' time, of each segment's and of every actor operation they
-    /// took, its tails scans and generation changes, and every invalidating
-    /// statement a traced connection ran.
     fn summarize(&self, samples: &[Sample], setups: &[Setup]) {
         let rank = |prefix: &str, mut ms: Vec<f64>| {
             ms.sort_by(f64::total_cmp);

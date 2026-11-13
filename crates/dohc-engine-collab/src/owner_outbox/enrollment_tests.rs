@@ -567,8 +567,6 @@ fn bad_cut_capture_race_and_capacity_failure_leave_original_work_unchanged() {
     }
 }
 
-/// An enrolled owner with an unsent draft, and the host checkpoint of a later
-/// restore generation that does not contain that draft.
 fn enrolled_with_unsent_draft() -> (
     ScratchDir,
     EngineStore,
@@ -609,10 +607,6 @@ fn enrolled_with_unsent_draft() -> (
     )
 }
 
-// An edit that builds on one the server accepted, still waiting when a later
-// restore generation replaces the accepted checkpoint. Its base and its own
-// bytes cannot rebuild it; with the checkpoint its queue kept, its recovery
-// copy can.
 #[test]
 fn work_on_an_accepted_prefix_rebuilds_from_its_queue_alone_after_a_generation_advance() {
     use super::super::{
@@ -678,7 +672,6 @@ fn work_on_an_accepted_prefix_rebuilds_from_its_queue_alone_after_a_generation_a
     while let Some(at) = cursor {
         let page = read(Some(at));
         cursor = page.next_cursor;
-        // A later page of the same part continues it.
         if page.cursor.offset > 0 {
             parts.last_mut().unwrap().1.extend(page.bytes);
         } else {

@@ -33,8 +33,6 @@ fn record_settled(
     record_text(store, audit, moment, &text, &vector)
 }
 
-/// The retirement form of settlement at `terminal`, through F=10, as the
-/// host records it.
 fn retire_settled(f: &mut Fixture, terminal: Option<LiveUpdateReceipt>, moment: &str) -> Result<LiveSettlementResult, ApplicationError> {
     let key = retirement_key(f, 10);
     let doc_key = f.key.clone();
@@ -44,7 +42,6 @@ fn retire_settled(f: &mut Fixture, terminal: Option<LiveUpdateReceipt>, moment: 
     })
 }
 
-/// The ordinary form of settlement at `terminal`, as the host records it.
 fn settled(f: &mut Fixture, terminal: Option<LiveUpdateReceipt>, moment: &str) -> Result<LiveSettlementResult, ApplicationError> {
     let doc_key = f.key.clone();
     let reconstruction = NativeHistoryReconstruction { working_reserve_bytes: 8 * 1024 * 1024 };
@@ -53,11 +50,6 @@ fn settled(f: &mut Fixture, terminal: Option<LiveUpdateReceipt>, moment: &str) -
     })
 }
 
-/// A root that applied its native update at 3, and whose updates C1 and C2
-/// the relay accepted at 5 and 6 without the host applying them, settled at
-/// B=3 through F and released, its document back in the scope. Its file holds
-/// what it settled at B, while its Y.Doc also holds C1 and C2. Nothing aligns
-/// the file with the Y.Doc. Returns the covered receipt and C1 and C2.
 fn released_at_b() -> (Fixture, LiveUpdateReceipt, CarriedDelivery, CarriedDelivery) {
     let (mut f, covered, c1, _) = covered_and_carried();
     let second = native_tail_edit(&mut f, "# Carried again\n", 13);
@@ -74,14 +66,10 @@ fn released_at_b() -> (Fixture, LiveUpdateReceipt, CarriedDelivery, CarriedDeliv
     (f, covered, c1, c2)
 }
 
-/// The local Y.Doc, as the store holds it.
 fn local_doc(f: &Fixture) -> Ydoc {
     f.store.read_with(|conn| durable::load_doc_in(conn, &f.key)).unwrap()
 }
 
-/// The file, the local Y.Doc and accepted history through `through` agree:
-/// the settlement recorded as `moment` projects the local Y.Doc, which is
-/// structurally the accepted state.
 fn converged(f: &Fixture, moment: &str, through: i64) {
     let local = local_doc(f);
     let file = moment_text(f, moment);
@@ -238,7 +226,6 @@ fn a_reader_built_note_resumes_over_the_file_its_predecessor_settled() {
     }
 }
 
-/// A damage the settled-B proof must refuse, and the refusal it gives.
 type SourceDamage = (&'static str, fn(&ApplicationError) -> bool, fn(&mut Fixture));
 
 fn unexplained(error: &ApplicationError) -> bool {
@@ -249,7 +236,6 @@ fn conflict(error: &ApplicationError) -> bool {
     matches!(error, ApplicationError::Conflict)
 }
 
-/// Write `text` as the file at the document's path, recorded as `moment`.
 fn write_file(f: &mut Fixture, text: &str, moment: &str) {
     VersionedTextStore::new(&mut f.store)
         .write_text(
@@ -295,7 +281,6 @@ fn the_settled_source_proof_refuses_any_unexplained_difference() {
             write(f, &format!("UPDATE live_device_settlements SET source_state_vector_digest='{}'", "f".repeat(64)))
         }),
         ("file not the projection", unexplained, |f| {
-            // A settlement record naming a file that is not accepted state at B.
             write_file(f, "# Forged\n", "forged");
             write(f, &format!(
                 "UPDATE live_device_settlements SET moment_id='forged',markdown_digest='{}'",
@@ -377,7 +362,6 @@ fn a_second_native_update_at_one_sequence_is_corrupt() {
     )), "a second native update");
 }
 
-/// Whether a settlement recorded its attribution as unavailable.
 fn attribution_unavailable(f: &Fixture) -> bool {
     f.store.table_row_count("live_settlement_attribution_unavailable").unwrap() > 0
 }
@@ -391,8 +375,6 @@ fn attribution_unavailable(f: &Fixture) -> bool {
 #[test]
 fn only_the_current_adoptions_refusal_makes_attribution_unavailable() {
     let mut f = refused_seed();
-    // A collaborator's paragraph on accepted state, which never held the
-    // refused seed's content.
     let accepted = Ydoc::wire();
     accepted.apply(&f.cut.baseline_bytes).unwrap();
     let bytes = accepted.richdoc_append_paragraph("Remote paragraph 3");

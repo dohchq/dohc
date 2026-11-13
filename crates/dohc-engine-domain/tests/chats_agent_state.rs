@@ -162,7 +162,6 @@ fn post(
     }
 }
 
-/// A person's post, by `user` or with no account.
 fn ask_by(
     chats: &mut LinkedChatStore<'_>,
     user: Option<&str>,
@@ -187,7 +186,6 @@ fn ask(chats: &mut LinkedChatStore<'_>, channel: &str, thread: &str, message: &s
     ask_by(chats, Some("ada"), channel, thread, message, at);
 }
 
-/// A post by the agent you run.
 fn answer(chats: &mut LinkedChatStore<'_>, channel: &str, thread: &str, message: &str, at: i64) {
     post(
         chats,

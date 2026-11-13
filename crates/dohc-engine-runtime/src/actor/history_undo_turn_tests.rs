@@ -181,7 +181,6 @@ pub(in crate::actor) fn record_phase(
     let current = actor.then(dohc_engine_storage::capture_phase::snapshot);
     let mut probes = probes().lock().unwrap();
     let probe = probes.entry(request.to_owned()).or_default();
-    // begin_turn fences these counters around only this Undo actor turn.
     let storage = current.and_then(|after| {
         probe
             .actor_totals
@@ -571,7 +570,6 @@ async fn running_checkpoint_does_not_exhaust_the_pinned_wal_budget() {
         .await,
         Err(RuntimeError::Storage(StorageError::FileLocked))
     ));
-    // A cancel during the wait wins over a spent budget.
     since = Some(Instant::now() - Duration::from_secs(2));
     let cancel = token.clone();
     assert!(matches!(
@@ -886,7 +884,6 @@ async fn parked_rename_after_restart(held: bool) {
         )
         .await;
     if held {
-        // Capture holds park jobs without making a version switch fail.
         assert!(switched.is_ok(), "{switched:?}");
     } else {
         // Decision 17 completes Undo; the switch still reports the outside conflict.
@@ -961,7 +958,6 @@ async fn parked_rename_after_restart(held: bool) {
             })
         }
     }
-    // Retry held captures the observation, then places the selected version's job.
     actor
         .finish_capture_pass(
             WS.into(),

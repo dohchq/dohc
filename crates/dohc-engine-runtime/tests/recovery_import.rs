@@ -206,7 +206,6 @@ async fn unchanged_lineage_replays_once_and_preserves_original_author_and_reques
                     .unwrap()
                     .json();
                 assert!(authors.contains("writer"));
-                // The outage typing's agent run survives the restart.
                 assert!(authors.contains(r#""agentRunId":"outage-run""#));
                 Ok::<_, StorageError>(())
             })
@@ -375,9 +374,6 @@ async fn delete(actor: &ActorHandle, root: &Path) {
         .unwrap();
 }
 
-// dohc's own settlement can write the base's text after a checkpoint names
-// the earlier file. That write is not an outside change.
-
 fn agent() -> Option<ChangeAttribution> {
     Some(ChangeAttribution {
         actor_kind: ChangeActorKind::Agent,
@@ -455,7 +451,6 @@ async fn record(
         .await
         .unwrap();
 }
-/// A checkpoint taken after `doc`'s acknowledged state, naming `disk_sha256`.
 fn checkpoint_at(
     state: &YdocOpenState,
     path: &str,
@@ -497,12 +492,9 @@ struct Rich {
     actor: ActorHandle,
     state: YdocOpenState,
     input: Option<RecoveryImport>,
-    /// The file just before the import runs.
     settled: Vec<u8>,
 }
 
-/// A rich note seeded from `seed` and settled, then warmed and settled again
-/// after the checkpoint's base, with typing that never reached the engine.
 async fn rich(seed: &str) -> Rich {
     let scratch = ScratchDir::new().unwrap();
     std::fs::write(scratch.path().join(NOTE), seed).unwrap();
@@ -591,8 +583,6 @@ async fn rich(seed: &str) -> Rich {
     }
 }
 
-/// The typing stays recoverable in exactly one place: the note, History, or
-/// the checkpoint main still holds. The import never writes the file.
 async fn assert_typing_kept(
     rich: Rich,
     text: &str,

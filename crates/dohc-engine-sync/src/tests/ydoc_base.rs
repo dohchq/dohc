@@ -450,7 +450,6 @@ fn first_inbound_base_over_divergent_plain_head_opens_conflict_not_overwrite() {
         "the divergent base still acks — the lineage must keep advancing"
     );
 
-    // The head is untouched.
     let head_text: String = engine
         .read_with(|conn| {
             conn.query_row(
@@ -467,7 +466,6 @@ fn first_inbound_base_over_divergent_plain_head_opens_conflict_not_overwrite() {
         "the base must not clobber the head"
     );
 
-    // The lineage itself landed: replicated marker, claimed base.
     let key = dohc_engine_collab::DocKey::new("ws", "main", "object-div").expect("key");
     let marker = dohc_engine_collab::read_marker(&engine, &key)
         .expect("marker read")
@@ -479,8 +477,6 @@ fn first_inbound_base_over_divergent_plain_head_opens_conflict_not_overwrite() {
         "the base claim still lands"
     );
 
-    // One moment-lane shaped conflict: current = local head, incoming = the
-    // base projection, both hydratable from `blobs`.
     let remote_sha = dohc_engine_storage::hex_sha256("remote truth".as_bytes());
     let (status, origin, current_blob, incoming_blob): (String, String, String, String) = engine
         .read_with(|conn| {
@@ -586,7 +582,6 @@ fn a_base_over_an_unmerged_head_conflicts_even_when_the_lineage_holds_rows() {
         .expect("scaffolding");
     let key = dohc_engine_collab::DocKey::new("ws", "main", "object-crashed").expect("key");
 
-    // A local-only session that crashed: durable rows, never settled.
     let draft = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "crashed draft");
     dohc_engine_collab::record_local_update(
         &mut engine,
@@ -607,8 +602,6 @@ fn a_base_over_an_unmerged_head_conflicts_even_when_the_lineage_holds_rows() {
     )
     .expect("crashed draft rows");
 
-    // Capture records an EXTERNAL disk edit: the head is now newer than
-    // anything this lineage produced.
     engine
         .write_with(&NoFaults, |tx| {
             dohc_engine_domain::write_projected_text_in_tx(
@@ -1215,8 +1208,6 @@ fn assert_refused_fold(initial: &str, chosen_file_head: bool) {
         "a fold that cannot reproduce the choice must refuse: {refused:?}"
     );
 
-    // And it left nothing behind: no appended update, and the settle marker
-    // does not claim bytes the lineage cannot produce.
     let (updates, settled): (i64, Option<String>) = engine
         .read_with(|conn| {
             Ok::<_, SyncError>((
@@ -1307,8 +1298,6 @@ fn a_resolution_over_an_incomplete_lineage_refuses() {
     )
     .expect("base claims");
 
-    // A third origin's dependent update lands without its predecessor: it is
-    // durably in `ydoc_updates` and the doc reports a missing dependency.
     let dep_doc = dohc_engine_collab::Ydoc::wire();
     let _predecessor = dep_doc.plaintext_insert(0, "dep base");
     let dependent = dep_doc.plaintext_insert(0, "more ");
@@ -2293,7 +2282,6 @@ fn different_document_seeds_keep_unsettled_edits_in_a_version_conflict() {
     }
 }
 
-/// The paths of `changes`, sorted.
 fn changed_paths_of(changes: &[crate::MomentMaterializationChange]) -> Vec<String> {
     let mut paths: Vec<String> = changes.iter().map(|change| change.path.clone()).collect();
     paths.sort();
@@ -2438,9 +2426,6 @@ fn ingress_drain_reports_its_sibling(stopped_first: bool) {
 
     let mut stopped_siblings = None;
     if stopped_first {
-        // The drain applies the base, then stops before its cleanup; the
-        // head's file is written before the next drain, and the store
-        // restarts.
         let (stopped, _cleanup) = crate::drain_deferred_ydoc_for_key_holding_cleanup(
             &mut engine,
             &mut WriterDocCache::new(),
@@ -2464,7 +2449,6 @@ fn ingress_drain_reports_its_sibling(stopped_first: bool) {
         engine = EngineStore::open(&store_path, 3_000).expect("reopen");
     }
 
-    // The pass's next op of the document drains the queue before it applies.
     let later = winner.plaintext_insert(19, " later");
     let later_sha = engine.put_binary_blob(&later).expect("later blob");
     let mut incoming = envelope(
@@ -2504,8 +2488,6 @@ fn ingress_drain_reports_its_sibling(stopped_first: bool) {
     }
     assert_eq!(siblings(&engine).len(), 1);
 
-    // The request is abandoned at a later wait: the next one claims the
-    // same report once more, and only a commit acknowledges it.
     let mut first = None;
     let claimed = crate::drain_report::claim(&mut engine, "ws", &mut first, &NoFaults)
         .expect("claim the drain reports");
@@ -2905,7 +2887,6 @@ fn seed_resolution_converges_on_both_peers_in_both_delivery_orders_after_restart
                 "resolved-seed",
                 10_000,
             );
-            // Restart after the local commit, before any resolution delivery.
             drop(a);
             let mut a = EngineStore::open(&a_path, 11000).unwrap();
             let ops = seed_resolution_ops(&a, "resolver");

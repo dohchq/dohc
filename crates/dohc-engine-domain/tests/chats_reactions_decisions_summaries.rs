@@ -696,9 +696,6 @@ fn message_page_batch_keeps_attachments_with_their_own_messages() {
     }
 }
 
-// ------------------------------------------------------------ stage receipts
-
-/// A chat handle that records a stage receipt for each keyed write.
 fn receipted(store: &mut EngineStore) -> LinkedChatStore<'_> {
     let mut chats = LinkedChatStore::new(store);
     chats.record_stage_receipts(true);
@@ -956,7 +953,6 @@ fn resolve_receipts_keep_written_lost_and_no_op_after_the_cell_changes() {
     );
     assert_eq!(local_journal(&store), journal);
 
-    // Another copy's later resolution replaces the cell.
     store
         .write_with(&NO_FAULTS, |tx| {
             tx.execute(
@@ -1123,8 +1119,6 @@ fn publication_state_reads_each_coordinate_against_its_origin_cursor_and_refusal
         "an origin without a push cursor has pushed nothing"
     );
 
-    // Pushed through the second row: the first is below the cursor, the
-    // second equal to it, and the rest above.
     store
         .write_with(&NO_FAULTS, |tx| {
             tx.execute(

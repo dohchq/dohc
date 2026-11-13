@@ -26,7 +26,6 @@
 // --ignored --nocapture --test-threads=1`: one profiler runs at a time. Each
 // case prints one `HELD_PROOF_MEMORY` line of JSON.
 
-/// Deterministic prose, as `ydoc_full_state_size.rs` writes it.
 struct Rng(u64);
 
 impl Rng {
@@ -44,7 +43,6 @@ const WORDS: &[&str] = &[
     "relay", "snapshot", "markdown", "structure", "inspectable", "durable", "boundary", "capture",
 ];
 
-/// A block of at least `target` bytes of prose.
 fn block(rng: &mut Rng, target: usize) -> String {
     let mut out = String::new();
     while out.len() < target {
@@ -57,8 +55,6 @@ fn block(rng: &mut Rng, target: usize) -> String {
     out
 }
 
-/// A rich document of `content` bytes, one paragraph of `block_bytes` per
-/// edit, as `limits.rs` measures it.
 fn rich(content: usize, block_bytes: usize) -> Ydoc {
     let doc = Ydoc::wire();
     let mut rng = Rng(1);
@@ -71,7 +67,6 @@ fn rich(content: usize, block_bytes: usize) -> Ydoc {
     doc
 }
 
-/// A plaintext document of `content` bytes, typed in runs of `block_bytes`.
 fn plaintext(content: usize, block_bytes: usize) -> Ydoc {
     let doc = Ydoc::wire();
     let mut rng = Rng(2);
@@ -140,8 +135,6 @@ fn sparse_deletions(content: usize, clients: usize) -> Ydoc {
     doc
 }
 
-/// A rich document of `content` bytes rewritten whole `revisions` times:
-/// its full state carries every earlier version's structure.
 fn rewritten(content: usize, revisions: usize) -> Ydoc {
     let doc = rich(content, 400);
     let mut markdown = doc.project(ContentKind::Richdoc).expect("project").content;
@@ -166,11 +159,6 @@ fn lexical_source(content: usize) -> String {
     source
 }
 
-/// A rich document rewritten from exact source of about `content` bytes,
-/// the edit another writer makes rewriting it from that source with one
-/// more item, and that source: the merged state's exact source is fresh and
-/// differs from its projection, so preserving it rebuilds and reprojects
-/// another document from it.
 fn reprojected(content: usize) -> (Ydoc, Vec<Vec<u8>>, String) {
     let source = lexical_source(content);
     let doc = Ydoc::wire();
@@ -185,11 +173,6 @@ fn reprojected(content: usize) -> (Ydoc, Vec<Vec<u8>>, String) {
     (doc, vec![edit], edited)
 }
 
-/// A rich document rewritten from exact source of about `content` bytes,
-/// the small source-preserving frontmatter edit another writer makes over
-/// it, and the source that edit binds: the merged state's exact source is
-/// fresh and differs from its projection, so preserving it rebuilds a whole
-/// document from that source against little retained work.
 fn frontmatter_edited(content: usize) -> (Ydoc, Vec<Vec<u8>>, String) {
     let source = lexical_source(content);
     let doc = Ydoc::wire();
@@ -204,20 +187,15 @@ fn frontmatter_edited(content: usize) -> (Ydoc, Vec<Vec<u8>>, String) {
     (doc, vec![edit], edited)
 }
 
-/// A document's lineage as a store keeps it, with the blobs of the work a
-/// hold covers.
 struct Lineage {
     store: EngineStore,
     key: DocKey,
     claim: String,
-    /// The full state the lineage loads to.
     full_state: Vec<u8>,
     /// Dropped last, once the store has closed.
     _directory: ScratchDir,
 }
 
-/// A store whose document `object` claims `base` as its base, of `kind`,
-/// with `rows` journaled after it and `updates` held as blobs.
 fn lineage(base: &Ydoc, kind: ContentKind, rows: &[Vec<u8>], updates: &[Vec<u8>]) -> Lineage {
     let directory = ScratchDir::new().unwrap();
     let mut store = EngineStore::open(&directory.path().join("engine.db"), 1).unwrap();
@@ -272,7 +250,6 @@ fn lineage(base: &Ydoc, kind: ContentKind, rows: &[Vec<u8>], updates: &[Vec<u8>]
     }
 }
 
-/// The contributions an outbox names for `updates`.
 fn covered(updates: &[Vec<u8>]) -> Vec<RetainedContribution> {
     updates
         .iter()
@@ -287,7 +264,6 @@ fn covered(updates: &[Vec<u8>]) -> Vec<RetainedContribution> {
         .collect()
 }
 
-/// A binding naming `lineage` and `tail`.
 fn bound(lineage: &Lineage, tail: ProtectedTail) -> ReleasedLineageBinding {
     ReleasedLineageBinding {
         workspace_id: "workspace".into(),
@@ -309,21 +285,11 @@ fn bound(lineage: &Lineage, tail: ProtectedTail) -> ReleasedLineageBinding {
     }
 }
 
-/// What a case's preserved Markdown must be.
 enum Expected<'a> {
     Containing(&'a str),
     Exactly(&'a str),
 }
 
-/// What the merged state keeps, kept as a proof keeps it: `key`'s lineage,
-/// the head's, which must be `claim`, loaded from `store` as a proof loads
-/// it, then every one of `updates` applied. The stored bytes loading reads,
-/// and the heap still held once the lineage loaded and once every update
-/// applied; what loading and applying only read is not counted. Then, on
-/// that merged state, what the index of the ranges it deleted holds once
-/// built. Then, loaded again before the profiler starts, what applying each
-/// update as the merge applies it holds: the most the heap held once it
-/// applied, over what it held before.
 fn kept_state(store: &EngineStore, key: &DocKey, claim: &str, updates: &[Vec<u8>]) -> Kept {
     let head = store
         .read_with(|conn| durable::read_marker_in(conn, key))
@@ -359,8 +325,6 @@ fn kept_state(store: &EngineStore, key: &DocKey, claim: &str, updates: &[Vec<u8>
     drop(state);
 
     let state = load();
-    // M, the encoded bytes the merge holds: the full state, then each
-    // update's as it applies.
     let mut merging = state.encode_full_state().len() as u64;
     let (mut growing, mut reserved) = (0u64, 0u64);
     let mut worst = Applying { rise: 0, allowance: 1 };
@@ -376,7 +340,6 @@ fn kept_state(store: &EngineStore, key: &DocKey, claim: &str, updates: &[Vec<u8>
         // 13·b + 2·M, as `preservation.rs` reserves applying.
         growing += 22 * bytes + indexed;
         reserved = reserved.max(growing + 13 * bytes + 2 * merging);
-        // Its rise counts what it adds to the state and the index too.
         let allowance = 35 * bytes + 2 * merging + indexed;
         if u128::from(rise) * u128::from(worst.allowance) > u128::from(worst.rise) * u128::from(allowance) {
             worst = Applying { rise, allowance };
@@ -414,14 +377,8 @@ struct Kept {
     stored: u64,
     loaded: u64,
     merged: u64,
-    /// What the index of the ranges the merged state deleted holds, and
-    /// what the merge reserves for it.
     index: Index,
     index_reserved: u64,
-    /// The most the heap held over the loaded state while the updates
-    /// applied, and the most the merge reserves beside that state while
-    /// they do: 22·b for each so far and the index's growth, and 13·b + 2·M
-    /// for the one applying.
     applying_peak: u64,
     applying_reserved: u64,
     /// What the heap held over the loaded state once every update applied
@@ -429,7 +386,6 @@ struct Kept {
     /// reallocation of state loaded before the profiler started was counted
     /// whole, so the rises read high.
     applying_retained: u64,
-    /// The application whose rise is largest against what it reserves.
     worst: Applying,
 }
 
@@ -444,8 +400,6 @@ struct Applying {
     allowance: u64,
 }
 
-/// Refuse a measurement whose preservation is not the complete one its case
-/// expects: `merged` merged, and its Markdown as `expected` says.
 fn accepted(case: &str, preservation: &Preservation, merged: &[RetainedContribution], expected: &Expected<'_>) {
     assert_eq!(preservation.status, PreservationStatus::Complete, "{case}: {:?}", preservation.findings);
     assert_eq!(preservation.merged, merged, "{case}: what it merged");
@@ -456,7 +410,6 @@ fn accepted(case: &str, preservation: &Preservation, merged: &[RetainedContribut
     }
 }
 
-/// What one measured proof found.
 struct Measured<'a> {
     case: &'a str,
     full_state: usize,
@@ -521,8 +474,6 @@ fn report(measured: &Measured<'_>) {
     );
 }
 
-/// Measure one hold: `lineage` merged with `updates`, whose preserved
-/// Markdown must be as `expected` says.
 fn measure(case: &str, lineage: &Lineage, updates: &[Vec<u8>], expected: &Expected<'_>) {
     measure_hold(case, lineage, updates, true, expected);
 }
@@ -653,7 +604,6 @@ fn measure_released_hold(count: usize) {
     });
 }
 
-/// One small edit appended to `state` by another writer, for a hold to cover.
 fn one_edit(state: &Ydoc, kind: ContentKind) -> Vec<Vec<u8>> {
     let writer = Ydoc::wire();
     writer.apply(&state.encode_full_state()).unwrap();
@@ -674,7 +624,6 @@ fn edit_and_removal(state: &Ydoc) -> Vec<Vec<u8>> {
     edits
 }
 
-/// `count` small paragraphs one writer appended over `state`, in order.
 fn many_edits(state: &Ydoc, count: usize) -> Vec<Vec<u8>> {
     let writer = Ydoc::wire();
     writer.apply(&state.encode_full_state()).unwrap();
@@ -683,7 +632,6 @@ fn many_edits(state: &Ydoc, count: usize) -> Vec<Vec<u8>> {
         .collect()
 }
 
-/// A state of `base` with `rows` applied.
 fn head_of(base: &Ydoc, rows: &[Vec<u8>]) -> Ydoc {
     let head = Ydoc::wire();
     head.apply(&base.encode_full_state()).unwrap();

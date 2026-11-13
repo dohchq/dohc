@@ -518,7 +518,6 @@ async fn text_case_only_merge_after_failed_delete(
         )
         .await
         .unwrap();
-    // A later replay must keep what the merge left.
     actor
         .materialize_replay_pending(root.path().into(), WS.into(), 6)
         .await
@@ -683,7 +682,6 @@ async fn pending_switch_delete_after_rename(path: &str, from: &str, to: &str, re
         assert_eq!(pending.len(), 1);
         assert!(pending[0].job_id.starts_with("version-switch-mat_"));
         std::fs::rename(root.join(from), root.join(to)).unwrap();
-        // Capture records the renamed file, with the bytes the delete expects.
         let mut capture = text_write("draft", renamed, "text", "renamed");
         capture.now_ms = 3;
         VersionedTextStore::new(&mut store)
