@@ -478,6 +478,21 @@ const reachedSince = (attached: HostedAttachment, objectId: string, required: nu
   (attached.reached.get(objectId)?.pull ?? 0) >= required;
 const goneSince = (attached: HostedAttachment, objectId: string, required: number) =>
   reachedSince(attached, objectId, required) && !attached.reached.get(objectId)!.listed;
+// Why no pull has confirmed a departing document left, or undefined once one has. Each answer stays the same while
+// its cause does, because a pass logs a waiting step again only when its words change.
+const departureWait = (
+  attached: HostedAttachment | undefined,
+  objectId: string,
+  required: number | undefined,
+) => {
+  if (!attached) return "its workspace has no hosted replica attached";
+  if (required === undefined) return "its departure was not announced to the replica";
+  if (reachedSince(attached, objectId, required)) return undefined;
+  if (!attached.hosted.checked) return "the replica has not checked its origin";
+  if (attached.pulls < required) return "no pull has started since its departure was announced";
+  if (attached.last === "failed") return "the last pull failed";
+  return "no departed list since its departure was announced has reached it";
+};
 
 /** Owns one configured service incarnation and its durable delivery consumers. */
 export async function startServiceLiveHost(options: {
@@ -1775,8 +1790,7 @@ export async function startServiceLiveHost(options: {
               row.objectId,
               joined,
               {
-                departed: () =>
-                  required !== undefined && reachedSince(attached!, row.objectId, required),
+                departureWait: () => departureWait(attached, row.objectId, required),
                 parked: () =>
                   required !== undefined && goneSince(attached!, row.objectId, required),
               },

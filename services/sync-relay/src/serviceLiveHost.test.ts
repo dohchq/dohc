@@ -8069,6 +8069,12 @@ it("confirms a stopped document's departure while its ready workspace's push kee
       expect(o.ownerCalls().slice(sent)).toContainEqual(["liveApplication.releaseActivation", key]),
     { timeout: 10_000 },
   );
+  // Before a pull confirmed it left, the log said why it waited.
+  expect(log).toHaveBeenCalledWith(
+    ...waiting(
+      "Waiting for its hosted replica to confirm the document left: no pull has started since its departure was announced.",
+    ),
+  );
   await vi.waitFor(
     () =>
       expect(log).toHaveBeenCalledWith(
