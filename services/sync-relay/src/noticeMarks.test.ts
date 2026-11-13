@@ -134,7 +134,11 @@ async function relay() {
   };
 }
 
-async function ok(response: Response): Promise<{ ok: true; dismissed: string[] }> {
+// Takes the handler's answer or its pending promise, as the helpers return it.
+async function ok(
+  answer: Response | Promise<Response>,
+): Promise<{ ok: true; dismissed: string[] }> {
+  const response = await answer;
   expect(response.status, await response.clone().text()).toBe(200);
   return (await response.json()) as { ok: true; dismissed: string[] };
 }
