@@ -14,12 +14,12 @@ We still let a friend ask a connected agent through the same Allow, Always allow
 
 Ice changed four parts of this plan while agreeing [agent threads and forwarding](../plans/agent-threads-and-forwarding.md). Where this section and the text above disagree, this section holds.
 
-- **The request offers Allow and Decline only.** Always allow moves to the agent's page, in a danger zone that lists the people who can ask without approval. An entry names one person and applies in every chat the owner shares with them. Adding a person opens a danger confirmation.
-- **Allow covers one message.** A later message from the same person is a new request.
-- **An agent dohc starts gets the warning, not a limit.** The plan above limited such a run to what the asker can reach. dohc cannot build that limit, so it must not offer it. The request says: "<agent> runs on this computer as you. dohc can't limit what it does for <person>."
-- **A link holder can ask.** Their name is unverified, so Allow opens a second confirmation that says so. A link holder can never be added to the list.
+- **The request offers Allow and Decline only.** Always allow moves to the agent's page, in a danger zone that lists the people who can ask without approval. An entry is one server account, never a name or an email. It applies in every chat the owner shares with that person, in every workspace the agent serves. Adding a person opens a danger confirmation.
+- **Allow covers one revision of one message.** The request shows the exact text dohc will pass on. An edit or a delete before the owner answers cancels the request. A later message from the same person is a new request.
+- **An agent dohc starts gets the warning, not a limit.** The plan above limited such a run to what the asker can reach. dohc cannot build that limit, so it must not offer it. The request names the computer: "<agent> runs on <computer> as you. dohc can't limit what it does for <person>."
+- **A link holder can ask.** Their name is unverified, so Allow opens a second confirmation that says so, and the agent is told the sender is an unverified link holder. A link holder can never be added to the list.
 
-The person who asks sees nothing until the owner allows. A request does not expire.
+The server fixes who sent a message, and only the owner's signed-in account can answer a request. The person who asks sees nothing until the owner allows. A request does not expire.
 
 ## Considered options
 
