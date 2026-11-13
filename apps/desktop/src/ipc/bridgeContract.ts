@@ -496,7 +496,9 @@ export type SaveOwnerLiveRecoveryCopyResult = z.infer<typeof SaveOwnerLiveRecove
 export const OwnerLiveDocument = z.object({
   path: SAFE_RELATIVE_PATH,
   status: z.enum(["ready", "preparing", "paused", "unavailable", "retired"]),
-  reason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "conflict-parent-withheld", "live-history-over-budget"]).optional(),
+  reason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "conflict-parent-withheld", "live-history-over-budget", "live-start-failing"]).optional(),
+  // The server's word for why the row isn't live, and since when; a live-start-failing row has it. The server takes the word from a known list.
+  failure: z.object({word: z.string().regex(/^[a-z0-9-]{1,64}$/), since: z.iso.datetime()}).strict().optional(),
   canResume: z.boolean(),
   // A retired row's: its owner's Pause or Stop retired it. One the server released without either goes live again when its owner opens it.
   stopped: z.boolean().optional(),
@@ -1515,7 +1517,7 @@ const SYNC_STATUS_BASE_FIELDS = {
     .optional(),
   // Active describes owner live delivery, not a fully synchronized workspace.
   ownerLiveDelivery: z.enum(["preparing", "active", "retrying"]).optional(),
-  ownerLiveDeliveryReason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "conflict-parent-withheld", "live-history-over-budget", "restart-required", "unsent-edits-limit"]).optional(),
+  ownerLiveDeliveryReason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "conflict-parent-withheld", "live-history-over-budget", "live-start-failing", "restart-required", "unsent-edits-limit"]).optional(),
   // Files that take no edits until the ones waiting for the server reach it.
   ownerLivePausedPaths: z.array(SAFE_RELATIVE_PATH).optional(),
   ownerLiveStopFailures: z.array(z.object({objectId:z.string().min(1),path:SAFE_RELATIVE_PATH,detail:z.string()})).optional(),

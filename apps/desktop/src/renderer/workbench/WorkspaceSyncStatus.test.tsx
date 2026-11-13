@@ -296,6 +296,11 @@ describe("sync status surface", () => {
       reason: "live-history-over-budget" as const,
       label: "Live editing can't start",
     },
+    {
+      delivery: "retrying" as const,
+      reason: "live-start-failing" as const,
+      label: "Live editing can't start",
+    },
   ])("labels $delivery owner live delivery as $label", ({ delivery, reason, label }) => {
     renderStatus({ syncStatus: liveDeliveryStatus(delivery, reason) });
     const live = screen.getByTestId("owner-live-delivery-status");

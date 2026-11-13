@@ -488,6 +488,8 @@ describe("owner live document enrollment", () => {
         {path: "diverged.md", objectId: "diverged", status: "unavailable", reason: "session-host-diverged"},
         {path: "edited.md", objectId: "edited", status: "unavailable", reason: "live-edit-unadmitted"},
         {path: "long.md", objectId: "long", status: "unavailable", reason: "live-history-over-budget"},
+        {path: "failing.md", objectId: "failing", status: "unavailable", reason: "live-start-failing", failure: {word: "engine-refused", since: "2026-11-13T01:00:00.000Z"}},
+        {path: "newer.md", objectId: "newer", status: "unavailable", reason: "a-reason-from-a-newer-server", failure: {word: "x"}},
       ]});
     await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId, retiredAfter: "older.md"})).resolves.toEqual({
       documents: [
@@ -504,6 +506,10 @@ describe("owner live document enrollment", () => {
         {path: "edited.md", objectId: "edited", status: "unavailable", reason: "live-edit-unadmitted", canResume: true},
         // A Resume fails the same way because ordinary edits never give the document a new base.
         {path: "long.md", objectId: "long", status: "unavailable", reason: "live-history-over-budget", canResume: false},
+        // The server keeps trying; a Resume tries now.
+        {path: "failing.md", objectId: "failing", status: "unavailable", reason: "live-start-failing", failure: {word: "engine-refused", since: "2026-11-13T01:00:00.000Z"}, canResume: true},
+        // A newer server's reason this build doesn't know keeps the row, by its status alone.
+        {path: "newer.md", objectId: "newer", status: "unavailable", canResume: false},
       ], nextCursor: "old.md",
     });
     expect(h.request.mock.calls.map((call) => call[1])).toEqual([

@@ -16,6 +16,7 @@ import {
   type LiveRefusalRow,
   type LiveStopWaitingNotice,
 } from "./LiveDocumentsDialog";
+import { formatShortTime } from "./time";
 
 // The server names each row's document; here, after its path.
 function row(path: string, overrides: Partial<LiveDocumentRow> = {}): LiveDocumentRow {
@@ -90,6 +91,35 @@ it("shows a document whose edit history the server can't check, with Stop and no
   expect(long.children[1]?.textContent).toBe("History too long");
   expect(within(long).getByText("This document's edit history is too long for the server to check, so live editing can't start. You can keep editing it in dohc, and your edits keep syncing. People you shared it with can't edit it live.")).toBeDefined();
   expect(actions("docs/long.md")).toEqual(["Stop live editing"]);
+});
+
+// The server keeps trying it; the row says why in the server's word, and Resume tries now.
+it("shows a document whose live start keeps failing, with the server's reason to copy, Resume and Stop", async () => {
+  const h = harness(), user = userEvent.setup();
+  const since = "2026-11-13T01:00:00.000Z";
+  h.load.mockResolvedValue(page([row("docs/failing.md", {status: "unavailable", reason: "live-start-failing", failure: {word: "engine-refused", since}, canResume: true})]));
+  render(<LiveDocumentsDialog workspaceId="ws-1" {...h} />);
+  const failing = await screen.findByTestId("live-document-row-docs/failing.md");
+  expect(failing.children[1]?.textContent).toBe("Can't start");
+  expect(within(failing).getByText("The server can't start live editing for this document. It keeps trying. You can keep editing it in dohc and your edits keep syncing, but people you shared it with can't edit it live until it starts.")).toBeDefined();
+  const line = `Server's reason: engine-refused, since ${formatShortTime(Date.parse(since))}`;
+  expect(within(failing).getByText(line)).toBeDefined();
+  await user.click(within(failing).getByRole("button", {name: "Copy the server's reason"}));
+  expect(await navigator.clipboard.readText()).toBe(line);
+  expect(actions("docs/failing.md").filter(name => name?.endsWith("live editing"))).toEqual(["Resume live editing", "Stop live editing"]);
+  await user.click(within(failing).getByRole("button", {name: "Resume live editing"}));
+  expect(h.resume).toHaveBeenCalledWith("ws-1", "docs/failing.md");
+});
+
+// The server's reason line belongs to the row form, so another reason that carries one shows it under its own sentence.
+it("shows the server's reason on any row that carries one", async () => {
+  const h = harness();
+  const since = "2026-11-13T01:00:00.000Z";
+  h.load.mockResolvedValue(page([row("docs/refused.md", {status: "unavailable", reason: "session-host-refused", failure: {word: "relay-error", since}, canResume: true})]));
+  render(<LiveDocumentsDialog workspaceId="ws-1" {...h} />);
+  const refused = await screen.findByTestId("live-document-row-docs/refused.md");
+  expect(within(refused).getByText(`Server's reason: relay-error, since ${formatShortTime(Date.parse(since))}`)).toBeDefined();
+  expect(within(refused).getByRole("button", {name: "Copy the server's reason"})).toBeDefined();
 });
 
 function paths(): string[] {
@@ -564,7 +594,7 @@ describe("LiveDocumentsDialog", () => {
     expect(actions("docs/diverged.md")).toEqual([]);
     // Only the document dohc has never opened says to open it before Resume.
     const openFirst =
-      "Live editing can't start until you open this document once in dohc. After you open it, resume live editing.";
+      "Live editing can't start until you open this document once in dohc. After you open it, resume live editing. A note larger than 256 KB doesn't open as a document in dohc. Make it smaller or split it, then open it.";
     expect(screen.getAllByText(openFirst)).toHaveLength(1);
     expect(screen.getByTestId("live-document-row-docs/unopened.md").textContent).toContain(openFirst);
 

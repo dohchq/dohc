@@ -681,7 +681,7 @@ function liveDeliveryCopy(
   if (reason === "live-document-without-lineage") {
     return {
       title: "Live editing can't start",
-      body: "The server can't start live editing for a document in this workspace until you open it once in dohc. Open Live documents to see which document. After you open it, resume live editing there.",
+      body: "The server can't start live editing for a document in this workspace until you open it once in dohc. A note larger than 256 KB doesn't open as a document in dohc. Make it smaller or split it, then open it. Open Live documents to see which document. After you open it, resume live editing there.",
       recovery: "live-documents",
       Icon: AlertTriangle,
     };
@@ -703,6 +703,15 @@ function liveDeliveryCopy(
       body: "A document in this workspace has too much edit history for the server to check, so live editing can't start for it. Your edits are saved and keep syncing. Open Live documents to see which document.",
       recovery: "live-documents",
       Icon: AlertTriangle,
+    };
+  }
+  // The server keeps trying it, so it shows the retry mark. Resume in Live documents tries now.
+  if (reason === "live-start-failing") {
+    return {
+      title: "Live editing can't start",
+      body: "The server can't start live editing for a document in this workspace. It keeps trying. Open Live documents to see which one.",
+      recovery: "live-documents",
+      Icon: RefreshCw,
     };
   }
   if (reason === "conflict-parent-withheld") {
