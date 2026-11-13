@@ -312,8 +312,8 @@ export function createNoticeStore(options: {
       pruned = true;
     }
     if (pruned) saveList();
-    // By the result's expiry the relay has let the row go, a retention after the mark landed, and no read stays on its
-    // way that long. The held row, given the result's expiry, goes in the same pass.
+    // A result expires no sooner than the row it was sent against, so a late copy of that row is past its expiry too
+    // and is pruned without the entry. The held row, given the result's expiry, goes in the same pass.
     for (const [id, entry] of acked) if (entry.result.expiresAtMs <= at) acked.delete(id);
     const waiting = new Map<string, PendingMark[]>();
     for (const mark of marks) {
