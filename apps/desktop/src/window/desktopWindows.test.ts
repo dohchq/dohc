@@ -976,7 +976,7 @@ describe("desktop native menus", () => {
     f.windows.trackWorkspaceWindow(first.native);
     f.windows.trackWorkspaceWindow(explicit.native);
     f.windows.refreshApplicationMenu();
-    click(item(f, "File", "New file"));
+    click(item(f, "File", "New page"));
     expect(first.webContents.send).toHaveBeenCalledWith(CHANNELS.menuCommand, "new-file");
     click(item(f, "Go", "Settings"), explicit.native);
     expect(explicit.webContents.send).toHaveBeenCalledWith(CHANNELS.menuCommand, "settings");
@@ -1203,7 +1203,7 @@ describe("desktop native menus", () => {
     f.windows.refreshApplicationMenu();
     const appMenu = submenu(f.templates.at(-1)![0]!);
     click(appMenu.find((entry) => entry.label === "Settings…")!);
-    click(item(f, "File", "New file"));
+    click(item(f, "File", "New page"));
     click(item(f, "File", "Close tab"));
     expect(f.dependencies.createMainWindow).toHaveBeenCalledOnce();
     const created = f.all[0]!;
@@ -1229,7 +1229,7 @@ describe("desktop native menus", () => {
     const starting = new Window().startLoad();
     f.windows.trackWorkspaceWindow(starting.native);
     f.windows.refreshApplicationMenu();
-    click(item(f, "File", "New file"), starting.native);
+    click(item(f, "File", "New page"), starting.native);
     click(item(f, "File", "Close tab"));
     expect(starting.webContents.send).not.toHaveBeenCalled();
     starting.finishLoad();
@@ -1247,7 +1247,7 @@ describe("desktop native menus", () => {
     window.webContents.loading = true;
     f.windows.trackWorkspaceWindow(window.native);
     f.windows.refreshApplicationMenu();
-    click(item(f, "File", "New file"));
+    click(item(f, "File", "New page"));
     expect(window.webContents.send).not.toHaveBeenCalled();
     window.webContents.loading = false;
     window.webContents.emit("did-stop-loading");
@@ -1260,7 +1260,7 @@ describe("desktop native menus", () => {
     const f = fixture("darwin");
     const exportWindow = new Window();
     f.windows.refreshApplicationMenu();
-    click(item(f, "File", "New file"), exportWindow.native);
+    click(item(f, "File", "New page"), exportWindow.native);
     expect(exportWindow.webContents.send).not.toHaveBeenCalled();
     expect(f.dependencies.createMainWindow).toHaveBeenCalledOnce();
     expect(f.windows.workspaceWindows.allLive()).toEqual([f.all[0]!.native]);
@@ -1269,7 +1269,7 @@ describe("desktop native menus", () => {
   it("drops a window-less menu command when its new window closes before it loads", () => {
     const f = fixture("darwin");
     f.windows.refreshApplicationMenu();
-    click(item(f, "File", "New file"));
+    click(item(f, "File", "New page"));
     const closing = f.all[0]!;
     closing.destroy();
     closing.finishLoad();

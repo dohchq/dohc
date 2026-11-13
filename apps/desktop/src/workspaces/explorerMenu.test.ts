@@ -148,6 +148,12 @@ describe("a joined workspace", () => {
     }
     expect(commands({ kind: "root", shareView: joined("comment"), memberRole: "admin" })).toEqual(["export-zip"]);
   });
+
+  it("names a new page as the rest of dohc does", () => {
+    const labels = explorerMenuEntries(scope({ kind: "root", shareView: joined("edit"), memberRole: "admin" }), "linux")
+      .flatMap((entry) => (entry.kind === "item" ? [entry.label] : []));
+    expect(labels.slice(0, 2)).toEqual(["New page", "New folder"]);
+  });
 });
 
 describe("a share mount inside an ordinary workspace", () => {

@@ -99,7 +99,7 @@ export function explorerMenuEntries(
     return [
       ...(canWrite
         ? [
-            item("New file", "new-file"),
+            item("New page", "new-file"),
             ...(canCreateFolder ? [item("New folder", "new-folder")] : []),
             ...(canCreateCollection ? [item("New collection…", "new-collection")] : []),
             separator,
@@ -117,7 +117,7 @@ export function explorerMenuEntries(
     ...(scope.canShare && !isSharedView ? [item("Share…", "share"), separator] : []),
     ...(canWrite && scope.kind === "folder"
       ? [
-          item("New file", "new-file"),
+          item("New page", "new-file"),
           ...(canCreateFolder ? [item("New folder", "new-folder")] : []),
           ...(canCreateCollection ? [item("New collection…", "new-collection")] : []),
           // Folder-targeted import: files land IN this folder (the renderer

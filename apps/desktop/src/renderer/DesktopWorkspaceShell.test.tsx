@@ -693,7 +693,7 @@ describe("collection folders", () => {
     // gate working, not the palette failing to open.
     await within(palette).findByText("New editor group right");
     for (const label of [
-      "New file",
+      "New page",
       "New file…",
       "New drawing",
       "New folder",
@@ -771,7 +771,7 @@ describe("open editors", () => {
     renderShell(bridge);
 
     await screen.findAllByTestId("tree-row");
-    await user.click(screen.getByLabelText("New file"));
+    await user.click(screen.getByLabelText("New page"));
     await user.keyboard("{Enter}Day one");
     await waitFor(() => expect(bridge.createWorkspaceFile).toHaveBeenCalledTimes(1));
     expect(hasPendingEditorDrafts()).toBe(true);
@@ -790,7 +790,7 @@ describe("open editors", () => {
     renderShell(bridge);
 
     await screen.findAllByTestId("tree-row");
-    await user.click(screen.getByLabelText("New file"));
+    await user.click(screen.getByLabelText("New page"));
     await user.keyboard("Lisbon{Enter}Day one");
     await user.click(screen.getAllByLabelText("Close Lisbon")[0]!);
     await act(async () => created.resolve({ path: "Lisbon.md" }));

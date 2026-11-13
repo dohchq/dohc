@@ -165,7 +165,7 @@ export interface ExplorerProps {
   // Incrementing request to begin an inline folder create at the root
   // (palette / application-menu "New Folder" route).
   newFolderRequest: number | null;
-  // New file opens a new page whose file will go in this folder ("" = root).
+  // New page opens a new page whose file will go in this folder ("" = root).
   onNewPage: (folder: string) => void;
   // Paths to select once their rows render ("Show in Explorer", or what an
   // import added). The first in the tree takes focus. The shell expands their
@@ -2792,7 +2792,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
               <div className="flex shrink-0 items-center gap-0.5">
                 {props.creates?.pages !== false ? (
                   <SectionActionButton
-                    label="New file"
+                    label="New page"
                     onClick={() => props.onNewPage(creationParentPath())}
                   >
                     <FilePlus2 size={13} aria-hidden />

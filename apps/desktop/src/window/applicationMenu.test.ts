@@ -41,7 +41,7 @@ describe("application menu template", () => {
 
   it("clicking a custom item sends its MenuCommand to the clicked window", () => {
     const { template, sendCommand } = build();
-    const newFile = items(template, "File").find((i) => i.label === "New file");
+    const newFile = items(template, "File").find((i) => i.label === "New page");
     const fakeWindow = { id: 1 };
     (newFile?.click as (a: unknown, b: unknown) => void)(undefined, fakeWindow);
     expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "new-file");
@@ -92,7 +92,7 @@ describe("application menu template", () => {
   it("renderer-owned accelerators are displayed but not registered", () => {
     const { template } = build();
     for (const [menu, label, accelerator] of [
-      ["File", "New file", "CommandOrControl+N"],
+      ["File", "New page", "CommandOrControl+N"],
       ["File", "Close tab", "CommandOrControl+W"],
       ["View", "Command palette", "CommandOrControl+Shift+P"],
       ["View", "Go to", "CommandOrControl+P"],

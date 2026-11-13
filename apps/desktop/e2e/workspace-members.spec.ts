@@ -751,9 +751,9 @@ test("@two-client a member creates a page that reaches the owner, and an admin c
     });
     await revealExplorerPath(mine, "notes/plan.md");
     const header = mine.getByTestId("explorer-files-header");
-    await expect(header.getByRole("button", { name: "New file" })).toBeVisible({ timeout: 60_000 });
+    await expect(header.getByRole("button", { name: "New page" })).toBeVisible({ timeout: 60_000 });
     await expect(header.getByRole("button", { name: "New folder" })).toHaveCount(0);
-    await header.getByRole("button", { name: "New file" }).click();
+    await header.getByRole("button", { name: "New page" }).click();
     await expect(mine.getByLabel("Page title")).toBeFocused();
     await mine.keyboard.type("Ideas");
     await themed(mine, "new-page-joined", async () => {
@@ -797,13 +797,13 @@ test("@two-client a member creates a page that reaches the owner, and an admin c
     await admin.close();
     admin = null;
 
-    // --- At Comment, Sam gets no New file and a read-only document --------
+    // --- At Comment, Sam gets no New page and a read-only document --------
     // Kai's window covered Sam's, and a hidden window does not check its
     // access. Sam looks at the window again.
     await member.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.show());
     await expect.poll(() => mine.evaluate(() => document.visibilityState)).toBe("visible");
     await setLevel("comment");
-    await expect(header.getByRole("button", { name: "New file" })).toHaveCount(0, { timeout: 120_000 });
+    await expect(header.getByRole("button", { name: "New page" })).toHaveCount(0, { timeout: 120_000 });
     await explorerRow(mine, "notes/plan.md").click();
     // The page opens to read, and Edit does not open the editor.
     const page = mine.getByRole("main");

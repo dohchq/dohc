@@ -894,7 +894,7 @@ describe("moveInMenu", () => {
     expect(moveInMenu(key("ArrowDown"), 0, [])).toBeNull();
   });
 
-  // Ctrl+N is New file and Ctrl+D a shortcut too: they belong to the app.
+  // Ctrl+N is New page and Ctrl+D a shortcut too: they belong to the app.
   it("leaves a letter held with Ctrl, Meta or Alt to the app's shortcuts", () => {
     expect(moveInMenu(key("h", { ctrlKey: true }), 0, labels)).toBeNull();
     expect(moveInMenu(key("d", { metaKey: true }), 0, labels)).toBeNull();

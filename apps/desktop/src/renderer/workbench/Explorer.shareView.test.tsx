@@ -141,13 +141,13 @@ describe("creating in a joined workspace", () => {
 
   it("offers a new page at Edit and hides page and folder creation below it", () => {
     render(<Explorer {...explorerProps({ shareView: joined, creates: { pages: false, folders: false } })} />);
-    expect(header().queryByRole("button", { name: "New file" })).toBeNull();
+    expect(header().queryByRole("button", { name: "New page" })).toBeNull();
     expect(header().queryByRole("button", { name: "New folder" })).toBeNull();
     cleanup();
 
     const onNewPage = vi.fn();
     render(<Explorer {...explorerProps({ shareView: joined, creates: { pages: true, folders: false }, onNewPage })} />);
-    fireEvent.click(header().getByRole("button", { name: "New file" }));
+    fireEvent.click(header().getByRole("button", { name: "New page" }));
     expect(onNewPage).toHaveBeenCalledWith("");
     expect(header().queryByRole("button", { name: "New folder" })).toBeNull();
   });

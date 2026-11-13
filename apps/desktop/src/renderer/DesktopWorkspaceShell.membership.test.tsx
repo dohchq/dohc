@@ -103,12 +103,13 @@ describe("a joined workspace", () => {
     ["comment", "member", false, false],
     ["edit", "member", true, false],
     ["edit", "admin", true, true],
-  ] as const)("at %s, a %s gets New file %s and New folder %s in the Explorer", async (access, role, page, folder) => {
+  ] as const)("at %s, a %s gets New page %s and New folder %s in the Explorer", async (access, role, page, folder) => {
     const bridge = withGroup(access, { status: "current", access, role });
     await waitFor(() => expect(bridge.checkSharedViewAccess).toHaveBeenCalled());
     const header = within(await screen.findByTestId("explorer-files-header"));
     await waitFor(() => expect(header.queryByRole("button", { name: "New folder" }) !== null).toBe(folder));
-    expect(header.queryByRole("button", { name: "New file" }) !== null).toBe(page);
+    expect(header.queryByRole("button", { name: "New page" }) !== null).toBe(page);
+    expect(header.queryByRole("button", { name: "New file" })).toBeNull();
   });
 
   it("applies a level change at once, with a toast and a Notices row", async () => {
