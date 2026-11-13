@@ -19,8 +19,8 @@ import {
   shellBootstrapProps,
 } from "./DesktopWorkspaceShell.testHarness";
 import {
+  CHAT_LOOKUP_FAILED_NOTE,
   CHAT_NOT_FOUND_NOTE,
-  RUN_THREAD_LOOKUP_FAILED_NOTE,
   type NoticeTarget,
 } from "../notices/noticeTarget";
 import { openWorkLinkInDohc } from "./workLinkOpener";
@@ -147,6 +147,6 @@ describe("a work link clicked in dohc", () => {
     expect(await screen.findByText(CHAT_NOT_FOUND_NOTE, { exact: false })).toBeTruthy();
 
     await act(async () => older.reject(new Error("engine stopped")));
-    expect(screen.queryByText(RUN_THREAD_LOOKUP_FAILED_NOTE, { exact: false })).toBeNull();
+    expect(screen.queryByText(CHAT_LOOKUP_FAILED_NOTE, { exact: false })).toBeNull();
   });
 });
