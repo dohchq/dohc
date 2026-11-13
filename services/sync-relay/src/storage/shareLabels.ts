@@ -3,7 +3,7 @@ import type {StorageContext} from "./context";
 import {shareLabelFor, type ShareLabelReader} from "../shareFilter";
 // The label is stored as the owner wrote it and withheld as it is read, so
 // a label stored before a link was withheld reads the same way.
-export function getShareLabels(storage: StorageContext, shareId: string, reader: ShareLabelReader = "member"): ShareLabels {
+export function getShareLabels(storage: StorageContext, shareId: string, reader: ShareLabelReader): ShareLabels {
   const row = storage.db.prepare(`SELECT l.subject_name, s.selector_json FROM sync_relay_share_labels l
     JOIN sync_relay_shares s ON s.share_id = l.share_id WHERE l.share_id = ?`).get(shareId);
   const stored = normalizeShareLabel(row?.subject_name);
