@@ -114,7 +114,8 @@ function logWriter(storage: SyncRelayStorage, workspaceId = "trip") {
     const relaySeq = Number(row.relay_seq);
     if (opKind === "moment.append") {
       context.db.prepare(`INSERT INTO sync_relay_object_moments (workspace_id, object_id, relay_seq, moment_id, version_id, path, recorded_at_ms)
-        VALUES (?, ?, ?, ?, 'main', ?, 1)`).run(workspaceId, String(payload.objectId), relaySeq, `moment-${relaySeq}`, payload.path ?? null);
+        VALUES (?, ?, ?, ?, ?, ?, 1)`).run(workspaceId, String(payload.objectId), relaySeq, `moment-${relaySeq}`,
+        typeof payload.versionId === "string" ? payload.versionId : "main", payload.path ?? null);
     }
     return relaySeq;
   });
@@ -288,6 +289,25 @@ it("shows a shared file's Notice only while the file stays in the share, whateve
   expect(await deleted.clone().text()).toBe(secret);
   expect(elsewhere).toBe(secret);
   expect(ids(await page(deleted))).toEqual([]);
+});
+
+it("keeps a shared file's Notice whatever a version the share doesn't cover does with the file", async () => {
+  const { storage, read, post } = await relay();
+  shareNotesWithAna(storage);
+  const write = logWriter(storage, "bens");
+  write("moment.append", { objectId: "object-list", path: "notes/list.md" });
+  post("share-file", { reach: { shareId: "share-ben" }, target: { path: "notes/list.md" } });
+  const before = await (await read("scope=phone")).text();
+  write("moment.append", { objectId: "object-list", path: "private/list.md", versionId: "draft" });
+  const outside = await (await read("scope=phone")).text();
+  write("moment.append", { objectId: "object-list", path: ".env", versionId: "draft" });
+  const secret = await (await read("scope=phone")).text();
+  write("moment.append", { objectId: "object-list", path: "notes/list.md", versionId: "draft" });
+  const inside = await read("scope=phone");
+  expect(await inside.clone().text()).toBe(before);
+  expect(outside).toBe(before);
+  expect(secret).toBe(before);
+  expect(ids(await page(inside))).toEqual(["share-file"]);
 });
 
 it("leaves out a share-placed row whose target reach settlement removed, even after the whole list was read", async () => {
