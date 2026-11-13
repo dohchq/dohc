@@ -264,7 +264,7 @@ async function acceptedShared(f: Awaited<ReturnType<typeof fixture>>, steps: str
   return { ...run, press, inspect };
 }
 
-it.skipIf(nativeEngine.missing).each([true])("runs a relay-authenticated document Button through native claims with dataset create access: %s", async allowed => {
+it.skipIf(nativeEngine.missing).each([true, false])("runs a relay-authenticated document Button through native claims with dataset create access: %s", async allowed => {
   const f = await fixture();
   f.addEditor("edit", ["Log"]);
   f.host.setDataGrant(owner, { ...scope, grantId: editor.grantId, grant: { operationIds: allowed ? [READ, CREATE] : [READ], discover: true,

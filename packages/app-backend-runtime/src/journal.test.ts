@@ -246,6 +246,11 @@ it("rolls back a failed claim and recovers lost claim acknowledgment without rep
   expect(f.db.prepare("SELECT bytes FROM accounting").get()!.bytes).toBe(charged);
 });
 
+it("refuses checkpoint transition after a competing write or withdrawal",()=>{
+  const f=fixture(),input=migration(f,f.initial);f.journal.commitOperation(f.prepare());expect(()=>f.journal.transitionCheckpoint(input)).toThrow("The Collection changed. Try again.");
+  f.revoke();expect(()=>f.journal.transitionCheckpoint(input)).toThrow("denied");
+});
+
 it("exports pinned immutable history while later writes and schema transitions continue",()=>{
   const f=fixture(); const first=f.journal.commitOperation(f.prepare());if(first.kind!=="committed")throw Error();
   const captured=f.journal.captureExport({scope:f.scope,authorize:f.authorize,capture:()=>({label:"approved original"})});

@@ -19,7 +19,7 @@ import { createAutomationFormulaEvaluator, type AutomationFormulaEvaluator } fro
 import { definitionHash, localIsoTime } from "@dohc/automation-executor/automation-plan";
 import { type ReachRoster, type RosterGrant } from "@dohc/automation-executor/automation-reach";
 import { createAutomationRunStore, type AutomationRunStore, type ReportedFailure, type StoredRun, type StoredSubscription } from "@dohc/automation-executor/automation-run-store";
-import { fakeLocalStateOpens } from "../testing/preparedLocalState";
+import { fakeLocalStateOpens, preparedAutomationStoreFolder } from "../testing/preparedLocalState";
 import { localAutomationStoreFolder } from "./localAutomationStore";
 import { automationHostGeneration, createAutomationHosts, HANDOVER_READ_FIRST_MS, HOST_FRESH_MS, type AutomationHosts } from "./automationHost";
 
@@ -2402,6 +2402,36 @@ it.each(["before receipts"])("replays shared Undo batches after a crash %s", asy
   expect(events).toEqual(["barrier", "receipts", "barrier", "receipts"]);
   expect((await w.baseStore.runsOf(TASKS, claim.claimId)).runs[0]?.undoWrites).toHaveLength(101);
 });
+
+it.skipIf(!process.env.DOHC_UNDO_BENCHMARK)("measures production Undo of 2000 records", async () => {
+  const w = await world({collections: ["Tasks", "Log"], automations: {Tasks: BUMP}});
+  await w.executor.open();
+  await w.executor.idle();
+  const listed = await w.executor.automationsIn("Tasks");
+  if (listed.status !== "read") throw new Error("No definitions");
+  const entry = listed.automations.find(item => item.valid);
+  if (!entry?.valid) throw new Error("No definition");
+  const records = Array.from({length: 2000}, (_, index) => w.addRecord("Tasks", `bench-${index}`, {Count: 2}));
+  const claim = w.claim(TASKS, records[0]!);
+  claim.state = "done";
+  const run = newRun(claim, entry.automation, "benchmark-1", Date.now());
+  run.outcome = {state: "done"}; run.finishedAtMs = Date.now(); run.settled = true;
+  run.steps = [{ordinal: 0, effects: records.map(record => ({kind: "set", target: {recordId: record.id,
+    path: record.path, collectionPath: "Tasks"}, fields: [{field: "Count", before: 1, after: 2}]}))}];
+  run.applied = [{ordinal: 0, writes: records.map(record => ({kind: "field", recordId: record.id,
+    path: record.path, field: "Count", before: 1, after: 2}))}];
+  const store = createAutomationRunStore(preparedAutomationStoreFolder(w.root));
+  await store.save(run);
+  const start = performance.now();
+  const result = await w.executor.undo({automationId: TASKS, claimId: claim.claimId, deletes: null}, async () => {});
+  const milliseconds = performance.now() - start;
+  await writeFile(process.env.DOHC_UNDO_BENCHMARK!, JSON.stringify({benchmark: "production-undo-2000", milliseconds, journaled: w.journaled.length, result}));
+  console.log(JSON.stringify({benchmark: "production-undo-2000", milliseconds, result}));
+  expect(result).toMatchObject({status: "undone", reverted: 2000});
+  expect(records.every(record => w.fieldsOf(record).Count === 1)).toBe(true);
+  console.log(JSON.stringify({benchmark: "production-undo-2000", milliseconds, journaled: w.journaled.length}));
+  await w.executor.close();
+}, 180_000);
 
 it("automation usage follows the local record off switch without stopping the run", async () => {
   const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: BUMP } });

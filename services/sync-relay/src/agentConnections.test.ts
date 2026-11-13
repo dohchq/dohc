@@ -486,6 +486,28 @@ describe("agent sign-in for share links", () => {
     expect(await agentStatuses(f, link)).toEqual({});
   });
 
+  it("retires connections when the owner ends the whole share", async () => {
+    const f = await fixture();
+    const link = await createLink(f);
+    const agent = await connect(f, link);
+    await ok(await f.h(request(OWNER, `/sync/shares/${link.shareId}/revoke`, { method: "POST" })));
+    await expectRefused(await introspect(f, agent.accessToken));
+    await expectRefused(await refresh(f, agent.clientId, agent.refreshToken, link.resource));
+    expect(connectionRow(f.dbPath, agent.connectionId)).toEqual({ status: "retired", tokens: 0 });
+  });
+
+  it("retires connections when the owner's account is deleted", async () => {
+    const f = await fixture();
+    const link = await createLink(f);
+    const agent = await connect(f, link);
+    const context = f.storage as StorageContext;
+    initializeAccountDeletion(context, DELETION_KEY);
+    fenceAccount(context, DELETION_KEY, OWNER, `${OWNER}@dohc.test`);
+    await expectRefused(await introspect(f, agent.accessToken));
+    await expectRefused(await refresh(f, agent.clientId, agent.refreshToken, link.resource));
+    expect(connectionRow(f.dbPath, agent.connectionId)).toEqual({ status: "retired", tokens: 0 });
+  });
+
   it("keeps connections ended after Undo restores an ended link", async () => {
     const f = await fixture();
     const link = await createLink(f);

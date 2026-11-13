@@ -328,6 +328,16 @@ describe("direct writes to a Collection's own files", () => {
     await expectCode(await write(narrow, [create(`${PACKING}/One.md`, body)]), 403, "share_op_rejected");
   });
 
+  it("rejects a forged author or owner identity on a record request", async () => {
+    const r = await relay();
+    const body = record(), change = create(`${PACKING}/One.md`, body);
+    await upload(r, body);
+    await expectCode(await write(r, [{ ...change, author: { kind: "named", userId: OWNER } }]), 403, "share_op_rejected");
+    await expectCode(await r.h(request(RECIPIENT, `/sync/shares/${r.shareId}/collection-writes`,
+      jsonBody({ submitId: "forged", changes: [change], workspaceId: WORKSPACE }))), 403, "share_op_rejected");
+    expect(await r.owner.directMoments()).toEqual([]);
+  });
+
   it("rechecks revocation inside the commit after record content validation", async () => {
     const r = await relay();
     const body = record();
@@ -817,6 +827,51 @@ describe("direct writes through an Edit share link", () => {
     for (const excluded of ['"authors"', 'admittedAuthorSnapshot', LINK_GRANT, String(principal.principal_id), TOKEN, PROFILE]) {
       expect(accountlessBody).not.toContain(excluded);
     }
+  });
+
+  it.skipIf(!process.env.SHARE_AUTHOR_PERF_OUTPUT)("measures direct-write routes and share reads", async () => {
+    const {writeFile} = await import("node:fs/promises");
+    let clock = CLOCK;
+    const r = await linkRelay({overrides: {nowMs: () => clock,
+      lookupUserDisplayName: async () => {
+        // Model a 2 ms account-service round trip in this performance workload.
+        await new Promise(resolve => setTimeout(resolve, 2));
+        return "Recipient";
+      }}});
+    sql(r, "UPDATE sync_relay_link_sessions SET expires_at_ms=10000000");
+    const coShare = await createShare(r.h, OWNER, WORKSPACE, {recipientUserId: "coeditor", paths: ["trip"], access: "edit"});
+    await upload(r, SCHEMA, SCHEMA_TWO);
+    let before = SCHEMA;
+    const samples: Record<string, number[]> = {namedWrite: [], linkWrite: [], shareRead: []};
+    for (const lane of ["namedWrite", "linkWrite"] as const) {
+      for (let i = 0; i < 280; i++) {
+        clock += 3000;
+        const after = before === SCHEMA ? SCHEMA_TWO : SCHEMA;
+        const cursor = r.storage.fetchLogPageDescending({workspaceId: WORKSPACE, beforeRelaySeq: null, limit: 1})[0]!.relaySeq;
+        const start = performance.now();
+        const response = lane === "namedWrite"
+          ? await write(r, [edit(`${PACKING}/collection.yaml`, before, after)], {submitId: `perf-${lane}-${i}`})
+          : await linkWrite(r, [linkEdit(`${PACKING}/collection.yaml`, before, after)], {submitId: `perf-${lane}-${i}`});
+        await response.text();
+        const elapsed = performance.now() - start;
+        expect(response.status).toBe(200);
+        if (i >= 40) samples[lane]!.push(elapsed);
+        const readStart = performance.now();
+        const read = await r.h(request("coeditor", `/sync/shares/${coShare}/log?since=${cursor}&limit=10`));
+        const body = await read.text();
+        const readElapsed = performance.now() - readStart;
+        expect(read.status).toBe(200);
+        expect(JSON.parse(body).ops).toHaveLength(1);
+        if (i >= 40) samples.shareRead!.push(readElapsed);
+        before = after;
+      }
+    }
+    const results = Object.fromEntries(Object.entries(samples).map(([lane, values]) => {
+      const sorted = [...values].sort((a, b) => a - b);
+      return [lane, {requests: values.length, medianMs: sorted[Math.floor(sorted.length / 2)], p95Ms: sorted[Math.ceil(sorted.length * 0.95) - 1], samplesMs: values}];
+    }));
+    await writeFile(process.env.SHARE_AUTHOR_PERF_OUTPUT!, JSON.stringify(results, null, 2));
+    console.log(JSON.stringify(Object.fromEntries(Object.entries(results).map(([lane, result]) => [lane, {...result, samplesMs: undefined}]))));
   });
 
   it("creates a record with link-principal provenance and obeys the owner's pause control", async () => {

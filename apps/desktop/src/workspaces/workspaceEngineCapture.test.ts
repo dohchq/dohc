@@ -1676,6 +1676,47 @@ describe("workspaceEngineCapture relay sync materialization", () => {
 
   // dohc removes a folder only when nothing but empty folders is left in it.
   // A file it doesn't track keeps the folder, so the page stops there.
+  it("merges 150 recorded files without desktop copies or notices", async () => {
+    const root = await createTestScratch("merge-150-recorded-");
+    await openedLocalState({ workspaceId: WORKSPACE_ID, rootPath: root });
+    const loopback = new VersionedLoopbackEngine();
+    const send = loopback.sendRequest.bind(loopback);
+    const requests: Request[] = [];
+    vi.spyOn(loopback, "sendRequest").mockImplementation(async request => {
+      requests.push(request);
+      if (request.method === "conflicts.list") return { id: request.id, result: { conflicts: [], nextAfterConflictId: null } };
+      const response = await send(request);
+      // Model the engine's immediate publication of each text merge.
+      if (request.method === VERSIONED_METHOD.versionsMerge) await write(root, (request.params as { path: string }).path, "incoming");
+      return response;
+    });
+    for (let index = 0; index < 150; index++) {
+      loopback.seedTextFile({ workspace: WORKSPACE_ID, objectId: `merge-object-${index}`, path: `${index}.md`, text: "recorded" });
+      await write(root, `${index}.md`, "recorded");
+    }
+    const sessions = mockLiveSessions(loopback);
+    const store = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions).store;
+    const draft = await store.createNamedVersion({ workspaceId: WORKSPACE_ID, name: "Draft", fromVersionId: "main" });
+    for (let index = 0; index < 150; index++) loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: draft.id, objectId: `merge-object-${index}`, path: `${index}.md`, text: "incoming" });
+    const notice = vi.fn();
+    const engine = capture(root, { store, rustEngineSessions: sessions, onOutsideWriteCopies: notice });
+    requests.length = 0;
+    try {
+      const started = performance.now();
+      await expect(engine.mergeVersionIntoMain(draft.id)).resolves.toMatchObject({ mergedFileCount: 150, conflictCount: 0 });
+      const elapsedMs = performance.now() - started;
+      const count = (method: string) => requests.filter(request => request.method === method).length;
+      expect(count(VERSIONED_METHOD.versionsMerge)).toBe(150);
+      expect(count(VERSIONED_METHOD.momentsList)).toBe(0);
+      expect(count(VERSIONED_METHOD.momentsGet)).toBe(0);
+      expect(count("files.resolve")).toBe(0);
+      expect((await readdir(root)).filter(name => name.includes("(kept copy"))).toEqual([]);
+      expect(notice).not.toHaveBeenCalled();
+      for (let index = 0; index < 150; index++) expect(await readFile(join(root, `${index}.md`), "utf8")).toBe("incoming");
+      process.stdout.write(`150-file merge: ${elapsedMs.toFixed(2)} ms; listMoments=0; getMoment=0; resolveFiles=0; merges=150\n`);
+    } finally { await engine.stop(); }
+  });
+
   it("keeps a folder that still holds a file dohc doesn't track", async () => {
     const root = await createTestScratch("relay-folder-to-file-kept-");
     await write(root, "d/a.md", "a\n");

@@ -19,13 +19,13 @@ const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {for (const cleanup of cleanups.splice(0).reverse()) await cleanup();});
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 
-it("transfers a recovery archive over the HTTP body limit through the production HTTP adapter", async () => {
+it("transfers a recovery archive over 21 MiB through the production HTTP adapter", async () => {
   const source = await httpFixture(), target = await httpFixture();
   expect((await source.activate()).status).toBe(200);
   const owner = { kind: "named" as const, workspaceId: "w", userId: "owner" };
   const scope = { workspaceId: "w", datasetId: id(1) };
-  for (let index = 0; index < 2; index++) {
-    const bytes = Buffer.alloc(4 * 1024, 0x61 + index); bytes.write("%PDF-");
+  for (let index = 0; index < 6; index++) {
+    const bytes = Buffer.alloc(4 * 1024 * 1024, 0x61 + index); bytes.write("%PDF-");
     const uploaded = source.host.ownerUpload(owner, { ...scope, revision: 1, revisionSha256: revision.revisionSha256,
       idempotencyKey: `large-file-${index}`, name: "receipt.pdf", contentType: "application/pdf", bytesBase64: bytes.toString("base64") });
     await source.host.invoke(owner, { ...scope, revision: 1, revisionSha256: revision.revisionSha256, operationId: id(5),
@@ -35,7 +35,7 @@ it("transfers a recovery archive over the HTTP body limit through the production
   const cursor = journal.head(scope, () => {}).cursor;
   journal.fence({ expected: cursor, authorize() {} });
   const archive = await source.host.exportRecovery(owner, scope);
-  const server = serveFetchHandler({ handler: guardRelayResponses(target.storage, target.handler), maxBodyBytes: () => 1024,
+  const server = serveFetchHandler({ handler: guardRelayResponses(target.storage, target.handler), maxBodyBytes: () => 21 * 1024 * 1024,
     streamBody: streamsRequestBody,
     oversized: () => new Response(null, { status: 413 }), failure: () => new Response(null, { status: 500 }) });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
@@ -50,7 +50,7 @@ it("transfers a recovery archive over the HTTP body limit through the production
       authorization: "Bearer owner", "content-type": "application/octet-stream", "x-dohc-dataset-manifest-sha256": manifestSha256,
       "x-dohc-dataset-source-cursor": JSON.stringify(cursor) } };
     const response = await fetch(`http://127.0.0.1:${address.port}/sync/w/datasets/${id(1)}/imports/large-transfer`, init);
-    expect(transferred).toBeGreaterThan(1024);
+    expect(transferred).toBeGreaterThan(21 * 1024 * 1024);
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ sourceCursor: cursor, targetCursor: { revision: cursor.revision + 1 } });
     expect(await (await target.invoke()).json()).toMatchObject({ result: expect.arrayContaining([expect.objectContaining({ name: "Large 0", receipt: expect.any(String) })]) });

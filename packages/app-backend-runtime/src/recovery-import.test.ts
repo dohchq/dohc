@@ -25,21 +25,15 @@ const definition: DatasetDefinition = { formatVersion:1,datasetId:id(1),name:"It
 const limits = { maxTotalBytes: 16*1024*1024 };
 const cleanups: Array<()=>Promise<void>>=[];
 afterEach(async()=>{for(const cleanup of cleanups.splice(0).reverse())await cleanup();});
-async function fixture(large = false, mutable = false){
+async function fixture(mutable = false){
   const directory=await mkdtemp(join(tmpdir(),"dohc-recovery-import-test-")), db=new DatabaseSync(join(directory,"host.sqlite")), seedPath=join(directory,"seed.sqlite"), seed=new DatabaseSync(seedPath);
   seed.exec(schemaSql);
-  if (large) {
-    seed.exec("BEGIN");
-    const value = "x".repeat(1024 * 1024);
-    for (let index = 0; index < 3; index++) seed.prepare("INSERT INTO items(value) VALUES(?)").run(value);
-    seed.exec("COMMIT");
-  }
   const transaction=<T>(fn:()=>T)=>{db.exec("BEGIN IMMEDIATE");try{const result=fn();db.exec("COMMIT");return result;}catch(error){db.exec("ROLLBACK");throw error;}};
   const journal=createDatasetJournal({db,transaction,nowMs:()=>1234}), scope={workspaceId:"workspace",datasetId:id(1)}, revision=describeDatasetRevision({definition: mutable ? {...definition, operations: definition.operations.map(operation => ({...operation, readOnly: false, kind: "action" as const}))} : definition,revision:1,schemaSql,operationSource:source});
   db.exec("CREATE TABLE dohc_dataset_lifecycle(workspace_id,dataset_id,archived,generation,reason,archived_at_ms); CREATE TABLE dohc_dataset_catalog(workspace_id,dataset_id,revision_json,artifacts_json); CREATE TABLE dohc_dataset_catalog_history(workspace_id,dataset_id,revision,revision_json,artifacts_json); CREATE TABLE dohc_dataset_bindings(workspace_id,dataset_id,app_id,binding_json,token); CREATE TABLE dohc_dataset_data_grants(workspace_id,dataset_id,principal_key,grant_json,token);");
   db.prepare("INSERT INTO dohc_dataset_catalog VALUES(?,?,?,?)").run(scope.workspaceId,scope.datasetId,JSON.stringify(revision),JSON.stringify({schemaSql,operationSource:source}));
   const authorize=()=>{}, checkpoint=await readFile(seedPath);
-  let head=journal.initialize({scope,hostEpoch:"host",approvedRevisionHash:revision.revisionSha256,source,schemaSql,definitionJson:JSON.stringify(revision),checkpoint,authorize, ...(large ? { capacityBytes:8*1024*1024 } : {})});
+  let head=journal.initialize({scope,hostEpoch:"host",approvedRevisionHash:revision.revisionSha256,source,schemaSql,definitionJson:JSON.stringify(revision),checkpoint,authorize});
   cleanups.push(async()=>{seed.close();db.close();if(!resolve(directory).startsWith(`${resolve(tmpdir())}${sep}dohc-recovery-import-test-`))throw Error("unsafe temp path");await rm(directory,{recursive:true,force:true,maxRetries:8,retryDelay:25});});
   function add(value: string, attached: string[] = [], retry?: {callerKey: string; payloadSha256: string}) {
     const session=seed.createSession({table:"items"}); seed.prepare("INSERT INTO items(value) VALUES(?)").run(value); const changeset=session.changeset(); session.close();
@@ -54,10 +48,9 @@ async function fixture(large = false, mutable = false){
     }}); return head;
   }
   async function stage(attachment?: {fileId:string; bytes:Uint8Array; revision:number}) {
-    const exportLimits = large ? { maxTotalBytes: 512 * 1024 * 1024 } : limits;
-    const prepared=await prepareDatasetRecoveryExport({db,journal,scope,authorize,directory: await privateFolder(join(directory, "exports"))(),limits:exportLimits,
+    const prepared=await prepareDatasetRecoveryExport({db,journal,scope,authorize,directory: await privateFolder(join(directory, "exports"))(),limits,
       ...(attachment?{attachments:{capture:()=>[{fileId:attachment.fileId,name:"receipt.png",contentType:"image/png",byteLength:attachment.bytes.byteLength,sha256:hash(attachment.bytes),revision:attachment.revision}],open:async function*(){yield attachment.bytes;}}}:{})});
-    const staged=await stageDatasetRecovery({stream:prepared.stream(),stagingParent:directory,limits:exportLimits,authorize,expectedManifestSha256:recoveryManifestSha256(prepared.manifest,exportLimits)});
+    const staged=await stageDatasetRecovery({stream:prepared.stream(),stagingParent:directory,limits,authorize,expectedManifestSha256:recoveryManifestSha256(prepared.manifest,limits)});
     await prepared.dispose(); return staged;
   }
   return {directory,db,seed,journal,scope,revision,authorize,add,migrate,stage,transaction,head:()=>head};
@@ -193,7 +186,7 @@ it("rejects attached bytes whose metadata differs from the original association"
 });
 
 it("preserves cancelled retry tombstones through recovery and rejects their reuse", async () => {
-  const f = await fixture(false, true), selected = {...f.scope, appId: "app", principalKey: "friend", operationId: id(5), revisionSha256: f.revision.revisionSha256};
+  const f = await fixture(true), selected = {...f.scope, appId: "app", principalKey: "friend", operationId: id(5), revisionSha256: f.revision.revisionSha256};
   const attempts = createDatasetAttempts({db: f.db, transaction: f.transaction, account() {}});
   attempts.request(selected, {action: "save", idempotencyKey: "abandoned", input: {value: "private"}}, f.authorize);
   const reference = reviewDatasetAttempts(f.db, f.scope).entries[0]!.reference;

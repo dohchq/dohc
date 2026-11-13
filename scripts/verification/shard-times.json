@@ -940,6 +940,7 @@
   "apps/desktop/src/workspaces/workspaceUiState.test.ts": 1,
   "apps/desktop/src/workspaces/workspaceVersionOperations.test.ts": 5.9,
   "apps/desktop/src/workspaces/ydocOpenDeadline.test.ts": 1,
+  "apps/desktop/src/workspaces/ydocOpenMeasurement.e2e.test.ts": 24.1,
   "apps/desktop/src/workspaces/zipWriter.test.ts": 1,
   "apps/mobile/src/account/scan.test.ts": 1,
   "apps/mobile/src/chats/agentCard.test.ts": 1,

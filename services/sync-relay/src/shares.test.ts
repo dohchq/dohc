@@ -510,6 +510,53 @@ describe("share grants", () => {
     expect(await earlier.text()).toBe(earlierContent);
   });
 
+  it("stops serving a revoked share and explains the removal only to its named recipient", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    const sharedSha = await putBlob(h, "shared body");
+    await appendOps(h, [momentOp("docs/shared.md", "shared body")]);
+    await createShare(h);
+
+    expect((await h(request(RECIPIENT, "/sync/shares/share-0/log?since=0"))).status).toBe(200);
+    expect(storage.listSharesGrantedBy(GRANTER)[0]?.grant).toMatchObject({
+      generation: 1,
+      status: "active",
+      revokedAtMs: null,
+    });
+
+    // The recipient cannot revoke; only the granter can.
+    const recipientRevoke = await h(request(RECIPIENT, "/sync/shares/share-0/revoke", { method: "POST" }));
+    expect(recipientRevoke.status).toBe(404);
+
+    const revoke = await h(request(GRANTER, "/sync/shares/share-0/revoke", { method: "POST" }));
+    expect(revoke.status).toBe(200);
+    // Idempotent for the granter.
+    expect((await h(request(GRANTER, "/sync/shares/share-0/revoke", { method: "POST" }))).status).toBe(200);
+    expect(storage.listSharesGrantedBy(GRANTER)[0]?.grant).toMatchObject({
+      generation: 2,
+      status: "revoked",
+      revokedAtMs: 5555,
+    });
+
+    for (const path of ["/sync/shares/share-0/log?since=0", "/sync/shares/share-0", `/sync/shares/share-0/blobs/${sharedSha}`]) {
+      const response = await h(request(RECIPIENT, path));
+      expect(response.status).toBe(404);
+      expect(await response.json()).toMatchObject({code: "share_access_removed"});
+      expect(await denialBytes(await h(request(STRANGER, path)))).toContain('"code":"not_found"');
+    }
+
+    // Revoked shares vanish from the recipient's list but stay (stamped) in
+    // the granter's management list.
+    const recipientList = await json(await h(request(RECIPIENT, "/sync/shares")));
+    expect(recipientList.received).toEqual([]);
+    const granterList = await json(await h(request(GRANTER, "/sync/shares")));
+    expect((granterList.granted as Array<Record<string, unknown>>)[0]).toMatchObject({
+      shareId: "share-0",
+      revokedAtMs: 5555,
+    });
+  });
+
   it("redacts version.create fork snapshots for version shares", async () => {
     const storage = await testStorage();
     const h = handler(storage);

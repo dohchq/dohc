@@ -1216,6 +1216,25 @@ describe("shared view refresh", () => {
     }
   });
 
+  it("deletes only its own spelling where the disk keeps case apart", async (context) => {
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
+    await writeFile(join(rootDir, "probe.md"), "");
+    const ignoresCase = await stat(join(rootDir, "PROBE.md")).then(() => true, () => false);
+    await rm(join(rootDir, "probe.md"));
+    if (ignoresCase) context.skip("this disk ignores case");
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const refresh = () => refreshSharedViewOnce(harness, { rootDir, workspaceId: WORKSPACE, shareId: SHARE_ID });
+    relay.addWrite("notes.md", "old\n");
+    relay.addWrite("Notes.md", "live\n");
+    await refresh();
+    relay.addDelete("notes.md");
+    await refresh();
+
+    expect((await readdir(rootDir)).filter((name) => !name.startsWith("."))).toEqual(["Notes.md"]);
+    expect(await readFile(join(rootDir, "Notes.md"), "utf8")).toBe("live\n");
+  });
+
   it("hands a deleted owner's file to one held spelling and keeps holding the rest", async (context) => {
     const view = await caseFoldingView(context, "edit");
     try {
@@ -1235,6 +1254,51 @@ describe("shared view refresh", () => {
       expect(await view.names()).toEqual(["NOTES.md"]);
     } finally {
       await view.store.close();
+    }
+  });
+
+  it("keeps a person's file apart beside a letter-case spelling after access narrows", async (context) => {
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
+    await writeFile(join(rootDir, "probe.md"), "");
+    const ignoresCase = await stat(join(rootDir, "PROBE.md")).then(() => true, () => false);
+    await rm(join(rootDir, "probe.md"));
+    if (ignoresCase) context.skip("this disk ignores case");
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    const store = harness.openStore(target);
+    const reconcile = async () => {
+      const refreshed = await reconcileStandaloneForTest({
+        rootDir, workspaceId: WORKSPACE, relay: harness.relay, shareId: SHARE_ID, store, pull: harness.pullFor(target),
+        pinnedSelector: { ...PINNED_SELECTOR, access: "edit" }, recordRefusals: async () => undefined, ended: false,
+      });
+      if (!refreshed.ok) throw new Error(refreshed.errorMessage);
+      return refreshed;
+    };
+    try {
+      relay.addWrite("notes.md", "shared\n");
+      await reconcile();
+      await writeFile(join(rootDir, "Notes.md"), "mine\n");
+      relay.addWrite("Notes.md", "theirs\n");
+      const pulled = await reconcile();
+      expect(pulled.unjournalablePaths).toEqual([{ path: "Notes.md", reason: "local-collision" }]);
+      await expect(readCollisionRecordPaths(rootDir, SHARE_ID)).resolves.toEqual(new Set(["Notes.md"]));
+      const before = await momentIds(store);
+      const captured = await captureStandaloneShareViewDivergence({
+        rootDir, workspaceId: WORKSPACE, store,
+        pinnedSelector: { ...PINNED_SELECTOR, access: "view" }, shareId: SHARE_ID, ended: false, preservedPaths: ["Notes.md"],
+      });
+
+      expect(captured.unjournalablePaths).toEqual([{ path: "Notes.md", reason: "local-collision" }]);
+      expect(captured.remainingPreservedPaths).toEqual(["Notes.md"]);
+      await expect(readCollisionRecordPaths(rootDir, SHARE_ID)).resolves.toEqual(new Set(["Notes.md"]));
+      const main = await store.ensureMainVersion({ workspaceId: WORKSPACE });
+      expect((await store.readTextFile({ workspaceId: WORKSPACE, versionId: main.id, path: "Notes.md" }))?.text).toBe("theirs\n");
+      expect((await store.readTextFile({ workspaceId: WORKSPACE, versionId: main.id, path: "notes.md" }))?.text).toBe("shared\n");
+      expect(await readFile(join(rootDir, "Notes.md"), "utf8")).toBe("mine\n");
+      expect(await momentIds(store)).toEqual(before);
+    } finally {
+      await store.close();
     }
   });
 

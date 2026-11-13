@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { fenceAccount, initializeAccountDeletion } from "./storage/accountDeletion";
 import { agentChannelWireId } from "@dohc/security-contract/chat-wire-ids";
 
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
@@ -51,6 +52,7 @@ import {
   type HandlerOverrides } from "./testing";
 
 const OWNER = "owner";
+const DELETION_KEY = "personal-agent-deletion-key-at-least-32-bytes";
 const OTHER = "other-account";
 const WS_A = "workspace-a";
 const WS_B = "workspace-b";
@@ -546,6 +548,30 @@ describe("revocation", () => {
     f.fence.down = false;
     await expectPersonal(f, agent).resolves.toMatchObject({ connectionId: agent.connectionId });
     await ok(await redeem(f, { clientId: agent.clientId, ...pending }));
+  });
+
+  it("signs out the account's agents and ends their running work at account deletion's fence, before purge", async () => {
+    const f = await fixture();
+    const wake = vi.spyOn(f.activity, "wakeLog");
+    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "view" }, { workspaceId: WS_B, level: "view" }] });
+    const stream = running(f, agent, [WS_A]);
+    const wait = running(f, agent, [WS_B], "wait");
+    const pending = await approve(f, { clientId: agent.clientId });
+
+    const context = f.storage as StorageContext;
+    initializeAccountDeletion(context, DELETION_KEY);
+    const job = fenceAccount(context, DELETION_KEY, OWNER, `${OWNER}@dohc.test`);
+    f.h.deleteAccount(OWNER, job.manifest!.workspaces.map((row) => row.workspaceId), job.manifest!.shareIds);
+
+    expect(stream).toHaveBeenCalledTimes(1);
+    expect(wait).toHaveBeenCalledTimes(1);
+    expect(wake).toHaveBeenCalledWith(WS_A);
+    expect(wake).toHaveBeenCalledWith(WS_B);
+    await expectPersonal(f, agent).rejects.toMatchObject({ code: "not_found" });
+    await expectRefused(await redeem(f, { clientId: agent.clientId, ...pending }));
+    expect(connectionTokens(f, agent.connectionId)).toBe(0);
+    // Purge hasn't run: the agent's row is still there, signed out.
+    expect(count(f, "sync_relay_personal_agents", "agent_id = ? AND status = 'signed_out'", agent.agentId)).toBe(1);
   });
 
   it("keeps a signed-in agent's token across a relay reopen", async () => {

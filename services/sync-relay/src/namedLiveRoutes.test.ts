@@ -603,12 +603,12 @@ async function openProductionSync(f: Awaited<ReturnType<typeof fixture>>, socket
   if (credit) send({kind: "sync-applied", appliedThroughJournalCursor: 0});
 }
 
-it.each([false, true])("delivers one chunked edit to two readers of one document; link=%s", async link => {
+it.each([false, true])("delivers one production-size 2 MiB edit to 22 readers of one document; link=%s", async link => {
   const profile = selfHostLiveProfile(), admission = createLiveConnectionAdmission();
   const readers: ProductionPeer[] = [];
   const sharedChanges = createNamedFrameChanges(128);
   let shared: NamedFrameNativeHost | undefined;
-  for (let person = 1; person <= 2; person++) {
+  for (let person = 1; person <= 22; person++) {
     const f = await fixture(profile.namedLive.transport, link, undefined, false, false, admission, person, 1, true);
     if (!shared) shared = {...f.native, changes: sharedChanges};
     const native = shared;
@@ -618,18 +618,18 @@ it.each([false, true])("delivers one chunked edit to two readers of one document
     await openProductionSync(f, socket);
     readers.push({f, socket});
   }
-  const updateBytes = Buffer.alloc(128 * 1024, 42);
+  const updateBytes = Buffer.alloc(profile.namedLive.host.maxAppliedUpdateBytes, 42);
   vi.mocked(shared!.client.readNextLiveApplied).mockImplementation(async (_request, after) => after.eventCount ? null : {
     position: {eventCount: 1, journalCursor: 1, evidenceDigest: "cd".repeat(32)}, updateBytes,
     ack: {deliveryId: "edit", updateDigest: createHash("sha256").update(updateBytes).digest("hex"), journalCursor: 1,
       acceptingHostEpoch: host.hostEpoch, localYDocSequence: 1, applicationReplayed: false},
   });
-  await vi.waitFor(() => expect(sharedChanges.listenerCount()).toBe(4));
+  await vi.waitFor(() => expect(sharedChanges.listenerCount()).toBe(44));
   sharedChanges.notify(readers[0]!.f.binding);
   await vi.waitFor(() => {
-    expect(readers.map(({socket}) => socket.ws.readyState)).toEqual(Array(2).fill(WebSocket.OPEN));
+    expect(readers.map(({socket}) => socket.ws.readyState)).toEqual(Array(22).fill(WebSocket.OPEN));
     expect(readers.map(({socket}) => socket.received.filter(frame => frame.kind === "chunk" && frame.transferId === 2)
-      .reduce((sum, frame) => sum + (frame.kind === "chunk" ? frame.bytes.length : 0), 0))).toEqual(Array(2).fill(updateBytes.length));
+      .reduce((sum, frame) => sum + (frame.kind === "chunk" ? frame.bytes.length : 0), 0))).toEqual(Array(22).fill(updateBytes.length));
   }, {timeout: 10_000});
   for (const {socket} of readers) {
     const chunks = socket.received.filter((frame): frame is Extract<LiveFrame, {kind: "chunk"}> => frame.kind === "chunk" && frame.transferId === 2);

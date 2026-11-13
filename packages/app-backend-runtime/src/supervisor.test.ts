@@ -164,6 +164,22 @@ it.each([153])("migrates records in a long workspace folder (%i characters)",asy
   expect((await f.invoke({id:"after",value:"new"},{idempotencyKey:"after"})).revision).toBe(3);
 });
 
+it("does not activate a migration whose owner was revoked during worker execution",async()=>{
+  let revoke=()=>{};
+  const f=await fixture({launch:launcher((command,controls)=>{if(command.command.kind==="migrateCheckpoint")revoke();controls.deliver();})});
+  revoke=()=>f.db.exec("UPDATE grants SET allowed=0");
+  await expect(f.supervisor.migrate(migration(f))).rejects.toThrow("denied");expect(f.db.prepare("SELECT revision FROM dohc_dataset_journals").get()!.revision).toBe(0);
+});
+
+it("withholds migrated state if owner access is revoked after the journal commits",async()=>{
+  let revoke=()=>{};
+  const f=await fixture({transform:journal=>({...journal,transitionCheckpoint(input){const result=journal.transitionCheckpoint(input);revoke();return result;}})});
+  revoke=()=>f.db.exec("UPDATE grants SET allowed=0");
+  await expect(f.supervisor.migrate(migration(f))).rejects.toThrow("denied");
+  expect(f.db.prepare("SELECT revision FROM dohc_dataset_journals").get()!.revision).toBe(1);
+  await expect(f.invoke({}, {readOnly:true})).rejects.toThrow("denied");
+});
+
 it("recovers committed data after the worker dies before finalization", async () => {
   let killed = false;
   const f = await fixture({ launch: launcher((command, controls) => {

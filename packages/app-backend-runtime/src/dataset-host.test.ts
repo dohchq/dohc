@@ -120,6 +120,23 @@ it("requires an archived Collection and current owner review of both data and af
   await expect(f.invoke("owner",id(6),{value:"changed"})).rejects.toThrow();
 });
 
+it("rolls permanent deletion and its tombstone back if private-resource cleanup fails", async () => {
+  const f = await fixture({deleteResources() { throw new Error("cleanup failed"); }}); await f.activate();
+  f.host.archiveDataset("owner",scope);
+  const preview = f.host.deletePreview("owner",scope);
+  await expect(f.host.deleteDataset("owner",{...scope,expected:preview.cursor,reviewToken:preview.reviewToken,acknowledge:true})).rejects.toThrow("cleanup failed");
+  expect(f.host.deletePreview("owner",scope).cursor).toEqual(preview.cursor);
+  expect(f.db.prepare("SELECT count(*) n FROM dohc_dataset_deletions").get()!.n).toBe(0);
+});
+
+it("rejects deletion at a fenced former authority", async () => {
+  const f = await fixture(); await f.activate();
+  const preview = f.host.deletePreview("owner",scope);
+  f.journal.fence({expected:preview.cursor,authorize(){}});
+  expect(() => f.host.deletePreview("owner",scope)).toThrow("current host");
+  await expect(f.host.deleteDataset("owner",{...scope,expected:preview.cursor,reviewToken:preview.reviewToken,acknowledge:true})).rejects.toThrow("stopped accepting changes to this Collection");
+});
+
 it("pages owner-only saved-operation metadata without receipts, payloads, or private results", async () => {
   const f = await fixture(); await f.activate();
   for (const key of ["secret-retry-1", "secret-retry-2", "secret-retry-3"]) await f.host.invoke("owner", { ...scope, revision: 1, revisionSha256: prepared.revision.revisionSha256, operationId: id(6), input: { value: "private payload" }, idempotencyKey: key });
@@ -200,6 +217,15 @@ it("keeps submission, data discovery, private reads, and source approval separat
   expect(() => f.host.setBinding("owner", { ...scope, appId: "form", binding: { ...f.binding(), revisionSha256: "0".repeat(64) } })).toThrow();
 });
 
+it("rolls back catalog creation and quota when the final authority check fails", async () => {
+  let f: Awaited<ReturnType<typeof fixture>>;
+  f = await fixture({ accountCreation() { f.db.prepare("UPDATE permissions SET active=0 WHERE user='owner'").run(); } });
+  await expect(f.activate()).rejects.toThrow("revoked");
+  expect(f.db.prepare("SELECT COUNT(*) AS n FROM dohc_dataset_catalog").get()!.n).toBe(0);
+  expect(f.db.prepare("SELECT COUNT(*) AS n FROM dohc_dataset_journals").get()!.n).toBe(0);
+  expect(f.db.prepare("SELECT active FROM permissions WHERE user='owner'").get()!.active).toBe(1);
+});
+
 it("blocks queued operations and receipt disclosure after binding or data grant revocation", async () => {
   const f = await fixture(); await f.activate();
   f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding() });
@@ -217,6 +243,28 @@ it("blocks queued operations and receipt disclosure after binding or data grant 
   const read = f.invoke("helper", id(7));
   f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: null });
   await expect(read).rejects.toThrow("You do not have access to this Collection.");
+});
+
+it("accounts binding and grant replacements by retained size and rolls back quota failures", async () => {
+  let f: Awaited<ReturnType<typeof fixture>>, refuse = false;
+  f = await fixture({ accountMetadata(_context, allocation) {
+    f.db.prepare("UPDATE accounting SET bytes=bytes+?").run(allocation.bytes);
+    if (refuse) throw new Error("quota");
+  } });
+  await f.activate(); const initial = f.db.prepare("SELECT bytes FROM accounting").get()!.bytes;
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding() });
+  f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { revision: 1, revisionSha256: prepared.revision.revisionSha256, operationIds: [id(7)], discover: true } });
+  const populated = f.db.prepare("SELECT bytes FROM accounting").get()!.bytes;
+  f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { revision: 1, revisionSha256: prepared.revision.revisionSha256, operationIds: [id(7)], discover: true } });
+  expect(f.db.prepare("SELECT bytes FROM accounting").get()!.bytes).toBe(populated);
+  refuse = true;
+  expect(() => f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { revision: 1, revisionSha256: prepared.revision.revisionSha256, operationIds: [id(7), id(8)], discover: true } })).toThrow("quota");
+  expect(f.host.describe("helper", scope).operations.map(operation => operation.operationId)).toEqual([id(7)]);
+  expect(f.db.prepare("SELECT bytes FROM accounting").get()!.bytes).toBe(populated);
+  refuse = false;
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: null });
+  f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: null });
+  expect(f.db.prepare("SELECT bytes FROM accounting").get()!.bytes).toBe(initial);
 });
 
 it("exposes complete migration previews only to the current owner and commits the reviewed values",async()=>{
@@ -257,6 +305,37 @@ it("migrates records atomically and retains stale grants for explicit reapproval
   const result = await f.host.invoke("helper", { ...scope, revision: 2, revisionSha256: revision.revisionSha256, operationId: id(7), input: {}, idempotencyKey: "read-new" });
   expect(result.result).toMatchObject([{ value: "saved" }]);
   expect(f.host.permissions("owner", { ...scope, limit: 1 })).toMatchObject({ nextCursor: "app:form" });
+});
+
+it("rolls back migration approval when accounting refuses and rejects a stale preview", async () => {
+  const stageDeltas: number[] = [];
+  const f = await fixture({ accountCheckpointStage(_context, allocation) { stageDeltas.push(allocation.bytes); }, accountMigration() { throw new Error("final migration quota"); } }); await f.activate();
+  const expected = f.host.approvedArtifacts("owner", scope).cursor;
+  const nextDefinition = { ...definition, name: "Next" };
+  const revision = describeDatasetRevision({ definition: nextDefinition, revision: 2, schemaSql, operationSource });
+  await expect(f.host.migrate("owner", { workspaceId: "workspace", revision, schemaSql, operationSource, expected, migrationSql: "SELECT 1;" })).rejects.toThrow("final migration quota");
+  expect(stageDeltas.length).toBe(2);
+  expect(stageDeltas[0]).toBeGreaterThan(0);
+  expect(stageDeltas[1]).toBe(-stageDeltas[0]!);
+  expect(f.host.approvedArtifacts("owner", scope).revision).toEqual(prepared.revision);
+  await f.invoke("owner", id(6), { value: "new record" });
+  await expect(f.host.migrate("owner", { workspaceId: "workspace", revision, schemaSql, operationSource, expected, migrationSql: "SELECT 1;" })).rejects.toThrow();
+  expect((await f.invoke("owner", id(7))).result).toMatchObject([{ value: "new record" }]);
+});
+
+it("commits app publication with its binding and rolls both back on failure", async () => {
+  const f = await fixture(); await f.activate();
+  f.db.exec("CREATE TABLE publications(id TEXT PRIMARY KEY);");
+  expect(() => f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding() }, () => {
+    f.db.prepare("INSERT INTO publications VALUES('form')").run(); throw new Error("publication failed");
+  })).toThrow("publication failed");
+  expect(f.db.prepare("SELECT COUNT(*) AS n FROM publications").get()!.n).toBe(0);
+  expect(f.host.permissions("owner", scope).permissions).toEqual([]);
+  expect(() => f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding() }, async () => {})).toThrow("synchronous");
+  expect(f.host.permissions("owner", scope).permissions).toEqual([]);
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding() }, () => { f.db.prepare("INSERT INTO publications VALUES('form')").run(); });
+  expect(f.db.prepare("SELECT COUNT(*) AS n FROM publications").get()!.n).toBe(1);
+  expect(f.host.permissions("owner", scope).permissions).toHaveLength(1);
 });
 
 it("enforces a form's create-field subset before operation execution", async () => {

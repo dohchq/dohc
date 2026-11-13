@@ -53,11 +53,11 @@ describe("About rail (right side)", () => {
     const bridge = Object.assign(makeBridge(Promise.resolve(STORED_STATE)), {
       listChatMessages: vi.fn<DohcDesktopBridge["listChatMessages"]>(),
       listChatReactions: vi.fn<DohcDesktopBridge["listChatReactions"]>(async () => ({ reactions: [], viewerAuthorId: "Reader" })),
-      markChatThreadRead: vi.fn<DohcDesktopBridge["markChatThreadRead"]>(async () => ({ lastReadSequence: 3, revision: 1 })),
+      markChatThreadRead: vi.fn<DohcDesktopBridge["markChatThreadRead"]>(async () => ({ lastReadSequence: 300, revision: 1 })),
       chatFileMentionsPage: vi.fn<DohcDesktopBridge["chatFileMentionsPage"]>(),
     });
     const thread = { id: "file-thread", title: "Long file conversation", createdAtMs: 1, updatedAtMs: 1 };
-    const messages = Array.from({ length: 3 }, (_, index) => ({
+    const messages = Array.from({ length: 300 }, (_, index) => ({
       id: `file-message-${index}`, threadId: thread.id,
       presentation: { group: "fixture", hue: null, self: false },
       authorKind: "human" as const, authorDisplayName: "Reader",
@@ -78,8 +78,8 @@ describe("About rail (right side)", () => {
     const user = userEvent.setup();
     renderShell(bridge);
     await user.click(await screen.findByTestId("linked-chat-open"));
-    await within(await screen.findByTestId("linked-chat-thread")).findByText("File message 2");
-    await waitFor(() => expect(scrolled).toContain("file-message-2"));
+    await within(await screen.findByTestId("linked-chat-thread")).findByText("File message 299");
+    await waitFor(() => expect(scrolled).toContain("file-message-299"));
     scrolled.length = 0;
     // The chat's link to b.md is a row in About's Links, under the thread.
     await user.click(screen.getByTestId("linked-chat-back"));
