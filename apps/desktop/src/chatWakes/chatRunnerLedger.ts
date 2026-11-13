@@ -21,8 +21,8 @@ export type ChatRunnerLedgerEntry = z.infer<typeof ChatRunnerLedgerEntry>;
 
 /** The saved declarations could not be read. Nothing is declared until it can be, and the file is left as it is. */
 export class ChatRunnerLedgerUnreadableError extends Error {
-  constructor() {
-    super("dohc could not read which workspaces this computer declared its agents for.");
+  constructor(cause?: unknown) {
+    super("dohc could not read which workspaces this computer declared its agents for.", { cause });
     this.name = "ChatRunnerLedgerUnreadableError";
   }
 }
@@ -49,7 +49,8 @@ export function createChatRunnerLedger(file: string, operations?: DurableFileOpe
     try { text = await readFile(file, "utf8"); }
     catch (error) {
       if (error instanceof Error && "code" in error && error.code === "ENOENT") return [];
-      throw error;
+      // An existing file it can't open, such as EACCES or EISDIR, needs the same repair as a damaged one.
+      throw new ChatRunnerLedgerUnreadableError(error);
     }
     let value: unknown;
     try { value = JSON.parse(text); }
