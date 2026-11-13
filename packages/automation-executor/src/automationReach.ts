@@ -42,6 +42,7 @@ export interface RosterGrant {
 /** One channel by its wire id, or every Group in the workspace. */
 export type RosterChat =
   | { kind: "channel"; wireId: string; canPost: boolean }
+  // Piece 4 (access rules) replaces this with each Group's own rule.
   | { kind: "groups"; canPost: boolean };
 
 /** The files a grant covers: its paths, or with `wholeWorkspace` every file on main. */
