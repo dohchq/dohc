@@ -16,7 +16,8 @@ import {
   shareCoversLinkPath,
   visibleSharePath,
 } from "@dohc/security-contract/share-selector";
-import { withholdChatFileLinks } from "@dohc/workspace-contracts/chat-mentions";
+import { projectChatFileLinks, withholdChatFileLinks } from "@dohc/workspace-contracts/chat-mentions";
+import { createAccountlessPathProjection } from "./accountlessPathProjection";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { asRecord } from "@dohc/workspace-core";
 import { SHA256_HEX_PATTERN } from "@dohc/security-contract/wire-patterns";
@@ -1104,15 +1105,23 @@ function withheldLinks(decision: ShareOpDecision, opKind: string, files: ShareSe
   return { ...decision, payload };
 }
 
-// A Group's name is also its share's label, which everyone it is shared with
-// reads. The label keeps only the file links its share's files cover, as the
-// name does in the chat. A selector that does not parse covers none.
-export function withheldShareLabel(selectorJson: string, label: string | null): string | null {
-  if (label === null) return null;
+// Who reads a share's label. The owner wrote it; a member reads real paths;
+// a link holder or link agent reads paths from the shared folder down.
+export type ShareLabelReader = "owner" | "member" | "link";
+
+// A Group's name is also its share's label. Anyone but the owner reads it
+// with only the file links its share's files cover, as the name reads in
+// the chat, and a link reader reads those as its files show them. A selector
+// that does not parse covers none.
+export function shareLabelFor(selectorJson: string, label: string | null, reader: ShareLabelReader): string | null {
+  if (label === null || reader === "owner") return label;
   const selector = parseStoredAnyShareSelectorJson(selectorJson);
   if (selector && !("kind" in selector)) return label;
-  const files = selector?.kind === "group" ? { paths: selector.paths, versionId: null } : null;
-  return withholdChatFileLinks(label, path => shareCoversLinkPath(files, path));
+  const files: ShareSelector | null = selector?.kind === "group" ? { paths: selector.paths, versionId: null, access: "view" } : null;
+  const covered = withholdChatFileLinks(label, path => shareCoversLinkPath(files, path));
+  if (reader === "member" || files === null) return covered;
+  const projection = createAccountlessPathProjection(files);
+  return projectChatFileLinks(covered, path => projection.projectPath(path));
 }
 
 // The single decision point for what a share recipient may read. Strict

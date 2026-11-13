@@ -439,6 +439,7 @@ describe("an agent waiting for messages", () => {
 
   it("reads a file link by the path its link's files show it at", async () => {
     const f = await fixture("clients/acme/team");
+    await ok(await f.h(request(OWNER, `/sync/shares/${f.shareId}`, { ...jsonBody({ subjectName: "Plan @[clients/acme/team/plan.md]" }), method: "PUT" })));
     const agent = await connect(f, "read-write");
     await ok(await post(f, agent, { threadId: "thread-team" }));
     ownerSays(f, "owner-reply", "thread-team", "see @[clients/acme/team/plan.md#Goals] and @[clients/acme/budget.md]");
@@ -446,6 +447,7 @@ describe("an agent waiting for messages", () => {
     expect(read.messages).toEqual([expect.objectContaining({
       messageId: "owner-reply", body: `see @[team/plan.md#Goals] and ${CHAT_FILE_LINK_WITHHELD}`,
     })]);
+    expect(read.group.name).toBe("Plan @[team/plan.md]");
   });
 
   it("keeps a mention in another thread for a later wait without a thread filter", async () => {

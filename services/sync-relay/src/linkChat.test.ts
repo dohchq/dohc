@@ -205,6 +205,9 @@ describe("link chat on a Group share", () => {
       messageId: "file-links", body: `see @[team/plan.md#Goals] and ${CHAT_FILE_LINK_WITHHELD}`,
     }));
     expect(JSON.stringify(page)).not.toContain("acme");
+    // The Group's name reads the same way.
+    expect((await f.h(request(OWNER, `/sync/shares/${f.shareId}`, { ...jsonBody({ subjectName: "Plan @[clients/acme/team/plan.md]" }), method: "PUT" }))).status).toBe(200);
+    expect(await json(await readChat(f, capability, "channels"))).toMatchObject({ channels: [{ name: "Plan @[team/plan.md]" }] });
   });
 
   it("creates read-write Group links only where Edit links are released", async () => {

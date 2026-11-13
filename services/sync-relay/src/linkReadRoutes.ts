@@ -101,7 +101,7 @@ export function createLinkReadRoutes(
         receivedSource: identity.source(["link", fresh.grantId], share.workspaceId),
         effectiveSelector: presentation.selector,
         access: fresh.access,
-        subjectName: storage.getShareLabels(fresh.shareId).subjectName,
+        subjectName: storage.getShareLabels(fresh.shareId, "link").subjectName,
         ...linkChannel(fresh.grantId),
         ...freshness,
         // share-web learns a holder's grant at exchange. It learns an agent's
@@ -159,7 +159,7 @@ export function createLinkReadRoutes(
         ok: true,
         effectiveSelector: presentation.selector,
         access: fresh.access,
-        subjectName: storage.getShareLabels(fresh.shareId).subjectName,
+        subjectName: storage.getShareLabels(fresh.shareId, "link").subjectName,
         ...linkChannel(fresh.grantId),
         files,
         nextCursor: snapshot.nextCursor,

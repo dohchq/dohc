@@ -195,7 +195,7 @@ export function createLinkChatRoutes(options: {
       if (profile !== null && (!linkKey || !LINK_SECRET_PATTERN.test(profile))) throw notFound();
       const profileName = profile === null || !linkKey ? null
         : storage.getLinkPrincipalForGrantProfile(capability.grantId, hashLinkProfileSecret(profile, linkKey))?.displayName ?? null;
-      const name = storage.getShareLabels(share.shareId).subjectName;
+      const name = storage.getShareLabels(share.shareId, "link").subjectName;
       const fresh = current();
       return respond({ shareId: share.shareId, profileName, channels: [{ channelWireId, name, access: fresh.effectiveSelector.access }] });
     }

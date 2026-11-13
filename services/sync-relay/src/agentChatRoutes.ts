@@ -219,7 +219,7 @@ export function createAgentChatRoutes(input: {
       if (signal.aborted) throw new Refused();
       current(check);
       const answer: AgentChatWaitBody = {
-        ok: true, group: { channelWireId, name: storage.getShareLabels(shareId).subjectName }, mention, messages: [], cursor: position,
+        ok: true, group: { channelWireId, name: storage.getShareLabels(shareId, "link").subjectName }, mention, messages: [], cursor: position,
       };
       for (const message of result.found) {
         const next = { ...answer, messages: [...answer.messages, message], cursor: message.relaySeq };

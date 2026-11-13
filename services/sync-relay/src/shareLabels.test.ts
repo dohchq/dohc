@@ -66,6 +66,7 @@ it("leaves old shares neutral until the owner refreshes them", async () => {
 it("keeps only the file links a Group's files cover in its label, which its members read as its name", async () => {
   const storage = await testStorage(), handler = testHandler(storage);
   await claimWorkspace(handler, "owner", "workspace");
+  const W = CHAT_FILE_LINK_WITHHELD;
   const name = "Q3 @[team/plan.md] @[finance/budget.md]";
   const share = (shareId: string, selector: object, subjectName: string) => storage.createShare({
     share: {shareId, workspaceId: "workspace", granterUserId: "owner", selectorJson: JSON.stringify(selector), createdAtMs: 1, labels: {subjectName}},
@@ -74,14 +75,27 @@ it("keeps only the file links a Group's files cover in its label, which its memb
   share("group", {kind: "group", channelWireId: "wire-group", paths: ["team"], versionId: null}, name);
   share("chat", {kind: "chat", channelWireId: "wire-chat"}, name);
   share("files", {paths: ["finance"], versionId: null}, "@[finance/budget.md]");
-  expect(storage.getShareLabels("group").subjectName).toBe(`Q3 @[team/plan.md] ${CHAT_FILE_LINK_WITHHELD}`);
+  share("nested", {kind: "group", channelWireId: "wire-nested", paths: ["clients/acme/team"], versionId: null},
+    "Plan @[clients/acme/team/plan.md] @[clients/acme/budget.md]");
+  // The owner's words are stored as written, and a label stored that way
+  // before this reads withheld all the same.
+  const db = inspectDatabase(storagePath(storage));
+  expect(db.prepare("SELECT subject_name FROM sync_relay_share_labels WHERE share_id = 'group'").get()).toEqual({subject_name: name});
+  db.close();
+  expect(storage.getShareLabels("group").subjectName).toBe(`Q3 @[team/plan.md] ${W}`);
   // A Group shared without files covers none.
-  expect(storage.getShareLabels("chat").subjectName).toBe(`Q3 ${CHAT_FILE_LINK_WITHHELD} ${CHAT_FILE_LINK_WITHHELD}`);
+  expect(storage.getShareLabels("chat").subjectName).toBe(`Q3 ${W} ${W}`);
   // A file share's label is no Group's name.
   expect(storage.getShareLabels("files").subjectName).toBe("@[finance/budget.md]");
+  // A link reader reads a covered link from the shared folder down, as its files show it.
+  expect(storage.getShareLabels("nested").subjectName).toBe(`Plan @[clients/acme/team/plan.md] ${W}`);
+  expect(storage.getShareLabels("nested", "link").subjectName).toBe(`Plan @[team/plan.md] ${W}`);
+  // The owner's listing shows the name as written, so its refresh finds nothing to change.
+  const granted = (await json(await handler(request("owner", "/sync/shares")))).granted as Array<Record<string, unknown>>;
+  expect(granted.find(row => row.shareId === "group")?.subjectName).toBe(name);
   // A rename reads the same way, cut short or not.
   expect((await handler(request("owner", "/sync/shares/group", {...jsonBody({subjectName: `Q4 @[finance/${"x".repeat(200)}.md]`}), method: "PUT"}))).status).toBe(200);
-  expect(storage.getShareLabels("group").subjectName).toBe(`Q4 ${CHAT_FILE_LINK_WITHHELD}`);
+  expect(storage.getShareLabels("group").subjectName).toBe(`Q4 ${W}`);
 });
 
 it("stores labels with an atomic link share and refuses former or replacement owners", async () => {
