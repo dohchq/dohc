@@ -58,7 +58,6 @@ async function capture(page: Page, list: Locator, name: string): Promise<void> {
   await setTheme(page, "light");
 }
 
-// The arrows wrap from the first option to the last, which starts out of view.
 async function expectLastRevealed(page: Page, list: Locator): Promise<void> {
   const last = list.getByRole("option").last();
   expect(await scrolls(list)).toBe(true);
@@ -99,7 +98,6 @@ test("the editor's listboxes keep the option Enter acts on in view as the arrows
     await expect(slash).toBeVisible();
     await capture(page, slash, "slash-menu");
     await expectLastRevealed(page, slash);
-    // Each list closes with its trigger text, as editor-slash-menu leaves it.
     await page.keyboard.press("Escape");
     await page.keyboard.press("Backspace");
     await expect(slash).toBeHidden();
@@ -184,8 +182,6 @@ test("the page-link and emoji pickers leave keys to the IME while it composes", 
         selectionEnd: text.length,
       });
     const commit = (text: string) => cdp.send("Input.insertText", { text });
-    // The editor records each key that reaches it while composing, and
-    // whether anything consumed it on the way.
     type Recording = HTMLElement & { composingKeys: string[] };
     await editor.evaluate((element) => {
       const keys: string[] = [];

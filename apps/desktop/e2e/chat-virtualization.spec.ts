@@ -140,7 +140,6 @@ test.describe("chat list virtualization", () => {
         )
         .toBeLessThan(2);
 
-      // A jump to the last item resumes following even after reading history.
       await page.evaluate(() => window.chatListFixture.jump("m-500"));
       await expect(row("m-500")).toBeInViewport();
       await expect.poll(() => gap(list)).toBeLessThan(2);
@@ -169,7 +168,6 @@ test.describe("chat list virtualization", () => {
       await expect(row("m-0")).toBeInViewport();
       await expect(trigger).toBeFocused();
       await page.keyboard.press("Tab");
-      // The next row's toolbar starts with its quick reactions.
       await expect(row("m-201").getByRole("button", { name: "React with 👍" })).toBeFocused();
       await page.keyboard.press("Shift+Tab");
       await expect(trigger).toBeFocused();
@@ -243,8 +241,6 @@ test.describe("chat list virtualization", () => {
       )
       .toBeLessThan(2);
 
-    // Moving an existing row from below the viewport into older history must
-    // preserve the reading position too, without dropping data preservation.
     await page.evaluate(() => window.chatListFixture.reorder());
     await expect(anchor).toHaveAttribute("aria-posinset", "222");
     await expect
@@ -291,7 +287,6 @@ test.describe("chat list virtualization", () => {
     const anchor = page.locator('[data-message-id="m-200"]');
     await expect(anchor).toBeInViewport({ ratio: 1 });
     const top = await anchor.evaluate((node) => node.getBoundingClientRect().top);
-    // The nearest row still mounted wholly above the viewport.
     const aboveId = await page.evaluate(() => {
       const viewportTop = document.querySelector('[role="list"]')!.getBoundingClientRect().top;
       return [...document.querySelectorAll("[data-message-id]")]

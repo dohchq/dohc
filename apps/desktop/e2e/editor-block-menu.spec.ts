@@ -48,7 +48,6 @@ test("the block menu keeps the row Enter acts on in view as the keys move it", a
     await expect(menu).toBeFocused();
     const text = menu.getByRole("menuitem", { name: "Text" });
     const remove = menu.getByRole("menuitem", { name: "Delete" });
-    // The list scrolls: the last row starts out of view.
     expect(await menu.evaluate((list) => list.scrollHeight > list.clientHeight)).toBe(true);
     expect(await inView(remove, menu)).toBe(false);
 
@@ -61,7 +60,6 @@ test("the block menu keeps the row Enter acts on in view as the keys move it", a
 
     await page.keyboard.press("Home");
     expect(await inView(text, menu)).toBe(true);
-    // The first row brings its section label along.
     expect(await inView(menu.getByText("Turn into", { exact: true }), menu)).toBe(true);
 
     await page.keyboard.press("ArrowUp");

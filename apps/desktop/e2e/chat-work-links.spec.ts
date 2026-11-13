@@ -13,7 +13,6 @@ import {
   trustOpenWorkspace,
 } from "./helpers/workspace";
 
-// Set UI_AUDIT_SHOT_DIR to also save each frame in both themes.
 const SHOT_DIR = process.env.UI_AUDIT_SHOT_DIR ?? "";
 
 async function shoot(page: Page, name: string): Promise<void> {
@@ -46,7 +45,6 @@ test("an agent links a Group, a thread, and a file in a message, and each chip o
     await trustOpenWorkspace(desktop);
     await waitForCliEndpoint(temp.homeDir);
 
-    // An agent works through the CLI, as it would from a terminal.
     const cli = async (...args: string[]) =>
       JSON.parse((await runDohcCli(temp, [...args, "--as-agent", "--json"])).stdout);
     await cli("chat", "create-group", "Trip", "--type", "posts");
@@ -92,7 +90,6 @@ test("an agent links a Group, a thread, and a file in a message, and each chip o
       }).toPass();
     };
 
-    // The post card names each link; the card stays the one button.
     await page.getByTestId("chats-channel").filter({ hasText: "Notes" }).click();
     const chips = card.getByTestId("chats-post-title-work-link");
     await expect(chips).toHaveCount(3);
@@ -102,12 +99,9 @@ test("an agent links a Group, a thread, and a file in a message, and each chip o
     await expect(card.getByRole("button", { name: "Open Trip", exact: true })).toHaveCount(0);
     await shoot(page, "a-post");
 
-    // In the post, each chip opens what it names.
     await openPost();
     await expect(thread.getByRole("button", { name: "Open Flights", exact: true })).toBeVisible();
     await expect(thread.getByRole("button", { name: "Open trip.md", exact: true })).toBeVisible();
-    // The post's title, its first line cut short, names a link it keeps and
-    // drops one it would cut. Its chip opens the Group.
     const titleChip = main.getByTestId("chats-thread-title-work-link");
     await expect(titleChip).toHaveCount(1);
     await expect(main.getByTestId("chats-thread-title")).not.toContainText("@[work:");
@@ -116,13 +110,11 @@ test("an agent links a Group, a thread, and a file in a message, and each chip o
     await expect(main.getByTestId("chats-channel-title")).toHaveText("Trip");
     await shoot(page, "c-group");
 
-    // The thread chip opens the thread.
     await openPost();
     await thread.getByRole("button", { name: "Open Flights", exact: true }).click();
     await expect(thread).toContainText("Book by Friday");
     await shoot(page, "d-thread");
 
-    // The file chip opens the file.
     await openPost();
     await thread.getByRole("button", { name: "Open trip.md", exact: true }).click();
     await expect(page.getByText("Flights on Friday.")).toBeVisible();

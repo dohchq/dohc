@@ -39,8 +39,6 @@ async function dragBoardCard(page: Page, card: Locator, column: Locator): Promis
   await page.mouse.up();
 }
 
-// Auth and custom source are fixture setup. Field rename, migration review, publication,
-// and submissions use real desktop/browser controls against the real relay and engine.
 test("@dataset-completion field rename preserves custom rules and an already published form", async ({}, info) => {
   test.setTimeout(180_000);
   const workspace = await createTempWorkspace(),
@@ -103,7 +101,6 @@ test("@dataset-completion field rename preserves custom rules and an already pub
     const collection = page.getByRole("region", { name: "Registrations", exact: true });
     await createRecord(collection, "Before sharing");
     await expect(await fieldCells(collection, "Name")).toHaveText("Before sharing");
-    // Add a real authored rule through the normal reviewed source-change path.
     const definition = JSON.parse(
       await readFile(join(workspace.rootPath, "Registrations/dataset.json"), "utf8"),
     ) as DatasetDefinition;
@@ -587,7 +584,6 @@ test("@dataset-completion board and calendar page all records and save governed 
     const calendarRow = event.locator(
       "xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' rbc-month-row ')]",
     );
-    // Drop onto a different day of the same visible week; calendar applies its date field operation.
     const originalDay = new Date(today.getFullYear(), today.getMonth(), 10).getDay();
     const eventBox = await event.boundingBox();
     const dayBox = await calendarRow

@@ -145,7 +145,6 @@ function decode(png: Buffer): Pixels {
   return PNG.sync.read(png);
 }
 
-// What differs between two images, or null when nothing does.
 function mismatch(expected: Pixels, actual: Pixels): string | null {
   if (expected.width !== actual.width || expected.height !== actual.height) {
     return `is ${actual.width}x${actual.height}, the baseline ${expected.width}x${expected.height}`;
@@ -175,9 +174,6 @@ function pngMismatch(expected: Buffer, actual: Buffer): string | null {
 const IN_CONTEXT_LEVELS = 16;
 const IN_CONTEXT_PIXELS = 64;
 
-// What differs between a part captured among the others and its baseline,
-// or null when no more than IN_CONTEXT_PIXELS pixels differ by more than
-// IN_CONTEXT_LEVELS in a channel.
 function farFrom(expected: Pixels, actual: Pixels): string | null {
   if (expected.width !== actual.width || expected.height !== actual.height)
     return mismatch(expected, actual);
@@ -195,7 +191,6 @@ function farFrom(expected: Pixels, actual: Pixels): string | null {
     : `differs by more than ${IN_CONTEXT_LEVELS} levels in ${far} pixels`;
 }
 
-// A part's box with BLEED around it, its height rounded up to a whole pixel.
 function around(box: Box): Box {
   return {
     x: box.x - BLEED,
@@ -407,7 +402,6 @@ test("@states-page @states-baselines every shared part matches its baseline in b
       window.location.hash = hash;
     }, STATES_PAGE_HASH);
     await expect(page.getByTestId("states-page")).toBeVisible();
-    // The page holds the document light so its light pane reads light tokens.
     await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
 
     // The page's clock is faked from here. Real time passes while the fonts
@@ -463,8 +457,6 @@ test("@states-page @states-baselines every shared part matches its baseline in b
     await expect(
       page.locator('[data-part="composer-sending"] button[aria-busy="true"]'),
     ).toHaveCount(2 * 3);
-    // The self-test notice exists to show a clipped row: in the 420px Notices
-    // part its body runs past three lines, so the row offers Show more.
     for (const theme of THEMES) {
       const more = page
         .getByTestId(`states-${theme}`)

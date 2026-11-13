@@ -38,8 +38,6 @@ test("a local workspace edits a rich doc through the engine provider without a c
     desktop = await launchDesktopApp({ workspace: temp });
     const { page } = desktop;
 
-    // Record every WebSocket the renderer opens for the whole session. Solo
-    // rich-doc editing must never open one.
     const webSockets: string[] = [];
     page.on("websocket", (ws) => {
       webSockets.push(ws.url());
@@ -64,7 +62,6 @@ test("a local workspace edits a rich doc through the engine provider without a c
     const editor = page.getByTestId("markdown-editor");
     await expect(editor).toBeVisible();
 
-    // Type into the live rich editor and let the debounced settle land.
     await editor.click();
     await page.keyboard.press(DOCUMENT_END);
     await page.keyboard.type(sentinel);
@@ -87,8 +84,6 @@ test("a local workspace edits a rich doc through the engine provider without a c
     // CRDT ops (the old path would have produced only ordinary moment.append
     // captures with no ydoc_updates rows at all).
     await expect.poll(() => ydocUpdateCount(temp.rootPath), { timeout: 30_000 }).toBeGreaterThan(0);
-    // The settle projected a history moment carrying the text (settle points are
-    // engine history).
     await expect
       .poll(
         () =>
@@ -102,7 +97,6 @@ test("a local workspace edits a rich doc through the engine provider without a c
       )
       .toBeGreaterThan(0);
 
-    // The editor is engine-native and opens no WebSocket during the session.
     expect(webSockets).toEqual([]);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);

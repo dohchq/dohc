@@ -19,7 +19,6 @@ const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as {
   DatabaseSync: new (path: string, options?: { readOnly?: boolean }) => SqliteFile;
 };
 
-// A row's value as the database file on disk holds it.
 function storedStage(path: string, rowid: number): unknown {
   const db = new DatabaseSync(path, { readOnly: true });
   try {
@@ -51,9 +50,6 @@ test("a CSV imported from its tab row opens as a database whose cells edit from 
     const signedUp = grid.getByTestId("db-cell-stage-row_2");
     await expect(signedUp).toHaveText("Signed up");
 
-    // From the search field, Tab enters the grid at its first cell, the first
-    // row's id. The arrow keys move to the second row's stage, Enter opens
-    // its editor, and Enter commits.
     await page.getByTestId("db-filter-input").focus();
     await page.keyboard.press("Tab");
     await expect(grid.getByTestId("db-cell-id-row_1")).toBeFocused();
@@ -76,7 +72,6 @@ test("a CSV imported from its tab row opens as a database whose cells edit from 
       .poll(() => storedStage(join(workspace.rootPath, "funnel.sqlite"), 2))
       .toBe("Signed up for a trial");
 
-    // Escape leaves a cell as it was, and Tab leaves the grid.
     await page.keyboard.press("ArrowUp");
     await expect(grid.getByTestId("db-cell-stage-row_1")).toBeFocused();
     await page.keyboard.press("F2");

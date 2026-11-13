@@ -154,8 +154,6 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     await expect(nestedComment).toHaveAttribute("data-parent-message-id", firstCommentId);
     await expect(nestedComment.getByTestId("chats-reply-context")).toHaveText("↳ replying to You");
 
-    // A post reaction is a reaction on the opening message. The same quiet
-    // pills work on comments.
     const openingMessage = view.locator('article[data-testid="chats-message"]');
     await addReaction(openingMessage, "👍", openingMessage);
     await expect(reactionPill(openingMessage, "👍")).toHaveAttribute("data-mine", "true");
@@ -178,7 +176,6 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     ]);
     expect(reply.stderr).toBe("");
     expect(reply.stdout).toContain("replied");
-    // `replied <threadId> <messageId>` carries the CLI message handle.
     const cliMessageId = reply.stdout.match(/^replied\s+\S+\s+(\S+)/mu)?.[1];
     expect(cliMessageId).toBeTruthy();
     if (!cliMessageId) throw new Error("CLI reply did not return a message id");
@@ -195,8 +192,6 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
       "Unanswered",
     );
 
-    // The feed summary reflects the same open decision, and reopening keeps
-    // the full agent treatment and resolve gesture intact.
     await view.getByTestId("chats-thread-back").click();
     const decisionCard = postCard(view, postTitle);
     await expect(decisionCard.getByTestId("chats-post-decision-open")).toHaveAccessibleName(
@@ -335,7 +330,6 @@ test("a comment's hidden toolbar takes no click meant for the comment above", as
     const point = { x: replyBox.x + replyBox.width / 2, y: replyBox.y + 0.5 };
     expect(point.y).toBeGreaterThan(aboveBox.y);
     expect(point.y).toBeLessThan(aboveBox.y + aboveBox.height);
-    // Rest the pointer on the comment above, clear of the lower row.
     await page.mouse.move(aboveBox.x + aboveBox.width / 2, aboveBox.y + aboveBox.height / 2);
     const toolbar = ownBubble(below).getByTestId("chats-message-toolbar");
     const toolbarTakesPoint = () =>
@@ -343,7 +337,6 @@ test("a comment's hidden toolbar takes no click meant for the comment above", as
     await expect.poll(toolbarTakesPoint).toBe(false);
     await expect(toolbar).toHaveCSS("pointer-events", "none");
 
-    // The same Reply, shown on hover, still starts a reply.
     await ownBubble(below).hover();
     await ownBubble(below).getByTestId("chats-comment-reply").click();
     await expect(view.getByTestId("chats-replying-mode")).toContainText("Replying to You");
@@ -398,8 +391,6 @@ test("an agent chat written by the CLI while the app runs arrives unread live", 
     await expect(agentThreadRow).toBeVisible();
     await expect(agentThreadRow.getByTestId("chats-thread-unread")).toHaveText("1");
 
-    // Reading it clears the badge, so it tracked read state rather than
-    // merely rendering an arrival.
     await agentThreadRow.click();
     await expect(threadView.getByTestId("chats-message-author")).toHaveText("Agent");
     await expect(threadView.getByTestId("chats-message-body")).toContainText(agentBody);

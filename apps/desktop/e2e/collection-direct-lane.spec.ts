@@ -126,7 +126,6 @@ test("@two-client a recipient with Edit changes a Collection directly, and the o
   try {
     relay = await spawnSyncRelay({ dbPath: join(ownerTemp.baseDir, "relay", "relay.sqlite") });
 
-    // --- The owner's synced workspace holds a Collection -----------------
     await seedWorkspaceManifest(ownerTemp, ownerWorkspaceId);
     await writeWorkspaceFiles(ownerTemp, [
       { path: SCHEMA_PATH, contents: SCHEMA },
@@ -145,7 +144,6 @@ test("@two-client a recipient with Edit changes a Collection directly, and the o
     });
     owner = await launchDesktopApp({ workspace: ownerTemp, env: syncEnv });
     await openWorkspaceFromFirstRun(owner.page, ownerTemp);
-    // Turning sync on claims the workspace and enrols its existing files.
     const enabled = await owner.page.evaluate(async (workspaceId) => {
       const api = (window as unknown as { dohcDesktop: Api }).dohcDesktop;
       try {
@@ -181,7 +179,6 @@ test("@two-client a recipient with Edit changes a Collection directly, and the o
       { workspaceId: ownerWorkspaceId, recipientEmail: RECIPIENT_EMAIL },
     );
 
-    // --- The recipient opens the share and changes the Collection ---------
     await seedCloudCredentials(recipientTemp, {
       serverUrl: relay.baseUrl,
       relayUrl: relay.baseUrl,
@@ -197,7 +194,6 @@ test("@two-client a recipient with Edit changes a Collection directly, and the o
     await page.getByTestId("open-share-start").click();
     await expect(page.getByTestId("shared-view-banner")).toBeVisible();
 
-    // A save pushes a Collection's own files on its own: no Send changes.
     await expect
       .poll(() => saveText(page, SCHEMA_PATH, SCHEMA_TWO), { timeout: 60_000, intervals: [1_000] })
       .toBe("written");
@@ -223,7 +219,6 @@ test("@two-client a recipient with Edit changes a Collection directly, and the o
           RECIPIENT_USER,
       ),
     ).toBe(true);
-    // Nothing waited for the owner's review.
     const proposals = await relayJson(
       relay.baseUrl,
       OWNER_TOKEN,
@@ -231,7 +226,6 @@ test("@two-client a recipient with Edit changes a Collection directly, and the o
     );
     expect((JSON.parse(proposals.body) as { proposals: unknown[] }).proposals).toEqual([]);
 
-    // --- The owner's disk and History have it, named for the recipient ----
     await expect
       .poll(
         async () => {
@@ -251,7 +245,6 @@ test("@two-client a recipient with Edit changes a Collection directly, and the o
       )
       .toBe(`${RECIPIENT_EMAIL} (Edit)`);
 
-    // --- A race: the owner changes the automations first -----------------
     await writeWorkspaceFiles(ownerTemp, [{ path: AUTOMATIONS_PATH, contents: AUTOMATIONS_OWNER }]);
     await expect
       .poll(
@@ -272,7 +265,6 @@ test("@two-client a recipient with Edit changes a Collection directly, and the o
       .filter({ hasText: "changed before your change reached" });
     await expect(stale).toBeVisible({ timeout: 60_000 });
     expect(await directPaths(relay, ownerWorkspaceId)).toHaveLength(2);
-    // The notice sends it as a proposal instead.
     await stale.getByTestId("workspace-shell-error-action").click();
     await expect
       .poll(
@@ -298,7 +290,6 @@ test("@two-client a recipient with Edit changes a Collection directly, and the o
       )
       .toEqual([AUTOMATIONS_PATH]);
 
-    // --- Stop and restore ---------------------------------------------------
     const grants = await relayJson(relay.baseUrl, OWNER_TOKEN, "/sync/shares");
     const grantId = (
       JSON.parse(grants.body) as { granted: Array<{ shareId: string; grantId: string }> }
@@ -320,8 +311,6 @@ test("@two-client a recipient with Edit changes a Collection directly, and the o
         { timeout: 120_000, intervals: [2_000] },
       )
       .toBe("restored");
-    // The schema goes back; the automations the owner changed since stay,
-    // listed for the owner to check.
     expect(outcome).toMatchObject({
       restored: [{ path: SCHEMA_PATH }],
       review: [{ path: AUTOMATIONS_PATH, reason: "changed-since" }],
@@ -345,7 +334,6 @@ test("@two-client a recipient with Edit changes a Collection directly, and the o
       timeout: 60_000,
     });
     await expect(page.getByTestId("share-changes-send")).toHaveCount(0);
-    // --- A server write after the stop is still refused ---------------------
     const refused = await relayJson(
       relay.baseUrl,
       RECIPIENT_TOKEN,

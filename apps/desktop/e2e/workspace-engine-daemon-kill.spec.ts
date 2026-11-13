@@ -108,7 +108,6 @@ async function killDaemonMidTyping(
   await page.keyboard.type(` ${input.preKill}`);
   for (const pid of victims) await hardKillPid(pid);
 
-  // Keep typing through the outage, exactly like the journey's user did.
   await page.keyboard.type(` ${input.postKill}`);
 
   const replacement = await waitForFreshEngineDaemon(
@@ -146,9 +145,6 @@ async function killDaemonMidTyping(
   return { desktop, editor };
 }
 
-// The journey's scenario. Its user stopped typing before the app went away, so
-// recovery that only runs on the next keystroke never runs at all: nothing is
-// typed here between the daemon's return and the quit.
 test("a hard daemon kill keeps the outage text when the user never types again", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
@@ -174,7 +170,6 @@ test("a hard daemon kill keeps the outage text when the user never types again",
     const onDisk = await readFile(join(temp.rootPath, docPath), "utf8");
     expect(onDisk).toContain(preKill);
     expect(onDisk).toContain(postKill);
-    // The document must be recovered, not duplicated.
     expect(onDisk.match(/Anchor paragraph\./g)).toHaveLength(1);
     expect(onDisk.match(new RegExp(preKill, "g"))).toHaveLength(1);
 
@@ -206,11 +201,9 @@ test("a hard daemon kill leaves the editor writable and lands the outage text", 
     });
     desktop = killed.desktop;
 
-    // (a) The editor must still accept input after the restart, not sit dead.
     await desktop.page.keyboard.type(" KILLREC_AFTER_RESTART");
     await expect(killed.editor).toContainText("KILLREC_AFTER_RESTART");
 
-    // (b) And the keystroke path persists everything through the replacement.
     await expect
       .poll(async () => await readFile(join(temp.rootPath, docPath), "utf8").catch(() => ""), {
         timeout: 30_000,
@@ -309,7 +302,6 @@ test("a document reopened after an app crash reads Saved only once its file has 
     await desktop.page.getByTestId("markdown-editor").click();
     await desktop.page.keyboard.press(DOCUMENT_END);
 
-    // Crash once the engine has journaled the edit.
     const journaled = ydocUpdateCount(temp.rootPath);
     await desktop.page.keyboard.insertText(` ${crashed}`);
     await expect.poll(() => ydocUpdateCount(temp.rootPath)).toBeGreaterThan(journaled);

@@ -256,7 +256,6 @@ test("@ui-audit the versions menu and what it opens", async () => {
     await page.emulateMedia({ reducedMotion: "reduce" });
     await expectActive(page, "Main");
 
-    // On Main: the menu, the New version dialog, a taken name, and Creating….
     await shootWindow(page, "window-main");
     await openMenu(page);
     await shootMenu(page, "menu-main");
@@ -279,8 +278,6 @@ test("@ui-audit the versions menu and what it opens", async () => {
     await expectActive(page, "Draft");
     await expect(page.getByTestId("version-new-dialog")).toHaveCount(0);
 
-    // On Draft: the trigger without a dot, the menu opened with the mouse,
-    // and the dialog starting from Draft.
     await shootParts(page, "trigger-draft", [page.getByTestId("version-menu-button")]);
     await openMenu(page);
     await shootMenu(page, "menu-draft");
@@ -289,8 +286,6 @@ test("@ui-audit the versions menu and what it opens", async () => {
     await expect(page.getByTestId("version-new-no-merge")).toBeVisible();
     await shootDialog(page, "new-version-draft");
 
-    // A create that fails for another reason: a notice with Try again, and
-    // its row in Notices. The dialog keeps the name.
     await interceptNext(desktop, "desktop:create-workspace-version", "fail");
     await page.getByTestId("version-new-input").press("Enter");
     const createFailed = errorToast(page, "Ideas");
@@ -345,7 +340,6 @@ test("@ui-audit the versions menu and what it opens", async () => {
     await shootWindow(page, "merge-resolved");
     await page.getByTestId("version-merge-done").click();
 
-    // A clean merge.
     await writeCaptured(page, temp.rootPath, "Draft", "plan.md", "# Plan\n\nSecond draft.\n");
     await openMenu(page);
     await page.getByTestId("version-merge").click();
@@ -356,8 +350,6 @@ test("@ui-audit the versions menu and what it opens", async () => {
     await shootWindow(page, "merge-success");
     await page.getByTestId("version-merge-done").click();
 
-    // A merge whose dialog closed while it ran keeps going, and its answer
-    // is a toast and a Notices row: a success, a failure, and files to decide.
     const closeWhileMerging = async (mode: "hold" | "hold-then-fail", shot?: string) => {
       await openMenu(page);
       await page.getByTestId("version-merge").click();
@@ -390,7 +382,6 @@ test("@ui-audit the versions menu and what it opens", async () => {
     await expect(failedAway).toBeVisible({ timeout: 30_000 });
     await expect(failedAway.getByTestId("workspace-shell-error-retry")).toBeVisible();
     await shootWindow(page, "merge-closed-failure");
-    // While another merge dialog is open, Try again waits and says why.
     await openMenu(page);
     await page.getByTestId("version-merge").click();
     await expect(failedAway.getByTestId("workspace-shell-error-retry")).toBeDisabled();
@@ -401,7 +392,6 @@ test("@ui-audit the versions menu and what it opens", async () => {
     await page.getByTestId("version-merge-cancel").click();
     await expect(page.getByTestId("version-merge-dialog")).toHaveCount(0);
     await expect(failedAway.getByTestId("workspace-shell-error-retry")).toBeEnabled();
-    // Try again opens the dialog merging again, and the answer shows there.
     await failedAway.getByTestId("workspace-shell-error-retry").click();
     await expect(page.getByTestId("version-merge-status")).toHaveText(/Merged 1 file into Main/, {
       timeout: 30_000,
@@ -468,7 +458,6 @@ test("@ui-audit the versions menu and what it opens", async () => {
     await expect(decideRow).toHaveCount(0, { timeout: 30_000 });
     await page.getByTestId("notice-center-toggle").click();
 
-    // Nothing new to merge.
     await openMenu(page);
     await page.getByTestId("version-merge").click();
     await page.getByTestId("version-merge-confirm").click();
@@ -551,12 +540,10 @@ test("@ui-audit the versions menu and what it opens", async () => {
     await shootWindow(page, "merge-resolved-protected");
     await page.getByTestId("version-merge-done").click();
 
-    // A version made from Draft cannot merge into Main, and says why.
     await createVersion(page, "Draft two");
     await openMenu(page);
     await shootMenu(page, "menu-nested");
     await page.keyboard.press("Escape");
-    // Opened from the keyboard, then down to the disabled Merge row.
     await page.getByTestId("version-menu-button").focus();
     await page.keyboard.press("Enter");
     await expect(page.getByTestId("version-menu")).toBeVisible();
@@ -573,7 +560,6 @@ test("@ui-audit the versions menu and what it opens", async () => {
     await page.keyboard.press("Escape");
     await shootWindow(page, "window-nested");
 
-    // Switching with an edit main has not taken yet asks to save it first.
     await explorerRow(page, "plan.md").click();
     const editor = page.getByTestId("markdown-editor");
     await expect(editor).toBeVisible({ timeout: 20_000 });

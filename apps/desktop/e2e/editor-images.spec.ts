@@ -30,7 +30,6 @@ test.afterEach(async () => {
 async function openMarkdownDoc(page: import("@playwright/test").Page, path: string): Promise<void> {
   await revealExplorerPath(page, path);
   await explorerRow(page, path).click();
-  // A plain (non-engine) markdown file opens straight into the WYSIWYG editor.
   await expect(page.getByTestId("markdown-editor")).toBeVisible({ timeout: 15_000 });
 }
 
@@ -123,8 +122,6 @@ test("in-editor image: a link escaping the workspace root does not render", asyn
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {
-    // A real, decodable PNG planted outside the workspace root (temp.baseDir is
-    // the parent of temp.rootPath) at the exact path the escape link targets.
     await writeFile(join(temp.baseDir, "outside.png"), PNG_BYTES);
     await writeWorkspaceFiles(temp, [
       {
@@ -144,7 +141,6 @@ test("in-editor image: a link escaping the workspace root does not render", asyn
     // state read next is final rather than early.
     const img = page.locator('.dohc-editor-image[alt="escape"]');
     await expect(img).toBeAttached({ timeout: 15_000 });
-    // It was never rewritten to the privileged scheme.
     await expect(img).not.toHaveAttribute("src", /^dohc-file:\/\//);
     // No src attribute at all (not `src=""` either, which re-requests the
     // page's own URL), and nothing fetched or decoded.
@@ -166,8 +162,6 @@ test("in-editor image: a link escaping the workspace root does not render", asyn
 
 // ── dragging an image FILE into a document ─────────────────────────────────
 
-// Writes a real PNG to a temp dir outside the workspace — the OS location a
-// user actually drags from — and returns its absolute path.
 async function pngOutsideWorkspace(): Promise<string> {
   const dir = await createTestScratch("dohc-drag-");
   const path = join(dir, "Dragged Shot.png");
@@ -226,15 +220,12 @@ test("dragging an image file onto the editor embeds it into the configured attac
     // The image renders — the whole write → dohc-file:// serve → decode path.
     await expectEditorImagePainted(page);
 
-    // ...and the bytes landed in the configured folder at the workspace root,
-    // under the slug+hash asset name, not next to the document.
     await expect
       .poll(async () => await readdir(join(temp.rootPath, "attachments")).catch(() => []))
       .toEqual([expect.stringMatching(/^dragged-shot-[0-9a-z]+\.png$/)]);
     const [written] = await readdir(join(temp.rootPath, "attachments"));
     expect(await readFile(join(temp.rootPath, "attachments", written!))).toEqual(PNG_BYTES);
 
-    // The node's src is the document-relative form that climbs to the root.
     await expect(page.locator(".dohc-editor-image").first()).toHaveAttribute(
       "src",
       /^dohc-file:\/\/.*\/attachments\/dragged-shot-[0-9a-z]+\.png$/,
@@ -345,7 +336,6 @@ test("opening an image file directly in the media viewer does not crash", async 
       })
       .toBeGreaterThan(0);
 
-    // The window must still be alive (a crash would tear down the renderer).
     expect(desktop.app.windows().length).toBeGreaterThan(0);
     expect(await page.evaluate(() => 1 + 1)).toBe(2);
   } finally {

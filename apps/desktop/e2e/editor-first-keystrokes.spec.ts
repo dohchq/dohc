@@ -13,9 +13,6 @@ import {
   type TempWorkspace,
 } from "./helpers/workspace";
 
-// The first keys typed after focus reaches a document's editor must land in
-// the editor, at the caret the person expects, and reach the file.
-
 type Desktop = Awaited<ReturnType<typeof launchDesktopApp>>;
 
 async function withDesktop(
@@ -127,7 +124,6 @@ test("a line typed after click, Ctrl+End and Enter lands at the end of an existi
       await expectEditorBound(page);
       await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved");
 
-      // Mounting the editor leaves focus in the explorer.
       const editor = page.getByTestId("markdown-editor");
       await expect(row).toBeFocused();
 

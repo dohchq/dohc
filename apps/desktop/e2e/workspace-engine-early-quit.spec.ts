@@ -178,7 +178,6 @@ for (const mode of [
             ),
           )
           .toBe(true);
-        // The pending checkpoint must never enter the persistent set-aside rows.
         expect(
           await desktop.page.evaluate(
             async (workspaceId) =>

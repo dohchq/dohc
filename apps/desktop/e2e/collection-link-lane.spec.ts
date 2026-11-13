@@ -65,7 +65,6 @@ async function ownerLog(relay: SyncRelayHandle): Promise<LogOp[]> {
   return (JSON.parse(read.body) as { ops: LogOp[] }).ops;
 }
 
-/** One MCP tool call, as a signed-in agent sends it to the link's MCP address. */
 async function callTool(
   handle: (request: Request) => Promise<Response>,
   agent: SignedInAgent,
@@ -136,7 +135,6 @@ test("@link-lane a browser and an agent change a Collection through an Edit link
     });
     relayProxy.routeRelayTo(relay.baseUrl);
 
-    // --- The owner's synced workspace holds a Collection -------------------
     await seedWorkspaceManifest(ownerTemp, WORKSPACE_ID);
     await writeWorkspaceFiles(ownerTemp, [
       { path: SCHEMA_PATH, contents: SCHEMA },
@@ -176,7 +174,6 @@ test("@link-lane a browser and an agent change a Collection through an Edit link
       )
       .toBe(true);
 
-    // --- The owner makes an Edit link to the trip folder --------------------
     const created = await relayJson(
       relay.baseUrl,
       OWNER_TOKEN,
@@ -195,7 +192,6 @@ test("@link-lane a browser and an agent change a Collection through an Edit link
       editLinks: true,
     });
 
-    // --- A person edits the schema in the viewer, with no account ------------
     const page = await shared.browser.newPage();
     await page.goto(`${sharedDatasetViewerOrigin}/s#${secret}`);
     await page.getByRole("button", { name: "collection.yaml", exact: true }).click();
@@ -206,7 +202,6 @@ test("@link-lane a browser and an agent change a Collection through an Edit link
     await page.getByRole("button", { name: "Save" }).click();
     await expect(page.getByText("Saved to the owner's workspace.")).toBeVisible();
 
-    // --- An agent given the same link signs in and replaces the automations --
     const viewer = shared;
     const agent = await signInAgent(
       (path, init = {}) =>
@@ -235,7 +230,6 @@ test("@link-lane a browser and an agent change a Collection through an Edit link
       result: { ok: true, outcome: "accepted", submitId: "agent-automations" },
     });
 
-    // --- Both are written as the link, never as a person --------------------
     const direct = (await ownerLog(relay)).filter(
       (op) => op.originId === `relay:collection-file:${link.grantId}`,
     );
@@ -249,7 +243,6 @@ test("@link-lane a browser and an agent change a Collection through an Edit link
       });
     }
 
-    // --- The owner's disk has both, and History names the link --------------
     await expect
       .poll(
         async () => {
@@ -277,7 +270,6 @@ test("@link-lane a browser and an agent change a Collection through an Edit link
         ]),
       );
 
-    // --- Stop and restore ends the link and puts both files back -------------
     let outcome: Awaited<ReturnType<Api["stopAndRestore"]>> | null = null;
     await expect
       .poll(
@@ -296,7 +288,6 @@ test("@link-lane a browser and an agent change a Collection through an Edit link
       )
       .toBe("restored");
     expect(outcome).toMatchObject({ review: [], unfinished: null });
-    // Automations go back first.
     const restored = (
       outcome as unknown as { restored: Array<{ path: string; restoredMomentId: string }> }
     ).restored;
@@ -310,7 +301,6 @@ test("@link-lane a browser and an agent change a Collection through an Edit link
       )?.status,
     ).toBe("revoked");
 
-    // --- Undo returns the content, never the access -------------------------
     await owner.page.evaluate(
       async (input) => {
         const api = (window as unknown as { dohcDesktop: Api }).dohcDesktop;
@@ -341,13 +331,10 @@ test("@link-lane a browser and an agent change a Collection through an Edit link
       ).links.find((row) => row.grantId === link.grantId)?.status,
     ).toBe("revoked");
 
-    // --- The browser and the agent are both refused now -----------------------
-    // The open viewer finds the link ended and stops offering Save.
     await expect(page.getByText("Editing is no longer available.")).toBeVisible({
       timeout: 60_000,
     });
     await expect(page.getByRole("button", { name: "Save" })).toHaveCount(0);
-    // A write sent from the page anyway is refused.
     expect(
       await page.evaluate(
         async ({ path, base, text }) => {

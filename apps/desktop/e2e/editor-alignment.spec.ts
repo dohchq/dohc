@@ -261,7 +261,6 @@ function expectTextOnEdge({ edges, boxes }: BlockEdges, edge: number) {
       .soft(Math.abs(edge - 16 - boxes[key]!.left), `${key} frame overhangs the left gutter`)
       .toBeLessThanOrEqual(1.5);
   }
-  // The code block's toolbar spans its frame.
   expect(boxes.toolbar, "code toolbar must render").not.toBeNull();
   for (const side of ["left", "right"] as const) {
     expect
@@ -321,11 +320,9 @@ test("every block type's text sits on one shared left content edge", async () =>
     const edge = edges.paragraph;
     expect(edge).not.toBeNull();
 
-    // Nested list items keep their 24px relative indent off the edge.
     expect(edges.nestedBullet).not.toBeNull();
     expect(Math.abs(edges.nestedBullet! - edge! - 24)).toBeLessThanOrEqual(1.5);
 
-    // The horizontal rule spans from the edge.
     expect(boxes.hr).not.toBeNull();
     expect(Math.abs(boxes.hr!.left - edge!)).toBeLessThanOrEqual(1.5);
 

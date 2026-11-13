@@ -26,8 +26,6 @@ type Desktop = Awaited<ReturnType<typeof launchDesktopApp>>;
 type Workspace = Awaited<ReturnType<typeof createTempWorkspace>>;
 type Relay = Awaited<ReturnType<typeof spawnSyncRelay>>;
 
-// A relay workspace holding shared.md, claimed and pushed by a third machine,
-// and sign-in credentials for both desktops.
 async function seedSharedWorkspace(
   workspaceId: string,
   first: Workspace,
@@ -122,7 +120,6 @@ async function logSyncStatus(
   }
 }
 
-// Open shared.md and wait until the live editor is bound and accepts typing.
 async function openLiveDocument(page: Page) {
   await explorerRow(page, "shared.md").click();
   await expect(page.getByTestId("markdown-source-toggle")).toBeVisible();
@@ -281,8 +278,6 @@ test("@two-client two desktops that open a document offline each show the other'
     const relayPort = relay.port;
     const relayDb = relay.dbPath;
 
-    // Both desktops open the document while neither can see the other's copy.
-    // Each editor seeds it, and both seeds originate one lineage.
     await relay.stop();
     relay = null;
     await openLiveDocument(left.page);
@@ -293,8 +288,6 @@ test("@two-client two desktops that open a document offline each show the other'
       .toEqual(lineageClaims(first));
     relay = await spawnSyncRelay({ dbPath: relayDb, port: relayPort });
 
-    // Online: the left types while nobody touches the right. The right's open
-    // editor shows the edit, and its file follows.
     await typeAtEnd(left.page, " Typed on the left.");
     await expect.poll(() => disk(first)).toContain("Typed on the left.");
     await expect(right.page.getByTestId("markdown-editor")).toContainText("Typed on the left.", {
@@ -302,7 +295,6 @@ test("@two-client two desktops that open a document offline each show the other'
     });
     await expect.poll(() => disk(second), { timeout: 90_000 }).toContain("Typed on the left.");
 
-    // Offline: each desktop types into the same open document.
     await relay.stop();
     relay = null;
     await typeAtEnd(left.page, " Left offline.");
@@ -311,7 +303,6 @@ test("@two-client two desktops that open a document offline each show the other'
     await expect.poll(() => disk(second)).toContain("Right offline.");
     relay = await spawnSyncRelay({ dbPath: relayDb, port: relayPort });
 
-    // Back online, each open editor shows every sentence exactly once.
     const typed = ["Starting together.", "Typed on the left.", "Left offline.", "Right offline."];
     for (const desktop of [left, right]) {
       await expect

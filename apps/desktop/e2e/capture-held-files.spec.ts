@@ -73,7 +73,6 @@ test("a real daemon holds a deep quote, shows its notice, and clears it after an
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       await page.screenshot({ path: test.info().outputPath(`held-toast-${theme}.png`) });
     }
-    // Reach the toast's retry by keyboard, then activate it without a pointer.
     const retry = toast.getByRole("button", { name: "Try again" });
     for (
       let i = 0;
@@ -93,7 +92,6 @@ test("a real daemon holds a deep quote, shows its notice, and clears it after an
       await page.keyboard.press("Tab");
     await expect(file).toBeFocused();
     await page.keyboard.press("Enter");
-    // The held note shows the hold right away, read-only, with no Edit anyway.
     const held = page.getByTestId("engine-may-hold-document-notice");
     await expect(held).toContainText('dohc cannot open "held.md" for live editing');
     await expect(held).toContainText("Restore the file's exact contents from before that edit.");
@@ -130,7 +128,6 @@ test("a real daemon holds a deep quote, shows its notice, and clears it after an
       );
       await page.screenshot({ path: test.info().outputPath(`held-notices-${theme}.png`) });
     }
-    // Details opens the row's report with its Copy details button.
     await row.getByRole("button", { name: "Details" }).click();
     await expect(row.getByRole("button", { name: "Copy details" })).toBeVisible();
     await writeFile(join(temp.rootPath, "held.md"), "Repaired outside dohc.\n");

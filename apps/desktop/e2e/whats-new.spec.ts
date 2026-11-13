@@ -19,7 +19,6 @@ async function shoot(page: Page, name: string): Promise<void> {
 }
 
 test("@whats-new What's new opens once after an update brings new notes", async () => {
-  // Three launches of the app.
   test.setTimeout(180_000);
   const workspace = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
@@ -30,11 +29,9 @@ test("@whats-new What's new opens once after an update brings new notes", async 
     await page.emulateMedia({ reducedMotion: "reduce" });
   };
   try {
-    // A new install starts on the person's work.
     desktop = await launchDesktopApp({ workspace });
     await ready(desktop.page);
     await expect(desktop.page.getByTestId("whats-new-page")).toHaveCount(0);
-    // As if the previous version had shown older notes.
     await desktop.page.evaluate(() =>
       localStorage.setItem("dohc.whatsNew.seen", "an-older-release"),
     );
@@ -50,7 +47,6 @@ test("@whats-new What's new opens once after an update brings new notes", async 
     expect(desktop.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
     await desktop.close();
 
-    // Seen: the next launch opens nothing, and the palette still reopens it.
     desktop = await launchDesktopApp({ workspace });
     await ready(desktop.page);
     await expect(desktop.page.getByTestId("whats-new-page")).toHaveCount(0);

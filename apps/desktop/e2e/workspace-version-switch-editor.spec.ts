@@ -133,21 +133,16 @@ test("switching the active version while a rich doc stays open re-binds the edit
     await expectActiveVersion(page, "Main");
     await waitForWorkspaceFile(page, workspace.workspaceId, "plan.md");
 
-    // Open the rich doc on Main — the engine editor binds to Main's Y.Doc.
     await explorerRow(page, "plan.md").click();
     await waitForEngineEditor(page);
     await expect.poll(() => editorText(page), { timeout: 15_000 }).toContain(mainSentinel);
 
-    // Fork "Draft" (create-and-switch). The doc stays open; the editor re-binds
-    // to Draft's freshly-materialized lineage (identical content so far).
     await createVersionViaMenu(page, "Draft");
     const draftId = engineVersionIdByName(temp.rootPath, "Draft");
     expect(draftId).not.toBeNull();
     await waitForEngineEditor(page);
     await expect.poll(() => editorText(page), { timeout: 15_000 }).toContain(mainSentinel);
 
-    // Type a Draft-only edit into the live editor and let the settle land — it
-    // must journal into Draft, never Main.
     const editor = page.getByTestId("markdown-editor");
     await editor.click();
     await page.keyboard.press(DOCUMENT_END);
@@ -168,7 +163,6 @@ test("switching the active version while a rich doc stays open re-binds the edit
         timeout: 20_000,
       })
       .toBe(false);
-    // Disk agrees: Main's plan.md never got the draft edit.
     await expect
       .poll(
         async () =>
@@ -179,8 +173,6 @@ test("switching the active version while a rich doc stays open re-binds the edit
       )
       .toBe(false);
 
-    // Switch back to Draft — the editor re-binds again and the draft edit
-    // returns (it was preserved in Draft's lineage, not lost on the switch).
     await switchVersionViaMenu(page, "Draft");
     await waitForEngineEditor(page);
     await expect.poll(() => editorText(page), { timeout: 20_000 }).toContain(draftSentinel);

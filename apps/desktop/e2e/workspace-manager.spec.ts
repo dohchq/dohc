@@ -11,8 +11,6 @@ import {
   seedWorkspaceRegistry,
 } from "./helpers/workspace";
 
-// With UI_AUDIT_SHOT_DIR set, the tests for a workspace dohc can't open save
-// the window in both themes.
 const SHOT_DIR = process.env.UI_AUDIT_SHOT_DIR;
 
 async function shootBothThemes(page: Page, name: string) {
@@ -63,7 +61,6 @@ test("workspace manager creates another window and removes a workspace from the 
       await manager.emulateMedia({ reducedMotion: "reduce" });
       await manager.screenshot({ path: testInfo.outputPath(`manager-${theme}.png`) });
     }
-    // A cut path puts "…" right after its first folder, at every width.
     const cutPath = () =>
       manager.getByTestId("workspace-manager-row").evaluate((row) => {
         const dots = row.querySelector("[data-path-cut]");
@@ -197,14 +194,9 @@ test("workspace manager keeps bottom-row menus reachable by keyboard and follows
   }
 });
 
-// A folder that can never be a workspace: the startup screen offers Remove
-// from list in place of Try again, and the next workspace opens. Open folder
-// on the same folder leads with why and offers another folder.
 test("a listed workspace inside dohc's state folder offers Remove from list, then the next workspace opens", async () => {
   test.setTimeout(120_000);
   const workspace = await createTempWorkspace();
-  // Listed before dohc refused such folders: a workspace inside the test
-  // home, which is dohc's state folder.
   const rootPath = join(workspace.homeDir, "notes");
   const refusal =
     "This folder is inside the folder that holds dohc's own settings, so it cannot be a workspace.";
@@ -220,7 +212,6 @@ test("a listed workspace inside dohc's state folder offers Remove from list, the
     const before = await files();
     desktop = await launchDesktopApp({ workspace });
     const { page } = desktop;
-    // dohc reopens the first listed workspace at startup and refuses it there.
     const failed = page.getByTestId("workspace-open-failed");
     await expect(failed).toContainText(refusal);
     await expect(failed).not.toContainText("Manage workspaces");
@@ -230,7 +221,6 @@ test("a listed workspace inside dohc's state folder offers Remove from list, the
     expect(await files()).toEqual(before);
     await shootBothThemes(page, "open-failed-not-a-workspace");
 
-    // A plain row leaves the list at once, without asking first.
     await remove.click();
     await expect(page.getByTestId("workspace-shell")).toHaveAttribute("data-ready", "true");
     await expect(failed).toHaveCount(0);
@@ -268,8 +258,6 @@ test("a listed workspace inside dohc's state folder offers Remove from list, the
   }
 });
 
-// A folder that may come back, such as on a drive that is not connected,
-// keeps Try again and Remove from list stays in Manage workspaces.
 test("a listed workspace whose folder is missing keeps Try again", async () => {
   test.setTimeout(120_000);
   const workspace = await createTempWorkspace();

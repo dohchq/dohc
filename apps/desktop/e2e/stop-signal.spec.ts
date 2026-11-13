@@ -96,8 +96,6 @@ async function stopsCleanlyOn(
       reopened.page.getByTestId("markdown-editor"),
       "The next start shows the saved edit",
     ).toContainText(EDIT);
-    // At start, dohc shows a notice for a crash report or for typing it kept in
-    // History. Both reads must find nothing, so neither notice can show.
     const startup = await reopened.page.evaluate(async (workspaceId) => {
       const api = window.dohcDesktop!;
       const [crash, kept] = await Promise.all([
@@ -119,8 +117,6 @@ async function stopsCleanlyOn(
       "Notices has no unread row",
     ).toHaveAttribute("aria-label", "Notices");
   } finally {
-    // Closing the first app attaches its logs, and stops it if the test failed
-    // before the signal.
     await stopped
       ?.close()
       .catch((error: unknown) => console.error("[stop-signal] closing the stopped app:", error));

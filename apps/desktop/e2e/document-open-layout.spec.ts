@@ -103,8 +103,6 @@ async function releaseDocumentOpens(desktop: LaunchedDesktopApp): Promise<void> 
   });
 }
 
-// Each block's box, from the body that holds the first heading: the read body
-// while opening, the editor once ready.
 async function measureBlocks(page: Page): Promise<Record<string, Box | null>> {
   return page.evaluate(() => {
     const view = document.querySelector('[data-testid="view-markdown"]');

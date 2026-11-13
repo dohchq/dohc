@@ -264,8 +264,6 @@ test("@restore-set-aside-typing a shared restore keeps the owner's later typing 
     await test.step("Restore earlier state on the shared note says to stop live editing first", async () => {
       const title = `dohc can't restore "${PATH}" while it has live editing on`;
       const body = "In Live documents, stop live editing for this page, then restore it again.";
-      // The title and body both show whole, with no Show more, and the
-      // refusal offers Try again and Open Live documents.
       const expectRefusal = async (shown: Locator) => {
         await expect(shown.locator("[id$='-title']")).toHaveText(title);
         await expect(shown.locator("[id$='-body']")).toHaveText(body);
@@ -332,9 +330,6 @@ test("@restore-set-aside-typing a shared restore keeps the owner's later typing 
         .poll(async () => normalized(await readFile(join(ownerTemp.rootPath, PATH), "utf8")))
         .toContain(R1);
     });
-    // A restore that stops a note's last Edit access can leave it and other
-    // shared notes stuck, so History no longer offers it. The rest of this
-    // test restores through it.
     test.fixme(true, "Restore shared file is not offered until #3090 is fixed.");
 
     const restored =
@@ -406,7 +401,6 @@ test("@restore-set-aside-typing a shared restore keeps the owner's later typing 
       .filter({ has: page.getByText(`Edits not written to ${PATH}`, { exact: true }) });
     await test.step("Notices lists the set-aside typing with Save recovery copy and Open Live documents", async () => {
       await page.getByTestId("notice-center-toggle").click();
-      // This is the regression assertion: main has no row for the old restore-fenced queue.
       await expect(notice).toBeVisible({ timeout: 60_000 });
       await expect(
         notice.getByRole("button", { name: "Save recovery copy", exact: true }),
@@ -577,7 +571,6 @@ test("@restore-set-aside-typing a shared restore keeps the owner's later typing 
       await expectCliKeptEdits();
       await live.getByRole("button", { name: "Close", exact: true }).click();
       await expect(live).toHaveCount(0);
-      // Closing Live documents returns to Settings, which opened it.
       await expect(page.getByTestId("settings-dialog")).toBeVisible();
       await page.keyboard.press("Escape");
       await expect(page.getByTestId("settings-dialog")).toHaveCount(0);

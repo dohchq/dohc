@@ -160,7 +160,6 @@ test("chat lane keeps history, follows within 40px, and retains focused rows", a
       "true",
     );
     await expect(trigger).toBeFocused();
-    // Home scrolls history while the reaction trigger keeps keyboard focus.
     await page.keyboard.press("Home");
     const firstRow = lane.locator(`[data-message-id="${seeded.firstMessageId}"]`);
     await expect(firstRow).toBeInViewport({ ratio: 1 });
@@ -247,7 +246,6 @@ test("a file linked mention reveals an unmounted historical message", async () =
     await expectWindowed(rail, "linked-chat", `File message ${messageCount - 1}`);
     await expect(rail.locator(`[data-message-id="${firstMessageId}"]`)).toHaveCount(0);
 
-    // The chat's link to topic.md is a row in About's Links, below the thread.
     await page.getByTestId("linked-chat-back").click();
     await page
       .getByTestId("about-links")

@@ -37,7 +37,6 @@ test("@slash-menu slash menu neither remounts nor detaches while filtering", asy
 
     await explorerRow(page, "notes").click();
     await explorerRow(page, "notes/doc.md").click();
-    // Engine mode: WYSIWYG is the whole surface, no Edit gate.
     await expect(page.getByTestId("markdown-edit-toggle")).toHaveCount(0, {
       timeout: 15_000,
     });
@@ -69,7 +68,6 @@ test("@slash-menu slash menu neither remounts nor detaches while filtering", asy
       );
     });
 
-    // ── 1. remount churn while typing and erasing a query ──
     await editor.click();
     await page.keyboard.press(DOCUMENT_END);
     await page.keyboard.press("Enter");
@@ -88,7 +86,6 @@ test("@slash-menu slash menu neither remounts nor detaches while filtering", asy
     expect(diag?.removed).toBe(0);
     expect(diag?.animStarts).toBe(1);
 
-    // ── 2. above placement stays glued to the caret while filtering ──
     await page.keyboard.press("Escape");
     await page.keyboard.press("Backspace");
     // Click at the end of a paragraph low in the viewport so the menu must
@@ -121,13 +118,11 @@ test("@slash-menu slash menu neither remounts nor detaches while filtering", asy
     // Entrance animation settles first (it translates the box slightly).
     await page.waitForTimeout(250);
     const anchoredBottom = await menuBottom();
-    // The bottom edge sits just above the caret line the user typed on.
     expect(Math.abs(anchoredBottom - target!.y)).toBeLessThan(40);
 
     for (const ch of "head") {
       await page.keyboard.type(ch, { delay: 20 });
       await page.waitForTimeout(60);
-      // Filtering shrinks the menu; its caret-side edge must not move.
       expect(Math.abs((await menuBottom()) - anchoredBottom)).toBeLessThan(1.5);
     }
     for (let i = 0; i < 4; i++) {

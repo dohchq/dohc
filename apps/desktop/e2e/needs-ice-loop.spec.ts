@@ -92,8 +92,6 @@ async function card(temp: TempWorkspace): Promise<string> {
   return await readFile(join(temp.rootPath, "board", "launch.md"), "utf8").catch(() => "");
 }
 
-// What dispatch holds for a thread: its live run and the requests waiting
-// for one.
 async function dispatchState(
   page: Page,
   threadId: string,
@@ -139,7 +137,6 @@ for (const door of ["mcp", "cli"] as const) {
         await openWorkspaceFromFirstRun(desktop.page, temp);
         await trustOpenWorkspace(desktop);
         const page = desktop.page;
-        // The board is a Collection before the agent writes to its card.
         await expect(page.locator('[data-testid="tree-row"][data-path="board"]')).toHaveAttribute(
           "data-collection",
           "true",
@@ -169,7 +166,6 @@ for (const door of ["mcp", "cli"] as const) {
         await expect(opening.getByTestId("chats-attachment-chip")).toContainText("launch.md");
         await expect(opening.getByTestId("chats-message-decision-open")).toBeVisible();
         if (when === "after-run") {
-          // The asking run has ended before Ice answers.
           await expect.poll(async () => (await runLines(runs)).length).toBe(1);
           const [asked] = await runLines(runs);
           await expect
@@ -179,11 +175,9 @@ for (const door of ["mcp", "cli"] as const) {
             .toBeNull();
         }
 
-        // Ice replies in the thread like anyone would: no mention, no Answer.
         await view.getByTestId("chats-composer").fill("Friday");
         await view.getByTestId("chats-composer").press("Enter");
 
-        // The agent sets the card from the answer and resolves the question.
         await expect(
           view.getByText("Going with Friday. The card is back In progress."),
         ).toBeVisible({ timeout: 60_000 });

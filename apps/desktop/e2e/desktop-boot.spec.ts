@@ -36,8 +36,6 @@ test("the desktop app boots with its bridge", async () => {
     ).toEqual([]);
     expect(bridge, "the preload must expose window.dohcDesktop").toBe("object");
 
-    // And the first thing a new user sees actually renders, which is the
-    // screen every other spec in this directory starts from.
     await expect(desktop.page.getByTestId("first-run-open-share")).toBeVisible();
   } finally {
     if (desktop) await cleanupDesktopWorkspace(desktop, temp);

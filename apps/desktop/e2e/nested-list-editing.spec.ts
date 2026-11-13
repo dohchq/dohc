@@ -85,7 +85,6 @@ test("@nested-list-editing typed nested lists survive reopen and restart", async
     await page.keyboard.press("Tab");
     await expect(editor.locator("li li li")).toHaveText("grandchild");
 
-    // Convert the typed child through the slash menu.
     await editor
       .locator("p")
       .filter({ hasText: /^child$/ })
@@ -95,7 +94,6 @@ test("@nested-list-editing typed nested lists survive reopen and restart", async
     await page.getByRole("option", { name: /Todo list/ }).click();
     await expect(editor.locator('li li input[type="checkbox"]')).toHaveCount(1);
 
-    // Paste at a new textblock, then convert beside an existing checklist.
     await page.keyboard.press(DOCUMENT_END);
     await page.keyboard.press("Enter");
     const inList = () =>

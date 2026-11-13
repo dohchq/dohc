@@ -70,7 +70,6 @@ type Bridge = Pick<
 >;
 type Received = { temp: TempWorkspace; app: ElectronApplication; page: Page };
 type LiveDelivery = Awaited<ReturnType<Bridge["getSyncStatus"]>>["ownerLiveDelivery"];
-// One read of the owner's live editing, and when it was asked for.
 type LiveEditingRead = {
   requestedAt: number;
   state: LiveDelivery | null | "unread";
@@ -118,7 +117,6 @@ async function hasMark(path: string): Promise<boolean> {
   return false;
 }
 
-// Replaces the system's opener with a recorder, and proves it is in place.
 async function recordSystemOpens(app: ElectronApplication): Promise<void> {
   await app.evaluate(({ shell }) => {
     const opened: string[] = [];
@@ -142,7 +140,6 @@ function systemOpens(app: ElectronApplication): Promise<string[]> {
   ]);
 }
 
-// The same call every Open externally control makes.
 function openExternally(page: Page, relativePath: string): Promise<void> {
   return page.evaluate(async (relativePath) => {
     const api = (window as unknown as { dohcDesktop: Bridge }).dohcDesktop;
@@ -171,7 +168,6 @@ function settle(page: Page) {
   });
 }
 
-// What the view says it holds to send.
 function unconfirmedChanges(page: Page) {
   return page.evaluate(async () => {
     const api = (window as unknown as { dohcDesktop: Bridge }).dohcDesktop;
@@ -179,8 +175,6 @@ function unconfirmedChanges(page: Page) {
   });
 }
 
-// Each opened path is a marked, read-only copy of its original, in order, in
-// the profile's opened folder. Each original is unmarked and unchanged.
 async function expectCopies(
   opened: string[],
   homeDir: string,
@@ -204,7 +198,6 @@ async function expectCopies(
   }
 }
 
-// History moments for both files, and the changes this workspace's journal holds to send.
 function engineCounts(rootPath: string) {
   return withEngineDb(rootPath, (db) => ({
     moments: db
@@ -348,7 +341,6 @@ test("a file from another person that the person can edit opens as a marked, rea
     const note = page.getByTestId("file-inspector");
     await expect(note).toContainText("The first draft.");
 
-    // Everything opening the view and the note did has settled.
     expect(await refresh(page)).toMatchObject({ ok: true });
     const before = engineCounts(temp.rootPath);
     expect(before?.moments.length, "History holds both files").toBeGreaterThan(0);
@@ -441,7 +433,6 @@ test("a file from another person opens as a marked, read-only copy during a live
     email: `recipient-${randomUUID()}@example.test`,
     password: `Recipient-proof-${randomUUID()}`,
   };
-  // Every request that would offer the recipient's changes to the owner.
   const offered: string[] = [];
   // The owner's live editing at the baseline, and at the end, when the first
   // open began, and how often the baseline was taken again.
@@ -476,10 +467,8 @@ test("a file from another person opens as a marked, read-only copy during a live
     recipientBrowser = await browser.newContext();
     await trust.route(recipientBrowser, origin);
     const recipientApproval = await recipientBrowser.newPage();
-    // The owner can share only with an account the server knows.
     await createVerifiedAccount(recipientApproval, stack.account, recipientAccount);
 
-    // The owner connects a workspace, opens the note, and shares the folder with Edit.
     await writeWorkspaceFiles(ownerTemp, [
       { path: NOTE, contents: NOTE_TEXT },
       { path: DATA, contents: DATA_TEXT },
@@ -545,14 +534,12 @@ test("a file from another person opens as a marked, read-only copy during a live
         ownerWorkspaceId,
       );
 
-    // The recipient opens the share on their own desktop, and the note in a live session.
     recipient = await launchDesktopApp({ workspace: recipientTemp, env: stack.trustEnv });
     await recordSystemOpens(recipient.app);
     const page = recipient.page;
     await page.getByTestId("first-run-open-share").click();
     await page.getByTestId("open-share-code").fill(share.shareCode);
     await page.getByTestId("open-share-choose-folder").click();
-    // Opening without an account asks the person to connect one first.
     await page.getByTestId("open-share-start").click();
     await openDesktopApproval(recipient, recipientApproval, origin);
     await approveDesktop(recipientApproval, recipientAccount);
@@ -569,7 +556,6 @@ test("a file from another person opens as a marked, read-only copy during a live
     await expect(page.getByTestId("share-changes-send")).toBeVisible();
     await revealExplorerPath(page, NOTE);
     await explorerRow(page, NOTE).click();
-    // The session is live: the saved file's Edit toggle is gone, and the live editor takes edits.
     await expect(page.getByTestId("markdown-edit-toggle")).toHaveCount(0, { timeout: 30_000 });
     await expect(page.getByTestId("markdown-editor")).toHaveAttribute("contenteditable", "true");
     await expect(page.getByTestId("markdown-editor")).toContainText("The first draft.");
@@ -637,7 +623,6 @@ test("a file from another person opens as a marked, read-only copy during a live
       };
     };
 
-    // Everything opening the view and the note did has settled on both sides.
     expect(await refresh(page)).toMatchObject({ ok: true });
     expect(await settle(page)).toMatchObject({ ok: true, capturedLocalChanges: 0, submitted: 0 });
     // The baseline counts only if the owner's live editing stayed active while
@@ -679,7 +664,6 @@ test("a file from another person opens as a marked, read-only copy during a live
     ]);
     expect(await systemOpens(owner.app)).toEqual([]);
 
-    // Everything Send changes runs, short of sending.
     expect(await refresh(page)).toMatchObject({ ok: true, changedPaths: 0 });
     expect(await settle(page)).toMatchObject({ ok: true, capturedLocalChanges: 0, submitted: 0 });
 
