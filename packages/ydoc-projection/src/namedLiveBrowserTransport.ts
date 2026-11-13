@@ -395,7 +395,14 @@ export function createNamedLiveBrowserTransport<
       override = { status: "authorizing", reason: null };
       notify();
       held.timer = setTimeout(
-        () => fail(held, "disconnected", "connect-timeout"),
+        // A busy live host holds the socket's upgrade until it has woken the file, so an attempt
+        // whose ticketed socket never opened reads as the server's, not the connection's.
+        () =>
+          fail(
+            held,
+            "disconnected",
+            held.socket && !held.route ? "host-unavailable" : "connect-timeout",
+          ),
         limits.connectTimeoutMs,
       );
       try {
