@@ -5387,10 +5387,17 @@ it.each([
 // A document whose fresh capture blocked with `block`, reclaimed while idle as
 // the idle reclaim retires it: with no owner Stop and no demand, and, unless
 // `shared`, with no Edit grant left. Resolves once it left the host, or, with
-// `whileDeparting`, once that ran as the departure kept its block.
+// `whileDeparting`, once that ran as the departure kept its block. A document
+// past the read budget is captured twice on a manual clock, so its wait holds
+// until the test advances the clock.
 async function reclaimedBlocked(block: "refused" | "history-over-budget",
   {shared = false, whileDeparting}: {shared?: boolean; whileDeparting?: (o: Awaited<ReturnType<typeof emptyServiceHost>>) => void} = {}) {
+  let now = 1_000_000;
+  if (block === "history-over-budget") vi.spyOn(Date, "now").mockImplementation(() => now);
   const o = await emptyServiceHost(), workspaces = [o.workspace];
+  let driver: ServiceActivationDriver | undefined;
+  const addTarget = ServiceActivationDriver.prototype.addTarget;
+  vi.spyOn(ServiceActivationDriver.prototype, "addTarget").mockImplementation(function (this: ServiceActivationDriver, ...args) {driver = this; return addTarget.apply(this, args);});
   o.f.storage.ensureOwnedLiveDocument({intent: "share", workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 10, guard() {}});
   // The relay holds no activation for the document, so each pass captures it fresh, and the capture's check refuses it.
   vi.spyOn(ServiceActivationStore.prototype, "read").mockReturnValue(null);
@@ -5399,8 +5406,16 @@ async function reclaimedBlocked(block: "refused" | "history-over-budget",
   vi.spyOn(console, "error").mockImplementation(() => {});
   const captures = () => o.client().captureOwnerActivation.mock.calls.length;
   const visits = () => vi.mocked(ServiceActivationDriver.prototype.activate).mock.calls.filter(call => call[0].path === o.sibling.path).length;
+  // Waits for the activation passes to visit the document a few more times.
+  const passes = async () => {const visited = visits(); await vi.waitFor(() => expect(visits()).toBeGreaterThan(visited + 2));};
   await o.host.update({workspaces, documents: [o.sibling], ...stay});
   await vi.waitFor(() => expect(o.host.blocked(o.sibling)).toBe(block));
+  if (block === "history-over-budget") {
+    // The second failure starts a wait, which the stopped clock never ends.
+    await vi.waitFor(() => expect(captures()).toBe(2));
+    await passes();
+    expect(captures()).toBe(2);
+  }
   if (!shared) expect(o.f.storage.revokeShare("share", 20)).toBe(true);
   // What the idle reclaim writes to the enrollment. The document has no activation, so it opens no retirement.
   o.raw.prepare("UPDATE sync_relay_service_host_enrollments SET enabled=0,retired=1,owner_demand=0,demand_at_ms=NULL WHERE workspace_id=? AND object_id=?")
@@ -5417,31 +5432,46 @@ async function reclaimedBlocked(block: "refused" | "history-over-budget",
     await vi.waitFor(() => expect(o.host.retains(o.sibling)).toBe(false), {timeout: 10_000});
     await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true), {timeout: 10_000});
   }
-  return {...o, workspaces, captures,
-    // Waits for the activation passes to visit the document a few more times.
-    async passes() {const visited = visits(); await vi.waitFor(() => expect(visits()).toBeGreaterThan(visited + 2));},
-    // The owner's open or Resume, which enrolls the document again, and the host update that adds it again.
+  // The owner's open or Resume, which enrolls the document again.
+  const enrol = (intent: "owner-open" | "owner-resume" = "owner-open") => {
+    if (intent === "owner-open") o.f.storage.ensureOwnedLiveDocument({intent, workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path, nowMs: 40, guard() {}});
+    else o.f.storage.ensureOwnedLiveDocument({intent, workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path, nowMs: 40, guard() {}});
+  };
+  return {...o, workspaces, captures, passes, enrol,
+    advance(ms: number) {now += ms;},
+    // The block the host keeps for the document's return, read from its activation driver.
+    kept: () => driver!.keptBlock({workspaceId: "workspace", objectId: o.sibling.objectId}),
+    // The enrolment, then the host update that adds the document again.
     async reopen(intent: "owner-open" | "owner-resume" = "owner-open") {
-      if (intent === "owner-open") o.f.storage.ensureOwnedLiveDocument({intent, workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path, nowMs: 40, guard() {}});
-      else o.f.storage.ensureOwnedLiveDocument({intent, workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path, nowMs: 40, guard() {}});
+      enrol(intent);
       await o.host.update({workspaces, documents: [o.sibling], ...stay});
     }};
 }
 
-// Proves: a document reclaimed while idle with a block keeps reporting it
-// while it is not hosted, and keeps it once an open hosts it again. A refused
+// Proves: a document reclaimed while idle with a block reports none while it
+// is not hosted, and the host applies the block it kept as an open adds the
+// document again, before any pass, so nothing captures in between. A refused
 // one is not captured again. One whose history was past the read budget keeps
 // the wait it had, so it is captured again only once that wait ends, as it
 // would have been had it never left.
 it.each(["refused", "history-over-budget"] as const)("keeps a %s block for a document reclaimed while idle, through the next open", async block => {
   const o = await reclaimedBlocked(block);
-  expect(o.host.blocked(o.sibling)).toBe(block);
+  expect(o.host.blocked(o.sibling)).toBeUndefined();
+  expect(o.kept()).toBe(block);
   const captured = o.captures();
-  await o.reopen();
+  o.enrol();
+  expect(o.host.blocked(o.sibling)).toBeUndefined();
+  await o.host.update({workspaces: o.workspaces, documents: [o.sibling], ...stay});
   expect(o.host.blocked(o.sibling)).toBe(block);
   await o.passes();
   expect(o.host.blocked(o.sibling)).toBe(block);
-  if (block === "refused") expect(o.captures()).toBe(captured);
+  expect(o.captures()).toBe(captured);
+  if (block === "history-over-budget") {
+    o.advance(1_000);
+    await vi.waitFor(() => expect(o.captures()).toBe(captured + 1));
+    await o.passes();
+    expect(o.captures()).toBe(captured + 1);
+  }
 });
 
 // Proves: the owner's one Resume of a document reclaimed while idle with a
@@ -5452,7 +5482,7 @@ it.each(["before", "after"] as const)("captures a document reclaimed while idle 
   if (order === "before") {
     // As the Resume route unblocks the document before the host reconciles.
     expect(o.host.unblock(o.sibling)).toBe(true);
-    expect(o.host.blocked(o.sibling)).toBeUndefined();
+    expect(o.kept()).toBeUndefined();
     await o.reopen("owner-resume");
   } else {
     await o.reopen("owner-resume");
@@ -5492,7 +5522,7 @@ it("captures a document reclaimed while idle with a refused block once after a R
 // with no unblock.
 it.each(["Stop", "Pause"] as const)("clears the block of a document reclaimed while idle at the host update after the owner's %s", async action => {
   const o = await reclaimedBlocked("refused"), captured = o.captures();
-  expect(o.host.blocked(o.sibling)).toBe("refused");
+  expect(o.kept()).toBe("refused");
   if (action === "Stop") {
     expect(preparedStop(o.f.storage, {workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path, enabled: false, retire: true, nowMs: 30, guard() {}}))
       .toMatchObject({ownerStop: "retire"});
@@ -5500,9 +5530,9 @@ it.each(["Stop", "Pause"] as const)("clears the block of a document reclaimed wh
     expect(o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", path: o.sibling.path, ownerUserId: "owner", enabled: false, nowMs: 30, guard() {}}))
       .toMatchObject({ownerStop: "pause"});
   }
-  expect(o.host.blocked(o.sibling)).toBe("refused");
+  expect(o.kept()).toBe("refused");
   await o.host.update({workspaces: o.workspaces, documents: [], ...stay});
-  expect(o.host.blocked(o.sibling)).toBeUndefined();
+  expect(o.kept()).toBeUndefined();
   await o.reopen("owner-resume");
   await vi.waitFor(() => expect(o.captures()).toBe(captured + 1));
 });
@@ -5511,10 +5541,10 @@ it.each(["Stop", "Pause"] as const)("clears the block of a document reclaimed wh
 // block, which an open then keeps.
 it("keeps the block of a document reclaimed while idle after its share is deleted", async () => {
   const o = await reclaimedBlocked("refused", {shared: true}), captured = o.captures();
-  expect(o.host.blocked(o.sibling)).toBe("refused");
+  expect(o.kept()).toBe("refused");
   expect(o.f.storage.revokeShare("share", 30)).toBe(true);
   await o.host.update({workspaces: o.workspaces, documents: [], ...stay});
-  expect(o.host.blocked(o.sibling)).toBe("refused");
+  expect(o.kept()).toBe("refused");
   await o.reopen();
   await o.passes();
   expect(o.captures()).toBe(captured);
@@ -5527,12 +5557,12 @@ it("keeps the block of a document reclaimed while idle after its share is delete
 // changed it. Another document hosted at that path is captured.
 it.each(["another document", "no document"] as const)("clears the block of a document reclaimed while idle once its path holds %s", async holder => {
   const o = await reclaimedBlocked("refused"), captured = o.captures();
-  expect(o.host.blocked(o.sibling)).toBe("refused");
+  expect(o.kept()).toBe("refused");
   const other = {...o.sibling, objectId: "another-object"}, at = o.f.storage.objectIdAtPathInVersion.bind(o.f.storage);
   vi.spyOn(o.f.storage, "objectIdAtPathInVersion").mockImplementation(input =>
     input.path === o.sibling.path ? (holder === "another document" ? other.objectId : undefined) : at(input));
   await o.host.update({workspaces: o.workspaces, documents: holder === "another document" ? [other] : [], ...stay});
-  expect(o.host.blocked(o.sibling)).toBeUndefined();
+  expect(o.kept()).toBeUndefined();
   expect(o.host.unblock(o.sibling)).toBe(false);
   if (holder === "another document") await vi.waitFor(() => expect(o.captures()).toBe(captured + 1));
 });
