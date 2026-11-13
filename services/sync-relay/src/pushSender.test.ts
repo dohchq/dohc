@@ -359,6 +359,9 @@ it.each([
   await sender.close();
   expect(transport).toHaveBeenCalledOnce();
   expect(rows(f.storage)[0]!.state).toBe("sent");
+
+});
+
 it.each(["rename", "delete"] as const)("drops a queued file-chat alert after the file %s", async operation => {
   const f = await fileChatFixture();
   f.message();
@@ -375,8 +378,6 @@ it.each(["rename", "delete"] as const)("drops a queued file-chat alert after the
   await sender.close();
   expect(rows(f.storage)[0]!.state).toBe("dropped");
   expect(transport).not.toHaveBeenCalled();
-});
-
 });
 
 it("drops a queued alert when the dependent grant's parent is revoked", async () => {

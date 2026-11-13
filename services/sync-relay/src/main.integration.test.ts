@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import { relayProcessFixture, loopbackListenDenied, WORKSPACE_ID, USER_ID, TEST_SHUTDOWN_GRACE_PERIOD_MS, SHUTDOWN_EXIT_WAIT_MS } from "./mainProcessTestSupport";
 
-const { tempRoot, spawnRelay, spawnRunningRelay, authHeaders, postJson, putBytes, sha256, settleWithin, sendTerminationSignal } = relayProcessFixture();
+const { tempRoot, spawnRelay, spawnRunningRelay, authHeaders, postJson, exchangeLink, putBytes, sha256, settleWithin, sendTerminationSignal } = relayProcessFixture();
 
 describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
 

@@ -494,6 +494,9 @@ describe("the automation replicas", () => {
     running.reconcile();
     await running.settled();
     expect(engine.methods().filter((method) => method === "sync.applyPull")).toHaveLength(2);
+
+  });
+
   it("closes a replica whose workspace was deleted, and removes every folder no row names", async () => {
     const { storage, raw } = await relay();
     const engine = fakeEngine();
@@ -509,8 +512,6 @@ describe("the automation replicas", () => {
     expect(replica.signal.aborted).toBe(true);
     expect(engine.methods()).toContain("workspace.close");
     expect(readdirSync(root).filter(entry => !entry.startsWith("owner-ingress-"))).toEqual([]);
-  });
-
   });
 
   // Copies an owner's account reads, beside those automations keep.

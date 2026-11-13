@@ -284,6 +284,9 @@ describeWithPostgres("closed sign-up", () => {
     expect(responses.map((response) => response.status)).toEqual([200, 200]);
     expect(await nameOf(first.user.id)).toBe("Ada");
     expect(await nameOf(second.user.id)).toBe("");
+
+  });
+
   it("never renames a verified account from a password reset, even with a name in the request", async () => {
     const email = `${unique()}@dohc.test`;
     const closed = closedAuth("admitted");
@@ -296,8 +299,6 @@ describeWithPostgres("closed sign-up", () => {
     const response = await submitResetPage(closed, email, { newPassword: "another-password-ddd", name: "Mallory" });
     expect(response.status).toBe(200);
     expect(await nameOf(user.id)).toBe("Ada");
-  });
-
   });
 
   it("signs out every session before it verifies the address, so a failure between the two leaves nobody signed in", async () => {

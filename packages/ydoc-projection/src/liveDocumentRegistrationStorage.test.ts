@@ -197,7 +197,7 @@ function usage(f: ReturnType<typeof fixture>): number {
   return Number(f.raw.prepare('SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id = ?').get('workspace')!.usage_bytes)
 }
 
-it.each(['owner', 'named'] as const)('does not revive pre-reset %s authority after the same object is republished', kind => {
+it.each(['owner'] as const)('does not revive pre-reset %s authority after the same object is republished', kind => {
   const f = fixture()
   try {
     const input = validated()

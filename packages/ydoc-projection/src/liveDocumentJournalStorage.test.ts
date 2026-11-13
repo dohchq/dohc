@@ -346,6 +346,10 @@ it.each(['connectionId'] as const)('rejects a different host %s before exact rep
     expect(f.storage.commitLiveUpdateJournal({ ...input, host: changed as typeof input.host }).result)
       .toEqual({ kind: 'refused', reason: 'stale-session' })
     expect(f.journalRows()).toEqual(before)
+
+  } finally { f.close() }
+})
+
 it.each(['principalId','grantId','grantGeneration','principalKind'] as const)('compares the captured authority %s before replay', field => {
   const f = registered()
   try {
@@ -357,9 +361,6 @@ it.each(['principalId','grantId','grantGeneration','principalKind'] as const)('c
     expect(f.storage.commitLiveUpdateJournal({ ...input, expectedAuthority: changed }).result)
       .toEqual({ kind: 'refused', reason: 'authority-refused' })
     expect(f.journalRows()).toEqual(before)
-  } finally { f.close() }
-})
-
   } finally { f.close() }
 })
 

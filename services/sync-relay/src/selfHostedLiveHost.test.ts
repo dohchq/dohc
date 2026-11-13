@@ -433,6 +433,10 @@ it("waits for a late daemon start and its close before every concurrent close re
   await expect(readFile(f.starts[0]!.configPath)).rejects.toMatchObject({code: "ENOENT"});
   expect(f.host.current()).toBeUndefined();
   expect(hasRelayWriteObservers(f.storage)).toBe(false);
+
+  expect(f.onError).not.toHaveBeenCalled();
+});
+
 it("removes a deleted account's hosted stores and markers while no session host runs, idempotently", async () => {
   const root = await mkdtemp(join(tmpdir(), "dohc-deleted-live-root-"));
   cleanup.push(() => rm(root, {recursive: true, force: true}));
@@ -448,9 +452,6 @@ it("removes a deleted account's hosted stores and markers while no session host 
   await deleteSelfHostedWorkspaceRoots(root, namespace, [current, earlier]);
   await deleteSelfHostedWorkspaceRoots(root, namespace, [current, earlier]);
   expect((await readdir(root)).sort()).toEqual(kept.sort());
-});
-
-  expect(f.onError).not.toHaveBeenCalled();
 });
 
 // Proves: deleting an account removes, on a running host, every hosted store

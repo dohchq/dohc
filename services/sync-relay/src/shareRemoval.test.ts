@@ -144,6 +144,9 @@ it("refuses a dependent Undo if the owner narrowed its parent link", async () =>
     expectedDependentGrantIds: [], guard: storage.captureStanding()})).toMatchObject({ok: true});
   expect(() => storage.undoShareRemoval({...removal, undoId: result.undo!.undoId})).toThrow("parent link no longer allows");
   expect(storage.getShareGrant("dependent")?.status).toBe("revoked");
+
+});
+
 it.each(["startup", "sweep", "failed removal", "failed guard"])("purges expired receipts on %s", async action => {
   let {storage} = await fixture();
   storage.removeShareAccess({...removal, grantId: "named"});
@@ -159,8 +162,6 @@ it.each(["startup", "sweep", "failed removal", "failed guard"])("purges expired 
   } else expect(() => storage.removeShareAccess({...removal, nowMs, grantId: "missing"})).toThrow("not found");
   expect((storage as StorageContext).db.prepare("SELECT undo_id FROM sync_relay_share_removals").all())
     .toEqual([{undo_id: retained.undo.undoId}]);
-});
-
 });
 
 it.each([false, true])("retains proposal content for Undo and releases it at expiry (%s)", async expire => {

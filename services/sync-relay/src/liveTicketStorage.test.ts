@@ -37,6 +37,10 @@ it("replaces a v1 ticket table, whose tickets expire within 30 seconds, instead 
     expect(state.raw.prepare(`PRAGMA table_info(${table})`).all()).toHaveLength(21);
     expect(rows(state)).toEqual([]);
     expect(state.storage.mintLiveTicket(mint)).toEqual({ expiresAtMs: 31000 });
+
+  } finally { await state.close(); }
+});
+
 it("refuses a link ticket that names both a link session and an agent connection, or neither", async () => {
   const state = await fixture();
   try {
@@ -45,9 +49,6 @@ it("refuses a link ticket that names both a link session and an agent connection
     expect(() => state.raw.exec(`UPDATE ${table} SET principal_kind='link'`)).toThrow(/CHECK/);
     expect(() => state.raw.exec(`UPDATE ${table} SET principal_kind='link', agent_connection_id='connection-1'`)).not.toThrow();
     expect(() => state.raw.exec(`UPDATE ${table} SET link_session_id='session-1'`)).toThrow(/CHECK/);
-  } finally { await state.close(); }
-});
-
   } finally { await state.close(); }
 });
 it("commits a ticket and consumes the hashed credential once in real storage", async () => {
@@ -171,6 +172,11 @@ it.each([
     state.raw.prepare(`UPDATE ${table} SET ${column}=?`).run(value);
     expect(() => state.storage.readLiveTicketTarget({ tokenHash, scope, audience })).toThrow(/stored live ticket is damaged|too large to be represented/);
     expect(() => state.storage.redeemLiveTicket(redeem)).toThrow(/stored live ticket is damaged|too large to be represented/);
+
+
+  } finally { await state.close(); }
+});
+
 it.each([
   `DROP INDEX idx_sync_relay_live_session_tickets_hash`,
   `CREATE INDEX extra_ticket_index ON ${table}(audience)`,
@@ -194,9 +200,6 @@ it("rejects an unmarked complete schema and a same-name trigger without adopting
     state.raw.exec(`DROP TABLE ${table}; CREATE TRIGGER ${table} AFTER INSERT ON sync_relay_workspaces BEGIN SELECT 1; END`);
     expect(() => reopenForSchemaCheck(state.path)).toThrow("unmarked live-ticket schema");
     expect(state.raw.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(marker)).toBeUndefined();
-  } finally { await state.close(); }
-});
-
   } finally { await state.close(); }
 });
 
@@ -291,6 +294,11 @@ it("compares frozen binding with a fresh report after a fence change", async () 
     const fresh = { ...report, binding: { ...binding, restoreFenceGeneration: 8 } };
     expect(state.storage.redeemLiveTicket({ ...redeem, report: fresh })).toBeNull();
     expect(state.storage.mintLiveTicket({ ...another(2), report: fresh })).not.toBeNull();
+
+
+  } finally { await state.close(); }
+});
+
 it.each([
   "CREATE INDEX idx_sync_relay_live_session_tickets_hash ON sync_relay_live_session_tickets(token_hash)",
   "CREATE UNIQUE INDEX idx_sync_relay_live_session_tickets_hash ON sync_relay_live_session_tickets(token_hash) WHERE redeemed_at_ms IS NULL",
@@ -308,9 +316,6 @@ it("refuses same-name trigger collisions even when the reserved index exists", a
   try {
     state.raw.exec("CREATE TRIGGER idx_sync_relay_live_session_tickets_hash AFTER INSERT ON sync_relay_workspaces BEGIN SELECT 1; END");
     expect(() => reopenForSchemaCheck(state.path)).toThrow("live-ticket schema is missing or damaged");
-  } finally { await state.close(); }
-});
-
   } finally { await state.close(); }
 });
 

@@ -148,6 +148,9 @@ describe("the automation run store", () => {
     expect(loaded).toMatchObject({sharedSettlements, undoWrites});
     await restarted.updateState(loaded, {sharedSettlements: [{draft: undoWrites[0]!.draft, state: "not-accepted"}]});
     expect((await restarted.runsOf(AUTOMATION, "settlement")).runs[0]?.sharedSettlements).toHaveLength(2);
+
+  });
+
   it.each([11, 12])("saves version 13 and refuses version %s without a compatibility reader", async version => {
     const root = await createTestScratch("dohc-automation-runs-");
     const store = createAutomationRunStore(testStoreFolder(root));
@@ -161,8 +164,6 @@ describe("the automation run store", () => {
     lines[0] = JSON.stringify(header);
     await writeFile(path, lines.join("\n"));
     await expect(store.runsOf(AUTOMATION, "atc_one")).resolves.toEqual({runs: [], unreadable: true});
-  });
-
   });
 
   it("keeps each claim's runs under the workspace's metadata folder and reads them back as written", async () => {

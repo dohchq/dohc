@@ -243,6 +243,9 @@ it("blocks queued operations and receipt disclosure after binding or data grant 
   const read = f.invoke("helper", id(7));
   f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: null });
   await expect(read).rejects.toThrow("You do not have access to this Collection.");
+
+});
+
 it("intersects admin app operations with the explicit data grant and refuses stale views", async () => {
   const f = await fixture(); await f.activate();
   f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding([id(6), id(7), id(8)]) });
@@ -251,8 +254,6 @@ it("intersects admin app operations with the explicit data grant and refuses sta
   await expect(f.invoke("helper", id(8), {}, "form")).rejects.toThrow("You do not have access to this Collection.");
   expect(() => f.host.describe("helper", scope)).toThrow("You do not have access to this Collection.");
   await expect(f.host.invoke("owner", { ...scope, revision: 1, revisionSha256: "0".repeat(64), operationId: id(6), input: {}, idempotencyKey: "request" })).rejects.toThrow("Its owner must approve this access again.");
-});
-
 });
 
 it("accounts binding and grant replacements by retained size and rolls back quota failures", async () => {
@@ -378,6 +379,9 @@ it("refuses file disclosure when a committed row change removes visibility after
   await expect(f.host.readOperation("owner",{...base,operationId:id(7),input:{},idempotencyKey:"read-visible"},()=>{disclosed=true;return "private receipt";})).rejects.toThrow("The Collection changed before dohc opened this file");
   expect(disclosed).toBe(false);
   expect((await invoke("owner",{...base,operationId:id(7),input:{},idempotencyKey:"check-hidden"})).result).toEqual([]);
+
+});
+
 it("lets only owners acknowledge an exact committed response without exposing participant retry secrets", async () => {
   let refunded = 0;
   const f = await fixture({accountMetadata(_context, allocation) {refunded += allocation.bytes;}}); await f.activate();
@@ -406,8 +410,6 @@ it("lets only owners acknowledge an exact committed response without exposing pa
   f.host.reconcileAttempt("owner", {...scope, reference: unconfirmed.reference, acknowledge: true});
   expect(attempts.request(attemptScope, {action: "get"}, () => {})).toEqual(next);
   expect(next.attempt!.token).not.toBe(pending.attempt!.token);
-});
-
 });
 
 it("cancels an unconfirmed retry before queued execution and permanently refuses its key", async () => {
@@ -560,6 +562,9 @@ it("attributes an owner's write to its agent at any depth from 0, through an app
   agent = { depth: 0 }; named = true;
   await expect(invoke("named", "form")).rejects.toThrow("You do not have access to this Collection.");
   expect(f.host.automationClaims.next(scope.workspaceId)).toBeNull();
+
+});
+
 it("names the person a commit is made for from the host's context, never the owner key, and none for a link", async () => {
   type Caller = "owner" | "named" | "link" | "automation";
   let caller: Caller = "owner", person: string | undefined, agent: { depth: number; agentId?: string } | undefined;
@@ -605,8 +610,6 @@ it("names the person a commit is made for from the host's context, never the own
     caller = refused; person = "user-ice";
     await expect(commit(`claimed-${refused}`)).rejects.toThrow("You do not have access to this Collection.");
   }
-});
-
 });
 
 it("keeps a Collection still importing, and names only the asking workspace's Collections and imports", async () => {

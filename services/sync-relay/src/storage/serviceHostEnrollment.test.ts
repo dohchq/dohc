@@ -138,12 +138,13 @@ it("does not replace a retained object when its path is reused or follow its ren
   f.seed(scope.workspaceId, "replacement-object", binding.currentPath, "replacement-share");
   expect(() => f.enroll({shareId: "replacement-share"})).toThrow("another document");
   expect(f.storage.listServiceHostEnrollments()[0]!.objectId).toBe(binding.objectId);
+
+});
+
 it("refuses altered enrollment schema on reopen", async () => {
   const f = await fixture(); f.enroll();
   f.raw.exec(`CREATE TRIGGER unexpected_enrollment_trigger AFTER UPDATE ON ${SERVICE_HOST_ENROLLMENTS} BEGIN SELECT 1; END`);
   expect(() => openSyncRelayStorage(f.path, f.config)).toThrow("constraints are damaged");
-});
-
 });
 
 // The enrollment table as relays created it before `owner_stop`.
