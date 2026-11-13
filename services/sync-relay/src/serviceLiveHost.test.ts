@@ -5384,6 +5384,126 @@ it.each([
   await vi.waitFor(() => expect(captures()).toBe(captured + 2));
 });
 
+// A document whose fresh capture blocked with `block`, reclaimed while idle as
+// the idle reclaim retires it: with no owner Stop and no demand, and, unless
+// `shared`, with no Edit grant left. Resolves once it left the host.
+async function reclaimedBlocked(block: "refused" | "history-over-budget", {shared = false} = {}) {
+  const o = await emptyServiceHost(), workspaces = [o.workspace];
+  o.f.storage.ensureOwnedLiveDocument({intent: "share", workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 10, guard() {}});
+  // The relay holds no activation for the document, so each pass captures it fresh, and the capture's check refuses it.
+  vi.spyOn(ServiceActivationStore.prototype, "read").mockReturnValue(null);
+  vi.spyOn(ServiceActivationStore.prototype, "prepare").mockRejectedValue(block === "refused" ? new ServiceActivationTooLarge()
+    : new ServiceActivationHistoryOverBudget("Ordinary activation history exceeds its configured entry budget."));
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const captures = () => o.client().captureOwnerActivation.mock.calls.length;
+  const visits = () => vi.mocked(ServiceActivationDriver.prototype.activate).mock.calls.filter(call => call[0].path === o.sibling.path).length;
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.blocked(o.sibling)).toBe(block));
+  if (!shared) expect(o.f.storage.revokeShare("share", 20)).toBe(true);
+  // What the idle reclaim writes to the enrollment. The document has no activation, so it opens no retirement.
+  o.raw.prepare("UPDATE sync_relay_service_host_enrollments SET enabled=0,retired=1,owner_demand=0,demand_at_ms=NULL WHERE workspace_id=? AND object_id=?")
+    .run("workspace", o.sibling.objectId);
+  await o.host.update({workspaces, documents: [], departing: [o.sibling]});
+  await vi.waitFor(() => expect(o.host.retains(o.sibling)).toBe(false), {timeout: 10_000});
+  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true), {timeout: 10_000});
+  return {...o, workspaces, captures,
+    // Waits for the activation passes to visit the document a few more times.
+    async passes() {const visited = visits(); await vi.waitFor(() => expect(visits()).toBeGreaterThan(visited + 2));},
+    // The owner's open or Resume, which enrolls the document again, and the host update that adds it again.
+    async reopen(intent: "owner-open" | "owner-resume" = "owner-open") {
+      if (intent === "owner-open") o.f.storage.ensureOwnedLiveDocument({intent, workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path, nowMs: 40, guard() {}});
+      else o.f.storage.ensureOwnedLiveDocument({intent, workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path, nowMs: 40, guard() {}});
+      await o.host.update({workspaces, documents: [o.sibling], ...stay});
+    }};
+}
+
+// Proves: a document reclaimed while idle with a block keeps reporting it
+// while it is not hosted, and keeps it once an open hosts it again. A refused
+// one is not captured again. One whose history was past the read budget keeps
+// the wait it had.
+it.each(["refused", "history-over-budget"] as const)("keeps a %s block for a document reclaimed while idle, through the next open", async block => {
+  const o = await reclaimedBlocked(block);
+  expect(o.host.blocked(o.sibling)).toBe(block);
+  const captured = o.captures();
+  await o.reopen();
+  expect(o.host.blocked(o.sibling)).toBe(block);
+  await o.passes();
+  expect(o.host.blocked(o.sibling)).toBe(block);
+  if (block === "refused") expect(o.captures()).toBe(captured);
+});
+
+// Proves: the owner's one Resume of a document reclaimed while idle with a
+// refused block clears it, whether the Resume's unblock comes before or after
+// the host adds the document again, and exactly one capture follows.
+it.each(["before", "after"] as const)("captures a document reclaimed while idle with a refused block once after one Resume, unblocked %s it is hosted again", async order => {
+  const o = await reclaimedBlocked("refused"), captured = o.captures();
+  if (order === "before") {
+    // As the Resume route unblocks the document before the host reconciles.
+    expect(o.host.unblock(o.sibling)).toBe(true);
+    expect(o.host.blocked(o.sibling)).toBeUndefined();
+    await o.reopen("owner-resume");
+  } else {
+    await o.reopen("owner-resume");
+    await o.passes();
+    expect(o.captures()).toBe(captured);
+    expect(o.host.unblock(o.sibling)).toBe(true);
+  }
+  await vi.waitFor(() => expect(o.captures()).toBe(captured + 1));
+  await o.passes();
+  expect(o.captures()).toBe(captured + 1);
+  expect(o.host.blocked(o.sibling)).toBe("refused");
+});
+
+// Proves: the owner's Stop or Pause of a document reclaimed while idle clears
+// its block at the next host update, so the owner's Resume captures it again
+// with no unblock.
+it.each(["Stop", "Pause"] as const)("clears the block of a document reclaimed while idle at the host update after the owner's %s", async action => {
+  const o = await reclaimedBlocked("refused"), captured = o.captures();
+  expect(o.host.blocked(o.sibling)).toBe("refused");
+  if (action === "Stop") {
+    expect(preparedStop(o.f.storage, {workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path, enabled: false, retire: true, nowMs: 30, guard() {}}))
+      .toMatchObject({ownerStop: "retire"});
+  } else {
+    expect(o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", path: o.sibling.path, ownerUserId: "owner", enabled: false, nowMs: 30, guard() {}}))
+      .toMatchObject({ownerStop: "pause"});
+  }
+  expect(o.host.blocked(o.sibling)).toBe("refused");
+  await o.host.update({workspaces: o.workspaces, documents: [], ...stay});
+  expect(o.host.blocked(o.sibling)).toBeUndefined();
+  await o.reopen("owner-resume");
+  await vi.waitFor(() => expect(o.captures()).toBe(captured + 1));
+});
+
+// Proves: deleting the share of a document reclaimed while idle leaves its
+// block, which an open then keeps.
+it("keeps the block of a document reclaimed while idle after its share is deleted", async () => {
+  const o = await reclaimedBlocked("refused", {shared: true}), captured = o.captures();
+  expect(o.host.blocked(o.sibling)).toBe("refused");
+  expect(o.f.storage.revokeShare("share", 30)).toBe(true);
+  await o.host.update({workspaces: o.workspaces, documents: [], ...stay});
+  expect(o.host.blocked(o.sibling)).toBe("refused");
+  await o.reopen();
+  await o.passes();
+  expect(o.captures()).toBe(captured);
+  expect(o.host.blocked(o.sibling)).toBe("refused");
+});
+
+// Proves: once the path of a document reclaimed while idle holds another
+// document, or none after a delete, the reclaimed document's block is gone at
+// the next host update. The host reads only what the path holds, whoever
+// changed it. Another document hosted at that path is captured.
+it.each(["another document", "no document"] as const)("clears the block of a document reclaimed while idle once its path holds %s", async holder => {
+  const o = await reclaimedBlocked("refused"), captured = o.captures();
+  expect(o.host.blocked(o.sibling)).toBe("refused");
+  const other = {...o.sibling, objectId: "another-object"}, at = o.f.storage.objectIdAtPathInVersion.bind(o.f.storage);
+  vi.spyOn(o.f.storage, "objectIdAtPathInVersion").mockImplementation(input =>
+    input.path === o.sibling.path ? (holder === "another document" ? other.objectId : undefined) : at(input));
+  await o.host.update({workspaces: o.workspaces, documents: holder === "another document" ? [other] : [], ...stay});
+  expect(o.host.blocked(o.sibling)).toBeUndefined();
+  expect(o.host.unblock(o.sibling)).toBe(false);
+  if (holder === "another document") await vi.waitFor(() => expect(o.captures()).toBe(captured + 1));
+});
+
 // Proves: a document held for a live edit its session never admitted cannot
 // become ready, so it gets one capture and then none. Its workspace keeps
 // pushing and pulling, and a sibling keeps its passes. Unblocking allows
