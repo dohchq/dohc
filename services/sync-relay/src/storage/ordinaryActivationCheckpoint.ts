@@ -321,11 +321,44 @@ export function forgetSupersededOrdinaryCheckpoints(
   workspaceId: string,
   current: { readonly replicationEpoch: string; readonly streamIdentity: string },
 ) {
+  forgetOrdinaryCheckpoints(
+    storage,
+    workspaceId,
+    "NOT (replication_epoch=? AND stream_identity=?)",
+    current.replicationEpoch,
+    current.streamIdentity,
+  );
+}
+
+/**
+ * Deletes a deleted object's main checkpoints, and returns their charge, in the transaction that appends its delete
+ * moment. The fold stops at a delete and activation refuses one, so no checkpoint folded before it can be read again,
+ * even if the object is later restored.
+ */
+export function forgetDeletedOrdinaryCheckpoints(
+  storage: StorageContext,
+  workspaceId: string,
+  objectId: string,
+) {
+  forgetOrdinaryCheckpoints(
+    storage,
+    workspaceId,
+    "main_version_id='main' AND object_id=?",
+    objectId,
+  );
+}
+
+function forgetOrdinaryCheckpoints(
+  storage: StorageContext,
+  workspaceId: string,
+  where: string,
+  ...params: string[]
+) {
   const freed = storage.db
     .prepare(
-      `DELETE FROM ${ORDINARY_CHECKPOINTS} WHERE workspace_id=? AND NOT (replication_epoch=? AND stream_identity=?) RETURNING accounted_bytes`,
+      `DELETE FROM ${ORDINARY_CHECKPOINTS} WHERE workspace_id=? AND ${where} RETURNING accounted_bytes`,
     )
-    .all(workspaceId, current.replicationEpoch, current.streamIdentity)
+    .all(workspaceId, ...params)
     .reduce((sum, row) => sum + Number(row.accounted_bytes), 0);
   if (freed === 0) return;
   const usage = storage.db
