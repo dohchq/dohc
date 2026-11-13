@@ -2,8 +2,8 @@
 // update's delete set names. It deletes a type's children with the type, and an item that arrives into a deleted
 // type. Every replica does the same, in either order, so activation and live admission must accept these rows as one
 // replay of them does.
-// Two people setting the same key, and Yjs's formatting cleanup, also delete content that no update names. Those rows
-// stay refused here.
+// Two people setting the same key of a live type, and Yjs's formatting cleanup, also delete content that no update
+// names. Those rows stay refused here.
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
@@ -427,7 +427,7 @@ describe("deletions no rule here accounts for stay refused", () => {
     },
   };
 
-  // Yjs deletes the value that loses, and no row names it. No rule here accepts that yet.
+  // Yjs deletes the value that loses, and no row names it. Unless its parent was deleted too, no rule here accepts that.
   for (const [name, shape] of Object.entries(SAME_KEY)) {
     it(`refuses ${name} at once, in either order`, () => {
       for (const order of ["first, then second", "second, then first"] as const) {

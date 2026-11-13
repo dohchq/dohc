@@ -1650,10 +1650,9 @@ describe("validateOrderedLiveUpdateCut", () => {
     //   4  retireSpans for the "x": one search step, the span, then subtractFromSpan's search step and range
     //   0  unsafe points: neither client has any
     const cascadeSteps = 1 + 6 + 3 + 4 + 0;
-    const measured = `cascade exact cost: cascade=${cascade} twin=${twin}`;
-    console.log(measured);
-    console.error(measured);
     expect(cascade - twin).toBeLessThanOrEqual(cascadeSteps);
+    // The exact difference, so a step the cascade stops charging shows up here.
+    expect(cascade - twin).toBe(-23);
   });
 
   it("refuses a deletion in the replay that no update declares and no Yjs merge explains", () => {
