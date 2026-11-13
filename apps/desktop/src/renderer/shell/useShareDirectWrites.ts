@@ -98,15 +98,16 @@ export function useShareDirectWrites(input: {
         };
         const reportAccess = (access: ShareViewRefresh): boolean => {
           if (!isCurrent() || (access !== "ended" && access !== "changed")) return false;
-          // A member's unsent page is kept as a proposal. The relay takes
-          // proposals only at Edit, so it goes once the level returns.
+          // A member's unsent pages wait in the journal. The relay takes
+          // them only at Edit, so they go when Edit returns and the view
+          // pushes again.
           if (membership && access === "changed") {
             showNotice({
               kind: "direct-write-unavailable",
               message:
-                "You can no longer edit in this workspace. Your unsent pages stay on this computer. When you can edit again, send them as a proposal.",
+                "You can no longer edit in this workspace. Your unsent pages stay on this computer and send when members can edit again.",
               retry: null,
-              send: sendAsProposal,
+              send: null,
             });
             return true;
           }

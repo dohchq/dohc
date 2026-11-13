@@ -337,22 +337,65 @@ it("tells a member who lost a page name race to use New page", async () => {
   );
 });
 
-it("keeps a member's unsent pages when their level drops and offers them as a proposal once they can edit", async () => {
+it("keeps a member's unsent pages when their level drops, with no proposal to send", async () => {
   const { notices, sendShareChanges } = await setup({
     membership: true,
     opened: { status: "unavailable" },
     changed: true,
   });
   await vi.waitFor(() => expect(notices).toHaveLength(1));
-  expect(notices[0]).toMatchObject({
+  expect(notices[0]).toEqual({
     kind: "direct-write-unavailable",
     message:
-      "You can no longer edit in this workspace. Your unsent pages stay on this computer. When you can edit again, send them as a proposal.",
+      "You can no longer edit in this workspace. Your unsent pages stay on this computer and send when members can edit again.",
     retry: null,
-    send: { label: "Send as proposal" },
+    send: null,
   });
-  notices[0]!.send!.run();
-  expect(sendShareChanges).toHaveBeenCalledOnce();
+  expect(sendShareChanges).not.toHaveBeenCalled();
+});
+
+it("sends a member's unsent pages without a click once they can edit again", async () => {
+  const checkShareAccess = vi.fn(async (): Promise<ShareViewRefresh> => "changed");
+  const notices: DirectWriteNotice[] = [];
+  respond({ status: "unavailable" });
+  const hook = renderHook(
+    ({ enabled }: { enabled: boolean }) =>
+      useShareDirectWrites({
+        workspaceId: "share-view",
+        sharedView: true,
+        membership: true,
+        enabled,
+        ready: true,
+        ownerName: "ana@example.com",
+        refreshShareView: async () => "current",
+        checkShareAccess,
+        sendShareChanges: vi.fn(async () => undefined),
+        showNotice: (notice) => notices.push(notice),
+      }),
+    { initialProps: { enabled: true } },
+  );
+  await vi.waitFor(() => expect(notices).toHaveLength(1));
+  hook.rerender({ enabled: false });
+  pushShareDirectWrites.mockClear();
+  hook.rerender({ enabled: true });
+  await vi.waitFor(() =>
+    expect(pushShareDirectWrites).toHaveBeenCalledExactlyOnceWith({ workspaceId: "share-view" }),
+  );
+  // A page whose name was taken meanwhile keeps today's draft recovery.
+  await answer({
+    status: "pushed",
+    writes: [
+      {
+        result: "stale",
+        paths: ["ideas/Plan.md"],
+        stalePath: "ideas/Plan.md",
+        recoveredDraftPath: "ideas/Page draft abc-2.txt",
+      },
+    ],
+  });
+  expect(notices[1]?.message).toBe(
+    "ideas/Plan.md is taken. Your text draft is kept in ideas/Page draft abc-2.txt on this computer. Use New page to create another page.",
+  );
 });
 
 it("counts several refused writes and gives the first reason", async () => {
