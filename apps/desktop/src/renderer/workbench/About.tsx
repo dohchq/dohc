@@ -1093,10 +1093,10 @@ export const LEVELS: Record<ShareLevel, { icon: LucideIcon; label: string }> = {
 export type AccessNoun = "file" | "chat";
 
 // What an empty list means, within what it covers. Never "no access": an
-// answer with no coverage is unknown, not empty. A workspace has no members
-// besides its owner, so a complete answer with no share from it, or no
-// permission on a Collection, leaves only its owner: one row says so. A
-// listing that has not finished claims nothing.
+// answer with no coverage is unknown, not empty. Others reach a file through
+// a share or the workspace's members, who are listed with it, so a complete
+// answer with no row, or no permission on a Collection, leaves only its
+// owner: one row says so. A listing that has not finished claims nothing.
 type EmptyWithin = { only: true } | { only: false; words: string };
 const EMPTY_WITHIN: Record<Exclude<AccessAnswer["coverage"]["kind"], "unavailable">, (noun: AccessNoun) => EmptyWithin> = {
   granted: () => ({ only: true }),

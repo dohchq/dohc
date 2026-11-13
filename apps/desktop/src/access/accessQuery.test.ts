@@ -125,12 +125,16 @@ it("excludes revoked named grants, former automation writers and ended links fro
   expect(index.forChat("channel").map(row => row.shareId)).toEqual(["active"]);
 });
 
-it("leaves the owner's workspace memberships to the Members page", () => {
+it("answers a tracked file on main with each workspace member, and leaves memberships out of the Sharing list", () => {
   const member = grant("member", { selector: { kind: "workspace" }, access: "edit" });
-  const source = readStoredRoster({ grants: [grant("active"), member], formerGrants: [{ grant: { ...member, grantId: "former", access: "view" }, automationsGeneration: 1 }],
-    endedGrants: [], links: [] })!;
+  const source = readStoredRoster({ grants: [grant("active"), member, grant("member", { grantId: "ana", recipientEmail: "ana@test.dev", access: "comment", selector: { kind: "workspace" } })],
+    formerGrants: [{ grant: { ...member, grantId: "former", access: "view" }, automationsGeneration: 1 }], endedGrants: [], links: [] })!;
   const query = createAccessQuery();
-  expect(query.answer(input(source)).rows).toMatchObject([{ shareId: "active" }]);
+  expect(query.answer(input(source)).rows).toMatchObject([{ shareId: "active" }, { grantId: "ana", access: "comment" }, { grantId: "member", access: "edit" }]);
+  expect(query.answer({ ...input(source), ref: { ...ref, path: "elsewhere.md" } }).rows.map(row => row.kind === "share" ? row.grantId : null)).toEqual(["ana", "member"]);
+  // Members reach main only, and never a secret or untracked path.
+  expect(query.answer({ ...input(source), ref: { ...ref, versionId: "draft" } }).rows).toEqual([]);
+  expect(query.answer({ ...input(source), ref: { ...ref, path: "Notes/.env" } }).rows).toEqual([]);
   expect(query.answer({ ...input(source), ref: null }).rows.map(row => row.kind === "share" ? row.shareId : null)).toEqual(["active"]);
 });
 

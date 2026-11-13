@@ -16,8 +16,9 @@ const Selector = z.union([
   z.object({ kind: z.never().optional(), paths: z.array(Path).max(100), versionId: Version }),
   z.object({ kind: z.literal("group"), channelWireId: Id, paths: z.array(Path).max(100), versionId: z.null() }),
   z.object({ kind: z.literal("chat"), channelWireId: Id }),
-  // Membership of another person's whole workspace. The level is the row's access.
-  z.object({ kind: z.literal("workspace"), role: z.enum(["admin", "member"]) }),
+  // Membership of a whole workspace. The level is the row's access. A member
+  // sees their role; the owner's listing of its members names none.
+  z.object({ kind: z.literal("workspace"), role: z.enum(["admin", "member"]).optional() }),
 ]);
 export const AccessShareRow = z.object({
   kind: z.literal("share"), shareId: Id, grantId: Id,
