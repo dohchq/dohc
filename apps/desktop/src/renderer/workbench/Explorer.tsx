@@ -903,10 +903,19 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     const next = pending.filter((change) => !pendingTreeChangeSettled(change, listingRequest));
     return next.length === pending.length ? pending : next;
   }, [pending, listingRequest]);
-  const projected = useMemo(
-    () => applyPendingTreeMoves(props.files, props.folders, unsettled),
-    [props.files, props.folders, unsettled],
-  );
+  // A new page's folder shows while the page is open and unwritten, so a
+  // folder an admin names in a joined workspace is in the tree at once,
+  // before its first page makes it. Closing the page takes it away. The
+  // folders are one key, so switching tabs does not rebuild the tree.
+  const newPageFolders = useMemo(() => [...new Set(props.editorGroups.flatMap((group) => group.tabs.flatMap((tab) => {
+    const parsed = parseTab(tab.path);
+    return parsed.kind === "newPage" && parsed.folder !== "" ? [parsed.folder] : [];
+  })))].join("\n"), [props.editorGroups]);
+  const projected = useMemo(() => {
+    const listed = applyPendingTreeMoves(props.files, props.folders, unsettled);
+    const waiting = newPageFolders === "" ? [] : newPageFolders.split("\n").filter((folder) => !listed.folders.includes(folder));
+    return waiting.length === 0 ? listed : { files: listed.files, folders: [...listed.folders, ...waiting] };
+  }, [props.files, props.folders, unsettled, newPageFolders]);
 
   const fileByPath = useMemo(() => {
     const map = new Map<string, WorkspaceFileEntry>();

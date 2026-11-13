@@ -3,6 +3,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Explorer, type ExplorerProps } from "./Explorer";
+import { newPageTabPath } from "./workbenchState";
 
 afterEach(cleanup);
 
@@ -167,5 +168,18 @@ describe("creating in a joined workspace", () => {
     } finally {
       delete window.dohcDesktop;
     }
+  });
+
+  it("shows the folder an admin named while its first page is open, and drops it when the page closes", () => {
+    const rows = () => within(screen.getByTestId("file-tree")).getAllByTestId("tree-row").map((row) => row.dataset.path);
+    const page = newPageTabPath("page-1", "Plans/Week 1");
+    const props = explorerProps({ shareView: joined, creates: { pages: true, folders: true }, expandedFolders: ["Plans"] });
+    const { rerender } = render(<Explorer {...props} />);
+    expect(rows()).toEqual(["note.md", "other.md"]);
+    rerender(<Explorer {...props} editorGroups={[{ id: "group-1", tabs: [{ path: "note.md" }, { path: page }], activeTab: page, size: 1 }]} />);
+    expect(rows()).toEqual(["Plans", "Plans/Week 1", "note.md", "other.md"]);
+    // Cancel: the page closes unwritten, and its folder goes with it.
+    rerender(<Explorer {...props} />);
+    expect(rows()).toEqual(["note.md", "other.md"]);
   });
 });
