@@ -16,16 +16,7 @@ import { settleAfterUnmount } from "./FileInspector.draft-fixture";
 vi.mock("../workspaces/workspaceTextLimits", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../workspaces/workspaceTextLimits")>()),
   WYSIWYG_MARKDOWN_THRESHOLD_BYTES: 256,
-  WORKSPACE_TEXT_EDITOR_MAX_BYTES: 2048,
 }));
-vi.mock("@dohc/live-session-contract/limits", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@dohc/live-session-contract/limits")>();
-  return {
-    ...actual,
-    LIVE_MARKDOWN_MAX_BYTES: 2048,
-    exceedsLiveMarkdownLimit: (text: string) => actual.exceedsUtf8Bytes(text, 2048),
-  };
-});
 
 setupFileInspectorTests();
 
@@ -121,8 +112,8 @@ describe("a note past read mode's size", () => {
 
   it("whose text is past the live limit, though its file is not, says it is too large, with no Edit anyway", async () => {
     // Each invalid byte in the file reads as U+FFFD, three bytes in the text.
-    const invalid = "\uFFFD".repeat(100);
-    const text = `# Notes\n\n${Array.from({ length: 8 }, (_, index) => `Paragraph ${index + 1} of plain text ${invalid}`).join("\n\n")}\n`;
+    const invalid = "\uFFFD".repeat(760);
+    const text = `# Notes\n\n${Array.from({ length: 1000 }, (_, index) => `Paragraph ${index + 1} of plain text ${invalid}`).join("\n\n")}\n`;
     expect(text.length).toBeLessThan(WORKSPACE_TEXT_EDITOR_MAX_BYTES);
     expect(utf8ByteLength(text)).toBeGreaterThan(WORKSPACE_TEXT_EDITOR_MAX_BYTES);
     const bridge = bridgeFor(text, "record");
