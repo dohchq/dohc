@@ -252,6 +252,28 @@ impl HostedRelay {
         );
     }
 
+    /// A delete of `object_id`, holding `text`, at `path`.
+    fn delete(
+        &mut self,
+        origin: &str,
+        seq: i64,
+        object_id: &str,
+        path: &str,
+        text: &str,
+        before_moment_id: &str,
+    ) {
+        self.own_head_change(
+            "delete",
+            origin,
+            seq,
+            object_id,
+            path,
+            path,
+            text,
+            before_moment_id,
+        );
+    }
+
     /// A change of `object_id` whose before side is its own head at `from`.
     #[allow(clippy::too_many_arguments)]
     fn own_head_change(

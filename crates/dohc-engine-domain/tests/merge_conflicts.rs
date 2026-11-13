@@ -5,11 +5,11 @@
 
 use dohc_engine_domain::normalize;
 use dohc_engine_domain::{
-    CompareTextFileVersions, ComparisonStatus, ConflictContentKind,
-    ConflictChoice, ConflictFileState, ConflictMetadata, ConflictStatus, CreateNamedVersion,
-    DeleteTextFile, DomainError, MergeTextFileFromVersion, MergeTextFileResult,
-    MergeUnchangedReason, NoFaults, ResolveConflictKind, ResolveTextConflict, SnapshotContent,
-    TextConflict, VersionFileChangeStatus, VersionedTextStore, WriteBinaryFile, WriteText,
+    CompareTextFileVersions, ComparisonStatus, ConflictChoice, ConflictContentKind,
+    ConflictFileState, ConflictMetadata, ConflictStatus, CreateNamedVersion, DeleteTextFile,
+    DomainError, MergeTextFileFromVersion, MergeTextFileResult, MergeUnchangedReason, NoFaults,
+    ResolveConflictKind, ResolveTextConflict, SnapshotContent, TextConflict,
+    VersionFileChangeStatus, VersionedTextStore, WriteBinaryFile, WriteText,
     insert_text_conflict_if_absent, live_state_matches_conflict_current, write_binary_file_in_tx,
 };
 use dohc_engine_files::{

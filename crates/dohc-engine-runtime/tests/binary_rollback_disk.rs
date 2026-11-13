@@ -8,9 +8,8 @@ use dohc_engine_files::{
     ScanManifest, Scanner,
 };
 use dohc_engine_runtime::{
-    SelfWriteRecorder,
     ActiveVersionSwitch, CancellationToken, NoFaults, PostCommitMaterializeOutcome,
-    WorkspaceSupervisor,
+    SelfWriteRecorder, WorkspaceSupervisor,
 };
 use dohc_engine_storage::FaultPoint;
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};

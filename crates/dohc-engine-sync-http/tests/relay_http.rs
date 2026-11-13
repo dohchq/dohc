@@ -8,14 +8,13 @@ use std::time::Duration;
 
 use dohc_engine_storage::{EngineStore, NoFaults, StorageError, TxnOutcome, hex_sha256};
 use dohc_engine_sync::{
-    read_pushed_seq,
     BlobDownloadBatchRequest, BlobDownloadSpec, BlobHaveRequest, BlobKind, BlobUploadRequest,
     ClaimRequest, EpochRequest, HostedPullRequest, HostedPullResponse, HostedScope,
     HostedScopeDocument, KeyEnvelopeDownloadRequest, KeyEnvelopeRequest, LogCoordinateRequest,
     LogCoordinateResponse, NoLiveLeases, ObservedBytes, ProbeRequest, PullRequest, RelayError,
     RelaySyncClient, RelayTransport, ReplicationEnvelope, ShareBlobRequest, ShareLogPushRequest,
     ShareReplicationEnvelope, ShareViewRequest, SharedChannelRequest, SyncPassOutcome,
-    blob_ceiling, journal_local_replication_op, read_relay_cursor,
+    blob_ceiling, journal_local_replication_op, read_pushed_seq, read_relay_cursor,
 };
 use dohc_engine_sync_http::HttpRelayTransport;
 use dohc_engine_testkit::open_store;
