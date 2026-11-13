@@ -6959,7 +6959,8 @@ it("pushes a live document's settled edit on the next pass while another documen
 
 // An activation whose drain runs past every pass deadline fails each time it runs, as one does on an engine whose owner
 // reads stop answering. Each owner state or outbox read opens the engine's store again. The activation tries again once
-// its back-off has passed, within one poll of it, and sends none of those reads while it waits.
+// its back-off has passed, within one poll of it, and sends none of those reads while it waits. While the host holds
+// its owner, no wait is longer than 30 s.
 it("retries an activation that keeps running past its pass deadline only after each back-off", async () => {
   const paced = pacedPasses(),
     o = await emptyServiceHost({ paced, limits: { passDeadlineMs: 50 } as DrainLimits });
@@ -6986,18 +6987,21 @@ it("retries an activation that keeps running past its pass deadline only after e
   });
   await o.host.update({ workspaces: [o.workspace], documents: [o.sibling], ...stay });
   await vi.waitFor(() => expect(reads).toHaveLength(1));
-  const passes = await paced.over(o.f, 32_000);
+  let passes = await paced.over(o.f, 32_000);
+  expect(reads.length, "Each retry must wait out its back-off.").toBeLessThanOrEqual(7);
+  passes += await paced.over(o.f, 88_000);
   console.info(
-    `Activation past its pass deadline, 32 s: ${passes} passes, ${reads.length} owner reads`,
+    `Activation past its pass deadline, 120 s: ${passes} passes, ${reads.length} owner reads`,
   );
-  // The first retry is the next pass, then each wait doubles from a second.
+  // The first retry is the next pass, then each wait doubles from a second, up to 30 s.
   const gaps = reads.slice(1).map((at, index) => at - reads[index]!);
-  expect(gaps.length).toBeGreaterThanOrEqual(5);
-  expect(gaps.length).toBeLessThanOrEqual(6);
+  expect(gaps.length).toBeGreaterThanOrEqual(8);
+  expect(gaps.length).toBeLessThanOrEqual(9);
   expect(gaps[0]).toBeLessThanOrEqual(paced.poll);
   gaps.slice(1).forEach((gap, index) => {
-    expect(gap).toBeGreaterThanOrEqual(1000 * 2 ** index);
-    expect(gap).toBeLessThanOrEqual(1000 * 2 ** index + paced.poll);
+    const wait = Math.min(30_000, 1000 * 2 ** index);
+    expect(gap).toBeGreaterThanOrEqual(wait);
+    expect(gap).toBeLessThanOrEqual(wait + paced.poll);
   });
   expect(o.host.isDocumentReady(o.document)).toBe(false);
 });

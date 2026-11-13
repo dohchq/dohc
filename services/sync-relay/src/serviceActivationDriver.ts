@@ -81,6 +81,7 @@ type TargetBlock =
   | { reason: "released-lineage-unsettled"; digest: string };
 type TargetFailure = {
   count: number;
+  at: number;
   until: number;
   overBudget: boolean;
   run?: { since: number; failures: number; word: KnownRefusalWord; shown: boolean };
@@ -751,9 +752,12 @@ export class ServiceActivationDriver {
   #backingOff(key: string) {
     return this.#waiting(key) && ![...this.#owners.values()].some((owner) => owner.target === key);
   }
-  // Whether a failed activation's wait before its next capture has not yet lapsed.
-  #waiting(key: string) {
-    return Date.now() < (this.#failures.get(key)?.until ?? 0);
+  // Whether a failed activation's wait before its next capture or drain has not yet lapsed. A target whose owner the host
+  // holds waits at most 30 s: its document, its Stop and its workspace's push wait for that owner to complete.
+  #waiting(key: string, owned = false) {
+    const failure = this.#failures.get(key);
+    if (!failure) return false;
+    return Date.now() < (owned ? Math.min(failure.until, failure.at + 30_000) : failure.until);
   }
   consumer(value: LiveDocumentKey) {
     const document = parseLiveDocumentKey(value),
@@ -1275,6 +1279,7 @@ export class ServiceActivationDriver {
     // The first retry is the next pass. Each later one waits twice as long as the one before, up to five minutes.
     this.#failures.set(key, {
       count,
+      at: now,
       until: count < 2 ? 0 : now + Math.min(300_000, 1000 * 2 ** (count - 2)),
       overBudget,
       ...(run ? { run } : {}),
@@ -1366,7 +1371,7 @@ export class ServiceActivationDriver {
       if (owner) return fenced;
     }
     // A failed activation waits before it captures or drains again. A document already live keeps draining on every pass.
-    if (!owner?.completed && this.#waiting(key)) return backingOff;
+    if (!owner?.completed && this.#waiting(key, owner !== undefined)) return backingOff;
     if (!owner) {
       let update = this.#latestUpdate(target);
       if (catchUp || !saved) {
