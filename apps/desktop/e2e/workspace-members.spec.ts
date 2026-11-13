@@ -924,12 +924,7 @@ test("@two-client a member creates a page that reaches the owner, and an admin c
     await member.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.show());
     await expect.poll(() => mine.evaluate(() => document.visibilityState)).toBe("visible");
     await setLevel("comment");
-    // A level change that lands between held pulls waits for the next look
-    // at the window. Here and below, a focus event stands in for that look.
-    await expect(async () => {
-      await mine.evaluate(() => window.dispatchEvent(new Event("focus")));
-      await expect(header.getByRole("button", { name: "New page" })).toHaveCount(0, { timeout: 10_000 });
-    }).toPass({ timeout: 120_000, intervals: [1_000] });
+    await expect(header.getByRole("button", { name: "New page" })).toHaveCount(0, { timeout: 120_000 });
     // The toast names who changed the level. Its light picture comes from the Group test.
     const changed = `${OWNER.user} changed members to Comment.`;
     await expect(mine.getByTestId("notice-toasts").getByTestId("workspace-shell-notice").filter({ hasText: changed })).toBeVisible({ timeout: 30_000 });
@@ -951,10 +946,7 @@ test("@two-client a member creates a page that reaches the owner, and an admin c
     // to Comment as it comes back. The page waits with no proposal to send,
     // and it goes on its own once members are back at Edit.
     await setLevel("edit");
-    await expect(async () => {
-      await mine.evaluate(() => window.dispatchEvent(new Event("focus")));
-      await expect(header.getByRole("button", { name: "New page" })).toBeVisible({ timeout: 10_000 });
-    }).toPass({ timeout: 120_000, intervals: [1_000] });
+    await expect(header.getByRole("button", { name: "New page" })).toBeVisible({ timeout: 120_000 });
     const relayPort = relay.port;
     await relay.stop();
     relay = null;
@@ -989,7 +981,6 @@ test("@two-client a member creates a page that reaches the owner, and an admin c
     await mine.keyboard.press("Escape");
     await setLevel("edit");
     await expect.poll(async () => {
-      await mine.evaluate(() => window.dispatchEvent(new Event("focus")));
       for (const path of ["notes/Budget.md", "Budget.md"]) if (/title: Budget/.test(await ownerFile(path))) return path;
       return "missing";
     }, { timeout: 120_000, intervals: [2_000] }).not.toBe("missing");

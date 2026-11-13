@@ -27,6 +27,7 @@ import {
   type fetchShareViewInfo,
   type fetchShareViewAccess,
   type probeShareViewLog,
+  type ShareViewSelector,
 } from "../workspaces/shareViewInfo";
 import type { RendererWorkspaceOperationSession } from "../window/rendererWorkspaceOperation";
 import {
@@ -421,6 +422,9 @@ export function registerSharedViewsIpcHandlers<
       relayUrl: string;
       nextCursor?: number;
       credentialGeneration: number;
+      // A membership's level as this computer knows it, which its held pull
+      // names. Cleared once the relay says it differs, until a check moves it.
+      level?: ShareViewSelector["access"];
     }
   >();
   const cacheClosers = new Map<Sender, () => void>();
@@ -556,8 +560,11 @@ export function registerSharedViewsIpcHandlers<
             shareId: cached.shareId,
             since: cached.nextCursor,
             signal: AbortSignal.any([controller.signal, retirement!]),
-            ...(held ? { hold: SHARE_VIEW_HOLD_MS } : {}),
+            ...(held
+              ? { hold: SHARE_VIEW_HOLD_MS, ...(cached.level ? { level: cached.level } : {}) }
+              : {}),
           });
+          if (probe.levelChanged) delete cached.level;
           controller.signal.throwIfAborted();
           scoped.assertCurrent();
           if (probe.unchanged || probe.levelChanged) {
@@ -777,6 +784,7 @@ export function registerSharedViewsIpcHandlers<
               relayUrl: workspace.shareView.relayUrl,
               nextCursor,
               credentialGeneration,
+              ...membershipLevel(workspace.shareView.grantedSelector),
             });
             const clear = () => clearCache(event.sender);
             const stopClose = dependencies.onSenderClosed(event.sender, clear);
@@ -986,6 +994,13 @@ export function registerSharedViewsIpcHandlers<
                 view.shareId,
                 committedPin.wholeWorkspace === true ? (stated.role ?? null) : null,
               );
+              const pulling = pullCache.get(event.sender);
+              if (
+                pulling?.workspaceId === workspace.workspaceId &&
+                pulling.shareId === view.shareId
+              ) {
+                Object.assign(pulling, membershipLevel(committedPin));
+              }
               return committedPin.wholeWorkspace === true
                 ? {
                     status: "current",
@@ -1013,6 +1028,13 @@ export function registerSharedViewsIpcHandlers<
       },
     },
   );
+}
+
+// A membership's level follows the relay both ways, so its held pull names
+// it. A path share's pin never rises, so naming its level could only repeat.
+function membershipLevel(selector: unknown): { level?: ShareViewSelector["access"] } {
+  const pin = recordedShareSelector(selector);
+  return pin?.wholeWorkspace === true ? { level: pin.access } : {};
 }
 
 function causeOf(error: unknown): string {

@@ -1158,6 +1158,39 @@ describe("ending access", () => {
     }
   });
 
+  // A level change that lands while no read waits: the next held read says
+  // the level it knew, and the relay compares that with its own record.
+  it("answers a held read at once when the level it knew is not the stored level", async () => {
+    const activity = new DiscussionActivityHub();
+    const { h } = await seed({ activity });
+    await invited(h, "ana");
+    const shareId = await shareIdOf(h, "ana");
+    const first = await json(await pull(h, "ana", shareId));
+    expect((await post(h, OWNER, `/sync/${WORKSPACE}/members/level`, { level: "edit" })).status).toBe(200);
+    const read = (knew: string) => h(request("ana", `/sync/shares/${shareId}/log?limit=500&since=${first.nextCursor}&hold=30000&level=${knew}`));
+    const response = await read("comment");
+    expect(response.status).toBe(200);
+    expect(await json(response)).toMatchObject({ ops: [], hasMore: false, nextCursor: first.nextCursor, levelChanged: true });
+    expect(activity.stats().waiters).toBe(0);
+  });
+
+  it.each([["the stored level", "edit"], ["an unknown level", "owner"]])("holds a read that knew %s", async (_case, knew) => {
+    const activity = new DiscussionActivityHub();
+    const { h } = await seed({ activity });
+    await invited(h, "ana");
+    const shareId = await shareIdOf(h, "ana");
+    const first = await json(await pull(h, "ana", shareId));
+    expect((await post(h, OWNER, `/sync/${WORKSPACE}/members/level`, { level: "edit" })).status).toBe(200);
+    const controller = new AbortController();
+    const held = h(request("ana", `/sync/shares/${shareId}/log?limit=500&since=${first.nextCursor}&hold=30000&level=${knew}`, { signal: controller.signal }));
+    try {
+      await expect.poll(() => activity.stats().waiters).toBe(1);
+    } finally {
+      controller.abort();
+      await held.catch(() => undefined);
+    }
+  });
+
   it("names who changed the level from its own record, never from the request", async () => {
     const { h } = await seed();
     await invited(h, "ana");

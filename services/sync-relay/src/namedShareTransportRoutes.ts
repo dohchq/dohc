@@ -1,3 +1,4 @@
+import { isShareAccessValue } from "@dohc/security-contract/share-selector";
 import { jsonResponse } from "@dohc/service-http";
 import { sha256Hex } from "@dohc/workspace-core/hash";
 import { accountDisplayName } from "./accountDisplayName";
@@ -27,6 +28,7 @@ import type { AuthorizedShareAction } from "./shareAuthorization";
 import {
   chatSideFor,
   chatSideOf,
+  fileSideOf,
   filterOpForShareAppend,
   isGroupSelector,
   isWorkspaceSelector,
@@ -209,6 +211,13 @@ export function createNamedShareTransportRoutes(
       // The selector that filtered the page being returned.
       let pageSelector = readSelector;
       const hold = parseLinkLogHold(url.searchParams.get("hold"));
+      // A held read names the level its reader knew, so a change that landed
+      // while no read waited still ends the next hold. The stored grant
+      // decides; a value that names no level is ignored.
+      const knew = url.searchParams.get("level");
+      if (hold > 0 && isShareAccessValue(knew) && knew !== (fileSideOf(authorized.effectiveSelector)?.access ?? "view")) {
+        return jsonResponse({ ok: true, ops: [], nextCursor: since, hasMore: false, ownOriginId, levelChanged: true });
+      }
       if (hold > 0 && page.ops.length === 0 && !page.hasMore && page.nextCursor === since) {
         const deadline = Date.now() + hold;
         let scanSince = since;

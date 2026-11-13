@@ -1146,6 +1146,29 @@ describe("background share pulls", () => {
       expect.anything(),
     );
   });
+  // A level change that lands between holds: the next hold names the level
+  // this computer knows, and the relay answers at once when its own differs.
+  it("names the level a membership knows in its held pull, once until the access check moves it", async () => {
+    const h = await harness();
+    h.workspace.shareView!.grantedSelector = { paths: [], versionId: null, access: "comment", wholeWorkspace: true };
+    await h.invoke(channel, { workspaceId: "existing" });
+    vi.clearAllMocks();
+    const bodies = [{ ops: [], hasMore: false, nextCursor: 42, levelChanged: true }, { ops: [], hasMore: false, nextCursor: 42 },
+      { ops: [], hasMore: false, nextCursor: 42 }];
+    const fetch = vi.fn<typeof globalThis.fetch>(async () => Response.json(bodies.shift()));
+    h.probeLog.mockImplementation(input => probeShareViewLog({ ...input, relay: { ...input.relay, fetch } }));
+    const held = { ...payload, trigger: "held" };
+    await expect(h.invoke(channel, held)).resolves.toMatchObject({ levelChanged: true });
+    expect(fetch).toHaveBeenLastCalledWith("https://relay.example.test/sync/shares/share/log?since=42&hold=25000&level=comment", expect.anything());
+    // Answered once: the next hold names no level, so a stale one cannot loop.
+    await h.invoke(channel, held);
+    expect(fetch).toHaveBeenLastCalledWith("https://relay.example.test/sync/shares/share/log?since=42&hold=25000", expect.anything());
+    h.fetchAccess.mockResolvedValue({ access: "edit" });
+    await expect(h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, { workspaceId: "existing" }))
+      .resolves.toMatchObject({ status: "current", access: "edit" });
+    await h.invoke(channel, held);
+    expect(fetch).toHaveBeenLastCalledWith("https://relay.example.test/sync/shares/share/log?since=42&hold=25000&level=edit", expect.anything());
+  });
   it("asks for the next held pull after a held pull brought changes", async () => {
     const h = await primed();
     h.probeLog.mockResolvedValue({ unchanged: false });

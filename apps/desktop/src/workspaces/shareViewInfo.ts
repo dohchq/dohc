@@ -245,7 +245,8 @@ export async function fetchShareViewAccess(input: {
   const role = readWorkspaceRole(body);
   if (role === null) throw new ShareSelectorInvalidError(input.shareId);
   if (!("levelChangedBy" in body)) return { access: body.access, role };
-  if (typeof body.levelChangedBy !== "string" || !body.levelChangedBy.trim()) throw new ShareSelectorInvalidError(input.shareId);
+  if (typeof body.levelChangedBy !== "string" || !body.levelChangedBy.trim())
+    throw new ShareSelectorInvalidError(input.shareId);
   return { access: body.access, role, levelChangedBy: body.levelChangedBy };
 }
 
@@ -255,13 +256,16 @@ export async function probeShareViewLog(input: {
   since: number;
   // How long the relay may wait for news before answering an empty page.
   hold?: number;
+  // The level this computer knows. The relay answers a hold at once when its
+  // own record differs.
+  level?: ShareAccess;
   signal?: AbortSignal;
 }): Promise<{ unchanged: boolean; levelChanged?: true }> {
   // Standalone share.view.pull reads the whole share log without channelWireId,
   // including group shares. Only shared-channel pulls pass a channel filter.
   const response = await shareFetch(
     input.relay,
-    `/sync/shares/${encodeURIComponent(input.shareId)}/log?since=${input.since}${input.hold ? `&hold=${input.hold}` : ""}`,
+    `/sync/shares/${encodeURIComponent(input.shareId)}/log?since=${input.since}${input.hold ? `&hold=${input.hold}` : ""}${input.hold && input.level ? `&level=${input.level}` : ""}`,
     { signal: input.signal },
   );
   const body: unknown = await response.json();
