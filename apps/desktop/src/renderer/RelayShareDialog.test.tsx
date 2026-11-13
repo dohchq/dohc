@@ -6383,6 +6383,138 @@ describe("people and links on one surface", () => {
     expect(screen.getByTestId("share-link-confirmation")).toBeTruthy();
   });
 
+  it("folds the shown share's ended links under more links, and counts them", async () => {
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [
+        readableLink("working", { shareId: "share-1" }),
+        readableLink("ended", { shareId: "share-1", status: "revoked", revokedAtMs: CREATED_MS + 20 }),
+      ],
+    });
+    const user = userEvent.setup();
+    render(<RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />);
+
+    const group = await screen.findByTestId("share-link-group-share-1");
+    expect(within(group).getAllByTestId(/^share-link-row-/u).map((row) => row.getAttribute("data-testid")))
+      .toEqual(["share-link-row-working"]);
+    expect(screen.queryByTestId("share-link-row-ended")).toBeNull();
+    const more = screen.getByTestId("share-links-more");
+    expect(more.textContent).toBe("1 more link");
+
+    await user.click(more);
+    expect(within(screen.getByTestId("share-link-rest-share-1")).getByTestId("share-link-row-ended").textContent).toContain("Ended");
+    // The share still has one card, with its comments and Add link.
+    expect(screen.getAllByTestId(/^share-link-group-/u)).toHaveLength(1);
+  });
+
+  it("opens more links to say that a link could not be added", async () => {
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [
+        readableLink("first", { shareId: "share-first", createdAtMs: CREATED_MS }),
+        readableLink("second", { shareId: "share-second", createdAtMs: CREATED_MS + 5 }),
+      ],
+    });
+    bridgeMock.addRelayShareLink.mockRejectedValue(new Error("The sync relay is unavailable."));
+    const user = userEvent.setup();
+    render(<RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />);
+
+    await addLinkWith(user, await screen.findByTestId("share-link-group-share-first"), "Can comment");
+    expect((await screen.findByTestId("share-link-error")).textContent).toBe("The sync relay is unavailable.");
+    expect(screen.getByTestId("share-links-more").getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("keeps the shown share in place when its oldest link ends", async () => {
+    const olderA = readableLink("a-old", { shareId: "share-a", createdAtMs: CREATED_MS });
+    const newerA = readableLink("a-new", { shareId: "share-a", createdAtMs: CREATED_MS + 9 });
+    const b = readableLink("b", { shareId: "share-b", createdAtMs: CREATED_MS + 5 });
+    bridgeMock.listRelayShareLinks
+      .mockResolvedValueOnce({ links: [olderA, newerA, b] })
+      .mockResolvedValue({ links: [{ ...olderA, status: "revoked", revokedAtMs: CREATED_MS + 20 }, newerA, b] });
+    const user = userEvent.setup();
+    render(<RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />);
+
+    await chooseLinkOption(user, await screen.findByTestId("share-link-row-a-old"), "End link");
+    await user.click(within(screen.getByTestId("share-link-confirmation")).getByRole("button", { name: "End link" }));
+    await waitFor(() => expect(screen.queryByTestId("share-link-row-a-old")).toBeNull());
+    // Share B's link is now the oldest working one, and share A still shows.
+    expect(within(screen.getByTestId("share-link-group-share-a")).getByTestId("share-link-row-a-new")).toBeTruthy();
+    expect(screen.queryByTestId("share-link-group-share-b")).toBeNull();
+    expect(screen.getByTestId("share-links-more").textContent).toBe("2 more links");
+  });
+
+  it("stops reading comments of a share that moves under the closed list", async () => {
+    const a = readableLink("a", { shareId: "share-a", createdAtMs: CREATED_MS });
+    const b = readableLink("b", { shareId: "share-b", createdAtMs: CREATED_MS + 5 });
+    const stays = independentGrant("stays", { shareId: "share-a" });
+    bridgeMock.listRelayShareLinks
+      .mockResolvedValueOnce({ links: [a, b], supportedLinkAccess: ["view", "comment"], independentGrants: [stays] })
+      .mockResolvedValue({
+        links: [{ ...a, status: "revoked", revokedAtMs: CREATED_MS + 20 }, b],
+        supportedLinkAccess: ["view", "comment"],
+        independentGrants: [stays],
+      });
+    const user = userEvent.setup();
+    render(<RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />);
+
+    const group = await openOwnerComments(user, "share-a");
+    await within(group).findByText("No comments yet.");
+    await waitFor(() => expect(bridgeMock.pollRelayShareDiscussionActivity).toHaveBeenCalledTimes(1));
+    await chooseLinkOption(user, screen.getByTestId("share-link-row-a"), "End link");
+    await user.click(within(screen.getByTestId("share-link-confirmation")).getByRole("button", { name: "End link" }));
+
+    // Share A has no working link left, so share B shows and A waits in the list.
+    expect(await screen.findByTestId("share-link-group-share-b")).toBeTruthy();
+    expect(screen.queryByTestId("share-link-group-share-a")).toBeNull();
+    await waitFor(() => expect(bridgeMock.cancelRelayShareDiscussionActivity).toHaveBeenCalledTimes(1));
+    await openMoreLinks(user);
+    expect(within(screen.getByTestId("share-link-group-share-a")).getByRole("button", { name: "Comments" }).getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("keeps a question about a person open when their share's comments close", async () => {
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [readableLink("link-1", { shareId: "share-1", dependents: [dependent("joined", "joined@dohc.test", "user-joined")] })],
+    });
+    const user = userEvent.setup();
+    render(<RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />);
+
+    const group = await openOwnerComments(user, "share-1");
+    await user.click(within(await screen.findByTestId("share-dependent-joined")).getByRole("button", { name: "Make independent" }));
+    expect(screen.getByTestId("owner-comments-confirmation")).toBeTruthy();
+    await user.click(within(group).getByRole("button", { name: "Comments" }));
+    expect(within(screen.getByTestId("share-people-share-1")).getByTestId("owner-comments-confirmation")).toBeTruthy();
+  });
+
+  it("stops a People read under way when sharing can no longer work", async () => {
+    const refresh = controllable<{ status: "requested" }>();
+    bridgeMock.requestAccessRefresh.mockReturnValue(refresh.promise);
+    const view = render(<RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />);
+    await waitFor(() => expect(bridgeMock.requestAccessRefresh).toHaveBeenCalledTimes(1));
+
+    view.rerender(
+      <RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}}
+        accessContext={accessContextFor({ connected: true, workspaceSynced: false, workspaceSyncConnected: false })} />,
+    );
+    await act(async () => refresh.resolve({ status: "requested" }));
+    expect(bridgeMock.listSharingAccess).not.toHaveBeenCalled();
+  });
+
+  it("reads the invited people from the start when the listing changes between pages", async () => {
+    bridgeMock.listSharingAccess
+      .mockResolvedValueOnce(sharingAccess([invitedRow("gone", "gone@dohc.test")], "page-2"))
+      .mockResolvedValueOnce({
+        ...sharingAccess([]),
+        coverage: { kind: "unavailable", complete: false, observation: "interval" },
+        unknownReason: "changed",
+        freshness: "unknown",
+      })
+      .mockResolvedValueOnce(sharingAccess([invitedRow("ana", "ana@dohc.test")]));
+    render(<RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />);
+
+    expect(await screen.findByTestId("share-invited-ana")).toBeTruthy();
+    expect(screen.queryByTestId("share-invited-gone")).toBeNull();
+    expect(screen.queryByTestId("share-people-failed")).toBeNull();
+    expect(bridgeMock.listSharingAccess).toHaveBeenNthCalledWith(3, { workspaceId: "ws-1", lane: "granted" });
+  });
+
   it("opens more links for a first separate link, so the link just made shows", async () => {
     const only = readableLink("only", { shareId: "share-only", createdAtMs: CREATED_MS });
     const made = readableLink("made", { shareId: "share-made", createdAtMs: CREATED_MS + 9, url: LINK_URL_B });

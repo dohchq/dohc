@@ -494,6 +494,8 @@ export function useRelayShareLinkPane(props: {
   const [separateOpen, setSeparateOpen] = useState(false);
   // The links past the first share, and a separate link, open from one line.
   const [moreOpen, setMoreOpen] = useState(false);
+  // The share whose links show, kept while it has a working link.
+  const shownShareId = useRef<string | null>(null);
   // Links whose last change may have landed without its answer: no URL
   // shows for them until the list reads again.
   const [unsureUrls, setUnsureUrls] = useState<ReadonlySet<string>>(() => new Set());
@@ -1147,8 +1149,9 @@ export function useRelayShareLinkPane(props: {
         activeOwnerAppendShareId.current = null;
       }
       if (ownerAppendBusy === shareId) setOwnerAppendBusy(null);
+      // A question about a person sits in People, so it stays.
       setOwnerConfirmation((current) =>
-        current?.shareId === shareId ? null : current,
+        current?.shareId === shareId && (current.kind === "delete" || current.kind === "block") ? null : current,
       );
       updateOwnerDiscussion(shareId, (current) => ({
         ...current,
@@ -1591,8 +1594,9 @@ export function useRelayShareLinkPane(props: {
         return;
       }
       setLinkError(ipcErrorMessage(cause));
-      // The link may have been made all the same, so the list that would hold it shows.
-      if (action.kind === "create") setMoreOpen(true);
+      // The error shows beside the separate link, which may sit in that list.
+      // A link made all the same shows there too.
+      setMoreOpen(true);
       void refreshLinks(scopeGeneration);
     } finally {
       if (
@@ -2465,7 +2469,7 @@ export function useRelayShareLinkPane(props: {
     );
   }
 
-  function renderLinkGroup(group: LinkGroup) {
+  function renderLinkGroup(group: LinkGroup, rows: readonly RelayShareLinkRow[] = group.rows) {
     const canAdd = eligibleShareIds.has(group.shareId);
     const addAccess = addAccessByShareId[group.shareId] ?? "view";
     const addNote = automationCheck.noteFor({ recipientEmail: null, access: addAccess, shareId: group.shareId });
@@ -2480,7 +2484,7 @@ export function useRelayShareLinkPane(props: {
         data-testid={`share-link-group-${group.shareId}`}
         className="flex flex-col rounded-lg border border-line bg-panel"
       >
-        {group.rows.map((row) => renderLinkRow(group, row))}
+        {rows.map((row) => renderLinkRow(group, row))}
 
         {canAdd ? (
           <div className="flex flex-col gap-2 border-t border-line px-3 py-2">
@@ -2609,37 +2613,48 @@ export function useRelayShareLinkPane(props: {
   const mintedElsewhere =
     minted !== null && !visibleLinks.some((row) => row.grantId === minted.grantId && row.status === "active");
 
-  // One share's links show. It is the share whose working link is oldest, so
-  // a new link never moves it. Every other share of this selection, with its
-  // own comments, and every ended link waits under one line.
+  // One share's working links show. The first to show is the share whose
+  // working link is oldest, so a new link never moves it, and it keeps its
+  // place while it has a working link. Every other share of this selection,
+  // with its own comments, and every other link waits under one line.
+  const isWorking = (row: RelayShareLinkRow) => row.status === "active" && rowMatchesTarget(row, props.target);
   const firstWorkingLink = (group: LinkGroup) =>
     group.rows
-      .filter((row) => row.status === "active" && rowMatchesTarget(row, props.target))
+      .filter(isWorking)
       .sort((left, right) => left.createdAtMs - right.createdAtMs || left.grantId.localeCompare(right.grantId))[0];
-  const primaryGroup = visibleLinkGroups.reduce<LinkGroup | null>((oldest, group) => {
-    const link = firstWorkingLink(group);
-    if (!link) return oldest;
-    const held = oldest ? firstWorkingLink(oldest)! : null;
-    return held === null || link.createdAtMs < held.createdAtMs || (link.createdAtMs === held.createdAtMs && link.grantId < held.grantId)
-      ? group
-      : oldest;
-  }, null);
+  const primaryGroup =
+    visibleLinkGroups.find((group) => group.shareId === shownShareId.current && group.rows.some(isWorking)) ??
+    visibleLinkGroups.reduce<LinkGroup | null>((oldest, group) => {
+      const link = firstWorkingLink(group);
+      if (!link) return oldest;
+      const held = oldest ? firstWorkingLink(oldest)! : null;
+      return held === null || link.createdAtMs < held.createdAtMs || (link.createdAtMs === held.createdAtMs && link.grantId < held.grantId)
+        ? group
+        : oldest;
+    }, null);
+  shownShareId.current = primaryGroup?.shareId ?? null;
+  const primaryRows = primaryGroup?.rows.filter(isWorking) ?? [];
+  const primaryRest = primaryGroup?.rows.filter((row) => !isWorking(row)) ?? [];
   const moreGroups = visibleLinkGroups.filter((group) => group !== primaryGroup);
-  const moreLinkCount = moreGroups.reduce((count, group) => count + group.rows.length, 0);
+  const moreLinkCount = primaryRest.length + moreGroups.reduce((count, group) => count + group.rows.length, 0);
   // A separate link is made beside the other separate links, once there are any.
-  const createInMore = primaryGroup !== null && moreGroups.length > 0;
+  const createInMore = primaryGroup !== null && moreLinkCount > 0;
+
+  // What sits under the closed list stops with it: its comments stop reading,
+  // and a question open on one of its links no longer holds the links that
+  // show. A share can also move there when its last working link ends.
+  const hiddenComments = moreOpen
+    ? []
+    : moreGroups.filter((group) => ownerDiscussionByShareId[group.shareId]?.expanded).map((group) => group.shareId);
+  const hiddenQuestion =
+    !moreOpen && confirmation !== null && !primaryRows.some((row) => row.grantId === confirmation.grantId);
+  useLayoutEffect(() => {
+    for (const shareId of hiddenComments) toggleOwnerDiscussion(shareId);
+    if (hiddenQuestion) setConfirmation(null);
+  });
 
   function toggleMore() {
-    if (moreOpen) {
-      // What closes with the list stops with it: its comments stop reading,
-      // and a question open on one of its links no longer holds the others.
-      for (const group of moreGroups) {
-        if (ownerDiscussionByShareId[group.shareId]?.expanded) toggleOwnerDiscussion(group.shareId);
-      }
-      if (createInMore) setSeparateOpen(false);
-      setConfirmation((current) =>
-        current !== null && moreGroups.some((group) => group.shareId === current.shareId) ? null : current);
-    }
+    if (moreOpen && createInMore) setSeparateOpen(false);
     setMoreOpen(!moreOpen);
   }
 
@@ -2688,11 +2703,11 @@ export function useRelayShareLinkPane(props: {
           </p>
         ) : null}
 
-        {primaryGroup ? renderLinkGroup(primaryGroup) : null}
+        {primaryGroup ? renderLinkGroup(primaryGroup, primaryRows) : null}
 
         {createInMore ? null : createSection}
 
-        {moreGroups.length > 0 ? (
+        {moreLinkCount > 0 ? (
           <>
             <GhostButton
               className="self-start"
@@ -2706,6 +2721,14 @@ export function useRelayShareLinkPane(props: {
             </GhostButton>
             {moreOpen ? (
               <div id="share-links-more-list" className="flex flex-col gap-2">
+                {primaryGroup && primaryRest.length > 0 ? (
+                  <div
+                    data-testid={`share-link-rest-${primaryGroup.shareId}`}
+                    className="flex flex-col rounded-lg border border-line bg-panel"
+                  >
+                    {primaryRest.map((row) => renderLinkRow(primaryGroup, row))}
+                  </div>
+                ) : null}
                 {moreGroups.map((group) => renderLinkGroup(group))}
                 {createInMore ? createSection : null}
               </div>

@@ -669,6 +669,9 @@ confidentialTest.describe("View link lifecycle", () => {
       confirmation = dialog.getByTestId("share-link-confirmation");
       await confirmation.getByRole("button", { name: "End link" }).click();
       await expect(confirmation).not.toBeVisible();
+      // An ended link waits under "more links".
+      await expect(linkRows).toHaveCount(0);
+      await dialog.getByTestId("share-links-more").click();
       await expect(linkRow).toContainText("Ended");
 
       const currentSecretAfterEnd = await exchangeViewLink(

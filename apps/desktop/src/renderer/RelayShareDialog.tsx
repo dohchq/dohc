@@ -40,14 +40,24 @@ function useInvitedPeople(input: { workspaceId: string; target: RelayShareTarget
     try {
       // A share made a moment ago is already being listed; this waits for it.
       await bridge().requestAccessRefresh({ workspaceId, reason: "sharing-open" }).catch(() => undefined);
+      if (!requests.isCurrent(token)) return;
       const people: InvitedPerson[] = [];
       const seen = new Set<string>();
       let cursor: string | undefined;
+      let restarted = false;
       while (true) {
-        if (!requests.isCurrent(token)) return;
         const answer = await bridge().listSharingAccess({ workspaceId, lane: "granted", ...(cursor ? { cursor } : {}) });
         if (!requests.isCurrent(token)) return;
-        if (answer.coverage.kind === "unavailable") throw new Error("dohc could not list this workspace's shares.");
+        if (answer.coverage.kind === "unavailable") {
+          // A page cursor belongs to the listing it came from. When that
+          // listing changed, main refuses the cursor, so read from the start.
+          if (cursor === undefined || restarted) throw new Error("dohc could not list this workspace's shares.");
+          restarted = true;
+          people.length = 0;
+          seen.clear();
+          cursor = undefined;
+          continue;
+        }
         for (const row of answer.rows) {
           const { selector } = row.kind === "share" ? row : { selector: null };
           if (row.kind !== "share" || row.via !== "named" || row.status !== "active" || selector === null || selector.kind !== undefined) continue;
@@ -74,7 +84,9 @@ function useInvitedPeople(input: { workspaceId: string; target: RelayShareTarget
   }, [scope]);
   useEffect(() => {
     if (read) void load();
-  }, [load, read, revision, scope]);
+    // A read under way stops when sharing can no longer work.
+    else requests.next();
+  }, [load, read, requests, revision, scope]);
   return { invited, load };
 }
 
