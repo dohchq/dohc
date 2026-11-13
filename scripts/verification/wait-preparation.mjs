@@ -145,7 +145,9 @@ export async function waitForPreparation(
           await checkBuild();
         }
       }
-      await pause(Math.max(0, Math.min(api.pollMs, deadline - now(), Math.max(0, checkAt - now()))));
+      await pause(
+        Math.max(0, Math.min(api.pollMs, deadline - now(), Math.max(0, checkAt - now()))),
+      );
     }
   } finally {
     api.log(`${scope} preparation wait`);

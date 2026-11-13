@@ -1381,9 +1381,10 @@ for (const [scope, jobName, artifact] of [
       );
       assert.equal(clock, 900_000);
       assert.equal(lastJobRead, 900_000, "the cap refreshes the build state");
-      assert.deepEqual(jobReadTimes, [
-        120_000, 240_000, 360_000, 480_000, 600_000, 720_000, 840_000, 900_000,
-      ]);
+      assert.deepEqual(
+        jobReadTimes,
+        [120_000, 240_000, 360_000, 480_000, 600_000, 720_000, 840_000, 900_000],
+      );
     }
     for (const conclusion of ["failure", "cancelled", "skipped", "duplicate"]) {
       let clock = 0;
@@ -1444,7 +1445,6 @@ test("compiler preparation waits for exactly both consumed artifacts under one c
     assert.equal(downloaded.length, publishArchive ? 2 : 1);
     assert.ok(clock <= 900_000, "the second artifact cannot restart the 15-minute cap");
   }
-
 });
 
 test("reporting joins its own successful group and caps queued or running siblings at 20 minutes", async () => {
