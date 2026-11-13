@@ -2484,6 +2484,72 @@ describe("private application v2 metadata transport", () => {
       await earlier.catch(() => undefined);
     }
   });
+
+  it("fails an upload it could not start sending before its deadline alone and keeps the connection", async () => {
+    const f = await recorder();
+    f.peer.backpressured = true;
+    const earlier = f.transport.sendRequest({
+      id: 1,
+      method: "earlier",
+      params: {},
+      deadlineMs: 60_000,
+    });
+    try {
+      await expect(
+        f.transport.sendLiveApplication({ ...uploadRequest, deadlineMs: 50 }, event()),
+      ).rejects.toMatchObject({ name: "EngineRequestDeadlineError", unsent: true });
+      f.peer.drain();
+      f.peer.send({ type: "response", id: f.headers[0]!.id, result: { answered: true } });
+      await expect(earlier).resolves.toMatchObject({ result: { answered: true } });
+      expect(f.headers.map((header) => header.method)).toEqual(["earlier"]);
+    } finally {
+      f.transport.close();
+      await earlier.catch(() => undefined);
+    }
+  });
+
+  it("fails an upload the writer reaches after its deadline alone and keeps the connection", async () => {
+    const f = await recorder();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+    f.peer.backpressured = true;
+    const earlier = f.transport.sendRequest({
+      id: 1,
+      method: "earlier",
+      params: {},
+      deadlineMs: 60_000,
+    });
+    const upload = f.transport.sendLiveApplication({ ...uploadRequest, deadlineMs: 50 }, event());
+    try {
+      // The deadline timer fires, and the earlier write drains before its deferred expiry runs.
+      vi.advanceTimersByTime(50);
+      f.peer.drain();
+      await expect(upload).rejects.toMatchObject({
+        name: "EngineRequestDeadlineError",
+        unsent: true,
+      });
+      expect(f.headers.map((header) => header.method)).toEqual(["earlier"]);
+      f.peer.send({ type: "response", id: f.headers[0]!.id, result: { answered: true } });
+      await expect(earlier).resolves.toMatchObject({ result: { answered: true } });
+    } finally {
+      vi.useRealTimers();
+      f.transport.close();
+      await earlier.catch(() => undefined);
+    }
+  });
+
+  it("closes the connection for an upload it started sending and could not finish before its deadline", async () => {
+    const f = await recorder(true);
+    try {
+      await expect(
+        f.transport.sendLiveApplication({ ...uploadRequest, deadlineMs: 50 }, event()),
+      ).rejects.toMatchObject({ name: "EngineRequestDeadlineError", unsent: false });
+      await expect(
+        f.transport.sendRequest({ id: 2, method: "after", params: {}, deadlineMs: 1_000 }),
+      ).rejects.toMatchObject({ code: "closed" });
+    } finally {
+      f.transport.close();
+    }
+  });
 });
 
 describe("private baseline upload", () => {
