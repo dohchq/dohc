@@ -3,7 +3,7 @@ import { phoneMarkReadArgsSchema, phoneRetryWakeArgsSchema, phoneWriteArgsSchema
 import { createActorIssuer, deriveLocalActor, serializeActorKey } from "@dohc/workspace-contracts/actor-identity";
 import type { ChatMessage, ChatThread, ChatThreadLane } from "@dohc/workspace-contracts/engine";
 import { asRecord } from "@dohc/workspace-core";
-import { ChatsLiveAdapter, DaemonRefusalError, type JsonValue } from "@dohc/workspace-engine-client";
+import { CHATS_METHOD, ChatsLiveAdapter, DaemonRefusalError, type JsonValue } from "@dohc/workspace-engine-client";
 import { EngineRequestError } from "@dohc/workspace-engine-client/daemon";
 import {
   answerDecision, answerWithReply, checkedContent, engineTrim, postToGroup, reactToMessage, replyInThread, sendToStream,
@@ -14,7 +14,7 @@ import { currentAccountFeedCursor } from "./accountFeed";
 import { serverChats, type MissingResult } from "./accountOperations";
 import type { AutomationReplica } from "./automationReplicas";
 import { stableJsonStringify } from "./canonicalJson";
-import { frozenWakes, resolveWakeTargets, shownName, TooManyWakeCandidates, type FrozenWakes, type WakeSources } from "./chatWakes";
+import { frozenWakes, resolveWakeTargets, shownName, TooManyWakeCandidates, type DmSource, type FrozenWakes, type WakeSources } from "./chatWakes";
 import { badRequest, notFound, RelayError } from "./errors";
 import {
   COULD_NOT_SEND, PUBLICATION_DEADLINE_MS, TOO_OLD, WORKSPACE_CHANGED, commandStages, isRefusalReason, publishOperation, receiptReader,
@@ -380,24 +380,41 @@ function visibleTargets(storage: SyncRelayStorage, copy: AutomationReplica) {
       const found = (await chats.store.listChannels({ workspaceId })).find((each) => each.id === channelId);
       return found?.kind === "agent" ? found.agentId ?? null : null;
     },
-    // The newest message `pick` keeps in the channel's visible threads of both lanes, replies included, a page at a time.
-    async latest(channelId: string, pick: (message: ChatMessage) => boolean): Promise<ChatMessage | null> {
-      let newest: ChatMessage | null = null;
+    // The newest message `pick` keeps in the channel's newest threads of both lanes, replies included, within a fixed
+    // budget. Each thread is read from its end, a page at a time, with the thread's message count giving where its
+    // last page starts, since a thread's message orders count from zero. `complete` is false when the budget, or the
+    // threads one listing returns, ran out before every message that could be newer was read.
+    async latest(channelId: string, pick: (message: ChatMessage) => boolean): Promise<DmSource> {
       const lanes = await Promise.all((["posts", "chat"] as const)
-        .map((lane) => chats.store.listChannelThreads({ workspaceId, channelId, lane })));
-      for (const { thread } of lanes.flat()) {
-        let after: number | undefined;
-        do {
+        .map((lane) => adapter.request(CHATS_METHOD.threadsListForChannel, { channelId, lane, pageLimit: DM_THREADS_PER_LANE })));
+      const complete = lanes.every((page) => (page.nextCursor ?? null) === null);
+      // A channel's threads are never on a file, so the secret-file filter has nothing to drop; one on a file is skipped.
+      const threads = lanes.flatMap((page) => page.threads).filter((summary) => summary.thread.linkedFile === undefined)
+        .sort((left, right) => right.thread.updatedAtMs - left.thread.updatedAtMs);
+      let newest: ChatMessage | null = null;
+      let pages = 0, read = 0;
+      for (const { thread, messageCount } of threads) {
+        // A thread last updated before the newest source found holds nothing newer.
+        if (newest !== null && thread.updatedAtMs < newest.createdAtMs) break;
+        for (let end = messageCount; end > 0;) {
+          if (pages === DM_MESSAGE_PAGES || read === DM_MESSAGES) return { message: newest, complete: false };
+          const start = Math.max(0, end - MESSAGE_PAGE, end - (DM_MESSAGES - read));
           const page = await adapter.listMessagesPage({
-            workspaceId, threadId: thread.id, limit: MESSAGE_PAGE, ...(after === undefined ? {} : { afterMessageOrder: after }),
+            workspaceId, threadId: thread.id, limit: end - start, ...(start === 0 ? {} : { afterMessageOrder: start - 1 }),
           });
-          for (const message of page.messages) {
-            if (pick(message) && (newest === null || message.createdAtMs >= newest.createdAtMs)) newest = message;
+          pages += 1;
+          read += end - start;
+          const found = page.messages.filter(pick).reduce<ChatMessage | null>(
+            (latest, message) => latest === null || message.createdAtMs >= latest.createdAtMs ? message : latest, null);
+          // This thread's earlier pages hold only earlier messages.
+          if (found !== null) {
+            if (newest === null || found.createdAtMs > newest.createdAtMs) newest = found;
+            break;
           }
-          after = page.nextAfterMessageOrder ?? undefined;
-        } while (after !== undefined);
+          end = start;
+        }
       }
-      return newest;
+      return { message: newest, complete };
     },
     // IDs a write would create. One a hidden row already holds answers as missing, so no engine conflict reveals it.
     async unclaimed(ids: { threadId?: string; messageId: string }): Promise<void> {
@@ -412,6 +429,10 @@ function visibleTargets(storage: SyncRelayStorage, copy: AutomationReplica) {
 type Targets = ReturnType<typeof visibleTargets>;
 // The engine's largest message page.
 const MESSAGE_PAGE = 500;
+// What finding a DM's agent reads at most: the newest threads of each lane, message pages, and messages.
+const DM_THREADS_PER_LANE = 8;
+const DM_MESSAGE_PAGES = 4;
+const DM_MESSAGES = 2_000;
 
 // What wake resolution reads: the account's enabled agents, and the copy through the reads' filter, a hidden target
 // reading as a missing one. A failed read fails the write before its row.
@@ -1053,10 +1074,14 @@ type RetryWakeAnswer = { ok: true; wake: ChatWakeView } | { ok: false; refusal: 
  * Tries a wake again, in a visit to the account's copy of `workspaceId`,
  * after the copy syncs. A wake whose thread the account may no longer see,
  * through the reads' secret-file filter, answers as one that isn't there,
- * and nothing changes. The caller authenticates the account, checks that it
- * owns the workspace and that the workspace shows on the phone, and parses
- * the request. `authorize` runs once the copy is open, once it has synced,
- * after the thread read, and after the retry, before the answer.
+ * and nothing changes. The relay log's head bounds what any sync of the copy
+ * can pull, so the thread is judged against it: when the head is unchanged
+ * from before the copy synced, through the read and the last session check,
+ * the read still holds, and the retry commits with nothing awaited after
+ * that check. When the head moved, the copy syncs and reads once more; a
+ * second move answers "Couldn't send", with no generation and no binding.
+ * The caller authenticates the account, checks that it owns the workspace
+ * and that the workspace shows on the phone, and parses the request.
  */
 export async function runAccountRetryWake(
   server: { storage: SyncRelayStorage; copies: ServerCopies },
@@ -1075,6 +1100,7 @@ export async function runAccountRetryWake(
   const { signal } = input.visitor;
   const missingWake: RetryWakeAnswer = { ok: false, reason: `no such wake: ${wakeId}`, refusal: "missing" };
   const notSent: RetryWakeAnswer = { ok: false, refusal: "refused", reason: COULD_NOT_SEND };
+  const logHead = () => storage.accountFeedStanding(workspaceId)?.log ?? null;
   return await server.copies.withServerCopy(accountId, workspaceId, input.visitor, async (copy) => {
     await input.authorize();
     const cursor = currentAccountFeedCursor(storage, workspaceId);
@@ -1082,20 +1108,39 @@ export async function runAccountRetryWake(
       await input.authorize();
       return { result, cursor };
     };
-    try {
-      await copy.sync(signal);
-      await input.authorize();
+    // Whether the account may see the wake's thread now. A wake it doesn't have is left to the retry to answer.
+    const visible = async () => {
       const threadId = storage.chatWakeThread({ accountId, workspaceId, wakeId });
-      if (threadId !== null) await visibleTargets(storage, copy).thread(threadId);
-    } catch (error) {
-      if (error instanceof RelayError || signal.aborted) throw error;
-      return await answered(error instanceof TargetMissing ? missingWake : notSent);
+      if (threadId === null) return true;
+      try {
+        await visibleTargets(storage, copy).thread(threadId);
+        return true;
+      } catch (error) {
+        if (error instanceof TargetMissing) return false;
+        throw error;
+      }
+    };
+    for (let attempt = 1; ; attempt += 1) {
+      const head = logHead();
+      let shown: boolean;
+      try {
+        await copy.sync(signal);
+        shown = await visible();
+      } catch (error) {
+        if (error instanceof RelayError || signal.aborted) throw error;
+        return await answered(notSent);
+      }
+      await input.authorize();
+      // Nothing is awaited from this check to the commit.
+      if (logHead() === head) {
+        if (!shown) return await answered(missingWake);
+        const retried = storage.retryChatWake({ accountId, workspaceId, operationId, wakeId, nowMs: input.nowMs() });
+        if (retried.kind === "retried") return await answered({ ok: true, wake: retried.wake });
+        if (retried.kind === "missing") return await answered(missingWake);
+        return await answered({ ok: false, refusal: "refused", reason: retried.kind === "too-old" ? TOO_OLD : COULD_NOT_SEND });
+      }
+      if (attempt === 2) return await answered(notSent);
     }
-    await input.authorize();
-    const retried = storage.retryChatWake({ accountId, workspaceId, operationId, wakeId, nowMs: input.nowMs() });
-    if (retried.kind === "retried") return await answered({ ok: true, wake: retried.wake });
-    if (retried.kind === "missing") return await answered(missingWake);
-    return await answered({ ok: false, refusal: "refused", reason: retried.kind === "too-old" ? TOO_OLD : COULD_NOT_SEND });
   });
 }
 

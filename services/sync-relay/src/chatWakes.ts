@@ -47,9 +47,12 @@ export interface WakeSources {
   opening(threadId: string): Promise<ChatMessage | null>;
   /** The agent of an agent's DM, or null for any other channel. */
   dmAgent(channelId: string): Promise<string | null>;
-  /** The newest message `pick` keeps in any of the channel's threads, replies included, across its whole history. */
-  latest(channelId: string, pick: (message: ChatMessage) => boolean): Promise<ChatMessage | null>;
+  /** The newest message `pick` keeps in the channel's threads, replies included, within a bounded read. */
+  latest(channelId: string, pick: (message: ChatMessage) => boolean): Promise<DmSource>;
 }
+
+/** A DM's newest source, and whether the bounded read could rule out a newer one. */
+export type DmSource = { message: ChatMessage | null; complete: boolean };
 
 type AgentMessage = ChatMessage & { authorAgentId: string };
 
@@ -58,26 +61,32 @@ const accountAgent = (accountId: string) => (message: ChatMessage | null | undef
   message?.author.kind === "agent" && message.authorUserId === accountId && typeof message.authorAgentId === "string" && message.authorAgentId !== "";
 
 // The agent messages a write answers: its DM's agent, the parent it replies under or else the post or file thread's
-// opening, and the question it answers. A Group's running conversation has no opening that answers.
-async function answeredMessages(sources: WakeSources, accountId: string, write: Exclude<WriteCommand, { kind: "react" }>): Promise<AgentMessage[]> {
+// opening, and the question it answers. A Group's running conversation has no opening that answers. `unread`: the
+// DM's bounded read ran out before it found its agent's message.
+async function answeredMessages(sources: WakeSources, accountId: string, write: Exclude<WriteCommand, { kind: "react" }>):
+  Promise<{ messages: AgentMessage[]; unread: boolean }> {
   const ours = accountAgent(accountId);
   const found: Array<ChatMessage | null | undefined> = [];
+  let unread = false;
   const dm = async (channelId: string) => {
     const agentId = await sources.dmAgent(channelId);
-    if (agentId !== null) found.push(await sources.latest(channelId, (message) => ours(message) && message.authorAgentId === agentId));
+    if (agentId === null) return;
+    const source = await sources.latest(channelId, (message) => ours(message) && message.authorAgentId === agentId);
+    found.push(source.message);
+    if (source.message === null && !source.complete) unread = true;
   };
   if (write.kind === "start") {
     if (write.lane === "chat") await dm(write.channelId);
-    return found.filter(ours);
+    return { messages: found.filter(ours), unread };
   }
   const thread = await sources.thread(write.threadId);
-  if (thread === null) return [];
+  if (thread === null) return { messages: [], unread };
   if (thread.channelId !== undefined) await dm(thread.channelId);
   const parent = write.parentMessageId === undefined ? null : await sources.message(write.parentMessageId);
   if (ours(parent)) found.push(parent);
   else if (thread.lane !== "chat") found.push(await sources.opening(write.threadId));
   if (write.kind === "answer") found.push(await sources.message(write.questionId));
-  return found.filter(ours);
+  return { messages: found.filter(ours), unread };
 }
 
 const candidateOf = (runner: ChatRunner, matched: ChatWakeCandidate["matched"]): ChatWakeCandidate =>
@@ -91,7 +100,9 @@ const agentKey = (agentId: string, displayName: string) => JSON.stringify([agent
  * have is one target, with every computer whose agent has it as a candidate.
  * An agent the write answers is a target only when exactly one enabled agent
  * matches its ID and name; one already in a mention target, or a repeat, adds
- * nothing. A reaction, or an account with no enabled agents, wakes nothing.
+ * nothing. A DM whose agent's message the bounded read didn't reach freezes no
+ * implicit target and is unmatched. A reaction, or an account with no
+ * enabled agents, wakes nothing.
  * Throws TooManyWakeCandidates past MAX_WAKE_CANDIDATES, rather than wake some.
  */
 export async function resolveWakeTargets(sources: WakeSources, accountId: string, write: WriteCommand): Promise<FrozenWakes> {
@@ -106,8 +117,11 @@ export async function resolveWakeTargets(sources: WakeSources, accountId: string
   }
   const mentioned = new Set(mentions.flatMap((target) => target.candidates.map(pair)));
   const implicit = new Map<string, ChatWakeTarget>();
-  let unmatched = false;
-  for (const message of await answeredMessages(sources, accountId, write)) {
+  const answered = await answeredMessages(sources, accountId, write);
+  // A long DM whose agent the bounded read didn't reach wakes no one, and isn't refused: the phone offers the mention
+  // hint, as for an agent that matched no computer.
+  let unmatched = answered.unread;
+  for (const message of answered.messages) {
     const name = shownName(message.author.displayName);
     const matches = runners.filter((runner) => runner.agentId === message.authorAgentId && shownName(runner.displayName) === name);
     const [runner] = matches;

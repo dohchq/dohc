@@ -12,13 +12,14 @@ const agentMessage = (id: string, displayName: string): ChatMessage => ({
   id, workspaceId: "trip", threadId: "thread-1", author: { kind: "agent", displayName }, authorUserId: "ana", authorAgentId: "default",
   body: "Done.", createdAtMs: 1, attachments: [],
 });
-const sources = (runners: ChatRunner[], messages: ChatMessage[] = []): WakeSources => ({
+const sources = (runners: ChatRunner[], messages: ChatMessage[] = [], dm: Pick<WakeSources, "dmAgent" | "latest"> = {
+  dmAgent: async () => null, latest: async () => ({ message: null, complete: true }),
+}): WakeSources => ({
   runners,
   message: async (messageId) => messages.find((message) => message.id === messageId) ?? null,
   thread: async (threadId) => ({ id: threadId, workspaceId: "trip", title: "Post", createdAtMs: 1, updatedAtMs: 1, lane: "posts", channelId: "group" }),
   opening: async () => null,
-  dmAgent: async () => null,
-  latest: async () => null,
+  ...dm,
 });
 const reply = (body: string, parentMessageId?: string): WriteCommand =>
   ({ kind: "reply", threadId: "thread-1", messageId: "reply-1", body, ...(parentMessageId === undefined ? {} : { parentMessageId }) });
@@ -45,4 +46,12 @@ it("keeps every target up to its candidate limit, and refuses a message past it"
   expect((await resolveWakeTargets(sources(both), "ana", reply(body(half)))).targets.flatMap((target) => target.candidates))
     .toHaveLength(MAX_WAKE_CANDIDATES);
   await expect(resolveWakeTargets(sources(both), "ana", reply(body(half + 1)))).rejects.toBeInstanceOf(TooManyWakeCandidates);
+});
+
+it("wakes no one in a DM whose agent the bounded read didn't reach, without refusing, and keeps the hint", async () => {
+  const runners = [runner("mac", "default", "Claude", "claude")];
+  const send: WriteCommand = { kind: "start", lane: "chat", channelId: "dm", threadId: "thread-dm", messageId: "message-1", body: "Still there?" };
+  const dm = (complete: boolean): Pick<WakeSources, "dmAgent" | "latest"> => ({ dmAgent: async () => "default", latest: async () => ({ message: null, complete }) });
+  expect(await resolveWakeTargets(sources(runners, [], dm(false)), "ana", send)).toEqual({ targets: [], unmatched: true });
+  expect(await resolveWakeTargets(sources(runners, [], dm(true)), "ana", send)).toEqual({ targets: [], unmatched: false });
 });
