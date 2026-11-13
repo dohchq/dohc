@@ -33,6 +33,7 @@ import {
   SaveChatBookmarkResult,
   ArchiveChatBookmarkResult,
 } from "./bridgeContract";
+import { chatFileLinkScope } from "../workspaces/chatFileLinkScope";
 import { registerOperations, type OperationHandlers } from "./operationTable";
 import { ipcWireError } from "./errorWords";
 import { listFileChatsForIpc } from "./fileChatsIpc";
@@ -734,11 +735,19 @@ export function registerChatsIpcHandlers<
       }
       operation.assertCurrent();
     }
+    // What each Group's messages may link, read from the same shares the send checks.
+    const shares =
+      kind === "workspace"
+        ? { sharedChannels: workspace.sharedChannels, shareRoster: workspace.shareRoster }
+        : null;
     return ListChatChannelsResult.parse({
       ...(rowsUncovered > 0 ? { sharedChannelRowsUncovered: rowsUncovered } : {}),
       channels: channels.map((channel) => ({
         ...chatChannelForIpc(channel),
         wireId: wireIds.get(channel.id) ?? null,
+        ...(shares
+          ? { fileLinks: chatFileLinkScope(shares, channel, wireIds.get(channel.id) ?? null) }
+          : {}),
       })),
       fileThreads: fileThreads.map((thread) => ({
         ...chatThreadForIpc(thread),

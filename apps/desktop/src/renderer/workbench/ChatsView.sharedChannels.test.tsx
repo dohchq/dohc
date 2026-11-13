@@ -2,6 +2,7 @@
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
+import type { ChatChannelRecord } from "../../ipc/bridgeContract";
 import {
   channel,
   thread,
@@ -9,6 +10,7 @@ import {
   bridgeMock,
   shareListing,
   emitCloudSessionChanged,
+  emitWorkspaceActivity,
   renderView,
   navigatorView,
   mentionRoster,
@@ -597,7 +599,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
       "You left this group. You can still read it.",
     );
   });
-  it("offers a joined Group's mounted files by the Group's paths, and every file in a Group not shared", async () => {
+  it("offers the files a Group's messages may link: a joined Group's mount by its paths, a shared Group's folder, and every file otherwise", async () => {
     // This workspace's own team/ folder is not the Group's. The Group's files
     // are its share's mount, which the Group's messages name by the owner's paths.
     const workspaceFiles = [
@@ -606,18 +608,21 @@ describe("ChatsView shared channels (MU-C4)", () => {
       { path: "shared-with-me/owner/team/plan.md", kind: "file" as const },
     ];
     const shareMounts = [{ shareId: "share-in", label: "owner" }];
-    bridgeMock.listChatChannels.mockResolvedValue({
-      channels: [
-        channel({
-          id: "channel-team",
-          name: "team",
-          slug: "team",
-          wireId: "wire-team",
-          folderPath: "team",
-        }),
-      ],
-      fileThreads: [],
-    });
+    const listTeam = (fileLinks: ChatChannelRecord["fileLinks"]) =>
+      bridgeMock.listChatChannels.mockResolvedValue({
+        channels: [
+          channel({
+            id: "channel-team",
+            name: "team",
+            slug: "team",
+            wireId: "wire-team",
+            folderPath: "team",
+            fileLinks,
+          }),
+        ],
+        fileThreads: [],
+      });
+    listTeam({ kind: "shared", shares: [["team"]] });
     bridgeMock.listChatChannelShares.mockResolvedValue(
       shareListing({
         joined: [
@@ -631,12 +636,14 @@ describe("ChatsView shared channels (MU-C4)", () => {
         ],
       }),
     );
+    const options = () =>
+      screen
+        .queryAllByTestId("chats-new-thread-file-mention-option")
+        .map((option) => option.getAttribute("data-path"));
     const offered = async () => {
       await userEvent.type(await screen.findByTestId("chats-new-thread-composer"), "@");
       await screen.findByTestId("chats-new-thread-mention-menu");
-      return screen
-        .queryAllByTestId("chats-new-thread-file-mention-option")
-        .map((option) => option.getAttribute("data-path"));
+      return options();
     };
     renderView(vi.fn(), vi.fn(), { workspaceFiles, shareMounts });
     await userEvent.click(await screen.findByTestId("chats-channel"));
@@ -652,6 +659,10 @@ describe("ChatsView shared channels (MU-C4)", () => {
     expect(await offered()).toEqual([]);
     cleanup();
 
+    // A Group of this workspace's offers every file until a share covers it.
+    // Once a listing of its shares says a link shares it, the open composer
+    // offers only its folder. The relay's grant listing names nobody for a link.
+    listTeam({ kind: "any" });
     bridgeMock.listChatChannelShares.mockResolvedValue(shareListing());
     renderView(vi.fn(), vi.fn(), { workspaceFiles });
     await userEvent.click(await screen.findByTestId("chats-channel"));
@@ -660,5 +671,8 @@ describe("ChatsView shared channels (MU-C4)", () => {
       "shared-with-me/owner/team/plan.md",
       "team/mine.md",
     ]);
+    listTeam({ kind: "shared", shares: [["team"]] });
+    act(() => emitWorkspaceActivity());
+    await waitFor(() => expect(options()).toEqual(["team/mine.md"]));
   });
 });

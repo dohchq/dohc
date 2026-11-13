@@ -2886,6 +2886,20 @@ export type ChatReactionRecord = z.infer<typeof ChatReactionRecord>;
 // rail: every handler needs the workspace's engine capture.
 const CHAT_CHANNEL_NAME_MAX = 80;
 
+// Which files a message in a chat may link: any, none, or only files inside
+// every one of the Group's shares. Each entry is one share's folders, and a
+// share that serves no file has none. The send refuses what this refuses, and
+// the composer offers only what it covers.
+export const ChatFileLinkScope = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("any") }),
+  z.object({ kind: z.literal("none") }),
+  z.object({
+    kind: z.literal("shared"),
+    shares: z.array(z.array(PATH_STRING).max(100)).min(1).max(1000),
+  }),
+]);
+export type ChatFileLinkScope = z.infer<typeof ChatFileLinkScope>;
+
 export const ChatChannelRecord = z.object({
   id: OPAQUE_ID,
   name: z.string().min(1).max(CHAT_CHANNEL_NAME_MAX),
@@ -2904,6 +2918,9 @@ export const ChatChannelRecord = z.object({
   // The channel's cross-machine wire identity — what shared-channel
   // grants key on. Absent/null for channels with no recorded wire mapping.
   wireId: z.string().min(1).max(256).nullable().optional(),
+  // What its messages may link, as the send reads it. The channel list always
+  // sets it; a record built elsewhere may omit it.
+  fileLinks: ChatFileLinkScope.optional(),
 });
 export type ChatChannelRecord = z.infer<typeof ChatChannelRecord>;
 

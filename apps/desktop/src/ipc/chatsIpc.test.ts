@@ -2342,6 +2342,62 @@ describe("registered chat channel and read-state boundaries", () => {
   );
 });
 
+it("tells a Group's composer which files its messages may link, by the shares its send checks", async () => {
+  const h = fixture();
+  h.storeMethods.listChannels.mockResolvedValue([
+    {
+      id: "channel",
+      workspaceId: "workspace",
+      name: "Trip",
+      slug: "trip",
+      kind: "channel",
+      type: "posts",
+      purpose: "",
+      createdAtMs: 1,
+      updatedAtMs: 1,
+      threadCount: 0,
+      unreadCount: 0,
+    },
+  ]);
+  const list = () =>
+    h.invoke(chatOperations.listChatChannels.channel, { workspaceId: "workspace" });
+  await expect(list()).resolves.toMatchObject({
+    channels: [{ id: "channel", fileLinks: { kind: "any" } }],
+  });
+  // Only a link shares the Group, so the relay's grant listing names nobody.
+  h.workspace.shareRoster = {
+    grants: [],
+    links: [
+      {
+        grant: {
+          granterUserId: "user-1",
+          granterEmail: null,
+          subjectName: null,
+          sharerName: null,
+          shareId: "share-trip",
+          grantId: "grant-link",
+          generation: 1,
+          status: "active",
+          recipientUserId: null,
+          recipientEmail: null,
+          selector: { kind: "group", channelWireId: "wire", paths: ["Trip"], versionId: null },
+          access: "read-write",
+          fileScope: "served",
+        },
+        ended: false,
+        automationsGeneration: null,
+      },
+    ],
+    formerGrants: [],
+    endedGrants: [],
+    version: 1,
+    listedAtMs: 1,
+  };
+  await expect(list()).resolves.toMatchObject({
+    channels: [{ id: "channel", fileLinks: { kind: "shared", shares: [["Trip"]] } }],
+  });
+});
+
 it("IPC, CLI and MCP share Links, cursors, omissions and conversation admission", async () => {
   const h = fixture(),
     root = createTestScratchSync("chat-links-doors-");
