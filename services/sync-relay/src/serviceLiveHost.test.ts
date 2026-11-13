@@ -6957,6 +6957,50 @@ it("pushes a live document's settled edit on the next pass while another documen
   ).toBeGreaterThanOrEqual(pulled + 2);
 });
 
+// An activation whose drain runs past every pass deadline fails each time it runs, as one does on an engine whose owner
+// reads stop answering. Each owner state or outbox read opens the engine's store again. The activation tries again once
+// its back-off has passed, within one poll of it, and sends none of those reads while it waits.
+it("retries an activation that keeps running past its pass deadline only after each back-off", async () => {
+  const paced = pacedPasses(),
+    o = await emptyServiceHost({ paced, limits: { passDeadlineMs: 50 } as DrainLimits });
+  // The back-off reads the wall clock, which moves with the host's clock here.
+  const startedAt = Date.now();
+  vi.spyOn(Date, "now").mockImplementation(() => startedAt + paced.clock.nowMs());
+  vi.mocked(ServiceActivationDriver.prototype.activate).mockRestore();
+  vi.mocked(ServiceActivationDriver.prototype.loaded).mockRestore();
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const engine = o.client().sendRequest,
+    answer = engine.getMockImplementation()!,
+    reads: number[] = [];
+  engine.mockImplementation(async (...args: unknown[]) => {
+    const [request, signal] = args as [{ method: string }, AbortSignal | undefined];
+    if (
+      request.method !== "liveApplication.ownerState" &&
+      request.method !== "ydoc.ownerOutbox.readPending"
+    )
+      return answer(...(args as Parameters<typeof answer>));
+    reads.push(paced.clock.nowMs());
+    return new Promise<never>((_resolve, reject) =>
+      signal!.addEventListener("abort", () => reject(signal!.reason), { once: true }),
+    );
+  });
+  await o.host.update({ workspaces: [o.workspace], documents: [o.sibling], ...stay });
+  await vi.waitFor(() => expect(reads).toHaveLength(1));
+  const passes = await paced.over(o.f, 32_000);
+  console.info(
+    `Activation past its pass deadline, 32 s: ${passes} passes, ${reads.length} owner reads`,
+  );
+  // The first retry is the next pass, then each wait doubles from a second.
+  const gaps = reads.slice(1).map((at, index) => at - reads[index]!);
+  expect(gaps.length).toBeGreaterThanOrEqual(5);
+  expect(gaps.length).toBeLessThanOrEqual(6);
+  gaps.slice(1).forEach((gap, index) => {
+    expect(gap).toBeGreaterThanOrEqual(1000 * 2 ** index);
+    expect(gap).toBeLessThanOrEqual(1000 * 2 ** index + paced.poll);
+  });
+  expect(o.host.isDocumentReady(o.document)).toBe(false);
+});
+
 // A pull after a departure is not its replica's chance to retire it when the
 // pull's departed list stops short of it. Proves: while the relay rotates its
 // pages, as the self-hosted relay does with a sibling keeping the workspace

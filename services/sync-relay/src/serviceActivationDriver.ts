@@ -1365,9 +1365,9 @@ export class ServiceActivationDriver {
       owner = this.#owners.get(JSON.stringify(document));
       if (owner) return fenced;
     }
+    // A failed activation waits before it captures or drains again. A document already live keeps draining on every pass.
+    if (!owner?.completed && this.#waiting(key)) return backingOff;
     if (!owner) {
-      // Waiting applies to capturing: a document already live keeps draining on every pass.
-      if (this.#waiting(key)) return backingOff;
       let update = this.#latestUpdate(target);
       if (catchUp || !saved) {
         let pulling = catchUp?.get(target.workspaceId);
