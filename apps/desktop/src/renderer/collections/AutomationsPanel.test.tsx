@@ -12,6 +12,7 @@ import type {
   ListAutomationPeopleResult,
   ListAutomationTargetsResult,
   RetryCollectionAutomationResult,
+  ScheduleHostComputer,
   ScheduleHostResult,
   UndoCollectionAutomationRunResult,
   WriteCollectionAutomationsPayload,
@@ -367,6 +368,61 @@ describe("the builder's triggers", () => {
       do: draft.do,
     });
   }, 30_000);
+});
+
+
+describe("a schedule's next run", () => {
+  const NOW = Date.UTC(2026, 8, 25, 10);
+  const daily: Automation = {
+    ...stamp,
+    id: "report",
+    name: "Morning report",
+    when: { kind: "schedule", every: "day", at: "09:00", timezone: "UTC" },
+    do: [{ kind: "add-record", values: [], collection: null, as: null, operation: null }],
+  };
+  const localTime = (ms: number) => new Intl.DateTimeFormat(undefined, {
+    weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+  }).format(ms);
+  const tomorrow = `Next run ${localTime(Date.UTC(2026, 8, 26, 9))}`;
+  const computers = [
+    { installId: "me", kind: "computer", label: "DESKTOP-1", lastSeenMs: NOW, thisComputer: true },
+    { installId: "laptop", kind: "computer", label: "Ice's laptop", lastSeenMs: NOW - 86_400_000, thisComputer: false },
+  ] satisfies ScheduleHostComputer[];
+  const relay = (hostInstallId: string | null, handoverFrom: string | null = null, listed: ScheduleHostComputer[] = computers): ScheduleHostResult =>
+    ({ kind: "relay", generation: 3, hostInstallId, handoverFrom, computers: listed });
+
+  // Only Date is fake: the panel's timer and the test's waits run on real time.
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("reports a failed read with Try again, and drops an answer for a workspace it left", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: NOW });
+    const { bridge } = makeBridge(read([summary(daily)]));
+    const onError = vi.fn();
+    bridge.readScheduleHost.mockRejectedValueOnce(new Error("dohc could not reach the relay."));
+    const { rerender } = render(<Panel onError={onError} />);
+    await waitFor(() => expect(onError).toHaveBeenCalledWith(
+      "dohc could not read which computer runs schedules.", expect.any(Error), expect.any(Function),
+    ));
+    expect(screen.getByText(tomorrow)).toBeTruthy();
+    const tryAgain = onError.mock.calls[0]?.[2] as () => void;
+    bridge.readScheduleHost.mockResolvedValueOnce(relay("laptop"));
+    act(() => tryAgain());
+    expect(await screen.findByText(`${tomorrow} on Ice's laptop`)).toBeTruthy();
+
+    // ws-1's answer comes after the panel moved to ws-2: it never shows there.
+    let answer: (result: ScheduleHostResult) => void = () => undefined;
+    bridge.readScheduleHost.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+    act(() => tryAgain());
+    rerender(<Panel workspaceId="ws-2" onError={onError} />);
+    await waitFor(() => expect(bridge.readScheduleHost).toHaveBeenCalledWith({ workspaceId: "ws-2" }));
+    await act(async () => answer(relay(null)));
+    expect(await screen.findByText(tomorrow)).toBeTruthy();
+    expect(screen.queryByText("No computer runs this workspace's schedules.")).toBeNull();
+    expect(screen.queryByText(/on Ice's laptop/)).toBeNull();
+  });
+
 });
 
 describe("the builder's steps in other Collections", () => {

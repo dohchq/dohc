@@ -178,6 +178,29 @@ describe("readRelayChatShareLanes", () => {
   }
 
   for (const lane of ["received"] as const) {
+
+  it("reports a chat row with unreadable access as unreachable", async () => {
+    const lanes = await readRelayChatShareLanes({
+      shareIdsClaimedElsewhere: new Set<string>(),
+      fetchListing: () =>
+        Promise.resolve({
+          granted: [
+            {
+              shareId: "share-corrupt",
+              workspaceId: "workspace-1",
+              recipientEmail: "ana@example.com",
+              revokedAtMs: null,
+              selector: { kind: "chat", channelWireId: "wire-corrupt" },
+              access: "edit",
+            },
+          ],
+        }),
+      workspaceId: "workspace-1",
+    });
+
+    expect(lanes).toEqual({ state: "unreachable" });
+  });
+
     it(`reports an over-cap ${lane} lane as over-limit, so cached rows survive and the surface can name it`, async () => {
       const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
       try {
@@ -328,6 +351,11 @@ describe("readRelayChatShareLanes", () => {
 // The session key scopes the renderer's cached relay rows to one account, so
 // preservation through an outage can never keep another account's rows.
 describe("chatShareSessionKey", () => {
+
+  it("answers null without a session", () => {
+    expect(chatShareSessionKey(null)).toBeNull();
+  });
+
   it("differs across users, servers, and relays", () => {
     const key = chatShareSessionKey({
       serverUrl: "https://cloud.dohc.test",

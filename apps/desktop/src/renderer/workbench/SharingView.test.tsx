@@ -363,6 +363,21 @@ describe("copying a share's code or invitation", () => {
     ]));
   });
 
+
+  it("reads the list again for a share that ended since, and reports nothing to fix", async () => {
+    answerWith({ granted: answer("granted", { rows: ROWS }) });
+    bridgeMock.getShareCopyDetails.mockResolvedValue({ status: "ended" });
+    render(<CopyView />);
+    const named = await rowOf("share-1");
+    const reads = bridgeMock.listSharingAccess.mock.calls.length;
+    fireEvent.click(within(named).getByRole("button", { name: "Copy code" }));
+    await waitFor(() => expect(bridgeMock.listSharingAccess.mock.calls.length).toBeGreaterThan(reads));
+    expect(bridgeMock.listSharingAccess).toHaveBeenLastCalledWith({ workspaceId: "workspace-a", lane: "granted" });
+    expect(bridgeMock.requestAccessRefresh).toHaveBeenCalledTimes(2);
+    expect(writeText).not.toHaveBeenCalled();
+    expect(reportFailure).not.toHaveBeenCalled();
+  });
+
   it("opens on the row Settings search found, focused, then lets go of the request", async () => {
     answerWith({ granted: answer("granted", { rows: ROWS }) });
     render(<CopyView focus={{ lane: "granted", shareId: "share-dep" }} />);

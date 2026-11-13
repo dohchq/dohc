@@ -231,6 +231,36 @@ describe("markdown editor unmount flush", () => {
     expect(reopenedSource.value).toBe(rawSource);
   });
 
+
+  it("offers a read-only source view for read-only markdown (truncated reads)", async () => {
+    // codex P3 follow-up: a read-only doc can't edit, but viewing raw source
+    // is still a view. The palette toggle opens the read-only source editor and
+    // never writes.
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "# Big\n",
+      truncated: true,
+      contentHash: null,
+    });
+    let registered: (() => void) | null = null;
+    render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="large.md"
+        registerSourceToggle={(toggle) => {
+          registered = toggle;
+        }}
+      />,
+    );
+    await screen.findByTestId("view-markdown");
+    await toggleSourceOnce(() => registered);
+    const textarea = await findSourceEditor();
+    expect(textarea.readOnly).toBe(true);
+    expect(textarea.value).toContain("# Big");
+    await toggleSourceOnce(() => registered);
+    await screen.findByTestId("view-markdown");
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+  });
+
   it("writes a list property still being typed and a pending body edit when the editor goes", async () => {
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "---\nid: note-1\ntitle: Plan\ntags:\n  - kyoto\n---\n\n# Plan\n",

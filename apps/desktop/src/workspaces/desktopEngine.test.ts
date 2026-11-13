@@ -962,4 +962,48 @@ describe("server owner peer lifecycle", () => {
       expect(f.engine.ownerLiveQuarantines("owner")).toHaveLength(3);
     } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset();}
   });
+  describe("a move's owner catch-up", () => {
+    const bindingOf = (path: string, objectId: string) => ({workspaceId: "owner", mainVersionId: "main", objectId, lineageClaimId: "a".repeat(64),
+      currentPath: path, selectorPaths: [path], restoreFenceGeneration: 1});
+    const ready = (path: string, objectId: string) =>
+      ({path, objectId, status: "ready", document: {binding: bindingOf(path, objectId), relayDatabaseNamespace: "namespace"}});
+    const observed = () => ownerDeliveryMock.pass.mock.calls.filter(([options]) => options.observedOnly === true)
+      .map(([options]) => options.document.binding.objectId as string);
+    async function owner(rows: () => unknown[]) {
+      const f = fixture(), credentials = new AbortController();
+      Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));
+      const rootPath = await createTestScratch("dohc-owner-catch-up-");
+      f.rows.set("owner", {workspaceId: "owner", rootPath, kind: "personal", mode: "local-first"});
+      const config = {nativeConfigPath: "native-config", nativeClient: {aggregateBytes: 100_000_000, maxUploads: 2},
+        frames: {receive: {maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096},
+          maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096},
+        attemptTimeoutMs: 30_000, retryDelayMs: 10_000};
+      f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => ["owner"], hasRefusals: () => undefined,
+        connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal, assertCurrent() {},
+          retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, keptEditsPage: unexpectedKeptEdits, open: unexpectedOpen,
+          documents: async () => ({ok: true, documents: rows()})})};
+      expect(await f.engine.start()).toBe(true);
+      await vi.waitFor(() => expect(f.engine.liveDocumentPaths("owner")).toBeDefined());
+      return {f, credentials};
+    }
+
+    it.each(["session", "quitting", "restart"])("answers false when the %s ends during the owner sync", async ending => {
+      const held = deferred<string>();
+      ownerDeliveryMock.pass.mockImplementation(async options => options.observedOnly ? held.promise : "empty");
+      const {f, credentials} = await owner(() => [ready("a.md", "a"), ready("b.md", "b")]);
+      try {
+        const answer = f.engine.ownerCatchUp("owner", ["a", "b"], new AbortController().signal);
+        await vi.waitFor(() => expect(observed()).toEqual(["a"]));
+        if (ending === "session") credentials.abort();
+        if (ending === "quitting") f.setQuitting(true);
+        const restarting = ending === "restart" ? f.engine.closeAllRelayTransportWorkspaces() : undefined;
+        held.resolve("acknowledged");
+        await restarting;
+        expect(await answer).toBe(false);
+        expect(observed()).toEqual(["a"]);
+      } finally {await f.close(); ownerDeliveryMock.pass.mockReset();}
+    });
+
+  });
+
 });

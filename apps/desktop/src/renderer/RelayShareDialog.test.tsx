@@ -1022,6 +1022,42 @@ codex mcp login dohc-share`);
   });
 
 
+
+  it("clears an open confirmation when an accepted post-create refresh removes its link", async () => {
+    const row = readableLink("grant-link-1", { shareId: "share-link-1" });
+    const refresh = controllable<{ links: LinkRow[] }>();
+    bridgeMock.listRelayShareLinks
+      .mockResolvedValueOnce({ links: [row] })
+      .mockReturnValueOnce(refresh.promise);
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+
+    const linkRow = await screen.findByTestId("share-link-row-grant-link-1");
+    await openSeparateLink(user);
+    await user.click(screen.getByTestId("share-link-create"));
+    await vi.waitFor(() => {
+      expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2);
+    });
+    await chooseLinkOption(user, linkRow, "Reset link");
+    expect(screen.getByTestId("share-link-confirmation")).toBeTruthy();
+
+    await act(async () => {
+      refresh.resolve({ links: [] });
+    });
+
+    expect(screen.queryByTestId("share-link-confirmation")).toBeNull();
+    expect(screen.getByTestId("share-link-create").hasAttribute("disabled")).toBe(
+      false,
+    );
+  });
+
   it("keeps B busy when a lifecycle success from A arrives late", async () => {
     const resetA = controllable<{ outcome: "rotated"; url: string }>();
     const endB = controllable<{ outcome: "ended"; undo: typeof UNDO }>();

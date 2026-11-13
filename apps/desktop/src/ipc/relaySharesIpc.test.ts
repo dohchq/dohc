@@ -419,6 +419,21 @@ describe("registered owner restore handler", () => {
 
 describe("registered relay share handlers", () => {
 
+
+  it.each([
+    {ok: true, access: "view"},
+    {ok: true, access: "edit", url: "https://relay.example/new"},
+    {ok: true, access: "comment", url: "not a URL"},
+    {ok: true, access: "comment", url: null},
+    {ok: false, access: "comment", url: "https://relay.example/new"},
+  ])("rejects a malformed or mismatched retune response %j", async response => {
+    const h = harness();
+    h.request.mockResolvedValue({kind: "success", body: response});
+    await expect(h.invoke(relayShareOperations.retuneRelayShareLink.channel, {
+      workspaceId, shareId: "share", grantId: "grant", expectedDependentGrantIds: [], access: "comment",
+    })).rejects.toThrow("sharing failed (500)");
+  });
+
   it("registers only this family and authenticates every channel before parsing or work", async () => {
     const h = harness();
     expect([...h.handlers.keys()]).toEqual([
@@ -463,6 +478,34 @@ describe("registered relay share handlers", () => {
     expect(h.request).not.toHaveBeenCalled();
     expect(h.accountRequest).not.toHaveBeenCalled();
     expect(h.polls.activeCount()).toBe(0);
+  });
+
+
+  it.each([
+    [relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId}],
+    [relayShareOperations.stopOwnerLiveDocument.channel, {workspaceId, path: "live.md"}],
+    [relayShareOperations.resumeOwnerLiveDocument.channel, {workspaceId, path: "live.md"}],
+    [relayShareOperations.createRelayShareLink.channel, linkInput],
+    [relayShareOperations.promoteRelayShareGrant.channel, {
+      workspaceId, shareId: "share", grantId: "grant", expectedParentGrantId: "parent",
+      expectedParentGeneration: 2,
+    }],
+    [relayShareOperations.pauseRelayShareDiscussion.channel, { workspaceId, shareId: "share" }],
+  ] as const)("checks currentness after the relay resolves for %s", async (channel, payload) => {
+    for (const invalidate of ["retireRenderer", "retirePhysical", "rotateCredentials"] as const) {
+      const h = harness();
+      const response = deferred<unknown>();
+      const started = deferred();
+      h.request.mockImplementation(() => { started.resolve(); return response.promise; });
+      const result = h.invoke(channel, payload);
+      await started.promise;
+      h[invalidate]();
+      const readResult = vi.fn(() => true);
+      response.resolve({ get ok() { return readResult(); } });
+      await expect(result).rejects.toThrow();
+      expect(readResult).not.toHaveBeenCalled();
+      expect(h.request).toHaveBeenCalledTimes(channel === relayShareOperations.listOwnerLiveDocuments.channel ? 2 : 1);
+    }
   });
 
   it("creates a link using the authorized workspace and credential snapshot", async () => {

@@ -1,3 +1,4 @@
+import { makeLink as mcpMakeLink } from "@dohc/mcp/tools";
 import { stageDeleteRecovery } from "../workspaces/workspaceDeleteRecovery";
 import { finishMoveRecovery } from "../workspaces/workspaceMoveRecovery";
 import { readWorkspaceHistoryOperation, undoWorkspaceHistoryOperation } from "../workspaces/workspaceHistoryOperations";
@@ -9,7 +10,7 @@ import { dirname, join } from "node:path";
 import { createApp, importData, replyToChat, writeWorkspaceFile, type ToolContext } from "../../../../packages/mcp/src/tools";
 import { createActorIssuer, deriveMomentActor, parseActorKey } from "@dohc/workspace-contracts/actor-identity";
 import { executeCli } from "@dohc/cli";
-import { CLI_PROTOCOL_VERSION, cliTransportResponseSchema, parseCliResult, type CliRequest, type CliResultByVerb, type CliTransportResponse, type CliVerb } from "@dohc/cli/protocol";
+import { CLI_PROTOCOL_VERSION, cliTransportResponseSchema, parseCliResult, type CliLinkTarget, type CliRequest, type CliResultByVerb, type CliTransportResponse, type CliVerb } from "@dohc/cli/protocol";
 import type { LinkedChatStore, VersionedTextMoment, VersionedTextMomentSummary } from "@dohc/workspace-contracts/engine";
 import { CHATS_METHOD, DaemonRefusalError, type Request } from "@dohc/workspace-engine-client";
 import { ChatsLoopbackEngine } from "@dohc/workspace-engine-client/testing";
@@ -850,6 +851,52 @@ describe("CLI socket server", () => {
     expect(object).toHaveBeenCalledOnce();
   });
 
+
+  it("links a Group, thread, message, and path through the CLI and MCP, and refuses a read-only workspace", async () => {
+    const made: unknown[] = [];
+    context.makeWorkReference = async target => {
+      if (target.kind === "documentCollection") throw new Error("not a Collection");
+      const path = target.kind === "file" && "path" in target ? target.path : undefined;
+      if (path === "missing.md") throw new Error("work-target-not-found");
+      if (path === "stopped.md") throw new Error("The workspace engine is not running.");
+      made.push(target);
+      return String(made.length).padStart(43, "R");
+    };
+    const started = await post({ actor: "agent", title: "Flights", body: "Book by Friday" });
+    const general = (await invoke("groups", { cwd: workspaceRoot, actor: "agent" })).groups.find(group => group.slug === "general")!;
+    const link = (target: CliLinkTarget) => invoke("link", { cwd: workspaceRoot, actor: "agent", target });
+    await expect(link({ kind: "group", group: "general" })).resolves.toEqual({
+      reference: "R".repeat(42) + "1", link: `@[work:${"R".repeat(42)}1]`, kind: "chat",
+    });
+    expect((await link({ kind: "thread", thread: started.threadId })).kind).toBe("thread");
+    expect((await link({ kind: "message", message: started.messageId })).kind).toBe("message");
+    await mkdir(join(workspaceRoot, "plans"), { recursive: true });
+    await writeFile(join(workspaceRoot, "plans", "trip.md"), "# Trip");
+    expect((await invoke("link", { cwd: join(workspaceRoot, "plans"), actor: "agent", target: { kind: "path", path: "trip.md" } })).kind).toBe("file");
+    // The CLI names chats by short ids; links name them by their engine ids.
+    expect(general.id).toBe("ch_1");
+    expect(made).toEqual([
+      { kind: "chat", channelId: expect.stringMatching(/^channel-/u) },
+      { kind: "thread", threadId: expect.stringMatching(/^thread-/u) },
+      { kind: "message", messageId: expect.stringMatching(/^message-/u) },
+      { kind: "file", path: "plans/trip.md" },
+    ]);
+    await expect(link({ kind: "message", message: "no-such-message" })).rejects.toThrow();
+    // Only a path the engine cannot find is missing; another failure says what it is.
+    await expect(link({ kind: "path", path: "missing.md" })).rejects.toThrow("dohc could not find missing.md");
+    await expect(link({ kind: "path", path: "stopped.md" })).rejects.toThrow("The workspace engine is not running.");
+    await expect(link({ kind: "path", path: "../outside.md" })).rejects.toThrow("path rejected (traversal)");
+
+    const ctx: ToolContext = { root: workspaceRoot, home: stateDir, request: value => invoke(value.verb, value.args) };
+    await expect(mcpMakeLink(ctx, { group: "general" })).resolves.toMatchObject({ kind: "chat", link: `@[work:${"R".repeat(42)}5]` });
+    await expect(mcpMakeLink(ctx, { group: "general", thread: started.threadId })).resolves.toEqual({
+      ok: false, reason: "Pass exactly one of group, thread, message, and path.",
+    });
+
+    context.readOnly = true; registryWorkspace.readOnly = true;
+    await expect(link({ kind: "group", group: "general" })).rejects.toThrow("This workspace is read-only. Make links in the owning workspace.");
+  });
+
   it("records once after a pending command settles and excludes concurrent and later request-id replays", async () => {
     const recordSuccess = vi.fn();
     serverOptions.recordSuccess = recordSuccess;
@@ -963,6 +1010,23 @@ describe("CLI socket server", () => {
     expect(await createApp(ctx, { appRoot: "partial" })).toEqual({
       ok: false, written: ["partial/index.html"], path: "partial/styles.css", reason: "Cannot write partial/styles.css: disk full. Free space.",
     });
+  });
+
+
+  it("duplicates through CLI with agent authority, request replay, and path floors", async () => {
+    const duplicateFile = vi.fn<NonNullable<CliWorkspaceContext["duplicateFile"]>>(async () => ({ok: true, path: "copy.md", materialized: true, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", undo: {available: true}}));
+    context.duplicateFile = duplicateFile;
+    const args = {cwd: workspaceRoot, actor: "agent" as const, path: "source.md", requestId: "duplicate-once"};
+    expect(await invoke("fileDuplicate", args)).toMatchObject({ok: true});
+    expect(await invoke("fileDuplicate", args)).toMatchObject({ok: true});
+    expect(duplicateFile).toHaveBeenCalledOnce();
+    expect(await executeCli({argv: ["file", "duplicate", "source.md", "--json"], cwd: workspaceRoot, request: request => invoke(request.verb, request.args)})).toMatchObject({exitCode: 0});
+    duplicateFile.mockClear();
+    expect(await invoke("fileDuplicate", {...args, actor: "human"})).toMatchObject({ok: false});
+    for (const path of ["../escape.md", ".env", ".dohc/private.md"]) expect(await invoke("fileDuplicate", {...args, path, requestId: path})).toMatchObject({ok: false});
+    context.readOnly = true;
+    expect(await invoke("fileDuplicate", {...args, requestId: "readonly"})).toMatchObject({ok: false});
+    expect(duplicateFile).not.toHaveBeenCalled();
   });
 
   it("undoes a move through socket, CLI and MCP with one compensation", async () => {
@@ -1439,6 +1503,90 @@ describe("CLI socket server", () => {
     });
   });
 
+
+  it("answers the automation verbs from the Automations panel's calls", async () => {
+    const AUTOMATION = "collection:object-tasks#stamp";
+    const trigger = { kind: "changed" as const, recordId: "rec_1", by: "agent" as const, sharedAuthor: null, depth: 1 };
+    const field = { kind: "field" as const, recordId: "rec_1", path: "tasks/one.md", field: "Done", before: null, after: "2026-09-27" };
+    const run = {
+      claimId: "atc_1", state: "failed" as const, error: "The record is open elsewhere.", createdAtMs: 1, updatedAtMs: 2,
+      trigger, definitionChanged: true, neverStarted: false, chainStopped: false, undoUnfinished: false, undone: false,
+    };
+    const retries: unknown[] = [];
+    const answers: Array<Awaited<ReturnType<NonNullable<CliWorkspaceContext["automations"]>["retry"]>>> = [
+      { status: "definition-changed", repeatsMessages: true },
+      { status: "queued", press: false },
+      {
+        status: "refused",
+        reason: "Only the computer this run failed on can try it again. The notice names that computer.",
+        notice: { title: 'Automation "Stamp" failed', body: "The record is open elsewhere. It ran on Laptop." },
+      },
+    ];
+    context.automations = {
+      automationIdAt: vi.fn(async (collectionPath: string, id: string) => (collectionPath === "tasks" ? `collection:object-tasks#${id}` : null)),
+      runs: vi.fn(async (_automationId: string, _before?: string) => ({
+        runs: [{ ...run, writes: [field, { kind: "created" as const, recordId: "rec_2", path: "tasks/two.md" }] }],
+        next: "1:atc_1",
+      })),
+      run: vi.fn(async (_automationId: string, claimId: string) =>
+        claimId === "atc_1" ? { ...run, findMs: 12, planMs: 0, writeMs: 30, writeCount: 1,
+          steps: [{ step: 2, writes: [field] }], failedStep: 3, startsOver: true } : null),
+      serverRuns: vi.fn(), serverRun: vi.fn(),
+      retry: vi.fn(async (input) => {
+        retries.push(input);
+        return answers.shift()!;
+      }),
+    };
+    const args = { cwd: workspaceRoot, actor: "agent" as const, collectionPath: "tasks", automation: "stamp" };
+
+    await expect(invoke("automationRuns", args)).resolves.toEqual({
+      ok: true,
+      runs: [{
+        run: "atc_1", state: "failed", error: "The record is open elsewhere.", createdAtMs: 1, updatedAtMs: 2,
+        trigger, definitionChanged: true, neverStarted: false, chainStopped: false, undone: false, changes: 2,
+      }],
+      next: "1:atc_1",
+    });
+    expect(context.automations!.runs).toHaveBeenCalledWith(AUTOMATION, undefined);
+    // The next page names where the last one ended.
+    await invoke("automationRuns", { ...args, page: "1:atc_1" });
+    expect(context.automations!.runs).toHaveBeenLastCalledWith(AUTOMATION, "1:atc_1");
+    await expect(invoke("automationRun", { ...args, run: "atc_1" })).resolves.toMatchObject({
+      ok: true,
+      run: { run: "atc_1", trigger, findMs: 12, planMs: 0, writeMs: 30, writeCount: 1,
+        steps: [{ step: 2, changes: [field] }], failedStep: 3, startsOver: true },
+    });
+    await expect(invoke("automationRun", { ...args, run: "atc_9" })).resolves.toEqual({
+      ok: false,
+      reason: "This computer has no run atc_9 of this automation. Each computer keeps the runs of the automations it ran.",
+    });
+
+    // A changed automation is refused until the caller confirms starting over.
+    const refused = await invoke("automationRetry", { ...args, run: "atc_1", startOver: false });
+    expect(refused).toMatchObject({ ok: false, status: "definition-changed", repeatsMessages: true });
+    expect("reason" in refused && refused.reason).toContain("This automation changed since the run failed.");
+    expect("reason" in refused && refused.reason).toContain("Posts, direct messages, and notices it already sent may be sent again.");
+    await expect(invoke("automationRetry", { ...args, run: "atc_1", startOver: true })).resolves.toEqual({ ok: true, status: "queued" });
+    expect(retries).toEqual([
+      { automationId: AUTOMATION, claimId: "atc_1", startOver: false },
+      { automationId: AUTOMATION, claimId: "atc_1", startOver: true },
+    ]);
+    // Another computer's run is refused with the notice that names that computer.
+    await expect(invoke("automationRetry", { ...args, run: "atc_1", startOver: false })).resolves.toEqual({
+      ok: false,
+      reason: "Only the computer this run failed on can try it again. The notice names that computer.",
+      notice: { title: 'Automation "Stamp" failed', body: "The record is open elsewhere. It ran on Laptop." },
+    });
+
+    await expect(invoke("automationRuns", { ...args, collectionPath: "../tasks" })).resolves.toMatchObject({ ok: false });
+    context.readOnly = true;
+    await expect(invoke("automationRetry", { ...args, run: "atc_1", startOver: true })).resolves.toEqual({
+      ok: false,
+      reason: "Run history is unavailable through shares. Each host keeps the runs it made.",
+    });
+    expect(retries).toHaveLength(3);
+  });
+
   it("presses a button through the press path and reports the run, asking before actions dohc cannot undo", async () => {
     const presses: Array<Parameters<NonNullable<CliWorkspaceContext["buttons"]>["press"]>[0]> = [];
     const actions = [{ name: "sendInvoice", label: "Send invoice" }];
@@ -1559,6 +1707,34 @@ describe("CLI socket server", () => {
     await expect(invoke("deleteRetainedCopies", {
       cwd: workspaceRoot, actor: "agent", copies: [{ id: 4, revision: 11 }], acceptLateWriteRisk: true,
     })).resolves.toEqual(unavailable);
+  });
+
+
+  it("says why sync stopped in the person's words, with the engine's detail", async () => {
+    const sentences = "Changes from another computer are waiting on the conflict in plan.md. They reached a limit, so dohc stopped receiving changes. Resolve the conflict to receive changes again.";
+    const detail = `DaemonRefusalError: conflict-wait-limit: ${sentences} (path plan.md, origin device-d seq 7, retained ops 1, retained bytes 536870912)`;
+    const failures = [{ cause: "unknown" as const, detail, sinceMs: 1, attempts: 2 }, null];
+    context.syncFailure = () => failures.shift() ?? null;
+    await expect(invoke("syncFailure", { cwd: workspaceRoot, actor: "agent" }))
+      .resolves.toEqual({ ok: true, syncFailure: { code: "conflict-wait-limit", message: sentences, detail } });
+    await expect(invoke("syncFailure", { cwd: workspaceRoot, actor: "agent" }))
+      .resolves.toEqual({ ok: true, syncFailure: null });
+    // Only the original workspace reads its sync, as with kept edits and
+    // History: a received share's folder, any folder in it, and a shared view.
+    const refused = { ok: false, reason: "Sync status is kept only in the original workspace. Open it to continue." };
+    const read = vi.fn(() => ({ cause: "unknown" as const, detail, sinceMs: 1, attempts: 2 }));
+    context.syncFailure = read;
+    await mkdir(join(workspaceRoot, "shared-with-me", "received", "notes"), { recursive: true });
+    for (const cwd of [join(workspaceRoot, "shared-with-me"), join(workspaceRoot, "shared-with-me", "received", "notes")]) {
+      await expect(invoke("syncFailure", { cwd, actor: "agent" })).resolves.toEqual(refused);
+    }
+    context.readOnly = true;
+    await expect(invoke("syncFailure", { cwd: workspaceRoot, actor: "agent" })).resolves.toEqual(refused);
+    context.readOnly = false;
+    expect(read).not.toHaveBeenCalled();
+    // The desktop's own check for a shared view's marker refuses too.
+    context.syncFailure = () => { throw new Error("This is a shared view — only the original workspace can be shared."); };
+    await expect(invoke("syncFailure", { cwd: workspaceRoot, actor: "agent" })).resolves.toMatchObject({ ok: false });
   });
 
   it("rebases MCP document and Collection paths from a subfolder and returns caller paths", async () => {
@@ -1841,6 +2017,31 @@ describe("CLI socket server", () => {
       exitCode: 1, stdout: "", stderr: "dohc: chats are not available in a read-only shared view\n",
     });
     expect(calls.writes).toBe(beforeReadOnly);
+  });
+
+
+  it("lets a local agent review, drop, and undo through the shared held operation", async () => {
+    const token = "a".repeat(64);
+    let waiting = true;
+    const calls: unknown[] = [];
+    context.heldNoteChange = async input => {
+      calls.push(input);
+      if (input.action === "drop") waiting = false;
+      if (input.action === "undo") waiting = true;
+      return {path: input.path, token, authors: [], held: waiting, historyMomentId: "history"};
+    };
+    const args = {cwd: workspaceRoot, actor: "agent" as const, path: "tracked.md"};
+    expect(await invoke("heldNoteChange", {...args, action: "review"})).toMatchObject({ok: true, held: true, token});
+    expect(await invoke("heldNoteChange", {...args, action: "drop", token})).toMatchObject({ok: true, held: false});
+    expect(await invoke("heldNoteChange", {...args, action: "undo", token})).toMatchObject({ok: true, held: true});
+    expect(calls.slice(1)).toEqual(["drop", "undo"].map(action => ({path: "tracked.md", action, token,
+      author: {kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local"}})));
+    expect(await invoke("heldNoteChange", {...args, actor: "human", action: "drop", token})).toMatchObject({ok: false});
+    expect(waiting).toBe(true);
+    context.readOnly = true;
+    registryWorkspace.readOnly = true;
+    await expect(invoke("heldNoteChange", {...args, action: "drop", token})).rejects.toThrow("read-only shared view");
+    expect(waiting).toBe(true);
   });
 
   it("answers a resent document edit with its first result", async () => {

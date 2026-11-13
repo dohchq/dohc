@@ -141,6 +141,7 @@
   "apps/desktop/src/performance/profilingHarness.test.ts": 3.3,
   "apps/desktop/src/preloadBundleConfig.test.ts": 1,
   "apps/desktop/src/preloadBundling.test.ts": 1,
+  "apps/desktop/src/preloadShareDirectWrites.test.ts": 3.4,
   "apps/desktop/src/process/loginShellPath.test.ts": 1.2,
   "apps/desktop/src/process/posixSpawn.test.ts": 1,
   "apps/desktop/src/process/stdioResilience.test.ts": 1,

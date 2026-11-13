@@ -2120,6 +2120,78 @@ describe("workspaceEngineCapture relay sync materialization", () => {
     await engine.stop();
   });
 
+
+  it("materializes protected writes and deletes before committing the relay cursor", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const loopback = new VersionedLoopbackEngine();
+    const engine = liveCapture(root, loopback);
+    loopback.seedSecretFile({
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path: ".env",
+      text: "ACCESS_TOKEN=protected\r\n",
+      origin: "sync",
+    });
+    const commitOrder: string[] = [];
+
+    await engine.runRelaySync(async (materializePage) =>
+      await deliverRelayPage(
+        materializePage,
+        {
+          fastForwardedPaths: [
+            {
+              versionId: "main",
+              path: ".env",
+              operation: "write" as const,
+              contentKind: "secret" as const,
+            },
+          ],
+        },
+        async () => {
+        expect(await readFile(join(root, ".env"), "utf8")).toBe(
+          "ACCESS_TOKEN=protected\r\n",
+        );
+        commitOrder.push("write");
+        },
+      ),
+    );
+
+    await loopback.sendRequest({
+      id: -3,
+      method: VERSIONED_METHOD.secretsDelete,
+      workspace: WORKSPACE_ID,
+      params: {
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: ".env",
+        origin: "sync",
+        momentId: "remote-secret-delete",
+      },
+    });
+    await engine.runRelaySync(async (materializePage) =>
+      await deliverRelayPage(
+        materializePage,
+        {
+          fastForwardedPaths: [
+            {
+              versionId: "main",
+              path: ".env",
+              operation: "delete" as const,
+              contentKind: "secret" as const,
+            },
+          ],
+        },
+        async () => {
+        expect(existsSync(join(root, ".env"))).toBe(false);
+        commitOrder.push("delete");
+        },
+      ),
+    );
+
+    expect(commitOrder).toEqual(["write", "delete"]);
+    await engine.stop();
+  });
+
   it("does not replay a protected write into a version entered after materialization failed", async () => {
     const { root, engine, draftId } = await protectedVersionFixture(
       "VALUE=main remote\n",

@@ -229,6 +229,21 @@ describe("SitePreviewPage", () => {
       bridgeMock.getSitePackage.mockResolvedValue(site);
     });
 
+
+    it("starts over in Restricted Mode when the person restricts the workspace again", async () => {
+      bridgeMock.getSitePackage.mockResolvedValue(packageApp);
+      bridgeMock.startSitePreview.mockResolvedValueOnce(answer("dev")).mockResolvedValueOnce(answer("static", 2));
+      render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+      await screen.findByTestId("site-preview-frame");
+      expect(starts()).toEqual(["dev"]);
+
+      trustChanged({ workspaceId: "ws-sites", trusted: false });
+
+      await screen.findByTestId("restricted-mode-state");
+      await waitFor(() => expect(starts()).toEqual(["dev", "static"]));
+      bridgeMock.getSitePackage.mockResolvedValue(site);
+    });
+
     it("holds Dev back while the read failed, and runs it once Try again reads trust", async () => {
       bridgeMock.getSitePackage.mockResolvedValue(packageApp);
       bridgeMock.readWorkspaceTrust.mockRejectedValueOnce(new Error("busy"));

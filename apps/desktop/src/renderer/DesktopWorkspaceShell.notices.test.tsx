@@ -1,4 +1,7 @@
 // @vitest-environment jsdom
+import type { SentNotices } from "./shell/useSentNotices";
+import type { NoticeTarget } from "../notices/noticeTarget";
+import { CollectionFieldWriteHost } from "./collections/recordFieldWrites";
 import { liveStopError } from "../ipc/liveEditingStop";
 import * as shellError from "./shell/useShellError";
 import "./DesktopWorkspaceShell.testSupport";
@@ -9,7 +12,7 @@ import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { ENGINE_STORE_BACKUP_DIR } from "../ipc/bridgeContract";
-import type { DohcDesktopBridge, StopOwnerLiveDocumentResult, SaveOwnerLiveRecoveryCopyResult, RebuildEngineStoreResult, SyncStatusResult, EngineYDocSaveStateEvent } from "../ipc/bridgeContract";
+import type { DohcDesktopBridge, StopOwnerLiveDocumentResult, SaveOwnerLiveRecoveryCopyResult, RebuildEngineStoreResult, SyncStatusResult, EngineYDocSaveStateEvent, NoticeRow, ResolveAutomationControlsResult } from "../ipc/bridgeContract";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { deferred } from "../testing/deferred";
 import { DesktopWorkspaceShell, WORKSPACE, OTHER_WORKSPACE, SYNC_STATUS, storedStateWithTabs, makeBridge, renderShell, shellBootstrapProps } from "./DesktopWorkspaceShell.testHarness";
@@ -499,6 +502,125 @@ describe("crash report notice", () => {
     await waitFor(() => expect(screen.queryByTestId("crash-report-toast")).toBeNull());
     expect((await screen.findByTestId("workspace-shell-notice")).textContent).toContain("Report sent");
   });
+});
+
+
+
+describe("notices sent to you", () => {
+  function sentNotices(notices: NoticeRow[]): SentNotices {
+    return {
+      account: null,
+      notices,
+      settled: true,
+      listFailure: null,
+      relist: vi.fn(),
+      toast: null,
+      hideToast: vi.fn(),
+      read: vi.fn(async () => undefined),
+      dismiss: vi.fn(async () => undefined),
+    };
+  }
+  const MENTION: NoticeRow = {
+    store: "account",
+    noticeId: "mention:1",
+    kind: "mention",
+    workspaceId: WORKSPACE.workspaceId,
+    recipientShareId: null,
+    senderKind: "person",
+    senderLabel: "Ana",
+    title: "Ana mentioned you in b.md",
+    body: "",
+    target: { path: "b.md" },
+    createdAtMs: 5_000,
+    readAtMs: null,
+    postedHere: false,
+  };
+
+  function renderWithNotices(
+    bridge: ReturnType<typeof makeBridge>,
+    extra: { sentNotices?: SentNotices; openOnReady?: NoticeTarget; onSwitchWorkspace?: (workspace: Workspace, open?: NoticeTarget) => void; workspace?: Workspace },
+    workspaces: Workspace[] = [extra.workspace ?? WORKSPACE],
+  ) {
+    vi.stubGlobal("dohcDesktop", bridge);
+    return render(
+      <>
+        <CollectionFieldWriteHost />
+        <DesktopWorkspaceShell
+          workspace={extra.workspace ?? WORKSPACE}
+          workspaces={workspaces}
+          {...shellBootstrapProps(bridge)}
+          onSwitchWorkspace={extra.onSwitchWorkspace ?? (() => {})}
+          {...(extra.sentNotices ? { sentNotices: extra.sentNotices } : {})}
+          {...(extra.openOnReady ? { openOnReady: extra.openOnReady } : {})}
+        />
+      </>,
+    );
+  }
+
+  const FAILED = (id: string, claimId: string): NoticeRow => ({
+    ...MENTION,
+    noticeId: `automation-failed:${id}`,
+    kind: "automation-failed",
+    senderKind: "automation",
+    title: `Automation "${id}" failed`,
+    body: "The record is open elsewhere. It ran on this computer.",
+    target: { automation: `collection:tasks#${id}`, path: "tasks/automations.yaml", run: claimId },
+    postedHere: true,
+  });
+  function withRuns(bridge: ReturnType<typeof makeBridge>) {
+    bridge.listCollections = vi.fn(async () => ({
+      collections: [{ path: "tasks", objectId: "object-test", status: "valid" as const, reasons: [] }], unclaimedDatasetFolders: [],
+    }));
+    // Main finds each automation's Collection by its id.
+    bridge.findAutomationCollection.mockResolvedValue({ status: "found", collectionPath: "tasks" });
+    bridge.listCollectionAutomationRuns.mockImplementation(async ({ automationId }) => ({ status: "listed", runs: [{
+      claimId: automationId.endsWith("#first") ? "atc_first" : "atc_second", state: "failed" as const,
+      error: "The record is open elsewhere.", createdAtMs: 5_000, updatedAtMs: 5_000,
+      trigger: { kind: "changed", recordId: "rec_1", by: "human", sharedAuthor: null, depth: 0 }, writes: [], definitionChanged: false, neverStarted: false, chainStopped: false, undoUnfinished: false, undone: false,
+    }], next: null }));
+    return bridge;
+  }
+
+  it("opens no runs for a notice whose Open was cancelled while main looked the automation up", async () => {
+    const user = userEvent.setup();
+    const bridge = withRuns(makeBridge(Promise.resolve(null)));
+    const found = deferred<{ status: "found"; collectionPath: string }>();
+    bridge.findAutomationCollection.mockReturnValueOnce(found.promise);
+    renderWithNotices(bridge, { sentNotices: sentNotices([FAILED("first", "atc_first")]) });
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    await user.click(await screen.findByTestId("sent-notice-automation-failed:first-open-row"));
+    // Closing Notices cancels the Open.
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    await act(async () => found.resolve({ status: "found", collectionPath: "tasks" }));
+    expect(screen.queryByTestId("tab-dohc://collection/tasks")).toBeNull();
+  });
+
+  describe("through an Edit share view", () => {
+    const EDIT_VIEW: Workspace = { ...WORKSPACE, shareView: { shareId: "share-1", granterEmail: "owner@dohc.test", access: "edit" } };
+    const SWITCHED_OFF = { to: "automation-controls", automation: "collection:object-tasks#first", sharedFile: "tasks/automations.yaml" } as const;
+    it("lets a later Open win over an earlier one still waiting on main", async () => {
+      const user = userEvent.setup();
+      const bridge = withRuns(makeBridge(Promise.resolve(null)));
+      const first = deferred<ResolveAutomationControlsResult>();
+      bridge.resolveAutomationControls.mockReturnValueOnce(first.promise)
+        .mockResolvedValueOnce({ status: "found", collectionPath: "chores", automation: "second" });
+      const later: NoticeRow = {
+        ...MENTION, noticeId: "automation-failed:second", kind: "automation-failed", senderKind: "automation", workspaceId: null,
+        recipientShareId: "share-1", title: 'Automation "second" switched off',
+        target: { recovery: "automation-controls", automation: "collection:object-chores#second", path: "chores/automations.yaml" },
+      };
+      renderWithNotices(bridge, { openOnReady: SWITCHED_OFF, workspace: EDIT_VIEW, sentNotices: sentNotices([later]) });
+      await waitFor(() => expect(bridge.resolveAutomationControls).toHaveBeenCalledTimes(1));
+      await user.click(await screen.findByTestId("notice-center-toggle"));
+      await user.click(await screen.findByTestId("sent-notice-automation-failed:second-open-row"));
+      expect(await screen.findByTestId("tab-dohc://collection/chores")).toBeTruthy();
+      await act(async () => first.resolve({ status: "found", collectionPath: "tasks", automation: "first" }));
+      expect(screen.queryByTestId("tab-dohc://collection/tasks")).toBeNull();
+      expect(screen.queryByTestId("tab-tasks/automations.yaml")).toBeNull();
+    });
+
+  });
+
 });
 
 

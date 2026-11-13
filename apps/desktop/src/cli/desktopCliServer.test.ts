@@ -208,6 +208,20 @@ describe("desktop CLI workspace context", () => {
     expect(f.dependencies.stopWorkspaceSync).toHaveBeenCalledOnce();
   });
 
+
+  it("keeps owner app actions bound to the CLI's original physical attachment", async () => {
+    const f = fixture();
+    const publish = vi.fn<NonNullable<Dependencies["ownerAppPublication"]>>(async () => ({ kind: "cancelled" }));
+    f.dependencies.ownerAppPublication = publish;
+    const context = await f.create().openCliWorkspace(f.workspace);
+    const request = { action: "cancel" as const, workspaceId: f.workspace.workspaceId, approvalId: "00000000-0000-4000-8000-000000000001" };
+    expect(await context.appPublication!(request)).toEqual({ kind: "cancelled" });
+    expect(publish).toHaveBeenCalledWith(request, null);
+    await f.authorities.invalidate(f.workspace.workspaceId);
+    await expect(context.appPublication!(request)).rejects.toThrow("This workspace changed while this ran. Try again.");
+    expect(publish).toHaveBeenCalledOnce();
+  });
+
   it("stops showing history the workspace's current policy no longer tracks, to the CLI and the MCP", async () => {
     const root = await mkdtemp(join(tmpdir(), "dohc-cli-history-"));
     try {

@@ -310,6 +310,57 @@ describe("ChatsView live activity refresh", () => {
   // flight. Activity in the new workspace must not queue a pass onto it: that
   // pass carries the old workspace's id and the new workspace's liveToken, and
   // the guard would pass while the wrong workspace's channels repaint.
+
+  it("drops a slow list refresh from the workspace the user left", async () => {
+    type ChannelListPage = {
+      channels: ChatChannelRecord[];
+      fileThreads: FileChatThreadRecord[];
+    };
+    let resolveStale!: (value: ChannelListPage) => void;
+    const staleRefresh = new Promise<ChannelListPage>((resolve) => {
+      resolveStale = resolve;
+    });
+    let oldWorkspaceReads = 0;
+    bridgeMock.listChatChannels.mockImplementation(
+      ({ workspaceId }: { workspaceId: string }) => {
+        if (workspaceId !== "workspace-old") {
+          return Promise.resolve({
+            channels: [channel({ id: "channel-new", name: "planning", slug: "planning" })],
+            fileThreads: [],
+          });
+        }
+        oldWorkspaceReads += 1;
+        return oldWorkspaceReads === 1
+          ? Promise.resolve({ channels: [channel()], fileThreads: [] })
+          : staleRefresh;
+      },
+    );
+    const view = render(
+      <ChatsView workspaceId="workspace-old" onOpenFileChat={vi.fn()} onError={vi.fn()} />,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("chats-channel-name").textContent).toBe("general"),
+    );
+    act(() => emitWorkspaceActivity());
+
+    view.rerender(
+      <ChatsView workspaceId="workspace-new" onOpenFileChat={vi.fn()} onError={vi.fn()} />,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("chats-channel-name").textContent).toBe("planning"),
+    );
+
+    await act(async () => {
+      resolveStale({
+        channels: [channel({ unreadCount: 9 })],
+        fileThreads: [],
+      });
+      await staleRefresh;
+    });
+    expect(screen.getByTestId("chats-channel-name").textContent).toBe("planning");
+    expect(screen.queryByTestId("chats-channel-unread")).toBeNull();
+  });
+
   it("never repaints one workspace's list with the one the user left", async () => {
     type ChannelListPage = {
       channels: ChatChannelRecord[];
