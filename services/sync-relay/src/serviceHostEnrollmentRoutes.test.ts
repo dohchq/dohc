@@ -662,8 +662,37 @@ it("reports ready only with completed retained activation and the current native
     objectId: binding.objectId,
     status: "ready",
     document: { binding, relayDatabaseNamespace: namespace },
+    head: 0,
   });
+  // `head` is the note's last accepted journal position; another note's edit leaves it alone.
+  const accept = (deliveryId: string, objectId: string) =>
+    Number(
+      f.raw
+        .prepare(`INSERT INTO sync_relay_live_update_journal
+      (delivery_id,update_digest,workspace_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,
+      restore_fence_generation,principal_kind,principal_id,accepting_host_epoch,received_at_ms,update_bytes,
+      relay_database_namespace,accepted_event_count,accepted_evidence_digest,accepted_metadata_bytes,canonical_version,first_seen_deletes_json)
+      VALUES (?,?,?,'main',?,?,?,'["docs/a.md"]',1,'owner','owner-1',1,1,x'01',?,1,?,1,2,'[]') RETURNING journal_cursor`)
+        .get(
+          deliveryId,
+          "c".repeat(64),
+          binding.workspaceId,
+          objectId,
+          binding.lineageClaimId,
+          binding.currentPath,
+          namespace,
+          "d".repeat(64),
+        )!.journal_cursor,
+    );
+  const first = accept("first-edit", binding.objectId);
+  expect((await state()).head).toBe(first);
+  accept("other-note-edit", "other-object");
+  expect((await state()).head).toBe(first);
+  const second = accept("second-edit", binding.objectId);
+  expect(second).toBeGreaterThan(first);
+  expect((await state()).head).toBe(second);
   f.storage.setServiceHostEnrollmentEnabled({ ...f.input, enabled: false });
+  expect(await state()).not.toHaveProperty("head");
   expect((await state()).status).toBe("paused");
 });
 

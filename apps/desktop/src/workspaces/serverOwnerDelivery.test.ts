@@ -34,6 +34,23 @@ it("discovers only ready documents, including after restart, and drops revoked t
   ).toEqual([]);
 });
 
+// The relay before `head` sends none; each note then opens its connection on every pass, as before.
+it("keeps a ready row's head when the server sends one, and refuses one that is not a position", () => {
+  expect(
+    readyOwnerDeliveryDocuments({ ok: true, documents: [{ ...ready, head: 0 }] }, "workspace"),
+  ).toEqual([{ ...document, head: 0 }]);
+  expect(
+    readyOwnerDeliveryDocuments({ ok: true, documents: [{ ...ready, head: 41 }] }, "workspace"),
+  ).toEqual([{ ...document, head: 41 }]);
+  expect(
+    readyOwnerDeliveryDocuments({ ok: true, documents: [ready] }, "workspace")[0],
+  ).not.toHaveProperty("head");
+  for (const head of [-1, 1.5, "4", null, Number.MAX_SAFE_INTEGER + 1])
+    expect(() =>
+      readyOwnerDeliveryDocuments({ ok: true, documents: [{ ...ready, head }] }, "workspace"),
+    ).toThrow("Invalid owner live document head.");
+});
+
 it("rejects foreign workspaces, versions, paths, duplicates and excessive target counts", () => {
   for (const row of [
     { ...ready, document: { ...document, binding: { ...binding, workspaceId: "foreign" } } },

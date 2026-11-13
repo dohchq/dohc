@@ -29,6 +29,13 @@ interface NativeOwnerDeliveryPassOptions {
   onEnrolled?(): Promise<void>;
   /** Never enrolls: an unbound document returns "unbound", and an answer counts only after an opening sync installed. */
   observedOnly?: boolean;
+  /**
+   * The server list's `head` for this note. When this computer has applied exactly that far and
+   * holds no edit for it, the pass returns "empty" without opening the note's connection.
+   * Equal numbers can still differ in content, as after the server restores an older backup;
+   * the caller's periodic full pass covers that.
+   */
+  serverHead?: number;
 }
 
 /** The authority lease and engine session must remain held until this pass settles. */
@@ -206,6 +213,15 @@ export async function runNativeOwnerDeliveryPass(
     if (options.observedOnly && preparation.status === "capture") return "unbound";
     // This computer closed this generation when its page was retired; its edits wait in a recovery copy.
     if (preparation.status === "retired") return "empty";
+    if (
+      options.serverHead !== undefined &&
+      preparation.status === "observed" &&
+      preparation.draft.pendingBytes === 0 &&
+      preparation.draft.state !== "quarantined" &&
+      preparation.draft.acceptedCursor === options.serverHead &&
+      isDeepStrictEqual(preparation.draft.binding, document.binding)
+    )
+      return "empty";
     if (preparation.status === "capture" || preparation.draft.outboxId === null) {
       const authority = await delivery.freshOwnerAuthority(document.binding);
       check();

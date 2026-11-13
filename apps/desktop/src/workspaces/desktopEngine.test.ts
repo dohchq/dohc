@@ -12,7 +12,7 @@ import {
   type EngineDaemonLifecycleOptions,
   type EngineClientSpawnOptions,
 } from "@dohc/workspace-engine-client/daemon";
-import { createDesktopEngine, type ServerOwnerDelivery } from "./desktopEngine";
+import { createDesktopEngine, OWNER_FULL_PASS_MS, type ServerOwnerDelivery } from "./desktopEngine";
 import type { JsonValue, OwnerYDocOutboxRecovery } from "@dohc/workspace-engine-client";
 import { EngineRelayClient } from "./engineRelayClient";
 import { createWorkspaceAuthorityOwner } from "./workspaceAuthorityOwner";
@@ -322,7 +322,7 @@ const unexpectedOpen = async (): Promise<"hosted" | "refused"> => {
  * `listed` sees each list read's `fresh` flag after the list is read, and can hold back its answer.
  */
 async function quarantinedOwner(
-  documents: { path: string; objectId: string }[],
+  documents: { path: string; objectId: string; head?: () => number }[],
   server: {
     kept?: () => unknown[];
     keptCursor?: number;
@@ -393,10 +393,11 @@ async function quarantinedOwner(
         documents: async (_signal, fresh) => {
           const answer = {
             ok: true,
-            documents: documents.map(({ path, objectId }) => ({
+            documents: documents.map(({ path, objectId, head }) => ({
               path,
               status: "ready",
               document: { binding: bindingOf(path, objectId), relayDatabaseNamespace: "namespace" },
+              ...(head ? { head: head() } : {}),
             })),
             ...(server.kept ? { keptEdits: server.kept() } : {}),
             ...(server.keptCursor === undefined ? {} : { keptEditsCursor: server.keptCursor }),
@@ -1253,7 +1254,8 @@ describe("server owner peer lifecycle", () => {
         open: unexpectedOpen,
         documents: async () => ({
           ok: true,
-          documents: [{ path: "notes/plan.md", status: "ready", document }],
+          // A list with a head: refusals are read outside the note's pass all the same.
+          documents: [{ path: "notes/plan.md", status: "ready", document, head: 0 }],
         }),
       }),
     };
@@ -1370,6 +1372,70 @@ describe("server owner peer lifecycle", () => {
       errors.mockRestore();
       await f.close();
       ownerDeliveryMock.pass.mockReset();
+    }
+  });
+
+  // The list's head lets a pass skip a note's connection; a head that missed an edit lasts until the note's first turn after OWNER_FULL_PASS_MS.
+  it("passes the list's head after a note's full pass, and opens the connection again every few minutes and after a failed pass", async () => {
+    let head = 7;
+    const { f, credentials } = await quarantinedOwner([
+      { path: "notes/plan.md", objectId: "object", head: () => head },
+      { path: "notes/other.md", objectId: "other" },
+    ]);
+    quarantineMock.read.mockResolvedValue([]);
+    let nowMs = 1_000_000;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => nowMs);
+    let planResult = "empty";
+    ownerDeliveryMock.pass.mockImplementation(async (options) =>
+      options.document.binding.currentPath === "notes/plan.md" ? planResult : "empty",
+    );
+    // What the next pass of plan.md is given as the server's head.
+    const nextPlanHead = async () => {
+      for (;;) {
+        const before = ownerDeliveryMock.pass.mock.calls.length;
+        f.engine.retryOwnerDelivery("owner");
+        await vi.waitFor(() =>
+          expect(ownerDeliveryMock.pass.mock.calls.length).toBeGreaterThan(before),
+        );
+        const options = ownerDeliveryMock.pass.mock.calls.at(-1)![0];
+        if (options.document.binding.currentPath !== "notes/plan.md") {
+          expect(options.serverHead).toBeUndefined();
+          continue;
+        }
+        return "serverHead" in options ? options.serverHead : "full";
+      }
+    };
+    try {
+      expect(await f.engine.start()).toBe(true);
+      await vi.waitFor(() => expect(ownerDeliveryMock.pass).toHaveBeenCalled());
+      // The first pass of each note opens its connection; later ones carry the head.
+      expect(
+        ownerDeliveryMock.pass.mock.calls.find(
+          ([options]) => options.document.binding.currentPath === "notes/plan.md",
+        )?.[0].serverHead,
+      ).toBeUndefined();
+      expect(await nextPlanHead()).toBe(7);
+      head = 9;
+      expect(await nextPlanHead()).toBe(9);
+      // The head stayed put while an edit arrived: the note's first turn after OWNER_FULL_PASS_MS still opens.
+      nowMs += OWNER_FULL_PASS_MS;
+      expect(await nextPlanHead()).toBe("full");
+      expect(await nextPlanHead()).toBe(9);
+      // A clock set back does not hold off the next full pass.
+      nowMs -= 60_000;
+      expect(await nextPlanHead()).toBe("full");
+      expect(await nextPlanHead()).toBe(9);
+      planResult = "retry";
+      expect(await nextPlanHead()).toBe(9);
+      planResult = "empty";
+      expect(await nextPlanHead()).toBe("full");
+      expect(await nextPlanHead()).toBe(9);
+    } finally {
+      clock.mockRestore();
+      credentials.abort();
+      await f.close();
+      ownerDeliveryMock.pass.mockReset();
+      quarantineMock.read.mockReset();
     }
   });
 
@@ -1818,7 +1884,7 @@ describe("server owner peer lifecycle", () => {
     };
     const pages = servedPages(served);
     const { f, credentials, workspace } = await quarantinedOwner(
-      [{ path: "notes/plan.md", objectId: "object" }],
+      [{ path: "notes/plan.md", objectId: "object", head: () => 0 }],
       {
         kept: () => kept,
         keptEdits: async (input) => {
@@ -1983,7 +2049,7 @@ describe("server owner peer lifecycle", () => {
         outboxId: last.outboxId,
       });
     const { f, credentials, workspace } = await quarantinedOwner(
-      [{ path: "notes/plan-1.md", objectId: "object-1" }],
+      [{ path: "notes/plan-1.md", objectId: "object-1", head: () => 0 }],
       {
         kept: () => firstPage,
         keptCursor: 2,
