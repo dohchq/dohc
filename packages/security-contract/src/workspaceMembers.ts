@@ -104,6 +104,12 @@ export const WORKSPACE_MEMBER_ROUTES = {
   leave: "/sync/:workspaceId/members/leave",
   /** POST {} → WorkspaceMembersView. Ends membership for everyone. */
   end: "/sync/:workspaceId/members/end",
+  /**
+   * POST {shareId, name, type?, purpose?} → {ok, channelWireId, name}. Owner
+   * or admin, through the membership share. The relay writes an ordinary
+   * Group into the owner's workspace.
+   */
+  groupCreate: "/sync/members/groups",
   /** POST {token} → WorkspaceJoinPreview. Signed in. */
   joinPreview: "/sync/members/join-preview",
   /** POST {token} → WorkspaceJoinResult. Signed in. */

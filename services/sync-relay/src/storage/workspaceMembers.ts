@@ -16,6 +16,9 @@ import {
 } from "./shares";
 import type { SqliteDb } from "./types";
 import { forgetReplicaCurrentViewCaches } from "../replicaCurrentViewReads";
+import { workspaceAdminOrigin } from "../relayLogInputs";
+import { appendLogBatchInTransaction, maxOriginSeq } from "./log";
+import { workspaceUsageBytes } from "./workspaces";
 
 // Workspace members (docs/engineering/plans/workspace-members.md, piece 1).
 //
@@ -934,4 +937,59 @@ export function claimWorkspaceInvitesInTransaction(
       .run(userId, Math.trunc(nowMs), invite.memberId);
     forgetReplicaCurrentViewCaches(storage, invite.workspaceId);
   }
+}
+
+// --- Groups -----------------------------------------------------------------
+
+export type WorkspaceGroupType = "posts" | "chat" | "both";
+
+export type CreateWorkspaceGroupResult =
+  | { ok: true; workspaceId: string; channelWireId: string }
+  | { ok: false; reason: "not-found" | "forbidden" | "workspace-quota" };
+
+/**
+ * An ordinary Group in the owner's workspace, created by the owner or an
+ * admin through the membership share. The role is read here, inside the
+ * write. The relay writes the create from the admin's own origin, so the
+ * owner's computer accepts it like any op in the log. The relay mints the
+ * Group's id, so this never creates General, a direct message or an agent
+ * chat, and every member reaches the Group as they reach any other.
+ *
+ * The Group names no folder. A folder exists in a workspace only through the
+ * files in it, and nothing here writes a file.
+ */
+export function createWorkspaceGroup(storage: StorageContext, input: {
+  shareId: string;
+  actorUserId: string;
+  name: string;
+  slug: string;
+  type: WorkspaceGroupType | undefined;
+  purpose: string | undefined;
+  nowMs: number;
+}): CreateWorkspaceGroupResult {
+  return storage.tx((): CreateWorkspaceGroupResult => {
+    const membership = getWorkspaceMembershipByShare(storage, input.shareId);
+    if (!membership) return { ok: false, reason: "not-found" };
+    const { workspaceId } = membership;
+    const actor = workspaceRoleOf(storage, workspaceId, input.actorUserId);
+    if (!actor) return { ok: false, reason: "not-found" };
+    if (!manages(actor.role)) return { ok: false, reason: "forbidden" };
+    const createdAtMs = Math.trunc(input.nowMs);
+    const channelWireId = `channel_${randomUUID().replaceAll("-", "")}`;
+    const originId = workspaceAdminOrigin(actor.memberId);
+    const payloadJson = JSON.stringify({
+      channelId: channelWireId, wireId: channelWireId, name: input.name, slug: input.slug, kind: "channel",
+      ...(input.type === undefined ? {} : { type: input.type }),
+      ...(input.purpose === undefined ? {} : { purpose: input.purpose }),
+      createdAtMs,
+    });
+    if (workspaceUsageBytes(storage, workspaceId) + Buffer.byteLength(payloadJson) > storage.options.workspaceQuotaBytes) {
+      return { ok: false, reason: "workspace-quota" };
+    }
+    appendLogBatchInTransaction(storage, {
+      workspaceId, originId,
+      ops: [{ originSeq: maxOriginSeq(storage, workspaceId, originId) + 1, opKind: "chat.channel.create", payloadJson, recordedAtMs: createdAtMs }],
+    });
+    return { ok: true, workspaceId, channelWireId };
+  });
 }

@@ -1951,6 +1951,7 @@ export interface SyncRelayStorage {
   inviteLinkAdmitsSignUp: WorkspaceMembersMethod<"inviteLinkAdmitsSignUp">;
   previewWorkspaceJoin: WorkspaceMembersMethod<"previewWorkspaceJoin">;
   joinWorkspace: WorkspaceMembersMethod<"joinWorkspace">;
+  createWorkspaceGroup: WorkspaceMembersMethod<"createWorkspaceGroup">;
   shareHasActiveGrants(shareId: string): boolean;
   getShareLabels(shareId: string, reader: ShareLabelReader): ShareLabels;
   setShareLabels(shareId: string, labels: ShareLabels, updatedAtMs: number): void;

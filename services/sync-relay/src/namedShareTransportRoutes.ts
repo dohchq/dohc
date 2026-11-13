@@ -1,5 +1,6 @@
 import { jsonResponse } from "@dohc/service-http";
 import { sha256Hex } from "@dohc/workspace-core/hash";
+import { accountDisplayName } from "./accountDisplayName";
 import {
   DiscussionActivityCapacityError,
   linkLogWaitGroup,
@@ -46,6 +47,65 @@ export type NamedShareTransportRoute =
 function shareScopeKey(selector: AnyShareSelector): string {
   const { access: _access, ...scope } = selector;
   return JSON.stringify(scope);
+}
+
+// What the Members page shows for a person with no account name.
+const NO_NAME = "No name";
+
+type ServedOp = Record<string, unknown>;
+
+/**
+ * A joined workspace names each person by their account, as the Members page
+ * does, never as the author's own computer named them: that computer calls a
+ * person with no profile name "You". An agent's or automation's message
+ * names the account it ran for the same way. Each account is looked up once
+ * per page.
+ */
+async function nameAuthorsByAccount(
+  ops: ServedOp[],
+  lookup: LogAuthorNameLookup | undefined,
+): Promise<ServedOp[]> {
+  const names = new Map<string, Promise<string>>();
+  const nameOf = (userId: string) => {
+    let name = names.get(userId);
+    if (!name) {
+      name = accountDisplayName(lookup, userId).then((found) => found ?? NO_NAME);
+      names.set(userId, name);
+    }
+    return name;
+  };
+  return Promise.all(
+    ops.map(async (op) => {
+      const payload = op.payload;
+      if (!payload || typeof payload !== "object" || Array.isArray(payload)) return op;
+      const fields = payload as Record<string, unknown>;
+      if (op.opKind === "chat.message.append" && typeof fields.authorUserId === "string") {
+        if (fields.authorKind === "human") {
+          return {
+            ...op,
+            payload: { ...fields, authorDisplayName: await nameOf(fields.authorUserId) },
+          };
+        }
+        if (
+          (fields.authorKind === "agent" || fields.authorKind === "automation") &&
+          typeof fields.authorOwnerDisplayName === "string"
+        ) {
+          return {
+            ...op,
+            payload: { ...fields, authorOwnerDisplayName: await nameOf(fields.authorUserId) },
+          };
+        }
+      }
+      if (
+        op.opKind === "chat.reaction.set" &&
+        fields.authorKind === "human" &&
+        typeof fields.authorId === "string"
+      ) {
+        return { ...op, payload: { ...fields, authorDisplayName: await nameOf(fields.authorId) } };
+      }
+      return op;
+    }),
+  );
 }
 
 export function createNamedShareTransportRoutes(
@@ -235,6 +295,9 @@ export function createNamedShareTransportRoutes(
               identityKey,
               after: url.searchParams.get("referenceAfter") || undefined,
             });
+      const ops = isWorkspaceSelector(share.selector)
+        ? await nameAuthorsByAccount(page.ops, lookupUserDisplayName)
+        : page.ops;
       const latest = requireShareAction(route.shareId, actor.userId, "read");
       const latestSelector = JSON.stringify(latest.effectiveSelector);
       if (
@@ -252,6 +315,7 @@ export function createNamedShareTransportRoutes(
             }
           : {}),
         ...page,
+        ops,
         ownOriginId,
       });
     }

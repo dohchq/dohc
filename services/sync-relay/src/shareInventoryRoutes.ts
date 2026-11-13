@@ -13,7 +13,12 @@ import {
   selectorTargetsBlockedChannel,
   type AuthorizedShareAction,
 } from "./shareAuthorization";
-import { effectiveShareSelector, fileSideOf, parseStoredAnyShareSelectorJson } from "./shareFilter";
+import {
+  effectiveShareSelector,
+  fileSideOf,
+  isWorkspaceSelector,
+  parseStoredAnyShareSelectorJson,
+} from "./shareFilter";
 import { showsGranterEmail, type createShareSummaries } from "./shareSummaries";
 import type {
   SyncRelayGrantedInventoryCursor,
@@ -49,6 +54,7 @@ export function createShareInventoryRoutes(
     | "listLinkGrantsByWorkspace"
     | "lookupHistoryAccounts"
     | "listActiveIndependentShareGrants"
+    | "workspaceRoleOf"
   >,
   nowMs: () => number,
   claimPendingShares: (userId: string) => Promise<void>,
@@ -167,8 +173,23 @@ export function createShareInventoryRoutes(
       if (!accessRateLimiter.allow(actor.userId, nowMs()))
         throw relayError("share_access_rate_limited");
       const authorized = requireShareAction(route.shareId, actor.userId, "read");
+      // A membership names the role too: the level alone cannot tell an
+      // admin from a member at Edit.
+      const role = isWorkspaceSelector(authorized.effectiveSelector)
+        ? storage.workspaceRoleOf(authorized.share.workspaceId, actor.userId)?.role
+        : undefined;
+      if (
+        isWorkspaceSelector(authorized.effectiveSelector) &&
+        role !== "admin" &&
+        role !== "member"
+      )
+        throw notFound();
       return jsonResponse(
-        { status: "current", access: fileSideOf(authorized.effectiveSelector)?.access ?? "view" },
+        {
+          status: "current",
+          access: fileSideOf(authorized.effectiveSelector)?.access ?? "view",
+          ...(role === undefined ? {} : { role }),
+        },
         200,
         { "cache-control": "private, no-store" },
       );
