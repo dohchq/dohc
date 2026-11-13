@@ -72,8 +72,6 @@ it("leaves the title for the body on a press anywhere below it", async () => {
   expect((screen.getByLabelText("Page body") as HTMLTextAreaElement).value).toBe("Day one");
 });
 
-// The hint keeps one voice whether or not the body has the caret, so it shows
-// under the title and stays where it is when the caret arrives.
 it("shows the empty body's hint while the title has the caret, and keeps it when the caret moves in", async () => {
   const user = userEvent.setup();
   renderPage();
@@ -135,8 +133,6 @@ it("shows a file that opens with no editor", async () => {
   expect(page.onHandedOff.mock.calls).toEqual([[false]]);
 });
 
-// The shell keeps what the page holds, so a page that unmounts before its
-// editor is ready gets it back when it mounts again.
 it("reports the body as it is typed, and starts from the body it held", async () => {
   const user = userEvent.setup();
   const page = renderPage({ draft: "---\ntitle: Lisbon\n---\n", body: "Day one" });

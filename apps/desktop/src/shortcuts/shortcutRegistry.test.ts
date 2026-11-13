@@ -309,7 +309,6 @@ describe("shortcut display", () => {
     expect(shortcutChords("editor-backspace-word", platform)).toEqual([
       mac ? ["⌘", "⌫"] : ["Ctrl", "Backspace"],
     ]);
-    // A row's keys stand for its first chord in a chip; every chord shows on its own.
     expect(shortcutChords("palette-move", platform)).toEqual([["↑"], ["↓"]]);
     expect(shortcutChords("palette-dismiss", platform)).toEqual([[mac ? "esc" : "Esc"]]);
   });

@@ -80,7 +80,6 @@ it.skipIf(engine.missing)(
         expect(pushes.at(-1)?.hasMore).toBe(false);
       }, arrival);
 
-      // B joins, receives the document, and opens it too.
       daemonB = await openJoinedDaemonCapture({
         workspaceId,
         rootPath: rootB,
@@ -105,8 +104,6 @@ it.skipIf(engine.missing)(
       engines.push(syncB);
       await syncB.start();
 
-      // Each device types while the other's editor sits idle, and the idle
-      // editor shows the edit without being touched.
       await typeAtEnd(editorA, "Typed on A.\n");
       syncA.queueSync();
       await vi.waitFor(() => expect(shown(editorB)).toContain("Typed on A."), arrival);
@@ -114,7 +111,6 @@ it.skipIf(engine.missing)(
       syncB.queueSync();
       await vi.waitFor(() => expect(shown(editorA)).toContain("Typed on B."), arrival);
 
-      // Both editors and both files hold every line exactly once.
       const merged = shown(editorA);
       for (const line of ["Starting together.", "Typed on A.", "Typed on B."]) {
         expect(merged.split(line).length - 1, line).toBe(1);

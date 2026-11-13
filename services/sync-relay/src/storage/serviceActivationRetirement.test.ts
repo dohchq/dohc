@@ -9,10 +9,6 @@ import type { StorageContext } from "./context";
 afterEach(cleanupLiveDeliveryFixtures);
 const activationId = `ordinary-activation-${"e".repeat(64)}`;
 
-// Proves: once Pause or the loss of the last Edit grant commits, an update the
-// relay validated earlier is refused at its commit. The retirement keeps the
-// journal cursor the fence closed at, and Resume or a restored grant does not
-// reopen admission while it is open.
 it.each(["pause", "revoke"] as const)(
   "refuses a validated update whose commit follows the fence: %s",
   (cause) => {

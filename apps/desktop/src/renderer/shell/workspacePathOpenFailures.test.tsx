@@ -18,7 +18,6 @@ let ping: () => void = () => undefined;
 let order: string[] = [];
 const retryWorkspacePathOpen = vi.fn(async (_payload: { attemptId: string }) => undefined);
 
-// Main reports a failure: it holds it, then pings.
 async function emit(failure: WorkspacePathOpenFailure) {
   held.push(failure);
   await act(async () => ping());
@@ -54,7 +53,6 @@ afterEach(() => {
   retryWorkspacePathOpen.mockReset();
 });
 
-// A notice owner as the workspace manager is one: its own toasts and rows.
 function Owner(props: { workspaceId: string | null }) {
   const notices = useConnectionNotices();
   useWorkspacePathOpenFailures(props.workspaceId, notices.reportFailure);
@@ -135,7 +133,6 @@ describe("folders a launch could not open", () => {
 
       const toast = await screen.findByTestId("workspace-shell-error");
       expect(toast.textContent).toContain(message);
-      // The error as it arrived is for Copy only.
       expect(toast.textContent).not.toMatch(/Error|EACCES|manifest v2|kind is invalid/);
       expect(within(toast).queryByRole("button", { name: "Try again" }) !== null).toBe(canRetry);
       const details = await copied(toast);
@@ -252,7 +249,6 @@ describe("folders a launch could not open", () => {
     expect(retryWorkspacePathOpen).toHaveBeenCalledExactlyOnceWith({ attemptId: "attempt-1" });
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
 
-    // Main reports the second failure with a new attempt, on the same row.
     await emit(
       failure("Error [ENOENT]: ENOENT: no such file or directory, stat 'C:\\work\\Trips'", {
         attemptId: "attempt-2",

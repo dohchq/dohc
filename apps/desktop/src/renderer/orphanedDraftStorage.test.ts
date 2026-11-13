@@ -36,7 +36,6 @@ it("writes version 1 on capture and replacement and restores both", () => {
   expect(loadStoredDrafts(now)).toEqual([expect.objectContaining(replacement)]);
 });
 
-// A deleted file's draft keeps saying so after a restart.
 it("restores why main set a draft aside, and refuses a reason it does not know", () => {
   const recovery = {
     objectId: "object",

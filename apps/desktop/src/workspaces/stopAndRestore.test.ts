@@ -131,7 +131,6 @@ it.each(["before barrier", "before receipts"])(
     });
     expect(e.restored).toHaveLength(3);
     expect(durable).toEqual([]);
-    // A later edit is not overwritten when recovery finds the keyed restore.
     e.all.push(moment("teammate", originals[0]!.objectId, originals[0]!.path, "old", "teammate"));
     fail = false;
     const result = await restoreDirectWrites({ ...deps, replayRequestId: requestId }, files);
@@ -214,17 +213,12 @@ function moment(
   };
 }
 
-/**
- * An engine over a list of moments, oldest first. A restore appends a
- * moment that puts the file back, as History does.
- */
 function engine(moments: VersionedTextMoment[], folders: Record<string, string[]> = {}) {
   const all = [...moments];
   const restored: string[] = [];
   const refused = new Set<string>();
   const changedAtRestore = new Set<string>();
   const failing = new Map<string, Error>();
-  // Files another queued operation adds to a folder just before a restore runs.
   const addedAtRestore = new Map<string, string>();
   const dependencies = {
     moment: vi.fn(async (id: string) => all.find((item) => item.id === id) ?? null),
@@ -851,7 +845,6 @@ describe("restoring what a person wrote directly", () => {
         file("m-auto", "o-auto", "trip/packing/automations.yaml"),
       ]),
     ).resolves.toMatchObject({ wroteAutomations: true, sendsMessages: true });
-    // A schema alone wrote no automation.
     const schema = moment(
       "m-schema",
       "o-schema",
@@ -936,7 +929,6 @@ describe("restoring what a person wrote directly", () => {
     });
     expect(dependencies.undoRuns).not.toHaveBeenCalled();
 
-    // Only a later change is protected: their automations are read and their runs undone.
     const later = engine([
       auto,
       moment(
@@ -1022,7 +1014,6 @@ describe("restoring what a person wrote directly", () => {
       file("m-auto-2", "o-auto", "trip/packing/automations.yaml"),
     ]);
 
-    // The owner's change between theirs keeps the file for review.
     expect(restored).toEqual([]);
     expect(outcome).toMatchObject({
       review: [{ path: "trip/packing/automations.yaml", reason: "changed-since" }],

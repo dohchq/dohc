@@ -49,7 +49,6 @@ describe("CredentialSessionCache", () => {
     const warming = cache.warm(load);
     cache.clear();
     pending.reject(new Error("stale read failure"));
-    // The sign-out replaced that load, so it reports no failure.
     await expect(warming).resolves.toBeNull();
 
     await cache.warm(load);
@@ -98,7 +97,6 @@ describe("CredentialSessionCache", () => {
     failing.reject(unreadable);
     await expect(first).resolves.toEqual({ error: unreadable });
     await expect(joined).resolves.toEqual({ error: unreadable });
-    // A later load that reads the store says nothing failed, and changes no earlier answer.
     await expect(cache.warm(async () => null)).resolves.toBeNull();
     await expect(first).resolves.toEqual({ error: unreadable });
     expect(cache.snapshot().credentials).toBeNull();

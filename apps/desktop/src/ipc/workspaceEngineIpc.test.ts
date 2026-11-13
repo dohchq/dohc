@@ -384,7 +384,6 @@ async function harness(
     if (id !== workspace.workspaceId) throw new Error("unknown workspace");
     return workspace;
   });
-  // Settings lists one agent, "agent", named "You".
   const displayName = vi.fn((agentId: string): string | undefined =>
     agentId === "agent" ? "You" : undefined,
   );
@@ -906,7 +905,6 @@ describe("workspace engine IPC registrations", () => {
     const other = await received(new HistoryStillPausedError([]));
     expect(liveEditingStoppedPaths(other)).toEqual([]);
     expect(readError(other).cause).toBe("HistoryStillPausedError: History is still paused.");
-    // History still taking in files reaches the renderer as catching up.
     const updating = await received(
       new DaemonRefusalError(
         {
@@ -1338,7 +1336,6 @@ describe("workspace engine IPC registrations", () => {
         // Written before runs were recorded: its name now, and no run to open.
         { historyId: 6, author: { kind: "automation", name: stamp, run: null } },
         { historyId: 5, author: { kind: "agent", name: "You" } },
-        // Another person's agent, as the file timeline names it.
         { historyId: 4, author: { kind: "agent", name: "Agent", person: "user-ana" } },
         { historyId: 3, author: { kind: "human", name: "user-ana" } },
         {
@@ -1445,7 +1442,6 @@ describe("workspace engine IPC registrations", () => {
     });
     expect(h.relay).not.toHaveBeenCalled();
 
-    // Another account asks the relay again, and is refused.
     h.signIn("person-other");
     h.relay.mockResolvedValue({ status: 404, body: { ok: false } });
     await expect(locate("claim-server")).resolves.toEqual({ location: "unavailable" });
@@ -1477,7 +1473,6 @@ describe("workspace engine IPC registrations", () => {
         claimId: "claim-server",
       });
 
-    // The person signs out while the owner's answer is on its way: it is no answer.
     const late = deferred<ServerReply>();
     h.relay.mockImplementationOnce(() => late.promise);
     const asking = locate();
@@ -1485,7 +1480,6 @@ describe("workspace engine IPC registrations", () => {
     h.signIn(null);
     late.resolve(shown);
     await expect(asking).rejects.toThrow("Your sign-in changed");
-    // A refusal for an older sign-in proves nothing either, a 404 or no run alike.
     for (const refusal of [
       { status: 404, body: { ok: false } },
       { status: 200, body: { ok: true, run: null } },
@@ -1502,7 +1496,6 @@ describe("workspace engine IPC registrations", () => {
     }
     h.signIn(null);
     h.relay.mockClear();
-    // Signed out, the run is not offered, and nothing asks the relay.
     await expect(locate()).resolves.toEqual({ location: "unavailable" });
     expect(h.relay).not.toHaveBeenCalled();
 
@@ -1517,7 +1510,6 @@ describe("workspace engine IPC registrations", () => {
     h.relay.mockClear();
     await expect(locate()).resolves.toEqual({ location: "available" });
     expect(h.relay).not.toHaveBeenCalled();
-    // After a sign-out, that answer is not offered to the person signed out.
     h.signIn(null);
     await expect(locate()).resolves.toEqual({ location: "unavailable" });
   });
@@ -1770,7 +1762,6 @@ describe("workspace engine IPC registrations", () => {
     h.capture.listMoments.mockImplementation(async (input) => {
       if (input?.versionId === "fresh")
         return { ...historyPage(), nextCursor: historyCursor(2), moments: [change("main", 30)] };
-      // Draft's first page is only the versions made from it.
       return input?.cursor === undefined
         ? {
             ...historyPage(),
@@ -1879,7 +1870,6 @@ describe("workspace engine IPC registrations", () => {
     ).rejects.toThrow("Engine history");
     expect(h.requireEngineCapture).toHaveBeenCalledOnce();
     expect(h.capture.restoreFileToBeforeMoment).not.toHaveBeenCalled();
-    // A renderer showing another workspace cannot read this share's history.
     await h.renderers.open(
       h.sender,
       { workspaceId: "other", attachmentId: Symbol("other") },
@@ -2138,7 +2128,6 @@ describe("workspace engine IPC registrations", () => {
       ];
     };
     await expect(names()).resolves.toEqual(["Nova", "Codex", "Codex", "Nova", "Codex"]);
-    // A rename shows at once, and an agent removed from Settings keeps its id.
     settingsNames.set("codex", "Kit");
     settingsNames.delete("nova");
     await expect(names()).resolves.toEqual(["nova", "Kit", "Kit", "nova", "Kit"]);
@@ -2679,7 +2668,6 @@ describe("registered engine-store repair", () => {
     await expect(h.invoke(CHANNELS.rebuildEngineStore)).rejects.toMatchObject({
       reason: "not-refused",
     });
-    // A store this build could not migrate is intact and never moved.
     h.getStatus.mockReturnValueOnce({ ...refused, engineStoreRefused: "migration-failed" });
     await expect(h.invoke(CHANNELS.rebuildEngineStore)).rejects.toMatchObject({
       reason: "not-refused",
@@ -3159,7 +3147,6 @@ describe("owner History path policy", () => {
     }
   });
 
-  // A change History never had is not one the rules hide.
   it("answers a missing change without calling it untracked", async () => {
     const h = await harness();
     h.readPolicy.mockResolvedValue({

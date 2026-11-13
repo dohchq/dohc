@@ -45,7 +45,6 @@ describe("WorkspaceFileListingCache", () => {
     const read = () =>
       cache.list({ workspaceId: "ws-a", attachmentId: ATTACHMENT_A, allowCached: true, load });
     await read();
-    // Deleted after the walk and written again before the next engine scan.
     cache.observe("ws-a", ATTACHMENT_A, [{ path: "packing.md", kind: "changed" }]);
     cache.invalidate({ workspaceId: "ws-a", paths: ["packing.md"], pathSetChanged: false });
     await read();
@@ -66,7 +65,6 @@ describe("WorkspaceFileListingCache", () => {
     const read = () =>
       cache.list({ workspaceId: "ws-a", attachmentId: ATTACHMENT_A, allowCached: true, load });
     const walking = read();
-    // Written again behind the walk, before the next engine scan.
     cache.observe("ws-a", ATTACHMENT_A, [{ path: "packing.md", kind: "changed" }]);
     cache.invalidate({ workspaceId: "ws-a", paths: ["packing.md"], pathSetChanged: false });
     const asked = read();
@@ -119,7 +117,6 @@ describe("WorkspaceFileListingCache", () => {
       const options = { workspaceId: "ws-a", attachmentId: ATTACHMENT_A, load };
       const putBack = () =>
         cache.observe("ws-a", ATTACHMENT_A, [{ path: "packing.md", kind: "changed" }]);
-      // Started after a delete answered; packing.md is put back behind it.
       const walking = cache.list({ ...options, allowCached: true });
       if (when === "before") putBack();
       const replacing = cache.list({ ...options, allowCached: false });
@@ -149,7 +146,6 @@ describe("WorkspaceFileListingCache", () => {
     };
     const putBack = () =>
       cache.observe("ws-a", ATTACHMENT_A, [{ path: "packing.md", kind: "changed" }]);
-    // packing.md is put back behind the replaced walk, and again behind its retry.
     const load = vi
       .fn()
       .mockReturnValueOnce(replaced.promise)

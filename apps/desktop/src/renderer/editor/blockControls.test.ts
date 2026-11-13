@@ -74,7 +74,6 @@ function makeEditorWithControls(content: Record<string, unknown>, plugins: Plugi
   });
 }
 
-/** Top-level block node types, in document order, with their start positions. */
 function topLevelBlocks(editor: Editor): { type: string; pos: number }[] {
   const blocks: { type: string; pos: number }[] = [];
   editor.state.doc.forEach((node, offset) => {
@@ -83,14 +82,12 @@ function topLevelBlocks(editor: Editor): { type: string; pos: number }[] {
   return blocks;
 }
 
-/** The gutter handle of the top-level block at `index`. */
 function blockHandle(editor: Editor, index: number): HTMLElement {
   const handle = editor.view.dom.querySelectorAll<HTMLElement>(".dohc-block-handle")[index];
   if (!handle) throw new Error(`block handle ${index} missing`);
   return handle;
 }
 
-/** The gutters on show after the pointer moves over `target`. */
 function hover(editor: Editor, target: Element): HTMLElement[] {
   target.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
   return visibleControls(editor);
@@ -102,7 +99,6 @@ function visibleControls(editor: Editor): HTMLElement[] {
   );
 }
 
-/** The innermost last element of the top-level block at `pos`. */
 function deepestElement(editor: Editor, pos: number): Element {
   let element = editor.view.nodeDOM(pos) as Element;
   while (element.lastElementChild) element = element.lastElementChild;
@@ -213,7 +209,6 @@ describe("BlockMenu on the Menu part's recipe and rule", () => {
     fireEvent.keyDown(menu, { key: "h" });
     expect(menu.getAttribute("aria-activedescendant")).toBe(rows[1]?.id);
 
-    // A row that opens under a still pointer does not take the active row.
     fireEvent.mouseMove(rows[4]!, { movementX: 0, movementY: 0 });
     expect(rows[1]?.hasAttribute("data-active")).toBe(true);
     fireEvent.mouseMove(rows[4]!, { movementX: 0, movementY: 2 });
@@ -305,7 +300,6 @@ describe("BlockMenu on the Menu part's recipe and rule", () => {
     expect(inView(remove)).toBe(true);
     fireEvent.keyDown(menu, { key: "Home" });
     expect(inView(rows[0]!)).toBe(true);
-    // The first row brings its section label along.
     expect(rows[0]!.parentElement!.offsetTop).toBeGreaterThanOrEqual(menu.scrollTop);
     fireEvent.keyDown(menu, { key: "ArrowUp" });
     expect(inView(remove)).toBe(true);
@@ -618,8 +612,6 @@ describe("blockControls gutter coverage", () => {
         .map((gutter) => gutter.style.getPropertyValue("--dohc-block-digits"));
     expect(digits()).toEqual(["1", "1", "2"]);
 
-    // A rebuild keeps the gutter of a block that keeps its kind and digits. A
-    // block that changes either gets a new one.
     const [paragraph, list, , nine] = gutters();
     editor.commands.insertContentAt(editor.state.doc.content.size, {
       type: "paragraph",
@@ -679,10 +671,8 @@ describe("blockControls gutter coverage", () => {
     expect(hover(editor, editor.view.dom.querySelector("td p")!)).toEqual([gutter(2)]);
     expect(hover(editor, editor.view.dom.querySelector("pre code")!)).toEqual([gutter(3)]);
     expect(hover(editor, editor.view.dom.lastElementChild!)).toEqual([gutter(4)]);
-    // A press between blocks lands on the editor itself, which no block owns.
     expect(hover(editor, editor.view.dom)).toEqual([]);
 
-    // The gap cursor's widget sits between the table's gutter and the table.
     const tablePos = topLevelBlocks(editor)[2]!.pos;
     editor.view.dispatch(
       editor.state.tr.setSelection(new GapCursor(editor.state.doc.resolve(tablePos))),
@@ -814,12 +804,6 @@ describe("blockControls turn into", () => {
   });
 });
 
-// The bubble menu's turn-into dropdown (blockControls.tsx's TurnIntoMenu)
-// doesn't get handed a block position the way the block context menu does —
-// it derives one from the current text selection via topLevelBlockPos, and
-// reads the active entry via turnIntoIdAt. These tests exercise that
-// same command-level path (resolve pos from selection -> turnBlockInto),
-// rather than re-testing turnBlockInto's own per-id branches above.
 describe("blockControls turn-into dropdown (bubble menu) command path", () => {
   it("keeps option clicks inside a shadow-root dropdown", () => {
     const editor = track(makeEditor("Some text"));
@@ -919,10 +903,6 @@ describe("resolveTurnIntoDropdown", () => {
   });
 });
 
-// Mount-level coverage for the dropdown itself: every option must be
-// rendered readable (bullet 8a was the bubble menu's overflow clipping the
-// dropdown to the toolbar's height), and the placement/max-height resolved
-// at open time must land on the listbox element for the CSS to consume.
 describe("TurnIntoMenu dropdown rendering", () => {
   it("opens a listbox with every turn-into option and the resolved placement/max height", () => {
     const editor = track(makeEditor("Hello world"));
@@ -1003,7 +983,6 @@ describe("TurnIntoMenu on the Menu part's recipe", () => {
       expect(listbox.getAttribute("aria-activedescendant")).toBe(quote.id);
       expect(quote.hasAttribute("data-active")).toBe(true);
       expect(inListView(listbox, quote)).toBe(true);
-      // The block's own type keeps its fill when the active option leaves it.
       expect(text.className.split(" ")).toContain("bg-selected");
       fireEvent.keyDown(listbox, { key: "h" });
       expect(listbox.getAttribute("aria-activedescendant")).toBe(options[1]!.id);

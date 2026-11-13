@@ -156,9 +156,7 @@ type Sample = {
   typed?: string;
   remove?: string[];
   source?: string;
-  // Values set on two replicas of the imported document, one each, then merged.
   concurrent?: [[string, unknown], [string, unknown]];
-  // The settle must keep the frontmatter block exactly as written.
   keeps?: boolean;
   checkImport?: boolean;
   checkBody?: boolean;

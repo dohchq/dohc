@@ -58,9 +58,6 @@ beforeEach(async () => {
   root = await createTestScratch("dohc-files-");
 });
 
-// Steps an import takes on disk, so a test can change the disk between two
-// of them as another process could. Each hook is one test's, and runs only
-// for the path it names.
 const fsHooks: {
   lstatResult?: (path: string, stats: Stats) => void;
   beforeOpen?: (path: string) => Promise<void>;
@@ -98,7 +95,6 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   };
 });
 
-// Runs `step` the first time the hook sees `path`.
 function once(path: string, step: () => Promise<void>): (seen: string) => Promise<void> {
   let ran = false;
   return async (seen) => {
@@ -165,7 +161,6 @@ describe("createFile", () => {
 });
 
 describe("createDurableFile", () => {
-  // The process stops halfway through writing: the final name must not hold a cut-off file.
   it("keeps the final name empty until the complete bytes are linked there", async () => {
     const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
     const halfWritten = deferred(),
@@ -447,7 +442,6 @@ describe("movePath", () => {
     await writeFile(join(root, "b.md"), "B");
     await expect(movePath(root, "a.md", "b.md")).rejects.toThrow(/already exists/);
     expect(await readFile(join(root, "b.md"), "utf8")).toBe("B");
-    // No merge semantics: dir-onto-dir with the same name refuses too.
     await mkdir(join(root, "x"), { recursive: true });
     await mkdir(join(root, "y/x"), { recursive: true });
     await expect(movePath(root, "x", "y/x")).rejects.toThrow(/already exists/);
@@ -481,7 +475,6 @@ describe("movePath", () => {
       await expect(movePath(root, "Team", "team/leads/sub")).rejects.toThrow(/into itself/);
       expect(await readFile(join(root, "Team", "leads", "x.md"), "utf8")).toBe("x");
     } else {
-      // Case-sensitive fs: the same-case descendant is still refused lexically.
       await expect(movePath(root, "Team", "Team/leads/sub")).rejects.toThrow(/into itself/);
     }
   });
@@ -540,7 +533,6 @@ describe("deletePath", () => {
     const trashNames = await readdir(join(root, ".dohc", "local", "trash"));
     expect(trashNames).toHaveLength(1);
     expect(trashNames[0]).toMatch(/^\d+-[0-9a-f-]+-junk\.md$/);
-    // Recoverable: the bytes survive, never a hard delete.
     expect(await readFile(join(root, ".dohc", "local", "trash", trashNames[0]!), "utf8")).toBe(
       "recover me",
     );
@@ -573,7 +565,6 @@ describe("deletePath", () => {
     await expect(deletePath(workspace(), "secret-notes.md", rejectingTrash)).rejects.toThrow(
       /A link is at \.dohc\/local\/trash, which must be a real folder/,
     );
-    // The file stayed put; nothing landed in the attacker directory.
     expect(await readFile(join(root, "secret-notes.md"), "utf8")).toBe("private");
     expect(await readdir(outside)).toEqual([]);
   });
@@ -664,11 +655,6 @@ describe("deletePath", () => {
       },
     );
 
-    // An empty folder lists no entry, so the bound is checked before each
-    // folder the walk opens, and once more before it answers. A bound
-    // already past stands in for one that runs out among empty folders. Past
-    // it, the walk opens nothing more: a folder it can't open would fail.
-
     it.skipIf(process.platform === "win32")(
       "moves nothing from a folder too large to check in its bounds",
       async () => {
@@ -683,7 +669,6 @@ describe("deletePath", () => {
           await expect(deletePath(workspace(), "folder", rejectingTrash)).rejects.toThrow(words);
         });
         await untouched();
-        // Within its bounds the same folder moves.
         await withICloudCheck(
           { applies: true, maxEntries: 7, readFlags: async (paths) => paths.map(() => 0) },
           async () => {
@@ -724,8 +709,6 @@ describe("deletePath", () => {
     await symlink(join(outside, "victim.md"), join(root, "link.md"), "file");
     const result = await deletePath(workspace(), "link.md", rejectingTrash);
     expect(result).toEqual({ trashed: false });
-    // The LINK left the tree, the target is untouched, and the trash holds the
-    // link (never the target's bytes).
     expect(existsSync(join(root, "link.md"))).toBe(false);
     expect(await readFile(join(outside, "victim.md"), "utf8")).toBe("keep");
     const trashNames = await readdir(join(root, ".dohc", "local", "trash"));
@@ -809,7 +792,6 @@ describe("copyIntoWorkspace", () => {
     await writeFile(join(root, "notes.md"), "existing");
     const outcome = await copyIntoWorkspace(root, [join(outside, "notes.md")]);
     expect(outcome).toEqual({ imported: ["notes (2).md"], skipped: 0 });
-    // The existing file is untouched; the import landed beside it.
     expect(await readFile(join(root, "notes.md"), "utf8")).toBe("existing");
     expect(await readFile(join(root, "notes (2).md"), "utf8")).toBe("incoming");
   });
@@ -818,9 +800,6 @@ describe("copyIntoWorkspace", () => {
   // are imported again beside themselves, not skipped. The shell names what
   // landed so the person can pick only the rest.
 
-  // A failed copy stops the import and says which file and why. Files that
-  // landed first come back too, so the shell can name them instead of
-  // letting a retry copy them again.
   it("returns what landed and which file stopped the import", async () => {
     const outside = await createTestScratch("dohc-import-");
     await writeFile(join(outside, "one.md"), "one");
@@ -973,8 +952,6 @@ describe("importDroppedPaths", () => {
     expect(await readdir(join(root, "Trip", "photos"))).toEqual(["beach.jpg"]);
   });
 
-  // Inside a folder these are left behind without a word. Dropped on their
-  // own, the person handed them over, so each is named with its reason.
   it("names each item a drop leaves out on its own, and why", async () => {
     const outside = await createTestScratch("dohc-drop-");
     await writeFile(join(outside, "ok.md"), "ok");
@@ -996,8 +973,6 @@ describe("importDroppedPaths", () => {
     });
   });
 
-  // The validator reads these as .git, .dohc and .DS_Store, but the file is
-  // named with the encoded spelling, so renaming it is the fix.
   it("says an encoded spelling of a reserved name can't be saved", () => {
     expect(nameSkip("cfg%2f.git")).toBe("name");
     expect(nameSkip("%2edohc")).toBe("name");
@@ -1055,7 +1030,6 @@ describe("importDroppedPaths", () => {
     const outside = await createTestScratch("dohc-many-");
     const fits = join(outside, "fits");
     await mkdir(join(fits, "inner"), { recursive: true });
-    // The two folders and 998 files make 1,000.
     await Promise.all(
       Array.from({ length: 998 }, (_, i) => writeFile(join(fits, "inner", `f-${i}.md`), "x")),
     );
@@ -1068,7 +1042,6 @@ describe("importDroppedPaths", () => {
     await Promise.all(
       Array.from({ length: 999 }, (_, i) => writeFile(join(over, `f-${i}.md`), "x")),
     );
-    // A file, the folder, and its 999 files make 1,001: nothing lands.
     await expect(
       importDroppedPaths(root, [join(outside, "loose.md"), over], [root]),
     ).rejects.toThrow(
@@ -1093,7 +1066,6 @@ describe("importDroppedPaths", () => {
       skippedSources: [{ path: "innocent.txt", reason: "link" }],
     });
     expect(existsSync(join(root, "innocent.txt"))).toBe(false);
-    // Nothing landed in the workspace — the secret never left its directory.
     expect(await readdir(root)).toEqual([]);
   });
 
@@ -1130,7 +1102,6 @@ describe("importDroppedPaths", () => {
       folders: ["Trip"],
     });
     expect(await readdir(elsewhere)).toEqual([]);
-    // The file dialog's path takes the same check.
     expect(await copyIntoWorkspace(root, [encodedFile])).toEqual({
       imported: [],
       skipped: 1,
@@ -1138,9 +1109,6 @@ describe("importDroppedPaths", () => {
     });
     expect(await readdir(elsewhere)).toEqual([]);
   });
-
-  // A nested name is checked where it lands: only the workspace root reserves
-  // shared-with-me.
 
   // Another process that can write the dropped folder, but not read the
   // secret, swaps what the screen saw for a link before the copy.
@@ -1172,14 +1140,8 @@ describe("importDroppedPaths", () => {
     },
   );
 
-  // Folders that landed are progress: the same drop again would land as
-  // Trip (2), so the result says the import stopped partway.
-
   // A folder swapped for a link while the screen reads it, and put back
   // before the copy, would have the screen record the link target's files.
-
-  // The forged identity stands for a screen that recorded the link target's
-  // file. The folder check after the open still refuses the read.
 
   it("refuses a drop whose folders hold more than 10,000 entries it leaves out", async () => {
     const outside = await createTestScratch("dohc-many-");
@@ -1224,8 +1186,6 @@ describe("importDroppedPaths", () => {
     expect(existsSync(join(root, "Trip", "sub", "a.md"))).toBe(false);
   });
 
-  // A process that can write the workspace, such as an agent, swaps a folder
-  // the import just made for a link out of the workspace.
   it("never creates through a destination folder swapped for a link", async () => {
     const outside = await createTestScratch("dohc-drop-");
     const elsewhere = await createTestScratch("dohc-elsewhere-");
@@ -1362,8 +1322,6 @@ describe("importDroppedPaths", () => {
 describe("trash ladder stop classification", () => {
   const entry = { ino: 7n, dev: 3n };
 
-  // The finding: EACCES, EIO and friends establish nothing about the path.
-  // They establish that dohc could not look, which is a different sentence.
   it("says it could not check when the look itself failed", () => {
     for (const code of ["EACCES", "EIO", "EPERM", undefined]) {
       expect(classifyLadderProbe(entry, { looked: false, code }), code).toBe("unchecked");
@@ -1402,7 +1360,6 @@ describe("copy length-refusal classification", () => {
 // here, and it is the case that carries the defect: a link to an unreachable
 // network path would be reported to the user as a link to a missing file.
 describe("copy end-probe classification", () => {
-  // The finding. The same distinction the trash ladder draws above.
   it("says it could not check when the probe itself failed", () => {
     for (const code of ["EACCES", "EIO", "EPERM", "ELOOP", "ETIMEDOUT", undefined]) {
       expect(classifyEndProbe({ looked: false, code }), code).toBe("unknown");
@@ -1423,7 +1380,6 @@ describe("import surfaces a vanished source instead of skipping it", () => {
       await mkdir(root, { recursive: true });
       const source = join(base, "link.md");
       await symlink(join(base, "never-existed.md"), source, "file");
-      // The link itself is right there -- that is why lstat got it wrong.
       expect((await lstat(source)).isSymbolicLink()).toBe(true);
 
       // The reason and the instruction come before the name: this renders in a
@@ -1443,8 +1399,6 @@ describe("import surfaces a vanished source instead of skipping it", () => {
     }
   });
 
-  // A link whose target IS there is an ordinary source: the dialog path
-  // deliberately follows it, so it still imports and still gets shortened.
   it("still imports through a symbolic link whose target exists", async () => {
     const base = await mkdtemp(join(tmpdir(), "dohc-livelink-"));
     try {
@@ -1461,9 +1415,6 @@ describe("import surfaces a vanished source instead of skipping it", () => {
       const outcome = await copyIntoWorkspace(root, [source]);
       expect(outcome.skipped).toBe(0);
       expect(outcome.imported).toHaveLength(1);
-      // What landed is the TARGET's bytes, under a collision variant, and the
-      // file that was already there is untouched. The outcome shape alone would
-      // still pass if the copy had overwritten it.
       const landed = outcome.imported[0];
       expect(landed).not.toBe(name);
       expect(await readFile(join(root, landed), "utf8")).toBe("keep me");

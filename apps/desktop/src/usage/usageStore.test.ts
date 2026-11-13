@@ -737,7 +737,6 @@ describe("local usage store", () => {
     await next.close();
     expect(io.writeFile).not.toHaveBeenCalled();
     expect(io.rename).not.toHaveBeenCalled();
-    // A launch clears only a leftover swap beside the record.
     expect(io.rm.mock.calls.filter(([file]) => !file.startsWith(`${path}.incoming`))).toEqual([]);
     expect(disk.get(path)).toBe(raw);
     expect(vi.getTimerCount()).toBe(0);
@@ -830,7 +829,6 @@ describe("local usage store", () => {
     expect((await store.read()).counts).toEqual([{ ...pair, day: today(), count: 1 }]);
     expect(store.recordSuccess(pair)).toBe(true);
   });
-  // Fails the next move of `from`, and only that one.
   function failMove(
     io: ReturnType<typeof memoryStore>["io"],
     from: string,
@@ -857,17 +855,14 @@ describe("local usage store", () => {
 
     await store.startNewRecord();
     const newer = disk.get(path);
-    // The newer record moves aside, the older one cannot move in, so the newer returns.
     failMove(io, `${path}.incoming`);
     await expect(store.restoreSetAside()).rejects.toThrow("file in use");
     expect(disk.get(path)).toBe(newer);
     expect(disk.get(at(1))).toBe("not JSON");
     expect(disk.has(at(2))).toBe(false);
-    // A rolled-back Restore leaves nothing a later launch could install.
     expect([...disk.keys()].filter((file) => file.includes(".incoming"))).toEqual([]);
     expect((await store.read()).enabled).toBe(false);
   });
-  // An older record set aside with 7 counts, ready to restore over the active one.
   function withOlderAside() {
     const memory = memoryStore();
     memory.disk.set(
@@ -891,7 +886,6 @@ describe("local usage store", () => {
     expect([...disk.keys()].filter((file) => file.includes(".incoming"))).toEqual([]);
     expect(disk.has(join("isolated-state", usageAsideName(2)))).toBe(false);
     await store.close();
-    // The person quits and deletes the record: the next launch starts fresh.
     disk.delete(path);
     expect((await restart().read()).counts).toEqual([]);
   });
@@ -1029,7 +1023,6 @@ describe("local usage store", () => {
     expect(disk.has(path)).toBe(false);
     expect(store.recordSuccess(pair)).toBe(false);
     io.link.mockImplementation(link);
-    // The next read finishes the swap from the record waiting beside it.
     expect((await store.read()).counts.map((row) => row.count)).toEqual([7]);
   });
   it.each(["one dohc can read", "one dohc cannot decode"])(
@@ -1152,7 +1145,6 @@ describe("local usage store", () => {
       expect(read.enabled).toBe(action !== "on");
       expect(read.counts).toEqual(initial.counts);
       expect(saved()).toMatchObject({ enabled: action !== "on", counts: initial.counts });
-      // The retried write keeps the old state, and nothing it lost comes back.
       await vi.advanceTimersByTimeAsync(30_000);
       expect(saved()).toMatchObject({ enabled: action !== "on", counts: initial.counts });
       expect(store.recordSuccess(pair)).toBe(action !== "on");

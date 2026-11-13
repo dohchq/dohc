@@ -164,9 +164,7 @@ describe("datasetButtonAccess", () => {
       true,
     );
     expect(datasetButtonAccess(describedAs(["markPaid"]), "Invoices", [])).toBe(true);
-    // Reading alone is not enough.
     expect(datasetButtonAccess(describedAs(["list"]), "Invoices", [])).toBe(false);
-    // A step invokes an operation this person is not given.
     expect(datasetButtonAccess(describedAs(["markPaid"]), "Invoices", ["markPaid", "list"])).toBe(
       false,
     );

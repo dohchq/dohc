@@ -8,7 +8,6 @@ it("moves the key once for each change main makes, whichever shell reads it firs
   const key = renderHook(() => useReopenKey("ws-observe"));
   const shellA = watchLiveSessions("ws-observe");
   act(() => observeLiveSessions("ws-observe", 0, false));
-  // Main retires its sessions, and a shell that opens now reads the new generation first.
   const shellB = watchLiveSessions("ws-observe");
   act(() => observeLiveSessions("ws-observe", 1, false));
   act(() => observeLiveSessions("ws-observe", 1, true));

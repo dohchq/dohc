@@ -232,7 +232,6 @@ it("starts no frame stream before the adoption's seed applies, then starts one w
     continueDrain: false,
   };
   try {
-    // The adoption's seed is still queued: validation asked to retry.
     state.drain.mockResolvedValueOnce(pending);
     state.seedApplied.mockReturnValueOnce(false);
     await expect(f.delivery.captureNative(binding)).rejects.toThrow(
@@ -294,8 +293,6 @@ it("waits for the owner pass before a named drain or settlement acquires the sam
   }
 });
 
-// Proves: the owner's settlement request, as after consenting to a held write,
-// settles past the settlement an ordinary settle reuses.
 it("settles an owner's settlement request through settleWanted", async () => {
   const f = await fixture();
   try {

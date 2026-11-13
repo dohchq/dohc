@@ -184,7 +184,6 @@ describe("requireE2eEngine", () => {
       override: null,
     });
 
-    // No copy happened, and it says so rather than reporting one that did not.
     expect(result.copied).toBe(false);
     expect(readFileSync(staged, "utf8")).toBe("the only copy");
   });

@@ -208,8 +208,6 @@ function renderActiveHeadingHarness(
     textContent: string;
     isTextblock: true;
   };
-  // A document of the current headings. Each edit makes a new one, which
-  // differs from the last everywhere.
   const headingsDoc = () => {
     const shown = [...headings];
     const node = (heading: OutlineHeading): FakeHeadingNode => ({
@@ -525,7 +523,6 @@ describe("OutlinePanel active heading", () => {
     const harness = renderActiveHeadingHarness([0, 200, 400]);
     harness.setMarginHits(true);
 
-    // The line sits 10 px above Plan, where a hit resolves to Plan's start.
     harness.scrollTo(118);
     expect(harness.activeText()).toBe("Intro");
 
@@ -534,8 +531,6 @@ describe("OutlinePanel active heading", () => {
   });
 
   it("takes the last reached heading of a row, as in document order", () => {
-    // Plan and Review sit side by side in one table row; the hit lands in
-    // Plan's cell.
     const harness = renderActiveHeadingHarness([0, 200, 200]);
     harness.setHitHeading(1);
 
@@ -545,8 +540,6 @@ describe("OutlinePanel active heading", () => {
   });
 
   it("walks back past every heading of a cell the line has not reached", () => {
-    // Plan and Review sit low in a row's first cell; the hit lands in the
-    // second cell, after both in document order.
     const harness = renderActiveHeadingHarness([0, 300, 400]);
     harness.setHitHeading(2);
 
@@ -556,8 +549,6 @@ describe("OutlinePanel active heading", () => {
   });
 
   it("walks back past a folded heading to the last drawn one", () => {
-    // Plan is folded away; Review and Done sit low in a row's first cell and
-    // the hit lands in the second cell.
     const harness = renderActiveHeadingHarness([0, 0, 300, 400]);
     harness.fold(1);
     harness.setHitHeading(3);
@@ -568,7 +559,6 @@ describe("OutlinePanel active heading", () => {
   });
 
   it("passes over a folded heading between headings of a row", () => {
-    // Plan and Done share a row; Review, between them, is folded away.
     const harness = renderActiveHeadingHarness([0, 200, 0, 200]);
     harness.fold(2);
     harness.setHitHeading(1);

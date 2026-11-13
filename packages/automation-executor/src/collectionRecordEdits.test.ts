@@ -491,7 +491,6 @@ function fakeSession(
   return { session, log };
 }
 
-/** A host over files in `root`: it records each session opened and each file created, with its author. */
 function contextFor(
   root: string,
   session: RecordEditSession,
@@ -723,7 +722,6 @@ function fakeEngine() {
       if (listeners.size > 0) return Promise.resolve();
       return new Promise((resolve) => waitingForListener.push(resolve));
     },
-    /** Resolves once the seam has asked for `count` records. */
     lookupsReached(count: number): Promise<void> {
       if (lookups.length >= count) return Promise.resolve();
       return new Promise((resolve) => waitingForLookups.push({ count, resolve }));
@@ -734,7 +732,6 @@ function fakeEngine() {
     announce(paths: readonly string[] | null) {
       for (const listener of [...listeners]) listener(paths);
     },
-    /** Adopts the file the seam wrote at `path` under the id in its frontmatter. */
     async adopt(root: string, path: string): Promise<string> {
       const text = await readFile(join(root, path), "utf8");
       const recordId = /^---\nid: (rec_[a-z2-7]{26})\n---\n$/.exec(text)?.[1];
@@ -816,8 +813,6 @@ describe("setCollectionRecordFields", () => {
     });
 
     expect(context.openedPaths).toEqual(["tasks/one.md"]);
-    // One journaled update per field carrying the agent's origin, then one
-    // settle before release.
     expect(log.order).toEqual(["apply", "apply", "settle", "close"]);
     const journaled = {
       actorOriginId: "notes-agent",
@@ -879,7 +874,6 @@ describe("setCollectionRecordFields", () => {
       kept: {},
     });
 
-    // The journaled updates touch only the changed fields, one each.
     expect(log.updates).toHaveLength(2);
     const replica = new Y.Doc();
     Y.applyUpdate(replica, before);
@@ -983,7 +977,6 @@ describe("setCollectionRecordFields", () => {
     const context = contextFor(root, session, {
       signal: controller.signal,
       async openRecord() {
-        // An automation run's deadline passes while the engine opens it.
         controller.abort();
         return session;
       },
@@ -1089,9 +1082,7 @@ describe("setCollectionRecordFields", () => {
 
   it("compares each field when it is written, so a change that lands after the session opens is kept", async () => {
     const root = await createTestScratch("dohc-collection-edits-");
-    // Undo's case: put Note back to "old" only while it still holds the run's "new".
     const { session, log } = fakeSession({
-      // A remote edit lands after the open and before the field's turn.
       beforeTurn: (doc) => doc.getMap("frontmatter").set("Note", "theirs"),
     });
     log.doc.getMap("frontmatter").set("Note", "new");
@@ -1246,7 +1237,6 @@ describe("createCollectionRecord", () => {
     expect(engine.lookups).toEqual([recordId, recordId]);
     expect(engine.listeners.size).toBe(0);
 
-    // Fields were seeded through the one write seam, attributed to the agent.
     expect(log.journaled).toEqual([
       {
         actorOriginId: "notes-agent",
@@ -1647,7 +1637,6 @@ describe("createCollectionRecord", () => {
       expect(unsubscribe).toHaveBeenCalledTimes(1);
       expect(engine.listeners.size).toBe(0);
       expect(context.openedPaths).toEqual([]);
-      // Only the outer creation's diagnostic read runs after cancellation.
       expect(read).toHaveBeenCalledTimes(1);
       expect(engine.lookups).toEqual([]);
     },

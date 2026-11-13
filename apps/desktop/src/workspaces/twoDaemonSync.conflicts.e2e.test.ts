@@ -81,8 +81,6 @@ it.skipIf(engine.missing)(
       });
       expect(await daemonA.capture.countOpenConflicts()).toBe(0);
 
-      // B is still reviewing the old seed. A saves one edit and journals
-      // another without settling it, so the disk cannot stand in for its Y.Doc.
       const editingA = await openEditor(daemonA, path);
       editors.push(editingA);
       await typeAtEnd(editingA, "saved on A during review\n");

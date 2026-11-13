@@ -137,7 +137,6 @@ describe("isInside", () => {
   });
 
   it("counts equality after normalization as inside", () => {
-    // A trailing separator names the same directory.
     expect(isInside(`${root}${sep}`, root)).toBe(true);
     expect(isInside(root, `${root}${sep}`)).toBe(true);
   });

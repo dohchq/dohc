@@ -183,7 +183,6 @@ describe("createOwnedWorkspaceReadPort", () => {
         ? "SHARED-WITH-ME/HEALTHY/RESTORED.MD"
         : "shared-with-me/healthy/restored.md",
     );
-    // A file, so the search reads that one file rather than a folder below it.
     expect(view.includeGlob).toBe("shared-with-me/healthy/restored.md");
     expect(view.allowPath("shared-with-me/healthy/restored.md")).toBe(true);
   });

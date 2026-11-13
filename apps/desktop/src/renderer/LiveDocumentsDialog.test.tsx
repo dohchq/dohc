@@ -16,7 +16,6 @@ import {
 } from "./LiveDocumentsDialog";
 import { formatShortTime } from "./time";
 
-// The server names each row's document; here, after its path.
 function row(path: string, overrides: Partial<LiveDocumentRow> = {}): LiveDocumentRow {
   return { path, objectId: `object:${path}`, status: "ready", canResume: false, ...overrides };
 }
@@ -103,7 +102,6 @@ it("shows a document whose edit history the server can't check, with Resume and 
   expect(h.resume).toHaveBeenCalledWith("ws-1", "docs/long.md");
 });
 
-// The server keeps trying it; the row says why in the server's word, and Resume tries now.
 it("shows a document whose live start keeps failing, with the server's reason to copy, Resume and Stop", async () => {
   const h = harness(),
     user = userEvent.setup();
@@ -140,7 +138,6 @@ it("shows a document whose live start keeps failing, with the server's reason to
   expect(h.resume).toHaveBeenCalledWith("ws-1", "docs/failing.md");
 });
 
-// The server's reason line belongs to the row form, so another reason that carries one shows it under its own sentence.
 it("shows the server's reason on any row that carries one", async () => {
   const h = harness();
   const since = "2026-11-13T01:00:00.000Z";
@@ -301,7 +298,6 @@ describe("LiveDocumentsDialog", () => {
         "dohc could not load the server's list. These edits are kept on this computer.",
       ),
     ).toBeTruthy();
-    // The toast keeps the cause.
     expect(h.onError).toHaveBeenCalledExactlyOnceWith(
       "dohc could not load the live documents for this workspace.",
       failure,
@@ -311,7 +307,6 @@ describe("LiveDocumentsDialog", () => {
       .setup()
       .click(within(kept).getByRole("button", { name: "Save recovery copy of note.md" }));
     expect(h.saveRecoveryCopy).toHaveBeenCalledExactlyOnceWith("ws", "note.md", "old-1");
-    // Once the server's list reads, it is the list, set-aside rows included.
     await act(async () => {
       h.onError.mock.calls[0]![2]();
     });
@@ -323,8 +318,6 @@ describe("LiveDocumentsDialog", () => {
       ),
     ).toBeNull();
   });
-  // Proves: a document whose server copy is missing an owner edit offers Resume,
-  // alone and with a deferred Stop, through the same path, with one Resume sentence each.
   it("offers Resume on a document whose server copy is missing an edit, with and without a deferred Stop", async () => {
     const h = harness(),
       reason = "live-edit-unadmitted" as const;
@@ -478,8 +471,6 @@ describe("LiveDocumentsDialog", () => {
       "Stopped",
       "Stopped",
     ]);
-    // Only a document whose server copy is missing an owner edit says so, and
-    // that a Resume tries it again.
     const edited =
       "The server hasn't applied an edit to this document. Resume live editing to try again.";
     expect(screen.getAllByText(edited)).toHaveLength(1);
@@ -490,16 +481,13 @@ describe("LiveDocumentsDialog", () => {
     expect(screen.getAllByText(held)).toHaveLength(1);
     expect(screen.getByTestId("live-document-row-docs/held.md").textContent).toContain(held);
     expect(actions("docs/held.md")).toEqual(["Stop live editing"]);
-    // Only a document whose server copy diverged sends its owner to the server's operator.
     const operator =
       "The server's copy of this workspace no longer matches the synced one. Contact the server's operator.";
     expect(screen.getAllByText(operator)).toHaveLength(1);
     expect(screen.getByTestId("live-document-row-docs/diverged.md").textContent).toContain(
       operator,
     );
-    // A Stop cannot finish on a diverged copy either.
     expect(actions("docs/diverged.md")).toEqual([]);
-    // Only the document dohc has never opened says to open it before Resume.
     const openFirst =
       "Live editing can't start until you open this document once in dohc. After you open it, resume live editing. A note larger than 256 KB doesn't open as a document in dohc. Make it smaller or split it, then open it.";
     expect(screen.getAllByText(openFirst)).toHaveLength(1);
@@ -623,14 +611,11 @@ describe("LiveDocumentsDialog", () => {
     });
 
     expect(h.stop).toHaveBeenCalledWith("ws-a", "docs/a.md", "object:docs/a.md");
-    // Workspace A's Stop never reports into workspace B.
     expect(h.onStopped).not.toHaveBeenCalled();
     expect(h.load).toHaveBeenCalledTimes(2);
     expect(h.load).toHaveBeenNthCalledWith(2, "ws-b", undefined);
   });
 
-  // A share whose live editing never started is not a live document. It gets
-  // its own section, its own words, and one Try again per share.
   describe("refused shares", () => {
     it("does not display or copy arbitrary server text", async () => {
       const h = harness();
@@ -674,8 +659,6 @@ describe("LiveDocumentsDialog", () => {
       });
 
       expect(h.retryRefusal).toHaveBeenCalledWith("ws-a", "share-1");
-      // Only the two mounts read: the refresh for the workspace that left
-      // never ran, and nothing it would have painted is on screen.
       expect(h.load).toHaveBeenCalledTimes(2);
       expect(h.load).toHaveBeenNthCalledWith(2, "ws-b", undefined);
       expect(h.loadRefusals).toHaveBeenCalledTimes(2);
@@ -683,8 +666,6 @@ describe("LiveDocumentsDialog", () => {
       expect(h.onError).not.toHaveBeenCalled();
     });
 
-    // The share was already asked. Its recovery re-reads both lists and must
-    // never enrol it a second time.
     it("recovers read-only when the refresh fails after a successful retry", async () => {
       const h = harness();
       h.load
@@ -702,7 +683,6 @@ describe("LiveDocumentsDialog", () => {
       expect(h.onError.mock.calls[0]![0]).toBe(
         "dohc could not load the live documents for this workspace.",
       );
-      // A half-finished refresh claims neither list.
       expect(
         screen.getByText(
           "This list is not current. Reload to see this workspace's live documents.",
@@ -805,7 +785,6 @@ describe("LiveDocumentsDialog", () => {
         "unreadable:outbox",
       );
       expect(screen.getByTestId("live-document-row-docs/a.md")).toBeTruthy();
-      // Read: the list reads again and shows the queue as it is now.
       h.load.mockResolvedValue(
         page([{ ...unreadable, quarantine: "paused", incident: "outbox:delivery:0" }]),
       );

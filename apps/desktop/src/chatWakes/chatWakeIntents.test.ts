@@ -28,7 +28,6 @@ const scratchFile = async () =>
 
 type OpenFile = NonNullable<DurableFileOperations["open"]>;
 
-/** Opens real files, and fails the fsync of the temporary file ("w") or of its folder ("r"). */
 const failingSync =
   (flagsToFail: "w" | "r"): OpenFile =>
   async (path, flags, mode) => {

@@ -84,7 +84,6 @@ const bridgeMock = {
       replacedListeners.delete(listener);
     };
   }),
-  // Main's trust. The person's answer in main's dialog is `answer`.
   readWorkspaceTrust: vi.fn(
     async ({ workspaceId }: { workspaceId: string }): Promise<WorkspaceTrustAnswer> => ({
       workspaceId,
@@ -183,14 +182,12 @@ describe("SitePreviewPage", () => {
       "49160",
     );
     expect(screen.getByTestId("site-preview-mode").textContent).toBe("Build");
-    // An older start, or one meant for another surface, changes nothing.
     replace(next(2, 49170));
     replace({ ...next(4, 49180), holderId: "another-surface" });
     expect(new URL(screen.getByTestId("site-preview-frame").getAttribute("src") ?? "").port).toBe(
       "49160",
     );
 
-    // A restart that failed after stopping the preview leaves nothing to show.
     replace({ ...next(5, 49190), preview: null });
     expect(screen.queryByTestId("site-preview-frame")).toBeNull();
     expect(screen.getByText("Preview stopped. Use Preview options to run it again.")).toBeTruthy();
@@ -254,7 +251,6 @@ describe("SitePreviewPage", () => {
       expect(state.textContent).toContain("In Restricted Mode, dohc does not run this app's code.");
       await screen.findByTestId("site-preview-frame");
       expect(starts()).toEqual(["static"]);
-      // The static preview stands in; the person's mode is still Dev.
       expect(window.localStorage.getItem("dohc.site-preview-mode.v1:ws-sites:report")).toBeNull();
 
       await userEvent.click(screen.getByRole("button", { name: "Trust workspace" }));
@@ -662,7 +658,6 @@ describe("SitePreviewPage", () => {
       const settledRenders = renders;
       const settledPolls = bridgeMock.getSitePreviewLogs.mock.calls.length;
 
-      // Three more unchanged polls: zero renders.
       await act(async () => {
         await vi.advanceTimersByTimeAsync(3_000);
       });

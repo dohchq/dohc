@@ -19,7 +19,6 @@ function trip(options: { findMessage?: boolean } = {}) {
   return { store, group, dm, host, commands };
 }
 
-// A post with a question in it, read back as the engine stores it.
 function asked(store: MemoryChatStore, options?: readonly string[]) {
   store.addThread({ id: "thread-plan", channelId: "channel-trip", lane: "posts" });
   const question = store.addMessage({
@@ -444,7 +443,6 @@ describe("answer", () => {
         message: { id: "mine" },
         winnerMessageId: "earlier",
       });
-      // The same reply already won: a retry finds it resolved.
       Object.assign(store.decisions.get("thread-plan")![0]!, { resolvedByMessageId: "mine" });
       await expect(
         answerWithReply(host, { threadId: "thread-plan", messageId: "question", replyId: "mine" }),

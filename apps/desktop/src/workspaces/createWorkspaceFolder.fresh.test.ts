@@ -126,7 +126,6 @@ describe("New workspace's claim that it made a folder from nothing", () => {
       await symlink(elsewhere, rootPath, linkType);
     };
     await expect(create(root)).rejects.toThrow(FOLDER_CHANGED);
-    // The link's target got no manifest either.
     expect(existsSync(join(elsewhere, ".dohc", "manifest.json"))).toBe(false);
   });
 });

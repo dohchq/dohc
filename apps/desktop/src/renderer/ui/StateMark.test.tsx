@@ -100,7 +100,6 @@ describe("StateMark", () => {
       expect(chip.getAttribute("data-state")).toBe(key);
       expect(chip.textContent).toBe(SAVE_STATE[key].label);
       expect(chip.getAttribute("title")).toBe(SAVE_STATE[key].title ?? null);
-      // One decorative mark before the words, never a second accessible name.
       expect(container.querySelectorAll("[aria-hidden]")).toHaveLength(1);
       // Nothing moves, so reduced motion has nothing to switch off.
       expect(container.innerHTML).not.toMatch(/animate-|animation/u);
@@ -109,8 +108,6 @@ describe("StateMark", () => {
   });
 
   it("keeps the stored state when a different row is shown", () => {
-    // A disabled editor over a saved draft: the chip says why, but
-    // the shell still sees the draft's own state.
     render(<StateMark testId="mark" state="saved" shown="too-large" />);
     const chip = screen.getByTestId("mark");
     expect(chip.getAttribute("data-state")).toBe("saved");
@@ -157,16 +154,12 @@ describe("StateMark", () => {
       expect.arrayContaining(["shrink-0", "whitespace-nowrap"]),
     );
     expect(retry.closest(".truncate")).toBeNull();
-    // The chip has its own column and keeps room for its mark and an ellipsis.
     const chip = screen.getByTestId("mark");
     expect(chip.parentElement!.parentElement).toBe(status);
     expect(chip.parentElement!.className.split(" ")).toContain("min-w-[28px]");
     expect(chip.querySelector(".truncate")?.textContent).toBe("Read-only");
   });
 
-  // A narrow header cuts the label short. The chip then takes focus and its
-  // tooltip carries the whole label and what it means. Its test id and text
-  // stay as they were, and its title gives way to the tooltip while cut.
   describe("cut short", () => {
     // jsdom lays nothing out, so the test says how wide the label is.
     function laidOut(scrollWidth: number, clientWidth: number) {
@@ -175,7 +168,6 @@ describe("StateMark", () => {
         client: vi.spyOn(Element.prototype, "clientWidth", "get").mockReturnValue(clientWidth),
       };
     }
-    // ResizeObservers that report a resize when the test says so.
     function resizes() {
       const live = new Set<() => void>();
       vi.stubGlobal(
@@ -192,7 +184,6 @@ describe("StateMark", () => {
       );
       return () => act(() => live.forEach((callback) => callback()));
     }
-    // What a screen reader hears as the chip's description.
     function description(chip: HTMLElement) {
       const ids = chip.getAttribute("aria-describedby");
       return ids === null
@@ -224,7 +215,6 @@ describe("StateMark", () => {
         "Saved locally · Pending shareYour edits are saved on this device. The shared file update is pending.",
       );
       expect(chip.textContent).toBe("Saved locally · Pending share");
-      // The chip's words are its label: its description is the explanation alone.
       expect(description(chip)).toBe(SAVE_STATE["pending-share"].title);
       expect(description(chip), "the label is read twice").not.toContain("Saved locally");
 
@@ -241,8 +231,6 @@ describe("StateMark", () => {
       expect(description(screen.getByTestId("mark"))).toBeNull();
     });
 
-    // Widening the pane, or a share going through, lets the label fit while
-    // the chip has focus.
     it("keeps focus when its label stops being cut, and leaves the tab order on blur", async () => {
       const widths = laidOut(300, 100);
       const resize = resizes();
@@ -269,8 +257,6 @@ describe("StateMark", () => {
       expect(chip.getAttribute("tabindex")).toBeNull();
     });
 
-    // A chip near a pane's left edge would push a right-aligned tooltip off
-    // the window, where a pane or panel edge cuts it off.
     it("keeps its tooltip under the chip and inside the window", async () => {
       laidOut(300, 100);
       vi.spyOn(Element.prototype, "getBoundingClientRect").mockReturnValue({
@@ -295,7 +281,6 @@ describe("StateMark", () => {
       expect(tooltip.style.top).toBe("30px");
     });
 
-    // The window shrinks, or the split moves, while the tooltip shows.
     it("follows the chip when the window or the chip changes size while it shows", async () => {
       laidOut(300, 100);
       const resize = resizes();

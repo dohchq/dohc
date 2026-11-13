@@ -27,9 +27,6 @@ vi.mock("@legendapp/list/react", () => ({
   ),
 }));
 
-// Secret-backed file UI: protected history rows carry a lock and the
-// compare view shows "Protected file changed" — contents never render.
-
 const SECRET_VALUE = "UI_SECRET_MARKER_555";
 
 function moment(overrides: Partial<EngineMomentRecord> & { id: string }): EngineMomentRecord {
@@ -105,7 +102,6 @@ describe("EngineHistoryView protected rows", () => {
         .getAllByTestId("engine-moment-summary")
         .find((summary) => summary.textContent === "Updated .env"),
     ).toBeTruthy();
-    // The protected row is still a normal, clickable timeline row.
     const rows = screen.getAllByTestId("engine-moment-open");
     expect(rows).toHaveLength(2);
     expect(screen.queryByText("Some protected activity in this range is not shown.")).toBeNull();
@@ -156,15 +152,12 @@ describe("VersionComparePage protected rows", () => {
     render(<VersionComparePage workspaceId="ws-1" versionId="v-1" />);
     const protectedPanel = await screen.findByTestId("version-compare-protected");
     expect(protectedPanel.textContent).toContain("Protected file changed");
-    // The ordinary file still renders its diff beside it.
     expect(screen.getByText("notes.md")).toBeTruthy();
-    // Never any secret content anywhere in the page.
     expect(document.body.textContent).not.toContain(SECRET_VALUE);
     const files = screen.getAllByTestId("version-compare-file");
     expect(files).toHaveLength(2);
     const secretSection = files.find((section) => section.dataset.comparePath === ".env");
     expect(secretSection?.querySelector('[data-testid="version-compare-protected"]')).toBeTruthy();
-    // The protected section renders no diff body at all.
     expect(secretSection?.querySelector('[data-testid="version-compare-diff-lines"]')).toBeNull();
   });
 });

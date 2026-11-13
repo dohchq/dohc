@@ -107,7 +107,6 @@ function relay(pages: Record<string, Page>) {
   });
 }
 
-// The listing for one /sync/shares body and one page of links.
 async function listed(shares: unknown, links: unknown[] = []): Promise<RosterListing> {
   const answer = await listRosterGrants(
     WORKSPACE,
@@ -204,7 +203,6 @@ describe("roster from the relay's listings", () => {
       "g-5",
       "g-6",
     ]);
-    // The revoked grant stays only as its person, which reach below never reads.
     expect(listing.grants !== null && listing.endedGrants).toEqual([
       {
         ...facts,
@@ -281,8 +279,6 @@ describe("roster from the relay's listings", () => {
   });
 
   it("finds the evidence to hold a step after the owner revoked, from another computer, a recipient who wrote it", async () => {
-    // Ana wrote Trip's automations directly; the owner revoked her on another
-    // computer before this one pulled what she wrote.
     const listing = await listed({ granted: [row({ revokedAtMs: 9, automationsGeneration: 1 })] });
     const entry: RegistryEntry = {
       workspaceId: WORKSPACE,
@@ -319,7 +315,6 @@ describe("roster from the relay's listings", () => {
       codeFiles: [],
       steps: [{ kind: "change-records", collection: { path: "Budget", name: "Budget" } }],
     });
-    // Allowed for the editors left, with Ana as the evidence the executor holds it on.
     expect(reach).toEqual({
       allowed: true,
       formerStops: [{ evidence: "g-1#1", name: "ana@dohc.test" }],
@@ -367,7 +362,6 @@ describe("keeping the roster current", () => {
   };
   const unchecked = (next: string) => ({ kind: "unknown", problem: { kind: "unchecked", next } });
 
-  // A roster listed before, with no pull since.
   function seed(): void {
     store.setShareRoster(
       WORKSPACE,
@@ -376,7 +370,6 @@ describe("keeping the roster current", () => {
     );
   }
 
-  // The same registry file, read the way a restarted dohc reads it.
   function restart(): void {
     store = createRegistryStore(store.registryFile);
   }
@@ -435,7 +428,6 @@ describe("keeping the roster current", () => {
     const diskFull = unchecked("Check that your disk has free space, then try again.");
     expect(await r.forRun(WORKSPACE)).toEqual(diskFull);
     expect(await r.forRun(WORKSPACE), "the write failure resolved itself").toEqual(diskFull);
-    // A mark that saves resolves it. The listing still fails after a pull.
     fail = false;
     r.pullStarting(WORKSPACE)();
     expect(await r.forRun(WORKSPACE)).toEqual(unchecked(failing.next));
@@ -455,7 +447,6 @@ describe("keeping the roster current", () => {
     expect(await run, "the run used a listing a pull overlapped").toEqual(cached);
     expect(list).toHaveBeenCalledTimes(2);
 
-    // When a pull overlaps that listing too, this run gets no roster.
     const third = deferred<RosterAnswer>();
     const fourth = deferred<RosterAnswer>();
     list.mockImplementationOnce(() => third.promise).mockImplementationOnce(() => fourth.promise);
@@ -540,7 +531,6 @@ describe("a shared workspace forgotten and attached again", () => {
         steps,
       });
 
-    // Shared with Ana, who can edit Trip.
     await mkdir(join(root, ".dohc"));
     await recordNeverSynced(root, { installId: "install-here", label: "This Mac" });
     store.register({
@@ -554,7 +544,6 @@ describe("a shared workspace forgotten and attached again", () => {
     const shared = await check();
     expect(shared.map((reach) => reach.allowed)).toEqual([false, false, true]);
 
-    // Forgotten, then attached again: the registry no longer names a server.
     store.remove(WORKSPACE);
     store.register({
       workspaceId: WORKSPACE,
@@ -566,7 +555,6 @@ describe("a shared workspace forgotten and attached again", () => {
       "dohc could not check who can edit Trip. Sync this workspace in Settings → Sync and sharing, then try again.";
     expect(await check()).toEqual(steps.map(() => ({ allowed: false, reason })));
 
-    // A record cut off mid-write, or one dohc cannot read, still stops them.
     const record = join(root, ".dohc", "sync-history.json");
     const synced = await readFile(record, "utf8");
     await writeFile(record, synced.slice(0, 10));
@@ -580,7 +568,6 @@ describe("a shared workspace forgotten and attached again", () => {
     store.setRemote(WORKSPACE, remote);
     expect(await check()).toEqual(steps.map(() => expect.objectContaining({ allowed: false })));
     now += SHARE_ROSTER_FRESH_MS;
-    // Ana is still an editor.
     expect(await check()).toEqual(shared);
   });
 });

@@ -25,8 +25,6 @@ function painted(opacity: "0" | "1") {
 const waiting = (testId: string) => screen.getByTestId(testId).style.animation !== "none";
 
 describe("SkeletonRows", () => {
-  // A lazy view's fallback lines give way to the view's own loading lines in
-  // one commit. Waiting again would blank the lines that were already showing.
   it("shows at once when it takes over, in the same slot, from lines that were showing", () => {
     const time = clock(10_000);
     painted("1");
@@ -61,8 +59,6 @@ describe("SkeletonRows", () => {
     expect(waiting("view")).toBe(true);
   });
 
-  // The view's own lines leave as its content arrives, and a loader deeper in
-  // that content, such as a message list, starts in another place.
   it("keeps the wait for lines nested in the slot that do not stand in its place", () => {
     const time = clock(25_000);
     painted("1");
@@ -82,7 +78,6 @@ describe("SkeletonRows", () => {
     expect(waiting("nested")).toBe(true);
   });
 
-  // A tab or workspace switch mounts new lines while other lines leave.
   it("keeps the wait for lines in another place, or in no slot", () => {
     const time = clock(30_000);
     painted("1");

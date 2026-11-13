@@ -1250,7 +1250,6 @@ it("shares one pending native resync between concurrent callers", async () => {
 // edit for it, so a person can be typing at that moment.
 const sha256Hex = (text: string) => createHash("sha256").update(text).digest("hex");
 
-// What each remote delivery brought, read as the delivery lands.
 function recordDeliveries(session: {
   doc: Y.Doc;
   headSha256: string | null | undefined;
@@ -1361,7 +1360,6 @@ it("sends its settle's head as a committed receipt, and confirms it with a fresh
   control.hold = release.promise;
   const settled = session.settle();
   await drain();
-  // State reaches the session while the settle is in flight.
   engine.emitEvent({
     name: YDOC_EVENT.remoteUpdate,
     seq: 100,
@@ -1409,7 +1407,6 @@ it("does not confirm a settle whose paired read shows another source", async () 
   control.hold = release.promise;
   const settled = session.settle();
   await drain();
-  // Another source reaches the engine while the settle is in flight.
   const peer = new Y.Doc();
   Y.applyUpdate(peer, Y.encodeStateAsUpdate(session.doc));
   const vector = Y.encodeStateVector(peer);
@@ -1472,7 +1469,6 @@ it("tells the provider the head is unknown for a restore that lands while a save
 
 it("pairs a head only with the last pass of a resync that a new source overtook", async () => {
   const engine = seedPlaintextEngine("seed");
-  // The head the engine reads with each resync's state.
   let diskHead = sha256Hex("seed");
   const held = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();
@@ -1504,7 +1500,6 @@ it("pairs a head only with the last pass of a resync that a new source overtook"
   const resynced = session.resync();
   await held.promise;
 
-  // A new source lands after the engine read the first pass's state.
   const peer = new Y.Doc();
   Y.applyUpdate(peer, session.initialUpdate);
   const vector = Y.encodeStateVector(peer);
@@ -1637,7 +1632,6 @@ it("journals what a person types while a resync is pending, without failing the 
   await drain();
   expect(resyncs).toBe(1);
 
-  // Two keystrokes while the resync waits: the second queues behind the first.
   const first = provider.applyLocalUpdate(
     plaintextUpdate(Y.encodeStateAsUpdate(provider.doc), (text) => text.insert(4, " one")),
   );
@@ -1914,7 +1908,6 @@ describe("seeding an absent lineage", () => {
   const clientsOf = (update: Uint8Array) =>
     new Set(Y.decodeUpdate(update).structs.map((struct) => struct.id.client));
 
-  // The seed one device sends when it first opens `content` at `headMomentId`.
   async function seedFor(
     contentKind: "plaintext" | "richdoc",
     content: string,
@@ -1971,7 +1964,6 @@ describe("seeding an absent lineage", () => {
     // A synced workspace keeps the lineage when the document closes.
     engine.markSessionReplicated(session.sessionId);
     const [seedClient] = clientsOf(recordedUpdates(engine, true)[0]!);
-    // The renderer edits its own doc and forwards each update, undo included.
     const editor = new Y.Doc();
     Y.applyUpdate(editor, session.initialUpdate);
     const forwarded: Promise<unknown>[] = [];
@@ -2432,7 +2424,6 @@ describe("YdocLiveAdapter", () => {
       code: "seed-not-permitted",
       message: "The session already has existing lineage.",
     });
-    // The daemon resumed nothing: this session seeded its own lineage.
     expect(session.lineage).toBe("absent");
 
     await expect(
@@ -2964,12 +2955,6 @@ describe("YdocLiveAdapter", () => {
     adapter.dispose();
   });
 
-  // The engine claims an unclaimed lineage inside the record that turns sync
-  // on for it. When that record's response is lost, the session is still
-  // unclaimed and the engine holds a claim it made from this very history.
-  // Sync turned on while this editor sat idle. The engine claimed the
-  // lineage from its own history and asks the session to resync. The
-  // session learns the claim without a record and keeps its document.
   it("learns a claim the engine made while it was idle", async () => {
     const engine = seedPlaintextEngine("idle");
     let claimed = false;
@@ -3015,8 +3000,6 @@ describe("YdocLiveAdapter", () => {
     adapter.dispose();
   });
 
-  // Owner registration can arrive between the resync request and its
-  // result. It waits on the provider's native owner, not on a timer.
   it("lets the provider's owner wait for the resync that brings the claim", async () => {
     const engine = seedPlaintextEngine("idle");
     let claimed = false;
@@ -3202,7 +3185,6 @@ describe("YdocLiveAdapter", () => {
         if (request.method === YDOC_METHOD.recordUpdate) {
           records += 1;
           if (records > 1) throw new Error("ydoc-lineage-stale");
-          // The seed originates the losing claim on this device.
           const response = await engine.sendRequest(request);
           return {
             ...response,
@@ -3249,8 +3231,6 @@ describe("YdocLiveAdapter", () => {
       }),
     ).rejects.toMatchObject({ code: "lineage-changed" });
 
-    // The losing document keeps the edit; the session hands over to the
-    // winner, which never receives it.
     await vi.waitFor(() => expect(replacements).toHaveLength(1));
     expect(session.doc).toBe(replacements[0]);
     expect(losingDoc.getText("plainText").toString()).toBe("losing root preserved edit");
@@ -3417,7 +3397,6 @@ describe("YdocLiveAdapter", () => {
       }),
     ).rejects.toMatchObject({ code: "lineage-changed" });
 
-    // Not acknowledged, still pending, and nothing of the other lineage merged.
     expect(acknowledged).toEqual([]);
     expect(session.missingLocalState).toBe(true);
     expect(session.lineageClaimId).toBeNull();
@@ -3425,8 +3404,6 @@ describe("YdocLiveAdapter", () => {
     expect(losingDoc.getText("plainText").toString()).toBe("losing root edit");
     expect(replacements).toEqual([]);
 
-    // Typing on the losing document before the handover is refused at once,
-    // without quarantining the session.
     let typed: unknown;
     try {
       void session.applyLocalTextEdit({ root: "plainText", index: 0, insert: "more " });
@@ -3492,8 +3469,6 @@ describe("YdocLiveAdapter", () => {
     const replacements: Y.Doc[] = [];
     session.onLineageReplaced((doc) => replacements.push(doc));
     sent.length = 0;
-    // Sync claimed the lineage from this device's history before the editor
-    // heard of it.
     claim = "own-claim";
 
     await session.applyLocalTextEdit({ root: "plainText", index: "idle".length, insert: " edit" });
@@ -3529,7 +3504,6 @@ describe("YdocLiveAdapter", () => {
             Buffer.from((request.params as { updateBase64: string }).updateBase64, "base64"),
           );
           if (records.length === 2) {
-            // A restore replaces the lineage while the first edit is in flight.
             await firstEdit.promise;
             claim = "winning-claim";
           }
@@ -3577,15 +3551,12 @@ describe("YdocLiveAdapter", () => {
     for (const edit of edits) await expect(edit).rejects.toMatchObject({ code: "lineage-changed" });
     await vi.waitFor(() => expect(replacements).toHaveLength(1));
 
-    // The queued edits of the losing document never reached the engine.
     expect(records).toHaveLength(2);
     expect(resyncs).toBe(2);
     expect(losingDoc.getText("plainText").toString()).toBe("losing root one two three");
     expect(session.doc.getText("plainText").toString()).toBe("winning root");
     expect(session.missingLocalState).toBe(false);
 
-    // The winner takes edits again: no quarantine, and the edit stands on
-    // the winner's own history.
     await session.applyLocalTextEdit({
       root: "plainText",
       index: "winning root".length,
@@ -3639,14 +3610,12 @@ describe("YdocLiveAdapter", () => {
       scheduleSettle: settleScheduler().schedule,
     });
     const losingDoc = provider.doc;
-    // A restore replaced the history under the open editor.
     claim = "restored-claim";
     await expect(
       provider.applyLocalUpdate(
         plaintextUpdate(provider.initialUpdate, (text) => text.insert(4, " refused")),
       ),
     ).rejects.toMatchObject({ code: "lineage-changed" });
-    // Typing on the losing document is refused before the handover lands.
     expect(() =>
       provider.applyLocalUpdate(
         plaintextUpdate(Y.encodeStateAsUpdate(losingDoc), (text) => text.insert(0, "more ")),
@@ -3660,7 +3629,6 @@ describe("YdocLiveAdapter", () => {
     expect(losingDoc.getText("plainText").toString()).toBe("more base refused");
     expect(provider.doc.getText("plainText").toString()).toBe("base");
 
-    // Neither refusal blocks the journal or the settle on the new history.
     await provider.applyLocalUpdate(
       plaintextUpdate(Y.encodeStateAsUpdate(provider.doc), (text) => text.insert(4, " fresh")),
     );
@@ -4080,9 +4048,6 @@ describe("YdocLiveAdapter", () => {
         settleDebounceMs: 100,
       });
 
-    // Fire the armed settle; while the lock holds, every failure re-arms the
-    // next attempt itself: debounce, then doubling — 100, 100, 200, 400 —
-    // and every failure still reaches onSettleError (nothing goes quiet).
     for (let attempt = 0; attempt < 3; attempt += 1) {
       expect(scheduler.armed).toHaveLength(1);
       scheduler.fire();
@@ -4091,12 +4056,10 @@ describe("YdocLiveAdapter", () => {
     expect(settleErrors).toEqual([refusal, refusal, refusal]);
     expect(delays).toEqual([100, 100, 200, 400]);
 
-    // The lock releases; the pending retry lands the write by itself.
     blocked.held = false;
     scheduler.fire();
     await drain();
     expect(settled).toHaveLength(1);
-    // Success re-arms nothing.
     expect(scheduler.armed).toHaveLength(0);
 
     await provider.close({ settle: false });
@@ -4247,7 +4210,6 @@ describe("YdocLiveAdapter", () => {
           { idempotencyKey: "second" },
         ),
       ).rejects.toBe(refusal);
-      // The replay lands the first edit, then the capacity is taken once.
       let refused = false;
       refuse = (key) => key === "second" && !refused && (refused = true);
       sent.length = 0;
@@ -4262,7 +4224,6 @@ describe("YdocLiveAdapter", () => {
       await vi.advanceTimersByTimeAsync(1_000);
       expect(outcome).toEqual([expect.objectContaining({ content: "first second" })]);
       expect(settleErrors).toEqual([]);
-      // The retry resends only the edit the engine did not take.
       expect(sent).toEqual(["first", "second", "second"]);
       await provider.close({ settle: false });
     } finally {
@@ -4476,13 +4437,11 @@ describe("YdocLiveAdapter", () => {
     expect(durableChanges).not.toHaveBeenCalled();
     expect(settled).toEqual([]);
 
-    // The ladder's rung: resend, then settle.
     expect(scheduler.armed).toHaveLength(1);
     scheduler.fire();
     await drain();
 
     expect(settled).toHaveLength(1);
-    // The assertion a call count cannot make.
     expect(settled[0]?.content).toContain("typed while the store was busy");
     expect(durableChanges).toHaveBeenCalledTimes(1);
     stopDurableChanges();
@@ -4506,11 +4465,9 @@ describe("YdocLiveAdapter", () => {
       expect(scheduler.armed).toHaveLength(1);
       scheduler.fire();
       await vi.advanceTimersByTimeAsync(0);
-      // The settle resent and was refused again. Nothing settled behind it.
       expect(writes()).toBe(3);
       expect(settled).toEqual([]);
 
-      // The contention clears; the settle resends and carries the text.
       await vi.advanceTimersByTimeAsync(1_000);
       expect(writes()).toBe(4);
       expect(settled).toHaveLength(1);
@@ -4547,14 +4504,11 @@ describe("YdocLiveAdapter", () => {
       .catch((error: unknown) => error);
 
     expect(closeFailure).not.toBeNull();
-    // Not the released-with-failed-settle shape: the session is still here.
     expect(closeFailure).not.toBeInstanceOf(YdocReleasedWithSettleFailureError);
     expect(String(closeFailure)).toContain("engine-store-busy");
   });
 
   it("releases once the resend lands, so a close is not blocked for good", async () => {
-    // The other half: the refusal above is a wait, not a wedge. Once the
-    // store frees, the same close hands over the text and completes.
     const { provider, journaled } = await openAgainstABusyJournal("typed and eventually sent", 2);
     await expect(journaled).rejects.toThrow("engine-store-busy");
 
@@ -4635,7 +4589,6 @@ describe("YdocLiveAdapter", () => {
       )
       .catch(() => undefined);
 
-    // The release completes and reports, rather than holding the session.
     const outcome = await provider
       .close()
       .then(() => null)
@@ -4664,8 +4617,6 @@ describe("YdocLiveAdapter", () => {
 
     expect(outcome).not.toBeNull();
     expect(String(outcome)).toContain("engine-store-busy");
-    // Still the caller's to retry: the refusal kept the session rather than
-    // trading the edit for a released lease.
     expect(provider.doc.getText("plainText").toString()).toContain("typed and never sent");
   });
 
@@ -4721,7 +4672,6 @@ describe("YdocLiveAdapter", () => {
 
     await provider.evict();
 
-    // The resend went first, and the evict followed it.
     expect(methods).toEqual([YDOC_METHOD.resync, YDOC_METHOD.recordUpdate, YDOC_METHOD.evict]);
   });
 
@@ -4800,7 +4750,6 @@ describe("YdocLiveAdapter", () => {
       release === "close" ? provider.close({ settle: false }) : provider.evict();
     if (recovery === "saved") {
       const releasing = releaseProvider();
-      // A settling error after successful release is still reported by close.
       const outcome = releasing.catch((error: unknown) => error);
       expect(await Promise.race([handoffStarted.then(() => true), outcome.then(() => false)])).toBe(
         true,
@@ -4855,7 +4804,6 @@ describe("YdocLiveAdapter", () => {
     );
     await expect(journaled).rejects.toThrow("engine-store-busy");
 
-    // The proof: the session still takes edits.
     const second = plaintextUpdate(provider.initialUpdate, (body) => {
       body.insert(0, "typed after the refusal ");
     });
@@ -4864,8 +4812,6 @@ describe("YdocLiveAdapter", () => {
     scheduler.fire();
     await drain();
     expect(settled).toHaveLength(1);
-    // Both edits reached the engine — the refused one via the resend, the
-    // later one on its own.
     expect(settled[0]?.content).toContain("typed before the session died");
     expect(settled[0]?.content).toContain("typed after the refusal");
 
@@ -4883,20 +4829,17 @@ describe("YdocLiveAdapter", () => {
       },
     );
 
-    // Climb two rungs: armed at 100, retry at 100, retry at 200.
     scheduler.fire();
     await drain();
     scheduler.fire();
     await drain();
     expect(delays).toEqual([100, 100, 200]);
 
-    // The lock releases and the pending retry lands the write.
     blocked.held = false;
     scheduler.fire();
     await drain();
     expect(settled).toHaveLength(1);
 
-    // A later lock: the next failure must re-arm at the debounce, not at 400.
     blocked.held = true;
     await provider.applyLocalUpdate(
       plaintextUpdate(provider.initialUpdate, (body) => {
@@ -4949,7 +4892,6 @@ describe("YdocLiveAdapter", () => {
       { settleDebounceMs: 100 },
     );
 
-    // Start the settle, then type again while it is still in flight.
     scheduler.fire();
     void provider.applyLocalUpdate(
       plaintextUpdate(provider.initialUpdate, (body) => {
@@ -4958,7 +4900,6 @@ describe("YdocLiveAdapter", () => {
     );
     await drain();
 
-    // One timer: the edit's. The refused settle deferred to it.
     expect(scheduler.armed).toHaveLength(1);
     expect(delays).toEqual([100, 100]);
 
@@ -5190,7 +5131,6 @@ describe("YdocLiveAdapter", () => {
     const settling = provider.settleNow();
     const closing = provider.close({ settle: false });
     await drain();
-    // The close is parked on the settle chain: nothing has been released.
     expect(order).toEqual([]);
 
     releaseSettle();
@@ -5202,7 +5142,6 @@ describe("YdocLiveAdapter", () => {
   });
 
   it("rejects a local update that arrives after the session released", async () => {
-    // A released session cannot save a late edit. Report that to its caller.
     const engine = seedPlaintextEngine();
     const provider = await openEngineYdocProviderSession({
       transport: engine,
@@ -5309,8 +5248,6 @@ describe("YdocLiveAdapter", () => {
 
     const first = provider.settleNow();
     const second = provider.settleNow();
-    // Both settles reach their barrier, but neither can complete while the
-    // first is held at the transport.
     await drain();
 
     expect(events.filter((event) => event === "settling")).toHaveLength(2);
@@ -5357,8 +5294,6 @@ describe("YdocLiveAdapter", () => {
     await provider.applyLocalUpdate(update).catch(() => undefined);
     await provider.settleNow().catch(() => undefined);
 
-    // The failure that reaches the save-state channel is the real cause —
-    // the refused recordUpdate — not some generic wrapper.
     expect(settleErrors.length).toBeGreaterThan(0);
     expect(
       settleErrors.some(
@@ -5449,11 +5384,6 @@ describe("YdocLiveAdapter", () => {
     expect(engine.activeSessionIds()).toHaveLength(0);
   });
 
-  // The escalation above is right for an ordinary teardown and
-  // wrong for a caller releasing a session it is about to declare absent: the
-  // daemon refuses that release precisely because content arrived, so settling
-  // it writes the file the caller is about to say does not exist. That caller
-  // says `settleOnRefusal: false`, and the refusal comes back instead.
   it("never escalates to a settling close when the caller forbids it", async () => {
     const engine = seedPlaintextEngine();
     const unsettledClose = new Error("injected unsettled close");
@@ -5483,8 +5413,6 @@ describe("YdocLiveAdapter", () => {
     await expect(provider.close({ settle: false, settleOnRefusal: false })).rejects.toBe(
       unsettledClose,
     );
-    // One close attempt, and it did not settle. The settling retry is what
-    // would have materialized the path.
     expect(closes).toEqual([false]);
   });
 
@@ -5955,7 +5883,6 @@ describe("YdocLiveAdapter", () => {
       destructive: false,
     });
     expect(provider.doc.getText("plainText").toString()).toBe("remote: seed local");
-    // The remote edit arrives once. Each settle sends only its committed head.
     const receipts = remoteUpdates.filter((delivery) => delivery.head !== undefined);
     expect(remoteUpdates.length - receipts.length).toBe(1);
     expect(receipts[0]).toEqual({
@@ -6450,8 +6377,6 @@ describe("the ydoc.open deadline", () => {
     });
     await first.evict();
 
-    // A different object lands at the old path (delete + unrelated
-    // recreate).
     engine.seedFile({
       workspace: WORKSPACE,
       versionId: VERSION,
@@ -6472,7 +6397,6 @@ describe("the ydoc.open deadline", () => {
     // close can prune the local-only lineage without materializing anything.
     await reusedPath.close({ settle: false });
 
-    // The same object, renamed to a new path.
     engine.seedFile({
       workspace: WORKSPACE,
       versionId: VERSION,
@@ -6519,8 +6443,6 @@ describe("the ydoc.open deadline", () => {
     });
     await first.evict();
 
-    // Capture ingests the file for the first time now, after the open
-    // already derived an object id for it.
     engine.seedFile({
       workspace: WORKSPACE,
       versionId: VERSION,
@@ -6733,8 +6655,6 @@ describe("the ydoc.open deadline", () => {
     await first.evict();
     const aObjectId = first.objectId;
 
-    // A is renamed to PATH2 and stays live there — an explicit seedFile
-    // carrying A's own derived id forward, exactly as a rename must.
     engine.seedFile({
       workspace: WORKSPACE,
       versionId: VERSION,
@@ -6744,8 +6664,6 @@ describe("the ydoc.open deadline", () => {
       objectId: aObjectId,
     });
 
-    // PATH1 is recaptured by an entirely unrelated file, with no explicit
-    // object id.
     engine.seedFile({
       workspace: WORKSPACE,
       versionId: VERSION,
@@ -6846,8 +6764,6 @@ describe("the ydoc.open deadline", () => {
       insert: "typed, never settled: ",
     });
 
-    // The object is renamed to PATH2 (re-keying the `files` row) and
-    // captured there with bytes matching this session's own content.
     engine.seedFile({
       workspace: WORKSPACE,
       versionId: VERSION,
@@ -6931,8 +6847,6 @@ describe("the ydoc.open deadline", () => {
     });
     expect(session.objectId).toBe(OBJECT_ID);
 
-    // Two edits that net back to bytes matching the object's new capture at
-    // PATH_B, never its stale row at PATH_A.
     await session.applyLocalEdit((doc) => {
       const text = doc.getText("plainText");
       text.delete(0, text.length);
@@ -6964,7 +6878,6 @@ describe("the ydoc.open deadline", () => {
     const engine = new YdocLoopbackEngine();
     const adapter = new YdocLiveAdapter(engine);
 
-    // Object A originates at PATH_A via an ordinary absent-head open.
     const first = await adapter.openSession({
       workspace: WORKSPACE,
       versionId: VERSION,
@@ -6979,7 +6892,6 @@ describe("the ydoc.open deadline", () => {
     await first.evict();
     const aObjectId = first.objectId;
 
-    // A is renamed to PATH_B and stays live there.
     engine.seedFile({
       workspace: WORKSPACE,
       versionId: VERSION,
@@ -7107,8 +7019,6 @@ describe("the ydoc.open deadline", () => {
     });
     await first.evict();
 
-    // A routine re-capture of the same path (content changed, no rename),
-    // with no explicit object id.
     engine.seedFile({
       workspace: WORKSPACE,
       versionId: VERSION,
@@ -7148,8 +7058,6 @@ describe("the ydoc.open deadline", () => {
     const derivedId = probe.objectId;
     await probe.evict();
 
-    // A different workspace's fixture happens to reuse that exact id
-    // string.
     engine.seedFile({
       workspace: OTHER_WORKSPACE,
       versionId: VERSION,

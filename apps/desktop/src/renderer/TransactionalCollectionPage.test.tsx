@@ -165,13 +165,11 @@ function setup(overrides: Partial<React.ComponentProps<typeof TransactionalColle
     ...render(<TransactionalCollectionPage {...props} />),
   };
 }
-/** A command in the page's one actions menu, which this opens when it is closed. */
 function command(name: string | RegExp): HTMLElement {
   if (!screen.queryByRole("menu", { name: "Manage Collection", hidden: true }))
     fireEvent.click(screen.getByRole("button", { name: "Manage Collection", hidden: true }));
   return screen.getByRole("menuitem", { name, hidden: true });
 }
-/** The names of the commands the open actions menu lists under each section label. */
 const commandsBySection = () =>
   within(screen.getByRole("menu", { name: "Manage Collection" }))
     .getAllByRole("group")
@@ -217,7 +215,6 @@ afterEach(async () => {
     if (descriptor) Object.defineProperty(HTMLElement.prototype, key, descriptor);
 });
 
-// The shared table, as a person finds its parts.
 const grid = () => screen.getByRole("grid");
 const badge = id(9);
 /** The same Collection with a field its create needs and its table cannot show, so a new record opens in the panel. */
@@ -236,13 +233,10 @@ function needingPanel(
     ?.fieldIds.push(badge);
   return description;
 }
-/** The table's new row. */
 const newRow = () => document.querySelector<HTMLElement>("[data-new-record]");
 /** The new row's field cells, after the cell that holds Discard. */
 const newRowCells = () => within(newRow()!).getAllByRole("gridcell").slice(1);
-/** What the new row says under it, as of a value it gave back. */
 const newRowNote = () => document.querySelector<HTMLElement>("[data-new-record-status]");
-/** Types records into the table's new row one after another, each saved with Enter, with no wait between them. */
 function typeRows(names: readonly string[]): void {
   fireEvent.click(within(grid()).getByRole("button", { name: "New record" }));
   for (const text of names) {
@@ -250,7 +244,6 @@ function typeRows(names: readonly string[]): void {
     fireEvent.keyDown(cellEditor(), { key: "Enter" });
   }
 }
-/** A Collection that holds each create's answer until the test gives it, in `answers`. Its reads return Alice at once. */
 function heldCreates() {
   const answers: Array<ReturnType<typeof deferred<{ result: AppBackendJson }>>> = [];
   const invoke = vi.fn((request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
@@ -259,19 +252,16 @@ function heldCreates() {
     answers.push(answer);
     return answer.promise;
   });
-  /** Waits for the create the queue sends next, which is the one numbered here, and answers it. */
   const answer = async (index: number, settle: (answer: (typeof answers)[number]) => void) => {
     await waitFor(() => expect(answers).toHaveLength(index + 1));
     await act(async () => settle(answers[index]!));
   };
   return { invoke, answers, answer };
 }
-/** The Name each create was sent with, in the order sent. */
 const createdNames = (invoke: Invoke) =>
   sent(invoke, create).map(
     (request) => (request.input as { values: Record<string, AppBackendJson> }).values[name],
   );
-/** The new row on screen holds nothing typed, and has the cursor in its first field. */
 function expectFreshRow(): void {
   expect(document.querySelectorAll("[data-new-record]")).toHaveLength(1);
   expect(newRowCells().map((cell) => cell.textContent)).toEqual(["", "", "New"]);
@@ -280,7 +270,6 @@ function expectFreshRow(): void {
 }
 const cellEditor = (root: ParentNode = document) =>
   root.querySelector<HTMLInputElement>("[data-cell-editor] input")!;
-/** Starts the table's new row, types in its first field, and leaves that field with a key. */
 function typeNewRow(
   text: string,
   leave: "Enter" | "Tab" = "Enter",
@@ -292,21 +281,17 @@ function typeNewRow(
   fireEvent.change(cellEditor(root), { target: { value: text } });
   fireEvent.keyDown(cellEditor(root), { key: leave });
 }
-/** The panel of a record that does not exist yet. */
 const draftPanel = () => screen.getByRole("complementary", { name: "New record" });
 const noDraftPanel = () => screen.queryByRole("complementary", { name: "New record" }) === null;
 const draftField = (field: string) => within(draftPanel()).getByRole("group", { name: field });
-/** What a field of the new record shows. */
 const draftValue = (field: string) =>
   draftField(field).querySelector("[data-property-value]")!.textContent;
-/** Types a value into a field of the new record in the panel, and saves the field with Enter. */
 function typeDraft(field: string, text: string): void {
   fireEvent.click(within(draftField(field)).getAllByRole("button")[0]!);
   const input = cellEditor(draftField(field));
   fireEvent.change(input, { target: { value: text } });
   fireEvent.keyDown(input, { key: "Enter" });
 }
-/** The cell of the record in row `row` under the column named `field`. */
 function cell(field: string, row = 0): HTMLElement {
   const column = within(grid())
     .getAllByRole("columnheader")
@@ -322,7 +307,6 @@ function cell(field: string, row = 0): HTMLElement {
 }
 const editor = () => grid().querySelector<HTMLElement>("[data-cell-editor]");
 const editorInput = () => editor()!.querySelector<HTMLInputElement>("input")!;
-/** Opens a cell's editor, types a value, and saves with Enter. */
 function type(field: string, value: string, row = 0): void {
   fireEvent.click(cell(field, row));
   const input = editorInput();
@@ -341,32 +325,25 @@ const loaded = () =>
   );
 /** The record panel. A test that gives the page a ⚡ panel names the one it means. */
 const panel = () => screen.getByRole("complementary");
-/** Opens Alice's record in the panel, as a person does from its row. */
 const openPanel = () => {
   fireEvent.click(screen.getByRole("button", { name: "Open Alice" }));
   return panel();
 };
-/** A field's row in the panel. */
 const property = (field: string) => within(panel()).getByRole("group", { name: field });
-/** The control that opens a panel field's editor. */
 const propertyValue = (field: string) => within(property(field)).getAllByRole("button")[0]!;
 const propertyEditor = (field: string) =>
   property(field).querySelector<HTMLElement>("[data-cell-editor]");
 const propertyInput = (field: string) =>
   propertyEditor(field)!.querySelector<HTMLInputElement>("input")!;
-/** What a panel field says about a change its host has not confirmed, or null. */
 const propertyMark = (field: string) =>
   property(field).querySelector("[data-cell-status]")?.getAttribute("data-cell-status") ?? null;
-/** Opens a panel field's editor, types a value, and saves with Enter. */
 function typeInPanel(field: string, value: string): void {
   fireEvent.click(propertyValue(field));
   const input = propertyInput(field);
   fireEvent.change(input, { target: { value } });
   fireEvent.keyDown(input, { key: "Enter" });
 }
-/** The control that opens the record's name for typing. */
 const nameButton = () => within(within(panel()).getByRole("heading")).getByRole("button");
-/** Opens the record's name in the panel's heading and types into it, without saving. */
 function typeName(text: string): void {
   fireEvent.click(nameButton());
   fireEvent.change(within(panel()).getByRole("textbox", { name: "Name" }), {
@@ -374,7 +351,6 @@ function typeName(text: string): void {
   });
 }
 const LEFT_OPEN = "This edit was still open, so dohc did not save it.";
-/** A command in the panel's menu, which this opens. */
 function recordCommand(name: string): HTMLElement {
   fireEvent.click(within(panel()).getByRole("button", { name: "Record actions" }));
   return screen.getByRole("menuitem", { name });
@@ -392,7 +368,6 @@ it("offers a calendar before the Collection has a date field, and asks for one",
   fireEvent.click(screen.getByRole("button", { name: "Add a date field" }));
   expect(onAddDateField).toHaveBeenCalledOnce();
 
-  // Once the Collection has a date field, the calendar uses it.
   const dated = dataset(),
     visit = id(7);
   dated.revision = 2;
@@ -536,7 +511,6 @@ it("keeps an empty multi-select editable, with the options picker the document t
   // A Data Collection's options are part of its approved rules, so the picker offers none to create.
   fireEvent.change(within(editor()!).getByRole("combobox"), { target: { value: "Later" } });
   expect(screen.queryByRole("option", { name: /Create/ })).toBeNull();
-  // The picks save once, when the picker closes.
   expect(sent(invoke, edit)).toHaveLength(0);
   fireEvent.pointerDown(document.body);
   await waitFor(() => expect(sent(invoke, edit)).toHaveLength(1));
@@ -608,7 +582,6 @@ describe("a Data Collection's table", () => {
     for (const key of ["Enter", "R", "Delete", "Backspace", " "]) press(key);
     expect(editor()).toBeNull();
     expect(sent(invoke, edit)).toHaveLength(0);
-    // A field with one opens its editor on a click.
     fireEvent.click(cell("Name"));
     expect(editorInput().value).toBe("Alice");
     fireEvent.keyDown(editorInput(), { key: "Escape" });
@@ -654,7 +627,6 @@ describe("a Data Collection's table", () => {
       );
       setup({ invoke });
       await screen.findByText("Alice");
-      // The count sits beside the Collection's name, and nowhere else.
       expect(screen.getByTestId("collection-record-count").textContent).toBe(words);
       expect(
         screen
@@ -692,7 +664,6 @@ describe("a Data Collection's table", () => {
     });
     expect(request.idempotencyKey).toMatch(/^[0-9a-f-]{36}$/);
     expect(document.activeElement).toBe(grid());
-    // There is no Save or Cancel step, and nothing on the page waits.
     expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
     expect(
       (screen.getAllByRole("button", { name: "New record" })[0] as HTMLButtonElement).disabled,
@@ -727,7 +698,6 @@ describe("a Data Collection's table", () => {
     const { onNotice } = setup({ invoke });
     await screen.findByText("Alice");
     type("Name", "Alicia");
-    // The cell shows what the person gave, marked as not confirmed yet. Nothing says the page is saving or loading.
     expect(cell("Name").textContent).toBe("AliciaSaving");
     expect(mark("Name")).toBe("pending");
     expect(screen.getByRole("region", { name: "People" }).getAttribute("aria-busy")).toBe("false");
@@ -774,7 +744,6 @@ describe("a Data Collection's table", () => {
     await screen.findByText("Alice");
     type("Name", "Alicia");
     type("Amount", "9");
-    // One request is in flight. The second change waits its turn on its cell.
     expect(sent(invoke, edit)).toHaveLength(1);
     expect([mark("Name"), mark("Amount")]).toEqual(["pending", "pending"]);
     const reads = sent(invoke, read).length;
@@ -784,7 +753,6 @@ describe("a Data Collection's table", () => {
       { id: 1, expectedVersion: 2, values: { [name]: "Alicia" } },
       { id: 1, expectedVersion: 7, values: { [amount]: 9 } },
     ]);
-    // The queue went on without waiting for a read.
     expect(
       invoke.mock.calls.findIndex(
         ([request]) =>
@@ -836,11 +804,9 @@ describe("a Data Collection's table", () => {
     await screen.findByText("Alice");
     type("Name", "Alicia");
     await waitFor(() => expect(mark("Name")).toBe("unconfirmed"));
-    // The cell keeps what was typed and says so. Nothing presents it as saved.
     expect(cell("Name").textContent).toContain("Alicia");
     expect(why("Name")).toBe("dohc could not confirm this change.");
     expect(screen.queryByRole("button", { name: "Undo last edit" })).toBeNull();
-    // The failure also takes a toast and a row in Notices, whose Try again sends the same change.
     expect(onError).toHaveBeenCalledWith(
       "dohc could not confirm this change.",
       expect.objectContaining({ message: "Connection ended after commit" }),
@@ -848,7 +814,6 @@ describe("a Data Collection's table", () => {
       expect.any(String),
     );
 
-    // A later change to the same record waits, and says so. The page does not lock.
     type("Amount", "9");
     expect(mark("Amount")).toBe("waiting");
     expect(why("Amount")).toBe("Waiting for an earlier change to this record");
@@ -856,7 +821,6 @@ describe("a Data Collection's table", () => {
     expect(
       (screen.getAllByRole("button", { name: "New record" })[0] as HTMLButtonElement).disabled,
     ).toBe(false);
-    // Another record's change goes through.
     type("Name", "Beatrice", 1);
     await waitFor(() => expect(sent(invoke, edit)).toHaveLength(2));
     expect(sent(invoke, edit)[1]!.input).toEqual({
@@ -866,14 +830,12 @@ describe("a Data Collection's table", () => {
     });
     expect(mark("Amount")).toBe("waiting");
 
-    // Try again sends the exact request, with its key. The record's held change follows with the receipt's version.
     fail = false;
     fireEvent.click(within(cell("Name")).getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(sent(invoke, edit)).toHaveLength(4));
     const writes = sent(invoke, edit);
     expect(writes[2]).toEqual(writes[0]);
     expect(writes[3]!.input).toEqual({ id: 1, expectedVersion: 9, values: { [amount]: 9 } });
-    // The row the failure left in Notices sends nothing once the change has landed.
     await act(async () => onError.mock.calls[0]![2]!());
     expect(sent(invoke, edit)).toHaveLength(4);
   });
@@ -904,7 +866,6 @@ describe("a Data Collection's table", () => {
     fireEvent.click(cell("Name"));
     expect(editorInput().value).toBe("Alicia");
     fireEvent.keyDown(editorInput(), { key: "Escape" });
-    // The selected cell says why under it, for the keyboard and a screen reader.
     expect(screen.getByRole("note").textContent).toBe(
       "The Collection refused this change. This record changed. Refresh the table.Dismiss",
     );
@@ -920,7 +881,6 @@ describe("a Data Collection's table", () => {
     expect(mark("Name")).toBe("refused");
     expect(why("Name")).toBe("Enter Name.");
     expect(sent(invoke, edit)).toHaveLength(0);
-    // The same value again takes the cell back to what the record holds.
     type("Name", "Alice");
     expect(mark("Name")).toBeNull();
     expect(sent(invoke, edit)).toHaveLength(0);
@@ -958,7 +918,6 @@ describe("a Data Collection's table", () => {
     rerender(<TransactionalCollectionPage {...props} copy={{ offline: true, savedAtMs: 1 }} />);
     expect(mark("Name", 1)).toBe("waiting");
     expect(why("Name", 1)).toBe("Waiting for the Collection to come back online");
-    // An offline copy takes no edit: no editor opens, and nothing is sent.
     fireEvent.click(cell("Amount"));
     expect(editor()).toBeNull();
     await act(async () => first.resolve({ result: receipt() }));
@@ -984,11 +943,9 @@ describe("a Data Collection's table", () => {
     });
     const view = setup({ invoke });
     await screen.findByText("Alice");
-    // Record 2's change is in flight, and record 1's waits behind it, unsent.
     type("Name", "Beatrice", 1);
     type("Name", "Alicia");
     expect(sent(invoke, edit)).toHaveLength(1);
-    // Another file opens in the tab group, then the Collection opens again.
     view.unmount();
     render(<TransactionalCollectionPage {...view.props} />);
     await screen.findByText("Alicia");
@@ -1005,7 +962,6 @@ describe("a Data Collection's table", () => {
       values: { [name]: "Alicia" },
     });
 
-    // A change dohc could not confirm is kept too, with its exact request.
     cleanup();
     render(<TransactionalCollectionPage {...view.props} />);
     await screen.findByText("Bea");
@@ -1030,7 +986,6 @@ describe("a Data Collection's table", () => {
     await act(async () => answer.resolve({ result: receipt() }));
     expect(result.onNotice).toHaveBeenCalledOnce();
     expect(result.onNotice).toHaveBeenCalledWith("Saved the edit in People");
-    // The change went out once, and the closed page read nothing more.
     expect(sent(invoke, edit)).toHaveLength(1);
     expect(sent(invoke, read)).toHaveLength(1);
   });
@@ -1066,7 +1021,6 @@ describe("a Data Collection's table", () => {
           : [words, failure, null],
       );
       expect(result.onNotice).not.toHaveBeenCalled();
-      // The page opens again with what was typed on its cell, and never as saved.
       render(<TransactionalCollectionPage {...result.props} />);
       await screen.findByText("Alicia");
       expect(mark("Name")).toBe(failure.message === "Lost reply" ? "unconfirmed" : "refused");
@@ -1091,7 +1045,6 @@ describe("a Data Collection's table", () => {
     await act(async () => {
       pending.resolve({ result: { id: 1, version: 3, priorValues: { [name]: "workspace-A" } } });
     });
-    // The notice goes to its own workspace's shell, and never to the next one's.
     expect(onNotice).toHaveBeenCalledWith("Saved the edit in People");
     expect(nextNotice).not.toHaveBeenCalled();
     expect(onError).not.toHaveBeenCalled();
@@ -1111,7 +1064,6 @@ describe("a Data Collection's table", () => {
       expectedVersion: 3,
       values: { [name]: "Alice" },
     });
-    // A reversal is not itself reversed.
     await waitFor(() =>
       expect(screen.queryByRole("button", { name: "Undo last edit" })).toBeNull(),
     );
@@ -1320,7 +1272,6 @@ describe("a Data Collection's table", () => {
       expect(handler, String(name)).toHaveBeenCalledOnce();
     }
     full.unmount();
-    // A page given nothing still reads its records again, and offers nothing else.
     setup();
     await screen.findByText("Alice");
     command("Refresh");
@@ -1384,7 +1335,6 @@ describe("a Data Collection's table", () => {
     }
     expect(handlers.onReviewSchema).not.toHaveBeenCalled();
     expect(handlers.onArchive).not.toHaveBeenCalled();
-    // The tabs and the search wait too, as the dropdowns and the search did.
     expect(viewTabs().every((tab) => (tab as HTMLButtonElement).disabled)).toBe(true);
     expect(screen.getByLabelText<HTMLInputElement>("Search collection").disabled).toBe(true);
     expect(command("Open source").getAttribute("aria-disabled")).toBeNull();
@@ -1394,7 +1344,6 @@ describe("a Data Collection's table", () => {
       true,
     );
     expect(onToggle).not.toHaveBeenCalled();
-    // Once the new record is cancelled, the ⚡ panel opens again.
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(screen.getByTestId<HTMLButtonElement>("collection-automations-button").disabled).toBe(
       false,
@@ -1443,7 +1392,6 @@ describe("a Data Collection's table", () => {
     expect(screen.queryByRole("button", { name: "View actions" })).toBeNull();
     fireEvent.contextMenu(viewTab("All records"));
     expect(screen.queryByRole("menu")).toBeNull();
-    // A view's layout is the view's: no dropdown chooses a saved view or a layout.
     expect(screen.queryByRole("combobox")).toBeNull();
     fireEvent.click(viewTab("Pending"));
     expect(views.select).toHaveBeenLastCalledWith(id(30));
@@ -1477,7 +1425,6 @@ describe("a Data Collection's table", () => {
       }),
     );
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Add a view" })).toBeNull());
-    // The table has no date field, so a calendar asks for one the existing way.
     fireEvent.click(screen.getByRole("button", { name: "Add a view" }));
     fireEvent.click(screen.getByRole("radio", { name: "Calendar" }));
     expect(screen.getByText("This Collection has no date field.")).toBeTruthy();
@@ -1538,7 +1485,6 @@ describe("a Data Collection's table", () => {
       filters: [{ fieldId: status, value: "New" }],
       sort: { fieldId: name, direction: "asc" },
     });
-    // The header shows the view's sort.
     expect(screen.getByRole("columnheader", { name: /Name/ }).getAttribute("aria-sort")).toBe(
       "ascending",
     );
@@ -1628,7 +1574,6 @@ describe("a Data Collection's files and relations", () => {
     );
     setup({ dataset: withResources(), invoke, uploadFile, readFile: vi.fn(), resolveRelation });
     await screen.findByText("Alice");
-    // A typed character and Delete start nothing on either cell.
     fireEvent.click(cell("Amount"));
     fireEvent.keyDown(editorInput(), { key: "Escape" });
     press("ArrowRight");
@@ -1641,13 +1586,11 @@ describe("a Data Collection's files and relations", () => {
     }
     expect(sent(invoke, edit)).toHaveLength(0);
 
-    // A relation opens the search of its related table. A press on a record changes only the editor, and Save sends it.
     press("Enter");
     expect(within(editor()!).queryByRole("textbox")).toBeNull();
     expect(within(editor()!).getByRole("searchbox", { name: "Search Team" })).toBeTruthy();
     fireEvent.click(await within(editor()!).findByRole("button", { name: "Red team" }));
     expect(sent(invoke, edit)).toHaveLength(0);
-    // A press on another cell keeps the editor, and its unsaved value, and goes to Save.
     fireEvent.click(cell("Name"));
     const save = within(editor()!).getByRole("button", { name: "Save" });
     expect(document.activeElement).toBe(save);
@@ -1700,7 +1643,6 @@ describe("a Data Collection's files and relations", () => {
       fileId: "1234567890abcdef",
       read: { operationId: read, fieldId: receiptField },
     });
-    // The press downloads. It opens no editor.
     expect(editor()).toBeNull();
     fireEvent.click(within(cell("Receipt")).getByRole("button", { name: "Change Receipt" }));
     fireEvent.click(within(editor()!).getByRole("button", { name: "Remove file" }));
@@ -1733,13 +1675,11 @@ describe("a Data Collection's record panel and forms", () => {
     open.focus();
     fireEvent.click(open);
     const record = screen.getByRole("complementary", { name: "Alice" });
-    // The panel is no dialog, and it takes focus without holding it.
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(record.getAttribute("aria-modal")).toBeNull();
     expect(document.activeElement).toBe(record);
     expect(within(record).getByRole("heading", { name: "Alice" })).toBeTruthy();
     expect(within(record).getByText("People")).toBeTruthy();
-    // The record's name is the heading, not a row. The other fields it may read follow in the table's order.
     expect(
       within(record)
         .getAllByRole("group")
@@ -1752,7 +1692,6 @@ describe("a Data Collection's record panel and forms", () => {
     expect(record.textContent).not.toMatch(/version|record 1/i);
     // A Data record has no page to open.
     expect(within(record).queryByRole("button", { name: "Open as page" })).toBeNull();
-    // The open record's row is marked, and the table beside the panel still takes an edit.
     expect(
       grid().querySelector('[role="row"][aria-current="true"]')?.getAttribute("data-index"),
     ).toBe("0");
@@ -1864,7 +1803,6 @@ describe("a Data Collection's record panel and forms", () => {
       }),
     );
     await waitFor(() => expect(mark("Name")).toBeNull());
-    // Name is required, so an empty one is not sent. The heading says why, as the cell does.
     fireEvent.click(nameButton());
     fireEvent.change(within(panel()).getByRole("textbox", { name: "Name" }), {
       target: { value: "" },
@@ -1885,12 +1823,10 @@ describe("a Data Collection's record panel and forms", () => {
       },
     }));
     setup({ dataset: optional, invoke });
-    // The table's Open control and the panel call the record the same thing for a screen reader.
     fireEvent.click(await screen.findByRole("button", { name: "Open record 41" }));
     const record = screen.getByRole("complementary", { name: "record 41" });
     expect(within(record).getByRole("heading", { name: "Untitled" })).toBeTruthy();
     expect(record.textContent).not.toContain("41");
-    // The name can still be given there.
     fireEvent.click(nameButton());
     expect(within(record).getByRole<HTMLInputElement>("textbox", { name: "Name" }).value).toBe("");
   });
@@ -1969,7 +1905,6 @@ describe("a Data Collection's record panel and forms", () => {
     open.focus();
     fireEvent.click(open);
     const record = panel();
-    // The page's menu closes on its own Escape, and the record stays.
     fireEvent.keyDown(command("Refresh"), { key: "Escape" });
     expect(screen.queryByRole("menu")).toBeNull();
     expect(panel()).toBe(record);
@@ -1990,7 +1925,6 @@ describe("a Data Collection's record panel and forms", () => {
     await screen.findByText("Alice");
     openPanel();
     typeName("Alicia");
-    // A press on another record's Open leaves the name first, which saves it by a cell's rules, on the record it was typed for.
     fireEvent.blur(within(panel()).getByRole("textbox", { name: "Name" }));
     fireEvent.click(screen.getByRole("button", { name: "Open Bea" }));
     expect(within(panel()).getByRole("heading").textContent).toBe("Bea");
@@ -2049,11 +1983,9 @@ describe("a Data Collection's record panel and forms", () => {
     fireEvent.click(copy("Left").getByRole("button", { name: "Open Alice" }));
     expect(kept()).toBe("1");
     expect(copy("Right").queryByRole("complementary")).toBeNull();
-    // The entry holds the record a person opened last, in either copy.
     fireEvent.click(copy("Right").getByRole("button", { name: "Open Bea" }));
     expect(kept()).toBe("2");
     expect(copy("Left").getByRole("complementary", { name: "Alice" })).toBeTruthy();
-    // The right copy closes its record. The left one still shows a record, so the entry holds that one.
     fireEvent.click(
       within(copy("Right").getByRole("complementary")).getByRole("button", {
         name: "Close record",
@@ -2111,7 +2043,6 @@ describe("a Data Collection's record panel and forms", () => {
     await screen.findByText("Alice");
     openPanel();
     expect(onOpenRecordChange).toHaveBeenLastCalledWith("1");
-    // Text being typed is no part of what the host keeps.
     fireEvent.click(propertyValue("Amount"));
     fireEvent.change(propertyInput("Amount"), { target: { value: "9" } });
     expect(onOpenRecordChange).toHaveBeenCalledTimes(1);
@@ -2119,7 +2050,6 @@ describe("a Data Collection's record panel and forms", () => {
     fireEvent.click(within(panel()).getByRole("button", { name: "Close record" }));
     expect(onOpenRecordChange).toHaveBeenLastCalledWith(null);
     first.unmount();
-    // The host kept the record with the tab. The page starts with it and takes no focus for it.
     render(<TransactionalCollectionPage {...first.props} initialOpenRecord="1" />);
     const record = await screen.findByRole("complementary", { name: "Alice" });
     expect(document.activeElement).not.toBe(record);
@@ -2196,16 +2126,13 @@ describe("a Data Collection's record panel and forms", () => {
       await waitFor(() => expect(lookups).toHaveLength(1));
       await act(async () => lookups[0]!.resolve({ result: bea }));
       typeInPanel("Amount", "8");
-      // The change is confirmed, the table's records are read again without the record, and the read of the record has not answered.
       await waitFor(() => expect(lookups).toHaveLength(2));
       expect(property("Amount").textContent).toContain("8");
       expect(propertyMark("Amount")).toBeNull();
-      // That read fails. The field still shows what the Collection confirmed.
       await act(async () => lookups[1]!.reject(new Error("Lost reply")));
       expect(property("Amount").textContent).toContain("8");
       expect(propertyMark("Amount")).toBeNull();
       expect(screen.getByRole("complementary", { name: "Bea" })).toBeTruthy();
-      // The record's next change goes with the version its receipt gave, not the one the failed read never brought.
       typeInPanel("Amount", "9");
       await waitFor(() =>
         expect(sent(invoke, edit).at(-1)?.input).toEqual({
@@ -2214,7 +2141,6 @@ describe("a Data Collection's record panel and forms", () => {
           values: { [amount]: 9 },
         }),
       );
-      // A later read of the record shows it.
       await waitFor(() => expect(lookups).toHaveLength(3));
       await act(async () =>
         lookups[2]!.resolve({
@@ -2266,7 +2192,6 @@ describe("a Data Collection's record panel and forms", () => {
       cleanup();
       resetKeptCollectionEditsForTests();
 
-      // A kept key that names no record is never sent to the Collection.
       const foreign = vi.fn(
         async (_request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => ({
           result: page(),
@@ -2293,13 +2218,11 @@ describe("a Data Collection's record panel and forms", () => {
       const view = setup({ dataset: keyed(), invoke, initialOpenRecord: "2" });
       await screen.findByText("Alice");
       await waitFor(() => expect(answers).toHaveLength(1));
-      // Another record opens before the answer for the first.
       openPanel();
       expect(screen.getByRole("complementary", { name: "Alice" })).toBeTruthy();
       await act(async () => answers[0]!.resolve({ result: bea }));
       expect(screen.getByRole("complementary", { name: "Alice" })).toBeTruthy();
       expect(screen.queryByText("Bea")).toBeNull();
-      // The panel closes before the answer.
       view.unmount();
       resetKeptCollectionEditsForTests();
       const closed = setup({ dataset: keyed(), invoke, initialOpenRecord: "2" });
@@ -2310,7 +2233,6 @@ describe("a Data Collection's record panel and forms", () => {
       expect(screen.queryByRole("complementary")).toBeNull();
       closed.unmount();
       resetKeptCollectionEditsForTests();
-      // The page leaves for another workspace, another Collection, or another table before the answer.
       const elsewhere: Array<Partial<React.ComponentProps<typeof TransactionalCollectionPage>>> = [
         { workspaceId: "workspace-B" },
         { dataset: { ...keyed(), datasetId: id(77) } },
@@ -2380,13 +2302,11 @@ describe("a Data Collection's record panel and forms", () => {
     });
     await screen.findByText("Alice");
     fireEvent.click(screen.getByRole("button", { name: "Open Alice" }));
-    // The ⚡ panel holds a draft and has not closed: no record opens, and nothing of the draft is lost.
     expect(close).toHaveBeenCalledOnce();
     expect(
       screen.getAllByRole("complementary").map((side) => side.getAttribute("aria-label")),
     ).toEqual(["Automations"]);
     expect(onOpenRecordChange).not.toHaveBeenCalled();
-    // It closes, and the record opens in its place.
     rerender(
       <TransactionalCollectionPage {...props} automations={automations(false)} panel={null} />,
     );
@@ -2395,7 +2315,6 @@ describe("a Data Collection's record panel and forms", () => {
       screen.getAllByRole("complementary").map((side) => side.getAttribute("aria-label")),
     ).toEqual(["Alice"]);
     expect(onOpenRecordChange).toHaveBeenLastCalledWith("1");
-    // The ⚡ panel opens again and takes the place back.
     rerender(
       <TransactionalCollectionPage {...props} automations={automations(true)} panel={drawer} />,
     );
@@ -2428,7 +2347,6 @@ describe("a Data Collection's record panel and forms", () => {
     fireEvent.click(within(grid()).getByRole("button", { name: "New record" }));
     typeDraft("Name", "Bob");
     first.unmount();
-    // The Collection opens again, and another file opens before its records load.
     render(
       <TransactionalCollectionPage
         {...first.props}
@@ -2481,14 +2399,12 @@ describe("a Data Collection's record panel and forms", () => {
     const first = setup({ dataset: needingPanel(dataset()) });
     await screen.findByText("Alice");
     fireEvent.click(within(grid()).getByRole("button", { name: "New record" }));
-    // Nothing is saved to the draft yet: the name is still in its open editor.
     fireEvent.click(within(draftField("Name")).getAllByRole("button")[0]!);
     fireEvent.change(cellEditor(draftField("Name")), { target: { value: "Bob" } });
     first.unmount();
     const again = render(<TransactionalCollectionPage {...first.props} />);
     await screen.findByRole("complementary", { name: "New record" });
     expect(draftValue("Name")).toBe("Bob");
-    // A word in a number field is kept as the word, with its field, and stops Create record until it is a number.
     typeDraft("Badge", "A1");
     fireEvent.click(within(draftField("Amount")).getAllByRole("button")[0]!);
     fireEvent.change(cellEditor(draftField("Amount")), { target: { value: "abc" } });
@@ -2527,7 +2443,6 @@ describe("a Data Collection's record panel and forms", () => {
     const { onError } = setup({ dataset: description, uploadFile });
     await screen.findByText("Alice");
     const record = openPanel();
-    // A file's value is drawn and changed by the page's own cell and editor, never the shared text editor.
     fireEvent.click(within(property("Amount")).getByRole("button", { name: "Add Amount" }));
     expect(propertyEditor("Amount")!.querySelector('input[type="text"]')).toBeNull();
     fireEvent.change(propertyEditor("Amount")!.querySelector('input[type="file"]')!, {
@@ -2580,7 +2495,6 @@ describe("a Data Collection's record panel and forms", () => {
       },
       expect.any(AbortSignal),
     );
-    // The press downloads the file. It opens no editor.
     expect(propertyEditor("Amount")).toBeNull();
     // An answer for the old workspace is stopped before it downloads or reports anything.
     view.rerender(<TransactionalCollectionPage {...view.props} workspaceId="workspace-B" />);
@@ -2697,14 +2611,12 @@ describe("a Data Collection's record panel and forms", () => {
     );
     const { invoke } = setup({ confirmDelete });
     await screen.findByText("Alice");
-    // No row of the table carries a delete control.
     expect(within(grid()).queryByRole("button", { name: /Delete/ })).toBeNull();
     openPanel();
     fireEvent.click(recordCommand("Delete record…"));
     expect(confirmDelete).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({ id: 1, version: 2 }),
     );
-    // A second press while the shell asks does nothing, and nothing is deleted before the answer.
     fireEvent.click(recordCommand("Delete record…"));
     expect(confirmDelete).toHaveBeenCalledOnce();
     expect(sent(invoke, remove)).toHaveLength(0);
@@ -2735,7 +2647,6 @@ describe("a Data Collection's record panel and forms", () => {
     fireEvent.click(recordCommand("Delete record…"));
     await act(async () => answers[1]!(true));
     await waitFor(() => expect(sent(invoke, remove)).toHaveLength(1));
-    // The deletion uses the version the edit left the record at.
     expect(sent(invoke, remove)[0]!.input).toEqual({ id: 1, expectedVersion: 3 });
   });
 
@@ -2764,7 +2675,6 @@ describe("a Data Collection's record panel and forms", () => {
       for (const key of ["Enter", "x", "Delete"]) press(key);
       expect(editor()).toBeNull();
     }
-    // The panel shows the record with no way to change it, delete it, or run an action, and says why.
     const record = openPanel();
     expect(within(record).queryByRole("button", { name: "Record actions" })).toBeNull();
     expect(within(within(record).getByRole("heading")).queryByRole("button")).toBeNull();
@@ -2786,7 +2696,6 @@ describe("a Data Collection's record panel and forms", () => {
     );
     setup({ invoke });
     const table = await screen.findByRole("grid");
-    // An empty Collection already shows its columns, and no count.
     expect(
       within(table)
         .getAllByRole("columnheader")
@@ -2796,12 +2705,10 @@ describe("a Data Collection's record panel and forms", () => {
     const add = within(table).getByRole("button", { name: "New record" });
     add.focus();
     fireEvent.click(add);
-    // The row is in place, with the cursor in its first field. No form opens under the table and no panel beside it.
     expect(newRow()).not.toBeNull();
     expect(document.activeElement).toBe(cellEditor());
     expect(screen.queryByRole("form")).toBeNull();
     expect(screen.queryByRole("complementary")).toBeNull();
-    // Escape cancels the open edit only. The next one leaves the row, which goes with nothing typed in it.
     fireEvent.keyDown(cellEditor(), { key: "Escape" });
     expect(newRow()).not.toBeNull();
     fireEvent.keyDown(table, { key: "Escape" });
@@ -2815,7 +2722,6 @@ describe("a Data Collection's record panel and forms", () => {
     });
     // The records are read again once the Collection confirms the new one, and Enter starts the next row.
     await waitFor(() => expect(sent(invoke, read)).toHaveLength(2));
-    // The next row holds only what a new record starts with.
     await waitFor(() => expect(newRow()?.textContent).toBe("New"));
     expect(document.activeElement).toBe(cellEditor());
     expect(sent(invoke, create)).toHaveLength(1);
@@ -2825,12 +2731,10 @@ describe("a Data Collection's record panel and forms", () => {
     const { invoke } = setup();
     await screen.findByText("Alice");
     fireEvent.click(screen.getAllByRole("button", { name: "New record" })[0]!);
-    // Name is left empty, and Amount is typed.
     fireEvent.keyDown(cellEditor(), { key: "Tab" });
     fireEvent.keyDown(grid(), { key: "1" });
     fireEvent.change(cellEditor(), { target: { value: "12.5" } });
     fireEvent.keyDown(cellEditor(), { key: "Enter" });
-    // Nothing is sent. The cursor is on the Name cell, which says it is required.
     expect(sent(invoke, create)).toHaveLength(0);
     const [nameCell, amountCell] = newRowCells();
     expect(nameCell!.getAttribute("aria-selected")).toBe("true");
@@ -2865,16 +2769,13 @@ describe("a Data Collection's record panel and forms", () => {
     const { invoke } = setup({ dataset: description });
     await screen.findByText("Alice");
     fireEvent.click(within(grid()).getByRole("button", { name: "New record" }));
-    // The row shows what a new record starts with: Status is New, and Done is ticked.
     expect(newRowCells()[2]!.textContent).toBe("New");
     expect(within(newRowCells()[3]!).getByRole<HTMLInputElement>("checkbox").checked).toBe(true);
-    // A row that holds only those is nothing typed: it goes, and makes no record.
     fireEvent.keyDown(cellEditor(), { key: "Escape" });
     fireEvent.keyDown(grid(), { key: "Escape" });
     expect(newRow()).toBeNull();
     expect(sent(invoke, create)).toHaveLength(0);
 
-    // What is sent is what the cells show: the default left as it is, and the box the person unticked.
     typeNewRow("Bob", "Tab");
     fireEvent.keyDown(grid(), { key: "ArrowRight" });
     fireEvent.keyDown(grid(), { key: "ArrowRight" });
@@ -2887,7 +2788,6 @@ describe("a Data Collection's record panel and forms", () => {
     });
     await waitFor(() => expect(newRow()?.textContent).toBe("New"));
 
-    // A cleared default is an explicit empty value. Status is required, so the save stops there and says so.
     fireEvent.change(cellEditor(), { target: { value: "Cy" } });
     fireEvent.keyDown(cellEditor(), { key: "Tab" });
     fireEvent.keyDown(grid(), { key: "ArrowRight" });
@@ -2927,15 +2827,12 @@ describe("a Data Collection's record panel and forms", () => {
     const { onNotice } = setup({ invoke });
     await screen.findByText("Alice");
     typeNewRow("Bob");
-    // The row left the table with its save. The row on screen is the next one.
     expectFreshRow();
     await waitFor(() => expect(sent(invoke, create)).toHaveLength(1));
-    // Leaving the next row, which holds nothing typed, sends nothing more.
     fireEvent.keyDown(cellEditor(), { key: "Escape" });
     fireEvent.keyDown(grid(), { key: "Escape" });
     expect(newRow()).toBeNull();
     expect(sent(invoke, create)).toHaveLength(1);
-    // The Collection made the record, and this page of records does not hold it.
     await act(async () => answer.resolve({ result: { id: 7, version: 1 } }));
     await waitFor(() =>
       expect(onNotice).toHaveBeenCalledWith(
@@ -2951,7 +2848,6 @@ describe("a Data Collection's record panel and forms", () => {
     const { onNotice } = setup({ invoke });
     await screen.findByText("Alice");
     typeRows(["Bob", "Cy", "Di"]);
-    // Each row left the table as it was saved, and the next key was typed in the row after it.
     expectFreshRow();
     // The queue sends one change at a time, in the order made.
     await waitFor(() => expect(sent(invoke, create)).toHaveLength(1));
@@ -2987,10 +2883,8 @@ describe("a Data Collection's record panel and forms", () => {
     );
     expect(list.getByRole("button", { name: "Copy value" })).toBeTruthy();
     expect(list.queryByRole("button", { name: "Try again" })).toBeNull();
-    // The refused record opens nowhere for typing: no panel opened, and the row on screen is still the empty one.
     expect(noDraftPanel()).toBe(true);
     expectFreshRow();
-    // Nothing was lost and nothing was sent twice.
     expect(createdNames(invoke)).toEqual(["Bob", "Cy", "Di"]);
   });
 
@@ -3000,12 +2894,10 @@ describe("a Data Collection's record panel and forms", () => {
     await screen.findByText("Alice");
     typeRows(["Bob", "Cy", "Di"]);
     await answer(0, (held) => held.reject(new Error("Lost reply")));
-    // The first is in doubt. The others go on, and are made before it.
     await answer(1, (held) => held.resolve({ result: { id: 8, version: 1 } }));
     await answer(2, (held) => held.resolve({ result: { id: 9, version: 1 } }));
     const list = within(await screen.findByRole("group", { name: "Changes dohc did not confirm" }));
     expect(list.getByText("dohc could not confirm the new record.")).toBeTruthy();
-    // A create that may have run is offered for typing nowhere: no panel opened, and the row on screen is the empty one.
     expect(noDraftPanel()).toBe(true);
     expectFreshRow();
     fireEvent.click(list.getByRole("button", { name: "Try again" }));
@@ -3032,14 +2924,12 @@ describe("a Data Collection's record panel and forms", () => {
     const list = within(await screen.findByRole("group", { name: "Changes dohc did not confirm" }));
     expect(list.getByText("dohc could not confirm the new record.")).toBeTruthy();
     expect(list.getByRole("button", { name: "Discard" })).toBeTruthy();
-    // No row holds the record: the row on screen is the next one, and takes typing.
     expectFreshRow();
     fireEvent.click(list.getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(sent(invoke, create)).toHaveLength(2));
     const changes = sent(invoke, create);
     expect(changes[1]).toEqual(changes[0]);
     await waitFor(() => expect(strip()).toBeNull());
-    // The record is on this page of records, so no notice says it was made.
     await waitFor(() => expect(sent(invoke, read)).toHaveLength(2));
     expect(result.onNotice).not.toHaveBeenCalled();
   });
@@ -3050,7 +2940,6 @@ describe("a Data Collection's record panel and forms", () => {
     const add = within(grid()).getByRole("button", { name: "New record" });
     add.focus();
     fireEvent.click(add);
-    // No row and no form: the panel, with a row for each field the create takes.
     expect(newRow()).toBeNull();
     expect(screen.queryByRole("form")).toBeNull();
     const draft = draftPanel();
@@ -3061,11 +2950,9 @@ describe("a Data Collection's record panel and forms", () => {
         .map((row) => row.getAttribute("data-property")),
     ).toEqual([name, amount, status, badge]);
     expect(draftValue("Status")).toBe("New");
-    // Focus is on its first field. A record that does not exist yet has no actions, and no page to open.
     expect(document.activeElement).toBe(within(draftField("Name")).getAllByRole("button")[0]);
     expect(within(draft).queryByRole("button", { name: "Record actions" })).toBeNull();
     expect(within(draft).queryByRole("button", { name: "Open as page" })).toBeNull();
-    // Cancel lets it go, and focus returns to what opened it.
     fireEvent.click(within(draft).getByRole("button", { name: "Cancel" }));
     expect(noDraftPanel()).toBe(true);
     expect(document.activeElement).toBe(add);
@@ -3101,7 +2988,6 @@ describe("a Data Collection's record panel and forms", () => {
     expect(draftField("Name").getAttribute("aria-describedby")).toBe(error!.id);
     expect(draftField("Badge").getAttribute("aria-describedby")).toBe(badgeError!.id);
     expect(document.activeElement).toBe(within(draftField("Name")).getAllByRole("button")[0]);
-    // A value in a field clears only its own error. The panel keeps what it holds.
     typeDraft("Name", "Bob");
     expect(screen.getAllByRole("alert").map((alert) => alert.textContent)).toEqual([
       "Enter Badge.",
@@ -3129,19 +3015,16 @@ describe("a Data Collection's record panel and forms", () => {
     const list = within(await screen.findByRole("group", { name: "Changes dohc did not confirm" }));
     expect(list.getByText("dohc could not confirm the new record.")).toBeTruthy();
     expect(noDraftPanel()).toBe(true);
-    // The page does not lock while the change waits.
     expect(
       (screen.getAllByRole("button", { name: "New record" })[0] as HTMLButtonElement).disabled,
     ).toBe(false);
     const retry = result.onError.mock.calls[0]![2];
-    // An offline copy sends nothing, so the change keeps its Try again.
     result.rerender(
       <TransactionalCollectionPage {...result.props} copy={{ offline: true, savedAtMs: 1 }} />,
     );
     await act(async () => retry());
     expect(writes).toBe(1);
     expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
-    // Back online, under rules with the same revision, the row left in Notices sends the same request.
     const base = needingPanel(dataset());
     const current = {
       ...base,
@@ -3182,7 +3065,6 @@ describe("a Data Collection's record panel and forms", () => {
     fireEvent.change(within(editor).getByLabelText("Amount"), {
       target: { files: [new File(["abc"], "receipt.txt", { type: "text/plain" })] },
     });
-    // The file's own Save waits for the upload.
     expect(within(editor).getByRole<HTMLButtonElement>("button", { name: "Save" }).disabled).toBe(
       true,
     );
@@ -3196,7 +3078,6 @@ describe("a Data Collection's record panel and forms", () => {
       }),
     );
     expect(screen.getByText("receipt.txt · 3 bytes · Save to attach")).toBeTruthy();
-    // Create record does not leave the chosen file behind: focus goes to the file's Save, and nothing is sent.
     fireEvent.click(screen.getByRole("button", { name: "Create record" }));
     expect(sent(result.invoke, create)).toHaveLength(0);
     expect(document.activeElement).toBe(within(editor).getByRole("button", { name: "Save" }));
@@ -3247,7 +3128,6 @@ describe("a Data Collection's record panel and forms", () => {
     fireEvent.keyDown(draftPanel(), { key: "Escape" });
     expect(sent(result.invoke, create)).toHaveLength(0);
     expect(noDraftPanel()).toBe(false);
-    // The page's own controls wait for it too, as they did for the form's upload.
     expect(
       (screen.getAllByRole("button", { name: "New record" })[0] as HTMLButtonElement).disabled,
     ).toBe(true);
@@ -3315,7 +3195,6 @@ describe("a Data Collection's record panel and forms", () => {
     await screen.findByText("Alice");
     fireEvent.click(command("Create form"));
     expect(onCreateForm).toHaveBeenCalledOnce();
-    // Without a connected handler, a public create action offers no form.
     result.rerender(
       <TransactionalCollectionPage
         {...result.props}
@@ -3357,7 +3236,6 @@ describe("a Data Collection's reads", () => {
         expect.any(Function),
         identity,
       );
-      // Records that could not load take no changes.
       expect(
         screen.getAllByRole<HTMLButtonElement>("button", { name: "New record" })[0]!.disabled,
       ).toBe(true);
@@ -3382,7 +3260,6 @@ describe("a Data Collection's reads", () => {
     } finally {
       vi.useRealTimers();
     }
-    // The toast's Try again is the same load.
     expect(invoke).toHaveBeenCalledTimes(2);
     act(() => retryFromToast());
     await waitFor(() => expect(invoke).toHaveBeenCalledTimes(3));
@@ -3486,7 +3363,6 @@ it("keeps an open record's panel, and the focus in it, when the records are read
     expect(screen.getByRole("complementary", { name: "Alice Paid" })).toBe(record),
   );
   expect(document.activeElement).toBe(button);
-  // A record the new read no longer holds keeps its panel, which says so instead of showing old values.
   invoke.mockResolvedValue({ result: { rows: [], nextCursor: null } });
   rerender(<TransactionalCollectionPage {...props} recordsVersion={2} />);
   await waitFor(() =>
@@ -3501,7 +3377,6 @@ it("shows records an automation changed in place, with no loading line, nothing 
   const { props, rerender } = setup({ invoke });
   await screen.findByText("Alice");
   const record = openPanel();
-  // An editor open in the panel stays open, with what it holds, while the record changes under it.
   fireEvent.click(propertyValue("Amount"));
   const input = propertyInput("Amount");
   fireEvent.change(input, { target: { value: "9" } });
@@ -3519,7 +3394,6 @@ it("shows records an automation changed in place, with no loading line, nothing 
   expect(propertyInput("Amount")).toBe(input);
   expect(input.value).toBe("9");
   fireEvent.keyDown(input, { key: "Escape" });
-  // A record the read left out keeps its panel open, which says so instead of showing old values.
   invoke.mockResolvedValueOnce({ result: { rows: [], nextCursor: null } });
   rerender(<TransactionalCollectionPage {...props} recordsChanged={2} />);
   await waitFor(() =>
@@ -3544,7 +3418,6 @@ it("finishes a read and a read in place asked for in one render, and leaves noth
   rerender(<TransactionalCollectionPage {...props} recordsVersion={1} recordsChanged={1} />);
   expect(await screen.findByText("Loading records…")).toBeTruthy();
   await act(async () => first.resolve({ result: page() }));
-  // The read in place waited for the other read, then ran.
   await screen.findByText("Alice Paid");
   expect(invoke).toHaveBeenCalledTimes(3);
   expect(screen.queryByText("Loading records…")).toBeNull();
@@ -3574,7 +3447,6 @@ it("shows the ⚡ button before New record, and a ⚡ that names the automations
   expect(onToggle).toHaveBeenCalledOnce();
   const marks = within(grid()).getAllByTestId("table-field-mark");
   expect(marks.map((found) => found.closest("button")?.textContent)).toEqual(["Amount", "Status"]);
-  // The mark's words describe the field's sort control, and show on hover or keyboard focus.
   const sortStatus = screen.getByRole("button", { name: "Status" });
   expect(document.getElementById(sortStatus.getAttribute("aria-describedby")!)?.textContent).toBe(
     '"Review new people" and "Stamp" set this field',
@@ -3585,7 +3457,6 @@ it("shows the ⚡ button before New record, and a ⚡ that names the automations
     '"Review new people" and "Stamp" set this field',
   );
   fireEvent.blur(sortStatus);
-  // The panel marks the same fields, with the same words.
   expect(
     within(openPanel())
       .getAllByTestId("table-field-mark")
@@ -3597,7 +3468,6 @@ it("shows the ⚡ button before New record, and a ⚡ that names the automations
 });
 
 describe("when the Collection's fields change", () => {
-  /** The next revision of the fixture, changed by `change`. */
   const revised = (
     revision: number,
     change: (next: TransactionalDatasetDescription) => void = () => undefined,
@@ -3648,7 +3518,6 @@ describe("when the Collection's fields change", () => {
         dataset={revised(2, retype(amount, "text"))}
       />,
     );
-    // The rows stay without the retyped field's old number, and nothing says the page is loading.
     expect(grid()).toBe(table);
     expect(within(table).getByText("Alice")).toBeTruthy();
     expect(within(table).queryByText("5")).toBeNull();
@@ -3756,7 +3625,6 @@ describe("when the Collection's fields change", () => {
     });
     const result = setup({ invoke });
     await screen.findByText("Alice");
-    // Record 2's change is in flight under revision 1. Record 1's waits behind it, unsent.
     type("Name", "Beatrice", 1);
     type("Name", "Alicia");
     expect(sent(invoke, edit)).toHaveLength(1);
@@ -3773,7 +3641,6 @@ describe("when the Collection's fields change", () => {
     expect(why("Name", 1)).toBe(
       "The Collection's rules changed before dohc confirmed this change. Check the record, then make the change again.",
     );
-    // The change not sent yet was typed as text, and Name is a number now, so it is never sent. Both cells keep what was typed.
     expect(mark("Name")).toBe("refused");
     expect(why("Name")).toBe(
       "This field changed, so dohc did not save this value. Enter a value the field takes.",
@@ -3783,13 +3650,11 @@ describe("when the Collection's fields change", () => {
       expect.stringContaining("Beatrice"),
     ]);
     await waitFor(() => expect(reads(invoke).at(-1)!.revision).toBe(2));
-    // The old request's late answer changes nothing.
     await act(async () => old.resolve({ result: receipt(5, 2) }));
     expect(sent(invoke, edit)).toHaveLength(1);
     expect(result.onNotice).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: "Undo last edit" })).toBeNull();
     expect(mark("Name", 1)).toBe("refused");
-    // Dismissed, the cell shows what the record holds under the new type, and the next change saves under the new rules.
     fireEvent.click(within(cell("Name")).getByRole("button", { name: "Dismiss" }));
     await waitFor(() => expect(cell("Name").textContent).toBe("42"));
     type("Name", "43");
@@ -3814,7 +3679,6 @@ describe("when the Collection's fields change", () => {
     await screen.findByText("Alice");
     type("Name", "Beatrice", 1);
     type("Amount", "9");
-    // Amount leaves the Collection under the same revision's rules, before its change is sent.
     const without = dataset();
     without.tables[0]!.fields = without.tables[0]!.fields.filter(
       (entry) => entry.fieldId !== amount,
@@ -3897,21 +3761,17 @@ describe("when the Collection's fields change", () => {
         )}
       />,
     );
-    // A renamed field keeps its value. A field the rules add takes its default.
     expect(draftValue("Full name")).toBe("Bob");
     expect(draftValue("Team")).toBe("Blue");
-    // The retyped field shows what was typed, read-only, with a way to copy it and one to clear it.
     const typed = within(draftPanel()).getByLabelText<HTMLInputElement>("Amount");
     expect(typed.readOnly).toBe(true);
     expect(typed.value).toBe("7");
     expect(screen.getByText(CHANGED)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Copy value" })).toBeTruthy();
-    // Create record writes nothing under the new type: it points at the field instead.
     fireEvent.click(screen.getByRole("button", { name: "Create record" }));
     expect(sent(result.invoke, create)).toHaveLength(0);
     expect(document.activeElement).toBe(typed);
     fireEvent.click(screen.getByRole("button", { name: "Clear value" }));
-    // The field is a row again, with nothing in it, and the panel keeps focus.
     expect(draftValue("Amount")).toBe("Empty");
     expect(document.activeElement).toBe(draftPanel());
     expect(screen.queryByText(CHANGED)).toBeNull();
@@ -3943,7 +3803,6 @@ describe("when the Collection's fields change", () => {
         .queryAllByRole("textbox")
         .filter((input) => (input as HTMLInputElement).readOnly)
         .map((input) => input.getAttribute("aria-label"));
-    // New options that still hold the value, and a field that stops being required, flag nothing.
     show(
       revised(2, (next) => {
         field(next, status).options = ["Reviewed", "Done"];
@@ -3951,7 +3810,6 @@ describe("when the Collection's fields change", () => {
       }),
     );
     expect(flagged()).toEqual([]);
-    // Options without the value, and a field that changes type, flag it.
     show(
       revised(3, (next) => {
         field(next, status).options = ["New", "Done"];
@@ -3959,7 +3817,6 @@ describe("when the Collection's fields change", () => {
       }),
     );
     expect(flagged()).toEqual(["Name", "Status"]);
-    // Once the fields take the values again, they are what was typed, with nothing flagged.
     show(revised(4));
     expect(flagged()).toEqual([]);
     expect(draftValue("Name")).toBe("Bob");
@@ -4001,16 +3858,13 @@ describe("when the Collection's fields change", () => {
     fireEvent.change(cellEditor(), { target: { value: "7" } });
     fireEvent.keyDown(cellEditor(), { key: "Tab" });
     const held = () => newRowCells().map((cell) => cell.textContent);
-    // An automation changed records, so the page reads them again in place.
     result.rerender(<TransactionalCollectionPage {...result.props} recordsChanged={1} />);
     await waitFor(() => expect(reads(result.invoke)).toHaveLength(2));
     expect(held().slice(0, 2)).toEqual(["Bob", "7"]);
-    // The table sorts, which reads the records again in another order.
     fireEvent.click(within(within(grid()).getAllByRole("columnheader")[1]!).getByRole("button"));
     await waitFor(() => expect(reads(result.invoke)).toHaveLength(3));
     await loaded();
     expect(held().slice(0, 2)).toEqual(["Bob", "7"]);
-    // Amount leaves the Collection's reads and creates: its value goes to a notice, and the rest stays.
     result.rerender(
       <TransactionalCollectionPage
         {...result.props}
@@ -4037,7 +3891,6 @@ describe("when the Collection's fields change", () => {
     fireEvent.keyDown(grid(), { key: "7" });
     fireEvent.change(cellEditor(), { target: { value: "7" } });
     fireEvent.keyDown(cellEditor(), { key: "Tab" });
-    // The create stops taking Amount. The table still reads and shows the column.
     result.rerender(
       <TransactionalCollectionPage
         {...result.props}
@@ -4051,7 +3904,6 @@ describe("when the Collection's fields change", () => {
     await waitFor(() =>
       expect(result.onError).toHaveBeenCalledWith(words, expect.any(TextNotSavedError), null),
     );
-    // The row no longer shows a value it will not send, and says where the value went.
     expect(
       newRowCells()
         .slice(0, 2)
@@ -4077,7 +3929,6 @@ describe("when the Collection's fields change", () => {
     typeNewRow("Bob", "Tab");
     fireEvent.keyDown(grid(), { key: "5" });
     fireEvent.change(cellEditor(), { target: { value: "58" } });
-    // The create stops taking Amount while its editor is still open over the row.
     result.rerender(
       <TransactionalCollectionPage
         {...result.props}
@@ -4114,7 +3965,6 @@ describe("when the Collection's fields change", () => {
     ).toBeTruthy();
     // The first try may have run. The rules change, so its request can never be confirmed, and the queue lets it go.
     result.rerender(<TransactionalCollectionPage {...result.props} dataset={revised(2)} />);
-    // The page's list keeps what the row held, as for any change that may have run, and offers no Try again.
     await waitFor(() =>
       expect(within(strip()!).queryByRole("button", { name: "Try again" })).toBeNull(),
     );
@@ -4125,7 +3975,6 @@ describe("when the Collection's fields change", () => {
     expect(list.getByRole("alert").textContent).toBe(
       "The Collection's rules changed before dohc confirmed this change. Check the record, then make the change again.",
     );
-    // No row holds the record to save it again: the row on screen is the next one, with nothing typed in it.
     expect(newRowCells()[0]!.textContent).toBe("");
     fireEvent.keyDown(grid(), { key: "Enter" });
     result.unmount();
@@ -4327,7 +4176,6 @@ describe("when the Collection's fields change", () => {
           copy={offline ? { offline: true, savedAtMs: 1 } : undefined}
         />,
       );
-    // A rename elsewhere keeps the panel, the editor and the focus in it.
     show(
       revised(2, (next) => {
         field(next, status).name = "Stage";
@@ -4337,11 +4185,9 @@ describe("when the Collection's fields change", () => {
     expect(within(record).getByRole("group", { name: "Stage" })).toBeTruthy();
     expect(propertyInput("Amount")).toBe(input);
     expect(document.activeElement).toBe(input);
-    // Offline, the editor waits with what it holds.
     show(revised(3), true);
     expect(propertyInput("Amount")).toBe(input);
     expect([input.value, input.matches(":disabled")]).toEqual(["9", true]);
-    // Back online with no edit action, saving keeps the value on the field and says why.
     show(
       revised(4, (next) => {
         next.operations = next.operations.filter((entry) => entry.operationId !== edit);
@@ -4447,7 +4293,6 @@ describe("when the Collection's fields change", () => {
     await waitFor(() => expect(sent(invoke, edit)).toHaveLength(1));
     result.rerender(<TransactionalCollectionPage {...result.props} dataset={revised(2)} />);
     expect(result.onError.mock.calls.at(-1)![0]).toContain("Check the records");
-    // The value stays on the field, in the panel and in the table, and can be saved again under the new rules.
     expect(within(property("Amount")).getByRole("note").textContent).toContain(
       "The Collection's rules changed before dohc confirmed this change. Check the record, then make the change again.",
     );
@@ -4481,7 +4326,6 @@ describe("when the Collection's fields change", () => {
     const result = setup({ resolveRelation, dataset: needingPanel(revised(1, relation(id(41)))) });
     await screen.findByText("Alice");
     newRecord();
-    // The new record's relation opens the editor a record's does, in the panel.
     fireEvent.click(within(draftField("Team")).getByRole("button", { name: "Edit Team" }));
     expect(await screen.findByRole("button", { name: "Old team" })).toBeTruthy();
     result.rerender(
@@ -4528,7 +4372,6 @@ describe("when the Collection's fields change", () => {
         )}
       />,
     );
-    // The emptied value is no value its field cannot take, so nothing is flagged.
     expect(within(draftPanel()).queryAllByRole("textbox")).toEqual([]);
     expect(draftValue("Private note")).toBe("Empty");
     fireEvent.click(screen.getByRole("button", { name: "Create record" }));
@@ -4558,7 +4401,6 @@ describe("when the Collection's fields change", () => {
   });
 });
 
-/** One of two pages of the same table, by the element that holds it. */
 function tableIn(root: HTMLElement) {
   const table = () => within(root).getByRole("grid");
   const at = (field: string, row = 0): HTMLElement => {
@@ -4622,7 +4464,6 @@ describe("one queue for a table's changes", () => {
         ["Saved the edit in People"],
       ]),
     );
-    // The closed page read nothing more.
     expect(sent(invoke, read)).toHaveLength(1);
   });
 
@@ -4643,10 +4484,8 @@ describe("one queue for a table's changes", () => {
     const a = tableIn(first.container),
       b = tableIn(second.container);
     a.type("Name", "Alicia");
-    // The other page shows the same change on its cell.
     expect(b.mark("Name")).toBe("pending");
     expect(b.cell("Name").textContent).toContain("Alicia");
-    // The first page closes. The change still ends, and the second page shows it and reads its records again.
     first.unmount();
     stored = "Alicia";
     await act(async () => answer.resolve({ result: receipt(3) }));
@@ -4702,7 +4541,6 @@ describe("one queue for a table's changes", () => {
     b.type("Amount", "9");
     expect(a.mark("Amount")).toBe("pending");
     expect(sent(invoke, edit)).toHaveLength(1);
-    // The left page closes. The right page's change still goes, after the left page's, on its receipt's version.
     view.rerender(<>{right}</>);
     await act(async () => answers[0]!.resolve({ result: receipt(3) }));
     await waitFor(() => expect(sent(invoke, edit)).toHaveLength(2));
@@ -4777,7 +4615,6 @@ describe("one queue for a table's changes", () => {
         "The Collection refused this change. Name is taken.",
       );
       expect(list.queryByRole("button", { name: "Try again" })).toBeNull();
-      // Neither page takes the record back for typing: no panel opens, and no row holds it.
       expect(within(sender).queryByRole("complementary")).toBeNull();
       expect(sender.querySelector("[data-new-record]")!.textContent).toBe("New");
       expect(other.querySelector("[data-new-record]")).toBeNull();
@@ -4867,7 +4704,6 @@ describe("one queue for a table's changes", () => {
     await screen.findByText("Alice");
     type("Name", "Alicia");
     type("Amount", "9");
-    // A read in place starts before the first change is confirmed, and answers after it.
     rerender(<TransactionalCollectionPage {...props} recordsChanged={1} />);
     await waitFor(() => expect(reads).toBe(2));
     await act(async () => first.resolve({ result: receipt(7) }));
@@ -4959,7 +4795,6 @@ describe("what a change that did not save leaves for the person", () => {
     expect(mark("Name")).toBe("refused");
     expect(why("Name")).toBe(NOT_FINISHED);
     expect(sent(view.invoke, edit)).toHaveLength(0);
-    // The next edit of the cell starts from what was typed, and saves it.
     fireEvent.click(cell("Name"));
     expect(editorInput().value).toBe("Bob");
     fireEvent.keyDown(editorInput(), { key: "Enter" });
@@ -5053,7 +4888,6 @@ describe("what a change that did not save leaves for the person", () => {
     fireEvent.click(cell("Name"));
     fireEvent.change(editorInput(), { target: { value: "Alicia" } });
     view.unmount();
-    // The page opens again in a saved view that sorts the other way, so Alice's record is in the second row.
     render(
       <TransactionalCollectionPage
         {...view.props}
@@ -5071,7 +4905,6 @@ describe("what a change that did not save leaves for the person", () => {
     expect([cell("Name").textContent, mark("Name")]).toEqual(["Bea", null]);
     expect(cell("Name", 1).textContent).toContain("Alicia");
     expect([mark("Name", 1), why("Name", 1)]).toEqual(["refused", NOT_FINISHED]);
-    // The header's next press clears the sort, and the text goes back to the first row with its record.
     await loaded();
     fireEvent.click(screen.getByRole("button", { name: "Name" }));
     await waitFor(() => expect(cell("Name").textContent).toContain("Alicia"));
@@ -5176,7 +5009,6 @@ describe("what a change that did not save leaves for the person", () => {
     expect(writes[2]!.input).toEqual({ id: 1, expectedVersion: 9, values: { [name]: "Alison" } });
   });
 
-  /** The fixture with a primary key the read returns, so one record can be read by it. */
   const member = id(9);
   function keyed(): TransactionalDatasetDescription {
     const description = dataset();
@@ -5216,7 +5048,6 @@ describe("what a change that did not save leaves for the person", () => {
     await screen.findByText("Alice");
     type("Name", "Alicia");
     type("Amount", "9");
-    // The first change moves the record out of the page's search, and its receipt reports no version.
     moved = true;
     await act(async () => first.resolve({ result: null }));
     await waitFor(() => expect(sent(invoke, edit)).toHaveLength(2));
@@ -5275,7 +5106,6 @@ describe("what a change that did not save leaves for the person", () => {
     await waitFor(() => expect(mark("Name")).toBe("refused"));
     expect(why("Name")).toBe(RULES_CHANGED);
     expect(cell("Name").textContent).toContain("Alicia");
-    // Nothing offers to send the same request again, and the page asks for the Collection's rules.
     expect(within(cell("Name")).queryByRole("button", { name: "Try again" })).toBeNull();
     expect(onError.mock.calls.at(-1)![2]).toBeNull();
     expect(onRefresh).toHaveBeenCalledOnce();
@@ -5313,14 +5143,12 @@ describe("what a change that did not save leaves for the person", () => {
     await waitFor(() => expect(mark("Name")).toBe("unconfirmed"));
     const reads = sent(invoke, read).length;
     fireEvent.click(within(cell("Name")).getByRole("button", { name: "Discard" }));
-    // The cell keeps what was typed, and says to check the record. Its row in Notices goes.
     expect(mark("Name")).toBe("refused");
     expect(why("Name")).toBe(DISCARDED);
     expect(cell("Name").textContent).toContain("Alicia");
     expect(onSettled).toHaveBeenCalledWith(onError.mock.calls[0]![3]);
     await act(async () => onError.mock.calls[0]![2]!());
     expect(sent(invoke, edit)).toHaveLength(2);
-    // The record's next change waits for a read, and goes with the version that read returns and a key of its own.
     type("Amount", "9");
     await waitFor(() => expect(sent(invoke, edit)).toHaveLength(3));
     expect(sent(invoke, read).length).toBeGreaterThan(reads);
@@ -5360,7 +5188,6 @@ describe("what a change that did not save leaves for the person", () => {
     expect(sent(invoke, create)).toHaveLength(1);
   });
 
-  /** A new record whose first answer is lost, and which the Collection then refuses. */
   function refusedCreate() {
     let writes = 0;
     return vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
@@ -5369,7 +5196,6 @@ describe("what a change that did not save leaves for the person", () => {
       throw refusal("Name is taken.");
     });
   }
-  /** Saves a new row named Bob, and waits for the page's list to say dohc could not confirm it. Leaves no row open. */
   async function createBob(): Promise<void> {
     typeNewRow("Bob");
     await screen.findByRole("group", { name: "Changes dohc did not confirm" });
@@ -5378,7 +5204,6 @@ describe("what a change that did not save leaves for the person", () => {
   }
 
   const REFUSED_TAKEN = "The Collection refused this change. Name is taken.";
-  /** The page's list holds the new record with why, to copy, and nothing on the page can send it again. */
   async function expectListedOnly(values: string) {
     const list = within(await screen.findByRole("group", { name: "Changes dohc did not confirm" }));
     expect(list.getByLabelText<HTMLInputElement>("New record").value).toBe(values);
@@ -5400,7 +5225,6 @@ describe("what a change that did not save leaves for the person", () => {
       expect(within(strip()!).queryByRole("button", { name: "Try again" })).toBeNull(),
     );
     await expectListedOnly("Name: Bob, Status: New");
-    // Nothing sends a third create: not Enter, and not closing the page.
     fireEvent.keyDown(grid(), { key: "Enter" });
     view.unmount();
     await Promise.resolve();
@@ -5412,7 +5236,6 @@ describe("what a change that did not save leaves for the person", () => {
     const view = setup({ invoke });
     await screen.findByText("Alice");
     await createBob();
-    // The page closes and opens again: its list has the change the row showed.
     view.unmount();
     render(<TransactionalCollectionPage {...view.props} />);
     fireEvent.click(
@@ -5433,7 +5256,6 @@ describe("what a change that did not save leaves for the person", () => {
     typeDraft("Name", "Bob");
     typeDraft("Badge", "A1");
     fireEvent.click(screen.getByRole("button", { name: "Create record" }));
-    // dohc could not confirm it: the panel closes, and the list has the change with its Try again.
     fireEvent.click(
       within(await screen.findByRole("group", { name: "Changes dohc did not confirm" })).getByRole(
         "button",
@@ -5455,7 +5277,6 @@ describe("what a change that did not save leaves for the person", () => {
     closeCollectionChangeShellsForTests();
     view.unmount();
     await Promise.resolve();
-    // A word in a number field stops the save. Everything the row held is kept, with the word under its field.
     expect(sent(view.invoke, create)).toHaveLength(0);
     expect(
       collectionWriteFailures().map((failure) => [
@@ -5480,7 +5301,6 @@ describe("what a change that did not save leaves for the person", () => {
   it("keeps a new row a required field stops in the list of unsaved changes when its table closes after the window showed another workspace", async () => {
     const view = setup();
     await screen.findByText("Alice");
-    // Name is left empty, and Amount is typed.
     fireEvent.click(within(grid()).getByRole("button", { name: "New record" }));
     fireEvent.keyDown(cellEditor(), { key: "Tab" });
     fireEvent.keyDown(grid(), { key: "7" });
@@ -5515,7 +5335,6 @@ describe("what a change that did not save leaves for the person", () => {
     const view = setup({ invoke });
     await screen.findByText("Alice");
     await createBob();
-    // The row the failure left in Notices sends the change again after the page closed.
     const [words, , retry, identity] = view.onError.mock.calls[0]!;
     expect([words, typeof identity]).toEqual(["dohc could not confirm this change.", "string"]);
     view.unmount();
@@ -5550,7 +5369,6 @@ describe("what a change that did not save leaves for the person", () => {
     await screen.findByText("Alice");
     typeNewRow("Bob");
     await waitFor(() => expect(sent(invoke, create)).toHaveLength(1));
-    // The page closes with the create out, and opens again with the ⚡ panel open.
     view.unmount();
     render(
       <TransactionalCollectionPage
@@ -5565,7 +5383,6 @@ describe("what a change that did not save leaves for the person", () => {
     expect(list.getByLabelText<HTMLInputElement>("New record").value).toBe(
       "Name: Bob, Status: New",
     );
-    // The ⚡ panel stays where it was, and nothing took its place.
     expect(noDraftPanel()).toBe(true);
     expect(
       screen.getAllByRole("complementary").map((side) => side.getAttribute("aria-label")),

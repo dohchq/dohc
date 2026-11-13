@@ -257,7 +257,6 @@ test(
             "index.html links missing.js, which is not in the app. Add the file or fix the link.",
         },
       );
-      // Each compile ran the packaged owner, not one from the source tree.
       await rm(
         join(destination, process.platform === "win32" ? "compiler-owner.exe" : "compiler-owner"),
       );

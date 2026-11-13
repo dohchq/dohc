@@ -71,7 +71,6 @@ describe.skipIf(!pgAvailable)("the credential fence", () => {
   }
 
   it("increases the epoch in the transaction that changes the password, and only then", async () => {
-    // Sign-up writes the first password without a fence.
     await account("fence-change", "first");
     expect(await fence().readEpoch("fence-change")).toBe(0);
     await pool.query(`update "account" set "updatedAt" = now() where "userId" = 'fence-change'`);
@@ -191,13 +190,11 @@ describe.skipIf(!pgAvailable)("the credential fence", () => {
     expect(old).toEqual({ epoch: 1, sessionCurrent: false });
     const current = await fence().readConsentCredentials("fence-consent", "fence-consent-new");
     expect(current).toEqual({ epoch: 1, sessionCurrent: true });
-    // A session that began at the moment of the change is current.
     await pool.query(`update "session" set dohc_created_at = (select changed_at from dohc_credential_fences where user_id = 'fence-consent')
       where id = 'fence-consent-old'`);
     expect(
       (await fence().readConsentCredentials("fence-consent", "fence-consent-old"))?.sessionCurrent,
     ).toBe(true);
-    // Another account's session is not this account's.
     await account("fence-consent-other", "other");
     expect(
       (await fence().readConsentCredentials("fence-consent-other", "fence-consent-new"))
@@ -237,11 +234,9 @@ describe.skipIf(!pgAvailable)("the credential fence", () => {
     await session("fence-legacy-after", "fence-legacy-after");
     await account("fence-legacy-none", "first");
     await session("fence-legacy-none", "fence-legacy-none");
-    // A change the fence recorded before the migration ran.
     await pool.query(
       `update "account" set password = 'hash:second' where "userId" = 'fence-legacy-before'`,
     );
-    // As if the sessions predate the column: drop it and run the migration again.
     await pool.query(`alter table "session" drop column dohc_created_at`);
     await pool.query(
       `update "session" set "createdAt" = clock_timestamp() + interval '1 hour' where id like 'fence-legacy-%'`,
@@ -249,7 +244,6 @@ describe.skipIf(!pgAvailable)("the credential fence", () => {
     await pool.query(
       await readFile(new URL("0006_session_created_on_database_clock.sql", MIGRATIONS), "utf8"),
     );
-    // A change after it.
     await pool.query(
       `update "account" set password = 'hash:second' where "userId" = 'fence-legacy-after'`,
     );
@@ -259,7 +253,6 @@ describe.skipIf(!pgAvailable)("the credential fence", () => {
     expect(
       await fence().readConsentCredentials("fence-legacy-after", "fence-legacy-after"),
     ).toEqual({ epoch: 1, sessionCurrent: false });
-    // An account with no fence keeps its session, and a new session is current.
     expect(await fence().readConsentCredentials("fence-legacy-none", "fence-legacy-none")).toEqual({
       epoch: 0,
       sessionCurrent: true,
@@ -289,7 +282,6 @@ describe.skipIf(!pgAvailable)("the credential fence", () => {
   });
 });
 
-/** A pooled client as the listener uses it: notifications, errors, queries, and release. */
 class FakeClient extends EventEmitter {
   readonly queries: string[] = [];
   readonly release = vi.fn();
@@ -335,7 +327,6 @@ describe("the credential fence listener", () => {
       expect(onDown).toHaveBeenCalledTimes(1);
       expect(first.release).toHaveBeenCalledTimes(1);
       expect(first.release).toHaveBeenCalledWith(true);
-      // The client it let go no longer counts.
       first.emit("error", new Error("The connection closed."));
       expect(onDown).toHaveBeenCalledTimes(1);
 

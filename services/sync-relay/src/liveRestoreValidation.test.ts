@@ -30,7 +30,6 @@ afterEach(async () => {
   await Promise.all(pools.splice(0).map((pool) => pool.close()));
 });
 
-/** An engine restore proposal whose stored source is its only artifact. */
 function engineProposal(direction: string) {
   const saved = JSON.parse(
     readFileSync(

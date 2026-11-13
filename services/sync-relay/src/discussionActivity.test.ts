@@ -92,7 +92,6 @@ describe("DiscussionActivityHub", () => {
         shouldPark: () => true,
       }),
     ).toThrow(DiscussionActivityCapacityError);
-    // A full personal pool leaves a link reader its place.
     const reader = hub.wait(linkLogWaitGroup("ws-a"), "link:reader", {
       holdMs: 60_000,
       shouldPark: () => true,

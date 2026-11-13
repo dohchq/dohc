@@ -386,8 +386,6 @@ describe("desktop workspace windows", () => {
     expect(f.windows.targetWindow(utility.native)).toBe(manager);
   });
 
-  // A closing window loses its webContents before the window itself goes.
-  // A quit in that gap must find no renderer to ask, not throw.
   it("leaves a closing window's destroyed renderer out of the windows that answer", () => {
     const f = fixture();
     const closing = new Window();
@@ -479,7 +477,6 @@ describe("desktop workspace windows", () => {
     expect(f.dependencies.createMainWindow).not.toHaveBeenCalled();
     existing.destroy();
     f.all.length = 0;
-    // A live manager alone is not a place for a handoff to land.
     f.windows.showOrCreateManagerWindow();
     f.windows.seedZoomLevel(2);
     const created = await f.windows.showOrCreateMainWindow();
@@ -526,7 +523,6 @@ describe("desktop workspace windows", () => {
     const loadListeners = first.webContents.listenerCount("did-finish-load");
     first.destroy();
     await expect(closed).rejects.toThrow("closed before it finished loading");
-    // The open's own listeners are gone: a late load sends nothing.
     expect(first.webContents.listenerCount("did-finish-load")).toBe(loadListeners - 1);
     expect(first.webContents.listenerCount("did-fail-load")).toBe(0);
     first.finishLoad();
@@ -1171,7 +1167,6 @@ describe("desktop native menus", () => {
       click(item(f, "View", "Zoom in"));
       await reported.promise;
       expect(f.dependencies.stepWindowZoom).toHaveBeenCalledExactlyOnceWith("in");
-      // The refusal already names the file and the way out.
       expect(f.dependencies.dialog.showErrorBox).toHaveBeenCalledWith(
         "Zoom",
         error instanceof Error
@@ -1224,7 +1219,6 @@ describe("desktop native menus", () => {
       [CHANNELS.menuCommand, "new-file"],
       [CHANNELS.menuCommand, "close-tab"],
     ]);
-    // A loaded window takes a command at once.
     click(item(f, "File", "New folder"));
     expect(created.webContents.send).toHaveBeenLastCalledWith(CHANNELS.menuCommand, "new-folder");
     expect(created.webContents.send).toHaveBeenCalledTimes(4);

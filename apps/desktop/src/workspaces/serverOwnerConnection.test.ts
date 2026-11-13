@@ -85,8 +85,6 @@ it("discovers only owned synced workspaces and sends credentials only to their p
   await expect(session!.documents(new AbortController().signal)).rejects.toThrow("changed");
 });
 
-// Proves: a pass holding an owner's open reads the server's list, not the
-// one cached before it, and other reads keep the cache.
 it("reads the list fresh when asked, and from its cache otherwise", async () => {
   const f = fixture(),
     session = (await f.connection.connect(f.workspace, new AbortController().signal))!;
@@ -127,7 +125,6 @@ it("sends the owner's kept-edits actions to the owner route, and reads the list 
   );
   await session.documents(signal);
   expect(f.fetch).toHaveBeenCalledTimes(3);
-  // A refusal that changed or is gone, and a Try again of edits an earlier copy keeps, answer as such; any other conflict keeps the server's words.
   for (const [code, earlier] of [
     ["kept-edits-changed", false],
     ["kept-edits-earlier", true],
@@ -155,7 +152,6 @@ it("sends the owner's kept-edits actions to the owner route, and reads the list 
   await expect(
     session.keptEdits({ action: "retry", outboxId: "outbox", generation: 2 }, signal),
   ).rejects.toThrow("Live editing is off for this document.");
-  // An earlier copy the server could not prepare says why, in the desktop's words; an unknown reason asks for a check.
   for (const [reason, code, words] of [
     [
       "disk-space",
@@ -201,7 +197,6 @@ it("sends the owner's kept-edits actions to the owner route, and reads the list 
       body: JSON.stringify({ action: "page", outboxId: "outbox", generation: 2, cursor }),
     }),
   );
-  // A later page of the list follows the cursor.
   f.fetch.mockResolvedValueOnce(
     new Response(JSON.stringify({ ok: true, keptEdits: [], nextCursor: null })),
   );
@@ -436,8 +431,6 @@ it("rejects discovery errors and bounds response bytes before parsing", async ()
   }
 });
 
-// Proves: a full page of the edits the server kept fits its response limit
-// even when every row has the longest path, in characters UTF-8 spends three bytes on.
 it("reads a full page of kept edits whose paths are all as long as a path can be", async () => {
   const keptEdits = Array.from({ length: 256 }, (_, index) => ({
     objectId: `object-${index}`,
@@ -476,9 +469,6 @@ it("keeps the credential account when discovery contains a client-selected accou
   expect(session).toMatchObject({ bearer: "secret", accountId: "owner" });
 });
 
-// Proves: the owner's open names only the path. A ready or starting document
-// is hosted; a Stopped or unavailable one, or a refused request, is a
-// terminal answer. The next list is read fresh.
 it("asks the owner route to host an opened document, and reads a Stop or refusal as a terminal answer", async () => {
   const f = fixture(),
     session = (await f.connection.connect(f.workspace, new AbortController().signal))!;

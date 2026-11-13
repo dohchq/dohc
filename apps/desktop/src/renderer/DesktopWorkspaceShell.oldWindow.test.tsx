@@ -66,7 +66,6 @@ describe("a window Forget left showing its workspace", () => {
     expect(bridge.goToWorkspaceWindow).toHaveBeenCalledExactlyOnceWith({});
     expect(bridge.closeThisWindow).not.toHaveBeenCalled();
 
-    // The other window closed.
     show({ openElsewhere: false });
     const stopped = screen.getByTestId("workspace-old-window");
     expect(within(stopped).getByRole("heading").textContent).toBe(
@@ -83,7 +82,6 @@ describe("a window Forget left showing its workspace", () => {
     await user.click(close);
     expect(bridge.closeThisWindow).toHaveBeenCalledOnce();
 
-    // The workspace opened in another window again.
     show({ openElsewhere: true });
     expect(document.activeElement).toBe(screen.getByRole("button", { name: "Go to that window" }));
   });
@@ -115,8 +113,6 @@ describe("a window Forget left showing its workspace", () => {
     const show = renderShell(bridge, null);
     await waitFor(() => expect(workbenchInert()).toBe(false));
     await waitFor(() => expect(bridge.getCaptureRecoveryStatus).toHaveBeenCalled());
-    // Main stopped the workspace before this window heard: workspace activity
-    // runs the window's reads again, and each one fails.
     const reads = bridge.getCaptureRecoveryStatus.mock.calls.length;
     bridge.getCaptureRecoveryStatus.mockRejectedValue(
       stoppedCall("desktop:get-capture-recovery-status", "read"),
@@ -134,7 +130,6 @@ describe("a window Forget left showing its workspace", () => {
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
     expect(document.body.textContent).not.toContain(KEPT_TYPING_FAILED);
 
-    // Any other failed call is still reported, with nothing to try again.
     bridge.goToWorkspaceWindow.mockRejectedValueOnce(
       stoppedCall("desktop:go-to-workspace-window", "call"),
     );

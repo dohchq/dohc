@@ -281,7 +281,6 @@ for (const [platform, arch] of [
           ? join(packaged, "app-compiler/node.exe")
           : join(packaged, "engine-reader", staged.generation, "node"),
       );
-      // Every packaged asset fails closed before engine launch.
       for (const key of ["bundle", "node", "manifest"]) {
         const file = installed[key],
           backup = `${file}.saved`;

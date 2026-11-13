@@ -45,7 +45,6 @@ describe("removeExpiredRunLogs", () => {
       "run-old.log.node": 31,
       "run-old.log.mcp.json": 31,
       "run-old.log.ended": 31,
-      // Quiet for 60 days before it ended 10 days ago.
       "run-quiet.log": 60,
       "run-quiet.log.ended": 10,
       // No recorded end: dohc stopped before recording it, or it still runs.
@@ -107,7 +106,6 @@ describe("removeExpiredRunLogs", () => {
 });
 
 describe("runLogKeepDays", () => {
-  // The limit dohc sweeps with when the settings file holds this text.
   async function limitFor(text: string) {
     const dir = await mkdtemp(join(tmpdir(), "dohc-run-log-settings-"));
     dirs.push(dir);

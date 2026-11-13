@@ -87,7 +87,6 @@ function heldClearRace(root: string, order: "queued" | "independent") {
   };
 }
 
-// This installation's run history in a workspace.
 const runsFolder = (root: string) => join(root, ".dohc", "agent-runs");
 const runsPath = (root: string) => join(runsFolder(root), agentRunsFileName("install-local"));
 
@@ -121,7 +120,6 @@ describe("AgentIntegration", () => {
         agentId: "terminal",
         onBehalfOf: "person-local",
       });
-      // The watcher slot now carries this run's attribution.
       expect(slots.at(-1)).toEqual({
         agentId: "terminal",
         onBehalfOf: "person-local",
@@ -129,13 +127,11 @@ describe("AgentIntegration", () => {
         depth: 0,
       });
 
-      // The record is durable and inspectable on disk.
       const persisted = JSON.parse(await readFile(runsPath(root), "utf8"));
       expect(persisted).toHaveLength(1);
       expect(persisted[0]).toMatchObject({ id: run.id, status: "running" });
 
       await integration.endAgentRun("ws", run.id);
-      // Slot cleared back to local user.
       expect(slots.at(-1)).toBeNull();
       const after = JSON.parse(await readFile(runsPath(root), "utf8"));
       expect(after[0]).toMatchObject({ status: "complete" });
@@ -266,7 +262,6 @@ describe("AgentIntegration", () => {
         });
         setAgentRun.mockClear();
         await integration.endAgentRun("ws", run.id);
-        // The run's attribution was already cleared; only its history is recorded.
         expect(setAgentRun).not.toHaveBeenCalled();
         expect(onRunEnded).toHaveBeenCalledOnce();
       });
@@ -699,7 +694,6 @@ describe("AgentIntegration", () => {
         setAgentRun: (_id, run) => setSlot(run),
       });
       const run = await before.startAgentRun("ws", "terminal");
-      // The process dies here: nothing ends the run.
       const after = createAgentIntegration({
         rootFor: () => root,
         setAgentRun: (_id, next) => setSlot(next),
@@ -746,7 +740,6 @@ describe("AgentIntegration", () => {
         runs[2],
         runs[3],
       ]);
-      // Each workspace sweeps once per process.
       await writeFile(path, JSON.stringify([run("written-later", { incarnation: "process-1" })]));
       await integration.getAgentRunStatus("ws");
       expect(JSON.parse(await readFile(path, "utf8"))).toMatchObject([
@@ -820,10 +813,6 @@ describe("AgentIntegration", () => {
     });
   });
 
-  // Same boundary as workspaceUiState: a malicious attached workspace can ship
-  // `.dohc` or `.dohc/agent-runs` as a SYMLINK to a directory outside the
-  // workspace. The run-log writer must refuse instead of planting a run file
-  // at the target.
   it.each([
     [
       ".dohc",
@@ -846,7 +835,6 @@ describe("AgentIntegration", () => {
             setAgentRun: (_id, run) => setSlot(run),
           });
           await expect(integration.startAgentRun("ws", "terminal")).rejects.toThrow(refusal);
-          // The escape target stayed untouched: no run log, no temp files.
           expect(await readdir(outside)).toEqual([]);
         } finally {
           await rm(outside, { recursive: true, force: true });

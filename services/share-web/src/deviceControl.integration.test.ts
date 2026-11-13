@@ -400,7 +400,6 @@ if (process.env.DENY_DEVICE_LISTEN === '1') {
       credential.instanceId,
       "--confirm-revoke",
     ];
-    // The operator command cannot become a second writer while the daemon owns the deployment.
     await expect(
       exec(process.execPath, revokeArgs, {
         windowsHide: true,

@@ -36,10 +36,6 @@ import {
   type CollectionAutomationEngine,
 } from "@dohc/automation-executor/collection-automations";
 
-// A person's change claims an automation in the real engine, and the
-// executor runs it: the claim, its field facts, the drain, the formula, and
-// the automation's own attributed writes.
-
 const engine = requireEngineBinaryOrSkip();
 const sharedEvaluator = createAutomationFormulaEvaluator();
 afterAll(() => sharedEvaluator.close());
@@ -54,9 +50,7 @@ async function harness(
       work: (adapter: CollectionAutomationEngine & VersionedLiveAdapter) => Promise<T>,
     ) => Promise<T>;
     personSets: (fields: Record<string, unknown>) => Promise<unknown>;
-    /** This signed-out computer's person, as main reads it. */
     person: LocalPersonAuthor;
-    /** The desktop's record edit context for a person. */
     recordContext: (person: LocalPersonAuthor, signal: AbortSignal) => CollectionRecordEditContext;
     capture: ReturnType<typeof createWorkspaceEngineCapture>;
     workspace: { workspaceId: string; rootPath: string; attachmentId: symbol };
@@ -192,12 +186,10 @@ async function harness(
     await run({
       root,
       withEngine,
-      // The next settle this test has not looked at yet.
       settled: async () => {
         while (settles.length <= seen) await new Promise<void>((resolve) => waiting.push(resolve));
         return settles[seen++]!;
       },
-      // The person changes the record, as the record view does.
       personSets: (fields) =>
         setCollectionRecordFields(editContext(new AbortController().signal), {
           recordPath: "Tasks/one.md",

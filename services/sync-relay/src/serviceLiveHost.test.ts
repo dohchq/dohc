@@ -155,7 +155,6 @@ async function fixture({ selfHosted = false } = {}) {
     closeStorage();
     await rm(root, { recursive: true, force: true });
   });
-  // Every host started from the fixture calls these as each of its activation passes ends.
   const passEnds = new Set<() => void>();
   return {
     trustedAccount: (accountId: string) => ({ accountId, name: "Owner name" }),
@@ -171,7 +170,6 @@ async function fixture({ selfHosted = false } = {}) {
     },
   };
 }
-// Resolves once `count` activation passes that began after the call have ended.
 function afterPasses(f: { passEnds: Set<() => void> }, count = 1) {
   let ended = 0;
   return new Promise<void>((resolve) => {
@@ -200,7 +198,6 @@ function seedRows(db: InstanceType<typeof DatabaseSync>, write: () => void) {
 function clientFrom(options: { env: Record<string, string> }) {
   const nativePath = options.env.DOHC_ENGINE_LIVE_HOST_CONFIG!;
   const config = JSON.parse(readFileSync(nativePath, "utf8"));
-  // It creates each hosted replica it is asked to, and answers anything else with its discovery.
   const client = {
     sendRequest: vi.fn(async (request?: { method: string }) =>
       request?.method === "sync.createHostedReplica"
@@ -231,7 +228,6 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-// The engine's hosted replica replies, with fields a test can override.
 const hostedPass = (overrides: Record<string, unknown> = {}) => ({
   fetched: 0,
   applied: 0,
@@ -543,7 +539,6 @@ const { DatabaseSync } = createRequire(import.meta.url)(
 ) as typeof import("node:sqlite");
 type DrainLimits = { maxEntriesPerDrain?: number; maxBytesPerDrain?: number };
 const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
-// The clock idle unloading reads, and the timer it arms each deadline on.
 type IdleClock = { nowMs: () => number; schedule: (atMs: number, fire: () => void) => () => void };
 
 // A service owner whose activation completed under an earlier connection, as
@@ -794,7 +789,6 @@ async function completedServiceOwner(
     ...(options.maxDocumentsPerPass ? { maxDocumentsPerPass: options.maxDocumentsPerPass } : {}),
     ...options.limits,
   });
-  // An empty host receives this workspace and document through `update`.
   const workspace = f.config.workspaces[0]! as ServiceWorkspace;
   if (options.maxApplications)
     Object.assign(f.config, {
@@ -811,7 +805,6 @@ async function completedServiceOwner(
         release: ReturnType<typeof deferred<void>>;
       }
     | undefined;
-  // Each is told the method of every engine request any daemon sends, as it is sent.
   const requestListeners = new Set<(method: string) => void>();
   // Queued unload replies, or errors that lose them. `replies` overrides every hosted pass, commit and push until a test changes it.
   // With `heldPerPass` and `departedPerPass`, a pass and its commit list at most that many, as when the rest do not fit.
@@ -1760,7 +1753,6 @@ async function completedServiceOwner(
         receivedAtMs: 5,
       });
   };
-  // The owner's restore begins and revokes the share's only Edit grant. `restore` also fences it.
   const beginRestore = () => {
     const plan = f.storage.readStopRestorePlan({
       document,
@@ -1774,7 +1766,6 @@ async function completedServiceOwner(
     });
     f.storage.beginStopRestore(plan.intent, 40);
   };
-  // Owner edits the native session appended to its queue in order, each on the state before it.
   const nativeEdits = (...values: string[]) => {
     const read = f.storage.readLiveUpdateJournalCut({ document });
     if (read.kind !== "cut") throw new Error("Missing live journal.");
@@ -1856,14 +1847,12 @@ async function completedServiceOwner(
     liveRegistration: () => registrations?.live,
     validateJournal,
     prepareEdit: (value: string) => prepareEdit(value, host.coordinate),
-    // An owner live edit the relay accepts under the running host, as the host's submit commits it.
     acceptEdit(value: string, coordinate = host.coordinate) {
       const committed = prepareEdit(value, coordinate)();
       if (committed.result.kind !== "accepted")
         throw new Error(`Live edit was not accepted: ${JSON.stringify(committed.result)}`);
       return committed.result.receipt;
     },
-    // The relay's owner delivery tip for the document.
     tip: () =>
       JSON.parse(
         String(
@@ -1909,9 +1898,6 @@ async function completedServiceOwner(
   };
 }
 
-// Proves: a real restore fence while a public call is in the engine fails that
-// call and the public calls queued behind it as incomplete. The queued calls
-// resolve their owner inside the document work and make no engine request.
 it.each(["drain"] as const)(
   "fails an in-flight public %s and queued public calls as incomplete after a restore fence",
   async (method) => {
@@ -1936,7 +1922,6 @@ it.each(["drain"] as const)(
       await expect(queuedDrain).rejects.toThrow("Service document activation is incomplete.");
       await expect(queuedSettle).rejects.toThrow("Service document activation is incomplete.");
       expect(o.ownerRequests()).toBe(requests);
-      // The queued calls never reached owner delivery.
       expect(drains).not.toHaveBeenCalled();
       expect(settles).not.toHaveBeenCalled();
     } finally {
@@ -1977,15 +1962,12 @@ it("logs drains that waited over 100 ms for their document once a minute, with f
 
 const stopLookup = { operationId: "restore", workspaceId: "workspace", ownerUserId: "owner" };
 
-// The engine's refusals of a capture: a hosted document that is not ready, and a retained activation that diverged or its store never held.
 const unready = () =>
   new EngineRequestError(1, {
     code: "CONFLICT",
     message: "hosted-document-unready",
     retry: "no",
   } as never);
-
-// A first capture of a document with no Y.Doc lineage.
 
 const appendDocumentRow = (
   raw: InstanceType<typeof DatabaseSync>,
@@ -2012,10 +1994,6 @@ const appendDocumentRow = (
 const engineMethods = (client: { sendRequest: { mock: { calls: unknown[][] } } }) =>
   client.sendRequest.mock.calls.map((call) => (call[0] as { method: string }).method);
 
-// Proves: a configured host that restarts checks its replica's origin before a
-// restore reaches its store. While the check fails, startup and each pass
-// retry it, and a restore is refused with no capture, application or
-// settlement. Once a pass's check succeeds, the restore proceeds.
 it("refuses a restore after a configured restart until its replica checked its origin", async () => {
   const o = await completedServiceOwner({ polling: true });
   await o.host.close();
@@ -2056,9 +2034,6 @@ it("refuses a restore after a configured restart until its replica checked its o
   });
 });
 
-// An empty host whose sibling document activates for real. The other document
-// counts as loaded but never activates, so only its unload reaches the engine.
-// Once `passes.deliver` is false, passes leave the sibling's delivery to the test.
 async function emptyServiceHost(
   options: {
     frameChanges?: boolean;
@@ -2113,7 +2088,6 @@ async function emptyServiceHost(
     workspace: "attached-handle",
     params: {},
   };
-  // The workspace's pulls so far, for waiting on the next one.
   const pullCount = () =>
     o
       .client()
@@ -2165,7 +2139,6 @@ it("answers a held-document read its detach or retired registration overtook as 
       ? ({ id: request.id, result: await engine() } as never)
       : through(...args);
   });
-  // The engine's next held-document answers wait for `release`, once one is asked, then `answer`.
   const holding = (answer: () => unknown) => {
     const asked = deferred<void>(),
       release = deferred<void>();
@@ -2192,7 +2165,6 @@ it("answers a held-document read its detach or retired registration overtook as 
   );
   await expect(read()).rejects.toThrow("engine connection closed");
 
-  // The engine's connection to the workspace ends with it: the read fails, and the recheck finds why.
   const detaching = holding(() => {
       throw new Error("engine connection closed");
     }),
@@ -2206,7 +2178,6 @@ it("answers a held-document read its detach or retired registration overtook as 
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
   const log = vi.spyOn(console, "error").mockImplementation(() => {});
   cleanup.push(async () => log.mockRestore());
-  // The engine answers, but the host that asked no longer stands.
   const retiring = holding(() => null),
     retired = o.host.heldDocument("workspace", "object", { markdown: false });
   await retiring.asked;
@@ -2218,10 +2189,6 @@ it("answers a held-document read its detach or retired registration overtook as 
   await expect(read()).rejects.toMatchObject({ code: "not_found" });
 });
 
-// Proves: the engine's cancellation, sent in place of an answer it already had,
-// frees a cancelled held read's lane slot well before the request deadline. The
-// engine refusing a second proof for the workspace reaches the owner as 429, and
-// a caller who lost ownership meanwhile as nothing there.
 it("frees a cancelled held read's slot on the engine's answer, and answers the engine's busy refusal 429 to the owner alone", async () => {
   const o = await emptyServiceHost(),
     workspaces = [o.workspace];
@@ -2241,7 +2208,6 @@ it("frees a cancelled held read's slot on the engine's answer, and answers the e
       : through(...args);
   });
 
-  // The read answered, then its caller left: the engine answers the cancel with CANCELLED.
   const entered = deferred<void>();
   engine = (request, cancel) =>
     new Promise((_resolve, reject) => {
@@ -2404,7 +2370,6 @@ async function enrolledServiceHost({
     calls,
     supervisor,
     errors,
-    // The owner's Stop, which fences the document at once.
     stop() {
       expect(
         preparedStop(o.f.storage, {
@@ -2452,13 +2417,11 @@ function validatePreparationParams(params: Record<string, unknown>): void {
 }
 const ACTIVATION = `ordinary-activation-${"a".repeat(64)}`,
   SUCCESSOR = `ordinary-activation-${"b".repeat(64)}`;
-// The engine requests of a retirement, without a restarted daemon's membership requests.
 const retirement = [
   "liveApplication.reconcileActivation",
   "liveApplication.settle",
   "liveApplication.releaseActivation",
 ];
-// The retired activation's row, and the boundary its release kept.
 const retiredRow = (o: Awaited<ReturnType<typeof enrolledServiceHost>>) => {
   const row = o.raw
     .prepare(
@@ -2473,7 +2436,6 @@ const retiredRow = (o: Awaited<ReturnType<typeof enrolledServiceHost>>) => {
         : JSON.parse(String(row.retired_boundary_json)),
   };
 };
-// The retirement form of each settlement sent since `from`.
 const retiringSettles = (o: Awaited<ReturnType<typeof enrolledServiceHost>>, from: number) =>
   o
     .ownerCalls()
@@ -2483,13 +2445,6 @@ const retiringSettles = (o: Awaited<ReturnType<typeof enrolledServiceHost>>, fro
         method === "liveApplication.settle" && Object.hasOwn(params as object, "retirement"),
     );
 
-// Proves: Stop ends editing authority, not the host's duty to settle what it
-// already applied. The stopped activation's retirement reconciles it with the
-// engine, settles through the tip the relay recorded and publishes, with no
-// delivery, admission or ordinary unload. Its release waits for a pull that
-// confirms the document left its hosted scope, then for a settlement that
-// reached the file; the relay then retires it at the boundary the engine
-// kept, and its workspace drains. Its accepted cut stays.
 it("retires a stopped last document once it settled and published and a pull confirmed it left, without an unload", async () => {
   const o = await enrolledServiceHost();
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -2501,7 +2456,6 @@ it("retires a stopped last document once it settled and published and a pull con
   await o.depart();
   await vi.waitFor(() => expect(retiringSettles(o, sent).length).toBeGreaterThan(0));
   expect(o.host.isDocumentReady(o.document)).toBe(false);
-  // A pull confirms it left, but nothing settled into the file, so it is not released. Its workspace keeps pushing and pulling.
   const pushes = () =>
     o
       .client()
@@ -2534,7 +2488,6 @@ it("retires a stopped last document once it settled and published and a pull con
     { retirement: key, terminalReceipt: tip },
   ]);
   expect(calls.at(-1)).toEqual(["liveApplication.releaseActivation", key]);
-  // It published after its last settlement and before its release.
   const methods = o
     .client()
     .sendRequest.mock.calls.map((call) => ((call as unknown[])[0] as { method: string }).method);
@@ -2560,7 +2513,6 @@ it("retires a stopped last document once it settled and published and a pull con
   expect(o.client().close).not.toHaveBeenCalled();
 });
 
-// A refused queue the server keeps for the enrolled document, with its engine requests.
 function keptEdits(o: Awaited<ReturnType<typeof enrolledServiceHost>>) {
   o.keptOutbox.binding = o.binding;
   let refusals = 0;
@@ -2583,7 +2535,6 @@ function keptEdits(o: Awaited<ReturnType<typeof enrolledServiceHost>>) {
         (call) => (call as unknown[])[0] as { method: string; workspace?: string; params: unknown },
       )
       .filter((request) => request.method === method);
-  // Another refused queue of the document, recorded before `kept-outbox` refuses again, with its own engine state.
   const other = (outboxId: string, copied = true) => {
     o.keptOutboxes.set(outboxId, {
       binding: o.binding,
@@ -2608,7 +2559,6 @@ function keptEdits(o: Awaited<ReturnType<typeof enrolledServiceHost>>) {
         checkpointDigest: null,
       });
   };
-  // A queue of the attached store.
   const queue = (outboxId: string) => ({ workspaceId: "workspace", identity, outboxId });
   return {
     refuse,
@@ -2628,34 +2578,9 @@ function keptEdits(o: Awaited<ReturnType<typeof enrolledServiceHost>>) {
 // its rows go. Try again needs the live authority Stop ended; on a hosted
 // document it grants the refused head through the host's own connection.
 
-// Proves: a refusal the server kept whose quarantine never reached the
-// engine, its queue still active, is recorded at Stop as the refusal of its
-// head, so once its owner confirms a copy the retirement keeps the edit and
-// releases.
-
-// Proves: once a stopped document's departure ended every Try again, later
-// passes that only wait for its owner's recovery copy read none of its queues
-// again. Its return, then a second Stop, scans them once more.
-
-// Proves: Try again rechecks its caller, its owner's live authority and the
-// refusal in the document's work, right before the grant. A Stop, a new
-// refusal or a caller who lost standing while it waited grants nothing, and a
-// grant the relay cannot record ends at once.
-
-// Proves: a document whose queue the relay refused at its owner's adoption
-// seed can still depart, although the host since applied another edit the
-// relay accepted, which no settlement can pass the seed to reach the file.
-// The Try again granted before Stop ends before anything else, the document
-// unloads without settling or publishing, with the queue's bytes and the
-// unsettled edit kept, and once its owner confirms a copy it leaves.
-
 // Proves: the relay refused the owner's adoption seed and nothing applied it. Stop's retirement asks
 // the journal, which proves the seed absent; the engine abandons it, and the retirement completes without
 // waiting for a recovery copy, which stays asked for. The first Resume activates the successor.
-
-// Proves: a refused seed of an earlier generation whose final accepted state
-// was never kept reaches its owner as the recovery copy refusal, as an
-// earlier store's refusal does, rather than as a server failure.
 
 // The accepted state a recovery copy reads, as the engine pages it through the host.
 async function keptCheckpoint(
@@ -2688,11 +2613,6 @@ const acceptedState = (text: string) => {
   return bytes;
 };
 
-// Proves: a document whose queue stays frozen at its owner's adoption seed
-// leaves only with a copy of the accepted state its departure sees. A copy
-// confirmed before a recipient's later accepted edit holds the document after
-// Stop. A copy read after the edit rebuilds it from its checkpoint, and its
-// confirmation lets the document go.
 it("keeps a frozen seed's stopped document until its owner copies the accepted state with the later edit", async () => {
   const o = await enrolledServiceHost(),
     k = keptEdits(o);
@@ -2708,7 +2628,6 @@ it("keeps a frozen seed's stopped document until its owner copies the accepted s
       checkpointDigest: early.digest,
     }),
   ).toBe(true);
-  // A recipient's edit the relay accepts after that copy: the engine's recovery checkpoint now holds it.
   o.acceptEdit("recipient");
   await o.host.drain(o.document);
   o.keptOutbox.checkpoint = acceptedState("Original\n\nRecipient text");
@@ -2723,7 +2642,6 @@ it("keeps a frozen seed's stopped document until its owner copies the accepted s
   expect(k.row()).toMatchObject({ copied: false });
   await o.nextPull();
   expect(o.host.drained("workspace")).toBe(false);
-  // Read after the edit, the copy holds it.
   const late = await keptCheckpoint(o.host, k.row()!, o.workspace.root);
   expect(late.text).toContain("Recipient text");
   expect(
@@ -2738,12 +2656,6 @@ it("keeps a frozen seed's stopped document until its owner copies the accepted s
   expect(k.row()).toBeNull();
 });
 
-// Proves: after an identity change, refusals kept in the earlier store are
-// read there, through one read-only recovery handle, never through an
-// attachment. The handle stays while a refusal in its store has no copy and
-// closes after the last copy. Since the engine opens one per workspace, a read
-// of another earlier store closes the open handle first, and a read its
-// caller abandons closes its handle too.
 async function rotatedServiceHost() {
   const o = await enrolledServiceHost(),
     k = keptEdits(o);
@@ -2778,7 +2690,6 @@ async function rotatedServiceHost() {
     earlier,
     root,
     closes,
-    /** The header page of a kept queue, read from the store at `store`. */
     read: (kept = earlier, store = root) => restarted.readKeptEditsPage(kept, undefined, store),
   };
 }
@@ -2814,7 +2725,6 @@ it("reads an earlier store's kept edits through one recovery handle, and closes 
     frameChanges: createNamedFrameChanges(16),
   });
   cleanup.push(() => restarted.close());
-  // The workspace is attached under its new identity, in its new store, and the stopped document leaves it.
   const rotatedRoot = join(o.f.root, "workspace-rotated");
   await mkdir(rotatedRoot);
   await restarted.update({
@@ -2835,7 +2745,6 @@ it("reads an earlier store's kept edits through one recovery handle, and closes 
   const [earlierRoot, olderRoot] = [join(o.f.root, "earlier-store"), join(o.f.root, "older-store")];
   const row = (outboxId: string, identity = k.identity) =>
     o.f.storage.readServiceKeptEdits({ workspaceId: "workspace", identity, outboxId })!;
-  // The entry header of a queue, which names the store that served it.
   const store = async (kept: ReturnType<typeof row>, root: string, signal?: AbortSignal) => {
     const header = (await restarted.readKeptEditsPage(kept, undefined, root, signal)) as {
       kind: string;
@@ -2864,7 +2773,6 @@ it("reads an earlier store's kept edits through one recovery handle, and closes 
       .slice(reads)
       .map((request) => request.workspace),
   ).toEqual(["recovery-1", "recovery-1", "recovery-1", "recovery-1"]);
-  // A copy of one refusal keeps the handle while another in its store waits; the last closes it.
   for (const outboxId of ["kept-outbox", "second-outbox"]) {
     expect(
       o.f.storage.confirmServiceKeptEditsCopy({
@@ -2880,14 +2788,12 @@ it("reads an earlier store's kept edits through one recovery handle, and closes 
     ).toEqual(outboxId === "kept-outbox" ? [] : ["recovery-1"]);
   }
   expect(o.recoveryStores.size).toBe(0);
-  // Another earlier store opens its own handle once the first closed.
   expect(await store(row("kept-outbox"), earlierRoot)).toBe(earlierRoot);
   expect(await store(row("kept-outbox", older), olderRoot)).toBe(olderRoot);
   expect(
     k.engine("liveApplication.closeRecoveryStore").map((request) => request.workspace),
   ).toEqual(["recovery-1", "recovery-2"]);
   expect([...o.recoveryStores.values()]).toEqual([{ root: olderRoot, handle: "recovery-3" }]);
-  // An abandoned read closes its handle.
   const abandoned = new AbortController(),
     parked = o.park("ydoc.ownerOutbox.readPending");
   const reading = restarted
@@ -2901,7 +2807,6 @@ it("reads an earlier store's kept edits through one recovery handle, and closes 
     k.engine("liveApplication.closeRecoveryStore").map((request) => request.workspace),
   ).toEqual(["recovery-1", "recovery-2", "recovery-3"]);
   expect(o.recoveryStores.size).toBe(0);
-  // Nothing went through the attached store.
   expect(
     k
       .engine("ydoc.ownerOutbox.readPending")
@@ -2918,33 +2823,6 @@ it("opens no earlier store for a read whose refusal changed while it waited", as
   expect(r.k.engine("liveApplication.openRecoveryStore")).toEqual([]);
 });
 
-// Proves: a recovery handle the engine no longer holds, as after a close whose
-// answer timed out, is dropped, and its store opens once more for the read.
-
-// Proves: a recovery handle whose close timed out while the engine's worker
-// still runs stays recorded. A read through it, which the engine refuses as
-// closing, closes it again and waits for that close before its store opens
-// once more, so an account deletion queued behind it waits for the worker too.
-
-// Proves: a read answers `preparing` while the engine prepares the earlier
-// store. A store the engine refused is the owner's recovery copy refusal, with
-// its reason, and its handle closes, so the next read prepares it again.
-
-// Proves: a handle closes after 60 s without a page read. A close that fails,
-// on release or once idle, keeps the handle and closes it after the next idle period.
-
-// Proves: deleting a workspace closes its recovery handle before anything
-// removes its stores, and a close that fails fails the deletion, so the store stays.
-
-// Proves: a stopped document whose departure has not reached the host yet
-// still records the edit the engine applied before anything publishes, so the
-// relay's owner tip covers its output, and settles it. Nothing releases before
-// the departure: the document stays retained and is never ready.
-
-// Proves: a row the relay accepted before Stop that the engine never applied
-// stays unapplied: reconciliation reports no application of it, the relay
-// records nothing, and the retirement settles and releases through the tip it
-// already had, inside the fence that includes the unapplied row.
 it("leaves an accepted edit the engine never applied unapplied, and retires through the earlier tip", async () => {
   const o = await enrolledServiceHost();
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -3026,12 +2904,10 @@ it("records a departed application only as the next accepted row, for its adopti
   expect(record(ack)()).toEqual({ binding: o.binding, tip: edit, next: null });
   expect(record(ack)()).toEqual({ binding: o.binding, tip: edit, next: null });
   expect(record({ ...ack, localYDocSequence: 4 })).toThrow(damaged);
-  // The engine reports a receipt the journal never accepted.
   expect(
     record({ ...ack, deliveryId: "unaccepted", journalCursor: edit.journalCursor + 1 }),
   ).toThrow(damaged);
   expect(o.tip()).toEqual(edit);
-  // A replacement connection with standing continues the same adoption; the earlier one has none.
   const replacement = register("replacement");
   expect(store.departedOwnerDelivery({ ...input, host: replacement })).toEqual({
     binding: o.binding,
@@ -3041,33 +2917,10 @@ it("records a departed application only as the next accepted row, for its adopti
   expect(() => store.departedOwnerDelivery(input)).toThrow("Committed delivery stale-session.");
 });
 
-// Proves: whether a pending activation holds an admitted seed comes from relay
-// rows alone, so a store rebuilt on a later connection reads the same answer.
-// It counts only while the activation is pending.
-
-// Proves: a daemon that starts after Stop retires a stopped document it never
-// loaded, from its durable obligation, the relay's journal and the engine's
-// record of what it applied. It captures no session and registers nothing.
-
 // Proves: a retirement resumes after its daemon stops at any point, from its
 // durable obligation alone: before the engine reconciled it, after it settled,
 // after the engine released it, or after the relay retired it. A released
 // activation's release replays its boundary, and a retired one needs nothing more.
-
-// Proves: an activation that never adopted retires with no boundary. Its
-// release may answer before its document parked, so the relay retires it
-// only once a pull confirms the document parked, on this daemon or one started
-// after it stopped.
-
-// Proves: a daemon that starts after its stopped document moved away from its
-// enrolled path does not settle it there, but keeps it, with its workspace
-// attached, while its owner has no recovery copy of edits the server kept.
-// Nothing retires before the copy. Once a copy exists, its retirement
-// completes without an ordinary unload, and its rows go.
-
-// Proves: deleting the share ends live authority as Stop does, though the
-// enrollment stays enabled until its release. The document settles from
-// durable state, on this daemon and on one started after it.
 
 // Proves: deleting the last Edit share cuts off admission at once, as Stop
 // does, while the owner's frame session is open and a drain waits in the
@@ -3133,12 +2986,6 @@ it("admits nothing after the last Edit share is deleted while a drain waits, and
   expect(o.client().sendLiveApplication).toHaveBeenCalledTimes(applications);
 });
 
-// Proves: Stop's retirement ends the owner's registration and readiness at
-// once. A Resume before the retirement finishes enables the enrollment, but
-// the obligation stays: activation passes leave the retiring activation alone,
-// so it never registers, delivers or becomes ready again, and the relay admits
-// nothing for it.
-
 it("activates a retired activation's successor after Resume, which admits edits only once it completed", async () => {
   const o = await enrolledServiceHost();
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -3153,7 +3000,6 @@ it("activates a retired activation's successor after Resume, which admits edits 
     source: { ...o.engine.capture.source, predecessorActivationId: ACTIVATION },
   };
   o.engine.adoption = { activationId: SUCCESSOR, throughCursor: null };
-  // At completion, the document is not ready and the relay admits nothing.
   const complete = ServiceActivationStore.prototype.complete,
     seen: unknown[] = [];
   vi.spyOn(ServiceActivationStore.prototype, "complete").mockImplementation(function (
@@ -3209,17 +3055,7 @@ it("activates a retired activation's successor after Resume, which admits edits 
 // starts from the feed, never from that copy. The two-daemon e2e can't hold
 // the host's copy ready across Stop, so it relies on this test.
 
-// Proves: the engine refuses to release a stopped document until it parked.
-// The refusal alone retires nothing: the release is tried again on each pass
-// while a pull that started after it still lists the document departed, and
-// the relay retires it once the engine releases it.
-
-// Proves: a retirement the relay defers for a restore it carries stays open
-// after the engine released the document. The host keeps the document, and a
-// later pass replays the release and retires it once the relay completes it.
-
 type Enrolled = Awaited<ReturnType<typeof enrolledServiceHost>>;
-// Each engine request for `method` after the first `count` is never answered, as when its daemon stops first.
 const unansweredAfter = (o: Enrolled, method: string, count: number) => {
   const reached = deferred<void>(),
     send = o.client().sendRequest,
@@ -3247,7 +3083,6 @@ const waiting = (reason: string) => [
   `ServerLogError: Departing live document is waiting: ${reason}`,
 ];
 
-// The document moves away from its enrolled path, so another object holds it.
 const moveAway = (o: Enrolled) => {
   const at = o.f.storage.objectIdAtPathInVersion.bind(o.f.storage);
   vi.spyOn(o.f.storage, "objectIdAtPathInVersion").mockImplementation((input) =>
@@ -3264,7 +3099,6 @@ const leaving = (o: Enrolled) =>
         method === "liveApplication.releaseActivation" ||
         method === "liveApplication.unloadDocument",
     );
-// The engine key of the document's open retirement, as it is now.
 const retirementKey = (o: Enrolled) => {
   const open = readServiceActivationRetirement(o.f.storage as StorageContext, o.document)!;
   return {
@@ -3310,7 +3144,6 @@ const movedDuringRestore = async ({
     k = kept ? keptEdits(o) : undefined;
   const log = vi.spyOn(console, "error").mockImplementation(() => {});
   const restoring = waiting("Waiting for its restore to finish.");
-  // `held` says the restarted host's passes are held, so the test runs them.
   const passed = async (held = false) => {
     if (held)
       await polls!.until(o.f, () =>
@@ -3324,7 +3157,6 @@ const movedDuringRestore = async ({
     o.acceptEdit("pending");
   }
   o.beginRestore();
-  // A covered or kept document opens no retirement, so it stays hosted until the restart.
   if (!covered && !live) {
     o.f.storage.setServiceHostEnrollmentEnabled({
       workspaceId: "workspace",
@@ -3381,7 +3213,6 @@ const movedDuringRestore = async ({
   expect(host.drained("workspace")).toBe(false);
   return { o, host, other, log, k, admission, driver: () => driver };
 };
-// Restore preparation as liveRestoreDrain.test.ts configures it.
 const RESTORE = {
   maxBytes: 1_000_000,
   maxEvents: 10,
@@ -3391,17 +3222,10 @@ const RESTORE = {
   validation: restorePolicy,
 };
 const jsonHash = (value: unknown) => sha256(Buffer.from(JSON.stringify(value)));
-// The relay admits the restore on the host that fenced it, while the document
-// is still at its path, as liveRestoreDrain.test.ts builds an admitted restore.
-// The engine commits the native fence, and the owner's host proposes a
-// content-valid candidate that restores the selected point, which the relay
-// records and admits. Admission moves the open retirement's accepted-through
-// to the restore's own cursor; `before` is the retirement's key before it.
 const admitMovedRestore = async (o: Enrolled) => {
   const before = retirementKey(o);
   return { proposalDigest: await admitRestore(o), before };
 };
-// The relay admits the owner's restore as `admitMovedRestore` does, and returns its proposal's digest.
 const admitRestore = async (o: Enrolled) => {
   const store = o.f.storage.createLiveCommittedDeliveryStore(o.f.history);
   const input = {
@@ -3570,7 +3394,6 @@ const restoreEngine = (o: Enrolled, host: Awaited<ReturnType<typeof startService
     bytes: Buffer.from(JSON.stringify(answer(operation))),
   }));
   Object.assign(o.client(), { sendLiveRestore });
-  // Proves and appends the restore's settlement moment, as publishRestore in liveRestoreDrain.test.ts does.
   const publish = async () => {
     const { admitted } = admission(),
       document = o.document,
@@ -3720,7 +3543,6 @@ it("completes a moved document's admitted restore through a restarted host, then
   );
 });
 
-// The enrolled document's owner, as the relay checks whether it stays live for them.
 const ownerCovers = (o: Enrolled) =>
   o.f.storage.serviceHostEnrollmentCovered({
     workspaceId: "workspace",
@@ -3739,7 +3561,6 @@ const ownerBinding = (o: Enrolled) =>
     document: o.document,
     actor: { kind: "owner", userId: "owner" },
   });
-// The owner's restore request, as `beginRestore` sends it.
 const restoreRequest = (o: Enrolled) =>
   o.f.storage.readStopRestorePlan({
     document: o.document,
@@ -3751,7 +3572,6 @@ const restoreRequest = (o: Enrolled) =>
     restorePointReceiptDigest: o.document.lineageClaimId,
     maxOutputBytes: 1_000_000,
   }).intent;
-// The workspace's stored bytes, as the relay charges them against its quota.
 const usage = (o: Enrolled) =>
   Number(
     o.raw
@@ -3769,7 +3589,6 @@ const journalText = (o: Enrolled) => {
   doc.destroy();
   return text;
 };
-// The note restored to its first version, with the owner's later `edit`.
 const restoredText = (edit?: string) => {
   const doc = markdownToYDoc("Original");
   if (edit !== undefined) doc.getMap("frontmatter").set("edit", edit);
@@ -3791,7 +3610,6 @@ const reopenRelay = (o: Enrolled) => {
   cleanup.push(async () => closeStorage());
   Object.assign(o.f, { ...reopened, closeStorage });
 };
-// Closes `previous` and the relay database, reopens the database, and starts a host on it, configured for restore, that hosts the note.
 const hostingAgain = async (
   o: Enrolled,
   previous: Awaited<ReturnType<typeof startServiceLiveHost>>,
@@ -3805,7 +3623,6 @@ const hostingAgain = async (
   await host.update({ workspaces: [o.workspace], documents: [o.sibling], ...stay });
   return host;
 };
-// The owner edits the note live again: the kept activation, with no retirement or successor, at the restored fence, for the owner alone.
 const ownerEditsAgain = async (
   o: Enrolled,
   host: Awaited<ReturnType<typeof startServiceLiveHost>>,
@@ -3826,7 +3643,6 @@ const ownerEditsAgain = async (
   ).toBe("refused");
   expect(o.f.storage.getShareGrant("grant")).toMatchObject({ status: "revoked" });
 };
-// The delivery IDs the current daemon was sent, in order.
 const delivered = (o: Enrolled) =>
   o
     .client()
@@ -3835,7 +3651,6 @@ const delivered = (o: Enrolled) =>
         (event as { metadata: { accepted: { receipt: { deliveryId: string } } } }).metadata.accepted
           .receipt.deliveryId,
     );
-// The owner's live edit: the relay admits it once, the kept session is sent it once, and a settlement then ends at it.
 const editOnce = async (
   o: Enrolled,
   host: Awaited<ReturnType<typeof startServiceLiveHost>>,
@@ -3907,7 +3722,6 @@ it("keeps the owner editing a note after restoring it, when the restore ended it
     reason: "native-fence-pending",
   });
   const proposalDigest = await admitRestore(o);
-  // A restart while the restore is unfinished keeps the note with its host, and the restore finishes there.
   let host = await hostingAgain(o, o.host);
   expect(ownerCovers(o)).toBe(true);
   expect(activations(o)).toEqual([ACTIVATION]);
@@ -3934,7 +3748,6 @@ it("keeps the owner editing a note after restoring it, when the restore ended it
   });
   expect(journalText(o)).toBe(restoredText());
   await editOnce(o, host, "after");
-  // A restart after the restore resumed continues the same session.
   host = await hostingAgain(o, host);
   await ownerEditsAgain(o, host, fence);
   expect(delivered(o)).not.toContain("edit-after");
@@ -3948,8 +3761,6 @@ it("keeps the owner editing a note after restoring it, when the restore ended it
 // the fence the note is left at, and the relay refuses the owner's live
 // editing. Once the host lets the note go, the activation retires.
 
-// The owner moves the note to `path`: its object's newest moment names that path.
-
 // The retiring host's push of the restored note, which puts the restore in the relay's ordinary history. Returns the
 // restored note's complete state.
 const pushRestoredUpdate = (o: Enrolled) => {
@@ -3957,7 +3768,6 @@ const pushRestoredUpdate = (o: Enrolled) => {
     restored = new Y.Doc({ gc: false });
   for (const bytes of [o.engine.capture.baselineBytes, o.engine.capture.fullState])
     Y.applyUpdate(ordinary, bytes);
-  // The state at the journal's last cursor, as the restore's settlement settled it.
   Y.applyUpdate(
     restored,
     o.raw
@@ -4029,20 +3839,8 @@ const restoredCapture = (o: Enrolled, fullState: Buffer): NativeOwnerActivation 
   };
 };
 
-// Proves: when the owner renames a note after a restore kept their live
-// session and resumed, the self-host supervisor retires that session through
-// its host. The host reconciles, settles and releases the activation, and
-// never unloads the note as an ordinary departure. When the owner moves the
-// note back and shares it again with Edit, the same daemon starts a successor
-// activation, and the note is ready again.
-
 // The kind of the owner's binding through the pending successor's access,
 // while its stored binding names `generation`. The row is put back before this returns.
-
-// Proves: a restore, then Stop, then Resume. The successor copies its retired
-// predecessor's identity and selector paths and takes the restored
-// generation, so its pending access is current and it activates. Had it
-// copied its predecessor's generation, the relay would refuse that access.
 
 // Proves: after a restore and Stop, the successor that Resume starts, whose source is the restore's settlement
 // moment, reads from a checkpoint folded through that moment. Here the owner's ordinary history reached the restored
@@ -4253,16 +4051,11 @@ it.each<{ after: string; steps: ("row" | "save")[]; read: "history" | "base" }>(
   },
 );
 
-// Proves: a restore request cannot name a live session for the relay to keep.
-// The relay records only the session its revocation kept, under the current
-// run and owner, and none when another Edit grant still covers the note.
-
 // Proves: the owner's restore is charged for the record it stores, and no
 // more. A restore that keeps nothing fits in exactly the room it needs, and one
 // byte less refuses it. Keeping the owner's live session adds only the bytes of
 // its marker. A refused restore records nothing and leaves the Edit grant active.
 
-// Each way an owner ends a document's live editing: deleting its share, Pause, or Stop.
 const endLiveEditing = {
   unshare: (o: Enrolled) => expect(o.f.storage.revokeShare("share", 30)).toBe(true),
   pause: (o: Enrolled) =>
@@ -4320,7 +4113,6 @@ const movedRetirementAfterRestart = async (
   expect(complete).toHaveBeenCalledWith(expect.objectContaining({ key }));
   return { host, key, other, driver: () => driver };
 };
-// The retirement form of each settlement, and each release, the current daemon sent.
 const retirementRequests = (o: Enrolled) => ({
   settles: retiringSettles(o, 0).map(
     ([, params]) => (params as { retirement: unknown }).retirement,
@@ -4331,12 +4123,6 @@ const retirementRequests = (o: Enrolled) => ({
     .map(([, params]) => params),
 });
 
-// Proves: with another document created at the old path while a moved
-// document's retirement is open, the restarted host still retires the moved
-// document by its own object. The other document keeps its own state: its
-// target at the old path stays, its capture continues there, and the relay
-// gives it no activation. The fake engine captures only the fixture document,
-// so that capture is refused.
 it("completes a moved document's retirement after a restart by its own object while another document holds its old path", async () => {
   const o = await enrolledServiceHost();
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -4737,7 +4523,6 @@ for (const c of [
             };
           },
       );
-    // The native queue holds an edit the host has not delivered when the other device moves the document.
     o.native.binding = o.binding;
     o.nativeEdits("before-move");
     const queued = o.native.entries.map((entry) => ({
@@ -4872,7 +4657,6 @@ for (const c of [
       part: "update",
       bytesBase64: Buffer.from([7]).toString("base64"),
     });
-    // Returning to the enrolled path must capture and activate again.
     expect(retiredRow(o).retired).toBe(false);
     const captures = o.client().captureOwnerActivation.mock.calls.length;
     move(o.sibling, o.sibling.path);

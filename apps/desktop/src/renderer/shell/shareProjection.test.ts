@@ -22,9 +22,6 @@ describe("share unmount projection", () => {
     ]);
   });
 
-  // Both removal surfaces funnel here. The Explorer records the share id
-  // itself; Settings reports it through the files-changed callback. Either
-  // way the reload must not delete state for files still on disk.
   it("skips a vanished mount whose folder stayed, whichever surface removed it", () => {
     const previous = [
       { shareId: "s-gone", label: "alex" },
@@ -44,7 +41,6 @@ describe("share unmount projection", () => {
         path: "shared-with-me/alex",
       },
     ]);
-    // Consumed, so an unrelated later reload cannot read a stale exemption.
     expect(foldersLeftBehind.has("s-left")).toBe(false);
   });
 
@@ -70,9 +66,6 @@ describe("share unmount projection", () => {
   });
 });
 
-// The closing line a manual refresh leaves behind. Damage has to reach it:
-// reporting damage in a separate notice meant the summary replaced it, and
-// the user was left with "Shares refreshed" — the wrong half.
 describe("share refresh summary", () => {
   const row = (over: Partial<{ label: string; status: string; changedPaths: number }>) =>
     ({
@@ -94,7 +87,6 @@ describe("share refresh summary", () => {
     expect(summary).not.toContain("grant.");
   });
 
-  // "Shares refreshed" said every share was current when one wasn't.
   it("counts the shares that refreshed when one did not", () => {
     expect(
       shareRefreshSummary([
@@ -139,7 +131,6 @@ describe("share refresh summary", () => {
       row({ label: "sam", status: "damaged" }),
     ]);
     expect(summary).toContain("kim ended");
-    // Plural subjects take the plural verb; the singular case keeps "grants".
     expect(summary, 'two shares reading as one — "what alex, sam grants"').toContain(
       "what alex, sam grant. Remove them and add those shares again.",
     );

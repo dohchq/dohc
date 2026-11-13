@@ -28,10 +28,7 @@ it.skipIf(engine.missing).each([["person", "reload", "rename"]] as const)(
       await vi.waitFor(() => expect(note.changedOutside).toEqual([true]), {
         timeout: REAL_DAEMON_DEADLINE_MS,
       });
-      // The editor keeps the person's text until they act.
       expect(note.text()).toBe("typed base\n");
-      // Reload closes the session and opens it again. Closing the note is
-      // the same close without the reopen.
       await note.session.close();
       if (action === "reload") {
         const reopened = await openNote(opened.capture);

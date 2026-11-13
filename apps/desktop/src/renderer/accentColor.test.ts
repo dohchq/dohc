@@ -13,7 +13,6 @@ import { palette } from "./tokens";
 const MODES = ["light", "dark"] as const;
 const SURFACES = ["bg", "panel", "panel2", "line"] as const;
 
-// Every 51st step of each channel: 216 colors from black to white.
 const GRID = [0, 51, 102, 153, 204, 255].flatMap((r) =>
   [0, 51, 102, 153, 204, 255].flatMap((g) =>
     [0, 51, 102, 153, 204, 255].map(

@@ -80,8 +80,6 @@ describe("sharedViewHistory", () => {
     expect((await history.listMoments()).moments).toHaveLength(2);
   });
 
-  // A recipient reads only the share's text moments. A protected row the
-  // store holds is neither listed nor counted, and no secret store is asked.
   it("lists and opens only the share store's text moments", async () => {
     const text = { id: "moment-1", path: "notes/plan.md", momentOrder: 1 };
     const page = {

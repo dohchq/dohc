@@ -1016,7 +1016,6 @@ describe("a stepwise run", () => {
         'The formula for "X" in step 2 failed. ReferenceError: later is step 3\'s result, and step 3 comes after step 2.',
       timedOut: false,
     });
-    // What landed before the failure stays, and the run names the step it failed at.
     expect(space.records.get("rec_t")!.values).toEqual({ A: 1 });
     expect(
       (await store.runsOf("collection:Tasks#chain", "atc_one")).runs[0]?.outcome,
@@ -1147,7 +1146,6 @@ describe("a stepwise run that stops", () => {
     ] as const) {
       const space = workspace(docs, { at, when });
       await expect(runToEnd(space, definition), `${when} ${at}`).resolves.toEqual({ kind: "done" });
-      // One increment, one added record, and each key wrote what the clean run's did.
       expect(valuesOf(space), `${when} ${at}`).toEqual(expected);
       expect(
         [...space.records.values()].filter((doc) => doc.collection === "Log"),
@@ -1214,7 +1212,6 @@ describe("a run and its Undo", () => {
       undoCollectionAutomationRuns(space.undo([]), [newer, older], signal),
     ).resolves.toMatchObject({ undone: { reverted: 0, changedSince: 1 } });
     expect(space.records.get("rec_t")!.values).toEqual({ Count: 2 });
-    // A person who sets a value a run's write passed through keeps it too.
     const third = {
       ...base,
       keySeed: `${base.keySeed}-3`,
@@ -1372,7 +1369,6 @@ describe("a saved run's Collections", () => {
     });
     expect(run.applied[0]?.writes[0]).toMatchObject({ path: "Trip/Tasks/a.md" });
     expect(run.created[0]).toMatchObject({ path: "Log/b.md" });
-    // Where they are already, nothing moves.
     expect(rebaseRun(run, (id) => where.get(id) ?? null)).toEqual({ moved: false, lost: false });
   });
 

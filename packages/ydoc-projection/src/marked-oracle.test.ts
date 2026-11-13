@@ -33,7 +33,6 @@ it("finds the links with no text marked finds in the shared corpus", () => {
   for (const { text, utf16, utf8, utf8Excluded } of oracle.expected.emptyLinks) {
     expect(text.isWellFormed(), JSON.stringify(text)).toBe(true);
     expect(emptyLinkRanges(text), JSON.stringify(text)).toEqual(utf16);
-    // A text has UTF-8 ranges exactly when no range splits a character.
     const splits = utf16.flat().some((at) => !text.slice(0, at).isWellFormed());
     expect(utf8 === null, JSON.stringify(text)).toBe(splits);
     expect(utf8Excluded !== undefined, JSON.stringify(text)).toBe(splits);

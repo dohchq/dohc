@@ -25,8 +25,6 @@ type Operation = ExactRendererWorkspaceOperation<
   RendererWorkspaceOperationSession
 >;
 
-// main.ts registers this row the same way: the handler reads the projection
-// for the workspace the sender's operation holds.
 function harness() {
   const pushed: AgentRunStateEvent[] = [];
   const activity = createWorkspaceActivity(() => {}, {
@@ -136,7 +134,6 @@ describe("agent run state IPC", () => {
       revision: 1,
       active: true,
     });
-    // A run in another workspace raises the shared revision without changing this answer.
     await start("ws-b", "run-b");
     expect(pushed.at(-1)).toEqual({ workspaceId: "ws-b", revision: 2, active: true });
     await expect(invoke("ws-a", "ws-a")).resolves.toEqual({

@@ -264,7 +264,6 @@ async function fixture(
     async resolveMaterial() {
       throw Error("An agent has no viewer material.");
     },
-    // The relay's document and ticket answers, for this agent's token at its address.
     async fetchRelay(relayRequest) {
       expect([
         relayRequest.headers.get("authorization"),

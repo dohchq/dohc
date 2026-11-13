@@ -52,7 +52,6 @@ async function pickReaction(like: HTMLElement, emoji: string) {
   await userEvent.click(choiceFor(await openPicker(like), emoji));
 }
 
-// A Home item the way main lists it: the viewer is named per thread.
 function homeItem(body: string, id: string) {
   return { ...personalFeedItem(body, id), viewerAuthorId: "author-you" };
 }
@@ -122,7 +121,6 @@ describe("ChatsView hybrid feed", () => {
     renderView();
     await userEvent.click(await screen.findByTestId("chats-feed-link"));
     const empty = (await screen.findByText("No posts in your groups yet.")).parentElement!;
-    // Every box up to the list grows.
     const list = empty.closest<HTMLElement>('[role="list"]')!;
     for (let box = empty; box !== list; box = box.parentElement!) {
       expect(box.className.split(" ")).toContain("flex-1");
@@ -152,7 +150,6 @@ describe("ChatsView hybrid feed", () => {
       renderView();
       await userEvent.click(await screen.findByTestId("chats-feed-link"));
       const like = await screen.findByTestId("chats-feed-like");
-      // The trigger stays visible either way; a locked group only disables it.
       expect(like.getAttribute("aria-label")).toBe("Add reaction");
       expect((like as HTMLButtonElement).disabled).toBe(locked);
       if (locked) {
@@ -345,7 +342,6 @@ describe("ChatsView hybrid feed", () => {
       });
       await write.promise;
     });
-    // Settled: the message's controls come back and the next click writes.
     await waitFor(() => expect(isPending(likes[0]!)).toBe(false));
     expect(isPending(pillA)).toBe(false);
     await pickReaction(likes[0]!, "👍");
@@ -413,8 +409,6 @@ describe("ChatsView hybrid feed", () => {
     await userEvent.click(await screen.findByTestId("chats-feed-link"));
     const [likeA, likeB] = await screen.findAllByTestId("chats-feed-like");
 
-    // Picking returns focus to the trigger. Pending, it stays focusable and
-    // refuses to open the picker again, so Enter changes nothing.
     await pickReaction(likeA!, "👍");
     expect(document.activeElement).toBe(likeA);
     expect(isPending(likeA!)).toBe(true);
@@ -424,7 +418,6 @@ describe("ChatsView hybrid feed", () => {
     expect(document.activeElement).toBe(likeA);
     expect(bridgeMock.setChatReaction).toHaveBeenCalledTimes(1);
 
-    // The user stays put: completion leaves focus where it is.
     await act(async () => {
       writeA.resolve({
         reaction: { ...like("message-a"), state: "added" },
@@ -435,7 +428,6 @@ describe("ChatsView hybrid feed", () => {
     await waitFor(() => expect(isPending(likeA!)).toBe(false));
     expect(document.activeElement).toBe(likeA);
 
-    // The user moves on: completion must not pull focus back.
     await pickReaction(likeB!, "👍");
     expect(document.activeElement).toBe(likeB);
     const [commentA] = screen.getAllByRole("button", { name: "Comment" });
@@ -476,15 +468,12 @@ describe("ChatsView hybrid feed", () => {
     const [itemA, itemB] = await screen.findAllByTestId("chats-feed-item");
     const likeA = screen.getAllByTestId("chats-feed-like")[0]!;
 
-    // A: the viewer is the only reactor, so Enter unmounts the pill. Focus
-    // moves to this post's Add reaction, not the page body.
     const pillA = within(itemA!).getByTestId("chats-feed-reaction-pill");
     pillA.focus();
     await userEvent.keyboard("{Enter}");
     expect(within(itemA!).queryByTestId("chats-feed-reaction-pill")).toBeNull();
     expect(document.activeElement).toBe(likeA);
     expect(isPending(likeA)).toBe(true);
-    // Settling with the row gone leaves focus where it is.
     await act(async () => {
       writeA.resolve({
         reaction: { ...like("message-a"), state: "removed" },
@@ -496,8 +485,6 @@ describe("ChatsView hybrid feed", () => {
     expect(within(itemA!).queryByTestId("chats-feed-reaction-pill")).toBeNull();
     expect(document.activeElement).toBe(likeA);
 
-    // B: a peer keeps the pill, so focus stays on it. The user moves on, and
-    // the failed write restores the row without pulling focus back.
     const pillB = within(itemB!).getByTestId("chats-feed-reaction-pill");
     pillB.focus();
     await userEvent.keyboard("{Enter}");
@@ -559,8 +546,6 @@ describe("ChatsView hybrid feed", () => {
     await waitFor(() => expect(isPending(trigger)).toBe(false));
     expect(document.activeElement).toBe(pill);
 
-    // A pill press that leaves focus in the picker's search: the picker
-    // closes and focus goes to the trigger, not the page body.
     const picker = await openPicker(trigger);
     const search = within(picker).getByLabelText("Search emoji or paste any emoji");
     search.focus();
@@ -584,7 +569,6 @@ describe("ChatsView hybrid feed", () => {
     await userEvent.click(await screen.findByTestId("chats-feed-link"));
     await screen.findByTestId("chats-feed-like");
 
-    // The refresh reads the thread first; the write is acknowledged after.
     act(() => emitWorkspaceActivity());
     expect(screen.getByText("Loading…")).toBeTruthy();
     await pickReaction(screen.getByTestId("chats-feed-like"), "👍");
@@ -592,7 +576,6 @@ describe("ChatsView hybrid feed", () => {
     await waitFor(() => expect(isPending(screen.getByTestId("chats-feed-like"))).toBe(false));
     expect(feedPill().getAttribute("aria-pressed")).toBe("true");
 
-    // The page lands after the write settled, without the like it predates.
     await act(async () => {
       stale.resolve({ items: [homeItem("A post", "message-1")] });
       await stale.promise;
@@ -695,7 +678,6 @@ describe("ChatsView hybrid feed", () => {
     });
     await waitFor(() => expect(bridgeMock.listChatReactions).toHaveBeenCalledTimes(1));
     expect(feedPill().getAttribute("aria-pressed")).toBe("true");
-    // Settled, so the next click is a new write.
     await pickReaction(screen.getByTestId("chats-feed-like"), "👍");
     expect(bridgeMock.setChatReaction).toHaveBeenLastCalledWith(
       expect.objectContaining({ messageId: "message-1", state: "removed" }),
@@ -799,7 +781,6 @@ describe("ChatsView hybrid feed", () => {
     expect(onNavCommand).toHaveBeenCalledWith(
       expect.objectContaining({ level: "thread", focusMessageId: "message-feed" }),
     );
-    // The command preceded the passive report of that destination.
     const commandOrder = onNavCommand.mock.invocationCallOrder[0]!;
     const reportIndex = onNavChange.mock.calls.findIndex(
       ([nav]) => (nav as ChatsNav).level === "thread",
@@ -1101,7 +1082,6 @@ describe("ChatsView hybrid feed", () => {
     const pill = await screen.findByTestId("chats-feed-reaction-pill");
     expect(pill.dataset.emoji).toBe("👍");
     expect(pill.textContent).toContain("1");
-    // The listing named the viewer, so the picker now shows the choice as yours.
     expect(choiceFor(await openPicker(like), "👍").getAttribute("aria-pressed")).toBe("true");
   });
 
@@ -1165,7 +1145,6 @@ describe("ChatsView hybrid feed", () => {
     const likes = await screen.findAllByTestId("chats-feed-like");
     expect(likes).toHaveLength(2);
 
-    // A's listing lags; B's answers first with both likes on the thread.
     let answerA!: (value: {
       reactions: ReturnType<typeof reactionFor>[];
       viewerAuthorId: string;
@@ -1188,7 +1167,6 @@ describe("ChatsView hybrid feed", () => {
     await waitFor(() =>
       expect(within(items[1]!).getByTestId("chats-feed-reaction-pill").dataset.emoji).toBe("👍"),
     );
-    // A's stale listing (only A liked) lands last. B stays liked.
     await act(async () => {
       answerA({ reactions: [reactionFor("message-a")], viewerAuthorId: "author-you" });
       await lateA;
@@ -1228,7 +1206,6 @@ describe("ChatsView hybrid feed", () => {
     expect(saved.textContent).toContain("Saved");
     await userEvent.click(screen.getByTestId("chats-post-bookmark-open"));
     expect(onOpenPath).toHaveBeenCalledWith("Bookmarks/Chats/Friday--thread-1.md");
-    // Saved is still the reverse path.
     await userEvent.click(saved);
     expect(bridgeMock.archiveChatBookmark).toHaveBeenCalled();
   });
@@ -1281,7 +1258,6 @@ describe("ChatsView hybrid feed", () => {
         "Bookmarks/Chats/Friday--thread-1.md",
       ),
     );
-    // The bookmark stays saved, and Try again archives it again.
     expect(saved.getAttribute("aria-pressed")).toBe("true");
     expect(onBookmarkArchived).not.toHaveBeenCalled();
     await act(async () => {
@@ -1399,13 +1375,10 @@ describe("Home and a file's chat share one reaction store", () => {
     await waitFor(() => expect(isPending(homeLike)).toBe(false));
     expect(feedPill().textContent).toContain("1");
 
-    // Home's newer read finds a peer's like too; the file's chat shows it
-    // without reading again.
     act(() => emitWorkspaceActivity());
     await waitFor(() => expect(filePill().textContent).toContain("2"));
     expect(bridgeMock.listChatReactions).toHaveBeenCalledTimes(2);
 
-    // A refused unlike from the file's chat returns both surfaces to that read.
     await userEvent.click(fileThumbs());
     expect(feedPill().textContent).toContain("1");
     expect(filePill().textContent).toContain("1");

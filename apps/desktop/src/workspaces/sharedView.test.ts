@@ -229,17 +229,14 @@ const NOT_EXCLUDED = { localStateReady: false };
 const closedViews = new Set<string>();
 const unexcludedViews = new Set<string>();
 
-/** Where a view's refresh records live. */
 function recordsDir(rootDir: string): string {
   return join(rootDir, ".dohc", "local", "share-refresh");
 }
 
-/** A view whose store the engine has opened: its `.dohc/local` is made. */
 async function openedView(rootDir: string): Promise<void> {
   await mkdir(join(rootDir, ".dohc", "local"), { recursive: true, mode: 0o700 });
 }
 
-/** An opened view's records folder, made as dohc makes it. */
 async function openedRecordsDir(rootDir: string): Promise<string> {
   await mkdir(recordsDir(rootDir), { recursive: true, mode: 0o700 });
   return recordsDir(rootDir);
@@ -455,7 +452,6 @@ async function momentIds(store: {
   );
 }
 
-// Minimal share-route double (same shape the engine share client tests use).
 class FakeShareRelay {
   ops: Array<Record<string, unknown>> = [];
   blobs = new Map<string, Buffer>();
@@ -1643,8 +1639,6 @@ describe("shared view refresh", () => {
       expect(await readFile(join(rootDir, path), "utf8")).toBe("granter file");
       expect(await momentIds(store)).toEqual(before);
 
-      // Simulate a crash after materialization succeeded but before capture
-      // cleared the collision record.
       await recordCollisionPaths(rootDir, SHARE_ID, [path]);
       const beforeCrashRecovery = await momentIds(store);
       await expect(
@@ -2330,7 +2324,6 @@ describe("shared view refresh", () => {
     });
     expect(harness.transport.committedCursor(WORKSPACE)).toBe(4);
 
-    // Revocation: the next refresh reports "ended" and the local files stay.
     relay.ended = true;
     const ended = await refreshSharedViewOnce(harness, {
       rootDir,
@@ -2450,8 +2443,6 @@ describe("share-refresh records in .dohc/local", () => {
     "share-collision-record.json",
   ];
 
-  // A view share whose granter added a file where the person already had
-  // their own. The refresh recorded the collision and kept the person's file.
   async function collidedView() {
     const rootDir = await createTestScratch("dohc-shared-view-records-");
     const relay = new FakeShareRelay();
@@ -2467,7 +2458,6 @@ describe("share-refresh records in .dohc/local", () => {
     await writeFile(join(rootDir, path), "my own file", "utf8");
     relay.addWrite(path, "granter file");
     const store = harness.openStore(target);
-    // As ShareViewFiles refreshes: capture, then pull, each failure an outcome.
     const refresh = (
       pull: Parameters<typeof refreshSharedViewOnceWithPull>[0]["pull"] = harness.pullFor(target),
       access: "view" | "edit" = "view",
@@ -2587,7 +2577,6 @@ describe("share-refresh records in .dohc/local", () => {
         expect(modes).toEqual([0o600, 0o600, 0o600]);
         expect((await stat(recordsDir(view.rootDir))).mode & 0o777).toBe(0o700);
       }
-      // A finished refresh leaves only the collision it still protects.
       expect(await readdir(recordsDir(view.rootDir))).toEqual(["share-collision-record.json"]);
       expect(await readFile(view.collisionRecord, "utf8")).toBe(
         JSON.stringify({ shareId: SHARE_ID, paths: [view.path] }),
@@ -2626,7 +2615,6 @@ describe("share-refresh records in .dohc/local", () => {
           "older share collision record",
         );
 
-        // Once the person moves their file out and removes the record, the share's file lands.
         await rename(
           join(view.rootDir, view.path),
           join(await createTestScratch("dohc-moved-out-"), "mine.md"),
@@ -2717,7 +2705,6 @@ describe("share-refresh records in .dohc/local", () => {
         errorMessage:
           "dohc did not update these shared files because the workspace has not finished opening. Try again when it opens.",
       });
-      // The store moved on, the folder did not, and the marker says so.
       expect(await readFile(join(view.rootDir, view.path), "utf8")).toBe("my own file");
       await expect(stat(join(view.rootDir, "docs/new.md"))).rejects.toMatchObject({
         code: "ENOENT",
@@ -2884,7 +2871,6 @@ describe("share-refresh records in .dohc/local", () => {
         ).toBe(true);
         await expect(readPendingMaterializationPaths(rootDir)).resolves.toEqual(new Set());
 
-        // The same record of dohc's own finishes the delete.
         await writePendingMaterializationPaths(rootDir, [path]);
         await expect(
           captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
@@ -2913,7 +2899,6 @@ describe("share-refresh records in .dohc/local", () => {
       const store = harness.openStore(target);
       const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
       try {
-        // The pull wrote moment two to the store and stopped before the folder.
         const main = await store.ensureMainVersion({ workspaceId: WORKSPACE });
         await store.writeTextFile({
           workspaceId: WORKSPACE,

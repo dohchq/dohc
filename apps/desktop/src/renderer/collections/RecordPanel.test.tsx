@@ -70,10 +70,8 @@ describe("the record panel", () => {
     expect(view.in.getByText("Fields")).toBeTruthy();
     expect(view.in.getByText("Page text")).toBeTruthy();
     expect(view.in.getByText("Offline copy · Read-only")).toBeTruthy();
-    // A record with no page offers none, and a record with no commands has no menu.
     expect(view.in.queryByRole("button", { name: "Open as page" })).toBeNull();
     expect(view.in.queryByRole("button", { name: "Record actions" })).toBeNull();
-    // Nothing holds focus in the panel: the page beside it takes it.
     screen.getByRole("button", { name: "Beside the panel" }).focus();
     expect(document.activeElement).toBe(screen.getByRole("button", { name: "Beside the panel" }));
 
@@ -102,7 +100,6 @@ describe("the record panel", () => {
 
     fireEvent.keyDown(view.in.getByRole("button", { name: "Record actions" }), { key: "Escape" });
     expect(view.onClose).toHaveBeenCalledTimes(2);
-    // Escape with focus on the page beside the panel is that page's key.
     fireEvent.keyDown(screen.getByRole("button", { name: "Beside the panel" }), { key: "Escape" });
     expect(view.onClose).toHaveBeenCalledTimes(2);
   });
@@ -181,7 +178,6 @@ describe("the record panel", () => {
     expect(onNameChange).toHaveBeenLastCalledWith("By a press away");
     expect(onNameChange).toHaveBeenCalledTimes(2);
 
-    // The same name saves nothing.
     fireEvent.keyDown(open(), { key: "Enter" });
     expect(onNameChange).toHaveBeenCalledTimes(2);
   });
@@ -269,7 +265,6 @@ describe("the record panel", () => {
     ).toBeNull();
     expect(onNameAbandoned).toHaveBeenCalledExactlyOnceWith("Half typed");
     expect(onNameChange).not.toHaveBeenCalled();
-    // An input in which nothing was typed leaves nothing to keep.
     view.rerender({ onNameChange, onNameAbandoned, canRename: true });
     fireEvent.click(within(view.in.getByRole("heading")).getByRole("button"));
     view.rerender({ onNameChange, onNameAbandoned, canRename: false });
@@ -346,7 +341,6 @@ describe("the record panel", () => {
     expect(view.onWidthChange).toHaveBeenLastCalledWith(640);
     fireEvent.keyDown(handle, { key: "Home" });
     expect(view.onWidthChange).toHaveBeenLastCalledWith(320);
-    // A width saved in a wider window gives way to the view.
     view.rerender({ width: 900 });
     expect(view.panel.style.width).toBe("640px");
   });
@@ -387,7 +381,6 @@ describe("the record panel", () => {
     expect(narrow.panel.className).toContain("absolute");
     expect(narrow.panel.className).toContain("right-0");
     expect(narrow.panel.style.width).toBe("380px");
-    // It never grows past the page.
     expect(narrow.in.getByRole("separator").getAttribute("aria-valuemax")).toBe("600");
   });
 });

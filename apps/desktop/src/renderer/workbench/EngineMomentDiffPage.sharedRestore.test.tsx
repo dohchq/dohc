@@ -64,7 +64,6 @@ async function open(detail: WorkspaceEngineMomentDetail) {
     />,
   );
   await screen.findByTestId("engine-diff-restore-file");
-  // The rarer ways back wait behind More.
   fireEvent.click(screen.getByTestId("engine-diff-more"));
   return { moment };
 }

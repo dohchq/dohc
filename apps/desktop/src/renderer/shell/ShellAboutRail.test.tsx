@@ -126,7 +126,6 @@ describe("About rail (right side)", () => {
     await within(await screen.findByTestId("linked-chat-thread")).findByText("File message 299");
     await waitFor(() => expect(scrolled).toContain("file-message-299"));
     scrolled.length = 0;
-    // The chat's link to b.md is a row in About's Links, under the thread.
     await user.click(screen.getByTestId("linked-chat-back"));
     const links = await screen.findByTestId("about-links");
     await user.click(await within(links).findByTestId("chat-file-mention"));
@@ -176,10 +175,8 @@ describe("About rail (right side)", () => {
     expect((await within(rail).findByTestId("linked-chat-title")).textContent).toBe(
       "Pricing questions",
     );
-    // The editor stays on b.md: the hit opens in About, not as a tab.
     expect(screen.getByTestId("tab-b.md").dataset.active).toBe("true");
 
-    // Consumed once: closing and reopening About shows b.md, not the thread.
     await user.click(screen.getByTestId("titlebar-about-sidebar"));
     await user.click(screen.getByTestId("titlebar-about-sidebar"));
     const reopened = await screen.findByTestId("about-rail");

@@ -106,7 +106,6 @@ describe("AppsSettings", () => {
     window.localStorage.setItem("dohc.site-preview-mode.v1:ws-1:report", "static");
     renderApps({ defaultPreviewMode: "build" });
     expect(await modeOf("report")).toBe("StaticPicked on this computer");
-    // The workspace default wins over dohc's own pick.
     expect(await modeOf("apps/trip")).toBe("BuildWorkspace default");
     expect(await modeOf("apps/signup")).toBe("BuildSet in dohc.json");
   });

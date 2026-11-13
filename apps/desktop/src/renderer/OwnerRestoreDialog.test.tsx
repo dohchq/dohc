@@ -33,7 +33,6 @@ const reader = {
   grantId: "grant",
   grantGeneration: 1,
 };
-// The account the desktop asked as, which the relay checked owns the workspace.
 const viewer = { userId: "owner", email: "owner@example.test" };
 const receipt = (cursor: number) => ({
   deliveryId: `event-${cursor}`,
@@ -280,8 +279,6 @@ it("requires separate stop and content confirmations and names every affected re
   expect(f.release).toHaveBeenCalledTimes(1);
   expect(f.changed).toHaveBeenCalledTimes(2);
 });
-// Proves: a restore whose file moved before it finished does not claim the
-// file was restored. It says the renamed file is unchanged.
 it("says the renamed file is unchanged when the restore finishes after a move", async () => {
   const f = fixture(),
     original = f.call.getMockImplementation()!;
@@ -307,8 +304,6 @@ it("says the renamed file is unchanged when the restore finishes after a move", 
   expect(screen.queryByText("File restored")).toBeNull();
   expect(f.restored).toHaveBeenCalledTimes(1);
 });
-// A finish that replies after the dialog closed still says the restore
-// changed, so the shell lists again.
 it("reports a finish that replies after the dialog closed", async () => {
   const f = fixture(),
     original = f.call.getMockImplementation()!,
@@ -329,8 +324,6 @@ it("reports a finish that replies after the dialog closed", async () => {
   expect(f.changed).toHaveBeenCalledTimes(2);
   expect(f.restored).not.toHaveBeenCalled();
 });
-// The relay refuses to start a restore while live editing of the file is still
-// stopping. Nothing changed, so the shell reports why and the choice stays.
 it.each(["plan", "begin"] as const)(
   "reports a refused %s through the shell and keeps the choice on screen",
   async (action) => {
@@ -382,8 +375,6 @@ it("settles an earlier refusal when the plan and the begin go through", async ()
   expect(f.settled).toHaveBeenCalledTimes(2);
   expect(f.error).not.toHaveBeenCalled();
 });
-// Closing keeps an unfinished restore findable: the dialog hands the shell
-// the restore it knows of.
 it("closes with the unfinished restore it knows of", async () => {
   const f = fixture(),
     original = f.call.getMockImplementation()!;
@@ -401,8 +392,6 @@ it("closes with the unfinished restore it knows of", async () => {
     expect.objectContaining({ operationId: "restore", phase: "fenced" }),
   );
 });
-// Preparation the relay cannot finish gives no cause beyond a full
-// workspace. A repeat says it repeated and what stays stopped meanwhile.
 it("says when preparation keeps failing, and when the workspace is full", async () => {
   const f = fixture(),
     original = f.call.getMockImplementation()!;
@@ -451,8 +440,6 @@ it("names a full workspace when admission refuses the confirmed restore", async 
   );
   expect(f.restored).not.toHaveBeenCalled();
 });
-// Proves: a restore opened by its ID reads only its own status, so it opens
-// as itself after the file's restore points are gone.
 it("opens a saved restore by its ID without the file's restore choices", async () => {
   const f = fixture(),
     original = f.call.getMockImplementation()!;
@@ -473,8 +460,6 @@ it("opens a saved restore by its ID without the file's restore choices", async (
     operationId: "restore",
   });
 });
-// Before live editing of the file stops for it, the owner can decline a
-// restore. Access stays stopped and the file stays unchanged.
 it("declines a reopened restore before its fence", async () => {
   const f = fixture(),
     original = f.call.getMockImplementation()!;
@@ -523,9 +508,6 @@ it("declines a reopened restore before its fence", async () => {
   fireEvent.click(screen.getByRole("button", { name: "Close" }));
   expect(f.close).toHaveBeenCalledWith(expect.objectContaining({ phase: "declined" }));
 });
-// Another window may have moved the restore on to its admission. The
-// refusal shows, the dialog reads where the restore stands, and Decline goes.
-// Retry then finishes the restore instead of asking to decline it.
 it("shows a refused decline and where the restore stands", async () => {
   const f = fixture(),
     original = f.call.getMockImplementation()!;
@@ -563,8 +545,6 @@ it("shows a refused decline and where the restore stands", async () => {
   expect(f.call.mock.calls.filter(([input]) => input.action === "decline")).toHaveLength(1);
 });
 
-// Proves: the owner can decline a restore at every phase before its
-// admission, from a preparation that did not finish and from the review.
 it.each(["pending", "review"] as const)(
   "declines a restore after its fence from the %s step",
   async (step) => {
@@ -601,8 +581,6 @@ it.each(["pending", "review"] as const)(
   },
 );
 
-// Proves: while a Decline has not ended the restore, Retry asks for the
-// Decline again instead of preparing the restore.
 it("repeats a pending Decline on Retry", async () => {
   const f = fixture(),
     original = f.call.getMockImplementation()!;
@@ -636,8 +614,6 @@ it("repeats a pending Decline on Retry", async () => {
 const DECLINING =
   "Declining has not finished. Live editing of this file stays stopped until it does. Retry to finish declining.";
 
-// Proves: a pending Decline outlives its dialog. Reopened from its row, the
-// restore's Retry prepares it, and the relay ends it by the recorded Decline.
 it("finishes a pending Decline from the reopened dialog", async () => {
   const f = fixture(),
     original = f.call.getMockImplementation()!;
@@ -678,8 +654,6 @@ it("finishes a pending Decline from the reopened dialog", async () => {
   expect(f.error).not.toHaveBeenCalled();
 });
 
-// Proves: a Decline the relay refused offers no retry. The dialog says what
-// stays stopped, and the shell files the refusal with the restore it names.
 it("reports a refused Decline through the shell without a retry", async () => {
   const f = fixture(),
     original = f.call.getMockImplementation()!;
@@ -720,15 +694,12 @@ it("marks the agent the owner's change declared beside the authenticated owner",
   expect(row.textContent).toContain("Owner");
   expect(row.textContent).toContain("trip-agent-hosted");
   expect(badges[0]!.getAttribute("aria-label")).toBe("agent");
-  // The declared person stays out of the row; the server's owner is the authority it names.
   expect(row.textContent?.split("Change details")[0]).not.toContain("local-person");
 });
 it("marks a connected agent's change with the plug, and a guest's agent as the guest's", async () => {
   const f = fixture(),
     original = f.call.getMockImplementation()!,
     base = reviewFixture();
-  // The first change is a connected agent's that gave no name. The second is a guest's, by an agent whose id
-  // reverses the text after it. The third is a connected agent's that calls itself Claude.
   const changes = [
     {
       authority: owner,
@@ -793,7 +764,6 @@ it("marks a connected agent's change with the plug, and a guest's agent as the g
   );
   expect(screen.getByRole("tooltip", { hidden: true }).textContent).toContain("Connected agent");
   fireEvent.blur(plugged);
-  // An agent that gave no name shows as "Agent", not by dohc's id for it, and nothing marks it as reported.
   expect(shownName(unnamed)).toBe("Agent");
   fireEvent.focus(unnamed);
   expect(screen.getByRole("tooltip", { hidden: true }).textContent).toBe("AgentConnected agent");
@@ -802,7 +772,6 @@ it("marks a connected agent's change with the plug, and a guest's agent as the g
   expect(screen.getByRole("tooltip", { hidden: true }).textContent).toContain(
     "Owned by Account reader",
   );
-  // Neither the card nor the row shows the id.
   expect(run.closest("li")!.textContent!.split("Change details")[0]).not.toContain("trip");
   expect(run.parentElement!.nextElementSibling!.textContent).toBe("Agent");
 });
@@ -811,7 +780,6 @@ it("names a personal agent's change by the agent's name, owned by the account it
     original = f.call.getMockImplementation()!,
     base = reviewFixture(),
     agentId = `p-${"a".repeat(26)}`;
-  // The second agent acts for an account the dialog has no email for.
   const agents = [
     { agentId, agentName: "Scout", onBehalfOf: "owner" },
     { agentId: `p-${"c".repeat(26)}`, agentName: "Lookout", onBehalfOf: "another-account" },
@@ -1170,14 +1138,11 @@ it("identifies the accepted restore point in the review", async () => {
   expect(document.querySelector("time")?.dateTime).toBe(new Date(1788922800000).toISOString());
 });
 
-// A reopened restore has no choice made in this dialog. The review names the
-// author the relay read for its exact restore point.
 it("names the accepted restore point's author when a stopped restore reopens", async () => {
   const f = fixture(7),
     original = f.call.getMockImplementation()!,
     at = 1788922800000;
   f.call.mockImplementation(async (input) => {
-    // The choices on this page name another author at the same cursor; the review does not read them.
     if (input.action === "options")
       return {
         ...f.options,
@@ -1323,12 +1288,10 @@ it("names people by the email the relay resolved, in the choices and in the revi
     ["", "Choose a change"],
     ["4", `${shown} · reader@example.test (2 of 2)`],
     ["3", `${shown} · reader@example.test (1 of 2)`],
-    // An account the relay could not name keeps its ID rather than a guessed name.
     ["2", `${shown} · Account stranger`],
     ["1", `${new Date(at - 60_000).toLocaleString()} · Owner`],
     ["0", "Before accepted edits"],
   ]);
-  // The review names the same people its choices named.
   const options = f.call.getMockImplementation()!;
   f.call.mockImplementation(async (input) => {
     if (input.action !== "review") return options(input);

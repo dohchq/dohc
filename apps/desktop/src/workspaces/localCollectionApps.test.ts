@@ -44,7 +44,6 @@ const deferred = () => {
   return { promise, resolve };
 };
 
-/** An engine with versions, deterministic moments, and controls for outages, held writes, and refusals. */
 function fakeEngine() {
   const versions = new Map<string, Map<string, string>>([
     ["main", new Map([["trip/responses/collection.yaml", schema]])],
@@ -265,7 +264,6 @@ async function fixture(
       },
     );
   };
-  // The same app with its Collection removed from app.publish.json.
   const unconnectedApp = () => {
     sources.set(
       "trip/app.publish.json",
@@ -569,7 +567,6 @@ describe("local document Collection apps", () => {
       pendingCreates: 1,
       authorityRevision: unconfirmed.authorityRevision,
     });
-    // A restart keeps the pending reservation; the engine's return settles it in the background.
     await f.host.close();
     const restarted = await f.open();
     expect(restarted.apps.list("trip")[0]).toMatchObject({ pendingCreates: 1 });
@@ -612,7 +609,6 @@ describe("local document Collection apps", () => {
       );
       expect(collections).toBe(stored);
       expect(budget).toBe(datasets + collections);
-      // The previous build compares the budget with Dataset usage alone.
       expect(budget).not.toBe(datasets);
     });
     const reopened = await f.open();
@@ -654,7 +650,6 @@ describe("local document Collection apps", () => {
           .get(datasetB.publicationId)!.n,
       ).toBe(0),
     );
-    // An older build may leave the displaced Dataset row active. Reopening does not hand it the root.
     await f.host.close();
     f.inspect((db) =>
       db
@@ -668,7 +663,6 @@ describe("local document Collection apps", () => {
         collectionA.authorityRevision,
       ),
     ).not.toThrow();
-    // Dataset A, then Collection B, then the identical Dataset A.
     const datasetA = await reopened.apps.activate(await f.datasetApp(reopened), signal());
     const collectionB = await reopened.apps.activate(
       await f.collectionApp(["destination"]),
@@ -762,7 +756,6 @@ describe("local document Collection apps", () => {
     const agent = { kind: "agent", label: "Builder", labelSource: "agent-declared" } as const;
     const prepared = await f.unconnectedApp();
     expect(prepared.candidate.capabilities).toEqual([]);
-    // A revision that drops its Collection replaces the Collection approval.
     const app = await f.host.apps.activate(prepared, signal(), agent);
     expect(app.authorityRevision).toBeGreaterThan(f.published.authorityRevision);
     expect(() =>
@@ -880,7 +873,6 @@ describe("local document Collection apps", () => {
       ).toBe(404);
       expect(f.engine.state.writes).toEqual([]);
       expect((await proven("/resume", {})).status).toBe(200);
-      // A revision that adds a Collection replaces it. Its session refuses to resume, or has already stopped.
       const collection = await f.host.apps.activate(await f.collectionApp(), signal());
       expect(
         await proven("/resume", {}).then(
@@ -910,7 +902,6 @@ describe("local document Collection apps", () => {
       lifetime.abort();
       await launcher.close();
     }
-    // Approving it again, then removing the approval, ends this device's authority for the app.
     const again = await f.host.apps.activate(await f.unconnectedApp(), signal());
     expect(again.publicationId).toBe(app.publicationId);
     expect(await f.host.apps.withdraw(again.publicationId, again.authorityRevision)).toEqual({
@@ -932,7 +923,6 @@ describe("local document Collection apps", () => {
         active_kind: null,
         active_publication_id: null,
       });
-      // Its bundle is charged with Collection apps, outside Dataset usage, and approving it again released the earlier copy.
       const stored = Number(
         db
           .prepare(
@@ -945,7 +935,6 @@ describe("local document Collection apps", () => {
       );
       expect(db.prepare("SELECT count(*) AS n FROM local_unconnected_apps").get()!.n).toBe(1);
     });
-    // The store opens again, and its budget still balances.
     const reopened = await f.open();
     expect(reopened.apps.list("trip")).toEqual(
       expect.arrayContaining([
@@ -985,7 +974,6 @@ describe("local document Collection apps", () => {
 
   it("gives no receipt to a request whose approval ended or that was aborted, even once its write committed", async () => {
     const f = await fixture();
-    // The approval changes after the engine commits and before it answers.
     f.engine.state.afterCommit = () => {
       f.engine.state.afterCommit = null;
       f.inspect((db) =>

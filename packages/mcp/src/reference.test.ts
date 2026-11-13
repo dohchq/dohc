@@ -28,7 +28,6 @@ afterEach(() => {
 });
 
 describe("CLI, MCP, and app channel reference", () => {
-  // On a mismatch, regenerate the page with the command at its top.
   it(`matches ${REFERENCE_PATH}`, async () => {
     await expect(await renderReference()).toMatchFileSnapshot(`../../../${REFERENCE_PATH}`);
   });

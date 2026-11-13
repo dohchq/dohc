@@ -58,7 +58,6 @@ describe("undoing the records a dataset automation added", () => {
   };
   const logs = async (f: Awaited<ReturnType<typeof world>>) =>
     (await f.records()).filter((row) => row.values[NOTES] === "Log");
-  // What the person sees when they click Undo, then the Undo they confirm from it.
   const ask = (f: Awaited<ReturnType<typeof world>>, claimId: string) =>
     f.executor.undo({ automationId: AUTOMATION, claimId, deletes: null }, trash);
   const confirmed = async (f: Awaited<ReturnType<typeof world>>, claimId: string) => {
@@ -265,7 +264,6 @@ describe("dataset automation claims in both ledgers", () => {
     // Undone since, which does not keep it longer.
     await store.save(saved("atc_undone", { state: "done" }, { undo: "done" }));
     await store.save(saved("atc_recent", { state: "done" }, { finishedAtMs: Date.now() }));
-    // The engine still offers its Try again.
     await store.save(saved("atc_offered", failed));
     f.engineClaims.push(engineClaim("atc_offered", "failed", old));
     // No ledger holds it any more.

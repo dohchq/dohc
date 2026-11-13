@@ -110,7 +110,6 @@ describe("resolveOpenPathTarget", () => {
         "/Users/sam/dohc/notes/trip/day-1.md": "file",
       }),
     ).toEqual({ kind: "workspace", workspace: nested, file: "day-1.md" });
-    // A sibling whose name starts like the root is not inside it.
     expect(
       resolve("/Users/sam/dohc/notes-old/a.md", { "/Users/sam/dohc/notes-old/a.md": "file" }),
     ).toEqual({
@@ -169,7 +168,6 @@ describe("resolveOpenPathTarget", () => {
       hasManifest: false,
       file: "notes.md",
     });
-    // A manifest in the home folder is one dohc cannot use, so it is passed over.
     expect(resolve("/Users/sam/Downloads/notes.md", file, [home])).toEqual({
       kind: "folder",
       rootPath: "/Users/sam/Downloads",

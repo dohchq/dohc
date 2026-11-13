@@ -11,7 +11,6 @@ describe("TokenBucketLimiter", () => {
     expect(limiter.allow("b", 1_000)).toBe(true);
     expect(limiter.allow("c", 2_000)).toBe(true);
     expect(limiter.size).toBe(2);
-    // "a" was the oldest and is gone; it starts a fresh bucket.
     expect(limiter.allow("a", 2_000)).toBe(true);
   });
 

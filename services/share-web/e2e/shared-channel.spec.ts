@@ -261,7 +261,6 @@ test("a group member reads and posts from a phone while a read-only member follo
     ).toBeLessThanOrEqual(844);
     await ana.screenshot({ path: testInfo.outputPath("shared-channel-phone.png") });
 
-    // Older history arrives on demand and keeps the reader's place.
     const oldestLoaded = ana.getByText("Plan item 11", { exact: true });
     await expect(ana.getByText("Plan item 10", { exact: true })).toHaveCount(0);
     const loadEarlier = ana.getByRole("button", { name: "Load earlier messages", exact: true });
@@ -362,7 +361,6 @@ test("a group member reads and posts from a phone while a read-only member follo
     await ana.reload();
     await expect(ana.locator(".chat-list strong", { hasText: "hotel" })).toBeVisible();
     await expect(ana.getByText(tooLong, { exact: true })).toBeVisible();
-    // The link agent wears the agent mark other agents wear, then the link mark, and no owner.
     const helper = ana.locator(".chat-message", { hasText: "Held the tram tickets for Saturday." });
     await expect(helper).toBeVisible();
     await expect(

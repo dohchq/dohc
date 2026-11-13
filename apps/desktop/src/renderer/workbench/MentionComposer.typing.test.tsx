@@ -18,7 +18,6 @@ const setup = {
 };
 afterEach(cleanup);
 
-// With a pick, the composer also shows the agent's offer, as ChatsView does.
 function Composer(props: { onPick?: (pick: AgentRosterPick | null) => void }) {
   const [value, setValue] = useState("@ag");
   const agent = useAgentOffer({

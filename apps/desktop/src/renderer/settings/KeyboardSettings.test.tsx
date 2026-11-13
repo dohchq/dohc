@@ -23,7 +23,6 @@ const listed = (platform: string, devTools = true) =>
       row.chords.map((keys) => `${heading} | ${row.name} | ${chordText(keys)}`),
     ),
   );
-// Each "Heading: Name" a chord shows under.
 const meaning = (platform: string, chord: string) =>
   listed(platform)
     .filter((row) => row.endsWith(` | ${chord}`))

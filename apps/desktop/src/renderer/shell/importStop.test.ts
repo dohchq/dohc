@@ -84,7 +84,6 @@ describe("namedPaths", () => {
     expect(namedPaths(["a.md", "b.md"])).toBe("a.md and b.md");
     expect(namedPaths(["notes/a.md", "b.md", "c.md"])).toBe("a.md and 2 more");
     expect(namedPaths(["notes/a.md", "notes/b.md"])).toBe("a.md and b.md");
-    // One name, at most 60 characters, whatever the file name's length.
     expect(namedPaths([`${"x".repeat(200)}.md`])).toBe(`${"x".repeat(59)}…`);
   });
 });

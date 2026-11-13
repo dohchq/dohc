@@ -188,7 +188,6 @@ const NOT_ADMITTED =
  * until the next one does. The changes it takes wait for the test to answer.
  */
 function collectionWindow(strict = false) {
-  // The workspace whose session main has admitted, and what the next `openWorkspace` does: wait, or fail.
   const main: { session: string | null; hold: Deferred | null; fail: Error | null } = {
     session: null,
     hold: null,
@@ -263,7 +262,6 @@ function collectionWindow(strict = false) {
     mount(workspace);
     await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
   };
-  /** Every record change the window asked main for, taken or refused. */
   const asked = () => bridge.dataset.mock.calls.filter(([request]) => request.action === "invoke");
   /** The window asked main to open this workspace, and main has not answered. */
   const opening = (workspace: Workspace) =>
@@ -272,14 +270,12 @@ function collectionWindow(strict = false) {
     );
   return { changes, main, asked, mount, show, opening };
 }
-/** What the toasts on screen say. */
 const toasts = () =>
   [
     ...screen.queryAllByTestId("workspace-shell-error"),
     ...screen.queryAllByTestId("workspace-shell-notice"),
   ].map((toast) => toast.textContent ?? "");
 const aboutExpenses = () => toasts().filter((words) => words.includes("Expenses"));
-/** Two changes: the first is with the host, and the second waits behind it. Then the window leaves, and the first is confirmed. */
 async function leaveWithOneQueued({
   changes,
   show,
@@ -295,14 +291,12 @@ async function leaveWithOneQueued({
 it("sends none of a Collection's queued changes while the window shows another workspace, and sends them on return with its table closed", async () => {
   const { changes, show } = collectionWindow();
   const change = await screen.findByTestId("collection-records");
-  // Two changes: the first is with the host, and the second waits behind it.
   fireEvent.click(change);
   fireEvent.click(change);
   await waitFor(() => expect(changes).toHaveLength(1));
 
   await show(OTHER_WORKSPACE);
   await act(async () => changes[0]!.answer.resolve(invoked({ id: 1, version: 2 })));
-  // The second change is not sent, and not failed: the other workspace hears nothing of either.
   expect(changes).toHaveLength(1);
   expect(aboutExpenses()).toEqual([]);
 
@@ -315,7 +309,6 @@ it("sends none of a Collection's queued changes while the window shows another w
     input: { id: 2, expectedVersion: 1, values: { [id(3)]: "Rent" } },
   });
   expect(screen.queryByTestId("collection-records")).toBeNull();
-  // dohc can't confirm it. With the table closed, the open shell says so, with Try again.
   await act(async () => changes[1]!.answer.reject(new Error("Lost reply")));
   await waitFor(() =>
     expect(
@@ -334,14 +327,12 @@ it("asks main for no queued change between the shell opening and main admitting 
     { changes, main, asked } = window;
   await leaveWithOneQueued(window);
   expect(asked()).toHaveLength(1);
-  // The window returns. Its shell is open, and main still holds the other workspace's session.
   main.hold = deferred();
   window.mount(WORKSPACE);
   await window.opening(WORKSPACE);
   expect(asked()).toHaveLength(1);
   expect(queue().attention()).toEqual([]);
   expect(aboutExpenses()).toEqual([]);
-  // Main admits the workspace, and the change goes, with the table closed.
   await act(async () => main.hold!.resolve());
   await waitFor(() => expect(changes).toHaveLength(2));
   expect(changes[1]!.request).toMatchObject({
@@ -393,7 +384,6 @@ it("leaves a queued change unsent, and not failed, while another workspace's uns
   expect(queue().size).toBe(1);
   expect(queue().attention()).toEqual([]);
   expect(aboutExpenses()).toEqual([]);
-  // The person discards it. The workspace opens, and the change goes.
   await act(async () => discardCollectionFieldWrite(collectionWriteFailures()[0]!.id));
   await waitFor(() => expect(changes).toHaveLength(2));
   expect(aboutExpenses()).toEqual([]);
@@ -441,13 +431,11 @@ it("files one row in Notices for a Collection whose change dohc could not confir
   const row = "dohc could not confirm a change to Expenses. Open it to check its records.";
   await show(WORKSPACE);
   await waitFor(() => expect(toasts().filter((words) => words.includes(row))).toHaveLength(1));
-  // Leaving and returning again files the same one row, not a second.
   await show(OTHER_WORKSPACE);
   await show(WORKSPACE);
   await waitFor(() => expect(toasts().filter((words) => words.includes(row))).toHaveLength(1));
   fireEvent.click(screen.getByTestId("notice-center-toggle"));
   expect(screen.getByTestId("notice-center").textContent!.split(row)).toHaveLength(2);
-  // Its Try again sends the exact request, with the table still closed.
   fireEvent.click(
     within(screen.getByTestId("notice-center")).getByRole("button", { name: "Try again" }),
   );
@@ -480,16 +468,13 @@ it("keeps the Collection's row in Notices after its Try again, for the value doh
   // The change goes again. The row and its toast stay for the value, and offer no Try again, which could do nothing for it.
   const unsaved = "dohc did not save a change to Expenses. Open it to check its records.";
   await waitFor(() => expect(aboutExpenses()).toEqual([expect.stringContaining(unsaved)]));
-  // Notices closed as its Try again ran. Opened again, it still holds the row.
   fireEvent.click(screen.getByTestId("notice-center-toggle"));
   await waitFor(() => expect(notices().textContent).toContain(unsaved));
   expect(notices().textContent).not.toContain("dohc could not confirm");
   expect(within(notices()).queryByRole("button", { name: "Try again" })).toBeNull();
-  // The change saves, and the row is still there.
   await act(async () => changes[1]!.answer.resolve(invoked({ id: 1, version: 2 })));
   await waitFor(() => expect(notices().textContent).toContain("Saved the edit in Expenses"));
   expect(notices().textContent).toContain(unsaved);
-  // The person lets the value go, and the row goes.
   act(() => queue().dismiss("99", id(3)));
   await waitFor(() => expect(notices().textContent).not.toContain(unsaved));
 });

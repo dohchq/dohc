@@ -213,7 +213,6 @@ describe("dataset publication binding", () => {
       parseDatasetDefinition(withActions({ ...settle, reversedBy: "unsettle" }, unsettle))
         .operations[3]!.reversedBy,
     ).toBe("unsettle");
-    // An action may reverse itself, as a toggle does.
     expect(
       parseDatasetDefinition(withActions({ ...settle, reversedBy: "settle" })).operations[3]!
         .reversedBy,
@@ -233,7 +232,6 @@ describe("dataset publication binding", () => {
       },
     ])
       expect(() => parseDatasetDefinition(refused)).toThrow();
-    // A reverse is part of the approved contract, so changing it changes access.
     const before = revision(),
       after = revision();
     before.definition = withActions({ ...settle, reversedBy: "unsettle" }, unsettle);
@@ -289,14 +287,12 @@ describe("dataset publication binding", () => {
       { kind: "delete", label: "Delete response", fields: [] },
     ]);
     expect(parseAppDatasetCapability(shown)).toEqual(shown);
-    // A capability approved before Review app showed these words still verifies, unchanged. One that carries them does not.
     expect(capability.operations.some((operation) => "display" in operation)).toBe(false);
     expect(verifyAppDatasetCapability(capability, approved)).toEqual(capability);
     expect(() => verifyAppDatasetCapability(shown, approved)).toThrow();
     expect(() =>
       displayAppDatasetCapability(capability, { ...approved, revision: 2 }, true),
     ).toThrow();
-    // A generated form's narrower create shows only the fields it writes.
     const narrowed = resolveAppDatasetCapability(
       { ...binding(approved), createFields: [{ operationId: id(5), fieldIds: [] }] },
       approved,
@@ -377,7 +373,6 @@ describe("dataset publication binding", () => {
       })),
     });
     const shown = displayAppDatasetCapability(capability, approved, true);
-    // A delete and an action still say what they do.
     expect(shown.operations.map((operation) => operation.display)).toEqual([
       ...Array.from({ length: 20 }, (_, n) => ({ kind: "read", label: `Read ${n}`, fields: [] })),
       { kind: "delete", label: "Remove response", fields: [] },

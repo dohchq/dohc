@@ -59,7 +59,6 @@ describe("momentDiffSides", () => {
     expect(sides.bytesOnly).toBe(true);
     expect(sides.before).toBeUndefined();
     expect(sides.after).toBeUndefined();
-    // The result is what the file holds now.
     expect(sides.byteLength).toBe(12);
   });
 

@@ -68,8 +68,6 @@ describe("Chats in the left side panel", () => {
     expect(channelButtons).toHaveLength(2);
     await user.click(channelButtons[0]!);
 
-    // The list is a navigator: the channel opens in the Chats tab and the
-    // list stays.
     const tab = await screen.findByTestId(
       `tab-dohc://chats/channel/${encodeURIComponent("channel-1")}`,
     );

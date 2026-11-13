@@ -107,7 +107,6 @@ it("exports stale snapshot files without continuity and preserves original evide
       originId: "origin",
       ops: ops.map(({ payload, ...op }) => ({ ...op, payloadJson: JSON.stringify(payload) })),
     });
-    // Simulate a damaged logical snapshot whose surviving file bytes remain useful.
     const storage = live.storage as StorageContext;
     storage.tx(() =>
       storage.db.prepare("DELETE FROM sync_relay_blobs WHERE sha256=?").run(sha256("missing")),

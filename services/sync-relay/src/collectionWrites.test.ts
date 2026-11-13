@@ -367,7 +367,6 @@ function bytes(text: string): number {
   return new TextEncoder().encode(text).byteLength;
 }
 
-// An in-place edit of `path` from `before` to `after`.
 function edit(path: string, before: string, after: string): ProposedChange {
   return {
     basedOnPath: path,
@@ -649,7 +648,6 @@ describe("direct writes to a Collection's own files", () => {
     const r = await relay();
     const withNudge = automations(STAMP, NUDGE);
     await upload(r, withNudge);
-    // Adding one.
     await expectCode(
       await write(r, [create(`${PACKING}/automations.yaml`, withNudge)]),
       403,
@@ -661,7 +659,6 @@ describe("direct writes to a Collection's own files", () => {
     const nudgeChanged = automations(STAMP, NUDGE.replace("Look", "Look again"));
     const nudgeRemoved = automations(STAMP);
     await upload(r, stampChanged, nudgeChanged, nudgeRemoved);
-    // Changing one, or removing one.
     for (const [index, after] of [nudgeChanged, nudgeRemoved].entries()) {
       await expectCode(
         await write(r, [edit(`${PACKING}/automations.yaml`, withNudge, after)], {
@@ -671,7 +668,6 @@ describe("direct writes to a Collection's own files", () => {
         "share_op_rejected",
       );
     }
-    // Another automation beside it, with the personal one unchanged.
     expect(
       (await write(r, [edit(`${PACKING}/automations.yaml`, withNudge, stampChanged)])).status,
     ).toBe(200);
@@ -1032,8 +1028,6 @@ describe("the owner's read of a grant's direct writes", () => {
     const before = await json(await ownerRead(r, r.grantId));
     const path = storagePath(r.storage);
     closeTestStorage(r.storage);
-    // Put the ledger back the way the earlier build made it: a user id on
-    // every row, an index since replaced, and no migration mark.
     const db = inspectDatabase(path);
     const usage = () =>
       db
@@ -1113,7 +1107,6 @@ describe("the owner's read of a grant's direct writes", () => {
     ]);
     migrated.close();
     expect(await json(await ownerRead(again, r.grantId))).toEqual(before);
-    // The same submit answers from its row, and another write still lands.
     const retried = await write(again, [edit(`${PACKING}/collection.yaml`, SCHEMA, SCHEMA_TWO)], {
       submitId: "edit",
     });
@@ -1166,8 +1159,6 @@ describe("the direct-write decision", () => {
   });
 });
 
-// An Edit share link writes the same files through its own route (ADR 0013),
-// with its content in the request and its authority from the capability.
 describe("direct writes through an Edit share link", () => {
   it("shares a link direct-write public snapshot without private authority", async () => {
     const r = await linkRelay();
@@ -1458,7 +1449,6 @@ describe("direct writes through an Edit share link", () => {
     const retried = await linkWrite(r, changes, { token: OTHER_TOKEN });
     expect(await json(retried)).toEqual({ ...first, created: false });
     expect((await r.owner.directMoments()).length).toBe(1);
-    // Another browser, with a session of its own, reusing the submit id.
     await expectCode(
       await linkWrite(r, changes, { token: OTHER_TOKEN, profile: OTHER_PROFILE }),
       409,
@@ -1538,7 +1528,6 @@ describe("direct writes through an Edit share link", () => {
     const next = [linkEdit(`${PACKING}/automations.yaml`, one, two)];
     await expectOpaque(await linkWrite(r, next, { submitId: "submit-2" }));
     await expectOpaque(await linkWrite(r, null, { body: "{" }));
-    // A retry of the write that landed learns nothing either.
     await expectOpaque(await linkWrite(r, [linkCreate(`${PACKING}/automations.yaml`, one)]));
     expect((await r.owner.directMoments()).length).toBe(1);
   });
@@ -1671,7 +1660,6 @@ describe("direct writes through an Edit share link", () => {
     const r = await linkRelay();
     const one = automations(STAMP);
     await r.owner.write("object-automations", `${PACKING}/automations.yaml`, one);
-    // Private content the link cannot read, stored in the same workspace.
     const hidden = automations(STAMP.replace("stamp", "hidden"));
     await r.owner.write("object-hidden", "budget/automations.yaml", hidden);
     const after = automations(STAMP.replace("Packed", "Ready"));

@@ -125,7 +125,6 @@ describe("shared mention composer helpers", () => {
 });
 
 describe("code cover", () => {
-  // Bodies of backtick runs, fences, mentions and line breaks, from a fixed seed.
   const bodies = () => {
     const pieces = ["`", "``", "```\n", "~~~\n", "\n", " ", "a", "@you ", "  ```\n"];
     let seed = 7;

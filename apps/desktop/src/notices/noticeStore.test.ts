@@ -214,7 +214,6 @@ interface Computer {
   signedIn: NoticeAccount | null;
   // Rises with every sign-in, sign-out, or account switch.
   generation: number;
-  // How each of this computer's workspaces reaches the signed-in relay.
   reach: Map<string, NoticeReach>;
   // Runs when the store asks how a workspace reaches the relay.
   onReach?: () => void;
@@ -383,9 +382,6 @@ async function file(
 }
 
 describe("notices on one person's computers", () => {
-  // Each pull hands the roster cache the account's personal agents revision,
-  // so a rename on another computer reaches this one with the next pull.
-
   it("reaches the person's other computer and carries read and dismissed back", async () => {
     const server = await relay();
     const laptop = await computer(account(server, "ana"));
@@ -689,7 +685,6 @@ describe("notices on one person's computers", () => {
     const shown = await laptop.store.list();
     expect(shown.account).toBe(laptop.signedIn?.key);
 
-    // Ben signs in on this computer and has a notice with the same id.
     switchTo(laptop, account(server, "ben"));
     laptop.reach.set(WORKSPACE, { workspaceId: WORKSPACE });
     await laptop.store.postNotice(notice());
@@ -794,7 +789,6 @@ describe("notices that stay on this computer", () => {
       signedOut.signedIn?.key ?? null,
     );
     expect((await signedOut.store.list()).notices).toEqual([]);
-    // A dismissed local notice is not posted again.
     await signedOut.store.postNotice(notice());
     expect((await signedOut.store.list()).notices).toEqual([]);
   });
@@ -804,7 +798,6 @@ describe("notices while the signed-in account changes", () => {
   it("queues a notice for the account signed in when the lists change, not when they load", async () => {
     const server = await relay();
     const laptop = await computer(account(server, "ana"));
-    // Ben signs in while the store loads Ana's list.
     laptop.onAccountRead = () => {
       laptop.onAccountRead = undefined;
       switchTo(laptop, account(server, "ben"));
@@ -829,7 +822,6 @@ describe("notices while the signed-in account changes", () => {
     await laptop.store.sync();
 
     server.online = true;
-    // Ana signs out as the first notice leaves.
     server.onRequest = () => {
       server.onRequest = undefined;
       switchTo(laptop, null);
@@ -927,7 +919,6 @@ describe("notices for another person", () => {
       NoticeNotSentError,
     );
 
-    // When Ana loses the share, the notice stays and its target goes.
     expect(server.storage.revokeShare(shareId, clock)).toBe(true);
     await ana.store.sync();
     expect((await ana.store.list()).notices).toEqual([
@@ -1050,7 +1041,6 @@ it("keeps an owner's held note available through an unavailable engine and remov
       refusalCoordinates: [coordinate],
     }),
   ]);
-  // Completion while closed is learned from the next authoritative engine read.
   owed = false;
   expect((await restarted.store.list()).notices).toHaveLength(1);
   available = true;
@@ -1247,8 +1237,6 @@ describe("refusal work after quit stops it", () => {
     });
   }
 
-  // Leaves a refusal with a dismissal queued for its first coordinate and a
-  // newer second coordinate still shown.
   async function withQueuedDismissal(
     refusals: ReturnType<typeof engine>,
     options: { directory?: string } = {},
@@ -1327,7 +1315,6 @@ describe("refusal work after quit stops it", () => {
     const saved = await localFile(each);
     const changes = each.changes;
     await queuedMark;
-    // The whole batch stops, so the other Notice in it stays too.
     await expect(
       each.store.mark([row, { store: "local", noticeId: "agent-run:1" }], "dismissed", null),
     ).rejects.toMatchObject({ name: "AbortError" });
@@ -1494,7 +1481,6 @@ describe("automation notices reach the people involved", () => {
       recipientUserId: "ana",
     });
     const owner = await computer(account(server, "owner"), { installId: "install-a" });
-    // Someone the owner shared with names the owner's run, and the owner reads it in their own workspace.
     server.storage.postNotice({
       noticeId: "automation-failed:ana",
       recipientUserId: "owner",
@@ -1556,7 +1542,6 @@ describe("automation notices reach the people involved", () => {
     await owner.store.sync();
     expect(await failedIn(owner)).toHaveLength(1);
 
-    // A notice that names a run, from a computer with Ana's install id, is still not hers.
     await owner.store.postNotice({
       workspaceId: WORKSPACE,
       noticeId: "automation-failed:crafted",
@@ -1579,7 +1564,6 @@ describe("automation notices reach the people involved", () => {
       ),
     ).resolves.toEqual({ status: "refused", reason: RETRY_ELSEWHERE });
     expect(retry).not.toHaveBeenCalled();
-    // Nor does it stop Ana's own Try again of a run her computer holds, or names another computer for it.
     const own = vi.fn(async () => ({ status: "queued" as const, press: false }));
     for (const holds of [true, false]) {
       await expect(
@@ -1792,7 +1776,6 @@ describe("the relay hands an agent wake to one owner computer", () => {
           await reply.promise;
           return result;
         },
-        // The wake fails at quit, so the claimed winner parks.
         wake: async () => {
           throw new Error("dohc is quitting");
         },

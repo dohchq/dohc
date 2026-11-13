@@ -94,7 +94,6 @@ describe("computeAttachmentPaths", () => {
         folderName: "assets",
       }),
     ).toEqual({ writePath: "notes/assets/pic-abc.png", relativeSrc: "assets/pic-abc.png" });
-    // A root-level document has no folder prefix.
     expect(
       computeAttachmentPaths("plan.md", file, {
         location: "per-document",
@@ -119,7 +118,6 @@ describe("computeAttachmentPaths", () => {
   });
 
   it("global-folder: one folder at the root, climbed to with `..`", () => {
-    // Root doc: no climb needed.
     expect(
       computeAttachmentPaths("plan.md", file, {
         location: "global-folder",
@@ -129,7 +127,6 @@ describe("computeAttachmentPaths", () => {
       writePath: "attachments/pic-abc.png",
       relativeSrc: "attachments/pic-abc.png",
     });
-    // One level deep: climb once.
     expect(
       computeAttachmentPaths("notes/plan.md", file, {
         location: "global-folder",
@@ -139,7 +136,6 @@ describe("computeAttachmentPaths", () => {
       writePath: "attachments/pic-abc.png",
       relativeSrc: "../attachments/pic-abc.png",
     });
-    // Deep nesting: climb once per folder segment.
     expect(
       computeAttachmentPaths("a/b/c/plan.md", file, {
         location: "global-folder",
@@ -228,8 +224,6 @@ describe("extractImageFiles", () => {
   });
 });
 
-// A minimal EditorView stand-in exercising the schema/tr/dispatch surface the
-// insert path touches — real ProseMirror views are too heavy for a unit test.
 type MockNode = { nodeSize: number; attrs: Record<string, unknown> };
 
 function makeMockView(docSize = 8, coordsPos: number | null = 5) {
@@ -259,7 +253,6 @@ function makeMockView(docSize = 8, coordsPos: number | null = 5) {
     dispatch(tr: { pos: number; node: MockNode }) {
       dispatched.push(tr);
     },
-    // Drops resolve their insert position from the cursor coordinates.
     posAtCoords: (_coords: { left: number; top: number }) =>
       coordsPos === null ? null : { pos: coordsPos },
   };
@@ -998,10 +991,8 @@ describe("handleImagePaste", () => {
 
     await vi.waitFor(() => expect(writeAsset).toHaveBeenCalledTimes(1));
     const [writePath] = writeAsset.mock.calls[0]!;
-    // Bytes land in the single root folder...
     expect(writePath).toMatch(/^attachments\/shot-[0-9a-z]+\.png$/);
     await vi.waitFor(() => expect(dispatched).toHaveLength(1));
-    // ...and the node src climbs to it from the nested doc's folder.
     expect(dispatched[0]!.node.attrs.src).toMatch(/^\.\.\/attachments\/shot-[0-9a-z]+\.png$/);
   });
 
@@ -1077,7 +1068,6 @@ describe("handleImageDrop", () => {
     await vi.waitFor(() => expect(writeAsset).toHaveBeenCalledTimes(1));
     expect(writeAsset.mock.calls[0]![0]).toMatch(/^notes\/assets\/dropped-shot-[0-9a-z]+\.png$/);
     await vi.waitFor(() => expect(dispatched).toHaveLength(1));
-    // Inserted where the cursor was, not at the selection.
     expect(dispatched[0]!.pos).toBe(5);
     expect(dispatched[0]!.node.attrs.src).toMatch(/^assets\/dropped-shot-[0-9a-z]+\.png$/);
   });
@@ -1236,8 +1226,6 @@ describe("pickAndInsertImages", () => {
 
     expect(pickImages).toHaveBeenCalledTimes(1);
     expect(writeAsset).toHaveBeenCalledTimes(1);
-    // The picker's bytes travel the same write path paste/drop use, so the
-    // attachment-location logic applies unchanged.
     expect(writeAsset.mock.calls[0]![0]).toMatch(/^notes\/assets\/diagram-[0-9a-z]+\.png$/);
     expect(dispatched).toHaveLength(1);
     expect(dispatched[0]!.pos).toBe(3);
@@ -1375,16 +1363,10 @@ describe("pickAndInsertImages", () => {
   });
 });
 
-// The attachment setting is workspace state that changes under a mounted editor
-// (the user edits it in the settings dialog; it differs per workspace). The
-// paste context therefore holds a reader, not a value — these tests pin that,
-// because a cached copy is exactly how the old code wrote images to the previous
-// workspace's / the pre-edit location.
 describe("attachment settings are read at use time", () => {
   it("re-reads the setting for every paste, so a settings change takes effect immediately", async () => {
     const { view } = makeMockView();
     const writeAsset = vi.fn().mockResolvedValue(undefined);
-    // Stands in for the workspace setting the user edits between the two pastes.
     let location: "per-document" | "same-folder" = "per-document";
     const readAttachments = vi.fn(async () => ({
       location,
@@ -1412,11 +1394,9 @@ describe("attachment settings are read at use time", () => {
     await vi.waitFor(() => expect(writeAsset).toHaveBeenCalledTimes(1));
     expect(writeAsset.mock.calls[0]![0]).toMatch(/^notes\/assets\//);
 
-    // The user changes the setting; the editor is not remounted.
     location = "same-folder";
     paste();
     await vi.waitFor(() => expect(writeAsset).toHaveBeenCalledTimes(2));
-    // The second paste honors the new location, not the one read at mount.
     expect(writeAsset.mock.calls[1]![0]).toMatch(/^notes\/a-[0-9a-z]+\.png$/);
     expect(readAttachments).toHaveBeenCalledTimes(2);
   });

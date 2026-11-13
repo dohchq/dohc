@@ -20,7 +20,6 @@ interface Received {
   body: string;
 }
 
-// A report server on this computer. It records every request it gets.
 async function startReportServer(
   answer: (request: IncomingMessage) => {
     status: number;
@@ -104,7 +103,6 @@ const EVERY_KIND: CrashEvent[] = [
   { kind: "engine", error: engineError(2), stage: "stopped" },
 ];
 
-// Main's dialog, answered the way the test says, and what it was shown.
 function dialog(answer: boolean) {
   const shown: CrashReportSendRequest[] = [];
   return {
@@ -132,7 +130,6 @@ describe("crash report store", () => {
     expect(onChanged).toHaveBeenCalledTimes(EVERY_KIND.length + 2);
     expect(shown.sendTo).toBe(reportServer.url.host);
 
-    // A renderer can open the dialog, but a Cancel there sends nothing.
     const cancelled = dialog(false);
     expect(await reports.send(cancelled.confirm)).toBe(false);
     expect(cancelled.shown).toEqual([{ host: reportServer.url.host, text: shown.report!.text }]);
@@ -282,7 +279,6 @@ describe("crash report store", () => {
     const next = store(null).read().report!;
     expect(next).toMatchObject({ read: true, problems: 2, source: "window" });
 
-    // A mark for fewer problems, or a repeated one, changes nothing.
     reports.markRead(1);
     reports.markRead(next.through);
     expect(onChanged).toHaveBeenCalledTimes(3);

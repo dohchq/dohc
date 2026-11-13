@@ -55,7 +55,6 @@ describe("main-window initial visibility", () => {
       else window.webContents.emit(first);
       expect(window.show).toHaveBeenCalledOnce();
 
-      // A late first paint or a renderer reload must not bring it forward again.
       window.emit("ready-to-show");
       window.webContents.emit("dom-ready");
       window.webContents.emit("dom-ready");

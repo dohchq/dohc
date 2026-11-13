@@ -502,7 +502,6 @@ describe("group streams", () => {
 });
 
 describe("show", () => {
-  // m1 opens the post; m2 and m3 are a branch under it; m4 is a newer sibling.
   function branchStore() {
     const { store } = tripStore();
     const thread = store.addThread({ id: "thread-plan", title: "Plan", channelId: "channel-trip" });

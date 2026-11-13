@@ -256,7 +256,6 @@ describe("Claude Code version check", () => {
     });
 
     expect(await claudeCodeVersion(executable, resources)).toBeNull();
-    // An update through a launcher that doesn't change takes effect.
     reported = "2.1.294";
     expect(await claudeCodeVersion(executable, resources)).toBe("2.1.294");
     reported = "2.1.317";

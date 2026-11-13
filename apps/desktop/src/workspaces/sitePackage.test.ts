@@ -816,12 +816,9 @@ describe("listSitePackages", () => {
     await writeFile(
       join(root, "prop-assign", "app.js"),
       [
-        // Provable, matching (tag, property), and actually inserted: img.src.
         'const img = document.createElement("img");',
         "document.body.appendChild(img);",
         'img.src = "img.png";',
-        // Provable, matching (tag, property), and actually inserted: a.href
-        // via setAttribute.
         'const link = document.createElement("a");',
         "document.body.appendChild(link);",
         'link.setAttribute("href", "linked.html");',
@@ -872,8 +869,6 @@ describe("listSitePackages", () => {
     );
     await writeFile(join(root, "static-share", "index.html"), '<script src="./app.js"></script>');
     await writeFile(join(root, "static-share", "app.js"), "window.ready = true;");
-    // A leftover build output from an earlier build — must not be what gets
-    // shared while preview is pinned to the configured static entry.
     await writeFile(
       join(root, "static-share", "dist", "index.html"),
       '<script src="./bundle.js"></script>',
@@ -1282,11 +1277,8 @@ describe("listSitePackages", () => {
       (candidate) => candidate.root === "import-map-merge",
     );
 
-    // "a" still resolves to the first map's own value...
     expect(manifestOf(site)?.assets).toContain("import-map-merge/from-first.js");
     expect(manifestOf(site)?.assets).not.toContain("import-map-merge/from-second.js");
-    // ...while "b", which only the second map declares, is still merged in
-    // and resolves — not lost because a first map already existed.
     expect(manifestOf(site)?.assets).toContain("import-map-merge/from-second-b.js");
   });
 
@@ -1609,9 +1601,6 @@ describe("listSitePackages", () => {
       (candidate) => candidate.root === "import-map-fingerprint",
     );
 
-    // The two-entries page's "c" -> "./d" mapping must survive its own
-    // scan even though the one-entry page's map fingerprinted identically
-    // under the old scheme.
     expect(manifestOf(site)?.assets).toContain("import-map-fingerprint/d");
   });
 
@@ -3329,9 +3318,6 @@ describe("listSitePackages", () => {
   it("shares the source entry for a static site with a leftover build-output directory, when previewed as static", async () => {
     await mkdir(join(root, "stale-dist", "dist"), { recursive: true });
     await writeFile(join(root, "stale-dist", "index.html"), "<h1>Source</h1>");
-    // A leftover build from an earlier session — buildOutputs still
-    // detects it, but the site is genuinely static and IS being
-    // previewed as static right now.
     await writeFile(join(root, "stale-dist", "dist", "index.html"), "<h1>Stale build</h1>");
 
     const noOverride = await getSitePackage(root, "stale-dist");
@@ -3766,7 +3752,6 @@ describe("listSitePackages", () => {
       (candidate) => candidate.root === "srcdoc-own-csp",
     );
 
-    // app.js itself is a real, permitted reference from the srcdoc...
     expect(manifestOf(site)?.assets).toContain("srcdoc-own-csp/app.js");
     // ...but its own fetch() is filtered by the srcdoc's connect-src
     // 'none', not the (unrestricted) outer document's policy.

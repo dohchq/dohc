@@ -274,7 +274,6 @@ it.each([
       removedSha256s: [orphan],
     });
     expect(f.storage.getBlob("w", hash)).not.toBeNull();
-    // An older upload time never shortens the refreshed window.
     f.put(hash, 1);
     expect(await f.storage.collectUnreferencedBlobs("w", { nowMs: 1_000 })).toEqual({
       removed: 0,

@@ -66,9 +66,6 @@ function runWithRoster(
   );
 }
 
-// A dataset run against a scripted host: what it sends, under which key,
-// and what it does when the approved rules change under a saved plan.
-
 const noCode = async (): Promise<never> => {
   throw new Error("This automation has no code step.");
 };
@@ -177,7 +174,6 @@ const fromLedger = (claimed: DatasetAutomationClaim): DatasetRunClaim => ({
   source: "dataset",
   claim: claimed,
 });
-// A run with no chat step reads no chat and sends nothing.
 const sendsNothing = {
   makeDurable: async () => {},
   chat: {
@@ -257,7 +253,6 @@ const DM_ANA: ChatDirectoryChannel = {
   runningThreadId: "thread-dm-ana",
 };
 
-/** Chat and notices as the executor gives them to a run, recording what the run sends. */
 function chatSpy(
   script: {
     write?: (message: AutomationChatMessage) => void;
@@ -337,7 +332,6 @@ describe("a dataset automation run", () => {
       idempotencyKey: datasetEffectKey("claim-1", `${definitionHash(automation)}-1`, 0, 0, "a", 0),
     });
 
-    // A resume sends that key again with the same content, without reading again.
     const second = host({
       resolves: () => true,
       edit: async () => ({ id: "a", version: 2, priorValues: { [STATUS]: "Open" } }),
@@ -507,7 +501,6 @@ describe("a due time on a dataset", () => {
       datasetEffectKey("atc_due", `${definitionHash(scheduled)}-1`, 1, 0, "a", 0),
     );
 
-    // The folder now holds another dataset: nothing is read or sent.
     const other = host({
       resolves: () => true,
       edit: async () => {
@@ -627,7 +620,6 @@ describe("a Group message on a dataset", () => {
       );
     expect(await attempt([TEAM], stop.signal)).toEqual({ kind: "wait", reason: "stopped" });
     expect(spy.notices).toHaveLength(1);
-    // Team is now another Group with the same name.
     expect(
       await attempt(
         [{ ...TEAM, id: "team-2", wireId: "team-2-wire" }],
@@ -701,7 +693,6 @@ automations:
     };
     return { automation: read.entries[0].automation, sent, surface, plans: () => plans };
   };
-  // Each evaluator request's record of the run's time, once each.
   const budgets = new Set<unknown>();
   let requests = 0;
   const runConflicting = async (
@@ -746,7 +737,6 @@ automations:
     // Each read of the Find's step evaluated its value before the Find read, all against one budget for the run.
     expect(requests).toBeGreaterThanOrEqual(3);
     expect(budgets.size).toBe(1);
-    // One edit, sent at the version the Set's step read.
     expect(
       script.sent
         .filter((input) => input.operationId === EDIT)
@@ -1185,7 +1175,6 @@ describe("chat steps in a dataset run", () => {
             to: [user-ana]
 `);
   const told = { ...claim, automationId: "collection:Budget#tell" };
-  // Every text reads "Closed", and every condition holds.
   const evaluator = {
     runCode: noCode,
     evaluate: async (_id: string, _scope: AutomationScope, formulas: readonly { kind: string }[]) =>
@@ -1251,7 +1240,6 @@ describe("chat steps in a dataset run", () => {
       [first.messages[0]!.effectId, first.messages[0]!.messageId],
       [`${key(tell, 3)}/dm/user-ana`, automationMessageId(`${key(tell, 3)}/dm/user-ana`)],
     ]);
-    // Try again sends only the notice, under the id it had. The record was edited once.
     const third = chatSpy();
     expect(await attempt(third, 2, new AbortController().signal)).toEqual({ kind: "done" });
     expect(third.messages).toEqual([]);
@@ -1379,7 +1367,6 @@ describe("chat steps in a dataset run", () => {
         },
       ],
     });
-    // Once someone else can edit Budget, the step acts as nobody.
     expect(await run([BOB])).toEqual({
       outcome: {
         kind: "failed",
@@ -1509,7 +1496,6 @@ describe("a dataset action a run invokes", () => {
       kind: "wait",
       reason: "stopped",
     });
-    // No read: the only call is the action, with a number for a number key.
     expect(first.sent).toEqual([
       expect.objectContaining({
         operationId: MARK_PAID,
@@ -1519,7 +1505,6 @@ describe("a dataset action a run invokes", () => {
     ]);
     expect(scopes.at(-1)).toMatchObject({ record: { id: 12 }, recordKeys: ["id"] });
     const evaluated = scopes.length;
-    // A resume sends the saved request again, without evaluating again; the host replays its receipt.
     const second = actionHost(async () => ({ result: { id: 12 }, revision: 8, replayed: true }));
     expect(
       await runWithRoster(dependencies(second.surface), input(new AbortController().signal)),
@@ -1635,7 +1620,6 @@ describe("a dataset action a run invokes", () => {
   });
 
   describe("with a code step", () => {
-    // Formulas and code run in the real evaluator.
     const shared = createAutomationFormulaEvaluator();
     afterAll(() => shared.close());
     const coded = (code: string) =>

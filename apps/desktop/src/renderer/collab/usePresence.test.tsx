@@ -7,7 +7,6 @@ import type { PresencePeer, PresenceSnapshot, PresenceTransport } from "./presen
 
 afterEach(cleanup);
 
-// A transport whose peer set the test can push at will.
 function pushableTransport() {
   let snapshot: PresenceSnapshot = { version: 0, peers: [] };
   const waiters = new Set<(s: PresenceSnapshot) => void>();
@@ -117,8 +116,6 @@ describe("usePresence gating + guard", () => {
     view.rerender(<Harness enabled transport={tB.transport} topic="B" />);
     await flush();
     act(() => {
-      // Late resolution of the old channel's in-flight poll: the ghost only
-      // renders if the stale callback slipped past the guard.
       tA.set([
         {
           faceToken: "ghost",
@@ -147,8 +144,6 @@ describe("usePresence gating + guard", () => {
       });
       await flush();
       expect(t.publishes.at(-1)).toMatchObject({ typing: true });
-      // The caller never calls setTyping(false); the idle window (5s default)
-      // must publish the clear on its own.
       await act(async () => {
         await vi.advanceTimersByTimeAsync(5_000);
       });
@@ -191,7 +186,6 @@ describe("usePresence gating + guard", () => {
         await vi.advanceTimersByTimeAsync(4_000);
       });
       expect(t.publishes.length).toBe(before + 1);
-      // …then at t=8s typing finally clears, exactly once.
       await act(async () => {
         await vi.advanceTimersByTimeAsync(1_000);
       });

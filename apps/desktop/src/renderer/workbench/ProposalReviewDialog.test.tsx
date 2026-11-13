@@ -36,7 +36,6 @@ function fileRow(overrides: Record<string, unknown> = {}) {
   };
 }
 
-// Open one file of the review, by its row.
 async function openFile(user: ReturnType<typeof userEvent.setup>, index = 0) {
   const toggles = await screen.findAllByTestId("proposal-review-file-toggle");
   await user.click(toggles[index]!);
@@ -108,9 +107,6 @@ describe("ProposalReviewDialog", () => {
     });
   });
 
-  // The whole point of the lazy read. A review carrying what a fortnight of
-  // work changes must open — and opening it must not fetch a single file's
-  // content, because fetching all of them is what made it impossible before.
   it("opens a review of the full bound without fetching any content", async () => {
     bridgeMock.readShareProposalChanges.mockResolvedValue(
       changes({
@@ -128,14 +124,12 @@ describe("ProposalReviewDialog", () => {
       bridgeMock.readShareProposalFileContent,
       "fetching content to draw the list restores the eager read this bound depends on",
     ).not.toHaveBeenCalled();
-    // Every row still says what it is without its content.
     expect(screen.getAllByTestId("proposal-review-file-toggle")[0]!.textContent).toContain(
       "docs/f-0.md",
     );
     expect(screen.getByTestId("proposal-review-accept").hasAttribute("disabled")).toBe(false);
   });
 
-  // Opening one file fetches that file, and only that file.
   it("fetches one file's content when its row is opened", async () => {
     const user = userEvent.setup();
     bridgeMock.readShareProposalChanges.mockResolvedValue(
@@ -158,12 +152,9 @@ describe("ProposalReviewDialog", () => {
       proposalId: "proposal-1",
       opIndex: 1,
     });
-    // Exactly one file is open, so exactly one diff is drawn.
     expect(screen.getAllByTestId("proposal-review-diff-lines")).toHaveLength(1);
   });
 
-  // Closing and reopening shows what was already read. A refetch per toggle
-  // would turn one impatient granter into a stream of relay round trips.
   it("reads one file's content once, however often its row is toggled", async () => {
     const user = userEvent.setup();
     renderDialog();
@@ -181,7 +172,6 @@ describe("ProposalReviewDialog", () => {
     ).toHaveLength(1);
   });
 
-  // One file this surface cannot read must not take the review down with it.
   it("states a file it could not read, and keeps both decisions available", async () => {
     const user = userEvent.setup();
     bridgeMock.readShareProposalFileContent.mockRejectedValue(
@@ -201,7 +191,6 @@ describe("ProposalReviewDialog", () => {
     ).toBe(false);
     expect(screen.getByTestId("proposal-review-accept").hasAttribute("disabled")).toBe(false);
 
-    // A failure is not a permanent verdict on that file. Reopening tries again.
     bridgeMock.readShareProposalFileContent.mockResolvedValue({
       currentText: "one\n",
       incomingText: "two\n",
@@ -214,8 +203,6 @@ describe("ProposalReviewDialog", () => {
     ).toContain("two");
   });
 
-  // The relay could not state who sent them. The review still works, and the
-  // dialog names an unknown account the way the share banner does.
   it("names an unknown sender the way the share surfaces already do", async () => {
     bridgeMock.readShareProposalChanges.mockResolvedValue(changes({ proposedByEmail: null }));
     renderDialog();
@@ -224,8 +211,6 @@ describe("ProposalReviewDialog", () => {
     );
   });
 
-  // Drift is the one thing review has to say that a diff cannot: the
-  // granter's copy moved after the recipient sent this.
   it("states drift on the file that drifted, and only on that file", async () => {
     bridgeMock.readShareProposalChanges.mockResolvedValue(
       changes({
@@ -254,10 +239,6 @@ describe("ProposalReviewDialog", () => {
     expect(files[1]!.textContent).toContain("Removed");
   });
 
-  // A change this surface cannot PREVIEW is still a change the granter has to
-  // answer. Binary content, content over the text bound, and a blob the relay
-  // would not serve all arrive as no incoming side — and the granter must
-  // still be able to say no.
   it("keeps both decisions available for a change it cannot preview", async () => {
     bridgeMock.readShareProposalChanges.mockResolvedValue(
       changes({
@@ -371,8 +352,6 @@ describe("ProposalReviewDialog", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
-  // The renderer async-state invariant: a slow answer for one submission must
-  // never repaint the window that replaced it.
   it("drops an answer that belongs to a replaced window", async () => {
     let releaseFirst: (() => void) | null = null;
     bridgeMock.readShareProposalChanges.mockImplementation(

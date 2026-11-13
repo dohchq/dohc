@@ -163,8 +163,6 @@ it.each(["Claude Code", "Codex"])(
     render(<AddAgentForm {...f.props} />);
     await userEvent.type(screen.getByLabelText("Agent name"), "Nova");
     await userEvent.click(await screen.findByRole("button", { name }));
-    // The card names the tool and its sign-in; its path waits under Advanced
-    // with how the tool starts, and its permissions stay in view.
     expect(screen.getByRole("button", { name }).textContent).not.toMatch(/Tools/u);
     expect(screen.getByTestId("agent-tool-permissions").closest("details")).toBeNull();
     expect(

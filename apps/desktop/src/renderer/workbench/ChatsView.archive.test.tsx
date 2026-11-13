@@ -29,7 +29,6 @@ describe("ChatsView archive and row menus", () => {
     renderView(vi.fn(), vi.fn(), { userSettings: DEFAULT_USER_SETTINGS, onNotice });
 
     fireEvent.contextMenu(await screen.findByTestId("chats-channel"), { clientX: 40, clientY: 60 });
-    // Nothing unread, so no Mark as read; the group is yours, so Add people.
     expect(menuLabels()).toEqual(["Add people…", "Archive"]);
     await user.click(screen.getByTestId("chat-row-menu-archive"));
 
@@ -82,7 +81,6 @@ describe("ChatsView archive and row menus", () => {
     expect(menuLabels()).toEqual(["Mark as read", "Add people…", "Unarchive"]);
     fireEvent.keyDown(screen.getByTestId("chat-row-menu-unarchive"), { key: "Escape" });
 
-    // Open, it says it is archived and offers the way back.
     await user.click(trip);
     await user.click(await screen.findByTestId("chats-unarchive"));
     expect(bridgeMock.setChatArchived).toHaveBeenCalledExactlyOnceWith({
@@ -195,7 +193,6 @@ describe("ChatsView archive and row menus", () => {
       }),
     );
 
-    // With the settings saying so, Archived has nothing left to show.
     unmount();
     renderView(vi.fn(), vi.fn(), {
       userSettings: {
@@ -244,7 +241,6 @@ describe("ChatsView archive and row menus", () => {
       ).toBe(true),
     );
     expect(screen.queryByTestId("chats-archived-toggle")).toBeNull();
-    // Open, it names no problem: Settings doesn't list a personal agent.
     fireEvent.click(
       screen.getAllByTestId("chats-my-agent").find((row) => row.textContent?.includes("Grok"))!,
     );

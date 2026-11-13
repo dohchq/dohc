@@ -17,9 +17,6 @@ import {
   shellBootstrapProps,
 } from "./DesktopWorkspaceShell.testHarness";
 
-// While this computer's queue for a note takes no more edits, the engine
-// refuses each one, so the note's editor stays read-only instead of taking
-// typing it then sets aside. Each way out of the pause makes it editable again.
 describe("a note whose live editing is paused", () => {
   const ROW: OwnerLiveQuarantine = {
     objectId: "object-a",
@@ -67,7 +64,6 @@ describe("a note whose live editing is paused", () => {
     renderShell(bridge);
     const note = await openNote(bridge);
     await expectPaused(note.toggle);
-    // Typing at a read-only note keeps nothing aside and writes nothing.
     await note.user.click(await note.toggle());
     await note.user.keyboard("Lost?");
     expect(screen.queryByTestId("markdown-editor")).toBeNull();
@@ -78,7 +74,6 @@ describe("a note whose live editing is paused", () => {
     expect(bridge.retryOwnerLiveQuarantine).toHaveBeenCalledOnce();
     await note.status(withRows({ ...ROW, recovery: "retrying" }));
     await expectPaused(note.toggle);
-    // The server took the queue: main lists the note no more.
     await note.status(SYNC_STATUS);
     const editor = await enterMarkdownSource(note.user);
     await note.user.type(editor, "Back");

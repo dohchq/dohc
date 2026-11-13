@@ -41,7 +41,6 @@ const FIELDS: FieldDefinition[] = [
   { name: "Points", type: "number" },
   { name: "Tags", type: "multi-select", options: ["urgent", "later", "home"] },
 ];
-/** A dataset table as the builder reads it: its fields, and its approved operations as "name:kind". */
 const datasetTable = (
   fields: FieldDefinition[],
   ...operations: string[]
@@ -298,11 +297,9 @@ function makeBridge(
     current = next;
     for (const listener of failureListeners) listener({ workspaceId: "ws-1" });
   };
-  // Main says this workspace's automations changed, as after a hand edit.
   const automationsChanged = (workspaceId: string) => {
     for (const listener of changeListeners) listener({ workspaceId });
   };
-  // Main says which computer runs schedules changed, as after a handover.
   const hostChanged = (workspaceId: string) => {
     for (const listener of hostListeners) listener(workspaceId);
   };
@@ -369,7 +366,6 @@ describe("the ⚡ panel", () => {
     render(<Panel onNotice={onNotice} />);
     const row = await screen.findByTestId("automation-stamp");
 
-    // The row menu works from the keyboard.
     within(row).getByRole("button", { name: "Stamp the finish date actions" }).focus();
     await userEvent.keyboard("{Enter}");
     expect(document.activeElement?.textContent).toBe("Edit");
@@ -410,7 +406,6 @@ describe("the ⚡ panel", () => {
       ),
     );
     expect(written[1]!.automations.map((automation) => automation.id)).toEqual(["stamp", "nudge"]);
-    // The deleted row held focus; the next automation's switch has it now.
     expect(document.activeElement).toBe(
       within(screen.getByTestId("automation-nudge")).getByRole("switch"),
     );
@@ -672,7 +667,6 @@ describe("a schedule's next run", () => {
     act(() => tryAgain());
     expect(await screen.findByText(`${tomorrow} on Ice's laptop`)).toBeTruthy();
 
-    // ws-1's answer comes after the panel moved to ws-2: it never shows there.
     let answer: (result: ScheduleHostResult) => void = () => undefined;
     bridge.readScheduleHost.mockImplementationOnce(
       () =>
@@ -729,7 +723,6 @@ describe("the builder's If", () => {
       "Done",
     );
 
-    // An empty Do is a problem; an empty Otherwise is not.
     await user.click(screen.getByRole("button", { name: "Save" }));
     expect(await within(group("Step 2, Do")).findByText("Add a step.")).toBeTruthy();
     expect(within(group("Step 2, Otherwise")).queryByText("Add a step.")).toBeNull();
@@ -838,7 +831,6 @@ describe("the builder's steps in other Collections", () => {
     { kind: "document", path: "Tasks", name: "Tasks", stopped: null, findStopped: null },
     { kind: "document", path: "Log", name: "Log", stopped: null, findStopped: null },
   ];
-  /** A bridge whose main lists Ledger, a dataset dohc describes as LEDGER_DATASET. */
   function ledgerBridge(
     file: ListCollectionAutomationsResult,
     targets: Target[] = [...DOCUMENTS, LEDGER],
@@ -897,7 +889,6 @@ describe("the builder's steps in other Collections", () => {
     ]);
     await user.selectOptions(screen.getByRole("combobox", { name: "Step 2, field 1" }), "Amount");
     await user.type(screen.getByRole("textbox", { name: "Step 2, Amount" }), "12");
-    // Entries has no delete, so Undo keeps what the step adds.
     expect(
       within(screen.getByTestId("builder-step-1")).getByText(
         /Undo keeps the records this step adds\. Entries has no delete action/,
@@ -959,11 +950,9 @@ describe("the builder's steps in other Collections", () => {
         collectionPath: "Tasks",
       }),
     );
-    // ws-1's description arrives after the switch: ws-2 has not said what Ledger is, so the step stays its sentence.
     await act(async () => describeFirst({ kind: "description", dataset: LEDGER_DATASET }));
     const step = screen.getByTestId("builder-step-0");
     expect(within(step).queryByRole("combobox")).toBeNull();
-    // ws-2's own answer describes Ledger again, for ws-2.
     await act(async () => listSecond({ collections: [...DOCUMENTS, LEDGER] }));
     expect(await within(step).findByRole("combobox", { name: "Step 1, Collection" })).toBeTruthy();
     expect(bridge.dataset).toHaveBeenLastCalledWith({
@@ -1044,7 +1033,6 @@ describe("the builder's people", () => {
     act(() => holdListeners.forEach((listener) => listener({ workspaceId: "ws-1" })));
     expect(await within(screen.getByTestId("builder-step-0")).findByText(stopped)).toBeTruthy();
     expect(bridge.listAutomationPeople.mock.calls.length).toBeGreaterThan(before);
-    // The saved person stays chosen, with why.
     expect(chosen("Step 1, person 1")).toBe(`ana@dohc.test (${stopped})`);
 
     bridge.listAutomationPeople.mockRejectedValue(new Error("offline"));
@@ -1059,7 +1047,6 @@ describe("the builder's people", () => {
         ([message]) => message === "dohc could not list the people an automation can message.",
       ),
     ).toHaveLength(1);
-    // What it last read stays on screen.
     expect(chosen("Step 1, person 1")).toBe(`ana@dohc.test (${stopped})`);
   }, 30_000);
 
@@ -1101,7 +1088,6 @@ describe("the builder's people", () => {
     expect(within(theirs).getByText(actsAsAna)).toBeTruthy();
     expect(within(theirs).getByLabelText("Someone else's step")).toBeTruthy();
     expect(within(theirs).queryByRole("textbox")).toBeNull();
-    // Your own, named by your account, edits as in a workspace never shared.
     expect(screen.getByTestId("builder-step-1").textContent).toContain("Wake your agent");
     // A new one is offered only where steps can name you without an account.
     expect(screen.queryByRole("button", { name: "Wake your agent" })).toBeNull();
@@ -1111,13 +1097,11 @@ describe("the builder's people", () => {
         "dohc cannot tell whose agent this step wakes, so you cannot change its message here.",
       ),
     ).toBeTruthy();
-    // The icon says so too, for a screen reader.
     expect(within(unknown).getByLabelText("dohc cannot tell whose step this is")).toBeTruthy();
     expect(within(unknown).queryByLabelText("Someone else's step")).toBeNull();
     expect(within(unknown).queryByRole("textbox")).toBeNull();
 
     await user.click(screen.getByRole("button", { name: "Move step 1 down" }));
-    // Moved, it keeps its verdict and stays theirs.
     const moved = screen.getByTestId("builder-step-1");
     expect(within(moved).getByText(actsAsAna)).toBeTruthy();
     expect(within(moved).getByText(whose)).toBeTruthy();
@@ -1450,7 +1434,6 @@ describe("the builder", () => {
       "Stamp the finish date!",
     );
 
-    // A notice asks to open runs: the builder asks too, and stays open.
     rerender(<Panel focus={{ automationId: "collection:Tasks#stamp", run: null, seq: 1 }} />);
     expect(await screen.findByTestId("automation-unsaved")).toBeTruthy();
     await user.click(
@@ -1478,8 +1461,6 @@ describe("the builder", () => {
     expect(written).toHaveLength(1);
   });
 
-  // Steps 1 to 15 in reading order: an If whose Do holds steps 2 to 4 and
-  // whose Otherwise holds 5 and 6, then every other kind of step.
   const title = (value: string) => [{ field: "Title", value: { kind: "literal" as const, value } }];
   const everyKind: Automation = {
     ...stamp,
@@ -1653,7 +1634,6 @@ describe("the builder", () => {
     expect((screen.getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe(
       "Stamp the finish date!",
     );
-    // Asked again, the person discards the draft: the panel closes, and has not stayed a second time.
     rerender(<Panel onClose={onClose} onStayed={onStayed} closeAsk={2} />);
     await user.click(
       within(await screen.findByTestId("automation-unsaved")).getByRole("button", {

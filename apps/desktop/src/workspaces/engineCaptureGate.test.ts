@@ -28,8 +28,6 @@ const hooks: WorkspaceCaptureHooks = {
 const ATTACHMENT_ID = Symbol("engine-capture-gate-test");
 
 describe("captureForWorkspace", () => {
-  // The gate owns the shared-view rule. The decision carries the cause,
-  // and the workspace folder is never touched.
   it("gives a shared view a null capture with the share cause", () => {
     const decision = captureForWorkspace(
       {

@@ -555,7 +555,6 @@ describe.skipIf(!available)("named browser production auth lifecycle", () => {
         expect(refused.status).toBe(404);
         await refused.body?.cancel();
       }
-      // Another recipient route must not convert the unverified account's pending invite first.
       const recipientList = await fetch(`${relayUrl}/sync/shares`, {
         headers: { cookie: browserCookies[0]! },
       });
@@ -657,7 +656,6 @@ describe.skipIf(!available)("named browser production auth lifecycle", () => {
       expect(await sessionExpiry()).toBe(agedExpiry.getTime());
       expect(await web.resolveNamedBrowserSession(browser(1), issued[1]!)).not.toBeNull();
       expect(await sessionExpiry()).toBe(agedExpiry.getTime());
-      // The same aged session refreshes without the preference, proving the cookie affects the real dependency.
       expect(
         await web.resolveNamedBrowserSession(
           new Request(`${origin}/api/live`, { headers: { cookie: sessionCookie } }),

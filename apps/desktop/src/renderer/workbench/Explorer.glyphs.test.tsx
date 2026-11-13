@@ -108,7 +108,6 @@ describe("Explorer kind glyphs", () => {
       expect(glyph.classList.contains(`lucide-${fileKindForPath(path).glyphId}`)).toBe(true);
       expect(glyph.getAttribute("width")).toBe("15");
       expect(glyph.getAttribute("aria-hidden")).toBe("true");
-      // The accessible name is exactly the file name: the glyph adds nothing.
       expect(screen.getByRole("treeitem", { name: path })).toBe(treeRow(path));
     }
   });
@@ -317,7 +316,6 @@ describe("Explorer kind glyphs", () => {
     return treeRow(path);
   }
 
-  // The left bar is the row's only absolutely placed child.
   function dropBar(row: HTMLElement): Element | undefined {
     return [...row.children].find((child) => child.classList.contains("absolute"));
   }
@@ -372,9 +370,7 @@ describe("Explorer kind glyphs", () => {
   });
 
   it.each([
-    // A file without an extension stays a plain file.
     ["LICENSE", "NOTICE", "lucide-file"],
-    // A name typed without an extension keeps the file's own.
     ["report.csv", "summary", "lucide-file-spreadsheet"],
   ])("keeps %s's kind while renaming it to %s", async (path, name, glyph) => {
     render(<Explorer {...explorerProps({ files: [file(path)] })} />);
@@ -387,9 +383,7 @@ describe("Explorer kind glyphs", () => {
   });
 
   it.each([
-    // A `.db` the listing does not report as a database stays a plain file.
     ["cache.db", "file", "lucide-file"],
-    // A file the listing reports as a database stays one whatever its name.
     ["store.bin", "database", "lucide-database"],
   ] as const)(
     "keeps the listing's kind while renaming %s until the name changes",

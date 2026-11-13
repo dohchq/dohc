@@ -98,7 +98,6 @@ function handler(
 
 let ownerSeq = 0;
 
-// The owner's file at `path`, through its own log.
 async function ownerWrites(f: Fixture, path: string, text: string): Promise<void> {
   await putBlob(f.h, OWNER, WORKSPACE, text);
   const originSeq = ownerSeq++;
@@ -136,7 +135,6 @@ async function ok(response: Response): Promise<Record<string, unknown>> {
   return json(response);
 }
 
-// Every refusal is the same bytes as a link that never existed.
 async function expectRefused(response: Response): Promise<void> {
   const refusal = opaqueLinkRefusal();
   expect({ status: response.status, body: await response.text() }).toEqual({
@@ -246,7 +244,6 @@ async function connect(
   };
 }
 
-// An agent's request as share-web sends it. A null header value leaves it out.
 function agentRequest(
   agent: Pick<Agent, "accessToken" | "resource">,
   path: string,
@@ -408,7 +405,6 @@ describe("an agent reading its link", () => {
     expect(blob.status).toBe(200);
     expect(await blob.text()).toBe(SHARED);
     await expectRefused(await f.h(agentRequest(agent, `/sync/link/blobs/${sha256(HIDDEN)}`)));
-    // A read is not an action.
     expect(connection(f, agent).last_action_at_ms).toBeNull();
   });
 
@@ -492,7 +488,6 @@ describe("an agent reading its link", () => {
       expect(response.status, name).toBe(404);
       await expectRefused(response);
     }
-    // A relay with no exchange key configured serves no agent, and can't turn on the Edit release.
     await expectRefused(
       await handler(f.storage, f.now, { relayExchangeKey: undefined })(
         agentRequest(agent, "/sync/link/share"),
@@ -749,7 +744,6 @@ describe("an agent in its link's discussion", () => {
     });
     f.now.value += 5;
     await ok(await agentPost(f, agent, { body: "from the agent", idempotencyKey: "agent-1" }));
-    // A retry answers from the message it made.
     await ok(await agentPost(f, agent, { body: "from the agent", idempotencyKey: "agent-1" }));
 
     const { principal_id: principalId, last_action_at_ms: lastActionAtMs } = connection(f, agent);
@@ -943,7 +937,6 @@ describe("an agent writing a Collection through an Edit link", () => {
     expect(JSON.parse(String(written!.admitted_author_snapshot_json))).toEqual([
       expect.objectContaining({ kind: "link", label: "Test agent" }),
     ]);
-    // Nothing about the agent's credential reaches the owner's log.
     expect(JSON.stringify(written)).not.toContain(agent.accessToken);
     expect(JSON.stringify(written)).not.toContain(agent.resource);
   });

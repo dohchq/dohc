@@ -370,8 +370,6 @@ describe("Overlay", () => {
   });
 });
 
-// Toasts sit above the dialog, outside its panel. F6 is the keyboard's way to
-// them and back; Tab and Escape never leave the dialog and its toasts.
 describe("Overlay with toasts above it", () => {
   function DialogWithToasts(props: { onClose: () => void; toasts?: boolean }) {
     return (

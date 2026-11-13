@@ -85,7 +85,6 @@ describe("a workspace proved never shared", () => {
   it("is never one that synced or opened as a share, even after it is forgotten and attached again", async () => {
     await recordNeverSynced(root, laptop);
     await recordSynced(root);
-    // Attached again, the registry entry has no server connection or share.
     expect(await provedNeverShared(entry, none)).toBe(false);
     await recordNeverSynced(root, laptop);
     expect(await provedNeverShared(entry, none), "a new-workspace record does not replace it").toBe(
@@ -125,7 +124,6 @@ describe("a workspace proved never shared", () => {
 
   it("keeps a sync or a share whatever a stale copy of the record says", async () => {
     await recordNeverSynced(root, laptop);
-    // The desk's copy of the folder from before either was recorded.
     const stale = await readFile(recordPath(), "utf8");
     await recordReceivedShare(root);
     await writeFile(recordPath(), stale);

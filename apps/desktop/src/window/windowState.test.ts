@@ -91,7 +91,6 @@ describe("planWindowPlacement", () => {
   it("resets to centered default when off every display", () => {
     const offscreen = { ...saved, bounds: { ...saved.bounds, x: 4000, y: 3000 } };
     expect(planWindowPlacement(offscreen, [PRIMARY]).bounds).toBeNull();
-    // The unplugged-monitor case: bounds were valid for a display that's gone.
     expect(planWindowPlacement(saved, [SECOND]).bounds).not.toEqual(saved.bounds);
   });
 
@@ -166,7 +165,6 @@ describe("createDebouncedSaver", () => {
     saver.schedule();
     saver.flush();
     expect(save).toHaveBeenCalledTimes(2);
-    // flush with nothing pending is a no-op
     saver.flush();
     expect(save).toHaveBeenCalledTimes(2);
     vi.useRealTimers();

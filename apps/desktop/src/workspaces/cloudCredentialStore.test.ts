@@ -46,7 +46,6 @@ describe("cloud credential store", () => {
     expect(await readFile(credentialFile(), "utf8")).not.toContain(credentials.token);
   });
 
-  // A file an earlier build saved can still carry the server's name.
   it("does not render invalid or retired server metadata from disk", async () => {
     const store = createCloudCredentialStore({ dir, cipher: fakeCipher });
     await store.save(credentials);
@@ -269,7 +268,6 @@ describe("cloud credential store", () => {
       await store.save(credentials);
       expect(statSync(credentialFile()).mode & 0o777).toBe(0o600);
 
-      // A pre-existing world-readable file is healed to 0600 on the next load.
       chmodSync(credentialFile(), 0o644);
       await store.load();
       expect(statSync(credentialFile()).mode & 0o777).toBe(0o600);

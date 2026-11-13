@@ -157,8 +157,6 @@ describe("share-view file operations through the real store", () => {
         "a put-back that abandons the list at the first failure strands every file after it too",
       ).rejects.toThrow("docs/roadmap/one.md is not at docs/plans/one.md");
 
-      // Exactly one file is stranded; the put-backs on either side of the
-      // failure ran, so their files are back where they started.
       expect(await storePaths(view)).toEqual([
         "docs/plans/four.md",
         "docs/plans/three.md",

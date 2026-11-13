@@ -50,7 +50,6 @@ describe.each(["light", "dark"] as const)("dimmed Graph nodes in %s", (theme) =>
     }
     expect(labelOpacity(0.5, 1, LABEL_DIM[theme], false)).toBe(0);
     expect(labelOpacity(1, 1, LABEL_DIM[theme], false)).toBeCloseTo(LABEL_DIM[theme]);
-    // With nothing emphasised, the zoom fade is unchanged; the emphasised node's own label shows whole.
     expect(labelOpacity(0.5, 0, LABEL_DIM[theme], false)).toBe(0.5);
     expect(labelOpacity(0.5, 1, LABEL_DIM[theme], true)).toBe(1);
   });

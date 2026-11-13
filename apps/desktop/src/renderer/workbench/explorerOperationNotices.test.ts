@@ -23,8 +23,6 @@ const deleted = (path: string): RecordedTreeChange => ({
   operationId: id,
   undoable: true,
 });
-// A delete main answered with its place: the system trash (true) or the
-// workspace's own trash (false).
 const trashed = (
   path: string,
   system: boolean,

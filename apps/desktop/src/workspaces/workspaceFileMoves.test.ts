@@ -41,15 +41,12 @@ import { saveRecoveryRecord } from "./workspaceDeleteRecovery";
 import { moveIntoWorkspaceTrash } from "./workspaceFiles";
 import { resumeWorkspaceLinkRewrites } from "./workspaceLinkRewrites";
 
-// Filesystem refusals a test switches on for chosen paths.
 const faults = vi.hoisted(
   () =>
     ({}) as {
       unlink?: (path: string) => boolean | Promise<boolean>;
       readdir?: (path: string) => boolean;
-      // Runs just before a hard link is made.
       link?: (from: string, to: string) => Promise<void>;
-      // Sees every call that would change the disk.
       mutate?: (syscall: string, path: string) => void;
     },
 );
@@ -94,7 +91,6 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 });
 
 const named = { kind: "agent", agentId: "Client name", onBehalfOf: "person-local" } as const;
-// The person desktop main read: signed out, this installation.
 const person = { kind: "human", humanId: "local:installation" } as const;
 const unnamed = { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local" } as const;
 
@@ -169,7 +165,6 @@ async function fixture(
     trashItem,
     markDeleted,
   });
-  // The watcher's pass over whatever the disk holds now.
   const settle = async () => {
     await engine().flush();
   };
@@ -271,7 +266,6 @@ describe("agent moves and deletes", () => {
       links.push(from);
       expect(dirname(from)).toBe(join(f.rootPath, ".dohc/local/trash"));
       expect(existsSync(join(f.rootPath, "source.txt"))).toBe(false);
-      // A save at the vacated source name must survive placement.
       await write(f.rootPath, "source.txt", "new save");
     };
     try {
@@ -306,7 +300,6 @@ describe("agent moves and deletes", () => {
     await write(f.rootPath, "photo.bin", new Uint8Array([0, 1, 2, 255]));
     const seen = await f.start();
 
-    // A person's move outside dohc reaches History through the watcher, with no author.
     await rename(join(f.rootPath, "a.txt"), join(f.rootPath, "person.txt"));
     await f.settle();
     const outside = (await f.rows()).filter((row) => !seen.has(row.id));
@@ -397,7 +390,6 @@ describe("agent moves and deletes", () => {
   });
 
   it("keeps a new file another program put at a restore path, and names what stayed in the trash", async () => {
-    // Another program writes dir/2.txt while History refuses its delete.
     const f = await fixture({
       beforeRequest: async (request) => {
         if (
@@ -517,7 +509,6 @@ describe("agent moves and deletes", () => {
     };
     await saveRecoveryRecord(workspace, record, "replace");
     await moveIntoWorkspaceTrash(workspace, join(f.rootPath, "b.txt"), record.staged);
-    // An unfinished move does not expire like an Undo offer.
     const old = new Date(Date.now() - 31 * 24 * 60 * 60 * 1_000);
     for (const name of await f.workspaceTrash())
       if (name.startsWith("replace-"))
@@ -527,7 +518,6 @@ describe("agent moves and deletes", () => {
         workspaceId: workspace.workspaceId,
         history: { rewriteHistoryLinks: vi.fn() },
       });
-    // A disk that refuses the first open leaves the record for the next one.
     faults.mutate = (syscall) => {
       if (syscall === "link" || syscall === "copyFile") throw new Error("The disk is busy");
     };
@@ -590,7 +580,6 @@ describe("a folder with a live page", () => {
     `dohc can't delete "notes" while a page in it has live editing on`,
     "In Live documents, stop live editing for every page in this folder, then delete the folder again.",
   ].join(String.fromCharCode(10));
-  // A page this computer owns at notes/page.md. The engine refuses only a folder move or delete over it.
   async function ownedFixture() {
     const methods: string[] = [],
       checks: Array<{ path: string; change: string | undefined }> = [];
@@ -684,7 +673,6 @@ describe("a page this computer owns live", () => {
     `dohc can't delete "notes/page.md" while it has live editing on`,
     "In Live documents, stop live editing for this page, then delete it again.",
   ].join(String.fromCharCode(10));
-  // The engine refuses only a page move or delete of notes/page.md.
   async function ownedFixture() {
     const methods: string[] = [],
       changes: Array<string | undefined> = [];
@@ -926,7 +914,6 @@ describe("a person's delete", () => {
     }
   });
 
-  // From the capture hold on, reading a folder named build fails.
   const unreadableBuild = (request: Request) => {
     if (request.method === "capture.hold") faults.readdir = (path) => path.endsWith(`${sep}build`);
   };
@@ -1149,7 +1136,6 @@ describe("History operation admission", () => {
 
 describe("a restore of a page this computer owns live", () => {
   it("refuses removing it to before its creation with the restore words, and keeps the page", async () => {
-    // The engine refuses the delete a restore to before creation runs.
     const f = await fixture({
       beforeRequest: (request) => {
         if (request.method === VERSIONED_METHOD.textDelete) {

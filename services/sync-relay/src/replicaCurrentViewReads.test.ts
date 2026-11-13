@@ -315,7 +315,6 @@ it("accountless paths use the existing relative projection in both directions", 
   expect(f.storage.listReplicaCurrentViewFiles(input)).toMatchObject({
     files: [{ path: "docs/a.md" }],
   });
-  // A deeper root loses its private parents.
   f.db
     .prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id='s'")
     .run('{"paths":["private/docs"],"versionId":null}');

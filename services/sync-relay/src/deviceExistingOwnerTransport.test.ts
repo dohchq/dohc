@@ -542,7 +542,6 @@ it("uses an existing client for bounded owner adoption and refuses ordinary remo
       ).result,
     ).toEqual({ status: "fenced", receipt });
     expect(ownerFor).toHaveBeenCalledTimes(acquired);
-    // A Decline's cancellation names only this fencing host, and only an answer for its document returns.
     const cancellation = {
       operationId: "stop",
       objectId: "object",
@@ -600,7 +599,6 @@ it("uses an existing client for bounded owner adoption and refuses ordinary remo
     expect(nativeRegisters()).toBe(registeredCount);
     singleton.sendRequest.mockResolvedValueOnce({ result: durableOwner });
     expect((await resume(18)).result).toEqual({ registrationId: 9 });
-    // The owner's Try again reaches the drain with the queue's state.
     singleton.sendRequest.mockResolvedValueOnce({
       result: {
         ...durableOwner,
@@ -709,7 +707,6 @@ it("uses an existing client for bounded owner adoption and refuses ordinary remo
       params: { registrationId: 9 },
     });
     const beforeFence = owner.finishHandoff.mock.calls.length;
-    // A fence refused for unpublished settlements changes nothing and keeps the registration.
     singleton.sendRequest.mockResolvedValueOnce({
       result: { status: "pending", reason: "publication-pending" },
     });

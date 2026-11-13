@@ -25,7 +25,6 @@ const message: AutomationChatMessage = {
   body: "Plan the trip",
 };
 
-// Codex's thread for this automation.
 const codexThread = automationAgentWakeThreadId("collection:Tasks#ask", "codex");
 
 function dependencies(overrides: Partial<AgentWakeDependencies> = {}) {
@@ -93,7 +92,6 @@ describe("waking a person's agent", () => {
         channelId,
       );
       expect(conversation).not.toBe(codexThread);
-      // A person's next message still joins the conversation.
       expect((await store.startChannelThread({ ...person, body: "Again" })).thread.id).toBe(
         conversation,
       );

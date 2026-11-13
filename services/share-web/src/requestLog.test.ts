@@ -37,7 +37,6 @@ afterEach(async () => {
   assets = undefined;
 });
 
-// The share-web application behind the same node server main.ts runs.
 async function listen(): Promise<string> {
   assets = await mkdtemp(join(tmpdir(), "share-web-request-log-"));
   await writeFile(join(assets, "index.html"), "<!doctype html>");
@@ -85,7 +84,6 @@ it("logs a share-link page as its route, never what follows /s/", async () => {
   const base = await listen();
   // A share link puts its secret after #, which a browser never sends.
   expect((await read(fetch(`${base}/s/`))).status).toBe(200);
-  // A link pasted with its # dropped puts the secret in the path.
   expect((await read(fetch(`${base}/s/${SECRET}`))).status).toBe(200);
   const agent = await read(fetch(`${base}/mcp/s/${SECRET}`, { method: "POST" }));
   expect(lines).toEqual([
@@ -144,7 +142,6 @@ it("logs a published app's request as app, even on a path the viewer also serves
     const request = new Request(`https://${host}${path}`, { method: "POST", headers: { host } });
     const response = await application.handle(request);
     statuses.push(response.status);
-    // What the node server writes once the application answers.
     SHARE_WEB_REQUEST_LOG.write(request, "POST", response.status, Date.now());
   }
   expect(lines).toEqual([

@@ -2189,7 +2189,6 @@ describe("request progress", () => {
       await nextImmediate();
       expect(transport.reportsProgress()).toBe(row.clientAsks && row.engineAgrees);
       const [wire] = requests;
-      // Absent, not false: a request that does not ask is unchanged on the wire.
       expect("progress" in wire!).toBe(row.flagged);
       if (row.flagged) expect(wire!.progress).toBe(true);
       peer.send({ type: "response", id: wire!.id, result: null });

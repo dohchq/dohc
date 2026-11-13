@@ -89,7 +89,6 @@ describe("where a sent notice opens", () => {
       path: "Tasks/automations.yaml",
       mount: null,
     });
-    // A view that ended, or one without Edit, switches nothing.
     const ended = workspace("edit-view", {
       shareView: { shareId: "share-1", granterEmail: null, access: "edit", ended: true },
     });

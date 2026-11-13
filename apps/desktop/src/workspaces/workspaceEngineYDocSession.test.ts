@@ -396,7 +396,6 @@ const recordAutomation = {
   run: { claimId: "finish-run", automationName: "Finish" },
 } as const;
 
-// Main's record edit context for the person main read when the write was requested.
 function recordContext(personId = "person") {
   return desktopRecordEditContext({
     capture,
@@ -676,12 +675,10 @@ it("settles an open record before a person's delete and credits the person in Hi
   // The system trash takes it from its own place, so its Restore returns it there.
   expect(trashed.map((entry) => entry.target)).toEqual([join(root, PATH)]);
   const methods = requests.map((request) => request.method);
-  // Settled and closed, then trashed, then recorded as deleted.
   expect(methods.lastIndexOf(YDOC_METHOD.close)).toBeLessThan(trashed[0]!.requestsBefore);
   expect(methods.indexOf(VERSIONED_METHOD.textDelete)).toBeGreaterThanOrEqual(
     trashed[0]!.requestsBefore,
   );
-  // The trash holds the settled document, not the artifact from before the typing.
   expect(trashedText).toContain("Typed before the delete.");
   const deleted = (await capture.listMoments()).moments.filter(
     (row) => row.operation === "delete" && row.path === PATH,
@@ -1010,9 +1007,6 @@ it("keeps a synced document's edit made while its close checks the deleted file"
   editor.destroy();
 });
 
-// The narrowness guard for the downgrade above. Any other refusal means the
-// user's edits did not reach the engine, which is what the thrown settle
-// failure and the retryable `error` state exist to say.
 it("still throws when an ordinary settle failure fails the close", async () => {
   const states: string[] = [];
   const session = await capture.openYDocSession({
@@ -1058,7 +1052,6 @@ it("reports file-locked, not error, for a lock refusal", async () => {
 
   expect(states).toContain("file-locked");
   expect(states).not.toContain("error");
-  // Still loud in the log: the retry does not replace the report.
   expect(captureErrors).toContain(`ydoc settle of ${PATH}`);
   settleRefusal = null;
   await session.close({ settle: false });
@@ -1104,17 +1097,11 @@ it("stays on settling for a busy engine store, because the retry is coming", asy
   expect(states.at(-1)).toBe("settling");
   expect(states).not.toContain("error");
   expect(states).not.toContain("file-locked");
-  // Still loud in the log: staying quiet on the chip is not going quiet.
   expect(captureErrors).toContain(`ydoc settle of ${PATH}`);
   settleRefusal = null;
   await session.close({ settle: false });
 });
 
-// `changed-on-disk` promises the file is not this document's. The refusal does
-// not prove that: the engine raises ConflictStaleTarget for any divergence of
-// the head — a path rebound to another object, or a settle whose
-// materialization was blocked or superseded — and in those the durable head
-// moved while the disk still holds our own settled bytes.
 it("keeps the close loud when the file still holds this document's bytes", async () => {
   const states: string[] = [];
   const session = await capture.openYDocSession({
@@ -1128,7 +1115,6 @@ it("keeps the close loud when the file still holds this document's bytes", async
   states.length = 0;
   captureErrors = [];
 
-  // No outside writer: the file is left exactly as the settle wrote it.
   settleRefusal = wireRefusal("conflict-stale-target");
   await expect(session.settleNow()).rejects.toThrow("conflict-stale-target");
   states.length = 0;
@@ -1198,8 +1184,6 @@ it("never reports a save seq the settled file does not back", async () => {
   await session.close();
   expect(vouched.length).toBeGreaterThan(1);
 
-  // THE INVARIANT: whatever seq a save vouched for, the file it left behind
-  // holds every edit up to that seq.
   for (const claim of vouched) {
     for (let at = 1; at <= claim.seq; at += 1) {
       expect(
@@ -1208,20 +1192,10 @@ it("never reports a save seq the settled file does not back", async () => {
       ).toContain(`EDIT-${at}.`);
     }
   }
-  // And the last one covers the whole document — the indicator does reach
-  // "Saved" rather than staying honest by never clearing.
   expect(vouched.at(-1)?.seq).toBe(EDITS);
   expect(await readFile(join(root, PATH), "utf8")).toContain(`EDIT-${EDITS}.`);
   await honest.stop().catch(() => undefined);
 });
-// The absent-head contract stated on WorkspaceEngineCapture.openYDocSession.
-//
-// The daemon does not refuse an open for a path the entered version has no
-// snapshot for: it derives an object id and binds an empty doc, which is the
-// only reason a just-created file is editable before capture ingests it. Both
-// halves of the contract are pinned here, because the guard is only correct if
-// it separates them: refusing everything would break creation, and refusing
-// nothing is the phantom file.
 it("refuses a live session for a path the entered version does not have", async () => {
   // The interleaving, at the point it actually decides: the user clicked
   // draftOnly.md while switchVersion("main") was on the capture chain, so the
@@ -1243,12 +1217,10 @@ it("refuses a live session for a path the entered version does not have", async 
   expect(refusal).toBeInstanceOf(YDocPathNotInVersionError);
   expect(isYDocPathNotInVersionError(refusal)).toBe(true);
   expect((refusal as YDocPathNotInVersionError).code).toBe("path-not-in-version");
-  // The refusal names the file and the version it is not in.
   expect((refusal as Error).message).toContain(DRAFT_ONLY);
   // The daemon session the probe opened is released, not leaked: a retained
   // lease would refuse every later open of the same object as already-live.
   expect(methodCount("ydoc.close")).toBe(methodCount("ydoc.open"));
-  // The whole point: nothing materialized. No phantom file in this version.
   await expect(readFile(join(root, DRAFT_ONLY), "utf8")).rejects.toMatchObject({
     code: "ENOENT",
   });
@@ -1337,9 +1309,7 @@ it("refuses an uncaptured artifact that has content, without calling it missing"
     );
 
   expect(refusal).toBeInstanceOf(YDocUncapturedArtifactError);
-  // The claim the user would see must not be made for a file that is right there.
   expect(isYDocPathNotInVersionError(refusal)).toBe(false);
-  // The file the empty bind would have erased is untouched.
   expect(await readFile(join(root, UNCAPTURED), "utf8")).toBe("# Real content");
   expect(methodCount("ydoc.close")).toBe(methodCount("ydoc.open"));
 });
@@ -1449,7 +1419,6 @@ describe("a crash-kept draft of a file capture never recorded", () => {
       contentKind: "richdoc",
       head: "absent",
     });
-    // New File leaves an empty file behind.
     await writeFile(join(root, DRAFT), "");
     await retainLineage("Typed into the new file.", { path: DRAFT });
   });
@@ -1567,8 +1536,6 @@ it("merges an agent's edit with typing the editor had not sent yet, through a re
   const run = paragraph.get(0) as Y.XmlText;
   run.insert(run.length, " PERSON");
 
-  // The agent edits that paragraph and adds a section, computed against the
-  // provider's state, which does not have the typing yet.
   const origin = {
     actorOriginId: "claude-code",
     attribution: {
@@ -1593,7 +1560,6 @@ it("merges an agent's edit with typing the editor had not sent yet, through a re
     }),
   ).resolves.toEqual({ path: PATH, changed: true, warning: DOCUMENT_EDIT_SHARED_WARNING });
 
-  // Now the editor sends its typing and takes the agent's edit.
   expect(
     ipc.applyUpdate(sender, {
       sessionId: "editor",
@@ -1619,7 +1585,6 @@ it("merges an agent's edit with typing the editor had not sent yet, through a re
     .toBe(expected);
   await ipc.close(sender, { sessionId: "editor" });
   expect(await readFile(join(root, PATH), "utf8")).toContain("Start over here. PERSON");
-  // The engine journaled the agent's update under the agent's name and run.
   expect(
     requests.some((request) => {
       const params = request.params as {
@@ -1683,7 +1648,6 @@ it("refuses a reused idempotency key with other content, and none of that conten
   expect(notices).not.toHaveBeenCalled();
   expect(replacements).not.toHaveBeenCalled();
 
-  // The session still takes ordinary writes, and they land beside the first.
   session.applyLocalUpdate(
     (() => {
       const scratch = new Y.Doc();
@@ -1711,7 +1675,6 @@ it("retries a lost keyed acknowledgement with the original record and no second 
   loseNextResync = true;
   await keyedWrite(session, "Recorded once.");
 
-  // The replacement asks the durable ledger about the original record.
   expect(methodCount(YDOC_METHOD.open)).toBe(opensBefore + 1);
   const keyed = requests.filter(
     (request) =>
@@ -1920,9 +1883,6 @@ it("quit waits for typing still unacknowledged when close starts before eviction
   }
 });
 
-// A restore gave the open document another history while edits were on their
-// way. Each refused write reaches the renderer as that history, never as a
-// generic reconnect, and the renderer sets the refused typing aside first.
 it.each([false, true])(
   "hands refused renderer typing to the renderer as the replaced history (lost resync answer: %s)",
   async (lostResync) => {
@@ -2014,7 +1974,6 @@ it.each([false, true])(
     // finds the new claim. The second carries the replacement and its recovered
     // paths.
     if (lostResync) lostResyncs = new Set([2]);
-    // Typing continues while the first refused edit is on its way.
     const entered = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
     beforeRecordUpdate = async () => {
@@ -2026,7 +1985,6 @@ it.each([false, true])(
     typeIntoBody(losingDoc, "Typed during the refusal.");
     await binding.flushPendingLocalUpdates();
     release.resolve();
-    // A lost answer leaves the replacement to the next settle's resync.
     if (lostResync) await provider.settleNow().catch(() => undefined);
     const winner = await installed.promise;
 
@@ -2045,7 +2003,6 @@ it.each([false, true])(
     expect(setAside).toHaveLength(1);
     expect(setAside[0]).toContain("Typed against the old history.");
     expect(setAside[0]).toContain("Typed during the refusal.");
-    // Neither a reconnect nor a refused-edit notice: the replacement is the answer.
     expect(
       captureErrors.filter(
         (context) => context.startsWith("Y.Doc local update") || context.startsWith("Y.Doc rebind"),

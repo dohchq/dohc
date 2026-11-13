@@ -731,7 +731,6 @@ async function fixture(
       connect: (token: string) => connect(token, cookie, headers, "", session),
     };
   }
-  /** Later requests present `headers` instead of the link holder's, or the holder's again without them. */
   const useCredentials = (headers = holderHeaders) => {
     linkHeaders = headers;
   };
@@ -1342,9 +1341,6 @@ it("refuses a native capture for a different owner document", async () => {
   expect(f.native.client.openLiveAppliedSync).not.toHaveBeenCalled();
 });
 
-// A share narrowed from a folder to the file still covers it, but changes what
-// the recipient is shown. The open connection closes. Reopening, with a new
-// provider, shows the share as it is now.
 it.each([
   ["named", false, "docs/a.md", ["docs/a.md"]],
   ["link", true, "a.md", ["a.md"]],
@@ -1796,7 +1792,6 @@ it("returns only the named grant binding in live frames", async () => {
   expect(await socket.status).toBe(101);
   const { provider, until } = await startProvider(socket);
   await until(() => provider.state().status === "live");
-  // A named recipient sees its own share's selector, not the lineage's recorded binding.
   expect(provider.state().binding).toMatchObject({
     ...binding,
     workspaceId: `named:${scope.grantId}`,

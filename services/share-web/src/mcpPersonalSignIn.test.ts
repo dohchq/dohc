@@ -111,7 +111,6 @@ afterEach(async () => {
   await closeTestStorages();
 });
 
-/** Each workspace's choice as the page draws it, by workspace: its radios, and the one checked. */
 function reachOf(html: string): Record<string, { offered: string[]; selected: string | null }> {
   const reach: Record<string, { offered: string[]; selected: string | null }> = {};
   for (const [, workspaceId, value, checked] of html.matchAll(
@@ -145,7 +144,6 @@ async function stack(options: { account?: boolean; live?: boolean } = {}) {
   await claimWorkspace(relay, ADA.userId, FUNDRAISER);
   await claimWorkspace(relay, BEN.userId, GARDEN);
   const relayCalls: string[] = [];
-  // The credential each live request sent the relay, by path.
   const liveCalls: Array<{ path: string; authorization: string | null }> = [];
   let noWorkspaces = false;
   // The next origin sequence of the owner's computer in each workspace.
@@ -167,7 +165,6 @@ async function stack(options: { account?: boolean; live?: boolean } = {}) {
       answer.status !== 200
     )
       return answer;
-    // The page's empty state: the relay's answer names no workspace.
     return Response.json({ ...(await json(answer)), workspaces: [] });
   };
   const application = () =>
@@ -189,7 +186,6 @@ async function stack(options: { account?: boolean; live?: boolean } = {}) {
   let app = application();
   const send: ShareWebSend = (path, init = {}) =>
     app.handle(new Request(ORIGIN + path, { ...init, headers: { host: HOST, ...init.headers } }));
-  /** An MCP client signed in with `accessToken` at the address `resource` names. */
   async function connect(accessToken: string, resource: string) {
     const client = new Client({ name: "personal-agent", version: "1" });
     await client.connect(
@@ -216,7 +212,6 @@ async function stack(options: { account?: boolean; live?: boolean } = {}) {
       },
     });
 
-  /** Opens the consent page for a new client at `workspaceId`'s address, signing the browser in first when it is signed out. */
   async function open(
     jar: CookieJar,
     workspaceId: string,
@@ -244,7 +239,6 @@ async function stack(options: { account?: boolean; live?: boolean } = {}) {
     return { as, page, html, clientId, verifier };
   }
 
-  /** Posts the consent form the page drew, with `fields` as the person filled it in. */
   function choose(as: ShareWebSend, html: string, fields: Record<string, string>) {
     return as(
       "/oauth/authorize/agent",
@@ -272,10 +266,8 @@ async function stack(options: { account?: boolean; live?: boolean } = {}) {
     restart() {
       app = application();
     },
-    /** The owner's own posts, as their computer pushes them to `workspaceId`'s log. */
     ownerSays: (workspaceId: string, ops: ChatOp[]) =>
       appendLog(relay, ADA.userId, workspaceId, sequenced(ops, ownerSeq(workspaceId, ops.length))),
-    /** The relay's view of a personal agent's token at its address. */
     authority: (agent: { accessToken: string; resource: string }) =>
       relay.linkAuthority.personal(
         new Request("https://relay.example.test/sync/link/personal-agent/workspaces", {
@@ -304,7 +296,6 @@ it("starts the address's workspace at Edit and every other at None, and offers N
   const s = await stack();
   const { page, html } = await s.open(new CookieJar(), FUNDRAISER);
   expect(page.status).toBe(200);
-  // Only the account's own workspaces, never another account's.
   expect(reachOf(html)).toEqual({
     [TRIP]: { offered: ["none", "view", "comment", "edit"], selected: "none" },
     [FUNDRAISER]: { offered: ["none", "view", "comment", "edit"], selected: "edit" },
@@ -354,12 +345,10 @@ it("signs an agent in again from its current reach", async () => {
     'name="as" value="new" class="opt" aria-pressed="true"><span class="tick" aria-hidden="true"></span>' +
       '<span class="k">New agent</span></button>',
   );
-  // The first agent takes the first hue, olive.
   expect(opened.html).toContain(
     `name="as" value="${agentId}" class="opt" aria-pressed="false"><span class="tick" aria-hidden="true"></span>` +
       `<span class="av agent hue-olive" aria-hidden="true">H</span><span class="k"><bdi>Helper</bdi> <span class="sub">@${handleForName("Helper")}`,
   );
-  // A new agent starts from the address.
   expect(selected(opened.html)).toEqual({ [TRIP]: "none", [FUNDRAISER]: "edit" });
 
   const chosen = await s.choose(opened.as, opened.html, { as: agentId, decision: "choose" });
@@ -368,7 +357,6 @@ it("signs an agent in again from its current reach", async () => {
   expect(page).toContain(`name="as" value="${agentId}" class="opt" aria-pressed="true">`);
   expect(formField(page, "as")).toBe(agentId);
   expect(page).not.toContain('id="name"');
-  // An agent signing in again has a solid tile in its own color.
   expect(page).toContain('<span class="tile agent known hue-olive">H</span>');
   expect(selected(page)).toEqual({ [TRIP]: "comment", [FUNDRAISER]: "view" });
   expect(page).toContain("<bdi>Helper</bdi> runs outside dohc.");
@@ -418,7 +406,6 @@ it("never accepts one family's token at the other's address, nor a personal toke
     const answer = await s.mcp(path, token);
     expect([answer.status, answer.headers.get("www-authenticate")], path).toEqual(refused(path));
   }
-  // Neither refreshes at the other's address.
   for (const [agent, resource] of [
     [personal, link.resource],
     [link, personal.resource],
@@ -431,7 +418,6 @@ it("never accepts one family's token at the other's address, nor a personal toke
     });
     expect([refreshed.status, await refreshed.json()]).toEqual([400, { error: "invalid_grant" }]);
   }
-  // Each still works at its own.
   expect((await s.mcp(linkPath, link.accessToken)).status).toBe(200);
   expect((await s.mcp(personalPath, personal.accessToken)).status).toBe(200);
 });
@@ -511,7 +497,6 @@ it("keeps a personal agent working after share-web restarts: it waits, replies, 
     "Museums in the morning.",
     "Plan the first day?",
   ]);
-  // Its own reply doesn't come back to it.
   expect(
     (
       await client.callTool({

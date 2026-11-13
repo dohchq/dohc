@@ -112,7 +112,6 @@ describe("LazyDesktopSettings", () => {
     expect(onClose).toHaveBeenCalledTimes(2);
   });
 
-  // The boundary's own button says Try again, so its words don't say it too.
   it("says Try again only on its button after a failed load", async () => {
     render(
       <LazyDesktopSettings

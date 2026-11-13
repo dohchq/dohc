@@ -106,7 +106,6 @@ async function relay() {
         ...(input.signal ? { signal: input.signal } : {}),
       }),
     );
-  // A published phone message's wakes, as its verdict records them.
   const publish = (operationId: string, messageId: string, targets: ChatWakeTarget[]) => {
     storage.recordAccountOperation({
       accountId: "ana",
@@ -301,7 +300,6 @@ it("holds a read without polling until a wake commits, within its bounds, and ch
     wakes: [{ wakeId: wakeOf("message-1") }],
   });
 
-  // A read past its computer's waits answers busy at once; another computer's still waits. Each ends at its time.
   parked = parks(CHAT_WAKE_WAITS_PER_INSTALL);
   const waiting = Array.from({ length: CHAT_WAKE_WAITS_PER_INSTALL }, () => read("mac", 1));
   await parked;
@@ -314,7 +312,6 @@ it("holds a read without polling until a wake commits, within its bounds, and ch
   for (const response of await Promise.all([...waiting, other]))
     expect(await json(response)).toEqual({ ok: true, cursor: "1", wakes: [] });
 
-  // A sign-in that changed while the read waited gets no answer.
   parked = parks(1);
   const gone = read("mac", 1);
   await parked;
@@ -338,7 +335,6 @@ it("holds no more than 16 reads for one account across its computers", async () 
   });
   const read = (installId: string) =>
     call("GET", `/sync/wakes?installId=${installId}&wait=${CHAT_WAKE_WAIT_MAX_MS}`);
-  // Two reads on each of eight computers fill the account.
   const waiting = Array.from({ length: 16 }, (_, index) => read(`computer-${index % 8}`));
   await filled;
   const busy = await read("computer-8");

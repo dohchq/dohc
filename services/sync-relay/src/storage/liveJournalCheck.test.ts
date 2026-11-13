@@ -85,7 +85,6 @@ it("reports clean journals silently, yields between bounded pages and documents,
   expect(Math.max(...counts)).toBe(128);
   expect(report).not.toHaveBeenCalled();
   expect(prepare.mock.calls.some(([sql]) => sql.includes("LIMIT 1"))).toBe(true);
-  // Next day's pass starts, then close interrupts it between pages.
   await vi.advanceTimersToNextTimerAsync();
   expect(counts.reduce((sum, count) => sum + count, 0)).toBe(1024 + 128);
   check.close();

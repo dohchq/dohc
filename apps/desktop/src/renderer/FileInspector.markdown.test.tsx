@@ -186,7 +186,6 @@ describe("FileInspector renders markdown through the shared component map", () =
       "entry",
       "1024",
     ]);
-    // The reader sees a document, never its source.
     expect(view.container.querySelector(".dohc-readable-text")?.textContent).not.toContain("|");
     // The shared map's own table wrapper, the editor's: a wide table scrolls
     // inside itself so the page never scrolls sideways. react-markdown's bare
@@ -206,7 +205,6 @@ describe("FileInspector renders markdown through the shared component map", () =
 
     await screen.findByTestId("markdown-source-view");
     expect(screen.getByTestId("truncated-notice")).toBeTruthy();
-    // The bounded viewer has no read-only strip, and the chip doesn't repeat the notice.
     expect(screen.queryByTestId("view-markdown-source")).toBeNull();
     const chip = await screen.findByTestId("markdown-save-state");
     expect(chip.dataset.state).toBe("recovery");
@@ -270,7 +268,6 @@ describe("FileInspector renders markdown through the shared component map", () =
         );
         expect(screen.queryByTestId("page-identity")).toBeNull();
         expect(screen.queryByTestId("properties-panel")).toBeNull();
-        // The document keeps its own controls.
         expect(screen.getByTestId("markdown-edit-toggle")).toBeTruthy();
 
         view.rerender(<FileInspector workspaceId="ws-1" path="a.md" />);

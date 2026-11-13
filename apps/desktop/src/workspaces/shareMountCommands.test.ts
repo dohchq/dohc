@@ -1265,8 +1265,6 @@ async function mountOnDisk(
   return { record };
 }
 
-// The renderer words the refusal from its kind, so the kind has to survive
-// the refresh loop. Before, the row said "unchanged".
 it("reports a mount refresh that can't read its collision record as that refusal", async () => {
   const h = harness();
   const { record } = await mountOnDisk(h, (recordPath, mountRoot) => ({

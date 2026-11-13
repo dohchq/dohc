@@ -89,7 +89,6 @@ const HELD = {
   fileUnread: false,
 };
 
-// What the laptop and the server each carry in a release.
 const groups = (floorMs: number, messageId: string): AutomationGroupHandover => ({
   floorMs,
   automations: [
@@ -136,7 +135,6 @@ function fakeExecutor(
   const claims: Array<{ run: number[]; throughMs: number }> = [];
   const pressed: Array<{ pressId: string; pressedBy: string }> = [];
   const holds: CollectionAutomationHold[] = [];
-  // What the owner's routes asked of this executor, in order.
   const asked: unknown[] = [];
   const executor: ServerExecutor = {
     holds: () => [...holds],
@@ -341,7 +339,6 @@ async function server(
     noticeLimiter: new TokenBucketLimiter(10, 1, 100),
     onError: (context, error) => errors.push([context, error]),
     nowMs: () => clock,
-    // The scheduler wakes when the host changes or a test steps it.
     clock: {
       now: () => clock,
       monotonic: () => clock,
@@ -374,9 +371,7 @@ async function server(
     run,
     errors,
     sync,
-    /** The workspaces the replicas module is asked to keep. */
     wanted: () => [...hooks!.wanted().keys()],
-    /** The replicas module opened this server's copy of the workspace. */
     async openReplica(): Promise<Fake> {
       open.set(WORKSPACE, replicaOf());
       hooks!.onChanged?.(WORKSPACE);
@@ -430,7 +425,6 @@ const setStatus = (n: number): StoredStep["effects"][number] => ({
   target: { recordId: `record-${n}`, collectionPath: "Tasks", path: `Tasks/${n}.md` },
   fields: [{ field: "Status", before: "Open", after: "Paid" }],
 });
-/** A run of Pay, as the server's executor starts one in its copy. */
 const payRunRecord = (claimId: string): StoredRun => ({
   ...newRun({ automationId: PRESSED, claimId }, payAutomation(), `seed-${claimId}`, clock),
   collections: [{ collectionId: "Tasks", path: "Tasks" }],
@@ -700,7 +694,6 @@ describe("a server that runs a workspace's automations", () => {
   it("takes the schedules, Group coverage, and reach verdicts from a computer, and hands them back", async () => {
     clock = at(8);
     const { storage, h, host } = await relay();
-    // The owner chose the laptop, then this server.
     await host("/check-in", { installId: "laptop", label: "Laptop", claim: false });
     expect((await host("/choose", { installId: "laptop", generation: 0 })).status).toBe(200);
     expect((await host("/choose", { installId: "server", generation: 1 })).body.host).toMatchObject(
@@ -713,7 +706,6 @@ describe("a server that runs a workspace's automations", () => {
       "the server runs nothing until the laptop releases",
     ).toBeNull();
 
-    // The laptop ran its schedules through 8:00 and releases what it decided.
     clock = at(9, 1);
     expect(
       (
@@ -728,7 +720,6 @@ describe("a server that runs a workspace's automations", () => {
       ).status,
     ).toBe(200);
 
-    // The server starts after the laptop: 9:00 runs here, and nothing before it.
     await vi.waitFor(() =>
       expect(fake.claims).toEqual([
         { run: [], throughMs: at(8) },
@@ -753,7 +744,6 @@ describe("a server that runs a workspace's automations", () => {
       fenceGeneration: null,
     });
 
-    // The owner chooses the laptop again: the server steps once more and releases.
     clock = at(10, 30);
     expect((await host("/choose", { installId: "laptop", generation: 3 })).status).toBe(200);
     await vi.waitFor(async () =>
@@ -792,7 +782,6 @@ describe("a server that runs a workspace's automations", () => {
       groupsWatched: 1,
       reach: reach("stopped", 4),
     });
-    // The first copy, which ran no schedules, was given the laptop's release.
     const first = await server(storage, h, { incarnation: 1, schedules: [] });
     const taking = await first.openReplica();
     expect(await taking.options.groupRelayRecord(3, new AbortController().signal)).toEqual({
@@ -811,7 +800,6 @@ describe("a server that runs a workspace's automations", () => {
       "what it cannot prove, it holds",
     ).toEqual({ generation: 3, reach: null, everShared: false });
 
-    // The owner moves the automations to the laptop and back: that release is new to this copy.
     clock = at(9);
     await host("/choose", { installId: "laptop", generation: 3 });
     await vi.waitFor(async () =>
@@ -850,7 +838,6 @@ describe("a server that runs a workspace's automations", () => {
     });
     storage.recordAutomationServerProgress({ workspaceId: WORKSPACE, throughMs: at(10) });
     clock = at(9, 30);
-    // The engine of the new copy stops answering before the scheduler reads its marks.
     const first = await server(storage, h, { incarnation: 2, engine: { answers: false } });
     const stalled = await first.openReplica();
     await vi.waitFor(() => expect(stalled.marksAsked()).toBeGreaterThan(0));
@@ -1060,7 +1047,6 @@ describe("a server that runs a workspace's automations", () => {
 
   it("reads the owner's shares without claiming an invite the owner has not opened", async () => {
     const storage = await testStorage();
-    // Ana invites the owner by email before the relay knows that address.
     const h = testHandler(storage, { nowMs: () => clock, resolveUserIdByEmail: () => null });
     await claimWorkspace(h, "ana", "workspace-ana");
     const shareId = await createShare(h, "ana", "workspace-ana", {
@@ -1072,7 +1058,6 @@ describe("a server that runs a workspace's automations", () => {
       storage.listActiveShareGrantsForRecipient(shareId, OWNER),
       "the server claimed nothing",
     ).toEqual([]);
-    // The owner's own listing claims it, as before.
     expect((await h(request(OWNER, "/sync/shares"))).status).toBe(200);
     expect(storage.listActiveShareGrantsForRecipient(shareId, OWNER)).toHaveLength(1);
   });
@@ -1219,7 +1204,6 @@ describe("a server that pushes its copy of a workspace", () => {
       expect(reported()).toBeGreaterThan(reports);
     });
     expect(ended()).toEqual([expect.objectContaining({ claimId: "claim-held" })]);
-    // Recovery leaves the queue active with nothing pending. The next sync confirms both runs.
     draft = { ...draft, pendingBytes: 0, state: "active" };
     const after = payRunRecord("claim-after");
     options.beforeEffect!(after, setStatus(1));
@@ -1255,7 +1239,6 @@ describe("the server's run gate", () => {
       expect(waiting).toEqual(["a"]);
       await vi.advanceTimersByTimeAsync(1);
       (await next)!.release(true);
-      // Another workspace has its own bucket.
       (await gate.admit("b", signal))!.release(true);
     } finally {
       vi.useRealTimers();
@@ -1296,7 +1279,6 @@ describe("the owner's routes to the server's runs", () => {
       automationHostRateLimiter: new TokenBucketLimiter(changesPerOwner, 1, 10),
     });
     await claimWorkspace(h, OWNER, WORKSPACE);
-    // The server keeps a copy of the workspace.
     storage.claimWorkspaceIdentity({
       workspaceId: WORKSPACE,
       replicationEpoch: "epoch-1",
@@ -1390,13 +1372,11 @@ describe("the owner's routes to the server's runs", () => {
 
   it("answers anyone else, a browser cookie, or a workspace with no copy here as if nothing were there", async () => {
     const { storage, h, s, call } = await owned();
-    // Ana can edit Tasks, which makes her no owner.
     await createShare(h, OWNER, WORKSPACE, {
       recipientUserId: "ana",
       paths: ["Tasks"],
       access: "edit",
     });
-    // No copy yet: the owner hears what a stranger hears.
     const none = await call(OWNER, "holds");
     expect(none.status).toBe(404);
     const fake = await s.openReplica();
@@ -1407,7 +1387,6 @@ describe("the owner's routes to the server's runs", () => {
     ])
       expect(attempt).toEqual(none);
     expect(fake.asked).toEqual([]);
-    // A workspace the relay no longer lists under the owner is not theirs to change.
     inspectDatabase(storagePath(storage))
       .prepare(
         "UPDATE sync_relay_workspaces SET owner_user_id = 'someone-else' WHERE workspace_id = ?",
@@ -1476,8 +1455,6 @@ describe("the owner's routes to the server's runs", () => {
       const { storage, call, start } = await copies();
       const first = await start(1);
       const { beforeEffect, onRunEnded } = first.fake.options;
-      // One run ends and a sync sends its changes. One sends only a notice,
-      // which the relay holds itself. One is still changing the copy.
       const sent = payRunRecord("claim-sent"),
         notified = payRunRecord("claim-notified"),
         unsent = payRunRecord("claim-unsent");
@@ -1527,7 +1504,6 @@ describe("the owner's routes to the server's runs", () => {
           }),
         ]),
       );
-      // Run history, as the owner's computers and agents read it, lists the lost run after this copy's own.
       const listed = await call(runsOf());
       expect(listed).toMatchObject({
         status: 200,
@@ -1549,7 +1525,6 @@ describe("the owner's routes to the server's runs", () => {
         },
       });
 
-      // Opening the copy again tells the owner nothing new.
       await second.run.close();
       await start(2);
       expect(await call(runsOf("&claimId=claim-unsent"))).toMatchObject({ body: { run: lostRun } });
@@ -1571,7 +1546,6 @@ describe("the owner's routes to the server's runs", () => {
       const running = pay.execute(false);
       await applying.promise;
 
-      // The server loses its host data while the run changes its copy.
       await first.run.close();
       clock = at(9);
       await start(2);
@@ -1634,7 +1608,6 @@ describe("the owner's routes to the server's runs", () => {
       expect(listed).toEqual(["claim-1", ...[...lost].reverse(), "claim-waited"]);
     });
 
-    // A failed dataset claim the relay keeps, as the copy's executor lists it.
     const failedClaim = (claimId: string, updatedAtMs: number): CollectionAutomationRun => ({
       claimId,
       state: "failed",
@@ -1649,7 +1622,6 @@ describe("the owner's routes to the server's runs", () => {
       undoUnfinished: false,
       undone: false,
     });
-    // The copy's executor lists these claims, and saved a run of those in `ran`.
     function keeps(fake: Fake, kept: CollectionAutomationRun[], ran: readonly string[] = []) {
       fake.executor.runs = async () => ({ runs: kept, next: null });
       fake.executor.listedRun = async (_automationId, claimId) =>
@@ -1759,7 +1731,6 @@ describe("the owner's routes to the server's runs", () => {
 
   it("opens no kept copy for anyone but its owner, or for a workspace it never kept", async () => {
     const { storage, s, call } = await owned();
-    // The copy was made for another owner, as before the workspace changed hands.
     inspectDatabase(storagePath(storage))
       .prepare("UPDATE sync_relay_automation_workspaces SET owner_user_id = 'someone-else'")
       .run();

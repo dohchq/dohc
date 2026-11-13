@@ -183,7 +183,6 @@ it.each(["empty", "nonempty", "missing", "update"])(
   },
 );
 
-// A note whose engine connection refuses every edit as busy, with real checkpoint files.
 async function openBusyNote() {
   const rootPath = await createTestScratch("dohc-busy-typing-");
   const workspaceId = "busy-typing-test";
@@ -306,8 +305,6 @@ it("keeps typing a busy store refused in a typing checkpoint, retired once the e
   }
 });
 
-// Each snapshot copies the whole note on the main thread. After the first
-// refusal, typing reaches the checkpoint on its 100 ms timer.
 it("builds one checkpoint snapshot for a burst of edits a busy store refused", async () => {
   const { workspaceId, refused, type, saved, close } = await openBusyNote();
   const snapshots = vi.mocked(typingRecoveryStateVectorSha256);

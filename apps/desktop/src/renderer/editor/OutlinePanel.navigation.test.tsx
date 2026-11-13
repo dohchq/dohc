@@ -174,8 +174,6 @@ describe("MarkdownEditor heading navigation", () => {
   });
 });
 
-// The seam a search line jump lands on. FileInspector maps its pending
-// Markdown line to a top-level block index; this reveals that block.
 describe("MarkdownEditor block navigation", () => {
   const VALUE = "# Intro\n\nFirst para\n\nSecond para\n\nThird para";
 
@@ -252,21 +250,15 @@ describe("MarkdownEditor block navigation", () => {
     editor.commands.setTextSelection(2);
     const before = editor.state.selection.from;
 
-    // How the block seam calls it: no cursor argument.
     revealDocPosition(editor, 20, () => null);
     expect(editor.state.selection.from).toBe(before);
 
-    // And the heading seam, which does ask, still moves it.
     revealDocPosition(editor, 20, () => null, 20);
     expect(editor.state.selection.from).toBe(20);
     editor.destroy();
   });
 
-  // The block a search result lands on can be a hundred items long.
-  // The target carries the block's own source, and the reveal lands the line
-  // inside it — proven here through the DOM the reader would be looking at.
   describe("landing inside a long block", () => {
-    // Every element the reveal scrolled, and the flashed text it drew.
     function revealDom(view: { container: HTMLElement }) {
       const flashed = Array.from(
         view.container.querySelectorAll<HTMLElement>(".dohc-target-flash"),
@@ -318,7 +310,6 @@ describe("MarkdownEditor block navigation", () => {
       await screen.findByTestId("markdown-editor");
       await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
 
-      // Pin the formatting-aware renderer wiring in scrollToBlock.
       const { elements, text } = revealDom(view);
       expect(text).toBe("beta second");
       expect(scrollIntoView.mock.instances[0]).toBe(elements[0]);

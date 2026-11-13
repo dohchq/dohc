@@ -89,7 +89,6 @@ describe("live host cancellation lifetime", () => {
       const pass = () =>
         withDeadline(host.signal, 60_000, async (signal) => {
           signals.push(new WeakRef(signal));
-          // A completing pass first runs work that listens to its signal directly.
           if (shape === "completes")
             await withLiveHostSignal(signal, new AbortController().signal, async () => undefined);
           // Hosted replication derives its own signal from the pass's.

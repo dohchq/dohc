@@ -174,7 +174,6 @@ function fakeRelay() {
       };
       rows.set(view.wakeId, { view, candidates, winner: null });
     },
-    /** The next read answers this computer's waiting rows at that time, after `before`. */
     offer(cursor: number, before?: () => Promise<void>) {
       pages.push(async (installId) => {
         await before?.();
@@ -192,7 +191,6 @@ function fakeRelay() {
   };
 }
 
-/** One computer's workspace "ws", its settings, and its dispatch ledger keyed by workspace, message, and agent. */
 function fakeComputer() {
   const local = {
     registered: true,
@@ -381,7 +379,6 @@ describe("claiming a wake", () => {
     const { consumer } = await w.settled();
     expect(w.relay.calls.claims).toEqual([]);
     expect(w.mac.local.syncs).toBe(1);
-    // The cursor moved past the deferred row, and the read parked rather than asking again.
     expect(w.relay.calls.waits).toEqual([0, 7]);
     await consumer.resume();
     expect(w.relay.calls.claims).toEqual([]);
@@ -620,7 +617,6 @@ describe("claiming a wake", () => {
     const w = await setup();
     const pc = fakeComputer();
     w.relay.add({}, [candidate("mac"), candidate("pc", { label: "PC" })]);
-    // Both computers read the wake while it waits, then race to claim it.
     const bothRead = deferred();
     let reads = 0;
     const together = async () => {
@@ -924,7 +920,6 @@ describe("the credential lifetime", () => {
       expect(w.relay.calls.confirms).toEqual([]);
       expect(w.mac.local.released).toBe(w.mac.local.opened);
 
-      // The next account's lifetime leaves the saved work alone.
       const saved = await w.intents();
       w.setCurrent(true);
       const next = await w.settled({
@@ -937,7 +932,6 @@ describe("the credential lifetime", () => {
       await next.consumer.stop();
       expect(await w.intents()).toEqual(saved);
 
-      // The same account's next lifetime finishes it exactly once.
       w.mac.local.hooks = {};
       w.relay.hooks.claim = undefined;
       if (boundary === "the message read") w.relay.offer(1);
@@ -1296,7 +1290,6 @@ describe("fix round 1", () => {
       await parked;
       expect(w.relay.calls.claims).toEqual([]);
       expect(await w.intents()).toEqual(left);
-      // Retries while it is still retired: recovery won't claim a saved claim-pending intent from it.
       await consumer.resume();
       await consumer.resume();
       expect(w.relay.calls.claims).toEqual([]);
@@ -1366,7 +1359,6 @@ describe("fix round 1", () => {
       expect(sends()).toBe(1);
       expect(w.relay.state()).toBe(step === "claim" ? "waiting" : "claimed");
       expect(intents.rows).toEqual([intentOf(step === "claim" ? "claim-pending" : "recorded")]);
-      // No hot loop: nothing is sent again before the backoff ends.
       await vi.advanceTimersByTimeAsync(999);
       expect(sends()).toBe(1);
       await vi.advanceTimersByTimeAsync(1);
@@ -1421,12 +1413,10 @@ describe("fix round 1", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(w.relay.calls.confirms).toHaveLength(1);
     intents.failNextList = true;
-    // The first retry fails before it reaches the intent.
     await vi.advanceTimersByTimeAsync(1_000);
     expect(intents.failNextList).toBe(false);
     expect(w.relay.calls.confirms).toHaveLength(1);
     expect(intents.rows).toEqual([intentOf("recorded")]);
-    // The next waits a longer backoff, with nothing calling resume.
     await vi.advanceTimersByTimeAsync(1_999);
     expect(w.relay.calls.confirms).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(1);

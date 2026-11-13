@@ -265,7 +265,6 @@ describe("desktop CLI collection proxy", () => {
         ok: false,
         reason: expect.stringContaining("path rejected"),
       });
-      // Only the read reached the desktop.
       expect(request).toHaveBeenCalledOnce();
     });
   });
@@ -348,8 +347,6 @@ describe("desktop CLI collection proxy", () => {
       await expect(
         createRecord(ctx, { collectionPath: "tasks", name: "new-task" }),
       ).resolves.toEqual({ ok: false, reason: DOHC_TRANSPORT_UNAVAILABLE_REASON });
-      // The record folder holds exactly the file the test wrote: no fallback
-      // file write happened.
       await expect(readdir(join(base.root, "tasks"))).resolves.toEqual(["task.md"]);
     });
   });

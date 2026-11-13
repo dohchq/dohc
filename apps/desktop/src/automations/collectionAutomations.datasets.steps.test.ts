@@ -52,7 +52,6 @@ ${steps}`;
           Status: New
         operation: invoices.create
 `;
-  // A message in a Group, as the engine claims it when it stores the message.
   const messageClaim = (
     claimId: string,
     message: {
@@ -105,7 +104,6 @@ ${steps}`;
     await f.executor.idle();
     return f.engineClaims.find((candidate) => candidate.claimId === claim.claimId)!;
   };
-  // Bob is in Team and cannot edit Budget.
   const bob = {
     grantId: "g-bob",
     recipientUserId: "u-bob",
@@ -381,7 +379,6 @@ automations:
       expect(agentMessages.map((message) => message.automation.depth)).toEqual(
         claims.slice(0, -1).map((claim) => claim.depth + 1),
       );
-      // Every wake in the chain goes on in Nova's thread for this automation.
       expect(new Set(agentMessages.map((message) => message.threadId))).toEqual(
         new Set([automationAgentWakeThreadId(ASK, "default")]),
       );
@@ -429,7 +426,6 @@ automations:
 });
 
 describe("code steps on a dataset", () => {
-  // Code that runs when Paid changes, then the steps after it.
   const coded = (code: string, ...after: string[]) =>
     closePaid(
       ["      - run: |", ...code.split("\n").map((line) => `          ${line}`), ...after].join(
@@ -615,7 +611,6 @@ describe("code steps on a dataset", () => {
       },
     };
     const f = await world({ evaluator });
-    // `set` and a change by the trigger record's own id land as one edit.
     await f.writeAutomations(
       coded(
         "return { set: { Status: 'Closed' }, records: [{ action: 'change', collection: 'Budget', id: ctx.record.id, fields: { Notes: 'by code' } }] };",

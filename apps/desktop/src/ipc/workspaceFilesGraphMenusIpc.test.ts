@@ -1052,9 +1052,6 @@ describe("registered native menu handlers", () => {
     expect(await offersShare("notes.md", "file")).toBe(false);
   });
 
-  // main's own reading of the registry marker, through the entries it
-  // returns. The intact row proves the menu still offers writes when nothing
-  // is damaged.
   it.each([
     ["intact", {}, true],
     ["no share id", { shareId: undefined }, false],

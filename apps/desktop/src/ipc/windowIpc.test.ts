@@ -413,7 +413,6 @@ describe("registered window IPC", () => {
     ]) {
       await h.invoke(CHANNELS.exitRoundAnswer, payload);
     }
-    // A stale round, and a sender that is not in the round.
     await h.invoke(CHANNELS.exitRoundAnswer, { roundId: roundId + 7, decision: "clear" });
     await h.invoke(CHANNELS.exitRoundAnswer, { roundId, decision: "clear" }, sender(99));
     await h.invoke(CHANNELS.exitRoundAnswer, { roundId, decision: "clear" }, h.first);

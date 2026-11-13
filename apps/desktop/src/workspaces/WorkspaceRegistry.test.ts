@@ -51,8 +51,6 @@ beforeAll(async () => {
 });
 
 let next = 0;
-// A registered workspace whose folder record says it never synced, or whose
-// history cannot be written: `.dohc` is a file, or its marks' folder is.
 async function workspace(
   folder: "never-synced" | "unwritable-folder" | "unwritable-record",
   received: Pick<RegistryEntry, "shareMounts" | "sharedChannels"> = {},
@@ -203,7 +201,6 @@ describe("a folder reached through a link", () => {
       mode: "local-first",
     });
 
-    // A root that is not its own real path changed after its check: nothing is saved.
     expect(() => registerWorkspace(entry("w-linked", link))).toThrow(FOLDER_CHANGED);
     expect(findWorkspace("w-linked")).toBeNull();
 

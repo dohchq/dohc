@@ -113,7 +113,6 @@ it("bounds concurrent work, cancels active jobs, and closes without dangling req
   expect(ready).toBe(false);
   abort.abort(new Error("cancelled"));
   await rejected;
-  // The cancelled child holds its slot until it has exited.
   expect(validate.hasCapacity?.()).toBe(false);
   await available;
   expect(validate.hasCapacity?.()).toBe(true);
@@ -170,7 +169,6 @@ it("keeps a busy activation waiting through live edits until the auxiliary slot 
   });
 }, 60_000);
 
-/** A restore point at `checkpoint`, with no stored artifacts. */
 function restorePoint(input: ReturnType<typeof fixture>["input"], checkpoint: Uint8Array) {
   return {
     binding: { ...input.document, currentPath: input.currentPath },

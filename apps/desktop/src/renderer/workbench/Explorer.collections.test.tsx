@@ -276,7 +276,6 @@ describe("Explorer collection folders", () => {
         const show = screen.getByRole("menuitem", { name: "Show in Files" });
         expect(document.activeElement).toBe(show);
         expect(show.className.split(" ")).toContain("focus:bg-selected");
-        // The browser's own contextmenu event for the key opens no second menu.
         fireEvent.contextMenu(show);
         await act(async () => {});
         expect(screen.getAllByRole("menu")).toHaveLength(1);
@@ -380,9 +379,6 @@ describe("Explorer collection folders", () => {
   });
 });
 
-// The words a row's tooltip shows, opened from the keyboard and from the
-// pointer, and closed by Escape and by leaving. The words are their own tab
-// stop, apart from the row's buttons.
 function expectTooltip(trigger: HTMLElement, words: string) {
   expect(screen.queryByRole("tooltip")).toBeNull();
   expect(trigger.tabIndex).toBe(0);
@@ -438,7 +434,6 @@ describe("Collections this computer cannot use", () => {
       />,
     );
     expectTooltip(screen.getByText("On Laptop"), elsewhere);
-    // Main named no computer: the row says the whole sentence, and still offers both steps.
     rerender(
       <Explorer
         {...explorerProps({
@@ -455,7 +450,6 @@ describe("Collections this computer cannot use", () => {
     expect(screen.getByText(elsewhere).tabIndex).toBe(-1);
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(onRetryCollections).toHaveBeenCalledOnce();
-    // Behind main's question, which names the other computer.
     fireEvent.click(screen.getByRole("button", { name: "Use this computer" }));
     expect(onKeepCollections).toHaveBeenCalledTimes(2);
     rerender(
@@ -512,10 +506,8 @@ describe("Collections on this computer's server, where another computer keeps th
     expect(screen.getByRole("menuitemradio", { name: "Show archived Collections" })).toBeTruthy();
     expect(screen.queryByRole("menuitem", { name: "Restore from recovery file…" })).toBeNull();
     fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
-    // Behind main's question, which names the other computer.
     fireEvent.click(within(section).getByRole("button", { name: "Use this computer" }));
     expect(onKeepCollections).toHaveBeenCalledOnce();
-    // The server didn't answer: no rows, the line, and Keep.
     const offline =
       "These Collections are on Laptop. Open this workspace there to use them, or to move them to a server.";
     rerender(
@@ -533,7 +525,6 @@ describe("Collections on this computer's server, where another computer keeps th
     expect(screen.queryByRole("button", { name: "Registrations" })).toBeNull();
     expect(screen.getByRole("button", { name: "Use this computer" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Collections actions" })).toBeNull();
-    // Main named no computer: the row says the whole sentence, with the same step.
     rerender(
       <Explorer
         {...explorerProps({

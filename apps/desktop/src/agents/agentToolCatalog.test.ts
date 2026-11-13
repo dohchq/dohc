@@ -54,7 +54,6 @@ describe("agent launch profiles", () => {
       "--json",
       "-",
     ]);
-    // A reply-only run loads none of the person's saved command rules.
     expect(agentProfileArguments(profile, ["--config", "x=1"], true)).toEqual([
       "exec",
       "--config",
@@ -389,7 +388,6 @@ describe("a typed command", () => {
     ]) {
       expect(launchFromCommand(command, current)).toEqual({ command });
     }
-    // Without a tool to start from, even the tool's own program runs as typed.
     expect(launchFromCommand("C:\\Tools\\codex.exe exec --full-auto")).toEqual({
       command: "C:\\Tools\\codex.exe exec --full-auto",
     });

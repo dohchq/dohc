@@ -173,7 +173,6 @@ describe("useUpdateFailureNotices", () => {
       }),
     );
 
-    // The same failure in a new state object, and a check that runs again.
     rerender({ state: { ...failed } });
     rerender({ state: { ...idle, status: "checking", message: "Checking for updates…" } });
     expect(report).toHaveBeenCalledOnce();
@@ -280,7 +279,6 @@ describe("useUpdateFailureNotices", () => {
     );
     report.mock.calls[0]![0].retry();
     expect(run).toHaveBeenCalledWith("download");
-    // The title bar shows the download from here on.
     rerender({ state: { ...downloading, version: "1.2.5" } });
     expect(clear).toHaveBeenCalledOnce();
   });

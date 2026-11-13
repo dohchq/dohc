@@ -6,9 +6,6 @@ import {
   compareVersionFilesPage,
 } from "./versionCompare";
 
-// The paged whole-version comparison. The store here is the two seams
-// the pager reads: the differing-path listing, and per-path side reads.
-
 interface FakeFile {
   path: string;
   status: "added" | "modified" | "deleted";
@@ -100,10 +97,8 @@ describe("compareVersionFilesPage", () => {
     });
     expect(page.files.map((file) => file.path)).toEqual(["a.md", "b.md"]);
     expect(page.nextAfterPath).toBe("b.md");
-    // The cut also stops hydration: c.md's sides are never read.
     expect(store.reads.filter((read) => read.path === "c.md")).toHaveLength(0);
 
-    // The continuation reaches the rest, without loss or duplication.
     const rest = await compareVersionFilesPage(store, {
       ...INPUT,
       byteBudget: 100 * 1024,

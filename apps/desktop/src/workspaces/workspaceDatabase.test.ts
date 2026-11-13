@@ -80,11 +80,9 @@ describe("importToDatabase", () => {
       },
       1_700_000_000_000,
     );
-    // Re-importing the same CSV over the canonical, user-edited file must fail…
     await expect(
       importToDatabase(root, WALLET_SOURCE, "finance/wallet.sqlite", "transactions"),
     ).rejects.toThrow(/already exists/i);
-    // …and the user's edit survives untouched.
     const snapshot = await readDatabaseSnapshot(root, "finance/wallet.sqlite");
     const row = snapshot.tables[0]?.rows.find((r) => String(r.id) === "txn_001");
     expect(row?.category).toBe("Edited");
@@ -170,7 +168,6 @@ describe("editing a database", () => {
       .trim()
       .split("\n")
       .map((l) => JSON.parse(l));
-    // Both the injected id and the injected clock are deterministic in the log.
     expect(ops[0]).toMatchObject({ operationId: "op_fixed_0001", appliedAt: 1_700_000_000_000 });
   });
 

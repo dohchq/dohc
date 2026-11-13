@@ -300,7 +300,6 @@ describe("owner Collection migration", () => {
   });
 });
 
-// A daemon whose opens prepare `.dohc/local` as the engine's do.
 class Daemon implements EngineDaemonClient {
   async sendRequest(request: Request): Promise<Response> {
     if (request.method === "workspace.open") {
@@ -314,11 +313,7 @@ class Daemon implements EngineDaemonClient {
   close(): void {}
 }
 
-// The store opens only once an engine open prepared `.dohc/local`, and its
-// host holds its worker folder from then on. A staged export still takes its
-// folder each time, after the open that let the store open may have ended.
 describe("a Collection export during an engine run", () => {
-  // A host opened while an earlier open had prepared `.dohc/local`, in the attachment the sessions below open.
   async function reopened(
     workspace: { workspaceId: string; rootPath: string; attachmentId: symbol },
     first: LocalDatasetHost,

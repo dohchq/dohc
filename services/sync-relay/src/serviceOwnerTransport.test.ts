@@ -179,7 +179,6 @@ it("uses the captured native session and translates owner outbox calls to its na
     state: "active",
     retryDeliveryId: null,
   });
-  // The owner's Try again reaches the drain with the queue's state.
   Object.assign(f.outbox, { state: "quarantined", retryDeliveryId: "delivery-1" });
   expect(
     (
@@ -222,7 +221,6 @@ it("uses the captured native session and translates owner outbox calls to its na
     }),
     undefined,
   );
-  // A refusal carries the head it refused and its key, so native records it once.
   const refused = { deliveryId: "delivery-1", refusalKey: "refusal-1" },
     refusal = { deliveryId: "delivery-1", key: "refusal-1" };
   await f.transport.client.sendRequest({

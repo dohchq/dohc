@@ -85,7 +85,6 @@ describe("transitionReason", () => {
       "dohc could not finish replacing this page. Try again to finish it.",
     );
     expect(transitionReason(TURN)).toBe(CONNECTION_LOST_REASON);
-    // Ended access has its own sentence.
     expect(transitionReason({ ...TURN, readOnlyCause: "access-ended" })).toBeUndefined();
     expect(transitionReason({ ...TURN, readOnlyWhileEditing: false })).toBeUndefined();
   });

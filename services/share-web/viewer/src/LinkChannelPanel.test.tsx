@@ -147,7 +147,6 @@ it("posts from a read-write link with the name it sets once, and marks the post 
   const posted = [...container.querySelectorAll<HTMLElement>(".chat-message")].at(-1);
   expect(posted?.dataset.authorKind).toBe("link");
   expect(posted?.querySelector('[role="img"]')?.getAttribute("aria-label")).toBe("Link holder");
-  // The name is set; it shows in place of the field, and the next post sends none.
   expect(nameField()).toBeNull();
   expect(text()).toContain("Posting as Sam");
   setControlValue(composer()!, "And again");

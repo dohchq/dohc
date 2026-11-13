@@ -108,7 +108,6 @@ describe("a workspace stop that has to report app commands still running", () =>
     void started.catch(() => undefined);
     await executing.promise;
 
-    // The stop cancels the start; the command it began comes back after.
     const stopping = lifecycle.stopWorkspace("trip", { rejectOnFailure: true });
     release.resolve();
     await expect(stopping).rejects.toThrow(AppCommandStillRunningError);

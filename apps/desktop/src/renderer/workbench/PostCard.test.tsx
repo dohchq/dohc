@@ -217,8 +217,6 @@ describe("PostCard as a feed row", () => {
     row({}, "Launch checklist");
     const toolbar = screen.getByTestId("chats-post-message-toolbar");
     const classes = toolbar.className.split(/\s+/);
-    // Hidden, the toolbar takes no pointer; the conditions that show it
-    // also let it take one.
     expect(classes).toEqual(expect.arrayContaining(["opacity-0", "pointer-events-none"]));
     for (const shown of ["group-hover", "group-focus-within", "has-[[popover]]"]) {
       expect(classes).toEqual(

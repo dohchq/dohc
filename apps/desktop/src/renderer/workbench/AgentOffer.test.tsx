@@ -93,7 +93,6 @@ describe("the agent offer", () => {
     ["runs", "Runs when you send", "reaches trip-planner", "run"],
     ["working", "Runs after the current run", "reaches trip-planner", "working"],
     ["paused", "Replies paused · runs after Resume", "reaches trip-planner", null],
-    // Alone, the folder says what it is.
     ["unknown", null, "Reaches trip-planner", null],
   ] as const)("%s says %j", (state, words, reach, mark) => {
     render(<AgentOffer offer={offer(state)} />);

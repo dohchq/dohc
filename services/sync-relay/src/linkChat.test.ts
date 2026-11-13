@@ -644,7 +644,6 @@ describe("link chat on a Group share", () => {
       for (let index = 0; index < MAX_LINK_CHAT_FOLLOWS_PER_GRANT; index++)
         await park(capabilities[0]!);
       await expectRefused(capabilities[0]!);
-      // One link at its cap leaves the other links theirs, up to the workspace's.
       for (const capability of capabilities.slice(1, linkCount)) {
         for (let index = 0; index < MAX_LINK_CHAT_FOLLOWS_PER_GRANT; index++)
           await park(capability);
@@ -834,7 +833,6 @@ describe("link posts in a Group's channel", () => {
       createdAtMs: 2_000,
     });
 
-    // A retry answers the first post; the same key with another body conflicts.
     const retried = await postChat(f, link.capability, {
       body: "hello from a link",
       claimedName: "Sam",
@@ -847,7 +845,6 @@ describe("link posts in a Group's channel", () => {
       "conflict",
     );
 
-    // A reply in the thread keeps the name the link holder set once.
     const reply = await postChat(f, link.capability, {
       idempotencyKey: "post-2",
       threadId: message.threadId,
@@ -1013,7 +1010,6 @@ describe("link posts in a Group's channel", () => {
       "link_discussion_blocked",
     );
 
-    // Another browser on the link posts until the owner pauses the share.
     const other = String((await json(await exchange(f, link.secret))).capabilityToken);
     expect((await postChat(f, other, {}, PROFILE_B)).status).toBe(200);
     expect(
@@ -1167,7 +1163,6 @@ describe("link posts in a Group's channel", () => {
       );
     const before = Number((await json(await feed(0))).latestRevision);
 
-    // An owner caught up at `before` is woken by the first post and sees its new link holder.
     const entered = deferred(),
       wait = activity.wait.bind(activity);
     const spy = vi.spyOn(activity, "wait").mockImplementation((group, actor, options) => {
@@ -1183,7 +1178,6 @@ describe("link posts in a Group's channel", () => {
     const woken = await json(await poll);
     expect(woken.principals).toEqual([{ principalId: principal.principalId, blocked: false }]);
 
-    // Naming itself later is news again; a later post that changes nothing is not.
     const named = Number(woken.latestRevision);
     expect(
       (await postChat(f, link.capability, { idempotencyKey: "post-2", claimedName: "Sam" })).status,
@@ -1421,7 +1415,6 @@ describe("client pushes of a link post", () => {
     };
     expect(message.messageId).not.toBe(`${LINK_CHAT_MESSAGE_ID_PREFIX}${guessed}`);
     expect(message.threadId).not.toBe(`${LINK_CHAT_THREAD_ID_PREFIX}${guessed}`);
-    // The owner's devices and the named recipient's desktop each pull the post.
     const lane = await json(
       await f.h(
         request(MEMBER, `/sync/shares/${f.shareId}/log?channelWireId=${channelWireId}&since=0`),

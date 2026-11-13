@@ -32,7 +32,6 @@ afterEach(() => {
 });
 
 describe("what the host allows and has not confirmed", () => {
-  // Column order: title 0, estimate 1, done 2, tags 3.
   const schema = makeSchema([
     { name: "title", type: "text" },
     { name: "estimate", type: "number" },
@@ -49,7 +48,6 @@ describe("what the host allows and has not confirmed", () => {
       ]),
     );
 
-  /** A host's unconfirmed cells, by `record:field`. */
   function statusStore(initial: Record<string, TableCellStatus> = {}) {
     let statuses = new Map(Object.entries(initial));
     const listeners = new Set<() => void>();
@@ -89,7 +87,6 @@ describe("what the host allows and has not confirmed", () => {
   }
 
   it("gives a cell the host refuses no edit path, by click or by key", () => {
-    // The host allows the title and the checkbox of the second record only.
     const canEditCell = (record: CollectionRecord, field: { name: string }) =>
       record.id === "rec-b" && field.name !== "estimate";
     const { cell, press, editor, onCellChange } = setup({ canEditCell });
@@ -109,7 +106,6 @@ describe("what the host allows and has not confirmed", () => {
     expect(editor()).toBeNull();
     expect(onCellChange).not.toHaveBeenCalled();
 
-    // The cells it allows still edit.
     fireEvent.click(cell(1, 2));
     press(" ");
     expect(onCellChange).toHaveBeenCalledExactlyOnceWith(
@@ -143,7 +139,6 @@ describe("what the host allows and has not confirmed", () => {
   it("shows a pending change on its cell alone, with the value the person gave", () => {
     const drawn = vi.fn();
     const { store, set } = statusStore();
-    // A host-drawn column counts how often the table draws a cell.
     const hostCells = new Map<string, TableHostCell>([
       [
         "estimate",
@@ -163,7 +158,6 @@ describe("what the host allows and has not confirmed", () => {
     expect(cell(0, 0).textContent).toBe("RenamedSaving");
     expect(cell(0, 0).querySelector('[data-cell-status="pending"]')).not.toBeNull();
     expect(cell(1, 0).textContent).toBe("Task b");
-    // No other cell drew again.
     expect(drawn).not.toHaveBeenCalled();
 
     set({});
@@ -186,7 +180,6 @@ describe("what the host allows and has not confirmed", () => {
     expect(editor()).toBeNull();
     expect(cell(0, 0).hasAttribute("aria-selected")).toBe(false);
 
-    // Selected from the keyboard, the cell says why under it, and Tab reaches the action.
     grid.focus();
     press("ArrowDown");
     const note = screen.getByRole("note");
@@ -199,7 +192,6 @@ describe("what the host allows and has not confirmed", () => {
     expect(retry).toHaveBeenCalledTimes(2);
     expect(document.activeElement).toBe(grid);
 
-    // Escape from the action goes back to the cell, and Tab goes on to the next one.
     press("Tab");
     fireEvent.keyDown(document.activeElement!, { key: "Escape" });
     expect(document.activeElement).toBe(grid);
@@ -219,7 +211,6 @@ describe("what the host allows and has not confirmed", () => {
     });
     const { grid, cell, press, editor } = setup({ cellStatuses: store });
     const onCell = within(cell(0, 0)).getByRole("button", { name: "Discard" });
-    // Nothing brings the change back, so the control says what it does.
     expect(onCell.title).toBe("Stop trying to save this change. It may already be saved.");
     fireEvent.click(onCell);
     expect(discard).toHaveBeenCalledOnce();
@@ -240,7 +231,6 @@ describe("what the host allows and has not confirmed", () => {
     fireEvent.click(inNote);
     expect(discard).toHaveBeenCalledTimes(2);
     expect(document.activeElement).toBe(grid);
-    // After the last action, Tab goes on to the next cell.
     press("Tab");
     fireEvent.keyDown(document.activeElement!, { key: "Tab" });
     fireEvent.keyDown(document.activeElement!, { key: "Tab" });
@@ -265,7 +255,6 @@ describe("what the host allows and has not confirmed", () => {
       fireEvent.change(editor()!.querySelector("input")!, { target: { value: text } });
     };
 
-    // Saved and cancelled edits, and an editor nobody typed in, leave nothing.
     typeInto(0, 0, "Saved");
     fireEvent.keyDown(editor()!.querySelector("input")!, { key: "Enter" });
     typeInto(0, 0, "Cancelled");
@@ -274,7 +263,6 @@ describe("what the host allows and has not confirmed", () => {
     rerender({ records: records().slice(1) });
     expect(onDraftAbandoned).not.toHaveBeenCalled();
 
-    // The record leaves the table under an edit.
     rerender({});
     typeInto(0, 0, "Typed");
     rerender({ records: records().slice(1) });
@@ -284,7 +272,6 @@ describe("what the host allows and has not confirmed", () => {
       text: "Typed",
       value: "Typed",
     });
-    // The field leaves it.
     typeInto(0, 1, "12");
     rerender({
       records: records().slice(1),
@@ -296,7 +283,6 @@ describe("what the host allows and has not confirmed", () => {
       text: "12",
       value: 12,
     });
-    // The table closes. A character that opened the edit was typed too.
     fireEvent.click(cell(0, 0));
     fireEvent.keyDown(editor()!.querySelector("input")!, { key: "Escape" });
     fireEvent.keyDown(screen.getByRole("grid"), { key: "x" });
@@ -322,7 +308,6 @@ describe("what the host allows and has not confirmed", () => {
         onDraftAbandoned={onDraftAbandoned}
       />
     );
-    /** Types into a cell of the first record, takes the record from the table, and answers what the host got. */
     const leave = (column: number, text: string) => {
       fireEvent.click(cell(0, column));
       fireEvent.change(editor()!.querySelector("input")!, { target: { value: text } });
@@ -336,7 +321,6 @@ describe("what the host allows and has not confirmed", () => {
       text: " 12 ",
       value: 12,
     });
-    // Emptied text saves as no value. That is a value, and not text the field cannot take.
     expect(leave(0, "")).toEqual({ recordId: "rec-a", field: "title", text: "", value: null });
     const refused = leave(1, "12x");
     expect(refused).toEqual({ recordId: "rec-a", field: "estimate", text: "12x" });
@@ -379,7 +363,6 @@ describe("what the host allows and has not confirmed", () => {
   it("keeps its layers in a stacking context of its own, so its sticky header never covers its host's menus", () => {
     const { grid } = setup();
     expect(grid.classList.contains("isolate")).toBe(true);
-    // Inside it, the header still sits above the editor that scrolls under it.
     fireEvent.click(
       grid.querySelectorAll<HTMLElement>('[role="row"][data-index="0"] [role="gridcell"]')[0]!,
     );
@@ -404,7 +387,6 @@ describe("what the host allows and has not confirmed", () => {
 
     fireEvent.click(within(cell(0, 0)).getByRole("button", { name: "Dismiss" }));
     expect(dismiss).toHaveBeenCalledOnce();
-    // A change that waits says so, with nothing to press.
     set({
       "rec-a:title": {
         state: "waiting",
@@ -442,7 +424,6 @@ describe("what the host allows and has not confirmed", () => {
     expect(cell(0, 0).textContent).toBe("File of rec-a");
     expect(screen.queryByText("Task a")).toBeNull();
 
-    // A typed character and Delete are the host's to take, in its editor.
     fireEvent.click(cell(0, 1));
     press("ArrowLeft");
     expect(cell(0, 0).getAttribute("aria-selected")).toBe("true");
@@ -459,7 +440,6 @@ describe("what the host allows and has not confirmed", () => {
     expect(editor()).toBeNull();
     expect(document.activeElement).toBe(grid);
 
-    // A host cell with no editor does not edit.
     fireEvent.click(cell(0, 1));
     press("Enter");
     expect(editor()).toBeNull();
@@ -498,17 +478,14 @@ describe("what the host allows and has not confirmed", () => {
     const title = () =>
       grid.querySelectorAll<HTMLElement>('[role="row"][data-index="0"] [role="gridcell"]')[0]!;
     const editor = () => grid.querySelector<HTMLElement>("[data-cell-editor]");
-    // Escape in the editor cancels the edit, and is not the host's.
     fireEvent.click(title());
     fireEvent.keyDown(editor()!.querySelector("input")!, { key: "Escape" });
     expect(editor()).toBeNull();
     expect(escapes).not.toHaveBeenCalled();
-    // So is Escape on the grid while an editor is open.
     fireEvent.click(title());
     fireEvent.keyDown(grid, { key: "Escape" });
     expect(editor()).toBeNull();
     expect(escapes).not.toHaveBeenCalled();
-    // A paused editor stays open with what it holds, and Escape on the grid is still not the host's.
     fireEvent.click(title());
     fireEvent.change(editor()!.querySelector("input")!, { target: { value: "Typed" } });
     view.rerender(table("rec-a", true));
@@ -519,11 +496,9 @@ describe("what the host allows and has not confirmed", () => {
     fireEvent.keyDown(grid, { key: "Escape" });
     expect(editor()).toBeNull();
     expect(escapes).not.toHaveBeenCalled();
-    // With a record open, the next Escape is the host's, and the selection stays.
     fireEvent.keyDown(grid, { key: "Escape" });
     expect(escapes).toHaveBeenCalledOnce();
     expect(title().getAttribute("aria-selected")).toBe("true");
-    // With none open, Escape clears the selection.
     view.rerender(table(null));
     fireEvent.keyDown(grid, { key: "Escape" });
     expect(title().getAttribute("aria-selected")).toBeNull();

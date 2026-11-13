@@ -89,7 +89,6 @@ async function closeTestComputers() {
 }
 afterEach(closeTestComputers);
 
-// The relay's test seam: "Bearer test:<user>" is that user.
 const testActor: ResolveActor = (request, workspaceId) => {
   const match = /^Bearer test:([A-Za-z0-9_.:-]+)$/u.exec(
     request.headers.get("authorization") ?? "",
@@ -274,7 +273,6 @@ it.skipIf(engine.missing)(
     });
     const relayUrl = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
 
-    // The owner's computer makes the Collection and one record, and syncs.
     const owner = await computer({
       root: join(root, "owner"),
       relayUrl,
@@ -302,7 +300,6 @@ it.skipIf(engine.missing)(
     });
     await owner.sync();
 
-    // The server joins the workspace as its owner and pulls it.
     const row = storage.joinAutomationWorkspace({
       workspaceId: WORKSPACE,
       nowMs: Date.now(),
@@ -325,7 +322,6 @@ it.skipIf(engine.missing)(
       "the pulled record is in its Collection on the server",
     ).toBe("Tasks/one.md");
 
-    // The automation adds a record and changes one, then the server pushes.
     const replica = {
       workspaceId: WORKSPACE,
       client: server.client,
@@ -355,7 +351,6 @@ it.skipIf(engine.missing)(
         idempotencyKeyPrefix: "claim-1/1/1",
       }),
     ).resolves.toEqual({ path: "Tasks/one.md", replaced: { Status: "Doing" }, kept: {} });
-    // It posts in the Group, found by its name, as the automation.
     const chat = replicaAutomationChat({
       runStore: { supersedeWake: async () => undefined },
       storage: {
@@ -388,7 +383,6 @@ it.skipIf(engine.missing)(
     );
     await server.sync();
 
-    // The owner's computer receives both, with the automation as their author.
     await owner.sync();
     const byAutomation = {
       authorOriginId: AUTOMATION.automationId,
@@ -870,7 +864,6 @@ it.skipIf(engine.missing).each(["recipient-only", "owner-and-recipient"] as cons
     expect(recipientMoment.authors).toEqual(expect.arrayContaining(localAuthors));
     expect(recipientMoment.authors).toHaveLength(localAuthors.length);
     await owner.sync();
-    // A later operation proves that no refused batch blocks the owner's log.
     await owner.request(
       "versionedText.write",
       {

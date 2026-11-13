@@ -6,8 +6,6 @@ type Outcome = { holds: boolean; label: string | null };
 const held = (label: string): Outcome => ({ holds: true, label });
 const free = (label: string | null): Outcome => ({ holds: false, label });
 
-// Every state, as the note's current queue, kept after a restore, and kept in
-// an earlier copy of the workspace. A new state fails to compile until it has a row.
 const TABLE = {
   paused: {
     current: held("Paused"),
@@ -72,7 +70,6 @@ describe("kept edits, in the editor and in Live documents", () => {
               : {}),
         };
         expect({ holds: queueHoldsNote(row), label: keptEditsLabel(row) }).toEqual(expected);
-        // Live documents says Paused, Trying again or Stopping only where the editor is read-only.
         if (expected.label !== null && HELD_LABELS.has(expected.label))
           expect(expected.holds).toBe(true);
       });

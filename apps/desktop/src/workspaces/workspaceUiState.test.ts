@@ -50,7 +50,6 @@ const STATE: WorkspaceUiState = {
 
 const engine = fakeLocalStateOpens();
 let workspaces = 0;
-// A workspace whose engine open prepared .dohc/local.
 async function openedWorkspace() {
   workspaces += 1;
   const workspace = {
@@ -67,7 +66,6 @@ describe("ui-state file store", () => {
     const root = workspace.rootPath;
     await writeUiStateFile(workspace, STATE);
     expect(await readUiStateFile(root)).toEqual(STATE);
-    // Pretty-printed JSON with a trailing newline, like every .dohc file.
     const raw = await readFile(join(root, ".dohc", "local", "ui-state.json"), "utf8");
     expect(raw.endsWith("\n")).toBe(true);
     expect(await readdir(join(root, ".dohc"))).toEqual(["local"]);
@@ -101,7 +99,6 @@ describe("ui-state file store", () => {
     );
     expect(await readdir(join(workspace.rootPath, ".dohc", "local"))).toEqual([]);
 
-    // A write after the workspace's engine open closed changes nothing.
     await engine.open(workspace);
     await writeUiStateFile(workspace, STATE);
     engine.close(workspace);
@@ -210,10 +207,6 @@ describe("ui-state file store", () => {
     expect(await readUiStateFile(root)).toBeNull();
   });
 
-  // A malicious attached workspace can ship `.dohc` as a SYMLINK to a
-  // user-writable directory outside the workspace. Following it would land
-  // main-process metadata writes outside the boundary — both the write and
-  // the read must refuse, and nothing may appear in the symlink's target.
   it.each([".dohc", ".dohc/local"])(
     "refuses to write through a symlinked %s and never lands files outside",
     async (linked) => {
@@ -228,7 +221,6 @@ describe("ui-state file store", () => {
         LocalStateUnavailableError,
       );
       expect(await readUiStateFile(root)).toBeNull();
-      // The escape target stayed untouched: no ui-state.json, no temp files.
       expect(await readdir(outside)).toEqual(linked === ".dohc" ? ["local"] : []);
       if (linked === ".dohc") expect(await readdir(join(outside, "local"))).toEqual([]);
     },

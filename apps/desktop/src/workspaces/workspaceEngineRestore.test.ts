@@ -27,13 +27,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   return { ...actual, readFile: vi.fn(actual.readFile) };
 });
 
-// The person a restore names, as desktop main reads them.
 const RESTORER = { kind: "human", humanId: "local-person" } as const;
-
-// Engine history reads (active-version timeline + one-moment
-// payloads), engine-routed restore (forward history, expected-event
-// registration, disk materialization, undo), the stable-object-id seam for
-// the linked-chat rail, and engine-coordinated renames.
 
 async function write(root: string, path: string, contents: string) {
   const absolute = join(root, path);
@@ -109,8 +103,6 @@ describe("engine history reads", () => {
     await engine.flush();
 
     const page = await engine.listMoments();
-    // The chain opens the daemon workspace and asks it for the timeline; the
-    // daemon, not the chain, writes the captured text into its store.
     const methods = requests.map((request) => request.method);
     expect(methods).toContain("workspace.open");
     expect(methods).not.toContain(VERSIONED_METHOD.textWrite);
@@ -523,13 +515,11 @@ describe("engine restore", () => {
     expect(result.path).toBe("doc.md");
     expect(await readText(root, "doc.md")).toBe("original\n");
 
-    // Forward history: the restore is a new moment on top, nothing rewritten.
     const after = await engine.listMoments();
     expect(after.moments.length).toBe(page.moments.length + 1);
     expect(after.moments[0].id).toBe(result.restoredMomentId);
     expect(after.moments[0].metadata.summary).toBe("Restored doc.md");
     expect(after.moments[0].metadata.origin).toBe("restore");
-    // The restore names who made it; the edit it undid stays outside capture's.
     expect(after.moments[0].authors).toEqual([RESTORER]);
     expect(after.moments[1].authors).toBeUndefined();
 
@@ -553,7 +543,6 @@ describe("engine restore", () => {
     await engine.flush();
     const editMomentId = (await engine.listMoments()).moments[0].id;
 
-    // A newer edit is still inside the settle window (never captured).
     await write(root, "doc.md", "uncaptured newest\n");
     await engine.restoreFileToBeforeMoment(editMomentId, RESTORER);
 
@@ -642,7 +631,6 @@ describe("engine restore", () => {
       (await engine.listMoments()).moments.find((moment) => moment.id === momentId)?.authors;
     expect(await authorsOf(restore.restoredMomentId)).toEqual([RESTORER]);
 
-    // Undo = restore to before the restore moment (forward again).
     const undo = await engine.restoreFileToBeforeMoment(restore.restoredMomentId, RESTORER);
     expect(undo.restored).toBe("text");
     expect(await readText(root, "new.md")).toBe("created\n");
@@ -912,7 +900,6 @@ describe("stable object ids for the linked-chat rail", () => {
     expect(objectId).not.toBeNull();
 
     const finish = await engine.beginFileRename("before.md", "after.md");
-    // Disk move failed; roll back.
     await finish(false);
 
     expect(await engine.fileObjectIdForPath("before.md")).toBe(objectId);
@@ -927,12 +914,10 @@ describe("stable object ids for the linked-chat rail", () => {
     engine.start();
     await engine.flush();
 
-    // Never tracked (no such engine file): nothing to coordinate.
     const finish = await engine.beginFileRename("nope.md", "still-nope.md");
     await finish(true);
     expect((await engine.listMoments()).moments).toHaveLength(0);
 
-    // Secret destination: the engine never records a rename into it.
     await write(root, "tracked.md", "body\n");
     engine.observeFileEvents([{ path: "tracked.md", operation: "update" }]);
     await engine.flush();

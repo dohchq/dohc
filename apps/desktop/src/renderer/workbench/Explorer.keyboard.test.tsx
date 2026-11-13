@@ -260,7 +260,6 @@ describe("active and picked rows", () => {
     expect(row("notes.md").className).toContain("font-medium");
     expect(row("apps/reading-list/index.html").className).not.toContain("font-medium");
 
-    // Clearing the pick returns the open file to the active fill.
     fireEvent.click(row("apps/reading-list/index.html"), { ctrlKey: true });
     expect(marked()).toEqual(["notes.md"]);
     expect(row("notes.md").className).toContain("bg-selected");
@@ -319,9 +318,6 @@ describe("active and picked rows", () => {
   });
 });
 
-// A click that opened a file selects only that file. When a new page takes
-// the editor, nothing in the tree is selected, so Delete acts on the focused
-// row.
 describe("the open file's selection after a new page opens", () => {
   afterEach(() => vi.unstubAllGlobals());
 
@@ -382,8 +378,6 @@ describe("the open file's selection after a new page opens", () => {
 describe("macOS file tree keys", () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  // A delete goes to the trash with Undo on its notice, so the key deletes
-  // without asking.
   it.each([
     ["darwin", "⌘⌫ deletes", { key: "Backspace", metaKey: true }, true],
     ["darwin", "⌫ alone does not delete", { key: "Backspace" }, false],
@@ -481,7 +475,6 @@ describe("selecting several rows in Files", () => {
     fireEvent.click(row("c.md"), { ctrlKey: true });
     for (const path of ["b.md", "c.md"])
       expect(row(path).className).toContain("bg-(--dohc-selection) text-ink");
-    // The open row outside the selection keeps its own fill and weight.
     expect(row("a.md").className).toContain("bg-selected font-medium");
     expect(bar()?.textContent).toBe("2 selected");
 
@@ -620,7 +613,6 @@ describe("selecting several rows in Files", () => {
     ];
     expect(changes).toEqual(refused);
 
-    // Try again deletes the two refused pages again, and reports the same changes.
     deleteWorkspacePath.mockClear();
     retry();
     await waitFor(() => expect(onError).toHaveBeenCalledTimes(2));
@@ -680,8 +672,6 @@ describe("selecting several rows in Files", () => {
     const order = deleteWorkspacePath.mock.calls.map(([input]) => input.relativePath);
     expect(order.indexOf("archive")).toBeLessThan(order.indexOf("box"));
     expect(onError).toHaveBeenCalledTimes(2);
-    // The folder's report keeps its own refusal, which the shell turns into
-    // the way to Live documents, and its Try again.
     const folder = onError.mock.calls.find(([, , , change]) => change?.path === "box");
     expect(folder?.[1]).toBe(folderRefusal);
     expect(folder?.[2]).toEqual(expect.any(Function));
@@ -709,8 +699,6 @@ describe("selecting several rows in Files", () => {
     expect(screen.queryByTestId("delete-confirm")).toBeNull();
   });
 
-  // A share view's delete has no trash, so it still asks, once, for the
-  // whole selection.
   it("asks once to delete the selection in a share view", async () => {
     const deleteWorkspacePath = vi.fn(async (_input: { relativePath: string }) => undefined);
     vi.stubGlobal("dohcDesktop", { deleteWorkspacePath });

@@ -42,7 +42,6 @@ async function serveViewer(page: Page) {
   });
 }
 
-/** Opens a signed-in app through share-web's app handler, loses its Collection's files, and reloads its page. */
 async function reloadAfterCollectionLost() {
   let missing = false;
   const bytes = Buffer.from("document.body.textContent='Fundraiser';");

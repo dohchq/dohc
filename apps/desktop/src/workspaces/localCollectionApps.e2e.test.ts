@@ -107,7 +107,6 @@ async function tripWorkspace(name: string) {
   let running = await startEngine();
   await waitForPathMoments(running.capture, "trip/responses/collection.yaml", 1);
   const hosts: LocalDatasetHost[] = [];
-  // `down`: the engine is unavailable to the app, as when the daemon is gone.
   const control = {
     wrap: (real: LocalCollectionEngine): LocalCollectionEngine => real,
     down: false,
@@ -176,7 +175,6 @@ it.skipIf(engine.missing)(
           idempotencyKey: key,
           fields: { destination: "Tokyo" },
         }) as Promise<Receipt>;
-      // The engine commits this write and its answer is lost.
       w.control.wrap = (real) => ({
         ...real,
         async create(envelope) {
@@ -185,7 +183,6 @@ it.skipIf(engine.missing)(
         },
       });
       await expect(create("committed", host)).rejects.toBeInstanceOf(LocalAppUnavailableError);
-      // This write never reaches the engine.
       w.control.wrap = (real) => ({
         ...real,
         async create() {
@@ -205,7 +202,6 @@ it.skipIf(engine.missing)(
       await expect
         .poll(() => reopened!.apps.list("trip")[0], { timeout: REAL_DAEMON_DEADLINE_MS })
         .toMatchObject({ pendingCreates: 0 });
-      // The first completes from its committed moment; the second is sent once the engine confirms it absent.
       for (const key of ["committed", "unsent"]) {
         const receipt = await create(key, reopened!);
         expect(await waitForPathMoments(w.capture, receipt.path, 1)).toEqual([

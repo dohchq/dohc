@@ -73,7 +73,6 @@ describe("useWorkspaceTrust", () => {
       await hook.result.current.requestTrust();
     });
     expect(bridgeMock.requestWorkspaceTrust).toHaveBeenCalledWith({ workspaceId: "a" });
-    // After a send, the request says it is automatic, so main opens it once.
     await act(async () => {
       await hook.result.current.requestTrust(true);
     });
@@ -124,7 +123,6 @@ describe("useWorkspaceTrust", () => {
     act(() => {
       restricting = hook.result.current.restrict();
     });
-    // The person trusted the workspace again from another window.
     act(() => {
       for (const listener of listeners) listener({ workspaceId: "a", trusted: true });
     });

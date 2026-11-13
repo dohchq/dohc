@@ -62,7 +62,6 @@ describe("engine Y.Doc save-seq bookkeeping", () => {
     noteSettleStart(state, 1);
     noteLocalEdit(state, 2);
     noteSettleStart(state, 2);
-    // The first settle completes first and carried only edit 1.
     expect(noteSettleOutcome(state, 1)).toBe(1);
     expect(noteSettleOutcome(state, 2)).toBe(2);
   });

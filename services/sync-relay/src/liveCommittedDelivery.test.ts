@@ -35,8 +35,6 @@ const declared = (cursor: number) => ({
   },
 });
 
-// A service host's committed delivery of `events` declared changes. The host
-// refuses the chosen application calls as settlement-required.
 function fixture(
   events: number,
   refusals: (call: number) => boolean,

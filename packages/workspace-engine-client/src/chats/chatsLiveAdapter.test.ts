@@ -505,8 +505,6 @@ type PostOptions = {
   origin?: "cli";
 };
 
-// A post whose id is its body. The first post in a thread starts it. A
-// person's post is Ada's unless it names another account or none.
 function readerFixture() {
   const { adapter, loopback } = loopbackAdapter();
   const started = new Set<string>();
@@ -1983,7 +1981,6 @@ describe("an agent's work report", () => {
       body: "Merged",
       work: { status: "done" },
     });
-    // The card is the newest report alone: it reported no link, so the card has none.
     const card = {
       status: "done",
       messageId: done.id,
@@ -2201,7 +2198,6 @@ describe("automation authors", () => {
         (message) => message.automation?.automationId,
       ),
     ).toEqual(["collection:object-tasks#stamp", "collection:object-tasks#stamp"]);
-    // Without ids, the adapter still mints them.
     const minted = await adapter.sendMessage({
       authorActorKey: null,
       workspaceId: "workspace",

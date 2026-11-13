@@ -131,7 +131,6 @@ describe("AddAgentForm", () => {
   });
 
   it("puts the title and actions in bands with a rule only while the body overflows", () => {
-    // ResizeObservers that report a resize when the test says so.
     const observed = new Set<Element>();
     const live = new Set<() => void>();
     vi.stubGlobal(
@@ -180,7 +179,6 @@ describe("AddAgentForm", () => {
     contentHeight = 520;
     report();
     expect(banded()).toBe(true);
-    // The bands keep the dialog's 20px inset.
     expect(body.classList.contains("px-5")).toBe(true);
     expect(header.classList.contains("px-5") && header.classList.contains("pt-5")).toBe(true);
     expect(footer.classList.contains("px-5") && footer.classList.contains("pb-5")).toBe(true);

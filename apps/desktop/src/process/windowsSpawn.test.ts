@@ -230,7 +230,6 @@ describeWin32("real .cmd shim topology (win32)", () => {
     const killed = await killChildTreeWin32(child);
     expect(killed).toBe(true);
 
-    // The grandchild — not just the cmd.exe wrapper — must be dead.
     const gone = await new Promise<boolean>((resolve) => {
       const check = () => {
         try {

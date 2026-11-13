@@ -89,7 +89,6 @@ it("keeps every snapshot within the IPC contract, however many chats pause", () 
   const threads = notices.register("a").notices.map(({ threadId }) => threadId);
   expect(threads).toHaveLength(CHAT_DISPATCH_NOTICES_MAX);
   expect(threads.slice(0, others.length)).toEqual([...others]);
-  // The oldest pauses gave way to the newest.
   expect(threads).not.toContain("t0");
   expect(threads.at(-1)).toBe(`t${CHAT_DISPATCH_NOTICES_MAX}`);
 });

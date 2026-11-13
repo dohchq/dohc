@@ -551,8 +551,6 @@ describe("EngineYDocSessionOwner", () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
-  // A closing settle can fail after the editor has gone, and the shell owes
-  // that failure a notice, so save states are the one message release keeps.
   it("keeps only save states once release starts", async () => {
     const outbound: TestOutbound[] = [];
     const owner = createOwner(outbound);
@@ -607,7 +605,6 @@ describe("EngineYDocSessionOwner", () => {
 
     closeGate.resolve();
     await expect(release).resolves.toEqual({ kind: "released" });
-    // A completed release forgets the session: nothing it emits later is sent.
     signals.emit("after-release");
     expect(outbound).toHaveLength(2);
   });

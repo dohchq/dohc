@@ -35,7 +35,6 @@ beforeEach(async () => {
   await mkdir(join(root, ".dohc"), { recursive: true });
   await mkdir(join(root, "notes"), { recursive: true });
   await writeFile(join(root, ".dohc", "settings.json"), SETTINGS);
-  // The whole attack in one line: an ordinary name for the reserved folder.
   await symlink(join(root, ".dohc"), join(root, "meta"), "dir");
 });
 
@@ -168,9 +167,6 @@ describe("workspaceDatabase through an in-workspace alias", () => {
 
 describe("the static directory preview through an in-workspace alias", () => {
   it("refuses a served root that resolves into .dohc", async () => {
-    // The entry exists, so before the resolved-path decision this preview
-    // started and served the workspace's control plane over HTTP. The alias
-    // spells an ordinary folder; only the resolved root gives it away.
     await writeFile(join(root, ".dohc", "index.html"), "<h1>state</h1>");
     await expect(
       startStaticDirectoryPreview(join(root, "meta"), {
@@ -194,7 +190,6 @@ describe("the static directory preview through an in-workspace alias", () => {
       const denied = await fetch(new URL("/meta/settings.json", preview.url));
       expect(denied.status).toBe(403);
       expect(await denied.text()).not.toContain("engine");
-      // The ordinary page still serves.
       await expect(fetch(preview.url).then((res) => res.text())).resolves.toContain("page");
     } finally {
       await preview.stop();

@@ -42,7 +42,6 @@ const invoice: CollectionRecord = {
 
 type Button = { field: string; state: AutomationButtonState };
 
-/** Main's answers: the record the file is, and what its Collection's buttons do. */
 function stub(
   answer:
     | { record: null }
@@ -182,7 +181,6 @@ describe("RecordButtonsRow", () => {
     const question = screen.getByRole("dialog", { name: "Run Mark paid for Invoice 12" });
     expect(question.textContent).toContain("Settle and Send receipt can't be undone.");
     expect(button.getAttribute("aria-expanded")).toBe("true");
-    // Focus goes to Run; Escape returns it to the button and runs nothing.
     expect(document.activeElement?.textContent).toBe("Run");
     fireEvent.keyDown(document.activeElement!, { key: "Escape" });
     expect(screen.queryByRole("dialog")).toBeNull();
@@ -190,13 +188,11 @@ describe("RecordButtonsRow", () => {
     fireEvent.click(button);
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(bridge.pressAutomationButton).not.toHaveBeenCalled();
-    // A held Enter that opened the question does not answer it.
     fireEvent.click(button);
     expect(screen.getByRole("dialog").getAttribute("aria-describedby")).toBe(
       screen.getByText("Settle and Send receipt can't be undone.").id,
     );
     const run = screen.getByRole("button", { name: "Run" });
-    // Tab and Shift+Tab stay in the question.
     fireEvent.keyDown(run, { key: "Tab" });
     expect(document.activeElement?.textContent).toBe("Cancel");
     fireEvent.keyDown(document.activeElement!, { key: "Tab", shiftKey: true });
@@ -553,7 +549,6 @@ const wordsOf = (control: HTMLElement) =>
   document.getElementById(control.getAttribute("aria-describedby") ?? "")?.textContent ?? null;
 const checkAgain = () =>
   screen.queryByRole("button", { name: "Check Mark paid for Invoice 12 again" });
-// The mark beside a checking or running button's name.
 const loaderIn = (button: HTMLElement) => button.querySelector("svg.lucide-loader-circle");
 
 describe("RecordButtonsRow in an Edit share view", () => {
@@ -576,7 +571,6 @@ describe("RecordButtonsRow in an Edit share view", () => {
     );
     expect(button.getAttribute("aria-disabled")).toBe("true");
     expect(wordsOf(button)).toBe(CHECKING_BUTTON);
-    // dohc is already checking, so there is nothing to check again.
     expect(checkAgain()).toBeNull();
     fireEvent.click(button);
     expect(bridge.pressAutomationButton).not.toHaveBeenCalled();
@@ -608,7 +602,6 @@ describe("RecordButtonsRow in an Edit share view", () => {
     const answer = deferred<ListAutomationButtonsResult>();
     bridge.listAutomationButtons.mockReturnValueOnce(answer.promise);
     await user.keyboard("{Enter}");
-    // Check again asks the host, past main's last answer.
     expect(bridge.listAutomationButtons).toHaveBeenLastCalledWith({
       workspaceId: "ws-1",
       collectionPath: "Invoices",
@@ -620,7 +613,6 @@ describe("RecordButtonsRow in an Edit share view", () => {
     expect(wordsOf(button)).toBe(CHECKING_BUTTON);
     await user.keyboard("{Enter}");
     expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(2);
-    // Main says the host is being asked: Check again goes, and focus moves to the button.
     await act(async () => answer.resolve(bridge.listed([{ field: "Mark paid", state: CHECKING }])));
     expect(checkAgain()).toBeNull();
     expect(document.activeElement).toBe(button);
@@ -648,7 +640,6 @@ describe("RecordButtonsRow in an Edit share view", () => {
     await waitFor(() => expect(checkAgain()).not.toBeNull());
     const again = checkAgain()!;
     const words = document.getElementById(again.getAttribute("aria-describedby")!)!;
-    // Focus that a click gives shows nothing.
     fireEvent.pointerDown(again);
     fireEvent.focus(again);
     expect(words.hidden).toBe(true);
@@ -658,7 +649,6 @@ describe("RecordButtonsRow in an Edit share view", () => {
     fireEvent.keyDown(again, { key: "Escape" });
     expect(words.hidden).toBe(true);
     expect(outer).not.toHaveBeenCalled();
-    // While main answers, it looks as inert as it is.
     expect(again.className).toContain("aria-disabled:hover:bg-transparent");
     expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(1);
   });
@@ -688,7 +678,6 @@ describe("RecordButtonsRow in an Edit share view", () => {
     await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
     expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(2);
     expect(loaderIn(button)).toBeNull();
-    // A store nothing shows reads when it next shows, not on every change.
     view.unmount();
     act(() => bridge.emitChanged({ workspaceId: "ws-1" }));
     expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(2);
@@ -697,7 +686,6 @@ describe("RecordButtonsRow in an Edit share view", () => {
     expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(3);
     stop();
     await act(async () => undefined);
-    // A closed workspace's store hears nothing.
     act(() => disposeAutomationButtons("ws-1"));
     store.subscribe(store.key("Mark paid", "rec-12"), () => undefined);
     act(() => bridge.emitChanged({ workspaceId: "ws-1" }));
@@ -761,7 +749,6 @@ describe("RecordButtonsRow in an Edit share view", () => {
     // The owner's computer runs it and files its one notice, so this view reports nothing.
     expect(onNotice).not.toHaveBeenCalled();
     expect(onError).not.toHaveBeenCalled();
-    // A press the host refuses when pressed files one notice, with Try again.
     bridge.pressAutomationButton.mockRejectedValueOnce(new Error(UNCHECKED));
     fireEvent.click(button);
     fireEvent.click(screen.getByRole("button", { name: "Run" }));
@@ -816,7 +803,6 @@ describe("RecordButtonsRow in an Edit share view", () => {
       .mockReturnValueOnce(older.promise)
       .mockReturnValueOnce(newer.promise);
     fireEvent.click(checkAgain()!);
-    // The host answered while that read was out, so the store reads again.
     act(() => bridge.emitChanged({ workspaceId: "ws-1" }));
     expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(3);
     await act(async () => newer.resolve(bridge.listed([{ field: "Mark paid", state: READY }])));
@@ -841,7 +827,6 @@ describe("RecordButtonsRow in an Edit share view", () => {
       ),
     );
     expect(store.states()?.get("Mark paid")).toEqual(READY);
-    // A closed workspace's store asks main nothing more.
     await store.refresh();
     expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(4);
     expect(onError).not.toHaveBeenCalled();
@@ -862,7 +847,6 @@ const paidByRun: RecordHistoryEntry = {
   },
 };
 
-// The shell's part: its Notices, the History it holds, and the record view.
 function shellWith(
   read: (payload: GetCollectionRecordHistoryPayload) => Promise<GetCollectionRecordHistoryResult>,
   openRun: (automationId: string, claimId: string, name: string) => Promise<string | null> = noRun,
@@ -1021,7 +1005,6 @@ describe("RecordButtonsRow History in the shell", () => {
     await waitFor(() => expect(f.runRows()).toHaveLength(1));
     fireEvent.keyDown(document, { key: "Escape" });
 
-    // Opened again, the first page's runs all settle, but the older run is still unchecked.
     f.locate.mockResolvedValue({ location: "unavailable" });
     fireEvent.click(screen.getByRole("button", { name: "History" }));
     const dialog = await screen.findByRole("dialog", { name: "History of Invoice 12" });
@@ -1068,7 +1051,6 @@ describe("RecordButtonsRow History in the shell", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Older changes" }));
     await waitFor(() => expect(f.runRows()).toHaveLength(1));
     fireEvent.keyDown(document, { key: "Escape" });
-    // Opened again, a first-page run fails too; Try again must still reach the older page.
     newerFails = true;
     fireEvent.click(screen.getByRole("button", { name: "History" }));
     await waitFor(() =>
@@ -1148,7 +1130,6 @@ describe("RecordButtonsRow History in the shell", () => {
     f.history.mockResolvedValue({ entries: [paidByRun], nextBeforeHistoryId: null });
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Try again" }));
     await screen.findByText(/Paid:/);
-    // The toast and the row go together.
     expect(f.rows()).toEqual([]);
   });
 
@@ -1213,14 +1194,12 @@ describe("RecordButtonsRow History in the shell", () => {
     await waitFor(() => expect(f.rows()).toHaveLength(1));
     fireEvent.keyDown(document, { key: "Escape" });
 
-    // A new change moved the first page's edge from 3 to 4.
     const older = deferred<GetCollectionRecordHistoryResult>();
     f.history.mockImplementation((payload) =>
       payload.beforeHistoryId === undefined
         ? Promise.resolve({ entries: [{ ...paidByRun, historyId: 5 }], nextBeforeHistoryId: 4 })
         : older.promise,
     );
-    // The row's own step, run while the row stays.
     act(() => f.rows()[0]!.retry!());
     await waitFor(() =>
       expect(f.history).toHaveBeenLastCalledWith({

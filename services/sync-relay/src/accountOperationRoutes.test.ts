@@ -53,7 +53,6 @@ afterEach(async () => {
   cleanupLiveDeliveryFixtures();
 });
 
-// `Bearer session:<user>:<session>` is a valid sign-in; anything else is not.
 const resolveAccountSession: ResolveAccountSession = async (request) => {
   const match = /^Bearer session:([\w-]+):([\w-]+)$/u.exec(
     request.headers.get("authorization") ?? "",
@@ -177,7 +176,6 @@ async function serverCopies(storage: SyncRelayStorage, engine: TestEngine) {
   return {
     copies,
     syncs,
-    /** Holds every sync until the returned function is called. */
     holdSyncs() {
       let release!: () => void;
       held = new Promise((resolve) => {
@@ -226,7 +224,6 @@ async function relay(
   return { storage, engine, h, activity, ...run };
 }
 
-/** A trip with a Group, a thread with two attachments, a page, and a thread on the page. */
 async function seedTrip(engine: TestEngine) {
   const chats = new ChatsLiveAdapter(engine, "trip", { workspaceId: "trip" });
   engine.files.seedTextFile({
@@ -669,7 +666,6 @@ describe("secret files through the server's copy", () => {
   it("keeps a chat on a deleted file readable, and hides one on a file the relay last saw at a secret path", async () => {
     const { storage, engine, h } = await relay();
     const { planning } = await seedTrip(engine);
-    // The relay's log puts each object somewhere, then deletes it; none is in the copy now.
     const moment = (objectId: string, relaySeq: number, path: string | null) =>
       (storage as StorageContext).db
         .prepare(
@@ -985,7 +981,6 @@ describe("an account's change feed", () => {
       versionId: "main",
     });
     write("chat.message.append", { threadId: "thread-keys", messageId: "m" });
-    // The wake checks the sign-in again, finds nothing it may answer, and waits on.
     await expect.poll(() => checks).toBeGreaterThan(parked);
     await expect.poll(() => activity.stats().waiters).toBe(1);
     const last = write("moment.append", {
@@ -993,7 +988,6 @@ describe("an account's change feed", () => {
       path: ".env.local",
       versionId: "main",
     });
-    // The page left for a secret path: the phone sees it go.
     expect(await feed(await held)).toEqual({
       ok: true,
       cursor: `0.${last}.0`,
@@ -1042,7 +1036,6 @@ describe("an account's change feed", () => {
     );
     edit("Porto");
     expect((await feed(await held)).changed).toEqual({ pages: ["object"] });
-    // The journal is read a part at a time, in cursor order.
     const rows = f.storage.accountFeedJournalRows({
       workspaceId: "workspace",
       after: 0,
@@ -1227,7 +1220,6 @@ describe("an account's chat writes through the server's copy", () => {
         return true;
       },
     };
-    // Whether the copy is open, how often a pass closed it, and a pass run now, as the server runs one.
     let open = false;
     let closes = 0;
     let pass = () => {};
@@ -1321,7 +1313,6 @@ describe("an account's chat writes through the server's copy", () => {
       changeAt: (check: number, kind: AccessChange) => {
         changeAt = { check, kind };
       },
-      /** Holds the nth sign-in check from now until its release. `reached` resolves once it waits. */
       holdCheck: (nth: number) => {
         let reached!: () => void, release!: () => void;
         const waiting = new Promise<void>((resolve) => {
@@ -1349,7 +1340,6 @@ describe("an account's chat writes through the server's copy", () => {
       reconcile: () => pass(),
       copyOpen: () => open,
       closes: () => closes,
-      /** Holds the copy's next step. `reached` resolves once it waits. */
       holdStep: () => {
         let reached!: () => void, release!: () => void;
         const waiting = new Promise<void>((resolve) => {
@@ -1467,7 +1457,6 @@ describe("an account's chat writes through the server's copy", () => {
       ).toMatchObject({ ok: true, state: "saved", threadId: "thread-stay" });
     }
 
-    // Renamed, the account writes under its new name, and a retry answers from the row without writing.
     f.named(() => "Ana Maria");
     await answer(
       await f.write("reply", { operationId: "op-renamed", threadId: "thread-stay", body: "Hi" }),
@@ -1480,7 +1469,6 @@ describe("an account's chat writes through the server's copy", () => {
     expect((await json(await f.write("post", post))).result).toEqual(posted.result);
     expect(f.engine.writes).toHaveLength(writes);
 
-    // A write whose send was lost replays from its row as its author was named then.
     const lost = { operationId: "op-lost", threadId: "thread-stay", body: "Baixa" };
     f.engine.failing.set(CHATS_METHOD.messageSend, new Error("the engine went away"));
     expect(await f.earlier({ operation: "reply", args: lost })).toMatchObject({
@@ -1566,7 +1554,6 @@ describe("an account's chat writes through the server's copy", () => {
     expect(f.engine.writes).toEqual([]);
     expect(f.syncs).toEqual([]);
 
-    // Without them, each write fits its schema.
     for (const [operation, args] of Object.entries(valid)) {
       expect(
         (await f.write(operation, { ...args, operationId: `op-${operation}` })).status,
@@ -1698,7 +1685,6 @@ describe("an account's chat writes through the server's copy", () => {
     const reacted = await bytes("react", reaction("message-secret"), "message-secret");
     expect(reacted.body).toContain('"refusal":"missing"');
     expect(await bytes("react", reaction("message-nowhere"), "message-nowhere")).toEqual(reacted);
-    // A Group no ID names answers as missing too, and not as a route that isn't there.
     expect(
       await answer(
         await f.write("post", { operationId: "op-post", groupId: "channel-nowhere", body: "Hi" }),
@@ -1735,7 +1721,6 @@ describe("an account's chat writes through the server's copy", () => {
       );
       expect(response.status, await response.clone().text()).toBe(200);
     };
-    // Two computers whose first agents are both `default` under different names. Claude runs on both.
     await declare("mac", "Ana's Mac", [{ agentId: "default", displayName: "Claude" }]);
     await declare("laptop", "Ana's Laptop", [
       { agentId: "default", displayName: "Codex" },
@@ -1837,7 +1822,6 @@ describe("an account's chat writes through the server's copy", () => {
     });
     expect(frozen("op-react")).toEqual({ targets: [], unmatched: false });
 
-    // A write recorded before the computers changed publishes the targets it froze.
     const lost = { operationId: "op-lost", threadId: "thread-claude", body: "Again" };
     f.engine.failing.set(CHATS_METHOD.messageSend, new Error("the engine went away"));
     expect(await f.earlier({ operation: "reply", args: lost })).toMatchObject({
@@ -1896,7 +1880,6 @@ describe("an account's chat writes through the server's copy", () => {
     ]);
     expect(JSON.stringify(rows), "a wake keeps no message text").not.toContain("secret-phrase-xyz");
 
-    // With computers declared, a hidden thread still answers exactly as a missing one.
     const bytes = async (operationId: string, threadId: string) =>
       (
         await (await f.write("reply", { operationId, threadId, body: "@claude hi" })).text()
@@ -1904,7 +1887,6 @@ describe("an account's chat writes through the server's copy", () => {
     expect(await bytes("op-hidden", onSecret.id)).toBe(await bytes("op-missing", "thread-nowhere"));
   });
 
-  // Declares one of Ana's computers and the agents it runs in "trip".
   const declare = async (
     f: WriteRelay,
     installId: string,
@@ -1966,7 +1948,6 @@ describe("an account's chat writes through the server's copy", () => {
   it("takes a DM's newest agent message across both of its lanes", async () => {
     const f = await writeRelay();
     const chats = new ChatsLiveAdapter(f.engine.chats, "trip", { workspaceId: "trip" });
-    // Two computers each run an agent `default`, under different names.
     await declare(f, "mac", [{ agentId: "default", displayName: "Claude" }]);
     await declare(f, "laptop", [{ agentId: "default", displayName: "Nova" }]);
     const dm = await chats.ensureAgentChannel({
@@ -1992,7 +1973,6 @@ describe("an account's chat writes through the server's copy", () => {
       ...agentAuthor("Claude"),
       body: "Here.",
     });
-    // A newer message in a thread of its own, in the posts lane.
     await chats.startChannelThread({
       workspaceId: "trip",
       channelId: dm.channelId,
@@ -2011,7 +1991,6 @@ describe("an account's chat writes through the server's copy", () => {
     expect(frozenTargets(f, "op-nova").map((target) => target.target)).toEqual([
       "implicit:laptop:default",
     ]);
-    // Then the conversation's agent speaks again, newest of all.
     await chats.sendMessage({
       workspaceId: "trip",
       threadId: "thread-dm",
@@ -2062,7 +2041,6 @@ describe("an account's chat writes through the server's copy", () => {
     }
     return dm.channelId;
   }
-  // Sends to the DM, and answers the frozen wakes and how many thread listings and message pages the send read.
   async function sendCounting(f: WriteRelay, operationId: string, streamId: string) {
     const asked = f.engine.asked.length;
     expect(
@@ -2253,7 +2231,6 @@ describe("an account's chat writes through the server's copy", () => {
       authorUserId: "ana",
       authorActorKey: null,
     };
-    // The default agent last spoke in a reply, then Ana wrote 600 messages; the helper in its DM's conversation, then 55.
     const dms: Record<string, string> = {};
     for (const agentId of ["default", "helper"]) {
       const dm = await chats.ensureAgentChannel({ workspaceId: "trip", agentId, name: "Claude" });
@@ -2414,7 +2391,6 @@ describe("an account's chat writes through the server's copy", () => {
       reason: "Couldn't send",
     });
 
-    // A wake in a thread now on a secret file answers exactly as one that isn't there, and gets no generation.
     const bytes = async (wakeId: string) =>
       (await (await retry({ operationId: `retry-${wakeId}`, wakeId })).text()).replaceAll(
         wakeId,
@@ -2478,7 +2454,6 @@ describe("an account's chat writes through the server's copy", () => {
     const held = f.holdCheck(4);
     const retrying = f.write("retryWake", { operationId: "retry-race", wakeId });
     await held.reached;
-    // Meanwhile the file moves to .env: the relay accepts the move, and a sync of the copy applies it.
     const db = (f.storage as StorageContext).db;
     const relaySeq = Number(
       db
@@ -2546,7 +2521,6 @@ describe("an account's chat writes through the server's copy", () => {
       "a repeat in a thread still shown answers its generation",
     ).toMatchObject({ ok: true, wake: { wakeId: next, generation: 2 } });
 
-    // The file moves to .env: the relay accepts the move, and the copy's engine applies it.
     const db = (f.storage as StorageContext).db;
     const relaySeq = Number(
       db
@@ -2580,7 +2554,6 @@ describe("an account's chat writes through the server's copy", () => {
     const { h } = await relay();
     const missing = await denialBytes(await h(op("nowhere", "groups")));
     const write = { operationId: "op-gone", threadId: "thread-stay", body: "Hi" };
-    // Each starts the write, ends access at its point, and answers the response, the rows, and the engine writes it expects.
     const points: Array<
       [
         label: string,
@@ -2642,7 +2615,6 @@ describe("an account's chat writes through the server's copy", () => {
     }
   });
 
-  // The read mark rows the relay holds, as the copy pushed them.
   const markRows = (f: WriteRelay) =>
     (f.storage as StorageContext).db
       .prepare(
@@ -2669,7 +2641,6 @@ describe("an account's chat writes through the server's copy", () => {
     expect(markRows(f)).toMatchObject([
       { accountUserId: "ana", threadId: "thread-stay", lastReadMessageId: "message-poll" },
     ]);
-    // An older mark answers alike: a mark has no row, and the engine moves nothing back.
     expect(
       await answer(
         await f.write("markRead", { threadId: "thread-stay", messageId: "message-stay" }),
@@ -2785,7 +2756,6 @@ describe("an account's chat writes through the server's copy", () => {
     expect(
       await bytes({ threadId: "thread-nowhere", messageId: "message-secret" }, "thread-nowhere"),
     ).toEqual(hiddenThread);
-    // Word for word what a read of the thread answers.
     expect(
       await answer(
         await f.write("markRead", { threadId: onSecret.id, messageId: "message-secret" }),
@@ -2812,7 +2782,6 @@ describe("an account's chat writes through the server's copy", () => {
     const { h } = await relay();
     const missing = await denialBytes(await h(op("nowhere", "groups")));
     const mark = { threadId: "thread-stay", messageId: "message-poll" };
-    // Access ends while the engine answers `method`.
     const during = async (f: WriteRelay, kind: AccessChange, method: string) => {
       const held = f.engine.hold(method);
       const marking = f.write("markRead", mark);
@@ -2869,7 +2838,6 @@ describe("an account's chat writes through the server's copy", () => {
         return response;
       });
     await held.reached;
-    // A pass meanwhile, as when another visit ends, keeps the copy: this visit still holds it.
     f.reconcile();
     expect(f.copyOpen()).toBe(true);
     expect(f.closes()).toBe(0);
@@ -2880,7 +2848,6 @@ describe("an account's chat writes through the server's copy", () => {
     expect(markRows(f)).toMatchObject([
       { accountUserId: "ana", threadId: "thread-stay", lastReadMessageId: "message-poll" },
     ]);
-    // Once the visit ends, nothing keeps the copy.
     await expect.poll(() => f.closes()).toBe(1);
   });
 

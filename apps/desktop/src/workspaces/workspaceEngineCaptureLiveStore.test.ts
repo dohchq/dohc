@@ -587,7 +587,6 @@ describe("createCaptureLiveStores", () => {
       const closing = store.close!();
       reply.resolve();
       await closing;
-      // Drain the abandoned session runs, including a follow-up queued behind close.
       await Promise.allSettled(runs.mock.results.map((result) => result.value));
       expect(requests.map((request) => request.method)).toEqual([
         WORKSPACE_METHOD.open,
@@ -713,12 +712,6 @@ describe("createCaptureLiveStores", () => {
     }
   });
 
-  // Every other refusal names itself in the MESSAGE, so the store recognises
-  // it by a set lookup. A size refusal spends its message on the constraint,
-  // the limit and the observed usage instead, and would escape that lookup as
-  // a raw `DaemonRefusalError` — the store's contract promises a
-  // `VersionedTextStoreError`.
-  //
   it("translates a measured size refusal and keeps its measurements", async () => {
     const message = "payload exceeds MAX_TEXT_BYTES: limit 10485760 bytes, observed 10485761 bytes";
     const client = clientFor(async () => {
@@ -979,7 +972,6 @@ describe("createCaptureLiveStores", () => {
           `conflict.${side}`,
         ).toEqual(Buffer.from(sides[side].bytes));
       }
-      // One read per distinct digest, and never the decoy's.
       expect(
         requests
           .filter((request) => request.method === VERSIONED_METHOD.textReadBlob)

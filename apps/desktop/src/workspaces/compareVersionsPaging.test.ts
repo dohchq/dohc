@@ -9,11 +9,6 @@ import {
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 
 import { createTestScratch } from "./testTemp";
-// The compare surface's protected rows must ride the
-// same page discipline as its text rows. The old shape drained every
-// `secrets.compare` page per comparison page and put every remaining
-// protected row on the final one. These drive capture.compareVersions with
-// fake page-shaped stores, so each page's row provenance is exact.
 
 const WORKSPACE_ID = "engine-capture-test";
 

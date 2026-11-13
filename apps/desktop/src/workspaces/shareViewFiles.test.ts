@@ -103,14 +103,12 @@ beforeEach(() => {
   });
 });
 
-/** A view the engine has opened: its `.dohc/local` is made. */
 async function workspaceRoot(): Promise<string> {
   const root = join(await createTestScratch("share-view-files-"), "workspace");
   await mkdir(join(root, ".dohc", "local"), { recursive: true, mode: 0o700 });
   return root;
 }
 
-/** Where a view's refresh records live. */
 function recordsDir(rootPath: string): string {
   return join(rootPath, ".dohc", "local", "share-refresh");
 }
@@ -878,7 +876,6 @@ describe("ShareViewFiles", () => {
         expect(
           restriction === "end" ? registered.ended : registered.grantedSelector.access === "view",
         ).toBe(true);
-        // Reload the persisted record and update/delete/re-add the canonical file.
         saved = JSON.parse(JSON.stringify(registered)) as typeof registered;
         const restarted = createShareViewFiles({
           ...ports,
@@ -2573,7 +2570,6 @@ describe("ShareViewFiles", () => {
       });
 
       await rm(join(rootPath, path));
-      // One more refresh restores the absent file and clears its kept path.
       await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
         files.reconcile(
           lease,
@@ -2597,8 +2593,6 @@ describe("ShareViewFiles", () => {
     }
   });
 
-  // A view's records wait for the engine's open of that view's own store: a
-  // standalone view's attachment, or a mount's store in its own folder.
   it("saves in a standalone view only once its attachment's open is ready, and changes nothing before", async () => {
     const rootPath = await workspaceRoot();
     const path = "notes/attached.md";
@@ -2903,9 +2897,6 @@ describe("ShareViewFiles", () => {
     ).rejects.toBeInstanceOf(SharePinInvalidError);
   });
 
-  // The renderer presents these markers as damaged; an Edit grant on one must
-  // not reach the local store either. The intact row proves the refusal comes
-  // from the damage, not from the setup.
   it.each([
     ["intact", {}, null],
     ["no share id", { shareId: undefined }, SharePinInvalidError],

@@ -68,7 +68,6 @@ describe("readOwnedFile", () => {
     await expect(readOwnedFile(path, 9)).resolves.toEqual({ status: "too-large" });
     seam.size = 1;
     await expect(readOwnedFile(path, 5)).resolves.toEqual({ status: "too-large" });
-    // The size the handle reports is checked before anything is read.
     seam.size = 100;
     await expect(readOwnedFile(path, 50)).resolves.toEqual({ status: "too-large" });
   });

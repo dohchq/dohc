@@ -649,7 +649,6 @@ const receipts = {
 };
 const receiptBytes = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3]).toString("base64");
 
-/** A fenced Collection with one record and its attachment, saved for a move to the relay. */
 async function movingCollection() {
   const source = await fixture(false, receipts);
   await source.activate();
@@ -753,7 +752,6 @@ it("finishes a move whose import stopped when the relay stopped, once the relay 
     sourceCursor: moved.sourceCursor,
     targetCursor: { revision: moved.sourceCursor.revision + 1 },
   });
-  // Startup released the stopped import's quota, attachment, and checkpoints before the retry.
   expect(restarted).toEqual({
     imports: 0,
     attachments: 0,
@@ -846,7 +844,6 @@ it("keeps an app working, on its own records only, when another Collection takes
     "Moved",
     "Still moved",
   ]);
-  // The app can't reach the Collection that took its old folder.
   await expect(
     invokeOther(link, id(5), { name: "Leaked" }, "leaked", publicationId),
   ).rejects.toMatchObject({ statusCode: 404 });
@@ -856,7 +853,6 @@ it("keeps an app working, on its own records only, when another Collection takes
   expect(names((await invokeOther(owner, id(6), {}, "other-read")).result)).toEqual([
     "Other record",
   ]);
-  // A file that names the other Collection never stands in for this one, at the old folder or where the moved file went.
   pushFile(f.storage, "dataset", collectionFile("archive/registrations/dataset.json"), {
     path: "archive/registrations/dataset.json",
     text: JSON.stringify({ datasetId: id(9) }),

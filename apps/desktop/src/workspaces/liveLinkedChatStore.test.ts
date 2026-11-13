@@ -77,7 +77,6 @@ describe("live linked chat store", () => {
     const seeds = () =>
       requests.filter((request) => request.method === "chats.readState.seedAccount");
     try {
-      // Signed out: nothing to record.
       await store.listChannelsPage({ workspaceId: "w", limit: 10 });
       expect(seeds()).toEqual([]);
       owner = "owner";
@@ -88,7 +87,6 @@ describe("live linked chat store", () => {
       ]);
       expect(logged).toHaveBeenCalledOnce();
 
-      // Opening the workspace again makes a new store, which tries again.
       seedFails = false;
       const reopened = createLiveLinkedChatStore(
         { workspaceId: "w", rootPath: chatReadyRoot },

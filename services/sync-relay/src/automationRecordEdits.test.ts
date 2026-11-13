@@ -318,17 +318,14 @@ describe("an automation's record writes on this server's replica", () => {
         metadata: { origin: "api", summary: "Added two.md" },
       }),
     ]);
-    // The record exists now, so the same create finds it and writes nothing.
     await expect(create()).resolves.toEqual({ path: "Tasks/two.md", recordId: RECORD });
     expect(writes).toHaveLength(1);
-    // A file the engine refused names the same request as the first.
     await expect(
       context.createFile("Tasks/two.md", `---\nid: ${RECORD}\n---\n`, AUTOMATION),
     ).rejects.toThrow("File already exists");
     expect((writes[1] as { requestId: string }).requestId).toBe(
       (writes[0] as { requestId: string }).requestId,
     );
-    // Moving the Collection cannot give a replay a new creation key.
     await context.createFile("Moved/two.md", `---\nid: ${RECORD}\n---\n`, AUTOMATION);
     expect((writes[2] as { requestId: string }).requestId).toBe(
       (writes[0] as { requestId: string }).requestId,
@@ -349,7 +346,6 @@ describe("an automation's record writes on this server's replica", () => {
     await expect(createCollectionRecord(context, input)).resolves.toMatchObject({
       recordId: RECORD,
     });
-    // Someone cleared the completed seed; a retry must leave it cleared.
     files.set("Tasks/retry.md", `---\nid: ${RECORD}\n---\n`);
     refuseKeys.add(`create-record/${RECORD}/Status`);
     events.length = 0;
@@ -399,7 +395,6 @@ describe("an automation's record writes on this server's replica", () => {
     const context = replicaRecordEditContext(replica(), engine, new AbortController().signal, true);
     const person = { kind: "user", userId: "local" } as const;
     await expect(context.createFile("Tasks/two.md", "---\n---\n", person)).rejects.toThrow(ONLY);
-    // Undo's session takes no automation's writes.
     await expect(
       context.createFile("Tasks/two.md", `---\nid: ${RECORD}\n---\n`, AUTOMATION),
     ).rejects.toThrow(ONLY);

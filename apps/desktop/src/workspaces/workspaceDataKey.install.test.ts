@@ -120,7 +120,6 @@ describe.each(platforms)("key publication on %s", (platform) => {
       code: unsupported ? "key-install-unsupported" : "key-corrupt",
       message: unsupported ? unsupportedWords : generalWords,
     });
-    // No key, claim or temporary file is left behind.
     expect(await readdir(dirname(path))).toEqual([]);
   });
 });

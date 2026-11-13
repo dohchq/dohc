@@ -6,8 +6,6 @@ function window(id: number) {
   return { id, webContents: { id, isDestroyed: () => false, send: vi.fn() } };
 }
 
-// Window 1 was left showing the workspace from before Forget. Window 2 shows
-// the workspace as it is open now. Window 3 shows another workspace.
 function setup() {
   const before = Symbol("before Forget");
   const now = Symbol("open now");

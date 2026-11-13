@@ -140,7 +140,6 @@ describe("crash report intake", () => {
     const refused = await intake(post(REPORT));
     expect(refused.status).toBe(429);
     expect(refused.headers?.["retry-after"]).toBe("3600");
-    // Another address is not held back.
     expect((await intake(post(REPORT, { "x-dohc-auth-client-ip": "203.0.113.8" }))).status).toBe(
       201,
     );
@@ -276,7 +275,6 @@ describe("crash report intake", () => {
     const { store } = memoryStore();
     const endless = upload(Infinity);
     expect((await createCrashReportIntake({ store })(streamPost(endless.body))).status).toBe(413);
-    // It starts no read once it has the limit, so it stops within the chunk that reaches it.
     expect(endless.counted.pulled).toBeGreaterThanOrEqual(CRASH_REPORT_DRAIN_MAX_BYTES);
     expect(endless.counted.pulled).toBeLessThan(CRASH_REPORT_DRAIN_MAX_BYTES + 16 * 1024);
   });

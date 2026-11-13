@@ -353,12 +353,10 @@ it("runs a targeted turn only between ordinary passes, and answers it", async ()
   ordinary.resolve({ documentCount: 1, acknowledged: false });
   await vi.advanceTimersByTimeAsync(0);
   expect(events).toEqual(["ordinary start", "ordinary end", "targeted a,b"]);
-  // No ordinary pass starts while the targeted one runs.
   await vi.advanceTimersByTimeAsync(5000);
   expect(runPass).toHaveBeenCalledTimes(1);
   targeted.resolve(true);
   await expect(answer).resolves.toBe(true);
-  // The ordinary schedule resumes where it was.
   await vi.advanceTimersByTimeAsync(1000);
   expect(runPass).toHaveBeenCalledTimes(2);
   await owner.stop();
@@ -434,7 +432,6 @@ it("lets other workspaces' ordinary documents advance under repeated targeted re
   const ordinary: Array<[string, number]> = [];
   const turns: string[] = [];
   let owner!: ReturnType<typeof startServerOwnerDelivery>;
-  // Each answer asks again at once, as a stream of moves in "one" would.
   let asks = 4;
   const ask = () => {
     if (asks-- > 0) void owner.catchUp("one", ["a"], new AbortController().signal).then(ask);

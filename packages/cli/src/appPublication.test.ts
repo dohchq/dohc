@@ -150,7 +150,6 @@ describe("owner publication review contract", () => {
       OwnerAppPublicationResult.safeParse({ kind: "localListed", publications: [withoutPending] })
         .success,
     ).toBe(false);
-    // An app that reaches no workspace data lists with neither capability.
     const { collectionCapability: _capability, pendingCreates: _pending, ...unconnected } = local;
     expect(
       OwnerAppPublicationResult.parse({ kind: "localListed", publications: [unconnected] }),

@@ -156,7 +156,6 @@ describe("open path failures", () => {
   it("gives every failure a window has not taken, combining those past its limit", () => {
     const f = fixture(2);
     const window = renderer(7, "a");
-    // One launch reports every folder before the window can take any.
     for (const path of ["first", "second", "third", "fourth", "fifth"])
       f.failures.report(path, refused, window);
 
@@ -171,7 +170,6 @@ describe("open path failures", () => {
       },
     ]);
     expect(f.failures.take(window)).toEqual([]);
-    // The window took them, so the next ones are kept apart again.
     f.failures.report("sixth", refused, window);
     expect(f.failures.take(window)).toEqual([expect.objectContaining({ path: "sixth" })]);
   });
@@ -205,7 +203,6 @@ describe("open path failures", () => {
     for (const path of ["first", "second"]) f.failures.report(path, refused, window);
     const [first, second] = f.failures.take(window);
     for (const path of ["third", "fourth"]) f.failures.report(path, refused, window);
-    // Untaken failures stay whatever main holds.
     expect(f.failures.take(window).map((failure) => "path" in failure && failure.path)).toEqual([
       "third",
       "fourth",

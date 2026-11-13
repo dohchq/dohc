@@ -45,7 +45,6 @@ afterEach(() => {
   while (mounts.length) mounts.pop()?.remove();
 });
 
-/** Position of the first callout node in the document. */
 function calloutPos(editor: Editor): number {
   let found = -1;
   editor.state.doc.descendants((node, pos) => {
@@ -55,7 +54,6 @@ function calloutPos(editor: Editor): number {
   return found;
 }
 
-/** Change only the callout title, as a remote/agent edit would. */
 function externallySetTitle(editor: Editor, title: string): void {
   const pos = calloutPos(editor);
   const node = editor.state.doc.nodeAt(pos);
@@ -108,12 +106,9 @@ describe("callout header title staleness", () => {
     const editor = makeEditor("> [!note] Original\n> body");
     const input = titleInput(editor);
 
-    // User focuses the input but types nothing...
     input.focus();
-    // ...while a remote/agent edit renames the callout.
     externallySetTitle(editor, "Remote wins");
 
-    // Blurring must not write the stale focused input back over the remote title.
     input.blur();
 
     expect(liveTitle(editor)).toBe("Remote wins");
@@ -142,12 +137,10 @@ describe("callout header title staleness", () => {
 
     editor.view.dispatch(editor.state.tr.insertText("XYZ ", 1));
 
-    // Same input element (no remint) and the uncommitted edit survives.
     const after = titleInput(editor);
     expect(after).toBe(input);
     expect(after.value).toBe("Uncommitted edit");
 
-    // The edit still commits on blur, proving the input stayed wired up.
     after.blur();
     expect(liveTitle(editor)).toBe("Uncommitted edit");
   });
@@ -163,8 +156,6 @@ describe("callout header title staleness", () => {
     input.blur();
     expect(liveTitle(editor)).toBe("First commit");
 
-    // Re-acquire the (possibly reminted) input, type an uncommitted edit, then
-    // Escape: it must restore the current title ("First commit"), not "Original".
     input = titleInput(editor);
     input.focus();
     input.value = "Scratch edit";

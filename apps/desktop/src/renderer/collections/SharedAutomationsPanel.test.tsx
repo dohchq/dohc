@@ -122,7 +122,6 @@ function makeBridge(first: ListCollectionAutomationsResult) {
     replace: (next: ListCollectionAutomationsResult) => {
       current = next;
     },
-    // Main says a shared file's change reached the relay, or the file changed.
     changed: (workspaceId: string) =>
       act(() => {
         for (const listener of listeners) listener({ workspaceId });
@@ -295,7 +294,6 @@ describe("the ⚡ panel of a Collection reached through a share", () => {
       reformat: false,
       submitId: expect.any(String),
     });
-    // On its way, the switch shows where the person put it, and the others wait.
     expect(switchOf("stamp").getAttribute("aria-checked")).toBe("false");
     expect(screen.getByTestId("automation-stamp").textContent).toContain("Waiting to sync");
     expect(switchOf("nudge").disabled).toBe(true);
@@ -312,7 +310,6 @@ describe("the ⚡ panel of a Collection reached through a share", () => {
     expect(screen.getByTestId("automation-nudge").textContent).not.toContain("Waiting to sync");
     expect(document.body.textContent).not.toMatch(/running|stopped/i);
 
-    // Another workspace's change reads nothing; this one's reads the file again.
     replace(shared([valid({ ...stamp, enabled: false }), valid(nudge)], { contentHash: NEXT }));
     const reads = bridge.listCollectionAutomations.mock.calls.length;
     changed("ws-other");
@@ -346,7 +343,6 @@ describe("the ⚡ panel of a Collection reached through a share", () => {
         expect.any(Function),
       ),
     );
-    // The panel shows the file as it is now, and nothing beside the entry.
     expect(switchOf("stamp").getAttribute("aria-label")).toBe("Stamp the date");
     expect(switchOf("stamp").getAttribute("aria-checked")).toBe("true");
     expect(screen.getByTestId("automation-stamp").textContent).not.toMatch(
@@ -429,7 +425,6 @@ describe("the ⚡ panel of a Collection reached through a share", () => {
     );
     await waitFor(() => expect(switchOf("stamp").getAttribute("aria-checked")).toBe("true"));
 
-    // Try again switches over the file as main reads it then.
     bridge.switchCollectionAutomation.mockResolvedValueOnce({
       status: "unknown",
       submitId: "submit-2",
@@ -474,7 +469,6 @@ describe("the ⚡ panel of a Collection reached through a share", () => {
         expectedContentHash: NEXT,
       }),
     );
-    // Its outcome still reaches Notices with the panel closed.
     expect(onError).toHaveBeenLastCalledWith(
       'dohc could not switch "Stamp the finish date" off.',
       expect.any(Error),
@@ -579,7 +573,6 @@ describe("the ⚡ panel of a Collection reached through a share", () => {
     const { rerender } = render(<Panel />);
     await screen.findByTestId("automation-nudge");
     const reads = bridge.listCollectionAutomations.mock.calls.length;
-    // Main found it in a newer read of the file than the panel's.
     replace(shared([valid(nudge), valid({ ...stamp, enabled: false })], { contentHash: NEXT }));
     rerender(<Panel focus={{ automationId: "stamp", run: null, controls: true, seq: 1 }} />);
     await waitFor(() =>

@@ -68,7 +68,6 @@ function bridgeFor(text: string, engine: "record" | "no-record") {
   const bridgeMock = {
     platform: "linux" as const,
     onWorkspaceActivity: vi.fn(() => () => undefined),
-    // A lossy note's band asks the engine whether it holds a change.
     readHeldChange: vi.fn(async () => ({ change: null })),
     onNoticesChanged: vi.fn(() => () => undefined),
     readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(async () => ({
@@ -112,7 +111,6 @@ function bridgeFor(text: string, engine: "record" | "no-record") {
   return bridgeMock;
 }
 
-// The wait: the note's text in read mode, Edit held, and the opening state.
 async function expectWaiting() {
   await waitFor(() =>
     expect(screen.getByTestId("view-markdown").textContent).toContain("Paragraph 1 of plain text"),
@@ -129,8 +127,6 @@ describe("a note past read mode's size", () => {
     const bridge = bridgeFor(LARGE_LOSSY, "record");
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
-    // The session binds first. Until the check answers, the note stays in read
-    // mode, opening, with no editor to take keys.
     await waitFor(() => expect(bridge.openEngineYDocSession).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(pending).toHaveLength(1));
     await expectWaiting();

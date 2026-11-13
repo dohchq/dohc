@@ -74,8 +74,6 @@ describe("ChatsView composer-first threads (anti-forum)", () => {
     renderView(vi.fn(), vi.fn(), { onThreadStarted });
 
     await user.click(await screen.findByTestId("chats-channel"));
-    // The channel view offers exactly one input: the composer. No title
-    // field exists on this path.
     const composer = await screen.findByTestId("chats-new-thread-composer");
     expect(document.querySelectorAll("input")).toHaveLength(0);
     await user.type(composer, "Should we ship on Friday?{Enter}");
@@ -87,8 +85,6 @@ describe("ChatsView composer-first threads (anti-forum)", () => {
         body: "Should we ship on Friday?",
       }),
     );
-    // Lands inside the new thread with the message rendered; the snippet is
-    // the display title.
     expect((await screen.findByTestId("chats-thread-title")).textContent).toBe(
       "Should we ship on Friday?",
     );

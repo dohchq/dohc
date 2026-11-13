@@ -1111,8 +1111,6 @@ describe("sync relay handler", () => {
     expect(put.status).toBe(200);
     const get = await h(request("a", "/sync/workspace-a/keys", { method: "GET" }));
     await expect(get.text()).resolves.toBe(envelope);
-    // The GET exposes the current fingerprint + write time so clients can
-    // detect a replaced envelope.
     expect(get.headers.get("etag")).toBe(`"${sha256(envelope)}"`);
     expect(get.headers.get("x-key-envelope-updated-at-ms")).toBe("1234");
 
@@ -1143,38 +1141,30 @@ describe("sync relay handler", () => {
     expect(create.status).toBe(200);
     expect(await json(create)).toMatchObject({ ok: true, sha256: sha256(first) });
 
-    // Concurrent-enroll race: a second unconditional PUT with different
-    // content loses — exactly one winner, nothing clobbered.
     const racingCreate = await h(putKeys(second));
     expect(racingCreate.status).toBe(409);
     await expect(
       (await h(request("a", "/sync/workspace-a/keys", { method: "GET" }))).text(),
     ).resolves.toBe(first);
 
-    // A byte-identical re-PUT is an idempotent retry, not a replacement.
     const retry = await h(putKeys(first));
     expect(retry.status).toBe(200);
     expect(keyEnvelopeHistory(storagePath(storage), "workspace-a")).toEqual([]);
 
-    // Stale CAS: If-Match naming anything but the current envelope is a 409.
     const stale = await h(putKeys(second, sha256(third)));
     expect(stale.status).toBe(409);
     const malformedIfMatch = await h(putKeys(second, "not-a-sha"));
     expect(malformedIfMatch.status).toBe(400);
 
-    // Correct CAS replaces, and the GET fingerprint moves with it.
     const replace = await h(putKeys(second, sha256(first)));
     expect(replace.status).toBe(200);
     const afterReplace = await h(request("a", "/sync/workspace-a/keys", { method: "GET" }));
     await expect(afterReplace.text()).resolves.toBe(second);
     expect(afterReplace.headers.get("etag")).toBe(`"${sha256(second)}"`);
 
-    // A now-stale writer (still holding first's fingerprint) is rejected.
     const lostRace = await h(putKeys(third, sha256(first)));
     expect(lostRace.status).toBe(409);
 
-    // Lockout stays recoverable server-side: the replaced envelope is
-    // retained byte-for-byte with an audit trail of when and by what.
     expect(keyEnvelopeHistory(storagePath(storage), "workspace-a")).toEqual([
       {
         envelopeJson: first,
@@ -1441,8 +1431,6 @@ describe("sync relay handler", () => {
         ).toBe(200);
       }
 
-      // Append a ydoc.update op referencing the update blob. The relay is content
-      // agnostic (dumb log), but referencedBlobShas must recognize the reference.
       const appended = await h(
         request(
           "a",
@@ -1479,7 +1467,6 @@ describe("sync relay handler", () => {
       const gc = await json(
         await h(request("a", "/sync/workspace-a/maintenance/gc", { method: "POST" })),
       );
-      // Only the orphan is reclaimed; the live ydoc update blob is a root.
       expect(gc).toEqual({ ok: true, removed: 1, removedSha256s: [orphanSha] });
       expect(
         (await h(request("a", `/sync/workspace-a/blobs/${updateSha}`, { method: "GET" }))).status,
@@ -1499,7 +1486,6 @@ describe("sync relay handler", () => {
     const content = Buffer.from("blob-in-flight");
     const contentSha = sha256(content);
 
-    // The blob is uploaded.
     expect(
       (
         await h(
@@ -1508,8 +1494,6 @@ describe("sync relay handler", () => {
       ).status,
     ).toBe(200);
 
-    // GC runs in the gap before the log append. The blob is younger than the
-    // grace window, so it is not reclaimed.
     const gc = await json(
       await h(request("a", "/sync/workspace-a/maintenance/gc", { method: "POST" })),
     );
@@ -1518,7 +1502,6 @@ describe("sync relay handler", () => {
       (await h(request("a", `/sync/workspace-a/blobs/${contentSha}`, { method: "GET" }))).status,
     ).toBe(200);
 
-    // The referencing log op is appended against durable content.
     expect(
       (
         await h(
@@ -1541,8 +1524,6 @@ describe("sync relay handler", () => {
       ).status,
     ).toBe(200);
 
-    // Once the blob has aged past the grace window and is referenced by the log,
-    // it stays (referenced). An unreferenced aged blob is still collectible.
     clock.now += 10 * 60 * 1000 + 1;
     const gcLater = await json(
       await h(request("a", "/sync/workspace-a/maintenance/gc", { method: "POST" })),
@@ -1582,8 +1563,6 @@ describe("sync relay handler", () => {
     );
     expect(rejected.status).toBe(422);
     expect(await json(rejected)).toMatchObject({ ok: false, code: "blob_missing" });
-    // No partial append: the log stays empty, so it holds no durable reference
-    // to a blob the relay cannot serve.
     const log = await json(
       await h(request("a", "/sync/workspace-a/log?since=0", { method: "GET" })),
     );
@@ -2248,7 +2227,6 @@ describe("sync relay handler", () => {
     const postOp = () =>
       h(request("a", "/sync/workspace-a/log", jsonBody({ originId: "origin-a", ops: [op0] })));
 
-    // Uploaded, then GC'd before any log row references it.
     expect(
       (
         await h(
@@ -2262,7 +2240,6 @@ describe("sync relay handler", () => {
     );
     expect(gc).toEqual({ ok: true, removed: 1, removedSha256s: [contentSha] });
 
-    // The append that would resurrect a dangling reference is rejected.
     const rejected = await postOp();
     expect(rejected.status).toBe(422);
     expect(await json(rejected)).toMatchObject({ ok: false, code: "blob_missing" });
@@ -2270,8 +2247,6 @@ describe("sync relay handler", () => {
       (await json(await h(request("a", "/sync/workspace-a/log?since=0", { method: "GET" })))).ops,
     ).toEqual([]);
 
-    // Two-phase happy path: re-upload the blob, then the same append lands
-    // cleanly against durable content.
     expect(
       (
         await h(
@@ -2301,24 +2276,17 @@ describe("sync relay handler", () => {
     }
   });
 
-  // CodeRabbit Stability: the key envelope + its append-only history count
-  // toward the quota, so a workspace cannot bypass the cap by rotating the
-  // envelope over and over.
   it("counts key-envelope storage (including rotation history) against the quota", async () => {
     const first = keyEnvelopeJson("Zmlyc3Q=");
     const storage = await testStorage({ workspaceQuotaBytes: first.length + 10 });
     const h = handler(storage);
     await createWorkspace(h);
 
-    // The create fits under the cap.
     expect((await h(putKeys(first))).status).toBe(200);
-    // A rotation moves the prior envelope into history and adds the new one, so
-    // usage would roughly double -- over the cap, rejected as quota_exceeded.
     const second = keyEnvelopeJson("c2Vjb25k");
     const rotated = await h(putKeys(second, sha256(first)));
     expect(rotated.status).toBe(413);
     expect(await json(rotated)).toMatchObject({ ok: false, code: "quota_exceeded" });
-    // The original envelope is intact (the rejected rotation changed nothing).
     const current = await h(request("a", "/sync/workspace-a/keys", { method: "GET" }));
     expect(await current.text()).toBe(first);
   });
@@ -2689,8 +2657,6 @@ describe("sync relay epoch and stream identity enforcement", () => {
       ).status,
     ).toBe(200);
 
-    // Supersede two distinct streams under the same epoch number. The
-    // three-column PK must retain both historical coordinates.
     expect(
       (
         await h(
@@ -3028,8 +2994,6 @@ describe("sync relay epoch and stream identity enforcement", () => {
       ),
     );
     expect(malformedNewClaim.status).toBe(400);
-    // A different owner can still claim it as genuinely new, proving the 400
-    // did not leave behind a reserved workspace row.
     const properClaim = await h(
       request(
         "b",
@@ -3115,8 +3079,6 @@ describe("sync relay epoch and stream identity enforcement", () => {
     expect((await push("origin-b", [op(0, { origin: "b", n: 0 })])).status).toBe(200);
     expect((await push("origin-b", [op(1, { origin: "b", n: 1 })])).status).toBe(200);
 
-    // origin-partitioned never reaches the relay; another origin continues
-    // independently and is accepted under the same workspace identity.
     expect((await push("origin-connected", [op(0, { connected: true })])).status).toBe(200);
     const pulled = await h(
       request("a", `/sync/workspace-a/log?since=0&${identityQuery()}`, { method: "GET" }),
@@ -3506,7 +3468,6 @@ describe("MU-C0 verified chat authorship", () => {
     expect(admitted.status).toBe(200);
     expect(await logOps(h)).toHaveLength(2);
 
-    // A registered kind whose marker names anyone but the pusher.
     for (const marker of ["victim", "", 7, null]) {
       const refused = await h(
         request(
@@ -3518,8 +3479,6 @@ describe("MU-C0 verified chat authorship", () => {
       expect(refused.status).toBe(403);
       expect(await json(refused)).toMatchObject({ ok: false, code: "authorship_mismatch" });
     }
-    // An unregistered kind can't opt itself in: an authored chat kind, a
-    // structural one, a kind no policy names, and an opaque non-chat op.
     for (const unregistered of [
       messageOp(2, "a"),
       {
@@ -3574,7 +3533,6 @@ describe("MU-C0 verified chat authorship", () => {
     );
     expect(mixed.status).toBe(403);
     expect(await json(mixed)).toMatchObject({ ok: false, code: "authorship_mismatch" });
-    // Atomic: the valid op in the same batch was not admitted either.
     expect(await logOps(h)).toEqual([]);
   });
 
@@ -3582,8 +3540,6 @@ describe("MU-C0 verified chat authorship", () => {
     const storage = await testStorage();
     const h = handler(storage);
     await createWorkspace(h);
-    // A non-chat op that happens to carry an authorId belonging to someone else
-    // is not a chat op, so the authorship gate ignores it.
     const opaque = await h(
       request(
         "a",
@@ -3646,10 +3602,6 @@ describe("MU-C0 verified chat authorship", () => {
   });
 
   it("Rejects an unknown chat.* op carrying author-shaped fields (fail-closed completeness)", async () => {
-    // A future authored chat op (here a made-up chat.thread.update) that carries
-    // an author-shaped field we have not taught the policy to verify must be
-    // refused, not admitted unverified. Shipping a new authored chat op without
-    // extending CHAT_OP_POLICY fails closed.
     const storage = await testStorage();
     const h = handler(storage);
     await createWorkspace(h);

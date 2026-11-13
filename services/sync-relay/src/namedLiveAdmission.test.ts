@@ -15,7 +15,6 @@ import { createLiveValidationExecutor } from "./liveValidation";
 import type { StorageContext } from "./storage/context";
 import type { CapacityLiveAdmissionValidator } from "./ownerOutboxDelivery";
 
-// Lets a test intercept the validation pool's children as they start.
 const forks = vi.hoisted(() => ({
   started: undefined as ((child: ChildProcess) => void) | undefined,
 }));

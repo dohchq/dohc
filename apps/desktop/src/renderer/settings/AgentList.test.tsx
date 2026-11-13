@@ -176,7 +176,6 @@ function renderList(fields: Partial<Parameters<typeof AgentList>[0]> = {}) {
   };
 }
 
-// The list's row for an agent, which opens its page.
 const row = (name: string) => {
   const found = screen
     .queryAllByTestId("agent-row")
@@ -187,7 +186,6 @@ const row = (name: string) => {
 const page = () => within(screen.getByTestId("agent-page"));
 const state = (name: string) => within(row(name)).getByTestId("agent-state").textContent;
 
-// Opens an agent's page from the list, going back first from another agent's page.
 async function openAgent(name: string) {
   const open = screen.queryByTestId("agent-page");
   if (open?.getAttribute("aria-label") === name) return page();
@@ -203,7 +201,6 @@ async function chooseAction(name: string, action: string) {
   await userEvent.click(screen.getByRole("button", { name: `${name} actions` }));
   await userEvent.click(screen.getByRole("menuitem", { name: action }));
 }
-// Remove on the agent's page, confirmed in its dialog.
 async function removeAgent(name: string) {
   await openAgent(name);
   await userEvent.click(page().getByRole("button", { name: `Remove ${name}…` }));
@@ -248,7 +245,6 @@ it("checks the agent again from the failed check's toast", async () => {
   });
   expect(page().getByText(/^Replied in \d+ s$/)).toBeTruthy();
 
-  // While a check can't start, Try again says why, and can be tried again.
   const running = deferred<RunnerSelfTestResult>();
   bridgeMock.runnerSelfTest.mockReturnValueOnce(running.promise);
   await check("Claude Code");
@@ -292,7 +288,6 @@ it("pauses every agent dohc starts that is on, and leaves the rest as they are",
   );
   expect(state("Claude Code")).toBe("Your command·Paused");
   expect(state("Codex")).toBe("Codex·Paused");
-  // An agent that is off has nothing to pause.
   expect(state("Codex off")).toBe("Your command·Off");
   expect(state("Claude in Terminal")).toBe("Through MCP");
   const codex = await openAgent("Codex");
@@ -337,12 +332,10 @@ it("names a new agent, picks its color, and keeps a typed name when the choice c
   await openAdd();
   await within(runsWith("codex")).findByText("Ready");
   const name = sheet().getByRole<HTMLInputElement>("textbox", { name: "Name" });
-  // The name follows the choice until the person types one.
   expect(name.value).toBe("Codex 2");
   await userEvent.click(runsWith("mcp"));
   expect(name.value).toBe("Agent");
   await userEvent.clear(name);
-  // An empty name says so only once Add agent is pressed.
   expect(sheet().queryByRole("alert")).toBeNull();
   await userEvent.click(screen.getByTestId("agent-add-confirm"));
   expect(sheet().getByRole("alert").textContent).toBe("Enter an agent name.");
@@ -412,7 +405,6 @@ it("doesn't check an agent added in one workspace after the panel moves to anoth
   expect(bridgeMock.runnerSelfTest).not.toHaveBeenCalled();
 });
 
-// The order since the choice stays: Undo moves only the agent it chose.
 it("keeps a later automations choice when an earlier one is undone", async () => {
   const claude = testAgent({ name: "Claude Code" });
   const codex = testAgent({ name: "Codex", hue: "blue" });
@@ -434,7 +426,6 @@ it("keeps a later automations choice when an earlier one is undone", async () =>
     source: "stored",
   });
   onNotice.mock.calls[0]![1]!();
-  // Gemini still wakes automations; Codex goes back after Claude Code.
   await vi.waitFor(() =>
     expect(onOrder).toHaveBeenLastCalledWith(
       ["gemini", "default", "codex"],
@@ -442,8 +433,6 @@ it("keeps a later automations choice when an earlier one is undone", async () =>
     ),
   );
 
-  // Claude Code, which Codex followed, was then removed. Codex goes after
-  // Gemini rather than in front of it.
   bridgeMock.getUserSettings.mockResolvedValueOnce({
     settings: { ...SETTINGS, agents: { gemini, codex } },
     source: "stored",
@@ -509,14 +498,12 @@ it("holds Check back in Restricted Mode with the band's words, and adds an agent
   const { onSave, onError } = renderList({ trust: restricted });
   const band = screen.getByTestId("restricted-agents-state");
   expect(band.textContent).toContain(AGENTS_RESTRICTED_MESSAGE);
-  // The band sits above the agents.
   expect(
     band.compareDocumentPosition(screen.getByTestId("agents")) & Node.DOCUMENT_POSITION_FOLLOWING,
   ).toBeTruthy();
   expect(screen.queryByTestId("agents-check-note")).toBeNull();
   await userEvent.click(within(band).getByRole("button", { name: "Trust workspace" }));
   expect(restricted.onTrust).toHaveBeenCalledOnce();
-  // The agent's page keeps the band, and its test waits.
   const codex = await openAgent("Codex");
   expect(screen.getByTestId("restricted-agents-state")).toBeTruthy();
   expect(checkButton().disabled).toBe(true);
@@ -530,14 +517,12 @@ it("holds Check back in Restricted Mode with the band's words, and adds an agent
   expect(bridgeMock.runnerSelfTest).not.toHaveBeenCalled();
   expect(onError).not.toHaveBeenCalled();
   expect(screen.queryByText("Didn't reply.")).toBeNull();
-  // The switch still works.
   await userEvent.click(
     (await openAgent("Codex")).getByRole("switch", { name: "Run Codex on this computer" }),
   );
   expect(onSave).toHaveBeenCalledTimes(2);
 });
 
-// Fix P: a Try again kept after the panel closed.
 it("asks main whether the workspace is restricted when a closed panel's Try again runs", async () => {
   bridgeMock.runnerSelfTest.mockResolvedValueOnce({ ok: false, detail: "Codex timed out." });
   const { onError, unmount } = renderList({ trust: trust(true) });
@@ -692,7 +677,6 @@ it("says above the sheet's buttons why a reach save failed, and keeps the choice
   expect(alert.textContent).toBe(
     "relay.test could not change Grok Bot right now. Try again shortly.",
   );
-  // The reason sits right above Cancel and Save reach.
   expect(
     alert.nextElementSibling!.contains(dialog.getByRole("button", { name: "Save reach" })),
   ).toBe(true);
@@ -747,7 +731,6 @@ it("removes a signed-out agent, and Undo brings it back signed out", async () =>
     agentId: NOVA_ID,
     change: { kind: "remove" },
   });
-  // Its page goes with it, and focus goes to the Agents heading.
   act(() => personalListener!({ accounts: [account([GROK])] }));
   expect(screen.queryByTestId("agent-page")).toBeNull();
   expect(personalIds()).toEqual([GROK_ID]);
@@ -783,12 +766,10 @@ it("opens the agent a notice names on a page of its own, with that agent's reach
       { name: "Comment" },
     ),
   );
-  // Open on Iris's sign-in toast.
   rerender({ openAgent: { agentId: irisId } });
   await waitFor(() =>
     expect(screen.getByTestId("agent-page").getAttribute("aria-label")).toBe("Iris"),
   );
-  // Grok's sheet closed with Grok's page.
   expect(screen.queryByRole("dialog")).toBeNull();
   await userEvent.click(page().getByRole("button", { name: "Change what Iris can reach" }));
   const irisSheet = within(screen.getByRole("dialog", { name: "Change what Iris can reach" }));
@@ -878,7 +859,6 @@ it("lists archived agents and removed agents' chats under Archived, with their a
   };
   const { onNotice } = renderList({ settings });
   const archived = within(await screen.findByTestId("agents-archived"));
-  // Codex moves from the main list to Archived; a chat taken off the list stays off.
   expect(
     screen.queryAllByTestId("agent-row").map((element) => element.getAttribute("aria-label")),
   ).toEqual(["Claude Code", "Claude in Terminal"]);
@@ -922,13 +902,11 @@ it("lists archived agents and removed agents' chats under Archived, with their a
     }),
   );
 
-  // An archived agent's page opens from its row, and Remove asks there too.
   await userEvent.click(archived.getByRole("button", { name: "Remove Codex…" }));
   expect(within(screen.getByTestId("remove-agent-dialog")).getByText("Remove Codex?")).toBeTruthy();
   await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
   await userEvent.click(archived.getByRole("button", { name: "Codex" }));
   expect(screen.getByTestId("agent-page").dataset.agentId).toBe("codex");
-  // Back focuses its row under Archived.
   await back();
   expect(document.activeElement).toBe(
     within(screen.getByTestId("agents-archived")).getByRole("button", { name: "Codex" }),

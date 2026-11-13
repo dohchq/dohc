@@ -58,7 +58,6 @@ it.each(["native", "registry"] as const)(
           preserveAgentRun: true,
         }),
       ).toBe(true);
-      // A closed activity can still own a run; a mismatched close must leave it alone.
       await activity.close(workspace, state, { expectedRootPath: other });
       expect(activity.hasAgentRun(state)).toBe(true);
       await activity.close(workspace, state, { expectedRootPath: expectedRoot });

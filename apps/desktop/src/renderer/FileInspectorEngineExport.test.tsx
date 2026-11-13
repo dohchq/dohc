@@ -153,7 +153,6 @@ describe("engine-mode export with no mounted serializer", () => {
 
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
-    // The timeout notice is up and the document is read-only beside it.
     await screen.findByTestId("engine-may-hold-document-notice");
 
     await user.click(screen.getByTestId("document-menu-trigger"));
@@ -201,12 +200,10 @@ describe("engine-mode export with no mounted serializer", () => {
   it("refuses the export while the engine open is still unresolved", async () => {
     const user = userEvent.setup();
     const bridge = engineBridge(DOC_MARKDOWN);
-    // The open never answers: the whole test sits inside the opening window.
     const openEngineYDocSession = vi.fn(async () => await new Promise<never>(() => {}));
     vi.stubGlobal("dohcDesktop", { ...bridge, openEngineYDocSession });
 
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
-    // The document is on screen through the local branch while it opens.
     await screen.findByTestId("document-menu-trigger");
 
     await user.click(screen.getByTestId("document-menu-trigger"));

@@ -48,7 +48,6 @@ function Harness(props: {
   );
 }
 
-// An open the test resolves by hand — the capture chain, held.
 function deferredBridge() {
   const doc = new Y.Doc();
   doc.getText("plainText").insert(0, "seed");
@@ -209,8 +208,6 @@ it("never opens for a document the caller has gated off", () => {
 
   render(<Harness path="notes/a.md" enabled={false} />);
 
-  // Truncated reads and read-only shared views are read-only for their own
-  // reasons and never bind a session — they must not inherit an opening wait.
   expect(screen.getByTestId("opening").textContent).toBe("false");
   expect(bridge.api.openEngineYDocSession).not.toHaveBeenCalled();
 });
@@ -236,7 +233,6 @@ it("re-enters opening on the first render of a version switch, not one frame lat
   expect(rendered[0]).toEqual({ opening: true, available: false, hasDoc: false });
   expect(rendered.every((pass) => !pass.available)).toBe(true);
 
-  // And it stays that way until the new open answers.
   expect(screen.getByTestId("opening").textContent).toBe("true");
   await waitFor(() => expect(bridge.api.openEngineYDocSession).toHaveBeenCalledTimes(2));
   bridge.bind();
@@ -271,8 +267,6 @@ it("re-enters opening when the document switches", async () => {
   bridge.bind();
   await waitFor(() => expect(screen.getByTestId("available").textContent).toBe("true"));
 
-  // The next document's open starts over: a bound predecessor must not lend
-  // this one a writable surface before its own session answers.
   view.rerender(<Harness path="notes/b.md" />);
   await waitFor(() => expect(screen.getByTestId("opening").textContent).toBe("true"));
   expect(screen.getByTestId("available").textContent).toBe("false");

@@ -1258,8 +1258,6 @@ describe("moveEngineStoreAside", () => {
 });
 
 describe("rebuildEngineStoreRequest", () => {
-  // An admitted request: the cached status says refused, no agent is running,
-  // and no earlier rebuild answered for this workspace.
   function deps(overrides: Partial<Parameters<typeof rebuildEngineStoreRequest>[1]> = {}) {
     return {
       isStoreRefused: () => true,
@@ -1292,8 +1290,6 @@ describe("rebuildEngineStoreRequest", () => {
     expect(d.rebuildGate.end).toHaveBeenCalledOnce();
   });
 
-  // The request was admitted on a cached rebuild refusal, but the folder now
-  // holds a store only an update opens. Moving it aside would lose it.
   it.each(["migration-failed", "migrated-by-newer-build"] as const)(
     "keeps a store the fresh probe says is %s in place",
     async (refusal) => {
@@ -1489,9 +1485,6 @@ describe("rebuildEngineStoreRequest", () => {
       ),
     ).rejects.toThrow();
 
-    // Recovery threw before the endRebuild() line above ever ran, so the
-    // gate is still raised — the sticky-on-failure rule (unaffected by this
-    // fix). The capture body never started either (probe stays undefined).
     expect(probe).toBeUndefined();
     await expect(sessions.run(workspace, async () => "unexpected")).rejects.toEqual(
       new EngineWorkspaceRebuildingError(workspace.workspaceId),

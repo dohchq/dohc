@@ -158,7 +158,6 @@ async function computer(input: {
     lifetime: lifetime.signal,
     request,
     nextRequestId,
-    /** Pushes what this engine has not sent, and answers how many changes went. */
     async push(): Promise<number> {
       let pushed = 0;
       for (let more = true; more;) {
@@ -472,7 +471,6 @@ it.skipIf(engine.missing)(
       text: "# Plan\n\nStay in Alfama.\n",
     });
 
-    // The change feed reads the relay's log: the page, its file, and the chats the owner's computer wrote.
     const standing = storage.accountFeedStanding(WORKSPACE)!;
     const feed = await relay(
       new Request(`${relayUrl}/sync/${WORKSPACE}/ops/changes?since=${standing.floor}.0.0`, {
@@ -490,7 +488,6 @@ it.skipIf(engine.missing)(
       },
     });
 
-    // A page read writes nothing to the copy, so the copy has nothing to send and the relay's log stays as it was.
     const db = (storage as StorageContext).db;
     const logRows = () =>
       Number(
@@ -520,8 +517,6 @@ it.skipIf(engine.missing)(
     expect(ownerPosition).not.toBeNull();
     expect(readPosition(await read("chat", { group: "planning" }))).toEqual(ownerPosition);
 
-    // The phone shows the thread and marks its newest message read. The copy publishes the mark, and the owner's
-    // computer, once it syncs, shows the thread read.
     expect(await read("markRead", { threadId: post.thread.id, messageId: reply.id })).toEqual({
       ok: true,
     });
@@ -598,7 +593,6 @@ it.skipIf(engine.missing)(
     const ownerChats = engineChats(owner.client, owner.workspace);
 
     const db = (storage as StorageContext).db;
-    // The payloads of the rows of one kind the relay accepted that hold these fields.
     const accepted = (kind: string, fields: Record<string, JsonValue>) =>
       db
         .prepare(
@@ -624,7 +618,6 @@ it.skipIf(engine.missing)(
           .get(WORKSPACE)!.n,
       );
     type Saved = { ok: true; state: "saved"; threadId: string; messageId?: string };
-    // A write the route saved, with its row settled, after which the owner's computer syncs.
     const saved = async (operation: string, args: Record<string, JsonValue>): Promise<Saved> => {
       const result = await route(operation, args);
       expect(result, operation).toMatchObject({
@@ -641,7 +634,6 @@ it.skipIf(engine.missing)(
     const sameStream = async (group: string) =>
       await same("chat", { group }, await readChat(ownerChats, { group }));
 
-    // A post, by the account's name now.
     const post = {
       operationId: "op-post",
       groupId: planning.channelId,
@@ -692,8 +684,6 @@ it.skipIf(engine.missing)(
     await sameThread(postThread);
     await sameStream(planning.channelId);
 
-    // A send into a Group's chat, and one into an empty DM, start their conversations. One into a DM with a running
-    // conversation joins it, and answers with that thread.
     expect(
       (
         await saved("send", {
@@ -726,7 +716,6 @@ it.skipIf(engine.missing)(
     await sameThread(running.thread.id);
     await sameStream(ben.channelId);
 
-    // A reply, and one under the post's message.
     expect(
       (
         await saved("reply", {
@@ -746,7 +735,6 @@ it.skipIf(engine.missing)(
       { parentMessageId: postMessage },
     ]);
 
-    // A question whose choices the engine trims, then the answer that picks one.
     const question = await saved("reply", {
       operationId: "op-question",
       threadId: postThread,
@@ -767,7 +755,6 @@ it.skipIf(engine.missing)(
     ).toMatchObject([{ resolvedByMessageId: answered.messageId, chosenOption: "Alfama" }]);
     await sameThread(postThread);
 
-    // A reaction added, then removed.
     for (const state of ["added", "removed"] as const) {
       await saved("react", {
         operationId: `op-${state}`,
@@ -797,7 +784,6 @@ it.skipIf(engine.missing)(
     });
     await sameThread(gone.id);
 
-    // One on a secret file reads, and takes writes, as a thread that isn't there, and no write is recorded.
     const hidden = { ok: false, reason: `chat thread not found: ${keys.id}`, refusal: "missing" };
     expect(await route("chat", { threadId: keys.id })).toEqual(hidden);
     expect(
@@ -818,7 +804,6 @@ it.skipIf(engine.missing)(
     expect(recorded("op-keys")).toBeUndefined();
     expect(recorded("op-keys-seen")).toBeUndefined();
 
-    // A retry under the account's new name answers from the row: the copy sends nothing, and the post keeps its author.
     name = "Ana Maria";
     const before = logRows();
     expect(await route("post", post)).toEqual(posted);

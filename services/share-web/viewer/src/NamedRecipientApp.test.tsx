@@ -265,7 +265,6 @@ function unloadWarns() {
   window.dispatchEvent(unload);
   return unload.defaultPrevented;
 }
-/** Opens docs/a.md as Alice and returns a way to change its session's state. */
 async function opened() {
   vi.stubGlobal(
     "fetch",

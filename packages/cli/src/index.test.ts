@@ -298,7 +298,6 @@ it("lists, saves, tries again and stops again kept edits with only the caller's 
     stdout: "Saved plan (recovered).dohc-recovery.json\ndohc could not make a readable copy.\n",
     stderr: "",
   });
-  // An incident names exactly which kept edits to save.
   expect(
     (
       await executeCli({
@@ -923,7 +922,6 @@ describe("executeCli", () => {
       stdout: "",
       stderr: "dohc: change not found: moment-9\n",
     });
-    // Unreadable History rules: the list refuses instead of saying there is no History.
     const hidden = {
       ok: false,
       status: "policy-unreadable",
@@ -962,7 +960,6 @@ describe("executeCli", () => {
       undone: false,
     };
     const list = vi.fn(async () => ({ ok: true, runs: [{ ...run, changes: 1 }], next: null }));
-    // A live change through an Edit link names the link, never a person.
     const linked = {
       ...run,
       trigger: {
@@ -1029,7 +1026,6 @@ describe("executeCli", () => {
       verb: "automationRuns",
       args: { cwd: WORKSPACE, actor: "human", collectionPath: "tasks", automation: "stamp" },
     });
-    // Older runs remain: the last line names the page that lists them.
     const paged = vi.fn(async () => ({
       ok: true,
       runs: [{ ...run, changes: 1 }],
@@ -1119,7 +1115,6 @@ describe("executeCli", () => {
       ok: true,
       run: { ...run, steps, failedStep: 3, startsOver: false },
     });
-    // A changed automation's run does not resume; Try again starts over.
     const changed = async () => ({
       ok: true,
       run: { ...run, definitionChanged: true, steps, failedStep: 3, startsOver: true },
@@ -1237,7 +1232,6 @@ describe("executeCli", () => {
         })
       ).stdout,
     ).toBe("sent to the owner's computer, which runs it\n");
-    // A flag value that looks like a global flag stays the flag's value.
     const record = vi.fn(send);
     await executeCli({
       argv: ["automation", "press", "Billing", "Send", "12", "--confirm", "--json"],

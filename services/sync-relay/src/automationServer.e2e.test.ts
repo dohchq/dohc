@@ -41,7 +41,6 @@ afterEach(async () => {
   await closeTestStorages();
 });
 
-// The relay's test seam: "Bearer test:<user>" is that user.
 const testActor: ResolveActor = (request, workspaceId) => {
   const match = /^Bearer test:([A-Za-z0-9_.:-]+)$/u.exec(
     request.headers.get("authorization") ?? "",
@@ -50,7 +49,6 @@ const testActor: ResolveActor = (request, workspaceId) => {
   return { userId: match[1]!, workspaceId };
 };
 
-/** One engine with the workspace open on the relay route and ordinary replication. */
 async function computer(input: {
   root: string;
   relayUrl: string;
@@ -150,7 +148,6 @@ it.skipIf(engine.missing)(
     const key = new Uint8Array(32).fill(7),
       namespace = "automation-server-e2e";
     const server = { label: "My dohc server" };
-    // The relay as main.ts mounts it while it runs automations.
     const relay = createSyncRelayHandler({
       storage,
       resolveActor: testActor,
@@ -182,7 +179,6 @@ it.skipIf(engine.missing)(
     });
     const relayUrl = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
 
-    // The owner's computer makes the Collection and its hourly schedule, and syncs.
     const owner = await computer({
       root: join(root, "owner"),
       relayUrl,
@@ -204,7 +200,6 @@ it.skipIf(engine.missing)(
       );
     }
     await owner.sync();
-    // The owner's computer asks for a host: the relay records the server.
     const checkIn = await relay(
       new Request(`${relayUrl}/sync/${WORKSPACE}/automation-host/check-in`, {
         ...jsonBody({ installId: "laptop", label: "Laptop", claim: true }),
@@ -217,7 +212,6 @@ it.skipIf(engine.missing)(
 
     await owner.close();
 
-    // The server joins as the owner and opens its copy.
     const row = storage.joinAutomationWorkspace({
       workspaceId: WORKSPACE,
       nowMs: Date.now(),
@@ -234,7 +228,6 @@ it.skipIf(engine.missing)(
         streamIdentity: row.streamIdentity,
       },
     });
-    // The replicas module pulls a copy when it opens it.
     await copy.sync();
     const metadataDir = join(root, "server", "metadata");
     await mkdir(metadataDir, { recursive: true });
@@ -304,10 +297,8 @@ it.skipIf(engine.missing)(
     });
     cleanup.push(() => running.close());
     hooks!.onChanged?.(WORKSPACE);
-    // The first step marks the schedule at the server's start; nothing before it runs.
     await vi.waitFor(() => expect(timers.length).toBeGreaterThan(0), { timeout: DEADLINE_MS });
 
-    // An hour and a half later on the server's clock, its due time runs.
     clock += 90 * 60_000;
     timers.splice(0).forEach((wake) => wake());
     const serverAdapter = new VersionedLiveAdapter(copy.client, copy.workspace, {

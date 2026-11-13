@@ -226,7 +226,6 @@ describe("an automation's messages on this server", () => {
       id: "message-auto-1",
     });
     await expect(writeWith()).rejects.toBe(refused);
-    // Only this automation's message, in the Group the effect named, counts.
     await expect(
       writeWith([{ ...sentByTell("message-auto-1"), author: { kind: "human" } }]),
     ).rejects.toBe(refused);

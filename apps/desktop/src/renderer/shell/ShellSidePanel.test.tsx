@@ -88,7 +88,6 @@ describe("apps pinned to the sidebar", () => {
     const shell = await screen.findByTestId("workspace-shell");
     await waitFor(() => expect(shell.dataset.ready).toBe("true"));
     expect(screen.queryByTestId("activity-graph")).toBeNull();
-    // The pin carries its app's title once dohc has read the app.
     const pinned = await screen.findByRole("button", { name: "Trip planner" });
     await user.click(pinned);
 

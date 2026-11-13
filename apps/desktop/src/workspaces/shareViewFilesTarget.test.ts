@@ -77,8 +77,6 @@ describe("resolveRegisteredShareViewFilesTarget", () => {
     expect(resolve(resolved!.rootPath)).not.toBe(resolve(resolved!.schedulingRootPath));
   });
 
-  // The engine keys a standalone view's open by its attachment, and that open
-  // is what lets the view write its refresh records in `.dohc/local`.
   it("carries a standalone view's attachment, and none for a mount's own store", () => {
     const attachmentId = Symbol("attached view");
     const record = mount("owner");

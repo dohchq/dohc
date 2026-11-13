@@ -12,7 +12,6 @@ import {
   resetSharedLocalDocumentsForTests,
 } from "./sharedLocalDocument";
 
-// Each row's gutter, by row number, every time a row renders.
 const gutterRenders = vi.hoisted(() => [] as Array<number | undefined>);
 vi.mock("./ui/DataGrid", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./ui/DataGrid")>();
@@ -29,7 +28,6 @@ const writeWorkspaceText = vi.fn<DohcDesktopBridge["writeWorkspaceText"]>();
 const releases: Array<() => void> = [];
 const buffers: Array<ReturnType<typeof acquireSharedLocalDocument>["buffer"]> = [];
 
-// A CSV as FileInspector hands it to its view.
 function csvFile(body: string) {
   const { buffer, release } = acquireSharedLocalDocument(
     documentVersionKey("ws-1", "funnel.csv", undefined),
@@ -53,7 +51,6 @@ function csvFile(body: string) {
   };
 }
 
-// The text that sets a column's width.
 const widthText = (column: number) =>
   screen.getByTestId("data-grid-widths").querySelectorAll("td")[column + 1]!.textContent;
 

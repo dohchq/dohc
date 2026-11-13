@@ -16,8 +16,6 @@ import {
   pullAndExpect,
 } from "./twoDaemonSync.fixture";
 
-// Quit stops waiting for a relay push the server has not answered. The
-// engine has not acknowledged the edit, so the next launch sends it.
 it.skipIf(engine.missing)(
   "sends an edit whose push was unanswered at quit on the next launch",
   async () => {

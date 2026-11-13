@@ -196,7 +196,6 @@ it.each([
   const trigger = screen.getByRole("button", { name: "Color for Orbit" });
   await user.click(trigger);
   expect(document.activeElement).toBe(swatch("Plum"));
-  // A scroll inside the popover is its own and keeps it open.
   fireEvent.scroll(dialog()!);
   expect(dialog()).not.toBeNull();
   act(move);
@@ -299,7 +298,6 @@ it("puts the choice on an agent's message in a conversation, and saves it with t
     </AgentColorContext.Provider>,
   );
   expect(screen.queryByRole("button", { name: "Color for Sam" })).toBeNull();
-  // The name and the sparkle take the avatar's plum; the person's name stays ink.
   const authors = await screen.findAllByTestId("chat-message-author");
   expect(
     authors.map((author) => author.querySelector(".text-hue-plum")?.textContent ?? null),

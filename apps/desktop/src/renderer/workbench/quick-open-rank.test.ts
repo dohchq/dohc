@@ -30,7 +30,6 @@ describe("quick-open match tiers", () => {
       "a/x note.md",
       "a/note/y.md",
     ]) {
-      // A word-boundary match sits between a basename prefix and a substring.
       expect(rank("note", ["a/xnote.md", path, "long/dir/note.md"]), path).toEqual([
         "long/dir/note.md",
         path,
@@ -86,8 +85,6 @@ describe("rankPreparedQuickOpenPaths", () => {
   });
 
   it("ties break by shorter path then alphabetical; non-matches drop", () => {
-    // Both notes.md basenames are tier 0 (basename prefix) — shorter path
-    // first; the boundary matches (a-/b-notes.md) follow alphabetically.
     const ranked = rank("note", [
       "deep/dir/notes.md",
       "notes.md",

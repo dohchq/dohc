@@ -54,7 +54,6 @@ async function relay() {
   return storage;
 }
 
-// Records a phone message's operation, then its verdict with the wake change, as publication does.
 function record(
   storage: SyncRelayStorage,
   operationId: string,
@@ -149,7 +148,6 @@ it("creates the chat wake tables on an older relay once, and refuses an unmarked
   closeTestStorage(upgraded);
   const first = marker();
   expect(first).toEqual({ migration_id: MARKER, completed_at_ms: expect.any(Number) });
-  // Marked, it is checked and kept as it is.
   const reopened = reopenTestStorage(path);
   expect(
     reopened.enabledChatRunners({ accountId: "ana", workspaceId: "trip", nowMs: NOW }),
@@ -177,7 +175,6 @@ it("deletes runners and wakes with their workspace, keeps retries' bindings, and
     context.db
       .prepare("UPDATE sync_relay_workspaces SET owner_user_id = ? WHERE workspace_id = ?")
       .run(ownerUserId, workspaceId);
-  // A wake that wasn't confirmed, tried again under `operationId`.
   const retried = (accountId: string, workspaceId: string, operationId: string) => {
     // The computer the retry moves to holds a leased declaration.
     expect(
@@ -234,7 +231,6 @@ it("deletes runners and wakes with their workspace, keeps retries' bindings, and
   expect(declare("ben", "trip"), "only the owner declares").toBe(false);
   retried("ana", "trip", "retry-trip");
   retried("ben", "bens", "retry-bens");
-  // Ben's wake in a workspace he owned then, which Ana owns when her account goes.
   owner("other", "ben");
   publish(storage, "op-ben-other", "message-other", [target("claude", "mac", "laptop")], {
     accountId: "ben",
@@ -337,12 +333,10 @@ it("makes a published message's wakes in its verdict's transaction, holds an ans
     prerequisite_message_id: "question-1",
   });
 
-  // A later verdict makes no second row, and leaves the first as it was.
   const before = wakes(storage);
   message(published, { stage: "saved" });
   expect(wakes(storage)).toEqual(before);
 
-  // A wake that can't be stored rolls the message's publication back with it.
   const failing = record(storage, "op-4");
   expect(() =>
     failing({
@@ -395,7 +389,6 @@ it("gives a waiting wake to its first candidate's claim, answers the winner afte
   expect(queued("mac")).toMatchObject({ state: "queued" });
   expect(queued("mac")).toMatchObject({ state: "queued" });
 
-  // Once the account no longer owns the workspace, its wakes there answer as missing.
   (storage as StorageContext).db
     .prepare("UPDATE sync_relay_workspaces SET owner_user_id = 'ben' WHERE workspace_id = 'trip'")
     .run();
@@ -466,7 +459,6 @@ it("retries a wake that didn't start or wasn't confirmed once per generation, bo
   expect(retry("retry-0"), "still waiting").toEqual({ kind: "refused" });
   storage.claimChatWake({ accountId: "ana", wakeId: source, installId: "mac", nowMs: NOW });
 
-  // Unconfirmed, it is tried on another computer: the winner leaves the candidates.
   const next = wakeOf("message-1", "claude", 2);
   expect(retry("retry-1")).toEqual({
     kind: "retried",
@@ -507,7 +499,6 @@ it("retries a wake that didn't start or wasn't confirmed once per generation, bo
     wake: { wakeId: next },
   });
   expect(count(storage, "sync_relay_chat_wakes")).toBe(3);
-  // That answer binds its key too.
   expect(retry("retry-2", wakeOf("message-2", "codex"))).toEqual({ kind: "mismatch" });
   expect(
     storage.recordAccountOperation({
@@ -523,7 +514,6 @@ it("retries a wake that didn't start or wasn't confirmed once per generation, bo
     }),
   ).toEqual({ kind: "mismatch" });
 
-  // The old winner can't claim the new generation; its late queued settles only its own row.
   expect(
     storage.claimChatWake({ accountId: "ana", wakeId: next, installId: "mac", nowMs: NOW + 1 }),
   ).toBeNull();
@@ -537,13 +527,11 @@ it("retries a wake that didn't start or wasn't confirmed once per generation, bo
   ).toMatchObject({ state: "queued" });
   expect(wakes(storage).find((row) => row.wake_id === next)).toMatchObject({ state: "waiting" });
 
-  // With its only candidate the winner, an unconfirmed wake has no other computer to try.
   const single = wakeOf("message-2", "codex");
   storage.claimChatWake({ accountId: "ana", wakeId: single, installId: "mac", nowMs: NOW });
   expect(retry("retry-3", single)).toEqual({ kind: "refused" });
   expect(count(storage, "sync_relay_chat_wakes")).toBe(3);
 
-  // Another workspace's, or another account's, answers as missing.
   publish(storage, "op-other", "message-other", [target("claude", "mac")], {
     workspaceId: "other",
   });

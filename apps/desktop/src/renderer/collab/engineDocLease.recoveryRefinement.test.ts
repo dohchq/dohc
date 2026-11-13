@@ -153,8 +153,6 @@ it("refines the newest refused snapshot, not the one each edit queued", async ()
   });
   await waitFor(() => expect(drafts.result.current.at(-1)?.text).toContain("edit-2"));
 
-  // The newest snapshot's projection fails. The first edit's refinement — the
-  // one queued behind it — must not answer for it.
   failProjectionCall = 2;
   release();
   await waitFor(() =>

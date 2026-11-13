@@ -101,7 +101,6 @@ function telemetry(
   });
 }
 
-// A telemetry whose person already saw a notice naming both reports on an earlier launch.
 function shown(
   reporting: Reporting | null = REPORTING,
   overrides: Parameters<typeof telemetry>[1] = {},
@@ -110,7 +109,6 @@ function shown(
   return telemetry(reporting, overrides);
 }
 
-// Lets both lanes' timers fire.
 const settle = () => vi.advanceTimersByTimeAsync(REPORT_LIMITS.usageFlushMs);
 const anError = (name = "TypeError") =>
   ({ kind: "renderer", origin: "uncaught", error: { name, stack: "" } }) as const;
@@ -454,7 +452,6 @@ describe("what an error report holds", () => {
         "timestamp",
         "uuid",
       ]);
-      // A new random ID for each problem, never the installation's.
       expect(event.distinct_id).toMatch(UUID);
       expect(event.timestamp).toBe(new Date(nowMs).toISOString());
       expect(event.properties).toMatchObject({
@@ -474,7 +471,6 @@ describe("what an error report holds", () => {
     expect(exceptionEvent(errorCalls()[0]!).distinct_id).not.toBe(
       exceptionEvent(errorCalls()[1]!).distinct_id,
     );
-    // Nothing installed a handler of its own.
     expect(
       ["uncaughtException", "unhandledRejection"].map((name) => process.listenerCount(name)),
     ).toEqual(listeners);
@@ -499,7 +495,6 @@ describe("what an error report holds", () => {
       "process",
     ]);
     expect(main.properties).toMatchObject({ process: "main", origin: "uncaughtException" });
-    // The error comes first, then its cause; each stack runs oldest call first.
     const app = (lineno: number, colno: number) => ({
       filename: "app:///dist/main/App-Ab12.js",
       function: "?",
@@ -548,7 +543,6 @@ describe("what an error report holds", () => {
         stacktrace: { type: "raw", frames: [app(5, 6), withheld] },
       },
     ]);
-    // Each file's chunk ID is read once.
     expect(readCode).toHaveBeenCalledTimes(1);
   });
 
@@ -669,7 +663,6 @@ describe("what an error report holds", () => {
     ]);
     for (const call of errorCalls()) {
       expect(String(call.init.body)).not.toContain(SECRET);
-      // The SDK put none of its own frames in place of a missing stack.
       for (const exception of exceptions(call)) expect(exception.mechanism.synthetic).toBe(false);
     }
   });

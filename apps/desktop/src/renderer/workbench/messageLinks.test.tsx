@@ -37,7 +37,6 @@ function mockBridge(
   return make;
 }
 
-// A message's Copy link inside a shell for one workspace.
 function Message(props: { workspaceId: string; sync: Sync }) {
   const make = useMessageLinkMaker({ workspaceId: props.workspaceId, sync: props.sync });
   return (

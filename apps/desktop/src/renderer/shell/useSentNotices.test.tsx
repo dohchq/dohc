@@ -107,11 +107,9 @@ describe("sent notices in a window", () => {
     expect(result.current.notices).toHaveLength(2);
     expect(result.current.toast).toBeNull();
 
-    // Main lists newest first.
     await arrive([notice("newest"), notice("newer"), ...listed]);
     expect(result.current.toast?.noticeId).toBe("newest");
 
-    // One at a time: the next arrival takes the toast.
     await arrive([notice("next"), ...listed]);
     expect(result.current.toast?.noticeId).toBe("next");
     act(() => result.current.hideToast());
@@ -146,7 +144,6 @@ describe("sent notices in a window", () => {
       ["a", true],
     ]);
 
-    // A list that left before main had the marks does not undo them.
     await act(async () => emitChanged?.());
     expect(result.current.notices.map((row) => [row.noticeId, row.readAtMs !== null])).toEqual([
       ["a", true],
@@ -215,8 +212,6 @@ describe("sent notices in a window", () => {
       read = result.current.read([{ store: "account", noticeId: "b" }]);
     });
 
-    // Ben signs in. His notice "b" is his own and unread; his notices were
-    // there before this window saw his list, so none of them toasts.
     await arrive([notice("c"), notice("b")], BEN);
     expect(result.current.notices.map((row) => [row.noticeId, row.readAtMs])).toEqual([
       ["c", null],
@@ -224,7 +219,6 @@ describe("sent notices in a window", () => {
     ]);
     expect(result.current.toast).toBeNull();
 
-    // The mark made on Ana's list still names Ana.
     await act(async () => {
       reading.resolve(undefined);
       await read;
@@ -234,7 +228,6 @@ describe("sent notices in a window", () => {
       mark: "read",
       notices: [{ store: "account", noticeId: "b" }],
     });
-    // Marks made now go out for Ben.
     await act(async () => result.current.dismiss({ store: "account", noticeId: "c" }));
     expect(bridge.markNotices).toHaveBeenLastCalledWith({
       account: BEN,

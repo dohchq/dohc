@@ -5,8 +5,6 @@ import type { KeptCopy, SaveKeptCopyResult } from "../../ipc/bridgeContract";
 import { keptCopyMessage, keptCopyNoNameMessage, useKeptCopyNotices } from "./useKeptCopyNotices";
 import { useShellError } from "./useShellError";
 
-// These wait on async bridge answers; every wait runs until its condition
-// holds, within the test's own budget.
 configure({ asyncUtilTimeout: 10_000 });
 vi.setConfig({ testTimeout: 20_000 });
 
@@ -97,7 +95,6 @@ describe("useKeptCopyNotices", () => {
       keptCopyMessage("b.md"),
     ]);
 
-    // A copy saved elsewhere, by an agent for example, loses its row.
     h.keep([{ id: 3, path: "a.md", keptAtMs: 1 }]);
     await act(async () => await h.result.current.refresh());
     expect(h.result.current.shellErrors).toEqual([]);
@@ -165,7 +162,6 @@ describe("useKeptCopyNotices", () => {
       },
     ]);
 
-    // Once every copy is saved, the summary and the overflow row go too.
     h.keep([]);
     await act(async () => await h.result.current.refresh());
     expect(h.result.current.shellErrors).toEqual([]);

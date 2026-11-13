@@ -117,7 +117,6 @@ describe("engine-mode DocumentMenu exports the live editor body, not stale props
     })),
     readWorkspaceDatabase: vi.fn(async () => ({ tables: [] })),
     exportDocumentFile: vi.fn(async () => ({ saved: true })),
-    // A lossy note's band asks the engine whether it holds a change.
     readHeldChange: vi.fn(async () => ({ change: null })),
     onNoticesChanged: vi.fn(() => () => undefined),
   };
@@ -199,7 +198,6 @@ describe("engine-mode DocumentMenu exports the live editor body, not stale props
     });
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
-    // Editor mounts once the file text loads (async IPC).
     await screen.findByTestId("editor-stub");
 
     // Inline properties always render under the title. In this state
@@ -257,9 +255,6 @@ describe("engine-mode DocumentMenu exports the live editor body, not stale props
     );
   });
 
-  // The canonical TypeScript writer keeps a `__proto__` or `constructor` key,
-  // and an exact integer beside one, in shared Y types. A copy writes the
-  // values, as the file holds them.
   it("copies shared-type frontmatter over the live body", async () => {
     const user = userEvent.setup();
     Object.defineProperty(navigator, "clipboard", {

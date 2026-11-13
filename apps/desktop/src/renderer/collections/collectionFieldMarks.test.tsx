@@ -70,7 +70,6 @@ it("reads a Collection once for every view of it, and again only when main's aut
   expect(record).toBe(table);
   const reads = bridge.listCollectionFieldMarks.mock.calls.length;
 
-  // Another workspace's change reads nothing; this one's reads once, and unchanged marks keep their identity.
   await act(async () => bridge.changed("ws-2"));
   expect(bridge.listCollectionFieldMarks).toHaveBeenCalledTimes(reads);
   await act(async () => bridge.changed("ws-1"));
@@ -104,7 +103,6 @@ it("never shows one workspace's marks in another, and asks nothing for null", as
   );
   workspace.id = "ws-2";
   rerender({ path: "Tasks" });
-  // ws-1 answers after the window moved to ws-2.
   await act(async () => {
     for (const answer of answers.splice(0)) answer();
   });

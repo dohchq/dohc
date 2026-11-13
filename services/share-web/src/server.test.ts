@@ -1761,7 +1761,6 @@ describe("share-web relay call", () => {
             : shareWebRefusalBody,
         );
       expectSecurityHeaders(answer);
-      // Metadata refusal evicts the session; a target refusal keeps it.
       expect(state.calls.map((call) => call.headers.get("authorization"))).toEqual([
         `LinkCapability ${CAP_ALPHA_2}`,
       ]);
@@ -1949,7 +1948,6 @@ describe("share-web relay call", () => {
           body: JSON.stringify({ channelWireId: "wire", body: "Hi", idempotencyKey: "post-1" }),
         }),
       );
-    // Another call inside the refresh window renews the capability while both are held.
     const renewWhileHeld = async (...pending: Promise<Response>[]) => {
       await vi.waitFor(() => expect(held).toHaveLength(pending.length));
       now += 600_001;
@@ -2006,7 +2004,6 @@ describe("share-web relay call", () => {
             capabilityExpiresAtMs: now + 900_000,
           });
         }
-        // The relay refuses the capability the renewal replaced.
         if (relayRequest.headers.get("authorization") === `LinkCapability ${first}`) {
           await new Promise<void>((resolve) => held.push(resolve));
           return new Response(null, { status: 404 });
@@ -2032,7 +2029,6 @@ describe("share-web relay call", () => {
     const answer = await overtaken;
     expect(answer.status).toBe(503);
     expect(await answer.json()).toEqual(linkRefusalBody("link_unavailable"));
-    // The session outlived the refusal, so trying again reads under the renewed capability.
     const retried = await handler(request(path, { headers }));
     expect(retried.status).toBe(200);
     await retried.body?.cancel();
@@ -2445,7 +2441,6 @@ describe("share-web protected discussion proxy", () => {
         expect(independent.status).toBe(200);
         await expectDiscussionUnavailable(twentyFifth);
         expect(alphaActivityCalls).toBe(24);
-        // The busy one backs off; once a hold ends, it is admitted.
         heldResolvers.shift()!(Response.json(publicBody));
         expect((await Promise.race(held)).status).toBe(200);
         const retried = await handler(

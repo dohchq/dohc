@@ -93,7 +93,6 @@ function joined(
 
 type ChannelsUpdate = (channels: readonly JoinedSharedChannel[]) => readonly JoinedSharedChannel[];
 
-// Applies each reservation to the channels as they stand, as the registry does.
 function registryUpdater(registry: Map<string, JoinedSharedChannel[]>) {
   return vi.fn(async (workspaceId: string, update: ChannelsUpdate) => {
     registry.set(workspaceId, [...update(registry.get(workspaceId) ?? [])]);
@@ -140,20 +139,14 @@ describe("parseDmRecipients / dmChannelNameFor", () => {
 });
 
 describe("matchDmChannelByRecipients", () => {
-  // The DM's identity is its live grant recipient set — never the (truncatable,
-  // collidable) display name. Two distinct recipient sets whose names collide at
-  // the 80-char cap must resolve to different channels.
   it("reuses a DM only when its live grant recipient set exactly equals the request, ignoring name collisions", () => {
     const longA = `${"a".repeat(78)}1@example.com`;
     const longB = `${"a".repeat(78)}2@example.com`;
-    // Both derive the same 80-char-capped display name.
     expect(dmChannelNameFor([longA])).toBe(dmChannelNameFor([longB]));
 
-    // Channel c1 is the live DM to longA (wire w1).
     const channels = [{ id: "c1", wireId: "w1" }];
     const liveGrantEmailsByWire = new Map([["w1", new Set([longA])]]);
 
-    // The colliding request (longB) must not reuse c1.
     expect(
       matchDmChannelByRecipients({
         recipients: [longB],
@@ -162,7 +155,6 @@ describe("matchDmChannelByRecipients", () => {
       }),
     ).toBeNull();
 
-    // The same recipient set (longA) reuses c1 (existing behaviour preserved).
     expect(
       matchDmChannelByRecipients({
         recipients: [longA],
@@ -175,7 +167,6 @@ describe("matchDmChannelByRecipients", () => {
   it("requires the full set to match — a subset or superset is a different DM", () => {
     const channels = [{ id: "c1", wireId: "w1" }];
     const liveGrantEmailsByWire = new Map([["w1", new Set(["a@x.com", "b@x.com"])]]);
-    // Superset request (a,b) reuses; subset (a) or a different member (a,c) do not.
     expect(
       matchDmChannelByRecipients({
         recipients: ["a@x.com", "b@x.com"],
@@ -225,7 +216,6 @@ describe("grantDmRecipients", () => {
   });
 
   it("rolls back this call's grants and rethrows when a later grant fails (no half-granted channel)", async () => {
-    // Simulate the grant POST failing on the 2nd of 2 recipients.
     const revoked: string[] = [];
     await expect(
       grantDmRecipients({
@@ -240,7 +230,6 @@ describe("grantDmRecipients", () => {
         },
       }),
     ).rejects.toThrow(/grant POST failed/u);
-    // The first recipient's grant was revoked → the channel has zero live grants.
     expect(revoked).toEqual(["share-a@x.com"]);
   });
 
@@ -348,9 +337,7 @@ describe("grantDmRecipients", () => {
 describe("peekReceivedGrantKind", () => {
   it("pages past a filtered prefix and detects kind:dm on the first served op", async () => {
     const pages = new Map<number, ShareLogPage>([
-      // since=0: workspace.init is filtered out → empty page, cursor advances.
       [0, { ops: [], nextCursor: 1, hasMore: true }],
-      // since=1: the chat.channel.create bootstrap is the first served op.
       [
         1,
         {
@@ -368,7 +355,6 @@ describe("peekReceivedGrantKind", () => {
       },
     });
     expect(kind).toBe("dm");
-    // It actually followed the cursor (did not stop on the empty first page).
     expect(seen).toEqual([0, 1]);
   });
 
@@ -419,7 +405,6 @@ describe("peekReceivedGrantKind", () => {
   it("caps pages scanned but keeps an all-filtered log retryable", async () => {
     let calls = 0;
     const kind = await peekReceivedGrantKind({
-      // Every page is empty but keeps claiming hasMore with an advancing cursor.
       fetchPage: async (since) => {
         calls++;
         return { ops: [], nextCursor: since + 1, hasMore: true };
@@ -487,7 +472,6 @@ describe("peekReceivedGrantKind", () => {
     // channel/thread/message bootstrap. Unknown must not enter the kind cache.
     await expect(peekReceivedGrantKind({ fetchPage })).resolves.toBe("unknown");
     ownerBootstrapVisible = true;
-    // A later poll sees the immutable create and can list the message request.
     await expect(peekReceivedGrantKind({ fetchPage })).resolves.toBe("dm");
   });
 });
@@ -1037,18 +1021,14 @@ describe("DM request decisions", () => {
         declinedShareIds: new Set(),
       });
 
-    // Before leaving: workspace-a holds it, so it is not a pending request.
     expect((await classify()).pending).toEqual([]);
 
-    // Leave: the same endJoinedChannel call leaveDm's IPC handler makes.
     workspaces[0]!.sharedChannels = endJoinedChannel(workspaces[0]!.sharedChannels, "share-live");
     expect(isShareAcceptedInWorkspace(workspaces[0]!.sharedChannels, "share-live")).toBe(false);
 
-    // After leaving: no workspace holds it, so it reappears as a request.
     const afterLeave = await classify();
     expect(afterLeave.pending.map((row) => row.shareId)).toEqual(["share-live"]);
 
-    // Accepting elsewhere (workspace-b) succeeds.
     const revived = await reserveAndPullSharedChannel({
       serverUrl: "HTTPS://ACCOUNTS.TEST:443/",
       relay: { baseUrl: "http://relay.test", token: "token" },
@@ -1129,7 +1109,6 @@ describe("listDmRecords", () => {
         nowMs: 2,
       },
     });
-    // A plain channel never appears in the DM list.
     await seed({
       method: CHATS_METHOD.channelCreate,
       params: { channelId: "channel-1", name: "general-ish", kind: "channel", nowMs: 3 },
@@ -1150,15 +1129,12 @@ describe("listDmRecords", () => {
 
   it("hides an OWNER DM with no thread (aborted/rolled-back start) but keeps a committed owner DM", async () => {
     const { store, seed } = await makeStore();
-    // An aborted start: the channel was created but grants failed → rolled back
-    // before the first message, so there is no thread.
     await seed({
       method: CHATS_METHOD.channelCreate,
       params: { channelId: "dm-aborted", name: "aborted@x.com", kind: "dm", nowMs: 1 },
     });
     expect(await listDmRecords({ workspaceId: WS, store, sharedChannels: [] })).toHaveLength(0);
 
-    // A committed owner DM (first message sent → a thread exists) still shows.
     await seed({
       method: CHATS_METHOD.channelCreate,
       params: { channelId: "dm-live", name: "bob@x.com", kind: "dm", nowMs: 2 },
@@ -1286,7 +1262,6 @@ describe("listDmRecords", () => {
       workspace: WS,
       channelId: "owner-channel-1",
       wireId: "owner-channel-1",
-      // The owner's recipient list — i.e. THIS participant's own address.
       name: "bob@x.com",
       kind: "dm",
       createdAtMs: 1,
@@ -1319,7 +1294,6 @@ describe("listDmRecords", () => {
       connected: true,
     });
 
-    // The grant ends (revoked / owner gone): reading stays, sending closes.
     const ended = await listDmRecords({
       workspaceId: WS,
       store,
@@ -1341,11 +1315,6 @@ describe("listDmRecords", () => {
   });
 });
 
-// Without this, leaving a DM ends its row but the same conversation
-// stays visible twice — once as the readable-tombstone row the test above
-// just proved listDmRecords keeps (connected:false), and once as the pending
-// request classifyDmRequests re-lists once no workspace holds a live row.
-// "One identity, one place" — the request-lane representation wins.
 describe("withholdDmsInRequestLanes", () => {
   it("drops a dm whose shareId is pending or declined, keeps everything else", () => {
     const endedLeft = { shareId: "share-left", channelWireId: "wire-left", connected: false };
@@ -1367,9 +1336,6 @@ describe("withholdDmsInRequestLanes", () => {
   });
 
   it("leaves the owner-revoked tombstone case alone: no request and no other live holder", () => {
-    // The owner-revoked case: the grant is gone from the relay's received
-    // listing (no request), and nobody accepted it anywhere (no live
-    // holder, by either shareId or wire) — every check passes it through.
     const revoked = { shareId: "share-revoked", channelWireId: "wire-revoked", connected: false };
     const result = withholdDmsInRequestLanes({
       dms: [revoked],
@@ -1381,12 +1347,6 @@ describe("withholdDmsInRequestLanes", () => {
     expect(result).toEqual([revoked]);
   });
 
-  // Leave in workspace A, accept the same request into
-  // workspace B — the share leaves the request lanes the moment B holds it
-  // live, and the request-lane check alone would stop withholding it, so A's
-  // ended row would reappear. Built through the real holder-map function
-  // (liveSharedChannelHoldersByShareId), not a hand-typed Map, so this proves
-  // the actual integration, not just the filter's own arithmetic.
   it("withholds an ended row whose share is held live by another workspace, even once it leaves the request lanes", () => {
     const endedInA = joined({
       shareId: "share-x",
@@ -1407,7 +1367,6 @@ describe("withholdDmsInRequestLanes", () => {
 
     const result = withholdDmsInRequestLanes({
       dms: [{ shareId: "share-x", channelWireId: "wire-x", connected: false }],
-      // Accepted elsewhere: the share is no longer a request anywhere.
       requestShareIds: new Set(),
       holdersByShareId,
       holdersByWireId,
@@ -1459,7 +1418,6 @@ describe("withholdDmsInRequestLanes", () => {
     ];
     const holdersByShareId = liveSharedChannelHoldersByShareId(workspaces);
     const holdersByWireId = liveSharedChannelHoldersByWireId(workspaces);
-    // The share-id map alone misses this: nobody holds "share-a1" live.
     expect(holdersByShareId.get("share-a1")).toBeUndefined();
     expect(holdersByWireId.get("wire-shared")).toEqual(new Set(["workspace-b"]));
 
@@ -1549,10 +1507,6 @@ describe("createLastKnownDmRequestLanesCache / classifyDmRequestsWithFallback", 
     expect(cache.get("workspace-a")).toBeUndefined();
   });
 
-  // Security: the cross-account leak this whole cache
-  // exists to close. Without clear() at a session transition, a signed-in
-  // account's cached rows (sender emails included) would answer for whoever
-  // signs in next, the moment their own first poll fails.
   it("clear() removes every workspace's cached lanes, so a session transition can never leak the previous account's rows", async () => {
     const cache = createLastKnownDmRequestLanesCache();
     cache.set("workspace-a", laneA);
@@ -1610,7 +1564,6 @@ describe("createLastKnownDmRequestLanesCache / classifyDmRequestsWithFallback", 
     generation = 2;
     cache.clear();
 
-    // Account A's classify finally resolves, after the transition.
     resolveClassify(laneA);
     const result = await resultPromise;
 
@@ -1634,11 +1587,6 @@ describe("createLastKnownDmRequestLanesCache / classifyDmRequestsWithFallback", 
   });
 });
 
-// The cache's last recorded lanes were classified while
-// the DM was still accepted, so an outage right after Leave falls back to
-// stale pre-leave lanes that still call the share accepted — the ended row
-// would reappear. markLeftInLastKnownLanes closes that gap: leaveDm records
-// the leave in the cache itself, without needing the relay at all.
 describe("markLeftInLastKnownLanes", () => {
   it("inserts the left share into the cache's pending lane", () => {
     const cache = createLastKnownDmRequestLanesCache();
@@ -1676,22 +1624,15 @@ describe("markLeftInLastKnownLanes", () => {
     expect(cache.get("workspace-a")?.pending).toEqual([row]);
   });
 
-  // The real flow the pin describes: leave, then a relay outage — the
-  // fallback must serve the conversation as a pending request, not silently
-  // keep calling it accepted.
   it("REAL FLOW: leave -> relay rejects on the next poll -> the fallback lanes list the conversation as pending", async () => {
     const cache = createLastKnownDmRequestLanesCache();
-    // Before leaving: the DM was accepted, so its shareId was never in any
-    // classified lane.
     cache.set("workspace-a", { pending: [], declined: [] });
 
-    // leaveDm's local, relay-free side effect.
     markLeftInLastKnownLanes(cache, "workspace-a", {
       shareId: "share-left",
       granterEmail: "alice@example.com",
     });
 
-    // The very next syncDms poll: the relay rejects.
     const result = await classifyDmRequestsWithFallback({
       workspaceId: "workspace-a",
       cache,
@@ -1702,8 +1643,6 @@ describe("markLeftInLastKnownLanes", () => {
     });
 
     expect(result.pending).toEqual([{ shareId: "share-left", granterEmail: "alice@example.com" }]);
-    // Consistent with withholdDmsInRequestLanes: the ended row is
-    // now withheld from the list, because its shareId IS a pending request.
     const requestShareIds = new Set(
       [...result.pending, ...result.declined].map((row) => row.shareId),
     );

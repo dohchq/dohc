@@ -281,8 +281,6 @@ describe("useShellError", () => {
       message: notice.message,
     });
   });
-  // Copy details is the message, the title and these details. The error's
-  // own message is an instruction or the Reason, so it adds no Cause.
   it.each([
     [
       "a conflict choice",
@@ -965,8 +963,6 @@ describe("useShellError", () => {
     ]);
   });
 
-  // A retry answers false when it could not run, such as during an account
-  // deletion review.
   it("keeps a newer report of the same failure when an older row's retry cannot run", () => {
     const { result } = renderHook(() => useShellError("ws-a"));
     act(() =>
@@ -988,7 +984,6 @@ describe("useShellError", () => {
     expect(result.current.shellErrors[0]!.retry).toBe(newer);
   });
 
-  // The toast is the newest unseen row, by time, then by place in the list.
   it("keeps every row in place when a retry cannot run, so a same-time newer toast stays shown", () => {
     const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
     try {
@@ -1072,7 +1067,6 @@ describe("useShellError", () => {
         result.current.runShellErrorAction(elsewhere.id);
       });
       expect(retry).toHaveBeenCalledOnce();
-      // A store that is gone, or a record that changed, offers no such step.
       for (const code of ["collections-missing", "collections-changed"]) {
         act(() =>
           result.current.reportShellError(
@@ -1321,7 +1315,6 @@ describe("useShellError", () => {
 
   it("files a failure that only waited for another request's Collection move as a row without a toast, so that request's failure keeps the toast", () => {
     const now = vi.spyOn(Date, "now");
-    // As the renderer receives it from main.
     const stopped = (waited: boolean) =>
       new Error(
         `Error invoking remote method 'dohc:dataset': ${String(
@@ -1360,7 +1353,6 @@ describe("useShellError", () => {
         { message: `Could not load Collection access. ${unfinished}`, seen: false },
         { message: `dohc could not read this Collection's automations. ${unfinished}`, seen: true },
       ]);
-      // A read that resumed the move itself, as after a restart, reports it with a toast.
       act(() => result.current.reportShellError("Could not open this Collection.", stopped(false)));
       expect(result.current.shellErrors.at(-1)).toMatchObject({
         message: `Could not open this Collection. ${unfinished}`,
@@ -1371,7 +1363,6 @@ describe("useShellError", () => {
     }
   });
 
-  // The toast is the newest unseen row, by time, then by place in the list.
   it("updates a quiet repeat in place, so another failure's newer toast stays the one shown", () => {
     const now = vi.spyOn(Date, "now");
     try {
@@ -1427,7 +1418,6 @@ describe("useShellError", () => {
       }),
     );
     expect(result.current.shellErrors.map((error) => error.seen)).toEqual([false]);
-    // Still open: the repeat keeps it open, as one row.
     act(() =>
       result.current.reportShellFailure({
         message: "Could not load History.",
@@ -1436,7 +1426,6 @@ describe("useShellError", () => {
       }),
     );
     expect(result.current.shellErrors.map((error) => error.seen)).toEqual([false]);
-    // Closed by the person: the repeat does not toast again.
     act(() => result.current.hideShellError(result.current.shellErrors[0]!.id));
     act(() =>
       result.current.reportShellFailure({
@@ -1446,7 +1435,6 @@ describe("useShellError", () => {
       }),
     );
     expect(result.current.shellErrors.map((error) => error.seen)).toEqual([true]);
-    // Another file's first failure is a toast of its own, repeat or not.
     act(() =>
       result.current.reportShellFailure({
         message: "Could not load History.",
@@ -1472,13 +1460,11 @@ describe("useShellError", () => {
       });
     act(report);
     act(() => result.current.hideShellError(result.current.shellErrors[0]!.id));
-    // Try again removes the row, then reads; the read fails again.
     act(() => result.current.retryShellError(result.current.shellErrors[0]!.id));
     expect(retry).toHaveBeenCalledTimes(1);
     expect(result.current.shellErrors).toEqual([]);
     act(report);
     expect(result.current.shellErrors.map((error) => error.seen)).toEqual([false]);
-    // Dismissed, then failing again: a toast, not a quiet row.
     act(() => result.current.dismissShellError(result.current.shellErrors[0]!.id));
     act(report);
     expect(result.current.shellErrors.map((error) => error.seen)).toEqual([false]);

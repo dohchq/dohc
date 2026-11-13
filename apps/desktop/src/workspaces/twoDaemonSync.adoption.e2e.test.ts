@@ -900,13 +900,11 @@ it.skipIf(engine.missing).each(["existing id", heldStopCase])(
               { workspaceId, path },
             ),
           );
-        // The session host's store, once it has one.
         const hostStore = async () => {
           const stores = join(relayRoot, "relay-deployment", "live-host");
           const store = (await readdir(stores)).find((entry) => /^[0-9a-f]{64}$/u.test(entry));
           return store === undefined ? undefined : join(stores, store);
         };
-        // The document's state in the session host's store.
         const hostDocumentState = async () => {
           const store = await hostStore();
           if (!store) return undefined;
@@ -923,7 +921,6 @@ it.skipIf(engine.missing).each(["existing id", heldStopCase])(
             db.close();
           }
         };
-        // This computer's Stops that still owe the server a retirement.
         const owedStops = async () =>
           (
             await source.sessions.run(source.workspace, async ({ workspace }) =>
@@ -956,7 +953,6 @@ it.skipIf(engine.missing).each(["existing id", heldStopCase])(
             (error: unknown) => error,
           );
           expect(stopRefusalStatus).toBe(409);
-          // The relay's edits-pending answer only means "not yet", so this computer keeps its Stop.
           expect((refused as Error).message).toBe(LIVE_STOP_WAITING);
           expect(await owedStops()).toMatchObject([
             { state: "requested", binding: document.binding },
@@ -982,7 +978,6 @@ it.skipIf(engine.missing).each(["existing id", heldStopCase])(
         );
         expect(releasedMoment?.authors).toContainEqual({ kind: "human", humanId: "local-person" });
         await expect.poll(hostDocumentState, { timeout: 120_000 }).toBe("parked");
-        // An ordinary owner edit that reaches the peer through ordinary sync.
         const editOrdinary = async (value: string, key: string) => {
           const ordinary = await capture!.openYDocSession({
             path,
@@ -1033,12 +1028,10 @@ it.skipIf(engine.missing).each(["existing id", heldStopCase])(
           return { ready, row };
         };
         const ready = { ready: true, row: expect.objectContaining({ path, status: "ready" }) };
-        // The operator's reports that the session host holds the document.
         const reports = () =>
           relayServer!
             .diagnostics()
             .stderr.split(`Live editing of ${path} in workspace ${workspaceId} is held`).length - 1;
-        // The relay's activations, the session host's copy and the relay's log, for a row that never became ready.
         const notReady = async (error: unknown): Promise<never> => {
           const db = new DatabaseSync(relayOptions.dbPath, { readOnly: true });
           let activations: unknown;
@@ -1068,7 +1061,6 @@ it.skipIf(engine.missing).each(["existing id", heldStopCase])(
         await expect
           .poll(async () => readFile(join((await hostStore())!, path), "utf8"), { timeout: 10_000 })
           .toContain("Name: Local after stop");
-        // The peer keeps the stopped edit.
         await expect
           .poll(
             async () => {
@@ -1078,14 +1070,12 @@ it.skipIf(engine.missing).each(["existing id", heldStopCase])(
             { timeout: 120_000 },
           )
           .toContain("Name: Local after stop");
-        // A relay restart starts the session host from its store, and the document is ready again.
         await relayServer.stop();
         relayServer = await spawnSyncRelay(relayOptions);
         proxy.routeRelayTo(relayServer.baseUrl);
         await expect.poll(liveRow, { timeout: 120_000 }).toEqual(ready).catch(notReady);
         expect(await hostDocumentState()).toBe("ready");
         expect(reports()).toBe(0);
-        // Another document of the workspace also starts live editing.
         const other = "notes/other.md";
         await adapter.writeTextFile({
           workspaceId,
@@ -1128,7 +1118,6 @@ it.skipIf(engine.missing).each(["existing id", heldStopCase])(
           }),
         });
         expect([200, 202]).toContain(otherEnrollment.status);
-        // Discovery lists documents by path.
         await expect
           .poll(async () => (await discovery()).map((row) => row.binding.currentPath), {
             timeout: 120_000,

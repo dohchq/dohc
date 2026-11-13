@@ -523,7 +523,6 @@ it("checks owner and workspace standing before constructing either authority env
     expect(
       storage.resolveCurrentLiveDocumentBinding({ document: readDocument, actor: namedActor }),
     ).toEqual({ kind: "refused", reason: "not-authorized" });
-    // The workspace's owner holds its document whatever its shares.
     expect(
       storage.resolveCurrentLiveDocumentBinding({ document: readDocument, actor: ownerActor }).kind,
     ).toBe("current");

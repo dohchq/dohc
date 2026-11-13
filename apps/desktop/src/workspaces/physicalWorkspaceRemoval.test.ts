@@ -37,7 +37,6 @@ function harness(
     onError,
     confirmDraftRemoval,
   });
-  // The real trust store, with its file kept in memory.
   const files = new Map<string, string>();
   const writeText = vi.fn(async (file: string, text: string) => {
     files.set(file, text);
@@ -122,7 +121,6 @@ it("still rejects registry removal failures and does not report them as draft cl
 });
 
 it("takes a failed join's entry out of the list without asking, and keeps its typing", async () => {
-  // The person would choose Cancel if dohc asked.
   const confirm = vi.fn(async () => false);
   const h = harness(false, confirm);
   const joinError = new Error("join failed");
@@ -298,7 +296,6 @@ it("leaves no grant behind when another window's Restrict fails while Forget run
       h.files.set(file, text);
     })
     .mockImplementationOnce(async (file, text) => {
-      // Another window restricts while that Trust writes, and its own write fails.
       restricted = h.trust.restrict("workspace").catch((failure: unknown) => failure);
       h.files.set(file, text);
     })

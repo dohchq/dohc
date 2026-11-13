@@ -108,7 +108,6 @@ it("credits a delivery's authors on the engine's rule", () => {
   };
   expect(vectors.deliveries.length).toBeGreaterThan(0);
   for (const row of vectors.deliveries) {
-    // A v1 row has no author snapshot or deletion ranges.
     const prior: AdmittedLiveUpdateMetadata =
       row.canonicalVersion === 1
         ? { accepted: {} as AdmittedLiveUpdateMetadata["accepted"], firstSeen: row.firstSeen }

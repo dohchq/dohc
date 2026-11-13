@@ -33,7 +33,6 @@ afterEach(async () => {
   vi.restoreAllMocks();
   for (const close of cleanup.splice(0).reverse()) await close();
 });
-// The workspace identity the fixture claims, whose hosted store holds the queues.
 const identity = { replicationEpoch: "epoch", streamIdentity: "stream" };
 const queue = (outboxId: string, of = identity) => ({
   workspaceId: scope.workspaceId,
@@ -73,7 +72,6 @@ async function fixture() {
     .prepare("INSERT INTO sync_relay_current_files VALUES (?,'main',?,?,'text',1)")
     .run(scope.workspaceId, binding.currentPath, "b".repeat(64));
   const history = createLiveJournalHistoryAuthority({ namespace, reconciled: true });
-  // The documents the session host blocked until their owner tries again.
   const blocked = new Map<string, ServiceActivationBlock>(),
     pending = new Set<string>(),
     prepared: RetirableServiceActivation[] = [];
@@ -173,7 +171,6 @@ async function fixture() {
       VALUES (?,?,1,?,'main',?,?,?,1,1)`)
       .run(scope.workspaceId, objectId, `moment-${objectId}`, path, "b".repeat(64), contentKind);
   };
-  // What the service host does once it no longer holds the document.
   const release = (objectId: string) =>
     f.storage.releaseServiceHostEnrollment({ workspaceId: scope.workspaceId, objectId, nowMs: 20 });
   return {
@@ -279,7 +276,6 @@ it("lets only the workspace's owner see, read, try again and confirm a copy of e
       ),
     );
   expect(await list()).toEqual([{ ...kept, generation: first, recovery: "paused" }]);
-  // A recipient of the owner's shares, and the owner of another workspace, learn and reach nothing.
   for (const actor of [
     { workspaceId: scope.workspaceId, userId: "recipient" },
     { workspaceId: "other-workspace", userId: "owner-1" },
@@ -296,7 +292,6 @@ it("lets only the workspace's owner see, read, try again and confirm a copy of e
     retrying: false,
     copied: false,
   });
-  // An unknown queue, as one another computer's Try again delivered, and a refusal the owner did not see both changed.
   for (const response of [
     ...(await Promise.all(
       ["page", "retry", "copied"].map((action) => act(action, first, "outbox-unknown")),
@@ -319,7 +314,6 @@ it("lets only the workspace's owner see, read, try again and confirm a copy of e
       })
     ).status,
   ).toBe(400);
-  // Each page is the engine's, after the cursor the owner sent, and the relay accepts and publishes none of it.
   const count = (table: string) =>
     Number(f.raw.prepare(`SELECT count(*) AS count FROM ${table}`).get()!.count);
   const before = [count("sync_relay_live_update_journal"), count("sync_relay_log")];
@@ -334,7 +328,6 @@ it("lets only the workspace's owner see, read, try again and confirm a copy of e
   });
   expect([count("sync_relay_live_update_journal"), count("sync_relay_log")]).toEqual(before);
   expect(f.host.keptEdits.retry).not.toHaveBeenCalled();
-  // Try again, once per refusal.
   expect(await (await act("retry", first)).json()).toEqual({ ok: true });
   expect(await list()).toEqual([{ ...kept, generation: first, recovery: "retrying" }]);
   expect((await act("retry", first)).status).toBe(409);
@@ -350,7 +343,6 @@ it("lets only the workspace's owner see, read, try again and confirm a copy of e
     );
   expect((await act("copied", first)).status).toBe(409);
   expect(held()).toBe(true);
-  // A confirmation names the checkpoint its copy read, and only that.
   for (const shape of [
     { action: "copied", outboxId: "outbox-1", generation: second },
     { action: "copied", outboxId: "outbox-1", generation: second, checkpointDigest: "x" },
@@ -371,13 +363,11 @@ it("lets only the workspace's owner see, read, try again and confirm a copy of e
   ).toEqual({ ok: true });
   expect(await list()).toEqual([{ ...kept, generation: second, recovery: "copied" }]);
   expect(held()).toBe(false);
-  // Without live authority here, or once the refusal changed, Try again grants nothing.
   f.host.keptEdits.retry.mockResolvedValueOnce("unavailable");
   expect((await act("retry", second)).status).toBe(409);
   f.host.keptEdits.retry.mockResolvedValueOnce("changed");
   expect((await act("retry", second)).status).toBe(409);
   expect(await list()).toEqual([{ ...kept, generation: second, recovery: "copied" }]);
-  // A refusal recorded while a page was read answers changed.
   const third = refuse();
   f.host.keptEdits.page.mockImplementationOnce(async (row, after) => {
     refuse();
@@ -386,18 +376,10 @@ it("lets only the workspace's owner see, read, try again and confirm a copy of e
   const raced = await act("page", third);
   expect(raced.status).toBe(409);
   expect(await raced.json()).toMatchObject({ code: "kept-edits-changed" });
-  // A queue that delivers again is forgotten.
   f.storage.forgetServiceKeptEdits(queue("outbox-1"));
   expect(await list()).toBeUndefined();
 });
 
-// Proves: a row of an earlier workspace identity's store lists as earlier,
-// before and after its copy. Its owner reads its pages from that store and
-// confirms a copy of it, which marks only that row and lets the host release
-// the store; Try again is refused without reaching the host, copied or not.
-// The current store's queue with the same outbox
-// ID lists as its own row, and each action reaches the row its generation
-// names. A recipient or another workspace's owner reaches neither.
 it("reads and confirms edits kept in an earlier identity's store, and refuses their Try again", async () => {
   const f = await fixture(),
     old = { replicationEpoch: "old-epoch", streamIdentity: "old-stream" };
@@ -433,7 +415,6 @@ it("reads and confirms edits kept in an earlier identity's store, and refuses th
     { ...row, generation: earlier, recovery: "paused", earlier: true },
     { ...row, generation: current, recovery: "paused" },
   ]);
-  // The owner tells the two stores apart without learning either identity.
   expect(listed[0]!.store).not.toBe(listed[1]!.store);
   for (const secret of ["old-epoch", "old-stream", "epoch", "stream"])
     expect(JSON.stringify(listed)).not.toContain(secret);
@@ -475,7 +456,6 @@ it("reads and confirms edits kept in an earlier identity's store, and refuses th
   expect(
     f.host.keptEdits.copied.mock.calls.map(([kept]) => [kept.generation, kept.identity]),
   ).toEqual([[earlier, old]]);
-  // An earlier store the server could not prepare answers with the reason.
   f.host.keptEdits.page.mockRejectedValueOnce(new RecoveryCopyRefusal("disk-space"));
   const unprepared = await act("page", earlier);
   expect(unprepared.status).toBe(409);
@@ -496,7 +476,6 @@ it("reads and confirms edits kept in an earlier identity's store, and refuses th
   expect(copiedRetry.status).toBe(409);
   expect(await copiedRetry.json()).toMatchObject({ ok: false, code: "kept-edits-earlier" });
   expect(f.host.keptEdits.retry).not.toHaveBeenCalled();
-  // A host that could not release the store keeps the confirmation.
   f.host.keptEdits.copied.mockRejectedValueOnce(new Error("engine gone"));
   expect(await (await act("copied", current)).json()).toEqual({ ok: true });
   expect(f.storage.readServiceKeptEdits(queue("outbox-x", identity))).toMatchObject({
@@ -504,9 +483,6 @@ it("reads and confirms edits kept in an earlier identity's store, and refuses th
   });
 });
 
-// Proves: the relay reads at most two pages at once, and each holds its turn
-// until its body is taken or cancelled, not only while it is built. Others
-// wait, and one whose caller gave up leaves the line without taking a turn.
 it("runs at most two recovery page reads at once across the relay, until each body is taken", async () => {
   const f = await fixture();
   for (const index of [1, 2, 3, 4, 5]) {
@@ -593,7 +569,6 @@ it("discovers rich documents in folders, skips other content, and preserves a pa
   f.release(binding.objectId);
   discoverServiceHostDocuments(f.storage);
   expect(f.storage.listServiceHostEnrollments()[0]!.enabled).toBe(false);
-  // Enrolling the share again leaves the Pause. Only the owner's Resume clears it.
   expect((await f.handle(f.request("POST", { shareId: scope.shareId }))).status).toBe(202);
   expect(f.storage.listServiceHostEnrollments()[0]).toMatchObject({
     enabled: false,
@@ -763,8 +738,6 @@ it("reports only a conflict-parent hold, after document state and existing block
   expect(await state()).toEqual({ ...base, status: "unavailable", reason: "workspace-changed" });
 });
 
-// Proves: a document whose activation keeps failing tells its owner why and since when, in place of Preparing.
-// A host that is down, a conflict-parent hold and every block keep their own words.
 it("reports a document whose live start keeps failing, after a down host, every hold and every block", async () => {
   const f = await fixture(),
     enrolled = f.storage.ensureOwnedLiveDocument({ intent: "share", ...f.input });
@@ -783,7 +756,6 @@ it("reports a document whose live start keeps failing, after a down host, every 
   f.host.unavailable = true;
   expect(await state()).toEqual({ ...base, status: "unavailable" });
   f.host.unavailable = false;
-  // Every other hold reads as Preparing, as it did, even while an earlier failure is still shown.
   for (const hold of [
     "hosted-backfill-work-waiting",
     "hosted-backfill-path-held",
@@ -814,34 +786,6 @@ it("reports a document whose live start keeps failing, after a down host, every 
   f.host.failing.mockReturnValue(undefined);
   expect(await state()).toEqual({ ...base, status: "preparing" });
 });
-
-// Proves: a document the session host blocked reads as refused until its
-// owner's Resume, which gives it exactly one more attempt. Enrolling its share
-// again is not a Resume, and a reading never clears the block.
-// Proves: of two Stops, and of two Resumes, sent at once, exactly one says it
-// changed live editing, so the desktop credits one author. A Resume of a page
-// a share already made live changes nothing.
-
-// Proves: a document blocked for having no live-editing history reads as its
-// own reason, so its owner learns to open it before Resume, which still unblocks it.
-
-// Proves: a document whose host copy is missing an owner edit reads as its
-// own reason. A Resume still asks for one more attempt, which blocks it again
-// with the same reason.
-
-// Proves: Resume of a document held for an unadmitted live edit records the
-// retirement of its exact prepared activation, completed or a successor still
-// pending, in the enrollment transaction, before the host may try it again. A
-// hold that ended before that transaction changes nothing, and the Resume does
-// not reopen the document's admission.
-
-// Proves: a document whose hosted replica diverged reads as its own reason
-// ahead of a block, a Resume cannot change that, and the owner learns nothing
-// of the store. A workspace that changed identity still reads as changed.
-
-// Proves: an owner's Pause or Stop records their intent but cannot hide a
-// diverged server copy. The paused and the retired document both keep the
-// reason, and the workspace still reads as diverged once no document is active.
 
 function deferredBody(method: string, url: string, headers: Record<string, string>) {
   let start!: () => void;

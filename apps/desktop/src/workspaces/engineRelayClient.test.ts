@@ -488,7 +488,6 @@ describe("EngineRelayClient", () => {
       pull.refusals.length,
       "an unbounded aggregate lets a relay grow memory in proportion to its log",
     ).toBe(MAX_REPORTED_REFUSALS);
-    // The count is still the truth, and every page still reached the record.
     expect(pull.refusalCount).toBe(pages);
     expect(recorded).toBe(pages);
     await sessions.closeAll();
@@ -709,8 +708,6 @@ describe("EngineRelayClient", () => {
     await second.push();
     expect(opens).toBe(2);
 
-    // A delayed predecessor cleanup must not release the successor's route or
-    // close its attachment-keyed session.
     await live.closeWorkspace(firstWorkspace);
     expect(routes.isBound(firstWorkspace.workspaceId)).toBe(true);
     await second.push();

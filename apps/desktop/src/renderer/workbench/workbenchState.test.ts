@@ -124,7 +124,6 @@ describe("tabs", () => {
       "b.md",
     ]);
     expect(activeTabPath(state)).toBe(momentDiffTabPath("m-2"));
-    // A change already open is activated where it is.
     state = openTab(state, "b.md");
     expect(openMomentDiff(state, "m-2")).toEqual(
       activateTab(state, DEFAULT_EDITOR_GROUP_ID, momentDiffTabPath("m-2")),
@@ -144,7 +143,6 @@ describe("tabs", () => {
       [momentDiffTabPath("left")],
       ["a.md", momentDiffTabPath("m-1")],
     ]);
-    // Two diff tabs persisted in one group: the active one follows.
     state = openTab(state, momentDiffTabPath("m-2"), right);
     state = openMomentDiff(state, "m-3", right);
     expect(activeGroup(state).tabs.map((tab) => tab.path)).toEqual([
@@ -172,7 +170,6 @@ describe("tabs", () => {
     state = openTab(state, "new.md");
     expect(allTabs(state)).toHaveLength(MAX_OPEN_TABS);
     expect(allTabs(state).some((tab) => tab.path === "f0.md")).toBe(true);
-    // The oldest NON-active tab gave way instead.
     expect(allTabs(state).some((tab) => tab.path === "f1.md")).toBe(false);
     expect(activeTabPath(state)).toBe("new.md");
   });
@@ -339,7 +336,6 @@ describe("tabs", () => {
     expect(allTabs(state).filter((tab) => tab.path === VERSIONS_TAB_PATH)).toHaveLength(1);
     expect(state.activeEditorGroup).toBe(DEFAULT_EDITOR_GROUP_ID);
     expect(state.editorGroups[0].activeTab).toBe(VERSIONS_TAB_PATH);
-    // With none open, it opens in the focused group.
     state = closeTab(state, DEFAULT_EDITOR_GROUP_ID, VERSIONS_TAB_PATH);
     state = openTabOnce(state, VERSIONS_TAB_PATH, "right");
     expect(state.editorGroups.find((group) => group.id === "right")?.activeTab).toBe(
@@ -666,8 +662,6 @@ describe("tabs", () => {
     expect(replaceTab(state, "tab://new-page/gone/", "Untitled.md")).toBe(state);
   });
 
-  // A tab names an app by its folder, as typed, never by its encoded tab
-  // address.
   it.each([
     ["apps/trip", "trip"],
     ["clients/acme/portal", "portal"],
@@ -768,8 +762,6 @@ describe("tabs", () => {
 });
 
 describe("mergeSavedTabs (Restore tabs)", () => {
-  // A full saved layout: b.md shown on its own on the left, and beside 98
-  // other files on the right.
   const saved: WorkbenchState = {
     ...defaultWorkbenchState(),
     editorGroups: [
@@ -806,7 +798,6 @@ describe("mergeSavedTabs (Restore tabs)", () => {
     const merged = mergeSavedTabs(saved, shown);
     expect(paths(merged)).toHaveLength(MAX_OPEN_TABS);
     expect(new Set(paths(merged))).toEqual(new Set(paths(shown)));
-    // b.md stays in the right group, where it was saved beside the others.
     expect(merged.editorGroups[1].tabs.map((tab) => tab.path)).toContain("b.md");
   });
 
@@ -887,8 +878,6 @@ describe("views and panels", () => {
   it("toggleSidebar and toggleAbout flip independently", () => {
     const state = toggleSidebar(defaultWorkbenchState());
     expect(state.sidebarVisible).toBe(false);
-    // The About rail is hidden by default (VS Code secondary-sidebar
-    // grammar) — unlike the old always-on history rail.
     expect(state.aboutVisible).toBe(false);
     expect(toggleAbout(state).aboutVisible).toBe(true);
     expect(toggleAbout(state).sidebarVisible).toBe(false);
@@ -900,7 +889,6 @@ describe("views and panels", () => {
     expect(chats.activeView).toBe("chats");
     expect(chats.sidebarVisible).toBe(true);
     expect(chats.aboutVisible).toBe(true);
-    // Choosing Chats again hides the left panel, as every rail view does.
     expect(setView(chats, "chats").sidebarVisible).toBe(false);
     expect(setView(setView(chats, "chats"), "chats")).toEqual(chats);
   });
@@ -1188,8 +1176,6 @@ describe("ui-state persistence round-trip", () => {
   });
 
   it("parse reads only own fields — inherited (prototype) fields never become state", () => {
-    // A crafted object inheriting every field from its prototype must parse
-    // as if the fields were absent: pure defaults, no tabs.
     const inherited = parseUiState(
       Object.create({
         version: 3,
@@ -1302,7 +1288,6 @@ describe("explorer expansion + pins", () => {
     const restored = parseUiState(serializeUiState(state));
     expect(restored.expandedFolders).toEqual(["notes"]);
     expect(restored.pinned).toEqual(["a.md"]);
-    // A pre-E3 ui-state.json (no explorer fields) parses to empty lists.
     const old = parseUiState({ version: 1, tabs: ["a.md"], activeTab: "a.md" });
     expect(old.expandedFolders).toEqual([]);
     expect(old.pinned).toEqual([]);
@@ -1343,13 +1328,11 @@ describe("collection views", () => {
     state = setCollectionActiveView(state, "tasks", "Board");
     state = setCollectionActiveView(state, "people", "Table");
     expect(state.collectionViews).toEqual({ tasks: "Board", people: "Table" });
-    // Re-storing the same view is a no-op (same reference).
     expect(setCollectionActiveView(state, "tasks", "Board")).toBe(state);
     state = setCollectionActiveView(state, "tasks", "Calendar");
     expect(state.collectionViews.tasks).toBe("Calendar");
     state = setCollectionActiveView(state, "tasks", null);
     expect(state.collectionViews).toEqual({ people: "Table" });
-    // Clearing an absent entry is a no-op (same reference).
     expect(setCollectionActiveView(state, "tasks", null)).toBe(state);
   });
 
@@ -1475,10 +1458,6 @@ describe("remapWorkbenchPaths (rename/move/delete projection)", () => {
     ]);
   });
 
-  // A collection tab's path encodes the folder path behind tab://collection/.
-  // The projection speaks filesystem paths, so the tab must project the
-  // DECODED folder and re-encode the result — treating the whole tab path as
-  // a filesystem path matches no rename and strands the tab.
   it("a collection tab follows its folder's rename, view preference included", () => {
     let state = withTabs(collectionTabPath("tasks"), "readme.md");
     state = setCollectionActiveView(state, "tasks", "Board");
@@ -1573,8 +1552,6 @@ describe("pruneMissingRestoredTabs (restored tabs whose file is gone)", () => {
     expect(pruneMissingRestoredTabs(state, restored("a.md", "b.md"), () => true)).toBe(state);
   });
 
-  // The whole point of the scoping: a listing that raced a create omits the
-  // new file, and must not be allowed to close the tab the user just opened.
   it("never touches a tab opened this session, whatever the listing says", () => {
     const state = withTabs("restored.md", "opened-now.md");
     const pruned = pruneMissingRestoredTabs(state, restored("restored.md"), () => false);
@@ -1647,7 +1624,6 @@ describe("the record a Collection tab shows open, and the record panel's width",
     state = setCollectionOpenRecord(state, data, "7");
     state = setCollectionOpenRecord(state, tasks, "tasks/a.md");
     expect(state.openRecords).toEqual({ [data]: "7", [tasks]: "tasks/a.md" });
-    // Storing the same record again changes nothing.
     expect(setCollectionOpenRecord(state, data, "7")).toBe(state);
     state = setCollectionOpenRecord(state, data, '"key"');
     expect(state.openRecords[data]).toBe('"key"');
@@ -1660,7 +1636,6 @@ describe("the record a Collection tab shows open, and the record panel's width",
     let state = setCollectionOpenRecord(withTabs("a.md", data), data, "7");
     state = moveTabToNewGroup(state, DEFAULT_EDITOR_GROUP_ID, "a.md", "right");
     state = openTab(state, data, "right");
-    // The tab is open in two groups, so closing one keeps its record.
     state = closeTab(state, DEFAULT_EDITOR_GROUP_ID, data);
     expect(state.openRecords).toEqual({ [data]: "7" });
     state = closeTab(state, "right", data);
@@ -1693,7 +1668,6 @@ describe("the record a Collection tab shows open, and the record panel's width",
         state: serializeUiState(state),
       }).success,
     ).toBe(true);
-    // A key as long as the bound is stored.
     const longest = "x".repeat(MAX_OPEN_RECORD_CHARS);
     state = setCollectionOpenRecord(state, data, longest);
     expect(state.openRecords).toEqual({ [data]: longest });
@@ -1734,7 +1708,6 @@ describe("the record a Collection tab shows open, and the record panel's width",
     const restored = parseUiState(JSON.parse(JSON.stringify(saved)));
     expect(restored.openRecords).toEqual({ [data]: "7" });
     expect(restored.recordPanelWidth).toBe(512);
-    // A layout saved before the panel opens with none, at the default width.
     const { openRecords: _records, recordPanelWidth: _width, ...before } = saved;
     expect(parseUiState(before).openRecords).toEqual({});
     expect(parseUiState(before).recordPanelWidth).toBe(RECORD_PANEL_DEFAULT_WIDTH);

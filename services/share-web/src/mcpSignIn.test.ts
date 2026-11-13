@@ -59,7 +59,6 @@ function expectNoStore(response: Response) {
   expect(response.headers.get("pragma")).toBe("no-cache");
 }
 
-// A page that cannot go back to the agent: no form, no redirect, no CORS.
 async function expectErrorPage(response: Response, status: number) {
   expect(response.status).toBe(status);
   expect(response.headers.get("content-type")).toBe("text/html; charset=utf-8");
@@ -127,7 +126,6 @@ async function stack() {
     clients.push(client);
     return client;
   }
-  // A code for `clientId`, allowed on the consent page.
   async function code(clientId: string, redirectUri = LOOPBACK_REDIRECT) {
     const { verifier, challenge } = pkce();
     const form = await consentForm(

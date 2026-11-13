@@ -10,14 +10,12 @@ describe("launch marks log", () => {
     try {
       launchMarks.appReady();
       launchMarks.firstWindow();
-      // daemonReady and firstPaint are still missing: no line yet.
       logLaunchMarksOnce();
       expect(info).not.toHaveBeenCalled();
 
       launchMarks.daemonReady();
       launchMarks.firstPaint();
       logLaunchMarksOnce();
-      // A renderer reload re-fires firstPaint and a caller can log again.
       launchMarks.daemonReady();
       launchMarks.firstPaint();
       logLaunchMarksOnce();

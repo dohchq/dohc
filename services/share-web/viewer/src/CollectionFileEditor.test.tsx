@@ -191,7 +191,6 @@ it("sends a save whose answer was lost again under the same submit id, and chang
   const [first, second, third] = sent.map((value) => value.body.submitId);
   expect(second).toBe(first);
   expect(third).not.toBe(first);
-  // Leaving with nothing unsaved asks nothing; with a draft, the page warns.
   const unload = new Event("beforeunload", { cancelable: true });
   window.dispatchEvent(unload);
   expect(unload.defaultPrevented).toBe(false);

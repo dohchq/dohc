@@ -51,7 +51,6 @@ async function fixture(t, change = {}) {
   write("dist/renderer/assets/index-AbC9.js", injected(RENDERER_CHUNK));
   mkdirSync(dirname(archive), { recursive: true });
   await asar.createPackage(app, archive);
-  // The installer leaves source maps out; the build keeps them.
   if (change.mainMap !== null)
     write("dist/main/main.js.map", change.mainMap ?? sourceMap(MAIN_CHUNK));
   write("dist/renderer/assets/index-AbC9.js.map", sourceMap(RENDERER_CHUNK));

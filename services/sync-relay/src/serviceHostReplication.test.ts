@@ -15,7 +15,6 @@ afterEach(async () => {
 const key = new Uint8Array(32).fill(17),
   namespace = "service-provenance-test";
 
-// Ordinary replication for a replica credential this server derived, as its automation replicas use.
 async function fixture() {
   const f = await ticketFixture();
   cleanup.push(f.close);
@@ -62,8 +61,6 @@ async function fixture() {
   return { ...f, post, get };
 }
 
-// Proves: the session host's credential reaches its scoped feed only. Every
-// ordinary replication route answers as an absent one.
 it("gives the service host credential 404 on every ordinary replication route", async () => {
   const f = await fixture();
   const enrollment = f.storage.ensureOwnedLiveDocument({

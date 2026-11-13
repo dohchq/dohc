@@ -102,7 +102,6 @@ function moving(
     signal,
   });
   const finish = (signal = new AbortController().signal) => finishedTransfer(read(signal));
-  // How a background read goes by the record.
   const moved = () => movedTransfer(read(new AbortController().signal));
   return { local, server, finish, moved };
 }
@@ -121,7 +120,6 @@ it("reads a Collection's transfer record as it is when no move is unfinished", a
 it("reads a Collection whose move hasn't finished from this computer in the background, without waiting for the move or resuming it", async () => {
   const stopped = moving(transfer("ready"), { after: transfer("imported") });
   await expect(stopped.moved()).resolves.toBeNull();
-  // A move that never ends keeps nothing waiting.
   const running = moving(transfer("ready"), {
     after: transfer("imported"),
     inFlight: new Promise(() => undefined),
@@ -330,7 +328,6 @@ it("waits for the move another read resumed while this one asked for the session
   expect(local.transferToShared).toHaveBeenCalledTimes(1);
   const stopped = Error("The server stopped answering.");
   stop(stopped);
-  // The read that ran the move reports its stop. The read that only waited says so.
   await expect(first).rejects.toMatchObject({
     name: "CollectionMoveUnfinishedError",
     code: undefined,

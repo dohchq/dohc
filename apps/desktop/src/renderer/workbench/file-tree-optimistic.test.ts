@@ -9,9 +9,6 @@ import {
   type PendingTreeMove,
 } from "./file-tree-optimistic";
 
-// Ported near as-is with the desktop row-type retype: rows are {path, kind}
-// and folders are plain path strings.
-
 const files: FileRow[] = [
   { path: "inbox/note.md", kind: "file" },
   { path: "projects/alpha/spec.md", kind: "file" },

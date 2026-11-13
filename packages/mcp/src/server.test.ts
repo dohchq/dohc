@@ -68,7 +68,6 @@ const SHARED_TOOLS = [
 ];
 
 const roots: string[] = [];
-// Document tools resolve their path inside a real workspace folder.
 async function workspaceRoot(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "dohc-mcp-documents-"));
   roots.push(root);
@@ -339,8 +338,6 @@ describe("share-level tool profiles", () => {
   });
 
   it("refuses an unrecognized --share-access value", () => {
-    // The refusal names the flag, the levels, and what it was given — an agent
-    // reads the error, not this file.
     expect(() => parseArgs(["--share-access", "read-only"])).toThrow(
       '--share-access must be one of view, comment, edit. Received: "read-only".',
     );
@@ -353,7 +350,6 @@ describe("share-level tool profiles", () => {
     const ctx = parseArgs(["--workspace", "/w", "--home", "/h", "--tool", "dohc_reply_to_chat"]);
     expect(ctx.tools).toEqual(new Set(["dohc_reply_to_chat"]));
     expect((await connectedToolNames(ctx)).names).toEqual(["dohc_reply_to_chat"]);
-    // The share level still decides: a view profile can't reply.
     const view = parseArgs([
       "--share-access",
       "view",
@@ -378,7 +374,6 @@ describe("share-level tool profiles", () => {
     for (const tool of [...DOCUMENT_WRITE_TOOLS, ...CHAT_WRITE_TOOLS]) {
       expect(names, tool).not.toContain(tool);
     }
-    // The read surface is still available so agents can browse a shared view.
     for (const tool of SHARED_TOOLS) {
       expect(names, tool).toContain(tool);
     }

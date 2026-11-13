@@ -189,28 +189,24 @@ function openCollectionActions() {
   if (!screen.queryByRole("menu", { name: "Collection actions" }))
     fireEvent.click(screen.getByRole("button", { name: "Collection actions" }));
 }
-/** Whether the actions menu offers a command. The menu is opened to look, then closed. */
 function offersCollectionAction(testId: string): boolean {
   openCollectionActions();
   const offered = screen.queryByTestId(testId) !== null;
   fireEvent.click(screen.getByRole("button", { name: "Collection actions" }));
   return offered;
 }
-/** Runs a command of the actions menu, once the page shows the Collection can be changed. */
 async function runCollectionAction(testId: string) {
   await screen.findByTestId("collection-new-record");
   openCollectionActions();
   fireEvent.click(screen.getByTestId(testId));
 }
 
-/** Types a name in the table's new row, and saves the row with Enter. */
 async function saveNewRow(name: string) {
   fireEvent.click(await screen.findByTestId("collection-new-record"));
   const input = document.querySelector<HTMLInputElement>("[data-cell-editor] input")!;
   fireEvent.change(input, { target: { value: name } });
   fireEvent.keyDown(input, { key: "Enter" });
 }
-/** Waits for a notice to say why the new row's record was not made, with what was typed. No row says it. */
 async function noticeSays(text: string) {
   await waitFor(() =>
     expect(screen.getByTestId("workspace-shell-error").textContent).toContain(text),
@@ -237,7 +233,6 @@ async function assertReadableAndReadOnly(bridge: ReturnType<typeof collectionBri
   expect(screen.queryByTestId("shared-view-refresh")).toBeNull();
   expect(offersCollectionAction("collection-fields-button")).toBe(false);
   expect(screen.queryByTestId("collection-new-record")).toBeNull();
-  // The view still shows as a tab, with nothing that saves a view.
   expect(
     within(screen.getByTestId("collection-view-switcher"))
       .getByRole("button", { name: "Table" })
@@ -279,14 +274,11 @@ describe("ended Edit Collection shares", () => {
       const send = directWriteInput.current!.sendShareChanges;
       if (action === "record creation") {
         await saveNewRow("Milk");
-        // A notice says the creation stopped part way, and keeps what was typed.
         await noticeSays(PART_WAY);
       }
       view.rerender(
         shell(bridge, { ...ENDED_SHARE, shareView: { ...ENDED_SHARE.shareView!, damaged: true } }),
       );
-      // The right to add records goes, and nothing starts a request as it goes. The notice's Try again, which
-      // finishes the same creation, meets the shell's refusal.
       if (action === "record creation") {
         await waitFor(() =>
           expect(screen.getByTestId("workspace-shell-error").textContent).toContain(PART_WAY),
@@ -512,7 +504,6 @@ describe("ended Edit Collection shares", () => {
       expect(await screen.findByRole("button", { name: "Finish for Retained task" })).toBeTruthy();
       fireEvent.click(screen.getByTestId("collection-automations-button"));
       await screen.findByRole("switch", { name: "Finish task" });
-      // A cell editor open before revocation must also go away.
       fireEvent.click(screen.getByRole("button", { name: "Retained task" }));
       expect(screen.getByRole("textbox")).toBeTruthy();
       await waitFor(() =>
@@ -544,14 +535,12 @@ describe("ended Edit Collection shares", () => {
         fireEvent.click(screen.getByTestId("shared-view-refresh"));
       }
       await assertReadableAndReadOnly(bridge);
-      // An ordinary local activity read still succeeds after the transition.
       const reads = bridge.queryCollectionRecords.mock.calls.length;
       act(() => bridge.emitWorkspaceActivity({ paths: ["tasks/retained.md"] }));
       await waitFor(() =>
         expect(bridge.queryCollectionRecords.mock.calls.length).toBeGreaterThan(reads),
       );
       expect(screen.getByText("Retained task")).toBeTruthy();
-      // The record opens in the panel, with no edit there: its name is text, and its body is the file's own read-only view.
       fireEvent.click(screen.getByRole("button", { name: "Open Retained task" }));
       const record = await screen.findByRole("complementary", { name: "Retained task" });
       expect(
@@ -647,7 +636,6 @@ describe("ended Edit Collection shares", () => {
     const pending = deferred<Awaited<ReturnType<typeof bridge.checkSharedViewAccess>>>();
     bridge.checkSharedViewAccess.mockReturnValue(pending.promise);
     await saveNewRow("Milk");
-    // A notice keeps what was typed and says why.
     await noticeSays("already exists");
     expect(bridge.checkSharedViewAccess).toHaveBeenCalledOnce();
   });
@@ -692,7 +680,6 @@ describe("ended Edit Collection shares", () => {
   it("keeps what a recipient typed in a new row, with why, when the relay refuses the record, and opens no file tab", async () => {
     const bridge = collectionBridge();
     bridge.checkSharedViewAccess.mockResolvedValue({ status: "current", access: "edit" });
-    // The record's file is kept on this computer as a draft the relay refused.
     const refused = {
       path: "tasks/Milk.md",
       recordId: "rec_abcdefghijklmnopqrstuvwxyz",
@@ -705,7 +692,6 @@ describe("ended Edit Collection shares", () => {
     await saveNewRow("Milk");
     await noticeSays("The owner's server did not accept this record.");
 
-    // The file takes the record's name. One notice keeps what was typed, and no row holds it.
     expect(bridge.createCollectionRecord.mock.calls[0]![0]).toMatchObject({
       collectionPath: "tasks",
       name: "Milk",
@@ -713,7 +699,6 @@ describe("ended Edit Collection shares", () => {
     expect(document.querySelector("[data-new-record]")?.textContent).toBe("");
     expect(screen.queryByTestId(editorTabTestId("tasks/Milk.md"))).toBeNull();
 
-    // The notice's Try again makes the record once more, and still opens no tab.
     fireEvent.click(screen.getByTestId("notice-center-toggle"));
     fireEvent.click(
       within(screen.getByTestId("notice-center")).getByRole("button", { name: "Try again" }),
@@ -742,7 +727,6 @@ describe("ended Edit Collection shares", () => {
     const view = render(shell(bridge, EDIT_SHARE));
     await saveNewRow("Milk");
     await noticeSays(PART_WAY);
-    // The share ends, and nothing starts a request as it does. The notice keeps what was typed.
     view.rerender(shell(bridge, ENDED_SHARE));
     await waitFor(() =>
       expect(screen.getByTestId("workspace-shell-error").textContent).toContain(
@@ -750,7 +734,6 @@ describe("ended Edit Collection shares", () => {
       ),
     );
     expect(bridge.createCollectionRecord).toHaveBeenCalledOnce();
-    // Its Try again finishes the same creation, which the ended share refuses.
     fireEvent.click(screen.getByTestId("notice-center-toggle"));
     fireEvent.click(
       within(screen.getByTestId("notice-center")).getByRole("button", { name: "Try again" }),

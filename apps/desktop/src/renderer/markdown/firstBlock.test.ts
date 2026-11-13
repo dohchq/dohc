@@ -5,7 +5,6 @@ import { lexesAsH1, opensWithH1 } from "./firstBlock";
 const lines = (count: number, word = "Line") =>
   Array.from({ length: count }, (_, line) => `${word} ${line}`).join("\n");
 
-// Each body, and whether the editor's lexer reads its first block as an H1.
 const BODIES: [string, string, boolean][] = [
   ["ATX H1", "# Plan\n\nBody\n", true],
   ["ATX H1, no blank line after", "# Plan\nBody\nmore", true],
@@ -67,8 +66,6 @@ const BODIES: [string, string, boolean][] = [
 ];
 
 describe("opensWithH1", () => {
-  // Every answer, decided from the lines or by lexing the lines it returns,
-  // matches the lexer reading the whole body.
   it.each(BODIES)("agrees with the lexer: %s", (_, body, expected) => {
     expect(lexesAsH1(Lexer, body)).toBe(expected);
     const decided = opensWithH1(body);

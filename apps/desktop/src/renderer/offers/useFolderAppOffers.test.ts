@@ -72,7 +72,6 @@ describe("folder app offers", () => {
     expect(reads.map((read) => read.folder)).toEqual(["site"]);
     await answer(0, app("one", "site"));
     expect(result.current.get("site")?.run?.entryPath).toBe("site/index.html");
-    // Rendering again with the same expansion asks nothing more.
     rerender({ workspaceId: "one", enabled: true, expandedFolders: ["site"], activePath: null });
     expect(reads).toHaveLength(1);
   });
@@ -151,15 +150,12 @@ describe("folder app offers", () => {
     expect(result.current.size).toBe(0);
   });
 
-  // Every failure reports, so a dismissed Notices row comes back. Only the
-  // first, a Try again, or the first after a read raises a toast.
   it("reports every failure of a folder, quietly after the first, until it reads or Try again", async () => {
     const { onError } = setup({ expandedFolders: ["site"] });
     const quiet = () => onError.mock.calls.map((call) => call[3]);
     await act(async () => reads[0]!.reject(new Error("listing failed")));
     expect(quiet()).toEqual([false]);
 
-    // Refocus asks again, and the same failure reports quietly.
     act(() => {
       window.dispatchEvent(new Event("focus"));
     });
@@ -171,7 +167,6 @@ describe("folder app offers", () => {
     await act(async () => reads[2]!.reject(new Error("listing failed")));
     expect(quiet()).toEqual([false, true, false]);
 
-    // After a read succeeds, a new failure is news.
     act(() => {
       window.dispatchEvent(new Event("focus"));
     });
@@ -183,7 +178,6 @@ describe("folder app offers", () => {
     expect(quiet()).toEqual([false, true, false, false]);
   });
 
-  // As the shell wires it: a toast is a row not yet seen.
   it("brings back a dismissed Notices row on the next failure, without a second toast", async () => {
     const { result } = renderHook(() => {
       const shell = useShellError("one");
