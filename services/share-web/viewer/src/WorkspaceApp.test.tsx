@@ -77,7 +77,15 @@ function server(options: {level?: Level; signedIn?: boolean; groups?: Array<{wir
       channels: groups.map(group => ({channelWireId: group.wire, name: group.name, kind: "channel", access}))});
     if (url.pathname === "/api/named-chat/messages" && init?.method === "POST") {
       const body = JSON.parse(String(init.body)) as Record<string, unknown>; posts.push(body);
-      return jsonResponse({shareId: "share", channelWireId: body.channelWireId, message: chat(40, String(body.body), "sam")});
+      const place = typeof body.path === "string" ? {path: body.path} : {channelWireId: body.channelWireId};
+      return jsonResponse({shareId: "share", ...place, message: chat(40, String(body.body), "sam")});
+    }
+    // A file's Comments, by the file's path.
+    const path = url.searchParams.get("path");
+    if (url.pathname === "/api/named-chat/messages" && path !== null) {
+      if (url.searchParams.has("since")) return hold("comments", url, signal);
+      return jsonResponse({shareId: "share", path, nextCursor: 30, olderCursor: null,
+        messages: path === "trip/plan.md" ? [chat(9, "Nine is early")] : []});
     }
     if (url.pathname === "/api/named-chat/messages" && url.searchParams.has("since")) return hold("chat", url, signal);
     if (url.pathname === "/api/named-chat/messages") {
@@ -96,9 +104,10 @@ const buttons = () => [...container.querySelectorAll("button")];
 const button = (label: string) => buttons().find(node => node.textContent === label || node.getAttribute("aria-label") === label);
 async function click(label: string) {const control = button(label); expect(control, label).toBeDefined(); await act(async () => control!.click());}
 async function render(grantId: string | null = GRANT) {await act(async () => root.render(<WorkspaceApp grantId={grantId}/>));}
-const following = (path: "log" | "chat") => held.filter(item => item.path === path && !item.signal.aborted);
+const following = (path: "log" | "chat" | "comments") => held.filter(item => item.path === path && !item.signal.aborted);
 async function opened() {await settle(() => text().includes("Leave at nine.") && text().includes("Plans start here") && following("chat").length === 1);}
 const groupPanel = () => container.querySelector<HTMLElement>("#workspace-chats")!;
+const commentsPanel = () => container.querySelector<HTMLElement>("#workspace-comments")!;
 
 it("asks a signed-out browser to sign in with the invited account, then opens the workspace", async () => {
   server({signedIn: false}); await render();
@@ -210,6 +219,8 @@ it("says the membership ended and shows none of the workspace once the member is
   server({level: "comment"}); await render(); await opened();
   await act(async () => following("log")[0]!.answer({ok: false, error: "not found"}, 404));
   await settle(() => text().includes("Your membership ended."));
+  // A browser keeps no copy, so the page says only that.
+  expect(container.querySelector(".state-message")?.textContent?.trim()).toBe("Your membership ended.");
   expect(container.querySelector('nav[aria-label="Workspace files"]')).toBeNull();
   expect(text()).not.toContain("Leave at nine.");
   expect(text()).not.toContain("Plans start here");
@@ -221,25 +232,81 @@ it("refuses an account that is not a member, and offers to sign out", async () =
   expect(button("Sign out")).toBeDefined();
 });
 
-it("lays the files, the page and the Groups side by side on a wide screen, and as three tabs on a phone", async () => {
+it("lays the files, the page and Chats or Comments side by side on a wide screen, and as four tabs on a phone", async () => {
   server({level: "comment"}); await render(); await opened();
-  expect(container.querySelector('[role="tablist"]')).toBeNull();
+  const side = [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
+  expect(side.map(tab => tab.textContent)).toEqual(["Comments", "Chats"]);
+  expect(side.map(tab => tab.getAttribute("aria-selected"))).toEqual(["false", "true"]);
   for (const id of ["workspace-files", "workspace-main", "workspace-chats"]) {
     expect(container.querySelector(`#${id}`)?.closest("[hidden], [inert]"), id).toBeNull();
   }
+  expect(commentsPanel().hasAttribute("inert")).toBe(true);
   await act(async () => root.unmount()); root = createRoot(container); held = [];
   narrow = true; await render(); await opened();
   const tabs = [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
-  expect(tabs.map(tab => tab.textContent)).toEqual(["Files", "Page", "Chats"]);
-  expect(tabs.map(tab => tab.getAttribute("aria-selected"))).toEqual(["false", "true", "false"]);
+  expect(tabs.map(tab => tab.textContent)).toEqual(["Files", "Page", "Comments", "Chats"]);
+  expect(tabs.map(tab => tab.getAttribute("aria-selected"))).toEqual(["false", "true", "false", "false"]);
   expect(container.querySelector("#workspace-files")?.hasAttribute("inert")).toBe(true);
   expect(container.querySelector("#workspace-chats")?.hasAttribute("inert")).toBe(true);
   await act(async () => tabs[1]!.dispatchEvent(new KeyboardEvent("keydown", {key: "ArrowRight", bubbles: true})));
   expect(tabs[2]!.getAttribute("aria-selected")).toBe("true");
   expect(document.activeElement).toBe(tabs[2]);
+  expect(commentsPanel().hasAttribute("inert")).toBe(false);
+  await settle(() => commentsPanel().textContent?.includes("Nine is early") === true);
+  await act(async () => tabs[2]!.dispatchEvent(new KeyboardEvent("keydown", {key: "ArrowRight", bubbles: true})));
   expect(container.querySelector("#workspace-chats")?.hasAttribute("inert")).toBe(false);
   await act(async () => tabs[0]!.click());
   await act(async () => [...container.querySelectorAll<HTMLButtonElement>("#workspace-files .file")].find(node => node.textContent === "readme.md")!.click());
   await settle(() => text().includes("Welcome."));
   expect(tabs[1]!.getAttribute("aria-selected")).toBe("true");
+});
+
+async function showComments() {
+  await click("Comments");
+  await settle(() => commentsPanel().textContent?.includes("Nine is early") === true && following("comments").length === 1);
+}
+
+it("shows the open file's Comments at Comment and posts one on the file", async () => {
+  server({level: "comment"}); await render(); await opened();
+  await showComments();
+  expect(following("comments")[0]!.url.searchParams.get("path")).toBe("trip/plan.md");
+  expect(commentsPanel().querySelector("h2")?.textContent).toBe("Comments");
+  expect(commentsPanel().textContent).toContain("plan.md");
+  const box = commentsPanel().querySelector<HTMLTextAreaElement>('textarea[name="body"]')!;
+  expect(box.getAttribute("aria-label")).toBe("Comment");
+  setControlValue(box, "Ten, then"); await act(async () => commentsPanel().querySelector<HTMLButtonElement>('button[type="submit"]')!.click());
+  await settle(() => posts.length === 1);
+  expect(posts[0]).toMatchObject({shareId: "share", path: "trip/plan.md", body: "Ten, then", authorKind: "human"});
+  expect(posts[0]).not.toHaveProperty("channelWireId");
+  await settle(() => commentsPanel().textContent?.includes("Ten, then") === true);
+
+  // Another file shows its own Comments.
+  const tree = container.querySelector('nav[aria-label="Workspace files"]')!;
+  await act(async () => [...tree.querySelectorAll<HTMLButtonElement>(".file")].find(node => node.textContent === "to-pack.md")!.click());
+  await settle(() => commentsPanel().textContent?.includes("No comments yet.") === true);
+  await settle(() => following("comments").length === 1 && following("comments")[0]!.url.searchParams.get("path") === "trip/to-pack.md");
+});
+
+it("shows a file's Comments at View with no comment controls", async () => {
+  server({level: "view"}); await render(); await opened();
+  await showComments();
+  expect(commentsPanel().querySelector("textarea, form")).toBeNull();
+  expect([...commentsPanel().querySelectorAll("button")].map(node => node.textContent)).not.toContain("Send");
+  expect(commentsPanel().textContent).toContain("Only people who can comment post here.");
+});
+
+it("copies a toast's text with the Copy button beside it", async () => {
+  server({level: "edit"});
+  const writeText = vi.fn(async () => undefined);
+  Object.defineProperty(navigator, "clipboard", {configurable: true, value: {writeText}});
+  vi.mocked(openMemberPage).mockResolvedValue({kind: "refused", code: "live_paused_by_owner"});
+  await render();
+  await settle(() => container.querySelector(".workspace-toast") !== null);
+  const toast = container.querySelector<HTMLElement>(".workspace-toast")!;
+  const copy = toast.querySelector<HTMLButtonElement>('button[aria-label="Copy message"]')!;
+  expect(copy).not.toBeNull();
+  // Beside the text, before the actions.
+  expect(copy.closest(".toast-text")).not.toBeNull();
+  await act(async () => copy.click());
+  expect(writeText).toHaveBeenCalledWith('dohc could not open "plan.md" for editing\nThe owner paused live editing for this page. You can still read it.');
 });

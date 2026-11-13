@@ -1,7 +1,7 @@
 import {lazy, Suspense, useCallback, useEffect, useRef, useState, type KeyboardEvent} from "react";
 import type {Ended} from "./ChatChannel";
 import {DohcMark, Icon, fileIcon} from "./icons";
-import {MemberChats} from "./MemberChats";
+import {MemberChats, MemberComments, useMemberListing} from "./MemberChats";
 import {memberSession} from "./memberWorkspace";
 import {filesFromAccumulator, isMarkdown, type FileAccumulator, type SharedFile, type ViewMeta} from "./model";
 import {accountUser, namedRequest} from "./namedRecipient";
@@ -19,10 +19,14 @@ const MemberLivePage = lazy(() => import("./MemberLivePage"));
 type Account = {id: string; name: string};
 type Files = {meta: ViewMeta; fileAccumulator: FileAccumulator; files: SharedFile[]; nextCursor: number; epochLogFloor: number};
 type View = {status: "loading"} | {status: "ready"; files: Files} | {status: "refused" | "ended" | "load-failed" | "version-mismatch"};
-type Tab = "files" | "page" | "chats";
+type Tab = "files" | "page" | "comments" | "chats";
+type Side = "comments" | "chats";
 const TABS: {id: Tab; label: string; panel: string}[] = [
-  {id: "files", label: "Files", panel: "workspace-files"}, {id: "page", label: "Page", panel: "workspace-main"}, {id: "chats", label: "Chats", panel: "workspace-chats"},
+  {id: "files", label: "Files", panel: "workspace-files"}, {id: "page", label: "Page", panel: "workspace-main"},
+  {id: "comments", label: "Comments", panel: "workspace-comments"}, {id: "chats", label: "Chats", panel: "workspace-chats"},
 ];
+// Beside the page on a wide screen, the open file's Comments or the Groups.
+const SIDES = TABS.filter((item): item is typeof item & {id: Side} => item.id === "comments" || item.id === "chats");
 const BADGE = {view: "View only", comment: "Can comment", edit: "Can edit"} as const;
 const SESSION_ENDED = "Your session ended. Sign in again to keep reading.";
 const CHECK_FAILED = "dohc could not open this workspace. Check your connection, then try again.";
@@ -130,7 +134,7 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
   const view = useMemberFiles(session, attempt);
   const [ended, setEnded] = useState(false);
   const [selectedPath, setSelectedPath] = useState("");
-  const [tab, setTab] = useState<Tab>("page"), [unread, setUnread] = useState(0);
+  const [tab, setTab] = useState<Tab>("page"), [side, setSide] = useState<Side>("chats"), [unread, setUnread] = useState(0);
   const [statusSlot, setStatusSlot] = useState<HTMLElement | null>(null), [toastSlot, setToastSlot] = useState<HTMLElement | null>(null);
   const leave = useRef<((action: () => void) => void) | null>(null), tabs = useRef(new Map<Tab, HTMLButtonElement>());
   const narrow = useNarrow();
@@ -142,6 +146,7 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
     setSelectedPath(path => files.files.some(file => file.path === path) ? path : files.files[0]?.path ?? "");
   }, [files]);
   const groupsEnded = useCallback((reason: Ended) => {if (reason === "signed-out") onSessionEnded(); else setEnded(true);}, [onSessionEnded]);
+  const listing = useMemberListing(view.status === "ready" ? grantId : null, account.id, groupsEnded);
   const signOut = () => (leave.current ?? (action => action()))(onSignOut);
   // A file whose text is gone has changed. The follow brings its new text; this says whether to wait for it.
   const refreshStale = useCallback(async (path: string, blobSha256: string) => {
@@ -151,9 +156,7 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
     } catch {return false;}
   }, [session]);
 
-  if (ended || view.status === "ended") return <StatePage icon="unlink" title="Your membership ended.">
-    <p>This browser keeps no copy of the workspace. Ask the owner to invite you again.</p>
-  </StatePage>;
+  if (ended || view.status === "ended") return <StatePage icon="unlink" title="Your membership ended."/>;
   if (view.status === "refused") return <StatePage icon="unlink" title="dohc could not open this workspace with this account.">
     <p>Sign in with the account the owner invited.</p>
     <button className="handoff-button secondary" type="button" disabled={signingOut} onClick={onSignOut}>Sign out</button>
@@ -181,13 +184,20 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
     onSelect={choose} onStaleBlob={refreshStale}/> : null;
   const shownTab = narrow ? tab : null;
   const panel = (id: Tab) => narrow ? {role: "tabpanel", "aria-labelledby": `workspace-tab-${id}`, inert: tab !== id, "data-shown": tab === id} : {};
-  const moveTab = (event: KeyboardEvent<HTMLDivElement>) => {
-    const index = TABS.findIndex(item => item.id === tab);
-    const next = event.key === "ArrowRight" ? (index + 1) % TABS.length : event.key === "ArrowLeft" ? (index + TABS.length - 1) % TABS.length :
-      event.key === "Home" ? 0 : event.key === "End" ? TABS.length - 1 : -1;
+  // What shows beside the page: on a phone, the tab when it is Comments or Chats.
+  const showing: Side | null = narrow ? (tab === "comments" || tab === "chats" ? tab : null) : side;
+  const sidePanel = (id: Side) => ({role: "tabpanel", "aria-labelledby": narrow ? `workspace-tab-${id}` : `side-tab-${id}`,
+    inert: showing !== id, "data-shown": showing === id});
+  const moveTab = <T extends Tab>(list: {id: T}[], current: T, choose: (id: T) => void) => (event: KeyboardEvent<HTMLDivElement>) => {
+    const index = list.findIndex(item => item.id === current);
+    const next = event.key === "ArrowRight" ? (index + 1) % list.length : event.key === "ArrowLeft" ? (index + list.length - 1) % list.length :
+      event.key === "Home" ? 0 : event.key === "End" ? list.length - 1 : -1;
     if (next < 0) return;
-    event.preventDefault(); setTab(TABS[next]!.id); tabs.current.get(TABS[next]!.id)?.focus();
+    event.preventDefault(); choose(list[next]!.id); tabs.current.get(list[next]!.id)?.focus();
   };
+  const tabLabel = (item: {id: Tab; label: string}) => <>
+    {item.label}{item.id === "chats" && unread > 0 && <span className="unread-count">{unread}<span className="sr-only"> unread</span></span>}
+  </>;
 
   return <div className="viewer link-page workspace-page" data-tab={shownTab ?? undefined}>
     <nav id="workspace-files" aria-label="Workspace files" {...panel("files")}>
@@ -236,14 +246,24 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
       </div>
       <div className="toast-slot" ref={setToastSlot}/>
     </div>
-    <div className="side-panel workspace-chats" id="workspace-chats" {...panel("chats")}>
-      <MemberChats grantId={grantId} accountId={account.id} shown={!narrow || tab === "chats"} onEnded={groupsEnded} onUnread={setUnread}/>
+    <div className="side-panel workspace-side" {...(narrow ? {inert: showing === null, "data-shown": showing !== null} : {})}>
+      {!narrow && <div className="side-tabs" role="tablist" aria-label="Beside the page" onKeyDown={moveTab(SIDES, side, setSide)}>
+        {SIDES.map(item => <button key={item.id} ref={node => {if (node) tabs.current.set(item.id, node);}} id={`side-tab-${item.id}`} role="tab" type="button"
+          aria-selected={side === item.id} aria-controls={item.panel} tabIndex={side === item.id ? 0 : -1} onClick={() => setSide(item.id)}>{tabLabel(item)}</button>)}
+      </div>}
+      <div className="side-stack">
+        <div id="workspace-comments" {...sidePanel("comments")}>
+          {showing === "comments" && (selected ? <MemberComments found={listing.found} onRetry={listing.retry} path={selected.path}
+            access={access === "view" ? "read-only" : "read-write"} onEnded={groupsEnded}/> : <p className="chat-state">No files in this workspace yet.</p>)}
+        </div>
+        <div className="workspace-chats" id="workspace-chats" {...sidePanel("chats")}>
+          <MemberChats found={listing.found} onRetry={listing.retry} shown={showing === "chats"} onEnded={groupsEnded} onUnread={setUnread}/>
+        </div>
+      </div>
     </div>
-    {narrow && <div className="workspace-tabs" role="tablist" aria-label="Workspace" onKeyDown={moveTab}>
+    {narrow && <div className="workspace-tabs" role="tablist" aria-label="Workspace" onKeyDown={moveTab(TABS, tab, setTab)}>
       {TABS.map(item => <button key={item.id} ref={node => {if (node) tabs.current.set(item.id, node);}} id={`workspace-tab-${item.id}`} role="tab" type="button"
-        aria-selected={tab === item.id} aria-controls={item.panel} tabIndex={tab === item.id ? 0 : -1} onClick={() => setTab(item.id)}>
-        {item.label}{item.id === "chats" && unread > 0 && <span className="unread-count">{unread}<span className="sr-only"> unread</span></span>}
-      </button>)}
+        aria-selected={tab === item.id} aria-controls={item.panel} tabIndex={tab === item.id ? 0 : -1} onClick={() => setTab(item.id)}>{tabLabel(item)}</button>)}
     </div>}
   </div>;
 }

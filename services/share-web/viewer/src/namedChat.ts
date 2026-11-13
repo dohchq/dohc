@@ -15,6 +15,16 @@ export interface NamedChatChannel {
   maxPostBytes: number;
   maxBodyBytes: number;
 }
+/** A current file's Comments in a workspace share, named by the file's path. */
+export interface NamedChatComments {
+  shareId: string;
+  userId: string;
+  path: string;
+  access: NamedChatAccess;
+  maxPostBytes: number;
+  maxBodyBytes: number;
+}
+type NamedChatPlace = NamedChatChannel | NamedChatComments;
 /** `body` is null when the relay left it out because it is too large for a browser response. */
 export interface NamedChatMessage {
   relaySeq: number;
@@ -132,20 +142,20 @@ export function chatMessage(value: unknown): NamedChatMessage {
   };
 }
 
-function page(value: Record<string, unknown>, channel: NamedChatChannel): NamedChatMessage[] {
-  if (
-    value.shareId !== channel.shareId ||
-    value.channelWireId !== channel.channelWireId ||
-    !Array.isArray(value.messages)
-  )
-    throw invalid();
-  return value.messages.map(chatMessage);
+const coordinates = (place: NamedChatPlace): Record<string, string> =>
+  "path" in place
+    ? { shareId: place.shareId, path: place.path }
+    : { shareId: place.shareId, channelWireId: place.channelWireId };
+
+/** The answer names the same share and channel, or the same file, that the request named. */
+function answers(value: Record<string, unknown>, place: NamedChatPlace): boolean {
+  return Object.entries(coordinates(place)).every(([key, expected]) => value[key] === expected);
 }
 
-const coordinates = (channel: NamedChatChannel) => ({
-  shareId: channel.shareId,
-  channelWireId: channel.channelWireId,
-});
+function page(value: Record<string, unknown>, place: NamedChatPlace): NamedChatMessage[] {
+  if (!answers(value, place) || !Array.isArray(value.messages)) throw invalid();
+  return value.messages.map(chatMessage);
+}
 
 export async function openNamedChannel(
   grantId: string,
@@ -181,7 +191,7 @@ export async function openNamedChannel(
 }
 
 async function readHistoryPage(
-  channel: NamedChatChannel,
+  channel: NamedChatPlace,
   before: number | null,
   signal: AbortSignal,
 ) {
@@ -203,7 +213,7 @@ async function readHistoryPage(
  * up to `CHAT_EMPTY_PAGE_LIMIT` pages. `nextCursor` is the first page's and starts following; `olderCursor` reads further back.
  */
 export async function readNamedChatHistory(
-  channel: NamedChatChannel,
+  channel: NamedChatPlace,
   before: number | null,
   signal: AbortSignal,
 ) {
@@ -219,7 +229,7 @@ export async function readNamedChatHistory(
 }
 
 export async function followNamedChat(
-  channel: NamedChatChannel,
+  channel: NamedChatPlace,
   since: number,
   holdMs: number,
   signal: AbortSignal,
@@ -239,9 +249,9 @@ export async function followNamedChat(
   };
 }
 
-/** Posts a new thread in the channel. Retrying with the same `id` and fields returns the original message. */
+/** Posts a new thread in the channel, or on the file. Retrying with the same `id` and fields returns the original message. */
 export async function postNamedChatMessage(
-  channel: NamedChatChannel,
+  channel: NamedChatPlace,
   post: { id: string; body: string },
   signal: AbortSignal,
 ) {
@@ -250,18 +260,17 @@ export async function postNamedChatMessage(
     ...post,
     authorKind: "human",
   });
-  if (value.shareId !== channel.shareId || value.channelWireId !== channel.channelWireId)
-    throw invalid();
+  if (!answers(value, channel)) throw invalid();
   return chatMessage(value.message);
 }
 
 /** The body the relay stores, or null when it would refuse it. */
-export function normalizeChatBody(text: string, channel: NamedChatChannel): string | null {
+export function normalizeChatBody(text: string, channel: NamedChatPlace): string | null {
   const body = text.replace(/\r\n?/gu, "\n").trimEnd();
   return body && body.isWellFormed() && !chatBodyTooLong(body, channel) ? body : null;
 }
 
-export function chatBodyTooLong(text: string, channel: NamedChatChannel): boolean {
+export function chatBodyTooLong(text: string, channel: NamedChatPlace): boolean {
   const body = text.replace(/\r\n?/gu, "\n").trimEnd(),
     encoder = new TextEncoder();
   const post = {

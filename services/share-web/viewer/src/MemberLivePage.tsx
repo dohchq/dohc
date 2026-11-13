@@ -109,6 +109,7 @@ export default function MemberLivePage({grantId, accountId, path, readView, stat
   const reason = phase.kind === "refused" ? phase.reason : phase.kind === "waiting" ? HOST_REFUSAL_REASONS[WAITS_FOR_HOST]! : null;
   const toast = !dismissed && (phase.kind === "refused" || (phase.kind === "waiting" && phase.reported));
   const readable = phase.kind === "refused" || phase.kind === "waiting";
+  const toastTitle = `dohc could not open "${name}" for editing`, toastBody = reason ? `${reason} You can still read it.` : "You can still read it.";
   return <>
     {statusSlot && !live && (!editing || readable) && createPortal(phase.kind === "opening"
       ? <p className="named-document-status" role="status">Opening the file…</p>
@@ -124,12 +125,30 @@ export default function MemberLivePage({grantId, accountId, path, readView, stat
     {toast && toastSlot && createPortal(<div className="edit-notice workspace-toast" role="alert">
       <span className="tile bad"><Icon name="alert"/></span>
       <div>
-        <p className="edit-notice-title">dohc could not open "{name}" for editing</p>
-        <p>{reason ? `${reason} You can still read it.` : "You can still read it."}</p>
+        <div className="toast-text">
+          <div><p className="edit-notice-title">{toastTitle}</p><p>{toastBody}</p></div>
+          <CopyMessage text={`${toastTitle}\n${toastBody}`}/>
+        </div>
         <div className="edit-notice-actions"><button className="handoff-button secondary" onClick={open}>Try again</button></div>
       </div>
       <button className="icon-button toast-close" type="button" aria-label="Dismiss" title="Dismiss" onClick={() => setDismissed(true)}><Icon name="x"/></button>
     </div>, toastSlot)}
     {leaving && <DiscardDraft cancel={() => setLeaving(null)} confirm={() => {const action = leaving; setLeaving(null); action();}}/>}
   </>;
+}
+
+/** Copies exactly what the toast says, and shows that it did for 2 s. */
+function CopyMessage({text}: {text: string}) {
+  const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(timer.current), []);
+  const copy = async () => {
+    let next: "copied" | "failed" = "copied";
+    try {await navigator.clipboard.writeText(text);} catch {next = "failed";}
+    setState(next); clearTimeout(timer.current); timer.current = setTimeout(() => setState("idle"), 2000);
+  };
+  const label = state === "copied" ? "Copied" : state === "failed" ? "Could not copy" : "Copy message";
+  return <button className="icon-button toast-copy" type="button" aria-label={label} title={label} onClick={() => void copy()}>
+    <Icon name={state === "copied" ? "check" : "copy"}/>
+  </button>;
 }

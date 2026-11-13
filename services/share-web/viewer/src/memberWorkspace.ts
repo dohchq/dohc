@@ -1,8 +1,8 @@
 import {normalizeShareLabel} from "@dohc/security-contract/share-labels";
 import {ended, type ChatChannelClient, type Ended} from "./ChatChannel";
 import {
-  CHAT_FOLLOW_HOLD_MS, CHAT_PAGE_LIMIT, chatBodyTooLong, chatMessage, chatRequest, NamedChatError, normalizeChatBody, postNamedChatMessage,
-  readNamedChatHistory, type NamedChatChannel, type NamedChatMessage,
+  CHAT_FOLLOW_HOLD_MS, CHAT_PAGE_LIMIT, chatBodyTooLong, chatMessage, chatRequest, followNamedChat, NamedChatError, normalizeChatBody,
+  postNamedChatMessage, readNamedChatHistory, type NamedChatChannel, type NamedChatComments, type NamedChatMessage,
 } from "./namedChat";
 import {RETRY_INITIAL_MS, RETRY_MAX_MS} from "./retry";
 
@@ -16,7 +16,7 @@ const record = (value: unknown): value is Record<string, unknown> => value !== n
 const invalid = () => new NamedChatError(0);
 const positive = (value: unknown) => Number.isSafeInteger(value) && Number(value) > 0;
 
-export interface MemberGroups {shareId: string; userId: string; groups: NamedChatChannel[]}
+export interface MemberGroups {shareId: string; userId: string; maxPostBytes: number; maxBodyBytes: number; groups: NamedChatChannel[]}
 
 /** Every Group the member reaches, in the workspace's order. */
 export async function openMemberGroups(grantId: string, signal: AbortSignal): Promise<MemberGroups> {
@@ -28,7 +28,19 @@ export async function openMemberGroups(grantId: string, signal: AbortSignal): Pr
     if (!record(channel) || typeof channel.channelWireId !== "string" || (channel.access !== "read-only" && channel.access !== "read-write")) throw invalid();
     return {shareId, userId, channelWireId: channel.channelWireId, name: normalizeShareLabel(channel.name), access: channel.access, maxPostBytes, maxBodyBytes};
   });
-  return {shareId, userId, groups};
+  return {shareId, userId, maxPostBytes, maxBodyBytes, groups};
+}
+
+/** A current file's Comments: read, followed and posted by the file's path. */
+export function commentsClient(comments: NamedChatComments): ChatChannelClient {
+  return {
+    access: comments.access,
+    readHistory: (before, signal) => readNamedChatHistory(comments, before, signal),
+    follow: (since, holdMs, signal) => followNamedChat(comments, since, holdMs, signal),
+    post: (post, signal) => postNamedChatMessage(comments, post, signal),
+    normalize: text => normalizeChatBody(text, comments),
+    tooLong: text => chatBodyTooLong(text, comments),
+  };
 }
 
 export interface GroupPage {messages: {channelWireId: string; message: NamedChatMessage}[]; nextCursor: number; hasMore: boolean}

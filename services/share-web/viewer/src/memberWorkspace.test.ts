@@ -27,7 +27,7 @@ it("opens every Group the member reaches, each with its own access", async () =>
   vi.stubGlobal("fetch", fetch);
   const opened = await openMemberGroups("grant-1", new AbortController().signal);
   expect(String((fetch.mock.calls[0] as unknown[])[0])).toBe("/api/named-chat/channels?grantId=grant-1");
-  expect(opened).toEqual({shareId: "share", userId: "sam", groups: [
+  expect(opened).toEqual({shareId: "share", userId: "sam", maxPostBytes: 9000, maxBodyBytes: 8000, groups: [
     {shareId: "share", userId: "sam", channelWireId: "wire-plans", name: "plans", access: "read-write", maxPostBytes: 9000, maxBodyBytes: 8000},
     {shareId: "share", userId: "sam", channelWireId: "wire-food", name: "food", access: "read-only", maxPostBytes: 9000, maxBodyBytes: 8000}]});
   vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({shareId: "share", userId: "sam", maxPostBytes: 9000, maxBodyBytes: 8000,
