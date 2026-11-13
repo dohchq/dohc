@@ -164,3 +164,34 @@ it("shows a View member every Group read-only and refuses a post", async () => {
     body: "Count me in", authorKind: "human" }) });
   expect(posted.status).toBe(403);
 });
+
+it("reads, follows and posts on a file's Comments for a member, and keeps them read-only at View", async () => {
+  const f = await fixture();
+  await ownerAppend(f.relay, [
+    logOp("chat.thread.create", { threadId: "c-plan", title: "", createdAtMs: 2, linkedObjectId: "object-trip/plan.md", linkedAtMs: 2, linkedPathHint: "trip/plan.md" }),
+    logOp("chat.message.append", chatMessageAppend("m-comment", "c-plan", "Nine is early", { authorUserId: OWNER }).payload),
+  ]);
+  const query = (extra: Record<string, string> = {}) => `messages?${new URLSearchParams({ shareId: f.shareId, path: "trip/plan.md", limit: "50", ...extra })}`;
+  const history = await f.chat(query());
+  expect(history.status, await history.clone().text()).toBe(200);
+  const page = await history.json() as { path: string; messages: Array<{ body: string }>; nextCursor: number };
+  expect(page.path).toBe("trip/plan.md");
+  expect(page.messages.map(message => message.body)).toEqual(["Nine is early"]);
+  const posted = await f.chat("messages", "sam", { method: "POST", body: JSON.stringify({ shareId: f.shareId, path: "trip/plan.md", id: "comment-1",
+    body: "Ten, then", authorKind: "human" }) });
+  expect(posted.status, await posted.clone().text()).toBe(200);
+  expect(await posted.json()).toMatchObject({ shareId: f.shareId, path: "trip/plan.md", message: { body: "Ten, then", authorUserId: "sam" } });
+  const follow = await f.chat(query({ since: String(page.nextCursor) }));
+  expect(follow.status, await follow.clone().text()).toBe(200);
+  expect(await follow.json()).toMatchObject({ path: "trip/plan.md", hasMore: false, messages: [expect.objectContaining({ body: "Ten, then" })] });
+  // An answer for another file, or a Group, is not this file's.
+  const unknown = await f.chat(query({ path: "trip/missing.md" }));
+  expect(unknown.status).toBe(404);
+
+  const view = await fixture("view");
+  const read = await view.chat(`messages?${new URLSearchParams({ shareId: view.shareId, path: "trip/plan.md", limit: "50" })}`);
+  expect(read.status, await read.clone().text()).toBe(200);
+  const refused = await view.chat("messages", "sam", { method: "POST", body: JSON.stringify({ shareId: view.shareId, path: "trip/plan.md", id: "comment-1",
+    body: "Ten, then", authorKind: "human" }) });
+  expect(refused.status).toBe(403);
+});

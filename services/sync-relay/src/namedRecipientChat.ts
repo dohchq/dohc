@@ -32,6 +32,7 @@ import {
 } from "./relayLogInputs";
 import { parseLimit, parseString, parseLinkLogHold } from "./requestInputs";
 import type { AuthorizedShareAction } from "./shareAuthorization";
+import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import {
   chatSideOf,
   filterOpForShare,
@@ -41,8 +42,9 @@ import {
 } from "./shareFilter";
 import type { createShareReadQueries } from "./shareReadQueries";
 import type { SyncRelayStorage } from "./storage";
+import { commentFileOf, currentFileAt, type CommentFile } from "./storage/personalAgentChat";
 import { MAX_DISCUSSION_ACTIVITY_HOLD_MS } from "./wireLimits";
-import { workspaceChatAccess, workspaceGroupReachable } from "./workspaceReach";
+import { workspaceChatAccess, workspaceFileReach, workspaceGroupReachable } from "./workspaceReach";
 
 const MAX_MESSAGE_BODY_BYTES = 64 * 1024;
 // About 100 people with two tabs each, and room to spare.
@@ -277,6 +279,7 @@ export function createNamedRecipientChat(options: {
           const allowed = new Set([
             "shareId",
             "channelWireId",
+            "path",
             "id",
             "threadId",
             "body",
@@ -289,7 +292,7 @@ export function createNamedRecipientChat(options: {
         } else {
           const allowed = channels
             ? ["grantId"]
-            : ["shareId", "channelWireId", "before", "since", "hold", "limit"];
+            : ["shareId", "channelWireId", "path", "before", "since", "hold", "limit"];
           if (
             [...url.searchParams.keys()].some(
               (key) => !allowed.includes(key) || url.searchParams.getAll(key).length !== 1,
@@ -329,7 +332,19 @@ export function createNamedRecipientChat(options: {
           followsByWorkspace.set(share.workspaceId, workspaceCount + 1);
           followWorkspace = share.workspaceId;
         }
-        const authority = requireShareAction(shareId, actor.userId, "read");
+        // A member's browser hears one refusal: a removed member reads like an unknown share, as the member's link reads do.
+        const membership =
+          (JSON.parse(share.selectorJson) as { kind?: unknown }).kind === "workspace";
+        const action = (kind: "read" | "append") => {
+          try {
+            return requireShareAction(shareId, actor.userId, kind);
+          } catch (error) {
+            throw membership && error instanceof RelayError && error.code === "share_access_removed"
+              ? notFound()
+              : error;
+          }
+        };
+        const authority = action("read");
         if (authority.share.workspaceId !== share.workspaceId) throw notFound();
         // A workspace share reaches every ordinary Group, one follow for them all.
         // Any other share reaches one channel.
@@ -338,7 +353,7 @@ export function createNamedRecipientChat(options: {
         const chat = workspace ? null : chatSideOf(authority.effectiveSelector);
         if (!workspace && !chat) throw notFound();
         const recheck = () => {
-          const fresh = requireShareAction(shareId, actor.userId, "read");
+          const fresh = action("read");
           if (
             fresh.share.workspaceId !== share.workspaceId ||
             isWorkspaceSelector(fresh.effectiveSelector) !== workspace ||
@@ -373,7 +388,7 @@ export function createNamedRecipientChat(options: {
           }
           let writable = false;
           try {
-            requireShareAction(shareId, actor.userId, "append");
+            action("append");
             writable = true;
           } catch (error) {
             if (!(error instanceof RelayError && error.code === "share_read_only")) throw error;
@@ -392,18 +407,37 @@ export function createNamedRecipientChat(options: {
             ],
           });
         }
+        // A workspace share reads and posts on a current file's Comments by its path. File Comments follow file reach.
+        const posting = request.method === "POST";
+        let file: CommentFile | null = null;
+        if (posting ? Object.hasOwn(input, "path") : url.searchParams.has("path")) {
+          const path = posting ? input.path : url.searchParams.get("path"),
+            selector = authority.effectiveSelector;
+          file =
+            typeof path === "string" && isWorkspaceSelector(selector)
+              ? currentFileAt(storage, share.workspaceId, path)
+              : null;
+          if (
+            !file ||
+            !isWorkspaceSelector(selector) ||
+            (posting
+              ? Object.hasOwn(input, "channelWireId")
+              : url.searchParams.has("channelWireId")) ||
+            visibleSharePath(workspaceFileReach(selector), file.filePath) !== file.filePath
+          )
+            throw notFound();
+        }
         // A workspace share follows every Group without naming one, and reads or posts in one Group by name.
-        const everyGroup = !chat && following;
+        const everyGroup = !chat && !file && following;
         if (everyGroup && url.searchParams.has("channelWireId")) throw notFound();
-        const channelWireId = everyGroup
-          ? null
-          : parseString(
-              request.method === "POST"
-                ? input.channelWireId
-                : url.searchParams.get("channelWireId"),
-              "channelWireId",
-              256,
-            );
+        const channelWireId =
+          everyGroup || file
+            ? null
+            : parseString(
+                posting ? input.channelWireId : url.searchParams.get("channelWireId"),
+                "channelWireId",
+                256,
+              );
         if (
           channelWireId !== null &&
           (chat
@@ -411,9 +445,10 @@ export function createNamedRecipientChat(options: {
             : !workspaceGroupReachable(channelWireId, resolver!))
         )
           throw notFound();
-        if (request.method === "POST") {
-          if (channelWireId === null) throw notFound();
-          requireShareAction(shareId, actor.userId, "append");
+        const place = file ? { path: file.filePath } : { channelWireId };
+        if (posting) {
+          if (channelWireId === null && !file) throw notFound();
+          action("append");
           if (input.authorUserId !== undefined && input.authorUserId !== actor.userId)
             throw relayError("authorship_mismatch");
           const id = parseString(input.id, "id", 256);
@@ -443,15 +478,25 @@ export function createNamedRecipientChat(options: {
             ? `browser-thread:${sha256Hex(JSON.stringify([shareId, actor.userId, id]))}`
             : parseString(input.threadId, "threadId", 256);
           if (!threadId.isWellFormed()) throw badRequest("invalid thread id");
+          // A reply on a file joins one of that file's threads.
+          if (
+            file &&
+            !createThread &&
+            commentFileOf(storage, share.workspaceId, threadId)?.objectId !== file.objectId
+          )
+            throw notFound();
 
           const append = async () => {
             const createdAtMs = options.nowMs();
             const ops = [
+              // The share's write binds a new thread on a file to the file's object, as the desktop's own Comments are.
               ...(createThread
                 ? [
                     {
                       opKind: "chat.thread.create",
-                      payload: { threadId, title: "", channelWireId, lane: "chat", createdAtMs },
+                      payload: file
+                        ? { threadId, title: "", linkedPath: file.filePath, createdAtMs }
+                        : { threadId, title: "", channelWireId, lane: "chat", createdAtMs },
                     },
                   ]
                 : []),
@@ -471,7 +516,7 @@ export function createNamedRecipientChat(options: {
             ].map((op, originSeq) => ({ ...op, originSeq, recordedAtMs: createdAtMs }));
             boundedJson({
               shareId,
-              channelWireId,
+              ...place,
               message: messageFromOp(
                 {
                   relaySeq: Number.MAX_SAFE_INTEGER,
@@ -505,7 +550,7 @@ export function createNamedRecipientChat(options: {
           recheck();
           return json({
             shareId,
-            channelWireId,
+            ...place,
             message: messageFromOp(
               { relaySeq: row.relaySeq, opKind: row.opKind, payload: JSON.parse(row.payloadJson) },
               row.originId,
@@ -521,6 +566,7 @@ export function createNamedRecipientChat(options: {
             shareId,
             channelWireId,
             query: url.searchParams,
+            comments: file && commentsOn(storage, share.workspaceId, file),
             recheck,
             activity: options.activity,
             waiter: `named:${actor.userId}`,
@@ -554,6 +600,31 @@ export function createNamedRecipientChat(options: {
   return handle;
 }
 
+/** A current file's Comments: the threads whose first create binds this file and no other. */
+interface FileComments {
+  path: string;
+  fetch(page: {
+    workspaceId: string;
+    cursor: number | null;
+    direction: "older" | "newer";
+    limit: number;
+  }): ReturnType<SyncRelayStorage["fetchCommentMessages"]>;
+  onFile(threadId: string): boolean;
+}
+
+function commentsOn(
+  storage: SyncRelayStorage,
+  workspaceId: string,
+  file: CommentFile,
+): FileComments {
+  return {
+    path: file.filePath,
+    fetch: (page) =>
+      storage.fetchCommentMessages({ ...page, objectId: file.objectId, path: file.filePath }),
+    onFile: (threadId) => commentFileOf(storage, workspaceId, threadId)?.objectId === file.objectId,
+  };
+}
+
 // One page of a shared channel for a browser reader, named or link: newest
 // first with `before`, or following with `since` and an optional hold. With
 // no channel, a follow of every Group a workspace share reaches, each message
@@ -561,6 +632,7 @@ export function createNamedRecipientChat(options: {
 // `recheck` throws once the reader's access has ended; it runs before every
 // read, including each wake of a hold, and before the page leaves.
 // `project` is the reader's view of a message, and the byte budget counts it.
+// With `comments` instead of a channel, a page of one file's Comments.
 export async function readSharedChannelPage<Message extends { relaySeq: number }>(input: {
   storage: Pick<SyncRelayStorage, "fetchChatMessages" | "fetchChannelMessages">;
   resolver: ChatShareThreadResolver;
@@ -568,6 +640,7 @@ export async function readSharedChannelPage<Message extends { relaySeq: number }
   workspaceId: string;
   shareId: string;
   channelWireId: string | null;
+  comments?: FileComments | null;
   query: URLSearchParams;
   recheck(): void;
   activity: Pick<DiscussionActivityHub, "wait">;
@@ -593,8 +666,10 @@ export async function readSharedChannelPage<Message extends { relaySeq: number }
       direction: following ? ("newer" as const) : ("older" as const),
       limit,
     };
-    const result =
-      input.channelWireId === null
+    const { comments } = input;
+    const result = comments
+      ? comments.fetch(page)
+      : input.channelWireId === null
         ? input.storage.fetchChannelMessages(page)
         : input.storage.fetchChatMessages({ ...page, channelWireId: input.channelWireId });
     position = result.nextCursor;
@@ -615,6 +690,10 @@ export async function readSharedChannelPage<Message extends { relaySeq: number }
           )
         : null;
       if (!message) continue;
+      if (comments) {
+        if (comments.onFile(message.threadId)) messages.push(message);
+        continue;
+      }
       if (input.channelWireId !== null) {
         messages.push(message);
         continue;
@@ -662,7 +741,11 @@ export async function readSharedChannelPage<Message extends { relaySeq: number }
   recheck();
   const envelope = {
     shareId: input.shareId,
-    ...(input.channelWireId === null ? {} : { channelWireId: input.channelWireId }),
+    ...(input.comments
+      ? { path: input.comments.path }
+      : input.channelWireId === null
+        ? {}
+        : { channelWireId: input.channelWireId }),
     ...page,
   };
   const messages: Message[] = [];

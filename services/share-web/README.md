@@ -385,6 +385,14 @@ The thread and message use the existing named log append, including its transact
 The relay refuses reactions, decisions, attachments, channel creation, and extra body fields.
 The ordinary recipient log route reserves `browser-chat` for these server-assigned sequences.
 
+A workspace member's share reaches every Group and every current file.
+`channels` lists every Group. A follow without `channelWireId` returns every Group's new messages, and each message names its `channelWireId`.
+Name a file with `path=<path>` instead of `channelWireId` to read, follow, or post on its Comments.
+Those responses carry `path` in place of `channelWireId`.
+A new post starts a thread bound to the file. A reply's `threadId` must be one of that file's threads.
+View reads Comments; Comment and Edit also post.
+A removed member, an ended membership, a fenced owner, another account, and a path outside the workspace's files all get the answer for an unknown share.
+
 Every message contains `relaySeq`, `messageId`, `threadId`, `authorUserId`,
 `authorDisplayName`, `authorKind`, `authorOwnerDisplayName`, `createdAtMs`, `body`, and `bodyTooLarge`.
 The user ID and owner name are null when absent.

@@ -82,16 +82,23 @@ function resultMatches(
           (channel.access === "read-only" || channel.access === "read-write"),
       )
     );
-  if (typeof value.channelWireId !== "string") return false;
-  if (write)
-    return (
-      Object.keys(value).sort().join() === "channelWireId,message,shareId" && message(value.message)
-    );
+  // A file's Comments answer with the file's path where a channel answers with its wire ID.
+  const place =
+    typeof value.channelWireId === "string"
+      ? "channelWireId"
+      : typeof value.path === "string"
+        ? "path"
+        : null;
+  if (!place) return false;
+  const keys = (names: string[]) =>
+    Object.keys(value).sort().join() === [place, ...names].sort().join();
+  if (write) return keys(["message", "shareId"]) && message(value.message);
   return (
-    Object.keys(value).sort().join() ===
-      (following
-        ? "channelWireId,hasMore,messages,nextCursor,shareId"
-        : "channelWireId,messages,nextCursor,olderCursor,shareId") &&
+    keys(
+      following
+        ? ["hasMore", "messages", "nextCursor", "shareId"]
+        : ["messages", "nextCursor", "olderCursor", "shareId"],
+    ) &&
     Array.isArray(value.messages) &&
     value.messages.every(message) &&
     Number.isSafeInteger(value.nextCursor) &&
@@ -227,8 +234,9 @@ export function createNamedRecipientChatClient(options: {
           const result = await readBoundedJson(response, limits.maxResponseBytes, signal);
           if (!record(result)) return refuse();
           if (response.status === 200) {
-            // A workspace share's follow names no Group and gets every Group it reaches.
-            const everyGroup = following && !url.searchParams.has("channelWireId");
+            // A workspace share's follow names no Group and no file, and gets every Group it reaches.
+            const onFile = url.searchParams.has("path");
+            const everyGroup = following && !url.searchParams.has("channelWireId") && !onFile;
             if (
               !resultMatches(
                 result,
@@ -243,7 +251,10 @@ export function createNamedRecipientChatClient(options: {
               !write &&
               !url.pathname.endsWith("/channels") &&
               (result.shareId !== url.searchParams.get("shareId") ||
-                (!everyGroup && result.channelWireId !== url.searchParams.get("channelWireId")))
+                (!everyGroup &&
+                  (onFile
+                    ? result.path !== url.searchParams.get("path")
+                    : result.channelWireId !== url.searchParams.get("channelWireId"))))
             )
               return refuse();
           } else if (

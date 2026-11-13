@@ -275,3 +275,135 @@ describe("a member's Chats in a browser", () => {
     expect(MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE).toBe(512);
   });
 });
+
+// A file's Comments are threads whose first create binds the file. The owner's
+// desktop and every member read the same threads.
+const commentThread = (threadId: string, path: string) => logOp("chat.thread.create", {
+  threadId, title: "", createdAtMs: 2, linkedObjectId: `object-${path}`, linkedAtMs: 2, linkedPathHint: path,
+});
+const comments = (shareId: string, path: string, query: Record<string, string> = {}) =>
+  `messages?${new URLSearchParams({ shareId, path, limit: "50", ...query })}`;
+
+async function commented() {
+  const seeded = await seed();
+  await ownerWrite(seeded.h, "docs/other.md", "another file");
+  await ownerAppend(seeded.h, [
+    commentThread("c-plan", "docs/plan.md"), message("msg-plan", "c-plan", "Is the hotel near the river?"),
+    commentThread("c-other", "docs/other.md"), message("msg-other", "c-other", "SENTINEL another file's comment"),
+  ]);
+  return seeded;
+}
+
+describe("a member's file Comments in a browser", () => {
+  it("reads a file's Comments at View, Comment and Edit, and no other file's or Group's", async () => {
+    const { h, storage } = await commented();
+    const ana = await member(h, storage, "ana");
+    for (const level of ["view", "comment", "edit"] as const) {
+      await setLevel(h, level);
+      const read = await chat(h, comments(ana.shareId, "docs/plan.md"), "ana");
+      expect(read.status, await read.clone().text()).toBe(200);
+      const page = await json(read);
+      expect(page).toMatchObject({ shareId: ana.shareId, path: "docs/plan.md", olderCursor: null,
+        messages: [expect.objectContaining({ messageId: "msg-plan", body: "Is the hotel near the river?" })] });
+      expect(page.messages).toHaveLength(1);
+      expect(JSON.stringify(page)).not.toContain("SENTINEL");
+    }
+  });
+
+  it("follows a file's Comments and wakes for a new one on that file only", async () => {
+    const { h, storage } = await commented();
+    const ana = await member(h, storage, "ana");
+    const page = await json(await chat(h, comments(ana.shareId, "docs/plan.md"), "ana"));
+    const held = chat(h, comments(ana.shareId, "docs/plan.md", { since: String(page.nextCursor), hold: "30000" }), "ana");
+    await ownerAppend(h, [message("msg-other-2", "c-other", "SENTINEL still the other file"), message("msg-plan-2", "c-plan", "Yes, five minutes away.")]);
+    const next = await held;
+    expect(next.status, await next.clone().text()).toBe(200);
+    expect(await json(next)).toMatchObject({ shareId: ana.shareId, path: "docs/plan.md", hasMore: false,
+      messages: [expect.objectContaining({ messageId: "msg-plan-2", body: "Yes, five minutes away." })] });
+  });
+
+  it("posts a Comment on the file at Comment and Edit that the owner reads on the file, and refuses one at View", async () => {
+    const { h, storage } = await commented();
+    const ana = await member(h, storage, "ana");
+    for (const level of ["comment", "edit"] as const) {
+      await setLevel(h, level);
+      const posted = await chat(h, "messages", "ana", jsonBody({ shareId: ana.shareId, path: "docs/plan.md", id: `r-${level}`, body: `from ${level}`, authorKind: "human" }));
+      expect(posted.status, await posted.clone().text()).toBe(200);
+      expect(await json(posted)).toMatchObject({ shareId: ana.shareId, path: "docs/plan.md", message: { body: `from ${level}`, authorUserId: "ana", authorDisplayName: "Name ana" } });
+    }
+    // The owner's log binds each new thread to the file's object, as the desktop's own Comments do.
+    const log = await json(await h(request(OWNER, `/sync/${WORKSPACE}/log?since=0&limit=500`)));
+    const ops = (log.ops as Array<{ opKind: string; payload?: Record<string, unknown>; payloadJson?: string }>)
+      .map(op => ({ opKind: op.opKind, payload: op.payload ?? JSON.parse(op.payloadJson ?? "{}") as Record<string, unknown> }));
+    const post = ops.find(op => op.opKind === "chat.message.append" && op.payload.body === "from comment")!;
+    expect(ops.find(op => op.opKind === "chat.thread.create" && op.payload.threadId === post.payload.threadId)?.payload)
+      .toMatchObject({ linkedObjectId: "object-docs/plan.md" });
+    const read = await json(await chat(h, comments(ana.shareId, "docs/plan.md"), "ana"));
+    expect((read.messages as Array<{ body: string }>).map(item => item.body)).toEqual(["from edit", "from comment", "Is the hotel near the river?"]);
+    // A reply joins a thread on this file.
+    const reply = await chat(h, "messages", "ana", jsonBody({ shareId: ana.shareId, path: "docs/plan.md", id: "r-reply", threadId: "c-plan", body: "thanks", authorKind: "human" }));
+    expect(reply.status, await reply.clone().text()).toBe(200);
+    expect(await json(reply)).toMatchObject({ message: { threadId: "c-plan", body: "thanks" } });
+
+    await setLevel(h, "view");
+    const refused = await chat(h, "messages", "ana", jsonBody({ shareId: ana.shareId, path: "docs/plan.md", id: "r-view", body: "x", authorKind: "human" }));
+    expect(refused.status).toBe(403);
+  });
+
+  it("refuses a removed member, an ended membership, a fenced owner, a forged person and a path outside reach like an unknown share", async () => {
+    const { h, storage } = await commented();
+    const ana = await member(h, storage, "ana");
+    const ben = await member(h, storage, "ben");
+    const read = (shareId: string, userId: string, path = "docs/plan.md") => chat(h, comments(shareId, path), userId);
+    const write = (shareId: string, userId: string, fields: Record<string, unknown> = {}) =>
+      chat(h, "messages", userId, jsonBody({ shareId, path: "docs/plan.md", id: "r-refused", body: "x", authorKind: "human", ...fields }));
+    const unknown = await refusalBytes(await read("share-never", "ana"));
+    expect(unknown.startsWith("404:")).toBe(true);
+    expect(await refusalBytes(await write("share-never", "ana"))).toBe(unknown);
+
+    // The person comes from the session: a stranger's cookie with Ana's share, or a claimed author.
+    expect(await refusalBytes(await read(ana.shareId, "mallory"))).toBe(unknown);
+    expect(await refusalBytes(await write(ana.shareId, "mallory"))).toBe(unknown);
+    expect((await write(ana.shareId, "ana", { authorUserId: "ben" })).status).not.toBe(200);
+    // A path the workspace share does not reach: a missing file, a secret, another file's thread, a Group's thread.
+    for (const path of ["docs/missing.md", ".env", "../docs/plan.md"]) {
+      expect(await refusalBytes(await read(ana.shareId, "ana", path)), path).toBe(unknown);
+      expect(await refusalBytes(await chat(h, "messages", "ana", jsonBody({ shareId: ana.shareId, path, id: `r-${path}`, body: "x", authorKind: "human" }))), path).toBe(unknown);
+    }
+    for (const threadId of ["c-other", "t-team"]) {
+      expect(await refusalBytes(await write(ana.shareId, "ana", { threadId })), threadId).toBe(unknown);
+    }
+    // A path and a Group together name nothing.
+    expect(await refusalBytes(await chat(h, comments(ana.shareId, "docs/plan.md", { channelWireId: GROUP }), "ana"))).toBe(unknown);
+
+    expect((await post(h, OWNER, `/sync/${WORKSPACE}/members/${ben.memberId}/remove`)).status).toBe(200);
+    expect(await refusalBytes(await read(ben.shareId, "ben"))).toBe(unknown);
+    expect(await refusalBytes(await write(ben.shareId, "ben"))).toBe(unknown);
+
+    const key = "account-deletion-key-at-least-32-bytes";
+    const context = storage as unknown as StorageContext;
+    initializeAccountDeletion(context, key);
+    fenceAccount(context, key, OWNER, `${OWNER}@dohc.test`);
+    expect(await refusalBytes(await read(ana.shareId, "ana"))).toBe(unknown);
+    expect(await refusalBytes(await write(ana.shareId, "ana"))).toBe(unknown);
+  });
+
+  it("refuses an ended membership like an unknown share", async () => {
+    const { h, storage } = await commented();
+    const ana = await member(h, storage, "ana");
+    const unknown = await refusalBytes(await chat(h, comments("share-never", "docs/plan.md"), "ana"));
+    expect((await post(h, OWNER, `/sync/${WORKSPACE}/members/end`)).status).toBe(200);
+    expect(await refusalBytes(await chat(h, comments(ana.shareId, "docs/plan.md"), "ana"))).toBe(unknown);
+    expect(await refusalBytes(await chat(h, "messages", "ana", jsonBody({ shareId: ana.shareId, path: "docs/plan.md", id: "r-ended", body: "x", authorKind: "human" })))).toBe(unknown);
+  });
+
+  it("ends a held Comments follow when the member is removed", async () => {
+    const { h, storage } = await commented();
+    const ana = await member(h, storage, "ana");
+    const page = await json(await chat(h, comments(ana.shareId, "docs/plan.md"), "ana"));
+    const held = chat(h, comments(ana.shareId, "docs/plan.md", { since: String(page.nextCursor), hold: "30000" }), "ana");
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect((await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana.memberId}/remove`)).status).toBe(200);
+    expect((await held).status).toBe(404);
+  });
+});
