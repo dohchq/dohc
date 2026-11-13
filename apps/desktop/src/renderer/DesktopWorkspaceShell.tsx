@@ -768,19 +768,26 @@ export function DesktopWorkspaceShell(props: {
     setWbState(next);
   }, []);
 
-  const openSettings = useCallback(
-    (section: SettingsSectionId = DEFAULT_SETTINGS_SECTION) => {
-      setSettingsFocus(null);
-      setSettingsAgent(null);
-      setSettingsSection(section);
-    },
-    [],
-  );
-  const customize = useCallback((part: CustomizePart) => {
-    setSettingsFocus(part);
+  // The Cloud and Live documents dialogs open above Settings. Settings asked
+  // for from anywhere else, such as the app menu, takes their place, so the
+  // dialog on top is always the one that holds the keyboard.
+  const showSettings = useCallback((section: SettingsSectionId, focus: CustomizePart | null) => {
+    setCloudOpen(false);
+    setCloudRetryServerUrl("");
+    setCloudRenew(false);
+    setLiveDocumentsWorkspaceId(null);
+    setSettingsFocus(focus);
     setSettingsAgent(null);
-    setSettingsSection(CUSTOMIZE_TARGETS[part].section);
+    setSettingsSection(section);
   }, []);
+  const openSettings = useCallback(
+    (section: SettingsSectionId = DEFAULT_SETTINGS_SECTION) => showSettings(section, null),
+    [showSettings],
+  );
+  const customize = useCallback(
+    (part: CustomizePart) => showSettings(CUSTOMIZE_TARGETS[part].section, part),
+    [showSettings],
+  );
   const openAgentSettings = useCallback(() => openSettings("agents"), [openSettings]);
 
   const workspaceId = props.workspace.workspaceId;
@@ -1402,10 +1409,8 @@ export function DesktopWorkspaceShell(props: {
       onChanged: () => {
         if (current()) refreshCloudStatus();
       },
-      onConnect: () => {
-        closeSettings();
-        setCloudOpen(true);
-      },
+      // Settings stays open under the dialog, so closing it returns there.
+      onConnect: () => setCloudOpen(true),
       // An enable or a pause. The page holds the switch, signed in or out,
       // so a retry it can no longer run opens the page again.
       onError: (error) => {
@@ -1423,7 +1428,7 @@ export function DesktopWorkspaceShell(props: {
       hasReceivedShares,
       onDeleteAccount: startAccountDeletion,
     };
-  }, [startAccountDeletion, reviewingAccountDeletion, closeSettings, cloudStatus, cloudStatusUnreadable, hasReceivedShares, openSettings, refreshCloudStatus, reportShellFailure, workspaceId]);
+  }, [startAccountDeletion, reviewingAccountDeletion, cloudStatus, cloudStatusUnreadable, hasReceivedShares, openSettings, refreshCloudStatus, reportShellFailure, workspaceId]);
   // Notices' Try again while dohc can't confirm the workspace's account: the
   // enable that Settings' Try again runs. A failure it can't fix here, such as
   // a passphrase, retries from Settings.
@@ -2282,12 +2287,11 @@ export function DesktopWorkspaceShell(props: {
   // The new session rebuilds the engine, so sync resumes with nothing else
   // asked for, and a saved pause stays.
   const signInAgain = useCallback(() => {
-    closeSettings();
     setCloudRetryServerUrl("");
     setCloudRenew(true);
     setCloudRenewal((renewal) => renewal + 1);
     setCloudOpen(true);
-  }, [closeSettings]);
+  }, []);
   // A renewal's failure, whatever step failed. Once its dialog has closed,
   // Try again signs in again from the start: the expired session is still
   // saved, and a plain dialog would hand it to Settings and start nothing.
@@ -8066,29 +8070,6 @@ export function DesktopWorkspaceShell(props: {
           }}
         />
       ) : null}
-      {cloudOpen ? (
-        <Overlay onClose={closeCloud}>
-          {/* Once signed in, what is left is settings: the account and the
-              sync switch. A session the dialog finds goes there too. */}
-          <CloudLogin
-            key={cloudRenewal}
-            handOffSession
-            renew={cloudRenew}
-            onClose={closeCloud}
-            onConnected={() => {
-              setCloudOpen(false);
-              setCloudRetryServerUrl("");
-              refreshCloudStatus();
-              // A renewed sign-in resumes sync by itself: nothing in Settings
-              // is left to do.
-              if (cloudRenew) setCloudRenew(false);
-              else openSettings("cloud");
-            }}
-            onConnectionError={cloudRenew ? reportRenewalError : reportConnectionError}
-            initialServerUrl={cloudRetryServerUrl}
-          />
-        </Overlay>
-      ) : null}
       {workspaceVersions.dialogs}
       {conflictReviewOpen ? (
         <ConflictReviewDialog
@@ -8152,7 +8133,12 @@ export function DesktopWorkspaceShell(props: {
       {settingsSection ? (
         // A finished pop keeps no transform, so an agent row's fixed ⋯ menu
         // places itself against the window. `!` outranks the unlayered class.
-        <Overlay onClose={closeSettings} panelProps={{ className: "dohc-pop-in [animation-fill-mode:backwards]!" }}>
+        <Overlay
+          onClose={closeSettings}
+          // A dialog opened from Settings dims the window once, not twice.
+          scrim={!cloudOpen && !(liveDocumentsWorkspaceId === workspaceId && !shareView)}
+          panelProps={{ className: "dohc-pop-in [animation-fill-mode:backwards]!" }}
+        >
           <LazyDesktopSettings
             workspaceIsReady={workspaceIsReady}
             workspaceOpenFailed={!!workspaceOpenFailure}
@@ -8187,12 +8173,35 @@ export function DesktopWorkspaceShell(props: {
             }}
             {...(liveDocumentsAvailable
               ? {
-                  onOpenLiveDocuments: () => {
-                    closeSettings();
-                    openLiveDocuments(workspaceId);
-                  },
+                  // Settings stays open under the dialog, so closing it
+                  // returns there.
+                  onOpenLiveDocuments: () => openLiveDocuments(workspaceId),
                 }
               : {})}
+          />
+        </Overlay>
+      ) : null}
+      {/* After Settings, so a dialog opened from Settings paints above it. */}
+      {cloudOpen ? (
+        <Overlay onClose={closeCloud}>
+          {/* Once signed in, what is left is settings: the account and the
+              sync switch. A session the dialog finds goes there too. */}
+          <CloudLogin
+            key={cloudRenewal}
+            handOffSession
+            renew={cloudRenew}
+            onClose={closeCloud}
+            onConnected={() => {
+              setCloudOpen(false);
+              setCloudRetryServerUrl("");
+              refreshCloudStatus();
+              // A renewed sign-in resumes sync by itself: nothing in Settings
+              // is left to do.
+              if (cloudRenew) setCloudRenew(false);
+              else openSettings("cloud");
+            }}
+            onConnectionError={cloudRenew ? reportRenewalError : reportConnectionError}
+            initialServerUrl={cloudRetryServerUrl}
           />
         </Overlay>
       ) : null}

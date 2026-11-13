@@ -40,6 +40,8 @@ export function OverlayFrame(props: {
   panelRef: RefObject<HTMLDivElement | null>;
   panelProps?: PanelProps;
   onBackdropClick?: () => void;
+  /** False while another dialog above this one dims the window. */
+  scrim?: boolean;
   children: ReactNode;
 }) {
   // A click closes only when its press began on the backdrop and closed no
@@ -49,7 +51,7 @@ export function OverlayFrame(props: {
   return (
     <div
       data-dohc-modal="true"
-      className={`fixed inset-0 ${props.appearance === "warning" ? "z-50" : "z-30"} flex flex-col items-center overflow-auto bg-scrim px-4 pb-[calc(var(--dohc-toast-room,0px)+1rem)] scroll-pb-[var(--dohc-toast-room,0px)]`}
+      className={`fixed inset-0 ${props.appearance === "warning" ? "z-50" : "z-30"} flex flex-col items-center overflow-auto ${props.scrim === false ? "" : "bg-scrim"} px-4 pb-[calc(var(--dohc-toast-room,0px)+1rem)] scroll-pb-[var(--dohc-toast-room,0px)]`}
       {...(props.onBackdropClick ? {
         onPointerDown: (event: PointerEvent<HTMLDivElement>) => {
           const target = event.target instanceof Node ? event.target : null;
@@ -91,6 +93,7 @@ export function Overlay(props: {
   appearance?: "standard" | "warning";
   panelRef?: RefObject<HTMLDivElement | null>;
   panelProps?: PanelProps;
+  scrim?: boolean;
 }) {
   const defaultPanelRef = useRef<HTMLDivElement>(null);
   const panelRef = props.panelRef ?? defaultPanelRef;
@@ -152,6 +155,7 @@ export function Overlay(props: {
       appearance={props.appearance}
       panelRef={panelRef}
       panelProps={props.panelProps}
+      scrim={props.scrim}
       onBackdropClick={pressTopBackdrop}
     >
       {props.children}

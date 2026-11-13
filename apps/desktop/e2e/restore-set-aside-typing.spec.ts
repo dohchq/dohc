@@ -374,6 +374,10 @@ test("@restore-set-aside-typing a shared restore keeps the owner's later typing 
       await expectCliKeptEdits();
       await live.getByRole("button", {name: "Close", exact: true}).click();
       await expect(live).toHaveCount(0);
+      // Closing Live documents returns to Settings, which opened it.
+      await expect(page.getByTestId("settings-dialog")).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(page.getByTestId("settings-dialog")).toHaveCount(0);
       await page.getByTestId("notice-center-toggle").click();
       await expect(notice).toHaveCount(0);
       await page.getByTestId("notice-center-toggle").click();
