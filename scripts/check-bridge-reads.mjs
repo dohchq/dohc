@@ -179,7 +179,7 @@ export function checkBridgeReads(root, inventory, limit = inventory?.sites?.leng
   }
   const listed = inventory.sites.length;
   if (listed > limit) {
-    return { failures: [inventoryPath + " lists " + listed + " reads, above the ceiling of " + limit + ". The inventory only shrinks. " + fix + " " + unowned], sites: [] };
+    return { failures: [inventoryPath + " lists " + listed + " reads, above the ceiling of " + limit + ". " + fix + " " + unowned], sites: [] };
   }
   const sites = collectBridgeReads(root), allowed = new Set(inventory.sites), current = new Set(sites.map(site => site.fingerprint));
   const failures = sites.filter(site => !allowed.has(site.fingerprint)).map(site => site.fingerprint + " (line " + site.line

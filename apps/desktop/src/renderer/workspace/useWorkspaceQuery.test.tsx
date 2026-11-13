@@ -74,6 +74,8 @@ describe("useWorkspaceQuery", () => {
     const { files, load } = await hideAndShowWhileReading(true);
     expect(files).toMatchObject({ value: undefined, pending: false, error: null });
     expect(load).toHaveBeenCalledOnce();
+    await act(() => files.retryIfIdle());
+    expect(load).toHaveBeenCalledTimes(2);
   });
   it("a query that reads on start reads again when shown again during a read", async () => {
     const { files, load } = await hideAndShowWhileReading(false);

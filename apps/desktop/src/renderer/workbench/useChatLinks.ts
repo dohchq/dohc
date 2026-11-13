@@ -9,7 +9,7 @@ type More = { cursor: string; pages: Page[] };
 const NO_PAGES: Page[] = [];
 
 // Reads only when opened or paged by the caller. A refresh supersedes a page
-// still loading, and a page read waits for any read in flight.
+// still loading, and a page read does nothing while any read is in flight.
 export function useChatLinks({ workspaceId, channelWireId, onError }: {
   workspaceId: string;
   channelWireId: string;

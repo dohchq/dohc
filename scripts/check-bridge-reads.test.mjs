@@ -118,7 +118,7 @@ test("fails when the inventory grows above its ceiling or shrinks below it", t =
   const dir = fixture(t, { [panel]: imports + "export function Panel() { void bridge().getStatus(); void bridge().getOther(); return <div />; }" });
   const sites = [panel + " | getStatus", panel + " | getOther"];
   assert.deepEqual(checkBridgeReads(dir, { sites }, 2).failures, []);
-  assert.match(checkBridgeReads(dir, { sites }, 1).failures.join(), /lists 2 reads, above the ceiling of 1\. The inventory only shrinks/u);
+  assert.match(checkBridgeReads(dir, { sites }, 1).failures.join(), /lists 2 reads, above the ceiling of 1\. Read it in the load of useWorkspaceQuery/u);
   assert.match(checkBridgeReads(dir, { sites }, 3).failures.join(), /Lower the ceiling in scripts\/check-bridge-reads\.mjs from 3 to 2/u);
 });
 
