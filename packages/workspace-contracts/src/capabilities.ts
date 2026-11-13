@@ -330,13 +330,21 @@ const LISTED_CAPABILITIES = {
 } as const;
 
 // Each declared operation joins its capability after the listed rows and tools.
+// The listed rows name every IPC operation, so a declared name or tool that
+// repeats any of them, or another declaration's, fails at load.
 function withDeclarations<Listed extends Readonly<Record<string, CapabilityMetadata>>>(
   listed: Listed,
   ...families: readonly Readonly<Record<string, OperationDeclaration & { readonly capabilityId: keyof Listed }>>[]
 ): Listed {
   const joined: Record<string, CapabilityMetadata> = { ...listed };
+  const operations = new Set(Object.values(listed).flatMap(meta => meta.ipc.operations));
+  const tools = new Set(Object.values(listed).flatMap(meta => [...meta.mcp.owner, ...meta.mcp.view, ...meta.mcp.comment, ...meta.mcp.edit]));
   for (const family of families) {
     for (const [name, { capabilityId, mcp }] of Object.entries(family)) {
+      for (const [names, value] of [[operations, name], [tools, mcp.tool]] as const) {
+        if (names.has(value)) throw new Error(`${value} is declared twice.`);
+        names.add(value);
+      }
       const id = capabilityId as string;
       const meta = joined[id];
       if (!meta) throw new Error(`${name} names an unknown capability ${id}.`);

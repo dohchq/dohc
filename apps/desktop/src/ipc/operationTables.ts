@@ -41,7 +41,8 @@ import {
   appViewOperations,
 } from "./bridgeContract";
 import { settingsOperations } from "./settingsOperations";
-import type { OperationTable } from "./operationTable";
+import { CHANNELS } from "./channels";
+import type { OperationDefinition, OperationTable } from "./operationTable";
 import { shareCopyOperations } from "./shareCopyOperations";
 import { accessOperations } from "./accessOperations";
 import { workspaceFileOperations } from "./workspaceFileOperations";
@@ -99,3 +100,8 @@ export const OPERATION_TABLES = [
   shareDirectWriteDeliveryOperations,
   appViewOperations,
 ] as const satisfies readonly OperationTable[];
+
+// Each channel names one row or one CHANNELS entry. A repeat fails when this module loads.
+const channels = [...Object.values(CHANNELS), ...OPERATION_TABLES.flatMap(table => Object.values<OperationDefinition>(table).map(row => row.channel))];
+const repeated = channels.find((channel, index) => channels.indexOf(channel) !== index);
+if (repeated) throw new Error(`${repeated} is declared twice.`);

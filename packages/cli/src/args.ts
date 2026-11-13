@@ -1,7 +1,6 @@
 import { ChatFileMentionsInput } from "@dohc/workspace-contracts/chat-file-mentions";
 import { LinksEdgesInput, LinksInInput, LinksResolveInput } from "@dohc/workspace-contracts/links";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
-import { byName, distinct } from "@dohc/workspace-contracts/operation-declaration";
 import type { z } from "zod";
 import { CHAT_WATCH_TIMEOUT_MS, CHAT_WATCH_MAX_TIMEOUT_MS, cliAgentIdSchema, APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, chatLinksGroupInputSchema, type CliLinkTarget, chatWorkReportSchema, LIVE_DOCUMENT_REASON_STEPS, type CliActor, type CliStreamPosition, type CliWorkReport, DECLARED_VERBS, type DeclaredOperation, type DeclaredRequestInput, type DeclaredVerb } from "./protocol";
 import { CHAT_WORK_STATUSES, isChatWorkStatus } from "@dohc/workspace-contracts/chat-work";
@@ -1461,27 +1460,27 @@ const DECLARED_PARSERS: { readonly [Verb in DeclaredVerb]: (input: VerbInput, co
   },
 };
 
-type DeclaredCommandVerbs<Group extends string> = {
-  readonly [Operation in DeclaredOperation as Operation["cli"]["command"][0] extends Group ? Operation["cli"]["command"][1] : never]: CliVerbSpec;
-};
-
-// The verbs of one command that declared operations supply.
-function declaredVerbs<Group extends string>(group: Group): DeclaredCommandVerbs<Group> {
-  const operations = Object.values<DeclaredOperation>(DECLARED_VERBS).filter(operation => operation.cli.command[0] === group);
-  const verbs = Object.entries(byName(operations, operation => operation.cli.command[1])).map(([name, { capabilityId, cli }]) => {
+// Adds each declared operation's verb to the hand-written command it names.
+// A declaration that names no command, or a verb the command already has, fails at load.
+function withDeclaredVerbs(commands: Readonly<Record<string, CliCommandSpec>>): Readonly<Record<string, CliCommandSpec>> {
+  const joined = Object.fromEntries(Object.entries(commands).map(([group, command]) => [group, { ...command, verbs: { ...command.verbs } }]));
+  for (const { capabilityId, cli } of Object.values<DeclaredOperation>(DECLARED_VERBS)) {
+    const [group, name] = cli.command;
+    const command = lookup(joined, group);
+    if (!command) throw new Error(`dohc ${group} ${name} names no command.`);
+    if (Object.hasOwn(command.verbs, name)) throw new Error(`dohc ${group} ${name} is declared twice.`);
     const parse = DECLARED_PARSERS[cli.verb] as (input: VerbInput, command: string) => object;
-    const verb: CliVerbSpec = {
+    command.verbs[name] = {
       capabilityId, summary: cli.summary, operands: cli.operands, ...("flags" in cli ? { flags: cli.flags } : {}),
       parse: input => ({ verb: cli.verb, ...parse(input, cli.command.join(" ")) }) as CliCommandBody,
     };
-    return [name, verb];
-  });
-  return Object.fromEntries(verbs) as DeclaredCommandVerbs<Group>;
+  }
+  return joined;
 }
 
 /** Every command and verb the CLI dispatches. Help reads this table too. */
-export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
-  links: { summary: "Read and resolve document links.", notes: [], verbs: declaredVerbs("links") },
+export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = withDeclaredVerbs({
+  links: { summary: "Read and resolve document links.", notes: [], verbs: {} },
   notices: {
     summary: "Read this workspace's Notices.",
     notes: ["Listing does not change whether rows are read."],
@@ -1595,7 +1594,7 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
       "Name a Group by its name or ID, and a thread or message by its ID. A unique ID prefix also works.",
       "DOHC_CHAT_ACTOR=agent in the environment does the same as --as-agent.",
     ],
-    verbs: distinct(CHAT_VERBS, declaredVerbs("chat")),
+    verbs: CHAT_VERBS,
   },
   dataset: {
     summary: "Create, change, and use transactional Collections.",
@@ -1706,7 +1705,7 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
     notes: ["Unlike other commands, account verbs also work outside a workspace folder."],
     verbs: ACCOUNT_VERBS,
   },
-};
+});
 
 export const GLOBAL_FLAGS: readonly CliFlag[] = [
   { name: "--as-agent", text: "Post and read chat as an agent." },
