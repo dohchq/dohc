@@ -72,11 +72,14 @@ export function AgentBadge(props: {
   // tool, or your runner command. The full command is the line's tooltip.
   const launch = ownAgent?.launch;
   const command = launch ? launchCommand(launch) : undefined;
-  const runsWith = !launch
-    ? undefined
-    : "tool" in launch
-      ? `${AGENT_TOOLS.find((tool) => tool.id === launch.tool)?.name ?? "Its tool"} on this computer`
-      : "Your runner command";
+  // An agent with a thread runs in its tool, wherever that tool runs it.
+  const runsWith = ownAgent?.thread
+    ? "A thread in T3 Code"
+    : !launch
+      ? undefined
+      : "tool" in launch
+        ? `${AGENT_TOOLS.find((tool) => tool.id === launch.tool)?.name ?? "Its tool"} on this computer`
+        : "Your runner command";
   const reported = reportedAgentLine(author.authorReported);
   // A plug card says "(as reported)" once: on the reported line when it has
   // one, else on a name the agent gave.

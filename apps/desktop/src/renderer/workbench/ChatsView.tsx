@@ -5360,13 +5360,15 @@ export function ChatsView(props: {
     const setLane = setGroupLane;
     const showLane = groupType === "chat" || (groupType === "both" && lane === "chat");
     // Only when the agent can't answer: what's wrong, and the fix. An agent
-    // you run has no launch; it answers whenever it's connected.
+    // you run has no launch; it answers whenever it's connected. One with a
+    // thread is off while dohc forwards nothing to it.
     const agentProblem =
       !agentDm || !props.agentSetup
         ? null
         : agentRemoved(nav.channel)
           ? { words: `${channelAgent?.label ?? "This agent"} was removed.`, action: "Agents" }
-          : channelSettingsAgent?.launch && !channelSettingsAgent.enabled
+          : (channelSettingsAgent?.launch || channelSettingsAgent?.thread) &&
+              !channelSettingsAgent.enabled
             ? { words: `${channelSettingsAgent.name} is off.`, action: "Turn on", off: true }
             : null;
     const channelGrants = nav.channel.wireId ? (grantedByWire.get(nav.channel.wireId) ?? []) : [];
@@ -5933,7 +5935,9 @@ export function ChatsView(props: {
     const removed = agentRemoved(channel);
     const unread = channel.unreadCount > 0;
     // An agent you run has no launch and no state here; Settings shows whether it's listening.
-    const off = agent?.launch !== undefined && !agent.enabled;
+    // One dohc starts, or forwards to, has a switch.
+    const hasSwitch = agent?.launch !== undefined || agent?.thread !== undefined;
+    const off = hasSwitch && !agent?.enabled;
     return (
       <NavRow
         key={channel.id}
@@ -5960,7 +5964,7 @@ export function ChatsView(props: {
             unread,
             archived,
             removed,
-            enabled: agent?.launch === undefined ? null : agent.enabled,
+            enabled: agent && hasSwitch ? agent.enabled : null,
             canRemove: agent !== undefined,
           },
         })}
