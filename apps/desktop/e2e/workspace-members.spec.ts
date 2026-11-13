@@ -183,6 +183,10 @@ test("@two-client an owner invites, opens the link, and sets roles; members see 
     await members.getByRole("switch", { name: "Invite link" }).click();
     await expect(url).toHaveCount(0);
     await expect(members.getByRole("switch", { name: "Invite link" })).toBeEnabled();
+    // The switch turns off at once; the relay answers a moment later.
+    await expect
+      .poll(async () => (await membersView(relay!, OWNER.token, workspaceId)).inviteLink?.enabled)
+      .toBe(false);
     const late = await relayJson(relay.baseUrl, "test:e2e-members-late", "/sync/members/join", {
       method: "POST",
       body: JSON.stringify({ token }),
@@ -250,7 +254,8 @@ test("@two-client an owner invites, opens the link, and sets roles; members see 
 });
 
 async function showSharing(page: Page) {
-  if (!(await page.getByTestId("sharing-view").isVisible())) await page.getByTestId(activityPin("sharing")).click();
+  if (!(await page.getByTestId("sharing-view").isVisible()))
+    await page.getByTestId(activityPin("sharing")).click();
   await expect(page.getByTestId("sharing-view")).toBeVisible();
 }
 
@@ -281,11 +286,23 @@ test("@two-client a member opens the workspace from Sharing and keeps a readable
     relay = await spawnSyncRelay({ dbPath: join(ownerTemp.baseDir, "relay", "relay.sqlite") });
     await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: OWNER.token, workspaceId });
     await seedWorkspaceManifest(ownerTemp, workspaceId);
-    await writeWorkspaceFiles(ownerTemp, [{ path: "notes/plan.md", contents: "# Plan\n\nThe lighthouse memo.\n" }]);
-    await seedWorkspaceRegistry(ownerTemp, [
-      { workspaceId, rootPath: ownerTemp.rootPath, remote: { serverUrl: relay.baseUrl, ownerUserId: OWNER.user } },
+    await writeWorkspaceFiles(ownerTemp, [
+      { path: "notes/plan.md", contents: "# Plan\n\nThe lighthouse memo.\n" },
     ]);
-    await seedCloudCredentials(ownerTemp, { serverUrl: relay.baseUrl, relayUrl: relay.baseUrl, email: OWNER.email, userId: OWNER.user, token: OWNER.token });
+    await seedWorkspaceRegistry(ownerTemp, [
+      {
+        workspaceId,
+        rootPath: ownerTemp.rootPath,
+        remote: { serverUrl: relay.baseUrl, ownerUserId: OWNER.user },
+      },
+    ]);
+    await seedCloudCredentials(ownerTemp, {
+      serverUrl: relay.baseUrl,
+      relayUrl: relay.baseUrl,
+      email: OWNER.email,
+      userId: OWNER.user,
+      token: OWNER.token,
+    });
 
     owner = await launchDesktopApp({ workspace: ownerTemp, env: syncEnv });
     const { page } = owner;
@@ -308,37 +325,63 @@ test("@two-client a member opens the workspace from Sharing and keeps a readable
     const members = await openMembers(page);
     await members.getByTestId("settings-members-invite-email").fill(MEMBER.email);
     await members.getByTestId("settings-members-invite-send").click();
-    await expect(members.getByTestId("settings-members-row").filter({ hasText: MEMBER.email })).toHaveAttribute("data-state", "active");
+    await expect(
+      members.getByTestId("settings-members-row").filter({ hasText: MEMBER.email }),
+    ).toHaveAttribute("data-state", "active");
     await page.getByRole("button", { name: "Close settings", exact: true }).click();
     const workspaceName = (await membersView(relay, OWNER.token, workspaceId)).workspaceName;
 
     // The relay serves the owner's file through Sam's membership.
     const shares = await relayJson(relay.baseUrl, MEMBER.token, "/sync/shares");
     expect(shares.status, shares.body).toBe(200);
-    const shareId = (JSON.parse(shares.body) as { received: { shareId: string; selector: { kind?: string } }[] })
-      .received.find((row) => row.selector.kind === "workspace")!.shareId;
-    await expect.poll(async () => {
-      const log = await relayJson(relay!.baseUrl, MEMBER.token, `/sync/shares/${shareId}/log?since=0&limit=500`);
-      return log.status === 200 && log.body.includes("notes/plan.md") ? "served" : `status:${log.status}`;
-    }, { timeout: 60_000, intervals: [1_000] }).toBe("served");
+    const shareId = (
+      JSON.parse(shares.body) as { received: { shareId: string; selector: { kind?: string } }[] }
+    ).received.find((row) => row.selector.kind === "workspace")!.shareId;
+    await expect
+      .poll(
+        async () => {
+          const log = await relayJson(
+            relay!.baseUrl,
+            MEMBER.token,
+            `/sync/shares/${shareId}/log?since=0&limit=500`,
+          );
+          return log.status === 200 && log.body.includes("notes/plan.md")
+            ? "served"
+            : `status:${log.status}`;
+        },
+        { timeout: 60_000, intervals: [1_000] },
+      )
+      .toBe("served");
 
     // --- Sam opens it from Sharing ----------------------------------------
     await seedWorkspaceManifest(memberTemp, "members-open-sam");
-    await seedWorkspaceRegistry(memberTemp, [{ workspaceId: "members-open-sam", rootPath: memberTemp.rootPath }]);
-    await seedCloudCredentials(memberTemp, { serverUrl: relay.baseUrl, relayUrl: relay.baseUrl, email: MEMBER.email, userId: MEMBER.user, token: MEMBER.token });
+    await seedWorkspaceRegistry(memberTemp, [
+      { workspaceId: "members-open-sam", rootPath: memberTemp.rootPath },
+    ]);
+    await seedCloudCredentials(memberTemp, {
+      serverUrl: relay.baseUrl,
+      relayUrl: relay.baseUrl,
+      email: MEMBER.email,
+      userId: MEMBER.user,
+      token: MEMBER.token,
+    });
     member = await launchDesktopApp({ workspace: memberTemp, env: syncEnv });
     const mine = member.page;
     await openWorkspaceFromFirstRun(mine, memberTemp);
     await mine.emulateMedia({ reducedMotion: "reduce" });
     await showSharing(mine);
     const received = mine.getByTestId("sharing-received-row").filter({ hasText: workspaceName });
-    await expect(received.getByTestId("sharing-row-who")).toContainText("Member ·", { timeout: 60_000 });
+    await expect(received.getByTestId("sharing-row-who")).toContainText("Member ·", {
+      timeout: 60_000,
+    });
     await expect(received.getByTestId("sharing-row-who")).toContainText("lets members comment");
     for (const theme of ["Light", "Dark"] as const) {
       await setTheme(mine, theme);
       await showSharing(mine);
       await expect(received).toBeVisible();
-      await mine.getByTestId("sharing-view").screenshot({ path: shot(`sharing-row-${theme.toLowerCase()}`) });
+      await mine
+        .getByTestId("sharing-view")
+        .screenshot({ path: shot(`sharing-row-${theme.toLowerCase()}`) });
     }
     const dialog = mine.getByTestId("open-shared-view");
     for (const theme of ["Dark", "Light"] as const) {
@@ -359,24 +402,34 @@ test("@two-client a member opens the workspace from Sharing and keeps a readable
     await dialog.getByTestId("open-share-start").click();
     // The first pull counts files in the button while it reads. It can finish
     // before a frame shows the count, so the picture is taken when it does.
-    await expect(dialog.getByTestId("open-share-start")).toContainText(/Reading \d+ files?/, { timeout: 5_000 })
+    await expect(dialog.getByTestId("open-share-start"))
+      .toContainText(/Reading \d+ files?/, { timeout: 5_000 })
       .then(() => dialog.screenshot({ path: shot("first-pull-light") }))
       .catch(() => undefined);
 
     // --- Inside: like an owned workspace -----------------------------------
-    await expect(mine.getByTestId("status-workspace")).toHaveText(workspaceName, { timeout: 120_000 });
+    await expect(mine.getByTestId("status-workspace")).toHaveText(workspaceName, {
+      timeout: 120_000,
+    });
     await expect(mine.getByTestId("shared-view-banner")).toHaveCount(0);
     await revealExplorerPath(mine, "notes/plan.md");
     await mine.getByTestId(activityPin("history")).click();
-    await expect(mine.locator('[data-testid="engine-moment-open"][data-moment-path="notes/plan.md"]').first()).toBeVisible({ timeout: 60_000 });
+    await expect(
+      mine.locator('[data-testid="engine-moment-open"][data-moment-path="notes/plan.md"]').first(),
+    ).toBeVisible({ timeout: 60_000 });
     await mine.getByTestId(activityPin("search")).click();
     await mine.getByTestId("search-input").fill("lighthouse");
-    await expect(mine.locator('[data-testid="search-result-group"][data-path="notes/plan.md"]')).toBeVisible({ timeout: 30_000 });
+    await expect(
+      mine.locator('[data-testid="search-result-group"][data-path="notes/plan.md"]'),
+    ).toBeVisible({ timeout: 30_000 });
     await openChatsView(mine);
     const group = mine.getByTestId("chats-channel").filter({ hasText: "Launch team" });
     await expect(group).toBeVisible({ timeout: 60_000 });
     await group.click();
-    await expect(mine.getByTestId("chats-thread").first()).toContainText("Kickoff: read the plan.", { timeout: 60_000 });
+    await expect(mine.getByTestId("chats-thread").first()).toContainText(
+      "Kickoff: read the plan.",
+      { timeout: 60_000 },
+    );
     for (const theme of ["Light", "Dark"] as const) {
       await setTheme(mine, theme);
       await mine.getByTestId("workspace-switcher").click();
@@ -395,13 +448,17 @@ test("@two-client a member opens the workspace from Sharing and keeps a readable
 
     // The held pull hears it: the ended band, and the copy stays readable.
     const band = mine.getByTestId("shared-view-banner");
-    await expect(band).toHaveText("Your membership ended. This copy stays on this computer.", { timeout: 60_000 });
+    await expect(band).toHaveText("Your membership ended. This copy stays on this computer.", {
+      timeout: 60_000,
+    });
     await expect(band).toHaveAttribute("data-ended", "true");
     await revealExplorerPath(mine, "notes/plan.md");
     await explorerRow(mine, "notes/plan.md").click();
     await expect(mine.getByText("The lighthouse memo.")).toBeVisible({ timeout: 30_000 });
     await openChatsView(mine);
-    await expect(mine.getByTestId("chats-channel").filter({ hasText: "Launch team" })).toBeVisible();
+    await expect(
+      mine.getByTestId("chats-channel").filter({ hasText: "Launch team" }),
+    ).toBeVisible();
     for (const theme of ["Light", "Dark"] as const) {
       await setTheme(mine, theme);
       await mine.screenshot({ path: shot(`ended-band-${theme.toLowerCase()}`) });
