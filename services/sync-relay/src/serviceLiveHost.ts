@@ -2237,9 +2237,12 @@ export async function startServiceLiveHost(options: {
                       method,
                       workspace: attached.handle,
                       params: { workspaceId, ...params },
-                      deadlineMs:
+                      // Within the longest timer Node keeps.
+                      deadlineMs: Math.min(
                         config.client.requestDeadlineMs +
-                        Math.max(HELD_READ_CANCEL_GRACE_MS, config.client.requestDeadlineMs),
+                          Math.max(HELD_READ_CANCEL_GRACE_MS, config.client.requestDeadlineMs),
+                        2_147_483_647,
+                      ),
                     },
                     undefined,
                     undefined,

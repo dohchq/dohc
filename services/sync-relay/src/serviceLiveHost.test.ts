@@ -2252,34 +2252,40 @@ it("stops the engine for a held read it answers neither at the deadline nor on c
   ]);
 });
 
-it("gives a held read at least one request deadline after its cancel", async () => {
-  const o = await emptyServiceHost({ frameChanges: true, requestDeadlineMs: 20_000 }),
-    workspaces = [o.workspace];
-  await o.host.update({ workspaces, documents: [o.sibling], ...stay });
-  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
-  const send = o.client().sendRequest,
-    through = send.getMockImplementation()! as (...args: unknown[]) => ReturnType<typeof send>;
-  const asked = deferred<number>();
-  send.mockImplementation(async (...args: unknown[]) => {
-    const request = args[0] as { id: number; method: string; deadlineMs: number };
-    if (request.method !== "sync.heldDocument") return through(...args);
-    asked.resolve(request.deadlineMs);
-    const cancel = args[3] as AbortSignal;
-    await new Promise((resolve) => cancel.addEventListener("abort", resolve, { once: true }));
-    throw new EngineRequestError(request.id, {
-      code: "CANCELLED",
-      message: "held document answer cancelled",
-      retry: "no",
+it.each([
+  [20_000, 40_000],
+  [2_147_483_647, 2_147_483_647],
+])(
+  "gives a held read at least one request deadline after its cancel (%i ms)",
+  async (requestDeadlineMs, sent) => {
+    const o = await emptyServiceHost({ frameChanges: true, requestDeadlineMs }),
+      workspaces = [o.workspace];
+    await o.host.update({ workspaces, documents: [o.sibling], ...stay });
+    await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+    const send = o.client().sendRequest,
+      through = send.getMockImplementation()! as (...args: unknown[]) => ReturnType<typeof send>;
+    const asked = deferred<number>();
+    send.mockImplementation(async (...args: unknown[]) => {
+      const request = args[0] as { id: number; method: string; deadlineMs: number };
+      if (request.method !== "sync.heldDocument") return through(...args);
+      asked.resolve(request.deadlineMs);
+      const cancel = args[3] as AbortSignal;
+      await new Promise((resolve) => cancel.addEventListener("abort", resolve, { once: true }));
+      throw new EngineRequestError(request.id, {
+        code: "CANCELLED",
+        message: "held document answer cancelled",
+        retry: "no",
+      });
     });
-  });
-  const caller = new AbortController();
-  const read = o.host.heldDocument("workspace", "object", { markdown: false }, caller.signal);
-  const left = expect(read).rejects.toThrow("caller left");
-  await expect(asked.promise).resolves.toBe(20_000 + 20_000);
-  caller.abort(new Error("caller left"));
-  await left;
-  expect(o.host.invalidated.aborted).toBe(false);
-});
+    const caller = new AbortController();
+    const read = o.host.heldDocument("workspace", "object", { markdown: false }, caller.signal);
+    const left = expect(read).rejects.toThrow("caller left");
+    await expect(asked.promise).resolves.toBe(sent);
+    caller.abort(new Error("caller left"));
+    await left;
+    expect(o.host.invalidated.aborted).toBe(false);
+  },
+);
 
 it("frees a cancelled held read's slot on the engine's answer, and answers the engine's busy refusal 429 to the owner alone", async () => {
   const o = await emptyServiceHost(),
