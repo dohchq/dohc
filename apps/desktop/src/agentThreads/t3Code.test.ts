@@ -181,8 +181,21 @@ describe("signing in to T3 Code", () => {
     cancelled.abort();
     await expect(signInToT3Code({ origin: t3.origin, open: browser, signal: cancelled.signal })).rejects.toMatchObject({ problem: "not-allowed", message: "The sign-in to T3 Code was cancelled." });
     expect(t3.registrations).toEqual([]);
-    // The step that opens the browser never returns.
-    await expect(signInToT3Code({ origin: t3.origin, open: () => new Promise<void>(() => undefined), timeoutMs: 20 })).rejects.toMatchObject({ problem: "not-allowed", message: "Nobody allowed dohc in T3 Code in time." });
+    // The step that opens the browser never returns, and the person cancels during it.
+    const during = new AbortController();
+    let entered = false;
+    const open = () => {
+      entered = true;
+      during.abort();
+      return new Promise<void>(() => undefined);
+    };
+    await expect(signInToT3Code({ origin: t3.origin, open, signal: during.signal })).rejects.toMatchObject({ problem: "not-allowed", message: "The sign-in to T3 Code was cancelled." });
+    expect(entered).toBe(true);
+    // Time runs out while an answer's body is still arriving. The reason is the time, not the unread answer.
+    const slowBody: typeof fetch = (_url, init) => Promise.resolve(new Response(new ReadableStream({
+      start(controller) { init!.signal!.addEventListener("abort", () => controller.error(new Error("stopped"))); },
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    await expect(signInToT3Code({ origin: t3.origin, open: browser, fetch: slowBody, timeoutMs: 20 })).rejects.toMatchObject({ problem: "not-allowed", message: "Nobody allowed dohc in T3 Code in time." });
   });
 
   it("says so when this T3 Code offers no sign-in to other programs", async () => {

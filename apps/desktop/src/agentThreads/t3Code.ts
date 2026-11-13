@@ -107,7 +107,8 @@ const SignInMetadata = z.object({
   registration_endpoint: z.string(),
 });
 const RegisteredClient = z.object({ client_id: z.string().min(1) });
-const IssuedToken = z.object({ access_token: z.string().min(1), token_type: z.literal("Bearer"), expires_in: z.number().positive() });
+// A server may spell the token type in any case.
+const IssuedToken = z.object({ access_token: z.string().min(1), token_type: z.string().refine((type) => type.toLowerCase() === "bearer"), expires_in: z.number().positive() });
 
 export interface T3CodeSignIn {
   /** The address T3 Code issued it at. dohc sends the token nowhere else. */
@@ -145,11 +146,14 @@ async function listenForRedirect(input: { state: string; issuer: string }): Prom
     const issuer = url.searchParams.get("iss");
     const got = url.searchParams.get("code");
     const allowed = got !== null && got !== "" && (issuer === null || issuer === input.issuer);
-    response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", connection: "close" });
-    response.end(allowed ? ALLOWED_PAGE : DECLINED_PAGE, () => {
+    const answered = () => {
       if (allowed) settle.resolve(got);
       else settle.reject(new T3CodeError("not-allowed", "T3 Code did not allow dohc."));
-    });
+    };
+    // The browser's connection can drop before the page is written. The answer still counts.
+    response.once("close", answered);
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", connection: "close" });
+    response.end(allowed ? ALLOWED_PAGE : DECLINED_PAGE, answered);
   });
   // A connection that never sends a request cannot hold the listener open.
   server.headersTimeout = 5_000;
@@ -238,6 +242,10 @@ export async function signInToT3Code(input: {
     // A sign-in the person cancelled is not kept, even when T3 Code issued it in time.
     if (stop.signal.aborted) throw stop.signal.reason as Error;
     return { origin, token: token.access_token, expiresAtMs: (input.nowMs ?? Date.now)() + token.expires_in * 1000 };
+  } catch (error) {
+    // Whatever failed after the person cancelled or time ran out, that is the reason.
+    if (stop.signal.aborted) throw stop.signal.reason as Error;
+    throw error;
   } finally {
     clearTimeout(timer);
     input.signal?.removeEventListener("abort", cancel);
