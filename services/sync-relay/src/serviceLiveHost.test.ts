@@ -7638,9 +7638,10 @@ it("reconciles a retirement's applications across work budgets and settles once 
 });
 
 // Proves: a membership update that fails partway, here at another workspace's origin check, still wakes the pass
-// that starts the departure it began, though each later attempt finds that departure already begun. Once the
-// other workspace attaches, the departure is announced and the stopped document retires, with no periodic pass.
-it("starts a stopped document's departure while another workspace's update keeps failing, with passes held", async () => {
+// that starts the departure it began, though each later attempt finds that departure already begun. The departure
+// is announced before that failure, so pulls confirm it and the stopped document retires while the other workspace
+// never attaches, with no periodic pass.
+it("retires a stopped document while another workspace's update keeps failing, with passes held", async () => {
   const polls = heldPolls(), o = await enrolledServiceHost({polls});
   vi.spyOn(console, "error").mockImplementation(() => {});
   const tip = o.tip(), key = retiringKey(o, tip);
@@ -7656,16 +7657,15 @@ it("starts a stopped document's departure while another workspace's update keeps
   expect(o.host.automationLedger("workspace-2")).toBeNull();
   // The pass the first failed update woke settles and publishes what the stopped document applied.
   await vi.waitFor(() => expect(retiringSettles(o, sent)).toContainEqual(["liveApplication.settle", {retirement: key, terminalReceipt: tip}]), {timeout: 10_000});
-  // No pull after an update has confirmed it left, so it stays.
-  expect(o.calls(sent)).not.toContain("liveApplication.releaseActivation");
-  expect(o.host.retains(o.sibling)).toBe(true);
-  o.replies.create = undefined;
-  await update();
+  // A pull after the announcement confirms it left, and it retires.
   await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true), {timeout: 10_000});
   expect(o.ownerCalls().slice(sent)).toContainEqual(["liveApplication.releaseActivation", key]);
   expect(retiredRow(o)).toEqual({retired: true, boundary: o.engine.boundary});
   expect(o.host.retains(o.sibling)).toBe(false);
   expect(polls.early()).toBeGreaterThan(0);
+  // The other workspace still cannot attach.
+  await expect(update()).rejects.toThrow("Relay unreachable.");
+  expect(o.host.automationLedger("workspace-2")).toBeNull();
 });
 
 // Proves: a retirement whose departure was already confirmed, and whose publication then pushed a page and has
