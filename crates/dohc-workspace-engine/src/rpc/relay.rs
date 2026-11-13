@@ -2309,6 +2309,33 @@ impl EngineService {
         relay_outcome_json(outcome)
     }
 
+    /// Send a membership view's own posts in Groups. The engine refuses any
+    /// grant other than the whole workspace at Comment or Edit.
+    pub(super) async fn share_view_push_chat(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ShareViewParams = parse(params)?;
+        let granted = share_grant(params.granted_selector)?;
+        let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
+        let outcome = self
+            .relay_execute(
+                ctx,
+                &open,
+                configuration,
+                RelayOperation::PushShareViewGroups {
+                    workspace_id: open.workspace_id.clone(),
+                    share_id: params.share_id,
+                    granted,
+                },
+                "share.view.pushChat",
+            )
+            .await?;
+        relay_outcome_json(outcome)
+    }
+
     pub(super) async fn share_view_pull(
         &self,
         ctx: &RequestContext,

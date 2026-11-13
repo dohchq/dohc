@@ -590,6 +590,9 @@ impl EngineService {
             "share.view.pull" => {
                 Box::pin(self.share_view_pull(&ctx, request.workspace, request.params)).await?
             }
+            "share.view.pushChat" => {
+                Box::pin(self.share_view_push_chat(&ctx, request.workspace, request.params)).await?
+            }
             "share.view.recordIdentity" => {
                 Box::pin(self.share_view_record_identity(&ctx, request.workspace, request.params))
                     .await?
@@ -1862,6 +1865,7 @@ mod tests {
             "share.records.status",
             "share.proposal.submit",
             "share.view.pull",
+            "share.view.pushChat",
             "share.view.recordIdentity",
             "sync.adoptJoinIdentity",
             "sync.claim",

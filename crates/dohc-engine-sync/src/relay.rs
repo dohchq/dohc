@@ -7538,32 +7538,34 @@ fn shared_chat_op_allowed(
             shared_channel_op_allowed(store, workspace_id, channel_wire_id, op)
         }
         SharedPushScope::WorkspaceGroups => store
-            .read_with(|conn| {
-                match op.op_kind.as_str() {
-                    "chat.thread.create" => match op
+            .read_with(|conn| match op.op_kind.as_str() {
+                "chat.thread.create" => match op
+                    .payload
+                    .get("channelWireId")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    Some(wire) => crate::share::wire_is_group(conn, workspace_id, wire),
+                    None => Ok(false),
+                },
+                "chat.message.append"
+                | "chat.decision.set"
+                | "chat.attachment.add"
+                | "chat.reaction.set" => {
+                    let Some(thread_id) = op
                         .payload
-                        .get("channelWireId")
+                        .get("threadId")
                         .and_then(serde_json::Value::as_str)
-                    {
-                        Some(wire) => crate::share::wire_is_group(conn, workspace_id, wire),
-                        None => Ok(false),
-                    },
-                    "chat.message.append" | "chat.decision.set" | "chat.attachment.add"
-                    | "chat.reaction.set" => {
-                        let Some(thread_id) =
-                            op.payload.get("threadId").and_then(serde_json::Value::as_str)
-                        else {
-                            return Ok(false);
-                        };
-                        match crate::share::thread_channel(conn, workspace_id, thread_id)? {
-                            Some(channel_id) => {
-                                crate::share::channel_is_group(conn, workspace_id, &channel_id)
-                            }
-                            None => Ok(false),
+                    else {
+                        return Ok(false);
+                    };
+                    match crate::share::thread_channel(conn, workspace_id, thread_id)? {
+                        Some(channel_id) => {
+                            crate::share::channel_is_group(conn, workspace_id, &channel_id)
                         }
+                        None => Ok(false),
                     }
-                    _ => Ok(false),
                 }
+                _ => Ok(false),
             })
             .map_err(local),
     }
