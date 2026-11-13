@@ -837,7 +837,7 @@ describe("CLI socket server", () => {
       )(dependencies) as NonNullable<Parameters<typeof createRelaySyncEngine>[0]["afterSuccessfulPull"]>;
       const sync = createRelaySyncEngine({
         rootDir: workspaceRoot, relay: { baseUrl: "https://relay.test", token: "token" }, onChange: vi.fn(),
-        capture: { runRelaySync: async task => task(async () => undefined) } as WorkspaceEngineCapture,
+        capture: { runRelaySync: async task => task(async () => undefined), countOpenConflicts: async () => 0 } as WorkspaceEngineCapture,
         operations: {
           claim: async () => undefined,
           push: async () => ({ pushed: 0, hasMore: false, originsPushed: [], ownerAdmissionPending: [], sharingDeclined: [] }),

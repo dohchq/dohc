@@ -38,13 +38,6 @@ export interface CloudSyncEngineOptions {
   operations: RelaySyncOperations;
   capture: WorkspaceEngineCapture;
   onChange: () => void;
-  // The number of conflicts currently open in the engine store. When
-  // provided, each successful pass re-reads it so the snapshot reflects
-  // reality after resolutions (local or replicated from another machine) —
-  // never a monotone accumulator that keeps saying "conflict" after the
-  // user resolved everything. Absent (tests/legacy), conflictsOpened
-  // accumulates as before.
-  countOpenConflicts?: () => Promise<number>;
   // Join bootstrap (0P-C gate fix): this engine belongs to a freshly joined
   // workspace, so it must never append ops to the relay before its first
   // successful pull — pushing first could seed local boilerplate into the
@@ -597,9 +590,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       }
     }
     passSharingDeclined.push(...(pullResult.sharingDeclined ?? []));
-    conflictCount = options.countOpenConflicts
-      ? await options.countOpenConflicts()
-      : conflictCount + pullResult.conflictsOpened;
+    conflictCount = await options.capture.countOpenConflicts();
     sharingDeclined = mergeSharingDeclined(passSharingDeclined);
     ownerAdmissionPending = passOwnerPending;
     pendingChangeCount = Math.max(

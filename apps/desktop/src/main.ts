@@ -2531,7 +2531,6 @@ function engineForWorkspace(
       withWorkspaceAttachment(workspace, lease => workspaceActivity.pullStarting(lease.state.activity));
       return shareRosters.pullStarting(workspace.workspaceId);
     },
-    countOpenConflicts: async () => await capture.countOpenConflicts(),
     // Another device's edits reach this one, and a document open here, while
     // nobody touches this desktop: the relay answers a held read when the log
     // changes. The rare pull covers a change that answer missed.
