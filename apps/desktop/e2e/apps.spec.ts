@@ -205,7 +205,6 @@ test("@apps finds an app declared only by app.publish.json and publishes it agai
       await publication.getByRole("button", { name: "Publish on a link", exact: true }).click();
       await publication.getByRole("button", { name: "Share app folder", exact: true }).click();
       const share = page.getByTestId("share-dialog");
-      await share.getByRole("radio", { name: "Anyone with the link", exact: true }).click();
       await share.getByRole("radiogroup", { name: "Link access" }).getByRole("radio", { name: "View", exact: true }).click();
       await share.getByRole("button", { name: "Create link", exact: true }).click();
       const linkUrl = (await share.getByTestId("share-link-url").textContent())!;
@@ -320,7 +319,6 @@ test("@apps publishes a static app that a guest opens by link", async ({}, info)
     const publication = page.getByTestId("app-publication-dialog");
     await publication.getByRole("button", { name: "Share app folder", exact: true }).click();
     const share = page.getByTestId("share-dialog");
-    await share.getByRole("radio", { name: "Anyone with the link", exact: true }).click();
     await share.getByRole("radiogroup", { name: "Link access" }).getByRole("radio", { name: "View", exact: true }).click();
     await share.getByRole("button", { name: "Create link", exact: true }).click();
     const linkUrl = (await share.getByTestId("share-link-url").textContent())!;

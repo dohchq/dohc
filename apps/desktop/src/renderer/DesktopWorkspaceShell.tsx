@@ -8248,6 +8248,10 @@ export function DesktopWorkspaceShell(props: {
               disconnectedAgents={disconnectedLinkAgents}
               accessContext={accessContext}
               server={cloudStatus?.workspaceServerUrl ?? null}
+              onOpenSharing={(target) => {
+                setSharingFocus(target);
+                mutateWb((state) => ({ ...state, activeView: SHARING_VIEW_ID, sidebarVisible: true }));
+              }}
             />
           </Suspense>
         </Overlay>

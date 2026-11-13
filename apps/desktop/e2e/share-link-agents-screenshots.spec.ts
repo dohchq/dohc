@@ -77,7 +77,6 @@ async function openLinkPane(page: Page): Promise<Locator> {
   await page.getByTestId("explorer-menu-item-share").click();
   const dialog = page.getByTestId("share-dialog");
   await expect(dialog).toBeVisible();
-  await dialog.getByRole("radio", { name: "Anyone with the link" }).click();
   return dialog;
 }
 
