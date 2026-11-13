@@ -410,12 +410,12 @@ function createRegisterView(client: FundraiserClient, context: AppContext, hooks
   function confirmDiscard(): void {
     const keep = button("Keep pending registration", { class: "secondary", click: () => showPending("The registration outcome is still unknown.") });
     messages.replaceChildren(notice("Discard this pending registration? It may already be saved. Check with the organizer before registering the same group again.", "info",
-      button("Discard", { class: "danger", click: () => { void (async () => {
+      button("Discard", { class: "danger", click: async () => {
         if (busy) return; setBusy(true);
         if (!await clearRetained()) { setBusy(false); showPending("dohc could not clear this response. Try again."); return; }
         attempt = null; context.pendingAttemptChanged?.(null);
         setBusy(false); messages.replaceChildren(); submitButton.focus();
-      })(); } }), keep));
+      } }), keep));
     keep.focus();
   }
   /** Rebuilds the draft from a retained attempt and keeps it frozen until Retry settles it. */

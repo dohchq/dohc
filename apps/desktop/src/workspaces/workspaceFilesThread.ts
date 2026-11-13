@@ -4,7 +4,7 @@ import type { FilesRequest, FilesResult } from "./workspaceFilesWorker";
 
 const port = parentPort;
 if (!port) throw new Error("Workspace file reader requires a parent port.");
-port.on("message", ({ id, request }: { id: number; request: FilesRequest }) => { void (async () => {
+port.on("message", async ({ id, request }: { id: number; request: FilesRequest }) => {
   try {
     let result: FilesResult;
     if (request.kind === "list") result = await listFiles(request.rootPath, { ...request.scope, includeContentIdentity: true });
@@ -18,4 +18,4 @@ port.on("message", ({ id, request }: { id: number; request: FilesRequest }) => {
     }
     port.postMessage({ id, result });
   } catch (error) { port.postMessage({ id, error: error instanceof Error ? error.message : String(error) }); }
-})(); });
+});

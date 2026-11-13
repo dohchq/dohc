@@ -39,13 +39,12 @@ export function initReducedMotion(): () => void {
       }
     }
   };
-  const onVisibilityChange = () => { void refresh(); };
-  document.addEventListener("visibilitychange", onVisibilityChange);
+  document.addEventListener("visibilitychange", refresh);
   void refresh();
   return () => {
     stopped = true;
     clearTimeout(timer);
-    document.removeEventListener("visibilitychange", onVisibilityChange);
+    document.removeEventListener("visibilitychange", refresh);
     delete document.documentElement.dataset.systemReducedMotion;
   };
 }

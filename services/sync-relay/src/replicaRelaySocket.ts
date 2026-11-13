@@ -9,7 +9,7 @@ import type { ReplicaReadLease } from "./replicaReadPrincipal";
 export async function serveReplicaRelay(storeDir: string, lease: ReplicaReadLease,
   handle: (request: Request) => Promise<Response>) {
   const socketPath = join(storeDir, "relay.sock");
-  const server = createServer({requestTimeout: 30_000, headersTimeout: 10_000}, (incoming, outgoing) => { void (async () => {
+  const server = createServer({requestTimeout: 30_000, headersTimeout: 10_000}, async (incoming, outgoing) => {
     outgoing.setHeader("connection", "close");
     try {
       if (incoming.method !== "GET" || incoming.headers.authorization !== `Bearer ${lease.bearer}` ||
@@ -27,7 +27,7 @@ export async function serveReplicaRelay(storeDir: string, lease: ReplicaReadLeas
       if (!outgoing.headersSent) outgoing.writeHead(500);
       outgoing.end();
     }
-  })(); });
+  });
   server.maxConnections = 4;
   server.setTimeout(10_000, socket => socket.destroy());
   const close = () => new Promise<void>((resolve, reject) => {

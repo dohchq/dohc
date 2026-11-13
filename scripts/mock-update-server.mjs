@@ -61,7 +61,7 @@ export async function createMockUpdateServer(options = {}) {
   const host = options.host ?? "127.0.0.1";
   const port = Number(options.port ?? process.env.DOHC_DESKTOP_MOCK_UPDATE_SERVER_PORT ?? 0);
 
-  const server = createServer((request, response) => { void (async () => {
+  const server = createServer(async (request, response) => {
     try {
       const filePath = await resolveServablePath(root, request.url ?? "/");
       if (!filePath) {
@@ -84,7 +84,7 @@ export async function createMockUpdateServer(options = {}) {
         response.end("Internal Server Error");
       }
     }
-  })(); });
+  });
 
   await new Promise((resolveListen, rejectListen) => {
     server.once("error", rejectListen);

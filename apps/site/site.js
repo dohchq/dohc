@@ -180,7 +180,7 @@ for (const link of document.querySelectorAll('[data-download-primary], [data-dow
   const buildFor = () => downloadBuilds[link.dataset.downloadCard ?? link.dataset.downloadBuild ?? link.dataset.downloadAsset];
   const canResolve = () => Boolean(buildFor());
   // GitHub hears from a visitor only when they click to download.
-  link.addEventListener('click', event => { void (async () => {
+  link.addEventListener('click', async event => {
     if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || link.target === '_blank') return;
     // "Download dohc" scrolls to the platforms below.
     if (!canResolve() && link.matches('[data-download-primary]')) return;
@@ -217,7 +217,7 @@ for (const link of document.querySelectorAll('[data-download-primary], [data-dow
     }
     status.remove();
     location.assign(link.href);
-  })(); });
+  });
 }
 
 const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -924,7 +924,7 @@ if (waitlist) {
     return 'Couldn\'t join the waitlist. Check the email address and try again.';
   };
 
-  waitlist.addEventListener('submit', (event) => { void (async () => {
+  waitlist.addEventListener('submit', async (event) => {
     event.preventDefault();
     if (pending) return;
     pending = true;
@@ -953,7 +953,7 @@ if (waitlist) {
       submit.removeAttribute('aria-disabled');
       submit.textContent = submitLabel;
     }
-  })(); });
+  });
 }
 
 const syncDemo = document.querySelector('[data-sync-demo]');

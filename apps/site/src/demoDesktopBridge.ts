@@ -213,7 +213,7 @@ async function pickBrowserImages() {
       input.multiple = true;
       input.addEventListener(
         "change",
-        () => { void (async () => {
+        async () => {
           const files = Array.from(input.files ?? [])
             .slice(0, 20)
             .filter((file) => file.size <= 20 * 1024 * 1024);
@@ -225,7 +225,7 @@ async function pickBrowserImages() {
             })),
           );
           resolve(images);
-        })(); },
+        },
         { once: true },
       );
       input.addEventListener("cancel", () => resolve([]), { once: true });

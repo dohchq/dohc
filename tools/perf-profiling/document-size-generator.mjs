@@ -66,7 +66,7 @@ if (process.send) {
     projection,
     docs = [],
     texts = [];
-  process.on('message', ({ id, method, input }) => { void (async () => {
+  process.on('message', async ({ id, method, input }) => {
     try {
       let value;
       if (method === 'init') {
@@ -124,5 +124,5 @@ if (process.send) {
     } catch (error) {
       process.send({ id, error: String(error.stack ?? error) });
     }
-  })(); });
+  });
 }

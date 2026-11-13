@@ -2531,9 +2531,9 @@ export function createWorkspaceEngineCapture(
         onError("capture renew", error);
         renewed = !captureHoldIsGone(error);
       }
-      if (renewed && !stopped) timer = setTimeout(() => { void tick(); }, every);
+      if (renewed && !stopped) timer = setTimeout(tick, every);
     };
-    timer = setTimeout(() => { void tick(); }, every);
+    timer = setTimeout(tick, every);
     return { stop() { stopped = true; clearTimeout(timer); } };
   }
 
@@ -5838,7 +5838,6 @@ export function createWorkspaceEngineCapture(
           // A close waits for the draft its refused save sets aside, and
           // tries again to remove drafts a newer one replaced.
           const closing = shuttingDown && closeInFlight ? closeInFlight
-            // oxlint-disable-next-line typescript/no-misused-promises -- finally waits for the promise this returns
             : attemptCloseEntry(opts).finally(() => {
               draftStep(async () => undefined);
               return draftSteps;

@@ -5,7 +5,8 @@
   "categories": { "correctness": "error" },
   "options": { "typeAware": true },
   "rules": {
-    "typescript/no-misused-promises": "error",
+    // An async callback may go where a void one is expected: tests and callers await what a handler returns.
+    "typescript/no-misused-promises": ["error", { "checksVoidReturn": false }],
     "typescript/switch-exhaustiveness-check": ["error", { "considerDefaultExhaustiveForUnions": true }],
     // Sites, apps, and HTML previews run sandboxed. A frame without a sandbox needs a stated reason.
     "react/iframe-missing-sandbox": "error",

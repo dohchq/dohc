@@ -119,7 +119,7 @@ export function observeWorkspaceFiles(options: {
     });
     return next;
   }
-  const unsubscribe = options.subscribe(() => { void wake(); }, paths => {
+  const unsubscribe = options.subscribe(wake, paths => {
     if (!closing) options.callbacks.captured(paths);
   });
   void wake();

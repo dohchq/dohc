@@ -27,7 +27,7 @@ async function load() {
     ready = true; freeze();
   } catch (error) { status.textContent = `${(error as Error).message} Reload to check your saved order before ordering.`; }
 }
-form.addEventListener("submit", event => { void (async () => {
+form.addEventListener("submit", async event => {
   event.preventDefault(); if (!ready || busy) return;
   if (!attempt) {
     const quantities = [...form.querySelectorAll<HTMLInputElement>('input[type="number"]')].filter(input => Number(input.value) > 0).map(input => ({itemId:input.name,quantity:Number(input.value)}));
@@ -52,7 +52,7 @@ form.addEventListener("submit", event => { void (async () => {
     another.hidden = false; discard.hidden = true;
   } catch (error) { status.textContent = (error as Error).message; button.textContent = "Retry same order"; discard.hidden = false; }
   finally { busy = false; freeze(); }
-})(); });
+});
 const identity = (input: any) => JSON.stringify([input.customerName, input.items.map((item: {itemId:string;quantity:number}) => [item.itemId,item.quantity]), input.receiptFileId ?? null]);
 async function resetOrder() {
   if (busy || !attempt) return;

@@ -4224,7 +4224,7 @@ export function ChatsView(props: {
     presentation: agentChatIdentity({ agentId: waitingDispatch.agentId, name: waitingDispatch.name }, settingsAgents).presentation,
     messageIds: new Set(waitingDispatch.triggerMessageIds),
   } : null, [settingsAgents, waitingDispatch]);
-  const retryFailedRun = useCallback(() => { void (async () => {
+  const retryFailedRun = useCallback(async () => {
     if (nav.level !== "thread" || !failedRun?.retryable || dispatchActionBusy) return;
     const { id: threadId, title } = nav.thread;
     const { runId } = failedRun;
@@ -4248,7 +4248,7 @@ export function ChatsView(props: {
     } finally {
       if (token === liveToken.current) setDispatchActionBusy(false);
     }
-  })(); }, [dispatchActionBusy, failedRun, nav, props.onError, workspaceId]);
+  }, [dispatchActionBusy, failedRun, nav, props.onError, workspaceId]);
 
   // Escape walks back up one level — but never steals Escape from a composer
   // holding a draft (that Escape reads as "leave my text alone").

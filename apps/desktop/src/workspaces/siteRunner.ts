@@ -241,7 +241,7 @@ function createDescendantCapture(
     child.pid !== undefined ? captureOnce(child.pid) : Promise.resolve();
   const timer =
     child.pid !== undefined
-      ? setInterval(() => { void captureOnce(child.pid!); }, options.intervalMs ?? DESCENDANT_CAPTURE_INTERVAL_MS)
+      ? setInterval(() => captureOnce(child.pid!), options.intervalMs ?? DESCENDANT_CAPTURE_INTERVAL_MS)
       : undefined;
   void captureNow();
   timer?.unref?.();

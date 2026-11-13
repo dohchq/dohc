@@ -319,7 +319,7 @@ export function createMainWindow(options?: {
     if (!event.isMainFrame || event.isSameDocument) return;
     navigatingDocumentId = options?.currentRendererDocumentId?.(window.webContents);
   });
-  window.webContents.on("did-navigate", () => { void (async () => {
+  window.webContents.on("did-navigate", async () => {
     const documentId = navigatingDocumentId;
     navigatingDocumentId = undefined;
     if (documentId === undefined) return;
@@ -328,7 +328,7 @@ export function createMainWindow(options?: {
     } catch (error) {
       console.error("[desktop] renderer navigation cleanup failed:", error);
     }
-  })(); });
+  });
 
   // window.open is a pure deny with NO side effects: renderer content (file
   // views today, app iframes in 7b) must never reach the OS browser except

@@ -2140,7 +2140,6 @@ const workspaceAuthorities = createWorkspaceAuthorityOwner({
         }),
       () => [
         // The executor hands its held dataset claims back before the host closes.
-        // oxlint-disable-next-line typescript/no-misused-promises -- finally waits for the promise this returns
         state.collectionAutomations.dispose().finally(() => closeLocalDatasetHost(state.datasetHost)),
         state.linkedChatStore?.close() ?? Promise.resolve(),
         state.agentDispatchStoreHandle?.close() ?? Promise.resolve(),
@@ -4411,7 +4410,6 @@ async function retryAutomationFromNotice(
     return result;
   } finally {
     if (automations && result?.status === "queued") {
-      // oxlint-disable-next-line typescript/no-misused-promises -- finally waits for the promise this returns
       void automations.idle().finally(release).catch((error: unknown) =>
         console.warn(`[desktop] Try again in ${workspace.workspaceId}:`, error));
     } else {

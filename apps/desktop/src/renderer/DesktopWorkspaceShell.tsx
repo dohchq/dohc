@@ -4665,7 +4665,6 @@ export function DesktopWorkspaceShell(props: {
     () => ({
       ...workspaceApps,
       pinnedApps: pinnedRoots,
-      // oxlint-disable-next-line typescript/no-misused-promises -- the caller ignores the promise; a wrapper here would change the callback's identity
       onSetPinned: setAppPinned,
       reveal: appsReveal === workspaceId,
       onRevealed: clearAppsReveal,
@@ -6131,7 +6130,6 @@ export function DesktopWorkspaceShell(props: {
         onImportFiles={importFromExplorer}
         shareView={shareView}
         onRefreshShareMounts={onExplorerRefreshShareMounts}
-        // oxlint-disable-next-line typescript/no-misused-promises -- the caller ignores the promise; a wrapper here would change the callback's identity
         onUnmountShare={unmountShare}
         onShare={onSharePath}
         onRefresh={onExplorerRefresh}
@@ -6471,7 +6469,6 @@ export function DesktopWorkspaceShell(props: {
   }, [props.sentNotices, workspaceId, reportShellError, clearIdentity]);
   useEffect(() => {
     showSyncRefusals((props.sentNotices?.notices ?? []).filter(notice =>
-      // oxlint-disable-next-line typescript/no-misused-promises -- the caller ignores the promise; a wrapper here would change the callback's identity
       isRefusalNoticeKind(notice.kind) && notice.workspaceId === workspaceId), syncFailureNotice.retry, openFile, openHistoryView, readWorkspaceError);
   }, [props.sentNotices?.notices, workspaceId, showSyncRefusals, syncFailureNotice.retry, openFile, openHistoryView, readWorkspaceError]);
   const driveLimitNotice = useDriveLimitNotice({
@@ -7118,7 +7115,6 @@ export function DesktopWorkspaceShell(props: {
                 onOpenRecordHistory={recordHistory.open}
                 accessEnded={shareViewEnded}
                 captureHeld={heldFiles?.some(file => file.workspaceId === workspaceId && file.path === path) ?? false}
-                // oxlint-disable-next-line typescript/no-misused-promises -- the caller ignores the promise; a wrapper here would change the callback's identity
                 onRetryHeldCapture={retryHeldCapture}
                 readOnly={
                   (!!shareView && !shareViewWritable) ||
@@ -7451,7 +7447,6 @@ export function DesktopWorkspaceShell(props: {
                         setCollectionActiveView(state, groupCollectionPath, viewName),
                       )
                     }
-                    // oxlint-disable-next-line typescript/no-misused-promises -- the caller ignores the promise; a wrapper here would change the callback's identity
                     onNewRecord={createCollectionRecord}
                     onOpenRecord={openFile}
                     // The record a tab shows open stays with the tab, by the record's id.
