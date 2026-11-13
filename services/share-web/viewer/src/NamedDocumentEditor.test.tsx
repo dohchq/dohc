@@ -143,6 +143,28 @@ it("says the server could not open the file, not that the connection failed, whi
   expect(live.reconnect).toHaveBeenCalledOnce();
 });
 
+it("says the owner removed the reader's access, and offers no retry", async () => {
+  const live = session("Body");
+  const removed: NamedLiveBrowserState = {
+    ...live.state(),
+    status: "disconnected",
+    reason: "access-removed",
+  };
+  await act(async () =>
+    root.render(
+      <NamedDocumentEditor
+        session={{ ...live, state: () => removed }}
+        path="docs/a.md"
+        onState={() => {}}
+      />,
+    ),
+  );
+  expect(container.querySelector('[role="status"]')?.textContent).toBe(
+    "The owner removed your access.",
+  );
+  expect(container.querySelector("button")).toBeNull();
+});
+
 it("asks the reader to check the connection when the connection failed", async () => {
   const live = session("Body");
   const closed: NamedLiveBrowserState = {

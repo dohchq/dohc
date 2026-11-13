@@ -138,7 +138,8 @@ function fixture(
     urls: string[] = [];
   let account = "reader",
     sessionCount = 0,
-    ticketCount = 0;
+    ticketCount = 0,
+    sessionMs = 12 * 60 * 60_000;
   let intercept:
     | ((path: string, init: RequestInit) => Promise<Response> | Response | undefined)
     | undefined;
@@ -153,12 +154,18 @@ function fixture(
     if (path === "/api/live/named-session")
       return Response.json({
         discriminator: (++sessionCount).toString().padStart(12, "0"),
-        expiresAtMs: Date.now() + 10_000,
+        expiresAtMs: Date.now() + sessionMs,
       });
     if (path === "/api/live/named-ticket")
       return Response.json({
         token: Buffer.alloc(32, ++ticketCount).toString("hex"),
         expiresAtMs: Date.now() + 10_000,
+      });
+    if (path === "/api/live/named-documents")
+      return Response.json({
+        access: "edit",
+        grantId: "grant",
+        files: [{ objectId: "document", path: "document.md" }],
       });
     throw new Error("Unexpected request.");
   });
@@ -202,6 +209,11 @@ function fixture(
     socketAt,
     account(id: string) {
       account = id;
+    },
+    /** How many sessions the page has received. */
+    issued: () => sessionCount,
+    sessionLifetime(ms: number) {
+      sessionMs = ms;
     },
     intercept(callback: typeof intercept) {
       intercept = callback;
@@ -477,7 +489,11 @@ describe("named browser transport", () => {
     f.socket.close();
     Y.applyUpdate(f.doc, first.bytes);
     f.intercept((path) =>
-      path === "/api/live/named-ticket" ? Response.json({ ok: false }, { status: 404 }) : undefined,
+      path === "/api/live/named-ticket"
+        ? Response.json({ ok: false }, { status: 404 })
+        : path === "/api/live/named-documents"
+          ? Response.json({ access: "edit", grantId: "grant", files: [] })
+          : undefined,
     );
     await f.value.reconnect();
     expect(f.value.state()).toMatchObject({
@@ -502,7 +518,7 @@ describe("named browser transport", () => {
     expect(retry.begin).toMatchObject(first.begin);
     peer.ack(retry, 1);
     await waitState(f.value, (state) => state.pendingUpdates === 0);
-    expect(f.requests).toHaveLength(9);
+    expect(f.requests).toHaveLength(10);
     expect(peer.submissions()).toHaveLength(1);
     expect(f.value.body.toString()).toBe(getDohcYDocBodyFragment(f.doc).toString());
   });
@@ -871,20 +887,22 @@ it("caps automatic reconnect backoff at ten seconds", async () => {
   expect(vi.getTimerCount()).toBe(0);
 });
 
-it("does not retry a ticket authority refusal over twenty seconds", async () => {
+it("does not retry a refusal over twenty seconds when the page never held the file", async () => {
   vi.useFakeTimers();
   const f = fixture();
   f.intercept((path) =>
-    path === "/api/live/named-ticket" ? new Response(null, { status: 404 }) : undefined,
+    path === "/api/live/named-ticket" || path === "/api/live/named-documents"
+      ? new Response(null, { status: 404 })
+      : undefined,
   );
   await f.value.reconnect();
   expect(f.value.state()).toMatchObject({
     status: "disconnected",
     reason: "authority-unavailable",
   });
-  expect(f.requests).toHaveLength(3);
+  expect(f.requests).toHaveLength(4);
   await vi.advanceTimersByTimeAsync(20_000);
-  expect(f.requests).toHaveLength(3);
+  expect(f.requests).toHaveLength(4);
   expect(f.sockets).toHaveLength(0);
   expect(vi.getTimerCount()).toBe(0);
 });
@@ -925,4 +943,303 @@ it("refuses an initial frame bound to another named grant before applying conten
     binding: null,
   });
   expect(f.value.body.length).toBe(0);
+});
+// A restarting or busy server answers an invited account's session and ticket requests with the
+// same 404 as lost access. The page reads its invitation again to tell them apart.
+it("keeps an invited editor trying while its invitation names the file, and stops once the owner removes access", async () => {
+  const f = await live();
+  vi.useFakeTimers();
+  edit(f.value, " draft");
+  const first = await f.peer.submitted();
+  Y.applyUpdate(f.doc, first.bytes);
+  let busy = true;
+  f.intercept((path) =>
+    busy && path === "/api/live/named-ticket" ? new Response(null, { status: 404 }) : undefined,
+  );
+  f.socket.close();
+  await vi.advanceTimersByTimeAsync(250);
+  expect(f.value.state()).toMatchObject({
+    status: "disconnected",
+    reason: "host-unavailable",
+    pendingUpdates: 1,
+  });
+  await vi.advanceTimersByTimeAsync(500);
+  expect(f.value.state()).toMatchObject({ reason: "host-unavailable" });
+  expect(f.requests.filter(({ path }) => path === "/api/live/named-documents")).toHaveLength(2);
+  busy = false;
+  await vi.advanceTimersByTimeAsync(1_000);
+  const socket = await f.socketAt(1),
+    peer = host(socket, f.value, 2);
+  socket.open();
+  await peer.greet();
+  await peer.initial(f.doc, binding, 1);
+  const retry = await peer.submitted();
+  expect(retry.bytes).toEqual(first.bytes);
+  peer.ack(retry, 1);
+  await waitState(f.value, (state) => state.pendingUpdates === 0);
+  expect(f.value.state().status).toBe("live");
+
+  f.intercept((path) =>
+    path === "/api/live/named-ticket"
+      ? new Response(null, { status: 404 })
+      : path === "/api/live/named-documents"
+        ? Response.json(
+            { ok: false, code: "share_access_removed", error: "The owner removed your access." },
+            { status: 404 },
+          )
+        : undefined,
+  );
+  socket.close();
+  await vi.advanceTimersByTimeAsync(250);
+  expect(f.value.state()).toMatchObject({ status: "disconnected", reason: "access-removed" });
+  const asked = f.requests.length;
+  await vi.advanceTimersByTimeAsync(20_000);
+  expect(f.requests).toHaveLength(asked);
+  expect(vi.getTimerCount()).toBe(0);
+});
+// A page that can never open stops asking the server, even while the invitation names the file.
+it.each([false, true])(
+  "keeps trying through refusals for five minutes after the file was last open, then stops; invitation readable=%s",
+  async (readable) => {
+    const f = await live();
+    vi.useFakeTimers();
+    f.intercept((path) =>
+      path === "/api/live/named-ticket" || (!readable && path === "/api/live/named-documents")
+        ? new Response(null, { status: 404 })
+        : undefined,
+    );
+    f.socket.close();
+    await vi.advanceTimersByTimeAsync(4 * 60_000);
+    expect(f.value.state()).toMatchObject({ status: "disconnected", reason: "host-unavailable" });
+    await vi.advanceTimersByTimeAsync(70_000);
+    expect(f.value.state()).toMatchObject({
+      status: "disconnected",
+      reason: "authority-unavailable",
+    });
+    const asked = f.requests.length;
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(f.requests).toHaveLength(asked);
+    expect(vi.getTimerCount()).toBe(0);
+  },
+);
+it("names the server, and keeps trying, when the deadline passes while the page reads its invitation", async () => {
+  const f = await live();
+  vi.useFakeTimers();
+  f.intercept((path, init) =>
+    path === "/api/live/named-ticket"
+      ? new Response(null, { status: 404 })
+      : path === "/api/live/named-documents"
+        ? new Promise<Response>((_resolve, reject) =>
+            init.signal!.addEventListener("abort", () => reject(new Error("Aborted."))),
+          )
+        : undefined,
+  );
+  f.socket.close();
+  await vi.advanceTimersByTimeAsync(250 + 2000);
+  expect(f.value.state()).toMatchObject({ status: "disconnected", reason: "host-unavailable" });
+  f.intercept(undefined);
+  await vi.advanceTimersByTimeAsync(500);
+  await f.socketAt(1);
+});
+
+// A page that was open counts the new sessions it asks for over five minutes of retrying.
+describe("a retrying page keeps its session", () => {
+  type Fixture = Awaited<ReturnType<typeof live>>;
+  async function reopen(f: Fixture, index: number) {
+    const socket = await f.socketAt(index),
+      peer = host(socket, f.value);
+    socket.open();
+    await peer.greet();
+    await peer.initial(f.doc);
+    expect(f.value.state().status).toBe("live");
+    return socket;
+  }
+  const refuseTickets = (f: Fixture, refused: (discriminator: string) => boolean) =>
+    f.intercept((path, init) =>
+      path === "/api/live/named-ticket" &&
+      refused((JSON.parse(init.body as string) as { discriminator: string }).discriminator)
+        ? new Response(null, { status: 404 })
+        : undefined,
+    );
+
+  it("asks for one new session while tickets are refused throughout, then stops", async () => {
+    const f = await live();
+    vi.useFakeTimers();
+    refuseTickets(f, () => true);
+    f.socket.close();
+    await vi.advanceTimersByTimeAsync(5 * 60_000 + 30_000);
+    expect(f.value.state()).toMatchObject({
+      status: "disconnected",
+      reason: "authority-unavailable",
+    });
+    expect(f.issued() - 1).toBe(1);
+  });
+
+  it("asks for one new session when the server lost the page's session, and keeps it", async () => {
+    const f = await live();
+    vi.useFakeTimers();
+    refuseTickets(f, (discriminator) => discriminator === "000000000001");
+    f.socket.close();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await reopen(f, 1);
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect(f.value.state().status).toBe("live");
+    expect(f.issued() - 1).toBe(1);
+  });
+
+  it.each([
+    ["at once", 0],
+    ["after two minutes open", 2 * 60_000],
+  ])(
+    "stops when the server loses its new session again %s, and Try again opens it",
+    async (_, openMs) => {
+      const f = await live();
+      vi.useFakeTimers();
+      const lost = new Set(["000000000001"]);
+      refuseTickets(f, (discriminator) => lost.has(discriminator));
+      f.socket.close();
+      await vi.advanceTimersByTimeAsync(1_000);
+      const socket = await reopen(f, 1);
+      await vi.advanceTimersByTimeAsync(openMs);
+      lost.add("000000000002");
+      socket.close();
+      await vi.advanceTimersByTimeAsync(5 * 60_000 + 30_000);
+      expect(f.value.state()).toMatchObject({
+        status: "disconnected",
+        reason: "authority-unavailable",
+      });
+      expect(f.issued() - 1).toBe(1);
+      const opening = f.value.reconnect();
+      await reopen(f, 2);
+      await opening;
+      expect(f.issued() - 1).toBe(2);
+    },
+  );
+
+  it("asks for one new session when the server never answers that request, then stops", async () => {
+    const f = await live();
+    vi.useFakeTimers();
+    let asked = 0;
+    f.intercept((path) => {
+      if (path === "/api/live/named-session") {
+        asked++;
+        return new Promise<Response>(() => {});
+      }
+      return path === "/api/live/named-ticket" ? new Response(null, { status: 404 }) : undefined;
+    });
+    f.socket.close();
+    await vi.advanceTimersByTimeAsync(5 * 60_000 + 30_000);
+    expect(f.value.state()).toMatchObject({
+      status: "disconnected",
+      reason: "authority-unavailable",
+    });
+    expect(asked).toBe(1);
+  });
+
+  // Try again can start at any point while the attempt it replaces reads the account.
+  it.each(Array.from({ length: 12 }, (_, ticks) => ticks))(
+    "keeps Try again's new session separate from an attempt it replaced, %i ticks in",
+    async (ticks) => {
+      const f = await live();
+      vi.useFakeTimers();
+      let release: (() => void) | undefined;
+      f.intercept((path) =>
+        path === "/api/account/session" && !release
+          ? new Promise<Response>((resolve) => {
+              release = () => resolve(Response.json({ user: { id: "reader", name: "Reader" } }));
+            })
+          : undefined,
+      );
+      const replaced = f.value.reconnect();
+      await vi.waitFor(() => expect(release).toBeDefined());
+      release!();
+      for (let tick = 0; tick < ticks; tick++) await Promise.resolve();
+      const opening = f.value.reconnect();
+      const socket = await reopen(f, 1);
+      await Promise.all([replaced, opening]);
+      const opened = f.issued();
+      refuseTickets(f, (discriminator) => Number(discriminator) <= opened);
+      socket.close();
+      await vi.advanceTimersByTimeAsync(1_000);
+      await reopen(f, 2);
+      expect(f.issued() - opened).toBe(1);
+    },
+  );
+
+  it("returns to editing by itself with one new session after the server was away for a minute and lost it", async () => {
+    const f = await live();
+    vi.useFakeTimers();
+    let away = true;
+    f.intercept((path, init) => {
+      if (away) return Promise.reject(new TypeError("Failed to fetch"));
+      return path === "/api/live/named-ticket" &&
+        (JSON.parse(init.body as string) as { discriminator: string }).discriminator ===
+          "000000000001"
+        ? new Response(null, { status: 404 })
+        : undefined;
+    });
+    f.socket.close();
+    await vi.advanceTimersByTimeAsync(60_000);
+    away = false;
+    // The server answers again. The page's next try finds its session gone, and the one after
+    // opens with a new session. Each try is at most 10 s after the last.
+    for (let waited = 0; f.sockets.length < 2 && waited < 30_000; waited += 250)
+      await vi.advanceTimersByTimeAsync(250);
+    await reopen(f, 1);
+    expect(f.issued() - 1).toBe(1);
+  });
+
+  it("asks for no new session while its socket opens and drops ten times", async () => {
+    const f = await live();
+    vi.useFakeTimers();
+    let socket = f.socket;
+    for (let index = 1; index <= 10; index++) {
+      socket.close();
+      await vi.advanceTimersByTimeAsync(250);
+      socket = await reopen(f, index);
+    }
+    expect(f.issued() - 1).toBe(0);
+  });
+
+  it("asks for no new session while its socket keeps failing for five minutes", async () => {
+    const f = await live();
+    vi.useFakeTimers();
+    let failed = 0;
+    for (let elapsed = 0; elapsed < 5 * 60_000; elapsed += 1_000) {
+      while (failed < f.sockets.length) f.sockets[failed++]!.close();
+      await vi.advanceTimersByTimeAsync(1_000);
+    }
+    expect(f.sockets.length).toBeGreaterThan(30);
+    expect(f.issued() - 1).toBe(0);
+  });
+
+  it("asks for a new session once the page's session has expired", async () => {
+    const f = fixture();
+    f.sessionLifetime(60_000);
+    const connecting = f.value.reconnect(),
+      first = await f.socketAt(0),
+      peer = host(first, f.value),
+      doc = document("base");
+    first.open();
+    await connecting;
+    await peer.greet();
+    await peer.initial(doc);
+    vi.useFakeTimers();
+    await vi.advanceTimersByTimeAsync(60_000);
+    first.close();
+    await vi.advanceTimersByTimeAsync(250);
+    await f.socketAt(1);
+    expect(f.issued()).toBe(2);
+  });
+
+  // The provider can end a live route itself. The five minutes start when the file was last open.
+  it("keeps trying through a refusal after the server ends a route that was quiet for a long time", async () => {
+    const f = await live();
+    vi.useFakeTimers();
+    await vi.advanceTimersByTimeAsync(6 * 60_000);
+    refuseTickets(f, () => true);
+    f.peer.send({ kind: "close", reason: "shutdown" });
+    await vi.advanceTimersByTimeAsync(250);
+    expect(f.value.state()).toMatchObject({ status: "disconnected", reason: "host-unavailable" });
+  });
 });
