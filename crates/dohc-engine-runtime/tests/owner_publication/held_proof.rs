@@ -19,8 +19,6 @@ fn writer(w: &RetainedWindow) -> rusqlite::Connection {
     raw
 }
 
-/// Run `sql` through a writer connection of its own, past the store's
-/// checks, and answer how many rows it changed.
 fn changed(w: &RetainedWindow, sql: &str) -> usize {
     let raw = writer(w);
     raw.execute_batch("PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON")
@@ -40,7 +38,6 @@ impl Drop for Resume {
 
 type Answer = Result<Option<HeldAnswer>, RuntimeError>;
 
-/// A read of the window document through the actor, until `token`.
 fn inspection(w: &RetainedWindow, token: &CancellationToken) -> tokio::task::JoinHandle<Answer> {
     let (actor, token) = (w.actor.clone(), token.clone());
     tokio::spawn(async move {
@@ -61,13 +58,11 @@ async fn paused_inspection(w: &RetainedWindow) -> (Resume, tokio::task::JoinHand
     (resume, request)
 }
 
-/// What the read answers once its proof goes on.
 async fn released(resume: Resume, request: tokio::task::JoinHandle<Answer>) -> Option<HeldAnswer> {
     drop(resume);
     request.await.unwrap().unwrap()
 }
 
-/// What `request` answers, which it must within 30 seconds.
 async fn answered(request: tokio::task::JoinHandle<Answer>) -> Answer {
     tokio::time::timeout(Duration::from_secs(30), request)
         .await
@@ -75,7 +70,6 @@ async fn answered(request: tokio::task::JoinHandle<Answer>) -> Answer {
         .unwrap()
 }
 
-/// Completes once `reached` does, which it must within 30 seconds.
 async fn reached(what: &str, reached: impl std::future::Future<Output = ()>) {
     tokio::time::timeout(Duration::from_secs(30), reached)
         .await
@@ -112,14 +106,10 @@ async fn the_actor_answers_other_work_while_a_held_proof_runs() {
     w.close().await;
 }
 
-/// What one case changes, through another writer, while the proof holds at
-/// its snapshot; it answers how many rows changed.
 type Change = fn(&RetainedWindow) -> usize;
 
-/// What one case writes before its proof, whose answer must still be current.
 type Prepare = fn(&mut RetainedWindow);
 
-/// The window document's released tail generation.
 fn generation(w: &RetainedWindow) -> i64 {
     w.store
         .read_with(|conn| {
@@ -133,7 +123,6 @@ fn generation(w: &RetainedWindow) -> i64 {
         .unwrap()
 }
 
-/// The window document's latest snapshot, as `sql` names it.
 const LATEST_SNAPSHOT: &str = "object_id='object' AND up_to_seq=
     (SELECT max(up_to_seq) FROM ydoc_snapshots WHERE object_id='object')";
 
@@ -160,7 +149,6 @@ mod changed_proof {
         outbox_only(w, "Drafted.");
         rebound(w);
     }
-    /// What the latest snapshot's `column` holds.
     fn latest_snapshot(w: &RetainedWindow, column: &str) -> String {
         w.store
             .read_with(|conn| {
@@ -416,8 +404,6 @@ async fn a_dead_actors_reader_keeps_its_store_fenced() {
         ..
     } = w;
     drop(store);
-    // Its worker is gone, so closing the owner reaches no actor; the owner
-    // still retires its token as it drops.
     let closed = owner.close().await;
     assert!(
         matches!(closed, Err(RuntimeError::ActorUnavailable)),
@@ -549,8 +535,6 @@ async fn a_proof_gives_way_when_the_wal_presses_and_writes_keep_succeeding() {
         .expect("write admission resumes within the client's busy budget");
     }
 
-    // Each write shares the desktop client's store-busy budget across all
-    // attempts and checkpoint waits, rather than restarting it on each refusal.
     let budget = client_busy_budget();
     const WRITE: &str = "INSERT INTO binary_blobs(sha256,byte_length,bytes)
         SELECT lower(hex(randomblob(32))),65536,randomblob(65536)";

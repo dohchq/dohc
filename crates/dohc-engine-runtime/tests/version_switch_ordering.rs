@@ -544,7 +544,6 @@ async fn plaintext_never_leaks_across_a_version_switch_and_back() {
     scan.assert_secret_plaintext_absent(&feature_text);
     scan.assert_absent_in_every_form("main marker", main_marker);
     scan.assert_absent_in_every_form("feature marker", feature_marker);
-    // Positive control: the ciphertext both tips hold IS in the scanned bytes.
     scan.assert_stored_ciphertext_scanned(&database);
     scan.assert_scanned_wal();
 
@@ -661,8 +660,6 @@ async fn a_secret_the_switch_has_not_written_stays_out_of_the_capture_seed() {
     supervisor.close(&database).expect("close");
 }
 
-/// `main` has `plans/trip.md` on disk and `later` has a file at `plans`,
-/// before the switch to `later`.
 struct FolderToFile {
     scratch: ScratchDir,
     database: PathBuf,
@@ -716,7 +713,6 @@ impl FolderToFile {
     }
 }
 
-/// The switch jobs at `path` still waiting to run.
 fn pending_switch_jobs(database: &std::path::Path, path: &str) -> i64 {
     Connection::open(database)
         .expect("sqlite")
@@ -1021,9 +1017,6 @@ const WAITING_PATH: &str = "ordered.md";
 const WAITING_MAIN: &str = "main line\r\nsecond\r\n";
 const WAITING_FEATURE: &str = "feature line\r\nsecond\r\n";
 
-/// Main holds `WAITING_MAIN` on disk. The feature version holds
-/// `WAITING_FEATURE`, or no file when `feature_text` is `None`. The switch to
-/// the feature version crashes after its job commits, and the actor reopens.
 async fn crash_switch_before_its_write(
     scratch: &ScratchDir,
     supervisor: &WorkspaceSupervisor,

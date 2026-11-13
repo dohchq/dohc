@@ -382,7 +382,6 @@ fn production_entrypoint_unloads_a_settled_document_and_reloads_its_accepted_edi
     let response=daemon.streamed(5,"liveApplication.apply",workspace.clone(),json!({"registrationId":registration,"rangeCount":0,"rangeStreamId":3,"rangeDigest":hex_sha256(&[]),"updateStreamId":2,"updateByteLength":2,"accepted":{"receipt":receipt,"binding":binding,"authority":{"principalKind":"owner","principalId":"person","grantId":null,"grantGeneration":null},"receivedAtMs":2}}),&[(2,&[0,0]),(3,&[])]);
     assert!(matches!(response, Envelope::Response(_)), "{response:?}");
 
-    // An accepted edit past the last settlement keeps the document loaded.
     let Envelope::Response(pending) = unload(&mut daemon, 6) else {
         panic!("pending unload")
     };
@@ -415,7 +414,6 @@ fn production_entrypoint_unloads_a_settled_document_and_reloads_its_accepted_edi
     };
     assert_eq!(repeated.error.code, ErrorCode::WorkspaceUnavailable);
 
-    // The next open reloads the accepted edit and its settlement.
     let reloaded = register(&mut daemon, 11);
     assert_ne!(reloaded, registration);
     let Envelope::Response(ack) = daemon.request(
@@ -517,7 +515,6 @@ fn production_entrypoint_starts_empty_and_changes_membership_without_restarting(
     assert!(listed(&mut daemon, 9).is_empty());
     daemon.close_cleanly();
 
-    // A daemon without a configured host offers none of these operations.
     let mut ordinary = Daemon(command(None).spawn().unwrap());
     ordinary.hello("configured-test-secret");
     assert!(matches!(ordinary.read(), Envelope::HelloAck(_)));

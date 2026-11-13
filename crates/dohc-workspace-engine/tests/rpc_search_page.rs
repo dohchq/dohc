@@ -1,6 +1,3 @@
-//! Desktop workspace-search RPC: active-version scoping and bounded paging
-//! through the real in-process daemon transport.
-
 use crate::common;
 
 use common::*;

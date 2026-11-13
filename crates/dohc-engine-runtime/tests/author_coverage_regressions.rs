@@ -24,7 +24,6 @@ fn coverage(store: &EngineStore, key: &DocKey) -> Coverage {
         .map_err(StorageError::persist_public)).expect("coverage")
 }
 
-/// The authors the next settlement would name.
 fn interval(store: &EngineStore, key: &DocKey) -> String {
     store
         .read_with(|conn| author_coverage::interval_in(conn, key, i64::MAX))

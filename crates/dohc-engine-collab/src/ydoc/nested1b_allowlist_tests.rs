@@ -269,7 +269,6 @@ fn generated_sources() -> Vec<String> {
                 for depth in 0..4 {
                     source.push_str(&format!("{}{parent} {inline}\n", " ".repeat(depth * width)));
                 }
-                // Tight siblings at each level, including later ordered starts.
                 let sibling = if parent.starts_with("1.") {
                     parent.replacen("1.", "2.", 1)
                 } else if parent.starts_with("3)") {

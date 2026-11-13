@@ -84,7 +84,6 @@ fn ordinary_update_context_does_not_infer_a_person_for_declared_work() {
         (Some("agent"), ChangeActorKind::Agent),
         (Some("automation"), ChangeActorKind::Automation),
     ] {
-        // The replicated update carries an agent's run to the owner's devices.
         let attribution = ChangeAttribution {
             actor_kind: kind,
             on_behalf_of: Some("owner-account".into()),
@@ -284,7 +283,6 @@ fn queue_legacy_moment_as(
     legacy
 }
 
-/// Writes a moment and journals it as the current build does.
 fn queue_fresh_moment_as(engine: &mut EngineStore, moment_id: &str, authors: &serde_json::Value) {
     seed_identity(engine);
     VersionedTextStore::new(engine)

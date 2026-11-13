@@ -1,5 +1,3 @@
-//! Settlement consumes admission coverage, including edits that only delete content.
-
 use dohc_engine_collab::{ContentKind, DocKey, Regime, Ydoc, author_coverage};
 use dohc_engine_domain::{ChangeActorKind, ChangeAttribution};
 use dohc_engine_runtime::{ActorHandle, CancellationToken, WorkspaceSupervisor, YdocOpenState};
@@ -89,7 +87,6 @@ fn coverage(db: &Path) -> (i64, Option<i64>, String, Option<i64>) {
         .map_err(StorageError::persist_public)).expect("coverage")
 }
 
-/// The authors the next settlement would name.
 fn interval(db: &Path, key: &DocKey) -> Value {
     let store = EngineStore::open(db, 4).expect("inspect store");
     let authors = store

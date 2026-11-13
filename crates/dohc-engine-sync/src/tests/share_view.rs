@@ -111,7 +111,6 @@ fn received_collection_projection_reads_pulls_incrementally_without_owner_side_e
                         Ok::<_, rusqlite::Error>(())
                     })
                     .unwrap();
-                // Restarting after that crash replays already settled writes.
                 pull = client
                     .pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults)
                     .unwrap();
@@ -187,7 +186,6 @@ fn received_collection_projection_reads_pulls_incrementally_without_owner_side_e
             projection = next;
             assert!(unchanged.is_empty());
         }
-        // Disposable worker state is enough to rebuild an existing store.
         let TxnOutcome::Committed((_, rebuilt)) = engine
             .write_with(&NoFaults, |tx| {
                 project_collections_in_tx(tx, "ws", "main", CollectionProjection::default())
@@ -1967,7 +1965,6 @@ fn a_record_too_small_for_every_refusal_lists_whole_ones_and_counts_the_rest() {
         refused_count,
         "the record's own count does not add up to the files it lost"
     );
-    // Every entry it did show is whole: its measurements and its full path.
     for (index, entry) in entries.iter().enumerate() {
         assert_eq!(
             *entry,
@@ -2191,14 +2188,6 @@ fn a_permanently_invalid_share_path_is_skipped_instead_of_freezing_the_share() {
     }
 }
 
-// The recipient's half of "chat follows the share". The relay
-// decides what to serve; this boundary decides what to place, against the
-// selector the recipient pinned. Every case drives the real
-// `apply_shared_envelope`, because a test that faked the resolving would
-// prove nothing about the boundary.
-//
-// The world each case builds: `shared/docs/in.md` is inside the grant and
-// `private/out.md` is not, both as real file objects with real path aliases.
 fn share_view_chat_fixture() -> (ScratchDir, std::path::PathBuf, EngineStore, ShareBoundary) {
     let (scratch, path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
@@ -2328,7 +2317,6 @@ fn share_view_refuses_a_thread_about_a_file_outside_the_grant() {
         apply_shared_envelope(&mut engine, &boundary, &create, &NoFaults),
         Err(SyncError::ShareBoundaryViolation)
     ));
-    // And a path this surface never replays at all.
     let secret = thread_create(
         0,
         "thread-secret",
@@ -3324,7 +3312,6 @@ fn received_token_survives_rename_delete_restore_and_visible_half_reentry() {
             op.payload = json!({"versionId":"main","objectId":token,"operation":"delete","path":"docs/b.md"});
             op
         };
-        // A move out is the visible delete; a move back is the visible create.
         let pages = [
             vec![write(0, "docs/a.md"), rename],
             vec![delete(2)],
@@ -3449,7 +3436,6 @@ fn received_head_replaces_local_draft_and_version_snapshot_gets_tokens() {
         )
         .unwrap();
     engine.read_with(|conn| {assert_eq!(conn.query_row("SELECT object_id FROM path_aliases WHERE workspace_id='ws' AND path='docs/a.md'",[],|row|row.get::<_,String>(0))?,token);Ok::<_,rusqlite::Error>(())}).unwrap();
-    // This draft was never submitted. Its current head retires, but history remains readable.
     let history = VersionedTextStore::new(&mut engine)
         .history_page("ws", Some("main"), Some("local-proposal"), None, 50, None)
         .unwrap();
@@ -3706,7 +3692,6 @@ fn received_rename_mismatch_replays_as_write_delete(case: &str) {
         assert_eq!(conn.query_row("SELECT COUNT(*) FROM path_aliases WHERE workspace_id='ws' AND path='docs/a.md'", [], |row| row.get::<_,i64>(0))?,0);
         Ok::<_,rusqlite::Error>(())
     }).unwrap();
-    // Retrying before cursor publication must reuse both fallback receipts.
     assert_eq!(
         client
             .pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults)
@@ -3977,7 +3962,6 @@ fn received_fallback_rename_commits_write_and_delete_together() {
     }
 }
 
-/// Both predicates, read through the real functions inside one transaction.
 fn lane_answers(engine: &mut EngineStore) -> (bool, bool) {
     let outcome = engine
         .write_with(&NoFaults, |tx| {

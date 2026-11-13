@@ -1,4 +1,3 @@
-//! A writable open closes the owner bindings an earlier build stranded.
 use crate::WorkspaceSupervisor;
 use dohc_engine_collab::live_object_binding::LiveObjectBinding;
 use dohc_engine_collab::owner_outbox::{
@@ -107,7 +106,6 @@ fn stranded(db: &Path, objects: &[&str]) {
         .unwrap();
 }
 
-/// Owner bindings, and queues closed as retired.
 fn owner_rows(db: &Path) -> (i64, i64) {
     EngineStore::open_read_only(db)
         .unwrap()

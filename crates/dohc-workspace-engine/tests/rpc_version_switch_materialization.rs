@@ -264,10 +264,6 @@ async fn switching_does_not_clobber_untracked_content() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn plaintext_never_leaks_across_an_rpc_version_switch() {
-    // The same property as the domain and runtime scans, proven at the daemon's
-    // own surface: after a switch driven entirely through RPC, the closed
-    // database holds no secret plaintext in either form.
-    //
     let main_marker = "MARKER_1c6a94fe_RPC_MAIN";
     let feature_marker = "MARKER_78b2de50_RPC_FEATURE";
     let main_text = format!("PASSWORD={main_marker}\n");
@@ -314,7 +310,6 @@ async fn plaintext_never_leaks_across_an_rpc_version_switch() {
     )
     .await;
 
-    // Switch to the fork and back. The projected file proves each switch ran.
     switch_to(&transport, &handle, 6, &workspace_id, &feature).await;
     assert_eq!(
         std::fs::read_to_string(scratch.path().join(".env")).expect("switched secret"),
@@ -337,7 +332,6 @@ async fn plaintext_never_leaks_across_an_rpc_version_switch() {
     scan.assert_secret_plaintext_absent(&feature_text);
     scan.assert_absent_in_every_form("main marker", main_marker);
     scan.assert_absent_in_every_form("feature marker", feature_marker);
-    // Positive control: both stored ciphertexts are in the scanned bytes.
     scan.assert_stored_ciphertext_scanned(&database);
     scan.assert_scanned_wal();
 

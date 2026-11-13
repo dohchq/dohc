@@ -281,17 +281,14 @@ fn mention_parser_skips_names_inside_file_links() {
             "@[trip @Nova notes.md] for @Nova, and @Ana@[x.md]",
             &["nova", "ana"],
         ),
-        // A blank path or heading makes no link.
         ("@[ ] @a @[ @b ]", &["a"]),
         ("@[x.md# @c] @[y.md# ] @d", &["d"]),
-        // Neither does a nested opener, a line break, or an opener in code.
         ("@[a @h @[b] @g]", &["h", "g"]),
         ("@[a @i\nb]", &["i"]),
         ("`@[` @j]", &["j"]),
         ("`@[a @k]`", &[]),
         // An escaped `]` stays in the path.
         ("@[a%5D @l] @m", &["m"]),
-        // Multi-byte text before and inside a link.
         ("日本 @[ノート @Nova.md] @Ana", &["ana"]),
         ("@[ノート.md#見出し @Nova] @Bo", &["bo"]),
     ];

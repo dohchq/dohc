@@ -1,4 +1,3 @@
-//! Outside Markdown refusal is an observed file hold, never a recorded edit.
 use crate::common;
 
 use common::*;

@@ -22,8 +22,6 @@ fn the_backoff_doubles_and_then_caps() {
             RESTART_BACKOFF_CAP,
         ]
     );
-    // Strictly non-decreasing everywhere, so no schedule edit can
-    // accidentally make a later failure retry sooner than an earlier one.
     for failures in 1..64u32 {
         assert!(
             restart_delay(failures + 1) >= restart_delay(failures),

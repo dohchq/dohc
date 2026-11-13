@@ -585,8 +585,6 @@ async fn over_cap_merged_resolution_applies_and_withholds_its_body() {
     assert_eq!(resolved.result["conflict"]["status"], "resolved");
     assert_eq!(resolved.result["conflict"]["resolution"], "applied-merged");
 
-    // The stored body is the combined text, byte for byte, and it hydrates the
-    // way an over-cap head read already does.
     let hydrated = ProtocolEngineService::call(
         service.as_ref(),
         RequestContext::unbounded().with_capability("blobs"),
@@ -659,7 +657,6 @@ async fn open_conflict_against_seeded_head(
     .await
 }
 
-/// The same seeded conflict, with `shape` applied to the open payload first.
 async fn open_conflict_against_seeded_head_with(
     transport: &InProcessTransport<EngineService>,
     handle: &WorkspaceHandle,
@@ -753,7 +750,6 @@ async fn over_frame_conflict_row_degrades_to_hydratable_metadata_instead_of_refu
         "the healthy neighbor ships beside the degraded row"
     );
 
-    // The degraded row keeps every side's address and loses only the bodies.
     assert_eq!(rows[0]["id"], "conflict-000");
     for side in ["base", "current", "incoming"] {
         let snapshot = &rows[0][side]["snapshot"];
@@ -887,7 +883,6 @@ async fn a_retained_copy_on_an_unchecked_volume_is_counted_listed_and_deleted() 
     use std::os::unix::fs::MetadataExt;
     let (scratch, transport, handle, workspace_id) = fixture("retained-copy").await;
     let _simulated = dohc_engine_files::retained::unchecked::simulate(scratch.path());
-    // The first name job "old" stages its original under.
     let source = ".dohc/engine/displaced/6f6c64.0";
     write_file(scratch.path(), source, b"old bytes");
     let m = std::fs::metadata(scratch.path().join(source)).expect("source");

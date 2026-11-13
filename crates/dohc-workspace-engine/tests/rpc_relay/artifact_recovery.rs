@@ -116,7 +116,6 @@ struct Notes {
     a: WorkspaceHandle,
     a_id: u64,
     notes: Vec<(String, DocKey, Ydoc)>,
-    /// B's session, lineage claim and first text for each note.
     sessions_b: Vec<(String, Value, String)>,
     sessions_a: Vec<String>,
 }
@@ -247,7 +246,6 @@ impl Notes {
         notes
     }
 
-    /// B adds a paragraph to each note in `indexes` and publishes it.
     async fn edit_on_b(&mut self, indexes: std::ops::Range<usize>) {
         for index in indexes {
             let session = &self.sessions_b[index].0;
@@ -353,8 +351,6 @@ impl Notes {
         std::fs::read_to_string(self.a_scratch.path().join(&self.notes[index].0)).unwrap()
     }
 
-    /// Every note's file on A has B's edit, or every one still has its first
-    /// text.
     fn assert_files(&self, caught_up: bool) {
         for (index, (path, _, doc)) in self.notes.iter().enumerate() {
             let expected = if caught_up {
@@ -374,7 +370,6 @@ impl Notes {
         db.query_row(sql, [], |r| r.get(0)).unwrap()
     }
 
-    /// The paths Notices names, each row with the recovery failure message.
     async fn notice_paths(&mut self) -> Vec<String> {
         let listed = call(
             &self.a_transport,
@@ -404,7 +399,6 @@ impl Notes {
         assert_eq!(self.notice_paths().await, expected);
     }
 
-    /// A change to another file still reaches A.
     async fn assert_sync_continues(&mut self) {
         call(&self.b_transport,&self.b,&mut self.b_id,"versionedText.write",json!({"versionId":"main","objectId":"other","path":"other.md","text":"Later incoming work","momentId":"other-moment","origin":"api","nowMs":210})).await;
         self.push_on_b().await;

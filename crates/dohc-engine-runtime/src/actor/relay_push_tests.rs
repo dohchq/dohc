@@ -403,7 +403,6 @@ fn dropped_completed_push_replays_remote_commit_once_before_advancing_local_curs
     };
     assert_eq!(committed.after_seq, PREFIX_OPS as i64 - 1);
     assert_eq!(relay.ops.len(), 2 * PREFIX_OPS);
-    // The relay committed; the writer has not consumed its completed answer.
     assert_eq!(
         read_pushed_seq(&store, WORKSPACE, ORIGIN).unwrap(),
         PREFIX_OPS as i64 - 1

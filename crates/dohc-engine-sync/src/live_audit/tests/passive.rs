@@ -104,7 +104,6 @@ fn row(
 ) -> ReplicaJournalRow {
     counted_row(source, cursor, cursor, previous, doc)
 }
-/// The source's accepted update at `cursor`, its lineage's event `count`.
 fn counted_row(
     source: &mut Fixture,
     cursor: i64,
@@ -642,8 +641,6 @@ fn a_restore_fence_decides_what_the_owner_holds() {
         OwnerOutboxLimits,
         draft::{ObservedOwnerBinding, install_observed_binding_in_tx},
     };
-    /// The restore's fence, with the owner's decision in its transaction
-    /// only if `decides`.
     fn fence_deciding(
         f: &mut Fixture,
         fence: NativeRestoreFence,
@@ -801,8 +798,6 @@ fn a_restore_fence_decides_what_the_owner_holds() {
             terminal: None,
             applied_sequence,
         };
-        // Refused for another reason, here a stale applied sequence, the
-        // fence decides nothing: the update stays held.
         let mut stale = fence.clone();
         stale.applied_sequence += 1;
         assert!(fence_deciding(&mut f, stale, decides).is_err());
@@ -870,7 +865,6 @@ fn passive_replica_round_trips_a_cancelled_restore_and_its_audit() {
         cancellation: cancelled,
         authority: None,
     };
-    // The update's audit record names the cancellation exactly.
     let ops = operations(&source.store);
     let audit = ops
         .iter()
@@ -990,8 +984,6 @@ fn passive_replica_round_trips_a_cancelled_restore_and_its_audit() {
         serde_json::from_str::<ReplicaRestoreCancellation>(&kept).unwrap(),
         record
     );
-    // The record with its cancellation removed or altered refuses on a
-    // replica that holds everything before it.
     let generation = chain.replace(
         "\"restoreFenceGeneration\":2",
         "\"restoreFenceGeneration\":3",
@@ -1254,8 +1246,6 @@ fn a_settlement_interval_crosses_cancelled_restores_only_through_their_evidence(
             3
         );
         assert_eq!(count(&source.store, "live_owner_activations"), 0);
-        // A passive replica imports the audit and the settlement that
-        // crosses both generations.
         let (_scratch, _path, replica) = receiver(&source);
         assert_eq!(count(&replica, "live_audit_settlements"), 1);
         let moment = |store: &EngineStore| -> String {

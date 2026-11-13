@@ -1,6 +1,3 @@
-//! Work references: made once per target on this device, kept across reopen,
-//! renames, and moves, and committed with their outbox entry or not at all.
-
 use dohc_engine_domain::work_references::{
     MadeWorkReference, TransactionalRecordId, WorkReferenceRegistration, WorkReferenceResolution,
     WorkTarget, WorkTargetInput, WorkTargetState, make_work_reference, resolve_work_reference,
@@ -439,7 +436,6 @@ fn rename_and_move_keep_the_target() {
     assert_eq!(state, WorkTargetState::Live);
     assert_eq!(path.as_deref(), Some("team"));
 
-    // The old path names nothing now; the new one names the same reference.
     assert!(matches!(
         make_work_reference(&mut store, WS, &file_by_path("notes/plan.md"), 9, &NoFaults),
         Err(DomainError::WorkTargetNotFound)
@@ -541,7 +537,6 @@ fn a_deleted_target_resolves_as_deleted() {
         found(&store, &message),
         (message_target, WorkTargetState::Deleted, None)
     );
-    // A deleted target cannot get a new reference, and the old one stays.
     assert!(matches!(
         make_work_reference(&mut store, WS, &file_by_path("gone.md"), 7, &NoFaults),
         Err(DomainError::WorkTargetNotFound)
@@ -782,8 +777,6 @@ fn a_deleted_record_collection_or_app_resolves_as_deleted() {
         assert_eq!(found(&store, reference).1, WorkTargetState::Live);
     }
 
-    // Each reads as deleted as soon as its file is gone, and stays deleted
-    // once the Collection index catches up.
     delete(&mut store, "people/ada.md", 6);
     assert_eq!(found(&store, &record).1, WorkTargetState::Deleted);
     delete(&mut store, "people/collection.yaml", 7);

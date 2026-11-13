@@ -16,7 +16,6 @@ fn create(new_origin_id: &str) -> RelayOperation {
     }
 }
 
-/// The probe of the replica created under `ORIGIN`.
 fn probe() -> RelayIoRequest {
     RelayIoRequest::PushHosted(PushRequest {
         work_references: Vec::new(),
@@ -100,8 +99,6 @@ fn every_create_probes_the_origin_once_and_replays_with_its_answer() {
     );
     assert_eq!(sent, [probe()]);
 
-    // A later attach mints another origin; the replica keeps its own, and
-    // the relay is asked again.
     let (again, sent) = create_answering(&mut store, "service-host:other", relay_max(-1));
     assert!(
         matches!(again, Ok(RelayOperationOutcome::HostedReplicaCreated)),

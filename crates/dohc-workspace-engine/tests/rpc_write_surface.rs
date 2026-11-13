@@ -76,7 +76,6 @@ async fn fixture_with_service(
     (scratch, service, transport, handle)
 }
 
-/// The first `search.queryPage` page for the active version.
 async fn search(
     transport: &InProcessTransport<EngineService>,
     handle: &WorkspaceHandle,

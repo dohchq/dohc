@@ -301,7 +301,6 @@ fn live_local_echo_without_a_committed_journal_row_is_validated_and_deferred() {
             Ok::<_, SyncError>(())
         })
         .unwrap();
-    // The first local coordinate has already been acknowledged.
     apply_envelope_with(&mut f.store, &f.echo, &NoFaults, |_, _| Ok(())).unwrap();
     f.echo.origin_seq = 1;
     f.echo.relay_seq = Some(2);

@@ -50,7 +50,6 @@ fn secret_delete_tombstone_blocks_older_put_resurrection() {
         recorded_at_ms: at,
         relay_seq: Some(seq),
     };
-    // put @10 wins over an empty tip.
     assert!(matches!(
         apply_secret_envelope(
             &mut engine,
@@ -63,7 +62,6 @@ fn secret_delete_tombstone_blocks_older_put_resurrection() {
             sharing_declined: ref outcome_sharing_declined,
         }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
-    // delete @20 wins and removes the materialized secret_files row.
     let delete = ReplicationEnvelope {
         settlement_admission: None,
         admitted_author_snapshot: None,
@@ -83,7 +81,6 @@ fn secret_delete_tombstone_blocks_older_put_resurrection() {
             sharing_declined: ref outcome_sharing_declined,
         }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
-    // A late delivery of an older put (@5) must not resurrect the secret.
     assert!(matches!(
         apply_secret_envelope(
             &mut engine,

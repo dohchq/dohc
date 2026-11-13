@@ -381,7 +381,6 @@ impl Fixture {
         json.map_or_else(Vec::new, |json| serde_json::from_str(&json).unwrap())
     }
 
-    /// The relay accepts the oldest pending owner entry at `cursor`, then the owner ACKs it.
     async fn accept_pending(
         &self,
         actor: &ActorHandle,
@@ -396,7 +395,6 @@ impl Fixture {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             ))
             .unwrap();
-        // The relay accepts exactly what the entry declared.
         let agent_declaration =
             declaration.map(|json| serde_json::from_str::<AgentDeclaration>(&json).unwrap());
         let receipt = LiveUpdateReceipt {
@@ -500,7 +498,6 @@ impl Fixture {
     }
 }
 
-/// How long the desktop client retries a busy store.
 fn client_busy_budget() -> std::time::Duration {
     let policy: serde_json::Value = serde_json::from_str(include_str!(
         "../../../packages/workspace-engine-client/src/daemon/storeBusyRetry.json"
@@ -636,8 +633,6 @@ async fn configured_pending_edits_do_not_escape_through_ordinary_index_journal_o
         std::fs::read_to_string(f.root.path().join(&f.binding.current_path)).unwrap(),
         f.text
     );
-    // A live settlement covers only the accepted prefix: the pending edit
-    // stays out of the file.
     let prefix = handle
         .settle(
             None,
@@ -768,7 +763,6 @@ async fn first_owner_settlement_publishes_the_adopted_source(replace_draft_befor
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
     support::configure_witness_reader(&actor, &f.root).await;
 
-    // H1: a private draft settles locally.
     f.record(
         &actor,
         f.doc.richdoc_append_paragraph(SENTINEL),
@@ -795,7 +789,6 @@ async fn first_owner_settlement_publishes_the_adopted_source(replace_draft_befor
         })
         .unwrap();
     if replace_draft_before_adoption {
-        // H2 deletes the sentinel and is never settled before adoption.
         let replaced = format!("{}\nOwner work that replaced the private draft.\n", f.text);
         f.record(
             &actor,
@@ -809,7 +802,6 @@ async fn first_owner_settlement_publishes_the_adopted_source(replace_draft_befor
         assert!(!projection(&f.doc).contains(SENTINEL));
     }
 
-    // Adoption seeds the full local state; the relay accepts it, then H3.
     let head: i64 = f
         .store
         .read_with(|conn| conn.query_row("SELECT head_update_seq FROM ydoc_docs", [], |r| r.get(0)))
@@ -847,7 +839,6 @@ async fn first_owner_settlement_publishes_the_adopted_source(replace_draft_befor
     let settled = settle().await.unwrap();
     assert!(settled.materialized);
 
-    // The local moment keeps the actual rollback preimage H1.
     let local = |store: &EngineStore| -> (String, String) {
         store
             .read_with(|conn| {
@@ -861,7 +852,6 @@ async fn first_owner_settlement_publishes_the_adopted_source(replace_draft_befor
     };
     assert_eq!(local(&f.store), (draft.clone(), draft_moment.clone()));
 
-    // The published companion names the adopted source H0 for every before field.
     let (source_recorded_at, source_origin): (i64, String) = f
         .store
         .read_with(|conn| {
@@ -907,7 +897,6 @@ async fn first_owner_settlement_publishes_the_adopted_source(replace_draft_befor
     assert!(!moment_json.contains(&draft_moment));
     assert!(!moment_json.contains(SENTINEL));
 
-    // The audit and its moment sit at consecutive native origin coordinates.
     let (audit_origin, audit_seq, audit_json) = journaled(
         &f.store,
         "live.audit.settlement",
@@ -958,7 +947,6 @@ async fn first_owner_settlement_publishes_the_adopted_source(replace_draft_befor
     leaked.payload["beforeBlobSha256"] = serde_json::json!(draft);
     assert_eq!(allowed(&f.store, &leaked), 0);
 
-    // Replaying the settlement journals nothing new.
     let rows = f.store.table_row_count("replication_log").unwrap();
     let again = settle().await.unwrap();
     assert_eq!(
@@ -967,7 +955,6 @@ async fn first_owner_settlement_publishes_the_adopted_source(replace_draft_befor
     );
     assert_eq!(f.store.table_row_count("replication_log").unwrap(), rows);
 
-    // A later private tail stays refused.
     f.record(
         &actor,
         f.doc.richdoc_append_paragraph("Private tail."),
@@ -982,8 +969,6 @@ async fn first_owner_settlement_publishes_the_adopted_source(replace_draft_befor
     assert_eq!(allowed(&f.store, &tail), 0);
     assert_eq!(allowed(&f.store, &published), 1);
 
-    // Closing the owner fences publication; compaction and a restart keep the
-    // journaled envelope and the local preimage.
     owner.close().await.unwrap();
     supervisor.close_all().unwrap();
     let compacted =
@@ -1081,7 +1066,6 @@ async fn terminal_native_seed_publishes_only_accepted_content_and_unblocks_ordin
             },
         )
     };
-    // A real pending seed remains retryable and cannot publish its private bytes.
     assert!(settle(None).await.is_err());
     let input = f.store.read_with(|conn| conn.query_row("SELECT outbox_id,delivery_id,update_digest FROM owner_ydoc_outbox_entries WHERE pending=1", [], |r| Ok(dohc_engine_collab::owner_outbox::OwnerOutboxRefuseInput {
         outbox_id:r.get(0)?, delivery_id:r.get(1)?, update_digest:r.get(2)?, reason:"terminal-source-refused".into()
@@ -1206,7 +1190,6 @@ async fn terminal_native_seed_publishes_only_accepted_content_and_unblocks_ordin
         1
     );
     assert!(!f.file().contains("Private refused seed"));
-    // An unrelated ordinary operation uses the unchanged publication gate.
     dohc_engine_domain::VersionedTextStore::new(&mut f.store)
         .write_text(
             &dohc_engine_domain::WriteText {
@@ -1466,7 +1449,6 @@ async fn unavailable_publication_after_handover(
                 .unwrap(),
             None
         );
-        // The accepted owner edit arrives while Stop prepares its fence.
         let update = f
             .doc
             .richdoc_append_paragraph("Owner edit accepted before Resume");
@@ -1505,7 +1487,6 @@ async fn unavailable_publication_after_handover(
             .begin_retirement(scope.clone(), coordinate.clone(), key.clone(), false)
             .await
             .unwrap();
-        // Give this native fixture ordinary sync's imported base and cursor.
         f.store.write_with(&NoFaults, |tx| {
             let payload = serde_json::json!({"versionId":"main","objectId":"object","contentKind":"richdoc",
                 "isBaseState":true,"lineageClaimId":f.binding.lineage_claim_id,"updateBlobSha256":f.binding.lineage_claim_id});
@@ -1661,7 +1642,6 @@ async fn unavailable_publication_after_handover(
         .await
         .unwrap();
     let handle = f.register(&owner, "reloaded").await;
-    // Continue from the accepted state, leaving the refused native tail private.
     let next_doc = Ydoc::wire();
     next_doc.apply(&intermediate_bytes).unwrap();
     let next_update = next_doc.richdoc_append_paragraph("Accepted next content");
@@ -1728,7 +1708,6 @@ async fn unavailable_publication_after_handover(
     supervisor.close_all().unwrap();
 }
 
-/// Stored settlements and the settlement audits journaled for the relay.
 fn recorded_settlements(store: &EngineStore) -> (i64, i64) {
     store
         .read_with(|conn| {
@@ -2716,7 +2695,6 @@ async fn stop_defers_a_lost_accepted_receipt_without_double_history() {
         .await
         .unwrap()
         .unwrap();
-    // Resume replays the receipt before another Stop releases this draft.
     let (outbox, digest): (String, String) = f
         .store
         .read_with(|conn| {
@@ -3538,8 +3516,6 @@ async fn a_retiring_activation_settles_through_its_durable_binding() {
     supervisor.close_all().unwrap();
 }
 
-/// The cut adopting `captured`, after `prefix` when it succeeds a released
-/// chain.
 fn imported_cut(
     captured: &ImportedOwnerActivation,
     prefix: Option<RetainedPrefix>,
@@ -3567,7 +3543,6 @@ fn imported_cut(
     }
 }
 
-/// The owner's own delivery as the relay accepted it, applied by `handle`.
 async fn deliver_owned(
     handle: &dohc_engine_runtime::actor::ActorLiveApplicationHandle,
     binding: &dohc_engine_collab::LiveObjectBinding,
@@ -3601,8 +3576,6 @@ async fn deliver_owned(
         .unwrap()
 }
 
-/// An ordinary `ydoc.update` envelope for the document, applied as ordinary
-/// sync applies it.
 async fn import_envelope(
     root: &ScratchDir,
     store: &mut EngineStore,
@@ -3653,7 +3626,6 @@ async fn import_envelope(
     );
 }
 
-/// The latest pending owner entry: its outbox, delivery and digest.
 fn latest_pending(store: &EngineStore) -> (String, String, String) {
     store
         .read_with(|conn| {
@@ -3762,8 +3734,6 @@ async fn adopted_window(carried: bool) -> HostWindow {
     adopt_window(window_host().await, carried).await
 }
 
-/// `host`'s root activation in "relay", adopted through the host, as
-/// [`HostWindow`] describes it.
 async fn adopt_window(host: WindowHost, carried: bool) -> HostWindow {
     let WindowHost {
         actor,
@@ -3877,7 +3847,6 @@ fn execute(store: &mut EngineStore, sql: &str) {
         .unwrap();
 }
 
-/// The owner's edit, recorded in the native Y.Doc.
 async fn record_owned(actor: &ActorHandle, lineage: &str, update: Vec<u8>, request: &str) {
     actor
         .ydoc_record_update(
@@ -3902,9 +3871,6 @@ async fn record_owned(actor: &ActorHandle, lineage: &str, update: Vec<u8>, reque
 }
 
 impl HostWindow {
-    /// Stop: the retirement settles the file at B, the document parks and the
-    /// activation releases. Then the document returns to the scope, with no
-    /// activation current.
     async fn release(&mut self) {
         let scope = dohc_engine_runtime::actor::OwnedRetirementScope {
             namespace: "relay".into(),
@@ -3970,7 +3936,6 @@ impl HostWindow {
         std::fs::read_to_string(self.root.path().join(WINDOW_PATH)).unwrap()
     }
 
-    /// The native Y.Doc's whole state.
     fn native(&self) -> Vec<u8> {
         dohc_engine_collab::load_persisted(&self.store, &window_key())
             .unwrap()
@@ -3985,13 +3950,11 @@ impl HostWindow {
     }
 }
 
-/// The text the released chain retains, inside the file's one paragraph.
 const RETAINED: &str = " Retained.";
 
 /// How the released chain retains [`RETAINED`], as release classifies it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Retained {
-    /// An owner edit the relay accepted and the host never applied.
     Carried,
     /// An edit ordinary sync brought before the lineage adopted, so the
     /// adoption seed holds it. The relay accepted the seed and the host
@@ -4017,11 +3980,8 @@ struct RetainedWindow {
     boundary: Option<RetainedPrefixBody>,
     lineage: String,
     base: Vec<u8>,
-    /// The digest of the delivery that retains [`RETAINED`].
     retained_digest: String,
-    /// That delivery's ID.
     retained_delivery: String,
-    /// What ordinary sync brought the host before its lineage adopted.
     synced: Vec<Vec<u8>>,
     root: ScratchDir,
 }
@@ -4069,8 +4029,6 @@ async fn configure_window_witness(actor: &ActorHandle, root: &ScratchDir) {
         .unwrap();
 }
 
-/// A workspace store holding the document's base as ordinary sync brought
-/// it, under `origin`.
 async fn window_store(root: &ScratchDir, origin: &str, base: &[u8], lineage: &str) -> EngineStore {
     let mut store = EngineStore::open(&engine_db_path(root).unwrap(), 0).unwrap();
     dohc_engine_domain::VersionedTextStore::new(&mut store)
@@ -4180,8 +4138,6 @@ async fn retained_window(retained: Retained) -> RetainedWindow {
     if retained != Retained::Own {
         accept_latest(&actor, &store, 2).await;
     }
-    // Stop: Phase A, settlement with nothing applied, the document parks,
-    // and the release. Its document returns with no activation current.
     let scope = dohc_engine_runtime::actor::OwnedRetirementScope {
         namespace: "relay".into(),
         max_deliveries: 8,
@@ -4298,7 +4254,6 @@ impl RetainedWindow {
     }
 }
 
-/// Every row a synced update, its refusal or its application could write.
 fn ingress_rows(store: &EngineStore) -> Vec<String> {
     table_rows(
         store,
@@ -4340,7 +4295,6 @@ fn document_rows(store: &EngineStore) -> Vec<String> {
     rows
 }
 
-/// Every row of `tables`, sorted.
 fn table_rows(store: &EngineStore, tables: &[&str]) -> Vec<String> {
     let mut rows: Vec<String> = tables
         .iter()
@@ -4365,7 +4319,6 @@ fn table_rows(store: &EngineStore, tables: &[&str]) -> Vec<String> {
     rows
 }
 
-/// Whether the host journaled `op`'s coordinate: a hosted replica's ack.
 fn journaled(store: &EngineStore, op: &dohc_engine_sync::ReplicationEnvelope) -> bool {
     store
         .read_with(|conn| {
@@ -4391,8 +4344,6 @@ async fn desktop_of(base: &[u8], lineage: &str, synced: &[Vec<u8>]) -> Desktop {
     replica_of("desktop", base, lineage, synced).await
 }
 
-/// A replica under `origin` holding the lineage as ordinary sync brought
-/// it, with its file, and no activation ever captured.
 async fn replica_of(origin: &str, base: &[u8], lineage: &str, synced: &[Vec<u8>]) -> Desktop {
     let root = ScratchDir::new().unwrap();
     let mut store = window_store(&root, origin, base, lineage).await;
@@ -4431,8 +4382,6 @@ impl Desktop {
         std::fs::read_to_string(self.root.path().join(WINDOW_PATH)).unwrap()
     }
 
-    /// The last `op_kind` row this desktop journaled, as the relay serves
-    /// it, with the blob its payload names at `blob`, if any.
     fn last_journaled(
         &self,
         op_kind: &str,
@@ -4468,12 +4417,10 @@ impl Desktop {
         (op, bytes)
     }
 
-    /// The last `ydoc.update` this desktop journaled, with its bytes.
     fn journaled_update(&self) -> (dohc_engine_sync::ReplicationEnvelope, Vec<u8>) {
         self.last_journaled("ydoc.update", "updateBlobSha256")
     }
 
-    /// How many `ydoc.update` rows this desktop journaled.
     fn updates_journaled(&self) -> i64 {
         self.store
             .read_with(|conn| {
@@ -4486,8 +4433,6 @@ impl Desktop {
             .unwrap()
     }
 
-    /// The person makes `change` to the document on the desktop. Returns the
-    /// `moment.append` it journaled, with its resulting bytes.
     async fn change(&self, change: FileChange) -> (dohc_engine_sync::ReplicationEnvelope, Vec<u8>) {
         let root = self.root.path().to_owned();
         let (self_writes, faults) = (Arc::new(()), Arc::new(NoFaults));
@@ -4568,7 +4513,6 @@ impl Desktop {
         self.last_journaled("moment.append", "payloadAfterBlobSha256")
     }
 
-    /// A disk edit to `text` that capture folds into the Y.Doc.
     async fn fold(&self, text: &str) -> (dohc_engine_sync::ReplicationEnvelope, Vec<u8>) {
         self.actor
             .capture_ingest(
@@ -4594,7 +4538,6 @@ impl Desktop {
         self.journaled_update()
     }
 
-    /// The person types a new paragraph of `text` in the desktop's editor.
     async fn append(
         &self,
         lineage: &str,
@@ -4626,7 +4569,6 @@ struct HostedFeed {
     rows: std::sync::Mutex<Vec<dohc_engine_sync::ReplicationEnvelope>>,
     blobs: std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>,
     placed: Vec<dohc_engine_sync::ReplicationEnvelope>,
-    /// The relay position of the feed's first row.
     first: i64,
 }
 
@@ -4675,8 +4617,6 @@ impl HostedFeed {
         self.write(object_id, path, None, text)
     }
 
-    /// The neighbour origin's next text write of `object_id` at `path`: one
-    /// that creates it, or one over `before`, the text its last write left.
     fn write(
         &self,
         object_id: &str,
@@ -4687,7 +4627,6 @@ impl HostedFeed {
         self.write_as("neighbour", object_id, path, before, text)
     }
 
-    /// [`Self::write`], from `origin`.
     fn write_as(
         &self,
         origin: &str,
@@ -4948,8 +4887,6 @@ async fn a_safe_desktop_append_applies_in_the_released_window_and_the_successor_
         text.contains("A desktop paragraph") && text.contains(RETAINED),
         "{text}"
     );
-    // The desktop's fold over the same head still holds, and the cache the
-    // append warmed keeps the applied head.
     let (fold, bytes) = desktop
         .fold(&format!("{}\nA desktop edit.\n", desktop.file()))
         .await;
@@ -4971,7 +4908,6 @@ async fn a_safe_desktop_append_applies_in_the_released_window_and_the_successor_
         cached.is_none_or(|cached| cached == native),
         "the cache keeps the applied head"
     );
-    // A safe update through the same cache still applies over that head.
     let safe = {
         let doc = Ydoc::wire();
         doc.apply(&native).unwrap();
@@ -4997,7 +4933,6 @@ async fn a_safe_desktop_append_applies_in_the_released_window_and_the_successor_
         applied.primary
     );
     assert!(w.text().contains("After the held fold") && w.text().contains(RETAINED));
-    // The append's pass commits; the fold's, still holding, never did.
     let committed = client
         .commit_hosted_cursor(
             &mut w.store,
@@ -5068,7 +5003,6 @@ async fn a_safe_desktop_append_applies_in_the_released_window_and_the_successor_
     w.close().await;
 }
 
-/// Another device's `ydoc.update` of the document, before the relay places it.
 fn ydoc_row(
     origin: &str,
     bytes: &[u8],
@@ -5109,7 +5043,6 @@ async fn a_released_lineage_hold_is_one_documents_across_passes_and_restart() {
     let (fold, fold_bytes) = desktop
         .fold(&format!("{}\nA desktop edit.\n", desktop.file()))
         .await;
-    // A later row of the same document that would apply on its own.
     let safe = {
         let doc = Ydoc::wire();
         doc.apply(&w.native()).unwrap();
@@ -5228,7 +5161,6 @@ async fn a_released_lineage_hold_is_one_documents_across_passes_and_restart() {
     w.close().await;
 }
 
-/// The window's document, live on the host.
 struct WindowLive;
 
 impl dohc_engine_sync::LeaseProbe for WindowLive {
@@ -5237,7 +5169,6 @@ impl dohc_engine_sync::LeaseProbe for WindowLive {
     }
 }
 
-/// [`hosted_pass`] while the window's document is live on the host.
 fn live_hosted_pass(
     store: &mut EngineStore,
     client: &dohc_engine_sync::RelaySyncClient<HostedFeed>,
@@ -5260,8 +5191,6 @@ fn live_hosted_pass(
     }
 }
 
-/// The window document's drain as its session ends, run again after each
-/// released-tail validation it waits for completes.
 fn settled_drain(w: &mut RetainedWindow) -> dohc_engine_sync::YdocDrainResult {
     let mut cache = w.cache();
     let store = &mut w.store;
@@ -5295,7 +5224,6 @@ fn queued_updates(store: &EngineStore) -> Vec<(String, i64, String, Option<Strin
         .unwrap()
 }
 
-/// What the host's commit of `pass`'s cursor did.
 fn pass_commit(
     store: &mut EngineStore,
     client: &dohc_engine_sync::RelaySyncClient<HostedFeed>,
@@ -5316,9 +5244,6 @@ fn pass_commit(
     committed
 }
 
-/// The window's document, held for its queued desktop fold: the fold queued
-/// behind the host's session, which acknowledged it, and the drain as the
-/// session ended held it for the work the released chain retains.
 async fn held_for_a_queued_fold() -> (
     RetainedWindow,
     Desktop,
@@ -5327,8 +5252,6 @@ async fn held_for_a_queued_fold() -> (
     held_for_a_queued_fold_of(Retained::Carried).await
 }
 
-/// [`held_for_a_queued_fold`], with the window retaining its work as
-/// `retained`.
 async fn held_for_a_queued_fold_of(
     retained: Retained,
 ) -> (
@@ -5357,7 +5280,6 @@ async fn held_for_a_queued_fold_of(
     (w, desktop, client)
 }
 
-/// The window document's inspection, as the host answers its owner.
 fn inspected_window(store: &EngineStore) -> dohc_engine_sync::HeldDocumentInspection {
     dohc_engine_sync::inspect_held_document(store, "workspace", "object")
         .unwrap()
@@ -5424,7 +5346,6 @@ fn outbox_only(w: &mut RetainedWindow, text: &str) -> RetainedContribution {
     }
 }
 
-/// The hold the drain derives again for the queued fold, stored.
 fn rebound(w: &mut RetainedWindow) -> Box<ReleasedLineageBinding> {
     let Some(dohc_engine_sync::HostedHold::ReleasedLineageUnsettled {
         binding,
@@ -5508,7 +5429,6 @@ fn record_key() -> DocKey {
     DocKey::new("workspace", "main", RECORD_OBJECT).unwrap()
 }
 
-/// A text head of `object_id` at `path`, as ordinary sync left it.
 fn seed_head(store: &mut EngineStore, object_id: &str, path: &str, text: &str) {
     dohc_engine_domain::VersionedTextStore::new(store)
         .write_text(
@@ -5531,9 +5451,6 @@ fn seed_head(store: &mut EngineStore, object_id: &str, path: &str, text: &str) {
         .unwrap();
 }
 
-/// Add [`RECORD_OBJECT`] to the window's store: its Collection's schema and
-/// the record as files, the record adopted, its Y.Doc lineage a base
-/// established, and a ready hosted document of it.
 fn add_collection_record(w: &mut RetainedWindow) {
     let markdown = format!("---\nid: {RECORD_ID}\ntitle: Original\n---\n\nBody\n");
     std::fs::create_dir_all(w.root.path().join("tasks")).unwrap();
@@ -5579,7 +5496,6 @@ fn add_collection_record(w: &mut RetainedWindow) {
     );
 }
 
-/// A peer's update that sets the record's title.
 fn record_title_update(
     store: &EngineStore,
     title: &str,
@@ -5595,7 +5511,6 @@ fn record_title_update(
     (op, bytes)
 }
 
-/// The peer's update of `key`'s `lineage` at `origin_seq`, carrying `bytes`.
 fn peer_update(
     key: &DocKey,
     path: &str,
@@ -5620,7 +5535,6 @@ fn peer_update(
     }
 }
 
-/// The window's document and the record, both live on the host.
 struct BothLive;
 
 impl dohc_engine_sync::LeaseProbe for BothLive {
@@ -5629,14 +5543,11 @@ impl dohc_engine_sync::LeaseProbe for BothLive {
     }
 }
 
-/// The scope of a feed holding the record and the window's document.
 const BOTH: [(&str, &str); 2] = [(RECORD_OBJECT, RECORD_PATH), ("object", WINDOW_PATH)];
 
 /// Each row a feed served, with its bytes, in relay order.
 type Served = Vec<(dohc_engine_sync::ReplicationEnvelope, Vec<u8>)>;
 
-/// A new client, as a new request has, over a feed of [`BOTH`] serving
-/// `rows` at the positions the first feed served them.
 fn served_again(rows: &Served) -> dohc_engine_sync::RelaySyncClient<HostedFeed> {
     let feed = HostedFeed::new(&BOTH);
     for (op, bytes) in rows {
@@ -5645,9 +5556,6 @@ fn served_again(rows: &Served) -> dohc_engine_sync::RelaySyncClient<HostedFeed> 
     dohc_engine_sync::RelaySyncClient::new(feed)
 }
 
-/// The window with the record added, and a client whose feed served the
-/// record's title change and two desktop appends while both documents were
-/// live: a committed pass queued all three, and both documents are ready.
 async fn record_and_window_queued() -> (
     RetainedWindow,
     Desktop,
@@ -5657,7 +5565,6 @@ async fn record_and_window_queued() -> (
     (w, desktop, client)
 }
 
-/// [`record_and_window_queued`], with the rows its feed served.
 async fn record_and_window_served() -> (
     RetainedWindow,
     Desktop,
@@ -5702,7 +5609,6 @@ async fn record_and_window_served() -> (
     (w, desktop, client, rows)
 }
 
-/// How many of `facts` report the record's title change to "Remote".
 fn remote_titles(facts: &[dohc_engine_domain::CollectionRecordApplyFacts]) -> usize {
     facts
         .iter()
@@ -5715,7 +5621,6 @@ fn remote_titles(facts: &[dohc_engine_domain::CollectionRecordApplyFacts]) -> us
         .count()
 }
 
-/// How many drain reports the store keeps.
 fn drain_reports(store: &EngineStore) -> i64 {
     store
         .read_with(|conn| {
@@ -5726,10 +5631,6 @@ fn drain_reports(store: &EngineStore) -> i64 {
         .unwrap()
 }
 
-/// After a pass waited with the record's queued title change removed and
-/// its report owed: resume it, or abandon it, with a restart or not, and
-/// run the next request. That request reports the change once, its commit
-/// acknowledges the report, and the pass after it reports nothing.
 fn owed_title_reported_once(
     w: &mut RetainedWindow,
     after: AfterWait,
@@ -5763,7 +5664,6 @@ fn owed_title_reported_once(
     let mut pass = hosted_pass(&mut w.store, &client, &mut cache);
     assert_eq!(remote_titles(&pass.record_facts), 1, "{after:?}: {pass:?}");
     if matches!(after, AfterWait::Restart) {
-        // A pass that reported it and never committed leaves it owed.
         w.store = EngineStore::open(&engine_db_path(&w.root).unwrap(), 0).unwrap();
         pass = hosted_pass(&mut w.store, &client, &mut cache);
         assert_eq!(remote_titles(&pass.record_facts), 1, "{after:?}: {pass:?}");
@@ -5854,12 +5754,10 @@ async fn an_inactive_drains_facts_survive_a_later_wait() {
     }
 }
 
-/// How many field-history rows the record has.
 fn field_history(store: &EngineStore) -> i64 {
     record_history(store, RECORD_ID)
 }
 
-/// How many field-history rows `record_id` has.
 fn record_history(store: &EngineStore, record_id: &str) -> i64 {
     store
         .read_with(|conn| {
@@ -5872,7 +5770,6 @@ fn record_history(store: &EngineStore, record_id: &str) -> i64 {
         .unwrap()
 }
 
-/// How many moments the record has, and how many conflicts the store keeps.
 fn record_moments_and_conflicts(store: &EngineStore) -> (i64, i64) {
     store
         .read_with(|conn| {
@@ -5886,8 +5783,6 @@ fn record_moments_and_conflicts(store: &EngineStore) -> (i64, i64) {
         .unwrap()
 }
 
-/// Whether the record's queued update is still queued, with the facts its
-/// application parked on it.
 fn record_update_parked(store: &EngineStore) -> bool {
     store
         .read_with(|conn| {
@@ -5904,11 +5799,8 @@ fn record_update_parked(store: &EngineStore) -> bool {
 /// How a request whose drain waited goes on.
 #[derive(Debug, Clone, Copy)]
 enum AfterWait {
-    /// The same request resumes once validation completes.
     Resume,
-    /// It is abandoned, and a new request runs.
     Abandon,
-    /// The store restarts, and a new request runs.
     Restart,
 }
 
@@ -5941,8 +5833,6 @@ async fn a_completed_documents_facts_survive_a_later_documents_wait() {
         let Err(dohc_engine_sync::RelayError::ValidationPending(pending)) = waited else {
             panic!("{after:?}: {waited:?}");
         };
-        // The record's drain committed its field change; the window's drain
-        // waits with nothing applied.
         assert_eq!(field_history(&w.store), 1, "{after:?}");
         assert!(record_update_parked(&w.store), "{after:?}");
         assert_eq!(queued_updates(&w.store).len(), 3, "{after:?}");
@@ -5994,7 +5884,6 @@ async fn a_completed_documents_facts_survive_a_later_documents_wait() {
     }
 }
 
-/// The record's lineage.
 fn record_lineage(store: &EngineStore) -> String {
     dohc_engine_collab::read_marker(store, &record_key())
         .unwrap()
@@ -6031,7 +5920,6 @@ fn archive_lineage(w: &mut RetainedWindow) -> String {
     full
 }
 
-/// The digest of the state the archive of `lineage` keeps.
 fn archived_state(store: &EngineStore, lineage: &str) -> String {
     store
         .read_with(|conn| {
@@ -6045,8 +5933,6 @@ fn archived_state(store: &EngineStore, lineage: &str) -> String {
         .unwrap()
 }
 
-/// Each queued Y.Doc update of the store, in relay order: its coordinate,
-/// relay position, lineage and the whole feed it recorded.
 fn queued_feeds(store: &EngineStore) -> Vec<String> {
     store
         .read_with(|conn| {
@@ -6061,7 +5947,6 @@ fn queued_feeds(store: &EngineStore) -> Vec<String> {
         .unwrap()
 }
 
-/// Each of `ops`' update blobs is still stored.
 fn blobs_kept(store: &EngineStore, ops: &[dohc_engine_sync::ReplicationEnvelope]) {
     for op in ops {
         let blob = op.payload["updateBlobSha256"].as_str().unwrap();
@@ -6101,9 +5986,6 @@ async fn archived_window(
     (w, desktop, client, queued, archive)
 }
 
-/// `hold` names the window's archived `lineage`, the `archive` state it
-/// keeps and the queued `first` update, on the feed it arrived on: frozen,
-/// and claiming currency.
 fn holds_archived(
     hold: Option<&dohc_engine_sync::HostedHold>,
     lineage: &str,
@@ -6176,8 +6058,6 @@ async fn a_documents_drain_holds_its_protected_archived_lineage() {
             w.lineage
         ),
     );
-    // The archive takes both; a hosted replica refuses the recovered copy
-    // its projection would write.
     let free = settled_drain(&mut w);
     assert_eq!(
         (
@@ -6444,9 +6324,6 @@ fn write_unchecked(w: &RetainedWindow, sql: &str) {
     .unwrap();
 }
 
-/// The host's application of exactly one delivery to the window's document,
-/// written past the store's checks: its delivery, lineage, digest, journal
-/// cursor and accepting epoch.
 const APPLIED_EXACTLY: &str = "INSERT INTO live_device_update_applications (relay_database_namespace,
       workspace_id,delivery_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,
       restore_fence_generation,update_digest,update_byte_length,journal_cursor,accepting_host_epoch,
@@ -6575,9 +6452,6 @@ type HeldPass = (
     dohc_engine_sync::HostedPassOutcome,
 );
 
-/// The window with a ready neighbour, its feed, and a pass that holds the
-/// desktop's fold of the document after applying the neighbour's create, as
-/// yet uncommitted.
 async fn held_pass() -> HeldPass {
     let mut w = retained_window(Retained::Carried).await;
     add_neighbour(&mut w.store);
@@ -6610,7 +6484,6 @@ fn relay_configuration() -> dohc_engine_runtime::RelayConfiguration {
 
 type Answer = Result<dohc_engine_runtime::RelayOperationOutcome, dohc_engine_runtime::RuntimeError>;
 
-/// The actor's commit of `pass`, running as a relay request does.
 fn actor_commit(
     w: &RetainedWindow,
     pass: &dohc_engine_sync::HostedPassOutcome,
@@ -6636,8 +6509,6 @@ fn actor_commit(
     })
 }
 
-/// Wait until `tails` holds a validation at its pause, failing if the
-/// request answers first.
 async fn held_validation(tails: &ReleasedTails, request: &mut tokio::task::JoinHandle<Answer>) {
     tokio::select! {
         () = tails.paused_validation() => {}
@@ -6666,8 +6537,6 @@ fn cursor_commits(store: &EngineStore) -> i64 {
         .unwrap()
 }
 
-/// Each queued owner settlement in drain order: its origin, whether it was
-/// scheduled, whether it applied, and the report that owns it.
 fn settlement_queue(store: &EngineStore) -> Vec<(String, bool, bool, Option<String>)> {
     store
         .read_with(|conn| {
@@ -6775,7 +6644,6 @@ enum FileChange {
 const RENAMED_PATH: &str = "notes/renamed.md";
 const BINARY: &[u8] = &[0, 255, 13, 10];
 
-/// The files under `notes`, with their bytes, but the neighbour's.
 fn notes(root: &ScratchDir) -> Vec<(String, Vec<u8>)> {
     let mut files: Vec<_> = std::fs::read_dir(root.path().join("notes"))
         .unwrap()
@@ -6865,7 +6733,6 @@ async fn a_desktop_delete_rename_or_binary_write_never_retires_what_a_released_c
             matches!(committed, dohc_engine_storage::TxnOutcome::Committed(_)),
             "{case}"
         );
-        // The hold is the released lineage's, not another wait.
         w.store.put_binary_blob(&bytes).unwrap();
         let held = settled_apply(
             &mut w.store,
@@ -6923,7 +6790,6 @@ async fn a_desktop_delete_rename_or_binary_write_never_retires_what_a_released_c
 
 const NEIGHBOUR_PATH: &str = "notes/neighbour.md";
 
-/// The neighbour, a ready document of the host's scope.
 fn add_neighbour(store: &mut EngineStore) {
     execute(
         store,
@@ -6932,7 +6798,6 @@ fn add_neighbour(store: &mut EngineStore) {
     );
 }
 
-/// Where the host's scope holds `object_id`.
 fn hosted_status(store: &EngineStore, object_id: &str) -> dohc_engine_sync::HostedDocumentStatus {
     dohc_engine_sync::read_hosted_replica(store, "workspace")
         .unwrap()
@@ -6942,8 +6807,6 @@ fn hosted_status(store: &EngineStore, object_id: &str) -> dohc_engine_sync::Host
         .clone()
 }
 
-/// A text write over the host's head that leaves the document at `path` with
-/// `text`, from an origin that journaled no `ydoc.update` for it.
 fn host_write(
     store: &EngineStore,
     path: &str,

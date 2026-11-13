@@ -411,8 +411,6 @@ fn historical_readers_prove_each_activations_own_source() {
     f.edit(true);
     f.adopt().unwrap();
     release(&mut f, "adoption");
-    // The released predecessor adopted from its own source; the successor
-    // adopted from the fixture's.
     let old = "Predecessor source.";
     let old_digest = hex_sha256(old.as_bytes());
     f.store

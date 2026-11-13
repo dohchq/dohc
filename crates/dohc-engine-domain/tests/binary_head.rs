@@ -1,7 +1,3 @@
-//! A binary head is a real head. Same-path generation supersede runs against
-//! the real materializer, and a binary head round-trips through history and
-//! rollback. The same-path supersede test is the load-bearing proof.
-
 use dohc_engine_domain::{
     EngineStore, NoFaults, RollbackTextFileMutation, VersionedTextStore, WriteBinaryFile,
     WriteText, binary_rollback_job_identity, write_binary_file_in_tx,
@@ -95,7 +91,6 @@ fn m2_same_path_binary_gen_is_strictly_below_next_text_and_is_superseded() {
     );
     let binary_gen = moment_order(&store, "bin-job");
 
-    // Same-path text write reuses the object; newer generation.
     VersionedTextStore::new(&mut store)
         .write_text(
             &WriteText {
@@ -217,7 +212,6 @@ fn rollback_text_over_binary_restores_the_binary_head() {
         )
         .expect("text over binary");
 
-    // Confirm the text moment recorded a binary preimage.
     let (before_kind, before_bin): (String, Option<String>) = store
         .read_with(|conn| {
             conn.query_row(
@@ -231,7 +225,6 @@ fn rollback_text_over_binary_restores_the_binary_head() {
     assert_eq!(before_kind, "binary");
     assert_eq!(before_bin.as_deref(), Some(binary_sha.as_str()));
 
-    // Roll the text moment back.
     VersionedTextStore::new(&mut store)
         .rollback_text_file_mutation(
             &RollbackTextFileMutation {
@@ -247,7 +240,6 @@ fn rollback_text_over_binary_restores_the_binary_head() {
         )
         .expect("rollback text over binary");
 
-    // The restored head must be the original binary head.
     let (kind, blob_sha, bin_sha): (String, Option<String>, Option<String>) = store
         .read_with(|conn| {
             conn.query_row(
@@ -329,7 +321,6 @@ fn rollback_first_binary_write_removes_file_and_object() {
     assert_eq!(orig, 0, "the original binary job must be cancelled");
     assert_eq!(restore, 1, "a compensating restore job must be enqueued");
 
-    // DISK-STATE proof: draining the materializer must not resurrect the file.
     run_pending_jobs(
         &store,
         scratch.path(),
@@ -424,7 +415,6 @@ fn rollback_of_completed_binary_write_deletes_the_materialized_file() {
         "the binary write must be materialized on disk before rollback"
     );
 
-    // Roll the completed binary write back.
     VersionedTextStore::new(&mut store)
         .rollback_text_file_mutation(
             &RollbackTextFileMutation {
@@ -519,7 +509,6 @@ fn rollback_of_completed_binary_overwrite_restores_previous_content_on_disk() {
         })
         .expect("overwrite binary head");
 
-    // Drain both writes to disk; the newest content wins the path.
     run_pending_jobs(
         &store,
         scratch.path(),
@@ -539,7 +528,6 @@ fn rollback_of_completed_binary_overwrite_restores_previous_content_on_disk() {
         "disk must hold the newer binary before rollback"
     );
 
-    // Roll the overwrite back → head restored to the previous binary content.
     VersionedTextStore::new(&mut store)
         .rollback_text_file_mutation(
             &RollbackTextFileMutation {
@@ -555,7 +543,6 @@ fn rollback_of_completed_binary_overwrite_restores_previous_content_on_disk() {
         )
         .expect("rollback completed binary overwrite");
 
-    // Drain the compensating restore → disk holds the previous content again.
     run_pending_jobs(
         &store,
         scratch.path(),
@@ -575,7 +562,6 @@ fn rollback_of_completed_binary_overwrite_restores_previous_content_on_disk() {
         "M1: disk must be restored to the previous binary content after rollback"
     );
 
-    // The DB head matches: previous binary sha.
     let (kind, bin): (String, Option<String>) = store
         .read_with(|conn| {
             conn.query_row(
@@ -593,8 +579,6 @@ fn rollback_of_completed_binary_overwrite_restores_previous_content_on_disk() {
 #[test]
 fn text_rollback_does_not_touch_a_materialization_job_with_the_same_id() {
     let (_scratch, mut store) = open();
-    // A pre-existing pending materialization job whose id collides with the text
-    // write's moment id below.
     let other_bytes = b"\x00unrelated\xff".as_slice();
     store
         .write_with(&NoFaults, |tx| {
@@ -615,7 +599,6 @@ fn text_rollback_does_not_touch_a_materialization_job_with_the_same_id() {
         })
         .expect("enqueue unrelated job");
 
-    // A text write whose moment id equals the unrelated job id.
     VersionedTextStore::new(&mut store)
         .write_text(
             &WriteText {
@@ -636,7 +619,6 @@ fn text_rollback_does_not_touch_a_materialization_job_with_the_same_id() {
         )
         .expect("text write");
 
-    // Roll the TEXT write back.
     VersionedTextStore::new(&mut store)
         .rollback_text_file_mutation(
             &RollbackTextFileMutation {
@@ -652,7 +634,6 @@ fn text_rollback_does_not_touch_a_materialization_job_with_the_same_id() {
         )
         .expect("rollback text write");
 
-    // The unrelated job must be untouched (still pending, same target).
     let (status, target): (String, String) = store
         .read_with(|conn| {
             conn.query_row(
@@ -744,7 +725,6 @@ fn rollback_of_pending_binary_write_with_bytes_on_disk_cleans_disk() {
         )
         .expect("rollback pending-but-on-disk binary write");
 
-    // Drain the compensating delete → disk cleaned to match the absent DB head.
     run_pending_jobs(
         &store,
         scratch.path(),

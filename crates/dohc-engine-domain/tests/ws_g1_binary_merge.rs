@@ -240,7 +240,6 @@ fn differing_bytes_open_a_conflict_resolvable_by_side() {
         Some(feat_bytes.len() as i64)
     );
 
-    // Keeping the current side writes nothing: main keeps its own bytes.
     let before = moment_count(&store);
     let kept = VersionedTextStore::new(&mut store)
         .resolve_text_conflict_with(
@@ -370,7 +369,6 @@ fn an_empty_text_head_over_a_binary_base_is_not_a_binary_fast_forward() {
         "m-1",
     );
     fork(&mut store);
-    // Main empties the file; the fork replaces the bytes with other bytes.
     write_text(&mut store, "main", "notes.md", "", "m-2");
     write_binary(
         &mut store,
@@ -419,7 +417,6 @@ fn text_replacing_an_untouched_binary_head_opens_a_conflict() {
         "m-1",
     );
     fork(&mut store);
-    // Main keeps the bytes it forked with; the source replaces them with text.
     write_text(&mut store, "feat", "notes.md", "feature text\n", "f-1");
 
     let result = VersionedTextStore::new(&mut store)
@@ -456,7 +453,6 @@ fn applying_an_absent_incoming_side_removes_the_binary_head_and_its_file() {
     let bytes = b"\x89PNG\xaa\xaa";
     let sha = write_binary(&mut store, "main", "logo.png", bytes, "obj-logo", "m-1");
     fork(&mut store);
-    // The source deletes the asset; the target keeps editing it.
     VersionedTextStore::new(&mut store)
         .delete_text_file(
             &dohc_engine_domain::DeleteTextFile {
@@ -505,8 +501,6 @@ fn applying_an_absent_incoming_side_removes_the_binary_head_and_its_file() {
         "the target head must be gone"
     );
 
-    // The folder follows: main is active, so the removal is queued as a binary
-    // delete keyed on the bytes it removes.
     let job = store
         .load_materialization_job(&binary_delete_job_id("resolve-delete-removal"))
         .expect("load the removal job")

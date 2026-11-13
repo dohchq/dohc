@@ -22,8 +22,6 @@ use sha2::{Digest, Sha256};
 use crate::apply::apply_chat_tx;
 use crate::*;
 
-/// A relay-acked envelope for workspace `ws`, recorded at 2_000 ms, whose
-/// relay sequence equals its origin sequence.
 fn envelope(origin: &str, seq: i64, kind: &str, payload: serde_json::Value) -> ReplicationEnvelope {
     ReplicationEnvelope {
         settlement_admission: None,

@@ -64,14 +64,12 @@ fn looks_structurally_valid(envelope: &ReplicationEnvelope) -> bool {
 
 fn arbitrary_string() -> impl Strategy<Value = String> {
     prop_oneof![
-        // Ordinary bounded strings.
         "[a-zA-Z0-9_-]{0,64}",
         // Adversarial: control bytes, which `bounded()` must reject.
         "[\\x00-\\x1f]{0,16}",
         // Adversarial: right at / just over the 512-byte identifier cap.
         prop::collection::vec(any::<char>(), 500..520)
             .prop_map(|chars| chars.into_iter().collect()),
-        // The empty string.
         Just(String::new()),
     ]
 }
@@ -107,9 +105,6 @@ fn arbitrary_envelope() -> impl Strategy<Value = ReplicationEnvelope> {
         )
 }
 
-/// A secret replication `op_kind`: biased toward the two real secret kinds so
-/// the apply path is actually exercised, plus arbitrary junk kinds that must
-/// be rejected as unsupported.
 fn secret_op_kind() -> impl Strategy<Value = String> {
     prop_oneof![
         Just("secret.file.put".to_owned()),
@@ -118,10 +113,6 @@ fn secret_op_kind() -> impl Strategy<Value = String> {
     ]
 }
 
-/// A secret payload: nulls/scalars plus a `secret.file.put`-SHAPED object with
-/// random field values (random base64-ish iv/tag, random sha, random byte
-/// length). Structurally plausible, never actually valid against a fresh
-/// store.
 fn arbitrary_secret_payload() -> impl Strategy<Value = serde_json::Value> {
     prop_oneof![
         Just(serde_json::Value::Null),
@@ -395,7 +386,6 @@ fn secret_mutations_reach_their_intended_validation() {
 
 #[test]
 fn serialized_payload_boundary_is_enforced_before_mutation() {
-    // Both ordinary and escape-heavy strings have exact serialized sizes.
     for unit in ["x", "\u{0000}", "界"] {
         for bytes in [
             MAX_PAYLOAD_JSON_BYTES - 1,

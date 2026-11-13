@@ -367,8 +367,6 @@ async fn a_pending_resolution_job_replays_before_the_next_settle() {
         )
         .await
         .expect("merged resolution");
-    // The resolution's materialization job is still pending (nothing ran
-    // it): the disk holds the pre-resolution bytes.
     assert_eq!(
         std::fs::read_to_string(scratch.path().join(PATH)).expect("disk"),
         "local truth"
@@ -416,10 +414,6 @@ async fn a_pending_resolution_job_replays_before_the_next_settle() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_open_base_conflict_freezes_the_open_too() {
-    // Refusing only the settle left the open serving the
-    // claimed sender lineage - the editor displayed and accepted edits
-    // against the unreviewed side while the head froze. The gate covers
-    // open and settle symmetrically.
     let scratch = ScratchDir::new().expect("scratch");
     let db = engine_db_path(&scratch).expect("db");
     {
@@ -679,7 +673,6 @@ async fn a_resolution_refuses_while_a_session_holds_the_document() {
         "unexpected resolve outcome: {refused:?}"
     );
 
-    // The conflict is untouched: still open, still awaiting review.
     supervisor.close(&db).expect("close actor");
     let store = EngineStore::open(&db, 12).expect("inspect");
     let open_conflicts: i64 = store
@@ -1267,16 +1260,13 @@ async fn an_idempotent_retry_survives_a_live_session() {
         }
     };
 
-    // The first attempt commits; imagine its response never arrived.
     resolve(dohc_engine_collab::LeaseRegistry::new())
         .await
         .expect("the resolution commits");
 
-    // The user reopens the resolved document, so a session now holds it.
     let leases = dohc_engine_collab::LeaseRegistry::new();
     let _held = leases.acquire(&key).expect("hold the document live");
 
-    // The exact retry must replay, not refuse.
     resolve(leases)
         .await
         .expect("an idempotent retry must survive a live session");

@@ -1227,7 +1227,6 @@ async fn edit_anyway_opens_a_note_with_no_ydoc_state(edited_before: bool, rename
     service.workspace_close(Some(workspace)).await.unwrap();
 }
 
-/// Seed a session from the file its open returned, as the desktop does.
 async fn seed_session(
     service: &EngineService,
     workspace: &WorkspaceHandle,

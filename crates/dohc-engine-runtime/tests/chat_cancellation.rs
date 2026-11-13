@@ -213,7 +213,6 @@ async fn cancelled_core_chat_mutations_leave_channels_threads_messages_and_revis
         );
     }
 
-    // The same inputs succeed with live tokens, including their idempotency keys.
     actor
         .chat_channel_create(
             workspace_id.clone(),

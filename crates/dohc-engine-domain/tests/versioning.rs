@@ -252,8 +252,6 @@ fn plaintext_store_door_rejects_reserved_ignored_and_traversal_paths() {
     );
 }
 
-// oracle (exactly-once): a deduped write replay returns the original recorded
-// result, never a later write's text/moment on the same path.
 #[test]
 fn deduped_write_returns_original_not_later_state() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -266,17 +264,14 @@ fn deduped_write_returns_original_not_later_state() {
     first.request_id = Some("req".to_owned());
     vt.write_text(&first, &NO_FAULTS).expect("first");
 
-    // A later write updates the same path (live snapshot becomes "second"/m2).
     vt.write_text(&write("main", "a.md", "second", "m2", "o1", 20), &NO_FAULTS)
         .expect("second");
 
-    // Replay the original request: must return the original result.
     let replay = vt.write_text(&first, &NO_FAULTS).expect("replay");
     assert!(replay.deduped);
     assert_eq!(replay.snapshot.text, "first");
     assert_eq!(replay.snapshot.latest_moment_id, "m1");
     assert_eq!(replay.moment.moment_id, "m1");
-    // The live state is unchanged (still the later write).
     assert_eq!(
         vt.read_text(WS, "main", "a.md").unwrap().unwrap().text,
         "second"
@@ -301,8 +296,6 @@ fn rollback_purges_versioned_and_merge_requests_but_preserves_other_kinds() {
         .write_text(&write("main", "a.md", "one", "m1", "o1", 10), &NO_FAULTS)
         .expect("first versioned write");
 
-    // A chat-domain ledger row whose result_seq intentionally collides with
-    // the next versioned moment_order.
     store
         .write_with(&NO_FAULTS, |tx| {
             tx.execute(
@@ -423,8 +416,6 @@ fn rollback_purges_versioned_and_merge_requests_but_preserves_other_kinds() {
     assert_eq!(surviving_kind_after_merge.as_deref(), Some("chat"));
 }
 
-// oracle: create-named-version forks correctly — copies snapshots/aliases,
-// isolates subsequent writes, and records the fork point.
 #[test]
 fn create_named_version_forks_and_isolates() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -466,7 +457,6 @@ fn create_named_version_forks_and_isolates() {
     assert_eq!(fork.fork_version_id.as_deref(), Some("main"));
     assert_eq!(fork.fork_moment_id.as_deref(), Some("m1"));
 
-    // The fork inherits main's content at the fork point.
     assert_eq!(
         vt.read_text(WS, "feat", "a.md").unwrap().unwrap().text,
         "v1"
@@ -509,7 +499,6 @@ fn create_named_version_forks_and_isolates() {
     );
     let mut vt = VersionedTextStore::new(&mut store);
 
-    // Writing to the fork updates the shared object in the fork only.
     vt.write_text(&write("feat", "a.md", "v2", "m2", "o1", 30), &NO_FAULTS)
         .expect("write feat");
     assert_eq!(
@@ -521,7 +510,6 @@ fn create_named_version_forks_and_isolates() {
         "v1"
     );
 
-    // A name conflict is rejected.
     let err = vt
         .create_named_version(
             &CreateNamedVersion {
@@ -538,7 +526,6 @@ fn create_named_version_forks_and_isolates() {
     assert_eq!(err.code(), "version-name-conflict");
 }
 
-// oracle: list-moments keyset pagination at limit-1 / limit / limit+1.
 #[test]
 fn list_moments_keyset_pagination_edges() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -547,7 +534,6 @@ fn list_moments_keyset_pagination_edges() {
     bootstrap(&mut store);
     let mut vt = VersionedTextStore::new(&mut store);
 
-    // Five moments, orders 1..=5.
     for i in 1..=5 {
         vt.write_text(
             &write(
@@ -571,21 +557,17 @@ fn list_moments_keyset_pagination_edges() {
         before_moment_order: before,
     };
 
-    // limit == N: full page, no next cursor.
     let full = vt.list_moments(&query(5, None)).expect("page");
     assert_eq!(full.moments.len(), 5);
     assert_eq!(full.latest_moment_order, Some(5));
     assert_eq!(full.next_before_moment_order, None);
-    // Newest first.
     assert_eq!(full.moments[0].moment_order, 5);
     assert_eq!(full.moments[4].moment_order, 1);
 
-    // limit+1 > N: still full, no cursor.
     let over = vt.list_moments(&query(6, None)).expect("page");
     assert_eq!(over.moments.len(), 5);
     assert_eq!(over.next_before_moment_order, None);
 
-    // limit-1 < N: partial page with a cursor; the next page finishes it.
     let first = vt.list_moments(&query(4, None)).expect("page");
     assert_eq!(first.moments.len(), 4);
     assert_eq!(first.moments[0].moment_order, 5);
@@ -598,7 +580,6 @@ fn list_moments_keyset_pagination_edges() {
     assert_eq!(second.moments[0].moment_order, 1);
     assert_eq!(second.next_before_moment_order, None);
 
-    // A bad version filter fails closed.
     let mut bad = query(4, None);
     bad.version_id = Some("nope".to_owned());
     assert_eq!(
@@ -606,7 +587,6 @@ fn list_moments_keyset_pagination_edges() {
         "version-not-found"
     );
 
-    // A non-positive limit is invalid input.
     assert_eq!(
         vt.list_moments(&query(0, None))
             .expect_err("bad limit")
@@ -615,8 +595,6 @@ fn list_moments_keyset_pagination_edges() {
     );
 }
 
-// oracle: versions-delete-text-file is version-local; a sibling fork keeps the
-// shared object's inherited snapshot.
 #[test]
 fn delete_text_file_does_not_affect_sibling_fork() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -646,7 +624,6 @@ fn delete_text_file_does_not_affect_sibling_fork() {
     assert_eq!(sibling.text, "one");
 }
 
-// oracle: versions-rollback-text-file-mutation restores deleted content.
 #[test]
 fn rollback_delete_restores_deleted_content() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -666,7 +643,6 @@ fn rollback_delete_restores_deleted_content() {
     );
 }
 
-// oracle: versions-rollback-text-file-mutation refuses a non-tip object mutation.
 #[test]
 fn rollback_rejects_non_latest_mutation() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -768,8 +744,6 @@ fn rollback_rejects_migrated_null_link_dependent() {
     );
 }
 
-// oracle: versions-rollback-text-file-mutation refuses a rename rollback when
-// its source path has since been occupied by a different object.
 #[test]
 fn rollback_rejects_occupied_restore_path() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -848,14 +822,12 @@ fn every_moment_writer_records_payload_provenance() {
             .expect("read after digest")
     };
 
-    // A first write carries no before payload.
     let first = provenance("m1");
     assert_eq!(first.0, None, "a first write has no payload-before path");
     assert_eq!(first.1, None, "a first write has no payload-before kind");
     assert_eq!(first.2, None, "a first write has no payload-before digest");
     assert_eq!(first.3, "a.md", "payload-after path is where it landed");
 
-    // An overwrite carries the replaced content, at the same path.
     let overwrite = provenance("m2");
     assert_eq!(overwrite.0.as_deref(), Some("a.md"));
     assert_eq!(overwrite.1.as_deref(), Some("text"));
@@ -866,7 +838,6 @@ fn every_moment_writer_records_payload_provenance() {
     );
     assert_eq!(overwrite.3, "a.md");
 
-    // THE CASE THAT DIVERGES: the payload moved a.md -> b.md.
     let renamed = provenance("m3");
     assert_eq!(
         renamed.0.as_deref(),
@@ -883,7 +854,6 @@ fn every_moment_writer_records_payload_provenance() {
         "a rename carries unchanged content"
     );
 
-    // A DELETE carries the removed content on both sides (oracle parity).
     let deleted = provenance("m4");
     assert_eq!(deleted.0.as_deref(), Some("b.md"));
     assert_eq!(deleted.3, "b.md");

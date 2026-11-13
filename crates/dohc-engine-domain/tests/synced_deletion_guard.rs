@@ -287,7 +287,6 @@ fn surviving_note_noop_removal_and_plain_undelete_remain_allowed() {
     let dir = ScratchDir::new().unwrap();
     let mut store = EngineStore::open(&engine_db_path(&dir).unwrap(), 1).unwrap();
     setup(&mut store, false);
-    // Retained deletion evidence must not prevent a surviving note's rollback.
     store.write_with(&NoFaults, |tx| {
         tx.execute("UPDATE conflicts SET status='resolved', chosen_from='incoming', resolution='applied-incoming'", []).unwrap();
         Ok::<_, DomainError>(())
@@ -302,7 +301,6 @@ fn surviving_note_noop_removal_and_plain_undelete_remain_allowed() {
             write_history_text_in_tx(tx, &write("noop", "Paris"), "edit")
         })
         .unwrap();
-    // A committed request/moment still replays after the object becomes dormant.
     delete_as(&mut VersionedTextStore::new(&mut store), "restore");
     let before_replay = counts(&mut store);
     store
@@ -314,7 +312,6 @@ fn surviving_note_noop_removal_and_plain_undelete_remain_allowed() {
         .write_with(&NoFaults, |tx| write_history_text_in_tx(tx, &input, "edit"))
         .unwrap();
     assert_eq!(counts(&mut store), before_replay);
-    // No sync delete/edit evidence: ordinary deleted-note History restore is safe.
     store
         .write_with(&NoFaults, |tx| {
             tx.execute("DELETE FROM conflicts", []).unwrap();

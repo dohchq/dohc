@@ -606,8 +606,6 @@ fn request_ids_replay_ingest_and_retire_exactly_once() {
         .capture_retire(&delete_replay, &NO_FAULTS)
         .expect("retire replay");
     assert!(replay_delete.deduped);
-    // The replayed inner result reports its own dedupe honestly; every
-    // other field must match the original byte-for-byte.
     let mut expected = first_delete.retired.clone();
     if let Some(expected) = expected.as_mut() {
         expected.deduped = true;
@@ -753,7 +751,6 @@ fn binary_capture_persists_a_jobless_binary_head_and_dedupes() {
     assert_eq!(second.moment_order, first.moment_order);
     assert_eq!(moment_count(&mut store), 1);
 
-    // Changed bytes append one new moment on the same object.
     let third = VersionedTextStore::new(&mut store)
         .capture_ingest_binary(&ingest_binary("photo.png", &[0xaa, 0xbb], 30), &NO_FAULTS)
         .expect("changed binary capture");
@@ -773,13 +770,11 @@ fn binary_capture_replaces_a_text_head_and_text_recaptures_over_binary() {
         .expect("flip to binary");
     assert!(!flipped.deduped);
 
-    // read_text fails closed on the binary head (BINHEAD contract).
     let err = VersionedTextStore::new(&mut store)
         .read_text(WS, VERSION, "flip.md")
         .expect_err("binary head is not text");
     assert!(matches!(err, DomainError::BinaryHeadNotText));
 
-    // And text capture flips it back on the same object.
     let back = VersionedTextStore::new(&mut store)
         .capture_ingest(&ingest("flip.md", "text again", 30), &NO_FAULTS)
         .expect("flip back to text");
@@ -926,7 +921,6 @@ fn capture_supersedes_an_older_pending_materialization_job() {
         })
         .expect("older resolve write with pending job");
 
-    // The user's on-disk bytes are captured at a newer generation.
     VersionedTextStore::new(&mut store)
         .capture_ingest_binary(&ingest_binary("doc.bin", disk_bytes, 20), &NO_FAULTS)
         .expect("capture the live disk bytes");
@@ -1032,9 +1026,6 @@ fn deduped_capture_marks_the_confirmed_head_as_materialized() {
     let stale_bytes = b"older stale content";
     std::fs::write(scratch.path().join("doc.bin"), live_bytes).expect("seed disk");
 
-    // Two sequential resolve writes to the same path leave an older pending
-    // job (stale bytes, preimage matching the current disk) beneath the head
-    // whose own newer job is also still pending.
     store
         .write_with(&NO_FAULTS, |tx| {
             put_binary_blob(tx, stale_bytes).map_err(DomainError::from)?;
@@ -1146,7 +1137,6 @@ fn the_capture_origin_is_reserved_on_the_public_write_path() {
         .expect_err("the real write path must reserve the capture origin");
     assert!(matches!(err, DomainError::InvalidInput { .. }));
 
-    // Every ordinary origin still passes.
     let ordinary = WriteText {
         metadata_origin: "api".to_owned(),
         ..forged
@@ -1157,7 +1147,6 @@ fn the_capture_origin_is_reserved_on_the_public_write_path() {
 #[test]
 fn a_claimed_dedupe_transfers_ownership_to_capture() {
     let (_scratch, mut store) = open_store();
-    // A foreign writer establishes the head.
     VersionedTextStore::new(&mut store)
         .write_text(
             &dohc_engine_domain::WriteText {
@@ -1254,7 +1243,6 @@ fn disk_driven_retire_owns_materialized_ydoc_heads() {
         "materialized ydoc heads are disk-owned"
     );
 
-    // RPC/agent-origin heads stay protected from disk-driven retires.
     VersionedTextStore::new(&mut store)
         .write_text(
             &dohc_engine_domain::WriteText {
@@ -1406,7 +1394,6 @@ fn snapshot_metadata_reports_which_paths_the_ydoc_editor_owns() {
     // through the e2e.
     let (_scratch, mut store) = open_store();
 
-    // An ordinary captured text file: no Y.Doc lineage.
     VersionedTextStore::new(&mut store)
         .capture_ingest(&ingest("notes/plain.md", "plain body", 10), &NO_FAULTS)
         .expect("plain ingest");
@@ -1512,7 +1499,6 @@ fn a_non_ownable_retire_must_not_destroy_a_materialized_ydoc_head() {
         "a settled Y.Doc head must survive a not-engine-ownable retire"
     );
 
-    // The head is genuinely still readable — not merely "no moment minted".
     let head = VersionedTextStore::new(&mut store)
         .read_text(WS, VERSION, "notes/huge.md")
         .expect("read head");
@@ -1636,7 +1622,6 @@ fn live_capture_labels_default_at_the_primitive() {
         Some("Updated photo.png")
     );
 
-    // text -> binary flip on the same object.
     let flipped = VersionedTextStore::new(&mut store)
         .capture_ingest_binary(
             &ingest_binary("notes/plain.md", &[0xff, 0x00], 30),
@@ -1657,7 +1642,6 @@ fn live_capture_labels_default_at_the_primitive() {
         Some("Became a binary file")
     );
 
-    // ...and back to text.
     let back = VersionedTextStore::new(&mut store)
         .capture_ingest(&ingest("notes/plain.md", "text again", 40), &NO_FAULTS)
         .expect("flip back to text");

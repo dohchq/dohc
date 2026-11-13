@@ -93,7 +93,6 @@ async fn edges_never_parse_pending_heads_and_refresh_only_after_certification() 
     write(&mut store, "source", "a.md", "[[target]]", 2);
     drain(&mut store);
     write(&mut store, "source", "a.md", "[[target]] changed", 3);
-    // Even before seed/certification, authoritative aliases must appear.
     write_deferred(&mut store, "new", "new.md", "[[target]]", 4);
     drop(store);
     // Hold link updates before the actor's first idle slot, which otherwise starts the drain.
