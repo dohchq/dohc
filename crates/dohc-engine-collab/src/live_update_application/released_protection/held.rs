@@ -1673,6 +1673,24 @@ impl<K, T> HeldProofs<K, T> {
         lock(&self.0.state).artifact_cap = bytes;
     }
 
+    /// Whether the store of `workspace_id`'s running proof presses on its
+    /// held readers.
+    #[doc(hidden)]
+    pub fn wal_pressed(&self, workspace_id: &str) -> bool {
+        lock(&self.0.state)
+            .running
+            .get(workspace_id)
+            .and_then(|proof| {
+                proof
+                    .job
+                    .halt
+                    .pressure
+                    .as_ref()
+                    .map(|pressure| pressure.raised())
+            })
+            .unwrap_or(false)
+    }
+
     /// How many checks proofs passed without stopping.
     #[doc(hidden)]
     pub fn checks_passed(&self) -> u64 {
