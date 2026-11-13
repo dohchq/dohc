@@ -1,5 +1,5 @@
-//! Generated command histories for one live note against a small reference
-//! model.
+//! Generated command histories for one live plaintext note against a small
+//! reference model.
 //!
 //! Each case starts from a fixture, runs at most eight commands through the
 //! engine's own entry points, and checks the model's invariants after every
@@ -7,8 +7,34 @@
 //!
 //! The model never reads the engine's tables. It holds the note's text as a
 //! plain Y.Doc that receives exactly the updates the engine acknowledged, the
-//! peer updates still parked behind a live session, and whether the file
-//! still owes writes before it must equal the note.
+//! peer updates still parked behind a live session, whether the file still
+//! owes writes, and what the file must hold once every committed write lands.
+//!
+//! This test does not cover:
+//!
+//! - Stop, retirement, release, or a Stopped fixture. Owner enrollment takes
+//!   only a rich document, which needs `dohc-engine-reader`. This crate does
+//!   not depend on it, and the existing Stop fixtures insert owner rows with
+//!   SQL.
+//! - Rich documents, file deletion, or explicit conflicts. The model never
+//!   expects a conflict, so any conflict copy fails the case.
+//! - The engine's session lease. While a session is open, the test passes
+//!   `AlwaysLive` to the pull, so the test makes peer edits park. A bug where
+//!   the engine fails to register a live session's lease cannot fail it.
+//! - Pulls as production runs them. Every remote apply closes the actor,
+//!   pulls on the store, and reopens the actor, which production does not do.
+//!   That reopen skips the startup replay that `restart()` runs. `pull()`
+//!   calls `fetch_pull`, `apply_pull`, `commit_pull_cursor`,
+//!   `pull_hosted_workspace`, and `commit_hosted_cursor` as
+//!   `run_relay_operation` in `dohc-engine-runtime/src/actor/relay.rs` does.
+//!   It passes empty released tails, and skips `park_departed_hosted`,
+//!   `release_unready_hosted`, and the retry on `RepairPending`.
+//!
+//! To cover a new lifecycle route, add a `Command` with its weight in
+//! `command()`, and an arm in `Run::step` that updates the model and checks
+//! the invariant the route keeps. To replay a failure, copy the replica and
+//! shrunk history that proptest prints into a `#[test]` that calls `replay`,
+//! as the regression tests at the end do.
 
 use dohc_engine_collab::live_update_application::ReleasedTails;
 use dohc_engine_collab::{ContentKind, DocKey, Regime, WriterDocCache, Ydoc};
@@ -67,7 +93,8 @@ enum Command {
     Settle,
     /// The session closes.
     Close,
-    /// The engine stops inside the next write, then restarts.
+    /// The engine stops at a fault point inside the next write, then
+    /// restarts.
     CrashAndReopen(Crash),
     /// An edit commits, its reply is lost, and the session sends it again.
     LostReply,
@@ -75,8 +102,12 @@ enum Command {
 
 #[derive(Clone, Copy, Debug)]
 enum Crash {
+    /// Before an edit's transaction commits.
     DuringEdit,
+    /// Before a settle's first transaction commits.
     DuringSettle,
+    /// After a settle commits its file write and before the write runs.
+    AfterSettleCommit,
 }
 
 fn command() -> impl Strategy<Value = Command> {
@@ -88,6 +119,7 @@ fn command() -> impl Strategy<Value = Command> {
         2 => Just(Command::Close),
         1 => Just(Command::CrashAndReopen(Crash::DuringEdit)),
         1 => Just(Command::CrashAndReopen(Crash::DuringSettle)),
+        1 => Just(Command::CrashAndReopen(Crash::AfterSettleCommit)),
         1 => Just(Command::LostReply),
     ]
 }
@@ -112,6 +144,10 @@ struct Model {
     /// Peer edits entered the note without their file writes: a resync, an
     /// open or a refused settle drained them. The writes stay owed.
     owed: bool,
+    /// What the file holds once every write the engine committed lands: the
+    /// note as of its last settle, drain, close that wrote, or pull with no
+    /// session. A restart must leave the file holding this.
+    file: String,
     /// The peer's own replica: the base and its own edits.
     peer: Ydoc,
     peer_seq: i64,
@@ -744,6 +780,7 @@ impl Run {
         text.apply(&base).expect("model base");
         let peer = Ydoc::wire();
         peer.apply(&base).expect("peer base");
+        let file = text.plaintext_string();
         Self {
             engine,
             model: Model {
@@ -752,6 +789,7 @@ impl Run {
                 session: None,
                 unsettled: false,
                 owed: false,
+                file,
                 peer,
                 peer_seq: 0,
                 edits: 0,
@@ -782,10 +820,12 @@ impl Run {
         drained
     }
 
-    /// A drain outside a close leaves the drained edits' writes owed.
+    /// A drain outside a close leaves the drained edits' writes owed. The
+    /// newest of them writes the note as the drain left it.
     fn drain_owed(&mut self) {
         if self.drain_parked() {
             self.model.owed = true;
+            self.model.file = self.model.text.plaintext_string();
         }
     }
 
@@ -877,6 +917,7 @@ impl Run {
             // An update that does not park first drains any that did.
             self.drain_owed();
             self.model.text.apply(&update).expect("model remote");
+            self.model.file = self.model.text.plaintext_string();
         }
     }
 
@@ -911,6 +952,7 @@ impl Run {
         self.model.session.as_mut().expect("session").head_sha = Some(settled.sha256.clone());
         self.model.unsettled = false;
         self.model.owed = false;
+        self.model.file = expected;
         self.check_file("settle")?;
         Ok(true)
     }
@@ -922,12 +964,15 @@ impl Run {
         self.engine
             .close(NOTE)
             .map_err(|error| self.fail(format!("close refused: {error:?}")))?;
-        // A close that drains parked edits writes them, and any writes owed
-        // before them, oldest first.
+        // A close that drains parked edits writes the whole note, local edits
+        // included, after any writes owed before them, oldest first. A dirty
+        // close that drains nothing writes nothing.
         if self.drain_parked() {
             self.model.owed = false;
-        }
-        if !self.model.unsettled && !self.model.owed {
+            self.model.unsettled = false;
+            self.model.file = self.model.text.plaintext_string();
+            self.check_file("close")?;
+        } else if !self.model.unsettled && !self.model.owed {
             self.check_file("close")?;
         }
         Ok(())
@@ -937,27 +982,83 @@ impl Run {
         let Some(session) = self.model.session.as_ref() else {
             return Ok(());
         };
-        let faults = ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist);
+        let behind = !self.model.parked.is_empty();
+        let point = match crash {
+            Crash::DuringEdit | Crash::DuringSettle => FaultPoint::StorageBeforePersist,
+            Crash::AfterSettleCommit => FaultPoint::MaterializeAfterJobCommit,
+        };
+        let faults = ScriptedFaults::crash_at(point);
         let injected: Arc<dyn FaultInjector> = faults.clone();
-        match crash {
+        // Whether the engine must stop, and its answer.
+        let (stops, answer) = match crash {
             Crash::DuringEdit => {
                 let (update, token) = self.next_edit().expect("session");
                 let session = self.model.session.as_ref().expect("session");
                 let request = format!("edit-{token}");
                 // Nothing committed, so nothing is acknowledged.
-                let _ = self
+                let result = self
                     .engine
                     .record(NOTE, session, &update, &request, injected);
+                (true, result.map(drop))
             }
-            Crash::DuringSettle => {
-                let _ = self.engine.settle(NOTE, session, injected);
+            Crash::DuringSettle | Crash::AfterSettleCommit => {
+                let result = self.engine.settle(NOTE, session, injected);
+                let settled = result.as_ref().ok().map(|outcome| {
+                    matches!(
+                        outcome,
+                        dohc_engine_runtime::actor::YdocSettleOutcome::Settled(_)
+                    )
+                });
+                let text = self.model.text.plaintext_string();
+                let commits = matches!(crash, Crash::AfterSettleCommit);
+                // Behind parked edits, the settle drains them first. A crash
+                // before persist stops in that drain; otherwise the settle
+                // asks the session to catch up. A current settle runs any
+                // owed writes first, and a crash after a job commit stops in
+                // the first of them. Then the settle writes only if the file
+                // is not already the note.
+                let stops = if behind {
+                    !commits
+                } else {
+                    (commits && self.model.owed) || text != self.model.file
+                };
+                if stops {
+                    // A crash after the job commit, with nothing owed,
+                    // stops after the settle committed its own write.
+                    if commits && !behind && !self.model.owed {
+                        self.model.unsettled = false;
+                        self.model.file = text;
+                    }
+                } else if behind {
+                    self.check(settled == Some(false), || {
+                        format!("a settle behind parked edits answered {result:?}")
+                    })?;
+                    self.drain_owed();
+                } else {
+                    self.check(settled == Some(true), || {
+                        format!("a settle with nothing to write answered {result:?}")
+                    })?;
+                }
+                (stops, result.map(drop))
             }
-        }
+        };
+        // A drain answers the sync layer's crash, everything else the
+        // runtime's.
+        let crashed = matches!(
+            answer,
+            Err(RuntimeError::OperationCrashed
+                | RuntimeError::Sync(dohc_engine_sync::SyncError::FaultCrash))
+        );
+        let fired = faults.fired();
+        self.check(fired == stops && crashed == stops, || {
+            format!("{crash:?}: the fault fired {fired}, the engine answered {answer:?}")
+        })?;
         // The engine restarts, and the session that held the note is gone.
-        // `check_store` then proves the restart kept every acknowledged edit.
+        // Startup replay lands every owed write before anything else runs.
         self.engine.restart();
         self.model.session = None;
-        Ok(())
+        self.model.owed = false;
+        self.check_restart()
     }
 
     fn lost_reply(&mut self) -> Result<(), TestCaseError> {
@@ -1002,13 +1103,24 @@ impl Run {
         })
     }
 
-    /// Once the note settles, its file holds the note, written in order:
-    /// a write that passed an older one would leave a conflict copy.
+    /// Once the note settles, its file holds the note, written in order. A
+    /// write that passed an older one is caught in one of two ways: it leaves
+    /// a conflict copy, which this check finds, or the next settle is refused
+    /// as a stale target, which fails the case.
     fn check_file(&self, after: &str) -> Result<(), TestCaseError> {
+        self.check_file_holds(after, &self.model.text.plaintext_string())
+    }
+
+    /// Right after a restart, before any settle or pull can repair it, the
+    /// file holds every write the engine committed.
+    fn check_restart(&self) -> Result<(), TestCaseError> {
+        self.check_file_holds("restart", &self.model.file)
+    }
+
+    fn check_file_holds(&self, after: &str, expected: &str) -> Result<(), TestCaseError> {
         let file = self.engine.file(NOTE);
-        let expected = self.model.text.plaintext_string();
-        self.check(file.as_deref() == Some(expected.as_str()), || {
-            format!("after {after} the file holds {file:?}, the note is {expected:?}")
+        self.check(file.as_deref() == Some(expected), || {
+            format!("after {after} the file holds {file:?}, it must hold {expected:?}")
         })?;
         let conflicts = self.engine.conflict_files();
         self.check(conflicts.is_empty(), || {
@@ -1094,4 +1206,26 @@ proptest! {
     ) {
         run(replica, &history)?;
     }
+}
+
+fn replay(replica: Replica, history: &[Command]) {
+    if let Err(error) = run(replica, history) {
+        panic!("{error}");
+    }
+}
+
+/// #3729: a settle after a drain wrote only the newest owed write, so the
+/// file fell behind the note.
+#[test]
+fn a_settle_after_a_drain_writes_every_owed_edit() {
+    use Command::{Open, RemoteApply, Settle};
+    replay(Replica::Device, &[Open, RemoteApply, Settle, RemoteApply]);
+}
+
+/// #3831: a pull wrote the note's file and left its queued writes pending,
+/// so a later settle replayed an older write and was refused as a stale
+/// target.
+#[test]
+fn a_pull_that_writes_the_file_ends_its_queued_writes() {
+    replay(Replica::Device, &[Command::RemoteApply]);
 }
