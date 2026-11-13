@@ -432,6 +432,17 @@ describe("OwnerYDocOutbox pending byte boundary", () => {
     await expect(read(result)).rejects.toThrow(TypeError);
   });
 
+  it("counts what a group's rows queued against the queue, not its merged update's length", async () => {
+    const result = pendingResult();
+    result.entries.push({...result.entries[0]!, sequence: 3, deliveryId: "delivery-3", appendKey: "append-3"});
+    Object.assign(result.entries[0]!, {queuedByteLength: 5});
+    result.pendingBytes = 8;
+    const pending = await read(result);
+    expect(pending.entries.map(entry => [entry.sequence, entry.byteLength])).toEqual([[1, 3], [3, 3]]);
+    result.pendingBytes = 9;
+    await expect(read(result)).rejects.toThrow("snapshot is incomplete");
+  });
+
   it("reads the agent an entry declared and adds none to an entry that declared none", async () => {
     const result = pendingResult();
     result.entries.push({ ...result.entries[0]!, sequence: 3, deliveryId: "delivery-3", appendKey: "append-3" });

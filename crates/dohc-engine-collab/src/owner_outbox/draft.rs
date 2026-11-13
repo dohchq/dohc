@@ -2597,6 +2597,8 @@ mod tests {
         feed(&mut reopened, &observed, 12, retry.update_bytes.clone());
         assert_eq!(remote_changes(&reopened), 3);
     }
+    /// Each typed draft's append result and update.
+    type Typed = Vec<(OwnerOutboxAppendResult, Vec<u8>)>;
     /// Each text typed as its own owner draft, in order, before any is delivered.
     fn type_drafts(
         store: &mut EngineStore,
@@ -2604,7 +2606,7 @@ mod tests {
         owner: &Ydoc,
         revision: i64,
         texts: &[&str],
-    ) -> Vec<(OwnerOutboxAppendResult, Vec<u8>)> {
+    ) -> Typed {
         texts
             .iter()
             .map(|text| {
@@ -2640,10 +2642,7 @@ mod tests {
         store: &mut EngineStore,
         observed: &ObservedOwnerBinding,
         checkpoint: &[u8],
-    ) -> (
-        Vec<(OwnerOutboxAppendResult, Vec<u8>)>,
-        super::super::OwnerOutboxEntry,
-    ) {
+    ) -> (Typed, super::super::OwnerOutboxEntry) {
         let owner = Ydoc::wire();
         owner.apply(checkpoint).unwrap();
         let typed = type_drafts(store, observed, &owner, 1, &["head", "second", "third"]);
@@ -2673,8 +2672,7 @@ mod tests {
         (typed, group)
     }
     #[test]
-    fn a_frame_carrying_a_known_group_id_with_a_different_digest_is_not_this_computers_own_draft()
-    {
+    fn a_frame_carrying_a_known_group_id_with_a_different_digest_is_not_this_computers_own_draft() {
         use super::super::AcceptedAs::{Delivery, JournalCursor};
         let (_dir, mut store, observed, checkpoint) = fixture();
         install(&mut store, &observed, &checkpoint);
@@ -2693,7 +2691,11 @@ mod tests {
                 .unwrap()
         };
         // While the group waits, its id and digest come from its own rows.
-        assert!(own(&store, &group.update_digest, Delivery(&group.delivery_id)));
+        assert!(own(
+            &store,
+            &group.update_digest,
+            Delivery(&group.delivery_id)
+        ));
         assert!(!own(&store, &other, Delivery(&group.delivery_id)));
         assert!(own(&store, &group.update_digest, JournalCursor(2)));
         assert!(!own(&store, &other, JournalCursor(2)));
@@ -2711,7 +2713,11 @@ mod tests {
         )
         .unwrap();
         // Once acknowledged, they come from the receipt every row keeps.
-        assert!(own(&store, &group.update_digest, Delivery(&group.delivery_id)));
+        assert!(own(
+            &store,
+            &group.update_digest,
+            Delivery(&group.delivery_id)
+        ));
         assert!(!own(&store, &other, Delivery(&group.delivery_id)));
         assert!(own(&store, &group.update_digest, JournalCursor(2)));
         assert!(!own(&store, &other, JournalCursor(2)));
@@ -2724,8 +2730,7 @@ mod tests {
     /// read, so the delivery offered after a refusal, a try again and a
     /// restart is the one first offered, and its receipt retires every row.
     #[test]
-    fn a_waiting_group_is_offered_as_the_same_delivery_after_a_refusal_a_try_again_and_a_restart()
-    {
+    fn a_waiting_group_is_offered_as_the_same_delivery_after_a_refusal_a_try_again_and_a_restart() {
         let (dir, mut store, observed, checkpoint) = fixture();
         install(&mut store, &observed, &checkpoint);
         let (typed, group) = deliver_head_of_three(&mut store, &observed, &checkpoint);
@@ -2785,12 +2790,21 @@ mod tests {
         // As migration 100 leaves every row that waits at the upgrade.
         store
             .write_with(&NoFaults, |tx| {
-                tx.execute("UPDATE owner_ydoc_outbox_entries SET delivery_group=NULL", [])
-                    .unwrap();
+                tx.execute(
+                    "UPDATE owner_ydoc_outbox_entries SET delivery_group=NULL",
+                    [],
+                )
+                .unwrap();
                 Ok::<_, OwnerOutboxError>(())
             })
             .unwrap();
-        typed.extend(type_drafts(&mut store, &observed, &owner, 1, &["four", "five"]));
+        typed.extend(type_drafts(
+            &mut store,
+            &observed,
+            &owner,
+            1,
+            &["four", "five"],
+        ));
         let outbox = typed[0].0.outbox_id.clone();
         for (cursor, (row, delta)) in (1..).zip(&typed[..3]) {
             let head = super::super::read_pending(&store, "workspace", &outbox)
@@ -2876,6 +2890,315 @@ mod tests {
             .unwrap()
             .entries
             .is_empty());
+    }
+    /// Every part a paged read serves, in order, each part's pages joined.
+    fn read_all_pages(
+        read: impl Fn(Option<OwnerOutboxReadCursor>) -> Result<OwnerOutboxPageResult, OwnerOutboxError>,
+    ) -> Vec<(OwnerOutboxReadPart, i64, Vec<u8>)> {
+        let mut parts: Vec<(OwnerOutboxReadPart, i64, Vec<u8>)> = Vec::new();
+        let mut cursor = None;
+        loop {
+            let Ok(OwnerOutboxPageResult::Page(page)) = read(cursor) else {
+                panic!("an unchanged snapshot reads a page");
+            };
+            let key = (page.cursor.part, page.cursor.sequence);
+            if parts.last().is_some_and(|last| (last.0, last.1) == key) {
+                parts.last_mut().unwrap().2.extend_from_slice(&page.bytes);
+            } else {
+                parts.push((key.0, key.1, page.bytes));
+            }
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => return parts,
+            }
+        }
+    }
+    /// The read offers the waiting group as its one entry, under the id and
+    /// digest a receipt for it must carry, and accounts for every queued byte.
+    fn assert_one_group_entry(
+        parts: &[(OwnerOutboxReadPart, i64, Vec<u8>)],
+        group: &super::super::OwnerOutboxEntry,
+    ) {
+        use OwnerOutboxReadPart::{Base, EntryHeader, Header, Update};
+        assert_eq!(
+            parts
+                .iter()
+                .map(|(part, sequence, _)| (*part, *sequence))
+                .collect::<Vec<_>>(),
+            [
+                (Header, 0),
+                (Base, 0),
+                (EntryHeader, group.sequence),
+                (Update, group.sequence)
+            ]
+        );
+        let header: serde_json::Value = serde_json::from_slice(&parts[0].2).unwrap();
+        let entry: serde_json::Value = serde_json::from_slice(&parts[2].2).unwrap();
+        assert_eq!(header["pendingEntryCount"], 1);
+        assert_eq!(entry["deliveryId"], group.delivery_id.as_str());
+        assert_eq!(entry["updateDigest"], group.update_digest.as_str());
+        assert_eq!(entry["byteLength"], group.update.len());
+        assert_eq!(
+            entry["queuedByteLength"], header["pendingBytes"],
+            "the group's rows hold every queued byte"
+        );
+        assert_eq!(parts[3].2, group.update);
+    }
+    /// A paged read, hosted or not, serves a waiting group as one entry across
+    /// pages smaller than any of its parts.
+    #[test]
+    fn a_paged_read_hosted_or_not_serves_a_waiting_group_as_one_entry() {
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let (typed, group) = deliver_head_of_three(&mut store, &observed, &checkpoint);
+        let outbox = typed[0].0.outbox_id.clone();
+        let local =
+            read_all_pages(|cursor| read_pending_page(&store, "workspace", &outbox, cursor, 7));
+        assert_one_group_entry(&local, &group);
+        let identity = store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT OR IGNORE INTO sync_identity \
+                     (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
+                     VALUES ('workspace','origin','epoch','stream',1)",
+                    [],
+                )
+                .unwrap();
+                tx.execute(
+                    "INSERT INTO hosted_replicas (workspace_id,created_at_ms) VALUES ('workspace',1)",
+                    [],
+                )
+                .unwrap();
+                tx.query_row(
+                    "SELECT replication_epoch,stream_identity FROM sync_identity \
+                     WHERE workspace_id='workspace'",
+                    [],
+                    |r| {
+                        Ok(super::super::HostedStoreIdentity {
+                            replication_epoch: r.get(0)?,
+                            stream_identity: r.get(1)?,
+                        })
+                    },
+                )
+                .map_err(read_sql)
+            })
+            .unwrap();
+        let identity = committed(identity).unwrap();
+        let hosted = read_all_pages(|cursor| {
+            super::super::read_pending_hosted_page(
+                &store,
+                "workspace",
+                &identity,
+                &outbox,
+                cursor,
+                7,
+            )
+        });
+        assert_one_group_entry(&hosted, &group);
+    }
+    /// Typing a joined edit again under its append key returns the row it
+    /// already wrote and leaves its group as it was.
+    #[test]
+    fn an_edit_typed_again_under_its_append_key_leaves_its_group_as_it_was() {
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let owner = Ydoc::wire();
+        owner.apply(&checkpoint).unwrap();
+        let typed = type_drafts(
+            &mut store,
+            &observed,
+            &owner,
+            1,
+            &["head", "second", "third"],
+        );
+        let outbox = typed[0].0.outbox_id.clone();
+        let before = super::super::read_pending(&store, "workspace", &outbox)
+            .unwrap()
+            .entries;
+        assert_eq!(before.len(), 2, "the head and the group behind it");
+        let (second, delta) = &typed[1];
+        let replayed = store
+            .write_with(&NoFaults, |tx| {
+                append_draft_in_tx(
+                    tx,
+                    "workspace",
+                    &observed.binding,
+                    1,
+                    "typed-second".into(),
+                    delta.clone(),
+                    3,
+                )
+            })
+            .unwrap();
+        assert_eq!(&committed(replayed).unwrap(), second);
+        assert_eq!(
+            super::super::read_pending(&store, "workspace", &outbox)
+                .unwrap()
+                .entries,
+            before
+        );
+    }
+    /// A row of a waiting group is not a delivery of its own. A receipt, a
+    /// refusal or a recorded refusal addressed to its own id changes nothing.
+    #[test]
+    fn a_receipt_or_refusal_addressed_to_a_grouped_row_is_refused() {
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let (typed, group) = deliver_head_of_three(&mut store, &observed, &checkpoint);
+        let outbox = typed[0].0.outbox_id.clone();
+        for (member, _) in &typed[1..] {
+            let receipt = receipt_for(&member.delivery_id, &member.update_digest, 2);
+            assert!(super::super::acknowledge(
+                &mut store,
+                "workspace",
+                &outbox,
+                std::slice::from_ref(&receipt)
+            )
+            .is_err());
+            assert!(!matches!(
+                store.read_with(|c| super::super::accepted::is_receipt_applied_in(
+                    c,
+                    &observed.binding,
+                    &observed.relay_database_namespace,
+                    &receipt
+                )),
+                Ok(true)
+            ));
+            let refusal = OwnerOutboxRefuseInput {
+                outbox_id: outbox.clone(),
+                delivery_id: member.delivery_id.clone(),
+                update_digest: member.update_digest.clone(),
+                reason: "invalid-update".into(),
+            };
+            assert!(matches!(
+                store.write_with(&NoFaults, |tx| refuse_entry_in_tx(
+                    tx,
+                    "workspace",
+                    &refusal,
+                    12
+                )),
+                Err(OwnerOutboxError::NotFound)
+            ));
+            store
+                .write_with(&NoFaults, |tx| {
+                    super::super::record_refusal_in_tx(
+                        tx,
+                        "workspace",
+                        &super::super::OwnerOutboxQuarantineInput {
+                            outbox_id: outbox.clone(),
+                            reason: "invalid-update".into(),
+                            observed_binding: None,
+                        },
+                        &super::super::OwnerOutboxRefusal {
+                            delivery_id: member.delivery_id.clone(),
+                            key: format!("refusal-{}", member.sequence),
+                        },
+                        12,
+                    )
+                })
+                .unwrap();
+        }
+        let waiting = super::super::read_pending(&store, "workspace", &outbox).unwrap();
+        assert_eq!(waiting.state, super::super::OwnerOutboxState::Active);
+        assert_eq!(waiting.entries, vec![group]);
+    }
+    /// A refusal of a waiting group retires every row in it. The same refusal
+    /// received again is recognized from the rows' kept bytes; another reason
+    /// for it is not.
+    #[test]
+    fn a_refused_group_retires_all_its_rows_and_the_same_refusal_is_recognized_again() {
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let (typed, group) = deliver_head_of_three(&mut store, &observed, &checkpoint);
+        let outbox = typed[0].0.outbox_id.clone();
+        let refusal = OwnerOutboxRefuseInput {
+            outbox_id: outbox.clone(),
+            delivery_id: group.delivery_id.clone(),
+            update_digest: group.update_digest.clone(),
+            reason: "The presser no longer has edit access.".into(),
+        };
+        let refuse = |store: &mut EngineStore, refusal: &OwnerOutboxRefuseInput| {
+            store
+                .write_with(&NoFaults, |tx| {
+                    refuse_entry_in_tx(tx, "workspace", refusal, 12)
+                })
+                .map(|_| ())
+        };
+        refuse(&mut store, &refusal).unwrap();
+        assert!(super::super::read_pending(&store, "workspace", &outbox)
+            .unwrap()
+            .entries
+            .is_empty());
+        let refused: i64 = store
+            .read_with(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM owner_ydoc_outbox_entries \
+                     WHERE outbox_id=?1 AND pending=0 AND terminal_reason=?2",
+                    rusqlite::params![outbox, refusal.reason],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(refused, 2, "both rows of the group are refused");
+        refuse(&mut store, &refusal).unwrap();
+        let other = OwnerOutboxRefuseInput {
+            reason: "invalid-update".into(),
+            ..refusal.clone()
+        };
+        assert!(matches!(
+            refuse(&mut store, &other),
+            Err(OwnerOutboxError::NotFound)
+        ));
+    }
+    /// Migration 100's index finds an acknowledged group's receipt on every
+    /// path, so no lookup walks an outbox's history.
+    #[test]
+    fn an_acknowledged_group_is_found_through_its_digest_index() {
+        let (_dir, store, observed, _checkpoint) = fixture();
+        let key = key(&observed.binding).unwrap();
+        let plan = |sql: &str, params: &[&dyn rusqlite::ToSql]| -> String {
+            store
+                .read_with(|c| {
+                    let mut statement = c
+                        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                        .map_err(read_sql)?;
+                    let details = statement
+                        .query_map(params, |r| r.get::<_, String>(3))
+                        .map_err(read_sql)?
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(read_sql)?;
+                    Ok::<_, OwnerOutboxError>(details.join("\n"))
+                })
+                .unwrap()
+        };
+        let digest = "ab".repeat(32);
+        let scope = |delivery: Option<&str>, cursor: Option<i64>| {
+            plan(
+                super::super::OWN_ACKNOWLEDGED_GROUP,
+                rusqlite::params![
+                    digest,
+                    key.workspace_id,
+                    key.version_id,
+                    key.object_id,
+                    delivery,
+                    cursor
+                ],
+            )
+        };
+        let plans = [
+            scope(Some("delivery"), None),
+            scope(None, Some(2)),
+            plan(
+                super::super::delivery_group::ACKNOWLEDGED_GROUP,
+                rusqlite::params!["outbox", "delivery", digest],
+            ),
+        ];
+        for plan in plans {
+            assert!(
+                plan.contains("USING INDEX owner_ydoc_outbox_entries_group_receipt"),
+                "{plan}"
+            );
+        }
     }
     #[test]
     fn accepted_write_failure_rolls_back_native_state_cursor_and_pending_work() {

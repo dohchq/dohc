@@ -518,7 +518,9 @@ export class OwnerYDocOutbox {
       const sequence = wireInteger(entry, "sequence", 1);
       if (sequence !== cursor.sequence) throw new TypeError("Owner outbox entry sequence changed.");
       const byteLength = wireInteger(entry, "byteLength", 1);
-      if (byteLength > remaining) throw new TypeError("Owner outbox entry exceeds pending bytes.");
+      // A group's merged update is not the sum of what its rows queued.
+      const queued = Object.hasOwn(entry, "queuedByteLength") ? wireInteger(entry, "queuedByteLength", 1) : byteLength;
+      if (queued > remaining) throw new TypeError("Owner outbox entry exceeds pending bytes.");
       const updateDigest = digestField(entry, "updateDigest");
       if (headOnly === "key") {
         headKey = {appendKey: stringField(entry, "appendKey"), updateDigest};
@@ -544,7 +546,7 @@ export class OwnerYDocOutbox {
         ...(agentRunId !== undefined ? {agentRunId} : {}),
         ...(Object.hasOwn(entry, "nativeSource") ? {nativeSource: nativeSource(entry.nativeSource, updateDigest)} : {}),
       });
-      remaining -= byteLength;
+      remaining -= queued;
       lastSequence = sequence;
     }
     if (headKey !== undefined) {

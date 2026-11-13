@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 pub mod accepted;
+mod delivery_group;
 pub mod draft;
 pub mod enrollment;
 mod native_source;
@@ -114,8 +115,10 @@ pub enum AcceptedAs<'a> {
 /// own draft. The host matches the draft's delivery. The owner matches a
 /// draft still waiting for its receipt, or one acknowledged at this cursor,
 /// so an old draft's bytes served again under a new cursor are not its own.
-/// A frame that is this computer's own draft is not a change from another
-/// computer.
+/// A group matches only by the digest computed here from its own rows while
+/// it waits, or kept in its rows' receipt once acknowledged; its id alone
+/// never matches. A frame that is this computer's own draft is not a change
+/// from another computer.
 pub fn is_own_draft_in(
     conn: &Connection,
     key: &crate::DocKey,
@@ -126,26 +129,81 @@ pub fn is_own_draft_in(
         AcceptedAs::Delivery(delivery_id) => (Some(delivery_id), None),
         AcceptedAs::JournalCursor(cursor) => (None, Some(cursor)),
     };
-    conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries e \
-         JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id \
-         WHERE e.update_digest=?1 \
-           AND o.workspace_id=?2 AND o.main_version_id=?3 AND o.object_id=?4 \
-           AND CASE WHEN ?5 IS NOT NULL THEN e.delivery_id=?5 \
-                    ELSE e.pending=1 \
-                      OR json_extract(e.accepted_receipt_json,'$.journalCursor')=?6 END)",
-        params![
-            update_digest,
-            key.workspace_id,
-            key.version_id,
-            key.object_id,
-            delivery_id,
-            journal_cursor
-        ],
-        |r| r.get(0),
-    )
-    .map_err(|error| crate::CollabError::Storage(StorageError::corrupt_public(error)))
+    let storage =
+        |error: rusqlite::Error| crate::CollabError::Storage(StorageError::corrupt_public(error));
+    let scope = params![
+        update_digest,
+        key.workspace_id,
+        key.version_id,
+        key.object_id,
+        delivery_id,
+        journal_cursor
+    ];
+    let row: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries e \
+             JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id \
+             WHERE e.update_digest=?1 \
+               AND o.workspace_id=?2 AND o.main_version_id=?3 AND o.object_id=?4 \
+               AND CASE WHEN ?5 IS NOT NULL THEN e.delivery_id=?5 \
+                        ELSE e.pending=1 \
+                          OR json_extract(e.accepted_receipt_json,'$.journalCursor')=?6 END)",
+            scope,
+            |r| r.get(0),
+        )
+        .map_err(storage)?;
+    if row
+        || conn
+            .query_row(OWN_ACKNOWLEDGED_GROUP, scope, |r| r.get(0))
+            .map_err(storage)?
+    {
+        return Ok(true);
+    }
+    // Only a queue's head can have been offered.
+    let outboxes = conn
+        .prepare(
+            "SELECT outbox_id FROM owner_ydoc_outboxes \
+             WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3",
+        )
+        .and_then(|mut statement| {
+            statement
+                .query_map(
+                    params![key.workspace_id, key.version_id, key.object_id],
+                    |r| r.get::<_, String>(0),
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .map_err(storage)?;
+    for outbox_id in outboxes {
+        let head =
+            delivery_group::pending_in(conn, &outbox_id, 1).map_err(|error| match error {
+                OwnerOutboxError::Storage(error) => crate::CollabError::Storage(error),
+                error => crate::CollabError::Corrupt {
+                    reason: format!("owner outbox head: {error}"),
+                },
+            })?;
+        if head.first().is_some_and(|head| {
+            head.is_group()
+                && head.update_digest == update_digest
+                && delivery_id.is_none_or(|id| id == head.delivery_id)
+        }) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
+
+/// An acknowledged group of this document by the receipt its rows keep, found
+/// through migration 100's index on its digest. `+e.outbox_id` keeps the
+/// planner from walking an outbox's whole history instead.
+const OWN_ACKNOWLEDGED_GROUP: &str = "SELECT EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries e \
+     JOIN owner_ydoc_outboxes o ON o.outbox_id=+e.outbox_id \
+     WHERE e.delivery_group IS NOT NULL AND e.accepted_receipt_json IS NOT NULL \
+       AND json_extract(e.accepted_receipt_json,'$.updateDigest')=?1 \
+       AND o.workspace_id=?2 AND o.main_version_id=?3 AND o.object_id=?4 \
+       AND CASE WHEN ?5 IS NOT NULL \
+                THEN json_extract(e.accepted_receipt_json,'$.deliveryId')=?5 \
+                ELSE json_extract(e.accepted_receipt_json,'$.journalCursor')=?6 END)";
 
 /// Bound owners settle through the admitted host cut, including after their
 /// pending queue drains. Ordinary settlement carries no accepted audit cut.
@@ -405,26 +463,43 @@ pub fn refuse_entry_in_tx(
     let parent = read_parent(tx, &input.outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
     require_workspace(workspace, &parent.binding.workspace_id)?;
     let observed = draft::read_observed_in(tx, &parent.binding)?;
-    let entry: Option<(String, bool, Option<String>, Option<String>)> = tx.query_row(
-        "SELECT update_digest,pending,accepted_receipt_json,terminal_reason FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND delivery_id=?2",
-        params![input.outbox_id,input.delivery_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
-    ).optional().map_err(read_sql)?;
-    let (digest, pending, receipt, reason) = entry.ok_or(OwnerOutboxError::NotFound)?;
-    if digest != input.update_digest || receipt.is_some() {
+    let found = delivery_group::find_in(
+        tx,
+        &input.outbox_id,
+        &input.delivery_id,
+        &input.update_digest,
+    )?;
+    let entry = match found {
+        Some(entry) => entry,
+        // A group's kept bytes recognize the same refusal again.
+        None if delivery_group::was_refused_in(
+            tx,
+            &input.outbox_id,
+            &input.delivery_id,
+            &input.update_digest,
+            &input.reason,
+        )? =>
+        {
+            return Ok(parent.binding)
+        }
+        None => return Err(OwnerOutboxError::NotFound),
+    };
+    if entry.update_digest != input.update_digest || entry.receipt_json.is_some() {
         return Err(OwnerOutboxError::ReceiptMismatch);
     }
-    if !pending {
-        return if reason.as_deref() == Some(input.reason.as_str()) {
+    let Some(delivery) = entry.pending else {
+        return if entry.terminal_reason.as_deref() == Some(input.reason.as_str()) {
             Ok(parent.binding)
         } else {
             Err(OwnerOutboxError::ReceiptMismatch)
         };
-    }
+    };
     let checkpoint_digest = match &observed {
         Some(observed) => observed.checkpoint_digest.clone(),
         None => native_refusal_checkpoint_in_tx(tx, &parent.binding, input)?,
     };
-    tx.execute("UPDATE owner_ydoc_outbox_entries SET pending=0,terminal_blob_digest=update_blob_digest,update_blob_digest=NULL,terminal_reason=?3 WHERE outbox_id=?1 AND delivery_id=?2 AND pending=1", params![input.outbox_id,input.delivery_id,input.reason]).map_err(write_sql)?;
+    // A group's later rows depend on its earlier ones, so it is refused whole.
+    tx.execute("UPDATE owner_ydoc_outbox_entries SET pending=0,terminal_blob_digest=update_blob_digest,update_blob_digest=NULL,terminal_reason=?4 WHERE outbox_id=?1 AND pending=1 AND sequence BETWEEN ?2 AND ?3", params![input.outbox_id,delivery.first_sequence,delivery.last_sequence,input.reason]).map_err(write_sql)?;
     // Retiring the granted head ends its Try again.
     tx.execute("UPDATE owner_ydoc_outboxes SET retry_delivery_id=NULL WHERE outbox_id=?1 AND retry_delivery_id=?2", params![input.outbox_id,input.delivery_id]).map_err(write_sql)?;
     let visible = draft::refuse_dependent_entries_in_tx(tx, &input.outbox_id, &checkpoint_digest)?;
@@ -807,14 +882,32 @@ fn append_with_retained_base(
         OwnerOutboxState::Active
     };
     let delivery_id = delivery_id(&parent.outbox_id, parent.next_sequence, &update_digest);
+    // A draft joins the group behind the head or starts one; other rows go alone.
+    let delivery_group = draft_revision
+        .map(|revision| {
+            delivery_group::joinable_in(
+                tx,
+                &parent.outbox_id,
+                parent.next_sequence,
+                revision,
+                declaration_json.as_deref(),
+                automation_json.as_deref(),
+                person_edit,
+                agent_run_id,
+                byte_length,
+            )
+            .map(|joined| joined.unwrap_or(parent.next_sequence))
+        })
+        .transpose()?;
     put_binary_blob_with_sha(tx, &input.update, &update_digest)?;
     tx.execute(
         "INSERT INTO owner_ydoc_outbox_entries \
              (outbox_id,sequence,append_key,delivery_id,update_digest,update_blob_digest,\
               byte_length,created_at_ms,pending,result_pending_bytes,\
               result_oldest_entry_at_ms,result_state,agent_declaration_json,\
-              draft_binding_revision,automation_declaration_json,person_edit,agent_run_id) \
-             VALUES (?1,?2,?3,?4,?5,?5,?6,?7,1,?8,?9,?10,?11,?12,?13,?14,?15)",
+              draft_binding_revision,automation_declaration_json,person_edit,agent_run_id,\
+              delivery_group) \
+             VALUES (?1,?2,?3,?4,?5,?5,?6,?7,1,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
         params![
             parent.outbox_id,
             parent.next_sequence,
@@ -831,6 +924,7 @@ fn append_with_retained_base(
             automation_json,
             person_edit.then_some(true),
             agent_run_id,
+            delivery_group,
         ],
     )
     .map_err(write_sql)?;
@@ -1079,7 +1173,8 @@ pub fn read_pending(
         let mut statement = conn
             .prepare(
                 "SELECT sequence,append_key,delivery_id,update_digest,update_blob_digest,\
-                 byte_length,created_at_ms,agent_declaration_json,automation_declaration_json,person_edit,agent_run_id \
+                 byte_length,created_at_ms,agent_declaration_json,automation_declaration_json,person_edit,agent_run_id,\
+                 COALESCE(delivery_group,sequence) \
                  FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND pending=1 ORDER BY sequence",
             )
             .map_err(read_sql)?;
@@ -1097,10 +1192,11 @@ pub fn read_pending(
                     row.get::<_, Option<String>>(8)?,
                     row.get::<_, Option<bool>>(9)?,
                     row.get::<_, Option<String>>(10)?,
+                    row.get::<_, i64>(11)?,
                 ))
             })
             .map_err(read_sql)?;
-        let mut entries = Vec::new();
+        let mut groups: Vec<(i64, Vec<OwnerOutboxEntry>)> = Vec::new();
         for row in rows {
             let (
                 sequence,
@@ -1114,6 +1210,7 @@ pub fn read_pending(
                 automation_json,
                 person_edit,
                 agent_run_id,
+                group,
             ) = row.map_err(read_sql)?;
             let update = get_binary_blob(conn, &blob_digest)?.ok_or(OwnerOutboxError::Corrupt)?;
             if update_digest != blob_digest
@@ -1122,7 +1219,7 @@ pub fn read_pending(
             {
                 return Err(OwnerOutboxError::Corrupt);
             }
-            entries.push(OwnerOutboxEntry {
+            let entry = OwnerOutboxEntry {
                 sequence,
                 append_key,
                 delivery_id,
@@ -1134,8 +1231,16 @@ pub fn read_pending(
                 agent_declaration: stored_declaration(declaration_json)?,
                 agent_run_id,
                 automation_declaration: stored_automation_declaration(automation_json)?,
-            });
+            };
+            match groups.last_mut() {
+                Some((last, rows)) if *last == group => rows.push(entry),
+                _ => groups.push((group, vec![entry])),
+            }
         }
+        let entries = groups
+            .into_iter()
+            .map(|(_, rows)| group_entry(outbox_id, rows))
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(OwnerOutboxPending {
             outbox_id: parent.outbox_id,
             binding: parent.binding,
@@ -1150,6 +1255,28 @@ pub fn read_pending(
             retry_delivery_id: parent.retry_delivery_id,
         })
     })
+}
+
+/// One delivery of a group's rows: their merged update under the group's id,
+/// with the first row's key, time and author, which every row shares.
+fn group_entry(
+    outbox_id: &str,
+    mut rows: Vec<OwnerOutboxEntry>,
+) -> Result<OwnerOutboxEntry, OwnerOutboxError> {
+    if rows.len() < 2 {
+        return rows.pop().ok_or(OwnerOutboxError::Corrupt);
+    }
+    let updates = rows
+        .iter_mut()
+        .map(|row| std::mem::take(&mut row.update))
+        .collect::<Vec<_>>();
+    let update = crate::merge_updates(&updates).map_err(draft::collab)?;
+    let mut entry = rows.swap_remove(0);
+    entry.update_digest = hex_sha256(&update);
+    entry.delivery_id = delivery_id(outbox_id, entry.sequence, &entry.update_digest);
+    entry.byte_length = i64::try_from(update.len()).map_err(|_| OwnerOutboxError::Corrupt)?;
+    entry.update = update;
+    Ok(entry)
 }
 
 /// The workspace identity a hosted store was created for: its replication
@@ -1285,6 +1412,7 @@ fn read_page(
         {
             return Err(OwnerOutboxError::InvalidInput("invalid read part sequence"));
         }
+        // Each entry is one delivery, named by its first row.
         let next_entry = |after: i64| -> Result<Option<OwnerOutboxReadCursor>, OwnerOutboxError> {
             tx.query_row(
                 "SELECT sequence FROM owner_ydoc_outbox_entries \
@@ -1301,7 +1429,7 @@ fn read_page(
         let (total_bytes, digest, bytes, following) = match cursor.part {
             Header => {
                 let count: i64 = tx.query_row(
-                    "SELECT COUNT(*) FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND pending=1",
+                    "SELECT COUNT(DISTINCT COALESCE(delivery_group,sequence)) FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND pending=1",
                     [outbox_id], |row| row.get(0),
                 ).map_err(read_sql)?;
                 header["pendingEntryCount"] = count.into();
@@ -1353,16 +1481,23 @@ fn read_page(
                         row.get::<_, Option<String>>(10)?,
                     )),
                 ).optional().map_err(read_sql)?.ok_or(OwnerOutboxError::InvalidInput("invalid read entry"))?;
-                let (append_key, delivery_id, digest, blob_digest, byte_length, created_at_ms, declaration_json, automation_json, person_edit, native_json, agent_run_id) = entry;
+                let (append_key, _, digest, blob_digest, byte_length, created_at_ms, declaration_json, automation_json, person_edit, native_json, agent_run_id) = entry;
                 if digest != blob_digest || byte_length <= 0 {
                     return Err(OwnerOutboxError::Corrupt);
                 }
+                let delivery = delivery_group::starting_at_in(&tx, outbox_id, cursor.sequence)?
+                    .ok_or(OwnerOutboxError::InvalidInput("invalid read entry"))?;
+                let group = delivery.is_group().then(|| delivery.update(&tx)).transpose()?;
                 if cursor.part == EntryHeader {
+                    let entry_bytes = group.as_ref().map_or(Ok(byte_length), |update| i64::try_from(update.len()))
+                        .map_err(|_| OwnerOutboxError::Corrupt)?;
                     let mut header = serde_json::json!({
                         "sequence": cursor.sequence, "appendKey": append_key,
-                        "deliveryId": delivery_id, "updateDigest": digest,
-                        "byteLength": byte_length, "createdAtMs": created_at_ms,
+                        "deliveryId": delivery.delivery_id, "updateDigest": delivery.update_digest,
+                        "byteLength": entry_bytes, "createdAtMs": created_at_ms,
                     });
+                    // A group's merged update is not the sum of what its rows queued.
+                    if group.is_some() { header["queuedByteLength"] = delivery.queued_bytes.into(); }
                     if person_edit == Some(true) { header["personEdit"] = serde_json::json!(true); }
                     // An entry that declared no agent has no field at all.
                     if let Some(declaration) = stored_declaration(declaration_json)? {
@@ -1384,9 +1519,12 @@ fn read_page(
                     let bytes = page_json(&header)?;
                     let (total, digest, bytes) = slice_header(bytes, cursor.offset, max_bytes)?;
                     (total, digest, bytes, following_part(Update))
+                } else if let Some(update) = group {
+                    let (total, digest, bytes) = slice_header(update, cursor.offset, max_bytes)?;
+                    (total, digest, bytes, next_entry(delivery.last_sequence)?)
                 } else {
                     let bytes = slice_blob(&tx, &blob_digest, byte_length, cursor.offset, max_bytes)?;
-                    (byte_length, digest, bytes, next_entry(cursor.sequence)?)
+                    (byte_length, digest, bytes, next_entry(delivery.last_sequence)?)
                 }
             }
         };
@@ -1975,50 +2113,35 @@ fn acknowledge_prefix_in(
     receipts: &[OwnerDeliveryReceipt],
 ) -> Result<OwnerOutboxAcknowledgeResult, OwnerOutboxError> {
     let outbox_id = parent.outbox_id.as_str();
-    let mut statement = tx
-        .prepare(
-            "SELECT sequence,delivery_id,update_digest,byte_length \
-             FROM owner_ydoc_outbox_entries \
-             WHERE outbox_id=?1 AND pending=1 ORDER BY sequence",
-        )
-        .map_err(read_sql)?;
-    let rows = statement
-        .query_map([outbox_id], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, i64>(3)?,
-            ))
-        })
-        .map_err(read_sql)?;
-    let prefix = rows
-        .take(receipts.len())
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(read_sql)?;
+    // Each receipt names one delivery: a row alone, or a group's rows.
+    let prefix = delivery_group::pending_in(tx, outbox_id, receipts.len())?;
     if prefix.len() != receipts.len()
-        || prefix
-            .iter()
-            .zip(receipts)
-            .any(|((_, delivery_id, digest, _), receipt)| {
-                delivery_id != &receipt.delivery_id || digest != &receipt.update_digest
-            })
+        || prefix.iter().zip(receipts).any(|(delivery, receipt)| {
+            delivery.delivery_id != receipt.delivery_id
+                || delivery.update_digest != receipt.update_digest
+        })
     {
         return Err(OwnerOutboxError::ReceiptMismatch);
     }
-    let acknowledged_bytes = prefix.iter().try_fold(0_i64, |total, row| {
-        total.checked_add(row.3).ok_or(OwnerOutboxError::Corrupt)
+    let acknowledged_bytes = prefix.iter().try_fold(0_i64, |total, delivery| {
+        total
+            .checked_add(delivery.queued_bytes)
+            .ok_or(OwnerOutboxError::Corrupt)
     })?;
-    let last_sequence = prefix.last().ok_or(OwnerOutboxError::ReceiptMismatch)?.0;
+    let last_sequence = prefix
+        .last()
+        .ok_or(OwnerOutboxError::ReceiptMismatch)?
+        .last_sequence;
+    let rows = prefix.iter().map(|delivery| delivery.rows).sum::<usize>();
     let released_digests = prefix
         .iter()
-        .map(|(_, _, digest, _)| digest.clone())
+        .flat_map(|delivery| delivery.row_digests.iter().cloned())
         .collect::<BTreeSet<_>>();
-    // Every acknowledgement keeps its receipt, observed or not: a cleared
-    // entry alone does not prove the relay accepted it.
-    for receipt in receipts {
-        tx.execute("UPDATE owner_ydoc_outbox_entries SET accepted_receipt_json=?3 WHERE outbox_id=?1 AND delivery_id=?2 AND pending=1",
-            params![outbox_id,receipt.delivery_id,serde_json::to_string(receipt).map_err(|_|OwnerOutboxError::Corrupt)?]).map_err(write_sql)?;
+    // Every acknowledgement keeps its receipt on each row it covers, observed
+    // or not: a cleared entry alone does not prove the relay accepted it.
+    for (delivery, receipt) in prefix.iter().zip(receipts) {
+        tx.execute("UPDATE owner_ydoc_outbox_entries SET accepted_receipt_json=?4 WHERE outbox_id=?1 AND pending=1 AND sequence BETWEEN ?2 AND ?3",
+            params![outbox_id,delivery.first_sequence,delivery.last_sequence,serde_json::to_string(receipt).map_err(|_|OwnerOutboxError::Corrupt)?]).map_err(write_sql)?;
     }
     let acknowledged = tx
         .execute(
@@ -2027,7 +2150,7 @@ fn acknowledge_prefix_in(
             params![outbox_id, last_sequence],
         )
         .map_err(write_sql)?;
-    if acknowledged != receipts.len() {
+    if acknowledged != rows {
         return Err(OwnerOutboxError::Corrupt);
     }
     for digest in released_digests {
@@ -2243,15 +2366,17 @@ pub(crate) fn record_refusal_in_tx(
     validate_identifier(&refusal.key, "refusal key must be non-empty and bounded")?;
     let parent = read_parent(tx, &input.outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
     require_workspace(workspace_id, &parent.binding.workspace_id)?;
-    let (recorded, head): (bool, Option<String>) = tx
+    let recorded: bool = tx
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM owner_ydoc_outbox_refusals \
-             WHERE outbox_id=?1 AND refusal_key=?2),(SELECT delivery_id FROM owner_ydoc_outbox_entries \
-             WHERE outbox_id=?1 AND pending=1 ORDER BY sequence LIMIT 1)",
+             WHERE outbox_id=?1 AND refusal_key=?2)",
             params![input.outbox_id, refusal.key],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| row.get(0),
         )
         .map_err(read_sql)?;
+    let head = delivery_group::pending_in(tx, &input.outbox_id, 1)?
+        .pop()
+        .map(|head| head.delivery_id);
     let refused = Some(refusal.delivery_id.as_str());
     if recorded
         || head.as_deref() != refused
@@ -2379,15 +2504,10 @@ pub(crate) fn retry_in_tx(
     if let Some(granted) = parent.retry_delivery_id {
         return Ok(granted);
     }
-    let head: String = tx
-        .query_row(
-            "SELECT delivery_id FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND pending=1 ORDER BY sequence LIMIT 1",
-            [&input.outbox_id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(read_sql)?
-        .ok_or(OwnerOutboxError::NotFound)?;
+    let head = delivery_group::pending_in(tx, &input.outbox_id, 1)?
+        .pop()
+        .ok_or(OwnerOutboxError::NotFound)?
+        .delivery_id;
     tx.execute(
         "UPDATE owner_ydoc_outboxes SET retry_delivery_id=?2 WHERE outbox_id=?1 AND state='quarantined'",
         params![input.outbox_id, head],
