@@ -678,6 +678,8 @@ export class WriteQueue {
         this.versions.set(write.record.key, { version, seq: this.seq, steps });
       } else if (write.kind === "edit") this.forget(write.record.key);
       else this.versions.delete(write.record.key);
+      // A deleted record has no later version for a page's copy of it to move to.
+      if (write.kind === "delete") for (const page of this.pages) page.steps.delete(write.record.key);
       for (const page of this.pages) for (const [fieldId, typed] of Object.entries(write.values)) {
         put(page.settled, write.record.key, fieldId, { id: write.id, seq: this.seq, status: { state: "pending", value: typed.value as CollectionValue } });
       }

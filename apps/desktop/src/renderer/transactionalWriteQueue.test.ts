@@ -287,6 +287,19 @@ describe("a confirmed value a page's records do not show yet", () => {
     expect(page.confirmed(page.readStarted(), "2", 4)).toEqual({ values: { name: "Bea" }, version: 6 });
   });
 
+  it("leaves no step for its record once the record's deletion is confirmed", async () => {
+    const rules = host(), { queue, page } = open(rules);
+    queue.enqueue(edit(row(2, 4), name, "Beatrice"));
+    rules.calls[0]!.answer.resolve({ result: { id: 2, version: 5 } });
+    await vi.waitFor(() => expect(queue.size).toBe(0));
+    expect(page.confirmed(page.readStarted(), "2", 4).version).toBe(5);
+    queue.enqueue({ kind: "delete", record: row(2, 5), operationId: "delete", label: "Deleted the record" });
+    await vi.waitFor(() => expect(rules.calls).toHaveLength(2));
+    rules.calls[1]!.answer.resolve({ result: { id: 2 } });
+    await vi.waitFor(() => expect(queue.size).toBe(0));
+    expect(page.confirmed(page.readStarted(), "2", 4).version).toBe(4);
+  });
+
   it("stays through a read of its record that started before the change was confirmed", async () => {
     const rules = host(), { queue, page } = open(rules);
     const before = page.readStarted();
