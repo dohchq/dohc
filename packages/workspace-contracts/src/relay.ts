@@ -694,8 +694,11 @@ export interface RelayNotice {
 }
 
 // With `scope=phone`, a page leaves out rows in owned workspaces whose owner
-// turned off "Show on phone", and rows whose target is a secret or ignored
-// file or a thread on one; a removed row carries no title. The cursor still
+// turned off "Show on phone", rows whose target is a secret or ignored file or
+// a thread on one, and every row whose kind's words the relay can't confirm:
+// an automation's rows without their Collection's path, a mention or agent run
+// naming no place, an automation wake, and any kind it doesn't know. A removed
+// row carries no title. The cursor still
 // moves past what it left out, so a page can be empty with `hasMore`. With
 // `wait`, a read whose cursor is caught up waits for the next change.
 export interface RelayNoticePage {
