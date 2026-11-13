@@ -155,7 +155,7 @@ export async function remoteLiveDocument(options: {
     const refused = state?.status === "quarantined" && LIVE_UPDATE_REFUSAL_VALUES.some(reason => reason === state.reason);
     const unknown = changed && !refused;
     // The provider can fail on a closing socket before its close arrives, so a closing socket's reason is read first.
-    // The socket's close timeout bounds the wait.
+    // The provider's terminate and the call's deadline bound the wait.
     if (closed && !changed && !(error instanceof LiveDocumentRefusal) && !open() && !signal.aborted)
       await Promise.race([closed, new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), {once: true}))]);
     const refusal = error instanceof LiveDocumentRefusal ? error : changed ? undefined : limited, failure = refusal ?? error;
