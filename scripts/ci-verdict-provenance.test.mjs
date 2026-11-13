@@ -861,8 +861,8 @@ test("job names match the workflow graph and timeout backstops", () => {
 
 test("cloud matrices run every JavaScript and Rust shard with separate evidence", () => {
   const { jobs } = load(workflow);
-  assert.equal(JS_SHARDS, 20);
-  assert.equal(RUST_SHARDS, 20);
+  assert.equal(JS_SHARDS, 14);
+  assert.equal(RUST_SHARDS, 8);
   for (const [name, count, finalJob, scope, command] of [
     [
       "javascript-workers",
@@ -929,9 +929,13 @@ test("cloud matrices run every JavaScript and Rust shard with separate evidence"
   }
 });
 
-test("the workflow graph pins its peak concurrent jobs", () => {
+test("the workflow graph pins its total and peak concurrent jobs", () => {
   const { jobs } = load(workflow),
     names = Object.keys(jobs);
+  assert.equal(
+    names.reduce((total, name) => total + (jobs[name].strategy?.matrix?.shard?.length ?? 1), 0),
+    29,
+  );
   const ancestors = (name) => {
     const needs = jobs[name].needs ?? [];
     return new Set(
@@ -979,7 +983,7 @@ test("the workflow graph pins its peak concurrent jobs", () => {
   assert.equal(concurrent(initial), JS_SHARDS + 5);
   assert.equal(concurrent(rustPhase), RUST_SHARDS + 5);
   assert.equal(peak, Math.max(JS_SHARDS + 5, RUST_SHARDS + 5));
-  assert.equal(peak, 25);
+  assert.equal(peak, 19);
   assert.ok(peak <= 60, "one combined gate fits the plan limit");
 });
 
