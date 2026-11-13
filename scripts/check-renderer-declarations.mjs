@@ -3,6 +3,7 @@
 // A declaration carries its CLI and MCP doors, which the renderer does not ship.
 // The check follows value imports from every renderer source through relative modules and @dohc packages.
 // It does not follow npm packages or a package export with no TypeScript source.
+// It refuses a dynamic import whose module is not a string, because it cannot follow one.
 import { existsSync, globSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, posix, resolve } from "node:path";
@@ -26,24 +27,30 @@ function childNodes(node) {
 const typeOnly = node => node.importKind === "type" || node.exportKind === "type"
   || node.specifiers?.length > 0 && node.specifiers.every(specifier => specifier.importKind === "type" || specifier.exportKind === "type");
 
-// The modules a file loads when it runs, and whether it declares an operation family.
+// A family file in workspace-contracts declares operations, however it spells its type.
+const declarationFile = /^packages\/workspace-contracts\/src\/(?:.+\/)?[^/]*Declarations\.ts$/u;
+
+// The modules a file loads when it runs, whether it declares an operation
+// family, and whether it loads a module it does not name.
 function readModule(path, source) {
   const program = parse(source, { sourceType: "module", plugins: path.endsWith(".tsx") ? ["typescript", "jsx"] : ["typescript"] }).program;
   const imports = [];
-  let declares = false;
+  let declares = declarationFile.test(path);
+  let unnamed = false;
   const visit = node => {
     if (["ImportDeclaration", "ExportNamedDeclaration", "ExportAllDeclaration"].includes(node.type)) {
       if (node.source && !typeOnly(node)) imports.push(node.source.value);
     } else if (node.type === "ImportExpression" || node.type === "CallExpression" && node.callee.type === "Import") {
       const [argument] = node.type === "ImportExpression" ? [node.source] : node.arguments;
       if (argument?.type === "StringLiteral") imports.push(argument.value);
+      else unnamed = true;
     } else if (node.type === "TSSatisfiesExpression" && node.typeAnnotation.typeName?.name === "OperationFamily") {
       declares = true;
     }
     for (const child of childNodes(node)) visit(child);
   };
   visit(program);
-  return { imports, declares };
+  return { imports, declares, unnamed };
 }
 
 function workspacePackages(root) {
@@ -82,7 +89,8 @@ export function checkRendererDeclarations(root) {
   const failures = [];
   for (let index = 0, queue = [...sources]; index < queue.length; index += 1) {
     const path = queue[index];
-    const { imports, declares } = readModule(path, readFileSync(join(root, path), "utf8"));
+    const { imports, declares, unnamed } = readModule(path, readFileSync(join(root, path), "utf8"));
+    if (unnamed) failures.push(path + " imports a module named by an expression, which this check cannot follow. Name the module with a string.");
     if (declares) {
       const chain = [path];
       while (reachedFrom.get(chain[0])) chain.unshift(reachedFrom.get(chain[0]));

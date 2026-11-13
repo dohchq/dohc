@@ -65,3 +65,28 @@ test("ignores renderer tests, which do not ship", t => {
     "apps/desktop/src/renderer/Panel.test.tsx": 'import { LINKS_DECLARATIONS } from "@dohc/workspace-contracts/links-declarations";\nexport const tools = LINKS_DECLARATIONS;',
   }), []);
 });
+
+test("recognises a declaration file by its name, however it spells the family type", t => {
+  const panelLoads = { [panel]: 'import { LINKS_DECLARATIONS } from "@dohc/workspace-contracts/links-declarations";\nexport const tools = LINKS_DECLARATIONS;' };
+  for (const declaration of [
+    "export const LINKS_DECLARATIONS: OperationFamily = { linksIn: { input: LinksInInput } };",
+    "export const LINKS_DECLARATIONS = { linksIn: { input: LinksInInput } } as const satisfies Family;",
+    "export const LINKS_DECLARATIONS = { linksIn: { input: LinksInInput } } as const satisfies Contracts.OperationFamily;",
+  ]) {
+    const [failure, ...rest] = failures(t, { ...panelLoads, "packages/workspace-contracts/src/linksDeclarations.ts": 'import { LinksInInput } from "./links";\n' + declaration });
+    assert.deepEqual(rest, [], declaration);
+    assert.match(failure, /^apps\/desktop\/src\/renderer\/Panel\.tsx loads the operation declarations in packages\/workspace-contracts\/src\/linksDeclarations\.ts at run time\./u, declaration);
+  }
+});
+
+test("refuses a dynamic import whose module is not a string", t => {
+  for (const statement of [
+    "export const later = () => import(`@dohc/workspace-contracts/links-declarations`);",
+    'const name = "@dohc/workspace-contracts/links-declarations";\nexport const later = () => import(name);',
+    'export const later = (family) => import(`@dohc/workspace-contracts/${family}-declarations`);',
+  ]) {
+    assert.deepEqual(failures(t, { [panel]: statement }), [
+      "apps/desktop/src/renderer/Panel.tsx imports a module named by an expression, which this check cannot follow. Name the module with a string.",
+    ], statement);
+  }
+});
