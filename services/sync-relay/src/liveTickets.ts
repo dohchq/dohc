@@ -17,7 +17,7 @@ import { hashLiveTicketToken, mintLiveTicketToken } from "./liveTicketSecurity.j
 export interface LiveTicketOptions {
   readonly storage: Pick<
     SyncRelayStorage,
-    "mintLiveTicket" | "readLiveTicketTarget" | "redeemLiveTicket"
+    "mintLiveTicket" | "readLiveTicketTarget" | "redeemLiveTicket" | "resolveLiveObjectHostBinding"
   >;
   readonly audience: string;
   readonly key: BinaryLike;
@@ -79,8 +79,22 @@ export function createLiveTickets(options: LiveTicketOptions) {
         return null;
       }
       try {
-        const report = await readReport(scope, objectId, signal);
-        if (report === null) return null;
+        signal?.throwIfAborted();
+        const candidate = await currentBinding({ ...scope }, objectId, signal);
+        signal?.throwIfAborted();
+        if (candidate === null) {
+          // A binding that is still current means the live host changed while this ran, as when
+          // it reconnects. That is a failure to ask again after, not a refusal.
+          if (storage.resolveLiveObjectHostBinding(scope, objectId).kind === "current")
+            throw new Error("The live host changed.");
+          return null;
+        }
+        let report: TicketHostReport;
+        try {
+          report = snapshotTicketHostReport(candidate);
+        } catch {
+          return null;
+        }
         const token = mintLiveTicketToken(entropy);
         const tokenHash = hashLiveTicketToken(token, key);
         const minted = storage.mintLiveTicket({

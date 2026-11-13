@@ -1864,6 +1864,12 @@ describe("a link ticket while the relay is busy", () => {
     expect(await Promise.all(waiting)).toEqual(waiting.map(() => opaque));
   });
 
+  it("asks a holder to try again when the live host reconnects during a ticket", async () => {
+    const f = await fixture(limits, true);
+    f.invalidated.abort();
+    expect(await ask(f)).toEqual(tryAgain);
+  });
+
   it("asks a holder to try again when a ticket takes too long", async () => {
     const f = await fixture(limits, true);
     vi.spyOn(f.tickets, "mint").mockImplementation(() => new Promise(() => {}));
