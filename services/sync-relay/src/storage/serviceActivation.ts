@@ -430,7 +430,8 @@ export class ServiceActivationStore {
       if (result.kind === "accepted") throw new Error("Ordinary fold validation answered for an activation.");
       return result;
     };
-    // More history after the checkpoint than one read takes folds into it a run of pages at a time, so no history is refused for its length.
+    // More than one page of history after the checkpoint folds into it a run of pages at a time, so the last read walks at most
+    // one page and no history is refused for its length.
     let checkpoint = lineage, found = read(checkpoint);
     while (found?.kind === "fold" && lineage) {
       input.signal?.throwIfAborted();
