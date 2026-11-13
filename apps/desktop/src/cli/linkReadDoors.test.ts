@@ -324,13 +324,8 @@ type SocketRead = (verb: string) => (workspace: CliRegistryWorkspace, input: unk
 function withReads(options: CliServerOptions, read: SocketRead): CliServerOptions {
   return {
     ...options,
-    chatLinks: read("chatLinks") as NonNullable<CliServerOptions["chatLinks"]>,
-    chatFileMentions: read("chatFileMentions") as NonNullable<CliServerOptions["chatFileMentions"]>,
-    links: {
-      edges: read("linksEdges") as NonNullable<CliServerOptions["links"]>["edges"],
-      incoming: read("linksIn") as NonNullable<CliServerOptions["links"]>["incoming"],
-      resolve: read("linksResolve") as NonNullable<CliServerOptions["links"]>["resolve"],
-    },
+    reads: Object.fromEntries(["chatLinks", "chatFileMentions", "linksEdges", "linksIn", "linksResolve"]
+      .map(verb => [verb, read(verb)])) as CliServerOptions["reads"],
   };
 }
 

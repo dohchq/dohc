@@ -77,6 +77,7 @@ import {
   type CliServerOptions,
   type CliVersionsPort,
   type CliWorkspaceContext,
+  type DeclaredReaders,
 } from "./cliServer";
 import { agentWriteAuthor, workspaceRequesters } from "./desktopCliServer";
 import { cliMessageId, cliThreadId } from "@dohc/workspace-operations/chats";
@@ -1400,8 +1401,8 @@ describe("CLI socket server", () => {
     expect(full).toMatchObject({ ok: true });
     if (!full.ok) throw Error(full.reason);
     expect(full.groups.some(group => group.channelWireId === null)).toBe(true);
-    const read = vi.fn<NonNullable<CliServerOptions["chatLinks"]>>(async () => null);
-    serverOptions.chatLinks = read;
+    const read = vi.fn<DeclaredReaders<CliRegistryWorkspace>["chatLinks"]>(async () => null);
+    serverOptions.reads = { chatLinks: read };
     expect(await invoke("chatLinks", { cwd: workspaceRoot, actor: "agent", group: listed.groups[0]!.name })).toBeNull();
     expect(read).not.toHaveBeenCalled();
   });
@@ -1416,8 +1417,8 @@ describe("CLI socket server", () => {
       channelWireId = await store!.getChannelWireId({ workspaceId: WORKSPACE_ID, channelId: channel.id });
       await makeChannelReadOnly(channel.id);
     };
-    const read = vi.fn<NonNullable<CliServerOptions["chatLinks"]>>(async () => null);
-    serverOptions.chatLinks = read;
+    const read = vi.fn<DeclaredReaders<CliRegistryWorkspace>["chatLinks"]>(async () => null);
+    serverOptions.reads = { chatLinks: read };
 
     expect(await invoke("chatLinks", { cwd: workspaceRoot, actor: "agent", group: "joined" })).toBeNull();
     expect(channelWireId).toBeTruthy();
@@ -1435,8 +1436,8 @@ describe("CLI socket server", () => {
     const channelWireId = groups.groups[0]!.channelWireId;
     expect(channelWireId).toBeTruthy();
     expect(full.groups.some(group => group.channelWireId === channelWireId)).toBe(true);
-    const read = vi.fn<NonNullable<CliServerOptions["chatLinks"]>>(async () => null);
-    serverOptions.chatLinks = read;
+    const read = vi.fn<DeclaredReaders<CliRegistryWorkspace>["chatLinks"]>(async () => null);
+    serverOptions.reads = { chatLinks: read };
     const group = groups.groups[0]!;
     for (const target of [group.name, group.id, group.id.slice(0, -1)]) {
       const cli = await executeCli({

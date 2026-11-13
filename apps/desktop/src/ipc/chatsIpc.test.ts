@@ -1198,7 +1198,7 @@ it("IPC, CLI and MCP share Links, cursors, omissions and conversation admission"
   const options:CliServerOptions={
     chatWrites:h.chatWrites,localUserDisplayName:()=>"Sam",localPersonId:()=>"local",agentRunDepth:()=>0,dispatchedAgent:()=>null,dispatchedRunId:()=>null,dispatchedRunSecret:()=>null,agentWriteRunId:()=>null,agentRunWorkspace:()=>undefined,connectedAgent:async()=>null,
     stateDir:root,listWorkspaces:()=>[{workspaceId:"workspace",rootPath:root,readOnly:true}],
-    chatLinks:(workspace,input)=>h.chatLinks(workspace.workspaceId,input),
+    reads:{chatLinks:(workspace,input)=>h.chatLinks(workspace.workspaceId,input)},
     openWorkspace:async()=>{throw Error("CLI Links must use the shared reader");},
   };
   const request=async(value:CliRequestWithoutToken,serverOptions=options)=>{

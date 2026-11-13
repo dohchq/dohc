@@ -140,11 +140,15 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
     notifyRenderer: () => undefined,
   });
   const dependencies: Dependencies = {
-    chatFileMentions: vi.fn(async () => null),
     notices: vi.fn(async () => []),
-    chatLinks: vi.fn(async () => null),
     heldChanges: { change: vi.fn(async () => null) },
-    links: { edges: vi.fn(async () => ({versionId:"main",files:[],entries:[],unchecked:[],complete:true,indexBuilding:false,mountsCovered:true,nextCursor:null})), incoming: vi.fn(async () => null), resolve: vi.fn(async () => ({ versionId: "main", results: [], mountsCovered: true })) },
+    reads: {
+      chatFileMentions: vi.fn(async () => null),
+      chatLinks: vi.fn(async () => null),
+      linksEdges: vi.fn(async () => ({versionId:"main",files:[],entries:[],unchecked:[],complete:true,indexBuilding:false,mountsCovered:true,nextCursor:null})),
+      linksIn: vi.fn(async () => null),
+      linksResolve: vi.fn(async () => ({ versionId: "main", results: [], mountsCovered: true })),
+    },
     automations: () => ({ automationIdAt: vi.fn(), runs: vi.fn(), run: vi.fn(), serverRuns: vi.fn(), serverRun: vi.fn(), retry: vi.fn() }),
     buttons: () => ({ inspect: vi.fn(async () => []), press: vi.fn() }),
     findWorkspace: (id) => rows.get(id) ?? null,
@@ -2473,7 +2477,7 @@ it("gives CLI and MCP the IPC link answer in a share without Chats capture", asy
   f.dependencies.sharedViewOf = () => ({ shareId: "share" }) as ReturnType<Dependencies["sharedViewOf"]>;
   const resolved = { versionId: "main", results: [{ path: "target.md", fragment: "heading" }], mountsCovered: true };
   const input = { source: "source.md", literals: [{ kind: "wikilink" as const, literal: "target#heading" }] };
-  f.dependencies.links.resolve = vi.fn(async () => resolved);
+  f.dependencies.reads.linksResolve = vi.fn(async () => resolved);
   await f.create().startDesktopCliServer();
   const token = "a".repeat(64);
   const send = async (request: CliRequestWithoutToken) => {
@@ -2488,11 +2492,11 @@ it("gives CLI and MCP the IPC link answer in a share without Chats capture", asy
   expect(await requestDeclaredTool({ root: f.workspace.rootPath, home: "state", request: send }, "dohc_links_resolve", input)).toEqual(resolved);
   expect(f.dependencies.openWorkspaceActivity).not.toHaveBeenCalled();
   expect(f.dependencies.linkedChatStoreFor).not.toHaveBeenCalled();
-  expect(f.dependencies.links.resolve).toHaveBeenCalledTimes(2);
+  expect(f.dependencies.reads.linksResolve).toHaveBeenCalledTimes(2);
   const held = deferred();
-  f.dependencies.links.resolve = vi.fn(async () => { await held.promise; return resolved; });
-  const pending = f.options().links!.resolve(f.workspace, input);
-  await vi.waitFor(() => expect(f.dependencies.links.resolve).toHaveBeenCalledOnce());
+  f.dependencies.reads.linksResolve = vi.fn(async () => { await held.promise; return resolved; });
+  const pending = f.options().reads!.linksResolve!(f.workspace, input);
+  await vi.waitFor(() => expect(f.dependencies.reads.linksResolve).toHaveBeenCalledOnce());
   const retired = f.authorities.invalidate(f.workspace.workspaceId);
   held.release();
   // Finished work reports as finished when the workspace closes during it.
@@ -2503,7 +2507,7 @@ it("gives CLI and MCP the IPC link answer in a share without Chats capture", asy
 it("returns an incoming page directly through CLI and MCP", async () => {
   const f = fixture(await createTestScratch("links-in-cli-"));
   const page = { versionId: "main", subject: { path: "a.md", objectId: "a" }, entries: [], unchecked: [], complete: true, indexBuilding: false, mountsCovered: true, nextCursor: null };
-  f.dependencies.links.incoming = vi.fn(async () => page);
+  f.dependencies.reads.linksIn = vi.fn(async () => page);
   await f.create().startDesktopCliServer();
   const token = "a".repeat(64);
   const send = async (request: CliRequestWithoutToken) => {
@@ -2589,7 +2593,7 @@ it("refuses a held change read for a note inside a share mount, asked from the w
 it("returns an edge page directly through CLI and MCP", async () => {
   const f = fixture(await createTestScratch("links-edges-cli-"));
   const page = { versionId: "main", files: [], entries: [], unchecked: [], complete: true, indexBuilding: false, mountsCovered: true, nextCursor: null };
-  f.dependencies.links.edges = vi.fn(async () => page);
+  f.dependencies.reads.linksEdges = vi.fn(async () => page);
   await f.create().startDesktopCliServer();
   const token = "a".repeat(64);
   const send = async (request: CliRequestWithoutToken) => {

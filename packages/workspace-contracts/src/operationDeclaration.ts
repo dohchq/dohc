@@ -58,13 +58,13 @@ export function byName<Declaration, Name extends string>(
   return named as Record<Name, Declaration>;
 }
 
-// Gives each named declaration one value, under the same name.
-export function mapNamed<Name extends string, Declaration, Value>(
-  named: Readonly<Record<Name, Declaration>>,
-  value: (declaration: Declaration) => Value,
+// Gives each named entry one value, under the same name.
+export function mapNamed<Name extends string, Entry, Value>(
+  named: Readonly<Record<Name, Entry>>,
+  value: (entry: Entry, name: Name) => Value,
 ): Readonly<Record<Name, Value>> {
   const values: Partial<Record<Name, Value>> = {};
-  for (const name of Object.keys(named) as Name[]) values[name] = value(named[name]);
+  for (const name of Object.keys(named) as Name[]) values[name] = value(named[name], name);
   return values as Record<Name, Value>;
 }
 
