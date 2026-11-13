@@ -8,7 +8,7 @@ This records a planned design. None of it is built yet. Today an agent dohc star
 
 In the plan, every agent a person chats with has an agent thread, its own continuing conversation in its tool. When a person's message wakes the agent, dohc forwards that message to the agent thread. dohc sends the new message, where it came from, and the person's note for that agent. It sends no other chat messages, and the agent reads the chat with dohc's tools when it needs more. A command the person runs as an agent gets only the new message when the person says the agent keeps its own memory. Otherwise it gets the chat's recent messages, as it does today. The agent alone decides what it posts back. dohc never posts the agent's words for it.
 
-An agent thread works in a folder of its own, and the CLI finds its workspace from the folder it runs in today. So a forwarded message names its workspace, and the instructions it carries for reading the chat and replying name that workspace too.
+An agent thread works in a folder of its own, and the CLI finds its workspace from the folder it runs in today. So a forwarded message names its workspace by an id no other person can set, and the instructions it carries for reading the chat and replying use that id. A workspace's name never selects a workspace, because other people can change it.
 
 A person works with one agent for weeks in a tool built for that. We chose forwarding so dohc chat is a second way to reach the same agent, on any device, without dohc becoming the place the agent runs.
 
