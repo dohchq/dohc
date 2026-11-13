@@ -798,7 +798,7 @@ it.each([false, true])(
 
 // Tabs that keep reconnecting fill a caller's share of tickets until those tickets expire.
 it.each([false, true])(
-  "asks a link holder to try again while its share of tickets is full; link=%s",
+  "asks a link holder or agent to try again while its share of tickets is full; link=%s",
   async (link) => {
     const f = await fixture(limits, link);
     const ask = async () => {
@@ -815,6 +815,12 @@ it.each([false, true])(
         ? [503, linkRefusalBody("link_live_unavailable")]
         : [404, { ok: false, error: "not found" }],
     );
+    if (!link) return;
+    // An agent on the same link holds its own share.
+    f.useCredentials(linkAgent(f).headers);
+    expect((await ask())[0]).toBe(200);
+    expect((await ask())[0]).toBe(200);
+    expect(await ask()).toEqual([503, linkRefusalBody("link_live_unavailable")]);
   },
 );
 
