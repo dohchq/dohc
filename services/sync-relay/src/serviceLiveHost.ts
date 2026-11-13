@@ -454,6 +454,8 @@ export async function startServiceLiveHost(options: {
   // call that sent the engine anything but what an idle pass sends asks for one
   // as it ends. One that applied and settled nothing, as when an idle desktop's
   // connection opens with nothing to deliver, left a pass nothing and asks for none.
+  // The counts are the host's, so another caller's request while the call runs
+  // asks for a pass too.
   const deliver = <T>(document: LiveDocumentKey, callerSignal: AbortSignal | undefined,
     run: (consumer: ReturnType<typeof configuredConsumer>, joined: AbortSignal) => Promise<T>) => {
     configuredConsumer(document);
@@ -1147,16 +1149,17 @@ export async function startServiceLiveHost(options: {
         const row = hosted.get(key);
         if (!row || !activation!.dormant(row.target)) return;
         const workspaceId = row.target.workspaceId;
-        // While a sibling is mid-activation the open skips catch-up, as awake documents
-        // do, and converges once that sibling resolves. Waiting here would let one stuck
-        // sibling keep every dormant document in the workspace from opening.
-        if (activation!.workspaceReady(workspaceId) && (await pull(attachments.get(workspaceId)!, joined, "open")).hasMore) {
-          throw new Error("Hosted replication has more pages.");
-        }
-        activation!.wake(row.target); touch(key);
-        // A pass publishes what the reload settled.
-        try {await activation!.activate(row.target, joined, settleTarget);}
-        finally {nudgePass();}
+        // A pass continues a catch-up that stopped at its page budget or failed, and publishes what a reload settled.
+        try {
+          // While a sibling is mid-activation the open skips catch-up, as awake documents
+          // do, and converges once that sibling resolves. Waiting here would let one stuck
+          // sibling keep every dormant document in the workspace from opening.
+          if (activation!.workspaceReady(workspaceId) && (await pull(attachments.get(workspaceId)!, joined, "open")).hasMore) {
+            throw new Error("Hosted replication has more pages.");
+          }
+          activation!.wake(row.target); touch(key);
+          await activation!.activate(row.target, joined, settleTarget);
+        } finally {nudgePass();}
       }));
     };
     // A held-document read asks the engine for a workspace this daemon replicates,

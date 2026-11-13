@@ -8084,7 +8084,36 @@ it("settles an edit a connection applies on an idle host at once, with the fixed
   expect(o.applied.has(edit.deliveryId)).toBe(true);
   await vi.waitFor(() => expect(engineParams(o, "liveApplication.settle").at(-1)).toMatchObject({terminalReceipt: edit}));
   expect(o.tip()).toEqual(edit);
+  const methods = () => o.client().sendRequest.mock.calls.map(call => ((call as unknown[])[0] as {method: string}).method);
+  await vi.waitFor(() => expect(methods().lastIndexOf("sync.push")).toBeGreaterThan(methods().lastIndexOf("liveApplication.settle")));
   expect(passes).toBeGreaterThanOrEqual(1);
+  expect(paced.clock.nowMs()).toBe(idle + paced.poll);
+});
+
+// A dormant note's open first pulls what the relay received. The relay was written by another process, so no write
+// notice came, and the pull stopped at its page budget: the open is refused, and the note stays dormant with its
+// workspace's catch-up unfinished. No connection change asks for a pass any more.
+// Proves: that open still asks for the pass that continues the catch-up, which starts at once when the idle pause
+// has already lasted one poll interval, and does not wait out the pause.
+it("continues the catch-up a dormant note's open left unfinished at once, with the fixed pass held back", async () => {
+  const paced = pacedPasses(), o = await enrolledServiceHost({paced, frameChanges: true});
+  const unloaded = () => o.membership.filter(row => row.method === "liveApplication.unloadDocument").length;
+  // The note unloads idle, ten minutes after its last connection, and the host goes back to its idle interval.
+  let now = Date.now();
+  vi.spyOn(Date, "now").mockImplementation(() => now);
+  now += 600_000;
+  await paced.until(o.f, () => unloaded() === 1);
+  expect(unloaded()).toBe(1);
+  await paced.until(o.f, () => paced.resting() === paced.ceiling);
+  expect(paced.resting()).toBe(paced.ceiling);
+  const idle = paced.clock.nowMs(), pending = () => o.host.hostedPulls("workspace").reasons.pending ?? 0, before = pending();
+  paced.clock.advance(idle + paced.poll);
+  o.replies.pass = {hasMore: true, fetched: 1, applied: 1};
+  const close = liveEditors(o.f.storage).acquire(o.sibling);
+  await expect(o.host.captureNative(o.binding)).rejects.toThrow("Hosted replication has more pages.");
+  close();
+  // The pass that pulls on runs with the clock where the open found it.
+  await vi.waitFor(() => expect(pending()).toBeGreaterThan(before));
   expect(paced.clock.nowMs()).toBe(idle + paced.poll);
 });
 
