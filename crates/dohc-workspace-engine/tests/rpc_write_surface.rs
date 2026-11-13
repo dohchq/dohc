@@ -3,7 +3,6 @@
 
 use crate::common;
 
-use base64::Engine as _;
 use common::*;
 use dohc_engine_protocol::{
     ErrorCode,

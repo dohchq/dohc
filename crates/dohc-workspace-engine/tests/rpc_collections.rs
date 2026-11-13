@@ -28,7 +28,7 @@ use dohc_workspace_engine::{
     RECORD_FIELD_CHANGED_EVENT, RECORD_UPDATED_EVENT, root_binding::write_root_binding,
 };
 use serde_json::{Value, json};
-use std::{fmt::Write as _, sync::Arc};
+use std::sync::Arc;
 
 const WORKSPACE_ID: &str = "ws-rpc-collections";
 const RECORD_ID: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";

@@ -11,7 +11,7 @@ use dohc_engine_protocol::{
     transport::{EngineTransport, InProcessTransport, RequestContext},
     wire::WorkspaceHandle,
 };
-use dohc_engine_storage::{EngineStore, NoFaults};
+use dohc_engine_storage::EngineStore;
 use dohc_engine_testkit::ScratchDir;
 use dohc_workspace_engine::{
     CAPTURE_INITIAL_SETTLED_EVENT, CaptureApplyProbe, EARLY_IMPORT_MIN_ADDED_FILES,

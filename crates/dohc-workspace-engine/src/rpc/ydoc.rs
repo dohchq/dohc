@@ -2769,7 +2769,6 @@ mod tests {
     use dohc_engine_protocol::transport::RequestContext;
     use dohc_engine_protocol::wire::Response;
     use dohc_engine_protocol::wire::WorkspaceHandle;
-    use dohc_engine_runtime::RuntimeError;
     use dohc_engine_runtime::WorkspaceSupervisor;
     use dohc_engine_runtime::actor::YdocSeedMaterialization;
     use dohc_engine_testkit::ScratchDir;

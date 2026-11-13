@@ -2551,9 +2551,6 @@ impl EngineService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dohc_engine_runtime::RelayOperationOutcome;
-    use dohc_engine_sync::ShareCursor;
-    use dohc_engine_sync::SyncPassOutcome;
     use serde_json::json;
 
     /// `count` documents held for work waiting, of about 110 bytes each.
@@ -3500,12 +3497,11 @@ mod tests {
 
     /// A loopback relay whose first log request waits for `release`. A repair
     /// test can hold the first lookup after the probe instead. The held request
-    /// sets `started`. While `refuse_claims` is set, every claim is refused.
+    /// sets `started`.
     struct PagedRelay {
         base_url: String,
         ops: Arc<std::sync::Mutex<Vec<Value>>>,
         started: Arc<std::sync::atomic::AtomicBool>,
-        refuse_claims: Arc<std::sync::atomic::AtomicBool>,
         release: Option<std::sync::mpsc::Sender<()>>,
         stop: Arc<std::sync::atomic::AtomicBool>,
         thread: Option<std::thread::JoinHandle<()>>,
@@ -3524,14 +3520,12 @@ mod tests {
             let base_url = format!("http://{}", listener.local_addr().expect("relay address"));
             let ops = Arc::new(std::sync::Mutex::new(Vec::new()));
             let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let refuse_claims = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let (release, released) = std::sync::mpsc::channel();
             let thread = std::thread::spawn({
-                let (ops, started, refuse_claims, stop) = (
+                let (ops, started, stop) = (
                     Arc::clone(&ops),
                     Arc::clone(&started),
-                    Arc::clone(&refuse_claims),
                     Arc::clone(&stop),
                 );
                 move || {
@@ -3547,7 +3541,6 @@ mod tests {
                             &ops,
                             &blobs,
                             &started,
-                            &refuse_claims,
                             &mut released,
                             &mut repair_probe,
                         );
@@ -3558,7 +3551,6 @@ mod tests {
                 base_url,
                 ops,
                 started,
-                refuse_claims,
                 release: Some(release),
                 stop,
                 thread: Some(thread),
@@ -3608,7 +3600,6 @@ mod tests {
         ops: &std::sync::Mutex<Vec<Value>>,
         blobs: &std::collections::HashMap<String, String>,
         started: &std::sync::atomic::AtomicBool,
-        refuse_claims: &std::sync::atomic::AtomicBool,
         released: &mut Option<std::sync::mpsc::Receiver<()>>,
         repair_probe: &mut Option<bool>,
     ) -> std::io::Result<()> {
@@ -3696,12 +3687,7 @@ mod tests {
         } else {
             None
         };
-        let claim = method == "POST" && path == "/sync/workspaces";
         let (status, body) = match body {
-            _ if claim && refuse_claims.load(Ordering::SeqCst) => (
-                "409 Conflict",
-                json!({ "code": "stream_identity_mismatch" }).to_string(),
-            ),
             Some(body) => ("200 OK", body),
             None => ("404 Not Found", String::new()),
         };

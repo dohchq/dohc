@@ -327,7 +327,6 @@ pub(super) fn chunk(
 mod tests {
     use super::*;
     use crate::lock;
-    use base64::Engine as _;
     use dohc_engine_collab::{ContentKind, Ydoc};
     use dohc_engine_protocol::transport::{ConnectionOwner, EngineService as _, RequestContext};
     use dohc_engine_protocol::wire::WorkspaceHandle;
