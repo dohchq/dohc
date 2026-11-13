@@ -8091,6 +8091,34 @@ it("settles an edit a connection applies on an idle host at once, with the fixed
   expect(paced.clock.nowMs()).toBe(idle + paced.poll);
 });
 
+// #3796: once a minute the supervisor sweeps for notes nobody has used for ten minutes, by calling
+// `storage.reclaimIdleLiveDocuments`. The call below is all its sweep does. The sweep's timer is the supervisor's
+// own and is no part of this test.
+// Proves: a sweep that finds nothing to reclaim writes nothing, so it asks the host for no pass. The pause it lands
+// in stands, and the pauses after it grow to the idle interval as they do with no sweep.
+it("runs no pass for a reclaim sweep that finds nothing, and lets the pause keep growing", async () => {
+  const paced = pacedPasses(), o = await enrolledServiceHost({paced});
+  let passes = 0;
+  o.f.passEnds.add(() => {passes++;});
+  // A pass that was asked for is not idle, so the pause after it is one poll interval again.
+  notifyRelayWrite(o.f.storage);
+  await paced.step(o.f);
+  expect(paced.resting()).toBe(paced.poll);
+  const pauses: number[] = [];
+  for (let sweep = 0; sweep < 5; sweep++) {
+    const ended = passes, left = paced.resting();
+    // The note is shared for editing, so the sweep leaves it.
+    expect(o.f.storage.reclaimIdleLiveDocuments(Date.now())).toEqual([]);
+    await new Promise(resolve => setImmediate(resolve));
+    expect(passes).toBe(ended);
+    expect(paced.resting()).toBe(left);
+    await paced.step(o.f);
+    pauses.push(paced.resting()!);
+  }
+  expect(pauses).toEqual([500, 1_000, 2_000, 2_000, 2_000]);
+  expect(o.host.isDocumentReady(o.document)).toBe(true);
+});
+
 // A dormant note's open first pulls what the relay received. The relay was written by another process, so no write
 // notice came, and the pull stopped at its page budget: the open is refused, and the note stays dormant with its
 // workspace's catch-up unfinished. No connection change asks for a pass any more.
