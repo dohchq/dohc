@@ -551,7 +551,7 @@ test("@two-client a member posts in a Group, follows a level change, and sees an
     await expect(page.getByTestId("chats-message-body")).toContainText("Kickoff: read the plan.");
     await page.getByTestId("chats-thread-back").click();
     for (const account of [MEMBER, ADMIN]) {
-      const invited = await relayJson(relay.baseUrl, OWNER.token, `/sync/${workspaceId}/members/invites`, { method: "POST", body: JSON.stringify({ email: account.email }) });
+      const invited = await relayJson(relay.baseUrl, OWNER.token, `/sync/${workspaceId}/members/invites`, { method: "POST", body: JSON.stringify({ email: account.email, workspaceName: "Members chat" }) });
       expect(invited.status, invited.body).toBe(200);
     }
     const kaiId = (await membersView(relay, OWNER.token, workspaceId)).people.find((person) => person.email === ADMIN.email)!.memberId;
