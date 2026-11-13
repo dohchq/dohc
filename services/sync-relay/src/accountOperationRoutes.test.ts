@@ -445,6 +445,27 @@ describe("pages the relay hosts live", () => {
 
 });
 
+describe("file reads through the server's copy", () => {
+  function seedFiles(engine: TestEngine) {
+    for (const [path, text] of [["docs/plan.md", "# Plan\n"], ["docs/trips/lisbon.md", "Alfama\n"], ["Docs/old.md", "Old\n"]] as const) {
+      engine.files.seedTextFile({ workspace: "trip", path, text, objectId: `object-${path}` });
+    }
+    engine.listedHidden.push(".env", "docs/.env.local", "a/.env/b.md", "docs/.DS_Store.");
+    engine.files.seedBinaryFile({ workspace: "trip", path: "photo.png", bytes: [1, 2, 3], objectId: "object-photo" });
+  }
+  it("takes exactly the file reads' arguments, and words an engine failure without its detail", async () => {
+    const { engine, h } = await relay();
+    seedFiles(engine);
+    for (const [name, args] of [["listFiles", { cwd: "/" }], ["listFiles", { path: 1 }], ["listFiles", { recursive: "no" }],
+      ["readText", {}], ["readText", { path: "a.md", actor: "human" }]] as const) {
+      const response = await h(op("trip", name, args));
+      expect(response.status, `${name} ${JSON.stringify(args)}`).toBe(400);
+    }
+    engine.failing.set("versionedText.list", new Error("The engine could not open /srv/dohc/engine.db."));
+    expect(await answer(await h(op("trip", "listFiles")))).toEqual({ ok: false, reason: "failed to list files" });
+  });
+});
+
 describe("an account's change feed", () => {
 
   it("delivers a change made between a read and the feed's start, from the log alone", async () => {
@@ -666,6 +687,7 @@ describe("an account's chat writes through the server's copy", () => {
     };
   }
   type WriteRelay = Awaited<ReturnType<typeof writeRelay>>;
+  const schemaRefusal = (operation: string) => ({ ok: false, code: "bad_request", error: `the arguments do not fit ${operation}` });
 
   it("saves each write as the session's account by its name now, and answers a retry from its row with the author it first had", async () => {
     const f = await writeRelay();
@@ -702,6 +724,71 @@ describe("an account's chat writes through the server's copy", () => {
     f.engine.failing.clear();
     expect(await answer(await f.write("reply", lost))).toMatchObject({ ok: true, state: "saved", threadId: "thread-stay" });
     expect(f.engine.writes.at(-1)).toMatchObject({ method: CHATS_METHOD.messageSend, params: { authorDisplayName: "Ana", body: "Baixa" } });
+  });
+
+  it("refuses a field outside each write's schema, in an answer's resolves too, before the copy syncs", async () => {
+    const f = await writeRelay();
+    const valid: Record<string, Record<string, unknown>> = {
+      post: { operationId: "op", groupId: "channel-nowhere", body: "Hi" },
+      send: { operationId: "op", streamId: "channel-nowhere", body: "Hi" },
+      reply: { operationId: "op", threadId: "thread-stay", body: "Hi" },
+      react: { operationId: "op", messageId: "message-stay", emoji: "👍", state: "added" },
+    };
+    const forbidden: Record<string, unknown> = {
+      runId: "run", reported: { product: "Nova" }, work: { status: "done" }, agent: "Nova", attachments: [], cwd: "/", actor: "human",
+      agentId: "nova", token: "a".repeat(64), runSecret: "a".repeat(64), door: "cli",
+      author: { kind: "human", displayName: "Ben" }, authorKind: "human", authorDisplayName: "Ben", authorUserId: "ben", authorActorKey: "key",
+      idempotencyKey: "key", stageKey: "key", stageReceipt: true,
+    };
+    const requests: Array<[label: string, operation: string, args: Record<string, unknown>]> = [];
+    for (const [operation, args] of Object.entries(valid)) {
+      for (const [field, value] of Object.entries(forbidden)) requests.push([`${operation} ${field}`, operation, { ...args, [field]: value }]);
+    }
+    // IDs the server derives, where the write names no such target.
+    for (const operation of ["post", "send", "reply"]) requests.push([`${operation} messageId`, operation, { ...valid[operation], messageId: "message-mine" }]);
+    for (const operation of ["post", "send"]) requests.push([`${operation} threadId`, operation, { ...valid[operation], threadId: "thread-mine" }]);
+    for (const [field, value] of Object.entries({ ...forbidden, resolvedByMessageId: "message-mine", threadId: "thread-stay" })) {
+      requests.push([`resolves ${field}`, "reply", { ...valid.reply, resolves: { messageId: "message-poll", [field]: value } }]);
+    }
+    for (const [label, operation, args] of requests) {
+      const response = await f.write(operation, args);
+      expect(response.status, label).toBe(400);
+      expect(await json(response), label).toEqual(schemaRefusal(operation));
+    }
+    expect(f.rows()).toBe(0);
+    expect(f.engine.writes).toEqual([]);
+    expect(f.syncs).toEqual([]);
+
+    // Without them, each write fits its schema.
+    for (const [operation, args] of Object.entries(valid)) {
+      expect((await f.write(operation, { ...args, operationId: `op-${operation}` })).status, operation).toBe(200);
+    }
+  });
+
+  it("reads a write's arguments, and answers an unknown or reserved name as missing without reading them", async () => {
+    const f = await writeRelay();
+    const streamed = (operation: string) => {
+      const read = { pulled: false };
+      const request = new Request(`http://relay.test/sync/trip/ops/${operation}`, {
+        method: "POST", headers: { ...signedIn("ana"), "content-type": "application/json" }, duplex: "half",
+        body: new ReadableStream({ pull(controller) { read.pulled = true; controller.enqueue(new TextEncoder().encode("{}")); controller.close(); } },
+          { highWaterMark: 0 }),
+      } as RequestInit & { duplex: "half" });
+      return { request, read };
+    };
+    const missing = await denialBytes(await f.write("changes", {}));
+    for (const name of ["changes", "markRead", "retryWake", "groupCreate", "toString", "__proto__", "constructor"]) {
+      const { request, read } = streamed(name);
+      expect(await denialBytes(await f.h(request)), name).toBe(missing);
+      expect(read.pulled, name).toBe(false);
+    }
+    for (const name of ["post", "send", "reply", "react"]) {
+      const { request, read } = streamed(name);
+      const response = await f.h(request);
+      expect(await json(response), name).toEqual(schemaRefusal(name));
+      expect(read.pulled, name).toBe(true);
+    }
+    expect(f.syncs).toEqual([]);
   });
 
   it("keeps the body limit and the sign-in's rate on writes", async () => {

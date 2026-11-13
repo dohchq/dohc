@@ -1,3 +1,5 @@
+import type { StorageContext } from "./storage/context";
+import { fenceAccount, initializeAccountDeletion } from "./storage/accountDeletion";
 import { afterEach, describe, expect, it } from "vitest";
 import { errorResponse, notFound } from "./errors";
 import { pkceS256Challenge } from "./linkSecurity";
@@ -27,6 +29,7 @@ import {
 } from "./testing";
 
 const OWNER = "owner";
+const DELETION_KEY = "agent-connection-deletion-key-at-least-32-bytes";
 const WORKSPACE = "workspace-agents";
 const OWNER_SECOND_WORKSPACE = "workspace-agents-second";
 const REDIRECT = "http://127.0.0.1:43110/callback";

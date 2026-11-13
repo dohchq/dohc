@@ -399,6 +399,11 @@ describe("Undo on an Explorer notice", () => {
     await user.click(within(screen.getByRole("dialog", { name: "Notices" })).getByRole("button", { name: "Undo" }));
   }
 
+  const shell = (bridge: ReturnType<typeof undoBridge>, workspace: Workspace) => (
+    <DesktopWorkspaceShell workspace={workspace} workspaces={[WORKSPACE, OTHER_WORKSPACE]}
+      {...shellBootstrapProps(bridge)} onSwitchWorkspace={() => {}} />
+  );
+
   it("undoes a delete after the side panel hid the Explorer", async () => {
     const bridge = undoBridge();
     const user = userEvent.setup();
@@ -440,6 +445,14 @@ describe("Undo on an Explorer notice", () => {
     await act(async () => undone.resolve({ ok: false, reason: "Cannot undo the delete.", refusal: { code: "unexplained" } }));
     expect(screen.queryByText("Cannot restore a.md.")).toBeNull();
   });
+
+  async function renameTo(user: ReturnType<typeof userEvent.setup>, path: string, name: string) {
+    await user.click((await screen.findAllByTestId("tree-row")).find((row) => row.dataset.path === path)!);
+    await user.keyboard("{F2}");
+    const input = await screen.findByTestId("tree-edit-input");
+    await user.clear(input);
+    await user.type(input, `${name}{Enter}`);
+  }
 
   it("never shows workspace A's live-page refusal in workspace B", async () => {
     const title = `dohc can't rename "a.md" while it has live editing on`;

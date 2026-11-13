@@ -1,3 +1,4 @@
+import type { StorageContext } from "./storage/context";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fenceAccount, initializeAccountDeletion } from "./storage/accountDeletion";
 import { agentChannelWireId } from "@dohc/security-contract/chat-wire-ids";
