@@ -358,6 +358,17 @@ export function workspaceRoleOf(
   return { role: entry.role, memberId: entry.memberId };
 }
 
+/** The grant a member or admin holds on the workspace share, while it is current. The owner holds none. */
+export function workspaceMemberGrantId(
+  storage: StorageContext,
+  workspaceId: string,
+  userId: string,
+): string | null {
+  const role = workspaceRoleOf(storage, workspaceId, userId);
+  if (!role || role.role === "owner") return null;
+  return memberById(storage, workspaceId, role.memberId)?.grantId ?? null;
+}
+
 export function readWorkspaceMembers(
   storage: StorageContext,
   workspaceId: string,

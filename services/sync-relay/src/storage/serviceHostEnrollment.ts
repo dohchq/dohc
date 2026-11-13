@@ -6,9 +6,14 @@ import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-document
 import { validateUserWritePath } from "@dohc/workspace-core";
 import {
   effectiveShareSelector,
+  fileSideOf,
   isLiveEditShareSelector,
+  isWorkspaceSelector,
   parseStoredAnyShareSelectorJson,
+  pathVisibleThroughShare,
 } from "../shareFilter";
+import { readCurrentShareGrant } from "./currentShareGrant";
+import { workspaceMemberGrantId, workspaceMemberGrantIsCurrent } from "./workspaceMembers";
 import { parseWorkspaceId } from "../requestInputs";
 import { canonicalLiveSelector, currentLiveDocumentMoment } from "./liveDocumentAuthority";
 import { LIVE_RESTORE_OPERATIONS, UNFINISHED_RESTORE } from "./liveRestoreOperationSchema";
@@ -166,10 +171,16 @@ export interface ServiceHostEnrollment {
  * Why hosting is asked for. `personal-open` is an agent's open of a document,
  * `owner-open` the owner's open from a desktop or phone, which may enroll a
  * document for the first time, `owner-resume` the owner's Resume, and `share`
- * an owner Edit share that covers the path. Only Resume clears the owner's
+ * an owner Edit share that covers the path, and `member-open` a workspace member's
+ * open at Edit. Only Resume clears the owner's
  * Pause or Stop.
  */
-export type LiveHostingIntent = "personal-open" | "owner-open" | "owner-resume" | "share";
+export type LiveHostingIntent =
+  | "personal-open"
+  | "member-open"
+  | "owner-open"
+  | "owner-resume"
+  | "share";
 interface EnsureOwnedLiveDocumentCommon {
   workspaceId: string;
   path: string;
@@ -186,6 +197,8 @@ export type EnsureOwnedLiveDocumentInput = EnsureOwnedLiveDocumentCommon &
     | { intent: "owner-resume"; ownerUserId: string; held?: ServiceHostHeldActivation }
     /** The agent's credential at the fence its request read. The transaction reads its authority and reach again. */
     | { intent: "personal-open"; personal: PersonalCredential }
+    /** The signed-in account. The transaction reads its membership, grant and level. */
+    | { intent: "member-open"; userId: string }
   );
 /** A hosting answer that is the caller's to act on, not an error in the request. */
 export type LiveHostingRefusalReason =
@@ -828,8 +841,11 @@ function authorizeIntent(
   storage: StorageContext,
   input: EnsureOwnedLiveDocumentInput,
   workspaceId: string,
+  path: string,
   nowMs: number,
 ): string {
+  if (input.intent === "member-open")
+    return authorizeMemberOpen(storage, input.userId, workspaceId, path);
   if (input.intent !== "personal-open")
     return parseLiveUpdateIdentifier(input.ownerUserId, "owner ID");
   // The agent's token, connection, epoch and fence as this transaction finds them, then its reach at Edit.
@@ -845,6 +861,31 @@ function authorizeIntent(
   if (reach.level !== "edit") throw relayError("personal_agent_edit_needed");
   return connection.ownerUserId;
 }
+/** The member's current grant on the workspace share, at Edit, reaching the path. Any other answer reveals nothing. */
+function authorizeMemberOpen(
+  storage: StorageContext,
+  userId: string,
+  workspaceId: string,
+  path: string,
+): string {
+  const grantId = workspaceMemberGrantId(storage, workspaceId, userId);
+  const current =
+    grantId === null
+      ? null
+      : readCurrentShareGrant(storage, { grantId, principal: { kind: "user", userId } });
+  const stored = current && parseStoredAnyShareSelectorJson(current.share.selectorJson);
+  const selector = stored && effectiveShareSelector(stored, current.grant.access);
+  if (
+    !current ||
+    current.share.workspaceId !== workspaceId ||
+    !selector ||
+    !isWorkspaceSelector(selector) ||
+    !isLiveEditShareSelector(selector) ||
+    !pathVisibleThroughShare(fileSideOf(selector)!, path)
+  )
+    throw notFound();
+  return current.share.granterUserId;
+}
 function ensureInsideTransaction(
   storage: StorageContext,
   input: EnsureOwnedLiveDocumentInput,
@@ -854,15 +895,17 @@ function ensureInsideTransaction(
     nowMs = timestamp(input.nowMs);
   input.guard();
   // Resolve and authorize: the caller's owner owns the workspace at its current identity, and the path holds a current rich document.
-  const ownerUserId = authorizeIntent(storage, input, workspaceId, nowMs);
+  const ownerUserId = authorizeIntent(storage, input, workspaceId, path, nowMs);
   const identity = ownedIdentity(storage, workspaceId, ownerUserId);
   const shareId =
     input.intent === "share" ? parseLiveUpdateIdentifier(input.shareId, "share ID") : null;
   if (input.intent === "share")
     assertShareCovers(storage, { workspaceId, path, shareId: shareId!, ownerUserId });
   const owner = input.intent === "owner-open" || input.intent === "owner-resume";
+  // An open hears its answers. A share or Resume is an owner's request that failed.
+  const opening = input.intent === "personal-open" || input.intent === "member-open" || input.intent === "owner-open";
   const full = () =>
-    input.intent === "personal-open" || input.intent === "owner-open"
+    opening || input.intent === "owner-open"
       ? new LiveHostingRefusal("live_host_full")
       : relayError("quota_exceeded", CAPACITY_FULL);
   const held = input.intent === "owner-resume" ? input.held : undefined;
@@ -878,7 +921,6 @@ function ensureInsideTransaction(
       throw relayError("conflict", MOVED);
     throw notFound();
   }
-  const opening = input.intent === "personal-open" || input.intent === "owner-open";
   const objectId = currentMainDocument(storage, { workspaceId, path }, opening);
   if (current) {
     assertCurrent(storage, current, ownerUserId);
@@ -1326,7 +1368,16 @@ export function setServiceHostEnrollmentEnabled(
 
 const EDIT_SHARE_COLUMNS = `s.share_id,s.workspace_id,s.granter_user_id,s.selector_json,s.created_at_ms`;
 const ACTIVE_EDIT_GRANT = `EXISTS(SELECT 1 FROM sync_relay_share_grants g WHERE g.share_id=s.share_id AND g.status='active' AND g.access='edit')`;
-function coversEnrolledPath(value: Record<string, unknown>, path: string): boolean {
+/**
+ * Whether an active Edit grant on the share covers the path. On a workspace
+ * share that grant must be a current member's, and the reach is the whole
+ * workspace's files.
+ */
+function coversEnrolledPath(
+  storage: StorageContext,
+  value: Record<string, unknown>,
+  path: string,
+): boolean {
   const share: SyncRelayShareRow = {
     shareId: String(value.share_id),
     workspaceId: String(value.workspace_id),
@@ -1336,12 +1387,20 @@ function coversEnrolledPath(value: Record<string, unknown>, path: string): boole
   };
   const parsed = parseStoredAnyShareSelectorJson(share.selectorJson),
     selector = parsed && effectiveShareSelector(parsed, "edit");
-  return (
-    !!selector &&
-    isLiveEditShareSelector(selector) &&
-    canonicalLiveSelector(share, selector) &&
-    visibleSharePath(selector, path) === path
-  );
+  if (!selector || !isLiveEditShareSelector(selector)) return false;
+  if (isWorkspaceSelector(selector)) {
+    return (
+      pathVisibleThroughShare(fileSideOf(selector)!, path) &&
+      storage.db
+        .prepare(`SELECT grant_id FROM sync_relay_share_grants
+      WHERE share_id=? AND status='active' AND access='edit'`)
+        .all(share.shareId)
+        .some((grant) =>
+          workspaceMemberGrantIsCurrent(storage, share.shareId, String(grant.grant_id)),
+        )
+    );
+  }
+  return canonicalLiveSelector(share, selector) && visibleSharePath(selector, path) === path;
 }
 function coveredByEditGrant(
   storage: StorageContext,
@@ -1356,14 +1415,17 @@ function coveredByEditGrant(
       .prepare(`SELECT ${EDIT_SHARE_COLUMNS} FROM sync_relay_shares s
       WHERE s.share_id=? AND s.workspace_id=? AND s.granter_user_id=? AND ${ACTIVE_EDIT_GRANT}`)
       .get(enrollment.shareId, enrollment.workspaceId, enrollment.ownerUserId);
-    if (own && coversEnrolledPath(own, enrollment.path)) return true;
+    if (own && coversEnrolledPath(storage, own, enrollment.path)) return true;
   }
   const shares = storage.db
     .prepare(`SELECT ${EDIT_SHARE_COLUMNS} FROM sync_relay_shares s INDEXED BY ${CANDIDATE_INDEX}
     WHERE s.workspace_id=? AND s.granter_user_id=? AND ${ACTIVE_EDIT_GRANT}`)
     .iterate(enrollment.workspaceId, enrollment.ownerUserId);
   for (const value of shares)
-    if (value.share_id !== enrollment.shareId && coversEnrolledPath(value, enrollment.path))
+    if (
+      value.share_id !== enrollment.shareId &&
+      coversEnrolledPath(storage, value, enrollment.path)
+    )
       return true;
   return false;
 }
@@ -1388,7 +1450,7 @@ export function serviceHostEnrollmentsCoveredByShare(
     )
     .all(String(share.workspace_id), String(share.granter_user_id))
     .map(row)
-    .filter((enrollment) => coversEnrolledPath(share, enrollment.path));
+    .filter((enrollment) => coversEnrolledPath(storage, share, enrollment.path));
 }
 /**
  * The owner's restore that keeps the document's live session through its own

@@ -1037,3 +1037,102 @@ it("never reclaims a note the owner's restore kept live, and reclaims it once th
     requestedAtMs: past,
   });
 });
+
+// A workspace member's open. `member-1` joins the fixture's workspace at
+// once, and the owner sets members to `level`.
+type Fixture = Awaited<ReturnType<typeof fixture>>;
+const MEMBER = "member-1";
+function setMemberLevel(f: Fixture, level: "view" | "comment" | "edit") {
+  expect(f.storage.setWorkspaceMemberLevel({workspaceId: scope.workspaceId, actorUserId: "owner-1", level, workspaceName: undefined,
+    newShareId: () => "unused-share", nowMs: 6})).toEqual({ok: true});
+}
+function addMember(f: Fixture, level: "view" | "comment" | "edit" = "edit") {
+  expect(f.storage.inviteWorkspaceMember({workspaceId: scope.workspaceId, actorUserId: "owner-1", workspaceName: "Plans", email: "sam@example.test",
+    recipientUserId: MEMBER, newMemberId: () => "member-entry", newGrantId: () => "member-grant", newShareId: () => "members-share", nowMs: 5}))
+    .toMatchObject({ok: true});
+  setMemberLevel(f, level);
+}
+const memberOpen = (f: Fixture, changes: {userId?: string; path?: string; nowMs?: number; changed?(changed: boolean): void} = {}) =>
+  f.storage.ensureOwnedLiveDocument({intent: "member-open", userId: MEMBER, workspaceId: scope.workspaceId, path: binding.currentPath, nowMs: 30, guard() {}, ...changes});
+const enrolled = (f: Fixture, path = binding.currentPath) => f.storage.readServiceHostEnrollment(scope.workspaceId, path);
+
+// Proves: a member at Edit hosts the document they open, under the owner,
+// with demand recorded as an agent's open records it.
+it("hosts a document a member at Edit opens and records the open as demand", async () => {
+  const f = await fixture(); addMember(f);
+  const heard: boolean[] = [];
+  expect(memberOpen(f, {changed: value => {heard.push(value);}})).toMatchObject({
+    objectId: binding.objectId, ownerUserId: "owner-1", shareId: null, enabled: true, retired: false, ownerStop: null, ownerDemand: false, demandAtMs: 30});
+  expect(heard).toEqual([true]);
+  expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding)).toBe(true);
+  // A second open renews the demand and changes nothing else.
+  expect(memberOpen(f, {nowMs: 40, changed: value => {heard.push(value);}})).toMatchObject({enabled: true, demandAtMs: 40});
+  expect(heard).toEqual([true, false]);
+});
+
+// Proves: the account, its grant and its level come from storage. Comment,
+// View, a path outside the workspace reach, an account outside the
+// workspace, the owner and a path share's recipient all write nothing.
+it.each([
+  ["a member at Comment", (f: Fixture) => {addMember(f, "comment"); return memberOpen(f);}],
+  ["a member at View", (f: Fixture) => {addMember(f, "view"); return memberOpen(f);}],
+  ["a path outside the workspace reach", (f: Fixture) => {addMember(f); return memberOpen(f, {path: ".env/notes.md"});}],
+  ["an account outside the workspace", (f: Fixture) => {addMember(f); return memberOpen(f, {userId: "stranger"});}],
+  ["the owner", (f: Fixture) => {addMember(f); return memberOpen(f, {userId: "owner-1"});}],
+  ["a path share's recipient at Edit", (f: Fixture) => {addMember(f); return memberOpen(f, {userId: scope.userId});}],
+] as const)("refuses a member open by %s", async (_, open) => {
+  const f = await fixture();
+  expect(() => open(f)).toThrow("not found");
+  expect(enrolled(f)).toBeNull();
+  expect(f.storage.listServiceHostEnrollments()).toEqual([]);
+});
+
+// Proves: the open reads the membership again inside its transaction, so a
+// removal or a level drop after the route checked the grant refuses it.
+it.each(["removed", "dropped to Comment"] as const)("refuses a member open when the member is %s after the route's check", async change => {
+  const f = await fixture(); addMember(f);
+  const checked = f.storage.listActiveShareGrantsForRecipient("members-share", MEMBER);
+  expect(checked.map(grant => grant.grantId)).toEqual(["member-grant"]);
+  if (change === "removed") {
+    expect(f.storage.removeWorkspaceMember({workspaceId: scope.workspaceId, actorUserId: "owner-1", memberId: "member-entry", nowMs: 20})).toEqual({ok: true});
+  } else setMemberLevel(f, "comment");
+  expect(() => memberOpen(f)).toThrow("not found");
+  expect(enrolled(f)).toBeNull();
+});
+
+// Proves: a full host answers a member's open with the refusal an agent's
+// open hears, at once and without a row.
+it("answers a member open on a full host with live_host_full", async () => {
+  const f = await fixture(); addMember(f);
+  for (let i = 2; i <= SERVICE_HOST_MAX_WORKSPACES + 1; i++) {
+    const workspaceId = `workspace-${i}`, shareId = `share-${i}`;
+    f.seed(workspaceId, `object-${i}`, binding.currentPath, shareId);
+    f.enroll({workspaceId, shareId});
+  }
+  expect(refusal(() => memberOpen(f))).toBe("live_host_full");
+  expect(enrolled(f)).toBeNull();
+});
+
+// Proves: a member's open leaves the path share and its grant as they were.
+it("leaves a path share and its grant unchanged when a member opens a document it covers", async () => {
+  const f = await fixture(); addMember(f);
+  const grants = () => f.raw.prepare("SELECT * FROM sync_relay_share_grants WHERE share_id=? ORDER BY grant_id").all(scope.shareId);
+  const shares = () => f.raw.prepare("SELECT * FROM sync_relay_shares WHERE share_id=?").all(scope.shareId);
+  const before = {grants: grants(), shares: shares()};
+  memberOpen(f);
+  expect({grants: grants(), shares: shares()}).toEqual(before);
+  // The path share still asks for hosting as before, and finds the document hosted.
+  expect(f.enroll({nowMs: 40})).toMatchObject({enabled: true, shareId: null, demandAtMs: 30});
+});
+
+// Proves: an active membership grant at Edit whose workspace reach includes
+// the path covers the document, and stops covering it at a lower level.
+it("counts a member's Edit grant as covering an enrolled document", async () => {
+  const f = await fixture(); f.enroll(); addMember(f);
+  expect(f.storage.revokeShareGrant({shareId: scope.shareId, grantId: scope.grantId, revokedAtMs: 20}).ok).toBe(true);
+  expect(f.storage.serviceHostEnrollmentCovered(enrolled(f)!)).toBe(true);
+  expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding)).toBe(true);
+  setMemberLevel(f, "comment");
+  expect(f.storage.serviceHostEnrollmentCovered(enrolled(f)!)).toBe(false);
+  expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding)).toBe(false);
+});

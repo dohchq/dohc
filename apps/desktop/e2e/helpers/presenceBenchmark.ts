@@ -336,6 +336,7 @@ export async function createPresenceFixture(options: {
       tickets,
       changes,
       readinessLimits: profile.desktopReadiness,
+      hostsMemberDocuments: () => false,
     });
     const live = createNamedLiveRoutes({
       kind: "named",

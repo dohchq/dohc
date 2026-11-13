@@ -1443,6 +1443,16 @@ if (namedLiveConfig) {
       tickets,
       changes: frameChanges!,
       readinessLimits: selfHostLiveProfile().desktopReadiness,
+      // As for an agent's open: only a relay running the self-hosted live host hosts a member's.
+      hostsMemberDocuments: () => {
+        const control = storage.getLiveHostControl();
+        return (
+          !!selfHost &&
+          !!deployment &&
+          control?.configuredMode === "service" &&
+          control.configuredHostId === selfHostedLiveHostId(deployment.history.namespace)
+        );
+      },
     });
     desktopLive = createNamedLiveRoutes({
       kind: "named",

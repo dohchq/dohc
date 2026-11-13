@@ -458,6 +458,7 @@ async function fixture(
         storage: state.storage,
         resolveActor: actor,
         readinessLimits: { maxPendingRequests: 8, maxPendingPerUser: 4, timeoutMs: 5000 },
+        hostsMemberDocuments: () => false,
         publicOrigin: audience,
         hosts: new Set([relayHost]),
         tickets,
@@ -2552,24 +2553,39 @@ describe("a link ticket while the relay is busy", () => {
 it("admits a workspace member at Edit for a reached path, and refuses View, Comment and a path outside reach", async () => {
   const f = await fixture(limits, false, undefined, false, true);
   const relay = testHandler(f.storage);
-  const owner = (path: string, body: Record<string, unknown>) => relay(request("owner-1", `/sync/${scope.workspaceId}${path}`, jsonBody(body)));
-  const invited = await owner("/members/invites", { email: "reader-1@dohc.test", workspaceName: "Docs" });
+  const owner = (path: string, body: Record<string, unknown>) =>
+    relay(request("owner-1", `/sync/${scope.workspaceId}${path}`, jsonBody(body)));
+  const invited = await owner("/members/invites", {
+    email: "reader-1@dohc.test",
+    workspaceName: "Docs",
+  });
   expect(invited.status, await invited.clone().text()).toBe(200);
   const shares = await json(await relay(request("reader-1", "/sync/shares")));
-  const shareId = (shares.received as Array<{shareId: string; selector: {kind?: string}}>).find(row => row.selector.kind === "workspace")!.shareId;
-  f.raw.prepare(`INSERT INTO sync_relay_object_moments (workspace_id, object_id, relay_seq, moment_id, version_id, path, blob_sha256, content_kind, byte_length, recorded_at_ms)
-    VALUES (?, 'object-secret', 50, 'moment-secret', 'main', '.env/notes.md', ?, 'text', 1, 1)`).run(scope.workspaceId, "c".repeat(64));
-  const open = (path: string) => f.post("/sync/live/desktop-open", {shareId, path});
+  const shareId = (shares.received as Array<{ shareId: string; selector: { kind?: string } }>).find(
+    (row) => row.selector.kind === "workspace",
+  )!.shareId;
+  f.raw
+    .prepare(`INSERT INTO sync_relay_object_moments (workspace_id, object_id, relay_seq, moment_id, version_id, path, blob_sha256, content_kind, byte_length, recorded_at_ms)
+    VALUES (?, 'object-secret', 50, 'moment-secret', 'main', '.env/notes.md', ?, 'text', 1, 1)`)
+    .run(scope.workspaceId, "c".repeat(64));
+  const open = (path: string) => f.post("/sync/live/desktop-open", { shareId, path });
 
   for (const level of ["view", "comment"]) {
-    expect((await owner("/members/level", {level})).status).toBe(200);
+    expect((await owner("/members/level", { level })).status).toBe(200);
     expect((await open(binding.currentPath)).status).toBe(404);
   }
-  expect((await owner("/members/level", {level: "edit"})).status).toBe(200);
+  expect((await owner("/members/level", { level: "edit" })).status).toBe(200);
   const admitted = await open(binding.currentPath);
   expect(admitted.status).toBe(200);
-  const body = await admitted.json() as {shareId: string; path: string; discriminator: string; ticket: {token: string}};
-  expect(body).toMatchObject({shareId, path: binding.currentPath});
-  expect(await f.connect(body.ticket.token, undefined, {}, "", body.discriminator).status).toBe(101);
+  const body = (await admitted.json()) as {
+    shareId: string;
+    path: string;
+    discriminator: string;
+    ticket: { token: string };
+  };
+  expect(body).toMatchObject({ shareId, path: binding.currentPath });
+  expect(await f.connect(body.ticket.token, undefined, {}, "", body.discriminator).status).toBe(
+    101,
+  );
   expect((await open(".env/notes.md")).status).toBe(404);
 });

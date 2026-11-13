@@ -13,7 +13,12 @@ import {
   type NamedLiveBrowserHttpLimits,
 } from "./namedLiveBrowserHttp";
 import { authorizeNamedLiveEditShareGrant } from "./shareAuthorization";
-import { fileSideOf, pathVisibleThroughShare } from "./shareFilter";
+import {
+  fileSideOf,
+  parseStoredAnyShareSelectorJson,
+  pathVisibleThroughShare,
+} from "./shareFilter";
+import { LiveHostingRefusal } from "./storage/serviceHostEnrollment";
 import type { createLiveTickets } from "./liveTickets";
 import type { SyncRelayStorage } from "./storage";
 import { type LiveHostChanges } from "./relayWriteChanges";
@@ -30,6 +35,8 @@ export function createNamedDesktopLive(options: {
   tickets: ReturnType<typeof createLiveTickets>;
   changes: LiveHostChanges;
   readinessLimits: { maxPendingRequests: number; maxPendingPerUser: number; timeoutMs: number };
+  /** Whether this server's own live host hosts the documents workspace members open. */
+  hostsMemberDocuments(): boolean;
 }) {
   const { storage } = options,
     limits = parseNamedLiveBrowserHttpLimits(options.limits);
@@ -61,6 +68,12 @@ export function createNamedDesktopLive(options: {
     Response.json(
       { ok: false },
       { status: 404, headers: { "cache-control": "private, no-store" } },
+    );
+  // The host's answer to hosting the document, which the desktop shows instead of waiting.
+  const hostRefused = (refusal: LiveHostingRefusal) =>
+    Response.json(
+      { ok: false, code: refusal.reason },
+      { status: 409, headers: { "cache-control": "private, no-store" } },
     );
   let pending = 0;
   let readinessPending = 0;
@@ -141,6 +154,31 @@ export function createNamedDesktopLive(options: {
           path: path.normalized,
         });
         if (!objectIdAtStart) return refuse();
+        // A member's open asks this server's host for the document once. Its transaction authorizes the member.
+        const selector = parseStoredAnyShareSelectorJson(share.selectorJson);
+        if (
+          selector &&
+          "kind" in selector &&
+          selector.kind === "workspace" &&
+          options.hostsMemberDocuments()
+        ) {
+          try {
+            storage.ensureOwnedLiveDocument({
+              intent: "member-open",
+              userId: actor.userId,
+              workspaceId: share.workspaceId,
+              path: path.normalized,
+              nowMs: Date.now(),
+              guard: () => {
+                signal.throwIfAborted();
+                check();
+              },
+            });
+          } catch (error) {
+            if (error instanceof LiveHostingRefusal) return hostRefused(error);
+            throw error;
+          }
+        }
         let wake = () => {};
         const changed = () => wake();
         const removeHost = options.changes.subscribe(changed, {
