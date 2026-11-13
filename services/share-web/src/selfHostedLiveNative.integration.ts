@@ -560,7 +560,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     // The owner's personal agent, signed in and reaching the workspace at
     // Edit, through the capture its live route makes. Its update declares
     // another agent, and the relay credits it to the agent on behalf of its owner.
-    const personal = {kind: "agent", agentId: `p-${"proofpersonalagent".padEnd(26, "a")}`, agentName: "Proof personal agent", onBehalfOf: ownerUser.id, depth: 0};
+    const personal = {kind: "agent", agentId: `p-${"proofpersonalagent".padEnd(26, "a")}`, agentName: "Proof personal agent", onBehalfOf: ownerUser.id};
     const personalCheck = agentAccessCheck(createHash("sha256").update("proof-personal-token").digest("base64url"), `${audience}/mcp/agent/w/workspace`, ticketKey)!;
     const relayWrite = storage as StorageContext;
     relayWrite.tx(() => {
@@ -608,23 +608,14 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     // service keeps the same credit that owner devices import.
     // Import marks the relay-admitted person confirmed; the admitted snapshot carries no marker.
     const importedHuman = {...human, relayConfirmed: true};
-    // Some copies keep an agent's depth 0 and others drop it, as History's
-    // flat form names none. History reads both as depth 0, so they compare
-    // without it.
-    const importedPersonal = {kind: personal.kind, agentId: personal.agentId, agentName: personal.agentName, onBehalfOf: personal.onBehalfOf};
     const declaredCredit = [
       {momentId: agentSettlement.record.momentId, imported: [agent, importedHuman]},
       {momentId: automationSettlement.record.momentId, imported: [automation]},
-      {momentId: personalSettlement.record.momentId, imported: [importedPersonal]},
+      {momentId: personalSettlement.record.momentId, imported: [personal]},
     ] as const;
-    const withoutDepthZero = (author: unknown) => {
-      if (typeof author !== "object" || author === null || (author as {depth?: unknown}).depth !== 0) return author;
-      const {depth: _depth, ...rest} = author as Record<string, unknown>;
-      return rest;
-    };
     const expectAuthors = (actual: unknown, expected: readonly unknown[]) => {
       expect(actual).toHaveLength(expected.length);
-      expect((actual as unknown[]).map(withoutDepthZero)).toEqual(expect.arrayContaining([...expected]));
+      expect(actual).toEqual(expect.arrayContaining([...expected]));
     };
     const momentAuthors = async (call: typeof rpc, momentId: string) => {
       const moment = ((await call("moments.list", {versionId: mainVersionId})).moments as {momentId: string; authors?: unknown[] | null}[])
@@ -677,7 +668,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     results.declaredAuthors = {
       agent: {receipt: agentAck, settlement: agentSettlement, admitted: [human, agent], imported: [agent, importedHuman]},
       automation: {receipt: automationAck, settlement: automationSettlement, admitted: [automationAdmitted], imported: [automation]},
-      personal: {receipt: personalAck, settlement: personalSettlement, admitted: [personal], imported: [importedPersonal]},
+      personal: {receipt: personalAck, settlement: personalSettlement, admitted: [personal], imported: [personal]},
     };
     // The service imports the admitted credit through its own background pull.
     // Poll its store until that credit lands. A missing row reads as undefined, not null.

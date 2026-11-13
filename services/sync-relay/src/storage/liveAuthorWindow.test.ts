@@ -215,7 +215,7 @@ it("keeps a personal agent as its update's only author after 32 agents were decl
   const suffix = Array.from({length: 32}, (_, index) => ({...admitted([human(`account-${index}`),
     {...declared, agentId: `writer-${index}`, onBehalfOf: `account-${index}`}], [range(index)]),
     accepted: {...admitted([]).accepted, authority: {...owner, principalId: `account-${index}`}}}));
-  const helper: LiveAuthorSnapshot = [{kind: "agent", agentId: personal.principalId, agentName: "Helper", onBehalfOf: "owner", depth: 0}];
+  const helper: LiveAuthorSnapshot = [{kind: "agent", agentId: personal.principalId, agentName: "Helper", onBehalfOf: "owner"}];
   expect(limitLiveDeclaredAgents(suffix, personal, helper)).toEqual(helper);
   expect(limitLiveDeclaredAgents(suffix, owner, [human("owner"), declared])).toEqual([human("owner")]);
 });

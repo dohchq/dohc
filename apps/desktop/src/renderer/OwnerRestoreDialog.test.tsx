@@ -382,7 +382,7 @@ it("names a personal agent's change by the agent's name, owned by the account it
     const agent = agents[index];
     return agent ? {...event, metadata: {...event.metadata, accepted: {...event.metadata.accepted,
       authority: {principalKind: "personal" as const, principalId: agent.agentId, grantId: null, grantGeneration: null}},
-    authorSnapshot: [{kind: "agent" as const, ...agent, depth: 0}]}} : event;
+    authorSnapshot: [{kind: "agent" as const, ...agent}]}} : event;
   })};
   f.call.mockImplementation(input => input.action === "review" ? Promise.resolve({status: f.status(), result: review, owner: viewer}) : original(input));
   render(<OwnerRestoreDialog {...f.props} />); await openStop();

@@ -126,7 +126,7 @@ function withHelper(ownerUserId = "owner") {
 
 it("builds a personal agent's snapshot from its record, on behalf of its owner", () => {
   const storage = withHelper();
-  const built = { kind: "agent" as const, agentId: helper.principalId, agentName: "Helper", onBehalfOf: "owner", depth: 0 };
+  const built = { kind: "agent" as const, agentId: helper.principalId, agentName: "Helper", onBehalfOf: "owner" };
   expect(personalLiveAuthorSnapshot(storage, helper)).toEqual([built]);
   storage.db.prepare("UPDATE sync_relay_personal_agents SET name='Renamed' WHERE agent_id=?").run(helper.principalId);
   expect(personalLiveAuthorSnapshot(storage, helper)).toEqual([{ ...built, agentName: "Renamed" }]);
@@ -135,7 +135,7 @@ it("builds a personal agent's snapshot from its record, on behalf of its owner",
 
 it("admits a personal agent's update only on behalf of the workspace's owner", () => {
   const storage = withHelper();
-  const built = { kind: "agent" as const, agentId: helper.principalId, agentName: "Helper", onBehalfOf: "owner", depth: 0 };
+  const built = { kind: "agent" as const, agentId: helper.principalId, agentName: "Helper", onBehalfOf: "owner" };
   expect(admitsWorkspaceLiveAuthorship(storage, "workspace", helper, personalLiveAuthorSnapshot(storage, helper))).toBe(true);
   expect(admitsWorkspaceLiveAuthorship(storage, "workspace", helper, [{ ...built, onBehalfOf: "reader" }])).toBe(false);
   expect(admitsWorkspaceLiveAuthorship(storage, "missing-workspace", helper, [built])).toBe(false);

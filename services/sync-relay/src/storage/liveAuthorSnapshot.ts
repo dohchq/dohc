@@ -76,15 +76,16 @@ export function deriveLiveAuthorSnapshot(storage: StorageContext, authority: Ser
 
 /**
  * A personal agent's snapshot, from its authority alone: the agent, by the
- * name it has now, on behalf of the account that owns it. An agent the relay
- * doesn't know gets none, which admission refuses.
+ * name it has now, on behalf of the account that owns it. It names no depth,
+ * as History names none for an agent at depth 0. An agent the relay doesn't
+ * know gets none, which admission refuses.
  */
 export function personalLiveAuthorSnapshot(storage: StorageContext,
   authority: Extract<ServerDerivedLiveUpdateAuthority, {principalKind: "personal"}>): LiveAuthorSnapshot {
   const agent = storage.db.prepare("SELECT owner_user_id,name FROM sync_relay_personal_agents WHERE agent_id=?").get(authority.principalId);
   if (!agent) return [];
   return parseLiveAuthorSnapshot([{kind: "agent", agentId: authority.principalId, agentName: String(agent.name),
-    onBehalfOf: String(agent.owner_user_id), depth: 0}]);
+    onBehalfOf: String(agent.owner_user_id)}]);
 }
 
 /**
