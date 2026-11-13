@@ -340,7 +340,7 @@ function AccountReadFailure(props: { account: PersonalAgentsAccount; reported: M
   if (props.account.roster !== null || failure === null) return null;
   return (
     <div className="mt-2">
-      <RetryRow testId="personal-agents-retry" onRetry={props.onReload}>
+      <RetryRow testId="personal-agents-retry" onRetry={() => { void props.onReload(); }}>
         dohc could not list your agents on {props.account.host}.
       </RetryRow>
     </div>
@@ -376,7 +376,7 @@ function PersonalReadFailure(props: { state: PersonalAgentsState; reported: { cu
   if (!failed) return null;
   return (
     <div className="mt-2">
-      <RetryRow testId="personal-agents-retry" onRetry={props.onReload}>{PERSONAL_READ_FAILED}</RetryRow>
+      <RetryRow testId="personal-agents-retry" onRetry={() => { void props.onReload(); }}>{PERSONAL_READ_FAILED}</RetryRow>
     </div>
   );
 }

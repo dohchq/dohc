@@ -1,6 +1,5 @@
 import { LINK_EXCHANGE_BUCKET_CAPACITY } from "./linkSecurity";
 import { request as httpRequest } from "node:http";
-import { access } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 

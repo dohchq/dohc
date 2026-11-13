@@ -18,7 +18,6 @@ import {
   jsonBody,
   putBlob as upload,
   request,
-  sha256,
   storagePath,
   testHandler,
   testStorage,

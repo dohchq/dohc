@@ -505,7 +505,7 @@ export function CloudLogin(props: {
             email={phase.email}
             serverUrl={serverUrl}
             networkAccess={networkAccess}
-            onSettled={settleDisconnect}
+            onSettled={failed => { void settleDisconnect(failed); }}
             onError={reportConnectionError}
           />
         </div>

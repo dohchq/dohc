@@ -3,7 +3,7 @@ import type { ActorPresentation } from "../../ipc/bridgeContract";
 export interface AgentRosterPick { candidate: MentionCandidate; from: number; to: number }
 export function agentRosterPickIsPresent(pick: AgentRosterPick, value: string): boolean {
   return value.slice(pick.from, pick.to) === "@" + pick.candidate.handle
-    && (pick.from === 0 || /[\s(\[{]/u.test(value[pick.from - 1] ?? ""))
+    && (pick.from === 0 || /[\s([{]/u.test(value[pick.from - 1] ?? ""))
     && !/[\p{L}\p{N}\p{M}._-]/u.test(value[pick.to] ?? "");
 }
 // The composer supplies one edit range. No handle search runs while typing.

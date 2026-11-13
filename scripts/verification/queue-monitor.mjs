@@ -402,7 +402,7 @@ function logIn(folder, file) {
 /** The end of a log of the inline gate holding verification slot `slot`, found from the slot's own record. */
 export function slotLog(status, slot, file) {
   const owner = status?.owners.find(candidate => candidate.name === `verification-slot-${slot}`);
-  if (!owner?.checkout || /^request /u.test(owner.phase ?? "")) return null;
+  if (!owner?.checkout || String(owner.phase ?? "").startsWith("request ")) return null;
   return logIn(inlineFolder(owner.checkout, owner.commit), file);
 }
 

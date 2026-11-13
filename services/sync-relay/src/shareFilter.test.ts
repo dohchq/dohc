@@ -8,7 +8,6 @@ import {
 import {
   MAX_CHANNEL_WIRE_ID_CHARS,
   MAX_SHARE_PATHS,
-  MAX_SHARE_PATH_CHARS,
   filterOpForShare,
   filterOpForShareAppend,
   filterProposedChangeForShare,

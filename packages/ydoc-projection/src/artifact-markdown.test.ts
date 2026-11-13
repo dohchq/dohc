@@ -1,6 +1,5 @@
 import {createHash} from 'node:crypto'
 import {afterEach, expect, it, vi} from 'vitest'
-import * as Y from 'yjs'
 import * as projection from './import-export.js'
 import * as artifact from './index.js'
 

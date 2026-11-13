@@ -1,4 +1,3 @@
-import type { SaveState } from "@dohc/workspace-contracts/save-state";
 import { createPortal } from "react-dom";
 import { CopyButton } from "./ui/CopyButton";
 import { restoreRecoveryDraftText } from "./collab/recoverySnapshot";

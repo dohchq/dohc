@@ -16,7 +16,6 @@ import { isNoticeLine, NOTICE_TARGET_FIELD_MAX_CHARS } from "@dohc/workspace-con
 import {
   codeStepOrdinals,
   definitionDigest,
-  definitionHash,
   type PlannedEffect,
   type RunClaim,
   type RunRecord,
@@ -174,11 +173,6 @@ export interface DatasetAutomationRunInput {
 }
 
 const failed = (error: string, timedOut = false): CollectionAutomationRunOutcome => ({ kind: "failed", error, timedOut });
-const stopped: CollectionAutomationRunOutcome = { kind: "wait", reason: "stopped" };
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 type Rules = { datasetId: string; revision: number; revisionSha256: string };
 /** A record as a generated read returns it: its id, version, and values by field id. */

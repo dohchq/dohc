@@ -96,7 +96,7 @@ document.addEventListener("click", (event) => {
 function ignore() {}
 
 function whenIdle() {
-  const load = () => loadAnalytics().catch(ignore);
+  const load = () => { void loadAnalytics().catch(ignore); };
   if ("requestIdleCallback" in window) requestIdleCallback(load, { timeout: 5000 });
   else setTimeout(load, 1000);
 }

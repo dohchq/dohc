@@ -144,7 +144,7 @@ export async function createLocalAppLaunchHost(options: { backend: LocalAppLaunc
         const frameSources = launchOptions?.keepAlive ? "'self' http: https: mailto:" : "'self'";
         const csp = `default-src 'none'; script-src ${scriptHash} ${document.scriptSources.join(" ")}; style-src 'unsafe-inline'; connect-src http: https: ws: wss:; img-src data: blob: http: https:; font-src data: http: https:; media-src data: blob: http: https:; frame-src ${frameSources}; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`;
         const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Local app</title><style>${BOOTSTRAP_STYLE}</style></head><body><p id="status" role="status">Opening app</p><script>${script}</script></body></html>`;
-        const server = createServer(async (request, response) => {
+        const server = createServer((request, response) => { void (async () => {
           const abort = new AbortController(), requestAborted = () => abort.abort();
           request.once("aborted", requestAborted);
           const activeSignal = AbortSignal.any([requestSignal, abort.signal, AbortSignal.timeout(15_000)]);
@@ -225,7 +225,7 @@ export async function createLocalAppLaunchHost(options: { backend: LocalAppLaunc
             }
           }
           finally { request.removeListener("aborted", requestAborted); if (admitted) pending--; }
-        });
+        })(); });
         server.requestTimeout = 15_000; server.headersTimeout = 10_000; server.maxConnections = 16;
         let stopped: Promise<void> | undefined;
         const stop = () => stopped ??= Promise.resolve().then(async () => {

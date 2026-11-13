@@ -190,6 +190,7 @@ describe("ConfirmDialog guards against an Enter nobody meant", () => {
     ["a text field", <textarea key="field" aria-label="Note" />],
     ["editable text", <div key="field" aria-label="Note" role="textbox" contentEditable suppressContentEditableWarning />],
     // An app's frame may hold a text field the renderer can't see.
+    // oxlint-disable-next-line react/iframe-missing-sandbox -- test stand-in with no src
     ["an app's frame", <iframe key="field" title="Note" />],
   ])("keeps focus on its panel when it opens while someone types in %s", async (_name, field) => {
     const user = userEvent.setup();

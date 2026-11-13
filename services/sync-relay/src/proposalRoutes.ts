@@ -14,7 +14,6 @@ import { destinationPath, proposalBase, proposalMomentPayload } from "./recipien
 import { PROPOSAL_ORIGIN_PREFIX } from "./shareProposals";
 import {
   SyncRelayBlobMissingError,
-  type ObjectMomentRow,
   type ShareProposalOpRow,
   type SyncRelayLogInput,
   type SyncRelayStorage,

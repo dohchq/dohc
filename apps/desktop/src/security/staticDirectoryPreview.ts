@@ -120,7 +120,7 @@ export async function startStaticDirectoryPreview(
     await access(join(root, entry), constants.R_OK);
   }
 
-  const server = createServer(async (request, response) => {
+  const server = createServer((request, response) => { void (async () => {
     const address = server.address();
     if (
       !address ||
@@ -258,7 +258,7 @@ export async function startStaticDirectoryPreview(
       response.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
       response.end("Not found");
     }
-  });
+  })(); });
   server.unref();
   const origin = await listen(server);
   return {

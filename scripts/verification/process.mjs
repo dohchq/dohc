@@ -87,6 +87,7 @@ export function run(command, args, { cwd = repoRoot, env = process.env, log, onS
       if (cancellation) return cancellation;
       clearTimeout(escalation);
       cancellation = (async () => {
+        // oxlint-disable-next-line typescript/no-unsafe-unary-minus -- pid is set: stopGroup runs only after interrupt saw it
         try { process.kill(-child.pid, "SIGKILL"); }
         catch (error) { if (error.code === "ESRCH") return; throw error; }
         await waitForGroupExit(child.pid);
@@ -125,7 +126,7 @@ export function run(command, args, { cwd = repoRoot, env = process.env, log, onS
       cleanup(); output?.end();
       reject(Object.assign(error, { exitCode: null, signal: null, stdout, stderr, interrupted, timedOut }));
     });
-    child.once("close", async (code, signal) => {
+    child.once("close", (code, signal) => { void (async () => {
       clearTimeout(deadline);
       if (interrupted && !windows) {
         try { await stopGroup(); } catch (error) { cancellationError = error; }
@@ -140,7 +141,7 @@ export function run(command, args, { cwd = repoRoot, env = process.env, log, onS
       if (failure) reject(Object.assign(failure, { exitCode: code, signal, stdout, stderr, interrupted: cut, timedOut,
         commandExitFailure: !outputError && !cancellationError && typeof code === "number" && code !== 0 && !cut && !timedOut }));
       else resolveRun({ pid: child.pid, code, stdout, stderr });
-    });
+    })(); });
   });
 }
 

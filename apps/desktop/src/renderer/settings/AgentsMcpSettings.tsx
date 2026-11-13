@@ -186,7 +186,7 @@ export function AgentsMcpSettings(props: {
           <button
             type="button"
             disabled={busy}
-            onClick={retry}
+            onClick={() => { void retry(); }}
             className="rounded-md border border-line px-2 py-1 text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50"
           >
             Retry

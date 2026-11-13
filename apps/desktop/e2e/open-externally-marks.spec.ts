@@ -77,7 +77,7 @@ async function hasMark(path: string): Promise<boolean> {
   }
   if (process.platform === "darwin") {
     const read = await promisify(execFile)("/usr/bin/xattr", ["-p", "com.apple.quarantine", path]).catch(() => null);
-    return read !== null && /^0081;/.test(read.stdout);
+    return read !== null && read.stdout.startsWith('0081;');
   }
   return false;
 }

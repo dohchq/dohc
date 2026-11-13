@@ -22,7 +22,7 @@ import type { Envelope } from "../../workspace-engine-client/src/protocol.js";
 import { LiveCommittedDelivery } from "../../../services/sync-relay/src/liveCommittedDelivery.js";
 
 import { afterEach, expect, it, vi } from "vitest";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import {
   registered,
   DatabaseSync,

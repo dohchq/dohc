@@ -1797,6 +1797,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     }
     await test?.cancel(SELF_TEST_RESTRICTED_DETAIL);
     const exits = await Promise.all(
+      // oxlint-disable-next-line typescript/await-thenable -- await needed: some entries are promises
       [live?.child, test?.child].map((child) => child ? exitWithin(child, RUNNER_KILL_GRACE_MS + 1_000) : true),
     );
     if (exits.includes(false)) throw new Error(RUNNER_OUTLIVED_STOP);
@@ -1851,6 +1852,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     const shown = new Set([threadId, ...postThreadIds]);
     const asked = busy ? pending.filter((each) => shown.has(each.threadId) && each.agentId === busy.claim.run.agentId) : [];
     const askedThreads = [...new Set(asked.map((each) => each.threadId))];
+    // oxlint-disable-next-line typescript/await-thenable -- await needed: some entries are promises
     const pauses = await Promise.all(askedThreads.map((id) =>
       id === threadId ? pauseState : dispatch.getThreadDispatchPauseState(workspaceId, id)));
     const held = new Set(askedThreads.filter((_, at) => pauses[at]?.paused === true));

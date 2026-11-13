@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { openedLocalState } from "../testing/preparedLocalState";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -18,7 +17,6 @@ import { unguardedCollections } from "../testing/collectionsHolder";
 
 const compileFixture = createDatasetFixtureCompiler();
 
-const digest = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const definition: DatasetDefinition = { formatVersion: 1, datasetId: id(1), name: "Items", schemaPath: "items/schema.sql", operationsPath: "items/operations.ts",
   tables: [{ tableId: id(2), name: "Items", sqlName: "items", primaryKey: "id", fields: [

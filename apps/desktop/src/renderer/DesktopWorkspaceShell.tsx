@@ -16,7 +16,7 @@ import { matchShellShortcut, matchShellShortcutChord } from "../shortcuts/shortc
 import { hasBlockingModal } from "./modalFocus";
 import { SkeletonRows, SkeletonSlot } from "./ui/SkeletonRows";
 import { isSharedWithMePath } from "@dohc/workspace-core/paths";
-import { Bot, Check, ChevronRight, CircleHelp, Copy, Eye, RefreshCw, Search, Send, User, X } from "lucide-react";
+import { ChevronRight, Eye, RefreshCw, Send, X } from "lucide-react";
 import {
   Fragment,
   Suspense,
@@ -37,7 +37,6 @@ import type {
   ResolveAutomationControlsResult,
   WorkReferenceOpen,
   ChatFileMentionRecord,
-  ChatThreadRecord,
   DesktopUserSettingsResult,
   EngineStoreRefusal,
   ImportWorkspaceFilesResult,
@@ -283,7 +282,6 @@ import {
 import type {
   ChatErrorNotice,
   ChatsInvitation,
-  ChatsNav,
 } from "./workbench/ChatsView";
 import { INVITATION_WAIT_MS, invitationOutcome, type InvitationLists } from "./workbench/invitationOutcome";
 import {
@@ -342,7 +340,6 @@ import {
   toggleSidebarOnRail,
   SHARING_VIEW_ID,
   type ActivityViewId,
-  type EditorGroup,
   type ExplorerMode,
   type WorkbenchState,
   type WorkbenchTab,
@@ -1530,7 +1527,6 @@ export function DesktopWorkspaceShell(props: {
     graphRefreshKey,
   } = fileIndex;
 
-  const focusedGroup = activeGroup(wb);
   const focusedTabPath = activeTabPath(wb);
   const {
     tabLabels: knownTabLabels,
@@ -4226,7 +4222,7 @@ export function DesktopWorkspaceShell(props: {
         (candidate) => candidate.id === groupId,
       );
       const tab = group?.tabs.find((candidate) => candidate.path === path);
-      if (tab) void closeTabsAfterFlush([{ groupId, tab }]);
+      if (tab) closeTabsAfterFlush([{ groupId, tab }]);
     },
     [closeTabsAfterFlush],
   );
@@ -4234,7 +4230,7 @@ export function DesktopWorkspaceShell(props: {
   // Every tab showing a file, in every group, as an import's Undo closes them.
   const closePathTabs = useCallback(
     (path: string) => {
-      void closeTabsAfterFlush(wbRef.current.editorGroups.flatMap((group) =>
+      closeTabsAfterFlush(wbRef.current.editorGroups.flatMap((group) =>
         group.tabs.filter((tab) => tab.path === path).map((tab) => ({ groupId: group.id, tab }))));
     },
     [closeTabsAfterFlush],
@@ -4283,7 +4279,7 @@ export function DesktopWorkspaceShell(props: {
     const group = activeGroup(current);
     const tab = group.tabs.find((candidate) => candidate.path === group.activeTab);
     if (tab) {
-      void closeTabsAfterFlush([{ groupId: group.id, tab }]);
+      closeTabsAfterFlush([{ groupId: group.id, tab }]);
     } else if (current.editorGroups.length > 1) {
       mutateWb((state) => closeEditorGroup(state, group.id));
     } else if (group.tabs.length === 0 && bridge().platform === "darwin") {
@@ -4303,7 +4299,7 @@ export function DesktopWorkspaceShell(props: {
   );
 
   const closeAllTabs = useCallback(() => {
-    void closeTabsAfterFlush(
+    closeTabsAfterFlush(
       wbRef.current.editorGroups.flatMap((group) =>
         group.tabs.map((tab) => ({ groupId: group.id, tab })),
       ),
@@ -4315,7 +4311,7 @@ export function DesktopWorkspaceShell(props: {
       const current = wbRef.current;
       const group = current.editorGroups.find((candidate) => candidate.id === groupId);
       if (!group?.tabs.some((tab) => tab.path === path)) return;
-      void closeTabsAfterFlush(
+      closeTabsAfterFlush(
         group.tabs
           .filter((tab) => tab.path !== path)
           .map((tab) => ({ groupId, tab })),
@@ -4669,6 +4665,7 @@ export function DesktopWorkspaceShell(props: {
     () => ({
       ...workspaceApps,
       pinnedApps: pinnedRoots,
+      // oxlint-disable-next-line typescript/no-misused-promises -- the caller ignores the promise; a wrapper here would change the callback's identity
       onSetPinned: setAppPinned,
       reveal: appsReveal === workspaceId,
       onRevealed: clearAppsReveal,
@@ -4837,7 +4834,7 @@ export function DesktopWorkspaceShell(props: {
         mutateWb((state) => closeEditorGroup(state, groupId));
         return;
       }
-      void closeTabsAfterFlush(group.tabs.map((tab) => ({ groupId, tab })));
+      closeTabsAfterFlush(group.tabs.map((tab) => ({ groupId, tab })));
     },
     [closeTabsAfterFlush, mutateWb],
   );
@@ -6134,6 +6131,7 @@ export function DesktopWorkspaceShell(props: {
         onImportFiles={importFromExplorer}
         shareView={shareView}
         onRefreshShareMounts={onExplorerRefreshShareMounts}
+        // oxlint-disable-next-line typescript/no-misused-promises -- the caller ignores the promise; a wrapper here would change the callback's identity
         onUnmountShare={unmountShare}
         onShare={onSharePath}
         onRefresh={onExplorerRefresh}
@@ -6473,6 +6471,7 @@ export function DesktopWorkspaceShell(props: {
   }, [props.sentNotices, workspaceId, reportShellError, clearIdentity]);
   useEffect(() => {
     showSyncRefusals((props.sentNotices?.notices ?? []).filter(notice =>
+      // oxlint-disable-next-line typescript/no-misused-promises -- the caller ignores the promise; a wrapper here would change the callback's identity
       isRefusalNoticeKind(notice.kind) && notice.workspaceId === workspaceId), syncFailureNotice.retry, openFile, openHistoryView, readWorkspaceError);
   }, [props.sentNotices?.notices, workspaceId, showSyncRefusals, syncFailureNotice.retry, openFile, openHistoryView, readWorkspaceError]);
   const driveLimitNotice = useDriveLimitNotice({
@@ -7119,6 +7118,7 @@ export function DesktopWorkspaceShell(props: {
                 onOpenRecordHistory={recordHistory.open}
                 accessEnded={shareViewEnded}
                 captureHeld={heldFiles?.some(file => file.workspaceId === workspaceId && file.path === path) ?? false}
+                // oxlint-disable-next-line typescript/no-misused-promises -- the caller ignores the promise; a wrapper here would change the callback's identity
                 onRetryHeldCapture={retryHeldCapture}
                 readOnly={
                   (!!shareView && !shareViewWritable) ||
@@ -7451,6 +7451,7 @@ export function DesktopWorkspaceShell(props: {
                         setCollectionActiveView(state, groupCollectionPath, viewName),
                       )
                     }
+                    // oxlint-disable-next-line typescript/no-misused-promises -- the caller ignores the promise; a wrapper here would change the callback's identity
                     onNewRecord={createCollectionRecord}
                     onOpenRecord={openFile}
                     // The record a tab shows open stays with the tab, by the record's id.

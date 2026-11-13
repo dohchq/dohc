@@ -55,7 +55,7 @@ export function SampleNotices() {
   if (!openFrozen.current) openBar.current = restingBar.current;
   useEffect(() => {
     if (demoMode === "band-scrolled") {
-      const timer = setTimeout(() => list.current?.scrollToOffset({ offset: 420, animated: false }), 800);
+      const timer = setTimeout(() => { void list.current?.scrollToOffset({ offset: 420, animated: false }); }, 800);
       return () => clearTimeout(timer);
     }
     if (demoMode !== "band-half-fold") return;

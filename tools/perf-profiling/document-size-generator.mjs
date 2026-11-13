@@ -34,7 +34,8 @@ export function startGenerator(options) {
     const value = pending.get(row.id);
     if (!value) return;
     pending.delete(row.id);
-    row.error ? value.reject(Error(row.error)) : value.resolve(row.value);
+    if (row.error) value.reject(Error(row.error));
+    else value.resolve(row.value);
   });
   const call = (method, input) =>
     new Promise((resolve, reject) => {
@@ -65,7 +66,7 @@ if (process.send) {
     projection,
     docs = [],
     texts = [];
-  process.on('message', async ({ id, method, input }) => {
+  process.on('message', ({ id, method, input }) => { void (async () => {
     try {
       let value;
       if (method === 'init') {
@@ -123,5 +124,5 @@ if (process.send) {
     } catch (error) {
       process.send({ id, error: String(error.stack ?? error) });
     }
-  });
+  })(); });
 }

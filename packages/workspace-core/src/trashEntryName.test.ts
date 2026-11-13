@@ -13,9 +13,6 @@ const PREFIX = "1785780488421-0ff532fe-1e3f-4c2b-9a77-5d1e6c8b3a10-";
 
 const byteLength = (value: string) => new TextEncoder().encode(value).length;
 
-// The name a caller would actually land on when nothing refuses it.
-const firstOf = (name: string, prefix: string, options = {}) =>
-  trashEntryPlan(name, prefix, options).candidates[0]!;
 // The name a caller falls back to once the platform has refused the rest.
 const lastOf = (name: string, prefix: string, options = {}) => {
   const { candidates } = trashEntryPlan(name, prefix, options);

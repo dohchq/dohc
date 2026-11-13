@@ -95,7 +95,6 @@ const SYNC_FAILURES_REPORTED = 3;
 // An in-process press list waits this long for a press, as the route's
 // long poll does.
 const PRESS_WAIT_MS = 25_000;
-const DAY_MS = 24 * 60 * 60 * 1000;
 // The effects a run makes in its copy, which reach the relay only when the
 // copy syncs. Notices and agent wakes go straight to the relay.
 const COPY_EFFECTS: ReadonlySet<string> = new Set(["set", "add", "message"]);

@@ -234,7 +234,7 @@ export function bindExcalidrawPresence(options: {
     lastPointerAt = scheduler.now();
     try {
       binding.awareness.setLocalState({
-        ...(binding.awareness.getLocalState() ?? {}),
+        ...binding.awareness.getLocalState(),
         pointer,
         button: update.button === "down" ? "down" : "up",
       });

@@ -25,7 +25,7 @@ const OWNER_EMAIL = "e2e-granter@dohc.test", RECIPIENT_EMAIL = "e2e-recipient@do
 const SCHEMA = "name: Tasks\nfields:\n  Task:\n    type: text\n  Status:\n    type: text\nviews:\n  - name: Board\n    kind: board\n    groupBy: Status\n  - name: Table\n    kind: table\n";
 type Op = { originId: string; opKind: string; payload: Record<string, unknown> };
 async function log(relay: SyncRelayHandle): Promise<Op[]> {
-  const query = new URLSearchParams({ since: "0", limit: "1000", ...(relayAdoptedIdentity(relay.dbPath, OWNER_ID) ?? {}) });
+  const query = new URLSearchParams({ since: "0", limit: "1000", ...relayAdoptedIdentity(relay.dbPath, OWNER_ID) });
   const result = await relayJson(relay.baseUrl, OWNER_TOKEN, `/sync/${OWNER_ID}/log?${query}`);
   expect(result.status, result.body).toBe(200);
   return (JSON.parse(result.body) as { ops: Op[] }).ops;

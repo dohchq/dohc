@@ -76,6 +76,7 @@ export async function measureLinkRename({instance, links, typing, waitUntil, sig
         });
         void observed.catch(() => undefined);
       }});
+      // oxlint-disable-next-line typescript/await-thenable -- await needed: beforeInput assigns observed, which TypeScript's narrowing misses
       const timings = await observed;
       const undoStarted = performance.now();
       const undo = await page.evaluate(({workspaceId, operationId}) => window.dohcDesktop.undoHistoryOperation({workspaceId, operationId}),

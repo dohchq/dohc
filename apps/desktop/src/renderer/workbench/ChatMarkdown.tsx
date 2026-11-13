@@ -274,7 +274,7 @@ function textEdges(root: HTMLElement) {
 // Text the Markdown parser would turn into one paragraph of the same text:
 // nothing Markdown or GFM gives meaning to, no blank line, and no edge
 // spaces. Most chat lines are like this, so they skip the parser.
-const MARKDOWN_SYNTAX = /[\\`*_~\[\]<>&|#!:]|\w@|www\.|^\s|\s$|^(?:[-+=]|\d+[.)])/mu;
+const MARKDOWN_SYNTAX = /[\\`*_~[\]<>&|#!:]|\w@|www\.|^\s|\s$|^(?:[-+=]|\d+[.)])/mu;
 
 interface Drawn {
   content: ReactNode;

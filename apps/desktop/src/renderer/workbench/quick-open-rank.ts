@@ -501,6 +501,7 @@ export class GoToIndex {
       this.matches = null;
       return;
     }
+    // oxlint-disable-next-line typescript/no-this-alias -- replace() is a generator, which cannot be an arrow function
     const index = this;
     function* replace(kind: GoToKind, entries: Iterable<{
       key: string; label: string; path: string; record: PreparedGoToRow["record"];

@@ -374,7 +374,6 @@ async function world(options: {
       if (active && active.change.onBehalfOf !== pressedBy) return { busy: true, claim: null };
       const claim = active ?? (() => {
         claimCount += 1;
-        const record = records.get(recordId)!;
         const created: AutomationClaim = {
           claimId: `atc_claim${claimCount}`, automationId, trigger: { key: `press:${pressId}` },
           recordId, collectionPath: null, depth: by.kind === "agent" ? by.depth : 0,

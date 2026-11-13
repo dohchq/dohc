@@ -137,9 +137,9 @@ function completedTransferSeconds(scope, jobs) {
   const steps = jobs.find(job => job.name === (scope === "js" ? "typecheck + tests" : "engine gate"))?.steps;
   if (!Array.isArray(steps)) return null;
   const wait = steps.findIndex(step => step.name === `Wait for the complete ${scope === "js" ? "JavaScript" : "Rust"} group`);
-  const verify = steps.findIndex((step, index) => index > wait && /^Require complete proof and /u.test(step.name));
+  const verify = steps.findIndex((step, index) => index > wait && step.name.startsWith('Require complete proof and '));
   if (wait < 0 || verify < 0) return null;
-  const downloads = steps.slice(wait + 1, verify).filter(step => /^Run actions\/download-artifact@/u.test(step.name));
+  const downloads = steps.slice(wait + 1, verify).filter(step => step.name.startsWith('Run actions/download-artifact@'));
   if (downloads.length !== 1) return null;
   const seconds = (Date.parse(downloads[0].completed_at) - Date.parse(downloads[0].started_at)) / 1000;
   return Number.isFinite(seconds) && seconds >= 0 ? seconds : null;

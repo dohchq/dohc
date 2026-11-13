@@ -4,7 +4,7 @@ import { onOverlayOpen } from "../overlayStack";
 import { createPortal, flushSync } from "react-dom";
 import { onComposerRoomChange } from "./toastClearance";
 import { automationReachCopy } from "../automationReachCopy";
-import { AlertTriangle, Bell, Check, CheckCircle2, ChevronDown, CloudOff, GitPullRequestArrow, Info, LogIn, MessageSquare, RefreshCw, Sparkles, User, X, Zap } from "lucide-react";
+import { AlertTriangle, Bell, Check, CheckCircle2, ChevronDown, CloudOff, GitPullRequestArrow, Info, RefreshCw, Sparkles, User, X, Zap } from "lucide-react";
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type HTMLAttributes, type KeyboardEvent, type MouseEvent, type ReactElement, type ReactNode } from "react";
 import {
   ENGINE_STORE_BACKUP_DIR,
@@ -2197,7 +2197,7 @@ export function NoticeCenter(props: {
                         data-testid="sent-notice-toast-open"
                         onClick={() => {
                           onHideSentNoticeToast?.();
-                          void openSentNotice(sentToast.notice);
+                          openSentNotice(sentToast.notice);
                         }}
                         className={TOAST_ACTION_CLASS}
                       >

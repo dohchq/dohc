@@ -25,14 +25,6 @@ function countClauses(people: readonly ShareGrant[]): string[] {
     .map(({ verb, count }, index) => index > 0 ? `${count} can ${verb}` : `${count} ${count === 1 ? "person" : "people"} can ${verb}`);
 }
 
-// How many links have each level, widest first: "1 link lets anyone edit".
-function linkClauses(links: readonly ShareGrant[]): string[] {
-  if (links.length === 1) return [`Anyone with the link can ${links[0]!.level}`];
-  return VERBS.map(verb => ({ verb, count: links.filter(grant => grant.level === verb).length }))
-    .filter(({ count }) => count > 0)
-    .map(({ verb, count }) => `${count} ${count === 1 ? "link lets" : "links let"} anyone ${verb}`);
-}
-
 /** Who can do what with a share, as its row's second line says it: the desktop's SharingView `grantedWho`.
  * Anyone with a link has the widest link's level, so only people above it are counted beside it. Without a
  * link, one person goes by name and several by count. */

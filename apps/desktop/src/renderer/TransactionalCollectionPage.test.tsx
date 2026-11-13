@@ -1310,7 +1310,7 @@ describe("a Data Collection's record panel and forms", () => {
         lookups.push(deferred<{ result: AppBackendJson }>());
         return lookups.at(-1)!.promise;
       });
-      const { props, rerender } = setup({ dataset: keyed(), invoke, initialOpenRecord: "2" });
+      setup({ dataset: keyed(), invoke, initialOpenRecord: "2" });
       await screen.findByText("Alice");
       await waitFor(() => expect(lookups).toHaveLength(1));
       await act(async () => lookups[0]!.resolve({ result: bea }));

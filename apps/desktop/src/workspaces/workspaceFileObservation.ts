@@ -112,17 +112,17 @@ export function observeWorkspaceFiles(options: {
       retryTimer = setTimeout(() => {
         retryTimer = undefined;
         dirty = false;
-        wake();
+        void wake();
       }, retryMs);
       retryMs = Math.min(retryMs * 2, MAX_RETRY_MS);
       retryTimer.unref?.();
     });
     return next;
   }
-  const unsubscribe = options.subscribe(wake, paths => {
+  const unsubscribe = options.subscribe(() => { void wake(); }, paths => {
     if (!closing) options.callbacks.captured(paths);
   });
-  wake();
+  void wake();
   let stopped: Promise<void> | undefined;
   return {
     ready,
