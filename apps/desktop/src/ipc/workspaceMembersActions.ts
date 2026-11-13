@@ -92,6 +92,9 @@ export function createWorkspaceMembersActions<Workspace extends MembersWorkspace
         } else {
           await response.body?.cancel().catch(() => undefined);
         }
+        // Every POST here is a change. Refresh before the currency check,
+        // because the relay made the change even if this window moved on.
+        if (body !== undefined && response.status === 200) dependencies.sharesChanged(workspaceId);
         session.assertCurrent();
         return { status: response.status, data };
       };
@@ -127,7 +130,6 @@ export function createWorkspaceMembersActions<Workspace extends MembersWorkspace
 
       const changed = (status: number) => {
         if (status !== 200) throw failure(request.action, status);
-        dependencies.sharesChanged(workspaceId);
       };
 
       const change = async (path: string, body: unknown): Promise<MembersResult> => {

@@ -159,6 +159,20 @@ describe("workspace members actions", () => {
     expect(h.sharesChanged.mock.calls).toEqual([["ws-1"], ["ws-1"], ["ws-1"], ["ws-1"]]);
   });
 
+  it("refreshes this computer's grants for a change the relay accepted after the window changed workspaces or accounts", async () => {
+    for (const leave of ["close", "rotate"] as const) {
+      const h = harness();
+      const answer = deferred<Response>();
+      h.relay.mockReturnValueOnce(answer.promise);
+      const pending = h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "remove", person: "m-ana" } });
+      await vi.waitFor(() => expect(h.relay).toHaveBeenCalled());
+      if (leave === "close") h.close(); else h.rotate();
+      answer.resolve(json(view()));
+      await expect(pending).rejects.toThrow();
+      expect(h.sharesChanged.mock.calls).toEqual([["ws-1"]]);
+    }
+  });
+
   it("finds a person by email for the owner's tools, and says so when no one has it", async () => {
     const h = harness();
     await h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "remove", person: "ANA@test" } });
