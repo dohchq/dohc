@@ -5640,10 +5640,23 @@ describe("workspaceEngineCapture agent attribution", () => {
 
 });
 
+/** The loopback engine, answering `conflicts.list` with no open conflicts. */
+class ConflictFreeLoopbackEngine extends VersionedLoopbackEngine {
+  override async sendRequest(request: Request): Promise<Response> {
+    if (request.method === "conflicts.list") {
+      return {
+        id: request.id,
+        result: { conflicts: [], nextAfterConflictId: null },
+      };
+    }
+    return await super.sendRequest(request);
+  }
+}
+
 describe("Rust engine session selection", () => {
   it.each(["owner-outbox", "shutdown"])("does not wake watched uploads after %s acknowledgement", async mode => {
     const root = await createTestScratch("dohc-durable-lane-");
-    const loopback = new VersionedLoopbackEngine();
+    const loopback = new ConflictFreeLoopbackEngine();
     await write(root, "note.md", "existing");
     loopback.seedTextFile({workspace: WORKSPACE_ID, versionId: "main", path: "note.md", text: "existing"});
     const entered = deferred<void>(), journal = deferred<void>();
@@ -5829,7 +5842,7 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
 
   it("opens a document and publishes an authored file while a relay push waits", async () => {
     const root = await createTestScratch("dohc-drain-interleave-");
-    const loopback = new VersionedLoopbackEngine();
+    const loopback = new ConflictFreeLoopbackEngine();
     const path = "note.md";
     await write(root, path, "existing document");
     loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: "main", path, text: "existing document" });
@@ -6112,21 +6125,9 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
   // unconditionally to resume an already-open conflict. An empty page is the
   // honest answer for a workspace that has never conflicted, and it keeps the
   // merge under test a real merge instead of a rejected one.
-  class MergeableLoopbackEngine extends VersionedLoopbackEngine {
-    override async sendRequest(request: Request): Promise<Response> {
-      if (request.method === "conflicts.list") {
-        return {
-          id: request.id,
-          result: { conflicts: [], nextAfterConflictId: null },
-        };
-      }
-      return await super.sendRequest(request);
-    }
-  }
-
   it("opens a session only after a running merge has finished reading and writing heads", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
-    const loopback = new MergeableLoopbackEngine();
+    const loopback = new ConflictFreeLoopbackEngine();
     loopback.seedTextFile({
       workspace: WORKSPACE_ID,
       versionId: "main",
