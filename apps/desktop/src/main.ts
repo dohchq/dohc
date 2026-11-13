@@ -548,7 +548,14 @@ import { createChatWakeNotices } from "./chatWakes/chatWakeNotices";
 import { createChatRunnerLedger } from "./chatWakes/chatRunnerLedger";
 import { createChatRunnerRoster } from "./chatWakes/chatRunnerRoster";
 import {
-  chatWakeBackoffMs, createChatWakeLifetime, sleepUnlessAborted, type ChatWakeSession,
+  CHAT_RUNNER_COMPUTER_LABEL_MAX_CHARS,
+  isChatWakeLine,
+} from "@dohc/workspace-contracts/chat-wakes";
+import {
+  chatWakeBackoffMs,
+  createChatWakeLifetime,
+  sleepUnlessAborted,
+  type ChatWakeSession,
 } from "./chatWakes/chatWakeLifetime";
 import type { AutomationChatMessage } from "@dohc/automation-executor/automation-chat";
 import { createAutomationEvaluator } from "@dohc/app-backend-runtime/automation";
@@ -7684,31 +7691,33 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
         );
       },
     },
-    registerHandlers: () => {
-      nativeTheme.on("updated", refreshTrayIcon);
-      // A backoff can outlast a sleep. On wake, try each failing sync now.
-      powerMonitor.on("resume", () => activity.retryFailingCloudSyncs());
-      for (const workspace of listWorkspaces()) {
-        if (workspace.remote === undefined && workspace.shareView === undefined) continue;
-        if (overlapsStateFolder(workspace.rootPath, stateDir())) continue;
-        void recordSyncedIfNeeded(workspace).catch((error: unknown) =>
-          console.warn(`[desktop] Could not record that workspace "${workspace.workspaceId}" synced:`, error));
-      }
-      void watchRecordedSchedules().catch((error: unknown) =>
-        console.warn("[desktop] Schedules: read the recorded schedules:", error));
-      resumeRunNow();
-      void automationWakeConsumer.resume();
-      // Reads the account without waiting for a window, so wakes start at login on an idle computer.
-      chatWakes.start();
-      void warmCredentialCache().catch((error: unknown) => console.error("[desktop] chat wake sign-in:", error));
-      app.on("browser-window-focus", () => { resumeRunNow(); void automationWakeConsumer.resume(); chatWakes.resume(); });
-      powerMonitor.on("resume", () => { void automationWakeConsumer.resume(); chatWakes.resume(); });
-      powerMonitor.on("suspend", () => automationScheduler.suspended());
-      powerMonitor.on("resume", () => automationScheduler.resumed());
-      powerMonitor.on("unlock-screen", () => automationScheduler.wake());
-      if (process.platform === "win32") {
-        app.on("browser-window-created", (_event, window) => {
-          window.hookWindowMessage(WM_TIMECHANGE, () => automationScheduler.wake());
+    workspaces: {
+      openPath: openWorkspacePath,
+      recordOpenFailure: recordOpenPathFailure,
+      reportOpenFailure: (path, error, window) =>
+        openPathFailures.report(path, error, window.webContents),
+      refreshNativeSurfaces: refreshNativeWorkspaceSurfaces,
+    },
+    bootstrap: {
+      markReady: () => {
+        launchMarks.appReady();
+        desktopMarks.markOnce("app-ready");
+        void removeEarlierMarkedCopies(markedCopies);
+        // Start retention even when Off. Never wait for measurement on startup.
+        usageLoad = setImmediate(() => {
+          usageLoad = undefined;
+          try {
+            usageStore = createUsageStore({
+              stateDir,
+              appVersion: app.getVersion(),
+              coverage: DESKTOP_USAGE_COVERAGE,
+              onStop: usageRecordStopped,
+            });
+          } catch {
+            usageStore = undefined;
+            return;
+          }
+          void usageStore.load().catch(() => {});
         });
       },
       startEngine: () => desktopEngine.start(),
@@ -7741,10 +7750,9 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
         void automationWakeConsumer.resume();
         // Reads the account without waiting for a window, so wakes start at login on an idle computer.
         chatWakes.start();
-        if (CHAT_WAKES_ON)
-          void warmCredentialCache().catch((error: unknown) =>
-            console.error("[desktop] chat wake sign-in:", error),
-          );
+        void warmCredentialCache().catch((error: unknown) =>
+          console.error("[desktop] chat wake sign-in:", error),
+        );
         app.on("browser-window-focus", () => {
           resumeRunNow();
           void automationWakeConsumer.resume();

@@ -227,43 +227,49 @@ export function createChatWakeLifetime(deps: ChatWakeLifetimeDeps): ChatWakeLife
 
   // Stops the running consumer when it isn't the current snapshot's, or when `again`, then starts the current one.
   function cycle(again: boolean): void {
-    transitions = transitions.then(async () => {
-      if (again) retryQueued = false;
-      if (running && (again || stopped || running.session !== latest)) {
-        const ended = running;
-        running = null;
-        await ended.consumer.stop();
-        leaving = ended.session;
-      }
-      // A dropped wake's row is over, and a fresh start can't change it.
-      if (again) clearRows(["unreadable", "parked", "unconfirmed"]);
-      const next = latest;
-      // Its account signed out, or another one signed in: withdraw with its own token, queued before the next publish.
-      // A credential load's placeholder decides nothing, and quit keeps the declarations.
-      if (leaving && !stopped && (next === null ? latestSettled : next.account.scope !== leaving.account.scope)) {
-        void deps.roster.withdraw(leaving);
-        leaving = null;
-      } else if (leaving && next !== null && next.account.scope === leaving.account.scope) {
-        leaving = null;
-      }
-      if (next === null && latestSettled) {
-        clearRows();
-        rowsScope = null;
-      }
-      if (running || stopped || !started || next === null || !next.isCurrent()) return;
-      if (!isChatWakeLine(next.account.installId, CHAT_RUNNER_INSTALL_ID_MAX_CHARS)) {
-        deps.log(new Error("This computer's install ID can't be sent with chat wakes."));
-        return;
-      }
-      if (rowsScope !== next.account.scope) {
-        clearRows();
-        rowsScope = next.account.scope;
-      }
-      const consumer = consumerFor(next);
-      running = { session: next, consumer };
-      consumer.start();
-      void deps.roster.reconcile(next);
-    }).catch(deps.log);
+    transitions = transitions
+      .then(async () => {
+        if (again) retryQueued = false;
+        if (running && (again || stopped || running.session !== latest)) {
+          const ended = running;
+          running = null;
+          await ended.consumer.stop();
+          leaving = ended.session;
+        }
+        // A dropped wake's row is over, and a fresh start can't change it.
+        if (again) clearRows(["unreadable", "parked", "unconfirmed"]);
+        const next = latest;
+        // Its account signed out, or another one signed in: withdraw with its own token, queued before the next publish.
+        // A credential load's placeholder decides nothing, and quit keeps the declarations.
+        if (
+          leaving &&
+          !stopped &&
+          (next === null ? latestSettled : next.account.scope !== leaving.account.scope)
+        ) {
+          void deps.roster.withdraw(leaving);
+          leaving = null;
+        } else if (leaving && next !== null && next.account.scope === leaving.account.scope) {
+          leaving = null;
+        }
+        if (next === null && latestSettled) {
+          clearRows();
+          rowsScope = null;
+        }
+        if (running || stopped || !started || next === null || !next.isCurrent()) return;
+        if (!isChatWakeLine(next.account.installId, CHAT_RUNNER_INSTALL_ID_MAX_CHARS)) {
+          deps.log(new Error("This computer's install ID can't be sent with chat wakes."));
+          return;
+        }
+        if (rowsScope !== next.account.scope) {
+          clearRows();
+          rowsScope = next.account.scope;
+        }
+        const consumer = consumerFor(next);
+        running = { session: next, consumer };
+        consumer.start();
+        void deps.roster.reconcile(next);
+      })
+      .catch(deps.log);
   }
 
   return {
