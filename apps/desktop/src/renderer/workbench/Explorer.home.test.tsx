@@ -209,12 +209,12 @@ describe("Explorer Files", () => {
 });
 
 describe("Explorer Home", () => {
-  it("orders its sections Open editors, Pinned, Pages, Sketches, Collections, Apps, Other files", () => {
+  it("orders its sections Open editors, Apps, Pinned, Pages, Sketches, Collections, Other files", () => {
     render(<Explorer {...explorerProps({ pinned: ["notes.md"] })} />);
 
     const sections = [...screen.getByTestId("file-tree").querySelectorAll("section")];
     expect(sections.map((element) => element.getAttribute("aria-label")))
-      .toEqual(["Open editors", "Pinned", "Pages", "Sketches", "Collections", "Apps", "Other files"]);
+      .toEqual(["Open editors", "Apps", "Pinned", "Pages", "Sketches", "Collections", "Other files"]);
     expect(screen.getByTestId("file-tree").getAttribute("aria-label")).toBe("Home");
   });
 
@@ -242,7 +242,7 @@ describe("Explorer Home", () => {
 
     close.focus();
     await user.tab();
-    expect(document.activeElement).toBe(screen.getByTestId("explorer-pages-toggle"));
+    expect(document.activeElement).toBe(screen.getByTestId("explorer-apps-toggle"));
   });
 
   it("leaves Files to Open editors and the folder tree", () => {
@@ -304,10 +304,12 @@ describe("Explorer Home", () => {
     }
     expect(screen.queryByTestId("sites-count")).toBeNull();
 
-    screen.getByTestId("explorer-pages-toggle").focus();
+    screen.getByTestId("explorer-apps-toggle").focus();
+    await user.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(screen.getByTestId("explorer-pages-toggle"));
     await user.keyboard("{ArrowDown}");
     expect(document.activeElement).toBe(screen.getByTestId("explorer-collections-toggle"));
-    await user.keyboard("{ArrowDown}");
+    await user.keyboard("{Home}");
     expect(document.activeElement).toBe(screen.getByTestId("explorer-apps-toggle"));
 
     // A folded section shows no line, and its toggle no longer points at one.
@@ -402,9 +404,14 @@ describe("Explorer Home", () => {
     const user = userEvent.setup();
     render(<Explorer {...explorerProps({ onOpenFile, pinned: ["budget.csv"] })} />);
 
-    const pinnedToggle = screen.getByTestId("explorer-pinned-toggle");
-    expect(pinnedToggle.tabIndex).toBe(0);
-    pinnedToggle.focus();
+    // Apps comes first, so its header holds Home's tab stop.
+    const appsToggle = screen.getByTestId("explorer-apps-toggle");
+    expect(appsToggle.tabIndex).toBe(0);
+    appsToggle.focus();
+    await user.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(screen.getByTestId("sites-row"));
+    await user.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(screen.getByTestId("explorer-pinned-toggle"));
     await user.keyboard("{ArrowDown}");
     await user.keyboard("{Enter}");
     expect(onOpenFile).toHaveBeenLastCalledWith("budget.csv");
@@ -594,6 +601,18 @@ describe("Explorer Home", () => {
     expect(mounted("file-0080.md")).toBe(true);
   });
 
+  it("measures the Pages window again when apps load above it", () => {
+    const props = explorerProps({ ...largeHome(), apps: apps({ state: { status: "loading" } }) });
+    // Each app row pushes Pages down, here by an exaggerated 150 px.
+    const view = scrolledHome(props, () => 150 * screen.queryAllByTestId("sites-row").length);
+    expect(mounted("file-0080.md")).toBe(false);
+
+    const loaded = Array.from({ length: 4 }, (_, index) => ({ ...app, root: `app-${index}`, title: `App ${index}` }));
+    view.rerender(<Explorer {...props} apps={apps({ state: { status: "ready", workspaceId: "workspace-1", apps: loaded } })} />);
+
+    expect(mounted("file-0080.md")).toBe(true);
+  });
+
   it("switches to Files to reveal a path", () => {
     const onModeChange = vi.fn();
     render(<Explorer {...explorerProps({ onModeChange, revealPaths: ["budget.csv"] })} />);
@@ -625,7 +644,7 @@ describe("selecting several rows in Home", () => {
     fireEvent.click(homeRow("pages:notes.md"), { ctrlKey: true });
     fireEvent.click(homeRow("apps:trip"), { ctrlKey: true });
     expect(onOpenFile).not.toHaveBeenCalled();
-    expect(picked()).toEqual(["pages:notes.md", "apps:trip"]);
+    expect(picked()).toEqual(["apps:trip", "pages:notes.md"]);
     // The open page keeps its weight inside the selection and gains the edge.
     expect(homeRow("pages:notes.md").parentElement?.className).toContain("font-medium");
     expect(edged()).toEqual(["pages:notes.md"]);

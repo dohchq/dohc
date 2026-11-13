@@ -193,7 +193,7 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     !!explorer.onRestoreCollection ||
     !!refusal ||
     !!explorer.collectionsElsewhere;
-  // Pages, Collections and Apps always show in a workspace of your own, each
+  // Apps, Pages and Collections always show in a workspace of your own, each
   // saying when it has nothing. A share view shows only the kinds it holds.
   const appsStatus = apps?.state.status;
   const appsShown = appsStatus === "failed" || appList.length > 0 || (!!apps && !explorer.shareView);
@@ -217,6 +217,21 @@ export function ExplorerHome(props: ExplorerHomeProps) {
   const holdRow = <div aria-hidden className="h-7" />;
   const collectionsUnknown = refusal ? undefined : explorer.collectionsUnknown;
   const sections: Section[] = [];
+  // dohc is for building apps, so Apps leads Home.
+  if (appsShown) {
+    sections.push({
+      id: "apps",
+      label: "Apps",
+      count: appList.length,
+      countLabel: (count) => plural(count, "app", "apps"),
+      rows: appRows,
+      ...(apps?.state.status === "failed" ? { body: <RetryRow testId="sites-failed" onRetry={apps.retry} /> } : {}),
+      ...(appsStatus === "loading" ? { body: holdRow } : {}),
+      ...(appsStatus === "ready" && appList.length === 0
+        ? { empty: "No apps yet." }
+        : {}),
+    });
+  }
   if (pinned.length > 0) sections.push({ id: "pinned", label: "Pinned", rows: pinned });
   if (pages.length > 0 || !explorer.shareView) {
     sections.push({
@@ -264,20 +279,6 @@ export function ExplorerHome(props: ExplorerHomeProps) {
       ) : undefined,
       ...(!refusal && !collectionsUnknown && !explorer.collectionsElsewhere && !explorer.onMoreDataCollections && collections.length === 0
         ? { empty: "No Collections yet." }
-        : {}),
-    });
-  }
-  if (appsShown) {
-    sections.push({
-      id: "apps",
-      label: "Apps",
-      count: appList.length,
-      countLabel: (count) => plural(count, "app", "apps"),
-      rows: appRows,
-      ...(apps?.state.status === "failed" ? { body: <RetryRow testId="sites-failed" onRetry={apps.retry} /> } : {}),
-      ...(appsStatus === "loading" ? { body: holdRow } : {}),
-      ...(appsStatus === "ready" && appList.length === 0
-        ? { empty: "No apps yet." }
         : {}),
     });
   }
@@ -367,7 +368,8 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     };
     setRange((current) => (current.start === next.start && current.end === next.end ? current : next));
   }, [pages.length, scrollerRef, windowed]);
-  useLayoutEffect(updateRange, [updateRange, sectionsKey, collapsed, props.aboveLayout]);
+  // Apps and Pinned sit above Pages, so their rows move it too.
+  useLayoutEffect(updateRange, [updateRange, sectionsKey, collapsed, props.aboveLayout, appRows.length, appsStatus, pinned.length]);
   useEffect(() => {
     const scroller = scrollerRef.current;
     if (!scroller || !windowed) return;
