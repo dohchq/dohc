@@ -8,6 +8,9 @@ import type { SyncRelayStorage } from "./storage";
 import { createAppBackendAdmission, type AppBackendAdmissionLimits } from "./appBackendAdmission";
 import { badRequest, notFound, relayError, RelayError } from "./errors";
 
+/** A page cursor, or a checkpoint record with its source and schema. */
+export const DATASET_REPLICA_REQUEST_BYTES = 1024 * 1024;
+
 export interface DatasetReplicaRoute {
   route: "dataset-replica";
   workspaceId: string;
@@ -42,6 +45,17 @@ export function createDatasetReplicaRoutes(
         AbortSignal.timeout(30_000),
       ]),
       scope = { workspaceId: route.workspaceId, datasetId: route.datasetId };
+    // Read before admission, so a slow sender holds no slot.
+    let body: unknown;
+    if (route.action !== "capture") {
+      if (request.headers.get("content-type")?.split(";")[0] !== "application/json")
+        throw badRequest("Collection copy requests require JSON.");
+      try {
+        body = await readBoundedJson(request, DATASET_REPLICA_REQUEST_BYTES, signal);
+      } catch {
+        throw badRequest("Invalid Collection copy request.");
+      }
+    }
     const release = admit(
       {
         dataset: JSON.stringify([route.workspaceId, route.datasetId]),
@@ -55,14 +69,6 @@ export function createDatasetReplicaRoutes(
       signal.throwIfAborted();
       if (route.action === "capture")
         return Response.json(host.replicaCapture(auth, scope), { headers });
-      if (request.headers.get("content-type")?.split(";")[0] !== "application/json")
-        throw badRequest("Collection copy requests require JSON.");
-      let body: unknown;
-      try {
-        body = await readBoundedJson(request, 1024 * 1024, signal);
-      } catch {
-        throw badRequest("Invalid Collection copy request.");
-      }
       if (!body || typeof body !== "object" || Array.isArray(body))
         throw badRequest("Invalid Collection copy request.");
       const row = body as Record<string, unknown>;

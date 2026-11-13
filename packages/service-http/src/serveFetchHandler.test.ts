@@ -27,7 +27,7 @@ async function serve(
   options: Partial<ServeFetchHandlerOptions> & Pick<ServeFetchHandlerOptions, "handler">,
 ): Promise<{ port: number; server: Server }> {
   const server = serveFetchHandler({
-    maxBodyBytes: () => 1024,
+    maxBodyBytes: () => 1024 * 1024,
     oversized: () => Response.json({ ok: false, error: "too large" }, { status: 413 }),
     failure: () => Response.json({ ok: false, error: "failed" }, { status: 500 }),
     ...options,
@@ -48,20 +48,26 @@ function firstChunk(response: IncomingMessage): Promise<Buffer> {
 }
 
 describe("serveFetchHandler", () => {
-  it("keeps Node's default receive deadline unless streaming is configured", async () => {
+  it("bounds headers itself and leaves body receipt to the adapter or a streaming handler", async () => {
     const ordinary = await serve({ handler: async () => new Response(null) });
     const streaming = await serve({
       streamBody: () => true,
       handler: async () => new Response(null),
     });
-    expect(ordinary.server.requestTimeout).toBe(300_000);
-    expect(ordinary.server.headersTimeout).toBe(60_000);
-    expect(streaming.server.requestTimeout).toBe(0);
-    expect(streaming.server.headersTimeout).toBe(60_000);
+    for (const { server } of [ordinary, streaming]) {
+      expect(server.requestTimeout).toBe(0);
+      expect(server.headersTimeout).toBe(60_000);
+    }
   });
 
-  it("bounds ordinary body receipt after headers when streaming is configured", async () => {
-    const handler = vi.fn(async () => new Response("ok"));
+  it("refuses an upload that does not arrive in time while its handler reads it", async () => {
+    let readFailed = false;
+    const handler = vi.fn(async (request: Request) => {
+      await request.text().catch(() => {
+        readFailed = true;
+      });
+      return new Response("ok");
+    });
     const { port, server } = await serve({
       streamBody: (url) => url.pathname === "/import",
       handler,
@@ -82,11 +88,13 @@ describe("serveFetchHandler", () => {
     expect(refused.headers.connection).toBe("close");
     expect(refused.headers["x-path"]).toBe("/ordinary");
     refused.resume();
-    expect(handler).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(readFailed).toBe(true));
+    // The connection lingers so the client can read the answer, then goes.
+    await vi.advanceTimersByTimeAsync(2_000);
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("clears the ordinary receipt timer before running the handler", async () => {
+  it("clears the receipt timer once the body has arrived", async () => {
     let entered!: () => void, finish!: () => void;
     const started = new Promise<void>((resolve) => {
       entered = resolve;
@@ -412,10 +420,13 @@ describe("serveFetchHandler", () => {
   });
 
   it("refuses an upload as it crosses the cap and closes the socket", async () => {
-    let handled = false;
+    let readFailed = false;
     const { port } = await serve({
-      handler: async () => {
-        handled = true;
+      maxBodyBytes: () => 96 * 1024,
+      handler: async (request) => {
+        await request.arrayBuffer().catch(() => {
+          readFailed = true;
+        });
         return new Response("ok");
       },
     });
@@ -425,7 +436,7 @@ describe("serveFetchHandler", () => {
     socket.on("data", (data: Buffer) => raw.push(Buffer.from(data)));
     const closed = new Promise<void>((resolve) => socket.once("close", () => resolve()));
     socket.write("PUT /blob HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\n");
-    const chunk = Buffer.alloc(600, "x");
+    const chunk = Buffer.alloc(64 * 1024, "x");
     socket.write(`${chunk.length.toString(16)}\r\n`);
     socket.write(chunk);
     socket.write("\r\n");
@@ -437,7 +448,235 @@ describe("serveFetchHandler", () => {
     expect(text).toMatch(/^HTTP\/1\.1 413/u);
     expect(text).toMatch(/\r\nconnection: close\r\n/iu);
     expect(text).toContain('{"ok":false,"error":"too large"}');
-    expect(handled).toBe(false);
+    expect(readFailed).toBe(true);
+  });
+
+  it("refuses an upload whose declared length is over the cap without running the handler", async () => {
+    const handler = vi.fn(async () => new Response("ok"));
+    const { port } = await serve({ maxBodyBytes: () => 1024, handler });
+    const response = await new Promise<IncomingMessage>((resolve, reject) => {
+      const request = httpRequest(
+        `http://127.0.0.1:${port}/blob`,
+        { method: "PUT", headers: { "content-length": "2048" } },
+        resolve,
+      );
+      request.on("error", reject);
+      request.write(Buffer.alloc(1));
+    });
+    expect(response.statusCode).toBe(413);
+    expect(response.headers.connection).toBe("close");
+    response.resume();
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("runs a small body's handler only once the body has arrived, outside the budget", async () => {
+    let entered = 0;
+    const bodies: string[] = [];
+    const sockets: IncomingMessage["socket"][] = [];
+    const { port, server } = await serve({
+      maxBodyBytes: () => 16 * 1024,
+      bodiesInFlight: { maxBytes: 1, maxBytesPerCaller: 1, caller: () => "" },
+      // A handler that takes a slot before it checks its caller.
+      handler: async (request) => {
+        entered++;
+        bodies.push(await request.text());
+        return new Response(null);
+      },
+    });
+    server.on("connection", (socket) => sockets.push(socket));
+    const head = ["POST /desktop-ready HTTP/1.1", "Host: test", "Content-Length: 4", "", ""].join(
+      "\r\n",
+    );
+    const socket = connect(port, "127.0.0.1");
+    const raw: Buffer[] = [];
+    socket.on("data", (data: Buffer) => raw.push(Buffer.from(data)));
+    socket.write(head + "ab");
+    await vi.waitFor(() => expect(sockets[0]?.bytesRead).toBe(head.length + 2));
+    expect(entered).toBe(0);
+    socket.write("cd");
+    await vi.waitFor(() => expect(Buffer.concat(raw).toString("utf8")).toMatch(/^HTTP\/1\.1 200/u));
+    expect(bodies).toEqual(["abcd"]);
+    socket.destroy();
+  });
+
+  it("gives a POST that frames no body a null body", async () => {
+    const bodies: Array<ReadableStream<Uint8Array> | null> = [];
+    const { port } = await serve({
+      handler: async (request) => {
+        bodies.push(request.body);
+        return new Response(null);
+      },
+    });
+    const response = await fetch(`http://127.0.0.1:${port}/handoff`, { method: "POST" });
+    expect(response.status).toBe(200);
+    expect(bodies).toEqual([null]);
+  });
+
+  it("delivers the answer of a handler that stops reading at its own smaller limit", async () => {
+    const { port } = await serve({
+      handler: async (request) => {
+        const reader = request.body!.getReader();
+        await reader.read();
+        await reader.cancel();
+        return new Response(null, { status: 413 });
+      },
+    });
+    const response = await new Promise<IncomingMessage>((resolve, reject) => {
+      const request = httpRequest(`http://127.0.0.1:${port}/small`, { method: "POST" }, resolve);
+      request.on("error", reject);
+      request.end(Buffer.alloc(512 * 1024));
+    });
+    expect(response.statusCode).toBe(413);
+    response.resume();
+  });
+
+  it("never reads the upload of a caller its handler refuses or keeps waiting", async () => {
+    const uploads = 8;
+    const size = 4 * 1024 * 1024;
+    let admit!: () => void;
+    const admission = new Promise<void>((resolve) => {
+      admit = resolve;
+    });
+    const sockets: IncomingMessage["socket"][] = [];
+    const statuses: number[] = [];
+    const { port, server } = await serve({
+      maxBodyBytes: () => size,
+      // A sign-in check that has not answered yet, then refuses without reading the body.
+      handler: async () => {
+        await admission;
+        return new Response(null, { status: 401 });
+      },
+    });
+    server.on("request", (incoming: IncomingMessage) => sockets.push(incoming.socket));
+    const payload = Buffer.alloc(size - 1);
+    // Each client is still sending when it is refused, and must still read the refusal.
+    const clients = Array.from({ length: uploads }, () => {
+      const request = httpRequest(`http://127.0.0.1:${port}/log`, {
+        method: "POST",
+        headers: { "content-length": String(size) },
+      });
+      request.on("error", () => undefined);
+      request.on("response", (response) => {
+        statuses.push(response.statusCode ?? 0);
+        response.resume();
+      });
+      request.write(payload);
+      return request;
+    });
+    await vi.waitFor(() => expect(sockets).toHaveLength(uploads));
+    // Give the clients time to push what the server will accept.
+    await new Promise<void>((resolve) => setTimeout(resolve, 200));
+    const readWhileWaiting = sockets.reduce((total, socket) => total + socket.bytesRead, 0);
+    admit();
+    await vi.waitFor(() => expect(statuses).toEqual(Array(uploads).fill(401)));
+    await vi.waitFor(() => expect(sockets.every((socket) => socket.destroyed)).toBe(true), {
+      timeout: 5_000,
+    });
+    for (const client of clients) client.destroy();
+    // Each connection holds at most a stream window, not its upload.
+    expect(readWhileWaiting).toBeLessThan(uploads * 512 * 1024);
+  });
+
+  it("keeps the bodies that handlers have read within the shared budget and each caller's share", async () => {
+    const releases: Array<() => void> = [];
+    const { port } = await serve({
+      bodiesInFlight: {
+        maxBytes: 96 * 1024,
+        maxBytesPerCaller: 64 * 1024,
+        caller: (headers) => headers.get("authorization") ?? "",
+      },
+      busy: () => Response.json({ ok: false, error: "busy" }, { status: 503 }),
+      handler: async (request) => {
+        const bytes = (await request.arrayBuffer()).byteLength;
+        // Holding the answer keeps this body counted.
+        await new Promise<void>((resolve) => releases.push(resolve));
+        return Response.json({ bytes });
+      },
+    });
+    const send = (caller: string) =>
+      new Promise<IncomingMessage>((resolve, reject) => {
+        httpRequest(
+          `http://127.0.0.1:${port}/log`,
+          { method: "POST", headers: { authorization: caller } },
+          resolve,
+        )
+          .on("error", reject)
+          .end(Buffer.alloc(48 * 1024));
+      });
+    const refused = async (pending: Promise<IncomingMessage>) => {
+      const response = await pending;
+      response.resume();
+      return [response.statusCode, response.headers.connection];
+    };
+    const first = send("a");
+    await vi.waitFor(() => expect(releases).toHaveLength(1));
+    // Past caller a's share, while the budget still has room.
+    expect(await refused(send("a"))).toEqual([503, "close"]);
+    const second = send("b");
+    await vi.waitFor(() => expect(releases).toHaveLength(2));
+    // Past the budget, though caller c holds nothing.
+    expect(await refused(send("c"))).toEqual([503, "close"]);
+    releases[0]!();
+    expect((await first).statusCode).toBe(200);
+    (await first).resume();
+    // Answering a releases its bytes for anyone.
+    const third = send("c");
+    await vi.waitFor(() => expect(releases).toHaveLength(3));
+    releases[1]!();
+    releases[2]!();
+    expect((await second).statusCode).toBe(200);
+    expect((await third).statusCode).toBe(200);
+    (await second).resume();
+    (await third).resume();
+  });
+
+  it("returns a timed-out upload's bytes to the budget as it refuses the upload", async () => {
+    const received = new Map<string, number>();
+    const { port, server } = await serve({
+      bodiesInFlight: {
+        maxBytes: 64 * 1024,
+        maxBytesPerCaller: 64 * 1024,
+        caller: (headers) => headers.get("authorization") ?? "",
+      },
+      busy: () => new Response(null, { status: 503 }),
+      handler: async (request) => {
+        const caller = request.headers.get("authorization") ?? "";
+        const reader = request.body!.getReader();
+        for (;;) {
+          const read = await reader.read().catch(() => ({ done: true as const }));
+          if (read.done) break;
+          received.set(caller, (received.get(caller) ?? 0) + read.value.byteLength);
+        }
+        return new Response(null);
+      },
+    });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const send = (caller: string, bytes: number, length = bytes) =>
+      new Promise<IncomingMessage>((resolve, reject) => {
+        const request = httpRequest(
+          `http://127.0.0.1:${port}/log`,
+          { method: "POST", headers: { authorization: caller, "content-length": String(length) } },
+          resolve,
+        );
+        request.on("error", reject);
+        request.write(Buffer.alloc(bytes));
+        if (bytes === length) request.end();
+      });
+    const arrived = new Promise<void>((resolve) => server.once("request", () => resolve()));
+    const stalled = send("a", 48 * 1024, 60 * 1024);
+    await arrived;
+    await vi.waitFor(() => expect(received.get("a")).toBe(48 * 1024));
+    const busy = await send("b", 48 * 1024);
+    expect(busy.statusCode).toBe(503);
+    busy.resume();
+    await vi.advanceTimersByTimeAsync(300_000);
+    const timedOut = await stalled;
+    expect(timedOut.statusCode).toBe(408);
+    timedOut.resume();
+    // Before the refused connection lingers out, and before any collection.
+    const admitted = await send("b", 48 * 1024);
+    expect(admitted.statusCode).toBe(200);
+    admitted.resume();
   });
 
   it("answers a throwing handler with the failure response for its URL", async () => {

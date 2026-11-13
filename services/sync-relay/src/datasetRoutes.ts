@@ -30,6 +30,15 @@ import { createAppBackendAdmission, type AppBackendAdmissionLimits } from "./app
 import { badRequest, notFound, relayError } from "./errors";
 import type { SyncRelayStorage } from "./storage";
 
+/** The largest JSON body a dataset action reads. */
+export function datasetRequestBytes(action: DatasetRoute["action"]): number {
+  return action === "upload"
+    ? APP_BACKEND_UPLOAD_REQUEST_BYTES
+    : action === "activate" || action === "prepare-migration"
+      ? 1024 * 1024
+      : 128 * 1024;
+}
+
 export interface DatasetRoute {
   route: "dataset";
   workspaceId: string;
@@ -345,6 +354,8 @@ export function createDatasetRoutes(
       AbortSignal.timeout(30_000),
     ]);
     const scope = { workspaceId: route.workspaceId, datasetId: route.datasetId! };
+    // Read before admission, so a slow sender holds no slot.
+    const raw = read ? undefined : await json(request, signal, datasetRequestBytes(route.action));
     const release = admit(
       {
         dataset: JSON.stringify([route.workspaceId, route.datasetId ?? "catalog"]),
@@ -406,15 +417,6 @@ export function createDatasetRoutes(
               ? positive(Number(query.get("beforeRevision")))
               : undefined,
           });
-        const raw = await json(
-          request,
-          signal,
-          route.action === "upload"
-            ? APP_BACKEND_UPLOAD_REQUEST_BYTES
-            : route.action === "activate" || route.action === "prepare-migration"
-              ? 1024 * 1024
-              : 128 * 1024,
-        );
         if (
           route.action === "approve-migration" ||
           route.action === "discard-migration" ||
@@ -763,6 +765,22 @@ export function createDatasetAppRoutes(
     const published = host.publication(auth, route.publicationId);
     if (!published) throw notFound();
     const { authority, workspaceId, datasetId, authorityRevision, capability } = published;
+    const get =
+      route.action === "descriptor" || route.action === "summary" || route.action === "blob";
+    const signal = AbortSignal.any([
+      request.signal,
+      storage.unavailable,
+      AbortSignal.timeout(30_000),
+    ]);
+    // Read before admission, so a slow sender holds no slot.
+    const raw =
+      get || request.method !== "POST"
+        ? undefined
+        : await json(
+            request,
+            signal,
+            route.action === "upload" ? APP_BACKEND_UPLOAD_REQUEST_BYTES : 128 * 1024,
+          );
     let release: () => void;
     try {
       release = admit(
@@ -782,14 +800,7 @@ export function createDatasetAppRoutes(
       if (auth.kind === "link") throw notFound();
       throw error;
     }
-    const signal = AbortSignal.any([
-      request.signal,
-      storage.unavailable,
-      AbortSignal.timeout(30_000),
-    ]);
     try {
-      const get =
-        route.action === "descriptor" || route.action === "summary" || route.action === "blob";
       if (request.method !== (get ? "GET" : "POST")) throw relayError("method_not_allowed");
       const query = new URL(request.url).searchParams;
       if (route.action === "blob") {
@@ -839,11 +850,6 @@ export function createDatasetAppRoutes(
             files: published.candidate.files,
           };
         }
-        const raw = await json(
-          request,
-          signal,
-          route.action === "upload" ? APP_BACKEND_UPLOAD_REQUEST_BYTES : 128 * 1024,
-        );
         if (route.action === "attempt") {
           const body = record(
             raw,

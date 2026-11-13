@@ -5,10 +5,15 @@ export { SYNC_RELAY_REQUEST_LOG } from "./requestLog";
 import { createWorkReferenceRoutes } from "./workReferenceRoutes";
 import { parsePublicEditRelease, type PublicEditRelease } from "@dohc/security-contract";
 import { normalizeLinkRefusal } from "./linkRefusal";
-import type { AppPublicationLimits } from "@dohc/security-contract/app-publication";
+import {
+  APP_COLLECTION_REQUEST_BYTES,
+  type AppPublicationLimits,
+} from "@dohc/security-contract/app-publication";
 import type { AppBackendAdmissionLimits } from "./appBackendAdmission";
-import { createDatasetAppRoutes, createDatasetRoutes } from "./datasetRoutes";
-import { createDatasetReplicaRoutes } from "./datasetReplicaRoutes";
+import { createDatasetAppRoutes, createDatasetRoutes, datasetRequestBytes } from "./datasetRoutes";
+import { MAX_BLOB_BYTES } from "./wireLimits";
+import { APP_BACKEND_UPLOAD_REQUEST_BYTES } from "@dohc/security-contract/app-backend";
+import { createDatasetReplicaRoutes, DATASET_REPLICA_REQUEST_BYTES } from "./datasetReplicaRoutes";
 import { createDatasetRecoveryExport } from "./datasetRecoveryExport";
 import type { RelayDatasetHost } from "./datasetHost";
 import { hashLinkProfileSecret } from "./linkSecurity";
@@ -1655,6 +1660,85 @@ export function createSyncRelayHandler({
       return { status: response.status, body: await response.json().catch(() => undefined) };
     },
   });
+}
+
+// Headroom over the blob cap so a maximal valid blob PUT still passes.
+export const MAX_BODY_BYTES = MAX_BLOB_BYTES + 1024 * 1024;
+const DEFAULT_BODY_BYTES = 256 * 1024;
+
+/**
+ * The largest body each route's handler reads. The adapter refuses a larger
+ * one before the handler runs. Paths outside `parseRoute`, such as a hosted
+ * replica's feed and the live session routes, keep the largest cap and bound
+ * their own bodies.
+ */
+export function maxRequestBodyBytes(url: URL): number {
+  let route: ReturnType<typeof parseRoute>;
+  try {
+    route = parseRoute({ url: url.href });
+  } catch {
+    return MAX_BODY_BYTES;
+  }
+  switch (route.route) {
+    case "log":
+    case "blob":
+    case "share-log":
+    case "share-blob":
+    case "share-proposals":
+      return MAX_BODY_BYTES;
+    case "dataset":
+      return Math.max(datasetRequestBytes(route.action), DEFAULT_BODY_BYTES);
+    case "named-dataset":
+    case "app-backend":
+      return route.action === "upload" ? APP_BACKEND_UPLOAD_REQUEST_BYTES : DEFAULT_BODY_BYTES;
+    case "dataset-replica":
+      return DATASET_REPLICA_REQUEST_BYTES;
+    // Its handler reserves the link's bytes before reading, so the body arrives first.
+    case "link-app-collection":
+      return APP_COLLECTION_REQUEST_BYTES;
+    // Up to 100 paths of up to 1,024 characters each.
+    case "shares-create":
+    case "share-link-create-atomic":
+      return 1024 * 1024;
+    default:
+      return DEFAULT_BODY_BYTES;
+  }
+}
+
+const SESSION_COOKIE = /(?:^|;)\s*(?:__Secure-)?better-auth\.session_token\s*=([^;]*)/gu;
+
+/**
+ * The one credential a request presents, which keys its share of bodies in
+ * flight. A request that presents an `Authorization` header and a session
+ * cookie, or two session cookies, could vary the one its handler ignores, so
+ * it shares the client address's share with every request that presents none.
+ * Anyone with a link can mint capabilities, so all of them share one share.
+ */
+export function requestBodyCaller(headers: Headers): string {
+  const authorization = headers.get("authorization");
+  if (authorization?.startsWith("LinkCapability ")) return "link";
+  const cookies = [...(headers.get("cookie") ?? "").matchAll(SESSION_COOKIE)];
+  if (authorization !== null && cookies.length === 0) {
+    const bearer = /^bearer (.*)$/iu.exec(authorization)?.[1]?.trim();
+    // The relay's own credentials, such as a service host's, are whole values.
+    if (!bearer || bearer.startsWith("dohc-")) return `authorization ${authorization}`;
+    return `session ${sessionToken(bearer)}`;
+  }
+  if (authorization === null && cookies.length === 1) {
+    // Read as better-auth reads a cookie value: trimmed and unquoted.
+    const value = cookies[0]![1]!.trim();
+    return `session ${sessionToken(value.startsWith('"') ? value.slice(1, -1) : value)}`;
+  }
+  return `address ${headers.get("x-dohc-relay-client-ip") ?? ""}`;
+}
+
+// A session token is also accepted signed, as `token.signature`, and encoded.
+function sessionToken(value: string): string {
+  let decoded = value;
+  try {
+    decoded = decodeURIComponent(value);
+  } catch {}
+  return decoded.split(".", 1)[0]!;
 }
 
 /**

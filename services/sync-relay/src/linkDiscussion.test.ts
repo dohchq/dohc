@@ -1690,6 +1690,32 @@ describe("share discussion HTTP boundary", () => {
     for (const response of await Promise.all(refusals)) {
       expect(await genericRefusal(response)).toBe(baseline);
     }
+    // A caller who is not the owner is refused before the relay reads the body.
+    for (const userId of [null, COMMENTER]) {
+      let read = false;
+      const body = new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            read = true;
+            controller.enqueue(
+              new TextEncoder().encode(JSON.stringify({ action: "pause", workspaceId: WORKSPACE })),
+            );
+            controller.close();
+          },
+        },
+        { highWaterMark: 0 },
+      );
+      const response = await test.handler(
+        request(userId, `/sync/shares/${SHARE}/discussion/moderation`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body,
+          duplex: "half",
+        } as RequestInit),
+      );
+      expect(await genericRefusal(response)).toBe(baseline);
+      expect(read, `read the body of ${userId ?? "an unsigned caller"}`).toBe(false);
+    }
     expect(linkWritesPausedAtMs(storagePath(test.storage), SHARE)).toBeNull();
     expect(test.storage.getLinkPrincipal(target.linkPrincipalId!)!.blockedAtMs).toBeNull();
     expect(test.storage.getLinkPrincipal(crossShare.principalId)!.blockedAtMs).toBeNull();
