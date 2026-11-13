@@ -19,6 +19,18 @@ export const noticesWords = {
   fromSender: { person: "From a person", agent: "From an agent", automation: "From an automation" },
   unreadCount: (count: number) => `Notices, ${count} unread`,
   showMore: (count: number) => `Show ${count} more`,
+
+  // The phone's.
+  markRead: "Mark read",
+  markUnread: "Mark unread",
+  /** Marks a Notice from the server done: it leaves the list, everywhere the account reads it. */
+  done: "Done",
+  /** The toast after Done, which holds its only Undo. */
+  markedDone: "Marked done",
+  /** A Notice whose target the phone can't open. */
+  openOnComputer: "Open on your computer",
+  readFailed: "dohc could not read your notices.",
+  marksFailed: "dohc could not save your changes to notices.",
 } as const;
 
 export const syncStatusWords = {

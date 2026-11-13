@@ -2,7 +2,7 @@ import { noticesWords } from "@dohc/interface-words/notices";
 import { AlertTriangle, Sparkles, User, Zap } from "lucide-react-native";
 import { StyleSheet, View } from "react-native";
 import { useTheme } from "../theme";
-import type { SenderKind } from "./sample";
+import type { SenderKind } from "./phoneNotice";
 
 // The sender's shape, as on the desktop and in chat: round for a person, a rounded square for an agent,
 // the bare lightning mark for an automation. A failure takes the danger triangle in place of its sender's shape,

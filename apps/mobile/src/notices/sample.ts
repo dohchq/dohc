@@ -1,33 +1,8 @@
 import { syncProblemSentence } from "@dohc/interface-words/notices";
 import { sharingWords } from "@dohc/interface-words/sharing";
 import { demoMode } from "../demo";
-// Sample notices for design review only, shaped like the relay's notices (RelayNotice): titles and bodies arrive as data.
-export type SenderKind = "person" | "agent" | "automation";
-
-export interface PhoneNotice {
-  readonly id: string;
-  /** Null for a failure held on this phone, which has no sender. */
-  readonly senderKind: SenderKind | null;
-  readonly senderLabel: string;
-  readonly title: string;
-  readonly body?: string;
-  /** How long ago it arrived; the row shows "2m ago" and VoiceOver hears "2 minutes ago". */
-  readonly minutesAgo: number;
-  /** When it arrived, for a notice made on this phone: its time then counts from here, not from `minutesAgo`. */
-  readonly atMs?: number;
-  readonly read: boolean;
-  /** Another workspace's name, shown beside the time. */
-  readonly folder?: string;
-  readonly open?: "open" | "openNote";
-  /** Where Open goes, when the phone can go there: a chat. */
-  readonly openChat?: { readonly id: string; readonly name: string };
-  readonly retry?: boolean;
-  /** What Try again does, for a failure held on this phone. */
-  readonly onRetry?: () => void;
-  /** A wake from the server waits for a computer; dismissing it would cancel it. */
-  readonly dismissible: boolean;
-  readonly failed?: boolean;
-}
+import type { PhoneNotice } from "./phoneNotice";
+// Sample notices for design review only, shaped like the server's: titles and bodies arrive as data.
 
 export const sampleNotices: readonly PhoneNotice[] = [
   {

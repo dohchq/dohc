@@ -1,10 +1,10 @@
-import { accountWords } from "@dohc/interface-words/account";
 import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from "react";
 import { useAccount } from "../account/AccountProvider";
 import type { AccountWorkspace } from "../server/api";
 import { sampleBuild } from "../sampleBuild";
 import { workspaceMarkFills } from "../theme";
 import type { PhoneWorkspace } from "./sample";
+import { workspaceName } from "./workspaceName";
 
 // The sample's workspaces, in a sample build only (src/sampleBuild.ts).
 // src/routes.test.ts reads the next statement as text, on one line.
@@ -91,11 +91,6 @@ export function useShownWorkspaces(): WorkspacesState {
     }),
     [workspaces, currentWorkspaceId, chooseWorkspace],
   );
-}
-
-/** The name a workspace shows under: its own, or the fallback before its computer sent one. */
-export function workspaceName(workspace: AccountWorkspace): string {
-  return workspace.name ?? accountWords.unnamedWorkspace;
 }
 
 // The server keeps no colour for a workspace, so its mark takes a fill by its ID: the same one on every launch.
