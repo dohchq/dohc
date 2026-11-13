@@ -7925,6 +7925,40 @@ it("reloads a document opened while the unload its deadline started is in the en
   expect(polls.early()).toBeGreaterThan(0);
 });
 
+// An editor's open waits for its turn behind the host's own work. The relay holds that open's place in its
+// connection limits until the open returns.
+// Proves: an open whose caller gives up while it waits behind an unload in the engine fails at once, before the
+// unload finishes, and never reloads the document. An open after it still reloads it, with passes held.
+it("lets an open given up while it waits behind an unload go at once, without reloading, with passes held", async () => {
+  const polls = heldPolls(),
+    clock = manualClock(),
+    o = await idleHost({ polls, clock });
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const captures = o.client().captureOwnerActivation.mock.calls.length;
+  o.hold(true);
+  const parked = o.park("liveApplication.unloadDocument");
+  await vi.waitFor(() => expect(clock.armed()).toContain(600_000));
+  clock.advance(600_000);
+  await parked.entered.promise;
+  o.hold(false);
+  const release = o.editors.acquire(o.sibling),
+    gone = new AbortController();
+  let left: unknown;
+  const abandoned = o.host.captureNative(o.binding(), gone.signal).catch((error: unknown) => {
+    left = error;
+  });
+  gone.abort(new Error("The browser left."));
+  await vi.waitFor(() => expect(left).toEqual(new Error("The browser left.")));
+  parked.release.resolve();
+  await abandoned;
+  await vi.waitFor(() => expect(o.unloaded()).toBe(1));
+  expect(o.client().captureOwnerActivation.mock.calls.length).toBe(captures);
+  const native = await o.host.captureNative(o.binding());
+  expect(native.invalidated.aborted).toBe(false);
+  expect(o.client().captureOwnerActivation.mock.calls.length).toBe(captures + 1);
+  release();
+});
+
 // Proves: an idle unload whose reply was lost goes again at its retry deadline, not before, without settling first,
 // and a reconnect sends it once more before reloading the document, with passes held.
 

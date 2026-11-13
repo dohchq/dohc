@@ -623,10 +623,25 @@ export async function startServiceLiveHost(options: {
   // Activation passes, idle unloads, wakes, and membership changes take turns,
   // so a pass never activates a document while it unloads.
   let turn: Promise<unknown> = Promise.resolve();
-  const exclusive = <T>(work: () => Promise<T>): Promise<T> => {
-    const run = turn.then(work);
+  // A caller that gives up while its turn is still queued, as an editor's open does when the browser goes,
+  // leaves at once, so the relay frees what it holds for that open. Its work then never runs. Work that has
+  // started keeps its caller until it ends.
+  const exclusive = <T>(work: () => Promise<T>, callerSignal?: AbortSignal): Promise<T> => {
+    let leave: (() => void) | undefined;
+    const left =
+      callerSignal &&
+      new Promise<never>((_, reject) => {
+        leave = () => reject(callerSignal.reason);
+        if (callerSignal.aborted) leave();
+        else callerSignal.addEventListener("abort", leave, { once: true });
+      });
+    const run = turn.then(() => {
+      if (leave) callerSignal!.removeEventListener("abort", leave);
+      callerSignal?.throwIfAborted();
+      return work();
+    });
     turn = run.catch(() => {});
-    return run;
+    return left ? Promise.race([run, left]) : run;
   };
   // A wake during a pass runs one more pass after it; one during the pause ends the pause.
   // Only the pause clears it, so a wake that lands while its pass runs is not lost.
@@ -2119,30 +2134,32 @@ export async function startServiceLiveHost(options: {
           if (!key) return;
           touch(key);
           if (!activation!.dormant(hosted.get(key)!.target) && !unloading.has(key)) return;
-          await exclusive(() =>
-            withLiveHostSignal(signal, callerSignal, async (joined) => {
-              await resolveUnload(key, joined);
-              const row = hosted.get(key);
-              if (!row || !activation!.dormant(row.target)) return;
-              const workspaceId = row.target.workspaceId;
-              // A pass continues a catch-up that stopped at its page budget or failed, and publishes what a reload settled.
-              try {
-                // While a sibling is mid-activation the open skips catch-up, as awake documents
-                // do, and converges once that sibling resolves. Waiting here would let one stuck
-                // sibling keep every dormant document in the workspace from opening.
-                if (
-                  activation!.workspaceReady(workspaceId) &&
-                  (await pull(attachments.get(workspaceId)!, joined, "open")).hasMore
-                ) {
-                  throw new Error("Hosted replication has more pages.");
+          await exclusive(
+            () =>
+              withLiveHostSignal(signal, callerSignal, async (joined) => {
+                await resolveUnload(key, joined);
+                const row = hosted.get(key);
+                if (!row || !activation!.dormant(row.target)) return;
+                const workspaceId = row.target.workspaceId;
+                // A pass continues a catch-up that stopped at its page budget or failed, and publishes what a reload settled.
+                try {
+                  // While a sibling is mid-activation the open skips catch-up, as awake documents
+                  // do, and converges once that sibling resolves. Waiting here would let one stuck
+                  // sibling keep every dormant document in the workspace from opening.
+                  if (
+                    activation!.workspaceReady(workspaceId) &&
+                    (await pull(attachments.get(workspaceId)!, joined, "open")).hasMore
+                  ) {
+                    throw new Error("Hosted replication has more pages.");
+                  }
+                  activation!.wake(row.target);
+                  touch(key);
+                  await activation!.activate(row.target, joined, settleTarget);
+                } finally {
+                  nudgePass();
                 }
-                activation!.wake(row.target);
-                touch(key);
-                await activation!.activate(row.target, joined, settleTarget);
-              } finally {
-                nudgePass();
-              }
-            }),
+              }),
+            callerSignal,
           );
         };
         // A held-document read asks the engine for a workspace this daemon replicates,
