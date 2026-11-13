@@ -135,6 +135,8 @@ For these codes, a retry does not help. Give `error` to the owner:
 - `live-document-without-lineage`: the owner has not opened the document in dohc on a desktop yet.
 - `edit_needed`: the agent has View or Comment in the workspace. The owner can change that in Settings › Agents.
 
+A code ending in `_limit`, such as `live_person_limit`, means a live connection limit is full. `error` says what to do. A call can succeed once another live document closes.
+
 The relay's other hosting refusals, such as `document-unavailable`, pass on with the relay's words. Other codes, such as `unavailable` and `rate_limited`, mean what they mean for the agent's other tools.
 
 ## App publication storage
