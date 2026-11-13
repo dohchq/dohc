@@ -689,6 +689,55 @@ it("answers a held read at once when a named share arrives during its last sign-
   ]);
 });
 
+it("sends a lost share's Notice to the phone as removed, without its words, and keeps it on the computer", async () => {
+  const { storage, read, full } = await relay();
+  shareNotesWithAna(storage, { deliver: true });
+  const before = await page(await read("scope=phone"));
+  const shared = before.notices.find((notice) => notice.kind === "share-received")!;
+  expect(shared).toMatchObject({ removed: false, target: { share: "share-ben" } });
+  expect(storage.revokeShare("share-ben", NOW)).toBe(true);
+
+  const response = await read(`scope=phone&cursor=${before.nextCursor}`);
+  const text = await response.clone().text();
+  const next = await page(response);
+  expect(next.replace).toBe(false);
+  expect(next.notices).toEqual([
+    expect.objectContaining({
+      noticeId: shared.noticeId,
+      removed: true,
+      title: "",
+      body: "",
+      senderLabel: "",
+      target: null,
+    }),
+  ]);
+  expect(next.notices[0]!.changeSeq).toBeGreaterThan(shared.changeSeq);
+  for (const left of [shared.title, shared.body]) expect(text).not.toContain(left);
+  // The computer's whole list keeps the row and its words, without its target.
+  expect(
+    (await full()).notices.find((notice) => notice.noticeId === shared.noticeId),
+  ).toMatchObject({ removed: false, title: shared.title, body: shared.body, target: null });
+  // A whole read leaves it out: the phone drops every row it held first.
+  expect(ids(await page(await read("scope=phone")))).toEqual([]);
+});
+
+it("sends a lost share's Notice as removed to a whole-list pull that took it before the loss", async () => {
+  const { storage, read, post } = await relay();
+  shareNotesWithAna(storage, { deliver: true });
+  await read("scope=phone");
+  post("later");
+  const first = await page(await read("scope=phone&limit=1"));
+  expect(first).toMatchObject({ hasMore: true, replace: true });
+  const [shared] = first.notices;
+  expect(shared).toMatchObject({ kind: "share-received", removed: false });
+  expect(storage.revokeShare("share-ben", NOW)).toBe(true);
+  const second = await page(await read(`scope=phone&limit=2&cursor=${first.nextCursor}`));
+  expect(second.notices.map((notice) => [notice.noticeId, notice.removed, notice.title])).toEqual([
+    ["later", false, "Title later"],
+    [shared!.noticeId, true, ""],
+  ]);
+});
+
 it("moves the phone's cursor past the rows it leaves out", async () => {
   const { read, post } = await relay();
   post("hidden-1", DIARY);

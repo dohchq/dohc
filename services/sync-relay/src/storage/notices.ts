@@ -659,7 +659,7 @@ export function readNoticeChanges(
     const scanned = rows.slice(0, input.limit).map(rowToNotice);
     const notices =
       input.scope === "phone"
-        ? phoneNotices(storage, input.recipientUserId, scanned)
+        ? phoneNotices(storage, input.recipientUserId, scanned, snapshotHead ?? 0)
         : withWakes(storage, input.recipientUserId, scanned);
     // Every change after the last row read is expired or replaced by a later
     // change, so a finished pull can move its cursor to the head. The phone's
@@ -756,13 +756,28 @@ const PHONE_NOTICE_KINDS = {
  *   only by scanning its log;
  * - a row whose kind `PHONE_NOTICE_KINDS` doesn't let it show, or whose
  *   target doesn't name the place that kind needs to confirm its words.
- * A removed row stays, so a phone drops what it holds, without its title.
+ * A removed row stays, so a phone drops what it holds. So does a row of a
+ * "shown" kind whose target reach settlement took: the phone could hold it,
+ * and its title names who shared and what. Like a removed row, a pull taking
+ * the whole list sends it only when it changed after the pull began, at
+ * `removedAfter`. Either carries no title, body, sender name, or target.
+ * Other rows the scope leaves out send nothing: their IDs could name what
+ * the phone never saw.
  */
 function phoneNotices(
   storage: StorageContext,
   recipientUserId: string,
   notices: RelayNotice[],
+  removedAfter: number,
 ): RelayNotice[] {
+  const gone = (notice: RelayNotice): RelayNotice => ({
+    ...notice,
+    title: "",
+    body: "",
+    senderLabel: "",
+    target: null,
+    removed: true,
+  });
   const ownership = new Map<string, boolean>();
   const owned = (workspaceId: string) => {
     let known = ownership.get(workspaceId);
@@ -845,7 +860,7 @@ function phoneNotices(
     );
   };
   return notices.flatMap((notice) => {
-    if (notice.removed) return [{ ...notice, title: "" }];
+    if (notice.removed) return [gone(notice)];
     if (
       notice.workspaceId !== null &&
       owned(notice.workspaceId) &&
@@ -855,6 +870,8 @@ function phoneNotices(
     const rule = Object.hasOwn(PHONE_NOTICE_KINDS, notice.kind)
       ? PHONE_NOTICE_KINDS[notice.kind]
       : "never";
+    if (rule === "shown" && notice.target === null)
+      return notice.changeSeq > removedAfter ? [gone(notice)] : [];
     const named =
       rule === "shown" ||
       (rule === "path" && notice.target?.path !== undefined) ||
