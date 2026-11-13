@@ -672,3 +672,110 @@ async fn secret_capture_never_takes_a_binary_publication_job() {
         }
     }
 }
+
+#[tokio::test]
+async fn inactive_publication_refuses_before_recording_and_can_retry_after_activation() {
+    let scratch = ScratchDir::new().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).unwrap().actor;
+    actor
+        .ensure_main_version(
+            "publish".into(),
+            1,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    actor
+        .create_named_version(
+            dohc_engine_domain::CreateNamedVersion {
+                workspace_id: "publish".into(),
+                new_version_id: "draft".into(),
+                name: "Draft".into(),
+                from_version_id: "main".into(),
+                now_ms: 2,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let mut input = text("inactive", "note.txt", "authored");
+    input.version_id = "draft".into();
+    let mut bytes = binary("inactive-binary");
+    bytes.version_id = "draft".into();
+    for _ in 0..2 {
+        assert!(matches!(
+            publish(
+                &actor,
+                scratch.path(),
+                input.clone(),
+                create(),
+                Arc::new(NoFaults)
+            )
+            .await,
+            Err(RuntimeError::Domain(DomainError::InvalidVersion))
+        ));
+        assert!(matches!(
+            actor
+                .versioned_binary_write_with_conditions(
+                    bytes.clone(),
+                    scratch.path().into(),
+                    create(),
+                    Arc::new(()),
+                    Arc::new(NoFaults),
+                    CancellationToken::new()
+                )
+                .await,
+            Err(RuntimeError::Domain(DomainError::InvalidVersion))
+        ));
+        assert_eq!(count(&actor).await, 0);
+    }
+    supervisor.close(&db).unwrap();
+    {
+        let store = dohc_engine_storage::EngineStore::open(&db, 2).unwrap();
+        let rows: i64 = store.read_with(|conn| conn.query_row("SELECT (SELECT count(*) FROM engine_requests) + (SELECT count(*) FROM materialization_jobs) + (SELECT count(*) FROM blobs) + (SELECT count(*) FROM binary_blobs)", [], |row| row.get(0)).map_err(dohc_engine_storage::StorageError::corrupt_public)).unwrap();
+        assert_eq!(rows, 0);
+    }
+    let actor = supervisor.open(&db, 3).unwrap().actor;
+    actor
+        .set_active_version(
+            dohc_engine_runtime::ActiveVersionSwitch {
+                workspace_id: "publish".into(),
+                version_id: "draft".into(),
+                root_dir: scratch.path().into(),
+                self_writes: Arc::new(()),
+                now_ms: 4,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        publish(&actor, scratch.path(), input, create(), Arc::new(NoFaults))
+            .await
+            .unwrap()
+            .materialize_outcome,
+        Outcome::Applied
+    );
+    assert_eq!(
+        actor
+            .versioned_binary_write_with_conditions(
+                bytes,
+                scratch.path().into(),
+                create(),
+                Arc::new(()),
+                Arc::new(NoFaults),
+                CancellationToken::new()
+            )
+            .await
+            .unwrap()
+            .materialize_outcome,
+        Outcome::Applied
+    );
+    supervisor.close(&db).unwrap();
+}
