@@ -1,6 +1,6 @@
 import { noticesWords } from "@dohc/interface-words/notices";
 import * as Haptics from "expo-haptics";
-import { Mail, MailOpen, X } from "lucide-react-native";
+import { CheckCircle2, Mail, X } from "lucide-react-native";
 import { memo, useEffect, useRef, useState } from "react";
 import { demoMode } from "../demo";
 import { StyleSheet, Text, View, type AccessibilityActionEvent } from "react-native";
@@ -15,12 +15,14 @@ import { copyText } from "../copy";
 import { ActionPill } from "./ActionPill";
 import {
   ageMinutes,
+  dismissLabel,
   marksRead,
   noticeDetails,
   noticeMeta,
   noticeRowAccessibility,
   noticeRowHandlers,
   shortAgo,
+  swipesUnread,
 } from "./rowAccessibility";
 import { useRouter } from "expo-router";
 import { SenderMark } from "./SenderMark";
@@ -29,12 +31,13 @@ import { TitleControls } from "./TitleControls";
 export const NoticeRow = memo(function NoticeRow({
   notice,
   onDismiss,
-  onToggleRead,
+  onSetRead,
 }: {
   notice: PhoneNotice;
+  /** Done for a Notice from the server; Dismiss for a failure held on this phone. */
   onDismiss(id: string): void;
   /** Mark read or Mark unread, for a Notice from the server. */
-  onToggleRead?(id: string): void;
+  onSetRead?(id: string, read: boolean): void;
 }) {
   const theme = useTheme();
   const titleLines = useLineClamp(3);
@@ -57,9 +60,9 @@ export const NoticeRow = memo(function NoticeRow({
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     onDismiss(notice.id);
   };
-  const toggleRead = () => {
+  const setRead = (read: boolean) => {
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    onToggleRead?.(notice.id);
+    onSetRead?.(notice.id, read);
   };
   const router = useRouter();
   const { label, actions } = noticeRowAccessibility(notice);
@@ -72,18 +75,20 @@ export const NoticeRow = memo(function NoticeRow({
         ? () => router.push({ pathname: "/chat/[id]", params: notice.openChat ?? {} })
         : undefined),
     retry: notice.onRetry,
-    toggleRead: onToggleRead ? toggleRead : undefined,
+    setRead: onSetRead ? setRead : undefined,
     copy: () => copyText(noticeDetails(notice)),
     dismiss,
   });
-  const readToggle = marksRead(notice) && onToggleRead !== undefined;
+  const readToggle = marksRead(notice) && onSetRead !== undefined;
+  const done = notice.relayId !== undefined;
   const onAction = (event: AccessibilityActionEvent) => handlers[event.nativeEvent.actionName]?.();
   const controls = (
     <TitleControls
       copyLabel={notice.failed ? noticesWords.copyErrorDetails : noticesWords.copyNoticeDetails}
       onCopy={handlers.copy}
-      dismissLabel={notice.dismissible ? noticesWords.dismissNotice : undefined}
+      dismissLabel={notice.dismissible ? dismissLabel(notice) : undefined}
       onDismiss={dismiss}
+      done={done}
       demoCopied={demoMode === "notice-copied" && notice.id === "n1"}
       // On the action line their 44pt targets reach 11pt past each icon, so they keep clear of the pill's.
       style={
@@ -140,7 +145,7 @@ export const NoticeRow = memo(function NoticeRow({
                 onPress={handlers.worded}
               />
             ) : null}
-            {/* The swipe right's visible control. */}
+            {/* Mark unread is also the swipe right. */}
             {readToggle ? (
               <ActionPill
                 label={notice.read ? noticesWords.markUnread : noticesWords.markRead}
@@ -157,7 +162,9 @@ export const NoticeRow = memo(function NoticeRow({
     </View>
   );
   if (!notice.dismissible) return row;
-  // Swiping left dismisses; swiping right, on a Notice from the server, marks it read or unread and springs back.
+  // Swiping left is Done, or Dismiss for a failure held on this phone. Swiping right marks a read Notice from the
+  // server unread, then springs back; an unread one offers no swipe right. A wake, which the phone's scope leaves out,
+  // isn't dismissible, so it has no swipe at all.
   return (
     <ReanimatedSwipeable
       ref={swipeable}
@@ -172,25 +179,25 @@ export const NoticeRow = memo(function NoticeRow({
           : (direction) => {
               if (direction === SwipeDirection.LEFT) return dismiss();
               swipeable.current?.close();
-              toggleRead();
+              setRead(false);
             }
       }
       renderLeftActions={
-        readToggle
+        readToggle && swipesUnread(notice)
           ? () => (
               <View style={[styles.swipe, { backgroundColor: theme.panel2 }]}>
-                {notice.read ? (
-                  <Mail size={22} color={theme.ink} strokeWidth={2} />
-                ) : (
-                  <MailOpen size={22} color={theme.ink} strokeWidth={2} />
-                )}
+                <Mail size={22} color={theme.ink} strokeWidth={2} />
               </View>
             )
           : undefined
       }
       renderRightActions={() => (
         <View style={[styles.swipe, { backgroundColor: theme.panel2 }]}>
-          <X size={22} color={theme.ink} strokeWidth={2} />
+          {done ? (
+            <CheckCircle2 size={22} color={theme.ink} strokeWidth={2} />
+          ) : (
+            <X size={22} color={theme.ink} strokeWidth={2} />
+          )}
         </View>
       )}
     >

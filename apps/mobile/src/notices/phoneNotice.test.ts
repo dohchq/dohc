@@ -3,7 +3,7 @@ import type { AccountWorkspace } from "../server/api";
 import type { NoticeRecord } from "../server/notices";
 import type { WorkspaceList } from "../server/workspaceList";
 import { phoneTarget, presentNotice } from "./phoneNotice";
-import { noticeDetails, noticeRowAccessibility } from "./rowAccessibility";
+import { noticeDetails, noticeRowAccessibility, swipesUnread } from "./rowAccessibility";
 
 const record: NoticeRecord = {
   noticeId: "n1",
@@ -122,7 +122,24 @@ describe("a Notice's row", () => {
     expect(noticeRowAccessibility(failed).actions.map((action) => action.label)).toEqual([
       "Mark read",
       "Copy error details",
-      "Dismiss notice",
+      "Done",
+    ]);
+  });
+
+  it("offers an automation wake, should one reach the phone, no Done and no swipe", () => {
+    const wake = presentNotice(
+      {
+        ...record,
+        kind: "automation-wake",
+        senderKind: "automation",
+        target: { automation: "a1" },
+      },
+      context,
+    );
+    expect(wake.dismissible).toBe(false);
+    expect(swipesUnread({ ...wake, read: true })).toBe(false);
+    expect(noticeRowAccessibility(wake).actions.map((action) => action.label)).toEqual([
+      "Copy notice details",
     ]);
   });
 });

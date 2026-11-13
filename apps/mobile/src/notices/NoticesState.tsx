@@ -35,10 +35,10 @@ interface NoticesState {
   readonly known: boolean;
   /** A new failure held on this phone goes on top, unread, replacing an earlier one with its id. */
   add(notice: PhoneNotice): void;
-  /** Dismisses a row. A Notice from the server is marked dismissed, with Undo on a toast. */
+  /** Done for a Notice from the server, with Undo on a toast; Dismiss for a failure held on this phone. */
   dismiss(id: string): void;
-  /** Marks a Notice from the server read, or unread when it is read. */
-  toggleRead(id: string): void;
+  /** Marks a Notice from the server read or unread. */
+  setRead(id: string, read: boolean): void;
   markAllRead(): void;
   /** Reads the account's Notices again from the start. */
   refresh(): void;
@@ -91,7 +91,7 @@ function SampleNoticesState({ children }: { children: ReactNode }) {
       known: true,
       add: local.add,
       dismiss: local.remove,
-      toggleRead: () => undefined,
+      setRead: () => undefined,
       markAllRead: local.readAll,
       refresh: () => undefined,
     }),
@@ -175,20 +175,19 @@ function ServerNoticesState({ children }: { children: ReactNode }) {
       if (relayId === undefined) return local.remove(id);
       store?.mark(relayId, "dismissed");
       showToast({
-        id: `dismissed:${relayId}`,
+        id: `done:${relayId}`,
         tone: "success",
-        title: noticesWords.noticeDismissed,
+        title: noticesWords.markedDone,
         holdsUndo: true,
         action: { label: confirmWords.undo, onPress: () => store?.mark(relayId, "restore") },
       });
     },
     [store, local.remove, showToast],
   );
-  const toggleRead = useCallback(
-    (id: string) => {
-      const notice = shown.current.find((entry) => entry.id === id);
-      if (notice?.relayId !== undefined)
-        store?.mark(notice.relayId, notice.read ? "unread" : "read");
+  const setRead = useCallback(
+    (id: string, read: boolean) => {
+      const relayId = shown.current.find((entry) => entry.id === id)?.relayId;
+      if (relayId !== undefined) store?.mark(relayId, read ? "read" : "unread");
     },
     [store],
   );
@@ -214,11 +213,11 @@ function ServerNoticesState({ children }: { children: ReactNode }) {
       known: relay.known,
       add: local.add,
       dismiss,
-      toggleRead,
+      setRead,
       markAllRead,
       refresh,
     }),
-    [notices, relay.known, local.add, dismiss, toggleRead, markAllRead, refresh],
+    [notices, relay.known, local.add, dismiss, setRead, markAllRead, refresh],
   );
   return <State value={value}>{children}</State>;
 }

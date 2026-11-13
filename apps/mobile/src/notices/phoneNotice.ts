@@ -109,7 +109,7 @@ export function presentNotice(
     ...(target
       ? { open: openWord(target), onOpen: () => context.open(record, target) }
       : { elsewhere: true }),
-    // A wake waits for a computer: no swipe or Dismiss touches it on the phone, though the relay leaves it out.
+    // A wake waits for a computer: the phone offers it no swipe and no Done, though its scope leaves wakes out.
     dismissible: record.kind !== "automation-wake",
     ...(record.kind === "automation-failed" ? { failed: true } : {}),
   };

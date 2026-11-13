@@ -19,9 +19,9 @@ Before you add or change a difference, follow [`apps/mobile/AGENTS.md`](../../..
 ## Surfaces
 
 1. **Clamps.** Toast titles take 4 lines and Notices row titles 3, where the desktop takes 2. A tap opens the rest in place, as the desktop's click or Show more does.
-2. **Notices rows and VoiceOver.** A row is one element. Its actions are in the rotor in this order: the worded action, Mark read or Mark unread, Copy, Dismiss. The spoken time is in full ("2 minutes ago"); on screen it is the desktop's ("2m ago").
+2. **Notices rows and VoiceOver.** A row is one element. Its actions are in the rotor in this order: the worded action, Mark read or Mark unread, Copy, then Done, or Dismiss on a failure held on this phone. The spoken time is in full ("2 minutes ago"); on screen it is the desktop's ("2m ago").
 3. **Header.** Mark all read is a system bar button. The header glass is the system's, themed by the navigation theme.
-4. **Done** ends editing, and shows only while the keyboard is up.
+4. **Done** ends editing, and shows only while the keyboard is up. On a Notice from the server, Done is the Notice's own action (#17), on a list with no keyboard.
 5. **Properties** are read-only for now, with nothing that looks editable: no field outlines, and a chevron only on a value that opens something.
 6. **The state mark** opens its explanation on tap. VoiceOver hears the mark's label with the explanation as its value.
 7. **Lossy and large files** have no Open externally. The large-file strip says to open it on a computer. A large file's state mark reads Read-only, as every read-only page's does, and its explanation says the file is too large to edit.
@@ -35,8 +35,10 @@ Before you add or change a difference, follow [`apps/mobile/AGENTS.md`](../../..
 15. **Settings** opens from your mark at the right of the Chats header, as in Slack. It holds the account and its server, Show on phone for each workspace, the account's sessions with End session, and its agents with Sign out, Remove and Restore. The desktop has no session or agent list yet.
 16. **Connect, Settings, a chat and a page show their errors in place**, with Try again, and file no toast or Notices row. They sit outside the tabs, where toasts show. A failed refresh keeps what's shown, with the cause and Try again above it.
 17. **Notices in a signed-in build** list the account's Notices that the server shows phones, with failures held on this phone, such as a read of Home or Chats, on top.
-    - A row stays unread until the person opens it, marks it read, or presses Mark all read. The phone has no pointer or focus to read a row by reaching it, so a Notice from the server shows Mark read or Mark unread under its text, and swiping right does the same.
-    - Swiping left, or ×, dismisses it. A dismissed Notice's toast says "Notice dismissed" with Undo, shows on Notices too, and stays until closed, because it holds the only Undo.
+    - A row stays unread until the person opens it, marks it read, or presses Mark all read. The phone has no pointer or focus to read a row by reaching it, so a Notice from the server shows Mark read or Mark unread under its text. Swiping right marks a read Notice unread; an unread one has no swipe right.
+    - A Notice from the server has Done where a failure has ×: a check in a circle, and swiping left. Done takes it off the list everywhere the account reads Notices. Its toast says "Marked done" with Undo, shows on Notices too, and stays until closed, because it holds the only Undo. A later Done's toast replaces it. A failure held on this phone keeps Dismiss.
+    - Read, unread, Done and Undo work on every row the phone shows. Open and, later, Reply and answers work only in an owned workspace that shows on the phone.
+    - An automation wake, which the server doesn't show phones, would have no swipe and no Done.
     - Open goes to a thread at its message, or a page, in the Notice's workspace when it shows on the phone, and opens that workspace. A row the phone can't open says "Open on your computer" after its time. Opening reads the row and never runs anything.
     - A failed read of the list, or marks that can't be sent, is a toast and a row with Try again. Marks wait on the phone, a relaunch included, and send in order when the server answers.
     A change feed that fails 3 times in a row shows as a failed read does, so content never goes out of date without a sign: a toast and a row on the tabs, and a line above a chat or page. Try again starts the feed at once, and its next answer takes the failure back.

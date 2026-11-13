@@ -21,23 +21,32 @@ export const noticeDetails = (notice: PhoneNotice) =>
 export interface RowHandlers {
   open?(): void;
   retry?(): void;
-  toggleRead?(): void;
+  /** Marks a Notice from the server read, or unread. */
+  setRead?(read: boolean): void;
   copy(): void;
   dismiss(): void;
 }
 
-/** Whether the row offers Mark read or Mark unread, and its swipe right: a Notice from the server can take them. */
+/** Whether the row offers Mark read or Mark unread: a Notice from the server can take them. */
 export const marksRead = (notice: PhoneNotice) =>
   notice.relayId !== undefined && notice.dismissible;
 
-/** The press handler behind each action a row offers: its pill or swipe, and its rotor action, share it. */
+/** Whether swiping the row right marks it unread: only a read Notice from the server. */
+export const swipesUnread = (notice: PhoneNotice) => marksRead(notice) && notice.read;
+
+/** The row's × and swipe left: Done for a Notice from the server, Dismiss for a failure held on this phone. */
+export const dismissLabel = (notice: PhoneNotice) =>
+  notice.relayId === undefined ? noticesWords.dismissNotice : noticesWords.done;
+
+/** The press handler behind each action a row offers: its pill or icon, and its rotor action, share it. */
 export function noticeRowHandlers(
   notice: PhoneNotice,
   handlers: RowHandlers,
 ): Partial<Record<string, () => void>> {
+  const { setRead } = handlers;
   return {
     worded: notice.retry ? handlers.retry : notice.open ? handlers.open : undefined,
-    read: marksRead(notice) ? handlers.toggleRead : undefined,
+    read: marksRead(notice) && setRead ? () => setRead(!notice.read) : undefined,
     copy: handlers.copy,
     dismiss: notice.dismissible ? handlers.dismiss : undefined,
   };
@@ -52,7 +61,7 @@ export function noticeMeta(notice: PhoneNotice, time: string): string {
 
 /**
  * What VoiceOver hears for a row, and its actions in rotor order: the worded action, Mark read or Mark unread, Copy,
- * then Dismiss.
+ * then Done, or Dismiss for a failure held on this phone.
  */
 export function noticeRowAccessibility(notice: PhoneNotice): {
   label: string;
@@ -74,7 +83,7 @@ export function noticeRowAccessibility(notice: PhoneNotice): {
       name: "copy",
       label: notice.failed ? noticesWords.copyErrorDetails : noticesWords.copyNoticeDetails,
     },
-    ...(notice.dismissible ? [{ name: "dismiss", label: noticesWords.dismissNotice }] : []),
+    ...(notice.dismissible ? [{ name: "dismiss", label: dismissLabel(notice) }] : []),
   ];
   const time = spokenAgo(ageMinutes(notice));
   const label = [

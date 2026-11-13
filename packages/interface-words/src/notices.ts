@@ -23,8 +23,10 @@ export const noticesWords = {
   // The phone's.
   markRead: "Mark read",
   markUnread: "Mark unread",
-  /** The toast after a Notice is dismissed, which holds its only Undo. */
-  noticeDismissed: "Notice dismissed",
+  /** Marks a Notice from the server done: it leaves the list, everywhere the account reads it. */
+  done: "Done",
+  /** The toast after Done, which holds its only Undo. */
+  markedDone: "Marked done",
   /** A Notice whose target the phone can't open. */
   openOnComputer: "Open on your computer",
   readFailed: "dohc could not read your notices.",

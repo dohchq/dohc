@@ -13,7 +13,7 @@ import { useNotices } from "./NoticesState";
 // clear too soon. A read that failed is a row here with its cause and Try again. Pulling down reads the list again.
 export function ServerNotices() {
   const theme = useTheme();
-  const { notices, unread, known, dismiss, toggleRead, markAllRead, refresh } = useNotices();
+  const { notices, unread, known, dismiss, setRead, markAllRead, refresh } = useNotices();
   return (
     <>
       <Stack.Screen options={{ title: noticesWords.heading }} />
@@ -43,7 +43,7 @@ export function ServerNotices() {
           )
         }
         renderItem={({ item }) => (
-          <NoticeRow notice={item} onDismiss={dismiss} onToggleRead={toggleRead} />
+          <NoticeRow notice={item} onDismiss={dismiss} onSetRead={setRead} />
         )}
       />
     </>
