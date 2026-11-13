@@ -122,18 +122,18 @@ function memberRead(h: SyncRelayHandler, path: string, grantId: string, userId: 
 const refusalBytes = async (response: Response) => `${response.status}:${await response.text()}`;
 
 describe("a member reads the workspace through the link read routes", () => {
-  it("reads the files at View, Comment and Edit, and the history only at Edit", async () => {
+  it("reads the workspace's name and files at View, Comment and Edit, and the history only at Edit", async () => {
     const { h, storage, planSha } = await seed();
     const ana = await member(h, storage, "ana");
     for (const level of ["view", "comment", "edit"] as const) {
       await setLevel(h, level);
       const share = await memberRead(h, "/sync/link/share", ana.grantId, "ana");
       expect(share.status, await share.clone().text()).toBe(200);
-      expect(await json(share)).toMatchObject({ ok: true, access: level });
+      expect(await json(share)).toMatchObject({ ok: true, access: level, subjectName: "Community" });
       const current = await memberRead(h, "/sync/link/current", ana.grantId, "ana");
       expect(current.status).toBe(200);
       const body = await json(current);
-      expect(body).toMatchObject({ access: level, files: [expect.objectContaining({ path: "docs/plan.md", blobSha256: planSha })] });
+      expect(body).toMatchObject({ access: level, subjectName: "Community", files: [expect.objectContaining({ path: "docs/plan.md", blobSha256: planSha })] });
       expect(JSON.stringify(body)).not.toContain("SENTINEL");
       const blob = await memberRead(h, `/sync/link/blobs/${planSha}`, ana.grantId, "ana");
       expect(blob.status).toBe(200);

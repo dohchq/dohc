@@ -24,7 +24,7 @@ type Stage =
   | { kind: "no-link" }
   | { kind: "signed-out"; ended: boolean }
   | { kind: "preview"; account: Account; preview: WorkspaceJoinPreview }
-  | { kind: "joined"; account: Account; workspaceName: string }
+  | { kind: "joined"; account: Account; workspaceName: string; grantId: string }
   | { kind: "refused"; account: Account | null; code: Refusal }
   | { kind: "unreachable"; account: Account | null };
 /** What failed, and the action that runs it again. A failed sign-in has none: the form is its retry. */
@@ -230,7 +230,12 @@ export default function JoinApp(props: { token: string | null }) {
         const result = parseWorkspaceJoinResult(value);
         if (!result) throw new JoinRefused("unavailable");
         forgetJoinToken();
-        settle(controller, { kind: "joined", account, workspaceName: result.workspaceName });
+        settle(controller, {
+          kind: "joined",
+          account,
+          workspaceName: result.workspaceName,
+          grantId: result.grantId,
+        });
       })
       .catch((cause) => failed(controller, cause, () => join(account), false));
   };
@@ -292,11 +297,10 @@ export default function JoinApp(props: { token: string | null }) {
             <p data-testid="join-owner">{shown.ownerName} owns this workspace.</p>
           ) : null}
           {shown.alreadyMember ? (
-            <JoinedLimit joined />
+            <OpenActions grantId={shown.grantId} workspaceName={shown.workspaceName} />
           ) : (
             <>
               <p>People in it will see your name. The owner and admins will also see your email.</p>
-              <JoinedLimit joined={false} />
               <button
                 className="handoff-button primary join-primary"
                 disabled={busy}
@@ -315,7 +319,7 @@ export default function JoinApp(props: { token: string | null }) {
     case "joined":
       return (
         <Page pageRef={page} icon="check" title={`You joined ${stage.workspaceName}`}>
-          <JoinedLimit joined />
+          <OpenActions grantId={stage.grantId} workspaceName={stage.workspaceName} />
           {failure}
           {signedIn(stage.account)}
         </Page>
@@ -349,17 +353,35 @@ export default function JoinApp(props: { token: string | null }) {
 }
 
 /**
- * dohc lists a workspace someone joined but cannot open it yet. Every
- * statement of that limit on this page comes from here, so the change that
- * opens joined workspaces edits this one place.
+ * Where a person in the workspace goes next: their workspace page in this
+ * browser, or the dohc app, which lists it in Sharing. The owner has no
+ * member page, so only dohc is offered to them.
  */
-function JoinedLimit(props: { joined: boolean }) {
+function OpenActions(props: { grantId: string | null; workspaceName: string }) {
+  const [where, setWhere] = useState(false);
   return (
-    <p data-testid="join-limit">
-      {props.joined
-        ? "It's listed in the dohc app, in Sharing under Shared with me. This version of dohc can't open it yet."
-        : "This version of dohc can't open a joined workspace yet. Once you join, it's listed in the dohc app, in Sharing under Shared with me."}
-    </p>
+    <div className="join-actions">
+      {props.grantId ? (
+        <a
+          className="handoff-button primary join-primary join-open"
+          href={`/s/workspace/${encodeURIComponent(props.grantId)}`}
+        >
+          Open in browser
+        </a>
+      ) : null}
+      <button
+        className="handoff-button secondary join-primary"
+        aria-expanded={where}
+        aria-controls="join-in-dohc"
+        onClick={() => setWhere((shown) => !shown)}
+      >
+        <DohcMark size={14} />
+        Open in dohc
+      </button>
+      <p id="join-in-dohc" hidden={!where}>
+        In the dohc app, open Sharing. {props.workspaceName} is under Shared with me.
+      </p>
+    </div>
   );
 }
 

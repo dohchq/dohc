@@ -998,7 +998,7 @@ describe("an admin's new Group", () => {
 
 describe("the invite link", () => {
   it("lets people join, and resetting or turning it off keeps everyone who joined", async () => {
-    const { h } = await seed();
+    const { h, storage } = await seed();
     const first = await inviteLink(h, OWNER, "turn-on");
     expect(first).not.toBeNull();
 
@@ -1007,15 +1007,31 @@ describe("the invite link", () => {
       workspaceName: "Community",
       ownerName: "Name owner",
       alreadyMember: false,
+      grantId: null,
     });
     const joined = await join(h, "cara", first!);
     expect(joined.status).toBe(200);
-    expect(await json(joined)).toMatchObject({
-      workspaceId: WORKSPACE,
-      workspaceName: "Community",
-    });
-    expect((await join(h, "cara", first!)).status).toBe(200);
     const caraShare = await shareIdOf(h, "cara");
+    // The answer names the person's own grant, which opens the workspace in a browser.
+    const caraGrant = storage.listActiveShareGrantsForRecipient(caraShare, "cara")[0]!.grantId;
+    expect(await json(joined)).toEqual({
+      workspaceId: WORKSPACE,
+      shareId: caraShare,
+      workspaceName: "Community",
+      grantId: caraGrant,
+    });
+    expect(await json(await join(h, "cara", first!))).toMatchObject({ grantId: caraGrant });
+    expect(
+      await json(await post(h, "cara", "/sync/members/join-preview", { token: first })),
+    ).toEqual({
+      workspaceName: "Community",
+      ownerName: "Name owner",
+      alreadyMember: true,
+      grantId: caraGrant,
+    });
+    expect(
+      await json(await post(h, OWNER, "/sync/members/join-preview", { token: first })),
+    ).toMatchObject({ alreadyMember: true, grantId: null });
 
     const second = await inviteLink(h, OWNER, "reset");
     expect(second).not.toBe(first);
@@ -1166,23 +1182,47 @@ describe("ending access", () => {
     await invited(h, "ana");
     const shareId = await shareIdOf(h, "ana");
     const first = await json(await pull(h, "ana", shareId));
-    expect((await post(h, OWNER, `/sync/${WORKSPACE}/members/level`, { level: "edit" })).status).toBe(200);
-    const read = (knew: string) => h(request("ana", `/sync/shares/${shareId}/log?limit=500&since=${first.nextCursor}&hold=30000&level=${knew}`));
+    expect(
+      (await post(h, OWNER, `/sync/${WORKSPACE}/members/level`, { level: "edit" })).status,
+    ).toBe(200);
+    const read = (knew: string) =>
+      h(
+        request(
+          "ana",
+          `/sync/shares/${shareId}/log?limit=500&since=${first.nextCursor}&hold=30000&level=${knew}`,
+        ),
+      );
     const response = await read("comment");
     expect(response.status).toBe(200);
-    expect(await json(response)).toMatchObject({ ops: [], hasMore: false, nextCursor: first.nextCursor, levelChanged: true });
+    expect(await json(response)).toMatchObject({
+      ops: [],
+      hasMore: false,
+      nextCursor: first.nextCursor,
+      levelChanged: true,
+    });
     expect(activity.stats().waiters).toBe(0);
   });
 
-  it.each([["the stored level", "edit"], ["an unknown level", "owner"]])("holds a read that knew %s", async (_case, knew) => {
+  it.each([
+    ["the stored level", "edit"],
+    ["an unknown level", "owner"],
+  ])("holds a read that knew %s", async (_case, knew) => {
     const activity = new DiscussionActivityHub();
     const { h } = await seed({ activity });
     await invited(h, "ana");
     const shareId = await shareIdOf(h, "ana");
     const first = await json(await pull(h, "ana", shareId));
-    expect((await post(h, OWNER, `/sync/${WORKSPACE}/members/level`, { level: "edit" })).status).toBe(200);
+    expect(
+      (await post(h, OWNER, `/sync/${WORKSPACE}/members/level`, { level: "edit" })).status,
+    ).toBe(200);
     const controller = new AbortController();
-    const held = h(request("ana", `/sync/shares/${shareId}/log?limit=500&since=${first.nextCursor}&hold=30000&level=${knew}`, { signal: controller.signal }));
+    const held = h(
+      request(
+        "ana",
+        `/sync/shares/${shareId}/log?limit=500&since=${first.nextCursor}&hold=30000&level=${knew}`,
+        { signal: controller.signal },
+      ),
+    );
     try {
       await expect.poll(() => activity.stats().waiters).toBe(1);
     } finally {

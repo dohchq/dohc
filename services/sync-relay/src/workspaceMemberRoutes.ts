@@ -329,6 +329,7 @@ export function createWorkspaceMemberRoutes(options: {
           workspaceName: preview.workspaceName,
           ownerName: await accountDisplayName(options.lookupUserDisplayName, preview.ownerUserId),
           alreadyMember: preview.alreadyMember,
+          grantId: preview.grantId,
         };
         return jsonResponse(body, 200, { "cache-control": "private, no-store" });
       }
@@ -351,6 +352,7 @@ export function createWorkspaceMemberRoutes(options: {
         workspaceId: joined.workspaceId,
         shareId: joined.shareId,
         workspaceName: joined.workspaceName,
+        grantId: joined.grantId,
       };
       return jsonResponse(body, 200, { "cache-control": "private, no-store" });
     }

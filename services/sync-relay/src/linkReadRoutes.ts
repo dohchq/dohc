@@ -34,6 +34,7 @@ export function createLinkReadRoutes(
     | "getShare"
     | "getShareGrant"
     | "getShareLabels"
+    | "getWorkspaceMembershipByShare"
     | "workspaceIsOwnedBy"
     | "getEpochLogFloor"
     | "readCurrentFileState"
@@ -76,6 +77,10 @@ export function createLinkReadRoutes(
         }
       : {};
   };
+  // A membership's share names its workspace; a link's share keeps its own label.
+  const subjectName = (shareId: string, request: Request) =>
+    storage.getShareLabels(shareId, isMemberRequest(request) ? "member" : "link").subjectName ??
+    (isMemberRequest(request) ? storage.getWorkspaceMembershipByShare(shareId)?.workspaceName : null) ?? null;
   return async function respondToLinkRead(
     request: Request,
     route: LinkReadRoute,
@@ -108,7 +113,7 @@ export function createLinkReadRoutes(
           receivedSource: identity.source(["link", fresh.grantId], share.workspaceId),
           effectiveSelector: presentation.selector,
           access: fresh.access,
-          subjectName: storage.getShareLabels(fresh.shareId, "link").subjectName,
+          subjectName: subjectName(fresh.shareId, request),
           ...linkChannel(fresh.grantId),
           ...freshness,
           // share-web learns a holder's grant at exchange. It learns an agent's
@@ -198,7 +203,7 @@ export function createLinkReadRoutes(
           ok: true,
           effectiveSelector: presentation.selector,
           access: fresh.access,
-          subjectName: storage.getShareLabels(fresh.shareId, "link").subjectName,
+          subjectName: subjectName(fresh.shareId, request),
           ...linkChannel(fresh.grantId),
           files,
           nextCursor: snapshot.nextCursor,

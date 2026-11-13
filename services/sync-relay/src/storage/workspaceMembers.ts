@@ -881,6 +881,7 @@ export function previewWorkspaceJoin(
   workspaceName: string;
   ownerUserId: string;
   alreadyMember: boolean;
+  grantId: string | null;
 } | null {
   return storage.readTx(() => {
     const linked = linkedMembership(storage, input.secretHash);
@@ -892,12 +893,13 @@ export function previewWorkspaceJoin(
       workspaceName: membership.workspaceName,
       ownerUserId,
       alreadyMember: ownerUserId === input.userId || entry?.state === "active",
+      grantId: ownerUserId !== input.userId && entry?.state === "active" ? entry.grantId : null,
     };
   });
 }
 
 export type WorkspaceJoinOutcome =
-  | { ok: true; workspaceId: string; shareId: string; workspaceName: string }
+  | { ok: true; workspaceId: string; shareId: string; workspaceName: string; grantId: string }
   | { ok: false; reason: "not-found" | "removed" | "full" | "account-unavailable" | "owner" };
 
 export function joinWorkspace(
@@ -915,15 +917,16 @@ export function joinWorkspace(
     if (!linked) return { ok: false, reason: "not-found" };
     if (accountIsFenced(storage, input.userId)) return { ok: false, reason: "account-unavailable" };
     const { membership, ownerUserId } = linked;
-    const joined = {
+    const joined = (grantId: string) => ({
       ok: true as const,
       workspaceId: membership.workspaceId,
       shareId: membership.shareId,
       workspaceName: membership.workspaceName,
-    };
+      grantId,
+    });
     if (ownerUserId === input.userId) return { ok: false, reason: "owner" };
     const entry = memberByAccount(storage, membership.workspaceId, input.userId);
-    if (entry?.state === "active") return joined;
+    if (entry?.state === "active") return joined(entry.grantId);
     // A removed account stays out until the owner or an admin lets it back in.
     if (entry?.state === "removed") return { ok: false, reason: "removed" };
     if (seatsTaken(storage, membership.workspaceId) >= MAX_WORKSPACE_MEMBERS)
@@ -947,7 +950,7 @@ export function joinWorkspace(
       }),
     );
     forgetReplicaCurrentViewCaches(storage, membership.workspaceId);
-    return joined;
+    return joined(grantId);
   });
 }
 

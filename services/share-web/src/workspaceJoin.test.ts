@@ -55,6 +55,7 @@ it("forwards the token with the account cookie and exchange key, and returns onl
       workspaceName: "Community",
       ownerName: "Ana",
       alreadyMember: false,
+      grantId: null,
       ownerEmail: "ana@example.test",
     }),
   );
@@ -67,6 +68,7 @@ it("forwards the token with the account cookie and exchange key, and returns onl
     workspaceName: "Community",
     ownerName: "Ana",
     alreadyMember: false,
+    grantId: null,
   });
   const sent = f.forwarded[0]!;
   expect(new URL(sent.url).pathname).toBe("/sync/members/join-preview");
@@ -79,13 +81,19 @@ it("forwards the token with the account cookie and exchange key, and returns onl
 
 it("joins through the relay's join route", async () => {
   const f = client(() =>
-    Response.json({ workspaceId: "ws-1", shareId: "share-1", workspaceName: "Community" }),
+    Response.json({
+      workspaceId: "ws-1",
+      shareId: "share-1",
+      workspaceName: "Community",
+      grantId: "grant-1",
+    }),
   );
   const response = await f.join(request("/api/members/join"));
   expect(await response.json()).toEqual({
     workspaceId: "ws-1",
     shareId: "share-1",
     workspaceName: "Community",
+    grantId: "grant-1",
   });
   expect(new URL(f.forwarded[0]!.url).pathname).toBe("/sync/members/join");
 });
