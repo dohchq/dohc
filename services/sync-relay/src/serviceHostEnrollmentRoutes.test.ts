@@ -594,7 +594,7 @@ it("reports only a conflict-parent hold, after document state and existing block
 
 // Proves: a document whose activation keeps failing tells its owner why and since when, in place of Preparing.
 // A host that is down, a conflict-parent hold and every block keep their own words.
-it("reports a document whose live start keeps failing, after a down host, holds and blocks", async () => {
+it("reports a document whose live start keeps failing, after a down host, every hold and every block", async () => {
   const f = await fixture(), enrolled = f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
   const state = async () => (await (await f.handle(f.request())).json()).documents[0];
   const base = {path: binding.currentPath, objectId: binding.objectId};
@@ -604,6 +604,11 @@ it("reports a document whose live start keeps failing, after a down host, holds 
   f.host.unavailable = true;
   expect(await state()).toEqual({...base, status: "unavailable"});
   f.host.unavailable = false;
+  // Every other hold reads as Preparing, as it did, even while an earlier failure is still shown.
+  for (const hold of ["hosted-backfill-work-waiting", "hosted-backfill-path-held", "hosted-scope-path-mismatch", "hosted-live-edit-unadmitted"] as const) {
+    f.host.holdReason.mockReturnValue(hold);
+    expect(await state()).toEqual({...base, status: "preparing"});
+  }
   f.host.holdReason.mockReturnValue("hosted-conflict-parent-withheld");
   expect(await state()).toEqual({...base, status: "unavailable", reason: "conflict-parent-withheld"});
   f.host.holdReason.mockReturnValue(undefined);

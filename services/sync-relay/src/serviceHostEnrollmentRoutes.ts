@@ -214,10 +214,11 @@ export function serviceHostReadiness(options: {
   // Each row names its document, so its owner's Stop and Resume act on that document alone.
   function state(row: ServiceHostEnrollment): ServiceHostDocumentState {
     const base = {path: row.path, objectId: row.objectId};
-    // Not live yet. A host that is down says only that. A document whose activation keeps failing says why, while the host keeps trying it.
+    // Not live yet. A host that is down says only that, and a held document reads as Preparing. A document whose
+    // activation keeps failing says why, while the host keeps trying it.
     const starting = (): ServiceHostDocumentState => {
       if (host.unavailable) return {...base, status: "unavailable"};
-      const failing = host.failing(row);
+      const failing = host.holdReason(row) === undefined ? host.failing(row) : undefined;
       return failing ? {...base, status: "unavailable", reason: "live-start-failing", failure: {word: failing.word, since: new Date(failing.since).toISOString()}}
         : {...base, status: "preparing"};
     };
