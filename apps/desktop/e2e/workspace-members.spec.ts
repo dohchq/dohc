@@ -1,8 +1,10 @@
 import { expect, test, type Page } from "@playwright/test";
 import { randomBytes } from "node:crypto";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { activityPin, settingsNavPin } from "../src/testPins";
 import { launchDesktopApp } from "./helpers/desktopApp";
+import { noticedRefusals } from "./helpers/engineDb";
 import { claimRelayWorkspace, relayJson } from "./helpers/relayPeer";
 import { spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
 import {
@@ -10,6 +12,7 @@ import {
   createTempWorkspace,
   explorerRow,
   openChatsView,
+  openExplorerView,
   openWorkspaceFromFirstRun,
   revealExplorerPath,
   seedCloudCredentials,
@@ -662,6 +665,152 @@ test("@two-client a member posts in a Group, follows a level change, and sees an
 
     expect(member.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
     expect(admin.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
+  } finally {
+    await cleanupDesktopWorkspace(admin, adminTemp);
+    await cleanupDesktopWorkspace(member, memberTemp);
+    await cleanupDesktopWorkspace(owner, ownerTemp);
+    await relay?.stop();
+  }
+});
+
+// Pages and folders in a joined workspace. At Edit a member creates a page
+// that reaches the owner's own folder, and Chats there lists no agents. An
+// admin creates a folder by naming it and writing its first page. At Comment
+// the member's Explorer offers no new page and a document opens read-only.
+test("@two-client a member creates a page that reaches the owner, and an admin creates a folder with its first page", async () => {
+  test.setTimeout(600_000);
+  const ownerTemp = await createTempWorkspace();
+  const memberTemp = await createTempWorkspace();
+  const adminTemp = await createTempWorkspace();
+  const workspaceId = "members-pages";
+  const syncEnv = { DOHC_TEST_SYNC_DEBOUNCE_MS: "150", DOHC_TEST_SYNC_BACKOFF_MS: "250" };
+  let relay: SyncRelayHandle | null = null;
+  let owner: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  let member: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  let admin: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  const shot = (name: string) => test.info().outputPath(`${name}.png`);
+  const themed = async (page: Page, name: string, ready: () => Promise<void>) => {
+    for (const theme of ["Light", "Dark"] as const) {
+      await setTheme(page, theme);
+      await ready();
+      await page.screenshot({ path: shot(`${name}-${theme.toLowerCase()}`) });
+    }
+  };
+  let nudge = 0;
+  // An idle owner pulls on its own sync cadence; a write wakes it. A missing
+  // page answers with the updates the owner's engine refused.
+  const ownerFile = async (path: string) => {
+    const text = await readFile(join(ownerTemp.rootPath, path), "utf8").catch(() => "");
+    if (text) return text;
+    nudge += 1;
+    await writeFile(join(ownerTemp.rootPath, "notes/plan.md"), `# Plan\n\nRead this first.\n${"\n".repeat(nudge % 2)}`);
+    return JSON.stringify(noticedRefusals(ownerTemp.rootPath, workspaceId));
+  };
+  const setLevel = async (level: "comment" | "edit") => {
+    const set = await relayJson(relay!.baseUrl, OWNER.token, `/sync/${workspaceId}/members/level`, { method: "POST", body: JSON.stringify({ level, workspaceName: "Members pages" }) });
+    expect(set.status, set.body).toBe(200);
+  };
+
+  try {
+    relay = await spawnSyncRelay({ dbPath: join(ownerTemp.baseDir, "relay", "relay.sqlite") });
+    await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: OWNER.token, workspaceId });
+    await seedWorkspaceManifest(ownerTemp, workspaceId);
+    await writeWorkspaceFiles(ownerTemp, [{ path: "notes/plan.md", contents: "# Plan\n\nRead this first.\n" }]);
+    await seedWorkspaceRegistry(ownerTemp, [
+      { workspaceId, rootPath: ownerTemp.rootPath, remote: { serverUrl: relay.baseUrl, ownerUserId: OWNER.user } },
+    ]);
+    await seedCloudCredentials(ownerTemp, { serverUrl: relay.baseUrl, relayUrl: relay.baseUrl, email: OWNER.email, userId: OWNER.user, token: OWNER.token });
+    owner = await launchDesktopApp({ workspace: ownerTemp, env: syncEnv });
+    await openWorkspaceFromFirstRun(owner.page, ownerTemp);
+    for (const account of [MEMBER, ADMIN]) {
+      const invited = await relayJson(relay.baseUrl, OWNER.token, `/sync/${workspaceId}/members/invites`, { method: "POST", body: JSON.stringify({ email: account.email, workspaceName: "Members pages" }) });
+      expect(invited.status, invited.body).toBe(200);
+    }
+    const kaiId = (await membersView(relay, OWNER.token, workspaceId)).people.find((person) => person.email === ADMIN.email)!.memberId;
+    const promoted = await relayJson(relay.baseUrl, OWNER.token, `/sync/${workspaceId}/members/${kaiId}/role`, { method: "POST", body: JSON.stringify({ role: "admin" }) });
+    expect(promoted.status, promoted.body).toBe(200);
+    await setLevel("edit");
+    const workspaceName = (await membersView(relay, OWNER.token, workspaceId)).workspaceName;
+    const shares = await relayJson(relay.baseUrl, MEMBER.token, "/sync/shares");
+    const shareId = (JSON.parse(shares.body) as { received: { shareId: string; selector: { kind?: string } }[] })
+      .received.find((row) => row.selector.kind === "workspace")!.shareId;
+    await expect.poll(async () => {
+      const log = await relayJson(relay!.baseUrl, MEMBER.token, `/sync/shares/${shareId}/log?since=0&limit=500`);
+      return log.status === 200 && log.body.includes("notes/plan.md") ? "served" : `status:${log.status}`;
+    }, { timeout: 60_000, intervals: [1_000] }).toBe("served");
+
+    // --- Sam, a member at Edit -------------------------------------------
+    member = await openMembership(relay, memberTemp, MEMBER, workspaceName, syncEnv);
+    const mine = member.page;
+    await themed(mine, "chats-no-agents", async () => {
+      const panel = await openChatsView(mine);
+      await expect(panel.getByTestId("chats-channels-heading")).toBeVisible({ timeout: 30_000 });
+      await expect(panel.getByTestId("chats-my-agent-section")).toHaveCount(0);
+    });
+    await revealExplorerPath(mine, "notes/plan.md");
+    const header = mine.getByTestId("explorer-files-header");
+    await expect(header.getByRole("button", { name: "New file" })).toBeVisible({ timeout: 60_000 });
+    await expect(header.getByRole("button", { name: "New folder" })).toHaveCount(0);
+    await header.getByRole("button", { name: "New file" }).click();
+    await expect(mine.getByLabel("Page title")).toBeFocused();
+    await mine.keyboard.type("Ideas");
+    await themed(mine, "new-page-joined", async () => {
+      await openExplorerView(mine);
+      await expect(mine.getByLabel("Page title")).toHaveValue("Ideas");
+    });
+    await mine.getByLabel("Page title").click();
+    await mine.keyboard.press("ControlOrMeta+w");
+    await expect(mine.getByTestId("new-page")).toHaveCount(0);
+    // The page went straight to the owner, not as a proposal.
+    await expect.poll(() => ownerFile("notes/Ideas.md"), { timeout: 120_000, intervals: [2_000] }).toMatch(/title: Ideas/);
+
+    // --- Kai, an admin, names a folder and writes its first page ----------
+    admin = await openMembership(relay, adminTemp, ADMIN, workspaceName, syncEnv);
+    const kai = admin.page;
+    await revealExplorerPath(kai, "notes/plan.md");
+    const newFolder = kai.getByTestId("explorer-files-header").getByRole("button", { name: "New folder" });
+    await expect(newFolder).toBeVisible({ timeout: 60_000 });
+    await explorerRow(kai, "notes").click();
+    await kai.keyboard.press("ArrowLeft");
+    await newFolder.click();
+    const folderName = kai.getByRole("textbox", { name: "New folder name" });
+    await expect(folderName).toBeFocused();
+    await kai.keyboard.type("Plans");
+    await kai.screenshot({ path: shot("admin-new-folder-name") });
+    await folderName.press("Enter");
+    await expect(kai.getByLabel("Page title")).toBeFocused();
+    await kai.keyboard.type("Kickoff");
+    await themed(kai, "admin-new-folder-page", async () => {
+      await openExplorerView(kai);
+      await expect(kai.getByLabel("Page title")).toHaveValue("Kickoff");
+    });
+    await kai.getByLabel("Page title").click();
+    await kai.keyboard.press("ControlOrMeta+w");
+    await expect(kai.getByTestId("new-page")).toHaveCount(0);
+    await expect.poll(async () => {
+      for (const path of ["Plans/Kickoff.md", "notes/Plans/Kickoff.md"]) if (/title: Kickoff/.test(await ownerFile(path))) return path;
+      return "missing";
+    }, { timeout: 120_000, intervals: [1_000] }).not.toBe("missing");
+    expect(admin.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
+    await admin.close();
+    admin = null;
+
+    // --- At Comment, Sam gets no New file and a read-only document --------
+    await setLevel("comment");
+    await expect(header.getByRole("button", { name: "New file" })).toHaveCount(0, { timeout: 120_000 });
+    await explorerRow(mine, "notes/plan.md").click();
+    // The page opens to read, and Edit does not open the editor.
+    const page = mine.getByRole("main");
+    await expect(page.getByText("Read this first.")).toBeVisible({ timeout: 60_000 });
+    await expect(mine.getByTestId("markdown-edit-toggle")).toBeDisabled();
+    await expect(mine.getByTestId("markdown-editor")).toHaveCount(0);
+    await themed(mine, "comment-read-only", async () => {
+      await openExplorerView(mine);
+      await expect(page.getByText("Read this first.")).toBeVisible();
+    });
+
+    expect(member.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
+    expect(owner.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
   } finally {
     await cleanupDesktopWorkspace(admin, adminTemp);
     await cleanupDesktopWorkspace(member, memberTemp);
