@@ -3,7 +3,7 @@ import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import type { ChatShareAccess } from "@dohc/security-contract/share-grant";
 
 // What a person in a workspace reaches through the workspace share. Every
-// surface asks these functions and nothing else, so access rules (piece 3 of
+// surface asks these functions and nothing else, so access rules (piece 4 of
 // docs/engineering/plans/workspace-members.md) narrow reach here once.
 //
 // Files: every tracked path on main, current and future. The engine path

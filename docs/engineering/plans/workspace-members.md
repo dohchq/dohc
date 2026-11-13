@@ -98,6 +98,8 @@ Members see the Groups they can reach and the Comments on files they can see. On
 
 A member can start a direct message with anyone in the workspace from the member list. A direct message is between two people. The server holds it for those two, connects them without showing either person's email, and keeps it out of the workspace, so the owner cannot read it. Reading one needs a connection to the server. Either person can block the other, which stops new messages. General, direct messages, and chats with agents stay private to the people in them.
 
+A direct message belongs to the people in it, on one server, not to a workspace. Two people have one conversation in every workspace they share on that server, and it continues if one of them leaves or is removed. A person can block another, and the server enforces the block. Typing an email is another way to find a person, and it opens the same conversation. The server's operator can read direct messages, so dohc never calls them encrypted.
+
 General is each workspace's personal chat. In a community, people may expect a "general" room to be public. The community makes a Group for that.
 
 ## Moderation
