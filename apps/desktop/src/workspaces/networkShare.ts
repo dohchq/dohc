@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { realpath, statfs } from "node:fs/promises";
 
 // On a network share, the share's server, not dohc, decides who can read the
-// workspace's History (#2379). Only the root's path and its volume decide:
+// workspace's History. Only the root's path and its volume decide:
 // no folder is listed and no file is read.
 
 /** What the check reads from this computer. Tests replace it. */

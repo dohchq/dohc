@@ -1,4 +1,4 @@
-//! Requests the supervisor answers at their deadline or cancel (#3318). Each handler
+//! Requests the supervisor answers at their deadline or cancel. Each handler
 //! here only reads its workspace's store. A read left off this list still
 //! answers, only after its workspace's actor turns. A write on it would answer
 //! before its work lands, so list a method only after reading its handler.

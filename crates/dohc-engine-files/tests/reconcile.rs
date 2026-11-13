@@ -631,7 +631,7 @@ fn overflow_during_cancelled_rescan_is_not_lost() {
 
 #[test]
 fn size_cap_grow_retains_never_retires_the_false_delete_regression() {
-    // P1 REGRESSION: a previously-tracked file edited past the size cap must be
+    // A previously-tracked file edited past the size cap must be
     // retained (still on disk, last-known-good kept), never classified `removed`
     // and Retired — that would forget live user data.
     use dohc_engine_files::OverCapPolicy;
@@ -911,16 +911,15 @@ fn retire_requires_final_lstat_confirm_and_toctou_reappearance_is_retained() {
     assert!(raced_plan.degraded);
 }
 
-/// R14 robustness: manifest rehydration. A controller seeded from a prior
-/// generation's manifest (standing in for state recovered after a process
-/// restart) must (1) still force a full reconcile (`rehydrated` starts
-/// dirty, same as `new`), and (2) not re-report already-tracked, unchanged
-/// files as freshly `Added` -- only genuinely new/changed/removed paths
-/// should appear. An empty-manifest restart (the pre-R14 behavior) would
-/// mis-report every unchanged file as `Added`. Also the amended-N8 safety
-/// valve: a rehydration seed carries no mtime observation, so the first scan
-/// after open must hash every file rather than trust the seed — and the
-/// pairings that scan records make the rescans after it cheap.
+/// A controller seeded from a prior generation's manifest (standing in for
+/// state recovered after a process restart) must (1) still force a full
+/// reconcile (`rehydrated` starts dirty, same as `new`), and (2) not
+/// re-report already-tracked, unchanged files as freshly `Added` -- only
+/// genuinely new/changed/removed paths should appear. An empty-manifest
+/// restart would mis-report every unchanged file as `Added`. A rehydration
+/// seed carries no mtime observation, so the first scan after open must hash
+/// every file rather than trust the seed, and the pairings that scan records
+/// make the rescans after it cheap.
 #[test]
 fn rehydrated_manifest_reconciles_only_real_changes() {
     let ws = Scratch::new();
@@ -1001,7 +1000,7 @@ fn rehydrated_manifest_reconciles_only_real_changes() {
     );
 }
 
-// ---- amended N8: the manifest's (size, mtime) pairing short-circuits hashing.
+// ---- the manifest's (size, mtime) pairing short-circuits hashing.
 // The hash stays the source of truth for classification; equal size+mtime
 // reuses the recorded hash; any size or mtime difference re-hashes; a
 // same-size edit that forges its mtime back is the documented git tradeoff.

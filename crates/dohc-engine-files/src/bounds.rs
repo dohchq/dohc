@@ -1,5 +1,5 @@
 //! Resource bounds for a scan / hash / diff run. This slice is largely about
-//! bounds (`plan §Rust policy`: every buffer names its bound), so the config is
+//! bounds (every buffer names its bound), so the config is
 //! a first-class, explicit value — never a `num_cpus` guess in library code
 //! (pools sized by config, not the machine).
 

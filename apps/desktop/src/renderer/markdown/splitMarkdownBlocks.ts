@@ -1,5 +1,5 @@
 // Splits markdown source into block-safe chunks for incremental rendering
-// (Phase 16: a 250KB document parses ~575ms as one tree; the first visible
+// (a 250KB document parses ~575ms as one tree; the first visible
 // window parses in single-digit ms). Chunk boundaries sit only at blank lines
 // outside fenced code, and never between a table and its row-height comment,
 // so each chunk parses to the same blocks it would inside the full document.

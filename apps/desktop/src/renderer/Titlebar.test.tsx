@@ -38,7 +38,7 @@ describe("workspaceName", () => {
     expect(workspaceName({ ...workspace, rootPath: "/" })).toBe("workspace");
   });
 
-  // #2887: a shared view's folder is named after its share ID.
+  // A shared view's folder is named after its share ID.
   it("names a shared view after what it shares, and after its folder when the share has no name", () => {
     const shared = { ...workspace, rootPath: "/home/sam/dohc/shared/k3x9q2m7" };
     expect(
@@ -152,8 +152,8 @@ describe("Titlebar", () => {
   });
 
   // The quick-open button is centered on the window, so a long workspace name
-  // used to run under it and hide the status beside it. Everything on the left
-  // now shares one clamped group and shortens inside it.
+  // must not run under it and hide the status beside it. Everything on the
+  // left shares one clamped group and shortens inside it.
   it("clamps the workspace name and its status into the space left of quick-open", () => {
     vi.stubGlobal("dohcDesktop", { platform: "win32" });
 

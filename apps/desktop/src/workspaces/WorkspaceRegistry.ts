@@ -81,7 +81,7 @@ export function findWorkspace(workspaceId: string): RegistryEntry | null {
   return store().find(workspaceId);
 }
 
-// Failed-join rollback (0P-C gate fix): unregister a workspace this process
+// Failed-join rollback: unregister a workspace this process
 // just created. No-op for unknown ids.
 export function removeWorkspace(workspaceId: string): void {
   store().remove(workspaceId);
@@ -171,7 +171,7 @@ export function reconcileWorkspaceRecipientShares(
   return store().reconcileRecipientShares(workspaceId, reconcile);
 }
 
-// MU-C4: change the workspace's joined shared channels. See updateReceived.
+// Change the workspace's joined shared channels. See updateReceived.
 export function updateWorkspaceSharedChannels(
   workspaceId: string,
   update: (current: readonly JoinedSharedChannel[]) => readonly JoinedSharedChannel[],

@@ -1,10 +1,10 @@
-//! Content-addressed binary blob storage (`plan §Storage and recovery model`,
-//! "blobs, integrity"). Blobs are filed under the lowercase-hex sha-256 of
-//! their exact bytes, so identical content is stored once (dedup by hash) and
-//! every read re-verifies the bytes against the key before returning them
-//! (integrity on read — a bit-rotted row fails closed, never returns as valid).
+//! Content-addressed binary blob storage. Blobs are filed under the
+//! lowercase-hex sha-256 of their exact bytes, so identical content is stored
+//! once (dedup by hash) and every read re-verifies the bytes against the key
+//! before returning them (integrity on read: a bit-rotted row fails closed,
+//! never returns as valid).
 //!
-//! The text-blob table (`blobs`) is CAL-2's; this module owns the binary analog
+//! The text-blob table is `blobs`; this module owns the binary analog
 //! (`binary_blobs`) and the shared hashing discipline. Both read and write are
 //! bounded by [`crate::limits::MAX_BLOB_BYTES`].
 

@@ -370,7 +370,7 @@ fn inherited_carried_evidence_refuses_without_writes() {
     }
 }
 
-/// Sol's round 4b ruling, 2(c): the retained suffix drains while the
+/// The retained suffix drains while the
 /// successor's seed waits for its receipt. C2 cannot overtake C1, each
 /// applies once under its original delivery with its accepted history, and a
 /// row past F still waits for the seed.
@@ -431,7 +431,7 @@ fn the_seed_cannot_overtake_the_retained_suffix() {
     }
 }
 
-/// Sol's 1a-2b finding: once every Carried delivery has an application, the
+/// Once every Carried delivery has an application, the
 /// suffix still resolves each one and checks its application exactly. One
 /// applied at another accepting epoch conflicts, so a later delivery refuses
 /// with nothing written.
@@ -631,7 +631,7 @@ fn replays(f: &mut Fixture, stored: &LiveSettlementResult, settle: impl Fn(&mut 
     }
 }
 
-/// Sol's round 4b ruling, 2(a): a successor's settlement projects accepted
+/// A successor's settlement projects accepted
 /// state at its terminal, never a delivery it has not applied, whatever
 /// receipt it saved. With C1 applied and C2 not, only C1's content settles;
 /// once C2 applies, the next settlement holds it; once S1's own seed applies,
@@ -864,7 +864,7 @@ fn carried_since_the_floor(count: i64) -> (Fixture, LiveUpdateReceipt, Vec<Carri
     (f, covered, carried)
 }
 
-/// Opus's and Sol's 4b1c reviews: coverage counts distinct native sequences.
+/// Coverage counts distinct native sequences.
 /// S1's seed names its captured head, the native sequence of its
 /// predecessor's last Carried update, and every row since the stored floor is
 /// unapplied. Settled at B, in the ordinary and the retirement form, a
@@ -938,7 +938,7 @@ fn refused_then_resumed() -> (Fixture, LiveUpdateReceipt) {
     (f, covered)
 }
 
-/// Sol's 4b1c review: a refusal the released chain left stays private on
+/// A refusal the released chain left stays private on
 /// replay. P's refused update lies above the stored floor and names P, not
 /// S. Settled at B, it keeps the tail private, and the projection holds only
 /// accepted state, never the refused content S's local Y.Doc still holds:

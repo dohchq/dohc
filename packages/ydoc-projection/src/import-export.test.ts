@@ -4155,11 +4155,11 @@ describe("Y.Doc markdown import/export", () => {
   });
 
   it("round-trips per-column GFM alignment (left/center/right) losslessly", () => {
-    // Phase 1 assumed per-column alignment was inexpressible; it is not. The
-    // `align` cell attr (set by tableControls' column grip menu) serializes to
-    // the delimiter row and parses back, so a mixed-alignment table — left
-    // (`:---`), center (`:---:`), right (`---:`), and default (`---`) — is
-    // byte-stable across the round-trip.
+    // Per-column alignment is expressible. The `align` cell attr (set by
+    // tableControls' column grip menu) serializes to the delimiter row and
+    // parses back, so a mixed-alignment table with left (`:---`), center
+    // (`:---:`), right (`---:`), and default (`---`) columns is byte-stable
+    // across the round-trip.
     const once = expectStableMarkdownRoundTrip(
       ["| L | C | R | D |", "| :--- | :---: | ---: | --- |", "| a | b | c | d |"].join("\n"),
       ["| :--- | :---: | ---: | --- |"],
@@ -4963,10 +4963,10 @@ describe("a list nested inside a task item", () => {
 
 // CommonMark lets a fenced code block's opener carry up to three leading
 // spaces. Four or more make an indented code block instead, which is a
-// different construct. markdownToYDoc used to drop a top-level fence indented
-// 1-3 spaces together with its whole body, so opening such a document and
-// letting it settle wrote the deletion back to disk. This mirrors the
-// desktop editor's suite — both packages parse markdown with the same rules.
+// different construct. markdownToYDoc must keep a top-level fence indented
+// 1-3 spaces. Dropping it with its whole body would write the deletion back
+// to disk when such a document opens and settles. This mirrors the desktop
+// editor's suite: both packages parse markdown with the same rules.
 describe("indented code fences", () => {
   function bodyBlocks(markdown: string): JSONContent[] {
     return yDocBodyJSON(markdownToYDoc(markdown)).content ?? [];

@@ -9,7 +9,7 @@ export function useCloudPresence(
   onStatusUnavailable: (retry: () => void) => void,
   workspaceIsReady: boolean,
 ) {
-  // MU-C5 presence: the signed-in relay session, if any. Drives whether Chats
+  // Presence: the signed-in relay session, if any. Drives whether Chats
   // gets a live presence transport (connected + relayUrl) or stays dormant.
   // Scope the first render after a workspace switch, before effects run.
   const [scopedStatus, setScopedStatus] = useState<{

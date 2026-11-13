@@ -2002,7 +2002,7 @@ test("@self-host-activation-typing typing continues through self-host activation
         { timeout: 120_000, intervals: [1_000] },
       )
       .toBe(true);
-    // #2789: the owner refuses some of the service host's activation updates
+    // The owner refuses some of the service host's activation updates
     // with this reason. Every other refusal still fails the test.
     const refused = noticedRefusals(ownerTemp.rootPath, workspaceId);
     expect(

@@ -28,14 +28,12 @@ export type DraftFlushOptions = { captureOnFailure?: boolean };
 
 export type DraftFlush = (options?: DraftFlushOptions) => Promise<void>;
 
-// The plain-text autosave, used by every NON-markdown editable view (CSV,
-// JSON, text). It carries the same three write seams as MarkdownView — an
-// armed timer, an unmount flush, and the shell's flush — and until #579's
-// adversarial review it carried none of the opening gate, because `opening`
-// only ever existed inside MarkdownView. A version switch bumps `reopenKey`,
-// the reread it triggers leaves the PRE-switch body on screen, and the armed
-// timer landed that body on the POST-switch tree. That is the exact
-// mechanism on the surfaces #567 never covered.
+// The plain-text autosave, used by every non-markdown editable view (CSV,
+// JSON, text). It carries the same three write seams as MarkdownView (an
+// armed timer, an unmount flush, and the shell's flush) and the same opening
+// gate. A version switch bumps `reopenKey`, the reread it triggers leaves the
+// pre-switch body on screen, and without the gate the armed timer would land
+// that body on the post-switch tree.
 //
 // Every gate here reads a REF at call time, never a prop. Routing the signal
 // through `disabled` (or any dep) is actively worse: the unmount-flush effect
@@ -347,12 +345,11 @@ export function useAutosavedTextDraft(props: {
     writerSettledEpoch,
   ]);
 
-  // Cancel-and-restore, during the render that first sees the new version
-  // (#567, extended to these views by the adversarial review). The armed
-  // write would land the previous version's text on the tree the switch just
-  // bound; dropping it silently would lose keystrokes. So it is set aside into
-  // the same store the markdown notice reads, and the surface goes back to the
-  // document.
+  // Cancel-and-restore, during the render that first sees the new version.
+  // The armed write would land the previous version's text on the tree the
+  // switch just bound; dropping it silently would lose keystrokes. So it is
+  // set aside into the same store the markdown notice reads, and the surface
+  // goes back to the document.
   const reopenKeyRef = useRef(props.reopenKey);
   const wasRefused = useRef(props.switchReadPending);
   // Two moments, one transition: the switch itself, and the reread landing
@@ -679,11 +676,10 @@ export function useAutosavedTextDraft(props: {
         }
       });
     };
-    // `disabled` is deliberately not a dep: as one it made every flip run this
-    // cleanup with the previous render's value captured, so turning writes off
-    // was itself a write (the lesson, and the adversarial review found
-    // the same trap waiting here). The ref carries the current value to a real
-    // unmount.
+    // `disabled` is deliberately not a dep: as one it would make every flip
+    // run this cleanup with the previous render's value captured, so turning
+    // writes off would itself be a write. The ref carries the current value
+    // to a real unmount.
   }, [workspaceId, path, localBuffer]);
 
   useEffect(() => {

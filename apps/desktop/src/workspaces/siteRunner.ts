@@ -94,10 +94,10 @@ const DEV_URL_RE =
   /(http:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?![A-Za-z0-9.-])(?::\d+)?(?:\/[^\s]*)?)(?=$|[\s.)"'`,\]>])/i;
 const DEV_URL_TRAILING_PUNCTUATION_RE = /[.,)"'`,\]>]+$/;
 // Dev tools colorize their "Local: http://..." line when FORCE_COLOR reaches
-// them (Playwright workers set it; user shells can too). Vite bolds the PORT
-// — "http://127.0.0.1:\x1b[1m5173\x1b[22m/" — which used to split the URL at
-// the escape and silently drop the port, loading a dead preview. Strip ANSI
-// SGR sequences before matching.
+// them (Playwright workers set it; user shells can too). Vite bolds the port:
+// "http://127.0.0.1:\x1b[1m5173\x1b[22m/". Matched as is, the URL splits at
+// the escape and drops the port, loading a dead preview. Strip ANSI SGR
+// sequences before matching.
 // eslint-disable-next-line no-control-regex
 const ANSI_SGR_RE = /\u001B\[[0-9;]*m/g;
 // Case-insensitive for both the inline (--host=X) and separate-token
@@ -582,45 +582,29 @@ const ENV_OPTIONS_WITH_VALUE = new Set(["-u", "--unset", "-C", "--chdir"]);
 // unrecognized option is refused below.
 const ENV_OPTIONS_UNVERIFIABLE = new Set(["-S", "--split-string"]);
 
-// Prefix wrappers this file refuses outright rather than trying to verify.
-// There is no allowlist anywhere in this validator — every command not
-// refused here still has its own args scanned by assertDirectHostBinds and,
-// if it nests a shell or an env-style wrapper, recursed into below. This is
-// the refuse set: commands that run an arbitrary wrapped command (the same
-// "smuggle a shell past validation" risk env(1) had before its own fix) but
-// that this file cannot soundly verify, for one of two reasons:
+// Prefix wrappers this file refuses outright. This validator has no
+// allowlist: every command not refused here has its args scanned by
+// assertDirectHostBinds and, if it nests a shell or an env-style wrapper, is
+// recursed into below. Each wrapper in this set runs an arbitrary wrapped
+// command, which could carry a shell past validation, and this file cannot
+// soundly verify it. What cannot be verified is not approved.
 //
-// - `nice`, `stdbuf`, `timeout`, `sudo`, `doas` each have their own
-//   prefix-attached, value-carrying option grammar (`nice -n <adjustment>`,
-//   `stdbuf -i/-o/-e <size>`, `timeout -s/-k <duration>`, `sudo -u/-g
-//   <user>`, ...) that would need reimplementing here to find where their
-//   own options end and the wrapped command begins — the same
-//   reimplementation risk ENV_OPTIONS_UNVERIFIABLE already declines for
-//   env's own -S/--split-string. `nohup` and `setsid` take next to no
-//   options of their own, but are grouped here rather than singled out:
-//   nothing about "this wrapper happens to have a small grammar" changes
-//   the risk it exists to smuggle a shell past validation.
-// - `cross-env-shell` joins its own remaining args back into one shell
-//   command string with a plain space join before handing it to a shell —
-//   unlike env's `sh -c "already one token"`, where the author quoted the
-//   whole body as a single argument this file's own tokenizer received
-//   intact, cross-env-shell's body is SYNTHESIZED from args this file
-//   already split apart, and re-joining them with a bare space cannot
-//   soundly reconstruct whatever quoting the author originally wrote (an
-//   arg that itself contained a space arrives here as one token; rejoining
-//   loses the boundary that made it one arg instead of two). Recursing into
-//   it as a shell body the way env-wrapped shells are below would be
-//   verifying a different string than what cross-env-shell will actually
-//   run — refused instead.
-// - `env-cmd`, `dotenv` both load their environment assignments from a
-//   CONFIG FILE (an .env file, an env-cmd config) this validator never
-//   reads — there is no command-line token to scan a HOST/HOSTNAME
-//   assignment out of at all, so nothing here can prove what environment
-//   the wrapped command receives.
-//
-// Refused outright: the same "cannot statically verify, so don't approve"
-// stance this file already takes throughout, rather than silently trusting
-// an unexamined wrapped command's own loopback binding.
+// - `nice`, `stdbuf`, `timeout`, `sudo`, `doas` each have a prefix-attached,
+//   value-carrying option grammar (`nice -n <adjustment>`, `stdbuf -i/-o/-e
+//   <size>`, `timeout -s/-k <duration>`, `sudo -u/-g <user>`, ...). Finding
+//   where their options end and the wrapped command begins would mean
+//   reimplementing it, the risk ENV_OPTIONS_UNVERIFIABLE declines for env's
+//   -S/--split-string. `nohup` and `setsid` take next to no options, but a
+//   small grammar does not change the risk.
+// - `cross-env-shell` joins its remaining args into one shell command string
+//   with a plain space join. This file already split those args, and an arg
+//   that contained a space arrives here as one token, so rejoining loses the
+//   boundary. Recursing into it as a shell body would verify a different
+//   string than the one cross-env-shell runs.
+// - `env-cmd`, `dotenv` load their environment assignments from a config
+//   file this validator never reads, so no command-line token holds a
+//   HOST/HOSTNAME assignment and nothing here can prove what environment the
+//   wrapped command receives.
 const PASSTHROUGH_WRAPPER_COMMAND_NAMES = new Set([
   "nice",
   "nohup",

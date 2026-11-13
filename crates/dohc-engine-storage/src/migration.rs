@@ -6195,7 +6195,7 @@ mod tests {
             .is_err(),
             "an activation that never adopted names no origin"
         );
-        // Sol's any-namespace ruling: a document lineage has one adopted
+        // A document lineage has one adopted
         // origin in any namespace, and succession stays in its own.
         let copied = |table: &str, id_column: &str, id: &str, changes: &str| {
             conn.execute_batch(&format!(
@@ -7790,18 +7790,16 @@ mod tests {
         .unwrap()
     }
 
-    /// Sol's tails-cache ruling: each of the nine tables a document's
-    /// released tails read moves its generation, old and new rows alike. A
-    /// delivery moves the document whose entry holds it, whatever document
-    /// its row claims; an activation moves the document of every activation
-    /// whose chain passes through it. So does the state a held document's
-    /// inspection loads that its coordinates do not name (Sol's r2c-3c-1
-    /// finding 1), including a latest snapshot removed after it folded rows,
-    /// an archive rebound, and a missing blob restored (Sol's r2c-3c-3
-    /// findings 1 and 2, Opus's finding 1). A blob nothing names, a folded
-    /// journal row no entry names, an append, a superseded snapshot pruned,
-    /// and a document column neither reads move nothing. The generation
-    /// outlives its document.
+    /// Each of the nine tables a document's released tails read moves its
+    /// generation, old and new rows alike. A delivery moves the document
+    /// whose entry holds it, whatever document its row claims; an activation
+    /// moves the document of every activation whose chain passes through it.
+    /// So does the state a held document's inspection loads that its
+    /// coordinates do not name, including a latest snapshot removed after it
+    /// folded rows, an archive rebound, and a missing blob restored. A blob
+    /// nothing names, a folded journal row no entry names, an append, a
+    /// superseded snapshot pruned, and a document column neither reads move
+    /// nothing. The generation outlives its document.
     #[test]
     fn every_released_tail_input_moves_its_documents_generation() {
         let dir = tempdir();
@@ -8128,10 +8126,9 @@ mod tests {
         .unwrap()
     }
 
-    /// Sol's r2c-3c-7 ruling on their and Opus's r2c-3c-5 finding 1: a hold's
-    /// binding advances its document's hold revision as it is set, changes,
-    /// moves to another document and back, goes and comes back, so two
-    /// writes cannot change it and restore its digest unseen. Its digest
+    /// A hold's binding advances its document's hold revision as it is set,
+    /// changes, moves to another document and back, goes and comes back, so
+    /// two writes cannot change it and restore its digest unseen. Its digest
     /// alone, the binding rewritten as it was, the hold's other columns, and
     /// a document with no binding arriving or going advance nothing. No hold
     /// write moves a released tail generation. A revision only advances,

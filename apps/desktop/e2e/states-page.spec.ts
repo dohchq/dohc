@@ -15,18 +15,16 @@ import { cleanupDesktopWorkspace, createTempWorkspace } from "./helpers/workspac
 //
 // Every pixel must equal its baseline, compared here from the decoded
 // images: Playwright's comparator skips pixels it takes for antialiasing
-// and tolerates a per-pixel distance, and either let a one-step token
-// change pass. The captures are made deterministic by construction:
-// software rendering, no animations or backdrop filters, a viewport as tall
-// as the page so nothing scrolls, a pinned color scheme, states forced
-// through the browser instead of pointer events, the pointer parked outside
-// every part, a paused clock so acknowledged copies hold, fonts checked,
-// each part captured alone at the top of its pane, and each capture
-// repeated until two in a row are equal.
+// and tolerates a per-pixel distance, and either lets a one-step token
+// change pass. The captures are deterministic by construction: software
+// rendering, no animations or backdrop filters, a viewport as tall as the
+// page, a pinned color scheme, states forced through the browser, the
+// pointer parked outside every part, a paused clock, fonts checked, each
+// part captured alone at the top of its pane, and each capture repeated
+// until two in a row are equal.
 // So the baselines do not cover a backdrop blur, an animation's end state,
-// anything only the GPU draws, or how a part looks at a display scale other
-// than 100%. The baselines were taken on Windows; Playwright names them per
-// platform.
+// anything only the GPU draws, or a display scale other than 100%. The
+// baselines were taken on Windows; Playwright names them per platform.
 //
 // A second pass captures each part among all the others and holds it to the
 // same baseline, roughly (IN_CONTEXT_LEVELS): it catches a part whose styles
@@ -171,9 +169,9 @@ function pngMismatch(expected: Buffer, actual: Buffer): string | null {
 // differently. Across four page positions, at most 21 pixels of a capture
 // (in buttons, with its many rounded corners) moved by more than 16 levels
 // in a channel, and none by more than 62. A part whose styles change how
-// others paint moves far more: #1983's mask on a tab strip dropped subpixel
-// text across the page, and moved 1,328 pixels of buttons by more than 16.
-// The limit is three times the worst noise and a twentieth of #1983's 1,328.
+// others paint moves far more: a mask on a tab strip dropped subpixel text
+// across the page, and moved 1,328 pixels of buttons by more than 16. The
+// limit is three times the worst noise and a twentieth of that 1,328.
 const IN_CONTEXT_LEVELS = 16;
 const IN_CONTEXT_PIXELS = 64;
 

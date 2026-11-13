@@ -1,6 +1,6 @@
 //! The files actor: a dedicated OS thread owning the scanner (and therefore the
 //! bounded hash pool) and the reconcile controller, driven by a **tokio**
-//! command loop — the same actor model CAL-2 established for the storage writer
+//! command loop, the same actor model as the storage writer
 //! (`crates/dohc-engine-runtime/src/actor.rs`).
 //!
 //! The scan/hash/reconcile work is blocking; it stays on one dedicated thread
@@ -29,11 +29,11 @@ use tokio::sync::mpsc::{self, OwnedPermit};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-/// Bound on the actor's command queue (`plan §Rust policy`: bounded everything).
+/// Bound on the actor's command queue.
 const COMMAND_QUEUE_CAPACITY: usize = 64;
 
 /// Physical capacity: the data bound plus one reserved slot for `Close`, so
-/// shutdown always has a home and never spins or starves (the CAL-2 pattern).
+/// shutdown always has a home and never spins or starves.
 const CHANNEL_CAPACITY: usize = COMMAND_QUEUE_CAPACITY + 1;
 
 /// The actor lifecycle.
@@ -136,15 +136,15 @@ impl FilesActor {
     /// **Must be called off the async runtime** (it blocks on a startup
     /// handshake). From within a tokio runtime use [`FilesActor::spawn_async`],
     /// which offloads the blocking startup to a dedicated thread. A debug
-    /// assertion catches on-runtime misuse (CAL-2 parity with the runtime
+    /// assertion catches on-runtime misuse (parity with the runtime
     /// actor's sync-context guard).
     pub fn spawn(root: PathBuf, bounds: ScanBounds) -> Result<Self, FilesError> {
         Self::spawn_with_manifest(root, bounds, None)
     }
 
     /// Same as [`FilesActor::spawn`], but seeds the reconcile controller from
-    /// a manifest recovered from a prior process's committed state (R14
-    /// robustness: manifest rehydration across a daemon restart), instead of
+    /// a manifest recovered from a prior process's committed state (manifest
+    /// rehydration across a daemon restart), instead of
     /// [`ReconcileController::new`]'s empty baseline. `None` behaves exactly
     /// like [`FilesActor::spawn`]. See
     /// [`ReconcileController::rehydrated`] for why this still forces a full

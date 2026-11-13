@@ -1895,7 +1895,7 @@ mod tests {
         ));
     }
 
-    /// r2c-3c-1's open item: close stops every proof, answers its callers as
+    /// Close stops every proof, answers its callers as
     /// closed and returns once their readers closed; past its bound it says
     /// they have not.
     #[test]
@@ -1941,7 +1941,7 @@ mod tests {
         assert!(lingering.drained(), "drained once the reader closed");
     }
 
-    /// Sol's r2c-3c-2 finding 1: a proof's thread paused just before its
+    /// A proof's thread paused just before its
     /// reader opens, past every earlier check, as a descheduled thread would
     /// be, never opens one once close began: close has nothing to wait for,
     /// and the proof finds itself stopped.
@@ -1966,7 +1966,7 @@ mod tests {
         );
     }
 
-    /// Sol's and Opus's "old finding 2": a proof past its deadline, which
+    /// A proof past its deadline, which
     /// joining callers cannot extend, answers busy, not closed or corrupt.
     #[test]
     fn a_proof_past_its_deadline_answers_busy() {
@@ -2029,7 +2029,7 @@ mod tests {
         assert_eq!(limit.reserved_bytes(), 0);
     }
 
-    /// Sol's r2c-3c-2 finding 6: a reader that cannot open answers a locked
+    /// A reader that cannot open answers a locked
     /// store, which its caller retries, never corrupt state.
     #[test]
     fn a_reader_that_cannot_open_is_locked_not_corrupt() {
@@ -2048,7 +2048,7 @@ mod tests {
         );
     }
 
-    /// Sol's r2c-3c-4 finding 2 and Opus's finding 4: what a daemon's proofs
+    /// What a daemon's proofs
     /// and results keep never passes its proof memory. A proof reserves
     /// before it grows past its reservation, and answers busy beside another
     /// proof or too large past the whole memory; a result larger than its

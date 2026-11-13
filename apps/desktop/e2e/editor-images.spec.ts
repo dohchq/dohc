@@ -245,12 +245,11 @@ test("dragging an image file onto the editor embeds it into the configured attac
 });
 
 test("dragging an image onto the page top-matter (outside ProseMirror) still embeds it", async () => {
-  // The regression this guards: file-drop embedding used to live only in
-  // ProseMirror's handleDrop, which never runs for drops outside view.dom.
-  // The document pane is bigger than view.dom — the title/icon/properties
-  // top-matter sits in the same scroller — so dropping an image up there was
-  // silently swallowed (Chromium's default file handling, denied by Electron's
-  // will-navigate guard). The pane-level drop zone makes it embed.
+  // ProseMirror's handleDrop never runs for drops outside view.dom. The
+  // document pane is bigger than view.dom: the title/icon/properties
+  // top-matter sits in the same scroller. Without the pane-level drop zone, an
+  // image dropped up there gets Chromium's default file handling, which
+  // Electron's will-navigate guard denies.
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {

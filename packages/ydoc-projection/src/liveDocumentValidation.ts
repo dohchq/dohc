@@ -964,7 +964,7 @@ function validatePublicState(
   unverifiedSource: UnverifiedSource,
   engineReader = false,
 ): string {
-  // Projection and reimport are the costliest steps, so a note too dense for them is refused first (#3575).
+  // Projection and reimport are the costliest steps, so a note too dense for them is refused first.
   if (!withinLiveNoteCapacity(scratch, policy)) refuse("capacity-refused");
   if (
     scratch.share.size !== 3 ||

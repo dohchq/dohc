@@ -13,7 +13,8 @@ This skill provides instructions, not credentials or repository permissions.
 
 Confirm the requested channel, source commit, platforms, and publication intent from the conversation.
 Default releases to the nightly channel and `platforms=windows-linux`.
-A published nightly must select `platforms=windows-linux`, and only one nightly publishes per nightly day, which starts at 18:00 UTC.
+A published nightly must select `platforms=windows-linux`.
+Publish at most one nightly per nightly day. A nightly day starts at 18:00 UTC.
 For a dry run, select fewer platforms when the request names them: `platforms=windows` or `platforms=linux`.
 The workflow builds no macOS files. The Mac release command adds them after the workflow publishes.
 For a stable release, check previous releases on its channel before selecting platforms.
@@ -50,11 +51,8 @@ Add the macOS files right after every run that publishes. Until then, Macs on th
 The scheduled nightly job adds them itself. If its report says that failed, run the command the report names.
 A release is not finished until `pnpm release:macos` reports that the release holds the macOS files.
 Do not report a release as done before that, because no Mac shows that the step was missed.
-Follow "Add the macOS files" in the release procedure on the Apple silicon Mac that holds the release keychain.
-Run `pnpm release:macos --version <tag> --channel <channel> --dry-run` and read its upload plan.
-Run the real command from a clean checkout of `main`.
-If Ice saved the release keychain's password in the login keychain, the command unlocks the keychain itself.
-Otherwise, it asks for the password before it builds and before it packages, and Ice types it.
+Follow ["Add the macOS files"](../../../docs/engineering/desktop-release.md#add-the-macos-files) in the release procedure on the Apple silicon Mac that holds the release keychain. It gives the commands.
+The command needs the release keychain's password. Ice types it, or the command reads the one Ice saved in the login keychain.
 Never ask for that password, never read the saved one, and never pass it to a command.
 Never create, change, or delete the saved password. If the command reports that it did not unlock the keychain, report that and stop.
 If an upload stops, run the same command again. It finishes from the files it kept in `~/dohc-release/<tag>/files`.

@@ -231,9 +231,8 @@ describe("history diff page", () => {
     await screen.findByTestId("engine-diff-lines");
     expect(computeTextDiffSpy).toHaveBeenCalledTimes(1);
 
-    // A render that does not change the moment must not diff it again. This
-    // used to run the diff twice per render: once for the counts, once for
-    // the lines.
+    // A render that does not change the moment must not diff it again. The
+    // counts and the lines share one diff.
     view.rerender(
       <EngineMomentDiffPage
         workspaceId="ws-1"
@@ -377,7 +376,7 @@ describe("versions compare page", () => {
     expect(computeTextDiffSpy).toHaveBeenCalledTimes(1);
 
     // A render that does not change the compared bodies must not diff them
-    // again. The compare page used to diff every file on every render.
+    // again.
     view.rerender(<VersionComparePage workspaceId="ws-1" versionId="v-1" />);
     await screen.findByTestId("version-compare-file");
     expect(computeTextDiffSpy).toHaveBeenCalledTimes(1);

@@ -487,8 +487,8 @@ export function createSharedChannelsIpc<
     if (!joinCredentials.relayUrl) {
       throw new Error("Reconnect your server to refresh its connection settings, then try again.");
     }
-    // Capture the credentials before the awaits below (CodeRabbit Data
-    // Integrity): currentCredentials() can change during fetch/pull (logout,
+    // Capture the credentials before the awaits below:
+    // currentCredentials() can change during fetch/pull (logout,
     // relay switch) — re-reading it afterwards can crash on null or pin the
     // joined channel to the wrong relay. The join is atomic against the
     // credentials it started with.

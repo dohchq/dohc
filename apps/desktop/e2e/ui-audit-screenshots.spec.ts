@@ -291,8 +291,8 @@ test("@ui-audit capture baseline screenshots", async () => {
     await page.waitForTimeout(800);
     await shot(page, "10-history-light");
 
-    // (11 was the built-in Sites view and 12 the retired Agent panel; both
-    // slots stay vacant so later shot names keep matching earlier audit runs.)
+    // (Slots 11 and 12 stay vacant so later shot names keep matching earlier
+    // audit runs.)
 
     // 13 — command palette
     await page.keyboard.press("ControlOrMeta+k");

@@ -262,10 +262,9 @@ export class MermaidRenderScheduler {
     this.generation.delete(key);
   }
 
-  /** Drop scheduler state for every key not in `activeKeys` — i.e. fences
-   *  deleted since the last sync — so timers/lastSource/generation don't leak
-   *  across an editing session (previously they only cleared on editor
-   *  destroy). */
+  /** Drop scheduler state for every key not in `activeKeys`, that is, for
+   *  fences deleted since the last sync, so timers/lastSource/generation
+   *  don't leak across an editing session. */
   prune(activeKeys: ReadonlySet<string>): void {
     const keys = new Set<string>([
       ...this.timers.keys(),

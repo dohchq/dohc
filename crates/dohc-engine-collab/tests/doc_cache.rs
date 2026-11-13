@@ -1,4 +1,4 @@
-//! WriterDocCache invariants (PR1 of the engine doc-cache design): the in-tx
+//! WriterDocCache invariants: the in-tx
 //! tuple probe under hostile raw-SQL injection, the ABA and poison cases the
 //! differential check must catch, rollback/crash semantics, compaction
 //! re-base byte-equality, eviction, and the forced-close containment pin.

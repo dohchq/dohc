@@ -11,7 +11,7 @@ import {
 } from "@dohc/live-session-contract/live-object-binding";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 
-// WS-G2-C-2 — the one source of truth for the e2e SQLite helpers that read the
+// The one source of truth for the e2e SQLite helpers that read the
 // workspace engine.db. These are load-bearing for the "no double-journal"
 // invariant (workspace-engine-editor.spec) and the decoupling proof
 // (workspace-collab-decoupling.spec); keeping a single copy stops the two specs

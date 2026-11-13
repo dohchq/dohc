@@ -171,7 +171,7 @@ pub(super) fn reader_retryable(error: &RuntimeError) -> bool {
     )
 }
 
-/// The reader refused the note as larger than it can check (#3575). Asking
+/// The reader refused the note as larger than it can check. Asking
 /// again gives the same answer. It keeps the INTERNAL code of the reader's
 /// other final answers: clients read a LIMIT_EXCEEDED refusal as an update the
 /// engine never admitted, and this one can come after the update landed.
@@ -1048,8 +1048,7 @@ mod tests {
             ))),
             // The relay route's own type. `RelayError` carries a relay
             // operation's local failures, so the busy store arrives typed
-            // rather than as a storage variant — and used to fall through to
-            // INTERNAL because this recognizer only read storage variants.
+            // rather than as a storage variant.
             RuntimeError::Relay(RelayError::StoreBusy),
         ];
         for error in busy {
@@ -1092,8 +1091,8 @@ mod tests {
         assert_eq!(invalid.code, ErrorCode::InvalidParams);
         assert_eq!(invalid.message, "invalid-input");
 
-        // S1 (BINHEAD): a text read of a binary head is a normal user error, not
-        // an internal server fault — it must map to InvalidParams, never fall
+        // A text read of a binary head is a normal user error, not an
+        // internal server fault. It must map to InvalidParams, never fall
         // through the catch-all to Internal.
         let binary_head = map_runtime(RuntimeError::Domain(DomainError::BinaryHeadNotText));
         assert_eq!(binary_head.code, ErrorCode::InvalidParams);
@@ -1343,7 +1342,7 @@ mod tests {
         let unreachable = map_runtime(RuntimeError::Relay(RelayError::Partitioned));
         assert_eq!(unreachable.code, ErrorCode::WorkspaceUnavailable);
         assert_eq!(unreachable.message, "relay-unreachable");
-        // Reopening the session cannot reach the relay either (#2708).
+        // Reopening the session cannot reach the relay either.
         assert_eq!(unreachable.retry, Retryability::AfterBackoff);
         let missing = map_runtime(RuntimeError::Relay(RelayError::WorkspaceUnavailable));
         assert_eq!(missing.code, ErrorCode::WorkspaceUnavailable);

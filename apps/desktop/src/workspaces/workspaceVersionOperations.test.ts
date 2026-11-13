@@ -641,8 +641,8 @@ describe("switchVersion", () => {
     expect(toMain.activeVersionId).toBe("main");
     expect(await readText(root, "plan.md")).toBe("v1 text\n");
     expect(existsSync(join(root, "draft-only.md"))).toBe(false);
-    // WS-G1 behavior flip: in-cap binary files now follow the active version
-    // byte-for-byte instead of being left untouched by switching.
+    // In-cap binary files follow the active version byte-for-byte when
+    // switching.
     expect(existsSync(join(root, "logo.png"))).toBe(true);
     expect(new Uint8Array(await readFile(join(root, "logo.png")))).toEqual(logoBytes);
 

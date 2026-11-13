@@ -340,8 +340,8 @@ fn markdown_witness_reader(root: &ScratchDir) -> dohc_engine_reader::Config {
     }
 }
 
-/// #1009 (open window): the post-lease open runs its conflict freeze before
-/// its deferred drain. A refused open has no event route, so draining first
+/// Open window: the post-lease open runs its conflict freeze before its
+/// deferred drain. A refused open has no event route, so draining first
 /// would consume the parked rows with nothing left for the reopen after
 /// resolution to drain and emit.
 ///
@@ -433,9 +433,9 @@ async fn an_open_refused_by_a_sync_conflict_keeps_the_parked_queue_for_the_retry
     );
 }
 
-/// #1009 (close window): a close whose drain-materialization fails must keep
-/// the parked queue rows so the retried close can drain again
-/// (content-deduped, no duplicated history) and surface their facts.
+/// Close window: a close whose drain-materialization fails must keep the
+/// parked queue rows so the retried close can drain again (content-deduped,
+/// no duplicated history) and surface their facts.
 ///
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_close_that_fails_to_materialize_keeps_the_parked_queue_for_the_retry() {
@@ -501,11 +501,11 @@ async fn a_close_that_fails_to_materialize_keeps_the_parked_queue_for_the_retry(
     );
 }
 
-/// #2813. A close ends its session before its drain writes the file. When
-/// that write fails, the service keeps the head the file was owed, and a
-/// retried close drains again and asks where that head's write stands. One a
-/// passing failure stopped stays owed while the failure lasts, so the retry
-/// reports it, and lands on a retry once the failure has passed.
+/// A close ends its session before its drain writes the file. When that
+/// write fails, the service keeps the head the file was owed, and a retried
+/// close drains again and asks where that head's write stands. One a passing
+/// failure stopped stays owed while the failure lasts, so the retry reports
+/// it, and lands on a retry once the failure has passed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_retried_close_lands_the_write_a_passing_failure_stopped() {
     use dohc_engine_runtime::{YdocWriteState, actor::YdocCloseMaterialization};
@@ -680,11 +680,10 @@ fn conflict_files(scratch: &ScratchDir) -> Vec<String> {
         .collect()
 }
 
-/// #2813. A resync applies a parked edit without writing the file. Another
-/// edit on the same lineage then parks behind the session, and the close
-/// applies it. Its write expects the file to hold the resync's edit, so the
-/// close must write both pending edits in order, leaving the file equal to
-/// the note.
+/// A resync applies a parked edit without writing the file. Another edit on
+/// the same lineage then parks behind the session, and the close applies it.
+/// Its write expects the file to hold the resync's edit, so the close must
+/// write both pending edits in order, leaving the file equal to the note.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_close_after_a_resync_brings_the_file_up_to_the_note() {
     use dohc_engine_collab::Ydoc;

@@ -24,7 +24,7 @@ import {
 // paints is the controlled regression in DesktopWorkspaceShell.history.test.tsx
 // ("keeps a history answer workspace A asked for out of workspace B").
 //
-// This spec doubles as the PR 0M-5 performance evidence: it records history
+// This spec doubles as performance evidence: it records history
 // first-useful-content with 1,000 moments and the chat rail with 200
 // messages.
 
@@ -53,8 +53,7 @@ test("switching A->B with A's heavy panels open shows only B's history and chats
   try {
     // --- Seed workspace A: 1,000 engine moments + one 200-message chat ---
     await seedWorkspaceManifest(temp, WORKSPACE_A_ID);
-    // Seeded through the engine daemon over RPC — post-cutover the retired
-    // TS in-process store produces stores the daemon refuses.
+    // Seeded through the engine daemon over RPC.
     const diskWrites: Array<{ path: string; contents: string }> = [];
     await seedThroughDaemon(
       { workspaceId: WORKSPACE_A_ID, rootPath: temp.rootPath },

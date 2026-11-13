@@ -2595,7 +2595,7 @@ pub(crate) fn record_authorized_update_in_tx(
 
 /// Give an unclaimed rich document the schema version it lacks, in the
 /// caller's claim transaction, so the first version it claims passes public
-/// validation (#3790). Nothing seeds a New page note, and its editor writes
+/// validation. Nothing seeds a New page note, and its editor writes
 /// the first update without the version.
 ///
 /// `false` means an owner binding or a restore holds the document, so the
@@ -2689,7 +2689,7 @@ pub fn encode_origination_base_in_tx(
 
 /// Settle: project the reconstructed Y.Doc to artifact content (with provenance),
 /// content-address the projection in `binary_blobs`, and enqueue a durable
-/// materialization job (R04's pipeline) in the same transaction.
+/// materialization job in the same transaction.
 ///
 /// **Clock-independent exactly-once.** The generation is a durable, monotone
 /// per-doc `settle_seq` (never the wall clock): a re-settle of unchanged content
@@ -2902,17 +2902,16 @@ pub fn local_close_is_covered(
         // discard the CRDT with the artifact never replaced — refuse until
         // the replay (retry-settle or open-time) lands the job.
         //
-        // Matched on the object's TARGET PATH rather than a job-id prefix.
+        // Matched on the object's target path rather than a job-id prefix.
         // Disk-writing jobs carry many id spellings (`ydoc-mat_`,
         // `resolve-mat_`, `merge-mat_`, `sync-resolve-mat_` from
         // `enqueue_write`; `secret-mat_` from the secrets store's own
         // enqueue; binary, version-switch, and unprefixed hash-id jobs
-        // besides) and a prefix list drifts out of sync with them (#715:
-        // three went unmatched, each a stale-disk window).
-        // Every kind sets `target_path` to the disk path it intends to
-        // write, so asking "is any pending job aimed at this object's disk
-        // artifact" via that path is the fact itself, not a proxy for it —
-        // and it needs no update when a future job kind is added.
+        // besides), and a prefix list that misses one leaves a stale-disk
+        // window. Every kind sets `target_path` to the disk path it intends
+        // to write, so the path answers whether any pending job is aimed at
+        // this object's disk artifact, and it needs no update when a job
+        // kind is added.
         let job_pending: bool = store.read_with(|conn| {
             conn.query_row(
                 concat!(

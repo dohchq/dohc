@@ -1,6 +1,6 @@
 //! Crash-injection traces at the version-create and restore transaction
-//! boundaries (CAL-2). Durability is proven by reopening, never by trusting an
-//! in-process flag (`TEST_ORACLE.md` §3). The named storage fault points
+//! boundaries. Durability is proven by reopening, never by trusting an
+//! in-process flag. The named storage fault points
 //! (`storage.before-persist`, `storage.after-commit-before-ack`) are the same
 //! seam the storage crate pins; the versioning compound commits ride it via
 //! `EngineStore::write_with`.

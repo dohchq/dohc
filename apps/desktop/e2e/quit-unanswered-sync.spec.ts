@@ -15,11 +15,10 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// #2868: with a synced workspace open, quit stays within its 6 s budget
-// while the sync server takes each connection and never answers. One case
-// leaves only the push unanswered. The other also leaves the read of the
-// relay's automation host record unanswered. The pull case comes with the
-// rest of #2868.
+// With a synced workspace open, quit stays within its 6 s budget while the
+// sync server takes each connection and never answers. One case leaves only
+// the push unanswered. The other also leaves the read of the relay's
+// automation host record unanswered. This spec does not cover the pull case.
 
 type Launched = Awaited<ReturnType<typeof launchDesktopApp>>;
 
@@ -268,7 +267,7 @@ for (const unanswered of ["push", "push and host read"] as const) {
         await holdPush(1);
         expect(sync.openRead(), "No automation host read is waiting").toBeUndefined();
       } else {
-        // #3406: after a host read fails, the executor reads again only once
+        // After a host read fails, the executor reads again only once
         // a pull reaches the relay. A pass pulls after it pushes, so a write
         // the relay answers makes the next read. A read still pending when
         // the pull lands keeps the next one queued behind it, and once it

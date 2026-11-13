@@ -662,10 +662,10 @@ export function createShareGrantRoutes(
     if (route.route === "shares-create" && request.method === "POST") {
       const input = await readJsonObject(request);
       if ("sharerName" in input) throw badRequest("The relay supplies the sender.");
-      // Two grant kinds share one create surface: a chat grant
-      // (MU-C4, addressed by channelWireId + optional access) or the PR-18
-      // path/version grant. The recipient addressing, pending-invite, and
-      // anti-enumeration behavior below is identical for both.
+      // Two grant kinds share one create surface: a chat grant (addressed by
+      // channelWireId + optional access) or the path/version grant. The
+      // recipient addressing, pending-invite, and anti-enumeration behavior
+      // below is identical for both.
       const { selector, access } = (() => {
         if (input.channelWireId !== undefined && input.paths !== undefined) {
           // One share for a group: the channel and its folder together.

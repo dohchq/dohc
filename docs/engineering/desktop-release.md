@@ -15,7 +15,6 @@ targets and deployment requirements.
 The Desktop Release workflow builds Windows and Linux, each from the matching
 Rust engine target. The release owner builds macOS on an Apple silicon Mac with
 `pnpm release:macos`, which adds its files to the release the workflow published.
-macOS releases support Apple silicon only; there is no Intel build.
 Stable releases require signing credentials for Windows and macOS.
 Nightly Windows builds may be unsigned for testing. The macOS command always
 signs and notarizes a release. An unsigned build is not a stable release.
@@ -42,7 +41,7 @@ Confirm that changes reaching `main` receive review before enabling signing.
 
 The release workflow starts only when someone dispatches it.
 Dispatches can start on other refs, but the preflight guard permits release jobs only on `main`.
-Pull requests never run this workflow. Dry runs receive empty signing credentials.
+Pull requests never run this workflow.
 The package and publish jobs both use the restricted environment.
 Only Windows signing and packaging steps receive the Windows signing secrets.
 Linux receives no signing secrets.
@@ -54,28 +53,6 @@ keychain on the release owner's Mac. They never enter GitHub, and no workflow
 can read them. The keychain stays locked between releases. Publishing the
 macOS files needs the release owner to unlock it, or the password that the
 owner [saved for unattended releases](#let-releases-run-unattended).
-
-## GitHub-hosted release jobs
-
-Every workflow job runs on a fresh GitHub-hosted runner with a pinned image.
-Windows and Linux packages build in parallel on separate machines.
-
-| Jobs | Image |
-| --- | --- |
-| Preflight for `linux` | `ubuntu-24.04` |
-| Preflight for other selections | `windows-2025` |
-| Version check and Publish | `ubuntu-24.04` |
-| Windows x64 package | `windows-2025` |
-| Linux x64 package | `ubuntu-24.04` |
-
-The workflow installs the pinned Node, pnpm, and Rust versions before building.
-The Windows package runs the packaged app check in its runner's desktop session.
-The Linux package runs its fuse smoke with `xvfb-run`.
-The smoke checks the executable's fuse values and starts it with an isolated profile.
-It uses `apps/desktop/release/linux-unpacked` on Linux and `apps/desktop/release/mac-arm64/dohc.app` on a Mac.
-For a local smoke with another package path, set `DOHC_SMOKE_PACKAGE_DIRECTORY` to that directory or app bundle.
-These checks do not prove installation, protocol registration, or installer upgrades.
-Use a disposable desktop account or VM for those release rehearsals.
 
 ## Contributor access to releases
 
@@ -121,36 +98,42 @@ A dry run skips both rules, so a dry run can test one platform at any time.
 If any package fails, the publish job does not run.
 
 To publish, dispatch `Desktop Release` from `main` with `channel=nightly`, `platforms=windows-linux`, and `dry_run=false`.
-Then [add the macOS files](#add-the-macos-files) the same day. The Mac command always signs and notarizes.
+Then [add the macOS files](#add-the-macos-files) the same day.
 
 ### Publish nightlies on a schedule
 
 On the Mac mini, a LaunchAgent publishes each nightly with nobody at the Mac.
-Ice decided on 2026-10-20 that it publishes without asking each time.
+It publishes without asking each time.
 Every rule above still applies.
 
-At 04:00 local time, launchd fetches `main` into its own clone in `~/dohc-release/driver`.
-It fetches from the `dohchq/dohc` URL that `install` checked, whatever the clone's own origin says.
-`install` makes that clone afresh each time. When the fetch or checkout fails, `gh` reports it, so no code from the clone runs.
+At 04:00 local time, launchd fetches `main` from `dohchq/dohc` into the job's own clone, `~/dohc-release/driver`.
 It discards anything else in that clone, then runs `node scripts/release-nightly.mjs run` from it.
-The job stops unless the clone is clean and on `main`. The job:
+The job first waits up to 3 hours until the Mac's verification queue has no request queued or running. The nightly verification starts at 03:07.
+The job publishes only when all of these hold:
 
-1. Waits up to 3 hours until the Mac's verification queue has no request queued or running. The nightly verification starts at 03:07.
-2. Adds the macOS files to the newest nightly if it published without them, after a failure or a lost run.
-3. Skips the night when `main` has not changed since the newest nightly, or when a nightly already published in that nightly day.
-4. Skips the night unless the Mac's full nightly verification passed on `main`'s head commit.
-5. Dispatches `Desktop Release` with `channel=nightly`, `platforms=windows-linux`, `dry_run=false`, and `commit` set to that head. Preflight builds nothing unless `main` is still at `commit`. The run's title names the channel, a dry run, and the commit, so the job follows its own run.
-6. Follows the run for up to 6 hours. When the run publishes, the job [adds the macOS files](#add-the-macos-files) to the new release. The job never cancels a run, because that could interrupt a publish. A run still going after 6 hours is left to finish, and if it publishes, the next night adds its macOS files.
+- The Mac's full nightly verification passed on `main`'s head commit.
+- `main` has changed since the newest nightly.
+- No nightly published in that nightly day.
+
+The job dispatches `Desktop Release` with `commit` set to that head. Preflight builds nothing unless `main` is still at `commit`.
+The job follows the run for up to 6 hours.
+When the run publishes, the job [adds the macOS files](#add-the-macos-files) to the new release.
+The job never cancels a run, because that could interrupt a publish. It leaves a run that is still going after 6 hours to finish.
+If the newest nightly published without its macOS files, the next night's job adds them first.
+[`scripts/release-nightly.mjs`](../../scripts/release-nightly.mjs) holds the full sequence.
 
 The job comments on #2281 after each published nightly and each failure.
-It also comments on every other skip that leaves `main` unpublished, such as missing verification or a nightly already published that nightly day, and when launchd cannot update its clone.
+It also comments on every other skip that leaves `main` unpublished.
+When launchd cannot update its clone, the LaunchAgent comments and runs no code from the clone.
 A night with nothing new posts nothing.
 The LaunchAgent writes the job's output to `~/dohc-release/nightly.log`.
+
 The job and every run of `release-desktop-macos.mjs` on the Mac take one lock, `~/dohc-release/release.lock`, so only one release command runs at a time.
-The system releases the lock when the last process holding it exits, so a crash leaves no stale lock.
-A command that finds it held stops at once, and the job reports that night on #2281.
+A command that finds the lock held stops at once, and the job reports that night.
+A crash leaves no stale lock.
 `install` and `uninstall` also run under the lock, so stopping the job through them never interrupts the macOS command.
-A logout, a shutdown, a forced kill, or stopping the LaunchAgent by hand with `launchctl bootout` still can. The release keychain then locks itself after 30 minutes without use, or when the Mac sleeps.
+A logout, a shutdown, a forced kill, or stopping the LaunchAgent by hand with `launchctl bootout` still can.
+The release keychain then locks itself after 30 minutes without use, or when the Mac sleeps.
 
 The job needs all of these:
 
@@ -165,7 +148,8 @@ Anyone who can merge to `main` therefore controls what runs with those credentia
 Keep `main` protected: require a review and allow no bypass, including for administrators.
 
 Install or remove the LaunchAgent from a login shell, in a checkout of `main` whose origin is `dohchq/dohc`.
-The LaunchAgent keeps the `PATH` of the shell that installs it, which must find `node`, `git`, `gh`, `pnpm`, and the Xcode tools:
+The LaunchAgent keeps the `PATH` of the shell that installs it, which must find `node`, `git`, `gh`, `pnpm`, and the Xcode tools.
+`install` makes the job's clone afresh each time:
 
 ```sh
 node scripts/release-nightly.mjs install
@@ -178,31 +162,20 @@ To check the workflow without publishing, run a dry run by hand. It dispatches w
 node scripts/release-nightly.mjs run --dry-run
 ```
 
-## Build a Windows nightly
+## Build a nightly without publishing
 
-Dispatch `Desktop Release` from `main` with `channel=nightly`, `platforms=windows`, and `dry_run=true`.
-Preflight and packaging run on `windows-2025`. The version check runs on `ubuntu-24.04`.
-The workflow generates the nightly version from the package version, UTC date, run number, and run attempt.
-Download the run's `desktop-Windows-x64` artifact after every job passes.
-Verify its files with the artifact command below.
-Pass `--channel nightly` and the run's generated version to that command.
-The Windows package job checks the executable with an isolated profile and test workspace before uploading it.
-A Windows-only nightly dispatch cannot publish. [Publish a nightly](#publish-a-nightly) with `platforms=windows-linux`.
+A dry run builds and checks the packages and publishes nothing.
+
+1. Dispatch `Desktop Release` from `main` with `channel=nightly`, `dry_run=true`, and `platforms` set to `windows`, `linux`, or `windows-linux`.
+2. After every job passes, download the run's `desktop-Windows-x64` artifact, its `desktop-Linux-x64` artifact, or both.
+3. [Verify the files](#verify-a-downloaded-artifact) of each artifact. Pass `--platform win` or `--platform linux`, `--arch x64`, `--channel nightly`, and the run's generated version.
+
 Each dispatch generates a new nightly version.
-The published prerelease records the source commit and includes generated release notes.
+The Linux artifact contains the AppImage, the `.deb`, and the nightly Linux update manifest, which lists both.
+`windows-linux` prepares both packages from one commit and generated version.
+A nightly dispatch with one platform cannot publish. [Publish a nightly](#publish-a-nightly) with `platforms=windows-linux`.
 
-## Build a Linux nightly
-
-Dispatch `Desktop Release` from `main` with `channel=nightly`, `platforms=linux`, and `dry_run=true`.
-Every job for this selection runs on `ubuntu-24.04`.
-Download the run's `desktop-Linux-x64` artifact after every job passes.
-It contains the AppImage, the `.deb`, and the nightly Linux update manifest, which lists both.
-Verify the files with `--platform linux`, `--arch x64`, the generated version, and `--channel nightly`.
-The Linux package job checks artifact hashes and runs the packaged fuse smoke and the engine upgrade check before uploading.
-
-Use `platforms=windows-linux` to prepare both packages from one commit and generated version.
-The packages build in parallel. Preflight runs on `windows-2025`; the version check and Publish run on `ubuntu-24.04`.
-Download both platform artifacts from the same run.
+## Select platforms for a published release
 
 Only the selected platforms receive installers and update packages.
 Continue including every platform that previously shipped on the selected channel.
@@ -213,17 +186,13 @@ It rejects a selection that omits an existing Windows or Linux manifest.
 It does not check macOS, because the Mac command adds those files after the workflow publishes.
 Partial-platform dry runs remain available because they publish no update feed.
 
-Private repository downloads require repository access.
-The packaged updater also needs an authenticated private feed or a public download host.
-Do not embed a repository token in the desktop package.
-
 ## Publish a stable version
 
 Merge the version change and its verification evidence into `main`.
 Before enabling releases, configure the environment credentials and protect changes to `main`.
 Complete the installer and update rehearsal below before publishing the first stable release.
 Dispatch `Desktop Release` from `main` with `channel=latest` and the matching package version.
-Select the platforms that the release supports.
+[Select the platforms](#select-platforms-for-a-published-release) that the release supports.
 Use `dry_run=true` to check unsigned packaging without publication.
 For publication, use `dry_run=false`. Stable Windows builds require signing.
 Then [add the macOS files](#add-the-macos-files).
@@ -260,93 +229,7 @@ The release is not finished until the command reports that the release holds the
    ```
 
 4. Update a clean checkout of `main`, then run the same command from it without `--dry-run`.
-5. If you [saved the release keychain's password](#let-releases-run-unattended), the command unlocks the keychain itself. Otherwise, it asks for the password twice: before it builds, and before it packages. Type it each time.
-
-A real run opens the release keychain for two short periods. Before it builds,
-the command unlocks the keychain, checks that the identity is valid and that the
-notarytool profile signs in, reads the PostHog key into memory, and locks the
-keychain again. The install, the builds, and the source map upload then run
-with the keychain locked. The upload fetches `@posthog/cli` outside the
-lockfile and runs its install script, and only that step receives the PostHog
-key. Before packaging, the command unlocks the keychain again. electron-builder
-signs and notarizes the app, the command notarizes the DMG, and the keychain
-locks once Apple accepts it. If the keychain is already unlocked when
-packaging starts, someone opened it while the build ran. The command says so,
-locks it, and unlocks it again the usual way. The command also locks the
-keychain when it ends, however it ends.
-
-With a saved password, the command unlocks the keychain itself. Otherwise, in a
-terminal, `security` asks for the password. Without a terminal, the command
-prints the `security unlock-keychain` command and waits up to 30 minutes for
-someone to run it.
-
-While the release keychain is unlocked, any program running as you can sign
-with the Developer ID identity through `codesign` and notarize with the profile
-through `notarytool`. Those periods cover the checks before the build,
-electron-builder, and both notarization waits.
-
-The command never changes the files of the checkout it runs from. It fetches
-the release commit and creates a throwaway worktree of it in
-`~/dohc-release/<tag>/checkout`. It installs dependencies there and builds the
-engine there with its own Cargo target folder. When it ends, it removes that
-worktree and Git's record of it. Only the files to upload stay, in
-`~/dohc-release/<tag>/files`, until the upload succeeds. A dry run uses
-`~/dohc-release/<tag>-dry-run` and keeps its files for inspection.
-
-The command stops before it builds unless all of these are true:
-
-- The host is an Apple silicon Mac, and Node runs as arm64.
-- The release is published, and its prerelease state matches the channel.
-- The release has no macOS files, or only part of an upload that the command
-  can finish, as [Finish an upload that stopped](#finish-an-upload-that-stopped) describes.
-- A Desktop Release run dispatched on `main` published the tag's commit: its
-  `Publish` job succeeded for that commit. For a nightly, that run is the one
-  in the tag. Its attempt is the tag's attempt, or a later attempt that re-ran
-  only the failed jobs and so kept the tag attempt's Preflight, which stamped
-  the version. The workflow runs `Publish` only after Preflight
-  passes on `refs/heads/main`, so a run dispatched on a tag named `main` does
-  not count. The commit must also be on the `main` branch's current commit.
-- The version is the one the workflow stamped. The command resolves it with
-  `scripts/resolve-desktop-release.mjs`, from the commit's package version and
-  the nightly date, run number, and attempt in the tag.
-- For a real run: the checkout that runs the command is clean and on `main`,
-  and your `gh` account can upload to `dohchq/dohc`. A dry run runs from any
-  checkout and prints which commit it ran from.
-- For a real run: the release keychain exists and holds one Developer ID
-  Application certificate and the notarytool profile. While the
-  `DOHC_POSTHOG_KEY` repository variable is set, it also holds the PostHog CLI
-  API key. A locked keychain shows all of this.
-
-When it first unlocks the keychain, the command checks that the identity is
-valid and that the notarytool profile signs in.
-
-The command then follows the workflow's package job. It stamps the version,
-builds the desktop and the `aarch64-apple-darwin` engine, and runs the package
-smoke. A real run builds with the repository's PostHog variables and uploads
-source maps after the engine build, before packaging, with the release keychain
-locked. electron-builder signs the
-app with the identity in the release keychain and notarizes and staples it
-through the notarytool profile. The command then notarizes and staples the DMG.
-
-Before it uploads, the command runs these checks:
-
-- `codesign --verify --deep --strict` on the app.
-- `spctl --assess` on the app.
-- `xcrun stapler validate` on the app and on the DMG.
-- The packaged fuse smoke, which also compiles one app through the packaged compiler and boots the app.
-- `scripts/verify-desktop-release-artifacts.mjs` for `mac` and `arm64`.
-
-The command uploads the DMG, the ZIP, and the ZIP's blockmap. It uploads
-`<channel>-mac.yml` only after the release holds each of those files with the
-size and SHA-256 digest that the command built, so the manifest never names a
-missing file. It refuses a manifest that names any other file. It then reads
-the release back and compares every file again. The manifest lists only the
-ZIP, which is what the Mac updater installs. Stapling changes the DMG's bytes
-after packaging, so the DMG stays out of the manifest.
-
-Ctrl-C, SIGTERM, or a closed terminal stops the command after the current step.
-It starts no further upload, removes the throwaway worktree, and locks the
-release keychain.
+5. If you [saved the release keychain's password](#let-releases-run-unattended), the command unlocks the keychain itself. Otherwise, it asks for the password twice: before it builds, and before it packages. Type it each time. Without a terminal, the command prints the `security unlock-keychain` command and waits up to 30 minutes for someone to run it.
 
 | Flag | Meaning |
 | --- | --- |
@@ -357,8 +240,53 @@ release keychain.
 | `--dry-run` | Builds unsigned, runs every check that needs no signature, prints the upload plan, and uploads nothing. A dry run runs from any checkout, does not read or lock the release keychain, and sends no reports. |
 | `--rehearse` | Only with `--dry-run`. Builds the checkout's own commit instead of the release commit, and prints what a real run refuses instead of stopping. |
 
-A dry run skips `spctl` and `stapler`, because an unsigned app has no
-Developer ID signature or ticket.
+The command builds the release commit in a throwaway worktree under `~/dohc-release/<tag>` and removes it when it ends.
+It never changes the files of the checkout it runs from.
+It builds as the workflow's package job does, then signs and notarizes the app and the DMG. [`scripts/release-desktop-macos.mjs`](../../scripts/release-desktop-macos.mjs) holds the steps.
+Only the files to upload stay, in `~/dohc-release/<tag>/files`, until the upload succeeds.
+A dry run uses `~/dohc-release/<tag>-dry-run` and keeps its files for inspection.
+Ctrl-C, SIGTERM, or a closed terminal stops the command after the current step.
+It starts no further upload, removes the throwaway worktree, and locks the release keychain.
+
+A real run unlocks the release keychain for two short periods.
+Before it builds, the command checks that the identity is valid and that the notarytool profile signs in. It reads the PostHog key into memory and locks the keychain again.
+Before it packages, the command unlocks the keychain again. The keychain locks once Apple accepts the DMG.
+The install, the builds, and the source map upload run with the keychain locked.
+The upload fetches `@posthog/cli` outside the lockfile and runs its install script, and only that step receives the PostHog key.
+If the keychain is already unlocked when packaging starts, someone opened it while the build ran. The command says so, locks it, and unlocks it again the usual way.
+The command also locks the keychain when it ends, however it ends.
+
+While the release keychain is unlocked, any program running as you can sign
+with the Developer ID identity through `codesign` and notarize with the profile
+through `notarytool`. Those periods cover the checks before the build,
+electron-builder, and both notarization waits.
+
+The command stops before it builds unless all of these are true:
+
+- The host is an Apple silicon Mac, and Node runs as arm64.
+- The release is published, and its prerelease state matches the channel.
+- The release has no macOS files, or only part of an upload that the command can finish, as [Finish an upload that stopped](#finish-an-upload-that-stopped) describes.
+- A Desktop Release run dispatched on the `main` branch has a successful `Publish` job for the tag's commit. A run dispatched on a tag named `main` does not count.
+- For a nightly, that run and its attempt are the ones in the tag. A later attempt also counts when it re-ran only the failed jobs.
+- The tag's commit is on the `main` branch.
+- The version is the one the workflow stamped for the commit's package version and the tag.
+- For a real run: the checkout that runs the command is clean and on `main`, and your `gh` account can upload to `dohchq/dohc`.
+- For a real run: the release keychain holds one Developer ID Application certificate and the notarytool profile. While the `DOHC_POSTHOG_KEY` repository variable is set, it also holds the PostHog CLI API key.
+
+When the command's message names this document, find the fix in [Prepare the Mac once](#prepare-the-mac-once).
+Step 1 creates the release keychain, steps 4 and 5 add and confirm the certificate, step 6 stores the notarytool profile, and step 7 stores the PostHog key.
+For a saved password that does not unlock the keychain, see [Let releases run unattended](#let-releases-run-unattended).
+
+Before it uploads, the command runs `codesign --verify --deep --strict` and `spctl --assess` on the app, and `xcrun stapler validate` on the app and on the DMG.
+It also runs the packaged fuse smoke and `scripts/verify-desktop-release-artifacts.mjs` for `mac` and `arm64`.
+A dry run skips `spctl` and `stapler`, because an unsigned app has no Developer ID signature or ticket.
+
+The command uploads the DMG, the ZIP, and the ZIP's blockmap first.
+It uploads `<channel>-mac.yml` only after the release holds each of those files with the size and SHA-256 digest that the command built, so the manifest never names a missing file.
+It refuses a manifest that names any other file.
+After the upload, it reads the release back and compares every file again.
+The manifest lists only the ZIP, which is what the Mac updater installs.
+Stapling changes the DMG's bytes after packaging, so the DMG stays out of the manifest.
 
 ### Finish an upload that stopped
 
@@ -372,13 +300,11 @@ upload from the kept files when both of these are true:
   digest, and the ZIP that the rerun downloads has the SHA-512 that the kept
   manifest names.
 
-The rerun first checks the kept files as the stopped run did. It runs the
-artifact verifier on them, unpacks the ZIP, and runs `codesign`, `spctl`, and
-`stapler` on the app and `stapler` on the DMG. It then uploads the missing
-files and, after the release holds all three, the manifest. It reads the
-release back. Finishing an upload signs nothing, so it does not unlock the
-release keychain. In any other state, the command stops and prints the
-`gh release delete-asset` commands that remove the macOS files from the
+The rerun first checks the kept files as the stopped run did. It then uploads
+the missing files and, after the release holds all three, the manifest. It
+reads the release back. Finishing an upload signs nothing, so it does not
+unlock the release keychain. In any other state, the command stops and prints
+the `gh release delete-asset` commands that remove the macOS files from the
 release. Run them only for that release, then run the command again to build
 from the start. The command never offers to delete files from a release that
 already has a Mac update manifest, because Macs may already update from it.
@@ -522,6 +448,10 @@ Packaged desktop builds normally check GitHub Releases.
 `DOHC_UPDATE_URL` replaces that feed with an operator-selected generic update URL.
 Set it only in a launch environment you control, and use a trusted HTTPS endpoint.
 
+Private repository downloads require repository access.
+The packaged updater also needs an authenticated private feed or a public download host.
+Do not embed a repository token in the desktop package.
+
 The app checks for updates but downloads one only when the person selects Update
 at the top right of the window. When the download finishes, the button reads
 Restart to update. When dohc cannot start or a window keeps failing, a dialog
@@ -577,45 +507,19 @@ Before the first release that reports:
    tracking. Check the current free allowance for each on PostHog's pricing
    page.
 
-The app limits what it sends:
+The app caps the reports it sends in each launch and drops the ones it cannot
+send. The limits are `REPORT_LIMITS` in
+[`apps/desktop/src/telemetry/telemetry.ts`](../../apps/desktop/src/telemetry/telemetry.ts).
+The other files in [`apps/desktop/src/telemetry/`](../../apps/desktop/src/telemetry/)
+build and send each report.
 
-| Limit | Usage reports | Error reports |
-| --- | --- | --- |
-| Events per launch | 1,000 | 25 |
-| Waiting at once | 100 | 10 |
-| Sent | 60 s after the first waits, or at once when 50 wait | 1 s after the problem |
-| Repeats | Each action counts | Each distinct problem once per launch |
-| Prepared per launch | Same as sent | 100, repeats included. Each window hands main at most 25 distinct errors. |
-
-A request times out after 10 s and is never retried. After a 429 response the
-app waits as long as `Retry-After` says, up to one hour, and drops reports
-until then. At quit, the app waits up to 3 s in total for a send under way and
-the reports behind it, alongside workspace shutdown, then drops the rest.
-
-Usage reports go to PostHog's batch endpoint from dohc's own code. Error
-reports go through `posthog-node`'s `captureExceptionImmediate`, loaded the
-first time an error report leaves. The SDK reads only the error dohc rebuilds
-from allowlisted values, and it opens no files.
-
-Usage events are `app_launched`, `workspace_created`, `workspace_opened`,
-`share_created`, `app_published`, and `chat_message_sent`. To add one, add it
-to `UsageEvent` and `USAGE_EVENTS` in `apps/desktop/src/telemetry/telemetry.ts`,
-then update the reports reference.
-
-PostHog groups an error report with frames in dohc's code by those frames,
-once source maps resolve them. A report without such a frame sets
-`$exception_fingerprint` from the failed part and the error chain, so problems
-with the same message stay apart.
+To add a usage event, add it to `UsageEvent` and `USAGE_EVENTS` in
+`apps/desktop/src/telemetry/telemetry.ts`, then update the reports reference.
 
 Each error report carries a new random distinct ID. PostHog's count of users
 affected by an issue therefore counts reports, not people or installations.
 An installation sends a problem at most once per launch, so a problem that
 recurs on one computer still adds a report on each launch.
-
-An error report sets `mechanism.handled` on its first exception to `false`
-when nothing caught the error in main or a window. It is `true` for an error
-a window's error boundary caught, and for engine and process failures that
-dohc handled.
 
 ### Upload source maps
 
@@ -629,15 +533,13 @@ original source lines:
 | `POSTHOG_CLI_PROJECT_ID` | Variable | The PostHog project ID. |
 | `POSTHOG_CLI_HOST` | Variable | Set only for a host other than `https://us.posthog.com`, such as `https://eu.posthog.com`. |
 
-The **Upload source maps** step runs `scripts/upload-desktop-source-maps.mjs`
+The **Upload source maps** step runs
+[`scripts/upload-desktop-source-maps.mjs`](../../scripts/upload-desktop-source-maps.mjs)
 for each package, after the desktop build and before packaging. The script
-runs `posthog-cli sourcemap process` from `@posthog/cli` 0.18.10 on
-`apps/desktop/dist/main` and `apps/desktop/dist/renderer`. The CLI writes a
-chunk ID into each script, then uploads each source map under that ID with
-release name `dohc-desktop`, the package version, and the package's dist as
-the build. The script then fails if any script with a source map has no chunk
-ID. The package ships those modified files, and error reports carry each
-frame's chunk ID. No later step may rebuild `apps/desktop/dist`.
+runs `posthog-cli sourcemap process` from `@posthog/cli`. The CLI writes a
+chunk ID into each script, then uploads each source map under that ID. The
+package ships those modified files, and error reports carry each frame's
+chunk ID. No later step may rebuild `apps/desktop/dist`.
 
 Without `DOHC_POSTHOG_KEY`, the step uploads nothing. With the key but without
 `POSTHOG_CLI_API_KEY` or `POSTHOG_CLI_PROJECT_ID`, the step fails. To fix it,
@@ -653,33 +555,30 @@ release that reports, and after a `posthog-node` or `@posthog/cli` update.
 
 #### Check source maps before the release
 
-The release workflow publishes as soon as its packages pass, so check a local
-package of the release commit first.
-`apps/desktop/scripts/check-error-symbolication.mjs` checks that PostHog
-resolves frames in the packaged main script and in the window's entry script.
+Run this check before you dispatch the release. The release workflow publishes
+as soon as its packages pass, so the check uses a local package of the release
+commit.
+[`apps/desktop/scripts/check-error-symbolication.mjs`](../../apps/desktop/scripts/check-error-symbolication.mjs)
+checks that PostHog resolves frames in the packaged main script and in the
+window's entry script. It builds one error in each, and dohc's own report code
+prepares and sends them. Both reports set `channel` and `dist` to
+`release-check`. The script makes these errors itself, so this check does not
+test the reports notice or the switches.
+[Check the installed release](#check-the-installed-release) tests them.
 
-The script reads the package's `app.asar` and the `apps/desktop/dist` folder
-of the build that made it. The package leaves source maps out, so only that
-folder has them. The script stops when a script in the folder differs from the
-packaged one, or when its source map carries another chunk ID. It picks a
-position in each script that the source map ties to dohc's own source. It then
-builds one main error and one window error at those positions. dohc's own
-report code prepares and sends them: `createTelemetry`, the same allowlist,
-and `posthog-node`, built from the checkout. Both reports set `channel` and
-`dist` to `release-check`.
+You need a clean checkout of the release commit on a computer you control.
+Set these variables in one shell:
 
-The script makes these errors itself, so this check does not test the reports
-notice or the switches. The installed release check below tests them.
+| Variable | Value |
+| --- | --- |
+| `DOHC_POSTHOG_KEY` and `DOHC_POSTHOG_HOST` | The release's PostHog project. |
+| `POSTHOG_CLI_API_KEY` and `POSTHOG_CLI_PROJECT_ID` | As [Upload source maps](#upload-source-maps) describes. |
+| `POSTHOG_CLI_HOST` | Set only for a host other than `https://us.posthog.com`. |
+| `DESKTOP_VERSION` | The release version followed by `-release-check`. |
+| `DOHC_DESKTOP_DIST` | The package's dist, such as `win-x64`. |
+| `CSC_IDENTITY_AUTO_DISCOVERY` | `false`, so the package stays unsigned. |
 
-1. Use a clean checkout of the release commit on a computer you control.
-2. In one shell, set `DOHC_POSTHOG_KEY` and `DOHC_POSTHOG_HOST` to the
-   release's PostHog project.
-3. In the same shell, set `POSTHOG_CLI_API_KEY` and `POSTHOG_CLI_PROJECT_ID`.
-   Set `POSTHOG_CLI_HOST` only for a host other than `https://us.posthog.com`.
-4. Set `DESKTOP_VERSION` to the release version followed by `-release-check`.
-   Set `DOHC_DESKTOP_DIST` to the package's dist, such as `win-x64`.
-5. Set `CSC_IDENTITY_AUTO_DISCOVERY` to `false`, so the package stays unsigned.
-6. From the repository root, build, upload, and package in this order:
+1. From the repository root, build, upload, and package in this order:
 
    ```sh
    node scripts/update-desktop-package-version.mjs
@@ -689,7 +588,7 @@ notice or the switches. The installed release check below tests them.
    pnpm --filter @dohc/desktop exec electron-builder --dir --publish never
    ```
 
-7. Run the script without `--send`. It sends nothing:
+2. Run the script without `--send`. It sends nothing:
 
    ```sh
    node apps/desktop/scripts/check-error-symbolication.mjs --app <app.asar> --dist apps/desktop/dist
@@ -699,15 +598,18 @@ notice or the switches. The installed release check below tests them.
    `apps/desktop/release/win-unpacked/resources/app.asar`. On an Apple
    silicon Mac, it is
    `apps/desktop/release/mac-arm64/dohc.app/Contents/Resources/app.asar`.
-8. Confirm that the output shows `"passed": true`. Read each event's
+   `--dist` must name the folder of the build that made the package. The
+   package leaves source maps out, so only that folder has them.
+3. Confirm that the output shows `"passed": true`. Read each event's
    `payload`, which is the report the script would send.
-9. Run the same command with `--send`. The script sends the two reports to
-   the project from step 2 and waits up to 3 s for answers.
-10. Confirm that the output shows `"passed": true`. Record each event's
-    `eventId`, `expected`, and `releaseId`.
-11. In PostHog, find each event by its `eventId`. Confirm that its top frame
-    shows the `expected` file and line, and that its `$release_id` equals
-    `releaseId`.
+4. Run the same command with `--send`. The script sends the two reports to
+   the PostHog project and waits up to 3 s for answers.
+5. Confirm that the output shows `"passed": true`. Record each event's
+   `eventId`, `expected`, and `releaseId`.
+6. In PostHog, find each event by its `eventId`.
+
+The check passes when each event's top frame shows the `expected` file and
+line, and its `$release_id` equals `releaseId`.
 
 If `"passed"` is `false`, each event's `problem` says what failed. Fix the
 cause and run the check again. Do not publish a release that reports until
@@ -715,15 +617,19 @@ PostHog resolves both frames.
 
 #### Check the installed release
 
+Run this check after the release publishes, on the installed package.
 Use a disposable OS account or virtual machine in which no other dohc runs.
 These steps stop one engine process: the one that this installation started.
 
-1. In the release run, confirm that **Upload source maps** passed.
-2. In PostHog, open the error tracking settings and find the symbol sets.
-   Confirm that the release's chunk IDs are there.
-3. Install the package, open a workspace, and close the reports notice. Keep
+Before you start, confirm both of these:
+
+- In the release run, **Upload source maps** passed.
+- In PostHog, the symbol sets in the error tracking settings hold the
+  release's chunk IDs.
+
+1. Install the package, open a workspace, and close the reports notice. Keep
    **Error reports** on.
-4. Find the engine process of this installation. On Windows, set `$install`
+2. Find the engine process of this installation. On Windows, set `$install`
    to the installation folder, then run:
 
    ```powershell
@@ -747,55 +653,41 @@ These steps stop one engine process: the one that this installation started.
 
    Continue only if `main` and `engine` each hold one process ID, both belong
    to your account, and both commands are in the installed `dohc.app`.
-5. Stop only that process. On Windows, run
+3. Stop only that process. On Windows, run
    `Stop-Process -Id $engine[0].ProcessId -Force`. On macOS, run
    `kill -9 "$engine"`.
-6. In PostHog, confirm that an `EngineDaemonUnavailableError` issue arrives
+4. In PostHog, confirm that an `EngineDaemonUnavailableError` issue arrives
    with `process` set to `engine`, the release's `app_version` and `dist`, and
    `$release_id`.
-7. Confirm that the event holds no file names, messages, or paths from your
+5. Confirm that the event holds no file names, messages, or paths from your
    computer, and that PostHog made no person for it.
-8. Turn **Error reports** off. dohc starts a new engine after step 5, so do
-   step 4 again to find its process. Do step 5 again, and confirm that PostHog
+6. Turn **Error reports** off. dohc starts a new engine after step 3, so do
+   step 2 again to find its process. Do step 3 again, and confirm that PostHog
    receives nothing.
+
+The check passes when the confirmations in steps 4, 5, and 6 all hold.
 
 ## What the release workflow proves
 
-The workflow runs the release helper tests and the desktop release smoke. Each
-platform job then checks the generated files with
-`scripts/verify-desktop-release-artifacts.mjs`. That check confirms all of the
-following:
+Every workflow job runs on a fresh GitHub-hosted runner with a pinned image, `windows-2025` or `ubuntu-24.04`.
+Windows and Linux packages build in parallel on separate machines.
+The workflow runs the release helper tests and the desktop release smoke.
+Each package job then checks its files and its packaged app before it uploads them.
+The steps are in [`.github/workflows/desktop-release.yml`](../../.github/workflows/desktop-release.yml).
 
-- The platform manifest has the requested version.
-- Every manifest file exists in the release directory.
-- The manifest size and SHA-512 match the file on disk.
-- The legacy `path` and `sha512` fields point to one listed file.
-- The expected installer files exist for the target architecture.
-- Artifact paths stay inside the release directory.
+- Both jobs check the update manifest and the installer files with [`scripts/verify-desktop-release-artifacts.mjs`](../../scripts/verify-desktop-release-artifacts.mjs).
+- The Windows job runs the packaged executable with an isolated profile and test workspace. It checks startup, editing, disk persistence, and restart.
+- The Linux job runs the packaged fuse smoke with `xvfb-run`. The smoke checks the executable's fuse values against `electron-builder.yml` and starts the package with an isolated profile.
+- The Linux job checks that a workspace survives an engine upgrade, because any nightly can add an engine migration. The packaged engine opens a test workspace that the newest published nightly's engine captured. The check runs in dry runs too. It skips with a notice when no nightly is published, or when the newest one predates the packaged engine and is listed in `scripts/select-upgrade-nightly.mjs`. It covers the engine store and workspace files, not app settings or the desktop profile.
 
-The Linux job also runs the packaged fuse smoke.
-It verifies the packaged executable's fuse values against `electron-builder.yml`.
-It then boots that package with an isolated profile and checks that the window can start.
-Windows-only selections skip that Linux check.
-The Windows job runs the packaged executable with an isolated profile and test workspace.
-It checks startup, editing, disk persistence, and restart before uploading artifacts.
+To repeat an engine upgrade failure locally, set `DOHC_UPGRADE_PREVIOUS_ENGINE` to the older engine and run `pnpm --filter @dohc/desktop exec vitest run src/workspaces/engineUpgrade.e2e.test.ts`.
+The fuse smoke uses `apps/desktop/release/linux-unpacked` on Linux and `apps/desktop/release/mac-arm64/dohc.app` on a Mac.
+For a local smoke with another package path, set `DOHC_SMOKE_PACKAGE_DIRECTORY` to that directory or app bundle.
 
-The Linux job also checks that a workspace survives an engine upgrade, because any nightly can add an engine migration.
-It extracts the engine from the newest published nightly's AppImage.
-That engine captures a test workspace with an edited Markdown file, a binary file, a nested folder, and a non-ASCII file name.
-The packaged engine then opens the same workspace.
-The check fails when a file's hash or latest moment changes, a recorded moment or its content disappears or changes, bytes on disk change, or a new edit is not captured.
-It covers the engine store and workspace files, not app settings or the desktop profile.
-It runs only on Linux, dry runs included.
-It fails when the newest published nightly has no AppImage or no executable engine.
-It skips with a notice when no nightly is published, or when the newest one predates the packaged engine.
-Those nightlies are listed in `scripts/select-upgrade-nightly.mjs`.
-To repeat a failure locally, set `DOHC_UPGRADE_PREVIOUS_ENGINE` to the older engine and run `pnpm --filter @dohc/desktop exec vitest run src/workspaces/engineUpgrade.e2e.test.ts`.
-
-The workflow's checks do not prove code signing, OS installer registration, update
-installation, or an upgrade that preserves a user's profile. Release owners
-must run those checks on a disposable account for each platform before the
-first stable release.
+The workflow's checks do not prove code signing, installation, protocol
+registration, OS installer registration, update installation, or an upgrade
+that preserves a user's profile. Release owners must run those checks on a
+disposable account or VM for each platform before the first stable release.
 
 ## Verify a downloaded artifact
 

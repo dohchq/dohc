@@ -49,19 +49,14 @@ export function testScratchParent({
 // up, and the handle is released when that test binary exits — after the guard
 // is gone.
 //
-// Measured on this machine, per full run: 0 entries from every package run on
-// its own (`-p dohc-engine-domain`, `-p dohc-workspace-engine --lib`, and
-// `-p dohc-engine-runtime -p dohc-engine-testkit -p dohc-engine-sync
-// -p dohc-engine-sync-http` — thousands of scratch directories between them),
-// and 4, then 3 entries from `--workspace`, where ~30 test binaries run at
-// once. Stragglers appear only at full parallelism, and single digits are the
-// healthy range.
+// Stragglers appear only at full parallelism. A package run on its own leaves
+// 0 entries. `--workspace`, with about 30 test binaries at once, was measured
+// leaving 3 or 4, so single digits are the healthy range.
 //
-// The limit sits an order of magnitude beyond that range, because the
-// regression this row exists to catch is not a straggler. It is a harness that
-// stops cleaning up at all, which showed up as 191,851 directories in #605.
-// Failing a healthy run over 3 stragglers would only teach the next reader to
-// ignore the row.
+// The limit sits an order of magnitude beyond that range. This row exists to
+// catch a harness that stops cleaning up at all, which left 191,851
+// directories the one time it happened. Failing a healthy run over 3
+// stragglers would only teach the next reader to ignore the row.
 const LEAK_ENTRY_LIMIT = 32;
 
 const LEAK_BYTE_LIMIT = 256 * 1024 * 1024;

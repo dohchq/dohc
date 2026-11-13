@@ -551,9 +551,9 @@ async fn plaintext_never_leaks_across_a_version_switch_and_back() {
     supervisor.close(&database).expect("close");
 }
 
-// dohc#3112. A crash before a switch writes a captured secret leaves the write
-// pending with no file. The capture seed at the next start leaves the secret
-// out, so the first scan doesn't record it as deleted, and replay writes it.
+// A crash before a switch writes a captured secret leaves the write pending
+// with no file. The capture seed at the next start leaves the secret out, so
+// the first scan doesn't record it as deleted, and replay writes it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_secret_the_switch_has_not_written_stays_out_of_the_capture_seed() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -1012,10 +1012,10 @@ async fn a_link_keeps_its_folder_and_the_file_unwritten() {
     assert_eq!(pending_switch_jobs(&fixture.database, "plans"), 0);
 }
 
-// dohc#3621. A crash after a switch commits a job, before it changes the
-// file, leaves the previous version's bytes on disk. Capture must not record
-// them in the active version. Replay lands the switch's change, and capture
-// then sees the active version's own bytes.
+// A crash after a switch commits a job, before it changes the file, leaves
+// the previous version's bytes on disk. Capture must not record them in the
+// active version. Replay lands the switch's change, and capture then sees the
+// active version's own bytes.
 const WAITING_PATH: &str = "ordered.md";
 // CRLF: the switch hashes the raw file, and capture must compare the same bytes.
 const WAITING_MAIN: &str = "main line\r\nsecond\r\n";

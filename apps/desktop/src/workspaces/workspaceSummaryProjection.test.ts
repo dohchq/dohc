@@ -124,9 +124,9 @@ describe("workspace summary projection", () => {
     }
   });
 
-  // The defect CodeRabbit found: one unreadable share record threw out of the
-  // whole projection, so a single stale grant answered "you have no
-  // workspaces" — false, and with no way back from the UI.
+  // One unreadable share record must not throw out of the whole projection.
+  // A single stale grant would answer "you have no workspaces", which is
+  // false and has no way back from the UI.
   it("keeps every other workspace when one stored share record is unreadable", () => {
     const summaries = workspaceSummariesFrom([
       entry({ workspaceId: "ws-healthy" }),
@@ -248,11 +248,10 @@ describe("workspace summary projection", () => {
     }
   });
 
-  // The mount and open handlers used to parse the raw registry record. A
-  // record nests each level under its pinned grant, so the wire schema could
-  // not be satisfied: every mount threw at the end and rolled back, and a
-  // freshly opened share view reached the renderer with no level. The unit
-  // suites missed it because they never drove a handler with a real record.
+  // A registry record nests each level under its pinned grant, so parsing the
+  // raw record cannot satisfy the wire schema: a mount would throw at the end
+  // and roll back, and a freshly opened share view would reach the renderer
+  // with no level. This test drives the projection with a real record.
   it("projects a raw registry record, level and all", () => {
     const summary = workspaceSummaryFor(
       entry({

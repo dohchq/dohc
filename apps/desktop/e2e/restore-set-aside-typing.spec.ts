@@ -54,7 +54,7 @@ const editor = (page: Page) => page.getByTestId("markdown-editor");
 const saveState = (page: Page) => page.getByTestId("markdown-save-state");
 const normalized = (text: string) => text.replaceAll("\r\n", "\n").trim();
 
-// Go to avoids the Explorer race observed in the #2761 trial.
+// Go to avoids a race in the Explorer.
 async function openNote(page: Page, path = PATH): Promise<void> {
   await page.getByTestId("titlebar-quick-open").click();
   const palette = page.getByTestId("quick-open");

@@ -14,7 +14,7 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// PR 0M-5 linked Chats rail E2E: create a chat about a file, send a message,
+// Linked Chats rail E2E: create a chat about a file, send a message,
 // survive a relaunch and a rename (stable engine object id), and render
 // agent-authored messages as "their stored name".
 
@@ -124,8 +124,7 @@ test('agent-authored messages render as "their stored name"', async () => {
 
   try {
     await seedWorkspaceManifest(temp, workspaceId);
-    // Seed BEFORE launch, through the engine daemon (post-cutover the
-    // retired TS in-process store is refused): the file exists in the engine
+    // Seed before launch, through the engine daemon: the file exists in the engine
     // (and identically on disk so startup reconciliation is a no-op), with a
     // linked chat that already carries one human and one agent message.
     await writeWorkspaceFiles(temp, [{ path: "notes/agenda.md", contents: "# Agenda\n" }]);

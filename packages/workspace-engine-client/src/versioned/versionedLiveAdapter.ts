@@ -789,8 +789,8 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
   }
 
   // One `conflicts.list` page, passed through with the daemon's own
-  // continuation. This adapter used to drain every page into one array, which
-  // undid the daemon's paging for every caller at once.
+  // continuation. Draining every page into one array would undo the daemon's
+  // paging for every caller at once.
   async listTextConflicts(input: {
     workspaceId: string;
     status?: "open" | "resolved";

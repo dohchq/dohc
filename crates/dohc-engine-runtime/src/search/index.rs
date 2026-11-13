@@ -313,14 +313,14 @@ fn rebuild_file_index_for_version(
 ) -> Result<(), SearchError> {
     // Snapshots (text) union the fork-base fallback for objects not re-owned in
     // this version, joined to the text blob, ORDER BY path — the exact TS
-    // candidate set and order. Since BINHEAD, `snapshots`/`fork_base_snapshots`
+    // candidate set and order. `snapshots`/`fork_base_snapshots`
     // carry a `content_kind` column and can hold binary heads (text `blob_sha256`
     // NULL, `binary_sha256` set); those must not enter the file FTS index — the TS
     // oracle deletes a path's file-search row on a binary write. The exclusion is
     // made explicit via `content_kind IS NOT 'binary'` in each candidate branch so
     // a future refactor of the text-blob JOIN (e.g. Inner -> left) cannot leak a
     // binary path into the file index; the inner `JOIN blobs` below also drops
-    // NULL-blob binary rows, but that is now a belt-and-suspenders backstop, not
+    // NULL-blob binary rows, but that is a backstop, not
     // the sole guarantee. `IS NOT 'binary'` (not `= 'text'`) preserves today's
     // behavior for a defensively-NULL content_kind row that still carries a text
     // blob — those are treated as text everywhere else via COALESCE and must stay
@@ -468,17 +468,13 @@ fn rebuild_chat_index_for_workspace(
     Ok(())
 }
 
-/// Ensure the FTS index for `version_id` is built, repairing durably. Ports
-/// `ensureSearchIndexForVersion` with two hardening deltas.
+/// Ensure the FTS index for `version_id` is built, repairing durably.
 ///
 /// **Atomic on any connection.** The whole rebuild (FTS wipes + inserts + the
-/// state row) runs inside its own `SAVEPOINT`, so it is atomic and crash-safe
-/// regardless of whether the caller is inside a transaction (`write_with`) or on
-/// an autocommit borrow (`read_with`). A crash mid-rebuild rolls the savepoint
-/// back — no reader ever observes a torn/partial generation, and no state row is
-/// certified. (The TS engine relied on its `serialize()` single BEGIN/COMMIT;
-/// the Rust query path can run on a bare connection, so the savepoint carries
-/// the guarantee instead of the caller.)
+/// state row) runs inside its own `SAVEPOINT`, because the query path can run
+/// on an autocommit borrow (`read_with`) as well as inside a transaction
+/// (`write_with`). A crash mid-rebuild rolls the savepoint back: no reader
+/// observes a partial generation, and no state row is certified.
 ///
 /// **Durable generation markers.**
 /// `engine_search_index_state.file_policy_degraded` records whether a generation
@@ -492,7 +488,7 @@ fn rebuild_chat_index_for_workspace(
 ///   rebuild chat (chat is independent of the FILE policy), mark `1`.
 /// - a degraded→healthy transition rebuilds files (picking up degraded-window
 ///   writes); a stable degraded window is a cheap early-return, so chat is not
-///   re-wiped+rebuilt on every query (the TS per-query rebuild is avoided).
+///   re-wiped+rebuilt on every query.
 ///
 /// Query-time `path_is_search_indexed` still fails FILE search closed while
 /// degraded regardless of what the frozen file index holds.

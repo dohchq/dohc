@@ -352,7 +352,7 @@ describe("OrphanedDraftNotices", () => {
     );
   });
 
-  // dohc#2308. Main sets the text of a file deleted outside dohc aside while
+  // Main sets the text of a file deleted outside dohc aside while
   // its document is still open, and the banner says what the save notice says.
   it("says a deleted file's set-aside text is the file's, not a reopened document's", async () => {
     const record = {

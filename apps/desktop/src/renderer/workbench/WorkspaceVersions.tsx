@@ -75,8 +75,8 @@ const VERSION_LOAD_RETRY_MS = 1_000;
 const VERSION_LOAD_FAILURE_ATTEMPTS = 5;
 
 // How long a read waits for its answer. The engine can leave a read with no
-// answer while the workspace's engine thread is stuck (#3318), so the
-// Versions reads give up, in the words of the engine's own deadline.
+// answer while the workspace's engine thread is stuck, so the Versions reads
+// give up, in the words of the engine's own deadline.
 const READ_DEADLINE_MS = 30_000;
 
 // The read, or a failure once it has gone READ_DEADLINE_MS with no answer. An
@@ -478,9 +478,9 @@ export function useWorkspaceVersions(props: WorkspaceVersionsOptions): Workspace
         // Suppress the reopen only when the failure happened before the
         // switch IPC started (the pre-switch flush): nothing main-side ran,
         // the live sessions are untouched, and a reopen would set the
-        // pending draft aside on the same version for nothing (#579 review,
-        // r4). Once the switch IPC has started, announce even if the version
-        // never moved — main may have closed the live sessions on its way to
+        // pending draft aside on the same version for nothing. Once the
+        // switch IPC has started, announce even if the version never moved,
+        // because main may have closed the live sessions on its way to
         // the failure, and without the reopen the editor keeps a Y.Doc whose
         // session is gone. An unknown outcome (the re-read
         // failed too) also announces: showing an uncertain reality beats
@@ -2148,7 +2148,7 @@ export function VersionComparePage(props: { workspaceId: string; versionId: stri
   );
 }
 
-// Standalone review of every open conflict (0P-C). The merge dialog handles
+// Standalone review of every open conflict. The merge dialog handles
 // conflicts born inside a merge; this dialog is how conflicts reach the user
 // outside that flow — two machines editing the same file while apart, or a
 // merge closed with "Finish later". Opened from the notice center's conflict

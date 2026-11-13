@@ -309,11 +309,9 @@ test("the verdict must name THIS checkout's commit, not any commit", () => {
   assert.throws(() => requireCiPassVerdict(passVerdict), /needs a resolveHead\(\)/);
 });
 
-// A frozen copy of a real run's verdict line used to live here, to prove the
-// parser reads what the producer emits. It went stale twice in one PR — once
-// per change to the producer — and a stale copy pins the past, not the
-// contract. `scripts/rust-gate-artifact.test.mjs` now runs the real producer
-// and feeds its evidence line to this checker, which cannot rot.
+// No frozen copy of a verdict line lives here: a copy goes stale whenever the
+// producer changes. `scripts/rust-gate-artifact.test.mjs` runs the real
+// producer and feeds its evidence line to this checker.
 
 test("distributed gate jobs retain source identity and pinned Rust tools", () => {
   const { jobs, env } = load(workflow);

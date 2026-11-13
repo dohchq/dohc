@@ -6,28 +6,27 @@
 //! 1. **`OffsetKind::Utf16` everywhere.** [`Ydoc::wire`] is the only constructor
 //!    a durable/replicated doc may use; it hard-codes `OffsetKind::Utf16`. The
 //!    default `OffsetKind::Bytes` is wire-unsafe against Yjs (positional
-//!    divergence + a struct-store panic on non-ASCII) and is reachable only
-//!    through [`Ydoc::with_mode`] with [`OffsetMode::Bytes`], which the
-//!    cross-engine `offsetProbe` test uses solely to PIN the divergence.
+//!    divergence and a struct-store panic on non-ASCII). Only the cross-engine
+//!    `offsetProbe` test reaches it, through [`Ydoc::with_mode`] with
+//!    [`OffsetMode::Bytes`], to pin the divergence.
 //! 2. **Nested `Any::Map` key order is nondeterministic through a yrs re-encode.**
-//!    [`Ydoc::canonical_content`] sorts every map (including nested frontmatter
-//!    objects) via `BTreeMap`, and [`project_frontmatter`] sorts nested keys, so
-//!    neither the semantic convergence surface nor the content projection
-//!    depends on HashMap iteration order.
+//!    [`Ydoc::canonical_content`] sorts every map through `BTreeMap`, and
+//!    [`project_frontmatter`] sorts nested keys, so neither the convergence
+//!    surface nor the content projection depends on HashMap iteration order.
 //! 3. **Well-formed UTF-16 at the boundary.** Rust `String` cannot hold a lone
-//!    surrogate, so every string this module produces is well-formed by
-//!    construction. Raw [`Ydoc::apply`] remains the permissive yrs primitive;
-//!    durable callers additionally use [`crate::validate_replay_parity`] before
-//!    journaling so a wire edit cannot split a multi-unit scalar.
+//!    surrogate, so every string this module produces is well-formed. Raw
+//!    [`Ydoc::apply`] stays permissive; durable callers also use
+//!    [`crate::validate_replay_parity`] before journaling so a wire edit cannot
+//!    split a multi-unit scalar.
 //! 4. **Shared declared root schema; projection is destructive on the TS side.**
-//!    Roots are read through the declared dohc schema ([`ROOT_FRONTMATTER`],
-//!    [`ROOT_META`], [`ROOT_BODY`], [`ROOT_PLAINTEXT`], and the three scene
-//!    maps) — the Yjs v1 wire carries no root kinds. The projection records
+//!    The Yjs v1 wire carries no root kinds, so roots are read through the
+//!    declared dohc schema ([`ROOT_FRONTMATTER`], [`ROOT_META`], [`ROOT_BODY`],
+//!    [`ROOT_PLAINTEXT`], and the three scene maps). The projection records
 //!    provenance including a `destructive` flag.
 //! 5. **yjs `applyUpdate` is not atomic on malformed input; yrs is.** The durable
-//!    layer never journals bytes that failed validation: [`Ydoc::apply`] decodes
-//!    the whole update before applying (a truncated update is rejected on decode,
-//!    state-unchanged), and the caller only persists bytes an apply accepted.
+//!    layer never journals bytes that failed validation. [`Ydoc::apply`] decodes
+//!    the whole update before applying, so a truncated update is rejected with
+//!    state unchanged, and the caller persists only bytes an apply accepted.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -57,7 +56,7 @@ mod wikilinks;
 
 /// The declared dohc root schema. The Yjs v1 wire format does not carry
 /// root-type kinds — a root's kind is defined by typed API access — so both
-/// engines must read roots through this identical declaration (spike finding 4).
+/// engines must read roots through this identical declaration.
 pub const ROOT_FRONTMATTER: &str = "frontmatter";
 /// Secondary map root (engine metadata).
 pub const ROOT_META: &str = "meta";
@@ -404,7 +403,7 @@ pub struct Projection {
     pub source_state_vector_sha256: String,
     /// Whether producing this projection mutated the live doc. The Rust
     /// projection is read-only (`false`); the TS `yDocToMarkdown` can mutate
-    /// (drops PM-invalid elements), which R11b's live adapter journals as an
+    /// (drops PM-invalid elements), which the live adapter journals as an
     /// ordinary update. Recorded so a cross-engine settle can reconcile.
     pub destructive: bool,
     pub markdown_write_safety: MarkdownWriteSafety,
@@ -1473,7 +1472,7 @@ impl Ydoc {
 
     /// The update that gives this document of `key` the rich-document schema
     /// version, or `None` when it already names one. New page's editor writes
-    /// a note's first update without the version (#3790).
+    /// a note's first update without the version.
     pub(crate) fn missing_schema_version_update(
         &self,
         key: &crate::DocKey,
@@ -1625,7 +1624,7 @@ impl Ydoc {
                     keep_frontmatter_source(&map, &meta, txn, source.as_deref());
                     // A live note keeps every block it deletes, so an outside
                     // save keeps the blocks it left alone at either end and
-                    // adds only what changed (#3741).
+                    // adds only what changed.
                     let (start, end) = if file_fold {
                         unchanged_ends::<_, WIRE_SEED>(&*txn, &frag, &blocks)
                     } else {

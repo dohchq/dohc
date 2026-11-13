@@ -258,8 +258,8 @@ async fn settle_ydoc_session_for_version_fence(
 }
 
 fn unsettled_fork_error(_content_kind: ContentKind) -> WireError {
-    // Both kinds settle now (richdoc projection is full-fidelity since
-    // R15-3), so an unsettled lineage refuses with one message.
+    // Both kinds settle, because richdoc projection is full-fidelity, so an
+    // unsettled lineage refuses with one message.
     WireError::new(ErrorCode::InvalidParams, "ydoc-unsettled-close")
 }
 

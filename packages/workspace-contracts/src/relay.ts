@@ -118,7 +118,7 @@ export class RelayConflictError extends Error {
 // is ahead of local reality, or holds the same origin seq with different
 // content). That means the local engine.db was restored/cloned from an older
 // snapshot — pushing must fail closed rather than silently drop local ops.
-// Recovering via an origin reset is 0P-C follow-up work.
+// Recovering via an origin reset is follow-up work.
 export class RelayOriginDivergedError extends Error {
   constructor(message = "Relay log for this origin diverged from the local journal.") {
     super(message);

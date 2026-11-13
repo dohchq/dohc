@@ -115,7 +115,7 @@ it("reads the same relay state across writes to another workspace", async () => 
   expect(f.state()).not.toBe(before);
 });
 
-// The reviewer's raw-SQL paths: each ends the document's last Edit grant without a log append, so only the scope shows it.
+// Raw-SQL paths: each ends the document's last Edit grant without a log append, so only the scope shows it.
 it.each<[string, (f: Awaited<ReturnType<typeof enrolled>>) => void]>([
   [
     "its share is revoked",

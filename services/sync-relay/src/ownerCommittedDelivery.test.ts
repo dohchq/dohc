@@ -1143,7 +1143,7 @@ it.each([
     expect(order).toEqual(expected);
     expect(outcome).toMatchObject({ kind: "done", terminalReceipt: edit });
     expect(f.consumer.adoptionSeedApplied(document)).toBe(true);
-    // #2982: only the drain reads the head's update, within its byte budget.
+    // Only the drain reads the head's update, within its byte budget.
     expect(updateReads).toBe(1);
   },
 );

@@ -25,7 +25,7 @@ import {
 
 // A lossy note (CONTEXT.md) opens read-only, with no engine session, and
 // nothing that skips the editor writes it either. The README holds the four
-// forms #2458 found in the app.
+// forms found in the app.
 
 const README = [
   "# Readme",

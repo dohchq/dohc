@@ -123,7 +123,7 @@ it("gives the service host credential 404 on every ordinary replication route", 
   });
 });
 
-// #2088: an empty push to the hosted log is the session host's origin probe.
+// An empty push to the hosted log is the session host's origin probe.
 // It stores nothing and answers the highest position the relay holds at that origin.
 it("answers an empty hosted push with its origin's highest position and stores nothing", async () => {
   const f = await fixture();

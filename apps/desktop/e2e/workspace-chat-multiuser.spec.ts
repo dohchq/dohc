@@ -17,24 +17,23 @@ import {
 } from "./helpers/workspace";
 import { fetchSharedChannelInfo } from "../src/workspaces/sharedChannelInfo";
 
-// MU-C6 — the multi-user chat + co-presence product proof, driven through the
-// real Electron app. One real desktop app is the channel OWNER (signed in as
+// The multi-user chat + co-presence product proof, driven through the
+// real Electron app. One real desktop app is the channel owner (signed in as
 // the granter over a real relay child process); a second relay client is the
 // participant the channel is shared to. The participant is exercised through
 // the same public relay surface the desktop's own main process uses — the
 // share presence route (a participant's ephemeral awareness path) and the
 // daemon shared-channel push/pull APIs (a participant's durable chat path) —
 // because the serial single-display harness runs one Electron
-// instance at a time (the 0P-C / MU integration pattern).
+// instance at a time.
 //
 // What this proves in the real app that unit/integration tests cannot:
 //   • the owner creates a channel and sends a message and it RENDERS;
 //   • the owner shares the channel to the participant from the real Chats UI;
 //   • when both view the shared channel, the owner's real app RENDERS the
 //     participant's presence face (channel scope via the wireId topic) and,
-//     inside a thread, the participant's TYPING indicator (thread scope) — the
-//     participant-side co-presence this branch wired — and the participant's
-//     own relay view converges on the owner (bidirectional);
+//     inside a thread, the participant's typing indicator (thread scope), and
+//     the participant's own relay view converges on the owner (bidirectional);
 //   • a participant's reply and reaction, pushed over the share, converge back
 //     into the owner's real app after a refresh.
 

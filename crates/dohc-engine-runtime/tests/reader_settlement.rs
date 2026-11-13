@@ -62,7 +62,7 @@ fn seed() -> (ScratchDir, std::path::PathBuf, DocKey, String, String) {
         3,
     )
     .unwrap();
-    // Synthetic claimed fixture. Admission and successor installation remain PR 6/7 work.
+    // Synthetic claimed fixture, without admission or successor installation.
     store
         .write_with(&NoFaults, |tx| {
             tx.execute("UPDATE ydoc_docs SET path='note.md'", [])
@@ -384,9 +384,9 @@ async fn real_reader_settles_without_edits_and_revalidates_after_restart() {
     }
 }
 
-/// A note past the reader's capacity used to fill its 512 MB heap, crash it
-/// and be asked again seven times (#3575). The reader now refuses it before
-/// its heap fills, and the engine hears capacity once and does not ask again.
+/// A note past the reader's capacity would fill its 512 MB heap and crash
+/// it. The reader refuses the note before its heap fills, and the engine
+/// hears capacity once and does not ask again.
 #[tokio::test]
 #[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 async fn real_reader_refuses_a_note_over_its_capacity_once_without_a_crash() {

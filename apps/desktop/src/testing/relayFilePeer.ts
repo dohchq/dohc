@@ -69,8 +69,8 @@ export interface RelayFilePeerOptions {
 }
 
 /**
- * A test-only relay peer that writes protocol operations without the retired
- * TypeScript engine. It models one remote machine and one ordered origin.
+ * A test-only relay peer that writes protocol operations itself, with no
+ * engine. It models one remote machine and one ordered origin.
  */
 export class RelayFilePeer {
   readonly originId: string;

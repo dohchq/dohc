@@ -435,8 +435,8 @@ fn serialized_payload_boundary_is_enforced_before_mutation() {
 
 proptest! {
     // `ProptestConfig::default()` is 256 cases and honors the standard
-    // `PROPTEST_CASES` env var; `with_cases(256)` pinned it and silently
-    // ignored the env var, so evidence runs asking for a large corpus got 256.
+    // `PROPTEST_CASES` env var. `with_cases(256)` would pin the count and
+    // ignore the env var.
     #![proptest_config(ProptestConfig::default())]
 
     /// Arbitrary bytes as purported wire JSON: deserialization never panics,

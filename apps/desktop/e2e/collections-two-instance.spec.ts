@@ -30,7 +30,7 @@ import {
 // other device's open board. Device B is the real Electron app with the
 // collection's board on screen. Device A is a real daemon-backed workspace
 // over the same relay. The serial single-display harness cannot run two
-// Electron instances (the 0P-C pattern), so device A makes the write its
+// Electron instances, so device A makes the write its
 // board drag makes: the grouped field set in the record's live document
 // session, settled to the file, and pushed. The proof is B's board moving
 // the card without any UI refresh. The view re-renders from the index when

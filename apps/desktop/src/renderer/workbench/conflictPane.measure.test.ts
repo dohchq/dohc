@@ -58,9 +58,8 @@ describe.skipIf(!measuring)("conflict preview window measurement", () => {
     let overCharWindow = 0;
     let overLineWindow = 0;
     // Files holding one line wider than the whole character window. This
-    // corpus has none — its longest line is about 19,000 characters — so the
-    // mid-line cut, and the "Show more" stall that lived in it,
-    // were structurally invisible here. The unit tests carry that shape
+    // corpus has none, because its longest line is about 19,000 characters,
+    // so it cannot show the mid-line cut. The unit tests carry that shape
     // instead; a corpus of hand-written source cannot.
     let overLongestLine = 0;
 
@@ -122,28 +121,23 @@ describe.skipIf(!measuring)("conflict preview window measurement", () => {
 
 // The benchmark behind CONFLICT_COMBINED_EDIT_MAX_BYTES.
 //
-// That limit rejects otherwise valid combined text, so AGENTS.md wants its
-// evidence in a focused benchmark rather than a comment. The rows above cannot
-// supply it: they measure corpus sizes and preview slicing in Node, and this
-// cost is Chromium's.
+// That limit rejects otherwise valid combined text, so its evidence belongs
+// in a focused benchmark. The rows above cannot supply it: they measure
+// corpus sizes and preview slicing in Node, and this cost is Chromium's.
 //
-// IT DRIVES THE SHIPPING PATH, which is the whole point. A first version
-// assigned `textarea.value` directly and reported 26-36 ms at half a megabyte.
-// That number was fiction: it forced a whole-value write on every keystroke,
-// and the real path does not do that. A real keystroke is
-//
+// It drives the shipping path. A real keystroke is
 //   native input event -> React onChange -> applyCombinedChange -> setState
 //   -> commit -> controlled value reconciled
-//
 // and React skips the value write when the browser's own incremental edit has
 // already produced the value it wanted. So this bundles React and the real
 // `applyCombinedChange`, types with `keyboard.insertText` so the native event
-// fires, and times from that event until the DOM settles. The measured cost
-// fell by about sixty times, and the bound moved because of it.
+// fires, and times from that event until the DOM settles. Do not assign
+// `textarea.value` directly. That forces a whole-value write on every
+// keystroke and reports about sixty times the real cost.
 //
 // The bound is raised inside the bundle for the accepted ladder, so the cost
-// curve can be read past the value the product ships — otherwise the guard
-// refuses the very rows a recalibration would need.
+// curve can be read past the value the product ships. Otherwise the guard
+// refuses the rows a recalibration would need.
 //
 //   DOHC_MEASURE_CONFLICT=1 pnpm --filter @dohc/desktop exec vitest run conflictPane.measure
 //

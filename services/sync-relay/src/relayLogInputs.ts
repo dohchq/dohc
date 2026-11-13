@@ -323,41 +323,30 @@ export async function parseAuthenticatedLogOps(
   return ops;
 }
 
-// MU-C0 verified authorship. The relay authenticates who is pushing
-// (actor.userId, server-derived from the Better Auth session — a client cannot
-// assert it). For every chat op that names an author, that author must be the
-// pusher, or the whole batch is rejected. This is the one place the relay reads
-// into a chat payload — a second narrow, tested relaxation of "payloads are
-// opaque", after PR-18's share filter, scoped to the author field, fail-closed.
+// Verified authorship. The relay authenticates who is pushing (actor.userId,
+// derived from the Better Auth session; a client cannot assert it). For every
+// chat op that names an author, that author must be the pusher, or the whole
+// batch is rejected. This check reads only the author field and fails closed.
 //
-// FAIL-CLOSED COMPLETENESS. The chat.* namespace is exhaustive here: every
-// chat op is either an explicitly-enumerated structural (no-author) op or an
-// authored op with a known author field. An unknown/unmapped chat.* op (a
-// future chat.thread.update, chat.message.edit,...) is rejected, never
-// admitted unverified — shipping a new authored chat op without extending this
-// policy fails closed, not open. Non-chat ops stay fully opaque and pass
-// through untouched.
+// The chat.* namespace is exhaustive here: every chat op is either an
+// enumerated structural (no-author) op or an authored op with a known author
+// field. An unknown chat.* op is rejected, never admitted unverified, so a new
+// chat op must join CHAT_OP_POLICY first. Non-chat ops pass through opaque.
 //
-// Author identity is always the OPAQUE relay user id (never a raw email — PII
-// must not enter the replicated CRDT):
-//  - chat.message.append.authorUserId — REQUIRED. Messages without a verified
-//    relay identity stay in the local engine and never enter a relay log.
-//  - chat.reaction.set.authorId       — REQUIRED. A reaction is inherently an
-//    authored act, so a missing/non-string author id is a malformed op and is
-//    rejected (fail-closed), same as a mismatch.
-//  - chat.decision.set / chat.attachment.add carry no author field. They are
-//    derived from messages whose authorship was already verified, so they are
-//    explicitly structural here and receive no separate authorship assertion.
+// Author identity is always the opaque relay user id, never a raw email (PII
+// must not enter the replicated CRDT). chat.message.append.authorUserId and
+// chat.reaction.set.authorId are required: a missing or non-string id is
+// rejected like a mismatch, and a message without a verified relay identity
+// stays in the local engine. chat.decision.set and chat.attachment.add carry
+// no author field. They derive from messages whose authorship was already
+// verified, so they are structural here.
 //
-// A future authored chat op is verified by adding it to CHAT_OP_POLICY; a
-// future no-author chat op by enumerating it as "structural".
-//
-// OWNER-PRIVATE MARKER. `ownerPrivateAccountId` in a payload declares that the
-// record changes only that account's own state, so a reader that doesn't know
-// its kind keeps it quietly and applies it after an upgrade. It is admitted
-// only on an authored kind registered here with `ownerPrivate: true`, and only
-// naming the authenticated pusher. Any other op carrying it, chat or not, is
-// refused, so no record can opt itself into quiet handling.
+// `ownerPrivateAccountId` in a payload declares that the record changes only
+// that account's own state, so a reader that doesn't know its kind keeps it
+// quietly and applies it after an upgrade. It is admitted only on an authored
+// kind registered here with `ownerPrivate: true`, and only naming the
+// authenticated pusher. Any other op carrying it, chat or not, is refused, so
+// no record can opt itself into quiet handling.
 type ChatOpPolicy =
   | { kind: "structural" }
   | {

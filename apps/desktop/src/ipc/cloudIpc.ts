@@ -367,7 +367,7 @@ export function registerCloudIpcHandlers<
     },
   );
 
-  // Join a synced workspace on this machine (0P-C): sync code from the
+  // Join a synced workspace on this machine: sync code from the
   // machine that already has it + a locally picked empty folder. Everything
   // is validated before any local state is created, so a mistyped code can
   // never mint an empty workspace; the first pull brings files, history,

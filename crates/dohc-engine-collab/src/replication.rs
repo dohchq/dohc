@@ -16,7 +16,7 @@
 //! a CRDT NO-OP (re-applying an integrated update changes nothing; convergence is
 //! preserved, proven by the spike), and the redundant row is re-folded at the
 //! next compaction, so the log stays bounded. Durable cross-compaction dedup by a
-//! per-peer applied cursor is R11b's replication-drain job (the `origin_seq`
+//! per-peer applied cursor is the replication drain's job (the `origin_seq`
 //! carried on [`RemoteUpdate`] is that cursor's input).
 
 use dohc_engine_storage::{EngineStore, FaultInjector, TxnOutcome};

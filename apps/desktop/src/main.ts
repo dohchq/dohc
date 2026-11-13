@@ -1047,7 +1047,7 @@ function requireWorkspace(workspaceId: string) {
   return workspace;
 }
 
-// PR 18 read-only shared views: a shared view is a read-only local workspace.
+// Read-only shared views: a shared view is a read-only local workspace.
 // `sharedViewOf` is the one authoritative predicate; every mutation surface
 // (file writes, agent runs, and the MCP config)
 // routes through it so a shared view can never be changed, only read. The
@@ -1634,13 +1634,12 @@ function clearCachedCredentials(): void {
     .credentialsChanged(null)
     .catch((error) => console.error("Saved Collection page cleanup failed", error));
   peekedReceivedGrantKinds.clear();
-  // #742 P1 SECURITY (rounds 4–5): every credential-cache clear is a session
-  // transition (login adoption, logout, or a current-session 401 — all three
-  // call this one function). Clearing here, not at each call site
-  // individually, is what makes sure a new account's first failed poll can
-  // never be served the previous account's cached request rows, sender
-  // emails included, regardless of which of the three paths ended the
-  // session.
+  // Security: every credential-cache clear is a session transition (login
+  // adoption, logout, or a current-session 401; all three call this one
+  // function). Clearing here, not at each call site, makes sure a new
+  // account's first failed poll can never be served the previous account's
+  // cached request rows, sender emails included, whichever of the three
+  // paths ended the session.
   for (const workspaceId of workspaceAuthorities.workspaceIds()) {
     const lease = workspaceAuthorities.acquire(workspaceId);
     try {
@@ -2466,7 +2465,7 @@ function automationAuthor(
   return collectionAutomationAuthor(collectionAutomationsOf(workspaceId), automationId);
 }
 
-// MU-C4 shared channels: one best-effort refresh pass over every shared
+// Shared channels: one best-effort refresh pass over every shared
 // channel this workspace has joined — push the member's local channel ops,
 // pull everyone else's. Never throws (transient failures log and retry on
 // the next pass); a revoked share is marked ended in the registry so it
@@ -3193,7 +3192,7 @@ function engineForWorkspace(
       ) ?? Promise.resolve(false),
     capture,
     onChange: createRelayOnChange(workspace),
-    // MU-C4: joined shared channels refresh on the same cadence as the
+    // Joined shared channels refresh on the same cadence as the
     // workspace's own sync (best-effort; never fails the pass).
     syncSharedChannels: async () => {
       const outcome = await withWorkspaceAttachmentAsync(workspace, () =>
@@ -3240,7 +3239,7 @@ function engineForWorkspace(
     waitForChange: createRelayLogWait({ workspaceId: workspace.workspaceId, relay }),
     idlePullMs: 5 * 60_000,
     // A freshly joined workspace's engine is pull-first: no push before the
-    // first successful pull (0P-C gate fix).
+    // first successful pull.
     ...(engineOptions.joinBootstrap ? { joinBootstrap: true } : {}),
     ...testSyncTimingOverrides(),
   });
@@ -3986,11 +3985,11 @@ function thisComputer(): Computer {
   return { installId: localInstallationId(), label: computerLabel(hostname()) };
 }
 
-// The local user's stable, OPAQUE reactor identity (WS-MU-C2). This value
+// The local user's stable, opaque reactor identity. This value
 // becomes a replicated CRDT author key, so it must never be the raw email — a
 // raw email would replicate to every peer (PII/GDPR exposure) and persist in
 // the immutable CRDT history. Prefer the Better Auth user id (an opaque uuid)
-// when signed in; that is forward-compatible with MU-C0, which verifies
+// when signed in; the relay verifies
 // authorId === actor.userId server-side. Signed out falls back to a persisted
 // per-install uuid. The email→display-name mapping stays LOCAL in
 // localUserDisplayName(). It is the account the credential cache last settled
@@ -4006,7 +4005,7 @@ function localPerson(): Promise<LocalPersonAuthor> {
   return localAuthorship.person();
 }
 
-// The verified relay identity for a signed-in chat message (WS-MU-C0). A
+// The verified relay identity for a signed-in chat message. A
 // signed-in session always carries the opaque Better Auth user id that the relay
 // verifies as `actor.userId`. Signed-out sends omit `authorUserId`. Reactions
 // still use the stable local fallback id offline. The email stays display-only.

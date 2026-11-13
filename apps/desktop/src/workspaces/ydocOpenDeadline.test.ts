@@ -405,7 +405,7 @@ describe("the document open's capture-chain hold", () => {
       expect((refusal as Error).message).toContain(
         `The ydoc.open deadlineMs limit of ${YDOC_OPEN_DEADLINE_MS}ms was reached`,
       );
-      // The surface answer #533 requires: read-only with a retry, never the
+      // The surface answer must be read-only with a retry, never the
       // writable plain editor.
       expect(isEngineWorkspaceOpenRefusedError(refusal)).toBe(true);
       await queued;
@@ -426,9 +426,9 @@ describe("the document open's capture-chain hold", () => {
     //
     // So the first open is read-only, which is right, and then "Try again"
     // meets `ydoc-session-busy` — the daemon saying it holds this document.
-    // Classified as an ordinary refusal, that answered the retry with the
-    // writable plain editor over a daemon-held canonical Y.Doc: the double
-    // writer #533 exists to prevent, reached by way of the fix for #616.
+    // Classified as an ordinary refusal, that would answer the retry with the
+    // writable plain editor over a daemon-held canonical Y.Doc: a double
+    // writer.
     const root = await createTestScratch("dohc-ydoc-deadline-");
     await write(root, "note.md", "hello\n");
     const loopback = new VersionedLoopbackEngine();
@@ -578,7 +578,7 @@ describe("the document open's capture-chain hold", () => {
   // daemon still holds the restart-safe session, and the refusal thrown in its
   // place is one main answers with a plain `available:false`. The renderer
   // hands the user a writable plain editor over a session the engine has not
-  // released: the double writer #533 and #567 exist to prevent.
+  // released: a double writer.
   describe("a release the budget refused is not a disk verdict", () => {
     function captureRefusingRelease(
       root: string,
@@ -740,11 +740,11 @@ describe("the document open's capture-chain hold", () => {
     });
 
     it("keeps the read-only classification when the daemon refuses the release", async () => {
-      // codex r17 P1. The rethrow covered the BUDGET's refusals only, so an
-      // ordinary one — UnsettledClose, which is the daemon saying an update
-      // raced in and the lineage is dirty — fell through to the disk verdict.
-      // That verdict is one `main` answers with a bare `available: false`, so
-      // the renderer opened the writable plain editor over the session this
+      // The rethrow must cover more than the budget's refusals. An ordinary
+      // one, such as UnsettledClose (the daemon saying an update raced in and
+      // the lineage is dirty), must not fall through to the disk verdict.
+      // `main` answers that verdict with a bare `available: false`, so the
+      // renderer would open the writable plain editor over the session this
       // very branch had just retained as an orphan, lease and all. The
       // classification does not depend on what refused the release: while the
       // session is unreleased the engine may still own the document.
@@ -768,20 +768,20 @@ describe("the document open's capture-chain hold", () => {
     });
 
     it("evicts a dirty orphan instead of settling it over the file", async () => {
-      // codex r20, and the last data-loss door. The discharge released on
-      // easier terms than the release that orphaned the session: no
-      // `settleOnRefusal: false`, so a repeated UnsettledClose escalated to a
-      // settling close inside the provider. The doc this session holds was
-      // seeded from neither a head nor a snapshot — settling it writes what
-      // replication delivered over bytes the watcher has not captured yet,
-      // which is exactly what rule 1 refuses the open to prevent.
+      // The discharge must release on the same terms as the release that
+      // orphaned the session. Without `settleOnRefusal: false`, a repeated
+      // UnsettledClose escalates to a settling close inside the provider. The
+      // doc this session holds was seeded from neither a head nor a snapshot,
+      // so settling it writes what replication delivered over bytes the
+      // watcher has not captured yet, which is what rule 1 refuses the open
+      // to prevent.
       //
-      // #665 closed the other end. A close that keeps refusing used to leave
-      // the orphan retained, holding its lease, and on a path no capture will
-      // ever reach — policy-excluded, or over the 10 MiB capture limit — the
-      // document stayed read-only until the daemon restarted. The orphan now
-      // evicts: the daemon lets go of the session while its lineage stays
-      // durable, so nothing is written and nothing is discarded.
+      // A close that keeps refusing must not leave the orphan retained and
+      // holding its lease: on a path no capture will ever reach
+      // (policy-excluded, or over the 10 MiB capture limit) the document
+      // would stay read-only until the daemon restarted. The orphan evicts:
+      // the daemon lets go of the session while its lineage stays durable, so
+      // nothing is written and nothing is discarded.
       const root = await createTestScratch("dohc-ydoc-deadline-");
       const uncaptured = "bytes the watcher has not ingested yet\n";
       await write(root, "note.md", uncaptured);
@@ -925,7 +925,7 @@ describe("the document open's capture-chain hold", () => {
       await engine.stop();
     });
 
-    // #710/#721 rider F6. The test above pins the disk-size clause of
+    // The test above pins the disk-size clause of
     // `captureWillReachPath`; a real `.dohc/files.toml` `tracked = false`
     // rule is what exercises the `policyTracksPath` clause, and only this
     // fixture severs cleanly from that one alone — the file here is a few
@@ -1000,8 +1000,7 @@ describe("the document open's capture-chain hold", () => {
     });
 
     it("refuses to settle an orphan for a lifecycle close either", async () => {
-      // codex r21, and the third site of one mechanism — which is why the
-      // never-settle rule now lives on the ORPHAN instead of at each caller.
+      // The never-settle rule lives on the orphan, not at each caller.
       // A registered orphan is visible to the lifecycle sweep every version
       // switch, merge, rename and delete runs, and that sweep closes with
       // `{ settle: false }` alone: the provider escalates a refused close into

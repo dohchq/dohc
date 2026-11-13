@@ -63,8 +63,8 @@ describe("routes opened from a link", () => {
   });
 });
 
-// Round 72 found the sample's data in the bundle of a build without it. Metro bundles every module a file imports, so
-// only a require behind a test that folds to false keeps one out.
+// Metro bundles every module a file imports, so only a require behind a test that folds to false keeps the sample's
+// data out of a build without it.
 describe("sample modules", () => {
   const isSample = (path: string) =>
     /(^|\/)sample\.ts$|(^|\/)Sample[A-Z]\w*\.tsx$/.test(slashed(path));

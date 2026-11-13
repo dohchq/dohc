@@ -1,7 +1,7 @@
-//! RPC-A acceptance: the read surface (versions/moments/text-list/binary/
-//! secrets) end to end through the transport, against state produced by the
-//! real write paths (RPC writes + autonomous capture) — never by seeding the
-//! DB directly, so the RPCs are proven against the daemon's own semantics.
+//! The read surface (versions/moments/text-list/binary/secrets) end to end
+//! through the transport, against state produced by the real write paths
+//! (RPC writes + autonomous capture), never by seeding the DB directly, so
+//! the RPCs are proven against the daemon's own semantics.
 
 use crate::common;
 

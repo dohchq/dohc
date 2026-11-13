@@ -35,7 +35,7 @@ export type OrphanedDraft = {
   // an allocator can hand out again after a dismissal frees it, so the newest
   // draft in a run can hold a lower id than a survivor captured before it.
   // A capture time is the same number on both sides of a restart, and storage
-  // has carried it since #600.
+  // carries it.
   capturedAtMs: number;
   recovery?: DraftRecoveryIdentity;
 };
@@ -368,8 +368,8 @@ export function remapOrphanedDraftPaths(
   project: (path: string) => string | null,
 ): void {
   // The stored copies move with them, and a rename onto a secret-classified
-  // path drops its plaintext row instead (#446 floor) — those drafts stop
-  // being durable and go back behind the close warning.
+  // path drops its plaintext row instead. Those drafts stop being durable
+  // and go back behind the close warning.
   const demoted = remapStoredDraftPaths(workspaceId, project);
   for (const id of demoted) storedIds.delete(id);
   let changed = demoted.size > 0;
@@ -495,10 +495,10 @@ export function noteWorkspaceLabel(workspaceId: string, label: string): void {
 let allRowsCache: { version: number; rows: readonly OrphanedDraftRow[] } | null = null;
 const EMPTY_ROWS: readonly OrphanedDraftRow[] = [];
 
-// Every unresolved draft, across workspaces, path-independent (#579 review,
-// r5): a deleted file has no inspector left to render its notice, so the
-// recovery surfaces that use this — the close-warning dialog and the notice
-// center — must not depend on any path still existing.
+// Every unresolved draft, across workspaces, path-independent. A deleted
+// file has no inspector left to render its notice, so the recovery surfaces
+// that use this (the close-warning dialog and the notice center) must not
+// depend on any path still existing.
 export function useAllOrphanedDrafts(): readonly OrphanedDraftRow[] {
   return useSyncExternalStore(subscribe, () => {
     if (allRowsCache && allRowsCache.version === storeVersion) {

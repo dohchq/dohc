@@ -9,7 +9,7 @@ import {
 } from "./wikilinkPlugin";
 import { codeBlock, codeMarkText, doc, paragraph, randomEdit, seededRandom } from "./testDocs";
 
-// D4.8 — wikilink decoration regex tests over real ProseMirror documents
+// Wikilink decoration regex tests over real ProseMirror documents
 // (testDocs.ts). A single paragraph's text starts at pos 1, so the
 // hand-computed positions below match the doc-root-offset convention.
 

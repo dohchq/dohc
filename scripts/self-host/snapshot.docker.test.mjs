@@ -8,7 +8,9 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 // Not in the root test list: it needs Docker with Linux containers and current builds of @dohc/app-backend-runtime and @dohc/sync-relay.
-// It uses the plain Node image and the checkout's bundles, so it needs no self-host image. See docs/how-to/self-host-recovery.md.
+// It uses the plain Node image and the checkout's bundles, so it needs no self-host image.
+// Build both packages first, with `pnpm --filter @dohc/app-backend-runtime build` and `pnpm --filter @dohc/sync-relay build`.
+// Then run it with: DOHC_SNAPSHOT_DOCKER_TEST=1 node --test scripts/self-host/snapshot.docker.test.mjs
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const image = "node:24.16.0-bookworm-slim";
 const skip =

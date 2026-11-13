@@ -1123,7 +1123,7 @@ it("evicts a failed generation before accepting the next edit", async () => {
         leaseActive = false;
       },
       async applyLocalUpdate(update) {
-        // Models the round-1 provider latch: once close starts, another apply
+        // Models the provider latch: once close starts, another apply
         // resolves without journaling. Capture must never leave this provider
         // installed after the first close refusal.
         if (providerClosed) return;
@@ -1940,7 +1940,7 @@ it.each(["definitive", "frozen", "uncertain", "uncertain-after-busy"])(
           ? "Live editing is paused for this file."
           : "No answer after three attempts.",
     );
-    // #2719: the workspace notice hears which refusal paused the file.
+    // The workspace notice hears which refusal paused the file.
     expect(paused).toEqual([kind === "frozen"]);
     expect(fixture.state.journalKeys).toContain("other-client");
     mirror.destroy();
@@ -2476,10 +2476,9 @@ it.each(["failure", "success"] as const)(
 );
 
 // A locked-settle rebind harness: every applied update lands in a durable
-// journal, and each new generation opens already holding all of it — so the
-// adoption's replay is empty, which is exactly the gap #595 names: nothing
-// arms a settle on the replacement, and the pending locked write would sit
-// stale until an unrelated edit.
+// journal, and each new generation opens already holding all of it. So the
+// adoption's replay is empty, and unless the adoption arms a settle on the
+// replacement, the pending locked write sits stale until an unrelated edit.
 async function lockedRebindCapture(
   prefix: string,
   options?: {
@@ -2582,7 +2581,7 @@ async function lockedRebindCapture(
     // close(), before it asks the daemon to release
     // (ydocProviderSession.ts). A fake that keeps forwarding after a refused
     // close models a session that can still hear peers, which no retained
-    // session can — and that difference is exactly what hid #595 round 14.
+    // session can, and that difference hides defects.
     let listening = true;
     const deliverPeerEdit = (text: string) => {
       // The daemon's lineage advances whether or not this client hears it:
@@ -2607,7 +2606,7 @@ async function lockedRebindCapture(
         state.evicts += 1;
       },
       async applyLocalUpdate(update) {
-        // The provider's post-#658 contract for a transient journal refusal:
+        // The provider's contract for a transient journal refusal:
         // it keeps the update (its own ladder resends it from durable state)
         // and rejects so the caller hears the truth. Modelling the rejection
         // without the keep would make the wrapper look safe for the wrong
@@ -2801,16 +2800,15 @@ function busyRefusal(): DaemonRefusalError {
 }
 
 it("absorbs a busy journal refusal instead of rebinding the generation", async () => {
-  // #658, codex P1 on the desktop tail. The provider now keeps a journal write
-  // the engine refused busy and re-arms its own ladder to resend it — and this
-  // boundary read that rejection as a broken generation and rebound, which
-  // closes the provider and cancels the retry it just armed. If the
-  // replacement's replay met the same busy store, adoptGeneration marked the
-  // session dead with no timer behind it: the canonical Y.Doc lived in memory
-  // and the .md stayed stale until some unrelated edit.
+  // The provider keeps a journal write the engine refused busy and re-arms
+  // its own ladder to resend it. This boundary must not read that rejection
+  // as a broken generation and rebind: a rebind closes the provider and
+  // cancels the retry it just armed. If the replacement's replay met the same
+  // busy store, adoptGeneration would mark the session dead with no timer
+  // behind it, the canonical Y.Doc would live in memory, and the .md would
+  // stay stale until some unrelated edit.
   //
-  // Three edits while the store stays busy is the spiral: under the old code
-  // each one rebound again.
+  // Three edits while the store stays busy check that no edit rebinds.
   //
   const { capture, state } = await lockedRebindCapture("dohc-ydoc-busy-journal-");
   const { session, mirror } = await openWithOneEdit(capture, "first edit ");
@@ -2952,17 +2950,16 @@ it("pays a locked close debt even when a replicated release succeeds", async () 
 });
 
 it("a rename after a version-switch stand-down refuses instead of saving stale content", async () => {
-  // #681, active-version-branch door: `standDownFromWrite` used to delete
-  // the debt entry the same way the other two doors did, so `beginFileRename`
-  // read the fence's stand-down as a landed write and would have recorded
-  // the stale pre-lock disk artifact under the new name.
+  // The active-version-branch door. `standDownFromWrite` must keep a marker
+  // for the debt it stands down. If it deleted the entry, `beginFileRename`
+  // would read the fence's stand-down as a landed write and record the stale
+  // pre-lock disk artifact under the new name.
   //
-  // Round 2 lifecycle check: this door's own comment says the RUST engine's
-  // fence (`materialize_replay_pending_for_fence`, lib.rs) already replays
-  // this write before a switch can succeed — but that replay is a daemon-
-  // internal operation this desktop session never opens a provider for, so
-  // it never reaches `onSettled` and never clears this JS-side marker. The
-  // shared refusal copy stays plainly true from where this rename stands:
+  // The Rust engine's fence (`materialize_replay_pending_for_fence`, lib.rs)
+  // replays this write before a switch can succeed, but that replay is a
+  // daemon-internal operation this desktop session never opens a provider
+  // for, so it never reaches `onSettled` and never clears this JS-side
+  // marker. The shared refusal copy stays true from where this rename stands:
   // relative to the version now active, this path's disk content still
   // never came from this debt's write — the fence's own copy already landed
   // it under the old version, not this one.
@@ -3105,8 +3102,8 @@ it("an external delete observed before a debt registers cancels it at the door i
   state.locked = true;
   state.replicated = true;
 
-  // RED before the fix: nothing remembered the earlier delete, so this
-  // close's own registration armed a fresh, un-cancelled debt.
+  // The earlier delete must be remembered, or this close's own registration
+  // arms a fresh, un-cancelled debt.
   await expect(session.close()).rejects.toThrow(/released, but its pre-close settle failed/);
   state.locked = false;
 
@@ -3126,19 +3123,16 @@ it("an external delete observed before a debt registers cancels it at the door i
 });
 
 it("a recreated path's own session arms its debt normally instead of being cancelled by an earlier delete", async () => {
-  // #681 round 8, codex P1 (real, corrected mid-round): the round-7
-  // tombstone is path-keyed, so a delete-then-recreate landing inside its
-  // TTL left it armed for the new file too. A first attempt fixed this by
-  // having any non-delete event invalidate the tombstone outright — wrong
-  // shape, reverted before shipping: the certifier's S2(b) showed it lets
-  // an old session, still mid-retry-ladder when the recreation lands,
-  // arm a late debt that settles its stale canonical doc over the new
-  // file — the exact resurrection-over-live-content corruption this whole
-  // PR exists to prevent. The correct discriminator is this session's own
-  // open time against the tombstone's: a session that opened after the
-  // delete (this one) was never the delete's victim, so it must arm
-  // normally regardless of whether a recreation happened at all — see the
-  // sibling pin for the old session, which must still cancel.
+  // The no-debt tombstone is path-keyed, so a delete-then-recreate landing
+  // inside its TTL would leave it armed for the new file too. A non-delete
+  // event must not invalidate the tombstone: an old session, still
+  // mid-retry-ladder when the recreation lands, could then arm a late debt
+  // that settles its stale canonical doc over the new file. The
+  // discriminator is this session's own open time against the tombstone's:
+  // a session that opened after the delete (this one) was never the
+  // delete's victim, so it must arm normally whether or not a recreation
+  // happened. See the sibling pin for the old session, which must still
+  // cancel.
   const { capture, state } = await lockedRebindCapture("dohc-ydoc-tombstone-recreate-");
 
   // The path is deleted (no debt exists yet, so the tombstone is set),
@@ -3155,8 +3149,8 @@ it("a recreated path's own session arms its debt normally instead of being cance
   state.replicated = true;
   await expect(session.close()).rejects.toThrow(/released, but its pre-close settle failed/);
 
-  // RED before the fix: the stale tombstone, still armed, was consumed
-  // here and cancelled this genuine pending write instead of arming it.
+  // A stale tombstone, still armed, must not be consumed here and cancel
+  // this genuine pending write instead of arming it.
   expect(
     state.errorMessages.some((message) =>
       message.includes("removed the path while a pending write waited"),
@@ -3215,10 +3209,10 @@ it.each(["quit", "close"] as const)(
 );
 
 it("a suppressed retry's dirty-session refusal discharges through evict instead of wedging the lease", async () => {
-  // Codex P1-B on #746. Forcing `settleOnRefusal: false` on a suppressed
-  // retry (the P1-A fix above) can meet a daemon that refuses the
+  // Forcing `settleOnRefusal: false` on a suppressed
+  // retry (the test above) can meet a daemon that refuses the
   // non-settling release because the session still holds unsettled state —
-  // `ydoc-unsettled-close` — and that refusal is TERMINAL, not transient
+  // `ydoc-unsettled-close` — and that refusal is terminal, not transient
   // (`isTransientEngineRefusal` names only file-locked and
   // engine-store-busy). Left as a plain rethrow, `scheduleTransientCloseRetry`
   // never re-arms, and the live entry stays registered with the daemon's
@@ -3245,8 +3239,8 @@ it("a suppressed retry's dirty-session refusal discharges through evict instead 
     new Error("daemon response"),
   );
 
-  // RED before the fix: nothing ever evicts a non-orphaned entry, so the
-  // terminal refusal just stops the ladder with the lease still held.
+  // A non-orphaned entry must evict too, or the terminal refusal stops the
+  // ladder with the lease still held.
   await expect.poll(() => state.evicts, { timeout: 15_000 }).toBe(1);
   // The refusal never escalated into a write: the deleted path stays gone.
   expect(state.settledContents).toEqual([]);
@@ -3293,11 +3287,11 @@ it("a delete delivered while the capture chain is busy still suppresses a retry 
   // the parked open — deliberately no `await capture.flush()` here.
   capture.observeFileEvents([{ path: "note.md", operation: "delete" }]);
 
-  // RED before the fix: the enqueued cleanup that used to be the only
-  // place recording the tombstone is still queued behind the parked open,
-  // so the retry (which fires here, off-chain) finds nothing and
-  // resettles the doc onto the path the user just deleted. The retry's own
-  // stand-down trace is the signal that it fired and met the tombstone.
+  // The enqueued cleanup is still queued behind the parked open. If it were
+  // the only place recording the tombstone, the retry (which fires here,
+  // off-chain) would find nothing and resettle the doc onto the path the
+  // user just deleted. The retry's own stand-down trace is the signal that
+  // it fired and met the tombstone.
   await expect
     .poll(() =>
       state.errorMessages.some((message) =>
@@ -3332,10 +3326,9 @@ it("a recreated path's fresh close-retry ladder still settles normally despite a
 });
 
 it("a delete refuses the open that could register a debt while disk work is in flight", async () => {
-  // #696 rescanned for debts registered after its suspension snapshot. #697
-  // makes that late registration unreachable: a new live open cannot enter
-  // the removal window at all. Keep the original pre-window debt here so the
-  // successful finisher still proves #696 cancellation was not weakened.
+  // A debt cannot register after the delete's suspension snapshot: a new
+  // live open cannot enter the removal window at all. Keep the pre-window
+  // debt here so the successful finisher still proves the delete cancels it.
   const { capture, state } = await lockedRebindCapture("dohc-ydoc-delete-race-");
   const first = await capture.openYDocSession({
     path: "note.md",
@@ -3425,12 +3418,11 @@ it("a rename refuses while its debt payment is still locked", async () => {
 });
 
 it("a folder move settles and closes a live child session before opening its window", async () => {
-  // The move seam used to vacate only its exact fromPath/toPath, so a
-  // live Y.Doc session on a folder's CHILD survived into the open window.
-  // Its own later settle (a reopen's flush, a daemon-armed debounced settle)
-  // could then materialize the moved-away child path mid-move. The vacate is
-  // now prefix-based, exactly like the delete seam's, so the child never
-  // reaches the window alive to race it.
+  // The move seam's vacate is prefix-based, like the delete seam's. Vacating
+  // only the exact fromPath/toPath would let a live Y.Doc session on a
+  // folder's child survive into the open window, and its later settle (a
+  // reopen's flush, a daemon-armed debounced settle) could materialize the
+  // moved-away child path mid-move.
   //
   const { capture, state, rootPath } = await lockedRebindCapture(
     "dohc-ydoc-foldermove-child-vacate-",
@@ -3487,9 +3479,9 @@ it("a folder move settles and closes a live child session before opening its win
 });
 
 it("a failed move holds its window across the rollback, not just up to it", async () => {
-  // #696 keeps the interval open until engine rollback completes. #697 makes
-  // the observable contract direct: an open is refused while that interval
-  // stands and succeeds only after the failed move has rolled back.
+  // The interval stays open until engine rollback completes. An open is
+  // refused while that interval stands and succeeds only after the failed
+  // move has rolled back.
   //
   // Two mutations, one per assertion:
   //   - close the window before rollback -> the queued open enters the gap.
@@ -3544,9 +3536,8 @@ it("a folder move fences late live opens on the no-op finisher path", async () =
   // `beginFileRename` returns a NO-OP finisher for everything the engine
   // rename declines — folders, binary, untracked paths — but the disk move
   // still happens, so a late live session could recreate the moved-from tree.
-  // The test above covers the engine-rename finisher; without this one, the
-  // no-op path carries the fix untested (verified: mutating only the no-op
-  // finisher leaves the test above green).
+  // The test above covers the engine-rename finisher. Mutating only the
+  // no-op finisher leaves that test green, so this one covers the no-op path.
   //
   const { capture, state, rootPath } = await lockedRebindCapture("dohc-ydoc-foldermove-race-");
   await mkdir(join(rootPath, "dir"), { recursive: true });
@@ -3790,10 +3781,10 @@ it("a settle the engine refuses for good stops the ladder and says why", async (
 it("a settle that committed but wrote nothing stops the ladder and names the symlink", async () => {
   // A settle resolving is the adjacent operation, not the write: the
   // engine commits the lineage and answers materialized: false for a target it
-  // declines to write, so the call comes back clean while the .md stays stale
-  // (#595 round 12 caught that much — it stopped discharging the debt there).
+  // declines to write, so the call comes back clean while the .md stays
+  // stale, and the debt is not discharged there.
   //
-  // What it did not settle is what that answer MEANS. `materialized: false`
+  // `materialized: false`
   // has exactly one producer: `JobOutcome::Blocked` <-
   // `MaterializeError::SymlinkTarget` (crates/dohc-engine-files/src/
   // materialize.rs) — the path or an ancestor is a symlink. Waiting restores
@@ -3845,7 +3836,7 @@ it("a settle that committed but wrote nothing stops the ladder and names the sym
 }, 40_000);
 
 it("a materialized settle after reopening a stood-down path clears the marker and re-enables the rename", async () => {
-  // #681 round 2's honest lifecycle end: only PROOF clears the marker — a
+  // Only proof clears the marker: a
   // settle the engine reports as materialized, which is the moment "its
   // last edit reached disk" becomes true. This is the recovery every
   // stand-down message already prescribes ("open it to write it again"),

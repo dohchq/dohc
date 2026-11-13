@@ -1,4 +1,4 @@
-// #3763: typing any amount must never stop a note from going live, and activation must cost what the note's size costs,
+// Typing any amount must never stop a note from going live, and activation must cost what the note's size costs,
 // not what its edit count costs. These tests drive the activation itself (`prepare`) with production settings, assert
 // that it accepts the note, and report how long it took, the longest time it held the relay's event loop, and the work
 // on the main thread inside its longest holds.

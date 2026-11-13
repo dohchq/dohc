@@ -456,11 +456,11 @@ fn another_workspaces_pending_job_cannot_block_this_close() {
             dohc_engine_collab::author_coverage::advance_in(tx, &key, false)
         })
         .expect("settlement consumes author coverage");
-    // The settle's OWN job must land before this test's cross-workspace
-    // collision means anything — a still-pending job for this object's own
-    // path is correctly blocking (#715: the guard now reads any pending job
-    // aimed at the path, not just certain job-id spellings), and asserting
-    // through it would test that instead of the workspace-scoping bug below.
+    // The settle's own job must land before this test's cross-workspace
+    // collision means anything. A still-pending job for this object's own
+    // path correctly blocks, because the guard reads any pending job aimed
+    // at the path, and asserting through it would test that instead of the
+    // workspace-scoping bug below.
     land_settle_job(&mut ts.store, &settle_outcome);
 
     // The guard joins `moments`, so this lineage needs the settle moment a
@@ -690,9 +690,9 @@ fn local_only_close_prunes_the_cache() {
 /// Seed a head for the object: the version row, the text blob, and the
 /// `snapshots` row that points at it.
 ///
-/// `engine_write_status` is what separates the two directions, and now also
-/// picks the realistic `metadata_origin` for each (#723: `captured_head_sha`
-/// reads that column directly). `None` is the disk -> engine direction — a
+/// `engine_write_status` separates the two directions and picks the
+/// realistic `metadata_origin` for each, because `captured_head_sha` reads
+/// that column directly. `None` is the disk -> engine direction — a
 /// capture read the file, so no materialization job exists, the head's
 /// origin is `"capture"`, and the bytes are the disk's. `Some(status)` is the
 /// engine -> disk direction: a job was minted to put these bytes on the file

@@ -7,8 +7,7 @@
 //! (`dohc-engine-storage`) rather than around it. Storage owns the connection,
 //! the open ritual, the single-transaction boundary, and the crash-injection
 //! fault seam; this crate owns what a version, a moment, a fork, and a restore
-//! *mean* (`plan §Target architecture`: `dohc-engine-domain` = version/merge
-//! semantics; `dohc-engine-storage` = SQLite ownership + transactions).
+//! *mean*.
 //!
 //! - **Compound commits.** Every mutation and its idempotency-ledger row commit
 //!   in one transaction via [`dohc_engine_storage::EngineStore::write_with`].

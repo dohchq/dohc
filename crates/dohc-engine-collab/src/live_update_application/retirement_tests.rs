@@ -1145,7 +1145,7 @@ fn covered_and_carried() -> (Fixture, LiveUpdateReceipt, LiveUpdateReceipt, i64)
     (f, covered, carried, sequence)
 }
 
-/// Release (Sol's plan §3): an adopted activation releases only after its
+/// Release: an adopted activation releases only after its
 /// document left the scope and parked, and only once its delivery and
 /// settlement are reconciled again in the release's own transaction. It
 /// stores B, F and the carried deliveries, deletes only its own binding, and
@@ -1205,7 +1205,7 @@ fn an_adopted_activation_releases_once_parked_and_reconciled() {
     );
     assert_eq!(f.store.table_row_count("live_device_application_bindings").unwrap(), 0);
     assert_eq!(rows(&f, &RELEASE_KEEPS), kept, "sources, history, settlements and input stay");
-    // Opus's round 2 F3: the settlement through F leaves nothing pending.
+    // The settlement through F leaves nothing pending.
     assert!(!f
         .store
         .read_with(|conn| settlement_pending(conn, "namespace", &f.key, &f.binding.lineage_claim_id, None))
@@ -1276,7 +1276,7 @@ fn each_release_class_needs_its_own_evidence() {
     }
 }
 
-/// Opus's round 2 F5: a released activation answers from its stored release
+/// A released activation answers from its stored release
 /// once a successor holds the lineage and applied the carried delivery,
 /// which a recomputation would count. It writes nothing.
 #[test]
@@ -1466,7 +1466,7 @@ fn bound(f: &Fixture) -> (i64, bool) {
         .unwrap()
 }
 
-/// Sol's ruling, after relay fencing: a fence that has not landed is
+/// A fence that has not landed is
 /// cancelled for good. The fence request still in flight, or replayed later,
 /// refuses, so the document keeps its generation and the relay keeps the
 /// retirement key it had. A duplicate answers the same; another key refuses.
@@ -1508,7 +1508,7 @@ fn a_restore_fence_that_never_landed_is_cancelled_for_good() {
     assert_eq!(cancel(&mut f, &input).unwrap(), cancelled);
 }
 
-/// Sol's ruling, option A: a cancellation racing a fence whose reply was
+/// A cancellation racing a fence whose reply was
 /// lost ends that fence for good at its generation, with the fence's stopped
 /// binding and the accepted endpoint it froze. A duplicate answers the
 /// committed receipt; the fence's replay refuses; no other operation, key or
@@ -1572,7 +1572,7 @@ fn a_committed_restore_fence_ends_in_its_terminal_cancellation_until_admission()
     assert_eq!(f.store.table_row_count("live_restore_cancellations").unwrap(), 0);
 }
 
-/// Sol: a released activation never regains live authority, after a
+/// A released activation never regains live authority, after a
 /// reconnect (a new owner, whose retired set is empty) or a restart (the
 /// store reopened), whether it adopted or not.
 #[test]
@@ -1608,7 +1608,7 @@ fn a_released_activation_never_regains_live_authority() {
     }
 }
 
-/// Sol's round 3b blocker: after Phase A and a restart, no owner retired the
+/// After Phase A and a restart, no owner retired the
 /// activation in memory, but its durable intent still refuses every way back
 /// to live authority, whether it adopted or not. A named or unnamed
 /// registration serving it is refused before any binding changes, a capture
@@ -1818,7 +1818,7 @@ fn readers_after_a_release() {
     assert_eq!(f.store.table_row_count("ydoc_owner_bindings").unwrap(), observed);
 }
 
-/// Sol's round 3b blocker: a never-adopted release carries its predecessor's
+/// A never-adopted release carries its predecessor's
 /// deliveries, but has no adoption to state their limits. The configured
 /// host's budget must still cover the limits they were accepted under: the
 /// chain's last adopted activation's, through any number of never-adopted

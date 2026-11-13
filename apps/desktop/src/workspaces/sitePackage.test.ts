@@ -1405,7 +1405,7 @@ describe("listSitePackages", () => {
     // identical between the two references to shared.js. Only the active
     // import map differs, isolating that dimension of the dedupe key: with
     // separate subdirectories, documentBase alone would already force two
-    // scans and this test would pass without exercising the fix at all.
+    // scans and this test would pass without exercising the import map at all.
     await mkdir(join(root, "import-map-identity"), { recursive: true });
     await writeFile(
       join(root, "import-map-identity", "page-a.html"),
@@ -2499,8 +2499,6 @@ describe("listSitePackages", () => {
     expect(site?.root).toBe("clients/acme/site");
   });
 
-  // ---- round-17 review pins ----
-
   it("does not fire a <source srcset> outside a <picture> parent", async () => {
     await mkdir(join(root, "source-srcset-guard"), { recursive: true });
     await writeFile(
@@ -2745,8 +2743,6 @@ describe("listSitePackages", () => {
     expect(manifestOf(site)?.assets).toContain("css-applied-stylesheet/applied.png");
   });
 
-  // ---- round-18 review pins ----
-
   it("does not treat an image-set() type() mime string as a URL candidate", async () => {
     await mkdir(join(root, "image-set-type-hint"), { recursive: true });
     await writeFile(
@@ -2874,8 +2870,6 @@ describe("listSitePackages", () => {
 
     expect(manifestOf(site)?.assets).toContain("no-csp/a.js");
   });
-
-  // ---- round-19 review pins ----
 
   it("keeps only the most recently opened XHR target when a receiver re-opens before it sends", async () => {
     await mkdir(join(root, "xhr-reopen"), { recursive: true });
@@ -3138,8 +3132,6 @@ describe("listSitePackages", () => {
     expect(manifestOf(site)?.assets).not.toContain("csp-document-order/late.js");
   });
 
-  // ---- round-20 review pins ----
-
   it("does not scan an inline script's own dependencies when script-src blocks it entirely", async () => {
     await mkdir(join(root, "csp-inline-script-blocked"), { recursive: true });
     await writeFile(
@@ -3376,8 +3368,6 @@ describe("listSitePackages", () => {
       expect(withManualStatic.shareManifest.manifest.entryPath).toBe("manual-static/index.html");
     }
   });
-
-  // ---- round-21 review pins ----
 
   it("declines an XHR send when its receiver opens two distinct targets and walk order can't disambiguate it", async () => {
     await mkdir(join(root, "xhr-ambiguous-open"), { recursive: true });

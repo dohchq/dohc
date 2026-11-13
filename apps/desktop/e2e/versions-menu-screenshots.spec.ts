@@ -371,7 +371,7 @@ test("@ui-audit the versions menu and what it opens", async () => {
       await releaseHeld(app);
     };
     // Each clean merge below changes a file the earlier merges left alone. A
-    // second merge of plan.md would ask which copy to keep (#3211).
+    // second merge of plan.md would ask which copy to keep.
     await writeCaptured(page, temp.rootPath, "Draft", "ideas.md", "# Ideas\n");
     await closeWhileMerging("hold", "merge-running-close");
     const mergedAway = page

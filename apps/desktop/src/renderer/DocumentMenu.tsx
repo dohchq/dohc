@@ -232,12 +232,12 @@ export function DocumentMenu(props: DocumentMenuProps) {
     }, FEEDBACK_MS);
   }
 
-  // NULL is the refusal this menu expects and handles. A throw is not: the
+  // Null is the refusal this menu expects and handles. A throw is not: the
   // serializer reads a live editor, and reading it can fail. Called outside a
-  // boundary it rejected the action's promise into nothing — no feedback, no
-  // log, and the menu still open as though the click had missed (#564,
-  // codex r23). Both actions serialize through here, so both answer a throw
-  // the way they answer any other failure.
+  // boundary, a throw would reject the action's promise into nothing: no
+  // feedback, no log, and the menu still open as though the click had missed.
+  // Both actions serialize through here, so both answer a throw the way they
+  // answer any other failure.
   async function serializeOrFail(
     id: DocumentMenuItemId,
     failureLabel: string,

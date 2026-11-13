@@ -12,7 +12,7 @@ import { withErrorWords } from "../../ipc/errorWords";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 
-// Reactions (WS-MU-C2) for one workspace. Every chat surface (the Chats view
+// Reactions for one workspace. Every chat surface (the Chats view
 // with its chat lane, post previews, and Home, and the file-rail LinkedChats)
 // hands its reaction reads to this store and paints only what the store
 // projects, so every surface shows the same rows, and writes on one

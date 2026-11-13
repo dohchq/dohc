@@ -33,9 +33,9 @@ import { endJoinedChannel } from "./sharedChannels";
 import { createLiveLinkedChatStore } from "./liveLinkedChatStore";
 import { createTestScratch } from "./testTemp";
 
-// WS-MU-C3 — the desktop DM orchestration: role derivation (owner vs
+// The desktop DM orchestration: role derivation (owner vs
 // participant), display labels, and connected-state — all sourced from the
-// local chat store plus the MU-C4 JoinedSharedChannel registry. A DM is a
+// local chat store plus the JoinedSharedChannel registry. A DM is a
 // `kind:"dm"` channel; participant metadata rides the shared-channel grant.
 
 const WS = "workspace-a";
@@ -1476,16 +1476,15 @@ describe("withholdDmsInRequestLanes", () => {
   });
 });
 
-// #742 P1 (rounds 3–4): the syncDms fallback + session-transition machinery,
-// extracted pure and dependency-injected so it gets real executing coverage
-// (the precedent for anything that would otherwise be a main.ts-only
-// closure).
+// The syncDms fallback + session-transition machinery, pure and
+// dependency-injected so it gets real executing coverage outside a main.ts
+// closure.
 describe("createLastKnownDmRequestLanesCache / classifyDmRequestsWithFallback", () => {
   const laneA = { pending: [{ shareId: "share-a", granterEmail: "a@x.com" }], declined: [] };
   const laneB = { pending: [{ shareId: "share-b", granterEmail: "b@x.com" }], declined: [] };
 
-  // A stable generation for tests that aren't exercising round 6's
-  // mid-classify session-transition guard.
+  // A stable generation for tests that aren't exercising the mid-classify
+  // session-transition guard.
   const stableGeneration = () => 1;
 
   it("seeds from the cache on a classify failure (offline / relay error)", async () => {

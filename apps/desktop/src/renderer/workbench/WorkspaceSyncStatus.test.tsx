@@ -71,7 +71,7 @@ describe("sync status surface", () => {
     expect(screen.getByTestId("sync-status").textContent).toBe("Syncing…");
   });
 
-  // edges-05: a pass in flight read "Saving…" beside a document that said
+  // A pass in flight must not read "Saving…" beside a document that says
   // Saved. The files are on disk; only the sync is under way.
   it("calls a pass in flight syncing, never saving", () => {
     renderStatus({ syncStatus: syncState("syncing") });
@@ -106,7 +106,7 @@ describe("sync status surface", () => {
     expect(screen.getByTestId("sync-status").textContent).toBe("Sync failed");
   });
 
-  // #3294: a busy server needs nothing from the person, so it is a ring with
+  // A busy server needs nothing from the person, so it is a ring with
   // its words kept for the name, and a failed save still shows over it.
   it("shows a busy server as a ring, not a failure", () => {
     const busy = syncState("sync-failed", {

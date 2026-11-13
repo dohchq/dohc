@@ -101,8 +101,8 @@ describe("planWindowPlacement", () => {
   });
 
   it("resets when the titlebar is above every display, even if the body is visible", () => {
-    // codex e0-e1 review: bottom 64px visible used to pass, but the titlebar
-    // at y=-736 is unreachable — the user can never drag the window back.
+    // The bottom 64px is visible, but the titlebar at y=-736 is unreachable:
+    // the user can never drag the window back.
     const titlebarOffTop = {
       ...saved,
       bounds: { x: 100, y: -736, width: 1280, height: 800 },

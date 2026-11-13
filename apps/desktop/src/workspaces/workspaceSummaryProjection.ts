@@ -9,37 +9,29 @@ import {
   shareViewIsPresent,
 } from "./shareViewMarker";
 
-// The registry -> renderer projection. The registry file is DATA, not a
+// The registry -> renderer projection. The registry file is data, not a
 // contract: a record can be hand-edited, half-written by a crash, or written
 // by an older build. Every entry is parsed against the wire schema before it
-// reaches the renderer, and every raw record is treated as `unknown` until it
-// has been — reading a field off a row that turned out to be `null` is how
-// one bad row used to take the whole workspace list with it.
+// reaches the renderer, and every raw record is `unknown` until then, so one
+// bad row cannot take the whole workspace list with it.
 //
-// Damage is contained, and contained differently for the two share kinds,
-// because they fail closed in opposite directions:
+// Damage is contained differently for the two share kinds:
 //
-//   A share VIEW marker is RESTRICTIVE. It is what tells the shell this
-//   workspace is someone else's: read-only editors, no share surfaces, a
-//   banner. Dropping it would present the workspace as an ordinary writable
-//   one — damage failing OPEN. So a share view whose grant cannot be read
-//   keeps its marker, loses only its level, and carries `damaged` so the
-//   shell can say what happened.
+//   A share view marker restricts. It tells the shell this workspace is
+//   someone else's: read-only editors, no share surfaces, a banner. Dropping
+//   it would present the workspace as an ordinary writable one. So a share
+//   view whose grant cannot be read keeps its marker, loses only its level,
+//   and carries `damaged` so the shell can say what happened.
 //
-//   A share MOUNT row carries no restriction — read-only enforcement for
-//   `shared-with-me/` is path-based and independent of these records — but it
-//   does carry MANAGEABILITY. The mount's folder is on disk, and the row is
-//   what the Remove action is addressed by, so an unreadable row is kept and
-//   marked rather than dropped. Dropping it would strand a folder the user
-//   can no longer remove.
+//   A share mount row restricts nothing: read-only enforcement for
+//   `shared-with-me/` is path-based. The row is what the Remove action
+//   addresses, so an unreadable row is kept and marked. Dropping it would
+//   strand a folder the user could not remove. Only a row with no readable
+//   `shareId` or `label` is dropped: there is nothing to remove or render.
 //
-//   The one mount shape still dropped is a row that cannot name itself: with
-//   no readable `shareId` or `label` there is nothing to remove or render.
-//
-// Damage to the WORKSPACE itself still throws, which is the behaviour the
-// refusal screen already exists for (see `nativeWorkspaceSummaries`). Hiding
-// a workspace would be a silent, unrecoverable answer to a fault the user
-// needs told about.
+// Damage to the workspace itself still throws, and the refusal screen shows
+// it (see `nativeWorkspaceSummaries`). Hiding a workspace would be a silent,
+// unrecoverable answer to a fault the user needs to be told about.
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);

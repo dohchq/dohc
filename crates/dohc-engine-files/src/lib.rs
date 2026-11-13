@@ -3,11 +3,9 @@
 //! Workspace filesystem **scan → hash → diff → reconcile-plan**, with the path
 //! floor, the watcher dirty-generation state machine, and full resource bounds,
 //! driven actor-native on a dedicated blocking thread under a tokio command
-//! loop (the CAL-2 model). This is the actor-native successor to the retired
-//! reference accelerator (NDJSON thread-per-request) — studied for its
-//! documented behavior, not depended on.
+//! loop.
 //!
-//! The calibration point is **cancellation + bounds**:
+//! The design centers on **cancellation + bounds**:
 //!
 //! - **Cooperative cancellation between bounded units.** Every scan checks the
 //!   [`CancellationToken`] between directory entries and between hash submissions,

@@ -135,12 +135,11 @@ export function createProposalRoutes(
     route: ShareProposalRoute,
     actorUserId: string,
   ): Promise<Response> => {
-    // The proposal lane's front door. The gauntlet mirrors the
-    // share-log POST above stage for stage, and the two routes stay
-    // separate on purpose: one route with two destinations is the
-    // conflation that let a recipient's file moments reach the granter's log
-    // in the first place (fixed by PR3-0). Nothing here can append, and
-    // nothing on the append route can propose.
+    // The proposal lane's front door. The checks mirror the share-log POST
+    // above stage for stage, and the two routes stay separate on purpose: one
+    // route with two destinations would let a recipient's file moments reach
+    // the granter's log. Nothing here can append, and nothing on the append
+    // route can propose.
     if (route.route === "share-proposals" && request.method === "POST") {
       await claimPendingShares(actorUserId);
       const authorized = requireShareAction(route.shareId, actorUserId, "propose");

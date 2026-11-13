@@ -17,7 +17,7 @@ import {
 } from "../testing/realDaemonWorkspaceSessions";
 import { createTestScratch } from "./testTemp";
 
-// #616, AGENTS.md "measure limits that reject work". YDOC_OPEN_DEADLINE_MS
+// YDOC_OPEN_DEADLINE_MS
 // rejects a `ydoc.open` that has not answered, so the only work it can reject
 // is a healthy open — and the honest way to know what one costs is to run one
 // against the daemon. The recorded table lives where the constant does

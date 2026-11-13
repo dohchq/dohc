@@ -455,7 +455,7 @@ mod tests {
 
     /// The key's folder moves after the engine checks it, and another takes
     /// its name. The key still publishes and loads through the checked
-    /// folder's path by ID, and the other folder gets nothing (#2375).
+    /// folder's path by ID, and the other folder gets nothing.
     #[cfg(target_vendor = "apple")]
     #[test]
     fn the_key_publishes_and_loads_in_the_folder_the_engine_checked() {

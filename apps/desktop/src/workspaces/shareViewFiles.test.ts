@@ -426,7 +426,7 @@ describe("ShareViewFiles", () => {
   });
 
   // On a disk that ignores case, notes.md owns the one file and Notes.md is
-  // held behind it (#2416). Saving, deleting or moving Notes.md would write
+  // held behind it. Saving, deleting or moving Notes.md would write
   // over notes.md's file, so each change is refused and nothing changes.
   it("refuses a change to a spelling held behind another one's file", async (context) => {
     const rootPath = await workspaceRoot();
@@ -834,7 +834,7 @@ describe("ShareViewFiles", () => {
       });
       await mkdir(join(rootPath, "tasks"), { recursive: true });
       for (const path of [locked, good]) await writeFile(join(rootPath, path), "recipient edit\n");
-      // A pending file's inspection failure formerly threw before markEnded.
+      // A pending file's inspection failure must not throw before markEnded.
       await seedPendingMaterializationPaths(rootPath, [locked]);
       const original = fsPromises.lstat;
       const inspect = vi.spyOn(fsPromises, "lstat").mockImplementation((...args) => {

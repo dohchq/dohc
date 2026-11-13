@@ -45,12 +45,10 @@ vi.mock("@dohc/ydoc-projection", async (importOriginal) => {
   };
 });
 
-// AUDIT-SILENTSAVE. The engine editor's save indicator used to be a 1s timer
-// that flipped to "saved" no matter what the engine did — three dogfood
-// journeys watched a doc read "Saved" over a ZERO-BYTE .md. It is now driven
-// only by main's real settle outcomes. These tests own that contract: no
-// timer may resurrect "saved", a failure must show, and a settle that predates
-// the newest keystroke must not claim to cover it.
+// Only main's real settle outcomes drive the engine editor's save indicator.
+// A timer would read "Saved" over a zero-byte .md. These tests own that
+// contract: no timer may resurrect "saved", a failure must show, and a settle
+// that predates the newest keystroke must not claim to cover it.
 
 let harness: ReturnType<typeof harnessBridge>;
 let retained: ReturnType<typeof retainObservedEngineDocLease>;

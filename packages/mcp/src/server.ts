@@ -423,10 +423,9 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await resolveVersionConflict(ctx, args)),
   );
 
-  // Legacy cloud sync (dohc_sync_now / dohc_sync_cloud) was removed with the
-  // retired workspace-api file/sync routes. Cloud sync is now automatic per
-  // workspace via the sync relay; use dohc_list_changes for workspace history
-  // and dohc_workspace_status to see whether a workspace is cloud-synced.
+  // Cloud sync is automatic per workspace via the sync relay. Use
+  // dohc_list_changes for workspace history and dohc_workspace_status to see
+  // whether a workspace is cloud-synced.
   register(
     "dohc_list_changes",
     {

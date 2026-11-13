@@ -648,10 +648,10 @@ describe("DocumentMenu", () => {
     await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
   });
 
-  // codex r2 on #684: a clipboard write settles after the click that started
-  // it, and a refusal now stands until the user closes the menu — so the late
-  // "Copied" landed on top of an instruction the user was still reading, and
-  // started the timer that closes the menu under them.
+  // A clipboard write settles after the click that started it, and a refusal
+  // stands until the user closes the menu. A late "Copied" must not land on
+  // top of an instruction the user is still reading, or start the timer that
+  // closes the menu under them.
   it("ignores a clipboard write that settles after a later action answered", async () => {
     const user = userEvent.setup();
     stubClipboard();
@@ -821,11 +821,10 @@ describe("DocumentMenu", () => {
     }
   });
 
-  // codex r23: NULL is the refusal this menu expects; a throw is not. The
-  // serializer reads a live editor, and reading it can fail — and once the
-  // call moved outside the action's try boundary, that rejected the action's
-  // promise into nothing: no feedback, no log, and the menu still open as
-  // though the click had missed.
+  // Null is the refusal this menu expects; a throw is not. The serializer
+  // reads a live editor, and reading it can fail. Outside the action's try
+  // boundary, a throw would reject the action's promise into nothing: no
+  // feedback, no log, and the menu still open as though the click had missed.
   it("reports a serializer that throws instead of rejecting into nothing", async () => {
     const user = userEvent.setup();
     stubClipboard();

@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
-// PR #524 made a 2 MB - 10 MiB conflict side listable, and the conflict
-// surface then painted it unguarded — a whole side per `<pre>`, a whole side
-// seeded into a controlled textarea, and every open conflict at once, two panes
-// each. These pin all three bounds on the surface itself.
+// A conflict side can be up to 10 MiB. Unguarded, the conflict surface would
+// paint a whole side per `<pre>`, seed a whole side into a controlled
+// textarea, and do both for every open conflict at once, two panes each.
+// These pin all three bounds on the surface itself.
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceVersionConflict } from "../../ipc/bridgeContract";
@@ -26,8 +26,8 @@ vi.mock("../../workspaces/workspaceTextLimits", async (importOriginal) => {
 
 /// Every walk of a whole side, whichever function made it. Asserting on the
 /// COUNT rather than on the spies keeps the numbers in a failure message
-/// readable — vitest serialises recorded arguments, and these are 10 MiB
-/// strings, which used to kill the run with `RangeError: Invalid array length`
+/// readable. Vitest serialises recorded arguments, and these are 10 MiB
+/// strings, which would kill the run with `RangeError: Invalid array length`
 /// instead of printing the assertion.
 function measurements(): number {
   return utf8ByteLengthSpy.mock.calls.length + exceedsUtf8BytesSpy.mock.calls.length;
@@ -37,7 +37,8 @@ const { CONFLICT_COMBINED_EDIT_MAX_BYTES, CONFLICT_PREVIEW_MAX_CHARS } =
   await import("./conflictPane");
 const { ConflictReviewDialog, openConflictId } = await import("./WorkspaceVersions");
 
-// 250,000 lines of 41 characters: over 10 MiB, the band #524 opened up.
+// 250,000 lines of 41 characters: over 10 MiB, the top of the range a
+// conflict side can list.
 //
 // Built once per marker and shared by every fixture that needs one. Strings
 // are immutable, so two conflicts holding the same body are indistinguishable
@@ -215,9 +216,9 @@ describe("combine by hand", () => {
     const box = screen.getByTestId("version-conflict-combined-input") as HTMLTextAreaElement;
     expect(box.value).toBe("my own draft\n");
     expect(box.value.length).toBeLessThanOrEqual(CONFLICT_COMBINED_EDIT_MAX_BYTES);
-    // The whole sentence, not just its numbers. The REASON is the part #566
-    // changed — the limit is what this box will edit, not what the engine
-    // will apply — and a `toContain` on the digits cannot tell the two apart.
+    // The whole sentence, not just its numbers. The reason matters: the limit
+    // is what this box will edit, not what the engine will apply, and a
+    // `toContain` on the digits cannot tell the two apart.
     expect(screen.getByTestId("version-conflict-combined-too-large").textContent).toBe(
       `That change would make the combined copy ${paste.length.toLocaleString(
         "en-US",

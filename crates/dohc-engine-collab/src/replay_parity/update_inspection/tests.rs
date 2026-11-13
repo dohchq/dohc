@@ -475,7 +475,7 @@ fn a_repeated_block_section_holds() {
     );
 }
 
-/// Sol's bytes: client 3 types "x" after the note's "a" and before the title.
+/// Client 3 types "x" after the note's "a" and before the title.
 /// yrs takes the parent from the left and the key from the right, so the
 /// string would replace the "a".
 #[test]

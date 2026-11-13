@@ -611,8 +611,8 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
 // real pairing, not a stand-in.
 describe("moment bodies the engine accepted cross the bridge", () => {
   it("carries a body larger than the old 2 MB bound", () => {
-    // One character past the retired 2,000,000 bound, and well inside the
-    // engine's 10 MiB text contract: this body is ordinary stored content.
+    // One character past 2,000,000, and well inside the engine's 10 MiB text
+    // contract: this body is ordinary stored content.
     const body = "x".repeat(2_000_001);
     const record = engineMomentDetailForIpc(
       detailWith({ before: textSide("v1\n"), after: textSide(body) }),
@@ -789,14 +789,14 @@ describe("version texts the engine accepted cross the bridge", () => {
   };
 
   it("lists a conflict whose side is larger than the old 2 MB bound", () => {
-    // The unrecoverable case from the issue: resolving needs a conflictId that
-    // only this listing supplies, so a rejected listing left the user stuck.
+    // Resolving needs a conflictId that only this listing supplies, so a
+    // rejected listing leaves the user stuck.
     //
     // 3 MiB on purpose. The daemon serializes all three sides in band and
     // refuses the page above 8 MiB minus envelope headroom
     // (`lib.rs:244-248,7482-7491`), so a row this size does reach main, and
-    // this schema was the only gate rejecting it. #537 covers the band above
-    // that cap, where the daemon still refuses and no hydration path exists.
+    // this schema must accept it. Above that cap the daemon still refuses and
+    // no hydration path exists.
     const side = "x".repeat(3 * 1024 * 1024);
     const conflict = versionConflictForIpc({
       ...base,

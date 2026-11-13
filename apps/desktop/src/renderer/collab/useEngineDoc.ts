@@ -59,13 +59,13 @@ export type UseEngineDoc = {
   // permits the local autosave editor only after opening settles without a
   // named refusal outcome.
   available: boolean;
-  // No open has answered for the current request yet. "Opening" and
-  // "not engine-backed" used to be the same `available: false`, so the caller
-  // showed its writable plain editor — whose autosave writes straight to disk
-  // — for the whole wait. On a workspace whose capture chain is busy (startup
-  // reconciliation, a version switch) that wait is seconds, and every keystroke
-  // in it took a path the about-to-bind session never sees: the session then
-  // seeds from a head without them. True on the first render of an open and on
+  // No open has answered for the current request yet. This is not the same
+  // as "not engine-backed". A caller that showed its writable plain editor
+  // for the wait would autosave straight to disk. On a workspace whose capture
+  // chain is busy (startup reconciliation, a version switch) that wait is
+  // seconds, and every keystroke in it would take a path the about-to-bind
+  // session never sees: the session then seeds from a head without them.
+  // True on the first render of an open and on
   // the first render after the request changes under a bound document (a
   // version switch), because both are the same unanswered question.
   // The caller must offer no writable surface while this is true.
@@ -77,10 +77,9 @@ export type UseEngineDoc = {
   objectId: string | null;
   versionId: string | null;
   // The document's real save state. "saving" the moment an edit is made,
-  // "saved" Only when main reports a settle that covered that edit actually
-  // committed and wrote the .md, "error" when a settle failed. This used to be
-  // a 1s timer that flipped to "saved" regardless of what the engine did —
-  // three dogfood journeys watched a doc read "Saved" over a zero-byte file.
+  // "saved" only when main reports a settle that covered that edit actually
+  // committed and wrote the .md, "error" when a settle failed. No timer sets
+  // "saved": a timer would read "Saved" over a zero-byte file.
   saveState: SaveState;
   // A known terminal save failure. The save-state chip uses this instead of
   // its generic error text so it can name the constraint and measured bytes.

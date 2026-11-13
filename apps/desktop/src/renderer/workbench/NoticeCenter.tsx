@@ -94,7 +94,7 @@ export type Notice = {
   // Paths the body lists, one per line under it.
   paths?: readonly string[];
   actions?: readonly NoticeAction[];
-  // Explicit dismissal (0P-C gate fix): rendered as a small X on the notice
+  // Explicit dismissal: rendered as a small X on the notice
   // row. Only notices whose underlying state has a real ack path expose it.
   onDismiss?: () => void;
   // Agent notices carry when they happened; system notices are stateful
@@ -1354,7 +1354,7 @@ export function NoticeCenter(props: {
   // Settings at the workspace's sync row.
   onConfirmSyncAccount?: () => void;
   onOpenSyncSettings?: () => void;
-  // Opens the conflict review dialog (0P-C): the notice's "Review" action
+  // Opens the conflict review dialog: the notice's "Review" action
   // lands the user directly on the side-by-side choices.
   onOpenConflicts: () => void;
   onRefreshShareView: () => void;

@@ -371,7 +371,7 @@ fn an_ingest_whose_held_file_is_gone_keeps_the_path_for_a_retire() {
     assert!(matches!(retry.ops.as_slice(), [CaptureOp::Retire { path }] if path == "open.md"));
 }
 
-// dohc#2360. A session settled a new document before capture recorded its
+// A session settled a new document before capture recorded its
 // file, and the file was gone when the sink read it. The path has no entry to
 // keep, so it waits as a retire candidate, and the scan after release retires
 // the record.
@@ -428,7 +428,7 @@ fn first_sight_deferred_delete_returns_as_a_retire() {
     assert!(after.is_empty(), "a retired candidate is not offered again");
 }
 
-// dohc#2360. A session releases a tracked document, and the next scan finds it
+// A session releases a tracked document, and the next scan finds it
 // grown past what capture tracks, so capture forgets the path. The offer came
 // while the path was still tracked, and it still retires the record once the
 // file is gone.

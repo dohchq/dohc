@@ -675,10 +675,10 @@ describe("history page", () => {
 
   // A boundary anyone has to await is not a boundary. When the old version's
   // answer lands first, it meets a guard that knows nothing, commits, and
-  // whatever arrives later cannot retract it — so a failed switch-triggered
-  // refresh left the previous version's moments on screen. Two awaits used to
-  // sit in front of the announcement: the shell's own lookup, and the
-  // selector's post-switch re-read. Neither answers here.
+  // whatever arrives later cannot retract it, so a failed switch-triggered
+  // refresh would leave the previous version's moments on screen. No await
+  // may sit in front of the announcement. Neither the shell's own lookup nor
+  // the selector's post-switch re-read answers here.
 
   // The residual window: a switch that failed, whose recovery re-read
   // also failed, leaves the shell asking which version is active. The
@@ -824,12 +824,12 @@ describe("history page", () => {
     expect(screen.queryByTestId("history-load-failed")).toBeNull();
   });
 
-  // Announcing the switch first re-keys this component, and the re-key used to
-  // bump the same counter the operation checks itself against — so the switch
-  // invalidated its own token while its follow-up re-read was still pending,
-  // its finally skipped, and the selector sat disabled on "Switching…" for the
-  // rest of the session. Liveness and operation identity are different
-  // questions.
+  // Announcing the switch first re-keys this component. The re-key must not
+  // bump the counter the operation checks itself against. If it did, the
+  // switch would invalidate its own token while its follow-up re-read was
+  // still pending, its finally would skip, and the selector would sit
+  // disabled on "Switching…" for the rest of the session. Liveness and
+  // operation identity are different questions.
 
   // The switch says where the workspace landed before it awaits anything
   // else. Announcing after the selector's own re-read would leave an
@@ -884,9 +884,9 @@ describe("history page", () => {
 
 // The same error loop from the other cause, on a workspace that is not
 // a shared view. After a failed capture build main has no capture, so every
-// version call is refused — while the renderer's own settings read still says
-// engine-on. History has carried main's status override since #601; versions
-// did not, so the selector rendered, retried, and raised the danger banner.
+// version call is refused while the renderer's own settings read still says
+// engine-on. Versions must follow main's status override as history does, or
+// the selector renders, retries, and raises the danger banner.
 
 // Virtual tabs survive restore, so a moment-diff tab outlives the History
 // surface that opened it. A shared view opens the change its share imported,
@@ -931,11 +931,11 @@ describe("shared view moment-diff tab", () => {
   // Before main decides, the tab claims nothing and reads nothing.
 });
 
-// The same tab, the other cause. #621 gated it on the share fact
-// alone, so a workspace whose recorder failed to build still mounted
-// EngineMomentDiffPage — which calls readEngineMoment on mount and falls into
-// its own error state. Reached by opening a moment diff while healthy and
-// restarting after a failed build.
+// The same tab, the other cause. Gated on the share fact alone, a workspace
+// whose recorder failed to build would still mount EngineMomentDiffPage,
+// which calls readEngineMoment on mount and falls into its own error state.
+// Reached by opening a moment diff while healthy and restarting after a
+// failed build.
 describe("moment-diff tab after a failed capture build", () => {
   const MOMENT_TAB = momentDiffTabPath("m-1");
   const FAILED_STATUS = {

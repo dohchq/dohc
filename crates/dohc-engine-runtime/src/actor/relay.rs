@@ -3587,7 +3587,7 @@ fn park_departed_hosted(
 /// `active`, the version the root holds, where the file already holds its
 /// head. A document that left the scope with writes queued, and that no
 /// session settles, would otherwise wait at the unload check for the next
-/// restart (#3793).
+/// restart.
 ///
 /// `end_superseded_writes` cancels each queued write of an earlier state.
 /// The write of the head itself is replayed, which only records that the
@@ -4067,9 +4067,9 @@ mod hosted_refusal_tests {
             .unwrap()
     }
 
-    /// Sol's slice-4 review: ordinary operations reached ordinary relay
-    /// routes from a hosted replica, and a claim left `pending` behind.
-    /// Each is refused with its reason before it writes or sends anything.
+    /// A hosted replica refuses each ordinary operation with its reason
+    /// before it writes or sends anything, so none reaches an ordinary relay
+    /// route and no claim leaves `pending` behind.
     #[test]
     fn a_hosted_replica_refuses_every_ordinary_operation_untouched() {
         let scratch = ScratchDir::new().unwrap();
@@ -4272,10 +4272,9 @@ mod hosted_refusal_tests {
         assert!(!file.exists());
     }
 
-    /// The durability review: a stuck retired file returned before the
-    /// retired files after it and every departed document, so nothing else
-    /// in the workspace ever retired. The others still go or park; the stuck
-    /// one stays departed, and the pass still names it.
+    /// A stuck retired file must not stop the retired files after it or the
+    /// departed documents. The others still go or park; the stuck one stays
+    /// departed, and the pass still names it.
     #[test]
     fn a_stuck_retired_file_does_not_hold_back_other_departed_documents() {
         let scratch = ScratchDir::new().unwrap();
@@ -4343,9 +4342,9 @@ mod hosted_refusal_tests {
         assert!(!root.path().join("z.md").exists());
     }
 
-    /// The durability review: a retired `a.md/x/c.md` left the folder
-    /// `a.md`, which a file at `a.md` could never replace. The folders its
-    /// file leaves empty go with it, up to one that still holds something.
+    /// A retired `a.md/x/c.md` that left the folder `a.md` would keep a file
+    /// at `a.md` from ever replacing it. The folders its file leaves empty go
+    /// with it, up to one that still holds something.
     #[test]
     fn a_retired_file_takes_the_folders_it_leaves_empty() {
         let scratch = ScratchDir::new().unwrap();
@@ -4405,9 +4404,9 @@ mod hosted_refusal_tests {
         );
     }
 
-    /// Sol's sixth park review: a finish that stops after writing a
-    /// document's file keeps only that document departed while the others
-    /// park, and after a restart the next pass parks it too.
+    /// A finish that stops after writing a document's file keeps only that
+    /// document departed while the others park, and after a restart the next
+    /// pass parks it too.
     #[test]
     fn an_interrupted_finish_holds_back_only_its_document_until_a_restart() {
         let scratch = ScratchDir::new().unwrap();
@@ -4520,12 +4519,11 @@ mod hosted_refusal_tests {
         assert!(!a.exists());
     }
 
-    /// #3793: each pull's projection of a Y.Doc update queues a write of
-    /// the note's file, and the pull's page writes the file itself. Nothing
-    /// replayed the queued writes for a note no session opened, so they
-    /// stayed pending past the note's departure. Parking ends them first:
-    /// the write of an earlier state is cancelled and leaves no conflict
-    /// file, and the write of the head is recorded as on disk.
+    /// Each pull's projection of a Y.Doc update queues a write of the note's
+    /// file, and the pull's page writes the file itself. Nothing replays the
+    /// queued writes for a note no session opened, so parking ends them
+    /// first: the write of an earlier state is cancelled and leaves no
+    /// conflict file, and the write of the head is recorded as on disk.
     #[test]
     fn parking_ends_the_writes_a_departed_document_left_pending() {
         let scratch = ScratchDir::new().unwrap();

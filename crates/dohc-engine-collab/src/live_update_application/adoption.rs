@@ -1727,7 +1727,7 @@ pub fn adopt_owner_committed(
             if cut.retained_prefix.is_none() && outbox_coverage(tx,&held,&key,&cut.events,max_events,Some(saved.covered_outbox_sequence))? != (saved.coverage_digest,saved.covered_outbox_sequence) { return Err(ApplicationError::Corrupt); }
             return Ok(OwnerAdoptionAck {adoption_id:cut.adoption_id.clone(),local_ydoc_sequence:sequence,terminal_cursor:cursor,adoption_replayed:true});
         }
-        // Opus, round 3b: a retirement still settling the document decides
+        // A retirement still settling the document decides
         // which activation follows it, so nothing adopts until it releases.
         if retirement::retiring(tx, &key)? || held.activation_id.as_ref().is_some_and(|id| *id != cut.adoption_id) {
             return Err(ApplicationError::Conflict);

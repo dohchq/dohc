@@ -138,7 +138,7 @@ function heapExhaustionCheckpoint() {
   return heapCheckpoint;
 }
 
-// Issue #1967: a busy activation's wait for capacity ended on any slot's release, so a host waking on it would
+// A busy activation's wait for capacity must not end on any slot's release, or a host waking on it would
 // capture again each time a live edit finished while the auxiliary slot stayed taken.
 // Proves: the wait outlasts a live edit's completion and ends only once the auxiliary child has exited, when an activation runs.
 it("keeps a busy activation waiting through live edits until the auxiliary slot frees", async () => {

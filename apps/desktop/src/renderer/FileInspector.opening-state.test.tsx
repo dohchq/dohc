@@ -199,7 +199,7 @@ describe("markdown document opening state", () => {
     // markdown-open-state is in the DOM one commit before the bridge is ever
     // called. Resolving on that element and then calling settle?.(…) can
     // silently no-op, and the test burns its whole window waiting for a state
-    // nobody moved -- #590 shape 2, the same trap as the source toggle below.
+    // nobody moved, the same trap as the source toggle below.
     // Wait for the call that creates settle; never optional-chain it away.
     await waitFor(() => expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1));
     bind();
@@ -263,9 +263,10 @@ describe("markdown document opening state", () => {
       expect(await navigator.clipboard.readText()).toBe("# Plan\n\nBase paragraph.\nDraft!"),
     );
 
-    // The chip shows beside "Opening…", not underneath it: the header slot
-    // used to be either/or, hiding any state in this window. Recovery has its
-    // own chip state — "Couldn't save" would invite a retry that cannot help.
+    // The chip shows beside "Opening…", not underneath it: an either/or
+    // header slot would hide any state in this window. Recovery has its
+    // own chip state, because "Couldn't save" would invite a retry that
+    // cannot help.
     expect(screen.queryByTestId("markdown-open-state")).not.toBeNull();
     expect(screen.getByTestId("markdown-save-state").getAttribute("data-state")).toBe("recovery");
     expect(screen.getByTestId("markdown-save-state").textContent).toBe("Edit set aside");

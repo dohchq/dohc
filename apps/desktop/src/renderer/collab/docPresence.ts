@@ -58,7 +58,7 @@ class SnapshotAwareness extends Awareness {
   }
 }
 
-// MU-C1 — DOC co-presence: bind a Yjs Awareness to the engine mirror doc and
+// Doc co-presence: bind a Yjs Awareness to the engine mirror doc and
 // bridge it over the same ephemeral relay transport as chat presence, keyed by
 // the doc's path/objectId rather than a channel. This is the design's handoff:
 // "the provider exposes the live session.doc; presence binds Yjs awareness to

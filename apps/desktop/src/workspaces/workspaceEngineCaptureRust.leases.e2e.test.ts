@@ -111,11 +111,10 @@ it.skipIf(engine.missing)(
   60_000,
 );
 
-// The journey behind #337 item 5, end to end through the real daemon. It was
-// filed as "no retry OR error". PR #495 gave the save indicator honest
-// states; #554 closes the retry half: a file-locked settle re-arms itself
-// with backoff, so the write lands when the external handle releases — no
-// further edit needed.
+// A locked save, end to end through the real daemon. The save indicator
+// reports the lock, and a file-locked settle re-arms itself with backoff, so
+// the write lands when the external handle releases, with no further edit
+// needed.
 it.skipIf(engine.missing || process.platform !== "win32")(
   "surfaces a locked save and lands it by itself once the lock releases",
   async () => {
@@ -205,7 +204,7 @@ it.skipIf(engine.missing || process.platform !== "win32")(
 // release refuses too — a local-only prune needs the CRDT projection to equal
 // `last_settled_sha` (crates/dohc-engine-collab/src/durable.rs). The outside
 // edit waits for this session, so the close evicts it: the disk version
-// stands and the unsettled text comes back as a recovered copy (#2463). The
+// stands and the unsettled text comes back as a recovered copy. The
 // save refusal still reads as an error, never as "changed on disk".
 it.skipIf(engine.missing)(
   "keeps unsettled edits in a recovered copy when their close meets a deferred outside edit",

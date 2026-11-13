@@ -733,7 +733,7 @@ describe("ui-state merge-on-load", () => {
     });
   });
 
-  // P1: closing a dirty tab unmounts the inspector mid-draft, and its cleanup
+  // Closing a dirty tab unmounts the inspector mid-draft, and its cleanup
   // flushes best-effort to a path that no longer exists. resolveWorkspaceFile
   // requires the file, the write fails, the failure is swallowed — the draft
   // would be gone with no error and no way back.
@@ -1178,10 +1178,9 @@ describe("ui-state merge-on-load", () => {
   // A DM lookup that answers afterwards would still replace the page with the
   // conversation the user left, taking away the message they just jumped to.
 
-  // The surviving mutant from the review: openFile's heading-target
-  // invalidation. A heading jump into the ALREADY-ACTIVE file moves no tab,
-  // so mutateWb's transition check cannot see it — only openFile's own
-  // `if (target)` branch cancels the pending DM.
+  // openFile's heading-target invalidation. A heading jump into the
+  // already-active file moves no tab, so mutateWb's transition check cannot
+  // see it. Only openFile's own `if (target)` branch cancels the pending DM.
 
   // A request that is merely in flight has not answered anything, and a
   // request that fails never will. Superseding on ISSUE would drop the only

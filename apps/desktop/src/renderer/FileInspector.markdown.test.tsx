@@ -118,7 +118,7 @@ describe("FileInspector renders markdown through the shared component map", () =
 
   it("opens a note over the limit in bytes as the read preview, even under it in characters", async () => {
     // A live session seeds at most WYSIWYG_MARKDOWN_THRESHOLD_BYTES of UTF-8,
-    // so the WYSIWYG editor must not open a note past it without one (#2521).
+    // so the WYSIWYG editor must not open a note past it without one.
     // Each sentence is 10 characters and 30 bytes.
     const japanese = `# 長いメモ\n\n${"長いメモの段落です。".repeat(Math.floor(WYSIWYG_MARKDOWN_THRESHOLD_BYTES / 20))}\n`;
     expect(japanese.length).toBeLessThan(WYSIWYG_MARKDOWN_THRESHOLD_BYTES);

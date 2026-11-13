@@ -312,9 +312,9 @@ describe("the proposal route's level gate", () => {
   });
 
   it("holds the two write routes apart: the append route still refuses moments", async () => {
-    // #646 PR3-0 closed the append gate, and PR3a must not reopen it by giving
-    // the append route a moment-shaped arm. The proposal route is the only way
-    // a file change crosses, and it never reaches the log without an accept.
+    // The append route refuses moments, and must not gain a moment-shaped
+    // arm. The proposal route is the only way a file change crosses, and it
+    // never reaches the log without an accept.
     const storage = await testStorage();
     const h = handler(storage);
     await claimWorkspace(h);

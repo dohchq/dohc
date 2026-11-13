@@ -1,4 +1,4 @@
-// file-org-v1 §4.5 / D4.3 — WAI-ARIA tree navigation. The keyboard
+// WAI-ARIA tree navigation. The keyboard
 // behavior is extracted as a pure function so it's testable without
 // a DOM (vitest is node + edge-runtime; no jsdom). The FileTree
 // component flattens its visible rows in order, calls `navigateTree`

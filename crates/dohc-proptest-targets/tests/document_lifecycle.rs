@@ -1243,17 +1243,16 @@ fn replay_both(history: &[Command]) {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// #3729: a settle after a drain wrote only the newest owed write, so the
-/// file fell behind the note.
+/// A settle after a drain must write every owed write. Writing only the
+/// newest leaves the file behind the note.
 #[test]
 fn a_settle_after_a_drain_writes_every_owed_edit() {
     use Command::{Open, RemoteApply, Settle};
     replay(Replica::Device, &[Open, RemoteApply, Settle, RemoteApply]);
 }
 
-/// #3831: a pull wrote the note's file and left its queued writes pending,
-/// so a later settle replayed an older write and was refused as a stale
-/// target.
+/// A pull that writes the note's file must end its queued writes. Otherwise
+/// a later settle replays an older write and is refused as a stale target.
 #[test]
 fn a_pull_that_writes_the_file_ends_its_queued_writes() {
     replay(Replica::Device, &[Command::RemoteApply]);

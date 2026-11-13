@@ -77,7 +77,7 @@ async function stopsCleanlyOn(
       ).toMatch(/^\[desktop\] quit: shutdown finished in \d+ ms$/u);
       expect(engines.filter(isRunning), "The quit stops the engine").toEqual([]);
     } else {
-      // Electron ends dohc before its quit finishes (#3411). The engine then
+      // Electron ends dohc before its quit finishes. The engine then
       // stops on its own once its input closes.
       await expect
         .poll(() => engines.filter(isRunning), { message: "The engine stops", timeout: 30_000 })
@@ -132,7 +132,7 @@ test.describe("stop signals", () => {
   test.skip(process.platform !== "linux", "The engine leads its own process group on Linux only.");
 
   // A SIGTERM or SIGHUP sent to the group also reaches Electron's GPU process,
-  // and Electron then ends dohc before its quit finishes (#3411).
+  // and Electron then ends dohc before its quit finishes.
   const groupStops = [
     { signal: "SIGTERM", verb: "ends", finishesQuit: false },
     { signal: "SIGINT", verb: "quits", finishesQuit: true },

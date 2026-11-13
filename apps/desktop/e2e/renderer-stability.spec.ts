@@ -9,14 +9,14 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// Renderer stability (bullet 11: "the app crashes a lot when just playing
-// around and clicking stuff — blank screen"). Two regression gates:
+// Renderer stability: clicking around the app must never end in a blank
+// screen. Two regression gates:
 //
 //   1. An aggressive click-around session (open/close/switch tabs across
 //      every file kind, toggle panels and views, quick-open, history rail)
-//      must leave the shell mounted with zero uncaught renderer errors —
-//      any pageerror here is exactly the class of throw that used to unmount
-//      the whole React tree to a blank window.
+//      must leave the shell mounted with zero uncaught renderer errors. Any
+//      pageerror here is the class of throw that unmounts the whole React
+//      tree to a blank window.
 //   2. A real renderer-process crash must recover: main's render-process-gone
 //      handler reloads the window instead of leaving it permanently blank.
 

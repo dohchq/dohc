@@ -355,7 +355,7 @@ test("a comment's hidden toolbar takes no click meant for the comment above", as
 // The live external-write invariant. A separate OS process writes an
 // agent chat into the running app's daemon over the authenticated CLI
 // endpoint, and the unread badge appears with NO relaunch and NO navigation.
-// This is the only cross-process write path after the daemon cutover — a
+// This is the only cross-process write path — a
 // second daemon cannot attach to the app's store — so it is what proves the
 // app invalidates its chat state on an outside write.
 //

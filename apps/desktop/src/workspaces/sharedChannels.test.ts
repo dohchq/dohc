@@ -32,8 +32,8 @@ import type { JoinedSharedChannel } from "./registryStore";
 import { createLiveLinkedChatStore } from "./liveLinkedChatStore";
 import { createTestScratch } from "./testTemp";
 
-// MU-C4: the desktop's best-effort refresh pass over joined shared channels.
-// The engine client is injected; these tests pin the pass's CONTAINMENT
+// The desktop's best-effort refresh pass over joined shared channels.
+// The engine client is injected; these tests pin the pass's containment
 // contract — one bad share never blocks the others, revocation reports ended,
 // a read-only downgrade keeps reads flowing.
 
@@ -829,10 +829,8 @@ describe("mergeJoinedChannel", () => {
     expect(rejoinedSameShare[0]!.access).toBe("read-only");
   });
 
-  // The join gate is gone. It existed to bound the joined-lane
-  // response, the scoped read bounds that now, and refusing a join could only
-  // ever make the user's own channel unreachable — the shape that produced
-  // three permanent-refusal defects in one review cycle.
+  // No join gate. The scoped read bounds the joined-lane response, and
+  // refusing a join could only make the user's own channel unreachable.
   it("never refuses a join, however many channels the account has already joined", () => {
     const lane = Array.from({ length: 20_000 }, (_, index) =>
       joined({ shareId: `share-${index}`, channelWireId: `wire-${index}` }),
@@ -1024,7 +1022,7 @@ describe("a failed join keeps its reservation", () => {
     expect(reserved.filter((entry) => entry.ended !== true)).toHaveLength(2);
   });
 
-  // The case codex named: a rejoin whose merge displaced an ended tombstone.
+  // A rejoin whose merge displaced an ended tombstone.
   // Removing the new row would erase that tombstone too and leave the wire
   // ungated — strictly worse than never having touched it.
   it("never leaves a wire that had a tombstone with no row at all", () => {

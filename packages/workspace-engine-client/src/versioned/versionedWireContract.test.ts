@@ -273,11 +273,11 @@ describe("versioned result decoder rejection", () => {
 });
 
 describe("versionedText.list hasYdocMarker", () => {
-  // AUDIT-SILENTSAVE round 4 (D3). hasYdocMarker is what stops the desktop
-  // capture layer from retiring a settled Y.Doc for exceeding a cap a Y.Doc is
-  // not bound by. A row that silently defaulted to false would re-open exactly
-  // that data-loss path, so an absent key must be a protocol violation — the
-  // same rule already applied to `materialized`.
+  // hasYdocMarker is what stops the desktop capture layer from retiring a
+  // settled Y.Doc for exceeding a cap a Y.Doc is not bound by. A row that
+  // silently defaulted to false would re-open exactly that data-loss path, so
+  // an absent key must be a protocol violation, the same rule already applied
+  // to `materialized`.
   const row = (overrides: Record<string, unknown> = {}) => ({
     path: "notes/settled.md",
     objectId: "object-1",

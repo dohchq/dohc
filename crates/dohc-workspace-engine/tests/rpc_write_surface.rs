@@ -1,5 +1,5 @@
-//! RPC-D sequencing steps 1-3: mutation guards exercised through the real
-//! in-process transport and actor-owned store.
+//! Mutation guards exercised through the real in-process transport and
+//! actor-owned store.
 
 use crate::common;
 
@@ -1906,7 +1906,7 @@ fn seed_versions(root: &Path, workspace_id: &str) {
         .expect("binary");
 }
 
-/// WS-G1 over the wire: a path holding bytes on one side compares as a present
+/// Over the wire, a path holding bytes on one side compares as a present
 /// binary head, a source-only change fast-forwards through the binary write
 /// status, and divergent bytes open a conflict — each carrying the content
 /// address and byte length the review surface renders.

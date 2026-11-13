@@ -395,7 +395,7 @@ describe("notice center", () => {
   // Owner live delivery is its own fact. Only "retrying" raises a notice, and
   // what it offers depends on whether anything can be dialled again.
 
-  // #2719: a note whose waiting edits reached their limit is named at once,
+  // A note whose waiting edits reached their limit is named at once,
   // and delivering them is what lifts the pause.
 
   // A document that moved, or a workspace that changed, is not a connection

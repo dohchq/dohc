@@ -13,7 +13,7 @@ import {
   navigatorView,
 } from "./ChatsView.testHarness";
 
-// --- Shared channels (MU-C4) -----------------------------------------------
+// --- Shared channels -------------------------------------------------------
 
 describe("ChatsView shared channels (MU-C4)", () => {
   const teamChannel = () =>
@@ -28,8 +28,8 @@ describe("ChatsView shared channels (MU-C4)", () => {
     renderView();
     await screen.findByTestId("chats-channel-name");
     // Failing closed is about authority, not silence. A listing that did not
-    // answer at all locks every affordance below, and it says so — an
-    // unexplained blank surface with every channel read-only was #618.
+    // answer at all locks every affordance below, and it says so instead of
+    // showing an unexplained blank surface with every channel read-only.
     expect((await screen.findByTestId("chats-shares-unreadable")).textContent).toContain(
       "dohc could not read your shares.",
     );

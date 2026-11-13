@@ -982,8 +982,7 @@ async fn a_departed_document_parks_and_frees_its_file_for_its_replacement() {
         "not the head"
     );
 
-    // The durability review: a commit lands whether or not parking after it
-    // fails, and says both.
+    // A commit lands whether or not parking after it fails, and says both.
     let commits = || {
         Connection::open(engine_db_path(&scratch).expect("db path"))
             .expect("open db")
@@ -1120,13 +1119,12 @@ async fn a_retired_file_that_could_not_go_holds_its_path_until_it_goes() {
     assert_eq!(host.pull().await["departed"], json!([]));
 }
 
-/// Sol's second park review, on disk: the host applied `doc-b`'s move from
-/// `x.md` to `a.md` and closed before materializing it, then `doc-b` left and
-/// parked at `a.md`, which `doc-a` took. On its return, the pass dropped
-/// every decision its history stored, the delete of `x.md` included, so
-/// `x.md` stayed behind once `doc-b` came back at `a.md`, and a document
-/// created at `x.md/child.md` could not materialize. Parking now finishes
-/// the move, and the held return keeps `x.md` free.
+/// The host applies `doc-b`'s move from `x.md` to `a.md` and closes before
+/// materializing it, then `doc-b` leaves and parks at `a.md`, which `doc-a`
+/// takes. Parking finishes the move, and the held return keeps `x.md` free.
+/// Otherwise the return's pass drops every decision its history stored, the
+/// delete of `x.md` included, `x.md` stays behind once `doc-b` comes back at
+/// `a.md`, and a document created at `x.md/child.md` cannot materialize.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_interrupted_move_is_finished_by_the_documents_held_return() {
     let mut relay = HostedRelay::default();
@@ -1282,11 +1280,10 @@ async fn reopen(host: Host, scratch: &ScratchDir, relay: &FakeRelay) -> Host {
     }
 }
 
-/// Sol's fifth park review: the host applied the deletion of `x.md` and
-/// closed before materializing it, then `doc-x` left the scope. Parking
-/// checked only its heads, of which it had none, so `doc-x` parked and
-/// `x.md` stayed on disk with no document. Parking now finishes the
-/// deletion first.
+/// The host applies the deletion of `x.md` and closes before materializing
+/// it, then `doc-x` leaves the scope. `doc-x` has no heads for parking to
+/// check, so parking finishes the deletion first. Otherwise `x.md` stays on
+/// disk with no document.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_deletion_applied_before_a_restart_lands_when_its_document_parks() {
     let mut relay = HostedRelay::default();
@@ -1324,14 +1321,14 @@ async fn a_deletion_applied_before_a_restart_lands_when_its_document_parks() {
     assert_eq!(disk(scratch.path()), (BTreeMap::new(), vec![]));
 }
 
-/// The durability review of parking, on disk: a return held at its path
-/// wrote its file only in the pass that unparked it, so a host that stopped
-/// after that pass and before materializing it made `doc-b` ready on the
-/// next pass with no file. `doc-b` returns to `a.txt` while `doc-a` holds
-/// it; `doc-a` moves, the next pass unparks `doc-b`, and the host closes
-/// before materializing. After it reopens, `doc-b` is ready only once its
-/// file holds its head. With `settled`, that head was last written by the
-/// host's own settlement of a live edit, which no row of the feed carries.
+/// A return held at its path writes its file only in the pass that unparks
+/// it, so a host that stops after that pass and before materializing it must
+/// not make `doc-b` ready on the next pass with no file. `doc-b` returns to
+/// `a.txt` while `doc-a` holds it; `doc-a` moves, the next pass unparks
+/// `doc-b`, and the host closes before materializing. After it reopens,
+/// `doc-b` is ready only once its file holds its head. With `settled`, that
+/// head was last written by the host's own settlement of a live edit, which
+/// no row of the feed carries.
 async fn held_return_interrupted_after_unparking_writes_its_file_after_a_restart(settled: bool) {
     let mut relay = HostedRelay::default();
     relay.log.push(json!({
@@ -1549,7 +1546,7 @@ fn native_bindings(scratch: &ScratchDir) -> Vec<(String, bool)> {
         .expect("bindings")
 }
 
-/// Part 5's held fence. `doc-a` and `doc-b` are ready, each with a live
+/// The held fence. `doc-a` and `doc-b` are ready, each with a live
 /// registration and an editor session, when the scope moves `doc-a` off its
 /// head's path. The pass that holds it drops its registration and session
 /// before it replies; `doc-b` keeps both, and `doc-a`'s accepted work still
@@ -1921,10 +1918,9 @@ fn hosted_store_state(scratch: &ScratchDir) -> String {
     .expect("hosted store state")
 }
 
-/// Sol's sixth and Opus's eighth findings: a hosted pull no live host names a
-/// feed for could adopt a scope and apply work before it failed. It is
-/// refused before it reads the feed or changes the store, and the same
-/// replica pulls once a feed is named.
+/// A hosted pull no live host names a feed for is refused before it reads
+/// the feed or changes the store, so it cannot adopt a scope or apply work.
+/// The same replica pulls once a feed is named.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_hosted_pull_no_live_host_configures_is_refused_before_it_reads_or_changes_anything() {
     let relay = rotated_relay();

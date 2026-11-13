@@ -26,23 +26,22 @@ import { pathCollisionKey } from "./pathCollisionKey";
 import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
 import { PERSONAL_AGENT_ID_PREFIX } from "./relayLogInputs";
 
-// PR 18 share grants: the server-side filter that decides which replicated
-// ops (and which blobs) a share RECIPIENT may see. This module is the
-// security boundary for external shares — everything here fails closed.
+// Share grants: the server-side filter that decides which replicated ops (and
+// which blobs) a share recipient may see. This module is the security
+// boundary for external shares. Everything here fails closed.
 //
-// Design note (recorded in the execution log): shares are LIVE-FOLLOW
-// read-only views. The recipient re-uses the relay's since-cursor log fetch
-// with this filter applied server-side, so a granter's later edits to shared
-// paths reach the recipient on refresh, and nothing outside the selector
-// ever crosses the wire. A point-in-time snapshot was the alternative; the
-// live-follow choice reuses the whole sync pipeline (cursoring, blobs,
-// idempotent re-fetch) instead of inventing a parallel snapshot format.
+// Shares are live-follow read-only views. The recipient re-uses the relay's
+// since-cursor log fetch with this filter applied server-side, so a granter's
+// later edits to shared paths reach the recipient on refresh, and nothing
+// outside the selector ever crosses the wire. Live-follow reuses the whole
+// sync pipeline (cursoring, blobs, idempotent re-fetch) instead of a parallel
+// snapshot format.
 //
 // The relay normally treats op payloads as opaque. Shares deliberately relax
 // that in one direction: the filter may read well-known path/hash/version
-// fields to decide inclusion, and may REDACT one field (version.create's
+// fields to decide inclusion, and may redact one field (version.create's
 // forkSnapshots). It still never interprets content, and any op kind or
-// payload shape it does not positively recognize is EXCLUDED.
+// payload shape it does not positively recognize is excluded.
 
 export { MAX_SHARE_PATHS, MAX_SHARE_PATH_CHARS };
 
@@ -63,7 +62,7 @@ export interface ShareSelector extends StoredShareSelector {
   access: ShareAccess;
 }
 
-// MU-C4 shared channels: a bidirectional chat grant. Unlike the
+// Shared channels: a bidirectional chat grant. Unlike the
 // read-only path/version selector above, a chat share scopes a whole
 // channel (its channel/thread/message/reaction ops, nothing else) and — when
 // access is "read-write" — lets the member append channel-scoped chat ops via
@@ -189,7 +188,7 @@ export interface ShareFileChatResolver {
   objectIdAtPath(path: string): string | undefined;
 }
 
-// MU-C4: how the chat branch resolves channel and thread ownership from the
+// How the chat branch resolves channel and thread ownership from the
 // workspace owner's append-only log. Both lookups use the earliest matching
 // create op, mirroring the engine's insert-if-absent apply semantics: a later
 // forged create can never change a channel's kind or re-bind a thread.
@@ -598,12 +597,12 @@ export function parseChatThreadTopic(topic: string): string | null {
   return threadId;
 }
 
-// MU-C1 presence gate: whether a share RECIPIENT may join the ephemeral
+// Presence gate: whether a share recipient may join the ephemeral
 // awareness scope for `topic`. Fail-closed and reuses the same visibility
 // check the durable filter uses, so presence can never fan out to a scope the
 // share does not already expose. For a path/version selector a topic is a
-// workspace-relative path (doc co-presence on a shared file). For a MU-C4
-// chat selector two topic shapes are allowed, both scoped to exactly
+// workspace-relative path (doc co-presence on a shared file). For a chat
+// selector two topic shapes are allowed, both scoped to exactly
 // the granted channel:
 //   - the bare granted channel wire id (channel-level co-presence), and
 //   - `chat:thread:<threadId>` for a thread that binds to the granted channel,
@@ -791,7 +790,7 @@ function servedChatPayload(
   return served;
 }
 
-// The chat branch of the fail-closed share filter (MU-C4). Strict allowlist,
+// The chat branch of the fail-closed share filter. Strict allowlist,
 // scoped to exactly the granted channel's wire id:
 //   - chat.channel.create for the granted wireId (the join bootstrap);
 //   - chat.thread.create carrying the granted channelWireId, provided the
@@ -1152,7 +1151,7 @@ export function shareLabelFor(
 // referenced paths visible, version matches), version.create for the shared
 // version (forkSnapshots redacted), the payload-free workspace.init bootstrap
 // op, and the five file-chat kinds whose thread resolves to a file
-// inside the selector. Chat-channel selector (MU-C4): only the
+// inside the selector. Chat-channel selector: only the
 // granted channel's chat ops (see filterChatOpForChannelShare) — file, secret,
 // version, and bootstrap ops stay excluded. Everything unrecognized is
 // excluded either way.
@@ -1308,12 +1307,11 @@ export function filterOpForShare(
 // `filterOpForShare` above answers the read question — "may this recipient see
 // this op?" — and the two are not the same question. A recipient may read every
 // file moment in the selector; it may write none of them, because a written
-// moment lands in the GRANTER's log and the granter's engine replays it
-// (#646 PR3-0).
+// moment lands in the granter's log and the granter's engine replays it.
 //
 // Only chat crosses in this direction today. A chat grant at
 // `read-write` appends what the channel branch admits. A file share appends
-// only the five file-chat kinds PR2 serves: the file-chat branch's own terminal
+// only the five file-chat kinds: the file-chat branch's own terminal
 // deny is the allowlist, so `moment.append`, `workspace.init`, `version.create`,
 // and every unknown kind are refused there. This function never falls through
 // to the read filter.

@@ -697,7 +697,7 @@ fn coordinate_matches(
     )
 }
 
-/// R10's built-in `chat.*` receiver apply dispatch. Structural rows use
+/// The built-in `chat.*` receiver apply dispatch. Structural rows use
 /// first-authoritative-writer semantics; reaction/decision/follow/feed cells
 /// use deterministic LWW tuples that include the remote origin coordinate.
 /// An applied op returns the Group automation claims its messages took, for
@@ -1430,7 +1430,6 @@ fn apply_thread(
     // read surface on both engines. We reject the malformed op at apply
     // (fail-closed), which is deliberately stricter than the oracle; honest
     // mint always pairs the fields, so only a corrupt/hostile op is refused.
-    // See the CROSS-ENGINE DELTA note in RPC_GAP.md.
     if file_shape && payload.linked_at_ms.is_none() {
         return Err(SyncError::InvalidInput {
             reason: "chat thread linked owner requires a linked timestamp",

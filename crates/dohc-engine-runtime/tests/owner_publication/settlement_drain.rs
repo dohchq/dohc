@@ -473,13 +473,12 @@ fn owed() -> (Vec<String>, Vec<FieldChange>) {
     )
 }
 
-/// Sol's review of round 4b2i-1a-2j, finding 2, through the actor and real
-/// admission: the drain applies the record's settlement with its field
-/// change and commits it under its report before the owner document's
-/// decision waits. The request stays outstanding; once validation completes
-/// it goes on in the same report, which names each change and fact once.
-/// The rows stay queued until a cursor naming that report commits: one
-/// naming another releases nothing.
+/// Through the actor and real admission: the drain applies the record's
+/// settlement with its field change and commits it under its report before
+/// the owner document's decision waits. The request stays outstanding; once
+/// validation completes it goes on in the same report, which names each
+/// change and fact once. The rows stay queued until a cursor naming that
+/// report commits: one naming another releases nothing.
 #[tokio::test]
 async fn a_waiting_drain_goes_on_in_its_report_through_real_admission() {
     let d = drain().await;
@@ -526,11 +525,10 @@ async fn a_waiting_drain_goes_on_in_its_report_through_real_admission() {
     d.close().await;
 }
 
-/// Sol's review of round 4b2i-1a-2j, finding 2, cancellation and reopen: a
-/// request cancelled while its drain waits leaves the committed prefix. The
-/// store reopened, the next pull reclaims it under a report of its own with
-/// its change and fact, once, and only a cursor naming that report releases
-/// the rows.
+/// Cancellation and reopen: a request cancelled while its drain waits leaves
+/// the committed prefix. The store reopened, the next pull reclaims it under
+/// a report of its own with its change and fact, once, and only a cursor
+/// naming that report releases the rows.
 #[tokio::test]
 async fn a_cancelled_drain_leaves_its_prefix_to_the_next_pull_after_reopen() {
     let mut d = drain().await;
@@ -573,12 +571,12 @@ async fn a_cancelled_drain_leaves_its_prefix_to_the_next_pull_after_reopen() {
     d.close().await;
 }
 
-/// Sol's review of round 4b2i-1a-2j, finding 1: one pull runs at a time on a
-/// store, across its waits for validation. A second pull that arrives while
-/// the first waits, with the record's settlement and its fact committed,
-/// waits for it without fetching. The first goes on in its report and names
-/// each change and fact once; its cursor commits before the second fetches,
-/// and the second names none of them again.
+/// One pull runs at a time on a store, across its waits for validation. A
+/// second pull that arrives while the first waits, with the record's
+/// settlement and its fact committed, waits for it without fetching. The
+/// first goes on in its report and names each change and fact once; its
+/// cursor commits before the second fetches, and the second names none of
+/// them again.
 #[tokio::test]
 async fn a_second_pull_waits_for_the_first_across_its_validation() {
     let d = drain().await;

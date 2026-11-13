@@ -79,10 +79,11 @@ describe("PresenceHub", () => {
   });
 
   it("a RETRIED leave still wakes parked pollers when it only prunes an expired peer", async () => {
-    // Regression: leave() used to gate bump() on deleting the caller's own
-    // entry, discarding prune()'s result. A duplicate/late leave (entry already
-    // gone) that expired a different stale peer in the same call left the
-    // version unbumped — parked pollers slept through an observable departure.
+    // leave() must bump the version when prune() expired any peer, not only
+    // when it deleted the caller's own entry. Otherwise a duplicate or late
+    // leave (entry already gone) that expires a different stale peer in the
+    // same call leaves the version unbumped, and parked pollers sleep through
+    // an observable departure.
     const hub = new PresenceHub({ entryTtlMs: 5_000 });
     hub.publish("ws:w:general", "alice", "tab1", {}, 1_000);
     hub.publish("ws:w:general", "bob", "tab1", {}, 1_001);

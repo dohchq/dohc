@@ -1,8 +1,8 @@
 use super::*;
 
-/// #4 (secret tombstone): once a delete wins, a later delivery of an older put
-/// must not resurrect the deleted secret (rank against tombstones, not the
-/// materialized secret_files tip).
+/// Once a delete wins, a later delivery of an older put must not resurrect
+/// the deleted secret (rank against tombstones, not the materialized
+/// secret_files tip).
 #[test]
 fn secret_delete_tombstone_blocks_older_put_resurrection() {
     use base64::Engine as _;

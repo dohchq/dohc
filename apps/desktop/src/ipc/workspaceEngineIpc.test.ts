@@ -1045,8 +1045,8 @@ describe("workspace engine IPC registrations", () => {
     await expect(h.invoke(CHANNELS.retryCloudSync, asked)).rejects.toThrow("readonly");
     expect(h.retryCloudSync).toHaveBeenCalledTimes(1);
   });
-  // Codex on #1233: a renderer showing one workspace could start another
-  // open workspace's push and pull.
+  // A renderer showing one workspace must not start another open workspace's
+  // push and pull.
   it("refuses a sync retry for an open workspace this renderer does not show", async () => {
     const h = await harness();
     const foreign = { workspaceId: "other", reason: "person" };

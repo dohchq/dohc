@@ -15,11 +15,11 @@ import { createDefaultDiskWriter } from "./workspaceEngineCapture";
 import { startStaticDirectoryPreview } from "../security/staticDirectoryPreview";
 import { createTestScratch } from "./testTemp";
 
-// One fact, tested per surface: every desktop guard used to read a path as
-// spelled and then prove only that it stays inside the workspace root. A
-// symlink planted inside the workspace passes that proof, so `meta -> .dohc`
-// named the workspace's own control plane under an ordinary name and every
-// surface below followed it.
+// One fact, tested per surface: a guard that reads a path as spelled proves
+// only that it stays inside the workspace root. A symlink planted inside the
+// workspace passes that proof, so `meta -> .dohc` names the workspace's own
+// control plane under an ordinary name. Every surface below must decide on
+// the resolved path.
 //
 // Each test here plants that alias, drives the real entry point, and asserts
 // both the refusal and the disk. Reverting the resolved-path decision at any

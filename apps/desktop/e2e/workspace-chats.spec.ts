@@ -21,7 +21,7 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// WS-E — CHATS EXPANSION (plan PR 12/13): a workspace gets a Chats
+// A workspace gets a Chats
 // view with channels. The default #general channel exists on first use, the
 // composer starts a chat with one Enter and no title prompt (untitled chats
 // display their first-message snippet), messages persist across relaunch,
@@ -94,9 +94,8 @@ test("general channel, composer-first chats, relaunch persistence, unread, searc
     await expect(page.getByTestId("chats-view")).toHaveCount(0);
 
     // Relaunch: channel chats are durable engine state. Between sessions an
-    // agent starts a second chat through the engine daemon over RPC — the
-    // external write path post-cutover (the retired TS in-process store is
-    // refused by daemon-owned workspaces). It must arrive UNREAD.
+    // agent starts a second chat through the engine daemon over RPC, the
+    // external write path. It must arrive unread.
     //
     // What this pins is durability across a relaunch. The live case — an
     // external write reaching the running app — needs the CLI endpoint into
@@ -160,7 +159,7 @@ test("general channel, composer-first chats, relaunch persistence, unread, searc
     await expect(view.getByTestId("chats-thread-unread")).toHaveCount(0);
     await expect(panel.getByTestId("chats-channel-unread")).toHaveCount(0);
 
-    // WS-D integration: engine search finds the channel message and renders
+    // Engine search finds the channel message and renders
     // it as a Chat result with the snippet title.
     await page.getByTestId(activityPin("search")).click();
     await page.getByTestId("search-input").fill("zeppelin-cadence");
@@ -386,8 +385,7 @@ test("performance: channel-list first paint and composer send latency", async ()
   try {
     await seedWorkspaceManifest(temp, workspaceId);
     // 50 channels x 10 threads = 500 threads (each with one message), seeded
-    // through the engine daemon over RPC (post-cutover the retired TS
-    // in-process store cannot create a daemon-acceptable store).
+    // through the engine daemon over RPC.
     await seedThroughDaemon({ workspaceId, rootPath: temp.rootPath }, async ({ chats }) => {
       await chats.ensureGeneralChannel({ workspaceId });
       for (let channelIndex = 1; channelIndex < 50; channelIndex += 1) {

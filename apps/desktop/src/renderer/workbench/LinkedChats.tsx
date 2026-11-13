@@ -476,7 +476,7 @@ export function LinkedChatsPanel(props: {
     workspaceId,
   ]);
 
-  // Reactions (WS-MU-C2) go through the workspace's reaction store, shared
+  // Reactions go through the workspace's reaction store, shared
   // with every Chats surface: this thread's rows as the store knows them.
   const threadReactions = activeThread ? reactions.view(activeThread.id) : NO_REACTIONS;
   const toggleReaction = useCallback(

@@ -396,7 +396,7 @@ it("persists a fenced idle outbox instead of requesting it again indefinitely", 
   );
 });
 
-// #3089: a move's owner sync never enrolls, and answers only after an opening sync installed.
+// A move's owner sync never enrolls, and answers only after an opening sync installed.
 const observedPass = (client: unknown) =>
   runNativeOwnerDeliveryPass({
     client: client as EngineClient,

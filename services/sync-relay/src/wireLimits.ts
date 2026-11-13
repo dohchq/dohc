@@ -15,13 +15,13 @@ export const MAX_HELD_READ_KNOWN_ROWS = 1024;
 // kind on hydrate. A blob a peer smuggles under this cap but over its kind's
 // ceiling is rejected client-side as a protocol violation.
 //
-// The widest is now the Y.Doc payload bound, not the 10 MiB document body:
-// #549 measured a rich document at MAX_TEXT_BYTES encoding to 14.06 MiB of
-// Y.Doc full state, so MAX_YDOC_UPDATE_BYTES is 20 MiB. Under that number a
-// document the engine accepts would be refused 413 here, and the base it needs
-// could never reach a peer. Keep this at or above the engine's
-// MAX_INGEST_BLOB_BYTES (crates/dohc-engine-sync/src/hydration.rs); no test
-// compares the two, so check both when widening either.
+// The widest is the Y.Doc payload bound, not the 10 MiB document body: a rich
+// document at MAX_TEXT_BYTES encodes to 14.06 MiB of Y.Doc full state, so
+// MAX_YDOC_UPDATE_BYTES is 20 MiB. Under that number a document the engine
+// accepts would be refused 413 here, and the base it needs could never reach
+// a peer. Keep this at or above the engine's MAX_INGEST_BLOB_BYTES
+// (crates/dohc-engine-sync/src/hydration.rs); no test compares the two, so
+// check both when widening either.
 export const MAX_BLOB_BYTES = APP_PUBLICATION_MAX_BLOB_BYTES;
 export const MAX_ORIGIN_ID_CHARS = 256;
 

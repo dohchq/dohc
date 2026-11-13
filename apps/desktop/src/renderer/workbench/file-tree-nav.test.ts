@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { navigateTree, type FlatRow } from "./file-tree-nav";
 
-// file-org-v1 D4.3 — keyboard-nav unit tests. Pure function; no DOM.
+// Keyboard-nav unit tests. Pure function; no DOM.
 
 // Sample tree:
 //   team/           (folder, expanded)

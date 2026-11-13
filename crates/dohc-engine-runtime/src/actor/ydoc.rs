@@ -3172,10 +3172,9 @@ fn ydoc_settle_attempt_on_store(
             }
             // An open sync conflict on this object freezes the settle: the
             // lineage may hold a peer's base the user has not reviewed, and
-            // settling would materialize it over the preserved head — the
-            // clobbering settle #338 refuses. Resolution folds the choice
-            // into the lineage (`fold_resolution_into_ydoc_in_tx`) and lifts
-            // the freeze.
+            // settling would materialize it over the preserved head.
+            // Resolution folds the choice into the lineage
+            // (`fold_resolution_into_ydoc_in_tx`) and lifts the freeze.
             if store
                 .read_with(|conn| {
                     dohc_engine_sync::open_sync_conflict_for_object(
@@ -3370,7 +3369,7 @@ fn ydoc_settle_attempt_on_store(
             validate_workspace_root(root_dir, root_guard)?;
             // A resync applies edits without writing, so writes older than the
             // head's can still be owed, and the head's expects the file to
-            // hold them (#2813). Any of them that doesn't land stops the
+            // hold them. Any of them that doesn't land stops the
             // settle, so the head's write never passes an owed one. A
             // conflicted one can't be trusted to make the head's conflict too:
             // the file may already hold what the head's write expects.
@@ -4643,7 +4642,7 @@ fn materialize_ydoc_drain(
     };
     // Every write the document still owes its file, not only the head's: a
     // resync applies edits without writing, and the head's write expects the
-    // file to hold the write before it (#2813).
+    // file to hold the write before it.
     let mut failed_jobs = replay_materializations_in_order(
         store,
         &materialization.root_dir,
@@ -4801,7 +4800,7 @@ fn ydoc_write_state_on_store(
 }
 
 /// Local Y.Doc RPCs have no sync-pass result. Keep an actionable origination
-/// decline visible at this boundary, matching the existing #632 diagnostic.
+/// decline visible at this boundary.
 /// Live sessions can consume only coordinates for the lineage they opened.
 /// A foreign base and every row behind it stay queued until close releases the
 /// lease, so resync cannot replace the lineage behind the active editor.
@@ -6005,9 +6004,9 @@ mod pending_write_order_tests {
             .collect()
     }
 
-    /// #3804: a pull's page brings the file to the note's head through a job
-    /// of its own, while the writes its projections queued still wait. A
-    /// replay then cancels the write of the earlier state, which could only
+    /// A pull's page brings the file to the note's head through a job of its
+    /// own, while the writes its projections queued still wait. A replay
+    /// then cancels the write of the earlier state, which could only
     /// conflict, and marks the write of the head complete. It writes nothing.
     #[test]
     fn a_replay_cancels_the_write_the_head_replaced_once_the_file_holds_the_head() {
@@ -6038,7 +6037,7 @@ mod pending_write_order_tests {
 
     /// A settle replays the writes before the head's one at a time and stops
     /// at the first that does not land. Once the file holds the head, the
-    /// first replay cancels every one of them, so none stops it (#3804).
+    /// first replay cancels every one of them, so none stops it.
     #[test]
     fn a_settle_passes_the_writes_the_head_replaced_once_the_file_holds_the_head() {
         let (scratch, mut store) = hosted_note_changes(&[
@@ -6140,11 +6139,11 @@ mod pending_write_order_tests {
         assert_eq!(conflict_files(&scratch), Vec::<String>::new());
     }
 
-    /// A store that is not a hosted replica is unchanged: it replays a write
-    /// the head replaced as before, which conflicts and keeps that earlier
-    /// state beside the file. Whether a desktop or a server's automation
-    /// replica reaches this state is not established (#3804). This test
-    /// changes with the decision to apply the rule to them too.
+    /// A store that is not a hosted replica replays a write the head
+    /// replaced, which conflicts and keeps that earlier state beside the
+    /// file. Whether a desktop or a server's automation replica reaches this
+    /// state is not established. This test changes with the decision to apply
+    /// the rule to them too.
     #[test]
     fn a_store_off_a_hosted_replica_replays_a_write_the_head_replaced_as_before() {
         let (scratch, mut store, _) = two_writes_that_tie_in_time();

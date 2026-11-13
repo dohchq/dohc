@@ -1798,7 +1798,7 @@ describe("CLI socket server", () => {
     }
   });
 
-  // #3089: a move of a live page waits up to the guard's limit, well inside the request's deadline.
+  // A move of a live page waits up to the guard's limit, well inside the request's deadline.
 
   it.each(["fileMove", "fileDelete"] as const)(
     "keeps host paths out of %s failures",
@@ -4412,11 +4412,8 @@ describe("CLI socket server", () => {
     expect(shown.messages[1]?.body).toBe("Reply before access changed");
   });
 
-  // The TypeScript-backend twin of this scenario was removed with the legacy
-  // sqlite fallback in queryFtsCandidates. The daemon test below asserts the
-  // same property -- that grep hydrates only the FTS candidate threads
-  // (loadedThreadIds equals the matching thread alone) -- and additionally
-  // covers the saturation fallback, so no coverage was lost.
+  // Grep hydrates only the FTS candidate threads (loadedThreadIds equals the
+  // matching thread alone), and falls back when the candidates saturate.
   it("uses daemon candidates for substring grep and falls back when they saturate", async () => {
     const matching = await post({
       actor: "human",

@@ -601,7 +601,7 @@ export function registerChatsIpcHandlers<
     return ListChatThreadAttachmentsResult.parse({ attachments });
   };
 
-  // --- Chats channels (PR 12/13, WS-E) -------------------------------------
+  // --- Chats channels -------------------------------------------------------
   // Workspace-wide Chats organized in channels, same gate as the file rail.
   // Unread counts and read cursors are store-derived; the renderer never
   // supplies identity or read-state revisions of its own.
@@ -675,7 +675,7 @@ export function registerChatsIpcHandlers<
   const listChatChannels: ChatHandler<"listChatChannels"> = async (input, { operation }) => {
     const { workspace, store, kind } = await requireChatScope(operation.workspace.workspaceId);
     operation.assertCurrent();
-    // MU-C4: refresh joined shared channels before reading, so opening
+    // Refresh joined shared channels before reading, so opening
     // Chats shows other members' latest messages. Offline, local rows
     // still answer.
     const rowsUncovered = await syncRendererWorkspaceSharedChannels(operation);
@@ -1027,7 +1027,7 @@ export function registerChatsIpcHandlers<
           )
         ).authorUserId,
     });
-    // MU-C4: refresh before reading, the way listChatChannels does. A channel
+    // Refresh before reading, the way listChatChannels does. A channel
     // view has no poll of its own, and the pass is bounded, so an untargeted
     // sync could leave the channel the user just opened waiting for the
     // rotation. Naming it puts it in this pass.
@@ -1142,7 +1142,7 @@ export function registerChatsIpcHandlers<
     });
   };
 
-  // --- Reactions (WS-MU-C2) ------------------------------------------------
+  // --- Reactions ------------------------------------------------------------
   // Durable, commutative emoji reactions. Identity is main-derived: the viewer
   // reacts as the local user (never renderer-supplied), so a reaction is an
   // authored act attributable and, once syncing, relay-verifiable.

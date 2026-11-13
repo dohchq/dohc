@@ -205,10 +205,9 @@ describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
     expect(relay.stderr()).toContain("SYNC_RELAY_TEST_POOL_END_REJECTED\n");
   });
 
-  // Gate finding: the transport must cap request bodies AT the STREAM. A
-  // client streaming an oversized body is cut off mid-upload (413 and/or a
-  // destroyed socket) instead of being fully buffered, and the server stays
-  // healthy afterwards.
+  // The transport must cap request bodies at the stream. A client streaming
+  // an oversized body is cut off mid-upload (413 and/or a destroyed socket)
+  // instead of being fully buffered, and the server stays healthy afterwards.
   it("rejects an oversized streamed body before buffering it and stays healthy", async () => {
     const relayRoot = await tempRoot("relay-stream-cap");
     const baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"));

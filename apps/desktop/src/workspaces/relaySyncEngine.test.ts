@@ -937,7 +937,7 @@ describe("relaySyncEngine", () => {
     await sync.stop();
   });
 
-  // 0P sync-hardening item 3: a RelayOriginDivergedError (restored/cloned
+  // A RelayOriginDivergedError (restored/cloned
   // engine.db) is not a dead end — the pass recovers onto a fresh origin,
   // re-pushes, and completes normally instead of failing the pass.
   it("recovers and re-pushes when the origin diverged (restored/cloned engine.db)", async () => {
@@ -1298,8 +1298,8 @@ describe("relaySyncEngine", () => {
     await sync.stop();
   });
 
-  // #1233 review: a retry on reconnecting or waking pushed one automatic
-  // failure to two attempts, which is the toast threshold.
+  // A retry on reconnecting or waking must not push one automatic failure to
+  // two attempts, which is the toast threshold.
   it("counts a retry on reconnecting or waking toward the failure's detail, not its attempts", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     pullMock
@@ -1366,7 +1366,7 @@ describe("relaySyncEngine", () => {
     expect(sync.snapshot().conflictCount).toBe(0);
   });
 
-  // 0P-C gate fix (High): a joining machine must never append ops to the
+  // A joining machine must never append ops to the
   // relay before its first successful pull — pushing first could seed
   // boilerplate into the remote workspace or mint conflicts against it.
   it("join bootstrap pulls before any push and only pushes after the first successful pull", async () => {
@@ -2127,7 +2127,7 @@ it("keeps owner admission pending after a successful pull and clears it only aft
   await sync.stop();
 });
 
-// #3089: the move guard's relay pass. It never cancels, moves or re-arms
+// The move guard's relay pass. It never cancels, moves or re-arms
 // ordinary work, and once its move stops waiting it skips its pull.
 describe("relaySyncEngine guard pass", () => {
   const pushed = (hasMore = false) => ({

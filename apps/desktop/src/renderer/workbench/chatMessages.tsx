@@ -54,7 +54,7 @@ import {
   subscribeChosenColors,
 } from "./chosenColors";
 
-// Shared Chats rendering (PR 13, WS-E): the file-rail LinkedChats panel and
+// Shared Chats rendering: the file-rail LinkedChats panel and
 // the workspace Chats view render messages and composers through these same
 // pieces so authorship display and send affordances can never drift. Test
 // ids are prefixed per surface ("linked-chat-*" vs "chats-*") because both

@@ -15,9 +15,7 @@ pub fn is_capture_recovery_origin(origin: &str) -> bool {
 }
 
 /// Recovery is owner-local History, never a file transition or an export preimage.
-/// Generic backfill and COVERED_HEADS_SQL use this exclusion. #1711 must adopt it
-/// in backfill_file_versions_in_tx, file_version_is_publishable_in_tx,
-/// LAST_FILE_EXPORT_SQL and file_version_before_in_tx's bootstrap preimage.
+/// Generic backfill and COVERED_HEADS_SQL use this exclusion.
 #[macro_export]
 macro_rules! exclude_capture_recovery_sql {
     () => {

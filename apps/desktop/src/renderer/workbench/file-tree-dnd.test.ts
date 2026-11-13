@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { planDrop } from "./file-tree-dnd";
 
-// file-org-v1 D4.7 — drop-planning unit tests. Pure function;
-// no DOM, no async. Locks the move semantics.
+// Drop-planning unit tests. Pure function; no DOM, no async.
+// Locks the move semantics.
 
 describe("planDrop — drag-and-drop target computation", () => {
   it("file → folder: moves the file INTO the target folder", () => {

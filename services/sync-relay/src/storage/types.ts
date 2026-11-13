@@ -1496,7 +1496,7 @@ export interface SyncRelayStorage {
     workspaceId: string;
     originId: string;
     ops: SyncRelayLogInput[];
-    // MU-C4 revoke-race gate: runs inside the append's BEGIN IMMEDIATE
+    // Revoke-race gate: runs inside the append's BEGIN IMMEDIATE
     // transaction, i.e. under the SQLite write lock that serializes revokes,
     // before anything is inserted. A throwing guard rolls the whole batch
     // back. This is how the member-append route re-verifies the share
@@ -1932,7 +1932,7 @@ export interface SyncRelayStorage {
     sha256: string;
     aboveRelaySeq?: number;
   }): SyncRelayLogRow[];
-  // MU-C4 shared channels: the channelWireId bound by the earliest
+  // Shared channels: the channelWireId bound by the earliest
   // chat.thread.create op for this threadId in the workspace's log (relay
   // order). undefined means no create exists; null means the earliest create
   // exists but carries no shareable channel binding. Earliest-wins mirrors the

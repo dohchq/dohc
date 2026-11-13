@@ -312,7 +312,7 @@ export type EngineDocInput = {
   // lease's session behind every subscriber, with the same stale-response
   // guard as any other open.
   retryKey?: number;
-  // G2-C-3 version-switch re-bind: a monotonic token that changes whenever the
+  // Version-switch re-bind: a monotonic token that changes whenever the
   // active version of this workspace changes while the same file stays open.
   reopenKey?: number;
 };

@@ -7840,7 +7840,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
     }
     let search_policy = search_policy_for_store(store);
     // Gate on the same floor the projection sink applies
-    // (`validate_plaintext_storable_path`) rather than R10's narrow
+    // (`validate_plaintext_storable_path`) rather than the narrow
     // share-boundary classifier, which misses reserved 8.3 aliases (`dohc~1`
     // aliases `.dohc`) and dots-and-spaces segments. The path is persisted as a
     // durable alias key, so it must already be canonical.

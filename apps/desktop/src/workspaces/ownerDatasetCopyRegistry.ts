@@ -42,11 +42,11 @@ const orMissing = <T>(work: Promise<T>): Promise<T | null> =>
 // `.dohc/local/dataset-copies`, and `.dohc/dataset-copies`, where copies
 // lived before `.dohc/local`. That old folder syncs and holds the account's
 // Collection data, so it goes too. Remove it from here once no workspace has
-// it (#2474). A record names a copies folder, one copy in it, or an old folder.
+// it. A record names a copies folder, one copy in it, or an old folder.
 // A copy's folder name is its account's tag and a short hash, so a cleanup
 // removes only the copies of accounts that left. Two older names count as an
 // account that left: a long hash with no tag, from before tags, and a tag
-// with a long hash, which made Windows paths too long (#2652).
+// with a long hash, which made Windows paths too long.
 const KEY = /^(?:[0-9a-f]{16}-)?[0-9a-f]{64}$|^[0-9a-f]{16}-[0-9a-f]{16}$/,
   COPIES = [".dohc", "local", "dataset-copies"],
   OLD_COPIES = [".dohc", "dataset-copies"];

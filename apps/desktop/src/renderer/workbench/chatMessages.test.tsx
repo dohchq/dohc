@@ -24,7 +24,7 @@ import { setChosenColors } from "./chosenColors";
 // scan, so its call count shows whether a message actually re-rendered.
 vi.mock("@dohc/workspace-contracts/chat-mentions", { spy: true });
 
-// Shared Chats pieces (PR 13, WS-E): both the file-rail panel and the Chats
+// Shared Chats pieces: both the file-rail panel and the Chats
 // view send through this composer, so its Enter semantics are load-bearing
 // for every chat surface at once.
 

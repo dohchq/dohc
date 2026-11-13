@@ -366,8 +366,8 @@ pub(crate) fn forget_before(payload: &mut serde_json::Value) {
 ///
 /// Also hold back a moment that would move its document onto another
 /// spelling of a path another document of the scope holds
-/// ([`spelling_holder`]). A disk that ignores case gives both one file
-/// (#2036). An ordinary replica holds nothing back.
+/// ([`spelling_holder`]). A disk that ignores case gives both one file.
+/// An ordinary replica holds nothing back.
 pub(crate) fn wait_for_occupant_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
@@ -490,7 +490,7 @@ pub(crate) fn held_before_routing(
 ///
 /// The same holds for another spelling of the path ([`spelling_holder`]): a
 /// disk that ignores case keeps one file for both, so two documents there
-/// would write each other's file (#2036). A document at exactly the path is
+/// would write each other's file. A document at exactly the path is
 /// named first.
 pub(crate) fn backfill_path_held(
     conn: &Connection,
@@ -536,8 +536,8 @@ pub(crate) fn backfill_path_held(
 ///
 /// A document held waiting, through others, on `object_id` holds nothing
 /// against it while `object_id` is not ready: documents that trade spellings
-/// of their paths each wait on the next, and none would ever move first
-/// (#2421). One that is not ready writes nothing at its head, so it moves
+/// of their paths each wait on the next, and none would ever move first.
+/// One that is not ready writes nothing at its head, so it moves
 /// first, and [`completed_hold`] keeps it from being ready until the others
 /// move too. A ready one would write its head at once, so it is held first.
 fn spelling_holder(
@@ -1486,7 +1486,7 @@ fn completed_hold(
         return stopped_hold(occupancy, object_id, &waiting).map(Some);
     }
     // A document that moved while another at a spelling of its path still
-    // waited on it (#2421) shares that one's file on a disk that ignores
+    // waited on it shares that one's file on a disk that ignores
     // case, so it is not ready until that one moves or is ready. One that
     // left the scope keeps its file there until it parks.
     for head in head_writes(conn, workspace_id, object_id)? {

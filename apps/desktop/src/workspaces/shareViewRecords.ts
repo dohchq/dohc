@@ -115,7 +115,7 @@ export function assertShareChangesJournalable(unjournalable: readonly Unjournala
 }
 
 // A held spelling's file is the file of the spelling that owns it, so saving,
-// moving or deleting the held one would write over the owner's (#2416).
+// moving or deleting the held one would write over the owner's.
 export function assertHeldSpellingsUnchanged(unjournalable: readonly UnjournalablePath[]): void {
   const held = unjournalable.filter((path) => path.reason === "spelling-collision");
   if (held.length === 0) return;

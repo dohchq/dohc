@@ -1,4 +1,4 @@
-// Phase 5 shared contract: the user-visible sync state. workspace-history /
+// The shared contract for the user-visible sync state. workspace-history /
 // the desktop bridge produce it; the shell's status surface binds to it.
 
 type SyncState =

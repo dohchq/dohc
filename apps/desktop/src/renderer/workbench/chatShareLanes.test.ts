@@ -4,9 +4,9 @@ import { answerLocally, emptyJoinedLaneOrder, planJoinedCommit } from "./chatSha
 
 // The joined lane's cache, tested where its rules live. Two of them cannot be
 // seen from the screen at all: what the cache still holds after a read, and
-// how much of it a long session accumulates. #640 exists to make that size a
-// property of the view, so it is pinned here the same way the response size is
-// pinned at the IPC handler.
+// how much of it a long session accumulates. That size must be a property of
+// the view, so it is pinned here the same way the response size is pinned at
+// the IPC handler.
 
 function answer(channelWireId: string): JoinedChannelAnswer {
   return { channelWireId, joined: null };

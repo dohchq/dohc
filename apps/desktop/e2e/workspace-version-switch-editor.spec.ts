@@ -13,12 +13,10 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// G2-C-3 Part B — THE VERSION-SWITCH-WHILE-OPEN RE-BIND, AS A TEST. G2-C-2 made
-// the SERVER side of a version switch safe (switchVersion settles+closes every
-// live engine Y.Doc session before materializing), but the OPEN EDITOR did not
-// re-bind: useEngineDoc keyed on (workspaceId, path, enabled), so switching the
-// active version while the same rich file stayed open left the editor showing
-// the old version's live doc. The fix keys useEngineDoc on the active version
+// The version-switch-while-open re-bind. switchVersion settles and closes
+// every live engine Y.Doc session before materializing, and the open editor
+// must re-bind too, or it keeps showing the old version's live doc.
+// useEngineDoc keys on the active version
 // (the shell's versionEpoch), so a switch flushes+reopens the session against
 // the now-active version's Y.Doc lineage — resume-never-reseed for a replicated
 // doc, reseed-from-the-freshly-materialized-file for a local-only doc. This
@@ -159,9 +157,9 @@ test("switching the active version while a rich doc stays open re-binds the edit
     });
     await expect.poll(() => editorText(page), { timeout: 15_000 }).toContain(draftSentinel);
 
-    // THE RE-BIND: switch back to Main while the same file stays open. Before
-    // the fix the editor kept showing Draft's live doc; now it re-binds to
-    // Main's lineage — Main's content, without the draft edit.
+    // The re-bind: switch back to Main while the same file stays open. The
+    // editor must not keep showing Draft's live doc. It re-binds to Main's
+    // lineage: Main's content, without the draft edit.
     await switchVersionViaMenu(page, "Main");
     await waitForEngineEditor(page);
     await expect.poll(() => editorText(page), { timeout: 20_000 }).toContain(mainSentinel);
@@ -189,7 +187,7 @@ test("switching the active version while a rich doc stays open re-binds the edit
 
     // Engine authority: the draft edit landed in Draft's snapshot only; Main's
     // snapshot is untouched. This is the "edits land in the correct version"
-    // half of the fix.
+    // half of the re-bind.
     await expect
       .poll(() => engineSnapshotText(temp.rootPath, draftId ?? "", "plan.md"), {
         timeout: 30_000,

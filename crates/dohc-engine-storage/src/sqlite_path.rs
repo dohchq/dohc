@@ -32,7 +32,7 @@ pub(crate) fn deep_folder(root: &Path, units: usize) -> std::path::PathBuf {
     folder
 }
 
-/// #2338: a store deeper than `MAX_PATH` is created, written, backed up,
+/// A store deeper than `MAX_PATH` is created, written, backed up,
 /// verified and reopened through its verbatim path.
 #[cfg(all(test, windows))]
 #[test]

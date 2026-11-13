@@ -1097,12 +1097,12 @@ fn refusal_message(store: &EngineStore, origin: &str) -> String {
         .unwrap()
 }
 
-/// Sol's ruling 1: at the drain's first decision that waits for validation,
-/// the waiting settlement rolls back with its scheduling, the one before it
-/// commits with its report, and nothing after it is read. Once validation
-/// completes the drain goes on from the settlement that waited, in the same
-/// report: every row it completes, before and after the wait, carries one
-/// id, and its change is reported once.
+/// At the drain's first decision that waits for validation, the waiting
+/// settlement rolls back with its scheduling, the one before it commits with
+/// its report, and nothing after it is read. Once validation completes the
+/// drain goes on from the settlement that waited, in the same report: every
+/// row it completes, before and after the wait, carries one id, and its
+/// change is reported once.
 #[test]
 fn a_drain_that_waits_for_validation_commits_only_the_settlements_before_it() {
     let DrainWindow {
@@ -1183,11 +1183,10 @@ fn a_drain_that_waits_for_validation_commits_only_the_settlements_before_it() {
     );
 }
 
-/// Sol's ruling 1, the retry: a completed validation authorizes nothing by
-/// itself. The owner's binding moves while the drain waits, so the
-/// settlement that waited is refused when the drain goes on; and a tail input
-/// that changes after validation completes makes it wait again for the
-/// generation it then reads.
+/// A completed validation authorizes nothing by itself. The owner's binding
+/// moves while the drain waits, so the settlement that waited is refused
+/// when the drain goes on; and a tail input that changes after validation
+/// completes makes it wait again for the generation it then reads.
 #[test]
 fn a_drain_decides_the_settlement_that_waited_again_from_what_it_reads() {
     let DrainWindow {
@@ -1243,11 +1242,10 @@ fn a_drain_decides_the_settlement_that_waited_again_from_what_it_reads() {
     assert!(report.changes.is_empty());
 }
 
-/// Sol's ruling 1, cancellation and crash: a request that stops waiting
-/// leaves its committed prefix for the next pull, which reclaims it under a
-/// report of its own. Rows a report applied stay reclaimable, with their
-/// materialization, until a cursor naming that report commits: an older
-/// report releases nothing.
+/// A request that stops waiting leaves its committed prefix for the next
+/// pull, which reclaims it under a report of its own. Rows a report applied
+/// stay reclaimable, with their materialization, until a cursor naming that
+/// report commits: an older report releases nothing.
 #[test]
 fn an_abandoned_drain_leaves_its_committed_prefix_and_materialization_to_the_next_pull() {
     let DrainWindow {
@@ -1300,10 +1298,10 @@ fn an_abandoned_drain_leaves_its_committed_prefix_and_materialization_to_the_nex
     assert!(drain_queue(&store).is_empty());
 }
 
-/// Sol's ruling 1, the pass: a pull whose drain waits keeps what it fetched
-/// and the drain's report. Its next run fetches nothing again and goes on
-/// with the same report, so the cursor it returns owns the settlement that
-/// committed before the wait, with that settlement's refusal.
+/// A pull whose drain waits keeps what it fetched and the drain's report.
+/// Its next run fetches nothing again and goes on with the same report, so
+/// the cursor it returns owns the settlement that committed before the wait,
+/// with that settlement's refusal.
 #[test]
 fn a_pull_whose_drain_waits_goes_on_with_the_same_report() {
     let DrainWindow {
@@ -4278,11 +4276,11 @@ fn recover_ended(store: &mut EngineStore) -> Result<crate::OpenArtifactDrain, Sy
     )
 }
 
-/// Sol's third and Opus's first findings on 3409694c7: recovery in a pass
-/// writes what the rows of a document it completes committed as drain
-/// reports, in the transaction that removes them, so a later op's wait, an
-/// abandoned pass or a restart still reports them once, with no recovery
-/// failure. The direct recovery API answers the same results at once.
+/// Recovery in a pass writes what the rows of a document it completes
+/// committed as drain reports, in the transaction that removes them, so a
+/// later op's wait, an abandoned pass or a restart still reports them once,
+/// with no recovery failure. The direct recovery API answers the same
+/// results at once.
 #[test]
 fn recovery_in_a_pass_reports_what_it_removed_through_drain_reports() {
     type Reported = (

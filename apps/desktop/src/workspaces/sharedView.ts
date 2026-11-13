@@ -109,7 +109,7 @@ export interface CaptureSharedViewRefreshOutcome extends CaptureSharedViewLocalD
 
 // Capture failing mid-pass still leaves whatever it fixed before the throw —
 // the pending marker for the one unreadable path survives (capture's
-// pending branch fails closed rather than guessing, per #867), but the
+// pending branch fails closed rather than guessing), but the
 // repairs or edits capture already applied to every entry visited before it
 // are real and already durable. This carries those counts on the error so a
 // caller can account for the work completed before capture failed instead of
@@ -256,8 +256,8 @@ export async function resolvedShareViewTarget(
 // this helper. There is no other correct way to mutate the store from here —
 // a branch added later that calls store.deleteTextFile / writeDiskContentToStore
 // / materializeSharedViewPaths directly, outside this helper, reintroduces the
-// exact race this function exists to close (see the round-14 fix for the
-// scanned-deletion branch, which used to skip locking entirely).
+// exact race this function exists to close. The scanned-deletion branch locks
+// too.
 async function withCaptureMutationLock<T>(
   rootDir: string,
   path: string,
@@ -422,7 +422,7 @@ async function materializeSharedViewPaths(
   let aliases: Map<string, string[]> | undefined;
   // The first other live path, by path, that reaches the regular file at
   // `target`: that path's head owns the file, as the engine decides for
-  // workspace peers (#2157). A link or folder at the target has no owner; the
+  // workspace peers. A link or folder at the target has no owner; the
   // delete repairs it.
   async function aliasOwner(path: string, target: string): Promise<string | null> {
     if (!(await lstat(target).catch(absentAsNull))?.isFile()) return null;
@@ -499,7 +499,7 @@ async function materializeSharedViewPaths(
       }
       // Another live spelling owns this file. The delete leaves it when it holds
       // that head, and otherwise writes that head there, under that spelling,
-      // so capture never reads the deleted path's bytes as that file's (#2294).
+      // so capture never reads the deleted path's bytes as that file's.
       const owner = await aliasOwner(change.path, resolvedTarget);
       if (owner !== null) {
         // A protected owner, such as one whose local edits capture could not
@@ -1075,7 +1075,7 @@ class CollisionRecordRefusal extends Error {
   }
 }
 
-// Before #2372 the collision record lived at the top of `.dohc`. A view
+// An older build kept the collision record at the top of `.dohc`. A view
 // updated from then may have one there still keeping a person's files apart,
 // and reading no new record as "no collisions" would let the next capture
 // replace them. So a view with no new record refuses while the old one is
@@ -2130,7 +2130,7 @@ async function captureSharedViewLocalDivergence(
   );
   const executeWork = async (work: CaptureWorkItem): Promise<CaptureVerdict> => {
     // A spelling a refresh held back, whose file another live spelling owns,
-    // sends and repairs nothing, even when preserved (#2416). Its record
+    // sends and repairs nothing, even when preserved. Its record
     // keeps it from reading as deleted if that file goes, and ends once it is
     // no longer live.
     if (work.collision) {
@@ -2541,8 +2541,8 @@ async function refreshSharedViewOnce(
 
       if (collisionRecordedPaths.has(change.path)) {
         // Already-recorded: keep excluding every later write OR delete for
-        // this path, regardless of whether the store now tracks it — this is
-        // the persistence #854 adds. Only capture's resolution arm clears it.
+        // this path, regardless of whether the store now tracks it. Only
+        // capture's resolution arm clears it.
         materializationExclusions.add(change.path);
         unjournalablePaths.push(
           await resolvedShareViewTarget(input.rootDir, change.path).then(
@@ -2569,7 +2569,7 @@ async function refreshSharedViewOnce(
     // Two spellings of one path in this pull, such as `notes.md` and
     // `Notes.md`, share one file on a disk that ignores case. The first is
     // written. Each later one is held back, recorded before that write, and
-    // released below if the disk gives it its own file (#2416).
+    // released below if the disk gives it its own file.
     const firstSpellings = new Map<string, string>();
     for (const change of pull.changedPaths) {
       if (change.operation === "delete" || materializationExclusions.has(change.path)) continue;

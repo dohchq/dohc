@@ -878,9 +878,9 @@ async fn side_metadata_is_measured_at_the_two_copies_the_row_actually_carries() 
     );
 }
 
-/// #2205: an original retained on a volume that cannot refuse to unlink an
-/// open file is counted in watcher.status, listed with its revision, and
-/// deleted only with the late-write risk accepted.
+/// An original retained on a volume that cannot refuse to unlink an open
+/// file is counted in watcher.status, listed with its revision, and deleted
+/// only with the late-write risk accepted.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_retained_copy_on_an_unchecked_volume_is_counted_listed_and_deleted() {

@@ -1,4 +1,4 @@
-//! Corruption behavior and redacted diagnostics (`plan §Corruption behavior`).
+//! Corruption behavior and redacted diagnostics.
 //!
 //! The store never auto-creates an empty replacement over a corrupt database
 //! (the open path refuses to init over any non-empty/foreign file, so the

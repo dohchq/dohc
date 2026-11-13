@@ -27,7 +27,7 @@ function opened() {
 }
 
 describe("NoticeOwner", () => {
-  // #3582: a failure after a dismissal changed a row that was gone.
+  // A failure after a dismissal must not change a row that is gone.
   it("files a new toast when the cause fails again after the person dismissed its row", () => {
     const { shown, row, notice } = opened();
     notice.failed();
@@ -87,7 +87,6 @@ describe("NoticeOwner", () => {
     expect(shown).toHaveLength(1);
   });
 
-  // #3285: a failed read had no Try again, and its row stayed after it worked.
   it("runs the registered Try again, and takes the row back once the cause works", () => {
     const { shown, row, retry, notice } = opened();
     notice.failed();

@@ -22,7 +22,7 @@ test("a workspace shows engine moments and restores a file end-to-end", async ()
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    // #1122 creates empty workspaces. Own the capture baseline in this fixture.
+    // A new workspace is empty. Own the capture baseline in this fixture.
     await writeWorkspaceFiles(temp, [
       { path: "startup.md", contents: "Startup capture baseline.\n" },
     ]);
@@ -100,8 +100,8 @@ test("a workspace shows engine moments and restores a file end-to-end", async ()
 
 // A person creates a workspace, makes its first document, types, and opens
 // History. The document's editor still holds it when capture first sees the
-// file, and capture used to count that as a failed ingest: History paused,
-// and could not list the document until its tab closed.
+// file. Capture must not count that as a failed ingest, which would pause
+// History and keep the document out of its list until its tab closed.
 test("History lists the first document of a new workspace while it is open", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;

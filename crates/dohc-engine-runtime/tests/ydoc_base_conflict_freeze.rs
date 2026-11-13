@@ -23,7 +23,7 @@ const WS: &str = "ws-base-conflict";
 const PATH: &str = "notes/plan.md";
 
 /// Seed a local plain-file head, then apply a peer's divergent base so the
-/// #546 conflict opens. Returns (doc key, winner base bytes, winner doc).
+/// conflict opens. Returns (doc key, winner base bytes, winner doc).
 fn seed_divergent_base(
     store: &mut EngineStore,
 ) -> (DocKey, Vec<u8>, dohc_engine_collab::Ydoc, String) {

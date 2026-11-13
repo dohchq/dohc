@@ -1438,8 +1438,8 @@ fn a_refused_shared_blob_does_not_freeze_the_share() {
     );
 }
 
-/// The other half of the disposition, and the one that keeps this fix from
-/// trading a frozen share for silently dropped data.
+/// The other half of the disposition, and the one that keeps a frozen share
+/// from being traded for silently dropped data.
 ///
 /// A body that does not hash to the sha its op named is the RELAY's copy being
 /// wrong, not the op. Repair the blob and this same op applies — so the pull
@@ -2076,10 +2076,10 @@ fn two_refused_paths_that_differ_past_the_budget_are_still_told_apart() {
 /// so the boundary passes them to replay, where `write_text` refuses them:
 /// `validate_path` rejects `..` anywhere in the path, and
 /// `validate_workspace_path` rejects an all-dot or all-space segment. Both
-/// arrive as `DomainError::InvalidPath`, which the generic `domain` mapping
-/// turned into `RelayError::Local("invalid-path")` — no refusal code, so the
-/// pull ABORTED. The cursor never committed and every op behind the bad path
-/// never arrived (#649, the failure mode).
+/// arrive as `DomainError::InvalidPath`. Mapped to
+/// `RelayError::Local("invalid-path")`, with no refusal code, that would
+/// abort the pull: the cursor would never commit, and every op behind the bad
+/// path would never arrive.
 ///
 /// The rules are pure over a path fixed in the served op, so asking again
 /// returns the same refusal forever: permanent, therefore skipped, and the

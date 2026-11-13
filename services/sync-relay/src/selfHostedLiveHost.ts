@@ -513,7 +513,7 @@ export async function startSelfHostedLiveHost(options: {
         refused.add(key);
         const document = `Live editing of object ${row.objectId} in workspace ${row.workspaceId}`,
           store = `Its store ${storeName(row)} is kept.`;
-        // Until the session host can start a document's Y.Doc itself (#2069), a device must.
+        // Until the session host can start a document's Y.Doc itself, a device must.
         options.onError?.(
           new ServerLogError(
             block === "without-lineage"

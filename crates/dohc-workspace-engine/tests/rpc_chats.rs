@@ -1,5 +1,5 @@
-//! RPC-B acceptance: the complete R09 chat read/write surface through the
-//! in-process protocol transport, backed only by real domain writes.
+//! The complete chat read/write surface through the in-process protocol
+//! transport, backed only by real domain writes.
 
 use crate::common;
 
@@ -1544,10 +1544,10 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
     )
     .await;
     for sequence in 0..6_i64 {
-        // Ids are bounded (256 UTF-16 units) since round 7, so the byte
-        // pressure comes from LARGE MESSAGE BODIES — hydrated feed items
-        // embed the opening message body, so ~60 KiB bodies trip the
-        // 256 KiB page budget after a handful of items.
+        // Ids are bounded (256 UTF-16 units), so the byte pressure comes
+        // from large message bodies. Hydrated feed items embed the opening
+        // message body, so ~60 KiB bodies trip the 256 KiB page budget after
+        // a handful of items.
         let huge_body = format!("feed budget {} {}", sequence, "b".repeat(60 * 1024));
         call(
             &transport,

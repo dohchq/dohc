@@ -103,8 +103,8 @@ function pushBounded(
 // The degraded shape: everything between the common prefix and the common
 // suffix becomes one removed block followed by one added block. Compaction
 // never drops any of that — it only drops context lines — so building more
-// than the display shows is pure waste. A 10 MiB body of short lines used to
-// build two million objects to render eight hundred.
+// than the display shows is pure waste. Unbounded, a 10 MiB body of short
+// lines would build two million objects to render eight hundred.
 function buildContiguousDiff(before: string[], after: string[], maxLines: number): LineDiff {
   let prefix = 0;
   while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) {

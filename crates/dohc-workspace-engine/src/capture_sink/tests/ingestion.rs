@@ -499,10 +499,10 @@ fn binary_flip_and_revert_to_identical_text_recaptures_the_head() {
 
 #[test]
 fn non_ownable_ingest_spares_a_ydoc_head_but_retires_a_capture_head() {
-    // AUDIT-SILENTSAVE. Pins the sink wiring directly: that the
-    // NonOwnable branch passes allow_ydoc_origin=false. The rpc test
-    // covers the same rule end to end, but only while the driver keeps
-    // offering that path — this does not depend on the driver at all.
+    // Pins the sink wiring directly: that the NonOwnable branch passes
+    // allow_ydoc_origin=false. The rpc test covers the same rule end to end,
+    // but only while the driver keeps offering that path. This test does not
+    // depend on the driver at all.
     //
     // A settled Y.Doc past MAX_CAPTURE_TEXT_BYTES arrives here as
     // NonOwnable. Retiring it destroys a document the user just saved.

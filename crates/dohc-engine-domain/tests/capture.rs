@@ -901,7 +901,7 @@ fn capture_supersedes_an_older_pending_materialization_job() {
     std::fs::write(scratch.path().join("doc.bin"), disk_bytes).expect("seed disk");
 
     // An older mirrored-resolve write enqueues a pending job whose preimage
-    // matches the current disk bytes (the exact codex-review scenario).
+    // matches the current disk bytes.
     let stale_sha = hex_sha256(stale_bytes);
     store
         .write_with(&NO_FAULTS, |tx| {
@@ -1334,7 +1334,7 @@ fn capture_manifest_excludes_pending_conflict_installed_ydoc_asset() {
     );
 }
 
-// dohc#3622. Only this version's own unwritten switch write keeps its head out
+// Only this version's own unwritten switch write keeps its head out
 // of the seed. Another version's pending write of the same bytes doesn't.
 #[test]
 fn capture_manifest_ignores_another_versions_unwritten_switch_write() {
@@ -1399,7 +1399,7 @@ fn capture_manifest_ignores_another_versions_unwritten_switch_write() {
 
 #[test]
 fn snapshot_metadata_reports_which_paths_the_ydoc_editor_owns() {
-    // AUDIT-SILENTSAVE round 4 (D3). `has_ydoc_marker` is what stops the
+    // `has_ydoc_marker` is what stops the
     // desktop capture layer from retiring a settled Y.Doc for exceeding a cap
     // a Y.Doc is not bound by. The whole daemon half of that fix rests on this
     // exists subquery, so it is asserted both ways here rather than only
@@ -1466,14 +1466,12 @@ fn snapshot_metadata_reports_which_paths_the_ydoc_editor_owns() {
 
 #[test]
 fn a_non_ownable_retire_must_not_destroy_a_materialized_ydoc_head() {
-    // AUDIT-SILENTSAVE round 3. The origin gate admits Y.Doc heads so a file
-    // DELETED while the daemon was down still retires. The capture sink then
-    // reused that permission for a different reason — "no longer
-    // engine-ownable" — and a settled Y.Doc past the 128 KiB capture cap is
-    // reported exactly that way. Result: the user pastes 131 KB, sees an
-    // honest "Saved" with the bytes on disk, quits, reopens, and reconcile
-    // journals "Stopped tracking non-text content" over a document they are
-    // actively editing. The reason must decide, not the origin alone.
+    // The origin gate admits Y.Doc heads so a file deleted while the daemon
+    // was down still retires. A settled Y.Doc past the 128 KiB capture cap
+    // is reported as "no longer engine-ownable". If that reason retired it
+    // too, a user who pasted 131 KB and saw "Saved" would reopen to
+    // "Stopped tracking non-text content" over a document they are editing.
+    // The reason must decide, not the origin alone.
     let (_scratch, mut store) = open_store();
     store
         .write_with(&NO_FAULTS, |tx| {

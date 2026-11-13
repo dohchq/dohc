@@ -1946,10 +1946,10 @@ it.each(["drain"] as const)(
   },
 );
 
-// Opus's security review: each drain queued behind a document's work logged
-// its wait, so someone with Edit submitting from several connections could fill
-// the log. Proves: a document's application waits log once a minute (the
-// submit line's test proves the shared cap's `repeated` count).
+// A drain queued behind a document's work must not log each wait, or someone
+// with Edit submitting from several connections could fill the log. Proves: a
+// document's application waits log once a minute (the submit line's test
+// proves the shared cap's `repeated` count).
 it("logs drains that waited over 100 ms for their document once a minute, with fixed words only", async () => {
   let clock = 0;
   const o = await completedServiceOwner({ nowMs: () => clock });
@@ -2649,7 +2649,7 @@ function keptEdits(o: Awaited<ReturnType<typeof enrolledServiceHost>>) {
 // unloads without settling or publishing, with the queue's bytes and the
 // unsettled edit kept, and once its owner confirms a copy it leaves.
 
-// Proves: Sol's F3. The relay refused the owner's adoption seed and nothing applied it. Stop's retirement asks
+// Proves: the relay refused the owner's adoption seed and nothing applied it. Stop's retirement asks
 // the journal, which proves the seed absent; the engine abandons it, and the retirement completes without
 // waiting for a recovery copy, which stays asked for. The first Resume activates the successor.
 
@@ -3207,7 +3207,7 @@ it("activates a retired activation's successor after Resume, which admits edits 
 // missing what the owner wrote while live editing was off. After Resume, the
 // successor's pass pulls the hosted feed before it captures, so the successor
 // starts from the feed, never from that copy. The two-daemon e2e can't hold
-// the host's copy ready across Stop since #2103, so it relies on this test.
+// the host's copy ready across Stop, so it relies on this test.
 
 // Proves: the engine refuses to release a stopped document until it parked.
 // The refusal alone retires nothing: the release is tried again on each pass
@@ -6493,11 +6493,11 @@ it.each(["another document", "no document"] as const)(
 // Proves: an update that reached the relay while the capture's pull ran may
 // have missed that pull, so it lifts the block that capture left.
 
-// Opus's r2c-3e4 review: nothing proved that a target sharing another's
-// catch-up pull blocks at that pull's head. Proves: a second ownerless target
-// whose document took an update after the first target's pull started, and
-// before its own activation read the latest, blocks at the head that pull
-// started at, so it captures once more on a later pass, and only once.
+// Proves: a target sharing another's catch-up pull blocks at that pull's
+// head. A second ownerless target whose document took an update after the
+// first target's pull started, and before its own activation read the latest,
+// blocks at the head that pull started at, so it captures once more on a
+// later pass, and only once.
 
 // The pause a host given this interval takes between passes, which only a wake, or `run` below, ends in a test.
 const HELD_POLL_MS = 3_600_000;
@@ -6999,13 +6999,12 @@ it("keeps a released-lineage hold a cut held list leaves out, until a list that 
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
 });
 
-// Sol's review: a pass that moved more documents from ready to held than its
-// answer fits cut `newlyHeld` silently, and a pass whose commit's reply was
-// lost never reached activation. Either way a live document past its page's
-// held window could be in neither list, and its owner stayed. Proves: such a
-// page drops every owner past its window, though it names none of them; the
-// document activates again, where the engine refuses it until a list names
-// its hold.
+// A pass that moves more documents from ready to held than its answer fits
+// cuts `newlyHeld` silently, and a pass whose commit's reply is lost never
+// reaches activation. Either way a live document past its page's held window
+// can be in neither list. Proves: such a page drops every owner past its
+// window, though it names none of them; the document activates again, where
+// the engine refuses it until a list names its hold.
 it("drops every owner past the window of a page whose newly held list may leave some out after a lost commit", async () => {
   const seen: { covers: boolean; owned: boolean; held: boolean }[] = [];
   const o = await emptyServiceHost(),
@@ -7101,15 +7100,12 @@ it("pushes a live document's settled edit on the next pass while another documen
   ).toBeGreaterThanOrEqual(pulled + 2);
 });
 
-// Sol's review: a pull after a departure counted as its replica's chance to
-// retire it even when its departed list stopped short of it, so the relay
-// moved on to its next page of retired enrollments, and the document came
-// back only on pulls whose lists stopped short of it again: it was never
-// confirmed gone. Proves: while the relay rotates its pages, as the
-// self-hosted relay does with a sibling keeping the workspace attached, a
-// page keeps its turn until a departed list reaches each of its documents,
-// so a parked document is confirmed gone within a few pulls, and never while
-// a list names it.
+// A pull after a departure is not its replica's chance to retire it when the
+// pull's departed list stops short of it. Proves: while the relay rotates its
+// pages, as the self-hosted relay does with a sibling keeping the workspace
+// attached, a page keeps its turn until a departed list reaches each of its
+// documents, so a parked document is confirmed gone within a few pulls, and
+// never while a list names it.
 it("confirms a parked document gone while its retired enrollment pages rotate, and never while a list names it", async () => {
   const o = await emptyServiceHost(),
     workspaces = [o.workspace];
@@ -7810,10 +7806,10 @@ it("pulls only the workspace a write reached, and each of two written in one tic
   expect(host.hostedPulls("workspace-b")).toEqual({ total: 2, reasons: { first: 1, changed: 1 } });
 });
 
-// Issue #1967, round 3: lifecycle work and idle deadlines waited for the next periodic pass to be found.
+// Lifecycle work and idle deadlines must not wait for the next periodic pass to be found.
 // Each test below holds periodic passes, so only the host's own wakes, or a pass the test runs, move it on.
 
-// Proves (#3542): reopening a moved document's workspace wakes the pass that gives its restore route back, and
+// Proves: reopening a moved document's workspace wakes the pass that gives its restore route back, and
 // Decline wakes the passes that end the route, unload what it loaded and drain the workspace, with no periodic pass.
 it.each(["detaches and attaches"])(
   "gives a moved document's restore route back after a running host %s its workspace, with passes held",
@@ -7938,7 +7934,7 @@ it("reloads a document opened while the unload its deadline started is in the en
 // order, so a pass that visits one document visits the other first.
 
 // Measures: a ready workspace whose document unloaded idle runs no idle sweep before a deadline and no lifecycle
-// retry, and pulls nothing more, over 100 passes. Before round 3 every pass swept for idle documents.
+// retry, and pulls nothing more, over 100 passes.
 
 // Proves: a retirement that stops at its work budget after its tip moved on wakes the pass that reconciles the
 // next pages, until it settles once through the last and retires, with no periodic pass. Seventeen edits two to
@@ -8165,9 +8161,9 @@ function pacedPasses(poll = 250, ceiling = 2_000) {
 }
 type Paced = ReturnType<typeof pacedPasses>;
 
-// Issue #1967: a host ran a pass every 250 ms for as long as it ran, whether or not the last one found anything.
 // Measures: the passes and engine requests of one simulated minute for one, five and twenty ready, quiet notes,
-// at an idle interval equal to the poll interval, as before, and at the live profile's two seconds.
+// at an idle interval equal to the poll interval, which runs a pass every poll whether or not the last one found
+// anything, and at the live profile's two seconds.
 // Proves: an idle host's pause grows until a rotation through its notes takes its idle interval, and the recovery
 // probe still pulls every 30 s. Twenty notes take three passes, so their pause stops at a third of the interval.
 it.each(
@@ -8338,8 +8334,8 @@ async function idleNote(options: { supervised?: boolean } = {}) {
   };
 }
 
-// Issue #1967, with the real activation and delivery of one note against the test engine.
-// Measures: the passes and engine requests of one simulated minute, at the old and the new idle interval.
+// With the real activation and delivery of one note against the test engine.
+// Measures: the passes and engine requests of one simulated minute, at idle intervals of 250 ms and 2,000 ms.
 // Proves: an idle pass sends the engine only the note's two waiting-edit reads and its workspace's push.
 it.each([250, 2_000])(
   "runs one hosted, ready note for a minute at an idle interval of %i ms",
@@ -8535,7 +8531,7 @@ it("settles an edit a connection applies on an idle host at once, with the fixed
   expect(paced.clock.nowMs()).toBe(idle + paced.poll);
 });
 
-// #3796: once a minute the supervisor sweeps for notes nobody has used for ten minutes, by calling
+// Once a minute the supervisor sweeps for notes nobody has used for ten minutes, by calling
 // `storage.reclaimIdleLiveDocuments`. The call below is all its sweep does. The sweep's timer is the supervisor's
 // own and is no part of this test.
 // Proves: a sweep that finds nothing to reclaim writes nothing, so it asks the host for no pass. The pause it lands

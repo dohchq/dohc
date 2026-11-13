@@ -2338,7 +2338,7 @@ impl EngineService {
             }
             // The close committed, so the session stays closed whatever its
             // drain answers. A failed drain is recorded instead, so a retried
-            // close reports it rather than finding no session (#2813).
+            // close reports it rather than finding no session.
             let drained = actor
                 .ydoc_close_drain(
                     session_key.clone(),

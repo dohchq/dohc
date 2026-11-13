@@ -434,7 +434,7 @@ describe("desktop workspace reads", () => {
   }
 
   // A held file waits on a person, so search leaves out that one file and
-  // finds the rest of the view (#2424).
+  // finds the rest of the view.
   it.each(["standalone", "mount"] as const)(
     "searches a %s view around a file held behind a local one",
     async (mode) => {

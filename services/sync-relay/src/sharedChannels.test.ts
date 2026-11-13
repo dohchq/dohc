@@ -21,11 +21,11 @@ import {
   testStorage,
 } from "./testing";
 
-// MU-C4 shared channels — the route-level adversarial suite for the
-// bidirectional chat grant: the member append route, the chat branch
-// of the fail-closed share filter, read-write vs read-only enforcement, and
-// revocation. PR-18 posture throughout: server-derived identity, fail-closed
-// filters, byte-identical generic 404s for every unauthorized probe.
+// Shared channels: the route-level adversarial suite for the bidirectional
+// chat grant: the member append route, the chat branch of the fail-closed
+// share filter, read-write vs read-only enforcement, and revocation.
+// Throughout: server-derived identity, fail-closed filters, byte-identical
+// generic 404s for every unauthorized probe.
 
 afterEach(closeTestStorages);
 

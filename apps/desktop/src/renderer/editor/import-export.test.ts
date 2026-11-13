@@ -501,7 +501,7 @@ describe("desktop editor markdown round-trip", () => {
   });
 
   it("round-trips per-column GFM alignment (left/center/right) losslessly", () => {
-    // Phase 1 assumed per-column alignment was inexpressible; it is not. The
+    // GFM can express per-column alignment. The
     // `align` cell attr (set by tableControls' column grip menu) serializes to
     // the delimiter row and parses back, so a mixed-alignment table — left
     // (`:---`), center (`:---:`), right (`---:`), and default (`---`) — is
@@ -910,9 +910,9 @@ describe("a list nested inside a task item", () => {
 
 // CommonMark lets a fenced code block's opener carry up to three leading
 // spaces. Four or more make an indented code block instead, which is a
-// different construct. The import path used to drop a top-level fence indented
-// 1-3 spaces together with its whole body, so opening such a document and
-// letting it settle wrote the deletion back to disk.
+// different construct. The import path must keep a top-level fence indented
+// 1-3 spaces together with its whole body. Dropping it would write the
+// deletion back to disk when such a document opens and settles.
 describe("desktop editor markdown import: indented code fences", () => {
   function bodyBlocks(markdown: string): JSONContent[] {
     const root = yXmlFragmentToProseMirrorRootNode(

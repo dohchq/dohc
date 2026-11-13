@@ -3,8 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createIpcPresenceTransport } from "./ipcPresenceTransport";
 import type { PresenceScopeInput } from "../../ipc/bridgeContract";
 
-// MU-C5 — the IPC-PROXIED presence transport. It must forward the scope, carry
-// NO relay token, normalize the snapshot, and abort an in-flight poll over IPC
+// The IPC-proxied presence transport. It must forward the scope, carry
+// no relay token, normalize the snapshot, and abort an in-flight poll over IPC
 // (presenceCancel) so a workspace switch can't leak a request or repaint stale.
 
 const SCOPE: PresenceScopeInput = { kind: "workspace", workspaceId: "ws-a" };

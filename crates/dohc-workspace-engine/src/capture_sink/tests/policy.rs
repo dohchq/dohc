@@ -68,8 +68,8 @@ fn an_unreadable_policy_holds_capture_instead_of_widening_or_retiring() {
         "the held op must neither update nor retire the existing head"
     );
 
-    // A MALFORMED file is a different case: the ratified WS-F rule keeps
-    // capture floor-only (writes are never dropped for a bad policy).
+    // A malformed file is a different case: capture stays floor-only, because
+    // writes are never dropped for a bad policy.
     std::fs::remove_dir_all(scratch.path().join(".dohc/files.toml")).expect("rm dir");
     write_file(
         scratch.path(),
@@ -175,8 +175,8 @@ fn broken_files_toml_keeps_capture_floor_only() {
     write_file(scratch.path(), "notes/a.md", b"kept");
     let (db, mut sink) = sink_for(&scratch, &supervisor);
 
-    // WS-F: a malformed policy never drops writes — capture stays
-    // floor-only rather than failing closed.
+    // A malformed policy never drops writes. Capture stays floor-only rather
+    // than failing closed.
     assert!(matches!(
         ingest(&mut sink, "notes/a.md").expect("floor-only capture"),
         IngestOutcome::Captured { .. }

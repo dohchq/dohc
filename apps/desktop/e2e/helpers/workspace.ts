@@ -151,7 +151,7 @@ export async function createSiblingWorkspaceDir(
 // Pre-seeds the hermetic registry (dohc-workspaces.json under the test home)
 // so the app launches with multiple known workspaces and the titlebar
 // switcher can move between them. An entry's optional `remote` marks the
-// workspace as cloud-synced (the 0P sync specs seed it so the relay engine
+// workspace as cloud-synced (the sync specs seed it so the relay engine
 // attaches at open without driving the enable-sync UI, which has its own
 // coverage).
 export async function seedWorkspaceRegistry(

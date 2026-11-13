@@ -341,7 +341,7 @@ it("removes only the copies of accounts that left in a look still owed, never th
   const mine = mocks.open.mock.calls
     .slice(1)
     .map(([options]) => (options as { directory: string }).directory);
-  // B's copy under the long name a build before #2652 used counts as an account that left.
+  // B's copy under the older long name counts as an account that left.
   const long = join(copies, `${basename(mine[0]!).slice(0, 16)}-${"3".repeat(64)}`);
   await mkdir(long);
   await writeFile(join(long, "replica.sqlite"), "B's data");

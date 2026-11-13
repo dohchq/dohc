@@ -446,12 +446,10 @@ function liveCapture(
 // `ORDER BY moment_order` query. Protected (secret) rows are dropped here
 // exactly as a query against the text `moments` table dropped them.
 async function liveMoments(engine: WorkspaceEngineCapture): Promise<EngineMomentRow[]> {
-  // DRAINED, not capped. An earlier draft asked for one 500-row page, which
-  // returns the newest 500 — so the moment a test recorded more, the reversed
-  // array stopped being oldest-first and every count and sequence assertion
-  // below would have compared against a truncated page without saying so. A cap
-  // here is a limit rejecting valid work; paging costs nothing and removes the
-  // question. (Same correction as the moments reader on #417.)
+  // Drained, not capped. One 500-row page returns the newest 500, so once a
+  // test records more, the reversed array stops being oldest-first and every
+  // count and sequence assertion below compares against a truncated page
+  // without saying so. Paging costs nothing and removes the question.
   const summaries: Awaited<ReturnType<WorkspaceEngineCapture["listMoments"]>>["moments"] = [];
   let cursor: import("@dohc/workspace-engine-client").HistoryCursor | undefined;
   for (;;) {
@@ -707,7 +705,7 @@ describe("workspaceEngineCapture batch capture", () => {
     );
     expect(open).toHaveBeenCalledTimes(2);
     // The note open and the record's adoption both read a seed past the
-    // in-band cap, up to the WYSIWYG editor's limit (#2521).
+    // in-band cap, up to the WYSIWYG editor's limit.
     for (const [options] of open.mock.calls) {
       expect(options).toMatchObject({
         largeSeed: { workspaceId: WORKSPACE_ID, maxBytes: WYSIWYG_MARKDOWN_THRESHOLD_BYTES },
@@ -4136,7 +4134,7 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
         // Delivered during the open, which the generation buffers and replays
         // the moment it installs — after the daemon has answered
         // head/lineage absent, before the guard runs. That is deterministic.
-        // The window codex named (arrival inside the awaited disk check) is the
+        // An arrival inside the awaited disk check is the
         // same defect one tick later, and the guard reads the count once after
         // that await, so both arrivals take the identical path. Racing an lstat
         // with a timer is not stageable, so this stages the half that is.
@@ -4189,13 +4187,12 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
     // closed itself and dropped every subscription) and cannot be reopened (a
     // refused close reinserts the daemon entry with its lease held).
     //
-    // Two things must be true of the answer, and #665 changed which refusal
-    // carries them. It may never call the path missing — something IS writing
-    // it — and it may never leave the surface writable over a session the
-    // daemon still holds.
+    // Two things must be true of the answer. It may never call the path
+    // missing, because something is writing it, and it may never leave the
+    // surface writable over a session the daemon still holds.
     //
-    // The orphan now evicts when its close is refused, so the daemon no longer
-    // holds the session and the second hazard is gone with it. What remains is
+    // The orphan evicts when its close is refused, so the daemon does not
+    // hold the session and the second hazard cannot arise. What remains is
     // the first, and `YDocOpenRacedError` is exactly it: this open's answer is
     // already stale, open it again — and the next open binds the lineage the
     // eviction preserved. The path this test guards is that the refusal is
@@ -4266,8 +4263,8 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
       "drop the `dischargedByEvict` arm (#665) -> the recheck finds the path still absent and the refusal claims the version does not have a file a peer is writing into it.",
     ).toBeInstanceOf(YDocOpenRacedError);
     expect(isYDocPathNotInVersionError(refusal)).toBe(false);
-    // The lease is gone, so the surface may fall back — that is what makes the
-    // raced refusal safe here where #564 needed the unreleased one.
+    // The lease is gone, so the surface may fall back. That is what makes the
+    // raced refusal safe here, where a held lease would need the unreleased one.
     expect(refusal).not.toBeInstanceOf(YDocSessionUnreleasedError);
     expect(evicts).toBe(1);
     // And the release never escalated, so nothing was materialized.
@@ -4380,7 +4377,7 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
       rustEngineSessions: mockLiveSessions(loopback),
       openRustYDocProviderSession: async (options) => {
         // Delivered during the open, so the count is already non-zero when the
-        // rules run — the exact input that used to bypass this refusal.
+        // rules run. This input must not bypass the refusal.
         options.onRemoteUpdate(peerUpdate);
         return {
           doc,
