@@ -25,11 +25,13 @@ import {
   openProductionSync,
 } from "./namedLiveRoutes.test-helper";
 import { personalRouteFixture } from "./personalLiveDocumentRoutes.test-helper";
+import { observeRelayWrites } from "./relayWriteChanges";
 import { selectHostedDocuments } from "./selfHostedLiveHost";
 import { selfHostLiveProfile } from "./selfHostLiveProfile";
 import { discoverServiceHostDocuments } from "./serviceHostEnrollmentRoutes";
 import { SERVICE_HOST_ENROLLMENTS } from "./storage/serviceHostEnrollment";
 import { SHARE_WEB_ORIGIN } from "./testing";
+import { chatChannelCreate, chatMessageAppend, chatThreadCreate, sequenced } from "./testing";
 
 // Run with DOHC_LIVE_HOST_MEASURE=1. Each measurement prints one line. The
 // fresh-read case also needs Postgres at POSTGRES_URL, or the dev default.
@@ -356,6 +358,10 @@ it.skipIf(process.env.DOHC_LIVE_HOST_MEASURE !== "1")(
 //   138 ms of CPU a round, and no standing check on another document. Before, the
 //   other 108 connections made 2268 checks over the 21 rounds, at p95 225 ms
 //   and 180 ms of CPU a round.
+// - A Group gets 2 posts a second for 10 s: no post rechecks a connection,
+//   and a post settles in p50 5 ms, p95 7 to 33 ms, with 1.6 to 2.4 ms of CPU.
+//   Before, each post rechecked all 120, at p50 103 ms, p95 357 ms and
+//   110 ms of CPU a post.
 // Each delivered update costs its connection 13 standing checks, one for
 // each frame sent and received and each feed read. A check reads the
 // connection's authority from SQLite, and preparing its statements is about
@@ -499,6 +505,50 @@ it.skipIf(process.env.DOHC_LIVE_HOST_MEASURE !== "1")(
     const oneCpu = process.cpuUsage(cpu),
       changedReads = reads.get("object-1") ?? 0,
       otherReads = total() - changedReads;
+    // Then a busy Group: 2 posts a second for 10 s while all 120 connections
+    // stay open. Relay writes reach the connections as the hosts deliver them.
+    cleanup.push(observeRelayWrites(f.storage, (documents) => f.changes.notifyWrite(documents)));
+    const workspaceId = f.binding.workspaceId,
+      originId = "member-desktop",
+      threadId = "t".repeat(26);
+    const append = (ops: Parameters<typeof sequenced>[0]) =>
+      f.storage.appendLogBatch({
+        workspaceId,
+        originId,
+        ops: sequenced(ops, f.storage.maxOriginSeq(workspaceId, originId) + 1).map(
+          ({ payload, ...op }) => ({ ...op, payloadJson: JSON.stringify(payload) }),
+        ),
+      });
+    append([
+      chatChannelCreate("c".repeat(26), {
+        kind: "channel",
+        name: "Events",
+        type: "both",
+        folderPath: "events",
+      }),
+      chatThreadCreate(threadId, "c".repeat(26)),
+    ]);
+    const POSTS = 20,
+      posts: number[] = [];
+    await new Promise((resolve) => setImmediate(resolve));
+    reads.clear();
+    cpu = process.cpuUsage();
+    for (let post = 0; post < POSTS; post++) {
+      const start = performance.now();
+      append([
+        chatMessageAppend(`post-${post}`, threadId, "See you at 6", {
+          authorUserId: "reader-1",
+          authorDisplayName: "Sam",
+        }),
+      ]);
+      // Every check a post wakes runs before the next macrotask.
+      await new Promise((resolve) => setImmediate(resolve));
+      const elapsed = performance.now() - start;
+      posts.push(elapsed);
+      await new Promise((resolve) => setTimeout(resolve, Math.max(0, 500 - elapsed)));
+    }
+    const chatCpu = process.cpuUsage(cpu),
+      chatReads = total();
     expect(sockets.every(({ socket }) => socket.ws.readyState === WebSocket.OPEN)).toBe(true);
     const sorted = [...fanOut].sort((a, b) => a - b),
       p = (q: number) => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * q))]!;
@@ -520,7 +570,16 @@ it.skipIf(process.env.DOHC_LIVE_HOST_MEASURE !== "1")(
         `p50=${q(0.5).toFixed(3)} p95=${q(0.95).toFixed(3)} max=${one[one.length - 1]!.toFixed(3)} samples=${one.length} ` +
         `cpu-ms-per-round=${((oneCpu.user + oneCpu.system) / 1000 / ROUNDS).toFixed(1)} standing-checks-changed=${changedReads} standing-checks-other=${otherReads}`,
     );
+    const chat = [...posts].sort((a, b) => a - b),
+      c = (x: number) => chat[Math.min(chat.length - 1, Math.floor(chat.length * x))]!;
+    console.log(
+      `NAMED_LIVE_CHAT_POSTS connections=${PEOPLE} posts=${POSTS} posts-per-second=2 rechecks-per-post=${(chatReads / POSTS).toFixed(1)} ` +
+        `post-to-settled-ms p50=${c(0.5).toFixed(3)} p95=${c(0.95).toFixed(3)} max=${chat[chat.length - 1]!.toFixed(3)} ` +
+        `cpu-ms-per-post=${((chatCpu.user + chatCpu.system) / 1000 / POSTS).toFixed(1)}`,
+    );
+    expect(sockets.every(({ socket }) => socket.ws.readyState === WebSocket.OPEN)).toBe(true);
     expect(otherReads).toBe(0);
+    expect(chatReads).toBe(0);
     expect(allReads / (PEOPLE * ROUNDS)).toBeLessThan(14);
     // About twice the slowest run above.
     expect(p(0.95)).toBeLessThan(3000);
