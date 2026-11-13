@@ -187,7 +187,7 @@ test(`${shapeName} JavaScript receipts reject missing, failed, duplicated, or di
       const comparison = aggregateJavascript(different, shape).buildIdentity;
       assert.equal(comparison.matched, false);
       assert.deepEqual(comparison.differingOutputs, [kind]);
-      assert.equal(comparison.outputs[kind].length, shape.js + 1);
+      assert.deepEqual(comparison.outputs[kind], different.map(row => ({ part: row.part, sha256: row.build[kind].artifact })));
       delete different[index].build[kind];
       assert.throws(() => aggregateJavascript(different, shape), /build identity/u);
     }
@@ -905,7 +905,7 @@ function writeTimingReceipts(root, scope, commit, shape = cloudShape()) {
   }
 }
 
-test("Boat build comparisons survive final verification and warn only about differing outputs", async t => {
+test("Boat build differences fail the aggregate with comparison evidence; identical builds pass final verification", async t => {
   const root = mkdtempSync(join(tmpdir(), "boat-build-identity-")), outputDirectory = join(root, "aggregate");
   t.after(() => rmSync(root, {recursive: true, force: true}));
   const jobs = withoutWaits(CLOUD_SHAPES.boat), commit = jobs[0].head_sha, summary = join(root, "summary.md");
@@ -913,28 +913,37 @@ test("Boat build comparisons survive final verification and warn only about diff
   const warn = t.mock.method(console, "warn", () => {});
   t.mock.method(console, "log", () => {});
   writeTimingReceipts(root, "js", commit, CLOUD_SHAPES.boat);
-  for (const kind of [null, "engine", "desktop"]) {
+  for (const differingOutputs of [[], ["engine"], ["desktop"], ["engine", "desktop"]]) {
     const path = join(root, "worker-1/result.json"), record = JSON.parse(readFileSync(path, "utf8"));
     record.build = buildReceipt();
-    if (kind) record.build[kind].artifact = "c".repeat(64);
+    for (const kind of differingOutputs) record.build[kind].artifact = "c".repeat(64);
     writeFileSync(path, JSON.stringify(record));
     if (existsSync(summary)) rmSync(summary);
     warn.mock.resetCalls();
-    const report = await aggregateCloud("js", root.replaceAll("\\", "/"), {env, outputDirectory, readJobs: async () => jobs,
+    const aggregate = () => aggregateCloud("js", root.replaceAll("\\", "/"), {env, outputDirectory, readJobs: async () => jobs,
       now: () => Date.parse(jobs.find(job => job.name === "typecheck + tests").completed_at)});
-    assert.equal(report.verdict, "PASS");
-    assert.equal(report.buildIdentity.matched, !kind);
-    assert.equal(warn.mock.calls.length, 0, "final verification owns annotations");
-    await verifyCompletedCloud("js", {env, outputDirectory, readJobs: async () => jobs});
+    const mismatch = differingOutputs.length > 0;
+    const message = `JavaScript build outputs differ across shared preparation and workers: ${differingOutputs.join(", ")}.`;
+    if (mismatch) await assert.rejects(aggregate, { message });
+    else await aggregate();
+    const report = JSON.parse(readFileSync(join(outputDirectory, "js-result.json"), "utf8"));
+    assert.equal(report.verdict, mismatch ? "FAIL" : "PASS");
+    assert.equal(report.error, mismatch ? message : undefined);
+    assert.equal(report.buildIdentity.matched, !mismatch);
+    assert.deepEqual(report.buildIdentity.differingOutputs, differingOutputs);
+    for (const kind of ["engine", "desktop"]) {
+      assert.deepEqual(Object.fromEntries(report.buildIdentity.outputs[kind].map(row => [row.part, row.sha256])),
+        Object.fromEntries(["prepare-0", ...Array.from({length: CLOUD_SHAPES.boat.js}, (_, i) => `worker-${i}`)]
+          .map(part => [part, part === "worker-1" ? record.build[kind].artifact : buildReceipt()[kind].artifact])));
+    }
+    const verify = () => verifyCompletedCloud("js", {env, outputDirectory, readJobs: async () => jobs});
+    if (mismatch) await assert.rejects(verify, /aggregate does not cover/u);
+    else await verify();
     const completed = JSON.parse(readFileSync(join(outputDirectory, "js-completed-result.json"), "utf8"));
-    assert.equal(completed.verdict, "PASS");
-    assert.deepEqual(completed.buildIdentity, report.buildIdentity);
-    assert.equal(warn.mock.calls.length, kind ? 1 : 0);
-    if (kind) {
-      const line = `JavaScript build outputs differ across shared preparation and workers: ${kind}.`;
-      assert.equal(warn.mock.calls[0].arguments[0], "::warning::" + line);
-      assert.equal(readFileSync(summary, "utf8"), line + "\n");
-    } else assert.equal(existsSync(summary), false);
+    assert.equal(completed.verdict, mismatch ? "FAIL" : "PASS");
+    if (!mismatch) assert.deepEqual(completed.buildIdentity, report.buildIdentity);
+    assert.equal(warn.mock.calls.length, 0);
+    assert.equal(existsSync(summary), false);
   }
 });
 

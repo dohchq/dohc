@@ -7,8 +7,6 @@ import { assertTaskCoverage } from "./shards.mjs";
 import { RUST_ARCHIVE_PROOFS, RUST_POLICY_STEPS, RUST_TEST_PROOFS } from "./cloud-rust.mjs";
 import { CLOUD_SHAPES, cloudShape, rustReaderShard } from "./cloud-shape.mjs";
 
-const REQUIRE_IDENTICAL_BUILDS = false;
-
 export function aggregateJavascript(records, shape = cloudShape()) {
   const preparation = records.filter(record => record.part === "prepare-0");
   if (preparation.length !== 1 || preparation[0].verdict !== "PASS") throw new Error("The JavaScript preparation receipt is missing, duplicated, or unsuccessful; check preparation and worker jobs.");
@@ -34,7 +32,6 @@ export function aggregateJavascript(records, shape = cloudShape()) {
     })]));
     const differingOutputs = Object.keys(outputs).filter(kind => new Set(outputs[kind].map(row => row.sha256)).size !== 1);
     buildIdentity = { matched: !differingOutputs.length, differingOutputs, outputs };
-    if (REQUIRE_IDENTICAL_BUILDS && !buildIdentity.matched) throw new Error(`JavaScript build outputs differ: ${differingOutputs.join(", ")}.`);
   }
   return { tasks: expected.length, flaky: shards.flatMap(record => record.flaky ?? []), tests: shards.flatMap(record => record.tests), parts: records.map(({ part, seconds }) => ({ part, seconds })),
     ...(buildIdentity ? { buildIdentity } : {}) };
@@ -211,11 +208,6 @@ export async function verifyCompletedCloud(scope, { env = process.env, readJobs 
       if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, report.warning + "\n");
     }
     if (scope === "js") reportFlaky(report.flaky, { summary: env.GITHUB_STEP_SUMMARY, annotate: true });
-    if (report.buildIdentity && !report.buildIdentity.matched) {
-      const warning = `JavaScript build outputs differ across shared preparation and workers: ${report.buildIdentity.differingOutputs.join(", ")}.`;
-      console.warn("::warning::" + warning);
-      if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, warning + "\n");
-    }
     console.log(`[verification] ${report.verdict} (${scope} completed group): ${JSON.stringify(report)}`);
   }
 }
@@ -254,6 +246,9 @@ export async function aggregateCloud(scope, directory = ".agent-artifacts/verifi
     if (!env.GITHUB_SHA || records.some(record => record.commit !== env.GITHUB_SHA)) throw new Error("The gate evidence does not cover the requested commit.");
     report.commit = env.GITHUB_SHA;
     Object.assign(report, scope === "js" ? aggregateJavascript(records, shape) : aggregateRust(records, shape));
+    if (report.buildIdentity && !report.buildIdentity.matched) {
+      throw new Error(`JavaScript build outputs differ across shared preparation and workers: ${report.buildIdentity.differingOutputs.join(", ")}.`);
+    }
     const finalJob = scope === "js" ? "typecheck + tests" : "engine gate";
     const all = await readJobs();
     const expected = gateJobNames(scope, shape);
