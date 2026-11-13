@@ -5939,11 +5939,25 @@ mod tests {
             .unwrap();
         let pending = crate::owner_outbox::read_pending(&store, "workspace-1", &outbox_id).unwrap();
         assert_eq!(pending.entries.len(), 2);
+        // Each delivery is applied, then acknowledged, so the group is the
+        // head when its frame arrives.
         for (cursor, entry) in (1..).zip(pending.entries) {
             let mut update = event(&entry.delivery_id, cursor, entry.update);
             snapshot(&mut update.metadata, declared("trip-agent"));
             sees(&mut update, &Ydoc::wire());
             ack(apply(&mut store, &mut cache, &handle, update));
+            crate::owner_outbox::acknowledge(
+                &mut store,
+                "workspace-1",
+                &outbox_id,
+                &[crate::owner_outbox::OwnerDeliveryReceipt {
+                    delivery_id: entry.delivery_id,
+                    update_digest: entry.update_digest,
+                    journal_cursor: cursor,
+                    accepting_host_epoch: 1,
+                }],
+            )
+            .unwrap();
         }
         let interval: serde_json::Value = serde_json::from_str(
             &store
