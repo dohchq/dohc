@@ -91,6 +91,10 @@ const bridgeMock = {
 const trust = { trusted: true, answer: true };
 const trustListeners = new Set<(event: WorkspaceTrustAnswer) => void>();
 const replacedListeners = new Set<(event: SitePreviewReplacedEvent) => void>();
+function trustChanged(event: WorkspaceTrustAnswer) {
+  trust.trusted = event.trusted;
+  act(() => { for (const listener of trustListeners) listener(event); });
+}
 function replace(event: SitePreviewReplacedEvent) {
   act(() => { for (const listener of replacedListeners) listener(event); });
 }
