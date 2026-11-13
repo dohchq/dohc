@@ -16,13 +16,13 @@ import { SectionHeader } from "./SectionHeader";
 import { useWorkspaces } from "./Workspaces";
 
 type Item =
-  | { type: "header"; key: string; title: string; collapsed: boolean; first: boolean }
+  | { type: "header"; key: string; title: string; collapsed: boolean; unread: boolean; first: boolean }
   | { type: "row"; key: string; row: ChatRowData }
   | { type: "state"; key: string };
 
 // Chats in a signed-in build: the header, with the switcher and Settings, then the open workspace's groups, people and
-// agents, as the server lists them. A chat opens its stream. The server keeps no read marks for the phone yet, so no
-// chat shows as unread. The list reads again when the feed reports a chat change.
+// agents, as the server lists them, unread by the account's read marks. A chat opens its stream. The list reads again
+// when the feed reports a chat change, as when a mark from this phone or the account's computer reaches the server.
 export function ServerChats() {
   const theme = useTheme();
   const { current } = useWorkspaces();
@@ -43,13 +43,17 @@ const SECTIONS: readonly { key: ChatGroup["kind"]; title: string }[] = [
   { key: "agent", title: workspaceWords.agents },
 ];
 
-// The server keeps no colour for a person, so their mark takes a fill by their chat's ID, as a workspace's does.
+// The server keeps no colour for a person, so their mark takes a fill by their chat's ID, as a workspace's does. As on
+// the desktop, an unread chat's name is bold, and a person or an agent also shows its count; a group shows none.
 function chatRow(group: ChatGroup): ChatRowData {
   const kind = group.kind === "dm" ? "person" : group.kind;
-  if (kind !== "person") return { id: group.id, kind, name: group.name, unread: false };
+  const unread = group.unreadCount > 0;
+  if (kind === "group") return { id: group.id, kind, name: group.name, unread };
+  const count = unread ? { count: group.unreadCount } : {};
+  if (kind === "agent") return { id: group.id, kind, name: group.name, unread, ...count };
   const hash = [...group.id].reduce((sum, char) => (sum * 31 + char.charCodeAt(0)) >>> 0, 0);
   const initials = group.name.split(/\s+/).filter(Boolean).slice(0, 2).map(word => [...word][0]?.toUpperCase() ?? "").join("");
-  return { id: group.id, kind, name: group.name, unread: false, initials, hue: workspaceMarkFills[hash % workspaceMarkFills.length]! };
+  return { id: group.id, kind, name: group.name, unread, ...count, initials, hue: workspaceMarkFills[hash % workspaceMarkFills.length]! };
 }
 
 function ChatList({ workspaceId, workspace, onScrolled }: { workspaceId: string; workspace: string; onScrolled(scrolled: boolean): void }) {
@@ -66,7 +70,8 @@ function ChatList({ workspaceId, workspace, onScrolled }: { workspaceId: string;
     return sections.flatMap((section, index) => {
       const closed = collapsed.has(section.key);
       return [
-        { type: "header" as const, key: `h-${section.key}`, title: section.title, collapsed: closed, first: index === 0 },
+        { type: "header" as const, key: `h-${section.key}`, title: section.title, collapsed: closed, unread: section.rows.some(row => row.unread),
+          first: index === 0 },
         ...closed ? [] : section.rows.map(row => ({ type: "row" as const, key: row.id, row })),
       ];
     });
@@ -93,7 +98,7 @@ function ChatList({ workspaceId, workspace, onScrolled }: { workspaceId: string;
       onScroll={event => onScrolled(event.nativeEvent.contentOffset.y > 0)}
       contentContainerStyle={{ paddingTop: 0, paddingBottom: 120 }}
       renderItem={({ item }) => item.type === "header"
-        ? <SectionHeader title={item.title} collapsed={item.collapsed} unread={false} first={item.first} onToggle={() => toggle(item.key.slice(2))} />
+        ? <SectionHeader title={item.title} collapsed={item.collapsed} unread={item.unread} first={item.first} onToggle={() => toggle(item.key.slice(2))} />
         : item.type === "row" ? <ChatRow row={item.row} onPress={open} /> : placeholder}
     />
   );

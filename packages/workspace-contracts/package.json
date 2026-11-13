@@ -29,6 +29,7 @@
     "./chat-work": "./src/chatWork.ts",
     "./chat-file-mentions": "./src/chatFileMentions.ts",
     "./chat-mentions": "./src/chatMentions.ts",
+    "./chat-order": "./src/chatOrder.ts",
     "./collection": "./src/collection.ts",
     "./collection-data": "./src/collectionData.ts",
     "./collection-values": "./src/collectionValues.ts",

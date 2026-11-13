@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { TokenBucketLimiter } from "@dohc/service-http";
 import { UnauthorizedError, type AccountSession, type ResolveAccountSession } from "@dohc/workspace-auth/session";
 import { CHATS_METHOD, ChatsLiveAdapter, VersionedLiveAdapter, type EngineTransport, type JsonValue } from "@dohc/workspace-engine-client";
@@ -19,6 +19,7 @@ import type { SyncRelayStorage } from "./storage";
 import type { StorageContext } from "./storage/context";
 import { closeTestStorages, denialBytes, json, testHandler, testStorage } from "./testing";
 import { PhoneWriteEngine, seedPhoneChats } from "./testing/phoneWriteEngine";
+import { PUBLICATION_DEADLINE_MS } from "./operationPublication";
 import { MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
 
 // The reads run over the real server copies and operations, with each copy's
@@ -262,7 +263,7 @@ describe("an account's reads through the server's copy", () => {
   it("answers an unknown operation, and the reserved `changes`, as missing", async () => {
     const { h, syncs } = await relay();
     const missing = await denialBytes(await h(op("nowhere", "groups")));
-    for (const name of ["changes", "groupCreate", "markRead", "watch", "toString", "__proto__", "constructor"]) {
+    for (const name of ["changes", "groupCreate", "watch", "toString", "__proto__", "constructor"]) {
       expect(await denialBytes(await h(op("trip", name))), name).toBe(missing);
     }
     expect(syncs).toEqual([]);
@@ -931,6 +932,7 @@ describe("an account's chat writes through the server's copy", () => {
     const syncs: string[] = [];
     let syncError: Error | null = null;
     let heldStep: { reached(): void; open: Promise<void> } | null = null;
+    let stepError: Error | null = null;
     let requestId = 0;
     const lifetime = new AbortController();
     const copy: AutomationReplica = {
@@ -941,24 +943,33 @@ describe("an account's chat writes through the server's copy", () => {
         syncs.push("trip");
         if (syncError !== null) throw syncError;
       },
-      step: async () => {
+      // As a copy's step does, it gives up, rejecting, when its caller's signal aborts.
+      step: async (signal) => {
         const held = heldStep;
         heldStep = null;
         if (held !== null) {
           held.reached();
-          await held.open;
+          await new Promise<void>((resolve, reject) => {
+            if (signal?.aborted) return reject(signal.reason);
+            signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+            void held.open.then(resolve);
+          });
         }
+        if (stepError !== null) throw stepError;
         engine.push((pushed) => context.tx(() => context.db.prepare(`INSERT INTO sync_relay_log
           (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms) VALUES ('trip', 'server-copy', ?, ?, ?, 1)`)
           .run(pushed.originSeq, pushed.kind, JSON.stringify(pushed.payload))));
         return true;
       },
     };
+    // Whether the copy is open, how often a pass closed it, and a pass run now, as the server runs one.
+    let open = false;
+    let closes = 0;
+    let pass = () => {};
     const copies = await startServerCopies({
       storage, root: "unused", engineExecutable: "unused", relayOrigin: ORIGIN, key: new Uint8Array(32), namespace: "test",
       startReplicas: async (hooks) => {
-        let open = false;
-        const pass = () => {
+        pass = () => {
           const reasons = hooks.wanted().get("trip");
           const joined = reasons === undefined ? null : storage.joinAutomationWorkspace({ workspaceId: "trip", nowMs: 1, reasons });
           const opens = joined?.incarnation === copy.incarnation && joined.ownerUserId === copy.ownerUserId;
@@ -966,6 +977,7 @@ describe("an account's chat writes through the server's copy", () => {
           const was = open;
           open = opens;
           if (opens && !was) hooks.onChanged?.("trip");
+          if (was && !opens) closes += 1;
         };
         return { unavailable: false, replica: (id) => id === "trip" && open ? copy : undefined, reconcile: () => queueMicrotask(pass),
           deleteWorkspaces: async () => undefined, failedSyncs: () => new Map(), settled: async () => undefined, close: async () => undefined };
@@ -1001,6 +1013,11 @@ describe("an account's chat writes through the server's copy", () => {
       changeAt: (check: number, kind: AccessChange) => { changeAt = { check, kind }; },
       named: (next: () => string | null) => { name = next; },
       failSync: (error: Error | null) => { syncError = error; },
+      failStep: (error: Error | null) => { stepError = error; },
+      /** Runs a pass of the copies now, which closes the copy unless something still needs it. */
+      reconcile: () => pass(),
+      copyOpen: () => open,
+      closes: () => closes,
       /** Holds the copy's next step. `reached` resolves once it waits. */
       holdStep: () => {
         let reached!: () => void, release!: () => void;
@@ -1167,12 +1184,12 @@ describe("an account's chat writes through the server's copy", () => {
       return { request, read };
     };
     const missing = await denialBytes(await f.write("changes", {}));
-    for (const name of ["changes", "markRead", "retryWake", "groupCreate", "toString", "__proto__", "constructor"]) {
+    for (const name of ["changes", "retryWake", "groupCreate", "toString", "__proto__", "constructor"]) {
       const { request, read } = streamed(name);
       expect(await denialBytes(await f.h(request)), name).toBe(missing);
       expect(read.pulled, name).toBe(false);
     }
-    for (const name of ["post", "send", "reply", "react"]) {
+    for (const name of ["post", "send", "reply", "react", "markRead"]) {
       const { request, read } = streamed(name);
       const response = await f.h(request);
       expect(await json(response), name).toEqual(schemaRefusal(name));
@@ -1307,5 +1324,200 @@ describe("an account's chat writes through the server's copy", () => {
       expect(f.rows(), kind).toBe(0);
       expect(f.engine.writes, kind).toEqual([]);
     }
+  });
+
+  // The read mark rows the relay holds, as the copy pushed them.
+  const markRows = (f: WriteRelay) => (f.storage as StorageContext).db.prepare(
+    "SELECT payload_json FROM sync_relay_log WHERE workspace_id = 'trip' AND op_kind = 'chat.thread.read.set' ORDER BY relay_seq",
+  ).all().map((row) => JSON.parse(String(row.payload_json)) as Record<string, unknown>);
+
+  it("marks a shown message read for the session's account, with no row, and its copy publishes the mark", async () => {
+    const f = await writeRelay();
+    const response = await f.write("markRead", { threadId: "thread-stay", messageId: "message-poll" });
+    expect(response.status).toBe(200);
+    expect(await json(response)).toEqual({ ok: true, result: { ok: true }, cursor: expect.any(String) });
+    expect(f.engine.marks.map((request) => request.params))
+      .toEqual([{ threadId: "thread-stay", messageId: "message-poll", replicationOwnerUserId: "ana" }]);
+    expect(markRows(f)).toMatchObject([{ accountUserId: "ana", threadId: "thread-stay", lastReadMessageId: "message-poll" }]);
+    // An older mark answers alike: a mark has no row, and the engine moves nothing back.
+    expect(await answer(await f.write("markRead", { threadId: "thread-stay", messageId: "message-stay" }))).toEqual({ ok: true });
+    expect(f.rows()).toBe(0);
+    expect(f.engine.writes).toEqual([]);
+  });
+
+  it("takes exactly a thread and a message, each of 1 to 256 units, before the copy syncs", async () => {
+    const f = await writeRelay();
+    const valid = { threadId: "thread-stay", messageId: "message-stay" };
+    const units = (count: number) => "x".repeat(count);
+    const forbidden: Record<string, unknown> = {
+      operationId: "op", createdAtMs: 1, upToSequence: 1, lastReadSequence: 1, accountUserId: "ben", ownerUserId: "ben", account: "ben",
+      replicationOwnerUserId: "ben", runId: "run", reported: { product: "Nova" }, work: { status: "done" }, agent: "Nova", attachments: [],
+      cwd: "/", actor: "human", agentId: "nova", token: "a".repeat(64), runSecret: "a".repeat(64), door: "cli",
+    };
+    const refused: Array<[label: string, args: unknown]> = [
+      ...Object.entries(forbidden).map(([field, value]): [string, unknown] => [field, { ...valid, [field]: value }]),
+      ["no thread", { messageId: "message-stay" }],
+      ["no message", { threadId: "thread-stay" }],
+      ["an empty thread ID", { ...valid, threadId: "" }],
+      ["an empty message ID", { ...valid, messageId: "" }],
+      ["a 257-unit thread ID", { ...valid, threadId: units(257) }],
+      ["a 257-unit message ID", { ...valid, messageId: units(257) }],
+      ["a thread ID that isn't text", { ...valid, threadId: 7 }],
+      ["a list", [valid]],
+    ];
+    for (const [label, args] of refused) {
+      const response = await f.write("markRead", args);
+      expect({ status: response.status, body: await json(response) }, label).toEqual({ status: 400, body: schemaRefusal("markRead") });
+    }
+    expect(f.syncs).toEqual([]);
+    expect(f.engine.marks).toEqual([]);
+    expect(await answer(await f.write("markRead", { ...valid, threadId: units(256) })), "a 256-unit thread ID").toMatchObject({ refusal: "missing" });
+    expect(await answer(await f.write("markRead", { ...valid, messageId: units(256) })), "a 256-unit message ID").toMatchObject({ refusal: "missing" });
+    expect(await answer(await f.write("markRead", valid))).toEqual({ ok: true });
+  });
+
+  it("keeps the body limit and the sign-in's rate on read marks", async () => {
+    const f = await writeRelay({ limiter: new TokenBucketLimiter(1, 0.001, 16) });
+    expect((await f.write("markRead", { threadId: "thread-stay", messageId: "a".repeat(256 * 1024) })).status).toBe(413);
+    const limited = await f.write("markRead", { threadId: "thread-stay", messageId: "message-stay" });
+    expect(limited.status).toBe(503);
+    expect(await json(limited)).toMatchObject({ ok: false, code: "server_busy" });
+    expect(f.syncs).toEqual([]);
+    expect(f.engine.marks).toEqual([]);
+  });
+
+  it("answers a hidden or missing thread, and a hidden, missing or another thread's message, as reads do, before any mark", async () => {
+    const f = await writeRelay();
+    const { planning, onSecret } = f.seeded;
+    await new ChatsLiveAdapter(f.engine.chats, "trip", { workspaceId: "trip" }).startChannelThread({
+      workspaceId: "trip", channelId: planning.channelId, threadId: "thread-other", messageId: "message-other", lane: "posts",
+      author: { kind: "human", displayName: "Ana" }, authorUserId: "ana", authorActorKey: null, body: "And dinner?",
+    });
+    const bytes = async (args: Record<string, string>, id: string) => {
+      const response = await f.write("markRead", args);
+      return { status: response.status, type: response.headers.get("content-type"), body: (await response.text()).replaceAll(id, "<id>") };
+    };
+    const hiddenThread = await bytes({ threadId: onSecret.id, messageId: "message-secret" }, onSecret.id);
+    expect(hiddenThread.status).toBe(200);
+    expect(hiddenThread.body).toContain('"refusal":"missing"');
+    expect(await bytes({ threadId: "thread-nowhere", messageId: "message-secret" }, "thread-nowhere")).toEqual(hiddenThread);
+    // Word for word what a read of the thread answers.
+    expect(await answer(await f.write("markRead", { threadId: onSecret.id, messageId: "message-secret" })))
+      .toEqual(await answer(await f.h(op("trip", "chat", { threadId: onSecret.id }))));
+    const absentMessage = await bytes({ threadId: "thread-stay", messageId: "message-nowhere" }, "message-nowhere");
+    expect(absentMessage.body).toContain('"refusal":"missing"');
+    expect(await bytes({ threadId: "thread-stay", messageId: "message-secret" }, "message-secret"), "a message in a hidden thread").toEqual(absentMessage);
+    expect(await bytes({ threadId: "thread-stay", messageId: "message-other" }, "message-other"), "another thread's message").toEqual(absentMessage);
+    expect(f.engine.marks).toEqual([]);
+    expect(markRows(f)).toEqual([]);
+  });
+
+  it("answers as missing, with no mark, when access ends at any check before a read mark, and with the mark once it is made", async () => {
+    const { h } = await relay();
+    const missing = await denialBytes(await h(op("nowhere", "groups")));
+    const mark = { threadId: "thread-stay", messageId: "message-poll" };
+    // Access ends while the engine answers `method`.
+    const during = async (f: WriteRelay, kind: AccessChange, method: string) => {
+      const held = f.engine.hold(method);
+      const marking = f.write("markRead", mark);
+      await held.reached;
+      f.change(kind);
+      held.release();
+      return await marking;
+    };
+    // The checks: before the arguments, after them, once the copy is open, once it has synced, after the thread read,
+    // after the message read, and after the copy's step, before the answer.
+    const at = async (f: WriteRelay, kind: AccessChange, check: number) => {
+      f.changeAt(check, kind);
+      return await f.write("markRead", mark);
+    };
+    const points: Array<[label: string, run: (f: WriteRelay, kind: AccessChange) => Promise<Response>, marks: number]> = [
+      ["after the arguments arrive", (f, kind) => at(f, kind, 2), 0],
+      ["once the copy is open", (f, kind) => at(f, kind, 3), 0],
+      ["once the copy has synced", (f, kind) => at(f, kind, 4), 0],
+      ["while the thread is read", (f, kind) => during(f, kind, CHATS_METHOD.threadsList), 0],
+      ["while the message is read", (f, kind) => during(f, kind, CHATS_METHOD.messageGet), 0],
+      ["while the copy's step sends the mark", async (f, kind) => {
+        const held = f.holdStep();
+        const marking = f.write("markRead", mark);
+        await held.reached;
+        f.change(kind);
+        held.release();
+        return await marking;
+      }, 1],
+      ["once the answer is ready", (f, kind) => at(f, kind, 7), 1],
+    ];
+    for (const [label, run, marks] of points) {
+      for (const kind of ACCESS_CHANGES) {
+        const f = await writeRelay();
+        expect(await denialBytes(await run(f, kind)), `${label}, ${kind}`).toBe(missing);
+        expect(f.engine.marks, `${label}, ${kind}`).toHaveLength(marks);
+      }
+    }
+  });
+
+  it("answers once the copy's step has sent the mark, and keeps the copy open while it runs", async () => {
+    const f = await writeRelay();
+    const held = f.holdStep();
+    let answered = false;
+    const marking = f.write("markRead", { threadId: "thread-stay", messageId: "message-poll" }).then((response) => {
+      answered = true;
+      return response;
+    });
+    await held.reached;
+    // A pass meanwhile, as when another visit ends, keeps the copy: this visit still holds it.
+    f.reconcile();
+    expect(f.copyOpen()).toBe(true);
+    expect(f.closes()).toBe(0);
+    expect(answered).toBe(false);
+    expect(markRows(f)).toEqual([]);
+    held.release();
+    expect(await answer(await marking)).toEqual({ ok: true });
+    expect(markRows(f)).toMatchObject([{ accountUserId: "ana", threadId: "thread-stay", lastReadMessageId: "message-poll" }]);
+    // Once the visit ends, nothing keeps the copy.
+    await expect.poll(() => f.closes()).toBe(1);
+  });
+
+  it("answers Couldn't send, without the copy's words, when its step fails or passes the deadline", async () => {
+    const couldNotSend = { ok: false, reason: "Couldn't send" };
+    const failed = await writeRelay();
+    failed.failStep(new Error("The relay at https://relay.internal refused the push."));
+    const response = await failed.write("markRead", { threadId: "thread-stay", messageId: "message-poll" });
+    const text = await response.text();
+    expect(response.status).toBe(200);
+    expect(JSON.parse(text).result).toEqual(couldNotSend);
+    expect(text).not.toContain("relay.internal");
+    expect(failed.engine.marks).toHaveLength(1);
+    expect(markRows(failed)).toEqual([]);
+
+    const slow = await writeRelay();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const held = slow.holdStep();
+      const marking = slow.write("markRead", { threadId: "thread-stay", messageId: "message-poll" });
+      await held.reached;
+      await vi.advanceTimersByTimeAsync(PUBLICATION_DEADLINE_MS);
+      expect(await answer(await marking)).toEqual(couldNotSend);
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(slow.engine.marks).toHaveLength(1);
+    expect(markRows(slow)).toEqual([]);
+  });
+
+  it("sends a read mark and a later write in the order the copy journaled them", async () => {
+    const f = await writeRelay();
+    f.failStep(new Error("The relay is unreachable."));
+    expect(await answer(await f.write("markRead", { threadId: "thread-stay", messageId: "message-poll" })))
+      .toEqual({ ok: false, reason: "Couldn't send" });
+    f.failStep(null);
+    expect(await answer(await f.write("reply", { operationId: "op-after", threadId: "thread-stay", body: "Hi" })))
+      .toMatchObject({ ok: true, state: "saved" });
+    const pushed = (f.storage as StorageContext).db.prepare(
+      "SELECT origin_seq, op_kind FROM sync_relay_log WHERE workspace_id = 'trip' AND origin_id = 'server-copy' ORDER BY relay_seq",
+    ).all().map((row) => ({ seq: Number(row.origin_seq), kind: String(row.op_kind) }));
+    expect(pushed[0]?.kind).toBe("chat.thread.read.set");
+    expect(pushed.map((row) => row.seq)).toEqual(pushed.map((row) => row.seq).sort((left, right) => left - right));
+    expect(pushed.length).toBeGreaterThan(1);
   });
 });

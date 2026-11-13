@@ -984,6 +984,10 @@ impl EngineService {
                 self.chats_read_state_mark_thread_read(&ctx, request.workspace, request.params)
                     .await?
             }
+            "chats.readState.markAccountRead" => {
+                self.chats_read_state_mark_account_read(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "chats.readState.get" => {
                 self.chats_read_state_get(&ctx, request.workspace, request.params)
                     .await?
@@ -1748,6 +1752,7 @@ mod tests {
             "chats.reactions.set",
             "chats.readState.get",
             "chats.readState.listUnreadFileThreads",
+            "chats.readState.markAccountRead",
             "chats.readState.markThreadRead",
             "chats.readState.seedAccount",
             "chats.stream.list",

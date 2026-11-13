@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { phoneWriteArgsSchemas, type PhoneWriteOperation } from "@dohc/cli/protocol";
+import { phoneMarkReadArgsSchema, phoneWriteArgsSchemas, type PhoneWriteOperation } from "@dohc/cli/protocol";
 import { createActorIssuer, deriveLocalActor, serializeActorKey } from "@dohc/workspace-contracts/actor-identity";
 import type { ChatMessage, ChatThread, ChatThreadLane } from "@dohc/workspace-contracts/engine";
 import { cutText } from "@dohc/workspace-contracts/names";
@@ -17,7 +17,7 @@ import type { AutomationReplica } from "./automationReplicas";
 import { stableJsonStringify } from "./canonicalJson";
 import { badRequest, notFound, RelayError } from "./errors";
 import {
-  COULD_NOT_SEND, TOO_OLD, WORKSPACE_CHANGED, commandStages, isRefusalReason, publishOperation, receiptReader,
+  COULD_NOT_SEND, PUBLICATION_DEADLINE_MS, TOO_OLD, WORKSPACE_CHANGED, commandStages, isRefusalReason, publishOperation, receiptReader,
   type ExpectedRecord, type PublicationAnswer, type PublicationStage, type RefusalReason,
 } from "./operationPublication";
 import type { CopyVisitor, ServerCopies } from "./serverCopies";
@@ -32,7 +32,8 @@ import type { OperationRecord } from "./storage/operationRecords";
 // every stage carries its derived key and asks the engine for a receipt. A
 // stage that a crash or a lost answer left unwritten replays from that stored
 // command, when the copy opens or the phone retries. The account operations
-// route calls `runAccountWrite`.
+// route calls `runAccountWrite`, and `runAccountMarkRead` for a read mark,
+// which has no row: a repeat, or an older mark, moves nothing.
 
 /** The bounds of a phone write's operation ID, in UTF-16 code units, which storage's bound in characters admits. */
 export const OPERATION_ID_MIN_LENGTH = 1;
@@ -330,7 +331,8 @@ function writeReaction(adapter: ChatsLiveAdapter, workspaceId: string, stored: S
 /**
  * The targets the account may see in the copy, by the reads' own rules: a
  * thread is one the secret-file-filtered store lists, and a message one in
- * such a thread. A hidden one answers exactly as a missing one.
+ * such a thread. A hidden one answers exactly as a missing one, after the
+ * same reads, so its answer takes no longer or shorter than a missing one's.
  */
 function visibleTargets(storage: SyncRelayStorage, copy: AutomationReplica) {
   const { workspaceId } = copy;
@@ -349,8 +351,14 @@ function visibleTargets(storage: SyncRelayStorage, copy: AutomationReplica) {
       return found;
     },
     async message(messageId: string): Promise<ChatMessage> {
+      const [found, listed] = await Promise.all([rawMessage(messageId), chats.store.listThreads({ workspaceId })]);
+      if (found === null || !listed.some((each) => each.id === found.threadId)) throw messageMissing(messageId);
+      return found;
+    },
+    // A message in a thread the caller already found visible: one in any other thread, hidden or not, is missing.
+    async messageIn(threadId: string, messageId: string): Promise<ChatMessage> {
       const found = await rawMessage(messageId);
-      if (found === null || (await visible(found.threadId)) === undefined) throw messageMissing(messageId);
+      if (found === null || found.threadId !== threadId) throw messageMissing(messageId);
       return found;
     },
     // A post goes to a Group's posts; a send to a Group's chat or a DM.
@@ -889,6 +897,85 @@ export async function runAccountWrite(
     const result = await runPhoneWrite({
       storage, copy, writer: input.writer, write: input.write, authorize: () => input.authorize(), signal: input.visitor.signal,
     });
+    return { result, cursor };
+  });
+}
+
+/** A phone read mark, as its strict request schema admits it. */
+type PhoneMarkRead = ReturnType<(typeof phoneMarkReadArgsSchema)["parse"]>;
+
+/** The read mark a request names. Arguments outside its schema reject with a bad request. */
+export function parseMarkRead(args: unknown): PhoneMarkRead {
+  const parsed = phoneMarkReadArgsSchema.safeParse(args);
+  if (!parsed.success) throw badRequest("the arguments do not fit markRead");
+  return parsed.data;
+}
+
+/** A read mark's answer: done, a missing or hidden target as reads answer one, or a failure without the engine's words. */
+type MarkReadAnswer = { ok: true } | MissingResult | { ok: false; reason: string };
+
+/**
+ * Moves the account's read mark in a thread to a message the phone showed,
+ * in a visit to its copy of `workspaceId`, after the copy syncs. The thread
+ * and the message resolve through the reads' filter, so a hidden or missing
+ * one, or a message in another thread, answers as reads answer a missing one,
+ * before any mark. The copy's engine journals the mark with its owner's
+ * context, and one sync step, bounded by the publication deadline, sends it
+ * before the visit ends. A step that fails or runs out of time answers
+ * "Couldn't send", which the phone retries. The caller authenticates the
+ * account, checks that it owns the workspace and that the workspace shows on
+ * the phone, and parses the mark. `authorize` runs once the copy is open,
+ * once it has synced, after each target read, before the mark, and after the
+ * step, before the answer.
+ */
+export async function runAccountMarkRead(
+  server: { storage: SyncRelayStorage; copies: ServerCopies },
+  input: {
+    workspaceId: string;
+    accountId: string;
+    mark: PhoneMarkRead;
+    visitor: Extract<CopyVisitor, { reason: "account" }>;
+    authorize(): Promise<void>;
+  },
+): Promise<{ result: MarkReadAnswer; cursor: string }> {
+  const { storage } = server;
+  const { mark } = input;
+  const { signal } = input.visitor;
+  return await server.copies.withServerCopy(input.accountId, input.workspaceId, input.visitor, async (copy) => {
+    await input.authorize();
+    const cursor = currentAccountFeedCursor(storage, input.workspaceId);
+    await copy.sync(signal);
+    await input.authorize();
+    const targets = visibleTargets(storage, copy);
+    const adapter = new ChatsLiveAdapter(copy.client, copy.workspace, { workspaceId: copy.workspaceId });
+    let result: MarkReadAnswer = { ok: true };
+    try {
+      await targets.thread(mark.threadId);
+      await input.authorize();
+      await targets.messageIn(mark.threadId, mark.messageId);
+      await input.authorize();
+      await adapter.markAccountThreadRead({
+        workspaceId: copy.workspaceId, threadId: mark.threadId, messageId: mark.messageId, replicationOwnerUserId: copy.ownerUserId,
+      });
+    } catch (error) {
+      if (error instanceof RelayError || signal.aborted) throw error;
+      result = error instanceof TargetMissing ? missing(error.reason) : failure(error, `failed to mark read: ${mark.threadId}`, "operation-only");
+    }
+    if (result.ok) {
+      // One sync step publishes the mark inside this visit, so the copy stays open for it. A step that fails or passes
+      // the deadline answers "Couldn't send", and the phone sends the mark again; the copy keeps it meanwhile.
+      const expired = new AbortController();
+      const timer = setTimeout(() => expired.abort(new Error("The read mark's sync deadline passed.")), PUBLICATION_DEADLINE_MS);
+      try {
+        await copy.step(AbortSignal.any([signal, expired.signal]));
+      } catch (error) {
+        if (error instanceof RelayError || signal.aborted) throw error;
+        result = failure(error, COULD_NOT_SEND, "operation-only");
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    await input.authorize();
     return { result, cursor };
   });
 }

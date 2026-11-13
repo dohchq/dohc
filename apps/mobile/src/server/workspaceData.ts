@@ -5,7 +5,7 @@ import type { CacheFiles, SavedView } from "./cacheFiles";
 import { requestGenerations, ServerError, shownProblem, type ServerClient } from "./client";
 import { sleep } from "./deviceFlow";
 import {
-  earlierCursor, FEED_HOLD_MS, isCursor, laterCursor, readChanges, readChats, readFiles, readPage, readStream, readThread,
+  earlierCursor, FEED_HOLD_MS, isCursor, laterCursor, markThreadRead, readChanges, readChats, readFiles, readPage, readStream, readThread,
   type ChatGroup, type ChatThread, type FeedAnswer, type FeedChanges, type GroupStream, type MissingChat, type PageRead, type Read, type WorkspaceFile,
 } from "./workspaceReads";
 import type { SavedList } from "./workspaceList";
@@ -290,6 +290,13 @@ export interface WorkspaceData {
   pause(): void;
   /** Ends everything this store started. */
   stop(): void;
+  /**
+   * Marks the account's place in a thread at a message a screen shows. A mark the server took, or one on its way, is
+   * not sent again; one that failed, including the server's "Couldn't send", says nothing, and the next showing sends
+   * it again. A 404 that still counts means the workspace may be gone, as for a read. Resolves once the mark settles,
+   * at once for one it doesn't send; it never rejects.
+   */
+  markRead(threadId: string, messageId: string): Promise<void>;
 }
 
 export const FEED_RETRY_MS = 1000;
@@ -376,6 +383,9 @@ export function createWorkspaceData(options: {
   }
 
   const live = () => !stopped && signIn.isCurrent();
+  // The message each thread's mark is on its way at, and the one the server last took.
+  const sending = new Map<string, string>();
+  const marked = new Map<string, string>();
   const isGone = (error: unknown) => error instanceof ServerError && error.problem === "not-found";
   let hasGone = false;
 
@@ -571,6 +581,19 @@ export function createWorkspaceData(options: {
       running = false;
       stopFeed();
       everything.abort();
+    },
+    markRead(threadId, messageId) {
+      if (!live() || sending.get(threadId) === messageId || marked.get(threadId) === messageId) return Promise.resolve();
+      sending.set(threadId, messageId);
+      return markThreadRead(signIn.client, workspaceId, threadId, messageId, everything.signal).then(
+        () => { marked.set(threadId, messageId); },
+        (error: unknown) => {
+          // As a read's 404 does, one that still counts says the workspace may be gone from this phone.
+          if (live() && isGone(error)) gone();
+        },
+      ).finally(() => {
+        if (sending.get(threadId) === messageId) sending.delete(threadId);
+      });
     },
   };
   return store;

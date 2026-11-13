@@ -315,6 +315,9 @@ export const phoneWriteArgsSchemas = {
   }).strict(),
 };
 export type PhoneWriteOperation = keyof typeof phoneWriteArgsSchemas;
+// The phone's read mark: the newest message it showed in a thread. It has no
+// operation ID: a repeat, or an older mark, moves nothing.
+export const phoneMarkReadArgsSchema = z.object({ threadId: phoneTargetIdSchema, messageId: phoneTargetIdSchema }).strict();
 // A key the caller chooses for one request. Sent again with the same key,
 // after a timeout for example, the request returns its first result while
 // dohc runs instead of doing its work twice.
@@ -1380,6 +1383,8 @@ const groupsFullResultSchema = z.discriminatedUnion("ok", [
                   title: z.string(),
                   lane: z.enum(["posts", "chat"]).optional(),
                   messageCount: z.number().int().nonnegative(),
+                  // The person's unread messages in the thread.
+                  unreadCount: z.number().int().nonnegative(),
                   updatedAtMs: z.number().int().nonnegative(),
                 })
                 .strict(),

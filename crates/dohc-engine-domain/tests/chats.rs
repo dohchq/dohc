@@ -11,10 +11,10 @@ use dohc_engine_domain::{
     ChatChannelKind, ChatChannelType, ChatDecisionState, ChatMessageAutomation, ChatReactionState,
     ChatReportedAgent, ChatThreadLane, CreateFileThread, DomainError, FeedCursorValue, FollowState,
     FollowTargetKind, GENERAL_CHANNEL_WIRE_ID, LinkedChatStore, LocalAttachmentInput,
-    MarkThreadRead, NoFaults, PENDING_CHAT_WORKSPACE_EXISTS_SQL, ResolveDecision, SaveBookmark,
-    SendMessage, SetFollow, SetReaction, StartChannelThread, base32_lowercase_no_padding,
-    bookmark_id_for, channel_slug_for_name, decode_feed_cursor, encode_feed_cursor,
-    linked_chat_projection_path,
+    MarkAccountThreadRead, MarkThreadRead, NoFaults, PENDING_CHAT_WORKSPACE_EXISTS_SQL,
+    ResolveDecision, SaveBookmark, SendMessage, SetFollow, SetReaction, StartChannelThread,
+    base32_lowercase_no_padding, bookmark_id_for, channel_slug_for_name, decode_feed_cursor,
+    encode_feed_cursor, linked_chat_projection_path,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, StorageError};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
@@ -2420,6 +2420,138 @@ fn an_owner_mark_publishes_a_coordinate_stored_without_a_record_once() {
         .expect("owner retry");
     assert_eq!(thread_read_ops(&store), 1, "a record of the place exists");
     assert_eq!(account_mark(&store, "t1"), Some((20, "m1".to_owned())));
+}
+
+/// The coordinates the log's account read records name, oldest first.
+fn published_thread_reads(store: &EngineStore) -> Vec<(i64, String)> {
+    store
+        .read_with(|conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT json_extract(payload_json, '$.lastReadCreatedAtMs'), \
+                            json_extract(payload_json, '$.lastReadMessageId') \
+                     FROM replication_log \
+                     WHERE workspace_id = ?1 AND op_kind = 'chat.thread.read.set' \
+                     ORDER BY origin_seq",
+                )
+                .map_err(StorageError::corrupt_public)?;
+            let rows = stmt
+                .query_map([WS], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(StorageError::corrupt_public)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(StorageError::corrupt_public)
+        })
+        .expect("published thread reads")
+}
+
+fn account_read(
+    thread_id: &str,
+    message_id: &str,
+    owner: Option<&str>,
+    now_ms: i64,
+) -> MarkAccountThreadRead {
+    MarkAccountThreadRead {
+        workspace_id: WS.to_owned(),
+        thread_id: thread_id.to_owned(),
+        message_id: message_id.to_owned(),
+        replication_owner_user_id: owner.map(str::to_owned),
+        now_ms,
+    }
+}
+
+#[test]
+fn a_signed_in_read_after_a_signed_out_message_publishes_the_newest_message_that_replicates() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .ensure_general_channel(WS, "gen-1", 1, &NO_FAULTS)
+        .expect("gen");
+    assert!(
+        chats
+            .seed_account_reads(WS, ACCOUNT, true, 2, &NO_FAULTS)
+            .expect("seed")
+    );
+    agent_thread(&mut chats, "t1", &[("m0", 10)]);
+    let signed_out = SendMessage {
+        author_user_id: None,
+        ..send_msg("t1", "m1", None, "signed out", 20)
+    };
+    chats
+        .send_message(&signed_out, &NO_FAULTS)
+        .expect("signed-out send");
+    chats
+        .mark_thread_read(&read_mark("t1", 2, None, Some(ACCOUNT), 30), &NO_FAULTS)
+        .expect("signed-in read");
+    drop(chats);
+    // The mark here stays on the signed-out message. The record names the
+    // newest message the account's other copies can hold.
+    assert_eq!(account_mark(&store, "t1"), Some((20, "m1".to_owned())));
+    assert_eq!(published_thread_reads(&store), vec![(10, "m0".to_owned())]);
+
+    // A retry publishes nothing more. A later message that replicates
+    // publishes itself.
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .mark_thread_read(&read_mark("t1", 2, None, Some(ACCOUNT), 31), &NO_FAULTS)
+        .expect("retry");
+    chats
+        .send_message(&agent_message("t1", "m2", 40), &NO_FAULTS)
+        .expect("agent reply");
+    chats
+        .mark_thread_read(&read_mark("t1", 3, None, Some(ACCOUNT), 50), &NO_FAULTS)
+        .expect("later read");
+    drop(chats);
+    assert_eq!(account_mark(&store, "t1"), Some((40, "m2".to_owned())));
+    assert_eq!(
+        published_thread_reads(&store),
+        vec![(10, "m0".to_owned()), (40, "m2".to_owned())]
+    );
+}
+
+#[test]
+fn an_account_mark_names_a_message_in_its_thread_and_journals_only_with_the_owner() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .ensure_general_channel(WS, "gen-1", 1, &NO_FAULTS)
+        .expect("gen");
+    agent_thread(&mut chats, "t1", &[("m0", 10), ("m1", 20)]);
+    agent_thread(&mut chats, "t2", &[("n0", 30)]);
+    // Before a copy shows an account's places, nothing moves.
+    let local = chats
+        .mark_account_thread_read(&account_read("t1", "m1", Some(ACCOUNT), 35), &NO_FAULTS)
+        .expect("no account yet");
+    assert_eq!(local.last_read_sequence, 0);
+    assert!(
+        chats
+            .seed_account_reads(WS, ACCOUNT, false, 36, &NO_FAULTS)
+            .expect("seed")
+    );
+    let refused = chats
+        .mark_account_thread_read(&account_read("t1", "n0", Some(ACCOUNT), 40), &NO_FAULTS)
+        .expect_err("another thread's message");
+    assert_eq!(refused.code(), "message-not-found");
+    let unowned = chats
+        .mark_account_thread_read(&account_read("t1", "m0", None, 41), &NO_FAULTS)
+        .expect("mark without the owner");
+    assert_eq!(unowned.last_read_sequence, 1);
+    let owned = chats
+        .mark_account_thread_read(&account_read("t1", "m1", Some(ACCOUNT), 42), &NO_FAULTS)
+        .expect("owner mark");
+    assert_eq!(owned.last_read_sequence, 2);
+    chats
+        .mark_account_thread_read(&account_read("t1", "m0", Some(ACCOUNT), 43), &NO_FAULTS)
+        .expect("older mark");
+    drop(chats);
+    assert_eq!(account_mark(&store, "t1"), Some((20, "m1".to_owned())));
+    assert_eq!(account_mark(&store, "t2"), None);
+    assert_eq!(published_thread_reads(&store), vec![(20, "m1".to_owned())]);
 }
 
 #[test]

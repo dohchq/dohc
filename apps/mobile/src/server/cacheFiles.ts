@@ -46,7 +46,7 @@ export interface CacheFiles {
 }
 
 /** Raise it when a file's layout, or the shape of a view's value, changes: older files are then deleted unread. */
-export const CACHE_FORMAT = 2;
+export const CACHE_FORMAT = 4;
 export const WRITE_DELAY_MS = 1000;
 export const WRITE_MAX_DELAY_MS = 5000;
 export const WRITE_INTERVAL_MS = 30_000;

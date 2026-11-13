@@ -28,6 +28,10 @@ export class PhoneWriteEngine implements EngineTransport {
   beforeWrite: () => void = () => undefined;
   /** Journals the account's read mark with a person's message, as a copy that shows the account's read places does. */
   readMarks = false;
+  /** Each explicit read mark that reached the engine, in order. */
+  readonly marks: Request[] = [];
+  /** The rows explicit read marks journaled, which the copy pushes with the receipts' rows. */
+  private readonly markRows: PhoneWriteRow[] = [];
   private readonly held = new Map<string, { reached(): void; open: Promise<void> }>();
   private originSeq = 0;
 
@@ -59,6 +63,7 @@ export class PhoneWriteEngine implements EngineTransport {
       return { id: request.id, result: { stages: stageKeys.map((stageKey) => this.stateOf(stageKey)) } };
     }
     if (!request.method.startsWith("chats.")) return await this.files.sendRequest(request);
+    if (request.method === CHATS_METHOD.readStateMarkAccountRead) return await this.mark(request);
     const write = WRITES.has(request.method);
     if (write) {
       this.writes.push(request);
@@ -80,14 +85,37 @@ export class PhoneWriteEngine implements EngineTransport {
     return response;
   }
 
-  /** Pushes each row the receipts list that the relay hasn't had yet. */
+  /** Pushes each row the receipts and read marks list that the relay hasn't had yet, in the order the engine journaled them. */
   push(relay: (row: PhoneWriteRow) => void): void {
-    for (const receipt of this.receipts.values()) {
-      for (const row of receipt.rows.filter((each) => !each.pushed)) {
-        relay(row);
-        row.pushed = true;
-      }
+    const rows = [...this.receipts.values()].flatMap((receipt) => receipt.rows).concat(this.markRows);
+    for (const row of rows.sort((left, right) => left.originSeq - right.originSeq)) {
+      if (row.pushed) continue;
+      relay(row);
+      row.pushed = true;
     }
+  }
+
+  // The engine moves the mark to the message and journals it with the owner's context, as a copy that shows the
+  // account's read places does. The stand-in keeps no mark, so a repeat journals again.
+  private async mark(request: Request): Promise<Response> {
+    this.marks.push(request);
+    let response: Response;
+    try {
+      response = await this.chats.sendRequest(request);
+    } catch (error) {
+      throw new EngineRequestError(request.id, { code: "INVALID_PARAMS", message: error instanceof Error ? error.message : "refused", retry: "no" },
+        request.method);
+    }
+    const params = asRecord(request.params) ?? {};
+    if (typeof params.replicationOwnerUserId === "string") {
+      const read = new ChatsLiveAdapter(this.chats, String(request.workspace), { workspaceId: this.workspaceId });
+      const message = await read.getMessage({ workspaceId: this.workspaceId, messageId: String(params.messageId) });
+      this.markRows.push({ originSeq: ++this.originSeq, kind: "chat.thread.read.set", pushed: false, payload: {
+        accountUserId: params.replicationOwnerUserId, threadId: message.threadId,
+        lastReadCreatedAtMs: message.createdAtMs, lastReadMessageId: message.id, atMs: message.createdAtMs,
+      } });
+    }
+    return response;
   }
 
   private stateOf(stageKey: string): JsonValue {

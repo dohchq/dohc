@@ -176,6 +176,8 @@ async function relayAndOwner(lookupUserDisplayName?: (userId: string) => string 
   const relayUrl = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
   const owner = await computer({ root: join(root, "owner"), relayUrl, bearerToken: "test:owner", identity: { kind: "claim" } });
 
+  // The copy's syncs, one after another, as the server runs them.
+  let lane: Promise<void> = Promise.resolve();
   const openCopy = async () => {
     const row = storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: Date.now(), reasons: ["account"] });
     if (row === null) throw new Error("The relay did not let the server join the workspace.");
@@ -184,11 +186,18 @@ async function relayAndOwner(lookupUserDisplayName?: (userId: string) => string 
       bearerToken: deriveAutomationReplicaBearer(row, { key, namespace }),
       identity: { kind: "join", replicationEpoch: row.replicationEpoch, streamIdentity: row.streamIdentity },
     });
+    // The copy reads by its owner's account, as the server opens it.
+    await copy.request("chats.readState.seedAccount", { accountUserId: "owner", seedLocal: false }, copy.workspace);
+    const sync = () => {
+      const run = lane.then(() => copy.sync());
+      lane = run.catch(() => undefined);
+      return run;
+    };
     const replica: AutomationReplica = {
       workspaceId: WORKSPACE, ownerUserId: "owner", incarnation: row.incarnation, reasons: row.reasons, startedAtMs: row.startedAtMs, pulledHead: 0,
       root: join(root, "server", "workspace"), metadataDir: join(root, "server", "metadata"), client: copy.client, workspace: copy.workspace,
-      signal: copy.lifetime, nextRequestId: copy.nextRequestId, withRecordWork: (work) => work(), sync: () => copy.sync(),
-      step: async () => { await copy.sync(); return true; },
+      signal: copy.lifetime, nextRequestId: copy.nextRequestId, withRecordWork: (work) => work(), sync,
+      step: async () => { await sync(); return true; },
     };
     const started = await startServerCopies({
       storage, root: join(root, "server"), engineExecutable: engine.require(), relayOrigin: RELAY_ORIGIN, key, namespace,
@@ -209,13 +218,17 @@ async function relayAndOwner(lookupUserDisplayName?: (userId: string) => string 
   };
   const same = async (operation: string, args: Record<string, JsonValue>, expected: unknown) =>
     expect(shared(await route(operation, args)), operation).toEqual(shared(expected));
-  return { storage, relay, relayUrl, owner, openCopy, route, same };
+  /** Waits for every sync the copy started, as a step a read mark leaves running. */
+  const copySettled = () => lane;
+  return { storage, relay, relayUrl, owner, openCopy, route, same, copySettled };
 }
 
 it.skipIf(engine.missing)("answers the phone's reads from the server's copy as the owner's computer reads them, and a page read sends nothing", async () => {
-  const { storage, relay, relayUrl, owner, openCopy, route: read, same } = await relayAndOwner();
+  const { storage, relay, relayUrl, owner, openCopy, route: read, same, copySettled } = await relayAndOwner();
 
-  // The owner's computer writes a page, a Group with a post, and a chat on the page, and syncs.
+  // The owner's computer reads by the owner's account, as a signed-in desktop does. It writes a page, a Group with a
+  // post and an agent's reply, and a chat on the page, and syncs.
+  await owner.request("chats.readState.seedAccount", { accountUserId: "owner", seedLocal: true }, owner.workspace);
   const main = await owner.request("versions.ensureMain", {}, owner.workspace);
   await owner.request("versionedText.write", {
     versionId: main.id as string, path: "docs/plan.md", text: "# Plan\n\nStay in Alfama.\n", origin: "api", publish: true, createOnly: true,
@@ -225,6 +238,10 @@ it.skipIf(engine.missing)("answers the phone's reads from the server's copy as t
   const planning = await chats.createChannel({ workspaceId: WORKSPACE, name: "Planning" });
   const post = await chats.startChannelThread({
     workspaceId: WORKSPACE, channelId: planning.channelId, author, authorUserId: "owner", authorActorKey: null, body: "Where do we stay?",
+  });
+  const reply = await chats.sendMessage({
+    workspaceId: WORKSPACE, threadId: post.thread.id, author: { kind: "agent", displayName: "Nova" }, authorOwnerDisplayName: "Owner",
+    authorUserId: "owner", authorActorKey: null, body: "Alfama has rooms.",
   });
   const ownerChats = engineChats(owner.client, owner.workspace);
   const plan = await ownerChats.fileObjectId("docs/plan.md");
@@ -270,6 +287,25 @@ it.skipIf(engine.missing)("answers the phone's reads from the server's copy as t
   expect(await read("documentRead", { path: "docs/plan.md" })).toEqual({ ok: true, path: "docs/plan.md", markdown: "# Plan\n\nStay in Alfama.\n" });
   expect(await copy.push()).toBe(0);
   expect(logRows()).toBe(before);
+
+  // Both read the owner's account marks: the owner's own post is read, the agent's reply isn't.
+  const unread = (full: unknown) => (full as { groups: Array<{ threads: Array<{ id: string; unreadCount: number }> }> }).groups
+    .flatMap((group) => group.threads).find((each) => each.id === post.thread.id)?.unreadCount;
+  const readPosition = (chat: unknown) => (chat as { stream: { readPosition: unknown } }).stream.readPosition;
+  expect(unread(await read("groupsFull"))).toBe(1);
+  expect(unread(await listGroupsWithThreads(ownerChats))).toBe(1);
+  const ownerPosition = readPosition(await readChat(ownerChats, { group: "planning" }));
+  expect(ownerPosition).not.toBeNull();
+  expect(readPosition(await read("chat", { group: "planning" }))).toEqual(ownerPosition);
+
+  // The phone shows the thread and marks its newest message read. The copy publishes the mark, and the owner's
+  // computer, once it syncs, shows the thread read.
+  expect(await read("markRead", { threadId: post.thread.id, messageId: reply.id })).toEqual({ ok: true });
+  await copySettled();
+  await owner.sync();
+  expect(unread(await listGroupsWithThreads(ownerChats))).toBe(0);
+  expect((await listGroupThreads(ownerChats, { group: "planning", reader: null })).threads).toMatchObject([{ unread: false }]);
+  expect(unread(await read("groupsFull"))).toBe(0);
 }, 120_000);
 
 it.skipIf(engine.missing)("saves the phone's writes through a copy that holds no file, as the relay accepts them and the owner's computer reads them", async () => {
@@ -321,6 +357,17 @@ it.skipIf(engine.missing)("saves the phone's writes through a copy that holds no
     messageId: phoneWriteIds("owner", WORKSPACE, "op-post").messageId("post") });
   const postThread = posted.threadId, postMessage = posted.messageId!;
   expect(recorded("op-post")).toMatchObject({ message_state: "published" });
+  // The account's actor key, which this server's origin issues: the copy's engine keeps it with the post, and the row
+  // keeps it in its command. It never travels to the relay.
+  const actorKey = '{"kind":"account","issuer":"https://relay.example.test","userId":"owner"}';
+  const copyChats = new ChatsLiveAdapter(copy.client, copy.workspace, { workspaceId: WORKSPACE });
+  const storedKeys = async () => ({
+    message: (await copyChats.getMessage({ workspaceId: WORKSPACE, messageId: postMessage })).authorActorKey,
+    row: (JSON.parse(String(db.prepare("SELECT command_json FROM sync_relay_account_operations WHERE operation_id = 'op-post'").get()!.command_json)) as {
+      author: { actorKey: unknown };
+    }).author.actorKey,
+  });
+  expect(await storedKeys()).toEqual({ message: actorKey, row: actorKey });
   expect(accepted("chat.message.append", { messageId: postMessage })).toMatchObject([{
     threadId: postThread, authorKind: "human", authorDisplayName: "Ana", authorUserId: "owner", body: "Where do we eat?",
   }]);
@@ -388,4 +435,6 @@ it.skipIf(engine.missing)("saves the phone's writes through a copy that holds no
   expect(await copy.push()).toBe(0);
   expect(logRows()).toBe(before);
   expect(accepted("chat.message.append", { messageId: postMessage })).toMatchObject([{ authorDisplayName: "Ana" }]);
+  expect(await storedKeys()).toEqual({ message: actorKey, row: actorKey });
+  expect(accepted("chat.message.append", { messageId: postMessage })[0]).not.toHaveProperty("authorActorKey");
 }, 120_000);
