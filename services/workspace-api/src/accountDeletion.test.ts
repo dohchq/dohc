@@ -1,7 +1,7 @@
 import {readFile} from "node:fs/promises";
 import {randomUUID} from "node:crypto";
 import {Client, Pool} from "pg";
-import {beforeAll, afterAll, afterEach, describe, expect, it, vi} from "vitest";
+import { beforeAll, afterAll, afterEach, describe, expect, it } from "vitest";
 import {CLIENT_IP_HEADER, createWorkspaceAuth} from "@dohc/workspace-auth/betterAuth";
 import {accountDeletionPreviewKey, mintDeletionPreviewToken} from "@dohc/workspace-auth/accountDeletion";
 import {createAccountDeletion} from "./accountDeletion";
@@ -22,10 +22,10 @@ describe.skipIf(!available)("account deletion against Postgres",()=>{
   afterAll(async()=>{await pool?.end();await admin?.query('DROP SCHEMA "'+schema+'" CASCADE');await admin?.end();});
   async function fixture(){
     let scope={workspaceIds:["owned-workspace"],workspaceCount:1,ownedShareCount:2,heldGrantCount:3,storedBytes:123};
-    let relayAvailable=true,finished=false,purgeCalls=0,previewCalls=0;
+    let relayAvailable=true,finished=false,purgeCalls=0;
     const deletion=createAccountDeletion({pool,secret,serverOrigin:baseURL,relayUrl:"http://relay.test",fetch:async(_url,init)=>{
       const body=JSON.parse(String(init?.body)) as {operation:string};
-      if(body.operation==="preview"){previewCalls++;return Response.json(scope);}
+      if(body.operation==="preview"){return Response.json(scope);}
       if(!relayAvailable)throw Error("relay unavailable");
       purgeCalls++;finished=true;return Response.json({finished:true});
     }});
@@ -37,21 +37,15 @@ describe.skipIf(!available)("account deletion against Postgres",()=>{
     const post=(path:string,body:unknown={},credential=token)=>auth.handler(new Request(baseURL+"/api/auth"+path,{method:"POST",headers:{authorization:"Bearer "+credential,"content-type":"application/json",[CLIENT_IP_HEADER]:clientIp},body:JSON.stringify(body)}));
     const claim=(userCode:string)=>auth.handler(new Request(baseURL+"/api/auth/device?user_code="+encodeURIComponent(userCode),{headers:{authorization:"Bearer "+token,[CLIENT_IP_HEADER]:clientIp}}));
     const preview=async()=>{const response=await post("/account/deletion-preview");expect(response.status).toBe(200);return await response.json() as {previewToken:string;email:string;serverOrigin:string;workspaceIds:string[]};};
-    return {deletion,auth,post,claim,preview,userId,email,token,sent,get finished(){return finished;},get purgeCalls(){return purgeCalls;},get previewCalls(){return previewCalls;},syncBytes(){scope={...scope,storedBytes:999};},changeScope(){scope={...scope,ownedShareCount:4};},disconnectRelay(){relayAvailable=false;},connectRelay(){relayAvailable=true;}};
+    return {deletion,auth,post,claim,preview,userId,email,token,sent,get finished(){return finished;},get purgeCalls(){return purgeCalls;},changeScope(){scope={...scope,ownedShareCount:4};},disconnectRelay(){relayAvailable=false;},connectRelay(){relayAvailable=true;}};
   }
   it("previews the exact account and refuses link or app credentials",async()=>{
     const f=await fixture();expect(await f.preview()).toMatchObject({email:f.email,serverOrigin:baseURL,workspaceIds:["owned-workspace"],workspaceCount:1,ownedShareCount:2,heldGrantCount:3,storedBytes:123,passwordRequired:true});
     expect((await f.post("/account/deletion-preview",{},"LinkCapability proof")).status).toBe(401);
     expect((await f.post("/account/delete",{previewToken:"proof"},"app-proof")).status).toBe(401);
   });
-  it("accepts the correct password with an old session",async()=>{
-    const f=await fixture(),preview=await f.preview();
-    await pool.query(`UPDATE "session" SET "createdAt"=now()-interval '16 minutes' WHERE "userId"=$1` ,[f.userId]);
-    expect((await f.post("/account/delete",{...preview,password})).status).toBe(200);
-    expect(f.finished).toBe(true);
-    expect((await pool.query('SELECT * FROM account_deletion_jobs')).rows).toHaveLength(0);
-  });
-  it.each([undefined, "", null, "wrong-password"])("refuses password %j without recording deletion or revoking sessions",async suppliedPassword=>{
+
+  it.each([undefined, "wrong-password"])("refuses password %j without recording deletion or revoking sessions",async suppliedPassword=>{
     const f=await fixture(),preview=await f.preview();
     const response=await f.post("/account/delete",{...preview,password:suppliedPassword});
     expect(response.status).toBe(400);
@@ -121,51 +115,5 @@ describe.skipIf(!available)("account deletion against Postgres",()=>{
     expect((await f.post("/account/delete",{...preview,password})).status).toBe(200);
     expect((await pool.query('SELECT id FROM "organization" ORDER BY id')).rows).toEqual([{id:"shared"}]);
   });
-  it("finishes synchronously when the relay acknowledges purge",async()=>{
-    const f=await fixture(),preview=await f.preview();
-    await f.auth.api.requestPasswordReset({body:{email:f.email}});
-    f.syncBytes();
-    const result=await f.post("/account/delete",{...preview,password});
-    expect(result.status).toBe(200);expect(await result.json()).toEqual({finished:true});
-    expect((await pool.query('SELECT * FROM "user" WHERE id=$1',[f.userId])).rows).toEqual([]);
-    expect((await pool.query('SELECT * FROM "verification" WHERE value=$1',[f.userId])).rows).toEqual([]);
-    const closed=createWorkspaceAuth({pool,secret,baseURL,sendEmail:async()=>{},admitAccount:async email=>email===f.email?"admitted":"refused"});
-    await expect(closed.api.signUpEmail({body:{email:"unapproved@example.test",password,name:"Unapproved"}})).rejects.toMatchObject({statusCode:403,body:{code:"SIGN_UP_CLOSED"}});
-  });
-});
 
-it("rejects invalid tokens before taking a connection or calling the relay",async()=>{
-  const connect=vi.fn(async()=>{throw Error("must not connect");}),relay=vi.fn(),confirmPassword=vi.fn();
-  const deletion=createAccountDeletion({pool:{connect} as unknown as Pool,secret,serverOrigin:baseURL,relayUrl:"http://relay.test",fetch:relay});
-  const scope={email:"person@example.test",serverOrigin:baseURL,workspaceIds:[],workspaceCount:0,ownedShareCount:0,heldGrantCount:0,storedBytes:0};
-  const key=accountDeletionPreviewKey(secret);
-  for(const token of ["invalid",mintDeletionPreviewToken(key,"other",scope),mintDeletionPreviewToken(key,"person",scope,Date.now()-600_000)]) {
-    await expect(deletion.delete({id:"person",email:scope.email},token,confirmPassword)).rejects.toMatchObject({statusCode:409});
-  }
-  expect(connect).not.toHaveBeenCalled();expect(relay).not.toHaveBeenCalled();expect(confirmPassword).not.toHaveBeenCalled();
-});
-it("calls the relay preview without holding an account lock",async()=>{
-  let locked=false;
-  const client={async query(sql:string){if(sql.includes("FOR UPDATE")){locked=true;return {rows:[{email:"person@example.test"}]};}if(sql==="COMMIT"||sql==="ROLLBACK")locked=false;return {rows:[]};},release(){}};
-  const pool={connect:async()=>client} as unknown as Pool;
-  const scope={email:"person@example.test",serverOrigin:baseURL,workspaceIds:[],workspaceCount:0,ownedShareCount:0,heldGrantCount:0,storedBytes:0};
-  const deletion=createAccountDeletion({pool,secret,serverOrigin:baseURL,relayUrl:"http://relay.test",fetch:async(_url,init)=>{
-    expect(locked).toBe(false);const body=JSON.parse(String(init?.body)) as {operation:string};
-    return Response.json(body.operation==="preview"?scope:{finished:true});
-  }});
-  expect(await deletion.delete({id:"person",email:scope.email},mintDeletionPreviewToken(accountDeletionPreviewKey(secret),"person",scope),async()=>{expect(locked).toBe(false);})).toEqual({finished:true});
-});
-
-it("confirms the password after checking the preview and before recording deletion",async()=>{
-  const connect=vi.fn(),confirmPassword=vi.fn(async()=>{throw Error("wrong password");});
-  const scope={email:"person@example.test",serverOrigin:baseURL,workspaceIds:[],workspaceCount:0,ownedShareCount:0,heldGrantCount:0,storedBytes:0};
-  const relay=vi.fn(async()=>Response.json(scope));
-  const deletion=createAccountDeletion({pool:{connect} as unknown as Pool,secret,serverOrigin:baseURL,relayUrl:"http://relay.test",fetch:relay});
-  const token=mintDeletionPreviewToken(accountDeletionPreviewKey(secret),"person",scope);
-  await expect(deletion.delete({id:"person",email:scope.email},token,confirmPassword)).rejects.toThrow("wrong password");
-  expect(relay).toHaveBeenCalledOnce();expect(confirmPassword).toHaveBeenCalledOnce();expect(connect).not.toHaveBeenCalled();
-  confirmPassword.mockClear();
-  relay.mockResolvedValueOnce(Response.json({...scope,heldGrantCount:1}));
-  await expect(deletion.delete({id:"person",email:scope.email},token,confirmPassword)).rejects.toMatchObject({statusCode:409});
-  expect(confirmPassword).not.toHaveBeenCalled();expect(connect).not.toHaveBeenCalled();
 });

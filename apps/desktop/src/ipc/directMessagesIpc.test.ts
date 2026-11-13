@@ -476,6 +476,22 @@ describe("registered direct message boundaries", () => {
     expect(h.events).toEqual([]);
   });
 
+  it.each([false, true])("refuses a file link in a direct message before any conversation or grant, and sends a malformed one: %s", async existing => {
+    const h = await harness();
+    if (existing) h.seedConversation();
+    await expect(h.invoke(CHANNELS.startDm, { ...startPayload, body: "See @[notes.md#Plan]" }))
+      .rejects.toThrow("Files can't be linked in a direct message.");
+    expect(h.storeMethods.createChannel).not.toHaveBeenCalled();
+    expect(h.storeMethods.startChannelThread).not.toHaveBeenCalled();
+    expect(h.storeMethods.sendMessage).not.toHaveBeenCalled();
+    expect(h.relayJson).not.toHaveBeenCalled();
+    expect(h.events).toEqual([]);
+    const body = "See @[notes.md and `@[notes.md]`";
+    await h.invoke(CHANNELS.startDm, { ...startPayload, body });
+    const commit = existing ? h.storeMethods.sendMessage : h.storeMethods.startChannelThread;
+    expect(commit).toHaveBeenCalledWith(expect.objectContaining({ body }));
+  });
+
   it.each([false, true])("commits the normalized 64 KiB DM body for an existing conversation: %s", async existing => {
     const h = await harness();
     if (existing) h.seedConversation();

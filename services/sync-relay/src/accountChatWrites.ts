@@ -430,9 +430,9 @@ const DM_THREADS_PER_LANE = 8;
 const DM_MESSAGE_PAGES = 4;
 const DM_MESSAGES = 2_000;
 
-// What wake resolution reads: the account's enabled agents, and the copy through the reads' filter, a hidden target
-// reading as a missing one. A failed read fails the write before its row.
-function wakeSources(storage: SyncRelayStorage, copy: AutomationReplica, targets: Targets, accountId: string): WakeSources {
+// What wake resolution reads: the account's enabled agents whose leases hold now, and the copy through the reads'
+// filter, a hidden target reading as a missing one. A failed read fails the write before its row.
+function wakeSources(storage: SyncRelayStorage, copy: AutomationReplica, targets: Targets, accountId: string, nowMs: number): WakeSources {
   const hidden = async <T>(read: () => Promise<T>): Promise<T | null> => {
     try {
       return await read();
@@ -442,7 +442,7 @@ function wakeSources(storage: SyncRelayStorage, copy: AutomationReplica, targets
     }
   };
   return {
-    runners: storage.enabledChatRunners({ accountId, workspaceId: copy.workspaceId }),
+    runners: storage.enabledChatRunners({ accountId, workspaceId: copy.workspaceId, nowMs }),
     message: (messageId) => hidden(() => targets.message(messageId)),
     thread: (threadId) => hidden(() => targets.thread(threadId)),
     opening: (threadId) => targets.opening(threadId),
@@ -904,7 +904,7 @@ export async function runPhoneWrite(input: PhoneWriteInput): Promise<PhoneWriteA
       try {
         const command = await canonicalWrite(write, ids, targets);
         const author = authorOf(writer, workspaceId);
-        const wakes = await resolveWakeTargets(wakeSources(storage, copy, targets, writer.accountId), writer.accountId, command);
+        const wakes = await resolveWakeTargets(wakeSources(storage, copy, targets, writer.accountId, nowMs()), writer.accountId, command);
         stored = { stages: publicationStages(command, author, ids.key), write: command, author, wakes };
       } catch (error) {
         return await failedBeforeRecord(error);
@@ -961,6 +961,8 @@ export async function runAccountWrite(
     write: PhoneWrite;
     visitor: Extract<CopyVisitor, { reason: "account" }>;
     authorize(): Promise<void>;
+    /** The route's clock, the one runner declarations are stamped with. */
+    nowMs?(): number;
   },
 ): Promise<{ result: PhoneWriteAnswer; cursor: string }> {
   const { storage } = server;
@@ -969,6 +971,7 @@ export async function runAccountWrite(
     const cursor = currentAccountFeedCursor(storage, input.workspaceId);
     const result = await runPhoneWrite({
       storage, copy, writer: input.writer, write: input.write, authorize: () => input.authorize(), signal: input.visitor.signal,
+      ...(input.nowMs ? { nowMs: input.nowMs } : {}),
     });
     return { result, cursor };
   });

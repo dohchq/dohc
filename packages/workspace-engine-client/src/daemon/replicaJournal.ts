@@ -1,6 +1,6 @@
 import type { AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, LiveObjectBinding, LiveUpdateReceipt } from "@dohc/live-session-contract";
 
-export interface ReplicaRestoreAdmission {
+interface ReplicaRestoreAdmission {
   readonly proposalDigest: string;
   readonly candidateDigest: string;
   readonly preparation: {
@@ -24,9 +24,9 @@ export interface ReplicaRestoreAdmission {
 }
 
 /** The document's current lineage authority when the relay served the page. */
-export interface ReplicaAuthority { readonly lineageClaimId: string; readonly baselineSequence: number; readonly restoreFenceGeneration: number }
+interface ReplicaAuthority { readonly lineageClaimId: string; readonly baselineSequence: number; readonly restoreFenceGeneration: number }
 
-export interface ReplicaJournalRow {
+interface ReplicaJournalRow {
   readonly admitted: AdmittedLiveUpdate;
   readonly relayDatabaseNamespace: string;
   readonly evidenceDigest: string;

@@ -172,6 +172,7 @@ function fakeRoster(relay: ReturnType<typeof fakeRelay>) {
       record("withdraw", wakeSession);
       return withdrawal;
     },
+    check: vi.fn(async () => undefined),
     stop: vi.fn(async () => undefined),
   } satisfies ChatRunnerRoster;
   return {
@@ -589,6 +590,14 @@ describe("Try again", () => {
     expect(w.deps.client).toHaveBeenCalledTimes(2);
     expect(w.deps.clear).not.toHaveBeenCalled();
     await w.lifetime.stop();
+  });
+});
+
+describe("renewing declarations on resume", () => {
+  it("asks the roster for what is due on every resume, power resume among them", () => {
+    const w = setup();
+    w.lifetime.resume();
+    expect(w.roster.roster.check).toHaveBeenCalledOnce();
   });
 });
 

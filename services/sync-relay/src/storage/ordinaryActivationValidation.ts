@@ -60,9 +60,12 @@ export interface OrdinaryFoldWork {
   readonly document:LiveDocumentKey;readonly currentPath:string;
   readonly page:{readonly start:Uint8Array;readonly fromBase:boolean;readonly updates:readonly Uint8Array[];readonly keepFrom:number};
 }
-/** A folded page: the full state after it, its projection, the base's when the page started there, and the prefixes it kept. */
+/**
+ * A folded page: the full state after it, its projection, the base's when the page started there, and the prefixes it
+ * kept. `unprojected` is a page whose end may be a state no live document has, which a shorter page may not end at.
+ */
 export type OrdinaryFoldResult={kind:"folded";state:Uint8Array;stateSha256:string;projection:Projection;base:Projection|null;
-  prefixes:(Projection&{index:number})[]}|{kind:"refused";message:string}|{kind:"over-budget";message:string};
+  prefixes:(Projection&{index:number})[]}|{kind:"refused"|"unprojected";message:string}|{kind:"over-budget";message:string};
 /**
  * Validates a capture against the history `readOrdinaryActivationHistory` read for it, or folds one page of a lineage's
  * history. Runs in a validation process; it reads no storage. Each refusal message is the one activation reports.
@@ -142,6 +145,10 @@ function foldOrdinaryHistoryPage(work:OrdinaryFoldWork,policy:OrderedLiveUpdateC
   const result=createLiveMarkdownHistoryValidator(policy)({document,currentPath,checkpoint:start,suffix:updates.slice(0,-1),candidate:updates[updates.length-1]!},
     {from:keepFrom,visit:(evidence,index)=>{prefixes.push({index,...projectionOf(evidence)});}});
   if(result.kind!=="accepted"&&result.reason==="capacity-refused")return {kind:"over-budget",message:"Ordinary activation history exceeds its configured validation budget."};
-  if(result.kind!=="accepted")return {kind:"refused",message:"Ordinary activation history is not a valid live document."};
+  if(result.kind!=="accepted"){
+    // Only a page that keeps no prefixes can end earlier without losing a projection its source needs.
+    const unprojected=result.reason==="invalid-schema"&&(result.source==="final"||result.source==="admitted-cut")&&keepFrom===updates.length;
+    return {kind:unprojected?"unprojected":"refused",message:"Ordinary activation history is not a valid live document."};
+  }
   return {kind:"folded",state:result.evidence.stateUpdate,stateSha256:result.evidence.stateUpdateSha256,projection:projectionOf(result.evidence),base,prefixes};
 }

@@ -1007,6 +1007,7 @@ export function DesktopWorkspaceShell(props: {
     setShellRetryBusy,
     runShellErrorAction,
     clearIdentity,
+    noticeOwner,
     privacySettingsAction,
     keepCollectionsHere,
   } = useShellError(workspaceId, props.workspace.shareView ? retryRefusedSharedView : undefined);
@@ -7330,8 +7331,7 @@ export function DesktopWorkspaceShell(props: {
                   versionKey={versionEpoch}
                   onOpenCompare={openVersionCompareTab}
                   onReviewConflicts={() => setConflictReviewOpen(true)}
-                  onError={reportButtonError}
-                  onSettled={clearIdentity}
+                  notices={noticeOwner}
                 />
               )
             );

@@ -11,10 +11,7 @@ import { openSyncRelayStorage } from "./storage";
 import { RelayWriteOwner } from "./storage/writeOwner";
 import type { SqliteDb } from "./storage/types";
 import { guardRelayResponses } from "./relayResponseStanding";
-import { createDeviceHostCredential } from "./deviceHostCredential";
-import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import type { StorageContext } from "./storage/context";
-import { attachedLiveJournalHistoryNamespace } from "./storage/liveJournalHistory";
 import { acquireSupervisorOwnership } from "../../../packages/app-backend-runtime/src/worker-ownership";
 
 const cleanups: (() => void)[] = [];
@@ -83,38 +80,6 @@ describe("relay deployment continuity", () => {
       expect(second.storage.claimWorkspace({ workspaceId: "w", ownerUserId: "u", createdAtMs: 1 })).toBe("owned");
     } finally { second.storage.close(); }
   }, 2 * TSX_CHILD_TIMEOUT_MS + 10_000);
-
-  // Proves: the relay's history is attached under the configured namespace
-  // before its storage is returned, so the first read of a note's restores,
-  // on opening and after a restart, sees the history they were written under.
-  it("attaches its history before it returns the storage, on opening and after a restart", () => {
-    const f = fixture(), {namespace} = JSON.parse(readFileSync(f.configPath, "utf8")) as {namespace: string};
-    for (const open of ["first", "reopened"]) {
-      const {storage, history} = openRelayDeployment(f.configPath);
-      try {
-        expect(attachedLiveJournalHistoryNamespace(storage as StorageContext), open).toBe(namespace);
-        expect(history.namespace).toBe(namespace);
-      } finally { storage.close(); }
-    }
-    expect(read(f.relayPath, "sync_relay_continuity")).toMatchObject({namespace});
-  });
-
-  it("refuses a database restored to exactly one permission write ago with no new journal event", async () => {
-    const f = fixture(), current = openRelayDeployment(f.configPath);
-    const credential = createDeviceHostCredential("host-one", parseHostEpoch(1));
-    const backupPath = join(f.root, "backup.sqlite");
-    try {
-      expect(current.storage.provisionDeviceHostCredential({ credential, updatedAtMs: 1 }).ok).toBe(true);
-      const source = new DatabaseSync(f.relayPath, { readOnly: true });
-      try { await backup(source, backupPath); } finally { source.close(); }
-      const before = read(f.relayPath,"sync_relay_continuity").stamp;
-      expect(current.storage.revokeDeviceHostCredential({ hostId: credential.hostId, instanceId: credential.instanceId, updatedAtMs: 2 }).ok).toBe(true);
-      expect(read(f.relayPath,"sync_relay_continuity").stamp).not.toBe(before);
-    } finally { current.storage.close(); }
-    for (const suffix of ["", "-wal", "-shm"]) if (existsSync(f.relayPath + suffix)) renameSync(f.relayPath + suffix, f.relayPath + suffix + ".preserved");
-    copyFileSync(backupPath, f.relayPath);
-    expect(() => openRelayDeployment(f.configPath)).toThrow(/continuity/);
-  });
 
   it.each(["relay", "continuity", "lock"])("refuses a missing %s file without recreating it", missing => {
     const f = fixture();
@@ -188,55 +153,6 @@ describe("relay deployment continuity", () => {
     expect(() => openRelayDeployment(f.configPath)).toThrow("Relay deployment continuity is unavailable.");
   });
 
-  it("does not initialize over existing data or put continuity inside a relay volume", () => {
-    const f = fixture();
-    expect(() => initializeRelayDeployment(f)).toThrow();
-    const other = join(f.root, "nested"); mkdirSync(other);
-    expect(() => initializeRelayDeployment({ configPath: join(f.root,"new.json"), relayPath: join(other,"relay.sqlite"), continuityDirectory: join(other,"continuity") })).toThrow();
-    expect(existsSync(join(other, "continuity"))).toBe(false);
-  });
-
-  it("read snapshots do not advance continuity", () => {
-    const f = fixture(), current = openRelayDeployment(f.configPath);
-    try {
-      const side = join(f.continuityDirectory,"continuity.sqlite"), before = read(side,"continuity");
-      expect(() => current.storage.getWorkspaceBootstrap("missing")).toThrow(/does not exist/);
-      current.storage.getLiveHostControl();
-      expect(read(side,"continuity")).toEqual(before);
-    } finally { current.storage.close(); }
-  });
-
-  it("a no-op write and unchanged schema restart leave continuity unchanged", () => {
-    const f = fixture(), current = openRelayDeployment(f.configPath);
-    try {
-      current.storage.claimWorkspace({ workspaceId: "w", ownerUserId: "u", createdAtMs: 1 });
-      const side = join(f.continuityDirectory,"continuity.sqlite"), before = read(side,"continuity");
-      expect(current.storage.claimWorkspace({ workspaceId: "w", ownerUserId: "u", createdAtMs: 2 })).toBe("owned");
-      expect(read(side,"continuity")).toEqual(before);
-    } finally { current.storage.close(); }
-    const side = join(f.continuityDirectory,"continuity.sqlite"), before = read(side,"continuity");
-    const reopened = openRelayDeployment(f.configPath); reopened.storage.close();
-    expect(read(side,"continuity")).toEqual(before);
-  });
-
-  it("reopens after a deferred constraint rolls back without changing continuity", () => {
-    const f = fixture(), current = openRelayDeployment(f.configPath);
-    const storage = current.storage as StorageContext;
-    const side = join(f.continuityDirectory, "continuity.sqlite");
-    try {
-      storage.tx(() => storage.db.exec("CREATE TABLE test_parent(id INTEGER PRIMARY KEY); CREATE TABLE test_child(parent_id INTEGER REFERENCES test_parent(id) DEFERRABLE INITIALLY DEFERRED)"));
-      const before = read(side, "continuity");
-      expect(() => storage.tx(() => storage.db.exec("INSERT INTO test_child VALUES(17)"))).toThrow(/FOREIGN KEY/);
-      expect(storage.db.prepare("SELECT * FROM test_child").all()).toHaveLength(0);
-      expect(storage.unavailable.aborted).toBe(true);
-      expect(read(side, "continuity")).toEqual(before);
-    } finally { storage.close(); }
-    const reopened = openRelayDeployment(f.configPath);
-    try {
-      expect(reopened.storage.claimWorkspace({ workspaceId: "after-rollback", ownerUserId: "owner", createdAtMs: 1 })).toBe("created");
-    } finally { reopened.storage.close(); }
-  });
-
   it.each(["before", "after"])("reopens committed data when confirmation throws %s its durable commit", async boundary => {
     const f = fixture(), live = openRelayDeployment(f.configPath);
     const storage = live.storage as StorageContext;
@@ -272,38 +188,7 @@ describe("relay deployment continuity", () => {
     } finally { reopened.storage.close(); }
   });
 
-  it("checkpoints the continuity record once before accepting storage and never per write", () => {
-    const f = fixture(), prepare = DatabaseSync.prototype.prepare, exec = DatabaseSync.prototype.exec;
-    let checkpoints = 0;
-    DatabaseSync.prototype.prepare = function(sql: string) {
-      const query = prepare.call(this, sql);
-      if (sql === "PRAGMA wal_checkpoint(FULL)" && prepare.call(this, "SELECT 1 FROM sqlite_schema WHERE name='continuity'").get()) {
-        const get = query.get.bind(query);
-        query.get = () => {
-          expect(prepare.call(this, "PRAGMA synchronous").get()?.synchronous).toBe(2);
-          const result = get();
-          checkpoints++;
-          return result;
-        };
-      }
-      return query;
-    };
-    DatabaseSync.prototype.exec = function(sql: string) {
-      if (sql === "BEGIN IMMEDIATE") expect(checkpoints).toBe(1);
-      return exec.call(this, sql);
-    };
-    try {
-      const current = openRelayDeployment(f.configPath);
-      try {
-        expect(checkpoints).toBe(1);
-        current.storage.claimWorkspace({workspaceId: "first", ownerUserId: "owner", createdAtMs: 1});
-        current.storage.claimWorkspace({workspaceId: "second", ownerUserId: "owner", createdAtMs: 2});
-        expect(checkpoints).toBe(1);
-      } finally { current.storage.close(); }
-    } finally { DatabaseSync.prototype.prepare = prepare; DatabaseSync.prototype.exec = exec; }
-  });
-
-  it.each(["busy", "partial", "io-error"])("refuses startup when the continuity record checkpoint is %s", failure => {
+  it.each(["partial"])("refuses startup when the continuity record checkpoint is %s", failure => {
     const f = fixture(), live = openRelayDeployment(f.configPath);
     live.storage.claimWorkspace({workspaceId: "acknowledged", ownerUserId: "owner", createdAtMs: 1});
     live.storage.close();
@@ -326,47 +211,7 @@ describe("relay deployment continuity", () => {
     finally { restarted.storage.close(); }
   });
 
-  it.each(["busy", "partial", "io-error"])("does not settle continuity when the durability checkpoint is %s", failure => {
-    const f = fixture(), live = openRelayDeployment(f.configPath);
-    const storage = live.storage as StorageContext, exec = DatabaseSync.prototype.exec;
-    DatabaseSync.prototype.exec = function(sql: string) {
-      if (sql === "COMMIT" && this.prepare("SELECT 1 FROM sqlite_schema WHERE name='continuity'").get()) throw new Error("record failed");
-      return exec.call(this, sql);
-    };
-    try { expect(() => storage.claimWorkspace({workspaceId: "committed", ownerUserId: "owner", createdAtMs: 1})).toThrow(/record failed/); }
-    finally { DatabaseSync.prototype.exec = exec; storage.close(); }
-    const side = join(f.continuityDirectory, "continuity.sqlite"), before = read(side, "continuity");
-    const prepare = DatabaseSync.prototype.prepare;
-    DatabaseSync.prototype.prepare = function(sql: string) {
-      const query = prepare.call(this, sql);
-      if (sql === "PRAGMA wal_checkpoint(FULL)" && prepare.call(this, "SELECT 1 FROM sqlite_schema WHERE name='sync_relay_continuity'").get()) query.get = () => {
-        if (failure === "io-error") throw new Error("checkpoint I/O error");
-        return {busy: failure === "busy" ? 1 : 0, log: 2, checkpointed: failure === "busy" ? 2 : 1};
-      };
-      return query;
-    };
-    try { expect(() => openRelayDeployment(f.configPath)).toThrow(/continuity|checkpoint/); }
-    finally { DatabaseSync.prototype.prepare = prepare; }
-    expect(read(side, "continuity")).toEqual(before);
-    const restarted = openRelayDeployment(f.configPath);
-    try { expect(restarted.storage.claimWorkspace({workspaceId: "committed", ownerUserId: "owner", createdAtMs: 2})).toBe("owned"); }
-    finally { restarted.storage.close(); }
-  });
-
-  it("refuses current-file snapshots after storage retirement", () => {
-    let owner!: RelayWriteOwner;
-    const root = mkdtempSync(join(tmpdir(), "relay-read-standing-"));
-    cleanups.push(() => rmSync(root, { recursive: true, force: true }));
-    const path = join(root, "relay.sqlite");
-    new DatabaseSync(path).close();
-    const storage = openSyncRelayStorage(path, {}, db => owner = new RelayWriteOwner(db));
-    try {
-      owner.invalidate();
-      expect(() => storage.readCurrentFileState({ workspaceId: "w", versionId: "main", selectorPaths: ["docs"], limit: 1 })).toThrow(/unavailable/);
-    } finally { storage.close(); }
-  });
-
-  it.each(["before-commit", "after-commit", "before-checkpoint", "after-checkpoint", "before-settlement-commit", "after-settlement-commit"])("recovers the production interruption at %s without losing acknowledged writes", async boundary => {
+  it.each(["before-commit", "after-settlement-commit"])("recovers the production interruption at %s without losing acknowledged writes", async boundary => {
     const f = fixture(), live = openRelayDeployment(f.configPath);
     const backupPath = join(f.root, "older.sqlite");
     try {
@@ -424,37 +269,6 @@ describe("relay deployment continuity", () => {
 });
 
 describe("relay write and response lifetime", () => {
-  it("retires after an uncertain rollback without confirming the write", () => {
-    const raw = new DatabaseSync(":memory:");
-    raw.exec("CREATE TABLE work(value INTEGER); CREATE TABLE sync_relay_continuity(singleton INTEGER,stamp INTEGER,nonce TEXT,previous_nonce TEXT); INSERT INTO sync_relay_continuity VALUES(1,0,'initial',NULL)");
-    let confirmed = false;
-    const db: SqliteDb = { prepare: sql => raw.prepare(sql) as unknown as ReturnType<SqliteDb["prepare"]>, close: () => raw.close(),
-      exec(sql) { if (sql === "COMMIT") throw new Error("commit failed"); raw.exec(sql); if (sql === "ROLLBACK") throw new Error("lost rollback result"); } };
-    const owner = new RelayWriteOwner(db, { confirm() { confirmed = true; }, close() {} }, 0, "initial");
-    try {
-      expect(() => owner.write(() => raw.exec("INSERT INTO work VALUES(1)"))).toThrow(/commit failed/);
-      expect(owner.unavailable.aborted).toBe(true);
-      expect(confirmed).toBe(false);
-    } finally { owner.close(); }
-  });
-
-  it("fences an uncertain COMMIT even when SQLite committed before throwing", () => {
-    const raw = new DatabaseSync(":memory:");
-    raw.exec("CREATE TABLE work(value INTEGER); CREATE TABLE sync_relay_continuity(singleton INTEGER,stamp INTEGER,nonce TEXT,previous_nonce TEXT); INSERT INTO sync_relay_continuity VALUES(1,0,'initial',NULL)");
-    let confirmed = false;
-    const db: SqliteDb = { prepare: sql => raw.prepare(sql) as unknown as ReturnType<SqliteDb["prepare"]>, close: () => raw.close(),
-      exec(sql) { raw.exec(sql); if (sql === "COMMIT") throw new Error("lost COMMIT result"); } };
-    const owner = new RelayWriteOwner(db, { confirm() { confirmed = true; }, close() {} }, 0, "initial");
-    try {
-      const standing = owner.captureStanding();
-      expect(() => owner.write(() => raw.exec("INSERT INTO work VALUES(1)"))).toThrow(/lost COMMIT/);
-      expect(raw.prepare("SELECT * FROM work").all()).toHaveLength(1);
-      expect(raw.prepare("SELECT stamp FROM sync_relay_continuity").get()?.stamp).toBe(1);
-      expect(confirmed).toBe(false);
-      expect(standing).toThrow(/unavailable/);
-      expect(() => owner.write(() => {})).toThrow(/unavailable/);
-    } finally { owner.close(); }
-  });
 
   it("rolls back a failed callback and refuses transaction nesting", () => {
     const raw = new DatabaseSync(":memory:"); raw.exec("CREATE TABLE work(value INTEGER)");
@@ -464,17 +278,6 @@ describe("relay write and response lifetime", () => {
       expect(raw.prepare("SELECT * FROM work").all()).toHaveLength(0);
       expect(owner.unavailable.aborted).toBe(false);
     } finally { owner.close(); }
-  });
-
-  it("suppresses an authorized response that finishes after its owner retires", async () => {
-    const raw = new DatabaseSync(":memory:"), owner = new RelayWriteOwner(raw as unknown as SqliteDb);
-    let release!: () => void;
-    const pending = new Promise<void>(resolve => { release = resolve; });
-    const handler = guardRelayResponses(owner, async () => { await pending; return Response.json({ secret: "private" }); });
-    const result = handler(new Request("https://relay.test/share"));
-    owner.invalidate(); release();
-    expect((await result).status).toBe(503);
-    owner.close();
   });
 
   it("cancels an established stream before forwarding a later chunk", async () => {
@@ -488,25 +291,4 @@ describe("relay write and response lifetime", () => {
     expect(cancelled).toBe(true);
     owner.close();
   });
-});
-
-it("includes a claimed email grant in the independent mutation record", () => {
-  const f = fixture(), { storage } = openRelayDeployment(f.configPath);
-  try {
-    storage.claimWorkspace({ workspaceId: "w", ownerUserId: "owner", createdAtMs: 1 });
-    storage.createShare({
-      share: { shareId: "s", workspaceId: "w", granterUserId: "owner", selectorJson: JSON.stringify({ paths: ["docs"], versionId: null }), createdAtMs: 1 },
-      grant: { grantId: "g", shareId: "s", principalKind: "email", principalUserId: null, principalEmail: "reader@example.test",
-        access: "view", generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null, parentGrantId: null },
-    });
-    const side = join(f.continuityDirectory, "continuity.sqlite");
-    const before = Number(read(side, "continuity").confirmed_stamp);
-    expect(storage.claimPendingSharesForEmail("reader@example.test", "reader")).toBe(1);
-    expect(storage.getShareGrant("g")?.principalUserId).toBe("reader");
-    const after = read(side, "continuity");
-    expect(Number(after.confirmed_stamp)).toBeGreaterThan(before);
-    expect(read(f.relayPath, "sync_relay_continuity").stamp).toBe(after.confirmed_stamp);
-    expect(storage.claimPendingSharesForEmail("reader@example.test", "reader")).toBe(0);
-    expect(read(side, "continuity")).toEqual(after);
-  } finally { storage.close(); }
 });

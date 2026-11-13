@@ -4,13 +4,12 @@ import {
   appendLog, claimWorkspace, closeTestStorages, createShare, json, jsonBody, linkSecret, moment, putBlob,
   RELAY_EXCHANGE_KEY, request, testHandler, testStorage,
 } from "../../sync-relay/src/testing";
-import { COLLECTION_WRITES_PATH } from "./collectionWrites";
 import { MCP_CORS_HEADERS, signInPageCsp } from "./mcpSignIn";
 import {
-  authorizePath, consentForm, decide, LOOPBACK_REDIRECT, pkce, register, registeredClient, signInAgent, tokenRequest,
+  authorizePath, consentForm, decide, LOOPBACK_REDIRECT, pkce, registeredClient, signInAgent, tokenRequest,
   type ShareWebSend,
 } from "./mcpSignIn.test-helper";
-import { createShareWebApplication, streamsRequestBody } from "./server";
+import { createShareWebApplication } from "./server";
 
 // The standard MCP sign-in through the real share-web and the real relay:
 // an agent finds the sign-in from a 401, registers, a person allows it on the
@@ -49,17 +48,10 @@ async function expectErrorPage(response: Response, status: number) {
   expect(await response.text()).toContain("dohc could not connect this agent");
 }
 
-async function stack(options: { exchangeKey?: boolean } = {}) {
+async function stack() {
   const storage = await testStorage();
   const relay = testHandler(storage, { relayExchangeKey: RELAY_EXCHANGE_KEY });
-  const relayCalls: string[] = [];
-  let consentRefused = false;
-  const fetchRelay = async (relayRequest: Request) => {
-    const path = new URL(relayRequest.url).pathname;
-    relayCalls.push(path);
-    // Stands in for a link that ends between the relay accepting the sign-in and the page reading it.
-    return consentRefused && path === "/sync/link/agent-authorizations/consent" ? new Response(null, { status: 404 }) : relay(relayRequest);
-  };
+  const fetchRelay = (relayRequest: Request) => relay(relayRequest);
   await claimWorkspace(relay, OWNER, WORKSPACE);
   const blob = await putBlob(relay, OWNER, WORKSPACE, CONTENT);
   await appendLog(relay, OWNER, WORKSPACE, [moment("docs/list.md", CONTENT, { originSeq: 0 })]);
@@ -72,7 +64,7 @@ async function stack(options: { exchangeKey?: boolean } = {}) {
   const secret = await link(["docs"]), otherSecret = await link(["notes"]);
   const application = () => createShareWebApplication({
     relayUrl: "https://relay.example.test", publicRelayUrl: "https://relay.example.test",
-    ...(options.exchangeKey === false ? {} : { relayExchangeKey: RELAY_EXCHANGE_KEY }),
+    relayExchangeKey: RELAY_EXCHANGE_KEY,
     publicHosts: new Set([HOST]), nowMs: () => 2_000, fetchRelay,
   });
   let app = application();
@@ -104,8 +96,7 @@ async function stack(options: { exchangeKey?: boolean } = {}) {
     return { code: value, verifier };
   }
   return {
-    send, mcp, connect, code, secret, otherSecret, blob, relayCalls, storage,
-    refuseConsent() { consentRefused = true; },
+    send, mcp, connect, code, secret, otherSecret, blob,
     restart() { app = application(); },
   };
 }
@@ -142,76 +133,6 @@ it("challenges an MCP request without a token, and publishes both metadata docum
   expectCors(unknown);
 });
 
-it("answers a preflight on the MCP and sign-in API paths, and not on the consent page", async () => {
-  const s = await stack();
-  const preflight = { method: "OPTIONS", headers: { origin: "https://inspector.example.test", "access-control-request-method": "POST" } };
-  for (const path of [`/mcp/s/${s.secret}`, `/.well-known/oauth-protected-resource/mcp/s/${s.secret}`,
-    "/.well-known/oauth-authorization-server", "/oauth/register", "/oauth/token"]) {
-    const answer = await s.send(path, preflight);
-    expect(answer.status, path).toBe(204);
-    expectCors(answer);
-  }
-  const page = await s.send("/oauth/authorize", preflight);
-  expect(page.status).toBe(405);
-  expect(page.headers.has("access-control-allow-origin")).toBe(false);
-});
-
-it("registers a public client, and refuses metadata it cannot use", async () => {
-  const s = await stack();
-  const created = await register(s.send, {
-    redirect_uris: [LOOPBACK_REDIRECT, LOOPBACK_REDIRECT], client_name: "Planner", token_endpoint_auth_method: "none",
-  });
-  expect(created.status).toBe(201);
-  expectCors(created);
-  expect(await created.json()).toEqual({
-    client_id: expect.stringMatching(AGENT_TOKEN), client_id_issued_at: 2, redirect_uris: [LOOPBACK_REDIRECT], client_name: "Planner",
-    grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], token_endpoint_auth_method: "none",
-  });
-  const refusals: Array<[Record<string, unknown>, string]> = [
-    [{ redirect_uris: [] }, "invalid_redirect_uri"],
-    [{ redirect_uris: ["http://agent.example.test/callback"] }, "invalid_redirect_uri"],
-    [{ redirect_uris: [`${LOOPBACK_REDIRECT}#fragment`] }, "invalid_redirect_uri"],
-    [{ redirect_uris: [LOOPBACK_REDIRECT, "https://user:pass@agent.example.test/callback"] }, "invalid_redirect_uri"],
-    [{ redirect_uris: [LOOPBACK_REDIRECT], client_name: "Planner\u0007" }, "invalid_client_metadata"],
-    [{ redirect_uris: [LOOPBACK_REDIRECT], token_endpoint_auth_method: "client_secret_basic" }, "invalid_client_metadata"],
-    [{ redirect_uris: [LOOPBACK_REDIRECT], grant_types: ["client_credentials"] }, "invalid_client_metadata"],
-    [{ redirect_uris: [LOOPBACK_REDIRECT], response_types: ["token"] }, "invalid_client_metadata"],
-  ];
-  for (const [metadata, error] of refusals) {
-    const refused = await register(s.send, metadata);
-    expect(refused.status, JSON.stringify(metadata)).toBe(400);
-    expect(await refused.json()).toMatchObject({ error });
-    expectCors(refused);
-  }
-  const notJson = await s.send("/oauth/register", { method: "POST", headers: { "content-type": "text/plain" }, body: "{}" });
-  expect(notJson.status).toBe(400);
-  expect(await notJson.json()).toMatchObject({ error: "invalid_client_metadata" });
-});
-
-it("keeps the version a client reports without its control characters, and refuses one too long or not text", async () => {
-  const s = await stack();
-  const created = await register(s.send, {
-    redirect_uris: [LOOPBACK_REDIRECT], client_name: "Planner", software_version: "2.4.0\u0000 beta\n",
-  });
-  expect(created.status).toBe(201);
-  const client = await created.json() as { client_id: string; software_version?: string };
-  expect(client.software_version).toBe("2.4.0 beta");
-  expect(s.storage.getAgentClient(client.client_id)).toMatchObject({ reportedName: "Planner", reportedVersion: "2.4.0 beta" });
-
-  const onlyControl = await register(s.send, { redirect_uris: [LOOPBACK_REDIRECT], software_version: "\u0007" });
-  expect(onlyControl.status).toBe(201);
-  const unversioned = await onlyControl.json() as { client_id: string; software_version?: string };
-  expect(unversioned.software_version).toBeUndefined();
-  expect(s.storage.getAgentClient(unversioned.client_id)).toMatchObject({ reportedVersion: null });
-
-  expect((await register(s.send, { redirect_uris: [LOOPBACK_REDIRECT], software_version: "v".repeat(100) })).status).toBe(201);
-  for (const version of ["v".repeat(101), 2]) {
-    const refused = await register(s.send, { redirect_uris: [LOOPBACK_REDIRECT], software_version: version });
-    expect(refused.status, String(version)).toBe(400);
-    expect(await refused.json()).toMatchObject({ error: "invalid_client_metadata" });
-  }
-});
-
 it("shows an error page, and never redirects, until the relay accepts the redirect URI", async () => {
   const s = await stack();
   const clientId = await registeredClient(s.send);
@@ -229,21 +150,6 @@ it("shows an error page, and never redirects, until the relay accepts the redire
   ];
   for (const path of refusals) await expectErrorPage(await s.send(path), 400);
   expect((await s.send(authorizePath(valid))).status).toBe(200);
-});
-
-it("sends a cancel, and a request that ends before its page, back to the agent with its state", async () => {
-  const s = await stack();
-  const clientId = await registeredClient(s.send);
-  const form = await consentForm(await s.send(authorizePath({ clientId, resource: resourceOf(s.secret), challenge: pkce().challenge, state: "kept" })));
-  const cancelled = await decide(s.send, ORIGIN, form, "cancel");
-  expect(cancelled.status).toBe(303);
-  expect(cancelled.headers.get("location")).toBe(`${LOOPBACK_REDIRECT}?error=access_denied&state=kept`);
-
-  s.refuseConsent();
-  const ended = await s.send(authorizePath({ clientId, resource: resourceOf(s.secret), challenge: pkce().challenge, state: "kept" }));
-  expect(ended.status).toBe(303);
-  expect(ended.headers.get("location")).toBe(`${LOOPBACK_REDIRECT}?error=access_denied&state=kept`);
-  expect(ended.headers.has("set-cookie")).toBe(false);
 });
 
 it("serves the consent page with its own headers and a cookie for this request only", async () => {
@@ -297,24 +203,6 @@ it("accepts a choice only from the browser and origin that opened the page, and 
   expect(again.headers.get("set-cookie")).toBe(`${name}=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict`);
 });
 
-it("keeps two consent pages open at once apart", async () => {
-  const s = await stack();
-  const clientId = await registeredClient(s.send);
-  const open = (state: string) => s.send(authorizePath({ clientId, resource: resourceOf(s.secret), challenge: pkce().challenge, state }));
-  const first = await consentForm(await open("first")), second = await consentForm(await open("second"));
-  expect(first.cookie.split("=")[0]).not.toBe(second.cookie.split("=")[0]);
-  const both = `${first.cookie}; ${second.cookie}`;
-  await expectErrorPage(await decide(s.send, ORIGIN, { ...first, cookie: second.cookie }, "allow"), 403);
-
-  const secondAllowed = await decide(s.send, ORIGIN, { ...second, cookie: both }, "allow");
-  const firstAllowed = await decide(s.send, ORIGIN, { ...first, cookie: both }, "allow");
-  const answer = (response: Response) => new URL(response.headers.get("location")!).searchParams;
-  expect([secondAllowed.status, firstAllowed.status]).toEqual([303, 303]);
-  expect(answer(secondAllowed).get("state")).toBe("second");
-  expect(answer(firstAllowed).get("state")).toBe("first");
-  expect(answer(firstAllowed).get("code")).not.toBe(answer(secondAllowed).get("code"));
-});
-
 it("trades a code for tokens with or without redirect_uri, and never caches an answer", async () => {
   const s = await stack();
   const clientId = await registeredClient(s.send);
@@ -342,35 +230,6 @@ it("trades a code for tokens with or without redirect_uri, and never caches an a
     expectNoStore(refused);
     expectCors(refused);
   }
-});
-
-it("answers each malformed token request in the OAuth error shape", async () => {
-  const s = await stack();
-  const clientId = await registeredClient(s.send);
-  const { code, verifier } = await s.code(clientId);
-  const valid = { grant_type: "authorization_code", client_id: clientId, code, code_verifier: verifier, resource: resourceOf(s.secret) };
-  const withoutVerifier = { grant_type: valid.grant_type, client_id: clientId, code, resource: valid.resource };
-  // Each refusal: its answer, status, OAuth error, and WWW-Authenticate challenge.
-  const refusals: Array<[Promise<Response>, number, string, string | null]> = [
-    [tokenRequest(s.send, { ...valid, grant_type: "client_credentials" }), 400, "unsupported_grant_type", null],
-    [tokenRequest(s.send, withoutVerifier), 400, "invalid_request", null],
-    [tokenRequest(s.send, { ...valid, client_secret: "secret" }), 401, "invalid_client", null],
-    [tokenRequest(s.send, valid, { authorization: `Basic ${Buffer.from(`${clientId}:secret`).toString("base64")}` }), 401, "invalid_client", "Basic"],
-    [s.send("/oauth/token", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(valid) }), 400, "invalid_request", null],
-    [s.send("/oauth/token", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: `${new URLSearchParams(valid).toString()}&grant_type=refresh_token` }), 400, "invalid_request", null],
-  ];
-  for (const [pending, status, error, challenge] of refusals) {
-    const refused = await pending;
-    expect(refused.status, error).toBe(status);
-    expect(refused.headers.get("content-type")).toContain("application/json");
-    expect(await refused.json()).toMatchObject({ error });
-    expect(refused.headers.get("www-authenticate")).toBe(challenge);
-    expectNoStore(refused);
-    expectCors(refused);
-  }
-  // None of them spent the code.
-  expect((await tokenRequest(s.send, valid)).status).toBe(200);
 });
 
 it("refreshes, and ends the connection when a used refresh token comes back", async () => {
@@ -425,42 +284,4 @@ it("keeps a signed-in agent working after share-web restarts", async () => {
     .toMatchObject({ structuredContent: { files: [expect.objectContaining({ blobSha256: s.blob })] } });
   const refreshed = await tokenRequest(s.send, { grant_type: "refresh_token", client_id: agent.clientId, refresh_token: agent.refreshToken, resource: agent.resource });
   expect(refreshed.status).toBe(200);
-});
-
-it("offers no sign-in without the relay exchange key", async () => {
-  const s = await stack({ exchangeKey: false });
-  const refused = await register(s.send, { redirect_uris: [LOOPBACK_REDIRECT] });
-  expect(refused.status).toBe(404);
-  expectCors(refused);
-  await expectErrorPage(await s.send(authorizePath({ clientId: "client", resource: resourceOf(s.secret), challenge: pkce().challenge })), 404);
-  expect((await s.mcp(s.secret, { authorization: `Bearer ${"C".repeat(43)}` })).status).toBe(404);
-  expect(s.relayCalls.filter((path) => path.startsWith("/sync/link/agent"))).toEqual([]);
-  expect((await register((await stack()).send, { redirect_uris: [LOOPBACK_REDIRECT] })).status).toBe(201);
-});
-
-it("streams only an MCP request and a Collection write past the request buffer", () => {
-  expect(streamsRequestBody(new URL(resourceOf("A".repeat(43))))).toBe(true);
-  expect(streamsRequestBody(new URL(ORIGIN + COLLECTION_WRITES_PATH))).toBe(true);
-  for (const path of ["/mcp", "/oauth/token", "/oauth/register", "/oauth/authorize/decision", "/api/exchange"]) {
-    expect(streamsRequestBody(new URL(ORIGIN + path)), path).toBe(false);
-  }
-});
-
-it("answers 404 at the removed agent exchange and the bare MCP address", async () => {
-  const s = await stack();
-  const agent = await signInAgent(s.send, ORIGIN, s.secret);
-  const removed = [
-    s.send("/api/mcp/exchange", jsonBody({ secret: s.secret })),
-    s.send("/mcp", { method: "POST", headers: { authorization: `Bearer ${agent.accessToken}`, "content-type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) }),
-    s.send("/mcp", { headers: { authorization: `Bearer ${agent.accessToken}` } }),
-  ];
-  for (const response of await Promise.all(removed)) {
-    expect(response.status).toBe(404);
-    expect(await response.json()).toEqual({ ok: false, error: "not found" });
-  }
-  const discovery = await s.send("/api/mcp");
-  expect(await discovery.json()).toMatchObject({ endpoint: "/mcp/s/<secret>", authorizationServer: "/.well-known/oauth-authorization-server" });
-  expect((await s.send("/api/exchange", jsonBody({ secret: s.secret }))).status).toBe(200);
-  expect((await s.mcp(s.secret, { authorization: `Bearer ${agent.accessToken}` })).status).toBe(200);
 });

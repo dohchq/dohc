@@ -10,6 +10,7 @@ import { agentIdForChannelWireId } from "@dohc/security-contract/chat-wire-ids";
 import { assertJoinedChannelWritable, joinedSharedChannelForWireId } from "./sharedChannels";
 import { shareViewIsPresent } from "./shareViewMarker";
 import { AutomationChatSessionWait } from "@dohc/automation-executor/automation-chat";
+import { chatFileLinkScope, hasChatFileLink, refuseChatFileLinks } from "./chatFileLinkScope";
 import type {
   AnswerOutcome,
   AnswerStages,
@@ -57,14 +58,14 @@ export type PersonWriter = Exclude<ChatWriter, { via: "automation" }>;
 export type ChatWriteStore = ChatRelayIdentityStore & Pick<LinkedChatStore,
   "createThread" | "sendMessage" | "startChannelThread" | "resolveChatDecision" |
   "listReactions" | "setReaction" | "getMessage" | "listChannelThreads" | "getThread" | "listMessagesPage" |
-  "listThreadDecisions">;
+  "listThreadDecisions" | "listChannels">;
 
 export interface ChatWritePlace {
   workspaceId: string;
   store: ChatWriteStore;
 }
 
-type ChatWorkspace = Pick<RegistryEntry, "remote" | "pausedRemote" | "shareView" | "sharedChannels">;
+type ChatWorkspace = Pick<RegistryEntry, "remote" | "pausedRemote" | "shareView" | "sharedChannels" | "shareRoster">;
 
 // The target and session a write was admitted under. channelWireId is
 // undefined until a joined channel makes the lookup necessary.
@@ -181,6 +182,23 @@ export function createChatWrites(dependencies: {
     return admission.channelWireId === null ? null : agentIdForChannelWireId(admission.channelWireId);
   }
 
+  // Refuses a file link the place's readers may not open. Only a write that
+  // holds a link reads the channel.
+  async function checkFileLinks(place: ChatWritePlace, admission: Admission, texts: readonly string[]): Promise<void> {
+    if (!hasChatFileLink(texts)) return;
+    const { workspaceId, store } = place;
+    const { target } = admission;
+    const channelId = "channelId" in target
+      ? target.channelId
+      : await store.findThreadChannelId({ workspaceId, threadId: target.threadId });
+    const channel = channelId
+      ? (await store.listChannels({ workspaceId })).find(entry => entry.id === channelId) ?? null
+      : null;
+    const wireId = admission.channelWireId !== undefined ? admission.channelWireId
+      : channel ? await store.getChannelWireId({ workspaceId, channelId: channel.id }) : null;
+    refuseChatFileLinks(chatFileLinkScope(ownedWorkspace(workspaceId), channel, wireId), texts);
+  }
+
   // Synchronous: it reads the registry and the session as they are now, and
   // returns the author the session resolves to. channelWireId undefined means
   // the workspace has no joined channels, which the caller decided in this
@@ -295,7 +313,7 @@ export function createChatWrites(dependencies: {
   }
 
   // Admits the message and does its async work. The caller commits the row.
-  async function prepareMessage(place: ChatWritePlace, target: ChatRelayIdentityTarget, input: ChatMessageInput & { parentMessageId?: string }) {
+  async function prepareMessage(place: ChatWritePlace, target: ChatRelayIdentityTarget, input: ChatMessageInput & { parentMessageId?: string; title?: string }) {
     const body = normalizeChatMessageBody(input.body);
     // Before admission, whose identity checks refuse a signed-out write to
     // a joined Group: an automation waits for a session there instead.
@@ -313,6 +331,7 @@ export function createChatWrites(dependencies: {
       (findWorkspace(place.workspaceId)?.remote ?? findWorkspace(place.workspaceId)?.pausedRemote) !== undefined) {
       throw new AutomationChatSessionWait();
     }
+    await checkFileLinks(place, admission, [body, ...(input.options ?? []), ...(input.title ? [input.title] : [])]);
     await input.checkTargets?.();
     const actor = await actorFor(input.writer);
     const wakeAgentIds = input.writer.via === "renderer"

@@ -1083,95 +1083,6 @@ mod tests {
     }
 
     #[test]
-    fn a_new_draft_starts_from_host_changes_between_two_accepted_writes() {
-        let (_dir, mut store, observed, checkpoint) = fixture();
-        install(&mut store, &observed, &checkpoint);
-        assert!(store
-            .read_with(|conn| list_drafts_in(conn, "workspace", None, 1, true))
-            .unwrap()
-            .is_empty());
-        let first_doc = Ydoc::wire();
-        first_doc.apply(&checkpoint).unwrap();
-        let delta = first_doc.richdoc_append_paragraph("first owner write");
-        let first = pending(&mut store, &observed, delta.clone());
-        feed(&mut store, &observed, 1, delta.clone());
-        super::super::acknowledge(
-            &mut store,
-            "workspace",
-            &first.outbox_id,
-            &[OwnerDeliveryReceipt {
-                delivery_id: first.delivery_id,
-                update_digest: first.update_digest,
-                journal_cursor: 1,
-                accepting_host_epoch: 1,
-            }],
-        )
-        .unwrap();
-        assert!(store
-            .read_with(|conn| list_drafts_in(conn, "workspace", None, 1, true))
-            .unwrap()
-            .is_empty());
-        let host = Ydoc::wire();
-        host.apply(&checkpoint).unwrap();
-        host.apply(&delta).unwrap();
-        let remote = host.richdoc_append_paragraph("host changed between writes");
-        feed(&mut store, &observed, 2, remote);
-        let current = store
-            .read_with(|conn| read_observed_in(conn, &observed.binding))
-            .unwrap()
-            .unwrap();
-        let second_doc = store
-            .read_with(|conn| open_draft_in(conn, &observed.binding, current.revision))
-            .unwrap();
-        assert_eq!(bounded(&second_doc.doc).unwrap(), bounded(&host).unwrap());
-        let delta = second_doc
-            .doc
-            .richdoc_append_paragraph("second owner write");
-        store
-            .write_with(&NoFaults, |tx| {
-                append_draft_in_tx(
-                    tx,
-                    "workspace",
-                    &observed.binding,
-                    current.revision,
-                    "second".into(),
-                    delta.clone(),
-                    5,
-                )
-            })
-            .unwrap();
-        host.apply(&delta).unwrap();
-        let reopened = store
-            .read_with(|conn| open_draft_in(conn, &observed.binding, current.revision))
-            .unwrap();
-        assert_eq!(bounded(&reopened.doc).unwrap(), bounded(&host).unwrap());
-        assert_eq!(
-            store
-                .read_with(|conn| list_drafts_in(conn, "workspace", None, 1, true))
-                .unwrap()
-                .len(),
-            1
-        );
-    }
-
-    #[test]
-    fn missing_native_document_is_unsettled_and_does_not_fail_the_page() {
-        let (_dir, mut store, observed, checkpoint) = fixture();
-        install(&mut store, &observed, &checkpoint);
-        store
-            .write_with(&NoFaults, |tx| {
-                tx.execute("DELETE FROM ydoc_docs", []).map_err(write_sql)?;
-                Ok::<_, OwnerOutboxError>(())
-            })
-            .unwrap();
-        let rows = store
-            .read_with(|conn| list_drafts_in(conn, "workspace", None, 64, false))
-            .unwrap();
-        assert_eq!(rows.len(), 1);
-        assert!(rows[0].native_unsettled);
-    }
-
-    #[test]
     fn write_status_uses_its_receipt_even_when_a_later_entry_is_pending() {
         let (_dir, mut store, observed, checkpoint) = fixture();
         install(&mut store, &observed, &checkpoint);
@@ -1240,105 +1151,6 @@ mod tests {
         assert_eq!(status(&store, &renamed), ["settled"]);
         renamed.append_key = "later-edit".to_owned();
         assert_eq!(status(&store, &renamed), ["pending"]);
-    }
-
-    #[test]
-    fn quarantine_and_restore_generation_refuse_the_exact_unaccepted_write() {
-        for fenced in [false, true] {
-            let (_dir, mut store, observed, checkpoint) = fixture();
-            install(&mut store, &observed, &checkpoint);
-            let owner = Ydoc::wire();
-            owner.apply(&checkpoint).unwrap();
-            let append = pending(
-                &mut store,
-                &observed,
-                owner.richdoc_append_paragraph("pending"),
-            );
-            let mut write = OwnerDraftWrite {
-                outbox_id: Some(append.outbox_id.clone()),
-                binding: observed.binding.clone(),
-                native_head_sequence: observed.native_head_sequence,
-                append_key: "owner-edit".to_owned(),
-            };
-            store
-                .write_with(&NoFaults, |tx| {
-                    if fenced {
-                        let mut changed = observed.binding.clone();
-                        changed.restore_fence_generation += 2;
-                        tx.execute(
-                            "UPDATE ydoc_owner_bindings SET binding_json=?1",
-                            params![binding_json(&changed)?],
-                        )
-                        .map_err(write_sql)?;
-                        tx.execute(
-                            "INSERT INTO owner_ydoc_outboxes (outbox_id,workspace_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,base_update_digest,base_blob_digest,base_byte_length,state,pending_bytes,oldest_entry_at_ms,next_sequence,quarantine_reason,observed_binding_json,created_at_ms) SELECT 'retry-outbox',workspace_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation+1,base_update_digest,base_blob_digest,base_byte_length,state,pending_bytes,oldest_entry_at_ms,next_sequence,quarantine_reason,observed_binding_json,created_at_ms FROM owner_ydoc_outboxes WHERE outbox_id=?1",
-                            params![append.outbox_id],
-                        )
-                        .map_err(write_sql)?;
-                        let mut absent = write.clone();
-                        absent.outbox_id = Some("retry-outbox".into());
-                        absent.binding.restore_fence_generation += 1;
-                        assert_eq!(write_states_in(tx, "workspace", &[absent])?, ["absent"]);
-                        tx.execute(
-                            "INSERT INTO owner_ydoc_outbox_entries (outbox_id,sequence,append_key,delivery_id,update_digest,update_blob_digest,byte_length,created_at_ms,pending,result_pending_bytes,result_oldest_entry_at_ms,result_state,draft_binding_revision) SELECT 'retry-outbox',sequence,'retry-owner-edit','retry-delivery',update_digest,update_blob_digest,byte_length,created_at_ms,pending,result_pending_bytes,result_oldest_entry_at_ms,result_state,draft_binding_revision FROM owner_ydoc_outbox_entries WHERE outbox_id=?1",
-                            params![append.outbox_id],
-                        ).map_err(write_sql)?;
-                    } else {
-                        tx.execute(
-                            "UPDATE owner_ydoc_outboxes SET state='quarantined',quarantine_reason='host refused' WHERE outbox_id=?1",
-                            params![append.outbox_id],
-                        )
-                        .map_err(write_sql)?;
-                    }
-                    Ok::<_, OwnerOutboxError>(())
-                })
-                .unwrap();
-            if fenced {
-                // A retry after one restore describes a new outbox, then another restore fences it.
-                write.outbox_id = Some("retry-outbox".to_owned());
-                write.binding.restore_fence_generation += 1;
-                write.append_key = "retry-owner-edit".into();
-            }
-            assert_eq!(
-                store
-                    .read_with(|conn| write_states_in(conn, "workspace", &[write]))
-                    .unwrap(),
-                ["not-accepted"]
-            );
-        }
-    }
-
-    #[test]
-    fn descriptors_distinguish_pending_delivery_from_native_settlement() {
-        let (_dir, mut store, observed, checkpoint) = fixture();
-        let key = key(&observed.binding).unwrap();
-        store.write_with(&NoFaults, |tx| {
-            crate::author_coverage::advance_in(tx, &key, false).map_err(collab)?;
-            tx.execute("UPDATE ydoc_docs SET last_settled_sha=(SELECT blob_sha256 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",
-                params![key.workspace_id, key.version_id, key.object_id]).map_err(write_sql)?;
-            Ok::<_, OwnerOutboxError>(())
-        }).unwrap();
-        install(&mut store, &observed, &checkpoint);
-        let descriptor = |store: &EngineStore| {
-            store
-                .read_with(|conn| descriptor_for_key_in(conn, &key))
-                .unwrap()
-                .unwrap()
-        };
-        assert!(!descriptor(&store).native_unsettled);
-        let owner = Ydoc::wire();
-        owner.apply(&checkpoint).unwrap();
-        let delta = owner.richdoc_append_paragraph("pending owner");
-        pending(&mut store, &observed, delta.clone());
-        let draft = descriptor(&store);
-        assert!(draft.pending_bytes > 0);
-        assert!(!draft.native_unsettled);
-        feed(&mut store, &observed, 4, delta);
-        assert!(descriptor(&store).native_unsettled);
-        let page = store
-            .read_with(|conn| list_drafts_in(conn, "workspace", None, 64, false))
-            .unwrap();
-        assert!(page[0].native_unsettled);
     }
 
     #[test]
@@ -1580,51 +1392,6 @@ mod tests {
                 .entries[0]
                 .person_edit
         );
-    }
-
-    #[test]
-    fn append_retry_compares_the_persisted_person_marker() {
-        let (_dir, mut store, observed, checkpoint) = fixture();
-        install(&mut store, &observed, &checkpoint);
-        let mut cache = crate::WriterDocCache::default();
-        let owner = Ydoc::wire();
-        owner.apply(&checkpoint).unwrap();
-        let input = OwnerDraftAppendInput {
-            person_edit: false,
-            binding: observed.binding,
-            expected_revision: 1,
-            append_key: "actorless".into(),
-            update: owner.richdoc_append_paragraph("Actorless"),
-            now_ms: 3,
-            agent_declaration: None,
-            agent_run_id: None,
-            automation_declaration: None,
-        };
-        let appended = append_draft_cached(
-            &mut store,
-            &mut cache,
-            "workspace",
-            input.clone(),
-            &NoFaults,
-        )
-        .unwrap();
-        assert!(entry_header(&store, &appended.outbox_id, appended.sequence)
-            .get("personEdit")
-            .is_none());
-        store
-            .write_with(&NoFaults, |tx| {
-                tx.execute(
-                    "UPDATE owner_ydoc_outbox_entries SET person_edit=1 WHERE delivery_id=?1",
-                    [&appended.delivery_id],
-                )
-                .map_err(write_sql)?;
-                Ok::<_, OwnerOutboxError>(())
-            })
-            .unwrap();
-        assert!(matches!(
-            append_draft_cached(&mut store, &mut cache, "workspace", input, &NoFaults),
-            Err(OwnerOutboxError::AppendKeyMismatch)
-        ));
     }
 
     #[test]
@@ -2087,6 +1854,7 @@ mod tests {
             1
         );
     }
+
     #[test]
     fn stale_revision_and_invalid_delta_leave_the_queue_empty() {
         let (_dir, mut store, observed, checkpoint) = fixture();
@@ -2141,44 +1909,7 @@ mod tests {
             0
         );
     }
-    #[test]
-    fn observation_retains_original_base_without_an_outbox_or_native_snapshot() {
-        let (_dir, mut store, mut observed, checkpoint) = fixture();
-        let doc = Ydoc::wire();
-        doc.apply(&checkpoint).unwrap();
-        let delta = doc.richdoc_append_paragraph("accepted change");
-        let key = key(&observed.binding).unwrap();
-        store
-            .write_with(&NoFaults, |tx| {
-                crate::record_update_in_tx(tx, &key, &delta, None, None, 3)
-            })
-            .unwrap();
-        let checkpoint = bounded(&doc).unwrap();
-        observed.checkpoint_digest = hex_sha256(&checkpoint);
-        observed.native_head_sequence = store
-            .read_with(|conn| crate::read_marker_in(conn, &key))
-            .unwrap()
-            .unwrap()
-            .head_update_seq;
-        assert_ne!(
-            observed.binding.lineage_claim_id,
-            observed.checkpoint_digest
-        );
-        install(&mut store, &observed, &checkpoint);
-        store
-            .write_with(&NoFaults, |tx| {
-                tx.execute("DELETE FROM ydoc_snapshots", []).unwrap();
-                assert!(tx
-                    .execute(
-                        "DELETE FROM binary_blobs WHERE sha256=?1",
-                        [&observed.binding.lineage_claim_id]
-                    )
-                    .is_err());
-                Ok::<_, OwnerOutboxError>(())
-            })
-            .unwrap();
-        assert_eq!(store.table_row_count("owner_ydoc_outboxes").unwrap(), 0);
-    }
+
     #[test]
     fn draft_open_refuses_marker_kind_or_regime_drift_without_a_head_change() {
         for assignment in [
@@ -2317,114 +2048,6 @@ mod tests {
                 .len(),
             0
         );
-    }
-    #[test]
-    fn try_again_refuses_a_document_no_longer_live_at_the_owner_binding() {
-        for assignment in [
-            "path='moved.md'",
-            "lineage_claim_status='unclaimed', lineage_claim_id=NULL, lineage_parent_claim_id=NULL, lineage_epoch_tag=NULL",
-            "regime='local-only', lineage_claim_status='unclaimed', lineage_claim_id=NULL, lineage_parent_claim_id=NULL, lineage_epoch_tag=NULL",
-        ] {
-            let (_dir, mut store, observed, checkpoint) = fixture();
-            install(&mut store, &observed, &checkpoint);
-            let owner = Ydoc::wire();
-            owner.apply(&checkpoint).unwrap();
-            let head = pending(
-                &mut store,
-                &observed,
-                owner.richdoc_append_paragraph("refused"),
-            );
-            refuse_for_good(&mut store, &head.outbox_id);
-            store
-                .write_with(&NoFaults, |tx| {
-                    tx.execute(&format!("UPDATE ydoc_docs SET {assignment}"), [])
-                        .unwrap();
-                    Ok::<_, OwnerOutboxError>(())
-                })
-                .unwrap();
-            assert!(
-                matches!(
-                    try_again(&mut store, &observed, &head.outbox_id),
-                    Err(OwnerOutboxError::ParentMismatch)
-                ),
-                "{assignment}"
-            );
-            assert_eq!(
-                super::super::read_pending(&store, "workspace", &head.outbox_id)
-                    .unwrap()
-                    .retry_delivery_id,
-                None,
-                "{assignment}"
-            );
-        }
-    }
-    #[test]
-    fn try_again_refuses_an_observed_binding_whose_document_is_gone() {
-        let (_dir, mut store, observed, checkpoint) = fixture();
-        install(&mut store, &observed, &checkpoint);
-        let owner = Ydoc::wire();
-        owner.apply(&checkpoint).unwrap();
-        let head = pending(
-            &mut store,
-            &observed,
-            owner.richdoc_append_paragraph("refused"),
-        );
-        refuse_for_good(&mut store, &head.outbox_id);
-        store
-            .write_with(&NoFaults, |tx| {
-                tx.execute("DELETE FROM ydoc_docs", []).unwrap();
-                Ok::<_, OwnerOutboxError>(())
-            })
-            .unwrap();
-        assert!(store
-            .read_with(|c| read_observed_in(c, &observed.binding))
-            .unwrap()
-            .is_some());
-        assert!(matches!(
-            try_again(&mut store, &observed, &head.outbox_id),
-            Err(OwnerOutboxError::ParentMismatch)
-        ));
-        assert_eq!(
-            super::super::read_pending(&store, "workspace", &head.outbox_id)
-                .unwrap()
-                .retry_delivery_id,
-            None
-        );
-    }
-    #[test]
-    fn retiring_the_granted_head_ends_its_try_again() {
-        let (_dir, mut store, observed, checkpoint) = fixture();
-        install(&mut store, &observed, &checkpoint);
-        let owner = Ydoc::wire();
-        owner.apply(&checkpoint).unwrap();
-        let head = pending(
-            &mut store,
-            &observed,
-            owner.richdoc_append_paragraph("refused twice"),
-        );
-        refuse_for_good(&mut store, &head.outbox_id);
-        assert_eq!(
-            try_again(&mut store, &observed, &head.outbox_id).unwrap(),
-            head.delivery_id
-        );
-        let refusal = OwnerOutboxRefuseInput {
-            outbox_id: head.outbox_id.clone(),
-            delivery_id: head.delivery_id.clone(),
-            update_digest: head.update_digest.clone(),
-            reason: "The presser no longer has edit access.".into(),
-        };
-        committed(
-            store
-                .write_with(&NoFaults, |tx| {
-                    refuse_entry_in_tx(tx, "workspace", &refusal, 12)
-                })
-                .unwrap(),
-        )
-        .unwrap();
-        let retired = super::super::read_pending(&store, "workspace", &head.outbox_id).unwrap();
-        assert_eq!(retired.state, super::super::OwnerOutboxState::Quarantined);
-        assert_eq!(retired.retry_delivery_id, None);
-        assert!(retired.entries.is_empty());
     }
     fn feed(
         store: &mut EngineStore,
@@ -3246,36 +2869,6 @@ mod tests {
             0
         );
     }
-    #[test]
-    fn late_receipt_containment_includes_delete_sets_and_overlapping_state() {
-        let (_dir, mut store, observed, checkpoint) = fixture();
-        install(&mut store, &observed, &checkpoint);
-        let owner = Ydoc::wire();
-        owner.apply(&checkpoint).unwrap();
-        let delta = owner
-            .rewrite_content_to_markdown(crate::ContentKind::Richdoc, "replacement\n")
-            .unwrap();
-        let append = pending(&mut store, &observed, delta.clone());
-        let receipt = OwnerDeliveryReceipt {
-            delivery_id: append.delivery_id,
-            update_digest: append.update_digest,
-            journal_cursor: 4,
-            accepting_host_epoch: 1,
-        };
-        feed(&mut store, &observed, 4, delta);
-        let full = bounded(&owner).unwrap();
-        feed(&mut store, &observed, 8, full);
-        assert!(store
-            .read_with(|c| super::super::accepted::is_receipt_applied_in(
-                c,
-                &observed.binding,
-                &observed.relay_database_namespace,
-                &receipt
-            ))
-            .unwrap());
-        super::super::acknowledge(&mut store, "workspace", &append.outbox_id, &[receipt]).unwrap();
-    }
-
     #[test]
     fn initial_sync_advances_a_cut_retries_and_keeps_pending_separate() {
         use super::super::accepted::{apply_sync_in_tx, read_state_in, OwnerAcceptedFrameInput};

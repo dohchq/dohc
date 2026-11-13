@@ -759,13 +759,30 @@ describe("useShellError", () => {
     expect(result.current.shellErrors).toEqual([]);
   });
 
+  it("files nothing from the notice owner of a workspace the shell left", () => {
+    const { result, rerender } = renderHook(({ id }) => useShellError(id), { initialProps: { id: "ws-a" } });
+    const left = result.current.noticeOwner.open("versions-reads", vi.fn());
+    rerender({ id: "ws-b" });
+    act(() => {
+      left.failed();
+      left.show({ read: "counts" }, new Error("count broke"));
+    });
+    expect(result.current.shellErrors).toEqual([]);
+    const here = result.current.noticeOwner.open("versions-reads", vi.fn());
+    act(() => {
+      here.failed();
+      here.show({ read: "counts" }, new Error("count broke"));
+    });
+    expect(result.current.shellErrors.map((error) => error.message)).toEqual(["dohc could not count the files that differ from Main. count broke"]);
+  });
+
   it("changes a part's row where it stands, toast and all, when it reports quietly", () => {
     const { result } = renderHook(() => useShellError("ws-a"));
     const engineDown = new Error("EngineDaemonUnavailableError: Rust engine daemon exited.");
     act(() => result.current.reportButtonError("dohc could not read when each version last changed.", engineDown, vi.fn(), "versions-reads:a"));
     const [before] = result.current.shellErrors;
     const retry = vi.fn();
-    act(() => result.current.reportButtonError("dohc could not finish loading Versions.", engineDown, retry, "versions-reads:a", true));
+    act(() => result.current.reportShellError("dohc could not finish loading Versions.", engineDown, retry, undefined, "versions-reads:a", true));
     expect(result.current.shellErrors).toHaveLength(1);
     expect(result.current.shellErrors[0]).toMatchObject({
       id: before!.id, atMs: before!.atMs, seen: false, retry, message: "dohc could not finish loading Versions. Try again in a moment.",

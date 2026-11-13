@@ -52,6 +52,25 @@ const MENTIONS_PAGE = {
 };
 const MENTIONS_EMPTY = { ...MENTIONS_PAGE, subject: null, entries: [], complete: true, sharedChannelRowsUncovered: 0, nextCursor: null };
 const NOT_A_PAGE = { versionId: "v1" };
+
+// A member's Group whose share covers only team/. The relay has already
+// withheld its link to a file outside team/ before the message reached this
+// computer (#3900), so the reads answer only covered files, and a preview
+// holds the words that stand in for the withheld link.
+const WITHHELD = "(a file not shared here)";
+const SHARED_LINKS_PAGE = {
+  ...CHAT_LINKS_PAGE, subject: { channelWireId: "wire-team" }, sharedChannelRowsUncovered: 0, nextCursor: null,
+  entries: [{ ...CHAT_LINKS_PAGE.entries[0]!, file: { objectId: "obj-t", path: "team/plan.md", folder: "team" } }],
+};
+const WITHHELD_MENTIONS_PAGE = {
+  ...MENTIONS_PAGE, subject: { objectId: "obj-t", path: "team/plan.md" }, sharedChannelRowsUncovered: 0, nextCursor: null,
+  entries: [{
+    ...MENTIONS_PAGE.entries[0]!,
+    attachment: { ...MENTIONS_PAGE.entries[0]!.attachment, objectId: "obj-t", pathHint: "team/plan.md" },
+    message: { ...MENTIONS_PAGE.entries[0]!.message, preview: `See team/plan.md and ${WITHHELD}` },
+    channelWireId: "wire-team", channelName: "Team", channelSlug: "team",
+  }],
+};
 const STALE = "dohc: This cursor belongs to another index. Start again without it.";
 const LONG = "x".repeat(32_769);
 
@@ -172,6 +191,7 @@ it("keeps the MCP door of the five link reads as recorded", async () => {
       await call("dohc_chat_links", { channelWireId: "" }, page(CHAT_LINKS_PAGE)),
       ...await refusals("dohc_chat_links", { channelWireId: "wire-general" }, page(CHAT_LINKS_PAGE)),
       await call("dohc_chat_links", { channelWireId: "", cursor: LONG }, page(CHAT_LINKS_PAGE)).then(longCursor),
+      await call("dohc_chat_links", { channelWireId: "wire-team" }, page(SHARED_LINKS_PAGE)),
     ],
     dohc_chat_file_mentions: [
       await call("dohc_chat_file_mentions", {}, page(MENTIONS_PAGE)),
@@ -182,6 +202,7 @@ it("keeps the MCP door of the five link reads as recorded", async () => {
       await call("dohc_chat_file_mentions", { subject: "a.md" }, page(MENTIONS_PAGE)),
       ...await refusals("dohc_chat_file_mentions", {}, page(MENTIONS_PAGE)),
       await call("dohc_chat_file_mentions", { subject: "a.md", cursor: LONG }, page(MENTIONS_PAGE)).then(longCursor),
+      await call("dohc_chat_file_mentions", { subject: { path: "team/plan.md" } }, page(WITHHELD_MENTIONS_PAGE)),
     ],
   };
   await expect(recorded(sections)).toMatchFileSnapshot("./linkReadTools.expected.txt");

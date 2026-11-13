@@ -57,8 +57,6 @@ fn digest(mut file: impl io::Read, cap: u64) -> Option<[u8; 32]> {
     }
 }
 
-#[cfg(all(unix, test))]
-pub(super) use unix::OPEN;
 #[cfg(unix)]
 pub(super) use unix::{Child, Folder};
 

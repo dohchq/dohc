@@ -13,8 +13,11 @@ import {
   isShareAccessValue,
   isValidShareVersionId,
   prepareSharePath,
+  shareCoversLinkPath,
   visibleSharePath,
 } from "@dohc/security-contract/share-selector";
+import { projectChatFileLinks, withholdChatFileLinks } from "@dohc/workspace-contracts/chat-mentions";
+import { createAccountlessPathProjection } from "./accountlessPathProjection";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { asRecord } from "@dohc/workspace-core";
 import { SHA256_HEX_PATTERN } from "@dohc/security-contract/wire-patterns";
@@ -1068,6 +1071,59 @@ function filterFileChatOpForPathShare(
   };
 }
 
+// The served fields of each chat kind that hold words someone wrote. Nested
+// values (an agent's report, its work status and link, a poll's options) are
+// read to their strings.
+const CHAT_TEXT_FIELDS: Readonly<Record<string, readonly string[]>> = {
+  "chat.channel.create": ["name", "slug", "purpose"],
+  "chat.thread.create": ["title", "channelSlug"],
+  "chat.message.append": ["body", "authorDisplayName", "authorOwnerDisplayName", "authorReported", "work"],
+  "chat.reaction.set": ["emoji", "authorDisplayName"],
+  "chat.decision.set": ["options", "chosenOption"],
+};
+
+function withholdIn(value: unknown, covers: (path: string) => boolean): unknown {
+  if (typeof value === "string") return withholdChatFileLinks(value, covers);
+  if (Array.isArray(value)) return value.map(item => withholdIn(item, covers));
+  const record = asRecord(value);
+  return record ? Object.fromEntries(Object.entries(record).map(([key, item]) => [key, withholdIn(item, covers)])) : value;
+}
+
+// What a recipient reads of a chat op keeps only the file links its share's
+// files cover; a share without files covers none. The relay applies it on
+// every read of every stored message. Appends are stored as written: the
+// owner reads them whole.
+function withheldLinks(decision: ShareOpDecision, opKind: string, files: ShareSelector | null): ShareOpDecision {
+  if (!decision.allowed || !Object.hasOwn(CHAT_TEXT_FIELDS, opKind)) return decision;
+  const served = asRecord(decision.payload);
+  if (!served) return decision;
+  const covers = (path: string) => shareCoversLinkPath(files, path);
+  const payload = { ...served };
+  for (const field of CHAT_TEXT_FIELDS[opKind]!) {
+    if (payload[field] !== undefined) payload[field] = withholdIn(payload[field], covers);
+  }
+  return { ...decision, payload };
+}
+
+// Who reads a share's label. The owner wrote it; a member reads real paths;
+// a link holder or link agent reads paths from the shared folder down.
+export type ShareLabelReader = "owner" | "member" | "link";
+
+// A Group's name is also its share's label. Anyone but the owner reads it
+// with only the file links its share's files cover, as the name reads in
+// the chat, and a link reader reads those as its files show them. A selector
+// that does not parse covers none.
+export function shareLabelFor(selectorJson: string, label: string | null, reader: ShareLabelReader): string | null {
+  if (label === null || reader === "owner") return label;
+  const selector = parseStoredAnyShareSelectorJson(selectorJson);
+  if (selector && !("kind" in selector)) return label;
+  const files: ShareSelector | null = selector?.kind === "group" ? { paths: selector.paths, versionId: null, access: "view" } : null;
+  const covered = withholdChatFileLinks(label, path => shareCoversLinkPath(files, path));
+  if (reader === "member" || files === null) return covered;
+  const projection = createAccountlessPathProjection(files);
+  return projectChatFileLinks(covered, path => projection.projectPath(path));
+}
+
 // The single decision point for what a share recipient may read. Strict
 // allowlist per selector kind. Path/version selector: moment.append (all
 // referenced paths visible, version matches), version.create for the shared
@@ -1096,20 +1152,20 @@ export function filterOpForShare(
     // folder either: a group's chat is one channel.
     if (opKind.startsWith("chat.")) {
       if (half === "files") return { allowed: false };
-      return filterChatOpForChannelShare(chatHalfOfGroup(selector), opKind, payload, chat, true);
+      return withheldLinks(filterChatOpForChannelShare(chatHalfOfGroup(selector), opKind, payload, chat, true), opKind, fileHalfOfGroup(selector));
     }
     if (half === "chat") return { allowed: false };
     return filterOpForShare(fileHalfOfGroup(selector), opKind, payloadJson, chat);
   }
   if (isChatChannelSelector(selector)) {
-    return filterChatOpForChannelShare(selector, opKind, payload, chat);
+    return withheldLinks(filterChatOpForChannelShare(selector, opKind, payload, chat), opKind, null);
   }
 
   // Chat follows the file share. Every chat kind routes here, so the
   // branch's own allowlist is the only way one is served — a kind it does not
   // name is denied there, not silently carried by a later branch.
   if (opKind.startsWith("chat.")) {
-    return filterFileChatOpForPathShare(selector, opKind, payload, chat);
+    return withheldLinks(filterFileChatOpForPathShare(selector, opKind, payload, chat), opKind, selector);
   }
 
   if (opKind === "workspace.init") {

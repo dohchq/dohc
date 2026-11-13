@@ -127,6 +127,7 @@ import {
 } from "./chatMessages";
 import { isPersonalAgentId, personalRosterHolds } from "./chosenColors";
 import { MentionComposer, type MentionComposerHandle } from "./MentionComposer";
+import { channelFileCandidates, DM_FILE_CANDIDATES } from "./chatFileMentionScope";
 import { openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./chatPoll";
 import { NEW_CONVERSATION, useAgentOffer } from "./AgentOffer";
 import { AddAgentForm } from "./AddAgentForm";
@@ -3305,6 +3306,14 @@ export function ChatsView(props: {
   // and a workspace switch could briefly publish under the previous workspace's
   // scope. Gating on (channelShares loaded for this workspaceId) closes both.
   const scopeResolved = sharesWorkspaceId === workspaceId;
+  // The files the open Group's composers offer. Its sharing counts only once
+  // this workspace's share listing has answered.
+  const channelFiles = useMemo(() => {
+    const wireId = activeChannel?.wireId ?? null;
+    const shared = scopeResolved && wireId !== null &&
+      (Boolean(joinedByWire.get(wireId)) || (grantedByWire.get(wireId)?.length ?? 0) > 0);
+    return channelFileCandidates(fileMentionCandidates, activeChannel, shared);
+  }, [activeChannel, fileMentionCandidates, grantedByWire, joinedByWire, scopeResolved]);
   const presence = usePresence({
     enabled: collaboration !== null && presenceTopic !== "" && scopeResolved,
     transport: presenceTransport,
@@ -4605,7 +4614,7 @@ export function ChatsView(props: {
             placeholder="Write the first message…"
             sendLabel="Start conversation"
             candidates={mentionCandidates}
-            fileCandidates={fileMentionCandidates}
+            fileCandidates={DM_FILE_CANDIDATES}
             loadFileHeadings={loadFileHeadings}
             onChange={setDmDraft}
             onSend={() => void startDm()}
@@ -4685,7 +4694,7 @@ export function ChatsView(props: {
                 placeholder={`Message ${dm.peerLabel}`}
                 sendLabel="Send message"
                 candidates={mentionCandidates}
-                fileCandidates={fileMentionCandidates}
+                fileCandidates={DM_FILE_CANDIDATES}
                 loadFileHeadings={loadFileHeadings}
                 onChange={(value) => {
                   setComposer(value);
@@ -4712,7 +4721,7 @@ export function ChatsView(props: {
             )}
             onSendReply={sendDmReply}
             mentionCandidates={mentionCandidates}
-            fileCandidates={fileMentionCandidates}
+            fileCandidates={DM_FILE_CANDIDATES}
             loadFileHeadings={loadFileHeadings}
             onOpenPath={props.onOpenPath}
             reactionControls={reactionControls}
@@ -4974,7 +4983,7 @@ export function ChatsView(props: {
                 placeholder="Write a comment…  @ to mention"
                 sendLabel="Send message"
                 candidates={mentionCandidates}
-                fileCandidates={fileMentionCandidates}
+                fileCandidates={channelFiles}
                 loadFileHeadings={loadFileHeadings}
                 onChange={(value) => {
                   setComposer(value);
@@ -5202,7 +5211,7 @@ export function ChatsView(props: {
             channel={nav.channel}
             locked={channelLocked}
             mentionCandidates={mentionCandidates}
-            fileCandidates={fileMentionCandidates}
+            fileCandidates={channelFiles}
             loadFileHeadings={loadFileHeadings}
             onOpenPath={props.onOpenPath}
             onError={props.onError}
@@ -5254,7 +5263,7 @@ export function ChatsView(props: {
                   placeholder={`What's happening in #${nav.channel.name}?`}
                   sendLabel="Start post"
                   candidates={mentionCandidates}
-                  fileCandidates={fileMentionCandidates}
+                  fileCandidates={channelFiles}
                   loadFileHeadings={loadFileHeadings}
                   onChange={setNewThreadBody}
                   poll={newThreadPoll}

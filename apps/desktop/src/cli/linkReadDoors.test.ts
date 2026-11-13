@@ -55,6 +55,25 @@ const MENTIONS_PAGE = {
 };
 const MENTIONS_EMPTY = { ...MENTIONS_PAGE, subject: null, entries: [], complete: true, sharedChannelRowsUncovered: 0, nextCursor: null };
 const NOT_A_PAGE = { versionId: "v1" };
+
+// A member's Group whose share covers only team/. The relay has already
+// withheld its link to a file outside team/ before the message reached this
+// computer (#3900), so the reads answer only covered files, and a preview
+// holds the words that stand in for the withheld link.
+const WITHHELD = "(a file not shared here)";
+const SHARED_LINKS_PAGE = {
+  ...CHAT_LINKS_PAGE, subject: { channelWireId: "wire-team" }, sharedChannelRowsUncovered: 0, nextCursor: null,
+  entries: [{ ...CHAT_LINKS_PAGE.entries[0]!, file: { objectId: "obj-t", path: "team/plan.md", folder: "team" } }],
+};
+const WITHHELD_MENTIONS_PAGE = {
+  ...MENTIONS_PAGE, subject: { objectId: "obj-t", path: "team/plan.md" }, sharedChannelRowsUncovered: 0, nextCursor: null,
+  entries: [{
+    ...MENTIONS_PAGE.entries[0]!,
+    attachment: { ...MENTIONS_PAGE.entries[0]!.attachment, objectId: "obj-t", pathHint: "team/plan.md" },
+    message: { ...MENTIONS_PAGE.entries[0]!.message, preview: `See team/plan.md and ${WITHHELD}` },
+    channelWireId: "wire-team", channelName: "Team", channelSlug: "team",
+  }],
+};
 const LONG = "x".repeat(32_769);
 const STALE = "This cursor belongs to another index. Start again without it.";
 
@@ -171,6 +190,7 @@ async function recordIpc() {
       await call("chatLinks", { ...ws, channelWireId: "wire-general" }, page(CHAT_LINKS_PAGE), foreign),
       await call("chatLinks", { ...ws, channelWireId: "wire-general" }, page(CHAT_LINKS_PAGE), untrusted),
       await call("chatLinks", { workspaceId: "", channelWireId: "", cursor: LONG }, page(CHAT_LINKS_PAGE)),
+      await call("chatLinks", { ...ws, channelWireId: "wire-team" }, page(SHARED_LINKS_PAGE)),
     ],
     chatFileMentionsPage: [
       await call("chatFileMentionsPage", ws, page(MENTIONS_PAGE)),
@@ -185,6 +205,7 @@ async function recordIpc() {
       await call("chatFileMentionsPage", ws, page(MENTIONS_PAGE), foreign),
       await call("chatFileMentionsPage", ws, page(MENTIONS_PAGE), untrusted),
       await call("chatFileMentionsPage", { workspaceId: "", subject: "a.md", cursor: LONG }, page(MENTIONS_PAGE)),
+      await call("chatFileMentionsPage", { ...ws, subject: { path: "team/plan.md" } }, page(WITHHELD_MENTIONS_PAGE)),
     ],
   };
 }
@@ -286,6 +307,8 @@ async function recordCli() {
       await cli(["chat", "links", "g".repeat(501)]),
       await cli(["chat", "links", "general", "--cursor", LONG]),
       await cli(["chat", "links", "g".repeat(501), "--cursor", LONG]),
+      await cli(["chat", "links", "team"], page(SHARED_LINKS_PAGE)),
+      await cli(["chat", "links", "team", "--json"], page(SHARED_LINKS_PAGE)),
     ],
     chatFileMentions: [
       await cli(["chat", "file-mentions"], page(MENTIONS_PAGE)),
@@ -301,6 +324,8 @@ async function recordCli() {
       await cli(["chat", "file-mentions", "extra"]),
       await cli(["chat", "file-mentions", "--path", "a.md"]),
       await cli(["chat", "file-mentions", "--subject", '{"path":""}', "--cursor", LONG]),
+      await cli(["chat", "file-mentions", "--subject", '{"path":"team/plan.md"}'], page(WITHHELD_MENTIONS_PAGE)),
+      await cli(["chat", "file-mentions", "--subject", '{"path":"team/plan.md"}', "--json"], page(WITHHELD_MENTIONS_PAGE)),
     ],
   };
 }
@@ -496,6 +521,7 @@ async function recordSocket() {
       await socket("chatLinks", { args: { ...human, group: "g".repeat(501), cursor: LONG }, reply: page(CHAT_LINKS_PAGE) }),
       await socket("chatLinks", { args: { actor: "robot", group: "g".repeat(501), cursor: LONG }, reply: page(CHAT_LINKS_PAGE) }),
       await socket("chatLinks", { args: { actor: "robot", channelWireId: "", cursor: LONG }, reply: page(CHAT_LINKS_PAGE) }),
+      await socket("chatLinks", { args: { ...human, channelWireId: "wire-team" }, reply: page(SHARED_LINKS_PAGE) }),
       ...await refusals("chatLinks", { ...human, group: "general" }, page(CHAT_LINKS_PAGE)),
       ...await refusals("chatLinks", { ...human, channelWireId: "wire-general" }, page(CHAT_LINKS_PAGE)),
     ],
@@ -506,6 +532,7 @@ async function recordSocket() {
       await socket("chatFileMentions", { args: { ...human, cursor: "stale" }, reply: failing("chat-mention-access-changed") }),
       await socket("chatFileMentions", { args: { ...human, subject: { path: "a.md", objectId: "obj-a" } }, reply: page(MENTIONS_PAGE) }),
       await socket("chatFileMentions", { args: { actor: "robot", subject: "a.md", cursor: LONG }, reply: page(MENTIONS_PAGE) }),
+      await socket("chatFileMentions", { args: { ...human, subject: { path: "team/plan.md" } }, reply: page(WITHHELD_MENTIONS_PAGE) }),
       ...await refusals("chatFileMentions", human, page(MENTIONS_PAGE)),
     ],
   };

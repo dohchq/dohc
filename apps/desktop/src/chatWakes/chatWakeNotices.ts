@@ -19,9 +19,10 @@ const MESSAGES: Record<ChatWakeProblem, string> = {
 };
 
 // The declarations ledger: which workspaces this computer told the server about its agents. Without it, nothing is
-// declared or withdrawn, and it is never written over, so the person restores or repairs it.
+// declared or withdrawn, and it is never written over. A read can fail for a moment too, so the text says dohc keeps
+// trying, and the person restores or repairs the file only if the row stays.
 const LEDGER_UNREADABLE =
-  "Your phone cannot wake agents here until it can. Restore or repair the file in Details before you try again.";
+  "Your phone cannot wake agents here until it can. dohc keeps trying. If this stays, restore or repair the file in Details.";
 
 // Why the server can't take this computer's agents, and the one thing to do.
 const REFUSALS: Record<ChatRunnerRefusal["reason"], string> = {
@@ -98,8 +99,8 @@ export function createChatWakeNotices(deps: {
     ledgerUnreadable(): void {
       ledgerFile.report();
     },
-    /** It read: takes its rows back. */
-    ledgerReadable(): void {
+    /** It read, or the account it was shown for left: takes its rows back. */
+    clearLedgerUnreadable(): void {
       ledgerFile.clear();
     },
     /** The server can't take this computer's agents as they are. One row per workspace; the lifetime calls it once per change. */

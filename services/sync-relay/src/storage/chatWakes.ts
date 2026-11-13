@@ -17,6 +17,13 @@ export const CHAT_WAKE_RETRIES = "sync_relay_chat_wake_retries";
 // install ID, so equal agent IDs on two computers stay apart. The computer's
 // label names a claim's winner. Rows go with the workspace.
 //
+// A declaration holds for CHAT_RUNNER_LEASE_MS from `updated_at_ms`, which
+// every declaration sets, the same one again included. A signed-in computer
+// declares again about daily; one that doesn't, because it quit after
+// signing out or its last declaration lost a race with an older one, stops
+// being a wake target when its lease ends. Its rows stay until it declares
+// again or a newer computer takes its place.
+//
 // Wakes: one row per wake target of a published phone message, per
 // generation. It names the message and its actual thread by ID and holds no
 // message text. `candidates_json` is the frozen list of computers that may
@@ -133,7 +140,15 @@ export const CHAT_WAKE_CLAIM_MS = 7 * 24 * 60 * 60 * 1000;
 export const CHAT_WAKE_CONFIRM_MS = 24 * 60 * 60 * 1000;
 /** How long a wake is kept once it ends. */
 export const CHAT_WAKE_KEEP_MS = 30 * 24 * 60 * 60 * 1000;
-/** The computers one account declares per workspace. A new one past this replaces the one heard from longest ago. */
+/**
+ * How long a computer's declaration names it as a wake target without another. Computers declare again about
+ * daily (the desktop's CHAT_RUNNER_REFRESH_MS), so a few missed days of a computer that is off don't drop it.
+ */
+export const CHAT_RUNNER_LEASE_MS = 3 * 24 * 60 * 60 * 1000;
+/**
+ * The computers one account declares per workspace. A new one past this replaces the one heard from longest ago,
+ * so a computer whose lease ended goes first.
+ */
 const CHAT_RUNNER_COMPUTERS = 32;
 /** The most rows one sweep call changes; the caller repeats until fewer come back. */
 const CHAT_WAKE_SWEEP_BATCH = 1_000;
@@ -217,10 +232,11 @@ function expire(storage: StorageContext, row: Row, nowMs: number): Row {
 }
 
 /**
- * Replaces one computer's declared agents in a workspace the account owns.
- * Answers false, writing nothing, when it doesn't own it. A computer new to
- * the workspace past CHAT_RUNNER_COMPUTERS replaces the one heard from
- * longest ago.
+ * Replaces one computer's declared agents in a workspace the account owns,
+ * and starts its lease again at `nowMs`, even when nothing changed. Answers
+ * false, writing nothing, when it doesn't own it. A computer new to the
+ * workspace past CHAT_RUNNER_COMPUTERS replaces the one heard from longest
+ * ago.
  */
 export function replaceChatRunners(storage: StorageContext, input: {
   accountId: string; workspaceId: string; installId: string; computerLabel: string; runners: readonly Omit<ChatRunner, "installId" | "computerLabel">[];
@@ -249,12 +265,16 @@ export function replaceChatRunners(storage: StorageContext, input: {
   });
 }
 
-/** The account's enabled agents on its computers in the workspace. */
-export function enabledChatRunners(storage: StorageContext, input: { accountId: string; workspaceId: string }): ChatRunner[] {
+/**
+ * The account's enabled agents on its computers in the workspace, whose declarations' leases hold at `nowMs`.
+ * Every new wake target and its candidates come from here. A retry starts from the frozen candidates of the
+ * generation it answers, and keeps only those whose declaration is enabled and still leased (retryChatWake).
+ */
+export function enabledChatRunners(storage: StorageContext, input: { accountId: string; workspaceId: string; nowMs: number }): ChatRunner[] {
   return storage.readTx(() => storage.db.prepare(
     `SELECT install_id, computer_label, agent_id, handle, display_name FROM sync_relay_chat_runners
-     WHERE workspace_id = ? AND account_id = ? AND enabled = 1 ORDER BY install_id, agent_id`,
-  ).all(input.workspaceId, input.accountId).map((row) => ({
+     WHERE workspace_id = ? AND account_id = ? AND enabled = 1 AND updated_at_ms > ? ORDER BY install_id, agent_id`,
+  ).all(input.workspaceId, input.accountId, input.nowMs - CHAT_RUNNER_LEASE_MS).map((row) => ({
     installId: String(row.install_id), computerLabel: String(row.computer_label), agentId: String(row.agent_id),
     handle: String(row.handle), displayName: String(row.display_name), enabled: true,
   })));
@@ -443,7 +463,15 @@ export function retryChatWake(storage: StorageContext, input: {
     if (owned(nextId) !== undefined) return answer();
     const source = expire(storage, found, nowMs);
     if (source.state !== "unclaimed" && source.state !== "unconfirmed") return { kind: "refused" };
-    const candidates = candidatesOf(source).filter((each) => source.state !== "unconfirmed" || each.installId !== source.winner_install_id);
+    // Only computers whose declaration of that agent is enabled and still leased: one that quit after signing out,
+    // or never came back, can't take the retry the person asked for.
+    const leased = storage.db.prepare(
+      `SELECT 1 FROM sync_relay_chat_runners WHERE workspace_id = ? AND account_id = ? AND install_id = ? AND agent_id = ?
+         AND enabled = 1 AND updated_at_ms > ?`,
+    );
+    const candidates = candidatesOf(source).filter((each) =>
+      (source.state !== "unconfirmed" || each.installId !== source.winner_install_id) &&
+      leased.get(workspaceId, accountId, each.installId, each.agentId, nowMs - CHAT_RUNNER_LEASE_MS) !== undefined);
     if (candidates.length === 0) return { kind: "refused" };
     storage.db.prepare(
       `INSERT INTO sync_relay_chat_wakes (wake_id, account_id, workspace_id, operation_id, message_id, thread_id, target, generation,

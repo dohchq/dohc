@@ -2,7 +2,9 @@ import { afterEach, expect, it } from "vitest";
 import { closeTestStorage, closeTestStorages, inspectDatabase, reopenTestStorage, storagePath, testStorage } from "../testing";
 import type { SyncRelayStorage } from "../storage";
 import { initializeAccountDeletion, purgeAccountRows } from "./accountDeletion";
-import { CHAT_WAKE_CLAIM_MS, CHAT_WAKE_CONFIRM_MS, CHAT_WAKE_KEEP_MS, chatWakeId, type ChatWakeTarget, type OperationWakeChange } from "./chatWakes";
+import {
+  CHAT_RUNNER_LEASE_MS, CHAT_WAKE_CLAIM_MS, CHAT_WAKE_CONFIRM_MS, CHAT_WAKE_KEEP_MS, chatWakeId, type ChatWakeTarget, type OperationWakeChange,
+} from "./chatWakes";
 import type { StorageContext } from "./context";
 
 afterEach(closeTestStorages);
@@ -74,7 +76,7 @@ it("creates the chat wake tables on an older relay once, and refuses an unmarked
   expect(first).toEqual({ migration_id: MARKER, completed_at_ms: expect.any(Number) });
   // Marked, it is checked and kept as it is.
   const reopened = reopenTestStorage(path);
-  expect(reopened.enabledChatRunners({ accountId: "ana", workspaceId: "trip" })).toHaveLength(1);
+  expect(reopened.enabledChatRunners({ accountId: "ana", workspaceId: "trip", nowMs: NOW })).toHaveLength(1);
   closeTestStorage(reopened);
   expect(marker()).toEqual(first);
 
@@ -96,6 +98,9 @@ it("deletes runners and wakes with their workspace, keeps retries' bindings, and
     context.db.prepare("UPDATE sync_relay_workspaces SET owner_user_id = ? WHERE workspace_id = ?").run(ownerUserId, workspaceId);
   // A wake that wasn't confirmed, tried again under `operationId`.
   const retried = (accountId: string, workspaceId: string, operationId: string) => {
+    // The computer the retry moves to holds a leased declaration.
+    expect(storage.replaceChatRunners({ accountId, workspaceId, installId: "laptop", computerLabel: "Laptop",
+      runners: [{ agentId: "default", handle: "claude", displayName: "Claude", enabled: true }], nowMs: NOW })).toBe(true);
     const wakeId = wakeOf(`message-${workspaceId}`, "claude", 1, workspaceId, accountId);
     storage.claimChatWake({ accountId, wakeId, installId: "mac", nowMs: NOW });
     expect(storage.retryChatWake({ accountId, workspaceId, operationId, wakeId, nowMs: NOW + CHAT_WAKE_CONFIRM_MS }).kind).toBe("retried");
@@ -218,6 +223,11 @@ it("ends a wake with no claim in 7 days, a claim with no queued in 24 hours, tak
 
 it("retries a wake that didn't start or wasn't confirmed once per generation, bound to its operation ID", async () => {
   const storage = await relay();
+  // Both computers declared, so their leases hold for the retries below.
+  for (const installId of ["mac", "laptop"]) {
+    storage.replaceChatRunners({ accountId: "ana", workspaceId: "trip", installId, computerLabel: installId,
+      runners: [{ agentId: "default", handle: "claude", displayName: "Claude", enabled: true }], nowMs: NOW });
+  }
   publish(storage, "op-1", "message-1", [target("claude", "mac", "laptop")]);
   publish(storage, "op-2", "message-2", [target("codex", "mac")]);
   const source = wakeOf("message-1", "claude");
@@ -264,4 +274,55 @@ it("retries a wake that didn't start or wasn't confirmed once per generation, bo
   publish(storage, "op-other", "message-other", [target("claude", "mac")], { workspaceId: "other" });
   expect(retry("retry-4", wakeOf("message-other", "claude", 1, "other"))).toEqual({ kind: "missing" });
   expect(retry("retry-5", source, "trip", "ben")).toEqual({ kind: "missing" });
+});
+
+it("names a computer as a wake target only while its declaration's lease holds, and starts the lease again on every declaration", async () => {
+  const storage = await relay();
+  const declare = (installId: string, nowMs: number, displayName = "Claude") => storage.replaceChatRunners({
+    accountId: "ana", workspaceId: "trip", installId, computerLabel: installId,
+    runners: [{ agentId: "default", handle: displayName.toLowerCase(), displayName, enabled: true }], nowMs,
+  });
+  const targets = (nowMs: number) =>
+    storage.enabledChatRunners({ accountId: "ana", workspaceId: "trip", nowMs }).map((runner) => runner.installId);
+  declare("mac", NOW);
+  declare("laptop", NOW);
+  // The boundary: a lease holds up to, not at, CHAT_RUNNER_LEASE_MS after its declaration.
+  expect(targets(NOW + CHAT_RUNNER_LEASE_MS - 1)).toEqual(["laptop", "mac"]);
+  expect(targets(NOW + CHAT_RUNNER_LEASE_MS)).toEqual([]);
+  // The same declaration again starts the lease again: the refresh a signed-in computer sends about daily.
+  declare("mac", NOW + CHAT_RUNNER_LEASE_MS - 1);
+  const updated = (storage as StorageContext).db.prepare(
+    "SELECT install_id, updated_at_ms FROM sync_relay_chat_runners WHERE install_id = 'mac'").get();
+  expect(updated).toEqual({ install_id: "mac", updated_at_ms: NOW + CHAT_RUNNER_LEASE_MS - 1 });
+  expect(targets(NOW + CHAT_RUNNER_LEASE_MS)).toEqual(["mac"]);
+  // An expired computer's rows stay, read as absent, until it declares again.
+  expect(count(storage, "sync_relay_chat_runners")).toBe(2);
+  declare("laptop", NOW + 2 * CHAT_RUNNER_LEASE_MS, "Nova");
+  expect(targets(NOW + 2 * CHAT_RUNNER_LEASE_MS).sort()).toEqual(["laptop"]);
+});
+
+it("tries a wake again only on computers whose declaration of its agent is enabled and still leased", async () => {
+  const storage = await relay();
+  const late = NOW + CHAT_WAKE_CLAIM_MS;
+  const declare = (installId: string, nowMs: number, enabled = true) => storage.replaceChatRunners({
+    accountId: "ana", workspaceId: "trip", installId, computerLabel: installId,
+    runners: [{ agentId: "default", handle: "claude", displayName: "Claude", enabled }], nowMs,
+  });
+  // Every wake below waited its whole claim time unclaimed. By then: the Mac never declared, the laptop's lease holds,
+  // the desktop's ended just then, and the tablet declared its agent switched off.
+  publish(storage, "op-some", "message-some", [target("claude", "mac", "laptop", "desktop", "tablet")]);
+  publish(storage, "op-none", "message-none", [target("claude", "mac", "desktop", "tablet")]);
+  declare("laptop", late - 1);
+  declare("desktop", late - CHAT_RUNNER_LEASE_MS);
+  declare("tablet", late - 1, false);
+  const retry = (operationId: string, messageId: string) =>
+    storage.retryChatWake({ accountId: "ana", workspaceId: "trip", operationId, wakeId: wakeOf(messageId, "claude"), nowMs: late });
+
+  const next = wakeOf("message-some", "claude", 2);
+  expect(retry("retry-some", "message-some")).toMatchObject({ kind: "retried", wake: { wakeId: next, generation: 2, state: "waiting" } });
+  expect(wakes(storage).find((row) => row.wake_id === next)?.candidates_json).toEqual(target("claude", "laptop").candidates);
+  // None left: answered as a wake with no other computer to try, and no empty generation.
+  const before = count(storage, "sync_relay_chat_wakes");
+  expect(retry("retry-none", "message-none")).toEqual({ kind: "refused" });
+  expect(count(storage, "sync_relay_chat_wakes")).toBe(before);
 });

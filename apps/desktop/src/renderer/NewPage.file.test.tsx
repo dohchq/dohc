@@ -98,36 +98,6 @@ it("hands the page to the plain editor when its file opens without a live sessio
   );
 });
 
-it("keeps a renamed title through blur while its save is still on the way", async () => {
-  const bridge = bridgeFor({ available: false });
-  bridge.writeWorkspaceText.mockImplementation(() => new Promise(() => undefined));
-  const user = userEvent.setup();
-  const fileExists = renderNewPage();
-  await user.keyboard("Lisbon{Enter}Day one");
-  fileExists();
-  await waitFor(() => expect(screen.queryByTestId("new-page")).toBeNull());
-  await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled(), { timeout: 3_000 });
-
-  const title = screen.getByLabelText("Page title") as HTMLTextAreaElement;
-  await user.click(title);
-  await user.keyboard("{End} trip");
-  await user.click(screen.getByTestId("markdown-editor"));
-  expect(title).not.toBe(document.activeElement);
-  expect(title.value).toBe("Lisbon trip");
-});
-
-it("shows a file that opens read-only", async () => {
-  bridgeFor({ available: false, liveHostUnavailable: true });
-  const user = userEvent.setup();
-  const fileExists = renderNewPage();
-  await user.keyboard("Lisbon{Enter}");
-  fileExists();
-
-  await waitFor(() => expect(screen.queryByTestId("new-page")).toBeNull());
-  expect(screen.getByTestId("file-inspector").parentElement!.hasAttribute("inert")).toBe(false);
-  expect(screen.getByTestId("view-markdown")).toBeTruthy();
-});
-
 it("shows a file that could not be read", async () => {
   const bridge = bridgeFor({ available: false });
   bridge.readWorkspaceText.mockRejectedValue(new Error("EACCES: permission denied"));

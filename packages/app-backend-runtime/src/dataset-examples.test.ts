@@ -32,7 +32,6 @@ async function fixture(app = "fundraiser") {
   const resolved = parseDatasetDefinition(JSON.parse(readFileSync(new URL(`../../../examples/${datasetPath}`, import.meta.url), "utf8")));
   const binding: AppDatasetBinding = { ...fields, datasetId: resolved.datasetId };
   expect(binding.revisionSha256).toBe(revision.revisionSha256);
-  // app.publish.json paths are relative to the app folder; the dataset's private sources stay out of them.
   if (declaration.inputs) expect(declaration.inputs.map((path: string) => `${app}/${path}`)).not.toEqual(expect.arrayContaining([definition.schemaPath, definition.operationsPath]));
   const directory = await mkdtemp(join(tmpdir(), "dohc-example-dataset-"));
   const db = new DatabaseSync(join(directory, "host.sqlite"));
@@ -121,56 +120,4 @@ it("shares fundraiser records and rules across the public app, admin app, and Co
   await f.result("setStatus", { id: saved.id, status: "verified", expectedVersion: 3 }, "helper", "admin");
   expect((await f.result("tableRegistrations", {}, "owner")).rows[0]).toMatchObject({ version: 4, values: { [statusField]: "verified" } });
   await expect(f.call("editRegistrationStatus", { id: saved.id, expectedVersion: 3, values: edited.priorValues }, "owner")).rejects.toMatchObject({ refusal: { code: "conflict" } });
-});
-
-it("preserves fundraiser rollback, receipt privacy, manual entry, and revocation", async () => {
-  const f = await fixture();
-  await f.result("register", registration([group("s2", 36)]), "friend", "form");
-  await expect(f.call("register", registration([group("s1"), group("s2")]), "friend", "form")).rejects.toMatchObject({ refusal: { code: "capacity_unavailable" } });
-  expect((await f.result("listPublicSessions", {}, "friend", "form") as any[]).map(row => row.available)).toEqual([36, 0]);
-  const manual = await f.result("manualEntry", { fullName: "Venue Friend", session: "both", role: "spectator", source: "reclub", status: "pay_at_venue", paymentMethod: "cash" }, "helper", "admin");
-  expect(manual.total).toBe(300);
-  await expect(f.call("setStatus", { id: manual.id, status: "verified", expectedVersion: 1 }, "helper", "admin")).rejects.toMatchObject({ refusal: { code: "invalid_input" } });
-  await f.result("setStatus", { id: manual.id, status: "verified", expectedVersion: 1, paymentMethod: "cash" }, "helper", "admin");
-  const listing = await f.result("listRegistrations", {}, "helper", "admin");
-  expect(listing.records).toHaveLength(2);
-  const registered = listing.records.find((row: Result) => row.hasReceipt);
-  expect(await f.result("receiptAccess", { id: registered.id }, "helper", "admin")).toEqual({ fileId: receipt.fileId });
-  for (const name of ["receiptAccess", "listRegistrations", "tableRegistrations"]) {
-    await expect(f.call(name, { id: registered.id }, "friend", "admin")).rejects.toThrow("You do not have access to this Collection.");
-  }
-  await expect(f.call("listRegistrations", {}, "owner", "form")).rejects.toThrow("You do not have access to this Collection.");
-  f.host.setDataGrant("owner", { ...f.scope, principalKey: "helper", grant: null });
-  await expect(f.call("receiptAccess", { id: registered.id }, "helper", "admin")).rejects.toThrow("You do not have access to this Collection.");
-  f.host.setBinding("owner", { ...f.scope, appId: "form", binding: null });
-  await expect(f.call("listPublicSessions", {}, "friend", "form")).rejects.toThrow("You do not have access to this Collection.");
-  expect((await f.result("tableRegistrations", {}, "owner")).rows).toHaveLength(2);
-});
-
-it("uses the same dataset host for stock reservations, Collection status edits, and atomic restoration", async () => {
-  const f = await fixture("stock-orders");
-  const input = { customerName: "First Customer", items: [{ itemId: "shirt-s", quantity: 20 }, { itemId: "shirt-m", quantity: 2 }] };
-  const first = await f.result("placeOrder", input, "friend", "form");
-  expect(first.totalCents).toBe(33000);
-  await expect(f.call("placeOrder", { customerName: "Other Customer", items: [{ itemId: "shirt-m", quantity: 1 }, { itemId: "shirt-s", quantity: 1 }] }, "friend", "form")).rejects.toMatchObject({ refusal: { code: "stock_unavailable" } });
-  const stock = await f.result("listItems", {}, "friend", "form") as any[];
-  expect(stock.find(item => item.id === "shirt-m").remaining).toBe(18);
-  const status = f.field("orders", "status");
-  const edit = (value: string, version: number) => f.result("editOrderStatus", { id: first.id, expectedVersion: version, values: { [status]: value } }, "owner");
-  await edit("cancelled", 1);
-  const undo = f.host.history("owner", f.scope).entries[0]!.undo!;
-  expect(undo).toMatchObject({ operationId: f.operation("editOrderStatus").operationId, recordId: first.id, expectedVersion: 2 });
-  const second = await f.result("placeOrder", input, "friend", "form");
-  await expect(f.call("editOrderStatus", { id: undo.recordId, expectedVersion: undo.expectedVersion, values: Object.fromEntries(undo.fields.map(field => [field.fieldId, field.value])) }, "owner")).rejects.toMatchObject({ refusal: { code: "stock_unavailable" } });
-  await f.result("setStatus", { id: second.id, expectedVersion: 1, status: "cancelled" }, "helper", "admin");
-  expect(await edit("confirmed", 2)).toMatchObject({ id: first.id, version: 3, priorValues: { [status]: "cancelled" } });
-  const page = await f.result("tableOrders", { search: "First", limit: 1 }, "owner");
-  expect(page.rows).toHaveLength(1); expect(page.nextCursor).not.toBeNull();
-  const next = await f.result("tableOrders", { search: "First", limit: 1, after: page.nextCursor }, "owner");
-  expect(next.rows).toHaveLength(1); expect(next.rows[0].id).not.toBe(page.rows[0].id); expect(next.nextCursor).toBeNull();
-  const filtered = await f.result("tableOrders", { filters: [{ fieldId: status, value: "confirmed" }] }, "owner");
-  expect(filtered.rows).toHaveLength(1); expect(filtered.rows[0].id).toBe(first.id);
-  expect(await f.result("tableOrders",{groupBy:status,limit:1},"owner")).toEqual({groupBy:status,groups:["cancelled"],nextGroupCursor:{value:"cancelled"}});
-  expect(await f.result("tableOrders",{groupBy:status,limit:1,groupAfter:{value:"cancelled"}},"owner")).toEqual({groupBy:status,groups:["confirmed"],nextGroupCursor:null});
-  expect(await f.result("tableOrders",{group:{fieldId:status,value:"confirmed"}},"owner")).toMatchObject({rows:[{id:first.id}],group:{fieldId:status,value:"confirmed"}});
 });

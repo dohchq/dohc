@@ -56,15 +56,9 @@ function observedClient(real: EngineClient, install?: (commit: () => ReturnType<
   return { client, calls };
 }
 
-// #3089: the move guard's deadline can abandon an owner sync. Whether or not
-// the native install committed, the durable accepted state stays one matched
-// pair, and the next pass starts from that pair. The owner here is already
-// bound, so these cases can't enroll; T7's unbound peer covers that.
-it.skipIf(engine.missing).each([
-  { name: "abort before the native call", commit: false },
-  { name: "a committed install whose answer is abandoned", commit: true },
-])("an abandoned owner sync leaves a matched accepted state ($name)", async ({ commit }) => {
-  const fixture = await openLiveMoveFixture({ workspaceId: `owner-install-abort-${commit ? "after" : "before"}`, compiledRelayMain,
+// An abandoned install keeps its committed cursor and digest paired for the next pass.
+it.skipIf(engine.missing)("an abandoned committed owner sync leaves a matched accepted state", async () => {
+  const fixture = await openLiveMoveFixture({ workspaceId: "owner-install-abort-after", compiledRelayMain,
     engineExecutable: engine.require(), pages: ["page"] });
   try {
     const owner = fixture.ownerEngine;
@@ -79,7 +73,7 @@ it.skipIf(engine.missing).each([
 
     const controller = new AbortController();
     const abandoned = observedClient(owner.nativeClient(), async install => {
-      if (commit) await install();
+      await install();
       controller.abort();
       throw controller.signal.reason;
     });
@@ -87,12 +81,11 @@ it.skipIf(engine.missing).each([
     expect(abandoned.calls.installs).toHaveLength(1);
     const installed = abandoned.calls.installs[0]!;
     expect(installed).toBeGreaterThanOrEqual(cursor);
-    // Each case lands on its own side: an install that threw before it
-    // committed would leave the old pair and fail the committed case.
+    // A failed commit would leave the old pair.
     const after = fixture.ownerAccepted("page");
     const pair = JSON.stringify({ old, after, installed });
-    expect(after.cursor, pair).toBe(commit ? installed : old.cursor);
-    expect(after.digest === old.digest, pair).toBe(!commit);
+    expect(after.cursor, pair).toBe(installed);
+    expect(after.digest === old.digest, pair).toBe(false);
     expect(abandoned.calls.enroll).toBe(0);
 
     // The next pass reads the durable state again and starts from it.

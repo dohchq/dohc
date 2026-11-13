@@ -26,7 +26,6 @@ it("derives the seed's delivery from the outbox the engine reports, as native do
     {adoptionId:f.capture.activationId,expectedLocalSequence:2,events:[],terminalReceipt:null,retainedPrefix:null} as never,{maxBytes:1000,maxEvents:2});
   await f.transport.client.sendRequest({...f.request,id:4,method:"liveApplication.ownerOutbox",params:{registrationId:7}});
   const seed=receiptFirstSeed(f.transport.seedDelivery(),{storage:f.storage,transport:f.transport.client,activationId:f.capture.activationId,binding:f.binding,host:f.host});
-  // The Rust test a_successors_later_edit_is_delivered_from_its_outbox pins the same vector natively.
   expect(seed?.deliveryId(2)).toBe("owner-delivery-c9d123ecd57e191bbb1f55a3eb45488d05a36bbef55727702cffb5711ed7a37b");
 });
 it("uses the captured native session and translates owner outbox calls to its native outbox",async()=>{

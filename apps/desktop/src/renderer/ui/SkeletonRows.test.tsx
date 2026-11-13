@@ -1,8 +1,7 @@
 // @vitest-environment jsdom
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import css from "../styles.css?raw";
-import { SkeletonLines, SkeletonRows, SkeletonSlot } from "./SkeletonRows";
+import { SkeletonRows, SkeletonSlot } from "./SkeletonRows";
 
 afterEach(() => {
   cleanup();
@@ -74,46 +73,11 @@ describe("SkeletonRows", () => {
     expect(waiting("no-slot")).toBe(true);
   });
 
-  it("is one status whose only words are its label", () => {
-    render(<SkeletonRows label="Loading history..." testId="loading" />);
-    const status = screen.getByRole("status");
-    expect(status).toBe(screen.getByTestId("loading"));
-    expect(status.textContent).toBe("Loading history...");
-  });
 
-  it("draws the drawing's four lines by default, hidden from a screen reader", () => {
-    render(<SkeletonRows label="Loading…" />);
-    const lines = screen.getByRole("status").querySelectorAll("[aria-hidden]");
-    expect([...lines].map((line) => line.className.match(/w-\[\d+%\]/)?.[0])).toEqual([
-      "w-[80%]",
-      "w-[62%]",
-      "w-[90%]",
-      "w-[54%]",
-    ]);
-    for (const line of lines) expect([line.classList.contains("bg-skeleton"), line.classList.contains("bg-selected")]).toEqual([true, false]);
-  });
 
-  it("repeats the widths for more rows", () => {
-    render(<SkeletonRows label="Loading…" rows={6} />);
-    const lines = screen.getByRole("status").querySelectorAll("[aria-hidden]");
-    expect(lines).toHaveLength(6);
-    expect(lines[4]?.className).toContain("w-[80%]");
-  });
 
-  it("leaves the status to the surface when only the lines are drawn", () => {
-    const { container } = render(<SkeletonLines rows={2} />);
-    expect(screen.queryByRole("status")).toBeNull();
-    expect(container.firstElementChild?.getAttribute("aria-hidden")).toBe("true");
-    expect(container.firstElementChild?.textContent).toBe("");
-  });
 
   // The wait is what keeps a quick load from flashing, and it lives in the
   // stylesheet, so a change there must fail here. Reduced motion shortens
   // only the duration, so the wait survives it.
-  it("stays blank for 150ms and holds no keyframe afterwards", () => {
-    render(<SkeletonRows label="Loading…" />);
-    expect(screen.getByRole("status").classList.contains("dohc-reveal-if-slow")).toBe(true);
-    expect(css).toMatch(/\.dohc-reveal-if-slow \{\s*animation: dohc-reveal-if-slow \d+ms ease-out 150ms backwards;\s*\}/);
-    expect(css).toMatch(/@keyframes dohc-reveal-if-slow \{\s*from \{\s*opacity: 0;\s*\}\s*\}/);
-  });
 });

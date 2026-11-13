@@ -40,6 +40,7 @@ import {HOSTED_RECOVERY_PROBE_MS, hostedRelayState, hostedReplicaQuiet, type Hos
 import {decodeHostedSyncResult, hostedWindowCovers, type HostedSyncMethodResultMap, type HostedWindow} from "@dohc/workspace-engine-client/relay-wire";
 import {withStreamedContributions, withStreamedMarkdown, type HeldReadInvalidated, type StreamedBlob} from "./heldDocumentRoutes";
 import type {ServiceActivationReplica} from "./serviceActivationDriver";
+import {createLogLineCap} from "./logLineCap.js";
 interface ServiceLiveHostConfig {
   readonly version: 1;
   readonly engineExecutable: string;
@@ -93,6 +94,10 @@ export interface ServiceHostedSet {
 // The lineages whose kept queue stays frozen at its owner's refused adoption seed, and those whose queue holds another refused edit.
 interface KeptHeads {readonly seeded: ReadonlySet<string>; readonly refused: ReadonlySet<string>}
 interface ServiceHostedDocument {readonly workspaceId: string; readonly objectId: string; readonly path: string}
+/** What one activation took in a slow pass, with its object id cut to eight characters. */
+interface SlowPassTarget {object: string | null; ms: number; outcome: "done" | "pending" | "error"; settle: "sent" | "reused" | "none"; materialized: boolean | null}
+/** What one workspace's pushes and pulls took in a slow pass, null when none ran. `pulls` counts its pulls by reason. */
+interface SlowPassWorkspace {readonly workspace: string; pushMs: number | null; pullMs: number | null; pulls?: Partial<Record<HostedPullReason, number>>}
 function parseServiceWorkspace(item: unknown) {
   const row = record(item, ["root", "workspaceId", "maxRegistrations"], ["hostedReplication"]);
   return Object.freeze({ root: path(row.root, true), workspaceId: parseLiveUpdateIdentifier(row.workspaceId, "workspace ID"),
@@ -272,6 +277,8 @@ export async function startServiceLiveHost(options: {
   const scope = Scope.makeUnsafe();
   const consumers = new Map<string, LiveCommittedDelivery>();
   const documents = new LiveDocumentWork();
+  // Each document and waiter logs a lock wait at most once a minute, so queued submissions cannot fill the log.
+  const lockWaitLines = createLogLineCap();
   const attachments = new Map<string, HostedAttachment>();
   // Hosted pulls by workspace and why each ran, across attachments.
   const pullCounts = new Map<string, Map<HostedPullReason, number>>();
@@ -428,9 +435,18 @@ export async function startServiceLiveHost(options: {
     return closing;
   };
   const abort = () => { if (!closing) void close().catch(error => console.error("Service host shutdown failed.", error)); };
-  const runDocument = async <T>(document: LiveDocumentKey, callerSignal: AbortSignal | undefined, operation: (joined: AbortSignal) => Promise<T>): Promise<T> => {
+  // `waiter` names a caller whose wait for the document is logged when it passes 100 ms.
+  const runDocument = async <T>(document: LiveDocumentKey, callerSignal: AbortSignal | undefined, operation: (joined: AbortSignal) => Promise<T>,
+    waiter?: "application" | "pass"): Promise<T> => {
+    const askedAt = now();
     try {
       return await withLiveHostSignal(signal, callerSignal, joined => documents.run(JSON.stringify(parseLiveDocumentKey(document)), joined, async () => {
+        const waitedMs = Math.round(now() - askedAt);
+        const repeated = waiter && waitedMs > 100 ? lockWaitLines(`${document.objectId} ${waiter}`, now()) : undefined;
+        if (repeated !== undefined) {
+          try {console.error("Live document waited for its lock.", {object: document.objectId.slice(0, 8), waiter, waitedMs, ...(repeated ? {repeated} : {})});}
+          catch { /* Reporting must not stop the work. */ }
+        }
         check();
         const result = await operation(joined);
         check();
@@ -460,19 +476,19 @@ export async function startServiceLiveHost(options: {
   // The counts are the host's, so another caller's request while the call runs
   // asks for a pass too.
   const deliver = <T>(document: LiveDocumentKey, callerSignal: AbortSignal | undefined,
-    run: (consumer: ReturnType<typeof configuredConsumer>, joined: AbortSignal) => Promise<T>) => {
+    run: (consumer: ReturnType<typeof configuredConsumer>, joined: AbortSignal) => Promise<T>, waiter?: "application") => {
     configuredConsumer(document);
     return runDocument(document, callerSignal, async joined => {
       const consumer = configuredConsumer(document), numbered = requestId, sent = sentRequests, counted = idleRequests;
       try { return await run(consumer, joined); }
       catch (error) { joined.throwIfAborted(); check(); configuredConsumer(document); throw error; }
       finally { if (requestId - numbered !== idleRequests - counted || sentRequests - sent !== idleRequests - counted) nudgePass(); }
-    });
+    }, waiter);
   };
   const drain = async (value: LiveDocumentKey, callerSignal?: AbortSignal): Promise<CommittedDeliveryOutcome> => {
     check();
     const document = parseLiveDocumentKey(value);
-    return deliver(document, callerSignal, (consumer, joined) => consumer.drain(document, joined));
+    return deliver(document, callerSignal, (consumer, joined) => consumer.drain(document, joined), "application");
   };
   const startup = Effect.runPromise(Effect.provideService(Effect.gen(function* () {
     yield* Effect.acquireRelease(Effect.succeed(lifetime), value => Effect.sync(() => value.dispose()));
@@ -565,7 +581,7 @@ export async function startServiceLiveHost(options: {
     // Owners dropped because a newly held list may leave some out are reported once per change in their count, until a complete list.
     // Each reads the relay state first, so a pull that ends with no more pages brought every change through it.
     // A write during the pull leaves `check` set, and the next pass pulls again. Pulls only read the relay.
-    const pull = async (attached: HostedAttachment, joined: AbortSignal, reason: HostedPullReason) => {
+    const pullOnce = async (attached: HostedAttachment, joined: AbortSignal, reason: HostedPullReason) => {
       const workspaceId = attached.hosted.connection.workspaceId;
       // Notices arrive in microtasks, so none lands between this read and clearing `check`.
       const state = hostedRelayState(storage, workspaceId), number = ++attached.pulls;
@@ -613,6 +629,22 @@ export async function startServiceLiveHost(options: {
       // Activation starts only after the check below is defined.
       if (activation) checkProgress();
       return result;
+    };
+    // Each workspace's push and pull times in the running activation pass, for its slow-pass line.
+    let passWorkspaces: Map<string, SlowPassWorkspace> | undefined;
+    const passWorkspace = (workspaceId: string) => {
+      if (!passWorkspaces) return undefined;
+      let timed = passWorkspaces.get(workspaceId);
+      if (!timed) passWorkspaces.set(workspaceId, timed = {workspace: workspaceId.slice(0, 8), pushMs: null, pullMs: null});
+      return timed;
+    };
+    // A pull during an activation pass, its activations' catch-up pulls included, counts toward that pass's slow-pass line.
+    const pull = async (attached: HostedAttachment, joined: AbortSignal, reason: HostedPullReason) => {
+      const timed = passWorkspace(attached.hosted.connection.workspaceId), startedAt = now();
+      try {return await pullOnce(attached, joined, reason);}
+      finally {
+        if (timed) {const pulls = timed.pulls ??= {}; pulls[reason] = (pulls[reason] ?? 0) + 1; timed.pullMs = (timed.pullMs ?? 0) + Math.round(now() - startedAt);}
+      }
     };
     for (const [index, value] of reply.workspaces.entries()) install(config.workspaces[index]!, value);
     yield* Effect.addFinalizer(() => Effect.sync(() => {
@@ -1557,7 +1589,7 @@ export async function startServiceLiveHost(options: {
       activation=new ServiceActivationDriver({trustedAccount:options.trustedAccount,storage,history,client,host:coordinate,workspace:checked,config:config.activation,
         adoption:config.adoption!,restore,nextRequestId,deadlineMs:config.client.requestDeadlineMs,assertCurrent:checkPreparing,
         maxApplications:config.settlement?.maxApplicationsPerSettlement,
-        registered(){registered=true;},runDocument:(document,signal,operation)=>runDocument(document,signal,operation),
+        registered(){registered=true;},runDocument:(document,signal,operation)=>runDocument(document,signal,operation,"pass"),
         lifetime:signal,wake:wakePass});
       registerRetained();
       progress=lifecycleProgress();
@@ -1586,9 +1618,10 @@ export async function startServiceLiveHost(options: {
         }
         return now()>=attached.probeAt?"probe":undefined;
       };
-      let index=0,lastError:string|undefined,lastIdleError:string|undefined;
+      let index=0,lastError:string|undefined,lastIdleError:string|undefined,lastSlowPassAt:number|undefined;
       const pass=()=>withDeadline(signal,config.activation!.passDeadlineMs,async passSignal=>{
-        const bounds=config.activation!;
+        const bounds=config.activation!,passStartedAt=now(),slowTargets:SlowPassTarget[]=[],slowWorkspaces=new Map<string,SlowPassWorkspace>();
+        passWorkspaces=slowWorkspaces;
         let failed=false;
         // One failed step does not hold back the others.
         const step=async(work:()=>Promise<unknown>)=>{
@@ -1655,9 +1688,26 @@ export async function startServiceLiveHost(options: {
           for(let visited=0;visited<Math.min(bounds.maxDocumentsPerPass,targets.length);visited++){
             index%=targets.length;
             const target=targets[index]!;index=(index+1)%targets.length;
-            // Settlement runs in the activation's own document work. A restore
-            // fence during it leaves the pass pending rather than ready.
-            await activation!.activate(target,passSignal,settleTarget,catchUp);
+            const timed:SlowPassTarget={object:hosted.get(JSON.stringify([target.workspaceId,target.path]))?.objectId.slice(0,8) ?? null,
+              ms:0,outcome:"error",settle:"none",materialized:null},startedAt=now();
+            slowTargets.push(timed);
+            try{
+              // Settlement runs in the activation's own document work. A restore
+              // fence during it leaves the pass pending rather than ready.
+              const outcome=await activation!.activate(target,passSignal,settleTarget && (async(consumer,document,joined)=>{
+                timed.object??=document.objectId.slice(0,8);
+                const sent=consumer.settlesSent;
+                try{
+                  const settled=await consumer.settle(document,joined);
+                  timed.materialized=!settlementPending(settled) && settled.materialized;
+                  return settled;
+                }finally{
+                  // A settlement the engine was asked for counts as sent even when it then failed.
+                  timed.settle=consumer.settlesSent>sent?"sent":timed.materialized===null?"none":"reused";
+                }
+              }),catchUp);
+              timed.outcome=outcome.kind==="done"?"done":"pending";
+            }finally{timed.ms=Math.round(now()-startedAt);}
           }
         });
         // Every ready workspace pushes, then pulls unless its replica is quiet and its relay state unchanged, until the
@@ -1668,9 +1718,13 @@ export async function startServiceLiveHost(options: {
         // origin does neither.
         for(const [workspaceId,attached] of [...attachments]){
           if(!attached.hosted.checked)continue;
+          const push=async()=>{
+            const timed=passWorkspace(workspaceId),startedAt=now();
+            try{await attached.hosted.push(passSignal);}finally{if(timed)timed.pushMs=Math.round(now()-startedAt);}
+          };
           if(activation!.workspaceReady(workspaceId)){
             // A refused push does not cost the pull, so departures are still confirmed while the push keeps failing.
-            await step(()=>attached.hosted.push(passSignal));
+            await step(push);
             await step(async()=>{
               // The pull uses the attachment standing after the push, not one the pass saw before it.
               const current=checked(workspaceId),reason=current && tailPull(workspaceId,current);
@@ -1679,7 +1733,7 @@ export async function startServiceLiveHost(options: {
           }
           else{
             // A refused push does not cost the pull, so held lists still page while the push keeps failing.
-            if(activation!.workspacePushes(workspaceId))await step(()=>attached.hosted.push(passSignal));
+            if(activation!.workspacePushes(workspaceId))await step(push);
             if(!catchUp.has(workspaceId))await step(()=>pull(attached,passSignal,"unready"));
           }
         }
@@ -1692,6 +1746,16 @@ export async function startServiceLiveHost(options: {
           });
         }
         if(!failed)lastError=undefined;
+        // A pass over a second logs what took its time, at most once a minute.
+        const passMs=Math.round(now()-passStartedAt);
+        if(passMs>1000 && (lastSlowPassAt===undefined || now()-lastSlowPassAt>=60_000)){
+          lastSlowPassAt=now();
+          const bounded=<T>(rows:T[])=>rows.length>bounds.maxDocumentsPerPass
+            ? [...rows.slice(0,bounds.maxDocumentsPerPass),{more:rows.length-bounds.maxDocumentsPerPass}] : rows;
+          try{console.error("Live host pass was slow.",{passMs,targets:bounded(slowTargets),workspaces:bounded([...slowWorkspaces.values()])});}
+          catch{ /* Reporting must not stop activation. */ }
+        }
+        passWorkspaces=undefined;
         return failed;
       });
       // Unloads hosted documents with no live connection for the idle period.

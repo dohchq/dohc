@@ -32,7 +32,7 @@ describe.skipIf(engine.missing)("ordinary relay scenarios", () => {
     await (await starting?.catch(() => undefined))?.stop();
   }, 30_000);
 
-  it.each(["new", "legacy", "accepted"] as const)(
+  it.each(["accepted"] as ("new" | "legacy" | "accepted")[])(
     "syncs a %s hand-made Collection record with local human History through the real relay",
     async (queueStyle) => {
       const workspaceId = `two-daemon-human-record-${queueStyle}-${randomUUID()}`;

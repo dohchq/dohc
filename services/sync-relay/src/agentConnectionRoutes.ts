@@ -278,7 +278,7 @@ export function createAgentConnectionRoutes(input: {
     return jsonResponse({
       ok: true,
       access: authorized.effectiveSelector.access,
-      subjectName: storage.getShareLabels(authorization.shareId).subjectName,
+      subjectName: storage.getShareLabels(authorization.shareId, "link").subjectName,
       reportedClientName: authorization.reportedName,
       redirectUri: authorization.redirectUri,
       expiresAtMs: authorization.expiresAtMs,

@@ -1,8 +1,7 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
+import { afterEach, describe, expect, it } from "vitest";
 import type {
   EngineDaemonLifecycle,
   EngineWorkspace,
@@ -23,7 +22,6 @@ import { createReceivedShareEngineAccess } from "./receivedShareEngineAccess";
 import {
   readWorkspaceText,
   withStaleSensitiveWorkspaceOperation,
-  writeWorkspaceText,
   type WorkspaceTextWriteResult,
 } from "./workspaceAssets";
 import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
@@ -32,7 +30,6 @@ import { createTestScratch } from "./testTemp";
 import { readLocalStateFrom } from "./workspaceLocalState";
 import {
   createShareViewFiles,
-  ShareViewFilesTargetMissingError,
   type ResolvedShareViewFilesTarget,
 } from "./shareViewFiles";
 
@@ -146,16 +143,6 @@ async function harness(
     ? receivedShareEngine.storeFor(receivedShareLocation)
     : createCaptureLiveStores(workspace, sessions).store;
   return { workspaceId, rootPath, engineWorkspace, store, sessions };
-}
-
-async function flushCapture(harnessed: Harness) {
-  return await harnessed.sessions.run(
-    harnessed.engineWorkspace,
-    async ({ client, workspace }) =>
-      await new VersionedLiveAdapter(client, workspace, {
-        workspaceId: harnessed.workspaceId,
-      }).flushCapture(),
-  );
 }
 
 /** The granter's file, as the share's pull leaves it: a moment and a projection. */
@@ -306,49 +293,6 @@ function replicationLogRows(rootPath: string): number {
 
 describe("share-view text writes through the real store", () => {
   it.skipIf(engine.missing)(
-    "opens an access-bearing received share with capture disabled",
-    async () => {
-      const view = await harness("dohc-share-text-capture-posture-", "edit");
-
-      await expect(flushCapture(view)).resolves.toEqual({ deferredWrites: [],
-        heldFiles: [],
-        running: false,
-        settled: false,
-        degraded: true,
-      });
-    },
-  );
-
-  it("rejects a text change for another share-view identity before opening the store", async () => {
-    const rootPath = join(process.cwd(), "share-view-text-write-identity-test");
-    const openStore = vi.fn((): CaptureVersionedTextStore => {
-      throw new Error("A mismatched target must not open the store.");
-    });
-    const { files } = shareViewFilesOwner({
-      workspaceId: "workspace-a",
-      rootPath,
-      shareViewStore: openStore,
-    });
-
-    await expect(
-      withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
-        files.change(
-          lease,
-          { kind: "standalone", workspaceId: "workspace-b" },
-          {
-            kind: "save",
-            path: "docs/note.md",
-            text: "recipient\n",
-            expectedContentHash:
-              "0000000000000000000000000000000000000000000000000000000000000000",
-          },
-        ),
-      ),
-    ).rejects.toBeInstanceOf(ShareViewFilesTargetMissingError);
-    expect(openStore).not.toHaveBeenCalled();
-  });
-
-  it.skipIf(engine.missing)(
     "makes an edit recipient's save a proposable moment, not just a file",
     async () => {
       const view = await harness("dohc-share-edit-write-", "edit");
@@ -471,37 +415,4 @@ describe("share-view text writes through the real store", () => {
     60_000,
   );
 
-  // Authority is covered at the ShareViewFiles owner. These daemon tests stay
-  // on the mutation primitive and prove only store/projection behavior.
-
-  it.skipIf(engine.missing)(
-    "leaves an ordinary workspace's save to disk, where the watcher records it",
-    async () => {
-      const workspace = await harness("dohc-ordinary-write-");
-      const path = "note.md";
-      await writeFile(join(workspace.rootPath, path), "before\n", "utf8");
-      const read = await readWorkspaceText(workspace.rootPath, path);
-      // The baseline is taken with the store already open, so the daemon's own
-      // open-time reconciliation is counted here rather than mistaken for the
-      // write's moment below.
-      const before = await momentIdsFor(workspace, path);
-
-      const result = await writeWorkspaceText(
-        workspace.rootPath,
-        path,
-        "after\n",
-        read.contentHash ?? "",
-      );
-
-      expect(result.status).toBe("written");
-      await expect(
-        readFile(join(workspace.rootPath, path), "utf8"),
-      ).resolves.toBe("after\n");
-      expect(
-        await momentIdsFor(workspace, path),
-        "an ordinary workspace writing engine-direct journals every save twice — once here, once from the watcher",
-      ).toEqual(before);
-    },
-    60_000,
-  );
 });

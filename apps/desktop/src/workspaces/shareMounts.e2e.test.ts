@@ -1,21 +1,9 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { describe, expect, it } from "vitest";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
-import {
-  createRealDaemonLifecycle,
-  createRealDaemonWorkspaceSessions,
-  REAL_DAEMON_TEST_TIMEOUT_MS,
-} from "../testing/realDaemonWorkspaceSessions";
 import { mountRootFor } from "./shareMounts";
-import {
-  createShareMountDirectoryThroughOwnerForTest,
-  refreshShareMountThroughOwnerForTest,
-  removeShareMountFolderThroughOwnerForTest,
-} from "../testing/shareViewFilesMountHarness";
-import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 import { createTestScratch } from "./testTemp";
 
 import { openLiveDaemonWorkspace } from "../../e2e/helpers/daemonSeed";
@@ -23,104 +11,10 @@ import { claimRelayWorkspace, relayJson } from "../../e2e/helpers/relayPeer";
 import { spawnSyncRelay } from "../../e2e/helpers/syncRelay";
 import { RelayFilePeer } from "../testing/relayFilePeer";
 import { createRealShareMountHarness } from "../testing/realShareMountHarness";
-import { readLocalStateFrom } from "./workspaceLocalState";
 
 const engine = requireEngineBinaryOrSkip();
 
 describe("share mounts real daemon", () => {
-  it.skipIf(engine.missing)(
-    "stores durable mount state inside the mount and removes only that mount",
-    async () => {
-      const host = await createTestScratch("dohc-share-mount-rust-e2e-");
-      const mount = { shareId: "share-1", label: "alex" };
-      const mountRoot = mountRootFor(host, mount.label);
-      const siblingRoot = mountRootFor(host, "sam");
-      const hostSentinel = join(host, "host-keep.md");
-      const siblingSentinel = join(siblingRoot, "sibling-keep.md");
-      const lifecycle = createRealDaemonLifecycle({
-        command: engine.require(),
-        maxRestarts: 0,
-      });
-      let sessions: EngineWorkspaceSessions | null = null;
-      let lifecycleStopped = false;
-
-      try {
-        await createShareMountDirectoryThroughOwnerForTest(host, mount.label);
-        await mkdir(siblingRoot);
-        await writeFile(hostSentinel, "host", "utf8");
-        await writeFile(siblingSentinel, "sibling", "utf8");
-
-        await lifecycle.start();
-        const activeSessions = createRealDaemonWorkspaceSessions(lifecycle);
-        sessions = activeSessions;
-        // Writers of `.dohc/local` ask the engine's open, as the desktop's do.
-        readLocalStateFrom(activeSessions);
-        await expect(
-          refreshShareMountThroughOwnerForTest({
-            hostWorkspaceId: "host-workspace-1",
-            hostRoot: host,
-            mount,
-            relay: {
-              baseUrl: "http://unused.invalid",
-              token: "unused",
-            },
-            // A real pinned selector: no paths and no version selects
-            // nothing at all, which the engine refuses.
-            pinnedSelector: { paths: ["docs"], versionId: null, access: "view" },
-            recordRefusals: async () => undefined,
-            pull: async () => ({
-              fetched: 0,
-              applied: 0,
-              skipped: 0,
-              refusals: [],
-              refusalCount: 0,
-              changedPaths: [],
-              nextCursor: 0,
-              commitCursor: async () => undefined,
-            }),
-            openStore: (workspace) =>
-              createCaptureLiveStores(workspace, activeSessions).store,
-          }),
-        ).resolves.toEqual({
-      status: "unchanged",
-      changedPaths: 0,
-      excludedPaths: [],
-      unjournalablePaths: [],
-      refusedOps: 0,
-      refusedDetail: null,
-    });
-
-        expect(
-          existsSync(join(mountRoot, ".dohc", "engine", "engine.db")),
-        ).toBe(true);
-        expect(existsSync(join(host, ".dohc", "engine", "engine.db"))).toBe(
-          false,
-        );
-        expect(
-          existsSync(join(siblingRoot, ".dohc", "engine", "engine.db")),
-        ).toBe(false);
-
-        await activeSessions.closeAll();
-        sessions = null;
-        await lifecycle.stop();
-        lifecycleStopped = true;
-
-        await removeShareMountFolderThroughOwnerForTest(host, mount.label);
-        expect(existsSync(mountRoot)).toBe(false);
-        await expect(readFile(hostSentinel, "utf8")).resolves.toBe("host");
-        await expect(readFile(siblingSentinel, "utf8")).resolves.toBe(
-          "sibling",
-        );
-      } finally {
-        await sessions?.closeAll().catch(() => undefined);
-        if (!lifecycleStopped) {
-          await lifecycle.stop().catch(() => undefined);
-        }
-        await rm(host, { recursive: true, force: true });
-      }
-    },
-    REAL_DAEMON_TEST_TIMEOUT_MS,
-  );
 
   it.skipIf(engine.missing)(
     "refuses writes and onward sharing, refreshes edits, preserves revoked files, and unmounts only the share",

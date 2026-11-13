@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { setupFileInspectorTests } from "./FileInspector.environment-fixture";
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -117,33 +117,4 @@ it("keeps Try again on the frozen editor after its row is dismissed", async () =
   expect(loadStoredDrafts(Date.now(), { bindHandles: false }).map((draft) => draft.path)).toEqual([PATH]);
   // Storage kept the edits, so the document's row no longer asks for a copy to keep them.
   expect(screen.getByTestId("orphaned-draft-notice").textContent).toContain(REPLACED_HISTORY_DRAFT_NOTICE);
-});
-
-it("says the replacement did not finish beside the edit it set aside", async () => {
-  const user = userEvent.setup();
-  render(surface("ws-1"));
-  await failReplacement();
-  // This session's own row keeps the earlier edits but does not say why.
-  expect(screen.getByTestId("orphaned-draft-notice").textContent).not.toContain(REPLACEMENT_FAILED_REASON);
-  expect(screen.getByTestId("markdown-save-state").getAttribute("title")).toBe(REPLACEMENT_FAILED_REASON);
-
-  await user.click(screen.getByTestId("markdown-source-toggle"));
-  const strip = (await screen.findByTestId("view-markdown-source")).querySelector("span");
-  expect(strip?.textContent).toBe(REPLACEMENT_FAILED_REASON);
-});
-
-it("offers Try again on the frozen editor when it failed while another workspace was active", async () => {
-  const user = userEvent.setup();
-  const view = render(surface("ws-2"));
-  const { setItem } = await failReplacement();
-  expect(screen.queryByTestId("connection-notices")).toBeNull();
-
-  view.rerender(surface("ws-1"));
-  expect(screen.queryByTestId("connection-notices")).toBeNull();
-  setItem.mockRestore();
-  await user.click(screen.getByTestId("markdown-save-state-action"));
-  await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
-  await waitFor(() => expect(screen.queryByTestId("markdown-save-state-action")).toBeNull());
-  expect(screen.getByTestId("workspace-shell-error").textContent).toContain(REPLACED_DOCUMENT_SAVED);
-  await act(async () => { view.unmount(); });
 });

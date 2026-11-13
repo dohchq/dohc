@@ -23,6 +23,7 @@ import {
 import { credentialScopedOperation, requireCredentials } from "../workspaces/credentialScopedOperation";
 import { resolveWorkspaceRelayAuthorId, type ChatRelayIdentityTarget } from "../workspaces/chatRelayIdentity";
 import { deriveChatActorKey } from "../workspaces/chatWrites";
+import { refuseChatFileLinks } from "../workspaces/chatFileLinkScope";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { relayApiFetch, relayFetchWithTimeout, RELAY_FETCH_TIMEOUT_MS } from "../workspaces/sharedChannels";
 import { ShareUnavailableError, type SyncRelayConnection } from "@dohc/workspace-contracts/relay";
@@ -463,6 +464,7 @@ export function registerDirectMessagesIpcHandlers<
     assertTrustedSender(event);
     const input = StartDmPayload.parse(payload);
     const body = normalizeChatMessageBody(input.body);
+    refuseChatFileLinks({ kind: "none" }, [body]);
     return withRendererWorkspaceOperation(
       event.sender,
       input.workspaceId,

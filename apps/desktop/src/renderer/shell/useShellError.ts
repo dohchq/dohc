@@ -5,6 +5,7 @@ import { CreationPartialError, creationPartialNotice } from "@dohc/cli/creation"
 import { cutText } from "@dohc/workspace-contracts/names";
 import type { ReportKinds } from "../../ipc/bridgeContract";
 import { isLiveEditingRefusal, isPrivacyDenied, isStoppedWorkspaceCall, isStoppedWorkspaceRead, KEEPABLE_COLLECTIONS_REFUSALS, readCollectionsRefusal, readError, refusalCode, UNKNOWN_ERROR_WORDS, USE_THIS_COMPUTER, waitedForCollectionMove, VOLUME_SHARES_NEW_FILES_WORDS, withErrorWords } from "../../ipc/errorWords";
+import { NoticeOwner, type NoticeSink } from "../../notices/noticeOwner";
 import type { NoticeTarget } from "../../notices/noticeTarget";
 import { bridge } from "../bridge";
 import { SETTLEMENT_ATTRIBUTION_REFUSED, SETTLEMENT_BINDING_CHANGED } from "../../notices/settlementRefusal";
@@ -172,6 +173,24 @@ function secretKeyWords(reason: string): string {
     default:
       return "dohc could not read the workspace secret key file.";
   }
+}
+
+// One notice owner for each workspace, filing into `sink`. Once the caller
+// moves to another workspace, the owner of the one it left files nothing.
+export function useNoticeOwner(workspaceId: string, sink: NoticeSink): NoticeOwner {
+  const latest = useRef({ workspaceId, sink });
+  latest.current = { workspaceId, sink };
+  return useMemo(() => {
+    const here = () => latest.current.workspaceId === workspaceId;
+    return new NoticeOwner({
+      report: (...notice) => {
+        if (here()) latest.current.sink.report(...notice);
+      },
+      clear: (identity) => {
+        if (here()) latest.current.sink.clear(identity);
+      },
+    });
+  }, [workspaceId]);
 }
 
 export function useShellError(workspaceId: string, retrySharedView?: () => void) {
@@ -421,12 +440,10 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
     [push, privacySettingsAction, keepCollectionsHere, reportSharedViewRefusal],
   );
   // The error hook the shell hands its parts (ReportButtonError): no kind, and
-  // an identity when the part names what failed. A part that keeps one row
-  // for several failures, such as the Versions page, passes `quiet` to change
-  // that row where it stands, and `onDismiss` to learn that the row is gone.
+  // an identity when the part names what failed.
   const reportButtonError = useCallback(
-    (fallback: string, error: unknown, retry: (() => void) | null, identity?: string, quiet?: boolean, onDismiss?: () => void) =>
-      reportShellError(fallback, error, retry, undefined, identity, quiet, onDismiss),
+    (fallback: string, error: unknown, retry: (() => void) | null, identity?: string) =>
+      reportShellError(fallback, error, retry, undefined, identity),
     [reportShellError],
   );
   // A failure already worded for the person. Report facts, such as a raw
@@ -1094,10 +1111,17 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
       : current.filter(error => error !== target));
   }, []);
 
+  // The workspace's notice owner, which files its rows here.
+  const noticeOwner = useNoticeOwner(workspaceId, {
+    report: (words, cause, retry, identity, quiet, onDismiss) => reportShellError(words, cause, retry, undefined, identity, quiet, onDismiss),
+    clear: clearIdentity,
+  });
+
   return {
     shellErrors,
     clearKind,
     clearIdentity,
+    noticeOwner,
     reportShellError,
     reportButtonError,
     reportShellFailure,
