@@ -313,13 +313,16 @@ export class ServiceActivationDriver {
   /**
    * Forgets a document the engine unloaded while it stays a target, and ends
    * its registration. Passes skip it until it wakes, then activate it again
-   * from its retained source.
+   * from its retained source. Its block and its wait stay, since it is the same document.
    */
   sleep(target:ServiceActivationTarget,document:LiveDocumentKey){
-    const key=JSON.stringify(parseLiveDocumentKey(document)),owner=this.#owners.get(key);
+    const key=JSON.stringify(parseLiveDocumentKey(document)),owner=this.#owners.get(key),slot=targetKey(target);
     owner?.consumer.release(document);
-    this.#keepReleasedHold(targetKey(target),()=>{this.removeTarget(target);this.addTarget(target,document.objectId);});
-    this.#dormant.set(targetKey(target),key);
+    const block=this.#blocked.get(slot),failure=this.#failures.get(slot);
+    this.removeTarget(target);this.addTarget(target,document.objectId);
+    if(block)this.#blocked.set(slot,block);
+    if(failure)this.#failures.set(slot,failure);
+    this.#dormant.set(slot,key);
   }
   dormant(target:ServiceActivationTarget){return this.#dormant.has(targetKey(target));}
   /** Whether the document belongs to a dormant target, which wakes when it is opened. */
