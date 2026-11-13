@@ -150,6 +150,18 @@ struct ChatReadStateMarkParams {
     thread_id: String,
     up_to_sequence: i64,
     expected_revision: Option<i64>,
+    // The workspace owner when the caller holds the owner's replication
+    // context. Only then does an account mark journal.
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    replication_owner_user_id: Option<String>,
+    now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatReadStateSeedAccountParams {
+    account_user_id: String,
+    seed_local: bool,
     now_ms: Option<i64>,
 }
 
@@ -192,12 +204,39 @@ impl EngineService {
                 params.thread_id,
                 params.up_to_sequence,
                 params.expected_revision,
+                params.replication_owner_user_id,
                 params.now_ms.unwrap_or(now_ms()?),
                 cancellation.token(),
             ),
         )
         .await?;
         Ok(read_state_json(&state))
+    }
+
+    /// Record the account whose read places this copy shows, once, seeding
+    /// its marks from this copy's local counts when `seedLocal` is set.
+    pub(crate) async fn chats_read_state_seed_account(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatReadStateSeedAccountParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let recorded = Self::read_under_ctx(
+            &cancellation,
+            "chats.readState.seedAccount",
+            open.actor.chat_read_state_seed_account(
+                open.workspace_id.clone(),
+                params.account_user_id,
+                params.seed_local,
+                params.now_ms.unwrap_or(now_ms()?),
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(json!({ "recorded": recorded }))
     }
 
     pub(crate) async fn chats_read_state_get(

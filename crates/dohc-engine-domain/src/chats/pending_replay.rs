@@ -1,13 +1,13 @@
 use super::{
     FeedCoordinateResolution, FollowTargetKind, FollowTargetResolution,
     PENDING_CHAT_WORKSPACE_EXISTS_SQL, PendingChatRefusal, PendingChatReplay,
-    ReplicatedMessageAuthor, ThreadMessageResolution, bump_chat_conversation_revision,
-    index_replicated_chat_message_search_rows, is_agent_id, mark_live_bookmarks_pending,
-    normalize_agent_owner_name, normalize_author_user_id, normalize_body, normalize_display_name,
-    normalize_reported_agent, normalize_work_report, parse_mention_handles,
-    personal_agent_may_post_in, reported_agent_json, resolve_feed_coordinate,
-    resolve_follow_target, resolve_thread_message, validate_replicated_link_author,
-    work_report_json,
+    ReplicatedMessageAuthor, ThreadMessageResolution, ThreadReadResolution,
+    bump_chat_conversation_revision, index_replicated_chat_message_search_rows, is_agent_id,
+    mark_live_bookmarks_pending, merge_account_thread_read, normalize_agent_owner_name,
+    normalize_author_user_id, normalize_body, normalize_display_name, normalize_reported_agent,
+    normalize_work_report, parse_mention_handles, personal_agent_may_post_in, reported_agent_json,
+    resolve_feed_coordinate, resolve_follow_target, resolve_thread_message,
+    resolve_thread_read_coordinate, validate_replicated_link_author, work_report_json,
 };
 use crate::AutomationClaim;
 use crate::automations::{AutomationGroupMessage, claim_group_message_in_tx};
@@ -30,6 +30,16 @@ struct PendingFeedReadSet {
     owner_user_id: String,
     last_seen_created_at_ms: i64,
     last_seen_message_id: String,
+    at_ms: i64,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingThreadReadSet {
+    account_user_id: String,
+    thread_id: String,
+    last_read_created_at_ms: i64,
+    last_read_message_id: String,
     at_ms: i64,
 }
 
@@ -452,6 +462,47 @@ fn replay_pending_chat_operation(
                         ],
                     )
                     .map_err(DomainError::sql_persist)?;
+                    Ok(PendingReplayOutcome::Applied)
+                }
+            }
+        }
+        "chat.thread.read.set" => {
+            let payload: PendingThreadReadSet = serde_json::from_value(operation.payload.clone())
+                .map_err(|_| DomainError::StateCorrupt {
+                reason: "pending chat thread-read payload is corrupt",
+            })?;
+            match resolve_thread_read_coordinate(
+                tx,
+                workspace_id,
+                &payload.thread_id,
+                payload.last_read_created_at_ms,
+                &payload.last_read_message_id,
+            )? {
+                ThreadReadResolution::Missing => {
+                    park_pending_chat_operation(
+                        tx,
+                        workspace_id,
+                        operation,
+                        "thread-read-message",
+                        &payload.last_read_message_id,
+                    )?;
+                    Ok(PendingReplayOutcome::Deferred)
+                }
+                ThreadReadResolution::Disallowed => Ok(PendingReplayOutcome::Refused(
+                    "chat thread read coordinate is not in its thread",
+                )),
+                ThreadReadResolution::Visible => {
+                    merge_account_thread_read(
+                        tx,
+                        workspace_id,
+                        &payload.account_user_id,
+                        &payload.thread_id,
+                        payload.last_read_created_at_ms,
+                        &payload.last_read_message_id,
+                        payload.at_ms,
+                        &operation.origin_id,
+                        operation.origin_seq,
+                    )?;
                     Ok(PendingReplayOutcome::Applied)
                 }
             }
@@ -928,7 +979,7 @@ fn changed_chat_dependencies(
         }
         "chat.message.append" => {
             if let Some(message_id) = payload.get("messageId").and_then(serde_json::Value::as_str) {
-                for kind in ["feed-message", "attachment-message"] {
+                for kind in ["feed-message", "attachment-message", "thread-read-message"] {
                     dependencies.push(PendingChatDependency {
                         kind,
                         id: message_id.to_owned(),

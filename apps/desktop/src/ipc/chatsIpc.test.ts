@@ -179,6 +179,8 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
     betweenDispatchScans: (_workspaceId, write) => write(),
     notifyRenderer: () => undefined,
   });
+  // What the handlers read as this computer's sign-in. Signed out unless a test signs in.
+  let ipcCredentials: CloudCredentials | null = null;
   const sender = { trusted: true };
   const held = authorities.acquire(workspace.workspaceId);
   let sessionCurrent = true;
@@ -206,7 +208,7 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
     readWorkspace: () => workspace, currentCredentialGeneration: () => 0,
     stateDir: () => stateDirectory,
     warmCredentialCache, localUserId: () => "owner",
-    localInstallationId: () => "local-owner", currentCredentials: () => null,
+    localInstallationId: () => "local-owner", currentCredentials: () => ipcCredentials,
     chatRelayIdentityFor,
     syncWorkspaceSharedChannels, syncSharedChannelsForChatTarget,
     syncRendererWorkspaceSharedChannels: async operation => {
@@ -228,6 +230,7 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
     activity, syncSharedChannelsForChatTarget, resolveEngineFiles, readOwnedWorkspaceText,
     warmCredentialCache, chatRelayIdentityFor, scanChatDispatch, projectChatBookmarks, desktopChatBookmarks,
     agentWaitsForTrust, signOutChatWrites: () => { chatCredentials = null; },
+    signInHandlers: (credentials: CloudCredentials) => { ipcCredentials = credentials; },
     // The window opens another workspace, so its session no longer shows this one.
     endSession: () => { sessionCurrent = false; } };
 }
@@ -570,6 +573,34 @@ describe("registered chat reads and reader-local state", () => {
     expect(test.storeMethods.markThreadRead).toHaveBeenCalledExactlyOnceWith({ workspaceId: "workspace", threadId: "thread", upToSequence: 3 });
     expect(test.activity.queueCloudSync).not.toHaveBeenCalled();
     expect(test.syncSharedChannelsForChatTarget).not.toHaveBeenCalled();
+  });
+
+  it("journals an account mark on the owner's workspace, and keeps a joined channel's read on this computer", async () => {
+    const test = fixture();
+    test.workspace.remote = { serverUrl: "https://cloud.test", ownerUserId: "verified-owner" };
+    test.signInHandlers({ serverUrl: "https://cloud.test", userId: "verified-owner", email: "sam@test.invalid", token: "token" });
+    expect(await test.invoke(chatOperations.markChatThreadRead.channel, { workspaceId: "workspace", threadId: "thread", upToSequence: 3 }))
+      .toEqual({ lastReadSequence: 3, revision: 7 });
+    expect(test.storeMethods.markThreadRead).toHaveBeenLastCalledWith({
+      workspaceId: "workspace", threadId: "thread", upToSequence: 3, replicationOwnerUserId: "verified-owner",
+    });
+    expect(test.activity.queueCloudSync).toHaveBeenCalledExactlyOnceWith("workspace");
+
+    // A joined channel sits in the owner's workspace but is someone else's share.
+    test.workspace.sharedChannels = [{
+      shareId: "share", channelWireId: "wire", access: "read-write", granterEmail: null,
+      relayUrl: "https://relay.test", recipientUserId: "verified-owner",
+    }];
+    await test.invoke(chatOperations.markChatThreadRead.channel, { workspaceId: "workspace", threadId: "thread", upToSequence: 3 });
+    expect(test.storeMethods.markThreadRead).toHaveBeenLastCalledWith({ workspaceId: "workspace", threadId: "thread", upToSequence: 3 });
+    expect(test.activity.queueCloudSync).toHaveBeenCalledOnce();
+
+    // Another account's sign-in carries no owner context.
+    test.workspace.sharedChannels = [];
+    test.signInHandlers({ serverUrl: "https://cloud.test", userId: "someone-else", email: "x@test.invalid", token: "token" });
+    await test.invoke(chatOperations.markChatThreadRead.channel, { workspaceId: "workspace", threadId: "thread", upToSequence: 3 });
+    expect(test.storeMethods.markThreadRead).toHaveBeenLastCalledWith({ workspaceId: "workspace", threadId: "thread", upToSequence: 3 });
+    expect(test.activity.queueCloudSync).toHaveBeenCalledOnce();
   });
 
   it("resolves served file chats through the share engine without acquiring capture", async () => {

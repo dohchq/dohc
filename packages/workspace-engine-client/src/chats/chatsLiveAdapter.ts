@@ -335,6 +335,7 @@ export class ChatsLiveAdapter {
     threadId: string;
     upToSequence: number;
     expectedRevision?: number;
+    replicationOwnerUserId?: string;
   }): Promise<ChatThreadReadState> {
     this.assertWorkspace(input.workspaceId);
     return this.request(CHATS_METHOD.readStateMarkThreadRead, {
@@ -343,6 +344,23 @@ export class ChatsLiveAdapter {
       ...(input.expectedRevision !== undefined
         ? { expectedRevision: input.expectedRevision }
         : {}),
+      ...(input.replicationOwnerUserId !== undefined
+        ? { replicationOwnerUserId: input.replicationOwnerUserId }
+        : {}),
+    });
+  }
+
+  // Records, once per workspace, the account whose read places this copy
+  // shows. With `seedLocal`, this copy's local counts seed that account.
+  async seedAccountReads(input: {
+    workspaceId: string;
+    accountUserId: string;
+    seedLocal: boolean;
+  }): Promise<{ recorded: boolean }> {
+    this.assertWorkspace(input.workspaceId);
+    return this.request(CHATS_METHOD.readStateSeedAccount, {
+      accountUserId: input.accountUserId,
+      seedLocal: input.seedLocal,
     });
   }
 

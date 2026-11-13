@@ -899,7 +899,9 @@ function allowedKeys(method: string): readonly string[] {
     case CHATS_METHOD.readStateGet:
       return ["threadId"];
     case CHATS_METHOD.readStateMarkThreadRead:
-      return ["threadId", "upToSequence", "expectedRevision", "nowMs"];
+      return ["threadId", "upToSequence", "expectedRevision", "replicationOwnerUserId", "nowMs"];
+    case CHATS_METHOD.readStateSeedAccount:
+      return ["accountUserId", "seedLocal", "nowMs"];
     case CHATS_METHOD.decisionResolve:
       return ["threadId", "messageId", "resolvedByMessageId", "chosenOption", "nowMs", "stageReceipt"];
     case CHATS_METHOD.reactionSet:
@@ -1142,6 +1144,9 @@ export class ChatsLoopbackEngine implements EngineTransport {
         return this.readStateGet(state, workspace, params);
       case CHATS_METHOD.readStateMarkThreadRead:
         return this.readStateMark(state, workspace, params);
+      // The loopback keeps local counts, so it never records an account.
+      case CHATS_METHOD.readStateSeedAccount:
+        return jsonResult({ recorded: false });
       case CHATS_METHOD.readStateListUnreadFileThreads:
         return this.listUnreadFileThreads(state, params);
       case CHATS_METHOD.decisionResolve:

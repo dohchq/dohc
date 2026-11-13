@@ -3285,6 +3285,37 @@ describe("MU-C0 verified chat authorship", () => {
     });
   }
 
+  function threadReadOp(originSeq: number, accountUserId: string | undefined) {
+    const payload: Record<string, unknown> = {
+      threadId: "t-1",
+      lastReadCreatedAtMs: 1000 + originSeq,
+      lastReadMessageId: "m-1",
+      atMs: 1000 + originSeq,
+    };
+    if (accountUserId !== undefined) payload.accountUserId = accountUserId;
+    return { originSeq, opKind: "chat.thread.read.set", payload, recordedAtMs: 1000 + originSeq };
+  }
+
+  it("admits an account thread read mark only for the authenticated pusher's account", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    const admitted = await h(
+      request("a", "/sync/workspace-a/log", jsonBody({ originId: "origin-a", ops: [threadReadOp(0, "a")] })),
+    );
+    expect(admitted.status).toBe(200);
+    expect(await logOps(h)).toHaveLength(1);
+
+    for (const accountUserId of ["victim", undefined]) {
+      const refused = await h(
+        request("a", "/sync/workspace-a/log", jsonBody({ originId: "origin-a", ops: [threadReadOp(1, accountUserId)] })),
+      );
+      expect(refused.status).toBe(403);
+      expect(await json(refused)).toMatchObject({ ok: false, code: "authorship_mismatch" });
+    }
+    expect(await logOps(h)).toHaveLength(1);
+  });
+
   it("rejects a batch mixing one valid and one forged op atomically (nothing admitted)", async () => {
     const storage = await testStorage();
     const h = handler(storage);

@@ -39,6 +39,16 @@ fn share_view_and_shared_channel_fail_closed_outside_boundary() {
         apply_shared_envelope(&mut engine, &channel, &private, &NoFaults),
         Err(SyncError::ShareBoundaryViolation)
     ));
+    let read_mark = envelope(
+        "peer",
+        1,
+        "chat.thread.read.set",
+        json!({"accountUserId":"u","threadId":"t","lastReadCreatedAtMs":1,"lastReadMessageId":"m","atMs":1}),
+    );
+    assert!(matches!(
+        apply_shared_envelope(&mut engine, &channel, &read_mark, &NoFaults),
+        Err(SyncError::ShareBoundaryViolation)
+    ));
 }
 
 /// A replicated origin reads its source after `shared:<shareId>:`, so a share

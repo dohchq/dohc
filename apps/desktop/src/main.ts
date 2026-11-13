@@ -394,6 +394,7 @@ import {
 import { RELAY_FETCH_TIMEOUT_MS, assertSharedChannelWritable, joinedSharedChannelForWireId, relayFetchWithTimeout } from "./workspaces/sharedChannels";
 import {
   resolveChatRelayIdentity,
+  resolveWorkspaceRelayAuthorId,
   workspaceRemoteMatchesCredentials,
   type ChatRelayIdentityTarget,
 } from "./workspaces/chatRelayIdentity";
@@ -3056,6 +3057,14 @@ function linkedChatStoreFor(
     sessions: desktopEngine.sessions,
       runWithAuthority: (work) =>
         workspaceAuthorities.withBinding(binding, () => work()),
+      // Only the owner's own synced workspace reads by account. A received
+      // share or a local-only workspace keeps its local counts.
+      accountReadOwner: () => {
+        const entry = findWorkspace(binding.workspaceId);
+        return entry && !shareViewIsPresent(entry.shareView)
+          ? resolveWorkspaceRelayAuthorId(entry, cachedCredentials)
+          : undefined;
+      },
     });
     lease.state.linkedChatStore = store;
   return store;

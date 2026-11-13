@@ -3710,6 +3710,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("ydoc_deferred_while_bound.sql"),
         sets_user_version: None,
     },
+    // An account's read place per chat thread, and its one-time seed.
+    Migration {
+        ordinal: 99,
+        id: "v2-chat-account-thread-reads",
+        sql: include_str!("chat_account_thread_reads.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -5757,6 +5764,10 @@ mod tests {
             (
                 "v2-ydoc-deferred-while-bound",
                 "30bd92335f7e5afbb08144a5340745fc0dd4d90ba891062a79f236a7f1869323",
+            ),
+            (
+                "v2-chat-account-thread-reads",
+                "f5ce091a08c24248c15ea1fecf86852af9a16b1d9c1cc0c3ca16a23a255d4869",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -7896,6 +7907,103 @@ mod tests {
             )
             .unwrap();
         assert_eq!(fresh, 0, "only the defer insert marks a row");
+    }
+
+    /// Account thread reads add their tables and let a mark park for its
+    /// message. Parked rows keep their kind, and a rerun applies nothing.
+    #[test]
+    fn account_thread_reads_upgrade_keeps_parked_rows_and_reruns_as_a_no_op() {
+        let ctx = MigrationContext::current(1);
+        let dir = tempdir();
+        let path = dir.join("account-thread-reads.db");
+        let mut conn = open_bare(&path);
+        let before = migration_index("v2-chat-account-thread-reads");
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 99);
+        assert_eq!(
+            BASELINE_MIGRATIONS[before - 1].id,
+            "v2-ydoc-deferred-while-bound"
+        );
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch(
+            "INSERT INTO chat_pending_replication \
+               (workspace_id,origin_id,origin_seq,dependency_kind,dependency_id) VALUES \
+               ('ws','peer',1,'feed-message','m-1'), \
+               ('ws','peer',2,'message-thread','t-1');",
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO chat_pending_replication VALUES ('ws','peer',3,'thread-read-message','m-2')",
+                [],
+            )
+            .is_err(),
+            "the old store has no thread-read parking"
+        );
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        let parked: String = conn
+            .query_row(
+                "SELECT group_concat(dependency_kind || ':' || dependency_id, ',') \
+                 FROM (SELECT * FROM chat_pending_replication ORDER BY origin_seq)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(parked, "feed-message:m-1,message-thread:t-1");
+        conn.execute(
+            "INSERT INTO chat_pending_replication VALUES ('ws','peer',3,'thread-read-message','m-2')",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO chat_pending_replication VALUES ('ws','peer',4,'unknown','x')",
+                [],
+            )
+            .is_err()
+        );
+        let index: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type='index' \
+                 AND name='chat_pending_replication_by_dependency'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(index, 1);
+        conn.execute(
+            "INSERT INTO chat_account_thread_read_state VALUES ('ws','owner','t-1',10,'m-1',11,'origin',0)",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO chat_account_thread_read_state VALUES ('ws','','t-2',10,'m-1',11,'origin',0)",
+                [],
+            )
+            .is_err(),
+            "a mark names its account"
+        );
+        conn.execute(
+            "INSERT INTO chat_account_read_seeds VALUES ('ws','owner',1,12)",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO chat_account_read_seeds VALUES ('ws-2','owner',2,12)",
+                [],
+            )
+            .is_err()
+        );
+        drop(conn);
+        let mut conn = open_bare(&path);
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 0 }
+        );
     }
 
     #[test]

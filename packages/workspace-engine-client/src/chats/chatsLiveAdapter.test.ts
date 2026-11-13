@@ -71,6 +71,14 @@ const CHAT_REQUEST_CASES: ChatRequestCase[] = [
     params: { threadId: "t", upToSequence: 1 },
   },
   {
+    method: CHATS_METHOD.readStateMarkThreadRead,
+    params: { threadId: "t", upToSequence: 1, replicationOwnerUserId: "u" },
+  },
+  {
+    method: CHATS_METHOD.readStateSeedAccount,
+    params: { accountUserId: "u", seedLocal: true },
+  },
+  {
     method: CHATS_METHOD.decisionResolve,
     params: { threadId: "t", messageId: "m", resolvedByMessageId: "m2" },
   },
@@ -299,6 +307,7 @@ const NEW_DECODER_CASES: Array<{
   },
   { method: CHATS_METHOD.readStateGet, valid: readState },
   { method: CHATS_METHOD.readStateMarkThreadRead, valid: readState },
+  { method: CHATS_METHOD.readStateSeedAccount, valid: { recorded: true } },
   { method: CHATS_METHOD.followsSet, valid: follow },
   { method: CHATS_METHOD.followsList, valid: { follows: [follow], nextCursor: null } },
   { method: CHATS_METHOD.feedMarkSeen, valid: feedReadState },
@@ -687,7 +696,7 @@ describe("ChatsLiveAdapter", () => {
   });
 
   it("encodes every chats request case with the workspace handle and exact params", async () => {
-    expect(CHAT_REQUEST_CASES).toHaveLength(64);
+    expect(CHAT_REQUEST_CASES).toHaveLength(66);
     const requests: Request[] = [];
     const adapter = new ChatsLiveAdapter(
       captureClient(requests),

@@ -71,6 +71,7 @@ import { createChatFileMentionsReader } from "../workspaces/chatFileMentions";
 import { chatBookmarkDestination } from "../workspaces/desktopChatBookmarks";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
 import type { ChatScope, createChatScopeCapability } from "./chatScope";
+import { joinedSharedChannelForTarget } from "../workspaces/sharedChannels";
 
 // The renderer always writes as the local person, never as an agent.
 const RENDERER: PersonWriter = { via: "renderer" };
@@ -982,14 +983,35 @@ export function registerChatsIpcHandlers<
       ...await waitsForTrust(workspace.workspaceId, started.message.id),
     });
   });
+  // The owner whose account mark this read journals. Only the owner's own
+  // workspace, outside a joined channel, journals one. Every other read
+  // stays on this computer.
+  async function accountReadReplicationOwner(scope: ChatScope, threadId: string): Promise<string | undefined> {
+    if (scope.kind !== "workspace" || shareViewIsPresent(scope.workspace.shareView)) return undefined;
+    await warmCredentialCache();
+    const owner = resolveWorkspaceRelayAuthorId(scope.workspace, currentCredentials());
+    if (!owner) return undefined;
+    const joined = await joinedSharedChannelForTarget({
+      workspaceId: scope.workspace.workspaceId,
+      sharedChannels: scope.workspace.sharedChannels,
+      store: scope.store,
+      target: { threadId },
+    });
+    return joined ? undefined : owner;
+  }
+
   const markChatThreadRead: ChatHandler<"markChatThreadRead"> = async (input) => {
     // Read state belongs to this reader, including in a read-only share view.
-    const { workspace, store } = await requireChatScope(input.workspaceId);
+    const scope = await requireChatScope(input.workspaceId);
+    const { workspace, store } = scope;
+    const replicationOwnerUserId = await accountReadReplicationOwner(scope, input.threadId);
     const state = await store.markThreadRead({
       workspaceId: workspace.workspaceId,
       threadId: input.threadId,
       upToSequence: input.upToSequence,
+      ...(replicationOwnerUserId ? { replicationOwnerUserId } : {}),
     });
+    if (replicationOwnerUserId) activity.queueCloudSync(workspace.workspaceId);
     return MarkChatThreadReadResult.parse({
       lastReadSequence: state.lastReadSequence,
       revision: state.revision,

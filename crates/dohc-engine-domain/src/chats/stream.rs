@@ -4,9 +4,9 @@
 use super::{
     ChatActorKind, ChatChannel, ChatDecision, ChatMessage, ChatMessageLinkAuthor, ChatReaction,
     ChatThread, ChatThreadLane, ChatWorkStatus, FEED_LIMIT_MAX, LinkedChatStore,
-    active_reactions_for_messages, collect, hydrate_attachments_for_messages, map_decision_row,
-    map_message_row, message_count_for_thread, persisted_nonnegative_safe, require_channel,
-    require_thread,
+    account_read_scope, active_reactions_for_messages, collect, hydrate_attachments_for_messages,
+    map_decision_row, map_message_row, message_count_for_thread, persisted_nonnegative_safe,
+    require_channel, require_thread,
 };
 use crate::error::DomainError;
 use rusqlite::{Connection, params};
@@ -378,7 +378,14 @@ impl<'a> LinkedChatStore<'a> {
                 });
             }
 
-            let read_position = read_position(conn, workspace_id, channel_id, &conversations)?;
+            let account = account_read_scope(conn, workspace_id)?;
+            let read_position = read_position(
+                conn,
+                workspace_id,
+                channel_id,
+                &conversations,
+                account.as_deref(),
+            )?;
             Ok(StreamPage {
                 items,
                 has_older,
@@ -794,12 +801,18 @@ fn agent_reply(message: ChatMessage) -> StreamAgentReply {
 /// The newest of: the newest post whose thread the person has read into, and
 /// each conversation's newest top-level message under its read cursor. Each
 /// scan stops at the first read row, so it reads only the unread rows above it.
+/// On a copy that shows an account's read places, the account's marks decide
+/// both lanes instead of the local counts.
 fn read_position(
     conn: &Connection,
     workspace_id: &str,
     channel_id: &str,
     conversations: &[(String, i64)],
+    account: Option<&str>,
 ) -> Result<Option<StreamPosition>, DomainError> {
+    if let Some(account) = account {
+        return account_read_position(conn, workspace_id, channel_id, conversations, account);
+    }
     let mut newest: Option<StreamPosition> = conn
         .prepare_cached(
             "SELECT t.created_at_ms, t.thread_id FROM chat_threads t \
@@ -831,6 +844,69 @@ fn read_position(
     for (thread_id, read) in conversations.iter().filter(|(_, read)| *read > 0) {
         let rows = stmt
             .query_map(params![workspace_id, thread_id, read], |row| {
+                Ok(Ok::<_, DomainError>(StreamPosition {
+                    created_at_ms: row.get(0)?,
+                    lane: ChatThreadLane::Chat,
+                    id: row.get(1)?,
+                }))
+            })
+            .map_err(DomainError::sql_corrupt)?;
+        if let Some(position) = collect(rows)?.pop()
+            && newest
+                .as_ref()
+                .is_none_or(|current| position.key() > current.key())
+        {
+            newest = Some(position);
+        }
+    }
+    Ok(newest)
+}
+
+/// [`read_position`] from an account's marks. A post counts once the account
+/// marked any of its messages read. A conversation counts its newest
+/// top-level message at or below the account's mark.
+fn account_read_position(
+    conn: &Connection,
+    workspace_id: &str,
+    channel_id: &str,
+    conversations: &[(String, i64)],
+    account: &str,
+) -> Result<Option<StreamPosition>, DomainError> {
+    let mut newest: Option<StreamPosition> = conn
+        .prepare_cached(
+            "SELECT t.created_at_ms, t.thread_id FROM chat_threads t \
+             CROSS JOIN chat_account_thread_read_state a \
+             WHERE t.workspace_id = ?1 AND t.channel_id = ?2 AND t.lane = 'posts' \
+               AND a.workspace_id = t.workspace_id AND a.account_user_id = ?3 \
+               AND a.thread_id = t.thread_id \
+             ORDER BY t.created_at_ms DESC, t.thread_id DESC LIMIT 1",
+        )
+        .map_err(DomainError::sql_corrupt)?
+        .query_map(params![workspace_id, channel_id, account], |row| {
+            Ok(Ok::<_, DomainError>(StreamPosition {
+                created_at_ms: row.get(0)?,
+                lane: ChatThreadLane::Posts,
+                id: row.get(1)?,
+            }))
+        })
+        .map_err(DomainError::sql_corrupt)
+        .and_then(collect)?
+        .pop();
+    let mut stmt = conn
+        .prepare_cached(
+            "SELECT m.created_at_ms, m.message_id FROM chat_messages m \
+             CROSS JOIN chat_account_thread_read_state a \
+             WHERE a.workspace_id = ?1 AND a.account_user_id = ?3 AND a.thread_id = ?2 \
+               AND m.workspace_id = a.workspace_id AND m.thread_id = a.thread_id \
+               AND m.parent_message_id IS NULL \
+               AND (m.created_at_ms, m.message_id) \
+                   <= (a.last_read_created_at_ms, a.last_read_message_id) \
+             ORDER BY m.created_at_ms DESC, m.message_id DESC LIMIT 1",
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    for (thread_id, _) in conversations {
+        let rows = stmt
+            .query_map(params![workspace_id, thread_id, account], |row| {
                 Ok(Ok::<_, DomainError>(StreamPosition {
                     created_at_ms: row.get(0)?,
                     lane: ChatThreadLane::Chat,

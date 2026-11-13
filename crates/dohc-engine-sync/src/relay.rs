@@ -5814,6 +5814,10 @@ enum ChatLwwCell {
     FeedRead {
         owner_user_id: String,
     },
+    ThreadRead {
+        account_user_id: String,
+        thread_id: String,
+    },
 }
 
 fn chat_lww_cell(op_kind: &str, payload: &serde_json::Value) -> Option<ChatLwwCell> {
@@ -5835,6 +5839,10 @@ fn chat_lww_cell(op_kind: &str, payload: &serde_json::Value) -> Option<ChatLwwCe
         "chat.feed.read.set" => Some(ChatLwwCell::FeedRead {
             owner_user_id: field("ownerUserId")?,
         }),
+        "chat.thread.read.set" => Some(ChatLwwCell::ThreadRead {
+            account_user_id: field("accountUserId")?,
+            thread_id: field("threadId")?,
+        }),
         _ => None,
     }
 }
@@ -5852,7 +5860,8 @@ fn rebase_chat_projection_suffix(
                 "SELECT origin_seq,op_kind,payload_json FROM replication_log \
                  WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq>=?3 \
                    AND op_kind IN ('chat.reaction.set','chat.decision.set', \
-                                   'chat.follow.set','chat.feed.read.set') \
+                                   'chat.follow.set','chat.feed.read.set', \
+                                   'chat.thread.read.set') \
                  ORDER BY origin_seq",
             )
             .map_err(SyncError::corrupt)?;
@@ -5966,6 +5975,23 @@ fn rebase_current_chat_projection(
                 owner_user_id
             ],
         ),
+        ChatLwwCell::ThreadRead {
+            account_user_id,
+            thread_id,
+        } => tx.execute(
+            "UPDATE chat_account_thread_read_state SET origin_id=?1,origin_seq=?2 \
+             WHERE workspace_id=?3 AND origin_id=?4 AND origin_seq=?5 \
+               AND account_user_id=?6 AND thread_id=?7",
+            params![
+                new_origin_id,
+                new_origin_seq,
+                workspace_id,
+                old_origin_id,
+                old_origin_seq,
+                account_user_id,
+                thread_id
+            ],
+        ),
     }
     .map_err(SyncError::persist)?;
     Ok(())
@@ -5986,7 +6012,8 @@ fn recompute_chat_projection_winners(
                 "SELECT origin_id,origin_seq,op_kind,payload_json,recorded_at_ms \
                  FROM replication_log WHERE workspace_id=?1 \
                    AND op_kind IN ('chat.reaction.set','chat.decision.set', \
-                                   'chat.follow.set','chat.feed.read.set') \
+                                   'chat.follow.set','chat.feed.read.set', \
+                                   'chat.thread.read.set') \
                  ORDER BY origin_id,origin_seq",
             )
             .map_err(SyncError::corrupt)?;

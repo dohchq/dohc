@@ -1192,7 +1192,9 @@ describe("the automation replicas", () => {
     expect(open.params).toMatchObject({ workspaceId: WORKSPACE, captureMode: "none", reconcileCollections: true, rootDir: replica.root,
       relay: { baseUrl: "https://relay.example", bearerToken: deriveAutomationReplicaBearer(storage.currentAutomationWorkspace(WORKSPACE)!, { key, namespace }) } });
     expect(replica.metadataDir.startsWith(replica.root)).toBe(false);
-    expect(engine.methods()).toEqual(["workspace.open", "versions.ensureMain", "sync.adoptJoinIdentity", "sync.push", "sync.fetchPull", "sync.applyPull", "sync.materializePendingCursor", "sync.commitCursor"]);
+    expect(engine.methods()).toEqual(["workspace.open", "chats.readState.seedAccount", "versions.ensureMain", "sync.adoptJoinIdentity", "sync.push", "sync.fetchPull", "sync.applyPull", "sync.materializePendingCursor", "sync.commitCursor"]);
+    expect(engine.sent.find((request) => request.method === "chats.readState.seedAccount")?.params, "a server copy seeds no local count")
+      .toEqual({ accountUserId: "owner", seedLocal: false });
 
     // Nothing changed at the relay: a pass pulls nothing.
     running.reconcile();

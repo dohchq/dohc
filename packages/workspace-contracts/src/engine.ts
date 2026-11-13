@@ -819,6 +819,9 @@ export interface ChatChannelSummary extends ChatChannel {
 // one local human actor for the single-user alpha). `lastReadSequence` counts
 // messages read from the start of the thread; `revision` is server-owned and
 // bumps on every applied advance — callers may CAS on it but never write it.
+// On an owned workspace the account's read mark decides what is read, and
+// `lastReadSequence` counts the messages before the earliest unread one in
+// arrival order, so it indexes the first unread message.
 interface ChatThreadReadState {
   workspaceId: WorkspaceId;
   threadId: ChatThreadId;
@@ -854,8 +857,10 @@ export interface ChatThread {
 export interface ChannelThreadSummary {
   thread: ChatThread;
   messageCount: number;
+  // See ChatThreadReadState.lastReadSequence.
   lastReadSequence: number;
-  // Derived: messageCount - lastReadSequence, clamped at zero. Never stored.
+  // Derived, never stored. Messages past the local count, or on an owned
+  // workspace, messages after the account's read mark.
   unreadCount: number;
   openDecisionCount: number;
   // Additive feed preview: listChannelThreads supplies the opening message
@@ -1286,11 +1291,14 @@ export interface LinkedChatStore {
   // the current state (revision unchanged); upToSequence clamps to the
   // thread's message count. Optional CAS: a stale expectedRevision fails with
   // "read-state-revision-mismatch" instead of silently applying.
+  // On an owned workspace the account's mark also moves forward. It
+  // journals only when `replicationOwnerUserId` names the account.
   markThreadRead(input: {
     workspaceId: WorkspaceId;
     threadId: ChatThreadId;
     upToSequence: number;
     expectedRevision?: number;
+    replicationOwnerUserId?: string;
   }): Promise<ChatThreadReadState>;
   // A group's posts and conversation messages in one order, read a page at a
   // time from the newest end. The limit defaults to 50, at most 100.

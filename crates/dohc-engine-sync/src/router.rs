@@ -75,6 +75,7 @@ const OWNED_OP_ROUTES: &[(&str, OwnedRoute)] = &[
     ("chat.reaction.set", OwnedRoute::Chat),
     ("chat.follow.set", OwnedRoute::Chat),
     ("chat.feed.read.set", OwnedRoute::Chat),
+    ("chat.thread.read.set", OwnedRoute::Chat),
     ("secret.file.put", OwnedRoute::Secret),
     ("secret.file.delete", OwnedRoute::Secret),
     ("secret.version.fork", OwnedRoute::Secret),

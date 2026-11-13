@@ -491,6 +491,7 @@ impl ActorHandle {
         thread_id: String,
         up_to_sequence: i64,
         expected_revision: Option<i64>,
+        replication_owner_user_id: Option<String>,
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<ChatThreadReadState, RuntimeError> {
@@ -504,6 +505,33 @@ impl ActorHandle {
                         &thread_id,
                         up_to_sequence,
                         expected_revision,
+                        replication_owner_user_id.as_deref(),
+                        now_ms,
+                        &NoFaults,
+                    )
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
+    }
+
+    pub async fn chat_read_state_seed_account(
+        &self,
+        workspace_id: String,
+        account_user_id: String,
+        seed_local: bool,
+        now_ms: i64,
+        token: CancellationToken,
+    ) -> Result<bool, RuntimeError> {
+        self.run_chats(move |chats| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                chats
+                    .seed_account_reads(
+                        &workspace_id,
+                        &account_user_id,
+                        seed_local,
                         now_ms,
                         &NoFaults,
                     )

@@ -25,6 +25,9 @@ export interface DesktopLinkedChatStore extends LinkedChatStore {
 export interface DesktopLinkedChatStoreOptions {
   sessions: EngineWorkspaceSessions;
   runWithAuthority?<Result>(work: () => Promise<Result>): Promise<Result>;
+  // The owner's account when this computer holds the owner's replication
+  // context for the workspace. Its read places replace local counts.
+  accountReadOwner?(): string | undefined;
 }
 
 function toStoreChannel(channel: LiveChatChannel): ChatChannel {
@@ -67,11 +70,27 @@ export function createLiveLinkedChatStore(
   sessions: EngineWorkspaceSessions,
   options: {
     runWithAuthority?<Result>(work: () => Promise<Result>): Promise<Result>;
+    accountReadOwner?(): string | undefined;
   } = {},
 ): DesktopLinkedChatStore {
   const runWithAuthority =
     options.runWithAuthority ??
     (async <Result>(work: () => Promise<Result>) => await work());
+  const accountReadOwner = options.accountReadOwner;
+  // The engine records the account once per workspace and seeds it from this
+  // computer's local counts. Until then, reads keep local counts.
+  let accountReadsRecorded = false;
+  const recordAccountReads = async (adapter: ChatsLiveAdapter) => {
+    if (accountReadsRecorded || !accountReadOwner) return;
+    const accountUserId = accountReadOwner();
+    if (!accountUserId) return;
+    try {
+      await adapter.seedAccountReads({ workspaceId: workspace.workspaceId, accountUserId, seedLocal: true });
+      accountReadsRecorded = true;
+    } catch (error) {
+      console.error("[desktop] account read seed:", error);
+    }
+  };
   const invoke = async <T>(
     operation: (adapter: ChatsLiveAdapter) => Promise<T>,
     options?: EngineWorkspaceRunOptions,
@@ -84,6 +103,7 @@ export function createLiveLinkedChatStore(
         const adapter = new ChatsLiveAdapter(client, handle, {
           workspaceId: workspace.workspaceId,
         });
+        await recordAccountReads(adapter);
         return await operation(adapter);
       },
       options,
