@@ -79,6 +79,38 @@ See the [agent link tests](../../services/sync-relay/src/linkAgentAuthority.test
 the [live route tests](../../services/sync-relay/src/namedLiveRoutes.test.ts),
 and the [sign-in tests](../../services/share-web/src/mcpSignIn.test.ts).
 
+## A personal agent's live session is provenance only
+
+A personal agent edits a live document with its owner's access, and adds only
+its name to the record. It edits only in a workspace its owner owns, only where
+the owner gave it Edit, and never through a share.
+
+Share-web calls `/sync/live/personal-document`, `/sync/live/personal-tickets`,
+and the `/sync/live/personal?workspaceId=` socket with the agent's access
+token, its MCP address, and the relay exchange key, as it calls the agent's
+other personal routes. A request names only a workspace and a path, or an
+object. The relay derives the agent, its owner, its reach, and the account's
+fence from the token and its own tables.
+
+The open, the mint, and the socket each read the fence again. Each checks the
+token, the agent's Edit reach in a workspace its owner owns, and the
+self-hosted live host. A ticket names the agent's connection, so another
+connection, another agent, or a link can't redeem it. The session's authority
+is `personal`, with the agent's id and no grant. Each edit records the agent as
+its author, on behalf of the workspace's owner. The relay ignores any context
+an update declares.
+
+The relay reads the fence again before it sends the initial state, before it
+releases each received update, and before it commits each edit. Each session
+registers as running work that needs Edit. Sign-out, removing the agent,
+narrowing its reach, lowering its level below Edit, and a newer fence each end
+the session at the commit that makes the change. An expired token ends it at
+the next update. Share-web opens a new session for each tool call, with the
+token that call carries, so no ticket or socket outlives its token.
+See the [personal live route tests](../../services/sync-relay/src/personalLiveRoutes.test.ts),
+the [held open tests](../../services/sync-relay/src/personalLiveDocumentRoutes.test.ts),
+and the [share-web tool tests](../../services/share-web/src/personalLiveDocument.test.ts).
+
 ## Live documents have one canonical host
 
 The session host holds the canonical Y.Doc. It journals accepted updates durably
