@@ -654,6 +654,9 @@ export interface RelayNotice {
   createdAtMs: number;
   readAtMs: number | null;
   dismissedAtMs: number | null;
+  // When the relay lets the row go. Each mark starts the row's retention
+  // again, so a computer keeps its copy until this time and no longer.
+  expiresAtMs: number;
   // The relay removed the row to make room in the list. Drop it; its body
   // and target are gone.
   removed: boolean;
@@ -681,9 +684,19 @@ export interface RelayNoticePage {
   personalAgentsRevision: number;
 }
 
-// POST /sync/notices/marks. Read and dismissed are one-way: marking a row
-// again, or a row the relay no longer holds, changes nothing.
-export type NoticeMark = "read" | "dismissed";
+// POST /sync/notices/marks. Marking a row again, or a row the relay no
+// longer holds, changes nothing. `unread` clears a read mark and `restore`
+// clears a dismissal; each keeps the other mark and starts the row's
+// retention again. A dismissal's first-dismissal receipt outlives a restore,
+// so dismissing again is never first. Only the owner's phone sends `unread`
+// and `restore`, with `?scope=phone` and its account session.
+export type NoticeMark = "read" | "dismissed" | "unread" | "restore";
+// The marks a computer sends.
+export type ComputerNoticeMark = Extract<NoticeMark, "read" | "dismissed">;
+// A phone's request body is exactly `{ marks: [{ noticeId, mark }] }`, at most
+// this many bytes. A computer's may add `installId` and, on a dismissal,
+// `withdraw: true`.
+export const NOTICE_MARKS_MAX_BODY_BYTES = 512 * 1024;
 
 // The answer to POST /sync/notices/marks. `dismissed` lists the notices this
 // request dismissed first, so of all the computers that dismiss one notice,

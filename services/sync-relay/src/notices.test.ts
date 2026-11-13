@@ -222,6 +222,7 @@ describe("notice list", () => {
         createdAtMs: 10_000,
         readAtMs: null,
         dismissedAtMs: null,
+        expiresAtMs: 10_000 + NOTICE_UNREAD_RETENTION_MS,
         removed: false,
       }],
       nextCursor: "1",

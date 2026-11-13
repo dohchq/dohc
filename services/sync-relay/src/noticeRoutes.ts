@@ -1,4 +1,4 @@
-import { jsonResponse, TokenBucketLimiter } from "@dohc/service-http";
+import { jsonResponse, readBoundedJson, TokenBucketLimiter } from "@dohc/service-http";
 import {
   AUTOMATION_SERVER_INSTALL_ID,
   SERVER_RUN_FAILED_NOTICE_PREFIX,
@@ -9,6 +9,7 @@ import {
   NOTICE_FROM_PREFIX,
   NOTICE_ID_MAX_CHARS,
   NOTICE_KINDS,
+  NOTICE_MARKS_MAX_BODY_BYTES,
   NOTICE_MARKS_PER_REQUEST,
   NOTICE_PAGE_MAX,
   NOTICE_POSTED_ID_MAX_CHARS,
@@ -23,6 +24,7 @@ import {
   type NoticeScope,
 } from "@dohc/workspace-contracts/relay";
 import type { ResolveAccountSession } from "@dohc/workspace-auth/session";
+import { asRecord } from "@dohc/workspace-core";
 import { accountDisplayName } from "./accountDisplayName";
 import { bearerAccountSession } from "./accountWorkspaceRoutes";
 import { DiscussionActivityCapacityError, type DiscussionActivityHub } from "./discussionActivity";
@@ -44,6 +46,8 @@ export const NOTICE_POST_MAX_SENDERS = 10_000;
 const MAX_USER_ID_CHARS = 256;
 const MAX_INSTALL_ID_CHARS = 256;
 const DEFAULT_NOTICE_PAGE = 100;
+// A marks body arrives within this, or the request ends.
+const NOTICE_MARKS_RECEIPT_MS = 10_000;
 
 /** The Notice reads one sign-in may hold waiting at once. */
 export const NOTICE_WAITS_PER_SESSION = 2;
@@ -172,6 +176,30 @@ export function createNoticeRoutes(
     }
   }
 
+  /**
+   * `POST /sync/notices/marks?scope=phone`: the owner's phone marks its list
+   * with exactly `{ marks: [{ noticeId, mark }] }`, any of the four marks. It
+   * names no computer, so it never consumes an automation wake. The sign-in is
+   * checked again after the body arrives, right before anything changes.
+   */
+  async function markForAccount(request: Request, url: URL): Promise<Response> {
+    parseScope(url.searchParams.get("scope"));
+    const resolveAccountSession = account.resolveAccountSession;
+    if (resolveAccountSession === undefined) throw notFound();
+    const session = () => bearerAccountSession(storage, resolveAccountSession, request);
+    const caller = await session();
+    if (!account.limiter.allow(caller.sessionId, nowMs())) {
+      throw new RelayError("server_busy", "This sign-in is asking faster than your server answers. Try again shortly.");
+    }
+    const body = await readMarksBody(request);
+    if (Object.keys(body).length !== 1 || !Object.hasOwn(body, "marks")) throw badRequest("the body must be exactly { marks }");
+    const marks = parseMarks(body.marks, PHONE_MARKS);
+    const current = await session();
+    if (current.sessionId !== caller.sessionId || current.userId !== caller.userId) throw notFound();
+    const dismissed = storage.markNotices({ recipientUserId: caller.userId, marks, nowMs: nowMs() });
+    return jsonResponse({ ok: true, dismissed } satisfies NoticeMarksResponse, 200);
+  }
+
   return async function respondToNotices(
     request: Request,
     route: NoticeRoute,
@@ -221,12 +249,16 @@ export function createNoticeRoutes(
       return jsonResponse({ ok: true }, 200);
     }
     if (route.route === "notice-marks" && request.method === "POST") {
+      const url = new URL(request.url);
+      if (url.searchParams.has("scope")) return await markForAccount(request, url);
+      // A computer's marks: read and dismissed, with `installId` and `withdraw`.
       const userId = await caller();
-      const body = await readJsonObject(request);
-      if (body.installId !== undefined && !isNoticeLine(body.installId, 256)) throw badRequest("installId is invalid");
+      const body = await readMarksBody(request);
+      if (!Object.keys(body).every((key) => key === "marks" || key === "installId")) throw badRequest("the body takes only marks and installId");
+      if (body.installId !== undefined && !isNoticeLine(body.installId, MAX_INSTALL_ID_CHARS)) throw badRequest("installId is invalid");
       const dismissed = storage.markNotices({
         recipientUserId: userId,
-        marks: parseMarks(body.marks),
+        marks: parseMarks(body.marks, COMPUTER_MARKS),
         ...(typeof body.installId === "string" ? { installId: body.installId } : {}),
         nowMs: nowMs(),
       });
@@ -282,18 +314,43 @@ function parseReach(body: Record<string, unknown>): NoticeReach {
   return { shareId };
 }
 
-function parseMarks(value: unknown): { noticeId: string; mark: NoticeMark; withdraw?: true }[] {
+// What each sender may mark with, and the fields each of its marks takes.
+interface MarkSender { marks: readonly NoticeMark[]; fields: readonly string[] }
+const PHONE_MARKS: MarkSender = { marks: ["read", "dismissed", "unread", "restore"], fields: ["noticeId", "mark"] };
+const COMPUTER_MARKS: MarkSender = { marks: ["read", "dismissed"], fields: ["noticeId", "mark", "withdraw"] };
+
+async function readMarksBody(request: Request): Promise<Record<string, unknown>> {
+  let body: unknown;
+  try {
+    body = await readBoundedJson(request, NOTICE_MARKS_MAX_BODY_BYTES,
+      AbortSignal.any([request.signal, AbortSignal.timeout(NOTICE_MARKS_RECEIPT_MS)]));
+  } catch (error) {
+    throw error instanceof RangeError ? relayError("payload_too_large") : badRequest("request body must be valid JSON");
+  }
+  const object = asRecord(body);
+  if (object === null) throw badRequest("request body must be a JSON object");
+  return object;
+}
+
+function parseMarks(
+  value: unknown,
+  sender: MarkSender,
+): { noticeId: string; mark: NoticeMark; withdraw?: true }[] {
   if (!Array.isArray(value) || value.length === 0 || value.length > NOTICE_MARKS_PER_REQUEST) {
     throw badRequest(`marks must list 1 to ${NOTICE_MARKS_PER_REQUEST} notices`);
   }
   return value.map((entry: unknown) => {
-    const mark = entry && typeof entry === "object" ? entry as Record<string, unknown> : {};
-    if (mark.mark !== "read" && mark.mark !== "dismissed") {
-      throw badRequest("mark must be read or dismissed");
+    const mark = asRecord(entry);
+    if (mark === null || !Object.keys(mark).every((key) => sender.fields.includes(key))) {
+      throw badRequest(`each mark takes only ${sender.fields.join(", ")}`);
     }
+    const named = mark.mark;
+    const kind = sender.marks.find((known) => known === named);
+    if (kind === undefined) throw badRequest(`mark must be ${sender.marks.join(", ")}`);
     if (!isNoticeLine(mark.noticeId, NOTICE_ID_MAX_CHARS)) throw badRequest("noticeId is invalid");
-    if (mark.withdraw !== undefined && (mark.withdraw !== true || mark.mark !== "dismissed")) throw badRequest("withdraw requires a dismissal");
-    return { noticeId: mark.noticeId, mark: mark.mark, ...(mark.withdraw ? { withdraw: true as const } : {}) };
+    // A withdrawal dismisses the copies the sender posted to others; nothing else reaches another list.
+    if (mark.withdraw !== undefined && (mark.withdraw !== true || kind !== "dismissed")) throw badRequest("withdraw requires a dismissal");
+    return { noticeId: mark.noticeId, mark: kind, ...(mark.withdraw === true ? { withdraw: true as const } : {}) };
   });
 }
 

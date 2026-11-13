@@ -24,7 +24,7 @@ import {
   NOTICE_TITLE_MAX_CHARS,
   NOTICE_UNREAD_RETENTION_MS,
   type NoticeKind,
-  type NoticeMark,
+  type ComputerNoticeMark,
   type NoticeReach,
   type NoticeRecipient,
   type NoticeTarget,
@@ -98,7 +98,7 @@ export interface NoticeStore {
   list(): Promise<{ account: string | null; notices: NoticeRow[] }>;
   // `account` is the key the caller's list showed. Account rows are marked
   // only while that account is signed in; local rows always are.
-  mark(refs: readonly NoticeRef[], mark: NoticeMark, account: string | null): Promise<void>;
+  mark(refs: readonly NoticeRef[], mark: ComputerNoticeMark, account: string | null): Promise<void>;
   // Dismisses one notice now and says whether this was its first dismissal,
   // as Run now needs: "unanswered" when the relay could not say.
   dismissFirst(ref: NoticeRef, account: string | null): Promise<"first" | "not-first" | "unanswered">;
@@ -231,6 +231,8 @@ const RelayRow = z.object({
   createdAtMs: NoticeRow.shape.createdAtMs,
   readAtMs: NoticeRow.shape.readAtMs,
   dismissedAtMs: z.number().int().nonnegative().nullable(),
+  // The relay's own retention for the row, which each mark starts again.
+  expiresAtMs: z.number().int().positive(),
   removed: z.boolean(),
 });
 type RelayRow = z.infer<typeof RelayRow>;
@@ -248,8 +250,10 @@ const OutboxMark = z.object({
 });
 type OutboxMark = z.infer<typeof OutboxMark>;
 
+// Version 2 keeps each row's expiry from the relay. An older file reads as
+// damaged: it is moved aside and the list refills from the relay.
 const AccountFile = z.object({
-  version: z.literal(1),
+  version: z.literal(2),
   cursor: z.string().max(64).nullable(),
   // The server answered that it has no notice list. Notices for this account
   // stay on this computer until a pull succeeds.
@@ -393,7 +397,7 @@ export function createNoticeStore(deps: {
     // Dismissed refusal rows also wait for the engine to acknowledge them on next open.
     const pending = file.rows.filter(row => isRefusalNoticeKind(row.kind));
     const rest = file.rows.filter(row => !isRefusalNoticeKind(row.kind));
-    const kept = [...pending, ...retained(rest, LOCAL_NOTICE_ROW_LIMIT, nowMs())];
+    const kept = [...pending, ...retained(rest, LOCAL_NOTICE_ROW_LIMIT, localRowLive(nowMs()))];
     if (kept.length === file.rows.length) return false;
     file.rows = kept;
     return true;
@@ -404,7 +408,7 @@ export function createNoticeStore(deps: {
     let file = accountFiles.get(name);
     if (!file) {
       file = await load(name, AccountFile, {
-        version: 1, cursor: null, routesMissing: false, rows: [], posts: [], marks: [],
+        version: 2, cursor: null, routesMissing: false, rows: [], posts: [], marks: [],
       });
       accountFiles.set(name, file);
       if (pruneAccount(file)) await saveAccount(account, file);
@@ -417,9 +421,10 @@ export function createNoticeStore(deps: {
     accountFiles.set(accountFileName(account), file);
   }
 
-  // Only cached relay rows age out; the outbox has its own limit.
+  // Only cached relay rows age out, when the relay lets them go; the outbox has its own limit.
   function pruneAccount(file: AccountFile): boolean {
-    const kept = retained(file.rows, NOTICE_LIST_ROW_LIMIT, nowMs());
+    const now = nowMs();
+    const kept = retained(file.rows, NOTICE_LIST_ROW_LIMIT, (row) => row.expiresAtMs > now);
     if (kept === file.rows) return false;
     file.rows = kept;
     return true;
@@ -433,7 +438,7 @@ export function createNoticeStore(deps: {
 
   // One waiting mark per notice. Dismissed takes the place of read, and read
   // adds nothing to dismissed. Returns false when nothing changed.
-  function queueMark(file: AccountFile, noticeId: string, mark: NoticeMark, withdraw = false): boolean {
+  function queueMark(file: AccountFile, noticeId: string, mark: ComputerNoticeMark, withdraw = false): boolean {
     const index = file.marks.findIndex((waiting) => waiting.noticeId === noticeId);
     const waiting = file.marks[index];
     if (waiting && (waiting.mark === "dismissed" || mark === "read") && (!withdraw || waiting.withdraw)) return false;
@@ -975,7 +980,7 @@ export function createNoticeStore(deps: {
 
   // Marks every named notice in one write per list, so marking a whole list
   // read costs one save and one pass.
-  async function mark(refs: readonly NoticeRef[], mark: NoticeMark, account: string | null): Promise<void> {
+  async function mark(refs: readonly NoticeRef[], mark: ComputerNoticeMark, account: string | null): Promise<void> {
     const session = refs.some((ref) => ref.store === "account") ? await deps.session() : null;
     const changed = await locked(async () => {
       const localRefs = new Map(refs.filter((ref) => ref.store === "local").map(ref => [ref.noticeId, ref]));
@@ -1169,10 +1174,12 @@ export function createNoticeStore(deps: {
 }
 
 // Folds one page into the stored rows. A page that starts the list over
-// replaces every cached row first; the outbox stays. Read and dismissed only
-// move forward, so a row marked here stays marked whatever order changes
-// arrive in. A row the relay removed to make room is dropped. A pulled row
-// settles the sent post with its id.
+// replaces every cached row first; the outbox stays. The relay's row is the
+// row, its cleared marks included, as when a phone marks it unread or
+// restores it; only a row older than the one held, by its change sequence,
+// changes nothing. Marks still waiting here show over the row in the list
+// until they send. A row the relay removed to make room is dropped. A pulled
+// row settles the sent post with its id.
 function merge(file: AccountFile, page: z.infer<typeof RelayPage>): boolean {
   let changed = false;
   if (page.replace && file.rows.length > 0) {
@@ -1194,31 +1201,34 @@ function merge(file: AccountFile, page: z.infer<typeof RelayPage>): boolean {
       changed = true;
       continue;
     }
-    const next = existing
-      ? { ...row, readAtMs: row.readAtMs ?? existing.readAtMs, dismissedAtMs: row.dismissedAtMs ?? existing.dismissedAtMs }
-      : row;
-    if (existing) file.rows[index] = next;
-    else file.rows.push(next);
+    if (existing && row.changeSeq < existing.changeSeq) continue;
+    if (existing) file.rows[index] = row;
+    else file.rows.push(row);
     changed = true;
   }
   return changed;
 }
 
-// The relay's retention and row limit, applied to this computer's copy:
-// dismissed rows go 30 days after dismissal, read rows 90 days after
-// reading, unread rows 180 days after arriving. Past the limit, read and
-// dismissed rows go first, oldest first, then the oldest unread. Returns
-// `rows` itself when nothing goes.
+// This computer's own rows keep the relay's retention: dismissed rows go 30
+// days after dismissal, read rows 90 days after reading, unread rows 180 days
+// after arriving.
+function localRowLive(nowMs: number) {
+  return (row: LocalRow) =>
+    row.dismissedAtMs !== null ? row.dismissedAtMs + NOTICE_DISMISSED_RETENTION_MS > nowMs
+    : row.readAtMs !== null ? row.readAtMs + NOTICE_READ_RETENTION_MS > nowMs
+    : row.createdAtMs + NOTICE_UNREAD_RETENTION_MS > nowMs;
+}
+
+// The rows `live` keeps, within the row limit. Past the limit, read and
+// dismissed rows go first, oldest first, then the oldest unread; a waiting
+// automation wake stays. Returns `rows` itself when nothing goes.
 function retained<Row extends { kind?: string; createdAtMs: number; readAtMs: number | null; dismissedAtMs: number | null }>(
   rows: Row[],
   limit: number,
-  nowMs: number,
+  isLive: (row: Row) => boolean,
 ): Row[] {
   const parked = (row: Row) => row.kind === "automation-wake" && row.dismissedAtMs === null;
-  const live = rows.filter((row) => parked(row) || (
-    row.dismissedAtMs !== null ? row.dismissedAtMs + NOTICE_DISMISSED_RETENTION_MS > nowMs
-    : row.readAtMs !== null ? row.readAtMs + NOTICE_READ_RETENTION_MS > nowMs
-    : row.createdAtMs + NOTICE_UNREAD_RETENTION_MS > nowMs));
+  const live = rows.filter(isLive);
   if (live.length === rows.length && rows.length <= limit) return rows;
   if (live.length <= limit) return live;
   const removed = new Set(live.filter((row) => !parked(row))

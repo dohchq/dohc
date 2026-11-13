@@ -117,14 +117,21 @@ describe("relay-only agent wake notices", () => {
     expect(await w.dismiss(id, "owner", "laptop")).toEqual([id]);
   });
 
-  it("refuses dismissal without a consuming computer and keeps the wake", async () => {
+  it("skips a wake's dismissal without a consuming computer, marks the rest of the batch, and keeps the wake", async () => {
     const w = await world();
-    w.post();
-    const id = w.list()[0]!.noticeId;
-    const response = await w.handler(request("owner", "/sync/notices/marks", jsonBody({ marks: [{ noticeId: id, mark: "dismissed" }] })));
-    expect(response.status).toBe(403);
-    expect(await response.json()).toMatchObject({ error: "Only a computer consuming this agent wake can dismiss it." });
-    expect(w.list()[0]!.wake).toEqual(wake);
+    const id = w.post();
+    w.storage.postNotice({
+      noticeId: "other", recipientUserId: "owner", senderUserId: "owner", senderLabel: "Ice",
+      reach: { workspaceId }, kind: "mention", title: "Other", body: "", target: {}, originInstallId: "laptop", nowMs: 10_000,
+    });
+    const response = await w.handler(request("owner", "/sync/notices/marks", jsonBody({
+      marks: [{ noticeId: id, mark: "dismissed" }, { noticeId: "other", mark: "dismissed" }],
+    })));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, dismissed: ["other"] });
+    const wakeRow = w.list().find((row) => row.noticeId === id);
+    expect(wakeRow).toMatchObject({ dismissedAtMs: null, wake });
+    expect(w.list().find((row) => row.noticeId === "other")?.dismissedAtMs).toBe(10_000);
     expect(await w.dismiss(id, "owner", "laptop")).toEqual([id]);
   });
 
