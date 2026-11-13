@@ -45,15 +45,25 @@ export interface CliForThread {
    * path so that every shell runs that program and no other.
    */
   program: string | null;
+  /** With no program: the first character of the path that a command can't carry. */
+  refused?: string;
   /** What the thread must know to run it. */
   notes: readonly string[];
 }
 
-// A path every shell reads whole inside double quotes: letters, digits,
-// spaces, and the marks below. It leaves out what ends the quotes in some
-// shell, as PowerShell's curly quotes do, what a shell expands there, and
-// what cmd.exe splits a line at when Git Bash hands it a .cmd path unquoted.
-const QUOTES_WHOLE = /^[\p{L}\p{M}\p{N} /:._~+@#'-]+$/u;
+// What every shell reads as plain text inside double quotes: letters,
+// digits, spaces, and the marks below. It leaves out what ends the quotes in
+// some shell, as PowerShell's curly quotes do, what a shell expands there,
+// what cmd.exe splits a line at when Git Bash hands it a .cmd path unquoted,
+// and @, which makes cmd.exe drop the quotes of a command wrapped in cmd /c.
+const HELD_IN_QUOTES = /^[\p{L}\p{M}\p{N} /:._~+#'-]$/u;
+// On Windows a program that passes a command through the system's older text
+// encoding turns some modifier letters and combining marks into a quote, a
+// caret, or a backtick. They are the two blocks from U+02B0 to U+036F.
+const turnsOnWindows = (character: string) => {
+  const code = character.codePointAt(0)!;
+  return code >= 0x2b0 && code <= 0x36f;
+};
 
 /**
  * The commands name dohc's own program by its full path, so no other program
@@ -62,12 +72,17 @@ const QUOTES_WHOLE = /^[\p{L}\p{M}\p{N} /:._~+@#'-]+$/u;
  * name would let another program answer to it.
  */
 export function cliForThread(path: string, platform: NodeJS.Platform): CliForThread {
-  const spelled = platform === "win32" ? path.replaceAll("\\", "/") : path;
-  if (!QUOTES_WHOLE.test(spelled)) return { program: null, notes: [] };
+  const windows = platform === "win32";
+  const spelled = windows ? path.replaceAll("\\", "/") : path;
+  const refused = Array.from(spelled).find(
+    (character) => !HELD_IN_QUOTES.test(character) || (windows && turnsOnWindows(character)),
+  );
+  if (refused !== undefined) return { program: null, refused, notes: [] };
+  if (spelled === "") return { program: null, notes: [] };
   return {
     program: `"${spelled}"`,
     notes: [
-      ...(platform === "win32" ? ["In PowerShell, put & before the quoted program."] : []),
+      ...(windows ? ["In PowerShell, put & before the quoted program."] : []),
       "Do not install or download a program named dohc.",
     ],
   };

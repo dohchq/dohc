@@ -233,12 +233,14 @@ describe("agent threads", () => {
 
   it("connects nothing when dohc cannot name its program in a command", async () => {
     const { agentThreads, forward, order } = started(
-      setup({}, ["m1"], { program: null, notes: [] }),
+      setup({}, ["m1"], { program: null, refused: "&", notes: [] }),
     );
 
     await expect(
       agentThreads.connect(WORKSPACE, { id: "chief", name: "Chief", thread }),
-    ).rejects.toThrow("Install dohc in another folder.");
+    ).rejects.toThrow(
+      `dohc can't connect a thread from where it is installed. The path of its folder has "&", which a command can't carry safely. Install dohc in a folder whose path has none.`,
+    );
 
     expect(forward).not.toHaveBeenCalled();
     expect(order).toEqual([]);

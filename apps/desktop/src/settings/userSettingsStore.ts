@@ -329,6 +329,21 @@ export function writeUserSettingsFile(
         `dohc didn't add ${next.agents[taken]!.name} because the settings file changed at the same time.`,
       );
     }
+    // A thread the caller gives an agent that another agent has by then, as
+    // when two windows connect it at once. The schema refuses the save
+    // without words a person can read, so this says which agent has it.
+    for (const [id, agent] of Object.entries(next.agents)) {
+      const { thread } = agent;
+      if (!thread || base.agents[id]?.thread?.id === thread.id) continue;
+      const holder = Object.entries(current.agents).find(
+        ([other, held]) =>
+          other !== id && held.thread?.tool === thread.tool && held.thread.id === thread.id,
+      );
+      if (holder)
+        throw new Error(
+          `dohc didn't connect ${agent.name} because ${holder[1].name} is already connected to that thread.`,
+        );
+    }
     return overlaySettings(current, base, next, agentLaunch);
   });
 }

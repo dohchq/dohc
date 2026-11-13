@@ -878,6 +878,38 @@ describe("desktop user settings store", () => {
     });
   });
 
+  it("says which agent has a thread when two windows connect it at once, and keeps the first", async () => {
+    const root = await createTestScratch("dohc-user-settings-");
+    const path = join(root, USER_SETTINGS_FILE);
+    await writeFile(path, JSON.stringify(DEFAULT_USER_SETTINGS));
+    const { launch: _launch, ...unlaunched } = testAgent();
+    // Both windows read the settings before either saves.
+    const seen = (await readUserSettingsFile(root)).settings;
+    const connecting = (id: string, name: string) => ({
+      ...seen,
+      agents: {
+        ...seen.agents,
+        [id]: {
+          ...unlaunched,
+          name,
+          enabled: true,
+          thread: { tool: "t3-code" as const, id: "t-1" },
+          workspaces: ["ws-1"],
+        },
+      },
+    });
+    await writeUserSettingsFile(root, connecting("chief", "Chief"), seen);
+
+    // A plain error, so its words reach the person as they are.
+    await expect(
+      writeUserSettingsFile(root, connecting("scout", "Scout"), seen),
+    ).rejects.toMatchObject({
+      name: "Error",
+      message: "dohc didn't connect Scout because Chief is already connected to that thread.",
+    });
+    expect(Object.keys(JSON.parse(await readFile(path, "utf8")).agents)).toEqual(["chief"]);
+  });
+
   it("refuses to save into an agent entry dohc cannot use, and leaves that entry as written", async () => {
     const root = await createTestScratch("dohc-user-settings-");
     const path = join(root, USER_SETTINGS_FILE);

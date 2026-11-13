@@ -194,11 +194,32 @@ describe("cliForThread", () => {
       "C:\\Users\\a=b\\dohc.cmd",
       "C:\\Users\\a<b>\\dohc.cmd",
       `C:\\Users\\a${at(0xa0)}b\\dohc.cmd`,
+      // cmd.exe drops the quotes of a command wrapped in cmd /c when it meets an @.
+      "C:\\Program Files\\@x\\dohc.cmd",
+      "/home/a@b/dohc",
+      // The system's older text encoding on Windows turns these into a quote, a caret, a backtick.
+      `C:\\Users\\a${at(0x2ba)}b\\dohc.cmd`,
+      `C:\\Users\\a${at(0x2c6)}b\\dohc.cmd`,
+      `C:\\Users\\e${at(0x300)}\\dohc.cmd`,
+      `C:\\Users\\e${at(0x30e)}\\dohc.cmd`,
     ]) {
       const cli = cliForThread(path, path.startsWith("C:") ? "win32" : "linux");
 
-      expect(cli, path).toEqual({ program: null, notes: [] });
+      expect(cli.program, path).toBeNull();
+      expect(cli.notes, path).toEqual([]);
     }
+    expect(cliForThread("", "linux")).toEqual({ program: null, notes: [] });
+  });
+
+  it("names the first character it refused, and keeps a combining accent where no older encoding reads it", () => {
+    expect(cliForThread("C:\\Users\\R&D (work)\\dohc.cmd", "win32").refused).toBe("&");
+    expect(cliForThread(`/home/e${at(0x301)}/dohc`, "linux").program).toBe(
+      `"/home/e${at(0x301)}/dohc"`,
+    );
+    // Marks outside those two blocks stay, so names in other scripts connect.
+    expect(
+      cliForThread(`C:\\Users\\${at(0x30e6, 0x30fc, 0x30b6, 0x30fc)}\\dohc.cmd`, "win32").program,
+    ).not.toBeNull();
   });
 
   it("says the thread cannot reply when there is no program to name", () => {

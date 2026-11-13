@@ -6,7 +6,7 @@ import {
   type DesktopUserSettings,
 } from "../settings/userSettings";
 import { subscribeChatWrites } from "../workspaces/chatWriteSignals";
-import { introductionText, type CliForThread } from "./forwardedText";
+import { introductionText, quoted, type CliForThread } from "./forwardedText";
 import { T3CodeError } from "./t3Code";
 import { createForwarding, type ForwardingDependencies, type ServedAgent } from "./forwarding";
 import type { T3CodeConnection } from "./t3CodeConnection";
@@ -155,10 +155,14 @@ export function createAgentThreads(dependencies: AgentThreadsDependencies) {
       if (!workspace) throw new Error("This computer no longer has this workspace.");
       // The thread replies with a command that names dohc's program. Without
       // one it could not reply, so dohc connects nothing.
-      if (dependencies.cli.program === null)
+      if (dependencies.cli.program === null) {
+        const { refused } = dependencies.cli;
         throw new Error(
-          "dohc can't connect a thread from the folder it is installed in. The folder's name has a character a command can't carry, such as & or $. Install dohc in another folder.",
+          refused === undefined
+            ? "dohc can't connect a thread, because it can't find its own program."
+            : `dohc can't connect a thread from where it is installed. The path of its folder has ${quoted(refused)}, which a command can't carry safely. Install dohc in a folder whose path has none.`,
         );
+      }
       const reaching = served(agent, workspace);
       if (!reaching) throw new Error("Give this agent a name with a letter or digit.");
       await forwarding.setAside(workspaceId, reaching);
