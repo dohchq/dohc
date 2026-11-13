@@ -406,7 +406,7 @@ This check uses the form that the desktop creates for a Collection.
 2. **Operator:** In the Collection's toolbar, choose **Manage Collection**, then **Create form**. Keep the Name field and choose **Create form**.
 3. **Operator:** Choose **Review and open app**. Review its files and the access it requests, then choose **Approve and open**.
 4. **Operator:** Open the app's review and choose **Publish on a link**, then **Share app folder**.
-   Choose **Anyone with the link** and **View**, then **Create link**. Copy the link, and close sharing.
+   Under **Anyone with the link**, choose **View**, then **Create link**. Copy the link, and close sharing.
 5. **Operator:** Open the app's review again and choose **Publish on a link**. Select the new link and choose **Prepare app**.
    In **Review app publication**, check that the link's actions are only the form's create action, and that the owner and helper actions are None.
    Then choose **Publish this revision**.

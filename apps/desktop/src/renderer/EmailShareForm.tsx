@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import { isComposingKey } from "./ui/keys";
 import type { CreateRelaySharePayload, CreateRelayShareResult, ShareAccess } from "../ipc/bridgeContract";
 import { AutomationShareNote, useAutomationShareCheck } from "./automationShareCheck";
@@ -7,39 +7,38 @@ import { bridge } from "./bridge";
 import { ipcErrorMessage } from "./ipcError";
 import { PrimaryButton, SecondaryButton } from "./ui/controls";
 import { CopyField } from "./ui/CopyButton";
+import { ShareAccessMenu } from "./shareAccess";
 import { BROWSER_INVITATION_SECRET, SHARE_CODE_SECRET } from "./shareCopySecrets";
 import { useRequestSequence } from "./useRequestSequence";
 
-const ACCESS_OPTIONS: ReadonlyArray<{
-  value: ShareAccess;
-  label: string;
-  helper: string;
-}> = [
-  {
-    value: "view",
-    label: "View",
-    helper: "They can read only what you selected.",
-  },
-  {
-    value: "edit",
-    label: "Edit",
-    helper: "They can read only what you selected, and send you changes to accept.",
-  },
-];
+const READS = "They can read only what you selected";
+const HISTORY = "They can see the full History.";
+
+// What each level gives, said where a person chooses it. Only a share of
+// files can be edited live in a browser.
+function accessOptions(target: RelayShareTarget): ReadonlyArray<{ value: ShareAccess; description: string; testId: string }> {
+  const live = target.kind === "paths" ? " In a browser, they can change shared Markdown files live when available." : "";
+  return [
+    { value: "view", description: `${READS}.`, testId: "share-access-view" },
+    { value: "edit", description: `${READS}, and send you changes to accept.${live} ${HISTORY}`, testId: "share-access-edit" },
+  ];
+}
 
 export function EmailShareForm(props: {
   workspaceId: string;
   target: RelayShareTarget;
-  visible: boolean;
   onDone: () => void;
+  // A share was made, so whoever lists this selection's people shows them.
+  onCreated?: (person: { shareId: string; grantId: string; name: string; access: ShareAccess }) => void;
 }) {
   const [email, setEmail] = useState("");
   const [access, setAccess] = useState<ShareAccess>("view");
   const [phase, setPhase] = useState<"idle" | "checking" | "creating">("idle");
   const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<CreateRelayShareResult | null>(null);
-  // RelayShareDialog keys this form by the canonical target. Switching panes
-  // keeps pending work; changing the target unmounts and invalidates it.
+  const emailId = useId();
+  // RelayShareDialog keys this form by the canonical target, so changing the
+  // target unmounts it and drops its pending work.
   const requests = useRequestSequence([props.workspaceId]);
   const automations = useAutomationShareCheck(props.workspaceId, props.target);
   useEffect(() => {
@@ -50,8 +49,9 @@ export function EmailShareForm(props: {
   const canSubmit = useMemo(() => email.trim().length > 2 && !busy, [busy, email]);
   const share = { recipientEmail: email.trim(), access };
   const note = automations.noteFor(share);
+  const options = useMemo(() => accessOptions(props.target), [props.target.kind]);
 
-  // An edit during the automation check drops it, so Create always acts on
+  // An edit during the automation check drops it, so Invite always acts on
   // the share on screen. Once the share is being made, the fields wait.
   function edit(apply: () => void) {
     if (phase === "checking") {
@@ -85,7 +85,10 @@ export function EmailShareForm(props: {
           : { paths: props.target.paths }),
       };
       const result = await bridge().createRelayShare(payload);
-      if (current()) setCreated(result);
+      if (current()) {
+        setCreated(result);
+        props.onCreated?.({ shareId: result.shareId, grantId: result.grantId, name: result.recipientEmail, access: asked.access });
+      }
     } catch (cause) {
       if (current()) setError(ipcErrorMessage(cause));
     } finally {
@@ -93,88 +96,59 @@ export function EmailShareForm(props: {
     }
   }
 
-  if (!props.visible) return null;
-
   return (
     <>
       {created === null ? (
         <>
-          <label className="block text-[12px] font-medium text-muted">
-            Email
-            <input
-              data-testid="share-email"
-              type="email"
-              value={email}
-              disabled={phase === "creating"}
-              onChange={(event) => {
-                const next = event.currentTarget.value;
-                edit(() => setEmail(next));
-              }}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !isComposingKey(event)) void createShare();
-              }}
-              placeholder="name@example.com"
-              spellCheck={false}
-              className="mt-1 h-8 w-full rounded-lg border border-line bg-bg px-3 text-[13px] text-ink placeholder:text-subtle focus:border-ink"
-            />
-          </label>
           <div className="flex flex-col gap-1">
-            <span className="text-[12px] font-medium text-muted">Access</span>
-            <div className="flex gap-1.5" role="radiogroup" aria-label="Access">
-              {ACCESS_OPTIONS.map((option) => (
-                <button
-                  key={option.value}
-                  type="button"
-                  role="radio"
-                  aria-checked={access === option.value}
-                  data-testid={`share-access-${option.value}`}
-                  disabled={phase === "creating"}
-                  onClick={() => edit(() => setAccess(option.value))}
-                  className={`h-8 flex-1 rounded-lg border px-3 text-left text-[13px] transition-colors disabled:opacity-50 ${
-                    access === option.value
-                      ? "border-ink bg-panel-2 text-ink"
-                      : "border-line bg-panel text-muted hover:text-ink"
-                  }`}
-                >
-                  {option.label}
-                </button>
-              ))}
+            <label htmlFor={emailId} className="text-[12px] font-medium text-muted">Invite by email</label>
+            <div className="flex items-center gap-2">
+              <input
+                id={emailId}
+                data-testid="share-email"
+                type="email"
+                value={email}
+                disabled={phase === "creating"}
+                onChange={(event) => {
+                  const next = event.currentTarget.value;
+                  edit(() => setEmail(next));
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !isComposingKey(event)) void createShare();
+                }}
+                placeholder="name@example.com"
+                spellCheck={false}
+                className="h-8 min-w-0 flex-1 rounded-lg border border-line bg-bg px-3 text-[13px] text-ink placeholder:text-subtle focus:border-ink"
+              />
+              <ShareAccessMenu
+                label="Access"
+                access={access}
+                options={options}
+                disabled={phase === "creating"}
+                testId="share-access"
+                width={288}
+                align="end"
+                onPick={(next) => edit(() => setAccess(next))}
+              />
+              <PrimaryButton
+                type="button"
+                className="shrink-0"
+                data-testid="share-create"
+                disabled={!canSubmit}
+                onClick={() => void createShare()}
+              >
+                {phase === "checking"
+                  ? "Checking automations…"
+                  : phase === "creating"
+                    ? "Inviting…"
+                    : note?.warning
+                      ? "Invite anyway"
+                      : "Invite"}
+              </PrimaryButton>
             </div>
-            <p
-              data-testid="share-access-helper"
-              className="m-0 text-[12px] leading-relaxed text-subtle"
-            >
-              {ACCESS_OPTIONS.find((option) => option.value === access)?.helper}
-            </p>
-            {access === "edit" && (
-              <p className="m-0 text-[12px] leading-relaxed text-subtle">
-                People who can edit can see the full History.
-              </p>
-            )}
           </div>
 
-          {access === "edit" && props.target.kind === "paths" && (
-            <p className="m-0 text-[12px] leading-relaxed text-muted">
-              Browser editing lets them change shared Markdown files live when available. Other files use changes you accept.
-            </p>
-          )}
-
           {note?.warning ? <AutomationShareNote note={note} /> : null}
-          <PrimaryButton
-            type="button"
-            className="self-end"
-            data-testid="share-create"
-            disabled={!canSubmit}
-            onClick={() => void createShare()}
-          >
-            {phase === "checking"
-              ? "Checking automations…"
-              : phase === "creating"
-                ? "Creating share…"
-                : note?.warning
-                  ? "Create share anyway"
-                  : "Create share"}
-          </PrimaryButton>
         </>
       ) : (
         <>

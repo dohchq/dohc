@@ -52,8 +52,9 @@ export type LinkAgentDisconnects = {
 
 /**
  * The Share dialog's Disconnects. They belong to the dialog, not to one
- * link's list, so leaving the link tab and coming back keeps a Disconnect
- * running and shows its failure in place. Only a Disconnect that fails after
+ * link's list, so a list that leaves the screen and comes back, as when
+ * "more links" closes and opens, keeps a Disconnect running and shows its
+ * failure in place. Only a Disconnect that fails after
  * the dialog closed goes to the shell, with Try again. A success, here or
  * from that Try again, reaches the shell's set of disconnected agents, so
  * every list leaves the agent out.

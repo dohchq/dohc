@@ -1,12 +1,17 @@
 import { CloudOff, LogIn, Share2, X, type LucideIcon } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import type { ShareAccess } from "../ipc/bridgeContract";
+import { bridge } from "./bridge";
 import { SYNC_UNCONFIRMED_ACCOUNT } from "./cloudSyncWords";
 import { EmailShareForm } from "./EmailShareForm";
+import { SHARE_ACCESS_WORDS, SharePersonRow } from "./shareAccess";
 import type { ShareRemovalNotices } from "./shell/useShareRemovalNotices";
-import { IconButton, PrimaryButton } from "./ui/controls";
-import { SegmentedControl, type SegmentedOption } from "./ui/SegmentedControl";
-import { useRelayShareLinkPane } from "./useRelayShareLinkPane";
+import { IconButton, PrimaryButton, RetryRow, SectionLabel } from "./ui/controls";
+import { MoreMenu } from "./ui/MoreMenu";
+import { rowMatchesTarget, useRelayShareLinkPane } from "./useRelayShareLinkPane";
+import { useRequestSequence } from "./useRequestSequence";
 import { accessReasonForLane, serverName, type AccessContext, type AccessReason } from "./workbench/accessReason";
+import type { SharingFocus } from "./workbench/SharingView";
 
 export type RelayShareTarget =
   | { kind: "paths"; paths: [string, ...string[]]; label?: string }
@@ -16,11 +21,62 @@ export type RelayShareTarget =
 // toasts, so a long link pane grows it downward and its body scrolls.
 const DIALOG_HEIGHT_CLASS = "max-h-[calc(100vh_-_7rem_-_var(--dohc-toast-room,0px))]";
 
-type ShareWith = "email" | "link";
-const SHARE_WITH_OPTIONS: ReadonlyArray<SegmentedOption<ShareWith>> = [
-  { value: "email", label: "Invite by email" },
-  { value: "link", label: "Anyone with the link" },
-];
+type InvitedPerson = { shareId: string; grantId: string; name: string; access: ShareAccess | null };
+type Invited = { status: "loading" } | { status: "ready"; people: InvitedPerson[] } | { status: "failed" };
+
+const isShareAccess = (access: string | null): access is ShareAccess => access !== null && access in SHARE_ACCESS_WORDS;
+
+// The people this selection was shared with by email, from the listing the
+// Sharing view reads. It is read again whenever `revision` changes. `scope`
+// names the workspace and the selection.
+function useInvitedPeople(input: { workspaceId: string; target: RelayShareTarget; scope: string; read: boolean; revision: number }) {
+  const { workspaceId, scope, read, revision } = input;
+  const [invited, setInvited] = useState<Invited>({ status: "loading" });
+  const requests = useRequestSequence([scope]);
+  const target = useRef(input.target);
+  target.current = input.target;
+  const load = useCallback(async () => {
+    const token = requests.next();
+    try {
+      // A share made a moment ago is already being listed; this waits for it.
+      await bridge().requestAccessRefresh({ workspaceId, reason: "sharing-open" }).catch(() => undefined);
+      const people: InvitedPerson[] = [];
+      const seen = new Set<string>();
+      let cursor: string | undefined;
+      while (true) {
+        if (!requests.isCurrent(token)) return;
+        const answer = await bridge().listSharingAccess({ workspaceId, lane: "granted", ...(cursor ? { cursor } : {}) });
+        if (!requests.isCurrent(token)) return;
+        if (answer.coverage.kind === "unavailable") throw new Error("dohc could not list this workspace's shares.");
+        for (const row of answer.rows) {
+          const { selector } = row.kind === "share" ? row : { selector: null };
+          if (row.kind !== "share" || row.via !== "named" || row.status !== "active" || selector === null || selector.kind !== undefined) continue;
+          if (!rowMatchesTarget({ selector: { paths: selector.paths, versionId: selector.versionId } }, target.current)) continue;
+          people.push({
+            shareId: row.shareId,
+            grantId: row.grantId,
+            name: row.recipientEmail ?? row.recipientUserId ?? "Unnamed person",
+            access: isShareAccess(row.access) ? row.access : null,
+          });
+        }
+        if (answer.nextCursor === null) break;
+        if (seen.has(answer.nextCursor)) throw new Error("dohc could not list all of this workspace's shares.");
+        seen.add(answer.nextCursor);
+        cursor = answer.nextCursor;
+      }
+      setInvited({ status: "ready", people });
+    } catch {
+      if (requests.isCurrent(token)) setInvited({ status: "failed" });
+    }
+  }, [requests, workspaceId]);
+  useEffect(() => {
+    setInvited({ status: "loading" });
+  }, [scope]);
+  useEffect(() => {
+    if (read) void load();
+  }, [load, read, revision, scope]);
+  return { invited, load };
+}
 
 export function RelayShareDialog(props: {
   workspaceId: string;
@@ -34,21 +90,42 @@ export function RelayShareDialog(props: {
   accessContext: AccessContext;
   // The server this workspace syncs with, when it syncs.
   server: string | null;
+  // Opens a share in the Sharing view, where it ends. The dialog closes first.
+  onOpenSharing?: (target: SharingFocus) => void;
 }) {
-  const [shareWith, setShareWith] = useState<ShareWith>("email");
+  // The form shows but takes no input while a cause dohc can name stops a
+  // share, or while it is still read. Nothing is read from the server until
+  // then. Main still refuses a share it cannot make, as when sync stops while
+  // the dialog is open.
+  const reason = accessReasonForLane(props.accessContext.facts, "granted");
+  const held = reason !== "unexplained";
   const linkPane = useRelayShareLinkPane({
     workspaceId: props.workspaceId,
     target: props.target,
-    visible: shareWith === "link",
+    visible: !held,
     onClose: props.onClose,
     ...(props.shareRemovals ? { shareRemovals: props.shareRemovals } : {}),
     ...(props.disconnectedAgents ? { disconnectedAgents: props.disconnectedAgents } : {}),
   });
-  // The forms show but take no input while a cause dohc can name stops a
-  // share, or while it is still read. Main still refuses a share it cannot
-  // make, as when sync stops while the dialog is open.
-  const reason = accessReasonForLane(props.accessContext.facts, "granted");
-  const held = reason !== "unexplained";
+  // A person invited in this dialog shows at once, before the listing has them.
+  const [invitedHere, setInvitedHere] = useState<{ scope: string; people: InvitedPerson[] }>({ scope: linkPane.scope, people: [] });
+  const [invitedRevision, setInvitedRevision] = useState(0);
+  const { invited, load: loadInvited } = useInvitedPeople({
+    workspaceId: props.workspaceId,
+    target: props.target,
+    scope: linkPane.scope,
+    read: !held,
+    revision: invitedRevision,
+  });
+  const listed = !held && invited.status === "ready" ? invited.people : [];
+  const invitedPeople = [
+    ...listed,
+    ...(held || invitedHere.scope !== linkPane.scope ? [] : invitedHere.people)
+      .filter((person) => !listed.some((known) => known.grantId === person.grantId)),
+    // A share with links lists its people through its links.
+  ].filter((person) => !linkPane.peopleShareIds.has(person.shareId));
+  const invitedFailed = !held && invited.status === "failed";
+  const { onOpenSharing } = props;
 
   const subject =
     props.target.kind === "version"
@@ -105,21 +182,55 @@ export function RelayShareDialog(props: {
         <div ref={contentRef} className="flex flex-col gap-3">
           <ShareSetup reason={reason} context={props.accessContext} server={props.server} onLeave={linkPane.close} />
 
-          <div inert={held || undefined} className={held ? "flex flex-col gap-3 opacity-50" : "flex flex-col gap-3"}>
-            <SegmentedControl
-              label="Share with"
-              value={shareWith}
-              options={SHARE_WITH_OPTIONS}
-              onChange={setShareWith}
-            />
+          <div inert={held || undefined} className={held ? "flex flex-col gap-6 opacity-50" : "flex flex-col gap-6"}>
+            <div className="flex flex-col gap-3">
+              <EmailShareForm
+                key={linkPane.scope}
+                workspaceId={props.workspaceId}
+                target={props.target}
+                onDone={linkPane.close}
+                onCreated={(person) => {
+                  const scope = linkPane.scope;
+                  setInvitedHere((current) => ({ scope, people: [...(current.scope === scope ? current.people : []), person] }));
+                  setInvitedRevision((revision) => revision + 1);
+                }}
+              />
+            </div>
 
-            <EmailShareForm
-              key={linkPane.scope}
-              workspaceId={props.workspaceId}
-              target={props.target}
-              visible={shareWith === "email"}
-              onDone={linkPane.close}
-            />
+            {invitedPeople.length > 0 || invitedFailed || linkPane.people !== null ? (
+              <section data-testid="share-people" className="flex flex-col gap-1" aria-labelledby="share-people-heading">
+                <SectionLabel as="h3" id="share-people-heading" className="m-0">
+                  People
+                </SectionLabel>
+                {invitedFailed ? (
+                  <RetryRow testId="share-people-failed" onRetry={() => void loadInvited()}>
+                    dohc could not load the people you invited by email.
+                  </RetryRow>
+                ) : null}
+                {invitedPeople.map((person) => (
+                  <div key={person.grantId} data-testid={`share-invited-${person.grantId}`}>
+                    <SharePersonRow name={person.name} detail={`${person.access ? `${SHARE_ACCESS_WORDS[person.access]} · ` : ""}Invited by email`}>
+                      {onOpenSharing ? (
+                        <MoreMenu
+                          label="Share options"
+                          topLayer
+                          testId={`share-invited-options-${person.grantId}`}
+                          items={[{
+                            label: "Open in Sharing",
+                            onSelect: () => {
+                              linkPane.close();
+                              onOpenSharing({ lane: "granted", shareId: person.shareId });
+                            },
+                          }]}
+                        />
+                      ) : null}
+                    </SharePersonRow>
+                  </div>
+                ))}
+                {linkPane.people}
+              </section>
+            ) : null}
+
             {linkPane.content}
           </div>
         </div>

@@ -89,7 +89,6 @@ test("@dataset-shared-form desktop publishes its Collection, a guest submits, an
     await publication.getByRole("button", { name: "Publish on a link", exact: true }).click();
     await publication.getByRole("button", { name: "Share app folder", exact: true }).click();
     const share = page.getByTestId("share-dialog");
-    await share.getByRole("radio", { name: "Anyone with the link", exact: true }).click();
     await share.getByRole("radiogroup", { name: "Link access" }).getByRole("radio", { name: "View", exact: true }).click();
     await share.getByRole("button", { name: "Create link", exact: true }).click();
     await expect(share.getByTestId("share-link-url")).toBeVisible();

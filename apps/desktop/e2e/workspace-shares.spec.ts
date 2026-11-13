@@ -392,9 +392,6 @@ confidentialTest.describe("View link lifecycle", () => {
       await expect(dialog).toBeVisible();
       await expect(dialog).toContainText("docs/shared.md");
 
-      const linkScope = dialog.getByRole("radio", { name: "Anyone with the link" });
-      await linkScope.click();
-      await expect(linkScope).toHaveAttribute("aria-checked", "true");
       const linkAccess = dialog.getByRole("radiogroup", { name: "Link access" });
       await expect(
         linkAccess.getByRole("radio", { name: "Comment", exact: true }),
@@ -537,7 +534,6 @@ confidentialTest.describe("View link lifecycle", () => {
       await page.getByTestId("explorer-menu-item-share").click();
       dialog = page.getByTestId("share-dialog");
       await expect(dialog).toBeVisible();
-      await dialog.getByRole("radio", { name: "Anyone with the link" }).click();
       const linkRows = dialog.locator('article[data-testid^="share-link-row-"]');
       await expect(linkRows).toHaveCount(1);
       const linkRow = linkRows.first();

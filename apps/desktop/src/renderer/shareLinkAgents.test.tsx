@@ -53,15 +53,15 @@ type View = {
   // The Share dialog is open, and which time it was opened.
   open: boolean;
   dialog: number;
-  // The link tab is shown, so the list is mounted.
-  linkTab: boolean;
+  // The link's row is on screen, so the list is mounted.
+  listShown: boolean;
   revision: number;
 };
 
 // The Share dialog's link pane, reduced to its Disconnects and one link's list.
-function Dialog(props: { notices: ShareRemovalNotices; disconnected: ReadonlySet<string>; linkTab: boolean; revision: number }) {
+function Dialog(props: { notices: ShareRemovalNotices; disconnected: ReadonlySet<string>; listShown: boolean; revision: number }) {
   const disconnects = useLinkAgentDisconnects(props.notices, props.disconnected);
-  return props.linkTab ? <LinkAgentsList {...LINK} revision={props.revision} disconnects={disconnects} /> : null;
+  return props.listShown ? <LinkAgentsList {...LINK} revision={props.revision} disconnects={disconnects} /> : null;
 }
 
 // The shell, which outlives each Share dialog.
@@ -76,12 +76,12 @@ function Shell(props: View) {
     },
   }), [agentDisconnected]);
   return props.open ? (
-    <Dialog key={props.dialog} notices={notices} disconnected={disconnected} linkTab={props.linkTab} revision={props.revision} />
+    <Dialog key={props.dialog} notices={notices} disconnected={disconnected} listShown={props.listShown} revision={props.revision} />
   ) : null;
 }
 
 function renderList(revision = 1) {
-  let view: View = { open: true, dialog: 1, linkTab: true, revision };
+  let view: View = { open: true, dialog: 1, listShown: true, revision };
   const rendered = render(<Shell {...view} />);
   const set = (change: Partial<View>) => {
     view = { ...view, ...change };
@@ -230,7 +230,7 @@ describe("LinkAgentsList", () => {
     expect(shell.agentDisconnected).toHaveBeenCalledWith({ workspaceId: "ws-1", grantId: "grant-1", connectionId: "c1" });
   });
 
-  it("keeps a Disconnect across leaving the link tab, and shows its failure in place with no notice", async () => {
+  it("keeps a Disconnect while its list is off screen, and shows its failure in place with no notice", async () => {
     api.listRelayShareLinkAgents.mockResolvedValue(page([agent("c1", "Codex")]));
     const pending = controllable<{ connectionId: string }>();
     api.disconnectRelayShareLinkAgent.mockReturnValueOnce(pending.promise);
@@ -238,17 +238,17 @@ describe("LinkAgentsList", () => {
     const { set } = renderList();
     await user.click(await screen.findByTestId("share-link-agent-disconnect-c1"));
 
-    // Invite by email takes the list away; the dialog stays open.
-    set({ linkTab: false });
+    // Closing "more links" takes the list away; the dialog stays open.
+    set({ listShown: false });
     expect(screen.queryByRole("region")).toBeNull();
-    set({ linkTab: true });
+    set({ listShown: true });
     const button = await screen.findByTestId("share-link-agent-disconnect-c1");
     expect(button.textContent).toBe("Disconnecting…");
 
-    set({ linkTab: false });
+    set({ listShown: false });
     await act(async () => pending.reject(new Error("Relay unavailable")));
     expect(shell.failed).not.toHaveBeenCalled();
-    set({ linkTab: true });
+    set({ listShown: true });
     const error = await screen.findByTestId("share-link-agent-error-c1");
     expect(error.textContent).toMatch(/^dohc could not disconnect Codex\./u);
     expect(screen.getByTestId("share-link-agent-disconnect-c1").textContent).toBe("Disconnect");
