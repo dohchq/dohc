@@ -439,8 +439,7 @@ export class ServiceActivationStore {
         bounds: {pageRows: ORDINARY_FOLD_PAGE_ROWS, pageBytes: input.bounds.maxBytesPerDrain}, pages: ORDINARY_FOLD_RUN_PAGES});
       if (folded.kind === "busy") throw new ServiceActivationBusy();
       if (folded.kind === "over-budget") throw new ServiceActivationHistoryOverBudget(folded.message);
-      // A fold that cannot go further leaves the read from the base to decide. So does a page that ends at a state no live
-      // document has, which a read from the base projects only where its source's proof needs it.
+      // A fold that cannot go further, or whose next row no page can fold, leaves the read from the base to decide.
       if (folded.kind === "blocked" || folded.kind === "current" || folded.kind === "refused") checkpoint = null;
       await setImmediate();
       found = read(checkpoint);
