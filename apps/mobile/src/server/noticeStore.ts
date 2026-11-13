@@ -38,9 +38,9 @@ import type { WorkspaceList, WorkspaceListStore } from "./workspaceList";
 // again. Rows of a workspace hidden on this phone go at once, from memory and disk. So do rows naming a path, thread,
 // or message in a workspace that left the list, which the relay serves only to its owner. A change made on another
 // device is seen when the phone next reads its workspace list: at launch, on a return from the background, and on
-// Refresh. A share's Notice goes at once when the share is lost: the relay sends it as removed. The relay sends nothing
-// when it stops showing a row for another reason, such as its file becoming secret: that row goes at the next whole
-// read, not at once.
+// Refresh. A share's Notice goes at the next read after the share is lost, within a held read's wait: the relay sends
+// it as removed. The relay sends nothing when it stops showing a row for another reason, such as its file becoming
+// secret: that row goes at the next whole read.
 //
 // Marks. Each mark waits in order, on disk, until the server takes it. One request is on its way at a time, and sends
 // the oldest waiting marks in the order they were made, so a later mark always lands after an earlier one, even when
