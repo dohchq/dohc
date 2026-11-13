@@ -403,7 +403,8 @@ function buildServer(options: PersonalMcpOptions, reach: Reach): McpServer {
       "Its owner must have opened it in dohc on a desktop first.", {
       workspace: workspaceArg(),
       // The live call answers before this request's own deadline.
-      options: workspace => ({live: {client: liveClient, workspaceId: workspace, refused: liveRefused}, limits,
+      options: workspace => ({live: {client: liveClient, workspaceId: workspace, refused: liveRefused,
+        tryAgainLater: (reason: string) => reason === "personal_agent_unavailable" ? {code: UNAVAILABLE.code, error: UNAVAILABLE.error} : undefined}, limits,
         signal: AbortSignal.any([signal, AbortSignal.timeout(Math.max(0, options.deadlineAtMs - Date.now() - ANSWER_RESERVE_MS))])}),
     });
   }

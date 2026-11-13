@@ -13,12 +13,16 @@ import {asRecord} from "@dohc/workspace-core/records";
 import {LINK_REFUSALS, parseLinkRefusal} from "@dohc/security-contract/link-refusal";
 
 export const LIVE_DOCUMENT_PREPARING = "The document is still starting. Try again shortly.";
+/** The WebSocket close that says to try again later. */
+const TRY_AGAIN_LATER_CLOSE_CODE = 1013;
 
 /** A personal agent's live access to one workspace, and its MCP's code and words for a relay refusal. */
 export interface PersonalLiveDocumentAccess {
   client: PersonalLiveClient;
   workspaceId: string;
   refused(response: Response, signal: AbortSignal): Promise<{code: string; error: string}>;
+  /** The MCP's code and words for a socket the relay closed as try again later, when it knows the reason. */
+  tryAgainLater(reason: string): {code: string; error: string} | undefined;
 }
 
 /** A refusal before any edit, with the code the agent acts on. */
@@ -52,7 +56,8 @@ function waitFor(provider: Provider, predicate: (state: NamedLiveProviderState) 
 }
 
 /** A ticket for one document, the context its edits record, and how to open its socket. */
-type LiveTicket = {objectId: string; workspaceId?: string; token: string; context?: LiveAuthorContext; open: LinkLiveAgentAccess["open"]};
+type LiveTicket = {objectId: string; workspaceId?: string; token: string; context?: LiveAuthorContext; open: LinkLiveAgentAccess["open"];
+  tryAgainLater?: PersonalLiveDocumentAccess["tryAgainLater"]};
 
 async function ticketValue(response: Response, keys: string, maxBytes: number, signal: AbortSignal, invalid: string): Promise<Record<string, unknown>> {
   const value = asRecord(await readBoundedJson(response, maxBytes, signal));
@@ -92,7 +97,7 @@ async function personalTicket(live: PersonalLiveDocumentAccess, path: string, ma
   if (!ticket.ok) throw await refusal(ticket);
   const value = await ticketValue(ticket, "expiresAtMs,token", maxBytes, signal, "Invalid live ticket.");
   return {objectId, workspaceId, token: value.token as string,
-    open: (token, openSignal, receive) => client.open(workspaceId, token, openSignal, receive)};
+    open: (token, openSignal, receive) => client.open(workspaceId, token, openSignal, receive), tryAgainLater: live.tryAgainLater};
 }
 
 export async function remoteLiveDocument(options: {
@@ -105,8 +110,8 @@ export async function remoteLiveDocument(options: {
   let provider: Provider | undefined;
   let route: ReturnType<Provider["connect"]> | undefined;
   let changed = false;
-  // The relay closed the socket because a connection limit is full. The agent gets its reason, not a timeout.
-  let limited: LiveDocumentRefusal | undefined, closed: Promise<void> | undefined, open = () => false;
+  // The relay closed the socket for a reason the agent can act on: a full connection limit, or try again later.
+  let closedFor: LiveDocumentRefusal | undefined, closed: Promise<void> | undefined, open = () => false;
   try {
     const maxBytes = options.limits.maxHttpResponseBytes;
     const ticket = "client" in options.live ? await personalTicket(options.live, path, maxBytes, signal) : await linkTicket(options.live, path, maxBytes, signal);
@@ -132,8 +137,11 @@ export async function remoteLiveDocument(options: {
       void route!.receive(bytes);
     });
     closed = new Promise(resolve => host.socket.once("close", (code, reason) => {
-      const limit = reason.toString(), message = code === LIVE_CONNECTION_LIMIT_CLOSE_CODE ? liveConnectionLimitMessage(limit) : undefined;
-      if (message) limited = new LiveDocumentRefusal(limit, message);
+      const words = reason.toString();
+      const limit = code === LIVE_CONNECTION_LIMIT_CLOSE_CODE ? liveConnectionLimitMessage(words) : undefined;
+      const later = code === TRY_AGAIN_LATER_CLOSE_CODE ? ticket.tryAgainLater?.(words) : undefined;
+      if (limit) closedFor = new LiveDocumentRefusal(words, limit);
+      else if (later) closedFor = new LiveDocumentRefusal(later.code, later.error);
       route!.disconnect();
       resolve();
     }));
@@ -158,7 +166,7 @@ export async function remoteLiveDocument(options: {
     // The provider's terminate and the call's deadline bound the wait.
     if (closed && !changed && !(error instanceof LiveDocumentRefusal) && !open() && !signal.aborted)
       await Promise.race([closed, new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), {once: true}))]);
-    const refusal = error instanceof LiveDocumentRefusal ? error : changed ? undefined : limited, failure = refusal ?? error;
+    const refusal = error instanceof LiveDocumentRefusal ? error : changed ? undefined : closedFor, failure = refusal ?? error;
     return {ok: false, path, outcome: unknown ? "unknown" : "not-applied", ...(refusal ? {code: refusal.code} : {}),
       error: unknown ? "The edit outcome is unknown. Read the live document before retrying." : failure instanceof Error ? failure.message : "Live document is unavailable."};
   } finally {

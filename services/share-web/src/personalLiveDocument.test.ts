@@ -7,8 +7,8 @@ import {Client, StreamableHTTPClientTransport} from "@modelcontextprotocol/clien
 import {markdownToYDoc, yDocToMarkdown} from "@dohc/ydoc-projection";
 import {createLiveFrameSession, encodeLiveFrameSync, type LiveFrame} from "@dohc/live-session-contract/live-frame";
 import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
-import {LIVE_CONNECTION_LIMIT_CLOSE_CODE, LIVE_CONNECTION_LIMIT_MESSAGES, type LiveConnectionLimitCode} from "@dohc/live-session-contract/live-connection";
-import {servePersonalMcp} from "./personalMcp";
+import {LIVE_CONNECTION_LIMIT_CLOSE_CODE, LIVE_CONNECTION_LIMIT_MESSAGES} from "@dohc/live-session-contract/live-connection";
+import {PERSONAL_SIGN_IN_UNAVAILABLE, servePersonalMcp} from "./personalMcp";
 import {createPersonalLiveClient} from "./personalLiveClient";
 import {LIVE_DOCUMENT_PREPARING, remoteLiveDocument} from "./remoteLiveDocument";
 
@@ -34,7 +34,7 @@ type RelayCall = {path: string; authorization: string | null; body: unknown; sig
 type Answer = (call: RelayCall) => Response | Promise<Response>;
 const structured = (result: unknown) => (result as {structuredContent?: Record<string, unknown>}).structuredContent;
 
-async function fixture(relay: {document?: Answer; ticket?: Answer; limit?: () => LiveConnectionLimitCode | undefined} = {}) {
+async function fixture(relay: {document?: Answer; ticket?: Answer; close?: () => [number, string] | undefined} = {}) {
   const doc = markdownToYDoc("Hello **world**.\n");
   const server = new WebSocketServer({port: 0, host: "127.0.0.1", perMessageDeflate: false, handleProtocols: () => "dohc-live-v1"});
   await once(server, "listening");
@@ -45,9 +45,9 @@ async function fixture(relay: {document?: Answer; ticket?: Answer; limit?: () =>
     // A personal session names its workspace and carries the agent's own token and MCP address.
     expect([request.url, request.headers.origin, request.headers["x-dohc-agent-resource"]]).toEqual(["/sync/live/personal?workspaceId=trip", origin, resource]);
     sockets.push(request.headers.authorization);
-    // The relay accepted the socket, then found a connection limit full.
-    const limit = relay.limit?.();
-    if (limit) {socket.close(LIVE_CONNECTION_LIMIT_CLOSE_CODE, limit); return;}
+    // The relay accepted the socket, then refused it: a connection limit is full, or it can't check the sign-in.
+    const close = relay.close?.();
+    if (close) {socket.close(...close); return;}
     const protocol = createLiveFrameSession("server", frames);
     socket.on("close", () => protocol.close());
     let chain = Promise.resolve();
@@ -153,7 +153,7 @@ it.each(["/sync/live/personal-document", "/sync/live/personal-tickets"])("cancel
   const f = await fixture(path === "/sync/live/personal-document" ? {document: hold} : {ticket: hold});
   const caller = new AbortController();
   const result = remoteLiveDocument({live: {client: f.live.agent({accessToken: TOKEN_A, resource}), workspaceId: "trip",
-    refused: async () => ({code: "unexpected", error: "unexpected"})}, limits, signal: caller.signal}, "doc.md");
+    refused: async () => ({code: "unexpected", error: "unexpected"}), tryAgainLater: () => undefined}, limits, signal: caller.signal}, "doc.md");
   await holding;
   caller.abort();
   expect(await result).toMatchObject({ok: false, outcome: "not-applied"});
@@ -172,11 +172,27 @@ it.each([["a refreshed token", TOKEN_B], ["an unchanged token", TOKEN_A]])("mint
 
 it("says a full connection limit at once when the relay closes the socket for it, and reads once there is room", async () => {
   let full = true;
-  const f = await fixture({limit: () => full ? "live_person_limit" : undefined});
+  const f = await fixture({close: () => full ? [LIVE_CONNECTION_LIMIT_CLOSE_CODE, "live_person_limit"] : undefined});
   // Without the close handling, the call waits for its 30 s deadline and reads as a timeout.
   expect(await f.call("dohc_edit_document", {find: "world", replacement: "friend"}))
     .toEqual({ok: false, path: "doc.md", outcome: "not-applied", code: "live_person_limit", error: LIVE_CONNECTION_LIMIT_MESSAGES.live_person_limit});
   expect(f.sockets).toHaveLength(1);
   full = false;
   expect(await f.call("dohc_read_document")).toEqual({ok: true, path: "doc.md", markdown: "Hello **world**.\n", source: "live"});
+});
+
+it("says to try again when the relay closes the socket because it can't check the sign-in, and reads once it can", async () => {
+  let reason: string | undefined = "personal_agent_unavailable";
+  const f = await fixture({close: () => reason ? [1013, reason] : undefined});
+  // Without the close handling, the call answers with no code, so the agent can't tell that a retry may help.
+  expect(await f.call("dohc_edit_document", {find: "world", replacement: "friend"}))
+    .toEqual({ok: false, path: "doc.md", outcome: "not-applied", code: "unavailable", error: PERSONAL_SIGN_IN_UNAVAILABLE});
+  // A try-again close with a reason the agent's MCP doesn't know carries no code.
+  reason = "something_else";
+  const unknown = await f.call("dohc_read_document");
+  expect(unknown).toMatchObject({ok: false, path: "doc.md", outcome: "not-applied"});
+  expect(unknown).not.toHaveProperty("code");
+  reason = undefined;
+  expect(await f.call("dohc_read_document")).toEqual({ok: true, path: "doc.md", markdown: "Hello **world**.\n", source: "live"});
+  expect(f.sockets).toHaveLength(3);
 });
