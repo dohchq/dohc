@@ -434,21 +434,113 @@ describe("named live browser provider", () => {
     expect(received).toEqual(["document.md", "document.md"]);
     expect(value.state().binding).toEqual(binding);
   });
-  it("drains queued edits in order while receiving peer updates", async () => {
+  it("sends the edits made while one update is in flight as one update, around peer updates", async () => {
     const { value, host, doc } = await live();
-    edit(value, " first"); const first = await host.submitted(); edit(value, " second"); edit(value, " third");
-    expect(value.state().pendingUpdates).toBe(3); expect(host.submissions()).toHaveLength(1);
+    edit(value, " first"); const first = await host.submitted();
+    edit(value, " second");
     const before = Y.encodeStateVector(doc);
     const content = (getDohcYDocBodyFragment(doc).get(0) as Y.XmlElement).get(0) as Y.XmlText;
     content.insert(content.length, " peer");
     await host.transfer("applied-update", Y.encodeStateAsUpdate(doc, before), 1);
-    expect(value.body.toString()).toContain("peer"); expect(value.state().pendingUpdates).toBe(3);
-    await host.ack(first, 1, 2); const second = await host.submitted(2);
-    await host.ack(second, 1, 3); const third = await host.submitted(3);
-    await host.ack(third, 1, 4);
-    expect(value.state()).toMatchObject({ status: "live", pendingUpdates: 0 });
-    for (const item of [first, second, third]) Y.applyUpdate(doc, item.bytes);
+    expect(value.body.toString()).toContain("peer");
+    edit(value, " third"); edit(value, " fourth");
+    expect(value.state().pendingUpdates).toBe(2); expect(host.submissions()).toHaveLength(1);
+    await host.ack(first, 1, 2); const merged = await host.submitted(2);
+    expect(hash(merged.bytes)).toBe(merged.begin.digest);
+    expect(merged.begin).not.toMatchObject({ deliveryId: (first.begin as { deliveryId: string }).deliveryId });
+    expect(value.state()).toMatchObject({ pendingUpdates: 1, pendingBytes: merged.bytes.length });
+    await host.ack(merged, 1, 3);
+    expect(value.state()).toMatchObject({ status: "live", pendingUpdates: 0, pendingBytes: 0 });
+    expect(host.submissions()).toHaveLength(2);
+    for (const item of [first, merged]) Y.applyUpdate(doc, item.bytes);
     expect(value.body.toString()).toBe(getDohcYDocBodyFragment(doc).toString());
+    expect(value.body.toString()).toContain("first second");
+    expect(value.body.toString()).toContain("third fourth");
+  });
+  it("resends a retried update unchanged while later edits merge behind it", async () => {
+    const { value, host, doc } = await live(); vi.useFakeTimers();
+    edit(value, " draft"); const first = await host.submitted();
+    if (first.begin.purpose !== "submit-update") throw new Error("Expected submit.");
+    edit(value, " a"); edit(value, " b");
+    await host.send({ kind: "result", result: "retry", deliveryId: first.begin.deliveryId, updateDigest: first.begin.digest, reason: "application-pending" });
+    edit(value, " c");
+    await vi.advanceTimersByTimeAsync(250);
+    const retry = await host.submitted(2);
+    expect(retry.bytes).toEqual(first.bytes);
+    expect(retry.begin).toMatchObject({ deliveryId: first.begin.deliveryId, digest: first.begin.digest });
+    expect(value.state().pendingUpdates).toBe(2);
+    await host.ack(retry);
+    const merged = await host.submitted(3);
+    Y.applyUpdate(doc, first.bytes); Y.applyUpdate(doc, merged.bytes);
+    expect(getDohcYDocBodyFragment(doc).toString()).toBe(value.body.toString());
+    expect(value.body.toString()).toContain("base draft a b c");
+  });
+  it("starts another update when merging would pass the update byte limit", async () => {
+    const { value, host, doc } = await live();
+    edit(value, " first"); const first = await host.submitted();
+    edit(value, "x".repeat(5000)); edit(value, "y".repeat(5000)); edit(value, "z");
+    expect(value.state().pendingUpdates).toBe(3);
+    await host.ack(first, 1, 1); const second = await host.submitted(2);
+    expect(second.bytes.length).toBeLessThanOrEqual(limits().frames.receive.maxUpdateBytes);
+    await host.ack(second, 1, 2); const third = await host.submitted(3);
+    expect(third.bytes.length).toBeLessThanOrEqual(limits().frames.receive.maxUpdateBytes);
+    await host.ack(third, 1, 3);
+    expect(value.state()).toMatchObject({ status: "live", pendingUpdates: 0, pendingBytes: 0 });
+    for (const item of [first, second, third]) Y.applyUpdate(doc, item.bytes);
+    expect(getDohcYDocBodyFragment(doc).toString()).toBe(value.body.toString());
+  });
+  it("splits a burst at the host's smaller update limit and delivers all of it", async () => {
+    const options = limits(), value = provider();
+    const policy = { ...options.frames, receive: { ...options.frames.receive, maxUpdateBytes: 4096 } };
+    const host = peer(value, 1, { policy, replenish: true }), doc = document("base");
+    await host.greet(); await host.initial(doc);
+    edit(value, " first"); const first = await host.submitted();
+    for (let key = 0; key < 6; key++) edit(value, String(key).repeat(1500));
+    await host.ack(first, 1, 1);
+    const sent = [first];
+    for (let cursor = 2; value.state().pendingUpdates > 0; cursor++) {
+      const item = await host.submitted(cursor);
+      expect(item.bytes.length).toBeLessThanOrEqual(4096);
+      sent.push(item); await host.ack(item, 1, cursor);
+    }
+    expect(sent.length).toBeGreaterThan(2);
+    expect(value.state()).toMatchObject({ status: "live", pendingBytes: 0 });
+    for (const item of sent) Y.applyUpdate(doc, item.bytes);
+    expect(getDohcYDocBodyFragment(doc).toString()).toBe(value.body.toString());
+  });
+  it("keeps every merged edit in the draft when the merged update is refused", async () => {
+    const { value, host } = await live();
+    edit(value, " first"); const first = await host.submitted();
+    edit(value, " second"); edit(value, " third");
+    await host.ack(first, 1, 1); const merged = await host.submitted(2);
+    if (merged.begin.purpose !== "submit-update") throw new Error("Expected submit.");
+    await host.send({ kind: "result", result: "refused", deliveryId: merged.begin.deliveryId, updateDigest: merged.begin.digest, reason: "provenance-refused" });
+    expect(value.state()).toMatchObject({ status: "quarantined", reason: "provenance-refused", pendingUpdates: 1 });
+    expect(value.body.toString()).toContain("base first second third");
+  });
+  it("merges only edits recorded under the same context", async () => {
+    let current: LiveAuthorContext = { kind: "link", publicPrincipalId: "public-ana" };
+    const value = createNamedLiveProvider(limits(), undefined, () => current);
+    cleanup.push(() => { value.close(); value.doc.destroy(); });
+    const { host } = await live(value);
+    edit(value, " first"); const first = await host.submitted();
+    edit(value, " second");
+    current = { kind: "link", publicPrincipalId: "public-ben" };
+    edit(value, " third"); edit(value, " fourth");
+    expect(value.state().pendingUpdates).toBe(3);
+    await host.ack(first, 1, 1); const second = await host.submitted(2);
+    expect(second.begin).toMatchObject({ authorContext: { publicPrincipalId: "public-ana" } });
+    await host.ack(second, 1, 2); const third = await host.submitted(3);
+    expect(third.begin).toMatchObject({ authorContext: { publicPrincipalId: "public-ben" } });
+  });
+  it("keeps the queue within its count however fast edits arrive", async () => {
+    const { value, host, doc } = await live(provider({ ...limits(), maxPendingUpdates: 2 }));
+    edit(value, " first"); const first = await host.submitted();
+    for (let key = 0; key < 200; key++) edit(value, "k");
+    expect(value.state()).toMatchObject({ status: "live", pendingUpdates: 2 });
+    await host.ack(first, 1, 1); const merged = await host.submitted(2);
+    Y.applyUpdate(doc, first.bytes); Y.applyUpdate(doc, merged.bytes);
+    expect(getDohcYDocBodyFragment(doc).toString()).toBe(value.body.toString());
   });
   it("records a peer update cursor before a synchronous observer disconnects", async () => {
     const { value, host, doc } = await live();

@@ -54,6 +54,8 @@ interface Route {
   readonly controls: LiveFrame[];
   epoch?: number;
   maxFrameBytes: number;
+  // The smaller of this page's and the host's per-update limits; the frame session refuses a larger submit.
+  maxUpdateBytes: number;
   nextTransfer: number;
   transfer?: Transfer;
   vectorSent: boolean;
@@ -227,6 +229,7 @@ export function createNamedLiveProvider(input: NamedLiveProviderLimits,
           if (hostEpoch !== null && frame.hostEpoch < hostEpoch) { quarantine("stale-host"); return; }
           held.epoch = frame.hostEpoch; hostEpoch = frame.hostEpoch;
           held.maxFrameBytes = Math.min(held.maxFrameBytes, frame.receivePolicy.maxFrameBytes);
+          held.maxUpdateBytes = Math.min(held.maxUpdateBytes, frame.receivePolicy.maxUpdateBytes);
           status = "syncing"; notify();
         } else if (frame.kind === "membership") {
           membership = frame; notify();
@@ -307,16 +310,31 @@ export function createNamedLiveProvider(input: NamedLiveProviderLimits,
   function localUpdate(bytes: Uint8Array, origin: unknown) {
     if (origin === REMOTE || status === "closed" || status === "quarantined") return;
     if (status !== "live") { quarantine("edit-while-unavailable"); return; }
-    if (bytes.length > limits.frames.receive.maxUpdateBytes || bytes.length > limits.maxPendingUpdateBytes - pendingBytes ||
-        pending.length >= limits.maxPendingUpdates) { quarantine("pending-update-limit"); return; }
+    if (bytes.length > limits.frames.receive.maxUpdateBytes) { quarantine("pending-update-limit"); return; }
     let authorContext: LiveAuthorContext | undefined;
     try {
       authorContext = recordingContext === undefined ? undefined
         : parseLiveAuthorContext(typeof recordingContext === "function" ? recordingContext() : recordingContext);
     } catch { quarantine("invalid-recording-context"); return; }
-    pending.push({ id: crypto.randomUUID(), bytes: bytes.slice(), epochs: [],
-      ...(authorContext ? { authorContext } : {}) });
-    pendingBytes += bytes.length;
+    // Edits made while an update is in flight leave together as one update, so
+    // typing costs one host admission per round trip rather than one per key.
+    // The head is never merged: it may have been sent, and a retry must resend
+    // its exact deliveryId and bytes.
+    const last = pending.length > 1 ? pending[pending.length - 1]! : undefined;
+    const merged = last && last.epochs.length === 0 && JSON.stringify(last.authorContext) === JSON.stringify(authorContext)
+      ? Y.mergeUpdates([last.bytes, bytes]) : undefined;
+    if (last && merged && merged.length <= (route?.maxUpdateBytes ?? limits.frames.receive.maxUpdateBytes) &&
+        merged.length - last.bytes.length <= limits.maxPendingUpdateBytes - pendingBytes) {
+      pending[pending.length - 1] = { ...last, bytes: merged };
+      pendingBytes += merged.length - last.bytes.length;
+    } else {
+      if (bytes.length > limits.maxPendingUpdateBytes - pendingBytes || pending.length >= limits.maxPendingUpdates) {
+        quarantine("pending-update-limit"); return;
+      }
+      pending.push({ id: crypto.randomUUID(), bytes: bytes.slice(), epochs: [],
+        ...(authorContext ? { authorContext } : {}) });
+      pendingBytes += bytes.length;
+    }
     notify();
     if (route) void pump(route);
   }
@@ -331,6 +349,7 @@ export function createNamedLiveProvider(input: NamedLiveProviderLimits,
       if (route) retire("disconnected", "replaced");
       const held: Route = { transport, protocol: createLiveFrameSession("client", limits.frames),
         controls: [{ kind: "hello", receivePolicy: limits.frames.receive }], maxFrameBytes: limits.frames.receive.maxFrameBytes,
+        maxUpdateBytes: limits.frames.receive.maxUpdateBytes,
         nextTransfer: 1, vectorSent: false, awaitingAck: false, retryDelayMs: 250, pumping: false, receiving: Promise.resolve(),
         grantedBytes: 0, grantedFrames: 0, receivedCursor: 0 };
       route = held; status = "connecting"; reason = null;
