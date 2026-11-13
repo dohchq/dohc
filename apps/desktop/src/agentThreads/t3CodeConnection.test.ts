@@ -145,14 +145,34 @@ describe("dohc's connection to T3 Code", () => {
   });
 
   it("keeps a new sign-in when a call made with the old one is refused late", async () => {
-    const { t3, store, connection, forward } = await setup();
+    const { t3, home, store } = await setup();
     await store.save({ origin: t3.origin, token: "revoked", expiresAtMs: Date.now() + 60_000 });
-    // The call with the old sign-in is on its way when the person allows dohc again.
+    // T3 Code's refusal of the old sign-in is held until the new one is kept.
+    let arrived!: () => void;
+    const refusalOnItsWay = new Promise<void>((resolve) => (arrived = resolve));
+    let deliver!: () => void;
+    const held = new Promise<void>((resolve) => (deliver = resolve));
+    const connection = createT3CodeConnection({
+      home,
+      store,
+      fetch: async (input, init) => {
+        const response = await fetch(input, init);
+        if (new Headers(init?.headers).get("authorization") === "Bearer revoked") {
+          arrived();
+          await held;
+        }
+        return response;
+      },
+    });
+    const forward = (forwardId: string) =>
+      connection.forward({ threadId: "t1", message: "hello", how: "line", forwardId });
+
     const late = problemOf(forward("f1"));
+    await refusalOnItsWay;
     await connection.signIn({ open: browser });
+    deliver();
 
     expect(await late).toBe("not-allowed");
-
     expect((await store.load())?.token).toBe("token-1");
     await forward("f2");
   });
