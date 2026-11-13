@@ -20,6 +20,7 @@ import type {ServiceHostedHold} from "./serviceHostedReplication";
 import {RecoveryCopyRefusal, type ServiceKeptEdits} from "./storage/serviceKeptEdits";
 import type {JsonValue} from "@dohc/workspace-engine-client";
 import {heldDocumentFixture} from "./heldDocument.test-helper";
+import type {KnownRefusalWord} from "./serverLogWords";
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {vi.restoreAllMocks(); for (const close of cleanup.splice(0).reverse()) await close();});
@@ -41,7 +42,7 @@ async function fixture() {
   const blocked = new Map<string, ServiceActivationBlock>(), pending = new Set<string>(), prepared: RetirableServiceActivation[] = [];
   const host = {ready: vi.fn(() => false), reconcile: vi.fn(), unavailable: false,
     holdReason: vi.fn((_document: {objectId: string}): ServiceHostedHold["reason"] | undefined => undefined),
-    failing: vi.fn((_document: {objectId: string}): {word: string; since: number} | undefined => undefined),
+    failing: vi.fn((_document: {objectId: string}): {word: KnownRefusalWord; since: number} | undefined => undefined),
     blocked: vi.fn((document: {objectId: string}) => blocked.get(document.objectId)),
     unblock: vi.fn((document: {objectId: string}) => blocked.delete(document.objectId)),
     diverged: vi.fn((_row: {workspaceId: string; replicationEpoch: string; streamIdentity: string}) => false),

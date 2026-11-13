@@ -1423,7 +1423,7 @@ it('reports why an activation keeps failing once two failures in a row have last
   try{
     const refusal=(message:string)=>new EngineRequestError(1,{code:'CONFLICT',message,retry:'no'} as never,'liveApplication.captureOwnerActivation')
     let error:unknown=new ServiceActivationRefused('docs/a.md has no lineage')
-    const capture=vi.fn(async(..._args:unknown[]):Promise<NativeOwnerActivation>=>{throw error})
+    const capture=vi.fn(async():Promise<NativeOwnerActivation>=>{throw error})
     const d=activationDriver(f,capture)
     const fail=async(at:number,signal=new AbortController().signal)=>{
       vi.setSystemTime(at);await expect(d.driver.activate(d.target,signal)).rejects.toBe(error)
