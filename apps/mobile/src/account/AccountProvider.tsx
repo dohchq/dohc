@@ -1,9 +1,12 @@
 import { fetch } from "expo/fetch";
 import { createContext, useContext, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
 import { AppState, View } from "react-native";
+import { nativeDurableFile } from "../../modules/durable-file";
 import { createAccount, type Account, type AccountState, type SignIn } from "../server/account";
 import { createCacheFiles } from "../server/cacheFiles";
+import { createDurableFiles } from "../server/durableFiles";
 import { createOpenWorkspace, type OpenWorkspaceState } from "../server/openWorkspace";
+import { createOutbox, type Outbox } from "../server/outbox";
 import { createReadCache, type WorkspaceData } from "../server/workspaceData";
 import { createWorkspaceList, type WorkspaceList, type WorkspaceListStore } from "../server/workspaceList";
 import { useTheme } from "../theme";
@@ -13,6 +16,8 @@ import { secureSignInStore } from "./secureSignInStore";
 interface AccountValue {
   readonly account: Account;
   readonly state: AccountState;
+  /** Chat writes waiting for the server. Nothing adds to it yet. */
+  readonly outbox: Outbox;
   readonly workspaces: WorkspaceList;
   /** The workspace open on the phone: the one chosen, or the first that shows. Null when none shows. */
   readonly currentWorkspaceId: string | null;
@@ -39,6 +44,10 @@ const noOpen = { subscribe: () => () => undefined, state: () => NONE };
 // started can reach the screen. Its feed runs while the app is in the foreground. The read cache keeps a copy on disk,
 // saved before the app goes to the background, so a relaunch shows what was read last. It empties, on disk too,
 // whenever the sign-in changes or ends.
+//
+// The outbox (src/server/outbox.ts) is the account's too, beside the cache and outside any workspace's store. It sends
+// only with its records' own account, keeps them through a 401, and deletes them at Sign out. A read that shows a saved
+// write's result hands it off. An app-state change reads it again if iOS kept it locked, and asks again at once.
 export function AccountProvider({ children }: { children: ReactNode }) {
   const [account] = useState(() => createAccount({ store: secureSignInStore, fetch }));
   const state = useSyncExternalStore(account.subscribe, account.state);
@@ -48,13 +57,22 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   const [cache] = useState(() => createReadCache(createCacheFiles()));
   useEffect(() => cache.follow(account), [account, cache]);
 
+  const [outbox] = useState(() => createOutbox({ files: createDurableFiles(nativeDurableFile()) }));
+  useEffect(() => outbox.follow(account), [account, outbox]);
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", () => outbox.wake());
+    return () => subscription.remove();
+  }, [outbox]);
+
   // The saved list shows until the server's answers, so a relaunch opens the last workspace from the cache.
   const list = useMemo<WorkspaceListStore | null>(() => signIn && createWorkspaceList(signIn, cache.savedList(signIn)), [signIn, cache]);
   const workspaces = useSyncExternalStore((list ?? noList).subscribe, (list ?? noList).state);
   useEffect(() => list?.reload(), [list]);
   // Made during render, so the first frame for a new workspace already reads from its own store. Making one starts
   // nothing: subscribing follows the list, and the effect runs the feed and stops it all once another replaces it.
-  const open = useMemo(() => signIn && list ? createOpenWorkspace({ signIn, list, cache }) : null, [signIn, list, cache]);
+  const open = useMemo(() => signIn && list ? createOpenWorkspace({
+    signIn, list, cache, onMessages: (workspaceId, messages) => outbox.handoff(signIn, workspaceId, messages),
+  }) : null, [signIn, list, cache, outbox]);
   const { currentWorkspaceId, data } = useSyncExternalStore((open ?? noOpen).subscribe, (open ?? noOpen).state);
   useEffect(() => {
     if (!open) return;
@@ -72,11 +90,11 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   }, [open, cache]);
 
   const value = useMemo<AccountValue>(() => ({
-    account, state, workspaces, currentWorkspaceId, data,
+    account, state, outbox, workspaces, currentWorkspaceId, data,
     chooseWorkspace: workspaceId => open?.choose(workspaceId),
     reloadWorkspaces: () => list?.reload(),
     setShowOnPhone: (workspaceId, showOnPhone) => open?.setShowOnPhone(workspaceId, showOnPhone),
-  }), [account, state, workspaces, currentWorkspaceId, data, list, open]);
+  }), [account, state, outbox, workspaces, currentWorkspaceId, data, list, open]);
   return <Context value={value}>{children}</Context>;
 }
 

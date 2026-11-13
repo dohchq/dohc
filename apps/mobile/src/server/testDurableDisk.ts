@@ -22,6 +22,8 @@ interface DurableDisk {
   readonly log: string[];
   /** Fails each write before its rename, leaving the previous record, or after it, at the folder sync. */
   failWrites: "write" | "sync-folder" | null;
+  /** An iOS phone not unlocked since it started: reads and recovery reject as locked, and writes fail. */
+  locked: boolean;
   /** Holds every write after its first half lands, until the returned function runs. */
   holdWrites(): () => void;
   names(): string[];
@@ -36,6 +38,7 @@ export function durableDisk(): DurableDisk {
     unreadable: new Set(),
     log: [],
     failWrites: null,
+    locked: false,
     holdWrites() {
       let release!: () => void;
       held = new Promise<void>(done => { release = done; });
@@ -65,6 +68,7 @@ export function durableDisk(): DurableDisk {
       write: (name, text) => serial(`write ${name}`, async () => {
         checkName(name);
         if (new TextEncoder().encode(text).length > RECORD_MAX_BYTES) throw nativeError("ERR_DURABLE_TOO_LARGE", "The record is too large.");
+        if (disk.locked) throw nativeError("ERR_DURABLE_FAILED", "Operation not permitted");
         temporaries += 1;
         const temp = `${name}.${temporaries.toString(16).padStart(32, "0")}.tmp`;
         disk.files.set(temp, text.slice(0, Math.floor(text.length / 2)));
@@ -80,6 +84,7 @@ export function durableDisk(): DurableDisk {
       }),
       read: name => serial(`read ${name}`, () => {
         checkName(name);
+        if (disk.locked) throw nativeError("ERR_DURABLE_LOCKED", "The phone hasn't been unlocked since it started.");
         const text = disk.files.get(name);
         if (text === undefined) return null;
         if (unreadable(name)) throw nativeError("ERR_DURABLE_UNREADABLE", "Couldn't read the record.");
@@ -90,10 +95,13 @@ export function durableDisk(): DurableDisk {
         checkName(name);
         disk.files.delete(name);
       }),
-      recover: () => serial("recover", () => ({
-        leftovers: disk.names().filter(name => !RECORD_NAME.test(name)),
-        unreadable: disk.names().filter(name => RECORD_NAME.test(name) && unreadable(name)),
-      })),
+      recover: () => serial("recover", () => {
+        if (disk.locked) throw nativeError("ERR_DURABLE_LOCKED", "The phone hasn't been unlocked since it started.");
+        return {
+          leftovers: disk.names().filter(name => !RECORD_NAME.test(name)),
+          unreadable: disk.names().filter(name => RECORD_NAME.test(name) && unreadable(name)),
+        };
+      }),
       removeLeftover: fileName => serial(`removeLeftover ${fileName}`, () => {
         checkName(fileName, TEMPORARY_NAME);
         disk.files.delete(fileName);

@@ -47,7 +47,14 @@ export const accountWords = {
   account: "Account",
   signOut: "Sign out",
   signOutTitle: (server: string) => `Sign out of ${server}?`,
-  signOutBody: "This phone stops reading your workspaces. Your work stays where it is.",
+  /** What Sign out deletes from the phone's outbox: messages never sent or refused, and ones that may still send. */
+  signOutBody: (unsent: number, maySend: number): string => {
+    const lines = [
+      unsent === 1 ? "1 message hasn't been sent. Signing out deletes it." : unsent > 1 ? `${unsent} messages haven't been sent. Signing out deletes them.` : null,
+      maySend === 1 ? "1 message may still send." : maySend > 1 ? `${maySend} messages may still send.` : null,
+    ].filter(line => line !== null);
+    return lines.length > 0 ? lines.join(" ") : "This phone stops reading your workspaces. Your work stays where it is.";
+  },
 
   showOnPhone: "Show on phone",
   showOnPhoneLabel: (workspace: string) => `Show ${workspace} on phone`,

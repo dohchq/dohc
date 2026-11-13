@@ -54,5 +54,12 @@ phone can open. Deletes run after any write in flight, and a delete overtakes a 
 `CACHE_FORMAT` when a view's value changes shape. Ending a token deletes it from the keychain first,
 then revokes its session, so a phone closed between the two keeps no token.
 
+The outbox (`src/server/outbox.ts`) keeps chat writes on disk, outside Caches, through the `durable-file` module
+(`src/server/durableFiles.ts`), until the server saves them and a read shows them. Nothing adds to it yet. It sends a
+record only with a sign-in for the record's own server and account, one at a time per thread or stream, in order, and
+asks again with the same operation ID until the write is saved or refused. A 401 keeps every record. Only Sign out
+deletes them, after sending stops. A record it can't read stays aside. A change to a record checks the outbox's
+lifetime after every wait, so a late answer can't bring back a deleted record.
+
 Copy uses React Native's core `Clipboard`, which React Native marks deprecated. Switch `src/copy.ts` to
 expo-clipboard before an upgrade removes it.

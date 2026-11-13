@@ -1,5 +1,6 @@
 import type { SignIn } from "./account";
 import { cacheScope, createWorkspaceData, type ReadCache, type WorkspaceData } from "./workspaceData";
+import type { ChatMessage } from "./workspaceReads";
 import type { WorkspaceListStore } from "./workspaceList";
 
 // The workspace open on the phone, and the store that reads it. The open workspace is the one the person chose in the
@@ -32,8 +33,10 @@ export function createOpenWorkspace(options: {
   readonly signIn: Pick<SignIn, "client" | "isCurrent" | "origin" | "userId">;
   readonly list: WorkspaceListStore;
   readonly cache: ReadCache;
+  /** A read of a workspace showed these messages, for the outbox's handoff. */
+  readonly onMessages?: (workspaceId: string, messages: readonly ChatMessage[]) => void;
 }): OpenWorkspace {
-  const { signIn, list, cache } = options;
+  const { signIn, list, cache, onMessages } = options;
   const listeners = new Set<() => void>();
   let chosen: string | null = null;
   let active = false;
@@ -45,6 +48,7 @@ export function createOpenWorkspace(options: {
     const data = createWorkspaceData({
       signIn, workspaceId, cache,
       onGone: () => list.reload(),
+      onMessages: onMessages && (messages => onMessages(workspaceId, messages)),
       // Only the store open now reopens; a later one has replaced any other.
       reopen: () => {
         if (!stopped && state.data === data) show(workspaceId);

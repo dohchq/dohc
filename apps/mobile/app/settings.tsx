@@ -66,7 +66,7 @@ function useServerList<T>(signIn: SignIn, read: (client: ServerClient) => Promis
 function SettingsScreen() {
   const theme = useTheme();
   const signIn = useSignIn();
-  const { account, workspaces, reloadWorkspaces, setShowOnPhone } = useAccount();
+  const { account, outbox, workspaces, reloadWorkspaces, setShowOnPhone } = useAccount();
   const server = serverName(signIn.origin);
   const sessions = useServerList(signIn, listSessions);
   const agents = useServerList(signIn, listAgents);
@@ -83,11 +83,14 @@ function SettingsScreen() {
     }
   }, [pending, signIn]);
 
+  // Signing out deletes the outbox, so the sheet counts what it would lose.
   const signOut = useCallback(async () => {
-    if (await confirm({ title: accountWords.signOutTitle(server), message: accountWords.signOutBody, confirm: accountWords.signOut, destructive: true })) {
+    const { unsent, maySend } = outbox.signOutCounts();
+    const message = accountWords.signOutBody(unsent, maySend);
+    if (await confirm({ title: accountWords.signOutTitle(server), message, confirm: accountWords.signOut, destructive: true })) {
       void account.signOut();
     }
-  }, [account, server]);
+  }, [account, outbox, server]);
 
   const end = (session: AccountSession) => act(session.sessionId, async () => {
     // Ending this phone's own session is signing out.
