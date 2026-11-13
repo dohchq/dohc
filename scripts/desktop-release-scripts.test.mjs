@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFile, spawn, spawnSync } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import {

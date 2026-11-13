@@ -8,7 +8,7 @@ import {parseNativeRestoreApplicationReceipt,parseNativeRestoreSettlementReceipt
 import { hasServiceActivation, readServiceActivation, serviceActivationSeed, serviceActivationState, type ServiceActivationAccess } from "./serviceActivationAccess";
 import {readServiceActivationOrigin} from "./serviceActivationOrigin";
 import {carryServiceActivationRetirement} from "./serviceActivationRetirement";
-import {readRestoreAdmission,verifyRestoreCheckpoint,restoreDigest,type RestoreAdmission,type RestoreSourceRange} from "./liveRestoreCheckpoint";
+import {verifyRestoreCheckpoint,restoreDigest,type RestoreAdmission,type RestoreSourceRange} from "./liveRestoreCheckpoint";
 import {retainedRestoreLifecycle,validateRestoreLifecycle,requireFinishedRestoreBinding} from "./liveRestoreLifecycleStorage";
 import { randomUUID, createHash } from "node:crypto";
 import {revalidateAcceptedHistoryDelivery,readAcceptedHistory, readAcceptedHistoryDelivery, requireAcceptedHistoryProof, RestoreHistoryBudget} from "./liveAcceptedHistory";

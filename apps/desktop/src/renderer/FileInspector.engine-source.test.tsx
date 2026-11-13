@@ -1194,7 +1194,7 @@ describe("engine markdown source view", () => {
   it("writes nothing when a pending draft meets a not-in-version refusal on reopen", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
-      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
       const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
       let opens = 0;
       let refuse!: () => void;

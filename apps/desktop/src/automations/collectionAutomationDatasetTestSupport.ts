@@ -156,7 +156,7 @@ globalThis.operations["invoices.release"] = (ctx, input) => {
     /** Runs once, after the first automation invocation commits and before its run hears back, as a crash there would. */
     afterInvoke?: () => Promise<void> } = {}) {
     // Runs once, after the next invocation of an operation as the owner commits and before its caller hears back.
-    let afterOwnerInvoke: { operationId: string; then: () => Promise<void> } | undefined;
+    let afterOwnerInvoke: { operationId: string; run: () => Promise<void> } | undefined;
     const root = await createTestScratch("dohc-dataset-automations-");
     for (const [path, text] of Object.entries(options.sources ?? files)) {
       await mkdir(join(root, dirname(path)), { recursive: true });
@@ -474,7 +474,7 @@ globalThis.operations["invoices.release"] = (ctx, input) => {
           const result = await invoking.invokeAsOwner(...args);
           if (args[0].operationId !== afterOwner.operationId) return result;
           afterOwnerInvoke = undefined;
-          await afterOwner.then();
+          await afterOwner.run();
           return result;
         } };
         const result = await work(automations);
@@ -500,7 +500,7 @@ globalThis.operations["invoices.release"] = (ctx, input) => {
       claims: () => host.automations.claims(AUTOMATION).claims,
       automationsChanged: () => automationsChanged,
       setRoster: (next: ReachRoster) => { roster = next; },
-      crashAfterOwnerInvoke: (operationId: string) => { afterOwnerInvoke = { operationId, then: async () => { throw new Error("dohc stopped."); } }; },
+      crashAfterOwnerInvoke: (operationId: string) => { afterOwnerInvoke = { operationId, run: async () => { throw new Error("dohc stopped."); } }; },
       /** Gives a person the data grant on these operations, as the share dialog would. */
       grant: (grantId: string, userId: string, operationIds: string[], reference = rules) => {
         const store = new DatabaseSync(join(root, ".dohc", "local", "datasets", "state.sqlite"));

@@ -259,10 +259,6 @@ export interface CollectionAutomationRunInput {
 }
 
 const failed = (error: string, timedOut = false): CollectionAutomationRunOutcome => ({ kind: "failed", error, timedOut });
-const stopped: CollectionAutomationRunOutcome = { kind: "wait", reason: "stopped" };
-
-/** A Collection as reach and messages name it, from its workspace path. */
-const collectionNamed = (path: string): ReachCollection => ({ path, name: path.split("/").at(-1) ?? path });
 
 export type ClaimRuns =
   | { unreadable: true }

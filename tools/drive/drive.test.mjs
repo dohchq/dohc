@@ -373,7 +373,7 @@ test("disk-watch reports a failure when the volume reaches the limit, or is not 
   await runDrive(watch({ limit: 71 }), driveHost({ disk: { blocks: 1000, bfree: 300, bavail: 300 } }).host);
 
   const unmounted = driveHost({ mounted: false });
-  await assert.rejects(runDrive(watch(), unmounted.host), new RegExp(`Volume ${uuid} is not mounted at /mnt/drive\. Reported this`));
+  await assert.rejects(runDrive(watch(), unmounted.host), new RegExp(`Volume ${uuid} is not mounted at /mnt/drive. Reported this`));
   assert.deepEqual(unmounted.pings, [{ url: `${diskUrl}/fail`, body: `Volume ${uuid} is not mounted at /mnt/drive.` }]);
 
   const other = driveHost({ mounted: false, otherMounts: [{ target: "/mnt/drive", source: "/dev/sdb", uuid: "99999999-2222-4333-8444-555555555555", fstype: "ext4" }] });

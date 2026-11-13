@@ -148,7 +148,7 @@ function configureDownloadControl(control, preferredKey) {
   updatePrimary();
 }
 
-preferredDownloadKey().then((key) => {
+void preferredDownloadKey().then((key) => {
   downloadControls.forEach((control) => configureDownloadControl(control, key));
   const platform = key ? downloadBuilds[key].platform : null;
   standaloneDownloadLinks.forEach((link) => {

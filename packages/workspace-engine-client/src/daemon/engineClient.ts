@@ -4,7 +4,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash, type Hash } from "node:crypto";
 import { Duplex } from "node:stream";
 import { TextDecoder } from "node:util";
-import { parseCanonicalAdmittedLiveUpdateMetadata, parseRelayAcceptedLiveUpdate, parseLiveUpdateIdentifier, parseLiveUpdateDigest, parseLiveUpdateHostApplicationAck, type LiveUpdateHostApplicationAck, type AdmittedLiveUpdate, parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract";
+import { parseCanonicalAdmittedLiveUpdateMetadata, parseLiveUpdateIdentifier, parseLiveUpdateDigest, parseLiveUpdateHostApplicationAck, type LiveUpdateHostApplicationAck, type AdmittedLiveUpdate, parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract";
 import type { BlobStart, Envelope, Event, Request, Response, WireError } from "../protocol";
 import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
 import type { OwnerYDocOutboxAppendResult } from "../ydoc/ownerYDocOutbox";
@@ -159,15 +159,6 @@ export interface LiveOwnerAdoptionCut {
   readonly retainedPrefix: RetainedPrefix | null;
   readonly baselineBytes: Uint8Array;
   readonly events: readonly AdmittedLiveUpdate[];
-}
-
-interface LiveApplicationBootstrapAck {
-  readonly bootstrapId: string;
-  readonly bootstrapMomentId: string;
-  readonly baselineDigest: string;
-  readonly baselineMomentRelaySequence: number;
-  readonly localYDocSequence: number;
-  readonly bootstrapReplayed: boolean;
 }
 
 interface LiveUpload {

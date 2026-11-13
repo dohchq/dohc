@@ -29,9 +29,6 @@ import { answerDecision } from "@dohc/workspace-operations/chat-writes";
 import { AGENTS_RESTRICTED_MESSAGE } from "./agentToolCatalog";
 import { createWorkspaceTrust, type WorkspaceTrust } from "../workspaces/workspaceTrust";
 
-const [bundledPlatform, bundledArch, nodeName] = process.platform === "win32"
-  ? ["win32", "x64", "node.exe"] as const
-  : ["darwin", "arm64", "node"] as const;
 
 const WORKSPACE_ID = "workspace-chat-dispatch";
 const CHAT_START_MS = Date.parse("2026-07-10T04:05:06.000Z");

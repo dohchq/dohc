@@ -173,7 +173,6 @@ import {
   Tray,
   utilityProcess,
   webContents,
-  WebContentsView,
   type IpcMainInvokeEvent,
   type IpcMainEvent,
   type WebContents,
@@ -402,7 +401,7 @@ import {
   workspaceSummariesFrom,
   workspaceSummaryFor,
 } from "./workspaces/workspaceSummaryProjection";
-import { RELAY_FETCH_TIMEOUT_MS, assertSharedChannelWritable, joinedSharedChannelForWireId, relayFetchWithTimeout } from "./workspaces/sharedChannels";
+import { RELAY_FETCH_TIMEOUT_MS, joinedSharedChannelForWireId, relayFetchWithTimeout } from "./workspaces/sharedChannels";
 import {
   accountReadReplicationOwner,
   resolveChatRelayIdentity,
@@ -448,7 +447,7 @@ import {
 } from "./workspaces/shareMounts";
 import { createShareMountCommands } from "./workspaces/shareMountCommands";
 import { createShareSkipRecorder } from "./workspaces/shareSkipRecorder";
-import { SharedChannelReadOnlyError, type SyncRelayConnection } from "@dohc/workspace-contracts/relay";
+import { type SyncRelayConnection } from "@dohc/workspace-contracts/relay";
 import { type ShareAccess } from "@dohc/security-contract/share-selector";
 import { datasetBaseFolder } from "@dohc/security-contract/dataset";
 import {
@@ -589,7 +588,6 @@ import { runLogKeepDays } from "./agents/runLogRetention";
 import { agentIdsToWake, agentYouRun, automationAgent, listAgents, type Agent, type ThemeMode } from "./settings/userSettings";
 import { createAgentWaits } from "./agents/agentWaits";
 import { createPersonalAgentRoster } from "./agents/personalAgentRoster";
-import { readWorkspaceSettingsFile } from "./workspaces/workspaceSettingsFile";
 import { createSearchRegistry } from "./workspaces/workspaceSearch";
 import { WorkspaceSearchOwner } from "./workspaces/workspaceSearchOwner";
 import { createWorkspaceSearchDaemonQuery } from "./workspaces/workspaceSearchDaemon";
@@ -777,7 +775,6 @@ const {
   readOwnedWorkspaceText,
   readOwnedWorkspaceTextFor,
   readOwnedWorkspaceAsset,
-  readOwnedWorkspaceAssetFor,
   listOwnedWorkspaceFilesFor,
   lookupOwnedWorkspaceFilesFor,
   ownedWorkspaceReadsFor,
@@ -7278,6 +7275,7 @@ function registerIpcHandlers(): void {
       const { local } = authority, remote = workspace.remote ? await remoteForWorkspace(workspace) : null;
       signal.throwIfAborted();
       return collectionPlace({ transfer: await finishedTransferOf(workspace, local, datasetId, signal), relayUrl: remote?.credentials.relayUrl ?? null,
+        // oxlint-disable-next-line typescript/await-thenable -- await kept: removing it changes scheduling
         automations: async () => automationCounts(workspace.workspaceId, datasetBaseFolder((await local.approvedArtifacts(datasetId)).revision.definition)),
         runs: async () => remote && await readAutomationHost(workspace.workspaceId, remote.credentials, remote.credentialGeneration, signal).then(serverRunsOfAnswer, () => null) });
     },

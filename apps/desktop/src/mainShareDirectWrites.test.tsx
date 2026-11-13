@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, render, renderHook, screen } from "@testing-library/react";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, expect, it } from "vitest";
 import { useState } from "react";
 import { createShareDirectWriteDelivery } from "./ipc/shareDirectWriteDelivery";
 import { shareDirectWriteDeliveryOperations, type DohcDesktopBridge, type ShareDirectWriteAnswerDelivery, type ShareDirectWriteDeliveryPayload, type ShareDirectWritesPushedEvent } from "./ipc/bridgeContract";

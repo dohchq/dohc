@@ -890,6 +890,7 @@ export function SitePreviewPage(props: {
                 data-testid="site-preview-frame"
                 title={site.title}
                 src={preview.url}
+                // oxlint-disable-next-line react/iframe-missing-sandbox -- deliberate; see the comment above this frame
                 sandbox="allow-forms allow-same-origin allow-scripts"
                 referrerPolicy="no-referrer"
                 style={{ colorScheme: "light", backgroundColor: "Canvas" }}

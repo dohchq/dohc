@@ -447,7 +447,7 @@ export async function typeAtEnd(editor: OpenEditor, text: string): Promise<void>
   const typed = editor.doc.getText("plainText");
   const before = Y.encodeStateVector(editor.doc);
   typed.insert(typed.length, text);
-  void editor.session.applyLocalUpdate(Y.encodeStateAsUpdate(editor.doc, before));
+  editor.session.applyLocalUpdate(Y.encodeStateAsUpdate(editor.doc, before));
   await editor.session.settleNow();
 }
 

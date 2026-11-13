@@ -105,7 +105,7 @@ export function createWorkspaceList(signIn: Pick<SignIn, "client" | "isCurrent">
       pending.add(workspaceId);
       reads.next();
       setEntry(workspaceId, showOnPhone, null);
-      setShowOnPhone(signIn.client, workspaceId, showOnPhone).then(
+      void setShowOnPhone(signIn.client, workspaceId, showOnPhone).then(
         stored => {
           pending.delete(workspaceId);
           setEntry(workspaceId, stored, null);

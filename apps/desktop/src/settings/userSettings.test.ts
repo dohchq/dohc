@@ -1,5 +1,4 @@
 import { readFile, symlink, unlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
@@ -42,9 +41,6 @@ import { AGENT_ID_TAKEN_ERROR } from "../ipc/errorWords";
 import { AGENT_HUE_ASSIGNMENT_ORDER, AGENT_HUES } from "@dohc/workspace-contracts/agent-hues";
 import { settingsWithAgent, testAgent } from "../testing/agentSettings";
 import { createTestScratch } from "../workspaces/testTemp";
-// WSL can expose the Windows temp directory under /mnt, which is slower and
-// more permission-sensitive for symlink tests; use the Linux temp dir there.
-const tempBase = tmpdir().startsWith("/mnt/") ? "/tmp" : tmpdir();
 
 describe("desktop user settings model", () => {
   it("rejects missing, foreign, or future shapes", () => {

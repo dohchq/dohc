@@ -15,10 +15,6 @@ afterEach(() => {vi.restoreAllMocks(); cleanupLiveDeliveryFixtures();});
 // A cancellation control entry has no delivery; it is named by its cursor.
 const deliveryId = (row: journal.ReplicaLiveJournalPage["rows"][number]) =>
   "cancellation" in row ? `cancellation-${row.journalCursor}` : row.admitted.metadata.accepted.receipt.deliveryId;
-const delivery = (row: journal.ReplicaLiveJournalPage["rows"][number] | undefined): journal.ReplicaLiveJournalRow => {
-  if (!row || "cancellation" in row) throw new Error("Expected a delivery row.");
-  return row;
-};
 
 function fixture() {
   const f = registered({deployment: true});

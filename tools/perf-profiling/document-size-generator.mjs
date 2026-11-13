@@ -34,7 +34,8 @@ export function startGenerator(options) {
     const value = pending.get(row.id);
     if (!value) return;
     pending.delete(row.id);
-    row.error ? value.reject(Error(row.error)) : value.resolve(row.value);
+    if (row.error) value.reject(Error(row.error));
+    else value.resolve(row.value);
   });
   const call = (method, input) =>
     new Promise((resolve, reject) => {

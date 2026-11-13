@@ -75,6 +75,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
       this.state.hasError &&
       arraysDiffer(prev.resetKeys ?? [], this.props.resetKeys ?? [])
     ) {
+      // oxlint-disable-next-line react/no-did-update-set-state -- resets the boundary once when its reset keys change
       this.setState({ error: null, hasError: false });
     }
   }

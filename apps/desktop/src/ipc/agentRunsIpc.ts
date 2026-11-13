@@ -160,7 +160,7 @@ export function createAgentRunsIpc<
     // The copyable MCP config snippet for the user's AI tool. Main owns the real
     // command/args so the renderer never invents a launch path.
     registerHandler(CHANNELS.getMcpConfig, workspaceHandler(async (event, payload, operation) => {
-      const input = AgentRunPayload.parse(payload);
+      AgentRunPayload.parse(payload);
       const workspace = operation.workspace;
       // A shared view hands out the MCP profile for its level, so the user's AI
       // tool is offered only the write tools the grant allows.

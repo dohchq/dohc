@@ -69,7 +69,7 @@ export function requirePlaywrightCli(cliPath, resolveCli = playwrightCliPath) {
  */
 export async function runPlaywright(args, {
   env = process.env,
-  cliPath = undefined,
+  cliPath,
   platform = process.platform,
   spawnImpl = spawn,
   mkdtempImpl = mkdtempSync,

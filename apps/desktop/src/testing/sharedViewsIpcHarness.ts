@@ -1,7 +1,6 @@
 import { expect, vi } from "vitest";
 import { resolve } from "node:path";
 import type { WatcherStatusResult } from "@dohc/workspace-engine-client";
-import { CHANNELS } from "../ipc/channels";
 import { registerSharedViewsIpcHandlers } from "../ipc/sharedViewsIpc";
 import { createWorkspaceRootApproval } from "../ipc/workspaceRegistryIpc";
 import { CredentialSessionCache } from "../workspaces/credentialSessionCache";

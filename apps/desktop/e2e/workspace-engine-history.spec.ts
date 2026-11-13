@@ -1,9 +1,7 @@
 import { activityPin } from "../src/testPins";
 import { expect, test } from "@playwright/test";
-import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
   activeWorkspace,

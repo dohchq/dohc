@@ -490,7 +490,7 @@ describe("startup selection", () => {
 
 describe("registry read failure", () => {
   it("tells the person to update dohc when a newer dohc wrote the registry", async () => {
-    const file = "C:\dohc\dohc-workspaces.json";
+    const file = "C:dohcdohc-workspaces.json";
     const refusal = new RegistryReadError(`Workspace registry version 2 is newer than supported (${file}); refusing to overwrite it.`, file, true);
     vi.stubGlobal("dohcDesktop", {
       windowRole: "workspace",

@@ -37,7 +37,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   return {
     ...actual,
     writeFile: (async (...args: Parameters<typeof actual.writeFile>) => {
-      if (failLauncherPublish && /^dohc-mcp\.tmp-/.test(basename(String(args[0])))) {
+      if (failLauncherPublish && basename(String(args[0])).startsWith('dohc-mcp.tmp-')) {
         await actual.writeFile(args[0], "partial-launcher");
         throw new Error("launcher publish failed");
       }

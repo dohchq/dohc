@@ -708,7 +708,7 @@ describe("RelayShareDialog", () => {
   });
 
   it("shows View and Comment link access with the exact paths warning", async () => {
-    const user = userEvent.setup();
+    userEvent.setup();
     render(
       <RelayShareDialog
         workspaceId="ws-1"
@@ -729,7 +729,7 @@ describe("RelayShareDialog", () => {
   });
 
   it("shows the exact version warning", async () => {
-    const user = userEvent.setup();
+    userEvent.setup();
     render(
       <RelayShareDialog
         workspaceId="ws-1"
@@ -784,7 +784,7 @@ describe("RelayShareDialog", () => {
     bridgeMock.listRelayShareLinks
       .mockResolvedValueOnce({ links: [], nextCursor: "repeated-page" })
       .mockResolvedValueOnce({ links: [], nextCursor: "repeated-page" });
-    const user = userEvent.setup();
+    userEvent.setup();
     render(
       <RelayShareDialog
         workspaceId="ws-1"
@@ -809,7 +809,7 @@ describe("RelayShareDialog", () => {
         nextCursor: "last-page",
       })
       .mockReturnValueOnce(lastPage.promise);
-    const user = userEvent.setup();
+    userEvent.setup();
     render(
       <RelayShareDialog
         workspaceId="ws-1"
@@ -948,7 +948,7 @@ describe("RelayShareDialog", () => {
         }),
       ],
     });
-    const user = userEvent.setup();
+    userEvent.setup();
     render(
       <RelayShareDialog
         workspaceId="ws-1"
@@ -1120,7 +1120,7 @@ describe("RelayShareDialog", () => {
     bridgeMock.listRelayShareLinks.mockResolvedValue({
       links: [readableLink("old-link", { url: null })],
     });
-    const user = userEvent.setup();
+    userEvent.setup();
     render(
       <RelayShareDialog
         workspaceId="ws-1"
@@ -1228,7 +1228,7 @@ codex mcp login dohc-share`);
     bridgeMock.listRelayShareLinks.mockResolvedValue({
       links: [readableLink("grant-link-1"), readableLink("grant-link-2", { status: "revoked", revokedAtMs: CREATED_MS + 1 })],
     });
-    const user = userEvent.setup();
+    userEvent.setup();
     render(
       <RelayShareDialog
         workspaceId="ws-1"
@@ -1392,7 +1392,7 @@ codex mcp login dohc-share`);
       />,
     );
 
-    const group = await openOwnerComments(user, "share-1");
+    await openOwnerComments(user, "share-1");
     const named = await screen.findByTestId("share-independent-named-1");
     expect(named.textContent).toContain("Can comment");
     await user.click(within(named).getByRole("button", { name: "End access" }));
@@ -1796,7 +1796,7 @@ codex mcp login dohc-share`);
       .mockReturnValueOnce(readAFirst.promise)
       .mockReturnValueOnce(readASecond.promise)
       .mockReturnValueOnce(readB.promise);
-    const user = userEvent.setup();
+    userEvent.setup();
     const view = render(
       <RelayShareDialog
         workspaceId="ws-a"
@@ -2343,7 +2343,7 @@ codex mcp login dohc-share`);
       />,
     );
 
-    const group = await openOwnerComments(user, "share-paged");
+    await openOwnerComments(user, "share-paged");
 
     expect(bridgeMock.listRelayShareLinks).toHaveBeenNthCalledWith(1, {
       workspaceId: "ws-1",
@@ -2430,7 +2430,7 @@ codex mcp login dohc-share`);
       workspaceId: "ws-1",
       cursor: "link-page-2",
     });
-    const firstGroup = await openOwnerComments(user, "share-first");
+    await openOwnerComments(user, "share-first");
     expect(
       screen.getByTestId("share-independent-independent-first"),
     ).toBeTruthy();
@@ -3397,7 +3397,7 @@ codex mcp login dohc-share`);
         onClose={() => {}}
       />,
     );
-    const group = await openOwnerComments(user, "share-mixed");
+    await openOwnerComments(user, "share-mixed");
 
     const dependentRow = await screen.findByTestId(
       "share-dependent-damaged-dependent",
@@ -5040,7 +5040,7 @@ codex mcp login dohc-share`);
         onClose={() => {}}
       />,
     );
-    const group = await openOwnerComments(user, "share-1");
+    await openOwnerComments(user, "share-1");
     const dependentRow = await screen.findByTestId(
       "share-dependent-dependent-1",
     );
@@ -5238,7 +5238,7 @@ codex mcp login dohc-share`);
         onClose={() => {}}
       />,
     );
-    const group = await openOwnerComments(user, "share-1");
+    await openOwnerComments(user, "share-1");
     await user.click(
       within(await screen.findByTestId("share-dependent-dependent-1"))
         .getByRole("button", { name: "Make independent" }),
@@ -5346,7 +5346,7 @@ codex mcp login dohc-share`);
         onClose={() => {}}
       />,
     );
-    const group = await openOwnerComments(user, "share-1");
+    await openOwnerComments(user, "share-1");
     await user.click(
       within(await screen.findByTestId("share-dependent-dependent-1"))
         .getByRole("button", { name: "Make independent" }),
@@ -5367,7 +5367,7 @@ codex mcp login dohc-share`);
         onClose={() => {}}
       />,
     );
-    const versionGroup = await openOwnerComments(user, "share-version");
+    await openOwnerComments(user, "share-version");
     expect(
       await screen.findByTestId("share-independent-version-root"),
     ).toBeTruthy();
@@ -6069,7 +6069,7 @@ codex mcp login dohc-share`);
         onClose={() => {}}
       />,
     );
-    const groupA = await openOwnerComments(user, "share-a");
+    await openOwnerComments(user, "share-a");
     await user.click(
       within(await screen.findByTestId("share-dependent-dependent-a"))
         .getByRole("button", { name: "Make independent" }),
@@ -6089,7 +6089,7 @@ codex mcp login dohc-share`);
         onClose={() => {}}
       />,
     );
-    const groupB = await openOwnerComments(user, "share-b");
+    await openOwnerComments(user, "share-b");
     const callsBeforePromotionSettles =
       bridgeMock.listRelayShareLinks.mock.calls.length;
     await act(async () => {
@@ -6534,7 +6534,7 @@ describe("advertised public Edit release", () => {
   });
   it("does not offer Edit for a pinned version even when advertised", async () => {
     bridgeMock.listRelayShareLinks.mockResolvedValue({links: [], independentGrants: [], supportedLinkAccess: ["view", "comment", "edit"]});
-    const user = userEvent.setup();
+    userEvent.setup();
     render(<RelayShareDialog workspaceId="ws-1" target={{kind: "version", versionId: "version-7", versionName: "review"}} onClose={() => {}} />);
     expect(within(screen.getByRole("radiogroup", {name: "Link access"})).queryByRole("radio", {name: "Edit"})).toBeNull();
   });

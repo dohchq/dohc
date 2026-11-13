@@ -36,6 +36,7 @@ function setState(pid, state) {
   if (!['inspect', 'visible', 'minimized'].includes(state)) throw Error('Invalid window state');
   const app = $.NSRunningApplication.runningApplicationWithProcessIdentifier(pid);
   if (state !== 'inspect' && app && !app.isNil()) {
+    // oxlint-disable-next-line eslint/no-unused-expressions -- JXA runs a no-argument Objective-C method on property access
     if (state === 'minimized') app.hide; else app.unhide;
     const deadline = Date.now() + 5000;
     for (;;) {
@@ -53,6 +54,7 @@ function write(value) {
   $.NSFileHandle.fileHandleWithStandardOutput.writeData(text.dataUsingEncoding($.NSUTF8StringEncoding));
 }
 
+// oxlint-disable-next-line eslint/no-unused-vars -- osascript calls run() as the script's entry point
 function run() {
   const input = $.NSFileHandle.fileHandleWithStandardInput;
   write({ ready: true });

@@ -81,7 +81,7 @@ export function codeEditorTestHost(host: HTMLElement): CodeEditorTestHost {
     value: {
       configurable: true,
       get: () => codeEditorText(host),
-      set: (text: string) => replaceCodeEditorText(host, text),
+      set: (text: string) => { replaceCodeEditorText(host, text); },
     },
     readOnly: {
       configurable: true,

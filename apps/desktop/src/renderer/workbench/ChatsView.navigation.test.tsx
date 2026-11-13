@@ -14,7 +14,6 @@ import {
   openingPreview,
   dm,
   bridgeMock,
-  workspaceActivityCallbacks,
   emitWorkspaceActivity,
   renderView,
 } from "./ChatsView.testHarness";

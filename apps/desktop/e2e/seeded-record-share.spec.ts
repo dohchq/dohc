@@ -29,7 +29,7 @@ type LogOp = { opKind: string; payload: { path?: string; momentId?: string; isBa
 
 async function recordOps(relay: SyncRelayHandle, workspaceId: string): Promise<LogOp[]> {
   const identity = relayAdoptedIdentity(relay.dbPath, workspaceId);
-  const query = new URLSearchParams({ since: "0", limit: "1000", ...(identity ?? {}) });
+  const query = new URLSearchParams({ since: "0", limit: "1000", ...identity });
   const log = await relayJson(relay.baseUrl, OWNER, `/sync/${workspaceId}/log?${query}`);
   if (log.status !== 200) return [];
   return (JSON.parse(log.body) as { ops: LogOp[] }).ops.filter(op => op.payload.path === RECORD_PATH);

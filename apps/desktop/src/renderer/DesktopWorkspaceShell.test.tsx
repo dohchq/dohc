@@ -2,7 +2,7 @@
 import { editorTabTestId } from "../testPins";
 import { ObserverStub } from "./DesktopWorkspaceShell.testSupport";
 import "./CollectionPage";
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";

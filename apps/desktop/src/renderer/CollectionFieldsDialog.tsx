@@ -113,7 +113,7 @@ function ScopedFields(props: CollectionFieldsDialogProps) {
       if (review.change.kind === "addButton") props.onButtonAdded?.(review.change.name);
     }} onDiscard={props.onDiscard} onLoadPreview={props.onLoadPreview} onClose={props.onClose} onError={props.onError} />;
   return <Overlay onClose={pending ? undefined : props.onClose}><form role="dialog" aria-modal="true" aria-labelledby="collection-fields-title"
-    onSubmit={event => { event.preventDefault(); void prepare(); }} className="dohc-elevated dohc-pop-in flex max-h-[88vh] w-[min(480px,calc(100vw-32px))] flex-col gap-3 overflow-y-auto rounded-xl border border-line bg-panel p-5">
+    onSubmit={event => { event.preventDefault(); prepare(); }} className="dohc-elevated dohc-pop-in flex max-h-[88vh] w-[min(480px,calc(100vw-32px))] flex-col gap-3 overflow-y-auto rounded-xl border border-line bg-panel p-5">
     <h2 id="collection-fields-title" className="m-0 text-base font-semibold text-ink">Fields and names</h2>
     <label className="text-[12px] text-muted">Change<select aria-label="Change" disabled={pending} className={`${selectClass} mt-1 w-full`} value={kind} onChange={event => {
       const next = event.target.value as DatasetSchemaChange["kind"]; setKind(next); setInvalid(null);
@@ -150,7 +150,7 @@ function ScopedFields(props: CollectionFieldsDialogProps) {
       {actions.map(operation => <div key={operation.operationId} className="flex h-8 items-center gap-2 rounded-md px-2">
         <span className="min-w-0 flex-1 truncate text-[13px] text-muted">{operation.label}</span>
         <SecondaryButton type="button" aria-label={`Add as button: ${operation.label}`} disabled={pending}
-          onClick={() => void prepare(operation.label)}>Add as button</SecondaryButton>
+          onClick={() => prepare(operation.label)}>Add as button</SecondaryButton>
       </div>)}
     </section> : null}
     {invalid && <p role="alert" className="m-0 text-[12px] text-danger">{invalid}</p>}

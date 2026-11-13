@@ -3339,6 +3339,8 @@ async function dispatchWorkspace(
       await notifyWrite(options, context);
       return { ok: true as const, status: "queued" as const, threadId: cliThreadId(threadId) };
     }
+    default:
+      break;
   }
 
   const channels = request.verb === "reply" ? [] : await loadChannels(chats);
@@ -3776,6 +3778,8 @@ async function dispatchWorkspace(
       }
       return { files };
     }
+    default:
+      break;
   }
 }
 

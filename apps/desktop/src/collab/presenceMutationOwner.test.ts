@@ -3,7 +3,6 @@ import { PresenceMutationOwner } from "./presenceMutationOwner";
 import {
   RendererWorkspaceOpenSupersededError,
   RendererWorkspaceSessionOwner,
-  type RendererWorkspaceSession,
 } from "../window/rendererWorkspaceSessionOwner";
 
 import { deferred } from "../testing/deferred";

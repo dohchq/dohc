@@ -8,7 +8,6 @@ import { bindEngineYDoc, EngineYDocDeliveryRefusedError } from "../../../apps/de
 import { CHANNELS } from "../../../apps/desktop/src/ipc/channels.js";
 import { EngineYDocRemoteUpdateEvent, EngineYDocSaveStateEvent } from "../../../apps/desktop/src/ipc/bridgeContract.js";
 import { getDohcYDocBodyFragment } from "@dohc/ydoc-projection/body-fragment";
-import { fileURLToPath } from "node:url";
 import {createNamedLiveRoutes} from "../../sync-relay/src/namedLiveRoutes.js";
 import { once, EventEmitter } from "node:events";
 import { createServer as createHttpsServer } from "node:https";

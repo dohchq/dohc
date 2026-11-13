@@ -405,12 +405,14 @@ async function typing(page, name, { rich = false, traced = rich, arm, beforeInpu
       state.longObserver = new PerformanceObserver(list => state.longTasks.push(...list.getEntries().map(e => ({ startTime: e.startTime, duration: e.duration }))));
       state.longObserver.observe({ type: 'longtask' });
     }, Boolean(trace));
+    // oxlint-disable-next-line typescript/await-thenable -- await needed: callers pass async callbacks
     await beforeInput();
     const samples = [];
     for (let index = 0; index < keystrokes; index++) {
       const start = await page.evaluate(mark => { if (mark) performance.mark(mark); return performance.now(); }, trace ? typingTraceMark(index, 'before') : null);
       await page.keyboard.press('x');
       if (index === keystrokes - 1) {
+        // oxlint-disable-next-line typescript/await-thenable -- await needed: callers pass async callbacks
         await afterInput();
       }
       await painted(page);

@@ -1358,7 +1358,7 @@ function leadingMarkdownBlockEscapeIndexes(text: string): number[] {
   const rest = text.slice(indent)
 
   if (/^#{1,6}(?:[\t ]|$)/.test(rest)) return [indent]
-  if (/^\$\$/.test(rest)) return [indent, indent + 1]
+  if (rest.startsWith('$$')) return [indent, indent + 1]
   if (/^[-+*](?:[\t ]|$)/.test(rest)) return [indent]
   if (/^(?:`{3,}|~{3,})/.test(rest)) return [indent]
   const thematicBreak =
@@ -1367,7 +1367,7 @@ function leadingMarkdownBlockEscapeIndexes(text: string): number[] {
     return [indent]
   }
   if (/^(?:=+|-+)[\t ]*$/.test(rest)) return [indent]
-  if (/^!\[/.test(rest)) return [indent + 1]
+  if (rest.startsWith('![')) return [indent + 1]
   // A link with no text starts no definition, and the parser reads it as text.
   if (/^\[(?!\]\()/.test(rest)) return [indent]
   const ordered = /^(\d{1,9})([.)])(?:[\t ]|$)/.exec(rest)

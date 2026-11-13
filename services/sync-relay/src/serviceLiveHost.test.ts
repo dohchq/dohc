@@ -1057,7 +1057,6 @@ function validatePreparationParams(params: Record<string, unknown>): void {
 const ACTIVATION = `ordinary-activation-${"a".repeat(64)}`, SUCCESSOR = `ordinary-activation-${"b".repeat(64)}`;
 // The engine requests of a retirement, without a restarted daemon's membership requests.
 const retirement = ["liveApplication.reconcileActivation", "liveApplication.settle", "liveApplication.releaseActivation"];
-const departed = (methods: string[]) => methods.filter(method => !["liveApplication.hosts", "liveApplication.attachWorkspace"].includes(method));
 // The retired activation's row, and the boundary its release kept.
 const retiredRow = (o: Awaited<ReturnType<typeof enrolledServiceHost>>) => {
   const row = o.raw.prepare("SELECT retired_at_ms,retired_boundary_json FROM sync_relay_service_activations WHERE activation_id=?").get(ACTIVATION)!;
@@ -2724,17 +2723,6 @@ it.each([true])("records a retirement's applications a page at a time across pas
   expect(retiredRow(o).boundary.terminalReceipt).toEqual(edits[8]);
 });
 
-// Proves: a retirement waiting at any step resumes on a daemon started after
-// its own stopped, from its durable obligation, once what it waited for holds.
-// One whose departure had not reached the daemon waits for its hosted replica
-// to confirm the document left.
-const waits: Record<string, {hold(o: Enrolled): void; clear(o: Enrolled): void}> = {
-  "Settlement has not reached the file.": {hold: o => {o.settlement.materialized = false;}, clear: o => {o.settlement.materialized = true;}},
-  "Hosted publication has more pages.": {hold: o => {o.replies.push = {hasMore: true};}, clear: o => {o.replies.push = {};}},
-  "Waiting for its hosted replica to confirm the document left.": {hold() {}, clear() {}},
-  "Waiting for its hosted replica to confirm the document parked.": {hold: o => {o.replies.commit = {departed: [o.sibling.objectId]};}, clear: o => {o.replies.commit = {};}},
-  "Retirement reconciliation is unfinished.": {hold: o => {o.engine.releasePending = "reconciliation";}, clear: o => {o.engine.releasePending = undefined;}},
-};
 
 // The pause a host given this interval takes between passes, which only a wake, or `run` below, ends in a test.
 async function restartEmpty(o: Awaited<ReturnType<typeof emptyServiceHost>>) {

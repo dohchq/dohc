@@ -1,6 +1,6 @@
 import { datasetColumnFields } from "@dohc/security-contract/dataset";
 import { test, expect } from "@playwright/test";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
@@ -15,7 +15,6 @@ import { sourceCaptureAdapter } from "../../../apps/desktop/src/testing/sourceCa
 import { dataset as agentDataset, type ToolContext } from "../../../packages/mcp/src/tools";
 import { DatasetRequest } from "../../../packages/cli/src/dataset";
 
-const sha = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
 test("stock orders use custom apps, relations, transactions, and attachments through the same Collection and agent APIs", async ({ browser }, info) => {
   test.setTimeout(90000);
   const directory = await mkdtemp(join(tmpdir(), "dohc-stock-browser-"));

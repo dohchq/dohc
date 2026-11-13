@@ -19,7 +19,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { TextDecoder } from "node:util";
 import { renameWithRetry } from "../atomicReplaceFile";
 import { isInside } from "../security/pathContainment";

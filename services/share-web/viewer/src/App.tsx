@@ -1369,6 +1369,7 @@ export function App() {
       for (;;) {
         if (!current) return;
         if (refreshInFlight) {
+          // oxlint-disable-next-line typescript/await-thenable -- await needed: refresh() assigns refreshInFlight, which TypeScript's narrowing misses
           await refreshInFlight;
           continue;
         }

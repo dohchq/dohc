@@ -1,6 +1,6 @@
 import "../../testing/legendListMock";
 // @vitest-environment jsdom
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { ChatDispatchStateForThreadResult, ListChatReactionsResult } from "../../ipc/bridgeContract";

@@ -184,7 +184,6 @@ import {
   RetuneRelayShareLinkResult,
   UnblockRelayShareDiscussionPrincipalPayload,
   UnblockRelayShareDiscussionPrincipalResult,
-  ReadShareProposalFileContentPayload,
   ReadShareProposalFileContentResult,
   ListShareProposalsPayload,
   ListShareProposalsResult,

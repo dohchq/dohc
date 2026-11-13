@@ -1,5 +1,5 @@
 import { activityPin } from "../src/testPins";
-import { expect, test, type Locator, type Page } from "@playwright/test";
+import { expect, test, type Locator } from "@playwright/test";
 import { join } from "node:path";
 import { seedThroughDaemon } from "./helpers/daemonSeed";
 import { runDohcCli, waitForCliEndpoint } from "./helpers/dohcCli";

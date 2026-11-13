@@ -937,14 +937,6 @@ describe("direct writes through an Edit share link", () => {
     } as RequestInit));
   }
 
-  function ledger(r: Relay): Array<Record<string, unknown>> {
-    const db = inspectDatabase(storagePath(r.storage));
-    try {
-      return db.prepare("SELECT grant_id, author_kind, user_id, principal_id, grant_generation FROM sync_relay_collection_writes").all();
-    } finally {
-      db.close();
-    }
-  }
   function principals(r: Relay): number {
     const db = inspectDatabase(storagePath(r.storage));
     try {

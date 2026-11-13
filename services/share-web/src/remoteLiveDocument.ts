@@ -42,7 +42,7 @@ type Provider = ReturnType<typeof createNamedLiveProvider>;
 function waitFor(provider: Provider, predicate: (state: NamedLiveProviderState) => boolean, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     let unsubscribe = () => {};
-    const finish = (error?: Error) => {unsubscribe(); signal.removeEventListener("abort", abort); error ? reject(error) : resolve();};
+    const finish = (error?: Error) => {unsubscribe(); signal.removeEventListener("abort", abort); if (error) reject(error); else resolve();};
     const abort = () => finish(new Error("The live document request timed out or was cancelled."));
     const check = (state: NamedLiveProviderState) => {
       if (signal.aborted) abort();

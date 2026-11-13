@@ -2,7 +2,6 @@ import * as Schema from "effect/Schema";
 import { WorkspaceDaemonRequester, type DaemonRequesterClient } from "../live/daemonLiveAdapter";
 import type { WorkspaceHandle } from "../protocol";
 
-const FILES_CHANGED_EVENT = "workspace.filesChanged";
 const Revision = Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0), Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER));
 const Cursor = Schema.Struct({ generation: Schema.String.check(Schema.isNonEmpty()), revision: Revision });
 const Fact = Schema.Struct({ path: Schema.String.check(Schema.isNonEmpty()), kind: Schema.Literals(["appeared", "disappeared", "changed"]) });

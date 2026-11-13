@@ -14,7 +14,6 @@ import type { SyncRelayStorage } from "./storage";
 import {
   appendLog,
   chatChannelCreate,
-  chatMessageAppend,
   chatThreadCreate,
   claimWorkspace,
   closeTestStorages,

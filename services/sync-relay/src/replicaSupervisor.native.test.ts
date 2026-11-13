@@ -158,7 +158,6 @@ it.skipIf(engineBinary.missing || process.platform !== "linux")("supervised repl
     await rpc(a, "versionedText.rename", { versionId: "main", fromPath: "scenario.txt", toPath: "renamed.txt", origin: "api", captureHoldId: hold.holdId });
     await rpc(a, "capture.release", { holdId: hold.holdId }); await push(a); await pull(b); await drain();
     expect(Buffer.from(String(stored("renamed.txt")), "utf8")).toEqual(readFileSync(join(a.dir, "renamed.txt")));
-    const replica = stores.get(workspaceId)!;
     hold = await rpc(a, "capture.hold"); rmSync(join(a.dir, "renamed.txt"));
     const deleted = await rpc(a, "versionedText.delete", { versionId: "main", path: "renamed.txt", origin: "api", captureHoldId: hold.holdId });
     await rpc(a, "capture.release", { holdId: hold.holdId }); await push(a); await pull(b); await drain(); expect(stored("renamed.txt")).toBeUndefined();

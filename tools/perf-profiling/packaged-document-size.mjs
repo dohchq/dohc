@@ -28,7 +28,8 @@ export function observeDocumentOpen({ name, marker, timeoutMs = 120000 }) {
       clearTimeout(deadline);
       cancelAnimationFrame(frame);
       window.removeEventListener('mousedown', onClick, true);
-      error ? reject(error) : resolve(result);
+      if (error) reject(error);
+      else resolve(result);
     };
     const deadline = setTimeout(() => finish(Error('Document open timed out')), timeoutMs);
     const check = () => {
@@ -98,7 +99,8 @@ export function observeDocumentReplacement({ timeoutMs = 30000 } = {}) {
       cancelAnimationFrame(frame);
       window.removeEventListener('keydown', keydown, true);
       window.removeEventListener('input', input, true);
-      error ? reject(error) : resolve(result);
+      if (error) reject(error);
+      else resolve(result);
     };
     const keydown = (event) => {
       if (event.key === 'x' || event.key === 'q') {
@@ -376,6 +378,7 @@ export async function measurePackagedDocument({
     } finally {
       clearInterval(memoryTimer);
       clearInterval(historyTimer);
+      // oxlint-disable-next-line typescript/await-thenable -- await needed: the samplers assign these promises, which TypeScript's narrowing misses
       await Promise.all([memorySampling, historySampling, Promise.allSettled(compactionPolls)]);
     }
     if (probeError) throw probeError;

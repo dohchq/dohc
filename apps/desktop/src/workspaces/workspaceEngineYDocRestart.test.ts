@@ -378,7 +378,6 @@ it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", 
     close: () => undefined,
     onEvent: () => () => undefined,
     async sendRequest(request: Request): Promise<Response> {
-      const params = request.params as Record<string, unknown>;
       if (request.method === "workspace.open") {
         return {
           id: request.id,
