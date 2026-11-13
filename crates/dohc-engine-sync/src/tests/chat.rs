@@ -8894,6 +8894,14 @@ fn the_owner_private_kinds_match_the_relay_registry() {
         .filter(|line| line.starts_with('"') && line.contains("ownerPrivate: true"))
         .filter_map(|line| line.split('"').nth(1))
         .collect();
+    // A wrapped entry would escape the one-line parse above, so every
+    // marked line must have been read.
+    let marked = source
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with("//") && line.contains("ownerPrivate: true"))
+        .count();
+    assert_eq!(relay.len(), marked);
     relay.sort_unstable();
     let mut engine = crate::router::OWNER_PRIVATE_KINDS.to_vec();
     engine.sort_unstable();
