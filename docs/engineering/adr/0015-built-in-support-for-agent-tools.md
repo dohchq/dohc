@@ -26,3 +26,4 @@ dohc reaches T3 Code through an interface T3 Code does not promise to keep. dohc
 - A tool gets built-in support when people ask for it. Until then its agents use "Your command".
 - What people see must not depend on the tool beyond what the tool cannot do. A tool that cannot steer shows no steer setting.
 - If a tool gives outside programs a supported way to message an open session, prefer it over starting the tool for each message.
+- T3 Code's own page decides the sign-in, and it asks for two things. When the browser that opens it is not signed in to T3 Code, it asks for a sign-in code, which a person gets today from a terminal command. It also asks what the client may do, and dohc can message only a thread that runs with no more than that. A sign-in on November 13, 2026 took both. dohc must not ship a way to connect a T3 Code thread that needs a terminal.
