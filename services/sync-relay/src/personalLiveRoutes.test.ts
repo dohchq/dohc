@@ -610,6 +610,15 @@ it("mints a ticket only for an agent at Edit, and only while the self-hosted liv
   ).toBe(404);
 });
 
+// A full share of tickets still answers a personal agent as before; only a link caller is asked to try again.
+it("refuses a personal agent at its share of unexpired tickets", async () => {
+  const f = await fixture(),
+    helper = f.agent("helper");
+  for (let minted = 0; minted < 8; minted++)
+    expect((await f.ticketRequest(helper)).status).toBe(200);
+  expect((await f.ticketRequest(helper)).status).toBe(404);
+});
+
 it("opens a ticket only for the connection it was minted for", async () => {
   const f = await fixture(),
     helper = f.agent("helper"),

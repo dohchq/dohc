@@ -938,6 +938,17 @@ function parseStoredLiveTicket(row: Record<string, unknown>): {
 
 export const LIVE_TICKET_REFUSED = Symbol("live-ticket refused");
 
+/**
+ * A principal already holds its share of unexpired tickets, as when its tabs keep reconnecting.
+ * That passes as the tickets expire, so a mint fails like the relay's own busy state instead of
+ * refusing.
+ */
+export class LiveTicketsRetained extends Error {
+  constructor() {
+    super("The principal holds its share of live tickets.");
+  }
+}
+
 function snapshotTicketLookup(input: Record<string, unknown>): LiveTicketLookup {
   return {
     tokenHash: parseTicketHash(input.tokenHash),
@@ -1221,8 +1232,9 @@ export function storeLiveTicketInTransaction(
       now,
       policy.retainedTicketsPerPrincipalGrant,
     );
-  if (!count || Number(count.retained_count) >= policy.retainedTicketsPerPrincipalGrant)
-    throw LIVE_TICKET_REFUSED;
+  if (!count) throw LIVE_TICKET_REFUSED;
+  if (Number(count.retained_count) >= policy.retainedTicketsPerPrincipalGrant)
+    throw new LiveTicketsRetained();
   storage.db
     .prepare(`INSERT INTO ${LIVE_TICKET_TABLE} (${LIVE_TICKET_COLUMNS.join(", ")})
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)`)
