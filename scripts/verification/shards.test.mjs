@@ -569,6 +569,21 @@ test("the saved passing run includes both confinement jobs in the gate span", ()
   );
 });
 
+test("run 43478162335 on the current graph is within budget and uncontended in both gates", () => {
+  const { jobs } = JSON.parse(
+    readFileSync(new URL("./fixtures/passing-29-job-run.json", import.meta.url), "utf8"),
+  );
+  for (const [scope, seconds] of [
+    ["js", 280],
+    ["rust", 432],
+  ]) {
+    const result = completedGateTiming(scope, jobs, jobs[0].head_sha);
+    assert.equal(result.seconds, seconds);
+    assert.equal(result.contended, false);
+    assert.equal(result.timing, "within budget");
+  }
+});
+
 test("uncontended ceiling overruns fail; contended overruns retain their measured span", (t) => {
   const warn = t.mock.method(console, "warn", () => {});
   for (const [scope, finalJob, budget] of [

@@ -827,6 +827,10 @@ test("job names match the workflow graph and timeout backstops", () => {
   for (const [id, node] of Object.entries(CLOUD_JOB_GRAPH)) {
     const job = jobs[id];
     assert.deepEqual(node.needs, [job.needs ?? []].flat(), id);
+    // jobReadyAt expects one job per need. A skipped matrix need leaves only a placeholder row.
+    for (const need of node.needs) {
+      assert.equal(CLOUD_JOB_GRAPH[need].names.length, 1, `${id} needs ${need}`);
+    }
     assert.deepEqual(
       node.names,
       job.strategy?.matrix?.shard
