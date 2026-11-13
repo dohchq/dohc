@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { desktopPins, settingsSectionPin } from "../../testPins";
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { useState } from "react";
+import { act, cleanup, fireEvent, render as renderUi, screen, waitFor, within, type RenderOptions } from "@testing-library/react";
+import { useState, type ReactElement } from "react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -21,6 +21,7 @@ import { Overlay } from "../Overlay";
 import type { ScheduleHostResult, UpdateStateEvent } from "../../ipc/bridgeContract";
 import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
 import { SettingsDialog } from "./SettingsDialog";
+import { WorkspaceSessionProvider } from "../workspace/workspaceSession";
 import { AGENTS_RESTRICTED_MESSAGE } from "../../agents/agentToolCatalog";
 import { applyLookSettings } from "../theme";
 import { palette } from "../tokens";
@@ -30,6 +31,10 @@ import { deferred } from "../../testing/deferred";
 import { useInstallationNotices } from "../shell/installationNotices";
 import type { ConnectionErrorReport } from "../shell/connectionNotices";
 import { ShellErrorReporter, type ReportShellFailure } from "../shell/useShellError";
+
+// The workspace shell provides the session in production.
+const render = (ui: ReactElement, options?: RenderOptions) =>
+  renderUi(ui, { wrapper: ({ children }) => <WorkspaceSessionProvider workspaceId="fixture">{children}</WorkspaceSessionProvider>, ...options });
 
 const config = {
   command: "dohc-mcp",

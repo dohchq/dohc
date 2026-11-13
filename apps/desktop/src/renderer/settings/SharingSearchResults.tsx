@@ -1,13 +1,14 @@
-import type { AccessShareRow } from "@dohc/workspace-contracts/access";
+import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
 import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import { File, Layers, MessageSquare, Share2, TriangleAlert } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo } from "react";
 import { bridge } from "../bridge";
 import { KindGlyph } from "../ui/KindGlyph";
 import { SectionLabel } from "../ui/controls";
-import { useRequestSequence } from "../useRequestSequence";
 import { shareSubject } from "../workbench/shareSubject";
 import type { SharingFocus, SharingLane } from "../workbench/SharingView";
+import { useWorkspaceQuery } from "../workspace/useWorkspaceQuery";
+import { useWorkspaceSession } from "../workspace/workspaceSession";
 
 // Share lists live in the Sharing view. Settings search still finds them: a
 // lane by its old section name, a share by what it covers or who it names.
@@ -24,44 +25,51 @@ export type SharingResult = SharingFocus & { label: string; row: AccessShareRow 
 
 // A lane's every page, or null when its first read failed. A later page main
 // refuses, because the listing changed, keeps what was read.
-async function readLane(workspaceId: string, lane: SharingLane, current: () => boolean): Promise<Found[] | null> {
+async function readLane(
+  lane: SharingLane,
+  list: (cursor: string | null) => Promise<AccessAnswer>,
+  signal: AbortSignal,
+): Promise<Found[] | null> {
   const found: Found[] = [];
   let cursor: string | null = null;
   do {
     let answer;
     try {
-      answer = await bridge().listSharingAccess({ workspaceId, lane, ...(cursor ? { cursor } : {}) });
+      answer = await list(cursor);
     } catch {
       return cursor === null ? null : found;
     }
     if (cursor !== null && answer.coverage.kind === "unavailable") break;
     for (const row of answer.rows) if (row.kind === "share") found.push({ lane, row });
     cursor = answer.nextCursor;
-  } while (cursor !== null && current());
+  } while (cursor !== null && !signal.aborted);
   return found;
 }
 
 // Both lists, read once per workspace on the first search.
 export function useSharingSearch(workspaceId: string, sharedView: boolean, query: string): SharingResult[] {
-  const [found, setFound] = useState<{ workspaceId: string; rows: Found[] } | null>(null);
-  const asked = useRef<string | null>(null);
-  const request = useRequestSequence([workspaceId]);
-  const q = query.trim().toLowerCase();
-  useEffect(() => {
-    if (!q || asked.current === workspaceId) return;
-    asked.current = workspaceId;
-    const token = request.next();
-    // Someone else's shared workspace grants nothing from here.
-    const lanes: SharingLane[] = sharedView ? ["received"] : ["granted", "received"];
-    void (async () => {
+  const read = useWorkspaceQuery(useWorkspaceSession(), {
+    key: workspaceId,
+    manual: true,
+    load: async (signal) => {
+      // Someone else's shared workspace grants nothing from here.
+      const lanes: SharingLane[] = sharedView ? ["received"] : ["granted", "received"];
       await bridge().requestAccessRefresh({ workspaceId, reason: "sharing-open" }).catch(() => undefined);
-      const answers = await Promise.all(lanes.map((lane) => readLane(workspaceId, lane, () => request.isCurrent(token))));
-      if (!request.isCurrent(token)) return;
-      // Every read failed: the next query change asks again.
-      if (answers.every((answer) => answer === null)) asked.current = null;
-      setFound({ workspaceId, rows: answers.flatMap((answer) => answer ?? []) });
-    })();
-  }, [q, request, sharedView, workspaceId]);
+      const answers = await Promise.all(lanes.map((lane) => readLane(lane, (cursor) => (
+        bridge().listSharingAccess({ workspaceId, lane, ...(cursor ? { cursor } : {}) })
+      ), signal)));
+      if (answers.every((answer) => answer === null)) throw new Error("No sharing list could be read.");
+      return answers.flatMap((answer) => answer ?? []);
+    },
+  });
+  const found = read.value;
+  const asked = read.pending || (found !== undefined && read.error === null);
+  const { retry } = read;
+  const q = query.trim().toLowerCase();
+  // Only a query change asks. After every read failed, the next one asks again.
+  useEffect(() => {
+    if (q && !asked) void retry();
+  }, [q, retry]);
 
   return useMemo(() => {
     if (!q) return [];
@@ -69,7 +77,7 @@ export function useSharingSearch(workspaceId: string, sharedView: boolean, query
       .map(({ lane, label }) => ({ lane, shareId: null, label, row: null }));
     const seen = new Set<string>();
     const shares: SharingResult[] = [];
-    for (const { lane, row } of found?.workspaceId === workspaceId ? found.rows : []) {
+    for (const { lane, row } of found ?? []) {
       const key = `${lane}\0${row.shareId}`;
       if (seen.has(key) || shares.length === MAX_SHARES) continue;
       const subject = shareSubject(row);
@@ -79,7 +87,7 @@ export function useSharingSearch(workspaceId: string, sharedView: boolean, query
       shares.push({ lane, shareId: row.shareId, label: subject.name, row });
     }
     return [...lanes, ...shares];
-  }, [found, q, sharedView, workspaceId]);
+  }, [found, q, sharedView]);
 }
 
 function ResultGlyph(props: { row: AccessShareRow | null }) {
