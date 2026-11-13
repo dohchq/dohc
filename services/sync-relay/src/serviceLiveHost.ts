@@ -917,6 +917,15 @@ export async function startServiceLiveHost(options: {
       retirements++;
       return undefined;
     };
+    // A document whose enrollment retired with no owner Stop, as the idle reclaim retires it, keeps its block and wait
+    // for when it is added again. A moved or deleted document keeps nothing.
+    const keepReclaimed = (key: string) => {
+      const row = hosted.get(key);
+      if (!row) return;
+      const {workspaceId, path} = row.target, enrollment = storage.readServiceHostEnrollmentByObjectId(workspaceId, row.objectId);
+      if (enrollment?.retired && enrollment.ownerStop === null &&
+        storage.objectIdAtPathInVersion({workspaceId, versionId: "main", path}) === row.objectId) activation!.keep(row.target, row.objectId);
+    };
     // A moved document whose authority still stands leaves activation without settling or unloading,
     // as when an earlier daemon left it. Any other departure unloads once it settled and its
     // output reached the relay; its workspace stays attached, so its hosted
@@ -929,6 +938,7 @@ export async function startServiceLiveHost(options: {
     // daemon loaded the document. Its work is pushed before the unload, where
     // the engine can prove it, so the relay refuses it at its coordinates.
     const depart = async (key: string, joined: AbortSignal) => {
+      keepReclaimed(key);
       const retirement = await retire(key, joined);
       if (retirement !== null) return retirement;
       await resolveUnload(key, joined);
@@ -1447,6 +1457,13 @@ export async function startServiceLiveHost(options: {
         // A workspace stays wanted while anything of it may remain in its replica, so one that is not has nothing left to drain.
         for (const workspaceId of [...members.keys()]) if (!desired.has(workspaceId) || changed.includes(workspaceId)) await detach(workspaceId, joined);
         for (const workspace of workspaces) if (!members.has(workspace.workspaceId) && !diverged.has(workspace.root)) await attach(workspace, joined);
+        // A kept block and wait end once the owner stops or pauses the document, it leaves its path, or its enrollment
+        // is gone. A workspace that drained detaches with its documents' enrollments still kept for their return.
+        for (const document of activation.keptDocuments()) {
+          const enrollment = storage.readServiceHostEnrollmentByObjectId(document.workspaceId, document.objectId);
+          if (!enrollment || enrollment.ownerStop !== null ||
+            storage.objectIdAtPathInVersion({workspaceId: document.workspaceId, versionId: "main", path: enrollment.path}) !== document.objectId) activation.forgetKept(document);
+        }
         for (const [key, document] of wanted) {
           if (!hosted.has(key) && members.has(document.target.workspaceId)) {activation.addTarget(document.target, document.objectId); hosted.set(key, document); touch(key);}
         }
@@ -1869,10 +1886,14 @@ export async function startServiceLiveHost(options: {
       diverged(): readonly {readonly workspaceId: string; readonly root: string}[] {
         return [...diverged].map(([root, workspaceId]) => ({workspaceId, root}));
       },
-      /** Why the hosted document failed the one capture it gets while it cannot progress and waits for its owner, if it did. */
+      /**
+       * Why the hosted document cannot go live, if it cannot. A blocked one failed the one capture it gets and waits for its
+       * owner. One whose history is past the read budget tries again after its wait.
+       * A document that is not hosted answers from the block and wait it keeps for when it is added again.
+       */
       blocked(document: {workspaceId: string; objectId: string}): ServiceActivationBlock | undefined {
         const key = hostedKey(document);
-        return key === undefined ? undefined : activation!.blocked(hosted.get(key)!.target);
+        return key === undefined ? activation?.keptBlock(document) : activation!.blocked(hosted.get(key)!.target);
       },
       /** Why the hosted pass left this document held, until a capture succeeds. */
       holdReason(document: {workspaceId: string; objectId: string}) {
@@ -1887,12 +1908,14 @@ export async function startServiceLiveHost(options: {
       /**
        * Lets a blocked hosted document try one more capture on the next pass,
        * as when its owner tries again, and a failing one try now. Returns
-       * whether it was blocked or its owner saw it failing.
+       * whether it was blocked or its owner saw it failing. The block and
+       * wait kept for the document, hosted or not, go too.
        */
       unblock(document: {workspaceId: string; objectId: string}): boolean {
-        const key = hostedKey(document), unblocked = key !== undefined && activation!.unblock(hosted.get(key)!.target);
+        const key = hostedKey(document), kept = activation?.forgetKept(document) ?? false;
+        const unblocked = key !== undefined && activation!.unblock(hosted.get(key)!.target);
         if (unblocked) nudgePass();
-        return unblocked;
+        return unblocked || kept;
       },
       /**
        * Reads one bounded page of a refused queue this host keeps, as the

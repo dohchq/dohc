@@ -223,7 +223,8 @@ export function serviceHostReadiness(options: {
     if (!row.enabled || row.ownerStop) return {...base, status: "paused"};
     if (changed(row)) return {...base, status: "unavailable", reason: "workspace-changed"};
     if (storage.objectIdAtPathInVersion({workspaceId: row.workspaceId, versionId: "main", path: row.path}) !== row.objectId) return {...base, status: "unavailable", reason: "document-unavailable"};
-    // Only the owner's Resume lets the host try a document it could not continue.
+    // Only the owner's Resume lets the host try a document it could not continue, except one whose history is past the
+    // read budget, which also tries again after its wait.
     // One with no live-editing history needs its owner to open it first. A Resume of one whose
     // host copy is missing an owner edit retires its held activation.
     const block = host.blocked(row);

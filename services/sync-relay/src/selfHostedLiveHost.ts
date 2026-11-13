@@ -284,7 +284,7 @@ export async function startSelfHostedLiveHost(options: {
           : block === "live-edit-unadmitted"
             ? `Live editing of ${row.path} in workspace ${row.workspaceId} is held: the session host hasn't applied an edit to the document. Its owner can resume live editing in dohc to try again. ${store}`
             : block === "history-over-budget"
-              ? `Live editing of ${row.path} in workspace ${row.workspaceId} cannot start: its edit history is past what this server reads or checks. It tries again once the document has a new base. ${store}`
+              ? `Live editing of ${row.path} in workspace ${row.workspaceId} cannot start: its edit history is past what this server reads or checks. It tries again later, or when its owner resumes live editing in dohc. ${store}`
               : `Live editing of ${row.path} in workspace ${row.workspaceId} stopped until its owner tries again. ${store}`));
       }
       // A workspace with no documents detaches once its replica drained, then
@@ -373,7 +373,10 @@ export async function startSelfHostedLiveHost(options: {
       });
     },
     ready(document: LiveDocumentKey) {return current?.isDocumentReady(document) ?? false;},
-    /** Why the running daemon cannot continue the document until its owner tries again, if it cannot. */
+    /**
+     * Why the running daemon cannot continue the document, if it cannot. Each waits for its owner, except a history past the
+     * read budget, which tries again after its wait.
+     */
     blocked(document: {workspaceId: string; objectId: string}) {return current?.blocked(document);},
     /** Why the running daemon's hosted pass left this document held. */
     holdReason(document: {workspaceId: string; objectId: string}) {return current?.holdReason(document);},

@@ -2,6 +2,7 @@ import { requireFinishedRestoreBinding } from "./liveRestoreLifecycleStorage";
 import { parseNativeOwnerActivationSource } from "@dohc/workspace-engine-client/daemon";
 import { registerLiveHostInTransaction } from "./hostControl";
 import { createHash } from "node:crypto";
+import { setImmediate } from "node:timers/promises";
 import { isDeepStrictEqual } from "node:util";
 import type { NativeOwnerActivation, NativeOwnerActivationSource, RetainedPrefixBody } from "@dohc/workspace-engine-client/daemon";
 import { parseLiveDocumentKey, parseLiveUpdateDigest, parseLiveUpdateIdentifier, parseLiveUpdateReceipt, type LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
@@ -16,8 +17,10 @@ import { LIVE_DELIVERY_OWNERS } from "./liveCommittedDeliverySchema";
 import { forgetIdleServiceHostUploads, restoreInProgress, SERVICE_HOST_ENROLLMENTS } from "./serviceHostEnrollment";
 import type { RetirementKey } from "./serviceActivationRetirement";
 import {readOrdinaryActivationHistory,verifyOrdinaryActivationCut,ServiceActivationBusy,ServiceActivationStaleCut,ServiceActivationTooLarge,
-  type OrdinaryActivationBounds} from "./ordinaryActivationSource";
+  type OrdinaryActivationBounds,type OrdinaryActivationRead} from "./ordinaryActivationSource";
 import {ServiceActivationHistoryOverBudget,type OrdinaryActivationValidator} from "./ordinaryActivationValidation";
+import {foldOrdinaryCheckpointPages,ORDINARY_FOLD_PAGE_ROWS,ORDINARY_FOLD_RUN_PAGES,type OrdinaryFoldValidator} from "./ordinaryActivationFold";
+import type {OrdinaryCheckpointScope} from "./ordinaryActivationCheckpoint";
 /** A retained activation whose stored record can't be read back. Only the operator can repair it. */
 export class ServiceActivationDamaged extends Error {
   constructor(options?: ErrorOptions) { super("Retained service activation is damaged.", options); }
@@ -379,7 +382,7 @@ export class ServiceActivationStore {
     for(const limit of Object.values(input.bounds))if(!Number.isSafeInteger(limit)||limit<1)throw new Error("Invalid ordinary activation read budget.");
     const capturedBytes=input.capture.baselineBytes.byteLength+input.capture.fullState.byteLength+Buffer.byteLength(JSON.stringify(input.capture.source));
     if(capturedBytes>input.bounds.maxCaptureBytes)throw new ServiceActivationCaptureOverBudget();
-    // The history read charges the baseline to the same budget, so a baseline past it waits for a new base too.
+    // The history read charges the baseline to the same budget, so a baseline past it refuses as a history past it does.
     if(input.capture.baselineBytes.byteLength>input.bounds.maxBytesPerDrain){
       throw new ServiceActivationHistoryOverBudget("Ordinary activation history exceeds its configured byte budget.");
     }
@@ -410,19 +413,47 @@ export class ServiceActivationStore {
       }
       if (predecessor) this.#requireSuccession(document, source, predecessor, ownerUserId);
     };
-    const history = this.storage.readTx(() => {
+    const {policySha256} = input.validate;
+    const lineage: OrdinaryCheckpointScope | null = policySha256 === undefined ? null : {namespace: this.history.namespace, document,
+      replicationEpoch: source.replicationEpoch, streamIdentity: source.streamIdentity,
+      base: {relaySeq: source.baseRelaySeq, originId: source.baseOriginId, originSeq: source.baseOriginSeq}, policySha256};
+    const read = (checkpoint: OrdinaryCheckpointScope | null) => this.storage.readTx((): OrdinaryActivationRead | undefined => {
       input.guard(); requireLiveJournalHistory(this.storage, this.history);
       const prior = readServiceActivation(this.storage, document);
       const ownerUserId = owner();
       if (retained(prior)) return undefined;
       succeed(prior ?? null, ownerUserId);
-      return readOrdinaryActivationHistory(this.storage, {source, document, baselineBytes, fullState, bounds: input.bounds});
+      return readOrdinaryActivationHistory(this.storage, {source, document, baselineBytes, fullState, bounds: input.bounds, checkpoint});
     });
+    const foldPage: OrdinaryFoldValidator = async (work, signal) => {
+      const result = await input.validate(work, signal);
+      if (result.kind === "accepted") throw new Error("Ordinary fold validation answered for an activation.");
+      return result;
+    };
+    // More than one page of history after the checkpoint folds into it a run of pages at a time, so the last read walks at most
+    // one page.
+    let checkpoint = lineage, found = read(checkpoint);
+    while (found?.kind === "fold" && lineage) {
+      input.signal?.throwIfAborted();
+      const folded = await foldOrdinaryCheckpointPages(this.storage, {scope: lineage, validate: foldPage, nowMs: () => input.registeredAtMs, signal: input.signal,
+        bounds: {pageRows: ORDINARY_FOLD_PAGE_ROWS, pageBytes: input.bounds.maxBytesPerDrain}, pages: ORDINARY_FOLD_RUN_PAGES});
+      if (folded.kind === "busy") throw new ServiceActivationBusy();
+      if (folded.kind === "over-budget") throw new ServiceActivationHistoryOverBudget(folded.message);
+      // A fold that cannot go further leaves the read from the base to decide. So does a page that ends at a state no live
+      // document has, which a read from the base projects only where its source's proof needs it.
+      if (folded.kind === "blocked" || folded.kind === "current" || folded.kind === "refused") checkpoint = null;
+      await setImmediate();
+      found = read(checkpoint);
+    }
+    if (found?.kind === "base") {checkpoint = null; found = read(checkpoint);}
+    if (found && found.kind !== "history") throw new ServiceActivationStaleCut();
+    const history = found?.history;
     const validation = await input.validate({document, currentPath: source.currentPath, baselineBytes,
       ...(history ? {cut: {source, fullState, history, maxBytesPerDrain: input.bounds.maxBytesPerDrain}} : {})}, input.signal);
     if (validation.kind === "retry") throw new ServiceActivationBusy();
     if (validation.kind === "capacity-refused") throw new ServiceActivationTooLarge();
     if (validation.kind === "over-budget") throw new ServiceActivationHistoryOverBudget(validation.message);
+    if (validation.kind === "folded") throw new Error("Ordinary activation validation answered for a fold.");
     if (validation.kind !== "accepted") throw new ServiceActivationRefused(validation.message);
     const base = validation.baseline;
     return this.storage.tx(() => {
@@ -440,7 +471,7 @@ export class ServiceActivationStore {
       if (!history) throw new ServiceActivationStaleCut();
       const predecessor = prior ?? null;
       succeed(predecessor, ownerUserId);
-      const ordinaryCut=verifyOrdinaryActivationCut(this.storage,{source,document,baselineBytes,fullState,baseline:base,history,proof:validation.proof,bounds:input.bounds});
+      const ordinaryCut=verifyOrdinaryActivationCut(this.storage,{source,document,baselineBytes,fullState,baseline:base,history,proof:validation.proof,bounds:input.bounds,checkpoint});
       if (!registerLiveHostInTransaction(this.storage, {...input.host,updatedAtMs:input.registeredAtMs,guard:input.guard}).ok) throw new Error("Service activation host is unavailable.");
       const registration = registerOrdinaryActivationBaselineInTransaction(this.storage,{host:input.host,registeredAtMs:input.registeredAtMs,baselineBytes,
         evidence:{version:1,document,currentPath:source.currentPath,checkpoint:{updateDigest:source.lineageClaimId,ranges:base.checkpoint.ranges},
