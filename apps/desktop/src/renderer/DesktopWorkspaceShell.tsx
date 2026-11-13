@@ -3310,29 +3310,29 @@ export function DesktopWorkspaceShell(props: {
     workspaceId,
   ]);
 
-  // Whether this workspace has engine-backed surfaces at all: history and
-  // versions. A shared view renders neither: its open deliberately installed
-  // no capture. A registry fact, so this value never waits on anything.
+  // `captureDecided` is whether main's capture decision for this workspace
+  // has landed. `captureAvailable` is whether main's capture serves this
+  // workspace.
   //
-  // Chats is the exception. A share view still installs no capture, so
-  // history and versions stay gone, but main answers chat from the share
-  // scope instead of a capture, so About opens everywhere. The Chats view
-  // does not: the per-file surface answers for a file the share already
-  // served, and a workspace-wide listing would be a superset to filter.
+  // A shared view installs no capture, so `captureAvailable` is false there.
+  // About is the exception: main answers chat from the share scope instead
+  // of a capture, so About opens everywhere. The Chats view does not: the
+  // per-file surface answers for a file the share already served, and a
+  // workspace-wide listing would be a superset to filter.
   //
-  // Whether main's capture will serve those surfaces. Main's status is the
-  // single answer to "does anything record here": after a failed capture
-  // build every version, chat and moment call is refused. It can only
-  // answer once main has decided, which is what `captureDecided` carries. A
-  // status that has not been decided sits at its "nothing is wrong"
-  // defaults, so do not read those as an answer.
+  // Outside a shared view, main's status is the single answer to "does
+  // anything record here": after a failed capture build every version, chat
+  // and moment call is refused. It can only answer once main has decided,
+  // which is what `captureDecided` carries. A status that has not been
+  // decided sits at its "nothing is wrong" defaults, so do not read those
+  // as an answer.
   //
-  // The capture capability. Everything that calls through
-  // `requireEngineCapture` reads this one value (the version selector, the
-  // shell's version fetch, the persisted compare and moment-diff tabs, the
-  // Chats view, About and tab, the graph's chat mentions and the
-  // linked-mentions panel), so the fact is decided once. A surface that
-  // re-derives it drifts.
+  // `captureAvailable` is the capture capability. Everything that calls
+  // through `requireEngineCapture` reads this one value (the version
+  // selector, the shell's version fetch, the persisted compare and
+  // moment-diff tabs, the Chats view, About and tab, the graph's chat
+  // mentions and the linked-mentions panel), so the fact is decided once. A
+  // surface that re-derives it drifts.
   const captureDecided = captureDecidedFor === workspaceId;
   const captureAvailable = !shareView && captureDecided && !statusSaysNoRecorder(syncStatus);
   useEffect(() => {

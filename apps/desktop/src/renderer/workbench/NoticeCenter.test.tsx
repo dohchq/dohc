@@ -392,16 +392,6 @@ describe("notice center", () => {
     },
   };
 
-  // Owner live delivery is its own fact. Only "retrying" raises a notice, and
-  // what it offers depends on whether anything can be dialled again.
-
-  // A note whose waiting edits reached their limit is named at once,
-  // and delivering them is what lifts the pause.
-
-  // A document that moved, or a workspace that changed, is not a connection
-  // to dial again: the way forward is the live-document list, and nothing
-  // here re-binds a document identity on the user's behalf.
-
   // A document the server stopped waits for its owner. The way to try again
   // is its Resume in the live documents list, from the toast and the row.
   // Nothing retries meanwhile, so both show the warning, not the retry mark.
@@ -490,9 +480,6 @@ describe("notice center", () => {
     },
   );
 
-  // There is no command that restarts the app for the user, so the notice
-  // names the step instead of offering a control that cannot run.
-
   it("clears the live delivery toast and notice when delivery recovers", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const { rerender } = renderNotices({ syncStatus: liveDeliveryStatus("retrying") });
@@ -550,17 +537,6 @@ describe("notice center", () => {
     fireEvent.click(screen.getByTestId("notice-center-toggle"));
     expect(screen.queryByTestId("notice-owner-live-delivery")).toBeNull();
   });
-
-  // The server's report does not explain a named reason, so once the server
-  // is back it shows at once, with its toast.
-
-  // A retry dohc is still fixing by itself shows in the title bar at once,
-  // and adds a toast and a row only once it has lasted 15 s.
-
-  // A retry that turns active before its 15 s cancels the wait: no toast or
-  // row ever appears, however long live editing then stays active.
-
-  // A named reason stays until someone acts, so it does not wait.
 
   // Enrollment refusals are one boolean on the status: however many shares it
   // covers, the user gets one announcement and one row, and the list is the

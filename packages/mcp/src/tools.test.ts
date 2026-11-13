@@ -183,8 +183,9 @@ async function withProcessPlatform<T>(platform: NodeJS.Platform, fn: () => Promi
   }
 }
 
-// The engine capture path these tests exercise relies on Linux descriptor-
-// relative fs.
+// Runs a test on Linux and skips it elsewhere. The tools have no platform
+// gate of their own: "mutating tools work on platforms without durable legacy
+// history" covers that.
 const itDurableHistory = process.platform === "linux" ? it : it.skip;
 
 // The traversal vectors every path-taking tool must refuse: parent escape,

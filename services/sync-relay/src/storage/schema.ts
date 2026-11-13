@@ -1437,7 +1437,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
 
       ${NORMALIZED_SHARE_SCHEMA_SQL}
 
-      -- #646 PR2: where every object the relay has ever seen sits RIGHT NOW,
+      -- Where every object the relay has ever seen sits RIGHT NOW,
       -- maintained at insert time by appendLogBatch. The file-chat share
       -- filter resolves a thread's object to its current path and tests that
       -- path against the selector, so this lookup is on the share read path
@@ -1463,7 +1463,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
       CREATE INDEX IF NOT EXISTS idx_sync_relay_object_paths_path
         ON sync_relay_object_paths(workspace_id, path);
 
-      -- #646 PR3a: one row per moment the relay has seen for an object, which
+      -- One row per moment the relay has seen for an object, which
       -- is what the base rewrite resolves against. sync_relay_object_paths
       -- above answers "where is this object NOW?"; accept needs the harder
       -- question, "which of your own moments produced the content the
@@ -1559,7 +1559,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
           workspace_id, version_id, blob_sha256, path, state_relay_seq
         );
 
-      -- #646 PR3a: a recipient's submitted changes, held until the granter
+      -- A recipient's submitted changes, held until the granter
       -- accepts or declines them. Nothing here is in the granter's log: accept
       -- is what releases it, through the same appendLogBatch the chat path
       -- already uses.

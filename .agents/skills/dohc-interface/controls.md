@@ -129,7 +129,7 @@ Position:
 
 | Part | Spacing |
 | --- | --- |
-| Row in a panel, tree, or menu | `h-7` (28 px), `gap-2` between icon and label |
+| Row in a panel, tree, or menu | `h-7` (28 px), `gap-2` between icon and label. A menu row uses `min-h-7`, so a row with a description grows. |
 | Row in a picker or on a page | `h-8` (32 px), `gap-2` |
 | Panel header | `h-9` (36 px), `px-3`, the same height as the tab strip |
 | Panel content | Starts 8 px under the header |

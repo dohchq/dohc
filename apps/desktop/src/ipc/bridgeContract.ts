@@ -296,7 +296,9 @@ export type PickWorkspaceRootResult = z.infer<typeof PickWorkspaceRootResult>;
 
 // The level a recipient holds on a path/version share, from the same
 // one place the relay and the engine read it. All three levels read the same
-// files; comment and edit open chat, and edit opens writes.
+// files. At comment and edit the relay accepts chat about those files, but
+// the desktop refuses every chat write in a received share (`chatWrites.ts`).
+// Only edit opens file writes (`shareViewTakesLocalWrites`).
 // The chat grant's own binary access is a different field.
 const SHARE_ACCESS = z.enum(SHARE_ACCESS_VALUES);
 export type ShareAccess = z.infer<typeof SHARE_ACCESS>;

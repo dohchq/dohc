@@ -30,12 +30,17 @@ import { PERSONAL_AGENT_ID_PREFIX } from "./relayLogInputs";
 // which blobs) a share recipient may see. This module is the security
 // boundary for external shares. Everything here fails closed.
 //
-// Shares are live-follow read-only views. The recipient re-uses the relay's
+// A share's read side is a live-follow view. The recipient re-uses the relay's
 // since-cursor log fetch with this filter applied server-side, so a granter's
 // later edits to shared paths reach the recipient on refresh, and nothing
 // outside the selector ever crosses the wire. Live-follow reuses the whole
 // sync pipeline (cursoring, blobs, idempotent re-fetch) instead of a parallel
 // snapshot format.
+//
+// A recipient's writes are separate decisions, each with its own allowlist:
+// chat appends (`filterOpForShareAppend`), proposed file changes
+// (`filterProposedChangeForShare`), and direct Collection writes
+// (`filterCollectionWriteForShare`).
 //
 // The relay normally treats op payloads as opaque. Shares deliberately relax
 // that in one direction: the filter may read well-known path/hash/version
@@ -63,7 +68,7 @@ export interface ShareSelector extends StoredShareSelector {
 }
 
 // Shared channels: a bidirectional chat grant. Unlike the
-// read-only path/version selector above, a chat share scopes a whole
+// path/version selector above, a chat share scopes a whole
 // channel (its channel/thread/message/reaction ops, nothing else) and — when
 // access is "read-write" — lets the member append channel-scoped chat ops via
 // the member append route. "read-only" is the broadcast/announcements opt-in:

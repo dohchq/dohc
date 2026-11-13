@@ -773,7 +773,6 @@ describe("notices sent to you", () => {
 
     // Every share read and message-request sync waits for the test. The
     // mount's reads come first; the reveal's own come after them.
-
     function heldBridge(uiState?: Promise<WorkspaceUiState | null>) {
       const shares: Deferred<typeof INVITATION_LISTING>[] = [];
       const syncs: Deferred<SyncDmsResult>[] = [];
@@ -797,16 +796,6 @@ describe("notices sent to you", () => {
       });
     };
     const opening = () => screen.findByText("Opening share…");
-    // Try again reads both lists again.
-
-    // Each state of the Chats panel ends the handoff, or leaves it to the person:
-    // - the list is loading: the card waits until the listing answers or fails;
-    // - the listing failed: `failed`, with Try again (above);
-    // - chats are off: at once, with why and Back only;
-    // - the invitation is archived: Archived opens, its row mounts, `shown`;
-    // - a complete listing doesn't have it: `absent` (above);
-    // - the person leaves: Chats' later reports end nothing (above).
-    // `shown` means its row is mounted in the list, nothing less.
 
     it("doesn't end the handoff when a notice's Open shows another invitation while it waits", async () => {
       const { bridge, shares, syncs } = heldBridge();
@@ -925,16 +914,6 @@ describe("notices sent to you", () => {
 });
 
 describe("owner live documents", () => {
-  // As it crosses Electron's IPC, which keeps only the name and message.
-
-  // The document's "Stopping live editing" row says the Stop waits, and keeps
-  // Save recovery copy, so Live documents adds no notice of that wait.
-
-  // Try again takes the notice at once, so a Stop that waits again after Live
-  // documents closes must report itself, as a refused one does.
-
-  // The dialog now reports a wait after it closes, which a workspace switch also does.
-
   it.each(["another", "closed"])(
     "drops the late pending Stop report for an %s workspace",
     async (mode) => {
@@ -1010,8 +989,6 @@ describe("owner live documents", () => {
     expect(bridge.stopOwnerLiveDocument).toHaveBeenCalledTimes(1);
   });
 
-  // Issue 2946: a Stop asked for before the list closed answers after it opens again.
-
   it("reports a Stop refused after Live documents reopens and closes again in a toast", async () => {
     const bridge = makeBridge(Promise.resolve(null)),
       stopping = deferred<StopOwnerLiveDocumentResult>();
@@ -1080,43 +1057,6 @@ describe("owner live documents", () => {
     await waitFor(() => expect(screen.queryByTestId("live-documents-dialog")).toBeNull());
     expect(screen.getByTestId("settings-section-cloud")).toBeTruthy();
   });
-
-  // The dialog's failure outlives the dialog: the shell keeps the notice and
-  // its Try again, and reopens the list when there is nothing left to retry
-  // into.
-
-  // The waiting words are the same for every document, so each document's
-  // waiting Stop keeps its own notice, and another report replaces only its own.
-
-  // Nothing sends a server-only Stop again, so the notice says to try again,
-  // and keeps the relay's words in Copy only. The row stays while a Stop runs,
-  // and through one that waits again after the dialog closes; it goes when a
-  // Stop succeeds.
-
-  // Main reports every Stop that succeeds, including an agent's, so the
-  // document's waiting row goes, and no other row.
-
-  // DesktopRoot remounts the shell on a switch, so this rerenders the same
-  // instance: the stricter case, where the shell's own guard is what keeps
-  // workspace A's list from repainting or reading workspace B.
-
-  // The notice's Try again is main's own retry command, not a repaint. A
-  // retry with no reason toasts once it has lasted 15 s.
-
-  // A relay outage must not read "Saving…" for its whole length, with a row
-  // three failures later that names no cause and offers nothing to do. The
-  // first failed pass toasts, and later passes of the same failure only
-  // update the row.
-
-  // Busy is not broken: a workspace still taking in files says nothing about
-  // its server connection, and the next activity reads it again.
-
-  // The list is a call to this workspace's own server, which main refuses for
-  // a workspace that has none. Local-only work gets no action that can only
-  // fail — the section still offers the way to turn sync on.
-
-  // Turning sync on re-reads the status this gate is derived from, so the
-  // list arrives without a restart or a workspace switch.
 });
 
 // Connect server is one path: signed in, the account and the sync switch are
@@ -1196,31 +1136,7 @@ describe("Connect server", () => {
     await user.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
   });
-
-  // The next step after signing in is the sync switch, so the dialog hands
-  // over to the page that holds it.
-
-  // The titlebar's workspace menu holds Connect server.
-
-  // Nobody knows yet whether the person is signed in. The dialog would show
-  // a session's account row a second time, so Settings answers instead.
-
-  // The shell's status said signed out, but the dialog's own check finds a
-  // session: the dialog hands it to Settings rather than showing the account.
-
-  // Access's setup notes, in About and the Sharing view: signed out, Connect
-  // server starts the connect flow; signed in to an account the workspace's
-  // sync does not match, the note opens Settings, where Try again lives.
 });
-
-// Turning sync on sends no session event, and the switch shows on from the
-// click, which invites closing Settings. The answer still reaches the shell.
-
-// Disconnect reaches every workspace, so its failure is news in whichever
-// workspace is open when it arrives, unlike an enable.
-
-// The folder holds only the active version's files, so a document too large
-// for live editing opens only in the version its refusal names.
 
 describe("Undo on an Explorer notice", () => {
   const DELETED = "dohc-operation:22222222-2222-4222-8222-222222222222";
@@ -1505,20 +1421,6 @@ it("signs in again from Notices, and sync resumes with no enable or pause", asyn
     vi.useRealTimers();
   }
 });
-
-// The dialog closed after a renewal failed. The notice's Try again still
-// signs in again at that server: the expired session is saved, and a plain
-// dialog would hand it to Settings and start nothing.
-
-// The renewal's first step, the status check, failed. Its notice still signs
-// in again once the dialog has closed, instead of opening Settings.
-
-// A connection that failed before the sign-in expired keeps its notice. Its
-// Try again during a renewal leaves the renewal a renewal, so the renewal's
-// own failure still signs in again from its notice after the dialog closes.
-
-// Two renewal attempts failed in one open dialog. The older failure's Try
-// again signs in again there, rather than doing nothing and leaving.
 
 // Settings shows the same expired row: no switch reading on while nothing
 // syncs, and Sign in again in Try again's place.

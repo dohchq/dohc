@@ -195,7 +195,7 @@ describe("markdown document opening state", () => {
     // through it (the title is frontmatter in the canonical Y.Doc) instead of
     // to disk.
     // `settle` is created inside the openEngineYDocSession executor, but
-    // `opening` is derived during render (useEngineDoc.ts:189), so
+    // `opening` is derived during render (in the `useEngineDoc` hook), so
     // markdown-open-state is in the DOM one commit before the bridge is ever
     // called. Resolving on that element and then calling settle?.(…) can
     // silently no-op, and the test burns its whole window waiting for a state

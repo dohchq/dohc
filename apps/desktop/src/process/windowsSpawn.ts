@@ -1,6 +1,6 @@
 // Windows child-process spawning support, shared by agent transports and the
-// site runner. On Windows, package-manager and npm-installed CLI commands are.
-// Cmd/.bat shims that cannot be spawned directly; they must run behind a
+// site runner. On Windows, package-manager and npm-installed CLI commands are
+// .cmd/.bat shims that cannot be spawned directly; they must run behind a
 // cmd.exe wrapper whose command line follows cmd's (not POSIX's) quoting
 // rules, and killing that wrapper does not kill the real process it started.
 // Everything here is a no-op on other platforms.

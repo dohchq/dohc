@@ -397,20 +397,6 @@ describe("history page", () => {
     expect(restoreEngineMomentFile).toHaveBeenCalledOnce();
   });
 
-  // The ladder itself is the hook's (useHistoryPage.test.tsx). This pins the
-  // surface it leaves behind: a line with no control and no global error,
-  // kept through the next activity's read until its page replaces it.
-
-  // While main's status says History is paused, the panel says so: in place
-  // of taking in changes, and above the rows a read still answers, which may
-  // be missing changes. The line goes with the pause.
-
-  // A pause can end before History answers a page: the panel goes back to
-  // taking in changes with no click, then the page replaces the line.
-
-  // A pause does not hide a read that really failed: it keeps its words and
-  // Try again, and the page Try again reads still starts with the line.
-
   // Page ordering, held refreshes and pagination admission are the hook's
   // (useHistoryPage.test.tsx). The shell owes the readiness mark to the page
   // that commits, and the Show earlier changes control to the hook's cursor.
@@ -462,8 +448,6 @@ describe("history page", () => {
     const loadMore = screen.getByTestId("engine-history-load-more");
     await waitFor(() => expect(loadMore.hasAttribute("disabled")).toBe(false));
   });
-
-  // A pagination failure about the displayed timeline reaches the notices.
 
   // A version switch changes which timeline is true, so it is a boundary: an
   // answer describing the version the user left must never paint the one they
@@ -667,46 +651,6 @@ describe("history page", () => {
     expect(await screen.findByText("Back on main")).toBeTruthy();
   });
 
-  // The boundary has to name the version the user left, and before the first
-  // page commits the panel displays none. Inferring that version from the
-  // timeline left the guard with nothing to reject, so the answer describing
-  // the version they had already left painted the panel — and stayed there
-  // when the post-switch refresh failed.
-
-  // A boundary anyone has to await is not a boundary. When the old version's
-  // answer lands first, it meets a guard that knows nothing, commits, and
-  // whatever arrives later cannot retract it, so a failed switch-triggered
-  // refresh would leave the previous version's moments on screen. No await
-  // may sit in front of the announcement. Neither the shell's own lookup nor
-  // the selector's post-switch re-read answers here.
-
-  // The residual window: a switch that failed, whose recovery re-read
-  // also failed, leaves the shell asking which version is active. The
-  // old-version answer lands before that lookup does, but the switch's own
-  // refresh superseded it, so it paints nothing even though that refresh
-  // failed. The lookup then finds no page to drop and asks nothing.
-
-  // The other verdict the lookup can reach: it agrees with the committed page
-  // (the failed switch never applied). Dropping here would blank a timeline
-  // that is right — and this is every merge and conflict resolution, whose
-  // lookup only restates what is already true.
-
-  // The judge must know when court is over: a lookup that settles after the
-  // shell unmounted judges nothing. Without the committed-watermark half of
-  // the staleness question, a contradicting late lookup would drop state and
-  // fire three IPC reads for a workspace the user already left — the renderer
-  // async-state invariant.
-
-  // A null page is not "no changes". Before the first read answers, the
-  // surface knows nothing, and it may claim neither an empty workspace nor a
-  // failure. The moment the read answers with an empty timeline, the empty
-  // copy is earned.
-
-  // One refresh issues three reads, and they answer three different
-  // questions. Awaiting them as one batch made the timeline report a failure
-  // that happened somewhere else — the engine had already served the page.
-  // The failure is still reported; it is reported about the read that had it.
-
   // The reverse path, end to end. Separating the lanes took one away: a
   // sibling that fails while the page succeeds renders the timeline, and the
   // timeline hides History's Try again — so the only control that could reach
@@ -823,70 +767,7 @@ describe("history page", () => {
     expect(screen.queryByText("Wrote the note in the draft")).toBeNull();
     expect(screen.queryByTestId("history-load-failed")).toBeNull();
   });
-
-  // Announcing the switch first re-keys this component. The re-key must not
-  // bump the counter the operation checks itself against. If it did, the
-  // switch would invalidate its own token while its follow-up re-read was
-  // still pending, its finally would skip, and the selector would sit
-  // disabled on "Switching…" for the rest of the session. Liveness and
-  // operation identity are different questions.
-
-  // The switch says where the workspace landed before it awaits anything
-  // else. Announcing after the selector's own re-read would leave an
-  // old-version answer arriving during that read to meet an unset boundary.
-  // The re-read here never settles, which is what a slow one looks like from
-  // the timeline's side.
-
-  // Main serves these calls concurrently, so a request issued earlier can
-  // answer later. Two activity refreshes are both superseded by the switch's
-  // own refresh. When that one fails, neither answer paints, whichever
-  // version it describes; the rows the switch dropped stay gone.
-
-  // The same callback runs for merges and conflict resolutions, neither of
-  // which changes the active version. Its refresh supersedes the one a
-  // pagination was holding. When that refresh and
-  // the pagination both fail, the rows on screen stay; the held answer, asked
-  // again since, does not paint. (useHistoryPage.test.tsx pins that a version
-  // statement alone keeps a held refresh.)
-
-  // A failure is an answer for the version rule: it answers about somewhere
-  // the user has left. The switch bumps the issue counter but not the
-  // committed watermark, so the old pagination's rejection still read as
-  // "about the open timeline" and posted a banner for a version nobody is
-  // looking at.
-
-  // Main pushes each change of the run slot, so the dot needs no read on
-  // refresh: a run seen by Settings or by chat dispatch shows the same way.
-
-  // A failure reports, and it takes nothing. The lane's watermark is what an
-  // answer earns: a read that failed proves nothing, and the older read still
-  // in flight may be the only answer anyone gets. Moving the watermark on a
-  // rejection would reject that answer when it lands, and the workspace status would
-  // sit on a value the workspace has left with nothing to correct it.
-
-  // What `committed` is for, on the success path: latest-committed-wins. Two
-  // refreshes overlap, the newer answers first, and the older must not paint
-  // its stale value over it when it finally lands.
-
-  // A failure whose question was already asked again. The newer read has not
-  // answered yet — so "what did this lane last write" cannot see it, and the
-  // failure looks like
-  // the newest thing there is. It is not: the lane has already asked again.
-  // Reporting raises a banner that the newer answer will not take down, and it
-  // then sits over a value the user can see is current.
 });
-
-// A shared view's open deliberately installed no capture, and main refuses
-// every version call.
-// The selector retried five times and then raised a danger-tone shell error
-// naming a Settings toggle nobody touched, and it came back on every share
-// refresh (the selector re-keys on versionEpoch).
-
-// The same error loop from the other cause, on a workspace that is not
-// a shared view. After a failed capture build main has no capture, so every
-// version call is refused while the renderer's own settings read still says
-// engine-on. Versions must follow main's status override as history does, or
-// the selector renders, retries, and raises the danger banner.
 
 // Virtual tabs survive restore, so a moment-diff tab outlives the History
 // surface that opened it. A shared view opens the change its share imported,
@@ -927,8 +808,6 @@ describe("shared view moment-diff tab", () => {
     }
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
-
-  // Before main decides, the tab claims nothing and reads nothing.
 });
 
 // The same tab, the other cause. Gated on the share fact alone, a workspace
