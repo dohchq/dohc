@@ -269,6 +269,20 @@ describe("account pages", () => {
     expect(open).not.toContain("data-sign-up");
   });
 
+  it("tells a person signing up from an invite link to open it again after confirming", async () => {
+    for (const closedSignUp of [true, false]) {
+      const body = await (await router({ closedSignUp })(get("/account/verify-email?next=%2Fjoin"))).text();
+      expect(body).toContain("Then open your invite link again to join the workspace.");
+    }
+    const plain = await (await router({ closedSignUp: true })(get("/account/verify-email?next=%2Faccount"))).text();
+    expect(plain).not.toContain("invite link");
+    // Sign-up keeps the join page, so the page sends the invite link's token from this tab.
+    expect(await (await router({ closedSignUp: true })(get("/account/sign-up?next=%2Fjoin"))).text()).toContain('data-next="/join"');
+    for (const refused of ["%2F%2Fjoin", "%2Fjoin%3Fx", "%2Fjoinx"]) {
+      expect(await (await router()(get(`/account/sign-up?next=${refused}`))).text(), refused).not.toContain("data-next");
+    }
+  });
+
   it("continues a device sign-in after a new password", async () => {
     const body = await (
       await router()(get("/account/reset-password?token=abc&next=%2Fdevice%3Fuser_code%3DABCD-EFGH"))

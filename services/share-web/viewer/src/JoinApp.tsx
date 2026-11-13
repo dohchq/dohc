@@ -174,9 +174,10 @@ export default function JoinApp(props: {token: string | null}) {
     case "checking":
       return <Page pageRef={page} busy announce="Checking the invite link">
         <div className="join-skeleton" aria-hidden="true"><i /><i /><i /><i /><i /></div></Page>;
+    // A broken link lands here, and so does a person who confirmed their email in another tab.
     case "no-link":
-      return <Page pageRef={page} icon="unlink" failed title="This invite link is incomplete">
-        <p>Open the whole link you were sent. If it still doesn't work, ask for it again.</p>
+      return <Page pageRef={page} icon="unlink" title="Open your invite link again">
+        <p>To join, open the whole invite link you were sent. If it still doesn't work, ask for a new one.</p>
       </Page>;
     case "signed-out": {
       const words = stage.ended ? "Your sign-in ended. Sign in again to join." : "Sign in to see which workspace this link is for.";

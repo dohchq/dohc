@@ -300,8 +300,10 @@ function corsHeaders(origin: string | null, allowed: Set<string>): Record<string
 
 // Only a path on this origin is a safe post-sign-in destination. `//host` and
 // `/\host` both leave this origin once a browser resolves them.
+// The pages an account page may continue to: the account, a device sign-in,
+// or the join page that holds an invite link's token in its tab.
 function samePath(value: string | null): string | null {
-  return value === "/account" || (value !== null && /^\/device\?user_code=[A-Za-z0-9%_-]+$/.test(value)) ? value : null;
+  return value === "/account" || value === "/join" || (value !== null && /^\/device\?user_code=[A-Za-z0-9%_-]+$/.test(value)) ? value : null;
 }
 
 function page(body: string, status = 200): Response {
