@@ -80,6 +80,7 @@ function capture(): WorkspaceEngineCapture {
     compareVersions: vi.fn(),
     mergeVersionIntoMain: vi.fn(),
     listOpenConflicts: vi.fn(),
+    countOpenConflicts: vi.fn(async () => 0),
     resolveConflict: vi.fn(),
     listMoments: vi.fn(),
     readMoment: vi.fn(),
@@ -719,8 +720,9 @@ describe("relaySyncEngine", () => {
     await sync.stop();
   });
 
-  it("wires push then pull through the capture callback and folds conflicts into the snapshot", async () => {
+  it("wires push then pull through the capture callback and reads open conflicts into the snapshot", async () => {
     const cap = capture();
+    vi.mocked(cap.countOpenConflicts).mockResolvedValue(2);
     const commit = vi.fn(async () => {});
     pullMock.mockImplementation(async (materializePage) => {
       await materializePage([]);
@@ -735,8 +737,7 @@ describe("relaySyncEngine", () => {
     expect(pushMock.mock.invocationCallOrder[0]!).toBeLessThan(
       pullMock.mock.invocationCallOrder[0]!,
     );
-    // The pull result rode through the capture (which committed the cursor)
-    // and its conflictsOpened landed in the snapshot.
+    // The pull result rode through the capture, which committed the cursor.
     expect(commit).toHaveBeenCalledTimes(1);
     expect(sync.snapshot().conflictCount).toBe(2);
     expect(sync.snapshot().lastSyncedAtMs).toBe(12345);
@@ -1204,6 +1205,7 @@ describe("relaySyncEngine", () => {
   it("re-reads open-conflict truth each pass so resolved conflicts clear the snapshot", async () => {
     const cap = capture();
     let openConflicts = 0;
+    vi.mocked(cap.countOpenConflicts).mockImplementation(async () => openConflicts);
     pullMock
       .mockImplementationOnce(async () => {
         openConflicts = 2;
@@ -1216,7 +1218,6 @@ describe("relaySyncEngine", () => {
       operations: mockOperations(),
       capture: cap,
       onChange: vi.fn(),
-      countOpenConflicts: async () => openConflicts,
       debounceMs: 100,
       nowMs: () => 12345,
     });

@@ -16,7 +16,7 @@ function fixture(joinBootstrap = false) {
   const push = vi.fn(async (): Promise<PushWorkspaceToRelayResult> => ({pushed: 1, hasMore: false, originsPushed: [], sharingDeclined: [], ownerAdmissionPending: []}));
   const pull = vi.fn(async (): Promise<PullWorkspaceFromRelayResult> => ({fetched: 0, applied: 0, skipped: 0, conflictsOpened: 0, fastForwardedPaths: [], nextCursor: 0, sharingDeclined: []}));
   const onChange = vi.fn(), shared = vi.fn(async () => false), afterPull = vi.fn(async () => {}), claim = vi.fn(async () => {});
-  const capture = {runRelaySync: async (task: (materialize: () => Promise<void>) => Promise<unknown>) => task(async () => {}),
+  const capture = {runRelaySync: async (task: (materialize: () => Promise<void>) => Promise<unknown>) => task(async () => {}), countOpenConflicts: async () => 0,
     onDurableLocalChange: (handler: (path: string) => void) => {listeners.add(handler); return () => listeners.delete(handler);}} as unknown as WorkspaceEngineCapture;
   const sync = createRelaySyncEngine({rootDir: "test", relay: {baseUrl: "http://relay.test", token: "token"}, capture,
     operations: {push, pull, claim, recoverOrigin: vi.fn()}, onChange,
@@ -234,7 +234,7 @@ it("keeps ten idle unwatched minutes at main's held-read and ordinary-pass caden
     signal.addEventListener("abort", aborted, {once: true});
   }));
   const sync = createRelaySyncEngine({rootDir: "idle", relay: {baseUrl: "http://relay.test", token: "t"},
-    capture: {runRelaySync: async (task: (materialize: () => Promise<void>) => Promise<unknown>) => task(async () => {}), onDurableLocalChange: listeners} as unknown as WorkspaceEngineCapture,
+    capture: {runRelaySync: async (task: (materialize: () => Promise<void>) => Promise<unknown>) => task(async () => {}), countOpenConflicts: async () => 0, onDurableLocalChange: listeners} as unknown as WorkspaceEngineCapture,
     operations: {push, pull, claim: async () => {}, recoverOrigin: vi.fn()}, onChange: vi.fn(), waitForChange: wait, idlePullMs: 300_000});
   await sync.start(); await vi.advanceTimersByTimeAsync(600_000);
   expect(push).toHaveBeenCalledTimes(3); expect(pull).toHaveBeenCalledTimes(3); expect(wait).toHaveBeenCalledTimes(25);
@@ -386,7 +386,7 @@ function countingFixture(relay: ReturnType<typeof countingRelay>, pushMs = 0) {
     return pushed(1);
   });
   const pull = vi.fn(async (): Promise<PullWorkspaceFromRelayResult> => ({fetched: 0, applied: 0, skipped: 0, conflictsOpened: 0, fastForwardedPaths: [], nextCursor: relay.head, sharingDeclined: []}));
-  const capture = {runRelaySync: async (task: (materialize: () => Promise<void>) => Promise<unknown>) => task(async () => {}),
+  const capture = {runRelaySync: async (task: (materialize: () => Promise<void>) => Promise<unknown>) => task(async () => {}), countOpenConflicts: async () => 0,
     onDurableLocalChange: (handler: (path: string) => void) => {listeners.add(handler); return () => listeners.delete(handler);}} as unknown as WorkspaceEngineCapture;
   const sync = createRelaySyncEngine({rootDir: "counting", relay: {baseUrl: "http://relay.test", token: "token"}, capture,
     operations: {push, pull, claim: vi.fn(async () => {}), recoverOrigin: vi.fn()}, onChange: vi.fn(), waitForChange: relay.wait});

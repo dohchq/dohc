@@ -310,6 +310,7 @@ describe("registered direct message boundaries", () => {
       capture: {
         runRelaySync: async (task: (materialize: () => Promise<void>) => Promise<unknown>) =>
           await task(async () => undefined),
+        countOpenConflicts: async () => 0,
       } as unknown as WorkspaceEngineCapture,
       onChange: () => undefined,
       operations: {

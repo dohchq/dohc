@@ -231,6 +231,7 @@ describe("EngineRelayClient real daemon", () => {
             runRelaySync: (task) => task(async (paths) => {
               expect(paths).toEqual([]);
             }),
+            countOpenConflicts: async () => 0,
           } as WorkspaceEngineCapture,
           onChange: () => undefined,
         });

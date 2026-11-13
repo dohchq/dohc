@@ -94,7 +94,7 @@ it.skipIf(!process.env.DOHC_BULK_SYNC_COUNT || engine.missing).for(counts)("auto
   const sessions = createRealDaemonWorkspaceSessions(new RelayConfiguredDaemonClientSource(lifecycle, routes));
   // The daemon owns real filesystem capture. Like engineRelayClient.e2e, this
   // gate exercises the sync coordinator without desktop editor admission.
-  const capture = { runRelaySync: task => task(async paths => { expect(paths).toEqual([]); }) } as WorkspaceEngineCapture;
+  const capture = { runRelaySync: task => task(async paths => { expect(paths).toEqual([]); }), countOpenConflicts: async () => 0 } as WorkspaceEngineCapture;
   const flushCapture = () => sessions.run(workspace, async ({ client, workspace: handle }) =>
     new WorkspaceDaemonRequester(client).request("capture.flush", {}, { workspace: handle }));
   let relay: SyncRelayHandle | undefined;
