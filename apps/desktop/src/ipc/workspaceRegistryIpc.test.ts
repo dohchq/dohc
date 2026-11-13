@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { defaultWorkspaceMode } from "@dohc/workspace-core";
 import { CHANNELS } from "./channels";
@@ -170,6 +171,26 @@ describe("registered workspace registry handlers", () => {
       h.invoke(CHANNELS.getDefaultShareRoot, { shareId: "../escape" }),
     ).rejects.toThrow();
     await expect(h.invoke(CHANNELS.getDefaultShareRoot, { shareId: "Upper" })).rejects.toThrow();
+  });
+
+  // A membership opens as the workspace it is, in a folder named after it.
+  it("names a membership's default folder after the workspace, in a free folder", async () => {
+    const h = await registryHarness();
+    const root = await h.invoke(CHANNELS.getDefaultWorkspaceRoot) as string;
+    const named = (name: string) => h.invoke(CHANNELS.getDefaultShareRoot, { shareId: "member-1", name }) as Promise<string>;
+    expect(await named("Community")).toBe(`${root}/Community`);
+    expect(h.roots.usableRoot(`${root}/Community`)).toBe(normalizeAbsolutePath(`${root}/Community`));
+    // An empty folder of that name is still free; one with files is not.
+    await mkdir(join(root, "Community"), { recursive: true });
+    expect(await named("Community")).toBe(`${root}/Community`);
+    await writeFile(join(root, "Community", "notes.md"), "kept");
+    expect(await named("Community")).toBe(`${root}/Community 2`);
+    // A name is one folder: separators and characters Windows refuses become spaces.
+    expect(await named("Trips/2026: \"Spring\"")).toBe(`${root}/Trips 2026 Spring`);
+    // Nothing usable left, or a device name, falls back to the share's own folder.
+    for (const name of ["../..", "CON", "lpt1.txt", "   "]) {
+      expect(await named(name), name).toBe(`${root}/shared/member-1`);
+    }
   });
 
   it("shares exact root approval with later consumers and refuses sibling spellings", async () => {

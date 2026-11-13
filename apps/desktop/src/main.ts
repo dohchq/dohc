@@ -7399,6 +7399,10 @@ const desktopEngine = createDesktopEngine({
       });
   },
   onRefusalsChanged: notifyNoticesChanged,
+  onShareViewPullProgress: (progress) => {
+    for (const window of BrowserWindow.getAllWindows())
+      window.webContents.send(CHANNELS.sharedViewPullProgress, progress);
+  },
   ownerLiveReleases: createUnwrittenReleases(() => join(stateDir(), "owner-live-releases.json")),
   documentProjection,
   serverOwnerDelivery: createServerOwnerConnection({
@@ -10469,6 +10473,7 @@ function registerIpcHandlers(): void {
     receivedShareEngine,
     openWorkspaceActivity,
     requireWorkspace,
+    listWorkspaces,
     notifyRenderer,
     syncNotices: (isCurrent) => noticeStore().sync(isCurrent),
     recordShareViewStoreRefusal: activity.recordShareViewStoreRefusal,

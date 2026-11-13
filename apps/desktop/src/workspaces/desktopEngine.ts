@@ -17,6 +17,7 @@ import {
 } from "@dohc/workspace-engine-client/daemon";
 import {
   EngineRelayClient,
+  type EngineRelayClientOptions,
   RelayConfiguredDaemonClientSource,
   RelayTransportRouteGuard,
 } from "./engineRelayClient";
@@ -179,6 +180,7 @@ interface DesktopEngineDependencies<State extends EngineAuthorityState> {
   resourcesBasePath(): string;
   onWorkspaceOpened?(workspaceId: string): void;
   onRefusalsChanged?: () => void;
+  onShareViewPullProgress?: EngineRelayClientOptions["onShareViewPullProgress"];
   serverOwnerDelivery?: ServerOwnerDelivery;
   /** Stops that took refused edits out of their queue but did not write the file. */
   ownerLiveReleases: UnwrittenReleases;
@@ -1567,6 +1569,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       const sessions = rustEngineWorkspaceSessions;
       rustEngineRelayClient = new EngineRelayClient({
         onRefusalsChanged: dependencies.onRefusalsChanged,
+        onShareViewPullProgress: dependencies.onShareViewPullProgress,
         sessions,
         routes: relayTransportRoutes,
         closeWorkspaceBinding: (workspace) =>

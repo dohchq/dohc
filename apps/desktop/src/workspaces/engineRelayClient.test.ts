@@ -21,6 +21,7 @@ import {
 import {
   allowInsecureLoopbackRelayForTests,
   EngineRelayClient,
+  type EngineRelayClientOptions,
   MixedRelayTransportError,
   RelayBusyError,
   RelayConfiguredDaemonClientSource,
@@ -193,7 +194,11 @@ afterEach(async () => {
   );
 });
 
-async function harness(daemon = new MockDaemon(), onRefusalsChanged?: () => void) {
+async function harness(
+  daemon = new MockDaemon(),
+  onRefusalsChanged?: () => void,
+  onShareViewPullProgress?: EngineRelayClientOptions["onShareViewPullProgress"],
+) {
   const rootPath = await createTestScratch("dohc-relay-client-unit-");
   const attachmentId = Symbol("test-workspace-attachment");
   roots.push(rootPath);
@@ -209,6 +214,7 @@ async function harness(daemon = new MockDaemon(), onRefusalsChanged?: () => void
     routes,
     requestDeadlineMs: 1_000,
     onRefusalsChanged,
+    onShareViewPullProgress,
   });
   const relay = { baseUrl: "https://relay.test/", token: "secret-token" };
   const client = live.bind({
@@ -464,6 +470,35 @@ describe("EngineRelayClient", () => {
   // before its cursor commits — so the in-memory aggregate only has to carry
   // enough to log and to show. A relay that refuses on every page must not be
   // able to grow it with its log; the paging loop has no page limit of its own.
+  // A first pull of a large workspace takes many pages. Each page that
+  // brings files says how many distinct files have arrived so far.
+  it("reports how many files a share view pull has read, page by page", async () => {
+    const pages: string[][] = [["a.md", "b.md"], ["b.md", "c.md"], []];
+    let pulls = 0;
+    const daemon = new MockDaemon((request) => {
+      if (request.method !== "share.view.pull") return undefined;
+      const paths = pages[pulls]!;
+      pulls += 1;
+      return {
+        fetched: paths.length, applied: paths.length, skipped: 0, refusals: [],
+        hasMore: pulls < pages.length, nextCursor: pulls,
+        changedPaths: paths.map((path) => ({ path, operation: "write", contentKind: "text" })),
+        pendingCursor: { kind: "shareView", token: `share-cursor-${pulls}` },
+      };
+    });
+    const progress = vi.fn();
+    const { sessions, client } = await harness(daemon, undefined, progress);
+    await client.pullShareView({
+      shareId: "share-view",
+      grantedSelector: { paths: [], versionId: null, access: "comment", wholeWorkspace: true },
+    });
+    expect(progress.mock.calls.map(([event]) => event)).toEqual([
+      { workspaceId: "workspace-a", shareId: "share-view", files: 2 },
+      { workspaceId: "workspace-a", shareId: "share-view", files: 3 },
+    ]);
+    await sessions.closeAll();
+  });
+
   it("bounds the refusals it accumulates in memory while counting them all", async () => {
     const pages = MAX_REPORTED_REFUSALS + 1;
     let pulls = 0;

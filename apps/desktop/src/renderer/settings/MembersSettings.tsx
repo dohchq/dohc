@@ -31,7 +31,6 @@ import {
 import type { MembersRequest, MembersResult } from "@dohc/cli/members";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
-import { JOINED_WORKSPACE_LIMIT } from "../joinedWorkspaceLimit";
 import { relativeTime } from "../relativeTime";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { CopyField, type CopySecret } from "../ui/CopyButton";
@@ -658,12 +657,7 @@ export function MembersPage(props: {
             title="Member level"
             testId="settings-members-level"
             description={
-              <>
-                <span data-testid="settings-members-level-words">{LEVEL_WORDS[level]}</span>
-                <span data-testid="settings-members-limit" className="mt-1 block">
-                  {JOINED_WORKSPACE_LIMIT.members}
-                </span>
-              </>
+              <span data-testid="settings-members-level-words">{LEVEL_WORDS[level]}</span>
             }
           >
             {/* The spinner sits in the gap before the control and takes no

@@ -8,7 +8,6 @@ import type { ShareCopyResult } from "@dohc/workspace-contracts/share-copy";
 import type { ShareProposalRow } from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
 import { ShellErrorReporter } from "../shell/useShellError";
-import { JOINED_WORKSPACE_LIMIT } from "../joinedWorkspaceLimit";
 import type { AccessFacts } from "./accessReason";
 import { SharingView, waitingByShare, type ShareMount, type SharingFocus } from "./SharingView";
 
@@ -35,6 +34,7 @@ const callbacks = {
   onReviewConflicts: vi.fn(),
   onReviewChanges: vi.fn(),
   onMountsChanged: vi.fn(),
+  onOpenShare: vi.fn(),
   onFocused: vi.fn(),
   onUnmount: vi.fn(async (_path: string) => undefined),
   reportError: vi.fn(),
@@ -202,6 +202,7 @@ function View(props: {
       focus={props.focus ?? null}
       onFocused={callbacks.onFocused}
       notSentWhileOpen={props.notSentWhileOpen ?? []}
+      onOpenShare={callbacks.onOpenShare}
     />
   );
 }
@@ -471,7 +472,7 @@ describe("the actions Settings offers on a share", () => {
     });
   });
 
-  it("shows a workspace the account joined by its name and role, with Open not yet available", async () => {
+  it("shows a workspace the account joined by its name and role, and opens it", async () => {
     answerWith({
       received: answer("received", {
         rows: [
@@ -503,12 +504,48 @@ describe("the actions Settings offers on a share", () => {
       "Admin · Sam owns this workspace",
     );
     expect(member!.textContent).not.toContain("@");
-    const open = within(await openMenu(member!)).getByRole("menuitem", { name: /Open/ });
-    expect(open.getAttribute("aria-disabled")).toBe("true");
-    expect(open.textContent).toContain(JOINED_WORKSPACE_LIMIT.open);
+    const share = {
+      shareId: "member",
+      shareCode: "code-member",
+      selector: { kind: "workspace", role: "member" },
+      access: "comment",
+    };
+    bridgeMock.getRelayReceivedShare.mockResolvedValue({ found: true, share });
+    const open = within(await openMenu(member!)).getByRole("menuitem", { name: "Open" });
+    expect(open.getAttribute("aria-disabled")).not.toBe("true");
     await userEvent.click(open);
-    expect(bridgeMock.getRelayReceivedShare).not.toHaveBeenCalled();
+    // The shell asks for a folder: Open hands it the share the relay states now.
+    await waitFor(() => expect(callbacks.onOpenShare).toHaveBeenCalledWith(share));
+    expect(bridgeMock.getRelayReceivedShare).toHaveBeenCalledWith({ shareId: "member" });
     expect(bridgeMock.mountShare).not.toHaveBeenCalled();
+  });
+
+  it("reports a membership that ended before Open, with Try again", async () => {
+    answerWith({
+      received: answer("received", {
+        rows: [
+          received({
+            shareId: "member",
+            subjectName: "Community",
+            selector: { kind: "workspace", role: "member" },
+            access: "comment",
+          }),
+        ],
+      }),
+    });
+    bridgeMock.getRelayReceivedShare.mockResolvedValue({
+      found: false,
+      removed: { message: "The owner removed your access." },
+    });
+    render(<View />);
+    const row = await screen.findByTestId("sharing-received-row");
+    await userEvent.click(within(await openMenu(row)).getByRole("menuitem", { name: "Open" }));
+    await waitFor(() => expect(callbacks.reportError).toHaveBeenCalledOnce());
+    expect(callbacks.reportError.mock.calls[0]![0]).toBe("dohc could not open Community.");
+    expect((callbacks.reportError.mock.calls[0]![1] as Error).message).toBe(
+      "The owner removed your access.",
+    );
+    expect(callbacks.onOpenShare).not.toHaveBeenCalled();
   });
 
   it("reports a share that could not be added, with Try again", async () => {

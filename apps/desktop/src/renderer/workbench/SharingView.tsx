@@ -20,7 +20,11 @@ import {
   type ReactNode,
   type Ref,
 } from "react";
-import type { ShareProposalRow, WorkspaceSummary } from "../../ipc/bridgeContract";
+import type {
+  RelayShareReceivedRow,
+  ShareProposalRow,
+  WorkspaceSummary,
+} from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 import { shareSenderParts } from "../ShareSender";
@@ -35,7 +39,6 @@ import { NameLine } from "../ui/NameLine";
 import { SkeletonLines } from "../ui/SkeletonRows";
 import { notSentWords } from "../notSentWords";
 import { useRequestSequence } from "../useRequestSequence";
-import { JOINED_WORKSPACE_LIMIT } from "../joinedWorkspaceLimit";
 import {
   ABOUT_ROW,
   AccessChecked,
@@ -49,6 +52,7 @@ import {
 } from "./About";
 import { accessReasonForLane, type AccessContext } from "./accessReason";
 import { EMPTY_ART } from "./EmptyArt";
+import { membershipWho } from "./membershipWords";
 import { shareSubject } from "./shareSubject";
 
 // The Sharing view: the shares this workspace granted, and the shares sent
@@ -457,6 +461,8 @@ export type SharingActions = {
   cancelEnd: () => void;
   end: (group: ShareGroup) => void;
   mount: (shareId: string) => void;
+  // Opens a membership as its own workspace, named for the error a failure reports.
+  open: (shareId: string, name: string) => void;
   unmount: (mount: ShareMount) => void;
   // The text a copy hands out, read at the click; null when there is none.
   copy: (grant: AccessShareRow, what: CopyWhat) => Promise<string | null>;
@@ -710,9 +716,8 @@ function ReceivedRow(props: {
         ? [
             {
               label: "Open",
-              onSelect: () => undefined,
-              disabled: true,
-              description: JOINED_WORKSPACE_LIMIT.open,
+              onSelect: () => actions.open(shareId, subject.name),
+              disabled: props.busy,
             },
           ]
         : [];
@@ -725,17 +730,10 @@ function ReceivedRow(props: {
         : "ended";
   const who: Who =
     membership && !word
-      ? membership.role === "admin"
-        ? {
-            text: `Admin · ${sender} owns this workspace`,
-            title: `Admin · ${parts.full} owns this workspace`,
-          }
-        : access
-          ? {
-              text: `Member · ${sender} lets members ${verbOf(access)}`,
-              title: `Member · ${parts.full} lets members ${verbOf(access)}`,
-            }
-          : { text: `Member · from ${sender}`, title: `Member · from ${parts.full}` }
+      ? {
+          text: membershipWho(membership.role, sender, access),
+          title: membershipWho(membership.role, parts.full, access),
+        }
       : access && !word
         ? {
             text: `${sender} lets you ${verbOf(access)}`,
@@ -1097,6 +1095,8 @@ export function SharingView(props: {
   onFocused: () => void;
   // New notes the server has no file for until their open editor is left.
   notSentWhileOpen?: readonly string[];
+  // Hands a membership the relay still states to the shell, which asks for a folder.
+  onOpenShare: (share: RelayShareReceivedRow) => void;
 }) {
   const { workspaceId, context, focus, onFocused } = props;
   const { facts, openSyncSettings, connect } = context;
@@ -1279,6 +1279,22 @@ export function SharingView(props: {
     }
   }
 
+  async function open(shareId: string, name: string) {
+    const token = epoch.current();
+    setBusyShareId(shareId);
+    try {
+      const found = await bridge().getRelayReceivedShare({ shareId });
+      if (!found.found)
+        throw new Error(found.removed?.message ?? "This workspace is no longer shared with you.");
+      if ("chats" in found) throw new Error("Join this from Chats.");
+      if (epoch.isCurrent(token)) props.onOpenShare(found.share);
+    } catch (cause) {
+      props.reportError(`dohc could not open ${name}.`, cause, () => void open(shareId, name));
+    } finally {
+      if (epoch.isCurrent(token)) setBusyShareId(null);
+    }
+  }
+
   async function unmount(target: ShareMount) {
     const token = epoch.current();
     setBusyShareId(target.shareId);
@@ -1351,6 +1367,7 @@ export function SharingView(props: {
     cancelEnd: () => setConfirmShareId(null),
     end: (group) => void end(group),
     mount: (shareId) => void mount(shareId),
+    open: (shareId, name) => void open(shareId, name),
     unmount: (target) => void unmount(target),
     copy,
     dismissSkips: (target) => void dismissSkips(target),

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { normalizeRootPath } from "@dohc/workspace-core";
 import { shareCaptureNoticeState } from "../workspaces/shareCaptureNotice";
 import {
   type OpenSharedViewPayload,
@@ -28,7 +29,6 @@ import {
   type probeShareViewLog,
 } from "../workspaces/shareViewInfo";
 import type { RendererWorkspaceOperationSession } from "../window/rendererWorkspaceOperation";
-import { assertMountableSelector } from "../workspaces/shareMounts";
 import {
   SHARE_VIEW_REOPEN_MESSAGE,
   shareViewIdentityIsIntact,
@@ -102,6 +102,7 @@ export function registerSharedViewsIpcHandlers<
   >;
   openWorkspaceActivity(workspace: CreatedWorkspace): Promise<unknown>;
   requireWorkspace(workspaceId: string): RegistryEntry;
+  listWorkspaces(): readonly RegistryEntry[];
   notifyRenderer(scope?: WorkspaceActivityScope): void;
   syncNotices(isCurrent: () => boolean): Promise<void>;
   recordShareViewStoreRefusal(
@@ -136,6 +137,7 @@ export function registerSharedViewsIpcHandlers<
     receivedShareEngine,
     openWorkspaceActivity,
     requireWorkspace,
+    listWorkspaces,
     notifyRenderer,
     recordShareViewStoreRefusal,
     recheckRemovedShares,
@@ -203,7 +205,8 @@ export function registerSharedViewsIpcHandlers<
   // Receive side: open a pasted share code as a READ-ONLY shared view.
   // Mirrors the join flow's ordering guarantees: everything is validated
   // before local state exists, the token only ever goes to the signed-in
-  // relay, and a failed first pull rolls the whole thing back.
+  // relay, and a failed first pull rolls the whole thing back. A membership
+  // keeps what its first pull brought instead, unless it ended.
   async function openSharedView(input: OpenSharedViewPayload) {
     const parsed = parseShareCode(input.shareCode);
     if (!parsed) {
@@ -251,9 +254,46 @@ export function registerSharedViewsIpcHandlers<
     // grant of "everything" (the mount path says the same through
     // assertMountableSelector).
     assertOpenIdentity();
-    assertMountableSelector(info.selector);
+    if (info.selector === null) {
+      throw new Error("This code is for a shared group. Join it from Chats instead of opening it.");
+    }
     const grantedSelector = info.selector;
     const rootPath = usableRoot(input.rootPath);
+    // A membership's first pull can be long. One that failed kept what arrived
+    // in this folder, and opening the same folder again continues it.
+    const membership = grantedSelector.wholeWorkspace === true;
+    const membershipName = info.subjectName ?? "the workspace";
+    const unfinished = (error: unknown) =>
+      new Error(
+        `dohc could not finish reading ${membershipName}: ${causeOf(error)}. What arrived stays in ${rootPath}. Try again continues from there.`,
+      );
+    const kept = membership
+      ? listWorkspaces().find(
+          (entry) =>
+            normalizeRootPath(entry.rootPath, process.platform) ===
+              normalizeRootPath(rootPath, process.platform) &&
+            entry.shareView?.shareId === parsed.shareId &&
+            entry.shareView.recipientUserId === credentials.userId &&
+            entry.shareView.ended !== true &&
+            (entry.shareView.grantedSelector as { wholeWorkspace?: unknown } | undefined)
+              ?.wholeWorkspace === true,
+        )
+      : undefined;
+    if (kept) {
+      await engineDaemonStartup();
+      try {
+        await firstPull(kept.rootPath, kept.workspaceId);
+      } catch (error) {
+        if (error instanceof ShareUnavailableError)
+          throw new Error(
+            `Your membership of ${membershipName} ended. What arrived stays in ${rootPath}.`,
+          );
+        throw unfinished(error);
+      } finally {
+        notifyRenderer();
+      }
+      return { workspace: workspaceSummaryFor(requireWorkspace(kept.workspaceId)) };
+    }
     const existingEntries = await readdir(rootPath).catch((error: unknown) => {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw error;
@@ -268,6 +308,7 @@ export function registerSharedViewsIpcHandlers<
     // arrives with the first pull below, and a shared view must never seed
     // starter files of its own.
     await mkdir(rootPath, { recursive: true });
+    let pullFailure = null as { error: unknown } | null;
     const created = await createJoinedWorkspace({
       workspaceId: randomUUID(),
       rootPath,
@@ -304,22 +345,12 @@ export function registerSharedViewsIpcHandlers<
           .catch((error) => {
             console.error("[desktop] share view identity:", error);
           });
-        const reconciled = await withStaleSensitiveWorkspaceOperation(created.rootPath, (lease) =>
-          shareViewFiles.reconcile(
-            lease,
-            { kind: "standalone", workspaceId: created.workspaceId },
-            "refresh",
-          ),
-        );
-        if (reconciled.kind !== "refresh") {
-          throw new Error("Shared view refresh returned an invalid result.");
-        }
-        const outcome = reconciled.outcome;
-        if ("ok" in outcome && !outcome.ok) {
-          throw new Error(outcome.errorMessage);
-        }
-        if (outcome.status === "ended") {
-          throw new ShareUnavailableError();
+        try {
+          await firstPull(created.rootPath, created.workspaceId);
+        } catch (error) {
+          // A membership keeps what arrived, unless it ended.
+          if (!membership || error instanceof ShareUnavailableError) throw error;
+          pullFailure = { error };
         }
       },
       rollbackLabel: "open-share",
@@ -352,8 +383,25 @@ export function registerSharedViewsIpcHandlers<
     // Through the PROJECTION, not a raw parse: the level lives under the
     // record's pinned grant, and a raw parse would strip it and hand the
     // renderer a fresh share view with no level to state.
+    if (pullFailure) throw unfinished(pullFailure.error);
     const summary = workspaceSummaryFor(requireWorkspace(created.workspaceId));
     return { workspace: summary };
+  }
+
+  async function firstPull(rootPath: string, workspaceId: string): Promise<void> {
+    const reconciled = await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+      shareViewFiles.reconcile(lease, { kind: "standalone", workspaceId }, "refresh"),
+    );
+    if (reconciled.kind !== "refresh") {
+      throw new Error("Shared view refresh returned an invalid result.");
+    }
+    const outcome = reconciled.outcome;
+    if ("ok" in outcome && !outcome.ok) {
+      throw new Error(outcome.errorMessage);
+    }
+    if (outcome.status === "ended") {
+      throw new ShareUnavailableError();
+    }
   }
 
   const pullCache = new Map<
@@ -912,4 +960,9 @@ export function registerSharedViewsIpcHandlers<
       },
     },
   );
+}
+
+function causeOf(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.replace(/\.+$/u, "") || "the server stopped answering";
 }

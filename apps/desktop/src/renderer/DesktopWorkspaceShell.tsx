@@ -44,6 +44,7 @@ import type {
   ImportWorkspaceFilesResult,
   MyShareChangeRow,
   RebuildEngineStoreResult,
+  RelayShareReceivedRow,
   ShareAccess,
   ShareHandoffStatus,
   ShareProposalRow,
@@ -259,7 +260,7 @@ import {
   LIVE_STOP_WAITING,
   type LiveStopRefusal,
 } from "../ipc/liveEditingStop";
-import { OpenSharedView } from "./OpenSharedView";
+import { OpenSharedView, opensForLiveEditing } from "./OpenSharedView";
 import { Overlay } from "./Overlay";
 import { ShareHandoffSurface, type HandoffChatsOutcome } from "./ShareHandoffSurface";
 import { DEFAULT_SETTINGS_SECTION, type SettingsSectionId } from "./settings/settingsRegistry";
@@ -825,6 +826,25 @@ export function DesktopWorkspaceShell(props: {
   useEffect(() => {
     if (handoffStatus.status !== "idle") setOpenShare(null);
   }, [handoffStatus.status]);
+  // Sharing's Open: a copy already on this computer opens where it is;
+  // otherwise the Open surface asks for a folder.
+  const openReceivedShare = useCallback(
+    (share: RelayShareReceivedRow) => {
+      const copy = props.workspaces.find(
+        (candidate) => candidate.shareView?.shareId === share.shareId,
+      );
+      if (copy) {
+        props.onSwitchWorkspace(copy);
+        return;
+      }
+      setOpenShare({
+        resolvedShare: { shareId: share.shareId, shareCode: share.shareCode, share },
+        liveEditing: opensForLiveEditing(share),
+        path: null,
+      });
+    },
+    [props.workspaces, props.onSwitchWorkspace],
+  );
   // Inline folder creates routed INTO the explorer (palette/menu).
   const [newFolderRequest, setNewFolderRequest] = useState<number | null>(null);
   const [wb, setWbState] = useState<WorkbenchState>(defaultWorkbenchState);
@@ -8342,6 +8362,7 @@ export function DesktopWorkspaceShell(props: {
                                   reportError: reportShellError,
                                   focus: sharingFocus,
                                   onFocused: clearSharingFocus,
+                                  onOpenShare: openReceivedShare,
                                   notSentWhileOpen: syncStatus?.notSentWhileOpen ?? [],
                                 }}
                                 selectedAppRoot={selectedAppRoot}

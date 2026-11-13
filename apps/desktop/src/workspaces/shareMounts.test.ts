@@ -796,6 +796,17 @@ describe("refreshShareMount", () => {
     expect(existsSync(join(mountRoot, "docs/brief.md"))).toBe(false);
     expect(await readFile(join(elsewhere, "brief.md"), "utf8")).toBe("victim");
   });
+  it("refuses to mount a membership", () => {
+    expect(() =>
+      assertMountableSelector({
+        paths: [],
+        versionId: null,
+        access: "comment",
+        wholeWorkspace: true,
+      }),
+    ).toThrow("Open it as its own workspace");
+  });
+
 });
 
 describe("owner-mediated mount removal", () => {

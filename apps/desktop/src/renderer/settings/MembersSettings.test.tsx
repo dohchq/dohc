@@ -10,7 +10,6 @@ import type { MembersRequest, MembersResult } from "@dohc/cli/members";
 import type { CloudStatusResult } from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
 import type { CloudSettings } from "./CloudSyncSettings";
-import { JOINED_WORKSPACE_LIMIT } from "../joinedWorkspaceLimit";
 import { LEVEL_WORDS, MembersSettings, membersGate } from "./MembersSettings";
 
 const person = (
@@ -699,23 +698,23 @@ describe("Members page", () => {
     expect(requests().at(-1)).toEqual({ action: "role", person: "m-bo", role: "admin" });
   });
 
-  it("tells the owner and admins that members cannot open the workspace yet, and a member only the level in words", async () => {
+  // Members open the workspace now, so no row says they cannot.
+  it("states the member level with no limit, and a member only the level in words", async () => {
     renderMembers();
-    expect((await screen.findByTestId("settings-members-limit")).textContent).toBe(
-      JOINED_WORKSPACE_LIMIT.members,
-    );
     expect(
-      within(screen.getByTestId("settings-members-level")).getByText("Member level"),
+      within(await screen.findByTestId("settings-members-level")).getByText("Member level"),
     ).toBeTruthy();
+    expect(screen.queryByTestId("settings-members-limit")).toBeNull();
     cleanup();
     bridge.workspaceMembers.mockImplementation(async () => ({
       status: "ready",
       view: adminView(),
     }));
     renderMembers();
-    expect((await screen.findByTestId("settings-members-limit")).textContent).toBe(
-      JOINED_WORKSPACE_LIMIT.members,
-    );
+    expect(
+      within(await screen.findByTestId("settings-members-level")).getByText("Member level"),
+    ).toBeTruthy();
+    expect(screen.queryByTestId("settings-members-limit")).toBeNull();
     cleanup();
     bridge.workspaceMembers.mockImplementation(async () => ({
       status: "ready",

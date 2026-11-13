@@ -288,6 +288,7 @@ export async function createSharedViewsIpcHarness(
     receivedShareEngine: { relayFor, storeFor },
     openWorkspaceActivity: open,
     requireWorkspace: registryRead,
+    listWorkspaces: () => [...registry.values()],
     notifyRenderer: notify,
     recordShareViewStoreRefusal: recordRefusal,
     syncNotices,

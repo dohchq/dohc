@@ -2363,6 +2363,7 @@ const SHARING_ACTIONS: SharingActions = {
   cancelEnd: noop,
   end: noop,
   mount: noop,
+  open: noop,
   unmount: noop,
   copy: async () => null,
   dismissSkips: noop,

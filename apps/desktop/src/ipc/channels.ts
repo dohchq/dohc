@@ -200,6 +200,7 @@ export const CHANNELS = {
   getCollection: "desktop:get-collection",
   queryCollectionRecords: "desktop:query-collection-records",
   historyNamesChanged: "desktop:history-names-changed",
+  sharedViewPullProgress: "desktop:shared-view-pull-progress",
   getCollectionRecordHistory: "desktop:get-collection-record-history",
   locateRecordHistoryRun: "desktop:locate-record-history-run",
   readWorkspaceDatabase: "desktop:read-workspace-database",

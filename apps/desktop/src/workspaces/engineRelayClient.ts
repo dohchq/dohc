@@ -617,6 +617,9 @@ export interface EngineRelayWorkspaceClient {
 
 export interface EngineRelayClientOptions {
   onRefusalsChanged?(): void;
+  // After each share view page that brought files: how many distinct files
+  // this pull has read so far. The open dialog counts a first pull with it.
+  onShareViewPullProgress?(progress: { workspaceId: string; shareId: string; files: number }): void;
   sessions: EngineWorkspaceSessions;
   routes: RelayTransportRouteGuard;
   /** Closes the captured binding without re-entering this client's request lane. */
@@ -629,6 +632,7 @@ const DEFAULT_RELAY_REQUEST_DEADLINE_MS = 30_000;
 
 export class EngineRelayClient {
   private readonly onRefusalsChanged: EngineRelayClientOptions["onRefusalsChanged"];
+  private readonly onShareViewPullProgress: EngineRelayClientOptions["onShareViewPullProgress"];
   private readonly sessions: EngineWorkspaceSessions;
   private readonly routes: RelayTransportRouteGuard;
   private readonly closeWorkspaceBinding: (workspace: EngineWorkspace) => Promise<void>;
@@ -640,6 +644,7 @@ export class EngineRelayClient {
 
   constructor(options: EngineRelayClientOptions) {
     this.onRefusalsChanged = options.onRefusalsChanged;
+    this.onShareViewPullProgress = options.onShareViewPullProgress;
     this.sessions = options.sessions;
     this.routes = options.routes;
     this.closeWorkspaceBinding =
@@ -1130,6 +1135,9 @@ export class EngineRelayClient {
           }
           for (const path of pageChangedPaths) {
             changed.set(path.path, path);
+          }
+          if (pageChangedPaths.length > 0) {
+            this.onShareViewPullProgress?.({ workspaceId: workspace.workspaceId, shareId, files: changed.size });
           }
           if (!hasMore) {
             finalCursor = cursor;

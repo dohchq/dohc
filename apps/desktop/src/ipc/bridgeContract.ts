@@ -383,6 +383,9 @@ export const WorkspaceSummary = z.object({
       // decides anything with it.
       access: SHARE_ACCESS.optional(),
       genericChatWritable: z.boolean().optional(),
+      // A workspace the account joined: the pin covers the whole workspace.
+      // The shell names it as a membership; the relay's grant still decides.
+      membership: z.literal(true).optional(),
       // The stored grant is unreadable. The marker still stands, because a
       // share view whose grant cannot be read must not present as an ordinary
       // workspace: the restrictive stance is what fails closed. The shell
@@ -456,6 +459,8 @@ export const DefaultWorkspaceRootResult = PATH_STRING;
 // dialog; the renderer never invents roots.
 export const DefaultShareRootPayload = z.object({
   shareId: z.string().min(1).max(128),
+  // A membership's workspace name, which names its folder.
+  name: z.string().min(1).max(320).optional(),
 });
 export type DefaultShareRootPayload = z.infer<typeof DefaultShareRootPayload>;
 export const DefaultShareRootResult = PATH_STRING;
@@ -4601,6 +4606,14 @@ const RelayShareReadableState = z.object({
   damaged: z.never().optional(),
 });
 
+// A membership this account holds: the whole workspace, at the role the
+// relay states. Only a received row carries it.
+const RelayShareMembershipState = z.object({
+  selector: z.object({ kind: z.literal("workspace"), role: z.enum(["admin", "member"]) }),
+  access: SHARE_ACCESS,
+  damaged: z.never().optional(),
+});
+
 const RelayShareDamagedState = z.object({
   selector: z.null(),
   // Damage reports carry the raw stored value so Settings can keep the
@@ -4634,7 +4647,7 @@ export const RelayShareGrantedRow = z.union([
 ]);
 export type RelayShareGrantedRow = z.infer<typeof RelayShareGrantedRow>;
 
-// A path/version share granted TO this account (the receive side). The
+// A path/version share or a membership granted TO this account (the receive side). The
 // relay deliberately omits the granter's workspace id; the selector and
 // granter identity are all a recipient ever sees.
 const RelayShareReceivedRowBase = z.object({
@@ -4651,6 +4664,7 @@ const RelayShareReceivedRowBase = z.object({
 
 export const RelayShareReceivedRow = z.union([
   RelayShareReceivedRowBase.extend(RelayShareReadableState.shape),
+  RelayShareReceivedRowBase.extend(RelayShareMembershipState.shape),
   RelayShareReceivedRowBase.extend(RelayShareDamagedState.shape),
 ]);
 export type RelayShareReceivedRow = z.infer<typeof RelayShareReceivedRow>;
@@ -4705,8 +4719,8 @@ export type RelayShareRemovedRow = z.infer<typeof RelayShareRemovedRow>;
 
 export const ListRelaySharesResult = z.object({
   granted: z.array(RelayShareGrantedRow).max(1000),
-  // Path/version shares addressed to this account (chat grants are
-  // listed through listChatChannelShares).
+  // Path/version shares and memberships addressed to this account (chat
+  // grants are listed through listChatChannelShares).
   received: z.array(RelayShareReceivedRow).max(1000).default([]),
   removed: z.array(RelayShareRemovedRow).max(1000).default([]),
 });
@@ -5873,6 +5887,15 @@ export const OpenSharedViewResult = z.object({
   workspace: WorkspaceSummary,
 });
 export type OpenSharedViewResult = z.infer<typeof OpenSharedViewResult>;
+
+// How many files a share view's pull has read so far, sent after each page
+// that brought some. The open dialog names it while a first pull runs.
+export const SharedViewPullProgressEvent = z.object({
+  workspaceId: WORKSPACE_ID,
+  shareId: OPAQUE_ID,
+  files: z.number().int().nonnegative(),
+});
+export type SharedViewPullProgressEvent = z.infer<typeof SharedViewPullProgressEvent>;
 
 export const RefreshSharedViewPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -9417,6 +9440,7 @@ export interface DohcDesktopBridge
   stepWindowZoom(payload: StepWindowZoomPayload): Promise<DesktopUserSettingsResult>;
   // Cached History names changed. Subscribers re-read with workspace/request guards.
   onHistoryNamesChanged(listener: (event: WorkspaceIdPayload) => void): () => void;
+  onSharedViewPullProgress(listener: (event: SharedViewPullProgressEvent) => void): () => void;
   // Live push: main signals the renderer when the active workspace's files
   // or history changed (settled filesystem batch recorded). Main filters by
   // each window's active workspace, so a window only hears about its own
