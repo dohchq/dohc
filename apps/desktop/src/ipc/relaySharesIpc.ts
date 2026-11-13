@@ -487,7 +487,7 @@ export function createOwnerLiveDocumentActions<
       // one it could not start until the owner opened it, or one whose server
       // copy is missing an owner edit: Resume retires the held session so the
       // edit can apply. For one whose start keeps failing, or whose history is
-      // too long to check, the server keeps trying, and Resume tries now.
+      // too long to check, Resume tries now.
       const documents = new Map([...stopped.documents, ...current.documents].map(document => [document.path, {
         ...document, canResume: ownerLiveDocumentCanResume(document),
       }]));

@@ -441,7 +441,7 @@ export const LIVE_DOCUMENT_REASON_STEPS = {
   "live-document-without-lineage": "Live editing can't start until the document is opened once in dohc. Open it, then Resume. A note larger than 256 KB doesn't open as a document in dohc. Make it smaller or split it, then open it.",
   "live-edit-unadmitted": "The server hasn't applied an edit. Resume tries again.",
   "conflict-parent-withheld": "A conflict in the file was resolved, so live editing can't resume. Edits made in dohc may not reach people with the link.",
-  "live-history-over-budget": "The document's edit history is too long for the server to check, so live editing can't start. The server keeps trying. Edits still sync, but people it is shared with can't edit it live until it starts. Resume tries now.",
+  "live-history-over-budget": "The document's edit history is too long for the server to check, so live editing can't start. Edits still sync, but people it is shared with can't edit it live. Resume tries again now.",
   "live-start-failing": "The server can't start live editing and keeps trying. failure.word is the server's reason, and failure.since is when it began. Resume tries now.",
 } as const;
 const liveDocumentReasonSchema = z.enum(Object.keys(LIVE_DOCUMENT_REASON_STEPS) as [keyof typeof LIVE_DOCUMENT_REASON_STEPS, ...(keyof typeof LIVE_DOCUMENT_REASON_STEPS)[]]);

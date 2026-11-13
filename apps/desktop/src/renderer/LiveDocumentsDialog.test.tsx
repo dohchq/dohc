@@ -82,14 +82,14 @@ it("distinguishes retired and hosted held notes and offers no Resume or Stop on 
   expect(actions("docs/diverged.md")).toEqual([]);
 });
 
-// The server keeps trying it, and Resume tries now. The words promise no start, because some histories never start.
+// Resume tries again now. The words promise no start, because some histories never start.
 it("shows a document whose edit history the server can't check, with Resume and Stop", async () => {
   const h = harness(), user = userEvent.setup();
   h.load.mockResolvedValue(page([row("docs/long.md", {status: "unavailable", reason: "live-history-over-budget", canResume: true})]));
   render(<LiveDocumentsDialog workspaceId="ws-1" {...h} />);
   const long = await screen.findByTestId("live-document-row-docs/long.md");
   expect(long.children[1]?.textContent).toBe("History too long");
-  expect(within(long).getByText("This document's edit history is too long for the server to check, so live editing can't start. The server keeps trying. You can keep editing it in dohc and your edits keep syncing, but people you shared it with can't edit it live until it starts.")).toBeDefined();
+  expect(within(long).getByText("This document's edit history is too long for the server to check, so live editing can't start. You can keep editing it in dohc and your edits keep syncing, but people you shared it with can't edit it live. Resume live editing to try again.")).toBeDefined();
   expect(actions("docs/long.md").filter(name => name?.endsWith("live editing"))).toEqual(["Resume live editing", "Stop live editing"]);
   await user.click(within(long).getByRole("button", {name: "Resume live editing for docs/long.md"}));
   expect(h.resume).toHaveBeenCalledWith("ws-1", "docs/long.md");

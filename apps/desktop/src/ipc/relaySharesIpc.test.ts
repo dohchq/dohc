@@ -504,8 +504,9 @@ describe("owner live document enrollment", () => {
         {path: "diverged.md", objectId: "diverged", status: "unavailable", reason: "session-host-diverged", canResume: false},
         // A Resume adds an edit made while live editing was off to the server's copy.
         {path: "edited.md", objectId: "edited", status: "unavailable", reason: "live-edit-unadmitted", canResume: true},
-        // The server keeps trying both; a Resume tries now.
+        // A Resume tries again now.
         {path: "long.md", objectId: "long", status: "unavailable", reason: "live-history-over-budget", canResume: true},
+        // The server keeps trying; a Resume tries now.
         {path: "failing.md", objectId: "failing", status: "unavailable", reason: "live-start-failing", failure: {word: "engine-refused", since: "2026-11-13T01:00:00.000Z"}, canResume: true},
         // A newer server's reason this build doesn't know keeps the row, by its status alone.
         {path: "newer.md", objectId: "newer", status: "unavailable", canResume: false},
