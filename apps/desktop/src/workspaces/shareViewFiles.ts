@@ -24,6 +24,7 @@ import {
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
+import { prepareSharePath, visibleSharePath } from "@dohc/security-contract/share-selector";
 import type { WorkspacePathListing } from "../ipc/bridgeContract";
 import {
   assertActiveWorkspaceOperationLease,
@@ -406,22 +407,15 @@ function assertPathWithinGrant(
   selector: NonNullable<ReturnType<typeof recordedShareSelector>>,
   path: string,
 ): void {
-  const validated = validateUserWritePath(path);
-  if (!validated.ok || classifyEngineFilePath(validated.normalized).kind !== "tracked") {
+  const prepared = prepareSharePath(path);
+  if (prepared === null) {
     throw new SharedFileReadOnlyError(
       `This path is not available through the shared view: ${path}`,
     );
   }
-  const selected =
-    selector.paths.length === 0
-      ? selector.versionId !== null
-      : selector.paths.some(
-          (granted) =>
-            validated.normalized === granted || validated.normalized.startsWith(`${granted}/`),
-        );
-  if (!selected) {
+  if (visibleSharePath(selector, prepared) === null) {
     throw new SharedFileReadOnlyError(
-      `This path is outside the files shared with you: ${validated.normalized}`,
+      `This path is outside the files shared with you: ${prepared.path}`,
     );
   }
 }

@@ -4,6 +4,7 @@ import type { ShareRecordStatus } from "./shareRecordStatus";
 import * as Y from "yjs";
 import { WebSocket as NodeWebSocket } from "ws";
 import { readBoundedJson } from "@dohc/service-http";
+import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 import {
   createNamedLiveBrowserTransport,
@@ -16,6 +17,15 @@ import { RELAY_FETCH_TIMEOUT_MS, relayApiFetch } from "./sharedChannels";
 import type { LiveDraft } from "./liveDraftRecovery";
 import type { ShareViewSelector } from "./shareViewInfo";
 import type { EngineYDocSessionCapture, EngineYDocSessionProvider } from "./engineYDocSessionIpc";
+
+/** Only main is live. The relay decides again at admission. */
+function editsLive(selector: ShareViewSelector, path: string): boolean {
+  return (
+    selector.access === "edit" &&
+    (selector.versionId === null || selector.versionId === "main") &&
+    visibleSharePath(selector, path) === path
+  );
+}
 
 interface Credentials {
   relayUrl: string;
@@ -111,14 +121,7 @@ export function createNamedDesktopLiveCapture(options: {
     async waitForAdmission(path, signal) {
       options.assertCurrent();
       signal.throwIfAborted();
-      if (
-        options.selector.access !== "edit" ||
-        (options.selector.versionId !== null && options.selector.versionId !== "main") ||
-        !(options.selector.paths.length === 0
-          ? options.selector.versionId === "main"
-          : options.selector.paths.some((root) => path === root || path.startsWith(`${root}/`)))
-      )
-        return false;
+      if (!editsLive(options.selector, path)) return false;
       const ready = await waitForNamedDesktopAdmission({
         relayUrl: credentials.relayUrl,
         token: credentials.token,
@@ -132,15 +135,7 @@ export function createNamedDesktopLiveCapture(options: {
       return ready;
     },
     async openYDocSession(input): Promise<EngineYDocSessionProvider> {
-      if (
-        options.selector.access !== "edit" ||
-        (options.selector.versionId !== null && options.selector.versionId !== "main") ||
-        !(options.selector.paths.length === 0
-          ? options.selector.versionId === "main"
-          : options.selector.paths.some(
-              (path) => input.path === path || input.path.startsWith(`${path}/`),
-            ))
-      )
+      if (!editsLive(options.selector, input.path))
         throw new Error("The shared file is outside this view.");
       if (input.contentKind !== "richdoc" || !/\.md$/i.test(input.path))
         throw new Error("Only shared Markdown supports live editing.");

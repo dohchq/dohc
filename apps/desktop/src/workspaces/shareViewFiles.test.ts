@@ -2979,6 +2979,22 @@ describe("ShareViewFiles", () => {
     expect(store.writeTextFile).not.toHaveBeenCalled();
   });
 
+  it("writes a page in a joined workspace at Edit and refuses a path outside the member's reach", async () => {
+    const rootPath = await workspaceRoot();
+    const store = mutableTextStore({ initial: [] });
+    const joined = {
+      ...target(rootPath),
+      grantedSelector: { paths: [], versionId: null, access: "edit" as const, wholeWorkspace: true as const },
+    };
+    const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => joined, openStore: () => store });
+    const create = (path: string) => withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+      files.change(lease, { kind: "standalone", workspaceId: "workspace-a" }, { kind: "create", path, initialText: "Idea\n" }));
+
+    await expect(create("ideas/new.md")).resolves.toMatchObject({ status: "committed" });
+    await expect(readFile(join(rootPath, "ideas/new.md"), "utf8")).resolves.toBe("Idea\n");
+    await expect(create(".env/secret.md")).rejects.toBeInstanceOf(SharedFileReadOnlyError);
+  });
+
   it("keeps a mount store warm across canonical reads and listings", async () => {
     const rootPath = await workspaceRoot();
     const store = Object.assign(readStore({ text: "canonical\n" }), {

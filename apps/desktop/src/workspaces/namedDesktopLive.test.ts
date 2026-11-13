@@ -11,6 +11,7 @@ import {
   type NamedLiveSelection,
 } from "@dohc/ydoc-projection/named-live-browser-transport";
 import { preserveLiveDraft } from "./liveDraftRecovery";
+import type { ShareViewSelector } from "./shareViewInfo";
 
 const transport = vi.hoisted(() => ({ factory: vi.fn() }));
 vi.mock("@dohc/ydoc-projection/named-live-browser-transport", async (importOriginal) => {
@@ -25,7 +26,11 @@ afterEach(async () => {
   vi.useRealTimers();
 });
 
-function fixture(recordDelivery?: () => Promise<ShareRecordStatus | null>, isOnline = true) {
+function fixture(
+  recordDelivery?: () => Promise<ShareRecordStatus | null>,
+  isOnline = true,
+  selector: ShareViewSelector = { access: "edit", versionId: null, paths: ["docs"] },
+) {
   const doc = new Y.Doc();
   cleanup.push(async () => doc.destroy());
   let ended = false;
@@ -117,7 +122,7 @@ function fixture(recordDelivery?: () => Promise<ShareRecordStatus | null>, isOnl
   const preserveDraft = vi.fn(async () => {});
   const capture = createNamedDesktopLiveCapture({
     shareId: "share",
-    selector: { access: "edit", versionId: null, paths: ["docs"] },
+    selector,
     credentials: {
       relayUrl: "https://relay.test",
       token: "real-account-token",
@@ -314,6 +319,44 @@ it("rejects a workspace switch and pinned-selector escape before editing", async
   expect(() => provider.applyLocalUpdate(new Uint8Array([0, 0]))).toThrow("switched");
   expect(f.session.state().pendingUpdates).toBe(0);
   await provider.close();
+});
+
+it("co-edits any reached path in a joined workspace at Edit, and nothing outside the member's reach", async () => {
+  const f = fixture(undefined, true, {
+    access: "edit",
+    versionId: null,
+    paths: [],
+    wholeWorkspace: true,
+  });
+  await expect(
+    f.capture.openYDocSession({
+      path: ".env/a.md",
+      contentKind: "richdoc",
+      onRemoteUpdate: vi.fn(),
+    }),
+  ).rejects.toThrow("outside this view");
+  expect(await f.capture.waitForAdmission!(".env/a.md", new AbortController().signal)).toBe(false);
+  expect(f.request).not.toHaveBeenCalled();
+  const provider = await f.capture.openYDocSession({
+    path: "docs/a.md",
+    contentKind: "richdoc",
+    onRemoteUpdate: vi.fn(),
+  });
+  expect(f.request).toHaveBeenCalledOnce();
+  await provider.close();
+  const comment = fixture(undefined, true, {
+    access: "comment",
+    versionId: null,
+    paths: [],
+    wholeWorkspace: true,
+  });
+  await expect(
+    comment.capture.openYDocSession({
+      path: "docs/a.md",
+      contentKind: "richdoc",
+      onRemoteUpdate: vi.fn(),
+    }),
+  ).rejects.toThrow("outside this view");
 });
 
 it("retains an edit quarantined before queue admission across failed recovery and retry", async () => {
