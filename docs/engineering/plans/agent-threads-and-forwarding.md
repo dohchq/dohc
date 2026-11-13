@@ -21,7 +21,7 @@ The agent alone decides what it posts back to dohc.
 - **A message wakes an agent under four conditions.** Its owner wrote it in dohc, not through the CLI or MCP. And it is in the agent's own chat, or mentions the agent, or replies under the agent's message, or is in a post or Comment the agent started (`answeredAgentIdOf` in `apps/desktop/src/workspaces/chatWrites.ts`). A Group's running conversation has no starter, so there only a mention or a reply under the agent's message wakes it.
 - **A connected agent must ask.** It reads its messages with `dohc chat inbox` and `dohc chat watch`, or with the MCP tool `dohc_wait_for_messages`. Settings shows Listening while it waits (`apps/desktop/src/agents/agentWaits.ts`). dohc never reaches out to it. A message for an agent that is not listening stays unread, and dohc shows no notice.
 - **An agent posts with dohc's tools.** `dohc chat reply` and `dohc_reply_to_chat` post a message. `--needs-decision` and `--option` ask the person to choose, and `--resolve` closes an open decision. `--work` and `--link` add a work report.
-- **An agent that signed in with a personal agent link can post less.** Its `dohc_post_channel` takes a body and nothing else (`chatPostFields` in `services/share-web/src/remoteMcp.ts`). It cannot ask for a decision, close one, or add a work report.
+- **An agent that signed in with a personal agent link can post less.** Its `dohc_post_channel` takes the message text, where to post it, and an idempotency key (`chatPostFields` in `services/share-web/src/remoteMcp.ts`). It has no field for a decision or a work report, so the agent cannot ask for a decision, close one, or report work.
 - **The CLI finds its workspace from the folder it runs in** (`resolveCliWorkspace` in `apps/desktop/src/cli/cliServer.ts`). It has no flag that names a workspace. The Windows app does not put `dohc` on `PATH`.
 - **Chat shows when an agent works.** `AgentPresenceHint` in `apps/desktop/src/renderer/workbench/ChatsControls.tsx` draws the dot and "Running codex".
 - **A phone message can wake an agent on a computer, behind a switch that is off** (`CHAT_WAKES_ON` in `apps/desktop/src/chatWakes/chatWakeLifetime.ts`). #3857, #3872, #3879, #3887, and #3893 built it. Each computer declares the agents dohc can start there. "An agent the person runs on their own is left out" (`apps/desktop/src/chatWakes/chatRunnerDeclaration.ts`).
@@ -66,9 +66,9 @@ The agent alone decides what it posts back to dohc.
 
 ### Other people
 
-24. Another person's message that names your agent reaches you as a request, under their message and in Notices. You answer Allow or Decline. Until you allow, they see nothing.
+24. Another person's message that mentions your agent, or replies under its message, reaches you as a request, under their message and in Notices. You answer Allow or Decline. Until you allow, they see nothing. No other message of theirs reaches the agent.
 25. A request is for one revision of one message. Allow forwards that revision. A later message from the same person is a new request.
-26. The list of people who can ask without your approval lives on the agent's page, in a danger zone. An entry is one server account. It applies in every chat you share with that person, in every workspace the agent serves.
+26. The list of people who can ask without your approval lives on the agent's page, in a danger zone. An entry is one server account. A listed person's message that would make a request is forwarded without one. The entry applies in every chat you share with that person, in every workspace the agent serves.
 27. A link holder can ask. Because their name is unverified, Allow opens a second confirmation. A link holder can never join the list in decision 26.
 28. Every agent gets the same warning and no limit. [ADR 0014](../adr/0014-friends-can-ask-connected-agents-without-confinement.md) is amended to match.
 
@@ -114,6 +114,8 @@ A message from another person, which the owner allowed, differs in two ways.
 Its first line names both people: `From Sam Ortiz (sam@ridge.co) in dohc, allowed by Ice.`
 For a link holder it reads `From an unverified link holder who gave the name "Sam", allowed by Ice.`
 dohc quotes the other person's text line by line, so no line of it can pass for a line dohc adds, such as `Note from Ice:`.
+
+The same holds for every message, the owner's included. Other people can set a Group's name, a chat thread's title, a file's or an attachment's name, and their own display name. dohc puts each such value on one line as an escaped, quoted string, so it cannot start a new line or pass for a line dohc adds.
 
 ### The introduction
 
@@ -186,7 +188,7 @@ Adding a person to the list in decision 26 opens dohc's danger confirmation. A s
 
 ```text
 Let Sam ask Chief of Staff without your approval?
-Sam's messages reach it in every chat you share, with your access and without asking you. dohc can't limit what it does for Sam.
+When Sam mentions Chief of Staff or replies to it, in any chat you share, the message reaches it with your access and without asking you. dohc can't limit what it does for Sam.
 [Cancel] [Always allow Sam]
 ```
 
@@ -196,7 +198,9 @@ The list shows each person, when they were added, and Remove.
 
 Turning on another workspace for a T3 Code agent opens a confirmation.
 It says that one agent thread will hold both workspaces' messages, so content from one can appear in the other's chats, including to other people there.
-A Claude Code or Codex agent needs no confirmation, because each workspace has its own agent thread.
+A Claude Code or Codex agent needs no such confirmation, because each workspace has its own agent thread.
+
+Turning on a workspace for any agent whose list in decision 26 has people opens a confirmation, whatever the tool. It names each listed person who will be able to ask the agent in that workspace.
 
 ### Settings
 
@@ -235,7 +239,7 @@ A sketch. Chat, settings, and the states above depend on this shape and on nothi
 
 ### T3 Code
 
-- dohc reads T3 Code's address from `server-runtime.json` in T3 Code's data folder. It does not assume a port. It connects only when that address is on this computer (`127.0.0.1`, `::1`, or `localhost`) and refuses any other.
+- dohc reads T3 Code's address from `server-runtime.json` in T3 Code's data folder. It does not assume a port. It connects only when that address is `127.0.0.1` or `::1`, and refuses any other, a host name included.
 - dohc signs in to T3 Code's MCP endpoint with the authorization-code flow and PKCE. The person allows dohc in T3 Code once for each computer.
 - dohc encrypts the sign-in with the system's credential encryption and never syncs it. `apps/desktop/src/workspaces/cloudCredentialStore.ts` does the same for the server sign-in when that encryption is available, and keeps a plain copy when it is not. dohc keeps no plain copy of the T3 Code sign-in. When the system cannot encrypt, dohc does not connect T3 Code and says why.
 - dohc drops the sign-in when T3 Code refuses it and when the last T3 Code agent is removed.
@@ -254,7 +258,8 @@ A sketch. Chat, settings, and the states above depend on this shape and on nothi
 
 ## Security
 
-- A message reaches an agent thread only when its owner wrote it in dohc, or when the owner allowed that revision, or when its sender is on the owner's list. The engine or the relay fixes each of those identities.
+- A message reaches an agent thread only when its owner wrote it in dohc, or when the owner allowed that revision, or when its sender is on the owner's list and it mentions the agent or replies under its message. The engine or the relay fixes each of those identities.
+- Every value another person can set reaches the agent as an escaped, quoted string on one line. Only dohc writes the other lines.
 - No post made through the CLI or MCP is forwarded, so an agent cannot wake an agent, itself included.
 - dohc states the limit it does not have. Interface text must never claim that dohc confines an agent thread.
 - A forwarded message can hold text from other people. The agent thread runs with the owner's access. Allow is the safeguard, so the request shows the exact text and dohc forwards exactly that.
@@ -267,7 +272,7 @@ A sketch. Chat, settings, and the states above depend on this shape and on nothi
 Each release ships when it is ready. Each needs its own proof on a real tool, not only on a stand-in.
 
 1. **T3 Code on one computer.** The T3 Code tool, Add agent and the agent's page, forwarding with the note, the states, the reminder, Answer here on that computer, `--workspace` in the CLI, and workspaces for an agent. Its first step is the trial this plan did not run. Forward from a prepared desktop to a scratch T3 Code thread and watch the reply arrive in chat.
-2. **T3 Code threads on linked machines.** The introduction for such a thread gives the agent its personal agent link. dohc ties the identity that link signs in to the agent in Settings. `dohc_post_channel` gains decisions, closing a decision, and work reports.
+2. **T3 Code threads on linked machines.** The introduction for such a thread gives the agent its personal agent link. dohc ties the identity that link signs in to the agent in Settings. `dohc_post_channel` gains decisions, closing a decision, and work reports. The link is a credential that sits in the agent thread's transcript, so four rules hold. Its reach is that agent and the workspaces it serves. A post made with it is never forwarded. Remove on the agent's page revokes it. Pointing the agent at another thread, or turning off a workspace, replaces it.
 3. **Claude Code and Codex.** Agent threads resumed for each message, a new one or a pasted session id, the switch for Your command, and fresh runs kept for automations. It starts with the two-writers test.
 4. **Other devices.** A computer declares the agents whose threads it holds, so a phone message wakes it. Answer here on other devices. This changes who can be named as a wake target in `apps/desktop/src/chatWakes`, which is an authorization change to a contract the phone app work owns. Agree it with that work first.
 5. **Other people.** Requests with Allow and Decline, the list on the agent's page, and the second confirmation for link holders. It depends on release 4.
