@@ -4,6 +4,7 @@ import {createNamedDesktopLive} from "./namedDesktopLive";
 import {createNamedFrameChanges} from "./namedLiveFrameHost";
 import {fixture as ticketFixture, binding, scope} from "./liveTickets.test-helper";
 import {LiveHostingRefusal} from "./storage/serviceHostEnrollment";
+import {RELAY_EXCHANGE_KEY} from "./testing";
 
 // A workspace member's desktop open on a server that hosts members'
 // documents: it enrolls the document once, before any wait, and a refusal
@@ -13,7 +14,7 @@ const relayHost = "relay.example.test", origin = "https://share.example.test";
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {for (const close of cleanups.splice(0).reverse()) await close(); vi.restoreAllMocks();});
 
-async function fixture(options: {level?: "view" | "comment" | "edit"; hostsMemberDocuments?: boolean} = {}) {
+async function fixture(options: {level?: "view" | "comment" | "edit"; hostsMemberDocuments?: boolean; browser?: boolean} = {}) {
   const hostBlocked = vi.fn((_document: {workspaceId: string; objectId: string}): string | undefined => undefined);
   const f = await ticketFixture(); cleanups.push(f.close);
   f.storage.claimWorkspaceIdentity({workspaceId: scope.workspaceId, replicationEpoch: "epoch", streamIdentity: "stream"});
@@ -24,10 +25,16 @@ async function fixture(options: {level?: "view" | "comment" | "edit"; hostsMembe
     workspaceName: undefined, newShareId: () => "unused-share", nowMs: 6})).toEqual({ok: true});
   const tickets = {mint: vi.fn(async () => null as {token: string; expiresAtMs: number} | null)};
   const changes = createNamedFrameChanges(16);
+  // A browser's sessions belong to share-web's live route, which resolves them later.
+  let sessionCount = 0;
+  const browserSessions = {create: vi.fn(() => ({discriminator: `browser-${String(++sessionCount).padStart(4, "0")}`, expiresAtMs: 90_000})),
+    remove: vi.fn(() => true)};
   const live = createNamedDesktopLive({
+    ...(options.browser ? {browser: {exchangeKey: RELAY_EXCHANGE_KEY, sessions: browserSessions}} : {}),
     storage: f.storage, publicOrigin: origin, hosts: new Set([relayHost]), tickets: tickets as never, changes,
     resolveActor: async (request: Request, workspaceId: string) =>
-      ({userId: request.headers.get("authorization") === "Bearer member" ? "member-1" : scope.userId, workspaceId}) as never,
+      ({userId: request.headers.get("authorization") === "Bearer member" || request.headers.get("cookie") === "session=member" ? "member-1" : scope.userId,
+        workspaceId}) as never,
     hostsMemberDocuments: () => options.hostsMemberDocuments ?? true,
     hostBlocked,
     readinessLimits: {maxPendingRequests: 8, maxPendingPerUser: 4, timeoutMs: 5000},
@@ -44,7 +51,14 @@ async function fixture(options: {level?: "view" | "comment" | "edit"; hostsMembe
       method: "POST", headers: {host: relayHost, authorization: `Bearer ${who}`, "content-type": "application/json"}, body: JSON.stringify(body), signal,
     }));
   }
-  return {...f, live, tickets, changes, enroll, post, hostBlocked};
+  function browserPost(route: "open" | "ready", body: Record<string, unknown> = {grantId: "member-grant", path: binding.currentPath},
+    headers: Record<string, string> = {}, signal?: AbortSignal) {
+    return live.handle(new Request(`https://${relayHost}/sync/live/member-${route}`, {
+      method: "POST", body: JSON.stringify(body), signal, headers: {cookie: "session=member", origin,
+        "x-dohc-relay-exchange-key": RELAY_EXCHANGE_KEY, "content-type": "application/json", ...headers},
+    }));
+  }
+  return {...f, live, tickets, changes, enroll, post, browserPost, browserSessions, hostBlocked};
 }
 
 it("enrolls a member's document once before waiting for its host, then admits once the host is ready", async () => {
@@ -138,4 +152,56 @@ it.each(["refused", "live-edit-unadmitted", "history-over-budget"])("keeps waiti
   await vi.waitFor(() => expect(f.tickets.mint).toHaveBeenCalledTimes(1));
   cancel.abort();
   expect((await waiting).status).toBe(404);
+});
+
+// A member's browser opens a page through share-web: the account cookie and
+// the exchange key, the grant by name, and the browser's own live sessions.
+it("opens a member's page from a browser with the account cookie, in the browser's sessions", async () => {
+  const f = await fixture({browser: true});
+  f.tickets.mint.mockResolvedValue({token: "ab".repeat(32), expiresAtMs: 61_000});
+  const response = await f.browserPost("open");
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({kind: "named", userId: "member-1", workspaceId: "named:member-grant", grantId: "member-grant",
+    shareId: "members-share", path: binding.currentPath, discriminator: "browser-0002", ticket: {token: "ab".repeat(32)}});
+  expect(f.enroll.mock.calls[0]![0]).toMatchObject({intent: "member-open", userId: "member-1"});
+  expect(f.browserSessions.create).toHaveBeenCalledWith(expect.objectContaining({userId: "member-1", grantId: "member-grant", workspaceId: scope.workspaceId}));
+  expect((await f.browserPost("ready")).headers.get("content-type")).toBe("text/plain");
+});
+
+it("answers a browser's open with the host's refusal, and waits on readiness for a page without lineage", async () => {
+  const f = await fixture({browser: true});
+  f.hostBlocked.mockReturnValue("without-lineage");
+  const response = await f.browserPost("open");
+  expect(response.status).toBe(409);
+  expect(await response.json()).toEqual({ok: false, code: "live-document-without-lineage"});
+  const ready = await f.browserPost("ready");
+  const reader = ready.body!.getReader(), decoder = new TextDecoder();
+  expect(decoder.decode((await reader.read()).value)).toBe(`waiting${"\n"}`);
+  await vi.waitFor(() => expect(f.tickets.mint).toHaveBeenCalledTimes(1));
+  f.hostBlocked.mockReturnValue(undefined);
+  f.tickets.mint.mockResolvedValue({token: "ab".repeat(32), expiresAtMs: 61_000});
+  f.changes.notifyHost([scope.workspaceId]);
+  expect(decoder.decode((await reader.read()).value)).toBe(`ready${"\n"}`);
+});
+
+it.each([
+  ["no exchange key", {}, {"x-dohc-relay-exchange-key": "wrong-key-wrong-key-wrong-key-wrong-key"}],
+  ["another origin", {}, {origin: "https://elsewhere.test"}],
+  ["a bearer token", {}, {authorization: "Bearer member"}],
+  ["another account", {}, {cookie: "session=other"}],
+  ["a path share's grant", {grantId: scope.grantId, path: binding.currentPath}, {cookie: "session=reader"}],
+  ["a share named instead of a grant", {shareId: "members-share", path: binding.currentPath}, {}],
+] as const)("refuses a browser's open with %s", async (_, body, headers) => {
+  const f = await fixture({browser: true});
+  f.tickets.mint.mockResolvedValue({token: "ab".repeat(32), expiresAtMs: 61_000});
+  const response = await f.browserPost("open", Object.keys(body).length ? body : undefined, headers);
+  expect(response.status).toBe(404);
+  expect(f.browserSessions.create).not.toHaveBeenCalled();
+});
+
+it("keeps the desktop routes and the browser routes apart", async () => {
+  const browser = await fixture({browser: true});
+  expect((await browser.post("open")).status).toBe(404);
+  const desktop = await fixture();
+  expect((await desktop.browserPost("open")).status).toBe(404);
 });

@@ -387,6 +387,8 @@ export function createSyncRelayHandler({
   relayPublicOrigin,
 }: CreateSyncRelayHandlerOptions): SyncRelayHandler & {
   resolveNamedBrowserSession: ReturnType<typeof createNamedLiveBrowserHttp>["resolve"];
+  /** The browser sessions share-web's live socket resolves, when named browser sessions are enabled. */
+  namedBrowserSessions: ReturnType<typeof createNamedLiveBrowserHttp>["sessions"] | undefined;
   /** The link resolver the MCP tool loop's routes use, for the live routes main composes. */
   linkAuthority: LinkAuthorityResolver;
   /** Personal agents' running work and fence, for the routes main composes. */
@@ -1848,6 +1850,7 @@ export function createSyncRelayHandler({
     },
     resolveNamedBrowserSession: (request: Request, discriminator: string) =>
       namedBrowser?.resolve(request, discriminator) ?? Promise.resolve(null),
+    namedBrowserSessions: namedBrowser?.sessions,
     /**
      * A GET of the owner's share listings, answered in process as the
      * routes answer the owner, so the server's automations find a
