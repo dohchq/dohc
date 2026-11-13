@@ -1627,19 +1627,6 @@ async fn configured_settlement_recovers_committed_projection_and_pending_materia
     }
 }
 
-async fn unload(f: &Fixture) -> Option<UnloadPending> {
-    f.owner
-        .unload(
-            f.binding.object_id.clone(),
-            f.handle.activation_id(),
-            vec![dohc_engine_collab::DocKey::new("workspace", "main", "object").unwrap()],
-            f.root.path().to_owned(),
-            40,
-        )
-        .await
-        .unwrap()
-}
-
 #[tokio::test]
 #[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 async fn reader_restore_dispatches_outside_the_actor_at_every_phase() {

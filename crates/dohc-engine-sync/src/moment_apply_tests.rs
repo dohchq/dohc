@@ -1,7 +1,7 @@
 use dohc_engine_collab::live_update_application::ReleasedTails;
 use dohc_engine_collab::{ContentKind as YdocContentKind, DocKey, LeaseRegistry, Regime, Ydoc};
 use dohc_engine_domain::{MomentOp, RollbackTextFileMutation, VersionedTextStore, WriteText};
-use dohc_engine_storage::{EngineStore, NoFaults, hex_sha256, put_binary_blob};
+use dohc_engine_storage::{EngineStore, NoFaults, hex_sha256};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};

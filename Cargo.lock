@@ -657,7 +657,6 @@ dependencies = [
  "getrandom 0.4.3",
  "landlock",
  "libc",
- "proptest",
  "rusqlite",
  "rustix",
  "seccompiler",

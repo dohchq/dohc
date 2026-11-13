@@ -14,8 +14,7 @@ use std::time::{Duration, SystemTime};
 /// The shared parent on Windows, inside that user's own temp directory.
 const SCRATCH_PARENT: &str = "dohc-test-scratch";
 /// The parent on macOS and Linux is `dohc-scratch-<uid>` in the shared `/tmp`.
-/// The name is short because a macOS socket path must stay under 104 bytes;
-/// `the_longest_socket_path_the_gate_can_produce_fits_on_macos` holds it.
+/// The short name leaves room within the 104-byte macOS socket path limit.
 const USER_SCRATCH_PREFIX: &str = "dohc-scratch-";
 /// Hex digits of the nonce in a scratch directory's name. `create_dir` refuses
 /// a name that exists, so the nonce only makes a retry rare: two live

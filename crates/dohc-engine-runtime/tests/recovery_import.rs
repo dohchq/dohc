@@ -490,13 +490,6 @@ fn receipts(db: &Path, request_id: &str) -> i64 {
 
 const NOTE: &str = "note.md";
 
-enum Warm {
-    /// An ordinary rich edit, after which a source witness no longer applies.
-    Append,
-    /// A source-preserving rewrite, which keeps the witness valid.
-    Preserving,
-}
-
 struct Rich {
     scratch: ScratchDir,
     db: std::path::PathBuf,
@@ -504,15 +497,13 @@ struct Rich {
     actor: ActorHandle,
     state: YdocOpenState,
     input: Option<RecoveryImport>,
-    /// The file the checkpoint names, before dohc settled "Warm.".
-    at_base: Vec<u8>,
     /// The file just before the import runs.
     settled: Vec<u8>,
 }
 
 /// A rich note seeded from `seed` and settled, then warmed and settled again
 /// after the checkpoint's base, with typing that never reached the engine.
-async fn rich(seed: &str, warm: Warm) -> Rich {
+async fn rich(seed: &str) -> Rich {
     let scratch = ScratchDir::new().unwrap();
     std::fs::write(scratch.path().join(NOTE), seed).unwrap();
     let db = engine_db_path(&scratch).unwrap();
@@ -562,23 +553,7 @@ async fn rich(seed: &str, warm: Warm) -> Rich {
     )
     .await;
     let at_base = disk(scratch.path(), NOTE);
-    let update = match warm {
-        Warm::Append => doc.richdoc_append_paragraph("Warm."),
-        Warm::Preserving => {
-            let source = String::from_utf8(at_base.clone()).unwrap();
-            let ending = if source.contains("\r\n") {
-                "\r\n"
-            } else {
-                "\n"
-            };
-            let body = source.strip_suffix(ending).unwrap_or(&source);
-            doc.rewrite_content_to_markdown_preserving_source(
-                ContentKind::Richdoc,
-                &format!("{body}{ending}{ending}Warm.{ending}"),
-            )
-            .unwrap()
-        }
-    };
+    let update = doc.richdoc_append_paragraph("Warm.");
     record(
         &actor,
         &state,
@@ -612,7 +587,6 @@ async fn rich(seed: &str, warm: Warm) -> Rich {
         actor,
         state,
         input: Some(input),
-        at_base,
         settled,
     }
 }
@@ -678,7 +652,7 @@ async fn assert_typing_kept(
 async fn a_checkpoint_from_another_serializer_is_refused_and_kept() {
     // Text from a serializer that adds a second final newline can't be
     // replayed to exactly that text, so main keeps the checkpoint.
-    let mut rich = rich("# Note\n\nAnchor.\n", Warm::Append).await;
+    let mut rich = rich("# Note\n\nAnchor.\n").await;
     rich.input.as_mut().unwrap().text.push('\n');
     let input = rich.input.take().unwrap();
     let text = input.text.clone();

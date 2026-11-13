@@ -691,40 +691,6 @@ fn a_held_host_update_survives_a_restart_and_a_resumed_feed() {
     assert!(refused(&owner).is_empty());
 }
 
-/// The owner's feed re-syncs to the host's state, as after a gap, instead of
-/// replaying each frame: its checkpoint moves to the host cut in one step.
-fn resync(owner: &mut RestoreOwner, host: &Ydoc, update: Vec<u8>, cursor: i64) {
-    use dohc_engine_collab::owner_outbox::accepted::{OwnerAcceptedFrameInput, apply_sync_in_tx};
-    let observed = &owner.observed;
-    let vector = host.encode_state_vector();
-    let dohc_engine_storage::TxnOutcome::Committed(result) = owner
-        .store
-        .write_with(&NoFaults, |tx| {
-            apply_sync_in_tx(
-                tx,
-                "ws",
-                &OwnerAcceptedFrameInput {
-                    binding: observed.binding.clone(),
-                    relay_database_namespace: "relay".into(),
-                    expected_revision: observed.revision,
-                    expected_native_head_sequence: observed.native_head_sequence,
-                    previous_accepted_cursor: observed.accepted_cursor,
-                    journal_cursor: cursor,
-                    update_bytes: update,
-                },
-                &vector,
-                10 + cursor,
-            )
-        })
-        .unwrap()
-    else {
-        panic!("the re-sync must commit")
-    };
-    owner.observed.revision = result.revision;
-    owner.observed.native_head_sequence = result.native_head_sequence;
-    owner.observed.accepted_cursor = result.accepted_cursor;
-}
-
 /// The owner's device becomes the note's own live host: the row
 /// registration installs (`install_binding`), in the owner binding's
 /// namespace and lineage.

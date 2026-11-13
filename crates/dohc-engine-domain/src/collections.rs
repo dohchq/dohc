@@ -5913,39 +5913,6 @@ fn query_cursor_value(
     }
 }
 
-#[cfg(test)]
-fn compare_record_to_cursor(
-    record: &CollectionRecord,
-    cursor: &CollectionQueryCursor,
-    sort: &[CollectionSort],
-) -> Result<Ordering, crate::DomainError> {
-    if cursor.sort_values.len() != sort.len()
-        || cursor.record_path.is_empty()
-        || cursor.record_id.is_empty()
-    {
-        return Err(crate::DomainError::InvalidInput {
-            reason: "collection query cursor is invalid",
-        });
-    }
-    for (sort, cursor_value) in sort.iter().zip(&cursor.sort_values) {
-        let ordering = compare_optional_json(
-            sortable_value_for_field(record, &sort.field),
-            query_cursor_value(cursor_value)?,
-        );
-        let ordering = match sort.direction {
-            ViewSortDirection::Asc => ordering,
-            ViewSortDirection::Desc => ordering.reverse(),
-        };
-        if ordering != Ordering::Equal {
-            return Ok(ordering);
-        }
-    }
-    Ok(record
-        .path
-        .cmp(&cursor.record_path)
-        .then_with(|| record.id.cmp(&cursor.record_id)))
-}
-
 fn query_cursor_for_record(
     record: &CollectionRecord,
     sort: &[CollectionSort],

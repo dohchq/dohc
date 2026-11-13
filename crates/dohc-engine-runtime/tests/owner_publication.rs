@@ -3375,10 +3375,9 @@ const WINDOW_PATH: &str = "notes/plan.md";
 /// A document whose root activation adopted through the host and applied
 /// the owner's edit at B and, with `carried`, whose next two owner edits the
 /// relay accepted and the host never applied. Fields drop in order: the
-/// actor closes before its scratch tree goes.
+/// supervisor closes before its scratch tree goes.
 struct HostWindow {
     owner: dohc_engine_runtime::actor::ActorLiveApplicationOwner,
-    actor: ActorHandle,
     supervisor: WorkspaceSupervisor,
     store: EngineStore,
     first: ImportedOwnerActivation,
@@ -3509,7 +3508,6 @@ async fn adopt_window(host: WindowHost, carried: bool) -> HostWindow {
     }
     HostWindow {
         owner,
-        actor,
         supervisor,
         store,
         first,
@@ -3649,34 +3647,6 @@ impl HostWindow {
         std::fs::read_to_string(self.root.path().join(WINDOW_PATH)).unwrap()
     }
 
-    /// A disk observation of `text` the capture sink watched change, with no
-    /// editor lease on the file.
-    async fn capture(
-        &self,
-        text: &str,
-    ) -> Result<dohc_engine_domain::WriteResult, dohc_engine_runtime::RuntimeError> {
-        self.actor
-            .capture_ingest(
-                dohc_engine_runtime::CaptureIngest {
-                    workspace_id: "workspace".into(),
-                    version_id: "main".into(),
-                    path: WINDOW_PATH.into(),
-                    text: text.into(),
-                    metadata_origin: "capture".into(),
-                    metadata_summary: None,
-                    metadata_correlation_id: None,
-                    author_json: None,
-                    now_ms: 60,
-                    request_id: None,
-                    claim_foreign_head: true,
-                },
-                dohc_engine_collab::LeaseRegistry::new(),
-                Arc::new(NoFaults),
-                CancellationToken::new(),
-            )
-            .await
-    }
-
     /// The native Y.Doc's whole state.
     fn native(&self) -> Vec<u8> {
         dohc_engine_collab::load_persisted(&self.store, &window_key())
@@ -3686,58 +3656,10 @@ impl HostWindow {
             .encode_full_state()
     }
 
-    /// Every row a capture could write, but the claimed origin of an
-    /// unchanged head.
-    fn written(&self) -> Vec<String> {
-        let mut rows: Vec<String> = [
-            "SELECT * FROM moments",
-            "SELECT workspace_id,version_id,object_id,path,content_kind,blob_sha256,latest_moment_id FROM snapshots",
-            "SELECT * FROM ydoc_docs",
-            "SELECT * FROM ydoc_updates",
-            "SELECT * FROM ydoc_snapshots",
-            "SELECT * FROM replication_log",
-            "SELECT * FROM owner_ydoc_outbox_entries",
-            "SELECT * FROM live_owner_activations",
-            "SELECT * FROM live_device_settlements",
-            "SELECT * FROM materialization_jobs",
-            "SELECT sha256 FROM binary_blobs",
-            "SELECT sha256 FROM blobs",
-        ]
-        .iter()
-        .flat_map(|sql| {
-            self.store
-                .read_with(|conn| {
-                    let mut statement = conn.prepare(sql)?;
-                    let columns = statement.column_count();
-                    statement
-                        .query_map([], |row| {
-                            let values = (0..columns)
-                                .map(|column| row.get::<_, rusqlite::types::Value>(column))
-                                .collect::<Result<Vec<_>, _>>()?;
-                            Ok(format!("{sql}: {values:?}"))
-                        })?
-                        .collect::<Result<Vec<_>, _>>()
-                })
-                .unwrap()
-        })
-        .collect();
-        rows.sort();
-        rows
-    }
-
     async fn close(self) {
         self.owner.close().await.unwrap();
         self.supervisor.close_all().unwrap();
     }
-}
-
-fn unproven(error: &dohc_engine_runtime::RuntimeError) -> bool {
-    matches!(
-        error,
-        dohc_engine_runtime::RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState {
-            reason: "ydoc-released-capture-unproven"
-        })
-    )
 }
 
 /// The text the released chain retains, inside the file's one paragraph.
@@ -3840,34 +3762,6 @@ async fn window_store(root: &ScratchDir, origin: &str, base: &[u8], lineage: &st
 }
 
 async fn retained_window(retained: Retained) -> RetainedWindow {
-    retained_window_keeping(retained, None).await.0
-}
-
-/// An edit of the lineage from the owner's desktop, which never saw
-/// [`RETAINED`].
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Kept {
-    /// A new paragraph, which destroys nothing.
-    Append,
-    /// A disk edit that capture folds, which deletes the retained text.
-    Fold,
-}
-
-/// [`retained_window`], where the host's hosted pass delivered `kept` while
-/// the root activation was bound and the document ready. Its session never
-/// admitted it, so it stays queued and holds the document through the
-/// release. The document then returns to the scope backfilling. Answers the
-/// feed that served it, and its row.
-async fn retained_window_keeping(
-    retained: Retained,
-    kept: Option<Kept>,
-) -> (
-    RetainedWindow,
-    Option<(
-        dohc_engine_sync::RelaySyncClient<HostedFeed>,
-        dohc_engine_sync::ReplicationEnvelope,
-    )>,
-) {
     let root = ScratchDir::new().unwrap();
     let base = owner_source_base();
     let lineage = hex_sha256(&base);
@@ -3963,39 +3857,6 @@ async fn retained_window_keeping(
     if retained != Retained::Own {
         accept_latest(&actor, &store, 2).await;
     }
-    let kept = match kept {
-        None => None,
-        Some(kept) => {
-            execute(&mut store, "INSERT INTO hosted_replicas(workspace_id,scope_generation,created_at_ms,main_cursor,last_outbound_seq,scope_token)
-                  VALUES ('workspace',1,0,1,(SELECT COALESCE(MAX(origin_seq),-1) FROM replication_log WHERE origin_id='origin'),'scope');
-                INSERT INTO hosted_documents(workspace_id,object_id,path,state,scope_generation) VALUES ('workspace','object','notes/plan.md','ready',1)");
-            let desktop = desktop_of(&base, &lineage, &synced).await;
-            let (op, bytes) = match kept {
-                Kept::Append => desktop.append(&lineage, "A desktop paragraph").await,
-                Kept::Fold => {
-                    desktop
-                        .fold(&format!("{}\nA desktop edit.\n", desktop.file()))
-                        .await
-                }
-            };
-            desktop.close().await;
-            let feed = HostedFeed::new(&[("object", WINDOW_PATH)]);
-            let op = feed.serve(op, bytes);
-            let client = dohc_engine_sync::RelaySyncClient::new(feed);
-            let pass = hosted_pass(
-                &mut store,
-                &client,
-                &mut dohc_engine_collab::WriterDocCache::new(),
-            );
-            assert_eq!(
-                pass.held.get("object"),
-                Some(&dohc_engine_sync::HostedHold::LiveEditUnadmitted),
-                "{kept:?}: {pass:?}"
-            );
-            assert!(pass_commit(&mut store, &client, &pass).committed);
-            Some((client, op))
-        }
-    };
     // Stop: Phase A, settlement with nothing applied, the document parks,
     // and the release. Its document returns with no activation current.
     let scope = dohc_engine_runtime::actor::OwnedRetirementScope {
@@ -4042,16 +3903,9 @@ async fn retained_window_keeping(
         )
         .await
         .unwrap();
-    if kept.is_some() {
-        execute(
-            &mut store,
-            "UPDATE hosted_documents SET state='parked',held_reason=NULL,scope_generation=0,unmaterialized_seq=NULL",
-        );
-    } else {
-        execute(&mut store, "INSERT INTO hosted_replicas(workspace_id,scope_generation,created_at_ms,main_cursor,last_outbound_seq)
+    execute(&mut store, "INSERT INTO hosted_replicas(workspace_id,scope_generation,created_at_ms,main_cursor,last_outbound_seq)
               VALUES ('workspace',1,0,1,(SELECT COALESCE(MAX(origin_seq),-1) FROM replication_log WHERE origin_id='origin'));
             INSERT INTO hosted_documents(workspace_id,object_id,path,state,scope_generation) VALUES ('workspace','object','notes/plan.md','parked',0)");
-    }
     let Release::Released { boundary, .. } = owner
         .release_activation(scope, coordinate.clone(), key, 40)
         .await
@@ -4059,19 +3913,12 @@ async fn retained_window_keeping(
     else {
         panic!("{retained:?}: released");
     };
-    if kept.is_some() {
-        execute(
-            &mut store,
-            "UPDATE hosted_documents SET scope_generation=1,state='backfilling',backfill_cursor=0",
-        );
-    } else {
-        execute(
-            &mut store,
-            "UPDATE hosted_documents SET scope_generation=1,state='ready';
+    execute(
+        &mut store,
+        "UPDATE hosted_documents SET scope_generation=1,state='ready';
             UPDATE hosted_replicas SET scope_token='scope'",
-        );
-    }
-    let window = RetainedWindow {
+    );
+    RetainedWindow {
         reader,
         witness,
         owner,
@@ -4087,8 +3934,7 @@ async fn retained_window_keeping(
         retained_delivery: delivery_id,
         synced,
         root,
-    };
-    (window, kept)
+    }
 }
 
 impl RetainedWindow {
@@ -4445,39 +4291,6 @@ impl Desktop {
         self.journaled_update()
     }
 
-    /// The desktop's editor settles the document, and its next push exports
-    /// the settled head. Returns the settlement `moment.append` that journals,
-    /// with its text.
-    async fn settle(&mut self, lineage: &str) -> (dohc_engine_sync::ReplicationEnvelope, Vec<u8>) {
-        let settled = self
-            .actor
-            .ydoc_settle(
-                self.root.path().to_owned(),
-                window_key(),
-                WINDOW_PATH.into(),
-                ContentKind::Richdoc,
-                Some(lineage.into()),
-                None,
-                "desktop-session".into(),
-                Arc::new(()),
-                60,
-                Arc::new(NoFaults),
-                CancellationToken::new(),
-                None,
-                None,
-            )
-            .await
-            .unwrap()
-            .settled()
-            .unwrap();
-        self.store
-            .write_with(&NoFaults, |tx| {
-                dohc_engine_sync::journal_moment_append_in_tx(tx, "workspace", &settled.moment_id)
-            })
-            .unwrap();
-        self.last_journaled("moment.append", "payloadAfterBlobSha256")
-    }
-
     async fn close(self) {
         self.supervisor.close_all().unwrap();
     }
@@ -4493,8 +4306,6 @@ struct HostedFeed {
     placed: Vec<dohc_engine_sync::ReplicationEnvelope>,
     /// The relay position of the feed's first row.
     first: i64,
-    /// How many pages the host pulled.
-    pulls: std::sync::atomic::AtomicUsize,
 }
 
 impl HostedFeed {
@@ -4505,7 +4316,6 @@ impl HostedFeed {
             blobs: Default::default(),
             placed: Vec::new(),
             first: 10,
-            pulls: Default::default(),
         }
     }
 
@@ -4520,10 +4330,6 @@ impl HostedFeed {
                 })
                 .collect(),
         }
-    }
-
-    fn pulls(&self) -> usize {
-        self.pulls.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn serve(
@@ -4635,7 +4441,6 @@ impl dohc_engine_sync::RelayTransport for HostedFeed {
         &self,
         req: dohc_engine_sync::HostedPullRequest,
     ) -> Result<dohc_engine_sync::HostedPullResponse, dohc_engine_sync::RelayError> {
-        self.pulls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let scope = self.scope.lock().unwrap().clone();
         let current = req.scope_token.as_deref() == Some(scope.token.as_str());
         let ops: Vec<_> = self
@@ -5255,39 +5060,16 @@ fn native_rows(store: &EngineStore) -> Vec<String> {
     )
 }
 
-/// What [`outbox_only`] stores under its entry's digest.
-enum Stored {
-    TheUpdate,
-    Other(&'static [u8]),
-    Nothing,
-}
-
 /// Queue, past the store's checks, an owner edit only the released lineage's
 /// outbox holds: a pending entry beside the retained delivery's, whose bytes
-/// add `text` to the head, with `stored` under its digest. Answers its
+/// add `text` to the head, stored under its digest. Answers its
 /// contribution.
-fn outbox_only(w: &mut RetainedWindow, text: &str, stored: Stored) -> RetainedContribution {
+fn outbox_only(w: &mut RetainedWindow, text: &str) -> RetainedContribution {
     let writer = Ydoc::wire();
     writer.apply(&w.native()).unwrap();
     let update = writer.richdoc_append_paragraph(text);
     let digest = hex_sha256(&update);
-    match stored {
-        Stored::TheUpdate => {
-            w.store.put_binary_blob(&update).unwrap();
-        }
-        Stored::Other(bytes) => write_unchecked(
-            w,
-            &format!(
-                "INSERT INTO binary_blobs (sha256,byte_length,bytes) VALUES ('{digest}',{},X'{}')",
-                bytes.len(),
-                bytes
-                    .iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect::<String>()
-            ),
-        ),
-        Stored::Nothing => {}
-    }
+    w.store.put_binary_blob(&update).unwrap();
     write_unchecked(
         w,
         &format!(
@@ -5346,7 +5128,7 @@ fn rebound(w: &mut RetainedWindow) -> Box<ReleasedLineageBinding> {
 async fn an_outbox_only_contribution_is_preserved_without_changing_the_head() {
     let (mut w, desktop, _client) = held_for_a_queued_fold().await;
     let earlier = inspected_window(&w.store).document.binding_digest;
-    let contribution = outbox_only(&mut w, "Outbox only.", Stored::TheUpdate);
+    let contribution = outbox_only(&mut w, "Outbox only.");
     let stale = inspected_window(&w.store);
     assert_eq!(
         stale.document.binding_digest, earlier,
@@ -5727,19 +5509,6 @@ async fn a_completed_documents_facts_survive_a_later_documents_wait() {
     }
 }
 
-/// The window document's released-tail generation.
-fn window_generation(store: &EngineStore) -> i64 {
-    store
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT generation FROM released_tail_generations WHERE object_id='object'",
-                [],
-                |row| row.get(0),
-            )
-        })
-        .unwrap()
-}
-
 /// Archive the window's lineage as a rejected base leaves one: the archive
 /// keeps the document's state, and the head moves to a lineage no released
 /// tail names, so only the archived lineage is protected. Answers the digest
@@ -5928,23 +5697,6 @@ async fn a_documents_drain_holds_its_protected_archived_lineage() {
     assert_ne!(archived_state(&w.store, &w.lineage), archive);
     desktop.close().await;
     w.close().await;
-}
-
-/// A fence row that resumed the document at restore generation 1.
-fn restored(w: &RetainedWindow) {
-    write_unchecked(
-        w,
-        &format!(
-            "INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,
-               operation_id,input_json,receipt_json,proposal_json,application_json,application_delivery_id,
-               resume_receipt_json,resume_settlement_id,resume_evidence_digest)
-             VALUES ('workspace','main','object','relay','restore',
-               '{{\"oldBinding\":{{\"lineageClaimId\":\"{}\",\"restoreFenceGeneration\":0}},\"newFence\":1}}',
-               '{{}}','{{}}','{{}}','restore-delivery','{{}}','settlement','{}')",
-            w.lineage,
-            "a".repeat(64)
-        ),
-    );
 }
 
 /// A pass whose hold names what its row would change commits nothing once
@@ -6697,14 +6449,6 @@ fn hosted_status(store: &EngineStore, object_id: &str) -> dohc_engine_sync::Host
         .documents[object_id]
         .status
         .clone()
-}
-
-/// The host's main cursor.
-fn main_cursor(store: &EngineStore) -> i64 {
-    dohc_engine_sync::read_hosted_replica(store, "workspace")
-        .unwrap()
-        .unwrap()
-        .main_cursor
 }
 
 /// A text write over the host's head that leaves the document at `path` with

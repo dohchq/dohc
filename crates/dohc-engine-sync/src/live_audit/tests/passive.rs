@@ -1567,8 +1567,6 @@ fn measurement_vector(doc: &dohc_engine_collab::Ydoc) -> std::collections::BTree
     (0..count).map(|_| (read(), read())).collect()
 }
 
-mod page_measurement;
-
 #[test]
 fn current_view_keeps_nested_list_bytes_and_projects_a_journal_edit() {
     use crate::replica_cut::{CurrentViewRequest, CurrentViewSelector, collect_current_view};

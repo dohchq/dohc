@@ -10176,11 +10176,6 @@ mod projection_tests {
         }
     }
 
-    fn settled(doc: &Ydoc, canonical: &str, snapshot: &str) -> Option<String> {
-        doc.settled_markdown_source(canonical, || Ok::<_, ()>(Some(snapshot.to_owned())))
-            .expect("snapshot read")
-    }
-
     #[test]
     fn resolution_fold_reconstructs_rich_structure_and_projection() {
         // The fold must parse the chosen markdown into the projection's own
@@ -10474,27 +10469,6 @@ fn main() {}
         }
     }
 
-    fn decode_fixture_int64_markers(value: &mut Value) {
-        match value {
-            Value::Array(values) => values.iter_mut().for_each(decode_fixture_int64_markers),
-            Value::Object(values) => {
-                let decoded = if values.len() == 1 {
-                    values
-                        .get("$dohcInt64")
-                        .and_then(Value::as_str)
-                        .map(|decimal| decimal.parse::<i64>().expect("fixture int64 is valid"))
-                } else {
-                    None
-                };
-                if let Some(integer) = decoded {
-                    *value = json!(integer);
-                } else {
-                    values.values_mut().for_each(decode_fixture_int64_markers);
-                }
-            }
-            _ => {}
-        }
-    }
     #[test]
     fn richdoc_projection_quotes_strings_that_yaml_would_retype_or_reject() {
         let doc = Ydoc::wire();

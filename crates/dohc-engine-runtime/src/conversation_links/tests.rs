@@ -378,3 +378,20 @@ fn conversation_links_failed_repair_backs_off_without_releasing_its_barrier_or_s
     assert_eq!(entries(&s, "a").len(), 1);
     assert_eq!(page(&s, "a", None).unwrap()["indexBuilding"], false);
 }
+
+fn posts_seed_fixture(s: &mut EngineStore, threads: i64, files: i64) {
+    s.write_with(&NoFaults, |c| {
+        let mut thread = c.prepare_cached("INSERT INTO chat_threads(workspace_id,thread_id,title,created_at_ms,updated_at_ms,channel_id,lane) VALUES('ws',?1,'Post',1,1,'a','posts')").map_err(sql)?;
+        let mut message = c.prepare_cached("INSERT INTO chat_messages(workspace_id,thread_id,message_order,message_id,author_kind,author_display_name,body,created_at_ms) VALUES('ws',?1,0,?1,'human','Ada','',1)").map_err(sql)?;
+        let mut attachment = c.prepare_cached("INSERT INTO chat_attachments(workspace_id,attachment_id,thread_id,message_id,target_kind,object_id,created_at_ms) VALUES('ws',?1,?2,?2,'file',?1,1)").map_err(sql)?;
+        for i in 0..threads {
+            let id = format!("post-{i:05}");
+            thread.execute([&id]).map_err(sql)?;
+            if i < files {
+                message.execute([&id]).map_err(sql)?;
+                attachment.execute(params![format!("f-{i:03}"),id]).map_err(sql)?;
+            }
+        }
+        Ok::<_, StorageError>(())
+    }).unwrap();
+}

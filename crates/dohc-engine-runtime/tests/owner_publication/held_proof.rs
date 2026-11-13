@@ -160,7 +160,7 @@ mod changed_proof {
     use super::*;
 
     fn drafted(w: &mut RetainedWindow) {
-        outbox_only(w, "Drafted.", Stored::TheUpdate);
+        outbox_only(w, "Drafted.");
         rebound(w);
     }
     /// What the latest snapshot's `column` holds.

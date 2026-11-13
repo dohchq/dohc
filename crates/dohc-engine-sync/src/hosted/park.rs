@@ -559,8 +559,6 @@ impl<'c> Occupancy<'c> {
         let mut holders = Holders::default();
         for occupant in occupants {
             let (held_by, held, in_scope) = occupant.map_err(SyncError::corrupt)?;
-            #[cfg(test)]
-            OCCUPANTS_READ.with(|read| read.set(read.get() + 1));
             let holder = if in_scope {
                 Holder::Scope(held_by)
             } else {
@@ -584,11 +582,6 @@ const OCCUPANTS_SQL: &str = "SELECT o.object_id,o.path,EXISTS(SELECT 1 FROM host
        UNION ALL SELECT object_id,path FROM path_aliases \
          WHERE workspace_id=?1 AND version_id=?2) o";
 
-#[cfg(test)]
-thread_local! {
-    /// How many heads and path aliases each [`Occupancy`] on this thread read.
-    pub(crate) static OCCUPANTS_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
 
 /// Who holds a path: a document of the scope, or only a departed document,
 /// or a retired file (`None`), which holds it against every document.

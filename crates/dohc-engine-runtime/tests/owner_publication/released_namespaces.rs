@@ -185,7 +185,8 @@ fn over_head(
 #[tokio::test]
 async fn input_fed_from_a_released_namespace_never_replaces_a_current_activations_state() {
     let mut cases = vec![("a rewrite".to_owned(), None, true)];
-    for change in [FileChange::Delete] {
+    {
+        let change = FileChange::Delete;
         cases.push((
             format!("{change:?} from the desktop's head"),
             Some(change),

@@ -302,33 +302,6 @@ fn a_renamed_succession_commits_whole_and_replays_after_restart() {
     }
 }
 
-/// Roll back the document's latest mutation, `moment`, through the domain,
-/// with the lineage following the restored path as the rename helper's does.
-fn roll_back(f: &mut Fixture, moment: &str) {
-    let input = dohc_engine_domain::RollbackTextFileMutation {
-        workspace_id: "workspace".into(),
-        version_id: "main".into(),
-        path: f.binding.current_path.clone(),
-        mutation_moment_id: moment.into(),
-        request_id: None,
-        metadata_origin: "user".into(),
-        author_json: None,
-    };
-    let mut restored = None;
-    VersionedTextStore::new(&mut f.store)
-        .rollback_text_file_mutation_with(&input, &NoFaults, |_, _| Ok(()), |tx, _, head, _, _| {
-            let (path, _) = head.expect("a text head");
-            tx.execute("UPDATE ydoc_docs SET path=?1 WHERE workspace_id='workspace' AND version_id='main' AND object_id='object'", [path])
-                .map_err(dohc_engine_storage::StorageError::persist_public)?;
-            restored = Some(path.to_owned());
-            Ok(())
-        })
-        .unwrap();
-    let path = restored.unwrap();
-    f.binding.current_path = path.clone();
-    f.binding.selector_paths = vec![path];
-}
-
 /// P, then S1, adopt and release at owner.md, and S2 registers there: a
 /// chain of two activations that held one binding.
 fn released_twice_at_one_binding() -> Fixture {

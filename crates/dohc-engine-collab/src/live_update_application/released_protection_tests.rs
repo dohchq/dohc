@@ -65,10 +65,6 @@ fn listed(binding: ReleasedLineageBinding) -> Vec<ProtectedTail> {
     }
 }
 
-fn coverage(f: &Fixture) -> Vec<RetainedCoverage> {
-    listed(protected(f).expect("protected")).into_iter().map(|tail| tail.coverage).collect()
-}
-
 /// The coverage a binding names for exactly `unproven`.
 fn committed(unproven: Vec<RetainedContribution>) -> RetainedCoverage {
     RetainedCoverage::Unproven(UnprovenCommitment::of(unproven).expect("unproven work"))

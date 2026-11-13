@@ -4,7 +4,7 @@
 
 use dohc_engine_domain::{VersionedTextStore, WriteText};
 use dohc_engine_storage::{EngineStore, FaultPoint, NoFaults};
-use dohc_engine_testkit::harness::write_foreign_unversioned_db;
+use dohc_engine_testkit::harness::{wal_sidecar, write_foreign_unversioned_db};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
 use std::path::Path;
 

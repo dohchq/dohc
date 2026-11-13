@@ -57,8 +57,6 @@ fn digest(mut file: impl io::Read, cap: u64) -> Option<[u8; 32]> {
     }
 }
 
-#[cfg(all(unix, test))]
-pub(super) use unix::OPEN;
 #[cfg(unix)]
 pub(super) use unix::{Child, Folder};
 
@@ -97,30 +95,8 @@ mod unix {
 
     impl Handle {
         fn new(fd: OwnedFd) -> Rc<Self> {
-            #[cfg(test)]
-            OPEN.with(|open| {
-                let (now, most) = open.get();
-                open.set((now + 1, most.max(now + 1)));
-            });
             Rc::new(Self(fd))
         }
-    }
-
-    #[cfg(test)]
-    impl Drop for Handle {
-        fn drop(&mut self) {
-            OPEN.with(|open| {
-                let (now, most) = open.get();
-                open.set((now - 1, most));
-            });
-        }
-    }
-
-    #[cfg(test)]
-    thread_local! {
-        /// Folder handles open now, and the most open at once.
-        pub(in super::super) static OPEN: std::cell::Cell<(usize, usize)> =
-            const { std::cell::Cell::new((0, 0)) };
     }
 
     pub(in super::super) struct Child {

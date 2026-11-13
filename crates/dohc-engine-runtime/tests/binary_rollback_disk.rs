@@ -9,35 +9,16 @@ use dohc_engine_files::{
 };
 use dohc_engine_runtime::{
     ActiveVersionSwitch, CancellationToken, NoFaults, PostCommitMaterializeOutcome,
-    SelfWriteRecorder, WorkspaceSupervisor,
+    WorkspaceSupervisor,
 };
 use dohc_engine_storage::FaultPoint;
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
+use std::sync::Arc;
 
 const WORKSPACE: &str = "ws-binary-rollback-disk";
 const BYTES: &[u8] = &[0, 1, 2, 3, 0xff];
 const UPDATED_BYTES: &[u8] = &[9, 8, 7, 6, 0xfe];
 const OTHER_LINEAGE_BYTES: &[u8] = &[4, 3, 2, 1, 0xfd];
-
-#[derive(Default)]
-struct CountingRecorder {
-    records: AtomicUsize,
-    retracts: AtomicUsize,
-}
-
-impl SelfWriteRecorder for CountingRecorder {
-    fn record(&self, _workspace_id: &str, _path: &str, _sha256: &str) {
-        self.records.fetch_add(1, Ordering::AcqRel);
-    }
-
-    fn retract(&self, _workspace_id: &str, _path: &str, _sha256: &str) {
-        self.retracts.fetch_add(1, Ordering::AcqRel);
-    }
-}
 
 fn binary_write(path: &str, moment_id: &str) -> WriteBinary {
     binary_write_for("main", path, moment_id, BYTES)

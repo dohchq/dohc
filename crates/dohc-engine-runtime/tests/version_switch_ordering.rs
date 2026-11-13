@@ -3,7 +3,7 @@ use dohc_engine_domain::{CreateNamedVersion, SecretDiskIntent, SecretWrite, Writ
 use dohc_engine_runtime::{
     ActiveVersionSwitch, CancellationToken, NoFaults, RuntimeError, WorkspaceSupervisor,
 };
-use dohc_engine_storage::{FaultAction, FaultInjector, FaultPoint, StorageError};
+use dohc_engine_storage::{FaultAction, FaultInjector, FaultPoint};
 use dohc_engine_testkit::{EngineDbScan, ScratchDir, ScriptedFaults, engine_db_path};
 use rusqlite::Connection;
 use std::path::PathBuf;

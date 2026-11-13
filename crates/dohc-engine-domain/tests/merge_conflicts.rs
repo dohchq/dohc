@@ -8,7 +8,7 @@ use dohc_engine_domain::{
     ConflictChoice, ConflictFileState, ConflictMetadata, ConflictStatus, CreateNamedVersion,
     DeleteTextFile, DomainError, MergeTextFileFromVersion, MergeTextFileResult,
     MergeUnchangedReason, NoFaults, ResolveConflictKind, ResolveTextConflict, SnapshotContent,
-    TextConflict, TextSnapshot, VersionFileChangeStatus, VersionedTextStore, WriteBinaryFile,
+    TextConflict, VersionFileChangeStatus, VersionedTextStore, WriteBinaryFile,
     WriteText, insert_text_conflict_if_absent, live_state_matches_conflict_current,
     write_binary_file_in_tx,
 };

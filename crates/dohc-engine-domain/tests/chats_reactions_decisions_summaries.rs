@@ -5,7 +5,7 @@ use dohc_engine_domain::{
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, StorageError};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 
 const WS: &str = "b2-round3";
 const NO_FAULTS: NoFaults = NoFaults;
