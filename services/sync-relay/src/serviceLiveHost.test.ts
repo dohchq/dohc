@@ -105,7 +105,7 @@ afterEach(async () => {
 });
 
 // `selfHosted` provisions the host ID the self-host supervisor provisions, so the supervisor can run this host.
-async function fixture({ selfHosted = false } = {}) {
+async function fixture({ selfHosted = false, requestDeadlineMs = 1000 } = {}) {
   const root = await mkdtemp(join(tmpdir(), "service-host-test-"));
   const workspace = join(root, "workspace");
   await mkdir(workspace);
@@ -138,7 +138,7 @@ async function fixture({ selfHosted = false } = {}) {
       aggregateBytes: 200_000_000,
       maxUploads: 2,
       connectTimeoutMs: 1000,
-      requestDeadlineMs: 1000,
+      requestDeadlineMs,
     },
   };
   const configPath = join(root, "service.json");
@@ -562,10 +562,14 @@ async function completedServiceOwner(
     idleClock?: IdleClock;
     paced?: Paced;
     nowMs?: () => number;
+    requestDeadlineMs?: number;
   } = {},
 ) {
   const adopted = options.adopted ?? true;
-  const f = await fixture({ selfHosted: options.selfHosted }),
+  const f = await fixture({
+      selfHosted: options.selfHosted,
+      ...(options.requestDeadlineMs ? { requestDeadlineMs: options.requestDeadlineMs } : {}),
+    }),
     raw = new DatabaseSync(join(f.root, "relay", "relay.sqlite"));
   cleanup.push(async () => raw.close());
   const policy = {
@@ -2046,6 +2050,7 @@ async function emptyServiceHost(
     restore?: boolean;
     idleClock?: IdleClock;
     paced?: Paced;
+    requestDeadlineMs?: number;
   } = {},
 ) {
   const o = await completedServiceOwner({ empty: true, ...options });
@@ -2245,6 +2250,35 @@ it("stops the engine for a held read it answers neither at the deadline nor on c
     "Live host stopped an engine that did not answer in time.",
     { method: "sync.heldDocument", deadlineMs: 16_000 },
   ]);
+});
+
+it("gives a held read at least one request deadline after its cancel", async () => {
+  const o = await emptyServiceHost({ frameChanges: true, requestDeadlineMs: 20_000 }),
+    workspaces = [o.workspace];
+  await o.host.update({ workspaces, documents: [o.sibling], ...stay });
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  const send = o.client().sendRequest,
+    through = send.getMockImplementation()! as (...args: unknown[]) => ReturnType<typeof send>;
+  const asked = deferred<number>();
+  send.mockImplementation(async (...args: unknown[]) => {
+    const request = args[0] as { id: number; method: string; deadlineMs: number };
+    if (request.method !== "sync.heldDocument") return through(...args);
+    asked.resolve(request.deadlineMs);
+    const cancel = args[3] as AbortSignal;
+    await new Promise((resolve) => cancel.addEventListener("abort", resolve, { once: true }));
+    throw new EngineRequestError(request.id, {
+      code: "CANCELLED",
+      message: "held document answer cancelled",
+      retry: "no",
+    });
+  });
+  const caller = new AbortController();
+  const read = o.host.heldDocument("workspace", "object", { markdown: false }, caller.signal);
+  const left = expect(read).rejects.toThrow("caller left");
+  await expect(asked.promise).resolves.toBe(20_000 + 20_000);
+  caller.abort(new Error("caller left"));
+  await left;
+  expect(o.host.invalidated.aborted).toBe(false);
 });
 
 it("frees a cancelled held read's slot on the engine's answer, and answers the engine's busy refusal 429 to the owner alone", async () => {
