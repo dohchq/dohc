@@ -47,7 +47,6 @@ import { UPDATE_STATUSES } from "../updates/updateMachine";
 import {
   ListChatChannelsResult,
   ListPersonalChatFeedResult,
-  ChatFileMentionsPageResult,
   ChatChannelRecord,
   ChatFeedItemRecord,
   ChatFileMentionRecord,
@@ -4139,7 +4138,7 @@ describe("partial-freshness marker on aggregate chat reads", () => {
 
   it("refuses a zero remainder, on every surface that reports one", () => {
     for (const [name, base] of Object.entries(RESULTS)) {
-      const schema = { ListChatChannelsResult, ListPersonalChatFeedResult, ChatFileMentionsPageResult }[
+      const schema = { ListChatChannelsResult, ListPersonalChatFeedResult }[
         name as keyof typeof RESULTS
       ];
       expect(

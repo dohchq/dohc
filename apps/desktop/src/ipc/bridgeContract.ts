@@ -1,7 +1,6 @@
-import { ChatLinksInput, ChatLinksPage } from "@dohc/workspace-contracts/chat-links";
 import { RESTORE_FENCED_RECOVERY_LIMIT } from "../workspaces/ownerLiveRecoveryLimits";
-import { ChatFileMentionsInput, ChatFileMentionsPage, ChatFileMentionEntry } from "@dohc/workspace-contracts/chat-file-mentions";
-import { linksOperations } from "./linksOperations";
+import { ChatFileMentionEntry } from "@dohc/workspace-contracts/chat-file-mentions";
+import type { linksOperations } from "./linksOperations";
 import { heldChangeOperations } from "./heldChangeOperations";
 import { WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
 import { SharedDocumentOpenState } from "./sharedDocumentOpenState";
@@ -175,7 +174,7 @@ const CHAT_CHANNEL_SLUG = z.string().min(1).refine(value => nameByteLength(value
 // case-variant id would break asset serving or alias another workspace).
 // Our own ids are UUIDs; a foreign manifest with any other shape is rejected
 // at attach time with a visible error.
-const WORKSPACE_ID = z
+export const WORKSPACE_ID = z
   .string()
   .min(1)
   .max(200)
@@ -2191,14 +2190,8 @@ export const ChatMessageRecord = z.object({
 });
 export type ChatMessageRecord = z.infer<typeof ChatMessageRecord>;
 
-export const ChatLinksPayload = ChatLinksInput.extend({workspaceId:WORKSPACE_ID});
-export const ChatLinksResult = ChatLinksPage;
-
-export const ChatFileMentionsPagePayload = ChatFileMentionsInput.extend({ workspaceId: WORKSPACE_ID });
 export const ChatFileMentionRecord = ChatFileMentionEntry;
 export type ChatFileMentionRecord = z.infer<typeof ChatFileMentionRecord>;
-// The engine adapter validates each page before the reader applies authority filtering.
-export const ChatFileMentionsPageResult = z.custom<z.infer<typeof ChatFileMentionsPage>>();
 
 const CHAT_BOOKMARK_RECORD_BASE = z.object({
   bookmarkId: OPAQUE_ID,
@@ -2589,7 +2582,7 @@ export const ListChatChannelsPayload = z.object({
 export type ListChatChannelsPayload = z.infer<typeof ListChatChannelsPayload>;
 
 export const ListChatChannelsResult = z.object({
-  // Partial-freshness marker; see ChatFileMentionsPageResult.
+  // Partial-freshness marker, as in ChatFileMentionsPage.
   sharedChannelRowsUncovered: z.number().int().positive().optional(),
   channels: z.array(ChatChannelRecord),
   // The "Files" grouping: file-linked Chats listed read-only beside the
@@ -2686,7 +2679,7 @@ export const ListPersonalChatFeedPayload = z.object({
 });
 export type ListPersonalChatFeedPayload = z.infer<typeof ListPersonalChatFeedPayload>;
 export const ListPersonalChatFeedResult = z.object({
-  // Partial-freshness marker; see ChatFileMentionsPageResult.
+  // Partial-freshness marker, as in ChatFileMentionsPage.
   sharedChannelRowsUncovered: z.number().int().positive().optional(),
   items: z.array(ChatFeedItemRecord).max(50),
   nextCursor: z.string().max(1000).optional(),

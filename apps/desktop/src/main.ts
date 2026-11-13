@@ -5422,10 +5422,14 @@ const { startDesktopCliServer } = createDesktopCliServer({
       return { result, waiting };
     },
   }),
-  links: workspaceLinks,
+  reads: {
+    chatLinks: (workspace, input) => workspaceChatLinks(workspace.workspaceId, input),
+    chatFileMentions: (workspace, input) => workspaceChatFileMentions(workspace.workspaceId, input),
+    linksEdges: (workspace, input) => workspaceLinks.edges(workspace, input),
+    linksIn: (workspace, input) => workspaceLinks.incoming(workspace, input),
+    linksResolve: (workspace, input) => workspaceLinks.resolve(workspace, input),
+  },
   heldChanges: workspaceHeldChanges,
-  chatLinks: (workspace, input) => workspaceChatLinks(workspace.workspaceId, input),
-  chatFileMentions: (workspace, input) => workspaceChatFileMentions(workspace.workspaceId, input),
   findWorkspace,
   agentYouRun: async (agentId) => agentYouRun((await readCachedUserSettingsFile(stateDir())).settings, agentId),
   agentWaiting: (agentId) => agentWaits.begin(agentId),
