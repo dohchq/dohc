@@ -263,9 +263,11 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
 // When nothing else applies and no caller said what failed.
 export const UNKNOWN_ERROR_WORDS = "dohc could not finish that.";
 
-// The sentence a notice owner's failure starts with, for every failure code.
-// A code with no words here does not compile. The failure's cause adds its own
-// words after this sentence (`withErrorWords`).
+// The sentence a notice owner files for each failure code. A code with no
+// words here does not compile. The shell then words the failure's cause as it
+// words any error: usually after this sentence, but in place of it for an
+// error with its own title, a shared-file refusal, or words that already start
+// with the sentence (`reportShellError`, `withErrorWords`).
 export type FailureWords = { [Code in FailureCode]: (facts: FailureFacts[Code]) => string };
 const VERSIONS_READ_WORDS: Record<FailureFacts["versions-reads"]["read"], string> = {
   "last-changes": "dohc could not read when each version last changed.",

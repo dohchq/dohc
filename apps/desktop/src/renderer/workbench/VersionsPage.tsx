@@ -1,8 +1,8 @@
 import { Check, Plus, RotateCw } from "lucide-react";
 import { type ReactNode, useEffect, useId, useMemo, useRef, useState } from "react";
 import type { ListVersionLastChangesResult, WorkspaceVersionRecord } from "../../ipc/bridgeContract";
-import type { Recovery, VersionsRead } from "../../notices/failure";
-import type { NoticeOwner } from "../../notices/noticeOwner";
+import type { VersionsRead } from "../../notices/failure";
+import type { CauseNotice, NoticeOwner } from "../../notices/noticeOwner";
 import { bridge } from "../bridge";
 import { relativeTime } from "../relativeTime";
 import { EmptyState, RetryRow, SecondaryButton } from "../ui/controls";
@@ -16,8 +16,6 @@ type LastChange = ListVersionLastChangesResult["versions"][number]["lastChange"]
 type Count = number | "failed";
 interface ConflictCount { count: number; more: boolean }
 
-type Read = VersionsRead;
-
 // The page's one notice, for every read that fails, as when the engine goes
 // away. It files once the reads that started together have settled, so one
 // cause shows one toast in its final words. A second failure changes the row
@@ -26,25 +24,20 @@ type Read = VersionsRead;
 // goes. Its Try again reads every failed read again. Once the person dismisses
 // the row, it stays gone until a read fails again, which files a new row and
 // toast.
-function useReadsNotice(notices: NoticeOwner, workspaceId: string, retry: (reads: readonly Read[]) => void) {
-  // Each page has its own row, since a split can show two.
-  const target = useId();
-  const recovery = useMemo<Recovery>(() => ({ retry: "read-versions-again", input: { page: target } }), [target]);
+function useReadsNotice(notices: NoticeOwner, retry: (reads: readonly VersionsRead[]) => void) {
   // Each failed read and its error, in the order they failed.
-  const [failures, setFailures] = useState<ReadonlyMap<Read, unknown>>(new Map());
+  const [failures, setFailures] = useState<ReadonlyMap<VersionsRead, unknown>>(new Map());
   // The reads that start together and have not settled.
-  const [reading, setReading] = useState<ReadonlySet<Read>>(new Set());
+  const [reading, setReading] = useState<ReadonlySet<VersionsRead>>(new Set());
   const current = useRef(failures);
   current.current = failures;
-  // Counts the failures, so a row the person dismissed comes back only for a
-  // new one, even for a read that already failed.
-  const [occurrence, setOccurrence] = useState(0);
   const retryReads = useRef(retry);
   retryReads.current = retry;
-  // Its Try again reads for this page, so the row goes with the page, as when
-  // its tab closes or another tab shows in its place.
+  // Each page has its own notice, since a split can show two. It closes with
+  // the page, as when its tab closes or another tab shows in its place.
+  const notice = useRef<CauseNotice<"versions-reads"> | null>(null);
   useEffect(() => {
-    const unregister = notices.handle(recovery, () => {
+    const opened = notices.open("versions-reads", () => {
       const failed = [...current.current.keys()];
       // The effect of a render before this press can still run. It finds its
       // failures gone, so it files nothing.
@@ -52,46 +45,41 @@ function useReadsNotice(notices: NoticeOwner, workspaceId: string, retry: (reads
       setFailures(current.current);
       retryReads.current(failed);
     });
-    return () => {
-      unregister();
-      notices.resolve(workspaceId, { code: "versions-reads", target });
-    };
-  }, [notices, workspaceId, recovery, target]);
+    notice.current = opened;
+    return () => opened.close();
+  }, [notices]);
   useEffect(() => {
+    const opened = notice.current;
     // A Try again pressed since this render took these failures back.
-    if (failures !== current.current) return;
+    if (opened === null || failures !== current.current) return;
     if (failures.size === 0) {
-      notices.resolve(workspaceId, { code: "versions-reads", target });
+      opened.resolve();
       return;
     }
-    const filed = notices.filedFailure("versions-reads", target);
-    if (filed === undefined && reading.size > 0) return;
+    const shown = opened.shown();
+    if (shown === undefined && reading.size > 0) return;
     const [first, ...others] = [...failures.keys()];
-    const read = others.length > 0 || filed?.facts.read === "several" ? "several" : first!;
     // The first failure's error gives the words and Copy details.
-    notices.reportFailure(workspaceId, {
-      failure: { code: "versions-reads", facts: { read }, cause: failures.get(first!) },
-      target,
-      recovery,
-      occurrence,
-    });
-  }, [failures, reading, occurrence]);
-  const settled = (read: Read) => setReading((now) => {
+    opened.show({ read: others.length > 0 || shown?.read === "several" ? "several" : first! }, failures.get(first!));
+  }, [failures, reading]);
+  const settled = (read: VersionsRead) => setReading((now) => {
     if (!now.has(read)) return now;
     const next = new Set(now);
     next.delete(read);
     return next;
   });
   return {
-    started(read: Read) {
+    started(read: VersionsRead) {
       setReading((now) => (now.has(read) ? now : new Set(now).add(read)));
     },
-    failed(read: Read, error: unknown) {
-      setOccurrence((count) => count + 1);
+    failed(read: VersionsRead, error: unknown) {
+      notice.current?.failed();
       settled(read);
-      setFailures((now) => (now.has(read) ? now : new Map(now).set(read, error)));
+      // A new map even for a read that already failed, so the notice is shown
+      // again. A read keeps the error it first failed with.
+      setFailures((now) => new Map(now).set(read, now.has(read) ? now.get(read) : error));
     },
-    worked(read: Read) {
+    worked(read: VersionsRead) {
       settled(read);
       setFailures((now) => {
         if (!now.has(read)) return now;
@@ -137,7 +125,7 @@ export function VersionsPage(props: {
 
   const versionIds = snapshot?.versions.map((version) => version.id).join("\n") ?? null;
 
-  const notice = useReadsNotice(props.notices, workspaceId, (reads) => {
+  const notice = useReadsNotice(props.notices, (reads) => {
     if (reads.includes("last-changes")) setLastChangesRetry((attempt) => attempt + 1);
     // Every failed count, even one whose failure has not reached the notice
     // yet. That failure's effect, from before the press, then files nothing.

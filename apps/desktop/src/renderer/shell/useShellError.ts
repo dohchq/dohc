@@ -173,6 +173,24 @@ function secretKeyWords(reason: string): string {
   }
 }
 
+// One notice owner for each workspace, filing into `sink`. Once the caller
+// moves to another workspace, the owner of the one it left files nothing.
+export function useNoticeOwner(workspaceId: string, sink: NoticeSink): NoticeOwner {
+  const latest = useRef({ workspaceId, sink });
+  latest.current = { workspaceId, sink };
+  return useMemo(() => {
+    const here = () => latest.current.workspaceId === workspaceId;
+    return new NoticeOwner({
+      report: (...notice) => {
+        if (here()) latest.current.sink.report(...notice);
+      },
+      clear: (identity) => {
+        if (here()) latest.current.sink.clear(identity);
+      },
+    });
+  }, [workspaceId]);
+}
+
 export function useShellError(workspaceId: string, retrySharedView?: () => void) {
   const currentWorkspace = useRef(workspaceId);
   currentWorkspace.current = workspaceId;
@@ -420,12 +438,10 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
     [push, privacySettingsAction, keepCollectionsHere, reportSharedViewRefusal],
   );
   // The error hook the shell hands its parts (ReportButtonError): no kind, and
-  // an identity when the part names what failed. A part that keeps one row
-  // for several failures, such as the Versions page, passes `quiet` to change
-  // that row where it stands, and `onDismiss` to learn that the row is gone.
+  // an identity when the part names what failed.
   const reportButtonError = useCallback(
-    (fallback: string, error: unknown, retry: (() => void) | null, identity?: string, quiet?: boolean, onDismiss?: () => void) =>
-      reportShellError(fallback, error, retry, undefined, identity, quiet, onDismiss),
+    (fallback: string, error: unknown, retry: (() => void) | null, identity?: string) =>
+      reportShellError(fallback, error, retry, undefined, identity),
     [reportShellError],
   );
   // A failure already worded for the person. Report facts, such as a raw
@@ -1094,12 +1110,10 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
   }, []);
 
   // The workspace's notice owner, which files its rows here.
-  const noticeSink = useRef<NoticeSink>({ report: reportButtonError, clear: clearIdentity });
-  noticeSink.current = { report: reportButtonError, clear: clearIdentity };
-  const noticeOwner = useMemo(() => new NoticeOwner(workspaceId, {
-    report: (...notice) => noticeSink.current.report(...notice),
-    clear: (identity) => noticeSink.current.clear(identity),
-  }), [workspaceId]);
+  const noticeOwner = useNoticeOwner(workspaceId, {
+    report: (words, cause, retry, identity, quiet, onDismiss) => reportShellError(words, cause, retry, undefined, identity, quiet, onDismiss),
+    clear: clearIdentity,
+  });
 
   return {
     shellErrors,

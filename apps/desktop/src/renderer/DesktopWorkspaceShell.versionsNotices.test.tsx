@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import "./DesktopWorkspaceShell.testSupport";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { Workspace } from "./DesktopWorkspaceShell";
@@ -38,12 +38,17 @@ function versionsShell() {
   const plan: Record<Read, Step[]> = { lastChanges: [], counts: [], conflicts: [] };
   const held: Record<Read, Array<ReturnType<typeof deferred<never>>>> = { lastChanges: [], counts: [], conflicts: [] };
   const calls: Record<Read, number> = { lastChanges: 0, counts: 0, conflicts: 0 };
+  // Each answer that settles at once. A held answer is not here.
+  const answered: Array<Promise<unknown>> = [];
   let moment = 0;
   const answer = <T,>(read: Read, ok: T): Promise<T> => {
     calls[read] += 1;
     const step = plan[read].shift() ?? "ok";
-    if (step === "ok") return Promise.resolve(ok);
-    if (step === "fail") return Promise.reject(new Error(BROKE[read]));
+    if (step !== "hold") {
+      const given = step === "ok" ? Promise.resolve(ok) : Promise.reject(new Error(BROKE[read]));
+      answered.push(given);
+      return given;
+    }
     const wait = deferred<never>();
     held[read].push(wait);
     return wait.promise;
@@ -79,6 +84,7 @@ function versionsShell() {
     plan,
     held,
     calls,
+    answered,
     // As DesktopRoot switches: the shell remounts for the other workspace.
     switchTo: (workspace: Workspace) => rendered.rerender(view(workspace)),
   };
@@ -117,12 +123,13 @@ async function opened() {
   await screen.findByTestId("versions-page");
 }
 
-// Waits for the page to ask for these reads, then for what it was told.
+// Waits for the page to ask for these reads, then for every answer given to
+// reach it and for what it did with them.
 async function settled(shell: ReturnType<typeof versionsShell>, counts: Partial<Record<Read, number>>) {
   await waitFor(() => {
     for (const [read, count] of Object.entries(counts)) expect(shell.calls[read as Read]).toBe(count);
   });
-  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+  await act(async () => { await Promise.allSettled(shell.answered); });
 }
 
 // History grows, so the page reads when each version last changed and its
@@ -316,6 +323,58 @@ describe("the Versions page's read notices, as a person sees them", () => {
               "Dismiss workspace error",
             ],
             "text": "dohc could not read when each version last changed. last changes brokeTry againDetails",
+          },
+        ],
+      }
+    `);
+  });
+
+  it("a read fails while another's row shows, and the person dismisses the row before the page shows it", async () => {
+    const shell = versionsShell();
+    shell.plan.conflicts.push("fail");
+    shell.plan.lastChanges.push("ok", "hold", "fail");
+    const user = userEvent.setup();
+    await opened();
+    await settled(shell, { lastChanges: 1, conflicts: 1, counts: 1 });
+    await historyGrows(shell);
+    const dismiss = within(await versionsRow(user)).getByRole("button", { name: "Dismiss notice" });
+    await act(async () => {
+      shell.held.lastChanges[0]!.reject(new Error(BROKE.lastChanges));
+      // The page has heard the failure once this resolves, and React has not
+      // shown it yet.
+      await shell.held.lastChanges[0]!.promise.catch(() => undefined);
+      fireEvent.click(dismiss);
+    });
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect(await look(user)).toMatchInlineSnapshot(`
+      {
+        "rows": [],
+        "toasts": [],
+      }
+    `);
+    // A failure after the dismissal files a new row.
+    await historyGrows(shell);
+    expect(await look(user)).toMatchInlineSnapshot(`
+      {
+        "rows": [
+          {
+            "buttons": [
+              "Dismiss notice",
+              "Try again",
+              "Details",
+            ],
+            "text": "Unreaddohc could not finish loading Versions. conflicts brokenowTry againDetails",
+            "unread": true,
+          },
+        ],
+        "toasts": [
+          {
+            "buttons": [
+              "Try again",
+              "Details",
+              "Dismiss workspace error",
+            ],
+            "text": "dohc could not finish loading Versions. conflicts brokeTry againDetails",
           },
         ],
       }

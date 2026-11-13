@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useLayoutEffect, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { withErrorWords } from "../../ipc/errorWords";
-import { useShellError } from "../shell/useShellError";
-import { NoticeOwner, type NoticeSink } from "../../notices/noticeOwner";
+import { useNoticeOwner, useShellError } from "../shell/useShellError";
+import type { NoticeOwner, NoticeSink } from "../../notices/noticeOwner";
 import { VersionsPage, orderVersions } from "./VersionsPage";
 import { useWorkspaceVersions } from "./WorkspaceVersions";
 
@@ -74,6 +74,8 @@ function Page(props: {
   onReviewConflicts?: () => void;
   onError?: OnError;
   onSettled?: (identity: string) => void;
+  // The shell's own owner, in place of one that files to `onError` and `onSettled`.
+  notices?: NoticeOwner;
   // The versions list's own failure, which the shell shows as a toast.
   onVersionsError?: (message: string, cause: unknown) => void;
 }) {
@@ -91,12 +93,7 @@ function Page(props: {
     onConflictError: () => {},
   });
   // One owner for each workspace, as the shell keeps one.
-  const sink = useRef<NoticeSink>({ report: () => {}, clear: () => {} });
-  sink.current = { report: props.onError ?? (() => {}), clear: props.onSettled ?? (() => {}) };
-  const notices = useMemo(() => new NoticeOwner(workspaceId, {
-    report: (...notice) => sink.current.report(...notice),
-    clear: (identity) => sink.current.clear(identity),
-  }), [workspaceId]);
+  const own = useNoticeOwner(workspaceId, { report: props.onError ?? (() => {}), clear: props.onSettled ?? (() => {}) });
   return (
     <>
       <VersionsPage
@@ -106,7 +103,7 @@ function Page(props: {
         versionKey={props.versionKey ?? 0}
         onOpenCompare={props.onOpenCompare ?? (() => {})}
         onReviewConflicts={props.onReviewConflicts ?? (() => {})}
-        notices={notices}
+        notices={props.notices ?? own}
       />
       {versions.dialogs}
     </>
@@ -136,7 +133,7 @@ let shell: ReturnType<typeof useShellError> | null = null;
 function ShellPage(props: { historyKey?: string; versionKey?: number }) {
   const notices = useShellError("ws-1");
   shell = notices;
-  return <Page {...props} onError={notices.reportButtonError} onSettled={notices.clearIdentity} />;
+  return <Page {...props} notices={notices.noticeOwner} />;
 }
 // Each Notices row's words, and whether its toast shows.
 const shownRows = () => shell!.shellErrors.map((error) => ({ message: error.message, toast: !error.seen }));
