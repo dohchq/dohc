@@ -39,8 +39,8 @@ import { markdownToYDoc, yDocToMarkdown } from "../../../packages/ydoc-projectio
 import { createLiveMarkdownHistoryValidator, createLiveMarkdownJournalValidator, createLiveMarkdownRegistrationValidator } from "../../../packages/ydoc-projection/src/liveDocumentValidation.js";
 import { hostedWindowCovers, releasedLineageBindingDigest, type HostedWindow, type ReleasedLineageBinding } from "@dohc/workspace-engine-client/relay-wire";
 import bindingVectors from "../../../packages/workspace-engine-client/src/relay/releasedLineageBindingVectors.json" with { type: "json" };
-import { validateOrdinaryActivation } from "./storage/ordinaryActivationValidation.js";
-import { readOrdinaryActivationHistory, verifyOrdinaryActivationCut } from "./storage/ordinaryActivationSource.js";
+import { ServiceActivationHistoryOverBudget, validateOrdinaryActivation } from "./storage/ordinaryActivationValidation.js";
+import { readOrdinaryActivationHistory, ServiceActivationTooLarge, verifyOrdinaryActivationCut } from "./storage/ordinaryActivationSource.js";
 import { nativeSettlementId, prepareHostedSettlements, settlementRecordDigest } from "./storage/hostedSettlement.js";
 import { stableJsonStringify } from "./canonicalJson.js";
 import { encodeNativeRestoreProposal } from "./liveRestoreProposal.js";
@@ -5338,6 +5338,49 @@ it("releases a departing document that already parked after a restart, capturing
 // become ready, so it gets one capture and then none. Its workspace keeps
 // pushing and pulling, and a sibling keeps its passes. Unblocking allows
 // exactly one more capture, which makes it ready once the hold clears.
+// Proves: a document whose fresh capture blocked keeps that block when the
+// engine unloads it while idle and when its target is forgotten and added
+// again. A refused one is not captured again until it is unblocked, which
+// allows exactly one more capture. A history past the read budget keeps
+// reporting it until it is unblocked.
+it.each([
+  ["refused", () => new ServiceActivationTooLarge()],
+  ["history-over-budget", () => new ServiceActivationHistoryOverBudget("Ordinary activation history exceeds its configured entry budget.")],
+] as const)("keeps a %s block when its target is forgotten and added again", async (block, refusal) => {
+  let driver: ServiceActivationDriver | undefined;
+  const addTarget = ServiceActivationDriver.prototype.addTarget;
+  vi.spyOn(ServiceActivationDriver.prototype, "addTarget").mockImplementation(function (this: ServiceActivationDriver, ...args) {driver = this; return addTarget.apply(this, args);});
+  const o = await emptyServiceHost(), workspaces = [o.workspace];
+  // The relay holds no activation for the document, so each pass captures it fresh, and the capture's check refuses it.
+  vi.spyOn(ServiceActivationStore.prototype, "read").mockReturnValue(null);
+  vi.spyOn(ServiceActivationStore.prototype, "prepare").mockRejectedValue(refusal());
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const captures = () => o.client().captureOwnerActivation.mock.calls.length;
+  const visits = () => vi.mocked(ServiceActivationDriver.prototype.activate).mock.calls.filter(call => call[0].path === o.sibling.path).length;
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.blocked(o.sibling)).toBe(block));
+  driver!.sleep(o.sibling, o.document);
+  expect(o.host.blocked(o.sibling)).toBe(block);
+  driver!.removeTarget(o.sibling);
+  driver!.addTarget(o.sibling, o.sibling.objectId);
+  expect(o.host.blocked(o.sibling)).toBe(block);
+  const captured = captures(), visited = visits();
+  await vi.waitFor(() => expect(visits()).toBeGreaterThan(visited + 2));
+  expect(o.host.blocked(o.sibling)).toBe(block);
+  if (block === "history-over-budget") {
+    expect(o.host.unblock(o.sibling)).toBe(true);
+    await vi.waitFor(() => expect(captures()).toBeGreaterThan(captured));
+    return;
+  }
+  expect(captures()).toBe(captured);
+  expect(o.host.unblock(o.sibling)).toBe(true);
+  await vi.waitFor(() => expect(captures()).toBe(captured + 1));
+  const retried = visits();
+  await vi.waitFor(() => expect(visits()).toBeGreaterThan(retried + 2));
+  expect(captures()).toBe(captured + 1);
+  expect(o.host.blocked(o.sibling)).toBe("refused");
+});
+
 it("captures a document held for an unadmitted live edit once, then not again until it is unblocked", async () => {
   const o = await emptyServiceHost(), workspaces = [o.workspace];
   await o.host.update({workspaces, documents: [o.sibling], ...stay});
