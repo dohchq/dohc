@@ -28,7 +28,10 @@ export type T3CodeProblem =
   | "unexpected";
 
 export class T3CodeError extends Error {
-  constructor(readonly problem: T3CodeProblem, message: string) {
+  constructor(
+    readonly problem: T3CodeProblem,
+    message: string,
+  ) {
     super(message);
     this.name = "T3CodeError";
   }
@@ -47,9 +50,17 @@ const RuntimeFile = z.object({ origin: z.string(), serverVersion: z.string().opt
  */
 export function t3CodeOriginOnThisComputer(origin: string): string | null {
   let url: URL;
-  try { url = new URL(origin); } catch { return null; }
+  try {
+    url = new URL(origin);
+  } catch {
+    return null;
+  }
   const onThisComputer = url.hostname === "127.0.0.1" || url.hostname === "[::1]";
-  return url.protocol === "http:" && onThisComputer && url.username === "" && url.password === "" && url.origin === origin.replace(/\/$/u, "")
+  return url.protocol === "http:" &&
+    onThisComputer &&
+    url.username === "" &&
+    url.password === "" &&
+    url.origin === origin.replace(/\/$/u, "")
     ? url.origin
     : null;
 }
@@ -61,11 +72,20 @@ export function t3CodeOriginOnThisComputer(origin: string): string | null {
  */
 export async function readT3CodeAddress(home: string): Promise<T3CodeAddress | null> {
   let text: string;
-  try { text = await readFile(join(home, "userdata", "server-runtime.json"), "utf8"); } catch { return null; }
+  try {
+    text = await readFile(join(home, "userdata", "server-runtime.json"), "utf8");
+  } catch {
+    return null;
+  }
   let file: z.infer<typeof RuntimeFile>;
-  try { file = RuntimeFile.parse(JSON.parse(text)); } catch { return null; }
+  try {
+    file = RuntimeFile.parse(JSON.parse(text));
+  } catch {
+    return null;
+  }
   const origin = t3CodeOriginOnThisComputer(file.origin);
-  if (origin === null) throw new T3CodeError("not-this-computer", "T3 Code's server is not on this computer.");
+  if (origin === null)
+    throw new T3CodeError("not-this-computer", "T3 Code's server is not on this computer.");
   return { origin, version: file.serverVersion ?? null };
 }
 
@@ -77,13 +97,18 @@ async function answerOf(fetcher: Fetch, url: string, init?: RequestInit): Promis
   try {
     return await fetcher(url, { ...init, redirect: "error" });
   } catch {
-    if (init?.signal?.aborted && init.signal.reason instanceof T3CodeError) throw init.signal.reason;
+    if (init?.signal?.aborted && init.signal.reason instanceof T3CodeError)
+      throw init.signal.reason;
     throw new T3CodeError("not-running", "T3 Code is not answering on this computer.");
   }
 }
 
 async function jsonOf(response: Response): Promise<unknown> {
-  try { return await response.json() as unknown; } catch { throw new T3CodeError("unexpected", "T3 Code sent an answer dohc could not read."); }
+  try {
+    return (await response.json()) as unknown;
+  } catch {
+    throw new T3CodeError("unexpected", "T3 Code sent an answer dohc could not read.");
+  }
 }
 
 /** Drops an answer dohc will not read, so its connection is freed, and fails with `error`. */
@@ -94,7 +119,8 @@ async function refuse(response: Response, error: T3CodeError): Promise<never> {
 
 function shaped<T>(schema: z.ZodType<T>, value: unknown): T {
   const parsed = schema.safeParse(value);
-  if (!parsed.success) throw new T3CodeError("unexpected", "T3 Code sent an answer dohc could not read.");
+  if (!parsed.success)
+    throw new T3CodeError("unexpected", "T3 Code sent an answer dohc could not read.");
   return parsed.data;
 }
 
@@ -108,7 +134,11 @@ const SignInMetadata = z.object({
 });
 const RegisteredClient = z.object({ client_id: z.string().min(1) });
 // A server may spell the token type in any case.
-const IssuedToken = z.object({ access_token: z.string().min(1), token_type: z.string().refine((type) => type.toLowerCase() === "bearer"), expires_in: z.number().positive() });
+const IssuedToken = z.object({
+  access_token: z.string().min(1),
+  token_type: z.string().refine((type) => type.toLowerCase() === "bearer"),
+  expires_in: z.number().positive(),
+});
 
 export interface T3CodeSignIn {
   /** The address T3 Code issued it at. dohc sends the token nowhere else. */
@@ -120,8 +150,10 @@ export interface T3CodeSignIn {
 /** How long the person has to answer in T3 Code before the sign-in gives up. */
 export const T3_CODE_ALLOW_TIMEOUT_MS = 5 * 60_000;
 
-const ALLOWED_PAGE = "<!doctype html><meta charset=\"utf-8\"><title>dohc</title><p>dohc can now reach T3 Code. You can close this tab.</p>";
-const DECLINED_PAGE = "<!doctype html><meta charset=\"utf-8\"><title>dohc</title><p>T3 Code did not allow dohc. You can close this tab.</p>";
+const ALLOWED_PAGE =
+  '<!doctype html><meta charset="utf-8"><title>dohc</title><p>dohc can now reach T3 Code. You can close this tab.</p>';
+const DECLINED_PAGE =
+  '<!doctype html><meta charset="utf-8"><title>dohc</title><p>T3 Code did not allow dohc. You can close this tab.</p>';
 
 interface Redirect {
   uri: string;
@@ -134,12 +166,25 @@ interface Redirect {
 // state is taken. The page reaches the browser before the sign-in goes on.
 async function listenForRedirect(input: { state: string; issuer: string }): Promise<Redirect> {
   let settle!: { resolve(code: string): void; reject(error: Error): void };
-  const code = new Promise<string>((resolve, reject) => { settle = { resolve, reject }; });
+  const code = new Promise<string>((resolve, reject) => {
+    settle = { resolve, reject };
+  });
   // The caller awaits the code only after it opens the browser.
   code.catch(() => undefined);
   const server = createServer((request, response) => {
-    const url = new URL(request.url ?? "/", "http://127.0.0.1");
-    if (request.method !== "GET" || url.pathname !== "/t3-code" || url.searchParams.get("state") !== input.state) {
+    // Any program on this computer can send the listener a request, so a path that is not a URL is refused like any other.
+    let url: URL | null;
+    try {
+      url = new URL(request.url ?? "/", "http://127.0.0.1");
+    } catch {
+      url = null;
+    }
+    if (
+      url === null ||
+      request.method !== "GET" ||
+      url.pathname !== "/t3-code" ||
+      url.searchParams.get("state") !== input.state
+    ) {
       response.writeHead(404, { connection: "close" }).end();
       return;
     }
@@ -152,7 +197,11 @@ async function listenForRedirect(input: { state: string; issuer: string }): Prom
     };
     // The browser's connection can drop before the page is written. The answer still counts.
     response.once("close", answered);
-    response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", connection: "close" });
+    response.writeHead(200, {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+      connection: "close",
+    });
     response.end(allowed ? ALLOWED_PAGE : DECLINED_PAGE, answered);
   });
   // A connection that never sends a request cannot hold the listener open.
@@ -188,23 +237,51 @@ export async function signInToT3Code(input: {
   timeoutMs?: number;
 }): Promise<T3CodeSignIn> {
   const origin = t3CodeOriginOnThisComputer(input.origin);
-  if (origin === null) throw new T3CodeError("not-this-computer", "T3 Code's server is not on this computer.");
+  if (origin === null)
+    throw new T3CodeError("not-this-computer", "T3 Code's server is not on this computer.");
   const fetcher = input.fetch ?? fetch;
   const stop = new AbortController();
-  const stopped = new Promise<never>((_, reject) => stop.signal.addEventListener("abort", () => reject(stop.signal.reason as Error), { once: true }));
+  const stopped = new Promise<never>((_, reject) =>
+    stop.signal.addEventListener("abort", () => reject(stop.signal.reason as Error), {
+      once: true,
+    }),
+  );
   stopped.catch(() => undefined);
-  const timer = setTimeout(() => stop.abort(new T3CodeError("not-allowed", "Nobody allowed dohc in T3 Code in time.")), input.timeoutMs ?? T3_CODE_ALLOW_TIMEOUT_MS);
-  const cancel = () => stop.abort(new T3CodeError("not-allowed", "The sign-in to T3 Code was cancelled."));
+  const timer = setTimeout(
+    () => stop.abort(new T3CodeError("not-allowed", "Nobody allowed dohc in T3 Code in time.")),
+    input.timeoutMs ?? T3_CODE_ALLOW_TIMEOUT_MS,
+  );
+  const cancel = () =>
+    stop.abort(new T3CodeError("not-allowed", "The sign-in to T3 Code was cancelled."));
   input.signal?.addEventListener("abort", cancel, { once: true });
   if (input.signal?.aborted) cancel();
   let redirect: Redirect | null = null;
   try {
-    const found = await answerOf(fetcher, `${origin}/.well-known/oauth-authorization-server`, { signal: stop.signal });
-    if (!found.ok) await refuse(found, new T3CodeError("refused", "This T3 Code does not offer a sign-in to other programs."));
+    const found = await answerOf(fetcher, `${origin}/.well-known/oauth-authorization-server`, {
+      signal: stop.signal,
+    });
+    if (!found.ok)
+      await refuse(
+        found,
+        new T3CodeError("refused", "This T3 Code does not offer a sign-in to other programs."),
+      );
     const metadata = shaped(SignInMetadata, await jsonOf(found));
     // Every address the sign-in uses must be T3 Code's own, so nothing dohc sends leaves this computer.
-    const endpoints = [metadata.issuer, metadata.authorization_endpoint, metadata.token_endpoint, metadata.registration_endpoint];
-    if (endpoints.some((endpoint) => { try { return new URL(endpoint).origin !== origin; } catch { return true; } })) {
+    const endpoints = [
+      metadata.issuer,
+      metadata.authorization_endpoint,
+      metadata.token_endpoint,
+      metadata.registration_endpoint,
+    ];
+    if (
+      endpoints.some((endpoint) => {
+        try {
+          return new URL(endpoint).origin !== origin;
+        } catch {
+          return true;
+        }
+      })
+    ) {
       throw new T3CodeError("not-this-computer", "T3 Code's sign-in is not on this computer.");
     }
     const verifier = base64Url(randomBytes(32));
@@ -214,10 +291,18 @@ export async function signInToT3Code(input: {
     const registered = await answerOf(fetcher, metadata.registration_endpoint, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ client_name: "dohc", redirect_uris: [redirect.uri], token_endpoint_auth_method: "none" }),
+      body: JSON.stringify({
+        client_name: "dohc",
+        redirect_uris: [redirect.uri],
+        token_endpoint_auth_method: "none",
+      }),
       signal: stop.signal,
     });
-    if (!registered.ok) await refuse(registered, new T3CodeError("refused", "T3 Code did not take dohc's sign-in request."));
+    if (!registered.ok)
+      await refuse(
+        registered,
+        new T3CodeError("refused", "T3 Code did not take dohc's sign-in request."),
+      );
     const client = shaped(RegisteredClient, await jsonOf(registered));
     const authorize = new URL(metadata.authorization_endpoint);
     for (const [name, value] of Object.entries({
@@ -228,20 +313,33 @@ export async function signInToT3Code(input: {
       code_challenge_method: "S256",
       state,
       resource,
-    })) authorize.searchParams.set(name, value);
+    }))
+      authorize.searchParams.set(name, value);
     await Promise.race([Promise.resolve(input.open(authorize.href)), stopped]);
     const code = await Promise.race([redirect.code, stopped]);
     const issued = await answerOf(fetcher, metadata.token_endpoint, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ grant_type: "authorization_code", code, redirect_uri: redirect.uri, client_id: client.client_id, code_verifier: verifier, resource }).toString(),
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        code,
+        redirect_uri: redirect.uri,
+        client_id: client.client_id,
+        code_verifier: verifier,
+        resource,
+      }).toString(),
       signal: stop.signal,
     });
-    if (!issued.ok) await refuse(issued, new T3CodeError("not-allowed", "T3 Code did not issue dohc a sign-in."));
+    if (!issued.ok)
+      await refuse(issued, new T3CodeError("not-allowed", "T3 Code did not issue dohc a sign-in."));
     const token = shaped(IssuedToken, await jsonOf(issued));
     // A sign-in the person cancelled is not kept, even when T3 Code issued it in time.
     if (stop.signal.aborted) throw stop.signal.reason as Error;
-    return { origin, token: token.access_token, expiresAtMs: (input.nowMs ?? Date.now)() + token.expires_in * 1000 };
+    return {
+      origin,
+      token: token.access_token,
+      expiresAtMs: (input.nowMs ?? Date.now)() + token.expires_in * 1000,
+    };
   } catch (error) {
     // Whatever failed after the person cancelled or time ran out, that is the reason.
     if (stop.signal.aborted) throw stop.signal.reason as Error;
@@ -278,8 +376,15 @@ async function payloadsOf(response: Response): Promise<unknown[]> {
   const text = await response.text();
   try {
     if ((response.headers.get("content-type") ?? "").includes("text/event-stream")) {
-      return text.split(/\r?\n\r?\n/u)
-        .map((event) => event.split(/\r?\n/u).filter((line) => line.startsWith("data:")).map((line) => line.slice(5).replace(/^ /u, "")).join("\n"))
+      return text
+        .split(/\r?\n\r?\n/u)
+        .map((event) =>
+          event
+            .split(/\r?\n/u)
+            .filter((line) => line.startsWith("data:"))
+            .map((line) => line.slice(5).replace(/^ /u, ""))
+            .join("\n"),
+        )
         .filter((data) => data !== "")
         .map((data) => JSON.parse(data) as unknown);
     }
@@ -296,10 +401,19 @@ async function payloadsOf(response: Response): Promise<unknown[]> {
  * address it was issued at, which must be on this computer. A sign-in issued
  * at another address is refused, so the person signs in again.
  */
-export async function openT3CodeSession(input: { origin: string; signIn: T3CodeSignIn; fetch?: Fetch }): Promise<T3CodeSession> {
+export async function openT3CodeSession(input: {
+  origin: string;
+  signIn: T3CodeSignIn;
+  fetch?: Fetch;
+}): Promise<T3CodeSession> {
   const origin = t3CodeOriginOnThisComputer(input.origin);
-  if (origin === null) throw new T3CodeError("not-this-computer", "T3 Code's server is not on this computer.");
-  if (input.signIn.origin !== origin) throw new T3CodeError("not-allowed", "T3 Code moved to another address. Allow dohc in T3 Code again.");
+  if (origin === null)
+    throw new T3CodeError("not-this-computer", "T3 Code's server is not on this computer.");
+  if (input.signIn.origin !== origin)
+    throw new T3CodeError(
+      "not-allowed",
+      "T3 Code moved to another address. Allow dohc in T3 Code again.",
+    );
   const fetcher = input.fetch ?? fetch;
   const endpoint = `${origin}/mcp`;
   let sessionId: string | null = null;
@@ -318,29 +432,41 @@ export async function openT3CodeSession(input: { origin: string; signIn: T3CodeS
       body: JSON.stringify(message),
     });
     sessionId = response.headers.get("mcp-session-id") ?? sessionId;
-    if (response.status === 401 || response.status === 403) await refuse(response, new T3CodeError("not-allowed", "dohc is not allowed in T3 Code."));
-    if (!response.ok) await refuse(response, new T3CodeError("refused", `T3 Code answered ${response.status}.`));
+    if (response.status === 401 || response.status === 403)
+      await refuse(response, new T3CodeError("not-allowed", "dohc is not allowed in T3 Code."));
+    if (!response.ok)
+      await refuse(response, new T3CodeError("refused", `T3 Code answered ${response.status}.`));
     return payloadsOf(response);
   };
   const request = async (method: string, params: Record<string, unknown>): Promise<unknown> => {
     const id = `dohc-${nextId++}`;
-    const answers = (await send({ jsonrpc: "2.0", id, method, params })).map((payload) => Envelope.safeParse(payload));
+    const answers = (await send({ jsonrpc: "2.0", id, method, params })).map((payload) =>
+      Envelope.safeParse(payload),
+    );
     const answer = answers.find((entry) => entry.success && entry.data.id === id);
-    if (!answer?.success) throw new T3CodeError("unexpected", "T3 Code sent an answer dohc could not read.");
-    if (answer.data.error !== undefined) throw new T3CodeError("refused", answer.data.error.message ?? "T3 Code refused the call.");
+    if (!answer?.success)
+      throw new T3CodeError("unexpected", "T3 Code sent an answer dohc could not read.");
+    if (answer.data.error !== undefined)
+      throw new T3CodeError("refused", answer.data.error.message ?? "T3 Code refused the call.");
     return answer.data.result;
   };
   const close = async (): Promise<void> => {
     if (sessionId === null) return;
-    await answerOf(fetcher, endpoint, { method: "DELETE", headers: headers() }).then((response) => response.body?.cancel(), () => undefined);
+    await answerOf(fetcher, endpoint, { method: "DELETE", headers: headers() }).then(
+      (response) => response.body?.cancel(),
+      () => undefined,
+    );
     sessionId = null;
   };
   try {
-    protocolVersion = shaped(Initialized, await request("initialize", {
-      protocolVersion: "2025-06-18",
-      capabilities: {},
-      clientInfo: { name: "dohc", version: "0.0.0" },
-    })).protocolVersion;
+    protocolVersion = shaped(
+      Initialized,
+      await request("initialize", {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "dohc", version: "0.0.0" },
+      }),
+    ).protocolVersion;
     await send({ jsonrpc: "2.0", method: "notifications/initialized" });
   } catch (error) {
     // A session T3 Code opened before the handshake failed is ended, not left behind.
@@ -349,8 +475,15 @@ export async function openT3CodeSession(input: { origin: string; signIn: T3CodeS
   }
   return {
     async call(tool, args) {
-      const result = shaped(ToolResult, await request("tools/call", { name: tool, arguments: args }));
-      if (result.isError) throw new T3CodeError("refused", result.content?.find((block) => block.text)?.text ?? "T3 Code refused the call.");
+      const result = shaped(
+        ToolResult,
+        await request("tools/call", { name: tool, arguments: args }),
+      );
+      if (result.isError)
+        throw new T3CodeError(
+          "refused",
+          result.content?.find((block) => block.text)?.text ?? "T3 Code refused the call.",
+        );
       return result.structuredContent;
     },
     close,
@@ -363,7 +496,14 @@ export interface T3CodeProject {
 }
 
 const ProjectPage = z.object({
-  projects: z.array(z.object({ id: z.string(), title: z.string(), archivedAt: z.string().nullable().optional(), deletedAt: z.string().nullable().optional() })),
+  projects: z.array(
+    z.object({
+      id: z.string(),
+      title: z.string(),
+      archivedAt: z.string().nullable().optional(),
+      deletedAt: z.string().nullable().optional(),
+    }),
+  ),
   nextCursor: z.number().nullable(),
 });
 
@@ -375,9 +515,13 @@ export async function listT3CodeProjects(session: T3CodeSession): Promise<T3Code
   const projects: T3CodeProject[] = [];
   let cursor: number | null = 0;
   for (let page = 0; cursor !== null && page < MAX_PROJECT_PAGES; page += 1) {
-    const got: z.infer<typeof ProjectPage> = shaped(ProjectPage, await session.call("t3_project_list", { cursor, limit: 100 }));
+    const got: z.infer<typeof ProjectPage> = shaped(
+      ProjectPage,
+      await session.call("t3_project_list", { cursor, limit: 100 }),
+    );
     for (const project of got.projects) {
-      if (!project.archivedAt && !project.deletedAt) projects.push({ id: project.id, title: project.title });
+      if (!project.archivedAt && !project.deletedAt)
+        projects.push({ id: project.id, title: project.title });
     }
     cursor = got.nextCursor;
   }
@@ -394,22 +538,42 @@ export interface T3CodeThread {
 }
 
 const ThreadPage = z.object({
-  threads: z.array(z.object({ threadId: z.string(), projectId: z.string(), title: z.string(), status: z.string().nullable(), updatedAt: z.string() })),
+  threads: z.array(
+    z.object({
+      threadId: z.string(),
+      projectId: z.string(),
+      title: z.string(),
+      status: z.string().nullable(),
+      updatedAt: z.string(),
+    }),
+  ),
   nextCursor: z.number().nullable(),
 });
 
 /** One page of a project's threads, newest first. A person can hold thousands, so the caller pages and searches by title. */
-export async function listT3CodeThreads(session: T3CodeSession, input: { projectId: string; titleContains?: string; cursor?: number }): Promise<{ threads: T3CodeThread[]; nextCursor: number | null }> {
-  const page = shaped(ThreadPage, await session.call("t3_thread_list", {
-    projectId: input.projectId,
-    limit: 50,
-    includeSubagents: false,
-    settled: false,
-    ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
-    ...(input.titleContains ? { titleContains: input.titleContains } : {}),
-  }));
+export async function listT3CodeThreads(
+  session: T3CodeSession,
+  input: { projectId: string; titleContains?: string; cursor?: number },
+): Promise<{ threads: T3CodeThread[]; nextCursor: number | null }> {
+  const page = shaped(
+    ThreadPage,
+    await session.call("t3_thread_list", {
+      projectId: input.projectId,
+      limit: 50,
+      includeSubagents: false,
+      settled: false,
+      ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+      ...(input.titleContains ? { titleContains: input.titleContains } : {}),
+    }),
+  );
   return {
-    threads: page.threads.map((thread) => ({ id: thread.threadId, projectId: thread.projectId, title: thread.title, status: thread.status, updatedAt: thread.updatedAt })),
+    threads: page.threads.map((thread) => ({
+      id: thread.threadId,
+      projectId: thread.projectId,
+      title: thread.title,
+      status: thread.status,
+      updatedAt: thread.updatedAt,
+    })),
     nextCursor: page.nextCursor,
   };
 }
@@ -421,13 +585,19 @@ const Sent = z.object({ runId: z.string().nullable().optional() });
  * work; "steer" hands it over during that work. `forwardId` names this
  * message for its whole life, so sending it again cannot give it twice.
  */
-export async function sendToT3CodeThread(session: T3CodeSession, input: { threadId: string; message: string; how: "line" | "steer"; forwardId: string }): Promise<{ runId: string | null }> {
-  const sent = shaped(Sent, await session.call("t3_thread_send", {
-    threadId: input.threadId,
-    message: input.message,
-    mode: input.how === "steer" ? "steer" : "queue",
-    clientRequestId: input.forwardId,
-  }));
+export async function sendToT3CodeThread(
+  session: T3CodeSession,
+  input: { threadId: string; message: string; how: "line" | "steer"; forwardId: string },
+): Promise<{ runId: string | null }> {
+  const sent = shaped(
+    Sent,
+    await session.call("t3_thread_send", {
+      threadId: input.threadId,
+      message: input.message,
+      mode: input.how === "steer" ? "steer" : "queue",
+      clientRequestId: input.forwardId,
+    }),
+  );
   return { runId: sent.runId ?? null };
 }
 
@@ -452,8 +622,20 @@ const ThreadRead = z.object({
 });
 
 /** What a thread is doing now. */
-export async function readT3CodeThread(session: T3CodeSession, threadId: string): Promise<T3CodeThreadState> {
-  const { thread } = shaped(ThreadRead, await session.call("t3_thread_read", { threadId, view: "messages", limit: 1, maxCharsPerItem: 1, runLimit: 1 }));
+export async function readT3CodeThread(
+  session: T3CodeSession,
+  threadId: string,
+): Promise<T3CodeThreadState> {
+  const { thread } = shaped(
+    ThreadRead,
+    await session.call("t3_thread_read", {
+      threadId,
+      view: "messages",
+      limit: 1,
+      maxCharsPerItem: 1,
+      runLimit: 1,
+    }),
+  );
   return {
     title: thread.title,
     working: thread.activeRunId !== null,

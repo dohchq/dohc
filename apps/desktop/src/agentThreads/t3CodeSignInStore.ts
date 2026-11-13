@@ -16,7 +16,14 @@ import type { T3CodeSignIn } from "./t3Code";
 
 const FILE_NAME = "dohc-t3-code.json";
 
-const Kept = z.object({ version: z.literal(1), origin: z.string().min(1), expiresAtMs: z.number(), token: z.string().min(1) }).strict();
+const Kept = z
+  .object({
+    version: z.literal(1),
+    origin: z.string().min(1),
+    expiresAtMs: z.number(),
+    token: z.string().min(1),
+  })
+  .strict();
 // What a request header can carry. A decryption that went wrong fails this.
 const VISIBLE_ASCII = /^[\x21-\x7e]+$/u;
 
@@ -38,7 +45,11 @@ export interface T3CodeSignInStore {
   clear(): Promise<void>;
 }
 
-export function createT3CodeSignInStore(options: { dir: string; cipher?: TokenCipher; nowMs?: () => number }): T3CodeSignInStore {
+export function createT3CodeSignInStore(options: {
+  dir: string;
+  cipher?: TokenCipher;
+  nowMs?: () => number;
+}): T3CodeSignInStore {
   const file = join(options.dir, FILE_NAME);
   const nowMs = options.nowMs ?? Date.now;
   const canKeep = () => options.cipher?.isAvailable() === true;
@@ -58,21 +69,32 @@ export function createT3CodeSignInStore(options: { dir: string; cipher?: TokenCi
         const kept = Kept.parse(JSON.parse(await readFile(file, "utf8")));
         if (kept.expiresAtMs <= nowMs()) return null;
         const token = options.cipher!.decrypt(kept.token);
-        return VISIBLE_ASCII.test(token) ? { origin: kept.origin, token, expiresAtMs: kept.expiresAtMs } : null;
+        return VISIBLE_ASCII.test(token)
+          ? { origin: kept.origin, token, expiresAtMs: kept.expiresAtMs }
+          : null;
       } catch {
         return null;
       }
     },
-    save: (signIn) => inOrder(async () => {
-      if (!canKeep()) throw new T3CodeSignInNotKept();
-      const kept: z.infer<typeof Kept> = { version: 1, origin: signIn.origin, expiresAtMs: signIn.expiresAtMs, token: options.cipher!.encrypt(signIn.token) };
-      await mkdir(options.dir, { recursive: true, mode: 0o700 });
-      await atomicReplaceFile(file, (tmp) => writeFile(tmp, `${JSON.stringify(kept, null, 2)}\n`, { mode: 0o600 }));
-    }),
-    clear: () => inOrder(async () => {
-      await unlink(file).catch((error: NodeJS.ErrnoException) => {
-        if (error.code !== "ENOENT") throw error;
-      });
-    }),
+    save: (signIn) =>
+      inOrder(async () => {
+        if (!canKeep()) throw new T3CodeSignInNotKept();
+        const kept: z.infer<typeof Kept> = {
+          version: 1,
+          origin: signIn.origin,
+          expiresAtMs: signIn.expiresAtMs,
+          token: options.cipher!.encrypt(signIn.token),
+        };
+        await mkdir(options.dir, { recursive: true, mode: 0o700 });
+        await atomicReplaceFile(file, (tmp) =>
+          writeFile(tmp, `${JSON.stringify(kept, null, 2)}\n`, { mode: 0o600 }),
+        );
+      }),
+    clear: () =>
+      inOrder(async () => {
+        await unlink(file).catch((error: NodeJS.ErrnoException) => {
+          if (error.code !== "ENOENT") throw error;
+        });
+      }),
   };
 }
