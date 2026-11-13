@@ -405,7 +405,7 @@ async function fixture(
         tickets,
         changes,
         limits: {
-          maxSessions: 10,
+          maxSessions: 32,
           retentionMs: 60000,
           maxPendingRequests: 4,
           maxRequestBytes: 16384,
@@ -1844,6 +1844,65 @@ it.each(["view", "comment"] as const)(
     expect(f.native.client.openLiveAppliedSync).not.toHaveBeenCalled();
   },
 );
+
+it("keeps one account's new browser sessions coming and still gives another account its session", async () => {
+  const f = await fixture(
+    limits,
+    false,
+    undefined,
+    false,
+    false,
+    undefined,
+    0,
+    0,
+    false,
+    undefined,
+    undefined,
+    { people: 2, documents: 1 },
+  );
+  // One more than the whole store holds.
+  for (let index = 0; index <= selfHostLiveProfile().browserSessions.maxSessions; index++) {
+    const response = await f.post(
+      "/sync/live/named-sessions",
+      { grantId: "edit-1" },
+      "account=reader-1",
+    );
+    expect(response.status).toBe(200);
+  }
+  const other = await f.post(
+    "/sync/live/named-sessions",
+    { grantId: "edit-2" },
+    "account=reader-2",
+  );
+  expect(other.status).toBe(200);
+});
+
+it("leaves the desktop's sessions as they were", async () => {
+  const f = await fixture(limits, false, undefined, false, true);
+  // Each open also mints a ticket; this test counts only sessions.
+  vi.spyOn(f.tickets, "mint").mockResolvedValue({
+    token: "ticket",
+    expiresAtMs: Date.now() + 60_000,
+  });
+  const opened: string[] = [];
+  for (let index = 0; index < 17; index++) {
+    const response = await f.post("/sync/live/desktop-open", {
+      shareId: scope.shareId,
+      path: binding.currentPath,
+    });
+    expect(response.status).toBe(200);
+    opened.push(((await response.json()) as { discriminator: string }).discriminator);
+  }
+  for (const discriminator of opened) {
+    const request = new Request(`https://${relayHost}/sync/live/desktop`, {
+      headers: { authorization: "Bearer reader-token" },
+    });
+    expect(await f.desktopAdmission!.resolve(request, discriminator)).toMatchObject({
+      kind: "named",
+      userId: scope.userId,
+    });
+  }
+});
 
 // A link page stops editing on a 404 and tries again on a 503. Each of these answered 404 before.
 describe("a link ticket while the relay is busy", () => {
