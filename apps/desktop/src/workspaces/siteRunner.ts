@@ -6,7 +6,12 @@ import { constants } from "node:fs";
 import { access, realpath, stat } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { killProcessTreePosix, parseProcessTable, processDescendants, processGroupDescendants } from "../process/posixSpawn";
+import {
+  killProcessTreePosix,
+  parseProcessTable,
+  processDescendants,
+  processGroupDescendants,
+} from "../process/posixSpawn";
 import {
   killChildTreeWin32,
   killProcessTreeWin32,
@@ -163,7 +168,9 @@ const OWN_PROCESS_GROUP = process.platform !== "win32";
 // still running is the only way to reach it once that wrapper is gone.
 export function defaultDescendantsReader(pid: number, spawnedAt: number): Promise<number[]> {
   if (process.platform !== "win32") return processGroupDescendants(pid);
-  return processDescendants(pid, async () => withoutReusedParents(await readProcessTableWithPowershell(), pid, spawnedAt));
+  return processDescendants(pid, async () =>
+    withoutReusedParents(await readProcessTableWithPowershell(), pid, spawnedAt),
+  );
 }
 
 // Windows keeps a process's parent pid after that parent exits, and gives the

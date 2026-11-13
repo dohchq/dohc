@@ -964,7 +964,9 @@ describe("startSiteDevServer", () => {
       // taken at the ready line, reads the real table only once the wrapper
       // is gone and its child belongs to init. The interval never ticks.
       let wrapperExited!: () => void;
-      const exited = new Promise<void>((resolve) => { wrapperExited = resolve; });
+      const exited = new Promise<void>((resolve) => {
+        wrapperExited = resolve;
+      });
       let reads = 0;
       const spawnedAt = Date.now();
       const handle = await startSiteDevServer({
@@ -1388,11 +1390,14 @@ describe("buildSite", () => {
       // until that real snapshot has found the helper.
       const captureDescendants = async (pid: number): Promise<number[]> => {
         try {
-          descendantPid = await vi.waitFor(async () => {
-            const value = Number(await readFile(pidFile, "utf8"));
-            expect(Number.isSafeInteger(value) && value > 0).toBe(true);
-            return value;
-          }, { timeout: BUILD_TIMEOUT_MS });
+          descendantPid = await vi.waitFor(
+            async () => {
+              const value = Number(await readFile(pidFile, "utf8"));
+              expect(Number.isSafeInteger(value) && value > 0).toBe(true);
+              return value;
+            },
+            { timeout: BUILD_TIMEOUT_MS },
+          );
           const descendants = await posixSpawn.processGroupDescendants(pid);
           expect(descendants).toContain(descendantPid);
           await writeFile(capturedFile, "captured");

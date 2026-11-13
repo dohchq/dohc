@@ -214,10 +214,14 @@ export async function processGroupDescendants(
   try {
     const table = parseProcessGroupTable(await readProcessGroupTable());
     const members = table.filter((entry) => entry.pgid === rootPid).map((entry) => entry.pid);
-    return collectTreePidsForRoots(buildChildrenByParent(table), [rootPid, ...members])
-      .filter((pid) => pid !== rootPid);
+    return collectTreePidsForRoots(buildChildrenByParent(table), [rootPid, ...members]).filter(
+      (pid) => pid !== rootPid,
+    );
   } catch (error) {
-    console.warn("[desktop] could not read the process table, so this capture found nothing", error);
+    console.warn(
+      "[desktop] could not read the process table, so this capture found nothing",
+      error,
+    );
     return [];
   }
 }
