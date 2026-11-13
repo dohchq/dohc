@@ -94,7 +94,7 @@ function publish(workspaceId: string, tabPath: string, entry: AboutConversation 
 // The workspace shell provides the session and the reaction store in production.
 function Rail(props: Partial<ComponentProps<typeof ShellAboutRail>>) {
   return (
-    <WorkspaceSessionProvider>
+    <WorkspaceSessionProvider workspaceId={props.workspaceId ?? "workspace-a"}>
     <ReactionStoreProvider workspaceId={props.workspaceId ?? "workspace-a"}>
       <ShellAboutRail
         wb={defaultWorkbenchState()}

@@ -34,7 +34,7 @@ import { ShellErrorReporter, type ReportShellFailure } from "../shell/useShellEr
 
 // The workspace shell provides the session in production.
 const render = (ui: ReactElement, options?: RenderOptions) =>
-  renderUi(ui, { wrapper: WorkspaceSessionProvider, ...options });
+  renderUi(ui, { wrapper: ({ children }) => <WorkspaceSessionProvider workspaceId="fixture">{children}</WorkspaceSessionProvider>, ...options });
 
 const config = {
   command: "dohc-mcp",

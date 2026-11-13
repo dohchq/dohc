@@ -6685,7 +6685,7 @@ export function DesktopWorkspaceShell(props: {
     : (version: { id: string; name: string }) =>
         setShareTarget({ kind: "version", versionId: version.id, versionName: version.name });
   return (
-    <WorkspaceSessionProvider>
+    <WorkspaceSessionProvider workspaceId={workspaceId}>
     <AgentSettingsProvider settings={props.userSettings?.settings ?? null}>
     <AgentColorContext.Provider value={setAgentColor}>
     <CustomizeContext.Provider value={customizeContext}>

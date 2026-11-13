@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { act, renderHook } from "@testing-library/react";
+import { createElement, type ReactNode } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 import { deferred } from "../../testing/deferred";
 import { WorkspaceSessionProvider } from "../workspace/workspaceSession";
@@ -13,7 +14,7 @@ function setup() {
   const read=vi.fn(),onError=vi.fn();
   vi.stubGlobal("dohcDesktop",{chatLinks:read});
   const hook=renderHook(({workspaceId,channelWireId})=>useChatLinks({workspaceId,channelWireId,onError}),
-    {initialProps:{workspaceId:"w",channelWireId:"a"},wrapper:WorkspaceSessionProvider});
+    {initialProps:{workspaceId:"w",channelWireId:"a"},wrapper:({children}:{children?:ReactNode})=>createElement(WorkspaceSessionProvider,{workspaceId:"w"},children)});
   return {...hook,read,onError};
 }
 afterEach(()=>vi.unstubAllGlobals());

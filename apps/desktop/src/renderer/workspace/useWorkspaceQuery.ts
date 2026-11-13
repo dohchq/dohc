@@ -1,23 +1,14 @@
 import { useLayoutEffect, useReducer, useState } from "react";
 import type { WorkspaceSession } from "./workspaceSession";
 
-// What an older answer is worth once a newer read was asked.
-// - "latest-issued": nothing. A newer read aborts the older ones, and only the
-//   newest read sets the value, the error, or the end of pending.
-// - "latest-success": an older success still sets the value when no newer
-//   success has, because the newer read may fail (#502). It is the commit rule
-//   of snapshotLane.ts. Only the newest read sets the error, and pending lasts
-//   while any read is in flight.
-export type QueryOrdering = "latest-issued" | "latest-success";
-
 export type WorkspaceQueryOptions<T, A> = {
   // What is read in this session. A new key retires the old key's reads and
   // starts from no value.
   key: string;
-  // The signal aborts when the read is superseded or retired. An answer that
-  // ignores it is still dropped.
+  // A newer read aborts this signal, and only the newest read sets the value,
+  // the error, or the end of pending. An answer that ignores the signal is
+  // still dropped.
   load: (signal: AbortSignal, argument: A | undefined) => Promise<T>;
-  ordering?: QueryOrdering;
   // Read only when retry is called, not when the query starts.
   manual?: boolean;
   // Hears each failure that sets the error, in the same update.
@@ -49,13 +40,7 @@ function createOwner<T, A>(
   repaint: () => void,
 ): Owner<T, A> {
   let live = false;
-  let issued = 0;
-  let committed = 0;
-  const reads = new Set<AbortController>();
-  const abortAll = () => {
-    for (const read of reads) read.abort();
-    reads.clear();
-  };
+  let newest: AbortController | null = null;
   const publish = (next: Partial<Owner<T, A>["state"]>) => {
     owner.state = { ...owner.state, ...next };
     repaint();
@@ -65,39 +50,38 @@ function createOwner<T, A>(
     key: options.key,
     options,
     state: { value: undefined, pending: false, error: null },
+    // React retires and starts an owner again when it hides and shows its
+    // subtree. The retired read was dropped, so a query that reads on start
+    // asks again, and a manual one stops pending.
     start: () => {
       live = true;
       if (!owner.options.manual) void owner.retry();
+      else if (owner.state.pending) publish({ pending: false });
     },
     retire: () => {
       live = false;
-      abortAll();
+      newest?.abort();
+      newest = null;
     },
     retry: async (argument) => {
       if (!live) return;
-      const { load, ordering = "latest-issued" } = owner.options;
-      const request = ++issued;
-      if (ordering === "latest-issued") abortAll();
+      newest?.abort();
       const read = new AbortController();
-      reads.add(read);
+      newest = read;
       publish({ pending: true, error: null });
       let answer: { ok: true; value: T } | { ok: false; error: unknown };
       try {
-        answer = { ok: true, value: await load(read.signal, argument) };
+        answer = { ok: true, value: await owner.options.load(read.signal, argument) };
       } catch (error) {
         answer = { ok: false, error };
       }
-      reads.delete(read);
-      if (!live || read.signal.aborted) return;
-      const pending = reads.size > 0;
-      if (answer.ok && request > committed) {
-        committed = request;
-        publish({ value: answer.value, pending });
-      } else if (!answer.ok && request === issued) {
-        publish({ error: answer.error, pending });
-        owner.options.report?.(answer.error);
+      if (read.signal.aborted) return;
+      newest = null;
+      if (answer.ok) {
+        publish({ value: answer.value, pending: false });
       } else {
-        publish({ pending });
+        publish({ error: answer.error, pending: false });
+        owner.options.report?.(answer.error);
       }
     },
   };
