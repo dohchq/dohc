@@ -207,6 +207,16 @@ pub fn apply_shared_envelope(
             enforce_share_view_chat_boundary(tx, boundary, op)?;
         } else {
             enforce_shared_channel_boundary(tx, boundary, op)?;
+            // A Group this lane carries is joined, so its threads keep local
+            // read counts and never take the owner's account marks.
+            if let Some(wire_id) = boundary.channel_wire_id.as_deref() {
+                tx.execute(
+                    "INSERT OR IGNORE INTO chat_joined_channels (workspace_id, wire_id) \
+                     VALUES (?1, ?2)",
+                    params![op.workspace_id, wire_id],
+                )
+                .map_err(SyncError::persist)?;
+            }
         }
         let applied = crate::apply::apply_chat_tx(tx, op)?;
         replay_refusals = applied.refusals;

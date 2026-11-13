@@ -991,6 +991,19 @@ pub struct StartChannelThread {
     pub request_id: Option<String>,
 }
 
+/// Inputs to [`LinkedChatStore::mark_thread_read`].
+#[derive(Debug, Clone)]
+pub struct MarkThreadRead {
+    pub workspace_id: String,
+    pub thread_id: String,
+    pub up_to_sequence: i64,
+    pub expected_revision: Option<i64>,
+    /// The workspace owner, when the caller holds the owner's replication
+    /// context. Only then does an account mark journal.
+    pub replication_owner_user_id: Option<String>,
+    pub now_ms: i64,
+}
+
 /// Inputs to [`LinkedChatStore::send_message`].
 #[derive(Debug, Clone)]
 pub struct SendMessage {
@@ -3180,7 +3193,12 @@ impl<'a> LinkedChatStore<'a> {
                      FROM page ch \
                      LEFT JOIN ( \
                        SELECT t.workspace_id, t.channel_id, COUNT(*) AS thread_count, \
-                              SUM(CASE WHEN ?5 IS NULL THEN MAX( \
+                              SUM(CASE WHEN ?5 IS NULL \
+                                OR EXISTS(SELECT 1 FROM chat_channel_wire_ids jw \
+                                  JOIN chat_joined_channels jc \
+                                    ON jc.workspace_id = jw.workspace_id AND jc.wire_id = jw.wire_id \
+                                  WHERE jw.workspace_id = t.workspace_id AND jw.channel_id = t.channel_id) \
+                              THEN MAX( \
                                 (SELECT COUNT(*) FROM chat_messages m \
                                  WHERE m.workspace_id = t.workspace_id AND m.thread_id = t.thread_id) \
                                 - COALESCE((SELECT rs.last_read_sequence \
@@ -4470,7 +4488,7 @@ impl<'a> LinkedChatStore<'a> {
         let (has_after, after_updated_at_ms, after_thread_id) = chat_after(after);
         self.store.read_with(|conn| {
             let channel = require_channel(conn, workspace_id, channel_id)?;
-            let account = account_read_scope(conn, workspace_id)?;
+            let account = account_read_scope_for_channel(conn, workspace_id, &channel.channel_id)?;
             // One page query carries every per-thread aggregate as a correlated
             // index lookup, so a full page costs a fixed number of statements
             // instead of five point queries per thread.
@@ -5274,15 +5292,12 @@ impl<'a> LinkedChatStore<'a> {
     /// `replication_owner_user_id` names that account.
     pub fn mark_thread_read(
         &mut self,
-        workspace_id: &str,
-        thread_id: &str,
-        up_to_sequence: i64,
-        expected_revision: Option<i64>,
-        replication_owner_user_id: Option<&str>,
-        now_ms: i64,
+        input: &MarkThreadRead,
         faults: &dyn FaultInjector,
     ) -> Result<ChatThreadReadState, DomainError> {
-        let up_to = normalize_read_sequence(up_to_sequence)?;
+        let up_to = normalize_read_sequence(input.up_to_sequence)?;
+        let expected_revision = input.expected_revision;
+        let now_ms = input.now_ms;
         if let Some(rev) = expected_revision
             && rev < 0
         {
@@ -5291,15 +5306,17 @@ impl<'a> LinkedChatStore<'a> {
                 "Expected read-state revision must be a non-negative integer.",
             ));
         }
-        let replication_owner_user_id = replication_owner_user_id
+        let replication_owner_user_id = input
+            .replication_owner_user_id
+            .as_deref()
             .map(|owner| normalize_feed_identity(owner, "Replication read account"))
             .transpose()?;
-        let ws = workspace_id.to_owned();
-        let tid = thread_id.to_owned();
+        let ws = input.workspace_id.clone();
+        let tid = input.thread_id.clone();
         let outcome = self.write_with_pending_chat_replay(&ws, faults, |tx| {
             require_thread(tx, &ws, &tid)?;
             let mut state = advance_read_cursor(tx, &ws, &tid, up_to, now_ms, expected_revision)?;
-            if let Some(account) = account_read_scope(tx, &ws)? {
+            if let Some(account) = account_read_scope_for_thread(tx, &ws, &tid)? {
                 if let Some(target) = conservative_read_coordinate(tx, &ws, &tid, up_to)? {
                     let journal = replication_owner_user_id.as_deref() == Some(account.as_str());
                     advance_account_thread_read(tx, &ws, &account, &tid, target, now_ms, journal)?;
@@ -5321,7 +5338,7 @@ impl<'a> LinkedChatStore<'a> {
     ) -> Result<ChatThreadReadState, DomainError> {
         self.store.read_with(|conn| {
             let mut state = read_state_for_thread(conn, workspace_id, thread_id)?;
-            if let Some(account) = account_read_scope(conn, workspace_id)? {
+            if let Some(account) = account_read_scope_for_thread(conn, workspace_id, thread_id)? {
                 state.last_read_sequence =
                     account_thread_position(conn, workspace_id, &account, thread_id)?.0;
             }
@@ -5354,9 +5371,16 @@ impl<'a> LinkedChatStore<'a> {
                 let read: Vec<(String, i64)> = {
                     let mut stmt = tx
                         .prepare(
-                            "SELECT thread_id, last_read_sequence FROM chat_thread_read_state \
-                             WHERE workspace_id = ?1 AND last_read_sequence > 0 \
-                             ORDER BY thread_id",
+                            "SELECT r.thread_id, r.last_read_sequence FROM chat_thread_read_state r \
+                             JOIN chat_threads t \
+                               ON t.workspace_id = r.workspace_id AND t.thread_id = r.thread_id \
+                             WHERE r.workspace_id = ?1 AND r.last_read_sequence > 0 \
+                               AND NOT EXISTS(SELECT 1 FROM chat_channel_wire_ids jw \
+                                 JOIN chat_joined_channels jc \
+                                   ON jc.workspace_id = jw.workspace_id AND jc.wire_id = jw.wire_id \
+                                 WHERE jw.workspace_id = t.workspace_id \
+                                   AND jw.channel_id = t.channel_id) \
+                             ORDER BY r.thread_id",
                         )
                         .map_err(DomainError::sql_corrupt)?;
                     let rows = stmt
@@ -7841,22 +7865,58 @@ pub(crate) fn account_read_scope(
     .map_err(DomainError::sql_corrupt)
 }
 
-/// An account's read mark in one thread, as `(created_at_ms, message_id)`.
-fn account_thread_mark(
+/// Whether a channel is a Group joined from another person's share. Its
+/// threads keep local counts. The SQL readers inline the same test.
+fn channel_is_joined(
     conn: &Connection,
     workspace_id: &str,
-    account_user_id: &str,
-    thread_id: &str,
-) -> Result<Option<(i64, String)>, DomainError> {
+    channel_id: &str,
+) -> Result<bool, DomainError> {
     conn.query_row(
-        "SELECT last_read_created_at_ms, last_read_message_id \
-         FROM chat_account_thread_read_state \
-         WHERE workspace_id = ?1 AND account_user_id = ?2 AND thread_id = ?3",
-        params![workspace_id, account_user_id, thread_id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        "SELECT EXISTS(SELECT 1 FROM chat_channel_wire_ids w \
+         JOIN chat_joined_channels j \
+           ON j.workspace_id = w.workspace_id AND j.wire_id = w.wire_id \
+         WHERE w.workspace_id = ?1 AND w.channel_id = ?2)",
+        params![workspace_id, channel_id],
+        |row| row.get(0),
     )
-    .optional()
     .map_err(DomainError::sql_corrupt)
+}
+
+/// The account whose marks decide one channel's reads: the recorded account,
+/// unless the channel is a joined Group.
+pub(crate) fn account_read_scope_for_channel(
+    conn: &Connection,
+    workspace_id: &str,
+    channel_id: &str,
+) -> Result<Option<String>, DomainError> {
+    let Some(account) = account_read_scope(conn, workspace_id)? else {
+        return Ok(None);
+    };
+    Ok((!channel_is_joined(conn, workspace_id, channel_id)?).then_some(account))
+}
+
+/// The account whose marks decide one thread's reads. Every reader and writer
+/// of a single thread asks here, so a joined Group's thread never takes or
+/// shows an account mark.
+fn account_read_scope_for_thread(
+    conn: &Connection,
+    workspace_id: &str,
+    thread_id: &str,
+) -> Result<Option<String>, DomainError> {
+    let channel_id: Option<String> = conn
+        .query_row(
+            "SELECT channel_id FROM chat_threads WHERE workspace_id = ?1 AND thread_id = ?2",
+            params![workspace_id, thread_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?
+        .flatten();
+    match channel_id {
+        Some(channel_id) => account_read_scope_for_channel(conn, workspace_id, &channel_id),
+        None => account_read_scope(conn, workspace_id),
+    }
 }
 
 /// The account coordinate that keeps a local count's read set read. The read
@@ -7998,20 +8058,26 @@ pub fn resolve_thread_read_coordinate(
     })
 }
 
+/// One account read mark as a copy stores it, with the journal coordinate
+/// that set it.
+#[derive(Debug, Clone, Copy)]
+pub struct AccountThreadReadCell<'a> {
+    pub workspace_id: &'a str,
+    pub account_user_id: &'a str,
+    pub thread_id: &'a str,
+    pub created_at_ms: i64,
+    pub message_id: &'a str,
+    pub updated_at_ms: i64,
+    pub origin_id: &'a str,
+    pub origin_seq: i64,
+}
+
 /// Merge an account's read mark in one thread. The later coordinate wins, and
 /// the update time and then the origin break a tie, so copies converge in
 /// any order. Answers whether the stored mark changed.
-#[allow(clippy::too_many_arguments)]
 pub fn merge_account_thread_read(
     tx: &Transaction<'_>,
-    workspace_id: &str,
-    account_user_id: &str,
-    thread_id: &str,
-    created_at_ms: i64,
-    message_id: &str,
-    updated_at_ms: i64,
-    origin_id: &str,
-    origin_seq: i64,
+    cell: &AccountThreadReadCell<'_>,
 ) -> Result<bool, DomainError> {
     let changed = tx
         .execute(
@@ -8029,24 +8095,56 @@ pub fn merge_account_thread_read(
                    (last_read_created_at_ms, last_read_message_id, updated_at_ms, \
                     origin_id, origin_seq)",
             params![
-                workspace_id,
-                account_user_id,
-                thread_id,
-                created_at_ms,
-                message_id,
-                updated_at_ms,
-                origin_id,
-                origin_seq
+                cell.workspace_id,
+                cell.account_user_id,
+                cell.thread_id,
+                cell.created_at_ms,
+                cell.message_id,
+                cell.updated_at_ms,
+                cell.origin_id,
+                cell.origin_seq
             ],
         )
         .map_err(DomainError::sql_persist)?;
     Ok(changed > 0)
 }
 
-/// Move an account's mark in one thread forward to `target` on this copy. It
-/// journals `chat.thread.read.set` only when `journal` is set and the target
-/// message itself replicates, so a local-only message never names a mark in
-/// the account's log. Answers whether the mark moved.
+/// Whether the log already holds a read record for exactly this account,
+/// thread, and coordinate, from this copy or another. It reads the record's
+/// kind and payload, never an origin sequence.
+fn thread_read_journaled(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    account_user_id: &str,
+    thread_id: &str,
+    created_at_ms: i64,
+    message_id: &str,
+) -> Result<bool, DomainError> {
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM replication_log \
+         WHERE workspace_id = ?1 AND op_kind = 'chat.thread.read.set' \
+           AND json_extract(payload_json, '$.accountUserId') = ?2 \
+           AND json_extract(payload_json, '$.threadId') = ?3 \
+           AND json_extract(payload_json, '$.lastReadCreatedAtMs') = ?4 \
+           AND json_extract(payload_json, '$.lastReadMessageId') = ?5)",
+        params![
+            workspace_id,
+            account_user_id,
+            thread_id,
+            created_at_ms,
+            message_id
+        ],
+        |row| row.get(0),
+    )
+    .map_err(DomainError::sql_corrupt)
+}
+
+/// Move an account's mark in one thread forward to `target` on this copy, and
+/// publish it when `journal` is set. Moving and publishing are separate: a
+/// mark stored without a record, for example while signed out, is published
+/// by the next authorized mark at the same coordinate. Once a record of the
+/// coordinate exists, a repeat writes nothing. A local-only message never
+/// names a mark in the account's log. Answers whether anything was written.
 fn advance_account_thread_read(
     tx: &Transaction<'_>,
     workspace_id: &str,
@@ -8057,36 +8155,68 @@ fn advance_account_thread_read(
     journal: bool,
 ) -> Result<bool, DomainError> {
     let (created_at_ms, message_id) = target;
-    if let Some((current_created_at_ms, current_message_id)) =
-        account_thread_mark(tx, workspace_id, account_user_id, thread_id)?
-        && (current_created_at_ms, current_message_id.as_str())
-            >= (created_at_ms, message_id.as_str())
-    {
-        return Ok(false);
-    }
-    let (origin_id, origin_seq) = local_replication_coordinate(tx, workspace_id, now_ms)?;
-    merge_account_thread_read(
-        tx,
-        workspace_id,
-        account_user_id,
-        thread_id,
-        created_at_ms,
-        &message_id,
-        now_ms,
-        &origin_id,
-        origin_seq,
-    )?;
-    let replicates: bool = journal
+    let current: Option<(i64, String, i64)> = tx
+        .query_row(
+            "SELECT last_read_created_at_ms, last_read_message_id, updated_at_ms \
+             FROM chat_account_thread_read_state \
+             WHERE workspace_id = ?1 AND account_user_id = ?2 AND thread_id = ?3",
+            params![workspace_id, account_user_id, thread_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    let moves = match &current {
+        None => true,
+        Some((current_created_at_ms, current_message_id, _)) => {
+            let stored = (*current_created_at_ms, current_message_id.as_str());
+            let wanted = (created_at_ms, message_id.as_str());
+            if stored > wanted {
+                return Ok(false);
+            }
+            stored < wanted
+        }
+    };
+    let publish = journal
         && tx
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM chat_messages \
                  WHERE workspace_id = ?1 AND thread_id = ?2 AND message_id = ?3 \
                    AND author_user_id IS NOT NULL)",
                 params![workspace_id, thread_id, message_id],
-                |row| row.get(0),
+                |row| row.get::<_, bool>(0),
             )
-            .map_err(DomainError::sql_corrupt)?;
-    if replicates {
+            .map_err(DomainError::sql_corrupt)?
+        && (moves
+            || !thread_read_journaled(
+                tx,
+                workspace_id,
+                account_user_id,
+                thread_id,
+                created_at_ms,
+                &message_id,
+            )?);
+    if !moves && !publish {
+        return Ok(false);
+    }
+    // A later update time keeps the stored cell pointing at this write.
+    let at_ms = current.as_ref().map_or(now_ms, |(_, _, updated_at_ms)| {
+        now_ms.max(updated_at_ms.saturating_add(1))
+    });
+    let (origin_id, origin_seq) = local_replication_coordinate(tx, workspace_id, at_ms)?;
+    merge_account_thread_read(
+        tx,
+        &AccountThreadReadCell {
+            workspace_id,
+            account_user_id,
+            thread_id,
+            created_at_ms,
+            message_id: &message_id,
+            updated_at_ms: at_ms,
+            origin_id: &origin_id,
+            origin_seq,
+        },
+    )?;
+    if publish {
         insert_local_replication_op(
             tx,
             workspace_id,
@@ -8098,9 +8228,9 @@ fn advance_account_thread_read(
                 "threadId": thread_id,
                 "lastReadCreatedAtMs": created_at_ms,
                 "lastReadMessageId": message_id,
-                "atMs": now_ms,
+                "atMs": at_ms,
             }),
-            now_ms,
+            at_ms,
         )?;
     }
     Ok(true)
@@ -8119,7 +8249,7 @@ fn advance_account_read_for_own_message(
     author_user_id: Option<&str>,
     now_ms: i64,
 ) -> Result<(), DomainError> {
-    let Some(account) = account_read_scope(tx, workspace_id)? else {
+    let Some(account) = account_read_scope_for_thread(tx, workspace_id, thread_id)? else {
         return Ok(());
     };
     if author_user_id.is_some_and(|author| author != account) {

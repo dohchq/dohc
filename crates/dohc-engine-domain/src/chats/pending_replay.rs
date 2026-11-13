@@ -1,5 +1,5 @@
 use super::{
-    FeedCoordinateResolution, FollowTargetKind, FollowTargetResolution,
+    AccountThreadReadCell, FeedCoordinateResolution, FollowTargetKind, FollowTargetResolution,
     PENDING_CHAT_WORKSPACE_EXISTS_SQL, PendingChatRefusal, PendingChatReplay,
     ReplicatedMessageAuthor, ThreadMessageResolution, ThreadReadResolution,
     bump_chat_conversation_revision, index_replicated_chat_message_search_rows, is_agent_id,
@@ -494,14 +494,16 @@ fn replay_pending_chat_operation(
                 ThreadReadResolution::Visible => {
                     merge_account_thread_read(
                         tx,
-                        workspace_id,
-                        &payload.account_user_id,
-                        &payload.thread_id,
-                        payload.last_read_created_at_ms,
-                        &payload.last_read_message_id,
-                        payload.at_ms,
-                        &operation.origin_id,
-                        operation.origin_seq,
+                        &AccountThreadReadCell {
+                            workspace_id,
+                            account_user_id: &payload.account_user_id,
+                            thread_id: &payload.thread_id,
+                            created_at_ms: payload.last_read_created_at_ms,
+                            message_id: &payload.last_read_message_id,
+                            updated_at_ms: payload.at_ms,
+                            origin_id: &operation.origin_id,
+                            origin_seq: operation.origin_seq,
+                        },
                     )?;
                     Ok(PendingReplayOutcome::Applied)
                 }

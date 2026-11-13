@@ -393,6 +393,7 @@ import {
 } from "./workspaces/workspaceSummaryProjection";
 import { RELAY_FETCH_TIMEOUT_MS, assertSharedChannelWritable, joinedSharedChannelForWireId, relayFetchWithTimeout } from "./workspaces/sharedChannels";
 import {
+  accountReadReplicationOwner,
   resolveChatRelayIdentity,
   resolveWorkspaceRelayAuthorId,
   workspaceRemoteMatchesCredentials,
@@ -5135,6 +5136,15 @@ const liveDocumentsForCli = () => {
   return ownerLiveDocumentsForCli;
 };
 const { startDesktopCliServer } = createDesktopCliServer({
+  accountReadOwner: async (workspace, store, threadId) => {
+    await warmCredentialCache();
+    return await accountReadReplicationOwner({
+      workspace: findWorkspace(workspace.workspaceId) ?? workspace,
+      credentials: cachedCredentials,
+      store,
+      threadId,
+    });
+  },
   notices: async (workspaceId) => agentNotices((await noticeStore().list()).notices, workspaceSummaries(), workspaceId),
   shareCopy: shareCopyReader,
   shareLinkAgents: shareLinkAgentsForCli,

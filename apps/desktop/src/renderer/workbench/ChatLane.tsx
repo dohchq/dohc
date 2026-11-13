@@ -28,6 +28,7 @@ import type { AgentSetupSummary } from "./ChatsView";
 import { focusMessage, TARGET_FLASH_MS } from "./landOnMessage";
 import { WorkStatus } from "./WorkCard";
 import { neutralPresentation } from "./actorPresentation";
+import { compareMessageOrder } from "./chatOrder";
 
 // The change to a Collection's rules a message asks a person to apply.
 const changeFileOf = (message: ChatMessageRecord) =>
@@ -225,7 +226,8 @@ export function ChatLane(props: {
       if (!isCurrent()) return;
       const laneMessages = laneRead?.messages ?? [];
       if (lane && paintedRevision.current?.threadId !== lane.id) {
-        // Sequences are 1-based, so the read cursor indexes the first unread.
+        // The read place counts the messages before the first unread one in
+        // arrival order, so it indexes that message.
         const firstUnread = lane.unreadCount > 0 ? laneMessages[lane.lastReadSequence] : undefined;
         setFirstUnreadMessageId(firstUnread?.id ?? null);
       }
@@ -234,7 +236,7 @@ export function ChatLane(props: {
       setThreadId(laneId);
       setPostThreadIds(posts.map((post) => post.id));
       setMessages([...postReads.flatMap((read) => postAsThread(read.messages)), ...laneMessages]
-        .sort((left, right) => left.createdAtMs - right.createdAtMs));
+        .sort(compareMessageOrder));
       setDecisions(reads.flatMap((read) => read.decisions));
       setRuns(Object.assign({}, ...reads.map((read) => read.runs)));
       setLoading(false);

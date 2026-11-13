@@ -1617,7 +1617,7 @@ describe("the automation replicas", () => {
     cleanup.push(async () => { await running.close(); await rm(root, { recursive: true, force: true }); });
     await vi.waitFor(() => expect(errors).toHaveLength(1), { timeout: WAIT_TIMEOUT_MS });
     expect(running.replica(WORKSPACE)).toBeUndefined();
-    expect(engine.methods().slice(0, 4)).toEqual(["workspace.open", "versions.ensureMain", "sync.adoptJoinIdentity", "workspace.close"]);
+    expect(engine.methods().slice(0, 5)).toEqual(["workspace.open", "chats.readState.seedAccount", "versions.ensureMain", "sync.adoptJoinIdentity", "workspace.close"]);
   });
 
   it("keeps opening, pulling, and letting go of the others while one workspace always fails", async () => {

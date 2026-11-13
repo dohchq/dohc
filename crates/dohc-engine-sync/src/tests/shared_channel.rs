@@ -84,6 +84,46 @@ fn a_share_id_with_a_colon_is_refused() {
 }
 
 #[test]
+fn a_group_a_shared_lane_applies_is_recorded_as_joined() {
+    let (_scratch, _path, mut engine) = open_store();
+    let boundary = ShareBoundary {
+        share_id: "share-joined".to_owned(),
+        surface: ShareSurface::SharedChannel,
+        channel_wire_id: Some("wire-joined".to_owned()),
+        granted: None,
+    };
+    let channel = envelope(
+        "granter",
+        0,
+        "chat.channel.create",
+        json!({
+            "channelId": "c-joined",
+            "name": "Joined",
+            "slug": "joined",
+            "kind": "channel",
+            "createdAtMs": 1,
+            "wireId": "wire-joined"
+        }),
+    );
+    assert!(matches!(
+        apply_shared_envelope(&mut engine, &boundary, &channel, &NoFaults),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            ..
+        })
+    ));
+    let joined: Vec<String> = engine
+        .read_with(|conn| {
+            let mut statement =
+                conn.prepare("SELECT wire_id FROM chat_joined_channels WHERE workspace_id = 'ws'")?;
+            let rows = statement.query_map([], |row| row.get(0))?;
+            rows.collect::<Result<Vec<String>, rusqlite::Error>>()
+        })
+        .expect("joined groups");
+    assert_eq!(joined, vec!["wire-joined".to_owned()]);
+}
+
+#[test]
 fn shared_channel_channel_create_without_wire_id_is_rejected() {
     let (_scratch, _path, mut engine) = open_store();
     let boundary = ShareBoundary {

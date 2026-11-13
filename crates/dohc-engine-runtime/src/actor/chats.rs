@@ -7,9 +7,10 @@ use dohc_engine_domain::{
     ChatFeedPage, ChatFeedReadState, ChatFollow, ChatMention, ChatMessage, ChatMessagePage,
     ChatProjectionFileAccess, ChatReaction, ChatStagePublication, ChatThread, ChatThreadLane,
     ChatThreadProjection, ChatThreadReadState, CreateFileThread, DispatchClaim, DispatchRecovery,
-    FollowTargetKind, LinkedChatStore, MentionCursor, PendingBookmarkRow, ResolveDecision,
-    RunRecordLink, SaveBookmark, SendMessage, SetFollow, SetReaction, StartChannelThread,
-    StreamPage, StreamPosition, ThreadDispatchPause, ThreadWithChannel, UnreadFileThread,
+    FollowTargetKind, LinkedChatStore, MarkThreadRead, MentionCursor, PendingBookmarkRow,
+    ResolveDecision, RunRecordLink, SaveBookmark, SendMessage, SetFollow, SetReaction,
+    StartChannelThread, StreamPage, StreamPosition, ThreadDispatchPause, ThreadWithChannel,
+    UnreadFileThread,
 };
 use dohc_engine_storage::NoFaults;
 use tokio_util::sync::CancellationToken;
@@ -484,15 +485,9 @@ impl ActorHandle {
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub async fn chat_read_state_mark_thread_read(
         &self,
-        workspace_id: String,
-        thread_id: String,
-        up_to_sequence: i64,
-        expected_revision: Option<i64>,
-        replication_owner_user_id: Option<String>,
-        now_ms: i64,
+        input: MarkThreadRead,
         token: CancellationToken,
     ) -> Result<ChatThreadReadState, RuntimeError> {
         self.run_chats(move |chats| {
@@ -500,15 +495,7 @@ impl ActorHandle {
                 Err(RuntimeError::Cancelled)
             } else {
                 chats
-                    .mark_thread_read(
-                        &workspace_id,
-                        &thread_id,
-                        up_to_sequence,
-                        expected_revision,
-                        replication_owner_user_id.as_deref(),
-                        now_ms,
-                        &NoFaults,
-                    )
+                    .mark_thread_read(&input, &NoFaults)
                     .map_err(RuntimeError::from)
             }
         })

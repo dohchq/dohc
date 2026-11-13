@@ -4,9 +4,9 @@
 use super::{
     ChatActorKind, ChatChannel, ChatDecision, ChatMessage, ChatMessageLinkAuthor, ChatReaction,
     ChatThread, ChatThreadLane, ChatWorkStatus, FEED_LIMIT_MAX, LinkedChatStore,
-    account_read_scope, active_reactions_for_messages, collect, hydrate_attachments_for_messages,
-    map_decision_row, map_message_row, message_count_for_thread, persisted_nonnegative_safe,
-    require_channel, require_thread,
+    account_read_scope_for_channel, active_reactions_for_messages, collect,
+    hydrate_attachments_for_messages, map_decision_row, map_message_row, message_count_for_thread,
+    persisted_nonnegative_safe, require_channel, require_thread,
 };
 use crate::error::DomainError;
 use rusqlite::{Connection, params};
@@ -378,7 +378,7 @@ impl<'a> LinkedChatStore<'a> {
                 });
             }
 
-            let account = account_read_scope(conn, workspace_id)?;
+            let account = account_read_scope_for_channel(conn, workspace_id, channel_id)?;
             let read_position = read_position(
                 conn,
                 workspace_id,

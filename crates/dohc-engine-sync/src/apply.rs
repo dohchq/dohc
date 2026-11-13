@@ -13,9 +13,9 @@ use dohc_engine_domain::chats::{
     replicated_source_origin, truncate_slug_base, upsert_chat_search_index_row, work_report_json,
 };
 use dohc_engine_domain::{
-    AGENT_CHANNEL_NAME, CHAT_THREAD_HEADER_MESSAGE_ID, ChannelGroup, ChatChannelKind,
-    ChatChannelType, ChatThreadLane, DomainError, FeedCoordinateResolution, FollowTargetKind,
-    FollowTargetResolution, GENERAL_CHANNEL_WIRE_ID, ReplicatedMessageAuthor,
+    AGENT_CHANNEL_NAME, AccountThreadReadCell, CHAT_THREAD_HEADER_MESSAGE_ID, ChannelGroup,
+    ChatChannelKind, ChatChannelType, ChatThreadLane, DomainError, FeedCoordinateResolution,
+    FollowTargetKind, FollowTargetResolution, GENERAL_CHANNEL_WIRE_ID, ReplicatedMessageAuthor,
     ThreadMessageResolution, ThreadReadResolution, attachment_id_for, channel_slug_for_name,
     encode_poll_options, has_projection_control_char, is_js_trim_ws, is_reaction_emoji_verbatim,
     merge_account_thread_read, normalize_agent_owner_name, normalize_author_user_id,
@@ -2189,14 +2189,16 @@ fn apply_thread_read(
     }
     merge_account_thread_read(
         tx,
-        &op.workspace_id,
-        &account_user_id,
-        &p.thread_id,
-        p.last_read_created_at_ms,
-        &p.last_read_message_id,
-        p.at_ms,
-        &op.origin_id,
-        op.origin_seq,
+        &AccountThreadReadCell {
+            workspace_id: &op.workspace_id,
+            account_user_id: &account_user_id,
+            thread_id: &p.thread_id,
+            created_at_ms: p.last_read_created_at_ms,
+            message_id: &p.last_read_message_id,
+            updated_at_ms: p.at_ms,
+            origin_id: &op.origin_id,
+            origin_seq: op.origin_seq,
+        },
     )
     .map_err(|error| map_chat_rule(error, "chat thread read could not be stored"))?;
     Ok(())

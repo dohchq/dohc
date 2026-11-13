@@ -78,15 +78,17 @@ export function createLiveLinkedChatStore(
     (async <Result>(work: () => Promise<Result>) => await work());
   const accountReadOwner = options.accountReadOwner;
   // The engine records the account once per workspace and seeds it from this
-  // computer's local counts. Until then, reads keep local counts.
-  let accountReadsRecorded = false;
+  // computer's local counts. Until then, reads keep local counts. Each owner
+  // gets one try while this store lives, so a failing seed is not asked again
+  // on every chat call. Opening the workspace again tries again.
+  const accountReadsTried = new Set<string>();
   const recordAccountReads = async (adapter: ChatsLiveAdapter) => {
-    if (accountReadsRecorded || !accountReadOwner) return;
+    if (!accountReadOwner) return;
     const accountUserId = accountReadOwner();
-    if (!accountUserId) return;
+    if (!accountUserId || accountReadsTried.has(accountUserId)) return;
+    accountReadsTried.add(accountUserId);
     try {
       await adapter.seedAccountReads({ workspaceId: workspace.workspaceId, accountUserId, seedLocal: true });
-      accountReadsRecorded = true;
     } catch (error) {
       console.error("[desktop] account read seed:", error);
     }

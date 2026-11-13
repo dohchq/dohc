@@ -3,9 +3,9 @@
 
 use dohc_engine_domain::{
     AGENT_REPLY_EXCERPT_CHARS, ChatActorKind, ChatChannelKind, ChatDecisionState, ChatThreadLane,
-    ChatWorkReport, ChatWorkStatus, DomainError, LinkedChatStore, NoFaults, ResolveDecision,
-    SendMessage, StartChannelThread, StreamAgentRequest, StreamAgentRequestState, StreamPage,
-    StreamPosition, ThreadWork,
+    ChatWorkReport, ChatWorkStatus, DomainError, LinkedChatStore, MarkThreadRead, NoFaults,
+    ResolveDecision, SendMessage, StartChannelThread, StreamAgentRequest, StreamAgentRequestState,
+    StreamPage, StreamPosition, ThreadWork,
 };
 use dohc_engine_storage::{EngineStore, StorageError};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
@@ -76,6 +76,23 @@ fn start(
         .expect("start")
         .0
         .thread_id
+}
+
+fn read_mark(
+    thread_id: &str,
+    up_to_sequence: i64,
+    expected_revision: Option<i64>,
+    replication_owner_user_id: Option<&str>,
+    now_ms: i64,
+) -> MarkThreadRead {
+    MarkThreadRead {
+        workspace_id: WS.to_owned(),
+        thread_id: thread_id.to_owned(),
+        up_to_sequence,
+        expected_revision,
+        replication_owner_user_id: replication_owner_user_id.map(str::to_owned),
+        now_ms,
+    }
 }
 
 fn reply_input(thread_id: &str, message_id: &str, at_ms: i64) -> SendMessage {
@@ -819,7 +836,7 @@ fn the_page_carries_the_newest_read_item_across_both_lanes() {
     assert_eq!(page(&mut store, None, 10).read_position, None);
 
     LinkedChatStore::new(&mut store)
-        .mark_thread_read(WS, "post-10", 1, None, None, 50, &NO_FAULTS)
+        .mark_thread_read(&read_mark("post-10", 1, None, None, 50), &NO_FAULTS)
         .expect("read post");
     assert_eq!(
         page(&mut store, None, 10).read_position.map(|p| p.id),
@@ -828,7 +845,7 @@ fn the_page_carries_the_newest_read_item_across_both_lanes() {
 
     // Reading the conversation through its parented reply covers c-20 only.
     LinkedChatStore::new(&mut store)
-        .mark_thread_read(WS, &chat, 2, None, None, 51, &NO_FAULTS)
+        .mark_thread_read(&read_mark(&chat, 2, None, None, 51), &NO_FAULTS)
         .expect("read chat");
     assert_eq!(
         page(&mut store, None, 10).read_position.map(|p| p.id),
@@ -836,7 +853,7 @@ fn the_page_carries_the_newest_read_item_across_both_lanes() {
     );
 
     LinkedChatStore::new(&mut store)
-        .mark_thread_read(WS, "post-40", 1, None, None, 52, &NO_FAULTS)
+        .mark_thread_read(&read_mark("post-40", 1, None, None, 52), &NO_FAULTS)
         .expect("read newest post");
     let read = page(&mut store, None, 10).read_position.expect("read");
     assert_eq!(
@@ -896,7 +913,7 @@ fn an_account_read_place_drives_the_pages_newest_read_item() {
     assert_eq!(page(&mut store, None, 10).read_position, None);
 
     LinkedChatStore::new(&mut store)
-        .mark_thread_read(WS, "post-10", 1, None, None, 50, &NO_FAULTS)
+        .mark_thread_read(&read_mark("post-10", 1, None, None, 50), &NO_FAULTS)
         .expect("read post");
     assert_eq!(
         page(&mut store, None, 10).read_position.map(|p| p.id),
@@ -906,7 +923,7 @@ fn an_account_read_place_drives_the_pages_newest_read_item() {
     // The account mark lands on the parented reply, so c-20 is the newest
     // top-level message at or below it.
     LinkedChatStore::new(&mut store)
-        .mark_thread_read(WS, &chat, 2, None, None, 51, &NO_FAULTS)
+        .mark_thread_read(&read_mark(&chat, 2, None, None, 51), &NO_FAULTS)
         .expect("read chat");
     assert_eq!(
         page(&mut store, None, 10).read_position.map(|p| p.id),
@@ -914,7 +931,7 @@ fn an_account_read_place_drives_the_pages_newest_read_item() {
     );
 
     LinkedChatStore::new(&mut store)
-        .mark_thread_read(WS, "post-40", 1, None, None, 52, &NO_FAULTS)
+        .mark_thread_read(&read_mark("post-40", 1, None, None, 52), &NO_FAULTS)
         .expect("read newest post");
     let read = page(&mut store, None, 10).read_position.expect("read");
     assert_eq!(

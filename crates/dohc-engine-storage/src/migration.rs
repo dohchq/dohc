@@ -5767,7 +5767,7 @@ mod tests {
             ),
             (
                 "v2-chat-account-thread-reads",
-                "f5ce091a08c24248c15ea1fecf86852af9a16b1d9c1cc0c3ca16a23a255d4869",
+                "cf3a4f56e015fff278768012d4312f181fffc2c56d54c2f5152a75438d13cc73",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -7928,7 +7928,12 @@ mod tests {
             "INSERT INTO chat_pending_replication \
                (workspace_id,origin_id,origin_seq,dependency_kind,dependency_id) VALUES \
                ('ws','peer',1,'feed-message','m-1'), \
-               ('ws','peer',2,'message-thread','t-1');",
+               ('ws','peer',2,'message-thread','t-1'); \
+             INSERT INTO replication_log \
+               (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) VALUES \
+               ('ws','shared:share-1:bob',0,'chat.channel.create','{\"wireId\":\"wire-bob\"}',1,1), \
+               ('ws','shared:share-2:cy',0,'chat.thread.create','{\"threadId\":\"t-9\",\"channelWireId\":\"wire-cy\"}',1,1), \
+               ('ws','own-origin',0,'chat.channel.create','{\"wireId\":\"wire-own\"}',1,0);",
         )
         .unwrap();
         assert!(
@@ -7952,6 +7957,27 @@ mod tests {
             )
             .unwrap();
         assert_eq!(parked, "feed-message:m-1,message-thread:t-1");
+        let joined: String = conn
+            .query_row(
+                "SELECT group_concat(wire_id, ',') FROM \
+                 (SELECT wire_id FROM chat_joined_channels WHERE workspace_id='ws' ORDER BY wire_id)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            joined, "wire-bob,wire-cy",
+            "only Groups a shared lane applied are joined"
+        );
+        let read_index: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type='index' \
+                 AND name='replication_log_thread_read'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(read_index, 1);
         conn.execute(
             "INSERT INTO chat_pending_replication VALUES ('ws','peer',3,'thread-read-message','m-2')",
             [],

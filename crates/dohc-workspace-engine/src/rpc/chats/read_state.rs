@@ -14,6 +14,7 @@ use crate::rpc::request::parse;
 use dohc_engine_domain::AgentReader;
 use dohc_engine_domain::ChatAgentReadState;
 use dohc_engine_domain::ChatThreadReadState;
+use dohc_engine_domain::MarkThreadRead;
 use dohc_engine_protocol::error::ErrorCode;
 use dohc_engine_protocol::error::WireError;
 use dohc_engine_protocol::transport::RequestContext;
@@ -200,12 +201,14 @@ impl EngineService {
             &cancellation,
             "chats.readState.markThreadRead",
             open.actor.chat_read_state_mark_thread_read(
-                open.workspace_id.clone(),
-                params.thread_id,
-                params.up_to_sequence,
-                params.expected_revision,
-                params.replication_owner_user_id,
-                params.now_ms.unwrap_or(now_ms()?),
+                MarkThreadRead {
+                    workspace_id: open.workspace_id.clone(),
+                    thread_id: params.thread_id,
+                    up_to_sequence: params.up_to_sequence,
+                    expected_revision: params.expected_revision,
+                    replication_owner_user_id: params.replication_owner_user_id,
+                    now_ms: params.now_ms.unwrap_or(now_ms()?),
+                },
                 cancellation.token(),
             ),
         )

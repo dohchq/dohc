@@ -223,6 +223,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "chat_feed_read_state",
     "chat_account_thread_read_state",
     "chat_account_read_seeds",
+    "chat_joined_channels",
     "chat_bookmarks",
     "chat_bookmark_outbox",
     "chat_dispatch_ledger",

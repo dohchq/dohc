@@ -25,6 +25,38 @@ CREATE TABLE chat_account_read_seeds (
     completed_at_ms INTEGER NOT NULL
 ) STRICT;
 
+-- The Groups this workspace joined from another person's share, by wire id.
+-- Their threads keep local counts and never take an account mark. A shared
+-- lane records each one as it applies the Group's ops; this backfill finds
+-- the ones an earlier build already applied.
+CREATE TABLE chat_joined_channels (
+    workspace_id TEXT NOT NULL,
+    wire_id      TEXT NOT NULL CHECK (length(CAST(wire_id AS BLOB)) > 0),
+    PRIMARY KEY (workspace_id, wire_id)
+) STRICT;
+INSERT OR IGNORE INTO chat_joined_channels (workspace_id, wire_id)
+SELECT workspace_id, wire_id FROM (
+    SELECT workspace_id,
+           CASE WHEN json_valid(payload_json)
+                THEN json_extract(payload_json, '$.wireId') END AS wire_id
+    FROM replication_log
+    WHERE op_kind = 'chat.channel.create' AND origin_id GLOB 'shared:*'
+    UNION
+    SELECT workspace_id,
+           CASE WHEN json_valid(payload_json)
+                THEN json_extract(payload_json, '$.channelWireId') END AS wire_id
+    FROM replication_log
+    WHERE op_kind = 'chat.thread.create' AND origin_id GLOB 'shared:*'
+)
+WHERE typeof(wire_id) = 'text' AND length(CAST(wire_id AS BLOB)) > 0;
+
+-- Finds an account's journaled read mark for one thread, so an authorized
+-- mark publishes a coordinate that was stored without a record.
+CREATE INDEX replication_log_thread_read ON replication_log(
+    workspace_id, json_extract(payload_json, '$.accountUserId'),
+    json_extract(payload_json, '$.threadId')
+) WHERE op_kind = 'chat.thread.read.set';
+
 -- A replicated account mark can arrive before its message. SQLite cannot
 -- change a CHECK in place, so the parking table is rebuilt with every row kept.
 CREATE TABLE chat_pending_replication_next (
