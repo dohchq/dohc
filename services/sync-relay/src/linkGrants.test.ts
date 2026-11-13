@@ -2196,6 +2196,14 @@ describe("explicit public Edit release", () => {
     ...jsonBody({secret}), headers: {"content-type": "application/json", "x-dohc-relay-exchange-key": exchangeKey},
   });
 
+  it("refuses pinned Edit creation even with release enabled", async () => {
+    const storage = await newStorage(), enabled = handler(storage, releaseOptions);
+    await enabled(request(OWNER, "/sync/workspaces", jsonBody({workspaceId: WORKSPACE})));
+    expect((await enabled(request(OWNER, `/sync/${WORKSPACE}/shares/links`, jsonBody({versionId: "version-pinned", access: "edit"})))).status).toBe(400);
+    expect(storage.listSharesGrantedBy(OWNER)).toEqual([]);
+    expect((await enabled(request(OWNER, `/sync/${WORKSPACE}/shares/links`, jsonBody({paths: ["docs"], access: "edit"})))).status).toBe(200);
+  });
+
   it("issues Edit only when released, then permits narrowing after release is removed", async () => {
     const storage = await newStorage();
     const enabled = handler(storage, releaseOptions);
@@ -2224,15 +2232,6 @@ describe("explicit public Edit release", () => {
 });
 
 describe("named share origin isolation", () => {
-
-  it("refuses pinned Edit creation even with release enabled", async () => {
-    const storage = await newStorage(), enabled = handler(storage, releaseOptions);
-    await enabled(request(OWNER, "/sync/workspaces", jsonBody({workspaceId: WORKSPACE})));
-    expect((await enabled(request(OWNER, `/sync/${WORKSPACE}/shares/links`, jsonBody({versionId: "version-pinned", access: "edit"})))).status).toBe(400);
-    expect(storage.listSharesGrantedBy(OWNER)).toEqual([]);
-    expect((await enabled(request(OWNER, `/sync/${WORKSPACE}/shares/links`, jsonBody({paths: ["docs"], access: "edit"})))).status).toBe(200);
-  });
-
   it("isolates promoted recipients with equal replica sequences and learned origins", async () => {
     const storage = await newStorage();
     const h = handler(storage);
