@@ -1,3 +1,4 @@
+import { DECLARATION_FAMILIES } from "@dohc/workspace-contracts/all-declarations";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import type { OperationDeclaration, OperationFamily } from "@dohc/workspace-contracts/operation-declaration";
 import type { z } from "zod";
@@ -47,12 +48,15 @@ type DeclaredRow<Declaration extends OperationDeclaration> = {
   readonly result: Declaration["ipc"] extends { readonly result: infer Result extends z.ZodType } ? Result : Declaration["result"];
 };
 
-// The rows of declared operations. Each runs inside the sending window's
-// active workspace; a declaration cannot choose another guard.
-export function declaredRows<Family extends OperationFamily & { readonly [Name in keyof Family]: { readonly capabilityId: CapabilityId } }>(
-  family: Family,
-  workspaceId: z.ZodType<string>,
-): { readonly [Name in keyof Family]: DeclaredRow<Family[Name]> } {
+type Families = typeof DECLARATION_FAMILIES;
+type DeclaredRows<Family> = { readonly [Name in keyof Family]: Family[Name] extends OperationDeclaration ? DeclaredRow<Family[Name]> : never };
+
+// The rows of one listed family, named by its key in DECLARATION_FAMILIES, so
+// a family that is not listed there gets no IPC rows. Each row runs inside the
+// sending window's active workspace; a declaration cannot choose another guard.
+export function declaredRows<Key extends keyof Families>(key: Key, workspaceId: z.ZodType<string>): DeclaredRows<Families[Key]> {
+  if (!Object.hasOwn(DECLARATION_FAMILIES, key)) throw new Error(`${key} is not a listed family.`);
+  const family: OperationFamily = DECLARATION_FAMILIES[key];
   const rows: Record<string, unknown> = Object.fromEntries(Object.entries(family).map(([name, declaration]) => [name, {
     capabilityId: declaration.capabilityId,
     channel: declaration.ipc.channel,
@@ -62,7 +66,7 @@ export function declaredRows<Family extends OperationFamily & { readonly [Name i
     payload: declaration.input.extend({ workspaceId }),
     result: declaration.ipc.result ?? declaration.result,
   }]));
-  return rows as { readonly [Name in keyof Family]: DeclaredRow<Family[Name]> };
+  return rows as DeclaredRows<Families[Key]>;
 }
 
 type Reply<Definition> =

@@ -1,4 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
+import { z } from "zod";
 import type { LINKS_DECLARATIONS } from "@dohc/workspace-contracts/links-declarations";
 
 afterEach(() => {
@@ -44,7 +45,13 @@ it("refuses an IPC table whose family the list does not name", async () => {
     return { DECLARATION_FAMILIES: { chat } };
   });
   // linksOperations.ts also fails the typecheck: the list has no links family.
-  await expect(import("./operationTables")).rejects.toThrow("Cannot convert undefined or null to object");
+  await expect(import("./operationTables")).rejects.toThrow("links is not a listed family.");
+});
+
+it("makes IPC rows only for a listed family", async () => {
+  const { declaredRows } = await import("./operationTable");
+  // @ts-expect-error notes is not a key of DECLARATION_FAMILIES.
+  expect(() => declaredRows("notes", z.string())).toThrow("notes is not a listed family.");
 });
 
 it("loads every table with distinct channels", async () => {

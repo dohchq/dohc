@@ -12,6 +12,7 @@ import { CLI_COMMANDS } from "@dohc/cli/args";
 import { renderCliHelp } from "@dohc/cli/help";
 import { CLI_CAPABILITIES, DECLARED_VERBS } from "@dohc/cli/protocol";
 import { advertisedCapabilityTools } from "@dohc/mcp/capability-exposure-fixture";
+import { DECLARATION_FAMILIES } from "@dohc/workspace-contracts/all-declarations";
 import { declaredRows, type OperationDefinition } from "./operationTable";
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
@@ -21,8 +22,8 @@ const readJson = <T>(path: URL) => JSON.parse(read(path)) as T;
 const writeJson = (path: URL, value: unknown) => writeFileSync(path, JSON.stringify(value, null, 2) + "\n");
 
 const operations = Object.values(DECLARED_VERBS);
-const family = Object.fromEntries(operations.map(operation => [operation.cli.verb, operation])) as Record<string, (typeof operations)[number]>;
-const rows: OperationDefinition[] = Object.values(declaredRows(family, z.string()));
+const families = Object.keys(DECLARATION_FAMILIES) as (keyof typeof DECLARATION_FAMILIES)[];
+const rows: OperationDefinition[] = families.flatMap(key => Object.values<OperationDefinition>(declaredRows(key, z.string())));
 const labels = operations.map(({ cli }) => cli.command.join(" "));
 const groups: string[] = [...new Set(operations.map(({ cli }) => cli.command[0]))];
 

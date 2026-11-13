@@ -46,7 +46,6 @@ import {
   StartChannelThreadResult,
   WORKSPACE_ID,
 } from "./bridgeContract";
-import { DECLARATION_FAMILIES } from "@dohc/workspace-contracts/all-declarations";
 import { distinct } from "@dohc/workspace-contracts/operation-declaration";
 import { declaredRows, type OperationTable } from "./operationTable";
 
@@ -198,4 +197,4 @@ const listedChatOperations = {
   },
 } as const satisfies OperationTable;
 
-export const chatOperations = distinct(listedChatOperations, declaredRows(DECLARATION_FAMILIES.chat, WORKSPACE_ID)) satisfies OperationTable;
+export const chatOperations = distinct(listedChatOperations, declaredRows("chat", WORKSPACE_ID)) satisfies OperationTable;
