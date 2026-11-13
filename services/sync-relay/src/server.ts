@@ -622,7 +622,9 @@ export function createSyncRelayHandler({
     claimPendingShares,
     requireShareAction,
     chatResolverFor,
-    lookupUserDisplayName,
+    // Presence names people without recording the name. A write would make
+    // every waiting poll prepare its snapshot again.
+    lookupAccountDisplayName,
   );
 
   function requireShareWorkspace(share: { workspaceId: string }, workspaceId: string): void {
