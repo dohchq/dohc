@@ -1332,6 +1332,22 @@ export function remapWorkbenchPaths(
   });
 }
 
+// The groups whose active tab becomes a file it did not show before: each
+// mounts a new document, which is a file open.
+export function groupsMountingNewDocument(
+  current: WorkbenchState,
+  next: WorkbenchState,
+): string[] {
+  return next.editorGroups.flatMap((after) => {
+    const before = current.editorGroups.find((group) => group.id === after.id);
+    return after.activeTab !== before?.activeTab &&
+      after.activeTab !== null &&
+      !TAB_KINDS[parseTab(after.activeTab).kind].virtual
+      ? [after.id]
+      : [];
+  });
+}
+
 // Restored tabs can outlive their files: a version rollback, an external
 // delete, or a share pull changes the tree without an explorer op, so
 // remapWorkbenchPaths never sees it and Open Editors keeps offering a path

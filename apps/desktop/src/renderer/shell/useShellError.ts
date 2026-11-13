@@ -12,7 +12,7 @@ import { MAX_OPEN_TABS } from "../workbench/workbenchState";
 import { TextNotSavedError, type ErrorDetailField } from "./copyDetails";
 import { reportsNoticeText } from "./useReportsNotice";
 import type { DirectWriteNotice, DirectWriteNoticeKind } from "./useShareDirectWrites";
-import { SAVED_TABS_TITLE, type SavedTabsNotice } from "./useSavedTabsReread";
+import { SAVED_TABS_TITLE, type SavedTabsNotice } from "./useSavedWorkbenchLayout";
 
 // A file dohc kept while it saved, as its Notices row reads, and the step
 // that moves it to a visible copy.

@@ -52,7 +52,6 @@ import type {
   WorkspaceActivityEvent,
   WorkspaceSummary,
   WorkspacePolicyFile,
-  GetWorkspaceUiStateResult,
 } from "../ipc/bridgeContract";
 import {
   activityPathsAffectWorkspaceListing,
@@ -63,7 +62,7 @@ import {
   saveOnlyLiveDocuments,
 } from "../ipc/bridgeContract";
 import { DROP_IMPORT_LIMITS, DROP_IMPORT_REFUSALS, isEditorMenuCommand } from "../ipc/channels";
-import { isHistoryCatchingUp, isLiveEditingRefusal, isLiveFolderRefusal, isPathTaken, isPrivacyDenied, isRestorePolicyRefusal, isLivePageOwnedRefusal, isSharedLiveFileRefusal, isStoppedWorkspaceRead, liveEditingStoppedPaths, livePageBody, livePagesBody, livePagesTitle, livePageTitle, readError, SHARED_LIVE_RESTORE_BODY, sharedLiveRestoreTitle, shouldRecheckShareAccess, withErrorWords } from "../ipc/errorWords";
+import { isHistoryCatchingUp, isLiveEditingRefusal, isLiveFolderRefusal, isPathTaken, isPrivacyDenied, isRestorePolicyRefusal, isLivePageOwnedRefusal, isSharedLiveFileRefusal, liveEditingStoppedPaths, livePageBody, livePagesBody, livePagesTitle, livePageTitle, readError, SHARED_LIVE_RESTORE_BODY, sharedLiveRestoreTitle, shouldRecheckShareAccess, withErrorWords } from "../ipc/errorWords";
 import { SyncedDeletionRevivalError } from "../workspaces/syncedDeletionRefusal";
 import {
   hasUnacknowledgedShareSkips,
@@ -132,7 +131,7 @@ import { useSyncFailureNotice } from "./shell/useSyncFailureNotice";
 import { useCollectionsWaitingNotice } from "./shell/useCollectionsWaitingNotice";
 import { useKeptFilesNotice } from "./shell/useKeptFilesNotice";
 import { useRetainedCopiesNotice } from "./shell/useRetainedCopiesNotice";
-import { useSavedTabsReread } from "./shell/useSavedTabsReread";
+import { useSavedWorkbenchLayout } from "./shell/useSavedWorkbenchLayout";
 import { leaveAppPage, routeAppTab } from "./shell/appTabOrder";
 import { useDriveLimitNotice } from "./shell/useDriveLimitNotice";
 import { useNetworkShareNotice } from "./shell/useNetworkShareNotice";
@@ -151,7 +150,6 @@ import {
   rendererMarks,
 } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
-import { useAsyncResponseEffect } from "./useAsyncResponseEffect";
 import type { RelayShareTarget } from "./RelayShareDialog";
 import { useSnapshotLane } from "./snapshotLane";
 import { CloudLogin } from "./CloudLogin";
@@ -273,7 +271,6 @@ import {
 } from "./workbench/WorkspaceVersions";
 import { VersionsPage } from "./workbench/VersionsPage";
 import { WhatsNewPage } from "./workbench/WhatsNewPage";
-import { openUnseenWhatsNewOnce } from "./whatsNew";
 import {
   ProposalReviewDialog,
   proposerName,
@@ -305,9 +302,9 @@ import {
   HISTORY_TAB_PATH,
   VERSIONS_TAB_PATH,
   WHATS_NEW_TAB_PATH,
+  groupsMountingNewDocument,
   isViewId,
   MAX_OPEN_TABS,
-  mergeSavedTabs,
   moveTab,
   moveTabToGroup,
   openTab,
@@ -321,10 +318,8 @@ import {
   keepActiveViewShown,
   parseAppViewId,
   sidebarViews,
-  parseUiState,
   recordRecentFile,
   remapWorkbenchPaths,
-  serializeUiState,
   siteTabPath,
   setCollectionActiveView,
   setCollectionOpenRecord,
@@ -412,20 +407,6 @@ function failedMovesChanged(
   return false;
 }
 
-function groupsMountingNewDocument(
-  current: WorkbenchState,
-  next: WorkbenchState,
-): string[] {
-  return next.editorGroups.flatMap((after) => {
-    const before = current.editorGroups.find((group) => group.id === after.id);
-    return after.activeTab !== before?.activeTab &&
-      after.activeTab !== null &&
-      !TAB_KINDS[parseTab(after.activeTab).kind].virtual
-      ? [after.id]
-      : [];
-  });
-}
-
 export function pendingHeadingTargetForOpen(
   path: string,
   target?: HeadingTarget,
@@ -457,13 +438,6 @@ const SHARE_COLLISION_RECORD_ROW = "share-collision-record";
 function collisionRecordSetAsideMessage(): string {
   return "dohc could not read this share's record of your files with the same path as a shared file. dohc keeps these files apart.";
 }
-
-// The commands that still run under the opening cover.
-const SETTINGS_COMMANDS: ReadonlySet<CommandId> = new Set(["settings", "settings-appearance", "settings-agents"]);
-
-export const WORKBENCH_PERSIST_DELAY_MS = 500;
-// How long after admission the opening cover says it waits for the saved tabs.
-export const COVER_WAIT_LINES_MS = 5_000;
 
 function scheduleMarkdownEditorPreload(): () => void {
   let idleHandle: number | null = null;
@@ -779,7 +753,7 @@ export function DesktopWorkspaceShell(props: {
     admit: admitWorkspace,
     markSwitchPhase: markCurrentSwitchPhase,
   } = visit;
-  const { state: wb, latest: wbRef, replace: writeWb, update: mutateWb, navigation: dmNavigationRequest } = visit.workbench;
+  const { state: wb, latest: wbRef, update: mutateWb, navigation: dmNavigationRequest } = visit.workbench;
   const openTabs = useMemo(() => allTabs(wb), [wb.editorGroups]);
   const {
     callbacksForEditor,
@@ -1553,43 +1527,53 @@ export function DesktopWorkspaceShell(props: {
     setSearchScrollTarget((current) => (current?.nonce === nonce ? null : current));
   }, []);
 
-  // Restore per-workspace workbench state from .dohc/local/ui-state.json. The shell
-  // renders at once under the opening cover (launch budgets key off shell
-  // visibility); the cover lifts in the commit that applies the stored state,
-  // or the defaults when there is none or the read fails. The stored state
-  // replaces whatever changed under the cover, and file opens wait for it, so
-  // nothing done under the cover loses the saved tabs. Writes start once the
-  // read answers. A failed read can't say what is saved, so after one, writes
-  // wait for a later read to apply the saved tabs, and a default-state write
-  // can never clobber the stored one.
-  const uiStateLoaded = useRef(false);
-  const restoredActiveFileSurface = useRef<{
-    selectionGeneration: number;
-    groupId: string;
-    path: string;
-  } | null>(null);
-  const [restoredSurfaceCommit, setRestoredSurfaceCommit] = useState<{
-    selectionGeneration: number;
-    waitsForFile: boolean;
-  } | null>(null);
-  // Lift the opening cover in the same commit as the saved layout or defaults.
-  // Admission and the saved-layout read never wait on this state.
-  const workbenchRestored =
-    restoredSurfaceCommit?.selectionGeneration === workspaceSelectionGeneration;
-  // A file open waits for the saved layout. While the opening cover shows, a
-  // command other than Settings does nothing and is not replayed. Settings
-  // opens from every entry, as its shortcut does, and doesn't change the layout.
-  const workbenchRestoredRef = useRef(false);
-  const heldFileOpens = useRef<[string, HeadingTarget?, Omit<ScrollTarget, "path">?][]>([]);
-  const openingCoverShown = useRef(false);
-  // The tab paths the stored state restored — the only ones a file listing is
-  // allowed to close. Empty until the load applies, and empty forever when
-  // nothing was stored. STATE, not a ref: the reconciliation below reads it,
-  // and the listing can win the race against this load, so it has to re-run
-  // when the restore lands.
-  const [restoredTabPaths, setRestoredTabPaths] = useState<ReadonlySet<string>>(
-    () => new Set<string>(),
+  const openVirtualTab = useCallback(
+    (path: string, recent = false, once = false) => {
+      const targetGroupId = wbRef.current.activeEditorGroup;
+      invalidateDeferredFileOpen(targetGroupId);
+      const current = wbRef.current;
+      const next = (once ? openTabOnce : openTab)(current, path, targetGroupId);
+      const targetAlreadyOwnsPath = current.editorGroups
+        .find((group) => group.id === targetGroupId)
+        ?.tabs.some((tab) => tab.path === path);
+      if (
+        next === current &&
+        !targetAlreadyOwnsPath &&
+        allTabs(current).length >= MAX_OPEN_TABS
+      ) {
+        showTabLimitError(allTabs(current).length, "open another tab");
+        return;
+      }
+      clearTabLimitError();
+      mutateWb(() => (recent ? recordRecentFile(next, path) : next));
+    },
+    [
+      clearTabLimitError,
+      invalidateDeferredFileOpen,
+      mutateWb,
+      showTabLimitError,
+    ],
   );
+  const {
+    restored: workbenchRestored,
+    coverWaits,
+    onRestoredFileSurfaceReady,
+    holdFileOpen,
+    allowsCommand,
+  } = useSavedWorkbenchLayout({
+    visit,
+    prepareRestoredTabPruning,
+    listingsSettled,
+    dirtyPaths,
+    showSavedTabsNotice,
+    openVirtualTab,
+    openFailed: workspaceOpenFailure !== null,
+  });
+
+  // The close warning for set-aside drafts lives above the error boundary
+  // (RecoveryCloseGuard in main.tsx) — a guard here would
+  // unmount with a crashed shell and the crash screen's reload would destroy
+  // the drafts unannounced.
 
   const sidebarSettings = props.userSettings?.settings.sidebar ?? DEFAULT_SIDEBAR_SETTINGS;
   // A shared view has chat per file, in About, and no workspace-wide listing,
@@ -1693,241 +1677,6 @@ export function DesktopWorkspaceShell(props: {
     },
     [reportShellError, setAppPinned, workspaceId],
   );
-
-  // After the saved tabs return, What's new opens over them once per release,
-  // reusing a restored What's new tab in any group. At the tab limit, a new
-  // tab would close one of the person's tabs, so it waits for a launch with
-  // room.
-  const openUnseenWhatsNew = async () => {
-    const id = workspaceIdRef.current;
-    const canOpen = () => {
-      if (workspaceIdRef.current !== id) return false;
-      const tabs = allTabs(wbRef.current);
-      return tabs.length < MAX_OPEN_TABS || tabs.some((tab) => tab.path === WHATS_NEW_TAB_PATH);
-    };
-    const open = () => openVirtualTab(WHATS_NEW_TAB_PATH, false, true);
-    if (!(await openUnseenWhatsNewOnce(canOpen, open)) || workspaceIdRef.current !== id) return;
-    // A restored file it covers no longer holds back the restored-surface
-    // phase. A file in another group still shows and reports itself.
-    const surface = restoredActiveFileSurface.current;
-    if (
-      surface !== null &&
-      surface.groupId === activeGroup(wbRef.current).id &&
-      activeTabPath(wbRef.current) === WHATS_NEW_TAB_PATH &&
-      markCurrentSwitchPhase("restored-active-surface-ready")
-    ) {
-      restoredActiveFileSurface.current = null;
-    }
-  };
-
-  // A failed read is read again once the workspace opens (useSavedTabsReread).
-  const layoutReadStartedAt = useRef(0);
-  const [layoutReadFailure, setLayoutReadFailure] = useState<{
-    admission: typeof workspaceAdmission;
-    startedAt: number;
-  } | null>(null);
-  useAsyncResponseEffect(
-    async () => {
-      await workspaceAdmission.promise;
-      if (workspaceAdmission.superseded) {
-        throw new DOMException("The workspace selection changed.", "AbortError");
-      }
-      layoutReadStartedAt.current = Date.now();
-      return bridge().getWorkspaceUiState({ workspaceId });
-    },
-    {
-      onSuccess: (stored) => {
-        let restoredFileSurface: typeof restoredActiveFileSurface.current = null;
-        if (stored) {
-          const parsed = parseUiState(stored);
-          const restoredGroup = activeGroup(parsed);
-          if (
-            restoredGroup.activeTab !== null &&
-            !TAB_KINDS[parseTab(restoredGroup.activeTab).kind].virtual
-          ) {
-            restoredFileSurface = {
-              selectionGeneration: workspaceSelectionGeneration,
-              groupId: restoredGroup.id,
-              path: restoredGroup.activeTab,
-            };
-          }
-          // Order matters: writeWb (which sets wbRef), THEN enable flushes — a
-          // beforeunload between "loaded" and the restored state's commit
-          // must flush the restored state, never the stale default.
-          writeWb(parsed);
-          setRestoredTabPaths(new Set(allTabs(parsed).map((tab) => tab.path)));
-        }
-        restoredActiveFileSurface.current = restoredFileSurface;
-        setRestoredSurfaceCommit({
-          selectionGeneration: workspaceSelectionGeneration,
-          waitsForFile: restoredFileSurface !== null,
-        });
-        uiStateLoaded.current = true;
-        void openUnseenWhatsNew();
-      },
-      onError: (error) => {
-        restoredActiveFileSurface.current = null;
-        setRestoredSurfaceCommit({
-          selectionGeneration: workspaceSelectionGeneration,
-          waitsForFile: false,
-        });
-        // The window's stop message says why. Nothing reads the tabs again
-        // until the workspace opens again, so nothing waits for them either.
-        if (isStoppedWorkspaceRead(error)) return;
-        setLayoutReadFailure({
-          admission: workspaceAdmission,
-          startedAt: layoutReadStartedAt.current,
-        });
-      },
-    },
-    [workspaceAdmission, workspaceId, workspaceSelectionGeneration],
-  );
-  // The saved layout replaces the defaults, and tabs opened since stay open
-  // beside the saved ones, the one in view still in view. A file open in both
-  // keeps its saved place, and an app open now stays in its group so it
-  // doesn't reload. Past the tab limit, saved tabs make room. Saving starts,
-  // with what's shown when nothing was saved.
-  const applySavedLayout = useCallback((stored: GetWorkspaceUiStateResult) => {
-    const shown = wbRef.current;
-    if (stored) {
-      const saved = parseUiState(stored);
-      writeWb(mergeSavedTabs(saved, shown));
-      setRestoredTabPaths(new Set(allTabs(saved).map((tab) => tab.path)));
-    } else {
-      writeWb({ ...shown });
-    }
-    uiStateLoaded.current = true;
-    void openUnseenWhatsNew();
-  }, [writeWb]);
-  useSavedTabsReread({
-    workspaceId,
-    failed: layoutReadFailure?.admission === workspaceAdmission ? layoutReadFailure : null,
-    tabsOpen: () => allTabs(wbRef.current).length > 0,
-    apply: applySavedLayout,
-    show: showSavedTabsNotice,
-  });
-  // The cover's lines for a saved layout that is slow to load.
-  const [coverWaitedFor, setCoverWaitedFor] = useState<typeof workspaceAdmission | null>(null);
-  useEffect(() => {
-    if (!workspaceIsReady || workbenchRestored) return;
-    const timer = setTimeout(() => setCoverWaitedFor(workspaceAdmission), COVER_WAIT_LINES_MS);
-    return () => clearTimeout(timer);
-  }, [workspaceAdmission, workspaceIsReady, workbenchRestored]);
-  const coverWaits = workspaceIsReady && coverWaitedFor === workspaceAdmission;
-  useEffect(() => {
-    if (
-      restoredSurfaceCommit?.selectionGeneration !==
-        workspaceSelectionGeneration ||
-      restoredSurfaceCommit.waitsForFile
-    ) {
-      return;
-    }
-    markCurrentSwitchPhase("restored-active-surface-ready");
-  }, [
-    markCurrentSwitchPhase,
-    restoredSurfaceCommit,
-    workspaceSelectionGeneration,
-  ]);
-  const onRestoredFileSurfaceReady = useCallback(
-    (path: string, groupId: string) => {
-      const target = restoredActiveFileSurface.current;
-      if (
-        target?.selectionGeneration !== workspaceSelectionGeneration ||
-        target.groupId !== groupId ||
-        target.path !== path
-      ) {
-        return;
-      }
-      if (markCurrentSwitchPhase("restored-active-surface-ready")) {
-        restoredActiveFileSurface.current = null;
-      }
-    },
-    [markCurrentSwitchPhase, workspaceSelectionGeneration],
-  );
-
-  // Debounced persist (500ms): tabs, view, panel visibility/width, rail.
-  useEffect(() => {
-    if (!uiStateLoaded.current) return;
-    const timer = setTimeout(() => {
-      void bridge()
-        .setWorkspaceUiState({ workspaceId, state: serializeUiState(wb) })
-        .catch(() => undefined);
-    }, WORKBENCH_PERSIST_DELAY_MS);
-    return () => clearTimeout(timer);
-  }, [wb, workspaceId]);
-
-  // Durability at the edges: the debounce above silently drops changes made
-  // within 500ms of quitting or switching workspaces — flush the latest state
-  // fire-and-forget on beforeunload and on unmount (workspace switch remounts
-  // the shell via key={workspaceId}). Gated on the read having answered so a
-  // default snapshot can never clobber stored state.
-  useEffect(() => {
-    const flush = () => {
-      if (!uiStateLoaded.current) return;
-      void bridge()
-        .setWorkspaceUiState({ workspaceId, state: serializeUiState(wbRef.current) })
-        .catch(() => undefined);
-    };
-    window.addEventListener("beforeunload", flush);
-    return () => {
-      window.removeEventListener("beforeunload", flush);
-      flush();
-    };
-  }, [workspaceId]);
-
-  // The close warning for set-aside drafts lives above the error boundary
-  // (RecoveryCloseGuard in main.tsx) — a guard here would
-  // unmount with a crashed shell and the crash screen's reload would destroy
-  // the drafts unannounced.
-
-  // Keep a restored tab only while the workspace still lists its file. A
-  // rollback, an external delete, or a share pull changes the tree without an
-  // explorer op, so nothing remaps the stored tabs and Open Editors keeps a
-  // dead path across restarts.
-  //
-  // Every listing is checked, not just the first. A shared workspace lists
-  // twice on open — once at mount, once after refreshShareView pulls the
-  // changed paths — and consuming whichever landed first would either miss a
-  // remote delete or judge the tabs against a pre-pull snapshot. Only the
-  // restored paths are eligible (see pruneMissingRestoredTabs), so a listing
-  // that raced a create can never close a tab opened this session.
-  //
-  // Both inputs are dependencies because either can arrive first: a listing
-  // that beats the ui-state load finds nothing restored yet, and the restore
-  // is what has to re-run the check.
-  useEffect(() => {
-    const prune = prepareRestoredTabPruning(restoredTabPaths, dirtyPaths);
-    if (prune === null) return;
-    const current = wbRef.current;
-    const next = prune(current);
-    if (next === current) return;
-    const groupsOpeningFiles = groupsMountingNewDocument(current, next);
-    if (
-      next.activeEditorGroup !== current.activeEditorGroup ||
-      activeTabPath(next) !== activeTabPath(current)
-    ) {
-      // This commits through the direct setter, on purpose: reconciling is not
-      // a user action. But it moves the active tab exactly as mutateWb does, so
-      // it owes the same invalidation — otherwise an in-flight DM navigation
-      // still passes its isCurrent() check and lands its destination on top of
-      // the tab we just activated.
-      invalidateDmNavigation(dmNavigationRequest);
-    }
-    // Activating a neighbour remounts the keyed inspector — that is an open
-    // (closeFileTab idiom). Without the mark, the inspector's mount measure
-    // brackets whatever stale mark came before it.
-    for (const groupId of groupsOpeningFiles) {
-      rendererMarks.mark(fileOpenStartMark(groupId));
-    }
-    writeWb(next);
-  }, [
-    prepareRestoredTabPruning,
-    listingsSettled,
-    restoredTabPaths,
-    dirtyPaths,
-    wb.activeEditorGroup,
-    focusedTabPath,
-  ]);
 
   const search = useWorkspaceSearch(
     workspaceId,
@@ -2860,10 +2609,7 @@ export function DesktopWorkspaceShell(props: {
       target?: HeadingTarget,
       scrollTarget?: Omit<ScrollTarget, "path">,
     ) => {
-      if (!workbenchRestoredRef.current) {
-        heldFileOpens.current.push([path, target, scrollTarget]);
-        return;
-      }
+      if (holdFileOpen(() => openFile(path, target, scrollTarget))) return;
       const targetGroupId = wbRef.current.activeEditorGroup;
       const requestSequence = invalidateDeferredFileOpen(targetGroupId);
       const isCurrentRequest = () =>
@@ -2940,6 +2686,7 @@ export function DesktopWorkspaceShell(props: {
       flushStableDrafts,
       hasDrafts,
       clearTabLimitError,
+      holdFileOpen,
       invalidateDeferredFileOpen,
       mutateWb,
       reportShellError,
@@ -2947,13 +2694,6 @@ export function DesktopWorkspaceShell(props: {
       workspaceId,
     ],
   );
-  // Set here, not in render, so a file open that lands before this runs still
-  // waits behind the held ones.
-  useEffect(() => {
-    workbenchRestoredRef.current = workbenchRestored;
-    if (!workbenchRestored) return;
-    for (const held of heldFileOpens.current.splice(0)) openFile(...held);
-  }, [openFile, workbenchRestored]);
   // Main writes the copy next to the file and keeps the queue; a slow answer
   // for a workspace this window left paints nothing. One save per file runs
   // at a time, and asking again while it runs waits for it.
@@ -3075,33 +2815,6 @@ export function DesktopWorkspaceShell(props: {
   const openAppTab = useCallback(
     (siteRoot: string) => openPathWithHeading(siteTabPath(siteRoot)),
     [openPathWithHeading],
-  );
-  const openVirtualTab = useCallback(
-    (path: string, recent = false, once = false) => {
-      const targetGroupId = wbRef.current.activeEditorGroup;
-      invalidateDeferredFileOpen(targetGroupId);
-      const current = wbRef.current;
-      const next = (once ? openTabOnce : openTab)(current, path, targetGroupId);
-      const targetAlreadyOwnsPath = current.editorGroups
-        .find((group) => group.id === targetGroupId)
-        ?.tabs.some((tab) => tab.path === path);
-      if (
-        next === current &&
-        !targetAlreadyOwnsPath &&
-        allTabs(current).length >= MAX_OPEN_TABS
-      ) {
-        showTabLimitError(allTabs(current).length, "open another tab");
-        return;
-      }
-      clearTabLimitError();
-      mutateWb(() => (recent ? recordRecentFile(next, path) : next));
-    },
-    [
-      clearTabLimitError,
-      invalidateDeferredFileOpen,
-      mutateWb,
-      showTabLimitError,
-    ],
   );
   const openVersionCompareTab = useCallback(
     (versionId: string) => {
@@ -5182,8 +4895,8 @@ export function DesktopWorkspaceShell(props: {
     ],
   );
   const runCommand = useCallback((id: CommandId) => {
-    if (!openingCoverShown.current || SETTINGS_COMMANDS.has(id)) commandHandlers[id]();
-  }, [commandHandlers]);
+    if (allowsCommand(id)) commandHandlers[id]();
+  }, [allowsCommand, commandHandlers]);
   const commands = useMemo<Command[]>(
     () => paletteCommandRows(commandContext).map((row) => ({ ...row, run: () => runCommand(row.id) })),
     [commandContext, runCommand],
@@ -6209,8 +5922,6 @@ export function DesktopWorkspaceShell(props: {
   useEffect(() => {
     setStoreDetailsOpen(false);
   }, [workspaceId]);
-  // A stopped workspace or a failed open shows in place of the opening cover.
-  openingCoverShown.current = !workbenchRestored && !workspaceStopped && (workspaceIsReady || !workspaceOpenFailure);
   visit.stopped.current = workspaceStopped;
   const storeDetailFields = useMemo(
     (): ReadonlyArray<readonly [string, string | null | undefined]> => [

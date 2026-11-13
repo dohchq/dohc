@@ -5,7 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { AppViewRequest, WorkspaceUiState } from "../ipc/bridgeContract";
 import { editorTabTestId } from "../testPins";
-import { SAVED_TABS_RESTORE } from "./shell/useSavedTabsReread";
+import { SAVED_TABS_RESTORE } from "./shell/useSavedWorkbenchLayout";
 import type { ExplorerProps } from "./workbench/Explorer";
 import { siteTabPath } from "./workbench/workbenchState";
 import { STORED_STATE, WORKSPACE, makeBridge, renderShell } from "./DesktopWorkspaceShell.testHarness";
