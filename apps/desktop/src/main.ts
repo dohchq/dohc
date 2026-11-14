@@ -681,6 +681,7 @@ import {
   createOwnerPendingShare,
   listOwnerPendingSharePaths,
 } from "./workspaces/ownerPendingShare";
+import { createNotSentWhileOpen } from "./workspaces/notSentWhileOpen";
 import { onWorkspaceCaptureSettled } from "./workspaces/captureActivityBridge";
 import { resumeWorkspaceLinkRewrites } from "./workspaces/workspaceLinkRewrites";
 import { createServerOwnerConnection } from "./workspaces/serverOwnerConnection";
@@ -3318,15 +3319,22 @@ function engineForWorkspace(
     },
     // Workspace activity keeps the Collections wait, so it outlasts this
     // engine when the person signs out.
-    afterPass: ({ failed }) =>
-      withWorkspaceAttachment(workspace, (lease) =>
-        workspaceActivity.syncPassEnded(
-          canonicalWorkspaceFor(lease),
-          lease.state.activity,
-          failed,
-          () => daemonRelay.collectionsWaiting(),
-        ),
-      ) ?? Promise.resolve(false),
+    afterPass: async ({ failed }) => {
+      const collections =
+        withWorkspaceAttachment(workspace, (lease) =>
+          workspaceActivity.syncPassEnded(
+            canonicalWorkspaceFor(lease),
+            lease.state.activity,
+            failed,
+            () => daemonRelay.collectionsWaiting(),
+          ),
+        ) ?? Promise.resolve(false);
+      const notSent = failed
+        ? false
+        : notSentWhileOpen.read(workspace.workspaceId, () => daemonRelay.firstExportsHeldOpen());
+      const [collectionsChanged, notSentChanged] = await Promise.all([collections, notSent]);
+      return collectionsChanged || notSentChanged;
+    },
     capture,
     onChange: createRelayOnChange(workspace),
     // Joined shared channels refresh on the same cadence as the
@@ -3715,6 +3723,7 @@ const activity = {
       ownerLiveStopFailures: desktopEngine.ownerLiveStopFailures(workspaceId),
       ownerLiveQuarantines: desktopEngine.ownerLiveQuarantines(workspaceId),
       ownerPendingShare: [...ownerPendingShare.paths(workspaceId)],
+      notSentWhileOpen: [...notSentWhileOpen.paths(workspaceId)],
       hasOwnerLiveRefusals: desktopEngine.hasOwnerLiveRefusals(workspaceId),
     })),
   recordShareViewStoreRefusal: (
@@ -6867,6 +6876,9 @@ const { startDesktopCliServer } = createDesktopCliServer({
   chatDispatchService,
   rememberPendingCliRunMessageLink,
 });
+
+// New notes whose first file waits for their open editor to be left.
+const notSentWhileOpen = createNotSentWhileOpen();
 
 // Shared notes whose files trail their text while edits wait for the server.
 const ownerPendingShare = createOwnerPendingShare({

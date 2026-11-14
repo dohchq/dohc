@@ -8268,6 +8268,7 @@ export function DesktopWorkspaceShell(props: {
                                   reportError: reportShellError,
                                   focus: sharingFocus,
                                   onFocused: clearSharingFocus,
+                                  notSentWhileOpen: syncStatus?.notSentWhileOpen ?? [],
                                 }}
                                 selectedAppRoot={selectedAppRoot}
                                 openAppTab={openAppTab}
@@ -9806,6 +9807,7 @@ export function DesktopWorkspaceShell(props: {
                                 disconnectedAgents={disconnectedLinkAgents}
                                 accessContext={accessContext}
                                 server={cloudStatus?.workspaceServerUrl ?? null}
+                                notSentWhileOpen={syncStatus?.notSentWhileOpen ?? []}
                                 onOpenSharing={(target) => {
                                   setSharingFocus(target);
                                   mutateWb((state) => ({

@@ -528,6 +528,8 @@ export interface EngineRelayWorkspaceClient {
   commitCursor(cursor: Record<string, JsonValue | undefined>): Promise<CommitRelayCursorResult>;
   // Collections updates wait for a pull that has not committed its last page.
   collectionsWaiting(): Promise<boolean>;
+  // Notes whose first file record waits only for their open editing session to end.
+  firstExportsHeldOpen(): Promise<string[]>;
   recoverOrigin(): Promise<RecoverRelayOriginResult>;
   claim(): Promise<void>;
   bootstrapJoinIdentity(
@@ -885,6 +887,13 @@ export class EngineRelayClient {
             workspaceId: workspace.workspaceId,
           }),
         ).waiting,
+      firstExportsHeldOpen: async () =>
+        decodeWorkspaceResult(
+          WORKSPACE_METHOD.syncFirstExportsHeldOpen,
+          await request(WORKSPACE_METHOD.syncFirstExportsHeldOpen, {
+            workspaceId: workspace.workspaceId,
+          }),
+        ).paths,
       recoverOrigin: async () => {
         const result = resultRecord(
           await request("sync.recoverOrigin", {
