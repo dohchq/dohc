@@ -28,7 +28,7 @@ const scopeLimitSeconds = 2 * 60 * 60;
 // a kill, so its receipt and `scope.json` record what happened.
 const scopeMaxGb = 11;
 const scopeMemory = `-p MemoryHigh=${scopeMaxGb - 2}G -p MemoryMax=${scopeMaxGb}G -p OOMPolicy=continue`;
-// The queue distrusts a check that failed after Windows free memory fell below this.
+// The queue distrusts a check that failed after Windows free memory fell below this, on a machine with 30 GiB or more.
 const hostFloorGb = 3;
 // The queue fails an attempt that passes its two-hour limit, so the job stops waiting for its slots
 // and memory in time to finish inside it, as a machine failure the queue retries. Until the attempt's
