@@ -377,6 +377,31 @@ describe("agent threads", () => {
     expect(order).toEqual(["sent message", "read m1"]);
   });
 
+  it("does not remind a thread whose agent stopped serving the workspace before its work ended", async () => {
+    const { agentThreads, tool, save, order, rows } = started(setup({ chief }));
+    tool.state = {
+      ...tool.state,
+      runs: [
+        { id: "run-1", state: "working", requestedAtMs: 100, startedAtMs: 200, endedAtMs: null },
+      ],
+    };
+    agentThreads.watch(WORKSPACE);
+    await vi.waitFor(() => expect(agentThreads.lines(WORKSPACE)).toHaveLength(1));
+
+    // The settings file changes under dohc, and no save tells it: the agent is off.
+    save({ chief: { ...chief, enabled: false } });
+    tool.state = {
+      ...tool.state,
+      working: false,
+      runs: [{ id: "run-1", state: "ended", requestedAtMs: 100, startedAtMs: 200, endedAtMs: 300 }],
+    };
+    signalChatWrite(WORKSPACE);
+
+    await vi.waitFor(() => expect(rows()).toEqual([]));
+    expect(agentThreads.lines(WORKSPACE)).toEqual([]);
+    expect(order).toEqual(["sent message", "read m1"]);
+  });
+
   it("forgets a workspace's lines when the workspace leaves this computer", async () => {
     const { agentThreads, tool, rows } = started(setup({ chief }));
     tool.state = {
