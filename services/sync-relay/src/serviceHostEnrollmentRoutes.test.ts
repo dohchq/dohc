@@ -1075,6 +1075,57 @@ it("retires an owner document, lists it separately, and resumes its retained ide
   );
 });
 
+// Proves: a retired row whose document was deleted leaves Live documents, since
+// Resume has no document to start. Restoring it from History lists it again, and
+// a moved document keeps its row.
+it("drops a retired document's row once it is deleted, and lists it again when restored", async () => {
+  const f = await fixture();
+  f.seed("docs/b.md", "object-b");
+  const deleted = f.storage.ensureOwnedLiveDocument({ intent: "share", ...f.input }),
+    moved = f.storage.ensureOwnedLiveDocument({ intent: "share", ...f.input, path: "docs/b.md" });
+  // The owner ends the Edit link, and the host lets both documents go.
+  expect(f.storage.revokeShare(scope.shareId, 30)).toBe(true);
+  f.release(deleted.objectId);
+  f.release(moved.objectId);
+  const moment = (objectId: string, seq: number, path: string | null) =>
+    f.raw
+      .prepare(`INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms)
+      VALUES (?,?,?,?,'main',?,?,?,?,40)`)
+      .run(
+        scope.workspaceId,
+        objectId,
+        seq,
+        `moment-${objectId}-${seq}`,
+        path,
+        path && "b".repeat(64),
+        path && "text",
+        path && 1,
+      );
+  const retired = async () =>
+    (await (await f.handle(f.request("GET", undefined, {}, "?retired=1"))).json()) as {
+      documents: { path: string; objectId: string }[];
+    };
+  // A delete indexes no path, and the current file goes.
+  moment(deleted.objectId, 2, null);
+  f.raw
+    .prepare("DELETE FROM sync_relay_current_files WHERE workspace_id=? AND path=?")
+    .run(scope.workspaceId, deleted.path);
+  moment(moved.objectId, 2, "docs/c.md");
+  expect((await retired()).documents).toEqual([
+    { path: "docs/b.md", objectId: moved.objectId, status: "retired", stopped: false },
+  ]);
+  // Restoring from History records a moment with the path again.
+  moment(deleted.objectId, 3, deleted.path);
+  f.raw
+    .prepare("INSERT INTO sync_relay_current_files VALUES (?,'main',?,?,'text',1)")
+    .run(scope.workspaceId, deleted.path, "b".repeat(64));
+  expect((await retired()).documents.map((row) => row.objectId)).toEqual([
+    deleted.objectId,
+    moved.objectId,
+  ]);
+  expect((await f.handle(f.request("POST", { path: deleted.path }))).status).toBe(202);
+});
+
 // Proves: while the service host still holds an edit the relay has not
 // admitted, Stop answers waiting and fences nothing: no retirement opens and
 // the document stays live. Once the edit is delivered, Stop retires through it.
