@@ -67,7 +67,7 @@ it("enrolls a member's document once before waiting for its host, then admits on
   await vi.waitFor(() => expect(f.tickets.mint).toHaveBeenCalledTimes(1));
   expect(f.enroll).toHaveBeenCalledTimes(1);
   expect(f.enroll.mock.calls[0]![0]).toMatchObject({intent: "member-open", userId: "member-1", workspaceId: scope.workspaceId, path: binding.currentPath});
-  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)).toMatchObject({enabled: true, ownerUserId: "owner-1", shareId: null});
+  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)).toMatchObject({enabled: true, ownerUserId: "owner-1", shareId: "members-share"});
   f.tickets.mint.mockResolvedValue({token: "ab".repeat(32), expiresAtMs: 61_000});
   f.changes.notify(binding);
   const response = await waiting;

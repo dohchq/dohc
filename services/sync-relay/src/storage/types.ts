@@ -919,6 +919,7 @@ export interface SyncRelayStorage {
       import("./serviceHostEnrollment").ServiceHostEnrollment,
       "workspaceId" | "objectId" | "ownerUserId" | "shareId" | "path"
     >,
+    nowMs?: number,
   ): boolean;
   /** With `restoring`, the owner's unfinished restore that kept the live session also counts. Live admission never passes it. */
   serviceHostDocumentEnabled(
@@ -2049,7 +2050,9 @@ export interface SyncRelayStorage {
     channelWireId: string,
   ): string | null | undefined;
   /** Each channel's earliest create, in log order: its wire id and its name. */
-  listChannelCreates(workspaceId: string): { channelWireId: string; name: string; type: "posts" | "chat" | "both" }[];
+  listChannelCreates(
+    workspaceId: string,
+  ): { channelWireId: string; name: string; type: "posts" | "chat" | "both" }[];
   findThreadCreateLane(workspaceId: string, threadId: string): "posts" | "chat" | undefined;
   findThreadFirstMessageId(workspaceId: string, threadId: string): string | undefined;
   findChannelChatThread(workspaceId: string, channelWireId: string): string | null;

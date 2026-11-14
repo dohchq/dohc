@@ -664,8 +664,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       serviceHostEnrollmentStorage.ServiceHostEnrollment,
       "workspaceId" | "objectId" | "ownerUserId" | "shareId" | "path"
     >,
+    nowMs?: number,
   ) {
-    return serviceHostEnrollmentStorage.serviceHostEnrollmentCovered(this, enrollment);
+    return serviceHostEnrollmentStorage.serviceHostEnrollmentCovered(this, enrollment, nowMs);
   }
   serviceHostDocumentEnabled(
     document: { workspaceId: string; objectId: string },
@@ -2124,7 +2125,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return objectIndexStorage.findChannelCreateKind(this, workspaceId, channelWireId);
   }
 
-  listChannelCreates(workspaceId: string): ReturnType<typeof objectIndexStorage.listChannelCreates> {
+  listChannelCreates(
+    workspaceId: string,
+  ): ReturnType<typeof objectIndexStorage.listChannelCreates> {
     return objectIndexStorage.listChannelCreates(this, workspaceId);
   }
 

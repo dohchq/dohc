@@ -13,7 +13,11 @@ import {
   pathVisibleThroughShare,
 } from "../shareFilter";
 import { readCurrentShareGrant } from "./currentShareGrant";
-import { workspaceMemberGrantId, workspaceMemberGrantIsCurrent } from "./workspaceMembers";
+import {
+  getWorkspaceMembership,
+  workspaceMemberGrantId,
+  workspaceMemberGrantIsCurrent,
+} from "./workspaceMembers";
 import { parseWorkspaceId } from "../requestInputs";
 import { canonicalLiveSelector, currentLiveDocumentMoment } from "./liveDocumentAuthority";
 import { LIVE_RESTORE_OPERATIONS, UNFINISHED_RESTORE } from "./liveRestoreOperationSchema";
@@ -38,6 +42,8 @@ import {
   RECLAIM_MAX_DEPARTING,
   RECLAIM_MIN_HOLD_MS,
   RECLAIM_RETENTION_MS,
+  MEMBER_OPEN_DEMAND_MS,
+  MEMBER_OPEN_MAX_DOCUMENTS,
   SERVICE_HOST_MAX_DOCUMENTS,
   SERVICE_HOST_MAX_WORKSPACES,
 } from "../liveHostingLimits";
@@ -559,17 +565,23 @@ function agentOnly(
  * agent-only one first. It reclaims none while the host is still letting go
  * of `RECLAIM_MAX_DEPARTING` retired documents. `full` is the intent's
  * answer when none does.
+ * Member opens also fit their workspace cap for MEMBER_OPEN_DEMAND_MS.
  */
 function assertCapacity(
   storage: StorageContext,
   workspaceId: string,
   full: () => Error,
   nowMs: number,
-  personal?: Parameters<typeof agentOnly>[1],
+  enrolling?: Parameters<typeof agentOnly>[1] | "member",
 ): void {
   const all = storage.db
     .prepare(`SELECT * FROM ${SERVICE_HOST_ENROLLMENTS} WHERE retired=0 LIMIT ?`)
     .all(SERVICE_HOST_MAX_DOCUMENTS + 1);
+  const personal = enrolling === "member" ? undefined : enrolling;
+  if (enrolling === "member") {
+    const opened = all.map(row).filter(enrollment => enrollment.workspaceId === workspaceId && memberOpened(storage, enrollment) && recentMemberDemand(enrollment.demandAtMs, nowMs)).length;
+    if (opened >= MEMBER_OPEN_MAX_DOCUMENTS) throw full();
+  }
   const capped = personal !== undefined && agentOnly(storage, personal);
   if (
     !capped &&
@@ -898,12 +910,19 @@ function ensureInsideTransaction(
   const ownerUserId = authorizeIntent(storage, input, workspaceId, path, nowMs);
   const identity = ownedIdentity(storage, workspaceId, ownerUserId);
   const shareId =
-    input.intent === "share" ? parseLiveUpdateIdentifier(input.shareId, "share ID") : null;
+    input.intent === "share"
+      ? parseLiveUpdateIdentifier(input.shareId, "share ID")
+      : input.intent === "member-open"
+        ? getWorkspaceMembership(storage, workspaceId)!.shareId
+        : null;
   if (input.intent === "share")
     assertShareCovers(storage, { workspaceId, path, shareId: shareId!, ownerUserId });
   const owner = input.intent === "owner-open" || input.intent === "owner-resume";
   // An open hears its answers. A share or Resume is an owner's request that failed.
-  const opening = input.intent === "personal-open" || input.intent === "member-open" || input.intent === "owner-open";
+  const opening =
+    input.intent === "personal-open" ||
+    input.intent === "member-open" ||
+    input.intent === "owner-open";
   const full = () =>
     opening || input.intent === "owner-open"
       ? new LiveHostingRefusal("live_host_full")
@@ -943,7 +962,11 @@ function ensureInsideTransaction(
         workspaceId,
         full,
         nowMs,
-        input.intent === "personal-open" ? current : undefined,
+        input.intent === "personal-open"
+          ? current
+          : input.intent === "member-open"
+            ? "member"
+            : undefined,
       );
     if (held) retireHeldActivation(storage, current, identity, held, nowMs);
     if (enabling) {
@@ -969,7 +992,9 @@ function ensureInsideTransaction(
     nowMs,
     input.intent === "personal-open"
       ? { workspaceId, ownerUserId, path, shareId, ownerDemand: false }
-      : undefined,
+      : input.intent === "member-open"
+        ? "member"
+        : undefined,
   );
   const charge =
     Buffer.byteLength(
@@ -1371,12 +1396,13 @@ const ACTIVE_EDIT_GRANT = `EXISTS(SELECT 1 FROM sync_relay_share_grants g WHERE 
 /**
  * Whether an active Edit grant on the share covers the path. On a workspace
  * share that grant must be a current member's, and the reach is the whole
- * workspace's files.
+ * workspace's files. Without `members`, a workspace share covers nothing.
  */
 function coversEnrolledPath(
   storage: StorageContext,
   value: Record<string, unknown>,
   path: string,
+  members = true,
 ): boolean {
   const share: SyncRelayShareRow = {
     shareId: String(value.share_id),
@@ -1390,6 +1416,7 @@ function coversEnrolledPath(
   if (!selector || !isLiveEditShareSelector(selector)) return false;
   if (isWorkspaceSelector(selector)) {
     return (
+      members &&
       pathVisibleThroughShare(fileSideOf(selector)!, path) &&
       storage.db
         .prepare(`SELECT grant_id FROM sync_relay_share_grants
@@ -1407,6 +1434,7 @@ function coveredByEditGrant(
   enrollment: Pick<ServiceHostEnrollment, "workspaceId" | "ownerUserId" | "path"> & {
     shareId?: string | null;
   },
+  members = true,
 ): boolean {
   // Admission runs this on every update. The share that enrolled the document almost always still covers it, so it is
   // checked first by key; the rest are read only when it doesn't, and the scan stops at the first that does.
@@ -1415,7 +1443,7 @@ function coveredByEditGrant(
       .prepare(`SELECT ${EDIT_SHARE_COLUMNS} FROM sync_relay_shares s
       WHERE s.share_id=? AND s.workspace_id=? AND s.granter_user_id=? AND ${ACTIVE_EDIT_GRANT}`)
       .get(enrollment.shareId, enrollment.workspaceId, enrollment.ownerUserId);
-    if (own && coversEnrolledPath(storage, own, enrollment.path)) return true;
+    if (own && coversEnrolledPath(storage, own, enrollment.path, members)) return true;
   }
   const shares = storage.db
     .prepare(`SELECT ${EDIT_SHARE_COLUMNS} FROM sync_relay_shares s INDEXED BY ${CANDIDATE_INDEX}
@@ -1424,7 +1452,7 @@ function coveredByEditGrant(
   for (const value of shares)
     if (
       value.share_id !== enrollment.shareId &&
-      coversEnrolledPath(storage, value, enrollment.path)
+      coversEnrolledPath(storage, value, enrollment.path, members)
     )
       return true;
   return false;
@@ -1477,7 +1505,7 @@ export function retireUncoveredServiceActivations(
   keep?: KeptServiceActivation,
 ): void {
   for (const enrollment of enrollments) {
-    if (coveredByEditGrant(storage, enrollment) || demanded(storage, enrollment)) continue;
+    if (grantedOrDemanded(storage, enrollment, nowMs)) continue;
     // Null while a retirement is open.
     if (
       keep?.workspaceId === enrollment.workspaceId &&
@@ -1576,24 +1604,42 @@ function latestRestore(storage: StorageContext, workspaceId: string, objectId: s
 /** Whether the host keeps a document the owner's restore kept live, from its revocation on. It admits no edit before the restore resumed. */
 export const serviceHostOwnerRetains = (storage: StorageContext, enrollment: CoveredEnrollment) =>
   keptByRestore(storage, enrollment, false);
-/** Whether an open or Resume recorded hosting demand on the enrollment as the caller knows it. */
-function demanded(
+/** Whether a member's open brought the document in and its owner never asked for it. */
+function memberOpened(
   storage: StorageContext,
-  enrollment: Pick<CoveredEnrollment, "workspaceId" | "objectId" | "ownerUserId" | "path">,
+  enrollment: Pick<ServiceHostEnrollment, "workspaceId" | "shareId" | "ownerDemand">,
 ): boolean {
   return (
-    storage.db
-      .prepare(
-        `SELECT 1 FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=? AND object_id=? AND owner_user_id=? AND path=? AND demand_at_ms IS NOT NULL`,
-      )
-      .get(enrollment.workspaceId, enrollment.objectId, enrollment.ownerUserId, enrollment.path) !==
-    undefined
+    !enrollment.ownerDemand &&
+    enrollment.shareId !== null &&
+    getWorkspaceMembership(storage, enrollment.workspaceId)?.shareId === enrollment.shareId
   );
 }
-const covered = (storage: StorageContext, enrollment: CoveredEnrollment) =>
-  coveredByEditGrant(storage, enrollment) ||
-  demanded(storage, enrollment) ||
-  serviceHostOwnerRetains(storage, enrollment);
+const recentMemberDemand = (demandAtMs: number | null, nowMs: number) =>
+  demandAtMs !== null && nowMs - demandAtMs < MEMBER_OPEN_DEMAND_MS;
+/**
+ * Whether an active Edit grant covers the enrollment as the caller knows it,
+ * or an open or Resume asked for it. A member's open asks only for
+ * MEMBER_OPEN_DEMAND_MS, and only while a current member's Edit grant
+ * reaches the document; after that a workspace share covers it no longer.
+ */
+function grantedOrDemanded(
+  storage: StorageContext,
+  enrollment: CoveredEnrollment,
+  nowMs: number,
+): boolean {
+  const value = storage.db
+    .prepare(
+      `SELECT * FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=? AND object_id=? AND owner_user_id=? AND path=?`,
+    )
+    .get(enrollment.workspaceId, enrollment.objectId, enrollment.ownerUserId, enrollment.path);
+  const current = value ? row(value) : null;
+  if (!current || !memberOpened(storage, current))
+    return current?.demandAtMs != null || coveredByEditGrant(storage, enrollment);
+  return coveredByEditGrant(storage, enrollment, recentMemberDemand(current.demandAtMs, nowMs));
+}
+const covered = (storage: StorageContext, enrollment: CoveredEnrollment, nowMs: number) =>
+  grantedOrDemanded(storage, enrollment, nowMs) || serviceHostOwnerRetains(storage, enrollment);
 /**
  * Whether the host keeps the enrolled document: an active Edit grant on any
  * of the owner's shares still covers it, an open or Resume asked for it, or
@@ -1602,9 +1648,10 @@ const covered = (storage: StorageContext, enrollment: CoveredEnrollment) =>
 export function serviceHostEnrollmentCovered(
   storage: StorageContext,
   enrollment: CoveredEnrollment,
+  nowMs = Date.now(),
 ): boolean {
   storage.captureStanding();
-  return covered(storage, enrollment);
+  return covered(storage, enrollment, nowMs);
 }
 /**
  * Ends the run of a live session the owner's restore kept, once nothing
@@ -1626,7 +1673,11 @@ export function endLapsedServiceHostRun(
       .prepare(`SELECT * FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=? AND object_id=?`)
       .get(enrollment.workspaceId, enrollment.objectId);
     const current = value ? row(value) : null;
-    if (!current || covered(storage, current) || !retirableServiceActivation(storage, current))
+    if (
+      !current ||
+      covered(storage, current, nowMs) ||
+      !retirableServiceActivation(storage, current)
+    )
       return false;
     endServiceHostRun(storage, current, nowMs);
     return openServiceActivationRetirement(storage, current, nowMs) !== null;
@@ -1650,7 +1701,7 @@ export function releaseServiceHostEnrollment(
       .get(parseWorkspaceId(input.workspaceId), input.objectId);
     const current = value ? row(value) : null;
     if (!current) return null;
-    const uncovered = !covered(storage, current);
+    const uncovered = !covered(storage, current, nowMs);
     if (current.retired && current.hostDrainedAtMs !== null) return null;
     if (!current.retired && !uncovered && !(current.enabled && current.ownerStop)) return null;
     storage.db

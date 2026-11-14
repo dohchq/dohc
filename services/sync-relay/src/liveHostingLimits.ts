@@ -17,6 +17,10 @@ export const RECLAIM_MIN_HOLD_MS = 2 * 60_000;
 export const RECLAIM_SWEEP_MS = 60_000;
 /** Retired documents the host may still be letting go of before reclaim retires another. Each one costs the host a pass. */
 export const RECLAIM_MAX_DEPARTING = 4;
+/** One workspace's documents that only a member's or an agent's open keeps: no owner's share enrolled them and the owner never asked. A quarter of the host, so one workspace's members leave room for every other. */
+export const MEMBER_OPEN_MAX_DOCUMENTS = 16;
+/** How long a member's open keeps its page counted and hosted. A member's browser session lasts 12 hours from the open that admitted it, so no session outlives the open's demand. */
+export const MEMBER_OPEN_DEMAND_MS = 12 * 60 * 60 * 1000;
 /** How long a personal open waits for its document to be ready. */
 export const HELD_OPEN_MAX_MS = 20_000;
 /** The longest a held open goes without its document being read again. */
