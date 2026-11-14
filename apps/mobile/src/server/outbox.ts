@@ -310,6 +310,8 @@ export function createOutbox(options: {
 
   /** Waits `ms`, or less: `wake` cuts it short, and so does `stop`. */
   async function pause(ms: number, stop: AbortSignal | null) {
+    // A sender stopped during its last write ends now, so its lane is free for the next sign-in.
+    if (stop?.aborted) return;
     const wait = new AbortController();
     const end = () => wait.abort();
     const woken = nudge.signal;

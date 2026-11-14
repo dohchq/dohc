@@ -211,13 +211,14 @@ export function createAccount(options: {
 
   async function endSignIn(): Promise<void> {
     const ending = saved;
+    const at = generation;
     const origin = ending?.origin ?? (state.status === "signed-out" ? state.origin : null);
     let left = false;
     const leave = async () => {
       if (left) return;
       left = true;
-      // A 401 may have ended this sign-in while the hook ran, and a newer one started; that one stays.
-      if (saved === ending) {
+      // A 401 or a newer sign-in may have moved the generation while the hook ran; what it holds now stays.
+      if (generation === at) {
         advance();
         saved = null;
         setState(signedOut(origin, false));

@@ -779,6 +779,27 @@ describe("asking again", () => {
     stop();
   });
 
+  it("frees the lane at once when the sign-in changes during a sender's reset write", async () => {
+    const disk = durableDisk();
+    const server = testServer();
+    server.on("POST", path("post"), PENDING, "offline", PENDING);
+    const { outbox, account, stop, wait } = launch(disk, server, { retryMs: () => 10 });
+    await ready(outbox);
+    await outbox.enqueue({ workspaceId: "ws-1", write: post("Hi") });
+    await vi.waitFor(() => expect(wait.pending).toHaveLength(1));
+    expect(record(outbox, 1)?.pendingSinceMs).not.toBeNull();
+    // The next request fails, and the write that resets the pending start is held.
+    const release = disk.holdWrites();
+    wait.release();
+    await vi.waitFor(() => expect(temporaries(disk)).toHaveLength(1));
+    expect(requests(server, "post")).toHaveLength(2);
+    account.signIn(server);
+    release();
+    // The stopped sender doesn't wait out its retry, so the new sign-in asks again without a timer.
+    await vi.waitFor(() => expect(requests(server, "post")).toHaveLength(3));
+    stop();
+  });
+
   it("settles a write the route refuses as malformed or too large, keeping its text", async () => {
     const disk = durableDisk();
     const server = testServer();
