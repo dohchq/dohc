@@ -3514,6 +3514,43 @@ async fn stop_records_each_edit_of_a_collection_record_apart() {
     supervisor.close_all().unwrap();
 }
 
+// #4059: each queued field change is written to the record's field history when
+// it is appended, and Stop's release must not write it again.
+#[tokio::test]
+async fn stop_lists_each_queued_field_change_once_in_record_history() {
+    let f = observed_record_release_fixture();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
+    for (index, status) in ["To do", "Doing", "Done"].into_iter().enumerate() {
+        actor
+            .owner_ydoc_append_draft(
+                "workspace".into(),
+                dohc_engine_collab::owner_outbox::draft::OwnerDraftAppendInput {
+                    person_edit: true,
+                    binding: f.binding.clone(),
+                    expected_revision: 1,
+                    append_key: format!("status-{index}"),
+                    update: f.doc.frontmatter_set("status", status).unwrap(),
+                    now_ms: 10 + index as i64,
+                    agent_declaration: None,
+                    agent_run_id: None,
+                    automation_declaration: None,
+                },
+                CancellationToken::new(),
+                Arc::new(()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    assert_eq!(record_history(&f.store, RELEASED_RECORD), 3);
+    stop_action(&actor, &f, "request").await.unwrap();
+    stop_action(&actor, &f, "release").await.unwrap();
+    assert_eq!(record_history(&f.store, RELEASED_RECORD), 3);
+    supervisor.close_all().unwrap();
+}
+
 #[tokio::test]
 async fn a_retiring_activation_settles_through_its_durable_binding() {
     let f = Fixture::new();
