@@ -458,6 +458,18 @@ export const phoneRetryWakeArgsSchema = z
     wakeId: z.string().regex(/^wake-[0-9a-f]{32}$/u),
   })
   .strict();
+// The phone's read of what a conversation it shows takes: a group's stream by
+// its engine channel ID, or a thread by its engine ID, with the message order
+// its covered page ends before when it isn't the thread's newest.
+export const phoneChatContextArgsSchema = z.union([
+  z.object({ group: phoneTargetIdSchema }).strict(),
+  z
+    .object({
+      threadId: phoneTargetIdSchema,
+      before: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER).optional(),
+    })
+    .strict(),
+]);
 // A key the caller chooses for one request. Sent again with the same key,
 // after a timeout for example, the request returns its first result while
 // dohc runs instead of doing its work twice.

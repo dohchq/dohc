@@ -20,6 +20,20 @@ export function hiddenFile(path: string | undefined): boolean {
 
 const isPage = (path: string) => liveDocumentKindForPath(path) === "richdoc";
 
+/**
+ * Whether a thread shows, judged from the relay's log alone as its reads
+ * judge it: hidden when its create names a hidden path, or the log last put
+ * its file at one.
+ */
+export function threadShownByLog(
+  storage: Pick<SyncRelayStorage, "accountFeedThreadPaths">,
+  workspaceId: string,
+  threadId: string,
+): boolean {
+  const paths = storage.accountFeedThreadPaths(workspaceId, threadId);
+  return !(paths.named.some(hiddenFile) || hiddenFile(paths.lastKnownPath ?? undefined));
+}
+
 type Cursor = Pick<AccountFeedStanding, "floor" | "log" | "journal">;
 type FeedStorage = Pick<
   SyncRelayStorage,
@@ -87,12 +101,10 @@ function readChanges(
   });
   const log = rows.length === ROWS_PER_READ ? rows.at(-1)!.relaySeq : standing.log;
   const threadShown = new Map<string, boolean>();
-  // A thread is judged as its reads judge it: hidden when its create names a hidden path, or the log last put its file at one.
   const shown = (threadId: string) => {
     let known = threadShown.get(threadId);
     if (known === undefined) {
-      const paths = storage.accountFeedThreadPaths(workspaceId, threadId);
-      known = !(paths.named.some(hiddenFile) || hiddenFile(paths.lastKnownPath ?? undefined));
+      known = threadShownByLog(storage, workspaceId, threadId);
       threadShown.set(threadId, known);
     }
     return known;

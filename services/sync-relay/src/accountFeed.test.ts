@@ -37,7 +37,12 @@ function backlog(log: AccountFeedLogRow[], journal: JournalRow[]) {
       through: number;
       limit: number;
     }) => page(journal, (row) => row.journalCursor, input),
-    accountFeedThreadPaths: () => ({ lastKnownPath: null, named: [] }),
+    accountFeedThreadPaths: () => ({
+      created: false,
+      linkedObjectId: null,
+      lastKnownPath: null,
+      named: [],
+    }),
   };
   const waits = createAccountFeedWaits(storage, new DiscussionActivityHub());
   const poll = async () => {

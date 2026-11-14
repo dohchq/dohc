@@ -1092,6 +1092,14 @@ export interface SyncRelayStorage {
     nowMs: number;
   }): import("./chatWakes").ChatRunner[];
   chatWakeHead(accountId: string): number;
+  /** The latest generation of each wake target of messages the phone shows, in the threads it read them in. */
+  phoneChatWakes(
+    input: Parameters<typeof import("./chatWakes").phoneChatWakes>[1],
+  ): import("@dohc/workspace-contracts/chat-wakes").PhoneChatWake[];
+  /** The threads of the account's wakes in a workspace whose rows changed after `since`, through `through`. */
+  chatWakeChanges(
+    input: Parameters<typeof import("./chatWakes").chatWakeChanges>[1],
+  ): ReturnType<typeof import("./chatWakes").chatWakeChanges>;
   listWaitingChatWakes(
     input: Parameters<typeof import("./chatWakes").listWaitingChatWakes>[1],
   ): ReturnType<typeof import("./chatWakes").listWaitingChatWakes>;
@@ -1124,7 +1132,7 @@ export interface SyncRelayStorage {
   accountFeedThreadPaths(
     workspaceId: string,
     threadId: string,
-  ): { lastKnownPath: string | null; named: string[] };
+  ): ReturnType<typeof import("./accountFeed").accountFeedThreadPaths>;
   currentAutomationWorkspace(
     workspaceId: string,
   ): import("./automationWorkspaces").AutomationWorkspace | null;

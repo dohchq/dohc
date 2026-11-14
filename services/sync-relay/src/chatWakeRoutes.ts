@@ -29,7 +29,7 @@ export type ChatWakeRoute =
 
 /** The wake reads one account may hold waiting at once, across its computers. */
 const CHAT_WAKE_WAITS_PER_ACCOUNT = 16;
-/** The wake reads one computer may hold waiting at once. */
+/** The wake reads one computer, or one phone sign-in, may hold waiting at once. */
 export const CHAT_WAKE_WAITS_PER_INSTALL = 2;
 // A runners or claim body is small.
 const BODY_MAX_BYTES = 32 * 1024;
@@ -86,24 +86,31 @@ export function createChatWakeWaits(
     );
 
   return {
-    /** Parks until a wake or `holdMs`. Answers server_busy past the computer's, the account's, or the server's waits. */
+    /**
+     * Parks until a wake or `holdMs`. Answers server_busy past the holder's, the account's, or the server's waits. The
+     * holder is a computer, `{ installId }`, or a phone's sign-in, `{ sessionId }`.
+     */
     async wait(input: {
       accountId: string;
-      installId: string;
+      holder: { installId: string } | { sessionId: string };
       caller: string;
       holdMs: number;
       signal: AbortSignal;
       shouldPark(): boolean;
     }): Promise<void> {
+      const holder =
+        "installId" in input.holder
+          ? `install:${input.holder.installId}`
+          : `session:${input.holder.sessionId}`;
       const installs = accounts.get(input.accountId) ?? new Map<string, number>();
       const held = [...installs.values()].reduce((total, count) => total + count, 0);
       if (
         held >= CHAT_WAKE_WAITS_PER_ACCOUNT ||
-        (installs.get(input.installId) ?? 0) >= CHAT_WAKE_WAITS_PER_INSTALL
+        (installs.get(holder) ?? 0) >= CHAT_WAKE_WAITS_PER_INSTALL
       )
         throw busy();
       accounts.set(input.accountId, installs);
-      installs.set(input.installId, (installs.get(input.installId) ?? 0) + 1);
+      installs.set(holder, (installs.get(holder) ?? 0) + 1);
       try {
         await hub.wait(chatWakeWaitGroup(input.accountId), `account:${input.caller}`, {
           holdMs: input.holdMs,
@@ -113,9 +120,9 @@ export function createChatWakeWaits(
       } catch (error) {
         throw error instanceof DiscussionActivityCapacityError ? busy() : error;
       } finally {
-        const left = installs.get(input.installId)! - 1;
-        if (left > 0) installs.set(input.installId, left);
-        else installs.delete(input.installId);
+        const left = installs.get(holder)! - 1;
+        if (left > 0) installs.set(holder, left);
+        else installs.delete(holder);
         if (installs.size === 0) accounts.delete(input.accountId);
       }
     },
@@ -127,7 +134,7 @@ export function createChatWakeWaits(
   };
 }
 
-type ChatWakeWaits = ReturnType<typeof createChatWakeWaits>;
+export type ChatWakeWaits = ReturnType<typeof createChatWakeWaits>;
 
 async function readBody(request: Request): Promise<Record<string, unknown>> {
   let body: unknown;
@@ -278,7 +285,7 @@ export function createChatWakeRoutes(options: {
         }
         await waits.wait({
           accountId,
-          installId,
+          holder: { installId },
           caller: caller.sessionId,
           holdMs: deadlineAtMs - Date.now(),
           signal: request.signal,

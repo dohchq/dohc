@@ -41,6 +41,7 @@ import type { StorageContext } from "./storage/context";
 import { closeTestStorages, denialBytes, json, testHandler, testStorage } from "./testing";
 import { PhoneWriteEngine, seedPhoneChats } from "./testing/phoneWriteEngine";
 import { PUBLICATION_DEADLINE_MS } from "./operationPublication";
+import { notifyChatWakeChange } from "./relayWriteChanges";
 import { MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
 
 const cleanup: Array<() => Promise<void>> = [];
@@ -1143,7 +1144,13 @@ describe("an account's chat writes through the server's copy", () => {
    * arguments, then after them, after the name lookup, once the copy is open,
    * and once the write's lock is held.
    */
-  async function writeRelay(options: { limiter?: TokenBucketLimiter; nowMs?: () => number } = {}) {
+  async function writeRelay(
+    options: {
+      limiter?: TokenBucketLimiter;
+      nowMs?: () => number;
+      activity?: DiscussionActivityHub;
+    } = {},
+  ) {
     const storage = await testStorage();
     const context = storage as StorageContext;
     storage.claimWorkspace({ workspaceId: "trip", ownerUserId: "ana", createdAtMs: 1 });
@@ -1293,6 +1300,7 @@ describe("an account's chat writes through the server's copy", () => {
       lookupUserDisplayName: () => name(),
       relayPublicOrigin: ORIGIN,
       ...(options.nowMs ? { nowMs: options.nowMs } : {}),
+      ...(options.activity ? { discussionActivity: options.activity } : {}),
     });
     return {
       storage,
@@ -1302,6 +1310,8 @@ describe("an account's chat writes through the server's copy", () => {
       syncs,
       seeded,
       change,
+      /** How many times a request has checked its sign-in. */
+      checks: () => checks,
       write: (operation: string, args: unknown) => h(op("trip", operation, args)),
       rows: () =>
         Number(
@@ -2904,5 +2914,567 @@ describe("an account's chat writes through the server's copy", () => {
       pushed.map((row) => row.seq).sort((left, right) => left - right),
     );
     expect(pushed.length).toBeGreaterThan(1);
+  });
+
+  const LATE = RETRY_NOW + CHAT_WAKE_CONFIRM_MS;
+  const personalAgent = (
+    f: WriteRelay,
+    letter: string,
+    name: string,
+    status: string,
+    reach: string[],
+  ) => {
+    const db = (f.storage as StorageContext).db;
+    const agentId = `p-${letter.repeat(26)}`;
+    db.prepare(
+      `INSERT INTO sync_relay_personal_agents (agent_id, owner_user_id, name, hue, status, epoch, created_at_ms)
+       VALUES (?, 'ana', ?, 'blue', ?, 1, 1)`,
+    ).run(agentId, name, status);
+    for (const workspaceId of reach)
+      db.prepare(
+        "INSERT INTO sync_relay_personal_agent_reach (agent_id, workspace_id, level, start_seq) VALUES (?, ?, 'view', 0)",
+      ).run(agentId, workspaceId);
+  };
+
+  it("reads a stream's lanes, who it can mention, and the latest wake of each of its messages, without a computer's ID or candidates", async () => {
+    const f = await writeRelay({ nowMs: () => LATE });
+    const { planning } = f.seeded;
+    const stay = unconfirmedWake(f, "op-stay", "message-stay", "thread-stay");
+    // A second computer runs the same agent, under a label that isn't its ID.
+    f.storage.replaceChatRunners({
+      accountId: "ana",
+      workspaceId: "trip",
+      installId: "install-9f2c",
+      computerLabel: "Ana's Mac",
+      runners: [{ agentId: "default", handle: "claude", displayName: "Claude", enabled: true }],
+      nowMs: RETRY_NOW,
+    });
+    personalAgent(f, "a", "Scout", "active", ["trip"]);
+    personalAgent(f, "b", "Ranger", "active", []);
+    personalAgent(f, "c", "Ghost", "signed_out", ["trip"]);
+
+    const response = await f.write("chatContext", { group: planning.channelId });
+    const text = await response.clone().text();
+    expect(await answer(response)).toEqual({
+      ok: true,
+      conversation: {
+        kind: "stream",
+        groupId: planning.channelId,
+        groupKind: "group",
+        canPost: true,
+        canSend: true,
+      },
+      mentions: [
+        { kind: "agent", handle: "Claude", label: "Claude", computers: ["Ana's Mac", "laptop"] },
+        { kind: "personalAgent", handle: "Scout", label: "Scout" },
+        { kind: "person", handle: "Ana", label: "Ana" },
+      ],
+      wakes: [
+        {
+          wakeId: stay,
+          messageId: "message-stay",
+          threadId: "thread-stay",
+          generation: 1,
+          state: "unconfirmed",
+          winnerLabel: "mac",
+          canRetry: true,
+        },
+      ],
+      wakeCursor: String(f.storage.chatWakeHead("ana")),
+    });
+    for (const withheld of ["install-9f2c", "installId", "candidates", '"matched"', "mention:"])
+      expect(text).not.toContain(withheld);
+
+    const chats = new ChatsLiveAdapter(f.engine.chats, "trip", { workspaceId: "trip" });
+    for (const [type, canPost, canSend] of [
+      ["posts", true, false],
+      ["chat", false, true],
+    ] as const) {
+      const group = await chats.createChannel({ workspaceId: "trip", name: `Only ${type}`, type });
+      expect(
+        (await answer(await f.write("chatContext", { group: group.channelId }))).conversation,
+      ).toEqual({ kind: "stream", groupId: group.channelId, groupKind: "group", canPost, canSend });
+    }
+  });
+
+  it("reads a thread's latest generations, and gives no wake for an answered agent no computer ran, even once one does", async () => {
+    const f = await writeRelay({ nowMs: () => LATE });
+    const { planning } = f.seeded;
+    const chats = new ChatsLiveAdapter(f.engine.chats, "trip", { workspaceId: "trip" });
+    await declare(f, "mac", [{ agentId: "default", displayName: "Claude" }]);
+    await chats.startChannelThread({
+      workspaceId: "trip",
+      channelId: planning.channelId,
+      threadId: "thread-nova",
+      messageId: "thread-nova-opening",
+      lane: "posts",
+      ...agentAuthor("Nova"),
+      body: "Done.",
+    });
+    expect(
+      await answer(
+        await f.write("reply", {
+          operationId: "op-nobody",
+          threadId: "thread-nova",
+          body: "Thanks",
+        }),
+      ),
+    ).toMatchObject({ ok: true, state: "saved" });
+    expect(wakesOf(f, "op-nobody")).toEqual({ targets: [], unmatched: true });
+    const context = async () =>
+      await answer(await f.write("chatContext", { threadId: "thread-nova" }));
+    const read = await context();
+    expect(read).toMatchObject({
+      ok: true,
+      conversation: { kind: "thread", threadId: "thread-nova", groupKind: "group" },
+      wakes: [],
+    });
+    expect(read, "this read gives no unmatched hint").not.toHaveProperty("unmatched");
+    // A computer that runs Nova now changes nothing the write froze.
+    await declare(f, "desktop", [{ agentId: "default", displayName: "Nova" }]);
+    expect(await context()).toMatchObject({ wakes: [] });
+
+    // A retried wake reads as its latest generation only. Its only computer claimed it and never confirmed, so no
+    // other computer is left, and the context offers no retry, which the route refuses too.
+    const first = unconfirmedWake(f, "op-stay", "message-poll", "thread-stay");
+    const second = chatWakeId("ana", "trip", "message-poll", "mention:claude", 2);
+    expect(
+      await answer(await f.write("retryWake", { operationId: "retry-1", wakeId: first })),
+    ).toMatchObject({ ok: true, wake: { wakeId: second } });
+    f.storage.claimChatWake({
+      accountId: "ana",
+      wakeId: second,
+      installId: "laptop",
+      nowMs: RETRY_NOW,
+    });
+    expect((await answer(await f.write("chatContext", { threadId: "thread-stay" }))).wakes).toEqual(
+      [
+        expect.objectContaining({
+          wakeId: second,
+          generation: 2,
+          state: "unconfirmed",
+          winnerLabel: "laptop",
+          canRetry: false,
+        }),
+      ],
+    );
+    expect(
+      await answer(await f.write("retryWake", { operationId: "retry-2", wakeId: second })),
+    ).toMatchObject({ ok: false, refusal: "refused" });
+  });
+
+  it("answers a hidden or missing thread alike, and refuses other arguments, another account, and a workspace hidden from the phone", async () => {
+    const f = await writeRelay({ nowMs: () => LATE });
+    const { onSecret } = f.seeded;
+    const hidden = unconfirmedWake(f, "op-hidden", "message-hidden", onSecret.id);
+    const missing = await denialBytes(await f.h(op("nowhere", "groups")));
+    const bytes = async (args: Record<string, string>) =>
+      (await (await f.write("chatContext", args)).text()).replaceAll(
+        Object.values(args)[0]!,
+        "<id>",
+      );
+    const secret = await bytes({ threadId: onSecret.id });
+    expect(secret).toBe(await bytes({ threadId: "thread-nowhere" }));
+    expect(secret).toContain('"refusal":"missing"');
+    expect(secret).not.toContain(hidden);
+    expect(await answer(await f.write("chatContext", { group: "group-nowhere" }))).toEqual({
+      ok: false,
+      reason: "no such group: group-nowhere",
+      refusal: "missing",
+    });
+
+    for (const args of [
+      {},
+      { threadId: "" },
+      { group: "a", threadId: "b" },
+      { group: "a", before: 1 },
+      { threadId: "thread-stay", before: 0 },
+      { threadId: "thread-stay", before: 1.5 },
+      { threadId: "thread-stay", messageIds: ["message-stay"] },
+      { threadId: "x".repeat(257) },
+    ]) {
+      const response = await f.write("chatContext", args);
+      expect({ status: response.status, body: await json(response) }, JSON.stringify(args)).toEqual(
+        { status: 400, body: schemaRefusal("chatContext") },
+      );
+    }
+    expect(
+      await denialBytes(
+        await f.h(op("trip", "chatContext", { threadId: "thread-stay" }, signedIn("ben"))),
+      ),
+    ).toBe(missing);
+    f.change("show on phone");
+    expect(await denialBytes(await f.write("chatContext", { threadId: "thread-stay" }))).toBe(
+      missing,
+    );
+  });
+
+  it("answers as missing, with no context, when access ends at any check of a context read", async () => {
+    const f0 = await writeRelay();
+    const missing = await denialBytes(await f0.h(op("nowhere", "groups")));
+    // The copy's open, after its sync, and after the conversation is read.
+    for (const check of [3, 4, 5]) {
+      for (const kind of ["sign-in", "owner", "show on phone"] as const) {
+        const f = await writeRelay();
+        unconfirmedWake(f, "op-stay", "message-stay", "thread-stay");
+        f.changeAt(check, kind);
+        expect(
+          await denialBytes(await f.write("chatContext", { threadId: "thread-stay" })),
+          `${check}, ${kind}`,
+        ).toBe(missing);
+      }
+    }
+  });
+
+  it("judges a context's thread by everything the relay accepted before it answers", async () => {
+    const f = await writeRelay({ nowMs: () => LATE });
+    const chats = new ChatsLiveAdapter(f.engine.chats, "trip", { workspaceId: "trip" });
+    f.engine.files.seedTextFile({
+      workspace: "trip",
+      path: "notes.md",
+      text: "# Notes\n",
+      objectId: "object-notes",
+    });
+    const onNotes = await chats.createThread({
+      workspaceId: "trip",
+      title: "Notes",
+      linkedFile: { objectId: "object-notes", pathHint: "notes.md" },
+    });
+    const wakeId = unconfirmedWake(f, "op-notes", "message-notes", onNotes.id);
+    const db = (f.storage as StorageContext).db;
+    // Another device's move of the notes, which the relay accepts.
+    const accepted = (originSeq: number, path: string) => {
+      const relaySeq = Number(
+        db
+          .prepare(`INSERT INTO sync_relay_log (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms)
+        VALUES ('trip', 'another-device', ?, 'moment.append', '{}', 1) RETURNING relay_seq`)
+          .get(originSeq)!.relay_seq,
+      );
+      db.prepare(`INSERT INTO sync_relay_object_moments (workspace_id, object_id, relay_seq, moment_id, version_id, path, recorded_at_ms)
+        VALUES ('trip', 'object-notes', ?, ?, 'main', ?, 1)`).run(
+        relaySeq,
+        `moment-${originSeq}`,
+        path,
+      );
+    };
+    // The request's own check, the check after its body, the copy's open, and the check after its sync come first;
+    // the fifth follows the conversation's read.
+    const held = f.holdCheck(5);
+    const reading = f.write("chatContext", { threadId: onNotes.id });
+    await held.reached;
+    accepted(1, ".env");
+    await new VersionedLiveAdapter(f.engine, "trip", { workspaceId: "trip" }).deleteTextFile({
+      workspaceId: "trip",
+      versionId: "main",
+      path: "notes.md",
+      metadata: { origin: "api" },
+    });
+    held.release();
+    const response = await reading;
+    expect(await response.clone().text()).not.toContain(wakeId);
+    expect(await answer(response)).toEqual({
+      ok: false,
+      reason: `chat thread not found: ${onNotes.id}`,
+      refusal: "missing",
+    });
+
+    // A move during the read, and another during the read again, answer a failed read with no context.
+    const first = f.holdCheck(5);
+    const again = f.write("chatContext", { threadId: "thread-stay" });
+    await first.reached;
+    accepted(2, "notes-2.md");
+    first.release();
+    // The second read's sync, then its read.
+    const second = f.holdCheck(2);
+    await second.reached;
+    accepted(3, "notes-3.md");
+    second.release();
+    expect(await answer(await again)).toEqual({ ok: false, reason: "failed to read chat context" });
+  });
+
+  it("covers a thread's newest messages a page at a time, reading only that page through every page the engine cuts it into", async () => {
+    const f = await writeRelay({ nowMs: () => LATE });
+    const chats = new ChatsLiveAdapter(f.engine.chats, "trip", { workspaceId: "trip" });
+    await chats.startChannelThread({
+      workspaceId: "trip",
+      channelId: f.seeded.planning.channelId,
+      threadId: "thread-long",
+      messageId: "long-0",
+      lane: "posts",
+      author: { kind: "human", displayName: "Zed" },
+      authorActorKey: null,
+      body: "0",
+    });
+    for (let order = 1; order < 250; order += 1)
+      await chats.sendMessage({
+        workspaceId: "trip",
+        threadId: "thread-long",
+        messageId: `long-${order}`,
+        author: { kind: "human", displayName: "Ana" },
+        authorActorKey: null,
+        body: String(order),
+      });
+    const oldest = unconfirmedWake(f, "op-oldest", "long-0", "thread-long");
+    const newest = unconfirmedWake(f, "op-newest", "long-249", "thread-long");
+    const covered = async (args: Record<string, number>) => {
+      const from = f.engine.asked.length;
+      const result = await answer(
+        await f.write("chatContext", { threadId: "thread-long", ...args }),
+      );
+      return {
+        reads: f.engine.asked
+          .slice(from)
+          .filter(
+            (method) =>
+              method === CHATS_METHOD.messagesList || method === CHATS_METHOD.reactionsList,
+          ),
+        nextBefore: (result.conversation as Record<string, unknown>).nextBefore,
+        wakes: (result.wakes as Array<{ wakeId: string }>).map((wake) => wake.wakeId),
+        people: (result.mentions as Array<{ kind: string; label: string }>)
+          .filter((mention) => mention.kind === "person")
+          .map((mention) => mention.label)
+          .sort(),
+      };
+    };
+    // One page of 100 messages each time, and no reactions, which list only whole.
+    expect(await covered({})).toEqual({
+      reads: [CHATS_METHOD.messagesList],
+      nextBefore: 150,
+      wakes: [newest],
+      people: ["Ana"],
+    });
+    expect(await covered({ before: 150 })).toEqual({
+      reads: [CHATS_METHOD.messagesList],
+      nextBefore: 50,
+      wakes: [],
+      people: ["Ana"],
+    });
+    expect(await covered({ before: 50 })).toEqual({
+      reads: [CHATS_METHOD.messagesList],
+      nextBefore: null,
+      wakes: [oldest],
+      people: ["Ana", "Zed"],
+    });
+    expect((await covered({ before: 1_000 })).nextBefore, "past the end covers the newest").toBe(
+      150,
+    );
+
+    // As the engine's byte budget does, it ends each page at three messages and says where to go on. Each context still
+    // covers its whole interval, so every message is covered exactly once.
+    const interior = unconfirmedWake(f, "op-interior", "long-200", "thread-long");
+    const original = f.engine.chats.sendRequest.bind(f.engine.chats);
+    const returned: string[] = [];
+    const pages = vi.spyOn(f.engine.chats, "sendRequest");
+    pages.mockImplementation(async (request) => {
+      const params = asRecord(request.params);
+      if (
+        request.method !== CHATS_METHOD.messagesList ||
+        params === null ||
+        params.threadId !== "thread-long"
+      )
+        return await original(request);
+      const response = await original({
+        ...request,
+        params: {
+          threadId: "thread-long",
+          limit: Math.min(Number(params.limit), 3),
+          ...(typeof params.afterMessageOrder === "number"
+            ? { afterMessageOrder: params.afterMessageOrder }
+            : {}),
+        },
+      });
+      const page = response.result as unknown as { messages: Array<{ id: string }> };
+      returned.push(...page.messages.map((message) => message.id));
+      return response;
+    });
+    const orders = (from: number, to: number) =>
+      Array.from({ length: to - from }, (_, index) => `long-${from + index}`);
+    const short = async (args: Record<string, number>) => {
+      const from = returned.length;
+      const result = await covered(args);
+      return { ...result, reads: result.reads.length, ids: returned.slice(from) };
+    };
+    expect(await short({})).toEqual({
+      reads: 34,
+      nextBefore: 150,
+      wakes: [interior, newest],
+      people: ["Ana"],
+      ids: orders(150, 250),
+    });
+    expect(await short({ before: 150 })).toMatchObject({
+      reads: 34,
+      nextBefore: 50,
+      wakes: [],
+      ids: orders(50, 150),
+    });
+    expect(await short({ before: 50 })).toMatchObject({
+      reads: 17,
+      nextBefore: null,
+      wakes: [oldest],
+      ids: orders(0, 50),
+    });
+
+    // An engine whose pages never cover the messages fails the read after at most 100 reads, naming no cursor.
+    pages.mockImplementation(async (request) => {
+      const params = asRecord(request.params);
+      if (
+        request.method !== CHATS_METHOD.messagesList ||
+        params === null ||
+        params.threadId !== "thread-long"
+      )
+        return await original(request);
+      const after = typeof params.afterMessageOrder === "number" ? params.afterMessageOrder : -1;
+      return { id: request.id, result: { messages: [], nextAfterMessageOrder: after + 1 } };
+    });
+    const from = f.engine.asked.length;
+    expect(await answer(await f.write("chatContext", { threadId: "thread-long" }))).toEqual({
+      ok: false,
+      reason: "failed to read chat context",
+    });
+    expect(
+      f.engine.asked.slice(from).filter((method) => method === CHATS_METHOD.messagesList),
+    ).toHaveLength(100);
+  });
+
+  const wakeChanges = (
+    since: string,
+    options: { hold?: number; signal?: AbortSignal; headers?: Record<string, string> } = {},
+  ) =>
+    new Request(
+      `http://relay.test/sync/trip/ops/wakeChanges?${new URLSearchParams({
+        since,
+        ...(options.hold === undefined ? {} : { hold: String(options.hold) }),
+      })}`,
+      {
+        headers: options.headers ?? signedIn("ana"),
+        ...(options.signal ? { signal: options.signal } : {}),
+      },
+    );
+
+  it("waits for a wake-only change apart from the workspace feed, answers only threads the phone may see, and answers at once for a change after its read", async () => {
+    const activity = new DiscussionActivityHub();
+    const f = await writeRelay({ activity, nowMs: () => LATE });
+    const stay = unconfirmedWake(f, "op-stay", "message-stay", "thread-stay");
+    // The log made one thread in a Group, and one on a secret file.
+    const log = logWriter(f.storage, activity);
+    log("chat.thread.create", { threadId: "thread-stay" });
+    log("chat.thread.create", {
+      threadId: "thread-keys",
+      linkedObjectId: "object-keys",
+      linkedPathHint: ".env",
+    });
+    const keys = unconfirmedWake(f, "op-keys", "message-keys", "thread-keys");
+    const read = await json(await f.write("chatContext", { threadId: "thread-stay" }));
+    const since = String((read.result as Record<string, unknown>).wakeCursor);
+    const queued = (wakeId: string) =>
+      f.storage.confirmChatWakeQueued({ accountId: "ana", wakeId, installId: "mac", nowMs: LATE });
+
+    const held = f.h(wakeChanges(since, { hold: 30_000 }));
+    await expect.poll(() => activity.stats().waiters).toBe(1);
+    const parked = f.checks();
+    queued(keys);
+    await expect.poll(() => f.checks()).toBeGreaterThan(parked);
+    await expect.poll(() => activity.stats().waiters).toBe(1);
+    queued(stay);
+    const head = String(f.storage.chatWakeHead("ana"));
+    expect(await feed(await held)).toEqual({ ok: true, cursor: head, threads: ["thread-stay"] });
+    expect(
+      await feed(await f.h(changes(String(read.cursor)))),
+      "no wake change reaches the workspace feed",
+    ).toEqual({ ok: true, cursor: read.cursor, changed: {} });
+
+    // A change between the context read and the wait's start answers at once, with nothing parked.
+    const again = await answer(await f.write("chatContext", { threadId: "thread-stay" }));
+    unconfirmedWake(f, "op-late", "message-late", "thread-stay");
+    expect(await feed(await f.h(wakeChanges(String(again.wakeCursor), { hold: 30_000 })))).toEqual({
+      ok: true,
+      cursor: String(f.storage.chatWakeHead("ana")),
+      threads: ["thread-stay"],
+    });
+    expect(activity.stats().waiters).toBe(0);
+
+    const now = String(f.storage.chatWakeHead("ana"));
+    expect(await feed(await f.h(wakeChanges(String(Number(now) + 5))))).toEqual({
+      ok: true,
+      cursor: now,
+      replace: true,
+    });
+    expect(await feed(await f.h(wakeChanges(now)))).toEqual({ ok: true, cursor: now, threads: [] });
+    for (const bad of ["", "x", "01", "-1", "99999999999999999"]) {
+      const response = await f.h(wakeChanges(bad));
+      expect(response.status, bad).toBe(400);
+    }
+    expect((await f.h(wakeChanges(now, { hold: 30_001 }))).status).toBe(400);
+
+    // Two held reads per sign-in; cancelling them answers the caught-up cursor.
+    const stop = new AbortController();
+    const waiting = [0, 1].map(() => f.h(wakeChanges(now, { hold: 30_000, signal: stop.signal })));
+    await expect.poll(() => activity.stats().waiters).toBe(2);
+    const busy = await f.h(wakeChanges(now, { hold: 30_000 }));
+    expect(busy.status).toBe(503);
+    expect(await json(busy)).toMatchObject({ ok: false, code: "server_busy" });
+    stop.abort();
+    for (const response of await Promise.all(waiting)) expect(response.status).toBe(200);
+  });
+
+  it("names no thread whose create the log doesn't hold, and answers replace for its change instead", async () => {
+    const f = await writeRelay({ nowMs: () => LATE });
+    const { onSecret } = f.seeded;
+    const since = String(f.storage.chatWakeHead("ana"));
+    // The engine holds this thread on a secret file; the relay's log has no create for it.
+    unconfirmedWake(f, "op-secret", "message-secret", onSecret.id);
+    const response = await f.h(wakeChanges(since));
+    const text = await response.clone().text();
+    expect(await feed(response)).toEqual({
+      ok: true,
+      cursor: String(f.storage.chatWakeHead("ana")),
+      replace: true,
+    });
+    expect(text).not.toContain(onSecret.id);
+    expect(await answer(await f.write("chatContext", { threadId: onSecret.id }))).toMatchObject({
+      ok: false,
+      refusal: "missing",
+    });
+  });
+
+  it("judges the threads a wake read answers after its last check of access", async () => {
+    const activity = new DiscussionActivityHub();
+    const f = await writeRelay({ activity, nowMs: () => LATE });
+    const log = logWriter(f.storage, activity);
+    log("chat.thread.create", {
+      threadId: "thread-notes",
+      linkedObjectId: "object-notes",
+      linkedPathHint: "notes.md",
+    });
+    log("moment.append", { objectId: "object-notes", path: "notes.md" });
+    const since = String(f.storage.chatWakeHead("ana"));
+    unconfirmedWake(f, "op-notes", "message-notes", "thread-notes");
+    const head = String(f.storage.chatWakeHead("ana"));
+    expect(await feed(await f.h(wakeChanges(since)))).toEqual({
+      ok: true,
+      cursor: head,
+      threads: ["thread-notes"],
+    });
+
+    // The request's own check comes first; the second is the last before the answer.
+    const held = f.holdCheck(2);
+    const reading = f.h(wakeChanges(since));
+    await held.reached;
+    log("moment.append", { objectId: "object-notes", path: ".env" });
+    held.release();
+    expect(await feed(await reading)).toEqual({ ok: true, cursor: head, threads: [] });
+  });
+
+  it("answers a held wake read as missing once the sign-in, the owner, or Show on phone changed while it waited", async () => {
+    for (const kind of ["sign-in", "owner", "show on phone"] as const) {
+      const activity = new DiscussionActivityHub();
+      const f = await writeRelay({ activity });
+      const missing = await denialBytes(await f.h(op("nowhere", "groups")));
+      const held = f.h(wakeChanges(String(f.storage.chatWakeHead("ana")), { hold: 30_000 }));
+      await expect.poll(() => activity.stats().waiters).toBe(1);
+      f.change(kind);
+      notifyChatWakeChange(f.storage, "ana");
+      expect(await denialBytes(await held), kind).toBe(missing);
+    }
   });
 });

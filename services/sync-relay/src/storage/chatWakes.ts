@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
 import {
   CHAT_WAKE_PAGE_MAX,
+  PHONE_CONTEXT_WAKES_MAX,
   type ChatWakeCandidate,
   type ChatWakeState,
   type ChatWakeView,
+  type PhoneChatWake,
   type WaitingChatWake,
 } from "@dohc/workspace-contracts/chat-wakes";
 import { notifyChatWakeChange } from "../relayWriteChanges";
@@ -263,14 +265,45 @@ const headOf = (storage: StorageContext, accountId: string) =>
 const OWNED = `SELECT c.* FROM sync_relay_chat_wakes c
   JOIN sync_relay_workspaces w ON w.workspace_id = c.workspace_id AND w.owner_user_id = c.account_id`;
 
-// Ends a row whose wait ran out: no claim in 7 days, or no queued 24 hours after its claim. Inside a write transaction.
+// The state a row ends in once its wait ran out at `nowMs`: no claim in 7 days, or no queued 24 hours after its claim.
+// Null while its wait holds, or for a row that isn't waiting.
+function expiredState(row: Row, nowMs: number): "unclaimed" | "unconfirmed" | null {
+  return row.state === "waiting" && Number(row.waiting_since_ms) + CHAT_WAKE_CLAIM_MS <= nowMs
+    ? "unclaimed"
+    : row.state === "claimed" && Number(row.claimed_at_ms) + CHAT_WAKE_CONFIRM_MS <= nowMs
+      ? "unconfirmed"
+      : null;
+}
+
+// The candidates a retry of an ended row in `state` takes: its frozen ones, less an unconfirmed winner, whose
+// declaration of that agent is enabled and still leased at `nowMs`. A computer that quit after signing out, or never
+// came back, can't take the retry the person asked for.
+function retryCandidates(
+  storage: StorageContext,
+  row: Row,
+  state: "unclaimed" | "unconfirmed",
+  nowMs: number,
+): ChatWakeCandidate[] {
+  const leased = storage.db.prepare(
+    `SELECT 1 FROM sync_relay_chat_runners WHERE workspace_id = ? AND account_id = ? AND install_id = ? AND agent_id = ?
+       AND enabled = 1 AND updated_at_ms > ?`,
+  );
+  return candidatesOf(row).filter(
+    (each) =>
+      (state !== "unconfirmed" || each.installId !== row.winner_install_id) &&
+      leased.get(
+        row.workspace_id,
+        row.account_id,
+        each.installId,
+        each.agentId,
+        nowMs - CHAT_RUNNER_LEASE_MS,
+      ) !== undefined,
+  );
+}
+
+// Ends a row whose wait ran out. Inside a write transaction.
 function expire(storage: StorageContext, row: Row, nowMs: number): Row {
-  const state =
-    row.state === "waiting" && Number(row.waiting_since_ms) + CHAT_WAKE_CLAIM_MS <= nowMs
-      ? "unclaimed"
-      : row.state === "claimed" && Number(row.claimed_at_ms) + CHAT_WAKE_CONFIRM_MS <= nowMs
-        ? "unconfirmed"
-        : null;
+  const state = expiredState(row, nowMs);
   if (state === null) return row;
   storage.db
     .prepare(
@@ -494,6 +527,90 @@ export function chatWakeHead(storage: StorageContext, accountId: string): number
   return storage.readTx(() => headOf(storage, accountId));
 }
 
+// The message IDs one statement names at most.
+const MESSAGE_BATCH = 500;
+const placeholders = (count: number) => Array.from({ length: count }, () => "?").join(", ");
+
+/**
+ * The latest generation of each wake target of the given messages, for the
+ * phone: only rows of the account in a workspace it owns, whose thread is the
+ * one the caller read each message in. A row whose wait ran out reads as the
+ * state it ends in, before a sweep writes it. A swept row, or one never made,
+ * has no hint. Nothing here names a computer's install ID or candidates. At
+ * most PHONE_CONTEXT_WAKES_MAX hints answer.
+ */
+export function phoneChatWakes(
+  storage: StorageContext,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    /** Each shown message's ID, to the thread it was read in. */
+    messages: ReadonlyMap<string, string>;
+    nowMs: number;
+  },
+): PhoneChatWake[] {
+  return storage.readTx(() => {
+    const ids = [...input.messages.keys()];
+    const hints: PhoneChatWake[] = [];
+    for (let start = 0; start < ids.length; start += MESSAGE_BATCH) {
+      const batch = ids.slice(start, start + MESSAGE_BATCH);
+      const rows = storage.db
+        .prepare(
+          `${OWNED} WHERE c.account_id = ? AND c.workspace_id = ? AND c.message_id IN (${placeholders(batch.length)})
+           AND c.generation = (SELECT MAX(d.generation) FROM sync_relay_chat_wakes d WHERE d.account_id = c.account_id
+             AND d.workspace_id = c.workspace_id AND d.message_id = c.message_id AND d.target = c.target)
+         ORDER BY c.message_id, c.created_at_ms, c.wake_id`,
+        )
+        .all(input.accountId, input.workspaceId, ...batch);
+      for (const row of rows) {
+        if (hints.length === PHONE_CONTEXT_WAKES_MAX) return hints;
+        if (input.messages.get(String(row.message_id)) !== String(row.thread_id)) continue;
+        const ended = expiredState(row, input.nowMs);
+        const state = ended ?? (String(row.state) as ChatWakeState);
+        hints.push({
+          wakeId: String(row.wake_id),
+          messageId: String(row.message_id),
+          threadId: String(row.thread_id),
+          generation: Number(row.generation),
+          state,
+          winnerLabel: nullableString(row.winner_label),
+          canRetry:
+            (state === "unclaimed" || state === "unconfirmed") &&
+            retryCandidates(storage, row, state, input.nowMs).length > 0,
+        });
+      }
+    }
+    return hints;
+  });
+}
+
+/** The most changed rows one call of chatWakeChanges reads. */
+export const CHAT_WAKE_CHANGES_PAGE = 1_000;
+
+/**
+ * The threads of the account's wakes in a workspace it owns whose rows
+ * changed after `since`, through `through`, oldest change first. `next` is
+ * `through`, or the last row's change when the page is full.
+ */
+export function chatWakeChanges(
+  storage: StorageContext,
+  input: { accountId: string; workspaceId: string; since: number; through: number },
+): { next: number; threadIds: string[] } {
+  return storage.readTx(() => {
+    const rows = storage.db
+      .prepare(
+        `${OWNED} WHERE c.account_id = ? AND c.workspace_id = ? AND c.change_seq > ? AND c.change_seq <= ?
+         ORDER BY c.change_seq LIMIT ?`,
+      )
+      .all(input.accountId, input.workspaceId, input.since, input.through, CHAT_WAKE_CHANGES_PAGE);
+    return {
+      next:
+        rows.length === CHAT_WAKE_CHANGES_PAGE ? Number(rows.at(-1)!.change_seq) : input.through,
+      threadIds: [...new Set(rows.map((row) => String(row.thread_id)))],
+    };
+  });
+}
+
 /**
  * The waiting wakes that list this computer among their candidates, in
  * workspaces the account owns, that changed after `since`, oldest change
@@ -689,24 +806,9 @@ export function retryChatWake(
     };
     if (owned(nextId) !== undefined) return answer();
     const source = expire(storage, found, nowMs);
-    if (source.state !== "unclaimed" && source.state !== "unconfirmed") return { kind: "refused" };
-    // Only computers whose declaration of that agent is enabled and still leased: one that quit after signing out,
-    // or never came back, can't take the retry the person asked for.
-    const leased = storage.db.prepare(
-      `SELECT 1 FROM sync_relay_chat_runners WHERE workspace_id = ? AND account_id = ? AND install_id = ? AND agent_id = ?
-         AND enabled = 1 AND updated_at_ms > ?`,
-    );
-    const candidates = candidatesOf(source).filter(
-      (each) =>
-        (source.state !== "unconfirmed" || each.installId !== source.winner_install_id) &&
-        leased.get(
-          workspaceId,
-          accountId,
-          each.installId,
-          each.agentId,
-          nowMs - CHAT_RUNNER_LEASE_MS,
-        ) !== undefined,
-    );
+    const ended = source.state;
+    if (ended !== "unclaimed" && ended !== "unconfirmed") return { kind: "refused" };
+    const candidates = retryCandidates(storage, source, ended, nowMs);
     if (candidates.length === 0) return { kind: "refused" };
     storage.db
       .prepare(
