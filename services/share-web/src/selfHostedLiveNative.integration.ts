@@ -4080,7 +4080,11 @@ it(
           }),
         { timeout: 30000 },
       );
-      expect(readFileSync(join(proof.store, path), "utf8")).toContain("live: edit");
+      // The engine records the settle before it writes the file, so wait for the file too.
+      await vi.waitFor(
+        () => expect(readFileSync(join(proof.store, path), "utf8")).toContain("live: edit"),
+        { timeout: 30000 },
+      );
       expect(hostFolder(proof, "notes")).toEqual(["long.md"]);
       return { path, refusedSettles };
     }),
@@ -4232,7 +4236,8 @@ for (const ending of ["its owner stops live editing", "its last link ends"] as c
             { timeout: 30000 },
           );
         }
-        expectProjectionWritesEnded(proof, path, 5);
+        // A pull writes the file before it ends the queued writes, so wait for them to end.
+        await vi.waitFor(() => expectProjectionWritesEnded(proof, path, 5), { timeout: 30000 });
         if (ending === "its owner stops live editing")
           expect((await proof.route("DELETE", { path, retire: true })).body).toMatchObject({
             status: "retired",
