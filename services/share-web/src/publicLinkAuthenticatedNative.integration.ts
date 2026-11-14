@@ -1,4 +1,7 @@
-import { OwnerRestoreActionResponse } from "../../../apps/desktop/src/ipc/ownerRestoreContract.js";
+import {
+  OwnerRestoreActionResponse,
+  OwnerRestoreRelayReview,
+} from "../../../apps/desktop/src/ipc/ownerRestoreContract.js";
 import { createServer as createHttpsServer } from "node:https";
 import {
   chromium,
@@ -839,9 +842,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
         await ownerRequest(prefix + "/prepare", {}),
       );
       expect(prepared.result.kind).toBe("prepared");
-      const reviewed = OwnerRestoreActionResponse.review.parse(
-        await ownerRequest(prefix + "/review", {}),
-      );
+      const reviewed = OwnerRestoreRelayReview.parse(await ownerRequest(prefix + "/review", {}));
       if (!reviewed.result || "kind" in reviewed.result)
         throw new Error("Exact owner restore review missing.");
       expect(reviewed.result.content.frozenMarkdown).toBe(settledMarkdown);

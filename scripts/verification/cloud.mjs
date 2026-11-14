@@ -8,7 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { assertPrepared, hashFile, prepare, stagedEnginePath } from "./build.mjs";
@@ -77,6 +77,21 @@ function passingBrowserReport(path) {
   )
     throw new Error(`Browser proof failed or skipped: ${path}`);
   return report;
+}
+
+/** A named task passes its one test. A file task passes every test in its file, at least one. */
+export function assertNativeProof(task, result) {
+  const cases = result.testResults
+    .flatMap((module) => module.assertionResults)
+    .filter((test) => !task.name || test.fullName === task.name);
+  if (
+    !result.success ||
+    !cases.length ||
+    cases.some((test) => test.status !== "passed") ||
+    result.numFailedTests ||
+    (task.name && (cases.length !== 1 || result.numPassedTests !== 1))
+  )
+    throw new Error(`Native proof did not pass: ${task.name ?? task.file}.`);
 }
 
 export async function runJavascript(
@@ -178,7 +193,7 @@ export async function runJavascript(
       const proofDirectory = join(directory, `self-host-${record.steps.length}`);
       mkdirSync(proofDirectory, { recursive: true });
       const sha256 = hashFile(stagedEnginePath);
-      const escaped = task.name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+      const escaped = task.name?.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
       await command(
         task,
         ...pnpm([
@@ -189,8 +204,9 @@ export async function runJavascript(
           "run",
           "--config",
           "vitest.self-host-native.config.ts",
-          "--testNamePattern",
-          `^${escaped}$`,
+          // Vitest matches a filter against the path from its root.
+          relative(resolve(repoRoot, "services/share-web"), resolve(repoRoot, task.file)),
+          ...(escaped ? ["--testNamePattern", `^${escaped}$`] : []),
           "--reporter=default",
           "--reporter=json",
           `--outputFile.json=${join(proofDirectory, "vitest.json")}`,
@@ -204,19 +220,11 @@ export async function runJavascript(
           },
         },
       );
-      const result = JSON.parse(readFileSync(join(proofDirectory, "vitest.json"), "utf8"));
-      const cases = result.testResults
-        .flatMap((module) => module.assertionResults)
-        .filter((test) => test.fullName === task.name);
-      if (
-        !result.success ||
-        cases.length !== 1 ||
-        cases[0].status !== "passed" ||
-        result.numPassedTests !== 1 ||
-        result.numFailedTests
-      )
-        throw new Error(`Native proof did not pass: ${task.name}.`);
-      if (task.name.startsWith("enrolls a self-hosted document,")) {
+      assertNativeProof(
+        task,
+        JSON.parse(readFileSync(join(proofDirectory, "vitest.json"), "utf8")),
+      );
+      if (task.name?.startsWith("enrolls a self-hosted document,")) {
         // The canonical reader also checks the complete saved delivery record.
         record.selfHostNative = readSelfHostDeliveryProof(proofDirectory, stagedEnginePath, sha256);
       }
@@ -348,7 +356,12 @@ export async function cloudJavascript(part, index = 0) {
                 record.build = build;
               }),
             ];
-            if (shard.some((group) => ["desktop", "accounts"].includes(group.kind)))
+            // namedRecipientAuthenticatedNative drives Chromium too.
+            if (
+              shard.some((group) =>
+                ["desktop", "accounts", "self-host-native"].includes(group.kind),
+              )
+            )
               actions.push(
                 step("browser installation", () =>
                   run(...pnpm(["exec", "playwright", "install", "chromium"]), {
