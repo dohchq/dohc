@@ -272,6 +272,7 @@ export function ChannelView({
   const [following, setFollowing] = useState<"live" | "delayed" | "stopped">("live"),
     [unseen, setUnseen] = useState(0);
   const [access, setAccess] = useState(client.access),
+    [accessFrom, setAccessFrom] = useState(client.access),
     [draft, setDraftText] = useState(() => (composerKey === null ? "" : readDraft(composerKey)));
   const [draftFor, setDraftFor] = useState(composerKey),
     currentKey = useRef(composerKey);
@@ -279,6 +280,11 @@ export function ChannelView({
   if (draftFor !== composerKey) {
     setDraftFor(composerKey);
     setDraftText(composerKey === null ? "" : readDraft(composerKey));
+  }
+  // A changed level reaches a mounted channel in place, so its messages and draft stay.
+  if (accessFrom !== client.access) {
+    setAccessFrom(client.access);
+    setAccess(client.access);
   }
   const setDraft = (text: string) => {
     setDraftText(text);

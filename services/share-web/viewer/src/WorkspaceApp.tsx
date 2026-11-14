@@ -322,7 +322,7 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
             access={access === "view" ? "read-only" : "read-write"} onEnded={groupsEnded}/> : <p className="chat-state">No files in this workspace yet.</p>)}
         </div>
         <div className="workspace-chats" id="workspace-chats" {...sidePanel("chats")}>
-          <MemberChats found={listing.found} onRetry={listing.retry} shown={showing === "chats"} onEnded={groupsEnded} onUnread={setUnread}/>
+          <MemberChats found={listing.found} onRetry={listing.retry} access={access === "view" ? "read-only" : "read-write"} shown={showing === "chats"} onEnded={groupsEnded} onUnread={setUnread}/>
         </div>
       </div>
     </div>

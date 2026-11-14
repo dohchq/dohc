@@ -41,8 +41,8 @@ export function useMemberListing(grantId: string | null, accountId: string, onEn
  * open one shows its messages, and the others count what arrives. `shown`
  * says whether the person can see the panel, so a phone's hidden tab counts too.
  */
-export function MemberChats({found, onRetry, shown, onEnded, onUnread}: {
-  found: MemberListing; onRetry(): void; shown: boolean; onEnded(reason: Ended): void; onUnread(count: number): void;
+export function MemberChats({found, onRetry, access, shown, onEnded, onUnread}: {
+  found: MemberListing; onRetry(): void; access: NamedChatAccess; shown: boolean; onEnded(reason: Ended): void; onUnread(count: number): void;
 }) {
   const [open, setOpen] = useState<string | null>(null), [unread, setUnread] = useState<ReadonlyMap<string, number>>(new Map());
   const onEndedRef = useRef(onEnded); onEndedRef.current = onEnded;
@@ -92,7 +92,8 @@ export function MemberChats({found, onRetry, shown, onEnded, onUnread}: {
         <span className="chats-hash"><Icon name="hash" size={14}/></span>
         <h2>{group.name ?? "Group"}</h2>
       </div>
-      <ChannelView key={`${opened.shareId}\n${group.channelWireId}`} client={hub.client(group)} name={group.name}
+      {/* A Group's access is the member level, which the workspace reads again while it stays open. */}
+      <ChannelView key={`${opened.shareId}\n${group.channelWireId}`} client={hub.client({...group, access})} name={group.name}
         onEnded={reason => onEndedRef.current(reason)} readOnlyNote={READ_ONLY} empty={EMPTY} threads={group.type ?? "both"}
         draftKey={`${opened.shareId}\ngroup\n${group.channelWireId}`}/>
     </> : <>

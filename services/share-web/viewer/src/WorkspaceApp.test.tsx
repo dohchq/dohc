@@ -54,7 +54,7 @@ function server(options: {level?: Level; signedIn?: boolean; groups?: Array<{wir
   const files = options.files ?? FILES;
   // A test can change the level while the page is open; the next read of the workspace's meta carries it.
   const levelNow = () => options.level ?? "comment";
-  const access = levelNow() === "view" ? "read-only" : "read-write";
+  const access = () => levelNow() === "view" ? "read-only" : "read-write";
   const groups = options.groups ?? [{wire: "wire-plans", name: "plans"}, {wire: "wire-food", name: "food"}];
   const meta = () => ({ok: true, effectiveSelector: {paths: [], versionId: null, access: levelNow(), wholeWorkspace: true}, access: levelNow(),
     subjectName: "Trip", lastSettledAtMs: Date.now(), lastSettledKnown: true});
@@ -83,7 +83,7 @@ function server(options: {level?: Level; signedIn?: boolean; groups?: Array<{wir
     }
     if (url.pathname === "/api/named-chat/channels" && groupsFail > 0) {groupsFail -= 1; return jsonResponse({ok: false, error: "unavailable"}, 503);}
     if (url.pathname === "/api/named-chat/channels") return jsonResponse({shareId: "share", userId: "sam", maxPostBytes: 9000, maxBodyBytes: 8000,
-      channels: groups.map(group => ({channelWireId: group.wire, name: group.name, kind: "channel", type: group.type ?? "both", access}))});
+      channels: groups.map(group => ({channelWireId: group.wire, name: group.name, kind: "channel", type: group.type ?? "both", access: access()}))});
     if (url.pathname === "/api/named-chat/messages" && init?.method === "POST") {
       const body = JSON.parse(String(init.body)) as Record<string, unknown>; posts.push(body);
       if (options.postFails) return jsonResponse({ok: false, error: "refused", code: options.postFails.code}, options.postFails.status);
@@ -145,6 +145,33 @@ it("shows the workspace's tree and a page's settled text at View, and its Groups
   await settle(() => text().includes("Fuel and food."));
   expect(container.querySelector(".file.selected")?.textContent).toBe("to-pack.md");
   expect(vi.mocked(openMemberPage)).not.toHaveBeenCalled();
+});
+
+it("follows the member level in an open Group: a raise offers the composer, and a downgrade keeps the draft to copy or discard", async () => {
+  const options: {level: Level} = {level: "view"};
+  const fetch = server(options); await render(); await opened();
+  const composer = () => groupPanel().querySelector<HTMLTextAreaElement>('textarea[name="body"]');
+  expect(composer()).toBeNull();
+  // The owner raised members to Comment. The next read of the workspace carries it, with no reload.
+  options.level = "comment";
+  // A read that moves the cursor follows again at once.
+  await act(async () => following("log")[0]!.answer({ops: [], nextCursor: 8, hasMore: false, epochLogFloor: 0}));
+  await settle(() => composer() !== null);
+  expect(groupPanel().textContent).not.toContain("Only people who can comment post here.");
+  await act(async () => setControlValue(composer()!, "Bring a map"));
+  // The owner lowered members to View again.
+  options.level = "view";
+  await settle(() => following("log").length === 1);
+  await act(async () => following("log")[0]!.answer({ops: [], nextCursor: 9, hasMore: false, epochLogFloor: 0}));
+  await settle(() => composer() === null);
+  expect(groupPanel().textContent).toContain("Only people who can comment post here.");
+  expect(groupPanel().querySelector<HTMLTextAreaElement>('[aria-label="Your unsent message"]')?.value).toBe("Bring a map");
+  expect([...groupPanel().querySelectorAll(".chat-unsent-actions button")].map(node => node.textContent)).toEqual(["Copy", "Discard"]);
+  // The open Group stayed mounted: its messages read once, and the Groups once.
+  expect(text()).toContain("Plans start here");
+  const reads = (path: string) => fetch.mock.calls.filter(([input]) => new URL(String(input), "https://share.test").pathname === path
+    && !new URL(String(input), "https://share.test").searchParams.has("since")).length;
+  expect(reads("/api/named-chat/channels")).toBe(1);
 });
 
 it("moves through the file tree with the arrow keys, folds a folder, and opens a file with Enter", async () => {
