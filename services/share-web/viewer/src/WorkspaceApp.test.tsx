@@ -349,6 +349,21 @@ it("switches a Group with both lanes between Posts and Chat", async () => {
   await act(async () => lanes()[1]!.click());
   expect(listed()).toEqual(["Quick question"]);
   expect(composer().placeholder).toBe("Message #plans");
+  // The arrow keys move between the lanes, as between the workspace's tabs, and one lane takes Tab.
+  const press = async (key: string) => act(async () => {
+    (document.activeElement as HTMLElement).dispatchEvent(new KeyboardEvent("keydown", {key, bubbles: true, cancelable: true}));
+  });
+  lanes()[1]!.focus();
+  expect(lanes().map(tab => tab.tabIndex)).toEqual([-1, 0]);
+  await press("ArrowRight");
+  expect(document.activeElement).toBe(lanes()[0]);
+  expect(listed()).toEqual(["Plans start here"]);
+  await press("ArrowLeft");
+  expect(document.activeElement).toBe(lanes()[1]);
+  await press("Home");
+  expect(lanes()[0]!.getAttribute("aria-selected")).toBe("true");
+  await press("End");
+  expect(listed()).toEqual(["Quick question"]);
 });
 
 it("keeps a Group's draft and a file's comment draft while the person moves around, and clears each after its send", async () => {

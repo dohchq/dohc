@@ -155,6 +155,10 @@ function ChatMessage({
 }
 
 type Lane = "posts" | "chat";
+const LANES = [
+  ["posts", "Posts"],
+  ["chat", "Chat"],
+] as const;
 /** An open thread: a post's, or one chat message's replies. */
 type OpenThread = { threadId: string; rootId: string | null };
 
@@ -505,6 +509,25 @@ export function ChannelView({
     setPostError(null);
     stick.current = true;
   };
+  // The arrow keys, Home and End move between the lanes, as between the workspace's tabs.
+  const moveLane = (event: KeyboardEvent<HTMLDivElement>) => {
+    const index = LANES.findIndex(([value]) => value === lane),
+      count = LANES.length;
+    const target =
+      event.key === "ArrowRight"
+        ? (index + 1) % count
+        : event.key === "ArrowLeft"
+          ? (index + count - 1) % count
+          : event.key === "Home"
+            ? 0
+            : event.key === "End"
+              ? count - 1
+              : -1;
+    if (target < 0) return;
+    event.preventDefault();
+    showLane(LANES[target]![0]);
+    event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]')[target]?.focus();
+  };
   const send = async (event?: FormEvent<HTMLFormElement>) => {
     event?.preventDefault();
     const controller = mounted.current;
@@ -621,18 +644,14 @@ export function ChannelView({
   return (
     <section className="chat-channel" aria-label={name ?? "Shared channel"}>
       {threads === "both" && !open && (
-        <div className="chat-lanes" role="tablist" aria-label="Group lanes">
-          {(
-            [
-              ["posts", "Posts"],
-              ["chat", "Chat"],
-            ] as const
-          ).map(([value, label]) => (
+        <div className="chat-lanes" role="tablist" aria-label="Group lanes" onKeyDown={moveLane}>
+          {LANES.map(([value, label]) => (
             <button
               key={value}
               type="button"
               role="tab"
               aria-selected={lane === value}
+              tabIndex={lane === value ? 0 : -1}
               onClick={() => showLane(value)}
             >
               {label}
