@@ -3764,6 +3764,46 @@ export function DesktopWorkspaceShell(props: {
       return saving;
     };
   }, [openFile, showSuccessNotice, reportShellError]);
+  // A held file can't go live again, so Live documents offers a copy beside
+  // it. Opening the copy starts its live editing.
+  const liveCopies = useRef(new Map<string, Promise<void>>());
+  const makeLiveCopy = useCallback(
+    (id: string, path: string): Promise<void> => {
+      // A row and its notice's Try again share one copy, so a second press makes no second file.
+      const key = `${id}\n${path}`;
+      const running = liveCopies.current.get(key);
+      if (running) return running;
+      const retry = () => void makeLiveCopy(id, path);
+      const copying = bridge()
+        .duplicateWorkspaceFile({ workspaceId: id, relativePath: path })
+        .then(
+          (copy) => {
+            if (workspaceIdRef.current !== id) return;
+            // History has the copy but its file isn't written yet; Duplicate again finishes it.
+            if (!copy.materialized) {
+              reportShellError(
+                `dohc could not finish the copy of ${path}.`,
+                new Error(`${copy.path} is in History but not yet in this folder.`),
+                retry,
+              );
+              return;
+            }
+            // Live documents may sit over Settings; both close so the copy shows.
+            setLiveDocumentsWorkspaceId(null);
+            closeSettings();
+            openFile(copy.path);
+          },
+          (error: unknown) => {
+            if (workspaceIdRef.current !== id) return;
+            reportShellError(`dohc could not make a copy of ${path}.`, error, retry);
+          },
+        )
+        .finally(() => liveCopies.current.delete(key));
+      liveCopies.current.set(key, copying);
+      return copying;
+    },
+    [closeSettings, openFile, reportShellError],
+  );
   const reportKeptCopyFailure = useCallback(
     (message: string, retry: () => void) => reportShellFailure({ message, retry }),
     [reportShellFailure],
@@ -9729,6 +9769,7 @@ export function DesktopWorkspaceShell(props: {
                             stopRunning={liveStopRunning}
                             saveRecoveryCopy={saveLiveRecoveryCopyFromDialog}
                             readKeptEdits={readKeptEdits}
+                            makeCopy={makeLiveCopy}
                             setAside={saveOnlyLiveDocuments(syncStatus?.ownerLiveQuarantines ?? [])}
                             {...(liveDocumentsReveal === null
                               ? {}

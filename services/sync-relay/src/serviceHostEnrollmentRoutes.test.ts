@@ -732,6 +732,50 @@ it.each([0, 1] as const)(
   },
 );
 
+// Duplicate is the way out for a held note: its copy is a new object whose
+// one moment carries no conflict, so the server can host it if the share covers it.
+it.each([
+  ["a share of the note's folder", ["docs"], true],
+  ["a share of exactly the note", ["docs/a.md"], false],
+] as const)(
+  "enrols a held note's copy, which carries no conflict effect, under %s only if it covers the copy",
+  async (_shape, paths, covered) => {
+    const f = await heldDocumentFixture();
+    cleanup.push(f.close);
+    const workspaceId = f.binding.workspaceId,
+      copy = { workspaceId, objectId: "copy-object", path: "docs/a - Copy.md" };
+    f.raw
+      .prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id=?")
+      .run(JSON.stringify({ paths, versionId: null }), scope.shareId);
+    f.raw
+      .prepare(`INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,relay_seq)
+      VALUES (?,'owner',3,'moment.append',?,1,4)`)
+      .run(
+        workspaceId,
+        JSON.stringify({
+          objectId: copy.objectId,
+          versionId: "main",
+          path: copy.path,
+          momentId: "copy-moment",
+        }),
+      );
+    f.raw
+      .prepare("INSERT INTO sync_relay_current_files VALUES (?,'main',?,?,'text',1)")
+      .run(workspaceId, copy.path, "b".repeat(64));
+    f.raw
+      .prepare(`INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms)
+      VALUES (?,?,4,'copy-moment','main',?,?,'text',1,1)`)
+      .run(workspaceId, copy.objectId, copy.path, "b".repeat(64));
+    discoverServiceHostDocuments(f.storage);
+    const enrolled = f.storage.listServiceHostEnrollments().map((row) => row.path);
+    expect(enrolled).toContain(f.binding.currentPath);
+    if (covered) expect(enrolled).toContain(copy.path);
+    else expect(enrolled).not.toContain(copy.path);
+    expect(f.storage.hasServiceHostConflictEffect(f.binding)).toBe(true);
+    expect(f.storage.hasServiceHostConflictEffect(copy)).toBe(false);
+  },
+);
+
 it("reports only a conflict-parent hold, after document state and existing blocks", async () => {
   const f = await fixture(),
     enrolled = f.storage.ensureOwnedLiveDocument({ intent: "share", ...f.input });
