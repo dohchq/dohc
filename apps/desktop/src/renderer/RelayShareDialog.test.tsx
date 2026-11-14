@@ -6735,4 +6735,51 @@ describe("sharing that cannot work yet", () => {
     expect(screen.queryByTestId("share-setup")).toBeNull();
     for (const control of formControls()) expect(control.closest("[inert]")).toBeNull();
   });
+
+  it("says which new notes the server has no file for yet, and how to send them", () => {
+    const view = render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={PLAN}
+        onClose={() => {}}
+        accessContext={CAN_SHARE}
+      />,
+    );
+    const band = (
+      notSentWhileOpen: readonly string[],
+      target: RelayShareTarget = PLAN,
+      accessContext = CAN_SHARE,
+    ) => {
+      view.rerender(
+        <RelayShareDialog
+          workspaceId="ws-1"
+          target={target}
+          onClose={() => {}}
+          accessContext={accessContext}
+          notSentWhileOpen={notSentWhileOpen}
+        />,
+      );
+      const shown = screen.queryByTestId("share-not-sent");
+      return shown ? [...shown.querySelectorAll("p")].map((line) => line.textContent) : null;
+    };
+    expect(band([])).toBeNull();
+    expect(band(["docs/plan.md"])).toEqual([
+      "This note hasn't been sent yet.",
+      "Leave the note or close its tab to send it.",
+    ]);
+    // Another note, or one whose name only begins the same, is not this one.
+    expect(band(["docs/other.md", "docs/plan.md.bak"])).toBeNull();
+    const docs: RelayShareTarget = { kind: "paths", paths: ["docs"] };
+    expect(band(["docs/plan.md", "docs-old/a.md"], docs)).toEqual([
+      "1 open note here hasn't been sent yet.",
+      "Leave the note or close its tab to send it.",
+    ]);
+    expect(band(["docs/plan.md", "docs/a/b.md", "notes/c.md"], docs)).toEqual([
+      "2 open notes here haven't been sent yet.",
+      "Leave them or close their tabs to send them.",
+    ]);
+    expect(band(["docs/plan.md"], { kind: "version", versionId: "version-7" })).toBeNull();
+    // While sharing can't work, the dialog says why instead.
+    expect(band(["docs/plan.md"], PLAN, accessContextFor("checking"))).toBeNull();
+  });
 });

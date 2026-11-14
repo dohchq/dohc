@@ -167,6 +167,7 @@ function View(props: {
   mounts?: ShareMount[];
   open?: boolean;
   focus?: SharingFocus;
+  notSentWhileOpen?: string[];
 }) {
   const [sharesRevision, sharesChanged] = useReducer((revision: number) => revision + 1, 0);
   const removals = useMemo(
@@ -199,6 +200,7 @@ function View(props: {
       reportError={callbacks.reportError}
       focus={props.focus ?? null}
       onFocused={callbacks.onFocused}
+      notSentWhileOpen={props.notSentWhileOpen ?? []}
     />
   );
 }
@@ -258,6 +260,38 @@ describe("the Sharing view's two lists", () => {
       workspaceId: "workspace-a",
       reason: "sharing-open",
     });
+  });
+
+  it("notes on a live share the new notes it covers that the server has no file for yet", async () => {
+    answerWith({
+      granted: answer("granted", {
+        rows: [
+          granted(),
+          granted({
+            shareId: "share-2",
+            grantId: "grant-2",
+            selector: { paths: ["research/competitors.md"], versionId: null },
+          }),
+          granted({
+            shareId: "share-3",
+            grantId: "grant-3",
+            status: "revoked",
+            selector: { paths: ["notes/old.md"], versionId: null },
+          }),
+        ],
+      }),
+    });
+    render(<View notSentWhileOpen={["notes/old.md", "notes/product-plan.md"]} />);
+    const rows = await screen.findAllByTestId("sharing-granted-row");
+    const note = (shareId: string) =>
+      within(rows.find((row) => row.dataset.shareId === shareId)!).queryByTestId("sharing-row-note")
+        ?.textContent ?? null;
+    expect(note("share-1")).toBe(
+      "This note hasn't been sent yet. Leave the note or close its tab to send it.",
+    );
+    expect(note("share-2")).toBeNull();
+    // An ended share has no link left to show the note.
+    expect(note("share-3")).toBeNull();
   });
 
   it("files a failed read in Notices and reads again from Try again", async () => {

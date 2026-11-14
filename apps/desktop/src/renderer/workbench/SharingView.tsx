@@ -32,6 +32,7 @@ import { KindGlyph } from "../ui/KindGlyph";
 import { MoreMenu, type MoreMenuItem } from "../ui/MoreMenu";
 import { NameLine } from "../ui/NameLine";
 import { SkeletonLines } from "../ui/SkeletonRows";
+import { notSentWords } from "../notSentWords";
 import { useRequestSequence } from "../useRequestSequence";
 import {
   ABOUT_ROW,
@@ -464,6 +465,8 @@ function GrantedRow(props: {
   group: ShareGroup;
   repeated: ReadonlySet<string>;
   waiting: WaitingChanges | undefined;
+  // New notes the server has no file for until their open editor is left.
+  notSentWhileOpen: readonly string[];
   confirming: boolean;
   busy: boolean;
   // Whether this server has shown that it makes browser invitations.
@@ -479,6 +482,10 @@ function GrantedRow(props: {
   const code = copies.code;
   const invitation = props.invitations ? copies.invitation : null;
   const word: Word | null = active ? null : first.status === "damaged" ? "damaged" : "ended";
+  const notSent =
+    active && first.selector && first.selector.kind === undefined
+      ? notSentWords(first.selector.paths, props.notSentWhileOpen)
+      : null;
   const cancelRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     if (props.confirming) cancelRef.current?.focus();
@@ -511,6 +518,7 @@ function GrantedRow(props: {
       subject={subject}
       name={shownName(subject, props.repeated)}
       who={word ? null : grantedWho(group)}
+      note={notSent ? `${notSent.state} ${notSent.next}` : null}
       word={word}
       menu={menu}
       copies={
@@ -884,6 +892,7 @@ export function SharingPanel(props: {
   receivedSetup: AccessSetup;
   conflictCount: number | null;
   waiting: ReadonlyMap<string, WaitingChanges>;
+  notSentWhileOpen: readonly string[];
   mounts: readonly ShareMount[];
   skipView: SkipView;
   invitations: boolean;
@@ -970,6 +979,7 @@ export function SharingPanel(props: {
                 group={group}
                 repeated={repeated}
                 waiting={props.waiting.get(group.shareId)}
+                notSentWhileOpen={props.notSentWhileOpen}
                 invitations={props.invitations}
                 confirming={props.confirmShareId === group.shareId}
                 busy={props.busyShareId === group.shareId}
@@ -1055,6 +1065,8 @@ export function SharingView(props: {
   // What to focus once its lane answers, as Settings search asked.
   focus: SharingFocus | null;
   onFocused: () => void;
+  // New notes the server has no file for until their open editor is left.
+  notSentWhileOpen?: readonly string[];
 }) {
   const { workspaceId, context, focus, onFocused } = props;
   const { facts, openSyncSettings, connect } = context;
@@ -1323,6 +1335,7 @@ export function SharingView(props: {
       receivedSetup={setupFor("received")}
       conflictCount={props.conflictCount}
       waiting={waiting}
+      notSentWhileOpen={props.notSentWhileOpen ?? []}
       mounts={props.mounts}
       skipView={skipView}
       invitations={invitations}

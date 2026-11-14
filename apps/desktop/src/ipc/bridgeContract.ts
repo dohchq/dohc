@@ -1692,6 +1692,8 @@ const SYNC_STATUS_BASE_FIELDS = {
     .optional(),
   // Shared notes whose edits wait on this computer for the server.
   ownerPendingShare: z.array(SAFE_RELATIVE_PATH).optional(),
+  // New notes the server has no file for until their open editor is left.
+  notSentWhileOpen: z.array(SAFE_RELATIVE_PATH).optional(),
   hasOwnerLiveRefusals: z.boolean().optional(),
   // A shared view can have canonical file state that has not yet
   // reached its local folder. The producer bounds each path sample while the

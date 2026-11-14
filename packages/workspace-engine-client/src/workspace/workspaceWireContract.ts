@@ -77,6 +77,7 @@ export const WORKSPACE_METHOD = {
   automationsScheduleMarks: "automations.scheduleMarks",
   syncRemoteChanges: "sync.remoteChanges",
   syncCollectionsWaiting: "sync.collectionsWaiting",
+  syncFirstExportsHeldOpen: "sync.firstExportsHeldOpen",
   ydocHeldChange: "ydoc.heldChange",
   automationsRunNow: "automations.runNow",
 } as const;
@@ -562,6 +563,7 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.automationsScheduleMarks]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.syncRemoteChanges]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.syncCollectionsWaiting]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.syncFirstExportsHeldOpen]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.ydocHeldChange]: WorkspaceJsonObject & { path: string };
   [WORKSPACE_METHOD.automationsRunNow]: AutomationRunNowParams;
 };
@@ -1597,6 +1599,13 @@ const WorkspaceResultSchemas = {
   /** Collections updates wait for an ordinary pull to commit its last page. */
   [WORKSPACE_METHOD.syncCollectionsWaiting]: mutableStruct({
     waiting: Schema.Boolean,
+  }),
+  /**
+   * The notes whose first file record waits only for an open editing session
+   * to end. The server has no file for them until the note is left.
+   */
+  [WORKSPACE_METHOD.syncFirstExportsHeldOpen]: mutableStruct({
+    paths: Schema.mutable(Schema.Array(Schema.String)),
   }),
   /**
    * One held save: `file` is the file's text on disk, and `held` what saving

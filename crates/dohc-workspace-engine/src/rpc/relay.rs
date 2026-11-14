@@ -1791,6 +1791,26 @@ impl EngineService {
         Ok(json!({ "applied": applied }))
     }
 
+    /// `sync.firstExportsHeldOpen`: the paths whose first file record waits
+    /// only for an open editing session to end. Like `sync.remoteChanges`, it
+    /// needs no relay configuration and no finished initial capture.
+    pub(super) async fn sync_first_exports_held_open(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+    ) -> Result<Value, WireError> {
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let paths = Self::read_under_ctx(
+            &cancellation,
+            "sync.firstExportsHeldOpen",
+            open.actor
+                .first_exports_held_open(open.workspace_id.clone(), self.leases.scoped(&open.root)),
+        )
+        .await?;
+        Ok(json!({ "paths": paths }))
+    }
+
     /// `sync.collectionsWaiting`: whether Collections updates wait for an
     /// ordinary pull to commit its terminal page. A paused workspace still
     /// answers, so it needs no relay configuration and no finished initial

@@ -1,9 +1,10 @@
-import { CloudOff, LogIn, Share2, X, type LucideIcon } from "lucide-react";
+import { CloudOff, CloudUpload, LogIn, Share2, X, type LucideIcon } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { ShareAccess } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { SYNC_UNCONFIRMED_ACCOUNT } from "./cloudSyncWords";
 import { EmailShareForm } from "./EmailShareForm";
+import { notSentWords } from "./notSentWords";
 import { SHARE_ACCESS_WORDS, SharePersonRow } from "./shareAccess";
 import type { ShareRemovalNotices } from "./shell/useShareRemovalNotices";
 import { IconButton, PrimaryButton, RetryRow, SectionLabel } from "./ui/controls";
@@ -126,6 +127,8 @@ export function RelayShareDialog(props: {
   server: string | null;
   // Opens a share in the Sharing view, where it ends. The dialog closes first.
   onOpenSharing?: (target: SharingFocus) => void;
+  // New notes the server has no file for until their open editor is left.
+  notSentWhileOpen?: readonly string[];
 }) {
   // The form shows but takes no input while a cause dohc can name stops a
   // share, or while it is still read. Nothing is read from the server until
@@ -227,6 +230,7 @@ export function RelayShareDialog(props: {
             server={props.server}
             onLeave={linkPane.close}
           />
+          {held ? null : <NotSent target={props.target} notSent={props.notSentWhileOpen ?? []} />}
 
           <div
             inert={held || undefined}
@@ -358,6 +362,25 @@ function ShareSetup(props: {
         </SetupBand>
       );
   }
+}
+
+// A link to a new note shows no file until the note's open editor is left.
+function NotSent(props: { target: RelayShareTarget; notSent: readonly string[] }) {
+  const words =
+    props.target.kind === "paths" ? notSentWords(props.target.paths, props.notSent) : null;
+  if (!words) return null;
+  return (
+    <div
+      data-testid="share-not-sent"
+      className="flex items-center gap-2 rounded-lg bg-panel-2 p-2 text-[12px] leading-4 text-ink"
+    >
+      <CloudUpload size={14} aria-hidden className="shrink-0 text-muted" />
+      <div className="min-w-0 flex-1">
+        <p className="m-0">{words.state}</p>
+        <p className="m-0 text-muted">{words.next}</p>
+      </div>
+    </div>
+  );
 }
 
 // The action opens its own place, so the dialog closes first.
