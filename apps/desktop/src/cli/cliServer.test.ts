@@ -2700,6 +2700,18 @@ describe("CLI socket server", () => {
       expect(members).toHaveBeenCalledOnce();
     });
 
+    // Its links would name this computer's view, which no one else can open.
+    it("refuses a link at every level, without calling it read-only", async () => {
+      const makeWorkReference = vi.fn(async () => "ref");
+      for (const access of ["view", "edit"] as const) {
+        joinAs(access);
+        context = { ...context, makeWorkReference };
+        await expect(invoke("link", { ...args(), target: { kind: "path", path: "tracked.md" } }))
+          .rejects.toThrow("Agents can't make links in a joined workspace yet. Name the file or Group in the message instead.");
+      }
+      expect(makeWorkReference).not.toHaveBeenCalled();
+    });
+
     it("takes a page edit to the workspace's live documents", async () => {
       joinAs("edit");
       const edit = vi.fn(async ({ path }: { path: string }) => ({ path, changed: true }));

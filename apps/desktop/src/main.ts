@@ -286,6 +286,7 @@ import {
   joinedByAccount,
 } from "./ipc/workspaceMembersActions";
 import { createJoinedGroup } from "./workspaces/joinedGroupCreate";
+import { sharedViewHistory } from "./workspaces/sharedViewHistory";
 import { memberOperations } from "./ipc/memberOperations";
 import { accessOperations } from "./ipc/accessOperations";
 import { assertResolvedWorkspacePath } from "./workspaces/workspaceRealPath";
@@ -7240,6 +7241,9 @@ const { startDesktopCliServer } = createDesktopCliServer({
   currentDaemon: () => desktopEngine.daemon,
   agentDispatchStoreHandleFor,
   sharedViewOf,
+  sharedViewHistory: (workspace) => sharedViewHistory(receivedShareEngine.storeFor({
+    engineWorkspaceId: workspace.workspaceId, rootPath: workspace.rootPath, attachmentId: workspace.attachmentId,
+  }), workspace.workspaceId),
   createJoinedGroup: async (workspace, store, input, assertCurrent) =>
     (
       await createJoinedGroup(

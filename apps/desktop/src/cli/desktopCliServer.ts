@@ -49,7 +49,10 @@ import {
   type WorkspaceEngineCapture,
 } from "../workspaces/workspaceEngineCapture";
 import type { LocalDatasetAgent } from "../workspaces/localDatasetHost";
-import type { WorkspaceAuthorityOperation } from "../workspaces/workspaceAuthorityOwner";
+import type {
+  PhysicalWorkspace,
+  WorkspaceAuthorityOperation,
+} from "../workspaces/workspaceAuthorityOwner";
 import type { LocalPersonAuthor } from "../workspaces/desktopRecordEdits";
 import { captureRefusal } from "../workspaces/engineCaptureGate";
 import { resolveEngineFileTargets } from "../workspaces/resolveEngineFiles";
@@ -106,9 +109,6 @@ import {
 
 // The engine reads at most this many accounts for one agent you run.
 const MAX_AGENT_REQUESTERS = 64;
-
-// A joined workspace keeps no History of its own on this computer.
-export const JOINED_HISTORY_REFUSAL = "Read a joined workspace's History in the app.";
 
 // The accounts this computer's person posts as in a workspace, as its
 // registry entry records them: the owner account sync started with, or the
@@ -299,6 +299,10 @@ interface DesktopCliServerDependencies<State> {
   // A share view's scope, or null for a workspace this computer owns. A
   // membership is a view of a whole workspace: a joined workspace.
   sharedViewOf(workspaceId: string): ShareViewWriteScope | null;
+  // A share view's History: what its share imported, from its own store.
+  sharedViewHistory(
+    workspace: PhysicalWorkspace<RegistryEntry>,
+  ): Pick<WorkspaceEngineCapture, "listMoments" | "readMoment">;
   // An agent's new page in a joined workspace. The relay decides each one;
   // the role and folders only give a refusal its reason first.
   // New group in a joined workspace, through the relay (joinedGroupCreate).
@@ -428,7 +432,7 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
     }
     await openWorkspaceActivity(workspace);
     // A share view has no capture. Its files resolve through the view's own
-    // engine session, and History stays in the app.
+    // engine session, and its History is what its share imported.
     const shareView = sharedViewOf(workspace.workspaceId) !== null;
     const capture = shareView ? null : activity.engineCaptureFor(workspace.workspaceId);
     if (!capture && !shareView) {
@@ -1306,13 +1310,18 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
           ? await capture.filePathForObjectId(objectId)
           : ((await resolveViewFile({ objectId }))?.path ?? null),
       listMoments: async ({ limit, objectId }) => {
-        if (!capture) throw new Error(JOINED_HISTORY_REFUSAL);
         // Unreadable rules hide every change, as the desktop's History does.
-        const policy = await readWorkspaceEnginePolicy(workspace.rootPath);
-        if (policy.errors.length)
+        // A share view's store holds only what its share imported, so it reads no rules.
+        const policy = capture ? await readWorkspaceEnginePolicy(workspace.rootPath) : null;
+        if (policy?.errors.length)
           return { status: "policy-unreadable", unreadable: policy.unreadable };
-        const page = await capture.listMoments({ limit, ...(objectId ? { objectId } : {}) });
-        const admitted = historyPathAdmission(policy);
+        const input = { limit, ...(objectId ? { objectId } : {}) };
+        const page = capture
+          ? await capture.listMoments(input)
+          : await withPhysicalWorkspaceOperation(workspace.workspaceId, (operation) =>
+              dependencies.sharedViewHistory(operation.workspace).listMoments(input),
+            );
+        const admitted = policy ? historyPathAdmission(policy) : () => true;
         return page.moments
           .filter(
             (moment): moment is typeof moment & { objectId: string; protected: false } =>
@@ -1334,7 +1343,12 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
           }));
       },
       readMoment: async (momentId) => {
-        if (!capture) throw new Error(JOINED_HISTORY_REFUSAL);
+        if (!capture) {
+          const detail = await withPhysicalWorkspaceOperation(workspace.workspaceId, (operation) =>
+            dependencies.sharedViewHistory(operation.workspace).readMoment(momentId),
+          );
+          return detail && !detail.protected ? detail.moment : null;
+        }
         // Unreadable rules hide every change, as the desktop's History does,
         // so the answer says nothing about this change.
         const policy = await readWorkspaceEnginePolicy(workspace.rootPath);

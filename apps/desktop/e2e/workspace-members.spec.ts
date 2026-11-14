@@ -646,6 +646,11 @@ test("@two-client a member posts in a Group, follows a level change, and sees an
     expect(general).toBeInstanceOf(DohcCliFailure);
     // A joined workspace has no General, as in the member's Chats.
     expect((general as DohcCliFailure).stderr).toContain("no such group: general");
+    // The agent reads the plan's History, as Sam's History panel lists it.
+    expect((await runDohcCli(samCli, ["--json", "history", "list", "notes/plan.md"])).stdout).toContain("notes/plan.md");
+    const link = await runDohcCli(samCli, ["link", "--path", "notes/plan.md"]).then(() => null, (error: unknown) => error);
+    expect(link).toBeInstanceOf(DohcCliFailure);
+    expect((link as DohcCliFailure).stderr).toContain("Agents can't make links in a joined workspace yet.");
     await openChatsView(mine);
 
     // --- The owner reads Sam's post and replies -----------------------------

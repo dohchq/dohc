@@ -2953,6 +2953,10 @@ async function makeLink(
   context: CliWorkspaceContext,
   chats: ChatsHost,
 ): Promise<CliResultByVerb["link"]> {
+  if (context.joined)
+    throw new CliCommandError(
+      "Agents can't make links in a joined workspace yet. Name the file or Group in the message instead.",
+    );
   if (context.readOnly || !context.makeWorkReference)
     throw new CliCommandError("This workspace is read-only. Make links in the owning workspace.");
   const make = context.makeWorkReference;

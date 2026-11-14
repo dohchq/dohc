@@ -303,6 +303,9 @@ function fixture(
     currentDaemon: vi.fn(() => daemon),
     agentDispatchStoreHandleFor: vi.fn(() => ({ store: dispatchStore })),
     sharedViewOf: vi.fn(() => null),
+    sharedViewHistory: vi.fn(() => {
+      throw new Error("No shared view History configured");
+    }),
     createJoinedGroup: vi.fn(
       async (_workspace, _store, input) =>
         ({ id: "channel_wire_joined", name: input.name }) as never,
@@ -1106,6 +1109,53 @@ describe("desktop CLI workspace context", () => {
     }
   });
 
+  it("reads a joined workspace's History and Collections from the view", async () => {
+    const f = fixture();
+    vi.mocked(f.dependencies.sharedViewOf).mockReturnValue({
+      ...SHARED_VIEW,
+      access: "edit",
+      membership: true,
+    });
+    const moment = {
+      id: "moment",
+      workspaceId: "workspace",
+      versionId: "main",
+      objectId: "object",
+      path: "notes.md",
+      recordedAtMs: 5,
+      operation: "update",
+      metadata: {},
+      momentOrder: 3,
+    };
+    const listMoments = vi.fn(async () => ({
+      moments: [{ ...moment, protected: false as const }],
+      startCursor: null,
+      nextCursor: null,
+      versionMarkers: [],
+      latestMomentOrder: 3,
+      activeVersionId: "main",
+    }));
+    const readMoment = vi.fn(async () => ({ protected: false as const, moment }));
+    f.dependencies.sharedViewHistory = vi.fn(() => ({ listMoments, readMoment }) as never);
+    const query = { records: [], nextCursor: null };
+    const queryCollectionRecords = vi.fn(async () => query);
+    f.dependencies.withEngineAdapter = async (_workspace, work) =>
+      work({ queryCollectionRecords } as unknown as VersionedLiveAdapter);
+    const context = await f.create().openCliWorkspace(f.workspace);
+    expect(context.joined).toBe(true);
+    await expect(context.listMoments({ limit: 5, objectId: "object" })).resolves.toEqual([
+      { ...moment, workspaceId: "workspace" },
+    ]);
+    expect(listMoments).toHaveBeenCalledWith({ limit: 5, objectId: "object" });
+    await expect(context.readMoment("moment")).resolves.toEqual(moment);
+    expect(f.dependencies.sharedViewHistory).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceId: "workspace", attachmentId: expect.any(Symbol) }),
+    );
+    expect(f.dependencies.activity.engineCaptureFor).not.toHaveBeenCalled();
+    await expect(context.collections!.query({ collectionPath: "tasks", limit: 2 })).resolves.toBe(
+      query,
+    );
+  });
   it("runs collection fields through physical admission and the existing Y.Doc edit", async () => {
     // A field write first reads its record to check it is not a lossy note.
     const root = await createTestScratch("dohc-cli-fields-");
@@ -2828,13 +2878,6 @@ describe("a joined workspace through the CLI", () => {
     expect(await context.fileObjectIdForPath("notes/plan.md")).toBe("object-share-plan");
     expect(await context.fileObjectIdForPath("notes/missing.md")).toBeNull();
     expect(await context.filePathForObjectId("object-share-plan")).toBe("notes/plan.md");
-    // History stays in the app, with one reason.
-    await expect(context.listMoments({ limit: 5 })).rejects.toThrow(
-      "Read a joined workspace's History in the app.",
-    );
-    await expect(context.readMoment("moment")).rejects.toThrow(
-      "Read a joined workspace's History in the app.",
-    );
     expect(context.versions).toBeUndefined();
   });
 
