@@ -10866,7 +10866,7 @@ function registerIpcHandlers(): void {
         throw error;
       }
     },
-    changeAgentThread: ({ workspaceId, agentId, threadId }) =>
+    changeAgentThread: ({ workspaceId, agentId, threadId }, { operation }) =>
       oneAgentThreadChange(async () => {
         const agent = await agentWithThreadFor(workspaceId, agentId);
         const left = agent.thread.id;
@@ -10884,19 +10884,23 @@ function registerIpcHandlers(): void {
           thread: { ...agent.thread, id: threadId },
         });
         await settingsIpc.changeAgent(agentId, (current) => {
+          operation.assertCurrent();
           if (current.thread?.id !== left)
             throw new Error(`${agent.name} was connected to another thread meanwhile. Try again.`);
           return { ...current, thread: { ...current.thread, id: threadId } };
         });
       }),
-    setAgentThreadWorkspace: ({ workspaceId, agentId, on }) =>
+    // Each save below is refused once the window shows another workspace, so
+    // the answer the window gets then, that nothing changed, is true.
+    setAgentThreadWorkspace: ({ workspaceId, agentId, on }, { operation }) =>
       oneAgentThreadChange(async () => {
         if (!on) {
-          await settingsIpc.changeAgent(agentId, (agent) =>
-            agent.workspaces?.includes(workspaceId)
+          await settingsIpc.changeAgent(agentId, (agent) => {
+            operation.assertCurrent();
+            return agent.workspaces?.includes(workspaceId)
               ? { ...agent, workspaces: agent.workspaces.filter((id) => id !== workspaceId) }
-              : agent,
-          );
+              : agent;
+          });
           return;
         }
         const { settings } = await readCachedUserSettingsFile(stateDir());
@@ -10908,6 +10912,7 @@ function registerIpcHandlers(): void {
         const told = agent.thread.id;
         await agentThreads().serve(workspaceId, { ...agent, thread: agent.thread }, async () => {
           await settingsIpc.changeAgent(agentId, (current) => {
+            operation.assertCurrent();
             // The thread dohc told is the one that gets the workspace.
             if (current.thread?.id !== told)
               throw new Error(

@@ -310,8 +310,8 @@ export function createAgentThreads(dependencies: AgentThreadsDependencies) {
      * now holds this workspace's messages too, and then has `save` save the
      * agent with the workspace. Rejects with nothing saved when T3 Code does
      * not take that, so no workspace is added for a thread dohc cannot tell.
-     * What was written in the workspace before the save landed is never
-     * forwarded.
+     * What was written in the workspace before the save landed, or in the
+     * moment after it while dohc read what to set aside, is not forwarded.
      */
     async serve(
       workspaceId: string,
