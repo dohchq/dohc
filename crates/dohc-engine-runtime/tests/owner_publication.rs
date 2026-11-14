@@ -2578,6 +2578,66 @@ async fn stop_release_entry_and_byte_bounds_are_inclusive() {
     }
 }
 
+// Proves: after the server refuses a note's edits for good, Stop releases the
+// note on this computer whatever the size of its queue: one pasted table, or
+// many small edits. Every pending edit lands in the note, and the next ordinary
+// edit saves to its file.
+#[tokio::test]
+async fn stop_releases_a_refused_queue_of_any_size_and_the_note_saves_again() {
+    for (count, size, last) in [
+        (1, Some(64 * 1024), "x".repeat(1_000)),
+        (40, None, "Pending edit 39".to_owned()),
+    ] {
+        let (f, supervisor, actor) = pending_release_fixture_sized(count, size).await;
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        let outbox: String = f
+            .store
+            .read_with(|conn| {
+                conn.query_row("SELECT outbox_id FROM owner_ydoc_outboxes", [], |r| {
+                    r.get(0)
+                })
+            })
+            .unwrap();
+        actor
+            .owner_ydoc_outbox_quarantine(
+                "workspace".into(),
+                dohc_engine_collab::OwnerOutboxQuarantineInput {
+                    outbox_id: outbox,
+                    reason: "capacity-refused".into(),
+                    observed_binding: None,
+                },
+                30,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let rows = stop_action(&actor, &f, "release").await.unwrap();
+        assert!(
+            rows[0].deferred.is_none(),
+            "{count} edits deferred the Stop"
+        );
+        assert_eq!(f.store.table_row_count("ydoc_owner_bindings").unwrap(), 0);
+        let doc = dohc_engine_collab::load_persisted(&f.store, &key)
+            .unwrap()
+            .unwrap()
+            .doc;
+        let update = doc.frontmatter_set("after", "Ordinary edit").unwrap();
+        f.record(&actor, update, "after-stop", 41).await;
+        assert!(
+            f.ordinary_settle(&actor)
+                .await
+                .unwrap()
+                .settled()
+                .unwrap()
+                .materialized
+        );
+        let text = std::fs::read_to_string(f.root.path().join(&f.binding.current_path)).unwrap();
+        assert!(text.contains(&last) && text.contains("Ordinary edit"));
+        supervisor.close_all().unwrap();
+    }
+}
+
 #[tokio::test]
 async fn stop_defers_a_lost_accepted_receipt_without_double_history() {
     let (mut f, supervisor, actor) = pending_release_fixture(1).await;
