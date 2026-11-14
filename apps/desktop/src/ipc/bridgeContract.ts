@@ -4483,6 +4483,8 @@ export const CloudStatusResult = z.object({
   syncPause: WorkspaceSyncPauseStatus.optional(),
   // Whether that remote is pinned to the current signed-in account.
   workspaceSyncConnected: z.boolean().optional(),
+  // A joined workspace: whether the signed-in account is the one that joined it.
+  joinedBySignedInAccount: z.boolean().optional(),
   workspaceSecretState: z
     .enum(["none", "protected-key-present", "protected-key-missing"])
     .optional(),

@@ -74,7 +74,7 @@ export type MembersGate =
   | { kind: "not-synced" }
   | { kind: "signed-out"; server: string | null }
   | { kind: "other-server"; server: string }
-  | { kind: "other-account" }
+  | { kind: "other-account"; joined?: true }
   | { kind: "expired" }
   | { kind: "ready"; account: string };
 
@@ -94,8 +94,12 @@ export function membersGate(cloud: CloudSettings | undefined, joined = false): M
   if (joined) {
     if (!status.connected) return { kind: "signed-out", server: null };
     if (cloud.signInExpired) return { kind: "expired" };
-    return { kind: "ready", account: `${status.serverUrl ?? ""}
-${status.email ?? ""}` };
+    if (status.joinedBySignedInAccount === false) return { kind: "other-account", joined: true };
+    return {
+      kind: "ready",
+      account: `${status.serverUrl ?? ""}
+${status.email ?? ""}`,
+    };
   }
   // A paused workspace keeps its place on the server, so its Members still load.
   if (!status.workspaceSynced && !status.syncPause) return { kind: "not-synced" };
@@ -347,7 +351,7 @@ function MembersGateView(props: {
               : sync;
       return (
         <GateState reason={gate.kind} icon={CloudOff} action={{ ...next, primary: true }}>
-          Sync this workspace with your server to see who is in it.
+          {gate.kind === "other-account" && gate.joined ? "This computer is signed in to a different account than the one that joined this workspace. Sign in to that account to see who is in it." : "Sync this workspace with your server to see who is in it."}
         </GateState>
       );
     }

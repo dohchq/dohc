@@ -484,7 +484,6 @@ describe("an admin's New group in a joined workspace", () => {
     );
     const create = createJoinedWorkspaceGroupAction<Joined>({
       credentials: async () => credentials,
-      relayUrlsMatch: (left, right) => left.replace(/\/$/, "") === right.replace(/\/$/, ""),
       relayResponse: relay,
     });
     return { create, relay };

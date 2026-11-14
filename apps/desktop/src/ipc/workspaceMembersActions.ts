@@ -3,6 +3,7 @@ import { MembersResult, type MembersRequest } from "@dohc/cli/members";
 import { createOwnerRelayShareOperation } from "./ownerRelayShareHandler";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { recordedShareSelector } from "../workspaces/shareViewRecords";
+import { relayUrlsMatch } from "../workspaces/syncCode";
 
 type MembersWorkspace = { workspaceId: string; rootPath: string; shareView?: unknown };
 type MembersOperation<Workspace> = { workspace: Workspace; assertCurrent(): void };
@@ -20,6 +21,21 @@ interface MembersDependencies<Workspace, Credentials> {
   relayResponse(credentials: Credentials, path: string, init: RequestInit): Promise<Response>;
   /** The relay accepted a change, so this computer's grant listings refresh now. */
   sharesChanged(workspaceId: string): void;
+}
+
+export const JOINED_BY_ANOTHER_ACCOUNT = "Sign in to the account that joined this workspace.";
+
+/** Whether these credentials are the account that joined this workspace, on the relay it joined through. */
+export function joinedByAccount(
+  view: { relayUrl?: string; recipientUserId?: string } | undefined,
+  credentials: { userId: string; relayUrl?: string } | null | undefined,
+): boolean {
+  return (
+    !!credentials?.relayUrl &&
+    !!view?.relayUrl &&
+    relayUrlsMatch(credentials.relayUrl, view.relayUrl) &&
+    view.recipientUserId === credentials.userId
+  );
 }
 
 export const MEMBERS_UNREACHABLE =
@@ -311,7 +327,6 @@ export function createJoinedWorkspaceGroupAction<
   Credentials extends { userId: string; relayUrl?: string },
 >(dependencies: {
   credentials(): Promise<Credentials | null>;
-  relayUrlsMatch(left: string, right: string): boolean;
   relayResponse(credentials: Credentials, path: string, init: RequestInit): Promise<Response>;
 }) {
   return async function createJoinedWorkspaceGroup(
@@ -319,15 +334,8 @@ export function createJoinedWorkspaceGroupAction<
     input: JoinedWorkspaceGroupInput,
   ): Promise<{ channelWireId: string }> {
     const credentials = await dependencies.credentials();
-    if (
-      !view?.shareId ||
-      !credentials?.relayUrl ||
-      !view.relayUrl ||
-      !dependencies.relayUrlsMatch(credentials.relayUrl, view.relayUrl) ||
-      view.recipientUserId !== credentials.userId
-    ) {
-      throw new Error("Sign in to the account that joined this workspace.");
-    }
+    if (!view?.shareId || !credentials || !joinedByAccount(view, credentials))
+      throw new Error(JOINED_BY_ANOTHER_ACCOUNT);
     let response: Response;
     try {
       response = await dependencies.relayResponse(

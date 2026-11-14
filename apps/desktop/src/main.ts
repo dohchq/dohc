@@ -282,6 +282,8 @@ import { createShareLinkAgentActions } from "./ipc/shareLinkAgentActions";
 import {
   createJoinedWorkspaceGroupAction,
   createWorkspaceMembersActions,
+  JOINED_BY_ANOTHER_ACCOUNT,
+  joinedByAccount,
 } from "./ipc/workspaceMembersActions";
 import { createJoinedGroup } from "./workspaces/joinedGroupCreate";
 import { memberOperations } from "./ipc/memberOperations";
@@ -7001,15 +7003,8 @@ const workspaceMembers = createWorkspaceMembersActions<RegistryEntry, CloudSessi
   remoteForJoinedWorkspace: async (workspace) => {
     await warmCredentialCache();
     const credentials = cachedCredentials;
-    const view = workspace.shareView;
-    if (
-      !credentials?.relayUrl ||
-      !view?.relayUrl ||
-      !relayUrlsMatch(credentials.relayUrl, view.relayUrl) ||
-      view.recipientUserId !== credentials.userId
-    ) {
-      throw new Error("Sign in to the account that joined this workspace.");
-    }
+    if (!credentials || !joinedByAccount(workspace.shareView, credentials))
+      throw new Error(JOINED_BY_ANOTHER_ACCOUNT);
     return { credentials, credentialGeneration: credentialCacheGeneration };
   },
   currentCredentialGeneration: () => credentialCacheGeneration,
@@ -7080,7 +7075,6 @@ const createJoinedWorkspaceGroup = createJoinedWorkspaceGroupAction<CloudSession
     await warmCredentialCache();
     return cachedCredentials;
   },
-  relayUrlsMatch,
   relayResponse: (credentials, path, init) =>
     relayShareResponseWithCredentials(credentials, path, init),
 });

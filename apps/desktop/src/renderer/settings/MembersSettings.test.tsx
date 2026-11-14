@@ -279,6 +279,18 @@ describe("Members page", () => {
       expect(bridge.workspaceMembers).not.toHaveBeenCalled();
     });
 
+    it("sends another account to Sync and sharing, with no Try again, before asking the server", async () => {
+      const { props } = renderMembers({ cloud: joined({ joinedBySignedInAccount: false }), joined: true });
+      const gate = screen.getByTestId("settings-members-gate");
+      expect(gate.dataset.reason).toBe("other-account");
+      expect(gate.textContent).toContain("This computer is signed in to a different account than the one that joined this workspace.");
+      expect(within(gate).queryByRole("button", { name: "Try again" })).toBeNull();
+      await userEvent.click(within(gate).getByRole("button", { name: "Sync and sharing" }));
+      expect(props.onOpenSync).toHaveBeenCalled();
+      expect(bridge.workspaceMembers).not.toHaveBeenCalled();
+      expect(membersGate(joined({ joinedBySignedInAccount: true }), true).kind).toBe("ready");
+    });
+
     it("asks to sign in again when the server stopped accepting this computer's sign-in", () => {
       expect(membersGate(joined(), true).kind).toBe("ready");
       expect(membersGate(cloud({ ...joined(), signInExpired: true }), true).kind).toBe("expired");
