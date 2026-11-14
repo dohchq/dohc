@@ -84,6 +84,7 @@
 .workspace-opening-side i:nth-child(2) { width: 30%; }
 .workspace-opening-side i:nth-child(3) { width: 86%; }
 .workspace-opening-side i:nth-child(4) { width: 64%; }
+.workspace-opening-head, .workspace-opening-tabs { display: none; }
 
 @media (prefers-reduced-motion: reduce) {
   .live-ring, .toast-slot .edit-notice { animation: none; }
@@ -100,8 +101,14 @@
   .link-page.workspace-page > nav :is(.folder, .file), .group-row { height: 40px; }
   .narrow-mark { display: grid; }
   .workspace-opening-files, .workspace-opening-side { display: none; }
-  .workspace-opening-page { grid-area: 1 / 1; padding: 64px 16px 16px; }
-  .workspace-opening::after { content: ""; height: 48px; grid-area: 2 / 1; border-top: 1px solid var(--viewer-line); background: var(--viewer-panel); }
+  .workspace-opening-page { grid-area: 1 / 1; padding: 0 16px 16px; }
+  /* The loaded page's header and tabs, so nothing moves when the workspace arrives. */
+  .workspace-opening-head { display: flex; height: 48px; align-items: center; gap: 8px; margin: 0 -8px 16px; }
+  .workspace-opening-head .bar-mark { display: grid; }
+  .workspace-opening-head i { width: 96px; }
+  .workspace-opening-tabs { display: flex; grid-area: 2 / 1; height: 48px; align-items: center; justify-content: space-around; box-sizing: content-box;
+    border-top: 1px solid var(--viewer-line); padding-bottom: env(safe-area-inset-bottom); background: var(--viewer-panel); }
+  .workspace-opening-tabs i { width: 48px; }
   /* Above the tabs. */
   .workspace-corner { right: 8px; bottom: 8px; left: 8px; width: auto; max-width: none; }
   .workspace-page ~ .workspace-corner { bottom: calc(56px + env(safe-area-inset-bottom)); }

@@ -556,7 +556,10 @@ it("loads in the shape of the workspace it opens: the files, the page and the si
   const opening = container.querySelector<HTMLElement>(".workspace-opening")!;
   expect(opening.getAttribute("aria-busy")).toBe("true");
   expect(opening.textContent).toBe("Opening the workspace");
-  expect([...opening.children].map(node => node.className)).toEqual(["workspace-opening-files", "workspace-opening-page", "workspace-opening-side", "sr-only"]);
+  expect([...opening.children].map(node => node.className)).toEqual(["workspace-opening-files", "workspace-opening-page", "workspace-opening-side", "workspace-opening-tabs", "sr-only"]);
+  // A phone shows the page's header, with the mark, and the four tabs under it.
+  expect(opening.querySelector(".workspace-opening-page > .workspace-opening-head .bar-mark")).not.toBeNull();
+  expect(opening.querySelectorAll(".workspace-opening-tabs > i")).toHaveLength(4);
 });
 
 it("lays the files, the page and Chats or Comments side by side on a wide screen, and as four tabs on a phone", async () => {

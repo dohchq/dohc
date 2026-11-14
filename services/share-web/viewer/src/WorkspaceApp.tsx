@@ -174,12 +174,16 @@ function useMemberFiles(session: string, attempt: number) {
   return view;
 }
 
-// The workspace's shape while it loads: its files, the page and the side panel, or the page alone on a phone.
+// The workspace's shape while it loads: its files, the page and the side panel, or on a phone the page's header, the page and the tabs.
 function WorkspaceOpening() {
   return <div className="viewer link-page workspace-page workspace-opening" aria-busy="true">
     <div className="workspace-opening-files" aria-hidden="true"><span className="bar-mark"><DohcMark/></span><i/><i/><i/><i/><i/></div>
-    <div className="workspace-opening-page" aria-hidden="true"><div className="skeleton"><i/><i/><i/><i/><i/><i/><i/></div></div>
+    <div className="workspace-opening-page" aria-hidden="true">
+      <div className="workspace-opening-head"><span className="bar-mark"><DohcMark/></span><i/></div>
+      <div className="skeleton"><i/><i/><i/><i/><i/><i/><i/></div>
+    </div>
     <div className="workspace-opening-side" aria-hidden="true"><i/><i/><i/><i/></div>
+    <div className="workspace-opening-tabs" aria-hidden="true"><i/><i/><i/><i/></div>
     <p className="sr-only">Opening the workspace</p>
   </div>;
 }
