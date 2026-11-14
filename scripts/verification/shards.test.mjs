@@ -10,9 +10,10 @@ import {
   javascriptTasks,
   nativeTestFiles,
   partitionJavascript,
-  partitionTasks,
   preparedArtifactPaths,
+  simulateJavascript,
 } from "./shards.mjs";
+import { MIN_TASK_SECONDS, refreshShardTimes } from "./refresh-shard-times.mjs";
 import { readWorkspacePackages } from "./selection.mjs";
 import {
   CLOUD_JOB_GRAPH,
@@ -109,8 +110,8 @@ test("shards cover every task once, including uneven and small workloads", () =>
         id: `task-${index}`,
         weight: index + 1,
       }));
-      const shards = partitionTasks(tasks, count);
-      assert.deepEqual(shards, partitionTasks(tasks.toReversed(), count));
+      const shards = partitionJavascript(tasks, count);
+      assert.deepEqual(shards, partitionJavascript(tasks.toReversed(), count));
       const records = shards.map((tasks, part) => ({
         part,
         verdict: "PASS",
@@ -273,7 +274,7 @@ test("execution groups preserve files, projects, native prerequisites, and comma
   assert.deepEqual(javascriptGroups(tasks.toReversed()), groups);
   assertTaskCoverage(
     tasks,
-    partitionTasks(groups, JS_SHARDS).map((groups, part) => ({
+    partitionJavascript(groups, JS_SHARDS).map((groups, part) => ({
       part,
       verdict: "PASS",
       completed: groups.flatMap((group) => group.tasks.map((task) => task.id)),
@@ -281,32 +282,7 @@ test("execution groups preserve files, projects, native prerequisites, and comma
   );
 });
 
-test("native preparation does not leave one worker with most of the native work", () => {
-  const groups = [false, true].flatMap((native) =>
-    [90, 70, 50, 30].map((weight, index) => ({ id: `${native}-${index}`, native, weight })),
-  );
-  const shards = partitionJavascript(groups, 2);
-  for (const native of [false, true]) {
-    assert.deepEqual(
-      shards.map((shard) =>
-        shard
-          .filter((group) => group.native === native)
-          .reduce((total, group) => total + group.weight, 0),
-      ),
-      [120, 120],
-    );
-  }
-  assertTaskCoverage(
-    groups,
-    shards.map((shard, part) => ({
-      part,
-      verdict: "PASS",
-      completed: shard.map((group) => group.id),
-    })),
-  );
-});
-
-test("only browser groups reserve two slots and double their partition cost", () => {
+test("only browser groups reserve two slots without changing their wall time", () => {
   const tasks = ["desktop", "accounts", "self-host-native", "command"].map((kind) => ({
     id: kind,
     kind,
@@ -317,20 +293,180 @@ test("only browser groups reserve two slots and double their partition cost", ()
   const groups = javascriptGroups([...tasks, ...files]);
   for (const task of tasks) {
     const group = groups.find((group) => group.id === task.id);
-    assert.equal(group.weight, ["desktop", "accounts"].includes(task.kind) ? 40 : 20);
+    assert.equal(group.weight, 20);
     assert.equal(group.slots, ["desktop", "accounts"].includes(task.kind) ? 2 : undefined);
     assert.equal(task.weight, 20);
   }
   const vitest = groups.find((group) => group.kind === "vitest");
-  assert.equal(vitest.weight, 24);
   assert.equal(vitest.slots, undefined);
+});
+
+test("simulation admits pure work before preparation and widens to three slots afterward", () => {
+  const groups = [
+    { id: "pure", weight: 30 },
+    ...["native-a", "native-b", "native-c"].map((id) => ({ id, weight: 20, native: true })),
+  ];
+  const result = simulateJavascript(groups, { inventory: 0, nativeReady: 10 });
   assert.deepEqual(
-    partitionTasks(
-      groups.filter((group) => group.kind !== "vitest"),
-      2,
-    ).map((shard) => shard.reduce((n, group) => n + group.weight, 0)),
-    [60, 60],
+    result.steps.find((step) => step.id === "pure"),
+    {
+      id: "pure",
+      startedAt: 0,
+      finishedAt: 30,
+    },
   );
+  for (const id of ["native-a", "native-b"])
+    assert.equal(result.steps.find((step) => step.id === id).startedAt, 10);
+  assert.equal(result.steps.find((step) => step.id === "native-c").startedAt, 30);
+  assert.equal(result.seconds, 50);
+  assert.equal(
+    simulateJavascript(
+      ["pure-a", "pure-b", "pure-c"].map((id) => ({ id, weight: 10 })),
+      { inventory: 0 },
+    ).seconds,
+    10,
+  );
+});
+
+test("simulation excludes shared resources and accounts for browser slots and the final runtime writer", () => {
+  const groups = [
+    { id: "database-a", resource: "postgres", weight: 30 },
+    { id: "database-b", resource: "postgres", weight: 20 },
+    { id: "mobile-a", resource: "mobile-editor", weight: 25 },
+    { id: "mobile-b", resource: "mobile-editor", weight: 15 },
+    { id: "browser", kind: "desktop", slots: 2, weight: 10 },
+    {
+      id: "runtime",
+      weight: 100,
+      tasks: [{ id: "node:apps/desktop/scripts/stage-app-backend-runtime.test.mjs" }],
+    },
+  ];
+  const result = simulateJavascript(groups, { inventory: 0, postgres: 0 });
+  for (const resource of ["postgres", "mobile-editor"]) {
+    const work = result.steps.filter(
+      (step) => groups.find((group) => group.id === step.id).resource === resource,
+    );
+    assert.ok(work[1].startedAt >= work[0].finishedAt);
+  }
+  for (const step of result.steps) {
+    const running = result.steps.filter(
+      (other) => other.startedAt <= step.startedAt && other.finishedAt > step.startedAt,
+    );
+    assert.ok(
+      running.reduce(
+        (sum, other) => sum + (groups.find((group) => group.id === other.id).slots ?? 1),
+        0,
+      ) <= 3,
+    );
+  }
+  const runtime = result.steps.find((step) => step.id === "runtime");
+  assert.ok(
+    result.steps
+      .filter((step) => step !== runtime)
+      .every((step) => step.finishedAt <= runtime.startedAt),
+  );
+});
+
+test("CPU contention slows active groups when native work arrives and releases capacity when they finish", () => {
+  const result = simulateJavascript(
+    [
+      { id: "pure-a", weight: 40, cpu: 2.5 },
+      { id: "pure-b", weight: 40, cpu: 2.5 },
+      { id: "native", weight: 40, cpu: 2.5, native: true },
+    ],
+    { inventory: 0, nativeReady: 10 },
+  );
+  assert.deepEqual(result.steps, [
+    { id: "pure-a", startedAt: 0, finishedAt: 70 },
+    { id: "pure-b", startedAt: 0, finishedAt: 70 },
+    { id: "native", startedAt: 10, finishedAt: 78 },
+  ]);
+  assert.equal(result.seconds, 78);
+});
+
+test("partitioning spreads desktop browser groups, projection tests, lint, and desktop typecheck", () => {
+  const tasks = [
+    ...Array.from({ length: 4 }, (_, index) => ({
+      id: `desktop-${index}`,
+      kind: "vitest",
+      package: "@dohc/desktop",
+      project: "desktop",
+      weight: 60,
+    })),
+    ...Array.from({ length: 2 }, (_, index) => ({
+      id: `projection-${index}`,
+      kind: "vitest",
+      package: "@dohc/ydoc-projection",
+      weight: 60,
+    })),
+    { id: "repository:pnpm lint", kind: "command", weight: 60 },
+    { id: "typecheck:@dohc/desktop", kind: "command", weight: 60 },
+  ];
+  const shards = partitionJavascript(javascriptGroups(tasks), 5);
+  assert.deepEqual(
+    shards.map((shard) => shard.length),
+    [1, 1, 1, 1, 1],
+  );
+  assertTaskCoverage(
+    tasks,
+    shards.map((shard, part) => ({
+      part,
+      verdict: "PASS",
+      completed: shard.flatMap((group) => group.tasks.map((task) => task.id)),
+    })),
+  );
+});
+
+test("partitioning balances finish time when resources serialize work", () => {
+  const groups = [10, 20, 50, 50, 20, 10, 20, 50].map((weight, index) => ({
+    id: `task-${index}`,
+    weight,
+    resource: [1, 3].includes(index) ? "postgres" : undefined,
+  }));
+  const shards = partitionJavascript(groups, 2);
+  assert.deepEqual(shards, partitionJavascript(groups.toReversed(), 2));
+  assert.deepEqual(
+    shards.map((shard) => simulateJavascript(shard, { inventory: 0, postgres: 0 }).seconds),
+    [50, 50],
+  );
+  assertTaskCoverage(
+    groups,
+    shards.map((shard, part) => ({
+      part,
+      verdict: "PASS",
+      completed: shard.map((group) => group.id),
+    })),
+  );
+  assert.throws(() => partitionJavascript(groups, 0), /positive integer/u);
+  assert.throws(() => partitionJavascript([groups[0], groups[0]], 2), /Duplicate/u);
+});
+
+test("timing refresh uses measured medians, retains missing weights, and keeps planner keys", () => {
+  const record = (seconds) => ({
+    scope: "js",
+    verdict: "PASS",
+    tests: [
+      { id: "vitest:example:node:src/example.test.ts", seconds },
+      { id: "vitest:example::src/tiny.test.ts", seconds: 0 },
+    ],
+    steps: [
+      { name: "typecheck:example", seconds: seconds + 1 },
+      { name: "native preparation", seconds: 100 },
+    ],
+  });
+  const records = [record(1), record(8), record(3), record(5)];
+  const weights = refreshShardTimes(records, { missing: 7 });
+  assert.deepEqual(weights, {
+    missing: 7,
+    "src/example.test.ts": 4,
+    "src/tiny.test.ts": MIN_TASK_SECONDS,
+    "typecheck:example": 5,
+  });
+  assert.deepEqual(weights, refreshShardTimes(records.toReversed(), { missing: 7 }));
+  const override = "vitest:example:node:src/example.test.ts";
+  assert.equal(refreshShardTimes(records, { [override]: 10 })[override], 4);
+  assert.throws(() => refreshShardTimes([{ ...record(1), verdict: "FAIL" }]), /passing/u);
+  assert.throws(() => refreshShardTimes([record(NaN)]), /Invalid/u);
 });
 
 test("JavaScript receipts reject missing, failed, duplicated, or different-head work", () => {
