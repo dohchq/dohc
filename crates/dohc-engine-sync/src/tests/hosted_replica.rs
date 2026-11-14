@@ -530,6 +530,12 @@ fn a_hosted_replica_journals_only_its_documents_live_work() {
     assert_eq!(last_outbound_seq(&store), 4);
 }
 
+struct ShareBeforePullResponse {
+    pull_count: usize,
+    object_id: String,
+    path: String,
+}
+
 /// The relay's scoped feed, in memory. It serves `workspace.init` and the
 /// rows of shared documents with their original coordinates, withholds every
 /// other row, and examines `raw_rows_per_page` rows per page as the relay
@@ -543,8 +549,7 @@ struct HostedFeed {
     revision: AtomicUsize,
     blobs: Mutex<BTreeMap<String, Vec<u8>>>,
     raw_rows_per_page: AtomicUsize,
-    /// Shares a document just before answering the pull with this count.
-    share_at_pull: Mutex<Option<(usize, String, String)>>,
+    share_before_pull_response: Mutex<Option<ShareBeforePullResponse>>,
     pulls: Mutex<Vec<HostedPullRequest>>,
     pushes: Mutex<Vec<PushRequest>>,
     /// Documents whose new host ops the relay refuses, each kept as a refusal at its coordinate.
@@ -565,7 +570,7 @@ impl HostedFeed {
             revision: AtomicUsize::new(0),
             blobs: Mutex::new(BTreeMap::new()),
             raw_rows_per_page: AtomicUsize::new(usize::MAX),
-            share_at_pull: Mutex::new(None),
+            share_before_pull_response: Mutex::new(None),
             pulls: Mutex::new(Vec::new()),
             pushes: Mutex::new(Vec::new()),
             refusing: Mutex::new(BTreeSet::new()),
@@ -745,15 +750,18 @@ impl RelayTransport for HostedFeed {
             pulls.len()
         };
         let due = {
-            let mut share_at = self.share_at_pull.lock().unwrap();
-            if share_at.as_ref().is_some_and(|(at, ..)| *at == count) {
+            let mut share_at = self.share_before_pull_response.lock().unwrap();
+            if share_at
+                .as_ref()
+                .is_some_and(|share| share.pull_count == count)
+            {
                 share_at.take()
             } else {
                 None
             }
         };
-        if let Some((_, object_id, path)) = due {
-            self.share(&object_id, &path);
+        if let Some(share) = due {
+            self.share(&share.object_id, &share.path);
         }
         let shared = self.shared.lock().unwrap().clone();
         let scope = HostedScope {

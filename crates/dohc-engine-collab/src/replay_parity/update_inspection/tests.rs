@@ -172,8 +172,6 @@ fn a_desktop_fold_holds_on_its_deletions_alone() {
     assert_eq!(inspect_update(&head, &fold), Hold(LiveDeletion));
 }
 
-/// Every journaled update carries the store's delete set, so an append to a
-/// document that already deleted content repeats that deletion.
 #[test]
 fn a_safe_append_after_historical_deletions_is_admissible() {
     let (doc, _, _) = with_paragraph(1, "Kept");
@@ -181,11 +179,18 @@ fn a_safe_append_after_historical_deletions_is_admissible() {
     append(&body, &mut doc.transact_mut(), "Gone");
     body.remove_range(&mut doc.transact_mut(), 1, 1);
     let head = head(&doc);
-    let update = append_update(&doc, "Typed after");
-    assert!(has_deletions(&update));
-    assert_eq!(inspect_update(&head, &update), Admissible);
-    head.apply(&update).unwrap();
-    assert_eq!(inspect_update(&head, &update), Admissible, "redelivery");
+    let append_with_old_deletions = append_update(&doc, "Typed after");
+    assert!(has_deletions(&append_with_old_deletions));
+    assert_eq!(
+        inspect_update(&head, &append_with_old_deletions),
+        Admissible
+    );
+    head.apply(&append_with_old_deletions).unwrap();
+    assert_eq!(
+        inspect_update(&head, &append_with_old_deletions),
+        Admissible,
+        "redelivery"
+    );
 }
 
 /// One delete range, partly deleted already and partly live, holds on its

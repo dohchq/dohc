@@ -1794,6 +1794,18 @@ fn follow_and_feed_read_journaling_require_matching_replication_owner() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
+    let follow_ops = |store: &EngineStore| {
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM replication_log \
+                     WHERE workspace_id = ?1 AND op_kind = 'chat.follow.set'",
+                    [WS],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .expect("follow op count")
+    };
     let mut chats = LinkedChatStore::new(&mut store);
     chats
         .ensure_general_channel(WS, "gen-1", 1, &NO_FAULTS)
@@ -1805,6 +1817,9 @@ fn follow_and_feed_read_journaling_require_matching_replication_owner() {
         )
         .expect("thread");
 
+    let implicit_poster_follow_ops = follow_ops(&store);
+    assert_eq!(implicit_poster_follow_ops, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
     let signed_out = chats
         .set_follow(
             &SetFollow {
@@ -1820,21 +1835,7 @@ fn follow_and_feed_read_journaling_require_matching_replication_owner() {
         )
         .expect("signed-out follow is durable");
     assert_eq!(signed_out.state, FollowState::Following);
-    let follow_ops = |store: &EngineStore| {
-        store
-            .read_with(|conn| {
-                conn.query_row(
-                    "SELECT COUNT(*) FROM replication_log \
-                     WHERE workspace_id = ?1 AND op_kind = 'chat.follow.set'",
-                    [WS],
-                    |row| row.get::<_, i64>(0),
-                )
-            })
-            .expect("follow op count")
-    };
-    // One: the poster's implicit follow of t1. The signed-out follow above
-    // journaled nothing.
-    assert_eq!(follow_ops(&store), 1);
+    assert_eq!(follow_ops(&store), implicit_poster_follow_ops);
 
     let mut chats = LinkedChatStore::new(&mut store);
     let mismatch = chats

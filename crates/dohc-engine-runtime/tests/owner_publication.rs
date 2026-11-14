@@ -3960,9 +3960,7 @@ enum Retained {
     /// adoption seed holds it. The relay accepted the seed and the host
     /// never applied it.
     Seed,
-    /// An owner edit still pending when Stop began, which the relay's
-    /// journal answered during reconciliation.
-    Own,
+    PendingOwnerEditFoundInJournal,
 }
 
 /// A host whose root activation released with [`RETAINED`] unapplied, its
@@ -4135,7 +4133,7 @@ async fn retained_window(retained: Retained) -> RetainedWindow {
         journal_cursor: 2,
         accepting_host_epoch: 1,
     };
-    if retained != Retained::Own {
+    if retained != Retained::PendingOwnerEditFoundInJournal {
         accept_latest(&actor, &store, 2).await;
     }
     let scope = dohc_engine_runtime::actor::OwnedRetirementScope {
@@ -4154,7 +4152,7 @@ async fn retained_window(retained: Retained) -> RetainedWindow {
         .begin_retirement(scope.clone(), coordinate.clone(), key.clone(), false)
         .await
         .unwrap();
-    if retained == Retained::Own {
+    if retained == Retained::PendingOwnerEditFoundInJournal {
         let journal = JournalEvidence {
             receipts: vec![accepted],
             absent: vec![],
@@ -6673,7 +6671,7 @@ fn notes(root: &ScratchDir) -> Vec<(String, Vec<u8>)> {
 async fn a_desktop_delete_rename_or_binary_write_never_retires_what_a_released_chain_retains() {
     for (change, retained) in [
         (FileChange::Delete, Retained::Carried),
-        (FileChange::Delete, Retained::Own),
+        (FileChange::Delete, Retained::PendingOwnerEditFoundInJournal),
         (FileChange::Rename, Retained::Carried),
         (FileChange::Binary, Retained::Carried),
     ] {

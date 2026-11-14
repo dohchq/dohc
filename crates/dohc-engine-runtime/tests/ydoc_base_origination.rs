@@ -1144,20 +1144,16 @@ async fn two_devices_that_seed_the_same_file_merge_into_one_lineage() {
         b_ops[0].blob_sha(),
         "both devices originate the same base"
     );
-    // Relay order: B's base, A's base, B's edit, A's edit. A pulls before it
-    // pushes, so A has not learned where its own base landed.
-    let from_a = relayed(&a, &a_ops, "device-a", &[2, 4]);
-    let from_b = relayed(&b, &b_ops, "device-b", &[1, 3]);
+    let [b_base, a_base, b_edit, a_edit] = [1, 2, 3, 4];
+    let from_a = relayed(&a, &a_ops, "device-a", &[a_base, a_edit]);
+    let from_b = relayed(&b, &b_ops, "device-b", &[b_base, b_edit]);
 
     let mut a_store = EngineStore::open(&a, 9_113).expect("open a");
     let mut b_store = EngineStore::open(&b, 9_114).expect("open b");
     settle_head(&mut a_store, &key, PATH);
     settle_head(&mut b_store, &key, PATH);
-    assert_eq!(
-        base_position(&a_store, &key).2,
-        1,
-        "A's base awaits its position"
-    );
+    let a_base_before_push = base_position(&a_store, &key);
+    assert_eq!(a_base_before_push.2, 1, "A's base awaits its position");
 
     deliver(&mut a_store, &from_b[..1], &NoLiveLeases);
     assert_eq!(

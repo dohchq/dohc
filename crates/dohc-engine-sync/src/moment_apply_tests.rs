@@ -1185,13 +1185,12 @@ fn a_drain_decides_the_settlement_that_waited_again_from_what_it_reads() {
     let mut report = crate::moment_apply::pending::PendingSettlementReport::default();
     let (pending, _) = drain_to_host(&mut store, &tails, &mut report);
     pending.validate().wait().unwrap();
-    // The capture's release record changes: the generation moves past the
-    // one just validated.
+    let release_time_after_validation_ms = 21;
     store
         .read_with(|conn| {
             conn.execute(
-                "UPDATE live_owner_activations SET released_at_ms=21 WHERE activation_id='capture'",
-                [],
+                "UPDATE live_owner_activations SET released_at_ms=?1 WHERE activation_id='capture'",
+                [release_time_after_validation_ms],
             )
         })
         .unwrap();

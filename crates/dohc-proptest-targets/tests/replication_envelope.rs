@@ -63,10 +63,10 @@ fn looks_structurally_valid(envelope: &ReplicationEnvelope) -> bool {
 }
 
 fn arbitrary_string() -> impl Strategy<Value = String> {
+    let control_byte_strings = "[\\x00-\\x1f]{0,16}";
     prop_oneof![
         "[a-zA-Z0-9_-]{0,64}",
-        // Adversarial: control bytes, which `bounded()` must reject.
-        "[\\x00-\\x1f]{0,16}",
+        control_byte_strings,
         // Adversarial: right at / just over the 512-byte identifier cap.
         prop::collection::vec(any::<char>(), 500..520)
             .prop_map(|chars| chars.into_iter().collect()),
