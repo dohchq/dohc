@@ -35,9 +35,9 @@ function wait(ms: number, signal: AbortSignal): Promise<void> {
  * page waiting for its owner's dohc shows a ring in that band, raises
  * its toast after LIVE_HOST_WAIT_REPORT_MS, and opens by itself once ready.
  * `leave` runs an action that would close the page, asking first when an
- * unsynced draft would go with it. When the page closes for any other reason,
- * such as a lower level, an ended membership or an ended session, `onUnsent`
- * gets the text that has not reached the workspace.
+ * unsynced draft would go with it. When the page closes or opens again for any
+ * other reason, such as Try again, a lower level, an ended membership or an
+ * ended session, `onUnsent` gets the text that has not reached the workspace.
  */
 export default function MemberLivePage({grantId, accountId, path, readView, statusSlot, bandSlot, toastSlot, leave, onUnsent}: {
   grantId: string; accountId: string; path: string; readView: ReactNode; statusSlot: HTMLElement | null; bandSlot: HTMLElement | null;
@@ -48,16 +48,23 @@ export default function MemberLivePage({grantId, accountId, path, readView, stat
   const [phase, setPhase] = useState<Phase>({kind: "opening"}), [editing, setEditing] = useState<MemberDocument | null>(null);
   const [live, setLive] = useState(false), [pending, setPending] = useState(false), [leaving, setLeaving] = useState<(() => void) | null>(null);
   const [dismissed, setDismissed] = useState(false);
-  const current = useRef<MemberDocument | null>(null), request = useRef<AbortController | null>(null), discarding = useRef(false);
+  // `discarded` is the one session whose draft the person chose to discard. Any other session's unsent text is kept.
+  const current = useRef<MemberDocument | null>(null), request = useRef<AbortController | null>(null), discarded = useRef<MemberDocument | null>(null);
   const onUnsentRef = useRef(onUnsent); onUnsentRef.current = onUnsent;
   const name = path.slice(path.lastIndexOf("/") + 1);
+  // The editor closes at once, so nothing more is sent. Text that had not reached the workspace stays with the person.
+  const release = useCallback(() => {
+    const closing = current.current, state = closing?.session.state();
+    if (closing && state && (state.pendingUpdates || state.status === "quarantined") && discarded.current !== closing) onUnsentRef.current(yDocToMarkdown(closing.session.doc));
+    request.current?.abort(); closing?.close(); current.current = null;
+  }, []);
 
   const refuse = useCallback((code: string) => {
     if (code === WAITS_FOR_HOST) return;
     setPhase({kind: "refused", reason: Object.hasOwn(HOST_REFUSAL_REASONS, code) ? HOST_REFUSAL_REASONS[code]! : null}); setDismissed(false);
   }, []);
   const open = useCallback(() => {
-    request.current?.abort(); current.current?.close(); current.current = null;
+    release();
     const controller = new AbortController(), {signal} = controller; request.current = controller;
     setEditing(null); setLive(false); setPending(false); setDismissed(false); setPhase({kind: "opening"});
     void (async () => {
@@ -79,17 +86,12 @@ export default function MemberLivePage({grantId, accountId, path, readView, stat
         if (signal.aborted) return;
       }
     })().catch(() => {if (!signal.aborted) setPhase({kind: "refused", reason: null});});
-  }, [grantId, path, accountId, refuse]);
+  }, [grantId, path, accountId, refuse, release]);
 
   useEffect(() => {
     open();
-    return () => {
-      // The editor closes at once, so nothing more is sent. Text that had not reached the workspace stays with the person.
-      const closing = current.current, state = closing?.session.state();
-      if (closing && state && (state.pendingUpdates || state.status === "quarantined") && !discarding.current) onUnsentRef.current(yDocToMarkdown(closing.session.doc));
-      request.current?.abort(); closing?.close(); current.current = null;
-    };
-  }, [open]);
+    return release;
+  }, [open, release]);
   // A page that waits for its owner says so only once it has waited a while.
   const waiting = phase.kind === "waiting" && !phase.reported;
   useEffect(() => {
@@ -140,6 +142,6 @@ export default function MemberLivePage({grantId, accountId, path, readView, stat
       <p>Copy the changes you want to keep. Open the current file, then paste and review them.</p>
       <button className="handoff-button secondary" onClick={() => leave.current?.(open)}>Open current file</button></aside>}
     {toast && toastSlot && createPortal(<Toast title={toastTitle} body={toastBody} {...(phase.kind === "waiting" ? {tone: "warning" as const} : {})} onRetry={open} onDismiss={() => setDismissed(true)}/>, toastSlot)}
-    {leaving && <DiscardDraft cancel={() => setLeaving(null)} confirm={() => {const action = leaving; setLeaving(null); discarding.current = true; action();}}/>}
+    {leaving && <DiscardDraft cancel={() => setLeaving(null)} confirm={() => {const action = leaving; setLeaving(null); discarded.current = current.current; action();}}/>}
   </>;
 }

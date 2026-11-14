@@ -56,13 +56,15 @@ afterEach(async () => {
 });
 
 function server(options: {level?: Level; levelChangedBy?: string; signedIn?: boolean; groups?: Array<{wire: string; name: string; type?: "posts" | "chat" | "both"}>; files?: typeof FILES; member?: boolean;
-  groupsFail?: number; history?: Record<string, unknown[]>; older?: Record<string, unknown[]>; postFails?: {status: number; code: string}; openHeld?: boolean} = {}) {
+  groupsFail?: number; history?: Record<string, unknown[]>; older?: Record<string, unknown[]>; postFails?: {status: number; code: string}; openHeld?: boolean; user?: string} = {}) {
   let signedIn = options.signedIn ?? true, groupsFail = options.groupsFail ?? 0;
   const files = options.files ?? FILES;
   // A test can change the level while the page is open; the next read of the workspace's meta carries it.
   const levelNow = () => options.level ?? "comment";
   const access = () => levelNow() === "view" ? "read-only" : "read-write";
-  const groups = options.groups ?? [{wire: "wire-plans", name: "plans"}, {wire: "wire-food", name: "food"}];
+  // A test can add a Group, or sign in as another account, while the page is open.
+  const groups = () => options.groups ?? [{wire: "wire-plans", name: "plans"}, {wire: "wire-food", name: "food"}];
+  const user = () => options.user ?? "sam";
   const meta = () => ({ok: true, effectiveSelector: {paths: [], versionId: null, access: levelNow(), wholeWorkspace: true}, access: levelNow(),
     subjectName: "Trip", lastSettledAtMs: Date.now(), lastSettledKnown: true, ...(options.levelChangedBy ? {levelChangedBy: options.levelChangedBy} : {})});
   const hold = (path: string, url: URL, signal: AbortSignal) => new Promise<Response>((resolve, reject) => {
@@ -73,7 +75,7 @@ function server(options: {level?: Level; levelChangedBy?: string; signedIn?: boo
   const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input), "https://share.test"), signal = init?.signal ?? new AbortController().signal;
     const headers = new Headers(init?.headers);
-    if (url.pathname === "/api/account/session") return jsonResponse({user: signedIn ? {id: "sam", name: "Sam Rivera"} : null});
+    if (url.pathname === "/api/account/session") return jsonResponse({user: signedIn ? {id: user(), name: user() === "sam" ? "Sam Rivera" : "Lee Park"} : null});
     if (url.pathname === "/api/account/sign-in") {signedIn = true; return jsonResponse({ok: true});}
     if (url.pathname === "/api/account/sign-out") {signedIn = false; return jsonResponse({ok: true});}
     // share-web gives an account that holds no membership the answer it gives an unknown grant.
@@ -89,8 +91,8 @@ function server(options: {level?: Level; levelChangedBy?: string; signedIn?: boo
       return new Response(TEXT[sha] ?? "", {headers: {"content-type": "text/plain"}});
     }
     if (url.pathname === "/api/named-chat/channels" && groupsFail > 0) {groupsFail -= 1; return jsonResponse({ok: false, error: "unavailable"}, 503);}
-    if (url.pathname === "/api/named-chat/channels") return jsonResponse({shareId: "share", userId: "sam", maxPostBytes: 9000, maxBodyBytes: 8000,
-      channels: groups.map(group => ({channelWireId: group.wire, name: group.name, kind: "channel", type: group.type ?? "both", access: access()}))});
+    if (url.pathname === "/api/named-chat/channels") return jsonResponse({shareId: "share", userId: user(), maxPostBytes: 9000, maxBodyBytes: 8000,
+      channels: groups().map(group => ({channelWireId: group.wire, name: group.name, kind: "channel", type: group.type ?? "both", access: access()}))});
     if (url.pathname === "/api/named-chat/messages" && init?.method === "POST") {
       const body = JSON.parse(String(init.body)) as Record<string, unknown>; posts.push(body);
       if (options.postFails) return jsonResponse({ok: false, error: "refused", code: options.postFails.code}, options.postFails.status);
@@ -193,6 +195,8 @@ it("says in a toast who changed the members' level, in the desktop's words, with
   const toast = () => container.querySelector<HTMLElement>(".workspace-toast")!;
   expect(toast().textContent).toContain("Ana now lets members view only.");
   expect([...toast().querySelectorAll("button")].map(node => node.textContent)).not.toContain("Try again");
+  // It reports a change, not a failure, so it has nothing to copy.
+  expect(toast().querySelector('[aria-label="Copy message"]')).toBeNull();
   options.level = "comment";
   await settle(() => following("log").length === 1);
   await act(async () => following("log")[0]!.answer({ops: [], nextCursor: 9, hasMore: false, epochLogFloor: 0}));
@@ -276,6 +280,42 @@ it("posts in a Group at Comment, counts another Group's new messages, and opens 
   expect(groupPanel().querySelector("h2")?.textContent).toBe("food");
   // One follow serves every Group, whichever is open.
   await settle(() => following("chat").length === 1);
+});
+
+const channelReads = (fetch: ReturnType<typeof server>) =>
+  fetch.mock.calls.filter(([input]) => new URL(String(input), "https://share.test").pathname === "/api/named-chat/channels").length;
+
+it("shows a Group added while the workspace is open, even when it had none", async () => {
+  vi.useFakeTimers({toFake: ["Date"]});
+  const options: {groups: Array<{wire: string; name: string}>} = {groups: []};
+  const fetch = server(options); await render();
+  await settle(() => text().includes("Leave at nine.") && groupPanel().textContent?.includes("No Groups in this workspace yet.") === true
+    && following("log").length === 1);
+  options.groups = [{wire: "wire-plans", name: "plans"}];
+  // A files update soon after the Groups arrived reads them no sooner.
+  await act(async () => following("log")[0]!.answer({ops: [], nextCursor: 8, hasMore: false, epochLogFloor: 0}));
+  await settle(() => following("log").length === 1);
+  // The first files update a hold after the last read of the Groups reads them again.
+  vi.setSystemTime(Date.now() + 30_000);
+  await act(async () => following("log")[0]!.answer({ops: [], nextCursor: 9, hasMore: false, epochLogFloor: 0}));
+  await settle(() => groupPanel().textContent?.includes("Plans start here") === true);
+  expect(channelReads(fetch)).toBe(2);
+});
+
+it("lists a new Group as soon as a message in it arrives, and keeps the open Group following", async () => {
+  const options: {groups: Array<{wire: string; name: string}>} = {groups: [{wire: "wire-plans", name: "plans"}]};
+  server(options); await render(); await opened();
+  options.groups = [...options.groups, {wire: "wire-trains", name: "trains"}];
+  await act(async () => following("chat")[0]!.answer({shareId: "share", nextCursor: 22, hasMore: false,
+    messages: [{...chat(21, "Tickets booked"), channelWireId: "wire-trains"}]}));
+  await settle(() => button("All Groups, 1 unread") !== undefined);
+  // The open Group still follows: a new message in it arrives.
+  await settle(() => following("chat").length === 1);
+  await act(async () => following("chat")[0]!.answer({shareId: "share", nextCursor: 24, hasMore: false,
+    messages: [{...chat(23, "Train at ten"), channelWireId: "wire-plans"}]}));
+  await settle(() => groupPanel().textContent?.includes("Train at ten") === true);
+  await click("All Groups, 1 unread");
+  expect(buttons().find(node => node.textContent?.startsWith("trains"))?.textContent).toBe("trains1 unread");
 });
 
 const composer = () => groupPanel().querySelector<HTMLTextAreaElement>('textarea[name="body"]')!;
@@ -572,17 +612,97 @@ async function editing(options: {level?: Level; member?: boolean}) {
 }
 const recovery = () => container.querySelector<HTMLElement>('[aria-label="Unsent edits"]');
 
+it("keeps a later draft's unsent text after the person discarded an earlier one", async () => {
+  const options: {level: Level} = {level: "edit"};
+  await editing(options);
+  const next = liveSession();
+  vi.mocked(memberDocument).mockReturnValueOnce({session: next as never, close: vi.fn()});
+  await settle(() => button("Open current file") !== undefined);
+  await click("Open current file"); await click("Discard draft and continue");
+  await settle(() => next.reconnect.mock.calls.length === 1);
+  await act(async () => next.type("Leave at eleven."));
+  options.level = "comment";
+  await act(async () => following("log")[0]!.answer({ops: [], nextCursor: 7, hasMore: false, epochLogFloor: 0}));
+  await settle(() => container.querySelector('[role="textbox"]') === null && recovery() !== null);
+  // Only the discarded draft went.
+  expect(container.querySelectorAll('[aria-label="Unsent edits"]')).toHaveLength(1);
+  expect(recovery()!.querySelector("textarea")?.value).toContain("Leave at eleven.");
+});
+
+it("keeps the unsent text when Try again opens the page again", async () => {
+  await editing({level: "edit"});
+  await act(async () => vi.mocked(memberDocument).mock.calls[0]![0].onRefused("live_paused_by_owner"));
+  await settle(() => container.querySelector(".workspace-toast") !== null);
+  await act(async () => [...container.querySelector(".workspace-toast")!.querySelectorAll("button")].find(node => node.textContent === "Try again")!.click());
+  await settle(() => recovery() !== null);
+  expect(recovery()!.querySelector("textarea")?.value).toContain("Leave at ten.");
+});
+
+// Item 3: the files never go out of date without a sign.
+it("marks the files as possibly out of date while their reads fail, raises a toast with Try again and copy, and clears both once they catch up", async () => {
+  vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
+  server({level: "comment"}); await render(); await opened();
+  const dated = () => container.querySelector<HTMLElement>("header .workspace-dated");
+  const toast = () => [...container.querySelectorAll<HTMLElement>(".workspace-toast")]
+    .find(node => node.textContent?.includes("dohc could not update this workspace's files"));
+  expect(dated()).toBeNull();
+  for (const [index, wait] of [1000, 2000, 4000].entries()) {
+    await settle(() => following("log").length === 1);
+    await act(async () => following("log")[0]!.answer({ok: false, error: "unavailable"}, 500));
+    await settle(() => dated() !== null);
+    // The last files that arrived stay readable, marked in the desktop's words.
+    expect(dated()!.textContent).toBe("May be out of date");
+    expect(text()).toContain("Leave at nine.");
+    // A failure or two passes in silence. The third raises the toast.
+    if (index < 2) {expect(toast()).toBeUndefined(); await act(async () => vi.advanceTimersByTime(wait));}
+  }
+  await settle(() => toast() !== undefined);
+  expect(toast()!.textContent).toContain("Check your connection.");
+  expect(toast()!.querySelector('[aria-label="Copy message"]')).not.toBeNull();
+  // Try again reads at once, with no wait.
+  await act(async () => [...toast()!.querySelectorAll("button")].find(node => node.textContent === "Try again")!.click());
+  await settle(() => following("log").length === 1);
+  await act(async () => following("log")[0]!.answer({ops: [], nextCursor: 8, hasMore: false, epochLogFloor: 0}));
+  await settle(() => dated() === null && toast() === undefined);
+});
+
+// Item 5: another account signed in on the same tab sees none of the first one's unsent work.
+it("keeps each account's drafts and unsent edits from another account signed in on the same tab", async () => {
+  const options: {level: Level; user?: string} = {level: "edit"};
+  await editing(options);
+  await settle(() => groupPanel().querySelector('textarea[name="body"]') !== null);
+  setControlValue(composer(), "Half a thought");
+  options.level = "comment";
+  await act(async () => following("log")[0]!.answer({ops: [], nextCursor: 7, hasMore: false, epochLogFloor: 0}));
+  await settle(() => recovery() !== null);
+  const signInAs = async (user: string) => {
+    await click("Sign out");
+    await settle(() => Boolean(container.querySelector('input[name="email"]')));
+    options.user = user; held = [];
+    await act(async () => {setControlValue(container.querySelector('input[name="email"]')!, `${user}@dohc.test`);
+      setControlValue(container.querySelector('input[name="password"]')!, "secret");});
+    await click("Sign in"); await opened();
+  };
+  await signInAs("lee");
+  expect(recovery()).toBeNull();
+  expect(composer().value).toBe("");
+  await signInAs("sam");
+  expect(recovery()!.querySelector("textarea")?.value).toContain("Leave at ten.");
+  expect(composer().value).toBe("Half a thought");
+});
+
 it("stops editing when the person loses Edit, and keeps the unsent text to copy, download or discard with Undo", async () => {
   const options: {level: Level} = {level: "edit"};
   await editing(options);
   options.level = "comment";
   await act(async () => following("log")[0]!.answer({ops: [], nextCursor: 7, hasMore: false, epochLogFloor: 0}));
   await settle(() => container.querySelector('[role="textbox"]') === null && recovery() !== null);
-  expect(recovery()!.textContent).toContain('dohc kept your unsent edits to "plan.md"');
+  // One compact row under the page's band, in the page's flow, that opens in place to the text.
+  expect(recovery()!.querySelector("summary")?.textContent).toBe("Unsent edits to plan.md");
+  expect(recovery()!.closest(".workspace-corner")).toBeNull();
+  expect(container.querySelector("#workspace-main > .page-band + .workspace-kept")?.contains(recovery())).toBe(true);
   // It says where the text lives.
-  expect(recovery()!.textContent).toContain("Only this tab has them, so closing it loses them.");
-  // Toasts stack in the same bottom-right corner, so neither covers the other.
-  expect(recovery()!.closest(".workspace-corner")?.querySelector(".toast-slot")).toBeInstanceOf(HTMLElement);
+  expect(recovery()!.textContent).toContain("Only this tab has them. Copy or download them before you close it.");
   expect(recovery()!.querySelector("textarea")?.value).toContain("Leave at ten.");
   const writeText = vi.fn(async () => undefined);
   Object.defineProperty(navigator, "clipboard", {configurable: true, value: {writeText}});
@@ -637,12 +757,12 @@ it("says in place when it could not copy the unsent edits, and keeps them with D
 });
 
 it("names kept edits to two files of the same name by their folders", async () => {
-  writeDraft("unsent-edits", JSON.stringify([{id: 1, path: "trip/plan.md", text: "Leave at ten."}, {id: 2, path: "welcome/plan.md", text: "Hello."},
-    {id: 3, path: "trip/to-pack.md", text: "Socks."}]));
+  writeDraft("unsent-edits", JSON.stringify([{id: 1, accountId: "sam", path: "trip/plan.md", text: "Leave at ten."},
+    {id: 2, accountId: "sam", path: "welcome/plan.md", text: "Hello."}, {id: 3, accountId: "sam", path: "trip/to-pack.md", text: "Socks."}]));
   server(); await render();
   await settle(() => container.querySelectorAll('[aria-label="Unsent edits"]').length === 3);
-  expect([...container.querySelectorAll('[aria-label="Unsent edits"] h2')].map(node => node.textContent)).toEqual([
-    'dohc kept your unsent edits to "trip/plan.md"', 'dohc kept your unsent edits to "welcome/plan.md"', 'dohc kept your unsent edits to "to-pack.md"']);
+  expect([...container.querySelectorAll('[aria-label="Unsent edits"] summary')].map(node => node.textContent)).toEqual([
+    "Unsent edits to trip/plan.md", "Unsent edits to welcome/plan.md", "Unsent edits to to-pack.md"]);
   await act(async () => [...container.querySelectorAll<HTMLButtonElement>('[aria-label="Unsent edits"] button')].find(node => node.textContent === "Discard")!.click());
   expect(container.querySelector('[aria-label="Discarded edits"]')?.textContent).toContain('Discarded your unsent edits to "trip/plan.md".');
 });

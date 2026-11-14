@@ -26,7 +26,7 @@
 .page-band button { flex: none; border: 0; padding: 0; background: none; color: var(--viewer-subtle); cursor: pointer; font: inherit; white-space: nowrap; }
 .page-band button:hover { color: var(--viewer-ink); }
 
-/* Errors and kept edits land at the window's bottom right, one above another. */
+/* Toasts land at the window's bottom right, one above another. */
 .workspace-corner { position: fixed; right: 16px; bottom: 16px; z-index: 30; display: flex; width: 380px; max-width: calc(100% - 32px); flex-direction: column; align-items: flex-end; gap: 8px; pointer-events: none; }
 /* Beside the workspace, the corner sits left of the side panel, so it never covers a Group's or a file's composer. */
 .workspace-page ~ .workspace-corner { right: calc(344px + 16px); max-width: calc(100% - 344px - 32px); }
@@ -44,17 +44,27 @@
 .toast-slot .edit-notice.title-only, .title-only .toast-text { align-items: center; }
 .title-only .toast-close, .title-only .toast-copy { margin-top: 0; }
 @keyframes workspace-toast { from { opacity: 0; transform: translateY(8px); } }
-/* Unsent live text stays over whatever shows next until the person copies, downloads or dismisses it. */
-.unsent-edits { width: 100%; box-sizing: border-box; pointer-events: auto; border: 1px solid var(--viewer-line); border-radius: 12px; padding: 12px; background: var(--viewer-panel); box-shadow: var(--viewer-shadow); color: var(--viewer-muted); font-size: 12px; text-wrap: pretty; }
-.unsent-edits h2 { margin: 0 0 4px; color: var(--viewer-ink); font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
-.unsent-edits p { margin: 0 0 8px; }
-/* On a wide screen the text shows about twelve lines, and the panel still fits the corner of a short window. */
-.unsent-edits textarea { display: block; width: 100%; height: clamp(96px, 100vh - 360px, 240px); box-sizing: border-box; resize: vertical; border: 1px solid var(--viewer-line); border-radius: 8px; padding: 8px; background: var(--viewer-panel-2); color: var(--viewer-ink); font: inherit; }
-.unsent-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+/* Unsent live text sits in the page's flow, under the band, one compact row per page that opens in place. */
+.workspace-kept { display: flex; flex: none; flex-direction: column; gap: 8px; width: 100%; max-width: 720px; box-sizing: border-box; margin: 0 auto; padding: 8px 16px 0; text-align: start; }
+.state-page .workspace-kept { margin-top: 16px; padding: 0; }
+.unsent-edits { border: 1px solid var(--viewer-line); border-radius: 8px; background: var(--viewer-panel); color: var(--viewer-muted); font-size: 12px; text-wrap: pretty; }
+.unsent-edits summary { display: flex; min-height: 36px; align-items: center; gap: 8px; padding: 0 12px; color: var(--viewer-ink); cursor: pointer; font-size: 13px; font-weight: 500; list-style: none; }
+.unsent-edits summary::-webkit-details-marker { display: none; }
+.unsent-edits summary > .icon:first-child { color: var(--viewer-warning); }
+.unsent-edits summary > .icon:last-child { color: var(--viewer-subtle); transition: transform 120ms; }
+.unsent-edits[open] summary > .icon:last-child { transform: rotate(180deg); }
+.unsent-name { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.unsent-edits p { margin: 0 12px 8px; }
+.unsent-edits textarea { display: block; width: calc(100% - 24px); height: 160px; box-sizing: border-box; margin: 0 12px; resize: vertical; border: 1px solid var(--viewer-line); border-radius: 8px; padding: 8px; background: var(--viewer-panel-2); color: var(--viewer-ink); font: inherit; }
+.unsent-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 8px 12px 12px; }
+/* Full contrast: these are the person's way to keep their text, not secondary chrome. */
+.unsent-actions .handoff-button.secondary, .unsent-discarded .handoff-button.secondary { height: 28px; padding: 0 8px; color: var(--viewer-ink); font-size: 12px; }
 /* The failure reads under the whole row, so Copy and Download stay side by side. */
 .unsent-actions .copy-failed { order: 1; flex-basis: 100%; margin: 0; color: var(--viewer-danger); }
-.unsent-discarded { display: flex; width: 100%; box-sizing: border-box; align-items: center; gap: 8px; pointer-events: auto; border: 1px solid var(--viewer-line); border-radius: 12px; padding: 8px 12px; background: var(--viewer-panel); box-shadow: var(--viewer-shadow); color: var(--viewer-muted); font-size: 12px; }
+.unsent-discarded { display: flex; align-items: center; gap: 8px; border: 1px solid var(--viewer-line); border-radius: 8px; padding: 4px 4px 4px 12px; background: var(--viewer-panel); color: var(--viewer-muted); font-size: 12px; }
 .unsent-discarded p { min-width: 0; flex: 1; margin: 0; overflow-wrap: anywhere; }
+/* The files shown are the last that arrived while reads fail. */
+.workspace-dated { display: inline-flex; flex: none; align-items: center; gap: 6px; margin-right: 8px; color: var(--viewer-muted); font-size: 12px; white-space: nowrap; }
 
 .workspace-side { min-width: 0; }
 .side-tabs { display: flex; height: 48px; flex: none; align-items: center; gap: 2px; padding: 0 8px; }
@@ -123,6 +133,7 @@
   .workspace-corner { right: 8px; bottom: 8px; left: 8px; width: auto; max-width: none; }
   .workspace-page ~ .workspace-corner { right: 8px; max-width: none; bottom: calc(56px + env(safe-area-inset-bottom)); }
   .toast-slot { width: 100%; }
+  .workspace-kept { padding: 8px 8px 0; }
   .unsent-edits textarea { height: 96px; }
   .workspace-tabs { display: flex; grid-area: 2 / 1; border-top: 1px solid var(--viewer-line); padding-bottom: env(safe-area-inset-bottom); background: var(--viewer-panel); }
   .workspace-tabs [role="tab"] { display: inline-flex; height: 48px; flex: 1; align-items: center; justify-content: center; gap: 6px; border: 0; background: transparent; color: var(--viewer-muted); cursor: pointer; font-size: 13px; font-weight: 500; }

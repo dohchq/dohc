@@ -1,4 +1,4 @@
-import {lazy, Suspense, useCallback, useEffect, useRef, useState, type KeyboardEvent} from "react";
+import {lazy, Suspense, useCallback, useEffect, useRef, useState, type KeyboardEvent, type ReactNode} from "react";
 import type {Ended} from "./ChatChannel";
 import {createPortal} from "react-dom";
 import {DohcMark, Icon} from "./icons";
@@ -43,22 +43,30 @@ const SESSION_ENDED = "Your session ended. Sign in again to keep reading.";
 const CHECK_FAILED = "dohc could not open this workspace. Check your connection.";
 const SIGN_OUT_FAILED = "dohc could not sign you out. Retry sign-out.";
 const CHECK_CONNECTION = "Check your connection.";
+// While the held read of the files fails, what shows is the last version that arrived. The desktop's words for an old list.
+const DATED = "May be out of date", DATED_TITLE = "These are the last files dohc received.";
+const FILES_BEHIND = "dohc could not update this workspace's files";
+// As on the phone, a read that fails this many times in a row raises a toast, so the files never go out of date without a sign.
+const BEHIND_REPORT_FAILURES = 3;
 const refusedStatus = (error: unknown) => error instanceof ViewResponseError && [401, 403, 404].includes(error.status);
 
-/** Live text that never reached the workspace, from a page that closed while the person could not keep editing it. */
-type Unsent = {id: number; path: string; text: string; discarded?: true};
+/**
+ * Live text that never reached the workspace, from a page that closed while the person could not keep editing it.
+ * Each item names the account that wrote it, so another account signed in on the same tab never sees it.
+ */
+type Unsent = {id: number; accountId: string; path: string; text: string; discarded?: true};
 const UNSENT_KEY = "unsent-edits";
 
 // The tab's session storage keeps the text through a reload, as it keeps drafts. A discarded item stays only for its Undo.
 function readUnsent(): Unsent[] {
   try {
     const stored: unknown = JSON.parse(readDraft(UNSENT_KEY) || "[]");
-    return Array.isArray(stored) ? stored.filter((item): item is Unsent =>
-      typeof item?.id === "number" && typeof item.path === "string" && typeof item.text === "string") : [];
+    return Array.isArray(stored) ? stored.filter((item): item is Unsent => typeof item?.id === "number" &&
+      typeof item.accountId === "string" && typeof item.path === "string" && typeof item.text === "string") : [];
   } catch {return [];}
 }
 function writeUnsent(list: readonly Unsent[]): void {
-  const kept = list.filter(item => !item.discarded).map(({id, path, text}) => ({id, path, text}));
+  const kept = list.filter(item => !item.discarded).map(({id, accountId, path, text}) => ({id, accountId, path, text}));
   writeDraft(UNSENT_KEY, kept.length ? JSON.stringify(kept) : "");
 }
 
@@ -72,9 +80,12 @@ function shownPath(path: string, all: readonly Unsent[]): string {
   return path;
 }
 
-// Shown over whatever the page shows next, so it outlasts a lower level, an ended membership or an ended session.
+/**
+ * One row per page in the page's flow, under its band, or on the page shown next, so it outlasts a lower level,
+ * an ended membership or an ended session. A row opens in place to the text, with Copy, Download and Discard.
+ */
 function UnsentEdits({unsent, onDiscard, onUndo, onForget}: {unsent: readonly Unsent[]; onDiscard(id: number): void; onUndo(id: number): void; onForget(id: number): void}) {
-  return <>{unsent.map(item => {
+  return <div className="workspace-kept">{unsent.map(item => {
     const name = shownPath(item.path, unsent), base = item.path.slice(item.path.lastIndexOf("/") + 1), dot = base.lastIndexOf(".");
     const file = dot > 0 ? `${base.slice(0, dot)} (unsent edits)${base.slice(dot)}` : `${base} (unsent edits)`;
     if (item.discarded) return <aside key={item.id} className="unsent-discarded" aria-label="Discarded edits">
@@ -82,23 +93,23 @@ function UnsentEdits({unsent, onDiscard, onUndo, onForget}: {unsent: readonly Un
       <button type="button" className="handoff-button secondary" onClick={() => onUndo(item.id)}>Undo</button>
       <button className="icon-button" type="button" aria-label="Dismiss" title="Dismiss" onClick={() => onForget(item.id)}><Icon name="x"/></button>
     </aside>;
-    return <aside key={item.id} className="unsent-edits" aria-label="Unsent edits">
-      <h2>dohc kept your unsent edits to "{name}"</h2>
-      <p>They didn't reach the workspace before editing ended. Only this tab has them, so closing it loses them. Copy or download them to keep them.</p>
+    return <details key={item.id} className="unsent-edits" aria-label="Unsent edits">
+      <summary><Icon name="triangle-alert" size={14}/><span className="unsent-name">Unsent edits to {name}</span><Icon name="chevron-down" size={14}/></summary>
+      <p>Only this tab has them. Copy or download them before you close it.</p>
       <textarea readOnly value={item.text} aria-label={`Unsent edits to ${name}`}/>
       <div className="unsent-actions">
         <CopyWork text={item.text} label="Copy unsent edits" failure="dohc could not copy the edits. Download them instead."/>
         <a className="handoff-button secondary" download={file} href={`data:text/markdown;charset=utf-8,${encodeURIComponent(item.text)}`}>Download</a>
         <button type="button" className="handoff-button secondary" onClick={() => onDiscard(item.id)}>Discard</button>
       </div>
-    </aside>;
-  })}</>;
+    </details>;
+  })}</div>;
 }
 
 const COMPOSERS = ".chat-composer, .chat-read-only, .comment-composer";
 
 /**
- * On a phone, toasts and kept edits sit above the tab bar, and a warning stays until it is dismissed.
+ * On a phone, toasts sit above the tab bar, and a warning stays until it is dismissed.
  * While a Group or Comments tab shows its composer, the corner rises above it, so it never covers what
  * the person writes or a kept draft's Copy and Discard.
  */
@@ -137,9 +148,14 @@ export default function WorkspaceApp({grantId}: {grantId: string | null}) {
   const [unsent, setUnsent] = useState<Unsent[]>(readUnsent);
   const unsentId = useRef(Math.max(0, ...unsent.map(item => item.id)));
   const [toastSlot, setToastSlot] = useState<HTMLElement | null>(null);
-  const keep = useCallback((path: string, text: string) => setUnsent(list => [...list, {id: ++unsentId.current, path, text}]), []);
-  const discarded = (id: number, value: boolean) =>
-    setUnsent(list => list.map(item => item.id !== id ? item : value ? {...item, discarded: true} : {id: item.id, path: item.path, text: item.text}));
+  // The account last signed in on this page. Signed out, its kept edits still show, so an ended session keeps them in view.
+  // Before any account signs in, as after a reload, every kept edit shows.
+  const [lastAccount, setLastAccount] = useState<string | null>(null);
+  const keep = useCallback((accountId: string, path: string, text: string) =>
+    setUnsent(list => [...list, {id: ++unsentId.current, accountId, path, text}]), []);
+  const discarded = (id: number, value: boolean) => setUnsent(list => list.map(item => item.id !== id ? item
+    : value ? {...item, discarded: true} : {id: item.id, accountId: item.accountId, path: item.path, text: item.text}));
+  const shown = lastAccount === null ? unsent : unsent.filter(item => item.accountId === lastAccount);
   useEffect(() => writeUnsent(unsent), [unsent]);
   // Closing the tab loses the kept text, so the browser asks first while any remains.
   const holding = unsent.some(item => !item.discarded);
@@ -149,20 +165,22 @@ export default function WorkspaceApp({grantId}: {grantId: string | null}) {
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
   }, [holding]);
+  const kept = shown.length ? <UnsentEdits unsent={shown} onDiscard={id => discarded(id, true)} onUndo={id => discarded(id, false)}
+    onForget={id => setUnsent(list => list.filter(item => item.id !== id))}/> : null;
   return <>
-    <MemberEntry grantId={grantId} onUnsent={keep} toastSlot={toastSlot}/>
-    {/* Toasts and kept edits share the window's bottom-right corner, and the edits outlive the workspace page. */}
-    <div className="workspace-corner">
-      <div className="toast-slot" ref={setToastSlot}/>
-      <UnsentEdits unsent={unsent} onDiscard={id => discarded(id, true)} onUndo={id => discarded(id, false)}
-        onForget={id => setUnsent(list => list.filter(item => item.id !== id))}/>
-    </div>
+    <MemberEntry grantId={grantId} onUnsent={keep} onAccount={setLastAccount} toastSlot={toastSlot} kept={kept}/>
+    {/* Toasts land at the window's bottom right. */}
+    <div className="workspace-corner"><div className="toast-slot" ref={setToastSlot}/></div>
   </>;
 }
 
 /** Signs the member in, then opens the workspace. */
-function MemberEntry({grantId, onUnsent, toastSlot}: {grantId: string | null; onUnsent(path: string, text: string): void; toastSlot: HTMLElement | null}) {
+function MemberEntry({grantId, onUnsent, onAccount, toastSlot, kept}: {
+  grantId: string | null; onUnsent(accountId: string, path: string, text: string): void; onAccount(id: string): void;
+  toastSlot: HTMLElement | null; kept: ReactNode;
+}) {
   const [account, setAccount] = useState<Account | null | undefined>(undefined);
+  useEffect(() => {if (account) onAccount(account.id);}, [account, onAccount]);
   const [pending, setPending] = useState<"account" | "sign-in" | "sign-out" | null>(grantId ? "account" : null);
   const [error, setError] = useState<string | null>(null);
   const request = useRef<AbortController | null>(null);
@@ -193,7 +211,7 @@ function MemberEntry({grantId, onUnsent, toastSlot}: {grantId: string | null; on
   const sessionEnded = useCallback(() => {request.current?.abort(); setAccount(null); setPending(null); setError(SESSION_ENDED);}, []);
 
   if (!grantId) return <StatePage icon="unlink" title="This workspace link isn't valid.">
-    <p>Open the workspace again from your invitation.</p>
+    <p>Open the workspace again from your invitation.</p>{kept}
   </StatePage>;
   if (account === undefined) return <WorkspaceOpening/>;
   if (!account) return <div className="state-page join-page">
@@ -206,20 +224,27 @@ function MemberEntry({grantId, onUnsent, toastSlot}: {grantId: string | null; on
         <SignInForm busy={pending !== null} error={error === SESSION_ENDED || error === CHECK_FAILED ? null : error} onSignIn={signIn}/>
         {error === CHECK_FAILED && <p className="join-error" role="alert">{CHECK_FAILED}{" "}
           <button className="join-link" type="button" disabled={pending !== null} onClick={() => check()}>Try again</button></p>}
+        {kept}
       </div>
     </main>
   </div>;
   return <MemberWorkspace key={`${account.id}\n${grantId}`} grantId={grantId} account={account} signingOut={pending === "sign-out"}
-    signOutError={error === SIGN_OUT_FAILED ? error : null} onSignOut={signOut} onSessionEnded={sessionEnded} onUnsent={onUnsent} toastSlot={toastSlot}/>;
+    signOutError={error === SIGN_OUT_FAILED ? error : null} onSignOut={signOut} onSessionEnded={sessionEnded}
+    onUnsent={(path, text) => onUnsent(account.id, path, text)} toastSlot={toastSlot} kept={kept}/>;
 }
 
-/** The workspace's files from the view routes, kept current by one held log read at a time. */
+/**
+ * The workspace's files from the view routes, kept current by one held log read at a time.
+ * `failures` counts the reads in a row that failed since the files last caught up, and `retry` reads again at once.
+ */
 function useMemberFiles(session: string, attempt: number) {
   const [view, setView] = useState<View>({status: "loading"});
+  const [failures, setFailures] = useState(0);
+  const wake = useRef<(() => void) | null>(null);
   useEffect(() => {
     const controller = new AbortController(), {signal} = controller;
     const ready = (loaded: Omit<Files, "files">): Files => ({...loaded, files: filesFromAccumulator(loaded.fileAccumulator)});
-    setView({status: "loading"});
+    setView({status: "loading"}); setFailures(0);
     void (async () => {
       let files: Files;
       try {files = ready(await loadCurrentState(session, signal));}
@@ -238,7 +263,7 @@ function useMemberFiles(session: string, attempt: number) {
             VIEW_LOG_HOLD_MS, files.meta.access !== "edit");
           const meta = await loadMeta(session, signal);
           if (signal.aborted) return;
-          files = ready({...log, meta}); setView({status: "ready", files}); delay = RETRY_INITIAL_MS;
+          files = ready({...log, meta}); setView({status: "ready", files}); setFailures(0); delay = RETRY_INITIAL_MS;
           const elapsed = Date.now() - started;
           if (log.nextCursor === previous && elapsed < VIEW_LOG_HOLD_MS) await waitForRetry(VIEW_LOG_HOLD_MS - elapsed, signal);
         } catch (error) {
@@ -246,18 +271,24 @@ function useMemberFiles(session: string, attempt: number) {
           if (error instanceof VersionMismatchError) {setView({status: "version-mismatch"}); return;}
           // A new epoch, or a level that no longer reads the whole log, starts again from the current files.
           if (error instanceof EpochFloorChangedError || (refusedStatus(error) && files.meta.access === "edit")) {
-            try {files = ready(await loadCurrentState(session, signal)); setView({status: "ready", files}); continue;}
+            try {files = ready(await loadCurrentState(session, signal)); setView({status: "ready", files}); setFailures(0); continue;}
             catch (reload) {error = reload;}
           }
           if (signal.aborted) return;
           if (refusedStatus(error)) {setView({status: "ended"}); return;}
-          await waitForRetry(delay, signal).catch(() => {}); delay = Math.min(delay * 2, RETRY_MAX_MS);
+          setFailures(count => count + 1);
+          // Try again ends the wait at once.
+          const pause = new AbortController(), stop = () => pause.abort();
+          signal.addEventListener("abort", stop, {once: true}); wake.current = stop;
+          await waitForRetry(delay, pause.signal).catch(() => {});
+          signal.removeEventListener("abort", stop); if (wake.current === stop) wake.current = null;
+          delay = Math.min(delay * 2, RETRY_MAX_MS);
         }
       }
     })();
     return () => controller.abort();
   }, [session, attempt]);
-  return view;
+  return {view, failures, retry: useCallback(() => wake.current?.(), [])};
 }
 
 // The workspace's shape while it loads: its files, the page and the side panel, or on a phone the page's header, the page and the tabs.
@@ -274,13 +305,16 @@ function WorkspaceOpening() {
   </div>;
 }
 
-function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut, onSessionEnded, onUnsent, toastSlot}: {
+function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut, onSessionEnded, onUnsent, toastSlot, kept}: {
   grantId: string; account: Account; signingOut: boolean; signOutError: string | null; onSignOut(): void; onSessionEnded(): void;
-  onUnsent(path: string, text: string): void; toastSlot: HTMLElement | null;
+  onUnsent(path: string, text: string): void; toastSlot: HTMLElement | null; kept: ReactNode;
 }) {
   const session = memberSession(grantId);
   const [attempt, setAttempt] = useState(0);
-  const view = useMemberFiles(session, attempt);
+  const {view, failures, retry: retryFiles} = useMemberFiles(session, attempt);
+  // A toast closed while the reads still fail stays closed until the files catch up.
+  const [behindDismissed, setBehindDismissed] = useState(false);
+  useEffect(() => {if (failures === 0) setBehindDismissed(false);}, [failures]);
   const [ended, setEnded] = useState(false);
   const [selectedPath, setSelectedPath] = useState("");
   const [tab, setTab] = useState<Tab>("page"), [side, setSide] = useState<Side>("chats"), [unread, setUnread] = useState(0);
@@ -301,7 +335,10 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
     setSelectedPath(path => files.files.some(file => file.path === path) ? path : files.files[0]?.path ?? "");
   }, [files]);
   const groupsEnded = useCallback((reason: Ended) => {if (reason === "signed-out") onSessionEnded(); else setEnded(true);}, [onSessionEnded]);
-  const listing = useMemberListing(view.status === "ready" ? grantId : null, account.id, groupsEnded);
+  const listing = useMemberListing(view.status === "ready" ? grantId : null, account.id, groupsEnded), {refresh: refreshListing} = listing;
+  // The held read of the files returns at least once per hold. Each return reads the Groups again once they are that old,
+  // so a new Group appears even when the workspace had none, or the new one has no messages yet.
+  useEffect(() => {if (view.status === "ready") refreshListing(VIEW_LOG_HOLD_MS);}, [view, refreshListing]);
   // Groups and Comments share one read, so one toast reports it. Each failure raises it again.
   const [listingDismissed, setListingDismissed] = useState(false);
   useEffect(() => {if (listing.found === "failed") setListingDismissed(false);}, [listing.found]);
@@ -326,19 +363,19 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
 
   if (ended || view.status === "ended") return <StatePage icon="unlink"
     title={lastName.current ? `Your membership in ${lastName.current} ended.` : "Your membership ended."}>
-    <p>Ask the owner to invite you again to keep working in it.</p>
+    <p>Ask the owner to invite you again to keep working in it.</p>{kept}
   </StatePage>;
   if (view.status === "refused") return <StatePage icon="unlink" title="dohc could not open this workspace with this account.">
     <p>This browser is signed in as {account.name}, not the account the owner invited.</p>
-    <button className="handoff-button secondary" type="button" disabled={signingOut} onClick={onSignOut}>Switch account</button>
+    <button className="handoff-button secondary" type="button" disabled={signingOut} onClick={onSignOut}>Switch account</button>{kept}
   </StatePage>;
   if (view.status === "load-failed") return <StatePage icon="alert" failed title="dohc couldn't open this workspace.">
     <p>Check your connection, then choose Try again.</p>
-    <button className="handoff-button secondary" type="button" onClick={() => setAttempt(value => value + 1)}>Try again</button>
+    <button className="handoff-button secondary" type="button" onClick={() => setAttempt(value => value + 1)}>Try again</button>{kept}
   </StatePage>;
   if (view.status === "version-mismatch") return <StatePage icon="refresh" title="This page does not match its server.">
     <p>Reload it to get the version the server expects.</p>
-    <button className="handoff-button secondary" type="button" onClick={() => location.reload()}>Reload</button>
+    <button className="handoff-button secondary" type="button" onClick={() => location.reload()}>Reload</button>{kept}
   </StatePage>;
   if (!files) return <WorkspaceOpening/>;
 
@@ -391,10 +428,12 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
         </div>
         <div className="header-actions">
           <div className="workspace-status" ref={setStatusSlot}/>
+          {failures > 0 && <span className="workspace-dated" title={DATED_TITLE}><Icon name="clock" size={12}/>{DATED}</span>}
           <span className="badge">{BADGE[files.meta.access]}</span>
         </div>
       </header>
       <div className="page-band" ref={setBandSlot}/>
+      {kept}
       <div className="layout">
         <div className="scroller">
           <div className="column">
@@ -423,7 +462,7 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
             access={access === "view" ? "read-only" : "read-write"} onEnded={groupsEnded}/> : <p className="chat-state">No files in this workspace yet.</p>)}
         </div>
         <div className="workspace-chats" id="workspace-chats" {...sidePanel("chats")}>
-          <MemberChats found={listing.found} onRetry={listing.retry} access={access === "view" ? "read-only" : "read-write"} shown={showing === "chats"} onEnded={groupsEnded} onUnread={setUnread}/>
+          <MemberChats found={listing.found} onRetry={listing.retry} onUnlisted={refreshListing} access={access === "view" ? "read-only" : "read-write"} shown={showing === "chats"} onEnded={groupsEnded} onUnread={setUnread}/>
         </div>
       </div>
     </div>
@@ -433,6 +472,8 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
     </div>}
     {listing.found === "failed" && !listingDismissed && toastSlot && createPortal(<Toast title={LISTING_FAILED} body={CHECK_CONNECTION}
       onRetry={listing.retry} onDismiss={() => setListingDismissed(true)}/>, toastSlot)}
+    {failures >= BEHIND_REPORT_FAILURES && !behindDismissed && toastSlot && createPortal(<Toast title={FILES_BEHIND} body={CHECK_CONNECTION}
+      onRetry={retryFiles} onDismiss={() => setBehindDismissed(true)}/>, toastSlot)}
     {levelNote && toastSlot && createPortal(<Toast title={levelNote.words} tone={levelNote.lower ? "warning" : "success"}
       onDismiss={() => setLevelNote(null)}/>, toastSlot)}
   </div>;

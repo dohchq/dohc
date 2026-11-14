@@ -17,54 +17,80 @@ export type MemberListing = "loading" | "failed" | MemberGroups;
 /**
  * The membership's share and Groups, which Chats and Comments both use, read once `grantId` is set:
  * after the workspace opens, so an account that holds no membership reads as refused, not ended. `retry` reads them again.
+ * `refresh` reads them again without showing a load, so a Group added while the workspace is open appears.
+ * Given an age, it reads only when the last read is older. A refresh that fails keeps the Groups shown, and the next one tries again.
  */
 export function useMemberListing(grantId: string | null, accountId: string, onEnded: (reason: Ended) => void) {
   const [found, setFound] = useState<MemberListing>("loading"), [attempt, setAttempt] = useState(0);
   const onEndedRef = useRef(onEnded); onEndedRef.current = onEnded;
+  // When the Groups last arrived, or null before they do.
+  const readAt = useRef<number | null>(null), quiet = useRef<AbortController | null>(null);
   useEffect(() => {
-    setFound("loading");
+    setFound("loading"); readAt.current = null;
     if (grantId === null) return;
     const controller = new AbortController();
     void openMemberGroups(grantId, controller.signal).then(groups => {
       if (controller.signal.aborted) return;
-      setFound(groups.userId === accountId ? groups : "failed");
+      if (groups.userId === accountId) {readAt.current = Date.now(); setFound(groups);} else setFound("failed");
     }, (error: unknown) => {
       if (controller.signal.aborted) return;
       const reason = ended(error);
       if (reason) onEndedRef.current(reason); else setFound("failed");
     });
-    return () => controller.abort();
+    return () => {controller.abort(); quiet.current?.abort(); quiet.current = null;};
   }, [grantId, accountId, attempt]);
-  return {found, retry: useCallback(() => setAttempt(value => value + 1), [])};
+  const refresh = useCallback((olderThanMs = 0) => {
+    if (grantId === null || readAt.current === null || quiet.current || Date.now() - readAt.current < olderThanMs) return;
+    const controller = new AbortController(); quiet.current = controller;
+    void openMemberGroups(grantId, controller.signal).then(groups => {
+      if (controller.signal.aborted || groups.userId !== accountId) return;
+      readAt.current = Date.now();
+      // The same Groups keep the same object, so nothing open reads them again.
+      setFound(current => typeof current === "object" && JSON.stringify(current) === JSON.stringify(groups) ? current : groups);
+    }, (error: unknown) => {
+      if (controller.signal.aborted) return;
+      const reason = ended(error);
+      if (reason) onEndedRef.current(reason);
+    }).finally(() => {if (quiet.current === controller) quiet.current = null;});
+  }, [grantId, accountId]);
+  return {found, retry: useCallback(() => setAttempt(value => value + 1), []), refresh};
 }
 
 /**
  * The workspace's Groups beside its files. One follow serves every Group; the
  * open one shows its messages, and the others count what arrives. `shown`
  * says whether the person can see the panel, so a phone's hidden tab counts too.
+ * The follow carries every Group the member reaches, so a message in a Group the list lacks calls `onUnlisted`.
  */
-export function MemberChats({found, onRetry, access, shown, onEnded, onUnread}: {
-  found: MemberListing; onRetry(): void; access: NamedChatAccess; shown: boolean; onEnded(reason: Ended): void; onUnread(count: number): void;
+export function MemberChats({found, onRetry, onUnlisted, access, shown, onEnded, onUnread}: {
+  found: MemberListing; onRetry(): void; onUnlisted(): void; access: NamedChatAccess; shown: boolean; onEnded(reason: Ended): void; onUnread(count: number): void;
 }) {
   const [open, setOpen] = useState<string | null>(null), [unread, setUnread] = useState<ReadonlyMap<string, number>>(new Map());
   const onEndedRef = useRef(onEnded); onEndedRef.current = onEnded;
+  const onUnlistedRef = useRef(onUnlisted); onUnlistedRef.current = onUnlisted;
   const seen = useRef({open, shown}); seen.current = {open, shown};
   const listed = useRef<HTMLButtonElement | null>(null), back = useRef<HTMLButtonElement | null>(null), returning = useRef<string | null>(null);
   const opened = typeof found === "object" ? found : null;
   // The first Group opens once the Groups arrive.
   useEffect(() => {if (opened) setOpen(current => current ?? opened.groups[0]?.channelWireId ?? null);}, [opened]);
 
-  const hub = useMemo(() => opened && createGroupFollow({shareId: opened.shareId, userId: opened.userId,
+  const listedIds = useRef(new Set<string>()); listedIds.current = new Set(opened?.groups.map(item => item.channelWireId));
+  // A read of the Groups that brings a new one keeps the follow, so the open Group keeps its messages.
+  const shareId = opened?.shareId, userId = opened?.userId;
+  const hub = useMemo(() => shareId && userId ? createGroupFollow({shareId, userId,
     onEnded: reason => onEndedRef.current(reason),
-    onMessages: counts => setUnread(current => {
-      const next = new Map(current);
-      for (const [wireId, count] of counts) {
-        // The Group in view has nothing unread.
-        if (wireId === seen.current.open && seen.current.shown) continue;
-        next.set(wireId, (next.get(wireId) ?? 0) + count);
-      }
-      return next;
-    })}), [opened]);
+    onMessages: counts => {
+      if ([...counts.keys()].some(wireId => !listedIds.current.has(wireId))) onUnlistedRef.current();
+      setUnread(current => {
+        const next = new Map(current);
+        for (const [wireId, count] of counts) {
+          // The Group in view has nothing unread.
+          if (wireId === seen.current.open && seen.current.shown) continue;
+          next.set(wireId, (next.get(wireId) ?? 0) + count);
+        }
+        return next;
+      });
+    }}) : null, [shareId, userId]);
   useEffect(() => () => hub?.close(), [hub]);
 
   // Opening a Group, or showing the panel, reads what it holds.
@@ -97,7 +123,7 @@ export function MemberChats({found, onRetry, access, shown, onEnded, onUnread}: 
       {/* A Group's access is the member level, which the workspace reads again while it stays open. */}
       <ChannelView key={`${opened.shareId}\n${group.channelWireId}`} client={hub.client({...group, access})} name={group.name}
         onEnded={reason => onEndedRef.current(reason)} readOnlyNote={READ_ONLY} empty={EMPTY} threads={group.type ?? "both"}
-        draftKey={`${opened.shareId}\ngroup\n${group.channelWireId}`}/>
+        draftKey={`${opened.userId}\n${opened.shareId}\ngroup\n${group.channelWireId}`}/>
     </> : <>
       <div className="chats-head"><h2>Groups</h2></div>
       {found === "loading" ? <p className="chat-state">Loading Groups…</p> :
@@ -139,7 +165,7 @@ export function MemberComments({found, onRetry, path, access, onEnded}: {
     <div className="chats-head"><h2>Comments</h2><span className="comments-file" title={path}>{name}</span></div>
     {client && opened ? <ChannelView key={`${opened.shareId}\n${path}\n${access}`} client={client} name={`Comments on ${name}`}
       onEnded={onEnded} readOnlyNote={READ_ONLY} empty={NO_COMMENTS} messageLabel="Comment"
-      placeholder="Comment on this file…" draftKey={`${opened.shareId}\nfile\n${path}`}/> :
+      placeholder="Comment on this file…" draftKey={`${opened.userId}\n${opened.shareId}\nfile\n${path}`}/> :
       found === "failed" ? <LoadFailed onRetry={onRetry}/> :
       <p className="chat-state">Loading comments…</p>}
   </section>;

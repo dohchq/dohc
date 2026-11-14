@@ -7,8 +7,8 @@ const FADES_AFTER_MS = 6000;
 /**
  * A member page's toast: what failed, the one thing to do, a copy control beside the text, Try again and Dismiss.
  * A `warning` says what dohc is still fixing by itself, as the desktop's warning notice does.
- * A toast with no `onRetry` reports a change, such as a new level, and has no Try again.
- * A `success` has nothing to report, so it has no copy control, and it fades as the desktop's does,
+ * A toast with no `onRetry` reports a change, such as a new level, not a failure, so it has neither Try again nor a copy control.
+ * A `success` fades as the desktop's does,
  * but not while the pointer or focus is on it. A warning or a failure stays until it is dismissed.
  */
 export function Toast({title, body, tone, onRetry, onDismiss}: {title: string; body?: string; tone?: "warning" | "success"; onRetry?(): void; onDismiss(): void}) {
@@ -29,7 +29,7 @@ export function Toast({title, body, tone, onRetry, onDismiss}: {title: string; b
     <div>
       <div className="toast-text">
         <div><p className="edit-notice-title">{title}</p>{body && <p>{body}</p>}</div>
-        {tone !== "success" && <CopyMessage text={body ? `${title}\n${body}` : title}/>}
+        {onRetry && <CopyMessage text={body ? `${title}\n${body}` : title}/>}
       </div>
       {onRetry && <div className="edit-notice-actions"><button className="handoff-button secondary" onClick={onRetry}>Try again</button></div>}
     </div>
