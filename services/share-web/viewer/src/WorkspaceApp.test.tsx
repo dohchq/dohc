@@ -636,6 +636,17 @@ it("says in place when it could not copy the unsent edits, and keeps them with D
   expect(recovery()!.querySelector("a[download]")).not.toBeNull();
 });
 
+it("names kept edits to two files of the same name by their folders", async () => {
+  writeDraft("unsent-edits", JSON.stringify([{id: 1, path: "trip/plan.md", text: "Leave at ten."}, {id: 2, path: "welcome/plan.md", text: "Hello."},
+    {id: 3, path: "trip/to-pack.md", text: "Socks."}]));
+  server(); await render();
+  await settle(() => container.querySelectorAll('[aria-label="Unsent edits"]').length === 3);
+  expect([...container.querySelectorAll('[aria-label="Unsent edits"] h2')].map(node => node.textContent)).toEqual([
+    'dohc kept your unsent edits to "trip/plan.md"', 'dohc kept your unsent edits to "welcome/plan.md"', 'dohc kept your unsent edits to "to-pack.md"']);
+  await act(async () => [...container.querySelectorAll<HTMLButtonElement>('[aria-label="Unsent edits"] button')].find(node => node.textContent === "Discard")!.click());
+  expect(container.querySelector('[aria-label="Discarded edits"]')?.textContent).toContain('Discarded your unsent edits to "trip/plan.md".');
+});
+
 it("keeps the unsent text after the membership ends, with none of the workspace", async () => {
   const options: {level: Level; member: boolean} = {level: "edit", member: true};
   await editing(options);

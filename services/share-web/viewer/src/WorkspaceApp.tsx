@@ -62,11 +62,21 @@ function writeUnsent(list: readonly Unsent[]): void {
   writeDraft(UNSENT_KEY, kept.length ? JSON.stringify(kept) : "");
 }
 
+/** The file's name, or where another kept file has the same name, the fewest folders before it that tell the two apart. */
+function shownPath(path: string, all: readonly Unsent[]): string {
+  const parts = path.split("/"), others = all.map(item => item.path.split("/")).filter(other => other.join("/") !== path);
+  for (let count = 1; count < parts.length; count++) {
+    const tail = parts.slice(-count).join("/");
+    if (!others.some(other => other.slice(-count).join("/") === tail)) return tail;
+  }
+  return path;
+}
+
 // Shown over whatever the page shows next, so it outlasts a lower level, an ended membership or an ended session.
 function UnsentEdits({unsent, onDiscard, onUndo, onForget}: {unsent: readonly Unsent[]; onDiscard(id: number): void; onUndo(id: number): void; onForget(id: number): void}) {
   return <>{unsent.map(item => {
-    const name = item.path.slice(item.path.lastIndexOf("/") + 1), dot = name.lastIndexOf(".");
-    const file = dot > 0 ? `${name.slice(0, dot)} (unsent edits)${name.slice(dot)}` : `${name} (unsent edits)`;
+    const name = shownPath(item.path, unsent), base = item.path.slice(item.path.lastIndexOf("/") + 1), dot = base.lastIndexOf(".");
+    const file = dot > 0 ? `${base.slice(0, dot)} (unsent edits)${base.slice(dot)}` : `${base} (unsent edits)`;
     if (item.discarded) return <aside key={item.id} className="unsent-discarded" aria-label="Discarded edits">
       <p>Discarded your unsent edits to "{name}".</p>
       <button type="button" className="handoff-button secondary" onClick={() => onUndo(item.id)}>Undo</button>
