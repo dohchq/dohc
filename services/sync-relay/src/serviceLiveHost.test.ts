@@ -7438,7 +7438,7 @@ it("replays a committed Stop on a preparation Conflict and refuses the Try again
 // workspace's next pushes each append a row, as the host's settled work does.
 // Each workspace has one enrolled document, so the relay holds a hosted scope for it, unless `unscoped`.
 // `notes` gives the first workspace that many activation targets, eight to a pass as in the live profile. Their
-// activation is replaced: each visit sends the engine the two waiting-edit reads a ready note's does and ends done.
+// activation is replaced: each visit sends the engine the one waiting-edit read a ready note's does and ends done.
 // A visit also drains the edit `waiting` holds for its note, into `drained`, as a real activation drains its owner's queue.
 // `intervals` are the pause between passes and the longest one while the host is idle.
 async function readyHostedHost(
@@ -7463,15 +7463,13 @@ async function readyHostedHost(
       .spyOn(ServiceActivationDriver.prototype, "activate")
       .mockImplementation(async function (this: ServiceActivationDriver, target) {
         const o = this.options;
-        for (let read = 0; read < 2; read++) {
-          await o.client.sendRequest({
-            id: o.nextRequestId(),
-            workspace: `handle-${target.workspaceId}`,
-            deadlineMs: o.deadlineMs,
-            method: "liveApplication.ownerState",
-            params: { workspaceId: target.workspaceId, registrationId: 1 },
-          });
-        }
+        await o.client.sendRequest({
+          id: o.nextRequestId(),
+          workspace: `handle-${target.workspaceId}`,
+          deadlineMs: o.deadlineMs,
+          method: "liveApplication.ownerState",
+          params: { workspaceId: target.workspaceId, registrationId: 1 },
+        });
         visited.push(target.path);
         if (waiting.delete(target.path)) drained.push(target.path);
         return {
@@ -8171,9 +8169,9 @@ it.each(
     console.info(
       `Idle host, ${notes} notes, idle interval ${idlePollIntervalMs} ms: ${passes} passes in 60 s, engine requests ${JSON.stringify(requests)}`,
     );
-    // Each pass asks for the waiting edits of up to eight notes, twice each, and pushes once.
+    // Each pass asks for the waiting edits of up to eight notes, once each, and pushes once.
     expect(requests["sync.push"]).toBe(passes);
-    expect(requests["liveApplication.ownerState"]).toBe(2 * Math.min(notes, 8) * passes);
+    expect(requests["liveApplication.ownerState"]).toBe(Math.min(notes, 8) * passes);
     // Only the recovery probe pulled, once every 30 s.
     expect(host.hostedPulls("workspace").total - pulls).toBe(2);
     expect(host.hostedPulls("workspace").reasons.probe).toBeGreaterThanOrEqual(2);
@@ -8313,7 +8311,8 @@ async function idleNote(options: { supervised?: boolean } = {}) {
 
 // With the real activation and delivery of one note against the test engine.
 // Measures: the passes and engine requests of one simulated minute, at idle intervals of 250 ms and 2,000 ms.
-// Proves: an idle pass sends the engine only the note's two waiting-edit reads and its workspace's push.
+// Proves: an idle pass sends the engine only the note's one waiting-edit read and its workspace's push. The settle
+// after the drain does not read the waiting edits again.
 it.each([250, 2_000])(
   "runs one hosted, ready note for a minute at an idle interval of %i ms",
   async (ceiling) => {
@@ -8335,7 +8334,7 @@ it.each([250, 2_000])(
       `Idle host, 1 hosted note, idle interval ${ceiling} ms: ${passes} passes in 60 s, engine requests ${JSON.stringify(requests)}, pulls ${JSON.stringify(o.host.hostedPulls("workspace"))}`,
     );
     expect(requests["sync.push"]).toBe(passes);
-    expect(requests["liveApplication.ownerState"]).toBe(2 * passes);
+    expect(requests["liveApplication.ownerState"]).toBe(passes);
     expect(Object.keys(requests).sort()).toEqual([
       "liveApplication.ownerState",
       "sync.commitCursor",

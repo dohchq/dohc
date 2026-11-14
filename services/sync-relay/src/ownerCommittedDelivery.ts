@@ -123,12 +123,14 @@ export class OwnerCommittedDelivery {
     settle: true,
     signal?: AbortSignal,
     wanted?: boolean,
+    drained?: boolean,
   ): Promise<SettlementOutcome>;
   async #run(
     value: LiveDocumentKey,
     settle: boolean,
     signal?: AbortSignal,
     wanted = false,
+    drained = false,
   ): Promise<OwnerDeliveryOutcome | SettlementOutcome> {
     const document = parseLiveDocumentKey(value),
       key = JSON.stringify(document),
@@ -147,6 +149,7 @@ export class OwnerCommittedDelivery {
       check();
       const actor = admittedOwner(this.storage, c.ownerAdmission, document.workspaceId);
       let saved = this.#adopted.get(key);
+      const drainedRegistration = drained ? saved : undefined;
       const existing = this.#store.existingOwnerDelivery({ host: c.host, document, actor });
       if (existing && (!saved || !isDeepStrictEqual(saved.binding, existing.binding))) {
         this.#registrations.invalidate(document.objectId);
@@ -430,7 +433,12 @@ export class OwnerCommittedDelivery {
           settledSinceApply = false;
         }
       };
-      const outbox = await drainOwnerOutbox({
+      // The drain that just returned done read the owner queue empty under this registration. Anything queued
+      // since waits for the next pass's drain.
+      const outbox =
+        drainedRegistration === adopted
+          ?{ admittedEntries: 0, hasMore: false, retryReady: false }
+          : await drainOwnerOutbox({
         storage: this.storage,
         admission: c.ownerAdmission,
         client: c.client,
@@ -544,6 +552,13 @@ export class OwnerCommittedDelivery {
   }
   settle(document: LiveDocumentKey, signal?: AbortSignal) {
     return this.#run(document, true, signal);
+  }
+  /**
+   * Settles right after `drain` returned done for the document, without reading the owner queue that drain just
+   * read empty. A registration made since drains first, as `settle` does.
+   */
+  settleDrained(document: LiveDocumentKey, signal?: AbortSignal) {
+    return this.#run(document, true, signal, false, true);
   }
   /** Settles past the settlement this connection has of the same terminal, as its owner wants after consenting to a held write. */
   settleWanted(document: LiveDocumentKey, signal?: AbortSignal) {

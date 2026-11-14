@@ -1216,7 +1216,7 @@ export class ServiceActivationDriver {
    * Without it, a retained activation resumes without that pull: its
    * caller pulled already, or the document left the hosted set, and a pull
    * would adopt the scope it left, after which the engine no longer captures it.
-   * `objectId` is as for `activationId`.
+   * `objectId` is as for `activationId`. `settle` runs only right after the document's drain returned done.
    */
   async activate(
     target: ServiceActivationTarget,
