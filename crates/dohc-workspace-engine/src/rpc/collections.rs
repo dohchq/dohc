@@ -280,7 +280,6 @@ fn bound_collection_history_page(response: &mut Value) {
     response["nextBeforeHistoryId"] = next_before_history_id;
 }
 
-/// Approximate serialized-bytes budget for one `collections.list` page.
 const COLLECTIONS_PAGE_BYTE_BUDGET: usize = 256 * 1024;
 
 /// The most one summary's serialized degradation-reason list may occupy in a

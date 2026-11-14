@@ -249,7 +249,6 @@ mod tests {
     /// The folder as a refusal names it.
     const SHOWN: &str = ".dohc/engine";
 
-    /// Move `dir` aside and put an empty folder at its name.
     fn swap(dir: &std::path::Path) -> std::path::PathBuf {
         let moved = dir.with_extension("moved");
         std::fs::rename(dir, &moved).unwrap();

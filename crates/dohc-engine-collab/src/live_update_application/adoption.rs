@@ -203,7 +203,6 @@ mod tests {
         fn edit_with_limit(&mut self, acknowledge: bool, max_pending_bytes: i64) {
             self.edit_by(acknowledge, max_pending_bytes, None);
         }
-        /// An edit recorded with `attribution`, or with no author.
         fn edit_by(
             &mut self,
             acknowledge: bool,

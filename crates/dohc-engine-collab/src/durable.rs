@@ -2330,7 +2330,6 @@ pub fn record_update_in_tx(
     )
 }
 
-/// The checks every ordinary local write passes before it appends.
 fn require_ordinary_local_write(tx: &Transaction<'_>, key: &DocKey) -> Result<(), CollabError> {
     crate::owner_outbox::draft::require_ordinary_write(tx, key)?;
     crate::live_update_application::require_restore_open(tx, key)?;
@@ -2719,13 +2718,9 @@ pub fn settle(
     store.write_with(faults, |tx| {
         crate::owner_outbox::require_ordinary_settlement(tx, key)?;
         crate::live_update_application::require_restore_open(tx, key)?;
-        // Persist the content and its provenance state vector as blobs. The
-        // content digest was computed once above; the settle rows below reuse
-        // it too.
         text::put_projection(tx, &content_bytes, &content_sha)?;
         put_binary_blob(tx, &sv_bytes)?;
 
-        // Durable per-doc settle counter + last-materialized content.
         let (settle_seq, last_sha): (i64, Option<String>) = tx
             .query_row(
                 "SELECT settle_seq, last_settled_sha FROM ydoc_docs \
@@ -2784,7 +2779,6 @@ pub fn settle(
                 now_ms,
             },
         )?;
-        // Advance the durable settle counter only on a real content change.
         if content_changed {
             tx.execute(
                 "UPDATE ydoc_docs SET settle_seq = ?4, last_settled_sha = ?5, updated_at_ms = ?6 \
@@ -2981,7 +2975,6 @@ pub fn close_session(
     if !local_close_is_covered(store, key, &marker, authoritative_projection)? {
         return Err(CollabError::UnsettledClose);
     }
-    // Prune the CRDT cache to nothing, keep the marker.
     store.write_with(faults, |tx| {
         crate::author_coverage::clear_native_in(tx, key)?;
         let removed_updates = tx

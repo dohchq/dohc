@@ -111,7 +111,6 @@ fn decide(head: &Ydoc, candidate: &[u8]) -> Result<(), StructuralHold> {
             next = end;
         }
     }
-    // Clocks of fresh structures this candidate safely admits.
     let mut admitted: BTreeMap<ClientID, Vec<(u32, u32)>> = BTreeMap::new();
     for at in fresh {
         let range = (index.block(at).start, index.block(at).end);

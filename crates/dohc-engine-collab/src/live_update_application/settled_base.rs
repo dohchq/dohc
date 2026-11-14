@@ -30,7 +30,6 @@ pub(super) fn is_unexplained(error: &ApplicationError) -> bool {
 /// Which of the namespace's settlements of a lineage a proof reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Settlement {
-    /// The latest.
     Latest,
     /// The latest, which must end at this cursor.
     LatestAt(i64),

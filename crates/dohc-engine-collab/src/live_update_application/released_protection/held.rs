@@ -201,7 +201,6 @@ impl Halt {
         }
     }
 
-    /// Whether the proof's reader closed.
     fn read(&self) -> bool {
         self.read.load(Ordering::Acquire)
     }
@@ -212,7 +211,6 @@ impl Halt {
             .compare_exchange(0, reason as u8, Ordering::AcqRel, Ordering::Acquire);
     }
 
-    /// Why the proof stopped, as recorded.
     fn reason(&self) -> Option<ProofStop> {
         ProofStop::of(self.reason.load(Ordering::Acquire))
     }
@@ -900,7 +898,6 @@ pub struct HeldProofJob {
     /// What it holds of its daemon's proof memory; none for a proof nothing
     /// limits.
     memory: Option<Arc<ProofMemory>>,
-    /// The largest contribution artifact it encodes.
     artifact_cap: usize,
     /// The readers its store's proofs hold open, its own among them.
     readers: Arc<OpenReaders>,
@@ -1305,7 +1302,6 @@ struct GateState {
     pause: Option<ProofStage>,
     /// Checks there to pass before the pause holds.
     skip: u64,
-    /// Proofs holding there.
     waiting: usize,
     /// Whether proofs hold just before their reader opens, as a thread
     /// descheduled there would, until resumed.

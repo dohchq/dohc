@@ -694,7 +694,6 @@ impl Integration {
         })
     }
 
-    /// How many ranges of clocks it deletes.
     fn deleted_ranges(&self) -> u64 {
         self.deletes
             .iter()

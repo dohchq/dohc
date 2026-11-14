@@ -427,7 +427,6 @@ mod tests {
             assert_eq!(receiver.recv().await.unwrap().name, "ordinary");
         }
         assert!(lock(&events.wakes.workspaces).is_empty());
-        // The two settles arrived once: the next notice is the ordinary one.
         events.emit("ordinary", json!({}));
         assert_eq!(receiver.recv().await.unwrap().name, "ordinary");
     }
@@ -477,7 +476,6 @@ mod tests {
     #[test]
     fn initial_settle_without_retained_wakes_is_an_ordinary_notice_or_nothing() {
         let events = EngineEvents::default();
-        // No subscriber: shed like every notice, and nothing is kept.
         events.emit_initial_settled("workspace");
         assert!(lock(&events.wakes.workspaces).is_empty());
         let mut rx = events.subscribe();

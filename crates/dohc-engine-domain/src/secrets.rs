@@ -321,8 +321,6 @@ impl<'a> SecretFileStore<'a> {
         SecretFileStore { store, key }
     }
 
-    // --------------------------------------------------------------- writes
-
     /// Encrypt and write `input.text` to a secret path. Content-equality against
     /// the current tip is a no-op (one moment per real change). On a real change:
     /// inserts a moment, upserts the encrypted tip, persists the ciphertext blob,
@@ -460,8 +458,6 @@ impl<'a> SecretFileStore<'a> {
     ) -> Result<Option<SecretMomentRecord>, DomainError> {
         delete_secret_file_keyless_with(self.store, input, faults, |_, _| Ok(()))
     }
-
-    // -------------------------------------------------------------- capture
 
     /// Autonomous secret capture: derives the moment id via the length-framed
     /// capture scheme (no caller-supplied ids), writes with
@@ -628,8 +624,6 @@ impl<'a> SecretFileStore<'a> {
         committed(outcome)
     }
 
-    // ----------------------------------------------------------- materialize
-
     /// The single authorized plaintext accessor. Decrypts the current tip for a
     /// secret path, returning a zeroizing [`SecretPlaintext`], or `None` when no
     /// tip exists. Fails closed (`decrypt-failed`) on tamper/wrong-key/AAD. The
@@ -752,8 +746,6 @@ impl<'a> SecretFileStore<'a> {
         })
     }
 
-    // ---------------------------------------------------------------- reads
-
     /// List secret moments, newest first, optionally scoped to a version.
     pub fn list_secret_moments(
         &self,
@@ -847,10 +839,6 @@ where
     })?;
     committed(outcome)
 }
-
-// ============================================================================
-// Free helpers.
-// ============================================================================
 
 /// The keyless secret delete: records a delete moment and removes the tip. A
 /// no-op (no moment) when there is no current tip. Free-standing because a

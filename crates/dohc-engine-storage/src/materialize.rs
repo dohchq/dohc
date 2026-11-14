@@ -20,7 +20,6 @@ use rusqlite::{Connection, OptionalExtension, Transaction};
 /// wrote newer content, which must be preserved, never clobbered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Preimage {
-    /// The target is expected to be absent (a create).
     Absent,
     /// The target is expected to still hold exactly this content hash (an
     /// overwrite of known content).

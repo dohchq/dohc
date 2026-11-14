@@ -437,7 +437,6 @@ fn list_held(
     Ok(())
 }
 
-/// The departed documents after `after`, from the first without it.
 fn departed_from<'a>(
     departed: &'a [String],
     after: Option<&str>,
@@ -2562,7 +2561,6 @@ mod tests {
         format!("{index:05}-{}", "x".repeat(294))
     }
 
-    /// The object IDs a list names, in its order.
     fn object_ids(list: &Value) -> Vec<String> {
         list.as_array()
             .expect("list")
@@ -3111,7 +3109,6 @@ mod tests {
                 .await
         }
 
-        /// A text write through `versionedText.write`.
         async fn write(&self, path: &str, text: &str) -> Result<Value, WireError> {
             static NEXT_WRITE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
             let request_id = NEXT_WRITE.fetch_add(1, Ordering::Relaxed);
@@ -3233,7 +3230,6 @@ mod tests {
                 .expect("read pull token")
         }
 
-        /// What `sync.collectionsWaiting` answers.
         async fn collections_waiting(&self) -> bool {
             let waiting = self
                 .service
@@ -3806,7 +3802,6 @@ mod tests {
         }
     }
 
-    /// Poll `future` once and report whether it finished.
     async fn poll_once<F: std::future::Future + ?Sized>(mut future: std::pin::Pin<&mut F>) -> bool {
         std::future::poll_fn(|cx| {
             std::task::Poll::Ready(std::future::Future::poll(future.as_mut(), cx).is_ready())
@@ -3814,7 +3809,6 @@ mod tests {
         .await
     }
 
-    /// Commit a pulled page's cursor.
     async fn commit_page(f: &CursorFixture, page: &Value) -> Result<Value, WireError> {
         let ctx = RequestContext::unbounded();
         let token = page["pendingCursor"]["token"]

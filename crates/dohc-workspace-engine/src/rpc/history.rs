@@ -168,7 +168,6 @@ fn moment_wire_json(moment: &MomentRecord, bodies: MomentBodies) -> Value {
         // dropped and never trusted raw.
         "authors": moment.author_json.as_deref().map(parsed_moment_authors),
         "syncRecordOnly": moment.sync_record_only,
-        // Hydrated payload text (momentSelectSql parity).
         "afterText": after_text,
         "afterByteLength": moment.after_byte_length,
         "afterInbandLimitBytes": after_inband_limit_bytes,

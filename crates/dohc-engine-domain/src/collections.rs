@@ -1879,8 +1879,6 @@ fn load_frontmatter_yaml(source: &str) -> Option<LoadedFrontmatterYaml> {
     let mut root_keys: Option<Vec<(usize, usize)>> = Some(Vec::new());
     for event in saphyr_parser::Parser::new_from_str(source) {
         let (event, span) = event.ok()?;
-        // Whether a node this event starts is a mapping key, and whether it is
-        // a key of the root mapping.
         let is_key = frames
             .last()
             .is_some_and(|frame| frame.mapping && frame.key.is_none());
@@ -6883,7 +6881,6 @@ mod attribution_tests {
             json!({ "agentId": "codex", "onBehalfOf": "local", "depth": 2 })
         );
         assert_eq!(declared.attribution().agent_run_id, None);
-        // An author written before agent runs were recorded names none.
         let unnamed = ChangeAttribution {
             agent_run_id: None,
             ..attribution
@@ -7298,7 +7295,6 @@ mod tests {
                     .expect("conflict row");
                 let mut values = Vec::new();
                 for field in FIELDS {
-                    // A quarter of fields are missing entirely.
                     if rng.pick(4) == 0 {
                         continue;
                     }

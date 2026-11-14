@@ -548,7 +548,6 @@ fn reserved_native_in(conn: &Connection, key: &DocKey) -> Result<Authors, Collab
     Ok(authors)
 }
 
-/// Adds one author per grouped identity row.
 fn union_identities(
     mut rows: rusqlite::Rows<'_>,
     authors: &mut Authors,
