@@ -76,28 +76,27 @@ export async function reconcileOwnerLiveStops(options: {
                 ));
           else await options.client.ownerYDocStopRetired(request(), stop.document, options.signal);
         } catch (error) {
-          // Let discovery install a restore successor before the next Stop attempt.
+          // Still waiting: a held save applies, or discovery installs a restore
+          // successor, before the next pass retries. The Stop has not finished.
           if (
-            !(
-              error instanceof EngineRequestError &&
-              ["owner-stop-conflict", "owner-stop-restore-pending"].includes(error.message)
-            )
-          ) {
-            // A release that committed ended the Stop even when it then could not write
-            // the file, as for one deleted outside dohc. One that did not stays owed.
-            const owed = (await options.client.ownerYDocStopList(request(), options.signal)).some(
-              (row) =>
-                row.retirementOwed &&
-                row.document.objectId === stop.document.objectId &&
-                row.document.mainVersionId === stop.document.mainVersionId,
-            );
-            if (owed) throw error;
-            console.error(
-              "[desktop] owner live release stopped but could not write the file:",
-              stop.document.objectId,
-              error,
-            );
-          }
+            error instanceof EngineRequestError &&
+            ["owner-stop-conflict", "owner-stop-restore-pending"].includes(error.message)
+          )
+            return;
+          // A release that committed ended the Stop even when it then could not write
+          // the file, as for one deleted outside dohc. One that did not stays owed.
+          const owed = (await options.client.ownerYDocStopList(request(), options.signal)).some(
+            (row) =>
+              row.retirementOwed &&
+              row.document.objectId === stop.document.objectId &&
+              row.document.mainVersionId === stop.document.mainVersionId,
+          );
+          if (owed) throw error;
+          console.error(
+            "[desktop] owner live release stopped but could not write the file:",
+            stop.document.objectId,
+            error,
+          );
         }
         options.onComplete?.(stop);
         options.assertCurrent();
