@@ -672,6 +672,85 @@ fn already_admitted_remote_authors_never_wedge_coverage_readers() {
         .expect("known authors and readers stay usable");
 }
 
+#[test]
+fn largest_serialized_authors_fit_the_entry_bound() {
+    use dohc_engine_collab::live_update_application::LiveAuthorEntry;
+    use dohc_engine_domain::collections::MAX_AUTOMATION_RUN_NAME_BYTES;
+    use dohc_engine_domain::{
+        moment_author_json, AutomationRunAttribution, SharedChangeAuthor, MAX_AUTHOR_FIELD_BYTES,
+        MAX_CHANGE_ATTRIBUTION_DEPTH,
+    };
+
+    let check = |json: String| {
+        let entries: Vec<serde_json::Value> = serde_json::from_str(&json).expect("author list");
+        assert_eq!(entries.len(), 1);
+        let bytes = entries[0].to_string().len();
+        assert!(
+            bytes <= author_coverage::MAX_AUTHOR_ENTRY_BYTES,
+            "{} author uses {bytes} bytes, exceeding MAX_AUTHOR_ENTRY_BYTES ({})",
+            entries[0]["kind"],
+            author_coverage::MAX_AUTHOR_ENTRY_BYTES,
+        );
+    };
+    for escaped in ['"', '\\'] {
+        let field = escaped.to_string().repeat(MAX_AUTHOR_FIELD_BYTES);
+        for actor_kind in [
+            ChangeActorKind::Human,
+            ChangeActorKind::Agent,
+            ChangeActorKind::Automation,
+        ] {
+            let attribution = ChangeAttribution {
+                actor_kind,
+                on_behalf_of: Some(field.clone()),
+                depth: MAX_CHANGE_ATTRIBUTION_DEPTH,
+                run: (actor_kind == ChangeActorKind::Automation).then(|| {
+                    AutomationRunAttribution {
+                        claim_id: field.clone(),
+                        automation_name: escaped.to_string().repeat(MAX_AUTOMATION_RUN_NAME_BYTES),
+                    }
+                }),
+                agent_run_id: (actor_kind == ChangeActorKind::Agent).then(|| field.clone()),
+            };
+            attribution.validate().expect("bounded native attribution");
+            check(moment_author_json(Some(&field), Some(&attribution)).expect("native author"));
+        }
+        for author in [
+            LiveAuthorEntry::Unattributed {},
+            LiveAuthorEntry::Human {
+                human_id: field.clone(),
+                human_name: field.clone(),
+            },
+            LiveAuthorEntry::Link {
+                public_principal_id: field.clone(),
+                label: field.clone(),
+            },
+            LiveAuthorEntry::Agent {
+                agent_id: field.clone(),
+                agent_name: Some(field.clone()),
+                on_behalf_of: Some(field.clone()),
+                depth: Some(u8::try_from(MAX_CHANGE_ATTRIBUTION_DEPTH).expect("wire depth")),
+            },
+        ] {
+            author.validate().expect("bounded live author");
+            check(serde_json::to_string(&[author]).expect("live author"));
+        }
+        for author in [
+            SharedChangeAuthor::Named {
+                user_id: field.clone(),
+                grant_id: field.clone(),
+                grant_generation: 9_007_199_254_740_991,
+            },
+            SharedChangeAuthor::Link {
+                grant_id: field.clone(),
+                principal_id: field.clone(),
+                grant_generation: 9_007_199_254_740_991,
+            },
+        ] {
+            check(author_coverage::shared_json(&author).expect("bounded shared author"));
+        }
+    }
+}
+
 /// A declared agent is the largest live entry: an id, a name and a principal,
 /// each up to 512 bytes that escape to twice their size, and its depth. The
 /// host admits it at 3,143 bytes, and the interval admits it too. The

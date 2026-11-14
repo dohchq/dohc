@@ -98,6 +98,7 @@ use sha2::{Digest, Sha256};
 /// UTF-8 bytes. Mirrors the TS engine's 10 MB text cap
 /// (`versions-write-text-file`).
 pub const MAX_TEXT_BYTES: usize = 10 * 1024 * 1024;
+const _: () = assert!(MAX_TEXT_BYTES as u64 == dohc_engine_files::MAX_CAPTURE_TEXT_BYTES);
 pub const MAX_METADATA_FIELD_BYTES: usize = 16 * 1024;
 pub const MAX_AUTHOR_FIELD_BYTES: usize = MAX_IDENTIFIER_BYTES;
 // Without control characters, quotes and backslashes take at most 2 bytes.
@@ -106,6 +107,7 @@ pub const MAX_AUTHOR_FIELD_BYTES: usize = MAX_IDENTIFIER_BYTES;
 // bytes. A declared agent's name takes one byte less. The largest two-field
 // entries, an 80-byte Edit link at the largest grant generation and a 66-byte
 // automation, take 2,128 and 2,114 bytes.
+// `largest_serialized_authors_fit_the_entry_bound` checks these serialized forms.
 pub const MAX_AUTHOR_ENTRY_BYTES: usize = larger(
     larger(
         r#"{"agentId":"","agentRunId":"","depth":64,"kind":"agent","onBehalfOf":""}"#.len(),
