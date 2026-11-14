@@ -422,7 +422,9 @@ const task = (doc: Y.Doc) => (body(doc).get(3) as Y.XmlElement).get(0) as Y.XmlE
 const LISTED =
   "***\n\n## Kept edits that aren’t in this copy\n\nThese edits were kept on the computer that made them. A change saved at the same moment removed or replaced the place they were made, so the note above doesn’t have them.\n\n";
 
-it.each([
+type Edit = (doc: Y.Doc) => void;
+
+it.each<[string, Edit | readonly Edit[], Edit, string, string]>([
   [
     "text typed into a paragraph someone else deleted",
     (doc: Y.Doc) => paragraph(doc).insert("Start here.".length, " Typed *sentence* [1]."),
@@ -482,7 +484,7 @@ it.each([
     "# Plan\n\nStart here.\n\nKeep this.\n",
     "1 more kept edit, such as an image, can’t be shown as text.\n",
   ],
-] as const)("lists %s at the end of the readable copy", async (_case, mine, theirs, note, listed) => {
+])("lists %s at the end of the readable copy", async (_case, mine, theirs, note, listed) => {
   const { root, writes } = await workspace();
   const saved = await saveLiveRecoveryCopy(
     liveRecoveryPackage(conflict(mine, theirs), source),

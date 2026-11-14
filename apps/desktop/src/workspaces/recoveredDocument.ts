@@ -55,7 +55,12 @@ function plainText(type: Y.AbstractType<unknown>): string {
 }
 
 /** The parts of `from`..`to` on `client` that `deletes` does not name. */
-function notDeleted(deletes: Y.DeleteSet, client: number, from: number, to: number): Span[] {
+function notDeleted(
+  deletes: ReturnType<typeof Y.mergeDeleteSets>,
+  client: number,
+  from: number,
+  to: number,
+): Span[] {
   const spans: Span[] = [];
   let cursor = from;
   for (const { clock, len } of deletes.clients.get(client) ?? []) {
