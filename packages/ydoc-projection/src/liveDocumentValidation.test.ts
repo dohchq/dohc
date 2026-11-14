@@ -446,6 +446,14 @@ describe("public Markdown schema", () => {
         (doc.getXmlFragment("body").get(0) as Y.XmlElement).insert(1, [hidden]);
       }),
     );
+    // The Markdown file would number "alpha" 2.
+    refused(
+      encode("1. alpha\n2. bravo", (doc) =>
+        (doc.getXmlFragment("body").get(0) as Y.XmlElement).insert(0, [
+          new Y.XmlElement("listItem"),
+        ]),
+      ),
+    );
     // An empty callout still has a title the Markdown file would keep.
     refused(
       encode("- [ ] alpha\n\nbravo", (doc) => {

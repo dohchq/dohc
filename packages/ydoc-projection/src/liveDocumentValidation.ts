@@ -851,6 +851,8 @@ function bodyFingerprint(
   const permitsText =
     body instanceof Y.XmlElement &&
     schema.nodes[body.nodeName]?.contentMatch.matchType(schema.nodes.text) != null;
+  // The engine's Markdown writer still counts an empty item when it numbers a list.
+  const numbered = body instanceof Y.XmlElement && body.nodeName === "orderedList";
   const children: XmlFingerprint[] = [];
   for (const child of body.toArray()) {
     const fingerprint = xmlFingerprint(child, depth, budget);
@@ -858,6 +860,7 @@ function bodyFingerprint(
     // A reading leaves out an empty shell, so the comparison does too. A shell carrying an
     // attribute the schema doesn't know would hide it, so that one is still compared and refused.
     if (
+      !numbered &&
       fingerprint.kind === "element" &&
       fingerprint.children.length === 0 &&
       child instanceof Y.XmlElement &&
