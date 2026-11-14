@@ -77,3 +77,12 @@ export function formatChatTime(createdAtMs: number): { label: string; iso: strin
     iso: createdAt.toISOString(),
   };
 }
+
+// How long something took or has lasted: "4s", "1m 20s", "2h 5m".
+export function formatRunDuration(ms: number): string {
+  const seconds = Math.max(1, Math.round(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return seconds % 60 ? `${minutes}m ${seconds % 60}s` : `${minutes}m`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}

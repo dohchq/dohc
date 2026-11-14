@@ -28,6 +28,7 @@ import type { AccessContext } from "./accessReason";
 import { ChatComposer, ChatMessageList, type ChatMessageListHandle } from "./chatMessages";
 import { useReactions, type ReactionView } from "./reactionStore";
 import { CopyMessageLink } from "./messageLinks";
+import { AgentThreadLines } from "./AgentThreadLines";
 
 // The composer's replacement for every received file share.
 // Same words main throws (SharedFileReadOnlyError) and the same shape the
@@ -494,6 +495,8 @@ export function LinkedChatsPanel(props: {
     [activeThread, props.onError, reactions, threadReactions.viewerAuthorId],
   );
 
+  const activeThreadId = activeThread?.id ?? null;
+  const activeChatThreadIds = useMemo(() => [activeThreadId], [activeThreadId]);
   const reactionControls = useMemo(
     () => ({
       reactions: threadReactions.reactions,
@@ -540,6 +543,11 @@ export function LinkedChatsPanel(props: {
           onOpenPath={props.onOpenPath}
           reactionControls={reactionControls}
           rowActions={copyLinkAction}
+        />
+        <AgentThreadLines
+          workspaceId={workspaceId}
+          chatThreadIds={activeChatThreadIds}
+          className="shrink-0 px-3 py-1"
         />
         {readOnly ? (
           <ReadOnlyNotice />

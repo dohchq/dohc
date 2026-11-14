@@ -7,6 +7,7 @@ import { withClosedEngineDocSession } from "./collab/engineDocLease";
 import { CreationPartialError, creationPartialNotice } from "@dohc/cli/creation";
 import { shareSenderLabel } from "@dohc/security-contract/share-labels";
 import { AgentSettingsProvider } from "./workbench/AgentBadge";
+import { AgentThreadLinesProvider } from "./workbench/AgentThreadLines";
 import { AgentColorContext, saveAgentColor } from "./workbench/AgentColorPicker";
 import { EngineMomentDiffPage } from "./workbench/EngineMomentDiffPage";
 import { StopAndRestoreDialog, useStopAndRestore } from "./StopAndRestoreDialog";
@@ -7895,7 +7896,7 @@ export function DesktopWorkspaceShell(props: {
     ? undefined
     : (version: { id: string; name: string }) =>
         setShareTarget({ kind: "version", versionId: version.id, versionName: version.name });
-  return (
+  const shell = (
     <WorkspaceSessionProvider workspaceId={workspaceId}>
       <AgentSettingsProvider settings={props.userSettings?.settings ?? null}>
         <AgentColorContext.Provider value={setAgentColor}>
@@ -9894,5 +9895,16 @@ export function DesktopWorkspaceShell(props: {
         </AgentColorContext.Provider>
       </AgentSettingsProvider>
     </WorkspaceSessionProvider>
+  );
+  return (
+    <AgentThreadLinesProvider
+      workspaceId={workspaceId}
+      ready={workspaceIsReady}
+      settings={props.userSettings?.settings ?? null}
+      report={reportShellFailure}
+      clear={clearIdentity}
+    >
+      {shell}
+    </AgentThreadLinesProvider>
   );
 }
