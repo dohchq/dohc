@@ -668,6 +668,15 @@ it("shows the account owner beside an agent's name", async () => {
   expect(container.querySelector(".chat-owner")?.textContent).toBe("Alice's agent");
 });
 
+it("names an agent with no name of its own once, by whose it is", async () => {
+  server({history: () => ({shareId, channelWireId, nextCursor: 10, olderCursor: null,
+    messages: [{...message(2, "Second", "Agent"), authorKind: "agent", authorOwnerDisplayName: "Alice"}]})});
+  await render(); await opened();
+  expect(container.querySelector(".chat-meta .chat-agent-mark")?.getAttribute("aria-label")).toBe("Agent");
+  expect(container.querySelector(".chat-author")?.textContent).toBe("Alice's agent");
+  expect(container.querySelector(".chat-owner")).toBeNull();
+});
+
 it("marks a link holder's post as a link holder, even under an account's name", async () => {
   server({
     history: () => ({

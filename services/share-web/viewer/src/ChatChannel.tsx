@@ -113,6 +113,9 @@ function ChatMessage({
   // A safe integer can lie outside the Date range; such a message shows without a time.
   const sent = new Date(message.createdAtMs),
     dated = !Number.isNaN(sent.getTime());
+  // "Agent" is dohc's word for an agent that gave no name. Such an agent goes by whose it is, as on the desktop.
+  const owner = agent ? message.authorOwnerDisplayName : null,
+    unnamed = owner !== null && message.authorDisplayName === "Agent";
   return (
     <li className="chat-message" data-seq={message.relaySeq} data-author-kind={message.authorKind}>
       <p className="chat-meta">
@@ -123,11 +126,11 @@ function ChatMessage({
             aria-label={message.authorKind === "automation" ? "Automation" : "Agent"}
           />
         )}
-        <span className="chat-author">{message.authorDisplayName}</span>
+        <span className="chat-author">
+          {unnamed ? `${owner}'s agent` : message.authorDisplayName}
+        </span>
         {message.authorKind === "link" && <LinkHolderMark />}
-        {agent && message.authorOwnerDisplayName && (
-          <span className="chat-owner">{message.authorOwnerDisplayName}'s agent</span>
-        )}
+        {owner && !unnamed && <span className="chat-owner">{owner}'s agent</span>}
         {dated && <time dateTime={sent.toISOString()}>{sentAt(sent)}</time>}
       </p>
       {html === null ? (
