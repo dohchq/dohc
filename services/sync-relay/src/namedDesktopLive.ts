@@ -1,6 +1,7 @@
 import { readBoundedJson } from "@dohc/service-http";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
+import { LIVE_TICKET_LIFETIME_MS } from "@dohc/live-session-contract/live-ticket";
 import {
   parseNamedLiveBrowserLimits,
   type NamedLiveBrowserLimits,
@@ -46,9 +47,13 @@ export function createNamedDesktopLive(options: {
       "Frame listener capacity cannot cover desktop admission and readiness requests.",
     );
   }
+  // A desktop session only opens its socket, and the desktop asks again before every connect,
+  // so it lasts as long as its ticket and ends once the socket opens. It has no per-account
+  // limit: a note that keeps failing to connect would push out another note's slow connect.
   const sessions = createNamedLiveBrowserSessions({
     ...options,
     ...limits,
+    retentionMs: LIVE_TICKET_LIFETIME_MS,
     authentication: "bearer",
   });
   const refuse = () =>
@@ -291,5 +296,12 @@ export function createNamedDesktopLive(options: {
       signal.removeEventListener("abort", cancel);
     }
   }
-  return { handle, resolve: sessions.resolve.bind(sessions) };
+  return {
+    handle,
+    async resolve(request: Request, discriminator: string) {
+      const context = await sessions.resolve(request, discriminator);
+      if (context) sessions.remove(discriminator);
+      return context;
+    },
+  };
 }
