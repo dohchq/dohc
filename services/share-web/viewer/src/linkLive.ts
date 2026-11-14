@@ -91,8 +91,11 @@ export async function openLinkDocument(discriminator: string, path: string, sign
   });
   const session = transport.select({ objectId });
   // The provider takes the state only before it asks the host for one, so a late answer is dropped.
-  void state.then((value) => {
-    if (value?.objectId === objectId) session.seed(value.bytes, value.through);
-  });
+  void state
+    .then((value) => {
+      if (value?.objectId === objectId) session.seed(value.bytes, value.through);
+    })
+    // An early state the page cannot apply leaves it to open as before.
+    .catch(() => {});
   return session;
 }

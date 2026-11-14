@@ -1600,7 +1600,8 @@ export function App() {
         otherWay={ready ? <OpenInDohc key={ready.session} session={ready.session} /> : undefined}
       />
     );
-  // The read-only text stays while live editing opens or can't start. A Collection's file shows only its editor.
+  // The read-only text stays while live editing opens or cannot start, until the editor has the server's text: its
+  // early state or a live sync. A Collection's file shows only its editor.
   const reads =
     selected !== undefined && ready !== null && !(editing && (editingCollectionFile || editorOpen));
   const appToOpen = new URLSearchParams(location.search).get("app");
