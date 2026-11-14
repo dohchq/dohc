@@ -4,6 +4,7 @@ const linkLivePaths = new Set([
   "/sync/live/link-tickets",
   "/sync/live/link-session",
   "/sync/live/link-document",
+  "/sync/live/link-document-state",
 ]);
 
 export function isLinkLivePath(pathname: string): boolean {

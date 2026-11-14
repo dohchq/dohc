@@ -249,6 +249,7 @@ export function createLinkLiveClient(options: {
       if (response.redirected || response.headers.has("location")) return null;
       const type = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
       // A note its host doesn't hold awake has no early state. A note it holds comes as its socket's opening sync.
+      // A state larger than the page takes is no state: the page opens the note as it would without one.
       if (state && response.status === 204) return { value: null, setCookie: credential.setCookie };
       if (state && response.status === 200 && type === "application/octet-stream")
         return {
@@ -256,7 +257,7 @@ export function createLinkLiveClient(options: {
             response,
             browserLimits.provider.frames.receive.maxSyncBytes,
             signal,
-          ),
+          ).catch(() => null),
           headers: response.headers,
           setCookie: credential.setCookie,
         };
@@ -274,8 +275,7 @@ export function createLinkLiveClient(options: {
           };
         return response.status >= 500 ? "unavailable" : null;
       }
-      if (state) return null;
-      return { value, setCookie: credential.setCookie };
+      return { value: state ? null : value, setCookie: credential.setCookie };
     } finally {
       await response.body?.cancel().catch(() => {});
     }
@@ -370,10 +370,16 @@ export function createLinkLiveClient(options: {
       "cache-control": "private, no-store",
       ...(result.setCookie ? { "set-cookie": result.setCookie } : {}),
     };
-    if (!result.headers) return new Response(null, { status: 204, headers });
-    const objectId = parseLiveUpdateIdentifier(result.headers.get("x-dohc-live-object-id")),
-      through = result.headers.get("x-dohc-live-applied-through") ?? "";
-    if (!/^\d+$/.test(through) || !Number.isSafeInteger(Number(through))) return refused();
+    // Anything but a whole state is no state, so a page never retries for one.
+    const objectId = result.headers?.get("x-dohc-live-object-id") ?? "",
+      through = result.headers?.get("x-dohc-live-applied-through") ?? "";
+    if (
+      !result.value ||
+      !/^\d+$/.test(through) ||
+      !Number.isSafeInteger(Number(through)) ||
+      !isObjectId(objectId)
+    )
+      return new Response(null, { status: 204, headers });
     signal.throwIfAborted();
     return new Response(Buffer.from(result.value as Uint8Array), {
       headers: {

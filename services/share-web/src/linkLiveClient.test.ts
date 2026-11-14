@@ -427,8 +427,8 @@ it("passes a note's early state through with its object and cursor, and no state
   expect([full.status, await full.json()]).toEqual([LINK_REFUSALS.link_full.status, body]);
 });
 // Proves: share-web forwards no state larger than the browser's opening sync, none without its object or cursor, and
-// no JSON answer as state.
-it("forwards no early state larger than the browser takes or missing its object or cursor", async () => {
+// no JSON answer as state. Each is no state, so a viewer's page opens the note at once instead of trying again.
+it("answers no early state for one larger than the browser takes or missing its object or cursor", async () => {
   for (const relay of [
     async () => stateAnswer(new Uint8Array(browserLimits.provider.frames.receive.maxSyncBytes + 1)),
     async () => stateAnswer(Uint8Array.from([1]), { "x-dohc-live-object-id": "object-a" }),
@@ -440,9 +440,11 @@ it("forwards no early state larger than the browser takes or missing its object 
     async () => stateAnswer(Uint8Array.from([1]), { "x-dohc-live-applied-through": "5" }),
     async () => Response.json({ objectId: "object-a" }),
   ])
-    expect(await answered(await fixture(vi.fn(relay)).client.handle(stateRequest()))).toEqual(
-      opaque,
-    );
+    expect(
+      await answered(
+        await fixture(vi.fn(relay), { holdsSession: true }).client.handle(stateRequest()),
+      ),
+    ).toEqual([204, ""]);
   const fits = await fixture(
     vi.fn(async () =>
       stateAnswer(new Uint8Array(browserLimits.provider.frames.receive.maxSyncBytes)),
