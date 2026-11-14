@@ -45,7 +45,10 @@ export interface DurableFiles {
 
 /** `locked`: an iOS phone that hasn't been unlocked since it started keeps the records closed. Try again after. */
 export class DurableFileError extends Error {
-  constructor(readonly kind: "invalid" | "too-large" | "unreadable" | "locked" | "unsynced" | "failed", message: string) {
+  constructor(
+    readonly kind: "invalid" | "too-large" | "unreadable" | "locked" | "unsynced" | "failed",
+    message: string,
+  ) {
     super(message);
     this.name = "DurableFileError";
   }
@@ -64,7 +67,8 @@ export function createDurableFiles(native: NativeDurableFile): DurableFiles {
     try {
       return await run();
     } catch (error) {
-      const code = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
+      const code =
+        typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
       const message = error instanceof Error ? error.message : String(error);
       throw new DurableFileError((typeof code === "string" && KINDS[code]) || "failed", message);
     }
@@ -87,19 +91,25 @@ export function createDurableFiles(native: NativeDurableFile): DurableFiles {
     },
     recover: () => call(() => native.recover()),
     async removeLeftover(fileName) {
-      if (!TEMPORARY_NAME.test(fileName)) throw new DurableFileError("invalid", "Only a leftover temporary file can be removed this way.");
+      if (!TEMPORARY_NAME.test(fileName))
+        throw new DurableFileError(
+          "invalid",
+          "Only a leftover temporary file can be removed this way.",
+        );
       return call(() => native.removeLeftover(fileName));
     },
   };
 }
 
 function checkName(name: string) {
-  if (!RECORD_NAME.test(name)) throw new DurableFileError("invalid", "The record name isn't valid.");
+  if (!RECORD_NAME.test(name))
+    throw new DurableFileError("invalid", "The record name isn't valid.");
 }
 
 /** Refuses text over the bound in UTF-8, and text with a lone surrogate, which UTF-8 can't hold. */
 function checkText(text: string) {
-  const tooLarge = () => new DurableFileError("too-large", `The record is larger than ${RECORD_MAX_BYTES} bytes.`);
+  const tooLarge = () =>
+    new DurableFileError("too-large", `The record is larger than ${RECORD_MAX_BYTES} bytes.`);
   // Each UTF-16 unit takes at least one byte.
   if (text.length > RECORD_MAX_BYTES) throw tooLarge();
   let bytes = 0;
@@ -110,7 +120,8 @@ function checkText(text: string) {
     else if (code < 0xd800 || code > 0xdfff) bytes += 3;
     else {
       const next = text.charCodeAt(i + 1);
-      if (code > 0xdbff || !(next >= 0xdc00 && next <= 0xdfff)) throw new DurableFileError("invalid", "The record's text isn't valid Unicode.");
+      if (code > 0xdbff || !(next >= 0xdc00 && next <= 0xdfff))
+        throw new DurableFileError("invalid", "The record's text isn't valid Unicode.");
       bytes += 4;
       i += 1;
     }
