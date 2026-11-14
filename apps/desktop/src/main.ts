@@ -607,6 +607,7 @@ import { createAgentThreads, forwardProblemWords } from "./agentThreads/agentThr
 import { cliForThread } from "./agentThreads/forwardedText";
 import { createForwardLedger } from "./agentThreads/forwardLedger";
 import { T3CodeError } from "./agentThreads/t3Code";
+import { createAgentThreadChanges } from "./agentThreads/threadChanges";
 import { createT3CodeCodeMaker } from "./agentThreads/t3CodeCli";
 import { createT3CodeConnection, type T3CodeConnection } from "./agentThreads/t3CodeConnection";
 import { createT3CodeSignInStore, encryptsWithSystemKey } from "./agentThreads/t3CodeSignInStore";
@@ -10767,15 +10768,14 @@ function registerIpcHandlers(): void {
 
   // One wait for the person's answer in T3 Code at a time.
   let allowingT3Code: AbortController | null = null;
-  // One change at a time to the thread an agent has and the workspaces it
-  // forwards from. Each reads the agent as the one before saved it, so a
-  // thread is never told about workspaces it will not get.
-  let agentThreadChanged: Promise<unknown> = Promise.resolve();
-  const oneAgentThreadChange = <T>(work: () => Promise<T>): Promise<T> => {
-    const done = agentThreadChanged.then(work, work);
-    agentThreadChanged = done.catch(() => undefined);
-    return done;
-  };
+  const agentThreadChanges = createAgentThreadChanges({
+    agents: async () => listAgents((await readCachedUserSettingsFile(stateDir())).settings),
+    changeAgent: settingsIpc.changeAgent,
+    threads: {
+      serve: (workspaceId, agent, save) => agentThreads().serve(workspaceId, agent, save),
+      change: (workspaceId, agent) => agentThreads().change(workspaceId, agent),
+    },
+  });
   const t3CodeConnectionState = async () => ({
     canKeep: t3Code().canKeep(),
     signedInUntilMs: await t3Code().signedInUntil(),
@@ -10866,66 +10866,21 @@ function registerIpcHandlers(): void {
         throw error;
       }
     },
+    // Each change is refused once the window shows another workspace, so the
+    // answer the window gets then, that nothing changed, is true.
     changeAgentThread: ({ workspaceId, agentId, threadId }, { operation }) =>
-      oneAgentThreadChange(async () => {
-        operation.assertCurrent();
-        const agent = await agentWithThreadFor(workspaceId, agentId);
-        const left = agent.thread.id;
-        if (left === threadId)
-          throw new Error(`${agent.name} is already connected to this thread.`);
-        // One thread is one agent (ADR 0016).
-        const { agents } = (await readCachedUserSettingsFile(stateDir())).settings;
-        const connected = Object.values(agents).find((other) => other.thread?.id === threadId);
-        if (connected) throw new Error(`${connected.name} is already connected to this thread.`);
-        // The introduction says which workspaces the thread gets, from the
-        // agent as it is saved now. No workspace is turned on or off for it
-        // until this change is saved.
-        await agentThreads().change(workspaceId, {
-          ...agent,
-          thread: { ...agent.thread, id: threadId },
-        });
-        await settingsIpc.changeAgent(agentId, (current) => {
-          operation.assertCurrent();
-          if (current.thread?.id !== left)
-            throw new Error(`${agent.name} was connected to another thread meanwhile. Try again.`);
-          return { ...current, thread: { ...current.thread, id: threadId } };
-        });
+      agentThreadChanges.changeThread({
+        workspaceId,
+        agentId,
+        threadId,
+        assertCurrent: operation.assertCurrent,
       }),
-    // Each save below is refused once the window shows another workspace, so
-    // the answer the window gets then, that nothing changed, is true.
     setAgentThreadWorkspace: ({ workspaceId, agentId, on }, { operation }) =>
-      oneAgentThreadChange(async () => {
-        // The call may have waited behind another change.
-        operation.assertCurrent();
-        if (!on) {
-          await settingsIpc.changeAgent(agentId, (agent) => {
-            operation.assertCurrent();
-            return agent.workspaces?.includes(workspaceId)
-              ? { ...agent, workspaces: agent.workspaces.filter((id) => id !== workspaceId) }
-              : agent;
-          });
-          return;
-        }
-        const { settings } = await readCachedUserSettingsFile(stateDir());
-        const agent = listAgents(settings).find(({ id }) => id === agentId);
-        if (!agent?.thread) throw new Error("This agent has no thread.");
-        // Already on, as when another window turned it on first: nothing is
-        // set aside a second time.
-        if (agent.workspaces?.includes(workspaceId)) return;
-        const told = agent.thread.id;
-        await agentThreads().serve(workspaceId, { ...agent, thread: agent.thread }, async () => {
-          await settingsIpc.changeAgent(agentId, (current) => {
-            operation.assertCurrent();
-            // The thread dohc told is the one that gets the workspace.
-            if (current.thread?.id !== told)
-              throw new Error(
-                `${agent.name} was connected to another thread while dohc told its thread about this workspace. Try again.`,
-              );
-            return current.workspaces?.includes(workspaceId)
-              ? current
-              : { ...current, workspaces: [...(current.workspaces ?? []), workspaceId] };
-          });
-        });
+      agentThreadChanges.setWorkspace({
+        workspaceId,
+        agentId,
+        on,
+        assertCurrent: operation.assertCurrent,
       }),
     readyAgentThread: async ({ workspaceId, agentId, name, threadId }) => {
       const { agents } = (await readCachedUserSettingsFile(stateDir())).settings;
