@@ -100,16 +100,11 @@ export function createThreadStates(dependencies: ThreadStatesDependencies) {
     } catch {}
   };
 
-  // The ledger's reads and writes, in the order they were asked for. Rows
-  // forwarded before the saved ones were read stay, newest last.
+  // The ledger's reads and writes, in the order they were asked for. A message
+  // forwarded before the saved rows were read is taken in after them, so it
+  // meets the row it may already have.
   let writes: Promise<void> = ledger.list().then((saved) => {
-    const live = [...rows.values()];
-    rows.clear();
     for (const row of saved.slice(-maxRows)) rows.set(keyOf(row), row);
-    for (const row of live) {
-      rows.delete(keyOf(row));
-      rows.set(keyOf(row), row);
-    }
   }, failed);
   const loaded = writes;
   const write = (work: () => Promise<void>): Promise<void> => {
@@ -171,8 +166,9 @@ export function createThreadStates(dependencies: ThreadStatesDependencies) {
     if (since.length === 0)
       return { phase: nowMs() - sentAtMs < UNLISTED_MS ? "in-line" : "ended" };
     // Newer work pushed it off the list. The tool takes work in order, so it
-    // is over once any of that newer work has begun.
-    return { phase: since.some((entry) => entry.state !== "in-line") ? "ended" : "in-line" };
+    // is over once any of that newer work has started. Newer work that was
+    // cancelled while it waited never started, and shows nothing.
+    return { phase: since.some((entry) => entry.startedAtMs !== null) ? "ended" : "in-line" };
   }
 
   /** Sets the row's line. A state that goes on keeps the time it began. */
@@ -209,7 +205,9 @@ export function createThreadStates(dependencies: ThreadStatesDependencies) {
       // has had since, which the reminder's work is part of if it went.
       const since = thread.runs.filter((entry) => entry.requestedAtMs >= reminder.atMs);
       if (since.some((entry) => entry.state === "working") || thread.working)
-        return show(row, "working", reminder.atMs, reminder.atMs);
+        return thread.waitingOnPerson
+          ? show(row, "waiting-in-tool", reminder.atMs, nowMs())
+          : show(row, "working", reminder.atMs, reminder.atMs);
       if (since.some((entry) => entry.state === "in-line"))
         return show(row, "in-line", reminder.atMs, reminder.atMs);
       return show(row, "silent", reminder.atMs, nowMs());
@@ -235,7 +233,13 @@ export function createThreadStates(dependencies: ThreadStatesDependencies) {
     }
     const recorded: ForwardRow = { ...row, reminder: { state: "recorded", atMs: nowMs() } };
     // Recorded, and saved, before it goes.
-    await replace(row, recorded);
+    try {
+      await replace(row, recorded);
+    } catch (error) {
+      // Not saved, so not sent. The row is as it was, and the next look tries again.
+      if (isCurrent(recorded)) rows.set(keyOf(row), row);
+      throw error;
+    }
     if (!isCurrent(recorded)) return;
     const sent = await dependencies.tool.forward({
       threadId: row.toolThreadId,
@@ -353,27 +357,30 @@ export function createThreadStates(dependencies: ThreadStatesDependencies) {
      * one for that agent and chat thread. A message reported again, as when
      * it could not be marked read and went a second time, keeps its row, so
      * a reminder already recorded for it is not sent again. Nothing here
-     * waits: the row is saved behind the caller.
+     * waits: the row is taken in, and saved, behind the caller, once the
+     * saved rows are read.
      */
     forwarded(row: Omit<ForwardRow, "reminder">): void {
-      if (stopped) return;
-      const key = keyOf(row);
-      if (rows.get(key)?.messageId === row.messageId) return;
-      const next: ForwardRow = { ...row, reminder: { state: "none" } };
-      const shown = lines.delete(key);
-      read.delete(key);
-      rows.delete(key);
-      rows.set(key, next);
-      void write(() => ledger.put(next)).catch(() => undefined);
-      // More rows than the ledger keeps: the oldest give way.
-      const gone = new Set<string>(shown ? [row.workspaceId] : []);
-      for (const oldest of rows.values()) {
-        if (rows.size <= maxRows) break;
-        if (drop(oldest)) gone.add(oldest.workspaceId);
-      }
-      for (const workspaceId of gone) changedNow(workspaceId);
-      wantsPoll = true;
-      void run();
+      void loaded.then(() => {
+        if (stopped) return;
+        const key = keyOf(row);
+        if (rows.get(key)?.messageId === row.messageId) return;
+        const next: ForwardRow = { ...row, reminder: { state: "none" } };
+        const shown = lines.delete(key);
+        read.delete(key);
+        rows.delete(key);
+        rows.set(key, next);
+        void write(() => ledger.put(next)).catch(() => undefined);
+        // More rows than the ledger keeps: the oldest give way.
+        const gone = new Set<string>(shown ? [row.workspaceId] : []);
+        for (const oldest of rows.values()) {
+          if (rows.size <= maxRows) break;
+          if (drop(oldest)) gone.add(oldest.workspaceId);
+        }
+        for (const workspaceId of gone) changedNow(workspaceId);
+        wantsPoll = true;
+        void run();
+      });
     },
     /**
      * Looks now. Call it with a workspace when one of its chats changed, so a

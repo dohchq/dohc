@@ -528,6 +528,136 @@ describe("what an agent thread is doing with a forwarded message", () => {
     states.stop();
   });
 
+  it("meets the saved row of a message forwarded again before the saved rows were read", async () => {
+    const reminded: ForwardRow = {
+      ...forwarded(),
+      reminder: { state: "sent", runId: "run-remind", atMs: 3_000 },
+    };
+    const store = memoryLedger([reminded]);
+    let open!: () => void;
+    const reading = new Promise<void>((resolve) => (open = resolve));
+    const { states, tool, forward } = setup({
+      ledger: {
+        ...store.ledger,
+        list: async () => {
+          await reading;
+          return store.ledger.list();
+        },
+      },
+    });
+    tool(thread([run("run-remind", "ended"), run("run-1", "ended")]));
+
+    // The message could not be marked read last time, and goes again at start.
+    states.forwarded(forwarded());
+    open();
+    await states.check();
+    await states.check();
+
+    expect(forward).not.toHaveBeenCalled();
+    expect(store.rows()).toEqual([reminded]);
+    expect(line(states)).toMatchObject({ state: "silent" });
+    states.stop();
+  });
+
+  it("keeps no more rows than the ledger does when one is forwarded before the saved rows were read", async () => {
+    const store = memoryLedger([
+      { ...forwarded({ chatThreadId: "thread-1" }), reminder: { state: "none" } },
+      { ...forwarded({ chatThreadId: "thread-2" }), reminder: { state: "none" } },
+    ]);
+    let open!: () => void;
+    const reading = new Promise<void>((resolve) => (open = resolve));
+    const { states } = setup({
+      maxRows: 2,
+      ledger: {
+        ...store.ledger,
+        list: async () => {
+          await reading;
+          return store.ledger.list();
+        },
+      },
+    });
+
+    states.forwarded(forwarded({ chatThreadId: "thread-3" }));
+    open();
+    await states.check();
+
+    expect(states.lines(WORKSPACE).map((entry) => entry.chatThreadId)).toEqual([
+      "thread-2",
+      "thread-3",
+    ]);
+    states.stop();
+  });
+
+  it("tries the reminder again when recording it failed, and still sends only one", async () => {
+    const store = memoryLedger();
+    let fail = true;
+    const { states, tool, forward, errors } = setup({
+      ledger: {
+        ...store.ledger,
+        put: async (row) => {
+          if (row.reminder.state === "recorded" && fail) throw new Error("the disk is full");
+          await store.ledger.put(row);
+        },
+      },
+    });
+    states.forwarded(forwarded());
+    tool(thread([run("run-1", "ended")]));
+
+    await states.check();
+    // Not recorded, so not sent, and not taken for a reminder that may have gone.
+    expect(forward).not.toHaveBeenCalled();
+    expect(errors.length).toBeGreaterThan(0);
+    expect(line(states)).toBeNull();
+
+    fail = false;
+    await states.check();
+    await states.check();
+
+    expect(forward).toHaveBeenCalledTimes(1);
+    expect(store.rows()[0]!.reminder).toMatchObject({ state: "sent" });
+    states.stop();
+  });
+
+  it("does not take newer work that was cancelled while it waited for a sign the message's work is over", async () => {
+    const { states, tool, forward } = setup();
+    states.forwarded(forwarded());
+    // Fifty newer runs pushed it off the list. All were cancelled before they started.
+    const cancelled = Array.from({ length: 50 }, (_, index) =>
+      run(`run-n${index}`, "ended", {
+        requestedAtMs: 2_000 + index,
+        startedAtMs: null,
+        endedAtMs: 3_000,
+      }),
+    );
+    tool({ ...thread(cancelled), working: true, activeRunId: "run-older" });
+
+    await states.check();
+
+    expect(line(states)).toMatchObject({ state: "in-line" });
+    expect(forward).not.toHaveBeenCalled();
+
+    // One of the newer runs started: the tool takes work in order, so this one is over.
+    tool(thread([run("run-n50", "working", { requestedAtMs: 2_100 }), ...cancelled.slice(1)]));
+    await states.check();
+    expect(forward).toHaveBeenCalledTimes(1);
+    states.stop();
+  });
+
+  it("says a reminder that may have gone waits on the person when the thread does", async () => {
+    const stopped: ForwardRow = { ...forwarded(), reminder: { state: "recorded", atMs: 3_000 } };
+    const { states, tool } = setup({}, [stopped]);
+    tool(
+      thread([run("run-r", "working", { requestedAtMs: 3_100 }), run("run-1", "ended")], {
+        waitingOnPerson: true,
+      }),
+    );
+
+    await states.check();
+
+    expect(line(states)).toMatchObject({ state: "waiting-in-tool" });
+    states.stop();
+  });
+
   it("lets a newer message in the same chat thread take the older one's place", async () => {
     const { states, tool, rows } = setup();
     await states.forwarded(forwarded());
