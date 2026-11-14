@@ -1136,6 +1136,35 @@ describe("a retrying page keeps its session", () => {
     expect(asked).toBe(1);
   });
 
+  it("says the owner removed access when that happens after the page has used its new session", async () => {
+    const f = await live();
+    vi.useFakeTimers();
+    let asked = 0,
+      removed = false;
+    const removal = () =>
+      Response.json(
+        { ok: false, code: "share_access_removed", error: "The owner removed your access." },
+        { status: 404 },
+      );
+    f.intercept((path) => {
+      if (removed && path !== "/api/account/session") return removal();
+      if (path === "/api/live/named-session") {
+        asked++;
+        return new Promise<Response>(() => {});
+      }
+      return path === "/api/live/named-ticket" ? new Response(null, { status: 404 }) : undefined;
+    });
+    f.socket.close();
+    await vi.waitFor(async () => {
+      await vi.advanceTimersByTimeAsync(250);
+      expect(asked).toBe(1);
+    });
+    removed = true;
+    await vi.advanceTimersByTimeAsync(5 * 60_000 + 30_000);
+    expect(f.value.state()).toMatchObject({ status: "disconnected", reason: "access-removed" });
+    expect(asked).toBe(1);
+  });
+
   // Try again can start at any point while the attempt it replaces reads the account.
   it.each(Array.from({ length: 12 }, (_, ticks) => ticks))(
     "keeps Try again's new session separate from an attempt it replaced, %i ticks in",

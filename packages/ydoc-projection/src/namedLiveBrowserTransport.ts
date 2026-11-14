@@ -443,6 +443,15 @@ export function createNamedLiveBrowserTransport<
       }
       return passingRefusal();
     }
+    /** Whether the invitation says the owner removed this account's access. */
+    async function accessRemoved(held: Attempt, grantId: string): Promise<boolean> {
+      try {
+        await json(held, "/api/live/named-documents", { grantId });
+        return false;
+      } catch (error) {
+        return error instanceof AccessRemoved;
+      }
+    }
     const passingRefusal = () =>
       accessStoodAt !== undefined && Date.now() - accessStoodAt < PASSING_REFUSAL_MS
         ? "host-unavailable"
@@ -573,7 +582,9 @@ export function createNamedLiveBrowserTransport<
             : error instanceof AccessRemoved
               ? "access-removed"
               : error instanceof SessionSpent
-                ? "authority-unavailable"
+                ? "grantId" in target && (await accessRemoved(held, String(target.grantId)))
+                  ? "access-removed"
+                  : "authority-unavailable"
                 : error instanceof LiveAuthorityUnavailableError
                   ? !options.authorize && "grantId" in target
                     ? await recheck(held, String(target.grantId))
