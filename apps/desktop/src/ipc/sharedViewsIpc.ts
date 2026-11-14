@@ -110,9 +110,6 @@ export function registerSharedViewsIpcHandlers<
   listWorkspaces(): readonly RegistryEntry[];
   notifyRenderer(scope?: WorkspaceActivityScope): void;
   syncNotices(isCurrent: () => boolean): Promise<void>;
-  // The role the relay last named for a joined workspace, or null for none,
-  // so main's own menus offer what the relay allows.
-  rememberMemberRole(workspaceId: string, shareId: string, role: "admin" | "member" | null): void;
   recordShareViewStoreRefusal(
     workspaceId: string,
     refusal: EngineStoreRefusal | null,
@@ -151,7 +148,6 @@ export function registerSharedViewsIpcHandlers<
     listWorkspaces,
     notifyRenderer,
     recordShareViewStoreRefusal,
-    rememberMemberRole,
     recheckRemovedShares,
   } = dependencies;
   // A shared view has no recorder, so its refresh is what meets a store only
@@ -337,6 +333,7 @@ export function registerSharedViewsIpcHandlers<
           // instead of trusting the relay's selection each time.
           grantedSelector,
           receivedIdentity: info.receivedIdentity,
+          ...membershipPlace(info),
           // Persist the origin relay so a later refresh signed into a different
           // relay is skipped instead of misreading a 404 as "share ended".
           relayUrl: credentials.relayUrl,
@@ -719,6 +716,10 @@ export function registerSharedViewsIpcHandlers<
                   granterEmail: current.shareView.granterEmail ?? info.granterEmail,
                   subjectName: info.subjectName,
                   sharerName: info.sharerName,
+                  ...(recordedShareSelector(current.shareView.grantedSelector)?.wholeWorkspace ===
+                  true
+                    ? membershipPlace(info)
+                    : {}),
                 };
                 await setWorkspaceShareView(workspace.workspaceId, nextShareView);
                 refreshedWorkspace = { ...current, shareView: nextShareView };
@@ -1007,12 +1008,19 @@ export function registerSharedViewsIpcHandlers<
               if (committed?.shareId !== view.shareId || !committedPin)
                 return { status: "unverified" };
               // Only a membership has a role, and a level that the owner changes
-              // for everyone; the window says so when this check moved it.
-              rememberMemberRole(
-                workspace.workspaceId,
-                view.shareId,
-                committedPin.wholeWorkspace === true ? (stated.role ?? null) : null,
-              );
+              // for everyone; the window says so when this check moved it. The
+              // view keeps the role for main's menus and the window's next start.
+              if (
+                committedPin.wholeWorkspace === true &&
+                stated.role &&
+                committed.role !== stated.role
+              ) {
+                await setWorkspaceShareView(workspace.workspaceId, {
+                  ...committed,
+                  role: stated.role,
+                });
+                notifyRenderer({ workspaceId: workspace.workspaceId, summaryChanged: true });
+              }
               const pulling = pullCache.get(event.sender);
               if (
                 pulling?.workspaceId === workspace.workspaceId &&
@@ -1047,6 +1055,18 @@ export function registerSharedViewsIpcHandlers<
       },
     },
   );
+}
+
+// Where a membership sits on the relay: the role it last named, and the
+// owner's workspace id that Members routes name. Neither grants anything.
+function membershipPlace(info: {
+  role?: "owner" | "admin" | "member";
+  membersWorkspaceId?: string;
+}) {
+  return {
+    ...(info.role === "admin" || info.role === "member" ? { role: info.role } : {}),
+    ...(info.membersWorkspaceId ? { membersWorkspaceId: info.membersWorkspaceId } : {}),
+  };
 }
 
 // A membership's level follows the relay both ways, so its held pull names

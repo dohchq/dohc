@@ -664,8 +664,10 @@ describe("a member's share view", () => {
     const shareId = await shareIdOf(h, "ana");
     const response = await info(h, "ana", shareId);
     expect(response.status).toBe(200);
+    // A member reaches Members by the workspace's id, as the owner does.
     expect(await json(response)).toMatchObject({
       shareId,
+      workspaceId: WORKSPACE,
       subjectName: "Community",
       selector: { kind: "workspace", role: "member" },
       access: "comment",

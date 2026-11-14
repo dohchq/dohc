@@ -243,7 +243,6 @@ export async function createSharedViewsIpcHarness(
     steps.push("open");
   });
   const recordRefusal = vi.fn<Dependencies["recordShareViewStoreRefusal"]>();
-  const rememberRole = vi.fn<Dependencies["rememberMemberRole"]>();
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
   registerSharedViewsIpcHandlers<string, Event, Operation, Lease>({
     registerHandler: (channel, handler) => {
@@ -293,7 +292,6 @@ export async function createSharedViewsIpcHarness(
     listWorkspaces: () => [...registry.values()],
     notifyRenderer: notify,
     recordShareViewStoreRefusal: recordRefusal,
-    rememberMemberRole: rememberRole,
     syncNotices,
     showsLive,
   });
@@ -337,7 +335,6 @@ export async function createSharedViewsIpcHarness(
     fetchAccess,
     closed,
     recordRefusal,
-    rememberRole,
     handlers,
     invoke,
     openPayload,

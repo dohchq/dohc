@@ -68,7 +68,9 @@ describe("a joined workspace", () => {
     bridge.listChannelThreads.mockResolvedValue({ threads: [] });
     bridge.checkSharedViewAccess.mockResolvedValue(checked);
     vi.stubGlobal("dohcDesktop", bridge);
-    render(shell(bridge, { ...JOINED, shareView: { ...JOINED.shareView!, access } }));
+    // The view keeps the role the relay last named; the check names it again.
+    const role = "role" in checked ? checked.role : undefined;
+    render(shell(bridge, { ...JOINED, shareView: { ...JOINED.shareView!, access, ...(role ? { role } : {}) } }));
     return bridge;
   }
 
@@ -95,6 +97,18 @@ describe("a joined workspace", () => {
 
   it("offers New group to an admin once the relay names the role", async () => {
     withGroup("view", { status: "current", access: "view", role: "admin" });
+    fireEvent.click(await screen.findByTestId("activity-chats"));
+    expect(await screen.findByTestId("chats-new-channel")).toBeTruthy();
+  });
+
+  // The view keeps the role from when it opened, so New group does not wait
+  // for the access check.
+  it("offers New group to an admin before the access check answers", async () => {
+    const bridge = makeShareBridge();
+    bridge.listChatChannels.mockResolvedValue({ channels: [], fileThreads: [] });
+    bridge.checkSharedViewAccess.mockReturnValue(new Promise(() => undefined));
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(shell(bridge, { ...JOINED, shareView: { ...JOINED.shareView!, role: "admin" } }));
     fireEvent.click(await screen.findByTestId("activity-chats"));
     expect(await screen.findByTestId("chats-new-channel")).toBeTruthy();
   });

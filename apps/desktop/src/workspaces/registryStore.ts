@@ -243,6 +243,11 @@ export interface ShareViewIdentity {
   relayUrl?: string;
   // The account that opened this copy. A missing pin cannot verify revocation.
   recipientUserId?: string;
+  // A membership's role as the relay last named it, so menus and the window
+  // know it before the next check, and the owner's workspace id that Members
+  // routes name. Neither grants anything; the relay decides every action.
+  role?: "admin" | "member";
+  membersWorkspaceId?: string;
   // Paths capture could not save before a restriction. Null protects the whole
   // copy when capture failed before it could enumerate paths. Reopen to resume.
   unsavedPaths?: string[] | null;

@@ -432,23 +432,30 @@ describe("metadata-only access checks", () => {
       await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload),
     ).toEqual({ status: "current", access: "edit", role: "member" });
   });
-  it("tells main the role the relay named, for main's own menus", async () => {
+  // The window and main's menus read the role from the view, so they know it
+  // before the next check. The relay still decides every action.
+  it("keeps the role the relay named on a membership, and never on a path share", async () => {
     const h = await harness();
-    const { shareId } = h.workspace.shareView!;
     h.fetchAccess.mockResolvedValue({ access: "edit", role: "admin" });
     await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload);
-    expect(h.rememberRole).toHaveBeenLastCalledWith(h.workspace.workspaceId, shareId, null);
+    expect(h.workspace.shareView).not.toHaveProperty("role");
     h.workspace.shareView!.grantedSelector = {
       paths: [],
       versionId: null,
       access: "edit",
       wholeWorkspace: true,
     };
+    h.notify.mockClear();
     await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload);
-    expect(h.rememberRole).toHaveBeenLastCalledWith(h.workspace.workspaceId, shareId, "admin");
+    expect(h.workspace.shareView!.role).toBe("admin");
+    expect(h.notify).toHaveBeenCalledWith({ workspaceId: "existing", summaryChanged: true });
+    // The same role again writes nothing.
+    h.notify.mockClear();
+    await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload);
+    expect(h.notify).not.toHaveBeenCalled();
     h.fetchAccess.mockResolvedValue({ access: "edit", role: "member" });
     await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload);
-    expect(h.rememberRole).toHaveBeenLastCalledWith(h.workspace.workspaceId, shareId, "member");
+    expect(h.workspace.shareView!.role).toBe("member");
   });
   it.each(["workspace", "credentials", "close"])(
     "discards a deferred 404 after %s changes",
@@ -746,6 +753,39 @@ describe("registered received-view handlers", () => {
       role: "member",
       selector: { paths: [], versionId: null, access: "comment", wholeWorkspace: true },
     };
+
+    it("pins the role and the workspace id Members routes name", async () => {
+      const h = await harness();
+      h.fetchInfo.mockResolvedValue({ ...member, membersWorkspaceId: "owner-workspace" });
+      await h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload);
+      const opened = [...h.registry.values()].find((entry) => entry.workspaceId !== "existing")!;
+      expect(opened.shareView).toMatchObject({
+        role: "member",
+        membersWorkspaceId: "owner-workspace",
+      });
+    });
+
+    it("follows the relay's role on refresh, and keeps a path share free of one", async () => {
+      const h = await harness();
+      h.fetchInfo.mockResolvedValue({
+        ...member,
+        role: "admin",
+        membersWorkspaceId: "owner-workspace",
+      });
+      await h.invoke(sharedViewAccessOperations.refreshSharedView.channel, {
+        workspaceId: "existing",
+      });
+      expect(h.workspace.shareView).not.toHaveProperty("role");
+      expect(h.workspace.shareView).not.toHaveProperty("membersWorkspaceId");
+      h.workspace.shareView!.grantedSelector = member.selector!;
+      await h.invoke(sharedViewAccessOperations.refreshSharedView.channel, {
+        workspaceId: "existing",
+      });
+      expect(h.workspace.shareView).toMatchObject({
+        role: "admin",
+        membersWorkspaceId: "owner-workspace",
+      });
+    });
 
     it("keeps what a failed first pull brought, and Try again continues it in place", async () => {
       const h = await harness();

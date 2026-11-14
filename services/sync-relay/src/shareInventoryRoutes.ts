@@ -334,7 +334,15 @@ export function createShareInventoryRoutes(
         ["user", actor.userId],
         authorized.share.workspaceId,
       );
-      return jsonResponse({ ok: true, ...summary, ...(receivedSource ? { receivedSource } : {}) });
+      // A member reaches Members by the workspace's id, which Members names
+      // to every member anyway. Any other share keeps it private.
+      const membership = (summary.selector as { kind?: unknown } | null)?.kind === "workspace";
+      return jsonResponse({
+        ok: true,
+        ...summary,
+        ...(membership ? { workspaceId: authorized.share.workspaceId } : {}),
+        ...(receivedSource ? { receivedSource } : {}),
+      });
     }
     throw relayError("method_not_allowed");
   }

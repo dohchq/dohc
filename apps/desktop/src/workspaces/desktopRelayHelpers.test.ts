@@ -322,9 +322,10 @@ describe("desktop relay helpers", () => {
   });
 
   it("reads a membership as the whole workspace, with the role and the workspace name", async () => {
-    const body = (selector: unknown, access = "comment") =>
+    const body = (selector: unknown, access = "comment", workspaceId: unknown = "owner-workspace") =>
       Response.json({
         shareId: "share-member",
+        workspaceId,
         granterUserId: "owner",
         granterEmail: null,
         sharerName: "Ana",
@@ -334,15 +335,16 @@ describe("desktop relay helpers", () => {
         access,
         createdAtMs: 7,
       });
-    const read = (selector: unknown, access?: string) =>
+    const read = (selector: unknown, access?: string, workspaceId?: unknown) =>
       fetchShareViewInfo({
-        relay: relay(vi.fn<typeof globalThis.fetch>(async () => body(selector, access))),
+        relay: relay(vi.fn<typeof globalThis.fetch>(async () => body(selector, access, workspaceId))),
         shareId: "share-member",
       });
     await expect(read({ kind: "workspace", role: "member" })).resolves.toMatchObject({
       subjectName: "Community",
       sharerName: "Ana",
       role: "member",
+      membersWorkspaceId: "owner-workspace",
       selector: { paths: [], versionId: null, access: "comment", wholeWorkspace: true },
     });
     await expect(read({ kind: "workspace", role: "admin" }, "edit")).resolves.toMatchObject({
@@ -358,17 +360,22 @@ describe("desktop relay helpers", () => {
     ] as const) {
       await expect(read(selector, access)).rejects.toBeInstanceOf(ShareSelectorInvalidError);
     }
+    // Members is reached by the workspace's id, so a membership needs one.
+    for (const workspaceId of [null, "", 7]) {
+      await expect(read({ kind: "workspace", role: "member" }, "comment", workspaceId)).rejects.toBeInstanceOf(ShareSelectorInvalidError);
+    }
   });
 
   it("keeps a path share free of a role", async () => {
     const info = await fetchShareViewInfo({
       relay: relay(vi.fn<typeof globalThis.fetch>(async () => Response.json({
-        shareId: "share-a", granterUserId: "user-a", genericChatWritable: false,
+        shareId: "share-a", granterUserId: "user-a", genericChatWritable: false, workspaceId: "owner-workspace",
         selector: { paths: ["docs"], versionId: null }, access: "view", createdAtMs: 1,
       }))),
       shareId: "share-a",
     });
     expect(info).not.toHaveProperty("role");
+    expect(info).not.toHaveProperty("membersWorkspaceId");
     expect(info.selector).not.toHaveProperty("wholeWorkspace");
   });
 

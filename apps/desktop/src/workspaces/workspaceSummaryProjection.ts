@@ -88,7 +88,10 @@ export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
         : {}),
       ...(damaged ? { damaged: true as const } : { access: level, genericChatWritable }),
       ...(!damaged && recordedShareSelector(raw.grantedSelector)?.wholeWorkspace === true
-        ? { membership: true as const }
+        ? {
+            membership: true as const,
+            ...(raw.role === "admin" || raw.role === "member" ? { role: raw.role } : {}),
+          }
         : {}),
       ...(raw.ended === true ? { ended: true } : {}),
       ...(raw.unsavedPaths !== undefined

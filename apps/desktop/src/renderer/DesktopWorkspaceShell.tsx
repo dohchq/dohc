@@ -2472,11 +2472,9 @@ export function DesktopWorkspaceShell(props: {
   const shareAccess = accessFor?.view === shareView ? accessFor.access : shareView?.access;
   // A membership's role, as the relay last named it. It is keyed by share, so
   // a registry refresh after a level change keeps it.
-  const [roleFor, setRoleFor] = useState<{ shareId: string; role: "admin" | "member" } | null>(
-    null,
-  );
-  const membershipRole =
-    roleFor !== null && roleFor.shareId === shareView?.shareId ? roleFor.role : undefined;
+  // The view keeps the role the relay last named, and the access check
+  // refreshes it. The relay decides every admin action.
+  const membershipRole = shareView?.membership ? shareView.role : undefined;
   const shareViewWritable = !shareViewDamaged && !shareViewEnded && shareAccess === "edit";
   const shareViewEndedRef = useRef(shareViewEnded);
   shareViewEndedRef.current = shareViewEnded;
@@ -3146,8 +3144,6 @@ export function DesktopWorkspaceShell(props: {
       else if (result.status === "ended") setEndedFor(shareView);
       else if (result.access && result.access !== shareAccess)
         setAccessFor({ view: shareView, access: result.access });
-      if (shareView.membership && shareView.shareId && result.role)
-        setRoleFor({ shareId: shareView.shareId, role: result.role });
       if (shareView.membership && result.levelChanged && result.access) {
         showSuccessNotice(
           result.levelChangedBy

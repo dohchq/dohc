@@ -114,6 +114,8 @@ it("stores bounded display labels, updates only for the owner, and cascades with
     granterEmail: "owner@dohc.test",
     access: "comment",
   });
+  // Only a membership names the owner's workspace.
+  expect(received).not.toHaveProperty("workspaceId");
   const update = { ...jsonBody({ subjectName: "Holiday" }), method: "PUT" };
   expect(
     (

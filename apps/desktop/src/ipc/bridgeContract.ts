@@ -386,6 +386,9 @@ export const WorkspaceSummary = z.object({
       // A workspace the account joined: the pin covers the whole workspace.
       // The shell names it as a membership; the relay's grant still decides.
       membership: z.literal(true).optional(),
+      // A membership's role as the relay last named it. It shows admin actions
+      // before the next check; the relay decides each one.
+      role: z.enum(["admin", "member"]).optional(),
       // The stored grant is unreadable. The marker still stands, because a
       // share view whose grant cannot be read must not present as an ordinary
       // workspace: the restrictive stance is what fails closed. The shell

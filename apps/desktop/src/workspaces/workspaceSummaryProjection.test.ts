@@ -60,6 +60,13 @@ describe("workspace summary projection", () => {
     expect(workspaceSummaryFor(entry({ shareView: shareView({ ...whole, paths: ["docs"] }) })).shareView?.membership).toBeUndefined();
   });
 
+  it("carries a membership's role, and no other view's", () => {
+    const whole = { paths: [], versionId: null, access: "edit", wholeWorkspace: true };
+    expect(workspaceSummaryFor(entry({ shareView: { ...shareView(whole), role: "admin" } })).shareView).toMatchObject({ membership: true, role: "admin" });
+    expect(workspaceSummaryFor(entry({ shareView: { ...shareView(whole), role: "owner" } })).shareView).not.toHaveProperty("role");
+    expect(workspaceSummaryFor(entry({ shareView: { ...shareView(goodSelector), role: "admin" } })).shareView).not.toHaveProperty("role");
+  });
+
   it("carries durable unsaved paths to the shell", () => {
     for (const unsavedPaths of [["docs/locked.md"], null]) {
       expect(

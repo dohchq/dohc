@@ -46,6 +46,8 @@ export interface ShareViewInfo {
   genericChatWritable: boolean;
   /** The caller's role, for a membership only. */
   role?: WorkspaceRole;
+  /** The owner's workspace id, which Members routes name. A membership only. */
+  membersWorkspaceId?: string;
   /**
    * The effective selector composed from the relay's stored scope and grant
    * access, or null when the share grants a chat channel and has no file
@@ -193,6 +195,9 @@ export async function fetchShareViewInfo(input: {
     throw new ShareSelectorInvalidError(input.shareId);
   }
   const selector = parseSelector(body.selector, body.access, input.shareId);
+  if (selector?.wholeWorkspace && (typeof body.workspaceId !== "string" || body.workspaceId.length === 0)) {
+    throw new ShareSelectorInvalidError(input.shareId);
+  }
   return {
     receivedIdentity: receivedReferencePin(body),
     shareId: String(body.shareId ?? input.shareId),
@@ -201,7 +206,7 @@ export async function fetchShareViewInfo(input: {
     sharerName: normalizeShareLabel(body.sharerName, 320),
     granterEmail: typeof body.granterEmail === "string" ? body.granterEmail : null,
     genericChatWritable: body.genericChatWritable,
-    ...(selector?.wholeWorkspace ? { role: readWorkspaceRole(body.selector)! } : {}),
+    ...(selector?.wholeWorkspace ? { role: readWorkspaceRole(body.selector)!, membersWorkspaceId: body.workspaceId as string } : {}),
     selector,
     createdAtMs: Number(body.createdAtMs ?? 0),
   };
