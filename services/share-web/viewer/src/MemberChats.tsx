@@ -127,7 +127,8 @@ export function MemberComments({found, onRetry, path, access, onEnded}: {
   return <section className="comments-panel link-channel member-comments" aria-label="Comments">
     <div className="chats-head"><h2>Comments</h2><span className="comments-file" title={path}>{name}</span></div>
     {client && opened ? <ChannelView key={`${opened.shareId}\n${path}\n${access}`} client={client} name={`Comments on ${name}`}
-      onEnded={onEnded} readOnlyNote={READ_ONLY} empty={NO_COMMENTS} messageLabel="Comment"/> :
+      onEnded={onEnded} readOnlyNote={READ_ONLY} empty={NO_COMMENTS} messageLabel="Comment"
+      placeholder="Comment on this file…"/> :
       found === "failed" ? <div className="chat-state" role="alert"><p>Comments didn't load.</p>
         <button type="button" className="handoff-button secondary" onClick={onRetry}>Try again</button></div> :
       <p className="chat-state">Loading comments…</p>}

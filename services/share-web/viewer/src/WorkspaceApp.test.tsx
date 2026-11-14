@@ -186,6 +186,7 @@ it("posts in a Group at Comment, counts another Group's new messages, and opens 
   server({level: "comment"}); await render(); await opened();
   expect(following("chat")[0]!.url.searchParams.get("channelWireId")).toBeNull();
   const box = groupPanel().querySelector<HTMLTextAreaElement>('textarea[name="body"]')!;
+  expect(box.placeholder).toBe("Message #plans");
   setControlValue(box, "Count me in"); await click("Send");
   await settle(() => posts.length === 1);
   expect(posts[0]).toMatchObject({shareId: "share", channelWireId: "wire-plans", body: "Count me in", authorKind: "human"});
@@ -322,6 +323,7 @@ it("shows the open file's Comments at Comment and posts one on the file", async 
   expect(commentsPanel().textContent).toContain("plan.md");
   const box = commentsPanel().querySelector<HTMLTextAreaElement>('textarea[name="body"]')!;
   expect(box.getAttribute("aria-label")).toBe("Comment");
+  expect(box.placeholder).toBe("Comment on this file…");
   setControlValue(box, "Ten, then"); await act(async () => commentsPanel().querySelector<HTMLButtonElement>('button[type="submit"]')!.click());
   await settle(() => posts.length === 1);
   expect(posts[0]).toMatchObject({shareId: "share", path: "trip/plan.md", body: "Ten, then", authorKind: "human"});

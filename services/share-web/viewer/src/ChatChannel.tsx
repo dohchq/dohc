@@ -144,7 +144,7 @@ export interface ChatChannelClient {
 
 /**
  * `composerField` sits above the message box; while `holdSend` is set, the message waits for that field.
- * `readOnlyNote`, `empty` and `messageLabel` replace the channel's own words, where the page names its conversations differently.
+ * `readOnlyNote`, `empty`, `messageLabel` and `placeholder` replace the channel's own words, where the page names its conversations differently.
  */
 export function ChannelView({
   client,
@@ -155,6 +155,7 @@ export function ChannelView({
   readOnlyNote = READ_ONLY,
   empty = EMPTY,
   messageLabel = "Message",
+  placeholder = name ? `Message #${name}` : "Write a message…",
 }: {
   client: ChatChannelClient;
   name: string | null;
@@ -164,6 +165,7 @@ export function ChannelView({
   readOnlyNote?: string;
   empty?: string;
   messageLabel?: string;
+  placeholder?: string;
 }) {
   const [messages, setMessages] = useState<NamedChatMessage[] | null>(null),
     [loadFailed, setLoadFailed] = useState(false);
@@ -516,6 +518,7 @@ export function ChannelView({
               readOnly={posting}
               rows={1}
               aria-label={messageLabel}
+              placeholder={placeholder}
               aria-describedby="chat-composer-status"
               enterKeyHint="send"
               onKeyDown={keyDown}
