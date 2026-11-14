@@ -181,6 +181,8 @@ export async function cloudRust(part, index = 0) {
         repoRoot,
         "--extract-to",
         repoRoot,
+        // Partition zero extracts over the target directory it just built.
+        ...(index === 0 ? ["--extract-overwrite"] : []),
         "--message-format=json",
       ]);
       const extracted = rustTestInventory(JSON.parse(listed.stdout)).map((task) => task.id);

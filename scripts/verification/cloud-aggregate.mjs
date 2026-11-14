@@ -116,20 +116,17 @@ export function aggregateRust(records) {
 export const CLOUD_JOB_GRAPH = {
   changes: { names: ["what changed"], needs: [] },
   "javascript-prepare": { names: ["shared preparation"], needs: ["changes"] },
-  "confinement-compiler": { names: ["compiler confinement"], needs: ["changes"] },
-  "confinement-relay": { names: ["relay confinement"], needs: ["changes"] },
   "javascript-workers": {
     names: Array.from({ length: JS_SHARDS - 1 }, (_, index) => `JS worker ${index + 1}`),
     needs: ["changes"],
   },
   javascript: { names: ["typecheck + tests"], needs: ["changes"] },
-  "rust-archive": { names: ["Rust build once"], needs: ["changes"] },
   "rust-policy": { names: ["Rust policy checks"], needs: ["changes"] },
   "rust-tests": {
     names: Array.from({ length: RUST_SHARDS - 1 }, (_, index) => `Rust tests ${index + 1}`),
-    needs: ["changes", "rust-archive"],
+    needs: ["changes"],
   },
-  rust: { names: ["engine gate"], needs: ["changes", "rust-archive"] },
+  rust: { names: ["engine gate"], needs: ["changes"] },
 };
 
 function gateJobNames(scope) {
@@ -139,7 +136,6 @@ function gateJobNames(scope) {
       ([id]) =>
         id === "changes" ||
         id === "javascript-prepare" ||
-        id.startsWith("confinement-") ||
         (scope === "rust" ? id.startsWith("rust") : id.startsWith("javascript")),
     )
     .flatMap(([, node]) => node.names);
@@ -199,19 +195,8 @@ function gateTiming(scope, required, metadata = required, transferSeconds = null
     conclusion: job.conclusion,
     runnerWaitSeconds: wait(job),
   }));
-  const preparedAt = Date.parse(
-    required.find((job) => job.name === "shared preparation").completed_at,
-  );
-  const confinementNames = [
-    ...CLOUD_JOB_GRAPH["confinement-compiler"].names,
-    ...CLOUD_JOB_GRAPH["confinement-relay"].names,
-  ];
   const longest = jobs
-    .filter(
-      (job) =>
-        job.name !== "what changed" &&
-        (!confinementNames.includes(job.name) || Date.parse(job.startedAt) > preparedAt),
-    )
+    .filter((job) => job.name !== "what changed")
     .reduce((a, b) => (a.runnerWaitSeconds > b.runnerWaitSeconds ? a : b));
   const contended = longest.runnerWaitSeconds > 30 || transferSeconds > 30,
     seconds = spanSeconds;

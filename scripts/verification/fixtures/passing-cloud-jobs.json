@@ -11,7 +11,7 @@
       "completed_at": "2026-11-11T13:04:14Z"
     },
     {
-      "name": "shared preparation + confinement",
+      "name": "shared preparation",
       "head_sha": "9f5de214993f8a0639c33a440dc25d164da056fb",
       "status": "completed",
       "conclusion": "success",
@@ -27,15 +27,6 @@
       "created_at": "2026-11-11T13:04:14Z",
       "started_at": "2026-11-11T13:04:19Z",
       "completed_at": "2026-11-11T13:08:09Z"
-    },
-    {
-      "name": "Rust build once",
-      "head_sha": "9f5de214993f8a0639c33a440dc25d164da056fb",
-      "status": "completed",
-      "conclusion": "success",
-      "created_at": "2026-11-11T13:04:14Z",
-      "started_at": "2026-11-11T13:04:19Z",
-      "completed_at": "2026-11-11T13:06:57Z"
     },
     {
       "name": "Rust policy checks",
@@ -150,8 +141,8 @@
       "head_sha": "9f5de214993f8a0639c33a440dc25d164da056fb",
       "status": "completed",
       "conclusion": "success",
-      "created_at": "2026-11-11T13:08:09Z",
-      "started_at": "2026-11-11T13:08:14Z",
+      "created_at": "2026-11-11T13:04:14Z",
+      "started_at": "2026-11-11T13:04:19Z",
       "completed_at": "2026-11-11T13:11:07Z"
     },
     {
@@ -262,5 +253,6 @@
       "started_at": "2026-11-11T13:11:15Z",
       "completed_at": "2026-11-11T13:11:29Z"
     }
-  ]
+  ],
+  "adaptation": "Build and confinement jobs folded into the current graph; completion times retained. Rust worker starts retained to model delayed scheduling."
 }
