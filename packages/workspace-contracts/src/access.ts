@@ -22,7 +22,7 @@ const Selector = z.union([
   }),
   z.object({ kind: z.literal("chat"), channelWireId: Id }),
   // Membership of a whole workspace. The level is the row's access. A member
-  // sees their role; the owner's listing of its members names none.
+  // sees their role, and the owner's listing names each member's role.
   z.object({ kind: z.literal("workspace"), role: z.enum(["admin", "member"]).optional() }),
 ]);
 export const AccessShareRow = z.object({

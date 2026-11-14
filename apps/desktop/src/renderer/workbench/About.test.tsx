@@ -207,7 +207,41 @@ describe("About Access", () => {
     );
   });
 
+  // The owner's Access lists the people the Members page lists, with the
+  // owner, their roles and the members' level once, beside the file's other shares.
+  it("lists an owned workspace's people by name and role, with the members' level once", async () => {
+    const membership = (grantId: string, recipientEmail: string, access: "comment" | "edit") =>
+      share({ shareId: "membership", grantId, recipientUserId: grantId, recipientEmail, selector: { kind: "workspace" }, access });
+    bridgeMock.getObjectAccess.mockResolvedValue(answer({ rows: [
+      membership("m-sam", "sam@example.com", "comment"), membership("m-kai", "kai@example.com", "edit"),
+      share({ shareId: "link-1", grantId: "link-grant", via: "link", recipientUserId: null, recipientEmail: null, access: "view" }),
+    ] }));
+    const person = (memberId: string, role: "owner" | "admin" | "member", name: string | null, email: string, state: "active" | "invited" | "removed" = "active") =>
+      ({ memberId, role, state, name, email, invitedAtMs: null, joinedAtMs: 1, removedAtMs: state === "removed" ? 2 : null });
+    bridgeMock.workspaceMembers.mockResolvedValue({
+      status: "ready",
+      view: {
+        workspaceId: "workspace-a", workspaceName: "Lisbon trip", viewer: { memberId: "owner", role: "owner" }, memberLevel: "comment",
+        inviteLink: { enabled: false, url: null },
+        people: [person("owner", "owner", "Ana Ruiz", "ana@example.com"), person("m-kai", "admin", "Kai", "kai@example.com"),
+          person("m-sam", "member", null, "sam@example.com"), person("m-lee", "member", null, "lee@example.com", "invited"),
+          person("m-old", "member", "Old", "old@example.com", "removed")],
+      },
+    });
+    render(<Access />);
+    await waitFor(() => expect(screen.getAllByTestId("about-access-person")).toHaveLength(3));
+    expect(screen.getAllByTestId("about-access-person").map((row) => row.textContent))
+      .toEqual(["AAna RuizYouOwner", "KKaiAdmin", "Ssam@example.comMember"]);
+    expect(screen.getByTestId("about-access-member-level").textContent).toBe("Members can comment");
+    // The memberships become the people list; the link stays a share row.
+    expect(screen.getAllByTestId("about-access-row").map((row) => row.dataset.via)).toEqual(["link"]);
+    expect(screen.queryByText("Can edit")).toBeNull();
+    expect(screen.getByTestId("about-access-count").textContent).toBe("4");
+  });
+
   it("lists the workspace's members, not Only you, for a tracked file with no share", async () => {
+    // A relay that lists no Members page leaves main's rows.
+    bridgeMock.workspaceMembers.mockResolvedValue({ status: "refused" });
     const member = (grantId: string, recipientEmail: string, access: "comment" | "edit") => ({
       shareId: "membership",
       grantId,

@@ -100,10 +100,10 @@ const FileGrant = z.object({
   access: z.enum(SHARE_ACCESS_VALUES),
 });
 // A workspace membership: every tracked file on main, at the member's level.
-// An admin's grant is Edit.
+// An admin's grant is Edit. The relay names the role the person holds now.
 const WorkspaceGrant = z.object({
   ...BASE,
-  selector: z.object({ kind: z.literal("workspace") }),
+  selector: z.object({ kind: z.literal("workspace"), role: z.enum(["admin", "member"]).optional() }),
   access: z.enum(SHARE_ACCESS_VALUES),
 });
 const GrantSchema = z.union([GroupGrant, ChatGrant, FileGrant, WorkspaceGrant]);

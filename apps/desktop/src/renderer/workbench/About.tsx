@@ -1375,10 +1375,10 @@ function OnlyYouRow() {
 
 // The count is who has access now: ended and damaged grants stay listed, but
 // do not count.
-function grantedCount(answer: AccessAnswer): string {
-  const active = answer.rows.filter(
-    (row) => row.kind === "collection" || row.status === "active",
-  ).length;
+function grantedCount(answer: AccessAnswer, people = 0): string {
+  const active =
+    people +
+    answer.rows.filter((row) => row.kind === "collection" || row.status === "active").length;
   return `${active}${answer.nextCursor ? "+" : ""}`;
 }
 
@@ -1471,13 +1471,17 @@ function withMembershipLevel(
 }
 
 const ROLE_WORDS = { owner: "Owner", admin: "Admin", member: "Member" } as const;
-// A member's workspace reaches everyone in it, so Access lists the people on
-// the Members page, as the relay names them to this account.
+// A workspace with members reaches everyone in it, so Access lists the people
+// on the Members page, as the relay names them to this account.
 type MemberPeople =
   | { status: "loading" }
   | { status: "failed" }
   | { status: "refused" }
   | { status: "ready"; view: WorkspaceMembersView };
+
+// The owner's listing names each membership as a share. Access shows them as people.
+const isMembershipRow = (row: AccessRow): boolean =>
+  row.kind === "share" && row.via !== "received" && row.selector?.kind === "workspace";
 
 // It reads while the section is open, and keeps what it read while closed.
 function useMemberPeople(
@@ -1498,20 +1502,11 @@ function useMemberPeople(
         ? shown
         : { key: workspaceId, people: { status: "loading" } },
     );
-    void (async () =>
-      bridge().workspaceMembers({ workspaceId, request: { action: "list" } }))().then(
-      (result) => {
-        if (!current) return;
-        notices.clear(identity);
-        setRead({
-          key: workspaceId,
-          people:
-            result.status === "ready"
-              ? { status: "ready", view: result.view }
-              : { status: "refused" },
-        });
-      },
-      (cause: unknown) => {
+    void (async () => {
+      let result: Awaited<ReturnType<ReturnType<typeof bridge>["workspaceMembers"]>>;
+      try {
+        result = await bridge().workspaceMembers({ workspaceId, request: { action: "list" } });
+      } catch (cause) {
         if (!current) return;
         setRead({ key: workspaceId, people: { status: "failed" } });
         notices.report({
@@ -1520,8 +1515,18 @@ function useMemberPeople(
           cause,
           retry: () => setAttempt((count) => count + 1),
         });
-      },
-    );
+        return;
+      }
+      if (!current) return;
+      notices.clear(identity);
+      setRead({
+        key: workspaceId,
+        people:
+          result?.status === "ready"
+            ? { status: "ready", view: result.view }
+            : { status: "refused" },
+      });
+    })();
     return () => {
       current = false;
     };
@@ -1536,6 +1541,51 @@ function useMemberPeople(
   };
 }
 
+// The people in the workspace, as the Members page lists them. The owner and
+// admins also read each email, and the members' one level.
+function MemberPeopleList(props: { view: WorkspaceMembersView }) {
+  const { view } = props;
+  const people = view.people.filter((person) => person.state === "active");
+  const manager = view.viewer.role !== "member";
+  return (
+    <>
+      <ul className="m-0 list-none p-0" data-testid="about-access-people">
+        {people.map((person) => {
+          const self = person.memberId === view.viewer.memberId;
+          const name = person.name?.trim() || person.email || "No name";
+          return (
+            <li key={person.memberId}>
+              <div
+                data-testid="about-access-person"
+                title={person.email ?? name}
+                className={`${ABOUT_ROW} h-7`}
+              >
+                <ChatAvatar
+                  presentation={relayPresentation(actorHueSlot(person.memberId), self)}
+                  name={name}
+                  kind="human"
+                  size="strip"
+                />
+                <span className="min-w-0 flex-1 truncate text-ink">{name}</span>
+                {self ? <span className="shrink-0 text-[11px] text-subtle">You</span> : null}
+                <span className="shrink-0 text-[11px] text-muted">{ROLE_WORDS[person.role]}</span>
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+      {manager ? (
+        <p data-testid="about-access-member-level" className="m-0 px-2 py-1 text-[11px] text-muted">
+          Members can {LEVELS[view.memberLevel].label.toLowerCase()}
+        </p>
+      ) : null}
+    </>
+  );
+}
+
+const activePeople = (view: WorkspaceMembersView) =>
+  view.people.filter((person) => person.state === "active").length;
+
 function AboutMemberAccess(props: {
   people: Exclude<MemberPeople, { status: "refused" }>;
   expanded: boolean;
@@ -1547,7 +1597,7 @@ function AboutMemberAccess(props: {
     <AboutSection
       id="access"
       label="Access"
-      count={people.status === "ready" ? String(people.view.people.length) : undefined}
+      count={people.status === "ready" ? String(activePeople(people.view)) : undefined}
       expanded={props.expanded}
       onToggle={props.onToggle}
     >
@@ -1558,29 +1608,7 @@ function AboutMemberAccess(props: {
           dohc could not load Members.
         </RetryRow>
       ) : (
-        <ul className="m-0 list-none p-0" data-testid="about-access-people">
-          {people.view.people.map((person) => {
-            const self = person.memberId === people.view.viewer.memberId;
-            const name = person.name?.trim() || "No name";
-            return (
-              <li key={person.memberId}>
-                <div data-testid="about-access-person" className={`${ABOUT_ROW} h-7`}>
-                  <ChatAvatar
-                    presentation={relayPresentation(actorHueSlot(person.memberId), self)}
-                    name={name}
-                    kind="human"
-                    size="strip"
-                  />
-                  <span className="min-w-0 flex-1 truncate text-ink" title={name}>
-                    {name}
-                  </span>
-                  {self ? <span className="shrink-0 text-[11px] text-subtle">You</span> : null}
-                  <span className="shrink-0 text-[11px] text-muted">{ROLE_WORDS[person.role]}</span>
-                </div>
-              </li>
-            );
-          })}
-        </ul>
+        <MemberPeopleList view={people.view} />
       )}
     </AboutSection>
   );
@@ -1731,14 +1759,17 @@ export function AboutAccess(props: {
     () => withMembershipLevel(read.view, membershipLevel, membershipEnded),
     [membershipEnded, membershipLevel, read.view],
   );
+  const joined = membershipLevel !== undefined;
+  // The owner's answer names each membership. Access then reads the people from the Members page.
+  const ownedMembers = !joined && view.status === "ready" && view.answer.rows.some(isMembershipRow);
   const members = useMemberPeople(
     workspaceId,
-    membershipLevel !== undefined && !membershipEnded,
+    (joined && !membershipEnded) || ownedMembers,
     props.expanded,
     props.notices,
   );
   // A relay that lists no Members page for this account leaves main's answer.
-  if (members.people && members.people.status !== "refused") {
+  if (joined && members.people && members.people.status !== "refused") {
     return (
       <AboutMemberAccess
         people={members.people}
@@ -1748,9 +1779,12 @@ export function AboutAccess(props: {
       />
     );
   }
+  const people =
+    ownedMembers && members.people?.status === "ready" ? members.people.view : undefined;
   return (
     <AboutAccessView
-      view={view}
+      view={ownedMembers && members.people?.status === "loading" ? { status: "loading" } : view}
+      {...(people ? { people } : {})}
       expanded={props.expanded}
       onToggle={props.onToggle}
       onRetry={() => void load({ refresh: true })}
@@ -1907,8 +1941,20 @@ export function AboutAccessView(props: {
   setup: AccessSetup;
   noun?: AccessNoun;
   onShare?: () => void;
+  // The workspace's people, in place of the answer's membership rows.
+  people?: WorkspaceMembersView;
 }) {
-  const { view } = props;
+  const { people } = props;
+  const view: AccessView =
+    people && props.view.status === "ready"
+      ? {
+          ...props.view,
+          answer: {
+            ...props.view.answer,
+            rows: props.view.answer.rows.filter((row) => !isMembershipRow(row)),
+          },
+        }
+      : props.view;
   const noun = props.noun ?? "file";
   const empty = view.status === "ready" ? emptyWithin(view.answer, noun) : null;
   // A fresh answer with something to show says nothing about itself; its
@@ -1919,12 +1965,16 @@ export function AboutAccessView(props: {
   const listedNone = answer !== null && answer.rows.length === 0 && empty?.only === true;
   const listedAll = answer !== null && answer.coverage.complete && answer.nextCursor === null;
   const quietCheck = fresh && !(listedNone && !listedAll);
-  const onlyYou = fresh && listedNone && listedAll;
+  const onlyYou = fresh && listedNone && listedAll && !people;
   return (
     <AboutSection
       id="access"
       label="Access"
-      count={view.status === "ready" && empty !== null ? grantedCount(view.answer) : undefined}
+      count={
+        view.status === "ready" && empty !== null
+          ? grantedCount(view.answer, people ? activePeople(people) : 0)
+          : undefined
+      }
       empty={onlyYou}
       summary={onlyYou ? <OnlyYou /> : undefined}
       {...(quietCheck && answer !== null && answer.checkedAtMs !== null
@@ -1969,7 +2019,8 @@ export function AboutAccessView(props: {
               {quietCheck ? null : (
                 <AccessChecked testId="about-access-freshness" answer={view.answer} />
               )}
-              {view.answer.rows.length > 0 ? null : !empty.only ? (
+              {people ? <MemberPeopleList view={people} /> : null}
+              {view.answer.rows.length > 0 || people ? null : !empty.only ? (
                 <AboutNote testId="about-access-empty">{empty.words}</AboutNote>
               ) : view.answer.coverage.complete && view.answer.nextCursor === null ? (
                 <OnlyYouRow />
