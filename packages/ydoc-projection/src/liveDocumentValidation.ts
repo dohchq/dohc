@@ -18,6 +18,7 @@ import {
   getDohcProseMirrorSchema,
   getDohcYDocFrontmatter,
   markdownToYDoc,
+  needsContent,
   yDocToMarkdown,
 } from "./import-export.js";
 import {
@@ -853,8 +854,15 @@ function bodyFingerprint(
   const children: XmlFingerprint[] = [];
   for (const child of body.toArray()) {
     const fingerprint = xmlFingerprint(child, depth, budget);
-    if (!permitsText || fingerprint.kind !== "text" || fingerprint.delta.length !== 0)
-      children.push(fingerprint);
+    if (permitsText && fingerprint.kind === "text" && fingerprint.delta.length === 0) continue;
+    // A reading leaves out an empty shell (isEmptyShell), so the comparison does too.
+    if (
+      fingerprint.kind === "element" &&
+      fingerprint.children.length === 0 &&
+      needsContent(fingerprint.nodeName)
+    )
+      continue;
+    children.push(fingerprint);
   }
   return children;
 }

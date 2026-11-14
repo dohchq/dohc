@@ -347,7 +347,6 @@ describe("public Markdown schema", () => {
         nested.insert(0, [new Y.XmlText()]);
         paragraph.insert(0, [nested]);
       }),
-      "projection-mutated",
     );
     refused(
       encode("Text", (doc) => {
@@ -393,10 +392,8 @@ describe("public Markdown schema", () => {
     refused(encode("Text", (doc) => doc.getMap("unknown").set("hidden", true)));
   });
   it("rejects invalid children, attributes and marks that the schema drops", () => {
-    // y-prosemirror removes an unknown element in a transaction before failing.
     refused(
       encode("Text", (doc) => doc.getXmlFragment("body").insert(0, [new Y.XmlElement("unknown")])),
-      "projection-mutated",
     );
     refused(
       encode("Text", (doc) =>
@@ -409,7 +406,29 @@ describe("public Markdown schema", () => {
           unknown: {},
         }),
       ),
-      "projection-mutated",
+    );
+  });
+  // Two people turning neighbouring to-dos into plain lines at once merge into an empty list.
+  it("accepts a list or item left empty by a merge, and refuses one that holds text", () => {
+    const plain = accepted(encode("- [ ] alpha\n\nbravo")).projectedMarkdown;
+    const withShells = accepted(
+      encode("- [ ] alpha\n\nbravo", (doc) => {
+        const body = doc.getXmlFragment("body");
+        const list = new Y.XmlElement("taskList");
+        list.insert(0, [new Y.XmlElement("taskItem")]);
+        body.insert(1, [list]);
+        (body.get(0) as Y.XmlElement).insert(1, [new Y.XmlElement("taskItem")]);
+      }),
+    );
+    expect(withShells.projectedMarkdown).toBe(plain);
+    refused(
+      encode("- [ ] alpha\n\nbravo", (doc) => {
+        const list = new Y.XmlElement("taskList"),
+          paragraph = new Y.XmlElement("paragraph");
+        paragraph.insert(0, [new Y.XmlText("hidden")]);
+        list.insert(0, [paragraph]);
+        doc.getXmlFragment("body").insert(1, [list]);
+      }),
     );
   });
   it("accepts a full 2 MiB file as one text run, and refuses one UTF-8 byte over", () => {

@@ -7,6 +7,7 @@ import { frontmatterYaml } from "./frontmatter.js";
 import {
   getDohcProseMirrorSchema,
   getDohcYDocFrontmatter,
+  isEmptyShell,
   markdownToYDoc,
   parseRichdocMarkdown,
   serializeRichdocBody,
@@ -170,8 +171,10 @@ function layoutOf(doc: Y.Doc): Layout {
   yXmlFragmentToProseMirrorRootNode(fragment, getDohcProseMirrorSchema()).forEach((block) => {
     blocks.push(block);
   });
-  // Read after the conversion, which deletes what the schema refuses.
-  const elements = fragment.toArray();
+  // The reading leaves out empty shells, so their places don't count.
+  const elements = fragment
+    .toArray()
+    .filter((element) => !(element instanceof Y.XmlElement && isEmptyShell(element)));
   if (
     elements.length !== blocks.length ||
     elements.some(

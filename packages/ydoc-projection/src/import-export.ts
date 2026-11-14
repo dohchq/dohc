@@ -890,6 +890,29 @@ export function getDohcProseMirrorSchema() {
   return schema;
 }
 
+/** Whether the schema refuses this node empty, as it refuses a list with no item. */
+export function needsContent(nodeName: string): boolean {
+  const type = schema.nodes[nodeName];
+  return type !== undefined && !type.contentMatch.validEnd;
+}
+
+/**
+ * Two edits can merge into a list or item with nothing in it. The schema can't hold it, so no
+ * reader shows it, and a reading leaves it out instead of refusing the document.
+ */
+export function isEmptyShell(element: Y.XmlElement): boolean {
+  if (!needsContent(element.nodeName)) return false;
+  const type = schema.nodes[element.nodeName]!;
+  const permitsText = type.contentMatch.matchType(schema.nodes.text!) != null;
+  return element
+    .toArray()
+    .every((child) =>
+      child instanceof Y.XmlElement
+        ? isEmptyShell(child)
+        : permitsText && child instanceof Y.XmlText && child.length === 0,
+    );
+}
+
 function yDocBodyToMarkdown(doc: Y.Doc): string {
   const plainText = getDohcYDocPlainText(doc);
   if (plainText) return plainText.toString();

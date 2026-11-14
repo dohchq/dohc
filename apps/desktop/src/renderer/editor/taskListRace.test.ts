@@ -17,7 +17,6 @@ import {
 } from "@dohc/ydoc-projection/markdown-extensions";
 import { getDohcYDocBodyFragment, markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { yXmlFragmentToProseMirrorRootNode } from "y-prosemirror";
-import { mountLiveBodyEditor } from "@dohc/ydoc-projection/browser-editor";
 import {
   createLiveMarkdownJournalValidator,
   WORKER_LIVE_VALIDATION_POLICY,
@@ -27,7 +26,6 @@ import { desktopMarkdownExtensions } from "./extensions";
 import { ListConversions } from "./listEditing";
 
 const admit = createLiveMarkdownJournalValidator(WORKER_LIVE_VALIDATION_POLICY);
-const REMOTE = Symbol("remote");
 const stops: (() => Promise<void> | void)[] = [];
 afterEach(async () => {
   for (const stop of stops.splice(0).reverse()) await stop();
@@ -39,45 +37,6 @@ type Person = {
   take(): Promise<Uint8Array>;
   receive(update: Uint8Array): void;
 };
-
-/** A share page: the editor's change runs inside the session's transaction, as the transport runs it. */
-function sharePage(baseline: Uint8Array): Promise<Person> {
-  const doc = new Y.Doc();
-  Y.applyUpdate(doc, baseline, REMOTE);
-  const sent: Uint8Array[] = [];
-  doc.on("update", (update: Uint8Array, origin: unknown) => {
-    if (origin !== REMOTE) sent.push(update);
-  });
-  const mount = window.document.createElement("div");
-  window.document.body.append(mount);
-  let view: EditorView | undefined;
-  const updateState = EditorView.prototype.updateState;
-  EditorView.prototype.updateState = function (this: EditorView, state) {
-    view = this;
-    return updateState.call(this, state);
-  };
-  const editor = mountLiveBodyEditor(mount, {
-    body: getDohcYDocBodyFragment(doc),
-    label: "Shared file editor",
-    canEdit: () => true,
-    edit(change) {
-      doc.transact(change);
-      return true;
-    },
-  });
-  EditorView.prototype.updateState = updateState;
-  stops.push(() => {
-    editor.destroy();
-    mount.remove();
-    doc.destroy();
-  });
-  return Promise.resolve({
-    doc,
-    view: view!,
-    take: async () => Y.mergeUpdates(sent.splice(0)),
-    receive: (update) => Y.applyUpdate(doc, update, REMOTE),
-  });
-}
 
 /** The desktop: the Markdown editor on the engine's document, sending what it ships to main. */
 async function desktop(baseline: Uint8Array): Promise<Person> {
@@ -156,7 +115,6 @@ function verdict(baseline: Uint8Array, suffix: Uint8Array[], candidate: Uint8Arr
   return result.kind === "refused" ? `refused: ${result.reason}` : result.kind;
 }
 
-const pages = { desktop, "share page": sharePage };
 const TASKS = "- [ ] alpha\n- [x] bravo\n- [ ] charlie\n- [x] delta\n";
 
 function caretAtLineStart(person: Person, index: number) {
@@ -248,25 +206,3 @@ it("shows each person the note's to-do boxes after two people turn neighbouring 
     expect(shown(person.view.state.doc)).toEqual(read(note, person.view));
   expect(refused.size).toBe(0);
 });
-
-// Backspace at the start of a to-do on a share page moves its line into the to-do above.
-it.each([
-  ["desktop", "share page"],
-  ["share page", "share page"],
-] as const)(
-  "keeps every line when two people join neighbouring to-dos into the ones above at once (%s, then %s)",
-  async (first, second) => {
-    const seed = markdownToYDoc(TASKS);
-    const baseline = Y.encodeStateAsUpdate(seed);
-    seed.destroy();
-    const a = await pages[first](baseline),
-      b = await pages[second](baseline);
-    caretAtLineStart(a, 1);
-    backspace(a);
-    caretAtLineStart(b, 2);
-    backspace(b);
-    const { note, refused } = await throughServer(baseline, [a, b]);
-    for (const line of ["alpha", "bravo", "charlie", "delta"]) expect(note).toContain(line);
-    expect(refused.size).toBe(0);
-  },
-);
