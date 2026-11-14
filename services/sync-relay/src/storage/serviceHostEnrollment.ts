@@ -1003,7 +1003,13 @@ function ensureInsideTransaction(
         .run(membersShareId, workspaceId, objectId);
     }
     if (input.intent === "member-open" ? memberTakes : input.intent !== "share")
-      recordDemand(storage, { workspaceId, objectId }, nowMs, owner, membersShareId, memberTakes);
+      recordDemand(
+        storage,
+        { workspaceId, objectId },
+        nowMs,
+        owner,
+        !memberTakes && memberOpened(storage, current),
+      );
     input.changed?.(enabling);
     return read(storage, workspaceId, path)!;
   }
@@ -1063,28 +1069,21 @@ function ensureInsideTransaction(
 }
 /**
  * Records hosting demand. An owner's also takes the document out of the
- * agent-only caps. Any intent's demand but a member's takes the document out
- * of the member rules: it no longer names the members share.
+ * agent-only caps. With `leavesMembers`, the demand takes a member-opened
+ * document out of the member rules: it no longer names a members share,
+ * the current membership's or an ended one's.
  */
 function recordDemand(
   storage: StorageContext,
   document: { workspaceId: string; objectId: string },
   nowMs: number,
   owner: boolean,
-  membersShareId: string | null,
-  member = false,
+  leavesMembers: boolean,
 ): void {
   storage.db
     .prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET demand_at_ms=max(COALESCE(demand_at_ms,0),?),owner_demand=max(owner_demand,?),
-    share_id=CASE WHEN ? AND share_id=? THEN NULL ELSE share_id END WHERE workspace_id=? AND object_id=?`)
-    .run(
-      nowMs,
-      Number(owner),
-      Number(!member),
-      membersShareId,
-      document.workspaceId,
-      document.objectId,
-    );
+    share_id=CASE WHEN ? THEN NULL ELSE share_id END WHERE workspace_id=? AND object_id=?`)
+    .run(nowMs, Number(owner), Number(leavesMembers), document.workspaceId, document.objectId);
 }
 /**
  * Renews the demand of a document a personal session kept open, when that
