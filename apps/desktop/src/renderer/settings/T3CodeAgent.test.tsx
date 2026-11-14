@@ -333,6 +333,34 @@ it("keeps an older search's late answer out of the list", async () => {
   );
 });
 
+it("takes no pick from a list the search is about to replace", async () => {
+  renderList();
+  await chooseT3Code();
+  await sheet().findByRole("radio", { name: /^Issue owner/ });
+  const list = screen.getByTestId("t3-code-threads");
+  expect(list.hasAttribute("inert")).toBe(false);
+
+  // The person types. Until the search goes, the list they see is the old one.
+  const answer = deferred<T3CodeThreadPage>();
+  bridgeMock.listT3CodeThreads.mockReturnValueOnce(answer.promise);
+  fireEvent.change(sheet().getByRole("searchbox", { name: "Find a thread by title" }), {
+    target: { value: "owner" },
+  });
+  expect(list.hasAttribute("inert")).toBe(true);
+
+  // The search went, and its list can be picked from, while it loads and after.
+  await waitFor(() =>
+    expect(bridgeMock.listT3CodeThreads).toHaveBeenLastCalledWith({
+      projectId: "p-dohc",
+      titleContains: "owner",
+    }),
+  );
+  expect(list.hasAttribute("inert")).toBe(false);
+  await act(async () => answer.resolve(onePage(thread("t-owner", "Release owner"))));
+  await userEvent.click(threadRow("Release owner"));
+  expect(threadRow("Release owner").getAttribute("aria-checked")).toBe("true");
+});
+
 it("loads the next page of a project's threads, and another project's from its first", async () => {
   bridgeMock.listT3CodeThreads.mockResolvedValueOnce({
     threads: [thread("t-1", "First thread")],

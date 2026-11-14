@@ -464,6 +464,9 @@ export function T3CodeThreadPicker(props: {
           role="radiogroup"
           aria-labelledby={threadLabel}
           data-testid="t3-code-threads"
+          // The list is about to be replaced by what the field now says. A
+          // thread picked from it in that moment would be dropped with it.
+          inert={typed.trim() !== query}
           onKeyDown={onKeyDown}
           className="flex max-h-44 flex-col overflow-y-auto rounded-lg border border-line bg-bg p-1"
         >
