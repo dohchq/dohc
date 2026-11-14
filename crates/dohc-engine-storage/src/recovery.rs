@@ -278,7 +278,8 @@ fn prepare(
 /// The migrated copy at `copy`, checked once more and then read only. Setting
 /// `cancelled` stops that check; page reads are not part of it.
 fn open_copy(copy: &Path, cancelled: &Arc<AtomicBool>) -> Result<EngineStore, StorageError> {
-    let opened = crate::schema::open_engine_db_read_only(copy, None, Some(cancelled.clone()))?;
+    let opened =
+        crate::schema::open_engine_db_read_only(copy, None, Some(cancelled.clone()), true)?;
     let passive = crate::schema::store_is_passive(&opened.conn)?;
     Ok(EngineStore::from_read_only(opened.conn, copy, passive))
 }

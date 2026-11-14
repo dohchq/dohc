@@ -1045,7 +1045,7 @@ impl EngineService {
             let workspace_id = workspace.workspace_id.clone();
             let limits = adoption.owner_outbox.clone();
             let mismatch = tokio::task::spawn_blocking(move || {
-                let store = dohc_engine_storage::EngineStore::open_read_only(held.database_path()).map_err(|_|invalid("owner adoption budget read failed"))?;
+                let store = held.open_reader().map_err(|_|invalid("owner adoption budget read failed"))?;
                 store.read_with(|conn| dohc_engine_collab::live_update_application::owner_activations::retained_limits_exceed(
                     conn,&workspace_id,limits.max_pending_bytes,limits.max_pending_age_ms))
                     .map_err(|_|invalid("owner adoption budget read failed"))

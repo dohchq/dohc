@@ -249,6 +249,8 @@ pub struct WorkspaceActor {
 pub struct StoreLocation {
     path: std::path::PathBuf,
     prepared: std::sync::OnceLock<PreparedStore>,
+    /// The actor's writer open checked the store's pages.
+    pages_checked: std::sync::OnceLock<dohc_engine_storage::PagesChecked>,
 }
 
 impl StoreLocation {
@@ -256,6 +258,7 @@ impl StoreLocation {
         Arc::new(StoreLocation {
             path,
             prepared: std::sync::OnceLock::new(),
+            pages_checked: std::sync::OnceLock::new(),
         })
     }
 
@@ -270,6 +273,15 @@ impl StoreLocation {
     pub fn folder(&self) -> &std::path::Path {
         store_folder(&self.path)
     }
+
+    /// Open the store for queries only. While the actor's writer holds the
+    /// store, the open skips the page check that writer's open ran.
+    pub fn open_reader(&self) -> Result<EngineStore, StorageError> {
+        match self.pages_checked.get() {
+            Some(checked) => EngineStore::open_read_only_after(checked),
+            None => EngineStore::open_read_only(&self.path),
+        }
+    }
 }
 
 /// A read-only store opened by its location's path. It keeps the location,
@@ -282,7 +294,7 @@ pub(crate) struct HeldReader {
 
 impl HeldReader {
     pub(crate) fn open(location: Arc<StoreLocation>) -> Result<Self, RuntimeError> {
-        let store = EngineStore::open_read_only(location.database_path())?;
+        let store = location.open_reader()?;
         #[cfg(test)]
         held_reader_tests::opened(location.database_path(), &store);
         Ok(HeldReader {
@@ -440,8 +452,7 @@ impl WorkspaceActor {
         let state = Arc::new(AtomicU8::new(LifecycleState::Opening.as_u8()));
         // Startup handshake uses a std channel: `spawn` runs in a synchronous
         // context, so the open result must not depend on a tokio runtime.
-        let (startup_tx, startup_rx) =
-            std_sync_channel::<Result<(bool, CheckpointCycle), StorageError>>(1);
+        let (startup_tx, startup_rx) = std_sync_channel::<Result<StartedStore, StorageError>>(1);
 
         let link_metrics = SharedMetrics::default();
         let worker_metrics = Arc::clone(&link_metrics);
@@ -475,7 +486,10 @@ impl WorkspaceActor {
             .map_err(RuntimeError::ThreadSpawn)?;
 
         match startup_rx.recv() {
-            Ok(Ok((store_freshly_created, checkpoint_cycle))) => {
+            Ok(Ok((store_freshly_created, checkpoint_cycle, pages_checked))) => {
+                if let Some(checked) = pages_checked {
+                    let _ = store.pages_checked.set(checked);
+                }
                 #[allow(unused_mut)]
                 let mut actor = WorkspaceActor {
                     markdown_recovery,
@@ -1071,6 +1085,11 @@ impl ActorHandle {
         Arc::clone(&self.store)
     }
 
+    /// Open the store for queries only, as [`StoreLocation::open_reader`] does.
+    pub fn open_reader(&self) -> Result<EngineStore, StorageError> {
+        self.store.open_reader()
+    }
+
     /// The actor's current lifecycle state.
     pub fn lifecycle(&self) -> LifecycleState {
         LifecycleState::from_u8(self.state.load(Ordering::Acquire))
@@ -1204,7 +1223,7 @@ fn worker_main(
     state: Arc<AtomicU8>,
     link_metrics: SharedMetrics,
     link_drain_holds: Arc<AtomicU64>,
-    startup_tx: std::sync::mpsc::SyncSender<Result<(bool, CheckpointCycle), StorageError>>,
+    startup_tx: std::sync::mpsc::SyncSender<Result<StartedStore, StorageError>>,
     writer_lock: Option<WriterLock>,
     work_count: Option<Arc<AtomicU64>>,
     released_tails: ReleasedTails,
@@ -1276,7 +1295,11 @@ fn worker_main(
     state.store(LifecycleState::Ready.as_u8(), Ordering::Release);
     let checkpoint_cycle: CheckpointCycle = Arc::new(store.checkpoint_cycle());
     if startup_tx
-        .send(Ok((store_freshly_created, checkpoint_cycle)))
+        .send(Ok((
+            store_freshly_created,
+            checkpoint_cycle,
+            store.pages_checked(),
+        )))
         .is_err()
     {
         // The spawner unwound before the actor was built; nothing to serve.
@@ -1522,6 +1545,14 @@ type WriterLock = file_guard::FileGuard<Box<std::fs::File>>;
 #[cfg(not(any(windows, target_vendor = "apple")))]
 type WriterLock = std::fs::File;
 
+/// What a worker's open tells its spawner: whether it created the store, its
+/// checkpoint cycle, and that its writer open checked the store's pages.
+type StartedStore = (
+    bool,
+    CheckpointCycle,
+    Option<dohc_engine_storage::PagesChecked>,
+);
+
 fn require_single_database_link(file: &std::fs::File) -> Result<(), RuntimeError> {
     #[cfg(windows)]
     let count = winapi_util::file::information(file).map(|info| info.number_of_links());
@@ -1681,6 +1712,71 @@ mod held_reader_tests {
         let read = tokio::task::spawn_blocking(move || read_rx.recv());
         assert!(read.await.unwrap().unwrap(), "the reader could not read");
     }
+
+    /// The writer's open checked the pages, so a reader opened while it holds
+    /// the store does not read every page again. Damage made since is found
+    /// by a query that reads it, or by the next open once the writer closes.
+    #[test]
+    fn a_reader_skips_the_page_check_while_the_actor_holds_the_store() {
+        let scratch = ScratchDir::new().unwrap();
+        let db = engine_db_path(&scratch).unwrap();
+        let supervisor = crate::WorkspaceSupervisor::new();
+        drop(supervisor.open(&db, 1).unwrap());
+        assert!(supervisor.close(&db).unwrap());
+        // A table no open or startup reads, so damage to it shows only in a
+        // page check or a query of it. Closing the last connection folds the
+        // WAL into the file.
+        let (root, page_size) = {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE unread_pages (value); INSERT INTO unread_pages VALUES (1);",
+            )
+            .unwrap();
+            let root: i64 = conn
+                .query_row(
+                    "SELECT rootpage FROM sqlite_schema WHERE name = 'unread_pages'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let page_size: i64 = conn
+                .pragma_query_value(None, "page_size", |row| row.get(0))
+                .unwrap();
+            (root as u64, page_size as u64)
+        };
+        let actor = supervisor.open(&db, 2).unwrap().actor;
+        let location = actor.location();
+        {
+            use std::io::{Seek, SeekFrom, Write};
+            let mut file = std::fs::OpenOptions::new().write(true).open(&db).unwrap();
+            // Page type 0 is no b-tree page.
+            file.seek(SeekFrom::Start((root - 1) * page_size)).unwrap();
+            file.write_all(&[0]).unwrap();
+            file.sync_all().unwrap();
+        }
+        let reader = HeldReader::open(Arc::clone(&location))
+            .expect("a reader under the actor must not check the pages again");
+        assert!(
+            reader
+                .read_with(
+                    |conn| conn.query_row("SELECT count(*) FROM unread_pages", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                )
+                .is_err(),
+            "a query that reads the damaged page must fail"
+        );
+        drop(reader);
+        drop(actor);
+        assert!(supervisor.close(&db).unwrap());
+        assert!(
+            matches!(
+                HeldReader::open(location),
+                Err(RuntimeError::Storage(StorageError::StateCorrupt { .. }))
+            ),
+            "once the actor closes, a reader must check the pages"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1752,10 +1848,18 @@ pub(crate) mod test_support {
                 markdown_recovery,
             );
         }));
-        (actor.store_freshly_created, actor.checkpoint_cycle) = startup_rx
+        let pages_checked;
+        (
+            actor.store_freshly_created,
+            actor.checkpoint_cycle,
+            pages_checked,
+        ) = startup_rx
             .recv_timeout(Duration::from_secs(5))
             .unwrap()
             .unwrap();
+        if let Some(checked) = pages_checked {
+            let _ = actor.store.pages_checked.set(checked);
+        }
         assert!(!actor.store_freshly_created, "exercise a reopened store");
         actor
     }

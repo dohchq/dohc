@@ -11,7 +11,7 @@ use crate::schema::{OPEN_WORK_STEP_OPS, open_engine_db, open_engine_db_read_only
 use crate::{blob, materialize};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 /// Whether a string is a safe bare SQL identifier (ASCII alnum + underscore,
@@ -40,6 +40,18 @@ pub struct EngineStore {
     flushes: crate::flush::Flushes,
     opening: u64,
     wal_pressure: Arc<crate::checkpoint::WalPressure>,
+    /// Set while this writer, whose open checked the store's pages, is open.
+    /// A read-only store has none.
+    pages_checked: Option<Arc<AtomicBool>>,
+}
+
+/// That a writer's open checked the pages of the store at its path. A
+/// read-only open through it skips that check while the writer stays open,
+/// and checks the pages again once the writer closes.
+#[derive(Debug)]
+pub struct PagesChecked {
+    path: PathBuf,
+    writer_open: Arc<AtomicBool>,
 }
 
 /// The number of the next open of any store in this process.
@@ -134,6 +146,7 @@ impl EngineStore {
             flushes,
             opening: next_opening(),
             wal_pressure: Arc::default(),
+            pages_checked: Some(Arc::new(AtomicBool::new(true))),
         })
     }
 
@@ -172,6 +185,7 @@ impl EngineStore {
             flushes,
             opening: next_opening(),
             wal_pressure: Arc::default(),
+            pages_checked: Some(Arc::new(AtomicBool::new(true))),
         })
     }
 
@@ -198,6 +212,7 @@ impl EngineStore {
             flushes,
             opening: next_opening(),
             wal_pressure: Arc::default(),
+            pages_checked: Some(Arc::new(AtomicBool::new(true))),
         })
     }
 
@@ -226,6 +241,7 @@ impl EngineStore {
             flushes,
             opening: next_opening(),
             wal_pressure: Arc::default(),
+            pages_checked: Some(Arc::new(AtomicBool::new(true))),
         })
     }
 
@@ -241,7 +257,40 @@ impl EngineStore {
         path: &Path,
         work: Option<Arc<AtomicU64>>,
     ) -> Result<Self, StorageError> {
-        let opened = open_engine_db_read_only(path, work, None)?;
+        let opened = open_engine_db_read_only(path, work, None, true)?;
+        let passive = crate::schema::store_is_passive(&opened.conn)?;
+        Ok(Self::from_read_only(opened.conn, path, passive))
+    }
+
+    /// That this writer's open checked the store's pages, for read-only opens
+    /// made while it stays open. A read-only store has none.
+    pub fn pages_checked(&self) -> Option<PagesChecked> {
+        self.pages_checked.as_ref().map(|writer_open| PagesChecked {
+            path: self.database_path.clone(),
+            writer_open: Arc::clone(writer_open),
+        })
+    }
+
+    /// [`Self::open_read_only`] for the store `checked` names. While the writer
+    /// whose open checked its pages stays open, this checks only the schema.
+    pub fn open_read_only_after(checked: &PagesChecked) -> Result<Self, StorageError> {
+        Self::open_read_only_while(&checked.path, || {
+            checked.writer_open.load(Ordering::Acquire)
+        })
+    }
+
+    /// A writer that is open once this open has finished was open throughout
+    /// it, since `writer_open` never turns true again. Otherwise the pages are
+    /// checked, as the writer may have closed before the file was opened.
+    fn open_read_only_while(
+        path: &Path,
+        writer_open: impl Fn() -> bool,
+    ) -> Result<Self, StorageError> {
+        let skipped = writer_open();
+        let opened = open_engine_db_read_only(path, None, None, !skipped)?;
+        if skipped && !writer_open() {
+            crate::schema::integrity_check(&opened.conn)?;
+        }
         let passive = crate::schema::store_is_passive(&opened.conn)?;
         Ok(Self::from_read_only(opened.conn, path, passive))
     }
@@ -262,6 +311,7 @@ impl EngineStore {
             flushes: crate::flush::Flushes::read_only(),
             opening: next_opening(),
             wal_pressure: Arc::default(),
+            pages_checked: None,
         }
     }
 
@@ -1255,6 +1305,11 @@ impl EngineStore {
 
 impl Drop for EngineStore {
     fn drop(&mut self) {
+        // A reader opened from here on checks the pages, since this writer no
+        // longer holds the store.
+        if let Some(writer_open) = &self.pages_checked {
+            writer_open.store(false, Ordering::Release);
+        }
         // Best effort. The actor drains before each reply; this covers work no
         // reply covered.
         if let Err(error) = self.drain_flushes() {
@@ -1268,3 +1323,57 @@ impl Drop for EngineStore {
 #[cfg(test)]
 #[path = "store/background_checkpoint_tests.rs"]
 mod background_checkpoint_tests;
+
+#[cfg(test)]
+mod pages_checked_tests {
+    use super::*;
+    use dohc_test_scratch::ScratchDir;
+
+    /// A store whose one user table has a damaged page that no open reads.
+    fn damaged_store(root: &ScratchDir) -> PathBuf {
+        let db = root.join("engine.db");
+        drop(EngineStore::open(&db, 1).unwrap());
+        let (root_page, page_size) = {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE unread_pages (value); INSERT INTO unread_pages VALUES (1);",
+            )
+            .unwrap();
+            let root_page: i64 = conn
+                .query_row(
+                    "SELECT rootpage FROM sqlite_schema WHERE name = 'unread_pages'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let page_size: i64 = conn
+                .pragma_query_value(None, "page_size", |row| row.get(0))
+                .unwrap();
+            (root_page as u64, page_size as u64)
+        };
+        use std::io::{Seek, SeekFrom, Write};
+        let mut file = std::fs::OpenOptions::new().write(true).open(&db).unwrap();
+        // Page type 0 is no b-tree page.
+        file.seek(SeekFrom::Start((root_page - 1) * page_size))
+            .unwrap();
+        file.write_all(&[0]).unwrap();
+        file.sync_all().unwrap();
+        db
+    }
+
+    #[test]
+    fn a_reader_checks_the_pages_if_the_writer_closed_during_its_open() {
+        let root = ScratchDir::new_named("pages-checked-race").unwrap();
+        let db = damaged_store(&root);
+        assert!(EngineStore::open_read_only_while(&db, || true).is_ok());
+        let loads = std::cell::Cell::new(0);
+        let closed_during_open = || {
+            loads.set(loads.get() + 1);
+            loads.get() == 1
+        };
+        assert!(matches!(
+            EngineStore::open_read_only_while(&db, closed_during_open),
+            Err(StorageError::StateCorrupt { .. })
+        ));
+    }
+}

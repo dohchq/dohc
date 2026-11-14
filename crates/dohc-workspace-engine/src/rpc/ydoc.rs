@@ -1005,8 +1005,7 @@ impl EngineService {
         let token = cancellation.token();
         let read_page = move |open: Arc<OpenWorkspace>, cursor: Option<_>, outbox_id: String| async move {
             tokio::task::spawn_blocking(move || {
-                let store =
-                    dohc_engine_storage::EngineStore::open_read_only(open.actor.database_path())?;
+                let store = open.actor.open_reader()?;
                 dohc_engine_collab::read_pending_owner_outbox_page(
                     &store,
                     &open.workspace_id,
