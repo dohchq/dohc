@@ -538,6 +538,8 @@ const SHARE_RELAY_POLL_MS = 5 * 60 * 1000;
 
 // The Notices row of a shared view whose refresh can't read its collision record.
 const SHARE_COLLISION_RECORD_ROW = "share-collision-record";
+// One row for the Collections list read, which a later failure replaces.
+const COLLECTIONS_READ = "collections-read";
 type ShareViewRefreshTrigger = NonNullable<RefreshSharedViewPayload["trigger"]>;
 
 // What a refresh that set a shared view's collision record aside tells the
@@ -2486,6 +2488,21 @@ export function DesktopWorkspaceShell(props: {
   const shareViewWritable = !shareViewDamaged && !shareViewEnded && shareAccess === "edit";
   const shareViewEndedRef = useRef(shareViewEnded);
   shareViewEndedRef.current = shareViewEnded;
+  // When another account than the one that joined is signed in, Members says
+  // so once. Collections need the joined account, so they add no toast or row.
+  const otherAccount = cloudStatus?.joinedBySignedInAccount === false;
+  const otherAccountRef = useRef(otherAccount);
+  otherAccountRef.current = otherAccount;
+  useEffect(() => {
+    if (otherAccount) clearIdentity(COLLECTIONS_READ);
+  }, [clearIdentity, otherAccount]);
+  const reportCollectionsRead = useCallback(
+    (error: unknown, retry: (() => void) | null = null) => {
+      if (!otherAccountRef.current)
+        reportShellError("Could not read Collections.", error, retry, undefined, COLLECTIONS_READ);
+    },
+    [reportShellError],
+  );
   const shareViewWritableRef = useRef(shareViewWritable);
   shareViewWritableRef.current = shareViewWritable;
   const shareHadEditRef = useRef(shareView?.access === "edit");
@@ -2581,17 +2598,11 @@ export function DesktopWorkspaceShell(props: {
       if (workspaceAdmission.superseded || shareViewEndedRef.current) return;
       void refreshDatasets().catch((error) => {
         if (!workspaceAdmission.superseded && !shareViewEndedRef.current)
-          reportShellError(
-            "Could not read Collections.",
-            error,
-            refresh,
-            undefined,
-            COLLECTIONS_LIST_NOTICE,
-          );
+          reportCollectionsRead(error, refresh);
       });
     };
     refresh();
-  }, [workspaceIsReady, workspaceAdmission, shareViewEnded, refreshDatasets, reportShellError]);
+  }, [workspaceIsReady, workspaceAdmission, shareViewEnded, refreshDatasets, reportCollectionsRead]);
   // This computer's saved Collections list came up to date from the server.
   useEffect(() => {
     if (!workspaceIsReady || shareViewEnded) return;
@@ -2605,15 +2616,9 @@ export function DesktopWorkspaceShell(props: {
   const retryCollectionsList = useCallback(() => {
     void refreshDatasets().catch((error) => {
       if (!workspaceAdmission.superseded)
-        reportShellError(
-          "Could not read Collections.",
-          error,
-          null,
-          undefined,
-          COLLECTIONS_LIST_NOTICE,
-        );
+        reportCollectionsRead(error);
     });
-  }, [refreshDatasets, reportShellError, workspaceAdmission]);
+  }, [refreshDatasets, reportCollectionsRead, workspaceAdmission]);
   // Keeps Collections no computer keeps yet on this one, then reads the list, and runs `then`, such as a tab's own read.
   const keepCollectionsWithList = useCallback(
     (then?: () => void) => {
@@ -4492,15 +4497,9 @@ export function DesktopWorkspaceShell(props: {
   const clearCollectionHistory = useCallback(() => setCollectionHistoryTab(null), []);
   const onMoreDataCollections = useCallback(() => {
     void loadMoreDatasets().catch((error) =>
-      reportShellError(
-        "Could not read Collections.",
-        error,
-        undefined,
-        undefined,
-        COLLECTIONS_LIST_NOTICE,
-      ),
+      reportCollectionsRead(error),
     );
-  }, [loadMoreDatasets, reportShellError]);
+  }, [loadMoreDatasets, reportCollectionsRead]);
   const onRestoreCollection = useCallback(() => {
     setRecoveryWorkspaceId(workspaceId);
   }, [workspaceId]);
@@ -6210,13 +6209,7 @@ export function DesktopWorkspaceShell(props: {
       if (!shareView) {
         void refreshDatasets().catch((error) => {
           if (!workspaceAdmission.superseded)
-            reportShellError(
-              "Could not read Collections.",
-              error,
-              null,
-              undefined,
-              COLLECTIONS_LIST_NOTICE,
-            );
+            reportCollectionsRead(error);
         });
         void refreshKeptCopies();
         // Capture records kept typing in the batch that took the outside text.
@@ -6273,6 +6266,7 @@ export function DesktopWorkspaceShell(props: {
     shareViewReadsCollections,
     refreshCollections,
     refreshDatasets,
+    reportCollectionsRead,
     refreshKeptCopies,
     captureRecoveries,
     mergeRemovals,
@@ -9784,13 +9778,7 @@ export function DesktopWorkspaceShell(props: {
                               setNewCollectionFolder(null);
                               if (ref.kind === "transactional") {
                                 void refreshDatasets().catch((error) =>
-                                  reportShellError(
-                                    "Could not read Collections.",
-                                    error,
-                                    null,
-                                    undefined,
-                                    COLLECTIONS_LIST_NOTICE,
-                                  ),
+                                  reportCollectionsRead(error),
                                 );
                                 void refreshFiles().catch((error) =>
                                   reportShellError("Could not refresh workspace files.", error),

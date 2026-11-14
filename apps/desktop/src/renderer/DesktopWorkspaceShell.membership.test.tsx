@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { ObserverStub } from "./DesktopWorkspaceShell.testSupport";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { chatTabPath } from "./workbench/workbenchState";
@@ -197,6 +197,22 @@ describe("a joined workspace", () => {
     render(shell(bridge, { ...JOINED, shareView: { ...JOINED.shareView!, ...change } }));
     expect((await screen.findByTestId("linked-chat-readonly-note")).textContent).toBe(note);
     expect(screen.queryByTestId("linked-chat-new")).toBeNull();
+  });
+
+  // Members says once that another account is signed in. Collections need
+  // the account that joined, so they add no toast or row of their own.
+  it.each([[true, 1], [false, 0]])("reports a failed Collections read when the account matches (%s) %i times", async (matches, toasts) => {
+    const bridge = makeShareBridge();
+    bridge.cloudStatus.mockResolvedValue({ connected: true, email: "lee@dohc.test", serverUrl: "https://cloud.dohc.test", workspaceSynced: true,
+      joinedBySignedInAccount: matches });
+    bridge.dataset.mockRejectedValue(new Error("Collection access or rules changed."));
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(shell(bridge, JOINED));
+    await waitFor(() => expect(bridge.dataset).toHaveBeenCalled());
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalled());
+    // The failed read and the status settle before the toasts are counted.
+    await act(async () => { await bridge.dataset.mock.results[0]!.value.catch(() => undefined); await bridge.cloudStatus.mock.results[0]!.value; });
+    await waitFor(() => expect(screen.queryAllByText(/Could not read Collections/)).toHaveLength(toasts));
   });
 
   it("shows the ended band and keeps the copy readable after the membership ends", async () => {

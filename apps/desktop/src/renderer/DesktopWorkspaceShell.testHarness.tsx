@@ -88,6 +88,7 @@ import type {
   WorkspaceUiState,
   PersonalAgentChangeResult,
   PersonalAgentsEvent,
+  CloudStatusResult,
 } from "../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import {
@@ -700,7 +701,7 @@ function makeBaseBridge(
       state: READY_UPDATE_STATE,
     })),
     getDroppedFilePaths: vi.fn((_files: File[]): string[] => []),
-    cloudStatus: vi.fn(async () => ({
+    cloudStatus: vi.fn(async (): Promise<CloudStatusResult> => ({
       connected: true,
       email: "me@dohc.test",
       serverUrl: "https://cloud.dohc.test",
