@@ -216,9 +216,12 @@ export function createAccount(options: {
     const leave = async () => {
       if (left) return;
       left = true;
-      advance();
-      saved = null;
-      setState(signedOut(origin, false));
+      // A 401 may have ended this sign-in while the hook ran, and a newer one started; that one stays.
+      if (saved === ending) {
+        advance();
+        saved = null;
+        setState(signedOut(origin, false));
+      }
       if (ending) await forget(ending.origin, ending.token);
     };
     const cleaning = options.onSignOut?.(leave);

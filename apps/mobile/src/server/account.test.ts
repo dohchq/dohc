@@ -314,6 +314,39 @@ describe("signing out", () => {
     expect(account.state()).toMatchObject({ status: "signed-out" });
   });
 
+  it("keeps a newer sign-in when a 401 ended the old one while its cleanup ran", async () => {
+    const { server, tokens } = setup();
+    server.on("GET", "/sync/account/sessions", "offline");
+    const cleanup = deferred<void>();
+    const cleaned = vi.fn(async (leave: () => Promise<void>) => {
+      await cleanup.promise;
+      await leave();
+    });
+    const account = createAccount({
+      store: tokens.store,
+      fetch: server.fetch,
+      sleep: async () => {},
+      onSignOut: cleaned,
+    });
+    await account.restore();
+    const earlier = signedIn(account);
+    const ending = account.signOut();
+    // While the outbox's cleanup waits, a request answers 401, and the person signs in again.
+    server.on("GET", "/sync/account/workspaces", {
+      status: 401,
+      body: { ok: false, code: "unauthorized" },
+    });
+    await expect(listWorkspaces(earlier.client)).rejects.toEqual(
+      new ServerError("signed-out", 401, "unauthorized"),
+    );
+    serveSignIn(server);
+    expect(await account.signIn(server.origin, () => {})).toBe("signed-in");
+    cleanup.resolve();
+    await ending;
+    expect(signedIn(account).email).toBe("sam@example.com");
+    expect(tokens.current()?.token).toBe("tok-2");
+  });
+
   it("ends a newer sign-in even while an earlier sign-out still waits on its revoke", async () => {
     const { server, tokens } = setup();
     const revoking = deferred<Answer>();
