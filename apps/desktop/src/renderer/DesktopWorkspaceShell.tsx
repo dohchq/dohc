@@ -3739,7 +3739,7 @@ export function DesktopWorkspaceShell(props: {
               // The package is in .dohc/local, which dohc does not open as a
               // file, so the row stays to say where it is and copy its path.
               showWarningNotice(
-                `dohc could not make a readable copy of your kept edits for ${path}. They are saved on this computer, in the file below.${kept}`,
+                `dohc could not make a readable copy of your kept edits for ${path}. A copy of them is saved on this computer, in the file below.${kept}`,
                 [saved.packagePath],
               );
               return;
