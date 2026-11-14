@@ -4,7 +4,12 @@ WORKDIR /source
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/ crates/
 COPY vendor/ vendor/
-RUN cargo build --locked --release -p dohc-workspace-engine --bin dohc-workspace-engine
+# Frame pointers let a profiler walk the engine's stacks. With no debug info, Cargo strips debug
+# sections but keeps the symbol table, so a stack names functions but not source lines.
+# CFLAGS gives the bundled C code (SQLite) frame pointers too: the cc crate adds them only with debug info.
+# Only this build gets them; the desktop builds its engine with the workspace's release profile.
+RUN RUSTFLAGS="-C force-frame-pointers=yes" CFLAGS="-fno-omit-frame-pointer" \
+    cargo build --locked --release -p dohc-workspace-engine --bin dohc-workspace-engine
 
 FROM node:24.16.0-bookworm-slim AS build
 ENV PNPM_HOME=/pnpm ELECTRON_SKIP_BINARY_DOWNLOAD=1
