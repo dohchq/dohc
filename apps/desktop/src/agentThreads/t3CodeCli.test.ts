@@ -1,3 +1,6 @@
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { T3CodeError, T3_CODE_ACCESS } from "./t3Code";
 import {
@@ -121,4 +124,61 @@ describe("making dohc's own sign-in code with T3 Code's program", () => {
     );
     await expect(codes.make("auto", cancel.signal)).rejects.toBe(reason);
   });
+});
+
+// The same, with a program file this computer runs. The file stands in for
+// T3 Code's own: it records what it was asked and prints the file beside it.
+describe("running T3 Code's program", () => {
+  const windows = process.platform === "win32";
+
+  async function program(script: { windows: string; other: string }) {
+    const home = await mkdtemp(join(tmpdir(), "dohc t3 program "));
+    const bin = join(home, "bin");
+    await mkdir(bin);
+    const path = t3CodeCliPath(home);
+    await writeFile(path, windows ? script.windows : script.other);
+    if (!windows) await chmod(path, 0o755);
+    return { home, bin, codes: createT3CodeCodeMaker({ home }) };
+  }
+
+  it("reads the code a program prints, and none from one that fails", async () => {
+    const { home, bin, codes } = await program({
+      windows: '@echo %*> "%~dp0asked.txt"\r\n@type "%~dp0made.json" 2>nul\r\n',
+      other:
+        '#!/bin/sh\necho "$*" > "$(dirname "$0")/asked.txt"\nexec cat "$(dirname "$0")/made.json" 2>/dev/null\n',
+    });
+    try {
+      expect(codes.available()).toBe(true);
+      await expect(codes.make("auto", never)).rejects.toMatchObject({
+        problem: "cannot-allow-here",
+      });
+      await writeFile(join(bin, "made.json"), JSON.stringify({ credential: "Q8RZ3NWD5KTC" }));
+      await expect(codes.make("full-access", never)).resolves.toBe("Q8RZ3NWD5KTC");
+      // cmd.exe hands a .cmd file each part in the quotes it arrived in.
+      const asked = (await readFile(join(bin, "asked.txt"), "utf8")).replaceAll('"', "").trim();
+      expect(asked).toBe(
+        "auth pairing create --scope orchestration:read --scope orchestration:operate " +
+          "--scope settings:write --scope source-control:write --ttl 1m --label dohc --json",
+      );
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it("ends a program that is still running when the person cancels", async () => {
+    const { home, codes } = await program({
+      windows: "@ping -n 60 127.0.0.1 >nul\r\n",
+      other: "#!/bin/sh\nexec sleep 60\n",
+    });
+    const cancel = new AbortController();
+    const reason = new T3CodeError("not-allowed", "The sign-in to T3 Code was cancelled.");
+    try {
+      const making = codes.make("auto", cancel.signal);
+      setTimeout(() => cancel.abort(reason), 300);
+      await expect(making).rejects.toBe(reason);
+    } finally {
+      // The folder can be removed once the program no longer holds it.
+      await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    }
+  }, 15_000);
 });
