@@ -27,6 +27,7 @@ function fixture() {
     lastApplied: null,
     membership: null,
     typingAhead: false,
+    typingStopped: false,
   };
   const notify = () => {
     for (const listener of listeners) listener(state);
@@ -327,7 +328,13 @@ it("shows the text on the host's early state, says typed words are not sent, and
   expect(status()).toBe("Not sent yet. Your changes are only in this tab.");
   expect(panel()).toBeNull();
   expect(unloadWarns()).toBe(true);
-  await act(async () => f.update({ status: "disconnected", reason: "host-unavailable" }));
+  await act(async () =>
+    f.update({ status: "disconnected", reason: "host-unavailable", typingStopped: true }),
+  );
+  expect(textbox()).toBe("false");
+  expect(panel()?.textContent).toContain("Review your draft");
+  // The page's own retry keeps the editor shut and the draft offered until it is live.
+  await act(async () => f.update({ status: "authorizing", reason: null }));
   expect(textbox()).toBe("false");
   expect(panel()?.textContent).toContain("Review your draft");
   expect(container.textContent).not.toContain("Changes saved");

@@ -29,8 +29,8 @@ const FINAL = ["access-removed", "link-full"];
 export function draftNeedsReview(state: NamedLiveBrowserState): boolean {
   return (
     state.status === "quarantined" ||
-    // Words typed ahead wait on an open that stopped, even one that tries again by itself.
-    (state.typingAhead && state.pendingUpdates > 0 && state.status === "disconnected") ||
+    // Words typed ahead wait on an open that stopped, through the page's own retries until it is live.
+    (state.typingAhead && state.typingStopped && state.pendingUpdates > 0) ||
     (state.pendingUpdates > 0 &&
       (state.status === "closed" ||
         (state.status === "disconnected" &&

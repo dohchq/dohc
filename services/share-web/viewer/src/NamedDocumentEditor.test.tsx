@@ -21,6 +21,7 @@ function session(markdown: string) {
     lastApplied: null,
     membership: null,
     typingAhead: false,
+    typingStopped: false,
   };
   return {
     doc,
