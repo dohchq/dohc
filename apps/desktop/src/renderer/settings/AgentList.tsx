@@ -1185,7 +1185,7 @@ export function AgentList(props: {
             onRename={() => setRenaming(agent.id)}
             onRemove={() => setRemoving({ workspaceId, agent })}
             onCheck={() => void check(agent)}
-            onChange={(change) => onSave(withAgent(settings, agent.id, change))}
+            onChange={(change) => void onSave(withAgent(settings, agent.id, change))}
             onError={(message, cause, retry) => onError?.(message, cause, retry)}
             onBack={closePage}
             backRef={back}

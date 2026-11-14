@@ -171,11 +171,6 @@ export function reminderText(target: ReplyTarget): string {
   ].join("\n");
 }
 
-/**
- * What dohc tells an agent thread when its person turns a workspace on for
- * it. The thread can then hold more than one workspace's messages, and other
- * people can read what it posts in each (ADR 0016).
- */
 // What a thread that holds more than one workspace's messages is asked. dohc
 // cannot make it do so (ADR 0016).
 const SEVERAL_WORKSPACES = [
@@ -183,6 +178,11 @@ const SEVERAL_WORKSPACES = [
   "Other people may read a workspace's chats. Post in a workspace only what belongs there. Do not carry what you learned from one workspace into another unless the person asks you to.",
 ];
 
+/**
+ * What dohc tells an agent thread when its person turns a workspace on for
+ * it. The thread can then hold more than one workspace's messages, and other
+ * people can read what it posts in each (ADR 0016).
+ */
 export function anotherWorkspaceText(input: { agentName: string; workspaceName: string }): string {
   return [
     `The person who connected this thread to dohc as their agent ${quoted(input.agentName)} now forwards their messages from the workspace named ${quoted(input.workspaceName)} to this thread.`,

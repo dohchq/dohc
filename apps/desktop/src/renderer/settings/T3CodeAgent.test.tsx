@@ -107,8 +107,9 @@ const bridgeMock = {
     async (_payload: { workspaceId: string; agentId: string; threadId: string }): Promise<void> =>
       undefined,
   ),
-  readyAgentThreadWorkspace: vi.fn(
-    async (_payload: { workspaceId: string; agentId: string }): Promise<void> => undefined,
+  setAgentThreadWorkspace: vi.fn(
+    async (_payload: { workspaceId: string; agentId: string; on: boolean }): Promise<void> =>
+      undefined,
   ),
 };
 vi.mock("../bridge", () => ({ bridge: () => bridgeMock }));
@@ -133,6 +134,8 @@ beforeEach(() => {
   // A test that fails before it uses up an answer it queued must not hand it to the next test.
   bridgeMock.readT3CodeConnection.mockReset();
   bridgeMock.allowDohcInT3Code.mockReset();
+  bridgeMock.changeAgentThread.mockReset();
+  bridgeMock.setAgentThreadWorkspace.mockReset();
 });
 afterEach(cleanup);
 
@@ -569,11 +572,11 @@ it("reads the thread again when the agent is saved with another one, and only th
   expect(bridgeMock.readAgentThread).toHaveBeenCalledTimes(2);
 });
 
-it("does not name the thread the agent left while its save is still on its way", async () => {
+it("does not name the thread the agent left when an answer for it comes after the settings changed", async () => {
   const { row, rerender } = await openChiefPage();
   expect(await row.findByText("Chief of Staff: dohc")).toBeTruthy();
-  // Settings show the new thread at once. The save has not landed, so the
-  // first answer is still for the thread the agent had.
+  // The settings name the new thread. The first answer is still for the
+  // thread the agent had.
   bridgeMock.readAgentThread
     .mockResolvedValueOnce({ threadId: "t-chief", title: "Chief of Staff: dohc", closed: true })
     .mockResolvedValueOnce({ threadId: "t-issue", title: "Issue owner", closed: false });
@@ -597,8 +600,8 @@ it("says what T3 Code said of the agent's thread, and never of the thread it lef
   expect(within(await row.findByTestId("agent-page-thread-retry")).getByText(gone)).toBeTruthy();
   expect(onError).toHaveBeenCalledWith(gone, expect.any(Error), expect.any(Function));
 
-  // The person changes the thread. The save has not landed, so the first
-  // answer is still that the old thread is gone. It is not said of the new one.
+  // The settings name another thread. The first answer is still that the old
+  // thread is gone. It is not said of the new one.
   bridgeMock.readAgentThread
     .mockResolvedValueOnce({ threadId: "t-chief", problem: gone })
     .mockResolvedValueOnce({ threadId: "t-issue", title: "Issue owner", closed: false });
@@ -647,9 +650,12 @@ it("opens the agent's thread in T3 Code, and reports when it could not", async (
   expect(onError).toHaveBeenCalledTimes(reports);
 });
 
-it("changes the thread: readies the picked one, then saves the agent with it and nothing else", async () => {
-  const readying = deferred();
-  bridgeMock.changeAgentThread.mockReturnValueOnce(readying.promise);
+const ISSUE = withChief({ thread: { tool: "t3-code", id: "t-issue" } });
+const issueThread = { threadId: "t-issue", title: "Issue owner", closed: false };
+
+it("changes the thread in main, saves nothing itself, and names the new thread once the settings have it", async () => {
+  const changing = deferred();
+  bridgeMock.changeAgentThread.mockReturnValueOnce(changing.promise);
   const { row, onSave, rerender, opener, issue } = await openChangeDialog();
   const box = changeDialog();
   expect(screen.getByRole("dialog", { name: "Change Chief of Staff's thread" })).toBeTruthy();
@@ -673,48 +679,70 @@ it("changes the thread: readies the picked one, then saves the agent with it and
 
   await userEvent.click(issue);
   expect(box.queryByTestId("agent-thread-change-same")).toBeNull();
-  await userEvent.click(changeConfirm());
+  // Two presses before the window draws again ask main once.
+  act(() => {
+    changeConfirm().click();
+    changeConfirm().click();
+  });
   expect(bridgeMock.changeAgentThread).toHaveBeenCalledExactlyOnceWith({
     workspaceId: "ws-1",
     agentId: "t3-code",
     threadId: "t-issue",
   });
-  // While the thread is readied the button says so, nothing is saved, and the dialog stays.
+  // While main changes the thread the button says so, and the dialog stays.
   expect(changeConfirm().textContent).toBe("Changing…");
   expect(changeConfirm().disabled).toBe(true);
   expect(box.getByRole<HTMLButtonElement>("button", { name: "Cancel" }).disabled).toBe(true);
   fireEvent.keyDown(document.body, { key: "Escape" });
   expect(screen.getByTestId("agent-thread-change-dialog")).toBeTruthy();
-  expect(onSave).not.toHaveBeenCalled();
 
-  await act(async () => readying.resolve());
-  expect(onSave).toHaveBeenCalledOnce();
-  const saved = onSave.mock.calls[0]![0];
-  expect(saved).toEqual(withChief({ thread: { tool: "t3-code", id: "t-issue" } }));
+  // Main answers before its settings reach this window. The dialog closes,
+  // and the row names the thread the settings here still have.
+  await act(async () => changing.resolve());
   expect(screen.queryByTestId("agent-thread-change-dialog")).toBeNull();
   await waitFor(() => expect(document.activeElement).toBe(opener));
+  expect(row.getByText("Chief of Staff: dohc")).toBeTruthy();
+  expect(bridgeMock.readAgentThread).toHaveBeenCalledOnce();
 
-  // The saved agent's row names the new thread.
-  bridgeMock.readAgentThread.mockResolvedValueOnce({
-    threadId: "t-issue",
-    title: "Issue owner",
-    closed: false,
-  });
-  rerender(saved);
+  // Main's settings arrive, and the row names the new thread.
+  bridgeMock.readAgentThread.mockResolvedValueOnce(issueThread);
+  rerender(ISSUE);
   expect(await row.findByText("Issue owner")).toBeTruthy();
+  // Main saved the thread. This window saved nothing.
+  expect(onSave).not.toHaveBeenCalled();
 });
 
-it("keeps the dialog and the pick when the thread can't be readied, and saves nothing", async () => {
+it("keeps the Change thread dialog as it is when main's settings arrive before its answer", async () => {
+  const changing = deferred();
+  bridgeMock.changeAgentThread.mockReturnValueOnce(changing.promise);
+  const { row, onSave, rerender, issue } = await openChangeDialog();
+  await userEvent.click(issue);
+  await userEvent.click(changeConfirm());
+  bridgeMock.readAgentThread.mockResolvedValueOnce(issueThread);
+  rerender(ISSUE);
+  // The settings name the picked thread because of this change, so the dialog
+  // does not say the thread is already the agent's.
+  expect(changeConfirm().textContent).toBe("Changing…");
+  expect(changeDialog().queryByTestId("agent-thread-change-same")).toBeNull();
+
+  await act(async () => changing.resolve());
+  expect(screen.queryByTestId("agent-thread-change-dialog")).toBeNull();
+  expect(await row.findByText("Issue owner")).toBeTruthy();
+  expect(onSave).not.toHaveBeenCalled();
+});
+
+it("keeps the dialog and the pick when main could not change the thread, and asks again", async () => {
   const refusal =
     "T3 Code refused dohc because this thread runs with a broader mode than dohc was allowed.";
   bridgeMock.changeAgentThread.mockRejectedValueOnce(new Error(refusal));
-  const { onSave, issue } = await openChangeDialog();
+  const { onSave, onError, issue } = await openChangeDialog();
   await userEvent.click(issue);
   await userEvent.click(changeConfirm());
   expect((await changeDialog().findByTestId("agent-thread-change-error")).textContent).toBe(
     refusal,
   );
-  expect(onSave).not.toHaveBeenCalled();
+  // The dialog is still open, so it says why itself, and files no notice.
+  expect(onError).not.toHaveBeenCalled();
   expect(issue.getAttribute("aria-checked")).toBe("true");
   expect(changeConfirm().textContent).toBe("Change thread");
   expect(changeConfirm().disabled).toBe(false);
@@ -722,38 +750,29 @@ it("keeps the dialog and the pick when the thread can't be readied, and saves no
 
   // The same pick goes again from the same button.
   await userEvent.click(changeConfirm());
-  await waitFor(() => expect(onSave).toHaveBeenCalledOnce());
-  expect(onSave.mock.calls[0]![0].agents["t3-code"]!.thread).toEqual({
-    tool: "t3-code",
-    id: "t-issue",
+  await waitFor(() => expect(screen.queryByTestId("agent-thread-change-dialog")).toBeNull());
+  expect(bridgeMock.changeAgentThread).toHaveBeenCalledTimes(2);
+  expect(bridgeMock.changeAgentThread).toHaveBeenLastCalledWith({
+    workspaceId: "ws-1",
+    agentId: "t3-code",
+    threadId: "t-issue",
   });
-  expect(screen.queryByTestId("agent-thread-change-dialog")).toBeNull();
-});
-
-it("saves nothing for an answer that comes after the window changed workspaces", async () => {
-  const readying = deferred();
-  bridgeMock.changeAgentThread.mockReturnValueOnce(readying.promise);
-  const both = withChief({ workspaces: ["ws-1", "ws-2"] });
-  const { onSave, onError, rerender, issue } = await openChangeDialog(both);
-  await userEvent.click(issue);
-  await userEvent.click(changeConfirm());
-  rerender(both, "ws-2");
-  expect(screen.queryByTestId("agent-thread-change-dialog")).toBeNull();
-  await act(async () => readying.resolve());
   expect(onSave).not.toHaveBeenCalled();
-  expect(onError).not.toHaveBeenCalled();
 });
 
-it("saves nothing for an answer that comes after the agent's page is gone", async () => {
-  const readying = deferred();
-  bridgeMock.changeAgentThread.mockReturnValueOnce(readying.promise);
+it("changes nothing for a thread change's answer that comes after the Thread row is gone", async () => {
+  const changing = deferred();
+  bridgeMock.changeAgentThread.mockReturnValueOnce(changing.promise);
   const { onSave, onError, rerender, issue } = await openChangeDialog();
   await userEvent.click(issue);
   await userEvent.click(changeConfirm());
-  // The agent was removed from the settings file.
-  rerender(SETTINGS);
+  // Another window turned this workspace off, and the row went with its dialog.
+  rerender(ELSEWHERE);
   expect(screen.queryByTestId("agent-thread-change-dialog")).toBeNull();
-  await act(async () => readying.resolve());
+  const checks = bridgeMock.readT3CodeConnection.mock.calls.length;
+  await act(async () => changing.resolve());
+  // A dialog that closes checks T3 Code again. One that is gone checks nothing.
+  expect(bridgeMock.readT3CodeConnection).toHaveBeenCalledTimes(checks);
   expect(onSave).not.toHaveBeenCalled();
   expect(onError).not.toHaveBeenCalled();
 });
@@ -1264,7 +1283,7 @@ it("asks before a workspace's messages go to the thread, and says what the threa
   expect(askConfirm().textContent).toBe("Forward from this workspace");
   expect(document.activeElement).toBe(askConfirm());
   // Nothing has taken effect.
-  expect(bridgeMock.readyAgentThreadWorkspace).not.toHaveBeenCalled();
+  expect(bridgeMock.setAgentThreadWorkspace).not.toHaveBeenCalled();
   expect(onSave).not.toHaveBeenCalled();
   expect(turnOn.getAttribute("aria-checked")).toBe("false");
 
@@ -1272,7 +1291,7 @@ it("asks before a workspace's messages go to the thread, and says what the threa
   expect(screen.queryByTestId("agent-workspace-dialog")).toBeNull();
   await waitFor(() => expect(document.activeElement).toBe(turnOn));
   expect(workspaceSwitch(page).getAttribute("aria-checked")).toBe("false");
-  expect(bridgeMock.readyAgentThreadWorkspace).not.toHaveBeenCalled();
+  expect(bridgeMock.setAgentThreadWorkspace).not.toHaveBeenCalled();
   expect(onSave).not.toHaveBeenCalled();
   expect(bridgeMock.readAgentThread).not.toHaveBeenCalled();
 });
@@ -1288,25 +1307,28 @@ it("counts the other workspaces in the ask, and says when the agent's forwarding
   rerender(withChief({ workspaces: [], enabled: false }));
   expect(
     askDialog().getByText(
-      "Once Forward messages is on, dohc forwards messages from this workspace to Chief of Staff's thread, which keeps the messages it already has.",
+      "Once Forward messages is on, dohc forwards messages from this workspace to Chief of Staff's thread, which keeps every message it already has, from any workspace.",
     ),
   ).toBeTruthy();
 });
 
-it("turns a workspace on: tells the thread, then saves the agent with it and nothing else", async () => {
+const HERE_TOO = withChief({ workspaces: ["ws-2", "ws-1"] });
+
+it("turns a workspace on in main, saves nothing itself, and shows the thread once the settings have it", async () => {
   const telling = deferred();
-  bridgeMock.readyAgentThreadWorkspace.mockReturnValueOnce(telling.promise);
+  bridgeMock.setAgentThreadWorkspace.mockReturnValueOnce(telling.promise);
   const { page, onSave, rerender } = await openAsk();
-  // Two presses before the window draws again tell the thread once.
+  // Two presses before the window draws again ask main once.
   act(() => {
     askConfirm().click();
     askConfirm().click();
   });
-  expect(bridgeMock.readyAgentThreadWorkspace).toHaveBeenCalledExactlyOnceWith({
+  expect(bridgeMock.setAgentThreadWorkspace).toHaveBeenCalledExactlyOnceWith({
     workspaceId: "ws-1",
     agentId: "t3-code",
+    on: true,
   });
-  // While dohc tells the thread the button says so, nothing is saved, and the dialog stays.
+  // While main turns it on the button says so, and the dialog stays.
   expect(askConfirm().textContent).toBe("Turning on…");
   expect(askConfirm().disabled).toBe(true);
   expect(askDialog().getByRole<HTMLButtonElement>("button", { name: "Cancel" }).disabled).toBe(
@@ -1314,17 +1336,17 @@ it("turns a workspace on: tells the thread, then saves the agent with it and not
   );
   fireEvent.keyDown(document.body, { key: "Escape" });
   expect(screen.getByTestId("agent-workspace-dialog")).toBeTruthy();
-  expect(onSave).not.toHaveBeenCalled();
 
+  // Main answers before its settings reach this window. The ask closes, and
+  // the page shows what the settings here still say.
   await act(async () => telling.resolve());
-  expect(onSave).toHaveBeenCalledOnce();
-  const saved = onSave.mock.calls[0]![0];
-  expect(saved).toEqual(withChief({ workspaces: ["ws-2", "ws-1"] }));
   expect(screen.queryByTestId("agent-workspace-dialog")).toBeNull();
-  expect(bridgeMock.readyAgentThreadWorkspace).toHaveBeenCalledOnce();
+  expect(workspaceSwitch(page).getAttribute("aria-checked")).toBe("false");
+  expect(page.queryByTestId("agent-page-thread")).toBeNull();
+  expect(bridgeMock.readAgentThread).not.toHaveBeenCalled();
 
-  // The saved agent's page is the page of a workspace it forwards from.
-  rerender(saved);
+  // Main's settings arrive, and the page is one of a workspace the agent forwards from.
+  rerender(HERE_TOO);
   expect(workspaceSwitch(page).getAttribute("aria-checked")).toBe("true");
   expect(await page.findByText("Chief of Staff: dohc")).toBeTruthy();
   expect(page.getByRole("button", { name: "Open in T3 Code" })).toBeTruthy();
@@ -1332,40 +1354,39 @@ it("turns a workspace on: tells the thread, then saves the agent with it and not
   expect(page.getByTestId("agent-thread-workspace").textContent).toBe(
     "Forward from this workspace",
   );
+  expect(bridgeMock.setAgentThreadWorkspace).toHaveBeenCalledOnce();
+  // Main saved the workspace. This window saved nothing.
+  expect(onSave).not.toHaveBeenCalled();
 });
 
-it("reads the thread only once the workspace is saved, not when Settings first show it", async () => {
-  const saving = deferred<DesktopUserSettingsResult | null>();
+it("shows the thread only once the ask has closed, when main's settings arrive before its answer", async () => {
+  const telling = deferred();
+  bridgeMock.setAgentThreadWorkspace.mockReturnValueOnce(telling.promise);
   const { page, onSave, rerender } = await openAsk();
-  onSave.mockReturnValueOnce(saving.promise);
   await userEvent.click(askConfirm());
-  await waitFor(() => expect(onSave).toHaveBeenCalledOnce());
-  const saved = onSave.mock.calls[0]![0];
-  // Settings show the change at once. Main does not have it yet, and would
-  // find no thread for this workspace.
-  rerender(saved);
+  rerender(HERE_TOO);
   expect(workspaceSwitch(page).getAttribute("aria-checked")).toBe("true");
   expect(askConfirm().textContent).toBe("Turning on…");
   expect(page.queryByTestId("agent-page-thread")).toBeNull();
   expect(bridgeMock.readAgentThread).not.toHaveBeenCalled();
 
-  await act(async () => saving.resolve({ settings: saved, source: "stored" }));
+  await act(async () => telling.resolve());
   expect(screen.queryByTestId("agent-workspace-dialog")).toBeNull();
   expect(await page.findByText("Chief of Staff: dohc")).toBeTruthy();
   expect(bridgeMock.readAgentThread).toHaveBeenCalledExactlyOnceWith({
     workspaceId: "ws-1",
     agentId: "t3-code",
   });
+  expect(onSave).not.toHaveBeenCalled();
 });
 
-it("saves nothing when the thread could not be told, says why in the ask, and asks again", async () => {
+it("keeps the ask open when main could not turn the workspace on, says why, and asks again", async () => {
   const stopped = "T3 Code is not running on this computer.";
-  bridgeMock.readyAgentThreadWorkspace.mockRejectedValueOnce(new Error(stopped));
+  bridgeMock.setAgentThreadWorkspace.mockRejectedValueOnce(new Error(stopped));
   const { page, onSave, onError } = await openAsk();
   await userEvent.click(askConfirm());
   expect((await askDialog().findByTestId("agent-workspace-error")).textContent).toBe(stopped);
   expect(askDialog().getByRole("alert").textContent).toBe(stopped);
-  expect(onSave).not.toHaveBeenCalled();
   // The ask is still open, so it says why itself, and files no notice.
   expect(onError).not.toHaveBeenCalled();
   expect(workspaceSwitch(page).getAttribute("aria-checked")).toBe("false");
@@ -1374,81 +1395,225 @@ it("saves nothing when the thread could not be told, says why in the ask, and as
   expect(askConfirm().disabled).toBe(false);
   expect(document.activeElement).toBe(askConfirm());
 
+  // A save that failed in main is said in the same place.
+  const unsaved = "dohc did not save settings.";
+  bridgeMock.setAgentThreadWorkspace.mockRejectedValueOnce(new Error(unsaved));
+  await userEvent.click(askConfirm());
+  expect((await askDialog().findByTestId("agent-workspace-error")).textContent).toBe(unsaved);
+  expect(screen.getByTestId("agent-workspace-dialog")).toBeTruthy();
+
   // The same button asks again, and the reason goes while it does.
   const telling = deferred();
-  bridgeMock.readyAgentThreadWorkspace.mockReturnValueOnce(telling.promise);
+  bridgeMock.setAgentThreadWorkspace.mockReturnValueOnce(telling.promise);
   await userEvent.click(askConfirm());
   expect(askDialog().queryByTestId("agent-workspace-error")).toBeNull();
-  expect(bridgeMock.readyAgentThreadWorkspace).toHaveBeenCalledTimes(2);
+  expect(bridgeMock.setAgentThreadWorkspace).toHaveBeenCalledTimes(3);
+  expect(bridgeMock.setAgentThreadWorkspace).toHaveBeenLastCalledWith({
+    workspaceId: "ws-1",
+    agentId: "t3-code",
+    on: true,
+  });
   await act(async () => telling.resolve());
-  expect(onSave).toHaveBeenCalledOnce();
-  expect(onSave.mock.calls[0]![0].agents["t3-code"]!.workspaces).toEqual(["ws-2", "ws-1"]);
   expect(screen.queryByTestId("agent-workspace-dialog")).toBeNull();
+  expect(onSave).not.toHaveBeenCalled();
+  expect(onError).not.toHaveBeenCalled();
 });
 
 it("says in its own words that the thread could not be told, when the error says nothing", async () => {
-  bridgeMock.readyAgentThreadWorkspace.mockRejectedValueOnce(undefined);
-  const { onSave } = await openAsk();
+  bridgeMock.setAgentThreadWorkspace.mockRejectedValueOnce(undefined);
+  await openAsk();
   await userEvent.click(askConfirm());
   expect((await askDialog().findByTestId("agent-workspace-error")).textContent).toBe(
     "dohc could not tell Chief of Staff's thread about this workspace.",
   );
-  expect(onSave).not.toHaveBeenCalled();
 });
 
-it("turns a workspace off without asking: saves the agent without it and nothing else", async () => {
-  const several = withChief({ workspaces: ["ws-2", "ws-1", "ws-3"] });
-  const { page, row, onSave, rerender } = await openChiefPage(several);
-  expect(await row.findByText("Chief of Staff: dohc")).toBeTruthy();
-  await userEvent.click(workspaceSwitch(page));
+it("leaves another workspace's ask open when an earlier ask's answer comes late", async () => {
+  const telling = deferred();
+  bridgeMock.setAgentThreadWorkspace.mockReturnValueOnce(telling.promise);
+  // The agent forwards from neither workspace the window shows here.
+  const neither = withChief({ workspaces: ["ws-3"] });
+  const { onSave, onError, rerender } = await openAsk(neither);
+  await userEvent.click(askConfirm());
+  // The window now shows ws-2, and the ask went with ws-1.
+  rerender(neither, "ws-2");
   expect(screen.queryByTestId("agent-workspace-dialog")).toBeNull();
-  expect(onSave).toHaveBeenCalledOnce();
-  const saved = onSave.mock.calls[0]![0];
-  expect(saved).toEqual(withChief({ workspaces: ["ws-2", "ws-3"] }));
-  expect(bridgeMock.readyAgentThreadWorkspace).not.toHaveBeenCalled();
+  await userEvent.click(workspaceSwitch(within(screen.getByTestId("agent-page"))));
+  expect(askConfirm().textContent).toBe("Forward from this workspace");
 
+  // The answer was for ws-1. The ask for ws-2 is still open, with nothing asked of main.
+  await act(async () => telling.resolve());
+  expect(screen.getByTestId("agent-workspace-dialog")).toBeTruthy();
+  expect(askConfirm().disabled).toBe(false);
+  expect(bridgeMock.setAgentThreadWorkspace).toHaveBeenCalledOnce();
+  expect(onSave).not.toHaveBeenCalled();
+  expect(onError).not.toHaveBeenCalled();
+});
+
+it("turns a workspace off in main without asking, and saves nothing itself", async () => {
+  const saving = deferred();
+  bridgeMock.setAgentThreadWorkspace.mockReturnValueOnce(saving.promise);
+  const { page, row, onSave, onError, rerender } = await openChiefPage(
+    withChief({ workspaces: ["ws-2", "ws-1", "ws-3"] }),
+  );
+  expect(await row.findByText("Chief of Staff: dohc")).toBeTruthy();
+  const toggle = workspaceSwitch(page);
+  expect(page.queryByTestId("switch-busy")).toBeNull();
+  // Two presses before the window draws again ask main once.
+  act(() => {
+    toggle.click();
+    toggle.click();
+  });
+  expect(bridgeMock.setAgentThreadWorkspace).toHaveBeenCalledExactlyOnceWith({
+    workspaceId: "ws-1",
+    agentId: "t3-code",
+    on: false,
+  });
+  expect(screen.queryByTestId("agent-workspace-dialog")).toBeNull();
+  // The switch moves at the press and holds still until main answers.
+  expect(toggle.getAttribute("aria-checked")).toBe("false");
+  expect(toggle.getAttribute("aria-busy")).toBe("true");
+  expect(page.getByTestId("switch-busy")).toBeTruthy();
+  // A press while it runs asks main nothing more, and does not ask to turn it on.
+  await userEvent.click(toggle);
+  expect(bridgeMock.setAgentThreadWorkspace).toHaveBeenCalledOnce();
+  expect(screen.queryByTestId("agent-workspace-dialog")).toBeNull();
+
+  // Main's settings arrive, and then its answer.
+  rerender(withChief({ workspaces: ["ws-2", "ws-3"] }));
+  expect(toggle.getAttribute("aria-busy")).toBe("true");
+  await act(async () => saving.resolve());
+  expect(toggle.getAttribute("aria-checked")).toBe("false");
+  expect(toggle.getAttribute("aria-busy")).toBeNull();
+  expect(page.queryByTestId("switch-busy")).toBeNull();
   // The page is then one of a workspace the agent does not forward from.
-  rerender(saved);
   expect(page.queryByTestId("agent-page-thread")).toBeNull();
   expect(page.queryByRole("button", { name: "Change thread" })).toBeNull();
-  expect(workspaceSwitch(page).getAttribute("aria-checked")).toBe("false");
-  // Turning it on again asks again.
-  await userEvent.click(workspaceSwitch(page));
-  expect(screen.getByTestId("agent-workspace-dialog")).toBeTruthy();
-  expect(bridgeMock.readyAgentThreadWorkspace).not.toHaveBeenCalled();
-});
-
-it("saves no workspace for an answer that comes after the window changed workspaces", async () => {
-  const telling = deferred();
-  bridgeMock.readyAgentThreadWorkspace.mockReturnValueOnce(telling.promise);
-  const { onSave, onError, rerender } = await openAsk();
-  await userEvent.click(askConfirm());
-  // The window now shows ws-2, which the agent forwards from.
-  rerender(ELSEWHERE, "ws-2");
-  expect(screen.queryByTestId("agent-workspace-dialog")).toBeNull();
-  await act(async () => telling.resolve());
+  expect(page.getByTestId("agent-thread-workspace").textContent).toBe(
+    "Forward from this workspaceIts thread gets no messages from this workspace.",
+  );
   expect(onSave).not.toHaveBeenCalled();
   expect(onError).not.toHaveBeenCalled();
 
-  // Back in ws-1 the ask is closed, and the workspace is still off.
-  rerender(ELSEWHERE, "ws-1");
-  expect(screen.queryByTestId("agent-workspace-dialog")).toBeNull();
-  expect(
-    workspaceSwitch(within(screen.getByTestId("agent-page"))).getAttribute("aria-checked"),
-  ).toBe("false");
+  // Turning it on again asks again.
+  await userEvent.click(toggle);
+  expect(screen.getByTestId("agent-workspace-dialog")).toBeTruthy();
+  expect(bridgeMock.setAgentThreadWorkspace).toHaveBeenCalledOnce();
 });
 
-it("saves no workspace for an answer that comes after the agent's page is gone", async () => {
-  const telling = deferred();
-  bridgeMock.readyAgentThreadWorkspace.mockReturnValueOnce(telling.promise);
-  const { onSave, onError, rerender } = await openAsk();
-  await userEvent.click(askConfirm());
+it("shows what the settings say once main has answered a turn-off, before its settings arrive", async () => {
+  const { page, row, rerender } = await openChiefPage();
+  expect(await row.findByText("Chief of Staff: dohc")).toBeTruthy();
+  const toggle = workspaceSwitch(page);
+  await userEvent.click(toggle);
+  await waitFor(() => expect(toggle.getAttribute("aria-busy")).toBeNull());
+  // The settings here still have the workspace, and the page shows them.
+  expect(toggle.getAttribute("aria-checked")).toBe("true");
+  expect(page.getByTestId("agent-page-thread")).toBeTruthy();
+
+  rerender(withChief({ workspaces: [] }));
+  expect(toggle.getAttribute("aria-checked")).toBe("false");
+  expect(page.queryByTestId("agent-page-thread")).toBeNull();
+});
+
+it("reports a workspace main could not turn off, with a Try again, and the switch reads on", async () => {
+  const unsaved = "dohc did not save settings.";
+  bridgeMock.setAgentThreadWorkspace.mockRejectedValueOnce(new Error(unsaved));
+  const { page, row, onSave, onError } = await openChiefPage();
+  expect(await row.findByText("Chief of Staff: dohc")).toBeTruthy();
+  const toggle = workspaceSwitch(page);
+  await userEvent.click(toggle);
+  await waitFor(() =>
+    expect(onError).toHaveBeenCalledExactlyOnceWith(
+      unsaved,
+      expect.any(Error),
+      expect.any(Function),
+    ),
+  );
+  expect(toggle.getAttribute("aria-checked")).toBe("true");
+  expect(toggle.getAttribute("aria-busy")).toBeNull();
+  expect(page.getByTestId("agent-page-thread")).toBeTruthy();
+  expect(screen.queryByTestId("agent-workspace-dialog")).toBeNull();
+
+  // The notice's Try again asks main again. An error that says nothing gets the page's words.
+  const tryAgain = () => (onError.mock.lastCall![2] as () => Promise<void>)();
+  bridgeMock.setAgentThreadWorkspace.mockRejectedValueOnce(undefined);
+  await act(tryAgain);
+  expect(bridgeMock.setAgentThreadWorkspace).toHaveBeenCalledTimes(2);
+  expect(bridgeMock.setAgentThreadWorkspace).toHaveBeenLastCalledWith({
+    workspaceId: "ws-1",
+    agentId: "t3-code",
+    on: false,
+  });
+  expect(onError).toHaveBeenLastCalledWith(
+    "dohc could not stop forwarding from this workspace to Chief of Staff.",
+    undefined,
+    expect.any(Function),
+  );
+  expect(toggle.getAttribute("aria-checked")).toBe("true");
+
+  // A Try again that works reports nothing more.
+  await act(tryAgain);
+  expect(bridgeMock.setAgentThreadWorkspace).toHaveBeenCalledTimes(3);
+  expect(onError).toHaveBeenCalledTimes(2);
+  expect(onSave).not.toHaveBeenCalled();
+});
+
+const BOTH = withChief({ workspaces: ["ws-1", "ws-2"] });
+
+it("reports nothing for a turn-off's answer that comes after the window changed workspaces", async () => {
+  const saving = deferred();
+  bridgeMock.setAgentThreadWorkspace.mockReturnValueOnce(saving.promise);
+  const { page, row, onError, rerender } = await openChiefPage(BOTH);
+  expect(await row.findByText("Chief of Staff: dohc")).toBeTruthy();
+  await userEvent.click(workspaceSwitch(page));
+  // The window now shows ws-2, which the agent forwards from too.
+  rerender(BOTH, "ws-2");
+  const shown = () => workspaceSwitch(within(screen.getByTestId("agent-page")));
+  expect(shown().getAttribute("aria-checked")).toBe("true");
+  expect(shown().getAttribute("aria-busy")).toBeNull();
+
+  await act(async () =>
+    saving.reject(new Error("Nothing was changed because this window changed workspaces.")),
+  );
+  expect(onError).not.toHaveBeenCalled();
+  expect(shown().getAttribute("aria-checked")).toBe("true");
+  // The switch of ws-2 asks main about ws-2.
+  await userEvent.click(shown());
+  expect(bridgeMock.setAgentThreadWorkspace).toHaveBeenLastCalledWith({
+    workspaceId: "ws-2",
+    agentId: "t3-code",
+    on: false,
+  });
+});
+
+it("reports nothing for a turn-off's answer that comes after the agent's page is gone", async () => {
+  const saving = deferred();
+  bridgeMock.setAgentThreadWorkspace.mockReturnValueOnce(saving.promise);
+  const { page, row, onError, rerender } = await openChiefPage();
+  expect(await row.findByText("Chief of Staff: dohc")).toBeTruthy();
+  await userEvent.click(workspaceSwitch(page));
   // The agent was removed from the settings file.
   rerender(SETTINGS);
-  expect(screen.queryByTestId("agent-workspace-dialog")).toBeNull();
-  await act(async () => telling.resolve());
-  expect(onSave).not.toHaveBeenCalled();
+  expect(screen.queryByTestId("agent-page")).toBeNull();
+  await act(async () => saving.reject(new Error("This agent is no longer in Settings.")));
   expect(onError).not.toHaveBeenCalled();
+});
+
+it("asks main nothing from a failed turn-off's Try again once the window shows another workspace", async () => {
+  bridgeMock.setAgentThreadWorkspace.mockRejectedValueOnce(
+    new Error("dohc did not save settings."),
+  );
+  const { page, row, onError, rerender } = await openChiefPage(BOTH);
+  expect(await row.findByText("Chief of Staff: dohc")).toBeTruthy();
+  await userEvent.click(workspaceSwitch(page));
+  await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+  const tryAgain = onError.mock.lastCall![2] as () => Promise<void>;
+
+  rerender(BOTH, "ws-2");
+  await act(tryAgain);
+  expect(bridgeMock.setAgentThreadWorkspace).toHaveBeenCalledOnce();
+  expect(onError).toHaveBeenCalledOnce();
 });
 
 it("says in the Change thread dialog how many other workspaces get the new thread", async () => {

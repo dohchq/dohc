@@ -1,6 +1,6 @@
 import { useId, useLayoutEffect, useRef, useState } from "react";
 import { Forward } from "lucide-react";
-import type { Agent, AgentSettings } from "../../settings/userSettings";
+import type { Agent } from "../../settings/userSettings";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 import { Overlay } from "../Overlay";
@@ -17,18 +17,15 @@ import { useRequestSequence } from "../useRequestSequence";
 
 /**
  * Asks before an agent's thread gets one more workspace's messages, and says
- * what the thread then holds (ADR 0016). On yes, dohc tells the thread first,
- * and `onSave` then saves the agent with the workspace, so a thread dohc could
- * not tell is never saved. The dialog stays open until that save is in main,
- * where the page reads the thread from. A refusal says why above the buttons,
- * and the same button asks again.
+ * what the thread then holds (ADR 0016). On yes, main tells the thread and
+ * then saves the agent with the workspace, so a thread dohc could not tell is
+ * never saved. The dialog stays open until main answers. A refusal, or a save
+ * that failed, says why above the buttons, and the same button asks again.
  */
 export function ForwardWorkspaceDialog(props: {
   workspaceId: string;
   workspaceName: string;
   agent: Agent;
-  // Resolves once main has saved the change, or the save has failed.
-  onSave: (change: (agent: AgentSettings) => AgentSettings) => Promise<unknown>;
   onClose: () => void;
 }) {
   const { workspaceId, agent } = props;
@@ -37,9 +34,6 @@ export function ForwardWorkspaceDialog(props: {
   const busyRef = useRef(false);
   // An answer for a dialog that is gone, or for another agent or workspace, changes nothing.
   const asks = useRequestSequence([workspaceId, agent.id]);
-  // The answer saves through the newest render's settings, not the ones it started with.
-  const latest = useRef(props);
-  latest.current = props;
   const id = useId();
   const panel = useRef<HTMLDivElement>(null);
   const confirm = useRef<HTMLButtonElement>(null);
@@ -56,7 +50,7 @@ export function ForwardWorkspaceDialog(props: {
     setBusy(true);
     setFailure(null);
     try {
-      await bridge().readyAgentThreadWorkspace({ workspaceId, agentId: agent.id });
+      await bridge().setAgentThreadWorkspace({ workspaceId, agentId: agent.id, on: true });
     } catch (cause) {
       if (!asks.isCurrent(token)) return;
       busyRef.current = false;
@@ -66,13 +60,7 @@ export function ForwardWorkspaceDialog(props: {
       );
       return;
     }
-    if (!asks.isCurrent(token)) return;
-    await latest.current.onSave((current) =>
-      current.workspaces?.includes(workspaceId)
-        ? current
-        : { ...current, workspaces: [...(current.workspaces ?? []), workspaceId] },
-    );
-    if (asks.isCurrent(token)) latest.current.onClose();
+    if (asks.isCurrent(token)) props.onClose();
   }
 
   const others = (agent.workspaces ?? []).filter((other) => other !== workspaceId).length;
@@ -95,7 +83,7 @@ export function ForwardWorkspaceDialog(props: {
           <p className="m-0">
             {`${agent.enabled ? "From now on" : "Once Forward messages is on"}, dohc forwards messages from this workspace to ${agent.name}'s thread, which ${
               others === 0
-                ? "keeps the messages it already has"
+                ? "keeps every message it already has, from any workspace"
                 : `also holds messages from ${others} other ${others === 1 ? "workspace" : "workspaces"}`
             }.`}
           </p>

@@ -44,6 +44,7 @@ import { RetryRow, SecondaryButton } from "../ui/controls";
 import { isComposingKey } from "../ui/keys";
 import { Menu } from "../ui/Menu";
 import { SegmentedControl } from "../ui/SegmentedControl";
+import { useRequestSequence } from "../useRequestSequence";
 import { ChatAvatar } from "../workbench/ChatAvatar";
 import { useWorkspaceQuery } from "../workspace/useWorkspaceQuery";
 import { useWorkspaceSession } from "../workspace/workspaceSession";
@@ -328,7 +329,6 @@ function ThreadRow(props: {
   thread: AgentThread;
   workspaceId: string;
   access: "checking" | "refused" | "usable";
-  onChange: (change: (agent: AgentSettings) => AgentSettings) => void;
   onError?: PageError | undefined;
   // The dialog may have got dohc allowed in T3 Code.
   onAllowChecked: () => void;
@@ -343,9 +343,9 @@ function ThreadRow(props: {
     load: () => bridge().readAgentThread({ workspaceId, agentId: agent.id }),
   });
   const { error, retry } = read;
-  // Settings show a save before it lands, so the answer may be for the thread
-  // the agent had until now. It is not shown, and the thread is read again
-  // until the answer is for the thread the agent has here.
+  // Main saves a new thread, and its settings reach this window on their own.
+  // An answer for another thread than the one the settings here name is not
+  // shown, and the thread is read again until the two agree.
   const answered = read.value;
   const current = answered?.threadId === thread.id ? answered : undefined;
   const value = current && "title" in current ? current : undefined;
@@ -439,11 +439,6 @@ function ThreadRow(props: {
           agentName={agent.name}
           threadId={thread.id}
           otherWorkspaces={(agent.workspaces ?? []).filter((id) => id !== workspaceId).length}
-          onChanged={(id) =>
-            props.onChange((current) =>
-              current.thread ? { ...current, thread: { ...current.thread, id } } : current,
-            )
-          }
           onClose={() => {
             setChanging(false);
             // The dialog can allow dohc, or allow it again with another mode.
@@ -452,6 +447,72 @@ function ThreadRow(props: {
         />
       ) : null}
     </>
+  );
+}
+
+// The switch for the workspace the window shows. Main makes both changes and
+// saves them. Turning it on asks first. Turning it off asks nothing, because
+// the switch turns it on again. It moves at the click and holds still until
+// main answers, and then shows what the settings say, so a workspace main
+// could not turn off reads as on again.
+function WorkspaceSwitch(props: {
+  agent: Agent;
+  workspaceId: string;
+  // The saved settings have this workspace on for the agent.
+  serves: boolean;
+  onAsk: () => void;
+  onError?: PageError | undefined;
+}) {
+  const { agent, workspaceId } = props;
+  const [turningOff, setTurningOff] = useState(false);
+  const running = useRef(false);
+  // An answer for a switch that is gone, with its agent or its workspace, reports and changes nothing.
+  const calls = useRequestSequence();
+  const report = useRef(props.onError);
+  report.current = props.onError;
+  const turnOff = async (): Promise<void> => {
+    const token = calls.next();
+    running.current = true;
+    setTurningOff(true);
+    try {
+      await bridge().setAgentThreadWorkspace({ workspaceId, agentId: agent.id, on: false });
+    } catch (cause) {
+      if (!calls.isCurrent(token)) return;
+      running.current = false;
+      setTurningOff(false);
+      report.current?.(
+        ipcErrorMessage(
+          cause,
+          `dohc could not stop forwarding from this workspace to ${agent.name}.`,
+        ),
+        cause,
+        // Try again on a notice this switch has outlived, or a later press replaced, does nothing.
+        async () => {
+          if (calls.isCurrent(token)) await turnOff();
+        },
+      );
+      return;
+    }
+    if (!calls.isCurrent(token)) return;
+    running.current = false;
+    setTurningOff(false);
+  };
+  const on = props.serves && !turningOff;
+  return (
+    <SwitchControl
+      label={`Forward messages from this workspace to ${agent.name}`}
+      tooltip={`${on ? "Turn off" : "Turn on"} for this workspace`}
+      description={on ? "Turn off" : "Turn on"}
+      checked={on}
+      busy={turningOff}
+      // Not disabled while it runs, because a disabled switch drops keyboard
+      // focus. A press then does nothing.
+      onChange={(next) => {
+        if (running.current) return;
+        if (next) props.onAsk();
+        else void turnOff();
+      }}
+    />
   );
 }
 
@@ -464,8 +525,6 @@ function ThreadAgentBoxes(props: {
   workspaceId: string;
   workspaceName: string;
   onChange: (change: (agent: AgentSettings) => AgentSettings) => void;
-  // The same save, for a change the page waits on.
-  onSave: (change: (agent: AgentSettings) => AgentSettings) => Promise<unknown>;
   onError?: PageError | undefined;
 }) {
   const { agent, onChange } = props;
@@ -519,20 +578,14 @@ function ThreadAgentBoxes(props: {
           }
         >
           <span className={VALUE}>
-            <SwitchControl
-              label={`Forward messages from this workspace to ${agent.name}`}
-              tooltip={`${serves ? "Turn off" : "Turn on"} for this workspace`}
-              description={serves ? "Turn off" : "Turn on"}
-              checked={serves}
-              onChange={(on) => {
-                // Turning it on asks first. Turning it off needs no ask: the switch turns it on again.
-                if (on) setAsking(here);
-                else
-                  onChange((current) => ({
-                    ...current,
-                    workspaces: (current.workspaces ?? []).filter((id) => id !== props.workspaceId),
-                  }));
-              }}
+            {/* Another agent or workspace starts the switch over. */}
+            <WorkspaceSwitch
+              key={here}
+              agent={agent}
+              workspaceId={props.workspaceId}
+              serves={serves}
+              onAsk={() => setAsking(here)}
+              onError={props.onError}
             />
           </span>
         </PageRow>
@@ -542,13 +595,12 @@ function ThreadAgentBoxes(props: {
             workspaceId={props.workspaceId}
             workspaceName={props.workspaceName}
             agent={agent}
-            onSave={props.onSave}
             onClose={() => setAsking(null)}
           />
         ) : null}
-        {/* Settings show a save before it lands, and main finds the thread from
-            what is saved. The ask closes once main has the workspace, so the
-            row waits for that. */}
+        {/* Main finds the thread only from a workspace it has saved for the
+            agent, so the row waits for the settings to have it, and for the
+            ask to close. */}
         {agent.thread && serves && asking !== here ? (
           // Another agent or workspace starts the row over, which closes its dialog.
           <ThreadRow
@@ -565,7 +617,6 @@ function ThreadAgentBoxes(props: {
                   ? "usable"
                   : "refused"
             }
-            onChange={onChange}
             onError={props.onError}
             onAllowChecked={() => void retryRead()}
           />
@@ -692,15 +743,13 @@ export function AgentPage(props: {
   onRename: () => void;
   onRemove: () => void;
   onCheck: () => void;
-  // Saves the agent with the change. Resolves once main has saved it, or the save has failed.
-  onChange: (change: (agent: AgentSettings) => AgentSettings) => Promise<unknown>;
+  onChange: (change: (agent: AgentSettings) => AgentSettings) => void;
   // A failure on the page that the workspace's Notices keep.
   onError?: PageError;
   onBack: () => void;
   backRef?: React.Ref<HTMLButtonElement>;
 }) {
-  const { agent } = props;
-  const onChange = (change: (agent: AgentSettings) => AgentSettings) => void props.onChange(change);
+  const { agent, onChange } = props;
   const [menuOpen, setMenuOpen] = useState(false);
   const [editing, setEditing] = useState<"timeout" | "command" | null>(null);
   const runLabelId = useId();
@@ -830,7 +879,6 @@ export function AgentPage(props: {
           workspaceId={props.workspaceId}
           workspaceName={props.workspaceName}
           onChange={onChange}
-          onSave={props.onChange}
           onError={props.onError}
         />
       ) : launched ? (
