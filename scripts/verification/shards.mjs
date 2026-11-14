@@ -7,6 +7,8 @@ import { desktopProofTags } from "./verify.mjs";
 const slash = (path) => path.replaceAll("\\", "/");
 const fileId = (path) => slash(relative(repoRoot, path));
 export const JS_SHARDS = 14;
+// Median worker inventory plus artifact restoration in the recorded cloud run.
+export const JS_NATIVE_READY_SECONDS = 100;
 const splitNativeFile = "services/share-web/src/selfHostedLiveNative.integration.ts";
 
 const databasePackages = new Set([
@@ -43,6 +45,13 @@ export function javascriptGroups(tasks) {
         kind: "vitest",
         pkg: files[0].package,
         native: Boolean(files[0].native),
+        // Desktop Vitest, projection, lint, and desktop typecheck slowed each other in measured
+        // runs. The simulator counts each as 2.5 of a worker's four CPUs, and browser proofs as 2.
+        cpu:
+          files[0].package === "@dohc/ydoc-projection" ||
+          (files[0].package === "@dohc/desktop" && files[0].project === "desktop")
+            ? 2.5
+            : 1,
         resource: databasePackages.has(files[0].package)
           ? "postgres"
           : files[0].package === "@dohc/mobile"
@@ -65,38 +74,111 @@ export function javascriptGroups(tasks) {
         tasks: [task],
         native: Boolean(task.native),
         resource: task.resource,
+        cpu: ["repository:pnpm lint", "typecheck:@dohc/desktop"].includes(task.id)
+          ? 2.5
+          : ["desktop", "accounts"].includes(task.kind)
+            ? 2
+            : 1,
         ...(["desktop", "accounts"].includes(task.kind)
-          ? { slots: 2, weight: 2 * task.weight }
+          ? { slots: 2, weight: task.weight }
           : { weight: task.weight }),
       })),
   );
   return groups;
 }
 
-export function partitionTasks(tasks, count) {
-  if (!Number.isSafeInteger(count) || count < 1)
-    throw new Error("A shard count must be a positive integer.");
-  if (new Set(tasks.map((task) => task.id)).size !== tasks.length)
-    throw new Error("Duplicate verification task IDs.");
-  const shards = Array.from({ length: count }, () => ({ weight: 0, tasks: [] }));
-  for (const task of tasks.toSorted((a, b) => b.weight - a.weight || a.id.localeCompare(b.id))) {
-    const shard = shards.reduce((least, next) => (next.weight < least.weight ? next : least));
-    shard.tasks.push(task);
-    shard.weight += task.weight;
+export function simulateJavascript(
+  groups,
+  {
+    nativeReady = JS_NATIVE_READY_SECONDS,
+    // Rounded medians from the same worker records as nativeReady.
+    inventory = 8,
+    postgres = 11,
+  } = {},
+) {
+  if (!groups.length) return { seconds: 0, steps: [] };
+  if (!groups.some((group) => group.native)) nativeReady = 0;
+  const ordered = groups.toSorted((a, b) => b.weight - a.weight || a.id.localeCompare(b.id));
+  const runtime = ordered.filter((group) =>
+    group.tasks?.some((task) => task.id.includes("stage-app-backend-runtime.test.mjs")),
+  );
+  const pending = ordered.filter((group) => !runtime.includes(group));
+  const active = [],
+    steps = [];
+  let seconds =
+    inventory +
+    (groups.some(
+      (group) =>
+        group.resource === "postgres" ||
+        ["desktop", "accounts", "self-host-native"].includes(group.kind),
+    )
+      ? postgres
+      : 0);
+  while (pending.length || active.length) {
+    // cloud.mjs passes preparation as both availability.changed and runBounded's more.
+    const limit = seconds >= nativeReady ? 3 : 2;
+    let slots = active.reduce((sum, work) => sum + (work.group.slots ?? 1), 0);
+    while (slots < limit) {
+      const index = pending.findIndex(
+        (group) =>
+          (!group.native || seconds >= nativeReady) &&
+          (!group.resource || !active.some((work) => work.group.resource === group.resource)) &&
+          (!active.length || slots + (group.slots ?? 1) <= limit),
+      );
+      if (index < 0) break;
+      const [group] = pending.splice(index, 1);
+      const step = { id: group.id, startedAt: seconds };
+      steps.push(step);
+      active.push({ group, step, remaining: group.weight });
+      slots += group.slots ?? 1;
+    }
+    if (!active.length && !pending.length) break;
+    const slowdown = Math.max(1, active.reduce((sum, work) => sum + (work.group.cpu ?? 1), 0) / 4);
+    for (const work of active) work.finishedAt = seconds + work.remaining * slowdown;
+    const next = Math.min(
+      ...active.map((work) => work.finishedAt),
+      ...(seconds < nativeReady ? [nativeReady] : []),
+    );
+    for (let index = active.length - 1; index >= 0; index--) {
+      const work = active[index];
+      if (work.finishedAt <= next) {
+        work.step.finishedAt = next;
+        active.splice(index, 1);
+      } else work.remaining -= (next - seconds) / slowdown;
+    }
+    seconds = next;
   }
-  return shards.map((shard) => shard.tasks);
+  for (const group of runtime) {
+    const finish = seconds + group.weight;
+    steps.push({ id: group.id, startedAt: seconds, finishedAt: finish });
+    seconds = finish;
+  }
+  if (groups.some((group) => group.native)) seconds = Math.max(seconds, nativeReady);
+  return { seconds, steps };
 }
 
 export function partitionJavascript(groups, count = JS_SHARDS) {
-  const native = partitionTasks(
-    groups.filter((group) => group.native),
-    count,
-  );
-  const pure = partitionTasks(
-    groups.filter((group) => !group.native),
-    count,
-  );
-  return native.map((groups, index) => [...groups, ...pure[index]]);
+  if (!Number.isSafeInteger(count) || count < 1)
+    throw new Error("A shard count must be a positive integer.");
+  if (new Set(groups.map((group) => group.id)).size !== groups.length)
+    throw new Error("Duplicate verification task IDs.");
+  // The simulator never finishes with a NaN weight, so every worker would hang until timeout.
+  if (groups.some((group) => !Number.isFinite(group.weight) || group.weight < 0))
+    throw new Error("Verification task weights must be finite, non-negative numbers.");
+  const shards = Array.from({ length: count }, () => []);
+  const finishes = shards.map(() => 0);
+  for (const group of groups.toSorted((a, b) => b.weight - a.weight || a.id.localeCompare(b.id))) {
+    let best;
+    for (let index = 0; index < count; index++) {
+      const finish = simulateJavascript([...shards[index], group]).seconds;
+      const latest = Math.max(finish, ...finishes.filter((_, other) => other !== index));
+      if (!best || latest < best.latest || (latest === best.latest && finish < best.finish))
+        best = { index, finish, latest };
+    }
+    shards[best.index].push(group);
+    finishes[best.index] = best.finish;
+  }
+  return shards;
 }
 
 export function assertTaskCoverage(expected, records) {
