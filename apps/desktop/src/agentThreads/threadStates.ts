@@ -39,6 +39,8 @@ export interface ThreadStatesDependencies {
   ledger: ForwardLedger;
   tool: {
     thread(threadId: string): Promise<T3CodeThreadState>;
+    /** Where one run stands, asked by its id. The tool lists only a thread's newest runs. */
+    run(threadId: string, runId: string): Promise<T3CodeRun["state"]>;
     forward(input: {
       threadId: string;
       message: string;
@@ -66,9 +68,6 @@ const POLL_MS = 4_000;
 // After a look that failed, such as the tool not running, dohc waits longer.
 const POLL_MS_AFTER_FAILURE = 30_000;
 const PAGE = 200;
-// The tool lists new work at once. Work it does not list yet counts as in
-// line for this long, then as over.
-const UNLISTED_MS = 10 * 60_000;
 
 const keyOf = (row: Pick<ForwardRow, "workspaceId" | "agentId" | "chatThreadId">) =>
   [row.workspaceId, row.agentId, row.chatThreadId].join("\n");
@@ -152,23 +151,21 @@ export function createThreadStates(dependencies: ThreadStatesDependencies) {
     }
   }
 
-  /** Where the work a message started stands, from what the tool lists. */
-  function phaseOf(runId: string | null, sentAtMs: number, thread: T3CodeThreadState): Phase {
-    const run = runId === null ? undefined : thread.runs.find((entry) => entry.id === runId);
-    if (run) return { phase: run.state, run };
-    // The tool lists only its newest work. Work that is going is going,
-    // listed or not.
-    if (runId !== null && runId === thread.activeRunId) return { phase: "working" };
+  /** Where the work a message started stands. */
+  async function phaseOf(
+    toolThreadId: string,
+    runId: string | null,
+    thread: T3CodeThreadState,
+  ): Promise<Phase> {
     // Work the tool gave no id for is over when the thread is doing nothing.
     if (runId === null) return { phase: thread.working ? "working" : "ended" };
-    const since = thread.runs.filter((entry) => entry.requestedAtMs >= sentAtMs);
-    // Nothing listed is as new: the tool has not listed it yet.
-    if (since.length === 0)
-      return { phase: nowMs() - sentAtMs < UNLISTED_MS ? "in-line" : "ended" };
-    // Newer work pushed it off the list. The tool takes work in order, so it
-    // is over once any of that newer work has started. Newer work that was
-    // cancelled while it waited never started, and shows nothing.
-    return { phase: since.some((entry) => entry.startedAtMs !== null) ? "ended" : "in-line" };
+    const run = thread.runs.find((entry) => entry.id === runId);
+    if (run) return { phase: run.state, run };
+    if (runId === thread.activeRunId) return { phase: "working" };
+    // The tool lists only a thread's newest work, and a person can put work
+    // waiting there in another order, so what it lists says nothing of this
+    // run. dohc asks for the run itself.
+    return { phase: await dependencies.tool.run(toolThreadId, runId) };
   }
 
   /** Sets the row's line. A state that goes on keeps the time it began. */
@@ -213,9 +210,9 @@ export function createThreadStates(dependencies: ThreadStatesDependencies) {
       return show(row, "silent", reminder.atMs, nowMs());
     }
     const sentAtMs = reminder.state === "sent" ? reminder.atMs : row.forwardedAtMs;
-    const { phase, run } = phaseOf(
+    const { phase, run } = await phaseOf(
+      row.toolThreadId,
       reminder.state === "sent" ? reminder.runId : row.runId,
-      sentAtMs,
       thread,
     );
     if (phase === "in-line") return show(row, "in-line", sentAtMs, run?.requestedAtMs ?? sentAtMs);

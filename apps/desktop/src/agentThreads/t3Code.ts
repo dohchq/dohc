@@ -26,6 +26,8 @@ export type T3CodeProblem =
   | "needs-more-access"
   /** The thread is no longer in T3 Code. */
   | "thread-gone"
+  /** T3 Code has no run with this id in the thread. */
+  | "run-gone"
   /** T3 Code refused the call for another reason. */
   | "refused"
   /** T3 Code answered in a shape dohc does not know. */
@@ -491,6 +493,9 @@ export async function openT3CodeSession(input: {
             "needs-more-access",
             "This thread runs with more access than dohc has in T3 Code. Allow dohc again, and pick the thread's mode on T3 Code's page.",
           );
+        // T3 Code's words for a run the thread does not have.
+        if (words && /run_not_found|does not belong to thread/u.test(words))
+          throw new T3CodeError("run-gone", "T3 Code has no such run in this thread.");
         // T3 Code's words for a thread it no longer has.
         if (words && /thread_not_found|is no longer available/u.test(words))
           throw new T3CodeError("thread-gone", "This thread is no longer in T3 Code.");
@@ -691,6 +696,32 @@ const ThreadRead = z.object({
   ),
 });
 
+// T3 Code's words for a run that is over, whatever way it ended.
+const ENDED = ["completed", "interrupted", "failed", "cancelled", "rolled_back"];
+const RunStatus = z.object({ status: z.string() });
+
+/**
+ * Where one run stands, asked by its id. T3 Code lists only a thread's newest
+ * runs with the thread, so a run it no longer lists is asked for here. A run
+ * the thread does not have is over.
+ */
+export async function readT3CodeRun(
+  session: T3CodeSession,
+  input: { threadId: string; runId: string },
+): Promise<T3CodeRun["state"]> {
+  try {
+    // T3 Code's wait answers at once with the run's status when given no time to wait.
+    const { status } = shaped(
+      RunStatus,
+      await session.call("t3_thread_wait", { ...input, timeoutMs: 1 }),
+    );
+    return status === "queued" ? "in-line" : ENDED.includes(status) ? "ended" : "working";
+  } catch (error) {
+    if (error instanceof T3CodeError && error.problem === "run-gone") return "ended";
+    throw error;
+  }
+}
+
 /** What a thread is doing now. */
 export async function readT3CodeThread(
   session: T3CodeSession,
@@ -718,10 +749,7 @@ export async function readT3CodeThread(
       state:
         run.status === "queued"
           ? "in-line"
-          : run.completedAt === null &&
-              !["completed", "interrupted", "failed", "cancelled", "rolled_back"].includes(
-                run.status,
-              )
+          : run.completedAt === null && !ENDED.includes(run.status)
             ? "working"
             : "ended",
       requestedAtMs: run.requestedAt,

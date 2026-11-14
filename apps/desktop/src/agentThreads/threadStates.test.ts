@@ -71,11 +71,21 @@ function setup(over: Partial<ThreadStatesDependencies> = {}, start: ForwardRow[]
     return { runId: "run-remind" };
   });
   const read = vi.fn(async (_threadId: string) => state);
+  // What the tool says of a run asked for by its id.
+  let ofRun: T3CodeRun["state"] = "ended";
+  const askedRuns: Array<[string, string]> = [];
   const changes: string[] = [];
   const errors: unknown[] = [];
   const states = createThreadStates({
     ledger: store.ledger,
-    tool: { thread: read, forward },
+    tool: {
+      thread: read,
+      forward,
+      run: async (threadId, runId) => {
+        askedRuns.push([threadId, runId]);
+        return ofRun;
+      },
+    },
     chats: {
       listMessagesPage: async (input) => {
         const from = (input.afterMessageOrder ?? -1) - 3;
@@ -103,6 +113,10 @@ function setup(over: Partial<ThreadStatesDependencies> = {}, start: ForwardRow[]
     errors,
     at: (ms: number) => {
       now = ms;
+    },
+    askedRuns,
+    runState: (next: T3CodeRun["state"]) => {
+      ofRun = next;
     },
     tool: (next: T3CodeThreadState) => {
       state = next;
@@ -167,9 +181,11 @@ describe("what an agent thread is doing with a forwarded message", () => {
   });
 
   it("reminds the thread once when its work ends with no reply, and records that first", async () => {
-    const { states, tool, sent, saved, forward, at } = setup();
+    const { states, tool, sent, saved, forward, at, runState } = setup();
     await states.forwarded(forwarded());
     tool(thread([run("run-1", "ended")]));
+    // The thread does not list the reminder's own work yet: asked for, it waits.
+    runState("in-line");
 
     await states.check();
 
@@ -274,32 +290,37 @@ describe("what an agent thread is doing with a forwarded message", () => {
     states.stop();
   });
 
-  it("counts work the tool does not list yet as in line, and work pushed off its list as over", async () => {
-    const { states, tool, forward, at } = setup();
-    // The tool has not listed the message's work yet: every listed run is older.
-    await states.forwarded(forwarded({ runId: "run-new", forwardedAtMs: 4_000 }));
-    tool(thread([run("run-0", "ended", { requestedAtMs: 900 })]));
+  it("asks the tool for the run itself when the thread's list does not hold it", async () => {
+    const { states, tool, forward, runState, askedRuns } = setup();
+    states.forwarded(forwarded({ runId: "run-old" }));
+    // Fifty newer runs pushed it off the list. One of them started first,
+    // because a person put it ahead: that says nothing of this run.
+    const newer = Array.from({ length: 50 }, (_, index) =>
+      run(`run-n${index}`, index === 0 ? "working" : "in-line", { requestedAtMs: 2_000 + index }),
+    );
+    tool(thread(newer));
+    runState("in-line");
+
     await states.check();
+
+    expect(askedRuns.at(-1)).toEqual(["t3-1", "run-old"]);
     expect(line(states)).toMatchObject({ state: "in-line" });
     expect(forward).not.toHaveBeenCalled();
 
-    // Newer work is listed and this run is not: it was pushed off the list.
-    tool(thread([run("run-later", "ended", { requestedAtMs: 4_500 })]));
+    // Newer runs cancelled while they waited change nothing either.
+    tool(
+      thread(
+        newer.map((entry) => ({ ...entry, state: "ended" as const, startedAtMs: null, endedAtMs: 3_000 })),
+      ),
+    );
+    await states.check();
+    expect(forward).not.toHaveBeenCalled();
+
+    // The tool says the run itself is over: now dohc reminds the thread.
+    runState("ended");
     await states.check();
     expect(forward).toHaveBeenCalledTimes(1);
-
-    // Work that stays unlisted for ten minutes is over too.
-    const second = setup();
-    await second.states.forwarded(forwarded({ runId: "run-lost", forwardedAtMs: 4_000 }));
-    second.tool(thread([]));
-    await second.states.check();
-    expect(second.forward).not.toHaveBeenCalled();
-    second.at(4_000 + 10 * 60_000);
-    await second.states.check();
-    expect(second.forward).toHaveBeenCalledTimes(1);
-    at(0);
     states.stop();
-    second.states.stop();
   });
 
   it("goes by the thread itself when the tool gave no id for the work", async () => {
@@ -404,20 +425,19 @@ describe("what an agent thread is doing with a forwarded message", () => {
   });
 
   it("goes on showing work the tool no longer lists while it is the work that is going", async () => {
-    const { states, tool, forward } = setup();
+    const { states, tool, forward, askedRuns } = setup();
     states.forwarded(forwarded());
     const newer = Array.from({ length: 50 }, (_, index) =>
       run(`run-n${index}`, "in-line", { requestedAtMs: 2_000 + index }),
     );
     // Fifty newer runs wait behind it, so the list no longer holds it.
     tool({ ...thread(newer), working: true, activeRunId: "run-1" });
-    await states.check();
-    expect(line(states)).toMatchObject({ state: "working" });
 
-    // It is neither listed nor going, and none of the newer work has begun: still in line.
-    tool({ ...thread(newer), working: false, activeRunId: null });
     await states.check();
-    expect(line(states)).toMatchObject({ state: "in-line" });
+
+    expect(line(states)).toMatchObject({ state: "working" });
+    // The thread already says it is the run that is going.
+    expect(askedRuns).toEqual([]);
     expect(forward).not.toHaveBeenCalled();
     states.stop();
   });
@@ -615,31 +635,6 @@ describe("what an agent thread is doing with a forwarded message", () => {
 
     expect(forward).toHaveBeenCalledTimes(1);
     expect(store.rows()[0]!.reminder).toMatchObject({ state: "sent" });
-    states.stop();
-  });
-
-  it("does not take newer work that was cancelled while it waited for a sign the message's work is over", async () => {
-    const { states, tool, forward } = setup();
-    states.forwarded(forwarded());
-    // Fifty newer runs pushed it off the list. All were cancelled before they started.
-    const cancelled = Array.from({ length: 50 }, (_, index) =>
-      run(`run-n${index}`, "ended", {
-        requestedAtMs: 2_000 + index,
-        startedAtMs: null,
-        endedAtMs: 3_000,
-      }),
-    );
-    tool({ ...thread(cancelled), working: true, activeRunId: "run-older" });
-
-    await states.check();
-
-    expect(line(states)).toMatchObject({ state: "in-line" });
-    expect(forward).not.toHaveBeenCalled();
-
-    // One of the newer runs started: the tool takes work in order, so this one is over.
-    tool(thread([run("run-n50", "working", { requestedAtMs: 2_100 }), ...cancelled.slice(1)]));
-    await states.check();
-    expect(forward).toHaveBeenCalledTimes(1);
     states.stop();
   });
 

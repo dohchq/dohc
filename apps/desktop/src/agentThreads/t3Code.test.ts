@@ -8,6 +8,7 @@ import {
   listT3CodeThreads,
   openT3CodeSession,
   readT3CodeAddress,
+  readT3CodeRun,
   readT3CodeThread,
   sendToT3CodeThread,
   signInToT3Code,
@@ -436,6 +437,29 @@ describe("T3 Code's thread tools", () => {
       closed: true,
       runs: [],
     });
+  });
+
+  it("asks T3 Code where one run stands, and takes a run the thread does not have as over", async () => {
+    const t3 = await fakeT3Code();
+    const session = await openT3CodeSession({ origin: t3.origin, signIn: signInAt(t3.origin) });
+    const asked = { threadId: "t1", runId: "r1" };
+    const states: string[] = [];
+    for (const status of ["queued", "preparing", "waiting", "running", "cancelled", "completed"]) {
+      t3.tools.t3_thread_wait = () => ({ runId: "r1", status, timedOut: true });
+      states.push(await readT3CodeRun(session, asked));
+    }
+    expect(states).toEqual(["in-line", "working", "working", "working", "ended", "ended"]);
+    // No time to wait: T3 Code answers with the status the run has now.
+    expect(t3.calls.findLast((call) => call.tool === "t3_thread_wait")?.args).toEqual({
+      ...asked,
+      timeoutMs: 1,
+    });
+
+    t3.refusals.t3_thread_wait = "run_not_found: Run r1 does not belong to thread t1.";
+    await expect(readT3CodeRun(session, asked)).resolves.toBe("ended");
+    // Any other refusal is not an answer about the run.
+    t3.refusals.t3_thread_wait = "thread_not_found: Thread t1 is no longer available.";
+    await expect(readT3CodeRun(session, asked)).rejects.toMatchObject({ problem: "thread-gone" });
   });
 
   it("tells a sign-in T3 Code no longer takes from a call it refused and an answer it cannot read", async () => {
