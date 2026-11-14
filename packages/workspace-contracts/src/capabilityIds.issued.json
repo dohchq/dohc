@@ -53,6 +53,8 @@
   "automation.switch",
   "capture.held.retry",
   "capture.history.retry",
+  "capture.outside.keep",
+  "capture.outside.read",
   "capture.recovery.clear",
   "capture.recovery.read",
   "capture.secret.retry",

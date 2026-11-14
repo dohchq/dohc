@@ -58,6 +58,7 @@ export function pendingStopHarness(
       credentialGeneration: 1,
     }),
     currentCredentialGeneration: () => 1,
+    keepOutsideChange: async () => false,
     relayShareJsonWithCredentials: relay as OwnerLiveDocumentActionDependencies<{
       workspaceId: string;
     }>["relayShareJsonWithCredentials"],

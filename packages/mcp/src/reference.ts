@@ -171,9 +171,11 @@ const DOCUMENT_RESULTS: Record<string, CliSocketVerb> = {
   "save-recovery-copy": "saveRecoveryCopy",
   "retry-kept-edits": "retryKeptEdits",
   "stop-again": "stopAgain",
+  "keep-outside-change": "keepOutsideChange",
   live: "liveDocuments",
   stop: "liveStop",
   resume: "liveResume",
+  "outside-changes": "outsideChanges",
 };
 
 // The socket verb whose result each `dohc automation` verb prints.
@@ -371,6 +373,7 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = dist
     dohc_save_recovery_copy: { cli: "saveRecoveryCopy" },
     dohc_retry_kept_edits: { cli: "retryKeptEdits" },
     dohc_stop_again: { cli: "stopAgain" },
+    dohc_keep_outside_change: { cli: "keepOutsideChange" },
     dohc_list_live_documents: { cli: "liveDocuments" },
     dohc_stop_live_editing: { cli: "liveStop" },
     dohc_resume_live_editing: { cli: "liveResume" },
@@ -639,6 +642,8 @@ const NOT_SHARED_READS: Record<string, string> = {
   dohc_list_version_conflicts:
     "A shared view keeps no versions of its own, so it does not offer this tool.",
   dohc_read_held_change: "A shared view holds no saves of its own, so it does not offer this tool.",
+  dohc_list_outside_changes:
+    "The owning workspace holds outside changes. Shared profiles do not offer this read.",
 };
 
 async function mcpSection(): Promise<{ text: string; version: string }> {

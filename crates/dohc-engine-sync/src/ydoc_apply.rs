@@ -3218,14 +3218,39 @@ pub fn prepare_local_ydoc_lineage_in_tx(
 pub enum CaptureLineage {
     Fold,
     /// The file holds the bytes capture last recorded, over a released
-    /// chain's tail: keep the lineage as it is and write nothing.
+    /// chain's tail, or behind a live note whose own write is pending: keep
+    /// the lineage as it is and write nothing.
     KeepTail,
+    /// The file changed outside dohc while its note is live. Capture records
+    /// none of it; the change is held until the person decides.
+    HeldOutside,
+}
+
+/// Whether `path`'s recorded head for `key` is a text write of the bytes
+/// with `sha256`: the bytes dohc last recorded for that path.
+pub(crate) fn recorded_head_matches_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    path: &str,
+    sha256: &str,
+) -> Result<bool, SyncError> {
+    tx.prepare_cached(
+        "SELECT EXISTS(SELECT 1 FROM snapshots WHERE workspace_id=?1 AND version_id=?2          AND object_id=?3 AND path=?4 AND content_kind='text' AND blob_sha256=?5)",
+    )
+    .map_err(SyncError::corrupt)?
+    .query_row(
+        rusqlite::params![key.workspace_id, key.version_id, key.object_id, path, sha256],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::corrupt)
 }
 
 /// Decide, before capture ingests `text` at `path`, what it does with the
-/// prepared lineage. An adopted owner, in any relay and on any lineage of
-/// the document, refuses every rewrite of it, so a file that differs from
-/// the Y.Doc refuses here before any other branch. A lineage a released
+/// prepared lineage. A note live for its owner, through a relay host's
+/// activation or the owner's own binding, on any lineage of the document,
+/// takes no rewrite of it, so a file that differs from the
+/// Y.Doc is held here before any other branch, unless it holds the bytes dohc
+/// last recorded and is only behind the note. A lineage a released
 /// chain left with no current activation folds only as
 /// [`released_capture`](dohc_engine_collab::live_update_application::released_capture)
 /// allows. Each refusal leaves the capture to roll back.
@@ -3242,7 +3267,7 @@ pub fn admit_capture_in_tx(
     let Some((marker, head)) = prepared.complete.state.as_ref() else {
         return Ok(CaptureLineage::Fold);
     };
-    if dohc_engine_collab::owner_outbox::has_adopted_owner_in(tx, key)
+    if dohc_engine_collab::owner_outbox::owner_holds_live_in(tx, key)
         .map_err(map_collab_hard_error)?
     {
         if prepared
@@ -3250,7 +3275,12 @@ pub fn admit_capture_in_tx(
             .as_ref()
             .is_some_and(|projection| projection.content != text)
         {
-            return Err(SyncError::LiveDocumentBindingActive);
+            let sha256 = dohc_engine_storage::hex_sha256(text.as_bytes());
+            return Ok(if recorded_head_matches_in_tx(tx, key, path, &sha256)? {
+                CaptureLineage::KeepTail
+            } else {
+                CaptureLineage::HeldOutside
+            });
         }
         return Ok(CaptureLineage::Fold);
     }

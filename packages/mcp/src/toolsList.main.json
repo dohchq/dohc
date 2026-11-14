@@ -2440,6 +2440,28 @@
       }
     },
     {
+      "name": "dohc_keep_outside_change",
+      "description": "Keep a live note's outside change, as Keep a copy does in dohc. Take `path` from dohc_list_outside_changes. dohc saves the file's bytes beside it as a copy, then writes the note's last saved text back into the file. `kept` is false when the file no longer holds an outside change. Owner workspace only.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
       "name": "dohc_link",
       "description": "Make a link to a chat, thread, message, file, or Collection. Pass exactly one of `group` (a Group, DM, or agent chat, by name, #slug, or id), `thread`, `message` (ids), or `path` (a file, or a Collection by its folder). Put the returned `link` text, `@[work:...]`, in a chat message: it shows as a chip that opens what it names, and keeps working after a rename or move.",
       "inputSchema": {
@@ -2811,6 +2833,19 @@
         "properties": {},
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_list_outside_changes",
+      "description": "List live notes whose file changed outside dohc while the note was live. Neither the note nor History holds those changes. Keep one with dohc_keep_outside_change, which saves the file's bytes as a copy and puts the note's text back in the file.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
       },
       "execution": {
         "taskSupport": "forbidden"

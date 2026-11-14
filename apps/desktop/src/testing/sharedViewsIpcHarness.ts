@@ -58,6 +58,7 @@ export const ready: WatcherStatusResult = {
   keptFiles: [],
   captureRecoveries: [],
   heldFiles: [],
+  outsideChanges: [],
   retainedCopies: { count: 0, bytes: 0 },
 };
 

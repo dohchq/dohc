@@ -296,13 +296,9 @@ for (const variant of ["closed", "open-reload", "restart"] as const) {
         await expect
           .poll(
             async () => {
-              const opened = (await editor(page).allInnerTexts()).some((text) =>
-                text.includes("AGENT-1"),
-              );
-              const waiting = (await page.getByTestId("notice-toasts").innerText()).includes(
-                "History has not recorded it yet",
-              );
-              return opened || waiting;
+              // The owner's live note keeps its text and holds the outside write.
+              const toasts = await page.getByTestId("notice-toasts").innerText();
+              return toasts.includes("Not in the live note:");
             },
             { timeout: 75_000, intervals: [1_000] },
           )

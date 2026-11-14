@@ -29,6 +29,7 @@ const READY_WATCHER_STATUS = {
   keptFiles: [],
   captureRecoveries: [],
   heldFiles: [],
+  outsideChanges: [],
   retainedCopies: { count: 0, bytes: 0 },
   phase: "ready",
 } satisfies WatcherStatusResult;

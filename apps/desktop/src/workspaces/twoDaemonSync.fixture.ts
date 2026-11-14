@@ -924,6 +924,7 @@ async function runRenameRepro(
       throw new Error("Unexpected Stop dependency");
     };
     const ownerHandlers = createRelaySharesIpcHandlers({
+      keepOutsideChange: async () => false,
       remoteForWorkspace: async () => ({ credentials, credentialGeneration: 1 }),
       currentCredentialGeneration: () => 1,
       currentCredentials: () => credentials,
@@ -2034,6 +2035,7 @@ async function runDeleteRepro(
       throw new Error("Unexpected Stop dependency");
     };
     const ownerHandlers = createRelaySharesIpcHandlers({
+      keepOutsideChange: async () => false,
       remoteForWorkspace: async () => ({ credentials, credentialGeneration: 1 }),
       currentCredentialGeneration: () => 1,
       currentCredentials: () => credentials,

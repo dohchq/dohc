@@ -15,6 +15,9 @@
     "groupCreate": [
       "group.create"
     ],
+    "keepOutsideChange": [
+      "capture.outside.keep"
+    ],
     "threads": [
       "chat.threads.list"
     ],
@@ -295,6 +298,9 @@
     ],
     "heldNoteChange": [
       "document.held.change"
+    ],
+    "outsideChanges": [
+      "capture.outside.read"
     ]
   },
   "public": {
@@ -409,6 +415,8 @@
     "chat links": "chat.read",
     "notices list": "notice.list",
     "document held-change": "document.held.change",
-    "dataset cancelInvoke": "dataset.operation.cancel"
+    "dataset cancelInvoke": "dataset.operation.cancel",
+    "document outside-changes": "capture.outside.read",
+    "document keep-outside-change": "capture.outside.keep"
   }
 }

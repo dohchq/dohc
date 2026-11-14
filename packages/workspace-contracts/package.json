@@ -14,6 +14,7 @@
     "./access": "./src/access.ts",
     "./held-changes": "./src/heldChanges.ts",
     "./links": "./src/links.ts",
+    "./outside-changes": "./src/outsideChanges.ts",
     "./share-copy": "./src/share-copy.ts",
     "./share-link-agents": "./src/shareLinkAgents.ts",
     "./agent-hues": "./src/agentHues.ts",

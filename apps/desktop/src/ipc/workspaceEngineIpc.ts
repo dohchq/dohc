@@ -155,6 +155,7 @@ export function createWorkspaceEngineIpc<
       | "readMoment"
       | "restoreFileToBeforeMoment"
       | "retryHistoryCapture"
+      | "keepOutsideChange"
       | "listVersions"
     >;
   }>;
@@ -931,6 +932,21 @@ export function createWorkspaceEngineIpc<
                 return true;
               });
               if (result === null) throw new Error("The workspace engine is not running.");
+            },
+          );
+        },
+        keepOutsideChange: async (input, { event }) => {
+          return withRendererWorkspaceOperation(
+            event.sender,
+            input.workspaceId,
+            "This workspace is no longer active.",
+            async (operation) => {
+              assertWritableWorkspace(operation.workspace);
+              const { capture } = await requireEngineCapture(
+                operation.workspace.workspaceId,
+                "Engine history",
+              );
+              return { kept: await capture.keepOutsideChange(input.path) };
             },
           );
         },

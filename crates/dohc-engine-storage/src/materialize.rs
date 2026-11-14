@@ -534,7 +534,8 @@ pub(crate) fn mark_complete(
     job_id: &str,
     now_ms: i64,
 ) -> Result<(), StorageError> {
-    set_status(conn, job_id, JobStatus::Complete, now_ms)
+    set_status(conn, job_id, JobStatus::Complete, now_ms)?;
+    crate::held_outside_changes::end_replaced_in(conn, job_id)
 }
 
 pub(crate) fn mark_cancelled(

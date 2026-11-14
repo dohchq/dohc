@@ -319,6 +319,9 @@ export interface CliKeptCopiesPort {
     restoredBy: "you" | "agent",
   ): Promise<{ path: string; status: "restored" }>;
   discardProtected(id: string): Promise<{ path: string; status: "discarded" }>;
+  // The Notices row's Keep a copy for a live note's outside change. False
+  // when the file no longer holds one.
+  keepOutsideChange(path: string): Promise<boolean>;
 }
 
 // Live documents whose edits the server refused, which dohc keeps on this
@@ -2212,7 +2215,7 @@ function validateRequestPathSpellings(request: CliRequest): void {
 type CliPathMode = "read" | "write" | "materialize";
 
 // Validate the caller spelling before rebasing, then validate workspace authority.
-async function callerPaths(context: CliWorkspaceContext, cwd: string) {
+async function callerPaths(context: Pick<CliWorkspaceContext, "rootPath">, cwd: string) {
   const root = await realpath(context.rootPath);
   // The cwd under the workspace's own spelling, so every rebased path is too.
   const folder = await pathUnderRoot(root, await realpath(cwd));
@@ -2404,6 +2407,7 @@ const RECEIVED_SHARE_RULES: {
   // Reads. Account deletion is the account's, not a workspace's.
   chatLinks: "anywhere",
   chatFileMentions: "anywhere",
+  outsideChanges: "owner",
   linksEdges: "anywhere",
   linksIn: "anywhere",
   linksResolve: "anywhere",
@@ -2453,6 +2457,7 @@ const RECEIVED_SHARE_RULES: {
   shareDisconnect: "owner",
   keptCopies: "owner",
   saveKeptCopy: "owner",
+  keepOutsideChange: "owner",
   retainedCopies: "owner",
   deleteRetainedCopies: "owner",
   ownerAppResponses: "owner",
@@ -2568,6 +2573,7 @@ async function dispatch(
     "saveRecoveryCopy",
     "retryKeptEdits",
     "stopAgain",
+    "keepOutsideChange",
     "liveDocuments",
     "liveStop",
     "liveResume",
@@ -2709,6 +2715,12 @@ async function dispatch(
         break;
       case "retryKeptEdits":
       case "stopAgain":
+        rebased = {
+          ...request,
+          args: { ...request.args, path: paths.rebase(request.args.path, "write") },
+        };
+        break;
+      case "keepOutsideChange":
         rebased = {
           ...request,
           args: { ...request.args, path: paths.rebase(request.args.path, "write") },
@@ -3871,6 +3883,21 @@ async function dispatchWorkspace(
         return mcpFailure(error, "failed to read whether Collection updates wait");
       }
 
+    case "keepOutsideChange": {
+      const keptCopies = context.keptCopies;
+      if (!keptCopies) return keptCopiesUnavailable();
+      try {
+        const kept = await keptCopies.keepOutsideChange(request.args.path);
+        if (kept) await notifyWrite(options, context);
+        return { ok: true as const, path: request.args.path, kept };
+      } catch (error) {
+        return pathFreeFailure(
+          error,
+          `dohc could not keep the outside change to ${request.args.path}.`,
+        );
+      }
+    }
+
     case "saveKeptCopy": {
       const keptCopies = context.keptCopies;
       if (!keptCopies) return keptCopiesUnavailable();
@@ -4758,7 +4785,10 @@ async function dispatchDeclaredRead(
       ? null
       : read(workspace, { channelWireId, cursor: request.args.cursor });
   }
-  const { cwd: _cwd, actor: _actor, agentId: _agentId, ...input } = request.args;
+  const { cwd, actor: _actor, agentId: _agentId, ...input } = request.args;
+  // Keep takes its path from the caller's folder, so list from there too.
+  if (request.verb === "outsideChanges")
+    return (await callerPaths(workspace, cwd)).result(await read(workspace, input));
   return read(workspace, input);
 }
 

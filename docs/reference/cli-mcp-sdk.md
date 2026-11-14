@@ -117,6 +117,16 @@ No arguments.
 
 Returns `{ ok: true, workspaceId, workspaceSynced: false, syncPause?: { atMs, author } } | { ok: false, reason }`.
 
+### `dohc_list_outside_changes`
+
+List live notes whose file changed outside dohc while the note was live. Neither the note nor History holds those changes. Keep one with dohc_keep_outside_change, which saves the file's bytes as a copy and puts the note's text back in the file.
+
+The owning workspace holds outside changes. Shared profiles do not offer this read.
+
+No arguments.
+
+Returns `{ outsideChanges: { path, firstObservedAtMs }[] }`.
+
 ### `dohc_chat_links`
 
 Read one bounded page of accessible files mentioned in a chat. Use channelWireId from dohc_list_groups, and continue nextCursor until null. Coverage can be partial.
@@ -355,6 +365,16 @@ Changes the workspace, so a shared view does not offer it.
 - `incident`: `string`. Required.
 
 Returns `{ ok: true, path, keptEdits } | { ok: false, reason }`.
+
+### `dohc_keep_outside_change`
+
+Keep a live note's outside change, as Keep a copy does in dohc. Take `path` from dohc_list_outside_changes. dohc saves the file's bytes beside it as a copy, then writes the note's last saved text back into the file. `kept` is false when the file no longer holds an outside change. Owner workspace only.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `path`: `string`. Required.
+
+Returns `{ ok: true, path, kept } | { ok: false, reason }`.
 
 ### `dohc_list_live_documents`
 
@@ -1185,6 +1205,18 @@ storedOn is this-computer, or server for a document the server hosts. A recovery
 
 With `--json`, prints `{ schemaVersion, ok: true, keptEdits: { path, reason, storedOn, incident, recovery, earlier?: true, saveOnly?: true }[], pendingShare, pendingShareWhileOpen }`.
 
+#### `dohc document keep-outside-change`
+
+```sh
+dohc document keep-outside-change <path> [options]
+```
+
+Keep a live note's outside change as a copy and put the note's text back in its file.
+
+Take the path from outside-changes. dohc saves the file's bytes beside it as a copy, then writes the note's last saved text into the file. kept is false when the file no longer holds an outside change.
+
+With `--json`, prints `{ schemaVersion, ok: true, path, kept }`.
+
 #### `dohc document save-recovery-copy`
 
 ```sh
@@ -1260,6 +1292,16 @@ Resume live editing for a document, as Resume does in Live documents.
 Accepts a document whose canResume is true in live. dohc sends this computer's unsent changes first, and records the Resume as this agent's when the server says this request resumed it. already is true when the document was already live. Then dohc records no one. Run live again to follow it: preparing until the server starts the document, then ready.
 
 With `--json`, prints `{ schemaVersion, ok: true, path, already?: true }`.
+
+#### `dohc document outside-changes`
+
+```sh
+dohc document outside-changes [options]
+```
+
+List live notes whose file changed outside dohc.
+
+With `--json`, prints `{ schemaVersion, outsideChanges: { path, firstObservedAtMs }[] }`.
 
 ### `dohc chat`
 

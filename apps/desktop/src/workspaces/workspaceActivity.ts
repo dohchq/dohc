@@ -67,6 +67,7 @@ interface WatchedWorkspace {
   keptFiles: readonly (readonly [string, string])[];
   retainedCopies: NonNullable<SyncStatusResult["retainedCopies"]> | null;
   heldFiles: NonNullable<SyncStatusResult["heldFiles"]>;
+  outsideChanges: NonNullable<SyncStatusResult["outsideChanges"]>;
   // The engine's latest answer: Collection updates wait for an unfinished
   // pull. Asked at open and after sync passes, and kept as sync engines
   // attach and detach. Reads are numbered so an older answer that resolves
@@ -180,6 +181,7 @@ export interface WorkspaceCaptureHooks {
   onKeptFiles: (paths: readonly (readonly [string, string])[]) => void;
   onRetainedCopies: (summary: NonNullable<SyncStatusResult["retainedCopies"]>) => void;
   onHeldFiles: (files: NonNullable<SyncStatusResult["heldFiles"]>) => void;
+  onOutsideChanges?: (changes: NonNullable<SyncStatusResult["outsideChanges"]>) => void;
 }
 
 export async function closeWorkspaceActivityAndRelay(options: {
@@ -357,6 +359,7 @@ export function createWorkspaceActivity(
       keptFiles: (w?.keptFiles ?? []).map(([original, copy]): [string, string] => [original, copy]),
       ...(w?.retainedCopies ? { retainedCopies: { ...w.retainedCopies } } : {}),
       heldFiles: w?.heldFiles ?? [],
+      outsideChanges: w?.outsideChanges ?? [],
       sharingDeclined: snap?.sharingDeclined ?? [],
       ownerAdmissionPending: snap?.ownerAdmissionPending ?? [],
       ...(collectionsWaitingForSync ? { collectionsWaitingForSync } : {}),
@@ -462,6 +465,7 @@ export function createWorkspaceActivity(
         keptFiles: [],
         retainedCopies: null,
         heldFiles: [],
+        outsideChanges: [],
         collectionsWaiting: false,
         collectionsWaitingAsked: 0,
         collectionsWaitingAnswered: 0,
@@ -533,6 +537,15 @@ export function createWorkspaceActivity(
             onHeldFiles: (files) => {
               if (state.entry !== entry) return;
               recordHeldFiles(workspace, state, files);
+            },
+            onOutsideChanges: (changes) => {
+              if (
+                state.entry !== entry ||
+                JSON.stringify(changes) === JSON.stringify(entry.outsideChanges)
+              )
+                return;
+              entry.outsideChanges = changes;
+              notify({ workspaceId: workspace.workspaceId });
             },
           });
           // stopAll may have raced the capture build; stop the capture no

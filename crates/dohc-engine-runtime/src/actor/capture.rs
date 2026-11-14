@@ -26,6 +26,7 @@ use dohc_engine_domain::{
 use dohc_engine_files::floor::path_collision_key;
 use dohc_engine_storage::capture_file_holds::{self, CaptureFileHold};
 use dohc_engine_storage::capture_first_imports;
+use dohc_engine_storage::held_outside_changes::{self, HeldOutsideChange};
 use dohc_engine_storage::{EngineStore, FaultInjector, StorageError, TxnOutcome};
 use rusqlite::{Connection, Transaction, params};
 use std::path::PathBuf;
@@ -1297,6 +1298,7 @@ impl ActorHandle {
         (
             Vec<dohc_engine_domain::CaptureRecovery>,
             Vec<CaptureFileHold>,
+            Vec<HeldOutsideChange>,
         ),
         RuntimeError,
     > {
@@ -1305,8 +1307,20 @@ impl ActorHandle {
                 Ok((
                     dohc_engine_domain::capture_recoveries_in(conn, &workspace_id)?,
                     capture_file_holds::list_in(conn, &workspace_id)?,
+                    held_outside_changes::list_in(conn, &workspace_id)?,
                 ))
             })
+        })
+        .await
+    }
+
+    /// Files that changed outside dohc while their note was live.
+    pub async fn held_outside_changes(
+        &self,
+        workspace_id: String,
+    ) -> Result<Vec<HeldOutsideChange>, RuntimeError> {
+        self.run(move |store, _| {
+            Ok(store.read_with(|conn| held_outside_changes::list_in(conn, &workspace_id))?)
         })
         .await
     }
@@ -1964,6 +1978,16 @@ fn capture_ingest_on_store(
     let outcome = match store.write_with(faults, |tx| {
         capture_ingest_in_tx(tx, input, indexing, leases, None)
     }) {
+        Err(error) if held_outside(&error) => {
+            match store.write_with(faults, |tx| record_held_outside_change_in(tx, input))? {
+                TxnOutcome::Committed(()) => {
+                    return Err(RuntimeError::CaptureFileHeld {
+                        path: input.path.clone(),
+                    });
+                }
+                TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
+            }
+        }
         Err(error) if unrepresentable(&error) => {
             match store.write_with(faults, |tx| record_capture_file_hold_in(tx, input))? {
                 TxnOutcome::Committed(()) => {
@@ -2031,6 +2055,63 @@ fn clear_unowned_capture_hold(
 
 fn unrepresentable(error: &RuntimeError) -> bool {
     matches!(error, RuntimeError::Sync(dohc_engine_sync::SyncError::InvalidInput { reason }) if *reason == capture_file_holds::NOT_REPRESENTABLE)
+}
+
+/// Capture's signal, inside its own transaction, that the file changed
+/// outside dohc while its note is live. It never leaves capture.
+const LIVE_NOTE_CHANGED_OUTSIDE: &str = "live-note-changed-outside";
+
+fn held_outside(error: &RuntimeError) -> bool {
+    matches!(error, RuntimeError::Sync(dohc_engine_sync::SyncError::InvalidInput { reason }) if *reason == LIVE_NOTE_CHANGED_OUTSIDE)
+}
+
+/// Record the held bytes after capture rolled back everything it read them for.
+fn record_held_outside_change_in(
+    tx: &Transaction<'_>,
+    input: &CaptureIngest,
+) -> Result<(), RuntimeError> {
+    let object_id = dohc_engine_domain::ensure_capture_object_in_tx(
+        tx,
+        &input.workspace_id,
+        &input.version_id,
+        &input.path,
+        input.now_ms,
+    )?;
+    held_outside_changes::record_in(
+        tx,
+        &HeldOutsideChange {
+            workspace_id: input.workspace_id.clone(),
+            version_id: input.version_id.clone(),
+            object_id,
+            path: input.path.clone(),
+            observed_sha256: dohc_engine_storage::hex_sha256(input.text.as_bytes()),
+            observed_size: input.text.len() as u64,
+            first_observed_at_ms: input.now_ms,
+            observed_at_ms: input.now_ms,
+        },
+    )?;
+    Ok(())
+}
+
+/// Bytes already held are not read again until they change, while their
+/// note is live. Once live editing ends, capture reads them like any file.
+fn ensure_not_held_outside(
+    tx: &Transaction<'_>,
+    input: &CaptureIngest,
+) -> Result<(), RuntimeError> {
+    let Some(hold) = held_outside_changes::hold_in(tx, &input.workspace_id, &input.path)? else {
+        return Ok(());
+    };
+    if hold.observed_sha256 != dohc_engine_storage::hex_sha256(input.text.as_bytes()) {
+        return Ok(());
+    }
+    let key = DocKey::new(&hold.workspace_id, &hold.version_id, &hold.object_id)?;
+    if dohc_engine_collab::owner_outbox::owner_holds_live_in(tx, &key)? {
+        return Err(RuntimeError::CaptureFileHeld {
+            path: input.path.clone(),
+        });
+    }
+    Ok(())
 }
 
 fn record_capture_file_hold_in(
@@ -2143,6 +2224,12 @@ fn prepare_capture_recovery_in(
     let key = DocKey::new(&input.workspace_id, &input.version_id, object_id)?;
     let lineage = dohc_engine_sync::prepare_local_ydoc_lineage_in_tx(tx, &key)?;
     let outcome = dohc_engine_sync::admit_capture_in_tx(tx, &lineage, &input.path, &input.text)?;
+    if outcome == dohc_engine_sync::CaptureLineage::HeldOutside {
+        return Err(dohc_engine_sync::SyncError::InvalidInput {
+            reason: LIVE_NOTE_CHANGED_OUTSIDE,
+        }
+        .into());
+    }
     let mut prepared = PreparedCaptureRecovery {
         object_id: object_id.to_owned(),
         lineage,
@@ -2214,6 +2301,7 @@ fn capture_ingest_in_tx(
     leases: &LeaseRegistry,
     mut batch: Option<&mut CaptureBatchSharedContext>,
 ) -> Result<WriteResult, RuntimeError> {
+    ensure_not_held_outside(tx, input)?;
     let (pinned, held) = pinned_capture_input(tx, input)?;
     let input = pinned.as_ref();
     if !held {
@@ -2477,6 +2565,8 @@ fn capture_ingest_in_tx(
         )?;
         capture_file_holds::clear_in(tx, &input.workspace_id, &input.path)?;
     }
+    // The file no longer holds the change capture held, or the note took it.
+    held_outside_changes::clear_in(tx, &input.workspace_id, &input.path)?;
     result.pending_placement = pending_placement;
     result.released_capture_hold = held;
     // Projection refusal may establish a hold; a valid pending observation rolls back.
@@ -2664,7 +2754,12 @@ fn capture_ingest_batch_with_item_savepoints_in_tx(
                 )
                 .map_err(StorageError::persist_public)?;
                 batch.capture = prior_capture;
-                if unrepresentable(&error) {
+                if held_outside(&error) {
+                    record_held_outside_change_in(tx, input)?;
+                    results.push(Err(RuntimeError::CaptureFileHeld {
+                        path: input.path.clone(),
+                    }));
+                } else if unrepresentable(&error) {
                     record_capture_file_hold_in(tx, input)?;
                     results.push(Err(RuntimeError::CaptureFileHeld {
                         path: input.path.clone(),
@@ -3003,6 +3098,7 @@ fn capture_ingest_binary_on_store(
             )?;
             capture_file_holds::clear_in(tx, &input.workspace_id, &input.path)?;
         }
+        held_outside_changes::clear_in(tx, &input.workspace_id, &input.path)?;
         Ok::<_, RuntimeError>(result)
     });
     let outcome = match outcome {
@@ -3553,6 +3649,7 @@ fn capture_retire_on_store(
             )?;
             capture_file_holds::clear_in(tx, &input.workspace_id, &input.path)?;
         }
+        held_outside_changes::clear_in(tx, &input.workspace_id, &input.path)?;
         Ok::<_, RuntimeError>((result, asset_jobs))
     })?;
     match outcome {

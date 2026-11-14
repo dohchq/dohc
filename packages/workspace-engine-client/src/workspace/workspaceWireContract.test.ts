@@ -1105,11 +1105,13 @@ it("decodes whether a recovery keeps typing for a deleted file", () => {
       keptFiles: [],
       captureRecoveries: [record],
       heldFiles: [],
+      outsideChanges: [],
       retainedCopies: { count: 0, bytes: 0 },
     }),
   ).toMatchObject({
     captureRecoveries: [record],
     heldFiles: [],
+    outsideChanges: [],
     retainedCopies: { count: 0, bytes: 0 },
   });
 });
@@ -1125,6 +1127,7 @@ it("decodes outside writes waiting for an open document", () => {
     keptFiles: [],
     captureRecoveries: [],
     heldFiles: [],
+    outsideChanges: [],
     retainedCopies: { count: 0, bytes: 0 },
     deferredWrites: ["notes/open.md"],
   };
@@ -1147,6 +1150,7 @@ it("decodes why protected files wait on the secret key", () => {
     keptFiles: [],
     captureRecoveries: [],
     heldFiles: [],
+    outsideChanges: [],
     retainedCopies: { count: 0, bytes: 0 },
     deferredWrites: [],
     secretKeyUnavailable: "volume-shares-new-files",
@@ -1200,6 +1204,7 @@ const holdReplies: Array<[WorkspaceMethod, Record<string, JsonValue>]> = [
       deferredWrites: [],
       keptFiles: [],
       captureRecoveries: [],
+      outsideChanges: [],
       retainedCopies: { count: 0, bytes: 0 },
     },
   ],
