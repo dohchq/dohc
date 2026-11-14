@@ -82,7 +82,9 @@ const bridgeMock = {
     async (_payload: {
       workspaceId: string;
       agentId: string;
-    }): Promise<{ threadId: string; title: string; closed: boolean }> => ({
+    }): Promise<
+      { threadId: string; title: string; closed: boolean } | { threadId: string; problem: string }
+    > => ({
       threadId: "t-chief",
       title: "Chief of Staff: dohc",
       closed: false,
@@ -534,6 +536,28 @@ it("does not name the thread the agent left while its save is still on its way",
 
   expect(await row.findByText("Issue owner", undefined, { timeout: 3_000 })).toBeTruthy();
   expect(bridgeMock.readAgentThread).toHaveBeenCalledTimes(3);
+});
+
+it("says what T3 Code said of the agent's thread, and never of the thread it left", async () => {
+  const gone = "This thread is no longer in T3 Code.";
+  // The agent's thread is gone from T3 Code: the reason to change it.
+  bridgeMock.readAgentThread.mockResolvedValueOnce({ threadId: "t-chief", problem: gone });
+  const { row, rerender, onError } = await openChiefPage();
+  expect(within(await row.findByTestId("agent-page-thread-retry")).getByText(gone)).toBeTruthy();
+  expect(onError).toHaveBeenCalledWith(gone, expect.any(Error), expect.any(Function));
+
+  // The person changes the thread. The save has not landed, so the first
+  // answer is still that the old thread is gone. It is not said of the new one.
+  bridgeMock.readAgentThread
+    .mockResolvedValueOnce({ threadId: "t-chief", problem: gone })
+    .mockResolvedValueOnce({ threadId: "t-issue", title: "Issue owner", closed: false });
+  rerender(withChief({ thread: { tool: "t3-code", id: "t-issue" } }));
+  await waitFor(() => expect(bridgeMock.readAgentThread).toHaveBeenCalledTimes(2));
+  expect(row.queryByTestId("agent-page-thread-retry")).toBeNull();
+  expect(row.getByLabelText("Reading the thread")).toBeTruthy();
+
+  expect(await row.findByText("Issue owner", undefined, { timeout: 3_000 })).toBeTruthy();
+  expect(row.queryByTestId("agent-page-thread-retry")).toBeNull();
 });
 
 it("reads the thread once T3 Code allows dohc, and says nothing of it before", async () => {

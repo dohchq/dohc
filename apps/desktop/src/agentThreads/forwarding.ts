@@ -95,6 +95,12 @@ export function createForwarding(dependencies: ForwardingDependencies) {
   >();
   const retries = new Map<string, { attempt: number; timer?: ReturnType<typeof setTimeout> }>();
   const stuck = new Set<string>();
+  // The forwards the tool took whose message could not then be marked read.
+  // Such a message is not sent again: its thread has it, and the tool refuses
+  // its id for another thread, which would hold every later message once the
+  // agent is pointed at one. Only its read marker is tried again.
+  const taken = new Set<string>();
+  const MAX_TAKEN = 1_000;
   let stopped = false;
 
   const report = (workspaceId: string, agentId: string | null, problem: unknown) => {
@@ -149,6 +155,12 @@ export function createForwarding(dependencies: ForwardingDependencies) {
     live: () => boolean,
   ): Promise<boolean> {
     if (!live()) return false;
+    const forwardId = forwardIdOf(workspace.id, agent.id, request.messageId);
+    if (taken.has(forwardId)) {
+      await markRead(workspace.id, agent, request);
+      taken.delete(forwardId);
+      return true;
+    }
     const { thread, messageCount } = await chats.getThread({
       workspaceId: workspace.id,
       threadId: request.threadId,
@@ -156,10 +168,10 @@ export function createForwarding(dependencies: ForwardingDependencies) {
     const { channel } = request;
     // The pass ended while it read the thread: nothing new goes out.
     if (!live()) return false;
-    const taken = await dependencies.tool.forward({
+    const started = await dependencies.tool.forward({
       threadId: agent.threadId,
       how: agent.whileBusy,
-      forwardId: forwardIdOf(workspace.id, agent.id, request.messageId),
+      forwardId,
       message: forwardedMessageText({
         cli: dependencies.cli,
         workspace,
@@ -183,12 +195,16 @@ export function createForwarding(dependencies: ForwardingDependencies) {
         chatThreadId: request.threadId,
         messageId: request.messageId,
         afterOrder: messageCount - 1,
-        runId: taken?.runId ?? null,
+        runId: started?.runId ?? null,
       });
     } catch {}
     // The tool took it. A failure from here leaves it unread, and the next
-    // try sends it under the same id.
+    // try marks it read without sending it again. After a restart dohc no
+    // longer knows the tool took it, and sends it under the same id.
+    taken.add(forwardId);
+    if (taken.size > MAX_TAKEN) taken.delete(taken.values().next().value!);
     await markRead(workspace.id, agent, request);
+    taken.delete(forwardId);
     return true;
   }
 

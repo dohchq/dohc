@@ -342,16 +342,24 @@ function ThreadRow(props: {
   // the agent had until now. It is not shown, and the thread is read again
   // until the answer is for the thread the agent has here.
   const answered = read.value;
-  const value = answered?.threadId === thread.id ? answered : undefined;
+  const current = answered?.threadId === thread.id ? answered : undefined;
+  const value = current && "title" in current ? current : undefined;
   useEffect(() => {
     if (answered === undefined || answered.threadId === thread.id) return;
     const timer = setTimeout(() => void retry(), 300);
     return () => clearTimeout(timer);
   }, [answered, thread.id, retry]);
+  // Why this thread could not be read: what the tool said of it, or why dohc could not ask.
+  const failure =
+    error !== null
+      ? ipcErrorMessage(error, THREAD_READ_FAILED)
+      : current && "problem" in current
+        ? current.problem
+        : null;
   // A failed read says why once, in Notices, with its Try again.
   useEffect(() => {
-    if (error !== null) report.current?.(ipcErrorMessage(error, THREAD_READ_FAILED), error, retry);
-  }, [error, retry]);
+    if (failure !== null) report.current?.(failure, error ?? new Error(failure), retry);
+  }, [failure, error, retry]);
   const [changing, setChanging] = useState(false);
   // A row that is gone, with its agent or its workspace, reports nothing.
   const shown = useRef(true);
@@ -377,10 +385,10 @@ function ThreadRow(props: {
   return (
     <>
       <PageRow testId="agent-page-thread" icon={<MessagesSquare size={14} />} label="Thread" wrap>
-        {access === "refused" ? null : error !== null ? (
+        {access === "refused" ? null : failure !== null ? (
           <div className="ml-auto min-w-0">
             <RetryRow testId="agent-page-thread-retry" onRetry={() => void retry()}>
-              {ipcErrorMessage(error, THREAD_READ_FAILED)}
+              {failure}
             </RetryRow>
           </div>
         ) : (
@@ -396,7 +404,7 @@ function ThreadRow(props: {
         )}
       </PageRow>
       <div className="flex min-h-11 flex-wrap items-center justify-end gap-x-2 gap-y-1 border-b border-line px-3 py-2 text-[12px]">
-        {error === null && value?.closed ? (
+        {failure === null && value?.closed ? (
           // T3 Code says which of the two only together. dohc still forwards to
           // the thread, so this claims nothing about what the thread then does.
           <p data-testid="agent-page-thread-closed" className="m-0 mr-auto min-w-0 text-muted">

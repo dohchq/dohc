@@ -8320,14 +8320,19 @@ export const agentThreadOperations = {
     scope: "workspace",
     channel: "desktop:read-agent-thread",
     payload: z.strictObject({ workspaceId: z.string().min(1), agentId: AgentId }),
-    result: z.strictObject({
-      // The thread the agent is saved with, which the title is of. A window
-      // shows a save before it lands, so it checks this against the thread it shows.
-      threadId: AgentThread.shape.id,
-      title: z.string(),
-      // The thread was archived or settled in its tool.
-      closed: z.boolean(),
-    }),
+    // Each answer names the thread the agent is saved with, which it is
+    // about. A window shows a save before it lands, so it checks that against
+    // the thread it shows, for a title and for a failure alike.
+    result: z.union([
+      z.strictObject({
+        threadId: AgentThread.shape.id,
+        title: z.string(),
+        // The thread was archived or settled in its tool.
+        closed: z.boolean(),
+      }),
+      // The tool could not be asked about that thread, or no longer has it.
+      z.strictObject({ threadId: AgentThread.shape.id, problem: z.string().min(1) }),
+    ]),
     guard: "active-workspace",
     inactiveMessage: "The thread was not read because this window changed workspaces.",
   },

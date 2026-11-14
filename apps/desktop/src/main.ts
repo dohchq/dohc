@@ -606,6 +606,7 @@ import { createCloudCredentialStore, mayUseKeychain } from "./workspaces/cloudCr
 import { createAgentThreads, forwardProblemWords } from "./agentThreads/agentThreads";
 import { cliForThread } from "./agentThreads/forwardedText";
 import { createForwardLedger } from "./agentThreads/forwardLedger";
+import { T3CodeError } from "./agentThreads/t3Code";
 import { createT3CodeConnection, type T3CodeConnection } from "./agentThreads/t3CodeConnection";
 import { createT3CodeSignInStore, encryptsWithSystemKey } from "./agentThreads/t3CodeSignInStore";
 import { createLastKnownDmRequestLanesCache } from "./workspaces/dmRequests";
@@ -10813,8 +10814,15 @@ function registerIpcHandlers(): void {
     },
     readAgentThread: async ({ workspaceId, agentId }) => {
       const agent = await agentWithThreadFor(workspaceId, agentId);
-      const { title, closed } = await t3Code().thread(agent.thread.id);
-      return { threadId: agent.thread.id, title, closed };
+      const threadId = agent.thread.id;
+      try {
+        const { title, closed } = await t3Code().thread(threadId);
+        return { threadId, title, closed };
+      } catch (error) {
+        // Said with the thread it is about, which a thrown error could not be.
+        if (error instanceof T3CodeError) return { threadId, problem: error.message };
+        throw error;
+      }
     },
     changeAgentThread: async ({ workspaceId, agentId, threadId }) => {
       const agent = await agentWithThreadFor(workspaceId, agentId);

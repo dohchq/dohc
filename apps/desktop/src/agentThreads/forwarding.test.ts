@@ -282,19 +282,63 @@ describe("forwarding", () => {
     forwarding.stop();
   });
 
-  it("sends a message again under the same id when it could not be marked read", async () => {
-    const { forwarding, sent, failMarks } = setup([request("m1", 10)], { retryAfterMs: [60_000] });
+  it("marks a message read on the next try, without sending it again, when the tool took it and the read marker failed", async () => {
+    const { forwarding, sent, marks, failMarks } = setup([request("m1", 10)], {
+      retryAfterMs: [60_000],
+    });
     failMarks(true);
 
     await forwarding.wake(WORKSPACE);
+    expect(marks).toEqual([]);
     failMarks(false);
     await forwarding.wake(WORKSPACE);
     await forwarding.wake(WORKSPACE);
 
     expect(sent.map((message) => message.forwardId)).toEqual([
       forwardIdOf(WORKSPACE, "chief", "m1"),
+    ]);
+    expect(marks).toEqual(["m1"]);
+    forwarding.stop();
+  });
+
+  it("sends a message again under the same id after a restart, when it was never marked read", async () => {
+    const before = setup([request("m1", 10)], { retryAfterMs: [60_000] });
+    before.failMarks(true);
+    await before.forwarding.wake(WORKSPACE);
+    before.forwarding.stop();
+
+    // A new forwarder does not know the tool took it. The tool tells by the id.
+    const after = setup([], { retryAfterMs: [60_000], chats: before.chats });
+    await after.forwarding.wake(WORKSPACE);
+
+    expect([...before.sent, ...after.sent].map((message) => message.forwardId)).toEqual([
+      forwardIdOf(WORKSPACE, "chief", "m1"),
       forwardIdOf(WORKSPACE, "chief", "m1"),
     ]);
+    after.forwarding.stop();
+  });
+
+  it("does not give the next thread a message the last one took, and goes on to the messages after it", async () => {
+    let agents: ServedAgent[] = [agent];
+    const { forwarding, sent, marks, failMarks } = setup([request("m1", 10)], {
+      retryAfterMs: [60_000],
+      workspace: async () => ({ name: "Launch", agents }),
+    });
+    // The first thread takes m1, and its read marker fails.
+    failMarks(true);
+    await forwarding.wake(WORKSPACE);
+    expect(sent.map((message) => [message.threadId, message.forwardId])).toEqual([
+      ["t3-thread-1", forwardIdOf(WORKSPACE, "chief", "m1")],
+    ]);
+
+    // The person points the agent at another thread. The tool would refuse
+    // m1's id there, and every message after m1 would wait behind it.
+    failMarks(false);
+    agents = [{ ...agent, threadId: "t3-thread-new" }];
+    await forwarding.wake(WORKSPACE, true);
+
+    expect(sent).toHaveLength(1);
+    expect(marks).toEqual(["m1"]);
     forwarding.stop();
   });
 
