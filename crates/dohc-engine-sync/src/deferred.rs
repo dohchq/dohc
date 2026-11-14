@@ -214,16 +214,17 @@ pub(crate) fn read(
             "SELECT DISTINCT d.origin_id FROM relay_deferred_ops d WHERE d.workspace_id=?1 AND {UNAPPLIED}"))?;
         let origins = stmt.query_map([workspace], |r| r.get(0))?
             .collect::<Result<BTreeSet<String>, _>>()?;
-        // Each file of an origin takes its turn in the page, so one file's
-        // long run of held work cannot keep the origin's other files out.
+        // Files of an origin take turns by when their work was last checked,
+        // then share the page op by op, so held files cannot keep a ready
+        // file out of it.
         let mut stmt = conn.prepare(
             "SELECT d.envelope_json FROM relay_deferred_ops d JOIN
              (SELECT origin_id,MIN(checked_sequence) AS checked FROM relay_deferred_ops
               WHERE workspace_id=?1 GROUP BY origin_id) q ON q.origin_id=d.origin_id
-             WHERE d.workspace_id=?1 ORDER BY q.checked,d.origin_id,
-               ROW_NUMBER() OVER (PARTITION BY d.origin_id,
-                 json_extract(d.envelope_json,'$.payload.objectId') ORDER BY d.origin_seq),
-               d.origin_seq LIMIT ?2")?;
+             WHERE d.workspace_id=?1
+             WINDOW file AS (PARTITION BY d.origin_id,json_extract(d.envelope_json,'$.payload.objectId'))
+             ORDER BY q.checked,d.origin_id,MIN(d.checked_sequence) OVER file,
+               ROW_NUMBER() OVER (file ORDER BY d.origin_seq),d.origin_seq LIMIT ?2")?;
         let encoded = stmt.query_map(params![workspace, REPLAY_PAGE], |r| r.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
         Ok::<_, rusqlite::Error>((mismatched, encoded, origins))
@@ -721,9 +722,15 @@ pub(crate) fn claim_report(
                     params![workspace,object_id,next]).map_err(SyncError::persist)?;
             }
         } else {
-            for origin in checked.iter().map(|op| &op.origin_id).collect::<BTreeSet<_>>() {
-                tx.execute("UPDATE relay_deferred_ops SET checked_sequence=?3 WHERE workspace_id=?1 AND origin_id=?2",
-                    params![workspace,origin,next]).map_err(SyncError::persist)?;
+            let mut files: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+            for op in checked {
+                files.entry(&op.origin_id).or_default().insert(op.payload["objectId"].as_str().unwrap_or_default());
+            }
+            for (origin, objects) in files {
+                let objects = serde_json::to_string(&objects).map_err(SyncError::corrupt)?;
+                tx.execute("UPDATE relay_deferred_ops SET checked_sequence=?4 WHERE workspace_id=?1 AND origin_id=?2
+                    AND COALESCE(json_extract(envelope_json,'$.payload.objectId'),'') IN (SELECT value FROM json_each(?3))",
+                    params![workspace,origin,objects,next]).map_err(SyncError::persist)?;
             }
         }
         let mut claimed = false;

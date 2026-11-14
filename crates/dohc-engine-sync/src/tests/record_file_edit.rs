@@ -1663,6 +1663,38 @@ fn a_file_with_a_page_of_held_saves_leaves_room_for_another_file() {
     );
 }
 
+#[test]
+fn a_ready_file_behind_a_page_of_held_files_gets_its_turn() {
+    let (_scratch, _a, mut b, mut d) = b_holds_a_conflict();
+    let packing_op = a_saves(
+        &mut d,
+        PACKING,
+        PACKING_PATH,
+        PACKING_TEXT,
+        "packing-saved",
+        60,
+    );
+    // A replay page holds 500 ops, here one save of each of 500 other files.
+    let mut retained = (0..500)
+        .map(|seq| {
+            let mut op = from_origin(&packing_op, "device-f", seq);
+            op.payload["objectId"] = json!(format!("held-{seq}"));
+            op
+        })
+        .collect::<Vec<_>>();
+    retained.push(from_origin(&packing_op, "device-f", 500));
+    b_retains(&mut b, &retained, &[PACKING_TEXT]);
+    let identity = read_sync_identity(&b, "ws")
+        .expect("identity")
+        .expect("B has an identity");
+    let (page, _) = crate::deferred::read(&b, "ws", &identity).expect("replay page");
+    assert!(page.iter().all(|op| op.origin_seq < 500));
+    crate::deferred::claim_report(&mut b, "ws", &page, &[], &mut None, &NoFaults)
+        .expect("the pass checks the page");
+    let (page, _) = crate::deferred::read(&b, "ws", &identity).expect("next replay page");
+    assert_eq!(page.first().map(|op| op.origin_seq), Some(500));
+}
+
 /// B has a draft it never saved, and D deletes that draft behind its Apollo
 /// save that waits on B's conflict. B refuses the delete until the draft
 /// settles, which is not a durable hold, so the delete and D's next change to
