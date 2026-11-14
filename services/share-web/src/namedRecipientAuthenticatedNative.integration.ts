@@ -16,7 +16,7 @@ import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { getCookies } from "better-auth/cookies";
 import { Client, Pool } from "pg";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { createLiveValidationExecutor } from "../../sync-relay/src/liveValidation.js";
@@ -536,18 +536,11 @@ it(
           const discriminator = new Promise<string>((resolve) => {
             resolveDiscriminator = resolve;
           });
-          page.on("response", async (response) => {
-            if (
-              new URL(response.url()).pathname === "/api/live/named-session" &&
-              response.status() === 200
-            ) {
-              try {
-                const body = (await response.json()) as { discriminator: string };
-                resolveDiscriminator(body.discriminator);
-              } catch (error) {
-                browserErrors.push(String(error));
-              }
-            }
+          // The socket's URL names the session. Chromium does not keep every response body for a later read.
+          page.on("websocket", (socket) => {
+            const url = new URL(socket.url()),
+              session = url.searchParams.get("session");
+            if (url.pathname === "/api/live" && session) resolveDiscriminator(session);
           });
           page.on("pageerror", (error) => browserErrors.push(String(error)));
           page.on("response", (response) => {
@@ -595,18 +588,23 @@ it(
             "/api/live/named-session",
             "/api/live/named-ticket",
           ]) {
-            expect(requests).toContainEqual({ accountId: user.id, path, status: 200 });
+            // Playwright may report a response after the page has used it.
+            await vi.waitFor(() =>
+              expect(requests).toContainEqual({ accountId: user.id, path, status: 200 }),
+            );
           }
         const wrongGrant = await openInvitation(users[1]!, "grant-0");
         await browserExpect(wrongGrant.page.getByRole("alert")).toBeVisible();
         await browserExpect(
           wrongGrant.page.getByRole("button", { name: "docs/a.md", exact: true }),
         ).toHaveCount(0);
-        expect(requests).toContainEqual({
-          accountId: users[1]!.id,
-          path: "/api/live/named-documents",
-          status: 404,
-        });
+        await vi.waitFor(() =>
+          expect(requests).toContainEqual({
+            accountId: users[1]!.id,
+            path: "/api/live/named-documents",
+            status: 404,
+          }),
+        );
         results.authentication = {
           accountIds: users.map((user) => user.id),
           requests,
