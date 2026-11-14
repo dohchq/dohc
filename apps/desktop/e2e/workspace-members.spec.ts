@@ -1,9 +1,10 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import { randomBytes } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { activityPin, settingsNavPin } from "../src/testPins";
 import { launchDesktopApp } from "./helpers/desktopApp";
+import { DohcCliFailure, runDohcCli, waitForCliEndpoint } from "./helpers/dohcCli";
 import { noticedRefusals } from "./helpers/engineDb";
 import { claimRelayWorkspace, relayJson } from "./helpers/relayPeer";
 import { spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
@@ -11,6 +12,7 @@ import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
   explorerRow,
+  openAboutPanel,
   openChatsView,
   openExplorerView,
   openWorkspaceFromFirstRun,
@@ -41,6 +43,7 @@ const JOINER = { token: "test:e2e-members-kai", email: "e2e-members-kai@dohc.tes
 // The same account, in its own relay: the admin in the Group chat test.
 const ADMIN = { token: JOINER.token, user: "e2e-members-kai", email: JOINER.email };
 const VIEWER_ORIGIN = "https://viewer.example.com";
+const GUEST = "e2e-members-lee@dohc.test";
 
 interface MembersView {
   workspaceName: string;
@@ -61,6 +64,16 @@ async function membersView(
   );
   expect(answer.status, answer.body).toBe(200);
   return JSON.parse(answer.body) as MembersView;
+}
+
+// The folder of the workspace this desktop joined, where its agent runs dohc.
+async function joinedRoot(temp: { homeDir: string }): Promise<string> {
+  const registry = JSON.parse(await readFile(join(temp.homeDir, "dohc-workspaces.json"), "utf8")) as {
+    workspaces: { rootPath: string; shareView?: { grantedSelector?: { wholeWorkspace?: boolean } } }[];
+  };
+  const joined = registry.workspaces.find((entry) => entry.shareView?.grantedSelector?.wholeWorkspace);
+  expect(joined, "the joined workspace is in the registry").toBeTruthy();
+  return joined!.rootPath;
 }
 
 // Opens Settings on Members, or reloads Members when Settings is already open.
@@ -505,9 +518,12 @@ async function openMembership(
 }
 
 // Group chat in a joined workspace. A member posts in a Group while the owner
-// reads it, and the owner's reply reaches the member as unread. The owner
+// reads it, and the owner's reply reaches the member as unread. The member
+// comments on a file, and the member's agent posts in the Group through the
+// CLI; the owner reads both. The owner
 // moves members to View with the member's window open, and the composer goes
-// with a toast. An admin then creates a Group that the member sees.
+// with a toast. An admin then creates a Group that the member sees, and
+// invites someone from the joined workspace's Members page.
 test("@two-client a member posts in a Group, follows a level change, and sees an admin's new Group", async () => {
   test.setTimeout(600_000);
   const ownerTemp = await createTempWorkspace();
@@ -601,6 +617,37 @@ test("@two-client a member posts in a Group, follows a level change, and sees an
     await themed(mine, "home", () => expect(home.getByTestId("chats-feed-item").filter({ hasText: "Sam here" })).toBeVisible({ timeout: 30_000 }));
     await expect(samGroup.getByTestId("chats-channel-unread")).toHaveCount(0, { timeout: 30_000 });
 
+    // --- Sam comments on the plan ------------------------------------------
+    await revealExplorerPath(mine, "notes/plan.md");
+    await explorerRow(mine, "notes/plan.md").click();
+    await openAboutPanel(mine);
+    // Access names the membership that reaches the file.
+    await expect(mine.getByTestId("about-access-row")).toContainText("Can comment", { timeout: 30_000 });
+    const newComment = mine.getByTestId("linked-chat-new");
+    await expect(newComment).toBeVisible({ timeout: 30_000 });
+    // The keyboard reaches the comment control.
+    await newComment.focus();
+    await mine.keyboard.press("Enter");
+    const commentBox = mine.getByTestId("linked-chat-new-composer");
+    await commentBox.fill("Dates\nCan we move day 2?");
+    await commentBox.press("Enter");
+    await expect(mine.getByTestId("linked-chat-title")).toHaveText("Dates");
+    await expect(mine.getByTestId("linked-chat-message-body")).toContainText("Can we move day 2?");
+    await themed(mine, "file-comment", () => expect(mine.getByTestId("linked-chat-composer")).toBeVisible());
+    await mine.getByTestId("linked-chat-back").click();
+    await themed(mine, "file-comments", () => expect(newComment).toBeVisible());
+
+    // --- Sam's agent posts in the Group through the CLI ---------------------
+    // The agent acts with Sam's session in the joined workspace's folder.
+    await waitForCliEndpoint(memberTemp.homeDir);
+    const samCli = { homeDir: memberTemp.homeDir, rootPath: await joinedRoot(memberTemp) };
+    await runDohcCli(samCli, ["chat", "post", "launch-team", "--as-agent", "Sam's agent: the dates line up."]);
+    const general = await runDohcCli(samCli, ["chat", "post", "general", "--as-agent", "Hello"]).then(() => null, (error: unknown) => error);
+    expect(general).toBeInstanceOf(DohcCliFailure);
+    // A joined workspace has no General, as in the member's Chats.
+    expect((general as DohcCliFailure).stderr).toContain("no such group: general");
+    await openChatsView(mine);
+
     // --- The owner reads Sam's post and replies -----------------------------
     await openChatsView(page);
     const ownerGroup = page.getByTestId("chats-channel").filter({ hasText: "Launch team" });
@@ -614,6 +661,20 @@ test("@two-client a member posts in a Group, follows a level change, and sees an
     await page.getByTestId("chats-composer").fill("Welcome, Sam.");
     await page.getByTestId("chats-composer").press("Enter");
     await expect(page.getByTestId("chats-message-body").filter({ hasText: "Welcome, Sam." })).toBeVisible();
+    await page.getByTestId("chats-thread-back").click();
+    await expect(page.getByTestId("chats-thread").filter({ hasText: "Sam's agent: the dates line up." })).toBeVisible({ timeout: 120_000 });
+
+    // The owner reads Sam's comment on the plan. About reads a file's
+    // comments when it opens.
+    await revealExplorerPath(page, "notes/plan.md");
+    await explorerRow(page, "notes/plan.md").click();
+    const ownerComment = page.getByTestId("about-panel").getByText("Dates");
+    await expect(async () => {
+      if (await page.getByTestId("about-rail").isVisible()) await page.getByTestId("titlebar-about-sidebar").click();
+      await openAboutPanel(page);
+      await expect(ownerComment).toBeVisible({ timeout: 5_000 });
+    }).toPass({ timeout: 120_000, intervals: [2_000] });
+    await openChatsView(page);
 
     // The reply reaches Sam as unread.
     await expect(samGroup.getByTestId("chats-channel-unread")).toBeVisible({ timeout: 120_000 });
@@ -666,6 +727,36 @@ test("@two-client a member posts in a Group, follows a level change, and sees an
     await expect(kai.getByTestId("chats-channel-title")).toHaveText("Field notes", { timeout: 60_000 });
     await expect(samPanel.getByTestId("chats-channel").filter({ hasText: "Field notes" })).toBeVisible({ timeout: 120_000 });
     await expect(samPanel.getByTestId("chats-new-channel")).toHaveCount(0);
+
+    // --- Kai invites someone from the joined workspace ----------------------
+    const kaiMembers = await openMembers(kai);
+    await expect(kaiMembers).toHaveAttribute("data-viewer-role", "admin", { timeout: 30_000 });
+    await kaiMembers.getByTestId("settings-members-invite-email").fill(GUEST);
+    await kaiMembers.getByTestId("settings-members-invite-send").click();
+    await expect(kaiMembers.getByTestId("settings-members-invite-email")).toHaveValue("", { timeout: 30_000 });
+    // The test relay knows every account, so the invite makes them a member at once.
+    await expect.poll(async () => (await membersView(relay!, OWNER.token, workspaceId)).people.find((person) => person.email === GUEST)?.state).toBe("active");
+    await expect(kaiMembers.getByTestId("settings-members-people")).toContainText(GUEST);
+    await kai.getByRole("button", { name: "Close settings", exact: true }).click();
+    // Members in each theme. Settings closes between them.
+    const membersShots = async (desktop: Page, name: string, check: (members: Locator) => Promise<void>) => {
+      for (const theme of ["Light", "Dark"] as const) {
+        await setTheme(desktop, theme);
+        await check(await openMembers(desktop));
+        await desktop.screenshot({ path: shot(`${name}-${theme.toLowerCase()}`) });
+        await desktop.getByRole("button", { name: "Close settings", exact: true }).click();
+      }
+    };
+    await membersShots(kai, "members-admin", (members) => expect(members.getByTestId("settings-members-people")).toContainText(GUEST));
+
+    // Sam sees names and roles, with no emails and nothing to manage.
+    await membersShots(mine, "members-member", async (members) => {
+      await expect(members).toHaveAttribute("data-viewer-role", "member");
+      await expect(members.getByTestId("settings-members-people")).toContainText(OWNER.user);
+      await expect(members.getByTestId("settings-members-invite-email")).toHaveCount(0);
+      await expect(members.getByTestId("settings-members-invites")).toHaveCount(0);
+      await expect(members).not.toContainText("@dohc.test");
+    });
 
     expect(member.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
     expect(admin.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
