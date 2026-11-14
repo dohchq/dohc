@@ -74,6 +74,10 @@ export class LiveCommittedDelivery {
   captureRegistration(binding: LiveObjectBinding) {
     return this.#registrations.capture(binding);
   }
+  /** Whether the host acknowledged the document's first state, as the delivery recorded it. It opens no drain. */
+  bootstrapApplied(document: LiveDocumentKey): boolean {
+    return this.#store.bootstrapApplied({ host: this.#connection.host, document });
+  }
   get workspace() {
     return this.#connection.workspace;
   }

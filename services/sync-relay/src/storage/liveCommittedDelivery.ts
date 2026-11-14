@@ -1339,6 +1339,20 @@ export class LiveCommittedDeliveryStore {
   }): CommittedDeliveryDrain {
     return this.#open(input, true);
   }
+  /** Whether `host` acknowledged the document's bootstrap. It only reads: it opens no drain and writes nothing. */
+  bootstrapApplied(input: {
+    host: LiveHostConnectionCoordinate;
+    document: LiveDocumentKey;
+  }): boolean {
+    const host = snapshotHostCoordinate(input.host),
+      document = journalDocument(input.document);
+    return this.#storage.readTx(() => {
+      const row = this.#storage.db
+        .prepare(`SELECT local_ydoc_sequence FROM ${BOOTSTRAPS} WHERE ${WHERE_BOOTSTRAP}`)
+        .get(this.#history.namespace, ...documentParams(document), host.hostId);
+      return row !== undefined && row.local_ydoc_sequence !== null;
+    });
+  }
   openSettlement(input: {
     host: LiveHostConnectionCoordinate;
     document: LiveDocumentKey;

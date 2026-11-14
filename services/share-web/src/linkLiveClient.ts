@@ -5,7 +5,7 @@ import {
 import { createHash } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import { WebSocket } from "ws";
-import { readBoundedJson } from "@dohc/service-http";
+import { readBoundedBytes, readBoundedJson } from "@dohc/service-http";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 import { parseLiveTicketToken } from "@dohc/live-session-contract/live-ticket";
 import type { LinkBrowserMaterial } from "./server";
@@ -224,6 +224,7 @@ export function createLinkLiveClient(options: {
     path: string,
     body: unknown,
     signal: AbortSignal,
+    state = false,
   ) {
     if (!credential) return null;
     if (credential === "unavailable") return credential;
@@ -246,12 +247,21 @@ export function createLinkLiveClient(options: {
     try {
       signal.throwIfAborted();
       if (response.redirected || response.headers.has("location")) return null;
+      const type = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+      // A note its host doesn't hold awake has no early state. A note it holds comes as its socket's opening sync.
+      if (state && response.status === 204) return { value: null, setCookie: credential.setCookie };
+      if (state && response.status === 200 && type === "application/octet-stream")
+        return {
+          value: await readBoundedBytes(
+            response,
+            browserLimits.provider.frames.receive.maxSyncBytes,
+            signal,
+          ),
+          headers: response.headers,
+          setCookie: credential.setCookie,
+        };
       // A proxy in front of a stopped relay answers with its own page.
-      if (
-        response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !==
-        "application/json"
-      )
-        return response.status >= 500 ? "unavailable" : null;
+      if (type !== "application/json") return response.status >= 500 ? "unavailable" : null;
       const value = await readBoundedJson(response, limits.maxResponseBytes, signal);
       if (response.status !== 200) {
         const code = parseLinkRefusal(value, response.status);
@@ -264,6 +274,7 @@ export function createLinkLiveClient(options: {
           };
         return response.status >= 500 ? "unavailable" : null;
       }
+      if (state) return null;
       return { value, setCookie: credential.setCookie };
     } finally {
       await response.body?.cancel().catch(() => {});
@@ -339,9 +350,44 @@ export function createLinkLiveClient(options: {
       },
     });
   }
+  // The early state a viewer's page shows before its socket opens. Agents read a note through its socket.
+  async function answerState(
+    body: Record<string, unknown>,
+    credential: RelayCredential | "unavailable" | null,
+    signal: AbortSignal,
+  ): Promise<Response> {
+    const result = await relayRequest(
+      credential,
+      "/sync/live/link-document-state",
+      body,
+      signal,
+      true,
+    );
+    if (!result) return refused();
+    if (result === "unavailable") return unavailable();
+    if (result.refusal) return result.refusal;
+    const headers = {
+      "cache-control": "private, no-store",
+      ...(result.setCookie ? { "set-cookie": result.setCookie } : {}),
+    };
+    if (!result.headers) return new Response(null, { status: 204, headers });
+    const objectId = parseLiveUpdateIdentifier(result.headers.get("x-dohc-live-object-id")),
+      through = result.headers.get("x-dohc-live-applied-through") ?? "";
+    if (!/^\d+$/.test(through) || !Number.isSafeInteger(Number(through))) return refused();
+    signal.throwIfAborted();
+    return new Response(Buffer.from(result.value as Uint8Array), {
+      headers: {
+        ...headers,
+        "content-type": "application/octet-stream",
+        "x-dohc-live-object-id": objectId,
+        "x-dohc-live-applied-through": through,
+      },
+    });
+  }
   async function handle(request: Request): Promise<Response> {
     const url = new URL(request.url),
-      document = url.pathname === "/api/live/link-document";
+      state = url.pathname === "/api/live/link-document-state",
+      document = state || url.pathname === "/api/live/link-document";
     if (
       (!document && url.pathname !== "/api/live/link-ticket") ||
       url.search ||
@@ -358,13 +404,10 @@ export function createLinkLiveClient(options: {
       // A body that isn't JSON is refused. One still arriving at the timeout is answered as busy.
       const body = await readBoundedJson(request, limits.maxRequestBytes, signal).catch(() => null);
       if (!liveInput(document, body)) return refused();
-      return answer(
-        document,
-        body,
-        await holder(String(body.discriminator), cookie, signal),
-        signal,
-        true,
-      );
+      const credential = await holder(String(body.discriminator), cookie, signal);
+      return state
+        ? answerState(body, credential, signal)
+        : answer(document, body, credential, signal, true);
     });
   }
   const resolveSession: LiveGatewayOptions["resolveSession"] = async (

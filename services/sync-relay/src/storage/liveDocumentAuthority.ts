@@ -707,6 +707,8 @@ export type LiveObjectHostBindingResult =
   | {
       readonly kind: "current";
       readonly binding: LiveObjectBinding;
+      /** What this reader is shown of `binding`, as its socket would show it. */
+      readonly view: LiveObjectBinding;
       readonly host: LiveHostConnectionCoordinate;
     }
   | Extract<CurrentLiveBindingResult, { kind: "refused" }>;
@@ -780,7 +782,7 @@ export function resolveLiveObjectHostBinding(
         actor: liveBrowserActor(scope),
       });
       return current.kind === "current"
-        ? { kind: "current", binding: current.binding, host: current.host }
+        ? { kind: "current", binding: current.binding, view: current.view, host: current.host }
         : current;
     }
     const host = readLiveHostControl(storage.db);
@@ -802,6 +804,7 @@ export function resolveLiveObjectHostBinding(
     return {
       kind: "current",
       binding: bound.binding,
+      view: bound.view,
       host: {
         mode: host.configuredMode,
         hostId: host.configuredHostId,

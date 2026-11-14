@@ -26,6 +26,7 @@ const METHODS: Readonly<Record<string, readonly string[]>> = {
   "/api/account/sign-in": ["POST"],
   "/api/account/sign-out": ["POST"],
   "/api/live/link-document": ["POST"],
+  "/api/live/link-document-state": ["POST"],
   "/api/live/link-ticket": ["POST"],
   "/api/live/named-session": ["POST"],
   "/api/live/named-ticket": ["POST"],

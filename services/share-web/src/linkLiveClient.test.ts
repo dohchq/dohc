@@ -388,3 +388,65 @@ it("tells only a viewer with a session to try again when requests are full", asy
     expect((await first).status).toBe(200);
   }
 });
+
+const stateRequest = () => request(metadata, "/api/live/link-document-state");
+const stateAnswer = (
+  bytes: Uint8Array,
+  headers: Record<string, string> = {
+    "x-dohc-live-object-id": "object-a",
+    "x-dohc-live-applied-through": "5",
+  },
+) =>
+  new Response(Buffer.from(bytes), {
+    headers: { "content-type": "application/octet-stream", ...headers },
+  });
+// Proves: a viewer gets the relay's early state as the bytes it sent, with its object and cursor, and no state as an
+// empty 204. A relay refusal passes through as it does for the note's own route.
+it("passes a note's early state through with its object and cursor, and no state as an empty answer", async () => {
+  const f = fixture(vi.fn(async () => stateAnswer(Uint8Array.from([1, 2, 3]))));
+  const response = await f.client.handle(stateRequest());
+  expect(response.status).toBe(200);
+  expect(new Uint8Array(await response.arrayBuffer())).toEqual(Uint8Array.from([1, 2, 3]));
+  expect(
+    ["content-type", "cache-control", "x-dohc-live-object-id", "x-dohc-live-applied-through"].map(
+      (name) => response.headers.get(name),
+    ),
+  ).toEqual(["application/octet-stream", "private, no-store", "object-a", "5"]);
+  const sent = f.fetchRelay.mock.calls[0]![0];
+  expect(sent.url).toBe("https://relay.example.test/sync/live/link-document-state");
+  expect(sent.headers.get("authorization")).toBe(`LinkCapability ${capabilityToken}`);
+  expect(await sent.json()).toEqual(metadata);
+  const asleep = await fixture(
+    vi.fn(async () => new Response(null, { status: 204 })),
+  ).client.handle(stateRequest());
+  expect(await answered(asleep)).toEqual([204, ""]);
+  const body = linkRefusalBody("link_full");
+  const full = await fixture(
+    vi.fn(async () => Response.json(body, { status: LINK_REFUSALS.link_full.status })),
+  ).client.handle(stateRequest());
+  expect([full.status, await full.json()]).toEqual([LINK_REFUSALS.link_full.status, body]);
+});
+// Proves: share-web forwards no state larger than the browser's opening sync, none without its object or cursor, and
+// no JSON answer as state.
+it("forwards no early state larger than the browser takes or missing its object or cursor", async () => {
+  for (const relay of [
+    async () => stateAnswer(new Uint8Array(browserLimits.provider.frames.receive.maxSyncBytes + 1)),
+    async () => stateAnswer(Uint8Array.from([1]), { "x-dohc-live-object-id": "object-a" }),
+    async () =>
+      stateAnswer(Uint8Array.from([1]), {
+        "x-dohc-live-object-id": "object-a",
+        "x-dohc-live-applied-through": "-1",
+      }),
+    async () => stateAnswer(Uint8Array.from([1]), { "x-dohc-live-applied-through": "5" }),
+    async () => Response.json({ objectId: "object-a" }),
+  ])
+    expect(await answered(await fixture(vi.fn(relay)).client.handle(stateRequest()))).toEqual(
+      opaque,
+    );
+  const fits = await fixture(
+    vi.fn(async () =>
+      stateAnswer(new Uint8Array(browserLimits.provider.frames.receive.maxSyncBytes)),
+    ),
+  ).client.handle(stateRequest());
+  expect(fits.status).toBe(200);
+});

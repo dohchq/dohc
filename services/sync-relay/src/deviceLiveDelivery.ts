@@ -34,6 +34,7 @@ import { snapshotStopRestoreLookup } from "./liveRestoreDelivery.js";
 import type { StopRestoreLookup } from "./storage/liveRestoreOperation.js";
 import { LiveRestorePreparation } from "./liveRestorePreparation.js";
 import { LiveDocumentWork } from "./liveDocumentWork.js";
+import { readAppliedState } from "./liveAwakeState.js";
 import { OwnerOutboxWake } from "./ownerOutboxWake.js";
 import { queueLiveHostRequests } from "./liveHostRequests.js";
 import { serverLogLine } from "./serverLogWords.js";
@@ -373,6 +374,41 @@ export function createDeviceLiveDelivery(options: {
         deadlineMs: config.client.requestDeadlineMs,
         drain,
       });
+    },
+    /**
+     * What the owner's computer applied of a note it already holds, without draining or registering it. Undefined
+     * when it holds no registration for the note or has not applied the note's first state yet.
+     */
+    async readAwakeState(value: LiveObjectBinding, maxOutputBytes: number, signal: AbortSignal) {
+      if (!changes || !client || !ready || closed || invalidated.signal.aborted) return undefined;
+      const binding = parseLiveObjectBinding(value);
+      const document = documentFor(binding);
+      const consumer = consumers.get(document.workspaceId);
+      let registration;
+      try {
+        if (
+          !consumer ||
+          !(consumer instanceof OwnerCommittedDelivery
+            ? consumer.adoptionSeedApplied(document)
+            : consumer.bootstrapApplied(document))
+        )
+          return undefined;
+        registration = consumer.captureRegistration(binding);
+      } catch {
+        return undefined;
+      }
+      return readAppliedState(
+        {
+          client,
+          workspace: consumer.workspace,
+          registration,
+          coordinate: host,
+          nextRequestId,
+          deadlineMs: config.client.requestDeadlineMs,
+        },
+        maxOutputBytes,
+        AbortSignal.any([invalidated.signal, signal]),
+      );
     },
     get restoreConfigured() {
       return config.restore !== undefined;

@@ -1865,7 +1865,11 @@ export function createShareWebApplication({
       return discoverApps(request);
     }
 
-    if (pathname === "/api/live/link-document" || pathname === "/api/live/link-ticket") {
+    if (
+      pathname === "/api/live/link-document" ||
+      pathname === "/api/live/link-document-state" ||
+      pathname === "/api/live/link-ticket"
+    ) {
       mark(pathname);
       if (!linkLive) return refused();
       const result = await linkLive.handle(request);

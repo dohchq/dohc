@@ -1,5 +1,7 @@
 import { afterEach, expect, it, vi } from "vitest";
+import { decodeLiveFrameSync } from "@dohc/live-session-contract/live-frame";
 import { createLinkLiveHttp } from "./linkLiveHttp";
+import type { AwakeLiveState } from "./liveAwakeState";
 import { linkRefusalBody } from "@dohc/security-contract/link-refusal";
 import type { SessionHostBlock } from "./linkRefusal";
 import { createLiveTickets } from "./liveTickets";
@@ -48,6 +50,7 @@ async function fixture(
     workspaceId: string;
     objectId: string;
   }) => SessionHostBlock | undefined,
+  state?: Pick<Parameters<typeof createLinkLiveHttp>[0], "readAwakeState" | "nowMs">,
 ) {
   const f = await ticketFixture();
   cleanups.push(f.close);
@@ -89,12 +92,19 @@ async function fixture(
     hosts: new Set(["relay.test"]),
     publicOrigin: audience,
     exchangeKey,
-    limits,
+    limits: state ? { ...limits, maxPendingRequests: 16 } : limits,
     sessionHostBlocked,
     linkAuthority,
+    ...(state ? { ...state, frames } : {}),
   });
   return { ...f, context, tickets, handle };
 }
+const frames = {
+  maxFrameBytes: 64 * 1024,
+  maxStateVectorBytes: 128 * 1024,
+  maxUpdateBytes: 2 * 1024 * 1024,
+  maxSyncBytes: 4 * 1024 * 1024,
+};
 function request(
   body: unknown = { discriminator, path: binding.currentPath },
   path = "/sync/live/link-document",
@@ -268,3 +278,128 @@ it.each([
     expect(await (await f.handle(request())).json()).toEqual({ objectId: binding.objectId });
   },
 );
+
+// A link reader's page asks for a note's state before it opens a socket, so it can show the note at once.
+const stateRequest = (body?: unknown, headers?: Record<string, string>) =>
+  request(body, "/sync/live/link-document-state", headers);
+// What a host that holds the note awake answers: the state at journal cursor 5, from the host the relay names now.
+async function awakeFixture(
+  sessionHostBlocked?: Parameters<typeof fixture>[0],
+  read?: (answer: AwakeLiveState) => Promise<AwakeLiveState | undefined>,
+) {
+  let now = 0;
+  const reads: { binding: unknown; maxOutputBytes: number }[] = [];
+  let answer!: AwakeLiveState;
+  const f = await fixture(sessionHostBlocked, {
+    nowMs: () => now,
+    readAwakeState: async (value, maxOutputBytes) => {
+      reads.push({ binding: value, maxOutputBytes });
+      return read ? read(answer) : answer;
+    },
+  });
+  const current = f.storage.resolveLiveObjectHostBinding(f.context, binding.objectId);
+  if (current.kind !== "current") throw new Error("Missing live binding.");
+  answer = {
+    binding: current.binding,
+    coordinate: current.host,
+    hostVector: Buffer.from([1, 2]),
+    missingStateUpdate: Buffer.from([3, 4, 5]),
+    appliedThroughJournalCursor: 5,
+  };
+  return {
+    ...f,
+    current,
+    reads,
+    advance(ms: number) {
+      now += ms;
+    },
+  };
+}
+
+// Proves: the state answer carries what the host applied, as the reader's socket would show it, with its cursor, read
+// under the note's current binding and the frame limit. A note its host doesn't hold awake gets no state.
+it("answers a note's early state as its socket's opening sync, and no state for a note its host does not hold awake", async () => {
+  let awake = true;
+  const f = await awakeFixture(undefined, async (answer) => (awake ? answer : undefined));
+  const response = await f.handle(stateRequest());
+  expect(response.status).toBe(200);
+  expect(response.headers.get("content-type")).toBe("application/octet-stream");
+  expect(response.headers.get("x-dohc-live-object-id")).toBe(binding.objectId);
+  expect(response.headers.get("x-dohc-live-applied-through")).toBe("5");
+  expect(decodeLiveFrameSync(new Uint8Array(await response.arrayBuffer()), frames)).toEqual({
+    binding: f.current.view,
+    hostVector: new Uint8Array([1, 2]),
+    missingStateUpdate: new Uint8Array([3, 4, 5]),
+  });
+  expect(f.reads).toEqual([{ binding: f.current.binding, maxOutputBytes: 1024 * 1024 }]);
+  awake = false;
+  const asleep = await f.handle(stateRequest());
+  expect([asleep.status, await asleep.text()]).toEqual([204, ""]);
+});
+
+// Proves: a state read from a host that is no longer the note's current one, or of a binding the note no longer has,
+// gives no state.
+it("gives no state read from another host or under another binding", async () => {
+  for (const changed of [
+    (answer: AwakeLiveState) => ({
+      ...answer,
+      coordinate: { ...answer.coordinate, connectionId: "earlier" },
+    }),
+    (answer: AwakeLiveState) => ({
+      ...answer,
+      binding: { ...answer.binding, restoreFenceGeneration: 8 },
+    }),
+  ]) {
+    const f = await awakeFixture(undefined, async (answer) => changed(answer));
+    expect((await f.handle(stateRequest())).status).toBe(204);
+  }
+});
+
+// Proves: the state route refuses what a ticket would. A full link refuses a new reader, and a note its session host
+// stopped is unavailable, and neither reaches the host.
+it("refuses a full link and a stopped note before it reads a state", async () => {
+  const full = await awakeFixture();
+  // The storage context holds its limits here; the public storage type does not show them.
+  (
+    full.storage as unknown as { options: { linkDiscussionPrincipalLimit: number } }
+  ).options.linkDiscussionPrincipalLimit = 0;
+  const refusal = await full.handle(stateRequest());
+  expect([refusal.status, await refusal.json()]).toEqual([403, linkRefusalBody("link_full")]);
+  // The note's own route, which opens nothing, still finds it.
+  expect(await (await full.handle(request())).json()).toEqual({ objectId: binding.objectId });
+  expect(full.reads).toEqual([]);
+  const stopped = await awakeFixture(() => "stopped");
+  const unavailable = await stopped.handle(stateRequest());
+  expect([unavailable.status, await unavailable.json()]).toEqual([
+    503,
+    linkRefusalBody("link_live_unavailable"),
+  ]);
+  expect(stopped.reads).toEqual([]);
+});
+
+// Proves: a caller that keeps asking and never opens a socket reaches the host only as often as the limits allow, and
+// each refused read answers no state at once. Reads the host has not answered count toward the reads at once.
+it("holds its read limits for a caller that never opens a socket", async () => {
+  const answers: ((value: AwakeLiveState) => void)[] = [];
+  let held = false,
+    answer!: AwakeLiveState;
+  const f = await awakeFixture(undefined, (value) => {
+    answer = value;
+    return held ? new Promise((resolve) => answers.push(resolve)) : Promise.resolve(value);
+  });
+  for (let read = 0; read < 20; read++) expect((await f.handle(stateRequest())).status).toBe(200);
+  expect((await f.handle(stateRequest())).status).toBe(204);
+  expect(f.reads.length).toBe(20);
+  f.advance(10_000);
+  held = true;
+  const waiting = Array.from({ length: 4 }, () => f.handle(stateRequest()));
+  await vi.waitFor(() => expect(answers.length).toBe(4));
+  expect((await f.handle(stateRequest())).status).toBe(204);
+  expect(f.reads.length).toBe(24);
+  held = false;
+  for (const resolve of answers) resolve(answer);
+  expect((await Promise.all(waiting)).map((response) => response.status)).toEqual([
+    200, 200, 200, 200,
+  ]);
+  expect((await f.handle(stateRequest())).status).toBe(200);
+});

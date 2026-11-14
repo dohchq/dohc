@@ -1191,6 +1191,16 @@ if (namedLiveConfig) {
     if (!host) throw new Error("Named live host is unavailable.");
     return host.captureNative(binding, signal);
   };
+  // A link reader's early state, from the configured host only, which answers only for a note it holds awake.
+  const readAwakeState = async (
+    binding: LiveObjectBinding,
+    maxOutputBytes: number,
+    signal: AbortSignal,
+  ) => {
+    const mode = storage.getLiveHostControl()?.configuredMode;
+    const host = mode === "service" ? serviceHost() : mode === "device" ? deviceControl : undefined;
+    return host?.readAwakeState(binding, maxOutputBytes, signal);
+  };
   const tickets = createLiveTickets({
     storage,
     audience: shareWebOrigin!,
@@ -1258,6 +1268,8 @@ if (namedLiveConfig) {
       publicEditRelease,
       sessionHostBlocked,
       linkAuthority: relayApplication.linkAuthority,
+      readAwakeState,
+      frames: namedLiveConfig.frames.receive,
     });
     server.once("close", linkLive.close);
     process.once("SIGINT", linkLive.close);

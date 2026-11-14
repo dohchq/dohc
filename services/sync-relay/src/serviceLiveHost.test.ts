@@ -7957,6 +7957,123 @@ it("lets an open given up while its reload is in the engine go at once, with pas
   release();
 });
 
+// A link reader's page asks for the state of a note before it opens a connection. The host answers only for a note it
+// holds awake, so the read itself never wakes, registers, drains or keeps awake a note.
+// Has the test engine answer an applied-state read of the real document at journal cursor 5.
+const answerAppliedRead = (o: Awaited<ReturnType<typeof idleHost>>) =>
+  Object.assign(o.client(), {
+    openLiveAppliedSync: vi.fn(async () => ({
+      binding: o.binding(),
+      position: { journalCursor: 5, eventCount: 2 },
+      observedLocalYDocHeadSequence: 0,
+      hostVector: Buffer.from([1, 2]),
+      missingStateUpdate: Buffer.from([3, 4, 5]),
+    })),
+  }).openLiveAppliedSync;
+const readAwake = (o: Awaited<ReturnType<typeof idleHost>>) =>
+  o.host.readAwakeState(o.binding(), 10_000, new AbortController().signal);
+// The note's registration, opened as an editor's connection opens it, with the editor gone again.
+const registerNote = async (o: Awaited<ReturnType<typeof idleHost>>) => {
+  const release = o.editors.acquire(o.sibling);
+  const native = await o.host.captureNative(o.binding());
+  release();
+  return native;
+};
+
+// Proves: a read of a note whose activation the host never completed, so never registered, answers no state, and
+// neither registers the note nor reads it.
+it("a document read gives a note the host has not registered no state and sends the host no request", async () => {
+  const o = await emptyServiceHost({ frameChanges: true });
+  o.passes.deliver = false;
+  await o.host.update({ workspaces: [o.workspace], documents: [o.sibling], ...stay });
+  const current = o.f.storage.resolveCurrentLiveDocumentBinding({
+    document: o.document,
+    actor: { kind: "owner", userId: "owner" },
+  });
+  if (current.kind !== "current") throw new Error("Missing live binding.");
+  const read = vi.fn();
+  Object.assign(o.client(), { openLiveAppliedSync: read });
+  const registers = () =>
+    o
+      .client()
+      .sendRequest.mock.calls.filter(
+        (call) =>
+          ((call as unknown[])[0] as { method: string }).method === "liveApplication.register",
+      ).length;
+  await expect(
+    o.host.readAwakeState(current.binding, 10_000, new AbortController().signal),
+  ).resolves.toBeUndefined();
+  expect(registers()).toBe(0);
+  expect(read).not.toHaveBeenCalled();
+});
+
+// Proves: a read of a registered note returns what the host applied at its journal cursor, under the registration it
+// already holds, and registers nothing again.
+it("a document read of a registered note returns the applied state at its cursor without registering again", async () => {
+  const o = await idleHost({ polls: heldPolls(), clock: manualClock() });
+  const native = await registerNote(o),
+    read = answerAppliedRead(o),
+    sent = o.methods().length;
+  await expect(readAwake(o)).resolves.toEqual({
+    binding: o.binding(),
+    coordinate: o.host.coordinate,
+    hostVector: Buffer.from([1, 2]),
+    missingStateUpdate: Buffer.from([3, 4, 5]),
+    appliedThroughJournalCursor: 5,
+  });
+  expect(o.methods().slice(sent)).toEqual([]);
+  expect(read).toHaveBeenCalledOnce();
+  expect((read.mock.calls[0] as unknown[])[0]).toMatchObject({
+    registrationId: native.registrationId,
+  });
+});
+
+// Proves: reads of an awake note leave the time it unloads idle where its last use set it.
+it("leaves the idle unload time of a note unchanged however often a document read reads it", async () => {
+  const clock = manualClock(),
+    o = await idleHost({ polls: heldPolls(), clock });
+  await registerNote(o);
+  answerAppliedRead(o);
+  const deadlines = clock.armed();
+  expect(deadlines).toContain(600_000);
+  clock.advance(300_000);
+  for (let read = 0; read < 5; read++) await expect(readAwake(o)).resolves.toBeDefined();
+  expect(clock.armed()).toEqual(deadlines);
+  o.hold(true);
+  clock.advance(600_000);
+  await vi.waitFor(() => expect(o.unloaded()).toBe(1));
+});
+
+// Proves: while an idle unload of a registered note is in the engine, and after its reply was lost, a read answers no
+// state and sends nothing, though the host still holds the note's registration.
+it("a document read answers no state for a registered note while its idle unload is unanswered", async () => {
+  const clock = manualClock(),
+    o = await idleHost({ polls: heldPolls(), clock });
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const native = await registerNote(o),
+    read = answerAppliedRead(o);
+  o.hold(true);
+  o.unloads.push(new Error("Unload reply lost."));
+  const parked = o.park("liveApplication.unloadDocument");
+  await vi.waitFor(() => expect(clock.armed()).toContain(600_000));
+  clock.advance(600_000);
+  await parked.entered.promise;
+  const sent = o.methods().length;
+  await expect(readAwake(o)).resolves.toBeUndefined();
+  parked.release.resolve();
+  await vi.waitFor(() => expect(o.unloaded()).toBe(1));
+  expect(native.invalidated.aborted).toBe(false);
+  await expect(readAwake(o)).resolves.toBeUndefined();
+  // The host's own replication keeps pulling. Nothing the read could send goes to live editing.
+  expect(
+    o
+      .methods()
+      .slice(sent)
+      .filter((method) => method.startsWith("liveApplication.")),
+  ).toEqual([]);
+  expect(read).not.toHaveBeenCalled();
+});
+
 // Proves: an idle unload whose reply was lost goes again at its retry deadline, not before, without settling first,
 // and a reconnect sends it once more before reloading the document, with passes held.
 
