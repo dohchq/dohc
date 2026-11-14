@@ -1,3 +1,4 @@
+import type { CaptureFileHold, OutsideChange } from "../ipc/bridgeContract";
 import type { HeldNoteChangeInput, HeldNoteChangeResult } from "@dohc/workspace-engine-client";
 import { duplicateWithRecovery } from "./workspaceDuplicateOutcome";
 import { resolveEngineFileTargets } from "./resolveEngineFiles";
@@ -705,6 +706,11 @@ export interface WorkspaceEngineCapture {
   // session whose tab closed still holds the document when its close was
   // refused. Answers false, writing nothing, when no session holds it.
   saveDeletedFileAgain(path: string): Promise<boolean>;
+  // Keep a copy: the person keeps a live note's outside change as a copy.
+  // Puts the note's last saved text back in its file; that write keeps the
+  // outside bytes first, as every write over bytes History lacks does.
+  // Answers false, writing nothing, when no outside change is held there.
+  keepOutsideChange(path: string): Promise<boolean>;
   // Flush + release any live Y.Doc session at or under a
   // path before a destructive op that does not run through the capture chain
   // itself (the delete IPC deletes on disk directly). Without this, a later
@@ -1011,7 +1017,8 @@ export interface WorkspaceEngineCaptureOptions {
   ) => void;
   onKeptFiles?: (paths: readonly (readonly [string, string])[]) => void;
   onRetainedCopies?: (summary: RetainedCopiesSummary) => void;
-  onHeldFiles?: (files: import("../ipc/bridgeContract").CaptureFileHold[]) => void;
+  onHeldFiles?: (files: CaptureFileHold[]) => void;
+  onOutsideChanges?: (changes: OutsideChange[]) => void;
   // Injectable disk mutation seam so tests can exercise mid-switch failures
   // without real fs faults. Defaults to careful direct fs writes with
   // containment checks.
@@ -1102,6 +1109,10 @@ function isCaptureBusy(error: unknown): boolean {
 // layer: for a moment it reads not running while ready and neither degraded
 // nor terminal (capture_driver.rs `PolicyChanged`). A failure reads degraded,
 // and a stopped task degraded and terminal.
+function outsideChangesOf(status: WatcherStatusResult): OutsideChange[] {
+  return status.outsideChanges.map(({ path, firstObservedAtMs }) => ({ path, firstObservedAtMs }));
+}
+
 function captureWorks(status: WatcherStatusResult | undefined): boolean {
   return (
     status === undefined ||
@@ -5046,6 +5057,7 @@ export function createWorkspaceEngineCapture(
           options.onRecoveryUnavailable?.(status.recoveryUnavailable);
           options.onSecretKeyUnavailable?.(status.secretKeyUnavailable ?? null);
           options.onHeldFiles?.(status.heldFiles);
+          options.onOutsideChanges?.(outsideChangesOf(status));
           for (const path of status.deferredWrites) liveYDocSessions.get(path)?.changedOutside();
         }
         const healthy = captureWorks(status);
@@ -6869,6 +6881,23 @@ export function createWorkspaceEngineCapture(
       if (!entry) return false;
       await entry.session.settleNow();
       return true;
+    },
+
+    keepOutsideChange(path) {
+      return enqueueResult(`keep outside change to ${path}`, async () => {
+        const engine = await engineStore();
+        const held = await engine.watcherStatus?.();
+        if (!held?.outsideChanges.some((change) => change.path === path)) return false;
+        const policy = await readPolicyForTask();
+        const versionId = await activeVersionIdOf(engine);
+        const head = await engine.readTextFile({ workspaceId, versionId, path });
+        if (!head) throw new Error(`dohc has no saved text for ${path}.`);
+        await materialize([{ kind: "write", path, text: head.text }], policy);
+        await engine.flushCapture?.();
+        const status = await engine.watcherStatus?.();
+        if (status) options.onOutsideChanges?.(outsideChangesOf(status));
+        return true;
+      });
     },
 
     setActiveAgentRun(submitted) {

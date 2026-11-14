@@ -1575,6 +1575,13 @@ export const CaptureHoldsEvent = z
   .object({ workspaceId: WORKSPACE_ID, heldFiles: z.array(CaptureFileHold) })
   .strict();
 export type CaptureHoldsEvent = z.infer<typeof CaptureHoldsEvent>;
+// A live note's file that changed outside dohc. The note and History do not
+// have those bytes; they stay only in the file until it matches the note
+// again or someone keeps them as a copy.
+export const OutsideChange = z
+  .object({ path: z.string().min(1), firstObservedAtMs: z.number().int() })
+  .strict();
+export type OutsideChange = z.infer<typeof OutsideChange>;
 
 const SYNC_STATUS_BASE_FIELDS = {
   syncPause: WorkspaceSyncPauseStatus.optional(),
@@ -1646,6 +1653,7 @@ const SYNC_STATUS_BASE_FIELDS = {
     })
     .optional(),
   heldFiles: z.array(CaptureFileHold).optional(),
+  outsideChanges: z.array(OutsideChange).optional(),
   // Collection updates wait for a pull that has not finished, as the engine
   // answers. "sync" while ordinary sync is on, signed in or not, so a pass
   // that finishes the pull ends it. "reopen" after sync paused but the

@@ -122,6 +122,7 @@ export {
   type GranularChatMessageSearchResponse,
   type GranularChatMessageSearchResult,
   type HeldChange,
+  type OutsideChange,
   type KeptCopy,
   type KeptCopySaveResult,
   type RetainedCopiesDeleteResult,

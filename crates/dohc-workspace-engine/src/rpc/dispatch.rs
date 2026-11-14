@@ -701,6 +701,7 @@ impl EngineService {
                     .await?
             }
             "watcher.status" => self.watcher_status(request.workspace).await?,
+            "capture.outsideChanges" => self.capture_outside_changes(request.workspace).await?,
             "capture.importRecovery" => {
                 Box::pin(self.capture_import_recovery(request.workspace, request.params)).await?
             }
@@ -1686,6 +1687,7 @@ mod tests {
             "capture.flush",
             "capture.hold",
             "capture.moveFile",
+            "capture.outsideChanges",
             "capture.reconcile",
             "capture.retry",
             "capture.retryHeld",

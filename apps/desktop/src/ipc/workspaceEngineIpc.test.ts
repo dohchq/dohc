@@ -305,6 +305,7 @@ async function harness(
       keptFiles: [],
       captureRecoveries: [],
       heldFiles: [],
+      outsideChanges: [],
       retainedCopies: { count: 0, bytes: 0 },
     })),
     clearCaptureRecovery: vi.fn<VersionedLiveAdapter["clearCaptureRecovery"]>(
@@ -808,6 +809,7 @@ describe("workspace engine IPC registrations", () => {
       keptFiles: [],
       captureRecoveries: [recovery],
       heldFiles: [],
+      outsideChanges: [],
       retainedCopies: { count: 0, bytes: 0 },
     });
     expect(await bridge.getCaptureRecoveryStatus({ workspaceId: "workspace" })).toEqual({
@@ -933,6 +935,7 @@ describe("workspace engine IPC registrations", () => {
       keptFiles: [],
       captureRecoveries: [],
       heldFiles: [],
+      outsideChanges: [],
       retainedCopies: { count: 0, bytes: 0 },
     });
     await expect(h.invoke(CHANNELS.retryFileRecovery)).rejects.toThrow("still cannot read");
@@ -959,6 +962,7 @@ describe("workspace engine IPC registrations", () => {
       keptFiles: [],
       captureRecoveries: [],
       heldFiles: [],
+      outsideChanges: [],
       retainedCopies: { count: 0, bytes: 0 },
     });
     await expect(h.invoke(captureRecoveryOperations.retrySecretKey.channel)).rejects.toThrow(

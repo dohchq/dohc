@@ -51,6 +51,7 @@ export const WORKSPACE_METHOD = {
   captureReconcile: "capture.reconcile",
   captureRetry: "capture.retry",
   captureRetryHeld: "capture.retryHeld",
+  captureOutsideChanges: "capture.outsideChanges",
   captureSetAuthor: "capture.setAuthor",
   captureHold: "capture.hold",
   captureRenew: "capture.renew",
@@ -204,6 +205,8 @@ export type GranularChatMessageSearchResult = GranularChatMessageSearchResponse[
 export type GranularChatMessageSearchResponse = typeof GranularChatMessageSearchResponseSchema.Type;
 
 export type WatcherStatusResult = WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.watcherStatus];
+/** A file that changed outside dohc while its note was live. */
+export type OutsideChange = typeof OutsideChangeSchema.Type;
 
 /** One held save, as `ydoc.heldChange` answers for it. */
 export type HeldChange = NonNullable<
@@ -522,6 +525,7 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.captureReconcile]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.captureRetry]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.captureRetryHeld]: WorkspaceJsonObject & { path: string };
+  [WORKSPACE_METHOD.captureOutsideChanges]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.captureSetAuthor]: CaptureSetAuthorParams;
   [WORKSPACE_METHOD.captureHold]: WorkspaceJsonObject & { operationId?: string };
   [WORKSPACE_METHOD.captureRenew]: WorkspaceJsonObject & { holdId: string };
@@ -1103,6 +1107,17 @@ const CaptureFileHoldSchema = mutableStruct({
 
 const NonNegativeIntSchema = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
 
+// Its bytes are in neither the note nor History. It ends when the file
+// matches what dohc recorded again, when its copy is kept, or when the note
+// stops being live.
+const OutsideChangeSchema = mutableStruct({
+  path: Schema.NonEmptyString,
+  observedSha256: Schema.NonEmptyString,
+  observedSize: NonNegativeIntSchema,
+  firstObservedAtMs: Schema.Int,
+  observedAtMs: Schema.Int,
+});
+
 const RetainedCopiesSummarySchema = mutableStruct({
   count: NonNegativeIntSchema,
   bytes: NonNegativeIntSchema,
@@ -1397,6 +1412,7 @@ const WorkspaceResultSchemas = {
     // Outside writes waiting for the open document to release its lease.
     deferredWrites: Schema.mutable(Schema.Array(Schema.NonEmptyString)),
     heldFiles: Schema.mutable(Schema.Array(CaptureFileHoldSchema)),
+    outsideChanges: Schema.mutable(Schema.Array(OutsideChangeSchema)),
     running: Schema.Boolean,
     degraded: Schema.Boolean,
     terminal: Schema.Boolean,
@@ -1477,6 +1493,9 @@ const WorkspaceResultSchemas = {
   [WORKSPACE_METHOD.captureRetry]: mutableStruct({
     ...CaptureFlushResultSchema.fields,
     restarted: Schema.Boolean,
+  }),
+  [WORKSPACE_METHOD.captureOutsideChanges]: mutableStruct({
+    outsideChanges: Schema.mutable(Schema.Array(OutsideChangeSchema)),
   }),
   [WORKSPACE_METHOD.captureRetryHeld]: mutableStruct({
     ...CaptureFlushResultSchema.fields,

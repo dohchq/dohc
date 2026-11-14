@@ -81,6 +81,7 @@ import {
   type ConflictResolveParams,
   type ConflictResolveResult,
   type HeldChange,
+  type OutsideChange,
   type KeptCopiesListResult,
   type KeptCopySaveResult,
   type RetainedCopiesDeleteResult,
@@ -1784,6 +1785,10 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
 
   async watcherStatus(): Promise<WatcherStatusResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.watcherStatus, {});
+  }
+
+  async outsideChanges(): Promise<OutsideChange[]> {
+    return (await this.workspaceRequest(WORKSPACE_METHOD.captureOutsideChanges, {})).outsideChanges;
   }
 
   async importRecovery(input: CaptureRecoveryImportParams): Promise<CaptureRecoveryImportResult> {

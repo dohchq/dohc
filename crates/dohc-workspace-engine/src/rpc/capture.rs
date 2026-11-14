@@ -502,6 +502,19 @@ impl EngineService {
         response["retried"] = json!(retried);
         Ok(response)
     }
+    /// Files that changed outside dohc while their note was live.
+    pub(super) async fn capture_outside_changes(
+        &self,
+        handle: Option<WorkspaceHandle>,
+    ) -> Result<Value, WireError> {
+        let open = self.open(handle.as_ref())?;
+        let changes = open
+            .actor
+            .held_outside_changes(open.workspace_id.clone())
+            .await
+            .map_err(map_runtime)?;
+        Ok(json!({ "outsideChanges": outside_changes_json(&changes) }))
+    }
     pub(super) async fn capture_clear_recovery(
         &self,
         handle: Option<WorkspaceHandle>,
