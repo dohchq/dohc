@@ -208,11 +208,17 @@ fn device_b(
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
         .expect("main version");
     pull(&mut b, 0, created, &[SCHEMA, apollo]);
+    reconcile(&mut b);
+    (scratch, path, b)
+}
+
+/// What the desktop runs once a pull completes: bind records and check
+/// their fields against their Collection's schema.
+fn reconcile(b: &mut EngineStore) {
     b.write_with(&NoFaults, |tx| {
         dohc_engine_domain::reconcile_collections_in_tx(tx, "ws", "main")
     })
-    .expect("bind the record");
-    (scratch, path, b)
+    .expect("reconcile Collections");
 }
 
 /// B opens Apollo: `doc` seeds it from `file`, then each of `typing` is a
@@ -1585,6 +1591,7 @@ Crew: Armstrong
     client
         .commit_pull_cursor(&mut b, "ws", &cursor, &NoFaults, &leases, 2_100)
         .expect("commit");
+    reconcile(&mut b);
     assert_eq!(head_text(&b, "missions-schema"), Some(SCHEMA.to_owned()));
     assert_eq!(
         head_text(&b, RECORD),
@@ -1601,6 +1608,7 @@ Crew: Armstrong
     drop(b);
     let mut b = EngineStore::open(&b_path, 3_000).expect("restart B");
     pull(&mut b, 4, &[], &[]);
+    reconcile(&mut b);
     assert_eq!(
         read_replication_acked_seq(&b, "ws", "device-a").expect("ack"),
         crew_op.origin_seq
@@ -1613,6 +1621,127 @@ Crew: Armstrong
         crew_status(&b).as_deref(),
         Some("valid"),
         "the table catches up"
+    );
+}
+
+/// A device's held Apollo saves fill a replay page; its held Packing save
+/// after them still gets a turn.
+#[test]
+fn a_file_with_a_page_of_held_saves_leaves_room_for_another_file() {
+    let (_scratch, _a, mut b, mut d) = b_holds_a_conflict();
+    let splashed = format!("{}\nSplashed down.\n", md(FLOWN));
+    let splashed_op = a_saves(
+        &mut d,
+        RECORD,
+        RECORD_PATH,
+        &splashed,
+        "apollo-splashed",
+        50,
+    );
+    let packing_op = a_saves(
+        &mut d,
+        PACKING,
+        PACKING_PATH,
+        PACKING_TEXT,
+        "packing-saved",
+        60,
+    );
+    // A replay page holds 500 ops.
+    let mut held = (0..500)
+        .map(|seq| from_origin(&splashed_op, "device-f", seq))
+        .collect::<Vec<_>>();
+    held.push(from_origin(&packing_op, "device-f", 500));
+    b_retains(&mut b, &held, &[&splashed, PACKING_TEXT]);
+    let identity = read_sync_identity(&b, "ws")
+        .expect("identity")
+        .expect("B has an identity");
+    let (page, _) = crate::deferred::read(&b, "ws", &identity).expect("replay page");
+    assert_eq!(page.len(), 500);
+    assert!(
+        page.iter().any(|op| op.origin_seq == 500),
+        "Packing's save is in the page"
+    );
+}
+
+/// B has a draft it never saved, and D deletes that draft behind its Apollo
+/// save that waits on B's conflict. B refuses the delete until the draft
+/// settles, which is not a durable hold, so the delete and D's next change to
+/// the draft wait retained with the Apollo save and each pull completes.
+#[test]
+fn a_refused_change_behind_held_work_waits_retained() {
+    const DRAFT: &str = "draft";
+    const DRAFT_PATH: &str = "notes/draft.md";
+    const DRAFT_TEXT: &str = "# Draft\n";
+    let (_scratch, _a, mut b, mut d) = b_holds_a_conflict();
+    b.write_with(&NoFaults, |tx| {
+        tx.execute(
+            "INSERT INTO file_objects (workspace_id,object_id,created_at_ms) VALUES ('ws',?1,1)",
+            [DRAFT],
+        )
+        .map_err(SyncError::persist)
+    })
+    .expect("B's draft object");
+    dohc_engine_collab::record_local_update(
+        &mut b,
+        &mut WriterDocCache::new(),
+        &DocKey::new("ws", "main", DRAFT).expect("draft key"),
+        &Ydoc::wire().plaintext_insert(0, "never saved"),
+        LocalAppend {
+            marker: Some(MarkerCreation {
+                path: Some(DRAFT_PATH),
+                content_kind: ContentKind::Plaintext,
+                regime: Regime::LocalOnly,
+            }),
+            ..Default::default()
+        },
+        &NoFaults,
+        2_200,
+        |_tx, _outcome, _sha| Ok(()),
+    )
+    .expect("B types a draft");
+
+    let splashed = format!("{}\nSplashed down.\n", md(FLOWN));
+    let splashed_op = a_saves(
+        &mut d,
+        RECORD,
+        RECORD_PATH,
+        &splashed,
+        "apollo-splashed",
+        50,
+    );
+    let mut delete = a_saves(&mut d, DRAFT, DRAFT_PATH, DRAFT_TEXT, "draft-saved", 60);
+    delete.payload = json!({
+        "momentId": "draft-deleted", "versionId": "main", "objectId": DRAFT,
+        "objectCreatedAtMs": 1, "path": DRAFT_PATH, "recordedAtMs": 2_000,
+        "operation": "delete",
+        "payloadBeforeBlobSha256": sha(DRAFT_TEXT), "payloadBeforePath": DRAFT_PATH,
+        "payloadAfterBlobSha256": sha(""), "payloadAfterPath": DRAFT_PATH,
+        "metadata": {"origin": "sync", "summary": "peer"},
+        "beforePresent": "present", "beforeObjectId": DRAFT, "beforeVersionId": "main",
+        "beforePath": DRAFT_PATH, "beforeBlobSha256": sha(DRAFT_TEXT),
+        "beforeUpdatedAtMs": 100, "beforeLatestMomentId": "draft-saved",
+        "beforeMetadata": {"origin": "api"}
+    });
+    let mut again = from_origin(&delete, "device-d", delete.origin_seq + 1);
+    again.payload["momentId"] = json!("draft-deleted-again");
+    let texts = [splashed.as_str(), DRAFT_TEXT, ""];
+    hydrate(&mut b, &texts);
+    let retained = |b: &EngineStore| count(b, "SELECT COUNT(*) FROM relay_deferred_ops");
+    let ack = |b: &EngineStore| read_replication_acked_seq(b, "ws", "device-d").expect("D's ack");
+
+    pull(&mut b, 3, &[splashed_op.clone(), delete, again], &texts);
+    assert_eq!(retained(&b), 3);
+    assert!(ack(&b) < splashed_op.origin_seq);
+    // The replay refuses the delete again, and the pull still completes.
+    pull(&mut b, 6, &[], &[]);
+    assert_eq!(retained(&b), 3);
+    assert_eq!(
+        waiting(&b),
+        vec![(
+            RECORD.to_owned(),
+            "device-d".to_owned(),
+            splashed_op.origin_seq
+        )]
     );
 }
 

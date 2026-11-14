@@ -27,18 +27,51 @@ const UNAPPLIED: &str =
 /// The objects and lowercased paths a file op touches. An op with none, or
 /// one that carries a conflict's effect, has no scope: it waits for all
 /// earlier work of its origin, and all later work waits for it.
+#[derive(Default)]
 struct Scope {
     objects: BTreeSet<String>,
     paths: BTreeSet<String>,
 }
 
 fn scope(op: &ReplicationEnvelope) -> Option<Scope> {
-    if !matches!(op.op_kind.as_str(), "moment.append" | "ydoc.update")
-        || !op.payload["conflictId"].is_null()
-    {
+    scope_of(&op.op_kind, &op.payload)
+}
+
+/// A retained op's kind and the payload fields [`scope_of`] reads, in
+/// [`SCOPE_PAYLOAD`] order, so a check need not decode whole envelopes.
+const SCOPE_JSON: &str = "json_extract(d.envelope_json,'$.opKind','$.payload.conflictId',
+    '$.payload.objectId','$.payload.beforeObjectId','$.payload.path',
+    '$.payload.payloadBeforePath','$.payload.payloadAfterPath','$.payload.beforePath')";
+const SCOPE_PAYLOAD: [&str; 7] = [
+    "conflictId",
+    "objectId",
+    "beforeObjectId",
+    "path",
+    "payloadBeforePath",
+    "payloadAfterPath",
+    "beforePath",
+];
+
+fn retained_scope(fields: &str) -> Result<Option<Scope>, SyncError> {
+    let fields: Vec<serde_json::Value> =
+        serde_json::from_str(fields).map_err(SyncError::corrupt)?;
+    let op_kind = fields
+        .first()
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let payload = SCOPE_PAYLOAD
+        .iter()
+        .zip(fields.iter().skip(1))
+        .map(|(name, value)| ((*name).to_owned(), value.clone()))
+        .collect();
+    Ok(scope_of(op_kind, &serde_json::Value::Object(payload)))
+}
+
+fn scope_of(op_kind: &str, payload: &serde_json::Value) -> Option<Scope> {
+    if !matches!(op_kind, "moment.append" | "ydoc.update") || !payload["conflictId"].is_null() {
         return None;
     }
-    let text = |name: &str| op.payload[name].as_str().map(str::to_owned);
+    let text = |name: &str| payload[name].as_str().map(str::to_owned);
     let objects: BTreeSet<String> = ["objectId", "beforeObjectId"]
         .into_iter()
         .filter_map(text)
@@ -69,6 +102,11 @@ fn path_overlaps(left: &str, right: &str) -> bool {
 }
 
 impl Scope {
+    fn merge(&mut self, other: Scope) {
+        self.objects.extend(other.objects);
+        self.paths.extend(other.paths);
+    }
+
     fn independent(&self, other: &Scope) -> bool {
         self.objects.is_disjoint(&other.objects)
             && !self
@@ -102,34 +140,39 @@ pub(crate) fn passes_held_work(
     let Some(mine) = scope(op) else {
         return Ok(false);
     };
-    let between = params![op.workspace_id, op.origin_id, acked, op.origin_seq];
-    let applied: i64 = tx
+    // An op past the ack applied, or was retained, only once each op before
+    // it had applied or was retained, and retained work leaves only once it
+    // applies. So the op just before `op` answers for all of them.
+    let covered: bool = tx
         .query_row(
-            "SELECT COUNT(*) FROM replication_log
-             WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq>?3 AND origin_seq<?4",
-            between,
+            "SELECT EXISTS(SELECT 1 FROM replication_log
+                 WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3)
+               OR EXISTS(SELECT 1 FROM relay_deferred_ops
+                 WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3)",
+            params![op.workspace_id, op.origin_id, op.origin_seq - 1],
             |r| r.get(0),
         )
         .map_err(SyncError::corrupt)?;
+    if !covered {
+        return Ok(false);
+    }
     let mut stmt = tx
         .prepare_cached(&format!(
-            "SELECT d.envelope_json FROM relay_deferred_ops d
+            "SELECT DISTINCT {SCOPE_JSON} FROM relay_deferred_ops d
              WHERE d.workspace_id=?1 AND d.origin_id=?2 AND d.origin_seq>?3 AND d.origin_seq<?4
                AND {UNAPPLIED}"
         ))
         .map_err(SyncError::corrupt)?;
     let waiting = stmt
-        .query_map(between, |r| r.get::<_, String>(0))
+        .query_map(
+            params![op.workspace_id, op.origin_id, acked, op.origin_seq],
+            |r| r.get::<_, String>(0),
+        )
         .map_err(SyncError::corrupt)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(SyncError::corrupt)?;
-    if applied + waiting.len() as i64 != op.origin_seq - acked - 1 {
-        return Ok(false);
-    }
-    for encoded in waiting {
-        let held: ReplicationEnvelope =
-            serde_json::from_str(&encoded).map_err(SyncError::corrupt)?;
-        if !scope(&held).is_some_and(|theirs| mine.independent(&theirs)) {
+    for fields in waiting {
+        if !retained_scope(&fields)?.is_some_and(|theirs| mine.independent(&theirs)) {
             return Ok(false);
         }
     }
@@ -171,11 +214,16 @@ pub(crate) fn read(
             "SELECT DISTINCT d.origin_id FROM relay_deferred_ops d WHERE d.workspace_id=?1 AND {UNAPPLIED}"))?;
         let origins = stmt.query_map([workspace], |r| r.get(0))?
             .collect::<Result<BTreeSet<String>, _>>()?;
+        // Each file of an origin takes its turn in the page, so one file's
+        // long run of held work cannot keep the origin's other files out.
         let mut stmt = conn.prepare(
             "SELECT d.envelope_json FROM relay_deferred_ops d JOIN
              (SELECT origin_id,MIN(checked_sequence) AS checked FROM relay_deferred_ops
               WHERE workspace_id=?1 GROUP BY origin_id) q ON q.origin_id=d.origin_id
-             WHERE d.workspace_id=?1 ORDER BY q.checked,d.origin_id,d.origin_seq LIMIT ?2")?;
+             WHERE d.workspace_id=?1 ORDER BY q.checked,d.origin_id,
+               ROW_NUMBER() OVER (PARTITION BY d.origin_id,
+                 json_extract(d.envelope_json,'$.payload.objectId') ORDER BY d.origin_seq),
+               d.origin_seq LIMIT ?2")?;
         let encoded = stmt.query_map(params![workspace, REPLAY_PAGE], |r| r.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
         Ok::<_, rusqlite::Error>((mismatched, encoded, origins))
@@ -337,9 +385,8 @@ pub(crate) fn retained_namespace(
 pub const WAITING_VERSION_CODE: &str = crate::moment_apply::RESOLVE_EXISTING_CONFLICT;
 
 /// The newer version that waits behind each of `conflict_ids` still open
-/// from sync, by conflict id. Only the first retained op still to apply of
-/// an origin's file can wait on a conflict, because the rest of that file
-/// waits behind it, as does the rest of an origin an op with no scope holds.
+/// from sync, by conflict id. Only a retained op still to apply that waits
+/// behind none of its origin's earlier retained work can wait on a conflict.
 /// A hosted replica reads none here: it retains by document, not origin.
 pub fn waiting_versions(
     store: &EngineStore,
@@ -382,14 +429,26 @@ pub fn waiting_versions(
             .map_err(SyncError::corrupt)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(SyncError::corrupt)?;
-        let mut seen = BTreeSet::new();
+        // What each origin's earlier retained work touches, or `None` once
+        // an op with no scope holds the rest.
+        let mut earlier: BTreeMap<String, Option<Scope>> = BTreeMap::new();
         for encoded in encoded {
             let op: ReplicationEnvelope =
                 serde_json::from_str(&encoded).map_err(SyncError::corrupt)?;
-            if seen.contains(&op.origin_id) || !seen.insert(hold_key(&op)) {
-                continue;
+            let mine = scope(&op);
+            let behind = match (earlier.get(&op.origin_id), &mine) {
+                (None, _) => false,
+                (Some(Some(before)), Some(mine)) => !mine.independent(before),
+                _ => true,
+            };
+            let before = earlier
+                .entry(op.origin_id.clone())
+                .or_insert_with(|| Some(Scope::default()));
+            match (before.as_mut(), mine) {
+                (Some(before), Some(mine)) => before.merge(mine),
+                _ => *before = None,
             }
-            if op.op_kind != "moment.append" {
+            if behind || op.op_kind != "moment.append" {
                 continue;
             }
             let field = |name: &str| op.payload[name].as_str();

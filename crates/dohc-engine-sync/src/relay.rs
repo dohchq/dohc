@@ -4057,10 +4057,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         faults: &dyn FaultInjector,
     ) -> Result<(), RelayError> {
         p.still_retryable.push(index);
-        p.held.insert(key.clone());
         let durable = origin_keys(&p.durable, &op.origin_id).next().is_some()
-            && origin_keys(&p.held, &op.origin_id)
-                .all(|held| *held == key || p.durable.contains(held));
+            && origin_keys(&p.held, &op.origin_id).all(|held| p.durable.contains(held));
+        p.held.insert(key.clone());
         if durable {
             p.durable.insert(key);
             crate::deferred::retain_waiting(
@@ -4231,7 +4230,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         .insert(op.origin_id.clone(), path.map(str::to_owned));
                 }
                 if let Some(key) = key {
-                    let durable = retained_while_held(op, reason);
+                    // While its origin has work retained, a refused op waits
+                    // retained too, as when the origin was held whole.
+                    let durable = retained_while_held(op, reason)
+                        || (matches!(p.holding, Holding::ByOrigin)
+                            && origin_keys(&p.durable, &op.origin_id).next().is_some());
                     if durable {
                         p.durable.insert(key.clone());
                     }
