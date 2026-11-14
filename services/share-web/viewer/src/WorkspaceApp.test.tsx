@@ -691,6 +691,25 @@ it("keeps each account's drafts and unsent edits from another account signed in 
   expect(composer().value).toBe("Half a thought");
 });
 
+it("shows no account's kept edits on a fresh load before sign-in, then only the signed-in account's, still after its session ends", async () => {
+  writeDraft("unsent-edits", JSON.stringify([{id: 1, accountId: "sam", path: "trip/plan.md", text: "Leave at ten."},
+    {id: 2, accountId: "lee", path: "trip/to-pack.md", text: "Socks."}]));
+  const options: {signedIn: boolean; user?: string} = {signedIn: false};
+  server(options); await render();
+  await settle(() => Boolean(container.querySelector('input[name="email"]')));
+  expect(recovery()).toBeNull();
+  expect(text()).not.toContain("Unsent edits");
+  options.user = "lee";
+  await act(async () => {setControlValue(container.querySelector('input[name="email"]')!, "lee@dohc.test");
+    setControlValue(container.querySelector('input[name="password"]')!, "secret");});
+  await click("Sign in"); await opened();
+  expect([...container.querySelectorAll('[aria-label="Unsent edits"] summary')].map(node => node.textContent)).toEqual(["Unsent edits to to-pack.md"]);
+  // Signed out on the same page, the person still sees their own kept text, and only theirs.
+  await click("Sign out");
+  await settle(() => Boolean(container.querySelector('input[name="email"]')));
+  expect([...container.querySelectorAll('[aria-label="Unsent edits"] summary')].map(node => node.textContent)).toEqual(["Unsent edits to to-pack.md"]);
+});
+
 it("stops editing when the person loses Edit, and keeps the unsent text to copy, download or discard with Undo", async () => {
   const options: {level: Level} = {level: "edit"};
   await editing(options);
@@ -716,7 +735,7 @@ it("stops editing when the person loses Edit, and keeps the unsent text to copy,
   await act(async () => [...recovery()!.querySelectorAll("button")].find(node => node.textContent === "Discard")!.click());
   expect(recovery()).toBeNull();
   const discarded = container.querySelector<HTMLElement>('[aria-label="Discarded edits"]')!;
-  expect(discarded.textContent).toContain('Discarded your unsent edits to "plan.md".');
+  expect(discarded.textContent).toContain('Discarded your unsent edits to plan.md.');
   await act(async () => [...discarded.querySelectorAll("button")].find(node => node.textContent === "Undo")!.click());
   expect(recovery()!.querySelector("textarea")?.value).toContain("Leave at ten.");
   expect(container.querySelector('[aria-label="Discarded edits"]')).toBeNull();
@@ -764,7 +783,7 @@ it("names kept edits to two files of the same name by their folders", async () =
   expect([...container.querySelectorAll('[aria-label="Unsent edits"] summary')].map(node => node.textContent)).toEqual([
     "Unsent edits to trip/plan.md", "Unsent edits to welcome/plan.md", "Unsent edits to to-pack.md"]);
   await act(async () => [...container.querySelectorAll<HTMLButtonElement>('[aria-label="Unsent edits"] button')].find(node => node.textContent === "Discard")!.click());
-  expect(container.querySelector('[aria-label="Discarded edits"]')?.textContent).toContain('Discarded your unsent edits to "trip/plan.md".');
+  expect(container.querySelector('[aria-label="Discarded edits"]')?.textContent).toContain('Discarded your unsent edits to trip/plan.md.');
 });
 
 it("keeps the unsent text after the membership ends, with none of the workspace", async () => {

@@ -89,7 +89,7 @@ function UnsentEdits({unsent, onDiscard, onUndo, onForget}: {unsent: readonly Un
     const name = shownPath(item.path, unsent), base = item.path.slice(item.path.lastIndexOf("/") + 1), dot = base.lastIndexOf(".");
     const file = dot > 0 ? `${base.slice(0, dot)} (unsent edits)${base.slice(dot)}` : `${base} (unsent edits)`;
     if (item.discarded) return <aside key={item.id} className="unsent-discarded" aria-label="Discarded edits">
-      <p>Discarded your unsent edits to "{name}".</p>
+      <p>Discarded your unsent edits to {name}.</p>
       <button type="button" className="handoff-button secondary" onClick={() => onUndo(item.id)}>Undo</button>
       <button className="icon-button" type="button" aria-label="Dismiss" title="Dismiss" onClick={() => onForget(item.id)}><Icon name="x"/></button>
     </aside>;
@@ -149,13 +149,13 @@ export default function WorkspaceApp({grantId}: {grantId: string | null}) {
   const unsentId = useRef(Math.max(0, ...unsent.map(item => item.id)));
   const [toastSlot, setToastSlot] = useState<HTMLElement | null>(null);
   // The account last signed in on this page. Signed out, its kept edits still show, so an ended session keeps them in view.
-  // Before any account signs in, as after a reload, every kept edit shows.
+  // Before any account signs in, as after a reload, none show: the tab may hold another person's text.
   const [lastAccount, setLastAccount] = useState<string | null>(null);
   const keep = useCallback((accountId: string, path: string, text: string) =>
     setUnsent(list => [...list, {id: ++unsentId.current, accountId, path, text}]), []);
   const discarded = (id: number, value: boolean) => setUnsent(list => list.map(item => item.id !== id ? item
     : value ? {...item, discarded: true} : {id: item.id, accountId: item.accountId, path: item.path, text: item.text}));
-  const shown = lastAccount === null ? unsent : unsent.filter(item => item.accountId === lastAccount);
+  const shown = unsent.filter(item => item.accountId === lastAccount);
   useEffect(() => writeUnsent(unsent), [unsent]);
   // Closing the tab loses the kept text, so the browser asks first while any remains.
   const holding = unsent.some(item => !item.discarded);
