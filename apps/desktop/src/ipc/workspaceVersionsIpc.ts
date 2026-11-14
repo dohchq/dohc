@@ -1,4 +1,5 @@
 import type { WorkspaceVersionRecord, workspaceVersionOperations } from "./bridgeContract";
+import type { protectedCopyOperations } from "./writeOperations";
 import {
   heldChangeAuthorsForIpc,
   versionConflictForIpc,
@@ -170,14 +171,6 @@ export function workspaceVersionHandlers<Event = unknown>(dependencies: {
       return saved;
     },
 
-    async restoreProtectedCopy(input) {
-      const capture = await requireVersionOperations(input.workspaceId);
-      const restored = await capture.restoreProtectedCopy(input.id);
-      activity.queueCloudSync(input.workspaceId);
-      notifyRenderer({ workspaceId: input.workspaceId });
-      return restored;
-    },
-
     async discardProtectedCopy(input) {
       const capture = await requireVersionOperations(input.workspaceId);
       return await capture.discardProtectedCopy(input.id);
@@ -226,6 +219,26 @@ export function workspaceVersionHandlers<Event = unknown>(dependencies: {
         conflicts: outcome.remaining.conflicts.map(versionConflictForIpc),
         nextAfterConflictId: outcome.remaining.nextAfterConflictId,
       };
+    },
+  };
+}
+
+// The window's handler for the protected-copy writes.
+export function protectedCopyHandlers<Event>(dependencies: {
+  requireEngineCapture(
+    workspaceId: string,
+    feature: "Versions",
+  ): Promise<{ capture: Pick<VersionOperations, "restoreProtectedCopy"> }>;
+  notifyRenderer(target: { workspaceId: string }): void;
+  activity: { queueCloudSync(workspaceId: string): void };
+}): OperationHandlers<typeof protectedCopyOperations, Event> {
+  return {
+    async restoreProtectedCopy(input) {
+      const { capture } = await dependencies.requireEngineCapture(input.workspaceId, "Versions");
+      const restored = await capture.restoreProtectedCopy(input.id);
+      dependencies.activity.queueCloudSync(input.workspaceId);
+      dependencies.notifyRenderer({ workspaceId: input.workspaceId });
+      return restored;
     },
   };
 }

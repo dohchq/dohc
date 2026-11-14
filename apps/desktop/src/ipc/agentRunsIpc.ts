@@ -17,8 +17,8 @@ import {
   ResumeThreadDispatchPayload,
   RunnerSelfTestPayload,
   RunnerSelfTestResult,
-  stoppedRunOperations,
 } from "./bridgeContract";
+import { stoppedRunOperations } from "./writeOperations";
 import { CHANNELS } from "./channels";
 import { registerOperations } from "./operationTable";
 import { AgentToolsResult } from "../agents/agentToolCatalog";

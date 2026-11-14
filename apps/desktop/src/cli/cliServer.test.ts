@@ -1957,6 +1957,23 @@ describe("CLI socket server", () => {
       expect(calls.openWorkspace).toBe(0);
     });
 
+    it("answers that kept copies are unavailable for a protected restore, without reaching it", async () => {
+      const reached = vi.fn(async () => {
+        throw new Error("reached");
+      });
+      Object.assign(context, { keptCopies: new Proxy({}, { get: () => reached }) });
+      for (const cwd of [inShare, join(workspaceRoot, "shared-with-me")]) {
+        expect(
+          await send("restoreProtectedCopy", { cwd, id: "00000000-0000-4000-8000-000000000001" }),
+        ).toEqual({
+          protocolVersion: CLI_PROTOCOL_VERSION,
+          ok: true,
+          result: { ok: false, reason: "kept copies are not available in this workspace" },
+        });
+      }
+      expect(reached).not.toHaveBeenCalled();
+    });
+
     it("refuses chat commands, and shows a Group with --peek", async () => {
       const chatCommands: Array<[CliVerb, Record<string, unknown>]> = [
         ["groupCreate", { name: "needs-ice" }],
@@ -2076,6 +2093,47 @@ describe("CLI socket server", () => {
       error: "dohc: CLI request exceeds 14 MiB. Split the files into smaller batches.",
     });
     expect(calls.openWorkspace).toBe(opened);
+  });
+
+  it.each([false, true])(
+    "restores a protected copy as an agent, and leaves a read-only view to the handler (readOnly %s)",
+    async (readOnly) => {
+      registryWorkspace = { ...registryWorkspace, readOnly };
+      context.readOnly = readOnly;
+      const restoreProtected = vi.fn(async () => ({ path: ".env", status: "restored" as const }));
+      Object.assign(context, { keptCopies: { restoreProtected } });
+      const id = "00000000-0000-4000-8000-000000000001";
+      expect(
+        await rawRequest({
+          token,
+          protocolVersion: CLI_PROTOCOL_VERSION,
+          verb: "restoreProtectedCopy",
+          args: { cwd: workspaceRoot, actor: "agent", id },
+        }),
+      ).toEqual({
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        ok: true,
+        result: { ok: true, status: "restored", path: ".env" },
+      });
+      expect(restoreProtected).toHaveBeenCalledWith(id, "agent");
+    },
+  );
+
+  it("refuses a run id on a protected restore", async () => {
+    Object.assign(context, { keptCopies: { restoreProtected: vi.fn() } });
+    expect(
+      await rawRequest({
+        token,
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        verb: "restoreProtectedCopy",
+        args: {
+          cwd: workspaceRoot,
+          actor: "agent",
+          id: "00000000-0000-4000-8000-000000000001",
+          runId: "run-1",
+        },
+      }),
+    ).toMatchObject({ ok: false, error: "dohc: invalid CLI request" });
   });
 
   it("refuses owner and chat commands in a received share opened as its own workspace", async () => {

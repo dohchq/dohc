@@ -10,10 +10,16 @@ import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { CLI_COMMANDS } from "@dohc/cli/args";
 import { renderCliHelp } from "@dohc/cli/help";
-import { CLI_CAPABILITIES, DECLARED_VERBS } from "@dohc/cli/protocol";
+import {
+  CLI_CAPABILITIES,
+  DECLARED_VERBS,
+  DECLARED_WRITES,
+  type DeclaredWrite,
+} from "@dohc/cli/protocol";
+import { WRITE_DECLARATION_FAMILIES } from "@dohc/workspace-contracts/all-write-declarations";
 import { advertisedCapabilityTools } from "@dohc/mcp/capability-exposure-fixture";
 import { DECLARATION_FAMILIES } from "@dohc/workspace-contracts/all-declarations";
-import { declaredRows, type OperationDefinition } from "./operationTable";
+import { declaredRows, declaredWriteRows, type OperationDefinition } from "./operationTable";
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 const here = (name: string) => new URL(name, import.meta.url);
@@ -27,8 +33,24 @@ const families = Object.keys(DECLARATION_FAMILIES) as (keyof typeof DECLARATION_
 const rows: OperationDefinition[] = families.flatMap((key) =>
   Object.values<OperationDefinition>(declaredRows(key, z.string())),
 );
-const labels = operations.map(({ cli }) => cli.command.join(" "));
-const groups: string[] = [...new Set(operations.map(({ cli }) => cli.command[0]))];
+// The declared writes join the same pins.
+const writes = Object.values<DeclaredWrite>(DECLARED_WRITES);
+const commandOf = ({ cli }: DeclaredWrite) => ("none" in cli ? [] : [cli.command]);
+const writeCommands = writes.flatMap(commandOf);
+for (const key of Object.keys(
+  WRITE_DECLARATION_FAMILIES,
+) as (keyof typeof WRITE_DECLARATION_FAMILIES)[])
+  rows.push(...Object.values<OperationDefinition>(declaredWriteRows(key, z.string())));
+const labels = [
+  ...operations.map(({ cli }) => cli.command.join(" ")),
+  ...writeCommands.map((command) => command.join(" ")),
+];
+const groups: string[] = [
+  ...new Set([
+    ...operations.map(({ cli }) => cli.command[0]),
+    ...writeCommands.map((command) => command[0]),
+  ]),
+];
 
 function withLabel(pinned: readonly string[], label: string): string[] {
   if (pinned.includes(label)) return [...pinned];
@@ -68,16 +90,29 @@ writeJson(ipcPath, ipc);
 const cliPath = here("./cliExposure.main.json");
 const cli = readJson<{
   socketVerbs: string[];
+  internalVerbs: string[];
   publicSocketVerbs: string[];
   publicVerbs: string[];
   help: Record<string, unknown> & {
     top: { prefix: string; commands: { group: string; block: string }[]; suffix: string };
   };
 }>(cliPath);
-const verbs = operations.map(({ cli: { verb } }) => verb);
+const publicVerbs = [
+  ...operations.map(({ cli: { verb } }) => verb),
+  ...writes.flatMap((write) => ("none" in write.cli ? [] : [write.socket.verb])),
+];
+const verbs = [...new Set([...publicVerbs, ...writes.map(({ socket }) => socket.verb)])];
 cli.socketVerbs = [...new Set([...cli.socketVerbs, ...verbs])].sort();
-cli.publicSocketVerbs = [...new Set([...cli.publicSocketVerbs, ...verbs])].sort();
-cli.publicVerbs = labels.reduce(withLabel, cli.publicVerbs);
+cli.publicSocketVerbs = [...new Set([...cli.publicSocketVerbs, ...publicVerbs])].sort();
+// A socket verb with no public command is internal.
+cli.internalVerbs = cli.socketVerbs.filter((verb) => !cli.publicSocketVerbs.includes(verb));
+// A command keeps the place its table gives it.
+const tableOrder = Object.entries(CLI_COMMANDS).flatMap(([group, { verbs: names }]) =>
+  Object.keys(names).map((name) => `${group} ${name}`),
+);
+cli.publicVerbs = labels
+  .reduce(withLabel, cli.publicVerbs)
+  .sort((a, b) => tableOrder.indexOf(a) - tableOrder.indexOf(b));
 const top = renderCliHelp({ help: [] });
 const { prefix, suffix } = cli.help.top;
 if (!top.startsWith(prefix) || !top.endsWith(suffix))
@@ -91,9 +126,7 @@ const commands = cli.help.top.commands.map((command) =>
 );
 const help: Record<string, unknown> = { ...cli.help, top: { prefix, commands, suffix } };
 for (const group of groups) help[group] = renderCliHelp({ help: [group] });
-for (const {
-  cli: { command },
-} of operations)
+for (const command of [...operations.map(({ cli }) => cli.command), ...writeCommands])
   help[command.join(" ")] = renderCliHelp({ help: command });
 cli.help = Object.fromEntries(
   [...groups, ...labels].reduce(withLabel, Object.keys(cli.help)).map((key) => [key, help[key]]),
@@ -105,7 +138,8 @@ const capabilities = readJson<{
   socket: Record<string, readonly string[]>;
   public: Record<string, string>;
 }>(capabilitiesPath);
-for (const verb of verbs) capabilities.socket[verb] = CLI_CAPABILITIES[verb];
+for (const verb of verbs)
+  capabilities.socket[verb] = CLI_CAPABILITIES[verb as keyof typeof CLI_CAPABILITIES];
 for (const label of labels) {
   const [group, name] = label.split(" ") as [string, string];
   capabilities.public[label] = CLI_COMMANDS[group]!.verbs[name]!.capabilityId;
@@ -117,10 +151,14 @@ const fixturePath = here("./cliDispatchInputs.fixture.ts");
 const fixture = read(fixturePath);
 const literal = (value: string) =>
   value.includes('"') && !value.includes("'") ? `'${value}'` : JSON.stringify(value);
-const missing = operations
-  .filter(({ cli: { command } }) => !fixture.includes(`  ${JSON.stringify(command.join(" "))}: `))
+const examples = [
+  ...operations.map(({ cli }) => cli),
+  ...writes.flatMap(({ cli }) => ("none" in cli ? [] : [cli])),
+];
+const missing = examples
+  .filter(({ command }) => !fixture.includes(`  ${JSON.stringify(command.join(" "))}: `))
   .map(
-    ({ cli: { command, example } }) =>
+    ({ command, example }) =>
       `  ${JSON.stringify(command.join(" "))}: [${example.map(literal).join(", ")}],\n`,
   );
 const jsonVerbs = "  // JSON verb parsers declare";
@@ -130,7 +168,10 @@ writeFileSync(fixturePath, fixture.replace(jsonVerbs, missing.join("") + jsonVer
 
 const toolsPath = new URL("../../../../packages/mcp/src/toolsList.main.json", import.meta.url);
 const tools = readJson<Record<string, Json[]>>(toolsPath);
-const declaredTools = new Set<string>(operations.map(({ mcp }) => mcp.tool));
+const declaredTools = new Set<string>([
+  ...operations.map(({ mcp }) => mcp.tool),
+  ...writes.flatMap(({ mcp }) => ("none" in mcp ? [] : [mcp.tool])),
+]);
 const nameOf = (tool: Json) => (tool as { name: string }).name;
 for (const level of ["owner", "view", "comment", "edit"] as const) {
   const advertised = await advertisedCapabilityTools(level === "owner" ? undefined : level);

@@ -4,6 +4,8 @@ import type {
   OperationDeclaration,
   OperationFamily,
 } from "@dohc/workspace-contracts/operation-declaration";
+import type { WriteDeclaration, WriteFamily } from "@dohc/workspace-contracts/write-declaration";
+import { WRITE_DECLARATION_FAMILIES } from "@dohc/workspace-contracts/all-write-declarations";
 import type { z } from "zod";
 
 // One row per renderer-to-main operation: the channel, the payload main
@@ -90,6 +92,61 @@ export function declaredRows<Key extends keyof Families>(
     ]),
   );
   return rows as DeclaredRows<Families[Key]>;
+}
+
+// The window's row of each declared write that the app offers.
+type WriteFamilies = typeof WRITE_DECLARATION_FAMILIES;
+type WrittenInApp = { readonly ipc: { readonly channel: string } };
+type DeclaredWriteRow<Declaration> = Declaration extends {
+  readonly ipc: {
+    readonly channel: infer Channel extends `desktop:${string}`;
+    readonly input: infer Input extends z.ZodType;
+    readonly result: infer Result extends z.ZodType;
+  };
+}
+  ? {
+      readonly capabilityId: CapabilityId;
+      readonly channel: Channel;
+      readonly scope: "workspace";
+      readonly guard: "active-workspace";
+      readonly inactiveMessage: string;
+      readonly payload: z.ZodType<
+        z.output<Input> & { workspaceId: string },
+        z.input<Input> & { workspaceId: string }
+      >;
+      readonly result: Result;
+    }
+  : never;
+type DeclaredWriteRows<Family> = {
+  readonly [
+    Name in keyof Family as Family[Name] extends WrittenInApp ? Name : never
+  ]: DeclaredWriteRow<Family[Name]>;
+};
+
+// The rows of one listed write family. A declaration cannot choose a guard:
+// each row runs inside the sending window's active workspace.
+export function declaredWriteRows<Key extends keyof WriteFamilies>(
+  key: Key,
+  workspaceId: z.ZodType<string>,
+): DeclaredWriteRows<WriteFamilies[Key]> {
+  if (!Object.hasOwn(WRITE_DECLARATION_FAMILIES, key))
+    throw new Error(`${key} is not a listed family.`);
+  const family: WriteFamily = WRITE_DECLARATION_FAMILIES[key];
+  const rows: Record<string, unknown> = {};
+  for (const [name, declaration] of Object.entries<WriteDeclaration>(family)) {
+    const { ipc } = declaration;
+    if ("none" in ipc) continue;
+    rows[name] = {
+      capabilityId: declaration.capabilityId,
+      channel: ipc.channel,
+      scope: "workspace",
+      guard: "active-workspace",
+      inactiveMessage: ipc.inactiveMessage,
+      payload: ipc.input.extend({ workspaceId }),
+      result: ipc.result,
+    };
+  }
+  return rows as DeclaredWriteRows<WriteFamilies[Key]>;
 }
 
 type Reply<Definition> = Definition extends { readonly result: infer Result extends z.ZodType }

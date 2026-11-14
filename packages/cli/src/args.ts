@@ -25,6 +25,10 @@ import {
   type DeclaredOperation,
   type DeclaredRequestInput,
   type DeclaredVerb,
+  DECLARED_WRITES,
+  type DeclaredWrite,
+  type DeclaredWriteOf,
+  type DeclaredWriteVerb,
 } from "./protocol";
 import { CHAT_WORK_STATUSES, isChatWorkStatus } from "@dohc/workspace-contracts/chat-work";
 import { DohcCliError } from "./errors";
@@ -196,7 +200,7 @@ type CliCommandBody =
       run: string;
       startOver: boolean;
     }
-  | { verb: "chatRetry"; thread: string }
+  | DeclaredWriteCommand
   | { verb: "automationButtons"; collectionPath: string; table?: string }
   | {
       verb: "automationPress";
@@ -220,6 +224,33 @@ export interface CliFlag {
   /** Placeholder for the flag's value. A flag without one is a switch. */
   value?: string;
   text: string;
+}
+
+// A declared write's command. Its words and capability come from the
+// declaration. Its parser is written in the command's table, where its place
+// sets its place in help.
+type DeclaredWriteInput<Verb extends DeclaredWriteVerb> = z.output<
+  DeclaredWriteOf<Verb>["socket"]["input"]
+>;
+type DeclaredWriteCommand = {
+  [Verb in DeclaredWriteVerb]: { verb: Verb } & DeclaredWriteInput<Verb>;
+}[DeclaredWriteVerb];
+const declaredWriteSpecs = new Map<DeclaredWriteVerb, CliVerbSpec>();
+function declaredWrite<Verb extends DeclaredWriteVerb>(
+  verb: Verb,
+  parse: (input: VerbInput) => DeclaredWriteInput<Verb>,
+): CliVerbSpec {
+  const { capabilityId, cli }: DeclaredWrite = DECLARED_WRITES[verb];
+  if ("none" in cli) throw new Error(`${verb} declares no CLI command: ${cli.none}`);
+  const spec: CliVerbSpec = {
+    capabilityId,
+    summary: cli.summary,
+    operands: cli.operands,
+    ...("notes" in cli ? { notes: cli.notes } : {}),
+    parse: (input) => ({ verb, ...parse(input) }) as CliCommandBody,
+  };
+  declaredWriteSpecs.set(verb, spec);
+  return spec;
 }
 
 interface VerbInput {
@@ -1106,21 +1137,12 @@ const CHAT_VERBS = {
       };
     },
   },
-  retry: {
-    capabilityId: "agent.run.retry",
-    summary: "Run an agent's stopped request in a conversation again, as Try again does.",
-    operands: "<thread>",
-    notes: [
-      "dohc chat show reports a stopped run under dispatch.lastRun.",
-      "Each request gets two attempts. Only the computer that ran it can run it again, and only someone who may post in the conversation.",
-    ],
-    parse: ({ operands }) => {
-      const [thread, ...extra] = operands;
-      if (!thread) fail("retry requires a thread id");
-      noExtraArgs(extra, "retry");
-      return { verb: "chatRetry", thread };
-    },
-  },
+  retry: declaredWrite("chatRetry", ({ operands }) => {
+    const [thread, ...extra] = operands;
+    if (!thread) fail("retry requires a thread id");
+    noExtraArgs(extra, "retry");
+    return { thread };
+  }),
   react: {
     capabilityId: "chat.react",
     summary: "Add your reaction to a message, or remove it if it is already there.",
@@ -1965,6 +1987,7 @@ const DECLARED_PARSERS: {
 
 // Adds each declared operation's verb to the hand-written command it names.
 // A declaration that names no command, or a verb the command already has, fails at load.
+// So does a declared write whose command lacks its parser.
 function withDeclaredVerbs(
   commands: Readonly<Record<string, CliCommandSpec>>,
 ): Readonly<Record<string, CliCommandSpec>> {
@@ -1989,6 +2012,14 @@ function withDeclaredVerbs(
       parse: (input) =>
         ({ verb: cli.verb, ...parse(input, cli.command.join(" ")) }) as CliCommandBody,
     };
+  }
+  // A declared write that names a command has its parser in that command's table.
+  for (const { cli, socket } of Object.values<DeclaredWrite>(DECLARED_WRITES)) {
+    if ("none" in cli) continue;
+    const [group, name] = cli.command;
+    const spec = declaredWriteSpecs.get(socket.verb);
+    if (!spec || lookup(joined, group)?.verbs[name] !== spec)
+      throw new Error(`dohc ${group} ${name} is declared but has no parser in its command.`);
   }
   return joined;
 }

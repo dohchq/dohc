@@ -171,6 +171,26 @@ Resolve wikilink or Markdown literals from one source document using the engine'
 
 Returns `{ versionId, results: ({ path, fragment } | { path, create, fragment } | null)[], mountsCovered }`.
 
+### `dohc_retry_chat_run`
+
+Run an agent's stopped request in a dohc Chat thread again, as Try again does under its message. dohc_read_chat reports a stopped run under dispatch.lastRun. Each request gets two attempts. Only the computer that ran it can run it again, and only for someone who may post in the thread.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `threadId`: `string`. Required.
+
+Returns `{ ok: true, status: "queued", threadId } | { ok: false, reason }`.
+
+### `dohc_restore_protected_copy`
+
+Write one entry from `protectedCopies` in dohc_list_kept_copies back to its protected file. Each entry is [path, id, keptAtMs]: a change to a protected file such as `.env` that a sync replaced or deleted, kept on this computer only. The synced text stays in the file's History, so the restore can be reversed there. `status` is `restored` with the file's `path`.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `id`: `string`. Required.
+
+Returns `{ ok: true, status: "restored", path } | { ok: false, reason }`.
+
 ### `dohc_duplicate_file`
 
 Duplicate one regular file beside its source with a fresh identity. Owner workspace only. Undo removes the copy while it is unchanged.
@@ -312,16 +332,6 @@ Changes the workspace, so a shared view does not offer it.
 - `id`: `integer`. Required.
 
 Returns `{ ok: true, status: "saved", path } | { ok: true, status: "gone" } | { ok: true, status: "no-valid-name" } | { ok: false, reason }`.
-
-### `dohc_restore_protected_copy`
-
-Write one entry from `protectedCopies` in dohc_list_kept_copies back to its protected file. Each entry is [path, id, keptAtMs]: a change to a protected file such as `.env` that a sync replaced or deleted, kept on this computer only. The synced text stays in the file's History, so the restore can be reversed there. `status` is `restored` with the file's `path`.
-
-Changes the workspace, so a shared view does not offer it.
-
-- `id`: `string`. Required.
-
-Returns `{ ok: true, status: "restored", path } | { ok: false, reason }`.
 
 ### `dohc_discard_protected_copy`
 
@@ -744,16 +754,6 @@ Changes the workspace, so a shared view does not offer it.
 - `nothingToReport`: `true`
 
 Returns `{ ok: true, threadId, messageId, parentMessageId?, resolvedMessageId?, warning? }`, or `{ ok: true, threadId, nothingToReport: true }`.
-
-### `dohc_retry_chat_run`
-
-Run an agent's stopped request in a dohc Chat thread again, as Try again does under its message. dohc_read_chat reports a stopped run under dispatch.lastRun. Each request gets two attempts. Only the computer that ran it can run it again, and only for someone who may post in the thread.
-
-Changes the workspace, so a shared view does not offer it.
-
-- `threadId`: `string`. Required.
-
-Returns `{ ok: true, status: "queued", threadId } | { ok: false, reason }`.
 
 ### `dohc_query_collection`
 
