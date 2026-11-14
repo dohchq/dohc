@@ -443,9 +443,13 @@ it("keeps unsent text to copy once the person can no longer post", async () => {
   await act(async () => groupPanel().querySelector<HTMLButtonElement>('button[aria-label="Copy unsent message"]')!.click());
   expect(writeText).toHaveBeenCalledWith("Not sent yet");
   expect(groupPanel().querySelector<HTMLButtonElement>('button[aria-label="Copy unsent message"]')!.textContent).toBe("Copied");
+  // A screen reader hears the result.
+  const heard = () => groupPanel().querySelector('.copy-status[role="status"]')?.textContent;
+  expect(heard()).toBe("Copied");
   writeText.mockRejectedValueOnce(new Error("denied"));
   await act(async () => groupPanel().querySelector<HTMLButtonElement>('button[aria-label="Copy unsent message"]')!.click());
-  expect(groupPanel().querySelector('[role="alert"]')?.textContent).toBe("dohc could not copy the message. Select it, then copy it.");
+  expect(groupPanel().querySelector(".copy-failed")?.textContent).toBe("dohc could not copy the message. Select it, then copy it.");
+  expect(heard()).toBe("dohc could not copy the message. Select it, then copy it.");
   expect(groupPanel().querySelector<HTMLTextAreaElement>('textarea[aria-label="Your unsent message"]')?.value).toBe("Not sent yet");
   await click("Discard");
   expect(groupPanel().querySelector('textarea[aria-label="Your unsent message"]')).toBeNull();
@@ -562,6 +566,7 @@ it("stops editing when the person loses Edit, and keeps the unsent text to copy,
   await act(async () => recovery()!.querySelector<HTMLButtonElement>('button[aria-label="Copy unsent edits"]')!.click());
   expect(writeText).toHaveBeenCalledWith(expect.stringContaining("Leave at ten."));
   expect(recovery()!.querySelector<HTMLButtonElement>('button[aria-label="Copy unsent edits"]')!.textContent).toBe("Copied");
+  expect(recovery()!.querySelector('.copy-status[role="status"]')?.textContent).toBe("Copied");
   const download = recovery()!.querySelector<HTMLAnchorElement>("a[download]")!;
   expect(download.getAttribute("download")).toBe("plan (unsent edits).md");
   // Discard takes the text away, and Undo brings it back.
@@ -602,7 +607,8 @@ it("says in place when it could not copy the unsent edits, and keeps them with D
   await settle(() => recovery() !== null);
   Object.defineProperty(navigator, "clipboard", {configurable: true, value: {writeText: vi.fn(async () => {throw new Error("denied");})}});
   await act(async () => recovery()!.querySelector<HTMLButtonElement>('button[aria-label="Copy unsent edits"]')!.click());
-  expect(recovery()!.querySelector('[role="alert"]')?.textContent).toBe("dohc could not copy the edits. Download them instead.");
+  expect(recovery()!.querySelector(".copy-failed")?.textContent).toBe("dohc could not copy the edits. Download them instead.");
+  expect(recovery()!.querySelector('.copy-status[role="status"]')?.textContent).toBe("dohc could not copy the edits. Download them instead.");
   expect(recovery()!.querySelector("textarea")?.value).toContain("Leave at ten.");
   expect(recovery()!.querySelector("a[download]")).not.toBeNull();
 });
