@@ -7,7 +7,7 @@ import {Toast} from "./Toast";
 import {CopyWork} from "./CopyWork";
 import {readDraft, writeDraft} from "./drafts";
 import {memberSession} from "./memberWorkspace";
-import {filesFromAccumulator, isMarkdown, type FileAccumulator, type SharedFile, type ViewMeta} from "./model";
+import {filesFromAccumulator, isMarkdown, type FileAccumulator, type ShareAccess, type SharedFile, type ViewMeta} from "./model";
 import {accountUser, namedRequest} from "./namedRecipient";
 import {SignInForm, signInErrorMessage} from "./NamedSignIn";
 import {RETRY_INITIAL_MS, RETRY_MAX_MS} from "./retry";
@@ -33,6 +33,12 @@ const TABS: {id: Tab; label: string; panel: string}[] = [
 // Beside the page on a wide screen, the open file's Comments or the Groups.
 const SIDES = TABS.filter((item): item is typeof item & {id: Side} => item.id === "comments" || item.id === "chats");
 const BADGE = {view: "View only", comment: "Can comment", edit: "Can edit"} as const;
+const LEVEL_RANK = {view: 0, comment: 1, edit: 2} as const;
+// The desktop's words for a members' level change (`levelChangedWords` in its membershipWords.ts).
+function levelChangedWords(access: ShareAccess, by: string | null | undefined): string {
+  const what = access === "view" ? "view only" : access;
+  return by ? `${by} now lets members ${what}.` : `Members can now ${what}.`;
+}
 const SESSION_ENDED = "Your session ended. Sign in again to keep reading.";
 const CHECK_FAILED = "dohc could not open this workspace. Check your connection.";
 const SIGN_OUT_FAILED = "dohc could not sign you out. Retry sign-out.";
@@ -258,6 +264,16 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
       return file === undefined || file.blobSha256 !== blobSha256;
     } catch {return false;}
   }, [session]);
+  // A level the owner or an admin changes while the page is open says so in a toast. The page has no Notices list to keep it.
+  const access = files?.meta.access, changedBy = useRef(files?.meta.levelChangedBy);
+  changedBy.current = files?.meta.levelChangedBy;
+  const shownAccess = useRef(access);
+  const [levelNote, setLevelNote] = useState<{words: string; lower: boolean} | null>(null);
+  useEffect(() => {
+    const before = shownAccess.current; shownAccess.current = access;
+    if (!access || !before || before === access) return;
+    setLevelNote({words: levelChangedWords(access, changedBy.current), lower: LEVEL_RANK[access] < LEVEL_RANK[before]});
+  }, [access]);
 
   if (ended || view.status === "ended") return <StatePage icon="unlink"
     title={lastName.current ? `Your membership in ${lastName.current} ended.` : "Your membership ended."}>
@@ -277,7 +293,6 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
   </StatePage>;
   if (!files) return <WorkspaceOpening/>;
 
-  const access = files.meta.access;
   const selected = files.files.find(file => file.path === selectedPath) ?? files.files[0];
   const tree = fileTree(files.files);
   const segments = selected?.path.split("/") ?? [];
@@ -327,7 +342,7 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
         </div>
         <div className="header-actions">
           <div className="workspace-status" ref={setStatusSlot}/>
-          <span className="badge">{BADGE[access]}</span>
+          <span className="badge">{BADGE[files.meta.access]}</span>
         </div>
       </header>
       <div className="page-band" ref={setBandSlot}/>
@@ -369,5 +384,7 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
     </div>}
     {listing.found === "failed" && !listingDismissed && toastSlot && createPortal(<Toast title={LISTING_FAILED} body={CHECK_CONNECTION}
       onRetry={listing.retry} onDismiss={() => setListingDismissed(true)}/>, toastSlot)}
+    {levelNote && toastSlot && createPortal(<Toast title={levelNote.words} tone={levelNote.lower ? "warning" : "success"}
+      onDismiss={() => setLevelNote(null)}/>, toastSlot)}
   </div>;
 }

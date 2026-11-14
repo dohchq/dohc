@@ -1,4 +1,5 @@
 import { createReceivedIdentity } from "./receivedIdentity";
+import { accountDisplayName, type LookupUserDisplayName } from "./accountDisplayName";
 import type { TokenBucketLimiter } from "@dohc/service-http";
 import { createAccountlessPathProjection } from "./accountlessPathProjection";
 import {
@@ -43,6 +44,8 @@ export function createLinkReadRoutes(
     | "automationSwitchableFolder"
     | "currentFileObjectId"
     | "indexReceivedWorkTargets"
+    | "workspaceRoleOf"
+    | "workspaceLevelChangedBy"
   >,
   nowMs: () => number,
   linkCurrentFileLimit: number,
@@ -61,6 +64,7 @@ export function createLinkReadRoutes(
   respondWithLinkBytes: ReturnType<typeof createLinkResponseStreams>["respondWithLinkBytes"],
   linkKey?: string | Uint8Array,
   replica?: ReturnType<SyncRelayStorage["createReplicaLinkReadService"]>,
+  lookupUserDisplayName?: LookupUserDisplayName,
 ) {
   const identity = createReceivedIdentity(linkKey);
 
@@ -80,7 +84,18 @@ export function createLinkReadRoutes(
   // A membership's share names its workspace; a link's share keeps its own label.
   const subjectName = (shareId: string, request: Request) =>
     storage.getShareLabels(shareId, isMemberRequest(request) ? "member" : "link").subjectName ??
-    (isMemberRequest(request) ? storage.getWorkspaceMembershipByShare(shareId)?.workspaceName : null) ?? null;
+    (isMemberRequest(request)
+      ? storage.getWorkspaceMembershipByShare(shareId)?.workspaceName
+      : null) ??
+    null;
+  // A member hears who last set the members' level, named from the relay's own record of the change.
+  const levelChangedBy = async (workspaceId: string, userId: string) => {
+    if (storage.workspaceRoleOf(workspaceId, userId)?.role !== "member") return {};
+    const changedBy = storage.workspaceLevelChangedBy(workspaceId);
+    const name =
+      changedBy === null ? null : await accountDisplayName(lookupUserDisplayName, changedBy);
+    return name === null ? {} : { levelChangedBy: name };
+  };
   return async function respondToLinkRead(
     request: Request,
     route: LinkReadRoute,
@@ -106,9 +121,14 @@ export function createLinkReadRoutes(
       );
       const fresh = requireFresh();
       const presentation = createAccountlessPathProjection(fresh.effectiveSelector);
+      const changed =
+        fresh.credential.kind === "member"
+          ? await levelChangedBy(share.workspaceId, fresh.credential.userId)
+          : {};
       return linkJsonResponse(
         fresh,
         {
+          ...changed,
           ok: true,
           receivedSource: identity.source(["link", fresh.grantId], share.workspaceId),
           effectiveSelector: presentation.selector,

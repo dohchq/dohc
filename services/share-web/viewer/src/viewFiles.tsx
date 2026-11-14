@@ -366,6 +366,7 @@ export function viewMeta(value: unknown): ViewMeta | null {
     },
     lastSettledAtMs: record.lastSettledAtMs as number | null,
     lastSettledKnown: record.lastSettledKnown,
+    ...(typeof record.levelChangedBy === "string" && record.levelChangedBy.trim() ? { levelChangedBy: record.levelChangedBy.trim() } : {}),
   };
 }
 

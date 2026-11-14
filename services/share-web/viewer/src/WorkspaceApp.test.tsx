@@ -53,7 +53,7 @@ afterEach(async () => {
   Reflect.deleteProperty(HTMLDialogElement.prototype, "showModal"); Reflect.deleteProperty(HTMLDialogElement.prototype, "close");
 });
 
-function server(options: {level?: Level; signedIn?: boolean; groups?: Array<{wire: string; name: string; type?: "posts" | "chat" | "both"}>; files?: typeof FILES; member?: boolean;
+function server(options: {level?: Level; levelChangedBy?: string; signedIn?: boolean; groups?: Array<{wire: string; name: string; type?: "posts" | "chat" | "both"}>; files?: typeof FILES; member?: boolean;
   groupsFail?: number; history?: Record<string, unknown[]>; older?: Record<string, unknown[]>; postFails?: {status: number; code: string}; openHeld?: boolean} = {}) {
   let signedIn = options.signedIn ?? true, groupsFail = options.groupsFail ?? 0;
   const files = options.files ?? FILES;
@@ -62,7 +62,7 @@ function server(options: {level?: Level; signedIn?: boolean; groups?: Array<{wir
   const access = () => levelNow() === "view" ? "read-only" : "read-write";
   const groups = options.groups ?? [{wire: "wire-plans", name: "plans"}, {wire: "wire-food", name: "food"}];
   const meta = () => ({ok: true, effectiveSelector: {paths: [], versionId: null, access: levelNow(), wholeWorkspace: true}, access: levelNow(),
-    subjectName: "Trip", lastSettledAtMs: Date.now(), lastSettledKnown: true});
+    subjectName: "Trip", lastSettledAtMs: Date.now(), lastSettledKnown: true, ...(options.levelChangedBy ? {levelChangedBy: options.levelChangedBy} : {})});
   const hold = (path: string, url: URL, signal: AbortSignal) => new Promise<Response>((resolve, reject) => {
     signal.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), {once: true});
     const item: Held = {path, url, signal, answer: (value, status = 200) => {held.splice(held.indexOf(item), 1); resolve(jsonResponse(value, status));}};
@@ -179,6 +179,25 @@ it("follows the member level in an open Group: a raise offers the composer, and 
   const reads = (path: string) => fetch.mock.calls.filter(([input]) => new URL(String(input), "https://share.test").pathname === path
     && !new URL(String(input), "https://share.test").searchParams.has("since")).length;
   expect(reads("/api/named-chat/channels")).toBe(1);
+});
+
+it("says in a toast who changed the members' level, in the desktop's words, with no Try again", async () => {
+  const options: {level: Level; levelChangedBy?: string} = {level: "comment"};
+  server(options); await render(); await opened();
+  expect(container.querySelector(".workspace-toast")).toBeNull();
+  options.level = "view"; options.levelChangedBy = "Ana";
+  await act(async () => following("log")[0]!.answer({ops: [], nextCursor: 8, hasMore: false, epochLogFloor: 0}));
+  await settle(() => container.querySelector(".workspace-toast") !== null);
+  const toast = () => container.querySelector<HTMLElement>(".workspace-toast")!;
+  expect(toast().textContent).toContain("Ana now lets members view only.");
+  expect([...toast().querySelectorAll("button")].map(node => node.textContent)).not.toContain("Try again");
+  options.level = "comment";
+  await settle(() => following("log").length === 1);
+  await act(async () => following("log")[0]!.answer({ops: [], nextCursor: 9, hasMore: false, epochLogFloor: 0}));
+  await settle(() => toast().textContent?.includes("Ana now lets members comment.") === true);
+  expect(container.querySelectorAll(".workspace-toast")).toHaveLength(1);
+  await act(async () => toast().querySelector<HTMLButtonElement>('button[aria-label="Dismiss"]')!.click());
+  expect(container.querySelector(".workspace-toast")).toBeNull();
 });
 
 it("moves through the file tree with the arrow keys, folds a folder, and opens a file with Enter", async () => {

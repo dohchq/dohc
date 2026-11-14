@@ -149,6 +149,15 @@ describe("a member reads the workspace through the link read routes", () => {
     }
   });
 
+  it("names who last set the members' level in the share's answer, from the relay's own record", async () => {
+    const { h, storage } = await seed();
+    const ana = await member(h, storage, "ana");
+    const share = async () => json(await memberRead(h, "/sync/link/share", ana.grantId, "ana"));
+    expect(await share()).not.toHaveProperty("levelChangedBy");
+    await setLevel(h, "view");
+    expect(await share()).toMatchObject({ access: "view", levelChangedBy: `Name ${OWNER}` });
+  });
+
   it("serves files the owner adds after the member joined", async () => {
     const { h, storage } = await seed();
     const ana = await member(h, storage, "ana");

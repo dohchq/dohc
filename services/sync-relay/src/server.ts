@@ -1171,6 +1171,7 @@ export function createSyncRelayHandler({
     respondWithLinkBytes,
     linkKey,
     replicaLinkReads,
+    lookupUserDisplayName,
   );
 
   const respondToOwnerRestore = createOwnerRestoreRoutes({
