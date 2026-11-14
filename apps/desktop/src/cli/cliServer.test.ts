@@ -4091,7 +4091,7 @@ describe("CLI socket server", () => {
       [".dohc/private.md", "path rejected (reserved): .dohc/private.md"],
     ] as const) {
       const denied = await comment(path, "T", "B");
-      expect(denied).toEqual({ exitCode: 1, stdout: "", stderr: `dohc: ${reason}\n` });
+      expect(denied).toEqual({ exitCode: 1, stdout: "", stderr: `${reason.startsWith("dohc ") ? reason : `dohc: ${reason}`}\n` });
     }
     const beforeReadOnly = calls.writes;
     registryWorkspace = { ...registryWorkspace, readOnly: true };

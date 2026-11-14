@@ -713,7 +713,7 @@ export interface CliServerHandle {
 
 class CliCommandError extends Error {
   constructor(message: string) {
-    super(message.startsWith("dohc:") ? message : `dohc: ${message}`);
+    super(namesDohc(message) ? message : `dohc: ${message}`);
     this.name = "CliCommandError";
   }
 }
@@ -754,7 +754,12 @@ function oneLine(value: string): string {
 function cliErrorLine(error: unknown): string {
   const raw = error instanceof Error ? error.message : "Unexpected CLI failure.";
   const message = oneLine(raw) || "Unexpected CLI failure.";
-  return message.startsWith("dohc:") ? message : `dohc: ${message}`;
+  return namesDohc(message) ? message : `dohc: ${message}`;
+}
+
+// A line that already starts with dohc, as "dohc: …" or a sentence such as "dohc could not…", names it once.
+function namesDohc(message: string): boolean {
+  return /^dohc[: ]/u.test(message);
 }
 
 // A conversation a notice opens, under the ids `show` takes.

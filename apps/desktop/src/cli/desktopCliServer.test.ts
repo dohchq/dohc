@@ -73,6 +73,9 @@ import { readDeleteRecovery, waitForRecovery } from "../workspaces/workspaceDele
 import { openedLocalState } from "../testing/preparedLocalState";
 import type { ShareViewWriteScope } from "../workspaces/shareWriteGate";
 
+// The CLI names dohc once: a line that starts with it keeps its words.
+const cliLine = (words: string) => `${/^dohc[: ]/u.test(words) ? words : `dohc: ${words}`}\n`;
+
 function deferred() {
   let release!: () => void;
   const promise = new Promise<void>((done) => {
