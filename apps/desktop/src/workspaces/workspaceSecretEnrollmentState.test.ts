@@ -149,6 +149,25 @@ describe("desktop workspace secret enrollment state", () => {
     await sessions.closeAll();
   });
 
+  it.each([
+    ["secret state", readWorkspaceSecretState],
+    ["enrollment key", readWorkspaceDataKeyForEnrollment],
+  ] as const)("preserves rootPath dot segments when reading %s", async (_name, read) => {
+    const root = await createTestScratch("dohc-secret-enrollment-");
+    await createEngineDb(root);
+    await mkdir(join(root, "x"));
+    const rootPath = `${root}/x/..`;
+    const daemon = new SecretStateDaemon();
+    const sessions = new EngineWorkspaceSessions({ currentClient: () => daemon });
+    try {
+      await read({ workspaceId: WORKSPACE_ID, rootPath }, sessions);
+      const open = daemon.requests.find((request) => request.method === "workspace.open");
+      expect(open?.params).toMatchObject({ rootDir: rootPath });
+    } finally {
+      await sessions.closeAll();
+    }
+  });
+
   it("does not open the daemon or create engine.db for a workspace with no secret state", async () => {
     const root = await createTestScratch("dohc-secret-enrollment-");
     const daemon = new SecretStateDaemon();

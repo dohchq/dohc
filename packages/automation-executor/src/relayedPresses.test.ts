@@ -72,6 +72,27 @@ const pendingPress: RelayAutomationPress = {
 };
 
 describe("relay polling lifetime", () => {
+  it("accepts no press when the host cannot obtain a hold", async () => {
+    const polls = channel<(presses: RelayAutomationPress[]) => void>();
+    const hold = vi.fn(() => null);
+    const accept = vi.fn(async () => [pendingPress.hostPressId]);
+    const host = hostWith(
+      {
+        list: () => new Promise<RelayAutomationPress[]>((resolve) => polls.send(resolve)),
+        accept,
+        settle: async () => undefined,
+      },
+      { host: { runsHere: async () => true, stillRuns: () => true, generation: () => 7, hold } },
+    );
+    host.start();
+    const answer = await polls.next();
+    answer([pendingPress]);
+    await polls.next();
+    host.stop();
+    expect(hold).toHaveBeenCalledOnce();
+    expect(accept).not.toHaveBeenCalled();
+  });
+
   it.each(["returns", "rejects"] as const)(
     "holds before acceptance until the press %s",
     async (outcome) => {

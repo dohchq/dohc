@@ -3409,7 +3409,7 @@ async function readBoundedMetadataFile(absolutePath: string): Promise<string | n
   return readFile(absolutePath, "utf8");
 }
 
-// sitePackage.test.ts checks these bounds against SitePackageScripts.
+// sitePackage.test.ts checks these bounds against the bridge contract's SitePackageScripts.
 // A script over these limits fails Zod parsing for the whole response. Drop
 // (not truncate) the offending script: a truncated shell command is a
 // different, possibly dangerous, command, not a shorter version of the same

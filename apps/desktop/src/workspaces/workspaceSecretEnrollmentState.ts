@@ -13,8 +13,8 @@ import type {
 
 export type WorkspaceSecretState = "none" | "protected-key-present" | "protected-key-missing";
 
-// `workspace.rootPath` must be the registry's rootPath verbatim, never a resolved copy:
-// the relay route table is keyed by exact string (`relayForOpen` ->
+// workspaceSecretEnrollmentState.test.ts checks verbatim daemon-open paths.
+// The relay route table is keyed by exact string (`relayForOpen` ->
 // `locations.get(rootPath)`), and registry paths are forward-slashed even on
 // Windows, so a `resolve()`d spelling misses the route and opens the workspace
 // with no relay configuration.

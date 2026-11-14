@@ -5745,11 +5745,10 @@ export const ListChatChannelSharesResult = z.object({
   // has already joined it.
   //
   // sharedChannelsIpc.test.ts checks requested local answers beyond the relay cap.
-  // These are dohc's own registry rows
-  // and they are the authority for channelIsLocked: a read that refuses them
-  // rejects the whole IPC call, the renderer reads an unknown listing, and
-  // every channel goes read-only. Nothing needs a cap here now — the
-  // caller's view bounds the size.
+  // Do not add a cap. These are dohc's own registry rows and they are the
+  // authority for channelIsLocked: a read that refuses them rejects the whole
+  // IPC call, the renderer reads an unknown listing, and every channel goes
+  // read-only. Nothing needs a cap here now — the caller's view bounds the size.
   joined: z.array(JoinedChannelAnswer),
   // The account the relay lanes are scoped to (server + stable user id), or
   // null when no session exists. Cached relay rows are preservable only

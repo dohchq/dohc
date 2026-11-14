@@ -9,7 +9,8 @@ import {
 
 // The LOCAL-WRITE gate for a share view, as one rule in one place.
 //
-// sharedView.test.ts checks admission, journaling, and proposals against one grant table.
+// sharedView.test.ts checks ShareViewFiles.change (writableSelector) admission,
+// journaling, and proposals against one grant table.
 // These surfaces fail in opposite directions when they disagree:
 //
 //   main's `assertWritableWorkspace` decides whether a write handler runs at
