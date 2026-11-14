@@ -3766,10 +3766,15 @@ export function DesktopWorkspaceShell(props: {
   }, [openFile, showSuccessNotice, reportShellError]);
   // A held file can't go live again, so Live documents offers a copy beside
   // it. Opening the copy starts its live editing.
+  const liveCopies = useRef(new Map<string, Promise<void>>());
   const makeLiveCopy = useCallback(
     (id: string, path: string): Promise<void> => {
+      // A row and its notice's Try again share one copy, so a second press makes no second file.
+      const key = `${id}\n${path}`;
+      const running = liveCopies.current.get(key);
+      if (running) return running;
       const retry = () => void makeLiveCopy(id, path);
-      return bridge()
+      const copying = bridge()
         .duplicateWorkspaceFile({ workspaceId: id, relativePath: path })
         .then(
           (copy) => {
@@ -3792,7 +3797,10 @@ export function DesktopWorkspaceShell(props: {
             if (workspaceIdRef.current !== id) return;
             reportShellError(`dohc could not make a copy of ${path}.`, error, retry);
           },
-        );
+        )
+        .finally(() => liveCopies.current.delete(key));
+      liveCopies.current.set(key, copying);
+      return copying;
     },
     [closeSettings, openFile, reportShellError],
   );

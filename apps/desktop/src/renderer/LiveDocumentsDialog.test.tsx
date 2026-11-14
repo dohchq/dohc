@@ -508,7 +508,7 @@ describe("LiveDocumentsDialog", () => {
     expect(actions("docs/stopped-gone.md")).toEqual([]);
   });
 
-  it("makes a copy of a held file, once at a time, and offers none once it stopped", async () => {
+  it("makes a copy of a held file, once at a time, says what it leaves out, and offers none once it stopped", async () => {
     const h = harness();
     const made = deferred<void>();
     h.makeCopy.mockReturnValueOnce(made.promise);
@@ -519,12 +519,25 @@ describe("LiveDocumentsDialog", () => {
           reason: "conflict-parent-withheld",
           canResume: false,
         }),
+        // Its kept edits have a recovery copy, so a copy of the file loses nothing.
         row("docs/held-2.md", {
           status: "unavailable",
           reason: "conflict-parent-withheld",
           canResume: false,
+          quarantine: "copied",
+          storedOn: "server",
+          incident: "kept-2",
         }),
         row("docs/held-stopped.md", { status: "retired", reason: "conflict-parent-withheld" }),
+        // A copy of the file leaves out these kept edits.
+        row("docs/held-kept.md", {
+          status: "unavailable",
+          reason: "conflict-parent-withheld",
+          canResume: false,
+          quarantine: "paused",
+          storedOn: "this-computer",
+          incident: "kept-3",
+        }),
       ]),
     );
     render(<LiveDocumentsDialog workspaceId="ws-1" {...h} />);
@@ -544,10 +557,19 @@ describe("LiveDocumentsDialog", () => {
     expect((copy as HTMLButtonElement).disabled).toBe(false);
     expect((other as HTMLButtonElement).disabled).toBe(false);
 
+    const text = (path: string) => screen.getByTestId(`live-document-row-${path}`).textContent;
     expect(actions("docs/held-stopped.md")).not.toContain("Make a copy");
-    expect(screen.getByTestId("live-document-row-docs/held-stopped.md").textContent).not.toContain(
-      "A copy of it can go live.",
+    expect(text("docs/held-stopped.md")).not.toContain("A copy of it can go live");
+    // Saving a recovery copy doesn't clear edits kept on this computer, so the row
+    // keeps its copy and says what it leaves out.
+    expect(actions("docs/held-kept.md")).toEqual(
+      expect.arrayContaining(["Save recovery copy", "Make a copy"]),
     );
+    const leavesOut = "A copy of it can go live, but it leaves out your kept edits.";
+    expect(text("docs/held-kept.md")).toContain(leavesOut);
+    expect(text("docs/held-2.md")).toContain("A copy of it can go live.");
+    expect(text("docs/held-2.md")).not.toContain(leavesOut);
+    expect(text("docs/held.md")).not.toContain(leavesOut);
   });
 
   it("loads the next stopped page and keeps the newest row for a repeated path", async () => {

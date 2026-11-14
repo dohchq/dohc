@@ -1073,13 +1073,11 @@ describe("owner live documents", () => {
       nextCursor: null,
     }));
     const failed = deferred<never>();
+    const unwritten = deferred<Awaited<ReturnType<typeof bridge.duplicateWorkspaceFile>>>();
     // The harness answers the third call with "notes/held - Copy.md", written.
-    bridge.duplicateWorkspaceFile.mockReturnValueOnce(failed.promise).mockResolvedValueOnce({
-      path: "notes/held - Copy.md",
-      materialized: false,
-      operationId: "dohc-operation:00000000-0000-4000-8000-000000000000",
-      undo: { available: true as const },
-    });
+    bridge.duplicateWorkspaceFile
+      .mockReturnValueOnce(failed.promise)
+      .mockReturnValueOnce(unwritten.promise);
     const user = userEvent.setup();
     renderShell(bridge);
 
@@ -1102,6 +1100,18 @@ describe("owner live documents", () => {
 
     // History has the copy, but its file isn't written yet: nothing opens.
     await user.click(within(toast).getByRole("button", { name: "Try again" }));
+    expect(bridge.duplicateWorkspaceFile).toHaveBeenCalledTimes(2);
+    // The row joins the copy its notice started, so no second file is made.
+    await user.click(within(dialog).getByRole("button", { name: `Make a copy of ${held.path}` }));
+    expect(bridge.duplicateWorkspaceFile).toHaveBeenCalledTimes(2);
+    await act(async () =>
+      unwritten.resolve({
+        path: "notes/held - Copy.md",
+        materialized: false,
+        operationId: "dohc-operation:00000000-0000-4000-8000-000000000000",
+        undo: { available: true as const },
+      }),
+    );
     await waitFor(() =>
       expect(screen.getByTestId("workspace-shell-error").textContent).toContain(
         `dohc could not finish the copy of ${held.path}.`,

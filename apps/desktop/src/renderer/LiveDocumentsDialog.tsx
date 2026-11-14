@@ -314,6 +314,19 @@ function deferredStopNote(
 }
 
 // Edits the server refused: where they are, and the one way back that always works.
+function heldCopyable(row: LiveDocumentRow): boolean {
+  return row.reason === "conflict-parent-withheld" && row.status !== "retired" && !row.saveOnly;
+}
+
+// The copy is made from the file, which lacks kept edits. Saving a recovery copy
+// doesn't clear edits kept on this computer, so the row keeps Make a copy and
+// says what it leaves out.
+function heldCopyNote(row: LiveDocumentRow): string {
+  return row.quarantine === undefined || row.quarantine === "copied"
+    ? " A copy of it can go live. If you shared only this file, share the copy too."
+    : " A copy of it can go live, but it leaves out your kept edits. Save a recovery copy to keep them. If you shared only this file, share the copy too.";
+}
+
 function quarantineNote(row: LiveDocumentRow): string | null {
   if (row.saveOnly && row.quarantine !== "unreadable")
     return row.sessionEnded
@@ -1012,11 +1025,7 @@ export function LiveDocumentsDialog({
                   </SecondaryButton>
                 ) : null}
                 {/* A held file can't go live again, but a copy of it can once it is opened. */}
-                {row.reason === "conflict-parent-withheld" &&
-                row.status !== "retired" &&
-                !row.saveOnly &&
-                makeCopy &&
-                !pendingStops.has(row.objectId) ? (
+                {heldCopyable(row) && makeCopy && !pendingStops.has(row.objectId) ? (
                   <SecondaryButton
                     size="compact"
                     className="shrink-0"
@@ -1073,8 +1082,8 @@ export function LiveDocumentsDialog({
                     {row.status === "retired"
                       ? "You can keep editing it in dohc, but your edits won't reach them."
                       : "You can keep editing it in dohc, but your edits may not reach them."}
-                    {makeCopy && row.status !== "retired" && !pendingStops.has(row.objectId)
-                      ? " A copy of it can go live. If you shared only this file, share the copy too."
+                    {makeCopy && heldCopyable(row) && !pendingStops.has(row.objectId)
+                      ? heldCopyNote(row)
                       : ""}
                   </p>
                 ) : null}
