@@ -1,0 +1,128 @@
+diff --git a/dist/y-tiptap.cjs b/dist/y-tiptap.cjs
+index 653ffe79d5edb4a040555bb222f472af1e45edc8..aa5ebe20ba1e7ddb39be9d8946e0ad9279f3e406 100644
+--- a/dist/y-tiptap.cjs
++++ b/dist/y-tiptap.cjs
+@@ -1571,6 +1571,8 @@ const marksToAttributes = (marks, meta) => {
+  * @param {any} pNode
+  * @param {BindingMetadata} meta
+  */
++const isEmptyYText = (type) => type instanceof Y__namespace.XmlText && type.length === 0;
++
+ const updateYFragment = (y, yDomFragment, pNode, meta) => {
+   if (
+     yDomFragment instanceof Y__namespace.XmlElement &&
+@@ -1605,7 +1607,12 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
+   const yChildren = yDomFragment.toArray();
+   const yChildCnt = yChildren.length;
+   const minCnt = math__namespace.min(pChildCnt, yChildCnt);
+-  if (reconcileMappedChildren(y, yDomFragment, pChildren, yChildren, meta)) {
++  // dohc: keep empty text pieces. The reorder path replaces and deletes children by
++  // position, so a line holding an empty piece takes the comparison below instead.
++  if (
++    !yChildren.some(isEmptyYText) &&
++    reconcileMappedChildren(y, yDomFragment, pChildren, yChildren, meta)
++  ) {
+     return
+   }
+   let left = 0;
+@@ -1697,6 +1704,14 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
+             meta
+           );
+           right += 1;
++        } else if (isEmptyYText(leftY)) {
++          // dohc: keep empty text pieces. Someone may be typing into this one, so put the
++          // new item in front of it and compare the line again.
++          yDomFragment.insert(left, [
++            createTypeFromTextOrElementNode(leftP, meta)
++          ]);
++          updateYFragment(y, yDomFragment, pNode, meta);
++          return
+         } else {
+           meta.mapping.delete(yDomFragment.get(left));
+           yDomFragment.delete(left, 1);
+@@ -1716,8 +1731,19 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
+       // Only delete the content of the Y.Text to retain remote changes on the same Y.Text object
+       yChildren[0].delete(0, yChildren[0].length);
+     } else if (yDelLen > 0) {
+-      yDomFragment.slice(left, left + yDelLen).forEach(type => meta.mapping.delete(type));
+-      yDomFragment.delete(left, yDelLen);
++      // dohc: keep empty text pieces. Delete what is left over one by one and skip each
++      // empty piece. A line the editor emptied that holds no empty piece keeps its first
++      // text piece, emptied, as the branch above does for a line of one piece.
++      const kept = pChildCnt === 0 && !yChildren.some(isEmptyYText)
++        ? yChildren.find(type => type instanceof Y__namespace.XmlText)
++        : undefined;
++      for (let i = left + yDelLen - 1; i >= left; i--) {
++        const type = yChildren[i];
++        if (isEmptyYText(type)) continue
++        meta.mapping.delete(type);
++        if (type === kept) type.delete(0, type.length);
++        else yDomFragment.delete(i, 1);
++      }
+     }
+     if (left + right < pChildCnt) {
+       const ins = [];
+diff --git a/dist/y-tiptap.js b/dist/y-tiptap.js
+index 28c55820dff13cf3d5c303970f530c17eb38f757..97adc76b7cdcec9903031e5c5ebf1394651e679c 100644
+--- a/dist/y-tiptap.js
++++ b/dist/y-tiptap.js
+@@ -1537,6 +1537,8 @@ const marksToAttributes = (marks, meta) => {
+  * @param {any} pNode
+  * @param {BindingMetadata} meta
+  */
++const isEmptyYText = (type) => type instanceof Y.XmlText && type.length === 0;
++
+ const updateYFragment = (y, yDomFragment, pNode, meta) => {
+   if (
+     yDomFragment instanceof Y.XmlElement &&
+@@ -1571,7 +1573,12 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
+   const yChildren = yDomFragment.toArray();
+   const yChildCnt = yChildren.length;
+   const minCnt = math.min(pChildCnt, yChildCnt);
+-  if (reconcileMappedChildren(y, yDomFragment, pChildren, yChildren, meta)) {
++  // dohc: keep empty text pieces. The reorder path replaces and deletes children by
++  // position, so a line holding an empty piece takes the comparison below instead.
++  if (
++    !yChildren.some(isEmptyYText) &&
++    reconcileMappedChildren(y, yDomFragment, pChildren, yChildren, meta)
++  ) {
+     return
+   }
+   let left = 0;
+@@ -1663,6 +1670,14 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
+             meta
+           );
+           right += 1;
++        } else if (isEmptyYText(leftY)) {
++          // dohc: keep empty text pieces. Someone may be typing into this one, so put the
++          // new item in front of it and compare the line again.
++          yDomFragment.insert(left, [
++            createTypeFromTextOrElementNode(leftP, meta)
++          ]);
++          updateYFragment(y, yDomFragment, pNode, meta);
++          return
+         } else {
+           meta.mapping.delete(yDomFragment.get(left));
+           yDomFragment.delete(left, 1);
+@@ -1682,8 +1697,19 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
+       // Only delete the content of the Y.Text to retain remote changes on the same Y.Text object
+       yChildren[0].delete(0, yChildren[0].length);
+     } else if (yDelLen > 0) {
+-      yDomFragment.slice(left, left + yDelLen).forEach(type => meta.mapping.delete(type));
+-      yDomFragment.delete(left, yDelLen);
++      // dohc: keep empty text pieces. Delete what is left over one by one and skip each
++      // empty piece. A line the editor emptied that holds no empty piece keeps its first
++      // text piece, emptied, as the branch above does for a line of one piece.
++      const kept = pChildCnt === 0 && !yChildren.some(isEmptyYText)
++        ? yChildren.find(type => type instanceof Y.XmlText)
++        : undefined;
++      for (let i = left + yDelLen - 1; i >= left; i--) {
++        const type = yChildren[i];
++        if (isEmptyYText(type)) continue
++        meta.mapping.delete(type);
++        if (type === kept) type.delete(0, type.length);
++        else yDomFragment.delete(i, 1);
++      }
+     }
+     if (left + right < pChildCnt) {
+       const ins = [];

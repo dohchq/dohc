@@ -264,6 +264,39 @@ function yDocBodyJSON(doc: Y.Doc): JSONContent {
   ).toJSON() as JSONContent;
 }
 
+// The editors keep an empty text piece someone may be typing into, so lines can hold one
+// beside a line break or alone. It shows nothing and must save nothing.
+it("saves the same Markdown for a line holding an empty text piece as for the line without it", () => {
+  const saved = (pieces: boolean) => {
+    const doc = markdownToYDoc("One.\n");
+    try {
+      const body = getDohcYDocBodyFragment(doc);
+      for (const [before, after, lineBreak] of [
+        ["", "", false],
+        ["", "", true],
+        ["Two.", "", true],
+        ["", "Three.", true],
+      ] as const) {
+        const line = new Y.XmlElement("paragraph");
+        body.push([line]);
+        const parts: (Y.XmlText | Y.XmlElement)[] = [];
+        if (before) parts.push(new Y.XmlText(before));
+        else if (pieces && (after || !lineBreak)) parts.push(new Y.XmlText());
+        if (lineBreak) parts.push(new Y.XmlElement("hardBreak"));
+        if (after) parts.push(new Y.XmlText(after));
+        else if (pieces && lineBreak) parts.push(new Y.XmlText());
+        line.push(parts);
+      }
+      return yDocToMarkdown(doc);
+    } finally {
+      doc.destroy();
+    }
+  };
+  const without = saved(false);
+  expect(without).toContain("Three.");
+  expect(saved(true)).toBe(without);
+});
+
 // Raw HTML is the text the file holds. The desktop tests read the same fixture
 // where a DOM exists and must get this same document.
 it("keeps raw HTML as the text the file holds", () => {

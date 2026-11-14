@@ -1,0 +1,100 @@
+diff --git a/dist/y-prosemirror.cjs b/dist/y-prosemirror.cjs
+index de4d1e6609bba2ffbc2a57048023cdf5bad44b18..9b069d353c49e4bf7c55f29cf78c54c1a0f1831e 100644
+--- a/dist/y-prosemirror.cjs
++++ b/dist/y-prosemirror.cjs
+@@ -1216,6 +1216,8 @@ const marksToAttributes = (marks, meta) => {
+  * @param {any} pNode
+  * @param {BindingMetadata} meta
+  */
++const isEmptyYText = (type) => type instanceof Y__namespace.XmlText && type.length === 0;
++
+ const updateYFragment = (y, yDomFragment, pNode, meta) => {
+   if (
+     yDomFragment instanceof Y__namespace.XmlElement &&
+@@ -1339,6 +1341,14 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
+             meta
+           );
+           right += 1;
++        } else if (isEmptyYText(leftY)) {
++          // dohc: keep empty text pieces. Someone may be typing into this one, so put the
++          // new item in front of it and compare the line again.
++          yDomFragment.insert(left, [
++            createTypeFromTextOrElementNode(leftP, meta)
++          ]);
++          updateYFragment(y, yDomFragment, pNode, meta);
++          return
+         } else {
+           meta.mapping.delete(yDomFragment.get(left));
+           yDomFragment.delete(left, 1);
+@@ -1358,8 +1368,19 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
+       // Only delete the content of the Y.Text to retain remote changes on the same Y.Text object
+       yChildren[0].delete(0, yChildren[0].length);
+     } else if (yDelLen > 0) {
+-      yDomFragment.slice(left, left + yDelLen).forEach(type => meta.mapping.delete(type));
+-      yDomFragment.delete(left, yDelLen);
++      // dohc: keep empty text pieces. Delete what is left over one by one and skip each
++      // empty piece. A line the editor emptied that holds no empty piece keeps its first
++      // text piece, emptied, as the branch above does for a line of one piece.
++      const kept = pChildCnt === 0 && !yChildren.some(isEmptyYText)
++        ? yChildren.find(type => type instanceof Y__namespace.XmlText)
++        : undefined;
++      for (let i = left + yDelLen - 1; i >= left; i--) {
++        const type = yChildren[i];
++        if (isEmptyYText(type)) continue
++        meta.mapping.delete(type);
++        if (type === kept) type.delete(0, type.length);
++        else yDomFragment.delete(i, 1);
++      }
+     }
+     if (left + right < pChildCnt) {
+       const ins = [];
+diff --git a/src/plugins/sync-plugin.js b/src/plugins/sync-plugin.js
+index dccfb76918c8c70fe5a5b12372cdabcc9d8c58dd..b32c69d04616c907e6421e942893fa6d1434c388 100644
+--- a/src/plugins/sync-plugin.js
++++ b/src/plugins/sync-plugin.js
+@@ -1142,6 +1142,8 @@ const marksToAttributes = (marks, meta) => {
+  * @param {any} pNode
+  * @param {BindingMetadata} meta
+  */
++const isEmptyYText = (type) => type instanceof Y.XmlText && type.length === 0
++
+ export const updateYFragment = (y, yDomFragment, pNode, meta) => {
+   if (
+     yDomFragment instanceof Y.XmlElement &&
+@@ -1265,6 +1267,14 @@ export const updateYFragment = (y, yDomFragment, pNode, meta) => {
+             meta
+           )
+           right += 1
++        } else if (isEmptyYText(leftY)) {
++          // dohc: keep empty text pieces. Someone may be typing into this one, so put the
++          // new item in front of it and compare the line again.
++          yDomFragment.insert(left, [
++            createTypeFromTextOrElementNode(leftP, meta)
++          ])
++          updateYFragment(y, yDomFragment, pNode, meta)
++          return
+         } else {
+           meta.mapping.delete(yDomFragment.get(left))
+           yDomFragment.delete(left, 1)
+@@ -1284,8 +1294,19 @@ export const updateYFragment = (y, yDomFragment, pNode, meta) => {
+       // Only delete the content of the Y.Text to retain remote changes on the same Y.Text object
+       yChildren[0].delete(0, yChildren[0].length)
+     } else if (yDelLen > 0) {
+-      yDomFragment.slice(left, left + yDelLen).forEach(type => meta.mapping.delete(type))
+-      yDomFragment.delete(left, yDelLen)
++      // dohc: keep empty text pieces. Delete what is left over one by one and skip each
++      // empty piece. A line the editor emptied that holds no empty piece keeps its first
++      // text piece, emptied, as the branch above does for a line of one piece.
++      const kept = pChildCnt === 0 && !yChildren.some(isEmptyYText)
++        ? yChildren.find(type => type instanceof Y.XmlText)
++        : undefined
++      for (let i = left + yDelLen - 1; i >= left; i--) {
++        const type = yChildren[i]
++        if (isEmptyYText(type)) continue
++        meta.mapping.delete(type)
++        if (type === kept) type.delete(0, type.length)
++        else yDomFragment.delete(i, 1)
++      }
+     }
+     if (left + right < pChildCnt) {
+       const ins = []
