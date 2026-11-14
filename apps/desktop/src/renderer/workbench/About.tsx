@@ -1442,6 +1442,27 @@ function AccessRowView(props: { row: AccessRow }) {
   );
 }
 
+// A level change applies at once, as it does to the composer, so the
+// membership's own row shows the level the relay last named.
+function withMembershipLevel(
+  view: AccessView,
+  level: AccessContext["membershipLevel"],
+): AccessView {
+  if (!level || view.status !== "ready") return view;
+  const rows = view.answer.rows.map((row) =>
+    row.kind === "share" &&
+    row.via === "received" &&
+    row.status === "active" &&
+    row.selector?.kind === "workspace" &&
+    row.access !== level
+      ? { ...row, access: level }
+      : row,
+  );
+  return rows.some((row, index) => row !== view.answer.rows[index])
+    ? { ...view, answer: { ...view.answer, rows } }
+    : view;
+}
+
 // What Access asks about: a file by its path, or a chat by its wire identity.
 export type AccessSubject =
   | { kind: "path"; path: string }
@@ -1581,9 +1602,14 @@ export function AboutAccess(props: {
     () => ({ reason, server, openSyncSettings, connect }),
     [connect, openSyncSettings, reason, server],
   );
+  const { membershipLevel } = props.context;
+  const view = useMemo(
+    () => withMembershipLevel(read.view, membershipLevel),
+    [membershipLevel, read.view],
+  );
   return (
     <AboutAccessView
-      view={read.view}
+      view={view}
       expanded={props.expanded}
       onToggle={props.onToggle}
       onRetry={() => void load({ refresh: true })}

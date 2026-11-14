@@ -149,6 +149,22 @@ describe("a joined workspace", () => {
     expect(bridge.checkSharedViewAccess).toHaveBeenCalled();
   });
 
+  it("shows the new level in About's Access at once", async () => {
+    const bridge = withGroup("comment", { status: "current", access: "view", role: "member", levelChanged: true },
+      Promise.resolve({ ...storedStateWithTabs(["a.md"]), aboutVisible: true }));
+    bridge.getObjectAccess.mockImplementation(async (input) => ({
+      ref: input.ref, visibility: "visible" as const, unknownReason: null, checkedAtMs: 0, freshness: "fresh" as const, nextCursor: null,
+      coverage: { kind: "received-own-grant" as const, complete: true, observation: "interval" as const },
+      rows: [{ kind: "share" as const, shareId: "share-1", grantId: "grant-1", via: "received" as const, granterUserId: "ana", granterEmail: null,
+        recipientUserId: "sam", recipientEmail: null, subjectName: "Community", sharerName: "Ana", selector: { kind: "workspace" as const, role: "member" as const },
+        access: "comment" as const, status: "active" as const, generation: 1 }],
+    }));
+    await screen.findByTestId("workspace-shell-notice");
+    // A file's Access starts open.
+    const row = await screen.findByTestId("about-access-row");
+    expect(within(row).getByText("Can view")).toBeTruthy();
+  });
+
   it("names who changed the level in the toast and its Notices row", async () => {
     withGroup("comment", { status: "current", access: "view", role: "member", levelChanged: true, levelChangedBy: "Ana" });
     const toast = await screen.findByTestId("workspace-shell-notice");

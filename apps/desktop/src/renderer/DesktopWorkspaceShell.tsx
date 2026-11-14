@@ -1810,7 +1810,7 @@ export function DesktopWorkspaceShell(props: {
   );
   // What Review app's Share links needs to say the workspace's server is signed out, as Share does.
   const appAccess = useMemo(
-    () => ({ context: accessContext, server: cloudServerUrl }),
+    () => ({ context: aboutAccessContext, server: cloudServerUrl }),
     [accessContext, cloudServerUrl],
   );
 
@@ -2470,6 +2470,14 @@ export function DesktopWorkspaceShell(props: {
     access: "view" | "comment" | "edit";
   } | null>(null);
   const shareAccess = accessFor?.view === shareView ? accessFor.access : shareView?.access;
+  // About's Access follows a level change at once, as the composer does.
+  const aboutAccessContext = useMemo<AccessContext>(
+    () =>
+      membershipView && shareAccess
+        ? { ...accessContext, membershipLevel: shareAccess }
+        : accessContext,
+    [accessContext, membershipView, shareAccess],
+  );
   // A membership's role, as the relay last named it. It is keyed by share, so
   // a registry refresh after a level change keeps it.
   // The view keeps the role the relay last named, and the access check
@@ -8442,7 +8450,7 @@ export function DesktopWorkspaceShell(props: {
                                 sharing={{
                                   workspaceId,
                                   shareView: isShareView,
-                                  context: accessContext,
+                                  context: aboutAccessContext,
                                   notices: aboutNotices,
                                   conflictCount:
                                     syncStatus?.state === "conflict"
@@ -9363,7 +9371,7 @@ export function DesktopWorkspaceShell(props: {
                                 openPathAtLine={openPathAtLine}
                                 openChatMention={openChatMention}
                                 aboutNotices={aboutNotices}
-                                accessContext={accessContext}
+                                accessContext={aboutAccessContext}
                               />
                             ) : null}
                           </div>
@@ -10014,7 +10022,7 @@ export function DesktopWorkspaceShell(props: {
                                 onClose={() => setShareTarget(null)}
                                 shareRemovals={shareRemovals}
                                 disconnectedAgents={disconnectedLinkAgents}
-                                accessContext={accessContext}
+                                accessContext={aboutAccessContext}
                                 server={cloudStatus?.workspaceServerUrl ?? null}
                                 notSentWhileOpen={syncStatus?.notSentWhileOpen ?? []}
                                 onOpenSharing={(target) => {

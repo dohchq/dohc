@@ -26,6 +26,9 @@ export type AccessContext = {
   share?: (path: string) => void;
   // The Share dialog is open. Access reads again when it closes.
   sharing?: boolean;
+  // A joined workspace's level as the relay last named it. The membership's
+  // row shows it before main lists the change.
+  membershipLevel?: "view" | "comment" | "edit";
 };
 
 export function serverName(server: string): string {
