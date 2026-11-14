@@ -1338,9 +1338,13 @@ describe("workspaceEngineCapture batch capture", () => {
             deferredWrites: [],
             outsideChanges: held,
           });
+        // Capture elsewhere in the workspace has not settled until Keep's own
+        // write puts the note's text back.
         if (property === "flushCapture")
           return async () => {
-            if ((await readFile(join(root, "note.md"), "utf8")) === "the note\n") held = [];
+            if ((await readFile(join(root, "note.md"), "utf8")) !== "the note\n")
+              throw new Error("Capture has not settled.");
+            held = [];
           };
         const value = Reflect.get(target, property, target);
         return typeof value === "function" ? value.bind(target) : value;

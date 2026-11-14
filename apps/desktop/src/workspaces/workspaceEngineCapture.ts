@@ -6887,8 +6887,10 @@ export function createWorkspaceEngineCapture(
     keepOutsideChange(path) {
       return enqueueResult(`keep outside change to ${path}`, async () => {
         const engine = await engineStore();
-        // A capture an editor's session deferred runs once the editor closed.
-        await engine.flushCapture?.();
+        // A Stop closes the note's editors first. A capture their session
+        // deferred for this path runs then; capture elsewhere is not waited on.
+        if ((await engine.watcherStatus?.())?.deferredWrites.includes(path))
+          await engine.flushCapture?.();
         const held = await engine.watcherStatus?.();
         if (!held?.outsideChanges.some((change) => change.path === path)) return false;
         const policy = await readPolicyForTask();
