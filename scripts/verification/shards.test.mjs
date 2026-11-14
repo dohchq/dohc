@@ -32,7 +32,11 @@ import {
   RUST_TEST_PROOFS,
   passedRustTests,
   rustTestInventory,
+  partitionRustTests,
+  rustPartitionFilters,
+  assertRustPartitionInventory,
 } from "./cloud-rust.mjs";
+import { recordedRustTimes, rustTimingSamples } from "./refresh-rust-times.mjs";
 import { waitForPreparation } from "./wait-preparation.mjs";
 import { cloudApi } from "./cloud-api.mjs";
 import { runVitestGroup } from "./vitest-group.mjs";
@@ -476,6 +480,125 @@ test("Rust inventory retains selected ordinary tests and counts only actual pass
     ),
     ["crate retained"],
   );
+});
+
+test("Rust time partitions are deterministic and cover each test exactly once", () => {
+  const times = {
+    defaultSeconds: 0.5,
+    binaries: { crate: 1 },
+    tests: { "crate slow": 66, "crate medium": 7, "crate fast": 2 },
+  };
+  const inventory = [
+    "crate slow",
+    "crate medium",
+    "crate fast",
+    ...Array.from({ length: 601 }, (_, i) => `crate new_${i}`),
+  ];
+  for (const count of [1, 4, 5, 6, 7, 8, inventory.length + 1]) {
+    const partitions = partitionRustTests(inventory, count, times);
+    assert.deepEqual(partitions, partitionRustTests(inventory.toReversed(), count, times));
+    assert.equal(partitions.length, count);
+    assert.deepEqual(partitions.flat().sort(), inventory.toSorted());
+    assert.equal(new Set(partitions.flat()).size, inventory.length);
+  }
+  assert.throws(() => partitionRustTests(["crate same", "crate same"]), /Duplicate/u);
+  for (const count of [0, -1, 1.5, NaN])
+    assert.throws(() => partitionRustTests(inventory, count), /positive integer/u);
+});
+
+test("Rust partitions use binary defaults for new tests and the global default for new binaries", () => {
+  const times = { defaultSeconds: 1, binaries: { known: 3 }, tests: { "known slow": 5 } };
+  assert.deepEqual(
+    partitionRustTests(
+      ["known slow", "known new_a", "known new_b", "new_crate new", "constructor new"],
+      2,
+      times,
+    ),
+    [
+      ["known slow", "constructor new", "new_crate new"],
+      ["known new_a", "known new_b"],
+    ],
+  );
+  assert.deepEqual(partitionRustTests([], 2, times), [[], []]);
+});
+
+test("Rust filters select exact tests in exact binaries and escape filterset syntax", () => {
+  assert.deepEqual(rustPartitionFilters(["crate same", "crate::integration same_longer"]), [
+    "-E",
+    "(binary_id(=crate) & test(=same)) | (binary_id(=crate::integration) & test(=same_longer))",
+  ]);
+  assert.deepEqual(rustPartitionFilters(["crate::bin/tool test(a,b)\\ path\n雪"]), [
+    "-E",
+    "(binary_id(=crate::bin\\u{2f}tool) & test(=test\\u{28}a\\u{2c}b\\u{29}\\u{5c}\\u{20}path\\u{a}\\u{96ea}))",
+  ]);
+  assert.deepEqual(rustPartitionFilters([]), ["-E", "none()"]);
+});
+
+test("Rust filters split large selections without dropping or repeating tests", () => {
+  const assigned = Array.from(
+    { length: 1600 },
+    (_, i) => `crate::integration test_${i}_${"x".repeat(150)}_雪`,
+  );
+  const args = rustPartitionFilters(assigned);
+  const filters = args.filter((_, index) => index % 2);
+  assert.ok(filters.length > 1);
+  for (let index = 0; index < args.length; index += 2) {
+    assert.equal(args[index], "-E");
+    assert.ok(Buffer.byteLength(args[index + 1]) + 1 < 128 * 1024);
+  }
+  const decode = (name) =>
+    name.replace(/\\u\{([a-f0-9]+)\}/gu, (_, hex) => String.fromCodePoint(parseInt(hex, 16)));
+  const selected = filters.flatMap((filter) =>
+    [...filter.matchAll(/\(binary_id\(=([^)]*)\) & test\(=([^)]*)\)\)/gu)].map(
+      (match) => `${decode(match[1])} ${decode(match[2])}`,
+    ),
+  );
+  assert.deepEqual(selected, assigned);
+  assert.throws(() => rustPartitionFilters([`crate ${"雪".repeat(32768)}`]), /too long/u);
+});
+
+test("Rust partition inventory rejects missing, unexpected, and duplicate listed tests", () => {
+  const assigned = ["crate first", "crate second"];
+  assert.doesNotThrow(() => assertRustPartitionInventory(assigned, assigned.toReversed()));
+  for (const listed of [
+    [],
+    assigned.slice(1),
+    [...assigned, "crate extra"],
+    [assigned[0], assigned[0]],
+  ])
+    assert.throws(
+      () => assertRustPartitionInventory(assigned, listed),
+      /differs from its assignment/u,
+    );
+});
+
+test("Rust time refresh records per-test medians and estimates the remaining work per binary", () => {
+  const samples = rustTimingSamples(
+    "\u001b[32mPASS [ 1.0s] (1/3) crate fast\u001b[0m\nPASS [ 9.0s] crate slow\nFAIL [ 2.0s] crate failed\nFLAKY 2/2 [ 1.0s] crate retry\nPASS [ 0.0s] other tiny",
+  );
+  assert.deepEqual(samples, [
+    { id: "crate fast", seconds: 1 },
+    { id: "crate slow", seconds: 9 },
+    { id: "other tiny", seconds: 0 },
+  ]);
+  const rows = [
+    ...samples,
+    { id: "crate fast", seconds: 2 },
+    { id: "crate small", seconds: 0.5 },
+    { id: "crate slow", seconds: 5 },
+    { id: "crate slow", seconds: 100 },
+  ];
+  assert.deepEqual(recordedRustTimes(rows), {
+    thresholdSeconds: 2,
+    defaultSeconds: 0.667,
+    binaries: { crate: 1, other: 0.001 },
+    tests: { "crate slow": 9 },
+  });
+  assert.deepEqual(recordedRustTimes(rows), recordedRustTimes(rows.toReversed()));
+  assert.deepEqual(recordedRustTimes([{ id: "crate boundary", seconds: 2 }]).tests, {
+    "crate boundary": 2,
+  });
+  assert.throws(() => recordedRustTimes([]), /No passed/u);
 });
 
 function passingCloudJobs() {
