@@ -1684,15 +1684,25 @@ fn a_ready_file_behind_a_page_of_held_files_gets_its_turn() {
         .collect::<Vec<_>>();
     retained.push(from_origin(&packing_op, "device-f", 500));
     b_retains(&mut b, &retained, &[PACKING_TEXT]);
+    b_retains(&mut b, &[from_origin(&packing_op, "device-g", 0)], &[]);
     let identity = read_sync_identity(&b, "ws")
         .expect("identity")
         .expect("B has an identity");
     let (page, _) = crate::deferred::read(&b, "ws", &identity).expect("replay page");
-    assert!(page.iter().all(|op| op.origin_seq < 500));
+    assert!(
+        page.iter()
+            .all(|op| op.origin_id == "device-f" && op.origin_seq < 500)
+    );
     crate::deferred::claim_report(&mut b, "ws", &page, &[], &mut None, &NoFaults)
         .expect("the pass checks the page");
+    // Another computer's work comes first, then device-f's file not yet checked.
     let (page, _) = crate::deferred::read(&b, "ws", &identity).expect("next replay page");
-    assert_eq!(page.first().map(|op| op.origin_seq), Some(500));
+    let first = page
+        .iter()
+        .take(2)
+        .map(|op| (op.origin_id.as_str(), op.origin_seq))
+        .collect::<Vec<_>>();
+    assert_eq!(first, [("device-g", 0), ("device-f", 500)]);
 }
 
 /// B has a draft it never saved, and D deletes that draft behind its Apollo

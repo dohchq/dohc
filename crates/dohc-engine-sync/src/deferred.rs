@@ -214,12 +214,13 @@ pub(crate) fn read(
             "SELECT DISTINCT d.origin_id FROM relay_deferred_ops d WHERE d.workspace_id=?1 AND {UNAPPLIED}"))?;
         let origins = stmt.query_map([workspace], |r| r.get(0))?
             .collect::<Result<BTreeSet<String>, _>>()?;
-        // Files of an origin take turns by when their work was last checked,
+        // Origins take turns by when any of their work was last checked, and
+        // within one, files take turns by when their work was last checked,
         // then share the page op by op, so held files cannot keep a ready
         // file out of it.
         let mut stmt = conn.prepare(
             "SELECT d.envelope_json FROM relay_deferred_ops d JOIN
-             (SELECT origin_id,MIN(checked_sequence) AS checked FROM relay_deferred_ops
+             (SELECT origin_id,MAX(checked_sequence) AS checked FROM relay_deferred_ops
               WHERE workspace_id=?1 GROUP BY origin_id) q ON q.origin_id=d.origin_id
              WHERE d.workspace_id=?1
              WINDOW file AS (PARTITION BY d.origin_id,json_extract(d.envelope_json,'$.payload.objectId'))
