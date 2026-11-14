@@ -1159,10 +1159,7 @@ impl EngineService {
                     probe.pause_open_budget_if_armed();
                 }
                 let result = (|| {
-                    let store = dohc_engine_storage::EngineStore::open_read_only(
-                        budget_store.database_path(),
-                    )
-                    .map_err(|error| {
+                    let store = budget_store.open_reader().map_err(|error| {
                         map_runtime(dohc_engine_runtime::RuntimeError::Storage(error))
                     })?;
                     let mismatch: bool = store.read_with(|conn| conn.query_row(

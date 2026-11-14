@@ -505,8 +505,7 @@ impl EngineService {
             let _serial = serial;
             let registration = read_registration;
             let b = &registration.binding;
-            let store = dohc_engine_storage::EngineStore::open_read_only(open.actor.database_path())
-                .map_err(|_| workspace_unavailable())?;
+            let store = open.actor.open_reader().map_err(|_| workspace_unavailable())?;
             let state = store.read_with(|conn| -> Result<Value,dohc_engine_storage::StorageError> {
                 use rusqlite::OptionalExtension;
                 let prior: Option<(String,i64,i64)> = conn.query_row(&format!("SELECT activation_id,local_ydoc_sequence,terminal_cursor FROM {} WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5",

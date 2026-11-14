@@ -488,18 +488,20 @@ fn open_engine_db_configured(
 /// Open an existing, fully migrated v2 store without creating files, changing
 /// persistent pragmas, or applying migrations. This is the reader primitive
 /// for daemon requests that run while another engine owns workspace writes.
-/// Its checks stop once `cancelled` is set.
+/// Its checks stop once `cancelled` is set. Without `pages`, it checks the
+/// schema but not the pages, for a store whose open writer already did.
 pub(crate) fn open_engine_db_read_only(
     path: &Path,
     work: Option<Arc<AtomicU64>>,
     cancelled: Option<Arc<AtomicBool>>,
+    pages: bool,
 ) -> Result<OpenedEngineDb, StorageError> {
     reject_undersized_database(path)?;
     let mut conn =
         crate::open_store(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(StorageError::corrupt)?;
     count_open_work(&mut conn, work, cancelled)?;
     apply_session_pragmas(&conn)?;
-    validate_current(&mut conn)?;
+    validate_current(&mut conn, pages)?;
     stop_counting(&mut conn)?;
     Ok(OpenedEngineDb {
         conn,
@@ -521,12 +523,17 @@ pub(crate) fn classify_existing(
     crate::migration::classify_ledger(conn, BASELINE_MIGRATIONS)
 }
 
-/// Refuse a store this build cannot read as it is, then check it.
-fn validate_current(conn: &mut Connection) -> Result<(), StorageError> {
+/// Refuse a store this build cannot read as it is, then check it, its pages
+/// only when `pages` is set.
+fn validate_current(conn: &mut Connection, pages: bool) -> Result<(), StorageError> {
     if classify_existing(conn)? == crate::migration::LedgerState::Pending {
         return Err(StorageError::MigrationPending);
     }
-    check_current(conn)
+    if pages {
+        return check_current(conn);
+    }
+    validate_v2(conn)?;
+    crate::search_generation::install(conn).map_err(StorageError::corrupt)
 }
 
 /// Check a current store's schema and pages once and ready its queries.

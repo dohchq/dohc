@@ -11,7 +11,7 @@ use crate::schema::{OPEN_WORK_STEP_OPS, open_engine_db, open_engine_db_read_only
 use crate::{blob, materialize};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 /// Whether a string is a safe bare SQL identifier (ASCII alnum + underscore,
@@ -40,6 +40,18 @@ pub struct EngineStore {
     flushes: crate::flush::Flushes,
     opening: u64,
     wal_pressure: Arc<crate::checkpoint::WalPressure>,
+    /// Set while this writer, whose open checked the store's pages, is open.
+    /// A read-only store has none.
+    pages_checked: Option<Arc<AtomicBool>>,
+}
+
+/// That a writer's open checked the pages of the store at its path. A
+/// read-only open through it skips that check while the writer stays open,
+/// and checks the pages again once the writer closes.
+#[derive(Debug)]
+pub struct PagesChecked {
+    path: PathBuf,
+    writer_open: Arc<AtomicBool>,
 }
 
 /// The number of the next open of any store in this process.
@@ -134,6 +146,7 @@ impl EngineStore {
             flushes,
             opening: next_opening(),
             wal_pressure: Arc::default(),
+            pages_checked: Some(Arc::new(AtomicBool::new(true))),
         })
     }
 
@@ -172,6 +185,7 @@ impl EngineStore {
             flushes,
             opening: next_opening(),
             wal_pressure: Arc::default(),
+            pages_checked: Some(Arc::new(AtomicBool::new(true))),
         })
     }
 
@@ -198,6 +212,7 @@ impl EngineStore {
             flushes,
             opening: next_opening(),
             wal_pressure: Arc::default(),
+            pages_checked: Some(Arc::new(AtomicBool::new(true))),
         })
     }
 
@@ -226,6 +241,7 @@ impl EngineStore {
             flushes,
             opening: next_opening(),
             wal_pressure: Arc::default(),
+            pages_checked: Some(Arc::new(AtomicBool::new(true))),
         })
     }
 
@@ -241,9 +257,27 @@ impl EngineStore {
         path: &Path,
         work: Option<Arc<AtomicU64>>,
     ) -> Result<Self, StorageError> {
-        let opened = open_engine_db_read_only(path, work, None)?;
+        let opened = open_engine_db_read_only(path, work, None, true)?;
         let passive = crate::schema::store_is_passive(&opened.conn)?;
         Ok(Self::from_read_only(opened.conn, path, passive))
+    }
+
+    /// That this writer's open checked the store's pages, for read-only opens
+    /// made while it stays open. A read-only store has none.
+    pub fn pages_checked(&self) -> Option<PagesChecked> {
+        self.pages_checked.as_ref().map(|writer_open| PagesChecked {
+            path: self.database_path.clone(),
+            writer_open: Arc::clone(writer_open),
+        })
+    }
+
+    /// [`Self::open_read_only`] for the store `checked` names. While the writer
+    /// whose open checked its pages stays open, this checks only the schema.
+    pub fn open_read_only_after(checked: &PagesChecked) -> Result<Self, StorageError> {
+        let pages = !checked.writer_open.load(Ordering::Acquire);
+        let opened = open_engine_db_read_only(&checked.path, None, None, pages)?;
+        let passive = crate::schema::store_is_passive(&opened.conn)?;
+        Ok(Self::from_read_only(opened.conn, &checked.path, passive))
     }
 
     /// A store for queries only over `conn`, a checked connection to a current
@@ -262,6 +296,7 @@ impl EngineStore {
             flushes: crate::flush::Flushes::read_only(),
             opening: next_opening(),
             wal_pressure: Arc::default(),
+            pages_checked: None,
         }
     }
 
@@ -1255,6 +1290,11 @@ impl EngineStore {
 
 impl Drop for EngineStore {
     fn drop(&mut self) {
+        // A reader opened from here on checks the pages, since this writer no
+        // longer holds the store.
+        if let Some(writer_open) = &self.pages_checked {
+            writer_open.store(false, Ordering::Release);
+        }
         // Best effort. The actor drains before each reply; this covers work no
         // reply covered.
         if let Err(error) = self.drain_flushes() {
