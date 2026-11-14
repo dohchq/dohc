@@ -288,12 +288,12 @@ async function awakeFixture(
   read?: (answer: AwakeLiveState) => Promise<AwakeLiveState | undefined>,
 ) {
   let now = 0;
-  const reads: { binding: unknown; maxOutputBytes: number }[] = [];
+  const reads: unknown[] = [];
   let answer!: AwakeLiveState;
   const f = await fixture(sessionHostBlocked, {
     nowMs: () => now,
-    readAwakeState: async (value, maxOutputBytes) => {
-      reads.push({ binding: value, maxOutputBytes });
+    readAwakeState: async (value) => {
+      reads.push(value);
       return read ? read(answer) : answer;
     },
   });
@@ -317,7 +317,7 @@ async function awakeFixture(
 }
 
 // Proves: the state answer carries what the host applied, as the reader's socket would show it, with its cursor, read
-// under the note's current binding and the frame limit. A note its host doesn't hold awake gets no state.
+// under the note's current binding. A note its host doesn't hold awake gets no state.
 it("answers a note's early state as its socket's opening sync, and no state for a note its host does not hold awake", async () => {
   let awake = true;
   const f = await awakeFixture(undefined, async (answer) => (awake ? answer : undefined));
@@ -331,15 +331,15 @@ it("answers a note's early state as its socket's opening sync, and no state for 
     hostVector: new Uint8Array([1, 2]),
     missingStateUpdate: new Uint8Array([3, 4, 5]),
   });
-  expect(f.reads).toEqual([{ binding: f.current.binding, maxOutputBytes: 1024 * 1024 }]);
+  expect(f.reads).toEqual([f.current.binding]);
   awake = false;
   const asleep = await f.handle(stateRequest());
   expect([asleep.status, await asleep.text()]).toEqual([204, ""]);
 });
 
-// Proves: a state read from a host that is no longer the note's current one, or of a binding the note no longer has,
-// gives no state.
-it("gives no state read from another host or under another binding", async () => {
+// Proves: a state read from a host that is no longer the note's current one, of a binding the note no longer has, or
+// larger than the route sends, gives no state.
+it("gives no state read from another host, under another binding, or larger than the route sends", async () => {
   for (const changed of [
     (answer: AwakeLiveState) => ({
       ...answer,
@@ -349,6 +349,8 @@ it("gives no state read from another host or under another binding", async () =>
       ...answer,
       binding: { ...answer.binding, restoreFenceGeneration: 8 },
     }),
+    // The host reads under the socket's own bound, so a state past the route's limit still arrives, and is dropped.
+    (answer: AwakeLiveState) => ({ ...answer, missingStateUpdate: Buffer.alloc(1024 * 1024 - 1) }),
   ]) {
     const f = await awakeFixture(undefined, async (answer) => changed(answer));
     expect((await f.handle(stateRequest())).status).toBe(204);

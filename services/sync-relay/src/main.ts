@@ -1192,14 +1192,12 @@ if (namedLiveConfig) {
     return host.captureNative(binding, signal);
   };
   // A link reader's early state, from the configured host only, which answers only for a note it holds awake.
-  const readAwakeState = async (
-    binding: LiveObjectBinding,
-    maxOutputBytes: number,
-    signal: AbortSignal,
-  ) => {
+  // The engine is not told the client's output bound, and an answer past it fails the whole engine connection, so
+  // this reads under the bound a socket's opening sync uses, never a smaller one.
+  const readAwakeState = async (binding: LiveObjectBinding, signal: AbortSignal) => {
     const mode = storage.getLiveHostControl()?.configuredMode;
     const host = mode === "service" ? serviceHost() : mode === "device" ? deviceControl : undefined;
-    return host?.readAwakeState(binding, maxOutputBytes, signal);
+    return host?.readAwakeState(binding, namedLiveConfig.host.maxSyncOutputBytes, signal);
   };
   const tickets = createLiveTickets({
     storage,

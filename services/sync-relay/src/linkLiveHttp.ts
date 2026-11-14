@@ -49,10 +49,12 @@ export function createLinkLiveHttp(options: {
   }) => SessionHostBlock | undefined;
   /** Authenticates a connected agent, as the link's other routes do. */
   linkAuthority: Pick<LinkAuthorityResolver, "resolve">;
-  /** What the note's current host applied, if it holds the note awake. Without it the state route refuses. */
+  /**
+   * What the note's current host applied, if it holds the note awake. Without it the state route refuses. It reads
+   * under the bound a socket's opening sync reads under, so the route drops a larger state rather than ask for less.
+   */
   readAwakeState?: (
     binding: LiveObjectBinding,
-    maxOutputBytes: number,
     signal: AbortSignal,
   ) => Promise<AwakeLiveState | undefined>;
   /** The frame limits a browser receives an opening sync under. */
@@ -243,15 +245,12 @@ export function createLinkLiveHttp(options: {
     >,
     signal: AbortSignal,
   ): Promise<Response> {
-    const read = await options.readAwakeState!(
-      before.binding,
-      Math.min(STATE_MAX_BYTES, options.frames!.maxSyncBytes),
-      signal,
-    );
+    const read = await options.readAwakeState!(before.binding, signal);
     signal.throwIfAborted();
     const after = options.storage.resolveLiveObjectHostBinding(context, objectId);
     if (
       !read ||
+      read.hostVector.byteLength + read.missingStateUpdate.byteLength > STATE_MAX_BYTES ||
       after.kind !== "current" ||
       !isDeepStrictEqual(read.binding, before.binding) ||
       !isDeepStrictEqual(read.coordinate, after.host) ||
