@@ -68,7 +68,7 @@ interface Effect {
 interface Successor {
   lineageClaimId: string;
   epochTag: string;
-  contentKind: "plaintext" | "richdoc";
+  contentKind: "plaintext" | "richdoc" | "scene";
   resultSha256: string;
   updateBlobSha256: string;
   stateVectorBlobSha256: string;
@@ -383,7 +383,11 @@ function successor(value: unknown): Successor | null {
     ],
     "successor",
   );
-  if (record.contentKind !== "plaintext" && record.contentKind !== "richdoc") {
+  if (
+    record.contentKind !== "plaintext" &&
+    record.contentKind !== "richdoc" &&
+    record.contentKind !== "scene"
+  ) {
     invalid("successor.contentKind is invalid");
   }
   return {

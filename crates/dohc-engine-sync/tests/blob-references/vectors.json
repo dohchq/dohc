@@ -509,6 +509,98 @@
       }
     },
     {
+      "name": "a resolution keeps a current drawing and names its scene successor blobs",
+      "opKind": "conflict.resolve",
+      "workspaceId": "workspace",
+      "recordedAtMs": 12,
+      "payload": {
+        "formatVersion": 1,
+        "workspaceId": "workspace",
+        "conflictId": "conflict",
+        "status": "resolved",
+        "chosenFrom": "current",
+        "resolution": "kept-current",
+        "targetVersionId": "main",
+        "sourceVersionId": "peer-main",
+        "paths": [
+          "notes/current.excalidraw",
+          "notes/incoming.bin"
+        ],
+        "transition": {
+          "current": {
+            "present": true,
+            "pathRef": 0,
+            "objectId": "object-current",
+            "latestMomentId": "moment-current",
+            "contentKind": "text",
+            "blobSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "byteLength": 12,
+            "updatedAtMs": 10
+          },
+          "incoming": {
+            "present": true,
+            "pathRef": 1,
+            "objectId": "object-incoming",
+            "latestMomentId": "moment-incoming",
+            "contentKind": "binary",
+            "blobSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "byteLength": 15,
+            "updatedAtMs": 11
+          },
+          "result": {
+            "present": true,
+            "pathRef": 0,
+            "objectId": "object-current",
+            "latestMomentId": "moment-current",
+            "contentKind": "text",
+            "blobSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "byteLength": 12,
+            "updatedAtMs": 10
+          }
+        },
+        "effectContext": {
+          "recordedAtMs": 12,
+          "metadata": {
+            "origin": "api",
+            "summary": null,
+            "correlationId": null
+          },
+          "author": null,
+          "currentObjectCreatedAtMs": 1,
+          "resultObjectCreatedAtMs": 1
+        },
+        "effects": [],
+        "lineageTransition": {
+          "predecessorClaimId": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "predecessorStateVectorSha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "predecessorDeleteSetSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "artifactPreimageSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "successor": {
+            "lineageClaimId": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "epochTag": "2222222222222222222222222222222222222222222222222222222222222222",
+            "contentKind": "scene",
+            "resultSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "updateBlobSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "stateVectorBlobSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          }
+        }
+      },
+      "blobs": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": [
+          "text"
+        ],
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": [
+          "binary"
+        ],
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc": [
+          "ydoc"
+        ],
+        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd": [
+          "ydoc"
+        ]
+      }
+    },
+    {
       "name": "a resolution keeps current binary and names its exported text preimage",
       "opKind": "conflict.resolve",
       "workspaceId": "workspace",
