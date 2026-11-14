@@ -798,6 +798,18 @@ it.each([
       objectId: "hidden-object",
     });
     expect([hidden.status, await hidden.text()]).toEqual([404, '{"ok":false,"error":"not found"}']);
+    // Nor does a real document the share no longer covers.
+    const select = f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?");
+    select.run(JSON.stringify({ paths: ["other.md"], versionId: null }));
+    const outside = await f.post(`/sync/live/${link ? "link" : "named"}-tickets`, {
+      discriminator: f.discriminator,
+      objectId: binding.objectId,
+    });
+    expect([outside.status, await outside.text()]).toEqual([
+      404,
+      '{"ok":false,"error":"not found"}',
+    ]);
+    select.run(JSON.stringify({ paths: [binding.currentPath], versionId: null }));
     f.sessionHostBlocked.mockReturnValue(undefined);
     expect(await f.connect((await f.mint()).token).status).toBe(101);
   },

@@ -632,16 +632,22 @@ it.each([
   "refuses an agent's ticket for a document the session host %s, until the block lifts",
   async (blocked, status, answer) => {
     const f = await fixture(),
-      helper = f.agent("helper");
+      helper = f.agent("helper"),
+      commenter = f.agent("commenter", "comment");
     f.setBlock(blocked);
     const refused = await f.ticketRequest(helper);
     expect([refused.status, await refused.json()]).toEqual([status, answer]);
-    // A document the agent can't reach says nothing about its block.
+    // A document the agent can't reach, or can't edit, says nothing about its block.
     const hidden = await f.ticketRequest(helper, {
       workspaceId: scope.workspaceId,
       objectId: "hidden-object",
     });
     expect([hidden.status, await hidden.json()]).toEqual([404, { ok: false, error: "not found" }]);
+    const viewing = await f.ticketRequest(commenter);
+    expect([viewing.status, await viewing.json()]).toEqual([
+      404,
+      { ok: false, error: "not found" },
+    ]);
     f.setBlock(undefined);
     expect(Object.keys(await f.mint(helper)).sort()).toEqual(["expiresAtMs", "token"]);
   },
