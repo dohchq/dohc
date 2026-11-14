@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { statSync } from "node:fs";
+import { recordRelayWrite, relayMainThreadTimingOn } from "../relayMainThreadTiming";
 import type { SqliteDb } from "./types";
 
 export interface RelayContinuity {
@@ -16,6 +18,9 @@ export class RelayWriteOwner {
   #nonce: string;
   readonly #changes;
   readonly #schema;
+  // The database file and when a checkpoint last wrote it. In WAL mode only a checkpoint writes the file.
+  #file: string | null | undefined;
+  #fileChangedNs: bigint | undefined;
   constructor(
     readonly db: SqliteDb,
     readonly continuity?: RelayContinuity,
@@ -50,6 +55,8 @@ export class RelayWriteOwner {
     const previous = this.#stamp;
     let stamp = previous,
       nonce = this.#nonce;
+    const timed = relayMainThreadTimingOn();
+    const startedAt = timed ? performance.now() : 0;
     try {
       this.db.exec("BEGIN IMMEDIATE");
       began = true;
@@ -79,11 +86,28 @@ export class RelayWriteOwner {
         }
       }
       committing = true;
+      const commitAt = timed ? performance.now() : 0;
       this.db.exec("COMMIT");
       began = false;
+      const committedAt = timed ? performance.now() : 0;
       if (changed) this.continuity!.confirm(stamp, nonce, this.#nonce);
       this.#stamp = stamp;
       this.#nonce = nonce;
+      // Without continuity the owner cannot tell a write that changed nothing, so it counts every write.
+      if (timed && (changed || !this.continuity)) {
+        // A committed write must not fail, and invalidate storage, because measuring it failed.
+        try {
+          const endedAt = performance.now();
+          recordRelayWrite({
+            writeMs: endedAt - startedAt,
+            commitMs: committedAt - commitAt,
+            confirmMs: changed ? endedAt - committedAt : null,
+            checkpoint: this.#checkpointed(),
+          });
+        } catch {
+          /* The write stands. */
+        }
+      }
       return result;
     } catch (error) {
       if (began) {
@@ -97,6 +121,25 @@ export class RelayWriteOwner {
       throw error;
     } finally {
       this.#writing = false;
+    }
+  }
+
+  /** Whether a checkpoint wrote the database file since the last write, read from its change time. */
+  #checkpointed(): boolean {
+    try {
+      if (this.#file === undefined) {
+        const main = this.db.prepare("PRAGMA database_list").get() as
+          | { file?: unknown }
+          | undefined;
+        this.#file = typeof main?.file === "string" && main.file !== "" ? main.file : null;
+      }
+      if (this.#file === null) return false;
+      const changedNs = statSync(this.#file, { bigint: true, throwIfNoEntry: false })?.mtimeNs;
+      const checkpointed = this.#fileChangedNs !== undefined && changedNs !== this.#fileChangedNs;
+      this.#fileChangedNs = changedNs;
+      return checkpointed;
+    } catch {
+      return false;
     }
   }
 

@@ -38,7 +38,9 @@ import type {
   SyncRelayStorage,
 } from "./storage.js";
 import { snapshotCurrentBindingRequest } from "./storage/liveDocumentAuthority.js";
-import type { CapacityLiveAdmissionValidator } from "./ownerOutboxDelivery.js";
+import type { CapacityLiveAdmissionValidator, LiveCheckTiming } from "./ownerOutboxDelivery.js";
+import type { JournalCutReadTiming } from "./storage/types.js";
+import { asRelayWrite, loopHeldBetween, recordLiveSubmit } from "./relayMainThreadTiming.js";
 import type {
   NamedFrameAppliedUpdate,
   NamedFrameHostSession,
@@ -93,7 +95,7 @@ export interface NamedFrameValidationBudget {
 }
 class ValidationExceedsBudget extends Error {}
 
-/** When one submission reached each step, from `performance.now()`. */
+/** When one submission reached each step, from `performance.now()`, and where its check spent its time. */
 interface SubmitTiming {
   readonly startedAt: number;
   /** The last journal commit's start and end. */
@@ -101,7 +103,27 @@ interface SubmitTiming {
   committedAt?: number;
   /** The journal admitted it, so the rest is its application and ACK read. */
   admitted?: boolean;
+  /** Waiting for a validation slot, over every attempt. */
+  waitMs: number;
+  /** Reading a personal agent's access again from Postgres. */
+  freshMs: number;
+  /** Times the check read a cut and validated it. */
+  attempts: number;
+  /** The last cut read: its rows, their bytes, and the checkpoint's bytes. */
+  rows?: number;
+  suffixBytes?: number;
+  checkpointBytes?: number;
+  readonly cut: JournalCutReadTiming;
+  readonly check: LiveCheckTiming;
 }
+const newSubmitTiming = (startedAt: number): SubmitTiming => ({
+  startedAt,
+  waitMs: 0,
+  freshMs: 0,
+  attempts: 0,
+  cut: { queryMs: 0, verifyMs: 0, copyMs: 0 },
+  check: { hopMs: 0, replayMs: 0, projectionMs: 0, workerOtherMs: 0 },
+});
 const SLOW_SUBMIT_MS = 500;
 const RESULT_WORDS: readonly string[] = [
   "success",
@@ -124,19 +146,40 @@ function reportLiveSubmit(
 ) {
   const word = answer.result === "success" ? answer.result : answer.reason;
   const result = RESULT_WORDS.includes(word) ? word : "unrecognized";
+  const ms = (from: number | undefined, to: number | undefined) =>
+    from === undefined || to === undefined ? null : Math.round(to - from);
+  const round = (value: number) => Math.round(value * 10) / 10;
+  const held = loopHeldBetween(timing.startedAt, nowMs);
+  const figures = {
+    checkMs: ms(timing.startedAt, timing.commitAt ?? nowMs),
+    waitMs: round(timing.waitMs),
+    queryMs: round(timing.cut.queryMs),
+    verifyMs: round(timing.cut.verifyMs),
+    copyMs: round(timing.cut.copyMs),
+    hopMs: round(timing.check.hopMs),
+    replayMs: round(timing.check.replayMs),
+    projectionMs: round(timing.check.projectionMs),
+    workerOtherMs: round(timing.check.workerOtherMs),
+    freshMs: round(timing.freshMs),
+    commitMs: ms(timing.commitAt, timing.committedAt),
+    drainMs: timing.admitted ? ms(timing.committedAt, nowMs) : null,
+    loopMaxMs: held && round(held.loopMaxMs),
+    loopHeldMs: held && round(held.loopHeldMs),
+    attempts: timing.attempts,
+    rows: timing.rows ?? null,
+    suffixBytes: timing.suffixBytes ?? null,
+    checkpointBytes: timing.checkpointBytes ?? null,
+  };
+  recordLiveSubmit(result, figures);
   if (result === "success" && nowMs - timing.startedAt <= SLOW_SUBMIT_MS) return;
   // Keyed by the whole id, so two documents that share a logged prefix keep their own minute.
   const repeated = submitLines(`${objectId} ${result}`, nowMs);
   if (repeated === undefined) return;
-  const ms = (from: number | undefined, to: number | undefined) =>
-    from === undefined || to === undefined ? null : Math.round(to - from);
   try {
     console.error("Live submit answered.", {
       submitter,
       object: objectId.slice(0, 8),
-      checkMs: ms(timing.startedAt, timing.commitAt ?? nowMs),
-      commitMs: ms(timing.commitAt, timing.committedAt),
-      drainMs: timing.admitted ? ms(timing.committedAt, nowMs) : null,
+      ...figures,
       result,
       ...(repeated ? { repeated } : {}),
     });
@@ -461,9 +504,15 @@ function captureLiveFrameHost(options: {
         let waitForCapacity = validate.waitForCapacity?.bind(validate);
         for (;;) {
           releaseValidationBytes();
-          await waitForCapacity?.(admissionSignal);
+          const waitAt = performance.now();
+          try {
+            await waitForCapacity?.(admissionSignal);
+          } finally {
+            timing.waitMs += performance.now() - waitAt;
+          }
           check(admissionSignal);
           if (validate.hasCapacity?.() === false) continue;
+          timing.attempts++;
           const read = storage.readLiveUpdateJournalCut(
             { document },
             options.validationBudget
@@ -474,9 +523,13 @@ function captureLiveFrameHost(options: {
                   releaseBytes = options.validationBudget!.reserveBytes(charge);
                 }
               : undefined,
+            timing.cut,
           );
           if (read.kind !== "cut") return { result: "refused", reason: read.reason };
           const cut = read.cut;
+          timing.rows = cut.suffix.length;
+          timing.suffixBytes = cut.suffix.reduce((sum, row) => sum + row.bytes.length, 0);
+          timing.checkpointBytes = cut.checkpoint.bytes.length;
           if (
             cut.checkpoint.bytes.length +
               cut.suffix.reduce((sum, row) => sum + row.bytes.length, updateBytes.length) >
@@ -516,6 +569,7 @@ function captureLiveFrameHost(options: {
                 ),
             },
             admissionSignal,
+            timing.check,
           );
           check(admissionSignal);
           if (validation.kind === "retry") {
@@ -525,6 +579,7 @@ function captureLiveFrameHost(options: {
           // Read again from Postgres just before the journal transaction. While
           // it can't answer, nothing is admitted and the agent may try again.
           if (freshRead) {
+            const freshAt = performance.now();
             try {
               await untilAborted(freshRead(), admissionSignal);
             } catch (error) {
@@ -535,29 +590,33 @@ function captureLiveFrameHost(options: {
               }
               close();
               return { result: "refused", reason: "authority-refused" };
+            } finally {
+              timing.freshMs += performance.now() - freshAt;
             }
             check(admissionSignal);
           }
           timing.commitAt = performance.now();
-          const committed = storage.commitLiveUpdateJournal({
-            host: native.coordinate,
-            actor,
-            expectedAuthority: authority,
-            ...(trustedAccount ? { trustedAccount } : {}),
-            ...(trustedAutomation ? { trustedAutomation } : {}),
-            ...(trustedAutomationPress ? { trustedAutomationPress } : {}),
-            ...(trustedAutomationGrant ? { trustedAutomationGrant } : {}),
-            metadata: {
-              deliveryId,
-              updateDigest,
-              binding,
-              ...(authorContext ? { authorContext } : {}),
-            },
-            cutToken: cut,
-            validation,
-            updateBytes,
-            receivedAtMs: Date.now(),
-          });
+          const committed = asRelayWrite("save", () =>
+            storage.commitLiveUpdateJournal({
+              host: native.coordinate,
+              actor,
+              expectedAuthority: authority,
+              ...(trustedAccount ? { trustedAccount } : {}),
+              ...(trustedAutomation ? { trustedAutomation } : {}),
+              ...(trustedAutomationPress ? { trustedAutomationPress } : {}),
+              ...(trustedAutomationGrant ? { trustedAutomationGrant } : {}),
+              metadata: {
+                deliveryId,
+                updateDigest,
+                binding,
+                ...(authorContext ? { authorContext } : {}),
+              },
+              cutToken: cut,
+              validation,
+              updateBytes,
+              receivedAtMs: Date.now(),
+            }),
+          );
           timing.committedAt = performance.now();
           if (committed.result.kind === "refused")
             return { result: "refused", reason: committed.result.reason };
@@ -724,7 +783,7 @@ function captureLiveFrameHost(options: {
       };
     },
     async submit(input, caller) {
-      const timing: SubmitTiming = { startedAt: performance.now() };
+      const timing = newSubmitTiming(performance.now());
       const answer = await admitSubmission(input, caller, timing);
       reportLiveSubmit(document.objectId, actor.kind, timing, answer, performance.now());
       return answer;

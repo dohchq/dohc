@@ -649,6 +649,15 @@ export type AcceptedLiveDocument =
   | { readonly kind: "cut"; readonly cut: LiveUpdateJournalCut }
   | { readonly kind: "restoring" }
   | { readonly kind: "none" };
+/** Where reading a journal cut spent its time, in milliseconds, added across reads. */
+export interface JournalCutReadTiming {
+  /** The read transaction: the size queries, the rows and their decoding. */
+  queryMs: number;
+  /** Checking every row's digest. */
+  verifyMs: number;
+  /** Copying the cut for the caller. */
+  copyMs: number;
+}
 export type LiveUpdateJournalCutResult =
   | { readonly kind: "cut"; readonly cut: LiveUpdateJournalCut }
   | {
@@ -1258,6 +1267,7 @@ export interface SyncRelayStorage {
   readLiveUpdateJournalCut(
     input: { document: LiveDocumentKey },
     reserveBytes?: (size: number) => void,
+    timing?: JournalCutReadTiming,
   ): LiveUpdateJournalCutResult;
   commitLiveUpdateJournal(
     input: LiveUpdateJournalCommitInput,
