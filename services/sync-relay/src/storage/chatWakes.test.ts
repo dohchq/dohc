@@ -19,6 +19,7 @@ import {
   type OperationWakeChange,
 } from "./chatWakes";
 import type { StorageContext } from "./context";
+import { OPERATION_KEEP_SETTLED_MS } from "./operationRecords";
 
 afterEach(closeTestStorages);
 
@@ -617,4 +618,229 @@ it("tries a wake again only on computers whose declaration of its agent is enabl
   const before = count(storage, "sync_relay_chat_wakes");
   expect(retry("retry-none", "message-none")).toEqual({ kind: "refused" });
   expect(count(storage, "sync_relay_chat_wakes")).toBe(before);
+});
+
+const shown = (...messageIds: string[]) =>
+  new Map(messageIds.map((messageId) => [messageId, "thread-1"]));
+const byWake = (hints: readonly { wakeId: string }[]) =>
+  Object.fromEntries(hints.map((hint) => [hint.wakeId, hint]));
+
+it("gives the phone each shown message's latest generation per target, as its wait's end leaves it, and whether a retry finds another computer", async () => {
+  const storage = await relay();
+  // Only the laptop holds a leased declaration of the agent.
+  storage.replaceChatRunners({
+    accountId: "ana",
+    workspaceId: "trip",
+    installId: "laptop",
+    computerLabel: "laptop label",
+    runners: [{ agentId: "default", handle: "claude", displayName: "Claude", enabled: true }],
+    nowMs: NOW,
+  });
+  publish(storage, "op-1", "message-1", [
+    target("claude", "mac", "laptop"),
+    target("codex", "mac"),
+  ]);
+  publish(storage, "op-held", "message-held", [target("claude", "mac", "laptop")], { held: true });
+  publish(storage, "op-ben", "message-1", [target("claude", "mac")], {
+    accountId: "ben",
+    workspaceId: "bens",
+  });
+  const claude = wakeOf("message-1", "claude"),
+    codex = wakeOf("message-1", "codex");
+  for (const wakeId of [claude, codex])
+    storage.claimChatWake({ accountId: "ana", wakeId, installId: "mac", nowMs: NOW });
+  const hints = (nowMs: number, messages = shown("message-1", "message-held", "message-quiet")) =>
+    storage.phoneChatWakes({ accountId: "ana", workspaceId: "trip", messages, nowMs });
+
+  expect(byWake(hints(NOW))).toEqual({
+    [claude]: {
+      wakeId: claude,
+      messageId: "message-1",
+      threadId: "thread-1",
+      generation: 1,
+      state: "claimed",
+      winnerLabel: "mac label",
+      canRetry: false,
+    },
+    [codex]: expect.objectContaining({ state: "claimed", canRetry: false }),
+    [wakeOf("message-held", "claude")]: expect.objectContaining({
+      state: "held",
+      winnerLabel: null,
+      canRetry: false,
+    }),
+  });
+  const late = NOW + CHAT_WAKE_CONFIRM_MS;
+  expect(byWake(hints(late)), "a claim past its time reads unconfirmed before a sweep").toEqual(
+    expect.objectContaining({
+      [claude]: expect.objectContaining({ state: "unconfirmed", canRetry: true }),
+      [codex]: expect.objectContaining({
+        state: "unconfirmed",
+        winnerLabel: "mac label",
+        canRetry: false,
+      }),
+    }),
+  );
+  expect(
+    wakes(storage)
+      .filter((row) => row.account_id === "ana" && row.message_id === "message-1")
+      .map((row) => row.state),
+    "the read writes nothing",
+  ).toEqual(["claimed", "claimed"]);
+  expect(JSON.stringify(hints(late))).not.toContain("laptop");
+
+  expect(
+    storage.retryChatWake({
+      accountId: "ana",
+      workspaceId: "trip",
+      operationId: "retry-1",
+      wakeId: claude,
+      nowMs: late,
+    }).kind,
+  ).toBe("retried");
+  const next = wakeOf("message-1", "claude", 2);
+  const latest = byWake(hints(late));
+  expect(latest[claude], "a superseded generation has no hint").toBeUndefined();
+  expect(latest[next]).toEqual({
+    wakeId: next,
+    messageId: "message-1",
+    threadId: "thread-1",
+    generation: 2,
+    state: "waiting",
+    winnerLabel: null,
+    canRetry: false,
+  });
+  expect(latest[codex]).toMatchObject({ generation: 1, state: "unconfirmed" });
+
+  expect(
+    hints(late, new Map([["message-1", "thread-elsewhere"]])),
+    "a wake whose thread isn't the one the message was read in",
+  ).toEqual([]);
+  expect(
+    storage.phoneChatWakes({
+      accountId: "ana",
+      workspaceId: "bens",
+      messages: shown("message-1"),
+      nowMs: late,
+    }),
+    "another account's workspace",
+  ).toEqual([]);
+  expect(
+    storage.phoneChatWakes({
+      accountId: "ben",
+      workspaceId: "trip",
+      messages: shown("message-1"),
+      nowMs: late,
+    }),
+  ).toEqual([]);
+});
+
+it("gives no hint once a wake's row or its write's command is gone, rather than a guess", async () => {
+  const storage = await relay();
+  publish(storage, "op-old", "message-old", [target("claude", "mac")]);
+  const hints = (nowMs: number) =>
+    storage.phoneChatWakes({
+      accountId: "ana",
+      workspaceId: "trip",
+      messages: shown("message-old"),
+      nowMs,
+    });
+  const ended = NOW + CHAT_WAKE_CLAIM_MS;
+  expect(storage.sweepChatWakes(ended)).toBe(1);
+  expect(hints(ended)).toEqual([expect.objectContaining({ state: "unclaimed", canRetry: false })]);
+  expect(storage.sweepChatWakes(ended + CHAT_WAKE_KEEP_MS + 1)).toBe(1);
+  expect(hints(ended + CHAT_WAKE_KEEP_MS + 1)).toEqual([]);
+
+  const sent = (operationId: string, messageId: string, unmatched: boolean, accountId = "ana") => {
+    const workspaceId = accountId === "ana" ? "trip" : "bens";
+    storage.recordAccountOperation({
+      accountId,
+      operationId,
+      binding: { workspaceId, operation: "reply", args: { operationId } },
+      incarnation: 1,
+      replicationEpoch: "epoch",
+      streamIdentity: "stream",
+      command: {
+        write: { kind: "reply", threadId: "thread-1", messageId, body: "Thanks" },
+        wakes: { targets: [], unmatched },
+      },
+      writesMessage: true,
+      nowMs: NOW,
+    });
+    storage.advanceAccountOperation({
+      accountId,
+      operationId,
+      stage: "saved",
+      message: "published",
+      nowMs: NOW,
+    });
+  };
+  sent("op-unmatched", "message-unmatched", true);
+  sent("op-matched", "message-matched", false);
+  sent("op-ben", "message-unmatched", true, "ben");
+  const unmatched = (accountId: string, workspaceId: string) =>
+    storage.unmatchedWakeMessages({
+      accountId,
+      workspaceId,
+      messageIds: ["message-unmatched", "message-matched", "message-nowhere"],
+    });
+  expect(unmatched("ana", "trip")).toEqual(new Set(["message-unmatched"]));
+  expect(unmatched("ana", "bens")).toEqual(new Set());
+  expect(storage.tombstoneSettledAccountOperations(NOW + OPERATION_KEEP_SETTLED_MS + 1)).toBe(3);
+  expect(unmatched("ana", "trip"), "a tombstone keeps no command").toEqual(new Set());
+});
+
+it("lists the threads whose wakes changed after a position, only in the workspace named and only the account's own", async () => {
+  const storage = await relay();
+  const changes = (since: number, workspaceId = "trip", accountId = "ana") =>
+    storage.chatWakeChanges({
+      accountId,
+      workspaceId,
+      since,
+      through: storage.chatWakeHead(accountId),
+    });
+  record(
+    storage,
+    "op-1",
+  )({
+    publish: {
+      messageId: "message-1",
+      threadId: "thread-a",
+      held: false,
+      targets: [target("claude", "mac")],
+    },
+  });
+  record(
+    storage,
+    "op-2",
+  )({
+    publish: {
+      messageId: "message-2",
+      threadId: "thread-b",
+      held: false,
+      targets: [target("claude", "mac")],
+    },
+  });
+  const published = storage.chatWakeHead("ana");
+  expect(changes(0)).toEqual({ next: published, threadIds: ["thread-a", "thread-b"] });
+  storage.claimChatWake({
+    accountId: "ana",
+    wakeId: wakeOf("message-2", "claude"),
+    installId: "mac",
+    nowMs: NOW,
+  });
+  expect(changes(published)).toEqual({ next: published + 1, threadIds: ["thread-b"] });
+
+  publish(storage, "op-other", "message-other", [target("claude", "mac")], {
+    workspaceId: "other",
+  });
+  expect(changes(published + 1), "a change in another workspace moves only the position").toEqual({
+    next: published + 2,
+    threadIds: [],
+  });
+  publish(storage, "op-ben", "message-ben", [target("claude", "mac")], {
+    accountId: "ben",
+    workspaceId: "bens",
+  });
+  expect(changes(0, "bens")).toEqual({ next: storage.chatWakeHead("ana"), threadIds: [] });
+  expect(changes(0, "trip", "ben")).toEqual({ next: 1, threadIds: [] });
 });

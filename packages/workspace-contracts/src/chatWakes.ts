@@ -123,3 +123,97 @@ export const ChatWakeClaimReply = z.strictObject({
 
 /** `POST /sync/wakes/:wakeId/queued`. */
 export const ChatWakeQueuedReply = z.strictObject({ ok: z.literal(true), wake: ChatWakeView });
+
+// The phone's view of a conversation it shows, through the owner's server:
+// what it can write there, who it can mention, and its messages' wakes. The
+// relay serves these shapes inside its `{ ok, result, cursor }` answer, and
+// the phone checks every answer against them.
+
+/** The most mention candidates one context read answers. */
+export const PHONE_MENTION_CANDIDATES_MAX = 256;
+/** The thread IDs one wake-changes answer lists at most. */
+export const PHONE_WAKE_CHANGES_MAX = 1_000;
+const NAME_MAX_CHARS = 256;
+// A handle as handleForName makes one: at most 200 bytes once normalized.
+const Handle = z.string().min(1).max(200);
+const Name = z.string().min(1).max(NAME_MAX_CHARS);
+const Cursor = z.string().regex(SEQUENCE);
+
+/**
+ * Someone the phone can mention. A person comes only from the conversation's own messages and reactions. An agent
+ * runs on the account's computers, named by their labels; a personal agent reaches the workspace but no computer runs
+ * it, so mentioning it wakes nothing there.
+ */
+export const PhoneMentionCandidate = z.discriminatedUnion("kind", [
+  z.strictObject({ kind: z.literal("person"), handle: Handle, label: Name }),
+  z.strictObject({
+    kind: z.literal("agent"),
+    handle: Handle,
+    label: Name,
+    computers: z.array(line(CHAT_RUNNER_COMPUTER_LABEL_MAX_CHARS)).min(1),
+  }),
+  z.strictObject({ kind: z.literal("personalAgent"), handle: Handle, label: Name }),
+]);
+export type PhoneMentionCandidate = z.infer<typeof PhoneMentionCandidate>;
+
+/**
+ * The latest generation of one wake target of a message the phone shows. `canRetry` says a Try again would find a
+ * computer now: the generation didn't start or wasn't confirmed, and another computer's lease of the agent holds. The
+ * retry route still decides.
+ */
+export const PhoneChatWake = z.strictObject({
+  wakeId: z.string().regex(CHAT_WAKE_ID),
+  messageId: Id,
+  threadId: Id,
+  generation: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
+  state: ChatWakeState,
+  winnerLabel: line(CHAT_RUNNER_COMPUTER_LABEL_MAX_CHARS).nullable(),
+  canRetry: z.boolean(),
+});
+export type PhoneChatWake = z.infer<typeof PhoneChatWake>;
+
+const PhoneGroupKind = z.enum(["group", "dm", "agent"]);
+
+/**
+ * `POST /sync/:workspaceId/ops/chatContext` with `{ group }` or `{ threadId }`, each an engine ID. A stream says which
+ * of its lanes take a post or a message; a thread takes replies, and names its group's kind, or null on a file.
+ * `unmatched` lists the account's messages whose answered agent no computer ran when it was sent. `wakeCursor` is the
+ * account's wake position when this was read, which `wakeChanges` takes as `since`.
+ */
+export const PhoneChatContext = z.strictObject({
+  ok: z.literal(true),
+  conversation: z.discriminatedUnion("kind", [
+    z.strictObject({
+      kind: z.literal("stream"),
+      groupId: Id,
+      groupKind: PhoneGroupKind,
+      canPost: z.boolean(),
+      canSend: z.boolean(),
+    }),
+    z.strictObject({
+      kind: z.literal("thread"),
+      threadId: Id,
+      groupKind: PhoneGroupKind.nullable(),
+    }),
+  ]),
+  mentions: z.array(PhoneMentionCandidate).max(PHONE_MENTION_CANDIDATES_MAX),
+  wakes: z.array(PhoneChatWake),
+  unmatched: z.array(z.strictObject({ messageId: Id, threadId: Id })),
+  wakeCursor: Cursor,
+});
+export type PhoneChatContext = z.infer<typeof PhoneChatContext>;
+
+/**
+ * `GET /sync/:workspaceId/ops/wakeChanges?since=&hold=`: the workspace's threads whose wakes changed after `since`,
+ * after waiting up to `hold` ms when none has. An empty list moves the cursor only. `replace` asks the phone to read
+ * every context again.
+ */
+export const PhoneWakeChanges = z.union([
+  z.strictObject({ ok: z.literal(true), cursor: Cursor, replace: z.literal(true) }),
+  z.strictObject({
+    ok: z.literal(true),
+    cursor: Cursor,
+    threads: z.array(Id).max(PHONE_WAKE_CHANGES_MAX),
+  }),
+]);
+export type PhoneWakeChanges = z.infer<typeof PhoneWakeChanges>;

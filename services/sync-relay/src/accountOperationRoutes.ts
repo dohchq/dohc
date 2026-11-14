@@ -12,7 +12,9 @@ import {
 import { accountDisplayName, type LookupUserDisplayName } from "./accountDisplayName";
 import { readAccountFeed, type AccountFeedWaits } from "./accountFeed";
 import { isAccountOperation, runAccountOperation } from "./accountOperations";
+import { parseChatContext, readWakeChanges, runAccountChatContext } from "./accountTalkContext";
 import { bearerAccountSession } from "./accountWorkspaceRoutes";
+import type { ChatWakeWaits } from "./chatWakeRoutes";
 import { badRequest, notFound, RelayError, relayError } from "./errors";
 import { parseWorkspaceId } from "./requestInputs";
 import type { ServerCopies } from "./serverCopies";
@@ -59,9 +61,11 @@ export function parseAccountOperationRoute(parts: readonly string[]): AccountOpe
 }
 
 /**
- * A signed-in account's reads, chat writes, read marks, and wake retries in a workspace it owns,
- * through this server's copy of it, while it shows on the phone, and its
- * change feed, at `GET .../ops/changes?since=&hold=`. Only a Bearer session
+ * A signed-in account's reads, chat writes, read marks, wake retries, and
+ * conversation contexts in a workspace it owns, through this server's copy
+ * of it, while it shows on the phone; its change feed, at
+ * `GET .../ops/changes?since=&hold=`; and its wake changes there, at
+ * `GET .../ops/wakeChanges?since=&hold=`. Only a Bearer session
  * reaches them, and the route checks the operation and the owner before it
  * reads the arguments or the cursor. The sign-in, its fence, the owner and
  * "Show on phone" are checked again once the arguments arrive, after the
@@ -81,6 +85,8 @@ export function createAccountOperationRoute(options: {
   /** Keyed by sign-in. */
   limiter: TokenBucketLimiter;
   feedWaits: AccountFeedWaits;
+  /** The account's wake reads, which wake changes park in. */
+  wakeWaits: Pick<ChatWakeWaits, "wait">;
   /** The account's name, which a write's author takes. */
   lookupUserDisplayName?: LookupUserDisplayName;
   /** This server's public origin, which issues its accounts' actor keys. Writes need it. */
@@ -95,7 +101,8 @@ export function createAccountOperationRoute(options: {
     route: AccountOperationRoute,
   ): Promise<Response> {
     const feed = route.operation === "changes" && request.method === "GET";
-    if (!feed && request.method !== "POST") throw relayError("method_not_allowed");
+    const wakeFeed = route.operation === "wakeChanges" && request.method === "GET";
+    if (!feed && !wakeFeed && request.method !== "POST") throw relayError("method_not_allowed");
     const caller = await session(request);
     if (!limiter.allow(caller.sessionId, options.nowMs())) {
       throw new RelayError(
@@ -103,8 +110,8 @@ export function createAccountOperationRoute(options: {
         "This sign-in is asking faster than your server answers. Try again shortly.",
       );
     }
-    // The feed reads only the relay's log; every other operation needs a copy.
-    if (!feed && options.copies() === undefined) throw copiesUnavailable();
+    // The feeds read only the relay's own tables; every other operation needs a copy.
+    if (!feed && !wakeFeed && options.copies() === undefined) throw copiesUnavailable();
     // The phone reaches a workspace its account owns while it shows on the phone.
     const reaches = (userId: string) =>
       storage.workspaceIsOwnedBy(route.workspaceId, userId) &&
@@ -112,8 +119,17 @@ export function createAccountOperationRoute(options: {
     const write = isPhoneWriteOperation(route.operation);
     const mark = route.operation === "markRead";
     const retry = route.operation === "retryWake";
+    const context = route.operation === "chatContext";
     if (
-      !(feed || write || mark || retry || isAccountOperation(route.operation)) ||
+      !(
+        feed ||
+        wakeFeed ||
+        write ||
+        mark ||
+        retry ||
+        context ||
+        isAccountOperation(route.operation)
+      ) ||
       !reaches(caller.userId)
     )
       throw notFound();
@@ -133,6 +149,21 @@ export function createAccountOperationRoute(options: {
         workspaceId: route.workspaceId,
         userId: caller.userId,
         caller: caller.sessionId,
+        since: url.searchParams.get("since"),
+        holdMs: hold === null ? 0 : parseLogHold(hold),
+        signal: request.signal,
+        authorize,
+      });
+      await authorize();
+      return jsonResponse({ ok: true, ...answer });
+    }
+    if (wakeFeed) {
+      const url = new URL(request.url);
+      const hold = url.searchParams.get("hold");
+      const answer = await readWakeChanges(storage, options.wakeWaits, {
+        workspaceId: route.workspaceId,
+        accountId: caller.userId,
+        sessionId: caller.sessionId,
         since: url.searchParams.get("since"),
         holdMs: hold === null ? 0 : parseLogHold(hold),
         signal: request.signal,
@@ -184,6 +215,21 @@ export function createAccountOperationRoute(options: {
     }
     const copies = options.copies();
     if (copies === undefined) throw copiesUnavailable();
+    if (context) {
+      const { result, cursor } = await runAccountChatContext(
+        { storage, copies },
+        {
+          workspaceId: route.workspaceId,
+          accountId: caller.userId,
+          target: parseChatContext(args),
+          visitor,
+          authorize,
+          // One clock with the runner declarations and the wakes, so leases and waits read the same here.
+          nowMs: () => options.nowMs(),
+        },
+      );
+      return jsonResponse({ ok: true, result, cursor });
+    }
     if (retry) {
       const { result, cursor } = await runAccountRetryWake(
         { storage, copies },

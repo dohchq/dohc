@@ -621,6 +621,7 @@ export function createSyncRelayHandler({
         nowMs,
         limiter: accountOperationRateLimiter,
         feedWaits: accountFeedWaits,
+        wakeWaits: chatWakeWaits,
         lookupUserDisplayName,
         serverUrl: relayPublicOrigin,
       })
