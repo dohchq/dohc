@@ -5,6 +5,7 @@ import {
 import { createLiveConnectionAdmission } from "./liveConnectionAdmission";
 import { EventEmitter } from "node:events";
 import { createHash } from "node:crypto";
+import { format } from "node:util";
 import { afterEach, expect, it, vi } from "vitest";
 import {
   EngineClient,
@@ -702,6 +703,8 @@ it("logs a slow or unsuccessful submission with cut ids, timings and a fixed wor
     ["Live submit answered.", refused],
     ["Live submit answered.", { ...refused, repeated: 2 }],
   ]);
+  // The line is flat, so the console prints every figure, not an [Object] in its place.
+  expect(format(...log.mock.calls[0]!)).toMatch(/drainMs: 600,.*rows: 0,/s);
   const shown = JSON.stringify(log.mock.calls);
   // No part of a delivery id, which the client chooses, reaches the log.
   for (const hidden of [
