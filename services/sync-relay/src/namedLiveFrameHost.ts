@@ -499,8 +499,11 @@ function captureLiveFrameHost(options: {
         for (;;) {
           releaseValidationBytes();
           const waitAt = performance.now();
-          await waitForCapacity?.(admissionSignal);
-          timing.waitMs += performance.now() - waitAt;
+          try {
+            await waitForCapacity?.(admissionSignal);
+          } finally {
+            timing.waitMs += performance.now() - waitAt;
+          }
           check(admissionSignal);
           if (validate.hasCapacity?.() === false) continue;
           timing.attempts++;
@@ -573,7 +576,6 @@ function captureLiveFrameHost(options: {
             const freshAt = performance.now();
             try {
               await untilAborted(freshRead(), admissionSignal);
-              timing.freshMs += performance.now() - freshAt;
             } catch (error) {
               admissionSignal.throwIfAborted();
               if (error instanceof RelayError && error.code === "personal_agent_unavailable") {
@@ -582,6 +584,8 @@ function captureLiveFrameHost(options: {
               }
               close();
               return { result: "refused", reason: "authority-refused" };
+            } finally {
+              timing.freshMs += performance.now() - freshAt;
             }
             check(admissionSignal);
           }

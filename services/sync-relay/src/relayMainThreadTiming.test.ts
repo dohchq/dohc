@@ -6,6 +6,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import {
   asRelayWrite,
   loopHeldBetween,
+  recordLiveSubmit,
   startRelayMainThreadTiming,
   stopRelayMainThreadTiming,
 } from "./relayMainThreadTiming";
@@ -113,9 +114,26 @@ it("reports how long the loop was held between two times", async () => {
   while (Date.now() < until) {
     /* Hold the loop. */
   }
+  // Before the sampler has run again, as when a save ends straight after a long synchronous step.
+  expect(loopHeldBetween(from, performance.now())?.loopMaxMs).toBeGreaterThanOrEqual(120);
   await new Promise((resolve) => setTimeout(resolve, 60));
   const held = loopHeldBetween(from, performance.now());
   // The sampler runs every 25 ms, so at least 125 of the 150 ms show as one late sample.
   expect(held?.loopMaxMs).toBeGreaterThanOrEqual(120);
   expect(held!.loopHeldMs).toBeGreaterThanOrEqual(held!.loopMaxMs);
+});
+
+it("keeps each save result's figures apart, so fast refusals do not move successful saves", () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "performance"] });
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  startRelayMainThreadTiming();
+  recordLiveSubmit("success", { checkMs: 40, rows: 3, loopMaxMs: null });
+  recordLiveSubmit("success", { checkMs: 60, rows: 3, loopMaxMs: null });
+  for (let i = 0; i < 5; i++) recordLiveSubmit("capacity-refused", { checkMs: 1, rows: null });
+  vi.advanceTimersByTime(60_025);
+  const summary = log.mock.calls[0]?.[1] as { saves: Record<string, unknown> };
+  expect(summary.saves).toEqual({
+    success: { count: 2, checkMs: { p50: 60, p90: 60, max: 60 }, rows: { p50: 3, p90: 3, max: 3 } },
+    "capacity-refused": { count: 5, checkMs: { p50: 1, p90: 1, max: 1 } },
+  });
 });

@@ -23,6 +23,7 @@ const MAX_VALUES = 5000;
 
 type Values = number[];
 interface WriteFigures {
+  count: number;
   writeMs: Values;
   commitMs: Values;
   confirmMs: Values;
@@ -30,6 +31,8 @@ interface WriteFigures {
 }
 /** The engine's one-request-at-a-time line, for one method. */
 interface EngineFigures {
+  /** Requests the engine answered; the values below keep at most a minute's cap of them. */
+  count: number;
   waitMs: Values;
   serveMs: Values;
   /** Requests that left the line before they were sent: cancelled, timed out or stopped. */
@@ -40,8 +43,8 @@ interface Minute {
   loopLateMs: Values;
   writes: Map<RelayWriteKind, WriteFigures>;
   engine: Map<string, EngineFigures>;
-  saves: Map<string, Values>;
-  saveResults: Map<string, number>;
+  /** Each result's count and figures, so fast refusals do not move successful saves' figures. */
+  saves: Map<string, { count: number; figures: Map<string, Values> }>;
   dropped: number;
 }
 
@@ -62,7 +65,6 @@ const newMinute = (startedAt: number): Minute => ({
   writes: new Map(),
   engine: new Map(),
   saves: new Map(),
-  saveResults: new Map(),
   dropped: 0,
 });
 
@@ -127,6 +129,10 @@ export function loopHeldBetween(
     loopMaxMs = Math.max(loopMaxMs, late);
     loopHeldMs += late;
   }
+  // A sample that is due but has not run yet: the loop is still late by now, and that lateness began within the save.
+  const pending = Math.min(Math.max(0, to - timing.expected), to - from);
+  loopMaxMs = Math.max(loopMaxMs, pending);
+  loopHeldMs += pending;
   return { loopMaxMs, loopHeldMs };
 }
 
@@ -142,9 +148,10 @@ export function recordRelayWrite(write: {
   const kind = writeKinds.getStore() ?? "other";
   let figures = minute.writes.get(kind);
   if (!figures) {
-    figures = { writeMs: [], commitMs: [], confirmMs: [], checkpoints: 0 };
+    figures = { count: 0, writeMs: [], commitMs: [], confirmMs: [], checkpoints: 0 };
     minute.writes.set(kind, figures);
   }
+  figures.count++;
   keep(minute, figures.writeMs, write.writeMs);
   keep(minute, figures.commitMs, write.commitMs);
   if (write.confirmMs !== null) keep(minute, figures.confirmMs, write.confirmMs);
@@ -160,13 +167,14 @@ export function recordEngineRequest(method: string, waitMs: number, serveMs: num
   const minute = timing.minute;
   let figures = minute.engine.get(method);
   if (!figures) {
-    figures = { waitMs: [], serveMs: [], leftWaiting: 0 };
+    figures = { count: 0, waitMs: [], serveMs: [], leftWaiting: 0 };
     minute.engine.set(method, figures);
   }
   if (serveMs === null) {
     figures.leftWaiting++;
     return;
   }
+  figures.count++;
   keep(minute, figures.waitMs, waitMs);
   keep(minute, figures.serveMs, serveMs);
 }
@@ -178,11 +186,13 @@ export function recordLiveSubmit(
 ): void {
   if (!timing) return;
   const minute = timing.minute;
-  minute.saveResults.set(result, (minute.saveResults.get(result) ?? 0) + 1);
+  let saves = minute.saves.get(result);
+  if (!saves) minute.saves.set(result, (saves = { count: 0, figures: new Map() }));
+  saves.count++;
   for (const [name, value] of Object.entries(figures)) {
     if (value === null) continue;
-    let values = minute.saves.get(name);
-    if (!values) minute.saves.set(name, (values = []));
+    let values = saves.figures.get(name);
+    if (!values) saves.figures.set(name, (values = []));
     keep(minute, values, value);
   }
 }
@@ -195,7 +205,7 @@ function spread(values: Values) {
 }
 
 function reportMinute(minute: Minute) {
-  if (minute.writes.size === 0 && minute.saveResults.size === 0 && minute.engine.size === 0) return;
+  if (minute.writes.size === 0 && minute.saves.size === 0 && minute.engine.size === 0) return;
   try {
     const loop = minute.loopLateMs;
     console.error("Relay main thread, last minute.", {
@@ -211,7 +221,7 @@ function reportMinute(minute: Minute) {
         [...minute.writes].map(([kind, figures]) => [
           kind,
           {
-            count: figures.writeMs.length,
+            count: figures.count,
             writeMs: spread(figures.writeMs),
             commitMs: spread(figures.commitMs),
             confirmMs: figures.confirmMs.length ? spread(figures.confirmMs) : null,
@@ -223,21 +233,24 @@ function reportMinute(minute: Minute) {
         [...minute.engine].map(([method, figures]) => [
           method,
           {
-            count: figures.serveMs.length,
+            count: figures.count,
             waitMs: figures.waitMs.length ? spread(figures.waitMs) : null,
             serveMs: figures.serveMs.length ? spread(figures.serveMs) : null,
             ...(figures.leftWaiting ? { leftWaiting: figures.leftWaiting } : {}),
           },
         ]),
       ),
-      saves: minute.saveResults.size
-        ? {
-            results: Object.fromEntries(minute.saveResults),
+      saves: Object.fromEntries(
+        [...minute.saves].map(([result, saves]) => [
+          result,
+          {
+            count: saves.count,
             ...Object.fromEntries(
-              [...minute.saves].map(([name, values]) => [name, spread(values)]),
+              [...saves.figures].map(([name, values]) => [name, spread(values)]),
             ),
-          }
-        : null,
+          },
+        ]),
+      ),
       ...(minute.dropped ? { dropped: minute.dropped } : {}),
     });
   } catch {
