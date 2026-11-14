@@ -111,6 +111,8 @@ export function useT3CodeAccess(
   // Leaving is going away or the window showing another workspace.
   const asks = useRequestSequence([session]);
   const open = useRef(false);
+  // How many answers T3 Code has given this one's asks.
+  const answers = useRef(0);
   const failed = useRef(onFailure);
   failed.current = onFailure;
   const endWait = () =>
@@ -137,6 +139,7 @@ export function useT3CodeAccess(
     try {
       const state = await bridge().allowDohcInT3Code({ access: mode });
       if (!asks.isCurrent(token)) return false;
+      answers.current += 1;
       setAnswered(state);
       setFailedHere(false);
       allowed = true;
@@ -162,12 +165,14 @@ export function useT3CodeAccess(
   // since this one last asked.
   const readAgain = read.retry;
   // The answer this one holds stands until the new read is in, so the page
-  // never says dohc has less than it holds while it reads.
+  // never says dohc has less than it holds while it reads. An answer that
+  // arrives during the read is newer than the read, and stands after it.
   const retryRead = useCallback(async () => {
+    const held = answers.current;
     try {
       await readAgain();
     } finally {
-      setAnswered(null);
+      if (answers.current === held) setAnswered(null);
     }
   }, [readAgain]);
   const cancel = () => {

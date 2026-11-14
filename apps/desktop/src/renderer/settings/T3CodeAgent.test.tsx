@@ -1022,6 +1022,33 @@ it("names on the agent's page the mode the person allowed again in the Change th
   expect(await access.findByText(/^Allowed with Full access until /)).toBeTruthy();
 });
 
+it("keeps a newer answer on the agent's page when an older read comes in after it", async () => {
+  bridgeMock.readT3CodeConnection.mockResolvedValue(allowedHere("auto"));
+  const { page } = await openChiefPage();
+  const access = within(page.getByTestId("agent-thread-access"));
+  await access.findByText(/^Allowed with Auto until /);
+  // Closing the dialog starts a read, which is slow to answer.
+  await userEvent.click(page.getByRole("button", { name: "Change thread" }));
+  const box = changeDialog();
+  await box.findByRole("button", { name: "Allow again" });
+  const reading = deferred<T3CodeConnectionState>();
+  bridgeMock.readT3CodeConnection.mockReturnValueOnce(reading.promise);
+  await userEvent.click(box.getByRole("button", { name: "Cancel" }));
+  await waitFor(() => expect(bridgeMock.readT3CodeConnection).toHaveBeenCalledTimes(3));
+
+  // Meanwhile the person allows again on the page, with more.
+  bridgeMock.allowDohcInT3Code.mockResolvedValueOnce(allowedHere("full-access"));
+  await userEvent.click(page.getByRole("button", { name: "Allow again" }));
+  await userEvent.click(page.getByRole("radio", { name: "Full access" }));
+  await userEvent.click(page.getByRole("button", { name: "Allow with Full access" }));
+  await access.findByText(/^Allowed with Full access until /);
+
+  // The read was made before that, and says what dohc had then.
+  await act(async () => reading.resolve(allowedHere("auto")));
+  expect(access.getByText(/^Allowed with Full access until /)).toBeTruthy();
+  expect(access.queryByText(/^Allowed with Auto until /)).toBeNull();
+});
+
 it("says only until when, for a sign-in the person allowed on T3 Code's page", async () => {
   bridgeMock.readT3CodeConnection.mockResolvedValueOnce(allowedHere(null));
   const { page } = await openChiefPage();
