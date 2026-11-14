@@ -1554,6 +1554,67 @@ describe("discard", () => {
     stop();
   });
 
+  it("keeps a record withheld in memory when its withheld write fails before the rename, so its sender doesn't start again, and says a relaunch may send it", async () => {
+    const disk = durableDisk();
+    const server = testServer();
+    server.on("POST", path("post"), held);
+    const { outbox, wait, stop } = launch(disk, server);
+    await ready(outbox);
+    const queued = await outbox.enqueue({ workspaceId: "ws-1", write: post("Hello") });
+    await vi.waitFor(() => expect(requests(server, "post")).toHaveLength(1));
+
+    disk.failWrites = "write";
+    await expect(
+      outbox.discard({ kind: "record", operationId: queued.operationId }),
+    ).rejects.toEqual(new OutboxError("withheld-in-memory", queued.operationId));
+    disk.failWrites = null;
+    expect(server.calls[0]?.signal.aborted).toBe(true);
+    expect(record(outbox, 1)).toMatchObject({ stage: "sending", withheld: true });
+    // The disk still holds the sendable version, which a relaunch would send.
+    expect(onDisk(disk, 1)).toMatchObject({ stage: "sending", withheld: false });
+    outbox.wake();
+    wait.release();
+    await settled();
+    expect(requests(server, "post")).toHaveLength(1);
+
+    await outbox.discard({ kind: "record", operationId: queued.operationId });
+    expect(outbox.state().records).toEqual([]);
+    expect(records(disk)).toEqual([]);
+    expect(requests(server, "post")).toHaveLength(1);
+    stop();
+  });
+
+  it.each(["unlink", "sync-folder"] as const)(
+    "says a relaunch may send a record whose withheld write didn't sync and whose delete fails at the %s, and keeps it withheld in memory",
+    async (failRemoves) => {
+      const disk = durableDisk();
+      const server = testServer();
+      server.on("POST", path("post"), held);
+      const { outbox, wait, stop } = launch(disk, server);
+      await ready(outbox);
+      const queued = await outbox.enqueue({ workspaceId: "ws-1", write: post("Hello") });
+      await vi.waitFor(() => expect(requests(server, "post")).toHaveLength(1));
+
+      disk.failWrites = "sync-folder";
+      disk.failRemoves = failRemoves;
+      await expect(
+        outbox.discard({ kind: "record", operationId: queued.operationId }),
+      ).rejects.toEqual(new OutboxError("withheld-in-memory", queued.operationId));
+      disk.failWrites = null;
+      disk.failRemoves = null;
+      expect(record(outbox, 1)).toMatchObject({ stage: "sending", withheld: true });
+      outbox.wake();
+      wait.release();
+      await settled();
+      expect(requests(server, "post")).toHaveLength(1);
+
+      await outbox.discard({ kind: "record", operationId: queued.operationId });
+      expect(outbox.state().records).toEqual([]);
+      expect(records(disk)).toEqual([]);
+      stop();
+    },
+  );
+
   it("waits for the record's disk change under way, and its sender writes and asks nothing after", async () => {
     const disk = durableDisk();
     const server = testServer();
@@ -1643,6 +1704,47 @@ describe("discard", () => {
     );
     expect(outbox.state().records).toHaveLength(2);
     expect(records(disk)).toEqual(["m-000000000001", "m-000000000002"]);
+    stop();
+  });
+
+  it("refuses to delete a refused post while a withheld reply in its thread still waits, so a retried reply is refused too", async () => {
+    const disk = durableDisk();
+    placeRecord(disk, 1, {
+      operationId: "op-parent",
+      write: post("Plans"),
+      target: { kind: "stream", id: "group-1" },
+      stage: "refused",
+      attempted: true,
+      result: { kind: "refused", reason: "Couldn't send", threadId: null, winnerMessageId: null },
+    });
+    // A reply that already has its thread, withheld because its sendable write failed.
+    placeRecord(disk, 2, {
+      operationId: "op-child",
+      write: reply("Yes", "thread-1"),
+      target: { kind: "thread", id: "thread-1" },
+      dependsOn: "op-parent",
+      withheld: true,
+    });
+    const server = testServer();
+    server.on("POST", path("reply"), held);
+    const { outbox, stop } = launch(disk, server);
+    await ready(outbox);
+    await settled();
+    expect(stages(outbox)).toEqual(["refused", "queued"]);
+    await expect(outbox.discard({ kind: "record", operationId: "op-parent" })).rejects.toEqual(
+      new OutboxError("has-dependents"),
+    );
+    expect(records(disk)).toEqual(["m-000000000001", "m-000000000002"]);
+
+    await outbox.retryEnqueue("op-child");
+    await vi.waitFor(() =>
+      expect(record(outbox, 2)).toMatchObject({
+        stage: "refused",
+        result: { reason: "The message it replies to wasn't sent" },
+      }),
+    );
+    await settled();
+    expect(requests(server, "reply")).toHaveLength(0);
     stop();
   });
 
