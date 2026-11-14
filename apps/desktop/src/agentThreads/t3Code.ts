@@ -28,6 +28,10 @@ export type T3CodeProblem =
   | "thread-gone"
   /** T3 Code has no run with this id in the thread. */
   | "run-gone"
+  /** Someone already answered the question, in T3 Code or in dohc. */
+  | "question-answered"
+  /** The question no longer waits for an answer. */
+  | "question-closed"
   /** T3 Code refused the call for another reason. */
   | "refused"
   /** T3 Code answered in a shape dohc does not know. */
@@ -498,6 +502,21 @@ export async function openT3CodeSession(input: {
         // T3 Code's words for a thread it no longer has.
         if (words && /thread_not_found|is no longer available/u.test(words))
           throw new T3CodeError("thread-gone", "This thread is no longer in T3 Code.");
+        // T3 Code's words for a question that takes no answer. They are read
+        // whole: the words that tell follow a request id of any length.
+        if (words && tool === "t3_pending_request") {
+          if (/already answered|Runtime request \S+ is resolved/u.test(words))
+            throw new T3CodeError("question-answered", "This question was already answered.");
+          if (
+            /no longer pending|pending user-input request was not found|Runtime request \S+ (?:was not found|is \w+)/u.test(
+              words,
+            )
+          )
+            throw new T3CodeError(
+              "question-closed",
+              "This question no longer waits for an answer.",
+            );
+        }
         // T3 Code's own words reach Notices, so they are kept short.
         throw new T3CodeError("refused", words?.slice(0, 300) ?? "T3 Code refused the call.");
       }
@@ -796,19 +815,12 @@ const QuestionRead = z.object({
     .max(20),
 });
 
-// T3 Code's words for a question that no longer takes an answer. It refuses a
-// read and an answer the same way.
+// A question that no longer takes an answer. T3 Code refuses a read and an
+// answer the same way.
 function closedQuestion(error: unknown): "already-answered" | "closed" | null {
-  if (!(error instanceof T3CodeError) || error.problem !== "refused") return null;
-  if (/already answered|Runtime request \S+ is resolved/u.test(error.message))
-    return "already-answered";
-  if (
-    /no longer pending|pending user-input request was not found|Runtime request \S+ (?:was not found|is \w+)/u.test(
-      error.message,
-    )
-  )
-    return "closed";
-  return null;
+  if (!(error instanceof T3CodeError)) return null;
+  if (error.problem === "question-answered") return "already-answered";
+  return error.problem === "question-closed" ? "closed" : null;
 }
 
 /** T3 Code's ids for the questions that wait on the person in a thread. */

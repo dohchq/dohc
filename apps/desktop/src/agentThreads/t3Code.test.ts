@@ -694,6 +694,9 @@ describe("T3 Code's thread tools", () => {
       ["invalid_request: The user-input request was already answered.", "already-answered"],
       // The same, when the other answer landed while this one was on its way.
       ["orchestration_error: Runtime request q-1 is resolved.", "already-answered"],
+      // The words that tell follow the request's id, however long it is.
+      [`orchestration_error: Runtime request ${"q".repeat(400)} is resolved.`, "already-answered"],
+      [`orchestration_error: Runtime request ${"q".repeat(400)} is expired.`, "closed"],
       ["orchestration_error: Runtime request q-1 is cancelled.", "closed"],
       ["orchestration_error: Runtime request q-1 was not found.", "closed"],
       ["invalid_request: The user-input request is no longer pending (cancelled).", "closed"],
