@@ -4,6 +4,7 @@ import {
   createNamedLiveBrowserTransport,
   parseNamedLiveBrowserLimits,
 } from "@dohc/ydoc-projection/named-live-browser-transport";
+import { fetchShareWeb } from "./apiVersion";
 import { namedRequest } from "./namedRecipient";
 
 const exact = (value: unknown, keys: string): value is Record<string, unknown> =>
@@ -12,10 +13,44 @@ const exact = (value: unknown, keys: string): value is Record<string, unknown> =
   !Array.isArray(value) &&
   Object.keys(value).sort().join() === keys;
 
+// What the note's host applied, when it holds the note awake. Anything else is no state, and the page opens as
+// before.
+async function earlyState(discriminator: string, path: string, signal: AbortSignal) {
+  try {
+    const response = await fetchShareWeb("/api/live/link-document-state", {
+      method: "POST",
+      credentials: "same-origin",
+      cache: "no-store",
+      redirect: "error",
+      signal,
+      headers: { accept: "application/octet-stream", "content-type": "application/json" },
+      body: JSON.stringify({ discriminator, path }),
+    });
+    const through = response.headers.get("x-dohc-live-applied-through") ?? "";
+    if (
+      response.status !== 200 ||
+      response.redirected ||
+      response.headers.get("content-type") !== "application/octet-stream" ||
+      !/^\d+$/.test(through)
+    ) {
+      await response.body?.cancel().catch(() => {});
+      return undefined;
+    }
+    return {
+      objectId: response.headers.get("x-dohc-live-object-id"),
+      through: Number(through),
+      bytes: new Uint8Array(await response.arrayBuffer()),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 /** The discriminator selects a protected cookie; it never grants access by itself. */
 export async function openLinkDocument(discriminator: string, path: string, signal: AbortSignal) {
   if (!/^[A-Za-z0-9_-]{12}$/.test(discriminator) || !/\.md$/i.test(path) || path.length > 1024)
     throw Error("Invalid file");
+  const state = earlyState(discriminator, path, signal);
   const metadata = await namedRequest("/api/live/link-document", signal, { discriminator, path });
   signal.throwIfAborted();
   if (!exact(metadata, "limits,objectId")) throw Error("Invalid file");
@@ -54,5 +89,13 @@ export async function openLinkDocument(discriminator: string, path: string, sign
       return { ticketToken, discriminator, websocketUrl: url.href };
     },
   });
-  return transport.select({ objectId });
+  const session = transport.select({ objectId });
+  // The provider takes the state only before it asks the host for one, so a late answer is dropped.
+  void state
+    .then((value) => {
+      if (value?.objectId === objectId) session.seed(value.bytes, value.through);
+    })
+    // An early state the page cannot apply leaves it to open as before.
+    .catch(() => {});
+  return session;
 }

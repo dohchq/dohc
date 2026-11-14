@@ -862,6 +862,44 @@ it("reads a ticket that never answers as the server's, and an earlier request th
     expect(f.value.state()).toMatchObject({ status: "disconnected", reason: "connect-timeout" });
   }
 });
+it("takes edits on the host's early state while a busy server holds the ticket, and none once that attempt stops", async () => {
+  vi.useFakeTimers();
+  const f = fixture(
+      limits(),
+      (_, signal) =>
+        new Promise<never>((_, reject) =>
+          signal.addEventListener("abort", () => reject(signal.reason)),
+        ),
+    ),
+    state = document("base");
+  const connecting = f.value.reconnect();
+  expect(edit(f.value, " early")).toBe(false);
+  expect(
+    f.value.seed(
+      encodeLiveFrameSync(
+        {
+          binding,
+          hostVector: Y.encodeStateVector(state),
+          missingStateUpdate: Y.encodeStateAsUpdate(state),
+        },
+        limits().provider.frames.receive,
+      ),
+      3,
+    ),
+  ).toBe(true);
+  expect(f.value.state()).toMatchObject({ status: "authorizing", typingAhead: true });
+  expect(edit(f.value, " draft")).toBe(true);
+  expect(f.value.state().pendingUpdates).toBe(1);
+  await vi.advanceTimersByTimeAsync(2000);
+  await connecting;
+  expect(f.value.state()).toMatchObject({
+    status: "disconnected",
+    reason: "host-unavailable",
+    pendingUpdates: 1,
+  });
+  expect(edit(f.value, " more")).toBe(false);
+  expect(f.value.body.toString()).toContain("base draft");
+});
 it("backs off repeated connection failures and cancels recovery when paused or replaced", async () => {
   const f = await live();
   vi.useFakeTimers();

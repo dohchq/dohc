@@ -32,6 +32,16 @@ export interface NamedLiveBrowserLimits {
 export interface NamedLiveBrowserState extends Omit<NamedLiveProviderState, "status"> {
   status: NamedLiveProviderState["status"] | "authorizing" | "refused";
 }
+/**
+ * Whether the page takes edits: live, or holding the host's early state while it opens. A page that stopped
+ * opening takes none until it tries again, so no more words wait on an attempt that may never succeed.
+ */
+export function namedLiveEditable(state: NamedLiveBrowserState): boolean {
+  return (
+    state.status === "live" ||
+    (state.typingAhead && ["authorizing", "connecting", "syncing"].includes(state.status))
+  );
+}
 type BrowserSocket = Pick<
   WebSocket,
   | "readyState"
@@ -630,10 +640,11 @@ export function createNamedLiveBrowserTransport<
       },
       /** Editors must use this guard before their synchronous Yjs transaction. */
       edit(change: () => void): boolean {
-        if (closed || state().status !== "live") return false;
+        if (closed || !namedLiveEditable(state())) return false;
         provider.doc.transact(change);
         return true;
       },
+      seed: provider.seed,
       reconnect,
       disconnect() {
         if (closed || ["quarantined", "refused"].includes(state().status)) return;

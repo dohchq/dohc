@@ -1,5 +1,9 @@
 // @vitest-environment jsdom
 import { afterEach, expect, it, vi } from "vitest";
+import * as Y from "yjs";
+import { encodeLiveFrameSync } from "@dohc/live-session-contract/live-frame";
+import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
+import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { openLinkDocument } from "./linkLive";
 import * as browserTransport from "@dohc/ydoc-projection/named-live-browser-transport";
 import {
@@ -81,6 +85,7 @@ it("opens the link socket with a one-use ticket and cookie credentials without a
       });
       return Response.json({ objectId: "object-a", limits });
     }
+    if (url === "/api/live/link-document-state") return new Response(null, { status: 204 });
     expect(url).toBe("/api/live/link-ticket");
     expect(JSON.parse(String(init?.body))).toEqual({
       discriminator: "abcdefghijkl",
@@ -102,7 +107,8 @@ it("opens the link socket with a one-use ticket and cookie credentials without a
         protocols: ["dohc-live-v1", `dohc-live-ticket.${"ab".repeat(32)}`],
       },
     ]);
-    expect(fetch).toHaveBeenCalledTimes(2);
+    // The file, its early state, then the ticket.
+    expect(fetch).toHaveBeenCalledTimes(3);
     expect(session.state().status).toBe("connecting");
     expect(create.mock.calls[0]![0].recordingContext!({ objectId: "object-a" })).toEqual({
       kind: "link",
@@ -183,7 +189,7 @@ it.each([
     await session.reconnect();
     expect(session.state()).toMatchObject({ status: "disconnected", reason });
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(3);
   } finally {
     session.close();
     vi.useRealTimers();
@@ -229,11 +235,11 @@ it("asks once on Try again while live editing is stopped, and opens the file onc
     await session.reconnect();
     expect(session.state()).toMatchObject({ status: "disconnected", reason: "live-stopped" });
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(fetch).toHaveBeenCalledTimes(4);
     stopped = false;
     await session.reconnect();
     expect(session.state().status).toBe("connecting");
-    expect(fetch).toHaveBeenCalledTimes(4);
+    expect(fetch).toHaveBeenCalledTimes(5);
   } finally {
     session.close();
     vi.useRealTimers();
@@ -277,7 +283,54 @@ it("tries a busy link ticket again by itself and opens the file once the server 
     expect(session.state()).toMatchObject({ status: "disconnected", reason: "host-unavailable" });
     busy = false;
     await vi.waitFor(() => expect(session.state().status).toBe("connecting"));
-    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(fetch).toHaveBeenCalledTimes(4);
+  } finally {
+    session.close();
+  }
+});
+const binding: LiveObjectBinding = {
+  workspaceId: "workspace",
+  mainVersionId: "main",
+  objectId: "document",
+  lineageClaimId: "lineage",
+  currentPath: "docs/a.md",
+  selectorPaths: ["docs/a.md"],
+  restoreFenceGeneration: 0,
+};
+it("takes the host's early state for a link's file before the page asks for a ticket", async () => {
+  const host = markdownToYDoc("Shared text");
+  const fetch = vi.fn(async (path: string, init: RequestInit) => {
+    if (path === "/api/live/link-document") return Response.json({ objectId: "document", limits });
+    if (path === "/api/live/link-document-state") {
+      expect(JSON.parse(init.body as string)).toEqual({
+        discriminator: "abcdefghijkl",
+        path: "docs/a.md",
+      });
+      const bytes = encodeLiveFrameSync(
+        {
+          binding,
+          hostVector: Y.encodeStateVector(host),
+          missingStateUpdate: Y.encodeStateAsUpdate(host),
+        },
+        limits.provider.frames.receive,
+      );
+      return new Response(bytes as Uint8Array<ArrayBuffer>, {
+        headers: {
+          "content-type": "application/octet-stream",
+          "x-dohc-live-object-id": "document",
+          "x-dohc-live-applied-through": "7",
+        },
+      });
+    }
+    throw new Error(`Unexpected request ${path}`);
+  });
+  vi.stubGlobal("fetch", fetch);
+  vi.stubGlobal("location", { origin: "https://share.example" });
+  const session = await openLinkDocument("abcdefghijkl", "docs/a.md", new AbortController().signal);
+  try {
+    await vi.waitFor(() => expect(session.state().typingAhead).toBe(true));
+    expect(session.state()).toMatchObject({ status: "disconnected", binding });
+    expect(session.body.toString()).toContain("Shared text");
   } finally {
     session.close();
   }

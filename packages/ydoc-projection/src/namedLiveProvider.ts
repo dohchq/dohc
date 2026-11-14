@@ -42,6 +42,8 @@ export interface NamedLiveProviderState {
   readonly lastApplied: LiveUpdateHostApplicationAck | null;
   /** A bounded current subset. An overflowed snapshot cannot establish departures by omission. */
   readonly membership: LiveMembershipFrame | null;
+  /** The page holds the host's early state and takes edits, which wait until it is live. */
+  readonly typingAhead: boolean;
 }
 
 interface PendingUpdate {
@@ -49,7 +51,8 @@ interface PendingUpdate {
   readonly bytes: Uint8Array;
   digest?: string;
   readonly epochs: number[];
-  readonly authorContext?: LiveAuthorContext;
+  // Missing on an edit taken ahead before the page knew its recording context; its first send records it.
+  authorContext?: LiveAuthorContext;
 }
 interface Transfer {
   readonly begin: LiveFrameBegin;
@@ -132,6 +135,16 @@ export function createNamedLiveProvider(
   let lastApplied: LiveUpdateHostApplicationAck | null = null;
   let membership: LiveMembershipFrame | null = null;
   let highestObservedCursor = 0;
+  // An early state is taken only before the page sends any route its vector. The host reads a route's first sync
+  // after that vector arrives, so on one binding that sync is never older than the early state.
+  let seeded = false,
+    synced = false,
+    vectorAsked = false;
+  const typingAhead = () => seeded && !synced && status !== "quarantined" && status !== "closed";
+  const contextNow = () =>
+    parseLiveAuthorContext(
+      typeof recordingContext === "function" ? recordingContext() : recordingContext,
+    );
   const state = (): NamedLiveProviderState => ({
     status,
     reason,
@@ -141,6 +154,7 @@ export function createNamedLiveProvider(
     pendingBytes,
     lastApplied: lastApplied && { ...lastApplied },
     membership: membership && { ...membership, members: [...membership.members] },
+    typingAhead: typingAhead(),
   });
   function notify() {
     for (const listener of listeners) {
@@ -200,6 +214,7 @@ export function createNamedLiveProvider(
         if (!control && !held.transfer) {
           if (held.epoch === undefined) return;
           if (!held.vectorSent) {
+            vectorAsked = true;
             const bytes = Y.encodeStateVector(doc);
             if (bytes.length > limits.frames.receive.maxStateVectorBytes) {
               quarantine("vector-limit");
@@ -225,6 +240,13 @@ export function createNamedLiveProvider(
               quarantine("delivery-attempt-limit");
               return;
             }
+            if (recordingContext !== undefined && !update.authorContext)
+              try {
+                update.authorContext = contextNow();
+              } catch {
+                quarantine("invalid-recording-context");
+                return;
+              }
             update.digest ??= await digest(update.bytes);
             if (!current(held)) return;
             update.epochs.push(held.epoch);
@@ -430,6 +452,7 @@ export function createNamedLiveProvider(
                 kind: "sync-applied",
                 appliedThroughJournalCursor: begin.appliedThroughJournalCursor,
               });
+              synced = true;
               status = "live";
               notify();
             } else if (begin.purpose === "applied-update") {
@@ -466,7 +489,7 @@ export function createNamedLiveProvider(
 
   function localUpdate(bytes: Uint8Array, origin: unknown) {
     if (origin === REMOTE || status === "closed" || status === "quarantined") return;
-    if (status !== "live") {
+    if (status !== "live" && !typingAhead()) {
       quarantine("edit-while-unavailable");
       return;
     }
@@ -475,17 +498,16 @@ export function createNamedLiveProvider(
       return;
     }
     let authorContext: LiveAuthorContext | undefined;
-    try {
-      authorContext =
-        recordingContext === undefined
-          ? undefined
-          : parseLiveAuthorContext(
-              typeof recordingContext === "function" ? recordingContext() : recordingContext,
-            );
-    } catch {
-      quarantine("invalid-recording-context");
-      return;
-    }
+    if (recordingContext !== undefined)
+      try {
+        authorContext = contextNow();
+      } catch {
+        // A link page learns its identity with its first ticket, which can come after the edits it took ahead.
+        if (status === "live") {
+          quarantine("invalid-recording-context");
+          return;
+        }
+      }
     // Edits made while an update is in flight leave together as one update, so
     // typing costs one host admission per round trip rather than one per key.
     // The head is never merged: it may have been sent, and a retry must resend
@@ -535,6 +557,45 @@ export function createNamedLiveProvider(
       return () => {
         listeners.delete(listener);
       };
+    },
+    /**
+     * Takes the host's early state, an initial sync's bytes through `throughJournalCursor`, so the page can be
+     * edited before it is live. Refused once any route has been sent the page's vector, or when the state does not
+     * fit this document.
+     */
+    seed(bytes: Uint8Array, throughJournalCursor: number): boolean {
+      if (seeded || vectorAsked || synced || status === "closed" || status === "quarantined")
+        return false;
+      if (!Number.isSafeInteger(throughJournalCursor) || throughJournalCursor < 0) return false;
+      let sync: ReturnType<typeof decodeLiveFrameSync>,
+        hostVector: Map<number, number>,
+        parsed: LiveObjectBinding;
+      try {
+        sync = decodeLiveFrameSync(bytes, limits.frames.receive);
+        hostVector = Y.decodeStateVector(sync.hostVector);
+        Y.decodeUpdate(sync.missingStateUpdate);
+        parsed = parseLiveObjectBinding(sync.binding);
+      } catch {
+        return false;
+      }
+      if (
+        parsed.mainVersionId !== "main" ||
+        (expected &&
+          ((expected.workspaceId !== undefined && parsed.workspaceId !== expected.workspaceId) ||
+            parsed.objectId !== expected.objectId))
+      )
+        return false;
+      binding = parsed;
+      highestObservedCursor = throughJournalCursor;
+      seeded = true;
+      Y.applyUpdate(doc, sync.missingStateUpdate, REMOTE);
+      const appliedVector = Y.decodeStateVector(Y.encodeStateVector(doc));
+      if ([...hostVector].some(([client, clock]) => (appliedVector.get(client) ?? 0) < clock)) {
+        quarantine("incomplete-sync");
+        return false;
+      }
+      notify();
+      return true;
     },
     connect(transport: NamedLiveTransport) {
       if (status === "closed" || status === "quarantined")
