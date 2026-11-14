@@ -64,8 +64,8 @@ export interface ForwardingDependencies {
    * its thread again. `agentId` is null when dohc could not read the workspace.
    */
   onProblem(workspaceId: string, agentId: string | null, problem: unknown): void;
-  /** The tool took a message. A failure here does not undo that. */
-  onForwarded?(forwarded: ForwardedRequest): void | Promise<void>;
+  /** The tool took a message. Forwarding does not wait for this, and a failure here does not undo that. */
+  onForwarded?(forwarded: ForwardedRequest): void;
   /** How long to wait before each try after a failure. The last one repeats. */
   retryAfterMs?: readonly number[];
 }
@@ -177,7 +177,7 @@ export function createForwarding(dependencies: ForwardingDependencies) {
       }),
     });
     try {
-      await dependencies.onForwarded?.({
+      dependencies.onForwarded?.({
         workspaceId: workspace.id,
         agent,
         chatThreadId: request.threadId,

@@ -17,6 +17,9 @@ export function createAgentThreadLinesStore(
   let lines = NONE;
   const listeners = new Set<() => void>();
   let stopListening: (() => void) | null = null;
+  // Counts each time the store starts listening, so an answer to a read made
+  // for an earlier time says nothing about this one.
+  let listening = 0;
 
   function receive(event: AgentThreadLinesEvent): void {
     if (event.workspaceId !== workspaceId || event.revision <= revision) return;
@@ -29,10 +32,11 @@ export function createAgentThreadLinesStore(
   // A Try again after the store stopped showing does nothing.
   function read(): void {
     if (!stopListening) return;
+    const during = listening;
     void bridge()
       .readAgentThreadLines({ workspaceId })
       .then(receive, (error: unknown) => {
-        if (stopListening) onReadError(error, read);
+        if (stopListening && during === listening) onReadError(error, read);
       });
   }
 
@@ -40,6 +44,7 @@ export function createAgentThreadLinesStore(
     subscribe(listener: () => void): () => void {
       listeners.add(listener);
       if (!stopListening) {
+        listening += 1;
         stopListening = bridge().onAgentThreadLines(receive);
         read();
       }

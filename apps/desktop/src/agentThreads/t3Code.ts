@@ -645,6 +645,8 @@ export interface T3CodeThreadState {
   title: string;
   /** A run is going now. */
   working: boolean;
+  /** The run that is going now. It may be older than every run in `runs`. */
+  activeRunId: string | null;
   /** Something waits on the person in T3 Code: a question or an approval. */
   waitingOnPerson: boolean;
   /** The thread was archived or settled, so it takes no more work. */
@@ -707,6 +709,7 @@ export async function readT3CodeThread(
   return {
     title: thread.title,
     working: thread.activeRunId !== null,
+    activeRunId: thread.activeRunId,
     waitingOnPerson: thread.pendingRequestCount > 0,
     closed: thread.archived || thread.settled,
     runs: recentRuns.map((run) => ({

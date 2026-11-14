@@ -171,7 +171,7 @@ function Lines(props: {
         let newest: AgentThreadLine | undefined;
         for (const line of all) {
           if (line.agentId !== agent.id || !chatThreadIds.includes(line.chatThreadId)) continue;
-          if (!newest || line.sinceMs > newest.sinceMs) newest = line;
+          if (!newest || line.forwardedAtMs > newest.forwardedAtMs) newest = line;
         }
         return newest ? [{ agent, line: newest }] : [];
       }),

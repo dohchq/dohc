@@ -57,7 +57,14 @@ function setup(
   const replies: Array<{ authorAgentId?: string }> = [];
   // What the tool says the thread is doing.
   const tool: { state: T3CodeThreadState } = {
-    state: { title: "Chief", working: true, waitingOnPerson: false, closed: false, runs: [] },
+    state: {
+      title: "Chief",
+      working: true,
+      activeRunId: null,
+      waitingOnPerson: false,
+      closed: false,
+      runs: [],
+    },
   };
   let saved: ForwardRow[] = [];
   const ledger: ForwardLedger = {
@@ -317,7 +324,14 @@ describe("agent threads", () => {
 
     await vi.waitFor(() =>
       expect(agentThreads.lines(WORKSPACE)).toEqual([
-        { agentId: "chief", chatThreadId: "thread-a", state: "working", sinceMs: 200 },
+        // The run began before the message went, so its time counts from the message.
+        {
+          agentId: "chief",
+          chatThreadId: "thread-a",
+          state: "working",
+          sinceMs: 9_000,
+          forwardedAtMs: 9_000,
+        },
       ]),
     );
     expect(sent).toHaveLength(1);

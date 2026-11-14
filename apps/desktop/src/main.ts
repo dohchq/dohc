@@ -801,6 +801,7 @@ import { runLogKeepDays } from "./agents/runLogRetention";
 import {
   agentIdsToWake,
   agentYouRun,
+  forwardingAgents,
   automationAgent,
   listAgents,
   type Agent,
@@ -10747,11 +10748,12 @@ function registerIpcHandlers(): void {
   });
   registerOperations(operationBoundary, agentThreadOperations, {
     readAgentThreadLines: ({ workspaceId }) => agentThreadLinesOf(workspaceId),
-    openAgentThread: async ({ agentId }) => {
-      const { agents } = (await readCachedUserSettingsFile(stateDir())).settings;
-      const thread = agents[agentId]?.thread;
-      if (!thread) throw new Error("This agent has no thread to open.");
-      await shell.openExternal(await t3Code().threadLink(thread.id));
+    openAgentThread: async ({ workspaceId, agentId }) => {
+      // Only a thread whose agent serves the workspace this window has open.
+      const { settings } = await readCachedUserSettingsFile(stateDir());
+      const agent = forwardingAgents(settings, workspaceId).find(({ id }) => id === agentId);
+      if (!agent) throw new Error("This agent has no thread for this workspace.");
+      await shell.openExternal(await t3Code().threadLink(agent.thread.id));
     },
     readT3CodeConnection: t3CodeConnectionState,
     allowDohcInT3Code: async () => {

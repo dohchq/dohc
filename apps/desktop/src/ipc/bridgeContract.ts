@@ -8200,6 +8200,9 @@ export const AgentThreadLine = z.strictObject({
   state: z.enum(["in-line", "working", "waiting-in-tool", "silent"]),
   // When this state began.
   sinceMs: z.number(),
+  // When the message went to the thread. A chat that shows several chat
+  // threads shows the line of the newest.
+  forwardedAtMs: z.number(),
 });
 export type AgentThreadLine = z.infer<typeof AgentThreadLine>;
 export const AgentThreadLinesEvent = z.strictObject({

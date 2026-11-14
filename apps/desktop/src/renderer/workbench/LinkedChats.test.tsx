@@ -327,7 +327,15 @@ it("shows what an agent's thread is doing over the composer of a file's chat", a
     pushLines({
       workspaceId: "workspace-1",
       revision: 2,
-      lines: [{ agentId: "nova", chatThreadId: "thread-9", state: "silent", sinceMs: 1 }],
+      lines: [
+        {
+          agentId: "nova",
+          chatThreadId: "thread-9",
+          state: "silent",
+          sinceMs: 1,
+          forwardedAtMs: 1,
+        },
+      ],
     }),
   );
   expect(screen.queryByTestId("agent-thread-line")).toBeNull();

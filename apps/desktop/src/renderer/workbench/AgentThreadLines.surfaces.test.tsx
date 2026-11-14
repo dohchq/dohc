@@ -50,6 +50,7 @@ const inShell = (chat: ReactNode) => (
 const line = (chatThreadId: string, state: AgentThreadLine["state"]): AgentThreadLine => ({
   agentId: "nova",
   chatThreadId,
+  forwardedAtMs: 0,
   state,
   sinceMs: NOW,
 });

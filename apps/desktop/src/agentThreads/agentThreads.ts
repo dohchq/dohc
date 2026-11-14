@@ -183,12 +183,12 @@ export function createAgentThreads(dependencies: AgentThreadsDependencies) {
           subscribeChatWrites(workspaceId, () => {
             void forwarding.wake(workspaceId);
             // A reply takes its line away at once.
-            void states.check();
+            void states.check(workspaceId);
           }),
         );
       if (hadThreadAgent === null) keepOrDropSignIn();
       void forwarding.wake(workspaceId);
-      void states.check();
+      void states.check(workspaceId);
     },
     /** What each agent thread is doing with the last message forwarded from each of the workspace's chat threads. */
     lines: (workspaceId: string): AgentThreadLine[] => states.lines(workspaceId),

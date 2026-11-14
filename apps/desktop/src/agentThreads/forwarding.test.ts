@@ -167,6 +167,17 @@ describe("forwarding", () => {
     expect(marks).toEqual(["m1"]);
   });
 
+  it("does not wait for what follows a forward", async () => {
+    const { forwarding, marks } = setup([request("m1", 10), request("m2", 20)], {
+      // A ledger write that never ends.
+      onForwarded: (() => new Promise<void>(() => {})) as () => void,
+    });
+
+    await forwarding.wake(WORKSPACE);
+
+    expect(marks).toEqual(["m1", "m2"]);
+  });
+
   it("marks a message read even when what follows a forward fails", async () => {
     const { forwarding, marks, problems } = setup([request("m1", 10)], {
       onForwarded: () => {

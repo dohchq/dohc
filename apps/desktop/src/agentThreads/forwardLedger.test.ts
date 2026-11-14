@@ -52,11 +52,11 @@ describe("the ledger of forwarded messages", () => {
     await ledger.put(row());
     await ledger.put(row({ agentId: "scout" }));
 
-    await ledger.put(row({ messageId: "m2", reminder: { state: "recorded" } }));
+    await ledger.put(row({ messageId: "m2", reminder: { state: "recorded", atMs: 2_000 } }));
 
     expect(await ledger.list()).toEqual([
       row({ agentId: "scout" }),
-      row({ messageId: "m2", reminder: { state: "recorded" } }),
+      row({ messageId: "m2", reminder: { state: "recorded", atMs: 2_000 } }),
     ]);
   });
 

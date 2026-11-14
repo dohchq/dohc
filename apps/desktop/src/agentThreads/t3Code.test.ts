@@ -341,6 +341,7 @@ describe("T3 Code's thread tools", () => {
     await expect(readT3CodeThread(session, "t1")).resolves.toEqual({
       title: "Chief of Staff",
       working: true,
+      activeRunId: "run-9",
       waitingOnPerson: true,
       closed: false,
       // Each run is in line, going, or over. One with a status dohc does not
@@ -430,6 +431,7 @@ describe("T3 Code's thread tools", () => {
     await expect(readT3CodeThread(session, "t1")).resolves.toEqual({
       title: "Quiet",
       working: false,
+      activeRunId: null,
       waitingOnPerson: false,
       closed: true,
       runs: [],

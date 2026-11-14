@@ -27,7 +27,7 @@ const ForwardRow = z.strictObject({
    */
   reminder: z.discriminatedUnion("state", [
     z.strictObject({ state: z.literal("none") }),
-    z.strictObject({ state: z.literal("recorded") }),
+    z.strictObject({ state: z.literal("recorded"), atMs: z.number().int().nonnegative() }),
     z.strictObject({
       state: z.literal("sent"),
       runId: z.string().min(1).max(512).nullable(),
@@ -64,7 +64,7 @@ const sameSlot = (
   a.workspaceId === b.workspaceId && a.agentId === b.agentId && a.chatThreadId === b.chatThreadId;
 
 // More rows than this means something is wrong. The oldest give way.
-const MAX_ROWS = 2_000;
+export const MAX_FORWARD_ROWS = 2_000;
 
 /** Every read, change, and write runs after the one before it settles. */
 export function createForwardLedger(
@@ -97,7 +97,7 @@ export function createForwardLedger(
   };
   const write = async (rows: ForwardRow[]) => {
     await mkdir(dirname(file), { recursive: true });
-    await atomicWriteFile(file, JSON.stringify(rows.slice(-MAX_ROWS)) + "\n", operations);
+    await atomicWriteFile(file, JSON.stringify(rows.slice(-MAX_FORWARD_ROWS)) + "\n", operations);
   };
   return {
     list: () => serial(read),
