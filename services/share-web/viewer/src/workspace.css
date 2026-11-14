@@ -41,7 +41,7 @@
 .toast-copy { flex: none; min-width: 28px; height: 28px; margin-top: -4px; padding: 0; }
 .toast-close { flex: none; min-width: 28px; height: 28px; margin: -4px -4px 0 0; padding: 0; }
 /* A toast that is only its title centres it on the icon. */
-.toast-slot .edit-notice.title-only { align-items: center; }
+.toast-slot .edit-notice.title-only, .title-only .toast-text { align-items: center; }
 .title-only .toast-close, .title-only .toast-copy { margin-top: 0; }
 @keyframes workspace-toast { from { opacity: 0; transform: translateY(8px); } }
 /* Unsent live text stays over whatever shows next until the person copies, downloads or dismisses it. */
