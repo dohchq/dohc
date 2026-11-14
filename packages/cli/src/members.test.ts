@@ -120,7 +120,8 @@ describe("dohc members", () => {
     );
   });
 
-  it("starts a refusal as the other refusals do, and says who can invite", async () => {
+  // The refusal keeps dohc as who could not, as "dohc could not reach the server." does.
+  it("says that dohc could not send the invite, and who can invite", async () => {
     const request = async () => {
       throw new Error("dohc could not send the invite. Only the owner and admins can invite.");
     };
@@ -133,7 +134,7 @@ describe("dohc members", () => {
     expect(result).toEqual({
       exitCode: 1,
       stdout: "",
-      stderr: "dohc: Could not send the invite. Only the owner and admins can invite.\n",
+      stderr: "dohc could not send the invite. Only the owner and admins can invite.\n",
     });
   });
 
@@ -153,7 +154,7 @@ describe("dohc members", () => {
       exitCode: 1,
       stdout: "",
       stderr:
-        "dohc: Could not remove this person because Members changed first. Run dohc members list, then try again.\n",
+        "dohc could not remove this person because Members changed first. Run dohc members list, then try again.\n",
     });
   });
 

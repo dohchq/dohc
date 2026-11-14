@@ -132,7 +132,6 @@ export const MEMBERS_REFUSED = "Your server does not list Members for this works
 // reload, so they name the command that lists Members.
 export function membersWordsForCli(error: unknown): unknown {
   if (!(error instanceof Error)) return error;
-  // The other CLI refusals read "dohc: ...", so a sentence that starts "dohc could not" takes that form too.
-  const words = error.message.replaceAll("Reload Members", "Run dohc members list").replace(/^dohc could not /u, "Could not ");
+  const words = error.message.replaceAll("Reload Members", "Run dohc members list");
   return words === error.message ? error : new Error(words);
 }
