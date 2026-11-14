@@ -161,9 +161,14 @@ export function useT3CodeAccess(
   // Reads again what dohc holds, which another surface may have changed
   // since this one last asked.
   const readAgain = read.retry;
+  // The answer this one holds stands until the new read is in, so the page
+  // never says dohc has less than it holds while it reads.
   const retryRead = useCallback(async () => {
-    setAnswered(null);
-    await readAgain();
+    try {
+      await readAgain();
+    } finally {
+      setAnswered(null);
+    }
   }, [readAgain]);
   const cancel = () => {
     if (!open.current) return;

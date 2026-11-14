@@ -1011,8 +1011,14 @@ it("names on the agent's page the mode the person allowed again in the Change th
   await userEvent.click(box.getByRole("button", { name: "Allow with Full access" }));
   expect(await box.findByRole("button", { name: "Allow again" })).toBeTruthy();
   // The page, which read what dohc had before the dialog opened, reads it again.
+  // Until that read is in, it says what it last knew, and never "Not allowed".
   expect(access.getByText(/^Allowed with Auto until /)).toBeTruthy();
+  const reading = deferred<T3CodeConnectionState>();
+  bridgeMock.readT3CodeConnection.mockReturnValueOnce(reading.promise);
   await userEvent.click(box.getByRole("button", { name: "Cancel" }));
+  await waitFor(() => expect(bridgeMock.readT3CodeConnection).toHaveBeenCalledTimes(3));
+  expect(access.getByText(/^Allowed with Auto until /)).toBeTruthy();
+  await act(async () => reading.resolve(allowedHere("full-access")));
   expect(await access.findByText(/^Allowed with Full access until /)).toBeTruthy();
 });
 
