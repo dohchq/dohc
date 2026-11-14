@@ -913,6 +913,16 @@ export function isEmptyShell(element: Y.XmlElement): boolean {
     );
 }
 
+/** Deletes the empty shells a reading leaves out, for code that pairs blocks with elements. */
+export function deleteEmptyShells(parent: Y.XmlFragment | Y.XmlElement): void {
+  for (let index = parent.length - 1; index >= 0; index--) {
+    const child = parent.get(index);
+    if (!(child instanceof Y.XmlElement)) continue;
+    if (isEmptyShell(child)) parent.delete(index, 1);
+    else deleteEmptyShells(child);
+  }
+}
+
 function yDocBodyToMarkdown(doc: Y.Doc): string {
   const plainText = getDohcYDocPlainText(doc);
   if (plainText) return plainText.toString();

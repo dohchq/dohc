@@ -7,7 +7,7 @@ import { frontmatterYaml } from "./frontmatter.js";
 import {
   getDohcProseMirrorSchema,
   getDohcYDocFrontmatter,
-  isEmptyShell,
+  deleteEmptyShells,
   markdownToYDoc,
   parseRichdocMarkdown,
   serializeRichdocBody,
@@ -94,8 +94,8 @@ export function documentEditUpdate(
   options: DocumentEditOptions,
 ): Uint8Array | null {
   return withDoc(state, (doc) => {
-    // Reading the document can delete elements the schema refuses. That
-    // happens before the edit starts recording, so the update never carries it.
+    // withDoc deleted the empty shells before the edit starts recording, so
+    // the update never carries that.
     const change = planEdit(layoutOf(doc), edit);
     if (!change) return null;
     let update: Uint8Array | null = null;
@@ -141,6 +141,8 @@ function withDoc<T>(state: Uint8Array, read: (doc: Y.Doc) => T): T {
   const doc = new Y.Doc();
   try {
     Y.applyUpdate(doc, state);
+    // The blocks pair with the elements, and a reading leaves empty shells out.
+    deleteEmptyShells(getDohcYDocBodyFragment(doc));
     return read(doc);
   } finally {
     doc.destroy();
@@ -171,10 +173,7 @@ function layoutOf(doc: Y.Doc): Layout {
   yXmlFragmentToProseMirrorRootNode(fragment, getDohcProseMirrorSchema()).forEach((block) => {
     blocks.push(block);
   });
-  // The reading leaves out empty shells, so their places don't count.
-  const elements = fragment
-    .toArray()
-    .filter((element) => !(element instanceof Y.XmlElement && isEmptyShell(element)));
+  const elements = fragment.toArray();
   if (
     elements.length !== blocks.length ||
     elements.some(
