@@ -24,7 +24,8 @@ import {
 } from "./linkRefusal";
 
 // A note's early state is read before its page opens a socket, so these limits hold for a caller that never opens
-// one. Each read reaches the note's host, which for a desktop host is the owner's computer.
+// one. Each read reaches the note's host, which for a desktop host is the owner's computer. The host reads under a
+// socket's opening-sync bound, so a note whose state is past STATE_MAX_BYTES is still read in full, then dropped.
 const STATE_READS_AT_ONCE = 4;
 const STATE_READS_PER_GRANT = 20;
 const STATE_READ_WINDOW_MS = 10_000;
