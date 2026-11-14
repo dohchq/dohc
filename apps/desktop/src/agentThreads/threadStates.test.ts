@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ForwardLedger, ForwardRow } from "./forwardLedger";
+import { forwardIdOf } from "./forwarding";
 import { T3CodeError, type T3CodeRun, type T3CodeThreadState } from "./t3Code";
 import { createThreadStates, type ThreadStatesDependencies } from "./threadStates";
 
@@ -237,7 +238,8 @@ describe("what an agent thread is doing with a forwarded message", () => {
         threadId: "t3-1",
         message: "REMINDER",
         how: "line",
-        forwardId: expect.stringMatching(/^remind-dohc-[0-9a-f]{64}$/),
+        // Named for the message in this thread, so another thread can take its own.
+        forwardId: `remind-${forwardIdOf(WORKSPACE, "chief", "m1", "t3-1")}`,
       },
     ]);
     // Saved as none when forwarded, recorded before the reminder went, sent after.

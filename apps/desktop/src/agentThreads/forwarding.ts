@@ -76,11 +76,20 @@ const PAGE = 50;
 type Request = Awaited<ReturnType<LinkedChatStore["listAgentRequestsPage"]>>["requests"][number];
 
 /**
- * The name one forwarded message keeps for its whole life. A tool keeps that
- * name only as long as it chooses: T3 Code keeps it for one sign-in.
+ * The name one forwarded message keeps in one thread for its whole life, so a
+ * second send of it there is no second message. A tool keeps that name only
+ * as long as it chooses: T3 Code keeps it for one sign-in. The thread is part
+ * of the name because T3 Code refuses, for good, a name it took for another
+ * thread. A message that goes again after the agent was pointed at another
+ * thread must be one the new thread can take.
  */
-export function forwardIdOf(workspaceId: string, agentId: string, messageId: string): string {
-  return `dohc-${createHash("sha256").update([workspaceId, agentId, messageId].join("\n")).digest("hex")}`;
+export function forwardIdOf(
+  workspaceId: string,
+  agentId: string,
+  messageId: string,
+  toolThreadId: string,
+): string {
+  return `dohc-${createHash("sha256").update([workspaceId, agentId, messageId, toolThreadId].join("\n")).digest("hex")}`;
 }
 
 export function createForwarding(dependencies: ForwardingDependencies) {
@@ -95,10 +104,11 @@ export function createForwarding(dependencies: ForwardingDependencies) {
   >();
   const retries = new Map<string, { attempt: number; timer?: ReturnType<typeof setTimeout> }>();
   const stuck = new Set<string>();
-  // The forwards the tool took whose message could not then be marked read.
-  // Such a message is not sent again: its thread has it, and the tool refuses
-  // its id for another thread, which would hold every later message once the
-  // agent is pointed at one. Only its read marker is tried again.
+  // The messages the tool took that could not then be marked read, each by
+  // its workspace, agent, and message. Such a message is not sent again, to
+  // its thread or to one the agent was pointed at since: only its read marker
+  // is tried again. dohc knows this until it stops. After a restart the
+  // message goes again under its name for the thread the agent then has.
   const taken = new Set<string>();
   const MAX_TAKEN = 1_000;
   let stopped = false;
@@ -155,10 +165,10 @@ export function createForwarding(dependencies: ForwardingDependencies) {
     live: () => boolean,
   ): Promise<boolean> {
     if (!live()) return false;
-    const forwardId = forwardIdOf(workspace.id, agent.id, request.messageId);
-    if (taken.has(forwardId)) {
+    const key = [workspace.id, agent.id, request.messageId].join("\n");
+    if (taken.has(key)) {
       await markRead(workspace.id, agent, request);
-      taken.delete(forwardId);
+      taken.delete(key);
       return true;
     }
     const { thread, messageCount } = await chats.getThread({
@@ -171,7 +181,7 @@ export function createForwarding(dependencies: ForwardingDependencies) {
     const started = await dependencies.tool.forward({
       threadId: agent.threadId,
       how: agent.whileBusy,
-      forwardId,
+      forwardId: forwardIdOf(workspace.id, agent.id, request.messageId, agent.threadId),
       message: forwardedMessageText({
         cli: dependencies.cli,
         workspace,
@@ -199,12 +209,11 @@ export function createForwarding(dependencies: ForwardingDependencies) {
       });
     } catch {}
     // The tool took it. A failure from here leaves it unread, and the next
-    // try marks it read without sending it again. After a restart dohc no
-    // longer knows the tool took it, and sends it under the same id.
-    taken.add(forwardId);
+    // try marks it read without sending it again.
+    taken.add(key);
     if (taken.size > MAX_TAKEN) taken.delete(taken.values().next().value!);
     await markRead(workspace.id, agent, request);
-    taken.delete(forwardId);
+    taken.delete(key);
     return true;
   }
 

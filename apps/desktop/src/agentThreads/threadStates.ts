@@ -255,7 +255,7 @@ export function createThreadStates(dependencies: ThreadStatesDependencies) {
       threadId: row.toolThreadId,
       message,
       how: "line",
-      forwardId: `remind-${forwardIdOf(row.workspaceId, row.agentId, row.messageId)}`,
+      forwardId: `remind-${forwardIdOf(row.workspaceId, row.agentId, row.messageId, row.toolThreadId)}`,
     });
     const at = nowMs();
     const reminded: ForwardRow = {
