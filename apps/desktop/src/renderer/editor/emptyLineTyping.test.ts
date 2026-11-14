@@ -164,8 +164,9 @@ function type(person: Person, text: string) {
   for (const character of text) person.view.dispatch(person.view.state.tr.insertText(character));
 }
 
+/** "accepted", or why the server refused the update. */
 function verdict(baseline: Uint8Array, suffix: Uint8Array[], candidate: Uint8Array) {
-  return admit({
+  const result = admit({
     document: {
       workspaceId: "workspace",
       mainVersionId: "main",
@@ -176,7 +177,8 @@ function verdict(baseline: Uint8Array, suffix: Uint8Array[], candidate: Uint8Arr
     checkpoint: baseline,
     suffix,
     candidate,
-  }).kind;
+  });
+  return result.kind === "refused" ? `refused: ${result.reason}` : result.kind;
 }
 
 const pages = { desktop, "share page": sharePage };
@@ -386,7 +388,7 @@ it.each(pairs)(
 
 // A line holding a line break, an empty piece and another line break.
 it.each(pairs)(
-  "keeps what one person types between two line breaks while the other types after them (%s types after, %s between)",
+  "keeps what one person types between two line breaks, between them, while the other types after them (%s types after, %s between)",
   async (after, between) => {
     const baseline = seeded([null, "", null]);
     const a = await pages[after](baseline),
@@ -405,5 +407,64 @@ it.each(pairs)(
     ]).toEqual(ALL_ACCEPTED);
     await exchange(a, b, fromA, fromB);
     await expectKept(a, b, "from b");
+    expect(yDocToMarkdown(a.doc)).toContain("  \nfrom b  \nz\n");
+  },
+);
+
+// Text, a line break and an empty piece. Removing the break would leave the empty piece
+// beside the text, and typing into it would put two pieces of text side by side, which the
+// server refuses. So the piece goes with the break, as before.
+it.each(pairs)(
+  "accepts every change and repeats nothing when one person removes a line break after text while the other types after it (%s removes, %s types)",
+  async (first, second) => {
+    const baseline = seeded(["a", null, ""]);
+    const a = await pages[first](baseline),
+      b = await pages[second](baseline);
+    caretAtEnd(a, 1);
+    caretAt(a, 1, 2);
+    backspace(a);
+    caretAtEnd(b, 1);
+    type(b, "b");
+    let fromA = await a.take(),
+      fromB = await b.take();
+    expect([
+      verdict(baseline, [], fromA),
+      verdict(baseline, [fromA], fromB),
+      verdict(baseline, [], fromB),
+      verdict(baseline, [fromB], fromA),
+    ]).toEqual(ALL_ACCEPTED);
+    await exchange(a, b, fromA, fromB);
+    const round = [fromA, fromB];
+    caretAtEnd(a, 1);
+    type(a, "X");
+    caretAtEnd(b, 1);
+    type(b, "c");
+    fromA = await a.take();
+    fromB = await b.take();
+    expect([
+      verdict(baseline, [...round, fromA], fromB),
+      verdict(baseline, [...round, fromB], fromA),
+    ]).toEqual(["accepted", "accepted"]);
+    await exchange(a, b, fromA, fromB);
+    const saved = yDocToMarkdown(a.doc);
+    expect(yDocToMarkdown(b.doc)).toBe(saved);
+    expect(saved.split("b").length).toBeLessThanOrEqual(2);
+    expect(lineShape(a.doc)).toEqual(lineShape(b.doc));
+  },
+);
+
+it.each(Object.keys(pages) as (keyof typeof pages)[])(
+  "pastes ten thousand line breaks into a line holding an empty piece (%s)",
+  async (maker) => {
+    const baseline = seeded([""]);
+    const a = await pages[maker](baseline);
+    caretAtEnd(a, 1);
+    const { state } = a.view;
+    const breaks = Array.from({ length: 10_000 }, () => state.schema.nodes.hardBreak!.create());
+    a.view.dispatch(state.tr.insert(state.selection.from, breaks));
+    const update = await a.take();
+    expect(verdict(baseline, [], update)).toBe("accepted");
+    const line = getDohcYDocBodyFragment(a.doc).get(1) as Y.XmlElement;
+    expect(line.toArray().filter((child) => child instanceof Y.XmlElement)).toHaveLength(10_000);
   },
 );
