@@ -736,8 +736,8 @@ export class ServiceActivationDriver {
       .every((target) => this.#completedTargets.has(targetKey(target)));
   }
   // Whether an unready workspace may still push. A document with no owner that waits out a backoff after a failed
-  // activation does not hold the push back, so its siblings' settled edits still publish while it waits. It still
-  // holds readiness, so the workspace keeps pulling as an unready one does.
+  // activation does not hold the push back, so its siblings' settled edits still publish while it waits. A workspace
+  // that may push also passes `workspaceWaiting`.
   workspacePushes(workspaceId: string) {
     return this.#targets
       .filter(
