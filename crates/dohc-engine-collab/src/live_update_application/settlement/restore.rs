@@ -63,7 +63,7 @@ impl RestoreAudit {
             || saved.previous_cursor != audit.previous_cursor
             || saved.previous_sequence != audit.previous_sequence
             || saved.interval != audit.interval_digest
-            || saved.application_count != audit.receipts.len()
+            || saved.application_count != audit.application_count
             || saved.markdown != self.input.preparation.point.markdown_digest
             || saved.vector != self.expected_vector
         {
@@ -107,7 +107,7 @@ impl RestoreAudit {
         receipts.push(application_identity(&application)?);
         if application != self.application
             || prior != self.prior
-            || receipts != audit.receipts
+            || receipts.len() != audit.application_count
             || latest_receipt(tx, &held)? != Some(application.admitted.accepted.receipt.clone())
             || coverage(
                 &prior,
@@ -216,7 +216,7 @@ impl ApplicationOwner {
             let audit = LiveSettlementAudit {
                 namespace: held.namespace.clone(), binding: application.admitted.accepted.binding.clone(), coordinate: held.coordinate.clone(),
                 previous_cursor, terminal_cursor: application.admitted.accepted.receipt.journal_cursor,
-                previous_sequence, sequence: application.local_head_sequence, observed_head: application.local_head_sequence, accepted: None, terminal_source: false, receipts, interval_digest,
+                previous_sequence, sequence: application.local_head_sequence, observed_head: application.local_head_sequence, accepted: None, terminal_source: false, application_count: receipts.len(), interval_digest,
                 bootstrap_moment: expected_moment, bootstrap_digest: expected_digest,
                 first: owner.is_none() && prior.is_none() && last_settled.is_none(),
                 restore: Some(Box::new(RestoreAudit { source, reader_resolver: resolver.cloned(), input: input.clone(), expected_vector: hex_sha256(&proposal.receipt().after_state_vector), application, prior, max_bytes, max_events })),
