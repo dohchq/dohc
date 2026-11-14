@@ -3,7 +3,10 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { markdownToYDoc, getDohcYDocBodyFragment } from "@dohc/ydoc-projection";
-import type { NamedLiveBrowserState } from "@dohc/ydoc-projection/named-live-browser-transport";
+import {
+  namedLiveEditable,
+  type NamedLiveBrowserState,
+} from "@dohc/ydoc-projection/named-live-browser-transport";
 import { LinkDocumentEditor } from "./LinkDocumentEditor";
 import { openLinkDocument } from "./linkLive";
 import { settle } from "./testing";
@@ -23,6 +26,7 @@ function fixture() {
     pendingBytes: 0,
     lastApplied: null,
     membership: null,
+    typingAhead: false,
   };
   const notify = () => {
     for (const listener of listeners) listener(state);
@@ -43,8 +47,9 @@ function fixture() {
     }),
     reconnect: vi.fn(async () => {}),
     disconnect: vi.fn(),
+    seed: vi.fn(() => false),
     edit(change: () => void) {
-      if (state.status !== "live") return false;
+      if (!namedLiveEditable(state)) return false;
       change();
       return true;
     },
@@ -292,4 +297,41 @@ it("reports the file open only once its session is first live, and keeps it open
   await act(async () => f.update({ status: "disconnected", reason: null }));
   expect(onOpenChange).toHaveBeenLastCalledWith(true);
   expect(body.hidden).toBe(false);
+});
+it("shows the text on the host's early state, says typed words are not sent, and offers the draft once opening stops", async () => {
+  const f = fixture(),
+    onOpenChange = vi.fn();
+  f.update({ status: "authorizing" });
+  vi.mocked(openLinkDocument).mockResolvedValue(f.session);
+  await act(async () =>
+    root.render(
+      <LinkDocumentEditor
+        discriminator="abcdefghijkl"
+        path="docs/a.md"
+        available
+        onClose={vi.fn()}
+        onOpenChange={onOpenChange}
+      />,
+    ),
+  );
+  await settle(() => container.querySelector('[role="textbox"]') !== null);
+  const body = container.querySelector<HTMLElement>(".named-body-editor")!,
+    textbox = () => container.querySelector('[role="textbox"]')!.getAttribute("contenteditable");
+  expect(body.hidden).toBe(true);
+  expect(textbox()).toBe("false");
+  await act(async () => f.update({ typingAhead: true }));
+  expect(onOpenChange).toHaveBeenLastCalledWith(true);
+  expect(body.hidden).toBe(false);
+  expect(textbox()).toBe("true");
+  await act(async () => f.update({ pendingUpdates: 1 }));
+  expect(status()).toBe("Not sent yet. Your changes are only in this tab.");
+  expect(panel()).toBeNull();
+  expect(unloadWarns()).toBe(true);
+  await act(async () => f.update({ status: "disconnected", reason: "host-unavailable" }));
+  expect(textbox()).toBe("false");
+  expect(panel()?.textContent).toContain("Review your draft");
+  expect(container.textContent).not.toContain("Changes saved");
+  await act(async () => f.update({ status: "live", reason: null, typingAhead: false }));
+  expect(status()).toBe("Saving changes…");
+  expect(panel()).toBeNull();
 });

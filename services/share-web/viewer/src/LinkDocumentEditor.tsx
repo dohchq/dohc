@@ -45,10 +45,11 @@ export function LinkDocumentEditor({
     [error, setError] = useState<string | null>(null);
   const [review, setReview] = useState(false),
     [leaving, setLeaving] = useState<(() => void) | null>(null);
-  // A session exists before it is authorized and synced. Its text is there only once it has been live.
+  // A session exists before it is authorized and synced. Its text is there once it has the host's early state or
+  // has been live.
   const [live, setLive] = useState(false);
   const receive = useCallback((reported?: NamedLiveBrowserState) => {
-    if (reported?.status === "live") setLive(true);
+    if (reported?.status === "live" || reported?.typingAhead) setLive(true);
     const state = current.current?.state();
     setReview(retainedDraft.current || (!!state && draftNeedsReview(state)));
   }, []);

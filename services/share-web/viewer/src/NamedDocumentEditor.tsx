@@ -3,9 +3,10 @@ import { LINK_REFUSALS } from "@dohc/security-contract/link-refusal";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { mountLiveBodyEditor } from "@dohc/ydoc-projection/browser-editor";
-import type {
-  createNamedLiveBrowserTransport,
-  NamedLiveBrowserState,
+import {
+  namedLiveEditable,
+  type createNamedLiveBrowserTransport,
+  type NamedLiveBrowserState,
 } from "@dohc/ydoc-projection/named-live-browser-transport";
 import { PropertiesAsWritten, useFrontmatterAsWritten } from "./PropertiesAsWritten";
 import "./namedRecipient.css";
@@ -28,6 +29,8 @@ const FINAL = ["access-removed", "link-full"];
 export function draftNeedsReview(state: NamedLiveBrowserState): boolean {
   return (
     state.status === "quarantined" ||
+    // Words typed ahead wait on an open that stopped, even one that tries again by itself.
+    (state.typingAhead && state.pendingUpdates > 0 && state.status === "disconnected") ||
     (state.pendingUpdates > 0 &&
       (state.status === "closed" ||
         (state.status === "disconnected" &&
@@ -42,7 +45,10 @@ function statusText(state: NamedLiveBrowserState, link: boolean): string {
       : state.lastApplied
         ? "Changes saved"
         : "Ready to edit";
-  if (OPENING.includes(state.status)) return "Opening the file…";
+  if (OPENING.includes(state.status))
+    return state.typingAhead && state.pendingUpdates
+      ? "Not sent yet. Your changes are only in this tab."
+      : "Opening the file…";
   const limit = liveConnectionLimitMessage(state.reason);
   if (limit) return limit;
   if (state.status === "quarantined")
@@ -92,7 +98,7 @@ export function NamedDocumentEditor({
     const editor = mountLiveBodyEditor(element.current, {
       body: session.body,
       label: "Shared file editor",
-      canEdit: () => session.state().status === "live",
+      canEdit: () => namedLiveEditable(session.state()),
       edit: session.edit,
     });
     const receive = (value: NamedLiveBrowserState) => {

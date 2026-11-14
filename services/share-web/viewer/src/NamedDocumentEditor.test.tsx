@@ -20,6 +20,7 @@ function session(markdown: string) {
     pendingBytes: 0,
     lastApplied: null,
     membership: null,
+    typingAhead: false,
   };
   return {
     doc,
@@ -29,6 +30,7 @@ function session(markdown: string) {
     close: vi.fn(),
     reconnect: vi.fn(async () => {}),
     disconnect: vi.fn(),
+    seed: vi.fn(() => false),
     edit(change: () => void) {
       change();
       return true;

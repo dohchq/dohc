@@ -634,6 +634,77 @@ describe("named live browser provider", () => {
     });
     expect(value.body.length).toBe(1);
   });
+  describe("on the host's early state", () => {
+    const early = (doc: Y.Doc, selected = binding) =>
+      encodeLiveFrameSync(
+        {
+          binding: selected,
+          hostVector: Y.encodeStateVector(doc),
+          missingStateUpdate: Y.encodeStateAsUpdate(doc),
+        },
+        limits().frames.receive,
+      );
+    it("takes edits before live and merges them with a later sync's concurrent edit", async () => {
+      // A link page learns its identity with its first ticket, after the person has started typing.
+      let context: LiveAuthorContext | undefined;
+      const value = createNamedLiveProvider(limits(), undefined, () => {
+        if (!context) throw new Error("Link identity is unavailable");
+        return context;
+      });
+      cleanup.push(() => {
+        value.close();
+        value.doc.destroy();
+      });
+      const host = document("base");
+      expect(value.seed(early(host), 3)).toBe(true);
+      expect(value.state()).toMatchObject({ status: "disconnected", typingAhead: true, binding });
+      edit(value, " draft");
+      expect(value.state()).toMatchObject({ typingAhead: true, pendingUpdates: 1 });
+      const text = (getDohcYDocBodyFragment(host).get(0) as Y.XmlElement).get(0) as Y.XmlText;
+      text.insert(text.length, " remote");
+      context = { kind: "link", publicPrincipalId: "public-ana" };
+      const route = peer(value);
+      await route.greet();
+      expect(route.submissions()).toHaveLength(0);
+      await route.initial(host, binding, 5);
+      expect(value.state()).toMatchObject({ status: "live", typingAhead: false });
+      expect(value.body.toString()).toContain("draft");
+      expect(value.body.toString()).toContain("remote");
+      const sent = await route.submitted();
+      expect(sent.begin).toMatchObject({ authorContext: context });
+      Y.applyUpdate(host, sent.bytes);
+      expect(getDohcYDocBodyFragment(host).toString()).toBe(value.body.toString());
+      await route.ack(sent, 1, 6);
+      expect(value.state().pendingUpdates).toBe(0);
+    });
+    it("quarantines a later sync older than the early state and keeps the words", async () => {
+      const value = provider(),
+        host = document("base");
+      expect(value.seed(early(host), 5)).toBe(true);
+      edit(value, " draft");
+      const route = peer(value);
+      await route.greet();
+      await route.initial(host, binding, 4);
+      expect(value.state()).toMatchObject({
+        status: "quarantined",
+        reason: "stale-sync-cut",
+        pendingUpdates: 1,
+        typingAhead: false,
+      });
+      expect(value.body.toString()).toContain("base draft");
+    });
+    it("refuses an early state once a route has the page's vector", async () => {
+      const value = provider(),
+        route = peer(value);
+      await route.greet();
+      await route.until(() =>
+        route.transfers.some((item) => item.begin.purpose === "client-vector"),
+      );
+      expect(value.seed(early(document("base")), 3)).toBe(false);
+      expect(value.state().typingAhead).toBe(false);
+      expect(value.body.length).toBe(0);
+    });
+  });
   it("ignores late frames from a retired route", async () => {
     const { value, host, doc } = await live();
     host.route.disconnect();
