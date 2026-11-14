@@ -42,11 +42,24 @@ pub(crate) struct OwnerEnrollmentUploadParams {
     recovery: bool,
 }
 
+/// A row the relay committed above the accepted cursor, for the owner's
+/// screen only.
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct OwnerRowUploadParams {
+    binding: LiveObjectBinding,
+    cursor: i64,
+    stream_id: u64,
+    byte_length: usize,
+    digest: String,
+}
+
 #[derive(Clone)]
 pub(crate) enum OwnerUpload {
     Accepted(OwnerUploadParams),
     Draft(OwnerDraftUploadParams),
     Enrollment(OwnerEnrollmentUploadParams),
+    Row(OwnerRowUploadParams),
 }
 
 impl OwnerUpload {
@@ -62,6 +75,16 @@ impl OwnerUpload {
             }
             params.binding.validate_canonical().map_err(|_| invalid())?;
             Ok(Self::Enrollment(params))
+        } else if method == "ydoc.ownerDelivery.putCommittedRow" {
+            let params: OwnerRowUploadParams =
+                serde_json::from_value(value).map_err(|_| invalid())?;
+            if !(2..=MAX).contains(&params.byte_length)
+                || !(1..=9_007_199_254_740_991).contains(&params.cursor)
+            {
+                return Err(invalid());
+            }
+            params.binding.validate_canonical().map_err(|_| invalid())?;
+            Ok(Self::Row(params))
         } else if method == "ydoc.ownerDelivery.appendDraft" {
             let params: OwnerDraftUploadParams =
                 serde_json::from_value(value).map_err(|_| invalid())?;
@@ -84,6 +107,7 @@ impl OwnerUpload {
             Self::Accepted(p) => (p.stream_id, p.byte_length, p.digest.clone()),
             Self::Draft(p) => (p.stream_id, p.byte_length, p.digest.clone()),
             Self::Enrollment(p) => (p.stream_id, p.byte_length, p.digest.clone()),
+            Self::Row(p) => (p.stream_id, p.byte_length, p.digest.clone()),
         }
     }
 }
@@ -522,6 +546,14 @@ impl EngineService {
                     .owner_delivery_enroll(ctx, request, params, input.bytes, input.reservation)
                     .await;
             }
+            OwnerUpload::Row(params) => {
+                if request.method != "ydoc.ownerDelivery.putCommittedRow" {
+                    return Err(invalid());
+                }
+                return self
+                    .owner_delivery_put_row(ctx, request, params, input.bytes, input.reservation)
+                    .await;
+            }
             OwnerUpload::Accepted(params) => params,
         };
         params.validate(&request.method)?;
@@ -624,6 +656,169 @@ impl EngineService {
                 result: json!({"revision":result.revision,"acceptedCursor":result.accepted_cursor,"nativeHeadSequence":result.native_head_sequence}),
             },
             blob_egress: None,
+            output_guard: Some(guard),
+        })
+    }
+
+    async fn owner_delivery_put_row(
+        &self,
+        ctx: RequestContext,
+        request: Request,
+        params: OwnerRowUploadParams,
+        bytes: Vec<u8>,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<ServiceResponse, WireError> {
+        use dohc_engine_collab::owner_outbox::draft::OwnerRowOutcome;
+        let guard = self.owner_delivery_guard(
+            &ctx,
+            request.workspace.as_ref(),
+            Some(&params.binding),
+            reservation.clone(),
+        )?;
+        let cancellation = OperationCancellation::new(&ctx);
+        let outcome = guard
+            .open
+            .actor
+            .owner_ydoc_put_committed_row(
+                params.binding.clone(),
+                params.cursor,
+                bytes,
+                cancellation.token(),
+                reservation,
+            )
+            .await
+            .map_err(map_runtime)?
+            .map_err(map_owner_outbox)?;
+        if outcome != OwnerRowOutcome::Unchanged {
+            self.notify_owner_sessions(&guard.workspace, &params.binding);
+        }
+        if !guard.is_current() {
+            return Err(workspace_unavailable());
+        }
+        let outcome = match outcome {
+            OwnerRowOutcome::Added => "added",
+            OwnerRowOutcome::Unchanged => "unchanged",
+            OwnerRowOutcome::Reconnect => "reconnect",
+        };
+        Ok(ServiceResponse {
+            response: Response {
+                id: request.id,
+                result: json!({ "outcome": outcome }),
+            },
+            blob_egress: None,
+            output_guard: Some(guard),
+        })
+    }
+
+    /// The owner route reopened: it sends its rows again from its open.
+    pub(crate) async fn owner_delivery_restart_rows(
+        &self,
+        ctx: RequestContext,
+        request: Request,
+    ) -> Result<ServiceResponse, WireError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Params {
+            binding: LiveObjectBinding,
+        }
+        let params: Params = serde_json::from_value(request.params).map_err(|_| invalid())?;
+        let reservation = self.reserve_owner_delivery()?;
+        let guard = self.owner_delivery_guard(
+            &ctx,
+            request.workspace.as_ref(),
+            Some(&params.binding),
+            reservation.clone(),
+        )?;
+        let key = dohc_engine_collab::DocKey::new(
+            &params.binding.workspace_id,
+            &params.binding.main_version_id,
+            &params.binding.object_id,
+        )
+        .map_err(|_| invalid())?;
+        let cancellation = OperationCancellation::new(&ctx);
+        guard
+            .open
+            .actor
+            .owner_ydoc_restart_committed_rows(key, cancellation.token(), reservation)
+            .await
+            .map_err(map_runtime)?;
+        self.notify_owner_sessions(&guard.workspace, &params.binding);
+        if !guard.is_current() {
+            return Err(workspace_unavailable());
+        }
+        Ok(ServiceResponse {
+            response: Response {
+                id: request.id,
+                result: json!({}),
+            },
+            blob_egress: None,
+            output_guard: Some(guard),
+        })
+    }
+
+    /// A paused note's Stop and the copy's bytes, for writing the copy file.
+    /// An empty copy, or no paused note, answers `empty` with no stream.
+    pub(crate) async fn owner_delivery_paused_copy(
+        &self,
+        ctx: RequestContext,
+        request: Request,
+    ) -> Result<ServiceResponse, WireError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Params {
+            main_version_id: String,
+            object_id: String,
+        }
+        let params: Params = serde_json::from_value(request.params).map_err(|_| invalid())?;
+        if !ctx.capabilities.iter().any(|c| c == "blobs") {
+            return Err(invalid());
+        }
+        let reservation = self.reserve_owner_delivery()?;
+        let guard =
+            self.owner_delivery_guard(&ctx, request.workspace.as_ref(), None, reservation.clone())?;
+        let key = dohc_engine_collab::DocKey::new(
+            &guard.open.workspace_id,
+            &params.main_version_id,
+            &params.object_id,
+        )
+        .map_err(|_| invalid())?;
+        let cancellation = OperationCancellation::new(&ctx);
+        let paused = guard
+            .open
+            .actor
+            .owner_ydoc_paused_copy(key, cancellation.token())
+            .await
+            .map_err(map_runtime)?
+            .map_err(map_owner_outbox)?;
+        if !guard.is_current() {
+            return Err(workspace_unavailable());
+        }
+        let (result, blob_egress) = match paused {
+            Some((stop, bytes)) if !bytes.is_empty() => {
+                let digest = dohc_engine_storage::hex_sha256(&bytes);
+                (
+                    json!({"status":"copy","stop":stop,"streamId":request.id,"byteLength":bytes.len(),"digest":digest}),
+                    Some(BlobEgress {
+                        stream_id: request.id,
+                        sha256: digest,
+                        bytes,
+                        cancel: ctx.cancel,
+                        deadline: ctx.deadline,
+                        byte_permit: None,
+                    }),
+                )
+            }
+            paused => (
+                json!({"status":"empty","stop":paused.map(|(stop, _)| stop)}),
+                None,
+            ),
+        };
+        Ok(ServiceResponse {
+            response: Response {
+                id: request.id,
+                result,
+            },
+            blob_egress,
             output_guard: Some(guard),
         })
     }
