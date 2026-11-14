@@ -8204,6 +8204,8 @@ export const AgentThreadLine = z.strictObject({
   // The tool's id for the question the thread waits on, when it waits on a
   // question. The question itself travels only when the person asks to answer it.
   questionId: z.string().min(1).max(512).nullable(),
+  // The thread waits on its person: this message's own work, or the work it is in line behind.
+  threadWaiting: z.boolean(),
 });
 export type AgentThreadLine = z.infer<typeof AgentThreadLine>;
 // A question an agent asks the person in its tool's own question box.

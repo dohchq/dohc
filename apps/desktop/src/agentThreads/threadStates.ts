@@ -38,6 +38,11 @@ export interface AgentThreadLine {
    * is a question. The question itself is never kept here.
    */
   questionId: string | null;
+  /**
+   * The thread waits on its person. True for a message whose own work waits,
+   * and for one in line while anything in the thread does.
+   */
+  threadWaiting: boolean;
 }
 
 export interface ThreadStatesDependencies {
@@ -181,14 +186,18 @@ export function createThreadStates(dependencies: ThreadStatesDependencies) {
     state: AgentThreadLineState,
     sentAtMs: number,
     toolMs: number,
-    questionId: string | null = null,
+    waiting: { on: boolean; questionId: string | null } = { on: false, questionId: null },
   ): void {
     if (!isCurrent(row)) return;
     const key = keyOf(row);
     const before = lines.get(key);
+    const { questionId, on: threadWaiting } = waiting;
     if (before?.state === state) {
-      // The same state with another question, as when one was answered and the thread asked the next.
-      if (before.questionId !== questionId) lines.set(key, { ...before, questionId });
+      // The same state, and the time it began, with another question or wait:
+      // one question answered and the next asked, or the work ahead of a
+      // message in line started or stopped waiting on the person.
+      if (before.questionId !== questionId || before.threadWaiting !== threadWaiting)
+        lines.set(key, { ...before, questionId, threadWaiting });
       return;
     }
     const now = nowMs();
@@ -203,12 +212,17 @@ export function createThreadStates(dependencies: ThreadStatesDependencies) {
       sinceMs,
       forwardedAtMs: row.forwardedAtMs,
       questionId,
+      threadWaiting,
     });
   }
 
   /** Sets a row's line from what its thread is doing, and reminds the thread when its work ended in silence. */
   async function follow(row: ForwardRow, thread: T3CodeThreadState): Promise<void> {
     const { reminder } = row;
+    // What the thread waits on, for a message whose work waits or is in line behind work that does.
+    const waiting = thread.waitingOnPerson
+      ? { on: true, questionId: thread.questionId }
+      : { on: false, questionId: null };
     if (reminder.state === "recorded") {
       // dohc stopped between recording the reminder and learning whether the
       // tool took it. None follows it. The line goes by the work the thread
@@ -216,10 +230,10 @@ export function createThreadStates(dependencies: ThreadStatesDependencies) {
       const since = thread.runs.filter((entry) => entry.requestedAtMs >= reminder.atMs);
       if (since.some((entry) => entry.state === "working") || thread.working)
         return thread.waitingOnPerson
-          ? show(row, "waiting-in-tool", reminder.atMs, nowMs(), thread.questionId)
+          ? show(row, "waiting-in-tool", reminder.atMs, nowMs(), waiting)
           : show(row, "working", reminder.atMs, reminder.atMs);
       if (since.some((entry) => entry.state === "in-line"))
-        return show(row, "in-line", reminder.atMs, reminder.atMs);
+        return show(row, "in-line", reminder.atMs, reminder.atMs, waiting);
       return show(row, "silent", reminder.atMs, nowMs());
     }
     const sentAtMs = reminder.state === "sent" ? reminder.atMs : row.forwardedAtMs;
@@ -228,10 +242,11 @@ export function createThreadStates(dependencies: ThreadStatesDependencies) {
       reminder.state === "sent" ? reminder.runId : row.runId,
       thread,
     );
-    if (phase === "in-line") return show(row, "in-line", sentAtMs, run?.requestedAtMs ?? sentAtMs);
+    if (phase === "in-line")
+      return show(row, "in-line", sentAtMs, run?.requestedAtMs ?? sentAtMs, waiting);
     if (phase === "working")
       return thread.waitingOnPerson
-        ? show(row, "waiting-in-tool", sentAtMs, nowMs(), thread.questionId)
+        ? show(row, "waiting-in-tool", sentAtMs, nowMs(), waiting)
         : show(row, "working", sentAtMs, run?.startedAtMs ?? sentAtMs);
     if (reminder.state === "sent") return show(row, "silent", sentAtMs, run?.endedAtMs ?? nowMs());
 
@@ -263,7 +278,7 @@ export function createThreadStates(dependencies: ThreadStatesDependencies) {
       reminder: { state: "sent", runId: sent?.runId ?? null, atMs: at },
     };
     const saved = replace(recorded, reminded);
-    show(reminded, "in-line", at, at);
+    show(reminded, "in-line", at, at, waiting);
     await saved;
   }
 

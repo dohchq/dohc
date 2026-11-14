@@ -149,6 +149,7 @@ describe("what an agent thread is doing with a forwarded message", () => {
       sinceMs: 1_100,
       forwardedAtMs: 1_000,
       questionId: null,
+      threadWaiting: false,
     });
 
     tool(thread([run("run-1", "working")]));
@@ -163,6 +164,82 @@ describe("what an agent thread is doing with a forwarded message", () => {
     await states.check();
     expect(line(states)).toMatchObject({ state: "waiting-in-tool", sinceMs: 7_000 });
     expect(changes.every((workspaceId) => workspaceId === WORKSPACE)).toBe(true);
+    states.stop();
+  });
+
+  it("says the thread waits from the moment a reminder gets in line behind work that does", async () => {
+    const { states, tool, forward, runState } = setup();
+    states.forwarded(forwarded());
+    tool(thread([run("run-1", "working")]));
+    await states.check();
+    // The message's work ended in silence, and other work in the thread waits on a question.
+    tool(
+      thread([run("run-other", "working"), run("run-1", "ended")], {
+        waitingOnPerson: true,
+        questionId: "q-1",
+      }),
+    );
+    runState("in-line", "run-remind");
+
+    await states.check();
+
+    // The reminder went in line behind that work. The line says so at once, with no second look.
+    expect(forward).toHaveBeenCalledTimes(1);
+    expect(line(states)).toMatchObject({
+      state: "in-line",
+      threadWaiting: true,
+      questionId: "q-1",
+    });
+    states.stop();
+  });
+
+  it("says of a message in line that the work ahead of it waits on the person, and keeps its time", async () => {
+    const { states, tool, at, changes } = setup();
+    states.forwarded(forwarded({ runId: "run-2" }));
+    // Another run of the thread works; this message's run waits behind it.
+    const ahead = run("run-1", "working");
+    const queued = run("run-2", "in-line", { requestedAtMs: 1_500 });
+    tool(thread([queued, ahead]));
+    await states.check();
+    expect(line(states)).toMatchObject({
+      state: "in-line",
+      sinceMs: 1_500,
+      threadWaiting: false,
+      questionId: null,
+    });
+
+    // The work ahead stops on an approval.
+    at(7_000);
+    tool(thread([queued, ahead], { waitingOnPerson: true }));
+    const before = changes.length;
+    await states.check();
+    expect(line(states)).toMatchObject({
+      state: "in-line",
+      // In line since the same moment: only what it waits behind changed.
+      sinceMs: 1_500,
+      threadWaiting: true,
+      questionId: null,
+    });
+    expect(changes.length).toBe(before + 1);
+
+    // It stops on a question instead: the id goes with the line, so the person can answer here.
+    tool(thread([queued, ahead], { waitingOnPerson: true, questionId: "q-1" }));
+    await states.check();
+    expect(line(states)).toMatchObject({
+      state: "in-line",
+      threadWaiting: true,
+      questionId: "q-1",
+    });
+
+    // The person answered: the work ahead goes on, and the line says only that it is in line.
+    tool(thread([queued, ahead]));
+    await states.check();
+    expect(line(states)).toMatchObject({
+      state: "in-line",
+      sinceMs: 1_500,
+      threadWaiting: false,
+      questionId: null,
+    });
     states.stop();
   });
 

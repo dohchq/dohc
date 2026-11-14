@@ -32,10 +32,17 @@ import { WorkingDots } from "./ChatThreadPanel";
 const TOOL_NAMES: Record<AgentWithThread["thread"]["tool"], string> = { "t3-code": "T3 Code" };
 
 /** What an agent's thread is doing with the last message forwarded from this chat. */
-export function agentThreadLineWords(state: AgentThreadLine["state"], tool: string): string {
+export function agentThreadLineWords(
+  state: AgentThreadLine["state"],
+  tool: string,
+  threadWaiting = false,
+): string {
   switch (state) {
     case "in-line":
-      return `In line in ${tool}`;
+      // In line while something in the thread waits on the person. Two sentences, so the second ends.
+      return threadWaiting
+        ? `In line. The thread is waiting for you in ${tool}.`
+        : `In line in ${tool}`;
     case "working":
       return "Working";
     case "waiting-in-tool":
@@ -239,8 +246,9 @@ function Line(props: {
   onAnswer: (questionId: string) => void;
 }) {
   const { agent, line } = props;
-  // Only a question can be answered here. An approval stays in the tool.
-  const questionId = line.state === "waiting-in-tool" ? line.questionId : null;
+  // Only a question can be answered here. An approval stays in the tool. A
+  // message in line while the thread waits on a question offers that question too.
+  const questionId = line.threadWaiting ? line.questionId : null;
   const { presentation } = agentChatIdentity({ agentId: agent.id, name: agent.name }, [agent]);
   const ink = useAgentInk(presentation);
   const tool = TOOL_NAMES[agent.thread.tool];
@@ -258,7 +266,7 @@ function Line(props: {
         <span role="status" className="flex min-w-0 items-center gap-2">
           <span className={`min-w-0 truncate font-semibold ${ink}`}>{agent.name}</span>
           <span className="min-w-12 shrink-[100] truncate">
-            {agentThreadLineWords(line.state, tool)}
+            {agentThreadLineWords(line.state, tool, line.threadWaiting)}
           </span>
         </span>
         {line.state === "working" ? <WorkingDots presentation={presentation} /> : null}
