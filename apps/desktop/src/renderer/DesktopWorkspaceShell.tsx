@@ -3738,8 +3738,11 @@ export function DesktopWorkspaceShell(props: {
             if (copy === null) {
               // The package is in .dohc/local, which dohc does not open as a
               // file, so the row stays to say where it is and copy its path.
+              // Unless dohc still keeps the edits, the package is their only
+              // record, so it is not called a copy.
+              const them = saved.keptEdits === "kept" ? "A copy of them is" : "They are";
               showWarningNotice(
-                `dohc could not make a readable copy of your kept edits for ${path}. A copy of them is saved on this computer, in the file below.${kept}`,
+                `dohc could not make a readable copy of your kept edits for ${path}. ${them} saved on this computer, in the file below.${kept}`,
                 [saved.packagePath],
               );
               return;

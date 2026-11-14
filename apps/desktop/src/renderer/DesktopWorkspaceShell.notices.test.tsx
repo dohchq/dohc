@@ -210,6 +210,8 @@ describe("edits the server refused", () => {
     const toast = (await screen.findByText(words, { exact: false })).closest<HTMLElement>(
       "[data-testid='workspace-shell-notice']",
     )!;
+    // The edits ended, so the package is their only record, not a copy.
+    expect(toast.textContent).toContain("They are saved on this computer, in the file below.");
     // The toast is closed; the row is what still says where the edits are.
     await user.click(within(toast).getByRole("button", { name: "Dismiss workspace notice" }));
     await waitFor(() => expect(screen.queryByText(words, { exact: false })).toBeNull());
