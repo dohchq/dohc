@@ -14,6 +14,7 @@ import {
 } from "@dohc/live-session-contract/live-frame";
 import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
+import { NAMED_LIVE_STOPPED } from "@dohc/security-contract/link-refusal";
 import {
   createNamedLiveBrowserTransport,
   LiveHostUnavailableError,
@@ -1039,6 +1040,47 @@ it("keeps an invited editor trying while its invitation names the file, and stop
   await vi.advanceTimersByTimeAsync(20_000);
   expect(f.requests).toHaveLength(asked);
   expect(vi.getTimerCount()).toBe(0);
+});
+it("tells an invited editor that live editing stopped, keeps the edit, and sends it once Try again finds the file live", async () => {
+  const f = await live();
+  vi.useFakeTimers();
+  edit(f.value, " draft");
+  const first = await f.peer.submitted();
+  let stopped = true;
+  f.intercept((path) =>
+    stopped && path === "/api/live/named-ticket"
+      ? Response.json(NAMED_LIVE_STOPPED, { status: 404 })
+      : undefined,
+  );
+  f.socket.close();
+  await vi.advanceTimersByTimeAsync(250);
+  expect(f.value.state()).toMatchObject({
+    status: "disconnected",
+    reason: "live-stopped",
+    pendingUpdates: 1,
+  });
+  const asked = f.requests.length;
+  await vi.advanceTimersByTimeAsync(20_000);
+  expect(f.requests).toHaveLength(asked);
+  expect(vi.getTimerCount()).toBe(0);
+
+  await f.value.reconnect();
+  expect(f.value.state()).toMatchObject({ reason: "live-stopped", pendingUpdates: 1 });
+  expect(
+    f.requests.slice(asked).filter(({ path }) => path === "/api/live/named-ticket"),
+  ).toHaveLength(1);
+  expect(f.sockets).toHaveLength(1);
+
+  stopped = false;
+  const reconnecting = f.value.reconnect();
+  const socket = await f.socketAt(1),
+    peer = host(socket, f.value, 2);
+  socket.open();
+  await reconnecting;
+  await peer.greet();
+  await peer.initial(f.doc, binding, 1);
+  const retry = await peer.submitted();
+  expect(retry.bytes).toEqual(first.bytes);
 });
 // A page that can never open stops asking the server, even while the invitation names the file.
 it.each([false, true])(
