@@ -332,6 +332,8 @@ export interface CliKeptEditsPort {
   list(): Promise<Extract<CliResultByVerb["liveKeptEdits"], { ok: true }>["keptEdits"]>;
   /** Shared notes whose edits wait on this computer for the server, so their files hold older text. */
   pendingShare(): Promise<readonly string[]>;
+  /** New notes a share shows that the server has no file for until their editor is left. */
+  pendingShareWhileOpen(): Promise<readonly string[]>;
   /** With an incident, saves exactly the kept edits it names. */
   saveRecoveryCopy(
     path: string,
@@ -3956,11 +3958,17 @@ async function dispatchWorkspace(
       const keptEdits = context.keptEdits;
       if (!keptEdits || context.readOnly) return keptEditsUnavailable();
       try {
-        const [kept, pendingShare] = await Promise.all([
+        const [kept, pendingShare, pendingShareWhileOpen] = await Promise.all([
           keptEdits.list(),
           keptEdits.pendingShare(),
+          keptEdits.pendingShareWhileOpen(),
         ]);
-        return { ok: true as const, keptEdits: kept, pendingShare: [...pendingShare] };
+        return {
+          ok: true as const,
+          keptEdits: kept,
+          pendingShare: [...pendingShare],
+          pendingShareWhileOpen: [...pendingShareWhileOpen],
+        };
       } catch (error) {
         return mcpFailure(error, "failed to list kept edits");
       }

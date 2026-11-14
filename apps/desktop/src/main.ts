@@ -682,7 +682,7 @@ import {
   createOwnerPendingShare,
   listOwnerPendingSharePaths,
 } from "./workspaces/ownerPendingShare";
-import { createNotSentWhileOpen } from "./workspaces/notSentWhileOpen";
+import { createNotSentWhileOpen, sharedByListing } from "./workspaces/notSentWhileOpen";
 import { onWorkspaceCaptureSettled } from "./workspaces/captureActivityBridge";
 import { resumeWorkspaceLinkRewrites } from "./workspaces/workspaceLinkRewrites";
 import { createServerOwnerConnection } from "./workspaces/serverOwnerConnection";
@@ -3725,6 +3725,7 @@ const activity = {
       ownerLiveQuarantines: desktopEngine.ownerLiveQuarantines(workspaceId),
       ownerPendingShare: [...ownerPendingShare.paths(workspaceId)],
       notSentWhileOpen: [...notSentWhileOpen.paths(workspaceId)],
+      pendingShareWhileOpen: pendingShareWhileOpen(workspaceId),
       hasOwnerLiveRefusals: desktopEngine.hasOwnerLiveRefusals(workspaceId),
     })),
   recordShareViewStoreRefusal: (
@@ -6714,6 +6715,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
   ownerLiveRecovery: {
     keptEdits: (workspaceId) => desktopEngine.ownerLiveQuarantines(workspaceId),
     pendingShare: (workspaceId) => ownerPendingShare.paths(workspaceId),
+    pendingShareWhileOpen,
     save: (workspace, path, incident) =>
       desktopEngine.saveOwnerLiveRecoveryCopy(workspace, path, incident),
     retry: (workspace, objectId, incident) =>
@@ -6889,6 +6891,15 @@ const { startDesktopCliServer } = createDesktopCliServer({
 
 // New notes whose first file waits for their open editor to be left.
 const notSentWhileOpen = createNotSentWhileOpen();
+// The new notes a share shows that have no file on the server yet. The share
+// roster is this computer's last listing, so a share made on another computer
+// counts once the next listing sees it.
+function pendingShareWhileOpen(workspaceId: string): string[] {
+  const notSent = notSentWhileOpen.paths(workspaceId);
+  if (notSent.length === 0) return [];
+  const listing = shareRosters.observation(workspaceId).listing;
+  return notSent.filter((path) => sharedByListing(listing, path));
+}
 
 // Shared notes whose files trail their text while edits wait for the server.
 const ownerPendingShare = createOwnerPendingShare({

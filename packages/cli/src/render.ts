@@ -528,13 +528,18 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       return comment.warning ? `${commented}\nwarning: ${lineSafe(comment.warning)}` : commented;
     }
     case "liveKeptEdits": {
-      const { keptEdits, pendingShare } = result as Extract<
+      const { keptEdits, pendingShare, pendingShareWhileOpen } = result as Extract<
         CliResultByVerb["liveKeptEdits"],
         { ok: true }
       >;
-      const pending = pendingShare.map(
-        (path) => `${lineSafe(path)} · pending share: the file holds older text`,
-      );
+      const pending = [
+        ...pendingShare.map(
+          (path) => `${lineSafe(path)} · pending share: the file holds older text`,
+        ),
+        ...pendingShareWhileOpen.map(
+          (path) => `${lineSafe(path)} · pending share: sent once its editor is left`,
+        ),
+      ];
       if (keptEdits.length === 0 && pending.length === 0) return "No document has kept edits.";
       return [
         ...keptEdits.map((row) =>

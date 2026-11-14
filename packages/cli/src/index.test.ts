@@ -249,6 +249,7 @@ it("lists, saves, tries again and stops again kept edits with only the caller's 
       },
     ],
     pendingShare: ["notes/waiting.md"],
+    pendingShareWhileOpen: ["notes/new.md"],
   };
   const request = vi.fn<(request: CliRequestWithoutToken) => Promise<unknown>>(async ({ verb }) =>
     verb === "liveKeptEdits"
@@ -277,6 +278,7 @@ it("lists, saves, tries again and stops again kept edits with only the caller's 
         "note.md · this-computer · paused · saveOnly · old-1:delivery:0",
         "old.md · server · copied · earlier · earlier:0",
         "notes/waiting.md · pending share: the file holds older text",
+        "notes/new.md · pending share: sent once its editor is left",
       ].join("\n") + "\n",
     stderr: "",
   });
@@ -286,7 +288,11 @@ it("lists, saves, tries again and stops again kept edits with only the caller's 
     env: {},
     request: async () => kept,
   });
-  expect(JSON.parse(json.stdout)).toMatchObject({ ok: true, pendingShare: ["notes/waiting.md"] });
+  expect(JSON.parse(json.stdout)).toMatchObject({
+    ok: true,
+    pendingShare: ["notes/waiting.md"],
+    pendingShareWhileOpen: ["notes/new.md"],
+  });
   expect(
     await executeCli({
       argv: ["document", "save-recovery-copy", "plan.md"],

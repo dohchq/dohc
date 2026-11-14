@@ -1250,7 +1250,13 @@ export async function workspaceStatus(ctx: ToolContext) {
     synced,
     ...(syncPause ? { syncPause } : {}),
     ...(waiting.ok ? { collectionsWaiting: waiting.waiting } : {}),
-    ...(kept?.ok ? { keptEdits: kept.keptEdits, pendingShare: kept.pendingShare } : {}),
+    ...(kept?.ok
+      ? {
+          keptEdits: kept.keptEdits,
+          pendingShare: kept.pendingShare,
+          pendingShareWhileOpen: kept.pendingShareWhileOpen,
+        }
+      : {}),
     ...(held.ok && held.heldFiles ? { heldFiles: held.heldFiles } : {}),
     ...(failed?.ok && failed.syncFailure ? { syncFailure: failed.syncFailure } : {}),
     ...removedShareStatus(entry),
