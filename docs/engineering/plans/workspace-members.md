@@ -123,7 +123,6 @@ The dohc CLI and MCP do what the Members page does, in a workspace the person ow
 - Reports, timeouts, and bans of people who are not members.
 - Listing a community publicly or in search engines.
 - Managing members from the phone.
-- Admins managing members through the CLI or MCP.
 - dohc Drive. A community needs a self-hosted server until Drive opens.
 
 ## What is new underneath
