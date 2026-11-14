@@ -27,7 +27,7 @@ import {
   RevealWorkspaceFolderPayload,
 } from "./bridgeContract";
 import { readdir } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { CHANNELS } from "./channels";
 
 export function createWorkspaceRootApproval(effectiveHome: () => string) {
@@ -352,15 +352,17 @@ export function registerOpenWorkspaceIpcHandler<
 // A name as one folder every desktop can hold, or null when nothing usable
 // is left. Separators and characters Windows refuses become spaces.
 export function folderSegment(name: string): string | null {
-  const segment = [...name.replace(/[<>:"/\|?*\u0000-\u001f]/gu, " ").replace(/\s+/gu, " ")]
+  const segment = [...name.replace(/[<>:"/\\|?*\u0000-\u001f]/gu, " ").replace(/\s+/gu, " ")]
     .slice(0, 80).join("").replace(/^[.\s]+|[.\s]+$/gu, "");
   if (segment.length === 0 || /^(con|prn|aux|nul|com\d|lpt\d)(\..*)?$/iu.test(segment)) return null;
   return segment;
 }
 
-async function freeFolder(base: string, segment: string): Promise<string | null> {
+// A folder directly inside `base`, or null. The name comes from the relay.
+export async function freeFolder(base: string, segment: string): Promise<string | null> {
   for (let attempt = 1; attempt < 100; attempt += 1) {
     const root = `${base}/${attempt === 1 ? segment : `${segment} ${attempt}`}`;
+    if (dirname(resolve(root)) !== resolve(base)) return null;
     const entries = await readdir(root).catch((error: NodeJS.ErrnoException) => error.code === "ENOENT" ? [] : null);
     if (entries !== null && entries.length === 0) return root;
   }

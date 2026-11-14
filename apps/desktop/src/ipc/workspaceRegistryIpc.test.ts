@@ -7,6 +7,7 @@ import { normalizeAbsolutePath } from "@dohc/workspace-core";
 import { type SyncStatusResult, type WorkspaceSummary } from "./bridgeContract";
 import {
   createWorkspaceRootApproval,
+  freeFolder,
   registerOpenWorkspaceIpcHandler,
   registerWorkspaceRegistryIpcHandlers,
 } from "./workspaceRegistryIpc";
@@ -187,9 +188,19 @@ describe("registered workspace registry handlers", () => {
     expect(await named("Community")).toBe(`${root}/Community 2`);
     // A name is one folder: separators and characters Windows refuses become spaces.
     expect(await named("Trips/2026: \"Spring\"")).toBe(`${root}/Trips 2026 Spring`);
+    // A backslash is a separator on Windows, so it never climbs out of the default root.
+    expect(await named("x\\..\\..\\Documents\\WindowsPowerShell")).toBe(`${root}/x .. .. Documents WindowsPowerShell`);
     // Nothing usable left, or a device name, falls back to the share's own folder.
-    for (const name of ["../..", "CON", "lpt1.txt", "   "]) {
+    for (const name of ["../..", "..\\..", "..", "...", "CON", "lpt1.txt", "   "]) {
       expect(await named(name), name).toBe(`${root}/shared/member-1`);
+    }
+  });
+
+  it("finds no free folder for a segment that would leave its base", async () => {
+    const base = await createTestScratch("free-folder-");
+    expect(await freeFolder(base, "Community")).toBe(`${base}/Community`);
+    for (const segment of ["../outside", "..", "a/b", ""]) {
+      expect(await freeFolder(base, segment), segment).toBeNull();
     }
   });
 
