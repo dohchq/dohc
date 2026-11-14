@@ -453,6 +453,75 @@ it.each(pairs)(
   },
 );
 
+it.each(pairs)(
+  "accepts both changes when two people remove the same line break before text (%s, %s)",
+  async (first, second) => {
+    const baseline = seeded([null, null, "words"]);
+    const a = await pages[first](baseline),
+      b = await pages[second](baseline);
+    for (const person of [a, b]) {
+      caretAt(person, 1, 1);
+      backspace(person);
+    }
+    const fromA = await a.take(),
+      fromB = await b.take();
+    expect([
+      verdict(baseline, [], fromA),
+      verdict(baseline, [fromA], fromB),
+      verdict(baseline, [], fromB),
+      verdict(baseline, [fromB], fromA),
+    ]).toEqual(ALL_ACCEPTED);
+    await exchange(a, b, fromA, fromB);
+    await expectKept(a, b, "words");
+  },
+);
+
+it.each(pairs)(
+  "keeps a line's text once when one person removes the line break before it while the other adds another there (%s removes, %s adds)",
+  async (first, second) => {
+    const baseline = seeded([null, "words"]);
+    const a = await pages[first](baseline),
+      b = await pages[second](baseline);
+    caretAt(a, 1, 1);
+    backspace(a);
+    caretAt(b, 1, 1);
+    hardBreak(b);
+    const fromA = await a.take(),
+      fromB = await b.take();
+    expect([
+      verdict(baseline, [], fromA),
+      verdict(baseline, [fromA], fromB),
+      verdict(baseline, [], fromB),
+      verdict(baseline, [fromB], fromA),
+    ]).toEqual(ALL_ACCEPTED);
+    await exchange(a, b, fromA, fromB);
+    await expectKept(a, b, "words");
+  },
+);
+
+it.each(pairs)(
+  "keeps what one person types into a line's text while the other adds a line break at its start (%s breaks, %s types)",
+  async (breaker, typist) => {
+    const baseline = seeded(["words"]);
+    const a = await pages[breaker](baseline),
+      b = await pages[typist](baseline);
+    caretAt(a, 1, 0);
+    hardBreak(a);
+    caretAtEnd(b, 1);
+    type(b, " from b");
+    const fromA = await a.take(),
+      fromB = await b.take();
+    expect([
+      verdict(baseline, [], fromA),
+      verdict(baseline, [fromA], fromB),
+      verdict(baseline, [], fromB),
+      verdict(baseline, [fromB], fromA),
+    ]).toEqual(ALL_ACCEPTED);
+    await exchange(a, b, fromA, fromB);
+    await expectKept(a, b, "words from b");
+  },
+);
+
 it.each(Object.keys(pages) as (keyof typeof pages)[])(
   "pastes ten thousand line breaks into a line holding an empty piece (%s)",
   async (maker) => {
@@ -467,4 +536,184 @@ it.each(Object.keys(pages) as (keyof typeof pages)[])(
     const line = getDohcYDocBodyFragment(a.doc).get(1) as Y.XmlElement;
     expect(line.toArray().filter((child) => child instanceof Y.XmlElement)).toHaveLength(10_000);
   },
+);
+
+/** A seeded source of numbers, so a failing race replays from its seed. */
+function random(seed: number) {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+type Edit = { kind: "type" | "break" | "delete"; at: number };
+
+/** The second line's start, and the node before and after offset `at` in it. */
+function around(person: Person, at: number) {
+  const { view } = person;
+  const line = textblocks(view)[1]!;
+  const $at = view.state.doc.resolve(
+    line.end - view.state.doc.resolve(line.end).parent.content.size + at,
+  );
+  return { $at, before: $at.nodeBefore, after: $at.nodeAfter };
+}
+
+/** Which run of text offset `at` falls in: the number of line breaks and other items before it. */
+function runOf(person: Person, at: number) {
+  let run = 0;
+  around(person, at).$at.parent.forEach((child, offset) => {
+    if (!child.isText && offset < at) run++;
+  });
+  return run;
+}
+
+/** Whether typing at `at` starts a new text piece because no piece holds that run. */
+function startsPiece(person: Person, at: number) {
+  const { before, after } = around(person, at);
+  if (before?.isText || after?.isText) return false;
+  const run = runOf(person, at);
+  let seen = 0;
+  for (const child of (getDohcYDocBodyFragment(person.doc).get(1) as Y.XmlElement).toArray()) {
+    if (child instanceof Y.XmlText) {
+      if (seen === run) return false;
+    } else seen++;
+  }
+  return true;
+}
+
+function pickEdit(person: Person, next: () => number): Edit {
+  const size = person.view.state.doc.child(1).content.size;
+  const kinds = ["type", "type", "break", "delete"] as const;
+  const kind = kinds[Math.floor(next() * kinds.length)]!;
+  if (kind === "delete" && size === 0) return { kind: "type", at: 0 };
+  const at = kind === "delete" ? 1 + Math.floor(next() * size) : Math.floor(next() * (size + 1));
+  return { kind, at };
+}
+
+/**
+ * Races these tests leave to other issues. Two new text pieces in one place, or a new one
+ * brought beside text, is the refusal #4037 tracks. A line break that splits a run of text,
+ * or a deleted break that joins two, moves text into a new piece, so a concurrent edit to
+ * that text is lost or repeated, as joins and splits of lines are in #4038.
+ */
+function knownRace(a: Person, editA: Edit, b: Person, editB: Edit) {
+  const runs = (person: Person, edit: Edit) =>
+    edit.kind === "delete"
+      ? [runOf(person, edit.at - 1), runOf(person, edit.at)]
+      : [runOf(person, edit.at)];
+  const meets = (person: Person, edit: Edit, other: Edit) => {
+    const { before, after } = around(person, edit.at);
+    if (edit.kind === "type" && startsPiece(person, edit.at)) {
+      // A deleted line break among several in a row may take a different one of them out,
+      // which brings the new piece beside text.
+      let from = edit.at,
+        to = edit.at;
+      while (from > 0 && around(person, from).before && !around(person, from).before!.isText)
+        from--;
+      while (around(person, to).after && !around(person, to).after!.isText) to++;
+      return (
+        (other.kind === "type" && other.at === edit.at) ||
+        (other.kind === "delete" && other.at > from && other.at <= to)
+      );
+    }
+    const moved =
+      edit.kind === "break"
+        ? before?.isText && after?.isText
+        : edit.kind === "delete" &&
+          !before?.isText &&
+          around(person, edit.at - 1).before?.isText &&
+          after?.isText;
+    return !!moved && runs(person, other).some((run) => runs(person, edit).includes(run));
+  };
+  return meets(a, editA, editB) || meets(b, editB, editA);
+}
+
+function apply(person: Person, edit: Edit, word: string) {
+  const { view } = person;
+  view.dispatch(view.state.tr.setSelection(TextSelection.near(around(person, edit.at).$at)));
+  if (edit.kind === "type") type(person, word);
+  else if (edit.kind === "break") hardBreak(person);
+  else backspace(person);
+}
+
+/** A second line of two to six parts: line breaks, empty pieces and words, with a break between any two words. */
+function randomLine(next: () => number): (string | null)[] {
+  const parts: (string | null)[] = [];
+  for (let count = 2 + Math.floor(next() * 5); count > 0; count--) {
+    const roll = next();
+    const afterWord = parts.findLast((part) => part !== "")?.startsWith("w");
+    if (roll < 0.4) parts.push(null);
+    else if (roll < 0.7 || afterWord) parts.push("");
+    else parts.push(`w${parts.length}`);
+  }
+  return parts;
+}
+
+/** Six rounds in which each person makes one random edit to the second line at the same time. */
+async function race(first: keyof typeof pages, second: keyof typeof pages, seed: number) {
+  const next = random(seed);
+  const line = randomLine(next);
+  const baseline = seeded(line);
+  const a = await pages[first](baseline),
+    b = await pages[second](baseline);
+  const history: Uint8Array[] = [];
+  const words: string[] = [];
+  const steps: string[] = [];
+  const replay = () => `seed ${seed}, line ${JSON.stringify(line)}: ${steps.join("; ")}`;
+  for (let round = 0; round < 6; round++) {
+    const editA = pickEdit(a, next);
+    let editB: Edit | null = pickEdit(b, next);
+    for (let tries = 0; editB && knownRace(a, editA, b, editB); tries++)
+      editB = tries < 20 ? pickEdit(b, next) : null;
+    steps.push(`A ${editA.kind}@${editA.at}, B ${editB ? `${editB.kind}@${editB.at}` : "waits"}`);
+    apply(a, editA, `xa${round}q`);
+    if (editB) apply(b, editB, `yb${round}q`);
+    words.push(`xa${round}q`, `yb${round}q`);
+    const fromA = await a.take(),
+      fromB = await b.take();
+    expect(
+      [
+        verdict(baseline, history, fromA),
+        verdict(baseline, [...history, fromA], fromB),
+        verdict(baseline, history, fromB),
+        verdict(baseline, [...history, fromB], fromA),
+      ],
+      replay(),
+    ).toEqual(ALL_ACCEPTED);
+    history.push(fromA, fromB);
+    a.receive(fromB);
+    b.receive(fromA);
+    for (let settle = 0; ; settle++) {
+      expect(settle, `${replay()}: the pages kept rewriting the line`).toBeLessThan(3);
+      const [againA, againB] = [await a.take(), await b.take()];
+      const live = [againA, againB].filter((update) => {
+        const { structs, ds } = Y.decodeUpdate(update);
+        return structs.length > 0 || ds.clients.size > 0;
+      });
+      if (live.length === 0) break;
+      for (const update of live) {
+        expect(verdict(baseline, history, update), replay()).toBe("accepted");
+        history.push(update);
+      }
+      a.receive(againB);
+      b.receive(againA);
+    }
+    const saved = yDocToMarkdown(a.doc);
+    expect(yDocToMarkdown(b.doc), replay()).toBe(saved);
+    expect(lineShape(b.doc), replay()).toEqual(lineShape(a.doc));
+    for (const word of words)
+      expect(saved.split(word).length, `${replay()}: ${word}`).toBeLessThanOrEqual(2);
+  }
+}
+
+it.each(pairs)(
+  "accepts every change and repeats nothing when two people type, add line breaks and delete in a line holding empty pieces, in random order (%s, %s)",
+  async (first, second) => {
+    for (let seed = 1; seed <= 50; seed++) await race(first, second, seed);
+  },
+  60_000,
 );

@@ -1,5 +1,5 @@
 diff --git a/dist/y-tiptap.cjs b/dist/y-tiptap.cjs
-index 653ffe79d5edb4a040555bb222f472af1e45edc8..b2b592ca4dc51e6360344e84aa3ad6ee0ec0ae11 100644
+index 653ffe79d5edb4a040555bb222f472af1e45edc8..8b7c88b5b927f72f52fa9ac801443d2999d211d1 100644
 --- a/dist/y-tiptap.cjs
 +++ b/dist/y-tiptap.cjs
 @@ -1571,6 +1571,8 @@ const marksToAttributes = (marks, meta) => {
@@ -43,7 +43,18 @@ index 653ffe79d5edb4a040555bb222f472af1e45edc8..b2b592ca4dc51e6360344e84aa3ad6ee
      return
    }
    let left = 0;
-@@ -1698,33 +1719,74 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
+@@ -1624,7 +1645,9 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
+     }
+   }
+   // find number of matching elements from right
+-  for (; right + left + 1 < minCnt; right++) {
++  // dohc: match up to the last child, as y-prosemirror 1.3.7 does. Stopping one short
++  // rewrote a line's last text piece whenever an item was added or removed before it.
++  for (; right + left < minCnt; right++) {
+     const rightY = yChildren[yChildCnt - right - 1];
+     const rightP = pChildren[pChildCnt - right - 1];
+     if (!mappedIdentity(meta.mapping.get(rightY), rightP)) {
+@@ -1698,33 +1721,74 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
            );
            right += 1;
          } else {
@@ -136,7 +147,7 @@ index 653ffe79d5edb4a040555bb222f472af1e45edc8..b2b592ca4dc51e6360344e84aa3ad6ee
    }, ySyncPluginKey);
  };
 diff --git a/dist/y-tiptap.js b/dist/y-tiptap.js
-index 28c55820dff13cf3d5c303970f530c17eb38f757..91841d1db6e15a56c8d17c0689788bffd0cd9069 100644
+index 28c55820dff13cf3d5c303970f530c17eb38f757..830cbd97cd9d6e164317231cc61cc253d1cbf279 100644
 --- a/dist/y-tiptap.js
 +++ b/dist/y-tiptap.js
 @@ -1537,6 +1537,8 @@ const marksToAttributes = (marks, meta) => {
@@ -180,7 +191,18 @@ index 28c55820dff13cf3d5c303970f530c17eb38f757..91841d1db6e15a56c8d17c0689788bff
      return
    }
    let left = 0;
-@@ -1664,33 +1685,74 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
+@@ -1590,7 +1611,9 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
+     }
+   }
+   // find number of matching elements from right
+-  for (; right + left + 1 < minCnt; right++) {
++  // dohc: match up to the last child, as y-prosemirror 1.3.7 does. Stopping one short
++  // rewrote a line's last text piece whenever an item was added or removed before it.
++  for (; right + left < minCnt; right++) {
+     const rightY = yChildren[yChildCnt - right - 1];
+     const rightP = pChildren[pChildCnt - right - 1];
+     if (!mappedIdentity(meta.mapping.get(rightY), rightP)) {
+@@ -1664,33 +1687,74 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
            );
            right += 1;
          } else {
