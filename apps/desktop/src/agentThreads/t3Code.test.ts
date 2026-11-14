@@ -444,11 +444,18 @@ describe("T3 Code's thread tools", () => {
     const session = await openT3CodeSession({ origin: t3.origin, signIn: signInAt(t3.origin) });
     const asked = { threadId: "t1", runId: "r1" };
     const states: string[] = [];
-    for (const status of ["queued", "preparing", "waiting", "running", "cancelled", "completed"]) {
+    for (const status of ["queued", "preparing", "waiting", "running"]) {
       t3.tools.t3_thread_wait = () => ({ runId: "r1", status, timedOut: true });
       states.push(await readT3CodeRun(session, asked));
     }
+    for (const status of ["cancelled", "completed"]) {
+      t3.tools.t3_thread_wait = () => ({ runId: "r1", status, timedOut: false });
+      states.push(await readT3CodeRun(session, asked));
+    }
     expect(states).toEqual(["in-line", "working", "working", "working", "ended", "ended"]);
+    // T3 Code restarted in the middle of the run and has yet to continue it: the work is not over.
+    t3.tools.t3_thread_wait = () => ({ runId: "r1", status: "interrupted", timedOut: true });
+    await expect(readT3CodeRun(session, asked)).resolves.toBe("working");
     // No time to wait: T3 Code answers with the status the run has now.
     expect(t3.calls.findLast((call) => call.tool === "t3_thread_wait")?.args).toEqual({
       ...asked,

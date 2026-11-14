@@ -100,7 +100,13 @@ function setup(
   const forget = vi.fn(async () => {});
   const agentThreads = createAgentThreads({
     cli,
-    t3Code: { forward, forget, thread: async () => tool.state } as unknown as T3CodeConnection,
+    t3Code: {
+      forward,
+      forget,
+      thread: async () => tool.state,
+      run: async (_threadId: string, runId: string) =>
+        tool.state.runs.find((entry) => entry.id === runId)?.state ?? "in-line",
+    } as unknown as T3CodeConnection,
     chats,
     ledger,
     onLines: (workspaceId) => void lineChanges.push(workspaceId),

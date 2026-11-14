@@ -160,12 +160,14 @@ export function createThreadStates(dependencies: ThreadStatesDependencies) {
     // Work the tool gave no id for is over when the thread is doing nothing.
     if (runId === null) return { phase: thread.working ? "working" : "ended" };
     const run = thread.runs.find((entry) => entry.id === runId);
-    if (run) return { phase: run.state, run };
+    if (run && run.state !== "ended") return { phase: run.state, run };
     if (runId === thread.activeRunId) return { phase: "working" };
-    // The tool lists only a thread's newest work, and a person can put work
-    // waiting there in another order, so what it lists says nothing of this
-    // run. dohc asks for the run itself.
-    return { phase: await dependencies.tool.run(toolThreadId, runId) };
+    // dohc asks for the run itself in two cases. The tool lists only a
+    // thread's newest work, and a person can put work waiting there in another
+    // order, so the list says nothing of a run it does not hold. And a run the
+    // list shows as over may go on in another run after the tool restarted,
+    // which only the answer for the run itself tells.
+    return { phase: await dependencies.tool.run(toolThreadId, runId), run };
   }
 
   /** Sets the row's line. A state that goes on keeps the time it began. */

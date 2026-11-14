@@ -108,11 +108,14 @@ test("connects a T3 Code thread as an agent and forwards a chat message to it", 
     })),
   });
   // Asked for one run: its status, or waiting in line when the thread does not list it yet.
-  t3.tools.t3_thread_wait = (args) => ({
-    runId: args.runId,
-    status: runs.find((run) => run.runId === args.runId)?.status ?? "queued",
-    timedOut: true,
-  });
+  t3.tools.t3_thread_wait = (args) => {
+    const run = runs.find((entry) => entry.runId === args.runId);
+    return {
+      runId: args.runId,
+      status: run?.status ?? "queued",
+      timedOut: !run || run.completedAt === null,
+    };
+  };
 
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;

@@ -698,12 +698,16 @@ const ThreadRead = z.object({
 
 // T3 Code's words for a run that is over, whatever way it ended.
 const ENDED = ["completed", "interrupted", "failed", "cancelled", "rolled_back"];
-const RunStatus = z.object({ status: z.string() });
+const RunStatus = z.object({ status: z.string(), timedOut: z.boolean() });
 
 /**
  * Where one run stands, asked by its id. T3 Code lists only a thread's newest
  * runs with the thread, so a run it no longer lists is asked for here. A run
  * the thread does not have is over.
+ *
+ * When T3 Code restarts in the middle of a run, it ends that run and continues
+ * the work in another. Its answer here follows the run to the one that
+ * continues it, which a thread's list of runs does not.
  */
 export async function readT3CodeRun(
   session: T3CodeSession,
@@ -711,11 +715,13 @@ export async function readT3CodeRun(
 ): Promise<T3CodeRun["state"]> {
   try {
     // T3 Code's wait answers at once with the run's status when given no time to wait.
-    const { status } = shaped(
+    const { status, timedOut } = shaped(
       RunStatus,
       await session.call("t3_thread_wait", { ...input, timeoutMs: 1 }),
     );
-    return status === "queued" ? "in-line" : ENDED.includes(status) ? "ended" : "working";
+    if (status === "queued") return "in-line";
+    // A run that ended and still timed out waits for T3 Code to continue it after a restart.
+    return ENDED.includes(status) && !timedOut ? "ended" : "working";
   } catch (error) {
     if (error instanceof T3CodeError && error.problem === "run-gone") return "ended";
     throw error;

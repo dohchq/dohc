@@ -72,7 +72,8 @@ function setup(over: Partial<ThreadStatesDependencies> = {}, start: ForwardRow[]
   });
   const read = vi.fn(async (_threadId: string) => state);
   // What the tool says of a run asked for by its id.
-  let ofRun: T3CodeRun["state"] = "ended";
+  // Unless a test says otherwise: as the thread lists it, or over when it does not.
+  const ofRun = new Map<string, T3CodeRun["state"]>();
   const askedRuns: Array<[string, string]> = [];
   const changes: string[] = [];
   const errors: unknown[] = [];
@@ -83,7 +84,12 @@ function setup(over: Partial<ThreadStatesDependencies> = {}, start: ForwardRow[]
       forward,
       run: async (threadId, runId) => {
         askedRuns.push([threadId, runId]);
-        return ofRun;
+        return (
+          ofRun.get(runId) ??
+          ofRun.get("any") ??
+          state.runs.find((entry) => entry.id === runId)?.state ??
+          "ended"
+        );
       },
     },
     chats: {
@@ -115,8 +121,8 @@ function setup(over: Partial<ThreadStatesDependencies> = {}, start: ForwardRow[]
       now = ms;
     },
     askedRuns,
-    runState: (next: T3CodeRun["state"]) => {
-      ofRun = next;
+    runState: (next: T3CodeRun["state"], runId = "any") => {
+      ofRun.set(runId, next);
     },
     tool: (next: T3CodeThreadState) => {
       state = next;
@@ -185,7 +191,7 @@ describe("what an agent thread is doing with a forwarded message", () => {
     await states.forwarded(forwarded());
     tool(thread([run("run-1", "ended")]));
     // The thread does not list the reminder's own work yet: asked for, it waits.
-    runState("in-line");
+    runState("in-line", "run-remind");
 
     await states.check();
 
@@ -208,6 +214,7 @@ describe("what an agent thread is doing with a forwarded message", () => {
 
     // It ends with nothing posted: the chat says so, and nothing more is sent.
     at(9_000);
+    runState("ended", "run-remind");
     tool(thread([run("run-remind", "ended", { endedAtMs: 8_000 }), run("run-1", "ended")]));
     await states.check();
     await states.check();
@@ -421,6 +428,27 @@ describe("what an agent thread is doing with a forwarded message", () => {
 
     expect(forward).toHaveBeenCalledTimes(1);
     expect(rows()[0]!.reminder).toMatchObject({ state: "sent" });
+    states.stop();
+  });
+
+  it("does not take a run the list shows as over for over while the tool continues it after a restart", async () => {
+    const { states, tool, forward, runState, askedRuns } = setup();
+    states.forwarded(forwarded());
+    // The tool restarted: the message's run ended, and another run continues its work.
+    tool(thread([run("run-continues", "working"), run("run-1", "ended")]));
+    runState("working");
+
+    await states.check();
+
+    expect(askedRuns.at(-1)).toEqual(["t3-1", "run-1"]);
+    expect(line(states)).toMatchObject({ state: "working" });
+    expect(forward).not.toHaveBeenCalled();
+
+    // The run that continues it is over too.
+    tool(thread([run("run-continues", "ended"), run("run-1", "ended")]));
+    runState("ended");
+    await states.check();
+    expect(forward).toHaveBeenCalledTimes(1);
     states.stop();
   });
 
