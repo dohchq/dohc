@@ -8,6 +8,10 @@ export const LINK_REFUSALS = {
     status: 403,
     error: "This link gives Comment access. Ask the owner for an Edit link.",
   },
+  link_full: {
+    status: 403,
+    error: "This link cannot take more people. Ask the owner for a new link.",
+  },
   link_live_unavailable: { status: 503, error: "Live editing is unavailable. Try again later." },
   link_unavailable: {
     status: 503,

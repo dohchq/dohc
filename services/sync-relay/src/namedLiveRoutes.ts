@@ -435,7 +435,11 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
         const minted = await options.tickets.mint({ objectId }, context, signal);
         signal.throwIfAborted();
         check();
-        return minted ? answer(minted) : refusal();
+        if (minted) return answer(minted);
+        // A link that has taken as many browsers as it may can't take this one. Trying again can't help.
+        return context.kind === "link" && storage.liveLinkFull(context)
+          ? linkRefusal("link_full")
+          : refusal();
       } catch (error) {
         // A personal agent learns when to try again: its account can't be read now, or it asked too often.
         if (kind === "personal")

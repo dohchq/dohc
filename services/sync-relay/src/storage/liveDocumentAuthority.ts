@@ -1007,6 +1007,13 @@ export function ticketScopeIsCurrent(storage: StorageContext, scope: LiveTicketS
   );
 }
 
+/** Whether a link browser's ticket would enroll one browser more than its link takes. */
+export function liveLinkFull(storage: StorageContext, scope: LiveTicketScope): boolean {
+  if (scope.kind !== "link" || "agentConnectionId" in scope) return false;
+  const link = currentLinkEdit(storage, liveBrowserActor(scope));
+  return !!link && linkPrincipalLimitReached(storage, link.enrollment);
+}
+
 export function currentTicketAuthority(
   storage: StorageContext,
   scope: LiveTicketScope,

@@ -14,7 +14,9 @@ export type NamedDocumentSession = ReturnType<
 >;
 const OPENING = ["authorizing", "connecting", "syncing"];
 // A disconnected page reconnects by itself and sends a pending change again, except for these reasons.
-const NO_AUTOMATIC_RETRY = ["authority-unavailable", "access-removed", "paused"];
+const NO_AUTOMATIC_RETRY = ["authority-unavailable", "access-removed", "link-full", "paused"];
+// Trying again can't change these, so the page offers no Try again.
+const FINAL = ["access-removed", "link-full"];
 /** Editing stopped with a change the page will not send again by itself. */
 export function draftNeedsReview(state: NamedLiveBrowserState): boolean {
   return (
@@ -45,6 +47,8 @@ function statusText(state: NamedLiveBrowserState, link: boolean): string {
   if (state.status === "closed")
     return "Editing stopped. Copy any unsynced changes you want to keep.";
   if (state.reason === "access-removed") return "The owner removed your access.";
+  if (state.reason === "link-full")
+    return "This link cannot take more people. Ask the owner for a new link.";
   if (state.reason === "authority-unavailable")
     return "dohc could not open the file for editing. Try again.";
   if (state.reason === "host-unavailable")
@@ -111,7 +115,7 @@ export function NamedDocumentEditor({
     >
       {!link && <h1>{path}</h1>}
       {statusSlot && working ? createPortal(status, statusSlot) : status}
-      {state.status === "disconnected" && state.reason !== "access-removed" && (
+      {state.status === "disconnected" && !FINAL.includes(state.reason ?? "") && (
         <button className="handoff-button secondary" onClick={() => void session.reconnect()}>
           {state.reason === "authority-unavailable" ||
           state.reason === "host-unavailable" ||
