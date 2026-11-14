@@ -1,4 +1,5 @@
 import type { createChatLinksReader } from "../workspaces/chatLinks";
+import { createJoinedGroup } from "../workspaces/joinedGroupCreate";
 import { agentColorsForPresentation } from "../settings/userSettingsStore";
 import { CHATS_STOPPED, chatOperations } from "./chatOperations";
 import { isReceivedObject } from "@dohc/workspace-contracts/workspace-ref";
@@ -1036,36 +1037,6 @@ export function registerChatsIpcHandlers<
     if (replicationOwnerUserId) activity.queueCloudSync(workspace.workspaceId);
   };
 
-  // The Group a joined workspace's next pull brings, once it is in the
-  // view's store. The relay wakes the held pull as soon as it writes the
-  // Group, so this waits for that pull, not for a timer.
-  async function joinedGroupArrived(scope: ChatScope, channelWireId: string, signal: AbortSignal) {
-    const find = async () =>
-      (await scope.store.listChannels({ workspaceId: scope.workspace.workspaceId })).find(
-        (channel) => channel.id === channelWireId,
-      );
-    let wake = () => {};
-    const unsubscribe = subscribeChatWrites(scope.workspace.workspaceId, () => wake());
-    try {
-      for (;;) {
-        const woke = new Promise<void>((resolve) => {
-          wake = resolve;
-        });
-        const found = await find();
-        if (found) return found;
-        signal.throwIfAborted();
-        await Promise.race([
-          woke,
-          new Promise<void>((resolve) =>
-            signal.addEventListener("abort", () => resolve(), { once: true }),
-          ),
-        ]);
-      }
-    } finally {
-      unsubscribe();
-    }
-  }
-
   const createChatChannel: ChatHandler<"createChatChannel"> = async (input, { operation }) => {
     // An admin's New group in a joined workspace. A path share stays behind
     // capture, which refuses it.
@@ -1077,23 +1048,16 @@ export function registerChatsIpcHandlers<
       const scope = await requireChatScope(input.workspaceId);
       if (input.folderPath !== undefined)
         throw new Error("A joined workspace's Groups have no folder of their own.");
-      const { channelWireId } = await createJoinedWorkspaceGroup(scope.workspace.shareView, {
-        name: input.name,
-        ...(input.type ? { type: input.type } : {}),
-        ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
-      });
-      operation.assertCurrent();
-      const channel = await joinedGroupArrived(
+      const { channel, channelWireId } = await createJoinedGroup(
+        { createJoinedWorkspaceGroup, subscribeChatWrites },
         scope,
-        channelWireId,
-        AbortSignal.timeout(30_000),
-      ).catch((error: unknown) => {
-        operation.assertCurrent();
-        throw new Error(
-          `dohc created ${input.name}, and it has not reached this computer yet. It shows in Chats when it does.`,
-          { cause: error },
-        );
-      });
+        {
+          name: input.name,
+          ...(input.type ? { type: input.type } : {}),
+          ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
+        },
+        () => operation.assertCurrent(),
+      );
       return CreateChatChannelResult.parse({
         channel: { ...chatChannelForIpc(channel), wireId: channelWireId },
       });
@@ -1185,15 +1149,16 @@ export function registerChatsIpcHandlers<
     sendOnce(event, input.workspaceId, async (operation, onSaved) => {
       const scope = await requireChatScope(input.workspaceId);
       const { workspace, store } = scope;
-      const host = chatWrites.host(
-        chatWritePlace(scope),
-        {
-          writer: RENDERER,
-          resolveAttachments: () =>
-            resolveChatFileReferences(workspace, (path) => chatFileObjectId(scope, path), input.fileReferences),
-          onSaved,
-        },
-      );
+      const host = chatWrites.host(chatWritePlace(scope), {
+        writer: RENDERER,
+        resolveAttachments: () =>
+          resolveChatFileReferences(
+            workspace,
+            (path) => chatFileObjectId(scope, path),
+            input.fileReferences,
+          ),
+        onSaved,
+      });
       // No title, ever, on this path: the thread displays its first-message
       // snippet.
       const message = {
@@ -1206,11 +1171,7 @@ export function registerChatsIpcHandlers<
         input.lane === "chat"
           ? await sendToStream(host, message)
           : await postToGroup(host, message);
-      const presentation = await presentationRequest(
-        workspace,
-        store,
-        operation.assertCurrent,
-      );
+      const presentation = await presentationRequest(workspace, store, operation.assertCurrent);
       return StartChannelThreadResult.parse({
         thread: channelThreadForIpc(
           {

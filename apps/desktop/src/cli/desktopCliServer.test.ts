@@ -303,6 +303,10 @@ function fixture(
     currentDaemon: vi.fn(() => daemon),
     agentDispatchStoreHandleFor: vi.fn(() => ({ store: dispatchStore })),
     sharedViewOf: vi.fn(() => null),
+    createJoinedGroup: vi.fn(
+      async (_workspace, _store, input) =>
+        ({ id: "channel_wire_joined", name: input.name }) as never,
+    ),
     joinedPages: {
       role: vi.fn(() => undefined),
       folderHoldsFile: vi.fn(async () => true),
@@ -2844,6 +2848,20 @@ describe("a joined workspace through the CLI", () => {
     ]);
     expect(f.dependencies.joinedPages.folderHoldsFile).toHaveBeenCalledWith("workspace", "notes");
     expect(f.dependencies.liveDocuments.editDocument).not.toHaveBeenCalled();
+  });
+
+  // The relay creates the Group in the owner's workspace and decides the
+  // role; the view's next pull brings it here.
+  it("creates a Group through the relay", async () => {
+    const f = joinedFixture("edit");
+    const context = await f.create().openCliWorkspace(f.joined);
+    await expect(context.createGroup!({ name: "Kai group", type: "posts" })).resolves.toMatchObject(
+      { name: "Kai group" },
+    );
+    const [workspace, store, input] = vi.mocked(f.dependencies.createJoinedGroup).mock.calls[0]!;
+    expect(workspace).toMatchObject({ workspaceId: "workspace", shareView: f.shareView });
+    expect(store).toBe(f.dependencies.linkedChatStoreFor(f.joined));
+    expect(input).toEqual({ name: "Kai group", type: "posts" });
   });
 
   it("names the level below Edit", async () => {

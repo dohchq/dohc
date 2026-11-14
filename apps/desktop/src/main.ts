@@ -283,6 +283,7 @@ import {
   createJoinedWorkspaceGroupAction,
   createWorkspaceMembersActions,
 } from "./ipc/workspaceMembersActions";
+import { createJoinedGroup } from "./workspaces/joinedGroupCreate";
 import { memberOperations } from "./ipc/memberOperations";
 import { accessOperations } from "./ipc/accessOperations";
 import { assertResolvedWorkspacePath } from "./workspaces/workspaceRealPath";
@@ -6963,6 +6964,17 @@ const liveDocumentsForCli = () => {
   if (!ownerLiveDocumentsForCli) throw new Error("Live editing is not ready. Try again.");
   return ownerLiveDocumentsForCli;
 };
+// An admin's New group in a joined workspace, for the app and for agents.
+const createJoinedWorkspaceGroup = createJoinedWorkspaceGroupAction<CloudSessionCredentials>({
+  credentials: async () => {
+    await warmCredentialCache();
+    return cachedCredentials;
+  },
+  relayUrlsMatch,
+  relayResponse: (credentials, path, init) =>
+    relayShareResponseWithCredentials(credentials, path, init),
+});
+
 const { startDesktopCliServer } = createDesktopCliServer({
   accountReadOwner: async (workspace, store, threadId) => {
     await warmCredentialCache();
@@ -7124,11 +7136,22 @@ const { startDesktopCliServer } = createDesktopCliServer({
   currentDaemon: () => desktopEngine.daemon,
   agentDispatchStoreHandleFor,
   sharedViewOf,
+  createJoinedGroup: async (workspace, store, input, assertCurrent) =>
+    (
+      await createJoinedGroup(
+        { createJoinedWorkspaceGroup, subscribeChatWrites },
+        { workspace, store },
+        input,
+        assertCurrent,
+      )
+    ).channel,
   joinedPages: {
     role: memberRoleOf,
     folderHoldsFile: async (workspaceId, folder) =>
-      (await shareViewFiles.list({ kind: "standalone", workspaceId }, { under: folder })).files.length > 0,
-    create: (workspace, path, markdown) => workspaceFileMutations.createShareViewPage(workspace, path, markdown),
+      (await shareViewFiles.list({ kind: "standalone", workspaceId }, { under: folder })).files
+        .length > 0,
+    create: (workspace, path, markdown) =>
+      workspaceFileMutations.createShareViewPage(workspace, path, markdown),
   },
   shareProjection: ownedShareProjection,
   withPhysicalWorkspaceOperation,
@@ -10837,15 +10860,7 @@ function registerIpcHandlers(): void {
     },
     agentWaitsForTrust: (workspaceId, messageId) =>
       chatDispatchService.waitsForTrust(workspaceId, messageId),
-    createJoinedWorkspaceGroup: createJoinedWorkspaceGroupAction<CloudSessionCredentials>({
-      credentials: async () => {
-        await warmCredentialCache();
-        return cachedCredentials;
-      },
-      relayUrlsMatch,
-      relayResponse: (credentials, path, init) =>
-        relayShareResponseWithCredentials(credentials, path, init),
-    }),
+    createJoinedWorkspaceGroup,
     subscribeChatWrites,
   });
 

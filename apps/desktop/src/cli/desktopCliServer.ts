@@ -54,6 +54,7 @@ import type { LocalPersonAuthor } from "../workspaces/desktopRecordEdits";
 import { captureRefusal } from "../workspaces/engineCaptureGate";
 import { resolveEngineFileTargets } from "../workspaces/resolveEngineFiles";
 import type { ShareViewWriteScope } from "../workspaces/shareWriteGate";
+import type { JoinedGroupInput } from "../workspaces/joinedGroupCreate";
 import { assertOriginalWorkspace } from "../ipc/ownerRelayShareHandler";
 import type {
   OwnerLiveDocumentsResult,
@@ -97,6 +98,7 @@ import {
   UNNAMED_AGENT_ID,
   VersionedTextStoreError,
   type MomentWriteAuthor,
+  type ChatChannelSummary,
 } from "@dohc/workspace-contracts/engine";
 
 // The engine reads at most this many accounts for one agent you run.
@@ -296,6 +298,13 @@ interface DesktopCliServerDependencies<State> {
   sharedViewOf(workspaceId: string): ShareViewWriteScope | null;
   // An agent's new page in a joined workspace. The relay decides each one;
   // the role and folders only give a refusal its reason first.
+  // New group in a joined workspace, through the relay (joinedGroupCreate).
+  createJoinedGroup(
+    workspace: RegistryEntry,
+    store: DesktopLinkedChatStore,
+    input: JoinedGroupInput,
+    assertCurrent: () => void,
+  ): Promise<ChatChannelSummary>;
   joinedPages: {
     // The role the relay last named, or undefined before it has.
     role(workspaceId: string): "admin" | "member" | undefined;
@@ -676,6 +685,11 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
           operation.assertCurrent();
           if (operation.signal !== publicationAttachment || publicationAttachment.aborted)
             throw new Error("This workspace changed while this ran. Try again.");
+          if (sharedViewOf(workspace.workspaceId)?.membership === true) {
+            return await dependencies.createJoinedGroup(operation.workspace, store, input, () =>
+              operation.assertCurrent(),
+            );
+          }
           if (sharedViewOf(workspace.workspaceId))
             throw new Error("This workspace is read-only. Write in the owning workspace.");
           return await createGroup(
@@ -867,16 +881,27 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
           if (startsWithFrontmatter(markdown)) throw new Error(FRONTMATTER_REFUSAL);
           const view = sharedViewOf(workspace.workspaceId);
           if (view?.membership === true) {
-            if (view.access !== "edit") throw new Error(`Adding a page needs Edit. You can ${view.access ?? "view"} here.`);
+            if (view.access !== "edit")
+              throw new Error(`Adding a page needs Edit. You can ${view.access ?? "view"} here.`);
             const folder = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
-            if (folder !== "" && dependencies.joinedPages.role(workspace.workspaceId) !== "admin" &&
-                !await dependencies.joinedPages.folderHoldsFile(workspace.workspaceId, folder)) {
-              throw new Error("Only admins add a page in a new folder. Put it in a folder that has a page.");
+            if (
+              folder !== "" &&
+              dependencies.joinedPages.role(workspace.workspaceId) !== "admin" &&
+              !(await dependencies.joinedPages.folderHoldsFile(workspace.workspaceId, folder))
+            ) {
+              throw new Error(
+                "Only admins add a page in a new folder. Put it in a folder that has a page.",
+              );
             }
-            return { path: await withPhysicalWorkspaceOperation(workspace.workspaceId, async (operation) => {
-              operation.assertCurrent();
-              return await dependencies.joinedPages.create(operation.workspace, path, markdown);
-            }) };
+            return {
+              path: await withPhysicalWorkspaceOperation(
+                workspace.workspaceId,
+                async (operation) => {
+                  operation.assertCurrent();
+                  return await dependencies.joinedPages.create(operation.workspace, path, markdown);
+                },
+              ),
+            };
           }
           // An empty file written on the capture chain, which refuses a path
           // that exists and records the agent as the file's author, and then
