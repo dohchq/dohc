@@ -131,7 +131,7 @@ export function createAgentThreads(dependencies: AgentThreadsDependencies) {
     chats: dependencies.chats,
     onProblem: dependencies.onProblem,
     workspace: serving,
-    onForwarded: (forwarded) =>
+    onForwarded: (forwarded) => {
       states.forwarded({
         workspaceId: forwarded.workspaceId,
         agentId: forwarded.agent.id,
@@ -141,7 +141,11 @@ export function createAgentThreads(dependencies: AgentThreadsDependencies) {
         afterOrder: forwarded.afterOrder,
         forwardedAtMs: nowMs(),
         runId: forwarded.runId,
-      }),
+      });
+      // The agent may have been pointed at another thread, turned off, or
+      // removed while the tool took this message. Its line then goes at once.
+      void dropLinesNoAgentHas().catch((error: unknown) => dependencies.onError?.(error));
+    },
   });
   // A line is for an agent dohc forwards to. One that was turned off, removed,
   // or pointed at another thread has none.
@@ -154,6 +158,36 @@ export function createAgentThreads(dependencies: AgentThreadsDependencies) {
         ),
     );
   };
+  /** The agent as its thread is reached from a workspace. Throws when dohc cannot connect the thread. */
+  const reached = (
+    workspaceId: string,
+    agent: Pick<AgentWithThread, "id" | "name" | "thread" | "whileBusy" | "note">,
+  ) => {
+    const workspace = dependencies.workspace(workspaceId);
+    if (!workspace) throw new Error("This computer no longer has this workspace.");
+    // The thread replies with a command that names dohc's program. Without
+    // one it could not reply, so dohc connects nothing.
+    if (dependencies.cli.program === null) {
+      const { refused } = dependencies.cli;
+      throw new Error(
+        refused === undefined
+          ? "dohc can't connect a thread, because it can't find its own program."
+          : `dohc can't connect a thread from where it is installed. The path of its folder has ${quoted(refused)}, which a command can't carry safely. Install dohc in a folder whose path has none.`,
+      );
+    }
+    const reaching = served(agent, workspace);
+    if (!reaching) throw new Error("Give this agent a name with a letter or digit.");
+    return reaching;
+  };
+  /** Tells a thread what dohc will send it. Rejects when the tool does not take it. */
+  const introduce = (threadId: string, agentName: string) =>
+    dependencies.t3Code.forward({
+      threadId,
+      how: "line",
+      message: introductionText({ cli: dependencies.cli, agentName }),
+      // One introduction for each time a person connects this thread as this agent.
+      forwardId: `dohc-intro-${randomUUID()}`,
+    });
   const watched = new Map<string, () => void>();
   // Whether any agent had a thread when dohc last looked. Null before the first look.
   let hadThreadAgent: boolean | null = null;
@@ -225,28 +259,22 @@ export function createAgentThreads(dependencies: AgentThreadsDependencies) {
       workspaceId: string,
       agent: Pick<AgentWithThread, "id" | "name" | "thread" | "whileBusy" | "note">,
     ): Promise<void> {
-      const workspace = dependencies.workspace(workspaceId);
-      if (!workspace) throw new Error("This computer no longer has this workspace.");
-      // The thread replies with a command that names dohc's program. Without
-      // one it could not reply, so dohc connects nothing.
-      if (dependencies.cli.program === null) {
-        const { refused } = dependencies.cli;
-        throw new Error(
-          refused === undefined
-            ? "dohc can't connect a thread, because it can't find its own program."
-            : `dohc can't connect a thread from where it is installed. The path of its folder has ${quoted(refused)}, which a command can't carry safely. Install dohc in a folder whose path has none.`,
-        );
-      }
-      const reaching = served(agent, workspace);
-      if (!reaching) throw new Error("Give this agent a name with a letter or digit.");
+      const reaching = reached(workspaceId, agent);
       await forwarding.setAside(workspaceId, reaching);
-      await dependencies.t3Code.forward({
-        threadId: reaching.threadId,
-        how: "line",
-        message: introductionText({ cli: dependencies.cli, agentName: agent.name }),
-        // One introduction for each time a person connects this thread as this agent.
-        forwardId: `dohc-intro-${randomUUID()}`,
-      });
+      await introduce(reaching.threadId, agent.name);
+    },
+    /**
+     * Readies another thread for an agent that already serves a workspace,
+     * before the agent is saved with it: tells the thread what dohc will send
+     * it. Nothing is set aside. A message that still waits for the agent goes
+     * to the new thread once it is saved, as when the old thread was gone
+     * from the tool. Rejects when T3 Code does not take the introduction.
+     */
+    async change(
+      workspaceId: string,
+      agent: Pick<AgentWithThread, "id" | "name" | "thread" | "whileBusy" | "note">,
+    ): Promise<void> {
+      await introduce(reached(workspaceId, agent).threadId, agent.name);
     },
     stop(): void {
       states.stop();

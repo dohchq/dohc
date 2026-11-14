@@ -8313,6 +8313,43 @@ export const agentThreadOperations = {
     guard: "active-workspace",
     inactiveMessage: "The thread was not opened because this window changed workspaces.",
   },
+  // Reads the thread an agent is connected to, for the agent's page. The
+  // agent may be off. Main finds the thread from the agent's saved settings.
+  readAgentThread: {
+    capabilityId: "agent.thread.read",
+    scope: "workspace",
+    channel: "desktop:read-agent-thread",
+    payload: z.strictObject({ workspaceId: z.string().min(1), agentId: AgentId }),
+    // Each answer names the thread the agent is saved with, which it is
+    // about. A window shows a save before it lands, so it checks that against
+    // the thread it shows, for a title and for a failure alike.
+    result: z.union([
+      z.strictObject({
+        threadId: AgentThread.shape.id,
+        title: z.string(),
+        // The thread was archived or settled in its tool.
+        closed: z.boolean(),
+      }),
+      // The tool could not be asked about that thread, or no longer has it.
+      z.strictObject({ threadId: AgentThread.shape.id, problem: z.string().min(1) }),
+    ]),
+    guard: "active-workspace",
+    inactiveMessage: "The thread was not read because this window changed workspaces.",
+  },
+  // Readies another thread for an agent that already has one, before the
+  // agent is saved with it: tells the thread what dohc will send it.
+  changeAgentThread: {
+    capabilityId: "agent.thread.connect",
+    scope: "workspace",
+    channel: "desktop:change-agent-thread",
+    payload: z.strictObject({
+      workspaceId: z.string().min(1),
+      agentId: AgentId,
+      threadId: AgentThread.shape.id,
+    }),
+    guard: "active-workspace",
+    inactiveMessage: "The thread was not changed because this window changed workspaces.",
+  },
   // Reads the question the agent's thread waits on. Main finds the thread from
   // the agent's saved settings, and keeps no copy of the question.
   readAgentThreadQuestion: {

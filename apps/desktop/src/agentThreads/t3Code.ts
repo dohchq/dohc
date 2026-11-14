@@ -42,7 +42,8 @@ export class T3CodeError extends Error {
     readonly problem: T3CodeProblem,
     message: string,
   ) {
-    super(message);
+    // Never without words: they are shown to the person, and T3 Code may send none.
+    super(message.trim() === "" ? "T3 Code refused the call." : message);
     this.name = "T3CodeError";
   }
 }

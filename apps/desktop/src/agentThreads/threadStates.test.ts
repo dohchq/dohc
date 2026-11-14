@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ForwardLedger, ForwardRow } from "./forwardLedger";
+import { forwardIdOf } from "./forwarding";
 import { T3CodeError, type T3CodeRun, type T3CodeThreadState } from "./t3Code";
 import { createThreadStates, type ThreadStatesDependencies } from "./threadStates";
 
@@ -237,7 +238,8 @@ describe("what an agent thread is doing with a forwarded message", () => {
         threadId: "t3-1",
         message: "REMINDER",
         how: "line",
-        forwardId: expect.stringMatching(/^remind-dohc-[0-9a-f]{64}$/),
+        // Named for the message in this thread, so another thread can take its own.
+        forwardId: `remind-${forwardIdOf(WORKSPACE, "chief", "m1", "t3-1")}`,
       },
     ]);
     // Saved as none when forwarded, recorded before the reminder went, sent after.
@@ -470,6 +472,29 @@ describe("what an agent thread is doing with a forwarded message", () => {
 
     expect(forward).toHaveBeenCalledTimes(1);
     expect(rows()[0]!.reminder).toMatchObject({ state: "sent" });
+    states.stop();
+  });
+
+  it("follows a message in the thread that took it last, when the agent was pointed at another", async () => {
+    // Saved before dohc stopped: the message went to one thread, and was reminded there.
+    const saved: ForwardRow = {
+      ...forwarded(),
+      reminder: { state: "sent", runId: "run-remind", atMs: 2_000 },
+    };
+    const { states, tool, forward, sent, rows } = setup({}, [saved]);
+    // The agent has another thread now, and that thread takes the same message.
+    states.forwarded(forwarded({ toolThreadId: "t3-2", runId: "run-9", forwardedAtMs: 4_000 }));
+    tool(thread([run("run-9", "working", { requestedAtMs: 4_100, startedAtMs: 4_200 })]));
+    await states.check();
+
+    expect(rows().map((row) => [row.toolThreadId, row.reminder.state])).toEqual([["t3-2", "none"]]);
+    expect(line(states)).toMatchObject({ state: "working", forwardedAtMs: 4_000 });
+
+    // Its work there ends in silence: that thread gets its own reminder.
+    tool(thread([run("run-9", "ended", { requestedAtMs: 4_100 })]));
+    await states.check();
+    expect(forward).toHaveBeenCalledTimes(1);
+    expect(sent[0]).toMatchObject({ threadId: "t3-2" });
     states.stop();
   });
 

@@ -424,6 +424,60 @@ describe("agent threads", () => {
     expect(order).toEqual(["sent message", "read m1"]);
   });
 
+  it("readies another thread for an agent with its introduction, and sets nothing aside", async () => {
+    const { agentThreads, order, sent, forward } = started(setup({ chief }, ["m1", "m2"]));
+    const next = { id: "chief", name: "Chief", thread: otherThread("t3-thread-2") };
+
+    await agentThreads.change(WORKSPACE, next);
+
+    // What still waits for the agent is left to go to the thread it is saved with.
+    expect(order).toEqual(["sent intro"]);
+    expect(sent[0]).toMatchObject({ threadId: "t3-thread-2", how: "line" });
+    expect(sent[0]!.message).toContain('their agent "Chief"');
+
+    const refused = new T3CodeError("thread-gone", "This thread is no longer in T3 Code.");
+    forward.mockRejectedValueOnce(refused);
+    await expect(agentThreads.change(WORKSPACE, next)).rejects.toBe(refused);
+    await expect(agentThreads.change("ws-gone", next)).rejects.toThrow(
+      "no longer has this workspace",
+    );
+  });
+
+  it("keeps no line for a thread the agent left while the tool took a message for it", async () => {
+    const { agentThreads, forward, save, rows, tool, order } = started(setup({ chief }));
+    tool.state = {
+      ...tool.state,
+      runs: [
+        { id: "run-1", state: "working", requestedAtMs: 100, startedAtMs: 200, endedAtMs: null },
+      ],
+    };
+    // The tool holds the message for the first thread until the test lets it go.
+    let taken!: () => void;
+    const holding = new Promise<void>((resolve) => {
+      taken = resolve;
+    });
+    forward.mockImplementationOnce(async () => {
+      await holding;
+      return { runId: "run-1" };
+    });
+    agentThreads.watch(WORKSPACE);
+    await vi.waitFor(() => expect(forward).toHaveBeenCalledTimes(1));
+
+    // The person points the agent at another thread, and then the tool answers.
+    save({ chief: { ...chief, thread: otherThread("t3-thread-2") } });
+    agentThreads.settingsChanged();
+    await settled();
+    taken();
+
+    // The first thread has the message, so it is read and goes to no other thread.
+    await vi.waitFor(() => expect(order).toEqual(["read m1"]));
+    await settled();
+    // The chat shows no line for work in a thread the agent no longer has.
+    expect(agentThreads.lines(WORKSPACE)).toEqual([]);
+    await vi.waitFor(() => expect(rows()).toEqual([]));
+    expect(forward).toHaveBeenCalledTimes(1);
+  });
+
   it("forgets a workspace's lines when the workspace leaves this computer", async () => {
     const { agentThreads, tool, rows } = started(setup({ chief }));
     tool.state = {

@@ -605,6 +605,7 @@ import { createCloudCredentialStore, mayUseKeychain } from "./workspaces/cloudCr
 import { createAgentThreads, forwardProblemWords } from "./agentThreads/agentThreads";
 import { cliForThread } from "./agentThreads/forwardedText";
 import { createForwardLedger } from "./agentThreads/forwardLedger";
+import { T3CodeError } from "./agentThreads/t3Code";
 import { createT3CodeConnection, type T3CodeConnection } from "./agentThreads/t3CodeConnection";
 import { createT3CodeSignInStore, encryptsWithSystemKey } from "./agentThreads/t3CodeSignInStore";
 import { createLastKnownDmRequestLanesCache } from "./workspaces/dmRequests";
@@ -10750,12 +10751,21 @@ function registerIpcHandlers(): void {
     if (!agent) throw new Error("This agent has no thread for this workspace.");
     return agent.thread.id;
   };
+  // An agent with a thread that serves the workspace a window has open,
+  // whether it is on or off, for the agent's own page in Settings.
+  const agentWithThreadFor = async (workspaceId: string, agentId: string) => {
+    const { settings } = await readCachedUserSettingsFile(stateDir());
+    const agent = listAgents(settings).find(({ id }) => id === agentId);
+    if (!agent?.thread || !agent.workspaces?.includes(workspaceId))
+      throw new Error("This agent has no thread for this workspace.");
+    return { ...agent, thread: agent.thread };
+  };
   registerOperations(operationBoundary, agentThreadOperations, {
     readAgentThreadLines: ({ workspaceId }) => agentThreadLinesOf(workspaceId),
+    // An agent that is off still has its thread, and its page opens it.
     openAgentThread: async ({ workspaceId, agentId }) => {
-      await shell.openExternal(
-        await t3Code().threadLink(await agentThreadFor(workspaceId, agentId)),
-      );
+      const agent = await agentWithThreadFor(workspaceId, agentId);
+      await shell.openExternal(await t3Code().threadLink(agent.thread.id));
     },
     readAgentThreadQuestion: async ({ workspaceId, agentId, requestId }) =>
       t3Code().question(await agentThreadFor(workspaceId, agentId), requestId),
@@ -10798,6 +10808,31 @@ function registerIpcHandlers(): void {
         })),
         nextCursor: page.nextCursor,
       };
+    },
+    readAgentThread: async ({ workspaceId, agentId }) => {
+      const agent = await agentWithThreadFor(workspaceId, agentId);
+      const threadId = agent.thread.id;
+      try {
+        const { title, closed } = await t3Code().thread(threadId);
+        return { threadId, title, closed };
+      } catch (error) {
+        // Said with the thread it is about, which a thrown error could not be.
+        if (error instanceof T3CodeError) return { threadId, problem: error.message };
+        throw error;
+      }
+    },
+    changeAgentThread: async ({ workspaceId, agentId, threadId }) => {
+      const agent = await agentWithThreadFor(workspaceId, agentId);
+      if (agent.thread.id === threadId)
+        throw new Error(`${agent.name} is already connected to this thread.`);
+      // One thread is one agent (ADR 0016).
+      const { agents } = (await readCachedUserSettingsFile(stateDir())).settings;
+      const connected = Object.values(agents).find((other) => other.thread?.id === threadId);
+      if (connected) throw new Error(`${connected.name} is already connected to this thread.`);
+      await agentThreads().change(workspaceId, {
+        ...agent,
+        thread: { ...agent.thread, id: threadId },
+      });
     },
     readyAgentThread: async ({ workspaceId, agentId, name, threadId }) => {
       const { agents } = (await readCachedUserSettingsFile(stateDir())).settings;

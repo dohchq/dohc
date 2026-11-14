@@ -131,6 +131,8 @@
   "desktop:ready-agent-thread": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:read-agent-thread-lines": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:open-agent-thread": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:read-agent-thread": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:change-agent-thread": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:read-agent-thread-question": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:answer-agent-thread-question": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:read-chat-dispatch-paused": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
