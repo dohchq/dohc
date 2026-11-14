@@ -175,7 +175,8 @@ describe("running T3 Code's program", () => {
   it("ends a program that is still running when the person cancels", async () => {
     const { home, codes } = await program({
       windows: "@ping -n 60 127.0.0.1 >nul\r\n",
-      other: "#!/bin/sh\nexec sleep 60\n",
+      // As T3 Code's AppImage file does, this one waits for a child and does not become it.
+      other: "#!/bin/sh\nsleep 60\necho over\n",
     });
     const cancel = new AbortController();
     const reason = new T3CodeError("not-allowed", "The sign-in to T3 Code was cancelled.");

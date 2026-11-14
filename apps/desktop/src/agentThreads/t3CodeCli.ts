@@ -53,8 +53,10 @@ const runProgram: T3CodeCliRunner = (command, args, signal, env) =>
     // On Windows the program is a .cmd file, which runs behind cmd.exe. The
     // helper quotes every part and refuses one it cannot quote safely.
     const resolved = resolveSpawnCommand(command, args);
+    const ownGroup = process.platform !== "win32";
     const child = spawn(resolved.command, resolved.args, {
       env,
+      detached: ownGroup,
       windowsHide: true,
       windowsVerbatimArguments: resolved.windowsVerbatimArguments,
       // Nothing is sent to it, and what it says of a failure is not read: it may hold a secret.
@@ -63,9 +65,17 @@ const runProgram: T3CodeCliRunner = (command, args, signal, env) =>
     let stdout = "";
     let over = false;
     const end = () => {
-      // The .cmd file starts the real program, so the whole tree is ended.
+      // The file starts the real program, so what it started is ended with it.
+      // On Windows that is the tree. Elsewhere it is the group the file leads:
+      // T3 Code's AppImage file runs the program as a child and waits for it.
       void killChildTreeWin32(child).then((killed) => {
-        if (!killed) child.kill();
+        if (killed) return;
+        try {
+          if (ownGroup && child.pid) process.kill(-child.pid, "SIGTERM");
+          else child.kill();
+        } catch {
+          child.kill();
+        }
       });
     };
     const timer = setTimeout(end, RUN_TIMEOUT_MS);
