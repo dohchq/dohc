@@ -2075,7 +2075,7 @@ interface SqliteRunResult {
   lastInsertRowid?: number | bigint;
 }
 
-interface SqliteStatement {
+export interface SqliteStatement {
   all(...params: unknown[]): Array<Record<string, unknown>>;
   get(...params: unknown[]): Record<string, unknown> | undefined;
   iterate(...params: unknown[]): IterableIterator<Record<string, unknown>>;

@@ -1,4 +1,5 @@
 import { accountIsFenced, workspaceIsDeleted } from "./storage/accountDeletion";
+import { reusePreparedStatements } from "./storage/preparedStatements";
 import * as workReferenceStorage from "./storage/workReferences";
 import * as replicaCurrentViews from "./storage/replicaCurrentViews";
 import * as replicaCurrentViewReads from "./replicaCurrentViewReads";
@@ -384,7 +385,7 @@ export function openSyncRelayStorage(
     owner = createOwner ? createOwner(db) : new RelayWriteOwner(db);
     owner.write(() => initializeSyncRelaySchema(db));
     const storage = new SqliteSyncRelayStorage(
-      db,
+      reusePreparedStatements(db),
       {
         pushConfigured: options.pushConfigured ?? false,
         workspaceQuotaBytes,
