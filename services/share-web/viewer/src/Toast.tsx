@@ -1,14 +1,29 @@
 import {useEffect, useRef, useState} from "react";
 import {Icon} from "./icons";
 
+// The desktop's FADING_TOAST_MS.
+const FADES_AFTER_MS = 6000;
+
 /**
  * A member page's toast: what failed, the one thing to do, a copy control beside the text, Try again and Dismiss.
  * A `warning` says what dohc is still fixing by itself, as the desktop's warning notice does.
  * A toast with no `onRetry` reports a change, such as a new level, and has no Try again.
- * A `success` has nothing to report, so it has no copy control.
+ * A `success` has nothing to report, so it has no copy control, and it fades as the desktop's does,
+ * but not while the pointer or focus is on it. A warning or a failure stays until it is dismissed.
  */
 export function Toast({title, body, tone, onRetry, onDismiss}: {title: string; body?: string; tone?: "warning" | "success"; onRetry?(): void; onDismiss(): void}) {
-  return <div className={`edit-notice workspace-toast${body || onRetry ? "" : " title-only"}`} role={tone ? "status" : "alert"}>
+  const dismiss = useRef(onDismiss);
+  dismiss.current = onDismiss;
+  const [pointer, setPointer] = useState(false), [focus, setFocus] = useState(false);
+  const fades = tone === "success" && !pointer && !focus;
+  useEffect(() => {
+    if (!fades) return;
+    const timer = setTimeout(() => dismiss.current(), FADES_AFTER_MS);
+    return () => clearTimeout(timer);
+  }, [fades, title]);
+  return <div className={`edit-notice workspace-toast${body || onRetry ? "" : " title-only"}`} role={tone ? "status" : "alert"}
+    onPointerEnter={() => setPointer(true)} onPointerLeave={() => setPointer(false)}
+    onFocus={() => setFocus(true)} onBlur={event => {if (!event.currentTarget.contains(event.relatedTarget)) setFocus(false);}}>
     {tone === "success" ? <span className="tile"><Icon name="check"/></span>
       : tone ? <span className="tile warn"><Icon name="triangle-alert"/></span> : <span className="tile bad"><Icon name="alert"/></span>}
     <div>
