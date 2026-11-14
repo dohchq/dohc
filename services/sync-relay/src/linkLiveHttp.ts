@@ -8,7 +8,12 @@ import { authorizeLinkShareAction } from "./shareAuthorization";
 import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity";
 import { parseNamedLiveRouteLimits, type NamedLiveRouteLimits } from "./namedLiveRoutes";
 import type { SyncRelayStorage } from "./storage";
-import { linkRefusal, opaqueLinkRefusal } from "./linkRefusal";
+import {
+  linkRefusal,
+  opaqueLinkRefusal,
+  sessionHostRefusal,
+  type SessionHostBlock,
+} from "./linkRefusal";
 
 /** Private relay metadata. The viewer receives only the selected object ID. */
 export function createLinkLiveHttp(options: {
@@ -20,7 +25,10 @@ export function createLinkLiveHttp(options: {
   exchangeKey: string;
   limits: NamedLiveRouteLimits;
   /** Whether the session host cannot continue the document until its owner or operator acts. */
-  sessionHostBlocked?: (document: { workspaceId: string; objectId: string }) => boolean;
+  sessionHostBlocked?: (document: {
+    workspaceId: string;
+    objectId: string;
+  }) => SessionHostBlock | undefined;
   /** Authenticates a connected agent, as the link's other routes do. */
   linkAuthority: Pick<LinkAuthorityResolver, "resolve">;
 }) {
@@ -120,9 +128,11 @@ export function createLinkLiveHttp(options: {
           )
             return linkRefusal("link_live_unavailable");
           if (current.kind !== "current" || current.binding.currentPath !== path) return null;
-          return options.sessionHostBlocked?.({ workspaceId: context.workspaceId, objectId })
-            ? linkRefusal("link_live_unavailable")
-            : { objectId };
+          const block = options.sessionHostBlocked?.({
+            workspaceId: context.workspaceId,
+            objectId,
+          });
+          return block ? sessionHostRefusal(block) : { objectId };
         }
         // Only a browser gateway opens a link session; an agent has no profile.
         if ("agentConnectionId" in context) return null;

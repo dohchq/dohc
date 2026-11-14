@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { linkRefusalBody } from "@dohc/security-contract/link-refusal";
+import { LINK_REFUSALS, linkRefusalBody } from "@dohc/security-contract/link-refusal";
 import { normalizeLinkRefusal } from "./linkRefusal";
 
 it.each([401, 403, 404])("hides non-contract %s bodies", async (status) => {
@@ -18,6 +18,27 @@ it.each([500, 502, 503])("keeps %s outages retryable without exposing details", 
   );
   expect(result.status).toBe(503);
   expect(await result.json()).toEqual(linkRefusalBody("link_unavailable"));
+});
+
+// Only the relay's own verified answer passes, and only on a live route.
+it("lets a live route say that editing stopped until the owner starts it again", async () => {
+  const stopped = () =>
+    Response.json(linkRefusalBody("link_live_stopped"), {
+      status: LINK_REFUSALS.link_live_stopped.status,
+    });
+  const live = await normalizeLinkRefusal(stopped(), "/sync/live/link-tickets", true);
+  expect([live.status, await live.json()]).toEqual([503, linkRefusalBody("link_live_stopped")]);
+  const other = await normalizeLinkRefusal(stopped(), "/sync/link/share");
+  expect([other.status, await other.json()]).toEqual([503, linkRefusalBody("link_unavailable")]);
+  const forged = await normalizeLinkRefusal(
+    Response.json(
+      { ...linkRefusalBody("link_live_stopped"), detail: "private host" },
+      { status: 503 },
+    ),
+    "/sync/live/link-tickets",
+    true,
+  );
+  expect(await forged.json()).toEqual(linkRefusalBody("link_live_unavailable"));
 });
 
 it.each([500, 502, 503])("uses live-editing words only for live routes on %s", async (status) => {

@@ -2250,9 +2250,11 @@ async function openSelfHostProof(name: string) {
         openRelay();
         await startSupervisor();
       },
-      /** Whether browsers are told live editing of the document is unavailable, as the relay's `main.ts` decides it. */
+      /** What browsers are told about live editing of the document, as the relay's `main.ts` decides it. */
       sessionHostBlocked: (document: { workspaceId: string; objectId: string }) =>
-        storage.getLiveHostControl()?.configuredMode === "service" && supervisor!.stopped(document),
+        storage.getLiveHostControl()?.configuredMode === "service"
+          ? supervisor!.sessionBlock(document)
+          : undefined,
       /**
        * Holds the reply to the next live application the engine completes.
        * `applied` resolves once the engine applied it; `release` lets the reply through.

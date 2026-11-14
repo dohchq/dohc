@@ -5,6 +5,7 @@ import {
   LiveAuthorityUnavailableError,
   LiveHostUnavailableError,
   LiveLinkFullError,
+  LiveStoppedError,
   parseNamedLiveBrowserLimits,
   type NamedLiveBrowserLimits,
 } from "@dohc/ydoc-projection/named-live-browser-transport";
@@ -107,6 +108,7 @@ export async function namedRequest(
       if (linkRefused) {
         const code = parseLinkRefusal(value, response.status);
         const message = code ? LINK_REFUSALS[code].error : "Unavailable";
+        if (code === "link_live_stopped") throw new LiveStoppedError(message);
         if (response.status === 503) throw new LiveHostUnavailableError(message);
         if (code === "link_full") throw new LiveLinkFullError(message);
         throw new LiveAuthorityUnavailableError(message);

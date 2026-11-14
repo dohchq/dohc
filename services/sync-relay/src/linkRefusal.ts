@@ -21,6 +21,17 @@ export function linkRefusal(code: LinkRefusalCode): Response {
   });
 }
 
+/**
+ * Why the session host can't continue a document for browsers: its copy here held an owner edit it
+ * could not apply, which only the owner's Resume clears, or it stopped for another reason.
+ */
+export type SessionHostBlock = "held" | "stopped";
+
+/** What a link holder is told about a blocked document. */
+export function sessionHostRefusal(block: SessionHostBlock): Response {
+  return linkRefusal(block === "held" ? "link_live_stopped" : "link_live_unavailable");
+}
+
 export async function normalizeLinkRefusal(
   response: Response,
   path: string,
@@ -28,6 +39,14 @@ export async function normalizeLinkRefusal(
 ): Promise<Response> {
   if (!isLinkEndpointPath(path)) return response;
   if (response.status >= 500) {
+    // A live route's own answer that only the owner can lift goes through. Every other outage reads the same.
+    if (
+      liveEditing &&
+      response.status === LINK_REFUSALS.link_live_stopped.status &&
+      parseLinkRefusal(await response.json().catch(() => null), response.status) ===
+        "link_live_stopped"
+    )
+      return linkRefusal("link_live_stopped");
     await response.body?.cancel().catch(() => undefined);
     return linkRefusal(liveEditing ? "link_live_unavailable" : "link_unavailable");
   }

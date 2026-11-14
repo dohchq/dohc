@@ -70,6 +70,8 @@ class Refused extends Error {}
 export class LiveAuthorityUnavailableError extends Error {}
 /** The server answered that it cannot start editing now. The page tries again by itself. */
 export class LiveHostUnavailableError extends Error {}
+/** The server answered that live editing of the document stopped until its owner starts it again. */
+export class LiveStoppedError extends Error {}
 /** The server answered that the link can take no more people. Trying again cannot help. */
 export class LiveLinkFullError extends Error {}
 /** The server answered that the owner removed this account's access. */
@@ -181,7 +183,8 @@ export function createNamedLiveBrowserTransport<
         value.status !== "disconnected" ||
         value.reason === "authority-unavailable" ||
         value.reason === "access-removed" ||
-        value.reason === "link-full"
+        value.reason === "link-full" ||
+        value.reason === "live-stopped"
       )
         return;
       reconnectTimer = setTimeout(() => {
@@ -604,9 +607,11 @@ export function createNamedLiveBrowserTransport<
                     ? !options.authorize && "grantId" in target
                       ? await recheck(held, String(target.grantId))
                       : "authority-unavailable"
-                    : error instanceof LiveHostUnavailableError
-                      ? "host-unavailable"
-                      : "connection-failed",
+                    : error instanceof LiveStoppedError
+                      ? "live-stopped"
+                      : error instanceof LiveHostUnavailableError
+                        ? "host-unavailable"
+                        : "connection-failed",
         );
       }
     }

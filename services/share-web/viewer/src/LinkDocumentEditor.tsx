@@ -137,6 +137,7 @@ export function LinkDocumentEditor({
   // The server gives one answer whether the page is still being prepared or will never go live,
   // so this says what the person can still do and keeps Try again.
   const unavailable = error === LINK_REFUSALS.link_live_unavailable.error;
+  const stopped = error === LINK_REFUSALS.link_live_stopped.error;
   const bar = (
     <>
       {busy && (
@@ -166,7 +167,7 @@ export function LinkDocumentEditor({
             <p className="edit-notice-title">
               {unavailable ? "dohc could not start editing this page." : error}
             </p>
-            {unavailable && <p>You can still read and comment here.</p>}
+            {(unavailable || stopped) && <p>You can still read and comment here.</p>}
             <div className="edit-notice-actions">
               {available && (
                 <button className="handoff-button secondary" onClick={open}>
