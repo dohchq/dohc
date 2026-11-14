@@ -6,6 +6,7 @@ import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-upda
 import { parseLiveTicketToken } from "@dohc/live-session-contract/live-ticket";
 import { createLiveFrameSession } from "@dohc/live-session-contract/live-frame";
 import type { LiveAuthorContext } from "@dohc/live-session-contract";
+import { isNamedLiveStopped } from "@dohc/security-contract/link-refusal";
 import {
   createNamedLiveProvider,
   type NamedLiveProviderLimits,
@@ -297,10 +298,12 @@ export function createNamedLiveBrowserTransport<
             if (refused)
               throw record(value) && value.code === "share_access_removed"
                 ? new AccessRemoved()
-                : new LiveAuthorityUnavailableError();
+                : isNamedLiveStopped(value, response.status)
+                  ? new LiveStoppedError()
+                  : new LiveAuthorityUnavailableError();
             return value;
           } catch (error) {
-            throw refused && !(error instanceof AccessRemoved)
+            throw refused && !(error instanceof AccessRemoved || error instanceof LiveStoppedError)
               ? new LiveAuthorityUnavailableError()
               : error;
           } finally {

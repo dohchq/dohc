@@ -1055,6 +1055,9 @@ importers:
       '@dohc/live-session-contract':
         specifier: workspace:*
         version: link:../live-session-contract
+      '@dohc/security-contract':
+        specifier: workspace:*
+        version: link:../security-contract
       '@dohc/workspace-contracts':
         specifier: workspace:*
         version: link:../workspace-contracts

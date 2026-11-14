@@ -84,6 +84,18 @@ it("refuses a document with no native history at once, and holds one with no sha
   expect(f.route.held()).toEqual({ waiters: 0, documents: 0 });
 });
 
+it("tells an agent at once that live editing of a held document stopped on the server", async () => {
+  const f = await fixture(),
+    a = f.agent("editor");
+  f.blocked.set(binding.objectId, "live-edit-unadmitted");
+  expect(await body(await a.open(), 409)).toEqual({
+    ok: false,
+    code: "live-edit-unadmitted",
+    error: "Live editing of this file stopped on the server. Only its owner can start it again.",
+  });
+  expect(f.route.held()).toEqual({ waiters: 0, documents: 0 });
+});
+
 it("answers live_paused_by_owner for a Stopped document, and enrolls one retired without a Stop again", async () => {
   const stopped = await fixture();
   stopped.storage.ensureOwnedLiveDocument({ intent: "share", ...stopped.input });

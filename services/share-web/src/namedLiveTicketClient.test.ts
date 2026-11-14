@@ -76,6 +76,30 @@ it("refuses link-only authentication and extra upstream authority data", async (
   );
   expect((await f.mint(request())).status).toBe(404);
 });
+// Only the exact answer passes. Anything else from the relay stays the plain refusal.
+const stopped = {
+  ok: false,
+  code: "live-edit-unadmitted",
+  error: "Live editing of this file stopped on the server. Only its owner can start it again.",
+};
+it.each([
+  [404, stopped, 404, stopped],
+  [404, { ...stopped, extra: true }, 404, { ok: false, error: "not found" }],
+  [404, { ...stopped, error: "Something else." }, 404, { ok: false, error: "not found" }],
+  [503, stopped, 404, { ok: false, error: "not found" }],
+  [404, { ok: false, error: "not found" }, 404, { ok: false, error: "not found" }],
+] as const)(
+  "tells an invited editor only that live editing stopped on the server (relay %s)",
+  async (relayStatus, relayBody, status, body) => {
+    const f = fixture();
+    f.fetchRelay.mockResolvedValueOnce(
+      Response.json(relayBody, { status: relayStatus, headers: { "x-relay": "inner" } }),
+    );
+    const result = await f.mint(request());
+    expect([result.status, await result.json()]).toEqual([status, body]);
+    expect(result.headers.has("x-relay")).toBe(false);
+  },
+);
 it("forwards the preference cookie with a session and refuses it alone or repeated account cookies", async () => {
   const f = fixture(),
     preference = `${accountCookies.dontRememberToken.name}=true`;

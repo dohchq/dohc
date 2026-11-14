@@ -44,7 +44,7 @@ import {
 } from "./liveTickets.test-helper.js";
 import type { LiveUpdateJournalCut } from "./storage/types.js";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
-import { linkRefusalBody } from "@dohc/security-contract/link-refusal";
+import { NAMED_LIVE_STOPPED, linkRefusalBody } from "@dohc/security-contract/link-refusal";
 import type { SessionHostBlock } from "./linkRefusal";
 
 const exchangeKey = "test-exchange-key-".repeat(3),
@@ -766,7 +766,7 @@ async function fixture(
   };
 }
 
-// Only a link holder learns why. A held document waits for its owner, so the page stops asking.
+// A held document waits for its owner, so the page is told and stops asking. Other blocks say nothing new.
 it.each([
   [false, "stopped"],
   [true, "stopped"],
@@ -785,23 +785,31 @@ it.each([
     expect([refused.status, await refused.json()]).toEqual(
       link
         ? [503, linkRefusalBody(block === "held" ? "link_live_stopped" : "link_live_unavailable")]
-        : [404, { ok: false, error: "not found" }],
+        : [404, block === "held" ? NAMED_LIVE_STOPPED : { ok: false, error: "not found" }],
     );
     expect(f.sessionHostBlocked).toHaveBeenCalledWith({
       workspaceId: binding.workspaceId,
       objectId: binding.objectId,
     });
     expect(mint).not.toHaveBeenCalled();
-    if (link) {
-      const hidden = await f.post("/sync/live/link-tickets", {
-        discriminator: f.discriminator,
-        objectId: "hidden-object",
-      });
-      expect([hidden.status, await hidden.text()]).toEqual([
-        404,
-        '{"ok":false,"error":"not found"}',
-      ]);
-    }
+    // A document the caller can't reach says nothing about its block.
+    const hidden = await f.post(`/sync/live/${link ? "link" : "named"}-tickets`, {
+      discriminator: f.discriminator,
+      objectId: "hidden-object",
+    });
+    expect([hidden.status, await hidden.text()]).toEqual([404, '{"ok":false,"error":"not found"}']);
+    // Nor does a real document the share no longer covers.
+    const select = f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?");
+    select.run(JSON.stringify({ paths: ["other.md"], versionId: null }));
+    const outside = await f.post(`/sync/live/${link ? "link" : "named"}-tickets`, {
+      discriminator: f.discriminator,
+      objectId: binding.objectId,
+    });
+    expect([outside.status, await outside.text()]).toEqual([
+      404,
+      '{"ok":false,"error":"not found"}',
+    ]);
+    select.run(JSON.stringify({ paths: [binding.currentPath], versionId: null }));
     f.sessionHostBlocked.mockReturnValue(undefined);
     expect(await f.connect((await f.mint()).token).status).toBe(101);
   },
