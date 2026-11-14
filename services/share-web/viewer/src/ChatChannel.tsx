@@ -93,7 +93,15 @@ interface Replies {
   open(): void;
 }
 
-function ChatMessage({ message, replies }: { message: NamedChatMessage; replies?: Replies }) {
+function ChatMessage({
+  message,
+  replies,
+  canReply,
+}: {
+  message: NamedChatMessage;
+  replies?: Replies;
+  canReply: boolean;
+}) {
   // Attachments are out of scope, so no image source is allowed.
   const html = useMemo(
     () => (message.body === null ? null : renderSafeMarkdown(message.body, () => null)),
@@ -129,7 +137,8 @@ function ChatMessage({ message, replies }: { message: NamedChatMessage; replies?
       ) : (
         <div className="markdown chat-body" dangerouslySetInnerHTML={{ __html: html }} />
       )}
-      {replies && (
+      {/* A person who can't post has nothing to reply with, so only a thread with replies opens. */}
+      {replies && (canReply || replies.count > 0) && (
         <button type="button" className="chat-replies" onClick={replies.open}>
           {replies.count === 0
             ? "Reply"
@@ -666,6 +675,7 @@ export function ChannelView({
                     key={message.relaySeq}
                     message={message}
                     replies={view?.replies.get(message.relaySeq)}
+                    canReply={access === "read-write"}
                   />
                 ))}
               </ol>

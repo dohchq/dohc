@@ -251,6 +251,20 @@ it("shows a Posts Group's posts with their reply counts, and replies in a post's
   expect(composer().placeholder).toBe("What's happening in #plans?");
 });
 
+it("shows a reply count at View only where a post has replies, and still opens that thread", async () => {
+  server({level: "view", groups: [{wire: "wire-plans", name: "plans", type: "posts"}], history: {"wire-plans": [
+    chat(3, "Plans start here", "ana", {threadId: "t-plan"}), chat(4, "Agreed", "ana", {threadId: "t-plan"}), chat(6, "Train or car?", "ana", {threadId: "t-ride"}),
+  ]}});
+  await render(); await opened();
+  expect(listed()).toEqual(["Plans start here", "Train or car?"]);
+  // A person who can't post has nothing to reply with, so a post with no replies shows nothing.
+  expect([...groupPanel().querySelectorAll(".chat-replies")].map(node => node.textContent)).toEqual(["1 reply"]);
+  expect(button("Reply")).toBeUndefined();
+  await click("1 reply");
+  await settle(() => listed().includes("Agreed"));
+  expect(groupPanel().querySelector('textarea[name="body"]')).toBeNull();
+});
+
 it("shows a Chat Group as one conversation, and answers a message in its thread", async () => {
   server({groups: [{wire: "wire-plans", name: "plans", type: "chat"}], history: {"wire-plans": [
     chat(3, "Plans start here", "ana", {threadId: "t-chat", lane: "chat"}), chat(4, "Agreed", "sam", {threadId: "t-chat", lane: "chat", parentMessageId: "m3"}),
