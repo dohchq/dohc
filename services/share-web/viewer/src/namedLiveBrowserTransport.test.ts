@@ -15,6 +15,7 @@ import {
 import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { NAMED_LIVE_STOPPED } from "@dohc/security-contract/link-refusal";
+import { draftNeedsReview } from "./NamedDocumentEditor";
 import {
   createNamedLiveBrowserTransport,
   LiveHostUnavailableError,
@@ -862,7 +863,7 @@ it("reads a ticket that never answers as the server's, and an earlier request th
     expect(f.value.state()).toMatchObject({ status: "disconnected", reason: "connect-timeout" });
   }
 });
-it("takes edits on the host's early state while a busy server holds the ticket, and none once that attempt stops", async () => {
+it("takes edits on the host's early state while a busy server holds the ticket, and none once that attempt stops, even while the page tries again", async () => {
   vi.useFakeTimers();
   const f = fixture(
       limits(),
@@ -898,7 +899,14 @@ it("takes edits on the host's early state while a busy server holds the ticket, 
     pendingUpdates: 1,
   });
   expect(edit(f.value, " more")).toBe(false);
+  // The page tries again by itself. Until it is live, the words stay under review and no more join them.
+  await vi.advanceTimersByTimeAsync(250);
+  expect(f.value.state()).toMatchObject({ status: "authorizing", typingAhead: true });
+  expect(edit(f.value, " retry")).toBe(false);
+  expect(draftNeedsReview(f.value.state())).toBe(true);
+  expect(f.value.state().typingStopped).toBe(true);
   expect(f.value.body.toString()).toContain("base draft");
+  expect(f.value.body.toString()).not.toContain("retry");
 });
 it("backs off repeated connection failures and cancels recovery when paused or replaced", async () => {
   const f = await live();

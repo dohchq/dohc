@@ -44,6 +44,7 @@ vi.mock("@dohc/ydoc-projection/named-live-browser-transport", async (importOrigi
               pendingBytes: 0,
               lastApplied: null,
               typingAhead: false,
+              typingStopped: false,
             } as NamedLiveBrowserState,
             close: vi.fn(),
             notify() {

@@ -31,15 +31,19 @@ export interface NamedLiveBrowserLimits {
 }
 export interface NamedLiveBrowserState extends Omit<NamedLiveProviderState, "status"> {
   status: NamedLiveProviderState["status"] | "authorizing" | "refused";
+  /** An attempt to open stopped before the page was live, so typing on the early state waits for live. */
+  typingStopped: boolean;
 }
 /**
- * Whether the page takes edits: live, or holding the host's early state while it opens. A page that stopped
- * opening takes none until it tries again, so no more words wait on an attempt that may never succeed.
+ * Whether the page takes edits: live, or holding the host's early state while it first opens. A page whose opening
+ * stopped takes none until it is live, so no more words wait on attempts that may never succeed.
  */
 export function namedLiveEditable(state: NamedLiveBrowserState): boolean {
   return (
     state.status === "live" ||
-    (state.typingAhead && ["authorizing", "connecting", "syncing"].includes(state.status))
+    (state.typingAhead &&
+      !state.typingStopped &&
+      ["authorizing", "connecting", "syncing"].includes(state.status))
   );
 }
 type BrowserSocket = Pick<
@@ -175,6 +179,10 @@ export function createNamedLiveBrowserTransport<
       reconnectDelayMs = 250,
       accessStoodAt: number | undefined,
       wasLive = false;
+    // Once an attempt has stopped before the page was live, typing on the early state waits for live. A retry that
+    // took typing again would show the editor for each attempt and let words join a draft that may never be sent.
+    let attempted = false,
+      typingStopped = false;
     // Automatic retries keep the page's session. A refusal of it may mean the server lost it, so
     // the page asks for a new one on its own once in an outage, and again only in an outage that
     // began PASSING_REFUSAL_MS after that request. Each request counts when it is sent.
@@ -204,8 +212,14 @@ export function createNamedLiveBrowserTransport<
         void connect();
       }, reconnectDelayMs);
     }
-    const state = (): NamedLiveBrowserState => ({ ...provider.state(), ...override });
+    const state = (): NamedLiveBrowserState => ({
+      ...provider.state(),
+      ...override,
+      typingStopped,
+    });
     const notify = () => {
+      const now = { ...provider.state(), ...override };
+      if (attempted && now.typingAhead && now.status === "disconnected") typingStopped = true;
       for (const listener of listeners) {
         try {
           listener(state());
@@ -489,6 +503,7 @@ export function createNamedLiveBrowserTransport<
     async function connect(): Promise<void> {
       if (closed || ["quarantined", "refused"].includes(state().status)) return;
       automatic = true;
+      attempted = true;
       stop();
       const held: Attempt = { controller: new AbortController(), writes: new Set() };
       attempt = held;
