@@ -471,7 +471,7 @@ it("logs a pass over a second at most once a minute, with cut ids, timings and f
     get settlesSent() {
       return settlesSent;
     },
-    async settle() {
+    async settleDrained() {
       settlesSent++;
       if (failSettle) throw new Error("Engine settle failed.");
       return { settlementId: null, previousCursor: 0, terminalCursor: 0, materialized: true };
