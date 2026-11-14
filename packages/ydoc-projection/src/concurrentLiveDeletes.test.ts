@@ -2,9 +2,11 @@
 // update's delete set names. It deletes a type's children with the type, and an item that arrives into a deleted
 // type. Every replica does the same, in either order, so activation and live admission must accept these rows as one
 // replay of them does.
-// Two people setting the same key of a live type, and Yjs's formatting cleanup, also delete content that no update
-// names. Those rows stay refused here.
+// When two people set the same key of a live type at once, Yjs deletes one of the two values and no update names it.
+// One of the two is kept, the same for everyone, so those rows are accepted too.
+// Yjs's formatting cleanup also deletes content that no update names. Those rows stay refused here.
 import { createHash } from "node:crypto";
+import * as encoding from "lib0/encoding";
 import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc } from "./import-export.js";
@@ -184,6 +186,32 @@ function undeclared(checkpoint: Uint8Array, rows: readonly Uint8Array[]): Undecl
   return found;
 }
 
+/** A row holding one item from `client`, at clock 0, with the origins given. */
+function oneItemRow(
+  client: number,
+  origin: Y.ID | null,
+  rightOrigin: Y.ID | null,
+  values: unknown[],
+) {
+  const encoder = new Y.UpdateEncoderV1();
+  encoding.writeVarUint(encoder.restEncoder, 1);
+  encoding.writeVarUint(encoder.restEncoder, 1);
+  encoder.writeClient(client);
+  encoding.writeVarUint(encoder.restEncoder, 0);
+  new Y.Item(
+    Y.createID(client, 0),
+    null,
+    origin,
+    null,
+    rightOrigin,
+    null,
+    null,
+    new Y.ContentAny(values),
+  ).write(encoder, 0);
+  encoding.writeVarUint(encoder.restEncoder, 0);
+  return encoder.toUint8Array();
+}
+
 /** What a refusal carries, and what only the replay deletes, for the failure message. */
 function detailOf(
   checkpoint: Uint8Array,
@@ -294,8 +322,9 @@ function replayRegistration(checkpoint: Uint8Array, rows: readonly Uint8Array[])
   return register({ document: documentFor(checkpoint), currentPath: PATH, checkpoint: state });
 }
 
-describe("concurrent edits that Yjs deletes on merge", () => {
-  for (const [name, shape] of Object.entries(SHAPES)) {
+/** Activation and live admission accept each shape in either order, as one replay of its rows does. */
+function acceptsEach(shapes: Readonly<Record<string, Concurrent>>) {
+  for (const [name, shape] of Object.entries(shapes)) {
     for (const order of ["first, then second", "second, then first"] as const) {
       it(`activation accepts ${name} (${order}), with one replay's projection`, () => {
         const { baseline, rows } = concurrentRows(shape, order);
@@ -329,6 +358,59 @@ describe("concurrent edits that Yjs deletes on merge", () => {
       expect(ends[0]!.markdown).toBe(ends[1]!.markdown);
     });
   }
+}
+
+/** Sets the note's `tags` property to a list holding `value`. */
+const setList = (doc: Y.Doc, value: string) =>
+  doc.getMap("frontmatter").set("tags", Y.Array.from([value]));
+
+const SAME_KEY: Readonly<Record<string, Concurrent>> = {
+  "two people ticking the same task item": {
+    markdown: "- [ ] Pack\n",
+    first: tick,
+    second: tick,
+  },
+  "one person ticking a task item while another unticks it": {
+    markdown: "- [ ] Pack\n",
+    first: tick,
+    second: (doc) =>
+      (elements(doc, "taskItem")[0] as unknown as Y.XmlElement<{ checked: boolean }>).setAttribute(
+        "checked",
+        false,
+      ),
+  },
+  "two people setting the same property": {
+    markdown: "---\nstatus: draft\n---\n\nNotes\n",
+    first: (doc) => doc.getMap("frontmatter").set("status", "review"),
+    second: (doc) => doc.getMap("frontmatter").set("status", "done"),
+  },
+  "two people setting the same property to a list": {
+    markdown: "---\ntags: draft\n---\n\nNotes\n",
+    first: (doc) => setList(doc, "review"),
+    second: (doc) => setList(doc, "done"),
+  },
+  "setting a property that someone else removes": {
+    markdown: "---\nstatus: draft\n---\n\nNotes\n",
+    first: (doc) => doc.getMap("frontmatter").set("status", "review"),
+    second: (doc) => doc.getMap("frontmatter").delete("status"),
+  },
+  "ticking a task item whose list someone else deletes": {
+    markdown: "Notes\n\n- [ ] Pack\n",
+    first: tick,
+    second: (doc) => deleteBlock(doc, "taskItem"),
+  },
+};
+
+/** The shapes whose value that is not kept is deleted by no row. */
+const UNNAMED_LOSER = [
+  "two people ticking the same task item",
+  "one person ticking a task item while another unticks it",
+  "two people setting the same property",
+  "two people setting the same property to a list",
+] as const;
+
+describe("concurrent edits that Yjs deletes on merge", () => {
+  acceptsEach(SHAPES);
 
   it("accepts a delete that Yjs carries into the content after it, with later rows on top", () => {
     const { baseline, rows, open, receive } = session("Notes\n\nShared\n\nLater\n");
@@ -397,6 +479,141 @@ describe("concurrent edits that Yjs deletes on merge", () => {
   });
 });
 
+describe("the same key set at once: one of the two is kept, the same for everyone", () => {
+  acceptsEach(SAME_KEY);
+
+  for (const name of UNNAMED_LOSER) {
+    it(`deletes the value not kept with no row naming it, for ${name}`, () => {
+      for (const order of ["first, then second", "second, then first"] as const) {
+        const { baseline, rows } = concurrentRows(SAME_KEY[name]!, order);
+        expect(
+          undeclared(baseline, rows).map((entry) => entry.kind),
+          order,
+        ).not.toHaveLength(0);
+      }
+    });
+  }
+
+  it("keeps one of three values, the same for everyone, in every order the rows arrive", () => {
+    const { baseline, rows, open } = session("---\nstatus: draft\n---\n\nNotes\n");
+    const values = ["review", "done", "parked"];
+    values.forEach((value, index) =>
+      open(index + 2)
+        .getMap("frontmatter")
+        .set("status", value),
+    );
+    expect(rows).toHaveLength(3);
+    const orders = [
+      [0, 1, 2],
+      [0, 2, 1],
+      [1, 0, 2],
+      [1, 2, 0],
+      [2, 0, 1],
+      [2, 1, 0],
+    ];
+    const ends = orders.map((order) => {
+      const arrived = order.map((index) => rows[index]!);
+      expect(undeclared(baseline, arrived)).toHaveLength(2);
+      const { evidence } = admitEach(baseline, arrived);
+      expectAccepted(baseline, arrived, activate(baseline, arrived).result);
+      return {
+        deletes: Y.decodeUpdate(evidence.stateUpdate).ds,
+        markdown: evidence.projectedMarkdownSha256,
+      };
+    });
+    for (const end of ends.slice(1)) {
+      expect(Y.equalDeleteSets(ends[0]!.deletes, end.deletes)).toBe(true);
+      expect(end.markdown).toBe(ends[0]!.markdown);
+    }
+  });
+
+  it("accepts a row arriving second that sets the key from the value before one already admitted", () => {
+    // Client 3's value is admitted first. Client 2 set the key without seeing it, so its value is placed before
+    // client 3's and deleted as it arrives: the row is admitted and the note does not change.
+    const { baseline, rows, open } = session("---\nstatus: draft\n---\n\nNotes\n");
+    open(3).getMap("frontmatter").set("status", "review");
+    open(2).getMap("frontmatter").set("status", "done");
+    const before = admitRow(baseline, rows, 0);
+    const after = admitEach(baseline, rows);
+    expect(after.evidence.projectedMarkdownSha256).toBe(
+      expectAccepted(baseline, rows.slice(0, 1), before).evidence.projectedMarkdownSha256,
+    );
+    const replay = new Y.Doc({ gc: false });
+    for (const update of [baseline, ...rows]) Y.applyUpdate(replay, update);
+    expect(replay.getMap("frontmatter").get("status")).toBe("review");
+    replay.destroy();
+  });
+
+  it("refuses a value for a key that names an entry to its right, in every order", () => {
+    // Yjs sets a key with nothing to its right, so a value that names an entry to its right is refused in every order.
+    const { baseline, rows, open } = session("---\nstatus: draft\n---\n\nNotes\n");
+    open(2).getMap("frontmatter").set("status", "review");
+    open(3).getMap("frontmatter").set("status", "done");
+    const review = Y.decodeUpdate(rows[0]!).structs.find(
+      (struct): struct is Y.Item => struct instanceof Y.Item,
+    )!;
+    const named = oneItemRow(4, null, review.id, ["x"]);
+    for (const order of [
+      [rows[0]!, named],
+      [rows[0]!, rows[1]!, named],
+      [rows[0]!, named, rows[1]!],
+    ]) {
+      const admitted = admitRow(baseline, order, order.length - 1);
+      const activated = activate(baseline, order).result;
+      expect(
+        [admitted, activated].map((result) =>
+          result.kind === "refused" ? result.reason : result.kind,
+        ),
+      ).toEqual(["invalid-update", "invalid-update"]);
+    }
+  });
+
+  it("refuses a value for a key holding two values the row doesn't replace, in every order", () => {
+    // Yjs sets a key to one value, so an entry holding two values its row doesn't replace is refused in every order.
+    const { baseline, rows, open } = session("---\nstatus: draft\n---\n\nNotes\n");
+    const base = new Y.Doc({ gc: false });
+    Y.applyUpdate(base, baseline);
+    const draft = (base.getMap("frontmatter") as unknown as { _map: Map<string, Y.Item> })._map.get(
+      "status",
+    )!;
+    base.destroy();
+    const two = oneItemRow(4, draft.id, null, ["a", "b"]);
+    const split = oneItemRow(6, Y.createID(4, 0), null, ["m"]);
+    open(5).getMap("frontmatter").set("status", "set");
+    const rowsByName: Record<string, Uint8Array> = { two, split, set: rows[0]! };
+    for (const order of [
+      ["two", "split", "set"],
+      ["two", "set", "split"],
+      ["split", "two", "set"],
+      ["split", "set", "two"],
+      ["set", "two", "split"],
+      ["set", "split", "two"],
+    ]) {
+      const arrived = order.map((name) => rowsByName[name]!);
+      const admitted = admitRow(baseline, arrived, order.indexOf("two"));
+      const activated = activate(baseline, arrived).result;
+      expect(
+        [admitted, activated].map((result) =>
+          result.kind === "refused" ? result.reason : result.kind,
+        ),
+        order.join(", "),
+      ).toEqual(["invalid-update", "invalid-update"]);
+    }
+  });
+
+  it("accepts a row from saved state where one person's replaced values for a key are joined", () => {
+    // Yjs joins one client's deleted values into one entry, and a row from saved state carries its deletes with it.
+    const { baseline, open } = session("---\nstatus: draft\n---\n\nNotes\n");
+    const doc = open(2);
+    for (const value of ["review", "done", "parked"])
+      doc.getMap("frontmatter").set("status", value);
+    const saved = Y.encodeStateAsUpdate(doc, Y.encodeStateVectorFromUpdate(baseline));
+    expect(Y.decodeUpdate(saved).structs.map((struct) => struct.length)).toEqual([2, 1]);
+    expectAccepted(baseline, [saved], admitRow(baseline, [saved], 0));
+    expectAccepted(baseline, [saved], activate(baseline, [saved]).result);
+  });
+});
+
 describe("deletions no rule here accounts for stay refused", () => {
   /** Client 3 bolds "Notes" first; client 2's row, made without seeing it, runs `edit`. */
   function boldedBoth(markdown: string, edit: (doc: Y.Doc, notes: Y.XmlText) => void) {
@@ -412,33 +629,6 @@ describe("deletions no rule here accounts for stay refused", () => {
   function expectRefusedAtBothDoors(checkpoint: Uint8Array, rows: readonly Uint8Array[]) {
     expectFinalProofRefusal(checkpoint, rows, admitRow(checkpoint, rows, rows.length - 1));
     expectFinalProofRefusal(checkpoint, rows, activate(checkpoint, rows).result);
-  }
-
-  const SAME_KEY: Readonly<Record<string, Concurrent>> = {
-    "two people ticking the same task item": {
-      markdown: "- [ ] Pack\n",
-      first: tick,
-      second: tick,
-    },
-    "two people setting the same property": {
-      markdown: "---\nstatus: draft\n---\n\nNotes\n",
-      first: (doc) => doc.getMap("frontmatter").set("status", "review"),
-      second: (doc) => doc.getMap("frontmatter").set("status", "done"),
-    },
-  };
-
-  // Yjs deletes the value that loses, and no row names it. Unless its parent was deleted too, no rule here accepts that.
-  for (const [name, shape] of Object.entries(SAME_KEY)) {
-    it(`refuses ${name} at once, in either order`, () => {
-      for (const order of ["first, then second", "second, then first"] as const) {
-        const { baseline, rows } = concurrentRows(shape, order);
-        expect(
-          undeclared(baseline, rows).length,
-          `${order}: the losing value is deleted by no row`,
-        ).toBeGreaterThan(0);
-        expectRefusedAtBothDoors(baseline, rows);
-      }
-    });
   }
 
   it("refuses deleting marked text that someone else bolded at the same moment, when the delete arrives second", () => {
