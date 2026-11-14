@@ -140,8 +140,6 @@ describe("Menu", () => {
     await waitFor(() => expect(document.activeElement).toBe(trigger));
   });
 
-  // A context menu has no trigger: it opens at a point and gives focus back
-  // to what had it, such as the row that was right-clicked.
   describe("opened at a point", () => {
     function AtPoint(props: { at: { x: number; y: number }; onClose: () => void }) {
       return (
@@ -425,7 +423,6 @@ describe("Menu", () => {
     expect(forget.className).toContain("text-danger");
     await user.keyboard("{ArrowDown}{ArrowDown}");
     expect(document.activeElement).toBe(forget);
-    // The current row keeps the selected fill after focus leaves it.
     expect(current.className.split(" ")).toContain("bg-selected");
     expect(current.className.split(" ")).toContain("font-medium");
     expect(forget.className.split(" ")).not.toContain("bg-selected");
@@ -518,8 +515,6 @@ describe("Menu", () => {
     expect(rowOf("Ctrl 2").className.split(" ")).toContain("bg-selected");
   });
 
-  // Opened with the mouse, a menu on its first row showed two active-looking
-  // rows: the focused first row and the checked one.
   it.each([
     ["its checked row", true, "Draft"],
     ["its first row when no row is checked", false, "Main"],
@@ -597,7 +592,6 @@ describe("Menu", () => {
     const reason = screen.getByText("Only versions made from Main can merge into Main.");
     expect(merge.getAttribute("aria-describedby")).toBe(reason.id);
     expect(merge.contains(reason)).toBe(true);
-    // The row, its focus fill and the reason keep their strength.
     expect(merge.className).not.toContain("opacity");
     expect(reason.className).not.toContain("opacity");
     expect(screen.getByText("Merge").className.split(" ")).toContain("opacity-50");
@@ -636,8 +630,6 @@ describe("Menu", () => {
     expect(document.activeElement).toBe(second);
   });
 
-  // A row shows as active when it has focus and focus draws the fill on it.
-  // A pointer open marks none, as a native menu does.
   describe("the marked row", () => {
     const marked = () =>
       screen
@@ -725,7 +717,6 @@ describe("Menu", () => {
         const user = userEvent.setup();
         render(<Harness items={items} />);
         await user.click(screen.getByTestId("row-menu"));
-        // The pointer's fill sits on another row.
         fireEvent.mouseMove(screen.getByRole("menuitem", { name: "Duplicate" }), {
           movementX: 0,
           movementY: 3,
@@ -872,7 +863,6 @@ describe("Menu", () => {
   });
 });
 
-// The keys every menu shares, the Menu part and the editor menus alike.
 describe("moveInMenu", () => {
   const labels = ["Text", "Heading 1", "Heading 2", "Duplicate", "Delete"];
   const key = (

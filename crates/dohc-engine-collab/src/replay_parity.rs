@@ -4,68 +4,58 @@
 //! units. Its UTF-16 splitter rounds an index inside an astral scalar to the
 //! scalar's UTF-8 boundary; Yjs instead exposes the two surrogate units. A
 //! candidate whose insertion/deletion boundary names that interior clock can
-//! therefore replay to different content despite being a valid update. Beyond
-//! that boundary class, a hostile peer can re-encode a `(client, clock)` pair
-//! the base (or a still-parked update) already owns with different content:
-//! yrs keeps its own first-seen item for that id and silently ignores the
-//! redefinition, while a from-scratch Yjs peer integrating the same lineage
-//! can resolve the conflicting redefinition differently — a divergence with
-//! no clock shortfall and no interior-scalar boundary named on the wire.
+//! therefore replay to different content despite being a valid update. A
+//! hostile peer can also re-encode a `(client, clock)` pair the base (or a
+//! still-parked update) already owns with different content. yrs keeps its
+//! first-seen item for that id and silently ignores the redefinition, while a
+//! from-scratch Yjs peer integrating the same lineage can resolve it
+//! differently, with no clock shortfall and no interior-scalar boundary named
+//! on the wire.
 //!
 //! The public `Update` API does not expose item origins in yrs 0.27.3, so this
 //! gate walks the v1 wire with yrs' own public `DecoderV1` primitives. It:
-//!  - rejects any structural block of length zero (a degenerate wire claim; no
-//!    honest edit ever encodes one, and it is the wire-visible precondition of
-//!    at least one internal yrs unwind this gate must never trigger);
+//!  - rejects any structural block of length zero (no honest edit encodes one,
+//!    and it is the wire-visible precondition of at least one internal yrs
+//!    unwind this gate must never trigger);
 //!  - compares the candidate's string content against whatever the base (or a
-//!    still-parked update) already claims at the same clocks — a content-parity
-//!    check that catches a hostile re-encode before any doc is touched;
-//!  - checks candidate delete endpoints, and any still-parked delete endpoints
-//!    (whose target scalar may only just now be forming from this candidate's
-//!    content), against the base ∪ candidate ∪ pending scalar structure —
-//!    computed before any delete removes it, since a post-delete scan no
-//!    longer contains the scalar;
+//!    still-parked update) already claims at the same clocks, which catches a
+//!    hostile re-encode before any doc is touched;
+//!  - checks candidate delete endpoints, and any still-parked delete endpoints,
+//!    against the base ∪ candidate ∪ pending scalar structure, computed before
+//!    any delete removes it;
 //!  - checks every candidate insertion boundary, and any still-parked
-//!    insertion boundary, against that same pre-delete scalar structure — so a
+//!    insertion boundary, against that same pre-delete scalar structure, so a
 //!    parked insert is caught at the moment its dependency integrates;
 //!  - requires dependency-complete replay to either integrate or park every
 //!    clock the candidate claims (a clock covered by neither is wire data yrs
 //!    silently discarded).
 //!
-//! All of the above is computed by scanning the base/candidate/pending WIRE
-//! bytes directly — never by asking yrs to diff a state vector captured on one
-//! `Doc` against a different `Doc` instance, which is what `store.rs`'s
-//! `write_blocks_from` can panic on (a state-vector clock that does not align
-//! with the diffed doc's own block layout). The gate still applies
-//! base+pending+candidate to an isolated scratch doc (needed because only a
-//! real integration can tell whether a claimed clock was silently discarded,
-//! e.g. an overlap-slice), but it only ever reads that scratch doc's state
-//! vector and pending-update bytes — both O(pending), never a full diff.
+//! The gate scans the base, candidate, and pending wire bytes directly. It
+//! never asks yrs to diff a state vector captured on one `Doc` against a
+//! different `Doc`, which `store.rs`'s `write_blocks_from` can panic on. It
+//! still applies base+pending+candidate to an isolated scratch doc, because
+//! only a real integration can tell whether a claimed clock was silently
+//! discarded. It reads only that doc's state vector and pending-update bytes,
+//! both O(pending), never a full diff.
 //!
-//! The live/durable document is never mutated. Because this runs inside
-//! `store.write_with`, the whole computation is wrapped in `catch_unwind` so any
-//! internal library unwind that the checks above did not already prevent
-//! becomes a fail-closed rejection instead of poisoning the caller's
-//! transaction (mirrors the hash worker's containment) — a backstop, not the
-//! primary mechanism.
+//! The live/durable document is never mutated. This runs inside
+//! `store.write_with`, so the whole computation is wrapped in `catch_unwind`.
+//! An internal library unwind the checks above did not prevent becomes a
+//! fail-closed rejection instead of poisoning the caller's transaction. That
+//! is a backstop, not the primary mechanism.
 //!
 //! ## Abort safety (the pre-validator)
 //!
-//! `catch_unwind` is a backstop, not a cure: yrs 0.27.3's `Update::decode_v1`
-//! can HARD-ABORT the whole process (uncatchable UB — see
-//! [`safe_read_string`]'s doc comment for the root cause), which no unwind
-//! boundary can contain. [`scan_v1`] — the wire walk this module already
-//! performs for replay parity — doubles as the pre-validator that closes this:
-//! it never calls `decode_v1` and never uses yrs' own unsafe string decode, so
-//! it can safely reject a malformed/adversarial update before any decode that
-//! could abort ever sees the bytes. [`prevalidate_update_bytes`] is the public
-//! entry point [`crate::durable::validate_update_bytes`] calls first — the
-//! shared choke point for both the local edit path and the remote replication
-//! path (`crates/dohc-engine-collab/src/durable.rs`,
-//! `crates/dohc-engine-collab/src/replication.rs`) — and this module's own
-//! `validate_replay_parity_inner` runs `scan_v1` on the candidate before any
-//! decode ([`Ydoc::apply`] pre-validates again at its own call site) for the
-//! same reason.
+//! yrs 0.27.3's `Update::decode_v1` can hard-abort the whole process
+//! (uncatchable UB; see [`safe_read_string`]'s doc comment for the root
+//! cause), which no unwind boundary can contain. [`scan_v1`] never calls
+//! `decode_v1` and never uses yrs' own unsafe string decode, so it can reject
+//! a malformed or adversarial update before any decode that could abort sees
+//! the bytes. [`prevalidate_update_bytes`] is the public entry point
+//! [`crate::durable::validate_update_bytes`] calls first. It is the shared
+//! choke point for the local edit path and the remote replication path.
+//! `validate_replay_parity_inner` also runs `scan_v1` on the candidate before
+//! any decode, and [`Ydoc::apply`] pre-validates again at its own call site.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -1581,7 +1571,6 @@ fn content_parity_conflict(candidate: &WireStructure, established: &ClockIdentit
         if candidate.tombstone_covers(client, clock) {
             return !candidate.delete_set_covers(client, clock);
         }
-        // The candidate does not claim this clock at all: nothing to compare.
         false
     })
 }
@@ -1725,28 +1714,21 @@ pub(crate) fn prevalidate_state_vector_bytes(bytes: &[u8]) -> Result<(), CollabE
 /// ```
 ///
 /// Malformed bytes therefore produce a `&str` that violates Rust's UTF-8
-/// invariant. The moment anything iterates `.chars()` over that fake `str`
-/// (yrs's own integration code inside `Update::decode_v1`, or this module's
-/// own structural walk if it naively reused yrs's decode helpers), the char
-/// decoder can synthesize an out-of-range/surrogate `u32` and hand it to an
-/// unchecked `char` construction — a debug-mode precondition check catches it
-/// as an uncatchable process abort (`std::panic::catch_unwind` cannot
-/// intercept it); in a release build the check compiles out and the same
-/// input is silent undefined behavior instead. This is the root cause of the
+/// invariant. When anything iterates `.chars()` over it, the char decoder can
+/// synthesize an out-of-range or surrogate `u32` and hand it to an unchecked
+/// `char` construction. A debug build aborts the process there, which
+/// `std::panic::catch_unwind` cannot intercept. A release build has silent
+/// undefined behavior. This is the root cause of the
 /// `known_crash_witness_yrs_char_decode_ub` hard-abort.
 ///
 /// Every string-bearing field this module reads therefore goes through this
 /// function instead of yrs's own `read_string`/`read_key`/`read_json`/
 /// `read_any`/`TypeRef::decode`/`Options::decode`. It reads the raw bytes
-/// with the ordinary bounds-checked `read_buf` (safe: yrs' `Read` trait only
-/// makes the STRING CAST unsafe, not the length-prefixed byte read) and
-/// validates them with the checked `std::str::from_utf8`, rejecting anything
-/// that is not well-formed UTF-8 — which by construction can never encode a
-/// surrogate (0xD800..=0xDFFF) or an out-of-range scalar (> 0x10FFFF) — before
-/// it is ever treated as a `str`. Once bytes have passed through here, no
-/// later `.chars()` iteration over them (by this module, or by yrs's own real
-/// `Update::decode_v1` once the pre-validator has accepted the update) can
-/// hit the UB, because they are now provably valid UTF-8.
+/// with the bounds-checked `read_buf` (yrs' `Read` trait makes only the string
+/// cast unsafe) and validates them with the checked `std::str::from_utf8`.
+/// Well-formed UTF-8 cannot encode a surrogate (0xD800..=0xDFFF) or an
+/// out-of-range scalar (> 0x10FFFF), so no later `.chars()` iteration over
+/// these bytes, by this module or by yrs's `Update::decode_v1`, can hit the UB.
 fn safe_read_string<'b>(decoder: &'b mut DecoderV1<'_>) -> Result<&'b str, CollabError> {
     let raw = decoder.read_buf().map_err(parity_decode_error)?;
     std::str::from_utf8(raw).map_err(|_| CollabError::ReplayParityViolation {
@@ -1959,14 +1941,14 @@ fn safe_read_id(decoder: &mut DecoderV1<'_>) -> Result<ID, CollabError> {
     Ok(ID::new(client, clock))
 }
 
-/// Walk the v1 wire structure with yrs' own public `DecoderV1` PRIMITIVES —
-/// never yrs' own `Update::decode_v1`, and never yrs' own unsafe string decode
+/// Walk the v1 wire structure with yrs' own public `DecoderV1` primitives,
+/// never yrs' own `Update::decode_v1` and never yrs' own unsafe string decode
 /// (every string-bearing field goes through [`safe_read_string`] and its
-/// derivatives above) — so this function is safe to run on fully untrusted,
-/// adversarial bytes. This IS the pre-validator: [`prevalidate_update_bytes`]
-/// is a thin public wrapper around it, and every caller in this module that
-/// used to call `Update::decode_v1`/`Ydoc::validate_update` on untrusted bytes
-/// now calls this (or the wrapper) FIRST.
+/// derivatives above), so this function is safe to run on fully untrusted,
+/// adversarial bytes. This is the pre-validator: [`prevalidate_update_bytes`]
+/// is a thin public wrapper around it, and every caller in this module calls
+/// this (or the wrapper) before `Update::decode_v1`/`Ydoc::validate_update`
+/// sees untrusted bytes.
 fn scan_v1(bytes: &[u8]) -> Result<WireStructure, CollabError> {
     scan(bytes, ScanVersion::V1)
 }
@@ -2431,8 +2413,6 @@ fn scan_content(
         BLOCK_ITEM_FORMAT_REF_NUMBER => {
             let key = safe_read_string(decoder)?.to_owned();
             let value = safe_read_json(decoder)?;
-            // Canonicalize (key, value) together: a length-prefixed key, then
-            // the tagged, variant-preserving Any payload.
             let mut canonical = (key.len() as u64).to_be_bytes().to_vec();
             canonical.extend_from_slice(key.as_bytes());
             append_canonical_any(&mut canonical, &value);
@@ -2898,7 +2878,6 @@ mod tests {
         let producer = Ydoc::wire();
         let candidate = producer.plaintext_insert(0, "hello");
 
-        // Sanity: without injection the gate returns normally (accepts).
         assert!(validate_replay_parity(&base, &candidate).is_ok());
 
         let escaped = with_armed_gate(|| {
@@ -3433,7 +3412,6 @@ mod tests {
             0x04, b't', b'e', b's', b't', // root name
             0x01, // ContentAny len = 1 value
         ];
-        // MAX_ANY_DEPTH + 100 nested length-1 arrays, then a terminal Null.
         for _ in 0..(MAX_ANY_DEPTH + 100) {
             bytes.push(117); // Any::Array
             bytes.push(0x01); // len = 1

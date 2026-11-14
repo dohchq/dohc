@@ -514,7 +514,6 @@ test("existing volumes stored anywhere but the configured disk folder are refuse
   assert.equal(check({ Driver: "other", Options: { ...options } }).length, 1);
 });
 
-// Runs the relay deployment check against in-memory folders, with the status and output `node -e` would give.
 function relayCheck(files, unreadable = false) {
   const fs = {
     statSync: (path) => (files.includes(path) ? {} : undefined),
@@ -608,7 +607,6 @@ test("only the first start of a data-disk deployment may initialize its relay", 
       files.join(),
     );
   }
-  // A failed check never reads as an empty disk or a found deployment.
   for (const check of [
     relayCheck([], true),
     { status: 1, stdout: "" },
@@ -755,7 +753,6 @@ test("the gateway starts before the relay is healthy, because the relay needs th
     const services = composeDependencies(files);
     assert.ok(services.gateway && services["sync-relay"], selection);
     assert.equal(waitsForHealthyRelay(services, "gateway"), false, selection);
-    // A wait through another service counts: the viewer still starts only after a healthy relay.
     assert.equal(waitsForHealthyRelay(services, "share-web"), true, selection);
     assert.equal(
       waitsForHealthyRelay(
@@ -799,7 +796,6 @@ test("an external database leaves out the bundled database, its volume and every
   const overlay = externalOverlay();
   assert.equal(overlay.services.postgres, RESET);
   assert.deepEqual(overlay.volumes, { dohc_self_host_postgres: RESET });
-  // These are the only references to the bundled database in the base file, and the overlay resets each one.
   assert.deepEqual(
     Object.keys(compose.services).filter((name) => compose.services[name].depends_on?.postgres),
     ["postgres-migrate"],
@@ -813,7 +809,6 @@ test("an external database leaves out the bundled database, its volume and every
     ),
     ["postgres"],
   );
-  // Every service that connects to the database gets the external host and the provider's CA certificate.
   const clients = Object.keys(compose.services).filter(
     (name) => name !== "postgres" && compose.services[name].environment?.POSTGRES_PASSWORD,
   );
@@ -846,7 +841,6 @@ test("an external database leaves out the bundled database, its volume and every
   }
 });
 
-// The parser reads the CA certificate that the overlay mounts in each service.
 const providerCa = (t) => {
   const read = fs.readFileSync;
   t.mock.method(fs, "readFileSync", (path, ...rest) =>
@@ -1086,7 +1080,6 @@ test("with an external database, every start but the first refuses an empty data
     calls: ["relay-initialize"],
   });
   assert.deepEqual(externalChecks({ start: false, firstStart: false }), { checks: [], calls: [] });
-  // Without an external database or a data disk, a start checks neither, as before.
   assert.deepEqual(
     deploymentChecks(".env.self-host", settings(), () => assert.fail("Docker ran"), later),
     [],
@@ -1214,7 +1207,6 @@ test("every gateway refuses internal paths before proxy handles", () => {
     assert.ok(config.indexOf("handle @internal") < config.indexOf("handle @relay"));
     assert.ok(config.indexOf("handle @internal") < config.indexOf("handle {"));
   }
-  // The app route has no account or relay handles. It refuses internal paths before its only proxy.
   const apps = readFileSync("tools/self-host/Caddyfile.cloudflare-apps", "utf8");
   assert.match(apps, /@internal path \/internal\/\*\s+handle @internal \{\s+respond 404\s+\}/);
   assert.ok(apps.indexOf("handle @internal") < apps.indexOf("handle {"));
@@ -1222,6 +1214,31 @@ test("every gateway refuses internal paths before proxy handles", () => {
     compose.services["share-web"].environment.DOHC_SHARE_WEB_INTERNAL_HOSTS,
     "share-web:1790",
   );
+});
+
+test("every gateway bounds relay bodies at the relay's largest cap, except Collection imports", () => {
+  for (const file of ["Caddyfile", "Caddyfile.private", "Caddyfile.cloudflare"]) {
+    const config = readFileSync(`tools/self-host/${file}`, "utf8");
+    const relay = config.slice(
+      config.indexOf("handle @relay {"),
+      config.indexOf("reverse_proxy sync-relay"),
+    );
+    const bounded =
+      /@relayBounded not path_regexp (\S+)\n\s+request_body @relayBounded \{\s+max_size 21MiB\s+\}/.exec(
+        relay,
+      );
+    assert.ok(bounded, file);
+    const unbounded = new RegExp(bounded[1]);
+    assert.ok(unbounded.test("/sync/w1/datasets/d1/imports/t1"), file);
+    for (const path of [
+      "/sync/w1/log",
+      "/sync/w1/blobs/abc",
+      "/sync/w1/datasets/d1/upload",
+      "/sync/w1/datasets/d1/imports/t1/x",
+    ]) {
+      assert.ok(!unbounded.test(path), `${file}: ${path}`);
+    }
+  }
 });
 
 test("automatic initialization cannot overwrite orphaned data or continuity", () => {

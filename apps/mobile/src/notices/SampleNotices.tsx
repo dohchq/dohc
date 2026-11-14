@@ -11,7 +11,7 @@ import { demoMode, demoScroll } from "../demo";
 import { NoticesFrameProbe } from "../firstScreenProbe";
 import { NoticeRow } from "./NoticeRow";
 import { useNotices } from "./NoticesState";
-import type { PhoneNotice } from "./sample";
+import type { PhoneNotice } from "./phoneNotice";
 import { useSyncBandHost, type BandRecord } from "./useSyncBandHost";
 import { useTheme } from "../theme";
 

@@ -122,12 +122,12 @@ export const WHATS_NEW_TAB_PATH = "tab://whats-new";
 export const CHATS_TAB_PATH = "tab://chats";
 const APP_TAB_PREFIX = "tab://app/";
 const VERSION_COMPARE_TAB_PREFIX = "tab://versions/compare/";
-// Engine moment diff (PR 0M-5): history diffs open by MOMENT id, not
+// Engine moment diff: history diffs open by moment id, not
 // legacy change-set id. The id alone is the tab identity: it
 // is contract-bounded, while a percent-encoded valid workspace path can
 // exceed the UI-state path bound. The moment record supplies its display path.
 const MOMENT_DIFF_TAB_PREFIX = "tab://moment-diff/";
-// A collection folder opened as its views (Phase 2 collections). Keyed by
+// A collection folder opened as its views. Keyed by
 // the folder path, so reopening re-activates instead of duplicating.
 const COLLECTION_TAB_PREFIX = "tab://collection/";
 const DATA_COLLECTION_TAB_PREFIX = "tab://data-collection/";
@@ -167,7 +167,7 @@ export function chatTabPath(target: ChatTabTarget): string {
   return `${CHATS_TAB_PATH}/${target.kind}/${encodeURIComponent(target.id)}`;
 }
 
-// Versions compare page (PR 0M-4): one tab per compared version, keyed by
+// Versions compare page: one tab per compared version, keyed by
 // the version id so re-comparing re-activates instead of duplicating.
 export function versionCompareTabPath(versionId: string): string {
   return `${VERSION_COMPARE_TAB_PREFIX}${encodeURIComponent(versionId)}`;
@@ -474,7 +474,7 @@ export interface WorkbenchState {
   // folder tree. Saved per workspace with the rest of the ui-state.
   explorerMode: ExplorerMode;
   // Which view each collection tab shows, keyed by the collection's folder
-  // path (Phase 2 collections). Per-user local state: closing the tab or
+  // path. Per-user local state: closing the tab or
   // restarting the app must not reset the open view.
   collectionViews: Record<string, string>;
   // The record each Collection tab shows open in its panel, keyed by the
@@ -482,7 +482,6 @@ export interface WorkbenchState {
   // Data record's key. A tab with no entry shows no panel. Closing the tab
   // drops its entry.
   openRecords: Record<string, string>;
-  // The record panel's width, for every Collection tab in the workspace.
   recordPanelWidth: number;
 }
 
@@ -793,7 +792,6 @@ export function openMomentDiff(
   const group = state.editorGroups.find((candidate) => candidate.id === targetGroupId);
   if (!group || group.tabs.some((tab) => tab.path === path))
     return openTab(state, path, targetGroupId);
-  // The active tab when it is a diff, else the group's first diff tab.
   const reused = [group.activeTab, ...group.tabs.map((tab) => tab.path)].find(
     (tabPath) => tabPath !== null && parseTab(tabPath).kind === "momentDiff",
   );
@@ -838,7 +836,6 @@ export function activateTab(state: WorkbenchState, groupId: string, path: string
   return next.activeEditorGroup === groupId ? next : { ...next, activeEditorGroup: groupId };
 }
 
-// The tab after or before the group's active tab, wrapping at the ends.
 export function adjacentTabPath(group: EditorGroup, step: 1 | -1): string | null {
   const { tabs } = group;
   const index = tabs.findIndex((tab) => tab.path === group.activeTab);
@@ -855,7 +852,6 @@ export function closeTab(state: WorkbenchState, groupId: string, path: string): 
   );
 }
 
-// A tab's open record goes with the tab, once no group shows it.
 function dropClosedTabRecords(state: WorkbenchState): WorkbenchState {
   const closed = Object.keys(state.openRecords).filter(
     (path) => !state.editorGroups.some((group) => group.tabs.some((tab) => tab.path === path)),
@@ -866,7 +862,6 @@ function dropClosedTabRecords(state: WorkbenchState): WorkbenchState {
   return { ...state, openRecords };
 }
 
-// Reorder one group's tabs. The target index clamps into that group.
 export function moveTab(
   state: WorkbenchState,
   groupId: string,

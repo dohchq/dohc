@@ -16,7 +16,6 @@ import {
   type TempWorkspace,
 } from "./helpers/workspace";
 
-// Set UI_AUDIT_SHOT_DIR to also save each frame in both themes.
 const SHOT_DIR = process.env.UI_AUDIT_SHOT_DIR ?? "";
 const GROUP = "Agent work";
 const LINK = "https://example.com/threads/7";
@@ -104,7 +103,6 @@ test("an agent's work report shows as the thread's Work card, which is its newes
     await expect(main.getByTestId("chats-channel-title")).toHaveText(GROUP);
     await waitForCliEndpoint(temp.homeDir);
 
-    // An agent working elsewhere posts where its work is and how it stands.
     const started = await post(temp, "Fix the login redirect\nReproducing it in a thread.", {
       status: "working",
       url: LINK,
@@ -121,13 +119,10 @@ test("an agent's work report shows as the thread's Work card, which is its newes
     await expect(plain.getByTestId("chats-post-work")).toHaveCount(0);
     await shoot(page, "a-post-working");
 
-    // A person's message reports no work.
     await expect(
       reply(temp, started.threadId, "Mine", { status: "done" }, "human"),
     ).rejects.toThrow("Only an agent reports work");
 
-    // The agent reports again without a link. The card becomes that report,
-    // with no reload: its status, and no link, because it gave none.
     await reply(temp, started.threadId, "Waiting for a review on the pull request.", {
       status: "waiting",
     });
@@ -146,8 +141,6 @@ test("an agent's work report shows as the thread's Work card, which is its newes
     );
     await shoot(page, "c-post-done");
 
-    // Inside the thread, each report shows on its own message, the opening
-    // post's included.
     await card.click();
     await expect(main.getByTestId("chats-thread-view")).toBeVisible();
     await expect(main.getByTestId("chats-message-work")).toHaveAttribute("data-status", "working");
@@ -162,7 +155,6 @@ test("an agent's work report shows as the thread's Work card, which is its newes
     await expect(main.getByTestId("chats-comment-work-open")).toHaveCount(1);
     await shoot(page, "d-thread-done");
 
-    // An agent reading the chat gets the same card.
     const shown = await sendCliRequest<"show">(
       {
         protocolVersion: CLI_PROTOCOL_VERSION,

@@ -13,8 +13,10 @@ export type NamedDocumentSession = ReturnType<
   ReturnType<typeof createNamedLiveBrowserTransport>["select"]
 >;
 const OPENING = ["authorizing", "connecting", "syncing"];
-// A disconnected page reconnects by itself and sends a pending change again, except for these reasons: it waits for the person to retry.
-const WAITS_FOR_RETRY = ["authority-unavailable", "paused"];
+// A disconnected page reconnects by itself and sends a pending change again, except for these reasons.
+const NO_AUTOMATIC_RETRY = ["authority-unavailable", "access-removed", "link-full", "paused"];
+// Trying again can't change these, so the page offers no Try again.
+const FINAL = ["access-removed", "link-full"];
 /** Editing stopped with a change the page will not send again by itself. */
 export function draftNeedsReview(state: NamedLiveBrowserState): boolean {
   return (
@@ -23,7 +25,7 @@ export function draftNeedsReview(state: NamedLiveBrowserState): boolean {
       (state.status === "closed" ||
         (state.status === "disconnected" &&
           state.reason !== null &&
-          WAITS_FOR_RETRY.includes(state.reason))))
+          NO_AUTOMATIC_RETRY.includes(state.reason))))
   );
 }
 function statusText(state: NamedLiveBrowserState, link: boolean): string {
@@ -44,8 +46,13 @@ function statusText(state: NamedLiveBrowserState, link: boolean): string {
       : "This account cannot open the file. Sign in with the invited account.";
   if (state.status === "closed")
     return "Editing stopped. Copy any unsynced changes you want to keep.";
+  if (state.reason === "access-removed") return "The owner removed your access.";
+  if (state.reason === "link-full")
+    return "This link cannot take more people. Ask the owner for a new link.";
   if (state.reason === "authority-unavailable")
     return "dohc could not open the file for editing. Try again.";
+  if (state.reason === "host-unavailable")
+    return "The server could not open the file for editing. dohc keeps trying.";
   return "Editing paused. Check your connection, then retry.";
 }
 /**
@@ -108,9 +115,11 @@ export function NamedDocumentEditor({
     >
       {!link && <h1>{path}</h1>}
       {statusSlot && working ? createPortal(status, statusSlot) : status}
-      {state.status === "disconnected" && (
+      {state.status === "disconnected" && !FINAL.includes(state.reason ?? "") && (
         <button className="handoff-button secondary" onClick={() => void session.reconnect()}>
-          {state.reason === "authority-unavailable" || liveConnectionLimitMessage(state.reason)
+          {state.reason === "authority-unavailable" ||
+          state.reason === "host-unavailable" ||
+          liveConnectionLimitMessage(state.reason)
             ? "Try again"
             : "Retry connection"}
         </button>

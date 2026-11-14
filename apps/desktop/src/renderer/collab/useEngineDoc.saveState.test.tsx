@@ -496,8 +496,6 @@ async function mountHostAcknowledgedDocument() {
   return { hook, drafts, typeAndDeliver };
 }
 
-// The host save waits behind the renderer's delivery response. Until that
-// response arrives, the edit is not saved anywhere this window can vouch for.
 it("host acknowledgement recovery keeps a draft when read-only precedes the delivery response", async () => {
   const { hook, finishDelivery } = await bufferHostSaveBehindDeferredResponse();
   const drafts = renderHook(() => useOrphanedDrafts("ws-1", "notes/a.md"));
@@ -507,7 +505,6 @@ it("host acknowledgement recovery keeps a draft when read-only precedes the deli
   expect(hook.result.current.readOnlyWhileEditing).toBe(true);
   expect(hook.result.current.saveState.kind).toBe("unknown");
   await waitFor(() => expect(drafts.result.current.map((draft) => draft.text)).toEqual(["seed!"]));
-  // Close waits for the withheld response.
   expect(harness.closed).toEqual([]);
 
   await finishDelivery();
@@ -531,8 +528,6 @@ it("host acknowledgement recovery sets nothing aside when the delivery response 
   expect(drafts.result.current).toEqual([]);
 });
 
-// A keystroke after a clean read-only status writes its draft at once. The
-// transition names that draft whether or not the later projection succeeds.
 it.each([
   ["completes", false],
   ["fails", true],

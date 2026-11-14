@@ -75,10 +75,8 @@ describe.skipIf(!pgAvailable)("applyMigrations bootstraps the full Postgres sche
     expect(migrations.map((m) => m.id)).toContain("0001_better_auth");
 
     const ran = await applyMigrations(client);
-    // A fresh schema gains all migrations on the first run, in filename order.
     expect(ran).toEqual(migrations.map((m) => m.id));
 
-    // The Better Auth tables exist without the retired application schema.
     const tables = await client.query<{
       user_tbl: string | null;
       session_tbl: string | null;
@@ -100,7 +98,6 @@ describe.skipIf(!pgAvailable)("applyMigrations bootstraps the full Postgres sche
     expect(row.workspaces_tbl).toBeNull();
     expect(row.crash_reports_tbl).not.toBeNull();
 
-    // The ledger records every applied migration.
     const ledger = await client.query<{ id: string }>(
       `select id from "${schema}".dohc_migrations order by id`,
     );

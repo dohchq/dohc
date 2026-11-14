@@ -1,8 +1,3 @@
-//! Scan behavior: fixture tree → normalized listing, path-floor exclusion,
-//! size-cap boundary (limit-1/limit/limit+1), the fail-closed max-files bound,
-//! bounded hash concurrency (the pool cap is asserted, not trusted), and
-//! between-unit cancellation leaving no partial listing.
-
 use crate::common;
 
 use common::Scratch;
@@ -56,7 +51,6 @@ fn path_floor_excludes_reserved_and_sidecars() {
     ws.write("finance/ledger.sqlite", b"SQLite format 3\0"); // tracked (real db file)
     ws.write("finance/ledger.sqlite-wal", b"sidecar"); // excluded (db sidecar)
     ws.write("notes/draft-wal", b"not a sidecar"); // tracked (no db base)
-    // OS metadata, at any depth.
     ws.write(".DS_Store", b"finder");
     ws.write("notes/.DS_Store", b"finder");
     ws.write("notes/._a.md", b"appledouble");
@@ -84,7 +78,6 @@ fn symlink_leaf_is_never_tracked() {
     let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
     let listing = scan(&scanner, ws.path());
 
-    // Whether or not the symlink could be created, it is never in the listing.
     assert_eq!(paths(&listing), ["notes/a.md"]);
     if !made {
         eprintln!(
@@ -96,7 +89,6 @@ fn symlink_leaf_is_never_tracked() {
 #[test]
 fn size_cap_boundary_limit_minus_one_limit_and_plus_one() {
     let ws = Scratch::new();
-    // Cap at exactly 8 bytes (inclusive).
     let cap = 8u64;
     ws.write("under.md", b"1234567"); // 7 bytes  -> hashed
     ws.write("at.md", b"12345678"); // 8 bytes    -> hashed (inclusive cap)
@@ -137,7 +129,6 @@ fn max_files_bound_fails_closed_never_truncates() {
     for i in 0..5 {
         ws.write(&format!("f{i}.md"), b"x");
     }
-    // Exactly 3 allowed; the 4th tips it over.
     let bounds = ScanBounds::builder().max_files(3).build();
     let scanner = Scanner::new(bounds).expect("scanner");
     let err = scanner
@@ -145,7 +136,6 @@ fn max_files_bound_fails_closed_never_truncates() {
         .expect_err("too many files must fail closed");
     assert_eq!(err.code(), "too-many-files");
 
-    // At the exact cap it succeeds (boundary inclusive).
     let ws2 = Scratch::new();
     for i in 0..3 {
         ws2.write(&format!("f{i}.md"), b"x");
@@ -158,8 +148,6 @@ fn max_files_bound_fails_closed_never_truncates() {
 #[test]
 fn hash_concurrency_never_exceeds_the_pool_cap() {
     let ws = Scratch::new();
-    // Many files, small pool: a naive per-file spawn would show 50-way
-    // concurrency; the bounded pool must cap it at the worker count.
     let workers = 2usize;
     let n = 50;
     for i in 0..n {
@@ -199,7 +187,6 @@ fn scanner_reuses_one_pool_across_scans_within_cap() {
         let listing = scan(&scanner, ws.path());
         assert_eq!(listing.files.len(), 10);
     }
-    // Concurrency stayed capped across all three scans on the same pool.
     assert!(scanner.pool().gauge().max_concurrent() <= workers);
     assert_eq!(scanner.pool().gauge().hashed(), 30);
 }
@@ -223,8 +210,6 @@ fn pre_cancelled_token_yields_no_partial_listing() {
 #[test]
 fn max_entries_bounds_a_directory_heavy_tree() {
     let ws = Scratch::new();
-    // Many directories, few tracked files: max_files alone would not catch a
-    // pure-directory explosion; max_entries bounds the DFS working set.
     for i in 0..60 {
         ws.write(&format!("d{i:03}/keep.txt"), b"x");
     }
@@ -260,20 +245,17 @@ fn over_cap_skipped_files_count_toward_max_files() {
 fn symlink_directory_cycle_terminates_and_tracks_nothing_under_loop() {
     let ws = Scratch::new();
     ws.write("A/real.md", b"real\n");
-    // A/loop -> A creates a directory cycle. The scanner never follows a
-    // symlinked directory, so the cycle is simply not descended.
     let made = ws.try_symlink_dir("A/loop", &ws.path().join("A"));
 
     let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
     let listing = scan(&scanner, ws.path());
-    // Terminates; only the real file is tracked, nothing under the loop.
     assert_eq!(paths(&listing), ["A/real.md"]);
     if !made {
         eprintln!("note: directory symlink unavailable on this host; termination holds vacuously");
     }
 }
 
-/// The amended-N8 short-circuit, pinned at the scanner seam: a matching
+/// The hash-reuse short-circuit, pinned at the scanner seam: a matching
 /// (size, mtime) pairing returns the manifest's recorded hash — provably
 /// without reading the file, because the recorded hash here is a deliberate
 /// lie that a re-hash could never produce — while a zero-mtime entry and a
@@ -285,14 +267,12 @@ fn scan_with_prior_reuses_the_recorded_hash_only_for_a_matching_pairing() {
     ws.age_mtime("doc.md", 30);
     let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
 
-    // Learn the observed pairing from a full-hash scan.
     let baseline = scan(&scanner, ws.path());
     let observed = &baseline.files[0];
     assert_eq!(observed.sha256, hex_sha256(b"content\n"));
     assert_ne!(observed.mtime_ms, 0, "the scratch file must carry an mtime");
     let hashed_after_baseline = scanner.pool().gauge().hashed();
 
-    // Matching pairing → the recorded (lying) hash comes back, no read.
     let matching = ScanManifest::from_entries([(
         "doc.md".to_owned(),
         ManifestEntry {
@@ -315,7 +295,6 @@ fn scan_with_prior_reuses_the_recorded_hash_only_for_a_matching_pairing() {
         "a matching pairing must not read the file"
     );
 
-    // A zero-mtime entry never authorizes reuse, even with a matching size.
     let no_pairing = ScanManifest::from_entries([(
         "doc.md".to_owned(),
         ManifestEntry {
@@ -333,7 +312,6 @@ fn scan_with_prior_reuses_the_recorded_hash_only_for_a_matching_pairing() {
     };
     assert_eq!(hashed.files[0].sha256, hex_sha256(b"content\n"));
 
-    // A size mismatch forces the hash even when the mtime matches.
     let wrong_size = ScanManifest::from_entries([(
         "doc.md".to_owned(),
         ManifestEntry {
@@ -363,7 +341,6 @@ fn invalid_root_is_typed() {
     assert_eq!(err.code(), "invalid-root");
 }
 
-/// Refuses the root's listing with one OS error number.
 struct DenyRoot(i32);
 
 impl ScanIoFaultInjector for DenyRoot {
@@ -557,8 +534,6 @@ fn mid_scan_write_voids_the_mtime_pairing_and_the_next_scan_rehashes() {
         "a (size, mtime) drift across the stat→read→stat window must void the pairing"
     );
 
-    // With no pairing recorded, a scan seeded from that listing cannot reuse
-    // the stale hash: it re-hashes and sees the racing write's bytes.
     let prior = ScanManifest::from_entries([(
         "doc.md".to_owned(),
         ManifestEntry {

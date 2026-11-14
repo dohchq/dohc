@@ -143,7 +143,6 @@ export function createWheel(period = 14): DriveModel & { setEdge: (strength: num
     mesh(spoke.clone(), silver, wheel).rotation.y = -angle;
   });
   spoke.dispose();
-  // Center cap.
   lathe(
     [
       [0.112, 0.3],
@@ -181,7 +180,6 @@ export function createWheel(period = 14): DriveModel & { setEdge: (strength: num
     },
     turn / spokes / 2,
   );
-  // Valve stem, beside a spoke at the rim.
   const valve = new T.Group();
   atAngle(valve, 0.6, turn * 0.07, 0);
   wheel.add(valve);

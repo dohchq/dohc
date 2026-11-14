@@ -305,7 +305,6 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
     }
   }
 
-  // Main says the file changed outside dohc, and whether it counted unsaved edits.
   function emitChangedOutside(unsaved: boolean, seq: number): void {
     if (openedSessionId === null) throw new Error("session not open yet");
     const event = {

@@ -71,8 +71,8 @@ fn stop_counting(conn: &mut Connection) -> Result<(), StorageError> {
 /// `synchronous = NORMAL`: the SQLite-recommended WAL setting and the TS
 /// engine's effective posture. Durable
 /// across application/process crashes (the crash tiers this crate tests); the
-/// last commit may be lost only on OS crash / power loss, honestly de-scoped to
-/// `TEST_ORACLE.md` tier 3. Pinned and asserted on open so a weakened value
+/// last commit may be lost only on OS crash / power loss, which is out of
+/// scope. Pinned and asserted on open so a weakened value
 /// fails a test rather than passing silently.
 const SYNCHRONOUS_NORMAL: i64 = 1;
 
@@ -130,7 +130,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "engine_migrations",
     "engine_ownership",
     "engine_requests",
-    // CAL-2 versioning tables.
+    // Versioning tables.
     "versioned_workspaces",
     "versions",
     "active_versions",
@@ -162,22 +162,22 @@ const REQUIRED_TABLES: &[&str] = &[
     "collection_relation_edges",
     "collection_historical_record_owners",
     "collection_historical_record_owner_backfills",
-    // R06 conflict-object tables.
+    // Conflict-object tables.
     "conflicts",
-    // R13 shadow fence token.
+    // Shadow fence token.
     "shadow_clone",
-    // R04 durability tables.
+    // Durability tables.
     "binary_blobs",
     "materialization_jobs",
     "materialization_displacements",
     "materialization_retained",
     "materialization_displacement_reads",
     "materialization_staging_locations",
-    // R08 secret-backed-file tables.
+    // Secret-backed-file tables.
     "secret_files",
     "secret_fork_bases",
     "secret_moments",
-    // R11a durable Y.Doc tables.
+    // Durable Y.Doc tables.
     "ydoc_docs",
     "markdown_write_obligations",
     "markdown_write_obligation_notice_dismissals",
@@ -202,7 +202,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "replication_pending_conflict_moments",
     "replication_pending_conflict_text_blobs",
     "replication_pending_conflict_binary_blobs",
-    // R09 chats-domain tables.
+    // Chats-domain tables.
     "chat_channels",
     "chat_channel_wire_ids",
     "chat_channel_placeholders",
@@ -231,13 +231,13 @@ const REQUIRED_TABLES: &[&str] = &[
     "run_message_links",
     "chat_dispatch_pause",
     "chat_stage_receipts",
-    // R12 search tables. The two FTS5 virtual tables show up in sqlite_schema
+    // Search tables. The two FTS5 virtual tables show up in sqlite_schema
     // with type='table', so the same presence probe applies. Their internal
     // FTS5 shadow tables are not listed.
     "engine_search_files_fts",
     "engine_search_chat_messages_fts",
     "engine_search_index_state",
-    // R10 replication, relay, and share cursors.
+    // Replication, relay, and share cursors.
     "sync_identity",
     "replication_log",
     "replication_refused_moment_blobs",
@@ -257,9 +257,9 @@ const REQUIRED_TABLES: &[&str] = &[
     "hosted_retired_files",
     "hosted_parked_snapshots",
     "hosted_parked_path_aliases",
-    // #646 PR3a proposal scan position.
+    // Proposal scan position.
     "share_proposal_push_state",
-    // Item 12: the direct lane's position and per-file decisions.
+    // The direct lane's position and per-file decisions.
     "share_direct_write_state",
     "share_direct_write_marks",
     "share_direct_write_plan",

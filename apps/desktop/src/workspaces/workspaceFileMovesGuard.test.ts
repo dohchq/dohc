@@ -9,10 +9,9 @@ import { withExclusiveWorkspaceOperation } from "./workspaceAssets";
 import { LiveFolderError, LivePageOwnedError } from "./workspaceEngineCapture";
 import { moveWorkspacePathByHand, prepareMoveWorkspacePathAs } from "./workspaceFileMoves";
 
-// #3089: every route that renames or moves a live page waits for the move
+// Every route that renames or moves a live page waits for the move
 // guard first, before it takes the workspace lock or calls the capture.
 
-// Counts every node:fs/promises call, to price a move's disk work.
 const fsCalls = vi.hoisted(() => ({ count: 0 }));
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>();
@@ -61,7 +60,6 @@ async function workspace(files: string[]) {
     signal: new AbortController().signal,
     assertCurrent() {},
   };
-  // While the guard waits, nothing holds the workspace lock.
   const lockIsFree = () =>
     withExclusiveWorkspaceOperation(rootPath, async () => {
       order.push("lock free");
@@ -289,16 +287,10 @@ it.each([
       calls.push(fsCalls.count);
     }
     expect(calls[1]).toBe(calls[0]);
-    // With a live page elsewhere, the guard reads the source's spelling.
     expect(calls[2]).toBeGreaterThan(calls[0]!);
   },
 );
 
-// A move of a folder over a page live on this computer, or of a page this
-// computer owns live, catches nothing up, and that refusal is the move's answer:
-// it never reaches the capture, whose own check might pass once the page stops.
-// A folder or page whose check passes, and a folder whose check failed for
-// another reason, still wait for the guard, then reach the capture.
 it.each([
   {
     route: "app",
@@ -364,7 +356,6 @@ it.each([
         refused ? [] : [["workspace", ["page"], expect.any(AbortSignal)]],
       );
       expect(f.order).toEqual(refused ? [] : ["capture"]);
-      // The app throws the refusal. The agent gets it as the move's failure.
       if (refused && route === "app") expect(outcome).toBe(refusal);
       else if (refused) expect(outcome).toEqual({ ok: false, path: from, reason: refusal.message });
       else expect(outcome).not.toBe(refusal);

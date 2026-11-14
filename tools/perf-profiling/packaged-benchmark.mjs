@@ -2214,7 +2214,6 @@ try {
               continue;
             }
             if (scenario === "presence") {
-              // Open both canonical engine documents before reading their snapshots at rest.
               for (const name of ["small.md", "large.md"]) await openDoc(fresh.page, name);
               await shutdown(runDir, fresh);
               const relayRequire = createRequire(join(root, "services/sync-relay/package.json"));

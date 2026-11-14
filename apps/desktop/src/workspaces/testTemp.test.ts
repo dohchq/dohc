@@ -125,7 +125,6 @@ describe("test scratch", () => {
     await symlink(outside, link, "junction");
 
     const nowMs = Date.now();
-    // The link and the run are ancient; only the link's target is recent.
     const when = new Date(nowMs - 49 * HOUR_MS);
     await lutimes(link, when, when);
     await age(abandoned, nowMs, 49);
@@ -220,7 +219,6 @@ describe("test scratch", () => {
     await writeFile(join(engine, "engine.db"), "live");
 
     const nowMs = Date.now();
-    // Everything above the deep file looks long abandoned.
     await age(engine, nowMs, 49);
     await age(join(soak, "workspace", ".dohc"), nowMs, 49);
     await age(join(soak, "workspace"), nowMs, 49);
@@ -260,7 +258,6 @@ describe("test scratch", () => {
       await pathExists(theirFile),
       "an aged directory that is not run-shaped is not this sweep's to remove",
     ).toBe(true);
-    // And the guard did not just turn the sweep off.
     expect(await pathExists(mine), "an aged run-shaped root must still be swept").toBe(false);
   });
 
@@ -293,7 +290,6 @@ describe("test scratch", () => {
       process.env.DOHC_TEST_SCRATCH_RUN = "ci-123-0123456789abcdef";
       expect(() => testScratchRunRoot()).toThrow(/generated run id/);
 
-      // A name of the caller's own is still theirs to choose.
       process.env.DOHC_TEST_SCRATCH_RUN = "ci-123";
       expect(basename(testScratchRunRoot())).toBe("ci-123");
     } finally {

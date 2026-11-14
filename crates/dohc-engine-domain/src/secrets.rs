@@ -1,46 +1,39 @@
-//! [`SecretFileStore`]: the secret-backed-file domain over the R04 storage core
-//! and the R08 crypto core.
-//!
-//! Every guarantee the TS `secretFileStore` makes is preserved here, but with a
-//! stronger type boundary:
+//! [`SecretFileStore`]: the secret-backed-file domain over the storage core
+//! and the crypto core.
 //!
 //! - **Ciphertext-only at rest.** A write encrypts plaintext with
 //!   [`dohc_engine_crypto`] and stores only the IV, tag, and ciphertext (base64
 //!   TEXT) plus the plaintext byte length. No column, journal entry, or blob
-//!   ever holds cleartext — proven by the plaintext-never-leaks scan.
+//!   ever holds cleartext. The plaintext-never-leaks scan proves it.
 //! - **One plaintext accessor.** [`SecretFileStore::materialize_secret_file`] is
 //!   the sole method that decrypts, returning a zeroizing
 //!   [`SecretPlaintext`](dohc_engine_crypto::SecretPlaintext). Every other method
-//!   is metadata-only by type — [`SecretMomentRecord`] has no content field.
+//!   is metadata-only by type: [`SecretMomentRecord`] has no content field.
 //! - **Fail closed.** A tampered ciphertext/tag, wrong key, or AAD mismatch
 //!   surfaces as `decrypt-failed`, never garbage plaintext.
-//! - **Durable materialization intent.** A write records its R04
-//!   materialization row in the same transaction as the secret state, so the
-//!   disk intent is crash-safe. [`SecretDiskIntent::Materialize`] enqueues a
-//!   pending job (the secret-aware executor writes the plaintext file);
-//!   [`SecretDiskIntent::AlreadyOnDisk`] (capture) records a completed marker
-//!   instead — the plaintext came FROM disk, and the marker lets the
-//!   staleness gate supersede older pending jobs. The row references the
-//!   CIPHERTEXT blob (integrity anchor); plaintext is produced only at
-//!   execution time by `materialize_secret_file` and lives only on disk.
+//! - **Durable materialization intent.** A write records its materialization
+//!   row in the same transaction as the secret state, so the disk intent is
+//!   crash-safe. [`SecretDiskIntent::Materialize`] enqueues a pending job that
+//!   the secret-aware executor writes. [`SecretDiskIntent::AlreadyOnDisk`]
+//!   (capture) records a completed marker instead, because the plaintext came
+//!   from disk, and the marker lets the staleness gate supersede older pending
+//!   jobs. The row references the ciphertext blob as its integrity anchor.
+//!   Plaintext is produced only at execution time by
+//!   `materialize_secret_file` and lives only on disk.
 //!
-//! R07's platform-independent path floor is enforced at every caller-supplied
+//! The platform-independent path floor is enforced at every caller-supplied
 //! path entry point. The gate fails closed in both directions: this encrypted
 //! store refuses ordinary paths (`not-secret-path`), while the plaintext store
 //! refuses secret-classified paths. Replication/apply callers cannot bypass the
 //! same store-door rule by choosing a different host platform.
 //!
-//! **Delete is a tombstone, not a crypto-shred (documented decision).** Deleting
-//! a secret removes the `secret_files` tip, but the prior write moment in
-//! `secret_moments` Retains its `after_ciphertext_base64` + `after_byte_length`.
-//! So a deleted secret's ciphertext — and its exact plaintext SIZE — persist in
-//! history (never plaintext: ciphertext-only-at-rest still holds). This is the
-//! deliberate, TS-matching behavior: the versioned model preserves history, and
-//! restore-to-before-a-moment depends on the retained sealed after-state. The
-//! residual is that existence + size of a deleted secret remain visible to
-//! anyone with DB access — acceptable because they already hold the ciphertext.
-//! A future crypto-shred-on-delete (purge the retained after-state) is a
-//! possible enhancement.
+//! **Delete is a tombstone, not a crypto-shred.** Deleting a secret removes
+//! the `secret_files` tip, but the prior write moment in `secret_moments`
+//! keeps its `after_ciphertext_base64` and `after_byte_length`, because
+//! restore-to-before-a-moment depends on the retained sealed after-state. A
+//! deleted secret's ciphertext and its exact plaintext size therefore stay
+//! visible to anyone with DB access, who already holds the ciphertext.
+//! Plaintext never does.
 
 use crate::error::DomainError;
 use crate::merge::VersionFileChangeStatus;
@@ -328,12 +321,10 @@ impl<'a> SecretFileStore<'a> {
         SecretFileStore { store, key }
     }
 
-    // --------------------------------------------------------------- writes
-
     /// Encrypt and write `input.text` to a secret path. Content-equality against
     /// the current tip is a no-op (one moment per real change). On a real change:
     /// inserts a moment, upserts the encrypted tip, persists the ciphertext blob,
-    /// enqueues an R04 materialization job, and journals the op — all in one
+    /// enqueues a materialization job, and journals the op — all in one
     /// transaction.
     pub fn write_secret_file(
         &mut self,
@@ -467,8 +458,6 @@ impl<'a> SecretFileStore<'a> {
     ) -> Result<Option<SecretMomentRecord>, DomainError> {
         delete_secret_file_keyless_with(self.store, input, faults, |_, _| Ok(()))
     }
-
-    // -------------------------------------------------------------- capture
 
     /// Autonomous secret capture: derives the moment id via the length-framed
     /// capture scheme (no caller-supplied ids), writes with
@@ -635,8 +624,6 @@ impl<'a> SecretFileStore<'a> {
         committed(outcome)
     }
 
-    // ----------------------------------------------------------- materialize
-
     /// The single authorized plaintext accessor. Decrypts the current tip for a
     /// secret path, returning a zeroizing [`SecretPlaintext`], or `None` when no
     /// tip exists. Fails closed (`decrypt-failed`) on tamper/wrong-key/AAD. The
@@ -759,8 +746,6 @@ impl<'a> SecretFileStore<'a> {
         })
     }
 
-    // ---------------------------------------------------------------- reads
-
     /// List secret moments, newest first, optionally scoped to a version.
     pub fn list_secret_moments(
         &self,
@@ -854,10 +839,6 @@ where
     })?;
     committed(outcome)
 }
-
-// ============================================================================
-// Free helpers.
-// ============================================================================
 
 /// The keyless secret delete: records a delete moment and removes the tip. A
 /// no-op (no moment) when there is no current tip. Free-standing because a

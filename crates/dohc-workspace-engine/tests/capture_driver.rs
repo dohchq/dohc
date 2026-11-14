@@ -157,7 +157,6 @@ async fn wait_for_layer_starts(probe: &CaptureApplyProbe, count: u64) {
 async fn autonomous_capture_notices_external_disk_changes() {
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
-    // Pre-existing content: the startup baseline scan must capture it.
     write_file(scratch.path(), "pre-existing.md", b"before open");
 
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
@@ -165,7 +164,6 @@ async fn autonomous_capture_notices_external_disk_changes() {
 
     wait_for_text(&transport, &handle, "pre-existing.md", Some("before open")).await;
 
-    // A file created after open, with no RPC: the watcher must drive it in.
     write_file(scratch.path(), "notes/external.md", b"external edit");
     wait_for_text(
         &transport,
@@ -175,11 +173,9 @@ async fn autonomous_capture_notices_external_disk_changes() {
     )
     .await;
 
-    // An update coalesces to the latest bytes.
     write_file(scratch.path(), "notes/external.md", b"updated");
     wait_for_text(&transport, &handle, "notes/external.md", Some("updated")).await;
 
-    // A delete retires the head.
     std::fs::remove_file(scratch.path().join("notes/external.md")).expect("delete");
     wait_for_text(&transport, &handle, "notes/external.md", None).await;
 
@@ -214,8 +210,6 @@ fn assert_no_initial_settled_event(events: &mut tokio::sync::mpsc::Receiver<Engi
     }
 }
 
-/// (metadataSummary, metadataCorrelationId) of the latest moment for `path`,
-/// read after workspace close through a fresh store connection.
 fn moment_metadata(db: &Path, path: &str) -> (Option<String>, Option<String>) {
     let store = EngineStore::open(db, 100).expect("reopen store");
     store
@@ -230,8 +224,6 @@ fn moment_metadata(db: &Path, path: &str) -> (Option<String>, Option<String>) {
         .expect("moment metadata")
 }
 
-/// Open a new workspace over two existing files and wait for its first
-/// import to record both.
 async fn open_over_existing_files(
     scratch: &ScratchDir,
 ) -> (
@@ -285,7 +277,6 @@ async fn policy_flip_on_unchanged_files_retires_and_rewidens() {
     );
     wait_for_text(&transport, &handle, "private/journal.md", None).await;
 
-    // Widen again: the path re-ingests with the same on-disk bytes.
     write_file(scratch.path(), ".dohc/files.toml", b"");
     wait_for_text(&transport, &handle, "private/journal.md", Some("personal")).await;
 
@@ -469,8 +460,6 @@ async fn binary_and_secret_content_capture_autonomously() {
         .await
         .expect("close");
 
-    // Offline inspection after a clean close: the binary head and the
-    // encrypted secret tip landed; the secret never touched plaintext tables.
     let store = EngineStore::open(&db_path, 100).expect("reopen store");
     let (binary_heads, secret_tips, env_moments): (i64, i64, i64) = store
         .read_with(|conn| {
@@ -604,9 +593,6 @@ async fn foreign_origin_secret_tip_is_never_claimed_or_retired_by_capture() {
         .await
         .expect("close before seeding");
 
-    // A genuinely foreign secret tip (origin "api") whose plaintext
-    // deliberately differs from what will be on disk — capture must neither
-    // overwrite nor retire it.
     let db_path = scratch.path().join(".dohc/engine/engine.db");
     let key = create_key_file(&scratch.path().join(".dohc/engine")).expect("mint key");
     {
@@ -1203,7 +1189,6 @@ const FIRST_IMPORT_SUMMARY: &str = "Added existing files";
 
 type BulkMoment = (String, Option<String>, Option<String>);
 
-/// Every `bulk/` moment, oldest first: (path, summary, correlation id).
 fn bulk_moments(db: &Path) -> Vec<BulkMoment> {
     let store = EngineStore::open(db, 100).expect("reopen store");
     store
@@ -1220,7 +1205,6 @@ fn bulk_moments(db: &Path) -> Vec<BulkMoment> {
         .expect("bulk moments")
 }
 
-/// The one correlation id that every moment carries under the import label.
 fn single_import_id(moments: &[BulkMoment]) -> String {
     let ids: std::collections::BTreeSet<_> = moments
         .iter()
@@ -1241,8 +1225,6 @@ fn single_import_id(moments: &[BulkMoment]) -> String {
     ids.into_iter().next().expect("one id")
 }
 
-/// Open a new workspace over a fresh import's worth of files and pause the
-/// import after its first committed unit.
 async fn open_paused_import(
     scratch: &ScratchDir,
     probe: &CaptureApplyProbe,
@@ -1335,7 +1317,6 @@ async fn a_store_from_before_import_tracking_counts_its_import_finished() {
     let (transport, handle, _events) = open_over_existing_files(&scratch).await;
     close_workspace(&transport, handle, 9_100).await;
 
-    // Roll the store back to before the import table existed.
     let db = scratch.path().join(".dohc/engine/engine.db");
     rusqlite::Connection::open(&db)
         .expect("open store")

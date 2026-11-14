@@ -3,7 +3,7 @@ import {
   ACCOUNT_DELETION_PATH,
   ACCOUNT_DELETION_KEY_HEADER,
 } from "@dohc/security-contract/account-deletion";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -218,6 +218,65 @@ describe("share-web sessions", () => {
       expect(valid.headers.get("x-robots-tag")).toBe("noindex, nofollow, noarchive");
       expect(garbage.headers.get("x-robots-tag")).toBe("noindex, nofollow, noarchive");
       expect(await valid.text()).toBe(await garbage.text());
+    } finally {
+      await rm(viewerAssetsDir, { recursive: true, force: true });
+    }
+  });
+
+  it("lets browsers keep the viewer's hashed files and nothing else", async () => {
+    const viewerAssetsDir = await mkdtemp(join(tmpdir(), "dohc-share-web-cache-"));
+    try {
+      await mkdir(join(viewerAssetsDir, "assets", "fonts", "Virgil"), { recursive: true });
+      await writeFile(join(viewerAssetsDir, "index.html"), "page");
+      await writeFile(join(viewerAssetsDir, "assets", "link-AbC12_-9.js"), "script");
+      await writeFile(join(viewerAssetsDir, "assets", "viewer.js"), "unhashed");
+      await writeFile(
+        join(viewerAssetsDir, "assets", "fonts", "Virgil", "Virgil-Regular.woff2"),
+        "font",
+      );
+      const handler = createShareWebHandler({
+        relayUrl: "http://relay.test",
+        publicHosts: new Set([HOST]),
+        fetchRelay: vi.fn(),
+        viewerAssetsDir,
+      });
+      const kept = await handler(request("/s/assets/link-AbC12_-9.js"));
+      expect([kept.status, await kept.text()]).toEqual([200, "script"]);
+      expect(kept.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+
+      const uncached = await Promise.all(
+        [
+          "/s",
+          `/s/${SECRET_ALPHA}`,
+          "/s/assets",
+          "/s/assets/",
+          "/s/assets/fonts",
+          "/s/assets/fonts/Virgil/Virgil-Regular.woff2",
+          "/s/assets/viewer.js",
+          "/s/assets/missing-AbC12_-9.js",
+          "/s/assets/%2e%2e/index.html",
+          "/s/edit/assets/link-AbC12_-9.js",
+          "/s/assets%2Flink-AbC12_-9.js",
+          `/s/assets/${SECRET_ALPHA}`,
+        ].map(async (path) => {
+          const served = await handler(request(path));
+          return [path, served.status, served.headers.get("cache-control")];
+        }),
+      );
+      expect(uncached).toEqual([
+        ["/s", 200, "private, no-store"],
+        [`/s/${SECRET_ALPHA}`, 200, "private, no-store"],
+        ["/s/assets", 200, "private, no-store"],
+        ["/s/assets/", 404, "private, no-store"],
+        ["/s/assets/fonts", 404, "private, no-store"],
+        ["/s/assets/fonts/Virgil/Virgil-Regular.woff2", 200, "private, no-store"],
+        ["/s/assets/viewer.js", 200, "private, no-store"],
+        ["/s/assets/missing-AbC12_-9.js", 404, "private, no-store"],
+        ["/s/assets/%2e%2e/index.html", 200, "private, no-store"],
+        ["/s/edit/assets/link-AbC12_-9.js", 404, "private, no-store"],
+        ["/s/assets%2Flink-AbC12_-9.js", 200, "private, no-store"],
+        [`/s/assets/${SECRET_ALPHA}`, 404, "private, no-store"],
+      ]);
     } finally {
       await rm(viewerAssetsDir, { recursive: true, force: true });
     }
@@ -1761,7 +1820,6 @@ describe("share-web relay call", () => {
             : shareWebRefusalBody,
         );
       expectSecurityHeaders(answer);
-      // Metadata refusal evicts the session; a target refusal keeps it.
       expect(state.calls.map((call) => call.headers.get("authorization"))).toEqual([
         `LinkCapability ${CAP_ALPHA_2}`,
       ]);
@@ -1949,7 +2007,6 @@ describe("share-web relay call", () => {
           body: JSON.stringify({ channelWireId: "wire", body: "Hi", idempotencyKey: "post-1" }),
         }),
       );
-    // Another call inside the refresh window renews the capability while both are held.
     const renewWhileHeld = async (...pending: Promise<Response>[]) => {
       await vi.waitFor(() => expect(held).toHaveLength(pending.length));
       now += 600_001;
@@ -2006,7 +2063,6 @@ describe("share-web relay call", () => {
             capabilityExpiresAtMs: now + 900_000,
           });
         }
-        // The relay refuses the capability the renewal replaced.
         if (relayRequest.headers.get("authorization") === `LinkCapability ${first}`) {
           await new Promise<void>((resolve) => held.push(resolve));
           return new Response(null, { status: 404 });
@@ -2032,7 +2088,6 @@ describe("share-web relay call", () => {
     const answer = await overtaken;
     expect(answer.status).toBe(503);
     expect(await answer.json()).toEqual(linkRefusalBody("link_unavailable"));
-    // The session outlived the refusal, so trying again reads under the renewed capability.
     const retried = await handler(request(path, { headers }));
     expect(retried.status).toBe(200);
     await retried.body?.cancel();
@@ -2445,7 +2500,6 @@ describe("share-web protected discussion proxy", () => {
         expect(independent.status).toBe(200);
         await expectDiscussionUnavailable(twentyFifth);
         expect(alphaActivityCalls).toBe(24);
-        // The busy one backs off; once a hold ends, it is admitted.
         heldResolvers.shift()!(Response.json(publicBody));
         expect((await Promise.race(held)).status).toBe(200);
         const retried = await handler(

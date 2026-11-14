@@ -144,7 +144,6 @@ const definition: DatasetDefinition = {
     },
   ],
 };
-// The same rules with a second delete in Invoices.
 const twoDeletes: DatasetDefinition = {
   ...definition,
   operations: [
@@ -508,7 +507,6 @@ describe("undo of a dataset run", () => {
   };
 
   it("keeps a field someone changed after the runs' last write to it, even where it matches an earlier write", async () => {
-    // The runs wrote Open â†’ Paid â†’ Closed. Someone then set it back to Paid.
     const records = { a: { version: 4, values: { [STATUS]: "Paid" } } };
     const { writes, host } = recordsHost(records);
     const runs = [
@@ -593,7 +591,6 @@ describe("undo of a dataset run", () => {
   });
 
   it("puts a field written twice back in one write, so it is never left between the runs' writes", async () => {
-    // Someone changed Note after the runs wrote Open â†’ Paid â†’ Closed.
     const records = { a: { version: 4, values: { [STATUS]: "Closed", [NOTE]: "mine" } } };
     const { writes, host } = recordsHost(records);
     const runs = [
@@ -625,7 +622,6 @@ describe("undo of a dataset run", () => {
   });
 
   it("puts back a person's change made between two of the runs' edits, not what the field held first", async () => {
-    // The run set Open â†’ Paid; someone set Held; the run then set Held â†’ Closed.
     const records = { a: { version: 4, values: { [STATUS]: "Closed" } } };
     const { writes, host } = recordsHost(records);
     const runs = [
@@ -680,7 +676,6 @@ describe("undo of a dataset run", () => {
       expect(await undo(host, [stopped()]), `landed ${landed}`).toEqual({ ...none, reverted: 1 });
       expect(records.a.values[STATUS], `landed ${landed}`).toBe("Open");
     }
-    // Someone changed it since: it stays.
     const records = { a: { version: 5, values: { [STATUS]: "Mine" } } };
     const { writes, host } = recordsHost(records);
     expect(await undo(host, [stopped()])).toEqual({ ...none, changedSince: 1 });
@@ -823,7 +818,6 @@ describe("undo of a dataset run", () => {
   });
 
   it("sends a request it sent again at a newer version first on a retry, so a person's later change stays", async () => {
-    // The run left Status Closed at version 3. Someone then changed Note.
     const records = { a: { version: 4, values: { [STATUS]: "Closed", [NOTE]: "mine" } } };
     const { writes, host } = recordsHost(records);
     const runs = [runOf("h-1", 1, [edit(EDIT, "a", STATUS, "Open", "Closed", 3)])];
@@ -909,12 +903,10 @@ describe("undo of a dataset run", () => {
     const records = { b: { version: 1, values: { [STATUS]: "Open" } } };
     const { host, sent } = recordsHost(records);
     const runs = [runOf("h-1", 1, [created("b")])];
-    // Someone changes it before the preview: the preview says it stays.
     records.b = { version: 2, values: { [STATUS]: "Theirs" } };
     expect(await preview(host, runs)).toEqual(shown({ keptChanged: 1 }));
     expect(await confirm(host, runs)).toEqual([]);
     expect(await undo(host, runs)).toEqual({ ...none, keptChanged: 1 });
-    // Someone changes it after the person confirmed: the saved delete is refused as stale.
     records.b = { version: 1, values: { [STATUS]: "Open" } };
     const later = [runOf("h-1", 1, [created("b")])];
     await confirm(host, later);
@@ -946,7 +938,6 @@ describe("undo of a dataset run", () => {
     const runs = [runOf("h-1", 1, [created("b"), created("c")])];
     expect(await preview(host, runs)).toEqual(shown({ unchecked: 2 }));
     expect(await confirm(host, runs)).toHaveLength(2);
-    // Someone changes c after the preview: its delete is refused as stale and it stays.
     records.c.version = 2;
     expect(await undo(host, runs)).toEqual({ ...none, deleted: 1, keptChanged: 1 });
     expect(Object.keys(records)).toEqual(["c"]);
@@ -969,7 +960,6 @@ describe("undo of a dataset run", () => {
     expect(await preview(bare.host, runs)).toMatchObject({ deletes: 0, kept: 3 });
     expect(await confirm(bare.host, runs)).toEqual([]);
     expect(await undo(bare.host, runs)).toEqual({ ...none, kept: 3 });
-    // Rules with deletes: only the record whose plan recorded this table's delete goes.
     const { host } = recordsHost(records);
     const again = [runOf("h-1", 1, [created("b"), created("c", []), created("d", [OTHER_REMOVE])])];
     expect(await preview(host, again)).toMatchObject({ deletes: 1, kept: 2 });
@@ -980,7 +970,6 @@ describe("undo of a dataset run", () => {
 
   it("uses a delete only while every editor of the automation can, and checks again before each saved delete it sends", async () => {
     const records = { b: { version: 1, values: {} }, c: { version: 1, values: {} } };
-    // Ana edits the automation and holds no grant to delete.
     const denied = recordsHost(records);
     const runs = [runOf("h-1", 1, [created("b"), created("c")])];
     expect(await preview(denied.host, runs, withAna)).toMatchObject({ deletes: 0, kept: 2 });
@@ -1002,7 +991,6 @@ describe("undo of a dataset run", () => {
       ),
     ).toEqual({ ...none, deleted: 1, kept: 1 });
     expect(Object.keys(records)).toEqual(["c"]);
-    // No roster: every delete stops.
     const unknown: DatasetUndoReach = {
       roster: { kind: "unknown", problem: { kind: "unusable-listing" } },
       collection,
@@ -1275,7 +1263,6 @@ describe("undo of a dataset run's actions", () => {
       "Hold was not undone. Release refused: This invoice is no longer on hold.",
     );
     expect(sent).toHaveLength(1);
-    // An action with no reverse under rules that changed still stops Undo before it starts.
     const mixed = [
       runOf(1, [action(SETTLE, "Settle", 10)]),
       runOf(2, [action(HOLD, "Hold", 11, { id: "a" }, { ...rules, revision: 3 })]),
@@ -1404,7 +1391,6 @@ describe("undo of a dataset run's actions", () => {
         )
       ).send([])!,
     );
-    // Stop and restore undoes only the newer run: the older run's reverse waits.
     expect(await undo(host, [newer])).toEqual({ ...none, actionsReversed: 1 });
     expect(sent.map((input) => input.input)).toEqual([{ id: "b" }]);
   });
@@ -1431,7 +1417,6 @@ describe("undo of a dataset run's actions", () => {
       ).send([])!,
     );
     expect(datasetUndoLostRun(host, [older, newer])).toBeNull();
-    // Run history dropped the older run.
     expect(datasetUndoLostRun(host, [newer])).toBe(
       "dohc no longer has the run that ran Hold, so it cannot finish this Undo. Undo what Hold changed by hand.",
     );
@@ -1466,7 +1451,6 @@ describe("undo of a dataset run's actions", () => {
     expect(planned.preview).toEqual(shown({ reverses: 2, actions: 1 }));
     const calls = planned.send([])!;
     expect(calls.map((call) => call.kind === "reverse" && call.revision)).toEqual([12, 10]);
-    // Saved with a different input than the run recorded: Undo sends exactly what it saved.
     runs[0]!.undoCalls.push(
       { ...calls[0]!, input: { id: "saved" } } as (typeof calls)[number],
       calls[1]!,

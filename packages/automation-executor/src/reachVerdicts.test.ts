@@ -28,7 +28,6 @@ describe("reach verdicts", () => {
     expect(nextReachVerdict(undefined, former, true)).toEqual(held);
     // Allowed before the link ended: the link may have switched it on since.
     expect(nextReachVerdict({ verdict: "allowed", stoppedFor: null }, former, true)).toEqual(held);
-    // Confirmed with that link in view: not asked again, until another link appears.
     const confirmed = {
       verdict: "allowed",
       stoppedFor: null,
@@ -42,7 +41,6 @@ describe("reach verdicts", () => {
       stoppedFor: notes.name,
       accountedLinks: ["g-notes#1", "g-trip#1"],
     });
-    // A step stopped for a current editor stays stopped, and keeps what it accounted for.
     expect(nextReachVerdict(confirmed, stoppedByBob, true)).toEqual({
       verdict: "stopped",
       stoppedFor: "bob@dohc.test",
@@ -98,8 +96,6 @@ describe("reach verdicts", () => {
       verdict: "held",
       stoppedFor: "bob@dohc.test",
     });
-    // A switched-off automation's step, or one held and never run, stops without a notice,
-    // and switching an automation off ends the notice for its stopped step.
     expect(
       nextReachVerdict({ verdict: "allowed", stoppedFor: null }, stoppedByBob, false).narrowed,
     ).toBeUndefined();

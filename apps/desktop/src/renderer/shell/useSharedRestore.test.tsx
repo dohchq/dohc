@@ -64,8 +64,6 @@ const options = (pendingOperation: unknown = null) => ({
 });
 
 let shell: ReturnType<typeof useShellError>;
-// The shell as it hosts Restore shared file: its Notices, and the History page
-// that opens the dialog while it is mounted.
 function Shell({
   enabled,
   page,
@@ -133,9 +131,6 @@ async function choose() {
   fireEvent.click(screen.getByRole("button", { name: "Review affected access" }));
 }
 
-// Proves: Try again on a refused start works after the History page that
-// opened the dialog is gone. It opens that change again and a fresh dialog,
-// and a later plan that goes through settles the row.
 it("reopens the change and its dialog from Try again after the page unmounts, and a later plan clears the row", async () => {
   let refuse = true;
   const f = fixture(async (input) => {
@@ -172,9 +167,6 @@ it("reopens the change and its dialog from Try again after the page unmounts, an
   expect(f.row()).toBeUndefined();
 });
 
-// Proves: every unfinished restore the relay lists has a row that opens it.
-// One that can still be declined offers Review restore and Decline restore;
-// a later one offers Try again. Decline ends it and says what stays stopped.
 it("files a row for each unfinished restore, and Decline from the row ends it", async () => {
   const restores = [
     {
@@ -243,9 +235,6 @@ it("files a row for each unfinished restore, and Decline from the row ends it", 
   });
 });
 
-// Proves: a row opens its own restore. The saved basis of this one was
-// compacted away, so the file's restore choices are gone, and the dialog
-// still opens the listed restore rather than an error about them.
 it("opens the listed restore from its row after the file's restore points are gone", async () => {
   const f = fixture(async (input) => {
     if (input.action === "unfinished")
@@ -277,9 +266,6 @@ it("opens the listed restore from its row after the file's restore points are go
   expect(f.actions()).not.toContain("options");
 });
 
-// Proves: a listing that fails, or reads only some restores, files one row
-// with Try again and keeps the rows already filed. A later full listing
-// clears it.
 it("files one row when the listing fails or reads only some restores, and a full listing clears it", async () => {
   const listingRow = () =>
     shell.shellErrors.find((error) => error.identity === sharedRestoreListingIdentity);
@@ -314,7 +300,6 @@ it("files one row when the listing fails or reads only some restores, and a full
       "dohc could not read 2 of this workspace's unfinished restores.",
     ),
   );
-  // The restore it could not read may be this one, so its row stays.
   expect(f.row()).toBeDefined();
   answer = "ok";
   act(() => shell.retryShellError(listingRow()!.id));
@@ -325,8 +310,6 @@ it("files one row when the listing fails or reads only some restores, and a full
   expect(f.row()).toBeDefined();
 });
 
-// Proves: a listing read before a Decline cannot file the declined restore
-// again when its reply arrives late.
 it("keeps a declined row gone when an older listing replies after the decline", async () => {
   const restore = {
     operationId: "restore",
@@ -357,7 +340,6 @@ it("keeps a declined row gone when an older listing replies after the decline", 
   await waitFor(() => expect(f.row()).toBeUndefined());
   await act(async () => late.resolve({ restores: [restore], unreadable: 0, nextCursor: null }));
   expect(f.row()).toBeUndefined();
-  // The Decline listed again from current state.
   expect(listings).toBe(3);
 });
 
@@ -398,10 +380,6 @@ it("files the row for a restore whose begin replies after its dialog closed", as
   expect(listings).toBe(3);
 });
 
-// Proves: a failed Decline keeps its row against a listing read before it,
-// and that listing still files the other files' rows. Rejected, the restore
-// still waits, which the next listing shows. Committed with its reply lost,
-// the next listing has no restore and clears the row.
 it.each(["rejected", "lost"] as const)(
   "keeps the row of a %s Decline against an older listing, until a newer one",
   async (outcome) => {
@@ -451,8 +429,6 @@ it.each(["rejected", "lost"] as const)(
   },
 );
 
-// Proves: a Decline the relay refused, from its row or its dialog, files a
-// row with no retry, and the listings that still list the restore keep it.
 const REFUSED_ROW = {
   title: "Restore not declined",
   retry: null,
@@ -505,8 +481,6 @@ it.each(["row", "dialog"] as const)(
   },
 );
 
-// Proves: closing the dialog on an unfinished restore keeps it findable, and
-// a listing that no longer has it, because it finished, clears its row.
 it("keeps a row for the restore a closed dialog left unfinished, until a listing drops it", async () => {
   let listed: unknown[] = [];
   const f = fixture(async (input) => {

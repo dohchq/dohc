@@ -46,7 +46,6 @@ const ANA = { kind: "owner", userId: "user-ana" } as const,
 const CHECKED = digest("collection:tasks#paid as checked");
 const authorize = () => {};
 
-/** A claim's committed change; a press has none. */
 function changeOf(claim: DatasetAutomationClaim): DatasetChangeClaimFact {
   if (claim.fact === null || claim.fact.kind === "button")
     throw new Error("This claim holds no change.");
@@ -79,7 +78,6 @@ function transactions(db: DatabaseSync) {
     }
   };
 }
-// `count` new tasks, as the values of one insert.
 const tasks = (count: number) =>
   Array.from(
     { length: count },
@@ -330,7 +328,6 @@ it("claims each changed record once per subscribed automation, by table, change 
   ]);
   expect(new Set(started.map((claim) => claim.claimId)).size).toBe(started.length);
   expect(f.claims.next(scope.workspaceId)).toBeNull();
-  // Each wake comes after its commit, and only a commit that claimed wakes.
   await Promise.resolve();
   expect(f.wakes).toEqual([1, 2, 4].map(() => ({ scope, failed: false, inTransaction: false })));
 });
@@ -340,7 +337,6 @@ it("commits a change it cannot read, failing only the automations that watch wha
   f.claims.subscribe(scope, subscription("collection:tasks#a", ["added"]));
   f.claims.subscribe(scope, subscription("collection:tasks#b", ["added"]));
   f.claims.subscribe(scope, subscription("collection:tags#new", ["added"], null, TAGS));
-  // Neither watches a table and change kind this change holds.
   f.claims.subscribe(scope, subscription("collection:tasks#done", ["changed"]));
   f.claims.subscribe(scope, subscription("collection:tags#gone", ["removed"], null, TAGS));
   // More matching records than the limit come before a value no field type holds.

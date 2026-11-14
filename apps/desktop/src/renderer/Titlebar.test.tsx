@@ -38,7 +38,7 @@ describe("workspaceName", () => {
     expect(workspaceName({ ...workspace, rootPath: "/" })).toBe("workspace");
   });
 
-  // #2887: a shared view's folder is named after its share ID.
+  // A shared view's folder is named after its share ID.
   it("names a shared view after what it shares, and after its folder when the share has no name", () => {
     const shared = { ...workspace, rootPath: "/home/sam/dohc/shared/k3x9q2m7" };
     expect(
@@ -152,8 +152,8 @@ describe("Titlebar", () => {
   });
 
   // The quick-open button is centered on the window, so a long workspace name
-  // used to run under it and hide the status beside it. Everything on the left
-  // now shares one clamped group and shortens inside it.
+  // must not run under it and hide the status beside it. Everything on the
+  // left shares one clamped group and shortens inside it.
   it("clamps the workspace name and its status into the space left of quick-open", () => {
     vi.stubGlobal("dohcDesktop", { platform: "win32" });
 
@@ -174,8 +174,6 @@ describe("Titlebar", () => {
     expect(group.contains(screen.getByTestId("titlebar-quick-open"))).toBe(false);
   });
 
-  // The breadcrumb: the mark, the workspace's own name, then its version and
-  // one saved dot. The product word shows only before a workspace is open.
   it("reads mark, workspace, version, then the saved dot, with no product word", () => {
     render(
       <Titlebar
@@ -201,7 +199,6 @@ describe("Titlebar", () => {
     expect(version.compareDocumentPosition(status) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(name.textContent).toBe("dohc");
     expect(group.textContent).toBe("dohcMain");
-    // The separator hides with its version while the picker has nothing to name.
     expect(version.parentElement?.className).toContain("empty:hidden");
     expect(version.parentElement?.className).toContain("before:content-['/']");
   });
@@ -240,7 +237,6 @@ describe("Titlebar", () => {
     // ends it in an ellipsis instead of pushing the status out of the window.
     expect(name.className).toContain("min-w-0");
     expect(name.className).toContain("truncate");
-    // A shortened name stays readable on hover.
     expect(screen.getByTestId("workspace-switcher").getAttribute("title")).toBe(
       "launch-readiness-and-self-hosting",
     );

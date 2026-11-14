@@ -38,7 +38,6 @@ afterEach(() => vi.restoreAllMocks());
 const person = { kind: "human", humanId: "local:move-owner" } as const;
 const agent = { kind: "agent", agentId: "move-agent", onBehalfOf: "local:move-owner" } as const;
 const id = "dohc-operation:11111111-1111-4111-8111-111111111111";
-// A refused Undo whose cause main cannot name.
 const refused = (reason: string) => ({ ok: false, reason, refusal: { code: "unexplained" } });
 const linkReceipt = {
   documents: 3,

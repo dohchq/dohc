@@ -160,8 +160,6 @@ function chatOps(
   return ops.filter((op) => op.opKind.startsWith("chat."));
 }
 
-// The whole world every serving case reads from: two files, one thread on
-// each, one message on each.
 async function seedWorkspace(h: SyncRelayHandler): Promise<OwnerLog> {
   await claimWorkspace(h);
   const log = new OwnerLog(h);
@@ -248,14 +246,11 @@ describe("chat over a file share", () => {
     const response = await h(request(RECIPIENT, `/sync/shares/${shareId}/log?since=0&limit=500`));
     expect(response.status).toBe(200);
     const body = await response.text();
-    // The leak shape, stated literally: nothing about the outside file may
-    // appear anywhere in the response bytes.
     for (const sentinel of [
       "SENTINEL-OUT-OF-SELECTOR",
       "SENTINEL-OUT-OF-SELECTOR-BODY",
       "notes/out.md",
       "thread-out",
-      // The granter's object id and the display-only hint never cross.
       "object-in",
       "docs/hint-captured-once.md",
     ]) {
@@ -463,7 +458,6 @@ describe("chat over a file share", () => {
     );
     expect(push.status).toBe(403);
     expect((await json(push)).code).toBe("share_op_rejected");
-    // Atomic: the acceptable op did not land either.
     const served = chatOps(await readShareLog(h, shareId));
     expect(served.map((op) => op.payload.messageId)).not.toContain("m-ok");
   });
@@ -675,12 +669,12 @@ describe("chat over a file share", () => {
     expect(served.map((op) => op.payload.messageId)).not.toContain("m-tampered");
   });
 
-  // P1 (review of bcdc31e0). A version share has NO paths, and
-  // `pathVisibleThroughShare` reads an empty path list as "every tracked
-  // path". For files that is bounded by the version check; chat has no
-  // version to check, so the same rule would have served the live discussion
-  // about every file on main — including files created long after the version
-  // and never in it. Chat follows PATHS, and only paths.
+  // A version share has no paths, and `pathVisibleThroughShare` reads an
+  // empty path list as "every tracked path". For files that is bounded by the
+  // version check; chat has no version to check, so the same rule would serve
+  // the live discussion about every file on main, including files created
+  // long after the version and never in it. Chat follows paths, and only
+  // paths.
   it("serves no chat at all through a version share, at any level", async () => {
     const storage = await testStorage();
     const h = handler(storage);
@@ -708,7 +702,7 @@ describe("chat over a file share", () => {
       expect(body, sentinel).not.toContain(sentinel);
     }
 
-    // And it accepts none either: chat is the only thing PR2 makes appendable,
+    // And it accepts none either: chat is the only thing that is appendable,
     // so a version share is not appendable at all.
     const push = await h(
       request(
@@ -721,11 +715,10 @@ describe("chat over a file share", () => {
     expect((await json(push)).code).toBe("share_read_only");
   });
 
-  // P1 (the confirmed suspect). A recipient's own thread is bound by PATH, and
-  // serving that string verbatim pinned the discussion to the path it was
-  // created at. The file then moves out of the share and the conversation
-  // keeps flowing — in both directions — about a file the share no longer
-  // covers.
+  // A recipient's own thread is bound by path. Serving that string verbatim
+  // would pin the discussion to the path it was created at: the file then
+  // moves out of the share and the conversation keeps flowing, in both
+  // directions, about a file the share no longer covers.
   it("stops a RECIPIENT-created thread when its file is renamed out of the share", async () => {
     const storage = await testStorage();
     const h = handler(storage);
@@ -758,7 +751,6 @@ describe("chat over a file share", () => {
     expect(push.status, await push.clone().text()).toBe(200);
     expect(chatOps(await readShareLog(h, shareId)).length).toBeGreaterThan(0);
 
-    // The granter renames the file out of the selector.
     await log.append(log.rename("object-in", "docs/in.md", "private/moved.md"));
 
     const served = chatOps(await readShareLog(h, shareId));
@@ -767,8 +759,6 @@ describe("chat over a file share", () => {
       "a path-bound thread must follow the file out, not serve its create-time path forever",
     ).toHaveLength(0);
 
-    // And the lane closes in the other direction too: a further message on
-    // that thread is refused rather than accepted into the granter's log.
     const after = await h(
       request(
         RECIPIENT,
@@ -798,8 +788,6 @@ describe("chat over a file share", () => {
     expect((await json(after)).code).toBe("share_op_rejected");
   });
 
-  // The same rule, one step further: a DELETED file takes its recipient
-  // thread with it. The reverse lookup answers "no object here" for both.
   it("stops a RECIPIENT-created thread when its file is deleted", async () => {
     const storage = await testStorage();
     const h = handler(storage);
@@ -833,13 +821,10 @@ describe("chat over a file share", () => {
     expect(chatOps(await readShareLog(h, shareId))).toHaveLength(0);
   });
 
-  // The asymmetry review probed for. A GRANTER's thread is bound by object, so
-  // it follows its file anywhere inside the share. A RECIPIENT's thread named
-  // its file by path, so an in-share rename used to kill it while the
-  // granter's survived — two threads on one file behaving differently.
-  //
-  // The accept door converts the binding, so both are object-bound now and
-  // both follow the file.
+  // A granter's thread is bound by object, so it follows its file anywhere
+  // inside the share. A recipient's thread names its file by path. The accept
+  // door converts that binding, so both threads are object-bound and both
+  // follow the file through an in-share rename.
   it("keeps both threads on a file when it is renamed within the share", async () => {
     const storage = await testStorage();
     const h = handler(storage);
@@ -871,13 +856,11 @@ describe("chat over a file share", () => {
     );
     expect(push.status, await push.clone().text()).toBe(200);
 
-    // Both threads are about docs/in.md before the rename.
     const before = chatOps(await readShareLog(h, shareId))
       .filter((op) => op.opKind === "chat.thread.create")
       .map((op) => op.payload.linkedPathHint);
     expect(before).toEqual(["docs/in.md", "docs/in.md"]);
 
-    // A rename that stays inside the shared folder.
     await log.append(log.rename("object-in", "docs/in.md", "docs/renamed.md"));
 
     const after = chatOps(await readShareLog(h, shareId))
@@ -888,7 +871,6 @@ describe("chat over a file share", () => {
       "a recipient's thread must follow its file inside the share, exactly as the granter's does",
     ).toEqual(["docs/renamed.md", "docs/renamed.md"]);
 
-    // And a further message on the recipient's thread still lands.
     const more = await h(
       request(
         RECIPIENT,
@@ -917,9 +899,6 @@ describe("chat over a file share", () => {
     expect(more.status, await more.clone().text()).toBe(200);
   });
 
-  // The stored shape, asserted directly: the accept door persists the
-  // GRANTER's object id, never the recipient's path. This is what makes the
-  // granter's own apply take the ordinary object lane.
   it("stores a recipient's create bound to the granter's object, not to a path", async () => {
     const storage = await testStorage();
     const h = handler(storage);
@@ -957,9 +936,6 @@ describe("chat over a file share", () => {
     });
   });
 
-  // A selector can name both dimensions. The paths-only rule must key on
-  // "names no paths", not on "names a version" — otherwise a share of
-  // docs/ pinned to a version would silently carry no conversation.
   it("carries chat on the paths a selector names, even when it also pins a version", async () => {
     const storage = await testStorage();
     const h = handler(storage);
@@ -987,7 +963,6 @@ describe("chat over a file share", () => {
       "a paths+version share must carry its paths' chat, not fall into the version-share deny",
     ).toEqual(["chat.thread.create", "chat.message.append"]);
 
-    // And it accepts, which the version-only share does not.
     const push = await h(
       request(
         RECIPIENT,
@@ -998,12 +973,6 @@ describe("chat over a file share", () => {
     expect(push.status).toBe(200);
   });
 
-  // The accept door's own refusal. The filter admits a create by proving an
-  // object sits at the path, and the door then reads that object to bind the
-  // thread — so the only way to reach the refusal is for the object to leave
-  // between the two reads. That is a real race (a delete landing mid-request),
-  // and the batch is refused whole rather than stored as a thread bound to
-  // nothing.
   it("refuses the batch when the file leaves between the filter and the accept", async () => {
     const storage = await testStorage();
     const h = handler(storage);
@@ -1068,17 +1037,6 @@ describe("chat over a file share", () => {
   });
 });
 
-// The append route accepts chat only.
-//
-// A file share at `comment` or `edit` accepts appends, and the route used
-// to filter them with `filterOpForShare` — the read filter. That filter admits
-// every in-selector `moment.append`, plus `workspace.init` and a matching
-// `version.create`. So a modified client could push a delete, a rename, or a
-// revert into the GRANTER's log, and the owner lane replayed it.
-//
-// Every case here drives the real POST route and then reads the GRANTER's own
-// log back through the owner route. The status alone proves nothing: a refusal
-// that still inserted is the defect, so the log is the assertion.
 describe("the append gate accepts chat only", () => {
   const LEVELS = ["comment", "edit"] as const;
 
@@ -1156,7 +1114,6 @@ describe("the append gate accepts chat only", () => {
       expect(await ownerLog(h), "a recipient's delete must never reach the granter's log").toEqual(
         before,
       );
-      // And the file is still where it was: the delete did not apply.
       expect(storage.objectCurrentPath(WORKSPACE, "object-in")).toBe("docs/in.md");
     });
 

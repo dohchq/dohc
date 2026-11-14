@@ -481,14 +481,14 @@ fn compacted_deferred_update_redelivery_does_not_duplicate_collection_history() 
     assert_eq!(deferred_rows, 0, "successful projection clears the marker");
 }
 
-/// Sol's first and Opus's third findings: a queued update whose bytes a
-/// drain applies and whose path its document no longer has is refused, and
-/// the refusal deleted its row at once, with the record facts its apply
-/// parked there. A drain that then stops before its cleanup, as one that
-/// waits for validation does, lost those facts. The row now leaves only
-/// with the cleanup, so after a stopped drain that its caller abandons, as
-/// a cancelled one, and again after a restart, the drain that removes it
-/// reports its facts and its refusal once, and history holds one row.
+/// A queued update whose bytes a drain applies and whose path its document
+/// no longer has is refused. Its row holds the record facts its apply parked
+/// there, so the row leaves only with the cleanup: a refusal that deleted it
+/// at once would lose those facts when the drain stops before its cleanup,
+/// as one that waits for validation does. After a stopped drain that its
+/// caller abandons, as a cancelled one, and again after a restart, the drain
+/// that removes the row reports its facts and its refusal once, and history
+/// holds one row.
 #[test]
 fn an_applied_then_refused_update_reports_its_facts_once_after_its_drain_stopped() {
     for restart in [false, true] {
@@ -570,7 +570,6 @@ fn an_applied_then_refused_update_after_a_stopped_drain(restart: bool) {
             ..
         })
     ));
-    // The queued payload names a path its document does not have.
     engine
         .write_with(&NoFaults, |tx| {
             tx.execute(
@@ -597,8 +596,6 @@ fn an_applied_then_refused_update_after_a_stopped_drain(restart: bool) {
             .expect("state")
     };
 
-    // The drain applies the bytes and refuses the row, then stops before
-    // its cleanup.
     let (stopped, _cleanup) = crate::drain_deferred_ydoc_for_key_holding_cleanup(
         &mut engine,
         &mut dohc_engine_collab::WriterDocCache::new(),
@@ -645,10 +642,6 @@ fn an_applied_then_refused_update_after_a_stopped_drain(restart: bool) {
     assert!(idle.record_facts.is_empty() && idle.refusals.is_empty());
 }
 
-/// A store holding the adopted Collection record `record_id` at `path`, its
-/// document's base claimed, and a peer's title change from `origin` queued
-/// behind a live session: the store's scratch tree and path, the store, the
-/// document and its lineage.
 fn queued_title_change(
     record_id: &str,
     object_id: &str,
@@ -733,13 +726,13 @@ fn queued_title_change(
     (scratch, store_path, engine, key, claim_id)
 }
 
-/// Sol's first ruling, window (a): what the end-of-pass drain removes stays
-/// owed to its pass when a later step, the settlement drain, waits and the
-/// request never resumes. The transaction that removes the row writes its
-/// drain report, so an abandoned request, or a restart, leaves it for the
-/// next request to claim, with its file change. A request reports it until a
-/// cursor commit acknowledges it under the token it was claimed with; a
-/// commit under an abandoned request's token acknowledges nothing.
+/// What the end-of-pass drain removes stays owed to its pass when a later
+/// step, the settlement drain, waits and the request never resumes. The
+/// transaction that removes the row writes its drain report, so an abandoned
+/// request, or a restart, leaves it for the next request to claim, with its
+/// file change. A request reports it until a cursor commit acknowledges it
+/// under the token it was claimed with; a commit under an abandoned
+/// request's token acknowledges nothing.
 #[test]
 fn a_released_drains_report_outlives_its_request_until_a_commit_acknowledges_it() {
     const RECORD_ID: &str = "rec_jjjjjjjjjjjjjjjjjjjjjjjjjj";
@@ -802,8 +795,6 @@ fn a_released_drains_report_outlives_its_request_until_a_commit_acknowledges_it(
             "restart={restart}: the row went, its report stays"
         );
 
-        // The request is abandoned at its settlement drain's wait, or the
-        // store restarts; the next request claims the report.
         if restart {
             drop(engine);
             engine = EngineStore::open(&store_path, 3_000).expect("reopen");
@@ -824,8 +815,6 @@ fn a_released_drains_report_outlives_its_request_until_a_commit_acknowledges_it(
         );
         let first = first.expect("a report token");
 
-        // That request is abandoned before its commit too: the next one
-        // claims the report again under a token of its own, once.
         let mut second = None;
         let again = crate::drain_report::claim(&mut engine, "ws", &mut second, &NoFaults)
             .expect("claim again");
@@ -857,14 +846,13 @@ fn a_released_drains_report_outlives_its_request_until_a_commit_acknowledges_it(
     }
 }
 
-/// Sol's first and Opus's third findings on f939d61f1: a drain applied a
-/// queued field change and stopped before its cleanup, as one that then
-/// waits does; a device binding then appeared, so the next drain finds the
-/// row a live edit no session admitted. That refusal, its blob and its hold
-/// now wait for the cleanup like any other, so a drain that stops again
-/// keeps the row and the facts parked on it. Whether the request is then
-/// abandoned or the store restarts, the drain that completes reports the
-/// facts and the refusal once.
+/// A drain applies a queued field change and stops before its cleanup, as
+/// one that then waits does; a device binding then appears, so the next
+/// drain finds the row a live edit no session admitted. That refusal, its
+/// blob and its hold wait for the cleanup like any other, so a drain that
+/// stops again keeps the row and the facts parked on it. Whether the request
+/// is then abandoned or the store restarts, the drain that completes reports
+/// the facts and the refusal once.
 #[test]
 fn a_live_refusal_keeps_its_rows_facts_until_its_cleanup() {
     for restart in [false, true] {
@@ -909,7 +897,6 @@ fn a_live_refusal_after_a_stopped_drain(restart: bool) {
     assert!(applied.refusals.is_empty(), "{applied:?}");
     assert_eq!(state(&engine), (1, 1, 0, 0), "the row keeps its facts");
 
-    // A device binding of the document appears before the next drain.
     engine
         .write_with(&NoFaults, |tx| {
             tx.execute(
@@ -1872,9 +1859,9 @@ fn assert_parked_inactive_refusal(collision: bool, waiting: u8) {
         )
         .unwrap();
         assert_eq!(inactive.refusals.len(), 1, "{:?}", inactive.refusals);
-        // Opus's third finding on 6ded1a22a: the drain took the archived
-        // lineage's last queued row and left its document no hold, so a hold
-        // the pass reported for that lineage is cleared in the same pass.
+        // The drain took the archived lineage's last queued row and left its
+        // document no hold, so a hold the pass reported for that lineage is
+        // cleared in the same pass.
         let freed = std::collections::BTreeSet::from([old_sha.clone()]);
         assert_eq!(inactive.cleared.get("inactive-refusal"), Some(&freed));
         assert_eq!(inactive.cleared.len(), 1);
@@ -1897,9 +1884,9 @@ fn ydoc_drain_waiting_nonempty_queue_leaves_inactive_update_queued() {
     assert_parked_inactive_refusal(true, 2);
 }
 
-/// Opus's seventh finding on 3409694c7: a drain report this build cannot
-/// read fails the claim that meets it once, and is gone after it; the
-/// reports beside it stay owed and the next claim reports them.
+/// A drain report this build cannot read fails the claim that meets it once,
+/// and is gone after it; the reports beside it stay owed and the next claim
+/// reports them.
 #[test]
 fn an_unreadable_drain_report_fails_one_claim_and_the_rest_stay_owed() {
     let (_scratch, _path, mut engine) = open_store();
@@ -1926,7 +1913,6 @@ fn an_unreadable_drain_report_fails_one_claim_and_the_rest_stay_owed() {
     assert_eq!(claimed.extras.conflicts_opened, 1);
 }
 
-/// The refusals of `origin` in `refusals`, as coordinate and reason.
 fn refusals_of(refusals: &[crate::ReplicationRefusal], origin: &str) -> Vec<(i64, String)> {
     refusals
         .iter()
@@ -1935,12 +1921,12 @@ fn refusals_of(refusals: &[crate::ReplicationRefusal], origin: &str) -> Vec<(i64
         .collect()
 }
 
-/// Sol's first and Opus's second findings on 3409694c7: a queued row whose
-/// content kind the head refuses applies its bytes first, and a later row of
-/// the same lineage projects the head, so the cleanup clears the lineage's
-/// notices, the refusal it just persisted among them. Its drain report keeps
-/// that refusal, so a request abandoned at a later wait, or a restart, still
-/// reports it, once, until a commit acknowledges it.
+/// A queued row whose content kind the head refuses applies its bytes first,
+/// and a later row of the same lineage projects the head, so the cleanup
+/// clears the lineage's notices, the refusal it just persisted among them.
+/// Its drain report keeps that refusal, so a request abandoned at a later
+/// wait, or a restart, still reports it, once, until a commit acknowledges
+/// it.
 #[test]
 fn a_refusal_its_projection_clears_stays_in_the_drain_report() {
     const RECORD_ID: &str = "rec_kkkkkkkkkkkkkkkkkkkkkkkkkk";
@@ -2031,7 +2017,6 @@ fn a_refusal_its_projection_clears_stays_in_the_drain_report() {
             "restart={restart}: the projection cleared its notice"
         );
 
-        // The request is abandoned at a later wait, or the store restarts.
         if restart {
             drop(engine);
             engine = EngineStore::open(&store_path, 3_000).expect("reopen");
@@ -2044,7 +2029,6 @@ fn a_refusal_its_projection_clears_stays_in_the_drain_report() {
             owed,
             "restart={restart}: the report keeps the refusal"
         );
-        // That request is abandoned too: the next one reports it once more.
         let mut second = None;
         let again = crate::drain_report::claim(&mut engine, "ws", &mut second, &NoFaults)
             .expect("claim again");

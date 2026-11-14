@@ -79,7 +79,6 @@ function prepared() {
     await compileOwner([source("agentProbeOwner.cs")], executable);
     await writeFile(join(directory, "descendant.mjs"), descendant);
     await writeFile(join(directory, "launcher.mjs"), launcher);
-    // The wrapper prints a version and runs the launcher, which starts the descendant.
     await writeFile(
       join(directory, "probe.cmd"),
       [

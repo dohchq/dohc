@@ -2,7 +2,7 @@ import "@testing-library/react";
 import { afterEach, vi } from "vitest";
 
 // Pre-warm the lazily-loaded views at collection so no findBy* window pays
-// for a module load under machine load (the mechanism, measured in #568).
+// for a module load under machine load.
 import "./editor/MarkdownEditor";
 
 import "./PropertiesPanel";

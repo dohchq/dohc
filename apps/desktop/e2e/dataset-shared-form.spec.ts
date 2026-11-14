@@ -21,8 +21,6 @@ import {
   seedWorkspaceRegistry,
 } from "./helpers/workspace";
 
-// Identity is seeded into an isolated profile. Owners create, preview, share, and publish
-// through visible controls. Only the OS browser dispatcher is replaced for local preview.
 test("@dataset-shared-form desktop publishes its Collection, a guest submits, and the owner reads the saved copy offline", async ({}, info) => {
   test.setTimeout(180_000);
   const workspace = await createTempWorkspace(),
@@ -237,7 +235,6 @@ test("@dataset-shared-form desktop publishes its Collection, a guest submits, an
     );
     if (online.kind !== "invoked") throw Error("Expected authoritative Collection data.");
     expect(JSON.stringify(online.result)).toContain("Shared browser participant");
-    // Publish a dashboard against the same authoritative Collection, with an explicit read approval.
     const appRoot = "registrations-form",
       manifestPath = join(workspace.rootPath, appRoot, "app.publish.json");
     const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {

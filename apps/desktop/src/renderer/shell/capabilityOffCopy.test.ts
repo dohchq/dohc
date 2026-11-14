@@ -36,7 +36,6 @@ describe("refused data store copy", () => {
       historyCaptureFailed: true,
       engineStoreRefused: cause,
     };
-    // A shared view's refused store takes the same line: it reads history, so it has no history-free cause.
     for (const copy of [
       historyOffPlaceholderCopy(status),
       historyOffPlaceholderCopy({ ...status, historyShareView: true }),
@@ -73,11 +72,6 @@ describe("migration failure copy", () => {
   });
 });
 
-// A capability flag is not a count. Whatever main established about the
-// RECORDER, none of it establishes that no version exists: versions live on
-// disk and outlive a session whose capture failed to build, an engine the
-// user switched off, and a settings file dohc could not read. The compare tab
-// has no count to read, so it may never claim absence.
 describe("version-compare off copy", () => {
   const base = {
     state: "synced" as const,
@@ -89,7 +83,6 @@ describe("version-compare off copy", () => {
   };
 
   it("calls a failed capture build unavailable, never empty", () => {
-    // the cause.
     const copy = versionCompareOffCopy({
       ...base,
       historyRecordingUnavailable: true,
@@ -101,17 +94,12 @@ describe("version-compare off copy", () => {
   });
 
   it("claims nothing when main established nothing", () => {
-    // The renderer's own read failed. It proves nothing either way.
     const copy = versionCompareOffCopy(base);
     expect(copy).toContain("dohc could not confirm whether this workspace has versions.");
     expect(copy).not.toContain("no versions");
   });
 });
 
-// The same rule on the Chats surfaces. Whatever main established about
-// the RECORDER, none of it establishes that no chat exists: chats live on disk
-// and outlive a session whose capture failed to build, an engine the user
-// switched off, and a settings file dohc could not read.
 describe("chats off copy", () => {
   const base = {
     state: "synced" as const,
@@ -123,7 +111,6 @@ describe("chats off copy", () => {
   };
 
   it("calls a failed capture build unavailable, never empty", () => {
-    // the cause.
     const copy = chatsOffCopy({
       ...base,
       historyRecordingUnavailable: true,
@@ -135,7 +122,6 @@ describe("chats off copy", () => {
   });
 
   it("claims nothing when main established nothing", () => {
-    // The renderer's own read failed. It proves nothing either way.
     const copy = chatsOffCopy(base);
     expect(copy).toContain("dohc could not confirm whether this workspace has chats.");
     expect(copy).not.toContain("no chats");

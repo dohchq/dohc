@@ -2899,17 +2899,54 @@ class ReplayFrontier {
     return result;
   }
 
+  /**
+   * Whether `other`, decoded from the replay, holds exactly this frontier.
+   * The replay may also delete content no input names, when `explained`
+   * accepts every such range. This frontier is compared as if it had those
+   * deletions too, and is left unchanged.
+   */
   equivalent(
     other: ReplayFrontier,
     budget: ValidationBudget,
     stage: OrderedLiveUpdateCutFailureStage,
+    explained?: (clientId: number, ranges: readonly NumericRange[]) => boolean,
   ): boolean {
     if (!rangeMapEquivalent(this.structural, other.structural, budget, stage)) return false;
-    if (!rangeMapEquivalent(this.deletes, other.deletes, budget, stage)) return false;
-    if (!pointMapEquivalent(this.unsafe, other.unsafe, budget, stage)) return false;
+    let unsafe: ReadonlyMap<number, readonly number[]> = this.unsafe;
+    const retiredLive = new Map<number, readonly LiveSpan[]>();
+    if (!rangeMapEquivalent(this.deletes, other.deletes, budget, stage)) {
+      if (explained === undefined) return false;
+      const implied = impliedDeletes(this.deletes, other.deletes, budget, stage);
+      if (implied === undefined) return false;
+      for (const [clientId, ranges] of implied) {
+        if (!explained(clientId, ranges)) return false;
+      }
+      const retainedUnsafe = new Map<number, number[]>();
+      for (const [clientId, ranges] of implied) {
+        const deletes = other.deletes.get(clientId) ?? [];
+        retiredLive.set(
+          clientId,
+          retireSpans(this.live.get(clientId) ?? [], ranges, deletes, budget, stage),
+        );
+        const points = this.unsafe.get(clientId);
+        if (points === undefined) continue;
+        retainedUnsafe.set(
+          clientId,
+          points.filter((point) => !rangeCovered(deletes, point, point + 1, budget, stage)),
+        );
+      }
+      const compared = new Map<number, readonly number[]>();
+      for (const [clientId, points] of this.unsafe) {
+        budget.visitIndexOperation(stage);
+        const kept = retainedUnsafe.get(clientId) ?? points;
+        if (kept.length > 0) compared.set(clientId, kept);
+      }
+      unsafe = compared;
+    }
+    if (!pointMapEquivalent(unsafe, other.unsafe, budget, stage)) return false;
     const clients = new Set([...this.live.keys(), ...other.live.keys()]);
     for (const clientId of clients) {
-      const left = this.live.get(clientId) ?? [];
+      const left = retiredLive.get(clientId) ?? this.live.get(clientId) ?? [];
       const right = other.live.get(clientId) ?? [];
       let leftIndex = 0;
       let rightIndex = 0;
@@ -2935,6 +2972,94 @@ class ReplayFrontier {
     }
     return true;
   }
+}
+
+/**
+ * Per client, what `actual` deletes beyond `declared`, or undefined when
+ * `actual` misses a declared deletion. Both are sorted, disjoint and merged,
+ * so one pass over each client's two lists finds it.
+ */
+function impliedDeletes(
+  declared: ReadonlyMap<number, readonly NumericRange[]>,
+  actual: ReadonlyMap<number, readonly NumericRange[]>,
+  budget: ValidationBudget,
+  stage: OrderedLiveUpdateCutFailureStage,
+): Map<number, NumericRange[]> | undefined {
+  for (const [clientId, ranges] of declared) {
+    budget.visitIndexOperation(stage);
+    if (ranges.length > 0 && !actual.has(clientId)) return undefined;
+  }
+  const result = new Map<number, NumericRange[]>();
+  for (const [clientId, ranges] of actual) {
+    budget.visitIndexOperation(stage);
+    const known = declared.get(clientId) ?? [];
+    const implied: NumericRange[] = [];
+    let next = 0;
+    for (const range of ranges) {
+      budget.visitIndexOperation(stage);
+      let cursor = range.startClock;
+      for (; next < known.length; next += 1) {
+        const declaredRange = known[next] as NumericRange;
+        budget.visitIndexOperation(stage);
+        if (declaredRange.startClock >= range.endClock) break;
+        // A declared range that starts before the cursor or ends past this
+        // range was not wholly deleted.
+        if (declaredRange.startClock < cursor || declaredRange.endClock > range.endClock)
+          return undefined;
+        if (declaredRange.startClock > cursor)
+          implied.push({ clientId, startClock: cursor, endClock: declaredRange.startClock });
+        cursor = declaredRange.endClock;
+      }
+      if (cursor < range.endClock)
+        implied.push({ clientId, startClock: cursor, endClock: range.endClock });
+    }
+    if (next !== known.length) return undefined;
+    if (implied.length > 0) result.set(clientId, implied);
+  }
+  return result;
+}
+
+/**
+ * Whether Yjs's merge deleted every struct in `ranges` with no update naming
+ * it, because its parent was deleted. Deleting a type deletes its children,
+ * including any that arrive later, and every replica does the same in any
+ * order. Anything else is not explained: a GC struct, whose parent can't be
+ * checked, or a map value that lost to a concurrent set of the same key while
+ * its parent stayed live.
+ */
+function deletedByMerge(
+  document: Y.Doc,
+  clientId: number,
+  ranges: readonly NumericRange[],
+  budget: ValidationBudget,
+  stage: OrderedLiveUpdateCutFailureStage,
+): boolean {
+  budget.visitIndexOperation(stage);
+  const structs = document.store.clients.get(clientId);
+  if (structs === undefined) return false;
+  let from = 0;
+  for (const range of ranges) {
+    let low = from;
+    let high = structs.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      budget.visitIndexOperation(stage);
+      const struct = structs[middle] as Y.Item | Y.GC;
+      if (struct.id.clock + struct.length <= range.startClock) low = middle + 1;
+      else high = middle;
+    }
+    from = low;
+    for (let index = low; index < structs.length; index += 1) {
+      budget.visitIndexOperation(stage);
+      const struct = structs[index] as Y.Item | Y.GC;
+      if (struct.id.clock >= range.endClock) break;
+      if (!(struct instanceof Y.Item) || !struct.deleted) return false;
+      const parent = struct.parent;
+      if (!(parent instanceof Y.AbstractType)) return false;
+      if (parent._item === null || !parent._item.deleted) return false;
+    }
+  }
+  return true;
 }
 
 function rangeMapEquivalent(
@@ -3432,7 +3557,11 @@ function completeProof(
     fail("invalid-update", stage);
   }
   const decodedFrontier = decodeCompleteState(stateUpdate, budget, stage, topology);
-  if (!expected.equivalent(decodedFrontier, budget, stage)) {
+  if (
+    !expected.equivalent(decodedFrontier, budget, stage, (clientId, ranges) =>
+      deletedByMerge(document, clientId, ranges, budget, stage),
+    )
+  ) {
     fail("invalid-update", stage);
   }
   return { stateUpdate, stateVector };

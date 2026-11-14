@@ -313,7 +313,6 @@ describe("closed app compiler", () => {
           expect.stringContaining("first script fails"),
           expect.stringMatching(/stops/),
         ]);
-        // Each stylesheet keeps its place, id, and media, and holds its compiled CSS.
         const sheet = document.getElementById("sheet")!;
         expect([
           sheet.tagName,
@@ -367,7 +366,6 @@ describe("closed app compiler", () => {
         runModules();
         expect(window.log).toEqual(["A:1", "B:b:2:true", "C:2:true:true", "D"]);
         expect(window.errors).toEqual([expect.stringContaining("A fails")]);
-        // Each deferred script now stands where it was written, with its attributes, and its stub is gone.
         expect(scripts().map((script) => script.getAttribute("type") ?? script.id)).toEqual([
           "module",
           "b",

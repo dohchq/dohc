@@ -365,12 +365,12 @@ describe("owner Y.Doc append result", () => {
   });
 });
 
-// AUDIT-SILENTSAVE round 2 (D4). The settle result grew two fields that carry
-// safety meaning — `content: string | null` (null = the artifact was past the
-// in-band cap, read the file instead) and `materialized: boolean` (false = the
-// settle committed but the file never moved). The daemon test proves the engine
+// The settle result carries two fields with safety meaning:
+// `content: string | null` (null = the artifact was past the in-band cap,
+// read the file instead) and `materialized: boolean` (false = the settle
+// committed but the file never moved). The daemon test proves the engine
 // emits them and the capture test proves the desktop handles them; this pins
-// the decoder in between, which nothing else exercised.
+// the decoder in between.
 
 function settleResult(overrides: Record<string, unknown> = {}) {
   return {

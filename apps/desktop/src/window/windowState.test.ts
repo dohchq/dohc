@@ -91,7 +91,6 @@ describe("planWindowPlacement", () => {
   it("resets to centered default when off every display", () => {
     const offscreen = { ...saved, bounds: { ...saved.bounds, x: 4000, y: 3000 } };
     expect(planWindowPlacement(offscreen, [PRIMARY]).bounds).toBeNull();
-    // The unplugged-monitor case: bounds were valid for a display that's gone.
     expect(planWindowPlacement(saved, [SECOND]).bounds).not.toEqual(saved.bounds);
   });
 
@@ -101,8 +100,8 @@ describe("planWindowPlacement", () => {
   });
 
   it("resets when the titlebar is above every display, even if the body is visible", () => {
-    // codex e0-e1 review: bottom 64px visible used to pass, but the titlebar
-    // at y=-736 is unreachable — the user can never drag the window back.
+    // The bottom 64px is visible, but the titlebar at y=-736 is unreachable:
+    // the user can never drag the window back.
     const titlebarOffTop = {
       ...saved,
       bounds: { x: 100, y: -736, width: 1280, height: 800 },
@@ -166,7 +165,6 @@ describe("createDebouncedSaver", () => {
     saver.schedule();
     saver.flush();
     expect(save).toHaveBeenCalledTimes(2);
-    // flush with nothing pending is a no-op
     saver.flush();
     expect(save).toHaveBeenCalledTimes(2);
     vi.useRealTimers();

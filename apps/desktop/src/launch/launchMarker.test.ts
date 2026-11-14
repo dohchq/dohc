@@ -47,7 +47,6 @@ describe("launch marker", () => {
     const disk = memoryFs();
     expect(open(disk.fs).unfinished).toBe(0);
     expect(disk.read()).toEqual({ version: "1.0.0", unfinished: 1 });
-    // The process died: nothing finished or handed off its launch.
     expect(open(disk.fs).unfinished).toBe(1);
     expect(open(disk.fs).unfinished).toBe(2);
     expect(disk.read()).toEqual({ version: "1.0.0", unfinished: 3 });
@@ -76,7 +75,6 @@ describe("launch marker", () => {
     const relaunch = open(disk.fs, pass);
     expect(relaunch).toMatchObject({ unfinished: 2, checked: true });
     expect(disk.read()).toEqual({ version: "1.0.0", unfinished: 3 });
-    // A shortcut that keeps the same argument gets no second pass.
     expect(open(disk.fs, pass).checked).toBe(false);
   });
 

@@ -96,7 +96,6 @@ describe("exit rounds", () => {
     r.exits.answer(1, round.roundId, "clear");
     r.exits.answer(2, round.roundId, "hold");
     await vi.advanceTimersByTimeAsync(60_000);
-    // Every window answered: the held one owns the decision, no dialog.
     expect(r.confirmProceed).not.toHaveBeenCalled();
     r.exits.answer(2, round.roundId, "clear");
     await expect(round.outcome).resolves.toBe("proceed");
@@ -126,7 +125,6 @@ describe("exit rounds", () => {
     expect(r.closings(1)).toEqual(["cancelled"]);
     expect(r.closings(2)).toEqual(["cancelled"]);
     expect(r.exits.current()).toBeNull();
-    // A late clear for the cancelled round counts for nothing.
     expect(r.exits.answer(1, round.roundId, "clear")).toBe(false);
   });
 
@@ -171,8 +169,6 @@ describe("exit rounds", () => {
     expect(empty.confirmProceed).not.toHaveBeenCalled();
   });
 
-  // A silent window may be busy, not dead. The ACK window never proceeds by
-  // itself: it asks the USER, and "Wait" keeps everything as it was.
   it("asks the user about a silent window and waiting keeps a quit vetoed", async () => {
     vi.useFakeTimers();
     const r = rounds();
@@ -255,7 +251,6 @@ describe("exit rounds", () => {
     });
     const round = r.exits.begin("update");
     await vi.advanceTimersByTimeAsync(1_000);
-    // Both wake mid-dialog and say clear.
     r.exits.answer(1, round.roundId, "clear");
     r.exits.answer(2, round.roundId, "clear");
     const state = r.settled(round.outcome);
@@ -278,7 +273,6 @@ describe("exit rounds", () => {
     await vi.advanceTimersByTimeAsync(1_000);
     const third = window(3);
     r.exits.enroll(third);
-    // Its hold is kept: after the dialog proceeds, the round waits on it.
     expect(r.exits.answer(3, round.roundId, "hold")).toBe(true);
     decide(true);
     await vi.advanceTimersByTimeAsync(0);
@@ -291,7 +285,6 @@ describe("exit rounds", () => {
     r.exits.answer(3, round.roundId, "clear");
     await expect(round.outcome).resolves.toBe("proceed");
 
-    // And its Go back cancels even while the dialog is still open.
     const again = rounds({ confirmProceed: () => new Promise<boolean>(() => undefined) });
     const second = again.exits.begin("update");
     await vi.advanceTimersByTimeAsync(1_000);
@@ -358,7 +351,6 @@ describe("exit rounds", () => {
     r.exits.answer(3, round.roundId, "clear");
     await vi.advanceTimersByTimeAsync(1_000);
     expect(r.confirmProceed).toHaveBeenCalledOnce();
-    // One more window opens while the dialog is up: not covered either.
     const fourth = window(4);
     r.exits.enroll(fourth);
     r.exits.answer(4, round.roundId, "clear");
@@ -380,7 +372,6 @@ describe("exit rounds", () => {
     r.exits.answer(1, round.roundId, "clear");
     r.exits.answer(2, round.roundId, "clear");
     await expect(round.outcome).resolves.toBe("proceed");
-    // A stale id retracts nothing; the proceeded round reaches both.
     r.exits.retract(round.roundId + 1);
     expect(r.closings(2)).toEqual(["proceed"]);
     r.exits.retract(round.roundId);
@@ -390,15 +381,12 @@ describe("exit rounds", () => {
     expect(r.closings(1)).toEqual(["proceed", "cancelled"]);
   });
 
-  // A late draft stopped one window's unload after the round proceeded, and
-  // the person went back there. Every member hears the exit is off.
   it("retracts a proceeded round when a member goes back on its exit", async () => {
     const r = rounds();
     const round = r.exits.begin("update");
     r.exits.answer(1, round.roundId, "clear");
     r.exits.answer(2, round.roundId, "clear");
     await expect(round.outcome).resolves.toBe("proceed");
-    // A clear, a stranger, or a stale id takes nothing back.
     expect(r.exits.answer(2, round.roundId, "clear")).toBe(false);
     expect(r.exits.answer(99, round.roundId, "cancel")).toBe(false);
     expect(r.exits.answer(2, round.roundId + 1, "cancel")).toBe(false);
@@ -421,8 +409,6 @@ describe("exit rounds", () => {
     await expect(update.outcome).resolves.toBe("proceed");
     expect(r.exits.approvedExit()).toBe("update");
 
-    // A quit asked afterwards takes the approval away, and a forced quit
-    // approves a quit, not the update.
     const quit = r.exits.begin("quit");
     expect(r.exits.approvedExit()).toBeNull();
     await vi.advanceTimersByTimeAsync(1_000);
@@ -437,8 +423,6 @@ describe("exit rounds", () => {
     expect(r.exits.approvedExit()).toBeNull();
   });
 
-  // Wait is not authorization. It keeps the quit vetoed, asks nothing more,
-  // and the next explicit quit decides afresh.
   it("does not re-prompt after Wait on a silent window, and a new quit asks again", async () => {
     vi.useFakeTimers();
     const r = rounds({ confirmProceed: async () => false });
@@ -449,8 +433,6 @@ describe("exit rounds", () => {
     await vi.advanceTimersByTimeAsync(30_000);
     expect(r.confirmProceed, "Wait must not repeat the prompt unasked").toHaveBeenCalledOnce();
     expect(r.exits.current()?.roundId).toBe(round.roundId);
-    // The user asks to quit again: the silent window is asked once more,
-    // and its silence goes back to the user.
     const again = r.exits.begin("quit");
     expect(again.roundId).toBe(round.roundId);
     expect(r.requests(2)).toEqual([round.roundId, round.roundId]);
@@ -491,7 +473,6 @@ describe("exit rounds", () => {
     const round = r.exits.begin("quit");
     r.exits.answer(1, round.roundId, "clear");
     await vi.advanceTimersByTimeAsync(1_000);
-    // The slow window answers clear while the dialog is up; the user waits.
     r.exits.answer(2, round.roundId, "clear");
     decide(false);
     await vi.advanceTimersByTimeAsync(0);
@@ -499,8 +480,6 @@ describe("exit rounds", () => {
     await vi.advanceTimersByTimeAsync(30_000);
     expect(state.value, "Wait is not authorization to quit").toBeNull();
     expect(r.confirmProceed).toHaveBeenCalledOnce();
-    // Cmd+Q again: everyone is clear, so the quit proceeds without a stuck
-    // round asking nobody.
     const again = r.exits.begin("quit");
     expect(again.created).toBe(false);
     await expect(round.outcome).resolves.toBe("proceed");

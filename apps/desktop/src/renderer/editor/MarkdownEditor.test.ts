@@ -45,7 +45,6 @@ async function flushAnimationFrames(count = 2): Promise<void> {
   });
 }
 
-/** The Tiptap editor behind a mounted MarkdownEditor surface. */
 function editorBehind(surface: HTMLElement): Editor {
   const { editor } = surface as TiptapEditorHTMLElement;
   if (!editor) throw new Error("The editor surface has no Tiptap editor mounted.");
@@ -209,7 +208,7 @@ describe("MarkdownEditor collaboration selection", () => {
       // Adding awareness changes `extensions`' identity — one of
       // useEditor's own rebuild deps — which destroys the bound editor and
       // constructs a fresh one, exercising the same y-tiptap
-      // _forceRerender path #705 fixed for the initial mount.
+      // _forceRerender path as the initial mount.
       awareness = new Awareness(ydoc);
       view.rerender(
         createElement(MarkdownEditor, {
@@ -362,7 +361,6 @@ describe("MarkdownEditor code block continuation", () => {
     const before = editor.getJSON();
 
     expect(pressAtEndOfCode(editor, { key: "ArrowDown" })).toBe(false);
-    // The doc must not be mutated by a pure navigation keypress.
     expect(editor.getJSON()).toEqual(before);
     editor.destroy();
   });
@@ -379,10 +377,6 @@ describe("MarkdownEditor code block continuation", () => {
   });
 });
 
-// The live editor registers its own extension list, and the collaboration
-// binding converts the Y.Doc through that schema. A `paragraph+` task item
-// makes the indented list schema-invalid, so binding drops the whole task list
-// and the document opens empty.
 describe.each(["local", "collaboration"])(
   "MarkdownEditor nested list interactions (%s)",
   (mode) => {
@@ -1061,17 +1055,16 @@ describe("MarkdownEditor read-only links", () => {
   });
 });
 
-// A tiptap editor reports the user's edits through `onUpdate`. This component
-// used to ignore every one of them until an animation frame set a
-// `dirtyTrackingReady` ref, which made "did the app hear the edit?" a question
-// about timing: an edit that arrived before the frame was applied to
-// ProseMirror's document and never reported, so the editor showed the text
-// while the app said "Saved" and scheduled no save at all.
+// A tiptap editor reports the user's edits through `onUpdate`. The component
+// must report every one. A gate that ignored updates until an animation frame
+// would make "did the app hear the edit?" a question about timing: an edit
+// that arrived before the frame would be applied to ProseMirror's document
+// and never reported, so the editor would show the text while the app said
+// "Saved" and scheduled no save at all.
 //
-// Holding the frame open is what makes that window permanent instead of a
-// 16ms race. These tests fail deterministically if the gate returns, and they
-// are the reason it cannot: nothing about a frame decides whether a keystroke
-// counts.
+// Holding the frame open makes that window permanent instead of a 16ms race,
+// so these tests fail deterministically if such a gate returns. Nothing about
+// a frame decides whether a keystroke counts.
 describe("MarkdownEditor dirty tracking", () => {
   function holdAnimationFrames(): void {
     vi.stubGlobal("requestAnimationFrame", () => 1);
@@ -1090,10 +1083,6 @@ describe("MarkdownEditor dirty tracking", () => {
     };
   }
 
-  // The rebuild case, and the more dangerous one: the user is already in the
-  // document when the engine session ends and the view falls back to the local
-  // editor. `collab` drops, the extensions change, and tiptap builds a new
-  // editor underneath a user who never stopped typing.
   it("reports an edit that lands after the editor is rebuilt mid-session", async () => {
     holdAnimationFrames();
     const onDirty = vi.fn();
@@ -1203,7 +1192,6 @@ it("hands Edit > Find to the editor that has focus, including its find bar", asy
   });
   const find = (surface: HTMLElement) => findReplaceKey.getState(editorBehind(surface!).state);
 
-  // With focus outside every editor, the command does nothing.
   act(() => sendToFocusedEditor("editor-find"));
   expect(screen.queryByRole("search", { name: "find and replace" })).toBeNull();
 

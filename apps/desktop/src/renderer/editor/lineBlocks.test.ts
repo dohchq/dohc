@@ -7,12 +7,8 @@ import {
   markdownToYDoc,
 } from "@dohc/ydoc-projection";
 
-// The span is what lets a caller slice the block's own source and refine a
-// landing inside it. Same walk as the index, so the rules above hold
-// it; these hold the boundaries the index never had to name.
 describe("blockForLine", () => {
   it("spans the block from its first line to its last", () => {
-    // 1 "First"  2 ""  3 "Second one"  4 "wrapped"  5 ""  6 "Third"
     const body = "First\n\nSecond one\nwrapped\n\nThird";
     expect(blockForLine(body, 1)).toEqual({ index: 0, startLine: 1, endLine: 2 });
     expect(blockForLine(body, 4)).toEqual({ index: 1, startLine: 3, endLine: 5 });
@@ -39,8 +35,6 @@ describe("blockForLine", () => {
 
 describe("blockForLine — the index", () => {
   it("maps every line of a block to that block", () => {
-    // 1 "First"        2 ""       3 "Second one"  4 "wrapped"
-    // 5 ""             6 "Third"
     const body = "First\n\nSecond one\nwrapped\n\nThird";
     expect(blockForLine(body, 1).index).toBe(0);
     expect(blockForLine(body, 3).index).toBe(1);
@@ -62,7 +56,6 @@ describe("blockForLine — the index", () => {
   });
 
   it("opens a block at a heading, and closes it after that one line", () => {
-    // 1 "Intro text"   2 "## Plan"   3 "Body" — three nodes, no blank lines.
     const body = "Intro text\n## Plan\nBody";
     expect(blockForLine(body, 1).index).toBe(0);
     expect(blockForLine(body, 2).index).toBe(1);
@@ -93,7 +86,6 @@ describe("blockForLine — the index", () => {
   });
 
   it("keeps a loose list one block and ends it at other content", () => {
-    // 1 "- one"  2 ""  3 "- two"  4 ""  5 "Paragraph"
     const body = "- one\n\n- two\n\nParagraph";
     expect(blockForLine(body, 3).index).toBe(0);
     expect(blockForLine(body, 5).index).toBe(1);
@@ -120,15 +112,12 @@ describe("blockForLine — the index", () => {
   });
 
   it("keeps a setext heading with its own text", () => {
-    // 1 "Title"  2 "====="  3 ""  4 "Body"
     const body = "Title\n=====\n\nBody";
     expect(blockForLine(body, 2).index).toBe(0);
     expect(blockForLine(body, 4).index).toBe(1);
   });
 
   it("ends a setext heading at its underline, blank line or not", () => {
-    // 1 "Title"  2 "====="  3 "Matched body" — two nodes, like an ATX
-    // heading. A lone `-` underlines too, and is not a bullet here.
     expect(blockForLine("Title\n=====\nMatched body", 3).index).toBe(1);
     expect(blockForLine("Title\n-\nMatched body", 3).index).toBe(1);
     expect(blockForLine("Title\n===  \nMatched body", 3).index).toBe(1);
@@ -140,25 +129,19 @@ describe("blockForLine — the index", () => {
   });
 
   it("gives a thematic break its own one-line block", () => {
-    // 1 "Intro"  2 ""  3 "---"  4 "Matched" — three nodes. All three markers
-    // read the same way, and the spaced form is a break, not a one-item list.
     for (const marker of ["---", "***", "___", "- - -", "-----"]) {
       const body = `Intro\n\n${marker}\nMatched`;
       expect(blockForLine(body, 3).index).toBe(1);
       expect(blockForLine(body, 4).index).toBe(2);
     }
-    // Two markers is a paragraph, which the next line continues.
     expect(blockForLine("Intro\n\n--\nMatched", 4).index).toBe(1);
   });
 
   it("keeps the setext underline ahead of the thematic break", () => {
-    // Under an open paragraph, `-` and `=` runs underline it. `*` and `_`
-    // cannot, so they stay breaks even there.
     expect(blockForLine("Intro\n---\nMatched", 3).index).toBe(1);
     expect(blockForLine("Intro\n-----\nMatched", 3).index).toBe(1);
     expect(blockForLine("Intro\n***\nMatched", 2).index).toBe(1);
     expect(blockForLine("Intro\n***\nMatched", 3).index).toBe(2);
-    // Nothing else is open, so the break is a break under any other kind.
     expect(blockForLine("# H\n---\nMatched", 2).index).toBe(1);
     expect(blockForLine("> q\n---\nAfter", 2).index).toBe(1);
     expect(blockForLine("- item\n---\nAfter", 2).index).toBe(1);
@@ -182,16 +165,12 @@ describe("blockForLine — the index", () => {
     expect(blockForLine("- one\n1) matched\n\nAfter", 2).index).toBe(1);
     expect(blockForLine("1) one\n- matched\n\nAfter", 2).index).toBe(1);
     expect(blockForLine("1. one\n- matched\n\nAfter", 2).index).toBe(1);
-    // A changed delimiter starts a separate ordered list.
     expect(blockForLine("1) a\n1. b", 2).index).toBe(1);
     expect(blockForLine("1. a\n1) b", 2).index).toBe(1);
-    // Indented, it is a nested list and stays in the item.
     expect(blockForLine("- one\n  1. matched\n\nAfter", 2).index).toBe(0);
   });
 
   it("reads a callout header only when it is complete", () => {
-    // A complete header ends the lazy continuation at a quoted heading; an
-    // unclosed one is an ordinary blockquote, which absorbs the same line.
     expect(blockForLine("> [!note]\n> # T\nMatched\n\nAfter", 3).index).toBe(1);
     expect(blockForLine("> [!note]-\n> # T\nMatched\n\nAfter", 3).index).toBe(1);
     expect(blockForLine("> [!note] Title\n> # T\nMatched\n\nAfter", 3).index).toBe(1);
@@ -201,12 +180,10 @@ describe("blockForLine — the index", () => {
   });
 
   it("counts indent in COLUMNS, so a tab reaches code depth", () => {
-    // `   \t` and `\t` both reach column four, where four literal spaces do.
     for (const prefix of ["\t", " \t", "  \t", "   \t", "    "]) {
       const body = `| A |\n| --- |\n| r |\n${prefix}matched\n\nAfter`;
       expect(blockForLine(body, 4).index).toBe(1);
     }
-    // Three columns is still prose.
     expect(blockForLine("Para\n\n   matched\n\nAfter", 3).index).toBe(1);
     expect(blockForLine("Para\n\n   # H\n\nAfter", 3).index).toBe(1);
     // At four columns a marker is literal text, not the block it looks like.
@@ -227,7 +204,6 @@ describe("blockForLine — the index", () => {
   });
 
   it("opens a block at a fence that interrupts a paragraph", () => {
-    // 1 "Intro"  2 "~~~"  3 "matched"  4 "~~~"  5 "After" — three nodes.
     const body = "Intro\n~~~\nmatched\n~~~\nAfter";
     expect(blockForLine(body, 1).index).toBe(0);
     expect(blockForLine(body, 3).index).toBe(1);
@@ -235,7 +211,6 @@ describe("blockForLine — the index", () => {
   });
 
   it("ends a fenced block at its closing fence", () => {
-    // A quote is open, not a paragraph, and the fence still interrupts it.
     const body = "> quote\n```\ncode\n```\nAfter";
     expect(blockForLine(body, 1).index).toBe(0);
     expect(blockForLine(body, 3).index).toBe(1);
@@ -243,17 +218,13 @@ describe("blockForLine — the index", () => {
   });
 
   it("keeps an indented code block whole across its own blank lines", () => {
-    // 1 "    one"  2 ""  3 "    matched"  4 ""  5 "After" — two nodes.
     const body = "    one\n\n    matched\n\nAfter";
     expect(blockForLine(body, 3).index).toBe(0);
     expect(blockForLine(body, 5).index).toBe(1);
-    // Consecutive blank lines do not break it either.
     expect(blockForLine("    one\n\n\n    matched", 4).index).toBe(0);
   });
 
   it("ends an indented code block where the indentation stops", () => {
-    // No blank line: the code block ends at the first unindented line, which
-    // opens its own block.
     expect(blockForLine("    one\nAfter", 2).index).toBe(1);
     expect(blockForLine("    one\n    two\nAfter\n\nEnd", 3).index).toBe(1);
     expect(blockForLine("    one\n- item\n\nAfter", 2).index).toBe(1);
@@ -267,7 +238,6 @@ describe("blockForLine — the index", () => {
   });
 
   it("keeps content indented into a list item inside that list", () => {
-    // 1 "- item"  2 ""  3 "  matched paragraph"  4 ""  5 "After"
     const body = "- item\n\n  matched paragraph\n\nAfter";
     expect(blockForLine(body, 3).index).toBe(0);
     expect(blockForLine(body, 5).index).toBe(1);
@@ -279,7 +249,6 @@ describe("blockForLine — the index", () => {
     const body = "$$\nx = 1\n\ny = 2\n$$\n\nAfter";
     expect(blockForLine(body, 4).index).toBe(0);
     expect(blockForLine(body, 7).index).toBe(1);
-    // A one-line block interrupts a paragraph and ends on its own line.
     expect(blockForLine("Intro\n$$x$$\nAfter", 2).index).toBe(1);
     expect(blockForLine("Intro\n$$x$$\nAfter", 3).index).toBe(2);
     expect(blockForLine("$$a$$\n$$b$$\nAfter", 3).index).toBe(2);
@@ -293,15 +262,10 @@ describe("blockForLine — the index", () => {
   });
 
   it("ends a quote's lazy continuation at a quoted blank", () => {
-    // 1 "> a"  2 ">"  3 "Matched" — the `>`-only line stops the quote from
-    // swallowing line 3, which the editor renders as its own paragraph.
     expect(blockForLine("> a\n>\nMatched\n\nAfter", 3).index).toBe(1);
     expect(blockForLine("> a\n> \nMatched\n\nAfter", 3).index).toBe(1);
-    // Without one, an unquoted line still continues the quote.
     expect(blockForLine("> a\nMatched\n\nAfter", 2).index).toBe(0);
-    // And the quote itself survives its own blank: `> b` is the same block.
     expect(blockForLine("> a\n>\n> b\n\nAfter", 3).index).toBe(0);
-    // An unquoted blank still splits one quote into two.
     expect(blockForLine("> one\n\n> two\n\nAfter", 3).index).toBe(1);
   });
 
@@ -314,8 +278,6 @@ describe("blockForLine — the index", () => {
       expect(blockForLine(body, 3).index).toBe(1);
       expect(blockForLine(body, 5).index).toBe(2);
     }
-    // A quoted paragraph still continues lazily, and a later quoted line is
-    // still the same callout.
     expect(blockForLine("> [!note]\n> body\nMatched\n\nAfter", 3).index).toBe(0);
     expect(blockForLine("> [!note]\n> # T\n> body\n\nAfter", 3).index).toBe(0);
   });
@@ -326,7 +288,6 @@ describe("blockForLine — the index", () => {
     for (const inner of ["# Title", "- item", "---", "<div>"]) {
       expect(blockForLine(`> a\n> ${inner}\nMatched\n\nAfter`, 3).index).toBe(0);
     }
-    // A quoted fence ends it for either kind.
     expect(blockForLine("> a\n> ```\n> code\n> ```\nMatched\n\nAfter", 5).index).toBe(1);
     expect(blockForLine("> [!note]\n> ```\n> code\n> ```\nMatched\n\nAfter", 5).index).toBe(1);
   });
@@ -338,7 +299,6 @@ describe("blockForLine — the index", () => {
     const bad = "> ```js`bad\n> body\nMatched\n\nAfter";
     expect(blockForLine(`> [!note]\n${bad}`, 4).index).toBe(1);
     expect(blockForLine(`> a\n${bad}`, 4).index).toBe(0);
-    // A clean info string opens a fence for either, and both stop at it.
     const good = "> ```js\n> code\n> ```\nMatched\n\nAfter";
     expect(blockForLine(`> [!note]\n${good}`, 5).index).toBe(1);
     expect(blockForLine(`> a\n${good}`, 5).index).toBe(1);
@@ -356,7 +316,6 @@ describe("blockForLine — the index", () => {
     expect(blockForLine("Intro\n--- | ---\n\nAfter", 4).index).toBe(1);
     // A header needs no pipe of its own — one column over one is a table.
     expect(blockForLine("Intro\n| --- |\n    matched\n\nAfter", 3).index).toBe(1);
-    // They must agree on the column count too.
     expect(blockForLine("A | B\n--- | --- | ---\n1 | 2\n\nAfter", 3).index).toBe(0);
     expect(blockForLine("A | B | C\n--- | ---\n1 | 2\n\nAfter", 3).index).toBe(0);
     // When they do agree it is a table, and a table row is not prose.
@@ -384,8 +343,6 @@ describe("blockForLine — the index", () => {
     expect(blockForLine("A `x | y` B\n--- | ---\n    matched\n\nAfter", 3).index).toBe(1);
   });
 
-  // Count the helper's character reads and backtick-search extents through
-  // blockForLine. Distinct unmatched run lengths must not restart suffix scans.
   it("reads a header of unclosed backtick runs in a linear amount of work", () => {
     const { charCodeAt, indexOf } = String.prototype;
     const work = (runs: number) => {
@@ -430,7 +387,6 @@ describe("blockForLine — the index", () => {
     expect(blockForLine(body, 3).index).toBe(1);
     expect(blockForLine(body, 4).index).toBe(2);
     expect(blockForLine(body, 5).index).toBe(3);
-    // Under an open paragraph the same line is that paragraph's own text.
     expect(blockForLine("Intro\n\t```\ncode\nAfter", 4).index).toBe(0);
     // A tab anywhere in the prefix lands on four, spaces or not.
     expect(blockForLine("Para\n\n \t```\ncode\n```\n\nAfter", 3).index).toBe(1);
@@ -463,10 +419,11 @@ describe("blockForLine — the index", () => {
     expect(blockForLine("-  item\n\n   para\n\nAfter", 3).index).toBe(0);
     // A tab takes the marker to column four.
     expect(blockForLine("-\titem\n\n  para\n\nAfter", 3).index).toBe(1);
-    // Without a blank line it is the same column that decides.
     expect(blockForLine("-    item\n  para\n\nAfter", 2).index).toBe(1);
     expect(blockForLine("- item\n  para\n\nAfter", 2).index).toBe(0);
-    // The active item sets the column, so a wider later item moves it.
+  });
+
+  it("moves the continuation column when a later list item has a wider marker", () => {
     expect(blockForLine("- a\n\n-    b\n\n  para\n\nAfter", 5).index).toBe(1);
   });
 
@@ -478,20 +435,17 @@ describe("blockForLine — the index", () => {
     expect(blockForLine("- outer\n  -    nested\n\n  matched\n\nAfter", 4).index).toBe(0);
     // The outer column still governs, so content short of it still breaks out.
     expect(blockForLine("-    outer\n     - nested\n\n  matched\n\nAfter", 4).index).toBe(1);
-    // A SIBLING at the top level does move it.
     expect(blockForLine("- a\n\n-    b\n\n  para\n\nAfter", 5).index).toBe(1);
   });
 
   it("ends an open list at a quote, but not at a table or display math", () => {
     expect(blockForLine("- item\n> matched\n\nAfter", 2).index).toBe(1);
-    // A quote must be indented into either kind of list item.
     expect(blockForLine("1. item\n> matched\n\nAfter", 2).index).toBe(1);
     expect(blockForLine("1) item\n> matched\n\nAfter", 2).index).toBe(1);
     // A table and display math interrupt a paragraph only.
     expect(blockForLine("- item\n$$x$$\n\nAfter", 2).index).toBe(0);
     expect(blockForLine("- item\n| A |\n| --- |\n| r |\n\nAfter", 2).index).toBe(0);
     expect(blockForLine("Intro\n$$x$$\nAfter", 2).index).toBe(1);
-    // Indented, all three are the item's own content.
     expect(blockForLine("- item\n  > matched\n\nAfter", 2).index).toBe(0);
   });
 
@@ -506,17 +460,13 @@ describe("blockForLine — the index", () => {
   it("keeps a loose checklist together across blank lines", () => {
     expect(blockForLine("- [ ] a\n\n- [ ] b\n\nAfter", 3).index).toBe(0);
     expect(blockForLine("- [ ] a\n\n- [ ] b\n\n- [ ] c\n\nAfter", 5).index).toBe(0);
-    // A bullet list still joins across one.
     expect(blockForLine("- a\n\n- b\n\nAfter", 3).index).toBe(0);
-    // With no blank line the checklist is one node, mixed states and all.
     expect(blockForLine("- [ ] a\n- [ ] b\n\nAfter", 2).index).toBe(0);
     expect(blockForLine("- [ ] a\n- [x] b\n\nAfter", 2).index).toBe(0);
-    // Content indented to the item's column still continues it.
     expect(blockForLine("- [ ] a\n\n  cont\n\nAfter", 3).index).toBe(0);
   });
 
   it("treats a checkbox as part of a list's identity", () => {
-    // Checkbox and no checkbox are different lists, blank line or not.
     expect(blockForLine("- [ ] a\n- b\n\nAfter", 2).index).toBe(1);
     expect(blockForLine("- a\n- [ ] b\n\nAfter", 2).index).toBe(1);
     expect(blockForLine("- [ ] a\n\n- b\n\nAfter", 3).index).toBe(1);
@@ -532,12 +482,9 @@ describe("blockForLine — the index", () => {
     // The box needs a space or the line end after it, and only `x`/`X` in it.
     expect(blockForLine("- [ ]a\n\n- [ ]b\n\nAfter", 3).index).toBe(0);
     expect(blockForLine("- [y] a\n\n- [y] b\n\nAfter", 3).index).toBe(0);
-    // A checklist interrupts and is interrupted like the bullet list it
-    // resembles.
     expect(blockForLine("Intro\n- [ ] a\n\nAfter", 2).index).toBe(1);
     expect(blockForLine("> intro\n- [ ] a\n\nAfter", 2).index).toBe(1);
     expect(blockForLine("- [ ] a\n> q\n\nAfter", 2).index).toBe(1);
-    // Nested under a bullet it is that bullet's content.
     expect(blockForLine("- a\n  - [ ] b\n\nAfter", 2).index).toBe(0);
   });
 
@@ -547,7 +494,6 @@ describe("blockForLine — the index", () => {
     expect(blockForLine("- one\n+ two", 2).index).toBe(1);
     expect(blockForLine("- a\n\n* b\n\n- c\n\nAfter", 5).index).toBe(2);
     expect(blockForLine("1. a\n\n2) b\n\nAfter", 3).index).toBe(1);
-    // The same marker still resumes, and an indented one is a nested list.
     expect(blockForLine("- one\n\n- two\n\nAfter", 3).index).toBe(0);
     expect(blockForLine("1. a\n\n2. b\n\nAfter", 3).index).toBe(0);
     expect(blockForLine("- a\n\n  * b\n\nAfter", 3).index).toBe(0);
@@ -561,10 +507,8 @@ describe("blockForLine — the index", () => {
     // It ends at its own line, so what follows opens a block with no blank
     // line between, where a paragraph would run on.
     expect(blockForLine("Intro\n\n[docs]: https://e.com\nAfter", 4).index).toBe(2);
-    // Adjacent definitions are one block each.
     expect(blockForLine("Intro\n\n[a]: https://a.com\n[b]: https://b.com\nAfter", 4).index).toBe(2);
     expect(blockForLine("Intro\n\n[a]: https://a.com\n[b]: https://b.com\nAfter", 5).index).toBe(3);
-    // Titles, on the line or under it, indented or not, belong to it.
     expect(blockForLine('Intro\n\n[a]: https://a.com "T"\nAfter', 4).index).toBe(2);
     expect(blockForLine('Intro\n\n[a]: https://a.com\n  "T"\nAfter', 4).index).toBe(1);
     expect(blockForLine('Intro\n\n[a]: https://a.com\n  "T"\nAfter', 5).index).toBe(2);
@@ -579,11 +523,9 @@ describe("blockForLine — the index", () => {
   });
 
   it("takes a definition whose destination sits on the next line", () => {
-    // `[docs]:` then the destination under it is one definition, one block.
     expect(blockForLine("Intro\n\n[docs]:\n  https://e.com\nAfter", 4).index).toBe(1);
     expect(blockForLine("Intro\n\n[docs]:\n  https://e.com\nAfter", 5).index).toBe(2);
     expect(blockForLine("Intro\n\n[docs]:\nhttps://e.com\nAfter", 5).index).toBe(2);
-    // And a title under that is still the same block.
     expect(blockForLine('Intro\n\n[docs]:\n  https://e.com\n  "T"\nAfter', 5).index).toBe(1);
     expect(blockForLine('Intro\n\n[docs]:\n  https://e.com\n  "T"\nAfter', 6).index).toBe(2);
     // A bare label with nothing under it is ordinary text.
@@ -596,8 +538,6 @@ describe("blockForLine — the index", () => {
   });
 
   it("ends a quote's lazy continuation at an unquoted block marker", () => {
-    // The reverse of a list being ended BY a quote: an unquoted list marker
-    // under a lazily-continuing quote starts its own block.
     expect(blockForLine("> intro\n- matched\n\nAfter", 2).index).toBe(1);
     expect(blockForLine("> intro\n* matched\n\nAfter", 2).index).toBe(1);
     expect(blockForLine("> intro\n1. matched\n\nAfter", 2).index).toBe(1);
@@ -606,13 +546,16 @@ describe("blockForLine — the index", () => {
     // ordered number, a plain quote only on one that counts from 1.
     expect(blockForLine("> intro\n2. matched\n\nAfter", 2).index).toBe(0);
     expect(blockForLine("> [!note]\n2. matched\n\nAfter", 2).index).toBe(1);
-    // A callout header followed straight by a marker ends there too.
     expect(blockForLine("> [!note]\n- matched\n\nAfter", 2).index).toBe(1);
-    // Both absorb display math, indented code and plain text.
     expect(blockForLine("> intro\n$$x$$\n\nAfter", 2).index).toBe(0);
     expect(blockForLine("> [!note]\n$$x$$\n\nAfter", 2).index).toBe(0);
     expect(blockForLine("> intro\n    code\n\nAfter", 2).index).toBe(0);
     expect(blockForLine("> intro\nmore text\n\nAfter", 2).index).toBe(0);
+  });
+
+  it("ends a callout when stripping a quote marker and optional space exposes a heading", () => {
+    expect(blockForLine("> [!note]\n> # T\nMatched\n\nAfter", 3).index).toBe(1);
+    expect(blockForLine("> [!note]\n># T\nMatched\n\nAfter", 3).index).toBe(1);
   });
 
   it("strips the quote prefix the tokenizer strips, and no more", () => {
@@ -621,9 +564,6 @@ describe("blockForLine — the index", () => {
     expect(blockForLine("> [!note]\n>\t# T\nMatched\n\nAfter", 3).index).toBe(0);
     expect(blockForLine("> [!note]\n>\t- item\nMatched\n\nAfter", 3).index).toBe(0);
     expect(blockForLine("> [!note]\n> \t# T\nMatched\n\nAfter", 3).index).toBe(0);
-    // A space after `>` is stripped, so these DO break.
-    expect(blockForLine("> [!note]\n> # T\nMatched\n\nAfter", 3).index).toBe(1);
-    expect(blockForLine("> [!note]\n># T\nMatched\n\nAfter", 3).index).toBe(1);
     // Spaces before `>` up to three keep it a quoted line; a tab does not,
     // so that line is unquoted content the callout absorbs.
     expect(blockForLine("> [!note]\n   > # T\nMatched\n\nAfter", 3).index).toBe(1);
@@ -648,7 +588,6 @@ describe("blockForLine — the index", () => {
     // Spaces alone still end it.
     expect(blockForLine("First\n   \nMatched\n\nAfter", 3).index).toBe(1);
     expect(blockForLine("First\n\nMatched\n\nAfter", 3).index).toBe(1);
-    // And a quote is not split by one either.
     expect(blockForLine("> a\n \n> b\n\nAfter", 3).index).toBe(0);
   });
 
@@ -703,7 +642,6 @@ describe("blockForLine — the index", () => {
     expect(blockForLine("Intro\n\n[]: https://a.com\nAfter", 4).index).toBe(1);
     expect(blockForLine("Intro\n\n[a]:\n\nAfter", 5).index).toBe(2);
     expect(blockForLine("Intro\n\n    [a]: https://a.com\n\nAfter", 5).index).toBe(2);
-    // Inside an open paragraph it is that paragraph's own text.
     expect(blockForLine("Intro\n[a]: https://a.com\n\nAfter", 2).index).toBe(0);
     expect(blockForLine("Intro\n[a]: https://a.com\n\nAfter", 4).index).toBe(1);
   });
@@ -732,7 +670,6 @@ describe("blockForLine — the index", () => {
     expect(blockForLine(body, 4).index).toBe(1);
     expect(blockForLine(body, 6).index).toBe(2);
     expect(blockForLine("Para\n    more\n\nAfter", 2).index).toBe(0);
-    // A table interrupts a paragraph, and a plain line under one stays in it.
     expect(blockForLine("Intro\n| A |\n| --- |\n| row |\n\nAfter", 2).index).toBe(1);
     expect(blockForLine("| A |\n| --- |\n| row |\nAfter", 4).index).toBe(0);
     // The delimiter row is what makes it a table. Without one it is prose,
@@ -762,10 +699,6 @@ function editorBlocks(body: string): string[] {
   return texts;
 }
 
-// Every rule the splitter claims, held against the real parser instead of
-// against CommonMark read from memory. This is where the quote rule came
-// from: `> one\n\n> two` parses as two blockquotes while `- one\n\n- two`
-// parses as one loose list, and the splitter guessed they behaved alike.
 describe("blockForLine — the index agrees with the editor's own parse", () => {
   const documents: ReadonlyArray<{
     name: string;

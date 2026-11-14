@@ -112,7 +112,7 @@ type Placement =
 
 const NOTICE_COLUMNS = `notice_id, change_seq, workspace_id, recipient_share_id, kind,
   sender_kind, sender_user_id, sender_label, title, body, target_json,
-  origin_install_id, created_at_ms, read_at_ms, dismissed_at_ms, removed_at_ms`;
+  origin_install_id, created_at_ms, read_at_ms, dismissed_at_ms, expires_at_ms, removed_at_ms`;
 const MARKED = "(read_at_ms IS NOT NULL OR dismissed_at_ms IS NOT NULL)";
 const UNREAD = "read_at_ms IS NULL AND dismissed_at_ms IS NULL";
 
@@ -607,6 +607,15 @@ function insertNotice(storage: StorageContext, row: NoticeRowInput): void {
  * whole list with `replace` set, paged under a cursor that remembers the
  * head the pull began at. That pull starts over only if a row changed after
  * it began is deleted.
+ *
+ * The phone's scope also starts the list over when a row read through a
+ * share loses its target after the cursor, or after a whole pull began. The
+ * phone may hold that row's words, and its scope can't send the row as
+ * removed: a posted row's ID is the sender's text and can name a file the
+ * phone never saw. The whole list leaves the row out, so the phone stops
+ * showing it. The restarted pull begins at the head and ends with a cursor at
+ * the head, so a row starts the list over again only after another change,
+ * such as a mark.
  */
 export function readNoticeChanges(
   storage: StorageContext,
@@ -635,13 +644,29 @@ export function readNoticeChanges(
           .get(input.recipientUserId, input.nowMs)?.seq ?? 0,
       ),
     );
+    // Only settlement leaves a live row read through a share without a target.
+    const lostAfter = (seq: number) =>
+      input.scope === "phone" &&
+      Number(
+        storage.db
+          .prepare(
+            `SELECT EXISTS (SELECT 1 FROM sync_relay_notices
+           WHERE recipient_user_id = ? AND change_seq > ? AND recipient_share_id IS NOT NULL
+             AND target_json IS NULL AND removed_at_ms IS NULL AND expires_at_ms > ?) AS lost`,
+          )
+          .get(input.recipientUserId, seq, input.nowMs)?.lost,
+      ) === 1;
     let replace: boolean;
     if (cursor === null) {
       replace = true;
     } else if (cursor.snapshotHead !== null) {
-      replace = cursor.snapshotHead > head || cursor.seq > head || deleted > cursor.snapshotHead;
+      replace =
+        cursor.snapshotHead > head ||
+        cursor.seq > head ||
+        deleted > cursor.snapshotHead ||
+        lostAfter(cursor.snapshotHead);
     } else {
-      replace = cursor.seq > head || cursor.seq < deleted;
+      replace = cursor.seq > head || cursor.seq < deleted || lostAfter(cursor.seq);
     }
     const since = replace ? 0 : cursor!.seq;
     const snapshotHead = replace ? head : cursor!.snapshotHead;
@@ -701,6 +726,41 @@ function withWakes(
 }
 
 /**
+ * What the phone's scope may show of each kind, by what its title and body can
+ * carry. A kind's words may name an automation, a file, or a chat on a hidden
+ * file, so the row shows only once the place they come from is confirmed:
+ * - "shown": the relay writes the words from facts no hidden file decides;
+ * - "path": the words name an automation or what it wrote, so the target must
+ *   name its Collection's path, a record in it, or its automations.yaml, and
+ *   that path must pass;
+ * - "located": the words come from a chat or a file, so the target must name a
+ *   thread or a path, and each one it names must pass;
+ * - "never": the words can't be confirmed.
+ * Every kind needs a decision here. A kind stored by a newer relay, or one
+ * missing from this list, shows as "never".
+ */
+const PHONE_NOTICE_KINDS = {
+  // Who mentioned you, and where.
+  mention: "located",
+  // The agent's name, the thread's place, and its reply's opening words.
+  "agent-run": "located",
+  // The automation's name.
+  "schedule-skipped": "path",
+  // The automation's or button's name, and the step's error.
+  "automation-failed": "path",
+  // The automation's name, and the message it wrote from its records.
+  "automation-notify": "path",
+  // The automation's name.
+  "automation-switched-off": "path",
+  // Its row names no Collection the relay can map to a path.
+  "automation-wake": "never",
+  // The granter and what they shared, which a share can only name as a tracked path or a channel.
+  "share-received": "shown",
+  // The agent's name, chosen by the owner.
+  "personal-agent-signed-in": "shown",
+} as const satisfies Record<NoticeKind, "shown" | "path" | "located" | "never">;
+
+/**
  * The phone's scope of rows already read for the recipient. It never carries
  * a wake payload, and it serves a row only when it can confirm the row is safe
  * to show. It leaves out:
@@ -710,19 +770,35 @@ function withWakes(
  *   recipient doesn't own, or through a share that doesn't admit the path.
  *   This depends only on the recipient's own access, never on what another
  *   account's workspace holds;
- * - a path that doesn't normalize, is secret or ignored, or whose file the
- *   main version last placed at such a path;
+ * - a path that doesn't normalize or is secret or ignored. In a workspace the
+ *   recipient owns, also a path whose file the relay last placed at such a
+ *   path in any version. Through a share, a path whose file the main version
+ *   no longer has at a path the share admits, which reads the same whether
+ *   it moved out, moved to a secret path, or was deleted;
  * - a thread whose create the log doesn't hold, names a hidden path or hint,
  *   or links a file the relay can't place or last placed at a hidden path;
  * - a message target without its thread: the relay finds a message's thread
- *   only by scanning its log.
- * A removed row stays, so a phone drops what it holds, without its title.
+ *   only by scanning its log;
+ * - a row whose kind `PHONE_NOTICE_KINDS` doesn't let it show, or whose
+ *   target doesn't name the place that kind needs to confirm its words.
+ * A removed row stays, without its title, body, sender name, or target, so a
+ * phone drops what it holds. Other rows the scope leaves out send nothing:
+ * their IDs could name what the phone never saw. A row whose target reach
+ * settlement took instead starts the list over in `readNoticeChanges`.
  */
 function phoneNotices(
   storage: StorageContext,
   recipientUserId: string,
   notices: RelayNotice[],
 ): RelayNotice[] {
+  const gone = (notice: RelayNotice): RelayNotice => ({
+    ...notice,
+    title: "",
+    body: "",
+    senderLabel: "",
+    target: null,
+    removed: true,
+  });
   const ownership = new Map<string, boolean>();
   const owned = (workspaceId: string) => {
     let known = ownership.get(workspaceId);
@@ -805,14 +881,22 @@ function phoneNotices(
     );
   };
   return notices.flatMap((notice) => {
-    if (notice.removed) return [{ ...notice, title: "" }];
+    if (notice.removed) return [gone(notice)];
     if (
       notice.workspaceId !== null &&
       owned(notice.workspaceId) &&
       !storage.showsOnPhone(recipientUserId, notice.workspaceId)
     )
       return [];
-    return safeTarget(notice) ? [notice] : [];
+    const rule = Object.hasOwn(PHONE_NOTICE_KINDS, notice.kind)
+      ? PHONE_NOTICE_KINDS[notice.kind]
+      : "never";
+    const named =
+      rule === "shown" ||
+      (rule === "path" && notice.target?.path !== undefined) ||
+      (rule === "located" &&
+        (notice.target?.path !== undefined || notice.target?.thread !== undefined));
+    return named && safeTarget(notice) ? [notice] : [];
   });
 }
 
@@ -836,10 +920,17 @@ export function advanceNoticeHead(storage: StorageContext, recipientUserId: stri
 }
 
 /**
- * Sets read or dismissed once. A row already marked, removed, expired, or
- * gone is left as it is. Returns the notices this call dismissed for the
- * first time ever: a receipt outlives the row, so a notice posted again
- * after its retention is not dismissed first twice.
+ * Sets read or dismissed once, or clears one with unread or restore. A mark
+ * that would change nothing, or a row removed, expired, or gone, is left as
+ * it is. Each change starts the row's retention again, by the state it leaves:
+ * dismissed, else read, else unread. Returns the notices this call dismissed
+ * for the first time ever: a receipt outlives the row, and a restore keeps
+ * it, so a notice is never dismissed first twice.
+ *
+ * An automation wake's row stands for its waiting payload. Only a computer
+ * consuming the wake dismisses it, and no unread or restore brings back a
+ * payload a dismissal consumed, so such a mark skips the row and the rest of
+ * the batch goes on.
  */
 export function markNotices(storage: StorageContext, input: MarkNoticesInput): string[] {
   for (const mark of input.marks) {
@@ -896,16 +987,44 @@ export function markNotices(storage: StorageContext, input: MarkNoticesInput): s
       );
     const markRead = markRow("read_at_ms");
     const markDismissed = markRow("dismissed_at_ms");
+    const clearRow = (column: string) =>
+      storage.db.prepare(
+        `UPDATE sync_relay_notices SET expires_at_ms = ?, change_seq = ?, ${column} = NULL
+       WHERE recipient_user_id = ? AND notice_id = ?`,
+      );
+    const clearRead = clearRow("read_at_ms");
+    const clearDismissed = clearRow("dismissed_at_ms");
     const removeWake = storage.db.prepare(
       "DELETE FROM sync_relay_automation_wakes WHERE recipient_user_id = ? AND notice_id = ?",
     );
     for (const { noticeId, mark } of input.marks) {
       const wake = noticeId.startsWith(AUTOMATION_WAKE_PREFIX);
-      if (wake && mark === "dismissed" && input.installId === undefined) {
-        throw relayError(
-          "notice_refused",
-          "Only a computer consuming this agent wake can dismiss it.",
+      if (
+        wake &&
+        (mark === "unread" ||
+          mark === "restore" ||
+          (mark === "dismissed" && input.installId === undefined))
+      )
+        continue;
+      if (mark === "unread" || mark === "restore") {
+        const row = read.get(input.recipientUserId, noticeId, input.nowMs);
+        if (!row || row.kind === "automation-wake") continue;
+        const readAt = mark === "unread" ? null : row.read_at_ms;
+        const dismissedAt = mark === "restore" ? null : row.dismissed_at_ms;
+        if (readAt === row.read_at_ms && dismissedAt === row.dismissed_at_ms) continue;
+        const retentionMs =
+          dismissedAt !== null
+            ? NOTICE_DISMISSED_RETENTION_MS
+            : readAt !== null
+              ? NOTICE_READ_RETENTION_MS
+              : NOTICE_UNREAD_RETENTION_MS;
+        (mark === "unread" ? clearRead : clearDismissed).run(
+          input.nowMs + retentionMs,
+          nextSeq(),
+          input.recipientUserId,
+          noticeId,
         );
+        continue;
       }
       if (wake && input.installId === "server") continue;
       if (mark === "dismissed" && input.installId !== undefined && !dismissed.includes(noticeId)) {
@@ -1347,7 +1466,6 @@ function makeRoom(
   const freed = removeRows(storage, recipientUserId, null, senderUserId, excess, nowMs);
   if (freed < excess) throw relayError("notice_list_full");
   if (removed + freed === 0) return;
-  // Past its tombstone limit, a list deletes its oldest tombstones.
   raiseFloors(
     storage,
     storage.db
@@ -1439,7 +1557,6 @@ function sweepExpiredNotices(
   );
 }
 
-// Each list's floor rises to the newest change among its deleted rows.
 function raiseFloors(storage: StorageContext, deleted: readonly Record<string, unknown>[]): void {
   const floors = new Map<string, number>();
   for (const row of deleted) {
@@ -1492,6 +1609,7 @@ function rowToNotice(row: Record<string, unknown>): RelayNotice {
     createdAtMs: Number(row.created_at_ms),
     readAtMs: row.read_at_ms === null ? null : Number(row.read_at_ms),
     dismissedAtMs: row.dismissed_at_ms === null ? null : Number(row.dismissed_at_ms),
+    expiresAtMs: Number(row.expires_at_ms),
     removed: row.removed_at_ms !== null,
   };
 }

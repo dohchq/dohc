@@ -41,7 +41,6 @@ test("an engine crash leaves a notice and sends its report only after the person
     if (appPid === undefined) throw new Error("Electron app has no pid.");
     await openWorkspaceFromFirstRun(page, temp);
 
-    // The engine ends the way a crash ends it: no graceful exit.
     const victims = await engineDaemonPids(appPid);
     expect(victims.length).toBeGreaterThan(0);
     for (const pid of victims) await hardKillPid(pid);
@@ -51,8 +50,6 @@ test("an engine crash leaves a notice and sends its report only after the person
     await expect(toast).toContainText("The workspace engine failed");
     expect(received).toEqual([]);
 
-    // Main asks in its own dialog. Answer it from main: Cancel first, which
-    // sends nothing, then Send report.
     const answerDialog = async (response: number) =>
       await app.evaluate(({ dialog }, answer) => {
         const asked = globalThis as { crashDialogMessages?: string[] };
@@ -97,8 +94,6 @@ test("an engine crash leaves a notice and sends its report only after the person
   }
 });
 
-// A crash toasts once. Closing the toast is kept with the report, so the next
-// launch shows only its row in Notices, still with Dismiss, Copy and Send.
 test("a closed crash toast stays closed after a restart, and its row stays in Notices", async () => {
   test.setTimeout(150_000);
   const temp = await createTempWorkspace();

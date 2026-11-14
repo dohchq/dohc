@@ -520,7 +520,7 @@ export function createShareProposalsIpc<Operation extends WorkspaceOperation>(de
               .submitShareProposal({
                 shareId: scope.shareId,
                 grantedSelector: scope.grant,
-                // PR3a mints a fresh key per submit. It makes the relay's idempotency
+                // Each submit mints a fresh key. It makes the relay's idempotency
                 // hold for a retry inside one submit (blobs, then the POST), not for
                 // a second press: a second press sends whatever is pending then,
                 // which is a second set of changes and a second proposal.

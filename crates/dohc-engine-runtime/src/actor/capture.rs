@@ -887,8 +887,8 @@ mod capture_file_hold_tests {
 
     #[test]
     fn a_retire_waits_while_a_pending_write_has_not_placed_the_head() {
-        // dohc#2360. A switch or settle whose placement failed leaves the
-        // head's write pending, so its missing file is not a deletion yet.
+        // A switch or settle whose placement failed leaves the head's write
+        // pending, so its missing file is not a deletion yet.
         use dohc_engine_storage::{MaterializationJobSpec, MaterializationOperation, Preimage};
         let scratch = ScratchDir::new().unwrap();
         let mut store = EngineStore::open(&engine_db_path(&scratch).unwrap(), 1).unwrap();
@@ -1022,8 +1022,8 @@ mod capture_file_hold_tests {
                 .map_err(StorageError::persist_public)
             })
             .unwrap();
-        // dohc#3193. Another version's switch write with the same bytes waits
-        // for that version, so it doesn't hold this head.
+        // Another version's switch write with the same bytes waits for that
+        // version, so it doesn't hold this head.
         let other_version = MaterializationJobSpec {
             job_id: crate::actor::versions::switch_projection_job_id(
                 "hold-proof",
@@ -3056,9 +3056,9 @@ pub(super) fn ensure_no_pending_undo_placement(
     Ok(())
 }
 
-/// The secrets that `version`'s switch has yet to write where no file was
-/// (dohc#3112). Until replay writes one, its missing file is not a deletion,
-/// as the domain seed rules for plain files.
+/// The secrets that `version`'s switch has yet to write where no file was.
+/// Until replay writes one, its missing file is not a deletion, as the domain
+/// seed rules for plain files.
 fn unwritten_switch_secrets(
     conn: &Connection,
     workspace: &str,
@@ -3130,7 +3130,7 @@ fn ensure_no_pending_head_placement(
         let job: String = row.get(0).map_err(StorageError::corrupt_public)?;
         let version: String = row.get(1).map_err(StorageError::corrupt_public)?;
         let sha: String = row.get(2).map_err(StorageError::corrupt_public)?;
-        // A switch job names its version only in its id (dohc#3193).
+        // A switch job names its version only in its id.
         if !job.starts_with("version-switch-mat_")
             || job
                 == super::versions::switch_projection_job_id(
@@ -3153,7 +3153,7 @@ fn ensure_no_pending_head_placement(
 }
 
 /// The capture refusal while the active version's switch has yet to replace or
-/// delete a file that still holds the previous version's bytes (dohc#3621).
+/// delete a file that still holds the previous version's bytes.
 /// Replay lands the switch's write, and capture sees the path again then.
 pub const CAPTURE_WAITS_FOR_SWITCH: &str = "capture-waits-for-switch";
 
@@ -3202,7 +3202,7 @@ fn switch_placement_waits(
             "delete" => dohc_engine_storage::MaterializationOperation::Delete,
             _ => continue,
         };
-        // A switch job names its version only in its id (dohc#3193).
+        // A switch job names its version only in its id.
         let secret = job.starts_with("version-switch-secret-mat_");
         if job
             == super::versions::switch_projection_job_id(

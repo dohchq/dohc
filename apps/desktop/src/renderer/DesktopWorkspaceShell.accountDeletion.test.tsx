@@ -72,8 +72,6 @@ function deletionBridge(deleteAccount: () => Promise<DeleteResult>) {
     };
   });
   bridge.cloudStatus = vi.fn(async () => (signedIn ? SIGNED_IN : SIGNED_OUT));
-  // Main's own disconnect after the server deleted the account: it announces
-  // the logout before the delete answers.
   const disconnect = () => {
     signedIn = false;
     announceSession(null);
@@ -87,7 +85,6 @@ async function openSyncSettings() {
   return screen.findByTestId("settings-row-account");
 }
 
-// Delete account… sits in the account row's More actions menu.
 function chooseDeleteAccount(row: HTMLElement) {
   fireEvent.click(within(row).getByTestId("cloud-account-more"));
   fireEvent.click(screen.getByTestId("cloud-delete-account"));
@@ -103,9 +100,6 @@ async function sendDelete(bridge: ReturnType<typeof deletionBridge>["bridge"]) {
   await waitFor(() => expect(bridge.deleteServerAccount).toHaveBeenCalledTimes(1));
 }
 
-// The review opens from Settings' account row, but the shell owns it: the
-// deletion's own disconnect drops the shell's status and the row, and the
-// answer still arrives.
 describe("deleting the server account from Settings", () => {
   it.each([
     [true, DELETED],
@@ -137,7 +131,6 @@ describe("deleting the server account from Settings", () => {
       expect((await screen.findAllByText(notice)).length).toBeGreaterThan(0);
       expect(screen.queryByTestId("server-account-delete")).toBeNull();
       expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
-      // Settings shows the signed-out page, and the workspace stays open.
       expect(await screen.findByTestId("settings-cloud-connect")).toBeTruthy();
       expect(screen.getByTestId("workspace-shell")).toBeTruthy();
       expect(bridge.cloudLogout).not.toHaveBeenCalled();
@@ -162,7 +155,6 @@ describe("deleting the server account from Settings", () => {
         disconnectError: "store failed",
       }),
     );
-    // The toast shows the failure, and Notices keeps the deletion's message.
     expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
       DISCONNECT_FAILED,
     );
@@ -174,7 +166,6 @@ describe("deleting the server account from Settings", () => {
     await screen.findByTestId("notice-toasts");
     expect(bridge.retryServerAccountDisconnect).not.toHaveBeenCalled();
 
-    // The first retry fails too, so the notice comes back with Try again.
     fireEvent.click(screen.getByTestId("workspace-shell-error-retry"));
     expect(bridge.retryServerAccountDisconnect).toHaveBeenCalledWith({});
     expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
@@ -311,8 +302,6 @@ describe("deleting the server account from Settings", () => {
     );
   });
 
-  // The notice names one account. A Try again after someone signed in reviews
-  // no account at all: Settings shows the session now.
   it("opens no review from a failed delete's Try again after another sign-in", async () => {
     const { bridge } = deletionBridge(async () => {
       throw new Error("dohc could not reach this server.");
@@ -332,8 +321,6 @@ describe("deleting the server account from Settings", () => {
   });
 });
 
-// File ▸ Open Workspace… while a delete is pending: the real DesktopRoot
-// remounts the shell for the other workspace, and the answer reports there.
 describe("a workspace switch while a delete is pending", () => {
   function renderRoot(deleteAccount: () => Promise<DeleteResult>) {
     const { bridge, disconnect } = deletionBridge(deleteAccount);
@@ -370,7 +357,6 @@ describe("a workspace switch while a delete is pending", () => {
     return {
       bridge: root,
       disconnect,
-      // Every workspace leaves the registry, as a Forget in the manager window does.
       forgetAll: async () => {
         registry = [];
         await act(async () => root.emitWorkspaceActivity());
@@ -393,7 +379,6 @@ describe("a workspace switch while a delete is pending", () => {
     });
     expect(bridge.attachWorkspaceFolder).toHaveBeenCalledTimes(1);
     expect(shellA.isConnected).toBe(false);
-    // The sent delete stays on screen over the other workspace.
     expect(screen.getByTestId("server-account-delete-confirm").textContent).toBe("Deleting…");
   }
 

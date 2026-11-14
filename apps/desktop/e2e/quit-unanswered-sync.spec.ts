@@ -15,11 +15,10 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// #2868: with a synced workspace open, quit stays within its 6 s budget
-// while the sync server takes each connection and never answers. One case
-// leaves only the push unanswered. The other also leaves the read of the
-// relay's automation host record unanswered. The pull case comes with the
-// rest of #2868.
+// With a synced workspace open, quit stays within its 6 s budget while the
+// sync server takes each connection and never answers. One case leaves only
+// the push unanswered. The other also leaves the read of the relay's
+// automation host record unanswered. This spec does not cover the pull case.
 
 type Launched = Awaited<ReturnType<typeof launchDesktopApp>>;
 
@@ -131,7 +130,6 @@ async function startSyncServer(
   };
 }
 
-// The push sends its blobs and ops with POST.
 const pushRequest = (workspaceId: string) =>
   new RegExp(`^POST /sync/${workspaceId}/(?:log[? ]|blobs/)`, "u");
 
@@ -199,7 +197,6 @@ for (const unanswered of ["push", "push and host read"] as const) {
         await window.dohcDesktop!.cloudEnableSync({ workspaceId: id });
       }, workspaceId);
 
-      // Holds everything, writes an edit and waits for its push to reach the held server.
       const holdPush = async (round: number) => {
         const before = sync.held.length;
         sync.hold();
@@ -224,8 +221,6 @@ for (const unanswered of ["push", "push and host read"] as const) {
         expect
           .poll(() => syncStatus(page, workspaceId), { timeout: 60_000 })
           .toEqual({ state: "synced", pendingChangeCount: 0 });
-      // Writes a file and waits until the relay has its push and the pass,
-      // which pulls after it pushes, has finished.
       const passThroughRelay = async (path: string, contents: string) => {
         const before = sync.seen.length;
         await writeFile(join(temp.rootPath, path), contents);
@@ -237,7 +232,6 @@ for (const unanswered of ["push", "push and host read"] as const) {
           .toBe(true);
         await synced();
       };
-      // Polls a condition, giving up after `ms`.
       const until = async (ready: () => boolean, ms: number) => {
         const end = Date.now() + ms;
         while (!ready()) {
@@ -268,7 +262,7 @@ for (const unanswered of ["push", "push and host read"] as const) {
         await holdPush(1);
         expect(sync.openRead(), "No automation host read is waiting").toBeUndefined();
       } else {
-        // #3406: after a host read fails, the executor reads again only once
+        // After a host read fails, the executor reads again only once
         // a pull reaches the relay. A pass pulls after it pushes, so a write
         // the relay answers makes the next read. A read still pending when
         // the pull lands keeps the next one queued behind it, and once it
@@ -300,7 +294,6 @@ for (const unanswered of ["push", "push and host read"] as const) {
         }
       }
 
-      // The measured quit: from asking the app to quit until its process exits, up to 30 s.
       const child = app.process();
       const exited = new Promise<number>((resolve) =>
         child.once("exit", () => resolve(performance.now())),
@@ -312,7 +305,6 @@ for (const unanswered of ["push", "push and host read"] as const) {
       });
       const exitedAtMs = await within(exited, 30_000);
       const quitMs = Math.round((exitedAtMs ?? performance.now()) - started);
-      // The app writes its quit line just before it exits.
       await within(outputEnded, 5_000);
       const quitLine =
         logs

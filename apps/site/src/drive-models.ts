@@ -403,7 +403,6 @@ export function createDifferential(): DriveModel {
   gear(carrier, [0.3, 0, 0], spiderGear, brass).rotation.z = Math.PI / 2;
   gear(carrier, [-0.3, 0, 0], spiderGear, brass).rotation.z = -Math.PI / 2;
 
-  // Pinion and short prop shaft with a visible universal joint.
   const input = new T.Group();
   input.rotation.x = Math.PI / 2;
   input.position.set(-0.1, -0.12, 0);

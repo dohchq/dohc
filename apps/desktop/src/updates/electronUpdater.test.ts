@@ -79,7 +79,6 @@ function fakeApp(updater: ReturnType<typeof fakeUpdater>) {
   };
 }
 
-// The installs that started, with their (isSilent, isForceRunAfter).
 function startedInstalls(updater: ReturnType<typeof fakeUpdater>): unknown[][] {
   return updater.install.mock.calls.filter(
     (_call, index) => updater.install.mock.results[index]?.value === true,
@@ -280,12 +279,12 @@ describe("electron updater actions", () => {
     expect(controller.downloadUpdate().accepted).toBe(true);
   });
 
-  // The latch is pulled ONCE. What a second request means
-  // changed in r18: it used to be refused, which stranded the update whenever
-  // a recovery warning vetoed the first restart's unload. The restart is not
-  // lost — electron-updater installs it on the next quit — so a second
-  // request completes it by quitting, and this is MAIN's fact to hold, not a
-  // renderer module variable a reload resets.
+  // The latch is pulled once. A second request is not refused: refusing it
+  // would strand the update whenever a recovery warning vetoed the first
+  // restart's unload. The restart is not lost, because electron-updater
+  // installs it on the next quit, so a second request completes it by
+  // quitting. Main holds this fact, not a renderer module variable a reload
+  // resets.
   it("on macOS, installs only after update-downloaded, pulls the latch once, and completes a staged restart", async () => {
     const updater = fakeUpdater();
     const app = fakeApp(updater);
@@ -337,7 +336,6 @@ describe("electron updater actions", () => {
       expect(app.quit).toHaveBeenCalledOnce();
       expect(updater.install).not.toHaveBeenCalled();
       expect(updater.quitAndInstall).not.toHaveBeenCalled();
-      // A window went back, so dohc did not quit. Restart quits again.
       await expect(controller.installUpdate()).resolves.toMatchObject({ accepted: true });
       expect(app.quit).toHaveBeenCalledTimes(2);
       expect(updater.install).not.toHaveBeenCalled();
@@ -383,7 +381,6 @@ describe("electron updater actions", () => {
       message: "dohc 1.2.4 is available.",
     });
     expect(updater.downloadUpdate).not.toHaveBeenCalled();
-    // Nothing a download did not start can install.
     await expect(controller.installUpdate()).resolves.toMatchObject({ accepted: false });
     updater.emit("update-downloaded", { version: "1.2.4" });
     expect(controller.publicState().status).toBe("available");
@@ -400,7 +397,6 @@ describe("electron updater actions", () => {
   });
 
   it("returns a failed download to Update, with the step that failed", async () => {
-    // The updater emits "error" and rejects; a rejection alone still ends the download.
     for (const emits of [true, false]) {
       const updater = fakeUpdater();
       const controller = (await startWith(updater))!;
@@ -419,7 +415,6 @@ describe("electron updater actions", () => {
           failure: { step: "download" },
         }),
       );
-      // Trying again clears the failure while it runs.
       expect(controller.downloadUpdate().state).not.toHaveProperty("failure");
     }
   });
@@ -440,7 +435,6 @@ describe("electron updater actions", () => {
     failChecksWith(updater, new Error("feed returned 503"));
     await controller.checkForUpdates();
     expect(controller.publicState().failure?.id).toBeGreaterThan(asked!.id);
-    // Offline is not a failure to report.
     failChecksWith(updater, new Error("net::ERR_INTERNET_DISCONNECTED"));
     await controller.checkForUpdates();
     expect(controller.publicState()).toMatchObject({ status: "offline" });
@@ -547,7 +541,6 @@ describe("electron updater actions", () => {
       const answer = deferred<boolean>();
       const confirmDownload = vi.fn(() => answer.promise);
       const waiting = controller.awaitUpdate(bounds, confirmDownload, onDownloading);
-      // Nothing downloads until the person answers.
       await vi.waitFor(() => expect(confirmDownload).toHaveBeenCalledWith("1.2.4"));
       expect(updater.downloadUpdate).not.toHaveBeenCalled();
       answer.resolve(true);

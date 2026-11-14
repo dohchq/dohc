@@ -43,7 +43,6 @@ function backlog(log: AccountFeedLogRow[], journal: JournalRow[]) {
     accountFeedThreadPaths: () => ({ lastKnownPath: null, named: [] }),
   };
   const waits = createAccountFeedWaits(storage, new DiscussionActivityHub());
-  /** Polls from the start until the feed answers nothing new. */
   const poll = async () => {
     const answers: AccountFeedAnswer[] = [];
     let since = "0.0.0";

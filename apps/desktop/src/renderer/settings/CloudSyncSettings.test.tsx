@@ -123,6 +123,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  document.documentElement.removeAttribute("data-theme");
 });
 
 describe("CloudSyncSettings", () => {
@@ -140,7 +141,6 @@ describe("CloudSyncSettings", () => {
     expect(screen.queryByTestId("settings-row-account")).toBeNull();
     expect(screen.queryByTestId("cloud-relink-workspace")).toBeNull();
     expect(screen.queryByRole("switch")).toBeNull();
-    // Disconnecting was a choice: the line names the way back, not a fault.
     const row = within(screen.getByTestId("settings-row-sync-workspace"));
     expect(row.getByTestId("cloud-workspace-not-connected").textContent).toBe(SYNC_NOT_CONNECTED);
     expect(row.queryByTestId("cloud-workspace-relink")).toBeNull();
@@ -155,30 +155,35 @@ describe("CloudSyncSettings", () => {
     await waitFor(() => expect(syncSwitch().getAttribute("aria-checked")).toBe("false"));
     expect((syncSwitch() as HTMLButtonElement).disabled).toBe(true);
     // The switch can't turn on signed out, so focus goes to Connect server.
-    expect(document.activeElement).toBe(screen.getByTestId("settings-cloud-connect"));
+    // The page moves focus in an effect after the switch updates, so wait for it.
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByTestId("settings-cloud-connect")),
+    );
     expect(screen.getByTestId("cloud-sync-paused").textContent).toContain("Paused by you");
     expect(screen.getByTestId("cloud-sync-needs-server").textContent).toBe(SYNC_ON_NEEDS_SERVER);
   });
 
-  it("shows a QR code of the server's origin, and nothing else, for connecting a phone", () => {
-    render(
-      <CloudSyncSettings
-        workspaceId="ws-1"
-        cloud={cloud({ ...SYNCED, serverUrl: "https://dohc.hollis.studio/" })}
-      />,
-    );
+  it.each(["light", "dark"])(
+    "encodes only the server origin in a dark-on-light phone QR in %s",
+    (theme) => {
+      document.documentElement.setAttribute("data-theme", theme);
+      render(
+        <CloudSyncSettings
+          workspaceId="ws-1"
+          cloud={cloud({ ...SYNCED, serverUrl: "https://dohc.hollis.studio/" })}
+        />,
+      );
 
-    const row = screen.getByTestId("settings-row-connect-phone");
-    expect(row.textContent).toBe("Connect a phonedohc.hollis.studio");
-    const code = within(row).getByRole("img", { name: "QR code for dohc.hollis.studio" });
-    expect(drawnCode(code)).toEqual(encoded("https://dohc.hollis.studio"));
-    expect(drawnCode(code)).not.toEqual(encoded("https://relay.hollis.studio"));
-    // Dark on light in both themes.
-    expect(code.querySelector("rect")?.getAttribute("fill")).toBe(palette.light.bg);
-    expect(code.querySelector("path")?.getAttribute("fill")).toBe(palette.light.ink);
-    // It sits under the account row.
-    expect(screen.getByTestId("settings-row-account").nextElementSibling).toBe(row);
-  });
+      const row = screen.getByTestId("settings-row-connect-phone");
+      expect(row.textContent).toBe("Connect a phonedohc.hollis.studio");
+      const code = within(row).getByRole("img", { name: "QR code for dohc.hollis.studio" });
+      expect(drawnCode(code)).toEqual(encoded("https://dohc.hollis.studio"));
+      expect(drawnCode(code)).not.toEqual(encoded("https://relay.hollis.studio"));
+      expect(code.querySelector("rect")?.getAttribute("fill")).toBe(palette.light.bg);
+      expect(code.querySelector("path")?.getAttribute("fill")).toBe(palette.light.ink);
+      expect(screen.getByTestId("settings-row-account").nextElementSibling).toBe(row);
+    },
+  );
 
   it("offers Delete account in More actions beside Disconnect, for the account the row shows", async () => {
     const logout = deferred<void>();
@@ -201,7 +206,6 @@ describe("CloudSyncSettings", () => {
     });
     expect(screen.queryByRole("menu")).toBeNull();
 
-    // Not while Disconnect is ending the same session.
     fireEvent.click(screen.getByTestId("cloud-disconnect"));
     expect(more.disabled).toBe(true);
     await act(async () => logout.resolve());
@@ -556,24 +560,6 @@ describe("CloudSyncSettings", () => {
     expect(bridgeMock.cloudStopSync).not.toHaveBeenCalled();
   });
 
-  // Another account owns the remote: main refuses, and its reason says what
-  // to do. Disconnect stays on the row above.
-
-  // Try again can ask for the passphrase. Once it unlocks, the form and the
-  // buttons go, and focus moves to the switch.
-
-  // The account can be confirmed on its own, which takes the buttons away
-  // under a keyboard user.
-
-  // A sign-in rereads the status, so the row shows its loading state between
-  // the unconfirmed account and the confirmed one.
-
-  // A failed Try again keeps its buttons. A confirmation that arrives later
-  // moves focus only while one of them still has it.
-
-  // Signing in again undoes Disconnect, and Connect server takes its place,
-  // so it asks nothing first.
-
   // Disconnect reaches every workspace, so its failure goes through the
   // installation-wide report, never the workspace-guarded one. The shell's
   // tests follow it through a workspace switch.
@@ -595,7 +581,6 @@ describe("CloudSyncSettings", () => {
     // The session may be gone even so: the shell reads it again.
     await waitFor(() => expect(settings.onChanged).toHaveBeenCalledOnce());
 
-    // The logout's own announcement carries no session.
     act(() => announceSession({ sessionKey: null, phase: "ready" }));
     unmount();
     await act(async () => {

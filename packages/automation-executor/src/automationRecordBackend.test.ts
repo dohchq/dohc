@@ -1282,7 +1282,6 @@ it("replays a replan after commit-before-append with the same caller and payload
   const a = automation(find("Target", true) + set(true, "found"));
   f.hooks.beforeEffect = () => {
     f.hooks.beforeEffect = undefined;
-    // A different field changed: the planned field still qualifies for the replan.
     f.rows.get("Target-dataset")!.get("same")!.version += 1;
   };
   f.hooks.crashAppend = true;

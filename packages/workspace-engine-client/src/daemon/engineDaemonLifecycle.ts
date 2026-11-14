@@ -61,67 +61,47 @@ const DEFAULT_WORKSPACE_READ_TIMEOUT_MS = 10_000;
 // slot, and admission overflow refuses immediately. So only silence is
 // evidence of a wedge — never a slow answer, and never a refusal.
 const DEFAULT_PING_INTERVAL_MS = 30_000;
-// A probe carries NO wire deadline, so the supervisor gives it the daemon's own
-// `default_deadline` of 30s — the latest a live daemon can take to answer a
-// probe it never gets an execution slot for. 45s is that bound plus 15s of
+// A probe carries no wire deadline, so the supervisor gives it the daemon's own
+// `default_deadline` of 30 s, the latest a live daemon can take to answer a
+// probe it never gets an execution slot for. 45 s is that bound plus 15 s of
 // egress headroom. The probe must not carry a deadline of its own: EngineClient
 // arms a client-side timer for any request that has one, and that timer turns
-// the very silence this looks for into a rejection, which reads as life.
+// the silence this looks for into a rejection, which reads as life.
 //
-// The 30s does not bound when the reply arrives, and no constant here could.
-// A reply is queued on the daemon's single output channel, and `write_output`
-// writes one whole item before it reads the next. The supervisor's deadline
-// covers `run_job` only; the wait on that channel is untimed. The queue holds
-// `OUTPUT_QUEUE_CAPACITY` = 64 ITEMS, counted without regard to size, and a
-// control frame may reach `max_frame_bytes` = 8 MiB — so up to 512 MiB can sit
-// ahead of a reply. `BlobEgressBudget` does not bound this: it reserves blob
-// bytes only. Most responses are far smaller (`SINGLE_ROW_HARD_CAP_BYTES` is
-// 700 KiB and page budgets are 256 KiB), but a control response may still fill
-// its frame, so 64 maximum-sized responses reach the ceiling.
+// No timeout bounds when the reply arrives. The reply waits, untimed, on the
+// daemon's single output channel, which holds `OUTPUT_QUEUE_CAPACITY` = 64
+// items of up to `max_frame_bytes` = 8 MiB each, so up to 512 MiB can sit ahead
+// of it. `BlobEgressBudget` reserves blob bytes only and does not bound this.
+// So the probe verdict reads inbound traffic, not the expiry alone: bytes for
+// anybody prove the daemon is turning, and a wedged daemon sends nothing to
+// anyone. The expiry measures total silence.
 //
-// That is why the expiry alone cannot be the test, and why raising it would
-// not help: no timeout both survives 512 MiB of egress and still catches a
-// wedge. The probe verdict reads inbound TRAFFIC instead. A probe stuck behind
-// bulk output arrives with that output, and bytes for anybody prove the daemon
-// is turning; a wedged daemon sends nothing to anyone. The expiry then measures
-// what it can honestly measure — total silence.
+// Traffic counts whenever it arrived since the last verdict, not only while a
+// probe was racing. The next probe starts an interval after the previous one
+// resolved: at production values a probe expires at 45 s and its successor
+// begins at 75 s, and the expired probe's own reply at 50 s must still count.
 //
-// That traffic counts whenever it arrived since the last verdict, not only
-// while a probe was racing. The next probe starts an interval after the
-// previous one resolved, so probes do not tile the timeline: at production
-// values a probe expires at 45s and its successor begins at 75s. A reply
-// delivered at 50s — the likeliest late frame there is, being the expired
-// probe's own — would fall in that gap and prove nothing.
-//
-// Scope: events count as traffic too. `event_forwarder` is a separate task
-// pushing onto the same queue, so it can emit while no request is in flight.
-// It is file-change driven, so an idle wedge still goes silent and is still
-// caught; a workspace being edited only defers the verdict, never loses it.
+// Events count as traffic too. `event_forwarder` is a separate task pushing
+// onto the same queue. It is file-change driven, so an idle wedge still goes
+// silent and is still caught; a workspace being edited only defers the verdict.
 const DEFAULT_PING_EXPIRY_MS = 45_000;
 const DEFAULT_MAX_PING_EXPIRIES = 3;
-// A wedge cannot be counted like a crash, so it gets its own budget.
-//
+// A wedge gets its own budget, because the crash budget can never trip on one.
 // The crash window asks for 10 exits inside 10 minutes. One wedge cycle is
-// 3 intervals + 3 expiries = 225s by construction, so a 10-minute window can
-// never hold more than 3 of them. Ten is unreachable, `healthyResetMs` (30s)
-// is shorter than the cycle so the burst budget resets every generation too,
-// and a daemon that wedges after every launch would restart forever — the
-// exact failure this file exists to end.
+// 3 intervals + 3 expiries = 225 s, so a 10-minute window holds at most 3 of
+// them, and `healthyResetMs` (30 s) is shorter than the cycle, so the burst
+// budget resets every generation too. A daemon that wedges after every launch
+// would restart forever.
 //
-// The deeper reason the shared contract does not fit: a crash is a sample and
-// a wedge is already a VERDICT. Ten crashes are evidence because one crash
-// might be a bad input. One wedge kill already cost three silent probes and
-// about three and a half minutes of proven silence. When a fresh process
-// repeats that from a clean start, with no probe answered in between,
-// restarting a third time is not a recovery plan — it is a loop. Two strikes
-// is about 7.5 minutes of a workspace that has answered nothing.
+// One wedge kill already cost three silent probes and about three and a half
+// minutes of proven silence. Two strikes is about 7.5 minutes of a workspace
+// that has answered nothing, from a clean start each time.
 //
 // Any answered probe clears the streak, so a daemon that wedges once and then
-// recovers is restarted, not condemned. The cap therefore bounds only an
-// unbroken wedge streak: a daemon that wedges intermittently is restarted
-// every time, by design. This file ends a daemon that stopped answering for
-// good, not one that answers unreliably. A crash between two wedges does not
-// clear the streak either — a process that exits answered nothing.
+// recovers is restarted, not condemned. The cap bounds only an unbroken wedge
+// streak: a daemon that wedges intermittently is restarted every time, by
+// design. A crash between two wedges does not clear the streak either, because
+// a process that exits answered nothing.
 const DEFAULT_MAX_CONSECUTIVE_WEDGES = 2;
 
 export interface EngineDaemonClient extends MinimalDaemonClient {
@@ -153,7 +133,6 @@ export interface EngineDaemonLifecycleOptions {
     client: NonNullable<EngineClientSpawnOptions["privateLiveApplication"]>;
   };
   command: string;
-  // Starts the engine in its own process group. See EngineClientSpawnOptions.
   ownProcessGroup?: boolean;
   launch?: (options: EngineClientSpawnOptions) => Promise<EngineDaemonClient>;
   fileExists?: (path: string) => boolean;

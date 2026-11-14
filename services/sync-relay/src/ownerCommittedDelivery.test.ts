@@ -311,9 +311,6 @@ it("keeps a handover's edits queued until its empty settle reaches the file", as
   expect(f.outboxAcks).toEqual([]);
 });
 
-// Proves: a held handover settle applies nothing and asks for no further pass,
-// stays held across a new consumer, and finishes once its owner wants the
-// settlement, as after consenting to the held write.
 it("keeps a handover's edits queued while its empty settle is held, then settles it once its owner wants it", async () => {
   const f = fixture({ prefix: 7, adoptionCursor: 7 });
   settlementRequired(f, () => false, {
@@ -521,8 +518,6 @@ it("resumes a held file settlement without reconnecting or accepting the deliver
   ).toHaveLength(1);
 });
 
-// Proves: an ordinary settle reuses this connection's settlement of the same
-// terminal, and one its owner wants, as after consenting to a held write, asks the host again.
 it("settles a terminal again when its owner wants it, past the settlement an ordinary settle reuses", async () => {
   const f = fixture({ prefix: 1 }),
     settled = settlementRequired(f, () => false);
@@ -544,8 +539,38 @@ it("settles a terminal again when its owner wants it, past the settlement an ord
   expect(settled).toEqual([receipt(2), receipt(2)]);
 });
 
-// Proves: a held settlement of a terminal, or one that has not reached the file, ends
-// the reuse of that terminal's earlier settlement, so the next ordinary settle asks the host again.
+// Proves: a settle right after a done drain does not read the owner queue again, and one under a registration made
+// since that drain, here by a new connection, reads it first.
+it("settles after a done drain without draining again, unless its registration is new since", async () => {
+  const f = fixture({ prefix: 1 }),
+    settled = settlementRequired(f, () => false);
+  expect(await f.consumer.drain(document)).toMatchObject({ kind: "done" });
+  expect(await f.consumer.settleDrained(document)).toMatchObject({
+    terminalCursor: 2,
+    materialized: true,
+  });
+  expect(drainOwnerOutbox).toHaveBeenCalledTimes(1);
+  expect(await f.reconnect().settleDrained(document)).toMatchObject({ terminalCursor: 2 });
+  expect(drainOwnerOutbox).toHaveBeenCalledTimes(2);
+  expect(settled).toEqual([receipt(2), receipt(2)]);
+});
+
+// Proves: an edit queued between a done drain and its settle is neither lost nor settled over. The settle covers only
+// what the drain applied, and the next pass's drain delivers the edit before its settle covers it.
+it("delivers an edit queued between a done drain and its settle on the next pass", async () => {
+  const f = fixture({ prefix: 1 }),
+    settled = settlementRequired(f, () => false);
+  expect(await f.consumer.drain(document)).toMatchObject({ kind: "done" });
+  f.retained.push(receipt(3));
+  expect(await f.consumer.settleDrained(document)).toMatchObject({ terminalCursor: 2 });
+  expect(f.outboxAcks).toEqual([receipt(2)]);
+  expect(f.retained).toEqual([receipt(3)]);
+  expect(await f.consumer.drain(document)).toMatchObject({ kind: "done" });
+  expect(f.outboxAcks).toEqual([receipt(2), receipt(3)]);
+  expect(await f.consumer.settleDrained(document)).toMatchObject({ terminalCursor: 3 });
+  expect(settled).toEqual([receipt(2), receipt(3)]);
+});
+
 it.each(["held", "unmaterialized"] as const)(
   "asks the host again once a settlement of a terminal it settled before comes back %s",
   async (outcome) => {
@@ -596,8 +621,6 @@ it.each(["held", "unmaterialized"] as const)(
   },
 );
 
-// Proves: a settle its owner wants that fails also ends the reuse, so the
-// next ordinary settle asks the host again instead of returning the old settlement.
 it("asks the host again after a settle its owner wanted fails", async () => {
   const f = fixture({ prefix: 1 }),
     settled = settlementRequired(f, () => false);
@@ -718,7 +741,6 @@ it("checks owner standing before returning an earlier application error", async 
 it("holds seed readiness until a pass proves it for the recorded adoption, then keeps it while later work is pending", async () => {
   const f = fixture({ owners: 2 });
   expect(f.consumer.adoptionSeedApplied(document)).toBe(false);
-  // The seed's application is still pending on the host.
   f.client.sendLiveApplication.mockResolvedValueOnce({
     id: 2,
     result: { status: "pending", reason: "retry" },
@@ -965,8 +987,6 @@ it("brings a device host's seed to readiness, applied before it is acknowledged,
   expect(f.consumer.adoptionSeedApplied(document)).toBe(true);
 });
 
-// A successor whose engine queue still holds its adoption seed cannot settle
-// the handover cut: the engine refuses every settlement before that seed.
 it.each([
   { head: "its adoption seed", seeded: true, order: ["commit", "apply edit", "acknowledge"] },
   {
@@ -1143,19 +1163,11 @@ it.each([
     expect(order).toEqual(expected);
     expect(outcome).toMatchObject({ kind: "done", terminalReceipt: edit });
     expect(f.consumer.adoptionSeedApplied(document)).toBe(true);
-    // #2982: only the drain reads the head's update, within its byte budget.
+    // Only the drain reads the head's update, within its byte budget.
     expect(updateReads).toBe(1);
   },
 );
 
-// A native service seed is acknowledged before it is applied. When its
-// application waits, the engine queue no longer holds it, but the relay's rows
-// hold it as this pending activation's admitted seed. With `behind`, the
-// successor adopted at B below its predecessor's F, so that many predecessor
-// rows come before the seed, and the first of them has no ACK. A later pass,
-// on this consumer or one rebuilt after a restart, applies those rows and then
-// the seed without the cut settle the engine refuses. Without an admitted seed
-// the cut still settles first.
 it.each([
   { consumer: "this", rebuilt: false, seed: true, behind: 0, settles: [] },
   { consumer: "a rebuilt", rebuilt: true, seed: true, behind: 0, settles: [] },

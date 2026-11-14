@@ -40,8 +40,6 @@ vi.mock("@dohc/workspace-engine-client/daemon", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@dohc/workspace-engine-client/daemon")>()),
   createEngineClient: spawn,
 }));
-// A folder a test names here can't be removed, as when the disk refuses. With `renamed`, so can the name
-// it is renamed to on its way out. With `partly`, the removal first deletes the folder's settled marker.
 const stuck = vi.hoisted(() => ({ path: null as string | null, renamed: false, partly: false }));
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
@@ -65,7 +63,6 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {
   vi.unstubAllEnvs();
-  // Every cleanup runs even after one fails; the first failure is reported once all have run.
   let failure: { error: unknown } | undefined;
   for (const close of cleanup.splice(0).reverse()) {
     try {
@@ -86,7 +83,6 @@ const key = new Uint8Array(32).fill(7),
 const WAIT_TIMEOUT_MS = 10_000;
 
 type ReplicaOptions = Parameters<typeof startAutomationReplicas>[0];
-// Most tests keep copies for automations; they name the workspaces, and this gives each its reason.
 type AutomationOptions = Omit<ReplicaOptions, "wanted"> & { wanted: () => readonly string[] };
 const automation = (ids: readonly string[]) =>
   new Map(ids.map((id) => [id, ["automation"] as const]));
@@ -111,7 +107,6 @@ async function relay() {
   return { storage, raw, log };
 }
 
-// An accepted press from a shared view, taken by `acceptedBy`.
 function acceptedPress(
   raw: ReturnType<typeof inspectDatabase>,
   hostPressId: string,
@@ -262,7 +257,6 @@ describe("the automation replica's credential", () => {
         bearer: deriveAutomationReplicaBearer({ ...row, incarnation: 2 }, { key, namespace }),
       }),
     ).toBeNull();
-    // A service host credential for the same values never verifies here.
     const service = deriveServiceHostBearer(row, { key, namespace });
     expect(authorize({ bearer: service })).toBeNull();
 
@@ -300,7 +294,6 @@ describe("the automation replica's credential", () => {
     );
     expect(push.status, await push.clone().text()).toBe(200);
     expect(await push.json()).toMatchObject({ inserted: 1 });
-    // An automation replica retains the client author boundary, including native-shaped moments.
     let originSeq = 1;
     for (const author of [
       { kind: "human", humanId: "recipient", humanName: "Recipient" },
@@ -369,7 +362,6 @@ describe("the automation replica's credential", () => {
       inserted: 1,
       currentMaxOriginSeq: originSeq,
     });
-    // Waiting to leave, it reads but writes nothing.
     storage.unwantAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
     expect(authorize({}), "a read").toBe("owner");
     expect(authorize({ pathname: `/sync/${WORKSPACE}/log`, method: "POST" }), "a push").toBeNull();
@@ -388,7 +380,6 @@ describe("the automation replica's credential", () => {
 describe("the automation replicas", () => {
   type Sent = { method: string; params: Record<string, unknown>; workspace?: string };
 
-  // An engine daemon that opens each workspace and answers ordinary replication.
   function fakeEngine() {
     const sent: Sent[] = [];
     let failPush: boolean | Error = false;
@@ -398,7 +389,6 @@ describe("the automation replicas", () => {
     // Handles opened without a relay, as a read of a closed copy's folder opens them, and how many of their closes fail next.
     const folderHandles: string[] = [];
     let failFolderCloses = 0;
-    // The copies' chats, which every engine the test starts shares.
     const chats = new ChatsLoopbackEngine();
     // Where the copy's folder holds each file, by object, and where a pull puts them next.
     const filePaths = new Map<string, string>();
@@ -566,7 +556,6 @@ describe("the automation replicas", () => {
       },
       chats,
       filePaths,
-      /** The relay moved these files since the copy last pulled; its next pull brings them. */
       movedOnRelay: (paths: Map<string, string>) => {
         pulledPaths = paths;
       },
@@ -574,7 +563,6 @@ describe("the automation replicas", () => {
       backlog: (pages: number) => {
         pullPages = pages;
       },
-      /** Holds the next pulls. `reached` resolves once one is waiting. */
       holdPulls: () => {
         let reached!: () => void, release!: () => void;
         const waiting = new Promise<void>((resolve) => {
@@ -634,7 +622,6 @@ describe("the automation replicas", () => {
   // One turn of the event loop: whatever only waited on promises has run.
   const turn = () => new Promise<void>((resolve) => setImmediate(resolve));
 
-  // Errors no test expects: the test fails if one is reported before it ends.
   function unexpectedErrors() {
     const errors: unknown[] = [];
     cleanup.push(async () => {
@@ -828,7 +815,6 @@ describe("the automation replicas", () => {
     const failed = passes.next();
     await vi.advanceTimersByTimeAsync(100);
     await failed;
-    // Writes to either workspace wake promptly, but never shorten the failed step's delay.
     for (let seq = 2; seq <= 4; seq++) {
       raw
         .prepare(
@@ -920,7 +906,6 @@ describe("the automation replicas", () => {
       "a server copy seeds no local count",
     ).toEqual({ accountUserId: "owner", seedLocal: false });
 
-    // Nothing changed at the relay: a pass pulls nothing.
     running.reconcile();
     await running.settled();
     expect(engine.methods().filter((method) => method === "sync.applyPull")).toHaveLength(1);
@@ -948,7 +933,6 @@ describe("the automation replicas", () => {
     expect(readdirSync(root).filter((entry) => !entry.startsWith("owner-ingress-"))).toEqual([]);
   });
 
-  // Copies an owner's account reads, beside those automations keep.
   async function copies(
     storage: SyncRelayStorage,
     wanted: () => ReadonlyMap<string, readonly CopyReason[]>,
@@ -1019,7 +1003,6 @@ describe("the automation replicas", () => {
     const clock = { ms: 0 };
     let wanted = [WORKSPACE, "ledger"];
     const { replicas: before, root } = await replicas(storage, () => wanted, clock);
-    // The workspace's automations moved to a computer: its copy leaves, and is retained.
     wanted = ["ledger"];
     before.reconcile();
     await before.settled();
@@ -1146,7 +1129,6 @@ describe("the automation replicas", () => {
       });
     }
     const engine = fakeEngine();
-    // The engine refuses every open of one workspace.
     const answer = spawn.getMockImplementation()!;
     spawn.mockImplementation(async (spawned: Parameters<typeof answer>[0]) => {
       const client = await answer(spawned);
@@ -1160,7 +1142,6 @@ describe("the automation replicas", () => {
       });
       return client;
     });
-    // "leaving" has not been wanted for a day.
     storage.joinAutomationWorkspace({ workspaceId: "leaving", nowMs: 0, reasons: ["automation"] });
     storage.unwantAutomationWorkspace({ workspaceId: "leaving", nowMs: 0 });
     const clock = { ms: AUTOMATION_WORKSPACE_LEAVE_AFTER_MS };
@@ -1202,7 +1183,6 @@ describe("the automation replicas", () => {
       "an unwanted copy still leaves on time",
     ).toBe(AUTOMATION_WORKSPACE_LEAVE_AFTER_MS);
 
-    // A write to the good workspace still pulls it, and the broken one keeps being tried.
     const pulls = () =>
       engine.sent.filter(
         (request) =>
@@ -1235,7 +1215,6 @@ describe("the automation replicas", () => {
       streamIdentity: "stream-1",
     });
     const engine = fakeEngine();
-    // The busy workspace's pulls always have more.
     const answer = spawn.getMockImplementation()!;
     let busyHandle: string | undefined;
     spawn.mockImplementation(async (spawned: Parameters<typeof answer>[0]) => {
@@ -1257,7 +1236,6 @@ describe("the automation replicas", () => {
       });
       return client;
     });
-    // Its pulls have more from the start, even while it first opens.
     let opened = true,
       cursor = 1;
     const clock = { ms: 5 };
@@ -1277,7 +1255,6 @@ describe("the automation replicas", () => {
       await running.close();
       await rm(root, { recursive: true, force: true });
     });
-    // The busy one never catches up, and the quiet one still opens.
     await vi.waitFor(() => expect(running.replica(WORKSPACE)).toBeDefined(), {
       timeout: WAIT_TIMEOUT_MS,
     });
@@ -1344,7 +1321,6 @@ describe("the automation replicas", () => {
     expect(closed).toBe(true);
   });
 
-  // A phone write the owner's account recorded on the copy, sending one message.
   function phoneWrite(storage: SyncRelayStorage, id: string) {
     const command: PublicationCommand = {
       stages: [
@@ -1368,7 +1344,6 @@ describe("the automation replicas", () => {
     });
     if (claim.kind !== "recorded") throw new Error(`expected a new record, got ${claim.kind}`);
   }
-  // The receipt of a write's one stage, whose message the copy journaled at `originSeq`.
   const receipt = (
     id: string,
     originSeq: number,
@@ -1383,7 +1358,6 @@ describe("the automation replicas", () => {
       coordinates: [{ originId: "copy", originSeq, state }],
     },
   ];
-  // The relay accepted the message at the copy's coordinate.
   const accept = (raw: ReturnType<typeof inspectDatabase>, id: string, originSeq: number) =>
     raw
       .prepare(
@@ -1454,7 +1428,6 @@ describe("the automation replicas", () => {
       await running.close();
       await rm(root, { recursive: true, force: true });
     });
-    // The first pass is asked for at once.
     await vi.advanceTimersByTimeAsync(0);
     await first;
     // `waitMs` is how long the pass waits: 100 ms once asked for, or a failed pass's delay.
@@ -1488,12 +1461,10 @@ describe("the automation replicas", () => {
     const { running, root, pass } = await stepped(storage, () => wanted);
     phoneWrite(storage, "lost");
     phoneWrite(storage, "unwritten");
-    // The relay holds the message, but the copy never heard its push answered.
     accept(raw, "lost", 1);
     engine.receipts(new Map([receipt("lost", 1, "pending")]));
     await pass();
     expect(outcome(raw, "lost")[0], "the copy waits to see its push").toBe("recorded");
-    // "Show on phone" goes off, so the writes no longer keep the copy, and it retires.
     storage.setShowOnPhone({ ownerUserId: "owner", workspaceId: WORKSPACE, showOnPhone: false });
     wanted = new Map();
     const handle = running.replica(WORKSPACE)!.workspace;
@@ -1515,7 +1486,6 @@ describe("the automation replicas", () => {
     expect(folders(root)).toEqual([]);
     expect(storage.listAutomationWorkspaces()).toEqual([]);
 
-    // Showing the workspace again makes a new copy, which replays nothing.
     storage.setShowOnPhone({ ownerUserId: "owner", workspaceId: WORKSPACE, showOnPhone: true });
     const reads = count(engine, "sync.ordinary.publicationState");
     wanted = new Map([[WORKSPACE, ["account"]]]);
@@ -1551,7 +1521,6 @@ describe("the automation replicas", () => {
     expect(existsSync(sentinel), "the folder stays while its read's handle is open").toBe(true);
     expect(existsSync(join(home, "settled")), "marked settled").toBe(true);
     expect(errors).toHaveLength(1);
-    // An account visit wants the copy again.
     return {
       ...copy,
       home,
@@ -1561,7 +1530,6 @@ describe("the automation replicas", () => {
       },
     };
   }
-  // Whether the copy open now is a fresh one: the settled folder, with its unsent records, is gone, and the write stays refused.
   function freshCopy(
     running: { replica(workspaceId: string): unknown },
     raw: ReturnType<typeof inspectDatabase>,
@@ -1586,7 +1554,6 @@ describe("the automation replicas", () => {
         (request) => request.method === "workspace.open" && request.params.relay !== undefined,
       ).length;
     const opens = relayOpens();
-    // The visit's pass removes the settled folder, and the removal deletes the marker, then fails.
     stuck.path = home;
     stuck.renamed = true;
     stuck.partly = true;
@@ -1612,7 +1579,6 @@ describe("the automation replicas", () => {
       "the leftover kept its name",
     ).toEqual([leftover]);
 
-    // The removal works again; the retry opens a fresh copy and removes the leftover.
     stuck.path = null;
     await pass(WORKSPACE);
     freshCopy(running, raw, sentinel);
@@ -1742,7 +1708,6 @@ describe("the automation replicas", () => {
     const engine = fakeEngine();
     const clock = { ms: 0 };
     const { running, pass, wantPublishing } = await visitedThenPublishing(storage, clock);
-    // The visit's write stays to publish once the visit ends.
     phoneWrite(storage, "sent");
     engine.receipts(new Map([receipt("sent", 1, "pending")]));
     wantPublishing();
@@ -1751,7 +1716,6 @@ describe("the automation replicas", () => {
     const reads = count(engine, "sync.ordinary.publicationState"),
       pushes = count(engine, "sync.push");
     expect(reads).toBeGreaterThan(0);
-    // The relay's head doesn't move, and the copy still pushes and looks again.
     await pass(WORKSPACE);
     expect(count(engine, "sync.ordinary.publicationState")).toBeGreaterThan(reads);
     expect(count(engine, "sync.push")).toBeGreaterThan(pushes);
@@ -1766,7 +1730,6 @@ describe("the automation replicas", () => {
     accept(raw, "sent", 1);
     await pass(WORKSPACE);
     expect(outcome(raw, "sent")).toEqual(["saved", "published", { threadId: "thread" }]);
-    // The next pass gives back the reason the saved write held.
     await pass();
     expect(
       storage.listAutomationWorkspaces()[0]?.reasons,
@@ -1780,7 +1743,6 @@ describe("the automation replicas", () => {
     const wanted = () => new Map<string, readonly CopyReason[]>([[WORKSPACE, ["account"]]]);
     const first = await stepped(storage, wanted);
     const opened = first.running.replica(WORKSPACE)!;
-    // The copy's chats live under its handle, which the restarted engine gives it again.
     const chats = new ChatsLiveAdapter(engine.chats, opened.workspace, { workspaceId: WORKSPACE });
     const group = await chats.createChannel({
       workspaceId: WORKSPACE,
@@ -1797,7 +1759,6 @@ describe("the automation replicas", () => {
       messageId: ids.messageId("post"),
       body: "Lunch?",
     };
-    // A crash after the row and before the engine's stage, on the copy that is open: the row is all there is.
     const claim = storage.recordAccountOperation({
       accountId: "owner",
       operationId: "unsent",
@@ -1905,7 +1866,6 @@ describe("the automation replicas", () => {
       ).toEqual([]);
       engine.receipts(new Map());
 
-      // A visit's sync fails before it pulls, while the relay may have moved the page to a secret path.
       if (moved) engine.movedOnRelay(new Map([["object-plan", ".env"]]));
       engine.failPush(new Error("the relay is unreachable"));
       const replica = restarted.running.replica(WORKSPACE)!;
@@ -1913,7 +1873,6 @@ describe("the automation replicas", () => {
       await restarted.pass();
       expect(sends(), `moved: ${moved}; the copy is behind the relay, so nothing replays`).toBe(0);
 
-      // A full sync catches it up again and asks for the pass that replays, into a thread still visible.
       const before = errors.length;
       engine.failPush(false);
       await replica.sync();
@@ -1982,7 +1941,6 @@ describe("the automation replicas", () => {
       const sends = () =>
         engine.sent.filter((request) => request.method === "chats.messages.send").length;
 
-      // The next pass's replay starts while the copy is current, and waits on its receipt read.
       let readReached!: () => void, releaseRead!: () => void;
       const reading = new Promise<void>((resolve) => {
         readReached = resolve;
@@ -1997,7 +1955,6 @@ describe("the automation replicas", () => {
       });
       const passing = restarted.pass();
       await reading;
-      // Meanwhile the relay may move the page to a secret path, and a visit's sync starts and waits before it pulls.
       if (moved) engine.movedOnRelay(new Map([["object-plan", ".env"]]));
       const gate = engine.holdPulls();
       const syncing = restarted.running.replica(WORKSPACE)!.sync();
@@ -2006,7 +1963,6 @@ describe("the automation replicas", () => {
       await passing;
       expect(sends(), `moved: ${moved}; the replay stopped`).toBe(0);
 
-      // Still owed: a pass after the sync replays, into a thread still visible.
       const before = errors.length;
       gate.release();
       await syncing;
@@ -2053,7 +2009,6 @@ describe("the automation replicas", () => {
     expect(claim.kind).toBe("recorded");
     await first.running.close();
 
-    // While the server is stopped, the page moves to a secret path at the relay. The folder still has it where it was.
     raw
       .prepare(`INSERT INTO sync_relay_object_moments (workspace_id, object_id, relay_seq, moment_id, version_id, path, recorded_at_ms)
       VALUES (?, 'object-plan', 1, 'moment-1', 'main', '.env', 1)`)
@@ -2067,7 +2022,6 @@ describe("the automation replicas", () => {
     ).not.toContain("chats.messages.send");
     expect(outcome(raw, "unsent")[0], "the write stays unsent").not.toBe("refused");
 
-    // Its copy retires as any copy does, and the write settles as unsent.
     storage.setShowOnPhone({ ownerUserId: "owner", workspaceId: WORKSPACE, showOnPhone: false });
     wanted = new Map();
     await restarted.pass();

@@ -43,7 +43,6 @@ async function closedDatabase() {
 }
 
 function removeAuthorshipMigration(db: InspectionDatabase): void {
-  // Recreate the pre-authorship store without the later hosted-publication extensions.
   db.exec("ALTER TABLE sync_relay_log DROP COLUMN relay_admission");
   for (const name of [
     "settlement_cut_usage_insert",

@@ -86,7 +86,6 @@ describe("automation steps a share would stop", () => {
     );
     expect(screen.getByTestId("share-create").textContent).toBe("Invite anyway");
 
-    // Another access level is another share: its own check, and no warning for View.
     await chooseAccess(user, "view");
     expect(screen.queryByTestId("share-automation-warning")).toBeNull();
     await chooseAccess(user, "edit");
@@ -218,7 +217,7 @@ describe("EmailShareForm", () => {
     const code = await screen.findByTestId("share-code");
     expect(code.textContent).toBe(SHARE_CODE);
     expect(screen.queryByTestId("share-browser-invitation-copy")).toBeNull();
-    // #2886: shares end from the Sharing view.
+    // Shares end from the Sharing view.
     expect(screen.getByText("You can end this share anytime from Sharing.")).toBeTruthy();
 
     await user.click(screen.getByTestId("share-code-copy"));

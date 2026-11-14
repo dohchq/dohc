@@ -15,10 +15,9 @@ import {
 } from "./helpers/workspace";
 
 // A person creates a file from the explorer and types into it. The editor's
-// live session holds the new document while capture first sees the file. The
-// capture layer used to report itself degraded for as long as the document
-// stayed open, so History, search, and a file's chats refused with "still
-// updating". Each of them must answer while the document is open.
+// live session holds the new document while capture first sees the file.
+// History, search, and a file's chats must each answer while the document is
+// open, and never refuse with "still updating".
 
 type FileChatsAnswer = { status?: string; fileObjectId?: string | null };
 
@@ -55,7 +54,6 @@ test("a new file open in the editor keeps History, search, and its chats working
     const workspace = await openWorkspaceFromFirstRun(page, temp);
     await waitForWorkspaceFile(page, workspace.workspaceId, "notes/readme.md");
 
-    // The explorer's New file: an empty file, then the editor opens it.
     await page.evaluate(async (id) => {
       const api = (
         window as unknown as {
@@ -92,13 +90,10 @@ test("a new file open in the editor keeps History, search, and its chats working
     expect(chats.status).not.toBe("refused");
     expect(chats.fileObjectId).toBeTruthy();
 
-    // History: an edit to another file lands as a moment while the new
-    // document stays open.
     await openHistoryView(page);
     await writeWorkspaceFiles(temp, [
       { path: "notes/readme.md", contents: "# Notes\n\nEdited on disk.\n" },
     ]);
-    // The file's first capture and then the edit: the newest row is first.
     const moments = page.locator(
       '[data-testid="engine-moment-open"][data-moment-path="notes/readme.md"]',
     );
@@ -116,7 +111,6 @@ test("a new file open in the editor keeps History, search, and its chats working
       .poll(async () => await readFile(join(temp.rootPath, "notes/readme.md"), "utf8"))
       .toBe("# Notes\n");
 
-    // Search finds the new file's text.
     await page.getByTestId(activityPin("search")).click();
     await expect(page.getByTestId("search-view")).toBeVisible();
     await page.getByTestId("search-input").fill(sentinel);
@@ -124,7 +118,6 @@ test("a new file open in the editor keeps History, search, and its chats working
       page.locator('[data-testid="search-result-group"][data-path="notes/fresh.md"]'),
     ).toBeVisible({ timeout: 20_000 });
 
-    // Still open, and the lookup still answers after all of that.
     const again = await listFileChats(page, workspace.workspaceId, "notes/fresh.md");
     expect(again.status).not.toBe("refused");
     expect(again.fileObjectId).toBe(chats.fileObjectId);

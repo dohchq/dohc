@@ -24,6 +24,7 @@ import {
   type LiveRestoreValidator,
   type LiveRestoreWork,
 } from "./liveRestoreValidation.js";
+import { childStderrLog, serverLogClass } from "./serverLogWords.js";
 
 export type SettlementNormalizationInput = {
   document: import("@dohc/live-session-contract").LiveDocumentKey;
@@ -196,11 +197,12 @@ export function createLiveValidationExecutor(
     // `close` follows the exit and the end of stderr, so its verdict is complete.
     child.once("close", release);
     let carry = "";
+    const forward = childStderrLog("[live-validation]");
     // Reading a refused fork's unopened stderr fails; that must not crash the relay.
     child.stderr?.on("error", () => {});
     child.stderr?.setEncoding("utf8");
     child.stderr?.on("data", (text: string) => {
-      process.stderr.write(text);
+      forward(text);
       const seen = carry + text;
       if (/Reached heap limit|JavaScript heap out of memory/.test(seen)) slot.heapExhausted = true;
       carry = seen.slice(-32);
@@ -262,11 +264,7 @@ export function createLiveValidationExecutor(
         if (!closed) hold(slot, false);
         const failed = value as { kind?: unknown; errorClass?: unknown };
         if (failed.kind === "failed")
-          reject(
-            new LiveValidatorFailure(
-              typeof failed.errorClass === "string" ? failed.errorClass : "unknown",
-            ),
-          );
+          reject(new LiveValidatorFailure(serverLogClass(failed.errorClass)));
         else resolve(value as Result);
         notify();
       };

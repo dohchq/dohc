@@ -28,7 +28,6 @@ const waiting = {
 
 type Sent = { url: string; init: RequestInit };
 
-/** A relay answering each request with the next body, recording what it was sent, and the deadlines asked for. */
 function world(...answers: Array<{ status?: number; body: unknown } | "hang">) {
   const sent: Sent[] = [];
   const deadlines: number[] = [];

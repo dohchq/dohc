@@ -179,7 +179,6 @@ function decodeReferenceComponent(value: string): string {
   });
 }
 
-// A file link in a chat message: its path and, when it has one, its heading.
 export interface ChatFileReference {
   path: string;
   headingAnchor?: string;
@@ -278,8 +277,6 @@ export function scanChatLinks(body: string): {
     const rawHeading = hash < stop ? body.slice(hash + 1, stop) : undefined;
     const headingAnchor =
       rawHeading !== undefined ? decodeReferenceComponent(rawHeading.trim()) : undefined;
-    // Keep heading normalization unchanged, but reject an explicitly present
-    // heading delimiter whose value is empty after normalization.
     if (path.trim() && (rawHeading === undefined || headingAnchor)) {
       tokens.push({
         path,

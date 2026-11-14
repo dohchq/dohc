@@ -127,9 +127,9 @@ export const CLOUD_JOB_GRAPH = {
   "rust-policy": { names: ["Rust policy checks"], needs: ["changes"] },
   "rust-tests": {
     names: Array.from({ length: RUST_SHARDS - 1 }, (_, index) => `Rust tests ${index + 1}`),
-    needs: ["changes", "rust-archive", "javascript-workers"],
+    needs: ["changes", "rust-archive"],
   },
-  rust: { names: ["engine gate"], needs: ["changes", "rust-archive", "javascript-workers"] },
+  rust: { names: ["engine gate"], needs: ["changes", "rust-archive"] },
 };
 
 function gateJobNames(scope) {
@@ -151,23 +151,6 @@ function jobReadyAt(job, metadata) {
   const dependencies = (node?.needs ?? []).flatMap((id) => {
     const { names } = CLOUD_JOB_GRAPH[id],
       present = sameHead.filter((dependency) => names.includes(dependency.name));
-    if (!present.length && names.length > 1) {
-      const prefix = names.reduce((prefix, name) => {
-        while (!name.startsWith(prefix)) prefix = prefix.slice(0, -1);
-        return prefix;
-      });
-      if (
-        sameHead.some((dependency) => {
-          const expression = dependency.name.indexOf("${{");
-          return (
-            dependency.conclusion === "skipped" &&
-            expression > 0 &&
-            prefix.startsWith(dependency.name.slice(0, expression))
-          );
-        })
-      )
-        return [];
-    }
     return names.flatMap((name) => {
       const matches = present.filter((dependency) => dependency.name === name);
       return matches.length !== 1 ? [null] : matches[0].conclusion === "skipped" ? [] : matches;
@@ -216,24 +199,6 @@ function gateTiming(scope, required, metadata = required, transferSeconds = null
     conclusion: job.conclusion,
     runnerWaitSeconds: wait(job),
   }));
-  // Rust waits for the JS worker matrix; their conclusions do not affect its verdict.
-  const javascriptNames = CLOUD_JOB_GRAPH["javascript-workers"].names;
-  const javascriptWaits =
-    scope === "rust"
-      ? metadata
-          .filter(
-            (job) =>
-              javascriptNames.includes(job.name) &&
-              job.conclusion !== "skipped" &&
-              job.head_sha === required.find((job) => job.name === "what changed").head_sha,
-          )
-          .map((job) => ({
-            name: job.name,
-            createdAt: job.created_at,
-            startedAt: job.started_at,
-            runnerWaitSeconds: wait(job),
-          }))
-      : [];
   const preparedAt = Date.parse(
     required.find((job) => job.name === "shared preparation").completed_at,
   );
@@ -241,14 +206,13 @@ function gateTiming(scope, required, metadata = required, transferSeconds = null
     ...CLOUD_JOB_GRAPH["confinement-compiler"].names,
     ...CLOUD_JOB_GRAPH["confinement-relay"].names,
   ];
-  const longest = [
-    ...jobs.filter(
+  const longest = jobs
+    .filter(
       (job) =>
         job.name !== "what changed" &&
         (!confinementNames.includes(job.name) || Date.parse(job.startedAt) > preparedAt),
-    ),
-    ...javascriptWaits,
-  ].reduce((a, b) => (a.runnerWaitSeconds > b.runnerWaitSeconds ? a : b));
+    )
+    .reduce((a, b) => (a.runnerWaitSeconds > b.runnerWaitSeconds ? a : b));
   const contended = longest.runnerWaitSeconds > 30 || transferSeconds > 30,
     seconds = spanSeconds;
   const targetSeconds = scope === "js" ? 300 : 600;
@@ -435,9 +399,9 @@ export async function waitForGate(
   try {
     for (;;) {
       if (now() < deadline) {
-        required = (await (readJobs ? readJobs() : api.jobs())).filter((job) =>
-          expected.includes(job.name),
-        );
+        required = (
+          await (readJobs ? readJobs() : api.jobs({ conditional: true, slowUnchanged: false }))
+        ).filter((job) => expected.includes(job.name));
         if (expected.some((name) => required.filter((job) => job.name === name).length > 1))
           throw new Error(`Duplicate ${scope} jobs.`);
         if (required.some((job) => job.status === "completed" && job.conclusion !== "success"))

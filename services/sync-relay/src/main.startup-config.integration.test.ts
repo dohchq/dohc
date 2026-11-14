@@ -67,7 +67,6 @@ describe("sync relay startup guards", () => {
       async () => {
         const response = await fetch(`${relay.baseUrl}/ready`);
         expect(response.status, `relay stayed unready\nstderr:\n${relay.stderr()}`).toBe(200);
-        // The self-host profile runs automations by default.
         expect(await response.json()).toEqual({
           ok: true,
           service: "sync-relay",
@@ -151,4 +150,38 @@ describe("sync relay startup guards", () => {
       expect(stderr).toContain(reason);
     },
   );
+
+  // Proves: a device control configuration that cannot be read stops the relay without its file's path in the log.
+  it("refuses an unreadable device delivery configuration without naming its path", async () => {
+    const root = await tempRoot("device-delivery-startup");
+    const configPath = join(root, "deployment.json");
+    initializeRelayDeployment({
+      configPath,
+      relayPath: join(root, "relay", "relay.sqlite"),
+      continuityDirectory: join(root, "continuity"),
+    });
+    const limits = {
+      maxConnections: 8,
+      maxHeaderBytes: 8192,
+      maxCredentialBytes: 4096,
+      maxPayloadBytes: 4096,
+      maxPendingBytes: 8192,
+      maxFragments: 8,
+      maxBufferedChunks: 8,
+      handshakeTimeoutMs: 20_000,
+      heartbeatIntervalMs: 100,
+      heartbeatTimeoutMs: 10_000,
+      closeTimeoutMs: 100,
+    };
+    const { code, stderr } = await spawnRelayExpectExit({
+      SYNC_RELAY_TEST_AUTH: "1",
+      SYNC_RELAY_DB_PATH: undefined,
+      DOHC_RELAY_DEPLOYMENT_CONFIG: configPath,
+      DOHC_DEVICE_CONTROL_LIMITS: JSON.stringify(limits),
+      DOHC_RELAY_DEVICE_DELIVERY_CONFIG: join(root, "private-plan", "delivery.json"),
+    });
+    expect(code).toBe(1);
+    expect(stderr).toContain("FATAL: Invalid device control configuration.");
+    expect(stderr).not.toContain("private-plan");
+  });
 });

@@ -17,7 +17,6 @@ describe("splitMarkdownBlocks", () => {
     const doc = `${filler}\n\n${fence}\n\n${filler}`;
     const chunks = splitMarkdownBlocks(doc);
     expect(chunks.length).toBeGreaterThan(1);
-    // The full fence (including its interior blank lines) lives in one chunk.
     const holders = chunks.filter((c) => c.includes("const a = 1;"));
     expect(holders).toHaveLength(1);
     expect(holders[0]).toContain("const b = 2;");
@@ -41,7 +40,6 @@ describe("splitMarkdownBlocks", () => {
     );
     const doc = paragraphs.join("\n\n");
     const chunks = splitMarkdownBlocks(doc);
-    // Re-joining chunks reproduces every paragraph intact.
     const joined = chunks.join("\n\n");
     for (const p of paragraphs) expect(joined).toContain(p);
     // And no chunk starts or ends mid-paragraph (always full lines from the set).
@@ -64,7 +62,6 @@ describe("splitMarkdownBlocks", () => {
     expect(holder(chunks, "| A | B |")).toBe(holder(chunks, comment));
     expect(holder(chunks, comment)).toContain(`${comment}\n\n\n${table}`);
 
-    // A list item reads a comment across a blank line too.
     const item = `- ${comment}\n\n${table.replaceAll(/^/gmu, "  ")}`;
     const listed = splitMarkdownBlocks(`${"x".repeat(4060)}\n\n${item}\n\nAfter.`);
     expect(holder(listed, comment)).toContain(item);

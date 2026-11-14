@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { fatal, installShutdown, parseGracePeriodMs, serveFetchHandler } from "@dohc/service-http";
 import { loadShareWebConfig } from "./config";
 import { createDeviceControlBridge } from "./deviceControlBridge";
-import { createLiveGateway } from "./liveGateway";
+import { createLiveGateway, namedSessionCheckIntervalMs } from "./liveGateway";
 import { createNamedLiveRelayRoute, namedLiveGatewayRequest } from "./namedLiveRelayRoute";
 import { clientAddress } from "./clientAddress";
 import {
@@ -48,6 +48,8 @@ const application = createShareWebApplication({
   viewerAssetsDir,
   accountAuth: config.accountAuth,
   namedBrowserSessionLimits: config.namedBrowserSessionLimits,
+  namedSessionCheckIntervalMs:
+    config.namedLiveGatewayLimits && namedSessionCheckIntervalMs(config.namedLiveGatewayLimits),
   namedLiveTickets: config.namedLiveGatewayLimits !== undefined,
   namedRecipientBrowserLimits: config.namedRecipientBrowserLimits,
   linkLive: config.linkLive,

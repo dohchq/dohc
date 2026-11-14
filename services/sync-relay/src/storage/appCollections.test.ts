@@ -738,7 +738,6 @@ it.each([{ readFields: ["destination"] }])(
     ).toThrow(/Collection responses are shared files/);
     expect(f.storage.readAppPublication(f.owner).authorityRevision).toBe(2);
 
-    // A previously stored approval must also fail closed without writing a response.
     f.raw
       .prepare(
         "UPDATE sync_relay_app_collection_approvals SET capability_json=? WHERE publication_id=?",

@@ -17,7 +17,6 @@ export interface ServerAccountDeleted {
   finished: boolean;
   email: string;
   server: string;
-  // Why this computer could not disconnect from the deleted account, if so.
   disconnectError: string | null;
 }
 

@@ -579,7 +579,6 @@ impl VersionedTextStore<'_> {
     }
 }
 
-/// One file of one side of a version comparison.
 struct CompareSideRow {
     path: String,
     kind: String,
@@ -591,7 +590,7 @@ struct CompareSideRow {
 /// `snapshots` has no path index, so the page walks the path key of
 /// `path_aliases` and reads each file's head by its object. Reading the rest
 /// of both versions and sorting it on every page took 33 s to compare two
-/// 50,000-file versions in pages of 200 (#3240).
+/// 50,000-file versions in pages of 200.
 fn compare_side_page(
     conn: &Connection,
     workspace_id: &str,

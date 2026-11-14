@@ -138,10 +138,10 @@ fn imported_activation_retains_original_source_without_minting_native_seed() {
     assert!(ack.adoption_replayed);
 }
 
-/// Opus's round 3a note: a registration that serves no activation outlives
-/// Phase A, and after a reconnect one could adopt the retired activation,
-/// committing an adoption whose answer is withheld. The replacement owner
-/// keeps the retired set, and adoption refuses before writing anything.
+/// A registration that serves no activation outlives Phase A. After a
+/// reconnect, one could adopt the retired activation and commit an adoption
+/// whose answer is withheld, so the replacement owner keeps the retired set
+/// and adoption refuses before writing anything.
 #[test]
 fn a_retired_activation_never_adopts_after_a_reconnect() {
     let mut f = imported_fixture();
@@ -343,7 +343,6 @@ fn hosted_activation_waits_for_its_document_backfill_not_the_ordinary_cursor() {
             .source,
         captured.source
     );
-    // A document that left the scope stops activating, ready or not.
     set(&mut f, "UPDATE hosted_replicas SET scope_generation=2");
     assert!(matches!(
         resume_imported(&mut f, &captured.activation_id, 1_000_000),
@@ -437,8 +436,6 @@ fn a_document_without_lineage_refuses_capture_unlike_one_whose_lineage_may_arriv
         capture_plain(&mut f),
         Err(ApplicationError::LiveDocumentWithoutLineage)
     ));
-    // The document with a lineage still activates, and its base past the
-    // committed position is still a conflict.
     capture_imported(&mut f, 1_000_000).unwrap();
     set(&mut f, "UPDATE ydoc_docs SET base_relay_seq=10");
     assert!(matches!(
@@ -796,7 +793,6 @@ fn reader_owner_base_has_its_own_authority_matrix() {
     for case in ["binding", "claim", "fence", "missing"] {
         let mut f = reader_fixture_case("valid");
         let resolver = reader_resolver();
-        // Populate a successful cache entry, then change mutable authority.
         assert!(prove_owner(&mut f, &resolver).unwrap());
         f.store.write_with(&NoFaults, |tx| {
             tx.execute("DELETE FROM ydoc_owner_base_sources", []).map_err(write_sql)?;

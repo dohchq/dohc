@@ -58,7 +58,6 @@ it("finishes a saved fenced reader stop-restore on retry", () => {
       maxEvents: 10,
     });
     expect(resolveLiveRestorePoint(capture, policy).markdownDigest).toBe(hash(source));
-    // The getter rechecks stored artifact authority even after an earlier successful proof.
     f.write((db) => {
       db.prepare("UPDATE sync_relay_object_moments SET object_id='foreign'").run();
     });

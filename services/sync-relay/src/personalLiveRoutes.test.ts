@@ -42,10 +42,6 @@ import { SERVICE_HOST_ENROLLMENTS } from "./storage/serviceHostEnrollment.js";
 import type { LiveUpdateJournalCut } from "./storage/types.js";
 import { LINK_KEY, RELAY_EXCHANGE_KEY, request, SHARE_WEB_ORIGIN, testHandler } from "./testing";
 
-// The personal agent routes over real HTTP and WebSocket, against the relay's
-// own handler for sign-in state and running work. The journal's side of a
-// personal edit is in `storage/liveAuthorSnapshots.test.ts`.
-
 const relayHost = "relay.example.test",
   OWNER = "owner-1";
 const frames = {
@@ -95,9 +91,7 @@ const limits: NamedLiveRouteLimits = {
   idleTimeoutMs: 10_000,
   drainTimeoutMs: 100,
 };
-/** The MCP address a personal agent signs in at for the workspace. */
 const RESOURCE = `${SHARE_WEB_ORIGIN}/mcp/agent/w/${scope.workspaceId}`;
-/** The self-hosted live host, which the fixture's device host hands over to. */
 const service = {
   mode: "service",
   hostId: "service-1",
@@ -161,10 +155,6 @@ function probe(): PersonalRunningEntry {
 type Agent = { agentId: string; connectionId: string; headers: Record<string, string> };
 type Socket = ReturnType<Awaited<ReturnType<typeof fixture>>["connect"]>;
 
-/**
- * The owner's workspace on a self-hosted live host that enrolled its
- * document, with the relay handler's personal agents behind the live routes.
- */
 async function fixture() {
   const state = await ticketFixture({
     liveTickets: {
@@ -265,7 +255,6 @@ async function fixture() {
   }
   await up();
 
-  // A test can hold validation to change the agent's access while it runs.
   let validations = 0,
     validating: Promise<void> | undefined;
   const validate: CapacityLiveAdmissionValidator = async ({
@@ -313,7 +302,6 @@ async function fixture() {
   await once(http, "listening");
   const port = (http.address() as { port: number }).port;
 
-  /** One of the owner's personal agents, signed in at the workspace's address and reaching it at `level`, as its sign-in commits it. */
   function agent(name: string, level: "view" | "comment" | "edit" = "edit") {
     const agentId = `p-${[...createHash("sha256").update(name).digest()]
       .slice(0, 26)
@@ -352,11 +340,9 @@ async function fixture() {
         headers: { authorization: `DohcAgent ${token}`, "x-dohc-agent-resource": RESOURCE },
       };
     };
-    /** The same agent's other connection, as a second client signed in. */
     return { ...connection(""), another: () => connection("-2") };
   }
 
-  /** What share-web sends for the agent's ticket request. */
   function ticketRequest(
     who: Agent,
     body: unknown = { workspaceId: scope.workspaceId, objectId: binding.objectId },
@@ -426,7 +412,6 @@ async function fixture() {
     );
     return { ws, status, received, closed };
   }
-  /** An owner's edit the host applied, read by the next pull, which waits for `held` before it answers. */
   function applied(updateBytes = Buffer.from([1, 2, 3]), held?: Promise<void>) {
     vi.mocked(native.client.readNextLiveApplied).mockImplementation(async (_request, after) => {
       if (after.eventCount) return null;
@@ -468,7 +453,6 @@ async function fixture() {
       },
     } as never);
   }
-  /** The owner changes the agent's reach from the roster. */
   async function reach(agentId: string, choices: { workspaceId: string; level: string }[]) {
     const response = await h(
       request(OWNER, `/sync/personal-agents/${agentId}/reach`, {
@@ -603,7 +587,6 @@ const delivered = (socket: Socket) =>
     ),
   );
 
-/** A session after its initial sync, with the host waiting for the next applied update. */
 async function editing(f: Fixture, who: Agent) {
   const socket = f.connect((await f.mint(who)).token, who);
   expect(await socket.status).toBe(101);
@@ -621,11 +604,19 @@ it("mints a ticket only for an agent at Edit, and only while the self-hosted liv
   expect((await f.ticketRequest(helper)).status).toBe(404);
   f.setSupported(true);
   expect(Object.keys(await f.mint(helper)).sort()).toEqual(["expiresAtMs", "token"]);
-  // A named recipient's body is not a personal agent's.
   expect(
     (await f.ticketRequest(helper, { discriminator: "abcdefghijkl", objectId: binding.objectId }))
       .status,
   ).toBe(404);
+});
+
+// A full share of tickets still answers a personal agent as before; only a link caller is asked to try again.
+it("refuses a personal agent at its share of unexpired tickets", async () => {
+  const f = await fixture(),
+    helper = f.agent("helper");
+  for (let minted = 0; minted < 8; minted++)
+    expect((await f.ticketRequest(helper)).status).toBe(200);
+  expect((await f.ticketRequest(helper)).status).toBe(404);
 });
 
 it("opens a ticket only for the connection it was minted for", async () => {

@@ -34,7 +34,6 @@ fn incoming_probes_only_certified_wikilinks_and_deduplicates_sources() {
         }
     );
     assert!(lookup(&s, "absent.md").sources.is_empty());
-    // Obsolete generations must not turn a Markdown-only source into a match.
     s.write_with(&NoFaults, |tx| {
         tx.execute(
             "UPDATE link_sources SET index_key='obsolete' WHERE object_id='a'",
@@ -143,7 +142,6 @@ fn source_parsing_checks_blob_integrity() {
         .read_with(|c| incoming::read_source(c, "ws", "main", "a"))
         .unwrap()
         .unwrap();
-    // A captured source owns its bytes even after the head changes.
     write(&mut s, "a", "a.md", "[[other]]", 2);
     assert_eq!(source.parse().unwrap().occurrences[0].literal, "target");
     s.write_with(&NoFaults, |tx| {
@@ -321,7 +319,6 @@ fn incoming_read_model_isolates_populated_workspaces_with_colliding_ids() {
         )
         .unwrap();
     }
-    // A second target alias makes only the foreign resolver ambiguous.
     c.execute(
         "INSERT INTO path_aliases VALUES('other','main','t','elsewhere/target.md')",
         [],
@@ -355,7 +352,6 @@ fn incoming_read_model_isolates_populated_workspaces_with_colliding_ids() {
             .sources
             .is_empty()
     );
-    // Changes to the foreign source cannot replace main's certification.
     c.execute(
         "UPDATE link_sources SET status='unindexed' WHERE workspace_id='other'",
         [],

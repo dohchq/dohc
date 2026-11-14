@@ -115,13 +115,8 @@ fn production_worker_binds_through_replay_pages_and_joins_on_close() {
 /// a Mac and by the descriptor held for it on Linux. After the folder moves
 /// and another takes its name, the worker still reads a retained file,
 /// recorded under the name main stores, in the folder the store opened
-/// through (#2468).
+/// through.
 #[cfg(any(target_vendor = "apple", target_os = "linux"))]
-/// The actor's store opens through its engine folder, by the folder's ID on
-/// a Mac and by the descriptor held for it on Linux. After the folder moves
-/// and another takes its name, the worker still reads a retained file,
-/// recorded under the name main stores, in the folder the store opened
-/// through (#2468).
 #[cfg(any(target_vendor = "apple", target_os = "linux"))]
 #[test]
 fn the_worker_reads_retained_files_in_the_folder_the_store_opened_through() {
@@ -262,7 +257,6 @@ fn add_source(actor: &WorkspaceActor, scratch: &ScratchDir, job: &str, target: &
     )
 }
 
-/// A retained original of job `job` for `target` at `source`, holding `bytes`.
 fn add_source_at(
     actor: &WorkspaceActor,
     scratch: &ScratchDir,
@@ -300,10 +294,10 @@ fn add_source_at(
         .unwrap()
 }
 
-/// #2205: an explicit delete lists and removes only quiet, finished,
-/// unheld originals on an unchecked volume. A changed source is recorded and
-/// kept, a hold taken after the check keeps its source, and an unfinished
-/// job's original and a kept recovery file stay.
+/// An explicit delete lists and removes only quiet, finished, unheld
+/// originals on an unchecked volume. A changed source is recorded and kept,
+/// a hold taken after the check keeps its source, and an unfinished job's
+/// original and a kept recovery file stay.
 #[test]
 fn an_explicit_delete_removes_only_eligible_originals() {
     let scratch = ScratchDir::new().unwrap();

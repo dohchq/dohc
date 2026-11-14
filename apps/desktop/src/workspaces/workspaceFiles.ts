@@ -119,7 +119,6 @@ export function extractFrontmatterIcon(head: string): string | undefined {
     ) {
       value = value.slice(1, -1);
     } else {
-      // Strip a trailing inline comment on an unquoted scalar.
       const comment = value.indexOf(" #");
       if (comment !== -1) value = value.slice(0, comment).trim();
     }
@@ -959,7 +958,6 @@ export interface DroppedFolderCheck {
   identity: FsEntryIdentity;
 }
 
-// The folder a dropped entry sits in.
 export function droppedEntryParent(source: DroppedSource, entry: DroppedEntry): DroppedFolderCheck {
   const at = entry.path.lastIndexOf("/");
   return {
@@ -1124,41 +1122,34 @@ export async function screenPickedPaths(
 // and why: the user handed them over and deserves to see they did not land,
 // same as a collision-budget skip inside the copy.
 //
-// TRUST DELTA vs copyIntoWorkspace's dialog path: these
-// absolute source paths are RENDERER-supplied (webUtils.getPathForFile in the
-// preload), not minted by a main-process file dialog — a compromised renderer
-// could forge the IPC array and name any readable file (e.g. ~/.ssh/id_rsa) to
-// have it copied into a possibly cloud-synced workspace. That residual is
-// inherent once file-write IPCs exist at all (renderer-compromise is already
-// game-over) and a genuine user drag may legitimately include any file the
-// user owns, so we do not gate by location. We DO bound it:
+// Trust differs from copyIntoWorkspace's dialog path: the renderer supplies
+// these absolute source paths (webUtils.getPathForFile in the preload), and
+// no main-process file dialog minted them. A compromised renderer could forge
+// the IPC array and name any readable file (e.g. ~/.ssh/id_rsa) to have it
+// copied into a possibly cloud-synced workspace. A genuine drag may include
+// any file the user owns, so location is not gated. These bounds apply:
 //   - count is capped here (not just at the zod boundary), and larger caps
 //     count every entry inside a dropped folder, landed or left out;
-//   - only real regular files and folders import — a FINAL-component symlink
+//   - only real regular files and folders import. A final-component symlink
 //     is refused before it is followed (lstat the original source, never
 //     realpath-then-isFile, which would promote a planted symlink-to-secret
-//     under the link's own innocuous name); special files are skipped, and a
-//     folder's walk never follows a link inside it;
+//     under the link's own name); special files are skipped, and a folder's
+//     walk never follows a link inside it;
 //   - every entry keeps the identity lstat gave it, so a file or folder
 //     another process swaps for a link after the screen is never copied;
-//   - a source whose CANONICAL path is inside any `.dohc` folder, or inside a
+//   - a source whose canonical path is inside any `.dohc` folder, or inside a
 //     registered workspace's `.dohc` wherever a link puts it, is refused (the
-//     check runs on realpath(source), so an ancestor symlink cannot smuggle a
+//     check runs on realpath(source), so an ancestor symlink cannot carry a
 //     metadata source past it);
-//   - a link on the way to a dropped item decides where the item really is,
-//     so it must belong to root or to this user. Another user's link, such as
-//     `/Users/Shared/evil/proj -> /Users/victim`, could otherwise turn a drop
-//     of `evil/proj/Documents` into this user's own Documents, and every
-//     later check would verify that target. Root owns the system links, such
-//     as macOS /tmp -> /private/tmp, so legitimate drags through them import.
-// Residuals: a link this user or root owns still leads where it leads, which
-// grants a compromised renderer nothing beyond the residual above (it could
-// just name `~/.ssh/id_rsa` directly). Another user's link swapped in and out
-// around the screen's adjacent checks is the window left. Windows has no
-// owner to compare here.
-// The real defense if that matters is a visible import-confirm quarantine
-// (deferred — needs product sign-off); until then it is accepted and named
-// here.
+//   - a link on the way to a dropped item must belong to root or to this
+//     user. Another user's link, such as `/Users/Shared/evil/proj ->
+//     /Users/victim`, could otherwise turn a drop of `evil/proj/Documents`
+//     into this user's own Documents. Root owns the system links, such as
+//     macOS /tmp -> /private/tmp, so drags through them import.
+// Accepted residuals: a link this user or root owns still leads where it
+// leads, and another user's link can be swapped in and out around the
+// screen's adjacent checks. Windows has no owner to compare here. A visible
+// import-confirm quarantine would close them and is deferred.
 export async function screenDroppedPaths(
   absolutePaths: string[],
   registeredRoots: string[],
@@ -1274,7 +1265,6 @@ async function screenDroppedSource(
   }
 }
 
-// A dropped item reached through a link another user owns.
 class ForeignDropLinkError extends Error {
   constructor(source: string) {
     super(
@@ -1886,8 +1876,7 @@ export async function moveIntoWorkspaceTrash(
     } catch (error) {
       moveError = error;
       // Only a length failure earns a shorter name. Windows reports an
-      // over-long path as ENOENT, which is how #613 disguised itself;
-      // anything else is not about length.
+      // over-long path as ENOENT; anything else is not about length.
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== "ENAMETOOLONG" && code !== "ENOENT") throw error;
     }

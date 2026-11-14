@@ -205,7 +205,6 @@ describe("EmojiPicker — dismiss leaves text intact", () => {
     const listbox = screen.getByRole("listbox", { name: "emoji" });
     const options = screen.getAllByRole("option");
     expect(options.length).toBeGreaterThan(1);
-    // Points at the first option on open.
     expect(listbox.getAttribute("aria-activedescendant")).toBe(options[0]!.id);
     expect(options[0]!.id).toBeTruthy();
 

@@ -118,7 +118,7 @@ export class RelayConflictError extends Error {
 // is ahead of local reality, or holds the same origin seq with different
 // content). That means the local engine.db was restored/cloned from an older
 // snapshot — pushing must fail closed rather than silently drop local ops.
-// Recovering via an origin reset is 0P-C follow-up work.
+// Recovering via an origin reset is follow-up work.
 export class RelayOriginDivergedError extends Error {
   constructor(message = "Relay log for this origin diverged from the local journal.") {
     super(message);
@@ -470,7 +470,6 @@ export type NoticeKind = keyof typeof NOTICE_KINDS;
 // start with these, so the owner's computers can act on them there.
 export const SERVER_RUN_FAILED_NOTICE_PREFIX = "server-automation-failed:";
 export const SERVER_HOLD_NOTICE_PREFIX = "automation-held:";
-// The kinds a person or agent may post.
 export type PostableNoticeKind = {
   [Kind in NoticeKind]: (typeof NOTICE_KINDS)[Kind]["recipients"] extends "relay" ? never : Kind;
 }[NoticeKind];
@@ -478,12 +477,10 @@ export type PostableNoticeKind = {
 // Lengths count code points, as a person counts characters.
 export const NOTICE_TITLE_MAX_CHARS = 120;
 export const NOTICE_BODY_MAX_CHARS = 500;
-// The relay's display-name limit for a sender.
 export const NOTICE_SENDER_LABEL_MAX_CHARS = 40;
 // The target as JSON, in UTF-8 bytes.
 const NOTICE_TARGET_MAX_BYTES = 2_048;
 export const NOTICE_TARGET_FIELD_MAX_CHARS = 1_024;
-// The id a sender posts.
 export const NOTICE_POSTED_ID_MAX_CHARS = 256;
 // The id the relay stores and serves. A notice from another person is
 // stored as `from:<sender user id, percent-encoded>:<posted id>`, so no
@@ -685,16 +682,25 @@ export interface RelayNotice {
   createdAtMs: number;
   readAtMs: number | null;
   dismissedAtMs: number | null;
+  // When the relay lets the row go. Each mark starts the row's retention
+  // again, so a computer keeps its copy until this time and no longer.
+  expiresAtMs: number;
   // The relay removed the row to make room in the list. Drop it; its body
   // and target are gone.
   removed: boolean;
 }
 
 // With `scope=phone`, a page leaves out rows in owned workspaces whose owner
-// turned off "Show on phone", and rows whose target is a secret or ignored
-// file or a thread on one; a removed row carries no title. The cursor still
-// moves past what it left out, so a page can be empty with `hasMore`. With
-// `wait`, a read whose cursor is caught up waits for the next change.
+// turned off "Show on phone", rows whose target is a secret or ignored file or
+// a thread on one, and every row whose kind's words the relay can't confirm:
+// an automation's rows without their Collection's path, a mention or agent run
+// naming no place, an automation wake, and any kind it doesn't know. A
+// removed row carries no title, body, sender name, or target. When a row read
+// through a share loses its target, as when the recipient loses the share,
+// the next page starts the list over with `replace`, and the whole list
+// leaves that row out. The cursor still moves past what it left out, so a
+// page can be empty with `hasMore`. With `wait`, a read whose cursor is
+// caught up waits for the next change.
 export interface RelayNoticePage {
   notices: RelayNotice[];
   // Opaque. Pass it back as `cursor` for the changes after this page; no
@@ -702,7 +708,8 @@ export interface RelayNoticePage {
   nextCursor: string;
   hasMore: boolean;
   // The page starts the list over, because the cursor is older than the
-  // relay keeps removed rows or came from another relay history. Drop every
+  // relay keeps removed rows or came from another relay history, or, on the
+  // phone's scope, a row read through a share lost its target. Drop every
   // cached row, keep your own waiting posts and marks, and take this page
   // and the pages after it as the whole list.
   replace: boolean;
@@ -712,9 +719,18 @@ export interface RelayNoticePage {
   personalAgentsRevision: number;
 }
 
-// POST /sync/notices/marks. Read and dismissed are one-way: marking a row
-// again, or a row the relay no longer holds, changes nothing.
-export type NoticeMark = "read" | "dismissed";
+// POST /sync/notices/marks. Marking a row again, or a row the relay no
+// longer holds, changes nothing. `unread` clears a read mark and `restore`
+// clears a dismissal; each keeps the other mark and starts the row's
+// retention again. A dismissal's first-dismissal receipt outlives a restore,
+// so dismissing again is never first. Only the owner's phone sends `unread`
+// and `restore`, with `?scope=phone` and its account session.
+export type NoticeMark = "read" | "dismissed" | "unread" | "restore";
+export type ComputerNoticeMark = Extract<NoticeMark, "read" | "dismissed">;
+// A phone's request body is exactly `{ marks: [{ noticeId, mark }] }`, at most
+// this many bytes. A computer's may add `installId` and, on a dismissal,
+// `withdraw: true`.
+export const NOTICE_MARKS_MAX_BODY_BYTES = 512 * 1024;
 
 // The answer to POST /sync/notices/marks. `dismissed` lists the notices this
 // request dismissed first, so of all the computers that dismiss one notice,

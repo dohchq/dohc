@@ -251,7 +251,6 @@ interface AutomationFieldValue {
   value: AutomationValue;
 }
 
-/** One key of an action's input, and the value it gets. */
 interface AutomationInputValue {
   key: string;
   value: AutomationValue;
@@ -341,18 +340,15 @@ export interface Automation {
   name: string;
   enabled: boolean;
   when: AutomationTrigger;
-  /** The "Only if" condition, or null. */
   if: string | null;
   do: AutomationStep[];
 }
 
 export const AUTOMATION_DIAGNOSTIC_CODES = [
-  // Problems with the whole file.
   "invalid-yaml",
   "file-too-large",
   "root-not-mapping",
   "unsupported-version",
-  // Problems with a property, in the file or in one automation.
   "unknown-property",
   "missing-property",
   "duplicate-key",
@@ -366,7 +362,6 @@ export const AUTOMATION_DIAGNOSTIC_CODES = [
   "too-long",
   "duplicate-value",
   "control-characters",
-  // Problems in one automation.
   "invalid-id",
   "missing-kind",
   "multiple-kinds",
@@ -1395,7 +1390,6 @@ function inputYaml(input: readonly AutomationInputValue[]): Map<string, unknown>
     : new Map(input.map(({ key, value }) => [key, valueYaml(value)]));
 }
 
-// A kind key and its argument, then the options that are not null.
 function withOptions(
   kind: string,
   argument: unknown,
@@ -1499,7 +1493,6 @@ function automationYaml(automation: Automation): Map<string, unknown> {
 // YAML 1.1 readers, such as PyYAML, read an unquoted 12:30 as the number 750.
 const SEXAGESIMAL = /^\d+(?::\d+)+$/;
 
-// Quotes every formula, and every clock time for YAML 1.1 readers.
 function quoteScalars(documents: YamlDocument[]): void {
   visit(documents, (node) => {
     if (node.kind === "scalar" && (node.value.startsWith("=") || SEXAGESIMAL.test(node.value))) {

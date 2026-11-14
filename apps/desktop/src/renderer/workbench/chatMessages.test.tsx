@@ -24,7 +24,7 @@ import { setChosenColors } from "./chosenColors";
 // scan, so its call count shows whether a message actually re-rendered.
 vi.mock("@dohc/workspace-contracts/chat-mentions", { spy: true });
 
-// Shared Chats pieces (PR 13, WS-E): both the file-rail panel and the Chats
+// Shared Chats pieces: both the file-rail panel and the Chats
 // view send through this composer, so its Enter semantics are load-bearing
 // for every chat surface at once.
 
@@ -66,7 +66,6 @@ describe("ChatComposer Enter-to-send", () => {
     // keydown arrives with isComposing = true and must never submit.
     fireEvent.keyDown(composer, { key: "Enter", isComposing: true });
     expect(onSend).not.toHaveBeenCalled();
-    // The same Enter after composition ends sends normally.
     fireEvent.keyDown(composer, { key: "Enter", isComposing: false });
     expect(onSend).toHaveBeenCalledTimes(1);
   });
@@ -147,7 +146,6 @@ describe("chat authorship display", () => {
     expect(screen.getByTitle("Ada").className).toContain("text-muted");
     const scans = vi.mocked(scanChatLinks).mock.calls.length;
 
-    // A save that hides a sidebar view is a new settings object.
     rerender(
       save({
         ...DEFAULT_USER_SETTINGS,
@@ -232,7 +230,6 @@ describe("chat authorship display", () => {
     );
   });
 
-  // Every connected agent of one account shares that account's unnamed agent group, so only its name tells two apart.
   it.each([
     ["your", "Claude", "Codex", { group: "unnamed-agent", hue: null, self: true, connected: true }],
     [
@@ -451,7 +448,6 @@ describe("chat authorship display", () => {
     expect(badge.getAttribute("aria-label")).toBe("agent");
     expect(mark.textContent).toBe("Link holder");
     expect(mark.title).toBe("Link holder");
-    // A screen reader meets the agent badge, then the name, then the link mark.
     expect(badge.compareDocumentPosition(author) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(author.compareDocumentPosition(mark) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     const avatar = document.querySelector<HTMLElement>("[data-link-agent]")!;
@@ -741,8 +737,6 @@ describe("formatChatTime", () => {
     expect(formatChatDay(new Date(2026, 8, 16).getTime(), now)).toBe("Yesterday");
   });
 
-  // The cached Intl.DateTimeFormat must format exactly like the
-  // toLocaleString call it replaced — same ambient locale, same options.
   it("matches the ambient-locale toLocaleString output exactly", () => {
     const at = 1_700_000_000_000;
     expect(formatChatTime(at)).toEqual({
@@ -777,7 +771,6 @@ describe("pinnedChatDay", () => {
   });
 
   it("hides the label when the conversation fits without scrolling", () => {
-    // The first message is the top row, and its divider is in full view.
     expect(pinnedChatDay({ day: "Today", startsDay: true, dividerFullyVisible: true })).toBeNull();
     expect(pinnedChatDay(null)).toBeNull();
   });
@@ -793,9 +786,6 @@ describe("pinnedChatDay", () => {
 });
 
 describe("ChatMessageList memo boundary", () => {
-  // Hosts keep composer drafts in the component that renders this list, so a
-  // keystroke re-renders the host. The list must not reconcile (and re-scan
-  // every message body) when its own props are unchanged.
   it("skips re-rendering when the host re-renders with unchanged props", () => {
     const messages: ChatMessageRecord[] = [
       {
@@ -909,7 +899,6 @@ describe("message reactions (WS-MU-C2)", () => {
     expect(accessibleName).toContain("Alice");
     expect(accessibleName).toContain("Bob");
     expect(screen.getByRole("button", { name: "👍 2 — Alice, Bob" })).toBe(pill);
-    // Not the viewer's reaction — not highlighted, aria-pressed false.
     expect(pill.getAttribute("data-mine")).toBe("false");
     expect(pill.getAttribute("aria-pressed")).toBe("false");
   });
@@ -946,7 +935,6 @@ describe("message reactions (WS-MU-C2)", () => {
       emoji: "🎉",
       nextState: "added",
     });
-    // Selecting closes the picker.
     expect(screen.queryByTestId("test-chat-reaction-picker")).toBeNull();
   });
 
@@ -1017,7 +1005,6 @@ describe("message reactions (WS-MU-C2)", () => {
     expect(quick.map((button) => button.dataset.emoji)).toEqual(["👍", "🙌"]);
     expect(quick[0]!.getAttribute("aria-pressed")).toBe("false");
     expect(quick[1]!.getAttribute("aria-pressed")).toBe("true");
-    // The toolbar holds the one add-reaction trigger; the pill row keeps none.
     expect(within(toolbar).getByTestId("test-chat-add-reaction")).toBeTruthy();
     expect(screen.getAllByTestId("test-chat-add-reaction")).toHaveLength(1);
     fireEvent.click(quick[0]!);

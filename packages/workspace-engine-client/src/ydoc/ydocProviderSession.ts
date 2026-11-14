@@ -65,10 +65,10 @@ export interface EngineYdocProviderSessionOptions {
   allowLossySourceSha256?: string;
   transport: EngineTransport;
   // Share one adapter across every doc on a given transport so request ids stay
-  // unique per session generation (bot #3601684269). When omitted a private
-  // adapter is created and disposed with this session; a shared adapter is
-  // never disposed here. R13's framed transport should additionally own id
-  // allocation as the hard guarantee.
+  // unique per session generation. When omitted a private adapter is created
+  // and disposed with this session; a shared adapter is never disposed here.
+  // A framed transport should additionally own id allocation as the hard
+  // guarantee.
   adapter?: YdocLiveAdapter;
   workspace: string;
   versionId: string;

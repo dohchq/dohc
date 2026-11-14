@@ -42,7 +42,6 @@ fn fixture_with_binding_generation(
     fixture_of_origin(replicates, source, generation, "owner-origin")
 }
 
-/// A fixture whose store journals its own ops under `origin`.
 fn fixture_of_origin(
     replicates: bool,
     source: Option<&str>,
@@ -1516,7 +1515,6 @@ fn import_projection(
     let id = projection.expect("changed projection");
     if deferred {
         if first_coordinate == Some(FirstDrainCoordinate::RefusedPath) {
-            // Exercise the drain's path refusal after importing the audit chain.
             receiver.read_with(|conn| conn.execute(
                 "UPDATE replication_log SET payload_json=json_set(payload_json,'$.path','wrong.md') WHERE workspace_id='ws' AND origin_id='owner-origin' AND origin_seq=?1",
                 [first_delta_seq],
@@ -1692,7 +1690,6 @@ fn personal_authority(agent_id: &str) -> ServerDerivedLiveUpdateAuthority {
     }
 }
 
-/// The owner, named and link authorities an ordinary record can carry.
 fn ordinary_authorities() -> [Option<ServerDerivedLiveUpdateAuthority>; 3] {
     [
         None,
@@ -2363,8 +2360,6 @@ fn native_origin_details_survive_import_and_forged_source_is_rejected() {
     assert_eq!(count(&receiver, "live_owner_adoptions"), 0);
 }
 
-/// Accepts a delivery at `cursor` that adds a paragraph to the baseline, and
-/// returns its receipt.
 fn accept_authored(
     f: &mut Fixture,
     cursor: i64,
@@ -2440,7 +2435,6 @@ fn settle_interval(
     moment_authors(&f.store, moment_id).expect("the host credits its interval")
 }
 
-/// Settle through `receipt` as the host does and journal the settlement.
 fn settle_through(
     f: &mut Fixture,
     receipt: dohc_engine_collab::live_update_application::LiveUpdateReceipt,
@@ -2565,7 +2559,6 @@ fn receiver_with_blobs(f: &Fixture) -> (ScratchDir, std::path::PathBuf, EngineSt
     (scratch, path, receiver)
 }
 
-/// Apply each op in order and report which ones applied.
 fn import_all(receiver: &mut EngineStore, ops: &[ReplicationEnvelope]) -> Vec<(String, bool)> {
     ops.iter()
         .map(|op| {
@@ -2611,7 +2604,6 @@ fn ordinary_audit_evidence_cannot_credit_an_imported_moment() {
     for native_settlements in [false, true] {
         let mut f = fixture(true);
         bootstrap(&mut f, false).unwrap();
-        // A claimed Edit link holder whose client sent no recording context.
         accept_authored(
             &mut f,
             1,
@@ -2622,7 +2614,6 @@ fn ordinary_audit_evidence_cannot_credit_an_imported_moment() {
             },
             None,
         );
-        // Another person, claimed under a named grant.
         accept_authored(
             &mut f,
             2,
@@ -2702,22 +2693,18 @@ fn ordinary_audit_evidence_cannot_credit_an_imported_moment() {
         for (kind, applied) in import_all(&mut receiver, &ops) {
             assert!(applied, "{kind}");
         }
-        // The peer retains the evidence, which adds no credit.
         assert_eq!(count(&receiver, "live_audit_events"), 3);
         assert_eq!(count(&receiver, "live_audit_settlements"), 1);
         assert_eq!(moment_authors(&receiver, &moment_id), None);
-        // A replayed pull changes nothing.
         import_all(&mut receiver, &ops);
         assert_eq!(moment_authors(&receiver, &moment_id), None);
         drop(receiver);
         let receiver = EngineStore::open(&path, 400).unwrap();
         assert_eq!(moment_authors(&receiver, &moment_id), None);
         assert_eq!(count(&receiver, "live_audit_events"), 3);
-        // Publication leaves raw History unchanged.
         assert_eq!(moment_authors(&f.store, &moment_id), Some(host));
 
         if !native_settlements {
-            // A settlement that claims another interval is still refused.
             let forged: Vec<_> = ops
                 .iter()
                 .map(|op| {
@@ -3021,8 +3008,6 @@ fn imported_owner(
                 journal_live_base_in_tx(tx, namespace, binding, 100)?;
                 return Ok(());
             }
-            // Only the ordinary base, as a lineage replicated before any
-            // live audit.
             let key = DocKey::new("ws", "main", "object").map_err(SyncError::corrupt)?;
             let state: String = tx
                 .query_row(
@@ -3301,9 +3286,6 @@ fn imported_owner(
     (f, source, baseline, activation)
 }
 
-/// An imported activation's adoption and two settlements on the service
-/// host. Returns what that host published, or nothing when the settlement is
-/// refused.
 fn imported_activation_publication(
     foreign_baseline: bool,
     preserve_baseline: bool,
@@ -3446,7 +3428,6 @@ const NATIVE_AUDIT_FIXTURE: &str = concat!(
     "/../../services/sync-relay/src/testing/fixtures/nativeAuthoredSettlement.json"
 );
 
-/// The operations an imported activation publishes, as the relay's fixture holds them.
 fn native_audit_fixture() -> serde_json::Value {
     let ops = imported_activation_publication(false, false);
     ops.iter()
@@ -3594,9 +3575,6 @@ fn distinct_audit_records_at_one_coordinate_keep_the_conservative_union() {
     }
 }
 
-/// One relay delivery of an audit record: the event it records, whether a
-/// second owner store published it at its own coordinate, and whether the
-/// relay confirmed its authors.
 struct AuditCopy {
     event_count: i64,
     republished: bool,
@@ -3662,8 +3640,6 @@ fn commit_recipient_deliveries(f: &mut Fixture, deliveries: i64) -> serde_json::
     authors
 }
 
-/// Imports the host's content, then each audit copy in order. Returns the
-/// retained projection authors and, after a reopen, the History moment's.
 fn import_audit_copies(
     f: &Fixture,
     authors: &serde_json::Value,
@@ -3841,7 +3817,6 @@ fn malformed_restore_receipt_pull(field: &str, value: serde_json::Value) {
         "nativeSourceManifestDigest":f.binding.lineage_claim_id,"frozenStateDigest":f.binding.lineage_claim_id,
         "pointStateDigest":f.binding.lineage_claim_id,"finalContentDigest":f.input.projected_markdown_digest
     })).unwrap();
-    // Serialize through the native metadata and restore types, in native record order.
     let bytes = format!(
         "{{\"kind\":\"application\",\"relayDatabaseNamespace\":\"relay\",\"eventCount\":1,\"evidenceDigest\":\"{evidence}\",\"updateByteLength\":{},\"metadata\":{},\"sourceApplication\":{{\"localYDocSequence\":2,\"hostCoordinate\":{{\"hostId\":\"host\",\"hostEpoch\":1,\"instanceId\":\"instance\",\"connectionId\":\"connection\"}}}},\"sourceRestore\":{},\"cancelledRestores\":[],\"contentCoordinate\":{}}}",
         f.bytes.len(),
@@ -4269,7 +4244,6 @@ fn a_parked_hosted_document_resumes_its_activation_after_it_returns() {
     )
     .unwrap();
     drop(owner);
-    // The relay acknowledged what the host wrote and its seed was delivered.
     let host_ops = crate::list_replication_ops(&store, "ws", HOST, -1, 500).unwrap();
     store
         .write_with(&NoFaults, |tx| {
@@ -4468,7 +4442,6 @@ fn a_held_update_on_a_shared_journal_waits_for_its_events_cursor() {
         ApplicationResult::Applied(..)
     ));
 
-    // The owner receives the service host's ops.
     let ops: Vec<ReplicationEnvelope> = host_operations(&host.store)
         .into_iter()
         .map(|mut op| {
@@ -4548,7 +4521,6 @@ fn a_held_update_on_a_shared_journal_waits_for_its_events_cursor() {
             install_observed_binding_in_tx(tx, "ws", &observed, &checkpoint)
         })
         .unwrap();
-    // The owner's feed accepts `update` at `cursor`, as a committed frame.
     let mut feed = |owner: &mut EngineStore, update: &[u8], cursor: i64| {
         let TxnOutcome::Committed(result) = owner
             .write_with(&NoFaults, |tx| {
@@ -4587,7 +4559,6 @@ fn a_held_update_on_a_shared_journal_waits_for_its_events_cursor() {
             })
             .unwrap()
     };
-    // What the owner decides as a pull pass ends.
     let decide = |owner: &mut EngineStore, cache: &mut WriterDocCache| {
         let decided =
             crate::ydoc_apply::decide_owner_holds_in_workspace(owner, cache, "ws", &NoFaults)

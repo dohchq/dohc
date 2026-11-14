@@ -7,7 +7,6 @@ import type { PresencePeer, PresenceSnapshot, PresenceTransport } from "./presen
 
 afterEach(cleanup);
 
-// A transport whose peer set the test can push at will.
 function pushableTransport() {
   let snapshot: PresenceSnapshot = { version: 0, peers: [] };
   const waiters = new Set<(s: PresenceSnapshot) => void>();
@@ -117,8 +116,6 @@ describe("usePresence gating + guard", () => {
     view.rerender(<Harness enabled transport={tB.transport} topic="B" />);
     await flush();
     act(() => {
-      // Late resolution of the old channel's in-flight poll: the ghost only
-      // renders if the stale callback slipped past the guard.
       tA.set([
         {
           faceToken: "ghost",
@@ -147,8 +144,6 @@ describe("usePresence gating + guard", () => {
       });
       await flush();
       expect(t.publishes.at(-1)).toMatchObject({ typing: true });
-      // The caller never calls setTyping(false); the idle window (5s default)
-      // must publish the clear on its own.
       await act(async () => {
         await vi.advanceTimersByTimeAsync(5_000);
       });
@@ -172,11 +167,13 @@ describe("usePresence gating + guard", () => {
       });
       await flush();
       expect(t.publishes.length).toBe(before + 1);
+      const laterKeystrokes = 3;
+      const keystrokeIntervalMs = 1_000;
       // (3 keystrokes x 1s keeps the whole timeline inside the 10s heartbeat,
       // so every publish observed here is typing-driven.)
-      for (let i = 0; i < 3; i += 1) {
+      for (let i = 0; i < laterKeystrokes; i += 1) {
         await act(async () => {
-          await vi.advanceTimersByTimeAsync(1_000);
+          await vi.advanceTimersByTimeAsync(keystrokeIntervalMs);
         });
         act(() => {
           screen.getByTestId("start-typing").click();
@@ -184,16 +181,17 @@ describe("usePresence gating + guard", () => {
         await flush();
       }
       expect(t.publishes.length).toBe(before + 1); // still just the one edge
-      // …and the repeated keystrokes kept the idle window alive: at t=7s the
-      // window measured from the first keystroke (t=5s) has lapsed, but the
-      // one from the last keystroke (t=3s+5s=8s) has not — no clear yet…
+      const idleWindowMs = 5_000;
+      const lastKeystrokeAtMs = laterKeystrokes * keystrokeIntervalMs;
+      const firstKeystrokeDeadlineMs = idleWindowMs;
+      const lastKeystrokeDeadlineMs = lastKeystrokeAtMs + idleWindowMs;
+      const betweenTheDeadlinesMs = (firstKeystrokeDeadlineMs + lastKeystrokeDeadlineMs) / 2;
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(4_000);
+        await vi.advanceTimersByTimeAsync(betweenTheDeadlinesMs - lastKeystrokeAtMs);
       });
       expect(t.publishes.length).toBe(before + 1);
-      // …then at t=8s typing finally clears, exactly once.
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(1_000);
+        await vi.advanceTimersByTimeAsync(lastKeystrokeDeadlineMs - betweenTheDeadlinesMs);
       });
       expect(t.publishes.length).toBe(before + 2);
       expect(t.publishes.at(-1)).toMatchObject({ typing: false });

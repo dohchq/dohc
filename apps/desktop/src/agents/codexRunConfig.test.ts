@@ -325,7 +325,6 @@ describe("a dohc Codex run", () => {
       {
         [REQUIREMENTS]: "[windows]\nallowed_sandbox_implementations = ['elevated', 'unelevated']\n",
       },
-      // Files dohc can't read or parse.
       { [USER]: "[windows\n" },
       { [REQUIREMENTS]: "[features\n" },
     ];
@@ -467,7 +466,6 @@ describe("a dohc Codex run", () => {
     const network = "[sandbox_workspace_write]\nnetwork_access = true\n";
     expect(profile({ [USER]: network })).toMatch(/,network=\{enabled=true\}\}$/u);
     expect(profile({ [SYSTEM]: network })).toMatch(/,network=\{enabled=true\}\}$/u);
-    // The user file wins over the system file.
     expect(
       profile({ [SYSTEM]: network, [USER]: "[sandbox_workspace_write]\nnetwork_access = false\n" }),
     ).not.toContain("network");
@@ -870,7 +868,6 @@ describe("a dohc Codex run", () => {
                 // A link into the workspace, where an earlier run swapped the folder it names for a link into another workspace.
                 "/home/sam/proj": "/data/ws/build",
                 "/data/ws/build": "/srv/other/.dohc",
-                // A link inside the folder it names.
                 "/opt/c/self": ".",
                 // A link whose `..` comes after a link, where a run turned ws/cache into a
                 // link deeper in the workspace and ws/lib into a link into another workspace.
@@ -1080,7 +1077,6 @@ describe("Codex without a saved login", () => {
   it("may reach a model through the provider Codex picks from the person's config", () => {
     expect(mayRun({ [USER]: "model_provider = 'azure'\n" })).toBe(true);
     expect(mayRun({ [USER]: "model_provider = 'openai'\n" })).toBe(false);
-    // The user config wins over the system config, and the system requirements win over both.
     expect(
       mayRun({ [SYSTEM]: "model_provider = 'azure'\n", [USER]: "model_provider = 'openai'\n" }),
     ).toBe(false);

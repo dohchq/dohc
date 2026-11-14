@@ -117,6 +117,77 @@ it("says the file could not open, not that the connection failed, when the share
   expect(live.reconnect).toHaveBeenCalledOnce();
 });
 
+it("says the server could not open the file, not that the connection failed, while the server is busy", async () => {
+  const live = session("Body");
+  const busy: NamedLiveBrowserState = {
+    ...live.state(),
+    status: "disconnected",
+    reason: "host-unavailable",
+  };
+  await act(async () =>
+    root.render(
+      <NamedDocumentEditor
+        session={{ ...live, state: () => busy }}
+        path="docs/a.md"
+        link
+        onState={() => {}}
+      />,
+    ),
+  );
+  expect(container.querySelector('[role="status"]')?.textContent).toBe(
+    "The server could not open the file for editing. dohc keeps trying.",
+  );
+  const button = container.querySelector("button");
+  expect(button?.textContent).toBe("Try again");
+  await act(async () => button?.click());
+  expect(live.reconnect).toHaveBeenCalledOnce();
+});
+
+it("says the owner removed the reader's access, and offers no retry", async () => {
+  const live = session("Body");
+  const removed: NamedLiveBrowserState = {
+    ...live.state(),
+    status: "disconnected",
+    reason: "access-removed",
+  };
+  await act(async () =>
+    root.render(
+      <NamedDocumentEditor
+        session={{ ...live, state: () => removed }}
+        path="docs/a.md"
+        onState={() => {}}
+      />,
+    ),
+  );
+  expect(container.querySelector('[role="status"]')?.textContent).toBe(
+    "The owner removed your access.",
+  );
+  expect(container.querySelector("button")).toBeNull();
+});
+
+it("says a full link can take no more people, and offers no retry", async () => {
+  const live = session("Body");
+  const full: NamedLiveBrowserState = {
+    ...live.state(),
+    status: "disconnected",
+    reason: "link-full",
+  };
+  await act(async () =>
+    root.render(
+      <NamedDocumentEditor
+        session={{ ...live, state: () => full }}
+        path="docs/a.md"
+        link
+        onState={() => {}}
+      />,
+    ),
+  );
+  expect(container.querySelector('[role="status"]')?.textContent).toBe(
+    "This link cannot take more people. Ask the owner for a new link.",
+  );
+  expect(container.querySelector("button")).toBeNull();
+});
+
 it("asks the reader to check the connection when the connection failed", async () => {
   const live = session("Body");
   const closed: NamedLiveBrowserState = {

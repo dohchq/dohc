@@ -53,8 +53,6 @@ fn queue(
     store.load_materialization_job(path).unwrap().unwrap()
 }
 
-/// Write "after" to `path` under `root`, as a peer's edit arrives, expecting
-/// the file to hold `before`, or not to exist when `before` is `None`.
 fn write_job(db: &Path, root: &Path, path: &str, before: Option<&[u8]>) -> JobOutcome {
     let mut store = EngineStore::open(db, 0).unwrap();
     let preimage = match before {
@@ -70,7 +68,6 @@ fn engine_write(db: &Path, root: &Path, path: &str, before: Option<&[u8]>) {
     assert_eq!(std::fs::read(root.join(path)).unwrap(), b"after");
 }
 
-/// The one `.conflict` copy in `dir`.
 fn conflict_copy(dir: &Path) -> PathBuf {
     let copies: Vec<PathBuf> = std::fs::read_dir(dir)
         .unwrap()
@@ -188,7 +185,6 @@ fn a_posix_acl_mask_does_not_become_group_access() {
     let report = scratch.path().join("report.md");
     std::fs::write(&report, b"before").unwrap();
     set_mode(&report, 0o600);
-    // User 4242 and the group read, and others get nothing.
     let entries = [
         (USER_OBJ, 6, UNDEFINED),
         (USER, 4, 4242),

@@ -511,7 +511,6 @@ describe("desktop CLI workspace context", () => {
         } as CliRequestWithoutToken);
 
       expect((await cli("history", "show", "journal")).stdout).toBe("dear diary");
-      // A change from a version that is not active reads as not found.
       f.capture.listVersions.mockResolvedValueOnce({ versions: [], activeVersionId: "draft" });
       expect(await cli("history", "show", "journal")).toEqual({
         exitCode: 1,
@@ -524,7 +523,6 @@ describe("desktop CLI workspace context", () => {
         join(root, ".dohc", "files.toml"),
         '[[rule]]\npath = "private/**"\ntracked = false\n',
       );
-      // An untracked change says so, as the desktop's diff does, and names no path.
       expect(await cli("history", "show", "journal")).toEqual({
         exitCode: 1,
         stdout: "",
@@ -535,7 +533,6 @@ describe("desktop CLI workspace context", () => {
         stderr: "dohc: change moved is hidden because History no longer tracks its file\n",
       });
       expect((await cli("history", "show", "notes")).stdout).toBe("plain");
-      // A list row names only the path after the change; show also checks the path before it.
       expect((await cli("history", "list")).stdout).toBe(
         [
           `moved · ${new Date(20).toISOString()} · rename · notes/moved.md`,
@@ -556,7 +553,6 @@ describe("desktop CLI workspace context", () => {
         changes: [{ id: "moved" }, { id: "notes" }],
         count: 2,
       });
-      // Neither door sends the rename's summary, which names the excluded path.
       expect(JSON.stringify(await mcp("moments", { includeFiles: true }))).not.toContain(
         "private/",
       );
@@ -691,7 +687,6 @@ describe("desktop CLI workspace context", () => {
           args: { cwd: root, actor: "agent", ...args },
         } as CliRequestWithoutToken);
 
-      // Each version but Main says what it was made from, as the versions menu does.
       expect(await mcp("versionList")).toEqual({
         ok: true,
         activeVersionId: "draft",
@@ -711,8 +706,6 @@ describe("desktop CLI workspace context", () => {
         "  Main · main\n* Draft · draft · made from Main\n",
       );
 
-      // Untracked and secret files are left out, and the next page starts
-      // after the last file shown, never after a hidden one.
       expect((await cli("version", "compare", "Draft")).stdout).toBe(
         "modified · notes.md\nMore files; use --after notes.md\n",
       );
@@ -722,7 +715,6 @@ describe("desktop CLI workspace context", () => {
         files: [{ path: "notes.md", status: "modified", currentText: "old", incomingText: "new" }],
         nextAfterPath: "notes.md",
       });
-      // A page with no file to show is read past.
       expect((await cli("version", "compare", "Draft", "--after", "notes.md")).stdout).toBe(
         "added · zeta.md\n",
       );
@@ -763,10 +755,7 @@ describe("desktop CLI workspace context", () => {
         ],
       });
       expect(JSON.stringify(await mcp("versionConflicts"))).not.toContain("private/");
-      // A conflict nothing waits behind says nothing about waiting.
       expect(JSON.stringify(await mcp("versionConflicts"))).not.toContain("waiting");
-      // A newer version held behind a conflict reads as one fact, worded with
-      // the conflict's own path. Its coordinates sit beside the message.
       const waitingVersion = {
         code: "resolve-existing-conflict" as const,
         objectId: "notes-object",
@@ -817,7 +806,6 @@ describe("desktop CLI workspace context", () => {
         nextAfterConflictId: null,
       });
 
-      // Unreadable rules hide every file, so the answer names the rules file.
       await writeFile(join(root, ".dohc", "files.toml"), "[[rule]\n");
       expect(await mcp("versionCompare", { version: "Draft" })).toEqual({
         ok: false,
@@ -839,7 +827,6 @@ describe("desktop CLI workspace context", () => {
         ok: false,
         reason: "Versions belong to the owning workspace. Open it to continue.",
       });
-      // Nor the kept and old copies of files; those stay with the owning workspace.
       const agent = (
         verb: "keptCopies" | "saveKeptCopy" | "retainedCopies" | "deleteRetainedCopies",
         args: Record<string, unknown> = {},
@@ -1023,7 +1010,6 @@ describe("desktop CLI workspace context", () => {
         conflictCount: 3,
         replacedProtectedPaths: [],
       });
-      // The merge prints the conflicts it left, except the one at a path History does not track.
       expect((await cli("version", "merge", "Draft")).stdout).toBe(
         "Merged Draft into Main · 3 files merged · 3 conflicts\nc1 · merge · notes.md\nc2 · merge · logo.png · binary\n",
       );
@@ -1054,7 +1040,6 @@ describe("desktop CLI workspace context", () => {
       expect(f.capture.resolveConflict).not.toHaveBeenCalled();
       await cli("version", "resolve", "c2", "--keep", "incoming");
       expect(f.capture.resolveConflict).toHaveBeenLastCalledWith("c2", { kind: "apply-incoming" });
-      // The answer lists the conflicts still open.
       f.capture.listOpenConflictsPage.mockResolvedValueOnce(open).mockResolvedValueOnce({
         conflicts: [conflict("c2", "logo.png", binary)],
         nextAfterConflictId: null,
@@ -1074,7 +1059,6 @@ describe("desktop CLI workspace context", () => {
       ).toEqual({ ok: false, reason: "The engine stopped." });
       expect(rounds.at(-1)!.told).toEqual({});
 
-      // A window that can't save its edits stops the change, and its reason reaches the caller.
       f.dependencies.versionRound = async () => {
         throw new Error("A Collection write failed. Try again.");
       };
@@ -1085,7 +1069,6 @@ describe("desktop CLI workspace context", () => {
         stderr: "dohc: A Collection write failed. Try again.\n",
       });
 
-      // A shared view keeps no versions of its own.
       vi.mocked(f.dependencies.sharedViewOf).mockReturnValue({});
       expect(await mcp("versionCreate", { name: "Ideas" })).toEqual({
         ok: false,
@@ -1176,7 +1159,6 @@ describe("desktop CLI workspace context", () => {
       await writeFile(join(root, "plan.md"), "# Plan\n\nText.\n");
       const f = fixture(root);
       const context = await f.create().openCliWorkspace(f.workspace);
-      // Even with an editor holding it, the agent reads what is on disk.
       vi.mocked(f.dependencies.liveDocuments.readDocument).mockResolvedValueOnce({
         path: "readme.md",
         state: Y.encodeStateAsUpdate(markdownToYDoc(lossy)),
@@ -1185,7 +1167,6 @@ describe("desktop CLI workspace context", () => {
         path: "readme.md",
         markdown: lossy,
       });
-      // A document an editor holds before its file exists still reads from the editor.
       vi.mocked(f.dependencies.liveDocuments.readDocument).mockResolvedValueOnce({
         path: "draft.md",
         state: Y.encodeStateAsUpdate(markdownToYDoc("# Draft")),
@@ -1208,7 +1189,6 @@ describe("desktop CLI workspace context", () => {
         "dohc can't change readme.md without also changing parts it can't show, such as raw HTML or reference links. Edit the file directly instead.",
       );
       await expect(input.assertEditable("plan.md")).resolves.toBeUndefined();
-      // A read that fails, other than for a missing file, refuses too.
       await mkdir(join(root, "folder.md"));
       await expect(input.assertEditable("folder.md")).rejects.toThrow(
         "dohc couldn't read folder.md to check it, so nothing changed. Try again.",
@@ -1313,13 +1293,11 @@ describe("desktop CLI workspace context", () => {
       (await input.change(Y.encodeStateAsUpdate(current), { keepBlocks: true, headSha256: null }))!,
     );
     expect(documentMarkdown(Y.encodeStateAsUpdate(current))).toBe("Final plan.\n");
-    // A note that records no source takes the edit while its head is unknown.
     expect(
       await input.change(Y.encodeStateAsUpdate(markdownToYDoc("Draft plan.")), {
         keepBlocks: true,
       }),
     ).toBeInstanceOf(Uint8Array);
-    // A refusal from the projection reaches the caller.
     await expect(
       input.change(Y.encodeStateAsUpdate(markdownToYDoc("Final plan.")), {
         keepBlocks: true,
@@ -1336,7 +1314,6 @@ describe("desktop CLI workspace context", () => {
       const edit = vi.mocked(f.dependencies.liveDocuments.editDocument);
       const created = new Map<string, Y.Doc>();
       edit.mockImplementation(async (input) => {
-        // The file is on disk, empty, before the text goes to its session.
         expect(await readFile(join(root, input.path), "utf8")).toBe("");
         const doc = new Y.Doc();
         const update = await input.change(Y.encodeStateAsUpdate(doc), { keepBlocks: false });
@@ -1364,7 +1341,6 @@ describe("desktop CLI workspace context", () => {
         path: "notes/new.md",
         origin,
       });
-      // Unnamed agents still get agent attribution.
       const write = vi.mocked(f.capture.writeAuthoredFile);
       expect(write.mock.calls[0]).toEqual([
         join(root, "notes/new.md"),
@@ -1425,8 +1401,6 @@ describe("desktop CLI workspace context", () => {
       ).rejects.toThrow("taken.md already exists. Edit it instead.");
       expect(await readFile(join(root, "taken.md"), "utf8")).toBe("Already here.\n");
 
-      // The file stays, and the refusal names it, so the caller edits it
-      // instead of creating a second one.
       edit.mockRejectedValueOnce(new Error("engine busy"));
       await expect(
         context.documents!.create({ path: "later.md", markdown: "Text", origin }),
@@ -1437,7 +1411,6 @@ describe("desktop CLI workspace context", () => {
       // Five creates wrote their text, and later.md tried once.
       expect(edit).toHaveBeenCalledTimes(6);
 
-      // Two creates of one path: one creates it, the other is told it exists.
       const race = await Promise.allSettled([
         context.documents!.create({ path: "race.md", markdown: "First.", origin }),
         context.documents!.create({ path: "race.md", markdown: "Second.", origin }),
@@ -1447,7 +1420,6 @@ describe("desktop CLI workspace context", () => {
         reason: expect.objectContaining({ message: "race.md already exists. Edit it instead." }),
       });
 
-      // Frontmatter, even an empty envelope, is refused before a file exists.
       const writes = write.mock.calls.length;
       await expect(
         context.documents!.create({ path: "front.md", markdown: "---\n{}\n---\n\nBody.", origin }),
@@ -1636,7 +1608,6 @@ describe("raw fileMove and fileDelete socket requests", () => {
         },
         recordDisk: async () => ["folder/tracked.txt"],
         delete: async () => {
-          // History records the delete after the folder has moved into the trash.
           await expect(lstat(join(f.root, "folder"))).rejects.toMatchObject({ code: "ENOENT" });
           attachmentId = f.authorities.currentBinding(f.workspace.workspaceId).attachmentId;
           drained = f.authorities.invalidate(f.workspace.workspaceId);
@@ -1736,7 +1707,6 @@ describe("raw fileMove and fileDelete socket requests", () => {
         }),
       ).toMatchObject({ ok: false });
     }
-    // Every refusal leaves the disk as it was.
     expect(await readFile(join(f.root, "app/.env"), "utf8")).toBe("TOKEN=1");
     expect(await readFile(join(f.root, "hidden/a.txt"), "utf8")).toBe("hidden");
     expect(await readFile(join(f.root, "plain.txt"), "utf8")).toBe("original");
@@ -2428,8 +2398,6 @@ async function liveDocumentsFixture(
   return { ...f, h, activity, authors, answer, documents, transport, doors };
 }
 
-// Agents read reason codes, so each one the window's list can carry has its documented next step.
-
 describe.each(["cli", "mcp"] as const)("live documents through %s", (door) => {
   it("lists each live document with its state and reason, as Live documents does", async () => {
     const f = await liveDocumentsFixture();
@@ -2563,7 +2531,6 @@ describe.each(["mcp"] as const)("who stopped or resumed live editing, through %s
       before: "ready",
     });
     expect(changes.last.get("object-plan")).toEqual({ action: "stopped", atMs: 7, author: agent });
-    // Who asked was recorded before the server stopped anything.
     expect(changes.record.begin.mock.invocationCallOrder[0]).toBeLessThan(
       f.h.ownerLiveStop.mock.invocationCallOrder[0]!,
     );
@@ -2656,7 +2623,6 @@ it("gives CLI and MCP the IPC link answer in a share without Chats capture", asy
   await vi.waitFor(() => expect(f.dependencies.reads.linksResolve).toHaveBeenCalledOnce());
   const retired = f.authorities.invalidate(f.workspace.workspaceId);
   held.release();
-  // Finished work reports as finished when the workspace closes during it.
   await expect(pending).resolves.toEqual(resolved);
   await retired;
 });

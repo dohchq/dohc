@@ -131,7 +131,6 @@ describe("workspace authority owner", () => {
     expect(owner.isCurrentAttachment("shared", attachmentId)).toBe(false);
     workspace = { ...registered };
     expect(owner.isCurrentAttachment("shared", attachmentId)).toBe(false);
-    // The check is a lookup: it attached nothing new.
     expect(createState).toHaveBeenCalledOnce();
     const replacement = owner.acquire("shared");
     expect(owner.isCurrentAttachment("shared", replacement.binding.attachmentId)).toBe(true);

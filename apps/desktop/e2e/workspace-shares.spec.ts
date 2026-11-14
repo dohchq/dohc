@@ -36,15 +36,13 @@ import {
 // Spec 1 (grant side): the app user shares a file by email from the
 //   explorer context menu, gets a copyable share code, manages it under
 //   Settings → Sync and sharing, and ends it — after which the recipient's relay
-//   access returns 404 with the removed-recipient explanation (#1438).
+//   access returns 404 with the removed-recipient explanation.
 // Spec 2 (receive side, the full loop): grant → open the share in the app
 //   → browse/search the read-only view → granter edits → refresh sees it →
 //   revoke → refresh surfaces "this share was ended" honestly.
 
 const GRANTER_TOKEN = "test:e2e-granter";
-// How a recipient sees the granter: the relay's sharer name with their email.
 const GRANTER_LABEL = "e2e-granter (e2e-granter@dohc.test)";
-// What an Edit share view's banner says; Send changes sits beside it.
 const EDIT_BANNER = `Shared view from ${GRANTER_LABEL}. Markdown edits save to the live host. Other file changes need their acceptance.`;
 const UNUSED_CONTENT_HASH = "0".repeat(64);
 const RECIPIENT_TOKEN = "test:e2e-recipient";
@@ -205,7 +203,6 @@ test("grant side: share a file by email from the explorer, copy the code, and en
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
 
-    // Right-click the file → "Share…" → the share dialog.
     await revealExplorerPath(page, "docs/plan.md");
     await explorerRow(page, "docs/plan.md").click({ button: "right" });
     await page.getByTestId("explorer-menu-item-share").click();
@@ -223,8 +220,6 @@ test("grant side: share a file by email from the explorer, copy the code, and en
     const shareId = shareCode.split(":")[1]!;
     await dialog.getByTestId("share-done").click();
 
-    // The recipient can fetch the shared log; a stranger cannot, and the
-    // denial is byte-identical to a share that never existed.
     const recipientFetch = await relayJson(
       relay.baseUrl,
       RECIPIENT_TOKEN,
@@ -244,13 +239,11 @@ test("grant side: share a file by email from the explorer, copy the code, and en
     expect(strangerFetch.status).toBe(404);
     expect(strangerFetch.body).toBe(missingFetch.body);
 
-    // Sharing → "Shared by me": the grant is listed and endable.
     await page.getByTestId(activityPin("sharing")).click();
     const row = page.locator(`[data-testid="sharing-granted-row"][data-share-id="${shareId}"]`);
     await expect(row).toBeVisible();
     await expect(row).toContainText("plan.md");
     await expect(row.getByTestId("sharing-row-who")).toHaveText(`${RECIPIENT_EMAIL} can view`);
-    // Ending asks before it ends: the menu opens the confirm.
     await row.hover();
     await row.getByRole("button", { name: "Share actions" }).click();
     await page.getByRole("menuitem", { name: "End share…" }).click();
@@ -260,7 +253,7 @@ test("grant side: share a file by email from the explorer, copy the code, and en
     await expect(row.getByTestId("sharing-row-status")).toHaveText("Ended");
 
     // Revocation is live: the recipient's next fetch returns 404 with the
-    // owner-removed explanation (#1438).
+    // owner-removed explanation.
     const revokedFetch = await relayJson(
       relay.baseUrl,
       RECIPIENT_TOKEN,
@@ -532,7 +525,6 @@ confidentialTest.describe("View link lifecycle", () => {
         await expect(linkRow.getByTestId(`share-link-access-${linkGrantId}`)).toHaveText(
           "Can view",
         );
-        // A separate share is one step away while this one has a link.
         await expect(dialog.getByRole("button", { name: "Create separate link" })).toBeVisible();
         await expect(linkAccess).toHaveCount(0);
         const reachableRetuneTargets = await dialog
@@ -596,7 +588,7 @@ confidentialTest.describe("View link lifecycle", () => {
           neverValidCredential,
           "/sync/link/share",
         );
-        // #1422 normalizes unverified link refusals to the same opaque 404.
+        // The relay normalizes unverified link refusals to the same opaque 404.
         expect(neverValidRead.status).toBe(404);
         expect(JSON.parse(neverValidRead.body)).toEqual({
           ok: false,
@@ -688,7 +680,7 @@ confidentialTest.describe("View link lifecycle", () => {
           error: "not found",
           code: "not_found",
         });
-        // #1438 explains removal to former recipients while strangers stay opaque.
+        // The relay explains removal to former recipients while strangers stay opaque.
         expect(namedAfterEnd.status).toBe(404);
         expect(JSON.parse(namedAfterEnd.body)).toEqual({
           ok: false,
@@ -724,8 +716,6 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    // A test-only remote peer seeds shared and unshared content through the
-    // relay protocol under the granter account.
     relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay", "relay.sqlite") });
     await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: GRANTER_TOKEN, workspaceId });
     const granter = new RelayFilePeer({
@@ -739,7 +729,6 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
       { path: "private/hidden.md", text: "The kraken ledger stays private.\n" },
     ]);
 
-    // The grant: docs/ (folder selector), addressed to the recipient email.
     const create = await relayJson(relay.baseUrl, GRANTER_TOKEN, `/sync/${workspaceId}/shares`, {
       method: "POST",
       body: JSON.stringify({ recipientEmail: RECIPIENT_EMAIL, paths: ["docs"], access: "view" }),
@@ -748,7 +737,6 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
     const shareId = (JSON.parse(create.body) as { shareId: string }).shareId;
     const shareCode = `dohc-share:${shareId}:${relay.baseUrl}`;
 
-    // The app is the recipient: fresh home, signed in as the recipient.
     await seedCloudCredentials(temp, {
       serverUrl: relay.baseUrl,
       relayUrl: relay.baseUrl,
@@ -766,7 +754,6 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
     await expect(page.getByTestId("open-shared-view")).toContainText(temp.rootPath);
     await page.getByTestId("open-share-start").click();
 
-    // The shared view opens: banner, shared files, and not the private one.
     await expect(page.getByTestId("workspace-shell")).toBeVisible();
     const banner = page.getByTestId("shared-view-banner");
     await expect(banner).toBeVisible();
@@ -777,11 +764,9 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
     await expect(explorerRow(page, "private")).toHaveCount(0);
     await expect(explorerRow(page, "private/hidden.md")).toHaveCount(0);
 
-    // Browse: the file opens and shows the granter's content.
     await explorerRow(page, "docs/shared.md").click();
     await expect(page.getByText("The comet-tail draft.")).toBeVisible();
 
-    // Search: the shared view is locally searchable.
     await page.getByTestId(activityPin("search")).click();
     await page.getByTestId("search-input").fill("comet-tail");
     await expect(
@@ -790,8 +775,6 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
     await page.getByTestId("search-input").fill("kraken");
     await expect(page.locator('[data-testid="search-result-group"]')).toHaveCount(0);
 
-    // Writes are refused with the honest copy — at the IPC boundary, not
-    // just in the UI.
     const writeAttempt = await page.evaluate(async (unusedContentHash) => {
       const api = (
         window as unknown as {
@@ -866,7 +849,7 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
         }),
       );
       const mcp = await api.getMcpConfig({ workspaceId });
-      // WS-G2-C-2 gate fix 4: a live engine Y.Doc session is writable, so opening
+      // A live engine Y.Doc session is writable, so opening
       // one in a read-only shared view must be refused at the IPC boundary (same
       // class as the write bypass above). applyEngineYDocUpdate on the refused
       // session must be an inert no-op — it must never throw and never write.
@@ -881,9 +864,6 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
           update: new Uint8Array([1, 2, 3]),
           lineageGeneration: 1,
           requestId: "11111111-1111-4111-8111-111111111111",
-          // Typing this from the contract surfaced a second drift the
-          // hand-written shape hid: `seq` is required too, so the call would
-          // have been rejected at the schema again.
           seq: 1,
         }),
       );
@@ -901,8 +881,6 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
     // the launched server registers only the write tools that level grants.
     // This share was created at "view", which grants none.
     expect(bypassAttempts.mcpArgs.join(" ")).toContain("--share-access view");
-    // The engine Y.Doc editor session is refused (never opens a writable session
-    // in a shared view), and applying an update to it is an inert no-op.
     expect(bypassAttempts.engineYDocAvailable).toBe(false);
     expect(bypassAttempts.engineYDocApply).toBe("allowed");
     // "allowed" only proves the apply didn't throw — a regression that dropped
@@ -912,13 +890,10 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
     // unchanged after the apply attempt.
     expect(await readFile(sharedFilePath, "utf8")).toBe(originalSharedContents);
 
-    // The granter keeps working; the recipient refreshes and sees it.
     await granter.writeText("docs/shared.md", "# Shared\n\nThe comet-tail draft, round two.\n");
     await page.getByTestId("shared-view-refresh").click();
     await expect(page.getByText("The comet-tail draft, round two.")).toBeVisible();
 
-    // The granter ends the share; the next refresh says so honestly and the
-    // local copy stays readable.
     const revoke = await relayJson(relay.baseUrl, GRANTER_TOKEN, `/sync/shares/${shareId}/revoke`, {
       method: "POST",
     });
@@ -946,7 +921,6 @@ test("mount side: add a share into a workspace and open it beside local files", 
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    // A test-only remote peer seeds shared and unshared content on the relay.
     relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay", "relay.sqlite") });
     await claimRelayWorkspace({
       baseUrl: relay.baseUrl,
@@ -991,7 +965,6 @@ test("mount side: add a share into a workspace and open it beside local files", 
     expect(commentCreate.status).toBe(200);
     const commentShareId = (JSON.parse(commentCreate.body) as { shareId: string }).shareId;
 
-    // The recipient's ordinary workspace (the mount host) with its own files.
     await seedWorkspaceManifest(temp, hostWorkspaceId);
     await writeWorkspaceFiles(temp, [
       { path: "notes/mine.md", contents: "# Mine\n\nHost workspace file.\n" },
@@ -1009,8 +982,6 @@ test("mount side: add a share into a workspace and open it beside local files", 
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
 
-    // Titlebar → "Open a share…" → the dialog defaults to MOUNTING into
-    // this workspace (no folder picker in mount mode).
     await page.getByTestId("workspace-switcher").click();
     await page.getByTestId("workspace-switcher-open-share").click();
     await expect(page.getByTestId("open-shared-view")).toBeVisible();
@@ -1030,8 +1001,6 @@ test("mount side: add a share into a workspace and open it beside local files", 
     }
     await page.getByTestId("open-share-start").click();
 
-    // The mount lands: a toast, tree rows under shared-with-me/e2e-granter,
-    // the private file never crosses, and the host file is untouched.
     await expect(page.getByTestId("workspace-shell-notice")).toContainText(
       "Added e2e-granter to shared-with-me. Its files are read-only and stay up to date.",
     );
@@ -1039,7 +1008,6 @@ test("mount side: add a share into a workspace and open it beside local files", 
     await expect(explorerRow(page, "shared-with-me/e2e-granter/private")).toHaveCount(0);
     await revealExplorerPath(page, "notes/mine.md");
 
-    // The mounted file opens read-only with the granter's content.
     await explorerRow(page, "shared-with-me/e2e-granter/docs/brief.md").click();
     await expect(page.getByText("The lighthouse memo.")).toBeVisible();
     // The mount has capture disabled. An external projection write still
@@ -1125,8 +1093,6 @@ test("mount side: an Edit code opens separately by default, and added to a works
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
 
-    // Once the relay states the grant, an Edit code defaults to Open
-    // separately. This person chooses Add to this workspace anyway.
     await page.getByTestId("workspace-switcher").click();
     await page.getByTestId("workspace-switcher-open-share").click();
     await page.getByTestId("open-share-code").fill(shareCode);
@@ -1137,16 +1103,12 @@ test("mount side: an Edit code opens separately by default, and added to a works
     await page.getByTestId("open-share-mode-mount").click();
     await expect(page.getByTestId("open-share-start")).toHaveText("Add share");
     await page.getByTestId("open-share-start").click();
-    // The message arrives as a toast, not a bar across the workbench, and
-    // says where Edit works.
     await expect(page.getByTestId("workspace-shell-notice")).toContainText(
       "Added e2e-granter to shared-with-me. Its files are read-only in this workspace. To use your Edit access, choose Open a share, then Open separately.",
     );
     await expect(page.getByTestId("shell-notice")).toHaveCount(0);
     await revealExplorerPath(page, "shared-with-me/e2e-granter/docs/brief.md");
 
-    // Read-only is true: the file does not open for editing, and main refuses
-    // both a write and a send from the host workspace.
     await explorerRow(page, "shared-with-me/e2e-granter/docs/brief.md").click();
     await expect(page.getByText("The lighthouse memo.")).toBeVisible();
     await expect(page.getByTestId("markdown-edit-toggle")).toBeDisabled();
@@ -1189,8 +1151,6 @@ test("mount side: an Edit code opens separately by default, and added to a works
     expect(refused.write).toContain("reserved");
     expect(refused.submit).toContain("This workspace is not a shared view.");
 
-    // Pasted again with the defaults, the code opens the live-editing view
-    // with Send changes.
     await page.getByTestId("workspace-switcher").click();
     await page.getByTestId("workspace-switcher-open-share").click();
     await page.getByTestId("open-share-code").fill(shareCode);
@@ -1363,10 +1323,6 @@ test("Comment handoff opens files without creating a second generic chat", async
 });
 
 test("direct named Comment keeps desktop generic chat read-only", async () => {
-  // A direct named Comment share carries independent relay append authority.
-  // Phase 3 keeps generic desktop chat read-only because the local store has
-  // no durable per-row relay receipt. The IPC attempt must leave no local row
-  // and no chat operation in the granter's relay log.
   test.setTimeout(240_000);
   const temp = await createTempWorkspace();
   const workspaceId = "share-comment-e2e";
@@ -1456,8 +1412,6 @@ test("direct named Comment keeps desktop generic chat read-only", async () => {
       }
       const threads = await api.listFileChats({ workspaceId, path: "docs/shared.md" });
       if ("status" in threads) throw new Error(threads.code);
-      // Listing is a read in a received share. It must answer without
-      // creating General or storing generic chat rows.
       const channels = await api.listChatChannels({ workspaceId });
       return {
         refusal,
@@ -1491,12 +1445,6 @@ test("direct named Comment keeps desktop generic chat read-only", async () => {
 });
 
 test("edit side: a recipient edits a shared file, sends the changes, and the granter accepts them", async () => {
-  // The whole proposal loop, through the real app and a real
-  // relay. This is the only place in the repo where a real engine and a real
-  // relay meet, so it is the only place that can prove the loop rather than
-  // one half of it: the recipient's engine journals the edit, the relay holds
-  // it as a change, the granter accepts, and the change lands in the
-  // GRANTER's log carrying a base the granter's own log can name.
   test.setTimeout(300_000);
   const temp = await createTempWorkspace();
   const workspaceId = "share-edit-e2e";
@@ -1546,14 +1494,11 @@ test("edit side: a recipient edits a shared file, sends the changes, and the gra
     await page.getByTestId("open-share-start").click();
     await expect(page.getByTestId("workspace-shell")).toBeVisible();
 
-    // The banner states the right the share actually grants.
     const banner = page.getByTestId("shared-view-banner");
     await expect(banner).toBeVisible();
     await expect(banner).toContainText(EDIT_BANNER);
     await expect(page.getByTestId("share-changes-send")).toBeVisible();
 
-    // The edit, written through the IPC boundary main owns. At view and
-    // comment this same call is refused; the receive-side spec pins that.
     const wrote = await page.evaluate(async (text) => {
       const api = (
         window as unknown as {
@@ -1610,20 +1555,17 @@ test("edit side: a recipient edits a shared file, sends the changes, and the gra
       )
       .toBe(1);
 
-    // The granter's side, read over HTTP as the granter.
     const { summary, proposal } = await openOnlyProposal(relay.baseUrl, workspaceId);
     // Who sent them, resolved by the relay from the server-derived user id on
     // the proposal row — never rebuilt by the client from its share list.
     expect(summary.proposedByEmail).toBe("e2e-recipient@dohc.test");
     expect(summary.ops).toBe(1);
     const proposalId = summary.proposalId;
-    // One change, on the shared file, not drifted.
     const ops = proposal.ops as Array<{ afterPath: string; drifted: boolean }>;
     expect(ops.length).toBe(1);
     expect(ops[0]!.afterPath).toBe("docs/shared.md");
     expect(ops[0]!.drifted).toBe(false);
 
-    // Nothing is in the granter's log until the granter says so.
     const beforeAccept = await relayJson(
       relay.baseUrl,
       GRANTER_TOKEN,
@@ -1665,8 +1607,6 @@ test("edit side: a recipient edits a shared file, sends the changes, and the gra
     expect(landed[0]!.payload.payloadAfterPath).toBe("docs/shared.md");
     expect(landed[0]!.payload.operation).toBe("write");
 
-    // And the content really crossed: the granter can read the recipient's
-    // bytes out of its own workspace.
     const digest = String(landed[0]!.payload.payloadAfterBlobSha256);
     const blob = await relayJson(
       relay.baseUrl,
@@ -1683,12 +1623,6 @@ test("edit side: a recipient edits a shared file, sends the changes, and the gra
 });
 
 test("edit side: a recipient creates, renames, deletes and imports, and the granter accepts all four", async () => {
-  // The other four writes a share view admits, through the real app,
-  // the real engine and a real relay. The text edit's loop is proved above;
-  // what this proves is that each of these operations becomes a change the
-  // submit lane can see, and that the accept door derives the right intent
-  // for each: a create, a rename, a delete, and an import that lands as a
-  // create.
   test.setTimeout(300_000);
   const temp = await createTempWorkspace();
   const workspaceId = "share-file-ops-e2e";
@@ -1746,7 +1680,6 @@ test("edit side: a recipient creates, renames, deletes and imports, and the gran
     await expect(page.getByTestId("shared-view-banner")).toContainText(EDIT_BANNER);
     await expect(page.getByTestId("share-changes-send")).toBeVisible();
 
-    // The four operations, each through the IPC boundary main owns.
     await desktop.app.evaluate(
       (_electron, paths: string[]) => {
         process.env.DOHC_TEST_IMPORT_PATHS = JSON.stringify(paths);
@@ -1836,12 +1769,8 @@ test("edit side: a recipient creates, renames, deletes and imports, and the gran
           }),
         { timeout: 120_000, intervals: [2_000] },
       )
-      // FOUR changes in one submit: `submitted` counts the files this press
-      // sent, and one press sends everything pending.
       .toBe(4);
 
-    // One proposal holding FOUR net changes — one per object, which is what
-    // the submit consolidates to.
     const { summary, proposal } = await openOnlyProposal(relay.baseUrl, workspaceId);
     expect(summary.ops).toBe(4);
     const proposalId = summary.proposalId;
@@ -1849,7 +1778,6 @@ test("edit side: a recipient creates, renames, deletes and imports, and the gran
       String(left.afterPath).localeCompare(String(right.afterPath)),
     );
     expect(ops.length).toBe(4);
-    // The review shows WHERE each change lands, per the intent rule.
     expect(ops.map((op) => op.afterPath)).toEqual([
       "docs/created.md",
       "docs/delete-me.md",
@@ -1887,7 +1815,6 @@ test("edit side: a recipient creates, renames, deletes and imports, and the gran
       ]),
     );
 
-    // A create: no base in the granter's log, because the granter never had it.
     const created = byPath.get("docs/created.md");
     expect(created, "the recipient's new file must reach the granter").toBeTruthy();
     expect(created!.operation).toBe("write");
@@ -1905,15 +1832,12 @@ test("edit side: a recipient creates, renames, deletes and imports, and the gran
     expect(renamed!.beforeLatestMomentId).toBe(renameSource!.latestMomentId);
     expect(renamed!.payloadBeforePath).toBe("docs/rename-me.md");
 
-    // A delete: at the path the granter has it now.
     const deleted = byPath.get("docs/delete-me.md");
     expect(deleted, "the recipient's delete must reach the granter").toBeTruthy();
     expect(deleted!.operation, "a delete that lands as a write resurrects the file").toBe("delete");
     expect(deleted!.objectId).toBe(deleteSource!.objectId);
     expect(deleted!.beforeLatestMomentId).toBe(deleteSource!.latestMomentId);
 
-    // An import: a create carrying the bytes, which the granter can read out
-    // of its own workspace.
     const imported = byPath.get("docs/ledger.md");
     expect(imported, "the recipient's import must reach the granter").toBeTruthy();
     expect(imported!.operation).toBe("write");

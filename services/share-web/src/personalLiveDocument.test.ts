@@ -100,7 +100,6 @@ async function fixture(
     clients: Client[] = [];
   const frames = limits.provider.frames;
   server.on("connection", (socket, request) => {
-    // A personal session names its workspace and carries the agent's own token and MCP address.
     expect([request.url, request.headers.origin, request.headers["x-dohc-agent-resource"]]).toEqual(
       ["/sync/live/personal?workspaceId=trip", origin, resource],
     );
@@ -335,7 +334,6 @@ const REFUSALS = [
     status: 409,
     error: "The owner must open this document in dohc on a desktop first.",
   },
-  // A level refusal reads as the personal MCP's other refusals do, naming the agent.
   {
     code: "personal_agent_edit_needed",
     status: 403,
@@ -369,7 +367,6 @@ it.each(REFUSALS)(
   },
 );
 
-// Without the abort, the same request completes (the first test).
 it.each(["/sync/live/personal-document", "/sync/live/personal-tickets"])(
   "cancels the request to %s when the caller aborts",
   async (path) => {
@@ -419,7 +416,6 @@ it.each([
   expect(await f.call("dohc_read_document")).toMatchObject({ ok: true });
   f.refresh(next);
   expect(await f.call("dohc_read_document")).toMatchObject({ ok: true });
-  // Each call mints with the token its request carries and opens its own socket.
   expect(
     f.calls
       .filter((call) => call.path === "/sync/live/personal-tickets")
@@ -462,7 +458,6 @@ it("says to try again when the relay closes the socket because it can't check th
     code: "unavailable",
     error: PERSONAL_SIGN_IN_UNAVAILABLE,
   });
-  // A try-again close with a reason the agent's MCP doesn't know carries no code.
   reason = "something_else";
   const unknown = await f.call("dohc_read_document");
   expect(unknown).toMatchObject({ ok: false, path: "doc.md", outcome: "not-applied" });

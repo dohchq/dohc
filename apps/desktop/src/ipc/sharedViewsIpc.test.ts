@@ -762,7 +762,6 @@ describe("registered received-view handlers", () => {
     "asks the server nothing on a %s refresh while another account is signed in",
     async (trigger) => {
       const h = await harness();
-      // A share reopened after Forget, which another account opened.
       Object.assign(h.workspace.shareView!, {
         recipientUserId: "someone-else",
         granterEmail: null,
@@ -835,10 +834,6 @@ describe("registered received-view handlers", () => {
     expect(h.notify).not.toHaveBeenCalled();
   });
 
-  // A shared view has no recorder, so the refresh is what meets a store a
-  // newer dohc migrated. It puts that refusal on the workspace status and
-  // clears it once the store answers. A rebuild refusal stays a refresh
-  // error, because a shared view cannot rebuild its store.
   it("records a store refusal that needs an update on the workspace status", async () => {
     const h = await harness();
     const refusal = (message: string) =>

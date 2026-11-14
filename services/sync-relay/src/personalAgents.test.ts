@@ -253,7 +253,6 @@ async function ok(response: Response): Promise<Record<string, unknown>> {
   return json(response);
 }
 
-// Every refusal is the same bytes as a link that never existed.
 async function expectRefused(response: Response): Promise<void> {
   const refusal = errorResponse(notFound());
   expect({ status: response.status, body: await response.text() }).toEqual({
@@ -358,7 +357,6 @@ function allow(
   );
 }
 
-/** A code the owner approved; not yet redeemed. */
 async function approve(
   f: Fixture,
   input: {
@@ -404,7 +402,6 @@ function refresh(
   });
 }
 
-/** What share-web forwards for an agent's tool call. */
 function agentRequest(accessToken: string, resource: string): Request {
   return new Request("http://relay.test/sync/link/agent-chat", {
     headers: {
@@ -543,7 +540,6 @@ describe("personal agent sign-in", () => {
       ],
       agents: [],
     });
-    // Another account signed in to the browser can't read or answer it.
     await expectRefused(await consent(f, requestId, "other-session"));
     await expectRefused(await allow(f, requestId, { session: "other-session" }));
     // No session is a sign-in, not a refusal.
@@ -551,7 +547,6 @@ describe("personal agent sign-in", () => {
       401,
     );
 
-    // An address naming a workspace the account doesn't own.
     const elsewhere = await beginRequest(f, clientId, OTHER_WS);
     await expectRefused(await consent(f, elsewhere));
     await expectRefused(await allow(f, elsewhere));
@@ -559,7 +554,6 @@ describe("personal agent sign-in", () => {
       workspaces: [{ workspaceId: OTHER_WS, name: null }],
     });
 
-    // A reach naming another account's workspace, a level there is none of, or nothing.
     await expectRefused(
       await allow(f, requestId, { reach: [{ workspaceId: OTHER_WS, level: "view" }] }),
     );
@@ -649,7 +643,6 @@ describe("families never mix", () => {
     await ok(await refresh(f, clientId, String(linkTokens.refreshToken), link.resource));
     await ok(await refresh(f, clientId, String(personalTokens.refreshToken), personal.resource));
 
-    // A personal token is unknown to the link introspection.
     await expectRefused(
       await internal(f, "agent-introspect", { accessToken: String(personalTokens.accessToken) }),
     );
@@ -683,7 +676,6 @@ describe("families never mix", () => {
         })
       ).status,
     ).toBe(404);
-    // A browser's cookie beside the account's bearer is refused too.
     expect(
       (await f.h(request(OWNER, "/sync/personal-agents", { headers: cookie("owner-session") })))
         .status,
@@ -721,7 +713,6 @@ describe("revocation", () => {
     expect(
       count(f, "sync_relay_personal_agent_connections", "connection_id = ?", agent.connectionId),
     ).toBe(0);
-    // With nothing left to sign in with, the roster shows it signed out.
     expect((await roster(f)).agents).toEqual([
       expect.objectContaining({ agentId: agent.agentId, status: "signed_out" }),
     ]);
@@ -940,7 +931,6 @@ describe("the owner's controls", () => {
         { workspaceId: WS_B, level: "view" },
       ],
     });
-    // Remove follows Sign out.
     await expectCode(await owner(f, `${path}/remove`, { method: "POST" }), 409, "conflict");
     expect(await changed(await owner(f, `${path}/sign-out`, { method: "POST" }))).toMatchObject({
       status: "signed_out",
@@ -1049,7 +1039,6 @@ function fromComputer(f: Fixture, workspaceId: string, ops: ChatOp[]): void {
   f.activity.wakeLog(workspaceId);
 }
 
-/** A post by the owner's account from their computer. */
 function ownerSays(
   messageId: string,
   threadId: string,
@@ -1063,7 +1052,6 @@ function ownerSays(
   });
 }
 
-/** A thread on a file, bound by the file's object id or by its path. */
 function fileThread(threadId: string, binding: Record<string, string>): ChatOp {
   return {
     opKind: "chat.thread.create",
@@ -1071,7 +1059,6 @@ function fileThread(threadId: string, binding: Record<string, string>): ChatOp {
   };
 }
 
-/** A team channel with two threads, and a thread in the agent's DM. */
 function chats(f: Fixture, workspaceId: string, agentId: string): void {
   fromComputer(f, workspaceId, [
     chatChannelCreate("wire-team"),
@@ -1137,7 +1124,6 @@ function payloadOf(row: { payloadJson: string }): Record<string, unknown> {
   return JSON.parse(row.payloadJson) as Record<string, unknown>;
 }
 
-/** Resolves once `count` subscriptions are parked. */
 async function parked(f: Fixture, count: number): Promise<void> {
   await vi.waitFor(() => expect(f.activity.stats().waiters).toBe(count));
 }
@@ -1171,7 +1157,6 @@ describe("a personal agent's posts", () => {
     const dm = agentChannelWireId(agent.agentId);
     const before = logOf(f, WS_A).length;
 
-    // A field that would name the author is refused, not ignored.
     for (const forged of [
       { authorUserId: OTHER },
       { authorAgentId: `p-${"b".repeat(26)}` },
@@ -1217,7 +1202,6 @@ describe("a personal agent's posts", () => {
       authorDisplayName: "Helper",
     });
 
-    // A retry answers the same post; the same key with another body is a conflict.
     expect((await ok(await post(f, agent, { channelWireId: dm }))).message).toMatchObject({
       messageId: message.messageId,
     });
@@ -1267,7 +1251,6 @@ describe("a personal agent's posts", () => {
       moment("notes/gone.md", "plan", { originSeq: 1, objectId: "object-gone" }),
       moment("notes/hidden.md", "plan", { originSeq: 2, objectId: "object-hidden" }),
       deleted("notes/gone.md", 3, "object-gone"),
-      // Moved to a secret path, then deleted there: its last path is secret.
       moment("config/prod.env", "plan", {
         originSeq: 4,
         objectId: "object-hidden",
@@ -1305,7 +1288,6 @@ describe("a personal agent's posts", () => {
     const read = (fields: Record<string, unknown>) =>
       tool(f, agent, "discussion", { workspaceId: WS_A, ...fields });
 
-    // A deleted file's thread reads a page at a time, with the path the file last had.
     const page = (await ok(await read({ threadId: "thread-gone", limit: 1 }))) as ChatPage &
       Record<string, unknown>;
     expect(page).toMatchObject({
@@ -1320,7 +1302,6 @@ describe("a personal agent's posts", () => {
     )) as ChatPage;
     expect(ids(older)).toEqual(["first"]);
     expect(older.olderCursor).toBeNull();
-    // A reply lands in that thread at Comment, and reads back there.
     const replied = (await ok(await post(f, agent, { threadId: "thread-gone", body: "an answer" })))
       .message as Record<string, unknown>;
     expect(replied).toMatchObject({
@@ -1334,7 +1315,6 @@ describe("a personal agent's posts", () => {
       "second",
       "first",
     ]);
-    // A current file's thread answers the same way, with only its own messages.
     expect(await ok(await read({ threadId: "thread-plan" }))).toEqual({
       ok: true,
       workspaceId: WS_A,
@@ -1344,20 +1324,16 @@ describe("a personal agent's posts", () => {
       olderCursor: null,
     });
 
-    // Exactly one of a file and a thread.
     expect((await read({ filePath: "notes/plan.md", threadId: "thread-plan" })).status).toBe(400);
     expect((await read({})).status).toBe(400);
-    // A thread whose last path is secret, an unknown thread, and another workspace's thread are not found.
     const before = logOf(f, WS_A).length;
     for (const threadId of ["thread-hidden", "thread-none", "thread-b"]) {
       await expectRefused(await read({ threadId }));
       await expectRefused(await post(f, agent, { threadId, idempotencyKey: `post-${threadId}` }));
     }
     expect(logOf(f, WS_A)).toHaveLength(before);
-    // A Group's thread reads through its channel, not as a file's discussion.
     await expectRefused(await read({ threadId: "thread-team" }));
 
-    // View reads a deleted file's thread but doesn't reply.
     expect(
       ids((await ok(await read({ workspaceId: WS_B, threadId: "thread-b" }))) as ChatPage),
     ).toEqual(["on-b"]);
@@ -1366,7 +1342,6 @@ describe("a personal agent's posts", () => {
       403,
       "personal_agent_view_only",
     );
-    // An owned workspace out of reach, from the start or once the owner narrows the reach.
     await expectCode(
       await read({ workspaceId: "workspace-c", threadId: "thread-c" }),
       403,
@@ -1502,7 +1477,6 @@ describe("a personal agent's Collection writes", () => {
       path: "trip/packing/Socks.md",
       authors: [{ kind: "agent", agentId: agent.agentId, onBehalfOf: OWNER }],
     });
-    // A retry answers the same write, and another write under its submit ID is refused.
     expect(await ok(await write(f, agent, [created()]))).toMatchObject({
       submitId: "submit-1",
       created: false,
@@ -1550,7 +1524,6 @@ describe("a personal agent's Collection writes", () => {
       const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "edit" }] });
       await packing(f);
       await ok(await write(f, agent, [created()]));
-      // A retry that passed the check before its body loses its access while the body arrives.
       const retry = new ReadableStream<Uint8Array>(
         {
           async pull(controller) {
@@ -1680,7 +1653,6 @@ async function withCopies(identified: readonly string[] = [WS_A, WS_B, OTHER_WS]
     f,
     engine,
     syncs,
-    /** Holds every sync until the returned function is called. */
     holdSyncs() {
       let releaseSyncs!: () => void;
       held = new Promise((resolve) => {
@@ -1694,7 +1666,6 @@ async function withCopies(identified: readonly string[] = [WS_A, WS_B, OTHER_WS]
   };
 }
 
-/** A Group with a purpose, a Group with no channel id, a DM between people, and the agent's DM, as the copy holds them. */
 function seedChats(engine: ChatsLoopbackEngine, workspace: string, agentId: string): void {
   engine.seedChannel({
     workspace,
@@ -1732,7 +1703,6 @@ describe("a personal agent's Groups", () => {
       groups: [{ channelWireId: "wire-planning", name: "Planning", purpose: "Where we go" }],
     });
     expect(syncs).toEqual([WS_A]);
-    // The listed Group is one the agent reads by its channel id.
     fromComputer(f, WS_A, [chatChannelCreate("wire-planning")]);
     await ok(await tool(f, agent, "chat", { workspaceId: WS_A, channelWireId: "wire-planning" }));
 
@@ -1810,7 +1780,6 @@ describe("a personal agent's wait", () => {
         authorDisplayName: "Bo",
       }),
       chatMessageAppend("no-account", "thread-dm", "hello"),
-      // Another agent's DM and a thread on a file count as any thread outside its own DM.
       ownerSays("other-dm", "thread-elsewhere", "@Research in another agent's DM"),
       ownerSays("other-dm-unmentioned", "thread-elsewhere", "for the other agent"),
       ownerSays("on-file", "thread-file", "@Research a comment"),
@@ -1869,7 +1838,6 @@ describe("a personal agent's wait", () => {
     expect(ids(answer)).toEqual(["after"]);
     expect(Object.keys(answer.cursor.seqs)).toEqual([WS_A]);
 
-    // Another agent's cursor, and a malformed one, are refused.
     const second = await signIn(f, { agent: { kind: "new", name: "Second" } });
     expect((await tool(f, second, "wait", { timeoutMs: 0, cursor: answer.cursor })).status).toBe(
       400,
@@ -1909,7 +1877,6 @@ describe("a personal agent's wait", () => {
     await expectRefused(await aborted);
     expect(f.activity.stats().waiters).toBe(0);
 
-    // Both subscriptions hold to the same deadline.
     const holds: number[] = [];
     const original = f.activity.wait.bind(f.activity);
     vi.spyOn(f.activity, "wait").mockImplementation((group, actor, options) => {
@@ -1947,7 +1914,6 @@ describe("a personal agent's reads", () => {
     expect(ids(older)).toEqual(["first"]);
     expect(older.olderCursor).toBeNull();
 
-    // A row at the agent's origin that names another agent isn't the agent's post.
     f.storage.appendLogBatch({
       workspaceId: WS_A,
       originId: personalAgentOrigin(agent.agentId),
@@ -2054,18 +2020,15 @@ describe("a personal agent's reads", () => {
       return reader;
     };
 
-    // A reach change ends it as running work.
     const narrowed = await open();
     await ok(await setReach(f, agent, [{ workspaceId: WS_B, level: "view" }]));
     await expect(narrowed.read()).rejects.toThrow("personal agent access changed during stream");
 
-    // Ownership lost: the next chunk's check refuses.
     await ok(await setReach(f, agent, BOTH_VIEW));
     const lost = await open();
     setOwner(f, WS_A, OTHER);
     await expect(lost.read()).rejects.toMatchObject({ code: "not_found" });
 
-    // A reset with its notification withheld: the next chunk reads the fence again and refuses.
     setOwner(f, WS_A, OWNER);
     const reset = await open();
     f.fence.changePassword(OWNER);
@@ -2073,10 +2036,7 @@ describe("a personal agent's reads", () => {
   });
 });
 
-// Proves: every answer was read after its caller asked, so a fence change
-// committed before a fresh read is seen, and a burst of callers shares reads.
 describe("single-flight fence reads", () => {
-  /** A fence read the test settles. */
   function reads() {
     const started: { userId: string; settle(epoch: number): void; fail(error: Error): void }[] = [];
     const read = vi.fn(
@@ -2118,7 +2078,6 @@ describe("single-flight fence reads", () => {
       await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2));
       started[1]!.settle(1);
       await expect(waiting).resolves.toBe(1);
-      // The stalled read answering late changes nothing.
       started[0]!.settle(0);
     } finally {
       vi.useRealTimers();

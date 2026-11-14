@@ -11,8 +11,6 @@ import {
 
 afterEach(cleanup);
 
-// A Manage menu like a dataset Collection's: a <details> that closes when
-// one of its buttons is clicked.
 function Harness(props: { files: readonly CollectionFile[]; onOpenFile?: (path: string) => void }) {
   const [open, setOpen] = useState(false);
   return (

@@ -23,9 +23,8 @@ import { createRelaySyncEngine } from "./relaySyncEngine";
 import { createTestScratch } from "./testTemp";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 
-// This suite used to gate on a private env var of its own, so it kept skipping
-// even where the daemon was built and every other suite ran. It now shares the
-// one gate.
+// This suite shares the one engine-binary gate, so it runs wherever the daemon
+// is built and every other daemon suite runs.
 const engine = requireEngineBinaryOrSkip();
 const scratchRoots: string[] = [];
 const lifecycles: EngineDaemonLifecycle[] = [];

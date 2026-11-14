@@ -154,7 +154,6 @@ export function createDatasetHandler<
   collectionPlace?(workspace: W, datasetId: string, signal: AbortSignal): Promise<DatasetPlace>;
   /** Moves a Collection that is only on this computer to the workspace's server for good. */
   moveToServer?(workspace: W, datasetId: string, signal: AbortSignal): Promise<void>;
-  /** A change to a Collection's fields or rules applied. */
   collectionRulesChanged?(workspaceId: string, datasetId: string): void;
 }) {
   const migrations = new Map<

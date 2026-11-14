@@ -74,49 +74,39 @@ function nameSome(entries) {
  * Judge a run's provenance from the tree readings taken across it.
  *
  * `readings` is `[{ step, state }, ...]` in order: the state read before the
- * first step, then the state read after each step, labelled with the step it
- * followed.
+ * first step, then the state read after each step, labelled with that step.
  *
- * A tree that MOVED between two readings FAILS — the step between them
- * straddles two trees and its row describes neither. That covers HEAD moving
- * and the worktree being edited, which are one corruption reached two ways.
- * The reason names the step, so a reader knows what to re-run.
+ * - A tree that moved between two readings fails. The step between them
+ *   straddles two trees, so its row describes neither. This covers a HEAD
+ *   move and a worktree edit alike. The reason names the step to re-run.
+ * - A tree that is already dirty at the first reading does not fail, because
+ *   running the gate over uncommitted work is the normal local loop. It is
+ *   recorded, so the reader knows the commit does not describe everything
+ *   that ran.
+ * - A HEAD that moved and returned inside one step fails too. Both readings
+ *   name the same commit, so only this checkout's HEAD reflog shows it. A
+ *   checkout with no HEAD log of its own is refused, because the fallback
+ *   git offers cannot see that switch.
  *
- * A tree that is ALREADY dirty at the first reading does NOT fail — running
- * the gate over uncommitted work is the normal local loop, and a check that
- * forbids it just gets removed. It is recorded instead, so the reader knows
- * the commit does not describe everything that ran.
+ * Three limits remain.
+ * - Nothing observes the tree between two readings. A worktree edit made and
+ *   undone inside one step, with no HEAD move, is invisible. The stamp
+ *   therefore reports how many readings agreed, not that the run was clean
+ *   throughout. Removing this limit needs a checkout nothing else can reach.
+ * - A reading lists paths and their status codes, not their contents, so a
+ *   second edit to an already dirty path leaves it identical. From a clean
+ *   start a pass covers every path. From a dirty start it covers every path
+ *   except the ones already listed. The stamp carries `dirty(N)` to show
+ *   which.
+ * - The named step can be off by one. A reading is taken when the step's own
+ *   process exits, so work that outlives it lands in the next interval, and
+ *   a skipped optional step takes no reading. The run is refused either way.
+ *   The reason names where the change was seen, not always where it was
+ *   caused.
  *
- * A HEAD that moved and RETURNED inside one step is refused too. The two
- * readings around that step name the same commit, so only git's own record
- * shows it: this checkout's HEAD reflog gained entries while the commit
- * stayed put. A checkout with no HEAD log of its own is refused rather than
- * read through the fallback git offers, which cannot see that switch.
- *
- * Three limits, and none is assumed away.
- *
- * Nothing observes the tree BETWEEN two readings, so a worktree edit made and
- * undone inside one step, with no HEAD move, is invisible; that is why the
- * stamp reports how many readings agreed rather than saying the run was clean
- * throughout. Removing it needs a checkout nothing else can reach.
- *
- * A reading is a list of paths and their status codes, not their contents, so
- * a second edit to a path that was already dirty leaves the reading
- * identical. This is why a PASS means two different things: from a clean
- * start it is a claim about paths, and from a dirty start it is that claim
- * about every path except the ones already listed. The stamp carries
- * `dirty(N)` so the difference is on the face of the artifact.
- *
- * The named step can be off by one. A reading is taken when the step's own
- * process exits, so work outliving it lands in the next step's interval and
- * is attributed there, and a skipped optional step takes no reading, so its
- * probe folds into the following one. The verdict is unaffected — the run is
- * refused either way — but the step in the reason is where the change was
- * SEEN, not always where it was caused.
- *
- * The gate's own steps can write tracked files — `cargo build` rewrites a
- * stale `Cargo.lock` — and that FAILS this row, correctly: that step did
- * straddle the rewrite. The next run passes, with the lock recorded as dirt.
+ * A gate step can write a tracked file, as `cargo build` does to a stale
+ * `Cargo.lock`. That fails this row, correctly, because the step straddled
+ * the rewrite. The next run passes, with the lock recorded as dirt.
  */
 export function classifyTreeProvenance(readings) {
   if (!Array.isArray(readings) || readings.length < 2) {
@@ -265,7 +255,6 @@ function readHeadReflog(capture, hasHeadLog) {
   return { present: true, count: entries, top: top.trim() };
 }
 
-/** A command's stdout as non-blank lines, or null when it did not answer. */
 function lines(stdout) {
   return stdout === null ? null : stdout.split(/\r?\n/).filter((line) => line.trim() !== "");
 }

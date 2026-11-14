@@ -12,10 +12,6 @@ import { NewPage } from "./NewPage";
 
 setupFileInspectorTests();
 
-// A new page's file can open without a live session. The plain editor then
-// takes what was typed, and a file nobody can edit here shows itself: the
-// page never waits for an editor that is not coming.
-
 type Open = Awaited<ReturnType<DohcDesktopBridge["openEngineYDocSession"]>>;
 
 function bridgeFor(open: Open) {

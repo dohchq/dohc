@@ -230,7 +230,6 @@ export function judgeOperation(
         receipt.winnerMessageId === undefined ? {} : { winnerMessageId: receipt.winnerMessageId };
       continue;
     }
-    // A stage that wrote nothing has nothing to publish.
     if (receipt.outcome === "no-op") continue;
     const accepted = accepts(
       storage,
@@ -559,7 +558,6 @@ export async function publishOperation(input: {
   authorize?(): Promise<void>;
   deadlineMs?: number;
   nowMs?(): number;
-  /** The wait between attempts. */
   pause?(ms: number, signal?: AbortSignal): Promise<void>;
 }): Promise<PublicationAnswer> {
   const { storage, copy, signal } = input;

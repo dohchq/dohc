@@ -19,7 +19,6 @@ import {
 
 afterEach(closeTestStorages);
 
-// `Bearer session:<user>:<session>` is a valid sign-in; anything else is not.
 const resolveAccountSession: ResolveAccountSession = async (request) => {
   const match = /^Bearer session:([\w-]+):([\w-]+)$/u.exec(
     request.headers.get("authorization") ?? "",

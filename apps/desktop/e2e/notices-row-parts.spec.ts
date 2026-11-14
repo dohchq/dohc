@@ -32,7 +32,6 @@ async function buttonStyle(button: Locator) {
   );
 }
 
-// Both parts, toasts above rows, with room for their shadows.
 async function shoot(page: Page, pane: Locator, name: string) {
   if (!SHOT_DIR) return;
   const boxes = await Promise.all(
@@ -95,7 +94,6 @@ test("a Notices row's actions are the toast's buttons, in line with its text, an
         await buttonStyle(rowAction),
         `a row's Try again draws as the toast's (${theme})`,
       ).toEqual(await buttonStyle(toastAction));
-      // The button's edge, not its words, starts where the title's words start.
       const edges = await failed.evaluate((row) => {
         const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
         let node = walker.nextNode();
@@ -120,7 +118,6 @@ test("a Notices row's actions are the toast's buttons, in line with its text, an
       await rowAction.hover();
       await shoot(page, pane, `notices-row-parts-${theme}-button-hover`);
 
-      // The moved row has nowhere to go: hovering it changes nothing.
       const moved = rows.getByTestId("notice-moved");
       const look = () =>
         moved.evaluate((row) => ({

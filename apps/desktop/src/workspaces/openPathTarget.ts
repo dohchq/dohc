@@ -10,7 +10,6 @@ export interface OpenPathFileSystem {
   hasManifest(folder: string): boolean;
   // Which folder this is on disk, or null when the disk cannot say.
   folderIdentity(realPath: string): FolderIdentity | null;
-  // The names a folder lists, or null when it cannot be read.
   folderNames(realPath: string): readonly string[] | null;
 }
 

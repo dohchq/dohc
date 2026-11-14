@@ -103,7 +103,6 @@ impl UnprovenCommitment {
     }
 }
 
-/// The version of a [`ContributionArtifact`]'s encoding.
 const ARTIFACT_VERSION: i64 = 1;
 
 /// Contributions, or binding tails, a [`ContributionArtifact`] encodes
@@ -380,7 +379,6 @@ impl<'a> Capped<'a> {
         Ok(())
     }
 
-    /// Append `value`'s canonical JSON.
     fn value(&mut self, value: &Value) -> Result<(), ApplicationError> {
         let mut unit = std::mem::take(&mut self.unit);
         unit.clear();
@@ -648,7 +646,6 @@ impl ReleasedLineageBinding {
         value
     }
 
-    /// [`Self::to_json`] without its tails.
     fn untailed_json(&self) -> Value {
         let incoming = &self.incoming;
         serde_json::json!({
@@ -1343,7 +1340,7 @@ mod tests {
         );
     }
 
-    /// Opus's r2c-3c-6 finding 3: a stored binding's digest, hashed in place
+    /// A stored binding's digest, hashed in place
     /// from its canonical bytes, is the one its encoding names, for every
     /// pinned vector.
     #[test]
@@ -1432,7 +1429,7 @@ mod tests {
         out
     }
 
-    /// Sol's r2c-3c-4 finding 4: the artifact encodes its binding's tails
+    /// The artifact encodes its binding's tails
     /// one at a time, to the bytes the one-pass encoding writes, many tails,
     /// none and invalid ones alike. A proof that stopped encodes none of
     /// them, and one cancelled partway, at its second check, stops there
@@ -1515,10 +1512,10 @@ mod tests {
         );
     }
 
-    /// Sol's r2c-3c-4 finding 2: an artifact refuses before it would pass
-    /// its cap, and never allocates past it. Opus's r2c-3c-6 finding 1: past
-    /// its cap there is no artifact, and the proof that encoded it goes on,
-    /// unstopped, to answer the rest. One exactly at its cap encodes.
+    /// An artifact refuses before it would pass its cap, and never allocates
+    /// past it. Past its cap there is no artifact, and the proof that encoded
+    /// it goes on, unstopped, to answer the rest. One exactly at its cap
+    /// encodes.
     #[test]
     fn an_artifact_refuses_before_it_allocates_past_its_cap() {
         let mut text = Capped::new(10_000, Stop::NEVER);

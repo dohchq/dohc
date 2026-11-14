@@ -388,10 +388,10 @@ export interface MomentAppendPayload {
   payloadBeforePath: string | null;
   payloadAfterBlobSha256: string;
   payloadAfterPath: string;
-  // Content kinds are absent for text (the pre-WS-G1 wire truth); "binary"
-  // shas point into binary_blobs and their bytes ship in the bundle's
-  // blobs-bin/ directory. Byte lengths ride along so importers can persist
-  // snapshot rows without re-measuring blob content.
+  // Content kinds are absent for text; "binary" shas point into binary_blobs
+  // and their bytes ship in the bundle's blobs-bin/ directory. Byte lengths
+  // ride along so importers can persist snapshot rows without re-measuring
+  // blob content.
   payloadBeforeContentKind?: VersionedFileContentKind;
   payloadBeforeByteLength?: number;
   payloadAfterContentKind?: VersionedFileContentKind;
@@ -418,8 +418,8 @@ export interface ChatThreadCreatePayload {
   linkedPathHint?: string;
   linkedAtMs?: number;
   channelSlug?: string;
-  // Preferred channel routing (0P-A gate fix): resolves through the importer's
-  // wire-id map before the slug alias. Absent in pre-wire-id payloads.
+  // Preferred channel routing: resolves through the importer's wire-id map
+  // before the slug alias. Absent in pre-wire-id payloads.
   channelWireId?: string;
 }
 
@@ -428,14 +428,13 @@ export interface ChatMessageAppendPayload {
   threadId: ChatThreadId;
   authorKind: ChatActor["kind"];
   authorDisplayName: string;
-  // WS-MU-C0 verified authorship: the OPAQUE Better Auth user id of the sender,
-  // never a raw email (PII must not enter the replicated CRDT). Present only for
-  // a signed-in send; the relay verifies `authorUserId === actor.userId` before
+  // Verified authorship: the opaque Better Auth user id of the sender, never
+  // a raw email (PII must not enter the replicated CRDT). Present only for a
+  // signed-in send; the relay verifies `authorUserId === actor.userId` before
   // admitting the op to the replication log, so it is the durable, spoofing-
-  // resistant "who said this". Solo/signed-out sends omit it — the op is then
-  // byte-identical to the pre-MU-C0 shape and `authorDisplayName` (display-only,
-  // never used for identity/authz) still renders. See the design's "Authenticated
-  // authorship" section.
+  // resistant "who said this". Solo/signed-out sends omit it, and
+  // `authorDisplayName` (display-only, never used for identity/authz) still
+  // renders. See the design's "Authenticated authorship" section.
   authorOwnerDisplayName?: string;
   authorUserId?: string;
   parentMessageId?: ChatMessageId;
@@ -504,9 +503,9 @@ export interface VersionedTextMoment {
   syncRecordOnly?: boolean;
 }
 
-// Timeline row (PR 0M-5 history flip): everything the history list needs
-// without hauling snapshot text bodies. momentOrder is the workspace-global
-// recording order — the keyset-pagination cursor and a monotonic refresh key.
+// Timeline row: everything the history list needs without hauling snapshot
+// text bodies. momentOrder is the workspace-global recording order: the
+// keyset-pagination cursor and a monotonic refresh key.
 export interface VersionedTextMomentSummary {
   id: VersionedTextMomentId;
   workspaceId: WorkspaceId;
@@ -719,10 +718,10 @@ export interface VersionedTextStore {
     origin: ActorNeutralWriteMetadata["origin"];
     author?: MomentWriteAuthor;
   }): Promise<void>;
-  // Timeline reads (PR 0M-5 history flip). listMoments serves the history
-  // list without payload bodies; getMoment serves the diff page with the full
-  // before/after payload. Both are workspace-scoped: a moment id from another
-  // workspace reads as null / absent.
+  // Timeline reads. listMoments serves the history list without payload
+  // bodies; getMoment serves the diff page with the full before/after
+  // payload. Both are workspace-scoped: a moment id from another workspace
+  // reads as null / absent.
   listMoments(input: {
     workspaceId: WorkspaceId;
     versionId?: VersionId;
@@ -855,11 +854,11 @@ export interface ChatThread {
   updatedAtMs: number;
   // Absent on older fixtures; a thread without a lane is a post.
   lane?: ChatThreadLane;
-  // Exactly-one-owner (P0E rule, tightened at the WS-E gate): a thread is
-  // file-linked OR belongs to a channel — never both, never neither. The
-  // store enforces this at creation (createThread requires a linked file;
-  // startChannelThread owns the channel path) and fails closed on rows that
-  // violate it, including channel threads whose channel no longer exists.
+  // Exactly one owner: a thread is file-linked or belongs to a channel, never
+  // both, never neither. The store enforces this at creation (createThread
+  // requires a linked file; startChannelThread owns the channel path) and
+  // fails closed on rows that violate it, including channel threads whose
+  // channel no longer exists.
   linkedFile?: LinkedChatFileRef;
   channelId?: ChatChannelId;
 }
@@ -985,10 +984,10 @@ export interface ChatMessage {
   workspaceId: WorkspaceId;
   threadId: ChatThreadId;
   author: ChatActor;
-  // WS-MU-C0 verified authorship: the sender's OPAQUE relay user id (Better Auth
-  // user id), the same value the relay verifies as `actor.userId`. Present only
+  // Verified authorship: the sender's opaque relay user id (Better Auth user
+  // id), the same value the relay verifies as `actor.userId`. Present only
   // for a signed-in send; absent for solo/legacy messages. `author` stays the
-  // display-only convenience — identity/authz key on `authorUserId`, never the
+  // display-only convenience: identity/authz key on `authorUserId`, never the
   // display name.
   authorOwnerDisplayName?: string;
   authorUserId?: string;
@@ -1080,13 +1079,13 @@ interface ChatMentionRecord {
   createdAtMs: number;
 }
 
-// Reactions (WS-MU-C2). The observed cell state — an emoji reaction by an
-// author is either present ("added") or tombstoned ("removed"). Tombstones are
-// retained so a stale re-add cannot win the LWW register.
+// Reactions. The observed cell state: an emoji reaction by an author is
+// either present ("added") or tombstoned ("removed"). Tombstones are retained
+// so a stale re-add cannot win the LWW register.
 type ChatReactionState = "added" | "removed";
 
 // Who reacted. Solo this is the local user/agent; the design's verified relay
-// authorUserId (MU-C0) later fills authorId. displayName/kind render the
+// authorUserId later fills authorId. displayName/kind render the
 // reaction ("<User>" / "<Agent>") without a separate lookup.
 interface ChatReactionAuthor {
   authorId: string;
@@ -1206,7 +1205,6 @@ export interface LinkedChatStore {
     title: string;
     linkedFile: { objectId: WorkspaceObjectId; pathHint?: string };
   }): Promise<ChatThread>;
-  // --- Channels (PR 12, WS-E) ---------------------------------------------
   createChannel(input: {
     workspaceId: WorkspaceId;
     name: string;
@@ -1228,18 +1226,17 @@ export interface LinkedChatStore {
   listChannels(input: { workspaceId: WorkspaceId }): Promise<ChatChannelSummary[]>;
   // Slug is a lookup ALIAS only; durable state keys on channelId.
   findChannelBySlug(input: { workspaceId: WorkspaceId; slug: string }): Promise<ChatChannel | null>;
-  // The channel's cross-machine WIRE identity (MU-C4 shared channels key on
-  // it): its own id for a locally created channel, the originating store's id
-  // for a replicated one, the well-known constant for "general". Null for a
+  // The channel's cross-machine wire identity (shared channels key on it):
+  // its own id for a locally created channel, the originating store's id for
+  // a replicated one, the well-known constant for "general". Null for a
   // channel with no recorded wire mapping (pre-wire-id rows).
   getChannelWireId(input: {
     workspaceId: WorkspaceId;
     channelId: ChatChannelId;
   }): Promise<string | null>;
-  // MU-C4 read-only write gate: resolve a thread to its bound channel with a
-  // single indexed lookup (no workspace-wide thread scan). Null when the
-  // thread is missing, cross-workspace, or not channel-bound (a file-linked
-  // thread).
+  // Read-only write gate: resolve a thread to its bound channel with a single
+  // indexed lookup (no workspace-wide thread scan). Null when the thread is
+  // missing, cross-workspace, or not channel-bound (a file-linked thread).
   findThreadChannelId(input: {
     workspaceId: WorkspaceId;
     threadId: ChatThreadId;
@@ -1272,9 +1269,9 @@ export interface LinkedChatStore {
     // conversation. People, the CLI and MCP never set it.
     ownThread?: boolean;
     author: ChatWriteActor;
-    // WS-MU-C0: the sender's OPAQUE relay user id (Better Auth user id). Caller
-    // supplies it only when signed in; the journaled message.append then carries
-    // it for relay verification. Omit for solo (byte-identical to today).
+    // The sender's opaque relay user id (Better Auth user id). Caller supplies
+    // it only when signed in; the journaled message.append then carries it for
+    // relay verification. Omit for solo.
     authorOwnerDisplayName?: string;
     authorUserId?: string;
     // Local admission metadata, separate from the immutable replicated payload.
@@ -1351,9 +1348,9 @@ export interface LinkedChatStore {
     // its DM's agent and each agent dohc starts that it names. Never journaled.
     wakeAgentIds?: string[];
     author: ChatWriteActor;
-    // WS-MU-C0: the sender's OPAQUE relay user id (Better Auth user id). Caller
-    // supplies it only when signed in; the journaled message.append then carries
-    // it for relay verification. Omit for solo (byte-identical to today).
+    // The sender's opaque relay user id (Better Auth user id). Caller supplies
+    // it only when signed in; the journaled message.append then carries it for
+    // relay verification. Omit for solo.
     authorOwnerDisplayName?: string;
     authorUserId?: string;
     // Local admission metadata, separate from the immutable replicated payload.
@@ -1430,7 +1427,7 @@ export interface LinkedChatStore {
     limit?: number;
   }): Promise<{ requests: ChatAgentRequestDetail[]; more: boolean }>;
   listMentionsForHandle(workspaceId: WorkspaceId, handle: string): Promise<ChatMentionRecord[]>;
-  // --- Reactions (WS-MU-C2) ------------------------------------------------
+  // --- Reactions ----------------------------------------------------------
   // Set (add or remove) one author's emoji reaction on a message. A
   // set-membership CRDT cell keyed by (messageId, emoji, author.authorId):
   // LWW-per-cell by (atMs, remove-wins tie), so the op is commutative and
@@ -1495,7 +1492,6 @@ export interface LinkedChatStore {
     replicationOwnerUserId?: string;
     headCursor: string;
   }): Promise<ChatFeedReadState>;
-  // --- Workspace-backed chat bookmarks -----------------------------------
   saveBookmark(input: {
     workspaceId: WorkspaceId;
     ownerUserId: string;
@@ -1591,7 +1587,6 @@ export interface AgentDispatchRecord {
 export interface AgentRunRecord {
   workspaceId: WorkspaceId;
   runId: string;
-  // The agent that runs.
   agentId: string;
   threadId: ChatThreadId;
   triggerMessageId: ChatMessageId;

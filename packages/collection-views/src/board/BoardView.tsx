@@ -143,7 +143,6 @@ function CardProperty({
   personLabel,
 }: {
   field: FieldDefinition;
-  /** The field's name as people read it. */
   label: string;
   indexed: CollectionIndexedValue | undefined;
   personLabel?: PersonLabel;

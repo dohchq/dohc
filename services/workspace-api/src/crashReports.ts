@@ -39,7 +39,6 @@ export interface StoredCrashReport {
 export interface CrashReportStore {
   // False when storage already holds CRASH_REPORTS_STORED_MAX reports.
   insert(report: StoredCrashReport): Promise<boolean>;
-  // Deletes reports older than the retention period and returns the count.
   deleteExpired(): Promise<number>;
 }
 

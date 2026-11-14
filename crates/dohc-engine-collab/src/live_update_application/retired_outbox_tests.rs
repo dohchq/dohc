@@ -2,7 +2,6 @@
 /// quarantine reason and observed binding.
 type OutboxState = (String, String, String, Option<String>, Option<LiveObjectBinding>);
 
-/// [`OutboxState`] as stored, its observed binding still JSON.
 type OutboxRow = (String, String, String, Option<String>, Option<String>);
 
 fn outbox_states(f: &Fixture) -> Vec<OutboxState> {
@@ -24,22 +23,18 @@ fn outbox_states(f: &Fixture) -> Vec<OutboxState> {
         .collect()
 }
 
-/// The fixture's binding, at `path`.
 fn binding_at(f: &Fixture, path: &str) -> LiveObjectBinding {
     LiveObjectBinding { current_path: path.into(), selector_paths: vec![path.into()], ..f.binding.clone() }
 }
 
-/// An open outbox's state at `path`.
 fn open_at(path: &str) -> OutboxState {
     (path.into(), format!("[\"{path}\"]"), "active".into(), None, None)
 }
 
-/// An outbox at `path` that a successor at `observed` retired.
 fn retired_at(path: &str, observed: LiveObjectBinding) -> OutboxState {
     (path.into(), format!("[\"{path}\"]"), "quarantined".into(), Some(SUCCESSION_RETIRED.into()), Some(observed))
 }
 
-/// Every entry of the outbox at `path`, as it is stored.
 fn entries_at(f: &Fixture, path: &str) -> Vec<String> {
     query_rows(
         f,
@@ -70,8 +65,6 @@ fn released_covered() -> Fixture {
     f
 }
 
-/// A released predecessor, with C1 and C2 Carried when `seeded`, and with
-/// nothing Carried and no seed to send otherwise.
 fn released(seeded: bool) -> Fixture {
     if seeded {
         released_carrying_twice(6).0
@@ -80,8 +73,6 @@ fn released(seeded: bool) -> Fixture {
     }
 }
 
-/// An empty open outbox at `path` and `selectors`, of P's lineage and
-/// generation, as `id`.
 fn extra_outbox(f: &mut Fixture, id: &str, path: &str, selectors: &[&str]) {
     write(
         f,
@@ -97,7 +88,7 @@ fn extra_outbox(f: &mut Fixture, id: &str, path: &str, selectors: &[&str]) {
     );
 }
 
-/// Opus's blocker on 4b3a and Sol's ruling (a): a successor renamed away
+/// A successor renamed away
 /// from its predecessor's outbox retires it in its adoption, seeded or not.
 /// The old outbox keeps every entry, and names the successor's binding; the
 /// successor's outbox is the generation's one open outbox.
@@ -120,7 +111,7 @@ fn a_renamed_succession_retires_the_outbox_it_covered() {
     }
 }
 
-/// Sol's ruling (a): a succession that returns to an earlier binding reopens
+/// A succession that returns to an earlier binding reopens
 /// the outbox an earlier succession retired there, with no abandoned seed,
 /// keeping its entries; its seed and later edits continue that outbox's
 /// sequence. S1's outbox is retired in turn.
@@ -145,7 +136,7 @@ fn a_succession_back_to_an_earlier_binding_reopens_its_outbox() {
     assert_eq!(entry_of(&f, &edit.delivery_id), (outbox_at(&f, "owner.md"), 4, None));
 }
 
-/// Sol's ruling (a): any outbox in the generation that is neither at the
+/// Any outbox in the generation that is neither at the
 /// successor's exact binding nor at one its chain held refuses adoption with
 /// no writes, seeded or not, with or without an outbox already at the
 /// successor's binding. That includes one at the successor's path with other
@@ -189,7 +180,7 @@ fn an_unrelated_outbox_refuses_every_succession() {
     }
 }
 
-/// Sol's ruling (a): a later succession accepts a retired outbox only with
+/// A later succession accepts a retired outbox only with
 /// nothing pending in it and an observed binding an adopted activation of the
 /// chain held after the outbox's own. Each damage to P's outbox, which S1
 /// retired, refuses S2 with no writes.
@@ -234,7 +225,7 @@ fn only_a_chained_drained_retirement_is_covered() {
     }
 }
 
-/// Sol's acceptance test 6: retirement, the successor's outbox, its
+/// Retirement, the successor's outbox, its
 /// activation and its seed commit together. A failure inside the transaction
 /// rolls all of it back. A crash before the commit leaves nothing, and one
 /// after it leaves everything; after a restart the retry adopts or replays,
@@ -302,8 +293,6 @@ fn a_renamed_succession_commits_whole_and_replays_after_restart() {
     }
 }
 
-/// P, then S1, adopt and release at owner.md, and S2 registers there: a
-/// chain of two activations that held one binding.
 fn released_twice_at_one_binding() -> Fixture {
     let mut f = released_with_nothing_carried();
     let terminal = f.cut.terminal_receipt.clone();
@@ -317,7 +306,7 @@ fn released_twice_at_one_binding() -> Fixture {
     f
 }
 
-/// Sol's ruling (c): the chain walk counts every activation it visits, not the
+/// The chain walk counts every activation it visits, not the
 /// bindings they held. Two activations at one binding exceed a budget of
 /// one, and the adoption refuses with no writes; at two it adopts.
 #[test]
@@ -345,7 +334,7 @@ fn the_chain_walk_counts_each_activation() {
     adopt(&mut f, 2).unwrap();
 }
 
-/// Sol's ruling (c): one rename walk serves every chain binding. It stops once
+/// One rename walk serves every chain binding. It stops once
 /// it has proved each path it needs, and refuses past its budget rather than
 /// prove less.
 #[test]
@@ -399,5 +388,4 @@ fn every_pending_total_must_show_a_quarantined_outbox_drained() {
     }
 }
 
-/// A fixture a successor adopts as it is, by the case it shows.
 type QuarantineFixture = (&'static str, fn() -> Fixture);

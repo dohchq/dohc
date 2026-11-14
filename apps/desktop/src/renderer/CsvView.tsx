@@ -118,7 +118,6 @@ interface ImportHooks {
   onError?: ReportButtonError;
 }
 
-// A finished import opens the database and says what it made, with Undo.
 function imported(workspaceId: string, result: ImportToDatabaseResult, hooks: ImportHooks) {
   hooks.onOpenPath?.(result.path);
   hooks.onNotice?.(
@@ -904,7 +903,6 @@ export function CsvPreviewBound(props: {
   );
 }
 
-// The widest of the header and the preview's rows.
 function columnCountFor(rows: string[][]): number {
   let count = rows[0]?.length ?? 0;
   const end = Math.min(rows.length, MAX_CSV_PREVIEW_ROWS + 1);

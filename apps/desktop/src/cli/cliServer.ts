@@ -592,7 +592,6 @@ export interface CliRunMessageLink {
   messageId: string;
 }
 
-// A reader for each declared verb, given the request's workspace and input.
 export type DeclaredReaders<Workspace> = {
   [Verb in DeclaredVerb]: (
     workspace: Workspace,
@@ -5268,8 +5267,8 @@ export async function startCliServer(options: CliServerOptions): Promise<CliServ
   await mkdir(options.stateDir, { recursive: true, mode: 0o700 });
   // Windows chmod does not set a DACL; directory access still depends on its inherited ACL.
   await chmod(options.stateDir, 0o700);
-  // main added the provenance-restore step; this branch made the endpoint
-  // platform-aware. Both are needed, restore first as main had it.
+  // The provenance restore runs before the platform-aware endpoint is chosen.
+  // Both are needed, restore first.
   await restoreCliServerRuntime(options);
   const endpointPath = join(options.stateDir, CLI_ENDPOINT_FILE);
   const socketPath = isWindows

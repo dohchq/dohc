@@ -29,6 +29,7 @@ import {
 } from "./MentionComposer";
 import { agentMentionId } from "../../settings/userSettings";
 import { useAgentOffer } from "./AgentOffer";
+import { AgentThreadLines } from "./AgentThreadLines";
 import { DecisionStatus } from "./ChatPosts";
 import { COLLECTION_CHANGE_FILE } from "../collections/collectionChangeFlow";
 import { CollectionChangeCard } from "./CollectionChangeCard";
@@ -995,6 +996,13 @@ export function ChatLane(props: {
             }
           />
         </>
+      }
+      belowList={
+        <AgentThreadLines
+          workspaceId={workspaceId}
+          chatThreadIds={reactionThreads}
+          className="mx-5 mb-1 mt-2"
+        />
       }
       notice={props.notice}
       composer={(inset) =>

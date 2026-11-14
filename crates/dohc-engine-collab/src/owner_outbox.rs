@@ -1514,7 +1514,6 @@ fn read_page(
                     // A group's merged update is not the sum of what its rows queued.
                     if group.is_some() { header["queuedByteLength"] = delivery.queued_bytes.into(); }
                     if person_edit == Some(true) { header["personEdit"] = serde_json::json!(true); }
-                    // An entry that declared no agent has no field at all.
                     if let Some(declaration) = stored_declaration(declaration_json)? {
                         header["agentDeclaration"] = serde_json::to_value(declaration)
                             .map_err(|_| OwnerOutboxError::Corrupt)?;
@@ -1650,7 +1649,6 @@ fn accepted_checkpoint_in(
 
 /// Where a queue stands with its owner's adoption seed.
 enum RefusedSeed {
-    /// It holds no refused seed.
     None,
     /// It holds its owner's refused adoption seed with no Try again granted,
     /// at the restore generation its document's application binding still
@@ -1665,7 +1663,6 @@ enum RefusedSeed {
     Earlier,
 }
 
-/// An adoption seed entry of queue `o` that nothing applied.
 const UNAPPLIED_SEED: &str = "EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries e WHERE e.outbox_id=o.outbox_id AND e.pending=1
     AND json_extract(e.native_source_json,'$.origin.kind')='adoptionSeed'
     AND NOT EXISTS(SELECT 1 FROM live_device_update_applications s WHERE s.delivery_id=e.delivery_id))";

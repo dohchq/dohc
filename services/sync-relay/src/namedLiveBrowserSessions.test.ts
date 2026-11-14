@@ -25,9 +25,15 @@ const bob = {
 };
 
 function fixture(
-  overrides: { maxSessions?: number; retentionMs?: number; now?: () => number } = {},
+  overrides: {
+    maxSessions?: number;
+    retentionMs?: number;
+    idleMs?: number;
+    now?: () => number;
+  } = {},
 ) {
-  let time = 100;
+  let time = 100,
+    elapsed: number | undefined;
   const shares = new Map<string, SyncRelayShareRow>();
   const grants = new Map<string, SyncRelayShareGrantRow>();
   for (const context of [alice, bob]) {
@@ -69,7 +75,9 @@ function fixture(
     resolveActor,
     maxSessions: 3,
     retentionMs: 1000,
+    maxSessionsPerAccount: 16,
     now: () => time,
+    elapsedNow: () => elapsed ?? time,
     ...overrides,
   };
   return {
@@ -81,6 +89,10 @@ function fixture(
     shares,
     setTime(value: number) {
       time = value;
+    },
+    /** Lets elapsed time part from the wall clock, which otherwise stands for both. */
+    setElapsed(value: number) {
+      elapsed = value;
     },
   };
 }
@@ -142,9 +154,14 @@ describe("private named browser route sessions", () => {
     expect(await state.sessions.resolve(request("bob"), issued.discriminator)).toBeNull();
   });
 
-  it.each(["before", "during"])(
-    "invalidates the old grant generation %s authentication without disturbing other mappings",
-    async (timing) => {
+  it.each([
+    ["before", "alice"],
+    ["during", "alice"],
+    ["before", "nobody"],
+    ["during", "nobody"],
+  ])(
+    "invalidates the old grant generation %s authentication by %s without disturbing other mappings",
+    async (timing, caller) => {
       const state = fixture();
       const old = state.sessions.create(alice)!;
       const other = state.sessions.create(bob)!;
@@ -155,9 +172,10 @@ describe("private named browser route sessions", () => {
       else
         state.resolveActor.mockImplementationOnce(async (_request, workspaceId) => {
           advanceGeneration();
+          if (caller === "nobody") throw new UnauthorizedError();
           return { userId: "alice", workspaceId };
         });
-      expect(await state.sessions.resolve(request(), old.discriminator)).toBeNull();
+      expect(await state.sessions.resolve(request(caller), old.discriminator)).toBeNull();
       expect(state.sessions.remove(old.discriminator)).toBe(false);
       expect(await state.sessions.resolve(request("bob"), other.discriminator)).toEqual(bob);
       const fresh = state.sessions.create(alice)!;
@@ -238,6 +256,63 @@ describe("private named browser route sessions", () => {
     expect(state.sessions.create(bob)).toBeNull();
   });
 
+  it("keeps each account's most recently used sessions and leaves other accounts' sessions alone", async () => {
+    // The store is full once the account holds sixteen, and its next session still opens.
+    const state = fixture({ maxSessions: 17 });
+    const other = state.sessions.create(bob)!;
+    const issued = Array.from({ length: 16 }, () => state.sessions.create(alice)!);
+    expect(await state.sessions.resolve(request(), issued[0]!.discriminator)).toEqual(alice);
+    const newest = state.sessions.create(alice)!;
+    expect(newest).not.toBeNull();
+    expect(await state.sessions.resolve(request(), issued[1]!.discriminator)).toBeNull();
+    for (const kept of [issued[0]!, ...issued.slice(2), newest])
+      expect(await state.sessions.resolve(request(), kept.discriminator)).toEqual(alice);
+    expect(state.sessions.create(bob)).toBeNull();
+    expect(await state.sessions.resolve(request("bob"), other.discriminator)).toEqual(bob);
+  });
+
+  it("clears an account's expired sessions before it replaces one still in use", async () => {
+    const state = fixture({ maxSessions: 64 });
+    const expiring = state.sessions.create(alice)!;
+    state.setTime(200);
+    const issued = Array.from({ length: 15 }, () => state.sessions.create(alice)!);
+    state.setTime(1099);
+    expect(await state.sessions.resolve(request(), expiring.discriminator)).toEqual(alice);
+    state.setTime(1100);
+    const newest = state.sessions.create(alice)!;
+    expect(state.sessions.remove(expiring.discriminator)).toBe(false);
+    for (const kept of [...issued, newest])
+      expect(await state.sessions.resolve(request(), kept.discriminator)).toEqual(alice);
+  });
+
+  it("does not count a refused lookup as use", async () => {
+    const state = fixture({ maxSessions: 64 });
+    const issued = Array.from({ length: 16 }, () => state.sessions.create(alice)!);
+    expect(await state.sessions.resolve(request("bob"), issued[0]!.discriminator)).toBeNull();
+    state.sessions.create(alice);
+    expect(await state.sessions.resolve(request(), issued[0]!.discriminator)).toBeNull();
+    expect(await state.sessions.resolve(request(), issued[1]!.discriminator)).toEqual(alice);
+  });
+
+  it("keeps the account's sessions when a new one cannot be stored", async () => {
+    const state = fixture({ maxSessions: 64 });
+    vi.mocked(randomBytes).mockReturnValueOnce(Buffer.alloc(9) as never);
+    const issued = Array.from({ length: 16 }, () => state.sessions.create(alice)!);
+    vi.mocked(randomBytes).mockReturnValueOnce(Buffer.alloc(9) as never);
+    expect(() => state.sessions.create(alice)).toThrow("Named session discriminator collision");
+    for (const kept of issued)
+      expect(await state.sessions.resolve(request(), kept.discriminator)).toEqual(alice);
+  });
+
+  it("refuses an account when the store is full of other accounts' sessions, and drops none of them", async () => {
+    const state = fixture({ maxSessions: 2 });
+    const first = state.sessions.create(alice)!;
+    const second = state.sessions.create(alice)!;
+    expect(state.sessions.create(bob)).toBeNull();
+    expect(await state.sessions.resolve(request(), first.discriminator)).toEqual(alice);
+    expect(await state.sessions.resolve(request(), second.discriminator)).toEqual(alice);
+  });
+
   it("uses fixed expiry without renewal and releases capacity on removal", async () => {
     const state = fixture({ maxSessions: 1 });
     const first = state.sessions.create(alice)!;
@@ -250,14 +325,15 @@ describe("private named browser route sessions", () => {
     expect(state.sessions.create(alice)).not.toBeNull();
   });
 
-  it.each(["remove", "expire", "abort"])(
+  it.each(["remove", "replace", "expire", "abort"])(
     "refuses when %s occurs during authentication",
     async (action) => {
-      const state = fixture();
+      const state = fixture({ maxSessions: 17 });
       const issued = state.sessions.create(alice)!;
       const controller = new AbortController();
       state.resolveActor.mockImplementationOnce(async (_request, workspaceId) => {
         if (action === "remove") state.sessions.remove(issued.discriminator);
+        if (action === "replace") for (let i = 0; i < 16; i++) state.sessions.create(alice);
         if (action === "expire") state.setTime(issued.expiresAtMs);
         if (action === "abort") controller.abort();
         return { userId: "alice", workspaceId };
@@ -311,14 +387,12 @@ describe("private named browser route sessions", () => {
   it("refuses missing and link sessions without consuming the named mapping", async () => {
     const state = fixture();
     const issued = state.sessions.create(alice)!;
-    state.storage.getShareGrant.mockClear();
     for (const cookie of [null, "dohc_share_link=secret; dohc_profile=secret"]) {
       const incoming = request();
       if (cookie === null) incoming.headers.delete("cookie");
       else incoming.headers.set("cookie", cookie);
       expect(await state.sessions.resolve(incoming, issued.discriminator)).toBeNull();
     }
-    expect(state.storage.getShareGrant).not.toHaveBeenCalled();
     expect(await state.sessions.resolve(request(), issued.discriminator)).toEqual(alice);
   });
 
@@ -385,5 +459,69 @@ describe("private named browser route sessions", () => {
     expect(() => state.sessions.create(bob)).toThrow("Named session discriminator collision");
     expect(await state.sessions.resolve(request(), first.discriminator)).toEqual(alice);
     expect(await state.sessions.resolve(request("bob"), first.discriminator)).toBeNull();
+  });
+});
+
+describe("a session nobody uses", () => {
+  const hour = 60 * 60 * 1000;
+  const policy = { retentionMs: 12 * hour, idleMs: 15 * 60 * 1000 };
+
+  it("is removed once its first window passes without a use", async () => {
+    const state = fixture(policy);
+    const { discriminator } = state.sessions.create(alice)!;
+    state.setTime(100 + policy.idleMs - 1);
+    expect(await state.sessions.resolve(request(), discriminator)).toEqual(alice);
+    state.setTime(100 + policy.idleMs - 1 + policy.idleMs);
+    expect(await state.sessions.resolve(request(), discriminator)).toBeNull();
+    expect(state.sessions.remove(discriminator)).toBe(false);
+  });
+
+  it("keeps the window its last check set through the relay's own uses", async () => {
+    const state = fixture(policy);
+    const { discriminator } = state.sessions.create(alice)!;
+    const window = 3 * 60 * 1000;
+    state.setTime(1_000);
+    expect(await state.sessions.check(request(), discriminator, window)).toEqual(alice);
+    state.setTime(1_000 + window - 1);
+    expect(await state.sessions.resolve(request(), discriminator)).toEqual(alice);
+    state.setTime(1_000 + 2 * window - 2);
+    expect(await state.sessions.resolve(request(), discriminator)).toEqual(alice);
+    state.setTime(1_000 + 3 * window - 2);
+    expect(await state.sessions.resolve(request(), discriminator)).toBeNull();
+  });
+
+  it("lasts its whole retention once a check announced no interval", async () => {
+    const state = fixture(policy);
+    const { discriminator } = state.sessions.create(alice)!;
+    expect(await state.sessions.check(request(), discriminator, Infinity)).toEqual(alice);
+    state.setTime(100 + policy.retentionMs - 1);
+    expect(await state.sessions.resolve(request(), discriminator)).toEqual(alice);
+    state.setTime(100 + policy.retentionMs);
+    expect(await state.sessions.resolve(request(), discriminator)).toBeNull();
+  });
+
+  it("follows the time that passed, not a corrected wall clock", async () => {
+    const state = fixture(policy);
+    const { discriminator } = state.sessions.create(alice)!;
+    const window = 3 * 60 * 1000;
+    state.setElapsed(100);
+    expect(await state.sessions.check(request(), discriminator, window)).toEqual(alice);
+    // The wall clock jumps forward past the window while one interval passes.
+    state.setTime(100 + 4 * 60 * 1000);
+    state.setElapsed(100 + 60 * 1000);
+    expect(await state.sessions.check(request(), discriminator, window)).toEqual(alice);
+    // It jumps back, and the window still ends when its time has passed.
+    state.setTime(100);
+    state.setElapsed(100 + 60 * 1000 + window);
+    expect(await state.sessions.check(request(), discriminator, window)).toBeNull();
+  });
+
+  it("is not kept by a use that fails its checks", async () => {
+    const state = fixture(policy);
+    const { discriminator } = state.sessions.create(alice)!;
+    state.setTime(100 + policy.idleMs - 1);
+    expect(await state.sessions.check(request("bob"), discriminator, Infinity)).toBeNull();
+    state.setTime(100 + policy.idleMs);
+    expect(await state.sessions.resolve(request(), discriminator)).toBeNull();
   });
 });

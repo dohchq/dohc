@@ -40,7 +40,6 @@ function predicatesReadRowid(sql: string): boolean {
 }
 
 export function assertReplayableSchema(schemaSql: string): void {
-  // Ignore quoted identifiers, literals, and comments when finding the SQL keyword.
   const code = schemaSql.replace(
     /'(?:[^']|'')*'|"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\]|--[^\r\n]*|\/\*[\s\S]*?\*\//g,
     " ",

@@ -154,6 +154,7 @@ export function objectMomentFromMomentValue(parsed: unknown): {
   objectId: string;
   momentId: string;
   versionId: string;
+  deleted: boolean;
   path: string | null;
   blobSha256: string | null;
   contentKind: string | null;
@@ -190,7 +191,17 @@ export function objectMomentFromMomentValue(parsed: unknown): {
     Number.isSafeInteger(record.payloadAfterByteLength)
       ? record.payloadAfterByteLength
       : null;
-  return { objectId, momentId, versionId, path, blobSha256, contentKind, byteLength, recordedAtMs };
+  return {
+    objectId,
+    momentId,
+    versionId,
+    deleted,
+    path,
+    blobSha256,
+    contentKind,
+    byteLength,
+    recordedAtMs,
+  };
 }
 
 export function readableString(value: unknown): string | null {

@@ -88,7 +88,6 @@ it("takes a Comment thread's id in the same shape to read it and to reply in it"
 it("takes the share link tools' inputs where they mean the same thing", () => {
   const linkFiles = linkTools["comment/current/without-live"],
     linkChannel = linkTools["group-channel"];
-  // A Collection write takes the Edit link's write and the workspace it goes to.
   const { workspace, ...write } = properties(personalTools, "dohc_write_collection_files");
   expect(write).toEqual(
     properties(linkTools["edit/current/without-live"], "dohc_write_collection_files"),
@@ -101,7 +100,6 @@ it("takes the share link tools' inputs where they mean the same thing", () => {
       properties(linkChannel, "dohc_post_group").idempotencyKey,
     ]);
   }
-  // A live tool takes the Edit link's input and the workspace it reads or edits in.
   for (const name of ["dohc_read_document", "dohc_edit_document"]) {
     const { workspace: liveWorkspace, ...input } = properties(personalTools, name);
     expect(input, name).toEqual(properties(linkTools["edit/current/live"], name));

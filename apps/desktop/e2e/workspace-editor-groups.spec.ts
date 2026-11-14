@@ -202,8 +202,6 @@ test("a group focused by a keyboard close shows its whole ring, and the active g
     const group = (number: number) => page.getByRole("region", { name: `Editor group ${number}` });
     const accent = await resolveColor(page, "var(--dohc-accent)");
 
-    // One group: closing its last tab from the keyboard leaves it empty and
-    // focused, with the ring on every edge.
     await explorerRow(page, "a.md").click();
     const onlyTab = page.getByTestId(editorTabTestId("a.md"));
     await expect(onlyTab).toHaveAttribute("aria-selected", "true");
@@ -213,9 +211,6 @@ test("a group focused by a keyboard close shows its whole ring, and the active g
     await expect(group(1)).toBeFocused();
     await expectRing(page, group(1), accent, true);
 
-    // A split of two groups with a tab each. Closing the right group's last
-    // tab from the keyboard collapses it, and the left group takes focus
-    // with its ring drawn over its open file.
     await explorerRow(page, "a.md").click();
     await group(1).getByTestId("create-editor-group-right").click();
     await tabToGroupTab(page, group(2), group(2).getByTestId(editorTabTestId("a.md")));
@@ -225,10 +220,6 @@ test("a group focused by a keyboard close shows its whole ring, and the active g
     await expect(group(1).getByTestId("view-markdown")).toBeVisible();
     await expectRing(page, group(1), accent, true);
 
-    // Three groups, the middle one emptied by moving its tab to the left
-    // group. Closing the right group's last tab from the keyboard collapses
-    // it and focuses the empty middle group, still split beside a group with
-    // a tab.
     await group(1).getByTestId("create-editor-group-right").click();
     await group(2).getByTestId("create-editor-group-right").click();
     await expect(group(3)).toBeVisible();
@@ -241,8 +232,6 @@ test("a group focused by a keyboard close shows its whole ring, and the active g
     await expect(group(2)).toHaveAttribute("aria-current", "true");
     await expectRing(page, group(2), accent, true);
 
-    // Focus leaves the groups: the ring goes, and the active group's mark
-    // stays on the empty group alone.
     await explorerRow(page, "a.md").focus();
     await expectRing(page, group(2), accent, false);
     await expectActiveMark(page, group(2), group(1), accent);
@@ -258,8 +247,6 @@ test("a group focused by a keyboard close shows its whole ring, and the active g
     await explorerRow(page, "a.md").focus();
     await expectActiveMark(page, group(1), group(2), highlight);
 
-    // A keyboard close in forced colors: the left group collapses and the
-    // empty group left alone takes focus with its ring on every edge.
     await tabToGroupTab(page, group(1), group(1).getByTestId(editorTabTestId("a.md")));
     await page.keyboard.press("Delete");
     await expect(group(2)).toHaveCount(0);

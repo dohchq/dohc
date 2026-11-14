@@ -38,7 +38,6 @@ it("names a workspace only for its owner", async () => {
     { workspaceId: "workspace", name: "Trip planning" },
   ]);
 
-  // Another account gets the bytes of a workspace that doesn't exist.
   const refused = await h(rename("other", "workspace", { name: "Taken" }));
   const missing = await h(rename("other", "no-such-workspace", { name: "Taken" }));
   expect(refused.status).toBe(404);

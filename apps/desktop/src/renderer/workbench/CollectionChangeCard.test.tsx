@@ -94,7 +94,6 @@ it("shows a collaborator's unapplied edit as its own row with its author", async
   card();
   await screen.findByTestId("lane-change-card");
   expect(within(row("Makes Email unique")).getByText(`Ice · ${formatClock(1_000)}`)).toBeTruthy();
-  // Rows the message's author made name nobody.
   expect(within(row("Adds the field Due date")).queryByText(/Claude Code/u)).toBeNull();
   expect(screen.getByText("History can't undo this change.")).toBeTruthy();
 });
@@ -148,7 +147,6 @@ it("applies the rows it showed and answers the message as the person who clicked
   card();
   const apply = await screen.findByTestId("lane-change-apply");
   expect(apply.textContent).toBe("Apply and delete 12 values");
-  // Someone with write access hides the deletion in the attached file after the card loaded.
   place.files[proposalPath] = JSON.stringify({
     ...proposal,
     rows: proposal.rows.filter((entry) => entry.kind !== "field-removed"),
@@ -170,7 +168,6 @@ it("applies the change after records came, and its reply attaches the change as 
   ask(place);
   card();
   const apply = await screen.findByTestId("lane-change-apply");
-  // A volunteer signed up without a note.
   place.recount(13, 12);
   fireEvent.click(apply);
   await waitFor(() =>
@@ -250,7 +247,6 @@ it("offers Try again for an Apply that fails after the chat closed, which prepar
   const apply = await screen.findByTestId("lane-change-apply");
   place.control.refuse = new Error("dohc lost its connection to the engine.");
   fireEvent.click(apply);
-  // The chat closes before the engine answers.
   view.unmount();
   await waitFor(() =>
     expect(onError).toHaveBeenCalledWith(
@@ -259,7 +255,6 @@ it("offers Try again for an Apply that fails after the chat closed, which prepar
       expect.any(Function),
     ),
   );
-  // A volunteer signed up before Try again.
   place.recount(13, 12);
   (onError.mock.calls[0]![2] as () => void)();
   await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Applied the change to Volunteers"));
@@ -341,7 +336,6 @@ it("says it applied the change after the chat closed even when its reply didn't 
   const proposal = ask(place);
   const view = card();
   const apply = await screen.findByTestId("lane-change-apply");
-  // The reply's own words don't say the change applied.
   onReply.mockRejectedValueOnce(new Error("dohc couldn't send that message."));
   fireEvent.click(apply);
   view.unmount();
@@ -359,7 +353,6 @@ it("says it applied the change after the chat closed even when its reply didn't 
     resolves: true,
   });
   expect(onNotice).toHaveBeenCalledTimes(1);
-  // Try again posted only the reply: the change applied once.
   expect(
     place
       .actions()
@@ -549,7 +542,6 @@ it("reviews the change the files make now and applies that preparation", async (
 
 it("lists a changed file that other rows stand for, with who changed it and its changes", async () => {
   ask(place);
-  // Ada edits the schema after the message. On the card, the field rows stand for that file.
   const schemaSql = "CREATE TABLE volunteers (id TEXT PRIMARY KEY, due TEXT);";
   place.files[volunteers.schemaPath] = schemaSql;
   place.moments.push(

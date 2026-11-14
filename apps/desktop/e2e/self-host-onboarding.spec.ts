@@ -87,8 +87,6 @@ test("@self-host-onboarding a real account connects two fresh desktops and keeps
     ]);
     left = await launchDesktopApp({ workspace: first });
     const workspace = await openWorkspaceFromFirstRun(left.page, first);
-    // Sync and sharing lives in Settings. Signed out, it opens the connect
-    // flow; once signed in, the flow hands back to the page and its switch.
     await left.page.getByTestId(activityPin("settings")).click();
     await left.page.getByTestId(settingsNavPin("cloud")).click();
     await left.page.getByTestId("settings-cloud-connect").click();

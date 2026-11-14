@@ -2,8 +2,7 @@
 //!
 //! The workspace actor model: each open workspace is a dedicated OS thread
 //! owning exactly one storage writer connection, addressed by clonable
-//! message-only handles. This crate proves the state-ownership story the
-//! rewrite depends on (`plan §Workspace actor model`):
+//! message-only handles. This crate implements that model:
 //!
 //! - **One writer, one owner.** [`actor::WorkspaceActor`] owns the connection
 //!   on its worker thread; it never crosses threads and there is no second

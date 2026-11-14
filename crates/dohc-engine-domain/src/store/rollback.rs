@@ -1296,7 +1296,7 @@ fn lineage_has_independent_object_mutation(
         if !seen.insert(version.version_id.as_str()) {
             return false;
         }
-        // TS value 2 is a concrete preimage (reachable for R05 update/delete/
+        // TS value 2 is a concrete preimage (reachable for update/delete/
         // rename); Rust's bool represents it as `true`. Rust intentionally
         // collapses TS unrecorded (0) and explicit-absent (1) to `false`;
         // this dependency check only needs the concrete-preimage distinction.

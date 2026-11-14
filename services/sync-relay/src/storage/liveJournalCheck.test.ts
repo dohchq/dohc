@@ -85,7 +85,6 @@ it("reports clean journals silently, yields between bounded pages and documents,
   expect(Math.max(...counts)).toBe(128);
   expect(report).not.toHaveBeenCalled();
   expect(prepare.mock.calls.some(([sql]) => sql.includes("LIMIT 1"))).toBe(true);
-  // Next day's pass starts, then close interrupts it between pages.
   await vi.advanceTimersToNextTimerAsync();
   expect(counts.reduce((sum, count) => sum + count, 0)).toBe(1024 + 128);
   check.close();
@@ -168,9 +167,13 @@ it.each(["overlap", "adjacency", "parent", "baseline", "boundary"])(
   },
 );
 
-it.each(["ERR_OUT_OF_RANGE", undefined])(
-  "continues past an unreadable document and logs only its code or name (%s)",
-  async (code) => {
+it.each([
+  ["ERR_OUT_OF_RANGE", "ERR_OUT_OF_RANGE"],
+  [undefined, "RangeError"],
+  ["notes/private document content.md", "RangeError"],
+])(
+  "continues past an unreadable document and logs only its known code or name (%s)",
+  async (code, logged) => {
     const db = fixture(1),
       report = vi.fn(),
       originalPrepare = db.prepare.bind(db);
@@ -201,7 +204,7 @@ it.each(["ERR_OUT_OF_RANGE", undefined])(
       await vi.advanceTimersByTimeAsync(1100);
       expect(report.mock.calls[0]).toEqual([
         "[sync-relay] live journal unreadable",
-        { document, errorCode: code ?? "RangeError" },
+        { document, errorCode: logged },
       ]);
       expect(report.mock.calls[1]?.[0]).toBe("[sync-relay] live journal damaged");
       expect(report.mock.calls[1]?.[1].document.objectId).toBe("second");

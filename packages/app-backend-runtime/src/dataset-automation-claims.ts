@@ -11,41 +11,37 @@ import type { DatasetCommit } from "./supervisor.js";
 
 // Automation claims for dataset commits (ADR 0008).
 //
-// The host that commits a dataset change claims it, inside the commit's own
-// transaction: each subscribed automation gets one claim per changed record,
-// keyed by (automation, host epoch, revision, table, record). Only a new
-// commit reaches this ledger. Receipt replays, recovery, replicas, and
-// materialization never commit, so they never claim.
-//
-// A change the facts reader refuses, such as a value no field type holds,
-// still commits. It claims no record: each automation that watches a table
-// and change kind the change holds gets one failed claim that says why. A claim carries the values of the fields its
-// automation watches, whoever can read them; the executor's reach check
-// filters them before a step uses them.
+// The host that commits a dataset change claims it inside the commit's own
+// transaction: one claim per subscribed automation and changed record, keyed
+// by (automation, host epoch, revision, table, record). Receipt replays,
+// recovery, replicas, and materialization never commit, so they never claim.
+// A change the facts reader refuses still commits and claims no record: each
+// automation that watches its table and change kind gets one failed claim
+// that says why. A claim carries the values of the fields its automation
+// watches, whoever can read them; the executor's reach check filters them
+// before a step uses them.
 //
 // A claim moves from pending to running to done or failed. The reaper at open
 // requeues claims a dead process left running, and fails a claim that keeps
 // dying. Try again queues a failed claim again and raises its run. Run history
 // keeps a settled claim 30 days after it last settled, and each automation's
-// newest failure, which its notice offers. Every
-// claim and History row is charged to the dataset's storage and refunded when
-// trimmed; deleting a dataset refunds everything it retained.
+// newest failure, which its notice offers. Every claim and History row is
+// charged to the dataset's storage and refunded when trimmed or when the
+// dataset is deleted.
 //
-// Each automation also counts its failures on one instance of a dataset,
-// its host epoch, a generation that only grows: trimming and Try again never
-// lower it. A failure notice the owner dismissed at generation N comes back
-// when the count passes N. A dataset deleted and made again, or restored,
-// has a new epoch, so its count starts over under a new instance and no
-// earlier dismissal applies to it. The count is charged to the dataset once,
-// and deleting the dataset forgets it with its claims.
+// Each automation counts its failures per host epoch in a generation that
+// only grows: trimming and Try again never lower it. A failure notice
+// dismissed at generation N comes back when the count passes N. A dataset
+// deleted and made again, or restored, has a new epoch, so its count starts
+// over and no earlier dismissal applies to it.
 //
-// A press of a Button field claims too, through `press`, with no commit: one
+// A press of a Button field claims through `press`, with no commit: one
 // pending claim keyed `press:<press id>` that acts for the person who
 // pressed. The ledger remembers each press 30 days, so the same press sent
 // again after a lost reply answers its claim instead of running twice, and
-// trimming and expiry keep a claim a remembered press names. While the button runs on
-// a record, the same person's new press of the same automation joins that
-// claim, and any other press is busy. A press also names the definition of
+// trimming and expiry keep a claim a remembered press names. While the button
+// runs on a record, the same person's new press of the same automation joins
+// that claim, and any other press is busy. A press names the definition of
 // the automation it was checked against, so its run can refuse another.
 
 /** A change at this depth runs no automation. Its claims fail at once and say why. */
@@ -714,7 +710,6 @@ export function createDatasetAutomationClaims(options: {
         });
       return made;
     },
-    /** Add or replace one automation's subscription. */
     subscribe(scope: DatasetScope, raw: DatasetAutomationSubscription): void {
       const workspaceId = text(scope.workspaceId, "workspace"),
         datasetId = text(scope.datasetId, "dataset");

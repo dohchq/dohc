@@ -53,8 +53,6 @@ describe("agent badge", () => {
       "Your runner command",
     );
     cleanup();
-    // A connected agent with no name posts as "Agent", and an older message can
-    // carry your agent's name. Neither is your agent's run.
     for (const name of ["Agent", "Nova"]) {
       expect(
         tooltipFor(
@@ -65,7 +63,6 @@ describe("agent badge", () => {
       ).not.toContain("Your runner command");
       cleanup();
     }
-    // An agent no longer in Settings shows no command.
     expect(tooltipFor({ authorDisplayName: "Nova", authorAgentId: "codex" }, mine)).not.toContain(
       "Your runner command",
     );

@@ -1879,8 +1879,6 @@ fn load_frontmatter_yaml(source: &str) -> Option<LoadedFrontmatterYaml> {
     let mut root_keys: Option<Vec<(usize, usize)>> = Some(Vec::new());
     for event in saphyr_parser::Parser::new_from_str(source) {
         let (event, span) = event.ok()?;
-        // Whether a node this event starts is a mapping key, and whether it is
-        // a key of the root mapping.
         let is_key = frames
             .last()
             .is_some_and(|frame| frame.mapping && frame.key.is_none());
@@ -6168,8 +6166,8 @@ fn reject_button_field_references(
 /// version's persisted collection index. Raw indexed values are never reparsed
 /// from record files, including when the schema is degraded.
 ///
-/// The filter, sort, and cursor run in SQL over the indexed values (#986,
-/// #991): a registered collation reproduces the cross-type `compare_json`
+/// The filter, sort, and cursor run in SQL over the indexed values:
+/// a registered collation reproduces the cross-type `compare_json`
 /// order over stored `value_json`, so a page reads and hydrates only the
 /// records it returns instead of materializing the collection.
 pub fn query_collection_records(
@@ -6883,7 +6881,6 @@ mod attribution_tests {
             json!({ "agentId": "codex", "onBehalfOf": "local", "depth": 2 })
         );
         assert_eq!(declared.attribution().agent_run_id, None);
-        // An author written before agent runs were recorded names none.
         let unnamed = ChangeAttribution {
             agent_run_id: None,
             ..attribution
@@ -7298,7 +7295,6 @@ mod tests {
                     .expect("conflict row");
                 let mut values = Vec::new();
                 for field in FIELDS {
-                    // A quarter of fields are missing entirely.
                     if rng.pick(4) == 0 {
                         continue;
                     }

@@ -181,9 +181,7 @@ describe("the linear reference scanner", () => {
     const handles = (body: string) => chatMentionTokens(body).map((token) => token.handle);
     expect(handles("@Nova, see @[trip @Nova notes.md]")).toEqual(["Nova"]);
     expect(handles("@[notes @agent draft.md#plan @agent]")).toEqual([]);
-    // A name that ends where a link starts still counts.
     expect(handles("@Nova@[trip.md]")).toEqual(["Nova"]);
-    // Inside code, the link is text and code hides its name.
     expect(handles("`@[trip @Nova notes.md]` and @Nova")).toEqual(["Nova"]);
   });
 });

@@ -30,7 +30,6 @@ async function capture(page: Page, name: string): Promise<void> {
   }
 }
 
-// One deliberate counted action, its count in Privacy, Off and On, then Clear.
 test("@usage-record Privacy shows a counted action, keeps it while Off, and clears it after a confirm", async () => {
   test.setTimeout(180_000);
   const temp = await createTempWorkspace();
@@ -59,7 +58,6 @@ test("@usage-record Privacy shows a counted action, keeps it while Off, and clea
     await expect(record(page).getByTestId("usage-record-file")).toHaveText(file);
     await capture(page, "counts");
 
-    // Keyboard: the switch takes focus and Space turns the record Off.
     await toggle(page).focus();
     await page.keyboard.press("Shift+Tab");
     await page.keyboard.press("Tab");
@@ -76,9 +74,6 @@ test("@usage-record Privacy shows a counted action, keeps it while Off, and clea
     await expect(record(page)).toHaveAttribute("data-state", "on");
     await expect.poll(async () => (await saved()).enabled).toBe(true);
 
-    // Keyboard: Enter on Clear record opens the confirm with focus and its
-    // ring on the confirm button. The same Enter, held, clears nothing.
-    // ArrowLeft reaches Cancel, and Escape gives focus back to Clear record.
     const clear = record(page).getByTestId("usage-record-clear");
     const confirm = page.getByTestId("usage-record-clear-confirm");
     const clearAction = page.getByTestId("usage-record-clear-action");
@@ -127,8 +122,6 @@ test("@usage-record Privacy shows a counted action, keeps it while Off, and clea
   }
 });
 
-// A folder where the file should be is a record dohc cannot read. Try again
-// only reads, so the folder stays as it is.
 test("@usage-record Privacy says a record it cannot read stays as it is, and offers Try again that writes nothing", async () => {
   const temp = await createTempWorkspace();
   let desktop: LaunchedDesktopApp | null = null;
@@ -165,7 +158,6 @@ test("@usage-record Privacy says a record it cannot read stays as it is, and off
   }
 });
 
-// A file that does not decode: Start a new record sets it aside, and Restore swaps it back.
 test("@usage-record Privacy sets an undecodable record aside, starts a new one Off, and restores the old one", async () => {
   const temp = await createTempWorkspace();
   let desktop: LaunchedDesktopApp | null = null;

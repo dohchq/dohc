@@ -148,7 +148,6 @@ describe("blockExit Mod-Enter escape", () => {
 
     expect(topLevelTypes(editor)).toEqual(["callout", "paragraph"]);
     expect(editor.state.doc.toString()).not.toContain("hardBreak");
-    // Caret sits in the new paragraph, ready to type.
     expect(editor.state.selection.$from.parent.type.name).toBe("paragraph");
     expect(editor.state.selection.$from.depth).toBe(1);
   });
@@ -311,7 +310,6 @@ describe("blockExit ArrowDown at document end", () => {
 
     press(editor, { key: "ArrowDown" });
 
-    // The menu consumed the key: selection moved in the menu, doc untouched.
     expect(editor.getJSON()).toEqual(before);
     expect(slashStateRef.current.open && slashStateRef.current.selected).toBe(1);
   });
@@ -409,8 +407,6 @@ describe("blockExit folded callout (toggle) guards", () => {
   });
 });
 
-// These lock the DEFAULT escape/delete paths the fixes above build on — if a
-// future extension swallows them, callouts become traps again.
 describe("blockExit locked defaults", () => {
   it("Enter on the empty last child lifts out of the callout", () => {
     const editor = makeEditor("> [!note] Title\n> hello");

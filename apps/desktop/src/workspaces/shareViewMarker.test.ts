@@ -1,18 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { readableShareLevel, shareViewGranterEmail, shareViewIsPresent } from "./shareViewMarker";
 
-// `shareViewIsPresent` is what main's `sharedViewOf` asks before refusing a
-// write. It decides whether someone else's files can be edited, so it is
-// tested as the security predicate it is, not as a formatting helper.
-
 describe("share-view marker presence", () => {
   it("treats only an absent field as an ordinary workspace", () => {
     expect(shareViewIsPresent(undefined)).toBe(false);
   });
 
-  // The hole this closes: `entry?.shareView ?? null` read a stored `null` as
-  // "no share view", so main allowed writes into a shared view whose marker
-  // had lost its value.
   it("treats a present-but-unreadable marker as a share view", () => {
     for (const raw of [null, "", 0, false, "nonsense", 7, [], {}]) {
       expect(
@@ -52,8 +45,6 @@ describe("share-view pinned level", () => {
     );
   });
 
-  // Same verdict as the refresh path, from the same function. A selector the
-  // pull refuses must not read as a healthy grant here.
   it("refuses every grant the pull refuses", () => {
     for (const selector of [
       null,

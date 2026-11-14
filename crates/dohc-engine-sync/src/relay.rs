@@ -3560,7 +3560,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         for change in heads {
             insert_changed_path(&mut pass.changed_paths, change);
         }
-        // A document that moved first in a trade of spellings (#2421) shares
+        // A document that moved first in a trade of spellings shares
         // the other's file on a disk that ignores case, whichever change
         // named its path, so its head waits for the pass that makes it ready.
         let unready: BTreeSet<&str> = replica
@@ -4106,8 +4106,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         // it has not retained, which stays in the feed. Nothing reruns the
         // drain for it. One of an archived lineage freezes only that lineage:
         // ingress stops each of its updates, and the head's ops route on.
-        // r1c-2: a dependency-drain hold still routes later ops, which queue
-        // behind it unbounded until its bounded retention lands.
+        // A dependency-drain hold still routes later ops, which queue behind
+        // it without a bound.
         let frozen = match (&p.holding, crate::hosted::hosted_document(op)) {
             (Holding::ByDocument { .. }, Some(object_id)) if recorded.is_none() => store
                 .read_with(|conn| -> Result<Option<crate::HostedHold>, SyncError> {
@@ -6242,8 +6242,8 @@ impl Holding {
     /// unsettled, or its lineage does not project its resulting head yet. The
     /// document is held there, naming why, and retains nothing, as one that
     /// is not ready.
-    // MERGE-REVIEW: main stops these only after a round without progress;
-    // the released-lineage and resulting-head reasons now wait for that too.
+    // Every reason here stops its document only after a round without
+    // progress.
     fn stop_where_it_can_wait(&mut self, op: &ReplicationEnvelope, reason: &str) {
         if let Self::ByDocument { unready, .. } = self
             && matches!(
@@ -6345,7 +6345,6 @@ struct ApplyProgress {
     holding: Holding,
     /// Every round ran; only settling what the ops left pending remains.
     rounds_done: bool,
-    /// The owner settlements the pass reports so far.
     settlements: crate::moment_apply::pending::PendingSettlementReport,
     /// The archived lineages, as `[version, object, lineage]`, that the
     /// inactive drains before its ops found released tails protect. Those
@@ -6358,7 +6357,6 @@ struct ApplyProgress {
     reader: crate::moment_apply::open_artifacts::ReaderWait,
 }
 
-/// What applying a pass came to.
 enum Applying {
     Done(Box<AppliedPass>),
     /// An op or owner settlement waits for released-tail validation; nothing
@@ -7140,7 +7138,6 @@ struct ScanSkips {
     stop_at: BTreeSet<String>,
 }
 
-/// What one scan of this replica's journal found.
 struct ShareProposalScan {
     changes: Vec<NetChange>,
     /// The journal position this scan read through, and the position the
@@ -7614,7 +7611,6 @@ fn refusal_detail(refused: &[RefusedBlob]) -> String {
     refusal_list(entries.len(), &entries[..listed])
 }
 
-/// The count leads, then the entries that fit, then what was left out.
 fn refusal_list(total: usize, listed: &[String]) -> String {
     let unlisted = format!("and {} more", total - listed.len());
     let mut parts: Vec<&str> = listed.iter().map(String::as_str).collect();
@@ -9171,7 +9167,6 @@ mod refusal_tests {
                 detail: "retryable-state: replication state is not ready: ydoc-resulting-head-pending (object zeus, origin peer seq 6); and 1 more".into(),
             }
         );
-        // The engine's log line names no path.
         assert_eq!(
             refusal.to_string(),
             "local sync state failed: retryable-state: replication state is not ready: ydoc-resulting-head-pending (object zeus, origin peer seq 6); and 1 more",

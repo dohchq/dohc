@@ -651,7 +651,7 @@ fn row_for(source: &Path, rel: &str, bytes: &[u8]) -> RetainedDisplacement {
     }
 }
 
-/// #2205: after a remount gives a source a new device number and the same
+/// After a remount gives a source a new device number and the same
 /// bytes, its identity is recorded once, held or not. A release backed off
 /// for minutes then keeps the source without reading it on every pass.
 #[cfg(all(test, feature = "fault-injection"))]

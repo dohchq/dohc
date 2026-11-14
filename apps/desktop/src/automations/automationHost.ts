@@ -75,7 +75,6 @@ export interface FinishedHere {
 }
 
 export interface AutomationHostsDependencies {
-  /** This computer's install id. */
   installId(): string;
   /** This computer's name, as the owner's settings show it. */
   label(): string;
@@ -576,7 +575,6 @@ export function createAutomationHosts(dependencies: AutomationHostsDependencies)
     open(workspaceId: string): void {
       const kept = states.get(workspaceId);
       if (kept) {
-        // Opening an open workspace again changes nothing.
         if (kept.open) return;
         kept.open = true;
         if (dependencies.synced(workspaceId)) void refresh(workspaceId, kept);

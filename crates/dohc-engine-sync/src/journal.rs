@@ -53,38 +53,30 @@ pub(crate) fn crashes(_faults: &dyn FaultInjector, _point: FaultPoint) -> bool {
 /// caller's transaction.
 ///
 /// A `sync_identity` row does not answer this. `local_replication_coordinate`
-/// (`dohc-engine-domain/src/chats.rs`) mints one with `INSERT OR IGNORE` from
-/// `randomblob(16)` on every ordinary chat write, including the
-/// `ensure_general_channel` bootstrap, so a workspace that has never seen a
-/// relay still has an identity. Gating anything cloud-shaped on its existence
-/// promotes private local documents.
+/// (`dohc-engine-domain/src/chats.rs`) mints one on every ordinary chat
+/// write, so a workspace that has never seen a relay still has an identity,
+/// and gating anything cloud-shaped on it promotes private local documents.
 ///
 /// A durable relay position does answer it. `sync_relay_cursors` advances only
 /// when a pull cursor commits and `sync_relay_push_state` only when a push
 /// succeeds; both run behind `relay-not-configured`, which the desktop
-/// satisfies only for a workspace the user explicitly enabled cloud sync on
-/// (`RegistryEntry.remote` plus matching credentials).
+/// satisfies only for a workspace the user explicitly enabled cloud sync on.
+/// A hosted replica answers `true` from its creation: its position lives in
+/// `hosted_replicas`. The identity is checked as well because
+/// [`journal_local_op_in_tx`] refuses without one, and that refusal would
+/// roll the user's edit back with it.
 ///
-/// A SHARE lane is deliberately not read here. This predicate answers for the
-/// OWNER lane, and for a share view the honest answer is no. The narrower
-/// [`workspace_journals_file_moments_in_tx`] holds the share-lane term, and
-/// only the file-moment journal reads it.
-///
-/// This is narrower than `adopt_join_identity`'s "pristine local replication
-/// state" check, which must refuse on any prior replication activity. Do not
-/// widen one to match the other. The identity is checked as well because
-/// [`journal_local_op_in_tx`] refuses without one, and that refusal would roll
-/// the user's edit back with it.
-///
-/// A hosted replica answers `true` from its creation: the session host
-/// exists only to replicate, and its position lives in `hosted_replicas`.
+/// This answers for the owner lane only.
+/// [`workspace_journals_file_moments_in_tx`] holds the share-lane term. This
+/// predicate is narrower than `adopt_join_identity`'s "pristine local
+/// replication state" check, which must refuse on any prior replication
+/// activity. Do not widen one to match the other.
 ///
 /// This reads past contact, not current enrolment. A freshly enrolled
 /// workspace answers `false` until its first push or pull commits; the
 /// deferred drain, the non-leased apply path, and the enrolment backfill retry
 /// origination after that. Nothing deletes a position row, so the answer stays
-/// `true` after sign-out or unbind until the engine has a durable, revocable
-/// record of enrolment.
+/// `true` after sign-out or unbind.
 pub fn workspace_replicates_with_relay_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
@@ -109,11 +101,11 @@ pub fn workspace_replicates_with_relay(
     .map_err(SyncError::corrupt)
 }
 
-/// Whether `workspace_id` journals FILE MOMENTS for replication: the owner
+/// Whether `workspace_id` journals file moments for replication: the owner
 /// relay lane, or an Edit share view's proposal lane.
 ///
-/// Deliberately narrower than [`workspace_replicates_with_relay_in_tx`]. A
-/// Edit can carry file moments through proposals and nothing else, so
+/// Deliberately narrower than [`workspace_replicates_with_relay_in_tx`]. An
+/// Edit share can carry file moments through proposals and nothing else, so
 /// the Y.Doc lanes, the conflict outbox and cursor advancement keep the
 /// owner-lane answer. Journaling anything a proposal cannot carry would leave
 /// rows in the recipient's database that nothing ever drains: a
@@ -124,17 +116,15 @@ pub fn workspace_replicates_with_relay(
 /// Edit grant, which is the only level whose file changes a share can drain.
 /// View and Comment record neither an identity nor a lane row.
 ///
-/// `EXISTS(sync_identity)` must never stand in for that. The doc on
-/// [`workspace_replicates_with_relay_in_tx`] above says why, and it predicted
-/// this exact mistake: an identity row alone cannot tell a share view that
-/// may send file changes from one that may not. An earlier revision of this
-/// function read it and would have journaled file moments for a read-only
-/// share carrying an unrelated identity.
+/// `EXISTS(sync_identity)` must never stand in for that. An identity row
+/// alone cannot tell a share view that may send file changes from one that
+/// may not, so a read-only share carrying an unrelated identity would
+/// journal file moments.
 ///
 /// The identity a journal append needs still exists whenever this answers
 /// true, because the lane row and the identity are written in one
-/// transaction. That matters: `journal_local_payload_json_in_tx` Refuses
-/// without an identity, and the refusal rolls the user's edit back with it.
+/// transaction. `journal_local_payload_json_in_tx` refuses without an
+/// identity, and the refusal rolls the user's edit back with it.
 pub fn workspace_journals_file_moments_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,

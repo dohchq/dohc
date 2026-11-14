@@ -130,7 +130,6 @@ const hold = (which: "heldReads" | "heldWrites") => {
 };
 
 const made: CacheFiles[] = [];
-/** The cache's files as one launch of the app makes them, over the same folder as every other launch. */
 function launch(options: { totalMaxBytes?: number; now?: () => number } = {}) {
   const files = createCacheFiles({ now: () => ++disk.clock, ...options });
   made.push(files);
@@ -186,7 +185,6 @@ describe("a scope's file", () => {
       scope: SCOPE_A,
       views,
     });
-    // Another launch reads the same file.
     await expect(launch().files.read(SCOPE_A)).resolves.toEqual(views);
   });
 
@@ -232,7 +230,6 @@ describe("a scope's file", () => {
     files.write(SCOPE_A, () => after);
     const writing = files.flush();
     await vi.waitFor(() => expect(names()).toContain(`${fileName(SCOPE_A)}.json.tmp`));
-    // Half the new file is on disk, and a read finds only the whole last one.
     await expect(launch().files.read(SCOPE_A)).resolves.toEqual(before);
     release();
     await writing;
@@ -259,7 +256,6 @@ describe("a scope's file", () => {
     expect(names()).toEqual([`${fileName(SCOPE_A)}.json`]);
     await expect(files.read(SCOPE_A)).resolves.toEqual(before);
 
-    // A partial file a closed app left, for a scope with no whole file: no read finds it, and the next write deletes it.
     disk.failWrites = false;
     place(pathOf(SCOPE_B, "json.tmp"), fileText(SCOPE_B, [saved("files", [])]).slice(0, 20));
     await expect(files.read(SCOPE_B)).resolves.toEqual([]);
@@ -314,7 +310,6 @@ describe("writing the files", () => {
       await vi.advanceTimersByTimeAsync(WRITE_DELAY_MS);
       expect(writes()).toBe(1);
 
-      // A reply streams in: a change every 250 ms for most of the next 30 s writes nothing more.
       let length = 0;
       for (let elapsed = 0; elapsed < WRITE_INTERVAL_MS - 2 * WRITE_DELAY_MS; elapsed += 250) {
         const now = ++length;
@@ -329,7 +324,6 @@ describe("writing the files", () => {
       files.write(SCOPE_A, () => reply(length + 1));
       await vi.advanceTimersByTimeAsync(WRITE_DELAY_MS);
       expect(writes()).toBe(2);
-      // Going to the background saves at once.
       await files.flush();
       expect(writes()).toBe(3);
       await expect(files.read(SCOPE_A)).resolves.toEqual(reply(length + 1));
@@ -367,14 +361,12 @@ describe("writing the files", () => {
   it("keeps the files under the total cap by deleting the scopes used least recently, across a relaunch", async () => {
     const scope = (n: number) => JSON.stringify(["https://dohc.example.com", "u-1", `ws-${n}`]);
     const views = [saved("page:a.md", { kind: "page", markdown: "x".repeat(1000) })];
-    // Room for three scopes' files, each the same size.
     const totalMaxBytes = 3 * Buffer.byteLength(fileText(scope(1), views));
     const first = launch({ totalMaxBytes }).files;
     for (const n of [1, 2, 3]) {
       first.write(scope(n), () => views);
       await first.flush();
     }
-    // Reading 1 uses it, so 2 is now the one used least recently.
     await first.read(scope(1));
     first.write(scope(4), () => views);
     await first.flush();
@@ -431,8 +423,6 @@ describe("deleting the files", () => {
     await expect(reading).resolves.toEqual([]);
   });
 });
-
-// --- the read cache over the files ----------------------------------------------------------------------------------
 
 const ops = (result: unknown, cursor: string): Answer => ({
   status: 200,
@@ -493,7 +483,6 @@ function open(
   return data;
 }
 
-/** A first launch that reads A's files and a page, and saves them. */
 async function readBeforeRelaunch(server: ReturnType<typeof testServer>) {
   const { files, cache } = launch();
   const data = open(server, cache);
@@ -521,7 +510,6 @@ describe("a relaunch", () => {
       expect(data.state(views.files)).toMatchObject({ value: A_FILES, loading: false }),
     );
     expect(data.state(views.page("a.md")).value).toEqual({ kind: "page", markdown: "# A" });
-    // The feed starts from the oldest cursor the file held: the listing's 0.5.2, not the page's 0.6.2.
     await vi.waitFor(() => expect(count(server, feedPath("ws-a", "0.5.2"))).toBe(2));
     expect(server.calls.filter((call) => call.method === "POST")).toHaveLength(reads);
   });
@@ -537,7 +525,6 @@ describe("a relaunch", () => {
     const data = open(server, cache);
     const painted = vi.fn();
     data.subscribe(views.files, painted);
-    // The first frame: the read has started, hasn't settled, and the screen shows the loading state it shows today.
     disk.log.push("first frame");
     expect(data.state(views.files)).toMatchObject({ value: null, loading: true, problem: null });
     data.retry(views.files);
@@ -586,7 +573,6 @@ describe("a relaunch", () => {
     const data = open(server, cache);
     data.subscribe(views.page("a.md"), () => {});
     data.subscribe(views.files, () => {});
-    // The stale page reads at once; the fresh listing waits for the feed.
     await vi.waitFor(() =>
       expect(data.state(views.page("a.md")).value).toEqual({ kind: "page", markdown: "# A again" }),
     );
@@ -902,7 +888,6 @@ describe("the saved workspace list", () => {
     body: { ok: true, workspaces },
   });
 
-  /** One launch of the app's account side: the list, with its saved copy, and the open workspace. */
   function launchAccount(server: ReturnType<typeof testServer>, signIn = signInTo(server)) {
     const { files, cache } = launch();
     const list = createWorkspaceList(signIn, cache.savedList(signIn));
@@ -913,7 +898,6 @@ describe("the saved workspace list", () => {
     return { files, cache, list, workspace, signIn };
   }
 
-  /** A first launch that lists A and B, and reads the files of each. */
   async function readBoth(server: ReturnType<typeof testServer>) {
     server.on("GET", "/sync/account/workspaces", listAnswer(entry("ws-a"), entry("ws-b")));
     const first = launchAccount(server);
@@ -986,7 +970,6 @@ describe("the saved workspace list", () => {
     workspace.state().data!.subscribe(views.files, () => {});
     await vi.waitFor(() => expect(cache.entries(cacheScope(signIn, "ws-a"))).toHaveLength(1));
 
-    // A has gone from the account, and B was hidden on the desktop while the phone was closed.
     answer(listAnswer(entry("ws-b", false), entry("ws-c")));
     await vi.waitFor(() =>
       expect(list.state()).toMatchObject({

@@ -303,7 +303,6 @@ describe("an owner app in its tab", () => {
     expect(notices.report).toHaveBeenLastCalledWith(
       expect.objectContaining({ message: APP_OPEN_FAILED }),
     );
-    // Reload in the toolbar relaunches a failed app.
     await userEvent.setup().click(screen.getByTestId("app-view-reload"));
     await openedView();
     expect(opens()).toBe(2);

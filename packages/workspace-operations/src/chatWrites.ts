@@ -122,7 +122,6 @@ export interface StartInput extends MessageInput {
   channelId: string;
   // A title names a new thread. A running conversation keeps its own.
   title?: string;
-  // The thread a new post starts.
   threadId?: string;
 }
 
@@ -229,7 +228,6 @@ async function start(
   return { threadId: started.thread.id, thread: started.thread, message: started.message };
 }
 
-// Starts a post in a Group.
 export async function postToGroup(host: ChatWriteHost, input: StartInput): Promise<Started> {
   return await start(host, input, "posts");
 }

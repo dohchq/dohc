@@ -46,7 +46,6 @@ const joined: JoinedSharedChannel = {
   recipientUserId: "user-1",
 };
 
-// The async steps a write can await before its row. A test can hold one.
 type Pause = "channel" | "wire" | "warm" | "attachments" | "reactions";
 
 function fixture() {
@@ -222,7 +221,6 @@ function fixture() {
       ]),
     ],
     localInstallationId: () => "local-id",
-    // Marks where an answer holds dispatch scans off.
     async betweenDispatchScans(_workspaceId, write) {
       events.push("hold");
       try {
@@ -261,7 +259,6 @@ function fixture() {
       holds.set(point, hold);
       return hold;
     },
-    // One call per write kind, each through the module's public interface.
     writeEach: {
       send: () =>
         writes.sendMessage(place, {
@@ -604,7 +601,6 @@ describe("chat writes", () => {
     await send("channel_wire_agent_v1_terminal");
     const woken = test.store.sendMessage.mock.calls.map(([input]) => input.wakeAgentIds);
     expect(woken).toEqual([["codex"], ["default"], undefined]);
-    // An agent's reply looks up no DM and wakes nobody.
     test.store.getChannelWireId.mockClear();
     await test.writes.sendMessage(test.place, {
       writer: AGENT,
@@ -645,12 +641,9 @@ describe("chat writes", () => {
       nextAfterMessageOrder: 1,
     });
     await reply();
-    // Naming Codex too wakes it once.
     await reply({ body: "@codex use the EU one" });
-    // The CLI's and an agent's messages wake no one.
     await reply({ writer: { via: "cli", actor: "human" } });
     await reply({ writer: AGENT });
-    // A post an agent the person runs started, or one that gave no id.
     test.store.listMessagesPage.mockResolvedValue({
       messages: [byAgent("opening", "scout")],
       nextAfterMessageOrder: 1,
@@ -661,7 +654,6 @@ describe("chat writes", () => {
       nextAfterMessageOrder: 1,
     });
     await reply();
-    // Another person's agent with the same settings id posted it on their computer.
     test.store.listMessagesPage.mockResolvedValue({
       messages: [byAgent("opening", "codex", false)],
       nextAfterMessageOrder: 1,
@@ -669,7 +661,6 @@ describe("chat writes", () => {
     await reply();
     test.store.getMessage.mockResolvedValueOnce(byAgent("question", "codex", false));
     await reply({ parentMessageId: "question" });
-    // A Group's conversation has no starter: only a reply under Codex's message answers it.
     test.store.getThread.mockResolvedValue({
       thread: {
         id: "thread",
@@ -689,8 +680,6 @@ describe("chat writes", () => {
     await reply();
     test.store.getMessage.mockResolvedValue(byAgent("question", "codex"));
     await reply({ parentMessageId: "question" });
-    // A read that fails wakes no one, not the post's starter, and the reply
-    // is still sent.
     test.store.getThread.mockResolvedValue({
       thread: {
         id: "thread",
@@ -919,8 +908,6 @@ describe("chat writes", () => {
     },
   );
 
-  // Every await before a row is followed by a synchronous check of the grant
-  // and the session together. These change each one during each await.
   describe("a change while a write awaits", () => {
     const changes = {
       "sign-out": {
@@ -1102,7 +1089,6 @@ describe("chat writes", () => {
     expect(test.effects.scanChatDispatch).toHaveBeenCalledWith("workspace");
   });
 
-  // A caller whose later step fails still knows the message saved.
   it.each(["send", "start", "answer"] as const)(
     "tells the caller a %s saved before the work after the write, which can fail",
     async (kind) => {
@@ -1165,8 +1151,6 @@ describe("chat writes", () => {
     });
   });
 
-  // The engine answers an answered question as it stands, so only the
-  // decision says another reply won. The reply stays, with its effects.
   it("keeps the reply and names the winner when another reply answered first", async () => {
     const test = fixture();
     test.store.resolveChatDecision.mockResolvedValueOnce({
@@ -1236,7 +1220,6 @@ describe("chat writes", () => {
     );
   });
 
-  // Try again after an answer whose reply saved while its question stayed open.
   describe("answering with a reply that saved", () => {
     // The reply as the store holds it, written through the module so it
     // carries the key the writer's session gives it.
@@ -1277,7 +1260,6 @@ describe("chat writes", () => {
       // The answer syncs. No new message means nothing to dispatch.
       expect(test.effects.queueCloudSync).toHaveBeenCalledWith("workspace");
       expect(test.effects.scanChatDispatch).not.toHaveBeenCalled();
-      // Other views showing the question hear that it was answered.
       expect(test.effects.notifyRenderer).toHaveBeenCalledExactlyOnceWith("workspace");
     });
 
@@ -1785,9 +1767,6 @@ describe("ActorKey local admission", () => {
     });
   });
 
-  // "default" and "codex" are the person's agents' ids, and Nova is one of their
-  // names. Outside a run dohc dispatched, any name is only a claim: the message
-  // shows it, under the unnamed agent's key, as History records the agent's edits.
   it.each([undefined, " Opus ", "Nova", "default", "codex"])(
     "keys an agent's message outside a run as the unnamed agent, showing its name (%s)",
     async (agentName) => {
@@ -1817,8 +1796,6 @@ describe("ActorKey local admission", () => {
     },
   );
 
-  // An agent you run is the person's own agent: its id is no claim, so its
-  // message is keyed by that id and never shows as a connected agent.
   it("keys an agent you run's message by its id and settings name, not as a connected agent", async () => {
     const test = fixture();
     const sent = await test.writes.sendMessage(test.place, {

@@ -45,12 +45,10 @@ vi.mock("@dohc/ydoc-projection", async (importOriginal) => {
   };
 });
 
-// AUDIT-SILENTSAVE. The engine editor's save indicator used to be a 1s timer
-// that flipped to "saved" no matter what the engine did — three dogfood
-// journeys watched a doc read "Saved" over a ZERO-BYTE .md. It is now driven
-// only by main's real settle outcomes. These tests own that contract: no
-// timer may resurrect "saved", a failure must show, and a settle that predates
-// the newest keystroke must not claim to cover it.
+// Only main's real settle outcomes drive the engine editor's save indicator.
+// A timer would read "Saved" over a zero-byte .md. These tests own that
+// contract: no timer may resurrect "saved", a failure must show, and a settle
+// that predates the newest keystroke must not claim to cover it.
 
 let harness: ReturnType<typeof harnessBridge>;
 let retained: ReturnType<typeof retainObservedEngineDocLease>;
@@ -138,9 +136,6 @@ it.each([false, true])(
   },
 );
 
-// A record keeps the path its document had when it stopped. A Stop that names
-// the document by its object id closes the panes that opened it at a new path,
-// and none of another document that now has its old path.
 it("closes the panes of the document a Stop names, at whatever path they opened it, and only those", async () => {
   const open = harness.api.openEngineYDocSession.bind(harness.api);
   vi.spyOn(harness.api, "openEngineYDocSession").mockImplementation(async (payload) =>
@@ -149,7 +144,6 @@ it("closes the panes of the document a Stop names, at whatever path they opened 
   retainDocument("notes/new.md");
   await waitFor(() => expect(retained.snapshot.outcome?.kind).toBe("bound"));
   const previous = harness.sessionId()!;
-  // The pane at notes/new.md now holds object-1; a Stop of another document there closes nothing.
   await withClosedEngineDocSession("ws-1", { objectId: "other-object" }, async () => undefined);
   await withClosedEngineDocSession(
     "other-workspace",
@@ -221,7 +215,6 @@ it("never flips back to Saved on a timer — only a real settle report clears it
   });
   expect(retained.snapshot.saveState.kind).toBe("saving");
 
-  // Only main's real report clears it.
   harness.emit("saved", harness.applied.at(-1)!.seq);
   expect(retained.snapshot.saveState.kind).toBe("saved-here");
 });
@@ -296,7 +289,6 @@ it("keeps deletion recovery separate from refused winner edits", async () => {
   expect(drafts.result.current.map((draft) => draft.text).join("|")).toContain("winner!");
 });
 
-// The shell's notices for a replaced history, as the lease reports them.
 function observeReplacementNotices() {
   const report = vi.fn<(failure: DocumentSaveFailure) => void>();
   const clear = vi.fn<(identity: string) => void>();
@@ -332,7 +324,6 @@ it("keeps the retired editor frozen while storage refuses its edits, and Try aga
   harness.emitLineageReplacement("winner");
   await waitFor(() => expect(retained.snapshot.readOnlyTransition?.cause).toBe("lineage-failure"));
 
-  // No acknowledgement, no winner, and nothing of the retired editor sent.
   expect(harness.acknowledgedGenerations).toEqual([]);
   expect(retained.boundDoc()).toBe(losingDoc);
   const failure = notices.reports().at(-1)!;
@@ -355,7 +346,6 @@ it("keeps the retired editor frozen while storage refuses its edits, and Try aga
     message: REPLACED_DOCUMENT_SAVED,
   });
 
-  // The installed generation does not install again.
   act(() => failure.retry!());
   await act(async () => {
     await Promise.resolve();
@@ -378,13 +368,11 @@ it.each(["newest text first"])(
     harness.emitLineageReplacement("winner");
     await waitFor(() => expect(retained.snapshot.readOnlyTransition?.retry).toBeTypeOf("function"));
     const retry = retained.snapshot.readOnlyTransition!.retry!;
-    // Typed into the frozen editor after the failed attempt.
     act(() => editDocument());
 
     setItem.mockRestore();
     act(() => retry());
     await waitFor(() => expect(retained.boundDoc().getText("plainText").toString()).toBe("winner"));
-    // A late edit on the retired mirror after the winner installed.
     act(() => {
       const text = losingDoc.getText("plainText");
       text.insert(text.length, "!");
@@ -435,9 +423,6 @@ it.each(["newest text first"])(
   },
 );
 
-// Turning sync on claims the open document's lineage, so main hands the
-// renderer a replacement while the person is still typing. The sandboxed
-// renderer has no `process`, and a handoff that reached it stayed frozen.
 it.each([
   { path: "trip/plan.md", platform: "win32", stored: true },
   { path: "trip/.env", platform: "linux", stored: false },
@@ -492,8 +477,6 @@ it("does not report Saved while an earlier delivery is still unanswered", async 
     });
     await flushLocalBatch();
 
-    // Main echoes a settle covering the newest seq while the first delivery has
-    // not answered. It must not vouch for the whole mirror yet.
     harness.emit("saved", 2);
     expect(retained.snapshot.saveState.kind).toBe("saving");
 
@@ -503,8 +486,6 @@ it("does not report Saved while an earlier delivery is still unanswered", async 
     });
     await waitFor(() => expect(harness.applied.at(-1)?.seq).toBe(2));
     expect(harness.mainText()).toBe("seed!!");
-    // Every outstanding delivery is acknowledged; the deferred settle now
-    // reports the mirror durable without another event.
     await waitFor(() => expect(retained.snapshot.saveState.kind).toBe("saved-here"));
   } finally {
     rejectFirst();
@@ -535,7 +516,6 @@ it("does not claim File in use for a lock refusal that predates the newest keyst
   harness.emit("file-locked", firstSeq);
   expect(retained.snapshot.saveState.kind).toBe("saving");
 
-  // A refusal that does cover the newest edit names the blocker.
   await flushLocalBatch();
   const secondSeq = harness.applied.at(-1)!.seq;
   expect(secondSeq).toBeGreaterThan(firstSeq);
@@ -561,7 +541,6 @@ it("does not claim Saved for a settle that predates the newest keystroke", async
   harness.emit("saved", firstSeq);
   expect(retained.snapshot.saveState.kind).toBe("saving");
 
-  // The follow-up settle covers it.
   await flushLocalBatch();
   const secondSeq = harness.applied.at(-1)!.seq;
   expect(secondSeq).toBeGreaterThan(firstSeq);
@@ -609,8 +588,6 @@ it("ignores a save-state report addressed to a different session", async () => {
   await flushLocalBatch();
   const seq = harness.applied.at(-1)!.seq;
 
-  // Another document's settle must never repaint this one (the renderer
-  // async-state invariant): right seq, wrong session id.
   harness.emit("saved", seq, "eyd-someone-else");
   expect(retained.snapshot.saveState.kind).toBe("saving");
 

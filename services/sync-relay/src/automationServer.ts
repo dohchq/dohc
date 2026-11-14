@@ -219,10 +219,10 @@ export interface AutomationServerOptions {
     workspaces(): readonly string[];
     onEvent(handler: (event: Event) => void): () => void;
   };
+  /** The server log prints `context`, so it holds only fixed words and ids, never a path or an automation's name. */
   onError(context: string, error: unknown): void;
   nowMs?(): number;
   clock?: SchedulerClock;
-  /** Tests replace the replicas and the executor. */
   startReplicas?: typeof startAutomationReplicas;
   createExecutor?(options: CollectionAutomationsOptions): ServerExecutor;
 }
@@ -313,7 +313,8 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       setTimer: (wake, delayMs) => setTimeout(wake, delayMs).unref(),
       clearTimer: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
     },
-    onError: (context, error) => options.onError(`schedules: ${context}`, error),
+    // A schedule's context names its automation, whose id holds its Collection's path.
+    onError: (_context, error) => options.onError("run schedules", error),
     // How far the server's schedules ran, kept so that turning automations
     // off never lets a computer run again what the server ran.
     onRecord: (workspaceId, record) => {
@@ -355,8 +356,6 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       });
     },
   });
-
-  // --- The host record, followed in process. ---
 
   const hostOf = (ws: WorkspaceState) => storage.automationHostRecord(ws.replica.workspaceId);
   /** The host generation the server runs the workspace at now, or null: nothing awaited. */
@@ -677,8 +676,6 @@ export async function startAutomationServer(options: AutomationServerOptions) {
     });
   }
 
-  // --- Each workspace's executor, over its replica. ---
-
   /** Pushes the replica's own writes soon, once at a time. */
   /**
    * Pushes the copy's writes, and pulls, once at a time. The engine refuses
@@ -780,8 +777,8 @@ export async function startAutomationServer(options: AutomationServerOptions) {
     // another write's preparation and settlement, including background retries.
     const serializeRecords = <T>(work: () => Promise<T>) => replica.withRecordWork(work);
     const recordEngine = replicaRecordEngine(replica);
-    recordEngine.onDeliveryError = (path, error) =>
-      options.onError(`deliver automation record "${path}" in workspace "${workspaceId}"`, error);
+    recordEngine.onDeliveryError = (_path, error) =>
+      options.onError(`deliver an automation record in workspace "${workspaceId}"`, error);
     recordEngine.checkWriteAuthority = async (path, declaration, signal) => {
       if (
         declaration.attribution.onBehalfOf === undefined ||
@@ -855,21 +852,15 @@ export async function startAutomationServer(options: AutomationServerOptions) {
         storage,
         // Fresh accepted state starts new work; quarantined writes remain terminal.
         synchronize: (binding, signal) => delivery.synchronize(binding, signal, true),
-        onError: (path, error) =>
-          options.onError(
-            `refresh automation record "${path}" in workspace "${workspaceId}"`,
-            error,
-          ),
+        onError: (_path, error) =>
+          options.onError(`refresh an automation record in workspace "${workspaceId}"`, error),
       });
       ws.refreshAcceptedRecords = accepted.refreshChanged;
       ws.refreshRecord = async (path) => {
         try {
           await accepted.refresh(path);
         } catch (error) {
-          options.onError(
-            `refresh automation record "${path}" in workspace "${workspaceId}"`,
-            error,
-          );
+          options.onError(`refresh an automation record in workspace "${workspaceId}"`, error);
           throw error;
         }
       };
@@ -880,10 +871,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
             await delivery.synchronize(current.binding, signal, true);
             await accepted.track(current.binding);
           } catch (error) {
-            options.onError(
-              `prepare automation record "${path}" in workspace "${workspaceId}"`,
-              error,
-            );
+            options.onError(`prepare an automation record in workspace "${workspaceId}"`, error);
             throw error;
           }
         }
@@ -922,7 +910,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
                 } catch (error) {
                   failures.push(error);
                   options.onError(
-                    `deliver automation record "${draft.binding.currentPath}" in workspace "${workspaceId}"`,
+                    `deliver an automation record in workspace "${workspaceId}"`,
                     error,
                   );
                 }
@@ -931,7 +919,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
           } while (after !== null);
           if (undelivered !== null)
             options.onError(
-              `deliver automation record "${undelivered}" in workspace "${workspaceId}"`,
+              `deliver an automation record in workspace "${workspaceId}"`,
               new Error(
                 "The record has updates the server has not sent, because no outbox holds them or the shared file set them aside. Until they are sent, the server confirms no run's changes as sent.",
               ),
@@ -1090,7 +1078,9 @@ export async function startAutomationServer(options: AutomationServerOptions) {
                 ownerUserId,
               });
             },
-            onError: options.onError,
+            // A failure report's context can name its automation or its notice's title.
+            onError: (_context, error) =>
+              options.onError(`report an automation failure in workspace "${workspaceId}"`, error),
           },
           workspaceId,
           report,
@@ -1133,8 +1123,9 @@ export async function startAutomationServer(options: AutomationServerOptions) {
           }),
         ),
       admitRun: (signal) => gate.admit(workspaceId, signal),
-      onError: (context, error) =>
-        options.onError(`automations in workspace "${workspaceId}": ${context}`, error),
+      // The executor's context can name an automation, whose id holds its Collection's path.
+      onError: (_context, error) =>
+        options.onError(`run the automations of workspace "${workspaceId}"`, error),
       withDatasetHost: async (work) => {
         if (!options.datasetHost) return null;
         return work(

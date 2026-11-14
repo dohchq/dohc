@@ -5,6 +5,7 @@ import { constants } from "node:fs";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { RelayError } from "./errors";
 import type { SyncRelayStorage } from "./storage";
+import { serverLogLine } from "./serverLogWords";
 import {
   OPERATOR_MAX_REQUEST_BYTES,
   OPERATOR_TIMEOUT_MS,
@@ -176,7 +177,7 @@ export async function startPublicationOperator(
         else if (error instanceof RelayError && error.code === "bad_request")
           reply({ code: 2, message: error.message });
         else {
-          console.error("[sync-relay] publication takedown failed", error);
+          console.error("[sync-relay] publication takedown failed", serverLogLine(error));
           reply({
             code: 1,
             message: "Publication takedown failed. Check the relay logs before retrying.",

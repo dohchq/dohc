@@ -108,7 +108,7 @@ async fn native_watcher_create_and_delete_drive_dirty_reconcile_without_dropping
     watcher.stop().expect("stop");
 }
 
-/// R14 F1 regression: delete-then-recreate the watched root inside the health
+/// Delete-then-recreate the watched root inside the health
 /// poll window. The recreated directory exists (so an existence-only check
 /// would see a healthy directory and do nothing), but the OS watch is still
 /// bound to the DELETED object -- so a file created in the new root would be
@@ -137,9 +137,6 @@ async fn probe_root_delete_recreate_race_is_not_silently_missed() {
 
     wait_dirty(&handle).await;
 
-    // Prove the reattached watch is live on the new directory (not the dead
-    // object): after clearing dirty, a fresh write into the recreated root
-    // must produce new dirty evidence.
     let run = handle
         .reconcile_if_dirty(CancellationToken::new())
         .await

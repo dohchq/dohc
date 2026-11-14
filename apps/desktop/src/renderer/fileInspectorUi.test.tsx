@@ -47,7 +47,6 @@ describe("DocumentControls", () => {
   });
 });
 
-// One editor group as the shell lays it out: its tab row, then the view.
 function Group(props: {
   id: string;
   groupNumber: number;
@@ -118,8 +117,6 @@ describe("ViewActions", () => {
     expect(within(actions).getByTestId("status-left").textContent).toBe("File in use");
     expect(screen.getByTestId("page-left").childElementCount).toBe(0);
 
-    // Keyboard order: the tabs, then the actions in the order the header
-    // had them, then the row's own group controls.
     const tablist = within(row).getByRole("tablist");
     expect(precedes(tablist, share)).toBe(true);
     expect(precedes(share, toggle)).toBe(true);
@@ -129,8 +126,6 @@ describe("ViewActions", () => {
     expect(share.classList).toContain(NARROW_GROUP_HIDDEN);
   });
 
-  // Run arrives once main answers that the file is an app's entry. It stands
-  // left of Share, so Share and the controls right of it stay put.
   it("puts Run for an app's entry left of Share, and nothing without one", () => {
     const onRun = vi.fn();
     const { rerender } = render(
@@ -147,9 +142,6 @@ describe("ViewActions", () => {
     expect(onRun).toHaveBeenCalledOnce();
   });
 
-  // Saved, saving and saved-to-host pass on their own, so the row says them
-  // only to screen readers, and typing never changes what the row draws. A
-  // held file, a lasting pending share or a failed save keeps its words.
   it.each(["saved", "saving", "saved-to-host"] as const)(
     "keeps a calm %s state for screen readers only, with no box beside Share",
     (saveState) => {
@@ -183,10 +175,6 @@ describe("ViewActions", () => {
     expect(mark.textContent).toBe(words);
   });
 
-  // Collaborators don't have the edits until the share takes them, so a
-  // pending share that lasts says so. A settle that beats the host's
-  // acknowledgement passes through it on the way to saved to host; that
-  // never shows words, so typing never makes the row flash.
   describe("pending share", () => {
     beforeEach(() => vi.useFakeTimers());
     afterEach(() => vi.useRealTimers());
@@ -208,8 +196,6 @@ describe("ViewActions", () => {
       expect(mark.textContent).toBe("Saved locally · Pending share");
     });
 
-    // Host away: each keystroke's save passes through saving, and the words
-    // stay up through it until the host takes the edits.
     it("keeps its words while the person types, until the host takes the edits", () => {
       const group = (saveState: SaveStateKey) => (
         <Group id="left" groupNumber={1} path="trip/plan.md" onShare={noop} saveState={saveState} />
@@ -228,13 +214,11 @@ describe("ViewActions", () => {
         rerender(group("pending-share"));
         expect(words()).toBe("Saved locally · Pending share");
       }
-      // The store's own state stays readable through the held words.
       rerender(group("saving"));
       expect(screen.getByTestId("status-left").dataset.state).toBe("saving");
 
       rerender(group("saved-to-host"));
       expect(words()).toBeNull();
-      // Resolved: the next brief pending share waits again.
       rerender(group("saving"));
       expect(words()).toBeNull();
       rerender(group("pending-share"));
@@ -259,9 +243,6 @@ describe("ViewActions", () => {
     });
   });
 
-  // An open can last, and meanwhile the page shows the disk copy read-only,
-  // so a slow open says "Opening…". A quick one draws nothing: the actions
-  // stay where the ready document draws them.
   describe("opening", () => {
     beforeEach(() => vi.useFakeTimers());
     afterEach(() => vi.useRealTimers());
@@ -303,8 +284,6 @@ describe("ViewActions", () => {
     expect(screen.getByTestId("editor-tab-actions").childElementCount).toBe(0);
   });
 
-  // A split: each group's row carries that group's document, and a click
-  // acts on that document.
   it("gives each group in a split its own document actions", () => {
     const shareLeft = vi.fn();
     const shareRight = vi.fn();
@@ -352,7 +331,7 @@ describe("OrphanedDraftNotices", () => {
     );
   });
 
-  // dohc#2308. Main sets the text of a file deleted outside dohc aside while
+  // Main sets the text of a file deleted outside dohc aside while
   // its document is still open, and the banner says what the save notice says.
   it("says a deleted file's set-aside text is the file's, not a reopened document's", async () => {
     const record = {
@@ -399,7 +378,6 @@ describe("OrphanedDraftNotices", () => {
     const row = await screen.findByTestId("orphaned-draft-notice");
     expect(row.textContent).not.toContain(REPLACED_HISTORY_DRAFT_NOTICE);
     expect(row.textContent).toContain("Copy your edits to keep them.");
-    // The set-aside edits are the person's own, so the copy says what it copies.
     expect(within(row).getByRole("button", { name: "Copy edits" })).toBeTruthy();
   });
 });

@@ -232,8 +232,6 @@ it.each(["undone", "deleted", "renamed", "superseded"])(
   },
 );
 
-// A receipt lives in `.dohc/local/duplicate-pending`. One left at the old
-// `.dohc/duplicate-pending` is not read, so Duplicate makes a new copy.
 it("ignores a receipt in the old folder and makes a new copy", async () => {
   const f = await fixture();
   const { createHash } = await import("node:crypto");
@@ -303,7 +301,6 @@ it.each([
     );
     expect(f.engine.duplicateFile).toHaveBeenCalledOnce();
     if (before !== null) expect(await readFile(receipt, "utf8")).toBe(before);
-    // The way out the words give works.
     await remove(receipt, { recursive: true });
     expect((await f.run()).operationId).toMatch(/^dohc-operation:/);
     expect(f.engine.duplicateFile).toHaveBeenCalledTimes(2);

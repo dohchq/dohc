@@ -54,7 +54,7 @@ confidence-threshold = 0.9
 private = { ignore = true }
 
 [bans]
-# Duplicate versions warn; flip to "deny" once the crate graph stabilizes.
+# Duplicate versions warn.
 multiple-versions = "warn"
 wildcards = "allow"
 # Nothing is hard-banned yet. Banned patterns (unbounded channels,

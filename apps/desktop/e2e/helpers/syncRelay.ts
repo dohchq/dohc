@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { realDaemonReaderConfig } from "../../src/testing/realDaemonWorkspaceSessions";
 
 // Spawns the real sync-relay service (services/sync-relay) as a child
-// process for the 0P sync E2E specs — the same pattern as the relay's own
+// process for the sync E2E specs — the same pattern as the relay's own
 // integration tests: NODE_ENV=test + SYNC_RELAY_TEST_AUTH accepts
 // `Bearer test:<user>` without a Postgres auth backend, and SQLite storage
 // lives in the spec's scratch directory. IPC requests orderly shutdown on

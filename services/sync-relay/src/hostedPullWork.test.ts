@@ -104,7 +104,6 @@ async function enrolled() {
   return { ...f, append, state, shared };
 }
 
-// Proves: writes that change nothing the hosted feed answers from leave the reading unchanged, so they schedule no pull.
 it("reads the same relay state across writes to another workspace", async () => {
   const f = await enrolled(),
     before = f.state();
@@ -115,7 +114,7 @@ it("reads the same relay state across writes to another workspace", async () => 
   expect(f.state()).not.toBe(before);
 });
 
-// The reviewer's raw-SQL paths: each ends the document's last Edit grant without a log append, so only the scope shows it.
+// Raw-SQL paths: each ends the document's last Edit grant without a log append, so only the scope shows it.
 it.each<[string, (f: Awaited<ReturnType<typeof enrolled>>) => void]>([
   [
     "its share is revoked",

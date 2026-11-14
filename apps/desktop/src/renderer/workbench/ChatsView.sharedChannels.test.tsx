@@ -2,6 +2,7 @@
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
+import type { ChatChannelRecord } from "../../ipc/bridgeContract";
 import {
   channel,
   thread,
@@ -9,11 +10,13 @@ import {
   bridgeMock,
   shareListing,
   emitCloudSessionChanged,
+  emitWorkspaceActivity,
   renderView,
   navigatorView,
+  mentionRoster,
 } from "./ChatsView.testHarness";
 
-// --- Shared channels (MU-C4) -----------------------------------------------
+// --- Shared channels -------------------------------------------------------
 
 describe("ChatsView shared channels (MU-C4)", () => {
   const teamChannel = () =>
@@ -28,14 +31,13 @@ describe("ChatsView shared channels (MU-C4)", () => {
     renderView();
     await screen.findByTestId("chats-channel-name");
     // Failing closed is about authority, not silence. A listing that did not
-    // answer at all locks every affordance below, and it says so — an
-    // unexplained blank surface with every channel read-only was #618.
+    // answer at all locks every affordance below, and it says so instead of
+    // showing an unexplained blank surface with every channel read-only.
     expect((await screen.findByTestId("chats-shares-unreadable")).textContent).toContain(
       "dohc could not read your shares.",
     );
     expect(screen.queryByTestId("chats-join-shared")).toBeNull();
     expect(screen.queryByTestId("chats-channel-shared")).toBeNull();
-    // Entering the channel offers no share button either.
     await userEvent.click(screen.getByTestId("chats-channel"));
     await screen.findByTestId("chats-channel-view");
     expect(screen.queryByTestId("chats-share-channel")).toBeNull();
@@ -107,8 +109,6 @@ describe("ChatsView shared channels (MU-C4)", () => {
       "wire-team",
     ]);
 
-    // The overview's older response lands first: it alone names wire-imported,
-    // and it puts the channel on screen.
     await act(async () => {
       answerOverviewRead(shareListing());
       await Promise.resolve();
@@ -116,7 +116,6 @@ describe("ChatsView shared channels (MU-C4)", () => {
     const shown = await screen.findAllByTestId("chats-channel-name");
     expect(shown.map((element) => element.textContent)).toEqual(["team", "imported"]);
 
-    // Then the newer read lands, naming only the channel the stale view showed.
     await act(async () => {
       answerSessionRead(shareListing());
       await Promise.resolve();
@@ -147,7 +146,6 @@ describe("ChatsView shared channels (MU-C4)", () => {
       if (shareReads === 1) {
         return Promise.resolve(shareListing({ received: [invitation] }));
       }
-      // The read that will land last, carrying the invitation it read then.
       if (shareReads === 2) {
         return new Promise((resolve) => {
           answerStaleRead = resolve;
@@ -160,7 +158,6 @@ describe("ChatsView shared channels (MU-C4)", () => {
 
     act(() => emitCloudSessionChanged("session-a", "ready"));
     await waitFor(() => expect(shareReads).toBe(2));
-    // A newer revalidation fails: dohc has no listing it can stand behind.
     act(() => emitCloudSessionChanged("session-a", "ready"));
     await waitFor(() => expect(shareReads).toBe(3));
     await screen.findByTestId("chats-shares-unreadable");
@@ -213,8 +210,6 @@ describe("ChatsView shared channels (MU-C4)", () => {
       expect(shareButton.getAttribute("aria-label")).toBe("1 member");
       await userEvent.click(shareButton);
 
-      // The member list shows who has it, and Remove revokes their grant. The
-      // shell gets the receipt and the words for the notice that holds Undo.
       const member = await screen.findByTestId("chats-share-member");
       expect(member.textContent).toContain("ana@example.com");
       await userEvent.click(screen.getByTestId("chats-share-revoke"));
@@ -232,8 +227,6 @@ describe("ChatsView shared channels (MU-C4)", () => {
         restoredMessage: "Restored ana@example.com to team.",
       });
 
-      // Adding someone as View only, from Add people at the top of the list.
-      // The dialog goes back to the list, which shows them while it reloads.
       let finishListing = () => {};
       bridgeMock.listChatChannelShares.mockImplementation(
         () =>
@@ -260,12 +253,10 @@ describe("ChatsView shared channels (MU-C4)", () => {
       );
       await act(async () => finishListing());
 
-      // Add people starts fresh: no one picked, and Can post chosen again.
       await userEvent.click(screen.getByTestId("chats-share-add-people"));
       expect((screen.getByTestId("chats-share-email") as HTMLInputElement).value).toBe("");
       expect(screen.getByTestId("chats-share-canpost").getAttribute("aria-checked")).toBe("true");
 
-      // Close leaves the members button where it was.
       await userEvent.click(screen.getByTestId("chats-share-close"));
       expect(screen.queryByTestId("chats-share-panel")).toBeNull();
       expect(screen.getByTestId("chats-share-channel")).toBeTruthy();
@@ -299,7 +290,6 @@ describe("ChatsView shared channels (MU-C4)", () => {
       finishFirst({});
       await Promise.resolve();
     });
-    // Reopening under the new account does not let the old batch go on.
     await userEvent.click(screen.getByTestId("chats-share-channel"));
     await waitFor(() => expect(screen.getByTestId("chats-share-panel")).toBeTruthy());
     expect(bridgeMock.shareChatChannel).toHaveBeenCalledTimes(1);
@@ -324,11 +314,9 @@ describe("ChatsView shared channels (MU-C4)", () => {
     await userEvent.click(await screen.findByTestId("chats-channel"));
     await userEvent.click(await screen.findByTestId("chats-share-channel"));
 
-    // The panel says what is wrong...
     expect((await screen.findByTestId("chats-share-members-unreadable")).dataset.failure).toBe(
       "over-limit",
     );
-    // ...and the control that would make it worse is off.
     expect((screen.getByTestId("chats-share-add-people") as HTMLButtonElement).disabled).toBe(true);
     await userEvent.click(screen.getByTestId("chats-share-add-people"));
     expect(screen.queryByTestId("chats-share-email")).toBeNull();
@@ -352,7 +340,6 @@ describe("ChatsView shared channels (MU-C4)", () => {
     const notice = await screen.findByTestId("chats-share-members-unreadable");
     expect(notice.textContent).toContain("dohc could not read your shares.");
     expect(screen.queryByTestId("chats-share-member")).toBeNull();
-    // The retry works from here too.
     bridgeMock.listChatChannelShares.mockResolvedValue(
       shareListing({
         granted: [
@@ -413,7 +400,6 @@ describe("ChatsView shared channels (MU-C4)", () => {
         shareId: "share-in",
       }),
     );
-    // The overview reloads after joining (channel + shares re-fetch).
     await waitFor(() => expect(bridgeMock.listChatChannels).toHaveBeenCalledTimes(2));
     // Regression (CodeRabbit critical): the join-in-flight flag must reset
     // after a successful join even though refreshOverview bumps the liveness
@@ -454,8 +440,6 @@ describe("ChatsView shared channels (MU-C4)", () => {
 
     await userEvent.click(screen.getByTestId("chats-channel"));
     await screen.findByTestId("chats-joined-banner");
-    // Read-only: the thread composer is replaced by an honest notice, and a
-    // joined channel is never re-shareable from here.
     expect(screen.getByTestId("chats-readonly-note").textContent).toContain("read-only for you");
     expect(screen.queryByTestId("chats-new-thread-composer")).toBeNull();
     expect(screen.queryByTestId("chats-share-channel")).toBeNull();
@@ -596,23 +580,30 @@ describe("ChatsView shared channels (MU-C4)", () => {
       "You left this group. You can still read it.",
     );
   });
-  it("offers only the files a joined Group's folder holds, and every file in a Group not shared", async () => {
+  it("offers the files a Group's messages may link: a joined Group's mount by its paths, a shared Group's folder, and every file otherwise", async () => {
+    // This workspace's own team/ folder is not the Group's. The Group's files
+    // are its share's mount, which the Group's messages name by the owner's paths.
     const workspaceFiles = [
-      { path: "team/plan.md", kind: "file" as const },
+      { path: "team/mine.md", kind: "file" as const },
       { path: "finance/budget.md", kind: "file" as const },
+      { path: "shared-with-me/owner/team/plan.md", kind: "file" as const },
     ];
-    bridgeMock.listChatChannels.mockResolvedValue({
-      channels: [
-        channel({
-          id: "channel-team",
-          name: "team",
-          slug: "team",
-          wireId: "wire-team",
-          folderPath: "team",
-        }),
-      ],
-      fileThreads: [],
-    });
+    const shareMounts = [{ shareId: "share-in", label: "owner" }];
+    const listTeam = (fileLinks: ChatChannelRecord["fileLinks"]) =>
+      bridgeMock.listChatChannels.mockResolvedValue({
+        channels: [
+          channel({
+            id: "channel-team",
+            name: "team",
+            slug: "team",
+            wireId: "wire-team",
+            folderPath: "team",
+            fileLinks,
+          }),
+        ],
+        fileThreads: [],
+      });
+    listTeam({ kind: "shared", shares: [["team"]] });
     bridgeMock.listChatChannelShares.mockResolvedValue(
       shareListing({
         joined: [
@@ -626,22 +617,43 @@ describe("ChatsView shared channels (MU-C4)", () => {
         ],
       }),
     );
+    const options = () =>
+      screen
+        .queryAllByTestId("chats-new-thread-file-mention-option")
+        .map((option) => option.getAttribute("data-path"));
     const offered = async () => {
       await userEvent.type(await screen.findByTestId("chats-new-thread-composer"), "@");
       await screen.findByTestId("chats-new-thread-mention-menu");
-      return screen
-        .queryAllByTestId("chats-new-thread-file-mention-option")
-        .map((option) => option.getAttribute("data-path"));
+      return options();
     };
-    renderView(vi.fn(), vi.fn(), { workspaceFiles });
+    renderView(vi.fn(), vi.fn(), { workspaceFiles, shareMounts });
     await userEvent.click(await screen.findByTestId("chats-channel"));
     await screen.findByTestId("chats-joined-banner");
     expect(await offered()).toEqual(["team/plan.md"]);
     cleanup();
 
+    // Without the Group's mount, it offers none of this workspace's own files.
+    // The roster keeps the menu open to show that.
+    renderView(vi.fn(), vi.fn(), { workspaceFiles, mentionCandidates: mentionRoster });
+    await userEvent.click(await screen.findByTestId("chats-channel"));
+    await screen.findByTestId("chats-joined-banner");
+    expect(await offered()).toEqual([]);
+    cleanup();
+
+    // A Group of this workspace's offers every file until a share covers it.
+    // Once a listing of its shares says a link shares it, the open composer
+    // offers only its folder. The relay's grant listing names nobody for a link.
+    listTeam({ kind: "any" });
     bridgeMock.listChatChannelShares.mockResolvedValue(shareListing());
     renderView(vi.fn(), vi.fn(), { workspaceFiles });
     await userEvent.click(await screen.findByTestId("chats-channel"));
-    expect((await offered()).sort()).toEqual(["finance/budget.md", "team/plan.md"]);
+    expect((await offered()).sort()).toEqual([
+      "finance/budget.md",
+      "shared-with-me/owner/team/plan.md",
+      "team/mine.md",
+    ]);
+    listTeam({ kind: "shared", shares: [["team"]] });
+    act(() => emitWorkspaceActivity());
+    await waitFor(() => expect(options()).toEqual(["team/mine.md"]));
   });
 });

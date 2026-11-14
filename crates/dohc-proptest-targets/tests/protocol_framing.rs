@@ -1,4 +1,4 @@
-//! Cutover-blocking fuzz family 1/3: IPC framing/protocol validation.
+//! Fuzz coverage for IPC framing and protocol validation.
 //!
 //! Surfaces under test: `dohc_engine_protocol::frame::FrameDecoder`
 //! (incremental frame decode over a byte stream fed in arbitrary chunks --
@@ -43,8 +43,6 @@ fn valid_hello_frame() -> Vec<u8> {
     .expect("seed envelope encodes")
 }
 
-/// Feed `bytes` in one shot, drain every frame, and enforce the poison
-/// invariant. Returns the total payload bytes yielded, for the bound check.
 fn drain_and_check_poison(bytes: &[u8]) -> usize {
     let mut decoder = FrameDecoder::new(WireLimits::default());
     decoder.push(bytes);
@@ -191,7 +189,6 @@ proptest! {
                 Some(FrameDecodeError::BadMagic(*b"BAD!"))
             }
             _ => {
-                // A valid but unfinished next frame is not an error.
                 let partial = encode_control_frame(b"unfinished", &WireLimits::default()).unwrap();
                 bytes.extend_from_slice(&partial[..partial.len() - 1]);
                 None
@@ -286,7 +283,6 @@ fn every_split_preserves_frames_and_terminal_error() {
         let mut bytes = encode_frames(&frames);
         let terminal = if malformed_tail {
             bytes.extend_from_slice(b"BAD!\x01\0\0\0\0\0\0\0");
-            // A valid frame after the error must never resynchronize.
             bytes.extend(encode_frames(&frames[..1]));
             Some(FrameDecodeError::BadMagic(*b"BAD!"))
         } else {

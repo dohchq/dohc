@@ -868,7 +868,6 @@ describe("OwnerYDocOutbox pending byte boundary", () => {
     const recovering = cursorReader([...pages(bound, 5), ...checkpointPages(checkpoint)]);
     const recovery = await recovering.client.readRecovery("outbox-1");
     expect(recovery.checkpoint).toEqual(new Uint8Array(checkpoint));
-    // A confirmation of this copy names what it read.
     expect(recovery.checkpointDigest).toBe(sha(checkpoint));
     expect(recovery.entries[0]?.update).toEqual(new Uint8Array([2, 3, 4]));
     expect(recovering.parts.slice(-2)).toEqual(["checkpoint", "checkpoint"]);
@@ -882,7 +881,6 @@ describe("OwnerYDocOutbox pending byte boundary", () => {
       checkpointDigest: null,
     });
     expect(unbound.parts).not.toContain("checkpoint");
-    // Delivery never reads it.
     const delivering = cursorReader([...pages(bound, 5), ...checkpointPages(checkpoint)]);
     expect(await delivering.client.readPending("outbox-1")).not.toHaveProperty("checkpoint");
     expect(delivering.parts).not.toContain("checkpoint");
@@ -907,7 +905,6 @@ describe("OwnerYDocOutbox pending byte boundary", () => {
     await expect(sinceHeader.client.readRecovery("outbox-1")).rejects.toBeInstanceOf(
       OwnerYDocOutboxReadChangedError,
     );
-    // A header read over several pages names the checkpoint's digest, so an acceptance changes it too.
     const [header] = pages(bound, 5),
       advanced = { ...bound, checkpointDigest: sha(successor) };
     const duringHeader = cursorReader([
@@ -1073,13 +1070,11 @@ describe("OwnerYDocOutbox pending byte boundary", () => {
       checkpointDigest: "c".repeat(64),
       recoveryCheckpointDigest: "c".repeat(64),
     });
-    // An earlier generation's refused seed freezes nothing, and a copy must still hold its checkpoint.
     const earlier = { ...frozen, frozenAtRefusedSeed: false };
     expect(await deliveryReader(pages(earlier, 4096), earlier.binding).read()).toMatchObject({
       frozenAtRefusedSeed: false,
       recoveryCheckpointDigest: "c".repeat(64),
     });
-    // A plain read of the queue carries none of them.
     const plain = await read(frozen);
     expect(plain).not.toHaveProperty("frozenAtRefusedSeed");
     expect(plain).not.toHaveProperty("checkpointDigest");

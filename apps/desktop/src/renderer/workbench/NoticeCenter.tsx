@@ -94,7 +94,7 @@ export type Notice = {
   // Paths the body lists, one per line under it.
   paths?: readonly string[];
   actions?: readonly NoticeAction[];
-  // Explicit dismissal (0P-C gate fix): rendered as a small X on the notice
+  // Explicit dismissal: rendered as a small X on the notice
   // row. Only notices whose underlying state has a real ack path expose it.
   onDismiss?: () => void;
   // Agent notices carry when they happened; system notices are stateful
@@ -154,7 +154,6 @@ export interface WorkspaceErrorNotice {
   read?: boolean;
   // The row has no Dismiss: it stays until its action runs.
   noDismiss?: boolean;
-  // Where a press on the row goes: the thing it is about.
   target?: NoticeTarget;
 }
 
@@ -217,10 +216,8 @@ const failureDetails = (notice: NoticeRow): string =>
     ["Time", new Date(notice.createdAtMs).toISOString()],
   ]);
 
-// Sent rows show this many at a time.
 export const SENT_NOTICE_PAGE = 50;
 
-// How long a toast for something finished or sent stays before it fades.
 const FADING_TOAST_MS = 6000;
 
 // The sender's shape: round for a person, a rounded square for an agent,
@@ -827,7 +824,7 @@ function liveDeliveryCopy(
   if (reason === "conflict-parent-withheld") {
     return {
       title: "Live editing can't resume",
-      body: "A conflict was resolved in a document in this workspace, so the server can't resume live editing for it. People with its link can still read the last shared version, but your edits in dohc may not reach them. Open Live documents to see which document.",
+      body: "A conflict was resolved in a document in this workspace, so the server can't resume live editing for it. People with its link can still read the last shared version, but your edits in dohc may not reach them. A copy of it can go live. Open Live documents to see which document and make a copy.",
       recovery: "live-documents",
       Icon: AlertTriangle,
     };
@@ -1354,7 +1351,7 @@ export function NoticeCenter(props: {
   // Settings at the workspace's sync row.
   onConfirmSyncAccount?: () => void;
   onOpenSyncSettings?: () => void;
-  // Opens the conflict review dialog (0P-C): the notice's "Review" action
+  // Opens the conflict review dialog: the notice's "Review" action
   // lands the user directly on the side-by-side choices.
   onOpenConflicts: () => void;
   onRefreshShareView: () => void;
@@ -2274,7 +2271,6 @@ export function NoticeCenter(props: {
         .sort((a, b) => b.atMs - a.atMs)[0] ?? null,
     [props.workspaceErrors],
   );
-  // Open Notices hides the toasts.
   const shownErrorToastId = open ? null : (errorToast?.id ?? null);
   const { onWorkspaceErrorShown } = props;
   useEffect(() => {
@@ -2337,7 +2333,6 @@ export function NoticeCenter(props: {
     action.onClick();
     setOpen(false);
   };
-  // Opening a row reads it, as reaching it does.
   const openLocal = (notice: Notice) => {
     const { target } = notice;
     const { onOpenTarget } = props;

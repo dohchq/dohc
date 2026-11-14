@@ -43,7 +43,6 @@ function counts(row: UsageRecordRow): boolean {
   return DOORS.some(({ door }) => row.doors[door].counted);
 }
 
-// Last used first, then what this build counts, then by name.
 function ordered(rows: readonly UsageRecordRow[]): UsageRecordRow[] {
   return rows.toSorted(
     (a, b) =>

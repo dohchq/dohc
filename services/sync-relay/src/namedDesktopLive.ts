@@ -1,6 +1,7 @@
 import { readBoundedJson } from "@dohc/service-http";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
+import { LIVE_TICKET_LIFETIME_MS } from "@dohc/live-session-contract/live-ticket";
 import {
   parseNamedLiveBrowserLimits,
   type NamedLiveBrowserLimits,
@@ -46,9 +47,13 @@ export function createNamedDesktopLive(options: {
       "Frame listener capacity cannot cover desktop admission and readiness requests.",
     );
   }
+  // A desktop session only opens its socket, and the desktop asks again before every connect,
+  // so it lasts as long as its ticket and ends once the socket opens. It has no per-account
+  // limit: a note that keeps failing to connect would push out another note's slow connect.
   const sessions = createNamedLiveBrowserSessions({
     ...options,
     ...limits,
+    retentionMs: LIVE_TICKET_LIFETIME_MS,
     authentication: "bearer",
   });
   const refuse = () =>
@@ -59,6 +64,11 @@ export function createNamedDesktopLive(options: {
   let pending = 0;
   let readinessPending = 0;
   const pendingByUser = new Map<string, number>();
+  // An open that waits for a host that is away, or for its account's tickets to expire, holds a
+  // request slot. Each account may hold as many of these as readiness allows it, so one account's
+  // notes cannot hold up other people's. An open beyond that is refused at once, and the desktop
+  // comes back through readiness.
+  const waitingOpensByUser = new Map<string, number>();
   async function handle(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const readiness = url.pathname === "/sync/live/desktop-ready";
@@ -89,6 +99,7 @@ export function createNamedDesktopLive(options: {
     const work = (async () => {
       let created: string | undefined;
       let heldUser: string | undefined;
+      let waitingUser: string | undefined;
       try {
         const check = storage.captureStanding();
         const input = await readBoundedJson(request, limits.maxRequestBytes, signal);
@@ -156,7 +167,8 @@ export function createNamedDesktopLive(options: {
               path: path.normalized,
             });
             if (!objectId) return refuse();
-            let authorized = false;
+            let authorized = false,
+              counted = false;
             for (const grant of storage.listActiveShareGrantsForRecipient(shareId, actor.userId)) {
               const authority = authorizeNamedLiveEditShareGrant({
                 storage,
@@ -181,14 +193,22 @@ export function createNamedDesktopLive(options: {
               let session = sessions.create(context);
               if (!session) return refuse();
               created = session.discriminator;
-              const ticket = await options.tickets
+              // A mint throws when the host changed or went away while it ran, and when the
+              // account's tickets for this grant reached their limit.
+              const minted = await options.tickets
                 .mint({ objectId }, context, signal)
-                .catch(() => null);
+                .catch(() => "failed" as const);
+              const ticket = minted === "failed" ? null : minted;
               signal.throwIfAborted();
               check();
               if (!ticket) {
                 sessions.remove(created);
                 created = undefined;
+                // A mint refused while the host stays current, as when its binding moved during
+                // the mint, waits uncounted as before.
+                counted ||=
+                  minted === "failed" ||
+                  storage.resolveLiveObjectHostBinding(context, objectId).kind !== "current";
                 continue;
               }
               if (readiness) return Response.json({ ready: true });
@@ -227,6 +247,12 @@ export function createNamedDesktopLive(options: {
               });
             }
             if (!authorized) return refuse();
+            if (!readiness && counted && !waitingUser) {
+              const count = waitingOpensByUser.get(actor.userId) ?? 0;
+              if (count >= readinessLimits.maxPendingPerUser) return refuse();
+              waitingUser = actor.userId;
+              waitingOpensByUser.set(waitingUser, count + 1);
+            }
             await nextChange;
           }
         } finally {
@@ -242,6 +268,11 @@ export function createNamedDesktopLive(options: {
           const remaining = pendingByUser.get(heldUser)! - 1;
           if (remaining) pendingByUser.set(heldUser, remaining);
           else pendingByUser.delete(heldUser);
+        }
+        if (waitingUser) {
+          const remaining = waitingOpensByUser.get(waitingUser)! - 1;
+          if (remaining) waitingOpensByUser.set(waitingUser, remaining);
+          else waitingOpensByUser.delete(waitingUser);
         }
         if (readiness) readinessPending--;
         else pending--;
@@ -291,5 +322,12 @@ export function createNamedDesktopLive(options: {
       signal.removeEventListener("abort", cancel);
     }
   }
-  return { handle, resolve: sessions.resolve.bind(sessions) };
+  return {
+    handle,
+    async resolve(request: Request, discriminator: string) {
+      const context = await sessions.resolve(request, discriminator);
+      if (context) sessions.remove(discriminator);
+      return context;
+    },
+  };
 }

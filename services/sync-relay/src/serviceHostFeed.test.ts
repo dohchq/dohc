@@ -187,7 +187,6 @@ async function fixture(lookupUserDisplayName?: LogAuthorNameLookup) {
     expect(response.status).toBe(200);
     return (await response.json()) as Page;
   };
-  // Reads the scope, then the feed under it.
   const read = async (query = "") => {
     const { scope: current } = await page();
     return page(`&scope=${current.token}${query}`);
@@ -266,7 +265,6 @@ it("serves hosted rows unchanged and refuses private files, their blobs and coor
   expect(feed.ops[1]!.payload).toEqual(write(binding.objectId, "docs/a.md", A));
   expect(feed.ops[1]).toMatchObject({ originId: "owner-device", originSeq: 1 });
   expect(feed.ops[2]!.payload).toEqual(ydoc(binding.objectId, "docs/a.md", Y));
-  // The cursor passes the private rows it withheld.
   expect(feed.nextCursor).toBeGreaterThan(feed.ops.at(-1)!.relaySeq);
   expect(feed.hasMore).toBe(false);
   expect(JSON.stringify(feed)).not.toMatch(/secret|object-private|object-view|object-b/);
@@ -281,7 +279,6 @@ it("serves hosted rows unchanged and refuses private files, their blobs and coor
     JSON.stringify({ sha256s: [A.sha256, P.sha256, absent] }),
   );
   expect(await have.json()).toEqual({ ok: true, missing: [P.sha256, absent] });
-  // Uploading bytes does not reveal whether the owner already held them.
   const put = async (content: Uint8Array<ArrayBuffer>, sha256: string) =>
     (await f.request("PUT", `blobs/${sha256}`, content, "application/octet-stream")).json();
   expect(await put(P.content, P.sha256)).toMatchObject({ alreadyHad: false });
@@ -386,7 +383,6 @@ it("refuses each write outside the hosted documents at its own coordinate and le
       reason: "outside-hosted-documents",
     })),
   );
-  // The relay keeps each coordinate with a digest of what it refused, never the payload.
   for (const [index, originSeq] of refusedSeqs.entries()) {
     const [opKind, payload] = outside[index]!;
     expect(f.hostCoordinate(originSeq)).toMatchObject({
@@ -402,7 +398,6 @@ it("refuses each write outside the hosted documents at its own coordinate and le
 
   f.setGrant(scope.shareId, "status='revoked',revoked_at_ms=20");
   expect(f.objects(await f.read())).toEqual(["workspace"]);
-  // The owner's content goes; bytes the host uploaded itself are still its own.
   expect(await f.blobStatus(A.sha256)).toBe(404);
   expect(await f.blobStatus(update.sha256)).toBe(200);
   // Still enrolled: work the relay accepted before revocation can settle.
@@ -458,13 +453,11 @@ it("returns each coordinate's original decision when a batch is retried after it
   expect(retried).toEqual({ ...first, inserted: 0, skipped: 3 });
   // A retried refusal is answered from the log, without preparing its payload again.
   expect(prepared).toEqual(["ydoc.update", "relay.refused", "relay.refused"]);
-  // A different payload at a decided coordinate conflicts, whichever the decision was.
   for (const originSeq of [0, 1]) {
     expect(
       (await f.push([["ydoc.update", ydoc(binding.objectId, "docs/a.md", A)]], originSeq)).status,
     ).toBe(409);
   }
-  // A later op lands after a refused one.
   expect(await (await f.push([batch[2]!], 3)).json()).toMatchObject({
     inserted: 1,
     currentMaxOriginSeq: 3,
@@ -491,7 +484,6 @@ it("settles a moved or replaced document's work without taking back its old loca
       content: content.content,
       createdAtMs: 1,
     });
-  // The owner moves a out of the share, and deletes b and puts another file at its path.
   f.append(
     ["moment.append", rename(binding.objectId, "docs/a.md", "private/a.md", A)],
     [
@@ -570,7 +562,6 @@ it("settles a moved or replaced document's work without taking back its old loca
   const body = (await response.json()) as PushAnswer;
   expect(body).toMatchObject({ inserted: 3, currentMaxOriginSeq: 2 });
   expect(body.refusals).toBeUndefined();
-  // The publications keep their history.
   expect(
     f.raw
       .prepare(
@@ -583,14 +574,11 @@ it("settles a moved or replaced document's work without taking back its old loca
     ["moment.append", "drain-b", "departed"],
     ["ydoc.update", null, "departed"],
   ]);
-  // Neither the location nor the current file moves back, and neither document is current again.
   expect(placement()).toEqual(before);
   expect([...f.storage.readServiceHostFeedScope(ws)!.departed]).toEqual([
     binding.objectId,
     "object-b",
   ]);
-  // A departed document's writes reach neither the owner's edits since it
-  // left nor the file now at its path: each fails like a blob the relay never had.
   const privateEdit = blob("edited after leaving");
   f.storage.putBlob({
     workspaceId: ws,
@@ -655,7 +643,6 @@ it("keeps a retiring document out of hosted reads and writes while its sibling s
     guard() {},
   });
   expect(stop?.acceptedCursor).toBe(0);
-  // Only the owner's Resume clears a Stop.
   f.storage.ensureOwnedLiveDocument({
     intent: "owner-resume",
     workspaceId: ws,
@@ -702,7 +689,6 @@ it("keeps a retiring document out of hosted reads and writes while its sibling s
     inserted: 2,
     refusals: [{ originSeq: 0, reason: "unproved-retirement-output" }],
   });
-  // With every other document stopped, the scope still names the obligation.
   f.storage.setServiceHostEnrollmentEnabled({
     workspaceId: ws,
     path: "docs/b.md",
@@ -731,8 +717,6 @@ it("keeps a retiring document out of hosted reads and writes while its sibling s
 
 it("fails a write naming a blob the host never fetched or uploaded as missing, and keeps it unreadable", async () => {
   const f = await fixture();
-  // The owner replaced a private file's content into the hosted document, so
-  // the served row names the private bytes it withholds.
   const replacement = blob("replacement");
   f.storage.putBlob({
     workspaceId: ws,
@@ -813,7 +797,6 @@ it("fails a write naming a blob the host never fetched or uploaded as missing, a
     const missing = await answer(op, P.sha256);
     expect(missing[0], op[0]).toBe(422);
     expect(JSON.parse(String(missing[1])), op[0]).toMatchObject({ code: "blob_missing" });
-    // A digest the relay holds fails exactly like one it never saw.
     expect(await answer(named(absentSha256)[index]!, absentSha256), op[0]).toEqual(missing);
   }
   expect(
@@ -823,7 +806,6 @@ it("fails a write naming a blob the host never fetched or uploaded as missing, a
   expect(f.hostCoordinate(0)).toBeNull();
   for (const sha256 of [P.sha256, YP.sha256]) expect(await f.blobStatus(sha256)).toBe(404);
 
-  // Blobs the host fetched or uploaded remain writable.
   expect(
     await (
       await f.push([
@@ -876,8 +858,6 @@ it("drops upload proof with its collected blob, and fails the write as retryable
   await expectMissingUntilUploaded(f, collected);
 });
 
-// A write naming a blob out of reach fails without taking its coordinate,
-// `blobs/have` asks for the blob, and the upload lets the same write land.
 async function expectMissingUntilUploaded(f: Awaited<ReturnType<typeof fixture>>, content: Blob) {
   const edit = ["ydoc.update", ydoc(binding.objectId, "docs/a.md", content)] satisfies [
     string,
@@ -912,7 +892,6 @@ it("after an epoch rotation hosts only documents enrolled again from above the f
       .epoch_log_floor,
   );
   expect(floor).toBeGreaterThan(0);
-  // A writer of the new epoch edits a, and creates a document with its Y.Doc base.
   const N = blob("new document"),
     base = blob("new document base"),
     edited = blob("hosted a, edited");
@@ -937,10 +916,8 @@ it("after an epoch rotation hosts only documents enrolled again from above the f
       parseLogOp({ originSeq, opKind, recordedAtMs: 50, payload }),
     ),
   });
-  // a's enrollment belongs to the old epoch, so it can neither serve nor enroll again.
   expect(f.storage.readServiceHostFeedScope(ws)).toBeNull();
   expect(() => f.enroll("docs/a.md")).toThrow("obsolete");
-  // b was never enrolled, and its only head is below the floor.
   expect(() => f.enroll("docs/b.md")).toThrow("current main document");
 
   const enrolled = f.enroll("docs/new.md");
@@ -961,14 +938,12 @@ it("after an epoch rotation hosts only documents enrolled again from above the f
     return (await response.json()) as Page;
   };
   const { scope: current } = await page("");
-  // a's old enrollment is still stored and enabled, but outside the scope.
   expect(f.storage.readServiceHostEnrollment(ws, "docs/a.md")).toMatchObject({
     enabled: true,
     retired: false,
     replicationEpoch: "epoch",
   });
   expect(current.documents).toEqual([{ objectId: "object-new", path: "docs/new.md" }]);
-  // The main feed and the new document's backfill both read only above the floor.
   for (const query of [
     `&scope=${current.token}`,
     `&scope=${current.token}&since=0&object=object-new`,
@@ -1014,9 +989,7 @@ it("cuts a paused document's reads at once and keeps its writes until the sessio
     f.storage.releaseServiceHostEnrollment({ workspaceId: ws, objectId, nowMs: 31 });
   const documents = async () => (await f.read()).scope.documents.map((row) => row.objectId);
   for (const sha256 of [A.sha256, Y.sha256, B.sha256]) expect(await f.blobStatus(sha256)).toBe(200);
-  // A pending Pause takes the document's rows and blobs out of reach now.
   set("docs/a.md", false);
-  // Stop fences new acceptance at once; the relay's live journal already holds what the host accepted.
   set("docs/b.md", false, true);
   const paused = await f.read();
   expect(paused.scope.documents).toEqual([]);
@@ -1026,7 +999,6 @@ it("cuts a paused document's reads at once and keeps its writes until the sessio
     (await f.request("GET", `log?${identity}&scope=${paused.scope.token}&since=0&object=object-b`))
       .status,
   ).toBe(400);
-  // The paused document keeps its binding, so the host's accepted work still lands while it settles.
   expect([...f.storage.readServiceHostFeedScope(ws)!.hosted.keys()]).toEqual([binding.objectId]);
   const settling = blob("settling edit");
   await f.upload(settling);
@@ -1034,23 +1006,19 @@ it("cuts a paused document's reads at once and keeps its writes until the sessio
     await (await f.push([["ydoc.update", ydoc(binding.objectId, "docs/a.md", settling)]])).json(),
   ).toMatchObject({ inserted: 1, currentMaxOriginSeq: 0 });
   expect(f.hostCoordinate(0)).toMatchObject({ opKind: "ydoc.update" });
-  // The stopped one takes no more writes.
   expect(
     await (await f.push([["ydoc.update", ydoc("object-b", "docs/b.md", settling)]], 1)).json(),
   ).toMatchObject({ refusals: [{ originSeq: 1, reason: "outside-hosted-documents" }] });
   expect(release("object-b")).toMatchObject({ hostDrainedAtMs: 31 });
-  // Resuming before the release cancels the Pause and brings the document back.
   set("docs/a.md", true);
   expect(await documents()).toEqual([binding.objectId]);
   for (const sha256 of [A.sha256, Y.sha256]) expect(await f.blobStatus(sha256)).toBe(200);
   expect(release(binding.objectId)).toBeNull();
   expect(await documents()).toEqual([binding.objectId]);
   expect(await f.blobStatus(B.sha256)).toBe(404);
-  // The Resume's demand keeps the document readable past revocation, and its release keeps it.
   f.setGrant(scope.shareId, "status='revoked',revoked_at_ms=40");
   expect(await documents()).toEqual([binding.objectId]);
   expect(release(binding.objectId)).toBeNull();
-  // Without that demand, revocation cuts reads at once; writes stay open until the release retires the document.
   f.raw
     .prepare(
       "UPDATE sync_relay_service_host_enrollments SET owner_demand=0,demand_at_ms=NULL WHERE workspace_id=? AND object_id=?",
@@ -1105,7 +1073,6 @@ it("keeps the hosted credential alive for an undrained Stop and then drops it, n
   expect(empty.scope.documents).toEqual([]);
   expect(f.objects(empty)).toEqual(["workspace"]);
   expect(await f.blobStatus(A.sha256)).toBe(404);
-  // The host's last accepted work asks to upload nothing, writes no bytes, and is refused like any op outside the scope.
   const last = blob("last accepted edit");
   expect(
     await (
@@ -1174,12 +1141,10 @@ it("keeps the read replica's routes and guards apart from the session host's", a
   const first = principal.issue(ws, "first");
   expect((await get(principal.handle, first.bearer, `log?${identity}`)).status).toBe(200);
   expect((await get(principal.handle, first.bearer, "live-journal")).status).toBe(200);
-  // Neither credential reaches the other's routes.
   expect((await get(principal.handle, first.bearer, `hosted/log?${identity}`)).status).toBe(404);
   expect((await get(f.handle, first.bearer, `hosted/log?${identity}`)).status).toBe(404);
   expect((await get(f.handle, f.bearer, "live-journal")).status).toBe(404);
   expect((await get(principal.handle, f.bearer, `log?${identity}`)).status).toBe(404);
-  // Ending either principal leaves the other reading.
   principal.revoke(first);
   expect((await get(principal.handle, first.bearer, "live-journal")).status).toBe(404);
   expect((await get(f.handle, f.bearer, `hosted/log?${identity}`)).status).toBe(200);

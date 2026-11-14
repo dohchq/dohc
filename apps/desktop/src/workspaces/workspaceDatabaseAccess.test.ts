@@ -80,7 +80,6 @@ async function fixture(options: { opened?: boolean } = {}) {
   };
 }
 
-/** A counter as dohc writes it, whose last number is `last`. */
 async function writeCounter(folder: string, last: number) {
   await mkdir(folder, { recursive: true, mode: 0o700 });
   const db = new DatabaseSync(join(folder, "state.sqlite"));
@@ -322,7 +321,6 @@ describe("this computer's operation counter", () => {
         await rename(join(elsewhere, "local"), local);
       }
       expect(lastNumber(f.counterFolder)).toBe(2);
-      // Once the person removes the folder, the next edit starts after the log.
       await rm(f.counterFolder, { recursive: true });
       expect(await f.editWorkspaceDatabaseInWorker(f.input)).toMatchObject({ version: 6 });
     },

@@ -49,8 +49,6 @@ function nextClipboardWrite(): Promise<string> {
   });
 }
 
-// A clipboard write the test settles itself, for the out-of-order cases: the
-// component must not act on an attempt the user has moved past.
 function deferredWrite() {
   let resolve!: () => void;
   let reject!: (reason: unknown) => void;
@@ -105,7 +103,6 @@ afterEach(() => {
   cleanup();
 });
 
-// The shell's notices, as the workspace shell provides them.
 function notices() {
   const report = vi.fn<ReportShellFailure>();
   const clear = vi.fn<(identity: string) => void>();
@@ -222,7 +219,6 @@ describe("DocumentMenu", () => {
           );
           await user.click(screen.getByTestId("document-menu-trigger"));
           await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
-          // Same workspace and title: documentKey alone must retire the action.
           view.rerender(
             <DocumentMenu
               path="Plan.md"
@@ -314,7 +310,6 @@ describe("DocumentMenu", () => {
         cause: failure,
         retry: expect.any(Function),
         identity: expect.stringMatching(/^copy-markdown:/),
-        // A press on its Notices row opens the note it names.
         target: { to: "file", path: "Plan.md" },
       });
     });
@@ -408,7 +403,6 @@ describe("DocumentMenu", () => {
     renderMenu();
     const trigger = screen.getByTestId("document-menu-trigger");
     await user.click(trigger);
-    // Focus moves to the first row on open.
     expect(document.activeElement).toBe(screen.getByTestId("document-menu-item-copy-markdown"));
 
     await user.keyboard("{Escape}");
@@ -423,8 +417,6 @@ describe("DocumentMenu", () => {
     stubClipboard();
     await user.click(screen.getByTestId("document-menu-trigger"));
 
-    // First item ("Copy as Markdown") holds focus by default. After a click,
-    // the first Down marks it.
     expect(document.activeElement).toBe(screen.getByTestId("document-menu-item-copy-markdown"));
     await user.keyboard("{ArrowDown}");
     expect(document.activeElement).toBe(screen.getByTestId("document-menu-item-copy-markdown"));
@@ -484,15 +476,10 @@ describe("DocumentMenu", () => {
     const call = await exported;
     expect(exportDocumentFile).toHaveBeenCalledTimes(1);
     expect(call.kind).toBe("markdown");
-    // Verbatim source, frontmatter included — no HTML rendering involved.
     expect(call.content).toBe(MARKDOWN);
     expect(screen.queryByRole("menu")).toBeNull();
   });
 
-  // An engine-backed document whose editor has not mounted (or failed
-  // to) cannot be serialized — the markdown cache beside it is empty on the
-  // failed-read recovery path, and falling back to it copied and exported an
-  // empty document while telling the user it worked. Every action refuses.
   it("refuses to copy or export a document it cannot serialize", async () => {
     const user = userEvent.setup();
     stubClipboard();
@@ -525,7 +512,6 @@ describe("DocumentMenu", () => {
     expect(copyItem.getAttribute("title")).toBeNull();
     expect(writeText).not.toHaveBeenCalled();
 
-    // The refusal leaves the menu open, so the export item is right there.
     await user.click(screen.getByTestId("document-menu-item-export-markdown"));
     await act(async () => {});
     // One label, on the item the user just clicked. There is one timer, so a
@@ -535,8 +521,6 @@ describe("DocumentMenu", () => {
     expect(screen.getAllByText("Document not open")).toHaveLength(1);
     const exportItem = screen.getByTestId("document-menu-item-export-markdown");
     expect(exportItem.textContent).toBe("Document not open");
-    // Each action names its own next step, and one status line carries the
-    // one feedback the menu holds.
     expect(screen.getByTestId("document-menu-status").textContent).toBe(
       "You can export this document when it opens.",
     );
@@ -581,11 +565,6 @@ describe("DocumentMenu", () => {
     expect(screen.getByTestId("document-menu-status")).toBe(status);
   });
 
-  // Moving the instruction into the status region is
-  // not enough while it rides the label's 1.2s timer — and that timer closed
-  // the menu, so the instruction left the screen with it. A keyboard or
-  // low-vision user gets 1.2s to find and read it, which is the same failure
-  // the tooltip had, one mechanism along.
   it("keeps the refusal's instruction until the user closes the menu", async () => {
     const user = userEvent.setup();
     stubClipboard();
@@ -614,7 +593,6 @@ describe("DocumentMenu", () => {
       ),
     );
 
-    // The two things that must not retire with it.
     expect(screen.queryByRole("menu")).not.toBeNull();
     expect(screen.getByTestId("document-menu-status").textContent).toBe(
       "You can copy this document when it opens.",
@@ -628,9 +606,6 @@ describe("DocumentMenu", () => {
     expect(screen.getByTestId("document-menu-status").textContent).toBe("");
   });
 
-  // The other half of that branch: a confirmation is over once it is read, so
-  // its timer still retires the label and closes the menu. Without this,
-  // keeping every menu open forever passes the test above.
   it("still closes on the timer after a confirmation", async () => {
     const user = userEvent.setup();
     renderMenu();
@@ -642,16 +617,15 @@ describe("DocumentMenu", () => {
     expect(await written).toBe(MARKDOWN);
     await act(async () => {});
     expect(screen.getByText("Copied")).toBeTruthy();
-    // A confirmation owes no next step, so the region says nothing.
     expect(screen.getByTestId("document-menu-status").textContent).toBe("");
 
     await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
   });
 
-  // codex r2 on #684: a clipboard write settles after the click that started
-  // it, and a refusal now stands until the user closes the menu — so the late
-  // "Copied" landed on top of an instruction the user was still reading, and
-  // started the timer that closes the menu under them.
+  // A clipboard write settles after the click that started it, and a refusal
+  // stands until the user closes the menu. A late "Copied" must not land on
+  // top of an instruction the user is still reading, or start the timer that
+  // closes the menu under them.
   it("ignores a clipboard write that settles after a later action answered", async () => {
     const user = userEvent.setup();
     stubClipboard();
@@ -671,8 +645,6 @@ describe("DocumentMenu", () => {
     await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
     expect(writeText).toHaveBeenCalledTimes(1);
 
-    // The editor went away while that write was in flight, and the next
-    // action is refused. This is what the user is now reading.
     markdown = null;
     await user.click(screen.getByTestId("document-menu-item-export-markdown"));
     await act(async () => {});
@@ -680,7 +652,6 @@ describe("DocumentMenu", () => {
       "You can export this document when it opens.",
     );
 
-    // The old write finally lands.
     await act(async () => {
       write.resolve();
       await write.promise;
@@ -702,9 +673,6 @@ describe("DocumentMenu", () => {
     expect(screen.queryByRole("menu")).not.toBeNull();
   });
 
-  // The same staleness across a close: the menu the write belonged to is gone,
-  // and the fresh one says nothing about the last one — a "Copied" here would
-  // also close a menu the user just opened.
   it("ignores a clipboard write that settles after the menu reopened", async () => {
     const user = userEvent.setup();
     stubClipboard();
@@ -752,7 +720,6 @@ describe("DocumentMenu", () => {
       "You can copy this document when it opens.",
     );
 
-    // The document opened and the user retries. This write does not settle.
     markdown = MARKDOWN;
     const retry = deferredWrite();
     writeText.mockImplementationOnce(() => retry.promise);
@@ -768,8 +735,6 @@ describe("DocumentMenu", () => {
       "Copy as Markdown",
     );
 
-    // And the retry still gets to speak when it lands. A confirmation owes no
-    // next step, so nothing of the refusal survives under it.
     await act(async () => {
       retry.resolve();
       await retry.promise;
@@ -778,9 +743,6 @@ describe("DocumentMenu", () => {
     expect(screen.getByTestId("document-menu-status").textContent).toBe("");
   });
 
-  // The other consequence of leaving the last answer standing: its timer runs
-  // too, and that timer closes the menu after a confirmation. A retry started
-  // inside the window had the menu shut under it while it was still pending.
   it("cannot be closed by a previous result's timer once a new attempt starts", async () => {
     vi.useFakeTimers();
     try {
@@ -794,13 +756,11 @@ describe("DocumentMenu", () => {
       await act(async () => {});
       expect(screen.getByText("Copied")).toBeTruthy();
 
-      // A second copy, inside that confirmation's window. It does not settle.
       const retry = deferredWrite();
       writeText.mockImplementationOnce(() => retry.promise);
       fireEvent.click(screen.getByTestId("document-menu-item-copy-markdown"));
       await act(async () => {});
 
-      // Pass the previous confirmation's deadline while the retry is pending.
       await act(async () => {
         await vi.advanceTimersByTimeAsync(FEEDBACK_MS * 2);
       });
@@ -821,11 +781,10 @@ describe("DocumentMenu", () => {
     }
   });
 
-  // codex r23: NULL is the refusal this menu expects; a throw is not. The
-  // serializer reads a live editor, and reading it can fail — and once the
-  // call moved outside the action's try boundary, that rejected the action's
-  // promise into nothing: no feedback, no log, and the menu still open as
-  // though the click had missed.
+  // Null is the refusal this menu expects; a throw is not. The serializer
+  // reads a live editor, and reading it can fail. Outside the action's try
+  // boundary, a throw would reject the action's promise into nothing: no
+  // feedback, no log, and the menu still open as though the click had missed.
   it("reports a serializer that throws instead of rejecting into nothing", async () => {
     const user = userEvent.setup();
     stubClipboard();
@@ -854,7 +813,6 @@ describe("DocumentMenu", () => {
       expect(logged).toHaveBeenCalledWith("Copy as Markdown failed", failure);
       expect(writeText).not.toHaveBeenCalled();
 
-      // The export path answers the same way, in its own words.
       await user.click(screen.getByTestId("document-menu-item-export-markdown"));
       await act(async () => {});
       expect(screen.getByTestId("document-menu-item-export-markdown").textContent).toBe(
@@ -862,17 +820,12 @@ describe("DocumentMenu", () => {
       );
       expect(logged).toHaveBeenCalledWith("Export as MARKDOWN failed", failure);
       expect(exportDocumentFile).not.toHaveBeenCalled();
-      // A failure the user can still see: the menu stays open for it, exactly
-      // as the refusal does.
       expect(screen.queryByRole("menu")).not.toBeNull();
     } finally {
       logged.mockRestore();
     }
   });
 
-  // A menu that closes under a pending write has no row left to answer on.
-  // The person closed it, so a success says nothing; a failure still owes
-  // them a message, and it goes through the shell's error hook.
   describe("a write that settles after the menu closed", () => {
     function renderReporting() {
       const shell = notices();
@@ -910,7 +863,6 @@ describe("DocumentMenu", () => {
           cause: failure,
         }),
       );
-      // Reopening says nothing about it either.
       await user.click(screen.getByTestId("document-menu-trigger"));
       expect(screen.queryByText("Couldn't copy")).toBeNull();
     });
@@ -940,8 +892,6 @@ describe("DocumentMenu", () => {
       });
       const { retry, identity } = report.mock.calls[0]![0];
 
-      // The document changed since; the retry copies what it says now, and
-      // takes its notice back.
       markdown = "# Revised\n";
       const copied = nextClipboardWrite();
       await act(async () => retry?.());
@@ -950,7 +900,6 @@ describe("DocumentMenu", () => {
       expect(clear).toHaveBeenCalledExactlyOnceWith(identity);
       expect(screen.queryByRole("menu")).toBeNull();
 
-      // A retry that fails again reports again, with a retry of its own.
       const refusal = new Error("clipboard refused again");
       writeText.mockImplementationOnce(() => Promise.reject(refusal));
       await act(async () => retry?.());
@@ -963,7 +912,6 @@ describe("DocumentMenu", () => {
         }),
       );
 
-      // And one that finds no document to copy reports that, not "Copied".
       markdown = null;
       await act(async () => retry?.());
       expect(report).toHaveBeenCalledTimes(3);
@@ -1000,8 +948,6 @@ describe("DocumentMenu", () => {
       expect(first.message).toBe("dohc could not copy Plan as Markdown.");
       writeText.mockClear();
 
-      // Another note is showing: Try again copies nothing, says why, and
-      // offers to open the note. Its notice replaces the first.
       view.rerender(menu("b", "Budget", "# Budget\n"));
       await act(async () => first.retry?.());
       expect(writeText).not.toHaveBeenCalled();
@@ -1017,8 +963,6 @@ describe("DocumentMenu", () => {
       notOpen.action?.run();
       expect(openPlan).toHaveBeenCalledOnce();
 
-      // Opened again, in a menu of its own, the note copies its text as it
-      // is now, and the notice is taken back.
       view.unmount();
       render(menu("a", "Plan", "# Plan, revised\n"), { wrapper });
       const copied = nextClipboardWrite();
@@ -1089,7 +1033,6 @@ describe("DocumentMenu", () => {
       view.unmount();
       writeText.mockClear();
 
-      // Opened again, the note's first read is slow, and Try again waits on it.
       let finishRead!: (markdown: string) => void;
       const slowRead = new Promise<string>((resolve) => {
         finishRead = resolve;
@@ -1106,7 +1049,6 @@ describe("DocumentMenu", () => {
       );
       await act(async () => first.retry?.());
 
-      // A newer Copy from the menu fails.
       writeText.mockImplementationOnce(() => Promise.reject(new Error("clipboard refused again")));
       await user.click(screen.getByTestId("document-menu-trigger"));
       await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
@@ -1146,14 +1088,12 @@ describe("DocumentMenu", () => {
       await user.keyboard("{Escape}");
       writeText.mockClear();
 
-      // Try again's write waits on the clipboard.
       const slowWrite = deferredWrite();
       writeText.mockImplementationOnce(() => slowWrite.promise);
       await act(async () => first.retry?.());
       await act(async () => {});
       expect(writeText).toHaveBeenCalledTimes(1);
 
-      // A newer Copy fails.
       writeText.mockImplementationOnce(() => Promise.reject(new Error("clipboard refused again")));
       await user.click(screen.getByTestId("document-menu-trigger"));
       await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
@@ -1220,7 +1160,6 @@ describe("DocumentMenu", () => {
       );
       const { identity } = report.mock.calls[0]![0];
 
-      // Back on Plan, a Copy whose write lands after Export ran takes the row back.
       view.rerender(menu("Plan.md", "Plan"));
       const copied = deferredWrite();
       writeText.mockImplementationOnce(() => copied.promise);

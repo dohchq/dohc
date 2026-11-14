@@ -366,15 +366,6 @@ describe("ui-state merge-on-load", () => {
     });
   });
 
-  // Journey 2: rolling back a rename left `assets/alpha-renamed.png`
-  // in Open Editors for a path that no longer existed — through a restart,
-  // because nothing reconciled the restored tabs against the workspace.
-
-  // A shared workspace lists its files twice on open: once at mount, once
-  // after refreshShareView pulls the changed paths. Reconciling against
-  // whichever landed first would either miss a remote delete or judge the
-  // restored tabs against a pre-pull snapshot.
-
   it("keeps a refresh that can't read the share collision record in Notices until a refresh completes", async () => {
     const words =
       "dohc did not update these shared files because it could not read .dohc/local/share-refresh/share-collision-record.json. " +
@@ -733,7 +724,7 @@ describe("ui-state merge-on-load", () => {
     });
   });
 
-  // P1: closing a dirty tab unmounts the inspector mid-draft, and its cleanup
+  // Closing a dirty tab unmounts the inspector mid-draft, and its cleanup
   // flushes best-effort to a path that no longer exists. resolveWorkspaceFile
   // requires the file, the write fails, the failure is swallowed — the draft
   // would be gone with no error and no way back.
@@ -1157,47 +1148,6 @@ describe("ui-state merge-on-load", () => {
       screen.queryByTestId(`tab-dohc://chats/dm/${encodeURIComponent(CANONICAL_DM.channelId)}`),
     ).toBeNull();
   });
-
-  // The same race through the back button: every BackHeader and the keyboard
-  // shortcut route through goBack, which must issue the same synchronous
-  // command — a DM answer queued in the tick of the Back click would
-  // otherwise pass its isCurrent() check and remount the DM over the channel
-  // the user went back to.
-
-  // The same race through "New message": the compose screen opens with a
-  // direct nav write, and a DM answer queued in the same tick would remount
-  // the DM over the compose the user just opened.
-
-  // The awaited form of the same click: a feed item carrying a focus target
-  // navigates in place (openConversation -> command + report), and the DM
-  // answers late. The destination write must cancel it.
-
-  // The in-thread reply-parent jump. It is the one command in the page
-  // that writes NO navigation — it only scrolls — so every other seam here
-  // (the destination write, the remount, the nav report) sees nothing move.
-  // A DM lookup that answers afterwards would still replace the page with the
-  // conversation the user left, taking away the message they just jumped to.
-
-  // The surviving mutant from the review: openFile's heading-target
-  // invalidation. A heading jump into the ALREADY-ACTIVE file moves no tab,
-  // so mutateWb's transition check cannot see it — only openFile's own
-  // `if (target)` branch cancels the pending DM.
-
-  // A request that is merely in flight has not answered anything, and a
-  // request that fails never will. Superseding on ISSUE would drop the only
-  // answer there is and leave the explorer empty with nothing to retry it.
-
-  // Listings resolve out of order (the mount listing can overtake the one the
-  // share pull triggered). An older snapshot committing last would show a
-  // stale tree and, worse, make the reconciliation read a live file as
-  // deleted and close its tab.
-
-  // Either load can win. When the listing lands first there is nothing
-  // restored to judge yet, so the restore itself has to re-run the check —
-  // otherwise the missing tab survives and gets written back out.
-
-  // The scoping earns its keep here: only stored tabs are eligible, so a
-  // listing that raced a create cannot close what the user just opened.
 
   it("stored state applies when the user touched nothing before the load", async () => {
     const stored = deferred<WorkspaceUiState | null>();

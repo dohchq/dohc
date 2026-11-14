@@ -144,8 +144,6 @@ it("refuses unexpected metadata fields and responses arriving after selection ca
   );
   await expect(openLinkDocument("abcdefghijkl", "docs/a.md", controller.signal)).rejects.toThrow();
 });
-// The share service answers 404 when the owner's device cannot serve the file
-// yet. The server answered, so the viewer must not blame the connection.
 it("reports a refused link ticket as unavailable, not as a failed connection", async () => {
   vi.stubGlobal("location", { origin: "https://share.example.test" });
   vi.stubGlobal(
@@ -163,6 +161,69 @@ it("reports a refused link ticket as unavailable, not as a failed connection", a
       status: "disconnected",
       reason: "authority-unavailable",
     });
+  } finally {
+    session.close();
+  }
+});
+it("stops on a link that can take no more people, without trying again", async () => {
+  vi.useFakeTimers();
+  vi.stubGlobal("location", { origin: "https://share.example.test" });
+  const fetch = vi.fn(async (url: RequestInfo | URL) =>
+    url === "/api/live/link-document"
+      ? Response.json({ objectId: "object-a", limits })
+      : Response.json(linkRefusalBody("link_full"), { status: 403 }),
+  );
+  vi.stubGlobal("fetch", fetch);
+  const session = await openLinkDocument("abcdefghijkl", "docs/a.md", new AbortController().signal);
+  try {
+    await session.reconnect();
+    expect(session.state()).toMatchObject({ status: "disconnected", reason: "link-full" });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  } finally {
+    session.close();
+    vi.useRealTimers();
+  }
+});
+// After a server restart the share service answers 503 until live editing can start again.
+it("tries a busy link ticket again by itself and opens the file once the server answers", async () => {
+  class Socket extends EventTarget {
+    readyState = 1;
+    bufferedAmount = 0;
+    protocol = "dohc-live-v1";
+    extensions = "";
+    binaryType = "arraybuffer";
+    constructor() {
+      super();
+      queueMicrotask(() => this.dispatchEvent(new Event("open")));
+    }
+    send() {}
+    close() {
+      this.readyState = 3;
+    }
+  }
+  vi.stubGlobal("WebSocket", Socket);
+  vi.stubGlobal("location", { origin: "https://share.example.test" });
+  let busy = true;
+  const fetch = vi.fn(async (url: RequestInfo | URL) =>
+    url === "/api/live/link-document"
+      ? Response.json({ objectId: "object-a", limits })
+      : busy
+        ? Response.json(linkRefusalBody("link_live_unavailable"), { status: 503 })
+        : Response.json({
+            token: "ab".repeat(32),
+            publicPrincipalId: "public-link-a",
+            expiresAtMs: Date.now() + 60_000,
+          }),
+  );
+  vi.stubGlobal("fetch", fetch);
+  const session = await openLinkDocument("abcdefghijkl", "docs/a.md", new AbortController().signal);
+  try {
+    await session.reconnect();
+    expect(session.state()).toMatchObject({ status: "disconnected", reason: "host-unavailable" });
+    busy = false;
+    await vi.waitFor(() => expect(session.state().status).toBe("connecting"));
+    expect(fetch).toHaveBeenCalledTimes(3);
   } finally {
     session.close();
   }

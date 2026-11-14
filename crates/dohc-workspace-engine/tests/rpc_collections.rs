@@ -1,5 +1,3 @@
-//! Collection reads through the real in-process daemon request path.
-
 use crate::common;
 
 use base64::Engine as _;
@@ -175,7 +173,6 @@ async fn received_collection_projection_follows_local_definition_writes_and_anno
         refusal.message,
         "received shares do not open live document sessions"
     );
-    // Received writes still update the table after the live-session refusal.
     std::fs::write(
         &record_path,
         format!("---\nid: {RECORD_ID}\nTitle: Fourth\n---\n"),
@@ -557,7 +554,6 @@ async fn an_automation_write_names_its_run_in_record_history() {
         json!({ "actorKind": "automation", "onBehalfOf": "local", "depth": 1, "run": run }),
     )
     .await;
-    // An automation write recorded without its run names none.
     record_update(
         13,
         "owner",
@@ -565,7 +561,6 @@ async fn an_automation_write_names_its_run_in_record_history() {
         json!({ "actorKind": "automation", "onBehalfOf": "local", "depth": 1 }),
     )
     .await;
-    // Only an automation's write names a run, and an unbounded one refuses.
     for (id, attribution) in [
         (
             14,
@@ -603,7 +598,6 @@ async fn an_automation_write_names_its_run_in_record_history() {
         .await;
         assert_eq!(refused.code, ErrorCode::InvalidParams, "{refused:?}");
     }
-    // Settling writes the record file; its capture keeps the run on the change.
     call(
         &transport,
         &handle,
@@ -862,7 +856,6 @@ async fn park_remote_status_update(
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
 
-    // Seed the local rich-document lineage from the captured artifact.
     let seed_doc = Ydoc::wire();
     seed_doc
         .rewrite_content_to_markdown(ContentKind::Richdoc, &markdown)
@@ -926,7 +919,6 @@ async fn park_remote_status_update(
     ));
     drop(store);
 
-    // Park one synced frontmatter edit behind the live session's lease.
     let (live, initial_update) = call_ydoc_with_blob(
         service.as_ref(),
         &handle,
@@ -1167,7 +1159,6 @@ async fn resync_emits_parked_record_events_once_after_a_claim_mismatch() {
         )
         .expect("restore original claim");
     drop(connection);
-    // This handshake returns to the original claim without draining it.
     call_ydoc_with_blob(
         parked.service.as_ref(),
         &parked.handle,
@@ -1284,7 +1275,6 @@ async fn collection_responses_honor_a_negotiated_frame_limit_below_the_default()
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
     let params = json!({ "collectionPath": "negotiated", "limit": 1 });
 
-    // At the daemon default the 2 MiB record travels in band.
     let in_band = ProtocolEngineService::call(
         service.as_ref(),
         RequestContext::unbounded(),
@@ -1325,7 +1315,6 @@ async fn collection_responses_honor_a_negotiated_frame_limit_below_the_default()
     let parsed: Value = serde_json::from_slice(&egress.bytes).expect("blob-backed collection JSON");
     assert_eq!(parsed["records"][0]["id"], json!(RECORD_ID));
 
-    // Without blobs the negotiated limit refuses rather than over-framing.
     let refusal = ProtocolEngineService::call(
         service.as_ref(),
         RequestContext::unbounded().with_max_frame_bytes(NEGOTIATED),

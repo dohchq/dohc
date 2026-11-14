@@ -148,10 +148,12 @@ describe("WorkspaceEngineCapture generated Markdown", () => {
       "# Refreshed legacy projection",
     );
 
-    // Simulate a crash after the generated write committed but before the
-    // bookmark outbox durably recorded upgraded.objectId.
+    const bookmarkBeforeOutboxIdentityCommit = {
+      bookmarkId: "bookmark-legacy",
+      destinationPath: legacyPath,
+    };
     const retried = await writeChatBookmarkProjection({
-      bookmark: { bookmarkId: "bookmark-legacy", destinationPath: legacyPath },
+      bookmark: bookmarkBeforeOutboxIdentityCommit,
       text: bookmarkProjection("bookmark-legacy", "Crash retry projection"),
       capture,
     });
@@ -613,7 +615,6 @@ describe("WorkspaceEngineCapture generated Markdown", () => {
     await capture.stop();
   });
 
-  // With `conflict`, another page is saved at the old path after the move.
   async function archiveAfterCommittedMove(conflict: boolean) {
     const rootPath = await root();
     const workspace = { workspaceId: "ws", rootPath };
@@ -701,7 +702,6 @@ describe("WorkspaceEngineCapture generated Markdown", () => {
         bookmarkId: saved.bookmarkId,
       });
 
-    // The engine moves the page, then deleting the original file fails.
     failDelete = true;
     await expect(
       owner.archiveChatBookmark(workspace, capture, "viewer", saved.bookmarkId),
@@ -714,7 +714,6 @@ describe("WorkspaceEngineCapture generated Markdown", () => {
     expect(await capture.fileObjectIdForPath(archivedPath)).toBe(ready.projectionObjectId);
     expect(await readFile(join(rootPath, destinationPath), "utf8")).toContain("Archive me");
 
-    // A worker pass finds nothing to do: only a person archives it again.
     await owner.projectPendingChatBookmarks("ws");
     expect(deleted).toEqual([join(rootPath, destinationPath)]);
     expect(await current()).toMatchObject({ projectionState: "failed", generation: 2 });
@@ -752,7 +751,6 @@ describe("WorkspaceEngineCapture generated Markdown", () => {
       return;
     }
 
-    // The bookmark's own control finishes the archive where the page is.
     await expect(
       owner.archiveChatBookmark(workspace, capture, "viewer", saved.bookmarkId),
     ).resolves.toMatchObject({ state: "archived", projectionState: "ready", generation: 2 });

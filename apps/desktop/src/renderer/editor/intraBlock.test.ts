@@ -7,10 +7,6 @@ import {
   markdownToYDoc,
 } from "@dohc/ydoc-projection";
 
-// The refinement is measured against the editor's own parse, the way
-// lineBlocks.test.ts measures the block rules: `markdownToYDoc` is what builds
-// the Y.Doc the engine editor binds to, so the nodes below are the nodes a
-// reader would be looking at. Nothing here is a hand-built fixture.
 function editorDoc(body: string) {
   return yXmlFragmentToProseMirrorRootNode(
     getDohcYDocBodyFragment(markdownToYDoc(body)),
@@ -18,9 +14,6 @@ function editorDoc(body: string) {
   );
 }
 
-/** The text a search hit on 1-based `line` reveals, or null when the reveal
- *  drops to the block start. This is the whole seam: the target FileInspector
- *  sends, resolved the way MarkdownEditor's scrollToBlock resolves it. */
 function revealed(body: string, line: number): string | null {
   const doc = editorDoc(body);
   const target = blockTargetForLine(body, line);
@@ -41,7 +34,6 @@ const items = (count: number, marker: (item: number) => string) =>
   Array.from({ length: count }, (_, item) => marker(item + 1));
 
 describe("a match deep in a long block lands the matched line", () => {
-  // 1 "Intro"  2 ""  3.. "- Item 1" .. "- Item 100"  103 ""  104 "After"
   const LONG_LIST = ["Intro", "", ...items(100, (n) => `- Item ${n}`), "", "After"].join("\n");
 
   it("lands the ninetieth item of a hundred-item bullet list", () => {
@@ -112,15 +104,11 @@ describe("a match deep in a long block lands the matched line", () => {
   });
 
   it("lands the item above a blank line inside the list", () => {
-    // The same rule one level down: a line in a gap resolves to the thing
-    // above it. A loose list keeps its blank lines, and a hit that lands on
-    // one shows the reader the item it follows.
     const loose = ["- Item 1", "", "- Item 2", "", "- Item 3"].join("\n");
     expect(revealed(loose, 4)).toBe("Item 2");
   });
 
   it("lands the item a continuation line belongs to, not the line", () => {
-    // 1 "- Item one"  2 "  wrapped"  3 "- Item two"  4 "  wrapped too"
     const body = "- Item one\n  wrapped\n- Item two\n  wrapped too";
     const landing = revealed(body, 4);
     expect(landing).toContain("Item two");
@@ -167,8 +155,6 @@ describe("a match deep in a long block lands the matched line", () => {
     const nestedItem = nestedList.child(0);
     const codeBlock = nestedItem.child(1);
 
-    // Prove the exact descent: later outer item -> nested list -> first nested
-    // item -> deep fence. The first nested item is new ground at this depth.
     expect(outerList.type.name).toBe("orderedList");
     expect(outerList.childCount).toBe(3);
     expect(outerItem.childCount).toBe(2);
@@ -306,9 +292,6 @@ describe("a match deep in a long block lands the matched line", () => {
   });
 
   it("counts a fence's own blank and heading-shaped lines as its text", () => {
-    // A fence's contents are inert to the block rules, and to these: line 4
-    // is code that looks like a heading, and the blank line above it does not
-    // shift the count.
     const body = "```\nfirst\n\n# not a heading\nlast\n```";
     expect(revealed(body, 4)).toBe("# not a heading");
     expect(revealed(body, 5)).toBe("last");

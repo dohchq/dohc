@@ -31,7 +31,6 @@ import { readUiStateFile } from "./workspaceUiState";
 import { readWorkspaceSettingsFile } from "./workspaceSettingsFile";
 import { createTestScratch } from "./testTemp";
 
-// The folder a reader is given.
 const ownedLocalStateDir = (rootPath: string) => readOwnedLocalState(rootPath, async (dir) => dir);
 const existingLocalStateFolder = (rootPath: string, name: string) =>
   readOwnedLocalStateFolder(rootPath, name, async (dir) => dir);
@@ -101,14 +100,12 @@ describe("this computer's .dohc/local", () => {
     expect(await refusal(localStateDir(workspace))).toBe("not-opened");
     expect(await lstat(join(workspace.rootPath, ".dohc")).catch(() => null)).toBeNull();
 
-    // A folder an earlier run of dohc left is not this open's.
     await mkdir(join(workspace.rootPath, ".dohc", "local"), { recursive: true });
     expect(await refusal(localStateDir(workspace))).toBe("not-opened");
 
     await open();
     const dir = await localStateDir(workspace);
     expect(await readdir(dir)).toEqual([]);
-    // Nor does this open say anything about the same workspace at another root.
     const elsewhere = { ...workspace, rootPath: await createTestScratch("dohc-local-state-") };
     await mkdir(join(elsewhere.rootPath, ".dohc", "local"), { recursive: true });
     expect(await refusal(localStateDir(elsewhere))).toBe("not-opened");
@@ -124,7 +121,6 @@ describe("this computer's .dohc/local", () => {
       "dohc could not keep this workspace's .dohc/local out of iCloud Drive, so it saves nothing there. Restart dohc to try again.",
     );
 
-    // A later open that marks it makes it ready again.
     await sessions.closeWorkspaceBinding(workspace);
     daemon.ready = true;
     await open();
@@ -378,7 +374,6 @@ describe("this computer's .dohc/local for a reader on Windows", () => {
     expect(await reading).toEqual({ sidebarOpen: true });
   });
 
-  // A read is trusted only while one open holds the folder throughout.
   it("drops what a reader found when the open closes before the read ends, even if another open follows", async () => {
     const { sessions, workspace, open } = await windowsEngine();
     const local = join(workspace.rootPath, ".dohc", "local");

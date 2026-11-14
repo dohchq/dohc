@@ -19,22 +19,17 @@ type JsonObject = { [key: string]: JsonValue | undefined };
 /**
  * The daemon's disk side, in front of a `VersionedLoopbackEngine`.
  *
- * The desktop capture chain no longer reads or writes the workspace folder on
- * capture: the Rust daemon watches the folder, ingests it on `capture.flush`,
- * and rewrites it after `versions.setActive`, a merge into the active
- * version, and a conflict resolution. The loopback models only the store, so
- * a chain-side test that exercises those operations sees no disk effect at
- * all. This fake adds the disk half the daemon owns, with the same rules the
- * daemon applies:
+ * The Rust daemon, not the desktop capture chain, reads and writes the
+ * workspace folder. The loopback models only the store, so this fake adds the
+ * disk half the daemon owns, with the daemon's rules:
  *
  * - `capture.flush` and `capture.reconcile` scan the root and ingest every
  *   policy-tracked path into the active version (text, binary, and secret
  *   files by the same classification as `readDiskTextState`), retiring paths
  *   the store tracks that the disk no longer holds. A path under a live
  *   `ydoc.open` lease is left alone, as `ensure_capture_target_not_leased`
- *   does. Bytes the chain itself just wrote (a self-write) are ingested like
- *   any other; the store's content-equality no-op keeps them from becoming a
- *   second moment.
+ *   does. The store's content-equality no-op keeps bytes the chain itself
+ *   just wrote from becoming a second moment.
  * - `versions.setActive` ingests the outgoing version first (the fence), then
  *   rewrites the folder to the incoming version's text, binary, and secret
  *   heads and removes paths the incoming version lacks.

@@ -650,7 +650,23 @@ export function createDiscussionRoutes(
     shareId: string,
   ): Promise<Response> => {
     if (request.method !== "POST") return privateRefused();
+    const share = storage.getShare(shareId);
+    if (!share) return privateRefused();
     let actorUserId: string;
+    // Only the discussion's owner gets the body read.
+    try {
+      const actor = await resolveActor(request, share.workspaceId);
+      if (
+        !actor.userId ||
+        Buffer.byteLength(actor.userId, "utf8") > LINK_DISCUSSION_DELETING_USER_ID_BYTE_LIMIT ||
+        !isCurrentDiscussionOwner(shareId, actor.userId)
+      ) {
+        return privateRefused();
+      }
+      actorUserId = actor.userId;
+    } catch {
+      return privateRefused();
+    }
     let action: DiscussionModerationAction;
     let workspaceId: string;
     let input: Record<string, unknown>;
@@ -661,18 +677,7 @@ export function createDiscussionRoutes(
       return privateErrorResponse(error);
     }
     try {
-      const actor = await resolveActor(request, workspaceId);
-      const share = storage.getShare(shareId);
-      if (
-        !actor.userId ||
-        Buffer.byteLength(actor.userId, "utf8") > LINK_DISCUSSION_DELETING_USER_ID_BYTE_LIMIT ||
-        !share ||
-        !isCurrentDiscussionOwner(shareId, actor.userId)
-      ) {
-        return privateRefused();
-      }
       requireShareWorkspace(share, workspaceId);
-      actorUserId = actor.userId;
       action = parseDiscussionModerationAction(input);
     } catch {
       return privateRefused();

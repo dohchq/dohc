@@ -1,5 +1,5 @@
-// Pure engine-history -> IPC record mappers, extracted from main.ts so the
-// per-side content-kind rules are unit-testable (WS-G1 review fix). main
+// Pure engine-history -> IPC record mappers, kept out of main.ts so the
+// per-side content-kind rules are unit-testable. main
 // injects how agent, named, and automation authors read, and the Collection
 // automations it names them from; nothing here touches Electron or process
 // state.
@@ -220,8 +220,8 @@ export function engineMomentForIpc(
   return {
     ...engineMomentBaseForIpc(moment, names),
     momentOrder: moment.momentOrder,
-    // Only stamped for protected (secret-backed) moments so ordinary rows
-    // stay byte-identical to the pre-PR-08 shape.
+    // Only stamped for protected (secret-backed) moments, so ordinary rows
+    // carry no `protected` field.
     ...(moment.protected ? { protected: true } : {}),
     ...(moment.contentKind === "binary"
       ? { contentKind: "binary" as const, byteLength: moment.byteLength ?? 0 }
@@ -256,7 +256,7 @@ export function engineMomentDetailForIpc(
   const moment = detail.moment;
   const before = moment.payload.before ?? null;
   const after = moment.payload.after;
-  // Classified per side (WS-G1 review fix): a binary->text transition must
+  // Classified per side: a binary->text transition must
   // not serve the binary preimage's empty anchor text as beforeText (a
   // false empty->text diff) — each side presents by its own contentKind.
   const beforeBinary = before !== null && before.contentKind === "binary" ? before : null;

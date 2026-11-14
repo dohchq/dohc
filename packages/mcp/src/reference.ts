@@ -42,8 +42,6 @@ interface JsonSchema {
   pattern?: string;
 }
 
-// --- Hand-written entries ----------------------------------------------------
-
 type DatasetAction = DatasetRequest["action"];
 type DatasetKind = DatasetResult["kind"];
 type AppAction = OwnerAppPublicationRequest["action"];
@@ -478,8 +476,6 @@ export const APP_CHANNEL_REQUESTS: {
     returns: '`{ kind: "accepted", acceptanceId, acceptedAtMs, momentId, objectId, path }`',
   },
 ];
-
-// --- Rendering ---------------------------------------------------------------
 
 function jsonSchema(schema: z.ZodType, io: "input" | "output"): JsonSchema {
   return z.toJSONSchema(schema, { io, unrepresentable: "any" }) as JsonSchema;

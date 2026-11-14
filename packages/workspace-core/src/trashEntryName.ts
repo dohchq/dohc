@@ -1,25 +1,17 @@
 // One rule for naming an entry in <workspace>/.dohc/local/trash, because two
 // surfaces move files there and both must produce a name the filesystem can
-// hold.
+// hold. A ~51-character timestamp+uuid prefix joined onto an untruncated
+// basename can pass the per-component limit: a legal 230-character name, fine
+// on NTFS, ext4 and APFS, then fails its rename with ENOENT, which reads as a
+// delete that never happened.
 //
-// The MCP server did not. It joined a ~51-character timestamp+uuid prefix onto
-// an untruncated basename, so a legal 230-character name -- fine on NTFS, ext4
-// and APFS -- produced a rename target past the per-component limit. The
-// calling agent received "ENOENT: no such file or directory, rename ..." about
-// a file that was right there, and would reasonably read that as a delete that
-// never happened. The desktop had a fix and kept it to itself.
-//
-// Then this module predicted the filesystem's answer twice, and was wrong both
-// times. First it assumed the per-component limit was the only one, which is
-// false on Windows without long paths. Then it assumed the composed-path limit
-// always binds, which is false wherever long paths are enabled -- and that
-// took deletion away from deep workspaces that had been working.
-//
-// So it stopped predicting. The rule offers candidates, longest first, and the
-// caller renames its way down them: the real name is attempted before anything
-// is thrown away, and a shorter one is used only when the platform actually
-// refused the longer one. A name that fits is never shortened for a limit that
-// did not apply -- which matters, because the trash keeps no record of the
+// The rule does not predict which limit applies. The per-component limit is
+// not the only one on Windows without long paths, and the composed-path limit
+// does not bind where long paths are enabled. The rule offers candidates,
+// longest first, and the caller renames its way down them: the real name is
+// attempted before anything is thrown away, and a shorter one is used only
+// when the platform refused the longer one. A name that fits is never
+// shortened for a limit that did not apply. The trash keeps no record of the
 // original name, so a character dropped here is gone for good.
 //
 // The entropy stays with the caller: this module takes the prefix already

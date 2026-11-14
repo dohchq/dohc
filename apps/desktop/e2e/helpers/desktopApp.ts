@@ -112,7 +112,7 @@ function describeWindow(page: Page): Promise<string> {
 /**
  * Waits for the page to get two animation frames. Playwright clicks only once
  * the page paints, and without frames a click waits silently until it times
- * out (#2973).
+ * out.
  */
 export async function waitForPaintedFrames(page: Page): Promise<void> {
   let failure: unknown;
@@ -317,7 +317,7 @@ export async function launchDesktopApp(input: {
     });
     launchedApps.set(page, app);
     // Hand the spec its window only once it shows, which dohc does after the
-    // first paint (#2973). The first screen's 20 s wait needs that paint anyway.
+    // first paint. The first screen's 20 s wait needs that paint anyway.
     const window = await app.browserWindow(page);
     try {
       const shown = await within(

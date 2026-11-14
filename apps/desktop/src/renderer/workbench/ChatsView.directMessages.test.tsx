@@ -16,10 +16,9 @@ import {
   renderView,
 } from "./ChatsView.testHarness";
 
-// Direct messages (WS-MU-C3): participants-only conversations behind the
-// collaboration gate. Solo (available:false, no DMs) renders nothing — the
-// zero-bloat rule — and the DM conversation is one running thread whose
-// composer sends on Enter (anti-forum).
+// Direct messages: participants-only conversations behind the collaboration
+// gate. Solo (available:false, no DMs) renders nothing, and the DM
+// conversation is one running thread whose composer sends on Enter.
 describe("ChatsView direct messages", () => {
   it("marks the message request a notice's Open names and focuses its Accept, until the next click", async () => {
     bridgeMock.syncDms.mockResolvedValue({
@@ -485,7 +484,6 @@ describe("ChatsView direct messages", () => {
     bridgeMock.declineDm.mockResolvedValue(undefined);
     fireEvent.click(decline);
     await waitFor(() => expect(held).toHaveLength(1));
-    // Activity queues another pass behind the decline's sync.
     act(() => emitWorkspaceActivity());
     await act(async () => held[0]!(answer([], [request])));
     await waitFor(() => expect(held).toHaveLength(2));
@@ -509,7 +507,6 @@ describe("ChatsView direct messages", () => {
     bridgeMock.declineDm.mockResolvedValue(undefined);
     act(() => emitWorkspaceActivity());
     await waitFor(() => expect(held).toHaveLength(1));
-    // The decline's sync queues behind the one already out.
     fireEvent.click(decline);
     await waitFor(() => expect(bridgeMock.declineDm).toHaveBeenCalled());
     await act(async () => undefined);
@@ -527,7 +524,6 @@ describe("ChatsView direct messages", () => {
   });
 
   it("shows no DM surface at all for a solo user", async () => {
-    // Even a stray dm-kind channel row never leaks into the channel list.
     bridgeMock.listChatChannels.mockResolvedValue({
       channels: [
         channel(),
@@ -652,10 +648,6 @@ describe("ChatsView direct messages", () => {
     expect(normallyOpened.className).not.toContain("dohc-target-flash");
   });
 
-  // The main-side shared-channel pass is bounded, so a poll that does not
-  // name the DM it is showing can refresh sixteen other channels and leave this
-  // conversation stale while the surface looks refreshed. The list poll names
-  // nothing (it is showing the list); the open-DM refresh names the DM.
   it("names the open DM on its refresh, and nothing on the list poll", async () => {
     const user = userEvent.setup();
     // A DM whose thread has not replicated yet refreshes the moment it opens,
@@ -702,7 +694,6 @@ describe("ChatsView direct messages", () => {
     expect(screen.getByTestId("chats-dm-title").textContent).toBe("bob@example.com");
     const bodies = await screen.findAllByTestId("chats-dm-message-body");
     expect(bodies.map((el) => el.textContent)).toEqual(["hey"]);
-    // On-screen == read: the cursor advances like the thread view.
     await waitFor(() =>
       expect(bridgeMock.markChatThreadRead).toHaveBeenCalledWith({
         workspaceId: "workspace-a",
@@ -726,9 +717,6 @@ describe("ChatsView direct messages", () => {
     expect(screen.queryByTestId("chats-dm-unread")).toBeNull();
   });
 
-  // The placement a participant picked when they accepted has a
-  // visible reverse path. The owner side (shareId null) never accepted a
-  // grant into a workspace, so it has nothing to reverse.
   describe("leaving a conversation", () => {
     it("shows Leave only for a participant's accepted DM, never the owner's own", async () => {
       const user = userEvent.setup();
@@ -762,7 +750,6 @@ describe("ChatsView direct messages", () => {
       await user.click(screen.getByTestId("chats-leave-dm-cancel"));
       expect(screen.queryByTestId("chats-leave-dm-dialog")).toBeNull();
       expect(bridgeMock.leaveDm).not.toHaveBeenCalled();
-      // Still on the DM, unchanged.
       expect(await screen.findByTestId("chats-dm-view")).toBeTruthy();
     });
 
@@ -807,7 +794,6 @@ describe("ChatsView direct messages", () => {
         }),
       );
       await waitFor(() => expect(screen.queryByTestId("chats-dm-view")).toBeNull());
-      // One identity, one place: the request-lane representation wins.
       await screen.findByTestId("chats-dm-request-item");
       expect(screen.queryByTestId("chats-dm-item")).toBeNull();
     });
@@ -960,8 +946,6 @@ describe("ChatsView direct messages", () => {
       await user.click(await screen.findByTestId("chats-dm-leave"));
       await screen.findByTestId("chats-leave-dm-dialog");
 
-      // Navigate away a path other than the dialog's own Escape/Cancel — the
-      // header Back button — while the dialog is still open.
       await user.click(screen.getByTestId("chats-dm-back"));
       expect(screen.queryByTestId("chats-leave-dm-dialog")).toBeNull();
 
@@ -990,7 +974,6 @@ describe("ChatsView direct messages", () => {
           pending: [],
           declined: [],
         };
-        // The list and the sync that opening the DM runs both see the grant.
         bridgeMock.syncDms
           .mockResolvedValueOnce(connected)
           .mockResolvedValueOnce(connected)
@@ -1014,8 +997,6 @@ describe("ChatsView direct messages", () => {
 
         expect(screen.queryByTestId("chats-leave-dm-dialog")).toBeNull();
         expect(bridgeMock.leaveDm).not.toHaveBeenCalled();
-        // Still on the DM — the revocation itself doesn't navigate away, it
-        // only makes the conversation read-only.
         expect(await screen.findByTestId("chats-dm-view")).toBeTruthy();
       } finally {
         vi.useRealTimers();
@@ -1057,7 +1038,6 @@ describe("ChatsView direct messages", () => {
       );
 
       await user.click(screen.getByTestId("chats-leave-dm-confirm"));
-      // Disabled: the click must not have reached leaveDm.
       expect(bridgeMock.leaveDm).not.toHaveBeenCalled();
 
       resolveSend({
@@ -1272,7 +1252,6 @@ describe("ChatsView direct messages", () => {
     expect((screen.getByTestId("chats-dm-recipients") as HTMLInputElement).value).toBe(
       "stale@example.com",
     );
-    // Back out, then reopen: the "To:" field must be empty again.
     await user.click(screen.getByTestId("chats-dm-new-back"));
     await user.click(await screen.findByTestId("chats-new-dm"));
     expect((screen.getByTestId("chats-dm-recipients") as HTMLInputElement).value).toBe("");
@@ -1353,7 +1332,6 @@ describe("ChatsView DM polling", () => {
       });
       const mounted = bridgeMock.syncDms.mock.calls.length;
 
-      // The poll at 5 s fails slowly; the poll at 10 s queues behind it.
       let finishFailure!: () => void;
       bridgeMock.syncDms.mockImplementationOnce(
         () =>
@@ -1580,12 +1558,10 @@ describe("ChatsView DM polling", () => {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(0);
       });
-      // Opening the DM starts the older sync.
       fireEvent.click(screen.getByTestId("chats-dm-item"));
       await act(async () => {
         await vi.advanceTimersByTimeAsync(0);
       });
-      // A landed read starts a newer one, which succeeds first.
       view.rerender(<ChatsView {...props} dmReadRevision={1} />);
       await act(async () => {
         await vi.advanceTimersByTimeAsync(0);
@@ -1596,7 +1572,6 @@ describe("ChatsView DM polling", () => {
         await vi.advanceTimersByTimeAsync(0);
       });
 
-      // The older failure does not hold the next tick.
       await act(async () => {
         await vi.advanceTimersByTimeAsync(4_000);
       });

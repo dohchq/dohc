@@ -110,7 +110,6 @@ export interface ChatWakeConsumerDeps {
   openWorkspace(workspaceId: string): Promise<ChatWakeWorkspace | null>;
   /** Resolves after `ms`, or when `signal` aborts. */
   sleep(ms: number, signal: AbortSignal): Promise<void>;
-  /** How long to wait after `failures` failed reads in a row. */
   backoffMs(failures: number): number;
   nowMs(): number;
   holdMs?: number;

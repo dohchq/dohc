@@ -1,4 +1,4 @@
-//! WriterDocCache invariants (PR1 of the engine doc-cache design): the in-tx
+//! WriterDocCache invariants: the in-tx
 //! tuple probe under hostile raw-SQL injection, the ABA and poison cases the
 //! differential check must catch, rollback/crash semantics, compaction
 //! re-base byte-equality, eviction, and the forced-close containment pin.
@@ -29,7 +29,6 @@ fn committed<T>(o: TxnOutcome<T>) -> T {
     }
 }
 
-/// A fresh store with a seeded, marked plaintext doc.
 fn setup(tag: &str, regime: Regime) -> (TempStore, DocKey) {
     let mut ts = fresh_store(tag);
     let key = test_key();
@@ -126,8 +125,6 @@ fn projected(store: &EngineStore, key: &DocKey) -> String {
         .content
 }
 
-// ---- hit / advance behavior -------------------------------------------------
-
 #[test]
 fn local_appends_install_then_hit_and_advance_the_cache() {
     let (mut ts, key) = setup("cache-hit-advance", Regime::LocalOnly);
@@ -169,7 +166,6 @@ fn local_appends_install_then_hit_and_advance_the_cache() {
     let s = ts.cache.stats();
     assert_eq!((s.hits, s.advances), (1, 1));
 
-    // The entry is byte-identical to a cold reconstruction.
     let cold = load_persisted(&ts.store, &key).expect("load").expect("doc");
     assert_eq!(
         ts.cache.doc_full_state_for_test(&key),
@@ -177,7 +173,6 @@ fn local_appends_install_then_hit_and_advance_the_cache() {
         "cached doc must equal the cold rebuild byte-for-byte"
     );
 
-    // A dedupe resend changes no durable state and touches no counters.
     let before = ts.cache.stats();
     let resend = committed(
         record_local_update(
@@ -279,8 +274,6 @@ fn frontier_delete_endpoints_canonicalize_across_pending_integration() {
     );
 }
 
-// ---- T1: mutation-style stale-cache injection -------------------------------
-
 #[test]
 fn tuple_probe_rejects_a_hostile_candidate_after_raw_sql_injection() {
     let (mut ts, key) = setup("cache-t1-injection", Regime::LocalOnly);
@@ -330,7 +323,6 @@ fn tuple_probe_rejects_a_hostile_candidate_after_raw_sql_injection() {
         "the head mismatch must fall back to a full rebuild"
     );
 
-    // A benign append still admits over the rebuilt lineage — including U2.
     let u3 = independent_insert("c");
     committed(
         record_local_update(
@@ -632,8 +624,6 @@ fn check4_refusal_evicts_the_scratch_and_the_next_gate_rebuilds_cold() {
     );
 }
 
-// ---- T3: rollback and crash semantics ---------------------------------------
-
 #[test]
 fn a_guarded_error_after_the_gate_evicts_only_the_mutated_scratch() {
     let (mut ts, key) = setup("cache-t3-guarded-err", Regime::LocalOnly);
@@ -726,9 +716,6 @@ fn a_guarded_error_after_the_gate_evicts_only_the_mutated_scratch() {
 
 #[test]
 fn a_post_commit_crash_removes_the_entry_and_a_rebuild_matches_the_durable_head() {
-    // (c) StorageAfterCommitBeforeAck: durable-but-unacked. The entry is
-    // removed fail-safe; the byte retry dedupes (installing nothing), and
-    // the next genuinely-new append rebuilds to the durable head.
     use dohc_engine_storage::FaultPoint;
     let (mut ts, key) = setup("cache-t3-crash-committed", Regime::LocalOnly);
     // Single-client lineage: the final cached-vs-cold comparison is
@@ -817,8 +804,6 @@ fn a_post_commit_crash_removes_the_entry_and_a_rebuild_matches_the_durable_head(
     );
 }
 
-// ---- T4: compaction re-base and eviction ------------------------------------
-
 #[test]
 fn compaction_rebases_the_entry_to_the_snapshot_byte_for_byte() {
     let (mut ts, key) = setup("cache-t4-compaction", Regime::LocalOnly);
@@ -869,7 +854,6 @@ fn compaction_rebases_the_entry_to_the_snapshot_byte_for_byte() {
         Some(true)
     );
 
-    // The re-based entry serves the next append as a hit.
     let before = ts.cache.stats();
     let update = producer.plaintext_insert(0, "y");
     committed(
@@ -989,8 +973,6 @@ fn the_byte_budget_charges_the_persistent_scratch() {
         "the entry must exceed a budget that omits one scratch byte"
     );
 }
-
-// ---- forced-close containment ----------------------------------------
 
 #[test]
 fn a_warmed_cache_does_not_change_forced_close_corruption_detection() {

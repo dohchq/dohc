@@ -1,4 +1,4 @@
-// MU-C1 — the CLIENT half of the ephemeral awareness transport.
+// The client half of the ephemeral awareness transport.
 //
 // A PresenceChannel drives one (scope, topic): it heartbeats the local state
 // so the relay keeps this client "present", long-polls for peer changes, and
@@ -155,18 +155,17 @@ interface PresenceChannelOptions {
 export interface PresenceChannel {
   // Update the local state and publish it immediately (e.g. typing on/off).
   setState(state: unknown): void;
-  // Stop heartbeating + polling, abort any in-flight poll, wait out any
-  // publish already in flight, and best-effort leave — in that order (#742
-  // P2, round 5: sending leave before an earlier publish settles lets that
-  // publish reach the transport after leave does, reviving presence the
-  // instant after it left). Idempotent. After this, onPeers never fires
-  // again. Resolves once the internal poll loop has fully exited (including
-  // a pending retry sleep) and the leave call has settled (#742 P2, round 3:
-  // a caller about to do something that will make this scope reject further
-  // presence calls — e.g. ending the DM's share — must be able to await the
-  // leave actually reaching the transport, not just being launched) — so
-  // teardown is deterministic and nothing dangles. The leave itself stays
-  // best-effort: a rejecting transport.leave never throws out of stop().
+  // Stop heartbeating and polling, abort any in-flight poll, wait out any
+  // publish already in flight, then send a best-effort leave, in that order.
+  // A leave sent before an earlier publish settles lets that publish reach
+  // the transport after the leave and revive presence the instant after it
+  // left. Idempotent. After this, onPeers never fires again. Resolves once
+  // the internal poll loop has fully exited (including a pending retry
+  // sleep) and the leave call has settled. A caller about to make this scope
+  // reject further presence calls, such as ending the DM's share, must be
+  // able to await the leave reaching the transport, not only its launch.
+  // The leave itself stays best-effort: a rejecting transport.leave never
+  // throws out of stop().
   stop(): Promise<void>;
 }
 
@@ -194,9 +193,9 @@ export function createPresenceChannel(options: PresenceChannelOptions): Presence
   // transport.leave alone does not order it after a publish already in
   // flight when stop() is called — a late-arriving publish can reach the
   // transport after leave does, reviving presence the instant after it left
-  // (ghost until TTL). Publishes never overlap: rapid pointer updates used
-  // to start concurrent requests, and an older one finishing last could
-  // outlive the newest — the same ghost — or repaint an older cursor. An
+  // (ghost until TTL). Publishes never overlap: rapid pointer updates would
+  // otherwise start concurrent requests, and an older one finishing last
+  // could outlive the newest, the same ghost, or repaint an older cursor. An
   // idle channel publishes synchronously; otherwise at most one publish
   // waits behind the active one, and it reads `state` when it runs, so the
   // coalesced publish always sends the newest.
@@ -301,8 +300,8 @@ export function createPresenceChannel(options: PresenceChannelOptions): Presence
         // returns; clearing the timer alone would strand it forever.
         retryResolve?.();
         pollController?.abort();
-        // Wait out any publish already in flight before sending leave (#742
-        // P2, round 5) — see inFlightPublish's own comment.
+        // Wait out any publish already in flight before sending leave. See
+        // inFlightPublish's own comment.
         await inFlightPublish;
         try {
           await options.transport.leave({

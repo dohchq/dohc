@@ -9,7 +9,7 @@ import {
 } from "./wikilinkPlugin";
 import { codeBlock, codeMarkText, doc, paragraph, randomEdit, seededRandom } from "./testDocs";
 
-// D4.8 — wikilink decoration regex tests over real ProseMirror documents
+// Wikilink decoration regex tests over real ProseMirror documents
 // (testDocs.ts). A single paragraph's text starts at pos 1, so the
 // hand-computed positions below match the doc-root-offset convention.
 
@@ -79,8 +79,6 @@ describe("detectAutocomplete — wikilink picker trigger", () => {
   });
 
   it("makeWikilinkPlugin builds a ProseMirror plugin keyed by wikilinkPluginKey", () => {
-    // Smoke test of the editor-facing factory (lazy: state.init only runs once
-    // added to an EditorState, so no DOM is needed to construct it).
     const knownFiles = new Map<string, WikilinkFile>();
     const plugin = makeWikilinkPlugin(
       () => knownFiles,

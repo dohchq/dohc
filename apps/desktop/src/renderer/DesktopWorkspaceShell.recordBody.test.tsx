@@ -77,14 +77,12 @@ function collectionShell(state: WorkspaceUiState = withTab) {
     folders: ["tasks"],
   });
   renderShell(bridge);
-  /** The layout the shell last asked main to save. */
   const saved = () => bridge.setWorkspaceUiState.mock.calls.at(-1)?.[0].state;
   return { bridge, saved };
 }
 const record = () => screen.getByRole("complementary", { name: "Record a" });
 const tab = () => screen.getByTestId(editorTabTestId(tasksTab));
 
-/** Types into the body's text, as source, and waits for the shell to show it unsaved. */
 async function typeInBody() {
   const user = userEvent.setup();
   await within(await screen.findByRole("complementary", { name: "Record a" })).findByTestId(
@@ -126,7 +124,6 @@ it("draws a record's body as the file's own document, without the title and the 
   expect(within(record()).queryByTestId("properties-panel")).toBeNull();
   expect(body.contains(document.activeElement)).toBe(false);
 
-  // The same file in a tab shows its title and its properties.
   fireEvent.click(screen.getAllByTestId("tree-row").find((row) => row.dataset.path === "a.md")!);
   expect(await screen.findByTestId("page-identity")).toBeTruthy();
   expect(screen.queryByTestId("collection-page")).toBeNull();
@@ -159,7 +156,6 @@ it.each([
   await within(await screen.findByRole("complementary", { name: "Record a" })).findByTestId(
     "view-markdown",
   );
-  // The body is the file's own view, which is read-only by the file's rule: its toggle to the editor is off, and nothing in it takes typing.
   const edit = await within(record()).findByTestId("markdown-edit-toggle");
   await waitFor(() => expect(within(record()).queryByTestId("markdown-open-state")).toBeNull());
   expect(edit.hasAttribute("disabled") || edit.getAttribute("aria-disabled") === "true").toBe(true);
@@ -182,7 +178,6 @@ it("marks the Collection's tab unsaved for text typed in the body, saves it befo
   expect(editor.isConnected).toBe(true);
   expect(editor.textContent).toContain("Draft!");
 
-  // The save goes through, and only then does the record leave.
   const save = deferred<{ status: "written"; contentHash: string }>();
   const write = vi.fn(() => save.promise);
   bridge.writeWorkspaceText = write;
@@ -235,14 +230,12 @@ it("takes Ctrl+/ for the body's Source only while focus is in the body", async (
   expect(toggle().disabled).toBe(false);
   expect(record().contains(document.activeElement)).toBe(false);
 
-  // Focus is on the Collection's page, outside the record's body: the shortcut is not the body's.
   const outside = screen.getByRole("button", { name: "Open record a" });
   outside.focus();
   fireEvent.keyDown(outside, { key: "/", ctrlKey: true });
   fireEvent.keyDown(document.body, { key: "/", ctrlKey: true });
   expect(toggle().textContent).toBe("Source");
 
-  // Focus is in the body: the shortcut shows its Source, and takes it back, as in the file's own tab.
   toggle().focus();
   fireEvent.keyDown(toggle(), { key: "/", ctrlKey: true });
   await waitFor(() => expect(toggle().textContent).toBe("WYSIWYG"));
@@ -275,7 +268,6 @@ it.each([
   const write = vi.fn(() => save.promise);
   bridge.writeWorkspaceText = write;
 
-  // The other group takes the next open.
   const other = screen.getByRole("region", { name: "Editor group 2" });
   await user.click(within(other).getByTestId(editorTabTestId("b.md")));
   await user.click(screen.getAllByTestId("tree-row").find((row) => row.dataset.path === "a.md")!);

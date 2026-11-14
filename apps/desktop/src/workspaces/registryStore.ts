@@ -249,8 +249,8 @@ export interface ShareViewIdentity {
   unconfirmedChanges?: ShareUnconfirmedChanges;
 }
 
-// A shared CHANNEL this workspace joined through a chat grant
-// (MU-C4): bidirectional — pulled into the local chat store and (when
+// A shared channel this workspace joined through a chat grant:
+// bidirectional — pulled into the local chat store and (when
 // read-write) pushed back through the member append route. `ended` marks a
 // revoked grant: the locally replayed copy stays readable but stops syncing.
 export interface JoinedSharedChannel {
@@ -314,7 +314,7 @@ export interface RegistryEntry extends CreatedWorkspace {
   // materialized and committed. Boot-time local writers must skip the entry.
   joinBootstrapPending?: true;
   shareView?: ShareViewIdentity;
-  // MU-C4: shared channels joined INTO this workspace's chat store.
+  // Shared channels joined into this workspace's chat store.
   sharedChannels?: JoinedSharedChannel[];
   // Share mounts materialized into this workspace's shared-with-me/.
   shareMounts?: ShareMountRecord[];
@@ -715,7 +715,7 @@ export function createRegistryStore(
       );
     },
 
-    // MU-C4: replace the workspace's joined shared-channel set. Upserts and
+    // Replace the workspace's joined shared-channel set. Upserts and
     // removals both go through this one write (callers compute the next set),
     // keeping the file format append-simple.
     setSharedChannels(workspaceId: string, sharedChannels: JoinedSharedChannel[]): void {
@@ -737,7 +737,7 @@ export function createRegistryStore(
       updateWorkspaceEntry(workspaceId, (entry) => ({ ...entry, shareMounts }));
     },
 
-    // Failed-join rollback (0P-C gate fix): removes a registration this
+    // Failed-join rollback: removes a registration this
     // process just created. Unknown ids are a no-op — the rollback path must
     // never throw over state that is already gone.
     remove(workspaceId: string): void {

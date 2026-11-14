@@ -732,8 +732,8 @@ async fn lane_candidate_and_bootstrap_rule_keep_recovery_owner_local() {
     supervisor.close(&db).unwrap();
     inspect(&db, |store| {
         store.read_with(|conn| {
-        // #1711 is unmerged. These are its current-head and bootstrap predicates,
-        // with the required named exclusion; no file_export_lane exists on main.
+        // These are the current-head and bootstrap predicates, with the
+        // required named exclusion.
         let candidate:String=conn.query_row(concat!("SELECT m.moment_id FROM moments m JOIN snapshots s USING(workspace_id,version_id,object_id)
             WHERE m.workspace_id=?1 AND m.object_id=?2 AND s.latest_moment_id=m.moment_id AND s.content_kind='text'
             AND m.payload_after_blob_sha256=s.blob_sha256 AND m.payload_after_path=s.path AND ",

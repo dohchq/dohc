@@ -20,7 +20,6 @@ const { VersionComparePage } = await import("./WorkspaceVersions");
 const { momentDiffTabPath } = await import("./workbenchState");
 const noop = () => {};
 
-// 250,000 lines a side, over 10 MiB: newline-heavy, far past the cell ceiling.
 function hugeBody(marker: string): string {
   const line = marker.repeat(10);
   const out: string[] = [];
@@ -141,8 +140,6 @@ describe("history diff page", () => {
     expect(order).toEqual(["restored", "release"]);
   });
 
-  // A failure is the shell's toast and Notices row, so the live region
-  // announces only a restore that happened.
   it.each([false, true])(
     "updates an existing live region with the restore outcome (failure: %s)",
     async (failure) => {
@@ -194,8 +191,6 @@ describe("history diff page", () => {
     },
   );
 
-  // Restore and Undo restore take each other's place, so a press hands the
-  // focus over and the keyboard can undo at once.
   it("hands the focus from Restore to Undo restore and back", async () => {
     vi.stubGlobal("dohcDesktop", {
       ...bridgeMock,
@@ -215,7 +210,6 @@ describe("history diff page", () => {
       fireEvent.click(screen.getByTestId("engine-diff-undo-restore"));
     });
     expect(document.activeElement).toBe(screen.getByTestId("engine-diff-restore-file"));
-    // The Undo shortcut on Undo restore hands it back too.
     await act(async () => {
       fireEvent.click(screen.getByTestId("engine-diff-restore-file"));
     });
@@ -231,9 +225,8 @@ describe("history diff page", () => {
     await screen.findByTestId("engine-diff-lines");
     expect(computeTextDiffSpy).toHaveBeenCalledTimes(1);
 
-    // A render that does not change the moment must not diff it again. This
-    // used to run the diff twice per render: once for the counts, once for
-    // the lines.
+    // A render that does not change the moment must not diff it again. The
+    // counts and the lines share one diff.
     view.rerender(
       <EngineMomentDiffPage
         workspaceId="ws-1"
@@ -332,8 +325,6 @@ describe("history diff page", () => {
     // lines to render the same 801.
     expect(body.children).toHaveLength(801);
     expect(body.textContent).toContain("more diff lines hidden");
-    // The counts still describe the whole change, in lines, and say so to a
-    // screen reader.
     const counts = screen.getByTestId("engine-diff-counts");
     expect(counts.textContent).toContain("+250000−250000");
     expect(counts.querySelector(".sr-only")?.textContent).toBe(
@@ -377,7 +368,7 @@ describe("versions compare page", () => {
     expect(computeTextDiffSpy).toHaveBeenCalledTimes(1);
 
     // A render that does not change the compared bodies must not diff them
-    // again. The compare page used to diff every file on every render.
+    // again.
     view.rerender(<VersionComparePage workspaceId="ws-1" versionId="v-1" />);
     await screen.findByTestId("version-compare-file");
     expect(computeTextDiffSpy).toHaveBeenCalledTimes(1);

@@ -566,7 +566,6 @@ async fn settle_for_cycle(actor: &ActorHandle, root: std::path::PathBuf) {
         .settled()
         .unwrap();
     assert!(settled.materialized);
-    // Publish each settled moment once, including a no-op timer retry.
     actor
         .run(move |store, _| {
             store.write_with(&NoFaults, |tx| {

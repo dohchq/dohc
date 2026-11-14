@@ -23,7 +23,7 @@ export function stripWindowsAliasSuffix(segment: string): string {
 //
 // Exported because this is the READ-side reservation: callers that re-decide
 // the reservation on a resolved path (a symlink can spell `.dohc` under any
-// name — #638) need the same predicate validateUserReadPath uses, not a copy.
+// name) need the same predicate validateUserReadPath uses, not a copy.
 export function isDohcMetadataPath(relativePath: string): boolean {
   return relativePath
     .replaceAll("\\", "/")

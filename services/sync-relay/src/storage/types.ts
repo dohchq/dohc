@@ -1312,6 +1312,8 @@ export interface SyncRelayStorage {
   ): RelayBaselineRegistrationResult;
   mintLiveTicket(input: LiveTicketMint): { expiresAtMs: number; publicPrincipalId?: string } | null;
   readLiveTicketTarget(input: LiveTicketLookup): { workspaceId: string; objectId: string } | null;
+  /** Whether a link browser's ticket would enroll one browser more than its link takes. */
+  liveLinkFull(scope: LiveTicketScope): boolean;
   redeemLiveTicket(input: LiveTicketRedemption): RedeemedLiveTicket | null;
   getLiveHostControl(): HostControlSnapshot | null;
   // Local deployment-operator operations. Account and device requests cannot call these.
@@ -1391,7 +1393,6 @@ export interface SyncRelayStorage {
     rotatedAtMs: number;
   }): RotateWorkspaceIdentityResult;
   workspaceIsOwnedBy(workspaceId: string, ownerUserId: string): boolean;
-  /** The user who owns the workspace, or null when the relay has no such workspace. */
   workspaceOwner(workspaceId: string): string | null;
   discardReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease): void;
   releaseReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease): void;
@@ -1496,7 +1497,7 @@ export interface SyncRelayStorage {
     workspaceId: string;
     originId: string;
     ops: SyncRelayLogInput[];
-    // MU-C4 revoke-race gate: runs inside the append's BEGIN IMMEDIATE
+    // Revoke-race gate: runs inside the append's BEGIN IMMEDIATE
     // transaction, i.e. under the SQLite write lock that serializes revokes,
     // before anything is inserted. A throwing guard rolls the whole batch
     // back. This is how the member-append route re-verifies the share
@@ -1932,7 +1933,7 @@ export interface SyncRelayStorage {
     sha256: string;
     aboveRelaySeq?: number;
   }): SyncRelayLogRow[];
-  // MU-C4 shared channels: the channelWireId bound by the earliest
+  // Shared channels: the channelWireId bound by the earliest
   // chat.thread.create op for this threadId in the workspace's log (relay
   // order). undefined means no create exists; null means the earliest create
   // exists but carries no shareable channel binding. Earliest-wins mirrors the

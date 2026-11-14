@@ -308,11 +308,12 @@ import {
 } from "node:fs";
 import { execFile } from "node:child_process";
 import { lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
-import { hostname, release as osRelease, type as osType } from "node:os";
+import { homedir, hostname, release as osRelease, type as osType } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import {
   SitePreviewReplacedEvent,
   McpConfigResult,
+  type AgentThreadLinesEvent,
   DesktopUserSettingsResult,
   SyncStatusResult,
   RebuildEngineStoreResult,
@@ -330,6 +331,7 @@ import {
   chatDispatchNoticeOperations,
   agentRunStateOperations,
   chatDispatchPauseOperations,
+  agentThreadOperations,
   agentsListeningOperations,
   personalAgentsOperations,
   type ScheduleHostResult,
@@ -600,6 +602,11 @@ import { createWorkspaceRefusalNotices } from "./notices/workspaceRefusalNotices
 import { noticeReachFor } from "./notices/noticeReach";
 import { agentNotices } from "./notices/agentNotices";
 import { createCloudCredentialStore, mayUseKeychain } from "./workspaces/cloudCredentialStore";
+import { createAgentThreads, forwardProblemWords } from "./agentThreads/agentThreads";
+import { cliForThread } from "./agentThreads/forwardedText";
+import { createForwardLedger } from "./agentThreads/forwardLedger";
+import { createT3CodeConnection, type T3CodeConnection } from "./agentThreads/t3CodeConnection";
+import { createT3CodeSignInStore, encryptsWithSystemKey } from "./agentThreads/t3CodeSignInStore";
 import { createLastKnownDmRequestLanesCache } from "./workspaces/dmRequests";
 import { readOrCreateLocalInstallationId } from "./workspaces/localInstallationIdentity";
 import { createLocalAuthorship } from "./workspaces/localAuthorship";
@@ -793,6 +800,7 @@ import { runLogKeepDays } from "./agents/runLogRetention";
 import {
   agentIdsToWake,
   agentYouRun,
+  forwardingAgents,
   automationAgent,
   listAgents,
   type Agent,
@@ -804,7 +812,7 @@ import { createSearchRegistry } from "./workspaces/workspaceSearch";
 import { WorkspaceSearchOwner } from "./workspaces/workspaceSearchOwner";
 import { createWorkspaceSearchDaemonQuery } from "./workspaces/workspaceSearchDaemon";
 import { rgPath } from "@vscode/ripgrep";
-import { createDesktopCliServer } from "./cli/desktopCliServer";
+import { createDesktopCliServer, workspaceRequesters } from "./cli/desktopCliServer";
 import { startCliServer, type CliRunMessageLink } from "./cli/cliServer";
 import { makeProcessDiagnosticsNonFatal } from "./process/stdioResilience";
 import {
@@ -1046,7 +1054,7 @@ function requireWorkspace(workspaceId: string) {
   return workspace;
 }
 
-// PR 18 read-only shared views: a shared view is a read-only local workspace.
+// Read-only shared views: a shared view is a read-only local workspace.
 // `sharedViewOf` is the one authoritative predicate; every mutation surface
 // (file writes, agent runs, and the MCP config)
 // routes through it so a shared view can never be changed, only read. The
@@ -1524,6 +1532,127 @@ const chatWakes = createChatWakeLifetime({
 function chatWakeIntentsFile(): string {
   return join(stateDir(), "chat-wakes.json");
 }
+// Lazy, like the cloud login: safeStorage is only safe to touch after app ready.
+let cachedAgentThreads: ReturnType<typeof createAgentThreads> | null = null;
+let cachedT3Code: T3CodeConnection | null = null;
+function t3Code(): T3CodeConnection {
+  cachedT3Code ??= createT3CodeConnection({
+    // The home folder the process was given, as the agent tools are found. A
+    // test run gives the app its own, so it never reaches the person's T3 Code.
+    home: join(homedir(), ".t3"),
+    store: createT3CodeSignInStore({
+      dir: stateDir(),
+      cipher: mayUseKeychain({
+        isPackaged: app.isPackaged,
+        platform: process.platform,
+        env: process.env,
+      })
+        ? {
+            isAvailable: () =>
+              safeStorage.isEncryptionAvailable() &&
+              encryptsWithSystemKey(
+                process.platform,
+                process.platform === "linux" ? safeStorage.getSelectedStorageBackend() : null,
+              ),
+            encrypt: (plain) => safeStorage.encryptString(plain).toString("base64"),
+            decrypt: (cipherText) => safeStorage.decryptString(Buffer.from(cipherText, "base64")),
+          }
+        : undefined,
+    }),
+  });
+  return cachedT3Code;
+}
+// The agents whose messages wait in each workspace, with why. Notices shows
+// one row for the workspace: the first agent still waiting.
+const forwardProblems = new Map<string, Map<string, unknown>>();
+// Each change to a workspace's problems writes its row once: a change that
+// lands while an earlier one reads the agents' names takes over the write.
+const forwardNoticeWrites = new Map<string, number>();
+async function reportForwardProblem(
+  workspaceId: string,
+  agentId: string,
+  problem: unknown,
+): Promise<void> {
+  const waiting = forwardProblems.get(workspaceId) ?? new Map<string, unknown>();
+  if (problem === null) waiting.delete(agentId);
+  else waiting.set(agentId, problem);
+  if (waiting.size === 0) forwardProblems.delete(workspaceId);
+  else forwardProblems.set(workspaceId, waiting);
+  const write = (forwardNoticeWrites.get(workspaceId) ?? 0) + 1;
+  forwardNoticeWrites.set(workspaceId, write);
+  const { agents } = (await readCachedUserSettingsFile(stateDir())).settings;
+  if (forwardNoticeWrites.get(workspaceId) !== write) return;
+  const first = forwardProblems.get(workspaceId)?.entries().next().value;
+  if (first === undefined) {
+    chatDispatchNotices.clear(workspaceId, "forward-stuck");
+    return;
+  }
+  const [firstId, why] = first;
+  chatDispatchNotices.report(workspaceId, {
+    reason: "forward-stuck",
+    ...(firstId ? { agentId: firstId } : {}),
+    message: forwardProblemWords(agents[firstId]?.name ?? null, why),
+  });
+}
+
+// Each snapshot of a workspace's lines has a later number than the one before.
+let agentThreadLinesRevision = 0;
+function agentThreadLinesOf(workspaceId: string): AgentThreadLinesEvent {
+  agentThreadLinesRevision += 1;
+  return {
+    workspaceId,
+    revision: agentThreadLinesRevision,
+    lines: agentThreads().lines(workspaceId),
+  };
+}
+
+function agentThreads(): ReturnType<typeof createAgentThreads> {
+  const chats = <Result>(
+    workspaceId: string,
+    read: (store: DesktopLinkedChatStore) => Promise<Result>,
+  ) => withWorkspaceAttachmentAsync({ workspaceId }, (lease) => read(linkedChatStoreFor(lease)));
+  cachedAgentThreads ??= createAgentThreads({
+    cli: cliForThread(
+      join(
+        resolveDohcCliBinDirectory({
+          appRoot: desktopPackageRootInDev(),
+          isPackaged: app.isPackaged,
+          resourcesPath: process.resourcesPath,
+        }),
+        process.platform === "win32" ? "dohc.cmd" : "dohc",
+      ),
+      process.platform,
+    ),
+    t3Code: t3Code(),
+    chats: {
+      listAgentRequestsPage: (input) =>
+        chats(input.workspaceId, (store) => store.listAgentRequestsPage(input)),
+      markThreadReadByAgent: (input) =>
+        chats(input.workspaceId, (store) => store.markThreadReadByAgent(input)),
+      getThread: (input) => chats(input.workspaceId, (store) => store.getThread(input)),
+      listMessagesPage: (input) =>
+        chats(input.workspaceId, (store) => store.listMessagesPage(input)),
+    },
+    ledger: createForwardLedger(join(stateDir(), "agent-thread-forwards.json")),
+    onLines: (workspaceId) =>
+      sendToWorkspaceWindows(CHANNELS.agentThreadLines, agentThreadLinesOf(workspaceId)),
+    onError: (error) => console.error("[desktop] agent threads:", error),
+    readSettings: async () => (await readCachedUserSettingsFile(stateDir())).settings,
+    workspace: (workspaceId) => {
+      const workspace = findWorkspace(workspaceId);
+      // A workspace is named for its folder.
+      return workspace
+        ? { name: basename(workspace.rootPath), ...workspaceRequesters(workspace) }
+        : null;
+    },
+    onProblem: (workspaceId, agentId, problem) => {
+      if (problem !== null)
+        console.error(`[desktop] forwarding to ${agentId ?? "agents"} in ${workspaceId}:`, problem);
+      void reportForwardProblem(workspaceId, agentId ?? "", problem);
+    },
+  });
+  return cachedAgentThreads;
+}
 function chatRunnerLedgerFile(): string {
   return join(stateDir(), "chat-runners.json");
 }
@@ -1632,13 +1761,12 @@ function clearCachedCredentials(): void {
     .credentialsChanged(null)
     .catch((error) => console.error("Saved Collection page cleanup failed", error));
   peekedReceivedGrantKinds.clear();
-  // #742 P1 SECURITY (rounds 4–5): every credential-cache clear is a session
-  // transition (login adoption, logout, or a current-session 401 — all three
-  // call this one function). Clearing here, not at each call site
-  // individually, is what makes sure a new account's first failed poll can
-  // never be served the previous account's cached request rows, sender
-  // emails included, regardless of which of the three paths ended the
-  // session.
+  // Security: every credential-cache clear is a session transition (login
+  // adoption, logout, or a current-session 401; all three call this one
+  // function). Clearing here, not at each call site, makes sure a new
+  // account's first failed poll can never be served the previous account's
+  // cached request rows, sender emails included, whichever of the three
+  // paths ended the session.
   for (const workspaceId of workspaceAuthorities.workspaceIds()) {
     const lease = workspaceAuthorities.acquire(workspaceId);
     try {
@@ -2268,7 +2396,12 @@ const shareRosters = createShareRosters({
   syncHistory: (workspace) => readSyncHistory(workspace.rootPath),
   logError: (workspaceId, error) =>
     console.warn(`[desktop] share roster refresh failed for ${workspaceId}:`, error),
-  onListed: (workspaceId) => collectionAutomationsOf(workspaceId)?.rosterChanged(),
+  // The renderer re-reads what each Group's messages may link, which the
+  // roster decides.
+  onListed: (workspaceId) => {
+    collectionAutomationsOf(workspaceId)?.rosterChanged();
+    notifyRenderer({ workspaceId });
+  },
 });
 
 const historyLabelWindows = new Map<WebContents, ReturnType<typeof createHistoryLabels>>();
@@ -2451,7 +2584,6 @@ const automationEvaluator = createAutomationFormulaEvaluator(() =>
   }),
 );
 
-// The Collection automation executor of an open workspace, or undefined.
 function collectionAutomationsOf(workspaceId: string): CollectionAutomations | undefined {
   return withWorkspaceAttachment({ workspaceId }, (lease) => lease.state.collectionAutomations);
 }
@@ -2464,7 +2596,7 @@ function automationAuthor(
   return collectionAutomationAuthor(collectionAutomationsOf(workspaceId), automationId);
 }
 
-// MU-C4 shared channels: one best-effort refresh pass over every shared
+// Shared channels: one best-effort refresh pass over every shared
 // channel this workspace has joined — push the member's local channel ops,
 // pull everyone else's. Never throws (transient failures log and retry on
 // the next pass); a revoked share is marked ended in the registry so it
@@ -2791,6 +2923,11 @@ const removePhysicalWorkspace = createPhysicalWorkspaceRemoval({
     removeWorkspace(workspaceId);
     // The declarations ledger still names it under its account, so the next publish withdraws it there.
     void chatWakes.runnersChanged();
+    // Every removal comes through here, a forgotten workspace and a join that
+    // was undone alike. Forwarding lets the workspace go and files nothing after.
+    cachedAgentThreads?.unwatch(workspaceId);
+    forwardProblems.delete(workspaceId);
+    chatDispatchNotices.clear(workspaceId, "forward-stuck");
   },
   confirmDraftRemoval: async (workspaceId) => {
     await flushTypingCheckpoints(workspaceId);
@@ -3191,7 +3328,7 @@ function engineForWorkspace(
       ) ?? Promise.resolve(false),
     capture,
     onChange: createRelayOnChange(workspace),
-    // MU-C4: joined shared channels refresh on the same cadence as the
+    // Joined shared channels refresh on the same cadence as the
     // workspace's own sync (best-effort; never fails the pass).
     syncSharedChannels: async () => {
       const outcome = await withWorkspaceAttachmentAsync(workspace, () =>
@@ -3238,7 +3375,7 @@ function engineForWorkspace(
     waitForChange: createRelayLogWait({ workspaceId: workspace.workspaceId, relay }),
     idlePullMs: 5 * 60_000,
     // A freshly joined workspace's engine is pull-first: no push before the
-    // first successful pull (0P-C gate fix).
+    // first successful pull.
     ...(engineOptions.joinBootstrap ? { joinBootstrap: true } : {}),
     ...testSyncTimingOverrides(),
   });
@@ -3984,11 +4121,11 @@ function thisComputer(): Computer {
   return { installId: localInstallationId(), label: computerLabel(hostname()) };
 }
 
-// The local user's stable, OPAQUE reactor identity (WS-MU-C2). This value
+// The local user's stable, opaque reactor identity. This value
 // becomes a replicated CRDT author key, so it must never be the raw email — a
 // raw email would replicate to every peer (PII/GDPR exposure) and persist in
 // the immutable CRDT history. Prefer the Better Auth user id (an opaque uuid)
-// when signed in; that is forward-compatible with MU-C0, which verifies
+// when signed in; the relay verifies
 // authorId === actor.userId server-side. Signed out falls back to a persisted
 // per-install uuid. The email→display-name mapping stays LOCAL in
 // localUserDisplayName(). It is the account the credential cache last settled
@@ -4004,7 +4141,7 @@ function localPerson(): Promise<LocalPersonAuthor> {
   return localAuthorship.person();
 }
 
-// The verified relay identity for a signed-in chat message (WS-MU-C0). A
+// The verified relay identity for a signed-in chat message. A
 // signed-in session always carries the opaque Better Auth user id that the relay
 // verifies as `actor.userId`. Signed-out sends omit `authorUserId`. Reactions
 // still use the stable local fallback id offline. The email stays display-only.
@@ -5170,9 +5307,11 @@ async function continueRunNow(intent: RunNowIntent): Promise<string | null> {
     // and the next start or window focus asks again.
     if (dismissal === "unanswered")
       return "dohc could not reach your server. It runs this once it does.";
+    // Not first: another computer's Run now claimed it, or someone marked it Done, perhaps
+    // before a phone restored it. Which one isn't known here, so the words claim neither.
     if (dismissal === "not-first") {
       await runNowIntents.remove(intent.notice);
-      return "This already ran from another computer.";
+      return "This Notice was already handled, so Run now won't start it.";
     }
     if (!(await automations.runNow(intent.automationId, intent.notice.noticeId))) {
       return "dohc could not start the automation. Its engine did not answer.";
@@ -6994,6 +7133,7 @@ const desktopEngine = createDesktopEngine({
     const workspace = findWorkspace(workspaceId);
     // A window's reads that came before this open, such as its settings, read again.
     notifyRenderer({ workspaceId });
+    agentThreads().watch(workspaceId);
     ownerPendingShare.refresh(workspaceId);
     if (workspace)
       void withWorkspaceAttachment({ workspaceId }, (lease) =>
@@ -7841,6 +7981,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       },
       stopNoticeRefusals: () => noticeStore().stopWorkspaceRefusals(),
       stopAutomationWakes: async () => {
+        cachedAgentThreads?.stop();
         await Promise.all([automationWakeConsumer.stop(), chatWakes.stop()]);
       },
       stopSearch: () => workspaceSearchOwner.dispose(),
@@ -8258,6 +8399,8 @@ const settingsIpc = createSettingsIpc<
     broadcastUserSettings(settings);
     void automationWakeConsumer.resume();
     chatWakes.resume();
+    // The save comes first, so the pass that follows reads the saved agents.
+    agentThreads().settingsChanged();
   },
   publishRunners: () => {
     void chatWakes.runnersChanged();
@@ -10587,8 +10730,88 @@ function registerIpcHandlers(): void {
   registerOperations(operationBoundary, chatDispatchNoticeOperations, {
     registerChatDispatchNotices: (input) => chatDispatchNotices.register(input.workspaceId),
     dismissChatDispatchNotice: (input) => chatDispatchNotices.dismiss(input.workspaceId, input.id),
-    retryChatWakes: () => {
+    retryChatWakes: ({ workspaceId }) => {
       chatWakes.retry();
+      cachedAgentThreads?.retry(workspaceId);
+    },
+  });
+
+  // One wait for the person's answer in T3 Code at a time.
+  let allowingT3Code: AbortController | null = null;
+  const t3CodeConnectionState = async () => ({
+    canKeep: t3Code().canKeep(),
+    signedInUntilMs: await t3Code().signedInUntil(),
+  });
+  // The thread of an agent that serves the workspace a window has open. A
+  // window names the agent, and never the thread.
+  const agentThreadFor = async (workspaceId: string, agentId: string): Promise<string> => {
+    const { settings } = await readCachedUserSettingsFile(stateDir());
+    const agent = forwardingAgents(settings, workspaceId).find(({ id }) => id === agentId);
+    if (!agent) throw new Error("This agent has no thread for this workspace.");
+    return agent.thread.id;
+  };
+  registerOperations(operationBoundary, agentThreadOperations, {
+    readAgentThreadLines: ({ workspaceId }) => agentThreadLinesOf(workspaceId),
+    openAgentThread: async ({ workspaceId, agentId }) => {
+      await shell.openExternal(
+        await t3Code().threadLink(await agentThreadFor(workspaceId, agentId)),
+      );
+    },
+    readAgentThreadQuestion: async ({ workspaceId, agentId, requestId }) =>
+      t3Code().question(await agentThreadFor(workspaceId, agentId), requestId),
+    answerAgentThreadQuestion: async ({ workspaceId, agentId, requestId, answers }) => {
+      const status = await t3Code().answer(
+        await agentThreadFor(workspaceId, agentId),
+        requestId,
+        answers,
+      );
+      // The thread goes on, or someone answered first: the line is looked at again now.
+      agentThreads().look(workspaceId);
+      return { status };
+    },
+    readT3CodeConnection: t3CodeConnectionState,
+    allowDohcInT3Code: async () => {
+      allowingT3Code?.abort();
+      const allowing = (allowingT3Code = new AbortController());
+      try {
+        await t3Code().signIn({
+          open: (url) => shell.openExternal(url),
+          signal: allowing.signal,
+        });
+      } finally {
+        if (allowingT3Code === allowing) allowingT3Code = null;
+      }
+      return t3CodeConnectionState();
+    },
+    cancelAllowDohcInT3Code: () => {
+      allowingT3Code?.abort();
+    },
+    listT3CodeProjects: async () => ({ projects: await t3Code().projects() }),
+    listT3CodeThreads: async (input) => {
+      const page = await t3Code().threads(input);
+      return {
+        threads: page.threads.map(({ id, title, status, updatedAt }) => ({
+          id,
+          title,
+          status,
+          updatedAt,
+        })),
+        nextCursor: page.nextCursor,
+      };
+    },
+    readyAgentThread: async ({ workspaceId, agentId, name, threadId }) => {
+      const { agents } = (await readCachedUserSettingsFile(stateDir())).settings;
+      // A new agent only: this marks the agent's unread messages read.
+      if (agents[agentId]) throw new Error("An agent already has this id. Add the agent again.");
+      // One thread is one agent. A second agent on it would put another
+      // workspace's messages in the same thread with no warning (ADR 0016).
+      const connected = Object.values(agents).find((agent) => agent.thread?.id === threadId);
+      if (connected) throw new Error(`${connected.name} is already connected to this thread.`);
+      await agentThreads().connect(workspaceId, {
+        id: agentId,
+        name,
+        thread: { tool: "t3-code", id: threadId },
+      });
     },
   });
 

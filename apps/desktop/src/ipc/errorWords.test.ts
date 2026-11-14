@@ -372,8 +372,6 @@ describe("error words", () => {
     },
   );
 
-  // The screen for a listed workspace offers Remove from list for this, and
-  // Open folder offers another folder. Neither offers Try again.
   it("marks a folder that can never be a workspace across IPC", () => {
     const error = new WorkspaceFolderRefusalError(stateFolderRefusal("inside"));
     const expected = {
@@ -799,8 +797,6 @@ describe("error words", () => {
     ).toBe("This share is read-only.");
   });
 
-  // The engine names a collaboration refusal by its code word. The person
-  // reads the caller's sentence, and the word goes only to Details.
   it.each([
     ["INVALID_PARAMS", "baseline-schema-version-missing"],
     ["INVALID_PARAMS", "malformed-update"],
@@ -868,7 +864,6 @@ describe("error words", () => {
     for (const raw of ["invalid-input", "EPIPE", "EPIPE: broken pipe, write"]) {
       expect(readError(acrossIpc(new Error(raw))).words, raw).toBeNull();
     }
-    // A file-system error that lost its code still leads with it.
     expect(
       readError(acrossIpc(new Error("ENOENT: no such file or directory, open 'a.md'"))).words,
     ).toBe("The file or folder is not there anymore.");
@@ -904,7 +899,6 @@ describe("error words", () => {
         cause: dump,
       });
     }
-    // Words stay words when they start with a bracket or a path makes them long.
     const pressed = "[Send] changed after it was pressed. Press it again.";
     expect(readError(acrossIpc(new Error(pressed))).words).toBe(pressed);
     const held = `dohc did not record the outside edit to "notes/${"a".repeat(500)}.md". Restore the file, then try again.`;
@@ -960,7 +954,6 @@ describe("error words", () => {
       words: elsewhere.message,
       computer: "Laptop",
     });
-    // A name with spaces and brackets crosses whole.
     const studio = new CollectionsRefusalError({
       kind: "elsewhere",
       computer: { installId: "install-studio", label: "Sam's Studio [2]" },
@@ -971,7 +964,6 @@ describe("error words", () => {
       words: studio.message,
       computer: "Sam's Studio [2]",
     });
-    // A refusal with no name, or one that doesn't decode, stays a refusal and names no computer.
     for (const wire of ["", " [computer=%ZZ]"]) {
       expect(
         readCollectionsRefusal(
@@ -988,7 +980,6 @@ describe("error words", () => {
         acrossIpc(new CollectionsRefusalError({ kind: "unclaimed" }), "desktop:dataset"),
       ),
     ).toEqual(unclaimed);
-    // A list returns these refusals, and a report reads each as the thrown one.
     for (const [returned, thrown] of [
       [unclaimed, new CollectionsRefusalError({ kind: "unclaimed" })],
       [{ kind: "elsewhere", words: elsewhere.message, computer: "Laptop" }, elsewhere],
@@ -1001,7 +992,6 @@ describe("error words", () => {
     expect(
       withErrorWords("Could not read Collections.", acrossIpc(elsewhere, "desktop:dataset")),
     ).toBe(`Could not read Collections. ${elsewhere.message}`);
-    // Another error with the same words is not a refusal.
     expect(
       readCollectionsRefusal(acrossIpc(new Error(elsewhere.message), "desktop:dataset")),
     ).toBeNull();
@@ -1026,7 +1016,6 @@ describe("error words", () => {
     const failed = new ServerCollectionsUnavailableError(elsewhere, new TypeError("fetch failed"));
     expect(failed.elsewhere).toBe(elsewhere);
     expect(failed.failure).toBe("TypeError: fetch failed");
-    // The server's error reads as it would have alone.
     for (const cause of [
       new TypeError("fetch failed"),
       new CollectionsRefusalError({ kind: "unclaimed" }),
@@ -1037,7 +1026,6 @@ describe("error words", () => {
       ).toEqual(readError(acrossIpc(cause, "desktop:dataset")));
     }
     expect(new ServerCollectionsUnavailableError(elsewhere, new Error()).failure).toBe("");
-    // A report names no words of its own for that list, and offers nothing to keep.
     const returned = collectionsRefusalError({
       kind: "server-unavailable",
       words: elsewhere.message,
@@ -1067,7 +1055,6 @@ describe("error words", () => {
       });
       expect(readCollectionReopenWait(wait)).toEqual({ words: wait.message, waitMs: retryAfterMs });
     }
-    // A worker failure that starts a wait carries it too, and keeps its own words.
     const stopped = Object.assign(new PersistentRuntimeError("worker_stopped", "stopped"), {
       retryAfterMs: 5000,
     });
@@ -1209,11 +1196,9 @@ it("reads every page whose live editing stopped from Try again on History, whole
     const stopped = new HistoryStillPausedError(paths);
     expect(liveEditingStoppedPaths(stopped)).toEqual(paths);
     expect(liveEditingStoppedPaths(across(stopped))).toEqual(paths);
-    // The same words from another error name no page.
     expect(liveEditingStoppedPaths(across(new Error(stopped.message)))).toEqual([]);
   }
   expect(liveEditingStoppedPaths(across(new HistoryStillPausedError([])))).toEqual([]);
-  // The class, the code and the lead are all needed, and the rest must be a list of paths.
   const wire = (text: string) =>
     new Error(`Error invoking remote method 'desktop:retry-history-capture': ${text}`);
   const lead = "History is still paused. Live editing stopped on ";

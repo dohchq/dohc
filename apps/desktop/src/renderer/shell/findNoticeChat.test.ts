@@ -63,7 +63,6 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-// What main's work link resolution hands the shell, for each kind of thread.
 const linkTo = (threadId: string, channelId: string | null) =>
   workLinkTarget({ channelId, threadId, messageId: "m-1" });
 

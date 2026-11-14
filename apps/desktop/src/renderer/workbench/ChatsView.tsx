@@ -24,6 +24,7 @@ import { NewGroupDialog, type GroupType } from "./NewGroupDialog";
 import { ChatMembersDialog } from "./ChatMembersDialog";
 import { emailKey, isEmail } from "./memberPicker";
 import { agentChatIdentity, orderAgentChats, withListedAgent } from "./agentChat";
+import { AgentThreadLines } from "./AgentThreadLines";
 import { ChatLane } from "./ChatLane";
 import { focusMessage, TARGET_FLASH_MS } from "./landOnMessage";
 import { usePersonalChatFeed } from "./usePersonalChatFeed";
@@ -157,7 +158,7 @@ import {
   resolveAgentPresenceActivity,
 } from "../../collab/agentPresence";
 
-// Multi-user chat presence (MU-C1) is opt-in: only under collaboration
+// Multi-user chat presence is opt-in: only under collaboration
 // (signedIn && relayConnected) is a transport supplied, so a solo/offline user
 // constructs no presence at all. Absent => today's exact single-user Chats.
 //
@@ -174,7 +175,6 @@ export interface ChatPresenceCollaboration {
 }
 
 export interface AgentSetupSummary {
-  // The workspace whose agent run was read with these settings.
   workspaceId: string;
   agentName?: string;
   preferredName?: string;
@@ -217,8 +217,8 @@ export type ChatsNav =
       thread: ChannelThreadRecord;
       focusMessageId?: string;
     }
-  // Direct messages (WS-MU-C3): one running conversation per DM (the
-  // anti-forum rule), plus a one-step "new message" composer.
+  // Direct messages: one running conversation per DM, plus a one-step
+  // "new message" composer.
   | { level: "dm"; dm: DmRecord; focusMessageId?: string }
   | { level: "dm-new" };
 
@@ -235,7 +235,6 @@ export interface ChatsDrafts {
   dmDraft: string;
   replyTarget: ChatsComposerReplyTarget | null;
   resolveTargetMessageId: string | null;
-  // The poll choice taken with the answer, when the poll had choices.
   resolveChosenOption?: string | null;
   // The polls drafted in the comment and new-post composers, each with the
   // conversation it belongs to.
@@ -311,6 +310,7 @@ interface ChannelSnapshot {
 }
 
 const EMPTY_MENTION_CANDIDATES: readonly MentionCandidate[] = [];
+const EMPTY_SHARE_MOUNTS: readonly { shareId: string; label: string }[] = [];
 
 // How long a failed DM sync holds the DM syncs nobody asked for. The relay is
 // down or slow, and a sync that queued behind a slow failure would otherwise
@@ -318,13 +318,9 @@ const EMPTY_MENTION_CANDIDATES: readonly MentionCandidate[] = [];
 const DM_SYNC_HOLD_MS = 15_000;
 
 const DM_SYNC_CAUSES = {
-  // Chats or a conversation opened.
   open: { pull: true, asked: true },
-  // A poll timer.
   tick: { pull: true, asked: false },
-  // A workspace activity event.
   activity: { pull: false, asked: false },
-  // A person's action changed the list.
   person: { pull: false, asked: true },
 } as const;
 type DmSyncCause = keyof typeof DM_SYNC_CAUSES;
@@ -409,7 +405,6 @@ function grantedLaneIsOverLimit(failure: ShareReadFailure | null): boolean {
   return failure?.kind === "over-limit" && failure.lanes.some((entry) => entry.lane === "granted");
 }
 
-// An agent chat's mark beside its name, in its agent's hue.
 function AgentMark(props: { presentation: ActorPresentation; name: string }) {
   return (
     <span data-testid="chats-channel-agent-mark" className="inline-flex shrink-0">
@@ -578,7 +573,6 @@ export function ChatsView(props: {
   ) => void;
   // What a change card's Apply or Undo did, when it finishes after the chat closed.
   onNotice?: (message: string, undo?: () => void) => void;
-  // Takes back the toast and Notices row of this identity.
   onClearError?: (identity: string) => void;
   // A bookmark's page was archived, so an earlier refusal to archive it is over.
   onBookmarkArchived?: (path: string) => void;
@@ -590,6 +584,9 @@ export function ChatsView(props: {
   // provided, the composer offers autocomplete and messages render chips.
   mentionCandidates?: readonly MentionCandidate[];
   workspaceFiles?: readonly WorkspaceFileEntry[];
+  // The received shares mounted in this workspace. A joined Group's files are
+  // its share's mount.
+  shareMounts?: readonly { shareId: string; label: string }[];
   // Main-derived settings/status summary. The Agents section reads it to
   // say whether the configured agent is set up.
   agentSetup?: AgentSetupSummary | null;
@@ -721,7 +718,6 @@ export function ChatsView(props: {
   const [decisions, setDecisions] = useState<ChatDecisionRecord[]>([]);
   const [attachments, setAttachments] = useState<ChatAttachmentRecord[]>([]);
   const [runRecords, setRunRecords] = useState<Record<string, ChatRunRecord>>({});
-  // The open thread's dispatch, null until read.
   const [dispatchState, setDispatchState] = useState<ChatDispatchStateForThreadResult | null>(null);
   const computerDispatchPaused = useChatDispatchPaused((error) =>
     props.onError(
@@ -760,9 +756,9 @@ export function ChatsView(props: {
     setCreatingGroup(false);
   }, []);
   const [addingAgent, setAddingAgent] = useState(false);
-  // Direct messages (WS-MU-C3). The section renders only when collaboration
-  // is on (signed in + relay) or a DM already exists locally — a solo user
-  // sees none of it.
+  // Direct messages. The section renders only when collaboration is on
+  // (signed in + relay) or a DM already exists locally. A solo user sees
+  // none of it.
   const [dms, setDms] = useState<DmRecord[]>([]);
   const [dmAvailable, setDmAvailable] = useState(false);
   const [pendingDmRequests, setPendingDmRequests] = useState<DmRequestRow[]>([]);
@@ -778,8 +774,8 @@ export function ChatsView(props: {
   const [dmDraft, setDmDraft] = useState("");
   const [startingDm, setStartingDm] = useState(false);
   const startingDmRef = useRef(false);
-  // MU-C4 shared channels. null = the sharing surface is unavailable (signed
-  // out / listing failed) and every sharing affordance stays hidden — the
+  // Shared channels. null means the sharing surface is unavailable (signed
+  // out or listing failed) and every sharing affordance stays hidden, so the
   // solo view is unchanged.
   const [channelShares, setChannelShares] = useState<ShareListing | null>(null);
   // Why the last committed share read did not produce rows, or null when it
@@ -910,34 +906,29 @@ export function ChatsView(props: {
   }, [sendContextKey]);
 
   // `background` marks a refresh the user did not ask for (the navigator's
-  // badge catch-up). Two things follow, and both are about not stealing from
-  // whatever the user IS doing:
-  //
+  // badge catch-up). It must not disturb what the user is doing:
   //  - It must not touch liveToken. That token means "everything in flight is
   //    now stale", and createChannel, joinShared and shareChannel capture it
-  //    to decide whether their own completion still counts. Bumping it here
-  //    made a badge refresh landing mid-mutation throw away the mutation's
-  //    successful result, leaving the create form or the old invite on screen.
-  //    Latest-wins among overview refreshes uses its own sequence instead; the
-  //    captured token is still checked, so a workspace switch or a user
-  //    navigation still discards this response.
+  //    to decide whether their own completion still counts. A bump here would
+  //    make a badge refresh landing mid-mutation discard the mutation's
+  //    successful result and leave the create form or the old invite on
+  //    screen. Latest-wins among overview refreshes uses its own sequence
+  //    instead; the captured token is still checked, so a workspace switch or
+  //    a user navigation still discards this response.
   //  - A transient failure must not replace a working navigator with an error
-  //    card (there is nothing to report to a user who asked for nothing).
+  //    card. The user asked for nothing, so there is nothing to report.
   //
   // One issue order over every commit into these surfaces, with a watermark
   // per lane. A reader takes a ticket when it issues its request and commits a
-  // lane only if no newer ticket landed there first. Same commit-time
-  // watermark as the workspace file listing: an id is taken at issue, and a
-  // response commits only if it is newer than what is already displayed.
-  //
-  // Lanes exist because these readers answer different questions.
-  // refreshOverview answers all three. refreshShares answers both share lanes.
-  // refreshChannelBadges answers the channel listing and the joined grants its
-  // listing just synced, and nothing about the relay-backed rows. One sequence
-  // over all of them would let a joined-only correction discard a full share
-  // read still in flight; one sequence per reader would let two readers undo
-  // each other — the person you just invited vanishing, or a cleared badge
-  // coming back.
+  // lane only if no newer ticket landed there first, the same commit-time
+  // watermark as the workspace file listing. Lanes exist because these
+  // readers answer different questions. refreshOverview answers all three.
+  // refreshShares answers both share lanes. refreshChannelBadges answers the
+  // channel listing and the joined grants its listing just synced, and
+  // nothing about the relay-backed rows. One sequence over all of them would
+  // let a joined-only correction discard a full share read still in flight.
+  // One sequence per reader would let two readers undo each other: the person
+  // you just invited vanishes, or a cleared badge comes back.
   const commitTicket = useRef(0);
   const committedLane = useRef<Record<CommitLane, number>>({
     overview: 0,
@@ -1432,7 +1423,7 @@ export function ChatsView(props: {
   // offline keeps the current list and the next pass retries. A late response
   // for a stale workspace/nav is dropped by the token guard.
   //
-  // One sync in flight (#545, badgeRead precedent). The activity signal below
+  // One sync in flight, as with badgeRead. The activity signal below
   // fires for every settled file batch and run update, and this is a relay
   // sync, not a local read — a burst must not fan out into a sync per event.
   // A call landing mid-sync is not dropped: it runs exactly one more pass when
@@ -2014,7 +2005,7 @@ export function ChatsView(props: {
     [syncOpenDm],
   );
 
-  // MU-C4 derived lookups: a channel matches a grant by its WIRE id. A key
+  // Derived lookups: a channel matches a grant by its wire id. A key
   // that is present with a null value means "asked, and this workspace holds
   // no grant" — an absent key means nobody asked, which is unknown.
   const joinedByWire = useMemo(() => {
@@ -2126,10 +2117,10 @@ export function ChatsView(props: {
       // The roll-up unread badge lives on this list, so a write to a chat
       // the user does not have open is only visible here.
       void refreshChannelBadges();
-      // The DM roll-up lives on the same list and used to wait for the 5s
-      // poll beside a live channel badge. Same signal, same moment —
-      // refreshDms coalesces the burst itself. The activity cause never
-      // pulls: a sync event caused this, and a pull would fire another.
+      // The DM roll-up lives on the same list, so it refreshes on the same
+      // signal instead of waiting for the 5s poll beside a live channel
+      // badge. refreshDms coalesces the burst itself. The activity cause
+      // never pulls: a sync event caused this, and a pull would fire another.
       void refreshDms("activity");
       return;
     }
@@ -2158,6 +2149,9 @@ export function ChatsView(props: {
       }
       return;
     }
+    // An open Group's composer offers files by the rule in the channel list,
+    // which a change to the Group's shares moves.
+    if (nav.level === "thread" || nav.level === "channel") void refreshChannelBadges();
     if (nav.level === "thread") {
       const threadId = nav.thread.id;
       const token = liveToken.current;
@@ -2561,7 +2555,7 @@ export function ChatsView(props: {
     workspaceId,
   ]);
 
-  // Reactions (WS-MU-C2) write and paint through the workspace's reaction
+  // Reactions write and paint through the workspace's reaction
   // store. Errors reach the user only while this view is still where the
   // toggle happened.
   const reactionThreadId =
@@ -2632,7 +2626,7 @@ export function ChatsView(props: {
     [nav.level, toggleInView],
   );
 
-  // --- Direct messages (WS-MU-C3) -----------------------------------------
+  // --- Direct messages ----------------------------------------------------
 
   const openDm = useCallback(
     async (dm: DmRecord, focusMessageId?: string) => {
@@ -2848,10 +2842,10 @@ export function ChatsView(props: {
     return () => clearInterval(interval);
   }, [nav, refreshOpenDm, props.suspendPolling]);
 
-  // #742 P2-D belt: LeaveDmDialog owns Escape itself, but this clears
-  // leavingDm on any navigation away from the DM it was opened for — leaving
-  // this DM, opening a different one, or leaving Chats entirely — so a stale
-  // confirmation can never reappear over a conversation it wasn't opened for.
+  // LeaveDmDialog owns Escape itself, but this clears leavingDm on any
+  // navigation away from the DM it was opened for (leaving this DM, opening
+  // a different one, or leaving Chats entirely), so a stale confirmation can
+  // never reappear over a conversation it wasn't opened for.
   // Also clears it the moment a field-level refresh of the same open DM
   // (refreshOpenDm) reports connected:false: an owner revocation
   // mid-dialog leaves the channelId unchanged, so the nav-change check alone
@@ -3361,32 +3355,29 @@ export function ChatsView(props: {
   }, [joinedByWire, laneAgents, openConversation, personalFeed]);
 
   // Cross-user co-presence for the open channel/thread turns on two decisions
-  // per conversation — the SCOPE it lands in and the TOPIC both sides key on.
+  // per conversation: the scope it lands in and the topic both sides key on.
   //
-  //  • SCOPE — where the presence lands on the relay. A PARTICIPANT viewing a
-  //    channel shared TO them must publish into a SHARE scope keyed by their
-  //    grant's shareId: the relay maps a {kind:"share"} request to the GRANTER's
-  //    workspace, so the owner (workspace scope) and every participant (share
-  //    scope) fan into one relay scope and see each other. An owner of a shared
-  //    channel — and any plain local channel — uses the plain workspace scope.
+  //  • Scope: where the presence lands on the relay. A participant viewing a
+  //    channel shared to them must publish into a share scope keyed by their
+  //    grant's shareId. The relay maps a {kind:"share"} request to the
+  //    granter's workspace, so the owner (workspace scope) and every
+  //    participant (share scope) meet in one relay scope and see each other.
+  //    An owner of a shared channel, and any plain local channel, uses the
+  //    plain workspace scope.
   //
-  //  • TOPIC — the per-conversation key both sides must agree on. A channel's
-  //    LOCAL id differs across machines (a replicated channel gets a fresh local
-  //    id), so channel presence keys on the cross-machine wireId instead — that
-  //    unification is what lets owner + participant meet. The relay's share gate
-  //    admits exactly the bare channel wireId as a chat-share presence topic
-  //    (presenceTopicAllowedForShare), so the channel topic IS the wireId. For a
-  //    plain local channel wireId === channel.id, so solo/owner presence is
-  //    functionally unchanged. A thread keys on its own id (already cross-machine)
-  //    so typing in one thread never bleeds into a sibling thread.
+  //  • Topic: the per-conversation key both sides must agree on. A channel's
+  //    local id differs across machines, so channel presence keys on the
+  //    cross-machine wireId. The relay's share gate admits exactly the bare
+  //    channel wireId as a chat-share presence topic
+  //    (presenceTopicAllowedForShare), so the channel topic is the wireId. For
+  //    a plain local channel wireId === channel.id. A thread keys on its own
+  //    id, which is already cross-machine, so typing in one thread never
+  //    shows in a sibling thread.
   //
-  // A DIRECT MESSAGE is a kind:"dm" chat channel backed by a chat
-  // grant, so it folds into the same derivation: its TOPIC is the DM channel's
-  // cross-machine wireId (channel-level co-presence — a DM has one running
-  // thread, so this is the natural "who's here", and both participants agree on
-  // the wireId), and its SCOPE is the grant's share scope for the PARTICIPANT
-  // (who was shared to) or the plain workspace scope for the OWNER — exactly the
-  // owner/participant convergence a joined channel uses.
+  // A direct message is a kind:"dm" chat channel backed by a chat grant, so
+  // it uses the same derivation. Its topic is the DM channel's wireId, because
+  // a DM has one running thread. Its scope is the grant's share scope for the
+  // participant and the plain workspace scope for the owner.
   const activeDm = nav.level === "dm" ? nav.dm : null;
   const activeChannel = nav.level === "channel" || nav.level === "thread" ? nav.channel : null;
   const activeJoined = activeChannel ? joinedFor(activeChannel) : null;
@@ -3429,16 +3420,30 @@ export function ChatsView(props: {
   // and a workspace switch could briefly publish under the previous workspace's
   // scope. Gating on (channelShares loaded for this workspaceId) closes both.
   const scopeResolved = sharesWorkspaceId === workspaceId;
-  // The files the open Group's composers offer. Its sharing counts only once
-  // this workspace's share listing has answered.
+  // The files the open Group's composers offer, by the rule in the latest
+  // channel list, since the open Group's own record is the one it was opened
+  // with. Until this workspace's share listing answers, whether the Group is
+  // joined is unknown, so it offers every file.
+  const shareMounts = props.shareMounts ?? EMPTY_SHARE_MOUNTS;
+  const listedChannels = overview.status === "ready" ? overview.channels : null;
   const channelFiles = useMemo(() => {
-    const wireId = activeChannel?.wireId ?? null;
-    const shared =
-      scopeResolved &&
-      wireId !== null &&
-      (Boolean(joinedByWire.get(wireId)) || (grantedByWire.get(wireId)?.length ?? 0) > 0);
-    return channelFileCandidates(fileMentionCandidates, activeChannel, shared);
-  }, [activeChannel, fileMentionCandidates, grantedByWire, joinedByWire, scopeResolved]);
+    if (!scopeResolved) return fileMentionCandidates;
+    const listed = activeChannel
+      ? (listedChannels?.find((entry) => entry.id === activeChannel.id) ?? activeChannel)
+      : null;
+    const wireId = listed?.wireId ?? null;
+    const share = wireId === null ? null : (joinedByWire.get(wireId) ?? null);
+    const mounts = share ? shareMounts.filter((mount) => mount.shareId === share.shareId) : [];
+    const joined = share ? { mountLabel: mounts.length === 1 ? mounts[0]!.label : null } : null;
+    return channelFileCandidates(fileMentionCandidates, listed, joined);
+  }, [
+    activeChannel,
+    fileMentionCandidates,
+    joinedByWire,
+    listedChannels,
+    scopeResolved,
+    shareMounts,
+  ]);
   const presence = usePresence({
     enabled: collaboration !== null && presenceTopic !== "" && scopeResolved,
     transport: presenceTransport,
@@ -4514,6 +4519,7 @@ export function ChatsView(props: {
   // A post's view shows its thread, so an agent's notice about a run there
   // is skipped while it's on screen.
   const postThreadId = nav.level === "thread" ? nav.thread.id : null;
+  const postChatThreadIds = useMemo(() => [postThreadId], [postThreadId]);
   const showPost = useCallback(
     (node: HTMLDivElement | null) =>
       node && postThreadId ? showChat(postThreadId, node) : undefined,
@@ -4964,7 +4970,7 @@ export function ChatsView(props: {
         className="flex min-h-0 flex-1 flex-col"
         onKeyDownCapture={onKeyDownCapture}
       >
-        {/* Presence (MU-C1): "viewing" faces + "typing…" for this DM, keyed by
+        {/* Presence: "viewing" faces + "typing…" for this DM, keyed by
             its channelWireId and fanned out through the same shareForRecipient
             grant gate. Dormant (calm header, no fake liveness) when solo. */}
         {dm.threadId ? (
@@ -5045,8 +5051,8 @@ export function ChatsView(props: {
               workspaceId
             }
             // The dialog only ever opens for the currently-viewed DM (the
-            // P2-D belt enforces this), so `sending` — already scoped to the
-            // active send context — IS this DM's own in-flight state.
+            // leavingDm effect enforces this), so `sending`, already scoped
+            // to the active send context, is this DM's own in-flight state.
             sendInFlight={sending}
             onConfirm={() => leaveDmConversation(leavingDm)}
             onClose={() => setLeavingDm(null)}
@@ -5249,6 +5255,11 @@ export function ChatsView(props: {
             names={presence.typingNames}
             className="mx-auto w-full max-w-[640px] px-3 sm:px-4"
           />
+          <AgentThreadLines
+            workspaceId={workspaceId}
+            chatThreadIds={postChatThreadIds}
+            className="mx-auto w-full max-w-[640px] px-3 pt-2 sm:px-4"
+          />
           {threadLocked ? (
             <ComposerNotice testId="chats-readonly-note">
               {threadJoined?.ended
@@ -5347,13 +5358,15 @@ export function ChatsView(props: {
     const setLane = setGroupLane;
     const showLane = groupType === "chat" || (groupType === "both" && lane === "chat");
     // Only when the agent can't answer: what's wrong, and the fix. An agent
-    // you run has no launch; it answers whenever it's connected.
+    // you run has no launch; it answers whenever it's connected. One with a
+    // thread is off while dohc forwards nothing to it.
     const agentProblem =
       !agentDm || !props.agentSetup
         ? null
         : agentRemoved(nav.channel)
           ? { words: `${channelAgent?.label ?? "This agent"} was removed.`, action: "Agents" }
-          : channelSettingsAgent?.launch && !channelSettingsAgent.enabled
+          : (channelSettingsAgent?.launch || channelSettingsAgent?.thread) &&
+              !channelSettingsAgent.enabled
             ? { words: `${channelSettingsAgent.name} is off.`, action: "Turn on", off: true }
             : null;
     const channelGrants = nav.channel.wireId ? (grantedByWire.get(nav.channel.wireId) ?? []) : [];
@@ -5920,7 +5933,9 @@ export function ChatsView(props: {
     const removed = agentRemoved(channel);
     const unread = channel.unreadCount > 0;
     // An agent you run has no launch and no state here; Settings shows whether it's listening.
-    const off = agent?.launch !== undefined && !agent.enabled;
+    // One dohc starts, or forwards to, has a switch.
+    const hasSwitch = agent?.launch !== undefined || agent?.thread !== undefined;
+    const off = hasSwitch && !agent?.enabled;
     return (
       <NavRow
         key={channel.id}
@@ -5947,7 +5962,7 @@ export function ChatsView(props: {
             unread,
             archived,
             removed,
-            enabled: agent?.launch === undefined ? null : agent.enabled,
+            enabled: agent && hasSwitch ? agent.enabled : null,
             canRemove: agent !== undefined,
           },
         })}

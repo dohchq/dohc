@@ -2320,7 +2320,6 @@ mod tests {
         settle_queued_interruption(false).await;
     }
 
-    /// The bootstrap fixture's baseline and its projected Markdown.
     fn fixture_baseline() -> (Vec<u8>, String) {
         let vectors: Value = serde_json::from_str(include_str!(
             "../../../dohc-engine-collab/tests/live-bootstrap-fixtures/live-bootstrap.json"
@@ -3493,7 +3492,7 @@ mod tests {
         service.workspace_close(Some(workspace)).await.unwrap();
     }
 
-    /// N8: an unload queued for a predecessor before its successor took the
+    /// An unload queued for a predecessor before its successor took the
     /// document reads the activation only once it holds the session lock,
     /// and cannot end the successor.
     #[tokio::test]

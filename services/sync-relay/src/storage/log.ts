@@ -27,6 +27,7 @@ import {
 import { rowToLogRow } from "./rows";
 import { notifyDesktopReadiness } from "../desktopReadinessChanges";
 import { forgetCollectionFilePresence } from "./collectionFilePresence";
+import { forgetDeletedOrdinaryCheckpoints } from "./ordinaryActivationCheckpoint";
 import { confirmLiveApplication } from "./liveApplicationAuthorship";
 import { REFUSED_OP_KIND } from "./relayAdmission";
 import {
@@ -279,7 +280,7 @@ export function appendLogBatchInTransaction(
   );
   assertWorkspaceQuota(storage, input.workspaceId, addedLogBytes);
 
-  // Data-integrity gate (0P sync-hardening): a log op must never be made
+  // Data-integrity gate: a log op must never be made
   // durable while it references a blob the relay does not hold. The blob
   // GC grace window covers the fresh PUT->POST gap, but not an old blob
   // that ages past the grace, nor a blob GC'd after a failed /log that a
@@ -377,6 +378,8 @@ export function appendLogBatchInTransaction(
         if (moment.versionId === "main" && moment.path !== null)
           notifyDesktopReadiness(storage, { workspaceId: input.workspaceId, path: moment.path });
         if (moment.versionId === "main") forgetCollectionFilePresence(storage, input.workspaceId);
+        if (moment.versionId === "main" && moment.deleted)
+          forgetDeletedOrdinaryCheckpoints(storage, input.workspaceId, moment.objectId);
         objectMomentStmt.run(
           input.workspaceId,
           moment.objectId,

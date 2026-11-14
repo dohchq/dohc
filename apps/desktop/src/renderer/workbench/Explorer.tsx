@@ -133,12 +133,10 @@ export type TreeChangeOperation = {
 export type LivePageRefused =
   // An "undo" refusal brings its own words.
   | { path: string; action: "move" | "rename" | "delete" | "replace" | "undo" }
-  // Several pages one move or delete could not change.
   | { paths: string[]; action: "move" | "delete" };
 
 export interface ExplorerProps {
   workspaceId: string;
-  // Which view the Explorer shows: Home, by kind, or Files, the folder tree.
   mode: ExplorerMode;
   onModeChange: (mode: ExplorerMode) => void;
   // Whether the workspace's first listing has landed. Home waits for it.
@@ -192,8 +190,6 @@ export interface ExplorerProps {
   // deleted one leaves. Home shows their files.
   unclaimedDatasetFolders?: ReadonlySet<string>;
   onOpenCollection: (path: string) => void;
-  // The workspace's apps, for Home's Apps section. Without it Home has no
-  // Apps section.
   apps?: ExplorerApps;
   dataCollections?: readonly DataCollection[];
   includeArchivedCollections?: boolean;
@@ -235,7 +231,6 @@ export interface ExplorerProps {
   // "Share…": offered by the main-owned context menu on synced,
   // non-shared-view workspaces; opens the shell's share dialog for the path.
   onShare: (path: string) => void;
-  // Asks for a listing and answers its request.
   onRefresh: () => number;
   // Failed tree operations go to the shell's error toast and Notices row,
   // with Try again when asking again can succeed. `change` is the tree
@@ -286,10 +281,8 @@ function draftFileKind(value: string, renameFrom: string): FileKindRecord {
   return fileKindForPath(withRenameDefault(renameFrom, name));
 }
 
-// Every Explorer row draws its glyph at the drawing's 15px.
 const GLYPH_SIZE = 15;
 
-// The glyph is ink on an active or picked row and subtle elsewhere.
 function glyphTone(marked: boolean): string {
   return marked ? "text-ink" : "text-subtle";
 }
@@ -332,7 +325,6 @@ function ancestorsOf(path: string): string[] {
   return out;
 }
 
-// The rows from one key to another, both included, in `order`'s order.
 export function rangeBetween(order: readonly string[], from: string, to: string): string[] | null {
   const a = order.indexOf(from);
   const b = order.indexOf(to);
@@ -360,7 +352,6 @@ export function editorTitle(path: string, label?: string): string {
   return TAB_KINDS[tab.kind].explorerTitle(tab, label);
 }
 
-// Home names a page by its title, as its Pages section does.
 function homeEditorTitle(path: string, label?: string): string {
   const page = parseTab(path).kind === "file" && fileKindForPath(path).displayKind === "markdown";
   return page ? pageTitle(path) : editorTitle(path, label);
@@ -436,14 +427,11 @@ export const TreeRow = memo(function TreeRow(props: {
   // views. Exposed as data-collection so tests can gate on the state before
   // clicking.
   collection: boolean;
-  // Main recognizes this folder as an app: the row draws the app glyph in
-  // the folder glyph's place, and says so as data-app.
   app: boolean;
   // In the selection, for aria-selected.
   selected: boolean;
   // In a selection an action would act on that is not just the open file.
   picked: boolean;
-  // The active editor's file.
   active: boolean;
   tabbable: boolean;
   dropPreview: RowDropPreview | null;
@@ -468,8 +456,6 @@ export const TreeRow = memo(function TreeRow(props: {
   const notVersioned = useNotVersionedMark(row.fullPath, !row.isFolder);
   const blocked = props.dropPreview?.kind === "blocked";
   const target = props.dropPreview?.role === "target";
-  // A drop preview colors the whole row, glyph included. An allowed target's
-  // glyph takes the success color.
   const glyphClass = props.dropPreview
     ? target && !blocked
       ? "text-success"

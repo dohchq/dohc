@@ -54,7 +54,6 @@ fn change(path: &str, operation: &'static str) -> MomentMaterializationChange {
     }
 }
 
-/// Apply `moments` to a fresh store, lay `disk` out, and materialize `page`.
 async fn materialize_page(
     moments: impl FnOnce(&mut VersionedTextStore<'_>),
     disk: impl FnOnce(&std::path::Path),
@@ -212,7 +211,6 @@ async fn a_delete_at_a_link_to_a_folder_is_refused() {
     std::fs::remove_file(scratch.path().join("x.md")).unwrap();
 }
 
-/// Cancels its token when the page places its first file.
 struct CancelOnFirstPlacement(CancellationToken);
 
 impl dohc_engine_runtime::SelfWriteRecorder for CancelOnFirstPlacement {

@@ -18,9 +18,9 @@ fn run(observations: &[TickObservation]) -> (Vec<std::time::Duration>, DriverSta
 
 #[test]
 fn a_watch_that_dies_every_tick_backs_off_instead_of_rescanning_hot() {
-    // The regression: a watch that dies right after every start used to
-    // rebuild the layer (actor + watcher + full baseline scan) every
-    // 500ms forever, because the drop-and-restart path skipped the sleep.
+    // A watch that dies right after every start must back off. Without the
+    // sleep on the drop-and-restart path, it rebuilds the layer (actor +
+    // watcher + full baseline scan) every 500ms forever.
     let (delays, status, _) = run(&[TickObservation::WatchLost; 4]);
     assert_eq!(
         delays,
@@ -114,7 +114,6 @@ fn a_policy_edit_neither_escalates_nor_forgives() {
         after_failure,
         "policy edits do not escalate"
     );
-    // ...nor launder an existing streak into a clean bill of health.
     assert_eq!(
         restart.failures(),
         1,
@@ -162,15 +161,12 @@ fn degradation_is_not_cleared_by_a_start_that_has_not_proven_itself() {
 fn a_tick_whose_apply_failed_does_not_clear_its_own_degradation() {
     let status = DriverStatus::default();
     let mut restart = RestartTracker::default();
-    // apply_run reported failures: the driver marks degraded, then the
-    // very same tick reports Healthy (watch alive, reconcile completed).
     status.mark_degraded();
     restart.observe(TickObservation::Healthy { clean: false }, &status);
     assert!(
         status.degraded(),
         "an apply failure must stay visible past the tick that raised it"
     );
-    // The next fully clean tick is what clears it.
     restart.observe(TickObservation::Healthy { clean: true }, &status);
     assert!(!status.degraded());
 }

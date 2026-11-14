@@ -16,11 +16,6 @@ import {
 import { signInAgent } from "./mcpSignIn.test-helper";
 import { createShareWebApplication } from "./server";
 
-// A link on a Group share reads the Group's channel, and a read-write link
-// posts there, through the real share-web and the real relay: a person in a
-// browser through the viewer's routes, and their agent through the remote
-// MCP. Neither has an account; the relay names the link as the author.
-
 const ORIGIN = "https://share.example.test";
 const HOST = "share.example.test";
 const OWNER = "owner";
@@ -113,7 +108,6 @@ async function stack(options: Parameters<typeof testStorage>[0] = {}) {
   expect(shared.status, await shared.clone().text()).toBe(200);
   const shareId = String(((await shared.json()) as { shareId: string }).shareId);
   const relayPaths: string[] = [];
-  // "METHOD /path" of each relay call.
   const relayCalls: string[] = [];
   // "METHOD /path" of relay calls whose next answer is lost after the relay made it:
   // before its response arrives or with its body broken.
@@ -189,7 +183,6 @@ async function stack(options: Parameters<typeof testStorage>[0] = {}) {
 
 type Stack = Awaited<ReturnType<typeof stack>>;
 
-/** A person opening the link in a browser. */
 async function browser(s: Stack, secret: string) {
   const exchanged = await s.send("/api/exchange", {
     method: "POST",
@@ -225,7 +218,6 @@ async function browser(s: Stack, secret: string) {
   };
 }
 
-/** An agent given only the link, signed in as its client reports itself, and allowed by a person. */
 async function agent(s: Stack, secret: string, clientName = "Planner"): Promise<Client> {
   const signedIn = await signInAgent(s.send, ORIGIN, secret, clientName);
   const client = new Client({ name: "link-agent", version: "1" });
@@ -314,7 +306,6 @@ it("lets an agent with only a read-write link read the channel and post, with th
     expect.objectContaining({ messageId: "owner-first", body: "Welcome" }),
   ]);
 
-  // The post shows the name the agent's client reported when it signed in.
   const posted = await mcp.callTool({
     name: "dohc_post_group",
     arguments: { body: "On it", idempotencyKey: "agent-1", threadId: "thread-team" },
@@ -336,7 +327,6 @@ it("lets an agent with only a read-write link read the channel and post, with th
     agentConnectionId: expect.any(String),
   });
   expect(stored?.payload).not.toHaveProperty("authorUserId");
-  // It posted through its own agent chat, never the viewer's post route. It reads through the viewer's read route.
   expect(s.relayCalls).toContain("POST /sync/link/agent-chat/post");
   expect(s.relayCalls).not.toContain("POST /sync/link/chat/messages");
   expect(s.relayCalls).toContain("GET /sync/link/chat/messages");
@@ -348,7 +338,6 @@ it("lets an agent with only a read-write link read the channel and post, with th
     expect.objectContaining({ authorKind: "link", body: "On it" }),
   ]);
 
-  // A refusal reaches the agent as a sentence it can act on.
   expect(
     s.storage.setShareLinkWritesPaused({
       shareId: s.shareId,
@@ -382,7 +371,6 @@ it("answers a post whose answer was lost as retryable, and its retry with the sa
   const { message } = (await retried.json()) as { message: { messageId: string } };
   expect((await s.linkPosts()).map((op) => op.payload.messageId)).toEqual([message.messageId]);
 
-  // An agent hears that the post may have landed, and that the same key is safe.
   const mcp = await agent(s, (await s.link("read-write")).secret);
   const post = { name: "dohc_post_group", arguments: { body: "On it", idempotencyKey: "agent-1" } };
   s.lost.set("POST /sync/link/agent-chat/post", "connection");

@@ -212,31 +212,28 @@ export function createNamedShareTransportRoutes(
       });
     }
 
-    // MU-C4 member append — the bidirectional extension of the PR-18
-    // recipient model, and the first place a non-owner writes into an
-    // owner's bucket. Fail-closed gauntlet, in order:
-    //   1. authorizeShareAction: membership, grant status, granter standing —
-    //      every denial is the same byte-identical generic 404.
-    //   2. The selector must accept appends: a read-write chat
-    //      grant, or a file share at comment or edit. A
-    //      read-only member and a VIEW file share are refused with an
-    //      explicit 403 — the member legitimately knows the share exists,
-    //      so this is a refusal, not a 404 — and with one code and one
-    //      body, because a level-specific refusal would tell a probing
+    // Member append: the first place a non-owner writes into an owner's
+    // bucket. Fail-closed checks, in order:
+    //   1. authorizeShareAction: membership, grant status, granter standing.
+    //      Every denial is the same byte-identical generic 404.
+    //   2. The selector must accept appends: a read-write chat grant, or a
+    //      file share at comment or edit. A read-only member and a view file
+    //      share are refused with an explicit 403, because the member
+    //      legitimately knows the share exists. The refusal has one code and
+    //      one body, because a level-specific refusal would tell a probing
     //      recipient the selector's level.
-    //   3. MU-C0 verified authorship: every authored chat op must claim the
-    //      AUTHENTICATED pusher (assertChatAuthorship verifies it) — a
+    //   3. Verified authorship: every authored chat op must claim the
+    //      authenticated pusher (assertChatAuthorship verifies it), so a
     //      member cannot forge a message or reaction as another member.
     //   4. Every op must pass the same fail-closed chat filter that scopes
     //      reads: chat.* only, granted channel only, earliest-thread-binding
     //      honored. One rejected op rejects the whole batch atomically.
-    // Accepted ops land in the OWNER's workspace bucket under a
-    // share-namespaced origin id, so a member can never extend (or collide
-    // with) the owner's — or another member's — origin sequence space; the
-    // relay still assigns no cross-origin order.
-    // Deliberate R10b boundary: members are not workspace replicas. Their
-    // share-namespaced appends are governed by the fail-closed share/channel
-    // filter, so workspace epoch enforcement does not apply on this route.
+    // Accepted ops land in the owner's workspace bucket under a
+    // share-namespaced origin id, so a member can never extend or collide
+    // with the owner's or another member's origin sequence space. The relay
+    // still assigns no cross-origin order. Members are not workspace
+    // replicas: the fail-closed share/channel filter governs their appends,
+    // so workspace epoch enforcement does not apply on this route.
     if (route.route === "share-log" && request.method === "POST") {
       if (browserMessageId === undefined) await claimPendingShares(actor.userId);
       const authorized = requireShareAction(route.shareId, actor.userId, "append");
@@ -256,7 +253,7 @@ export function createNamedShareTransportRoutes(
       if (!Array.isArray(input.ops)) throw badRequest("ops must be an array");
       if (input.ops.length > MAX_OPS_PER_REQUEST) throw badRequest("too many ops");
       // Authorship runs before the filter and parseLogOp so neither admits nor
-      // freezes a payload whose claimed author is missing or forged (MU-C0).
+      // freezes a payload whose claimed author is missing or forged.
       assertChatAuthorship(input.ops, actor.userId);
       assertClientLogProvenance(originId, input.ops);
       // Batch-aware channel scoping: a thread created earlier in this batch
@@ -287,7 +284,7 @@ export function createNamedShareTransportRoutes(
       const ops = await parseNamedShareLogOps(input.ops, actor.userId, lookupUserDisplayName);
       for (const op of ops) {
         // The write filter, never the read one: what a recipient may see is
-        // not what it may push into the granter's log (#646 PR3-0).
+        // not what it may push into the granter's log.
         const decision = filterOpForShareAppend(
           share.selector,
           op.opKind,

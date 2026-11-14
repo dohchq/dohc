@@ -429,8 +429,8 @@ export async function assertRealMountRoot(hostRoot: string, label: string): Prom
 
 // Creates the mount directory, guarding the container first: a symlinked
 // shared-with-me must be refused before mkdir would follow it and create the
-// label outside the workspace (codex P2 — the refresh guard alone ran after
-// this write). The label directory itself is created exclusively: a mount
+// label outside the workspace. The refresh guard runs after this write, so it
+// cannot stand in. The label directory itself is created exclusively: a mount
 // only ever owns a directory it created — a leftover or hand-made folder
 // must never be adopted (pulls would overwrite it; rollback/unmount would
 // delete it).
@@ -485,10 +485,10 @@ export function mountStoreWorkspaceIdFor(hostWorkspaceId: string, shareId: strin
 /**
  * One refresh result row, built so the wire schema can always carry it.
  *
- * The loop used to push the registry's raw `shareId` and `label` and parse
- * the whole array at the end, so one record with a 65-character label threw
- * after every pull had already run — no row survived, and the user was told
- * "Couldn't refresh shares." while the healthy mounts had in fact refreshed.
+ * Each row is validated as it is built. Parsing the whole array at the end
+ * would let one record with a 65-character label throw after every pull had
+ * already run: no row would survive, and the user would be told "Couldn't
+ * refresh shares." while the healthy mounts had in fact refreshed.
  *
  * Identity damage is contained exactly like grant damage: a row that cannot
  * state its own identity is dropped from the report rather than allowed to

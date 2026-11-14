@@ -85,8 +85,6 @@ class Granter {
     return digest;
   }
 
-  // One write to one file, with real content, returning the moment id the
-  // granter's log now holds for it.
   async write(
     objectId: string,
     path: string,
@@ -266,7 +264,6 @@ async function reviewProposal(
   return (await json(response)).proposal as Record<string, unknown>;
 }
 
-// The only open proposal, opened. Every caller here submits exactly one.
 async function onlyReview(h: SyncRelayHandler): Promise<Record<string, unknown>> {
   const rows = await reviewRows(h);
   expect(rows.length, "one open proposal").toBe(1);
@@ -312,9 +309,9 @@ describe("the proposal route's level gate", () => {
   });
 
   it("holds the two write routes apart: the append route still refuses moments", async () => {
-    // #646 PR3-0 closed the append gate, and PR3a must not reopen it by giving
-    // the append route a moment-shaped arm. The proposal route is the only way
-    // a file change crosses, and it never reaches the log without an accept.
+    // The append route refuses moments, and must not gain a moment-shaped
+    // arm. The proposal route is the only way a file change crosses, and it
+    // never reaches the log without an accept.
     const storage = await testStorage();
     const h = handler(storage);
     await claimWorkspace(h);
@@ -396,7 +393,6 @@ describe("the base rewrite", () => {
     const granter = new Granter(h);
     const readByRecipient = await granter.write("object-in", "docs/in.md", "granter one");
     const shareId = await createShare(h, "edit");
-    // The granter moves on while the recipient is editing.
     const head = await granter.write("object-in", "docs/in.md", "granter two");
     expect(head.momentId).not.toBe(readByRecipient.momentId);
     await uploadShareBlob(h, shareId, "recipient two");
@@ -435,7 +431,6 @@ describe("the base rewrite", () => {
     await granter.write("object-in", "docs/in.md", "granter one");
     const shareId = await createShare(h, "edit");
     await uploadShareBlob(h, shareId, "recipient two");
-    // A hash of content this workspace has never held.
     await granter.putBlob("a stranger");
 
     const submitted = await submit(h, shareId, [
@@ -452,7 +447,6 @@ describe("the base rewrite", () => {
     ).toBe("null");
     expect(moment.beforeLatestMomentId).toBeUndefined();
     expect(moment.payloadBeforePath).toBeNull();
-    // The object is still the granter's own: only the LINEAGE is unknown.
     expect(moment.objectId).toBe("object-in");
   });
 
@@ -527,7 +521,6 @@ describe("the origin an accept writes", () => {
       200,
     );
 
-    // The recipient's next op, at the next number its own journal hands it.
     const after = await recipientChat(h, shareId, 1, "two");
     expect(
       after.status,
@@ -545,11 +538,6 @@ describe("the origin an accept writes", () => {
 });
 
 describe("what the granter does under an open proposal", () => {
-  // The base is resolved to an OBJECT at the submit door and followed at
-  // accept. A path is not an identity: between the two doors the granter can
-  // move the file or remove it, and a base re-resolved by path would then find
-  // a different file, or none — and "none" is minted as a create.
-
   it("deletes the file where the granter has it now, not where the recipient read it", async () => {
     // Same rule as a content-only edit, in the other direction: the recipient
     // asked for the file to be gone, not for a path to be gone. A delete
@@ -609,7 +597,6 @@ describe("what the granter does under an open proposal", () => {
     const submitted = await submit(h, shareId, [change({ basedOnBlobSha256: read.blobSha256 })]);
     const proposalId = (await json(submitted)).proposalId as string;
 
-    // The granter deletes the file while the changes wait for review.
     const deleted = await granter.write("object-in", "docs/in.md", "granter one", {
       operation: "delete",
       payloadAfterBlobSha256: null,
@@ -723,7 +710,6 @@ describe("accept, decline, and withdraw", () => {
     const proposalId = (await json(submitted)).proposalId as string;
 
     narrowToComment(storage, shareId);
-    // The recipient can still see what it has out.
     const listed = await h(request(RECIPIENT, `/sync/shares/${shareId}/proposals`));
     expect(listed.status, await listed.clone().text()).toBe(200);
     expect((await json(listed)).proposals).toHaveLength(1);
@@ -758,7 +744,6 @@ describe("what an open proposal survives", () => {
     const submitted = await submit(h, shareId, [change({ basedOnBlobSha256: head.blobSha256 })]);
     const proposalId = (await json(submitted)).proposalId as string;
 
-    // Long past any grace window.
     const swept = await storage.collectUnreferencedBlobs(WORKSPACE, {
       nowMs: 4242 + 365 * 24 * 60 * 60 * 1000,
     });
@@ -766,7 +751,6 @@ describe("what an open proposal survives", () => {
       sha256("recipient two"),
     );
 
-    // And the proof that it still works: the accept lands the content.
     expect((await settle(h, proposalId, "accept")).status).toBe(200);
     expect((await granter.sharedMoments(shareId))[0]!.payloadAfterBlobSha256).toBe(
       sha256("recipient two"),
@@ -812,7 +796,6 @@ describe("what an open proposal survives", () => {
       "content held for a proposal nobody can answer is held forever",
     ).toContain(sha256("recipient two"));
 
-    // The recipient, meanwhile, can do nothing more.
     expect(
       (
         await submit(h, shareId, [change({ basedOnBlobSha256: head.blobSha256 })], {
@@ -917,7 +900,6 @@ describe("the recipient's blob route", () => {
     const proposalId = (await json(sent)).proposalId as string;
     const one = (id: string, as: string) => h(request(as, `/sync/${WORKSPACE}/proposals/${id}`));
 
-    // The owner reads it, and it carries the file rows the listing does not.
     const mine = await one(proposalId, GRANTER);
     expect(mine.status, await mine.clone().text()).toBe(200);
     const proposal = (await json(mine)).proposal as Record<string, unknown>;
@@ -938,7 +920,6 @@ describe("the recipient's blob route", () => {
       "a per-proposal route denying differently from the listing leaks which proposals exist",
     ).toBe(denied[0]);
 
-    // Settled is history on this route, exactly as on the op route.
     expect((await settle(h, proposalId, "decline")).status).toBe(200);
     expect(
       await denialBytes(await one(proposalId, GRANTER)),
@@ -959,19 +940,12 @@ describe("the recipient's blob route", () => {
     const op = (id: string, as: string, index = 0) =>
       h(request(as, `/sync/${WORKSPACE}/proposals/${id}/ops/${index}`));
 
-    // The owner reads it.
     expect((await op(proposalId, GRANTER)).status).toBe(200);
 
-    // Every other way in is the same bytes, so none of them tells the caller
-    // whether the thing they asked about exists.
     const denied = await Promise.all([
-      // The share's own recipient, who owns none of this workspace.
       op(proposalId, RECIPIENT),
-      // An account with no relationship to the share at all.
       op(proposalId, OTHER),
-      // A proposal id that never existed.
       op("proposal-absent", GRANTER),
-      // An op index this proposal does not have.
       op(proposalId, GRANTER, 1),
     ]).then((responses) => Promise.all(responses.map(denialBytes)));
     expect(
@@ -988,8 +962,6 @@ describe("the recipient's blob route", () => {
       "a per-op route denying differently from the listing leaks which proposals exist",
     ).toBe(denied[0]);
 
-    // A settled proposal is history. The review asks one question, and it
-    // closes when the proposal leaves `open`.
     expect((await settle(h, proposalId, "decline")).status).toBe(200);
     expect(
       await denialBytes(await op(proposalId, GRANTER)),

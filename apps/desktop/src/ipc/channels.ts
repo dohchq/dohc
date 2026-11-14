@@ -224,7 +224,6 @@ export const CHANNELS = {
   ownerAppResponses: "desktop:owner-app-responses",
   // An automation claim failed or a retry queued one: run history reads again.
   automationRunsChanged: "desktop:automation-runs-changed",
-  // The crash report changed; the renderer reads it again.
   crashReportChanged: "desktop:crash-report-changed",
   // The offline copies an account change left changed; the renderer reads them again.
   collectionCopiesLeftChanged: "desktop:collection-copies-left-changed",
@@ -240,8 +239,8 @@ export const CHANNELS = {
   chatDispatchNotices: "desktop:chat-dispatch-notices",
   agentRunState: "desktop:agent-run-state",
   chatDispatchPaused: "desktop:chat-dispatch-paused",
+  agentThreadLines: "desktop:agent-thread-lines",
   agentsListening: "desktop:agents-listening",
-  // Main's cached personal agents changed.
   personalAgents: "desktop:personal-agents",
   chatAgentRequestsChanged: "desktop:chat-agent-requests-changed",
   // Collection automations: main parses and writes automations.yaml.
@@ -293,7 +292,7 @@ export const CHANNELS = {
   requestDmAgain: "desktop:request-dm-again",
   startDm: "desktop:start-dm",
   leaveDm: "desktop:leave-dm",
-  // Ephemeral presence (MU-C5): IPC-proxied so the relay bearer token never
+  // Ephemeral presence: IPC-proxied so the relay bearer token never
   // reaches the renderer — main holds the token and makes the relay presence
   // request. publish (or leave), long-poll, and cancel an in-flight poll.
   presencePublish: "desktop:presence-publish",

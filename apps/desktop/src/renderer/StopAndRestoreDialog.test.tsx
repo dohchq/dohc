@@ -130,7 +130,6 @@ it("reads unfinished progress again once the workspace's automations open", asyn
     sendsMessages: false,
     unfinished: { step: "files" as const, message: "Interrupted" },
   };
-  // Main answers nothing until the automation store opens.
   let opened = false;
   let changed: ((event: { workspaceId: string }) => void) | undefined;
   const pending = vi.fn(async () =>
@@ -363,7 +362,6 @@ function fixture(
       vi.fn<(fallback: string, error: unknown, retry: () => void, identity: string) => void>(),
     onSettled: vi.fn<(identity: string) => void>(),
   };
-  // The shell's part: it holds the dialog and the files put back.
   let shell!: ReturnType<typeof useStopAndRestore>;
   function Shell() {
     shell = useStopAndRestore(WORKSPACE, {
@@ -724,7 +722,6 @@ it("passes queued, failed and set-aside paths to Stop and restore", async () => 
   );
   act(() => setCollectionFieldWriteAccess(WORKSPACE, "No connection"));
   f.stopAndRestore.mockClear();
-  // A retained failure contributes the same path on a later attempt.
   act(() => f.shell().retry(WORKSPACE, ANA, "stop"));
   await waitFor(() =>
     expect(f.stopAndRestore).toHaveBeenCalledWith({
@@ -963,7 +960,6 @@ it("keeps partial Undo outcomes on an unexpected error and retries only remainin
   const [fallback, error, retry, identity] = f.props.onError.mock.calls[0]!;
   expect(fallback).toBe("dohc could not undo the restore.");
   expect((error as Error).message).toBe("The workspace engine is not running.");
-  // Only the initial Stop settled; the partial Undo keeps its retry notice.
   expect(f.props.onSettled.mock.calls).toEqual([[identity]]);
   act(() => f.shell().close());
   act(() => retry());
@@ -1077,19 +1073,16 @@ it("reports failures through the shell, and a Try again after closing opens the 
   expect((error as Error).message).toBe("The workspace engine is not running.");
   expect(screen.queryByRole("alert")).toBeNull();
 
-  // The person closes the dialog, then uses Try again from the Notices row.
   fireEvent.click(screen.getByText("Close"));
   expect(screen.queryByTestId("stop-and-restore-dialog")).toBeNull();
   act(() => f.props.onError.mock.calls[0]![2]());
   await waitFor(() => expect(f.props.onError).toHaveBeenCalledTimes(2));
-  // Access stopped on the first try, so the failure says so.
   expect(f.props.onError.mock.calls[1]![0]).toBe(
     "Stopped ana@example.com's access. dohc has not finished restoring their changes.",
   );
   expect((f.props.onError.mock.calls[1]![1] as Error).message).toBe(
     "dohc could not reach the relay.",
   );
-  // The reopened dialog keeps the earlier outcome and its Undo.
   expect(
     await screen.findByText("Stopped ana@example.com's access and restored 1 file."),
   ).toBeTruthy();
@@ -1264,7 +1257,6 @@ it("keeps the runs a try undid after the files are undone, and after the dialog 
   });
   await screen.findByRole("combobox", { name: "Who to stop" });
   fireEvent.click(screen.getByTestId("stop-and-restore-confirm"));
-  // The owner closes the dialog while the try runs.
   fireEvent.click(screen.getByText("Close"));
   await act(async () => {
     finish();
@@ -1280,7 +1272,6 @@ it("keeps the runs a try undid after the files are undone, and after the dialog 
   ).toBeTruthy();
   expect(screen.getByText("Undid 2 runs of automations ana@example.com changed.")).toBeTruthy();
 
-  // A new try passes over the runs already undone, and still names them.
   act(() => f.shell().retry(WORKSPACE, ANA, "stop"));
   expect(
     await screen.findByText("Stopped ana@example.com's access and restored 0 files."),
@@ -1304,8 +1295,6 @@ it("shows each kept change once: fields at a later value, fields on records that
       fieldsMissing: 1,
       unfinished: { step: "runs", message: "The workspace engine is not running." },
     },
-    // The retry undoes the run the first try stopped on. It reports the same
-    // 2 fields still kept, and no missing field or other change of its own.
     {
       status: "restored",
       restored: [],
@@ -1328,7 +1317,6 @@ it("shows each kept change once: fields at a later value, fields on records that
   ).toBeTruthy();
   expect(screen.getByTestId("stop-and-restore-outcome").textContent).not.toMatch(/\b4\b/);
 
-  // Kept fields a retry reports replace the earlier try's; missing fields and other changes add up.
   act(() => f.props.onError.mock.calls[0]![2]());
   expect(
     await screen.findByText("Undid 2 runs of automations ana@example.com changed."),
@@ -1414,7 +1402,6 @@ it("never shows runs it did not finish undoing as done, and tries again from the
   ]);
   await screen.findByRole("combobox", { name: "Who to stop" });
   fireEvent.click(screen.getByTestId("stop-and-restore-confirm"));
-  // What finished, then what did not, with no run counted as undone.
   expect(
     await screen.findByText("Stopped ana@example.com's access and restored 1 file."),
   ).toBeTruthy();
@@ -1429,7 +1416,6 @@ it("never shows runs it did not finish undoing as done, and tries again from the
   expect((error as Error).message).toBe(sync);
   expect(typeof retry).toBe("function");
 
-  // A try that undoes some runs and stops again names each count once.
   fireEvent.click(screen.getByRole("button", { name: "Try again" }));
   expect(
     await screen.findByText("Undid 1 run of automations ana@example.com changed."),
@@ -1446,7 +1432,6 @@ it("never shows runs it did not finish undoing as done, and tries again from the
   expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
   expect(screen.getByTestId("stop-and-restore-undo")).toBeTruthy();
   expect(f.props.onError).toHaveBeenCalledTimes(2);
-  // Every failure named the same row, and the finished try removed it.
   const identity = f.props.onError.mock.calls[0]![3];
   expect(f.props.onError.mock.calls[1]![3]).toBe(identity);
   expect(f.props.onSettled).toHaveBeenCalledWith(identity);
@@ -1631,7 +1616,6 @@ it("does not say runs are unfinished after an earlier try finished them, when a 
   expect(
     await screen.findByText("Undid 2 runs of automations ana@example.com changed."),
   ).toBeTruthy();
-  // Stop and restore again, from History.
   act(() => f.shell().retry(WORKSPACE, ANA, "stop"));
   expect(await screen.findByText("dohc has not finished restoring files.")).toBeTruthy();
   expect(screen.getByText("Undid 2 runs of automations ana@example.com changed.")).toBeTruthy();

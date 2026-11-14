@@ -186,7 +186,6 @@ for (const surface of ["standalone", "mount"] as const) {
         await peer.writeTextFiles([
           { path: `${COLLECTION}/first.md`, text: record("Shared second") },
         ]);
-        // Land a pull; the existing page must re-query without the user refreshing its table.
         await page.evaluate(
           async ({ workspaceId, surface }) => {
             const api = (window as unknown as { dohcDesktop: DohcDesktopBridge }).dohcDesktop;

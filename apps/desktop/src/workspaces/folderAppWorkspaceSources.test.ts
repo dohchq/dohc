@@ -23,7 +23,6 @@ describe("folder app source authority", () => {
     ]);
     const readText = vi.fn(async () => text('{"type":"app"}'));
     const listShare = vi.fn();
-    // Even when the disk listing returns a projection, owned recognition must not use it.
     const sources = await readFolderAppWorkspaceSources(root, "shared-with-me/team", {
       reader: { resolveShare: async () => null, readText },
       listOwned,

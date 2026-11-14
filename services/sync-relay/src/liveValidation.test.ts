@@ -1,8 +1,13 @@
+import { ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { createLiveMarkdownJournalValidator } from "@dohc/ydoc-projection/live-journal-validation";
-import { createLiveValidationExecutor } from "./liveValidation.js";
+import {
+  createLiveValidationExecutor,
+  createValidatorFailureLog,
+  LiveValidatorFailure,
+} from "./liveValidation.js";
 import { LiveRestoreTooLarge } from "./liveRestoreValidation.js";
 import { nestedEmphasis } from "./liveValidation.fixture.js";
 
@@ -108,7 +113,6 @@ it("bounds concurrent work, cancels active jobs, and closes without dangling req
   expect(ready).toBe(false);
   abort.abort(new Error("cancelled"));
   await rejected;
-  // The cancelled child holds its slot until it has exited.
   expect(validate.hasCapacity?.()).toBe(false);
   await available;
   expect(validate.hasCapacity?.()).toBe(true);
@@ -133,7 +137,7 @@ function heapExhaustionCheckpoint() {
   return heapCheckpoint;
 }
 
-// Issue #1967: a busy activation's wait for capacity ended on any slot's release, so a host waking on it would
+// A busy activation's wait for capacity must not end on any slot's release, or a host waking on it would
 // capture again each time a live edit finished while the auxiliary slot stayed taken.
 // Proves: the wait outlasts a live edit's completion and ends only once the auxiliary child has exited, when an activation runs.
 it("keeps a busy activation waiting through live edits until the auxiliary slot frees", async () => {
@@ -165,7 +169,6 @@ it("keeps a busy activation waiting through live edits until the auxiliary slot 
   });
 }, 60_000);
 
-/** A restore point at `checkpoint`, with no stored artifacts. */
 function restorePoint(input: ReturnType<typeof fixture>["input"], checkpoint: Uint8Array) {
   return {
     binding: { ...input.document, currentPath: input.currentPath },
@@ -196,8 +199,28 @@ it("refuses restore work whose child runs out of heap, and validates the next re
 
 it("fails a job whose child exits abnormally, and replaces the child", async () => {
   const { input, validate } = fixture();
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  const written = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
   // The child cannot read a missing input and exits with an uncaught error.
-  await expect(validate(null as never)).rejects.toThrow("exited");
+  try {
+    await expect(validate(null as never)).rejects.toThrow("exited");
+    // Its stack can name files, so the log counts its lines and shows none of them.
+    await vi.waitFor(() =>
+      expect(
+        log.mock.calls.some(([line]) =>
+          /^\[live-validation\] withheld \d+ stderr lines? that can name files\.$/.test(
+            String(line),
+          ),
+        ),
+      ).toBe(true),
+    );
+    expect(JSON.stringify([log.mock.calls, written.mock.calls])).not.toMatch(
+      /TypeError|liveValidationWorker/,
+    );
+  } finally {
+    log.mockRestore();
+    written.mockRestore();
+  }
   expect(validate.hasCapacity?.()).toBe(true);
   expect((await validate(input)).kind).toBe("accepted");
 });
@@ -274,3 +297,33 @@ it("commits and recovers worker evidence without changing an exact replay", asyn
     f.close();
   }
 }, 30_000);
+
+it("names a validator failure whose class it does not know as Error", async () => {
+  const messages: string[] = [];
+  const pool = createLiveValidationExecutor(
+    512,
+    createValidatorFailureLog((message) => messages.push(message)),
+  );
+  pools.push(pool);
+  const { input } = fixture(),
+    validate = pool.validator(policy);
+  const emit = ChildProcess.prototype.emit;
+  ChildProcess.prototype.emit = function (
+    this: ChildProcess,
+    event: string | symbol,
+    ...args: unknown[]
+  ) {
+    return Reflect.apply(emit, this, [
+      event,
+      ...(event === "message" ? [{ kind: "failed", errorClass: "notes/secret plan.md" }] : args),
+    ]) as boolean;
+  } as typeof emit;
+  try {
+    await expect(validate(input)).rejects.toThrow(LiveValidatorFailure);
+  } finally {
+    ChildProcess.prototype.emit = emit;
+  }
+  expect(messages).toEqual([
+    "[sync-relay] live validation failed with Error for document object; the edit waits and is tried again.",
+  ]);
+});

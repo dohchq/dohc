@@ -70,7 +70,6 @@ const FileGroup = memo(function FileGroup(props: {
   // Whether the group renders all its entries (vs the bounded preview window
   // — committing hundreds of rows at once is a keystroke-budget long task).
   showAll: boolean;
-  // Index of the keyboard-selected entry within this group, or -1.
   selectedEntryIndex: number;
   onToggle: (path: string) => void;
   onShowAll: (path: string) => void;
@@ -348,7 +347,6 @@ export function SearchView(props: {
   }
 
   const fileCount = model.groups.length;
-  // Anything beyond the query that can hide a match: a toggle or a glob.
   const narrowed = caseSensitive || wholeWord || regex || includeGlob !== "" || excludeGlob !== "";
 
   return (

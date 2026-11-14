@@ -183,7 +183,6 @@ describe("Explorer rename", () => {
     await act(async () => {});
     expect(readExplorerMenu).not.toHaveBeenCalled();
     expect(screen.getByTestId("tree-edit-input")).toBe(input);
-    // The tree around the field keeps its own menu.
     fireEvent.contextMenu(screen.getByTestId("file-tree"));
     await waitFor(() => expect(readExplorerMenu).toHaveBeenCalledOnce());
   });

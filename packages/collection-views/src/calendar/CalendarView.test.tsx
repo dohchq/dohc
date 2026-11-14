@@ -268,7 +268,6 @@ describe("CalendarView", () => {
         onNewRecord={onNewRecord}
       />,
     );
-    // Every day of the month's grid has one, off-range days too. The keyboard reaches each.
     const days = screen.getAllByRole("button", { name: /^New record on / });
     expect(days.length).toBe(42);
     expect(days.every((day) => day.tabIndex === 0)).toBe(true);
@@ -276,9 +275,7 @@ describe("CalendarView", () => {
     day.focus();
     expect(document.activeElement).toBe(day);
     fireEvent.click(day);
-    // The day goes to the host as the engine's date value.
     expect(onNewRecord).toHaveBeenCalledExactlyOnceWith("2026-08-20");
-    // The day still shows its number.
     expect(day.parentElement?.textContent).toBe("20");
 
     view.rerender(

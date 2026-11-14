@@ -21,9 +21,7 @@ interface FakeServer {
 }
 
 interface FakeOptions {
-  /** Capabilities announced after EHLO. */
   capabilities?: string[];
-  /** Replaces the reply for a command the test wants to fail. */
   refuse?: { command: string; reply: string };
 }
 

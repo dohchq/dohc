@@ -421,7 +421,6 @@ function RunRow(props: {
 export function AutomationRuns(props: {
   workspaceId: string;
   automationId: string;
-  /** The run to open, as a notice names it, or null. */
   run?: string | null;
   /** Rises when the Collection or its automations may have changed. */
   refreshKey: number;
@@ -623,7 +622,6 @@ export function AutomationRuns(props: {
     return () => clearInterval(interval);
   }, []);
 
-  // Reads only the page after the runs shown.
   const loadOlder = () => {
     if (list === null || list === "unavailable" || loadingOlder) return;
     const before = list.next;

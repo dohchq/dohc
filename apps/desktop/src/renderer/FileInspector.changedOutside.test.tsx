@@ -15,20 +15,12 @@ import { FileInspector } from "./FileInspector";
 import { CHANGED_OUTSIDE_NOTICE } from "./MarkdownView";
 import { resetSharedLocalDocumentsForTests } from "./sharedLocalDocument";
 
-// The engine session as the test sets it, and every retry key the inspector
-// asked for. A new retry key closes the session and opens it again: until the
-// test sets the reopened session, the note is opening, as with the real hook.
-// Setting the session re-renders its subscribers, as a real update does.
 const engine = vi.hoisted(() => ({
   state: undefined as unknown as UseEngineDoc,
   listeners: new Set<() => void>(),
   retryKeys: [] as number[],
   boundRetryKey: 0,
-  // When set, a session the inspector keeps closed reads as closed, as with
-  // the real hook.
   closedWhenDisabled: false,
-  // When set, every open inspector gets the session whatever its own retry
-  // key, as panes sharing one engine lease do.
   sharedLease: false,
 }));
 const retryKeys = engine.retryKeys;
@@ -179,7 +171,6 @@ describe("FileInspector when an open note changed outside dohc", () => {
     vi.unstubAllGlobals();
   });
 
-  // The note as the person has it: its file read, and its session bound.
   async function openNote(): Promise<void> {
     engine.state = engineState(markdownToYDoc("# Plan\n"), null);
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
@@ -197,7 +188,6 @@ describe("FileInspector when an open note changed outside dohc", () => {
     setEngine(engineState(markdownToYDoc("# Plan\n"), "saved"));
     await waitFor(() => expect(retryKeys).toEqual([0, 1]));
     expect(screen.queryByTestId("changed-outside-notice")).toBeNull();
-    // The reopened session shows the disk version.
     setEngine(engineState(markdownToYDoc("# Written outside dohc\n"), null));
     const chip = screen.getByTestId("markdown-save-state");
     expect(chip.getAttribute("data-state")).toBe("reloaded");
@@ -280,8 +270,6 @@ describe("FileInspector when an open note changed outside dohc", () => {
       }
       await waitFor(() => expect(pane2.queryByTestId("lossy-note-notice")).toBeNull());
 
-      // Another app writes version B over unsaved text, and pane 1 reloads it
-      // into the session both panes share.
       disk = { text: versionB, contentHash: hashB };
       setEngine(engineState(seededFrom(versionA, hashA), "unsaved", hashA));
       fireEvent.click(await pane1.findByRole("button", { name: "Reload" }));

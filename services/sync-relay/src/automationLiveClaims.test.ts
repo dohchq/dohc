@@ -15,7 +15,6 @@ const SUBSCRIPTION = {
   fields: ["Status"],
 };
 
-// The claim's own fields, as the engine answers them; the test reads only a few.
 const claimFields = (claimId: string, originSeq: number) => ({
   claimId,
   automationId: "collection:Tasks#stamp",
@@ -259,14 +258,12 @@ describe("the server's claim engine", () => {
       { automationId: SUBSCRIPTION.automationId, path: "Tasks" },
     ]);
     await adapter.subscribeAutomation(SUBSCRIPTION);
-    // A new live host incarnation holds none of them.
     (live.ledger as { incarnation: string }).incarnation = "host-2";
     expect(adapter.waiting()).toBe(true);
     live.calls.length = 0;
     await adapter.claimNextAutomation({ automationIdPrefix: "collection:" });
     expect(live.calls).toEqual([["subscribe", SUBSCRIPTION]]);
     expect(adapter.waiting()).toBe(false);
-    // The same incarnation already holds them: a drain sends nothing.
     await adapter.claimNextAutomation({ automationIdPrefix: "collection:" });
     expect(live.calls).toEqual([["subscribe", SUBSCRIPTION]]);
   });

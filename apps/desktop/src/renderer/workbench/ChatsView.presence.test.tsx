@@ -15,8 +15,8 @@ import type { DesktopUserSettings } from "../../settings/userSettings";
 import { settingsWithAgent } from "../../testing/agentSettings";
 import type { PresencePeer, PresenceSnapshot, PresenceTransport } from "../collab/presenceChannel";
 
-// MU-C1 — presence in the Chats surface: gated by collaboration, calm, and
-// dormant for solo.
+// Presence in the Chats surface: gated by collaboration, calm, and dormant
+// for solo.
 
 type TestChatsViewProps = Omit<Parameters<typeof ProductionChatsView>[0], "workspaces"> & {
   workspaces?: Parameters<typeof ProductionChatsView>[0]["workspaces"];
@@ -89,7 +89,7 @@ const bridgeMock = {
   markChatThreadRead: vi.fn(),
   listChatReactions: vi.fn(),
   sendChatMessage: vi.fn(),
-  // MU-C4 shared-channel surface: ChatsView loads share state on mount, so
+  // Shared-channel surface: ChatsView loads share state on mount, so
   // the presence tests must stub it even though they exercise a solo view.
   listChatChannelShares: vi.fn(),
   onCloudSessionChanged: vi.fn(),
@@ -100,7 +100,7 @@ const bridgeMock = {
   createChatChannel: vi.fn(),
   startChannelThread: vi.fn(),
   setChatReaction: vi.fn(),
-  // DM presence (MU-C3 x MU-C1): the DM surface loads through syncDms.
+  // DM presence: the DM surface loads through syncDms.
   syncDms: vi.fn(),
   acceptDm: vi.fn(),
   declineDm: vi.fn(),
@@ -200,7 +200,6 @@ beforeEach(() => {
     sessionKey: "session-a",
     relay: { state: "answered" as const, granted: [], received: [], removed: [] },
   });
-  // Solo default: no DMs, DM surface unavailable.
   bridgeMock.syncDms.mockResolvedValue({
     available: false,
     dms: [],
@@ -272,7 +271,6 @@ describe("ChatsView presence (MU-C1)", () => {
     const user = userEvent.setup();
     renderView(collabWith(t.transport));
     await openThread(user);
-    // A published presence op should have fired for the open thread.
     await waitFor(() => expect(t.publishes.length).toBeGreaterThan(0));
     act(() => {
       t.set([
@@ -312,7 +310,6 @@ describe("ChatsView presence (MU-C1)", () => {
     // admits so owner + participant meet.
     await user.click(await screen.findByTestId("chats-channel"));
     await waitFor(() => expect(t.topics).toContain("channel-1"));
-    // …and opening a thread re-scopes presence to the thread's own topic.
     await user.click(await screen.findByTestId("chats-thread"));
     await screen.findByTestId("chats-thread-view");
     await waitFor(() => expect(t.topics).toContain("chat:thread:thread-1"));
@@ -337,14 +334,12 @@ describe("ChatsView presence (MU-C1)", () => {
     await openThread(user);
     await waitFor(() => expect(t.publishes.length).toBeGreaterThan(0));
 
-    // Typing into the composer publishes typing: true…
     await user.type(screen.getByTestId("chats-composer"), "hi");
     await waitFor(() =>
       expect(t.publishes.some((state) => (state as { typing?: boolean }).typing === true)).toBe(
         true,
       ),
     );
-    // …and sending clears it.
     await user.keyboard("{Enter}");
     await waitFor(() => expect(bridgeMock.sendChatMessage).toHaveBeenCalled());
     await waitFor(() => expect((t.publishes.at(-1) as { typing?: boolean }).typing).toBe(false));
@@ -467,7 +462,6 @@ describe("ChatsView presence (MU-C1)", () => {
         },
       ]);
     });
-    // Idle keeps the dot and the label, and says nothing.
     await waitFor(() =>
       expect(screen.getByTestId("chats-my-agent-presence").getAttribute("aria-label")).toBe(
         "Agent is idle",
@@ -590,8 +584,6 @@ describe("ChatsView presence scope selection (participant vs owner)", () => {
       />,
     );
 
-    // PARTICIPANT: the joined channel lands in the GRANTER's scope via a SHARE
-    // scope keyed by the grant's shareId, on the channel's cross-machine wireId.
     await openChannelById(user, "channel-joined");
     await waitFor(() => expect(rec.publishes.some((p) => p.topic === "wire-joined")).toBe(true));
     expect(rec.publishes.find((p) => p.topic === "wire-joined")?.scope).toEqual({
@@ -600,8 +592,6 @@ describe("ChatsView presence scope selection (participant vs owner)", () => {
       shareId: "share-1",
     });
 
-    // OWNER/PLAIN: switching to a channel this account owns flips to the plain
-    // WORKSPACE scope, on that channel's own wireId topic.
     await user.click(screen.getByTestId("chats-channel-back"));
     await openChannelById(user, "channel-owned");
     await waitFor(() => expect(rec.publishes.some((p) => p.topic === "wire-owned")).toBe(true));
@@ -664,8 +654,6 @@ describe("ChatsView presence scope selection (participant vs owner)", () => {
       />,
     );
     await openChannelById(user, "channel-joined");
-    // Into the thread: presence re-scopes to the thread's own topic but stays
-    // in the granter's SHARE scope (a thread of a shared channel is shared too).
     await user.click(await screen.findByTestId("chats-thread"));
     await screen.findByTestId("chats-thread-view");
     await waitFor(() =>
@@ -679,11 +667,6 @@ describe("ChatsView presence scope selection (participant vs owner)", () => {
   });
 });
 
-// A DM is a kind:"dm" chat channel backed by a chat grant, so its
-// presence folds into the same scope/topic derivation: the TOPIC is the DM
-// channel's cross-machine wireId; the SCOPE is the grant's share scope for the
-// PARTICIPANT (shared to) and the plain workspace scope for the OWNER — the
-// exact owner/participant convergence a joined channel uses.
 describe("ChatsView presence scope selection (DM)", () => {
   const participantDm: DmRecord = {
     channelId: "dm-local",
@@ -772,7 +755,6 @@ describe("ChatsView presence scope selection (DM)", () => {
         collaboration={rec.collaboration}
       />,
     );
-    // DM first: SHARE scope on the DM wireId.
     await openDmByChannelId(user, "dm-local");
     await waitFor(() => expect(rec.publishes.some((p) => p.topic === "wire-dm")).toBe(true));
     expect(rec.publishes.find((p) => p.topic === "wire-dm")?.scope).toEqual({
@@ -790,8 +772,6 @@ describe("ChatsView presence scope selection (DM)", () => {
       kind: "workspace",
       workspaceId: "workspace-a",
     });
-    // The memoized transport rebuilt on the real scope switch: consecutive
-    // factory calls never repeat a scope identity, and both scopes were used.
     const keys = rec.calls.map(scopeKey);
     for (let i = 1; i < keys.length; i += 1) expect(keys[i]).not.toBe(keys[i - 1]);
     expect(keys).toContain("share:dm-share-1");
@@ -867,10 +847,6 @@ describe("ChatsView presence scope selection (DM)", () => {
     expect(order).toEqual(["presence-leave-settled", "leave-dm"]);
   });
 
-  // leave() already stopped the channel before leaveDm was
-  // even called. If leaveDm rejects, the row never ended and this DM stays
-  // open — presence must re-arm, or this client reads as gone to peers until
-  // it navigates away and back.
   it("re-arms presence with a fresh publish if leaveDm rejects", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({ channels: [], fileThreads: [] });
     bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [participantDm] });
@@ -893,8 +869,6 @@ describe("ChatsView presence scope selection (DM)", () => {
     await user.click(await screen.findByTestId("chats-leave-dm-confirm"));
     await waitFor(() => expect(bridgeMock.leaveDm).toHaveBeenCalled());
 
-    // Still on the DM (leaveDm failed, goBack never ran) — and a fresh
-    // channel has published again for the same topic/scope.
     expect(await screen.findByTestId("chats-dm-view")).toBeTruthy();
     await waitFor(() => expect(rec.publishes.length).toBeGreaterThan(publishesBeforeLeave));
     expect(rec.publishes.at(-1)).toEqual({
@@ -908,10 +882,6 @@ describe("ChatsView presence scope selection (DM)", () => {
   });
 });
 
-// FIX 3 — presence must not act before its SCOPE is resolved for the current
-// workspace. Scope for a joined channel derives from channelShares (loaded
-// async); until that load lands, and after a workspace switch, presence stays
-// dormant so it never publishes under a guessed or previous-workspace scope.
 describe("ChatsView presence scope gating (loaded share state)", () => {
   const ownedChannel: ChatChannelRecord = {
     id: "channel-owned",
@@ -984,13 +954,10 @@ describe("ChatsView presence scope gating (loaded share state)", () => {
         collaboration={rec.collaboration}
       />,
     );
-    // While the share state is unresolved, presence must publish nothing.
     await act(async () => {
       for (let i = 0; i < 10; i += 1) await Promise.resolve();
     });
     expect(rec.publishes.length).toBe(0);
-    // Land the load; the joined channel now carries resolved share state, so
-    // opening it lands presence in the granter's SHARE scope (never workspace).
     await act(async () => {
       releaseOverview({ channels: [joinedChannel], fileThreads: [] });
     });
@@ -1068,7 +1035,6 @@ describe("ChatsView presence when the first share lookup never answers", () => {
       channels: [ownedChannel],
       fileThreads: [],
     });
-    // The initial lookup never answers; the background one fails.
     let initial = true;
     bridgeMock.listChatChannelShares.mockImplementation(() => {
       if (initial) {
@@ -1089,7 +1055,6 @@ describe("ChatsView presence when the first share lookup never answers", () => {
     const view = render(<ChatsView {...props(0)} />);
     await waitFor(() => expect(bridgeMock.listChatChannelShares).toHaveBeenCalledTimes(1));
 
-    // A read lands. Its background refresh supersedes the stalled initial one.
     view.rerender(<ChatsView {...props(1)} />);
     await waitFor(() => expect(bridgeMock.listChatChannelShares).toHaveBeenCalledTimes(2));
 

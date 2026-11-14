@@ -235,7 +235,6 @@ async fn duplicate_commit_crash_restart_replays_placement_and_undo_plan() {
     drop(store);
     let supervisor = crate::WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 6).unwrap().actor;
-    // The workspace.open startup path: no capture hold and no Duplicate retry.
     assert_eq!(
         actor
             .materialize_replay_pending_counting(root.path().to_path_buf(), WS.into(), 6, None)
@@ -410,7 +409,6 @@ async fn duplicate_live_bound_copy_undo_refusal_names_the_copy() {
     place(&mut store, root.path(), &copy);
     let claim = store.put_binary_blob(b"lineage").unwrap();
     let digest = dohc_engine_storage::hex_sha256(b"Original");
-    // The adoption and the activation it makes current.
     store.write_with(&NoFaults, |tx| {
         tx.execute("INSERT INTO live_owner_adoptions(relay_database_namespace,adoption_id,workspace_id,main_version_id,object_id,lineage_claim_id,binding_json,source_moment_id,source_digest,source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,evidence_digest,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,host_coordinate_json,max_pending_bytes,max_pending_age_ms) VALUES('relay','adoption',?1,'main',?2,?4,'{\"currentPath\":\"copy.md\"}',?3,?5,8,0,0,'evidence','coverage',0,0,0,'{}','{}',100,100)", params![WS,copy.moments[0].object_id,copy.moments[0].moment_id,claim,digest]).map_err(StorageError::persist_public)?;
         tx.execute("INSERT INTO live_owner_activations(relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,origin_adoption_id,binding_json,source_moment_id,source_digest,source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,host_coordinate_json,evidence_digest,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,max_pending_bytes,max_pending_age_ms) SELECT relay_database_namespace,adoption_id,workspace_id,main_version_id,object_id,lineage_claim_id,adoption_id,binding_json,source_moment_id,source_digest,source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,host_coordinate_json,evidence_digest,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,max_pending_bytes,max_pending_age_ms FROM live_owner_adoptions", []).map_err(StorageError::persist_public)
@@ -420,6 +418,43 @@ async fn duplicate_live_bound_copy_undo_refusal_names_the_copy() {
         matches!(error, RuntimeError::Domain(DomainError::UndoRefused {ref path,reason:"This copy is a shared live file. Continue editing at its current location"}) if path == "copy.md"),
         "{error:?}"
     );
+}
+
+/// A page whose live editing can't resume keeps its owner binding here, with
+/// no current activation. Duplicate is the way out for it, so it must copy.
+#[tokio::test]
+async fn duplicate_copies_a_page_this_computer_owns_live() {
+    let (root, mut store) = fixture();
+    seed(&mut store, root.path(), "source.md", "source", "Original");
+    let source: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT object_id FROM moments WHERE moment_id='source'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    bind_owner(&mut store, &source);
+    let copy = duplicate(&mut store, root.path(), Arc::new(NoFaults))
+        .await
+        .unwrap();
+    assert_ne!(copy.moments[0].object_id, source);
+    place(&mut store, root.path(), &copy);
+    assert_eq!(
+        std::fs::read_to_string(root.join("copy.md")).unwrap(),
+        "Original"
+    );
+    let still_bound: bool = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM ydoc_owner_bindings WHERE object_id=?1)",
+                [&source],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert!(still_bound);
 }
 
 /// Undo of a copy deletes it, which would leave its owner binding behind.

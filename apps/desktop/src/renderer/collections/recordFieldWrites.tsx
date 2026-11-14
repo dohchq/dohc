@@ -381,7 +381,6 @@ export type CollectionFieldWrite = {
 // file-locked settle is NOT one of these — the engine already holds that
 // write durably.
 export type CollectionWriteFailure = CollectionFieldWrite & {
-  // The state line the failure row shows.
   message: string;
   superseded?: boolean;
   recoveryOnly?: boolean;
@@ -452,7 +451,6 @@ const UNREAD_RECORD_MESSAGE =
   "dohc did not save this change because it could not read this record to check it. Try again.";
 const LOSSY_RECORD_MESSAGE =
   "dohc did not save this change because it would rewrite parts of this record dohc can't show. Open the record to edit it externally.";
-// What to do with a kept record that was never created, as the entries above say of a value with no retry.
 const COPY_UNSAVED_RECORD = "Copy what you typed before discarding it.";
 const CHANGED_SELECTION_MESSAGE =
   "This selection changed since your edit. Copy your unsaved value before discarding it.";

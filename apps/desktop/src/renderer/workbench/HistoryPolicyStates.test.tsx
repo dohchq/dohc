@@ -43,7 +43,6 @@ describe("History hidden by its rules", () => {
     expect(historyHiddenWords([".dohc"])).toBe(
       "dohc can't read this workspace's .dohc folder, so History is hidden. Fix the folder, then try again.",
     );
-    // A Stop and restore row already names its file.
     expect(restoreRulesUnreadableWords([".dohc/visibility.toml"])).toBe(
       "dohc could not restore this file because it can't read .dohc/visibility.toml. Fix the file, then try again.",
     );
@@ -162,8 +161,6 @@ function moment(): EngineMomentDetailRecord {
 type PageProps = Parameters<typeof EngineMomentDiffPage>[0];
 type Mock = ReturnType<typeof vi.fn>;
 
-// The page as the shell mounts it. `update` renders it again with new props,
-// such as a newer History answer or the shell's restore request.
 function renderPage(readEngineMoment: Mock, restoreEngineMomentFile: Mock = vi.fn()) {
   vi.stubGlobal("dohcDesktop", { readEngineMoment, restoreEngineMomentFile });
   const calls = {
@@ -311,13 +308,10 @@ describe("a History diff the rules hide", () => {
       "TOML parse error",
     );
 
-    // Try again asks the shell to open this change again; it restores nothing itself.
     (page.onError.mock.calls[0]![2] as () => void)();
     expect(page.onReopenRestore).toHaveBeenCalledWith("m-1", "notes/plan.md");
     expect(restore).toHaveBeenCalledOnce();
 
-    // The shell's request reads the change again, then restores it, and the
-    // page takes it once.
     page.update({ restoreRequested: true });
     await waitFor(() => expect(restore).toHaveBeenCalledTimes(2));
     expect(read).toHaveBeenCalledTimes(2);
@@ -341,7 +335,6 @@ describe("a History diff the rules hide", () => {
     const page = renderPage(read, restore);
     await screen.findByTestId("engine-diff-lines");
 
-    // The page still shows the diff from its last read when the request comes.
     page.update({ restoreRequested: true });
     expect(await screen.findByTestId("engine-diff-untracked")).toBeTruthy();
     await waitFor(() => expect(page.onRestoreRequestTaken).toHaveBeenCalledOnce());
@@ -420,7 +413,6 @@ describe("a History diff the rules hide", () => {
     }
     const view = render(<Harness answer={1} />);
     await screen.findByTestId("engine-diff-lines");
-    // A History refresh starts a read, which is still out when Try again comes.
     view.rerender(<Harness answer={2} />);
     expect(read).toHaveBeenCalledTimes(2);
 
@@ -450,8 +442,6 @@ describe("a History diff the rules hide", () => {
       expect(screen.getByTestId("engine-diff-title-open-file").textContent).toBe("notes/other.md"),
     );
 
-    // The tab switches to the change the shell asked about, and the page
-    // still holds the other change's answer.
     page.update({ tabPath: momentDiffTabPath("m-1"), restoreRequested: true });
     await act(async () => {});
     expect(page.onRestoreRequestTaken).not.toHaveBeenCalled();
@@ -515,7 +505,6 @@ it("refreshes a diff's account name without waiting on the server", async () => 
     notify = listener;
     return () => {};
   };
-  // Subscribe on the new workspace, under the same read token used by the diff.
   page.update({ workspaceId: "ws-names" });
   await screen.findByText(/Someone you shared with/);
   named = true;

@@ -63,7 +63,6 @@ it("drops a slow run read from A after a switch to B and back to A", async () =>
     reads[2]!(inactive);
   });
   expect(result.current.agentSetup).toMatchObject({ workspaceId: "ws-a", agentRunActive: false });
-  // The first A read and B's read both answer after the current one.
   await act(async () => {
     reads[0]!(active);
     reads[1]!(active);

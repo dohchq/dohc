@@ -15,7 +15,6 @@ import {
 } from "./workbenchState";
 
 const engine = fakeLocalStateOpens();
-// A workspace whose engine open prepared .dohc/local.
 async function openedWorkspace(prefix: string) {
   const workspace = { workspaceId: prefix, rootPath: await createTestScratch(prefix) };
   await engine.open(workspace);
@@ -28,10 +27,7 @@ async function fixture(version: 2 | 3) {
   );
 }
 
-// A version-2 file predates the About rail: its right-panel fields were
-// chatsVisible and chatsWidth, which nothing reads, so the rail opens closed.
-// It predates the record panel too, and its Data Collection tab does not restore.
-async function migratedFixture() {
+async function layoutWithDefaultPanelsAndNoDataCollectionTabs() {
   const current = await fixture(3);
   current.editorGroups[0].tabs = current.editorGroups[0].tabs.filter(
     (path: string) => !path.startsWith("tab://data-collection/"),
@@ -70,7 +66,13 @@ describe("UI-state v2 to v3", () => {
   it("migrates every current tab kind and active reference while preserving the other state", async () => {
     const old = await fixture(2);
     const before = structuredClone(old);
-    expect(serializeUiState(parseUiState(old))).toEqual(await migratedFixture());
+    expect(old).toMatchObject({ version: 2, chatsVisible: true, chatsWidth: 444 });
+    expect(parseUiState({ ...old, chatsVisible: false, chatsWidth: 999 })).toEqual(
+      parseUiState(old),
+    );
+    expect(serializeUiState(parseUiState(old))).toEqual(
+      await layoutWithDefaultPanelsAndNoDataCollectionTabs(),
+    );
     expect(old).toEqual(before);
     expect(old.editorGroups[0].tabs).toContain(
       "dohc://data-collection/123e4567-e89b-42d3-a456-426614174001/123e4567-e89b-42d3-a456-426614174002",
@@ -87,7 +89,7 @@ describe("UI-state v2 to v3", () => {
       GetWorkspaceUiStateResult.parse(await readUiStateFile(workspace.rootPath)),
     );
     const v3 = WorkspaceUiState.parse(serializeUiState(restored));
-    expect(v3).toEqual(await migratedFixture());
+    expect(v3).toEqual(await layoutWithDefaultPanelsAndNoDataCollectionTabs());
     await writeUiStateFile(workspace, v3);
     const read = GetWorkspaceUiStateResult.parse(await readUiStateFile(workspace.rootPath));
     expect(read).toEqual(v3);

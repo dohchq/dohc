@@ -123,7 +123,6 @@ describe("durable agent wakes", () => {
 
 const second: PendingAutomationWake = { ...pending, noticeId: "automation-wake:" + "b".repeat(64) };
 
-// Holds the first call that reaches it until released.
 function gate() {
   const started = deferred();
   const released = deferred();

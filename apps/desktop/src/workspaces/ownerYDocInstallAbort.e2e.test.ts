@@ -32,8 +32,6 @@ afterAll(async () => {
 
 type Install = EngineClient["ownerYDocApplyInitialSync"];
 
-// The real client, except that it counts enrollments, records each install's
-// cursor and the cursors it reads, and lets the test take over the install.
 function observedClient(
   real: EngineClient,
   install?: (commit: () => ReturnType<Install>) => ReturnType<Install>,
@@ -117,7 +115,6 @@ it.skipIf(engine.missing)(
       expect(after.digest === old.digest, pair).toBe(false);
       expect(abandoned.calls.enroll).toBe(0);
 
-      // The next pass reads the durable state again and starts from it.
       const next = observedClient(owner.nativeClient());
       expect(["empty", "acknowledged"]).toContain(
         await pass(next.client, AbortSignal.timeout(60_000)),

@@ -3,64 +3,33 @@ import { exceedsUtf8Bytes, utf8ByteLength } from "../../workspaces/workspaceText
 // What one conflict side is allowed to paint, and what a combined copy is
 // allowed to hold.
 //
-// PR #524 made a 2 MB - 10 MiB conflict side listable, which was right: those
-// conflicts used to be unrecoverable. The conflict panes then painted whatever
-// arrived. A side goes into one `<pre>` with `whitespace-pre-wrap
-// break-words`, so the browser lays out every character of it even inside a
-// `max-h-40` scroller — the scroll height is not known until it does. The
-// sibling compare surface has been bounded since #516 (see unifiedDiff.tsx);
-// these panes had no equivalent.
+// A conflict side can be up to 10 MiB. A side goes into one `<pre>` with
+// `whitespace-pre-wrap break-words`, so the browser lays out every character
+// of it even inside a `max-h-40` scroller, because the scroll height is not
+// known until it does. unifiedDiff.tsx bounds the sibling compare surface.
 //
 // Nothing here rejects work. The preview shows a window and says how much it
-// held back, and `Show more` extends it — the same shape as the compare
-// surface's display bound, except the rest stays reachable.
+// held back, and `Show more` extends it, so the rest stays reachable.
 
 /// One preview window: whole lines, up to whichever of the two bounds ends
 /// first. Both are needed. Characters bound the text the browser must lay out.
 /// Lines bound the line boxes it lays them out into, which characters alone do
-/// not — 200,000 line feeds is 200,000 line boxes and 200,000 characters.
+/// not: 200,000 line feeds is 200,000 line boxes and 200,000 characters.
 ///
-/// "Line" means LF, and only LF. That is not an assumption, it is a
-/// measurement: a `<pre>` with the pane's own `white-space: pre-wrap` and
-/// `overflow-wrap: break-word`, 2,000 two-character segments joined by each
-/// candidate, in the Chromium this app ships (`playwright` chromium-1223):
+/// "Line" means LF only, because that is what the renderer breaks on. In the
+/// pane's `<pre>`, in the Chromium this app ships, LF and CRLF force a break.
+/// A lone CR, U+2028, U+2029, VT, FF, and NEL only soft wrap. React writes
+/// text nodes directly, so a lone CR lays out as an ordinary character. A body
+/// broken only by those is one line to the line window, and the character
+/// window holds it. Measure in the renderer before adding another boundary.
 ///
-///   LF        2,000 line boxes   forces a break
-///   CRLF      2,000 line boxes   forces a break
-///   CR           77 line boxes   soft wrap only
-///   U+2028      118 line boxes   soft wrap only
-///   U+2029      118 line boxes   soft wrap only
-///   VT U+000B   116 line boxes   soft wrap only
-///   FF U+000C    77 line boxes   soft wrap only
-///   NEL U+0085  118 line boxes   soft wrap only
-///
-/// CSS resolves segment breaks to LF, and the CR of a CRLF is normalized away
-/// by the HTML parser — but React writes text nodes directly, so a lone CR
-/// reaching this pane stays a lone CR and lays out as an ordinary character.
-/// A body broken only by any of the "soft wrap only" rows is one line to the
-/// line window, and the character window is what holds it. That is correct,
-/// not a gap: those bodies cost soft wrapping over a bounded 200,000
-/// characters, which is the thing the character window exists to bound.
-///
-/// Two earlier attempts got this wrong in opposite directions — one added CR
-/// as a boundary, one wanted U+2028 and U+2029 — both from reading the spec
-/// rather than the renderer. Measure before adding a third.
-///
-/// Measured by conflictPane.measure.test.ts against this repository's tracked
-/// text (`.md`, `.ts`, `.tsx`, `.rs`; 919 files), the stand-in for the
-/// documents a workspace holds — dohc has no user corpus yet:
-///
-///   lines: p50 191, p90 1,063, p99 4,414, max 13,404
-///   chars: p50 7,022, p90 39,271, p99 174,756, max 469,068
-///   longest line: p50 99, p99 552, max 19,184
-///
-/// Both windows sit above the 99th-percentile document, so 0.9% of them reach
-/// the character window and 0.8% the line window. A body past either shows its
+/// Both windows sit above the 99th-percentile document (4,414 lines and
+/// 174,756 characters) in this repository's tracked text, which
+/// conflictPane.measure.test.ts measures. A body past either bound shows its
 /// first window and a count of what is held back, and `Show more` reaches the
-/// rest. That is a weaker cut than the compare surface makes today — it stops
-/// at 800 diff lines and offers no way to see the rest at all.
+/// rest.
 ///
-/// The corpus holds NO line wider than the character window, so it says
+/// That corpus holds no line wider than the character window, so it says
 /// nothing about the mid-line cut below. The unit tests carry that shape.
 export const CONFLICT_PREVIEW_MAX_CHARS = 200_000;
 export const CONFLICT_PREVIEW_MAX_LINES = 5_000;
@@ -78,7 +47,6 @@ export const CONFLICT_COMBINED_EDIT_MAX_BYTES = 1024 * 1024;
 export const CONFLICT_HEALTHY_DOCUMENT_MAX_BYTES = 496_029;
 
 type ConflictPreview = {
-  /// The text the pane paints.
   text: string;
   /// How much the window held back, in UTF-16 code units. Zero means the pane
   /// shows the whole side.
@@ -101,9 +69,10 @@ type ConflictPreview = {
 ///
 /// The cut prefers a line boundary but never requires one: a window that could
 /// not fit the next whole line fills to the character bound instead, inside
-/// that line. Requiring the boundary made `Show more` stop making progress —
-/// a six-character line followed by a 1 MiB line revealed nothing for the
-/// first five presses, because the window kept landing on the same newline.
+/// that line. Requiring the boundary would stop `Show more` making progress:
+/// a six-character line followed by a 1 MiB line would reveal nothing for the
+/// first five presses, because the window would keep landing on the same
+/// newline.
 ///
 /// The one cut that stays on a boundary is the one the LINE window makes.
 /// Filling past it would paint the line boxes that window exists to bound, and
@@ -137,8 +106,6 @@ function isHighSurrogate(code: number): boolean {
   return code >= 0xd800 && code < 0xdc00;
 }
 
-/// What one change to the combined copy does: it is taken, or it is refused
-/// for being past the editing bound and the attempted size is reported.
 type CombinedChange = { accepted: true; text: string } | { accepted: false; refusedBytes: number };
 
 /// The decision behind every keystroke in the combine textarea.

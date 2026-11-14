@@ -19,8 +19,6 @@ function propertyValue(key: string): string {
   return (screen.getByLabelText(`Property ${key} value`) as HTMLInputElement).value;
 }
 
-// The properties each change touches. A change inside a shared value reports
-// the property that holds it.
 function trackChangedProperties(frontmatter: Y.Map<unknown>): Set<string> {
   const changed = new Set<string>();
   frontmatter.observeDeep((events) => {
@@ -306,7 +304,6 @@ describe("PropertiesPanel", () => {
       expect(screen.queryByTestId("properties-locked")).toBeNull();
       expect([...frontmatter.keys()]).toEqual(["due", "id", "title", "options"]);
       expect([...changed].filter((key) => !"options".startsWith(key))).toEqual(["settings"]);
-      // An ordinary map stays a Yjs Any value.
       expect(frontmatter.get("options")).not.toBeInstanceOf(Y.AbstractType);
 
       Y.applyUpdate(replica, Y.encodeStateAsUpdate(doc));

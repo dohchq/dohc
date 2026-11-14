@@ -9,10 +9,8 @@ function renderStatus(props: { syncStatus: SyncStatusResult | null; failedSaves?
   return render(<WorkspaceSyncStatus failedSaves={0} {...props} />);
 }
 
-// The dot's kind: saved, working, waiting, off or attention.
 const dotOf = () =>
   screen.getByTestId("sync-status").querySelector("[data-dot]")?.getAttribute("data-dot");
-// Whether the label shows beside the dot, or only names it.
 const worded = () =>
   !screen
     .getByTestId("sync-status")
@@ -71,7 +69,7 @@ describe("sync status surface", () => {
     expect(screen.getByTestId("sync-status").textContent).toBe("Syncing…");
   });
 
-  // edges-05: a pass in flight read "Saving…" beside a document that said
+  // A pass in flight must not read "Saving…" beside a document that says
   // Saved. The files are on disk; only the sync is under way.
   it("calls a pass in flight syncing, never saving", () => {
     renderStatus({ syncStatus: syncState("syncing") });
@@ -106,7 +104,7 @@ describe("sync status surface", () => {
     expect(screen.getByTestId("sync-status").textContent).toBe("Sync failed");
   });
 
-  // #3294: a busy server needs nothing from the person, so it is a ring with
+  // A busy server needs nothing from the person, so it is a ring with
   // its words kept for the name, and a failed save still shows over it.
   it("shows a busy server as a ring, not a failure", () => {
     const busy = syncState("sync-failed", {
@@ -143,8 +141,6 @@ describe("sync status surface", () => {
     expect(status.textContent).not.toContain("(");
   });
 
-  // One saved mark in one place: a saved workspace shows the dot alone, and
-  // its words stay its accessible name and tooltip.
   it("shows a saved workspace as the dot alone, named for screen readers", () => {
     renderStatus({ syncStatus: syncState("synced") });
     const status = screen.getByRole("status", { name: "Local · saved" });
@@ -153,7 +149,6 @@ describe("sync status surface", () => {
     expect(worded()).toBe(false);
   });
 
-  // A sync pass is work in flight: a ring, its words kept for the name.
   it("shows a sync pass as a ring", () => {
     renderStatus({ syncStatus: syncState("syncing") });
     expect(dotOf()).toBe("working");
@@ -205,7 +200,6 @@ describe("sync status surface", () => {
     },
   );
 
-  // A file whose save failed: the title bar must not say saved over it.
   it("names the files that couldn't save instead of saved, and says saved again once they clear", () => {
     const { rerender } = renderStatus({ syncStatus: syncState("synced"), failedSaves: 1 });
     const status = screen.getByTestId("sync-status");
@@ -262,8 +256,6 @@ describe("sync status surface", () => {
     expect(screen.getByTestId("sync-status").textContent).toContain("Conflict (2)");
   });
 
-  // Self-hosting: the thing the user connects is their server, and every
-  // other surface that names this state says the same word.
   it("names a lost connection as the server, not the cloud", () => {
     renderStatus({
       syncStatus: {
@@ -281,8 +273,6 @@ describe("sync status surface", () => {
     expect(status.textContent).not.toMatch(/cloud/i);
   });
 
-  // Owner live delivery reads beside the local save state, never inside it:
-  // a saved file proves nothing about live editing.
   it.each([
     { delivery: "preparing" as const, reason: undefined, label: "Preparing live editing" },
     { delivery: "active" as const, reason: undefined, label: "Live editing active" },
@@ -341,15 +331,12 @@ describe("sync status surface", () => {
       expect(live.querySelector(".bg-warning")).not.toBeNull();
       expect(live.querySelector(".animate-spin")).toBeNull();
     }
-    // Local saving keeps its own line, and active delivery never claims it.
     const status = screen.getByTestId("sync-status");
     expect(status.textContent).toContain("Local · saved");
     expect(status.contains(live)).toBe(false);
     expect(live.textContent).not.toMatch(/synced|up to date/i);
   });
 
-  // A retry with no reason is dohc still dialling, so it takes the ring a sync
-  // pass uses. A named reason waits on someone and keeps the filled dot.
   it("shows a live retry with no reason as a ring", () => {
     const liveDot = () =>
       screen
@@ -416,7 +403,6 @@ describe("sync status surface", () => {
     );
   });
 
-  // Any other failure leaves the server's reach unknown, so live editing still speaks.
   it("keeps live editing beside a sync failure that does not name the server", () => {
     renderStatus({
       syncStatus: {
@@ -431,9 +417,6 @@ describe("sync status surface", () => {
     );
   });
 
-  // The title bar doesn't name the server, so live editing shows beside its
-  // words: no server connection, an account dohc can't confirm, a failed save,
-  // or a required update.
   it.each([
     {
       label: "Connect server to sync",

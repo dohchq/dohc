@@ -151,7 +151,6 @@ async function harness(shared = false, hooks: { disposeState?: () => void } = {}
     events.push("start-with-activity");
     return integration.startAgentRun(value.workspaceId, agentId);
   });
-  // Settings lists one agent you run, `terminal`, and one dohc starts, `default`.
   const agentYouRun = vi.fn(async (agentId: string) => {
     events.push("agent-you-run");
     return agentId === "terminal" ? { id: agentId } : null;

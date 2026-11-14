@@ -11,9 +11,6 @@ import { TEST_CONTENT_HASH } from "./FileInspector.draft-fixture";
 
 setupFileInspectorTests();
 
-// The text and CSV editors are disabled for two different reasons, and the
-// chip must name the one that applies: a read-only share is not a file that
-// was too large to read.
 describe("read-only reason on the text and CSV chips", () => {
   const bridgeMock = {
     platform: "linux" as const,
@@ -40,7 +37,6 @@ describe("read-only reason on the text and CSV chips", () => {
     vi.unstubAllGlobals();
   });
 
-  // Other files keep the chip's title, which names any file; a page says its own.
   const PAGE_SHARE = "This page is shared with you to read.";
   const TOO_LARGE = "This file is too large to edit in dohc.";
 

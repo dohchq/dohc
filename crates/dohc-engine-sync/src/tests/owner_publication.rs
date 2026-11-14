@@ -12,7 +12,6 @@ pub(crate) fn fixture() -> (ScratchDir, EngineStore, ObservedOwnerBinding, Vec<u
     fixture_at("owner.md")
 }
 
-/// The owner fixture with its page at `path`.
 fn fixture_at(path: &str) -> (ScratchDir, EngineStore, ObservedOwnerBinding, Vec<u8>) {
     let (dir, _, mut store) = open_store();
     seed_identity(&mut store);
@@ -1292,7 +1291,6 @@ fn a_stuck_167_1_delete_and_the_moments_after_it_publish_after_the_sweep() {
             ),
         ));
     }
-    // What the 167.1 delete left: the page and its lineage gone, its owner rows kept.
     store
         .write_with(&NoFaults, |tx| {
             tx.execute_batch(

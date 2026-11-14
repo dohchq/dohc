@@ -245,7 +245,6 @@ export function buildMenuTemplate(options: {
           ),
         ),
         ...(isMac ? ([{ type: "separator" }, { role: "togglefullscreen" }] as const) : []),
-        // Dev only: a packaged everyday-people app has no devtools menu item.
         ...(options.isDev ? ([{ type: "separator" }, { role: "toggleDevTools" }] as const) : []),
       ],
     },

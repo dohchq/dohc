@@ -188,7 +188,6 @@ async function stack(access: "view" | "edit" = "edit") {
 
 type Stack = Awaited<ReturnType<typeof stack>>;
 
-/** A person opening the link in a browser that is also signed in to a dohc account. */
 async function browser(s: Stack) {
   const exchanged = await s.send("/api/exchange", {
     method: "POST",
@@ -205,7 +204,6 @@ async function browser(s: Stack) {
     "x-dohc-link-session": session,
     cookie: [...cookies, ACCOUNT_COOKIE].join("; "),
   };
-  /** The viewer's request, with any header replaced or, when null, left out. */
   const post = (
     body: BodyInit,
     changed: Record<string, string | null> = {},
@@ -231,7 +229,6 @@ async function browser(s: Stack) {
   return { session, cookies, post, write };
 }
 
-/** An agent given only the link, signed in and allowed by a person. */
 async function agent(s: Stack): Promise<Client> {
   const { resource, accessToken } = await signInAgent(s.send, ORIGIN, s.secret, "Packer");
   const client = new Client({ name: "link-agent", version: "1" });
@@ -426,7 +423,6 @@ it("takes a write only from the viewer page or this server's agent tools, never 
       cookie: b.cookies.filter((cookie) => !cookie.startsWith("dohc_share_profile_")).join("; "),
     }),
     b.post(body, {}, `${COLLECTION_WRITES_PATH}?session=${b.session}`),
-    // Who writes is never the request's to say.
     b.post(
       JSON.stringify({
         ...(JSON.parse(body) as object),

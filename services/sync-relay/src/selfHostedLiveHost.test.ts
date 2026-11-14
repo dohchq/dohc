@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { afterEach, expect, it, vi } from "vitest";
 import { startSelfHostedLiveHost, deleteSelfHostedWorkspaceRoots } from "./selfHostedLiveHost";
 import { stopWithoutSessionHost } from "./sessionHostStop";
+import { serverLogLine } from "./serverLogWords";
 import { createServiceHostEnrollmentRoutes } from "./serviceHostEnrollmentRoutes";
 import { fenceAccount, initializeAccountDeletion } from "./storage/accountDeletion";
 import type { ServiceHostedSet } from "./serviceLiveHost";
@@ -114,11 +115,13 @@ function deferred() {
 }
 const bearer = (workspace: Workspace) => workspace.hostedReplication!.relay.bearerToken;
 const namespace = "supervisor-history";
-// The store a workspace identity's hosted replica lives in.
 const storeName = (workspaceId: string, replicationEpoch = "epoch", streamIdentity = "stream") =>
   createHash("sha256")
     .update(JSON.stringify(["hosted-v1", namespace, workspaceId, replicationEpoch, streamIdentity]))
     .digest("hex");
+const recovery =
+  "Recovery is not automatic yet. The store and every edit in it are kept. Keep the store's .diverged marker beside it. " +
+  "Without it the next relay start attaches the store again and checks it against the relay before anyone can edit.";
 
 async function fixture(
   options: {
@@ -174,7 +177,6 @@ async function fixture(
     updates: ServiceHostedSet[] = [],
     attachedAfter: string[][] = [],
     events: string[] = [];
-  // Documents the running host cannot continue until their owner tries again, with why.
   const blocked = new Map<string, ServiceActivationBlock>();
   const holdReasons = new Map<string, ServiceHostedHold["reason"]>();
   const refusal = new Error("Workspace attach refused.");
@@ -196,7 +198,6 @@ async function fixture(
     close: ReturnType<typeof vi.fn<() => Promise<void>>>;
     controller: AbortController;
   }> = [];
-  // Each page read of a kept queue, with the store it names.
   const keptReads: Array<{ outboxId: string; store: string }> = [];
   let live = 0,
     peak = 0;
@@ -448,7 +449,6 @@ async function fixture(
     failNextUpdate(error: Error) {
       failUpdate = error;
     },
-    /** Refuses every update that wants the path. */
     refuseAttach(path: string | undefined) {
       refusedPath = path;
     },
@@ -618,11 +618,15 @@ it.each([
     expect(f.enrollment()).toEqual(before);
     expect(f.storage.serviceActivationRetirement(binding)).toBeNull();
     expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding)).toBe(admission);
-    expect(log.mock.calls.filter(([line]) => String(line).includes("Session host:"))).toEqual([
+    // The log names the refusal's code: a moved document's state names its earlier path.
+    expect(
+      log.mock.calls.filter(([line]) => String(line).includes("Session host refusal:")),
+    ).toEqual([
       [
-        `Live editing Stop for workspace ${scope.workspaceId}, object ${binding.objectId}. Session host: ${test.state}`,
+        `Live editing Stop for workspace ${scope.workspaceId}, object ${binding.objectId}. Session host refusal: ${test.code}`,
       ],
     ]);
+    expect(log.mock.calls.flat().join(" ")).not.toContain(binding.currentPath);
     expect(log.mock.calls.flat().join(" ")).not.toContain(failure.message);
   } finally {
     finish.resolve();
@@ -630,10 +634,6 @@ it.each([
   }
 });
 
-// Proves: an owner's recovery read starts the daemon when none runs, as after
-// an identity change left only earlier stores. Reads at once start one daemon,
-// each reads the store its row's identity names, not the workspace's current
-// store, and later reconciliations keep that daemon.
 it("starts its daemon for a recovery read while it hosts nothing, and reads the store of the row's identity", async () => {
   const f = await fixture({ empty: true });
   await vi.waitFor(() => expect(f.host.unavailable).toBe(false), { timeout: 10_000 });
@@ -711,7 +711,6 @@ it("keeps a document hosted while any Edit grant covers it and retires it once i
     f.storage.revokeShareGrant({ shareId: scope.shareId, grantId: scope.grantId, revokedAtMs: 20 })
       .ok,
   ).toBe(true);
-  // This update follows the revocation; the overlapping share still covers docs/a.md.
   f.add("notes/d.md", "object-d", "share-notes");
   await f.waitUpdate(["docs/a.md", "notes/c.md", "notes/d.md"]);
   expect(
@@ -722,7 +721,6 @@ it("keeps a document hosted while any Edit grant covers it and retires it once i
     }).ok,
   ).toBe(true);
   await f.waitUpdate(["notes/c.md", "notes/d.md"]);
-  // Its replica still holds it, so the enrollment stays.
   await f.waitPasses();
   expect(f.storage.listRetiredServiceHostEnrollments(scope.workspaceId).documents).toEqual([]);
   expect(f.storage.listServiceHostEnrollments(scope.workspaceId).map((row) => row.path)).toContain(
@@ -749,9 +747,6 @@ it("keeps a document hosted while any Edit grant covers it and retires it once i
   ).toBe(true);
 });
 
-// Proves: stopping a workspace's last document keeps the workspace attached
-// until its replica drains, then detaches it and only then releases the
-// enrollment. The store stays, and resuming the document reopens it.
 it("drains a stopped last document, then detaches the workspace and releases it, keeping its store", async () => {
   const f = await fixture();
   await f.waitStarted(1);
@@ -772,7 +767,6 @@ it("drains a stopped last document, then detaches the workspace and releases it,
     { workspaceId: scope.workspaceId, objectId: binding.objectId, path: binding.currentPath },
   ]);
   await f.waitPasses();
-  // Undrained, so the hosted credential and the store stay.
   expect(f.enrollment()!.hostDrainedAtMs).toBeNull();
   expect(f.storage.currentServiceHostWorkspace(scope.workspaceId, true)).not.toBeNull();
   expect(existsSync(store)).toBe(true);
@@ -786,12 +780,10 @@ it("drains a stopped last document, then detaches the workspace and releases it,
     `release ${binding.objectId} attached=false store=true`,
   ]);
   expect(f.storage.currentServiceHostWorkspace(scope.workspaceId, true)).toBeNull();
-  // The next reconciliation no longer wants the workspace.
   await vi.waitFor(() => expect(f.updates.at(-1)!.workspaces).toEqual([]), { timeout: 10_000 });
   expect(await readFile(join(store, "replica.sqlite"), "utf8")).toBe("hosted");
   expect(f.host.current()).toBeDefined();
   expect(f.starts[0]!.close).not.toHaveBeenCalled();
-  // Resumed, the document's workspace attaches to the store it kept.
   f.storage.ensureOwnedLiveDocument({ intent: "owner-resume", ...f.input });
   const returned = await f.waitUpdate(["docs/a.md"]);
   expect(returned.workspaces.map((row) => basename(row.root))).toEqual([
@@ -802,9 +794,6 @@ it("drains a stopped last document, then detaches the workspace and releases it,
   expect(await readFile(join(store, "replica.sqlite"), "utf8")).toBe("hosted");
 });
 
-// Proves: a diverged store stays where it is, untouched and reported once.
-// Its workspace releases nothing and is not attached again on later passes or
-// by a restarted daemon, while another workspace's changes still apply.
 it("keeps a diverged store in place and its workspace detached across passes and daemon restarts", async () => {
   const f = await fixture();
   await f.waitStarted(1);
@@ -816,9 +805,10 @@ it("keeps a diverged store in place and its workspace detached across passes and
   f.diverge();
   f.host.reconcile();
   const reported = expect.objectContaining({
-    message: expect.stringMatching(/diverged from the relay.*stays detached.*store is kept at .+/),
+    message: `The live editing copy of workspace ${scope.workspaceId} diverged from the relay. It stays detached, and its store ${storeName(scope.workspaceId)} is kept. ${recovery}`,
   });
   await vi.waitFor(() => expect(f.onError).toHaveBeenCalledWith(reported), { timeout: 10_000 });
+  expect(serverLogLine(f.onError.mock.calls[0]![0])).not.toContain(f.data);
   f.onError.mockClear();
   await f.waitPasses();
   const workspaceId = "workspace-2",
@@ -844,7 +834,6 @@ it("keeps a diverged store in place and its workspace detached across passes and
   await vi.waitFor(() => expect(f.attachedAfter.at(-1)).toEqual([workspaceId]), {
     timeout: 10_000,
   });
-  // A replacement daemon knows nothing of the divergence, and still gets only the other workspace.
   f.starts[0]!.controller.abort();
   await f.waitStarted(2);
   await vi.waitFor(
@@ -872,13 +861,6 @@ it("keeps a diverged store in place and its workspace detached across passes and
   expect(await readFile(join(store, "replica.sqlite"), "utf8")).toBe("unpublished work");
 });
 
-// Proves: the operator learns where a blocked document's store is kept, once
-// per block, and the document stays hosted. A new block after its owner's
-// retry is reported again, even one before any reconciliation saw it unblocked.
-
-// Proves: a document with no Y.Doc lineage tells the operator, once, that its
-// owner must open it on a desktop before it can start.
-
 // Proves: a document whose history is past what the server reads or checks
 // tells the operator, once, that it tries again later or on its owner's Resume.
 it("tells the operator a document whose history is past its budget tries again later", async () => {
@@ -896,20 +878,19 @@ it("tells the operator a document whose history is past its budget tries again l
   expect(f.onError.mock.calls).toEqual([
     [
       expect.objectContaining({
-        message: `Live editing of docs/a.md in workspace ${scope.workspaceId} cannot start: its edit history is past what this server reads or checks. It tries again later, or when its owner resumes live editing in dohc. Its store is kept at ${join(f.data, storeName(scope.workspaceId))}.`,
+        message: `Live editing of object ${binding.objectId} in workspace ${scope.workspaceId} cannot start: its edit history is past what this server reads or checks. It tries again later, or when its owner resumes live editing in dohc. Its store ${storeName(scope.workspaceId)} is kept.`,
       }),
     ],
   ]);
   expect(f.host.blocked(binding)).toBe("history-over-budget");
+  // The server log prints the whole line, and it names neither the document's path nor the store's folder.
+  const line = serverLogLine(f.onError.mock.calls[0]![0]);
+  expect(line).toMatch(/^ServerLogError: Live editing of object /);
+  expect(line).not.toContain("docs/a.md");
+  expect(line).not.toContain(f.data);
   await f.waitPasses();
   expect(f.onError).toHaveBeenCalledTimes(1);
 });
-
-// Proves: a document whose host copy is missing an owner edit tells the
-// operator, once, that it is held until its owner resumes it.
-
-// Proves: a divergence whose detach failed as its daemon exited keeps the
-// store out of the replacement daemon, and is reported once.
 
 // Proves: a daemon that replaces a failed one is logged once it starts. The first daemon's start is not.
 it("logs a replacement daemon once it starts", async () => {
@@ -933,11 +914,6 @@ it("logs a replacement daemon once it starts", async () => {
   }
 });
 
-// Proves: a restarted relay keeps a diverged store detached from its start,
-// before any pull could find the divergence again, and its owner still reads
-// why live editing stopped. The operator hears of it once, and no daemon starts for it.
-
-// A relay that starts again on the fixture's storage and stores.
 async function restart(f: Awaited<ReturnType<typeof fixture>>, onError = vi.fn()) {
   const restarted = await startSelfHostedLiveHost({
     trustedAccount: (accountId: string) => ({ accountId, name: "Owner name" }),
@@ -955,9 +931,6 @@ async function restart(f: Awaited<ReturnType<typeof fixture>>, onError = vi.fn()
   return restarted;
 }
 
-// Proves: a marker that could not be written is written on a later
-// reconciliation, and the store stays fenced meanwhile. Its failure is
-// reported once, and the relay that starts after it landed keeps the store detached.
 it("retries a divergence marker that could not be written, fencing the store meanwhile", async () => {
   const f = await fixture();
   await f.waitStarted(1);
@@ -974,7 +947,9 @@ it("retries a divergence marker that could not be written, fencing the store mea
     { timeout: 10_000 },
   );
   expect(f.onError.mock.calls.find(failed)![0]).toMatchObject({
-    message: `Could not write ${marker}. It is retried while the relay runs; a relay restart before it lands attaches the store again.`,
+    message:
+      `Could not write the .diverged marker of store ${storeName(scope.workspaceId)} for workspace ${scope.workspaceId} (Error: ENOSPC). ` +
+      "It is retried while the relay runs; a relay restart before it lands attaches the store again.",
     cause: markerFailure.error,
   });
   await f.waitPasses();
@@ -997,8 +972,6 @@ it("retries a divergence marker that could not be written, fencing the store mea
   expect((await restart(f)).diverged(f.enrollment()!)).toBe(true);
 });
 
-// Proves: startup deletes nothing: not a store no enrollment names, not what
-// an earlier build left partway or set aside, and not other directories.
 it("deletes no store at startup, named or not", async () => {
   const stale = "f".repeat(64),
     named = storeName(scope.workspaceId);
@@ -1119,11 +1092,6 @@ it("removes a deleted account's hosted stores and markers while no session host 
   expect((await readdir(root)).sort()).toEqual(kept.sort());
 });
 
-// Proves: deleting an account removes, on a running host, every hosted store
-// of its workspaces with the live state parked there, an earlier identity's
-// drained store, and a diverged store's marker. The daemon detaches each
-// workspace while its store is still there. Nothing writes them again, and
-// another owner's store stays.
 it("removes a deleted account's hosted stores, parked state and markers on a running host", async () => {
   const f = await fixture();
   await f.waitStarted(1);
@@ -1185,8 +1153,6 @@ it("removes a deleted account's hosted stores, parked state and markers on a run
   expect(f.onError).not.toHaveBeenCalled();
 });
 
-// Proves: a deletion waits for the reconciliation writing a divergence marker,
-// so that marker is not written after the deletion removed the store.
 it("waits for a divergence marker being written before deleting its store", async () => {
   const f = await fixture();
   await f.waitStarted(1);

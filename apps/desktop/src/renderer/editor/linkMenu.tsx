@@ -38,8 +38,6 @@ import {
   type FloatingMenuPlacement,
 } from "./floatingMenuPosition";
 
-// ── popover state ────────────────────────────────────────────────────────
-
 export type LinkMenuState =
   | { open: false }
   | {
@@ -182,8 +180,6 @@ export function removeLinkMenu(editor: Editor, state: OpenLinkMenuState): void {
     .run();
 }
 
-// ── Cmd/Ctrl+K keyboard shortcut ────────────────────────────────────────
-
 /** Standalone extension so MarkdownEditor.tsx only needs to add it to the
  *  extensions array — no editorProps/plugin-array surgery required for the
  *  shortcut itself. */
@@ -293,8 +289,6 @@ export function makeLinkMenuPlugin({
     },
   });
 }
-
-// ── popover UI ───────────────────────────────────────────────────────────
 
 export function LinkMenu({
   editor,

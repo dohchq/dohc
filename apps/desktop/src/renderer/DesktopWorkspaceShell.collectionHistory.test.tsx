@@ -130,9 +130,6 @@ async function collectionRow(user: ReturnType<typeof userEvent.setup>) {
   return screen.findByTestId("history-collection-open");
 }
 
-// The timeline is about changes: a file's row opens its diff, and a
-// Collection's row opens that Collection's History, where the change and its
-// Undo are.
 describe("a Collection change in the History timeline", () => {
   it("opens its Collection's History by click, again once the Collection is open", async () => {
     const user = userEvent.setup();
@@ -163,8 +160,6 @@ describe("a Collection change in the History timeline", () => {
     expect(await within(history).findByText("addRow")).toBeTruthy();
   });
 
-  // The row opens the tab in the focused group, so only that group's page
-  // opens History.
   it("opens one History when its Collection shows in two editor groups", async () => {
     const user = userEvent.setup();
     collectionShell({
@@ -190,7 +185,6 @@ describe("a Collection change in the History timeline", () => {
     expect(screen.queryAllByRole("dialog", { name: "Collection history" })).toEqual([]);
   });
 
-  // A tab closed before its page loaded takes its ask with it.
   it("opens the Collection without History after the row's tab closed while it loaded", async () => {
     const loading = deferred();
     page.loading = loading.promise;
@@ -241,7 +235,6 @@ describe("the Collections section", () => {
       "No Collections yet.",
     );
     await user.click(screen.getByRole("menuitemradio", { name: "Show archived Collections" }));
-    // The archived list is on its way, so the section doesn't say it's empty.
     expect(screen.queryByTestId("explorer-collections-empty")).toBeNull();
     await user.click(screen.getByRole("button", { name: "Collections actions" }));
     expect(screen.getByRole("menuitem", { name: "Restore from recovery file…" })).toBeTruthy();
@@ -270,7 +263,6 @@ describe("the Collections section", () => {
     await user.click(await screen.findByRole("button", { name: "Collections actions" }));
     await user.click(screen.getByRole("menuitemradio", { name: "Show archived Collections" }));
     await act(async () => archived[0]!.reject(new Error("The archived list could not be read.")));
-    // The list isn't known, so nothing says it's empty, and Try again sits where it would be.
     const failed = await screen.findByTestId("collections-failed");
     expect(screen.queryByTestId("explorer-collections-empty")).toBeNull();
 

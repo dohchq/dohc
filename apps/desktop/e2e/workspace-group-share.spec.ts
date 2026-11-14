@@ -69,7 +69,6 @@ test("@two-client a group shares its channel and folder together, and both sides
       userId: OWNER_USER,
       token: OWNER_TOKEN,
     });
-    // The member's own local workspace, signed in as the recipient.
     await seedWorkspaceManifest(memberTemp, memberWorkspaceId);
     await writeWorkspaceFiles(memberTemp, [
       { path: "notes/mine.md", contents: "# Mine\n\nThe member's own file.\n" },
@@ -88,7 +87,6 @@ test("@two-client a group shares its channel and folder together, and both sides
     owner = await launchDesktopApp({ workspace: ownerTemp, env: syncEnv });
     await openWorkspaceFromFirstRun(owner.page, ownerTemp);
 
-    // --- The owner creates a group that holds posts and chat -------------
     await openChatsView(owner.page);
     await owner.page.getByTestId("chats-new-channel").click();
     await owner.page.getByTestId("chats-new-channel-name").fill("Launch team");
@@ -97,10 +95,8 @@ test("@two-client a group shares its channel and folder together, and both sides
     await owner.page.getByTestId("chats-new-channel-submit").click();
     await expect(owner.page.getByTestId("chats-channel-view")).toBeVisible();
     await expect(owner.page.getByTestId("chats-channel-title")).toHaveText("Launch team");
-    // The group's folder exists the moment the group does.
     await waitForWorkspaceFile(owner.page, ownerWorkspaceId, "launch-team");
 
-    // A file in the group's folder and one outside it, then a post.
     await writeWorkspaceFiles(ownerTemp, [
       { path: "launch-team/plan.md", contents: "# Plan\n\nThe lighthouse memo.\n" },
       { path: "private/ledger.md", contents: "The kraken ledger stays private.\n" },
@@ -115,7 +111,6 @@ test("@two-client a group shares its channel and folder together, and both sides
     await owner.page.getByTestId("chats-thread-back").click();
     await expect(owner.page.getByTestId("chats-channel-view")).toBeVisible();
 
-    // --- The owner shares the group by email ----------------------------
     await owner.page.getByTestId("chats-share-channel").click();
     await expect(owner.page.getByTestId("chats-share-panel")).toBeVisible();
     await owner.page.getByTestId("chats-share-email").fill(MEMBER_EMAIL);
@@ -124,7 +119,6 @@ test("@two-client a group shares its channel and folder together, and both sides
     await owner.page.getByTestId("chats-share-close").click();
     await expect(owner.page.getByTestId("chats-share-panel")).toHaveCount(0);
 
-    // The relay holds one grant, a group naming the channel and its folder.
     const listing = await fetch(`${relay.baseUrl}/sync/shares`, {
       headers: { authorization: `Bearer ${OWNER_TOKEN}` },
     });
@@ -169,7 +163,6 @@ test("@two-client a group shares its channel and folder together, and both sides
       )
       .toBe("served");
 
-    // --- The member joins from Shared with you ---------------------------
     member = await launchDesktopApp({ workspace: memberTemp, env: syncEnv });
     expect(member.app.process().pid).not.toBe(owner.app.process().pid);
     await openWorkspaceFromFirstRun(member.page, memberTemp);
@@ -177,7 +170,6 @@ test("@two-client a group shares its channel and folder together, and both sides
     await expect(member.page.getByTestId("chats-shared-with-you")).toBeVisible({ timeout: 60_000 });
     await member.page.getByTestId("chats-join-shared").click();
 
-    // The channel arrives with the owner's post.
     const joinedChannel = member.page
       .getByTestId("chats-channel")
       .filter({ hasText: "Launch team" });
@@ -191,22 +183,17 @@ test("@two-client a group shares its channel and folder together, and both sides
       },
     );
 
-    // The folder arrives beside the member's own files, labeled by the
-    // group's name; the owner's private file never crosses.
     await revealExplorerPath(member.page, "shared-with-me/launch-team/launch-team/plan.md");
     await expect(explorerRow(member.page, "shared-with-me/launch-team/private")).toHaveCount(0);
     await revealExplorerPath(member.page, "notes/mine.md");
     await explorerRow(member.page, "shared-with-me/launch-team/launch-team/plan.md").click();
     await expect(member.page.getByText("The lighthouse memo.")).toBeVisible();
 
-    // --- The member posts back in the group's chat lane ------------------
-    // The Chats tab comes back where it was left: inside the group.
     await openChatsView(member.page);
     if (!(await member.page.getByTestId("chats-channel-view").isVisible())) {
       await joinedChannel.click();
     }
     await expect(member.page.getByTestId("chats-channel-title")).toHaveText("Launch team");
-    // The group's type crossed with the channel: both lanes are here.
     await expect(member.page.getByTestId("chats-channel-view")).toHaveAttribute(
       "data-group-type",
       "both",

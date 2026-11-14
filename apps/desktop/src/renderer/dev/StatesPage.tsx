@@ -260,7 +260,6 @@ const SHADOW_ROOM = "p-10";
 // drawn at the pane's width, as the Settings frame is, with the shadow's room.
 const REVIEW_ROOM = `${SHADOW_ROOM} w-[672px] [&>[role=dialog]]:w-full`;
 
-// A held save to a note with raw HTML: the file, then what saving would write.
 const HELD_FILE = [
   "# Readme",
   "",
@@ -310,7 +309,6 @@ const HELD_CHANGE_READS: { label: string; read: HeldChangeRead }[] = [
   { label: "no longer held", read: { kind: "ready", change: null } },
 ];
 
-// The parts the page renders, when it renders only some.
 const ShownParts = createContext<ReadonlySet<string> | undefined>(undefined);
 
 // A part whose subject is not a menu but which holds one, such as a header
@@ -367,7 +365,6 @@ const noop = () => undefined;
 
 const NO_RECOVERY: ReadonlySet<string> = new Set();
 
-// One group's strip over a strip of paper, as the shell lays a group out.
 function EditorGroupSpecimen(props: {
   groupId: string;
   groupNumber: number;
@@ -429,8 +426,6 @@ function UrlOfferSpecimen(props: { force?: string; chosen?: boolean }) {
   );
 }
 
-// One group's tab row carrying an open document's actions, as the shell lays
-// it out, over a strip of paper.
 function TabRowActionsSpecimen(props: {
   width: string;
   testId?: string;
@@ -477,8 +472,6 @@ function SplitGroupsSpecimen(
   );
 }
 
-// Two groups side by side, each with one file open and that file's actions
-// in its own tab row.
 function FileViewSplitSpecimen(props: {
   left: { path: string; actions: ReactNode };
   right: { path: string; actions: ReactNode };
@@ -552,7 +545,6 @@ function EditorGroupsSpecimen(props: { activeHasTabs: boolean }) {
   );
 }
 
-// More tabs than a narrow strip holds.
 const OVERFLOW_TABS = [
   "itinerary.md",
   "budget.csv",
@@ -591,7 +583,6 @@ function OverflowStripSpecimen(props: {
   );
 }
 
-// The sidebar's Collections section, at a width the sidebar takes.
 function CollectionsSectionSpecimen(props: { width: number; children: ReactNode }) {
   return (
     <div
@@ -784,7 +775,6 @@ const STRIP_FILES: ReadonlyMap<string, WorkspaceFileEntry> = new Map(
 );
 const STRIP_LABELS: ReadonlyMap<string, string> = new Map([[STRIP_GROUP, "trip"]]);
 
-// One group's strip over a strip of paper, its tab list at rest.
 function GlyphStrip(props: {
   groupId: string;
   groupNumber: number;
@@ -906,7 +896,6 @@ const LONG_REPORT_TOAST = {
   seen: false,
 };
 
-// Opens the Details inside it, as a click on Details would.
 function DetailsOpen(props: { children: ReactNode }) {
   const ref = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
@@ -923,7 +912,6 @@ const HIDDEN_HISTORY: HistoryPolicyUnreadableResult = {
   unreadable: [".dohc/visibility.toml"],
   policyErrors: [PARSER_TEXT],
 };
-// The toast a refused restore raises, in the words the shell builds for it.
 const REFUSED_RESTORE = new Error(
   `Error invoking remote method 'desktop:restore-engine-moment-file': RestorePolicyRefusalError [policy-unreadable]: .dohc/visibility.toml: ${PARSER_TEXT}`,
 );
@@ -1156,7 +1144,6 @@ const TIMELINE_STORY: TimelineEntry[] = [
   storyMoment("story-unknown", storyAt(12, 58), { origin: "unknown" }),
 ].map((moment) => ({ kind: "file", moment }));
 
-// Budget's definition labels its operation; Guests' is not loaded here.
 const TIMELINE_COLLECTIONS = new Map([
   [
     TIMELINE_BUDGET,
@@ -1173,9 +1160,7 @@ const TIMELINE_COLLECTIONS = new Map([
   ],
 ]);
 
-// The About tab on the drawing's document: who wrote what, who has it.
 const ABOUT_PATH = "notes/product-plan.md";
-// The Comments head's one action.
 const ABOUT_COMMENT_ACTION = (
   <AboutSectionAction
     testId="linked-chat-new"
@@ -1250,7 +1235,6 @@ const ABOUT_MOMENTS: EngineMomentRecord[] = [
     origin: "local-file",
   }),
 ];
-// A person's edits in one sitting, as Ice's Untitled.md shows them.
 const ABOUT_SITTING: EngineMomentRecord[] = [0, 1, 2, 3, 4].map((step) =>
   aboutMoment({
     id: `about-sitting-${step}`,
@@ -1314,7 +1298,6 @@ const ABOUT_ACCESS_UNKNOWN: AccessAnswer = {
   freshness: "unknown",
 };
 
-// About for the drawing's #general: Sam and the agent Nova here, and the Group's grants.
 const aboutPeer = (
   faceToken: string,
   displayName: string,
@@ -1362,8 +1345,6 @@ const ABOUT_CHAT_ACCESS: AccessAnswer = {
     }),
   ],
 };
-// The files #general mentions: the funnel by Nova, the landscape by Sam, and
-// the plan by both.
 const mentionedBy = (
   displayName: string,
   presentation: ActorPresentation,
@@ -1393,8 +1374,6 @@ const ABOUT_MENTIONS: Extract<ConversationLinksView, { status: "ready" }> = {
   building: false,
   partial: false,
 };
-// Two files a Group's link authors mentioned last: the cabin by an agent that
-// signed in with the link, the dates by a person who opened it.
 const ABOUT_LINK_MENTIONED: MentionedFile[] = [
   {
     objectId: "states-cabin",
@@ -1433,7 +1412,6 @@ function ConversationLinks(props: { view: ConversationLinksView }) {
   );
 }
 
-// A group's feed and a thread, from the drawing's #general.
 const CHAT_AT = new Date(2026, 6, 8, 14, 43).getTime();
 const CHAT_REACTIONS: ChatReactionControls = {
   reactions: [],
@@ -1553,7 +1531,6 @@ const CHAT_THREAD_NAV = {
   channel: CHAT_CHANNEL,
   thread: CHAT_POSTS[0]!.thread,
 } as const;
-// The same thread in Claude Code's own chat.
 const CHAT_AGENT_THREAD_NAV = {
   ...CHAT_THREAD_NAV,
   channel: {
@@ -1679,8 +1656,6 @@ function ChatFailedRunSpecimen(props: {
   );
 }
 
-// Claude Code asks Ada to apply a change to Volunteers, and its card draws in
-// each state. Ada made the Email rule earlier; the agent made the rest.
 const CHANGE_AT = (hour: number, minute: number) => new Date(2026, 6, 8, hour, minute).getTime();
 const VOLUNTEERS = "volunteers/dataset.json";
 const VOLUNTEERS_MIGRATION = "volunteers/migrations/004-due-date.sql";
@@ -1824,7 +1799,6 @@ const changeCard = (
 });
 const WAITING = { kind: "waiting" } as const;
 const applyFailure = collectionApplyFailure("Volunteers");
-// Two volunteers with notes signed up after the change was sent.
 const shownDeletes = collectionChangeDeletes(CHANGE_ROWS);
 const deletesMore = collectionDeletesMoreFailure(shownDeletes, {
   ...shownDeletes,
@@ -2016,7 +1990,6 @@ function AgentOfferComposer(props: {
   );
 }
 
-// The About rail at the drawing's 290px, on the chrome.
 function AboutPanelSpecimen(props: { children: ReactNode }) {
   return (
     <div className="flex w-[290px] flex-col rounded-lg border border-line bg-panel pb-2">
@@ -2045,7 +2018,6 @@ const CHAT_RUN: ChatMessageRecord[] = [
   },
 ];
 
-// A person, an agent in the default olive, and an agent with a chosen color.
 const AGENT_COLOR_CHAT: ChatMessageRecord[] = [
   {
     id: "color-sam",
@@ -2093,8 +2065,6 @@ function ChatRunSpecimen() {
   );
 }
 
-// The drawing's document, linked from the meeting notes twice and from the
-// research, and named in #general.
 const aboutLink = (source: string, title: string, line: number, snippet: string, ordinal = 0) => {
   const start = snippet.indexOf("[[");
   const end = snippet.indexOf("]]") + 2;
@@ -2209,9 +2179,6 @@ function AccessSpecimen(props: { view: AccessView; reason?: AccessReason }) {
   );
 }
 
-// The Sharing view's lists, as the drawing fills them: a long name cut in
-// its middle, one person, several at two levels, a link, two rows with one
-// name, and an ended share.
 const SHARING_CHECKED_AT = new Date(2026, 6, 8, 9, 40).getTime();
 const SHARING_GRANTED: AccessAnswer = {
   ...ABOUT_ACCESS,
@@ -2311,7 +2278,6 @@ const SHARING_UNKNOWN: Partial<AccessAnswer> = {
 const SHARING_MOUNTS: ShareMount[] = [
   { shareId: "in-funnel", label: "funnel", granterEmail: "sam@hollis.studio", access: "view" },
 ];
-// A mount the relay no longer lists, and one whose pulls skipped changes.
 const SHARING_SKIPPED = {
   ops: [
     {
@@ -2406,7 +2372,6 @@ const SHARING_ACTIONS: SharingActions = {
 };
 const ready = (answer: AccessAnswer): AccessView => ({ status: "ready", answer });
 
-// The Sharing view at the drawing's 280px, on the chrome.
 function SharingSpecimen(props: {
   granted: AccessView;
   received: AccessView;
@@ -2519,7 +2484,6 @@ const MERGE_BLOCKED_NOTICE = {
   onDismiss: noop,
 };
 
-// Twelve files picked in Research, as Explorer lists them.
 const DELETE_PATHS = [
   "Research/competitors.md",
   "Research/meeting-2026-07-08.md",
@@ -2561,8 +2525,6 @@ function DialogSpecimen(props: { theme: "light" | "dark" }) {
   );
 }
 
-// The New version dialog, from Main with a name typed, and from a version
-// with unsaved changes and a refused name.
 function NewVersionSpecimen(props: { theme: "light" | "dark"; fromVersion?: boolean }) {
   const panelRef = useRef<HTMLDivElement>(null);
   const draft = {
@@ -2625,7 +2587,6 @@ function failToCopy(): never {
   throw new Error("nothing to copy");
 }
 
-// One row per form: rest, hover, keyboard focus, then the two answers.
 function CopySpecimens(props: { theme: "light" | "dark"; form: "icon" | "words" }) {
   const { theme, form } = props;
   const iconOnly = form === "icon";
@@ -2769,7 +2730,6 @@ const REFUSED_UNDO_TOAST = {
   seen: false,
 };
 
-// The versions menu on a version made from another version, and on Main.
 const radioMenuItems: MenuEntry[] = [
   { id: "main", label: "Main", checked: false, onSelect: noop },
   { id: "draft", label: "Draft two", checked: true, onSelect: noop },
@@ -3344,8 +3304,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         </div>
       </Section>
 
-      {/* The Explorer's menu, one part per kind of row: a file in a synced
-          workspace, a folder, and a received share's mount. */}
       <Section part="explorer-menu-file" title="Explorer menu, file">
         <Specimen label="rows main returns; first row keyboard-active; shortcuts">
           <div
@@ -3515,7 +3473,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         </div>
       </Section>
 
-      {/* Details closed, open, and open with a report long enough to scroll. */}
       <Section part="notice-details" title="Notice details">
         <div className={`flex w-full flex-wrap items-start gap-x-6 gap-y-4 ${SHADOW_ROOM}`}>
           <WorkspaceErrorToast error={toast("danger")} onRetry={noop} onHide={noop} />
@@ -3652,7 +3609,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         <DialogSpecimen theme={theme} />
       </Section>
 
-      {/* The shell's menus, one part each. */}
       <Section part="menu-radio" title="Menu with radio rows">
         <Specimen label="checked: keyboard-active; unchecked: hover; icon; disabled with its reason">
           <div
@@ -4183,7 +4139,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* On the title bar's own fill. */}
       <Section part="title-bar-status" title="Title bar status">
         {/* The saved dot alone while nothing needs the person, and its words
             once something does. */}
@@ -5168,7 +5123,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* Privacy's rows in the narrowest pane, an 840px window's, and the widest. */}
       <Section part="settings-privacy" title="Settings: Privacy">
         <Specimen label="narrowest pane: Diagnostics' buttons under its text; usage reports changed, keyboard focus on its switch">
           <div
@@ -6893,13 +6847,11 @@ const HOME_NO_APPS: ExplorerApps = {
   pinnedApps: [],
 };
 
-// A share that holds one app and nothing else.
 const HOME_SHARED_APP: ExplorerApps = {
   ...HOME_NO_APPS,
   state: { status: "ready", workspaceId: "states", apps: [SHELF_APP] },
 };
 
-// One editor group with nothing open in it.
 const HOME_NO_EDITORS: ExplorerProps["editorGroups"] = [
   { id: "primary", tabs: [], activeTab: null, size: 1 },
 ];

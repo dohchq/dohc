@@ -329,7 +329,6 @@ it("gives a teammate access to a Collection on this computer by moving it to the
     transferStatus,
   } = await collectionOnThisComputer();
 
-  // Without the owner's agreement nothing moves, and the refusal says what moving means.
   expect(await collection("window", { ...address, action: "permissions" })).toMatchObject({
     kind: "permissions",
     place: {
@@ -345,7 +344,6 @@ it("gives a teammate access to a Collection on this computer by moving it to the
     teammate.invoke(invoke(id(6), "teammate-before", { name: "Too early" })),
   ).rejects.toThrow();
 
-  // Agreeing moves the Collection with its records, then gives the teammate exactly the chosen action.
   await expect(collection("window", { ...setGrant, moveToServer: true })).resolves.toEqual({
     kind: "grant-updated",
   });
@@ -363,7 +361,6 @@ it("gives a teammate access to a Collection on this computer by moving it to the
     result: [{ name: "Owner" }, { name: "Teammate" }],
   });
 
-  // Once the Collection is on the server, the owner changes access with no further agreement.
   await expect(
     collection("window", {
       ...setGrant,
@@ -376,18 +373,15 @@ it("gives a teammate access to a Collection on this computer by moving it to the
   controller.abort();
 });
 
-// What a person sees when the server stops answering partway through a move.
 const stopped =
   "This Collection didn't finish moving to relay.test. Its records are kept on this computer.";
 
-// The first chunk of an upload, then a broken connection.
 it.each([
   [
     "after the server kept it, before its answer arrived",
     (init: RequestInit, send: (init: RequestInit) => Promise<unknown>) => send(init),
   ],
 ])("finishes a move that stopped %s on the next read after a restart", async (_when, upload) => {
-  // The server stops answering during the move's upload, and answers again after this computer restarts.
   let down = false,
     uploads = 0;
   const {
@@ -412,7 +406,6 @@ it.each([
   await expect(collection("window", { ...setGrant, moveToServer: true })).rejects.toThrow(stopped);
   expect(transferStatus(id(1))?.state).toBe("ready");
 
-  // After a restart, a read tries to finish the move. While the server is still away it fails, and the Collection stays fenced.
   await restart();
   await expect(collection("window", { ...address, action: "permissions" })).rejects.toThrow(
     stopped,
@@ -422,7 +415,6 @@ it.each([
   );
   expect(transferStatus(id(1))?.state).toBe("ready");
 
-  // Once the server answers, the next read finishes the move with the owner's record, and access saves with no new agreement.
   down = false;
   expect(await collection("window", { ...address, action: "permissions" })).toMatchObject({
     kind: "permissions",

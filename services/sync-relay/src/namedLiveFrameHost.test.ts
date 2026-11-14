@@ -343,7 +343,6 @@ it("arms a coalesced wake before an empty native read and retains one output lea
   lease.release();
 });
 
-// Only the relay attributes work to a personal agent. The host refuses before it reads who records.
 it.each(["account"] as const)(
   "refuses an %s recording context that names a personal agent before journal admission",
   async (kind) => {

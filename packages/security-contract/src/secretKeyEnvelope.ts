@@ -100,7 +100,7 @@ async function deriveKek(input: {
   // N=2^17 r=8 p=1 uses roughly 128 MiB and is intended for a once-per-machine
   // desktop enrollment prompt, not a hot web-login path. Argon2id would be
   // stronger, but scrypt is Node's zero-dependency async KDF and matches the
-  // 0P-D design's passphrase-wrapped key envelope.
+  // design's passphrase-wrapped key envelope.
   return new Promise<Buffer>((resolve, reject) => {
     scrypt(
       input.passphrase,

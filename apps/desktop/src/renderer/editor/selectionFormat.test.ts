@@ -34,7 +34,6 @@ function makeEditor(markdown: string): Editor {
   return editor;
 }
 
-// The document position where `text` starts.
 function positionOf(editor: Editor, text: string): number {
   let found = -1;
   editor.state.doc.descendants((node, pos) => {
@@ -93,7 +92,6 @@ describe("selectionFormat", () => {
         if (format[mark]) seen.add(mark);
       }
     }
-    // Each mark the document uses was active for some selection.
     expect([...seen].sort()).toEqual(["bold", "code", "highlight", "italic", "link"]);
   });
 

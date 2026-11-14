@@ -108,9 +108,6 @@ describe("Show in File Explorer", () => {
     );
   });
 
-  // DesktopRoot remounts the shell on a switch. Keeping the same shell is the
-  // stricter case, and coming back to the first workspace does not revive the
-  // old answer. Each time main answers that the window left.
   it.each(["remounts its shell", "keeps its shell", "keeps its shell and switches back"] as const)(
     "says nothing when the reveal answers after the window switches workspaces and %s",
     async (mode) => {

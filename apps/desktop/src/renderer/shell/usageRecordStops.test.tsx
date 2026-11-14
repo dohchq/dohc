@@ -46,7 +46,6 @@ it("reports a timed save that stopped counting, with Try again that reads the fi
   );
   const retry = report.mock.calls[0]![2] as () => Promise<void>;
 
-  // Still unreadable: the row comes back with the file's own words.
   bridge.readUsageRecord.mockResolvedValueOnce({
     status: "unreadable",
     file: "dohc-usage.json",
@@ -60,7 +59,6 @@ it("reports a timed save that stopped counting, with Try again that reads the fi
     expect.any(Function),
   );
 
-  // Read again: counting resumes, and nothing more is reported.
   await act(retry);
   expect(report).toHaveBeenCalledTimes(2);
   expect(bridge.readUsageRecord).toHaveBeenCalledTimes(2);

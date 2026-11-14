@@ -378,12 +378,8 @@ it("answers a dataset read its client closed as closed, without an error line, a
     expect(errors).not.toHaveBeenCalled();
     // A connection the server closed itself, as at shutdown, is not a client leaving: it logs and answers 500.
     expect((await read(f.handler)).status).toBe(500);
-    expect(errors).toHaveBeenCalledWith(
-      "[sync-relay] unhandled error",
-      expect.objectContaining({ name: "AbortError" }),
-    );
+    expect(errors).toHaveBeenCalledWith("[sync-relay] unhandled error", "AbortError");
     errors.mockClear();
-    // Only the close itself is quiet: another failure after the client left still logs and answers 500.
     const failing = createSyncRelayHandler({
       storage: f.storage,
       datasetHost: f.host,
@@ -395,10 +391,7 @@ it("answers a dataset read its client closed as closed, without an error line, a
       },
     });
     expect((await read(failing, new ClientClosedRequest())).status).toBe(500);
-    expect(errors).toHaveBeenCalledWith(
-      "[sync-relay] unhandled error",
-      expect.objectContaining({ message: "actor lookup failed" }),
-    );
+    expect(errors).toHaveBeenCalledWith("[sync-relay] unhandled error", "Error");
   } finally {
     errors.mockRestore();
   }
@@ -1053,4 +1046,57 @@ it("serves owner-only metadata History and validates its boolean query", async (
       })
     ).status,
   ).toBe(404);
+});
+
+it("admits a Collection request only once its body has arrived", async () => {
+  const f = await httpFixture();
+  expect((await f.activate()).status).toBe(200);
+  const publicationId = f.publish();
+  expect((await f.http(`${f.path}/binding`, { publicationId, enabled: true })).status).toBe(200);
+  const appPath = `link/app-publications/${publicationId}/backend/invoke`;
+  const submission = {
+    authorityRevision: 1,
+    operation: "submit",
+    input: { name: "Friend" },
+    idempotencyKey: "submission",
+  };
+  // A request that has sent part of its body, and is still being read.
+  const stall = async (path: string, headers: Record<string, string>) => {
+    let sender!: ReadableStreamDefaultController<Uint8Array>;
+    let reading!: () => void;
+    const read = new Promise<void>((resolve) => {
+      reading = resolve;
+    });
+    const init: RequestInit & { duplex: "half" } = {
+      method: "POST",
+      duplex: "half",
+      headers: { authorization: "Bearer owner", "content-type": "application/json", ...headers },
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          sender = controller;
+          controller.enqueue(new TextEncoder().encode("{"));
+        },
+        pull() {
+          reading();
+        },
+      }),
+    };
+    const response = f.handler(new Request(`https://relay/sync/${path}`, init));
+    await read;
+    return { close: () => sender.close(), response };
+  };
+  // Slow senders must not hold the relay's Collection copy slot, or a caller's slots.
+  const cases: Array<[string, number, Record<string, string>, () => Promise<Response>]> = [
+    [`${f.path}/replica/page`, 1, {}, () => f.http(`${f.path}/replica/capture`)],
+    [`${f.path}/invoke`, 4, {}, () => f.invoke()],
+    [appPath, 4, f.publicHeaders, () => f.http(appPath, submission, f.publicHeaders)],
+  ];
+  for (const [path, count, headers, admitted] of cases) {
+    const stalled = await Promise.all(Array.from({ length: count }, () => stall(path, headers)));
+    expect((await admitted()).status).toBe(200);
+    for (const request of stalled) {
+      request.close();
+      expect((await request.response).status).toBe(400);
+    }
+  }
 });

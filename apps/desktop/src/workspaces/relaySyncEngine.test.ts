@@ -51,7 +51,6 @@ function pullResult(
   };
 }
 
-// How many relay tasks hold the fake capture's chain right now.
 let chainHeld = 0;
 
 function capture(): WorkspaceEngineCapture {
@@ -372,7 +371,6 @@ describe("relaySyncEngine", () => {
     });
     const sync = engine({ capture: capture(), onChange, afterPass });
     await sync.start();
-    // A quiet pass announces nothing, unless the owner's answer changed the status.
     onChange.mockClear();
     sync.queuePull();
     await vi.runAllTimersAsync();
@@ -382,7 +380,6 @@ describe("relaySyncEngine", () => {
     await vi.runAllTimersAsync();
     expect(onChange).toHaveBeenCalledOnce();
     expect(sync.snapshot().syncing).toBe(false);
-    // A failed answer never fails the pass.
     afterPass.mockRejectedValueOnce(new Error("daemon busy"));
     await sync.retryNow({ countsAsAttempt: true });
     expect(sync.snapshot()).toMatchObject({ syncing: false, syncFailure: null });
@@ -598,7 +595,6 @@ describe("relaySyncEngine", () => {
     await expect(first.start()).rejects.toThrow(message);
     await first.stop();
 
-    // The reopened daemon returns the refusal saved with its sync identity.
     pushMock.mockRejectedValueOnce(new RelayClaimRefusedError(message));
     const restarted = engine({ capture: capture() });
     await expect(restarted.start()).rejects.toThrow(message);
@@ -741,7 +737,6 @@ describe("relaySyncEngine", () => {
 
     await expect(sync.start()).rejects.toThrow("relay unavailable");
     expect(calls).toEqual(["starting", "pull", "ended"]);
-    // The retry's push fails, so it never sends a pull and starts none.
     pushMock.mockRejectedValueOnce(new Error("offline"));
     await vi.advanceTimersByTimeAsync(100);
     expect(pushMock).toHaveBeenCalledTimes(2);
@@ -830,7 +825,6 @@ describe("relaySyncEngine", () => {
     expect(pushMock.mock.invocationCallOrder[0]!).toBeLessThan(
       pullMock.mock.invocationCallOrder[0]!,
     );
-    // The pull result rode through the capture, which committed the cursor.
     expect(commit).toHaveBeenCalledTimes(1);
     expect(sync.snapshot().conflictCount).toBe(2);
     expect(sync.snapshot().lastSyncedAtMs).toBe(12345);
@@ -937,7 +931,7 @@ describe("relaySyncEngine", () => {
     await sync.stop();
   });
 
-  // 0P sync-hardening item 3: a RelayOriginDivergedError (restored/cloned
+  // A RelayOriginDivergedError (restored/cloned
   // engine.db) is not a dead end — the pass recovers onto a fresh origin,
   // re-pushes, and completes normally instead of failing the pass.
   it("recovers and re-pushes when the origin diverged (restored/cloned engine.db)", async () => {
@@ -966,13 +960,11 @@ describe("relaySyncEngine", () => {
     const sync = engine({ capture: cap });
     await sync.start();
 
-    // Divergence detected → recovery ran once → push retried → pull ran.
     expect(recoverMock).toHaveBeenCalledTimes(1);
     expect(pushMock).toHaveBeenCalledTimes(2);
     expect(pullMock).toHaveBeenCalledTimes(1);
     // The pushes and the recovery waited on the relay off the capture chain.
     expect(held).toEqual([0, 0, 0]);
-    // The pass completed cleanly — no auth-expiry, no failure notice.
     expect(sync.snapshot().authExpired).toBe(false);
     expect(sync.snapshot().lastSyncedAtMs).toBe(12345);
   });
@@ -1068,8 +1060,6 @@ describe("relaySyncEngine", () => {
     expect(cap.runRelaySync).toHaveBeenCalledTimes(3);
   });
 
-  // edges-05: three failures had to pass before anyone heard, so a
-  // 25-second outage never surfaced at all.
   it("reports the first failed pass with its cause and clears it on success", async () => {
     const failures: Error[] = [
       new RelayUnreachableError(),
@@ -1093,7 +1083,6 @@ describe("relaySyncEngine", () => {
       attempts: 1,
     });
     await vi.advanceTimersByTimeAsync(500);
-    // The same failure, one attempt older, with the newest cause.
     expect(sync.snapshot().syncFailure).toEqual({
       cause: "server-busy",
       detail: "RelayBusyError: The server is busy.",
@@ -1125,7 +1114,6 @@ describe("relaySyncEngine", () => {
     expect(sync.snapshot().syncFailure).toBeNull();
     expect(afterPass).toHaveBeenCalledExactlyOnceWith({ failed: false });
     expect(errorSpy).not.toHaveBeenCalled();
-    // No backoff retries the pass.
     await vi.advanceTimersByTimeAsync(5000);
     expect(pushMock).toHaveBeenCalledTimes(1);
     errorSpy.mockRestore();
@@ -1149,7 +1137,6 @@ describe("relaySyncEngine", () => {
     await sync.retryNow({ countsAsAttempt: true });
     expect(cap.runRelaySync).toHaveBeenCalledTimes(2);
     expect(sync.snapshot().syncFailure).toBeNull();
-    // The backoff it replaced does not run a pass of its own later.
     await vi.runAllTimersAsync();
     expect(cap.runRelaySync).toHaveBeenCalledTimes(2);
     errorSpy.mockRestore();
@@ -1170,7 +1157,6 @@ describe("relaySyncEngine", () => {
     pushMock.mockResolvedValueOnce(more).mockResolvedValueOnce(more);
     await sync.pushRecorded();
     expect(pushMock).toHaveBeenCalledTimes(3);
-    // The continuation the first pushes asked for does not push again.
     await vi.runOnlyPendingTimersAsync();
     expect(pushMock).toHaveBeenCalledTimes(3);
     await sync.stop();
@@ -1218,16 +1204,13 @@ describe("relaySyncEngine", () => {
     sync.queueSync();
     await vi.advanceTimersByTimeAsync(100);
     expect(cap.runRelaySync).toHaveBeenCalledTimes(1);
-    // The automatic retry is due 500 ms after that failure.
     await vi.advanceTimersByTimeAsync(200);
     await sync.retryNow({ countsAsAttempt: true });
     expect(cap.runRelaySync).toHaveBeenCalledTimes(2);
-    // The failed retry leaves it due 300 ms from now, not later.
     await vi.advanceTimersByTimeAsync(299);
     expect(cap.runRelaySync).toHaveBeenCalledTimes(2);
     await vi.advanceTimersByTimeAsync(1);
     expect(cap.runRelaySync).toHaveBeenCalledTimes(3);
-    // That automatic failure is the one that doubles the interval.
     await vi.advanceTimersByTimeAsync(999);
     expect(cap.runRelaySync).toHaveBeenCalledTimes(3);
     await vi.advanceTimersByTimeAsync(1);
@@ -1268,7 +1251,6 @@ describe("relaySyncEngine", () => {
     await vi.advanceTimersByTimeAsync(100);
     expect(cap.runRelaySync).toHaveBeenCalledTimes(1);
 
-    // Try again while the first pass is still out, then that pass fails.
     const retried = sync.retryNow({ countsAsAttempt: true });
     expect(sync.snapshot().retrying).toBe(false);
     failRunning();
@@ -1298,8 +1280,8 @@ describe("relaySyncEngine", () => {
     await sync.stop();
   });
 
-  // #1233 review: a retry on reconnecting or waking pushed one automatic
-  // failure to two attempts, which is the toast threshold.
+  // A retry on reconnecting or waking must not push one automatic failure to
+  // two attempts, which is the toast threshold.
   it("counts a retry on reconnecting or waking toward the failure's detail, not its attempts", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     pullMock
@@ -1357,8 +1339,6 @@ describe("relaySyncEngine", () => {
     await sync.start();
     expect(sync.snapshot().conflictCount).toBe(2);
 
-    // The user resolves both conflicts (locally or via a peer's replicated
-    // resolution); the next pass must drop the count, not keep accumulating.
     openConflicts = 0;
     sync.queueSync();
     await vi.advanceTimersByTimeAsync(100);
@@ -1366,7 +1346,7 @@ describe("relaySyncEngine", () => {
     expect(sync.snapshot().conflictCount).toBe(0);
   });
 
-  // 0P-C gate fix (High): a joining machine must never append ops to the
+  // A joining machine must never append ops to the
   // relay before its first successful pull — pushing first could seed
   // boilerplate into the remote workspace or mint conflicts against it.
   it("join bootstrap pulls before any push and only pushes after the first successful pull", async () => {
@@ -1381,13 +1361,10 @@ describe("relaySyncEngine", () => {
       nowMs: () => 12345,
     });
     await sync.start();
-    // First pass: pull only. The relay log is untouched by this machine.
     expect(claimMock).not.toHaveBeenCalled();
     expect(pullMock).toHaveBeenCalledTimes(1);
     expect(pushMock).not.toHaveBeenCalled();
 
-    // After the bootstrap pull succeeded, the follow-up pass reconciles
-    // normally (push then pull).
     await vi.runAllTimersAsync();
     expect(pushMock).toHaveBeenCalledTimes(1);
     expect(pullMock).toHaveBeenCalledTimes(2);
@@ -1418,12 +1395,10 @@ describe("relaySyncEngine", () => {
     await expect(sync.start()).rejects.toThrow("offline");
     expect(pushMock).not.toHaveBeenCalled();
 
-    // Backoff retry while still offline: still no push.
     await vi.advanceTimersByTimeAsync(500);
     expect(pullMock).toHaveBeenCalledTimes(2);
     expect(pushMock).not.toHaveBeenCalled();
 
-    // Once a pull finally succeeds, normal push/reconcile resumes.
     fail = false;
     await vi.advanceTimersByTimeAsync(1000);
     await vi.runAllTimersAsync();
@@ -1458,13 +1433,11 @@ describe("relaySyncEngine", () => {
     expect(cap.runRelaySync).toHaveBeenCalledTimes(1);
     expect(sync.snapshot().pendingChangeCount).toBe(0);
 
-    // A queued sync is about to pull, so the request adds no pass.
     sync.queueSync();
     sync.queuePull();
     await vi.runAllTimersAsync();
     expect(cap.runRelaySync).toHaveBeenCalledTimes(2);
 
-    // A running pass pulls, so the request adds no pass either.
     let release!: () => void;
     pullMock.mockImplementationOnce(async () => {
       await new Promise<void>((resolve) => {
@@ -1480,7 +1453,6 @@ describe("relaySyncEngine", () => {
     await vi.runAllTimersAsync();
     expect(cap.runRelaySync).toHaveBeenCalledTimes(3);
 
-    // A failed pass backs off; the request does not shorten the wait.
     pullMock.mockRejectedValueOnce(new Error("network"));
     sync.queuePull();
     await vi.advanceTimersByTimeAsync(0);
@@ -1507,7 +1479,6 @@ describe("relaySyncEngine", () => {
       }
       expect(cap.runRelaySync).toHaveBeenCalledTimes(poll);
     }
-    // The writes stop, and the debounced pass pushes the rest.
     await vi.advanceTimersByTimeAsync(100);
     expect(cap.runRelaySync).toHaveBeenCalledTimes(4);
     expect(sync.snapshot().pendingChangeCount).toBe(0);
@@ -1595,7 +1566,6 @@ describe("relaySyncEngine", () => {
     expect(onChange).not.toHaveBeenCalled();
     expect(sync.snapshot().pendingChangeCount).toBe(0);
 
-    // Another device's edit arrives on the next pull, and the renderer hears it.
     pullMock.mockResolvedValueOnce(pullResult({ fetched: 1, applied: 1 }));
     await vi.advanceTimersByTimeAsync(1000);
     expect(cap.runRelaySync).toHaveBeenCalledTimes(3);
@@ -1613,8 +1583,6 @@ describe("relaySyncEngine", () => {
     await sync.start();
     onChange.mockClear();
 
-    // Another computer's newer save waits behind an open conflict: the pull
-    // fetches it and applies nothing, and an open review must still hear it.
     pullMock.mockResolvedValueOnce(pullResult({ fetched: 1 }));
     sync.queuePull();
     await vi.advanceTimersByTimeAsync(0);
@@ -1639,8 +1607,6 @@ describe("relaySyncEngine", () => {
     const sync = engine({ capture: cap, idlePullMs: 1000 });
     await sync.start();
 
-    // A local change runs its own pass, and the next pull waits a whole
-    // interval after that pass.
     await vi.advanceTimersByTimeAsync(600);
     sync.queueSync();
     await vi.advanceTimersByTimeAsync(100);
@@ -1650,7 +1616,6 @@ describe("relaySyncEngine", () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(cap.runRelaySync).toHaveBeenCalledTimes(3);
 
-    // The next pull fails. The 500 ms backoff retries it, not the interval.
     pullMock.mockRejectedValueOnce(new Error("network"));
     await vi.advanceTimersByTimeAsync(1000);
     expect(cap.runRelaySync).toHaveBeenCalledTimes(4);
@@ -1674,14 +1639,12 @@ describe("relaySyncEngine", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(waits.sinces()).toEqual([5]);
 
-    // Another device appends. The relay answers, and one pass pulls it.
     pullMock.mockResolvedValueOnce(pullResult({ fetched: 1, applied: 1, nextCursor: 7 }));
     waits.answer(true);
     await vi.advanceTimersByTimeAsync(0);
     expect(cap.runRelaySync).toHaveBeenCalledTimes(2);
     expect(waits.sinces()).toEqual([5, 7]);
 
-    // The hold passes with no change, and the engine waits again at once.
     waits.answer(false);
     await vi.advanceTimersByTimeAsync(0);
     expect(waits.sinces()).toEqual([5, 7, 7]);
@@ -1699,7 +1662,6 @@ describe("relaySyncEngine", () => {
     await sync.start();
     await vi.advanceTimersByTimeAsync(0);
 
-    // A local write's pass pulls before the other device's op lands.
     let finishPull!: () => void;
     pullMock.mockImplementationOnce(async () => {
       await new Promise<void>((resolve) => {
@@ -1715,8 +1677,6 @@ describe("relaySyncEngine", () => {
     finishPull();
     await vi.advanceTimersByTimeAsync(0);
 
-    // The wait restarts past that pass's cursor, the relay answers at once,
-    // and another pass pulls the op.
     expect(waits.sinces()).toEqual([5, 5]);
     pullMock.mockResolvedValueOnce(pullResult({ fetched: 1, applied: 1, nextCursor: 6 }));
     waits.answer(true);
@@ -1735,7 +1695,6 @@ describe("relaySyncEngine", () => {
     await sync.start();
     await vi.advanceTimersByTimeAsync(0);
 
-    // The relay keeps reporting a change the pull does not get past.
     waits.answer(true);
     await vi.advanceTimersByTimeAsync(0);
     expect(cap.runRelaySync).toHaveBeenCalledTimes(2);
@@ -1750,7 +1709,6 @@ describe("relaySyncEngine", () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(waits.sinces()).toEqual([5, 5, 5]);
 
-    // A failed wait backs off too, and no pass runs for it.
     waits.fail(new Error("relay unavailable"));
     await vi.advanceTimersByTimeAsync(1999);
     expect(waits.sinces()).toHaveLength(3);
@@ -1782,9 +1740,6 @@ describe("relaySyncEngine", () => {
     errorSpy.mockRestore();
   });
 
-  // The idle cost this engine pays in one minute, with the relay holding each
-  // read for 25 s. Polling every 5 s ran 12 passes, each one a relay log read
-  // plus a shared-channel read for every joined channel.
   it("costs an idle minute three held reads and no pass", async () => {
     const cap = capture();
     const reads: number[] = [];
@@ -1844,7 +1799,6 @@ describe("relaySyncEngine", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(stops).toEqual([]);
 
-    // The read answers after stop. That answer starts no pass.
     waits.answer(true);
     await Promise.all([first, second]);
     expect(stops).toEqual(["first", "second"]);
@@ -1869,7 +1823,6 @@ describe("relaySyncEngine", () => {
     await vi.advanceTimersByTimeAsync(1000);
     expect(waits.sinces()).toEqual([5]);
 
-    // The replaced read reports a change. It is stale, so no pass runs.
     waits.read(0).resolve(true);
     await vi.advanceTimersByTimeAsync(0);
     expect(waits.sinces()).toEqual([5, 7]);
@@ -1933,7 +1886,6 @@ describe("relaySyncEngine", () => {
     });
     const fetch = vi.fn(async (resource: string | URL | Request, init?: RequestInit) => {
       if (String(resource).endsWith("/bootstrap")) {
-        // A coordinate read that ignores its abort.
         return await new Promise<Response>((resolve) => {
           bootstraps.push({
             signal: init!.signal!,
@@ -2127,7 +2079,7 @@ it("keeps owner admission pending after a successful pull and clears it only aft
   await sync.stop();
 });
 
-// #3089: the move guard's relay pass. It never cancels, moves or re-arms
+// The move guard's relay pass. It never cancels, moves or re-arms
 // ordinary work, and once its move stops waiting it skips its pull.
 describe("relaySyncEngine guard pass", () => {
   const pushed = (hasMore = false) => ({
@@ -2151,7 +2103,6 @@ describe("relaySyncEngine guard pass", () => {
       maxBackoffMs: 2000,
       nowMs: () => 12345,
     });
-  // Fake time since the call, at each pull.
   function pullTimes() {
     const started = Date.now();
     const times: number[] = [];
@@ -2301,7 +2252,6 @@ describe("relaySyncEngine guard pass", () => {
     await started;
     await guarded;
     expect(pullMock).toHaveBeenCalledTimes(1);
-    // The next pass still pulls first, and pushes only after that pull succeeds.
     await sync.retryNow({ countsAsAttempt: true });
     expect(pullMock).toHaveBeenCalledTimes(2);
     expect(pushMock).not.toHaveBeenCalled();
@@ -2350,7 +2300,6 @@ describe("relaySyncEngine guard pass", () => {
       controller.abort();
       held.release();
       await guarded;
-      // The ordinary pass queued behind the guard pulls, with no further request.
       await vi.advanceTimersByTimeAsync(0);
       expect(pullMock).toHaveBeenCalledTimes(1);
       expect(pushMock).toHaveBeenCalledTimes(2);

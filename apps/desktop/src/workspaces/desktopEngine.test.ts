@@ -12,7 +12,7 @@ import {
   type EngineDaemonLifecycleOptions,
   type EngineClientSpawnOptions,
 } from "@dohc/workspace-engine-client/daemon";
-import { createDesktopEngine, type ServerOwnerDelivery } from "./desktopEngine";
+import { createDesktopEngine, OWNER_FULL_PASS_MS, type ServerOwnerDelivery } from "./desktopEngine";
 import type { JsonValue, OwnerYDocOutboxRecovery } from "@dohc/workspace-engine-client";
 import { EngineRelayClient } from "./engineRelayClient";
 import { createWorkspaceAuthorityOwner } from "./workspaceAuthorityOwner";
@@ -322,7 +322,7 @@ const unexpectedOpen = async (): Promise<"hosted" | "refused"> => {
  * `listed` sees each list read's `fresh` flag after the list is read, and can hold back its answer.
  */
 async function quarantinedOwner(
-  documents: { path: string; objectId: string }[],
+  documents: { path: string; objectId: string; head?: () => number }[],
   server: {
     kept?: () => unknown[];
     keptCursor?: number;
@@ -393,10 +393,11 @@ async function quarantinedOwner(
         documents: async (_signal, fresh) => {
           const answer = {
             ok: true,
-            documents: documents.map(({ path, objectId }) => ({
+            documents: documents.map(({ path, objectId, head }) => ({
               path,
               status: "ready",
               document: { binding: bindingOf(path, objectId), relayDatabaseNamespace: "namespace" },
+              ...(head ? { head: head() } : {}),
             })),
             ...(server.kept ? { keptEdits: server.kept() } : {}),
             ...(server.keptCursor === undefined ? {} : { keptEditsCursor: server.keptCursor }),
@@ -564,7 +565,6 @@ const stopMethods = (methods: string[]) =>
   methods.filter(
     (method) => method.startsWith("ydoc.ownerStop.") && method !== "ydoc.ownerStop.list",
   );
-// The engine lists a Stop only while it waits, owes the server a retirement, or deferred its release.
 const listedStop = (stop: { state: string; retirementOwed: boolean; deferred?: unknown }) =>
   stop.state === "requested" || stop.retirementOwed || stop.deferred !== undefined;
 /**
@@ -1196,8 +1196,6 @@ describe("server owner peer lifecycle", () => {
     }
   });
 
-  // A document whose edits the server refused for good names itself, with
-  // where its edits are, instead of the workspace's moved-or-removed reason.
   it("names a refused document in its own quarantine, keeps the workspace delivering, and counts each Try again as a new incident", async () => {
     const f = fixture(),
       credentials = new AbortController();
@@ -1256,7 +1254,8 @@ describe("server owner peer lifecycle", () => {
         open: unexpectedOpen,
         documents: async () => ({
           ok: true,
-          documents: [{ path: "notes/plan.md", status: "ready", document }],
+          // A list with a head: refusals are read outside the note's pass all the same.
+          documents: [{ path: "notes/plan.md", status: "ready", document, head: 0 }],
         }),
       }),
     };
@@ -1296,7 +1295,6 @@ describe("server owner peer lifecycle", () => {
         rootPath: lease.binding.canonicalRootPath,
         attachmentId: lease.binding.attachmentId,
       }));
-      // A Try again names the incident the owner saw; a stale one opens nothing.
       await expect(
         f.engine.retryOwnerLiveQuarantine(workspace, "object", "outbox:delivery:9"),
       ).rejects.toThrow("This document changed.");
@@ -1313,7 +1311,6 @@ describe("server owner peer lifecycle", () => {
       expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([
         { incident: "outbox:delivery:1", recovery: "retrying" },
       ]);
-      // The server refuses the attempt again: the same document, a new incident.
       quarantineMock.read.mockResolvedValue(refused("paused"));
       f.engine.retryOwnerDelivery("owner");
       await vi.waitFor(() =>
@@ -1324,7 +1321,6 @@ describe("server owner peer lifecycle", () => {
       await expect(
         f.engine.retryOwnerLiveQuarantine(workspace, "object", "outbox:delivery:0"),
       ).rejects.toThrow("This document changed.");
-      // Recovered: the queue is gone, and so is the quarantine.
       quarantineMock.read.mockResolvedValue([]);
       ownerDeliveryMock.pass.mockResolvedValue("acknowledged");
       f.engine.retryOwnerDelivery("owner");
@@ -1336,12 +1332,6 @@ describe("server owner peer lifecycle", () => {
     }
   });
 
-  // A Stop that waits for the server, or a release whose file write is not
-  // confirmed, is read again on open: the first from the engine's Stop rows,
-  // the second from this computer's durable record.
-
-  // Proves: an open's answer counts only for the session that asked. One
-  // that ended meanwhile records nothing, so the next session asks again.
   it("drops an owner open's answer when its session ended meanwhile, and asks again in the next session", async () => {
     let ended = false;
     const open = vi.fn(
@@ -1385,7 +1375,71 @@ describe("server owner peer lifecycle", () => {
     }
   });
 
-  // #2719: the engine refuses a note's next edit once too many wait to reach the server, before any pass reports it.
+  // The list's head lets a pass skip a note's connection; a head that missed an edit lasts until the note's first turn after OWNER_FULL_PASS_MS.
+  it("passes the list's head after a note's full pass, and opens the connection again every few minutes and after a failed pass", async () => {
+    let head = 7;
+    const { f, credentials } = await quarantinedOwner([
+      { path: "notes/plan.md", objectId: "object", head: () => head },
+      { path: "notes/other.md", objectId: "other" },
+    ]);
+    quarantineMock.read.mockResolvedValue([]);
+    let nowMs = 1_000_000;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => nowMs);
+    let planResult = "empty";
+    ownerDeliveryMock.pass.mockImplementation(async (options) =>
+      options.document.binding.currentPath === "notes/plan.md" ? planResult : "empty",
+    );
+    // What the next pass of plan.md is given as the server's head.
+    const nextPlanHead = async () => {
+      for (;;) {
+        const before = ownerDeliveryMock.pass.mock.calls.length;
+        f.engine.retryOwnerDelivery("owner");
+        await vi.waitFor(() =>
+          expect(ownerDeliveryMock.pass.mock.calls.length).toBeGreaterThan(before),
+        );
+        const options = ownerDeliveryMock.pass.mock.calls.at(-1)![0];
+        if (options.document.binding.currentPath !== "notes/plan.md") {
+          expect(options.serverHead).toBeUndefined();
+          continue;
+        }
+        return "serverHead" in options ? options.serverHead : "full";
+      }
+    };
+    try {
+      expect(await f.engine.start()).toBe(true);
+      await vi.waitFor(() => expect(ownerDeliveryMock.pass).toHaveBeenCalled());
+      // The first pass of each note opens its connection; later ones carry the head.
+      expect(
+        ownerDeliveryMock.pass.mock.calls.find(
+          ([options]) => options.document.binding.currentPath === "notes/plan.md",
+        )?.[0].serverHead,
+      ).toBeUndefined();
+      expect(await nextPlanHead()).toBe(7);
+      head = 9;
+      expect(await nextPlanHead()).toBe(9);
+      // The head stayed put while an edit arrived: the note's first turn after OWNER_FULL_PASS_MS still opens.
+      nowMs += OWNER_FULL_PASS_MS;
+      expect(await nextPlanHead()).toBe("full");
+      expect(await nextPlanHead()).toBe(9);
+      // A clock set back does not hold off the next full pass.
+      nowMs -= 60_000;
+      expect(await nextPlanHead()).toBe("full");
+      expect(await nextPlanHead()).toBe(9);
+      planResult = "retry";
+      expect(await nextPlanHead()).toBe(9);
+      planResult = "empty";
+      expect(await nextPlanHead()).toBe("full");
+      expect(await nextPlanHead()).toBe(9);
+    } finally {
+      clock.mockRestore();
+      credentials.abort();
+      await f.close();
+      ownerDeliveryMock.pass.mockReset();
+      quarantineMock.read.mockReset();
+    }
+  });
+
+  // The engine refuses a note's next edit once too many wait to reach the server, before any pass reports it.
   it("names a note whose edits the engine paused until a pass empties its queue", async () => {
     const { f, credentials } = await quarantinedOwner([
       { path: "notes/plan.md", objectId: "object" },
@@ -1415,7 +1469,6 @@ describe("server owner peer lifecycle", () => {
       expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("unsent-edits-limit");
       expect(f.engine.ownerLivePausedPaths("owner")).toEqual(["notes/plan.md"]);
       expect(ownerDeliveryMock.pass).toHaveBeenCalledTimes(passes);
-      // One delivered edit leaves the rest waiting, and another note's empty queue changes nothing.
       plan = "acknowledged";
       await passAgain(5);
       expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying");
@@ -1433,8 +1486,6 @@ describe("server owner peer lifecycle", () => {
     }
   });
 
-  // The release failed, so the notice said the Stop waits; reconciliation
-  // finishes it in the background with no live document left to deliver.
   it.each([true, false])(
     "follows background Stop recovery in the notices when the release writes the file: %s",
     async (materialized) => {
@@ -1453,7 +1504,6 @@ describe("server owner peer lifecycle", () => {
         if (request.method === "ydoc.ownerStop.release") {
           if (failRelease) throw new Error("dohc could not write the file.");
           released = true;
-          // The Stop keeps the snapshot of the kept edits the record holds.
           const { keptSnapshot } = request.params as { keptSnapshot?: string };
           expect(keptSnapshot).toBe(f.unwritten[0]?.snapshot);
           return { id: request.id, result: { stops: [{ ...stopRow("released"), keptSnapshot }] } };
@@ -1513,7 +1563,6 @@ describe("server owner peer lifecycle", () => {
           }),
         );
         if (materialized) return;
-        // The queue is gone, and Save recovery copy still rebuilds the kept edits from what was saved before the release.
         const queueReads = quarantineMock.queue.mock.calls.length;
         const saved = await f.engine.saveOwnerLiveRecoveryCopy(await workspace(), "notes/plan.md");
         expect(saved).toEqual({
@@ -1536,12 +1585,6 @@ describe("server owner peer lifecycle", () => {
     },
   );
 
-  // A release took refused edits but could not write the file. A restart, or
-  // an engine store reset that forgets the release, keeps the record and its
-  // stored package. Try again settles that release again by the record's
-  // binding and never asks for a new Stop. When the engine no longer holds
-  // the release, only Save recovery copy remains, and the record ends once it
-  // has written the stored package.
   it.each([
     ["a restart, then a Try again that writes the file", "materialized"],
     ["a restart, then a Try again that fails again", "failed"],
@@ -1554,7 +1597,6 @@ describe("server owner peer lifecycle", () => {
       if (outcome !== "conflict") kept.engine.release = releaseAnswer(outcome === "materialized");
       try {
         await (await kept.launch()).f.close();
-        // Nothing was exported before the Try again.
         const second = await kept.launch();
         try {
           expect(second.f.engine.ownerLiveQuarantines("owner")).toMatchObject([
@@ -1584,7 +1626,6 @@ describe("server owner peer lifecycle", () => {
               "This document changed.",
             );
           expect(await kept.records().recovery("owner", "object")).toEqual(expect.any(String));
-          // Save recovery copy writes the stored package into the workspace, which ends the record.
           const saved = await f.engine.saveOwnerLiveRecoveryCopy(workspace, "notes/old plan.md");
           expect(saved.keptEdits).toBe("ended");
           expect(await readFile(join(kept.rootPath, saved.copyPath!), "utf8")).toContain("kept");
@@ -1594,7 +1635,6 @@ describe("server owner peer lifecycle", () => {
           expect(stopMethods(methods)).toEqual([]);
           expect(await kept.records().list("owner")).toEqual([]);
           expect(await kept.records().recovery("owner", "object")).toBeNull();
-          // Nothing is left to route a Stop of the live document into a release.
           await vi.waitFor(() => expect(f.engine.ownerLiveQuarantines("owner")).toEqual([]));
         } finally {
           await f.close();
@@ -1605,7 +1645,6 @@ describe("server owner peer lifecycle", () => {
     },
   );
 
-  // Save from a row writes what that row shows, so its result and toast name what was exported.
   it("saves exactly the kept edits a row's incident names", async () => {
     const kept = await keptRelease();
     kept.engine.queues = [
@@ -1664,9 +1703,6 @@ describe("server owner peer lifecycle", () => {
     }
   });
 
-  // While the engine refuses to read a document's queue head, nothing could
-  // keep the edits a release takes, so the release refuses and Save reports
-  // the engine's refusal. The row stays, and Try again reads it again.
   it("refuses a release and a save of a queue the engine cannot read, keeps its row, and reads it again on Try again", async () => {
     const { f, credentials, binding, workspace } = await quarantinedOwner([]);
     const refused = new EngineRequestError(1, {
@@ -1684,7 +1720,6 @@ describe("server owner peer lifecycle", () => {
       recovery: "unreadable",
     };
     let readable = false;
-    // As the reader answers: an unreadable row, unless the read is strict for that queue.
     quarantineMock.read.mockImplementation(
       async (_client, _handle, options?: { strict?: (queue: LiveObjectBinding) => boolean }) => {
         if (readable)
@@ -1739,7 +1774,6 @@ describe("server owner peer lifecycle", () => {
       await expect(
         f.engine.saveOwnerLiveRecoveryCopy(owner, "notes/plan.md", row.incident),
       ).rejects.toBe(refused);
-      // A failed strict read keeps the row, and Try again fails with the same refusal while it stands.
       expect(f.engine.ownerLiveQuarantines("owner")).toEqual([row]);
       await expect(f.engine.retryOwnerLiveQuarantine(owner, "object", row.incident)).rejects.toBe(
         refused,
@@ -1758,8 +1792,6 @@ describe("server owner peer lifecycle", () => {
     }
   });
 
-  // Save recovery copy reads the whole queue and writes next to the file. It
-  // asks the engine for nothing that changes the queue.
   it("lists and saves restore-fenced typing with its old incident after the binding advances", async () => {
     const { f, credentials, binding, workspace } = await quarantinedOwner([
       { path: "notes/plan.md", objectId: "object" },
@@ -1828,9 +1860,6 @@ describe("server owner peer lifecycle", () => {
     }
   });
 
-  // Edits the server keeps for a document it hosts: the server's list names
-  // them, Save recovery copy writes the server's queue beside the document and
-  // only then tells the server, and Try again names the server's refusal.
   it("saves edits the server keeps from the server's queue, then confirms the copy, and tries them again on the server", async () => {
     let kept = [
       {
@@ -1855,7 +1884,7 @@ describe("server owner peer lifecycle", () => {
     };
     const pages = servedPages(served);
     const { f, credentials, workspace } = await quarantinedOwner(
-      [{ path: "notes/plan.md", objectId: "object" }],
+      [{ path: "notes/plan.md", objectId: "object", head: () => 0 }],
       {
         kept: () => kept,
         keptEdits: async (input) => {
@@ -1903,7 +1932,6 @@ describe("server owner peer lifecycle", () => {
         outboxId: "server-outbox",
         checkpoint: { sha256: served.checkpointDigest },
       });
-      // The package rebuilds the recipient's accepted edit and the kept one.
       const rebuilt = new Y.Doc();
       for (const part of liveRecoveryUpdates(parseLiveRecoveryPackage(stored)))
         Y.applyUpdate(rebuilt, part);
@@ -1926,7 +1954,6 @@ describe("server owner peer lifecycle", () => {
       expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([
         { storedOn: "server", recovery: "copied" },
       ]);
-      // The engine on this computer was never asked for the server's queue.
       expect(quarantineMock.queue).not.toHaveBeenCalled();
       await expect(
         f.engine.retryOwnerLiveQuarantine(await workspace(), "object", "server:server-outbox:0"),
@@ -1950,9 +1977,6 @@ describe("server owner peer lifecycle", () => {
     }
   });
 
-  // Proves: a page read returns every byte and every recorded author of the
-  // queue, across many small pages, and a queue that changed between pages
-  // answers changed instead of a copy.
   it("assembles the server's queue from bounded pages with every byte and author, and refuses one that changed", async () => {
     const { queue } = recoveryQueue(keptBinding);
     const served: OwnerYDocOutboxRecovery = {
@@ -1997,7 +2021,6 @@ describe("server owner peer lifecycle", () => {
     ).toEqual(served);
     expect(reads).toBeGreaterThan(10);
     let turn = 0;
-    // The queue changes after the first page, so the engine answers the next as changed.
     await expect(
       readServerKeptEditsQueue(row, async (cursor) => ({
         ok: true,
@@ -2006,9 +2029,6 @@ describe("server owner peer lifecycle", () => {
     ).rejects.toBeInstanceOf(ServerKeptEditsConflict);
   });
 
-  // Proves: the desktop lists every row the server keeps, past its first page,
-  // and saves and confirms one only that later page names. A later page that
-  // fails keeps the last complete list.
   it("discovers and saves a later row of the server's kept edits, and keeps the last complete list when a page fails", async () => {
     const row = (index: number) => ({
       objectId: `object-${index}`,
@@ -2029,7 +2049,7 @@ describe("server owner peer lifecycle", () => {
         outboxId: last.outboxId,
       });
     const { f, credentials, workspace } = await quarantinedOwner(
-      [{ path: "notes/plan-1.md", objectId: "object-1" }],
+      [{ path: "notes/plan-1.md", objectId: "object-1", head: () => 0 }],
       {
         kept: () => firstPage,
         keptCursor: 2,
@@ -2050,7 +2070,6 @@ describe("server owner peer lifecycle", () => {
       expect(await f.engine.start()).toBe(true);
       await vi.waitFor(() => expect(f.engine.ownerLiveQuarantines("owner")).toHaveLength(3));
       expect(pageRequests[0]).toBe(2);
-      // A row listed on both pages appears once.
       expect(
         f.engine.ownerLiveQuarantines("owner").filter((found) => found.objectId === "object-1"),
       ).toHaveLength(1);
@@ -2269,7 +2288,6 @@ describe("server owner peer lifecycle", () => {
       await vi.waitFor(() =>
         expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("workspace-changed"),
       );
-      // A document whose start keeps failing outranks the reasons an owner can't act on either way.
       rows = [...others, failing];
       f.engine.retryOwnerDelivery("owner");
       await vi.waitFor(() =>
@@ -2281,14 +2299,12 @@ describe("server owner peer lifecycle", () => {
       await vi.waitFor(() =>
         expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("live-history-over-budget"),
       );
-      // With no document to deliver.
       rows = [...others, refused];
       f.engine.retryOwnerDelivery("owner");
       await vi.waitFor(() =>
         expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("session-host-refused"),
       );
       expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying");
-      // A frozen document outranks the server's other reasons, but not a refusal.
       rows = [ready, ...others];
       f.engine.retryOwnerDelivery("owner");
       await vi.waitFor(() =>
@@ -2344,7 +2360,6 @@ describe("server owner peer lifecycle", () => {
       await vi.waitFor(() =>
         expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("document-unavailable"),
       );
-      // One document's damaged server record marks only its row diverged; it still outranks a refusal.
       rows = [ready, refused, divergedRow];
       f.engine.retryOwnerDelivery("owner");
       await vi.waitFor(() =>
@@ -2355,8 +2370,6 @@ describe("server owner peer lifecycle", () => {
       await vi.waitFor(() =>
         expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("document-unavailable"),
       );
-      // A document edited while live editing was off outranks a frozen one and
-      // the server's other reasons, but not a refusal a Resume can still help.
       rows = [ready, ...others, edited];
       f.engine.retryOwnerDelivery("owner");
       await vi.waitFor(() =>
@@ -2390,7 +2403,6 @@ describe("server owner peer lifecycle", () => {
       await vi.waitFor(() =>
         expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("session-host-refused"),
       );
-      // The owner stopped every document, and the server still reports its diverged copy.
       rows = [];
       diverged = true;
       f.engine.retryOwnerDelivery("owner");
@@ -2398,7 +2410,6 @@ describe("server owner peer lifecycle", () => {
         expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("session-host-diverged"),
       );
       expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying");
-      // The server no longer reports it.
       diverged = false;
       f.engine.retryOwnerDelivery("owner");
       await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryStatus("owner")).toBeUndefined());

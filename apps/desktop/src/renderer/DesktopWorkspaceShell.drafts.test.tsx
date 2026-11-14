@@ -70,7 +70,6 @@ describe("workspace switch admission", () => {
     const stored = deferred<WorkspaceUiState | null>();
     const bridge = makeBridge(stored.promise);
     bridge.openWorkspace = vi.fn(() => open.promise);
-    // What each commit put on screen, read after React applied it.
     const commits: Array<{
       preparing: boolean;
       tab: boolean;
@@ -118,8 +117,6 @@ describe("workspace switch admission", () => {
       await stored.promise;
     });
     await waitFor(() => expect(screen.queryByTestId("workspace-preparing")).toBeNull());
-    // The first commit without the surface already shows the saved tab,
-    // sidebar width and About rail; no commit showed the defaults.
     expect(commits.find((commit) => !commit.preparing)).toEqual({
       preparing: false,
       tab: true,
@@ -144,7 +141,6 @@ describe("workspace switch admission", () => {
       );
       await screen.findByTestId(`tab-${path}`);
     };
-    // The clock passes the open's limit while the first read waits.
     const waitOutTheOpen = (bridge: ReturnType<typeof makeBridge>) => {
       const now = Date.now.bind(Date);
       bridge.getWorkspaceUiState.mockImplementationOnce(() => {
@@ -365,8 +361,6 @@ describe("workspace switch admission", () => {
   });
 });
 
-// Neither a UI-state read nor a save of the default layout has happened, even
-// when the window unloads now.
 function expectNoUiStateTraffic(bridge: ReturnType<typeof makeBridge>) {
   window.dispatchEvent(new Event("beforeunload"));
   expect(bridge.getWorkspaceUiState).not.toHaveBeenCalled();
@@ -626,8 +620,6 @@ describe("workspace admission over collection writes", () => {
     await act(async () => {});
     expect(harness.bridge.openWorkspace).not.toHaveBeenCalled();
 
-    // The write's session open settles without a session: the write is
-    // retained, and admission must stop on it instead of proceeding.
     harness.openAvailability.available = false;
     await act(async () => {
       gate.resolve();
@@ -676,9 +668,6 @@ describe("explorer operations over collection writes", () => {
     });
     await beginRename(bridge);
     await waitFor(() => expect(bridge.moveWorkspacePath).toHaveBeenCalledTimes(1));
-    // The pause covers the pending IPC: a racing cell edit (an editor commit
-    // already in flight) is refused and retained, never queued against the
-    // path the move is changing.
     expect(collectionWritesPaused(WORKSPACE.workspaceId)).toBe(true);
     let accepted = true;
     act(() => {
@@ -692,7 +681,6 @@ describe("explorer operations over collection writes", () => {
       await move.promise;
     });
     await waitFor(() => expect(collectionWritesPaused(WORKSPACE.workspaceId)).toBe(false));
-    // The retained edit follows the rename, like tabs and set-aside drafts.
     expect(collectionWriteFailures()[0]!.change.recordPath).toBe("renamed.md");
   });
 });
@@ -763,8 +751,6 @@ describe("dirty tab close boundaries", () => {
     await user.click(screen.getByRole("button", { name: "Close all editors" }));
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
 
-    // Remove the original b.md tab, then open the same path as a new tab while
-    // close-all still waits for a.md. The later tab is not part of that click.
     fireEvent.click(
       within(screen.getByTestId("tab-b.md")).getByRole("button", {
         name: "Close b.md",
@@ -1015,11 +1001,11 @@ describe("explorer destructive change flush boundaries", () => {
   });
 });
 
-// #567 / #579 review: set-aside draft recovery at the shell seams. The drafts
-// live in a module store keyed by workspace + path; the shell owns the two
-// integrations under test — path remapping on explorer renames, and the
-// distinction between recovery (dot, no save promise) and savable-dirty
-// (dot and the version-switch save-first prompt).
+// Set-aside draft recovery at the shell seams. The drafts live in a module
+// store keyed by workspace + path. The shell owns the two integrations under
+// test: path remapping on explorer renames, and the distinction between
+// recovery (dot, no save promise) and savable-dirty (dot and the
+// version-switch save-first prompt).
 describe("set-aside draft recovery", () => {
   it.each(["EBUSY"])(
     "reports a %s draft read failure in Notices and retries discovery",
@@ -1146,13 +1132,9 @@ describe("set-aside draft recovery", () => {
       ).toHaveBeenCalled(),
     );
     expect(screen.queryByTestId("version-switch-save-confirm")).toBeNull();
-    // The notice survives the switch — recovery needed no save.
     expect(screen.getByTestId("orphaned-draft-notice")).toBeTruthy();
   });
 
-  // A deleted file's tab is gone, so no inspector will ever
-  // render its notice again — the notice center is the path-independent
-  // surface where the draft stays reachable, Copy/Dismiss included.
   it("keeps a deleted path's set-aside draft reachable from the notice center", async () => {
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(null));
@@ -1183,15 +1165,9 @@ describe("set-aside draft recovery", () => {
     await user.click(screen.getByTestId("recovery-dismiss-confirm"));
     await waitFor(() => expect(screen.queryByTestId("notice-set-aside-edits")).toBeNull());
 
-    // ...and with nothing left, the surface says so rather than implying a
-    // draft that is not there.
     expect(screen.getByTestId("notice-center").textContent).toContain("All clear");
   });
 
-  // A failed save-first flush aborts the switch, the
-  // workspace never leaves its version, and the recovery announcement must
-  // not fire — announcing a version change reopens the live document and
-  // sets the still-editable draft aside on the same version.
   it("does not set the draft aside when a failed switch never left the version", async () => {
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(storedStateWithTabs(["a.md"], "a.md")));
@@ -1214,7 +1190,6 @@ describe("set-aside draft recovery", () => {
       ],
       activeVersionId: "main",
     }));
-    // The save-first flush fails: the autosave write rejects.
     bridge.writeWorkspaceText = vi.fn(async () => {
       throw new Error("disk full");
     });
@@ -1231,7 +1206,6 @@ describe("set-aside draft recovery", () => {
     await user.click(item!);
     await user.click(await screen.findByTestId("version-switch-save-continue"));
 
-    // The flush failed, the switch never started, the version never changed.
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
     expect(bridge.switchWorkspaceVersion).not.toHaveBeenCalled();
 

@@ -11,6 +11,7 @@ import {
 } from "./serviceActivationDriver";
 import type { OwnerOutboxAdmission } from "./ownerOutboxDelivery";
 import { liveHostSignal, withDeadline, withLiveHostSignal } from "./liveHostSignal.js";
+import { untilAborted } from "./namedLiveFrameHost.js";
 import { observeRelayWrites, type LiveHostChanges } from "./relayWriteChanges.js";
 import { parseNativeLiveSyncConfig } from "./liveSyncConfig.js";
 import { LiveDocumentWork } from "./liveDocumentWork.js";
@@ -64,7 +65,7 @@ import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory.j
 import type { LiveHostConnectionCoordinate, SyncRelayStorage } from "./storage.js";
 import { parseLiveSettlementConfig, type LiveSettlementConfig } from "./liveSettlementConfig.js";
 import { settlementPending } from "./liveSettlement.js";
-import { activationFailureLine } from "./activationFailureLine.js";
+import { childStderrLog, codeWord, serverLogLine, ServerLogError } from "./serverLogWords.js";
 import { snapshotStopRestoreLookup } from "./liveRestoreDelivery.js";
 import { relayError } from "./errors.js";
 import type { StopRestoreLookup } from "./storage/liveRestoreOperation.js";
@@ -404,6 +405,12 @@ export function readServiceLiveHostConfig(
 
 // Held reads running at once, waiting, and sharing one engine request.
 const HELD_READS = { maxRunning: 2, maxQueued: 16, maxWaiters: 8 } as const;
+// A held read is cancelled at the request deadline. The engine may take up to its HELD_PROOF_CLOSE_BOUND (10 s) to stop a
+// running proof and answer the cancel, and its actor, which does not watch the cancel, may be busy before that. An
+// engine that answers neither the read nor its cancel this long after the deadline is stopped. The grace is at least
+// the request deadline, the actor delay a queued request tolerates, and at least this floor. Keep the floor above
+// HELD_PROOF_CLOSE_BOUND.
+const HELD_READ_CANCEL_GRACE_MS = 15_000;
 const held = new WeakSet<SyncRelayStorage>();
 // An earlier store's recovery handle closes after this long without a page read.
 const RECOVERY_IDLE_MS = 60_000;
@@ -478,6 +485,20 @@ const reachedSince = (attached: HostedAttachment, objectId: string, required: nu
   (attached.reached.get(objectId)?.pull ?? 0) >= required;
 const goneSince = (attached: HostedAttachment, objectId: string, required: number) =>
   reachedSince(attached, objectId, required) && !attached.reached.get(objectId)!.listed;
+// Why no pull has confirmed a departing document left, or undefined once one has. Retirement asks only with its
+// workspace's replica attached and checked. Each answer stays the same while its cause does, because a pass logs a
+// waiting step again only when its words change.
+const departureWait = (
+  attached: HostedAttachment,
+  objectId: string,
+  required: number | undefined,
+) => {
+  if (required === undefined) return "its departure was not announced to the replica";
+  if (reachedSince(attached, objectId, required)) return undefined;
+  if (attached.pulls < required) return "no pull has started since its departure was announced";
+  if (attached.last === "failed") return "the last pull failed";
+  return "no departed list since its departure was announced has reached it";
+};
 
 /** Owns one configured service incarnation and its durable delivery consumers. */
 export async function startServiceLiveHost(options: {
@@ -559,6 +580,8 @@ export async function startServiceLiveHost(options: {
   // Attached workspaces and hosted documents, as `update` last left them.
   const members = new Map<string, { handle: string; workspace: ServiceWorkspace }>();
   const hosted = new Map<string, { target: ServiceActivationTarget; objectId: string }>();
+  // Hosted documents whose activation has not finished: since when, and the reason last logged and when.
+  const waiting = new Map<string, { since: number; shown?: string; shownAt?: number }>();
   // Hosted documents that left the hosted set. Passes settle, publish and unload them.
   const leaving = new Set<string>();
   // Leaving documents an earlier daemon may have left unsettled. Each resumes its retained activation before it unloads.
@@ -623,10 +646,25 @@ export async function startServiceLiveHost(options: {
   // Activation passes, idle unloads, wakes, and membership changes take turns,
   // so a pass never activates a document while it unloads.
   let turn: Promise<unknown> = Promise.resolve();
-  const exclusive = <T>(work: () => Promise<T>): Promise<T> => {
-    const run = turn.then(work);
+  // A caller that gives up while its turn is still queued, as an editor's open does when the browser goes,
+  // leaves at once, so the relay frees what it holds for that open. Its work then never runs. Work that has
+  // started runs until it ends, and keeps the turn until then.
+  const exclusive = <T>(work: () => Promise<T>, callerSignal?: AbortSignal): Promise<T> => {
+    let leave: (() => void) | undefined;
+    const left =
+      callerSignal &&
+      new Promise<never>((_, reject) => {
+        leave = () => reject(callerSignal.reason);
+        if (callerSignal.aborted) leave();
+        else callerSignal.addEventListener("abort", leave, { once: true });
+      });
+    const run = turn.then(() => {
+      if (leave) callerSignal!.removeEventListener("abort", leave);
+      callerSignal?.throwIfAborted();
+      return work();
+    });
     turn = run.catch(() => {});
-    return run;
+    return left ? Promise.race([run, left]) : run;
   };
   // A wake during a pass runs one more pass after it; one during the pause ends the pause.
   // Only the pause clears it, so a wake that lands while its pass runs is not lost.
@@ -769,7 +807,9 @@ export async function startServiceLiveHost(options: {
   };
   const abort = () => {
     if (!closing)
-      void close().catch((error) => console.error("Service host shutdown failed.", error));
+      void close().catch((error) =>
+        console.error("Service host shutdown failed.", serverLogLine(error)),
+      );
   };
   // An operator learns which side ended the engine: the engine itself, or the relay after a request's deadline.
   const exited = (code: number | null, exitSignal: NodeJS.Signals | null) => {
@@ -994,7 +1034,7 @@ export async function startServiceLiveHost(options: {
               },
               signal,
               onExit: exited,
-              onStderr: (text) => console.error("[service-live-host]", text.trimEnd()),
+              onStderr: childStderrLog("[service-live-host]"),
             }),
           ),
           (value) => Effect.promise(() => value.waitForExit()),
@@ -1395,6 +1435,7 @@ export async function startServiceLiveHost(options: {
         };
         const unhost = (key: string) => {
           hosted.delete(key);
+          waiting.delete(key);
           leaving.delete(key);
           recovering.delete(key);
           parking.delete(key);
@@ -1425,8 +1466,7 @@ export async function startServiceLiveHost(options: {
             );
             const reply =
               result && typeof result === "object" ? (result as Record<string, unknown>) : {};
-            if (reply.status === "pending")
-              return typeof reply.reason === "string" ? reply.reason : "unload-pending";
+            if (reply.status === "pending") return codeWord(reply.reason) ?? "unload-pending";
             if (reply.status !== "unloaded")
               throw new Error("Invalid live document unload response.");
           } catch (error) {
@@ -1436,7 +1476,7 @@ export async function startServiceLiveHost(options: {
           return undefined;
         };
         const settleTarget: Parameters<ServiceActivationDriver["activate"]>[2] = config.settlement
-          ? (consumer, document, joined) => consumer.settle(document, joined)
+          ? (consumer, document, joined) => consumer.settleDrained(document, joined)
           : undefined;
         // Whether a hosted document's owner lost live authority over it: Pause or
         // Stop fenced it, or neither an Edit grant of its owner covers it nor the
@@ -1774,8 +1814,7 @@ export async function startServiceLiveHost(options: {
               row.objectId,
               joined,
               {
-                departed: () =>
-                  required !== undefined && reachedSince(attached!, row.objectId, required),
+                departureWait: () => departureWait(attached!, row.objectId, required),
                 parked: () =>
                   required !== undefined && goneSince(attached!, row.objectId, required),
               },
@@ -2118,30 +2157,34 @@ export async function startServiceLiveHost(options: {
           if (!key) return;
           touch(key);
           if (!activation!.dormant(hosted.get(key)!.target) && !unloading.has(key)) return;
-          await exclusive(() =>
-            withLiveHostSignal(signal, callerSignal, async (joined) => {
-              await resolveUnload(key, joined);
-              const row = hosted.get(key);
-              if (!row || !activation!.dormant(row.target)) return;
-              const workspaceId = row.target.workspaceId;
-              // A pass continues a catch-up that stopped at its page budget or failed, and publishes what a reload settled.
-              try {
-                // While a sibling is mid-activation the open skips catch-up, as awake documents
-                // do, and converges once that sibling resolves. Waiting here would let one stuck
-                // sibling keep every dormant document in the workspace from opening.
-                if (
-                  activation!.workspaceReady(workspaceId) &&
-                  (await pull(attachments.get(workspaceId)!, joined, "open")).hasMore
-                ) {
-                  throw new Error("Hosted replication has more pages.");
+          await exclusive(
+            () =>
+              withLiveHostSignal(signal, callerSignal, async (joined) => {
+                await resolveUnload(key, joined);
+                const row = hosted.get(key);
+                if (!row || !activation!.dormant(row.target)) return;
+                const workspaceId = row.target.workspaceId;
+                // A pass continues a catch-up that stopped at its page budget or failed, and publishes what a reload settled.
+                try {
+                  // While a sibling is mid-activation the open skips catch-up, as awake documents
+                  // do, and converges once that sibling resolves. Waiting here would let one stuck
+                  // sibling keep every dormant document in the workspace from opening. A sibling
+                  // waiting out a backoff is not mid-activation, so the open catches up.
+                  if (
+                    (activation!.workspaceReady(workspaceId) ||
+                      activation!.workspaceWaiting(workspaceId)) &&
+                    (await pull(attachments.get(workspaceId)!, joined, "open")).hasMore
+                  ) {
+                    throw new Error("Hosted replication has more pages.");
+                  }
+                  activation!.wake(row.target);
+                  touch(key);
+                  await activation!.activate(row.target, joined, settleTarget);
+                } finally {
+                  nudgePass();
                 }
-                activation!.wake(row.target);
-                touch(key);
-                await activation!.activate(row.target, joined, settleTarget);
-              } finally {
-                nudgePass();
-              }
-            }),
+              }),
+            callerSignal,
           );
         };
         // A held-document read asks the engine for a workspace this daemon replicates,
@@ -2200,16 +2243,32 @@ export async function startServiceLiveHost(options: {
                       method,
                       workspace: attached.handle,
                       params: { workspaceId, ...params },
-                      deadlineMs: config.client.requestDeadlineMs,
+                      // Within the longest timer Node keeps.
+                      deadlineMs: Math.min(
+                        config.client.requestDeadlineMs +
+                          Math.max(HELD_READ_CANCEL_GRACE_MS, config.client.requestDeadlineMs),
+                        2_147_483_647,
+                      ),
                     },
                     undefined,
                     undefined,
-                    cancelled,
+                    // The read is cancelled at the request deadline from its start, even while a caller that joined
+                    // later still waits, so the grace counts from that cancel.
+                    AbortSignal.any([
+                      cancelled,
+                      AbortSignal.timeout(config.client.requestDeadlineMs),
+                    ]),
                   );
                   return {
                     result: decodeHostedSyncResult(method, response.result),
                     ...(streamed ? { streamed } : {}),
                   };
+                } catch (error) {
+                  // The engine received the read and answered neither it nor its cancel, so it is stopped as a
+                  // queued request's engine is, whether or not a caller still waits.
+                  if (changes && error instanceof EngineRequestDeadlineError && !error.unsent)
+                    unanswered(error);
+                  throw error;
                 } finally {
                   stop();
                 }
@@ -2951,6 +3010,33 @@ export async function startServiceLiveHost(options: {
             lastError: string | undefined,
             lastIdleError: string | undefined,
             lastSlowPassAt: number | undefined;
+          // A document whose activation has not finished for a minute names its latest reason once, and again at most once a
+          // minute while that reason changes. A blocked document has its own line.
+          const noteWaiting = (
+            target: ServiceActivationTarget,
+            outcome: { kind: string; reason?: string },
+          ) => {
+            const key = JSON.stringify([target.workspaceId, target.path]);
+            if (outcome.kind === "done" || activation!.blocked(target) !== undefined) {
+              waiting.delete(key);
+              return;
+            }
+            const at = now(),
+              reason = outcome.reason ?? outcome.kind,
+              state = waiting.get(key) ?? { since: at };
+            waiting.set(key, state);
+            if (at - state.since < 60_000 || reason === state.shown) return;
+            if (state.shownAt !== undefined && at - state.shownAt < 60_000) return;
+            state.shown = reason;
+            state.shownAt = at;
+            try {
+              console.error(
+                `Live editing is waiting. workspace ${target.workspaceId} object ${hosted.get(key)?.objectId ?? "unknown"} ${reason}`,
+              );
+            } catch {
+              /* Reporting must not stop activation. */
+            }
+          };
           const pass = () =>
             withDeadline(signal, config.activation!.passDeadlineMs, async (passSignal) => {
               const bounds = config.activation!,
@@ -2965,7 +3051,7 @@ export async function startServiceLiveHost(options: {
                   await work();
                 } catch (error) {
                   failed = true;
-                  const shown = activationFailureLine(error);
+                  const shown = serverLogLine(error);
                   if (!signal.aborted && shown !== lastError) {
                     lastError = shown;
                     try {
@@ -2988,7 +3074,7 @@ export async function startServiceLiveHost(options: {
                   }
                   if (waiting !== undefined) {
                     lifecycleRetries++;
-                    throw new Error(`Departing live document is waiting: ${waiting}`);
+                    throw new ServerLogError(`Departing live document is waiting: ${waiting}`);
                   }
                 });
               // A replica that has not checked its origin checks it first. Until it succeeds, its workspace's steps wait.
@@ -3085,7 +3171,7 @@ export async function startServiceLiveHost(options: {
                           timed.object ??= document.objectId.slice(0, 8);
                           const sent = consumer.settlesSent;
                           try {
-                            const settled = await consumer.settle(document, joined);
+                            const settled = await consumer.settleDrained(document, joined);
                             timed.materialized =
                               !settlementPending(settled) && settled.materialized;
                             return settled;
@@ -3102,17 +3188,18 @@ export async function startServiceLiveHost(options: {
                       catchUp,
                     );
                     timed.outcome = outcome.kind === "done" ? "done" : "pending";
+                    noteWaiting(target, outcome);
                   } finally {
                     timed.ms = Math.round(now() - startedAt);
                   }
                 }
               });
               // Every ready workspace pushes, then pulls unless its replica is quiet and its relay state unchanged, until the
-              // recovery probe. One with no documents still pulls while its replica has departures to finish.
-              // One that is not ready pulls once a pass unless an activation above caught it up, so its held lists page
-              // on and an ended hold is freed, however long another document holds readiness back. It pushes first while
-              // only documents with no owner waiting out a backoff hold it back. One whose replica has not checked its
-              // origin does neither.
+              // recovery probe. One with no documents still pulls while its replica has departures to finish. One held back
+              // only by documents waiting out a backoff pulls the same way, and pushes unless one of them has its owner here.
+              // Any other unready workspace pulls once a pass unless an activation above caught it up, so its held lists page
+              // on and an ended hold is freed, however long another document holds readiness back. It does not push. One
+              // whose replica has not checked its origin does neither.
               for (const [workspaceId, attached] of [...attachments]) {
                 if (!attached.hosted.checked) continue;
                 const push = async () => {
@@ -3124,9 +3211,10 @@ export async function startServiceLiveHost(options: {
                     if (timed) timed.pushMs = Math.round(now() - startedAt);
                   }
                 };
-                if (activation!.workspaceReady(workspaceId)) {
+                const ready = activation!.workspaceReady(workspaceId);
+                if (ready || activation!.workspaceWaiting(workspaceId)) {
                   // A refused push does not cost the pull, so departures are still confirmed while the push keeps failing.
-                  await step(push);
+                  if (ready || activation!.workspacePushes(workspaceId)) await step(push);
                   await step(async () => {
                     // The pull uses the attachment standing after the push, not one the pass saw before it.
                     const current = checked(workspaceId),
@@ -3134,8 +3222,6 @@ export async function startServiceLiveHost(options: {
                     if (current && reason) await pull(current, passSignal, reason);
                   });
                 } else {
-                  // A refused push does not cost the pull, so held lists still page while the push keeps failing.
-                  if (activation!.workspacePushes(workspaceId)) await step(push);
                   if (!catchUp.has(workspaceId))
                     await step(() => pull(attached, passSignal, "unready"));
                 }
@@ -3194,7 +3280,7 @@ export async function startServiceLiveHost(options: {
                   sleep(key, row, state.generation, deadline),
                 );
               } catch (error) {
-                waiting = activationFailureLine(error);
+                waiting = serverLogLine(error);
               }
               if (waiting === undefined || idle.get(key)?.generation !== state.generation) continue;
               idle.set(key, {
@@ -3213,8 +3299,10 @@ export async function startServiceLiveHost(options: {
             if (visited === 0) idleSweepsBeforeDue++;
           };
           // Whether nothing is left for a pass to do until a wake, a nudge or a deadline: no document leaves, parks,
-          // recovers, unloads or is kept, none that moved away is still listed, every activation finished or blocked, and
-          // every workspace is checked, ready, pushed and quiet with its relay state read and its recovery probe not due.
+          // recovers, unloads or is kept, none that moved away is still listed, every activation finished, blocked or waits
+          // out a backoff, and every workspace is checked and quiet with its relay state read and its recovery probe not
+          // due, ready apart from documents waiting out a backoff, and pushed unless its push waits for one of those.
+          // A pause ends within idlePollIntervalMs, so a document tries again within that of its wait lapsing.
           const settled = () => {
             if (
               leaving.size ||
@@ -3231,8 +3319,12 @@ export async function startServiceLiveHost(options: {
               if (
                 !attached.hosted.checked ||
                 attached.hosted.diverged ||
-                !attached.hosted.pushedAll ||
-                !activation!.workspaceReady(workspaceId)
+                !(
+                  activation!.workspaceReady(workspaceId) ||
+                  activation!.workspaceWaiting(workspaceId)
+                ) ||
+                // A push that waits for a document's backoff does not run, so it cannot have pushed everything.
+                (!attached.hosted.pushedAll && activation!.workspacePushes(workspaceId))
               )
                 return false;
               if (
@@ -3745,7 +3837,10 @@ export async function startServiceLiveHost(options: {
                           wire.message === "invalid-retirement-preparation")
                       ) {
                         reconnect = true;
-                        console.error("Live editing Stop preparation is unavailable.", error);
+                        console.error(
+                          "Live editing Stop preparation is unavailable.",
+                          serverLogLine(error),
+                        );
                         if (wire.code === "INVALID_PARAMS") throw error;
                         throw relayError("restore-in-progress");
                       }
@@ -3820,8 +3915,13 @@ export async function startServiceLiveHost(options: {
               objectId: binding.objectId,
               lineageClaimId: binding.lineageClaimId,
             });
-            await wake(document, callerSignal);
-            await drain(document, callerSignal);
+            // An open whose caller gives up stops waiting at once, even for a started reload step that can't stop
+            // at once, so the relay frees what it holds for that open. The reload keeps its turn until it ends.
+            const waitFor = <T>(work: Promise<T>) =>
+              callerSignal ? untilAborted(work, callerSignal) : work;
+            await waitFor(wake(document, callerSignal));
+            await waitFor(drain(document, callerSignal));
+            callerSignal?.throwIfAborted();
             check();
             const consumer = consumerFor(document)!;
             const registration = consumer.captureRegistration(binding);
@@ -3970,7 +4070,7 @@ export async function startServiceLiveHost(options: {
       await close();
     } catch (cleanupError) {
       try {
-        console.error("Service host startup cleanup failed.", cleanupError);
+        console.error("Service host startup cleanup failed.", serverLogLine(cleanupError));
       } catch {
         /* Preserve the startup failure. */
       }

@@ -654,7 +654,7 @@ impl AliasHeads {
     /// The heads, with their content kinds and in path order, at other
     /// spellings of `path` that reach the file `path` reaches, as they do on a
     /// disk that ignores case. They own the file, so a delete at `path` must
-    /// leave it to them (#2157).
+    /// leave it to them.
     fn owners(&self, root: &std::path::Path, path: &str) -> Vec<(String, &'static str)> {
         let Some(candidates) = self.0.get(&path_collision_key(path)) else {
             return Vec::new();
@@ -1584,7 +1584,7 @@ pub(super) fn materialize_relay_page_on_store(
             continue;
         }
         // On a disk that ignores case or normalization, a head at another
-        // spelling can own the file this delete reaches (#2157). The file then
+        // spelling can own the file this delete reaches. The file then
         // goes to that head: it stays, or gets the head's bytes and spelling.
         // A page that also writes that spelling, as a case-only rename does,
         // or a path inside or around it, runs its deletes and writes in order
@@ -1765,8 +1765,8 @@ pub(super) fn materialize_relay_page_on_store(
 /// projection a pull applies queues a write of its document's file that
 /// expects the head before it, and the page then brings the file to the
 /// newest head through a job of its own. Nothing runs the queued writes while
-/// the copy is up, and each later replay kept one earlier state beside the
-/// file as a conflict file (#3804). So once a path's file holds its head, its
+/// the copy is up, and each later replay would keep one earlier state beside
+/// the file as a conflict file. So once a path's file holds its head, its
 /// writes of earlier states are cancelled and the write of the head is
 /// replayed, which marks it complete without writing.
 ///
@@ -2191,7 +2191,7 @@ pub(super) mod tests {
     /// A peer whose disk keeps case apart can hold `notes.md` and `Notes.md`.
     /// When it creates `Notes.md` in one page and deletes `notes.md` in a
     /// later one, both spellings reach one file on a disk that ignores case.
-    /// `Notes.md`'s head owns it, so the delete leaves it (#2157).
+    /// `Notes.md`'s head owns it, so the delete leaves it.
     #[test]
     fn a_later_pages_delete_leaves_the_file_another_spelling_owns() {
         let (scratch, _, mut store) = dohc_engine_testkit::open_store();
@@ -2501,7 +2501,7 @@ pub(super) mod tests {
 
     /// A case-only rename arrives as one page that deletes `notes.md` and
     /// writes `Notes.md` with the same bytes. The page runs its delete and then
-    /// its write, as #2146 orders them, and the file takes the new spelling.
+    /// its write, and the file takes the new spelling.
     #[test]
     fn a_case_only_rename_page_runs_its_delete_and_write() {
         let (scratch, _, mut store) = dohc_engine_testkit::open_store();
@@ -2779,10 +2779,10 @@ pub(super) mod tests {
             .collect()
     }
 
-    /// #3804: on a hosted replica each projection a pull applies queues a
-    /// write of the note's file, and the page writes the file itself. Nothing
-    /// ran the queued writes, and each later replay kept one earlier state
-    /// beside the file. The page now ends them once the file holds the head.
+    /// On a hosted replica each projection a pull applies queues a write of
+    /// the note's file, and the page writes the file itself. Nothing runs the
+    /// queued writes, and each later replay would keep one earlier state
+    /// beside the file. The page ends them once the file holds the head.
     #[test]
     fn a_hosted_page_ends_the_writes_its_projections_queued() {
         use dohc_engine_storage::JobStatus;

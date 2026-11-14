@@ -93,7 +93,6 @@ async fn main_named_people_survive_retry_and_restart() {
         .await
         .unwrap();
     assert_eq!(response.result["deduped"], true);
-    // The same request naming someone else is a different request.
     let mut relabeled = record_update(12, &handle, &resumed, &first, typed_by("bob"));
     relabeled.idempotency_key = Some("original-alice".into());
     assert!(
@@ -159,8 +158,6 @@ async fn hand_made_creation_and_deletion_name_the_person_as_local_file_edits() {
     call(&transport, &handle, 7, "workspace.close", json!({})).await;
 }
 
-// An automation names its run's person, whoever is signed in here: a run a
-// synced edit by Bob started names Bob, and a scheduled run names nobody.
 #[tokio::test]
 async fn an_automation_write_keeps_its_runs_person() {
     let scratch = ScratchDir::new().unwrap();

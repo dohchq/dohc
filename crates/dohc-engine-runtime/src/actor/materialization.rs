@@ -1264,8 +1264,7 @@ fn replay_materializations(
             }
             // On a hosted replica, a projection's write of a state the path's
             // head replaced never runs once the file holds that head: it
-            // could only conflict (#3804). Any other store replays it as
-            // before.
+            // could only conflict. Any other store replays it.
             let projection_write = job.operation == MaterializationOperation::Write
                 && job.job_id.starts_with("ydoc-mat_");
             if projection_write && is_hosted.is_none() {
@@ -1483,7 +1482,7 @@ pub(super) struct EndedWrites {
 ///
 /// A Y.Doc projection queues a write of the file that expects the file to
 /// hold the head before it. When something else brings the file to a later
-/// head, as a pull's page does (#3804), that write can no longer land: a
+/// head, as a pull's page does, that write can no longer land: a
 /// replay finds the file changed and keeps the write's content beside it as
 /// a conflict file. The content is an earlier state the store still holds as
 /// a moment, and the head replaced it, so the write is cancelled instead.

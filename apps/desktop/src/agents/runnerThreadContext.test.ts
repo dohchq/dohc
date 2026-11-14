@@ -108,7 +108,6 @@ describe("buildRunnerThreadContext", () => {
     expect(shownIds(markdown)).toEqual(Array.from({ length: 40 }, (_, index) => `m_${index + 5}`));
   });
 
-  // A claim answers every request queued in its thread, not only the asking one.
   it("keeps a later request past 48,000 characters", async () => {
     await seedThread(["first request".padEnd(24_000, "."), "second request".padEnd(24_000, ".")]);
     const markdown = await context("m_0");

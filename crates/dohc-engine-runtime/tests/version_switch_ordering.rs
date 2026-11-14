@@ -544,16 +544,15 @@ async fn plaintext_never_leaks_across_a_version_switch_and_back() {
     scan.assert_secret_plaintext_absent(&feature_text);
     scan.assert_absent_in_every_form("main marker", main_marker);
     scan.assert_absent_in_every_form("feature marker", feature_marker);
-    // Positive control: the ciphertext both tips hold IS in the scanned bytes.
     scan.assert_stored_ciphertext_scanned(&database);
     scan.assert_scanned_wal();
 
     supervisor.close(&database).expect("close");
 }
 
-// dohc#3112. A crash before a switch writes a captured secret leaves the write
-// pending with no file. The capture seed at the next start leaves the secret
-// out, so the first scan doesn't record it as deleted, and replay writes it.
+// A crash before a switch writes a captured secret leaves the write pending
+// with no file. The capture seed at the next start leaves the secret out, so
+// the first scan doesn't record it as deleted, and replay writes it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_secret_the_switch_has_not_written_stays_out_of_the_capture_seed() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -661,8 +660,6 @@ async fn a_secret_the_switch_has_not_written_stays_out_of_the_capture_seed() {
     supervisor.close(&database).expect("close");
 }
 
-/// `main` has `plans/trip.md` on disk and `later` has a file at `plans`,
-/// before the switch to `later`.
 struct FolderToFile {
     scratch: ScratchDir,
     database: PathBuf,
@@ -716,7 +713,6 @@ impl FolderToFile {
     }
 }
 
-/// The switch jobs at `path` still waiting to run.
 fn pending_switch_jobs(database: &std::path::Path, path: &str) -> i64 {
     Connection::open(database)
         .expect("sqlite")
@@ -1012,18 +1008,15 @@ async fn a_link_keeps_its_folder_and_the_file_unwritten() {
     assert_eq!(pending_switch_jobs(&fixture.database, "plans"), 0);
 }
 
-// dohc#3621. A crash after a switch commits a job, before it changes the
-// file, leaves the previous version's bytes on disk. Capture must not record
-// them in the active version. Replay lands the switch's change, and capture
-// then sees the active version's own bytes.
+// A crash after a switch commits a job, before it changes the file, leaves
+// the previous version's bytes on disk. Capture must not record them in the
+// active version. Replay lands the switch's change, and capture then sees the
+// active version's own bytes.
 const WAITING_PATH: &str = "ordered.md";
 // CRLF: the switch hashes the raw file, and capture must compare the same bytes.
 const WAITING_MAIN: &str = "main line\r\nsecond\r\n";
 const WAITING_FEATURE: &str = "feature line\r\nsecond\r\n";
 
-/// Main holds `WAITING_MAIN` on disk. The feature version holds
-/// `WAITING_FEATURE`, or no file when `feature_text` is `None`. The switch to
-/// the feature version crashes after its job commits, and the actor reopens.
 async fn crash_switch_before_its_write(
     scratch: &ScratchDir,
     supervisor: &WorkspaceSupervisor,

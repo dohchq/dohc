@@ -146,8 +146,6 @@ it("reports a failed projection instead of copying the readable half", async () 
   );
   expect(writeText).not.toHaveBeenCalled();
 
-  // The failure was transient, and the row still holds the canonical snapshot.
-  // The next copy retries the import and waits for it.
   projectionShouldFail = false;
   const release = armProjectionGate();
   await user.click(screen.getByTestId("recovery-list-copy"));
@@ -190,7 +188,6 @@ it("copies the readable half when the recovery snapshot cannot be decoded", asyn
   const user = userEvent.setup();
   render(<RecoveryList rows={[rowFor(text)]} />);
 
-  // It copies the person's own edits, so its name says so.
   await user.click(screen.getByRole("button", { name: "Copy edits" }));
   await waitFor(async () =>
     expect(await navigator.clipboard.readText()).toBe("Crude fallback text"),

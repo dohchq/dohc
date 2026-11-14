@@ -90,7 +90,6 @@ async fn fenced_pages_do_not_repeat_or_skip_under_concurrent_writes_and_tip_roll
     let first = page(&transport, &handle, None, 1).await;
     assert_eq!(first["moments"][0]["momentId"], "text-7");
     let fence = first["startCursor"]["textFence"].clone();
-    // The position stays literal even after its row is removed.
     call(
         &transport,
         &handle,

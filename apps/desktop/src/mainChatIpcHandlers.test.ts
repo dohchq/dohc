@@ -29,11 +29,6 @@ describe("runtime main chat IPC boundaries", () => {
   });
 });
 
-// A relay outage must resolve as "unreachable", never as an empty
-// listing — an empty listing is an authoritative "there are no shares" and
-// clobbers whatever the renderer has cached. A missing or rejected session is
-// the third fact: "signed-out", which must clear cached account-scoped rows
-// rather than preserve them across a logout or account switch.
 describe("readRelayChatShareLanes", () => {
   it("reports a session failure as signed-out, not as a transport outage", async () => {
     const lanes = await readRelayChatShareLanes({
@@ -74,7 +69,6 @@ describe("readRelayChatShareLanes", () => {
               selector: { kind: "chat", channelWireId: "wire-2" },
               access: "read-write",
             },
-            // Not a chat share.
             { shareId: "share-doc", workspaceId: "workspace-1", selector: { kind: "document" } },
           ],
           received: [
@@ -130,9 +124,6 @@ describe("readRelayChatShareLanes", () => {
     });
   });
 
-  // The removed lane is the only source for "the owner removed your access".
-  // Its ids ride with the answer; a lane that is not an array is a malformed
-  // listing, like the other lanes.
   it("carries the relay's removed share ids, and treats a malformed removed lane as unreachable", async () => {
     const removed = await readRelayChatShareLanes({
       shareIdsClaimedElsewhere: new Set<string>(),
@@ -165,8 +156,8 @@ describe("readRelayChatShareLanes", () => {
   });
 
   // The row cap is the one door row-level validation does not cover. Every row
-  // below is structurally valid, so the guard used to answer "answered" and
-  // hand the contract parse a lane it cannot represent: the parse throws, the
+  // below is structurally valid. A guard that answered "answered" would hand
+  // the contract parse a lane it cannot represent: the parse throws, the
   // IPC call rejects, the renderer's .catch(() => null) commits a null
   // listing, and every cached invitation and grant disappears.
   function relayRowsOverCap(lane: "granted" | "received") {
@@ -231,9 +222,8 @@ describe("readRelayChatShareLanes", () => {
             MAX_CHAT_CHANNEL_SHARE_ROWS + 1
           } rows; the cap is ${MAX_CHAT_CHANNEL_SHARE_ROWS} rows per lane. Reporting the listing over-limit, so cached rows survive and the surface can name the constraint.`,
         );
-        // The composition is the defect: the guard's answer must survive the
-        // contract parse the IPC handler runs immediately after it. This is
-        // the parse that used to throw.
+        // The guard's answer must survive the contract parse the IPC handler
+        // runs immediately after it.
         expect(() =>
           ListChatChannelSharesResult.parse({
             joined: [],
@@ -247,12 +237,6 @@ describe("readRelayChatShareLanes", () => {
     });
   }
 
-  // The relay keeps returning revoked grants to the
-  // granter, so counting them made the cap measure an account's lifetime
-  // grants: past the cap the listing stayed over-limit with every grant
-  // revoked, and revoking more could not reduce it. Third time this cap
-  // produced a permanent-refusal shape, same cause each time — counting rows
-  // the user cannot remove.
   it("drops revoked grants, so revoking one gets an account back under the cap", async () => {
     const grantRows = (revokedFrom: number) =>
       Array.from({ length: MAX_CHAT_CHANNEL_SHARE_ROWS + 1 }, (_, index) => ({
@@ -264,7 +248,6 @@ describe("readRelayChatShareLanes", () => {
         access: "read-write",
       }));
 
-    // Every grant live: genuinely over the cap.
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const allLive = await readRelayChatShareLanes({
@@ -297,14 +280,7 @@ describe("readRelayChatShareLanes", () => {
     ).toBe(true);
   });
 
-  // An ended row in another workspace claims nothing. The
-  // tombstone is that workspace's own write gate and stays for that, but it
-  // was never an argument for cross-workspace exclusivity — once A has left,
-  // filtering the invitation out of every other workspace makes leaving
-  // irreversible everywhere except A, where the only offered action is to
-  // rejoin. The caller builds the set; this pins what the guard does with it.
-
-  // The acceptance case for #618: another workspace's received lane being
+  // Another workspace's received lane being
   // unreadable must not blank a workspace that has shares of its own. The
   // scoping runs before the cap, so the rows homed elsewhere never count
   // against this workspace's lane.
@@ -352,8 +328,6 @@ describe("readRelayChatShareLanes", () => {
   });
 });
 
-// The session key scopes the renderer's cached relay rows to one account, so
-// preservation through an outage can never keep another account's rows.
 describe("chatShareSessionKey", () => {
   it("answers null without a session", () => {
     expect(chatShareSessionKey(null)).toBeNull();
@@ -420,7 +394,7 @@ describe("handleRelayUnauthorized", () => {
     expect(steps).toEqual([]);
   });
 
-  // #742 P1 SECURITY, round 5: a current-session 401 IS an account-session
+  // Security: a current-session 401 is an account-session
   // end — main.ts's clearCachedCredentials() (called here as
   // clearCachedCredentials, exactly as main.ts wires it) also clears the DM
   // request-lanes cache, so a new account's first failed poll can never be

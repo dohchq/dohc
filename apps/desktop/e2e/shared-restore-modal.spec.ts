@@ -108,7 +108,6 @@ test.describe("shared restore review with a notice toast", () => {
         expect(process.env[key]).toBe(buildEnvironment[key]);
       }
       const { restore } = await openReview(page, setup);
-      // The action sits below the fold until the person scrolls the review.
       await expect(restore).not.toBeInViewport();
       const { width, height } = viewports[setup.viewport];
       await page.mouse.move(width / 2, height / 2);
@@ -124,8 +123,6 @@ test.describe("shared restore review with a notice toast", () => {
     });
   }
 
-  // History's day headings stick above the list. The review must still own
-  // every point it covers, including its title and path, once it has settled.
   for (const setup of cases) {
     for (const scrolled of [false, true]) {
       test(`the restore review covers History's ${scrolled ? "scrolled " : ""}day heading at the ${setup.viewport} size in ${setup.theme} with ${setup.motion} motion`, async ({
@@ -140,7 +137,6 @@ test.describe("shared restore review with a notice toast", () => {
             ? async () => {
                 await history.hover();
                 await page.mouse.wheel(0, 700);
-                // A later day's heading is pinned to the top of the list.
                 await expect
                   .poll(() =>
                     history.evaluate((list) => {
@@ -199,7 +195,6 @@ test.describe("shared restore review with a notice toast", () => {
               `restore-over-history-${setup.viewport}-${setup.theme}${scrolled ? "-scrolled" : ""}.png`,
             ),
         });
-        // The large window leaves the review clear of the sidebar.
         expect(overlaps > 0).toBe(setup.viewport !== "large");
         expect(misses).toEqual([]);
       });
@@ -212,7 +207,6 @@ test.describe("shared restore review with a notice toast", () => {
     }) => {
       const { dialog } = await openReview(page, setup, false);
       const toast = page.getByTestId("workspace-shell-error");
-      // What a pointer at the toast's middle hits is the toast, not the review or its scrim.
       expect(
         await toast.evaluate((element) => {
           const box = element.getBoundingClientRect();
@@ -228,7 +222,6 @@ test.describe("shared restore review with a notice toast", () => {
       await toast.getByRole("button", { name: "Try again" }).click();
       await expect(page.getByLabel("Toast retries")).toHaveText("1");
       await expect(dialog).toBeVisible();
-      // Closing it leaves the trap whole: the next Tab lands in the review.
       await toast.getByRole("button", { name: "Dismiss workspace error" }).click();
       await expect(toast).toHaveCount(0);
       await page.keyboard.press("Tab");
@@ -236,9 +229,6 @@ test.describe("shared restore review with a notice toast", () => {
     });
   }
 
-  // At the smallest window, with a toast showing and the review at rest, the
-  // review's actions sit above the toast: a pointer at their centres and a
-  // keyboard focus both reach them without scrolling.
   for (const setup of cases.filter((candidate) => candidate.viewport === "minimum")) {
     test(`the review's actions clear the toast at rest at the minimum size in ${setup.theme}`, async ({
       page,
@@ -258,7 +248,6 @@ test.describe("shared restore review with a notice toast", () => {
         path: test.info().outputPath(`review-at-rest-minimum-${setup.theme}.png`),
       });
 
-      // Keyboard focus lands on Restore file where it can be seen.
       await page.keyboard.press("Shift+Tab");
       await expect(restore).toBeFocused();
       expect(await atCentre(restore)).toBe(true);
@@ -279,9 +268,6 @@ test.describe("shared restore review with a notice toast", () => {
     });
   }
 
-  // A window without the shell keeps its notices in a fixed corner wrapper.
-  // Its toasts still rise above a warning dialog, such as the one that asks
-  // before dohc closes, and take clicks there.
   for (const theme of ["light", "dark"] as const) {
     test(`a corner toast is on top of a warning dialog and takes a click in ${theme}`, async ({
       page,
@@ -323,11 +309,8 @@ test.describe("shared restore review with a notice toast", () => {
     await page.keyboard.press("F6");
     const toasts = page.getByTestId("notice-toasts");
     const retry = toasts.getByRole("button", { name: "Try again" });
-    // F6 lands on the toast's first worded action, even when a cut-off title
-    // puts Show more before it.
     await expect(retry).toBeFocused();
     await page.screenshot({ path: test.info().outputPath("toast-keyboard-focus-dark.png") });
-    // Tab cycles the toast's own controls; it does not reach the page behind.
     for (let step = 0; step < 4; step += 1) {
       await page.keyboard.press("Tab");
       await expect(toasts.locator(":focus")).toHaveCount(1);
@@ -335,8 +318,6 @@ test.describe("shared restore review with a notice toast", () => {
     await retry.focus();
     await page.keyboard.press("Enter");
     await expect(page.getByLabel("Toast retries")).toHaveText("1");
-    // Escape from the toast goes back to where F6 left the review, and the
-    // review stays open. F6 goes there and back again.
     await page.keyboard.press("Escape");
     await expect(restore).toBeFocused();
     await expect(dialog).toBeVisible();
@@ -344,8 +325,6 @@ test.describe("shared restore review with a notice toast", () => {
     await expect(retry).toBeFocused();
     await page.keyboard.press("F6");
     await expect(restore).toBeFocused();
-    // Closing the focused toast from the keyboard leaves the trap whole: the
-    // next Tab lands in the review, not on the page behind it.
     await page.keyboard.press("F6");
     await toasts.getByRole("button", { name: "Dismiss workspace error" }).focus();
     await page.keyboard.press("Enter");
@@ -355,7 +334,6 @@ test.describe("shared restore review with a notice toast", () => {
   });
 
   test("the keyboard stays in the restore review while a toast is open", async ({ page }) => {
-    // Retry leaves the review, so focus starts outside its controls.
     const { dialog, restore } = await openReview(page, cases[0], false);
     await page.keyboard.press("Shift+Tab");
     await expect(restore).toBeFocused();

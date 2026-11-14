@@ -115,7 +115,6 @@ async function relay(
   return { h, storage };
 }
 
-// Trip is shared with Ana by name as share-0.
 async function sharedTrip(overrides: HandlerOverrides = {}) {
   const setup = await relay(overrides);
   const shareId = grant({ paths: ["trip"], recipientUserId: "ana" });
@@ -136,7 +135,6 @@ function notice(overrides: Partial<PostNoticeRequest> = {}): PostNoticeRequest {
   } as PostNoticeRequest;
 }
 
-// A self notice posted straight to storage, past the rate limiter.
 function stored(storage: SyncRelayStorage, userId: string, noticeId: string, at = clock): void {
   const input: PostNoticeInput = {
     noticeId,
@@ -179,7 +177,6 @@ async function pull(
   return page;
 }
 
-// Every row in the list, following pages.
 async function pullAll(h: SyncRelayHandler, userId: string): Promise<RelayNotice[]> {
   const rows: RelayNotice[] = [];
   for (let cursor: string | undefined, more = true; more;) {
@@ -215,7 +212,6 @@ describe("notice list", () => {
     ["owner", "edit", AUTOMATION_SWITCHED_OFF_BODY, AUTOMATION_SWITCHED_OFF_BODY],
     ["ana", "edit", AUTOMATION_SWITCHED_OFF_BODY, AUTOMATION_SWITCHED_OFF_BODY],
     ["ana", "view", AUTOMATION_SWITCHED_OFF_BODY, AUTOMATION_SWITCHED_OFF_VIEW_BODY],
-    // A sender words a switch no share can make as the view body; its owner still opens it.
     ["owner", "edit", AUTOMATION_SWITCHED_OFF_VIEW_BODY, AUTOMATION_SWITCHED_OFF_BODY],
     ["ana", "edit", AUTOMATION_SWITCHED_OFF_VIEW_BODY, AUTOMATION_SWITCHED_OFF_VIEW_BODY],
   ] as const)(
@@ -278,6 +274,7 @@ describe("notice list", () => {
           createdAtMs: 10_000,
           readAtMs: null,
           dismissedAtMs: null,
+          expiresAtMs: 10_000 + NOTICE_UNREAD_RETENTION_MS,
           removed: false,
         },
       ],
@@ -344,7 +341,6 @@ describe("notice list", () => {
     await expectRefused(await post(h, "ana", toSelf(benShare, "probe")));
     await expectRefused(await post(h, "ana", toSelf("share-none", "missing")));
     expect((await post(h, "ana", toSelf(shareId, "own"))).status).toBe(200);
-    // A person who opened a public link holds a grant too.
     seedLinkGrant(storage, { grantId: "link-1", shareId: benShare, secretHash: sha256("secret") });
     seedDependentGrant(storage, {
       shareId: benShare,
@@ -420,7 +416,6 @@ describe("notices for someone else", () => {
     expect((await post(h, "owner", notice({ recipientUserId: "ana" }))).status).toBe(200);
     const ownerId = (await pull(h, "owner")).notices[0]!.noticeId;
     const copyId = (await pull(h, "ana")).notices[0]!.noticeId;
-    // Supplying the sender's id as the recipient cannot take back their post.
     expect(
       (
         await h(
@@ -434,7 +429,6 @@ describe("notices for someone else", () => {
     ).toBe(200);
     expect((await pull(h, "owner")).notices[0]!.dismissedAtMs).toBeNull();
     expect((await pull(h, "ana")).notices[0]!.dismissedAtMs).toBeNull();
-    // An ordinary dismissal changes only this person's list.
     await h(
       request(
         "owner",
@@ -484,7 +478,6 @@ describe("notices for someone else", () => {
       workspaceId: WORKSPACE,
       recipientShareId: null,
     });
-    // A grantee cannot name the owner's workspace.
     await expectRefused(await post(h, "ana", notice()));
   });
 
@@ -509,7 +502,6 @@ describe("notices for someone else", () => {
         workspaceId: WORKSPACE,
       }),
     ]);
-    // Only through a share the sender holds, and never beside a named recipient.
     await expectRefused(await post(h, "ben", toOwner));
     expect((await post(h, "ana", { ...toOwner, shareId: "share-unknown" })).status).toBe(403);
     expect(
@@ -551,7 +543,6 @@ describe("notices for someone else", () => {
     grant({ paths: ["budget"], recipientUserId: "ben" });
     const viaShare = { workspaceId: undefined, shareId };
 
-    // The grantee cannot read the owner's private folder, in either direction.
     await expectRefused(
       await post(h, "owner", notice({ recipientUserId: "ana", target: { path: "budget/q3" } })),
     );
@@ -560,7 +551,6 @@ describe("notices for someone else", () => {
     );
     // Ben reads budget but not trip.
     await expectRefused(await post(h, "ana", notice({ ...viaShare, recipientUserId: "ben" })));
-    // A stranger, to or from the owner, and a share that does not exist.
     await expectRefused(await post(h, "stranger", notice()));
     await expectRefused(await post(h, "stranger", notice(viaShare)));
     await expectRefused(await post(h, "owner", notice({ recipientUserId: "stranger" })));
@@ -580,7 +570,6 @@ describe("notices for someone else", () => {
       await post(h, "owner", notice({ recipientUserId: "ana", kind: "agent-run" })),
     );
 
-    // A revoked grant reads nothing.
     expect(storage.revokeShare(shareId, clock)).toBe(true);
     await expectRefused(await post(h, "owner", notice({ recipientUserId: "ana" })));
     await expectRefused(await post(h, "ana", notice(viaShare)));
@@ -629,7 +618,6 @@ describe("notices for someone else", () => {
     grant({ paths: ["trip"], recipientUserId: "ben" });
     const shared = notice({ recipientUserId: "ana", noticeId: "automation-failed:x" });
 
-    // Ben posts first, as if to take the id. The owner's notice still arrives.
     expect(
       (
         await post(h, "ben", {
@@ -665,7 +653,6 @@ describe("notices for someone else", () => {
       clock,
     );
 
-    // Nobody can post an id in the sender-scoped form to themselves.
     const squat = await post(
       h,
       "ana",
@@ -712,7 +699,6 @@ describe("limits on notices from other people", () => {
     expect((await post(h, "owner", toAna("a"))).status).toBe(200);
     expect((await post(h, "owner", toAna("b"))).status).toBe(200);
     await expectRateLimited(await post(h, "owner", toAna("c")));
-    // Notices to yourself and other senders are not limited by the owner's posts.
     expect((await post(h, "owner", notice({ kind: "agent-run", noticeId: "d" }))).status).toBe(200);
     expect(
       (await post(h, "ana", notice({ workspaceId: undefined, shareId: "share-0", noticeId: "e" })))
@@ -730,11 +716,16 @@ describe("limits on notices from other people", () => {
         (await post(h, "owner", notice({ recipientUserId: "ana", noticeId: `n${index}` }))).status,
       ).toBe(200);
     }
-    await mark(h, "ana", [{ noticeId: "from:owner:n5", mark: "read" }]);
+    const readRow = "from:owner:n5";
+    const oldestUnreadRow = "from:owner:n0";
+    await mark(h, "ana", [{ noticeId: readRow, mark: "read" }]);
 
     expect(
       (await post(h, "owner", notice({ recipientUserId: "ana", noticeId: "n100" }))).status,
     ).toBe(200);
+    const idsAfterOnePost = (await pullAll(h, "ana")).map((row) => row.noticeId);
+    expect(idsAfterOnePost).not.toContain(readRow);
+    expect(idsAfterOnePost).toContain(oldestUnreadRow);
     expect(
       (await post(h, "owner", notice({ recipientUserId: "ana", noticeId: "n101" }))).status,
     ).toBe(200);
@@ -742,9 +733,8 @@ describe("limits on notices from other people", () => {
     expect(ids).toHaveLength(NOTICE_ROWS_PER_SENDER + 1);
     expect(ids).toContain("ana-own");
     expect(ids).toContain("from:owner:n101");
-    // The read row goes first, then the oldest unread.
-    expect(ids).not.toContain("from:owner:n5");
-    expect(ids).not.toContain("from:owner:n0");
+    expect(ids).not.toContain(readRow);
+    expect(ids).not.toContain(oldestUnreadRow);
   });
 
   it("sends a row removed to make room as an ordinary change", async () => {
@@ -772,13 +762,10 @@ describe("limits on notices from other people", () => {
         { path: "trip/tasks", automation: "finished-date" },
       ],
     ]);
-    // A tombstone takes no place in the list and cannot be marked.
     await mark(h, "ana", [{ noticeId: "from:owner:n0", mark: "read" }]);
     expect((await pull(h, "ana", next.nextCursor)).notices).toEqual([]);
     expect((await pullAll(h, "ana")).map((row) => row.noticeId)).not.toContain("from:owner:n0");
 
-    // Once the tombstone expires, only a computer that pulled before it
-    // takes the whole list.
     clock += NOTICE_REMOVED_RETENTION_MS;
     stored(storage, "ana", "later");
     expect((await pull(h, "ana", cursor)).replace).toBe(true);
@@ -860,7 +847,6 @@ describe("limits on notices from other people", () => {
     expect(await json(refused)).toMatchObject({ ok: false, code: "notice_list_full" });
     expect(countRows(storagePath(storage), "sync_relay_notices")).toBe(NOTICE_LIST_ROW_LIMIT);
 
-    // Ana's own notice still makes room, oldest first.
     expect(
       (
         await post(
@@ -931,7 +917,6 @@ describe("pulling changes", () => {
     ]);
     expect(changes.nextCursor).toBe("5");
 
-    // The flags go one way: nothing changes a second time.
     clock = 30_000;
     await mark(h, "owner", [
       { noticeId: "a", mark: "read" },
@@ -946,7 +931,6 @@ describe("pulling changes", () => {
       personalAgentsRevision: 0,
     });
 
-    // Dismissing a read row is still a change.
     await mark(h, "owner", [{ noticeId: "a", mark: "dismissed" }]);
     const last = await pull(h, "owner", "5");
     expect(last.notices.map((row) => [row.noticeId, row.readAtMs, row.dismissedAtMs])).toEqual([
@@ -975,7 +959,6 @@ describe("pulling changes", () => {
     expect(await answer("ana", [{ noticeId: "a", mark: "dismissed" }]), "not ana's notice").toEqual(
       { ok: true, dismissed: [] },
     );
-    // Two computers dismiss the same notice: only the first hears it did.
     expect(
       await answer("owner", [
         { noticeId: "a", mark: "dismissed" },
@@ -1034,8 +1017,6 @@ describe("pulling changes", () => {
     };
     await post(h, "owner", notice({ kind: "mention", noticeId: "a" }));
     expect(await dismiss()).toEqual(["a"]);
-    // The dismissed row outlives its retention and goes; a computer that
-    // kept the post sends it again, and the row comes back.
     clock += NOTICE_DISMISSED_RETENTION_MS + 1;
     await post(h, "owner", notice({ kind: "mention", noticeId: "b" }));
     await post(h, "owner", notice({ kind: "mention", noticeId: "a" }));
@@ -1109,6 +1090,41 @@ describe("pulling changes", () => {
       ),
     );
     expect(await response.json()).toEqual({ ok: true, dismissed: [] });
+
+    // A phone's restore and unread leave the schedule's floor, so no later dismissal is first.
+    const floors = () =>
+      context.db
+        .prepare(
+          "SELECT schedule_key, reclaimed_through_ms FROM sync_relay_notice_dismissal_floors WHERE recipient_user_id = ?",
+        )
+        .all("owner");
+    const floor = floors();
+    expect(floor).toHaveLength(1);
+    for (const installId of [undefined, "laptop"]) {
+      storage.markNotices({
+        recipientUserId: "owner",
+        marks: [
+          { noticeId: report, mark: "restore" },
+          { noticeId: report, mark: "unread" },
+        ],
+        nowMs: clock,
+      });
+      expect(
+        (await pull(h, "owner")).notices.find((row) => row.noticeId === report)?.dismissedAtMs,
+      ).toBeNull();
+      const again = await h(
+        request(
+          "owner",
+          "/sync/notices/marks",
+          jsonBody({
+            marks: [{ noticeId: report, mark: "dismissed" }],
+            ...(installId === undefined ? {} : { installId }),
+          }),
+        ),
+      );
+      expect(await again.json(), installId).toEqual({ ok: true, dismissed: [] });
+      expect(floors()).toEqual(floor);
+    }
   });
 
   it("keeps a notice stamped a little ahead of the clock from being first again after reclaim", async () => {
@@ -1199,7 +1215,6 @@ describe("pulling changes", () => {
     expect(snapshot.notices.map((row) => row.noticeId)).toEqual(["a", "c"]);
     expect(snapshot.nextCursor).toBe(current);
 
-    // The same holds once a post has swept the row away.
     stored(storage, "owner", "d");
     expect(countRows(storagePath(storage), "sync_relay_notices")).toBe(3);
     expect((await pull(h, "owner", behind)).replace).toBe(true);
@@ -1217,7 +1232,6 @@ describe("pulling changes", () => {
     clock += NOTICE_DISMISSED_RETENTION_MS;
     stored(storage, "owner", "n5");
 
-    // A cursor from before the removal takes the whole list, page by page.
     const pages: RelayNoticePage[] = [await pull(h, "owner", "2", 2)];
     while (pages.at(-1)!.hasMore) pages.push(await pull(h, "owner", pages.at(-1)!.nextCursor, 2));
     expect(pages.map((page) => [page.replace, page.notices.map((row) => row.noticeId)])).toEqual([
@@ -1227,7 +1241,6 @@ describe("pulling changes", () => {
     ]);
     expect(pages.at(-1)!.nextCursor).toBe("7");
 
-    // A row removed while a whole-list pull is under way starts it over.
     const first = await pull(h, "owner", "1", 2);
     await mark(h, "owner", [{ noticeId: "n0", mark: "dismissed" }]);
     clock += NOTICE_DISMISSED_RETENTION_MS;
@@ -1246,7 +1259,6 @@ describe("pulling changes", () => {
         (await post(h, "owner", notice({ recipientUserId: "ana", noticeId: `n${index}` }))).status,
       ).toBe(200);
     }
-    // A computer takes the first page of the whole list, then stops.
     const first = await pull(h, "ana", undefined, 1);
     expect(first.notices.map((row) => row.noticeId)).toEqual(["from:owner:n0"]);
     // Ana's share took her list's first change.
@@ -1309,7 +1321,6 @@ describe("notices after access ends", () => {
     ]);
     expect(after.notices.every((row) => row.changeSeq > Number(before.nextCursor))).toBe(true);
 
-    // Nothing changes again until access changes again.
     expect((await pull(h, "ana", after.nextCursor)).notices).toEqual([]);
     expect(storage.revokeShare(tasksShare, clock)).toBe(true);
     const last = await pull(h, "ana", after.nextCursor);
@@ -1333,7 +1344,6 @@ describe("notices after access ends", () => {
       return checks.mock.calls.length - before;
     };
 
-    // Both rows come through one share: one check.
     expect(await checksDuring(() => pull(h, "ana"))).toBe(1);
     expect(await checksDuring(() => pull(h, "ana"))).toBe(0);
     expect(await checksDuring(() => pull(h, "ana"))).toBe(0);
@@ -1608,7 +1618,6 @@ describe("notice retention", () => {
     clock = start + NOTICE_UNREAD_RETENTION_MS;
     expect(await ids()).toEqual([]);
 
-    // Expired rows can no longer be marked, and the next post removes them.
     await mark(h, "owner", [{ noticeId: "unread", mark: "read" }]);
     expect(await ids()).toEqual([]);
     const path = storagePath(storage);

@@ -40,6 +40,7 @@ import {
 import { observeRelayWrites } from "./relayWriteChanges";
 import { ServiceOrdinaryReplication } from "./serviceOrdinaryReplication";
 import { selfHostedLiveProfile } from "./selfHostLiveProfile";
+import { childStderrLog, serverLogLine } from "./serverLogWords";
 
 /** One workspace this server keeps a replica of, open in its engine. */
 export interface AutomationReplica {
@@ -755,7 +756,7 @@ export async function startAutomationReplicas(options: {
       callback();
     } catch (error) {
       try {
-        console.error("[automation-replicas] A callback failed.", error);
+        console.error("[automation-replicas] A callback failed.", serverLogLine(error));
       } catch {
         /* Nothing is left to report it to. */
       }
@@ -1171,7 +1172,10 @@ export async function startAutomationReplicas(options: {
         Effect.sync(() => {
           reconciled = false;
           if (!Cause.hasInterruptsOnly(cause))
-            console.error("[automation-replicas] Passes stopped.", Cause.squash(cause));
+            console.error(
+              "[automation-replicas] Passes stopped.",
+              serverLogLine(Cause.squash(cause)),
+            );
         }),
       ),
     ),
@@ -1222,7 +1226,9 @@ export async function startAutomationReplicas(options: {
   };
   // Storage that stops closes the replicas too, and close() callers wait for that.
   const closeUnavailable = () => {
-    close().catch((error: unknown) => console.error("[automation-replicas] Close failed.", error));
+    close().catch((error: unknown) =>
+      console.error("[automation-replicas] Close failed.", serverLogLine(error)),
+    );
   };
   if (storage.unavailable.aborted) closeUnavailable();
   else storage.unavailable.addEventListener("abort", closeUnavailable, { once: true });
@@ -1274,7 +1280,6 @@ export async function startAutomationReplicas(options: {
     get unavailable(): boolean {
       return signal.aborted || !reconciled || !client || client.exited.signal.aborted;
     },
-    /** The open replica of this workspace, or undefined. */
     replica(workspaceId: string): AutomationReplica | undefined {
       return replicas.get(workspaceId);
     },
@@ -1320,7 +1325,7 @@ async function spawnEngine(
     connectTimeoutMs: REQUEST_DEADLINE_MS,
     signal,
     ...(onExit ? { onExit } : {}),
-    onStderr: (text) => console.error("[automation-replicas]", text.trimEnd()),
+    onStderr: childStderrLog("[automation-replicas]"),
   });
 }
 
@@ -1566,7 +1571,7 @@ async function settleRemovedCopies(
         } catch (error) {
           console.error(
             `[sync-relay] The phone's writes in the copy of workspace "${workspaceId}" couldn't be settled.`,
-            error,
+            serverLogLine(error),
           );
         }
       }
@@ -1577,7 +1582,7 @@ async function settleRemovedCopies(
   } catch (error) {
     console.error(
       "[sync-relay] The engine that settles the phone's writes in removed copies didn't start.",
-      error,
+      serverLogLine(error),
     );
   } finally {
     await rm(configPath, { force: true });

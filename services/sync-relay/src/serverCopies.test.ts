@@ -8,10 +8,6 @@ import type { CopyReason } from "./storage/automationWorkspaces";
 import type { StorageContext } from "./storage/context";
 import { closeTestStorages, testStorage } from "./testing";
 
-// The copies run over a fake replicas module: each pass joins every wanted
-// workspace's row with its reasons and opens its copy at once, and closes
-// the copies nothing wants.
-
 afterEach(closeTestStorages);
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -181,7 +177,6 @@ describe("an account's visits to the server's copies", () => {
     const storage = await relay();
     const run = await copies(storage);
     const visit = run.copies.withServerCopy(OWNER, "trip", phone(), async () => "read");
-    // The copy opens in the next pass, after the owner changed.
     (storage as StorageContext).db
       .prepare("UPDATE sync_relay_workspaces SET owner_user_id = 'ben' WHERE workspace_id = 'trip'")
       .run();
@@ -194,7 +189,6 @@ describe("the copies the phone's unsent writes keep", () => {
     const ids = Array.from({ length: ACCOUNT_VISITS_PER_ACCOUNT + 1 }, (_, n) => `w-${n}`);
     const storage = await relay([...ids, "hidden"]);
     for (const [n, workspaceId] of [...ids, "hidden"].entries()) {
-      // Each copy took a write during a visit that ended before the server restarted.
       storage.joinAutomationWorkspace({ workspaceId, nowMs: 1, reasons: ["account"] });
       storage.endCopyReason(workspaceId, "account");
       storage.recordAccountOperation({
@@ -209,7 +203,6 @@ describe("the copies the phone's unsent writes keep", () => {
         nowMs: n,
       });
     }
-    // A workspace hidden from the phone keeps no copy for its writes.
     storage.setShowOnPhone({ ownerUserId: OWNER, workspaceId: "hidden", showOnPhone: false });
     let atStart: Array<[string, readonly CopyReason[]]> = [];
     let wanted: ReadonlyMap<string, readonly CopyReason[]> = new Map();
@@ -241,7 +234,6 @@ describe("the copies the phone's unsent writes keep", () => {
       ["hidden", []],
       ...ids.map((id): [string, CopyReason[]] => [id, ["publication"]]),
     ]);
-    // The oldest writes first, and no more than the account may hold.
     expect(wanted).toEqual(
       new Map(
         ids

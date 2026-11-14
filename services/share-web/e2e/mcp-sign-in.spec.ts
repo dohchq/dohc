@@ -28,7 +28,6 @@ function requiredText(value: unknown, field: string): string {
   return value;
 }
 
-// The agent's loopback redirect URI, as a desktop MCP client opens one.
 async function startAgentCallback() {
   const received: AgentCallback[] = [];
   const server = createServer((request, response) => {
@@ -116,7 +115,6 @@ test("a person allows an agent from the consent page, and the agent reaches the 
   const callback = await startAgentCallback();
   const request = await playwright.request.newContext({ ignoreHTTPSErrors: true });
   try {
-    // Discovery, as an MCP client does it: the endpoint's 401 names its metadata.
     const resource = `${front}/mcp/s/${seeded.secret}`;
     const unsigned = await listTools(request, resource);
     expect(unsigned.status()).toBe(401);
@@ -158,7 +156,6 @@ test("a person allows an agent from the consent page, and the agent reaches the 
       return url.href;
     };
 
-    // Allow: the browser posts the real form and follows the 303 to the agent.
     const allowed = pkce();
     const allowState = randomBytes(16).toString("base64url");
     await page.goto(authorizeUrl(allowState, allowed.challenge));
@@ -206,7 +203,6 @@ test("a person allows an agent from the consent page, and the agent reaches the 
       expect.arrayContaining(["dohc_read_file", "dohc_share_status"]),
     );
 
-    // Cancel: a fresh page sends the agent access_denied, with its state.
     const cancelState = randomBytes(16).toString("base64url");
     const cancelPage = await context.newPage();
     await cancelPage.goto(authorizeUrl(cancelState, pkce().challenge));

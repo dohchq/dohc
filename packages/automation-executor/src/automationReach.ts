@@ -101,10 +101,9 @@ export interface ReachPerson {
 }
 
 /**
- * One step as the reach check sees it. The file contract (PR #1240) defines
- * the steps; the executor maps each one here with names and people resolved
- * and paths as the engine lists them. Steps inside an If count like any
- * other step.
+ * One step as the reach check sees it. The file contract defines the steps;
+ * the executor maps each one here with names and people resolved and paths
+ * as the engine lists them. Steps inside an If count like any other step.
  */
 export type ReachStep = (
   | { kind: "unavailable"; reason: string }
@@ -224,7 +223,6 @@ function isCanonical(path: string): boolean {
   );
 }
 
-// Why dohc cannot use a path a step names, or null.
 function pathProblem(path: string, name: string, role: "source" | "target"): string | null {
   if (isSharedWithMePath(path)) {
     return role === "source"

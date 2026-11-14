@@ -6,22 +6,20 @@
 //! effective-policy resolution), and the TS `readEngineSearchPolicySync` /
 //! `pathIsSearchIndexed`.
 //!
-//! The `effectivePolicy.ts` half is held to that claim by
-//! `tests/effective_policy.rs`, which asserts this port against a fixture
-//! regenerated from the live TypeScript oracle and drift-checked by the Rust
-//! gate. TypeScript is canonical: a disagreement is fixed here.
+//! `tests/effective_policy.rs` asserts the `effectivePolicy.ts` port against a
+//! fixture regenerated from the live TypeScript oracle and drift-checked by the
+//! Rust gate. TypeScript is canonical: a disagreement is fixed here.
 //!
-//! ## The fail-closed contract (the hotfix this shard must preserve)
+//! ## The fail-closed contract
 //!
-//! An **absent** `.dohc/files.toml` / `.dohc/visibility.toml` is a valid
-//! configuration: defaults apply (index normally). A policy file that **exists
-//! but cannot be read or parsed** must never widen search — it fails closed: a
-//! diagnostic is recorded and, while it is present, no FILE is searchable
-//! (`path_is_search_indexed` returns `false`, the query path returns an empty —
-//! not `None` — result so the caller cannot fall back to an unfiltered scan).
-//! This is scoped to FILE search: a broken FILE policy never disables chat
-//! search (chat visibility is not governed by these files) — see `index.rs` and
-//! `query.rs` for how the scoping is carried through.
+//! An absent `.dohc/files.toml` / `.dohc/visibility.toml` is a valid
+//! configuration: defaults apply. A policy file that exists but cannot be read
+//! or parsed must never widen search. A diagnostic is recorded and, while the
+//! file is present, no file is searchable: `path_is_search_indexed` returns
+//! `false`, and the query path returns an empty result, not `None`, so the
+//! caller cannot fall back to an unfiltered scan. This covers file search
+//! only. A broken file policy never disables chat search, which these files
+//! do not govern; see `index.rs` and `query.rs`.
 //!
 //! Reserved names share the capture floor's Unicode folding on every host.
 //! On-disk trailing aliases remain platform-specific.
@@ -680,7 +678,7 @@ fn read_policy_file<T>(
     // Non-UTF-8 content is MALFORMED (the user's file is bad), not an access
     // failure: consumers that hold on Unreadable (capture's unknown-policy
     // hold) must not stall forever on a byte-level typo — Invalid routes it
-    // to the WS-F floor-only rule instead, same as a TOML parse error.
+    // to the floor-only rule instead, same as a TOML parse error.
     let text = match String::from_utf8(bytes) {
         Ok(text) => text,
         Err(_) => {

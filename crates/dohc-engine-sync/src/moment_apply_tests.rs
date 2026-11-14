@@ -41,7 +41,6 @@ fn apply_leased(
     crate::apply_moment_envelope(store, envelope, faults, leases, &ReleasedTails::default())
 }
 
-/// [`crate::apply_moment_envelope_detailed`] on fresh released tails.
 fn apply_detailed(
     store: &mut EngineStore,
     envelope: &ReplicationEnvelope,
@@ -361,7 +360,6 @@ fn restore_settlement_imported_before_the_owner_reaches_its_generation_waits_the
         selector_paths: vec!["owner.md".into(), "other.md".into()],
         ..observed.binding.clone()
     };
-    // Each payload names the restored text; only the audit differs.
     let other_text = "a restore with other content";
     let restored_audit = restored_text.as_str();
     let cases = vec![
@@ -426,11 +424,8 @@ fn restore_settlement_imported_before_the_owner_reaches_its_generation_waits_the
     );
     assert_eq!(snapshot(&store, "object"), before);
 
-    // Ordinary sync imports the restore's settlement before the authenticated
-    // owner feed reaches generation 1. It waits instead of being refused.
     let restore_id = format!("moment-ydoc-{}", "b".repeat(64));
     retain_audit(&store, &next, "relay", &restore_id, &restored_text);
-    // A settlement the host never accepted waits on the same binding.
     let forged_text = "a restore the host never accepted";
     hydrate_texts(&mut store, &[forged_text]);
     let forged_id = format!("moment-ydoc-{}", "c".repeat(64));
@@ -460,15 +455,12 @@ fn restore_settlement_imported_before_the_owner_reaches_its_generation_waits_the
     assert!(waiting.changes.is_empty());
     assert_eq!(snapshot(&store, "object"), before);
 
-    // The authenticated owner feed reaches the restore generation.
     let advanced = enroll_restore(&mut store, &next, &restored, 1, &observed.limits);
     assert_eq!(
         (advanced.binding, advanced.accepted_cursor),
         (next.clone(), 1)
     );
 
-    // The replay repeats every check against the authenticated binding: the
-    // restore reaches the file, and audit alone never authorizes content.
     let settled =
         crate::moment_apply::pending::drain_to_end(&mut store, "ws", &NoFaults, &NoLiveLeases)
             .unwrap();
@@ -556,8 +548,6 @@ fn restore_settlement_skipped_by_a_later_generation_is_refused_and_released() {
         crate::moment_apply::pending::SUPERSEDED
     );
 
-    // Committing the report releases the queue row; the refused envelope
-    // keeps its text for inspection.
     let committed = crate::commit_relay_cursor(
         &mut store,
         "ws",
@@ -600,7 +590,6 @@ fn restore_settlement_skipped_by_a_later_generation_is_refused_and_released() {
         1
     );
 
-    // The current generation's own settlement still applies at its exact binding.
     let latest_settlement = restore_settlement(
         "second-restore",
         &latest_id,
@@ -1014,8 +1003,6 @@ fn drain_window() -> DrainWindow {
     }
 }
 
-/// Each queued settlement in drain order: its origin, whether it was
-/// scheduled, whether it applied, and the report that owns it.
 fn drain_queue(store: &EngineStore) -> Vec<(String, bool, bool, Option<String>)> {
     store
         .read_with(|conn| {
@@ -1029,7 +1016,6 @@ fn drain_queue(store: &EngineStore) -> Vec<(String, bool, bool, Option<String>)>
         .unwrap()
 }
 
-/// One attempt of the drain into `report`, on `tails`.
 fn drain_once(
     store: &mut EngineStore,
     tails: &ReleasedTails,
@@ -1045,8 +1031,6 @@ fn drain_once(
     )
 }
 
-/// The drain's first attempt, which waits at the host settlement: the
-/// pending validation and the report that owns a-moved.
 fn drain_to_host(
     store: &mut EngineStore,
     tails: &ReleasedTails,
@@ -1097,12 +1081,12 @@ fn refusal_message(store: &EngineStore, origin: &str) -> String {
         .unwrap()
 }
 
-/// Sol's ruling 1: at the drain's first decision that waits for validation,
-/// the waiting settlement rolls back with its scheduling, the one before it
-/// commits with its report, and nothing after it is read. Once validation
-/// completes the drain goes on from the settlement that waited, in the same
-/// report: every row it completes, before and after the wait, carries one
-/// id, and its change is reported once.
+/// At the drain's first decision that waits for validation, the waiting
+/// settlement rolls back with its scheduling, the one before it commits with
+/// its report, and nothing after it is read. Once validation completes the
+/// drain goes on from the settlement that waited, in the same report: every
+/// row it completes, before and after the wait, carries one id, and its
+/// change is reported once.
 #[test]
 fn a_drain_that_waits_for_validation_commits_only_the_settlements_before_it() {
     let DrainWindow {
@@ -1183,11 +1167,10 @@ fn a_drain_that_waits_for_validation_commits_only_the_settlements_before_it() {
     );
 }
 
-/// Sol's ruling 1, the retry: a completed validation authorizes nothing by
-/// itself. The owner's binding moves while the drain waits, so the
-/// settlement that waited is refused when the drain goes on; and a tail input
-/// that changes after validation completes makes it wait again for the
-/// generation it then reads.
+/// A completed validation authorizes nothing by itself. The owner's binding
+/// moves while the drain waits, so the settlement that waited is refused
+/// when the drain goes on; and a tail input that changes after validation
+/// completes makes it wait again for the generation it then reads.
 #[test]
 fn a_drain_decides_the_settlement_that_waited_again_from_what_it_reads() {
     let DrainWindow {
@@ -1243,11 +1226,10 @@ fn a_drain_decides_the_settlement_that_waited_again_from_what_it_reads() {
     assert!(report.changes.is_empty());
 }
 
-/// Sol's ruling 1, cancellation and crash: a request that stops waiting
-/// leaves its committed prefix for the next pull, which reclaims it under a
-/// report of its own. Rows a report applied stay reclaimable, with their
-/// materialization, until a cursor naming that report commits: an older
-/// report releases nothing.
+/// A request that stops waiting leaves its committed prefix for the next
+/// pull, which reclaims it under a report of its own. Rows a report applied
+/// stay reclaimable, with their materialization, until a cursor naming that
+/// report commits: an older report releases nothing.
 #[test]
 fn an_abandoned_drain_leaves_its_committed_prefix_and_materialization_to_the_next_pull() {
     let DrainWindow {
@@ -1300,10 +1282,10 @@ fn an_abandoned_drain_leaves_its_committed_prefix_and_materialization_to_the_nex
     assert!(drain_queue(&store).is_empty());
 }
 
-/// Sol's ruling 1, the pass: a pull whose drain waits keeps what it fetched
-/// and the drain's report. Its next run fetches nothing again and goes on
-/// with the same report, so the cursor it returns owns the settlement that
-/// committed before the wait, with that settlement's refusal.
+/// A pull whose drain waits keeps what it fetched and the drain's report.
+/// Its next run fetches nothing again and goes on with the same report, so
+/// the cursor it returns owns the settlement that committed before the wait,
+/// with that settlement's refusal.
 #[test]
 fn a_pull_whose_drain_waits_goes_on_with_the_same_report() {
     let DrainWindow {
@@ -1369,7 +1351,6 @@ fn a_pull_whose_drain_waits_goes_on_with_the_same_report() {
     assert!(drain_queue(&store).is_empty());
 }
 
-/// An owner observed at restore generation 0 and accepted cursor 0.
 struct RestoreOwner {
     store: EngineStore,
     observed: dohc_engine_collab::owner_outbox::draft::ObservedOwnerBinding,
@@ -1407,7 +1388,6 @@ fn restore_owner_from(original: &[u8], initial_text: &str, path: &str) -> Restor
     owner
 }
 
-/// `restore_owner`'s note and the binding it would install, not installed.
 fn unbound_restore_owner() -> RestoreOwner {
     let fixture: Value = serde_json::from_str(include_str!(
         "../../dohc-engine-collab/tests/owner-source/owner-source-seed.json"
@@ -1513,7 +1493,6 @@ fn apply_test_owner_frame(owner: &mut RestoreOwner, update: Vec<u8>, cursor: i64
     owner.observed.accepted_cursor = result.accepted_cursor;
 }
 
-/// The host's state once a restore that appends `paragraph` is accepted.
 fn restored_host(checkpoint: &[u8], paragraph: &str) -> (Ydoc, String) {
     let host = Ydoc::wire();
     host.apply(checkpoint).unwrap();
@@ -1565,7 +1544,6 @@ fn restore_settlement(
     )
 }
 
-/// The authenticated owner feed reaches `binding` at the host cut `cursor`.
 fn enroll_restore(
     store: &mut EngineStore,
     binding: &dohc_engine_collab::live_object_binding::LiveObjectBinding,
@@ -1920,7 +1898,6 @@ fn direct_write_authors_are_refused_outside_a_collections_own_files() {
             "trip-schema-1",
             TRIP_SCHEMA,
         ),
-        // A record moved onto the schema path, stated as a write.
         {
             let mut moved = present_text_payload(
                 "record-onto-schema",
@@ -1966,7 +1943,6 @@ fn direct_write_authors_are_refused_outside_a_collections_own_files() {
             "Changed",
         ),
         absent_text_payload("code", "code", "trip/stamp.js", "code"),
-        // Another file's object, with every declared path at the schema.
         present_text_payload(
             "foreign-object-edit",
             "trip-record",
@@ -1983,14 +1959,12 @@ fn direct_write_authors_are_refused_outside_a_collections_own_files() {
             "trip/automations.yaml",
             "version: 1\n",
         ),
-        // An object this workspace held once, now without a head.
         absent_text_payload(
             "deleted-object-create",
             "gone-object",
             "trip/automations.yaml",
             "version: 1\n",
         ),
-        // A schema created in a folder that holds files, directly or below.
         absent_text_payload(
             "schema-in-used-folder",
             "notes-schema",
@@ -4278,11 +4252,11 @@ fn recover_ended(store: &mut EngineStore) -> Result<crate::OpenArtifactDrain, Sy
     )
 }
 
-/// Sol's third and Opus's first findings on 3409694c7: recovery in a pass
-/// writes what the rows of a document it completes committed as drain
-/// reports, in the transaction that removes them, so a later op's wait, an
-/// abandoned pass or a restart still reports them once, with no recovery
-/// failure. The direct recovery API answers the same results at once.
+/// Recovery in a pass writes what the rows of a document it completes
+/// committed as drain reports, in the transaction that removes them, so a
+/// later op's wait, an abandoned pass or a restart still reports them once,
+/// with no recovery failure. The direct recovery API answers the same
+/// results at once.
 #[test]
 fn recovery_in_a_pass_reports_what_it_removed_through_drain_reports() {
     type Reported = (
@@ -4340,8 +4314,6 @@ fn recovery_in_a_pass_reports_what_it_removed_through_drain_reports() {
         );
         assert_eq!(marks(&store), direct_marks, "restart={restart}");
 
-        // A later op of the pass waits and the pass is abandoned, or the
-        // store restarts; the next pass claims the reports.
         let mut store = if restart {
             drop(store);
             EngineStore::open(&engine_db_path(&scratch).unwrap(), 3_000).unwrap()
@@ -4455,7 +4427,6 @@ fn ended_recovery_retries_inserted_durable_update_blob() {
         &crate::AlwaysLive,
     )
     .unwrap();
-    // Model a missing durable blob while preserving the parked tail's blob.
     store
         .read_with(|conn| conn.execute_batch("PRAGMA foreign_keys=OFF"))
         .unwrap();

@@ -91,8 +91,6 @@ describe("a save while the settings file changes", () => {
         source: "stored",
         ignored: [{ key: "wallpaper", reason: "unknown" }],
       });
-      // What the save answered is what is on disk, so the watcher finds nothing
-      // left to apply.
       expect(await reloadUserSettingsFile(root)).toBeNull();
     },
   );

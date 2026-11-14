@@ -509,7 +509,6 @@ export function TransactionalCollectionPage(props: TransactionalCollectionPagePr
 interface Live {
   /** The page's records and the open record, by key. */
   rows: ReadonlyMap<string, TransactionalRow>;
-  /** Opens a record in the panel. */
   openRecord(row: TransactionalRow): void;
   fields: TransactionalField[];
   /** The fields a cell can change now, by id. */
@@ -520,9 +519,7 @@ interface Live {
   query: Query;
   load(next: Query, history?: Array<TransactionalCursor | null>): Promise<void>;
   openCreate(opener: HTMLElement | null): void;
-  /** Gives a field of the new record in the panel a value. */
   changeDraft(fieldId: string, value: AppBackendJson): void;
-  /** What people call the table. */
   tableName: string;
   /** A file of the new record in the panel started or stopped uploading. */
   uploading(fieldId: string, busy: boolean): void;
@@ -607,14 +604,12 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     null,
   );
   const openRecordRead = useRef<AbortController | null>(null);
-  // The panel of a new record, before the record exists.
   const draftPanel = useRef<HTMLElement | null>(null);
   // What the person gave the new record in the panel, by field id. A field they have not touched shows a new
   // record's default, under the field's definition now.
   const [draft, setDraft] = useState<Record<string, Typed>>({});
   const draftNow = useRef(draft);
   draftNow.current = draft;
-  // What is wrong with each field the person tried to save, by field id.
   const [invalid, setInvalid] = useState<Readonly<Record<string, string>>>({});
   const errorIds = useId(),
     focusInvalid = useRef(false);
@@ -629,7 +624,6 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   // The change the panel's new record sent, while the panel waits for its answer.
   const [awaiting, setAwaiting] = useState<number | null>(null),
     awaitingRef = useRef<number | null>(null);
-  // Why the Collection did not take the panel's new record.
   const [formRefusal, setFormRefusal] = useState<string | null>(null);
   // The creates the table's new rows handed to the queue and it has not settled, by change. Several can be out at once.
   const rowCreates = useRef(new Set<number>());
@@ -1221,7 +1215,6 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       draft: { ...kept.draft, ...leftInEditors.current },
     });
   }
-  /** Gives a field of the panel's new record a value, which takes back what was wrong with the one before. */
   function changeDraft(fieldId: string, value: AppBackendJson): void {
     const field = table?.fields.find((entry) => entry.fieldId === fieldId);
     if (!field) return;
@@ -1293,7 +1286,6 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       setEditor({ operation: create });
       return true;
     }
-    // The panel's own create.
     if (!typable) {
       closeEditor();
       return false;

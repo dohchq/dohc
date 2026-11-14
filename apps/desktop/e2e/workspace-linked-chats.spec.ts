@@ -14,7 +14,7 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// PR 0M-5 linked Chats rail E2E: create a chat about a file, send a message,
+// Linked Chats rail E2E: create a chat about a file, send a message,
 // survive a relaunch and a rename (stable engine object id), and render
 // agent-authored messages as "their stored name".
 
@@ -38,10 +38,8 @@ test("create a chat about a file, send a message, survive relaunch and rename", 
     await explorerRow(page, "notes/topic.md").click();
     await openAboutPanel(page);
 
-    // Calm empty state, then create.
     await expect(page.getByTestId("about-chats-count")).toHaveText("0");
     await expect(page.getByTestId("linked-chat-open")).toHaveCount(0);
-    // A comment on the whole file: its first line titles the chat.
     await page.getByTestId("linked-chat-new").click();
     const comment = page.getByTestId("linked-chat-new-composer");
     await comment.fill("Naming discussion\nShould we rename this topic?");
@@ -50,10 +48,8 @@ test("create a chat about a file, send a message, survive relaunch and rename", 
     await expect(page.getByTestId("linked-chat-message-body")).toContainText(
       "Should we rename this topic?",
     );
-    // Signed-out desktop: the human author displays as "You".
     await expect(page.getByTestId("linked-chat-message-author")).toHaveText("You");
 
-    // Relaunch: the chat is durable in the engine store.
     await desktop.close();
     desktop = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(desktop.page, temp);
@@ -124,8 +120,7 @@ test('agent-authored messages render as "their stored name"', async () => {
 
   try {
     await seedWorkspaceManifest(temp, workspaceId);
-    // Seed BEFORE launch, through the engine daemon (post-cutover the
-    // retired TS in-process store is refused): the file exists in the engine
+    // Seed before launch, through the engine daemon: the file exists in the engine
     // (and identically on disk so startup reconciliation is a no-op), with a
     // linked chat that already carries one human and one agent message.
     await writeWorkspaceFiles(temp, [{ path: "notes/agenda.md", contents: "# Agenda\n" }]);

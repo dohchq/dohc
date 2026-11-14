@@ -25,7 +25,7 @@ import {
 
 // A lossy note (CONTEXT.md) opens read-only, with no engine session, and
 // nothing that skips the editor writes it either. The README holds the four
-// forms #2458 found in the app.
+// forms found in the app.
 
 const README = [
   "# Readme",
@@ -93,19 +93,16 @@ test("@lossy-note a lossy note opens read-only, takes no edit it didn't choose, 
     await waitForWorkspaceFile(page, opened.workspaceId, "readme.md");
     await waitForWorkspaceFile(page, opened.workspaceId, "plan.md");
 
-    // A note dohc wrote opens straight into the editor.
     await explorerRow(page, "plan.md").click();
     await expect(page.getByTestId("markdown-source-toggle")).toBeVisible({ timeout: 15_000 });
     await expect(page.getByTestId("markdown-editor")).toHaveAttribute("contenteditable", "true");
     await expect(page.getByTestId("lossy-note-notice")).toHaveCount(0);
 
-    // The README shows its text at once, read-only, and says why.
     await explorerRow(page, "readme.md").click();
     const notice = page.getByTestId("lossy-note-notice");
     await expect(notice).toBeVisible();
     await expect(notice).toContainText("This note has parts dohc can't show.");
     await expect(page.getByTestId("view-markdown")).toContainText("Hidden until opened.");
-    // The raw HTML shows as its text, at the note's left edge like the rest.
     const lefts = await page.locator(".dohc-readable-text").evaluate(
       (view, needles) =>
         needles.map((needle) => {
@@ -126,17 +123,14 @@ test("@lossy-note a lossy note opens read-only, takes no edit it didn't choose, 
     await expect(page.getByTestId("markdown-editor")).toHaveCount(0);
     await expect(page.getByTestId("markdown-edit-toggle")).toBeDisabled();
     await shoot(page, "lossy-note-notice");
-    // Keyboard: the notice's actions take focus.
     await page.getByTestId("lossy-note-open-externally").focus();
     await expect(page.getByTestId("lossy-note-open-externally")).toBeFocused();
 
-    // Typing reaches nothing.
     await page.getByTestId("view-markdown").getByText("See the docs.").click();
     await page.keyboard.type("Typed into a lossy note.");
     await page.keyboard.press("Enter");
     await expect(page.getByTestId("view-markdown")).not.toContainText("Typed into a lossy note.");
 
-    // An agent reads the file as it is, and its edit is refused.
     await waitForCliEndpoint(temp.homeDir);
     await expect(agentCli(temp, "documentRead", { path: "readme.md" })).resolves.toMatchObject({
       ok: true,
@@ -157,8 +151,6 @@ test("@lossy-note a lossy note opens read-only, takes no edit it didn't choose, 
     });
     expect(await sha256(temp.rootPath, "readme.md")).toBe(original);
 
-    // An agent's own file tools still change it: History records the change
-    // and the open view shows the new text.
     const before = (await readHistoryMoments(page, opened.workspaceId, "readme.md"))?.length ?? 0;
     await writeWorkspaceFiles(temp, [{ path: "readme.md", contents: OUTSIDE }]);
     await expect(page.getByTestId("view-markdown")).toContainText(
@@ -172,7 +164,6 @@ test("@lossy-note a lossy note opens read-only, takes no edit it didn't choose, 
       .toBe(before + 1);
     const outside = await sha256(temp.rootPath, "readme.md");
 
-    // Edit anyway warns first. Escape and Cancel change nothing.
     const editAnyway = page.getByTestId("lossy-note-edit-anyway");
     await editAnyway.focus();
     await page.keyboard.press("Enter");
@@ -206,8 +197,6 @@ test("@lossy-note a lossy note opens read-only, takes no edit it didn't choose, 
       moment.momentOrder > newest.momentOrder ? moment : newest,
     );
 
-    // The save that converted the note keeps the editor and its focus, so
-    // typing goes on with no click, and the next save works too.
     await expect(editor).toBeFocused();
     await page.keyboard.type(" Typed again.");
     await expect
@@ -216,7 +205,6 @@ test("@lossy-note a lossy note opens read-only, takes no edit it didn't choose, 
     await expect(editor).toBeFocused();
     await expect(notice).toHaveCount(0);
 
-    // History gives back the file from before the converting edit, byte for byte.
     await openHistoryView(page);
     await page.locator(`[data-testid="engine-moment-open"][data-moment-id="${edit.id}"]`).click();
     await page.getByTestId("engine-diff-restore-file").click();

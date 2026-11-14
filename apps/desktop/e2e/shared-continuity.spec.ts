@@ -96,7 +96,6 @@ const PENDING_EDIT_WARNING =
 const editor = (page: Page) => page.getByTestId("markdown-editor");
 const saveState = (page: Page) => page.getByTestId("markdown-save-state");
 
-/** A desktop window as the person sees it, for layout review. It stays in the local report. */
 async function attachScreen(testInfo: TestInfo, page: Page, name: string): Promise<void> {
   await testInfo.attach(name, { contentType: "image/png", body: await page.screenshot() });
 }
@@ -161,7 +160,6 @@ function describeView(view: PromiseSettledResult<string>, sentences: string[]) {
     : { error: view.reason instanceof Error ? view.reason.message : String(view.reason) };
 }
 
-/** The agent's read equals the settled file, which holds `present` and none of `absent`. */
 async function ownerSettled(
   temp: TempWorkspace,
   present: string[],
@@ -254,7 +252,6 @@ async function openSharedRestore(page: Page) {
   return dialog;
 }
 
-/** The owner's restore review lists exactly these recipients as holding edit access. */
 async function expectActiveAccess(page: Page, recipients: string[]): Promise<void> {
   const dialog = await openSharedRestore(page);
   if (recipients.length) {
@@ -270,7 +267,6 @@ async function expectActiveAccess(page: Page, recipients: string[]): Promise<voi
   await dialog.getByRole("button", { name: "Close" }).click();
 }
 
-/** Shares `paths` with Edit and waits until the server hosts `path` live. */
 async function shareForEdit(
   page: Page,
   workspaceId: string,
@@ -306,7 +302,6 @@ async function shareForEdit(
   return created;
 }
 
-/** The owner opens their workspace, connects a new account to the server, and turns on sync. */
 async function connectAndSync(
   owner: LaunchedDesktopApp,
   temp: TempWorkspace,
@@ -334,7 +329,6 @@ async function connectAndSync(
   return opened;
 }
 
-/** A recipient opens the share on their own desktop, connecting their account first, and opens the document. */
 async function openShare(
   recipient: LaunchedDesktopApp,
   temp: TempWorkspace,
@@ -348,7 +342,6 @@ async function openShare(
   await page.getByTestId("first-run-open-share").click();
   await page.getByTestId("open-share-code").fill(shareCode);
   await page.getByTestId("open-share-choose-folder").click();
-  // Opening without an account asks the person to connect one first.
   await page.getByTestId("open-share-start").click();
   await openDesktopApproval(recipient, approvalPage, origin);
   await approveDesktop(approvalPage, account);
@@ -553,7 +546,6 @@ const declaredAuthor = (declaration: Declaration) =>
     ...(declaration.depth > 0 ? { depth: declaration.depth } : {}),
   });
 
-/** The moment that wrote `text` names the declared agent, in its list row and its detail alike. */
 async function expectDeclaredMoment(
   page: Page,
   workspaceId: string,
@@ -689,15 +681,11 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
         email,
       ])
     ).rows[0]!.id;
-  // The hosted agent edits' accepted changes and the moments that show them,
-  // kept for the report.
   let ownerWorkspaceId: string | undefined;
   let hosted: AcceptedDeclaration | undefined;
   let next: AcceptedDeclaration | undefined;
   const provenance: Record<string, IntroducingMoment> = {};
-  // The owner document's compaction marker before and after its tab closed.
   let foldEvidence: unknown;
-  // Counts from the last check of a declared change's acceptance.
   let lastAcceptance: unknown;
   let lastEnrollment: unknown;
   const enrollments: unknown[] = [];
@@ -756,7 +744,6 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
     });
   };
   const ownerAudit = (deliveryId: string) => ownerAuditRecord(ownerTemp.rootPath, deliveryId);
-  /** The changes the relay has journaled so far that declared the unnamed agent. */
   const declaredDeliveries = (workspaceId: string) =>
     new Set(
       stack!
@@ -1075,7 +1062,6 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
         HA,
         admittedAgent(hosted!.change.authorSnapshot),
       );
-      // The share holds one file: no history of the hidden one, even by the owner's moment IDs.
       await expect(async () => {
         expect(await momentIds(page, recipientWorkspaceId, HIDDEN)).toEqual([]);
       }).toPass({ timeout: 30_000 });
@@ -1106,8 +1092,6 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       await expect
         .poll(() => ownerSettled(ownerTemp, [H1, A1, HA, R1]), { timeout: 60_000 })
         .toBe(true);
-      // The owner's History credits the recipient's change to the account and
-      // name the server admitted for their desktop's edit.
       const page = owner!.page;
       const recipientUserId = await accountId(recipientAccount.email);
       const admitted = {
@@ -1136,7 +1120,6 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       }
       expect(credit!.listed).toEqual(credit!.authors);
       expect(credit!.label).toBe(recipientAccount.name);
-      // The recipient's credit leaves the hosted agent's credit in place.
       expect(
         await expectDeclaredMoment(
           page,
@@ -1185,15 +1168,12 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       const page = owner!.page;
       const recipientUserId = await accountId(recipientAccount.email);
       const dialog = await openSharedRestore(page);
-      // Restore names the recipient by their account email.
       const recipientLabel = recipientAccount.email;
       const access = dialog.getByLabel("Access to stop");
       await expect(access.locator("option", { hasText: recipientLabel })).toHaveCount(1, {
         timeout: 60_000,
       });
       await access.selectOption({ label: recipientLabel });
-      // Restore to the accepted change just before the recipient's first edit,
-      // which keeps the owner's and agent's work.
       const point = stack!.acceptedCursorBefore(workspace.workspaceId, PATH, recipientUserId);
       const pointSelect = dialog.getByLabel("Shared restore point");
       // A choice says when and who made the change, never an internal change
@@ -1226,7 +1206,6 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       await expect(restorePoint).toHaveAttribute("data-journal-cursor", String(point));
       await expect(restorePoint).toHaveText(/ · Owner$/);
       await attachScreen(testInfo, page, "restore review before and after");
-      // The review names the recipient by the same email, not an account ID.
       const removed = dialog.locator("details", {
         has: page.locator("summary", { hasText: /^Removed by this restore/ }),
       });
@@ -1297,7 +1276,6 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       await page.keyboard.type(" Typed after access stopped.");
       await expect(document).not.toContainText("Typed after access stopped.");
       await expectActiveAccess(owner!.page, []);
-      // The recipient's edit saved before the stop, so nothing is set aside.
       await expect(page.getByTestId("orphaned-draft-notice")).toHaveCount(0);
     });
 
@@ -1398,7 +1376,6 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
         const page = newRecipient.page;
         for (const text of [H1, A1, HA, H2, A2]) await expect(editor(page)).toContainText(text);
         await expect(editor(page)).not.toContainText(R1);
-        // Both agents' changes reach the new recipient's history, before and after the restore.
         provenance.hostedNewRecipient = await expectDeclaredMoment(
           page,
           sharedWorkspaceId,
@@ -1444,7 +1421,6 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       // document turning read-only made it ask the relay, and the relay said so.
       const document = await expectEndedShare(page, [H1, A1, HA]);
       await expect(document).not.toContainText(R2);
-      // The saved edit stays in the owner's History, not in a set-aside draft.
       await expect(page.getByTestId("orphaned-draft-notice")).toHaveCount(0);
       await expectNoCollectionNotice(page);
       await attachScreen(testInfo, page, "stopped recipient");
@@ -1469,7 +1445,6 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
           .toBeGreaterThan(0);
         expect(await heldEditorUpdates(desktop)).toMatchObject({ settled: 0, released: false });
         expect(await cliRead(ownerTemp)).not.toContain(RP);
-        // The owner ends the share through the same call as Shared by me.
         await owner!.page.evaluate(
           (shareId) =>
             (window as unknown as { dohcDesktop: Api }).dohcDesktop.revokeRelayShare({ shareId }),
@@ -1696,7 +1671,6 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       await testInfo
         .attach("relay output", { contentType: "text/plain", body: relay.relayOutput() })
         .catch(() => undefined);
-      // Where each declared agent change stopped, against the moments found so far.
       const declared =
         ownerWorkspaceId &&
         (() => {
@@ -1770,7 +1744,6 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
 const NOTE = "docs/notes.md";
 const NOTE_TEXT = "Nobody edits this note.";
 
-/** Each settlement the relay logged as refused, as "<stage> <check>". */
 const refusedSettlementChecks = (output: string) =>
   [
     ...output.matchAll(
@@ -1779,7 +1752,6 @@ const refusedSettlementChecks = (output: string) =>
   ].map(([, stage, check]) => `${stage} ${check}`);
 
 type LiveDelivery = Awaited<ReturnType<Api["getSyncStatus"]>>["ownerLiveDelivery"];
-// One read of the owner's live editing, and when it was asked for.
 type LiveEditingRead = {
   requestedAt: number;
   state: LiveDelivery | null | "unread";
@@ -1842,7 +1814,6 @@ async function observeOwnerLiveEditing(
     read();
     Reflect.set(window, "ownerLiveEditing", { reads, pending });
   }, workspaceId);
-  // Every read asked for so far, once each has answered, in the order asked.
   return () =>
     page.evaluate(async () => {
       const { reads, pending } = Reflect.get(window, "ownerLiveEditing") as {
@@ -2002,7 +1973,7 @@ test("@self-host-activation-typing typing continues through self-host activation
         { timeout: 120_000, intervals: [1_000] },
       )
       .toBe(true);
-    // #2789: the owner refuses some of the service host's activation updates
+    // The owner refuses some of the service host's activation updates
     // with this reason. Every other refusal still fails the test.
     const refused = noticedRefusals(ownerTemp.rootPath, workspaceId);
     expect(
@@ -2068,9 +2039,6 @@ test("@self-host-activation-typing typing continues through self-host activation
   }
 });
 
-// Two people open a shared note live on a self-hosted server, and nobody edits
-// it. The server publishes its settlement of the note with its authors, so the
-// owner's Notices holds no review row.
 test("@self-host-live-review two people open a shared note live and its owner gets no review notice", async ({
   browser,
 }, testInfo) => {
@@ -2169,8 +2137,6 @@ test("@self-host-live-review two people open a shared note live and its owner ge
     );
     await expect(editor(recipient.page)).toContainText(NOTE_TEXT);
 
-    // Settled: the host settled everything the relay accepted for the note and
-    // pushed it, and the owner applied every operation the host published.
     await expect
       .poll(
         () => {
@@ -2242,7 +2208,6 @@ test("@self-host-live-review two people open a shared note live and its owner ge
     const failures = cleanup.filter(
       (result): result is PromiseRejectedResult => result.status === "rejected",
     );
-    // A body failure stays the reported error.
     if (failures.length && !bodyFailure)
       throw new AggregateError(
         failures.map((result) => result.reason),

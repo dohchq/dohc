@@ -2330,7 +2330,6 @@ pub fn record_update_in_tx(
     )
 }
 
-/// The checks every ordinary local write passes before it appends.
 fn require_ordinary_local_write(tx: &Transaction<'_>, key: &DocKey) -> Result<(), CollabError> {
     crate::owner_outbox::draft::require_ordinary_write(tx, key)?;
     crate::live_update_application::require_restore_open(tx, key)?;
@@ -2595,7 +2594,7 @@ pub(crate) fn record_authorized_update_in_tx(
 
 /// Give an unclaimed rich document the schema version it lacks, in the
 /// caller's claim transaction, so the first version it claims passes public
-/// validation (#3790). Nothing seeds a New page note, and its editor writes
+/// validation. Nothing seeds a New page note, and its editor writes
 /// the first update without the version.
 ///
 /// `false` means an owner binding or a restore holds the document, so the
@@ -2689,7 +2688,7 @@ pub fn encode_origination_base_in_tx(
 
 /// Settle: project the reconstructed Y.Doc to artifact content (with provenance),
 /// content-address the projection in `binary_blobs`, and enqueue a durable
-/// materialization job (R04's pipeline) in the same transaction.
+/// materialization job in the same transaction.
 ///
 /// **Clock-independent exactly-once.** The generation is a durable, monotone
 /// per-doc `settle_seq` (never the wall clock): a re-settle of unchanged content
@@ -2719,13 +2718,9 @@ pub fn settle(
     store.write_with(faults, |tx| {
         crate::owner_outbox::require_ordinary_settlement(tx, key)?;
         crate::live_update_application::require_restore_open(tx, key)?;
-        // Persist the content and its provenance state vector as blobs. The
-        // content digest was computed once above; the settle rows below reuse
-        // it too.
         text::put_projection(tx, &content_bytes, &content_sha)?;
         put_binary_blob(tx, &sv_bytes)?;
 
-        // Durable per-doc settle counter + last-materialized content.
         let (settle_seq, last_sha): (i64, Option<String>) = tx
             .query_row(
                 "SELECT settle_seq, last_settled_sha FROM ydoc_docs \
@@ -2784,7 +2779,6 @@ pub fn settle(
                 now_ms,
             },
         )?;
-        // Advance the durable settle counter only on a real content change.
         if content_changed {
             tx.execute(
                 "UPDATE ydoc_docs SET settle_seq = ?4, last_settled_sha = ?5, updated_at_ms = ?6 \
@@ -2902,17 +2896,16 @@ pub fn local_close_is_covered(
         // discard the CRDT with the artifact never replaced — refuse until
         // the replay (retry-settle or open-time) lands the job.
         //
-        // Matched on the object's TARGET PATH rather than a job-id prefix.
+        // Matched on the object's target path rather than a job-id prefix.
         // Disk-writing jobs carry many id spellings (`ydoc-mat_`,
         // `resolve-mat_`, `merge-mat_`, `sync-resolve-mat_` from
         // `enqueue_write`; `secret-mat_` from the secrets store's own
         // enqueue; binary, version-switch, and unprefixed hash-id jobs
-        // besides) and a prefix list drifts out of sync with them (#715:
-        // three went unmatched, each a stale-disk window).
-        // Every kind sets `target_path` to the disk path it intends to
-        // write, so asking "is any pending job aimed at this object's disk
-        // artifact" via that path is the fact itself, not a proxy for it —
-        // and it needs no update when a future job kind is added.
+        // besides), and a prefix list that misses one leaves a stale-disk
+        // window. Every kind sets `target_path` to the disk path it intends
+        // to write, so the path answers whether any pending job is aimed at
+        // this object's disk artifact, and it needs no update when a job
+        // kind is added.
         let job_pending: bool = store.read_with(|conn| {
             conn.query_row(
                 concat!(
@@ -2982,7 +2975,6 @@ pub fn close_session(
     if !local_close_is_covered(store, key, &marker, authoritative_projection)? {
         return Err(CollabError::UnsettledClose);
     }
-    // Prune the CRDT cache to nothing, keep the marker.
     store.write_with(faults, |tx| {
         crate::author_coverage::clear_native_in(tx, key)?;
         let removed_updates = tx

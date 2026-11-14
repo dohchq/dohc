@@ -29,8 +29,6 @@ import { setFrontmatterValue } from "./frontmatter-map.js";
 
 type ExpectedMarkdownFragment = string | RegExp;
 
-// The characters `run` splits at newlines, and the characters it passes to
-// `replace`.
 function textWork(run: () => void): { split: number; replace: number } {
   const { split, replace } = String.prototype;
   const work = { split: 0, replace: 0 };
@@ -409,8 +407,6 @@ function expectSavedAsTheSameDocument(document: JSONContent): void {
   expect(serializeRichdocBody(parseRichdocMarkdown(saved))).toBe(saved);
 }
 
-// Whatever Markdown, link, or dohc syntax raw HTML encloses stays the text the
-// file holds, and a save writes it back as the same text.
 it.each([
   ["a backslash escape", "<b>\\*</b>"],
   ["a backslash line break", "<b>a\\\nb</b>"],
@@ -444,8 +440,6 @@ it.each([
   expectSavedAsTheSameDocument(document);
 });
 
-// These kinds of HTML block run on across blank lines, and each reads as one
-// paragraph of its source. A save keeps it one paragraph, blank lines and all.
 it.each([
   ["a comment", "<!-- TODO: fix this,\n\nsee: later -->"],
   [
@@ -471,10 +465,6 @@ it.each([
   expectSavedAsTheSameDocument(document);
 });
 
-// Only the serializer's `&lt;` and `&gt;` open and close a tag span. A raw
-// tag, or a `<` or `>` the file holds as text, opens none, so a reference
-// beside it keeps the spelling the file gave it. The save writes that text
-// so it reopens the same.
 it.each([
   ["raw HTML", "<b>&#59;</b>", "<b>&#59;</b>", "&lt;b&gt;&amp;&#35;59&#59;&lt;/b&gt;"],
   [
@@ -511,8 +501,6 @@ it.each([
   expectSavedAsTheSameDocument(document);
 });
 
-// So does a reference beside text angles wherever the text sits: it reads as
-// the same text as a reference whose `&` the file spells `&amp;`.
 it.each([
   ["a list item", (text: string) => `- ${text}`],
   ["a heading", (text: string) => `# ${text}`],
@@ -536,9 +524,6 @@ function expectParagraphText(markdown: string, text: string, saved: string): voi
   expectSavedAsTheSameDocument(document);
 }
 
-// A link with no text is the text the file holds, every reference as the file
-// spells it, and its own `<` and `>` open no tag span. A save writes it as it
-// is, at the start of a line too, so it reopens as the same text.
 it.each([
   ["text angles in its title", '[](https://e.example "Map<K, &#59; V>")'],
   ["a title", '[](https://h.example "kept")'],
@@ -558,8 +543,6 @@ it.each([
   expectParagraphText(markdown, markdown, markdown);
 });
 
-// Text that is no link reads as text does, and only real syntax beside an
-// empty link is syntax.
 it("reads text beside an empty link as text, and its syntax as syntax", () => {
   expectParagraphText("[](a b &amp; c)", "[](a b & c)", "[](a b &amp; c)");
   const document = parseRichdocMarkdown(
@@ -578,8 +561,6 @@ it("reads text beside an empty link as text, and its syntax as syntax", () => {
   expectSavedAsTheSameDocument(document);
 });
 
-// Inside a tag span, an empty link's `[` is a reference, so it reads back as
-// the span's other text does.
 it("saves an empty link inside a tag span as the same text", () => {
   const document = parseRichdocMarkdown(
     '&lt;b&gt; [](https://e.example "Map<K, &#59; V>") x&lt;/b&gt;',
@@ -609,8 +590,6 @@ it.each([
   expectSavedAsTheSameDocument(document);
 });
 
-// A link reference definition is the text the file holds too, references
-// spelled as the file spells them.
 it.each([
   "[a]: <https://e.example/?q=&#59;>",
   '[x]: <a b> "t"',
@@ -626,10 +605,6 @@ it.each([
   });
 });
 
-// A save writes the definition as one tag span: each character that could
-// read as syntax is a reference, so no renderer reads a link or emphasis in
-// it. A block that holds exactly those bytes for one whole definition reopens
-// as the same text, URLs and all.
 it.each([
   [
     "[a]: <https://e.example/?q=&#59;>",
@@ -673,9 +648,6 @@ const exampleLink = {
   marks: [{ type: "link", attrs: { href: "https://e.example", title: null } }],
 };
 
-// A definition a person writes with `&#91;` is no definition, and reads as
-// any text does, its URL a link. Only the bytes a save writes for one whole
-// definition are one, and text around them reads as it always has.
 it.each([
   ["&#91;x]: https://e.example", [{ type: "text", text: "[x]: " }, exampleLink]],
   [
@@ -696,8 +668,6 @@ it.each([
   });
 });
 
-// The bytes a save writes stop being a definition at the first change: a
-// character the save would write as a reference, or a line after it.
 it.each([
   ['&#91;x&#93;&#58; u &#34;t"', '[x&#93;&#58; u &#34;t"'],
   ["&#91;x&#93;&#58; u&#33;", "[x&#93;&#58; u&#33;"],
@@ -710,8 +680,6 @@ it.each([
   });
 });
 
-// A document whose definitions sit beside other blocks, tables included,
-// saves and reopens as the same document.
 it("saves definitions beside other blocks as the same document", () => {
   const document = parseRichdocMarkdown(
     [
@@ -736,8 +704,6 @@ it("saves definitions beside other blocks as the same document", () => {
   expectSavedAsTheSameDocument(document);
 });
 
-// A definition's NBSP and `\r` are references like its punctuation, and
-// other Unicode is written as it is, so it still reopens as the same text.
 it.each([
   ['[x]: u "a\u00a0b"', "&#91;x&#93;&#58; u &#34;a&#160;b&#34;"],
   ['[x]: u "a\rb"', "&#91;x&#93;&#58; u &#34;a&#13;b&#34;"],
@@ -754,9 +720,6 @@ it.each([
   expectSavedAsTheSameDocument(document);
 });
 
-// A link with no text is the text the file holds on each of its lines: no
-// block opener, indent, or reference escape reads a line its title starts.
-// The Markdown around it still reads as Markdown.
 it.each(['[](u "a\n2. b")', '[](u "a\n[x] b")', '[](u "x\n    y")'])(
   "keeps each line of the link with no text %j",
   (markdown) => {
@@ -773,8 +736,6 @@ it("keeps the Markdown around a link with no text across lines", () => {
   }
 });
 
-// A paragraph someone types holds a link with no text across lines, its runs
-// marked as given, and a heading after it when asked.
 function typedParagraph(runs: Array<{ text: string; mark?: string }>, heading = false): Y.Doc {
   const doc = markdownToYDoc(heading ? "placeholder\n\n# Outside" : "placeholder");
   const paragraph = getDohcYDocBodyFragment(doc).get(0) as Y.XmlElement;
@@ -973,8 +934,6 @@ function sentinelSearchWork(run: () => void): number {
   }
 }
 
-// After or before a written link, each line of references costs its own
-// characters to search, however many lines the paragraph holds.
 it.each([
   ["after", "&#35; b\n", "# b\n"],
   ["after", "&#59; b\n", "&#59; b\n"],
@@ -1022,8 +981,6 @@ it.each([
   },
 );
 
-// Text after a written link that holds no sentinel is searched once, however
-// often marked lexes inside it.
 it("searches Markdown after a written link for its start in a linear amount of work", () => {
   const measure = (repetitions: number) => {
     const lines = "*b* ".repeat(repetitions);
@@ -1058,7 +1015,6 @@ it("searches Markdown after a written link for its start in a linear amount of w
   expect(large, `${small} -> ${large}`).toBeLessThan(small * 2.2);
 });
 
-// A file that holds such a line still reads it as the block it starts.
 it("reads a block a file starts inside a link with no text as that block", () => {
   expect(parseRichdocMarkdown('[](u "a\n# b")').content?.map((block) => block.type)).toEqual([
     "paragraph",
@@ -1148,7 +1104,6 @@ it("writes as text each link with no text with a line that would end its paragra
   ];
   let ends = 0;
   for (const line of lines) {
-    // The link's own lines, after its first, as a paragraph's.
     const link = `[](u "a\n${line}")`;
     const source = `x${link.slice(link.indexOf("\n"))}`;
     let block: JSONContent[];
@@ -1193,8 +1148,6 @@ it("writes as text each link with no text with a line that would end its paragra
   }
 });
 
-// A table reads only its own lines, so the Markdown right after it, with no
-// blank line, stays Markdown, even when a code span holds a pipe.
 it.each([
   ["| a | b |\n|---|---|\n| c | d |\n# H\n`x|y`", ["table", "heading", "paragraph"]],
   ["| a | b |\n|---|---|\n| `c|e` | d |\n# H\nplain", ["table", "heading", "paragraph"]],
@@ -1223,8 +1176,6 @@ it("keeps a pipe in code in a table cell and after the table", () => {
   ]);
 });
 
-// A definition that holds a line a table could start with, or that a table
-// follows with no blank line, keeps its lines and the table keeps its own.
 it("keeps a definition and the table after it apart", () => {
   const source = '[x]: u "a\n| b |"\n| c |\n| - |\n| d |';
   const document = parseRichdocMarkdown(source);
@@ -1236,7 +1187,6 @@ it("keeps a definition and the table after it apart", () => {
   expectSavedAsTheSameDocument(document);
 });
 
-// An escaped `[` stays an escape, and the syntax after it stays syntax.
 it("reads an escaped definition as the escape and the link it holds", () => {
   const link = (href: string) => ({
     type: "text",
@@ -1272,8 +1222,6 @@ it("reads an escaped definition as the escape and the link it holds", () => {
   );
 });
 
-// A definition the parser keeps as text reopens as the same text. Any other
-// `[` that starts a paragraph keeps its `\[` escape.
 it.each([
   ["[x]: u", "&#91;"],
   ["[x]: <u> (t)", "&#91;"],
@@ -1397,8 +1345,6 @@ function generatedEmptyLinkTexts(): string[] {
   });
 }
 
-// The characters the reader of links with no text reads: it reads each one
-// through `charAt` or `charCodeAt`.
 function emptyLinkReads(text: string): number {
   const { charAt, charCodeAt } = String.prototype;
   let reads = 0;
@@ -1425,8 +1371,6 @@ function emptyLinkReads(text: string): number {
   }
 }
 
-// A run of candidates, whether they fail or succeed, costs no more than the
-// text it spans, with no close after it, one, or two.
 it.each([
   ["candidates with no close", "[]("],
   ["candidates in angles", "[](<"],
@@ -1444,8 +1388,6 @@ it.each([
   }
 });
 
-// One candidate tries its title from each whitespace position before its
-// destination, and reads the title once.
 it.each([
   ["an open title", (k: number) => `[](${" ".repeat(k)}"${"x".repeat(k)}`],
   ["an open title after a destination", (k: number) => `[](${" \t".repeat(k)}u "${"x".repeat(k)}`],
@@ -1563,8 +1505,6 @@ it("reads references between separate raw HTML runs as it reads them outside raw
   expectSavedAsTheSameDocument(document);
 });
 
-// A table cell writes its `<br>` as a real tag, which reopens as raw HTML, so
-// it bounds no tag span either side.
 it("saves a table cell holding a real <br> beside raw HTML as the same document", () => {
   const document = parseRichdocMarkdown(
     "| H |\n| --- |\n| a<br>b &#124; &#123; <b>*x*</b> {{atom:a}} |",
@@ -1577,8 +1517,6 @@ it("saves a table cell holding a real <br> beside raw HTML as the same document"
   expectSavedAsTheSameDocument(document);
 });
 
-// An edit can leave raw HTML across lines that would open blocks, or split it
-// across marks, where no file could hold it.
 it.each([
   [
     "lines that open blocks",
@@ -1897,8 +1835,6 @@ describe("Y.Doc markdown import/export", () => {
   ])(
     "never brings back the comments of $name, whoever writes it",
     ({ markdown, deleted, added, settled }) => {
-      // Plain Y.Map writes in separate updates, in one update, and through the
-      // helper that keeps an edited key's comments.
       for (const write of ["separate", "together", "helper"] as const) {
         const doc = markdownToYDoc(markdown);
         try {
@@ -1924,8 +1860,6 @@ describe("Y.Doc markdown import/export", () => {
     },
   );
 
-  // A collaborator can write any frontmatter source. One too deep, too large,
-  // or too costly to expand refuses projection.
   it.each([
     ["deep block", `---\ntitle:\n${"- ".repeat(500_000)}Plan\n---\n\n`],
     ["deep flow", `---\ntitle: ${"[".repeat(500_000)}Plan${"]".repeat(500_000)}\n---\n\n`],
@@ -1971,9 +1905,6 @@ describe("Y.Doc markdown import/export", () => {
     expect(loadMarkdownFrontmatter(markdown)).toBeUndefined();
   });
 
-  // Two devices delete different keys offline, then one adds both back. The
-  // kept text still names both keys and their comments, but neither key holds
-  // the item the text was written for.
   it("never brings back a comment when a key deleted on another device returns", () => {
     const base = markdownToYDoc("---\n# x note\nx: 1\n# y note\ny: 2\nz:   3\n---\n\nBody");
     const [a, b] = [new Y.Doc(), new Y.Doc()];
@@ -2878,7 +2809,6 @@ describe("Y.Doc markdown import/export", () => {
       ]),
     );
 
-    // The line break keeps the mark, so the text stays one italic run.
     expect(once).toBe("*before\n&#35; heading text*\n");
     const reopened = markdownToYDoc(once);
     expect(yDocBodyJSON(reopened).content).toEqual([
@@ -3108,7 +3038,6 @@ describe("Y.Doc markdown import/export", () => {
     const input = "![alt](<my folder/pic 1.png>)\n";
     const once = yDocToMarkdown(markdownToYDoc(input));
     expect(once).toBe(input);
-    // And a second pass is stable.
     expect(yDocToMarkdown(markdownToYDoc(once))).toBe(input);
   });
 
@@ -3178,7 +3107,6 @@ describe("Y.Doc markdown import/export", () => {
   });
 
   const IMAGE_SRC_CONTRACT: ReadonlyArray<{ src: string; markdown: string }> = [
-    // Kept — relative asset paths (the ordinary case).
     { src: "assets/pic.png", markdown: "![x](assets/pic.png)" },
     { src: "./assets/pic.png", markdown: "![x](./assets/pic.png)" },
     // Kept — forward-slash parent traversal, losslessly: the global-folder
@@ -3186,7 +3114,6 @@ describe("Y.Doc markdown import/export", () => {
     // resolver refuses to serve an escaping path; the export drops it).
     { src: "../assets/pic.png", markdown: "![x](../assets/pic.png)" },
     { src: "../../outside.png", markdown: "![x](../../outside.png)" },
-    // Kept — remote images.
     { src: "https://example.com/x.png", markdown: "![x](https://example.com/x.png)" },
     { src: "http://example.com/x.png", markdown: "![x](http://example.com/x.png)" },
     // Dropped — every non-http(s) scheme, however obfuscated.
@@ -3196,13 +3123,11 @@ describe("Y.Doc markdown import/export", () => {
     { src: "data:image/svg+xml;base64,PHN2Zz4=", markdown: "![x]()" },
     { src: "file:///etc/passwd", markdown: "![x]()" },
     { src: "dohc-file://ws/x.png", markdown: "![x]()" },
-    // Dropped — absolute and protocol-relative.
     { src: "/etc/pic.png", markdown: "![x]()" },
     { src: "//evil.example.com/x.png", markdown: "![x]()" },
     // Dropped — backslash-obfuscated traversal (never authored markdown).
     { src: "..\\secret\\pic.png", markdown: "![x]()" },
     { src: "a\\..\\..\\b.png", markdown: "![x]()" },
-    // Dropped — empty / whitespace-only.
     { src: "", markdown: "![x]()" },
     { src: "   ", markdown: "![x]()" },
   ];
@@ -3500,7 +3425,6 @@ describe("Y.Doc markdown import/export", () => {
     expect(yDocBodyJSON(markdownToYDoc(repeated))).toEqual(
       yDocBodyJSON(markdownToYDoc('[x]: https://a.example\n[x]: https://b.example "kept"\n')),
     );
-    // A link with no text keeps its destination and title as text.
     expect(
       yDocBodyJSON(markdownToYDoc('Hello[](https://h.example "kept")\n')).content?.[0],
     ).toEqual({
@@ -4155,11 +4079,11 @@ describe("Y.Doc markdown import/export", () => {
   });
 
   it("round-trips per-column GFM alignment (left/center/right) losslessly", () => {
-    // Phase 1 assumed per-column alignment was inexpressible; it is not. The
-    // `align` cell attr (set by tableControls' column grip menu) serializes to
-    // the delimiter row and parses back, so a mixed-alignment table — left
-    // (`:---`), center (`:---:`), right (`---:`), and default (`---`) — is
-    // byte-stable across the round-trip.
+    // Per-column alignment is expressible. The `align` cell attr (set by
+    // tableControls' column grip menu) serializes to the delimiter row and
+    // parses back, so a mixed-alignment table with left (`:---`), center
+    // (`:---:`), right (`---:`), and default (`---`) columns is byte-stable
+    // across the round-trip.
     const once = expectStableMarkdownRoundTrip(
       ["| L | C | R | D |", "| :--- | :---: | ---: | --- |", "| a | b | c | d |"].join("\n"),
       ["| :--- | :---: | ---: | --- |"],
@@ -4756,8 +4680,6 @@ describe("Y.Doc markdown import/export", () => {
   it("keeps a list item and a following callout distinct (nested callout survives)", () => {
     const input = ["- item", "  > [!note] In list", "  > body", "", "- second"].join("\n");
     const once = yDocToMarkdown(markdownToYDoc(input));
-    // The blank line between tight list items normalizes away, but the nested
-    // callout and both list items survive, and the result is idempotent.
     expect(once).toContain("> [!note] In list");
     expect(once).toContain("> body");
     expect(once).toContain("- item");
@@ -4779,10 +4701,7 @@ describe("Y.Doc markdown import/export", () => {
   it("absorbs a lazy-continuation line into the callout instead of reflowing it out", () => {
     const input = ["> [!note] Title", "> first line", "lazy continuation"].join("\n");
     const once = yDocToMarkdown(markdownToYDoc(input));
-    // First pass normalizes the lazy line to a `>`-prefixed body line inside the
-    // callout (rather than reflowing it into a separate paragraph)...
     expect(once).toBe(["> [!note] Title", "> first line", "> lazy continuation", ""].join("\n"));
-    // ...and the normalized form is byte-stable thereafter.
     const twice = yDocToMarkdown(markdownToYDoc(once));
     expect(twice).toBe(once);
   });
@@ -4795,7 +4714,6 @@ describe("Y.Doc markdown import/export", () => {
           content: [{ type: "text", text, marks: [{ type: "highlight" }] }],
         },
       ]);
-    // The concrete escaped form is unambiguous and reversible.
     expect(yDocToMarkdown(highlighted("a==b"))).toBe("==a\\=\\=b==\n");
     // A lone `=` adjacent to the closing delimiter must also be escaped, or the
     // mark would close one char early (`==a=` → `==a===`).
@@ -4927,7 +4845,6 @@ describe("Y.Doc markdown import/export", () => {
   it("does not absorb text after a fenced code block inside a callout", () => {
     const input = ["> [!note]", "> ```", "> code", "> ```", "outside"].join("\n");
     const once = yDocToMarkdown(markdownToYDoc(input));
-    // `outside` is a plain top-level paragraph, not a lazy `>`-prefixed body line.
     expect(once).toMatch(/^outside$/m);
     expect(once).not.toContain("> outside");
     const twice = yDocToMarkdown(markdownToYDoc(once));
@@ -4963,10 +4880,10 @@ describe("a list nested inside a task item", () => {
 
 // CommonMark lets a fenced code block's opener carry up to three leading
 // spaces. Four or more make an indented code block instead, which is a
-// different construct. markdownToYDoc used to drop a top-level fence indented
-// 1-3 spaces together with its whole body, so opening such a document and
-// letting it settle wrote the deletion back to disk. This mirrors the
-// desktop editor's suite — both packages parse markdown with the same rules.
+// different construct. markdownToYDoc must keep a top-level fence indented
+// 1-3 spaces. Dropping it with its whole body would write the deletion back
+// to disk when such a document opens and settles. This mirrors the desktop
+// editor's suite: both packages parse markdown with the same rules.
 describe("indented code fences", () => {
   function bodyBlocks(markdown: string): JSONContent[] {
     return yDocBodyJSON(markdownToYDoc(markdown)).content ?? [];

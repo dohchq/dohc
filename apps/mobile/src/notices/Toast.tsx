@@ -6,7 +6,7 @@ import Animated, { FadeInDown, FadeOutDown } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useLineClamp } from "../textScale";
 import { useTheme } from "../theme";
-import type { SenderKind } from "./sample";
+import type { SenderKind } from "./phoneNotice";
 import { ActionPill } from "./ActionPill";
 import { SenderMark } from "./SenderMark";
 import { TitleControls } from "./TitleControls";
@@ -23,10 +23,11 @@ export interface ToastMessage {
   /** Fewer title lines than the usual 4, for a title written to fit them. */
   readonly titleLines?: number;
   readonly body?: string;
-  /** One worded action under the text: Try again, Undo. */
   readonly action?: { readonly label: string; onPress?(): void };
   /** A sent notice's toast carries its row's sender mark; without one, a failure is held on this phone. */
   readonly sender?: SenderKind;
+  /** Its action is the only Undo for a change: it stays until closed, on Notices too. */
+  readonly holdsUndo?: boolean;
 }
 
 // Any screen under the tabs shows a toast through this; the tabs layout owns the one on screen.
@@ -36,7 +37,8 @@ export const useShowToast = () => useContext(ShowToast);
 export const HideToast = createContext<(id: string) => void>(() => {});
 export const useHideToast = () => useContext(HideToast);
 
-// How long a success stays before it fades; failures stay until closed. Same as the desktop.
+// How long a success stays before it fades; failures, and a toast holding the only Undo, stay until closed. Same as
+// the desktop.
 const FADING_TOAST_MS = 6000;
 
 // The desktop's toast on a phone: bottom, full width in 16pt gutters above the tab bar.
@@ -50,11 +52,12 @@ export function Toast({ message, onClose }: { message: ToastMessage; onClose(): 
   const bodyLines = useLineClamp(3);
   const [open, setOpen] = useState(false);
   const toggle = () => setOpen((value) => !value);
+  const fades = success && !message.holdsUndo;
   useEffect(() => {
-    if (!success) return;
+    if (!fades) return;
     const timer = setTimeout(onClose, FADING_TOAST_MS);
     return () => clearTimeout(timer);
-  }, [success, onClose]);
+  }, [fades, onClose]);
   return (
     <Animated.View
       entering={FadeInDown.duration(220)}

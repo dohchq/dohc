@@ -16,7 +16,6 @@ import {
 
 type Bridge = Pick<DohcDesktopBridge, "cloudEnableSync">;
 
-// Every label the title bar shows, in order, from the moment this is called.
 async function recordTitlebar(page: Page): Promise<() => Promise<string[]>> {
   await page.evaluate(() => {
     const seen: string[] = [];
@@ -83,8 +82,6 @@ test("a sync the server cannot take names the server, offers Try again, and clea
       "local draft\n\nwritten while the server is down\n",
     );
 
-    // One failed pass: the title bar and a toast name the server, and
-    // Notices keeps the row after the toast closes.
     await expect(titlebar).toHaveText("Server unreachable", { timeout: 60_000 });
     const toast = page.getByTestId("workspace-shell-error");
     await expect(toast).toContainText("dohc could not reach the server.");

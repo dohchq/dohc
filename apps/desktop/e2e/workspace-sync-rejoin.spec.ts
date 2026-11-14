@@ -35,7 +35,7 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// 0P-C — the multi-machine sync product proof. One real Electron app is
+// The multi-machine sync product proof. One real Electron app is
 // "this machine". A test-only protocol peer seeds the remote machine's state
 // because the serial harness cannot run two Electron instances. The relay is
 // the real service, spawned as a child process with its SQLite on tmpfs.
@@ -172,7 +172,6 @@ test("offline edits reach the Electron conflict review and its resolution surviv
       appMomentsBeforeEdit = await pathMomentCount(page, workspaceId, path);
     }).toPass({ timeout: 30_000 });
 
-    // Both machines edit from the same base while the relay is unavailable.
     await relay.stop();
     relay = null;
     await writeWorkspaceFiles(temp, [{ path, contents: appEdit }]);
@@ -238,8 +237,6 @@ test("offline edits reach the Electron conflict review and its resolution surviv
       .toBe(0);
     expect(await readFile(join(sourceRoot, path), "utf8")).toBe(peerEdit);
 
-    // Relaunch the real app and daemon with the same profile and workspace.
-    // The selected bytes and the closed conflict must remain durable.
     await desktop.close();
     desktop = null;
     desktop = await launchDesktopApp({
@@ -292,8 +289,6 @@ test("join flow: paste the sync code, pick a folder, and the workspace arrives w
       identity: establishedIdentity,
     });
 
-    // The remote peer seeds file history and a linked chat. The app must bring
-    // all of this state over during the join.
     const firstRoadmap = await remotePeer.writeText("notes/roadmap.md", "# Roadmap\n\ndraft one\n");
     await remotePeer.writeText(
       "notes/roadmap.md",
@@ -317,7 +312,6 @@ test("join flow: paste the sync code, pick a folder, and the workspace arrives w
     });
     expect(relayAdoptedIdentity(relayDb, workspaceId)).toEqual(establishedIdentity);
 
-    // Machine 2 is the app: fresh home (no workspaces), already signed in.
     await seedCloudCredentials(temp, {
       serverUrl: relay.baseUrl,
       relayUrl: relay.baseUrl,
@@ -336,8 +330,6 @@ test("join flow: paste the sync code, pick a folder, and the workspace arrives w
     const joinStartedAt = Date.now();
     await page.getByTestId("join-workspace-start").click();
 
-    // The workspace opens with everything: identity, files on disk, history
-    // moments, the linked chat, and a searchable index.
     await waitForWorkspaceReady(page);
     console.log(
       `[perf] join-to-interactive-shell: ${Date.now() - joinStartedAt}ms (${
@@ -420,14 +412,12 @@ test("join flow: paste the sync code, pick a folder, and the workspace arrives w
     const momentRow = page.locator(
       `[data-testid="engine-moment-open"][data-moment-path="${historyPath}"]`,
     );
-    // History lives in the left History view (the right panel is Chats now).
     await openHistoryView(page);
     await expect(momentRow.first()).toBeVisible();
     if (bulkCount === 0) {
       expect(await momentRow.count()).toBeGreaterThanOrEqual(2);
     }
 
-    // Pulled file content is searchable through the engine index.
     await page.getByTestId(activityPin("search")).click();
     await expect(page.getByTestId("search-view")).toBeVisible();
     await page.getByTestId("search-input").fill("galaxy-brain");
@@ -435,7 +425,6 @@ test("join flow: paste the sync code, pick a folder, and the workspace arrives w
       page.locator('[data-testid="search-result-group"][data-path="notes/roadmap.md"]'),
     ).toBeVisible();
 
-    // Pulled CHAT content is searchable and opens in the Chats rail.
     await page.getByTestId("search-input").fill("quasar");
     const chatGroup = page
       .locator('[data-testid="search-result-group"]')
@@ -538,8 +527,6 @@ test("protected join preserves a failed folder, then restores exact secret and b
     await page.getByTestId("join-choose-folder").click();
     await page.getByTestId("join-workspace-start").click();
 
-    // The missing passphrase is discovered at the public IPC boundary. The
-    // attempt preserves its manifest but releases its registry entry.
     await expect(page.getByTestId("join-sync-passphrase")).toBeFocused();
     await expect(page.getByTestId("join-used-folder")).toHaveText(
       `Files stay in ${temp.rootPath}.`,
@@ -564,8 +551,6 @@ test("protected join preserves a failed folder, then restores exact secret and b
     await expect.poll(() => fileMatches(join(retryRoot, binaryPath), binaryBytes)).toBe(true);
     expect((await readFile(join(retryRoot, SECRET_KEY_RELATIVE_PATH))).length).toBeGreaterThan(0);
 
-    // Relaunch with the same profile and registry. The joined key and both
-    // exact payloads must remain usable without another enrollment prompt.
     await desktop.close();
     desktop = null;
     desktop = await launchDesktopApp({ workspace: temp });
@@ -585,11 +570,11 @@ test("protected join preserves a failed folder, then restores exact secret and b
   }
 });
 
-// Enable-sync product proof (G2-C-3 gate fix): turning sync ON for a
-// LOCAL-ONLY workspace must claim the bucket on the RELAY alone. workspace-api
-// is now auth-only and 404s every non-auth route, so the retired
-// `POST ${serverUrl}/workspaces` preclaim would fail the whole flow with
-// "Enabling sync failed (404)" before the relay claim ever ran. This drives
+// Enable-sync product proof: turning sync on for a local-only workspace must
+// claim the bucket on the relay alone. workspace-api is auth-only and 404s
+// every non-auth route, so a `POST ${serverUrl}/workspaces` preclaim would
+// fail the whole flow with "Enabling sync failed (404)" before the relay
+// claim ever ran. This drives
 // the real cloudEnableSync IPC against a real relay (no workspace-api at all)
 // and proves the workspace claims, binds, and pushes its content end to end.
 test("enabling sync claims the workspace on the relay alone (no workspace-api preclaim)", async () => {
@@ -608,7 +593,6 @@ test("enabling sync claims the workspace on the relay alone (no workspace-api pr
     const relayDb = join(temp.baseDir, "relay", "relay.sqlite");
     relay = await spawnSyncRelay({ dbPath: relayDb });
 
-    // Local-only registry entry (no `remote`): the workspace is not synced yet.
     await seedWorkspaceRegistry(temp, [{ workspaceId, rootPath: temp.rootPath }]);
     // serverUrl points at the relay too — exactly the shape that made the old
     // `${serverUrl}/workspaces` preclaim 404 (the relay 404s any non-/sync path).
@@ -628,9 +612,8 @@ test("enabling sync claims the workspace on the relay alone (no workspace-api pr
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
 
-    // Drive the real enable-sync IPC. Before the fix this rejects with
-    // "Enabling sync failed (404)"; after it, the relay claim is authoritative
-    // and it resolves with a live sync status.
+    // Drive the real enable-sync IPC. The relay claim is authoritative, so it
+    // resolves with a live sync status and not "Enabling sync failed (404)".
     const enableResult = await page.evaluate(async (id) => {
       const api = (
         window as unknown as {
@@ -771,8 +754,6 @@ test("enabling sync claims the workspace on the relay alone (no workspace-api pr
     expect(blobResponse.status).toBe(200);
     expect(Buffer.from(await blobResponse.arrayBuffer()).toString("utf8")).toBe(outboundContents);
 
-    // The app reflects a synced workspace (the sync-status surface is present,
-    // not the local-only absence).
     await expect(page.getByTestId("sync-status")).toBeVisible({ timeout: 30_000 });
   } finally {
     // Stop the relay child before removing the temp tree it holds open, or
@@ -930,8 +911,6 @@ async function typeWhileEnablingSync(pattern: TypingPattern): Promise<void> {
       return;
     }
 
-    // The words live in the claimed lineage, not only in the file. After a
-    // restart the document opens from the engine with every word.
     await desktop.close();
     desktop = await launchDesktopApp({ workspace: temp });
     const restarted = desktop.page;
@@ -1058,8 +1037,6 @@ test("typing continues after enabling sync claims the open document", async () =
     // across the handoff.
     await page.keyboard.insertText(" pending-marker");
 
-    // The marker must reach disk or a stored set-aside draft. A draft must
-    // still be offered if a replacement set the marker aside.
     const setAsideDrafts = () =>
       page.evaluate(() =>
         Object.keys(localStorage)
@@ -1095,8 +1072,6 @@ test("typing continues after enabling sync claims the open document", async () =
         .map((entry) => entry.text),
     ).toEqual([]);
 
-    // A set-aside draft outlives the app. Restart on the same profile: the
-    // stored row must load and the notice center must still offer it.
     if (setAside) {
       await desktop.close();
       desktop = await launchDesktopApp({ workspace: temp });

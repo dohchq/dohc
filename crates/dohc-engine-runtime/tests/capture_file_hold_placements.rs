@@ -1,4 +1,3 @@
-//! Durable holds park actual relay and rollback placements, including replay.
 use crate::support;
 use dohc_engine_collab::{
     ContentKind, DocKey, LeaseRegistry, LocalAppend, MarkerCreation, Regime, WriterDocCache, Ydoc,
@@ -405,7 +404,6 @@ fn seed_desktop_link_row(scratch: &ScratchDir) -> (DocKey, String) {
     (key, initial)
 }
 
-/// Write `text` as an outside edit and capture it, returning the error code.
 async fn capture_outside(
     actor: &ActorHandle,
     scratch: &ScratchDir,
@@ -428,7 +426,6 @@ async fn capture_outside(
         .map_err(|error| error.code())
 }
 
-/// The error code of opening the held file for live editing, if any.
 async fn open_error(actor: &ActorHandle) -> Option<&'static str> {
     actor
         .ydoc_open_state(
@@ -535,7 +532,6 @@ async fn a_held_outside_edit_is_released_by_the_file_dohc_would_write() {
     let held = Err("capture-file-held");
     assert_eq!(capture_outside(&actor, &scratch, &outside, 5).await, held);
     assert_eq!(open_error(&actor).await, held.err());
-    // Try again reads the same bytes the same way, so the file stays held.
     let retried = actor.retry_capture_file(WS.into(), FILE.into()).await;
     assert!(retried.unwrap());
     assert_eq!(capture_outside(&actor, &scratch, &outside, 6).await, held);
@@ -550,13 +546,11 @@ async fn a_held_outside_edit_is_released_by_the_file_dohc_would_write() {
     assert_eq!(capture_outside(&actor, &scratch, &ended, 7).await, held);
     // The earlier bytes lack the final newline too, so they are held as well.
     assert_eq!(capture_outside(&actor, &scratch, &initial, 8).await, held);
-    // The earlier bytes as dohc writes them release the file.
     let before = format!("{initial}\n");
     assert_eq!(capture_outside(&actor, &scratch, &before, 9).await, Ok(()));
     let holds = actor.capture_file_holds(WS.into()).await.unwrap();
     assert!(holds.is_empty(), "{holds:?}");
     assert_eq!(open_error(&actor).await, None);
-    // The same outside edit, with the final newline kept, is then taken in.
     assert_eq!(capture_outside(&actor, &scratch, &ended, 10).await, Ok(()));
     assert_eq!(file(&scratch), ended);
     supervisor.close(&db).unwrap();

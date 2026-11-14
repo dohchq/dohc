@@ -1236,7 +1236,6 @@ type Slot =
   | { kind: "code"; ordinal: number; as: string | null };
 
 type Guards = NonNullable<AutomationFormula["when"]>;
-/** A code step to run. */
 type CodeItem = { kind: "code"; source: string };
 
 export interface EvaluationRequest {
@@ -1802,7 +1801,6 @@ function slotSubject(slot: Slot): string {
 // A notice's title and body, as the relay bounds them.
 const NOTICE_TITLE_MAX_CHARS = 120;
 const NOTICE_BODY_MAX_CHARS = 500;
-// A notice body keeps tabs and line feeds and no other control character.
 const NOTICE_CONTROL_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f]/gu;
 
 function noticeText(text: string): string {

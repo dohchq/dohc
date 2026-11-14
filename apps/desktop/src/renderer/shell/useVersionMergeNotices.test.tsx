@@ -67,7 +67,6 @@ it("keeps a row that waits on decisions until a review or merge dialog closes wi
   expect(f.row()).toMatchObject({ noDismiss: true, action: { label: "Decide what to keep" } });
   act(() => f.result.current.shell.runShellErrorAction(f.row()!.id));
   expect(f.openConflictReview).toHaveBeenCalledOnce();
-  // A later merge of the same version takes back only a failure's row.
   act(() => f.result.current.merges.clear(IDENTITY));
   expect(f.row()).toBeDefined();
   act(() => f.result.current.merges.settle());

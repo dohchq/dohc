@@ -1,5 +1,6 @@
 import { namedAccountCookie } from "./namedAccountCookie";
 import { readBoundedJson } from "@dohc/service-http";
+import { NAMED_SESSION_CHECK_HEADER } from "@dohc/live-session-contract/named-session-check";
 import {
   LIVE_UPDATE_IDENTIFIER_MAX_BYTES,
   parseLiveUpdateIdentifier,
@@ -65,6 +66,8 @@ export function createNamedLiveBrowserClient(options: {
   exchangeKey: string;
   limits: NamedLiveBrowserClientLimits;
   fetchRelay: (request: Request) => Promise<Response>;
+  /** How often the named gateway checks an open editor's session, which the relay's window follows. */
+  checkIntervalMs?: number;
 }) {
   const limits = parseNamedLiveBrowserClientLimits(options.limits);
   const origin = new URL(options.publicOrigin);
@@ -143,6 +146,9 @@ export function createNamedLiveBrowserClient(options: {
                 cookie,
                 origin: options.publicOrigin,
                 "x-dohc-relay-exchange-key": options.exchangeKey,
+                ...(discriminator === undefined || options.checkIntervalMs === undefined
+                  ? {}
+                  : { [NAMED_SESSION_CHECK_HEADER]: String(options.checkIntervalMs) }),
               },
             },
           ),

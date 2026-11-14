@@ -33,7 +33,6 @@ const CUSTOMIZE_ITEM = { id: "customize", label: "Customize…" } as const;
 // mirrors the code-block copy button's "copy" → "copied" swap
 // (editor/codeBlockChrome.tsx).
 export const FEEDBACK_MS = 1200;
-// How long a Copy runs before its row says it is still working.
 export const PROGRESS_DELAY_MS = 150;
 
 function writeClipboard(markdown: string): Promise<void> {
@@ -80,7 +79,6 @@ class NoteNotOpen extends Error {
   }
 }
 
-// Where a Copy's failure is filed, and the row a later Copy takes back.
 export type CopyNotices = {
   report: ReportShellFailure | null;
   clear: ((identity: string) => void) | null;
@@ -197,7 +195,6 @@ export function DocumentMenu(props: DocumentMenuProps) {
 
   useEffect(() => {
     if (!open) return;
-    // A freshly opened menu says nothing about the last one.
     setFeedback({});
     setInstruction("");
     // Closing ends every attempt this menu started. The token moves past
@@ -232,12 +229,12 @@ export function DocumentMenu(props: DocumentMenuProps) {
     }, FEEDBACK_MS);
   }
 
-  // NULL is the refusal this menu expects and handles. A throw is not: the
+  // Null is the refusal this menu expects and handles. A throw is not: the
   // serializer reads a live editor, and reading it can fail. Called outside a
-  // boundary it rejected the action's promise into nothing — no feedback, no
-  // log, and the menu still open as though the click had missed (#564,
-  // codex r23). Both actions serialize through here, so both answer a throw
-  // the way they answer any other failure.
+  // boundary, a throw would reject the action's promise into nothing: no
+  // feedback, no log, and the menu still open as though the click had missed.
+  // Both actions serialize through here, so both answer a throw the way they
+  // answer any other failure.
   async function serializeOrFail(
     id: DocumentMenuItemId,
     failureLabel: string,

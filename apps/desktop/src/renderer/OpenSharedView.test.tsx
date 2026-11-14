@@ -260,7 +260,6 @@ describe("OpenSharedView", () => {
       expect(bridgeMock.getDefaultShareRoot).toHaveBeenCalledWith({ shareId: "share-b" }),
     );
 
-    // A's answer lands while B is pending: nothing to open into yet.
     await act(async () => rootA.resolve("/home/sam/dohc/shared/share-a"));
     expect(screen.queryByText("/home/sam/dohc/shared/share-a")).toBeNull();
     expect(button.disabled).toBe(true);
@@ -390,7 +389,6 @@ describe("OpenSharedView defaults for a pasted code", () => {
     fireEvent.change(input, { target: { value: OTHER_CODE } });
     await waitFor(() => expect(bridgeMock.getRelayReceivedShare).toHaveBeenCalledTimes(2));
 
-    // A is Edit, and its answer lands while B is on screen.
     await act(async () => answers.get("share-1")!.resolve(received("edit", "share-1")));
     expect(start.textContent).toBe("Checking the share…");
     expect(modeChecked("mount")).toBe("false");
@@ -400,7 +398,6 @@ describe("OpenSharedView defaults for a pasted code", () => {
     await waitFor(() => expect(start.textContent).toBe("Add share"));
     expect(modeChecked("mount")).toBe("true");
 
-    // Back to A: the answer it already had decides, with no second request.
     fireEvent.change(input, { target: { value: CODE } });
     await waitFor(() => expect(modeChecked("separate")).toBe("true"));
     expect(bridgeMock.getRelayReceivedShare).toHaveBeenCalledTimes(2);

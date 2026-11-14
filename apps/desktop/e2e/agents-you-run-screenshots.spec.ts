@@ -95,7 +95,6 @@ test("@ui-audit agents you run in Settings › Agents and in their chat", async 
     await openWorkspaceFromFirstRun(page, temp);
     await trustOpenWorkspace(desktop);
 
-    // Terminal connects as itself and waits; Scout isn't connected.
     agent = await startAgentYouRun(page, WORKSPACE_ID, "terminal", REPLY);
     await expect.poll(() => agentsListening(page), { timeout: 30_000 }).toEqual(["terminal"]);
 
@@ -110,7 +109,6 @@ test("@ui-audit agents you run in Settings › Agents and in their chat", async 
     await page.mouse.move(0, 0);
     await shoot(page, section, "agents-you-run-a-settings");
 
-    // Add agent with Another agent chosen shows the MCP config it will use.
     await section.getByTestId("agent-add").click();
     const sheet = page.getByTestId("agent-add-sheet");
     await expect(sheet.getByLabel(/^Looking for /)).toHaveCount(0);
@@ -121,7 +119,6 @@ test("@ui-audit agents you run in Settings › Agents and in their chat", async 
     await sheet.getByRole("button", { name: "Cancel" }).click();
     await expect(sheet).toHaveCount(0);
 
-    // Scout's page: how to connect it, the run that marks its changes, and its menu.
     await row("scout").click();
     const agentPage = section.getByTestId("agent-page");
     await expect(agentPage).toHaveAttribute("data-agent-id", "scout");
@@ -134,7 +131,6 @@ test("@ui-audit agents you run in Settings › Agents and in their chat", async 
     await shoot(page, dialog, "agents-you-run-c-menu");
     await page.keyboard.press("Escape");
 
-    // Remove asks first. Just after it, the list is back and its toast offers Undo.
     await agentPage.getByRole("button", { name: "Remove Scout…" }).click();
     const confirm = page.getByTestId("remove-agent-dialog");
     await expect(confirm).toContainText("Remove Scout?");
@@ -154,7 +150,6 @@ test("@ui-audit agents you run in Settings › Agents and in their chat", async 
     await undo.click();
     await expect(row("scout")).toHaveCount(1);
 
-    // Terminal's reply in its chat, under its name and color.
     await page.getByRole("button", { name: "Close settings" }).click();
     await expect(dialog).toHaveCount(0);
     await openAgentChat(page, "terminal", "Terminal");

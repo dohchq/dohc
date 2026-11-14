@@ -315,14 +315,6 @@ describe("sync before live hosting", () => {
 });
 
 describe("owner live document enrollment", () => {
-  // Document A stopped at old.md and moved to new.md; B now has old.md. The
-  // server resumed A, so Resume clears A's Stop where A is now, never B's.
-  // When this computer no longer has the resumed document, it clears that
-  // document's Stop as the engine holds it, or nothing when it holds none.
-
-  // Proves: a document stopped on a diverged server copy keeps the reason and
-  // offers no Resume, whether its Stop finished or waits on this computer.
-
   // Proves: a deferred Stop offers Resume on a document whose server copy
   // is missing an owner edit, or whose history is too long to check, since a
   // Resume tries it again, but not on one whose conflict parent is withheld.
@@ -595,11 +587,6 @@ describe("owner live document enrollment", () => {
               ...(deferred ? { deferred } : {}),
             };
 
-    // A Stop that finished but could not write the file: Try again names the
-    // row's document and settles that release again, wherever the document is
-    // now. It never asks for a new Stop or the server. The record decides,
-    // even before this computer's list of kept edits is read, as after a
-    // restart or an engine store reset.
     it("writes the file again from the unwritten release alone, and never starts a new Stop", async () => {
       const h = harness();
       h.unwrittenOwnerLiveReleases.mockResolvedValue([
@@ -630,15 +617,12 @@ describe("owner live document enrollment", () => {
         [h.workspace, "object"],
         [h.workspace, "object"],
       ]);
-      // Its editors are held off where the document is now.
       expect(h.reserved).toEqual(["live.md", "live.md", "live.md", "live.md"]);
       expect(h.ownerLiveQuarantines).not.toHaveBeenCalled();
       expect(h.ownerLiveStop).not.toHaveBeenCalled();
       expect(h.request).not.toHaveBeenCalled();
     });
 
-    // Record A keeps "old.md" after its document moved to "new.md"; document B
-    // now has "old.md". Each Stop names its document before it changes anything.
     it("names the document before it chooses a record or starts a Stop", async () => {
       const h = harness();
       h.unwrittenOwnerLiveReleases.mockResolvedValue([
@@ -689,7 +673,6 @@ describe("owner live document enrollment", () => {
         path: string;
         again?: { objectId: string; recovery: "not-written" | "stopping" };
       }) => h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, { workspaceId, ...input });
-      // Stop of "old.md" stops B, and leaves A's record.
       await expect(stop({ path: "old.md" })).resolves.toEqual({ keptEdits: "none" });
       expect(h.retryOwnerLiveRelease).not.toHaveBeenCalled();
       expect(
@@ -702,20 +685,17 @@ describe("owner live document enrollment", () => {
         ["request", "old.md", "other"],
         ["release", "old.md", "other"],
       ]);
-      // A Stop again for a document that is gone creates no Stop for anyone, nor for B at its row's path.
       h.ownerLiveStop.mockClear();
       h.request.mockClear();
       await expect(
         stop({ path: "old.md", again: { objectId: "gone", recovery: "stopping" } }),
       ).rejects.toThrow("This document changed.");
-      // B has no record to try again; A's record is not B's.
       await expect(
         stop({ path: "old.md", again: { objectId: "other", recovery: "not-written" } }),
       ).rejects.toThrow("This document changed.");
       expect(h.ownerLiveStop).not.toHaveBeenCalled();
       expect(h.request).not.toHaveBeenCalled();
       expect(h.retryOwnerLiveRelease).not.toHaveBeenCalled();
-      // A waiting Stop of A runs again for A where it is now, never for B.
       await expect(
         stop({ path: "old.md", again: { objectId: "object", recovery: "stopping" } }),
       ).resolves.toEqual({ keptEdits: "none" });
@@ -766,7 +746,6 @@ describe("owner live document enrollment", () => {
         }),
       ).rejects.toThrow();
       expect(h.saveOwnerLiveRecoveryCopy).toHaveBeenCalledOnce();
-      // A row's Save names the kept edits it shows.
       await h.invoke(relayShareOperations.saveOwnerLiveRecoveryCopy.channel, {
         workspaceId,
         path: "notes/a.md",
@@ -809,7 +788,6 @@ describe("owner live document enrollment", () => {
     expect(h.request.mock.calls.at(-1)?.[0]).toBe(h.credentials);
   });
 
-  // A status this build doesn't know leaves nothing to show, so its row is dropped. A reason it doesn't know leaves the row by its status alone.
   it.each([
     ["drops a row with an unknown status", "status", []],
     [

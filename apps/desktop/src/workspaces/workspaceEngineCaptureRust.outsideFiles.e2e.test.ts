@@ -7,9 +7,6 @@ import { REAL_DAEMON_DEADLINE_MS } from "../testing/realDaemonWorkspaceSessions"
 import { waitForPathMoments } from "./waitForPathMoments";
 import { engine, openRealCapture, writeOutside } from "./workspaceEngineCaptureRust.fixture";
 
-// Capture keeps a note's unsaved text in History when it records an outside
-// version, but has nothing that keeps a drawing's strokes. A drawing keeps its
-// guarded close: the close refuses, and the strokes stay in the open drawing.
 it.skipIf(engine.missing)(
   "keeps a drawing's unsaved strokes when its file changed outside dohc (#2463)",
   async () => {
@@ -65,13 +62,11 @@ it.skipIf(engine.missing)(
         () => null,
         (error: unknown) => error,
       );
-      // The close stays refused, and the lease stays held with the strokes.
       expect(closed).not.toBeNull();
       expect(foldScene(session.doc).elements.map((element) => element.id)).toEqual(["stroke"]);
       expect(await opened.withEngine((engine) => engine.watcherStatus())).toMatchObject({
         deferredWrites: ["drawing.excalidraw"],
       });
-      // The drawing has no notice, and its chip promises nothing about History.
       expect(changedOutside).toEqual([]);
       expect(states).not.toContain("changed-on-disk");
     } finally {
@@ -96,7 +91,6 @@ it.skipIf(engine.missing)(
       });
       await writeFile(join(opened.root, "note.md"), "outside before restart\n");
       expect.soft(await opened.health()).toEqual({ newestMoment: "read", health: null });
-      // Stop the daemon without closing or settling the document session.
       await opened.stopEngine();
       restarted = await openRealCapture("deferred-write-restart", {}, opened.root);
       const moments = await waitForPathMoments(restarted.capture, "note.md", 2);

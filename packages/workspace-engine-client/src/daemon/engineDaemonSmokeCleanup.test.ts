@@ -81,8 +81,8 @@ it.each([false, true])(
 );
 
 // The smoke's first step is making its directory, so the mkdtemp spy shows
-// whether it started. It takes the engine's one open lock, and sent at the
-// handshake it made the first workspace open wait behind it (#2187).
+// whether it started. It takes the engine's one open lock, so sent at the
+// handshake it makes the first workspace open wait behind it.
 function smokeClient() {
   const requests: string[] = [];
   return {

@@ -100,7 +100,6 @@ async function ok(response: Response): Promise<Record<string, unknown>> {
   return json(response);
 }
 
-// Every refusal is the same bytes as a link that never existed.
 async function expectRefused(response: Response): Promise<void> {
   const refusal = errorResponse(notFound());
   expect({ status: response.status, body: await response.text() }).toEqual({
@@ -511,7 +510,6 @@ describe("agent sign-in for share links", () => {
     await expectRefused(await refresh(f, agent.clientId, agent.refreshToken, link.resource));
     expect(connectionRow(f.dbPath, agent.connectionId).status).toBe("active");
 
-    // A token used just now still ends the connection when reused.
     await expectRefused(
       await refresh(f, agent.clientId, String(first.refreshToken), link.resource),
     );
@@ -787,7 +785,6 @@ describe("agent sign-in for share links", () => {
     await expectRefused(await refresh(f, agent.clientId, agent.refreshToken, link.resource));
     expect(connectionRow(f.dbPath, agent.connectionId)).toEqual({ status: "retired", tokens: 0 });
     expect(await agentStatuses(f, link)).toEqual({});
-    // The restored link signs agents in again; the old connection does not come back.
     const again = await connect(f, link, agent.clientId);
     expect(await agentStatuses(f, link)).toEqual({ [again.connectionId]: "active" });
   });

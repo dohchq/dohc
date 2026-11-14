@@ -4,7 +4,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { DEFAULT_USER_SETTINGS, type DesktopUserSettings } from "../../settings/userSettings";
-import { settingsWithAgent } from "../../testing/agentSettings";
+import { settingsWithAgent, testAgent } from "../../testing/agentSettings";
 import { bridgeMock, channel, ChatsView, dm, renderView } from "./ChatsView.testHarness";
 import { resetChosenColorsForTests, setPersonalAgents } from "./chosenColors";
 
@@ -29,7 +29,6 @@ describe("ChatsView archive and row menus", () => {
     renderView(vi.fn(), vi.fn(), { userSettings: DEFAULT_USER_SETTINGS, onNotice });
 
     fireEvent.contextMenu(await screen.findByTestId("chats-channel"), { clientX: 40, clientY: 60 });
-    // Nothing unread, so no Mark as read; the group is yours, so Add people.
     expect(menuLabels()).toEqual(["Add people…", "Archive"]);
     await user.click(screen.getByTestId("chat-row-menu-archive"));
 
@@ -82,7 +81,6 @@ describe("ChatsView archive and row menus", () => {
     expect(menuLabels()).toEqual(["Mark as read", "Add people…", "Unarchive"]);
     fireEvent.keyDown(screen.getByTestId("chat-row-menu-unarchive"), { key: "Escape" });
 
-    // Open, it says it is archived and offers the way back.
     await user.click(trip);
     await user.click(await screen.findByTestId("chats-unarchive"));
     expect(bridgeMock.setChatArchived).toHaveBeenCalledExactlyOnceWith({
@@ -195,7 +193,6 @@ describe("ChatsView archive and row menus", () => {
       }),
     );
 
-    // With the settings saying so, Archived has nothing left to show.
     unmount();
     renderView(vi.fn(), vi.fn(), {
       userSettings: {
@@ -206,6 +203,67 @@ describe("ChatsView archive and row menus", () => {
     });
     await screen.findByTestId("chats-channel");
     expect(screen.queryByTestId("chats-archived-toggle")).toBeNull();
+  });
+
+  it("shows an agent with a thread as off, and turns it on from its row menu", async () => {
+    const user = userEvent.setup();
+    const onSaveUserSettings = vi.fn(async () => undefined);
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [
+        channel(),
+        channel({
+          id: "chat-chief",
+          name: "Chief",
+          slug: "agent-t3-code",
+          kind: "agent",
+          agentId: "t3-code",
+        }),
+      ],
+      fileThreads: [],
+    });
+    // dohc forwards to this agent's own thread and never starts it.
+    const { launch: _launch, ...fields } = testAgent({ name: "Chief", enabled: false });
+    const settings: DesktopUserSettings = {
+      ...DEFAULT_USER_SETTINGS,
+      agents: {
+        "t3-code": {
+          ...fields,
+          thread: { tool: "t3-code", id: "thread-1" },
+          workspaces: ["workspace-a"],
+        },
+      },
+    };
+    renderView(vi.fn(), vi.fn(), {
+      userSettings: settings,
+      onSaveUserSettings,
+      agentSetup: {
+        workspaceId: "workspace-a",
+        preferredName: "Sam",
+        agentName: "Chief",
+        runnerConfigured: false,
+        runnerEnabled: false,
+        agentRunActive: false,
+        agents: [{ id: "t3-code", name: "Chief", enabled: false }],
+      },
+      onSetupAgent: vi.fn(),
+    });
+
+    const row = await screen.findByTestId("chats-my-agent");
+    expect(within(row).getByTestId("chats-my-agent-state").textContent).toBe("off");
+    fireEvent.contextMenu(row, { clientX: 40, clientY: 60 });
+    expect(menuLabels()).toContain("Turn on");
+    await user.click(screen.getByTestId("chat-row-menu-agent-power"));
+    await waitFor(() => expect(onSaveUserSettings).toHaveBeenCalledOnce());
+    const [saved] = onSaveUserSettings.mock.lastCall as unknown as [DesktopUserSettings];
+    expect(saved.agents["t3-code"]).toMatchObject({
+      enabled: true,
+      thread: { tool: "t3-code", id: "thread-1" },
+    });
+
+    fireEvent.click(row);
+    expect((await screen.findByTestId("chats-agent-problem")).textContent).toContain(
+      "Chief is off.",
+    );
   });
 
   it("keeps a personal agent's chat in the sidebar while your roster holds it, and archives it once removed", async () => {
@@ -244,7 +302,6 @@ describe("ChatsView archive and row menus", () => {
       ).toBe(true),
     );
     expect(screen.queryByTestId("chats-archived-toggle")).toBeNull();
-    // Open, it names no problem: Settings doesn't list a personal agent.
     fireEvent.click(
       screen.getAllByTestId("chats-my-agent").find((row) => row.textContent?.includes("Grok"))!,
     );

@@ -376,7 +376,6 @@ describe("useCaptureRecoveryNotices", () => {
     ]);
     expect(h.bridge.getCaptureRecoveryStatus).toHaveBeenCalledWith({ workspaceId: "ws-a" });
 
-    // A later read of the same list keeps the row and its toast state.
     act(() => h.result.current.hideShellError(row.id));
     await act(() => h.result.current.notices.refresh());
     expect(recoveryRows(h)).toEqual([{ ...row, seen: true }]);
@@ -391,7 +390,6 @@ describe("useCaptureRecoveryNotices", () => {
   it("clears a dismissed notice in the engine, and no later read raises it again", async () => {
     const h = harness([RECOVERY]);
     await waitFor(() => expect(recoveryRows(h)).toHaveLength(1));
-    // A read already on its way still lists the recovery when it answers.
     const late = deferred<CaptureRecoveryStatusResult>();
     h.bridge.getCaptureRecoveryStatus.mockImplementationOnce(() => late.promise);
     const reading = h.result.current.notices.refresh();
@@ -425,10 +423,8 @@ describe("useCaptureRecoveryNotices", () => {
     expect(failure.message).toBe(
       'dohc could not remove the notice about "notes/rich.md". The workspace engine is not running.',
     );
-    // The dismissed row stays dismissed while the engine still lists it.
     await act(() => h.result.current.notices.refresh());
     expect(recoveryRows(h)).toEqual([]);
-    // Until the person tries its History Restore and the engine refuses it.
     act(() => {
       h.result.current.notices.restoreRefused("notes/rich.md", SHARED_REFUSAL);
     });
@@ -464,7 +460,6 @@ describe("useCaptureRecoveryNotices", () => {
     expect(before.tone).toBe("warning");
     act(() => h.result.current.hideShellError(before.id));
 
-    // Another failure, or a file with no kept typing, stays the caller's.
     expect(
       h.result.current.notices.restoreRefused(
         "notes/rich.md",
@@ -495,7 +490,6 @@ describe("useCaptureRecoveryNotices", () => {
         .message,
     ).toBe(captureRecoveryMessage("notes/other.md", false));
 
-    // A later refusal is answered too: the toast again, from the same one row.
     act(() => h.result.current.hideShellError(shared.id));
     act(() => {
       took = h.result.current.notices.restoreRefused("notes/rich.md", SHARED_REFUSAL);
@@ -507,14 +501,12 @@ describe("useCaptureRecoveryNotices", () => {
     )!;
     expect(again.seen).toBe(false);
     expect(again.message).toBe(shared.message);
-    // A read in between raises nothing on its own.
     act(() => h.result.current.hideShellError(again.id));
     await act(() => h.result.current.notices.refresh());
     expect(
       recoveryRows(h).find((row) => row.identity === "capture-recovery:moment-capture-recovery-a"),
     ).toEqual({ ...again, seen: true });
 
-    // Only a dismissal or a History Restore of the change clears it.
     await act(() => h.result.current.notices.refresh());
     expect(recoveryRows(h)).toHaveLength(2);
     expect(h.bridge.clearCaptureRecovery).not.toHaveBeenCalled();
@@ -528,7 +520,6 @@ describe("useCaptureRecoveryNotices", () => {
     });
     expect(recoveryRows(h)[0]!.message).toBe(captureRecoveryMessage("notes/rich.md", true));
 
-    // Dismissed, then a later restart keeps new typing at the same file.
     act(() => h.result.current.dismissShellError(recoveryRows(h)[0]!.id));
     await waitFor(() => expect(h.bridge.clearCaptureRecovery).toHaveBeenCalledOnce());
     await waitFor(() => expect(h.bridge.getCaptureRecoveryStatus).toHaveBeenCalledTimes(2));
@@ -559,7 +550,6 @@ describe("useCaptureRecoveryNotices", () => {
     await act(async () => answers[0]!.resolve({ captureRecoveries: [RECOVERY] }));
     expect(h.result.current.shellErrors).toEqual([]);
 
-    // The new workspace's own answer still raises its notice.
     await act(async () =>
       answers[1]!.resolve({
         captureRecoveries: [{ ...RECOVERY, momentId: "moment-capture-recovery-b" }],

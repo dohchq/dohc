@@ -146,8 +146,6 @@ it("keeps an intentional outside focus destination", async () => {
   expect(document.activeElement).toBe(screen.getByText("Elsewhere"));
 });
 
-// The same rule for a menu another owner builds from the DOM, such as the
-// editor's table menu.
 describe("listenForDismiss", () => {
   function mount(root: ParentNode = document.body) {
     const trigger = document.createElement("button");
@@ -190,7 +188,6 @@ describe("listenForDismiss", () => {
     stop();
   });
 
-  // The Escape that closes an IME's candidate list is the IME's own.
   it.each([{ isComposing: true }, { keyCode: 229 }])(
     "leaves an Escape that belongs to a composition ($isComposing, $keyCode)",
     (composing) => {

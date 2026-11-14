@@ -296,7 +296,6 @@ export const chatLinksGroupInputSchema = ChatLinksInput.omit({ channelWireId: tr
   })
   .strict();
 
-// The operations declared in workspace-contracts, by the socket verb each answers.
 type Families = typeof DECLARATION_FAMILIES;
 export type DeclaredOperation = {
   [Family in keyof Families]: Families[Family][keyof Families[Family]];
@@ -613,7 +612,7 @@ export const LIVE_DOCUMENT_REASON_STEPS = {
     "Live editing can't start until the document is opened once in dohc. Open it, then Resume. A note larger than 256 KB doesn't open as a document in dohc. Make it smaller or split it, then open it.",
   "live-edit-unadmitted": "The server hasn't applied an edit. Resume tries again.",
   "conflict-parent-withheld":
-    "A conflict in the file was resolved, so live editing can't resume. Edits made in dohc may not reach people with the link.",
+    "A conflict in the file was resolved, so live editing can't resume. Edits made in dohc may not reach people with the link. A copy can go live, but it leaves out the row's kept edits. Save a recovery copy to keep them. Then duplicate the file and open the copy in dohc. If only this file was shared, share the copy too.",
   "live-history-over-budget":
     "The document's edit history is too long for the server to check, so live editing can't start. Edits still sync, but people it is shared with can't edit it live. Resume tries again now.",
   "live-start-failing":
@@ -1595,7 +1594,6 @@ const replyResultSchema = z
     warning: z.string().min(1).optional(),
   })
   .strict();
-// Try again for a conversation's stopped agent request: queued, or why not.
 const chatRetryResultSchema = z.union([
   z
     .object({ ok: z.literal(true), status: z.literal("queued"), threadId: z.string().min(1) })
@@ -1895,7 +1893,6 @@ const groupsFullResultSchema = z.discriminatedUnion("ok", [
                   title: z.string(),
                   lane: z.enum(["posts", "chat"]).optional(),
                   messageCount: z.number().int().nonnegative(),
-                  // The person's unread messages in the thread.
                   unreadCount: z.number().int().nonnegative(),
                   updatedAtMs: z.number().int().nonnegative(),
                 })
@@ -2574,7 +2571,6 @@ const automationRunFields = {
   createdAtMs: z.number().int().nonnegative(),
   updatedAtMs: z.number().int().nonnegative(),
   trigger: automationTriggerSchema,
-  // The run began under another version of the automation.
   definitionChanged: z.boolean(),
   // It failed before it started, as a chain stop or a change too large to
   // start automations for, so it cannot run again.

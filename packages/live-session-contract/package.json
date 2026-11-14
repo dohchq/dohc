@@ -13,7 +13,8 @@
     "./live-ticket": "./src/liveTicket.ts",
     "./live-frame": "./src/liveFrame.ts",
     "./limits": "./src/limits.ts",
-    "./live-connection": "./src/liveConnection.ts"
+    "./live-connection": "./src/liveConnection.ts",
+    "./named-session-check": "./src/namedSessionCheck.ts"
   },
   "scripts": {
     "test": "vitest run",

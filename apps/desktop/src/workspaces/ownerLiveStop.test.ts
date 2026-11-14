@@ -305,7 +305,7 @@ it("finishes both Stops when the first release is held and only the safe peer ma
   expect(complete.mock.calls.map(([row]) => row.document.objectId)).toEqual(["held", "safe"]);
 });
 
-// #3129: a page deleted outside dohc refuses the release's file write after the release committed.
+// A page deleted outside dohc refuses the release's file write after the release committed.
 it.each([true, false])(
   "ends a Stop whose release committed before its file write failed (committed: %s)",
   async (committed) => {
@@ -358,7 +358,6 @@ it.each([true, false])(
       expect(onError).not.toHaveBeenCalled();
       expect(release).toHaveBeenCalledOnce();
     } else {
-      // A release that did not commit is still owed: reported, and sent again on the next pass.
       expect(onComplete).not.toHaveBeenCalled();
       expect(onError).toHaveBeenCalledTimes(2);
       expect(release).toHaveBeenCalledTimes(2);

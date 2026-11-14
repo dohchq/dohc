@@ -60,7 +60,6 @@ function fixture() {
   };
   return { ...input, root, state, key, options };
 }
-/** After a run, the state directory keeps only the lock database: the staging folder is gone. */
 const afterRun = ["snapshot.lock"];
 const gib = 1024 ** 3;
 const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
@@ -192,7 +191,6 @@ describe("online relay snapshots", () => {
     const manifest = await withRelaySnapshot(
       { ...f.options, release: "test-release" },
       async (snapshot) => {
-        // Writes continue after the copy; the snapshot did not hold the writer back.
         await writer.reached(snapshot.manifest.stamp + 2);
         return openRelaySnapshot(
           await saveRelaySnapshot(snapshot, join(f.root, "saved")),

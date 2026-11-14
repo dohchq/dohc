@@ -114,7 +114,7 @@ export interface WorkspaceActivityOptions {
   // Builds a sync engine for a workspace when it is enabled and connected;
   // null keeps the workspace local-only. Called on open and on enableCloud.
   // The options (joinBootstrap) ride through from enableCloud so a freshly
-  // joined workspace's engine can be built pull-first (0P-C gate fix).
+  // joined workspace's engine can be built pull-first.
   engineFor?: (
     workspace: ActivityWorkspace,
     capture: WorkspaceEngineCapture | null,
@@ -146,7 +146,6 @@ export interface WorkspaceActivityOptions {
   onAgentRunState?: (event: AgentRunStateEvent) => void;
 }
 
-// A local agent run is any run holding the slot except the runner self-test.
 function isAgentAtWork(run: ActiveAgentRun | null): boolean {
   return run !== null && run.dispatch !== "self-test";
 }
@@ -736,7 +735,7 @@ export function createWorkspaceActivity(
   // wait for first contact so the caller can surface immediate failures.
   // joinBootstrap builds a pull-first engine for a freshly joined workspace:
   // its start() is the first pull, and no push can happen before that pull
-  // succeeds (0P-C gate fix) — so a start() failure here means "nothing
+  // succeeds — so a start() failure here means "nothing
   // arrived yet" and the join handler can roll the whole join back cleanly.
   async function enableCloud(
     workspace: ActivityWorkspace,
@@ -784,7 +783,7 @@ export function createWorkspaceActivity(
     }
   }
 
-  // Failed-join rollback (0P-C gate fix): stop and forget one workspace —
+  // Failed-join rollback: stop and forget one workspace —
   // watcher, engine, and capture — so the join handler can remove its
   // folder/registry state without tearing down every other workspace.
   async function close(

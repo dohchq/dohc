@@ -233,7 +233,6 @@ async function fixture() {
   state.killReplay = true;
   return { host, state, launch, call, write, receipt };
 }
-// The Collection page as the shell shows it: its errors as toasts, and one list item per row in Notices.
 function ShellPage({ f }: { f: Awaited<ReturnType<typeof fixture>> }) {
   const description = transactionalDescription(f.host.describe(id(1)));
   const { shellErrors, reportShellError, retryShellError, clearIdentity } = useShellError("w");
@@ -292,7 +291,6 @@ it("keeps one current Notices row and the wait in the page until the records loa
     `This Collection is waiting to reopen. Try again in ${seconds} seconds.`;
   await within(page).findByText(wait(5), {}, workerWait);
   expect(noticeRows()).toEqual([`dohc could not load Items. ${wait(5)}`]);
-  // The wait ends; trying again from the page replays, and the replay stops the worker again.
   f.state.clock += 5000;
   fireEvent.click(pageRetry());
   await waitFor(
@@ -303,10 +301,8 @@ it("keeps one current Notices row and the wait in the page until the records loa
     workerWait,
   );
   expect(within(page).queryByText(wait(5))).toBeNull();
-  // The page says the load failed, and offers the toast's Try again.
   expect(within(page).getByText("dohc could not load Items.")).toBeTruthy();
   expect(pageRetry()).toBeTruthy();
-  // The next wait is longer, and its row replaces the last one.
   fireEvent.click(toastRetry());
   await within(page).findByText(wait(10), {}, workerWait);
   expect(noticeRows()).toEqual([`dohc could not load Items. ${wait(10)}`]);

@@ -57,7 +57,6 @@ async function fixture(quota?: number) {
     f.storage.setServiceHostEnrollmentEnabled({ ...input, enabled, nowMs: 20 });
   const resume = (changes = {}) =>
     f.storage.ensureOwnedLiveDocument({ intent: "owner-resume", ...input, nowMs: 20, ...changes });
-  // What the service host does once it no longer holds the document.
   const release = (objectId = binding.objectId) =>
     f.storage.releaseServiceHostEnrollment({ workspaceId: scope.workspaceId, objectId, nowMs: 25 });
   const pause = () => {
@@ -107,7 +106,6 @@ async function fixture(quota?: number) {
       .run(shareId, workspaceId, JSON.stringify({ paths: ["docs"], versionId: null }));
     if (edit) grant(`${shareId}-edit`, shareId);
   }
-  // An active grant on the share, Edit unless `access` says otherwise.
   const grant = (grantId: string, shareId: string, access = "edit") =>
     f.raw
       .prepare(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,
@@ -135,7 +133,6 @@ it("retains original document, share and credential across pause, new invitation
     )
     .run(scope.shareId);
   f.grant("replacement-edit", "replacement");
-  // The new share leaves the Pause. Only Resume clears it.
   expect(f.enroll({ shareId: "replacement", nowMs: 30 })).toMatchObject({
     enabled: false,
     ownerStop: "pause",
@@ -183,7 +180,6 @@ it("fences a paused document's admission at once, keeps its credential until its
     }).kind,
   ).toBe("current");
   expect(f.setEnabled(false)).toMatchObject({ enabled: true, ownerStop: "pause" });
-  // The host keeps its credential while applied work settles, but nothing new is admitted.
   expect(enabled()).toBe(false);
   expect(f.authorize(bearer)).toBe("owner-1");
   expect(
@@ -280,7 +276,6 @@ it("service tokens are workspace, deployment and key bound and never authorize a
     expect(
       f.authorize(bearer, { method, pathname: `/sync/${scope.workspaceId}/hosted/${suffix}` }),
     ).toBe("owner-1");
-    // The same route outside the scoped feed is the workspace's ordinary replication.
     expect(
       f.authorize(bearer, { method, pathname: `/sync/${scope.workspaceId}/${suffix}` }),
     ).toBeNull();
@@ -320,7 +315,6 @@ it("refuses altered enrollment schema on reopen", async () => {
   expect(() => openSyncRelayStorage(f.path, f.config)).toThrow("constraints are damaged");
 });
 
-// The enrollment table as relays created it before `owner_stop`.
 const V1_SQL = `CREATE TABLE ${SERVICE_HOST_ENROLLMENTS} (
   workspace_id TEXT NOT NULL,
   object_id TEXT NOT NULL,
@@ -360,7 +354,6 @@ const V2_SQL = `CREATE TABLE ${SERVICE_HOST_ENROLLMENTS} (
   FOREIGN KEY (workspace_id) REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
   FOREIGN KEY (share_id) REFERENCES sync_relay_shares(share_id)
 ) STRICT`;
-/** Rewrites the fixture's enrollments into the v1 layout, keeping each row's enabled and retired state. */
 function downgradeToV1(
   f: Awaited<ReturnType<typeof fixture>>,
   sql = V1_SQL,
@@ -445,7 +438,6 @@ it("migrates v2 enrollments with released rows already drained", async () => {
   }
 });
 
-// The v3 layout, which required the share whose Edit grant enrolled each document.
 const V3_SQL = `CREATE TABLE ${SERVICE_HOST_ENROLLMENTS} (
   workspace_id TEXT NOT NULL,
   object_id TEXT NOT NULL,
@@ -481,9 +473,6 @@ function downgradeToV3(f: Awaited<ReturnType<typeof fixture>>, sql = V3_SQL) {
     COMMIT;`);
 }
 
-// Proves: v4 keeps every v3 enrollment as it was, its share included, lets
-// later rows name no share, and records no hosting demand for any row. A v3
-// table that is not the shipped layout is refused.
 it("migrates v3 enrollments with their shares and no hosting demand, and refuses damaged v3 storage", async () => {
   const f = await fixture(),
     damaged = await fixture();
@@ -608,7 +597,6 @@ it("migrates v1 enrollments in place and keeps the enabled document hosted", asy
           .listRetiredServiceHostEnrollments(scope.workspaceId)
           .documents.map((row) => [row.path, row.ownerStop, row.hostDrainedAtMs]),
       ).toEqual([["docs/retired.md", "retire", 25]]);
-      // A retired v1 document stays out of a new Edit share's reach, as it did before.
       expect(reopened.hasKeptServiceHostEnrollment(scope.workspaceId, "docs/retired.md")).toBe(
         true,
       );
@@ -681,7 +669,6 @@ it("retired rows stay hidden until an explicit reactivation and still reject for
       ownerUserId: "other",
     }),
   ).toBeNull();
-  // Stop fences acceptance immediately.
   expect(
     f.storage.setServiceHostEnrollmentEnabled({ ...f.input, enabled: false, retire: true }),
   ).toMatchObject({ enabled: false, retired: true, ownerStop: "retire" });
@@ -724,7 +711,6 @@ it("refuses a document's live binding once no Edit grant of its owner covers it,
   });
   expect(enabled()).toBe(false);
   expect(owner()).toEqual(refused);
-  // A View grant, or an Edit grant on another person's share, does not cover it.
   f.raw
     .prepare(
       "INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES ('overlap',?,'owner-1',?,0),('foreign',?,'other',?,0)",
@@ -799,9 +785,6 @@ const recorded = (requestedAtMs: number) => ({
   requestedAtMs,
 });
 
-// Proves: Pause fences admission and records the exact activation's retirement
-// in its own transaction. Repeating it keeps that one record. Resume records
-// the return without clearing the retirement, so nothing revives the activation.
 it("records one retirement when Pause fences the activation, and Resume leaves it pending", async () => {
   const f = await activated();
   expect(f.owner()).toBe("current");
@@ -812,7 +795,6 @@ it("records one retirement when Pause fences the activation, and Resume leaves i
   f.setEnabled(false);
   expect(f.retirement()).toEqual(recorded(20));
   expect(f.retirements()).toBe(1);
-  // Another Edit share neither clears the Pause nor admits anything.
   f.share("another", "another-edit");
   expect(f.storage.hasKeptServiceHostEnrollment(scope.workspaceId, binding.currentPath)).toBe(true);
   expect(f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)).toMatchObject(
@@ -855,13 +837,11 @@ async function kept() {
     storage.serviceHostEnrollmentCovered(
       storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)!,
     );
-  // The host retiring the kept activation once it released the document, no earlier than the retirement was requested.
   const retireKept = () =>
     f.raw
       .prepare(`UPDATE sync_relay_service_activations SET retired_at_ms=retire_requested_at_ms,retired_boundary_json='{}',state_bytes=NULL
     WHERE activation_id=?`)
       .run(restore.activationId);
-  // The same answers from the same store after a restart.
   const afterRestart = () => {
     const reopened = withHistory(openSyncRelayStorage(f.path, f.config));
     try {
@@ -876,13 +856,6 @@ async function kept() {
   return { ...f, restore, enrolled, enabled, asOwner, covered, retireKept, afterRestart };
 }
 
-// The owner's restore revoking the last Edit grant, as `beginStopRestore` does, keeping `activationId`.
-
-// A synthetic later restore of the kept note, begun at fence 8 and not yet fenced, carrying the current run's marker. The test ends it before its fence.
-
-// Proves: the owner's restore that kept the note's live session keeps it live
-// for that owner alone, through the host's release and a restart. The
-// activation does not retire, and the grant stays revoked.
 it("keeps a note live for its owner after their restore, and for no one else", async () => {
   const f = await kept();
   expect(f.retirement()).toBeNull();
@@ -906,9 +879,6 @@ it("keeps a note live for its owner after their restore, and for no one else", a
     }).kind,
   ).toBe("refused");
 });
-
-// A live sibling note under the same folder share, enrolled and with its own
-// activation, as the fixture's note has.
 
 // Proves: Stop opens a new retirement only with the host's preparation of
 // exactly that activation and restore generation, checked while the
@@ -949,11 +919,9 @@ it("retires a prepared activation only with its host's preparation and replays t
   expect(() =>
     retire({ ...candidate, lineageClaimId: "c".repeat(64), assertCurrent() {} }),
   ).toThrow(expect.objectContaining({ code: "conflict" }));
-  // The generation changed after the host prepared.
   expect(() => retire({ ...candidate, restoreFenceGeneration: 6, assertCurrent() {} })).toThrow(
     ServiceHostRetirementConflict,
   );
-  // The connection that prepared it was replaced.
   expect(() =>
     retire({
       ...candidate,
@@ -979,7 +947,6 @@ it("retires a prepared activation only with its host's preparation and replays t
     restoreFenceGeneration: binding.restoreFenceGeneration,
   });
   expect(f.storage.retirableServiceActivation(enrolled)).toBeNull();
-  // A repeated Stop, as after a lost reply, replays the open retirement without a preparation.
   expect(retire()).toMatchObject({ retired: true, acceptedCursor: fence.acceptedThrough });
   expect(f.storage.serviceActivationRetirement(enrolled)).toEqual(fence);
 });
@@ -997,10 +964,6 @@ const reclaimed = {
   ownerDemand: false,
   demandAtMs: null,
 };
-/**
- * The fixture's note, which only demand recorded at 10 keeps: the owner's
- * open when `owner`, otherwise an agent's session. Its only Edit grant ended.
- */
 async function demandedOnly(owner = false) {
   const f = await fixture();
   f.enroll();
@@ -1034,19 +997,13 @@ async function demandedOnly(owner = false) {
   };
 }
 
-/** Every enrollment row as stored. */
 const stored = (f: Fixture) =>
   f.raw.prepare(`SELECT * FROM ${SERVICE_HOST_ENROLLMENTS} ORDER BY workspace_id,object_id`).all();
 
-// Proves: the sweep reclaims a note only agents' demand keeps once nothing
-// used it for the retention period, and writes nothing before. An open live
-// connection keeps it past the period; once it closes, the same sweep
-// reclaims it. The row stays.
 it("reclaims an agent-only note idle past retention, and keeps it while a live connection is open", async () => {
   const f = await demandedOnly(),
     past = 10 + RECLAIM_RETENTION_MS + 1,
     before = stored(f);
-  // Idle for exactly the retention period is not past it.
   expect(f.sweep(past - 1)).toEqual([]);
   const release = f.connect();
   expect(f.sweep(past)).toEqual([]);
@@ -1059,9 +1016,6 @@ it("reclaims an agent-only note idle past retention, and keeps it while a live c
   expect(stored(f)).toHaveLength(before.length);
 });
 
-// Proves: a note the owner's restore kept live is never reclaimed, though
-// only demand otherwise keeps it. Once the restore keeps nothing, the same
-// note is reclaimed and its activation's retirement opens.
 it("never reclaims a note the owner's restore kept live, and reclaims it once the restore keeps nothing", async () => {
   const f = await kept(),
     past = 10 + RECLAIM_RETENTION_MS + 1;

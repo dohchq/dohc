@@ -1596,12 +1596,10 @@ it("names the person a commit is made for from the host's context, never the own
     });
     return f.host.automationClaims.next(scope.workspaceId)?.actor;
   };
-  // The owner's own commit and its agent's name the person main gave, not the owner key.
   person = "user-ice";
   expect(await commit("owner")).toEqual({ kind: "owner", userId: "user-ice" });
   agent = { depth: 0 };
   expect(await commit("agent")).toEqual({ kind: "agent", depth: 0, userId: "user-ice" });
-  // An agent the person runs themselves names its id.
   agent = { depth: 0, agentId: "terminal" };
   expect(await commit("agent-you-run")).toEqual({
     kind: "agent",
@@ -1618,7 +1616,6 @@ it("names the person a commit is made for from the host's context, never the own
     depth: 1,
     userId: "user-ice",
   });
-  // With no person known, the owner's commit names nobody.
   caller = "owner";
   person = undefined;
   expect(await commit("nobody")).toEqual({ kind: "owner" });

@@ -30,7 +30,6 @@ it("uses mutually compatible browser, relay, native and owner limits", () => {
   expect(profile.service.activation.maxCaptureBytes).toBeLessThanOrEqual(
     profile.nativeIngress.sync.policy.maxOutputBytes,
   );
-  // The supported server offers the owner's stop-access restore.
   expect(parseLiveRestoreConfig(profile.service.restore)).toMatchObject({
     maxBytes: profile.service.restore.maxBytes,
     maxEvents: profile.service.restore.maxEvents,

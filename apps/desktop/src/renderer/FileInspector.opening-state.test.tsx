@@ -33,7 +33,6 @@ setupFileInspectorTests();
 describe("markdown document opening state", () => {
   const DOC_MARKDOWN = "# Plan\n\nBase paragraph.\n";
 
-  // An engine open the test resolves by hand — the held capture chain.
   function makeHeldOpenBridge() {
     const serverDoc = markdownToYDoc(DOC_MARKDOWN);
     let settle: ((available: boolean) => void) | null = null;
@@ -155,8 +154,6 @@ describe("markdown document opening state", () => {
     await resetOrphanedDraftsAndSettle();
   });
 
-  // The user's real attempt: click the header's edit control, then type into
-  // whatever editing surface the document offers.
   async function attemptToType(user: ReturnType<typeof userEvent.setup>) {
     await user.click(screen.getByTestId("markdown-edit-toggle"));
     // Whichever surface the click produced — the mutation below produces the
@@ -183,7 +180,6 @@ describe("markdown document opening state", () => {
       "`const opening = false` in MarkdownView. The plain editor renders during the held open, the edit toggle is live, and this typing lands `writeWorkspaceText({ text: '…Base paragraph.\\nDraft!' })` — the write the binding session never sees. Asserted first so the mutation fails here, on the phantom write, not on the missing chip.",
     ).toEqual([]);
 
-    // The wait is visible and named, and the document still reads.
     expect(screen.getByTestId("markdown-open-state").textContent).toBe("Opening…");
     await waitFor(() =>
       expect(screen.getByTestId("view-markdown").textContent).toContain("Base paragraph."),
@@ -195,11 +191,11 @@ describe("markdown document opening state", () => {
     // through it (the title is frontmatter in the canonical Y.Doc) instead of
     // to disk.
     // `settle` is created inside the openEngineYDocSession executor, but
-    // `opening` is derived during render (useEngineDoc.ts:189), so
+    // `opening` is derived during render (in the `useEngineDoc` hook), so
     // markdown-open-state is in the DOM one commit before the bridge is ever
     // called. Resolving on that element and then calling settle?.(…) can
     // silently no-op, and the test burns its whole window waiting for a state
-    // nobody moved -- #590 shape 2, the same trap as the source toggle below.
+    // nobody moved, the same trap as the source toggle below.
     // Wait for the call that creates settle; never optional-chain it away.
     await waitFor(() => expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1));
     bind();
@@ -223,8 +219,6 @@ describe("markdown document opening state", () => {
     await user.click(screen.getByTestId("markdown-edit-toggle"));
     await typeInMarkdownEditor(user, await screen.findByTestId("markdown-editor"), "Draft!");
     expect(bridge.bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
-    // The version switch: same mount, same pending draft, same armed timer.
-    // The second open stays held — the "Opening…" window under test.
     view.rerender(
       <FileInspector
         workspaceId="ws-1"
@@ -263,9 +257,10 @@ describe("markdown document opening state", () => {
       expect(await navigator.clipboard.readText()).toBe("# Plan\n\nBase paragraph.\nDraft!"),
     );
 
-    // The chip shows beside "Opening…", not underneath it: the header slot
-    // used to be either/or, hiding any state in this window. Recovery has its
-    // own chip state — "Couldn't save" would invite a retry that cannot help.
+    // The chip shows beside "Opening…", not underneath it: an either/or
+    // header slot would hide any state in this window. Recovery has its
+    // own chip state, because "Couldn't save" would invite a retry that
+    // cannot help.
     expect(screen.queryByTestId("markdown-open-state")).not.toBeNull();
     expect(screen.getByTestId("markdown-save-state").getAttribute("data-state")).toBe("recovery");
     expect(screen.getByTestId("markdown-save-state").textContent).toBe("Edit set aside");
@@ -293,7 +288,6 @@ describe("markdown document opening state", () => {
       expect(codeEditorText(screen.getByTestId("markdown-editor"))).toBe(DOC_MARKDOWN),
     );
 
-    // Dismiss retires the notice, and the save pipeline is healthy again.
     await user.click(screen.getByTestId("recovery-dismiss"));
     await user.click(screen.getByTestId("recovery-dismiss-confirm"));
     expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
@@ -308,15 +302,12 @@ describe("markdown document opening state", () => {
     );
   });
 
-  // A second reopen with the first notice still up must not
-  // destroy the first draft. Both stay, oldest first, each with its own copy.
   it("keeps both set-aside drafts when a second reopen lands before the first is resolved", async () => {
     const user = userEvent.setup();
     const bridge = makeHeldOpenBridge();
     vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
     const view = await armDraftThenReopen(user, bridge);
 
-    // The reopen resolves, the user types again, and a third open starts.
     bridge.answerNotEngineBacked();
     await waitFor(() => expect(screen.queryByTestId("markdown-open-state")).toBeNull());
     await typeInMarkdownEditor(user, screen.getByTestId("markdown-editor"), "More!");
@@ -573,10 +564,6 @@ describe("markdown document opening state", () => {
     await waitFor(async () => expect(await navigator.clipboard.readText()).toBe(newestBody));
   });
 
-  // Overlapping writes. Autosave A awaiting its IPC and a
-  // later B must not overlap — if B settles first, a waiter releases while
-  // A's older temp-file rename is still pending over newer content. One
-  // write in flight, ever; the next one waits and then reads the newer text.
   it("serializes overlapping autosaves — a second write waits for the first to land", async () => {
     useAutoAdvancingFakeTimers();
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
@@ -602,8 +589,6 @@ describe("markdown document opening state", () => {
     await advanceAutosaveDebounce();
     await waitFor(() => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1));
 
-    // The user keeps typing while write one is still in flight; a second
-    // autosave arms and fires.
     await typeInMarkdownEditor(user, screen.getByTestId("markdown-editor"), "Two");
     await advanceAutosaveDebounce();
     expect(
@@ -626,17 +611,6 @@ describe("markdown document opening state", () => {
     ]);
   });
 
-  // Recovery follows the PATH, not the file kind. An
-  // extension-changing rename remaps a markdown draft onto the text view,
-  // and Copy/Dismiss must exist there too — a marker with no controls
-  // strands the text behind a permanent dirty dot.
-
-  // The queue and the obligation. Writer A is in flight,
-  // writer B is parked in writeDraftNow's own wait, and the shell's flush
-  // awaits the slot. When A lands, B resumes first, claims the slot, and
-  // clears `unsavedDraft` — a single-await flush would return right there,
-  // and the switch it gates would proceed while B lands the previous
-  // version's text.
   it("the flush outlasts a queued writer that claims the slot when the first write lands", async () => {
     useAutoAdvancingFakeTimers();
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
@@ -674,7 +648,6 @@ describe("markdown document opening state", () => {
     await typeInMarkdownEditor(user, await screen.findByTestId("markdown-editor"), "One");
     await advanceAutosaveDebounce();
     await waitFor(() => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1));
-    // B arms and fires while A holds the slot: B is parked in the queue.
     await typeInMarkdownEditor(user, screen.getByTestId("markdown-editor"), "Two");
     await advanceAutosaveDebounce();
     expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
@@ -684,7 +657,6 @@ describe("markdown document opening state", () => {
     const flushPromise = flush!().then(() => {
       flushSettled = true;
     });
-    // A lands; B claims the slot and issues its own write.
     await act(async () => {
       releaseA();
       await heldA;
@@ -709,10 +681,6 @@ describe("markdown document opening state", () => {
     expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2);
   });
 
-  // A set-aside draft on a path whose read fails (a rename
-  // raced an I/O failure) must still be copyable — the error branch is a
-  // state the marker and close warning point into, so it must offer the
-  // actions they demand.
   it("offers recovery on the failed-read branch", async () => {
     const user = userEvent.setup();
     const bridge = makeHeldOpenBridge();

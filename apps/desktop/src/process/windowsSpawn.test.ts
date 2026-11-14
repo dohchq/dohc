@@ -140,14 +140,9 @@ describe("resolveSpawnCommand", () => {
   });
 });
 
-// processDescendantsWin32 was consolidated into posixSpawn.ts's own
-// processDescendants (it took its process-table reader as an argument, so
-// the tree-walk arithmetic it wrapped was byte-identical to the POSIX
-// version — see posixSpawn.test.ts's own "processDescendants" suite, which
-// exercises the same arithmetic this block used to, and windowsSpawn.ts's
-// module comment for why the reader is the only genuinely platform-specific
-// part). This module now exports only readProcessTableWithPowershell, the
-// Windows-specific text source.
+// Both platforms share posixSpawn.ts's processDescendants, which its own
+// "processDescendants" suite in posixSpawn.test.ts covers. windowsSpawn.ts
+// supplies only readProcessTableWithPowershell, the Windows text source.
 
 const describeWin32 = process.platform === "win32" ? describe : describe.skip;
 
@@ -235,7 +230,6 @@ describeWin32("real .cmd shim topology (win32)", () => {
     const killed = await killChildTreeWin32(child);
     expect(killed).toBe(true);
 
-    // The grandchild — not just the cmd.exe wrapper — must be dead.
     const gone = await new Promise<boolean>((resolve) => {
       const check = () => {
         try {

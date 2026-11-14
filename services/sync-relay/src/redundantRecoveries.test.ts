@@ -19,7 +19,6 @@ const MARKDOWN = "# Plan\n\nKept from the stopped session.\n";
 const MOMENT = `${RELEASED_COPY_MOMENT_PREFIX}${"c".repeat(64)}`;
 const OBJECT = `released-copy-object-${"c".repeat(64)}`;
 
-/** A copy of retained work's creation as an owner device publishes it, at `path` and `recordedAtMs`. */
 function creation(path: string, recordedAtMs: number, overrides: Record<string, unknown> = {}) {
   return {
     originSeq: 0,
@@ -101,7 +100,6 @@ describe("a copy of retained work published by two owner devices", () => {
     expect(first).not.toHaveProperty("redundantRecoveries");
     const acceptedRelaySeq = Number((f.projected().log[0] as { relay_seq: number }).relay_seq);
 
-    // The other device chose another path and recorded at another time: still the same copy.
     const second = await f.push("device-b", creation("notes/plan (recovered 2).md", 20));
     const redundant = [
       {
@@ -114,7 +112,6 @@ describe("a copy of retained work published by two owner devices", () => {
     ];
     expect(second).toMatchObject({ inserted: 1, redundantRecoveries: redundant });
     expect(second).not.toHaveProperty("refusals");
-    // A retry after a lost answer derives the same result.
     expect(await f.push("device-b", creation("notes/plan (recovered 2).md", 20))).toMatchObject({
       inserted: 0,
       skipped: 1,
@@ -128,7 +125,6 @@ describe("a copy of retained work published by two owner devices", () => {
     ]);
     expect(projected.paths).toEqual([{ path: "notes/plan (recovered).md" }]);
     expect(projected.moments).toEqual([{ relay_seq: acceptedRelaySeq }]);
-    // The first device's own retry names nothing redundant.
     expect(await f.push("device-a", creation("notes/plan (recovered).md", 10))).not.toHaveProperty(
       "redundantRecoveries",
     );
@@ -164,8 +160,8 @@ describe("a copy of retained work published by two owner devices", () => {
     expect(other).not.toHaveProperty("redundantRecoveries");
   });
 
-  // Sol's Ruling A: a copy credits the authors of the retained work it keeps,
-  // and only the same authorship names the same copy.
+  // A copy credits the authors of the retained work it keeps, and only the
+  // same authorship names the same copy.
   const authors = [
     { kind: "agent", agentId: "earlier-agent", onBehalfOf: "owner", depth: 1 },
     { kind: "agent", agentId: "trip-agent", onBehalfOf: "owner", depth: 1 },

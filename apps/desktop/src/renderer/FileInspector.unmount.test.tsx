@@ -42,7 +42,6 @@ import {
 } from "./FileInspector.draft-fixture";
 import { type DraftFlush } from "./useAutosavedTextDraft";
 
-// A CSV's Table or Raw choice in its actions.
 const csvMode = (name: "Table" | "Raw") =>
   within(screen.getByTestId("csv-raw-toggle")).getByRole("radio", { name });
 import { deferred } from "../testing/deferred";
@@ -93,10 +92,10 @@ async function settleUserEventAction<T>(pending: Promise<T>): Promise<T> {
 // WYSIWYG ProseMirror div in MarkdownEditor. Wait for the CodeMirror host when
 // a test needs source mode. The test ids are pinned by e2e and must not change.
 
-// The P1 trap: typing arms an 800ms autosave, and unmounting
-// (tab close, tab switch — the inspector is keyed by the active tab) used to
-// clear the timer without flushing, silently dropping the draft. The unmount
-// cleanup must fire the pending draft through writeWorkspaceText.
+// Typing arms an 800ms autosave, and unmounting (tab close, tab switch: the
+// inspector is keyed by the active tab) must not clear the timer without
+// flushing, which would silently drop the draft. The unmount cleanup must
+// fire the pending draft through writeWorkspaceText.
 describe("markdown editor unmount flush", () => {
   const bridgeMock = {
     platform: "linux" as const,
@@ -277,9 +276,8 @@ describe("markdown editor unmount flush", () => {
   });
 
   it("offers a read-only source view for read-only markdown (truncated reads)", async () => {
-    // codex P3 follow-up: a read-only doc can't edit, but viewing raw source
-    // is still a view. The palette toggle opens the read-only source editor and
-    // never writes.
+    // A read-only doc can't edit, but viewing raw source is still a view.
+    // The palette toggle opens the read-only source editor and never writes.
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "# Big\n",
       truncated: true,
@@ -320,7 +318,6 @@ describe("markdown editor unmount flush", () => {
     await user.click(editor);
     await user.type(editor, "Draft!");
     await user.type(screen.getByLabelText("Property tags value"), ", nara");
-    // A shortcut changes the tab with focus still in the list.
     view.unmount();
 
     expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
@@ -341,7 +338,6 @@ describe("markdown editor unmount flush", () => {
     await screen.findByTestId("view-markdown");
 
     expect(screen.getByTestId("truncated-notice")).toBeTruthy();
-    // A truncated (read-only) doc never exposes editable inline properties.
     expect(screen.queryByTestId("properties-panel")).toBeNull();
     const editToggle = screen.getByTestId("markdown-edit-toggle") as HTMLButtonElement;
     expect(editToggle.getAttribute("aria-disabled")).toBe("true");
@@ -351,11 +347,6 @@ describe("markdown editor unmount flush", () => {
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
   });
 
-  // The supported sequence, not simultaneous typing: one pane's autosave is in
-  // flight, focus hands over, and the peer types. The peer's WYSIWYG edit is
-  // LAZY, so the shared body still reads as the text the older write is
-  // landing — and reporting that write as saved would strand the edit with no
-  // timer and no dirty flag to bring it back.
   it("keeps a peer's lazy WYSIWYG edit alive when an older write lands", async () => {
     const path = "shared-wysiwyg-peer-write.md";
     bridgeMock.readWorkspaceText.mockResolvedValue({
@@ -906,9 +897,6 @@ describe("markdown editor unmount flush", () => {
     });
   });
 
-  // The same early edit in a duplicate pane whose read answered after a newer
-  // one. The shared document refuses the older read, so saving the edit would
-  // put text built on the older read under the newer content hash.
   it("sets aside an early edit built on a read the document already moved past", async () => {
     type ReadResult = { text: string; truncated: false; contentHash: string };
     const newerHash = "2".repeat(64);

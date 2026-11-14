@@ -2409,7 +2409,6 @@ mod tests {
         let owner = Ydoc::wire();
         owner.apply(&checkpoint).unwrap();
         let mut typed = type_drafts(&mut store, &observed, &owner, 1, &["one", "two", "three"]);
-        // As migration 100 leaves every row that waits at the upgrade.
         store
             .write_with(&NoFaults, |tx| {
                 tx.execute(

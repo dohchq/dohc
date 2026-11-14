@@ -198,7 +198,7 @@ impl Default for Deadlines {
             request: Duration::from_secs(10),
             queue: Duration::from_secs(10),
             // A cold start made the first sync after 30 s idle take about 2 s on a
-            // Windows desktop (#3356). An idle reader holds about 66 MiB.
+            // Windows desktop. An idle reader holds about 66 MiB.
             idle: Duration::from_secs(10 * 60),
         }
     }
@@ -398,7 +398,7 @@ fn drive(shared: Arc<Shared>, config: Config, d: Deadlines) {
             wait_event(w, &shared, Instant::now() + d.request)?.ok_or(Failure::Crashed)
         })();
         // A crash before the request reached the process is not the note's
-        // crash, and must not use up its proof's crash limit (#3575).
+        // crash, and must not use up its proof's crash limit.
         let result = result.map_err(|failure| match failure {
             Failure::Crashed if phase != "response" => Failure::NotStarted,
             failure => failure,

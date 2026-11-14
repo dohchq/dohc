@@ -91,10 +91,8 @@ describe("JoinSyncedWorkspace", () => {
 
     await user.type(passphrase, "shared protected-files passphrase");
     expect(passphrase.getAttribute("aria-invalid")).toBeNull();
-    // The first folder holds the earlier attempt's files: Join asks for another.
     await user.type(passphrase, "{Enter}");
     expect(bridgeMock.cloudJoinWorkspace).toHaveBeenCalledTimes(1);
-    // The Enter that moved focus to the chip does not also press it.
     expect(bridgeMock.pickWorkspaceRoot).toHaveBeenCalledTimes(1);
     const chip = screen.getByTestId("join-choose-folder");
     expectFieldError(chip, "join-choose-folder-error", "Choose an empty folder.");
@@ -164,7 +162,6 @@ describe("JoinSyncedWorkspace", () => {
     expect(bridgeMock.cloudStatus).toHaveBeenCalledTimes(2);
   });
 
-  // The in-flight join cannot be backed out of silently.
   it("disables Back while a join is in flight and ignores a resolve after unmount", async () => {
     const user = userEvent.setup();
     const onReady = vi.fn();
@@ -198,7 +195,6 @@ describe("JoinSyncedWorkspace", () => {
     const user = userEvent.setup();
     bridgeMock.cloudStatus
       .mockResolvedValueOnce({ connected: false }) // panel gate
-      // Embedded CloudLogin check: a known server address prefills its field.
       .mockResolvedValueOnce({ connected: false, serverUrl: "https://dohc.example.test" })
       .mockResolvedValue({
         connected: true,

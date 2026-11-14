@@ -59,7 +59,6 @@ function expectNoStore(response: Response) {
   expect(response.headers.get("pragma")).toBe("no-cache");
 }
 
-// A page that cannot go back to the agent: no form, no redirect, no CORS.
 async function expectErrorPage(response: Response, status: number) {
   expect(response.status).toBe(status);
   expect(response.headers.get("content-type")).toBe("text/html; charset=utf-8");
@@ -127,7 +126,6 @@ async function stack() {
     clients.push(client);
     return client;
   }
-  // A code for `clientId`, allowed on the consent page.
   async function code(clientId: string, redirectUri = LOOPBACK_REDIRECT) {
     const { verifier, challenge } = pkce();
     const form = await consentForm(
@@ -239,10 +237,12 @@ it("serves the consent page with its own headers and a cookie for this request o
   expect(page.headers.get("x-content-type-options")).toBe("nosniff");
   expect(page.headers.get("cache-control")).toBe("private, no-store");
   expect(page.headers.has("access-control-allow-origin")).toBe(false);
-  // Host-only, for the request's remaining life: ten minutes on this fixed clock.
-  expect(page.headers.get("set-cookie")).toMatch(
-    /^__Host-dohc_consent_[A-Za-z0-9_-]{16}=[A-Za-z0-9_-]{43}; Path=\/; Max-Age=600; Secure; HttpOnly; SameSite=Strict$/u,
+  const requestLifetimeSeconds = 10 * 60;
+  const hostOnlyConsentCookie = new RegExp(
+    String.raw`^__Host-dohc_consent_[A-Za-z0-9_-]{16}=[A-Za-z0-9_-]{43}; Path=/; Max-Age=${requestLifetimeSeconds}; Secure; HttpOnly; SameSite=Strict$`,
+    "u",
   );
+  expect(page.headers.get("set-cookie")).toMatch(hostOnlyConsentCookie);
   const form = await consentForm(page);
   expect(form.cookie.split("=")[1]).toBe(form.secret);
   expect(form.html).toContain('<meta name="referrer" content="same-origin">');

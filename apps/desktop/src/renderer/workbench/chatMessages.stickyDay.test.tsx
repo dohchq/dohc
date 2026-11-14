@@ -56,7 +56,6 @@ class FakeObserver {
   constructor(private readonly callback: IntersectionObserverCallback) {
     FakeObserver.current = this;
   }
-  // A divider whose top sits `top` px below the pane's top edge.
   deliver(target: Element, top: number) {
     const entry = {
       target,
@@ -144,7 +143,6 @@ describe("ChatMessageList pinned day", () => {
       formatChatDay(messages[1]!.createdAtMs),
     );
 
-    // Scrolled back so the divider is fully in view: the label hides.
     observer.deliver(divider, 40);
     expect(screen.queryByTestId("list-sticky-day")).toBeNull();
   });
@@ -165,7 +163,6 @@ describe("ChatMessageList pinned day", () => {
     const nextMark = next.querySelector<HTMLElement>("[data-day-mark]")!;
     expect(observer.observed.has(nextMark)).toBe(true);
 
-    // The first day's divider is above the pane, its rows still at the top.
     observer.deliver(first, -60);
     showTop(0);
     expect(screen.getByTestId("list-sticky-day").textContent).toBe(
@@ -177,7 +174,6 @@ describe("ChatMessageList pinned day", () => {
     observer.deliver(nextMark, -1);
     expect(screen.queryByTestId("list-sticky-day")).toBeNull();
 
-    // It rises past the line itself and becomes the pinned day.
     observer.deliver(next, -1);
     showTop(1);
     expect(screen.getByTestId("list-sticky-day").textContent).toBe(
@@ -242,7 +238,6 @@ describe("ChatMessageList pinned day", () => {
       formatChatDay(days[0]!.createdAtMs),
     );
 
-    // The next day's row unmounts, and its mark leaves the observer.
     const shorter = days.slice(0, 2);
     rerender(
       <ChatMessageList testIdPrefix="list" messages={shorter} loading={false} emptyLabel="Empty" />,

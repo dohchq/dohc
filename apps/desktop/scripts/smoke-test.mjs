@@ -56,7 +56,7 @@ const SMOKE_DURATION_MS = 8000;
 // (src/shutdownBudgets.ts) before it writes that line.
 const QUIT_LINE_LIMIT_MS = 15_000;
 // After the line, Chromium waits for its helper processes to exit. On a loaded
-// Mac that took from seconds to over 90 s (#2159), so the smoke stops the
+// Mac that took from seconds to over 90 s, so the smoke stops the
 // process itself instead of failing.
 const TEARDOWN_GRACE_MS = 10_000;
 let sentTerm = false;

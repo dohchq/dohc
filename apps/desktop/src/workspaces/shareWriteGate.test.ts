@@ -6,8 +6,6 @@ import {
   workspaceWriteRefusal,
 } from "./shareWriteGate";
 
-// A registry entry's share-view marker, in the shape the registry stores it:
-// the pinned grant under `grantedSelector`, which is where the level lives.
 function marker(access: ShareAccess | "unreadable", ended = false) {
   return {
     shareId: "share-1",
@@ -19,8 +17,6 @@ function marker(access: ShareAccess | "unreadable", ended = false) {
   };
 }
 
-// The rule main's `assertWritableWorkspace` and the capture gate both ask.
-// Both fail in a direction that costs something, so every input is stated.
 describe("shareViewTakesLocalWrites", () => {
   it("takes writes at edit, and only at edit", () => {
     const levels: ShareAccess[] = ["view", "comment", "edit"];
@@ -76,8 +72,6 @@ describe("workspaceWriteRefusal", () => {
   });
 
   it("refuses a marker whose value was lost", () => {
-    // PRESENCE, not truthiness: a stored `shareView: null` is a share view
-    // whose marker lost its value, not a workspace that never had one.
     expect(
       workspaceWriteRefusal(null),
       "`?? null` reads a damaged marker as an ordinary workspace",

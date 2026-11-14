@@ -420,7 +420,6 @@ test("the app overlay follows the Cloudflare overlay, and only behind Cloudflare
     "snapshots",
     "up",
   ]);
-  // Direct and private access keep their gateways, even with an app domain served by the operator's own proxy.
   for (const changed of [
     { DOHC_BEHIND_CLOUDFLARE: "0" },
     { DOHC_BEHIND_CLOUDFLARE: undefined },
@@ -466,7 +465,6 @@ test("the app overlay refuses a partial configuration before any Docker action",
         `${name}=${value}`,
       );
     }
-    // A certificate that no gateway would use is refused too, so a forgotten setting does not look configured.
     const other =
       name === "DOHC_APP_TLS_CERT_FILE" ? "DOHC_APP_TLS_KEY_FILE" : "DOHC_APP_TLS_CERT_FILE";
     for (const changed of [{ DOHC_BEHIND_CLOUDFLARE: "0" }, { DOHC_SHARE_WEB_APP_DOMAIN: "" }]) {
@@ -625,7 +623,6 @@ test(
     const docker = (args, allowFailure) => run("docker", args, allowFailure);
     let networkCreated = false;
     try {
-      // A local CA signs the app certificate, and clients trust that CA explicitly.
       const file = (name) => join(scratch, name);
       run("openssl", [
         "req",
@@ -707,7 +704,6 @@ test(
         );
         return file(name);
       };
-      // Compose itself refuses the overlay without the key file setting.
       const partial = docker(
         composeArgs(
           envFile("partial", { ...values, DOHC_APP_TLS_KEY_FILE: undefined }),

@@ -33,11 +33,9 @@ target-*/
 /.artifacts/
 /.codex-artifacts/
 # Every log a tool tees into the repo root, which is where the gates write
-# theirs: `pr-engine-gate.log`, the macOS evidence run's `macos-*.log`, and
-# `codex-*.log`. Ignoring the class keeps the gates out of the worktree they
-# measure — the provenance row fails a tree that changes mid-run, and a log
-# `tee` creates as the run starts would otherwise race that check or stamp a
-# pristine CI checkout `dirty(N)`.
+# theirs. The provenance row fails a tree that changes mid-run, so a log that
+# `tee` creates as the run starts would race that check or stamp a pristine CI
+# checkout `dirty(N)`.
 /*.log
 
 # Read-only external source clones for agent exploration.

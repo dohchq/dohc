@@ -185,7 +185,6 @@ it("offers a change that couldn't be saved to the reopened share's window, not t
 
   expect(view.sent).toEqual([]);
   const answerId = (reopened.sent[0] as { answerId: string }).answerId;
-  // The old window can't take it first.
   expect(delivery.update(view, { action: "claim", answerId, ...old })).toBe(false);
   expect(delivery.update(reopened, { action: "claim", answerId, ...current })).toBe(true);
 });

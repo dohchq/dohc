@@ -1,4 +1,4 @@
-//! An outside save folds only what changed into a live note (#3741).
+//! An outside save folds only what changed into a live note.
 
 use super::*;
 
@@ -36,8 +36,6 @@ fn body_json(doc: &Ydoc) -> Value {
     xml_json(&txn, XmlOut::Fragment(body))
 }
 
-/// Folds `after` over a note that held `before`, and checks the note reads
-/// and is shaped exactly as a fresh fold of `after`. Returns the update.
 fn fold_over(before: &str, after: &str) -> Vec<u8> {
     let doc = folded(before);
     let update = doc
@@ -91,7 +89,7 @@ fn a_hundred_block_note_saved_often_grows_by_what_changed() {
             .expect(&markdown);
     }
     let grown = clock(&doc) - fresh;
-    // Replacing the body grew the note by all of it on every save (#3741).
+    // Replacing the whole body would grow the note by all of it on every save.
     assert!(grown < fresh / 5, "fresh {fresh}, 20 saves added {grown}");
 }
 
@@ -234,8 +232,8 @@ fn folding_over_another_note_reads_as_a_fresh_fold() {
     }
 }
 
-/// #3746 compared blocks as JSON. It stays here as the oracle the direct
-/// comparison must agree with, or else treat the block as changed.
+/// Compares blocks as JSON. It is the oracle the direct comparison must agree
+/// with, or else treat the block as changed.
 fn json_same<A: ReadTxn, B: ReadTxn>(old_txn: &A, old: &XmlOut, new_txn: &B, new: &XmlOut) -> bool {
     fn plain<T: ReadTxn>(txn: &T, node: &XmlOut) -> bool {
         match node {
@@ -271,8 +269,6 @@ fn with_history(markdown: &str) -> Option<Ydoc> {
     Some(doc)
 }
 
-/// Compares every block of `old` with every block of `new` both ways, and
-/// counts the pairs judged different and the same.
 fn agree(old: &Ydoc, new: &Ydoc, tally: &mut [usize; 2]) {
     let (old_blocks, new_blocks) = (blocks_of(old), blocks_of(new));
     let (old_txn, new_txn) = (old.doc.transact(), new.doc.transact());
@@ -291,8 +287,6 @@ fn agree(old: &Ydoc, new: &Ydoc, tally: &mut [usize; 2]) {
     }
 }
 
-/// Blocks that differ from a neighbour by one thing: tag, an attribute, a
-/// child, or a run's text or formatting.
 const NEAR_MISSES: &[&str] = &[
     "Kept.",
     "Kept!",
@@ -373,8 +367,6 @@ fn the_direct_comparison_decides_as_the_json_one_did() {
             agree(&old, new, &mut tally);
         }
     }
-    // Every Markdown contract source that folds, against itself and the
-    // next two.
     let corpus: Value = serde_json::from_str(include_str!(
         "../../../../tools/rust-engine-program/nested-markdown-contract.json"
     ))
@@ -403,8 +395,6 @@ fn the_direct_comparison_decides_as_the_json_one_did() {
     assert!(different > same, "different {different}, same {same}");
 }
 
-/// Folds `markdown` twice, changes the first block of one copy with `old` and
-/// of the other with `new`, and compares the two: (JSON, direct).
 fn judged(markdown: &str, old: impl Fn(&Ydoc), new: impl Fn(&Ydoc)) -> (bool, bool) {
     let (old_doc, new_doc) = (folded(markdown), folded(markdown));
     old(&old_doc);
@@ -424,7 +414,6 @@ fn set_attribute(doc: &Ydoc, key: &str, value: Any) {
     element.insert_attribute(&mut doc.doc.transact_mut(), key, value);
 }
 
-/// Empties the first block's text and writes it again with `write`.
 fn rewrite_text(doc: &Ydoc, write: impl Fn(&yrs::XmlTextRef, &mut yrs::TransactionMut)) {
     let text = doc.richdoc_block_text(0).unwrap();
     let mut txn = doc.doc.transact_mut();
@@ -498,9 +487,7 @@ fn where_the_comparisons_could_disagree_the_direct_one_keeps_nothing_json_would_
     };
     let (json, direct) = judged("Kept.\n", split_bold, whole_bold);
     assert_eq!(direct, json);
-    // The same text with and without formatting.
     assert_eq!(judged("Kept.\n", whole_bold, unchanged), (false, false));
-    // A plain value embedded in the text against the same digits as text.
     let embed = |doc: &Ydoc| {
         rewrite_text(doc, |text, txn| {
             text.insert_embed(txn, 0, Any::Number(7.0));
@@ -517,7 +504,6 @@ fn fold_work(doc: &Ydoc, markdown: &str) -> FoldWork {
     FOLD_WORK.with(|work| work.get())
 }
 
-/// Every block and text node in a note's body.
 fn nodes(doc: &Ydoc) -> usize {
     fn count<T: ReadTxn>(txn: &T, node: &XmlOut) -> usize {
         match node {
@@ -585,7 +571,6 @@ fn the_direct_comparison_never_keeps_a_block_holding_a_shared_type_or_value() {
         let branch = yrs::branch::BranchPtr::from(AsRef::<yrs::branch::Branch>::as_ref(&paragraph));
         yrs::ArrayRef::from(branch).push_back(&mut txn, 7);
     }
-    // A heading whose level is a shared array.
     let attribute = folded("## Kept.\n");
     let XmlOut::Element(element) = blocks_of(&attribute).remove(0) else {
         panic!("not a heading")
@@ -594,7 +579,6 @@ fn the_direct_comparison_never_keeps_a_block_holding_a_shared_type_or_value() {
         let mut txn = attribute.doc.transact_mut();
         element.insert_attribute(&mut txn, "level", yrs::ArrayPrelim::from([2]));
     }
-    // A paragraph whose text is an embedded array.
     let embed = folded("Kept.\n");
     let text = embed.richdoc_block_text(0).unwrap();
     {

@@ -111,7 +111,6 @@ function cellText(value: unknown): string {
   return String(value);
 }
 
-// The text an edit starts from: a NULL cell starts empty.
 function editText(value: unknown): string {
   return value === null || value === undefined ? "" : String(value);
 }
@@ -120,8 +119,6 @@ function isNumericColumn(column: Column): boolean {
   return /int|real|num|floa|doub|dec/.test(column.type.toLowerCase());
 }
 
-// A column's type as an icon: numbers, text, or bytes. An untyped column has
-// none.
 function typeIcon(column: Column): LucideIcon | null {
   if (isNumericColumn(column)) return Hash;
   const type = column.type.toLowerCase();
@@ -171,7 +168,6 @@ function mergeEditPage(snapshot: Snapshot, result: DatabaseEditResult): Snapshot
   return changed ? { ...snapshot, tables } : snapshot;
 }
 
-// The snapshot with a pending write's value in its cell.
 function withWrite(snapshot: Snapshot, write: CellWrite): Snapshot {
   const identity = editIdentity(write.key);
   const tables = snapshot.tables.map((table) =>
@@ -409,7 +405,6 @@ export function DatabaseStudioView(props: {
     [onError],
   );
 
-  // An unchanged draft writes nothing.
   function commitEdit(table: Table, draft: string) {
     if (!editing) return;
     setEditing(null);

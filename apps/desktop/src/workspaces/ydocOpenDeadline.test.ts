@@ -173,7 +173,6 @@ describe("the document open's capture-chain hold", () => {
       await vi.advanceTimersByTimeAsync(42_000);
       expect(daemon.methods.slice(methodsBefore)).toContain("versions.active");
       expect(providerOpens).toBe(1);
-      // Another file was captured; this one was not.
       daemon.wake("capture.importProgress");
       await vi.advanceTimersByTimeAsync(0);
       expect(providerOpens).toBe(2);
@@ -242,14 +241,12 @@ describe("the document open's capture-chain hold", () => {
         } else {
           expect(opened).toBeInstanceOf(DaemonRefusalError);
           expect(isEngineWorkspaceOpenRefusedError(opened)).toBe(true);
-          // At the deadline the open checks once more, and is refused again.
           expect(providerOpens).toBe(outcome === "deadline" ? 2 : 1);
         }
         expect(sleep).not.toHaveBeenCalled();
         expect(daemon.handlers.size).toBe(0);
         expect(workspaceOpens()).toBe(opensBefore);
         captured = true;
-        // A finished or refused open must release the capture chain.
         await engine.listMoments({ limit: 1 });
       } finally {
         sessions.beginShutdown();
@@ -308,7 +305,6 @@ describe("the document open's capture-chain hold", () => {
     );
     const engine = captureWith(root, sessions);
     engine.start();
-    // Opens the store while the daemon is healthy.
     await engine.flush();
     daemonDown = true;
 
@@ -405,7 +401,7 @@ describe("the document open's capture-chain hold", () => {
       expect((refusal as Error).message).toContain(
         `The ydoc.open deadlineMs limit of ${YDOC_OPEN_DEADLINE_MS}ms was reached`,
       );
-      // The surface answer #533 requires: read-only with a retry, never the
+      // The surface answer must be read-only with a retry, never the
       // writable plain editor.
       expect(isEngineWorkspaceOpenRefusedError(refusal)).toBe(true);
       await queued;
@@ -426,18 +422,14 @@ describe("the document open's capture-chain hold", () => {
     //
     // So the first open is read-only, which is right, and then "Try again"
     // meets `ydoc-session-busy` — the daemon saying it holds this document.
-    // Classified as an ordinary refusal, that answered the retry with the
-    // writable plain editor over a daemon-held canonical Y.Doc: the double
-    // writer #533 exists to prevent, reached by way of the fix for #616.
+    // Classified as an ordinary refusal, that would answer the retry with the
+    // writable plain editor over a daemon-held canonical Y.Doc: a double
+    // writer.
     const root = await createTestScratch("dohc-ydoc-deadline-");
     await write(root, "note.md", "hello\n");
     const loopback = new VersionedLoopbackEngine();
-    // A daemon that takes the lease and then cannot get its reply out. It is
-    // stateful on purpose: the busy refusal is a consequence of the first open
-    // landing, not a canned answer, so a fake that never took the session
-    // could not produce it either.
     let leaseHeld = false;
-    const client = {
+    const daemonWithBlockedOpenReply = {
       close: () => undefined,
       onEvent: () => () => undefined,
       async sendRequest(request: Request): Promise<Response> {
@@ -471,7 +463,9 @@ describe("the document open's capture-chain hold", () => {
         return daemonCaptureLifecycleAnswer(request) ?? (await loopback.sendRequest(request));
       },
     };
-    const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => daemonWithBlockedOpenReply,
+    });
     const engine = createWorkspaceEngineCapture({
       workspaceId: WORKSPACE_ID,
       rootPath: root,
@@ -491,8 +485,6 @@ describe("the document open's capture-chain hold", () => {
       expect(await opening).toBeInstanceOf(YdocOpenTimedOutError);
       expect(leaseHeld).toBe(true);
 
-      // "Try again": a fresh open of the same document, which the daemon now
-      // refuses because it holds the session the first attempt took.
       const retry = await engine
         .openYDocSession({ path: "note.md", onRemoteUpdate: () => undefined })
         .catch((error: unknown) => error);
@@ -578,7 +570,7 @@ describe("the document open's capture-chain hold", () => {
   // daemon still holds the restart-safe session, and the refusal thrown in its
   // place is one main answers with a plain `available:false`. The renderer
   // hands the user a writable plain editor over a session the engine has not
-  // released: the double writer #533 and #567 exist to prevent.
+  // released: a double writer.
   describe("a release the budget refused is not a disk verdict", () => {
     function captureRefusingRelease(
       root: string,
@@ -590,8 +582,6 @@ describe("the document open's capture-chain hold", () => {
         workspaceId: WORKSPACE_ID,
         rootPath: root,
         rustEngineSessions: sessions,
-        // Absent head and absent lineage: the bind the absent-head contract
-        // judges by what is on disk.
         openRustYDocProviderSession: async () => ({
           doc,
           initialUpdate: Y.encodeStateAsUpdate(doc),
@@ -631,7 +621,6 @@ describe("the document open's capture-chain hold", () => {
 
     it("reports the timeout, not an uncaptured artifact, when the release times out", async () => {
       const root = await createTestScratch("dohc-ydoc-deadline-");
-      // Content on disk: the branch that refuses whatever else is true.
       await write(root, "note.md", "uncaptured bytes\n");
 
       const refusal = await refusalFrom(
@@ -655,15 +644,6 @@ describe("the document open's capture-chain hold", () => {
       expect(refusal).not.toBeInstanceOf(YDocUncapturedArtifactError);
     });
 
-    // The other half of the same defect, and the one the user feels. The
-    // client stopped waiting; the daemon did not stop working. Its close runs
-    // in a spawned task (crates/dohc-workspace-engine/src/lib.rs,
-    // ydoc_close_inner) that runs to completion whatever happens to the RPC
-    // future, and a genuine close refusal — an update raced in, so the
-    // lineage is dirty — reinserts the session entry with its lease held.
-    // The refusal that left this function was the last reference to that
-    // session, so every later open answered ydoc-session-busy and "Try again"
-    // could never work again. Retain it where a close can still reach it.
     it("discharges the session it could not release, so the retry binds", async () => {
       const root = await createTestScratch("dohc-ydoc-deadline-");
       await write(root, "note.md", "uncaptured bytes\n");
@@ -723,13 +703,11 @@ describe("the document open's capture-chain hold", () => {
         .catch((error: unknown) => error);
       expect(refusal).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
 
-      // "Try again".
       const session = await engine.openYDocSession({
         path: "note.md",
         onRemoteUpdate: () => undefined,
       });
       expect(session.doc).toBe(doc);
-      // The retry closed the stranded session before binding a new one.
       expect(closes).toBe(2);
       // And it closed it — a spent transport budget is waited out, never
       // evicted.
@@ -740,11 +718,11 @@ describe("the document open's capture-chain hold", () => {
     });
 
     it("keeps the read-only classification when the daemon refuses the release", async () => {
-      // codex r17 P1. The rethrow covered the BUDGET's refusals only, so an
-      // ordinary one — UnsettledClose, which is the daemon saying an update
-      // raced in and the lineage is dirty — fell through to the disk verdict.
-      // That verdict is one `main` answers with a bare `available: false`, so
-      // the renderer opened the writable plain editor over the session this
+      // The rethrow must cover more than the budget's refusals. An ordinary
+      // one, such as UnsettledClose (the daemon saying an update raced in and
+      // the lineage is dirty), must not fall through to the disk verdict.
+      // `main` answers that verdict with a bare `available: false`, so the
+      // renderer would open the writable plain editor over the session this
       // very branch had just retained as an orphan, lease and all. The
       // classification does not depend on what refused the release: while the
       // session is unreleased the engine may still own the document.
@@ -758,7 +736,6 @@ describe("the document open's capture-chain hold", () => {
         "rethrow only budget refusals -> YDocUncapturedArtifactError, a plain fallback, and two writers on one path.",
       ).toBeInstanceOf(YDocSessionUnreleasedError);
       expect(refusal).not.toBeInstanceOf(YDocUncapturedArtifactError);
-      // Named for the agent reading it, with the daemon's own refusal kept.
       expect((refusal as Error).cause).toMatchObject({
         message: "ydoc close refused: unsettled-close",
       });
@@ -768,20 +745,20 @@ describe("the document open's capture-chain hold", () => {
     });
 
     it("evicts a dirty orphan instead of settling it over the file", async () => {
-      // codex r20, and the last data-loss door. The discharge released on
-      // easier terms than the release that orphaned the session: no
-      // `settleOnRefusal: false`, so a repeated UnsettledClose escalated to a
-      // settling close inside the provider. The doc this session holds was
-      // seeded from neither a head nor a snapshot — settling it writes what
-      // replication delivered over bytes the watcher has not captured yet,
-      // which is exactly what rule 1 refuses the open to prevent.
+      // The discharge must release on the same terms as the release that
+      // orphaned the session. Without `settleOnRefusal: false`, a repeated
+      // UnsettledClose escalates to a settling close inside the provider. The
+      // doc this session holds was seeded from neither a head nor a snapshot,
+      // so settling it writes what replication delivered over bytes the
+      // watcher has not captured yet, which is what rule 1 refuses the open
+      // to prevent.
       //
-      // #665 closed the other end. A close that keeps refusing used to leave
-      // the orphan retained, holding its lease, and on a path no capture will
-      // ever reach — policy-excluded, or over the 10 MiB capture limit — the
-      // document stayed read-only until the daemon restarted. The orphan now
-      // evicts: the daemon lets go of the session while its lineage stays
-      // durable, so nothing is written and nothing is discarded.
+      // A close that keeps refusing must not leave the orphan retained and
+      // holding its lease: on a path no capture will ever reach
+      // (policy-excluded, or over the 10 MiB capture limit) the document
+      // would stay read-only until the daemon restarted. The orphan evicts:
+      // the daemon lets go of the session while its lineage stays durable, so
+      // nothing is written and nothing is discarded.
       const root = await createTestScratch("dohc-ydoc-deadline-");
       const uncaptured = "bytes the watcher has not ingested yet\n";
       await write(root, "note.md", uncaptured);
@@ -851,7 +828,6 @@ describe("the document open's capture-chain hold", () => {
         { settle: false, settleOnRefusal: false },
         { settle: false, settleOnRefusal: false },
       ]);
-      // The bytes are still the user's.
       expect(await readFile(join(root, "note.md"), "utf8")).toBe(uncaptured);
       await engine.stop();
     });
@@ -925,7 +901,7 @@ describe("the document open's capture-chain hold", () => {
       await engine.stop();
     });
 
-    // #710/#721 rider F6. The test above pins the disk-size clause of
+    // The test above pins the disk-size clause of
     // `captureWillReachPath`; a real `.dohc/files.toml` `tracked = false`
     // rule is what exercises the `policyTracksPath` clause, and only this
     // fixture severs cleanly from that one alone — the file here is a few
@@ -1000,8 +976,7 @@ describe("the document open's capture-chain hold", () => {
     });
 
     it("refuses to settle an orphan for a lifecycle close either", async () => {
-      // codex r21, and the third site of one mechanism — which is why the
-      // never-settle rule now lives on the ORPHAN instead of at each caller.
+      // The never-settle rule lives on the orphan, not at each caller.
       // A registered orphan is visible to the lifecycle sweep every version
       // switch, merge, rename and delete runs, and that sweep closes with
       // `{ settle: false }` alone: the provider escalates a refused close into

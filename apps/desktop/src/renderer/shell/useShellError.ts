@@ -71,6 +71,7 @@ export type ShellErrorKind =
   | "chat-wake-unconfirmed"
   | "chat-wake-runners-refused"
   | "chat-wake-runners-unreadable"
+  | "chat-forward-stuck"
   | "singleton-tab-split"
   | "tab-limit"
   | "workspace-search"
@@ -153,7 +154,6 @@ export interface ShellError {
   kind?: ShellErrorKind;
   // A kept copy's row: it stays while the engine lists that copy.
   keptCopyId?: number;
-  // The reports notice's row: the reports its words name.
   reports?: ReportKinds;
   // What the row is about, such as one record a creation left part way or
   // one person's Stop and restore. A row replaces only a row of the same
@@ -230,7 +230,6 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
   const shownKeptCopiesMore = useRef(false);
   // Sibling notices restored from local storage have a row without a toast.
   const shownOutsideCopies = useRef(new Map<string, string>());
-  // Listed kept typing already shown in this workspace.
   const shownCaptureRecoveries = useRef(new Set<string>());
   const shownCaptureHolds = useRef(new Set<string>());
 
@@ -506,7 +505,6 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
       retry: (() => void) | null = null,
       kind?: ShellErrorKind,
       identity?: string,
-      // Changes the row of its identity where it stands, with no new toast.
       quiet = false,
       onDismiss?: () => void,
     ) => {
@@ -1470,7 +1468,6 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
     );
   }, []);
 
-  // The workspace's notice owner, which files its rows here.
   const noticeOwner = useNoticeOwner(workspaceId, {
     report: (words, cause, retry, identity, quiet, onDismiss) =>
       reportShellError(words, cause, retry, undefined, identity, quiet, onDismiss),

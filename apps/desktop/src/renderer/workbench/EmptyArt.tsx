@@ -19,7 +19,6 @@ const SQUARE = "size-1.75 shrink-0 rounded-xs";
 const DOT = "size-2.5 shrink-0 rounded-full";
 const AVATAR = `${DOT} border-[1.5px] border-bg`;
 
-// A table's cells, row by row: a header row, then text and tag cells.
 const CELLS = [
   "head",
   "head",

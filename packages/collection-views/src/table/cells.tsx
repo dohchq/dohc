@@ -403,7 +403,6 @@ export function CellEditor({
       ) : (
         <CellInput {...textInput} parse={(raw) => raw.trim() || null} />
       );
-    // text, url: a plain text value.
     default:
       return <CellInput {...textInput} parse={(raw) => raw || null} />;
   }

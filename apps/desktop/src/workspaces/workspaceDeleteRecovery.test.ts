@@ -42,7 +42,6 @@ vi.mock("node:fs/promises", async (original) => {
 });
 const person = { kind: "human", humanId: "local:test" } as const;
 const agent = { kind: "agent", agentId: "test-agent", onBehalfOf: "local:test" } as const;
-// A refused Undo whose cause main cannot name.
 const refused = (reason: string) => ({ ok: false, reason, refusal: { code: "unexplained" } });
 async function fixture(tracked = ["folder/tracked.txt"], systemAccepts = false) {
   const root = await createTestScratch("delete-recovery-");

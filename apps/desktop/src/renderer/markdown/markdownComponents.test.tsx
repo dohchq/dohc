@@ -38,7 +38,6 @@ describe("MARKDOWN_COMPONENTS tables", () => {
     ]);
     expect(table!.querySelectorAll("tr")).toHaveLength(3);
 
-    // The whole point of the fix: the reader sees a table, never the source.
     expect(view.container.textContent).not.toContain("|");
     expect(view.container.textContent).not.toContain("---");
   });

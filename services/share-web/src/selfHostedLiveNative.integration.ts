@@ -375,7 +375,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
   mkdirSync(join(ownerRoot, "docs"));
   writeFileSync(join(ownerRoot, "docs/a.md"), "Hello\n");
   const schema = `service_activation_${randomUUID().replaceAll("-", "")}`;
-  // The full gate once timed out a 2 s connect to a healthy Postgres (#1217).
+  // A 2 s connect to a healthy Postgres can time out under the full gate.
   const admin = new Client({ connectionString, connectionTimeoutMillis: 30_000 });
   const pool = new Pool({
     connectionString,
@@ -2312,12 +2312,29 @@ async function openSelfHostProof(name: string) {
             boundary: row.boundary === null ? null : JSON.parse(String(row.boundary)),
           })),
       /** How the host lists a ready document: its current binding, through the activation that holds it. */
-      ready: (path: string) => ({
-        path,
-        objectId: activation(path)!.source.objectId,
-        status: "ready",
-        document: { binding: activation(path)!.binding, relayDatabaseNamespace: history.namespace },
-      }),
+      ready: (path: string) => {
+        const binding = activation(path)!.binding;
+        return {
+          path,
+          objectId: activation(path)!.source.objectId,
+          status: "ready",
+          document: { binding, relayDatabaseNamespace: history.namespace },
+          // The owner's list also gives the last journal position the relay accepted for the note.
+          head: Number(
+            (
+              relayRead
+                .prepare(`SELECT COALESCE(MAX(journal_cursor),0) AS head FROM sync_relay_live_update_journal
+            WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?`)
+                .get(
+                  binding.workspaceId,
+                  binding.mainVersionId,
+                  binding.objectId,
+                  binding.lineageClaimId,
+                ) as { head: number }
+            ).head,
+          ),
+        };
+      },
       /** A document's rows in the relay's live journal. */
       journal: (object = objectId) =>
         relayRead
@@ -2392,7 +2409,12 @@ async function openSelfHostProof(name: string) {
           markdown: yDocToMarkdown(doc),
         })),
       documents: async () =>
-        (await route("GET")).body.documents as { path: string; status: string; reason?: string }[],
+        (await route("GET")).body.documents as {
+          path: string;
+          status: string;
+          reason?: string;
+          head?: number;
+        }[],
       hosted: (object = objectId) =>
         serviceRead(
           (engine) =>
@@ -2402,7 +2424,6 @@ async function openSelfHostProof(name: string) {
               )
               .get(object) as { state: string; reason: string | null } | undefined,
         ),
-      /** Engine RPCs the service host started. */
       started: (method: string) =>
         harness.calls.filter((call) => call.method === method && call.status === "started").length,
       /**
@@ -3163,7 +3184,6 @@ it(
         fullStateByteLength: successor.fullState.byteLength,
         predecessorActivationId: P,
       });
-      // One capture, which asked for no activation of its own.
       expect(harness.captures.slice(captures)).toEqual([
         { activationId: S, requestedActivationId: undefined, source: successor.source },
       ]);
@@ -3235,7 +3255,13 @@ it(
         { timeout: 10000 },
       );
       expect(proof.activations()).toEqual([retired, current]);
-      expect(await proof.documents()).toEqual([proof.ready("docs/a.md"), proof.ready("docs/b.md")]);
+      const listed = await proof.documents();
+      expect(listed).toEqual([proof.ready("docs/a.md"), proof.ready("docs/b.md")]);
+      // Each note's `head` is the position its last live edit was given, not only what a query says.
+      expect(listed.map((row) => row.head)).toEqual([
+        collaborated.journalCursor,
+        afterRestart.journalCursor,
+      ]);
       // docs/b.md holds exactly its own live edits.
       expect(proof.journal(second.objectId)).toEqual([
         ...secondJournal,
@@ -3366,7 +3392,9 @@ it(
       expect(attempts()).toBe(before + 1);
       // The operator is told of nothing they need to do.
       expect(
-        proof.reports.filter((report) => report.startsWith("Live editing of docs/a.md")),
+        proof.reports.filter((report) =>
+          report.startsWith(`Live editing of object ${proof.objectId} `),
+        ),
       ).toEqual([]);
       return { attemptsBeforeResume: before, reports: proof.reports };
     }),
@@ -3809,7 +3837,9 @@ it(
       await settledPasses(proof);
       expect(attempts()).toBe(captured + 1);
       expect(
-        proof.reports.filter((report) => report.startsWith("Live editing of docs/a.md")),
+        proof.reports.filter((report) =>
+          report.startsWith(`Live editing of object ${proof.objectId} `),
+        ),
       ).toEqual([]);
       expect(proof.storage.readServiceHostEnrollment("workspace", "docs/a.md")).toMatchObject({
         ownerStop: null,
@@ -3825,7 +3855,6 @@ it(
       expect(S).not.toBe(P);
       expect(successor.completed).toBe(true);
       expect(successor.source.predecessorActivationId).toBe(P);
-      // Its full state holds the owner's edit.
       const full = new Y.Doc();
       try {
         Y.applyUpdate(full, successor.fullState);
@@ -3925,7 +3954,7 @@ it(
   180000,
 );
 
-// Until the session host starts a document's Y.Doc itself (#2069), a file only
+// Until the session host starts a document's Y.Doc itself, a file only
 // written as text has nothing to activate, so it blocks instead of retrying.
 // Its owner only opens it, as the Notice tells them, and the lineage that
 // reaches the relay gives it one more attempt, which activates it.
@@ -3961,9 +3990,11 @@ it(
       await settledPasses(proof);
       expect(attempts()).toBe(blocked);
       expect(
-        proof.reports.filter((report) => report.startsWith("Live editing of docs/plain.md")),
+        proof.reports.filter((report) =>
+          report.startsWith(`Live editing of object ${plain.objectId} `),
+        ),
       ).toEqual([
-        `Live editing of docs/plain.md in workspace workspace cannot start: the document has no live-editing history. It starts once its owner opens it in dohc on a desktop. Its store is kept at ${proof.store}.`,
+        `Live editing of object ${plain.objectId} in workspace workspace cannot start: the document has no live-editing history. It starts once its owner opens it in dohc on a desktop. Its store ${basename(proof.store)} is kept.`,
       ]);
       // Its owner opens it on their device without changing it, which starts its Y.Doc and pushes it to the relay.
       // The next pass pulls it into the host's replica and captures once more, with no Resume.
@@ -4037,7 +4068,6 @@ it(
           ),
         { timeout: 60000 },
       );
-      // No settle of it was refused on the way.
       const refusedSettles = harness.calls
         .slice(from)
         .filter((call) => call.method === "liveApplication.settle" && call.status === "failed")
@@ -4057,17 +4087,21 @@ it(
           }),
         { timeout: 30000 },
       );
-      expect(readFileSync(join(proof.store, path), "utf8")).toContain("live: edit");
+      // The engine records the settle before it writes the file, so wait for the file too.
+      await vi.waitFor(
+        () => expect(readFileSync(join(proof.store, path), "utf8")).toContain("live: edit"),
+        { timeout: 30000 },
+      );
       expect(hostFolder(proof, "notes")).toEqual(["long.md"]);
       return { path, refusedSettles };
     }),
   120000,
 );
 
-// #3804: a store written before the fix holds a hosted note's queued writes. Opening it replayed every
-// one, and each write of a past version left a conflict file. Such a store also holds writes an earlier
-// replay already conflicted, each with its conflict file. The engine refuses this note's capture, as in
-// the case below, so nothing else ends its writes before the restart.
+// A store may hold a hosted note's queued writes. Replaying every one on open would leave a conflict
+// file for each write of a past version. Such a store also holds writes an earlier replay already
+// conflicted, each with its conflict file. The engine refuses this note's capture, as in the case
+// below, so nothing else ends its writes before the restart.
 it(
   "writes no conflict file for a hosted note's queued writes when the engine restarts",
   () =>
@@ -4199,7 +4233,7 @@ for (const ending of ["its owner stops live editing", "its last link ends"] as c
           expect.objectContaining({ path, status: "preparing" }),
         );
         // The host pulls four later edits of the owner's, one at a time. Each pull queues a write of the note's file
-        // in its replica and writes the file itself. The pull ends the write it queued (#3804), so none waits when
+        // in its replica and writes the file itself. The pull ends the write it queued, so none waits when
         // live editing ends.
         for (const edit of ["second", "third", "fourth", "fifth"]) {
           await note.edit((doc) => doc.getMap("frontmatter").set(edit, "pulled"));
@@ -4209,7 +4243,8 @@ for (const ending of ["its owner stops live editing", "its last link ends"] as c
             { timeout: 30000 },
           );
         }
-        expectProjectionWritesEnded(proof, path, 5);
+        // A pull writes the file before it ends the queued writes, so wait for them to end.
+        await vi.waitFor(() => expectProjectionWritesEnded(proof, path, 5), { timeout: 30000 });
         if (ending === "its owner stops live editing")
           expect((await proof.route("DELETE", { path, retire: true })).body).toMatchObject({
             status: "retired",
@@ -4251,7 +4286,7 @@ for (const ending of ["its owner stops live editing", "its last link ends"] as c
   );
 }
 
-// #2088: the operator puts back an older copy of the session host's store,
+// The operator puts back an older copy of the session host's store,
 // which lost live edits the host already pushed. The next attach finds that
 // before anyone edits: the workspace detaches, no capture runs, and the relay
 // keeps exactly what the host pushed.

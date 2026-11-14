@@ -7,6 +7,7 @@ import { withClosedEngineDocSession } from "./collab/engineDocLease";
 import { CreationPartialError, creationPartialNotice } from "@dohc/cli/creation";
 import { shareSenderLabel } from "@dohc/security-contract/share-labels";
 import { AgentSettingsProvider } from "./workbench/AgentBadge";
+import { AgentThreadLinesProvider } from "./workbench/AgentThreadLines";
 import { AgentColorContext, saveAgentColor } from "./workbench/AgentColorPicker";
 import { EngineMomentDiffPage } from "./workbench/EngineMomentDiffPage";
 import { StopAndRestoreDialog, useStopAndRestore } from "./StopAndRestoreDialog";
@@ -439,7 +440,6 @@ function isMountedSharePath(path: string | null): boolean {
   return !!path && isSharedWithMePath(path);
 }
 
-// A move that failed, and whether its destination was already taken.
 type FailedMove = { move: PendingTreeMove; destinationTaken: boolean };
 
 const isTreeMove = (change: PendingTreeChange): change is PendingTreeMove =>
@@ -467,7 +467,6 @@ function failedMoveNow(
   };
 }
 
-// Whether a listing shows any failed move made, or its destination's state changed.
 function failedMovesChanged(
   notices: Iterable<readonly FailedMove[]>,
   files: Parameters<typeof listedMoveEnds>[1],
@@ -813,7 +812,6 @@ export function DesktopWorkspaceShell(props: {
     setLiveDocumentsReveal(reveal);
     setLiveDocumentsWorkspaceId(id);
   }, []);
-  // Relay-share dialog target: paths, or a version.
   const [shareTarget, setShareTarget] = useState<RelayShareTarget | null>(null);
   const [openShare, setOpenShare] = useState<NoticeShare | "blank" | null>(null);
   const openSharePath =
@@ -1004,8 +1002,7 @@ export function DesktopWorkspaceShell(props: {
   // save-first prompt is owed.
   const recoveryPaths = useOrphanedDraftPaths(workspaceId);
   // The global recovery list (the close dialog, above this shell) labels
-  // rows with the name the UI shows here — the raw id is a UUID (#579
-  // review, r10).
+  // rows with the name the UI shows here, because the raw id is a UUID.
   useEffect(() => {
     noteWorkspaceLabel(workspaceId, workspaceName(props.workspace));
   }, [workspaceId, props.workspace]);
@@ -2050,15 +2047,12 @@ export function DesktopWorkspaceShell(props: {
   const pinnedApps = usePinnedApps(workspaceId, pinnedRoots);
   const selectedAppRoot = parseAppViewId(wb.activeView);
   const selectedApp = pinnedApps.find((app) => app.root === selectedAppRoot) ?? null;
-  // The panel's header names dohc's own view or the pinned app.
   const sidePanelTitle = isViewId(shownView)
     ? SIDE_PANEL_VIEWS[shownView].label
     : shownView === SHARING_VIEW_ID
       ? "Sharing"
       : (selectedApp?.label ?? "App");
 
-  // Every view on the rail, in its order: dohc's own, pinned apps, then
-  // Sharing at the rail's foot.
   const railOrder = useMemo<readonly ActivityViewId[]>(
     () => [...railViews, ...pinnedRoots.map(appViewId), SHARING_VIEW_ID],
     [pinnedRoots, railViews],
@@ -3311,41 +3305,38 @@ export function DesktopWorkspaceShell(props: {
     workspaceId,
   ]);
 
-  // Whether this workspace has engine-backed surfaces at all: history and
-  // versions. A shared view renders neither: its open deliberately installed
-  // no capture. A registry fact, so this value never waits on anything.
+  // `captureDecided` is whether main's capture decision for this workspace
+  // has landed. `captureAvailable` is whether main's capture serves this
+  // workspace.
   //
-  // Chats is the exception. A share view still installs no capture, so
-  // history and versions stay gone, but main answers chat from the SHARE
-  // scope instead of a capture, so About opens everywhere. The Chats view
-  // does not: the per-file surface answers for a file the share already
-  // served, and a workspace-wide listing would be a superset to filter
-  // (decision 5, and the shape that produced #627).
-  // Whether main's capture will SERVE those surfaces. Main's status is the
-  // single answer to "does anything record here": after a failed capture
-  // build every version, chat and moment call is refused. It can only
-  // answer once main has decided, which is what `captureDecided` carries. A
-  // status that has not been decided sits at its "nothing is wrong"
-  // defaults, and reading those as an answer is how this gate was wrong
-  // twice.
+  // A shared view installs no capture, so `captureAvailable` is false there.
+  // About is the exception: main answers chat from the share scope instead
+  // of a capture, so About opens everywhere. The Chats view does not: the
+  // per-file surface answers for a file the share already served, and a
+  // workspace-wide listing would be a superset to filter.
   //
-  // The capture capability. Everything that calls through
-  // `requireEngineCapture` reads this one value — the version selector, the
-  // shell's version fetch, the persisted compare and moment-diff tabs, the
-  // Chats view, About and tab, the graph's chat mentions and the
-  // linked-mentions panel — so the fact is
-  // decided once. A surface that re-derives it drifts, which is exactly how
-  // the compare tab kept mounting after #614 gated the selector.
+  // Outside a shared view, main's status is the single answer to "does
+  // anything record here": after a failed capture build every version, chat
+  // and moment call is refused. It can only answer once main has decided,
+  // which is what `captureDecided` carries. A status that has not been
+  // decided sits at its "nothing is wrong" defaults, so do not read those
+  // as an answer.
   //
+  // `captureAvailable` is the capture capability. Everything that calls
+  // through `requireEngineCapture` reads this one value (the version
+  // selector, the shell's version fetch, the persisted compare and
+  // moment-diff tabs, the Chats view, About and tab, the graph's chat
+  // mentions and the linked-mentions panel), so the fact is decided once. A
+  // surface that re-derives it drifts.
   const captureDecided = captureDecidedFor === workspaceId;
   const captureAvailable = !shareView && captureDecided && !statusSaysNoRecorder(syncStatus);
   useEffect(() => {
     if (!workspaceIsReady) return;
     void refreshHistory().catch((error) => reportShellError("Could not refresh history.", error));
   }, [refreshHistory, reportShellError, workspaceIsReady]);
-  // Conflict review (0P-C): opened from the notice center's conflict notice.
-  // Lists every open conflict — two machines editing apart, or a merge left
-  // with "Finish later" — with the same side-by-side cards as the merge flow.
+  // Conflict review: opened from the notice center's conflict notice. Lists
+  // every open conflict (two machines editing apart, or a merge left with
+  // "Finish later") with the same side-by-side cards as the merge flow.
   const [conflictReviewOpen, setConflictReviewOpen] = useState(false);
   const onVersionWorkspaceStateChanged = useCallback(
     (activeVersionId?: string, lineageChanged = true) => {
@@ -3355,14 +3346,13 @@ export function DesktopWorkspaceShell(props: {
       advanceReopenKey(workspaceId);
       // A version switch changes which timeline is true, and the boundary is
       // only worth anything before the answers it has to judge arrive.
-      // Rejecting everything in flight by token was too blunt: main notifies
-      // the renderer before the switch invoke resolves, so a perfectly valid
-      // NEW-version refresh can be issued before this runs, and rejecting it
-      // left the panel on the old version whenever the refresh below failed.
-      // Naming the version instead fixes that — but a version this callback
-      // has to await is not a boundary at all: an old answer landing first
-      // reads a guard that knows nothing, commits, and the late lookup cannot
-      // retract it.
+      // Rejecting everything in flight by token is too blunt: main notifies
+      // the renderer before the switch invoke resolves, so a valid
+      // new-version refresh can be issued before this runs, and rejecting it
+      // would leave the panel on the old version whenever the refresh below
+      // failed. A version this callback has to await is not a boundary
+      // either: an old answer landing first reads a guard that knows nothing,
+      // commits, and the late lookup cannot retract it.
       //
       // So the operation says which version it left the workspace on. Every
       // caller that moved the workspace knows: a switch names its target, a
@@ -3376,11 +3366,11 @@ export function DesktopWorkspaceShell(props: {
       const versionToken = ++engineHistoryToken.current;
       if (activeVersionId !== undefined) {
         // The page on screen belongs to the version the user just left, and
-        // the refresh below is the only thing that would replace it — so a
-        // refresh that fails used to leave the timeline naming a version
-        // nobody is on. The observation retracts it instead. A merge or a
-        // conflict resolution names the version the page already describes,
-        // so nothing is dropped for them.
+        // the refresh below is the only thing that would replace it. If that
+        // refresh failed, the timeline would name a version nobody is on, so
+        // the observation retracts the page. A merge or a conflict resolution
+        // names the version the page already describes, so nothing is dropped
+        // for them.
         observeEngineVersion(versionToken, activeVersionId);
       } else if (
         // The capture gate again, off the mirrors for the same reason
@@ -3775,6 +3765,46 @@ export function DesktopWorkspaceShell(props: {
       return saving;
     };
   }, [openFile, showSuccessNotice, reportShellError]);
+  // A held file can't go live again, so Live documents offers a copy beside
+  // it. Opening the copy starts its live editing.
+  const liveCopies = useRef(new Map<string, Promise<void>>());
+  const makeLiveCopy = useCallback(
+    (id: string, path: string): Promise<void> => {
+      // A row and its notice's Try again share one copy, so a second press makes no second file.
+      const key = `${id}\n${path}`;
+      const running = liveCopies.current.get(key);
+      if (running) return running;
+      const retry = () => void makeLiveCopy(id, path);
+      const copying = bridge()
+        .duplicateWorkspaceFile({ workspaceId: id, relativePath: path })
+        .then(
+          (copy) => {
+            if (workspaceIdRef.current !== id) return;
+            // History has the copy but its file isn't written yet; Duplicate again finishes it.
+            if (!copy.materialized) {
+              reportShellError(
+                `dohc could not finish the copy of ${path}.`,
+                new Error(`${copy.path} is in History but not yet in this folder.`),
+                retry,
+              );
+              return;
+            }
+            // Live documents may sit over Settings; both close so the copy shows.
+            setLiveDocumentsWorkspaceId(null);
+            closeSettings();
+            openFile(copy.path);
+          },
+          (error: unknown) => {
+            if (workspaceIdRef.current !== id) return;
+            reportShellError(`dohc could not make a copy of ${path}.`, error, retry);
+          },
+        )
+        .finally(() => liveCopies.current.delete(key));
+      liveCopies.current.set(key, copying);
+      return copying;
+    },
+    [closeSettings, openFile, reportShellError],
+  );
   const reportKeptCopyFailure = useCallback(
     (message: string, retry: () => void) => reportShellFailure({ message, retry }),
     [reportShellFailure],
@@ -4740,7 +4770,7 @@ export function DesktopWorkspaceShell(props: {
     workspaceId,
     // Unfinished shared restores get no Notices row. Retry on one says "File
     // restored" but never reaches the file, and Decline doesn't bring live
-    // editing back (#3090).
+    // editing back.
     enabled: false,
     onBeforeRestore: beginLineageOperation,
     onRestored: onHistoryRestored,
@@ -5623,10 +5653,10 @@ export function DesktopWorkspaceShell(props: {
     }),
     [appsReveal, clearAppsReveal, pinnedRoots, setAppPinned, workspaceApps, workspaceId],
   );
-  // Stable identities for the memoized explorer and inspector (D2#2/#5).
-  // Inline arrows here handed every shell render a fresh prop set, which
-  // re-rendered every TreeRow and re-ran FileInspector for renders that
-  // changed nothing they show.
+  // Stable identities for the memoized explorer and inspector. Inline
+  // arrows here would hand every shell render a fresh prop set, which
+  // re-renders every TreeRow and re-runs FileInspector for renders that
+  // change nothing they show.
   const onOpenEditorsHeightChange = useCallback(
     (height: number) => mutateWb((state) => setOpenEditorsHeight(state, height)),
     [mutateWb],
@@ -6004,10 +6034,10 @@ export function DesktopWorkspaceShell(props: {
   // never reopen the workspace.
   useEffect(() => {
     if (!workspaceIsReady) return;
-    // Trailing-edge coalescing (D2#8): main emits one activity event per
-    // settled batch, and a burst (an import, an agent writing many files)
-    // used to issue a listing + four history reads per event. One refresh
-    // after the burst quiets answers them all — refreshFiles's committed-
+    // Trailing-edge coalescing: main emits one activity event per settled
+    // batch, and without it a burst (an import, an agent writing many files)
+    // would issue a listing and four history reads per event. One refresh
+    // after the burst quiets answers them all. refreshFiles's committed-
     // request watermark and refreshHistory's tokened lanes are latest-wins,
     // so the coalesced (newest) refresh can never lose to a dropped one.
     // A pending timer cleared by this effect's cleanup is not a lost refresh
@@ -6381,7 +6411,7 @@ export function DesktopWorkspaceShell(props: {
   // Received workspaces refresh on open and on demand; ended copies stay local.
   // The relay-derived generic chat fact selects the Comment banner's next
   // step. It does not grant a desktop write: every received share's Chats are
-  // read-only in Phase 3 because the store cannot prove per-row delivery.
+  // read-only because the store cannot prove per-row delivery.
   const shareViewHasIndependentChat =
     !shareViewDamaged &&
     !shareViewEnded &&
@@ -6986,12 +7016,12 @@ export function DesktopWorkspaceShell(props: {
   );
 
   // One history timeline element, rendered by the side panel's History view
-  // and the history tab — the engine page state is root-owned (never a
-  // second subscription). A workspace with no history source (retirement
-  // Phase C removed the legacy recorder) gets a placeholder instead of an
-  // empty list, and what that placeholder claims comes from main's status —
-  // or, for a shared view, the registry capability and the share's live
-  // state — never from the renderer's own capability read.
+  // and the history tab. The engine page state is root-owned (never a
+  // second subscription). A workspace with no history source gets a
+  // placeholder instead of an empty list, and what that placeholder claims
+  // comes from main's status or, for a shared view, the registry capability
+  // and the share's live state. It never comes from the renderer's own
+  // capability read.
   const historyOffCopy = historyOffPlaceholderCopy(syncStatus);
   // History stopped recording, so the panel says so in place of taking in changes.
   const historyPaused = isHistoryPaused(syncStatus);
@@ -7210,6 +7240,7 @@ export function DesktopWorkspaceShell(props: {
     shareRemovals,
     mentionCandidates,
     workspaceFiles: files,
+    shareMounts: workspaceShareMounts,
     collaboration: chatCollaboration,
     agentSetup,
     onSetupAgent: openAgentSettings,
@@ -7222,7 +7253,7 @@ export function DesktopWorkspaceShell(props: {
   // destinations. Active chat pages own the live conversations: disable the
   // navigator's collaboration transport so it cannot
   // create a duplicate presence lease, and suspend its polls so one open
-  // conversation does not double every chat read (D2#6). The page's landed
+  // conversation does not double every chat read. The page's landed
   // reads still reach the navigator through their local-thread and DM
   // revisions, and it still reloads the Group list on activity.
   const chatsTabIsLive = wb.editorGroups.some(
@@ -7251,6 +7282,7 @@ export function DesktopWorkspaceShell(props: {
     shareRemovals,
     mentionCandidates,
     workspaceFiles: files,
+    shareMounts: workspaceShareMounts,
     collaboration: null,
     suspendPolling: chatsTabIsLive,
     ...(revealedInvitation === null
@@ -7334,8 +7366,6 @@ export function DesktopWorkspaceShell(props: {
     ? (filedBeforeStopRef.current ?? new Set(shellErrors.map((error) => error.id)))
     : null;
   const filedBeforeStop = filedBeforeStopRef.current;
-  // Errors as the notice center shows them: the message, whether it can be
-  // asked again, and what it lets a person copy.
   const workspaceErrors = useMemo(
     () =>
       shellErrors.map((error) => ({
@@ -7866,7 +7896,7 @@ export function DesktopWorkspaceShell(props: {
     ? undefined
     : (version: { id: string; name: string }) =>
         setShareTarget({ kind: "version", versionId: version.id, versionName: version.name });
-  return (
+  const shell = (
     <WorkspaceSessionProvider workspaceId={workspaceId}>
       <AgentSettingsProvider settings={props.userSettings?.settings ?? null}>
         <AgentColorContext.Provider value={setAgentColor}>
@@ -8000,10 +8030,10 @@ export function DesktopWorkspaceShell(props: {
                                   ),
                                 )
                               : null}
-                            {/* Changes already sent, and the way to take them back (#646
-              PR3a). Deliberately not behind the level: a granter can narrow
-              the share while changes wait, and a reverse path a downgrade
-              removes is not a reverse path — it would strand work in front of
+                            {/* Changes already sent, and the way to take them back.
+              Deliberately not behind the level: a granter can narrow the
+              share while changes wait, and a reverse path a downgrade
+              removes is not a reverse path. It would strand work in front of
               someone who may never answer it. The relay agrees; withdraw asks
               for membership, not for edit. */}
                             <>
@@ -8294,9 +8324,9 @@ export function DesktopWorkspaceShell(props: {
                                       refreshKey={
                                         historyRefreshCounter + versionEpoch + mountContentEpoch
                                       }
-                                      // G2-C-3: the engine editor re-binds to the new version's Y.Doc
-                                      // lineage only on an active-version change — versionEpoch alone,
-                                      // not history growth (which must not churn the live session).
+                                      // The engine editor re-binds to the new version's Y.Doc lineage
+                                      // only on an active-version change: versionEpoch alone, not
+                                      // history growth (which must not churn the live session).
                                       engineVersionKey={versionEpoch}
                                       onOpenPath={openPathWithHeading}
                                       drawingCollaboration={chatCollaboration}
@@ -8388,7 +8418,6 @@ export function DesktopWorkspaceShell(props: {
                                             {...(wb.editorGroups.length > 1
                                               ? { onCloseGroup: closeGroupAfterFlush }
                                               : {})}
-                                            // Where the group's file view draws Share file.
                                             {...(tabPath &&
                                             !TAB_KINDS[groupTab?.kind ?? "removed"].virtual &&
                                             !shareView &&
@@ -8514,17 +8543,16 @@ export function DesktopWorkspaceShell(props: {
                                                 case "versionCompare":
                                                   return (
                                                     // A persisted compare tab reads the version capability, like
-                                                    // every other version entry point. Gating it on the share fact
-                                                    // alone left the whole #620 cause open: on a workspace whose
-                                                    // capture build failed the page still mounted, called
-                                                    // listWorkspaceVersions and compareWorkspaceVersions, and said
-                                                    // "Could not compare with Main."
+                                                    // every other version entry point. The share fact alone is not
+                                                    // enough: on a workspace whose capture build failed the page
+                                                    // would still mount, call listWorkspaceVersions and
+                                                    // compareWorkspaceVersions, and say "Could not compare with
+                                                    // Main."
                                                     !captureAvailable ? (
                                                       shareView ? (
                                                         // A persisted compare tab on a shared view. The page
-                                                        // asks main for the versions, and a shared view has none —
-                                                        // the same refusal the selector used to raise as a danger
-                                                        // banner. The tab stays closeable and states the capability.
+                                                        // asks main for the versions, and a shared view has none.
+                                                        // The tab stays closeable and states the capability.
                                                         <div
                                                           data-testid="version-compare-share-view"
                                                           className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted"
@@ -8567,46 +8595,43 @@ export function DesktopWorkspaceShell(props: {
                                                 case "whatsNew":
                                                   return <WhatsNewPage appVersion={appVersion} />;
                                                 case "versions":
-                                                  return (
-                                                    // The same capability gate and lines as a compare tab.
-                                                    !captureAvailable ? (
-                                                      shareView ? (
-                                                        <div
-                                                          data-testid="versions-share-view"
-                                                          className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted"
-                                                        >
-                                                          A shared view has no versions. Close this
-                                                          tab to go back to the shared files.
-                                                        </div>
-                                                      ) : !captureDecided ? (
-                                                        <SkeletonRows
-                                                          layout="panel"
-                                                          label="Loading versions..."
-                                                        />
-                                                      ) : (
-                                                        <div
-                                                          data-testid="versions-off"
-                                                          className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted"
-                                                        >
-                                                          {versionCompareOffCopy(syncStatus)}
-                                                        </div>
-                                                      )
-                                                    ) : (
-                                                      <VersionsPage
-                                                        workspaceId={workspaceId}
-                                                        versions={workspaceVersions}
-                                                        disabled={
-                                                          !workspaceIsReady || workspaceStopped
-                                                        }
-                                                        historyKey={versionsHistoryKey}
-                                                        versionKey={versionEpoch}
-                                                        onOpenCompare={openVersionCompareTab}
-                                                        onReviewConflicts={() =>
-                                                          setConflictReviewOpen(true)
-                                                        }
-                                                        notices={noticeOwner}
+                                                  return !captureAvailable ? (
+                                                    shareView ? (
+                                                      <div
+                                                        data-testid="versions-share-view"
+                                                        className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted"
+                                                      >
+                                                        A shared view has no versions. Close this
+                                                        tab to go back to the shared files.
+                                                      </div>
+                                                    ) : !captureDecided ? (
+                                                      <SkeletonRows
+                                                        layout="panel"
+                                                        label="Loading versions..."
                                                       />
+                                                    ) : (
+                                                      <div
+                                                        data-testid="versions-off"
+                                                        className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted"
+                                                      >
+                                                        {versionCompareOffCopy(syncStatus)}
+                                                      </div>
                                                     )
+                                                  ) : (
+                                                    <VersionsPage
+                                                      workspaceId={workspaceId}
+                                                      versions={workspaceVersions}
+                                                      disabled={
+                                                        !workspaceIsReady || workspaceStopped
+                                                      }
+                                                      historyKey={versionsHistoryKey}
+                                                      versionKey={versionEpoch}
+                                                      onOpenCompare={openVersionCompareTab}
+                                                      onReviewConflicts={() =>
+                                                        setConflictReviewOpen(true)
+                                                      }
+                                                      notices={noticeOwner}
+                                                    />
                                                   );
                                                 case "chat":
                                                   return (
@@ -8659,13 +8684,12 @@ export function DesktopWorkspaceShell(props: {
                                                           </Suspense>
                                                         </div>
                                                       ) : shareView ? (
-                                                        // A persisted Chats tab on a shared view. The
-                                                        // neighbouring line blamed the Settings flag, and a share
-                                                        // never touched it. #646 PR2 changed what is true here: a
-                                                        // shared view has chat now, per file, and this tab is the
-                                                        // workspace-wide listing it still does not get — so the copy
-                                                        // states the capability the reader does have and points at
-                                                        // the surface that answers.
+                                                        // A persisted Chats tab on a shared view. A share never
+                                                        // touches the Settings flag, so the copy must not blame it.
+                                                        // A shared view has chat per file, and this tab is the
+                                                        // workspace-wide listing it does not get, so the copy states
+                                                        // the capability the reader does have and points at the
+                                                        // surface that answers.
                                                         <div
                                                           data-testid="chats-page-share-view"
                                                           className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted"
@@ -8683,8 +8707,8 @@ export function DesktopWorkspaceShell(props: {
                                                       ) : (
                                                         // Main decided, and the answer was no capture: the engine flag
                                                         // is off, the settings file is unreadable, or the capture
-                                                        // build failed. The line that used to stand here blamed the
-                                                        // flag for all three.
+                                                        // build failed. The copy must not blame the flag for all
+                                                        // three.
                                                         <div
                                                           data-testid="chats-page-off"
                                                           className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted"
@@ -8695,17 +8719,14 @@ export function DesktopWorkspaceShell(props: {
                                                     </SkeletonSlot>
                                                   );
                                                 case "site":
-                                                  return (
-                                                    // The group's kept app tabs, below, show a valid app.
-                                                    groupSiteRoot ? null : (
-                                                      <InvalidSitePathFallback
-                                                        activeTab={tabPath}
-                                                        onClose={() => {
-                                                          if (tabPath)
-                                                            closeFileTab(editorGroup.id, tabPath);
-                                                        }}
-                                                      />
-                                                    )
+                                                  return groupSiteRoot ? null : (
+                                                    <InvalidSitePathFallback
+                                                      activeTab={tabPath}
+                                                      onClose={() => {
+                                                        if (tabPath)
+                                                          closeFileTab(editorGroup.id, tabPath);
+                                                      }}
+                                                    />
                                                   );
                                                 case "transactionalCollection":
                                                   return (
@@ -9022,7 +9043,6 @@ export function DesktopWorkspaceShell(props: {
                                               return unhandled;
                                             })()}
                                           </ErrorBoundary>
-                                          {/* The app this group shows lies over this slot. */}
                                           {groupSiteRoot ? (
                                             <div
                                               data-testid="app-slot"
@@ -9172,7 +9192,6 @@ export function DesktopWorkspaceShell(props: {
                                 </div>
                               </div>
                               <div className="flex items-center gap-2">
-                                {/* One button for every step: Check, Update, then Restart to update. */}
                                 {desktopUpdate.step ? (
                                   <PrimaryButton
                                     autoFocus
@@ -9751,6 +9770,7 @@ export function DesktopWorkspaceShell(props: {
                             stopRunning={liveStopRunning}
                             saveRecoveryCopy={saveLiveRecoveryCopyFromDialog}
                             readKeptEdits={readKeptEdits}
+                            makeCopy={makeLiveCopy}
                             setAside={saveOnlyLiveDocuments(syncStatus?.ownerLiveQuarantines ?? [])}
                             {...(liveDocumentsReveal === null
                               ? {}
@@ -9875,5 +9895,16 @@ export function DesktopWorkspaceShell(props: {
         </AgentColorContext.Provider>
       </AgentSettingsProvider>
     </WorkspaceSessionProvider>
+  );
+  return (
+    <AgentThreadLinesProvider
+      workspaceId={workspaceId}
+      ready={workspaceIsReady}
+      settings={props.userSettings?.settings ?? null}
+      report={reportShellFailure}
+      clear={clearIdentity}
+    >
+      {shell}
+    </AgentThreadLinesProvider>
   );
 }

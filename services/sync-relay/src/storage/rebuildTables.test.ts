@@ -23,7 +23,6 @@ const withoutShare = "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT NOT 
 
 it("drops a column only when the caller names it, and keeps every other column's rows", () => {
   withTable((db) => {
-    // The relay's write transaction rolls the refused rebuild back, so the table keeps its row and column.
     expect(() =>
       new RelayWriteOwner(db).write(() => rebuildTables(db, ["notes"], () => withoutShare)),
     ).toThrow("rebuilding notes would lose share_id");

@@ -50,6 +50,51 @@ export function mountLiveBodyEditor(
         dom.textContent = node.attrs.alt ? `[Image: ${String(node.attrs.alt)}]` : "[Image]";
         return { dom };
       },
+      // The schema draws a to-do box as a bare checkbox, which only the browser toggles. This one
+      // sends the tick as an edit and then shows the document's value, so a tick that isn't
+      // saved doesn't stay on screen.
+      taskItem(node, view, getPos) {
+        const dom = document.createElement("li"),
+          label = document.createElement("label"),
+          box = document.createElement("input"),
+          contentDOM = document.createElement("div");
+        const show = () => {
+          dom.dataset.checked = String(node.attrs.checked === true);
+          box.checked = node.attrs.checked === true;
+          box.setAttribute("aria-label", node.textContent || "To-do");
+        };
+        dom.dataset.type = "taskItem";
+        label.contentEditable = "false";
+        box.type = "checkbox";
+        box.addEventListener("mousedown", (event) => event.preventDefault());
+        box.addEventListener("change", () => {
+          const position = getPos();
+          if (input.canEdit() && position !== undefined)
+            view.dispatch(
+              view.state.tr.setNodeMarkup(position, undefined, {
+                ...node.attrs,
+                checked: box.checked,
+              }),
+            );
+          show();
+        });
+        label.append(box, document.createElement("span"));
+        dom.append(label, contentDOM);
+        show();
+        return {
+          dom,
+          contentDOM,
+          update(next) {
+            if (next.type !== node.type) return false;
+            node = next;
+            show();
+            return true;
+          },
+          // The box and its marker are this view's own; only the item's text is the document's.
+          ignoreMutation: (mutation) =>
+            mutation.type !== "selection" && !contentDOM.contains(mutation.target),
+        };
+      },
     },
     handlePaste(_view, event) {
       event.preventDefault();

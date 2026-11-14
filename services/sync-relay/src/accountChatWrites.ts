@@ -623,13 +623,11 @@ function visibleTargets(storage: SyncRelayStorage, copy: AutomationReplica) {
           lane === "posts" ? "This group takes no posts." : "This group has no chat.",
         );
     },
-    // A visible thread's first message.
     async opening(threadId: string): Promise<ChatMessage | null> {
       return (
         (await adapter.listMessagesPage({ workspaceId, threadId, limit: 1 })).messages[0] ?? null
       );
     },
-    // The agent of an agent's DM, or null for any other channel.
     async dmAgent(channelId: string): Promise<string | null> {
       const found = (await chats.store.listChannels({ workspaceId })).find(
         (each) => each.id === channelId,
@@ -1489,7 +1487,6 @@ export async function runAccountWrite(
   );
 }
 
-/** A phone read mark, as its strict request schema admits it. */
 type PhoneMarkRead = ReturnType<(typeof phoneMarkReadArgsSchema)["parse"]>;
 
 /** The read mark a request names. Arguments outside its schema reject with a bad request. */
@@ -1584,7 +1581,6 @@ export async function runAccountMarkRead(
   );
 }
 
-/** The phone's Try again on a wake, as its strict request schema admits it. */
 type PhoneRetryWake = ReturnType<(typeof phoneRetryWakeArgsSchema)["parse"]>;
 
 /** The Try again a request names. Arguments outside its schema reject with a bad request. */

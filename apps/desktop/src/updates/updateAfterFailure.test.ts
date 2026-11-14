@@ -25,7 +25,6 @@ function fixture(
     async (_failure: UpdateFailure, _version: string) => options.confirm ?? true,
   );
   const install = vi.fn(async () => options.install ?? { accepted: true });
-  // The notice stays until its signal aborts or the test closes it.
   const notices: Array<{ version: string; signal: AbortSignal; close(): void }> = [];
   const showDownloading = vi.fn(
     (_failure: UpdateFailure, version: string, signal: AbortSignal) =>

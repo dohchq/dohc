@@ -19,10 +19,6 @@ const asFile = { isSymbolicLink: () => false, isFile: () => true };
 const asLink = { isSymbolicLink: () => true, isFile: () => false };
 const asOther = { isSymbolicLink: () => false, isFile: () => false };
 
-// These four strings are the whole point of the module: the desktop and the
-// MCP server both refuse with them, so a noun that drifts here drifts on both
-// surfaces at once. Pinned by exact match, byte for byte — swapping "folder"
-// back to "directory" fails these first.
 describe("dohc guard refusals", () => {
   it("names a file's other link and a change during opening with recovery steps", () => {
     const guard = { ...DOHC_DATABASES_GUARD, path: ".dohc/databases/data/operations.jsonl" };
@@ -93,8 +89,6 @@ describe("dohc guard refusals", () => {
     );
   });
 
-  // The register test: no refusal may carry developer vocabulary, and none may
-  // stop before telling the user what to do.
   it("keeps every refusal in the user register with a next step", () => {
     const all = [
       notARealFolderRefusal(DOHC_TRASH_GUARD, asFile),

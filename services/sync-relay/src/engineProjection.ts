@@ -8,6 +8,7 @@ import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { Duplex } from "node:stream";
+import { ServerLogError } from "./serverLogWords.js";
 import {
   EngineClient,
   DuplexEngineClientConnection,
@@ -80,7 +81,7 @@ export async function startEngineProjection(
 ): Promise<EngineProjectionService> {
   const platform = options.platform ?? process.platform;
   if (platform !== "linux" && !options.allowUnisolatedProjection) {
-    throw new Error(
+    throw new ServerLogError(
       "Document projection requires Linux memory isolation; development can explicitly set DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION=1.",
     );
   }
@@ -92,17 +93,17 @@ export async function startEngineProjection(
     "maxAddressSpaceBytes",
   ] as const) {
     if (!Number.isSafeInteger(settings[key]) || settings[key] < (key === "maxQueued" ? 0 : 1))
-      throw new TypeError("Invalid projection budget.");
+      throw new ServerLogError("Invalid projection budget.");
   }
   if (settings.maxAddressSpaceBytes < 1024)
-    throw new TypeError("Invalid projection address-space budget.");
+    throw new ServerLogError("Invalid projection address-space budget.");
   const executable = options.engineExecutable;
   if (!isAbsolute(executable)) {
-    throw new TypeError("The projection engine must be an absolute executable file.");
+    throw new ServerLogError("The projection engine must be an absolute executable file.");
   }
   const binaryIdentity = await stat(executable, { bigint: true });
   if (!binaryIdentity.isFile()) {
-    throw new TypeError("The projection engine must be an absolute executable file.");
+    throw new ServerLogError("The projection engine must be an absolute executable file.");
   }
   const engineSha256 = hash(await readFile(executable));
   const binaryUnchanged = async () => {
@@ -325,8 +326,8 @@ export async function startEngineProjection(
   });
   if (probe.kind !== "projected" || probe.content.length !== 0) {
     await service.close();
-    throw new Error(
-      `Projection engine did not pass startup probes: ${probe.kind === "refused" ? probe.reason + ": " + probe.message : "nonempty probe output"}`,
+    throw new ServerLogError(
+      `Projection engine did not pass startup probes: ${probe.kind === "refused" ? probe.reason : "nonempty probe output"}`,
     );
   }
   return service;

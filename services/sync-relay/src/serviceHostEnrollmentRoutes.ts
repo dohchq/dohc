@@ -617,7 +617,17 @@ export function createServiceHostEnrollmentRoutes(options: {
         return response({
           ok: true,
           diverged: !!identity && host.diverged({ workspaceId, ...identity }),
-          documents: storage.listServiceHostEnrollments(workspaceId).map(state),
+          // `head`: the note's last accepted journal position, so the owner's desktop can skip a
+          // note it has already applied. A position, never content; only the owner reads this list.
+          documents: storage.listServiceHostEnrollments(workspaceId).map((row) => {
+            const document = state(row);
+            return document.status === "ready"
+              ? {
+                  ...document,
+                  head: storage.automationRecordJournalCursor(document.document.binding),
+                }
+              : document;
+          }),
           ...(kept.keptEdits.length
             ? { keptEdits: kept.keptEdits.map((row) => keptView(row, identity)) }
             : {}),

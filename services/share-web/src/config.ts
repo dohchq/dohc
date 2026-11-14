@@ -6,7 +6,11 @@ import {
   parseNamedLiveBrowserClientLimits,
   type NamedLiveBrowserClientLimits,
 } from "./namedLiveBrowserClient";
-import { parseLiveGatewayLimits, type LiveGatewayLimits } from "./liveGateway";
+import {
+  NAMED_GATEWAY_IDLE_TIMEOUT_RANGE_MS,
+  parseLiveGatewayLimits,
+  type LiveGatewayLimits,
+} from "./liveGateway";
 import {
   parseNamedLiveBrowserLimits,
   type NamedLiveBrowserLimits,
@@ -204,6 +208,14 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
     namedLiveGatewayLimits = parseLiveGatewayLimits(
       JSON.parse(env.DOHC_SHARE_WEB_NAMED_LIVE_LIMITS),
     );
+    // The gateway checks open editors' sessions on a pace set by this timeout, and the relay
+    // keeps a session only a few accepted intervals past its last check.
+    const { idleTimeoutMs } = namedLiveGatewayLimits,
+      { min, max } = NAMED_GATEWAY_IDLE_TIMEOUT_RANGE_MS;
+    if (idleTimeoutMs < min || idleTimeoutMs > max)
+      throw new Error(
+        `DOHC_SHARE_WEB_NAMED_LIVE_LIMITS idleTimeoutMs is ${idleTimeoutMs}. It must be from ${min} to ${max} (${min / 1000} to ${max / 1000} seconds).`,
+      );
   }
   let namedRecipientBrowserLimits: NamedLiveBrowserLimits | undefined;
   if (env.DOHC_SHARE_WEB_NAMED_EDITOR_LIMITS !== undefined) {

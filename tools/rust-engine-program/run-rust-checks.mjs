@@ -333,7 +333,6 @@ results.unshift({
 // already carry a `|`, so a trailing field could not be read back reliably.
 const treeStamp = provenance.stamp;
 
-// Summary + pasteable evidence line.
 const stamp = new Date().toISOString();
 const summary = results
   .map((r) => `${r.name}=${r.status}${r.reason ? `[${r.reason}]` : ""}`)

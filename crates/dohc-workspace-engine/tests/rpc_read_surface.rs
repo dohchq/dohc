@@ -1,7 +1,7 @@
-//! RPC-A acceptance: the read surface (versions/moments/text-list/binary/
-//! secrets) end to end through the transport, against state produced by the
-//! real write paths (RPC writes + autonomous capture) — never by seeding the
-//! DB directly, so the RPCs are proven against the daemon's own semantics.
+//! The read surface (versions/moments/text-list/binary/secrets) end to end
+//! through the transport, against state produced by the real write paths
+//! (RPC writes + autonomous capture), never by seeding the DB directly, so
+//! the RPCs are proven against the daemon's own semantics.
 
 use crate::common;
 
@@ -19,7 +19,6 @@ use std::time::Duration;
 const WORKSPACE_ID: &str = "ws-rpc-read-surface";
 const WAIT: Duration = Duration::from_secs(20);
 
-/// Flush until the given path's captured state satisfies `check`.
 async fn flush_until(
     transport: &InProcessTransport<EngineService>,
     handle: &WorkspaceHandle,
@@ -173,12 +172,10 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    // versions.active resolves to main on a fresh workspace.
     let active = call(&transport, &handle, 2, "versions.active", json!({})).await;
     assert_eq!(active["id"], json!("main"));
     assert_eq!(active["kind"], json!("main"));
 
-    // versions.list contains it.
     let versions = call(&transport, &handle, 3, "versions.list", json!({})).await;
     let listed: Vec<&str> = versions["versions"]
         .as_array()
@@ -188,7 +185,6 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
         .collect();
     assert!(listed.contains(&"main"), "main missing from {listed:?}");
 
-    // An RPC write joins the surface alongside captured content.
     call(
         &transport,
         &handle,
@@ -306,8 +302,6 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
         "pages must not overlap"
     );
 
-    // versionedBinary.read returns the exact bytes; a TEXT head is not a
-    // binary value and therefore answers null.
     id += 1;
     let binary = call(
         &transport,
@@ -353,8 +347,6 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
     assert_eq!(big["inbandLimitBytes"], json!(48 * 1024));
     assert!(big["sha256"].is_string());
 
-    // An unknown version fails closed on the listing too — a typo'd id must
-    // never masquerade as an empty version.
     id += 1;
     let unknown_version = transport
         .call(
@@ -372,7 +364,6 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
         "listing an unknown version must refuse, not read as empty"
     );
 
-    // moments.list pages newest-first and moments.get roundtrips one.
     id += 1;
     let moments = call(
         &transport,
@@ -503,7 +494,6 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
     .await;
     assert_eq!(big["text"], json!(big_secret));
 
-    // secrets.recorded answers only whether protected History holds a text.
     for (path, text, held) in [
         (".env", "TOKEN=rpc-read", true),
         (".env", "TOKEN=rpc-gone", false),
@@ -615,8 +605,6 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
         no_version.is_err(),
         "an unknown version refuses even keyless-and-stateless"
     );
-    // Once a version exists (text write; no key ever minted), keyless +
-    // stateless materialize answers null.
     call(
         &transport,
         &fresh_handle,

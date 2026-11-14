@@ -104,7 +104,6 @@ fn row(
 ) -> ReplicaJournalRow {
     counted_row(source, cursor, cursor, previous, doc)
 }
-/// The source's accepted update at `cursor`, its lineage's event `count`.
 fn counted_row(
     source: &mut Fixture,
     cursor: i64,
@@ -314,13 +313,13 @@ fn passive_journal_echo_both_orders_have_one_history_and_equal_owner_evidence_an
     }
 }
 
-/// Sol's replica format: a restore the relay cancelled after its native fence
-/// reaches a replica as a control record. At the replica's exact generation
-/// and endpoint it advances the generation and nothing else, and a replay
-/// skips. The next delivery at the new generation then applies on the
-/// normal count and evidence chain. A forged or altered record refuses, and
-/// so does a delivery at the new generation without one, or one from the
-/// generation before after it.
+/// A restore the relay cancelled after its native fence reaches a replica as
+/// a control record. At the replica's exact generation and endpoint it
+/// advances the generation and nothing else, and a replay skips. The next
+/// delivery at the new generation then applies on the normal count and
+/// evidence chain. A forged or altered record refuses, and so does a
+/// delivery at the new generation without one, or one from the generation
+/// before after it.
 #[test]
 fn passive_replica_crosses_a_cancelled_restore_by_its_control_record() {
     use dohc_engine_collab::live_update_application::passive::ReplicaRestoreCancellation;
@@ -642,8 +641,6 @@ fn a_restore_fence_decides_what_the_owner_holds() {
         OwnerOutboxLimits,
         draft::{ObservedOwnerBinding, install_observed_binding_in_tx},
     };
-    /// The restore's fence, with the owner's decision in its transaction
-    /// only if `decides`.
     fn fence_deciding(
         f: &mut Fixture,
         fence: NativeRestoreFence,
@@ -801,8 +798,6 @@ fn a_restore_fence_decides_what_the_owner_holds() {
             terminal: None,
             applied_sequence,
         };
-        // Refused for another reason, here a stale applied sequence, the
-        // fence decides nothing: the update stays held.
         let mut stale = fence.clone();
         stale.applied_sequence += 1;
         assert!(fence_deciding(&mut f, stale, decides).is_err());
@@ -829,14 +824,14 @@ fn a_restore_fence_decides_what_the_owner_holds() {
     }
 }
 
-/// Sol's round trip: the source settles, fences a restore, cancels it,
-/// accepts its next update at the new generation and settles that too, with
-/// no successor. That update's audit record carries the cancellation that
-/// explains its generation step. A fresh passive replica given the baseline,
-/// the control record and the update, then the audit and both settlements,
-/// matches the source after a restart and keeps the exact control record.
-/// The update without its control record refuses, and so does the audit
-/// record with its cancellation removed or altered.
+/// The source settles, fences a restore, cancels it, accepts its next update
+/// at the new generation and settles that too, with no successor. That
+/// update's audit record carries the cancellation that explains its
+/// generation step. A fresh passive replica given the baseline, the control
+/// record and the update, then the audit and both settlements, matches the
+/// source after a restart and keeps the exact control record. The update
+/// without its control record refuses, and so does the audit record with its
+/// cancellation removed or altered.
 #[test]
 fn passive_replica_round_trips_a_cancelled_restore_and_its_audit() {
     use dohc_engine_collab::live_update_application::passive::ReplicaRestoreCancellation;
@@ -870,7 +865,6 @@ fn passive_replica_round_trips_a_cancelled_restore_and_its_audit() {
         cancellation: cancelled,
         authority: None,
     };
-    // The update's audit record names the cancellation exactly.
     let ops = operations(&source.store);
     let audit = ops
         .iter()
@@ -990,8 +984,6 @@ fn passive_replica_round_trips_a_cancelled_restore_and_its_audit() {
         serde_json::from_str::<ReplicaRestoreCancellation>(&kept).unwrap(),
         record
     );
-    // The record with its cancellation removed or altered refuses on a
-    // replica that holds everything before it.
     let generation = chain.replace(
         "\"restoreFenceGeneration\":2",
         "\"restoreFenceGeneration\":3",
@@ -1254,8 +1246,6 @@ fn a_settlement_interval_crosses_cancelled_restores_only_through_their_evidence(
             3
         );
         assert_eq!(count(&source.store, "live_owner_activations"), 0);
-        // A passive replica imports the audit and the settlement that
-        // crosses both generations.
         let (_scratch, _path, replica) = receiver(&source);
         assert_eq!(count(&replica, "live_audit_settlements"), 1);
         let moment = |store: &EngineStore| -> String {

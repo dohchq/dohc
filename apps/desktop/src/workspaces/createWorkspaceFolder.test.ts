@@ -34,7 +34,6 @@ function thrown(run: () => void): unknown {
   return null;
 }
 
-// Seams for a folder swapped mid-open and for a mounted disk.
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
   return {
@@ -180,12 +179,13 @@ describe("createWorkspaceFolder", () => {
     });
     expect(await readdir(root)).toEqual([".dohc"]);
     expect(await readSyncHistory(root), "a new folder never synced").toBe("never-synced");
-    // Its schedules run on the computer that made it, whichever computer reads the folder.
-    expect(await scheduleComputer(root, { installId: "install-desk", label: "Desk" })).toEqual({
-      kind: "computer",
-      computer,
-    });
-    // So do its Collections, whose store it makes later.
+    const otherComputer = { installId: "install-desk", label: "Desk" };
+    for (const readingComputer of [computer, otherComputer]) {
+      expect(await scheduleComputer(root, readingComputer)).toEqual({
+        kind: "computer",
+        computer,
+      });
+    }
     expect(JSON.parse(await readFile(join(root, ".dohc", "collections.json"), "utf8"))).toEqual({
       version: 1,
       workspaceId: created.workspaceId,
@@ -226,8 +226,6 @@ describe("createWorkspaceFolder", () => {
     const root = join(base, "reattached");
     await createWorkspaceFolder({ rootPath: root, homeDir, stateDir, computer, kind: "personal" });
     await recordSynced(root);
-    // Forgetting drops only the registry entry; attaching the folder again
-    // adopts its manifest and leaves the record.
     await createWorkspaceFolder({ rootPath: root, homeDir, stateDir, computer, kind: "personal" });
     expect(await readSyncHistory(root)).toBe("synced");
 
@@ -391,7 +389,6 @@ describe("createWorkspaceFolder", () => {
     ).rejects.toMatchObject(refusal(stateFolderRefusal("holds")));
     expect(await readdir(appData)).toEqual(["Roaming"]);
     expect(await readdir(state)).toEqual(["dohc-settings.json"]);
-    // A folder beside it is an ordinary choice.
     await expect(
       createWorkspaceFolder({
         rootPath: join(appData, "notes"),
@@ -450,7 +447,6 @@ describe("createWorkspaceFolder", () => {
         thrown(() => assertNotStateFolder(canonicalWorkspaceRoot(picked), state)),
       ).toMatchObject(refusal(stateFolderRefusal("holds")));
     }
-    // A workspace registered inside the state folder is refused too.
     const inside = await createWorkspaceFolder({
       rootPath: join(state, "notes"),
       homeDir,
@@ -463,7 +459,6 @@ describe("createWorkspaceFolder", () => {
     );
     expect(await readdir(appData)).toEqual(before);
     expect(await readFile(join(state, "dohc-settings.json"), "utf8")).toBe("{}");
-    // Another registered workspace opens as before.
     const other = await createWorkspaceFolder({
       rootPath: join(base, "notes"),
       homeDir,

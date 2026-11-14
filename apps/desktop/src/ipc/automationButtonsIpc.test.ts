@@ -97,18 +97,12 @@ function fixture(
     shareView?: unknown;
     files?: Record<string, string>;
     pressed?: Awaited<ReturnType<CollectionAutomations["press"]>>;
-    /** Why the run the press joins waits. */
     waiting?: "roster" | "held" | "busy";
     described?: string[];
-    /** Each described table's Button fields, by table name. */
     buttons?: Record<string, string[]>;
-    /** The dataset a Collection folder holds, when it is one. */
     datasetIn?: string;
-    /** The actions a dataset button runs that dohc cannot undo. */
     irreversible?: Array<{ name: string; label: string }>;
-    /** A dataset button's state other than ready. */
     datasetState?: { kind: "disabled"; reason: string };
-    /** The dataset ledger remembers the press. */
     remembered?: boolean;
     inspection?: RelayButtonInspection;
     inspect?: (targets: readonly RelayButtonTarget[]) => Promise<RelayButtonInspection[]>;
@@ -316,7 +310,6 @@ function fixture(
     inspectionAccount: async () => account,
     inspectionChanged: () =>
       window.send(CHANNELS.collectionAutomationsChanged, { workspaceId: WORKSPACE_ID }),
-    // The server's data as main makes it on a computer that doesn't keep the Collections.
     serverCollection: async () =>
       serverRelay === null
         ? null
@@ -349,7 +342,6 @@ function fixture(
       pressId: PRESS_ID,
       ...payload,
     });
-  // A dataset Collection goes by its id, and a press names its table.
   const callDataset = (channel: string, payload: Record<string, unknown>) =>
     handlers.get(channel)!(
       { sender: window },
@@ -363,7 +355,6 @@ function fixture(
       pressId: PRESS_ID,
       ...payload,
     });
-  // A press by Collection folder, as the CLI sends it, with no window to tell.
   const waits: Array<string | null> = [];
   const named = (
     input: Partial<NamedPress> = {},
@@ -767,7 +758,6 @@ describe("dataset operations from shared document buttons", () => {
       buttons: [{ state: { kind: "unchecked", reason: "Host unavailable" } }],
     });
     expect(inspect).toHaveBeenCalledTimes(1);
-    // That answer is recent, so a listing keeps it. Check again asks the host anyway.
     await expect(f.call(CHANNELS.listAutomationButtons, { check: true })).resolves.toMatchObject({
       buttons: [{ state: { kind: "checking", reason: BUTTON_CHECKING } }],
     });
@@ -848,7 +838,6 @@ describe("dataset operations from shared document buttons", () => {
       files: { "Invoices/automations.yaml": PAID_FILE },
       inspection,
     });
-    // A reply for another definition is unknown, even if that host said ready.
     await vi.waitFor(async () => {
       await expect(f.call(CHANNELS.listAutomationButtons, {})).resolves.toMatchObject({
         buttons: [{ state: { kind: "unchecked" } }],
@@ -1313,7 +1302,6 @@ describe("pressing a button", () => {
       ],
     });
     await expectCallerDescriptions(f, describe);
-    // The pressing window hears how the run settles.
     f.pressWindows.settled(WORKSPACE_ID, { claimId, outcome: "done", error: null });
     expect(f.window.sent).toEqual([
       {
@@ -1341,12 +1329,10 @@ describe("pressing a button", () => {
         return { busy: false, claimId, settled: null };
       },
     });
-    // The window's button is free again at once: the server runs it, and a failure arrives as the server's notice.
     await expect(f.pressDataset({ recordId: "12", confirmed: ["sendInvoice"] })).resolves.toEqual({
       busy: false,
       relayed: true,
     });
-    // An agent's press names the agent and its depth, and the server answers with its run.
     await expect(
       f.named({}, { kind: "agent", originId: "agent-run-7", depth: 2 }),
     ).resolves.toEqual({ busy: false, claimId, settled: null });
@@ -1374,12 +1360,10 @@ describe("pressing a button", () => {
         agent: { originId: "agent-run-7", depth: 2 },
       },
     ]);
-    // The server checks a new press itself; this computer's ledger and checks are not asked.
     expect(f.executor.datasetPressed).not.toHaveBeenCalled();
     expect(f.executor.datasetButtons).not.toHaveBeenCalled();
     expect(f.executor.pressDataset).not.toHaveBeenCalled();
     expect(f.window.sent).toEqual([]);
-    // A run the server already ended says how; one busy for someone else says so.
     const ended = fixture({
       server: () => ({ busy: false, claimId, settled: { outcome: "done", error: null } }),
     });
@@ -1393,7 +1377,6 @@ describe("pressing a button", () => {
       busy: true,
       reason: "Running for this record.",
     });
-    // An answer that is not a press is refused.
     const odd = fixture({
       server: () => ({ busy: false, claimId, settled: null, pressedBy: "someone" }),
     });
@@ -1402,7 +1385,6 @@ describe("pressing a button", () => {
 
   it("lets the server answer a CLI press it remembers, and checks the button here only to say why the server refused one", async () => {
     const claimId = "c".repeat(64);
-    // Sent again after a lost answer: the automation is off now, but the server remembers the press.
     const remembered = fixture({
       datasetIn: id(1),
       described: ["list"],
@@ -1414,7 +1396,6 @@ describe("pressing a button", () => {
       remembered.named({}, { kind: "agent", originId: "agent-run-7", depth: 1 }),
     ).resolves.toEqual({ busy: false, claimId, settled: { outcome: "done", error: null } });
     expect(remembered.executor.datasetButtons).not.toHaveBeenCalled();
-    // A new press the server refuses says why as this computer reads the button.
     const off = fixture({
       datasetIn: id(1),
       described: ["list"],
@@ -1425,7 +1406,6 @@ describe("pressing a button", () => {
       },
     });
     await expect(off.named()).rejects.toThrow("Mark paid is off. Turn it on in Automations.");
-    // One that runs an action dohc cannot undo asks for it by name, as a press kept here does.
     const irreversible = [{ name: "sendInvoice", label: "Send invoice" }];
     const unconfirmed = fixture({
       datasetIn: id(1),
@@ -1437,7 +1417,6 @@ describe("pressing a button", () => {
       },
     });
     await expect(unconfirmed.named()).resolves.toEqual({ confirm: irreversible });
-    // The server's own refusal stands when this computer sees nothing wrong.
     const refused = fixture({
       datasetIn: id(1),
       described: ["list"],
@@ -1494,7 +1473,6 @@ describe("pressing a button", () => {
       expect.any(Function),
     );
     await expectCallerDescriptions(f, f.executor.datasetButtons.mock.calls[0]![2]);
-    // The document rule is not what answers a dataset.
     expect(f.buttonFields).not.toHaveBeenCalled();
   });
 
@@ -1609,7 +1587,6 @@ describe("pressing a button by its Collection's folder, as the CLI does", () => 
       expect.any(Function),
     );
     expect(f.waits).toEqual(["roster"]);
-    // No window pressed, so none hears the run.
     expect(f.window.sent).toEqual([]);
     await expect(f.named({ collectionPath: "shared-with-me/Invoices" })).rejects.toThrow(
       "is not a Collection in this workspace",
@@ -1637,7 +1614,6 @@ describe("pressing a button by its Collection's folder, as the CLI does", () => 
       claimId: "a".repeat(64),
       settled: null,
     });
-    // The executor checks the names again against the automation it runs.
     expect(f.executor.pressDataset).toHaveBeenCalledWith(
       {
         datasetId: id(1),
@@ -1690,7 +1666,6 @@ describe("pressing a button by its Collection's folder, as the CLI does", () => 
     const changed = [
       { datasetState: { kind: "disabled" as const, reason: "Mark paid is switched off." } },
       { irreversible },
-      // Renamed since: the resend names the table it pressed in.
       { buttons: { Invoices: ["Mark as paid"] } },
     ];
     for (const since of changed) {
@@ -1719,7 +1694,6 @@ describe("pressing a button by its Collection's folder, as the CLI does", () => 
         expect.any(Function),
       );
     }
-    // A new press of a switched-off button is refused with its reason.
     const off = fixture({
       datasetIn: id(1),
       described: ["list"],
@@ -1739,7 +1713,6 @@ describe("pressing a button by its Collection's folder, as the CLI does", () => 
     const [first, again, other] = document.executor.press.mock.calls.map(idOf);
     expect(again).toBe(first);
     expect(other).not.toBe(first);
-    // The same key on the same folder, once it holds a dataset, is a new press in the dataset's ledger.
     const dataset = fixture({
       datasetIn: id(1),
       described: ["list"],
@@ -1796,7 +1769,6 @@ describe("pressing a button by its Collection's folder, as the CLI does", () => 
     );
     expect(f.executor.datasetIn).not.toHaveBeenCalled();
     expect(f.executor.press).not.toHaveBeenCalled();
-    // Less than Edit on the Collection refuses, as the app's button does.
     const view = fixture({
       shareView: editShare(["Invoices"], "view"),
       files: { "Invoices/automations.yaml": PAID_FILE },

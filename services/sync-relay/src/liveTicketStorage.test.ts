@@ -16,6 +16,7 @@ import { openSyncRelayStorage } from "./storage.js";
 import type { StorageContext } from "./storage/context.js";
 import {
   consumeLiveTicketInTransaction,
+  LiveTicketsRetained,
   storeLiveTicketInTransaction,
 } from "./storage/liveDocumentAuthority.js";
 import { LIVE_TICKET_COLUMNS } from "./storage/schema.js";
@@ -189,7 +190,7 @@ it("retains redeemed capacity until expiry and never evicts unexpired tickets", 
     state.storage.mintLiveTicket(mint);
     state.storage.redeemLiveTicket(redeem);
     state.storage.mintLiveTicket(another(2));
-    expect(state.storage.mintLiveTicket(another(3))).toBeNull();
+    expect(() => state.storage.mintLiveTicket(another(3))).toThrow(LiveTicketsRetained);
     expect(rows(state)).toHaveLength(2);
     state.setTime(31000);
     expect(state.storage.mintLiveTicket(another(3))).toEqual({ expiresAtMs: 61000 });
@@ -470,12 +471,12 @@ it("refuses activation, freezes the ticket epoch, and preserves capacity across 
         report: { ...report, connection: coordinate },
       }),
     ).not.toBeNull();
-    expect(
+    expect(() =>
       state.storage.mintLiveTicket({
         ...another(4),
         report: { ...report, connection: coordinate },
       }),
-    ).toBeNull();
+    ).toThrow(LiveTicketsRetained);
     expect(state.raw.prepare(`SELECT ticket_id FROM ${table} ORDER BY ticket_id`).all()).toEqual([
       { ticket_id: "ticket-1" },
       { ticket_id: "ticket-2" },
@@ -608,7 +609,6 @@ it("redeems a personal agent's ticket only from the connection it names", async 
   }
 });
 
-// The v2 table, before personal agents.
 const V2_TICKET_TABLE = `CREATE TABLE ${table} (
   ticket_id TEXT NOT NULL CHECK (length(CAST(ticket_id AS BLOB)) BETWEEN 1 AND 512),
   token_hash TEXT NOT NULL CHECK (length(token_hash) = 43 AND length(CAST(token_hash AS BLOB)) = 43 AND token_hash NOT GLOB '*[^A-Za-z0-9_-]*'),

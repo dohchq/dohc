@@ -141,7 +141,6 @@ describe("email delivery gate", () => {
 });
 
 describe("auth body limit", () => {
-  /** An endless body in 16 KiB chunks that counts what the router pulls. */
   function endless() {
     const counted = { pulled: 0 };
     const body = new ReadableStream<Uint8Array>(
@@ -201,7 +200,6 @@ describe("auth body limit", () => {
     const response = await router({ auth: gateway({}, handler) })(post(body));
     expect(response.status).toBe(413);
     expect(response.headers.get("connection")).toBe("close");
-    // It stops at the chunk that crosses the limit.
     expect(counted.pulled).toBe(AUTH_BODY_MAX_BYTES / (16 * 1024) + 1);
     expect(handler).not.toHaveBeenCalled();
   });
@@ -265,7 +263,6 @@ describe("account pages", () => {
     expect(open).toContain('id="password"');
     expect(open).toContain("Send a verification link");
 
-    // A closed server sets the password and name when the person opens the emailed link.
     const closed = await (await router({ closedSignUp: true })(get("/account/sign-up"))).text();
     expect(closed).not.toContain('id="name"');
     expect(closed).not.toContain('id="password"');

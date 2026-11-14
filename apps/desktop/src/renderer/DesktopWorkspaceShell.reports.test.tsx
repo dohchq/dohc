@@ -18,7 +18,6 @@ import {
 const BOTH = { usage: true, errors: true };
 const ON = { usageReports: true, errorReports: true };
 
-// The shell as DesktopRoot mounts it, with the switches it has read so far.
 function shell(
   bridge: ReturnType<typeof makeBridge>,
   privacy: PrivacySettings | null,
@@ -38,7 +37,6 @@ function shell(
   );
 }
 
-// Each ask waits until the test answers it.
 function heldAnswers(bridge: ReturnType<typeof makeBridge>): Deferred<ReportKinds>[] {
   const answers: Deferred<ReportKinds>[] = [];
   bridge.readReportsNotice = vi.fn(() => {

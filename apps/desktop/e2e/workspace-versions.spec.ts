@@ -142,35 +142,28 @@ test("the wedge: create a version, edit in it, switch, and merge back to Main", 
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
 
-    // The selector shows Main by default.
     await expectActiveVersion(page, "Main");
 
-    // 1. Create "Draft" through the UI — it becomes the working version.
     await createVersionViaMenu(page, "Draft");
     const draftId = engineVersionIdByName(temp.rootPath, "Draft");
     expect(draftId).not.toBeNull();
 
-    // 2. Edit plan.md on disk while Draft is active — the watcher captures
-    //    the edit into Draft (not Main).
     await writeWorkspaceFiles(temp, [{ path: "plan.md", contents: "draft text\n" }]);
     await expect
       .poll(() => engineSnapshotText(temp.rootPath, draftId ?? "", "plan.md"), { timeout: 30_000 })
       .toBe("draft text\n");
     expect(engineSnapshotText(temp.rootPath, "main", "plan.md")).toBe("v1 text\n");
 
-    // 3. Switch to Main — the folder shows Main's content again.
     await switchVersionViaMenu(page, "Main");
     await expect
       .poll(() => readWorkspaceText(temp.rootPath, "plan.md"), { timeout: 20_000 })
       .toBe("v1 text\n");
 
-    // 4. Switch back to Draft — the draft edit returns.
     await switchVersionViaMenu(page, "Draft");
     await expect
       .poll(() => readWorkspaceText(temp.rootPath, "plan.md"), { timeout: 20_000 })
       .toBe("draft text\n");
 
-    // 5. Compare with Main shows the one changed file.
     await openVersionMenu(page);
     await page.getByTestId("version-compare").click();
     await expect(page.getByTestId("version-compare-page")).toBeVisible();
@@ -178,7 +171,6 @@ test("the wedge: create a version, edit in it, switch, and merge back to Main", 
       page.locator('[data-testid="version-compare-file"][data-compare-path="plan.md"]'),
     ).toBeVisible({ timeout: 20_000 });
 
-    // 6. Merge Draft into Main (clean) — Main now has the draft text.
     await openVersionMenu(page);
     await page.getByTestId("version-merge").click();
     await expect(page.getByTestId("version-merge-dialog")).toBeVisible();
@@ -189,7 +181,6 @@ test("the wedge: create a version, edit in it, switch, and merge back to Main", 
     await page.getByTestId("version-merge-done").click();
     expect(engineSnapshotText(temp.rootPath, "main", "plan.md")).toBe("draft text\n");
 
-    // Switching to Main shows the merged content on disk.
     await switchVersionViaMenu(page, "Main");
     await expect
       .poll(() => readWorkspaceText(temp.rootPath, "plan.md"), { timeout: 20_000 })
@@ -219,7 +210,6 @@ test("conflicting edits surface a calm conflict panel and keep-this-side resolve
       })
       .toBe("base line\n");
 
-    // Fork "Feature" and change the file there...
     await createVersionViaMenu(page, "Feature");
     await writeWorkspaceFiles(temp, [{ path: "notes.md", contents: "feature side\n" }]);
     const featureId = engineVersionIdByName(temp.rootPath, "Feature");
@@ -230,7 +220,6 @@ test("conflicting edits surface a calm conflict panel and keep-this-side resolve
       })
       .toBe("feature side\n");
 
-    // ...then change the same file differently on Main.
     await switchVersionViaMenu(page, "Main");
     await writeWorkspaceFiles(temp, [{ path: "notes.md", contents: "main side\n" }]);
     await expect
@@ -239,8 +228,6 @@ test("conflicting edits surface a calm conflict panel and keep-this-side resolve
       })
       .toBe("main side\n");
 
-    // Merging Feature into Main surfaces the conflict panel — both sides
-    // shown in full, no raw markers anywhere.
     await switchVersionViaMenu(page, "Feature");
     await openVersionMenu(page);
     await page.getByTestId("version-merge").click();
@@ -254,15 +241,12 @@ test("conflicting edits surface a calm conflict panel and keep-this-side resolve
     const dialogText = await page.getByTestId("version-merge-dialog").textContent();
     expect(dialogText ?? "").not.toContain("<<<<<<<");
 
-    // Keep Feature's copy — Main resolves to the incoming side.
     await conflict.getByTestId("version-conflict-keep-incoming").click();
     await expect(page.getByTestId("version-merge-status")).toHaveText(/^Merged .+ into Main$/, {
       timeout: 30_000,
     });
     await page.getByTestId("version-merge-done").click();
 
-    // Engine and disk agree: Main's tip holds the feature side, and once Main
-    // is active the folder shows it too.
     expect(engineSnapshotText(temp.rootPath, "main", "notes.md")).toBe("feature side\n");
     await switchVersionViaMenu(page, "Main");
     await expect
@@ -349,8 +333,6 @@ test("binary assets switch byte-exactly and binary conflicts resolve by side", a
       .poll(() => readWorkspaceBytes(temp.rootPath, "logo.png"), { timeout: 20_000 })
       .toEqual(draftConflictBytes);
 
-    // Second round resolves the other way — "keep mine" must keep Main's
-    // bytes, guarding against both buttons being wired to the same side.
     const mainKeepBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xcc, 0x01]);
     const draftKeepBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xdd, 0x02]);
     await writeWorkspaceFiles(temp, [{ path: "logo.png", contents: mainKeepBytes }]);
@@ -383,7 +365,6 @@ test("binary assets switch byte-exactly and binary conflicts resolve by side", a
     });
     await page.getByTestId("version-merge-done").click();
 
-    // Main's side won: its tip and folder hold mainKeepBytes, byte for byte.
     expect(engineSnapshotBytes(temp.rootPath, "main", "logo.png")).toEqual(mainKeepBytes);
     await switchVersionViaMenu(page, "Main");
     await expect
@@ -394,7 +375,7 @@ test("binary assets switch byte-exactly and binary conflicts resolve by side", a
   }
 });
 
-// Known M4 (#3211). A merge leaves the merge base where the version started,
+// A known defect. A merge leaves the merge base where the version started,
 // so a second merge of lines the version changed again asks which copy to
 // keep, though both copies are the person's own. The test expects the clean
 // result, and is marked as failing only once the second merge answers, so a
@@ -426,7 +407,6 @@ test("a version merges cleanly a second time after it changes the same lines aga
       await openVersionMenu(page);
       await page.getByTestId("version-merge").click();
       await page.getByTestId("version-merge-confirm").click();
-      // The merge has answered, with a result or with files to decide.
       await expect(page.getByTestId("version-merge-status")).toBeVisible({ timeout: 30_000 });
     };
 

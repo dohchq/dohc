@@ -31,7 +31,7 @@ import {
   type LiveBrowserContext,
   type PersonalLiveContext,
 } from "./liveBrowserContext.js";
-import type { LinkAuthorityResolver, PersonalAuthority } from "./linkAuthority.js";
+import { type LinkAuthorityResolver, type PersonalAuthority } from "./linkAuthority.js";
 import type { PersonalAgents } from "./personalAgents.js";
 import { errorResponse, relayError, RelayError } from "./errors.js";
 import type { CapacityLiveAdmissionValidator } from "./ownerOutboxDelivery.js";
@@ -305,23 +305,30 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
     refuseDeviceControl(socket, limits.drainTimeoutMs),
   );
 
+  // A link page stops editing on a 404 and tries again on a 503, so a relay that is stopping,
+  // full, slow or failing answers 503 to a caller someone has vouched for. share-web sends a
+  // holder's capability only for a browser session it holds; an agent's token is vouched for
+  // once it resolves here. Anyone else gets the same 404 in every state.
+  const busy = (vouched: boolean) =>
+    kind === "link" && vouched ? linkRefusal("link_live_unavailable") : refusal();
+
   async function handle(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (
       options.kind === "owner" ||
       desktop ||
-      closed ||
-      storage.unavailable.aborted ||
       url.pathname !== `/sync/live/${kind}-tickets` ||
       url.search ||
       request.method !== "POST" ||
       !trusted(request.headers) ||
       request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !==
         "application/json" ||
-      pendingRequests >= limits.maxPendingRequests ||
       request.signal.aborted
     )
       return refusal();
+    let vouched = (request.headers.get("authorization") ?? "").startsWith("LinkCapability ");
+    if (closed || storage.unavailable.aborted || pendingRequests >= limits.maxPendingRequests)
+      return busy(vouched);
     pendingRequests++;
     const controller = new AbortController(),
       signal = AbortSignal.any([
@@ -333,9 +340,11 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
     const timer = setTimeout(() => controller.abort(), limits.upgradeTimeoutMs);
     let cancel!: () => void;
     const cancelled = new Promise<Response>((done) => {
-      cancel = () => done(refusal());
+      cancel = () => done(busy(vouched && !request.signal.aborted));
       signal.addEventListener("abort", cancel, { once: true });
     });
+    // Once the request is well formed, a throw is the relay's own failure, not a refusal.
+    let wellFormed = false;
     const work = (async () => {
       try {
         const check = storage.captureStanding();
@@ -377,6 +386,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
         const { discriminator, objectId } = input as Record<string, unknown>;
         if (!sessionId(discriminator)) return refusal();
         parseLiveUpdateIdentifier(objectId);
+        wellFormed = true;
         const authenticated = new Request(request.url, {
           headers: credentials(request.headers),
           signal,
@@ -385,6 +395,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
         signal.throwIfAborted();
         check();
         if (!context || context.kind !== kind) return refusal();
+        vouched = true;
         if (context.kind === "link") {
           const authority = authorizeLinkShareAction({
             storage,
@@ -424,15 +435,22 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
         const minted = await options.tickets.mint({ objectId }, context, signal);
         signal.throwIfAborted();
         check();
-        return minted ? answer(minted) : refusal();
+        if (minted) return answer(minted);
+        // A link that has taken as many browsers as it may can't take this one. Trying again can't help.
+        return context.kind === "link" && storage.liveLinkFull(context)
+          ? linkRefusal("link_full")
+          : refusal();
       } catch (error) {
         // A personal agent learns when to try again: its account can't be read now, or it asked too often.
-        return kind === "personal" &&
-          !signal.aborted &&
-          error instanceof RelayError &&
-          (error.statusCode === 503 || error.statusCode === 429)
-          ? errorResponse(error)
-          : refusal();
+        if (kind === "personal")
+          return !signal.aborted &&
+            error instanceof RelayError &&
+            (error.statusCode === 503 || error.statusCode === 429)
+            ? errorResponse(error)
+            : refusal();
+        return busy(
+          vouched && wellFormed && !(error instanceof RelayError && error.statusCode < 500),
+        );
       } finally {
         pendingRequests--;
         clearTimeout(timer);

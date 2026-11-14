@@ -86,7 +86,6 @@ async function fixture(
     await rm(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 });
   }
 }
-// Runs a stand-in script instead of the worker and reports the signal that ended it.
 function scriptLauncher(
   script: string,
   ended: (signal: NodeJS.Signals | null) => void = () => {},

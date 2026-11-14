@@ -1,4 +1,4 @@
-// #3763: typing any amount must never stop a note from going live, and activation must cost what the note's size costs,
+// Typing any amount must never stop a note from going live, and activation must cost what the note's size costs,
 // not what its edit count costs. These tests drive the activation itself (`prepare`) with production settings, assert
 // that it accepts the note, and report how long it took, the longest time it held the relay's event loop, and the work
 // on the main thread inside its longest holds.
@@ -9,6 +9,7 @@ import { createLiveValidationExecutor } from "./liveValidation.js";
 import type { StorageContext } from "./storage/context.js";
 import {
   CHECKPOINT_MOMENTS,
+  forgetDeletedOrdinaryCheckpoints,
   readOrdinaryCheckpoint,
   type OrdinaryCheckpointScope,
 } from "./storage/ordinaryActivationCheckpoint.js";
@@ -19,7 +20,13 @@ import {
   type OrdinaryFoldValidator,
 } from "./storage/ordinaryActivationFold.js";
 import { ServiceActivationStaleCut } from "./storage/ordinaryActivationSource.js";
+import { SERVICE_ACTIVATIONS } from "./storage/serviceActivationSchema.js";
+import { serverLogLine } from "./serverLogWords.js";
 import { createLiveMarkdownRegistrationValidator } from "../../../packages/ydoc-projection/src/liveDocumentValidation.js";
+import {
+  markdownToYDoc,
+  yDocToMarkdown,
+} from "../../../packages/ydoc-projection/src/import-export.js";
 import {
   ACTIVATION,
   typedNote,
@@ -326,6 +333,18 @@ it("a note typed within today's entry limit activates", async () => {
     replayed: false,
     completed: false,
   });
+});
+
+// The server log shows only fixed words, so the refusal must carry its reason as one.
+it("an activation refused for its baseline names why in the server log", async () => {
+  const note = await typedRelayNote(100);
+  const validate = validation();
+  expect((await activate(note, validate)).outcome).toMatchObject({ replayed: false });
+  // The relay keeps the registered baseline but forgets the activation that registered it.
+  note.raw.prepare(`DELETE FROM ${SERVICE_ACTIVATIONS}`).run();
+  expect(serverLogLine((await activate(note, validate)).outcome)).toBe(
+    "ServerLogError: Service activation requires a new live baseline: already-registered.",
+  );
 });
 
 // One keystroke past today's entry limit: the activation folds its rows into a checkpoint before its last read.
@@ -693,6 +712,102 @@ it.each([false, true])(
     pages = 0;
     expect((await activate(note, counted(false), capture)).outcome).toEqual(activated(note));
     expect(pages).toBe(0);
+  },
+);
+
+/**
+ * A note past today's entry limit, folded into a checkpoint, then deleted and restored at its path. The restored note
+ * activates under `lineage`: its old one, which a device that kept an edit against the delete brings back, or a new one
+ * seeded from the restored text, which every other restore starts. Unless `kept`, the relay deletes the old lineage's
+ * checkpoint as it does when it appends the delete.
+ */
+async function restoredActivation(lineage: "old" | "new", kept: boolean) {
+  const validate = validation(),
+    note = await typedRelayNote(ACTIVATION.maxActivationHistoryEntries + 1),
+    storage = storageOf(note),
+    old = lineageOf(note, validate);
+  for (let runs = 0; (await foldOnePage(note, validate)).kind === "folded"; runs++)
+    if (runs > 100) throw new Error("The fold did not finish.");
+  expect(readOrdinaryCheckpoint(storage, old)).toMatchObject({
+    throughRelaySeq: note.capture.source.committedCursor,
+  });
+  const deleted = note.appendMoment({
+    momentId: "deleted",
+    path: note.path,
+    operation: "delete",
+    payloadBeforePath: note.path,
+    payloadBeforeContentKind: "text",
+    payloadBeforeBlobSha256: note.end.projectedMarkdownSha256,
+    payloadAfterPath: null,
+    payloadAfterBlobSha256: null,
+  });
+  note.raw
+    .prepare(
+      "INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms) VALUES ('workspace',?,?,'deleted','main',NULL,NULL,NULL,NULL,0)",
+    )
+    .run(note.document.objectId, deleted);
+  if (!kept) storage.tx(() => forgetDeletedOrdinaryCheckpoints(storage, "workspace", "object"));
+  expect(readOrdinaryCheckpoint(storage, old) !== null).toBe(kept);
+  if (lineage === "old") {
+    note.appendWrite("restored", note.end, true);
+    const { outcome } = await activate(note, validate, note.captureAt(note.note.fullState));
+    return { document: note.document, outcome };
+  }
+  const restored = new Y.Doc();
+  Y.applyUpdate(restored, note.note.fullState);
+  const seeded = markdownToYDoc(yDocToMarkdown(restored), { clientID: 3 }),
+    baseline = Y.encodeStateAsUpdate(seeded);
+  restored.destroy();
+  seeded.destroy();
+  const lineageClaimId = createHash("sha256").update(baseline).digest("hex"),
+    document = { ...note.document, lineageClaimId },
+    text = createLiveMarkdownRegistrationValidator(ACTIVATION.validation)({
+      document,
+      currentPath: note.path,
+      checkpoint: baseline,
+    });
+  if (text.kind !== "accepted") throw new Error("Invalid restored note.");
+  note.appendWrite("restored", text.evidence, true);
+  const base = note.appendUpdate(baseline, { lineageClaimId, isBaseState: true }),
+    captured = note.captureAt(baseline);
+  const capture = {
+    ...captured,
+    baselineBytes: Buffer.from(baseline),
+    source: {
+      ...captured.source,
+      lineageClaimId,
+      baseRelaySeq: base,
+      baseOriginSeq: captured.source.nativeHeadSequence,
+    },
+  };
+  return { document, outcome: (await activate(note, validate, capture)).outcome };
+}
+
+// A note's checkpoints are deleted with it. Activation stops at the delete, and a restore's new lineage reads only its own
+// checkpoint, so a restored note activates the same way whether the old checkpoint is still there or not.
+it(
+  "a deleted note restored under its old lineage is refused the same way with its old checkpoint or without it",
+  { timeout: 300_000 },
+  async () => {
+    const withCheckpoint = await restoredActivation("old", true),
+      without = await restoredActivation("old", false);
+    expect(withCheckpoint.outcome).toMatchObject({
+      message: "Ordinary activation history replaced the live document.",
+    });
+    expect(without).toEqual(withCheckpoint);
+  },
+);
+
+it(
+  "a deleted note restored under a new lineage activates the same way with the old lineage's checkpoint or without it",
+  { timeout: 300_000 },
+  async () => {
+    const withCheckpoint = await restoredActivation("new", true),
+      without = await restoredActivation("new", false);
+    expect(withCheckpoint).toMatchObject({
+      outcome: { document: withCheckpoint.document, replayed: false, completed: false },
+    });
+    expect(without).toEqual(withCheckpoint);
   },
 );
 

@@ -7,27 +7,26 @@
 //! keeps the fork-time state.
 //!
 //! Moment backfill cannot use `metadata_origin` to tell local from imported:
-//! `moment_apply.rs` stores the sending peer's wire value verbatim (S2's
-//! boundary stamp covers `snapshots`/`fork_base_snapshots`, not `moments`).
-//! It excludes an imported moment by exact provenance instead — a matching
-//! successfully applied `imported=1` row in `replication_log`, correlated on
-//! `momentId` (which the receiver preserves verbatim, unlike secrets). An
-//! imported coordinate with a pending refusal did not create the matching
-//! domain row, so it is not import provenance. The backfill also excludes
-//! moments whose object has retained or claimed CRDT state, except its current
-//! head when durable coverage proves it is the lineage's file artifact. Deferred
-//! CRDT input still reserves the path. A pruned local marker has no such state:
-//! its saved artifact history remains the source for enrollment. A declined
-//! lineage instead exports one current saved version; its intermediate settles
-//! stay local after prune, claim, and later enrollment.
+//! `moment_apply.rs` stores the sending peer's wire value verbatim, and the
+//! boundary stamp covers `snapshots`/`fork_base_snapshots`, not `moments`. It
+//! excludes an imported moment by a matching successfully applied
+//! `imported=1` row in `replication_log`, correlated on `momentId`, which the
+//! receiver preserves verbatim. A coordinate with a pending refusal created
+//! no matching domain row, so it is not import provenance. The backfill also
+//! excludes moments whose object has retained or claimed CRDT state, except
+//! its current head when durable coverage proves it is the lineage's file
+//! artifact. Deferred CRDT input still reserves the path. A pruned local
+//! marker has no such state: its saved artifact history remains the source
+//! for enrollment. A declined lineage exports one current saved version; its
+//! intermediate settles stay local after prune, claim, and later enrollment.
 //!
 //! A live append stores its path on `ydoc_docs`, so enrollment can originate
 //! the lineage before any settle creates a snapshot. Once a snapshot exists,
-//! its path is canonical and can change while the document is closed. The
-//! enrollment read therefore prefers the snapshot path and uses the Y.Doc path
-//! only for a never-settled lineage. A lineage an open session holds is
-//! deferred: the session's next record or its close originates it, and a
-//! later sweep claims it once no session holds it.
+//! its path is canonical and can change while the document is closed, so the
+//! enrollment read prefers the snapshot path and uses the Y.Doc path only for
+//! a never-settled lineage. A lineage an open session holds is deferred: the
+//! session's next record or its close originates it, and a later sweep
+//! claims it once no session holds it.
 //!
 //! Secret-version payloads always read `secret_fork_bases`, including the
 //! source tip's frozen last-edit timestamp. Receivers store `updatedAtMs` in
@@ -431,7 +430,7 @@ fn backfill_moments_between(
     // imported one: `moment_apply.rs`'s `INSERT INTO moments` stores the
     // WIRE payload's `metadata.origin` verbatim (the sending peer's own
     // value — "api", "capture", "local-file", whatever that peer used), not
-    // a boundary stamp. Only `snapshots`/`fork_base_snapshots` get S2's
+    // a boundary stamp. Only `snapshots`/`fork_base_snapshots` get the
     // "sync" stamp. The reliable discriminator is real import provenance:
     // `moment_apply.rs` preserves the sender's `moment_id` verbatim (unlike
     // secrets, which re-mint theirs), and every applied envelope lands a
@@ -2310,7 +2309,6 @@ mod tests {
                 .iter()
                 .any(|(kind, p)| kind == "moment.append" && p["objectId"] == "scene")
         );
-        // Store and authorize the asset without changing the scene's document or moment.
         let sha = dohc_engine_storage::hex_sha256(&[1, 2, 3]);
         VersionedTextStore::new(&mut store)
             .write_binary(

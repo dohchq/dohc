@@ -5,17 +5,17 @@
 //!
 //! Ownership model: the DRIVER TASK owns the files actor and watch registration, so
 //! it can tear them down and re-spawn them freely (the policy-flip re-offer
-//! below, and the D-shard watcher supervision that builds on the same lever).
+//! below, and the watcher supervision that builds on the same lever).
 //! The daemon holds only a [`CaptureDriver`]: a cancellation token, the
-//! driver's join handle, and a small observable status snapshot for the E
-//! RPCs. Shutdown is strictly ordered — unregister watch → files.close() →
+//! driver's join handle, and a small observable status snapshot for
+//! `watcher.status`. Shutdown is strictly ordered — unregister watch → files.close() →
 //! driver exit — and on PER-WORKSPACE close the daemon awaits the driver
 //! before closing the store actor, so no capture write can race workspace
 //! teardown. (At whole-DAEMON exit the transport's close hook closes actors
 //! first; in-flight capture writes fail contained and un-acked, and the
 //! post-transport drain joins the threads — see `run_stdio`.)
 //!
-//! Policy-flip convergence (the #205-review obligation): `.dohc` is unwatched
+//! Policy-flip convergence: `.dohc` is unwatched
 //! (policy edits generate no watcher events — TS parity), so each drive cycle
 //! fingerprints `.dohc/files.toml` + `.dohc/visibility.toml`. On a change the
 //! files layer is respawned with a manifest seeded from captured state.
@@ -951,13 +951,13 @@ impl ScanGauge {
     }
 }
 
-/// Observable driver state for the E-shard `watcher.status` RPC and tests.
+/// Observable driver state for the `watcher.status` RPC and tests.
 ///
 /// One atomic word, deliberately: with separate atomics per flag, no
 /// writer-side store ordering can stop a reader from loading one flag before
-/// a transition and the other after it — `running && terminal` stayed
-/// observable through four rounds of store-order fixes. A single word makes
-/// every read a consistent snapshot and every transition one store.
+/// a transition and the other after it, so a reader could observe
+/// `running && terminal`. A single word makes every read a consistent
+/// snapshot and every transition one store.
 #[derive(Default)]
 pub(crate) struct DriverStatus {
     bits: std::sync::atomic::AtomicU8,
@@ -1545,7 +1545,6 @@ impl CaptureDriver {
     }
 }
 
-/// One incarnation of the files layer.
 struct FilesLayer {
     files: FilesActor,
     watcher: crate::file_observation::CaptureWatch,
@@ -1899,12 +1898,10 @@ fn wall_now_ms() -> i64 {
 }
 
 /// The I/O one driver tick performs, behind a seam so the loop's cadence and
-/// restart decisions are testable without a filesystem. Two rounds of review
-/// found real defects in this loop that every test missed, because the tests
-/// asserted on [`RestartTracker`] while the loop chose its own timing — a
-/// mutation restoring the original bug left the whole suite green. The loop
-/// is now generic over this trait so a fake can drive it under paused time
-/// and assert what it actually waited on.
+/// restart decisions are testable without a filesystem. Tests that assert
+/// only on [`RestartTracker`] miss defects in the timing the loop chooses.
+/// The loop is generic over this trait so a fake can drive it under paused
+/// time and assert what it waited on.
 trait DriverEnv {
     type Layer;
 
@@ -3141,7 +3138,6 @@ struct CaptureThreadOutcome {
     /// Automation claims the ordinary file captures committed.
     automation_claims: Vec<dohc_engine_domain::AutomationClaim>,
     pending_placement_paths: Vec<CapturePlacementPath>,
-    /// The provenance the pass recorded with.
     provenance: CaptureProvenance,
     /// The rules the pass's capture read.
     rules: PolicyState,
@@ -3179,7 +3175,6 @@ fn startup_provenance(
     }
 }
 
-/// Record a live pass as a rescan unless it already has a label.
 fn record_as_rescan(provenance: &mut CaptureProvenance) {
     if provenance.summary.is_none() {
         provenance.summary = Some(RESCAN_SUMMARY.to_owned());
@@ -3760,7 +3755,7 @@ async fn apply_bound_run_with_handle(
     }
     // UNREAD + narrowed: a path in the scanner's retained-unread set, over
     // the size cap or evicted by a cloud provider,
-    // never appears in the diff (CAL-3 keeps it last-known-good, never
+    // never appears in the diff (it stays last-known-good, never
     // Retire), so a policy narrow could never reach it through an op. Retire
     // those directly — policy exclusion is an OWNERSHIP decision, distinct
     // from the size-cap false-delete defense that protects still-tracked

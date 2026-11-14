@@ -469,7 +469,6 @@ export function hostedWindowCovers(window: HostedWindow, objectId: string): bool
 export type HeldDocumentInspection = NonNullable<HostedSyncMethodResultMap["sync.heldDocument"]>;
 
 type HeldPreservation = NonNullable<HeldDocumentInspection["preservation"]>;
-// The status each reason holds preservation at.
 const REASON_STATUS: Record<
   HeldPreservation["reasons"][number]["reason"],
   HeldPreservation["status"]
@@ -484,7 +483,6 @@ const REASON_STATUS: Record<
   "malformed-authorship": "invalid-evidence",
 };
 
-// What no merged contributions commit to.
 const NOTHING_MERGED = mergedContributionsCommitment([]).digest;
 
 // Only a current binding may preserve, and a hold marked stale never is

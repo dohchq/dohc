@@ -93,7 +93,6 @@ describe("reserved paths", () => {
   it("read validation allows shared-with-me (write reservation, not a secret)", () => {
     const read = validateUserReadPath("shared-with-me/alex/brief.md", { platform: "win32" });
     expect(read).toEqual({ ok: true, normalized: "shared-with-me/alex/brief.md" });
-    // Case/alias variants normalize the same way they do on the write side.
     expect(validateUserReadPath("Shared-With-Me./alex/brief.md", { platform: "win32" }).ok).toBe(
       true,
     );
@@ -204,13 +203,11 @@ describe("Check A — reserved-path (security core, every surface, every platfor
 
   it("rejects `shared-with-me` 8.3 aliases on write but allows them on read", () => {
     for (const candidate of ["SHARED~1/alex/brief.md", "share~10/x.md", "SHARED~2", "shar~100"]) {
-      // Write reservation (like shared-with-me itself).
       expect(validateUserWritePath(candidate)).toEqual({ ok: false, reason: "reserved" });
       expect(validateUserMaterializePath(candidate, { platform: "win32" })).toMatchObject({
         ok: false,
         reason: "reserved",
       });
-      // Readable, exactly like the long-form shared-with-me projection.
       expect(validateUserReadPath(candidate, { platform: "win32" }).ok).toBe(true);
     }
   });
@@ -285,7 +282,6 @@ describe("Check B — materialize hazard (disk-write only, win32-gated)", () => 
 
   it("allows the same names on the default write path (classify/capture) and non-win32 reads", () => {
     for (const candidate of hazards) {
-      // Check A only — never applies the materialize hazard.
       expect(validateUserWritePath(candidate).ok).toBe(true);
       // Reads accept them on non-Windows (colon is a legal filename byte there).
       expect(validateUserReadPath(candidate, { platform: "linux" }).ok).toBe(true);
@@ -418,8 +414,6 @@ describe("workspace root choice", () => {
 });
 
 describe("a workspace root that overlaps dohc's state folder", () => {
-  // Where each system keeps an app's settings, the folders above it a person
-  // could pick, and folders inside it.
   const cases = [
     {
       platform: "win32",

@@ -56,7 +56,6 @@ export function fixture(
     if (result.kind !== "ready") throw Error(result.kind);
     return result.capture;
   };
-  // The service host adopts the document's service activation, when it has one.
   const adopt = () => {
     const activation = context.db
       .prepare(

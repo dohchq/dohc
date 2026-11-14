@@ -9,6 +9,7 @@ import {
   ServiceHostedReplication,
   type ServiceHostedPullPage,
 } from "./serviceHostedReplication.js";
+import { ServerLogError } from "./serverLogWords.js";
 
 const attachment = (maxPagesPerPull = 3) => ({
   relay: { baseUrl: "https://relay.example", bearerToken: "service-credential" },
@@ -55,7 +56,6 @@ const commit = (patch: Partial<HostedSyncMethodResultMap["sync.commitCursor"]> =
   sharingDeclined: [],
   ...patch,
 });
-// What a page says of a departed document: whether it is, or undefined past its list's window.
 const says = (page: ServiceHostedPullPage, objectId: string) =>
   hostedWindowCovers(page.departed.window, objectId)
     ? page.departed.listed.includes(objectId)
@@ -181,10 +181,6 @@ it("pulls again after a pass that adopted a new scope, without materializing or 
   ]);
 });
 
-// Proves: however many documents are held, each pass asks after where the last
-// one's list stopped, so every hold is named within a few passes, and tells
-// its page where its list speaks. A list that reached the last starts the next
-// from the first, and one listing a document before where it was asked is refused.
 it("asks each pass for the held documents after where the last list stopped", async () => {
   const f = fixture(),
     work = (objectId: string) => ({ objectId, reason: "hosted-backfill-work-waiting" as const });
@@ -299,7 +295,7 @@ it("tells the caller of a commit that stands before the retirement after it fail
   const heard = vi.fn();
   // It names the engine's code word, never the path, so the server log never shows the file.
   await expect(f.driver.pull(undefined, heard)).rejects.toThrow(
-    new Error(
+    new ServerLogError(
       "Hosted retirement failed: hosted-file-unexpected (code INTERNAL, method sync.commitCursor)",
     ),
   );
@@ -321,7 +317,6 @@ it("keeps each departed document the engine still holds until a reply that read 
     message: "hosted-file-unexpected: docs/b.md holds bytes other than its document's head",
     retry: "no",
   };
-  // The rows retired but the file did not go; then the departed list went unread; then the file went.
   const commits = [
     commit({ hasMore: true, retirement: failed, departed: ["doc-b"] }),
     commit({ hasMore: true, departed: null }),
@@ -339,8 +334,8 @@ it("keeps each departed document the engine still holds until a reply that read 
   expect(f.driver.departedNone).toBe(true);
 });
 
-// Sol's review: departed documents the engine cannot park filled every
-// answer's departed list from the first, so one after them was never named.
+// Departed documents the engine cannot park must not fill every answer's
+// departed list from the first, or one after them is never named.
 // Proves: each pass asks for the departed documents after where the last
 // list stopped, its commit's list starts where the pass's did, and a page
 // says nothing past its window. A list that reached the last starts the

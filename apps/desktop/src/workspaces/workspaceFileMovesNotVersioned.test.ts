@@ -14,7 +14,6 @@ import {
 const person = { kind: "human" as const, humanId: "local:installation" };
 const agent = { kind: "agent" as const, agentId: "test-agent", onBehalfOf: "local:installation" };
 
-// `untracked`: the files the active version does not track, or null on Main.
 async function workspace(untracked: string[] | null) {
   const rootPath = await createTestScratch("not-versioned");
   for (const file of ["Notes/Page.md", "Media/clip.mp4", "Media/cover.png"]) {
@@ -189,7 +188,6 @@ it("an agent is not told to confirm a file History's rules leave out, which its 
     reason: expect.stringContaining("Media/clip.mp4 isn't versioned"),
   });
   expect(f.asked).toEqual([["Media/clip.mp4"]]);
-  // The app moves a left-out file along, so it still asks about it.
   await expect(
     deleteWorkspacePathByHand(f.operation, "Media", person, f.options),
   ).rejects.toMatchObject({ paths: ["Media/clip.mp4", "Media/cover.png"] });
@@ -202,6 +200,5 @@ it("counts a .git folder the app's change carries along, without reading inside 
   await expect(
     deleteWorkspacePathByHand(f.operation, "Media", person, f.options),
   ).rejects.toMatchObject({ name: "NotVersionedError", paths: ["Media/.git"] });
-  // The engine is never asked about it.
   expect(f.asked).toEqual([["Media/clip.mp4", "Media/cover.png"]]);
 });

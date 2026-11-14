@@ -33,7 +33,6 @@ describe("a failed run's notice", () => {
   const OPEN = "Open the automation to turn it back on.";
   const ASK = "Ask someone who can edit the Collection to turn it back on.";
   it.each([
-    // Owners and editors through a share both open the automation's switch.
     [AUTOMATION_SWITCHED_OFF_BODY, true, true, OPEN],
     [AUTOMATION_SWITCHED_OFF_BODY, true, false, OPEN],
     [AUTOMATION_SWITCHED_OFF_BODY, false, false, ASK],
@@ -206,7 +205,6 @@ describe("a failed run's notice", () => {
       automation: "collection:object-tasks#stamp",
       path: "Projects/Tasks/automations.yaml",
     });
-    // Everyone else reads why, without the computer, and no promise that someone can try it again.
     expect(automationFailedElsewhereBody(stopped, null)).toBe(why);
   });
 

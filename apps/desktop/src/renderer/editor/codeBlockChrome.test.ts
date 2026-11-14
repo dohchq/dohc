@@ -16,7 +16,6 @@ function toolbars(state: EditorState, plugin: Plugin) {
     .sort((a, b) => a.pos - b.pos);
 }
 
-/** Each code block's toolbar position and language, as a full rebuild makes them. */
 function expected(document: PMNode) {
   const plugin = makeCodeBlockChromePlugin();
   return shown(EditorState.create({ doc: document, plugins: [plugin] }), plugin);
@@ -118,7 +117,6 @@ describe("makeCodeBlockChromePlugin — edits", () => {
         state.doc.child(0).nodeSize +
         blocks.slice(0, 1000).reduce((pos, block) => pos + block.nodeSize, 0);
       state = state.apply(state.tr.insertText("y", middle + 1));
-      // Before this bound, each key made all 2,000 toolbars again.
       expect(widget).not.toHaveBeenCalled();
     } finally {
       widget.mockRestore();

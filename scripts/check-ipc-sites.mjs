@@ -138,7 +138,6 @@ export function extractIpcSites(path, source) {
       continue;
     const node = cursor.node;
     if (node.name === "CallExpression") calls.push(node);
-    // Collect uncalled transports and outside collection uses during the binding walk.
     if (isReference(node) || node.name === "MemberExpression") candidates.push(node);
     if (isBindingDefinition(node)) {
       const declaration = ancestor(

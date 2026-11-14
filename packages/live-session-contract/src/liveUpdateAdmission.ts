@@ -345,7 +345,6 @@ export function admitsLiveAuthorship(
   );
 }
 
-/** The engine's bounds: an identifier with no Unicode control character. */
 function declaredIdentifier(value: unknown, name: string): string {
   const identifier = parseLiveUpdateIdentifier(value, name);
   if (/\p{Cc}/u.test(identifier)) {

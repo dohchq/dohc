@@ -228,7 +228,6 @@ test("@apps finds an app declared only by app.publish.json and publishes it agai
 
     const publishAndOpen = async (root: string) => {
       await page.locator(`[data-testid="sites-row"][data-root="${root}"]`).click();
-      // The app uses no Collection. It still opens in its tab on this device, without a link.
       await page
         .getByTestId("site-preview-page")
         .getByRole("button", { name: "Review and open app", exact: true })
@@ -513,10 +512,7 @@ test("@apps publishes a static app that a guest opens by link", async ({}, info)
       "background-image",
       /^url\("data:image\/png;base64,/,
     );
-    // Under the published hash-only policy the page runs as in a tab: head content and its ids stay, each classic script
-    // sees only what precedes it, a throw stops only its own script, and deferred and module scripts run in document order.
     await expect(app.locator("#config")).toHaveCount(1);
-    // The browser parses the page itself: a microtask runs between two scripts, and each stylesheet keeps its id and place.
     await expect(app.locator("#order")).toHaveText(
       "head:Reading list:false:true microtask box:box:false classic A B:true C",
     );

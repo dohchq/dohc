@@ -163,8 +163,6 @@ const cutEvent = (cursor: number) => ({
   },
 });
 
-// The old cut still holds `events` declared changes; the host refuses the
-// chosen application calls as settlement-required.
 function cut(
   kind: "owner" | "bootstrap",
   events: number,
@@ -460,8 +458,6 @@ it("refuses a Decline answer that does not prove the restore's end", async () =>
   expect(f.store.acknowledgeStopRestoreCancellation).toHaveBeenCalledTimes(1);
 });
 
-// A failure to record the answer can pass, so the Decline stays pending and
-// the relay log keeps its cause.
 it("keeps a Decline pending when its answer cannot be recorded", async () => {
   const log = vi.spyOn(console, "error").mockImplementation(() => {});
   try {
@@ -474,7 +470,7 @@ it("keeps a Decline pending when its answer cannot be recorded", async () => {
       kind: "pending",
       reason: "The host's cancellation answer was not recorded.",
     });
-    expect(log).toHaveBeenCalledWith("[sync-relay] restore cancellation not recorded:", cause);
+    expect(log).toHaveBeenCalledWith("[sync-relay] restore cancellation not recorded:", "Error");
   } finally {
     log.mockRestore();
   }

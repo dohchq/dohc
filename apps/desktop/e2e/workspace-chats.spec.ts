@@ -21,7 +21,7 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// WS-E — CHATS EXPANSION (plan PR 12/13): a workspace gets a Chats
+// A workspace gets a Chats
 // view with channels. The default #general channel exists on first use, the
 // composer starts a chat with one Enter and no title prompt (untitled chats
 // display their first-message snippet), messages persist across relaunch,
@@ -39,14 +39,10 @@ test("general channel, composer-first chats, relaunch persistence, unread, searc
     await openWorkspaceFromFirstRun(desktop.page, temp);
     let page = desktop.page;
 
-    // The Chats view exists on the activity rail; first use auto-creates
-    // the default #general channel.
     await page.getByTestId(activityPin("chats")).click();
     await expect(page.getByTestId("chats-view")).toBeVisible();
     await expect(page.getByTestId("chats-channel-name")).toHaveText("general");
 
-    // Composer-first thread start: the channel view offers NO title input —
-    // typing a message and pressing Enter IS creating the chat.
     await page.getByTestId("chats-channel").click();
     await expect(page.getByTestId("chats-channel-view")).toBeVisible();
     await expect(page.getByTestId("chats-channel-view").locator("input")).toHaveCount(0);
@@ -54,8 +50,6 @@ test("general channel, composer-first chats, relaunch persistence, unread, searc
     await newThreadComposer.fill("Let's plan the launch this week.");
     await newThreadComposer.press("Enter");
 
-    // Straight into the thread; the snippet is the display title; the
-    // signed-out desktop's human author displays as "You".
     await expect(page.getByTestId("chats-thread-view")).toBeVisible();
     await expect(page.getByTestId("chats-thread-title")).toHaveText(
       "Let's plan the launch this week.",
@@ -65,14 +59,11 @@ test("general channel, composer-first chats, relaunch persistence, unread, searc
     );
     await expect(page.getByTestId("chats-message-author")).toHaveText("You");
 
-    // Replies land through the thread composer.
     const composer = page.getByTestId("chats-composer");
     await composer.fill("Second message here.");
     await composer.press("Enter");
     await expect(page.getByTestId("chats-message-body")).toHaveCount(2);
 
-    // Back in the channel: the post card shows the snippet title, no
-    // unread badge for your own messages.
     await page.getByTestId("chats-thread-back").click();
     await expect(page.getByTestId("chats-post-title")).toHaveText(
       "Let's plan the launch this week.",
@@ -94,9 +85,8 @@ test("general channel, composer-first chats, relaunch persistence, unread, searc
     await expect(page.getByTestId("chats-view")).toHaveCount(0);
 
     // Relaunch: channel chats are durable engine state. Between sessions an
-    // agent starts a second chat through the engine daemon over RPC — the
-    // external write path post-cutover (the retired TS in-process store is
-    // refused by daemon-owned workspaces). It must arrive UNREAD.
+    // agent starts a second chat through the engine daemon over RPC, the
+    // external write path. It must arrive unread.
     //
     // What this pins is durability across a relaunch. The live case — an
     // external write reaching the running app — needs the CLI endpoint into
@@ -134,25 +124,20 @@ test("general channel, composer-first chats, relaunch persistence, unread, searc
     await expect(panel.getByTestId("chats-channel-name")).toHaveText("general");
     await expect(panel.getByTestId("chats-channel")).toHaveAttribute("data-thread-count", "2");
     await panel.getByTestId("chats-channel").click();
-    // Two threads exist now (the agent seeded one between sessions), so pick
-    // the composer-created one by its snippet title.
     await view
       .getByTestId("chats-thread")
       .filter({ hasText: "Let's plan the launch this week." })
       .click();
     await expect(view.getByTestId("chats-message-body")).toHaveCount(2);
 
-    // Back to the channel: the agent thread carries an unread badge.
     await view.getByTestId("chats-thread-back").click();
     const agentThreadRow = view.getByTestId("chats-thread").filter({ hasText: "zeppelin-cadence" });
     await expect(agentThreadRow).toBeVisible();
     await expect(agentThreadRow.getByTestId("chats-thread-unread")).toHaveText("1");
 
-    // The panel's channel row rolls the unread up.
     await expect(panel.getByTestId("chats-channel-unread")).toHaveText("1 unread");
     await expect(panel.getByTestId("chats-channel-name")).toHaveClass(/font-medium/);
 
-    // Opening the thread marks it read; the badges clear at both levels.
     await panel.getByTestId("chats-channel").click();
     await agentThreadRow.click();
     await expect(view.getByTestId("chats-message-author")).toHaveText("Nova");
@@ -160,7 +145,7 @@ test("general channel, composer-first chats, relaunch persistence, unread, searc
     await expect(view.getByTestId("chats-thread-unread")).toHaveCount(0);
     await expect(panel.getByTestId("chats-channel-unread")).toHaveCount(0);
 
-    // WS-D integration: engine search finds the channel message and renders
+    // Engine search finds the channel message and renders
     // it as a Chat result with the snippet title.
     await page.getByTestId(activityPin("search")).click();
     await page.getByTestId("search-input").fill("zeppelin-cadence");
@@ -169,13 +154,11 @@ test("general channel, composer-first chats, relaunch persistence, unread, searc
       .filter({ hasText: "The zeppelin-cadence report is ready." });
     await expect(chatGroup).toBeVisible({ timeout: 20_000 });
     await expect(chatGroup.getByText("Chat", { exact: true })).toBeVisible();
-    // Previews read like the chat: no Markdown heading markers.
     await expect(chatGroup.getByTestId("search-result-row").first()).toBeVisible();
     for (const preview of await chatGroup.getByTestId("search-result-row").allTextContents()) {
       expect(preview).not.toMatch(/^#/);
     }
 
-    // A search for the author finds the line that names them.
     await page.getByTestId("search-input").fill("Nova");
     await expect(
       page.getByTestId("search-result-row").filter({ hasText: /^Nova \(agent\)$/ }),
@@ -185,8 +168,6 @@ test("general channel, composer-first chats, relaunch persistence, unread, searc
   }
 });
 
-// The panel is a navigator, like the Explorer: a click opens the conversation
-// in the Chats editor tab and the panel keeps its list.
 test("a panel click opens the conversation in the Chats tab and the panel keeps its list", async ({}, testInfo) => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
@@ -202,8 +183,6 @@ test("a panel click opens the conversation in the Chats tab and the panel keeps 
     await explorerRow(page, "notes.md").click();
     await expect(page.getByTestId(editorTabTestId("notes.md"))).toBeVisible();
 
-    // Selecting a channel opens the Chats tab at that channel. The panel
-    // shows no conversation of its own.
     const panel = await openChatsView(page);
     await panel.getByTestId("chats-channel").click();
     const chatsTab = page.getByTestId(editorTabPrefixPattern("tab://chats/channel/", true));
@@ -252,8 +231,6 @@ test("a panel click opens the conversation in the Chats tab and the panel keeps 
     await expect(page.getByTestId("chats-composer")).toHaveCount(1);
     await page.getByTestId("chats-composer").fill("draft in flight");
 
-    // Switching to another editor tab and back keeps the conversation and
-    // the unsent draft in the tab. The panel stays a navigator throughout.
     await page.getByTestId(editorTabTestId("notes.md")).click();
     await expect(panel.getByTestId("chats-thread-view")).toHaveCount(0);
     await expect(panel.getByTestId("chats-channel")).toBeVisible();
@@ -261,7 +238,6 @@ test("a panel click opens the conversation in the Chats tab and the panel keeps 
     await expect(pageThreadView).toBeVisible();
     await expect(pageThreadView.getByTestId("chats-composer")).toHaveValue("draft in flight");
 
-    // Home has its own tab; returning to General preserves the thread draft.
     await panel.getByTestId("chats-feed-link").click();
     const homeTab = page.getByTestId(editorTabTestId("tab://chats"));
     await expect(homeTab).toContainText("Home");
@@ -297,7 +273,6 @@ test("a panel click opens the conversation in the Chats tab and the panel keeps 
         path: test.info().outputPath(`chat-channel-${theme.toLowerCase()}.png`),
       });
     }
-    // The durable channel identity and Home tab survive a desktop restart.
     await desktop.close();
     desktop = await launchDesktopApp({ workspace: temp });
     page = desktop.page;
@@ -313,8 +288,6 @@ test("a panel click opens the conversation in the Chats tab and the panel keeps 
   }
 });
 
-// About for an open Group lists each file its messages mention once, last
-// mentioned first, and a row opens its file.
 test("About for a Group lists the files its messages mention and opens one", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
@@ -375,9 +348,6 @@ test("About for a Group lists the files its messages mention and opens one", asy
   }
 });
 
-// PERFORMANCE (plan chat budgets, scaled to alpha): 50 channels / 500
-// threads first-paint under 500ms; composer-send-to-rendered p50 under
-// 100ms. Measured inside the page (real IPC round trips + real paints).
 test("performance: channel-list first paint and composer send latency", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
@@ -386,8 +356,7 @@ test("performance: channel-list first paint and composer send latency", async ()
   try {
     await seedWorkspaceManifest(temp, workspaceId);
     // 50 channels x 10 threads = 500 threads (each with one message), seeded
-    // through the engine daemon over RPC (post-cutover the retired TS
-    // in-process store cannot create a daemon-acceptable store).
+    // through the engine daemon over RPC.
     await seedThroughDaemon({ workspaceId, rootPath: temp.rootPath }, async ({ chats }) => {
       await chats.ensureGeneralChannel({ workspaceId });
       for (let channelIndex = 1; channelIndex < 50; channelIndex += 1) {
@@ -452,8 +421,6 @@ test("performance: channel-list first paint and composer send latency", async ()
     );
     expect(firstPaintMs).toBeLessThan(500);
 
-    // Composer send-to-rendered: open a thread, then measure repeated sends
-    // from submit to the message's painted DOM node (rAF-polled).
     await page.getByTestId("chats-channel").first().click();
     await page.getByTestId("chats-thread").first().click();
     await expect(page.getByTestId("chats-message-body").first()).toBeVisible();

@@ -31,13 +31,10 @@ describe("closing a workspace's activity", () => {
     const close = async () => {
       closes.push("closed");
     };
-    // A schedule run holds the workspace; a window opens it too.
     holdBackground(state);
     state.retainedActivity = true;
-    // The last window closes before the run ends: its hold goes, the run's stays.
     leaveForeground(state);
     expect(closeActivity(state, close, { unlessInUse: true }), "the run still holds it").toBeNull();
-    // The run ends and its release closes the workspace.
     releaseBackground(state);
     await closeActivity(state, close, { unlessInUse: true });
     expect(closes).toEqual(["closed"]);
@@ -60,7 +57,6 @@ describe("closing a workspace's activity", () => {
     );
     expect(state.activityClosing, "published at once").toBe(closing);
 
-    // A window opens the workspace now: it retains it and waits for the close.
     state.retainedActivity = true;
     const reopened = state.activityClosing!.then(() => steps.push("window opened"));
     expect(

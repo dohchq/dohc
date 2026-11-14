@@ -62,17 +62,13 @@ export interface ExplorerHomeProps {
   // Changes whenever the Open editors section above Home changes height, so
   // the Pages window is measured again.
   aboveLayout: string;
-  // The file or folder the Explorer is renaming, and its name field.
   editingPath: string | null;
   renderEditRow: (depth: number) => ReactNode;
-  // The Explorer's selection: workspace paths.
   selection: ReadonlySet<string>;
   onSelect: (paths: ReadonlySet<string>) => void;
-  // Opens the row's menu at the pointer.
   onMenu: (kind: "file" | "folder", path: string, at: { x: number; y: number }) => void;
   onRename: (path: string, isFolder: boolean) => void;
   onDelete: (paths: string[]) => void;
-  // Switches to Files, with this path selected when it has one.
   onShowInFiles: (paths: readonly string[] | null) => void;
   drag: {
     start: (path: string, event: DragEvent) => void;
@@ -81,7 +77,6 @@ export interface ExplorerHomeProps {
     leave: () => void;
     end: () => void;
   };
-  // How a drag over this path would land, while one is in progress.
   dropPreviewFor: (path: string) => RowDropPreview | null;
 }
 
@@ -93,12 +88,9 @@ type Section = {
   // More can load, so the count shows how many have loaded so far, with a "+".
   countMore?: boolean;
   rows: HomeRowModel[];
-  // A last row that is not a file, such as Show all in Files.
   more?: { key: string; label: string; testId: string; onActivate: () => void };
   add?: { label: string; onClick: () => void };
-  // The section's own actions, in a ⋯ beside its +.
   actions?: MenuItem[];
-  // What the section shows before or after its rows.
   body?: ReactNode;
   after?: ReactNode;
   // The muted line a section with nothing in it shows under its header. It
@@ -385,8 +377,6 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     });
   }
 
-  // ---- one keyboard list over every section ----
-
   // Which sections are drawn, with their rows; the sections themselves are
   // rebuilt each render, so the list follows this key.
   const sectionsKey = sections
@@ -536,7 +526,6 @@ export function ExplorerHome(props: ExplorerHomeProps) {
 
   // Where a Shift-click or Shift+arrow range starts: a row's key.
   const anchorKey = useRef<string | null>(null);
-  // The workspace paths of the rows from one key to another, in order.
   const pathsBetween = (from: string, to: string): Set<string> => {
     const keys = rangeBetween(
       nav.rows.map((row) => row.fullPath),
@@ -570,8 +559,6 @@ export function ExplorerHome(props: ExplorerHomeProps) {
       return;
     }
     if (row.open === null) {
-      // A pinned folder that is no Collection or app opens in Files, and so do
-      // the files to fix of a Collection that can't open.
       if (row.fix) onShowInFiles(row.fix);
       else if (row.menu) onShowInFiles([row.menu.path]);
       return;
@@ -625,15 +612,12 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     if (!row.menu) return;
     rowRefs.current.get(row.key)?.focus({ preventScroll: true });
     const current = live.current.props;
-    // A row outside the selection is the selection while its menu acts.
     if (!current.selection.has(row.menu.path)) {
       current.onSelect(new Set([row.menu.path]));
       anchorKey.current = row.key;
     }
     current.onMenu(row.menu.kind, row.menu.path, { x: event.clientX, y: event.clientY });
   }, []);
-  // A rename shows its name field in the row it started from, or else the
-  // first row for that path.
   const editingPath = props.editingPath;
   const editKey = useMemo(() => {
     if (editingPath === null) return null;
@@ -672,8 +656,6 @@ export function ExplorerHome(props: ExplorerHomeProps) {
       props.onRename(menu.path, menu.kind === "folder");
       return;
     }
-    // The selection, or the focused row alone when it is outside the
-    // selection. From a heading, the selection.
     if (isDeleteKey(event) && (menu || props.selection.size > 0)) {
       event.preventDefault();
       props.onDelete(menu && !props.selection.has(menu.path) ? [menu.path] : [...props.selection]);
@@ -713,7 +695,6 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     }
   };
 
-  // Add an app here… lands on the first app.
   const appsReveal = apps?.reveal ?? false;
   const onAppsRevealed = apps?.onRevealed;
   const appsSettled = apps ? apps.state.status !== "loading" : true;
@@ -736,8 +717,6 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     return <SkeletonRows layout="list" className="mt-4 px-3 py-2" label="Loading files..." />;
   }
 
-  // As in Files, the rows of a selection that is not just the open row take
-  // the picked fill.
   const selectionIsOpenRow =
     openRowPath !== null && props.selection.size === 1 && props.selection.has(openRowPath);
   const renderRow = (row: HomeRowModel): ReactNode => {
@@ -968,7 +947,6 @@ const HomeRow = memo(function HomeRow(props: {
   active: boolean;
   tabbable: boolean;
   testId?: string;
-  // An Apps row: the app's marks and its pin.
   app?: SitePackageInfo;
   pinned?: boolean;
   onSetPinned?: (appRoot: string, pinned: boolean) => void;
@@ -987,7 +965,6 @@ const HomeRow = memo(function HomeRow(props: {
   const onSetPinned = app ? props.onSetPinned : undefined;
   const pinned = props.pinned ?? false;
   const pinLabel = pinned ? "Unpin" : "Pin to sidebar";
-  // As in Files, a file the active version does not track is dimmed and says so.
   const notVersioned = useNotVersionedMark(path ?? "", row.menu?.kind === "file");
   const fill = props.dropKind
     ? props.dropKind === "blocked"
@@ -1002,7 +979,6 @@ const HomeRow = memo(function HomeRow(props: {
         : notVersioned
           ? "text-subtle hover:bg-hover hover:text-muted"
           : "text-muted hover:bg-hover hover:text-ink";
-  // An allowed drop target's glyph takes the success color.
   const glyphTone =
     props.dropKind && props.dropKind !== "blocked" && props.dropRole === "target"
       ? "text-success"
@@ -1011,7 +987,6 @@ const HomeRow = memo(function HomeRow(props: {
         : "text-subtle";
   const trailing = (onSetPinned ? 1 : 0) + (row.menu || row.fix ? 1 : 0);
   const [reached, setReached] = useState(false);
-  // How the menu of a Collection that can't open was opened, while it is open.
   const [fixMenu, setFixMenu] = useState<"pointer" | "keyboard" | null>(null);
   const rowButton = useRef<HTMLButtonElement | null>(null);
   const rowBox = useRef<HTMLDivElement | null>(null);
@@ -1026,7 +1001,6 @@ const HomeRow = memo(function HomeRow(props: {
         onPointerEnter={reached ? undefined : () => setReached(true)}
         className={`group relative flex items-center rounded-md transition-colors duration-75 ${cause ? "" : "h-7"} ${fill}`}
       >
-        {/* As in Files, the open row in a picked selection gains a 2px ink edge. */}
         {!props.dropKind && picked && active ? (
           <span
             aria-hidden

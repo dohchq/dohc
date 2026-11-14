@@ -50,7 +50,6 @@ async function until(predicate) {
   }
 }
 
-// A delivery folder whose "app" is a script the test runs with Node.
 async function delivery(t, { smoke = "passed" } = {}) {
   const root = scratch(t);
   const app = join(root, "app");

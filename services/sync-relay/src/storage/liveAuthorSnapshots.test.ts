@@ -120,9 +120,6 @@ it("binds server automation provenance to owner admission and exact retries", ()
   }
 });
 
-// A build without delivery groups sends each edit of a group the relay already
-// accepted again, under the edit's own delivery id. Each is a new row that
-// claims nothing first seen, so the group's row keeps the edits' authorship.
 it("accepts each edit of an accepted merged update again under its own id without claiming its structs", () => {
   const f = registered({ deployment: true });
   try {
@@ -148,11 +145,6 @@ const personalHost = {
   connectionId: "connection",
 } as const;
 const helperId = `p-${"h".repeat(26)}`;
-/**
- * The owner's personal agent "Helper", signed in and reaching the workspace
- * at Edit as its sign-in commits it, on a self-hosted live host that enrolled
- * the document. Returns the agent's live actor.
- */
 function personalEditor(f: Fixture) {
   const check = agentAccessCheck(
     "a".repeat(43),
@@ -247,7 +239,6 @@ it("admits a personal agent's live edit on behalf of its owner, and never by wha
     expect(accepted.admitted!.metadata.accepted.authority).toEqual(first.expectedAuthority);
     expect(accepted.admitted!.metadata.authorSnapshot).toEqual(helper);
     expect(lastAction()).toEqual({ last_action_at_ms: first.receivedAtMs });
-    // A replay that declares someone else is still the same delivery.
     expect(f.storage.commitLiveUpdateJournal(declaring(first, human)).result).toMatchObject({
       kind: "accepted",
       replayed: true,
@@ -329,7 +320,6 @@ it("binds an owner's declared agent to its delivery and refuses a changed, added
     const accepted = f.storage.commitLiveUpdateJournal(first);
     expect(accepted.result).toMatchObject({ kind: "accepted", replayed: false });
     expect(admittedAgent(accepted.admitted!.metadata)).toEqual(expectedAgent);
-    // The declaration names an agent; the authenticated owner stays the authority.
     expect(accepted.admitted!.metadata.accepted.authority).toEqual(first.expectedAuthority);
     expect(JSON.parse(String(declarations(f)[0]!.author_snapshot_json))).toContainEqual(
       expectedAgent,
@@ -339,7 +329,6 @@ it("binds an owner's declared agent to its delivery and refuses a changed, added
       replayed: true,
     });
 
-    // This cut carries the declared event, so admission compares it with storage.
     const plain = f.capture(f.update("more", "plain"), "plain");
     expect(admittedAgent(plain.cutToken.suffix[0]!.metadata)).toEqual(expectedAgent);
     const second = f.storage.commitLiveUpdateJournal(plain);
@@ -374,7 +363,6 @@ it("reads a declaration folded into a checkpoint from committed delivery, accept
     const first = declare(f.capture(f.update(), "declared"), declared);
     const accepted = f.storage.commitLiveUpdateJournal(first);
     expect(accepted.result.kind).toBe("accepted");
-    // Large undeclared events reach the journal's byte checkpoint.
     const large = f.update("payload", "x".repeat(1_048_576));
     let cursor = 1;
     while (

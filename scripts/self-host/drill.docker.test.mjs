@@ -12,6 +12,9 @@ import { runMove } from "./move.mjs";
 
 // Not in the root test list: it needs a Linux Docker host and the image named by DOHC_RECOVERY_TEST_IMAGE.
 // Build the image from this checkout. See "Move to a new host" in docs/how-to/self-host-recovery.md.
+// Run it with: DOHC_RECOVERY_TEST_IMAGE=<image> node --test scripts/self-host/drill.docker.test.mjs
+// It carries the accounts volume over by name, so it does not prove the accounts volume copy commands.
+// A killed container does not lose the host's write cache, so it does not prove survival of a power loss.
 const skip = !process.env.DOHC_RECOVERY_TEST_IMAGE
   ? "Set DOHC_RECOVERY_TEST_IMAGE to a built self-host image."
   : process.platform !== "linux"
@@ -155,7 +158,6 @@ test(
       );
       const first = await project("a", disk);
 
-      // An unmounted disk leaves the folder missing. The volume mount fails and nothing is created.
       assert.notEqual(
         compose(first, ["run", "--rm", "--no-deps", "-T", "relay-initialize"], {
           allowFailure: true,
@@ -237,7 +239,6 @@ test(
       });
       compose(first, ["up", "-d", "--wait", "sync-relay"]);
 
-      // The old server dies without a clean shutdown and never runs again.
       compose(first, ["kill"]);
       assert.equal(compose(first, ["ps", "--quiet", "--status", "running"]).stdout.trim(), "");
       compose(first, ["down"]);
@@ -249,7 +250,6 @@ test(
         override,
         `volumes:\n  dohc_self_host_postgres:\n    external: true\n    name: ${first.name}_dohc_self_host_postgres\n`,
       );
-      // With the accounts database present, move still refuses an empty folder and leaves it empty.
       const empty = await project("c", join(scratch, "empty"), ["-f", override]);
       assert.throws(
         () => runMove({ envFile: empty.env }, mover(empty), () => {}),

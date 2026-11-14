@@ -128,12 +128,14 @@ export type LiveDocumentsDialogProps = {
   saveRecoveryCopy?: (workspaceId: string, path: string, incident?: string) => Promise<void>;
   /** Reads again the kept edits of a row dohc could not read, named by its incident. */
   readKeptEdits?: (workspaceId: string, objectId: string, incident: string) => Promise<void>;
+  /** Duplicates a held row's file beside it and opens the copy, which can go
+   * live. Settles when the copy is made or failed; the shell reports a failure. */
+  makeCopy?: (workspaceId: string, path: string) => Promise<void>;
   /** The rows of edits a restore set aside on this computer, which the list
    * shows when it cannot read the server's list. */
   setAside?: readonly LiveDocumentRow[];
   /** One page of refused shares, from the share id the previous page ended on. */
   loadRefusals: (workspaceId: string, after?: string) => Promise<LiveRefusalPage>;
-  /** Asks the engine to enrol one refused share again. */
   retryRefusal: (workspaceId: string, shareId: string) => Promise<void>;
   onClose: () => void;
   /** Reported to the shell, which owns the toast and the Notices row. The
@@ -179,7 +181,6 @@ type Scope = { live: boolean };
 const readFailedMessage = "dohc could not load the live documents for this workspace.";
 const refusalsReadFailedMessage =
   "dohc could not load the shares that could not start live editing.";
-// What did not happen, in the words this dialog owns.
 const REFUSAL_SENTENCE = "This share could not start live editing automatically.";
 // Enough files to recognize the share without turning a row into a listing.
 const REFUSAL_PATHS_SHOWN = 5;
@@ -313,6 +314,19 @@ function deferredStopNote(
 }
 
 // Edits the server refused: where they are, and the one way back that always works.
+function heldCopyable(row: LiveDocumentRow): boolean {
+  return row.reason === "conflict-parent-withheld" && row.status !== "retired" && !row.saveOnly;
+}
+
+// The copy is made from the file, which lacks kept edits. Saving a recovery copy
+// doesn't clear edits kept on this computer, so the row keeps Make a copy and
+// says what it leaves out.
+function heldCopyNote(row: LiveDocumentRow): string {
+  return row.quarantine === undefined || row.quarantine === "copied"
+    ? " A copy of it can go live. If you shared only this file, share the copy too."
+    : " A copy of it can go live, but it leaves out your kept edits. Save a recovery copy to keep them. If you shared only this file, share the copy too.";
+}
+
 function quarantineNote(row: LiveDocumentRow): string | null {
   if (row.saveOnly && row.quarantine !== "unreadable")
     return row.sessionEnded
@@ -366,8 +380,6 @@ function failureMessage(work: Work, readFailed: boolean): string {
     : `dohc could not resume live editing for ${work.path}.`;
 }
 
-/** What to call a refused share: its first file, or the share itself when the
- * engine returned no paths for it. */
 function refusalLabel(row: LiveRefusalRow): string {
   return row.paths[0] ?? "this share";
 }
@@ -417,6 +429,7 @@ export function LiveDocumentsDialog({
   reveal,
   saveRecoveryCopy,
   readKeptEdits,
+  makeCopy,
   setAside = [],
 }: LiveDocumentsDialogProps) {
   const [state, setState] = useState<ListState>({ kind: "loading" });
@@ -429,8 +442,9 @@ export function LiveDocumentsDialog({
     () => new Map(),
   );
   const focusStopRetry = useRef<string | null>(null);
-  // Rows whose Save recovery copy is running, keyed by workspace and path.
   const [savingCopies, setSavingCopies] = useState<ReadonlySet<string>>(() => new Set());
+  // The held row whose copy is being made, as `${workspaceId}\n${path}`.
+  const [copying, setCopying] = useState<string | null>(null);
   const [shownWorkspaceId, setShownWorkspaceId] = useState(workspaceId);
   const request = useRequestSequence([workspaceId]);
   const running = useRef(false);
@@ -1010,6 +1024,28 @@ export function LiveDocumentsDialog({
                       : "Save recovery copy"}
                   </SecondaryButton>
                 ) : null}
+                {/* A held file can't go live again, but a copy of it can once it is opened. */}
+                {heldCopyable(row) && makeCopy && !pendingStops.has(row.objectId) ? (
+                  <SecondaryButton
+                    size="compact"
+                    className="shrink-0"
+                    // One copy at a time: a second would queue behind it and make another file.
+                    disabled={
+                      (busy?.kind === "stop" && busy.objectId === row.objectId) || copying !== null
+                    }
+                    aria-busy={copying === `${workspaceId}\n${row.path}` || undefined}
+                    aria-label={`Make a copy of ${row.path}`}
+                    onClick={() => {
+                      const key = `${workspaceId}\n${row.path}`;
+                      setCopying(key);
+                      void makeCopy(workspaceId, row.path).finally(() =>
+                        setCopying((current) => (current === key ? null : current)),
+                      );
+                    }}
+                  >
+                    {copying === `${workspaceId}\n${row.path}` ? "Making a copy…" : "Make a copy"}
+                  </SecondaryButton>
+                ) : null}
                 {/* A Resume alone fails again until dohc has opened the document once. */}
                 {row.reason === "live-document-without-lineage" &&
                 !pendingStops.has(row.objectId) &&
@@ -1046,6 +1082,9 @@ export function LiveDocumentsDialog({
                     {row.status === "retired"
                       ? "You can keep editing it in dohc, but your edits won't reach them."
                       : "You can keep editing it in dohc, but your edits may not reach them."}
+                    {makeCopy && heldCopyable(row) && !pendingStops.has(row.objectId)
+                      ? heldCopyNote(row)
+                      : ""}
                   </p>
                 ) : null}
                 {/* Resume tries again now. Some histories never start, and an older server doesn't try again by itself, so the words promise no more. */}

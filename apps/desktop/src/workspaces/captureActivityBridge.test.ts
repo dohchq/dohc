@@ -130,7 +130,6 @@ describe("bridgeCaptureEventsToRenderer", () => {
     });
     expect(notify).toHaveBeenCalledWith({ workspaceId: "ws-b", paths: ["b.md"] });
 
-    // A later batch notifies again — the debounce is a window, not a latch.
     emit(captureEvent(CAPTURE_MOMENT_RECORDED_EVENT, momentPayload("ws-a", ["a.md"])));
     vi.advanceTimersByTime(100);
     expect(notify).toHaveBeenCalledTimes(3);
@@ -202,7 +201,6 @@ describe("onWorkspaceCaptureSettled", () => {
     emit(captureEvent(CAPTURE_MOMENT_RECORDED_EVENT, momentPayload("ws-a", ["tasks/two.md"])));
     emit(captureEvent(CAPTURE_MOMENT_RECORDED_EVENT, momentPayload("ws-b", ["tasks/two.md"])));
     emit(captureEvent("record.created", momentPayload("ws-a", ["tasks/two.md"])));
-    // More paths than the payload lists, and a payload that names no workspace.
     emit(
       captureEvent(CAPTURE_MOMENT_RECORDED_EVENT, {
         workspaceId: "ws-a",

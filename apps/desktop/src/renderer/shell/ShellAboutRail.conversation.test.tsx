@@ -97,7 +97,6 @@ const SAM = {
   displayName: "Sam Rivera",
   presentation: { group: "sam", hue: "rust", self: false },
 } as const;
-// One mention of a file, newest first by `at`.
 function mention(path: string, author: Mention["author"], at: number): Mention {
   return {
     threadId: "thread-1",
@@ -125,7 +124,6 @@ function linksPage(entries: Mention[], overrides: Partial<Page> = {}): Page {
     ...overrides,
   };
 }
-// Each row: its file, then who mentioned it.
 const linkRows = () =>
   screen
     .queryAllByTestId("about-conversation-link")
@@ -134,7 +132,6 @@ const linkRows = () =>
       within(row).getByTestId("about-conversation-link-authors").textContent,
     ]);
 
-// A hit as the shell mints it, for the tab it belongs to.
 const searchHit = (tab: string, id: string, title: string): AboutSearchHit => ({
   thread: { id, title, createdAtMs: 1, updatedAtMs: 1 },
   tab,
@@ -239,7 +236,6 @@ describe("About for an open conversation", () => {
   ] as const)(
     "shows a %s's name, its mark, and who is here",
     async (kind, tabPath, entry, here) => {
-      // Your agent in the color you chose, so its avatar shows it is yours.
       setChosenColors(settingsWithAgent({ hue: "teal" }));
       publish("workspace-a", tabPath, entry);
       render(<Rail focusedTabPath={tabPath} />);
@@ -247,7 +243,6 @@ describe("About for an open conversation", () => {
       expect(panel.dataset.conversationKind).toBe(kind);
       const header = screen.getByTestId("about-header");
       const name = within(header).getByText(entry.name);
-      // A long name truncates, so its whole text is in the tooltip.
       expect(name.getAttribute("title")).toBe(entry.name);
       const avatar = header.querySelector(`span[aria-hidden][title="${entry.name}"]`);
       if (kind === "group") {
@@ -260,16 +255,12 @@ describe("About for an open conversation", () => {
         expect(avatar?.querySelector(".lucide-sparkles")).toBeTruthy();
         expect(avatar?.className).toContain("text-hue-teal");
       }
-      // The faces keep their name, and the page's own header is the one live
-      // region that announces them.
       if (here) expect(within(header).getByRole("img", { name: here })).toBeTruthy();
-      // Nobody else here: no faces at all.
       else expect(within(header).queryByRole("img")).toBeNull();
       expect(within(header).queryByRole("status")).toBeNull();
       // Access reads only when opened, like a file's.
       expect(screen.getByTestId("about-access-toggle").getAttribute("aria-expanded")).toBe("false");
       expect(bridgeMock.getObjectAccess).not.toHaveBeenCalled();
-      // A conversation has no file sections.
       expect(screen.queryByTestId("about-chats")).toBeNull();
       expect(screen.queryByTestId("about-history")).toBeNull();
     },
@@ -296,7 +287,6 @@ describe("About for an open conversation", () => {
     rerender(<Rail workspaceId="workspace-b" />);
     expect(screen.getByTestId("about-header").textContent).toBe("b-general");
 
-    // Workspace A's page leaves: About waits for it and shows nothing of B.
     act(() => forA());
     rerender(<Rail workspaceId="workspace-a" />);
     expect(screen.getByText("Loading About...")).toBeTruthy();
@@ -325,22 +315,17 @@ describe("About for an open conversation", () => {
     expect(onSearchHitRead).toHaveBeenCalledTimes(1);
     const read = { ...hit, read: true };
 
-    // A hit still set for another tab shows nowhere else.
     rerender(<Rail focusedTabPath={GENERAL} searchChatTarget={read} />);
     expect((await screen.findByTestId("about-header")).textContent).toBe("general");
     expect(screen.queryByTestId("linked-chat-thread")).toBeNull();
     rerender(<Rail focusedTabPath={LAUNCH} searchChatTarget={read} />);
     expect(screen.getByTestId("about-header").textContent).toBe("launch");
 
-    // A new hit on a conversation tab shows its chat there.
     const next = searchHit(LAUNCH, "thread-launch", "Launch date");
     rerender(<Rail focusedTabPath={LAUNCH} searchChatTarget={next} />);
     expect((await screen.findByTestId("linked-chat-title")).textContent).toBe("Launch date");
-    // Read, it stays while its tab has focus.
     rerender(<Rail focusedTabPath={LAUNCH} searchChatTarget={{ ...next, read: true }} />);
     expect(screen.getByTestId("linked-chat-title").textContent).toBe("Launch date");
-    // The shell drops it when focus leaves; back on its tab, the tab shows
-    // its own conversation.
     rerender(<Rail focusedTabPath={GENERAL} searchChatTarget={null} />);
     expect((await screen.findByTestId("about-header")).textContent).toBe("general");
     rerender(<Rail focusedTabPath={LAUNCH} searchChatTarget={null} />);
@@ -358,8 +343,6 @@ describe("About for an open conversation", () => {
       protectedTruncated: false,
     });
     const onSearchHitRead = vi.fn();
-    // A hit for a.md, not yet read, reaches a rail opened on b.md: About was
-    // collapsed while focus moved.
     render(
       <Rail
         focusedTabPath="b.md"
@@ -383,8 +366,6 @@ describe("About for an open conversation", () => {
     const { rerender } = render(<Rail focusedTabPath={GENERAL} searchChatTarget={hit} />);
     expect((await screen.findByTestId("linked-chat-title")).textContent).toBe("Pricing questions");
 
-    // Chats Home, then Graph: About's file panel stays mounted with no file
-    // for both, and still shows nothing of the hit.
     rerender(<Rail focusedTabPath={CHATS_TAB_PATH} searchChatTarget={null} />);
     expect((await screen.findByTestId("linked-chats-empty")).textContent).toBe(
       "Open a file or a conversation to see who has access.",
@@ -439,7 +420,6 @@ describe("About for an open conversation", () => {
   });
 
   it("keeps Access open across conversations, though the next one loads first", async () => {
-    // A stale answer keeps its check line, so the head stays a disclosure.
     bridgeMock.getObjectAccess.mockResolvedValue({ ...answer(), freshness: "stale" });
     publish("workspace-a", GENERAL, conversation({}));
     const { rerender } = render(<Rail />);
@@ -467,7 +447,6 @@ describe("About for an open conversation", () => {
     expect(within(header).queryByRole("img")).toBeNull();
     publish("workspace-a", GENERAL, { ...entry, present: [peer("sam", "Sam Rivera")] });
     expect(within(header).getByRole("img", { name: "Sam Rivera is here" })).toBeTruthy();
-    // An older withdrawal leaves the newer entry in place.
     act(() => withdraw());
     expect(screen.getByTestId("about-header").textContent).toContain("general");
   });
@@ -527,8 +506,6 @@ describe("Links for an open conversation", () => {
       });
       expect(count()).toBe("2");
       const [funnel, plan] = screen.getAllByTestId("about-conversation-link");
-      // The file's folder beside its name, then an agent's square and a
-      // person's circle.
       expect(funnel!.textContent).toContain("funnel.csvdata");
       const faces = [...funnel!.querySelectorAll<HTMLElement>("span[aria-hidden][title]")];
       expect(faces.map((face) => [face.title, face.className.includes("rounded-full")])).toEqual([
@@ -554,8 +531,6 @@ describe("Links for an open conversation", () => {
       expect(linkRows()).toEqual([["data/funnel.csv", "Mentioned by agent Nova"]]),
     );
     expect(count()).toBe("1+");
-    // Pressed from the keyboard, Show more leaves with the last page, so
-    // focus goes on to the row that page added.
     screen.getByTestId("about-conversation-links-more").focus();
     await userEvent.setup().keyboard("{Enter}");
     await waitFor(() =>
@@ -625,10 +600,8 @@ describe("Links for an open conversation", () => {
       "Mentioned by agent Nova",
       "Mentioned by automation Stamp the date",
       "Mentioned by Sam Rivera",
-      // An agent that joined with a link is an agent, then a link holder, as beside its posts.
       "Mentioned by agent link holder Claude Code, link holder Wren",
     ]);
-    // The words are for screen readers; the avatar's shape shows the kind.
     const words = screen.getAllByText(/^(agent|automation)$/);
     expect(words.map((word) => [word.textContent, word.className])).toEqual([
       ["agent ", "sr-only"],
@@ -683,8 +656,6 @@ describe("Links for an open conversation", () => {
     },
   );
 
-  // The row says only what failed. Its notice says that first, then why
-  // when the error says.
   it.each([
     [
       "a known reason",
@@ -733,7 +704,6 @@ describe("Links for an open conversation", () => {
     expect(bridgeMock.chatLinks).toHaveBeenCalledTimes(2);
     expect(linkRows()).toEqual([["data/funnel.csv", "Mentioned by agent Nova"]]);
     expect(screen.queryByTestId("about-conversation-links-failed")).toBeNull();
-    // Notices' Try again reads the conversation again.
     bridgeMock.chatLinks.mockResolvedValueOnce(linksPage([]));
     act(() => (notices.report.mock.calls[0]![0] as { retry: () => void }).retry());
     await waitFor(() => expect(linkRows()).toHaveLength(0));

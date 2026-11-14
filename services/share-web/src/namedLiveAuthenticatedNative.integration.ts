@@ -677,6 +677,8 @@ it("authenticates two accounts through the production browser transport and pres
       expect(requests.slice(wrongGrantStart)).toEqual([
         { accountId: users[1]!.id, path: "/api/account/session", status: 200 },
         { accountId: users[1]!.id, path: "/api/live/named-session", status: 404 },
+        // The page reads the invitation, which refuses this account just the same.
+        { accountId: users[1]!.id, path: "/api/live/named-documents", status: 404 },
       ]);
       expect(sockets).toHaveLength(socketCount);
       results.authentication = {

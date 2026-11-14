@@ -55,7 +55,6 @@ test(
       );
       return { started: result.status === 0, argv, stdout: result.stdout };
     };
-    // A failed probe and a missing unshare both refuse.
     for (const [unshare, args] of [
       [1, []],
       [1, ["notes.md"]],
@@ -83,7 +82,6 @@ test(
       started: true,
       argv: ["--enable-logging", "notes.md"],
     });
-    // A person who passes --no-sandbox chose it; the launcher adds nothing.
     assert.deepEqual(await started(1, ["--no-sandbox"]), { started: true, argv: ["--no-sandbox"] });
   },
 );

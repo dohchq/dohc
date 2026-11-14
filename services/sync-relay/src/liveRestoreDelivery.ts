@@ -18,6 +18,7 @@ import {
 import { configRecord } from "./deviceLiveHostConfig";
 import { authorityInteger } from "./storage/liveDocumentAuthority";
 import { settlementResponse, settlementPending } from "./liveSettlement";
+import { serverLogLine } from "./serverLogWords";
 
 export type StopRestoreOutcome =
   | { kind: "pending"; reason: string }
@@ -81,7 +82,7 @@ export async function cancelStopRestore(options: {
   } catch (error) {
     if (error instanceof StopRestoreCancellationRefused)
       return { kind: "refused", reason: error.message };
-    console.error("[sync-relay] restore cancellation not recorded:", error);
+    console.error("[sync-relay] restore cancellation not recorded:", serverLogLine(error));
     return { kind: "pending", reason: "The host's cancellation answer was not recorded." };
   }
   return { kind: "declined" };

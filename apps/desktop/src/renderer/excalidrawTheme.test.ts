@@ -9,7 +9,6 @@ const theme = readFileSync(new URL("./excalidrawTheme.css", import.meta.url), "u
   /\/\*[\s\S]*?\*\//g,
   "",
 );
-// The build Excalidraw ships in production, which is what dohc packages.
 const dist = dirname(createRequire(import.meta.url).resolve("@excalidraw/excalidraw"));
 const excalidrawCss = readFileSync(join(dist, "index.css"), "utf8");
 const excalidrawJs = readFileSync(join(dist, "index.js"), "utf8");
@@ -30,7 +29,6 @@ const tokenKey = new Map(
   Object.entries(CSS_TOKEN_NAMES).map(([key, name]) => [name, key as keyof ThemeTokens]),
 );
 
-// A dohc token, or an sRGB mix of two, as the hex color it paints.
 function resolve(
   value: string | undefined,
   mode: "light" | "dark",
@@ -117,8 +115,6 @@ describe("Excalidraw's chrome in dohc's tokens", () => {
     );
   });
 
-  // The filter cannot show every color, so a saturated accent shows as the
-  // nearest color it can, which must still stand out on a white canvas.
   it("keeps a saturated custom accent's selection visible on the dark canvas", () => {
     const canvas = hexOf(shown([255, 255, 255]).map(clip));
     for (const chosen of [

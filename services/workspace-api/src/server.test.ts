@@ -27,7 +27,6 @@ async function listen(
   return (server!.address() as AddressInfo).port;
 }
 
-/** Opens a connection and resolves with the server's side of it. */
 async function open(port: number): Promise<{ client: Socket; socket: Socket }> {
   const accepted = once(server!, "connection");
   const client = connect(port, "127.0.0.1");
@@ -37,7 +36,6 @@ async function open(port: number): Promise<{ client: Socket; socket: Socket }> {
   return { client, socket };
 }
 
-/** Writes `text` on a new connection and resolves with everything the server sent once it closes. */
 function exchange(port: number, text: string): Promise<{ reply: string; ms: number }> {
   return new Promise((resolve) => {
     const started = Date.now();
@@ -119,7 +117,6 @@ describe("workspace server", () => {
   it("finishes an answer that takes longer than the idle limit", async () => {
     let accepted: Promise<unknown[]> | undefined;
     const port = await listen(SHORT, async () => {
-      // Answers only once its connection has been idle past the limit.
       const [socket] = (await accepted!) as [Socket];
       await once(socket, "timeout");
       return new Response("slow answer");

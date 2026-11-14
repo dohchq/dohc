@@ -84,7 +84,6 @@ export function usageRecordHandlers(deps: {
       try {
         result = usageRecordView(await current.read(), deps.coverage, file);
       } catch (error) {
-        // File and decoding errors leave the record unreadable.
         const code = (error as NodeJS.ErrnoException | null)?.code;
         if (typeof code !== "string") throw error;
         result = { status: "unreadable", file, code, setAside: null };

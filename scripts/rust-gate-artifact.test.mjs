@@ -190,7 +190,6 @@ function claim(path) {
   return path;
 }
 
-/** A PATH whose `<name>` prints `stdout` and exits `code`. */
 function stubCommand(name, stdout, code) {
   const dir = mkdtempSync(join(tmpdir(), "dohc-cmd-stub-"));
   writeFileSync(join(dir, name), `#!/bin/sh\nprintf '%s\\n' "${stdout}"\nexit ${code}\n`);
@@ -236,7 +235,6 @@ test("the gate stamps the tree it read, at every step boundary", () => {
   try {
     const run = runGate(stub);
 
-    // The summary block opens with the tree, and the row is in it.
     assert.match(run.summary, /^== summary ==\r?\n {2}tree [0-9a-f]{8} /);
     assert.match(run.summary, /PASS tree provenance/);
 
@@ -275,7 +273,6 @@ test("the gate stamps the tree it read, at every step boundary", () => {
     assert.match(run.evidence, /reader tests=PASS/);
     assert.match(run.evidence, /scratch leak=PASS/);
 
-    // The stamp names the commit this checkout is on, not any commit.
     const head = spawnSync("git rev-parse HEAD", {
       cwd: repoRoot,
       shell: true,
@@ -323,7 +320,6 @@ test("the caps and the scratch root reach every cargo child", () => {
     assert.match(child, /NEXTEST_TEST_THREADS=\d+/);
     assert.match(child, /DOHC_TEST_SCRATCH_ROOT=./);
 
-    // And the evidence line records caps, ahead of the head stamp.
     assert.match(run.evidence, /, jobs \d+, test-threads \d+, head /);
   } finally {
     rmSync(stub, { recursive: true, force: true });
@@ -600,8 +596,6 @@ test("a tree changed under the gate is refused, and never stamped", () => {
     assert.doesNotMatch(run.summary.split("\n")[1], /clean|dirty/);
     assert.match(run.evidence, / head UNATTRIBUTABLE\)/);
 
-    // A refused run is a failed run, in the verdict field and in the exit
-    // code — not a green log with one red row inside it.
     assert.match(run.evidence, /\| FAIL \|/);
     assert.notEqual(run.code, 0);
   } finally {
@@ -626,7 +620,6 @@ test("a HEAD moved and returned inside one step is refused", () => {
     // that every Git host records the same count.
     assert.match(run.summary, /HEAD was updated [1-9]\d* time(?:s)? during `native target`/);
 
-    // The stamp is the judgement's, and the verdict is the run's.
     assert.match(run.summary, /^== summary ==\r?\n {2}tree UNATTRIBUTABLE\r?\n/);
     assert.match(run.evidence, / head UNATTRIBUTABLE\)/);
     assert.match(run.evidence, /\| FAIL \|/);

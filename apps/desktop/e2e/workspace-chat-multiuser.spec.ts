@@ -17,24 +17,23 @@ import {
 } from "./helpers/workspace";
 import { fetchSharedChannelInfo } from "../src/workspaces/sharedChannelInfo";
 
-// MU-C6 — the multi-user chat + co-presence product proof, driven through the
-// real Electron app. One real desktop app is the channel OWNER (signed in as
+// The multi-user chat + co-presence product proof, driven through the
+// real Electron app. One real desktop app is the channel owner (signed in as
 // the granter over a real relay child process); a second relay client is the
 // participant the channel is shared to. The participant is exercised through
 // the same public relay surface the desktop's own main process uses — the
 // share presence route (a participant's ephemeral awareness path) and the
 // daemon shared-channel push/pull APIs (a participant's durable chat path) —
 // because the serial single-display harness runs one Electron
-// instance at a time (the 0P-C / MU integration pattern).
+// instance at a time.
 //
 // What this proves in the real app that unit/integration tests cannot:
 //   • the owner creates a channel and sends a message and it RENDERS;
 //   • the owner shares the channel to the participant from the real Chats UI;
 //   • when both view the shared channel, the owner's real app RENDERS the
 //     participant's presence face (channel scope via the wireId topic) and,
-//     inside a thread, the participant's TYPING indicator (thread scope) — the
-//     participant-side co-presence this branch wired — and the participant's
-//     own relay view converges on the owner (bidirectional);
+//     inside a thread, the participant's typing indicator (thread scope), and
+//     the participant's own relay view converges on the owner (bidirectional);
 //   • a participant's reply and reaction, pushed over the share, converge back
 //     into the owner's real app after a refresh.
 
@@ -177,7 +176,6 @@ test("owner + participant chat and co-presence converge in the real app", async 
     await openWorkspaceFromFirstRun(page, temp);
     const baseUrl = relay.baseUrl;
 
-    // --- (a) OWNER creates a channel, starts a thread, sends a message ------
     await page.getByTestId(activityPin("chats")).click();
     await expect(page.getByTestId("chats-view")).toBeVisible();
 
@@ -185,7 +183,6 @@ test("owner + participant chat and co-presence converge in the real app", async 
     await page.getByTestId("chats-new-channel-name").fill("launch");
     await page.getByTestId("chats-new-channel-type-posts").click();
     await page.getByTestId("chats-new-channel-name").press("Enter");
-    // createChannel opens the new channel directly.
     await expect(page.getByTestId("chats-channel-view")).toBeVisible();
     await expect(page.getByTestId("chats-channel-title")).toHaveText("launch");
 
@@ -199,12 +196,10 @@ test("owner + participant chat and co-presence converge in the real app", async 
     const threadId = await page.getByTestId("chats-thread").first().getAttribute("data-thread-id");
     expect(threadId).toBeTruthy();
 
-    // --- (b) OWNER shares the channel to the participant from the Chats UI --
     await page.getByTestId("chats-share-channel").click();
     await expect(page.getByTestId("chats-share-panel")).toBeVisible();
     await page.getByTestId("chats-share-email").fill(RECIPIENT_EMAIL);
     await page.getByTestId("chats-share-submit").click();
-    // The grant lands (a member row appears in the panel).
     await expect(page.getByTestId("chats-share-member")).toContainText(RECIPIENT_EMAIL);
     // Members is a dialog; close it before working in the channel again.
     await page.getByTestId("chats-share-close").click();
@@ -230,7 +225,6 @@ test("owner + participant chat and co-presence converge in the real app", async 
       .toBe("owner-present");
     expect(sawOwner).toBe(true);
 
-    // The owner's REAL app renders the participant's presence face.
     await expect(page.locator(`[aria-label="${RECIPIENT_USER} is here"]`)).toBeVisible({
       timeout: 30_000,
     });
@@ -266,9 +260,6 @@ test("owner + participant chat and co-presence converge in the real app", async 
       await typingPump;
     }
 
-    // --- (c) + (d) durable convergence: the participant pulls the shared
-    // channel, replies, and reacts to the owner's message; the owner's real app
-    // shows both after re-opening the thread.
     const relayConn = recipientRelay(baseUrl);
     const info = await fetchSharedChannelInfo({ relay: relayConn, shareId });
     expect(info.channelWireId).toBe(channelWireId);
@@ -290,7 +281,6 @@ test("owner + participant chat and co-presence converge in the real app", async 
     });
     expect(messages.length).toBeGreaterThan(0);
     const ownerMessageId = messages[0]!.id;
-    // The participant's reply.
     await memberStore.sendMessage({
       authorActorKey: null,
       workspaceId: memberWs,
@@ -299,7 +289,6 @@ test("owner + participant chat and co-presence converge in the real app", async 
       authorUserId: RECIPIENT_USER,
       body: "Joining from the other side — count me in.",
     });
-    // The participant reacts to the owner's first message.
     await memberStore.setReaction({
       workspaceId: memberWs,
       threadId: threadId!,
@@ -348,7 +337,6 @@ test("owner + participant chat and co-presence converge in the real app", async 
     await expect(
       page.getByTestId("chats-message-body").filter({ hasText: "count me in" }),
     ).toBeVisible();
-    // The participant's reaction on the owner's message rendered too.
     await expect(page.getByText("🚀").first()).toBeVisible({ timeout: 15_000 });
   } finally {
     // Stop the relay child before removing the temp tree: its sqlite db lives

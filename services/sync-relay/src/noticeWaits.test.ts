@@ -9,6 +9,8 @@ import {
 import {
   NOTICE_WAIT_MAX_MS,
   type AutomationWake,
+  type NoticeTarget,
+  type PostableNoticeKind,
   type RelayNotice,
   type RelayNoticePage,
 } from "@dohc/workspace-contracts/relay";
@@ -18,7 +20,11 @@ import { NOTICE_WAITS_PER_ACCOUNT, NOTICE_WAITS_PER_SESSION } from "./noticeRout
 import { notifyNoticeChange } from "./relayWriteChanges";
 import type { SyncRelayStorage } from "./storage";
 import type { StorageContext } from "./storage/context";
-import { advanceNoticeHead, type PostNoticeInput } from "./storage/notices";
+import {
+  advanceNoticeHead,
+  noticePersonalAgentSignedIn,
+  type PostNoticeInput,
+} from "./storage/notices";
 import {
   closeTestStorages,
   denialBytes,
@@ -141,7 +147,8 @@ async function relay(options: { seedFull?: boolean } = {}) {
       kind: "mention",
       title: `Title ${noticeId}`,
       body: `Body ${noticeId}`,
-      target: {},
+      // A mention shows on the phone only where its place is confirmed: an ordinary file in Trip.
+      target: { path: "inbox/today.md" },
       originInstallId: "install-a",
       senderUserId: "ana",
       senderLabel: "Ana",
@@ -408,13 +415,13 @@ it("leaves hidden workspaces, secret targets, and wake payloads out of the phone
   const response = await read("scope=phone&limit=200");
   const text = await response.clone().text();
   const phone = await page(response);
-  const kept = ["plain", "deleted", "thread-plain", "thread-chat", "through-share", wakeId];
+  // A wake names no Collection the relay can place, so its row stays off the phone too.
+  const kept = ["plain", "deleted", "thread-plain", "thread-chat", "through-share"];
   expect(ids(phone)).toEqual(kept);
   expect(phone.notices.find((notice) => notice.noticeId === "through-share")).toMatchObject({
     workspaceId: null,
     recipientShareId: "share-ben",
   });
-  expect(phone.notices.find((notice) => notice.noticeId === wakeId)).not.toHaveProperty("wake");
   // Title and body go with the row, not just its target.
   for (const left of [
     "API key rotated",
@@ -440,12 +447,124 @@ it("leaves hidden workspaces, secret targets, and wake payloads out of the phone
   );
 });
 
+it("leaves out an automation's rows whose Collection the relay can't place, and judges a skipped schedule by its file", async () => {
+  const { storage, read, full, post } = await relay();
+  const skipped = (first: number, target: PostNoticeInput["target"]) =>
+    post(`schedule-skipped:trip:collection:c1#digest:${first}`, {
+      kind: "schedule-skipped",
+      title: `Hidden digest ${first} skipped once`,
+      target,
+    });
+  skipped(1_000, { automation: "collection:c1#digest", path: "lists/automations.yaml" });
+  skipped(1_001, { automation: "collection:c1#digest", path: ".env/automations.yaml" });
+  // Its automations.yaml path was too long to send, so the relay can't place the Collection.
+  skipped(1_002, { automation: "collection:c1#digest" });
+  storage.postAutomationWake({
+    workspaceId: "trip",
+    ownerUserId: "ana",
+    effectId: "effect-1",
+    claimId: "claim-1",
+    keySeed: "seed-1",
+    startedAtMs: NOW,
+    wake: {
+      automationId: "collection:c1#digest",
+      name: "Digest",
+      depth: 1,
+      body: "Summarize the day",
+    },
+    senderLabel: "Digest",
+    nowMs: NOW,
+  });
+  const response = await read("scope=phone");
+  const text = await response.clone().text();
+  expect(ids(await page(response))).toEqual(["schedule-skipped:trip:collection:c1#digest:1000"]);
+  for (const left of ["Hidden digest 1001", "Hidden digest 1002", "Your agent has work waiting"])
+    expect(text).not.toContain(left);
+  expect((await full()).notices).toHaveLength(4);
+});
+
+it("shows each kind on the phone only as its rule allows, and leaves out a kind it doesn't know", async () => {
+  const { storage, read, full, post } = await relay();
+  logWriter(storage)("chat.thread.create", { threadId: "thread-chat" });
+  const automation = "collection:c1#digest";
+  const placed = { path: "lists/automations.yaml", automation };
+  // [noticeId, kind, target, shown on the phone]
+  const cases: Array<[string, PostableNoticeKind, NoticeTarget, boolean]> = [
+    ["mention-thread", "mention", { thread: "thread-chat", message: "m-1" }, true],
+    ["mention-path", "mention", { path: "docs/plan.md" }, true],
+    ["mention-nowhere", "mention", {}, false],
+    ["agent-run-thread", "agent-run", { thread: "thread-chat", run: "run-1" }, true],
+    ["agent-run-run-only", "agent-run", { run: "run-2" }, false],
+    [`schedule-skipped:trip:${automation}:1000`, "schedule-skipped", placed, true],
+    [`schedule-skipped:trip:${automation}:1001`, "schedule-skipped", { automation }, false],
+    ["failed", "automation-failed", { ...placed, run: "claim-1" }, true],
+    ["failed-hidden", "automation-failed", { path: ".env/automations.yaml", automation }, false],
+    ["failed-nameless", "automation-failed", { automation, run: "claim-1" }, false],
+    ["failed-blank", "automation-failed", {}, false],
+    [
+      "notify",
+      "automation-notify",
+      { path: "lists/milk.md", record: "r1", automation, run: "claim-1" },
+      true,
+    ],
+    ["notify-nameless", "automation-notify", { automation, run: "claim-1" }, false],
+    ["switched-off", "automation-switched-off", placed, true],
+    ["switched-off-nameless", "automation-switched-off", { automation }, false],
+  ];
+  for (const [noticeId, kind, target] of cases) post(noticeId, { kind, target });
+  // The relay's own kinds: a share received, and an agent's sign-in, both shown; a wake, never.
+  shareNotesWithAna(storage, { deliver: true });
+  noticePersonalAgentSignedIn(storage as StorageContext, {
+    ownerUserId: "ana",
+    workspaceId: "trip",
+    connectionId: "conn-1",
+    agentId: "p-nova",
+    agentName: "Nova",
+    nowMs: NOW,
+  });
+  const { noticeId: wakeId } = storage.postAutomationWake({
+    workspaceId: "trip",
+    ownerUserId: "ana",
+    effectId: "effect-1",
+    claimId: "claim-1",
+    keySeed: "seed-1",
+    startedAtMs: NOW,
+    wake: { automationId: automation, name: "Digest", depth: 1, body: "Summarize the day" },
+    senderLabel: "Digest",
+    nowMs: NOW,
+  });
+  // A kind this relay doesn't know, as a newer relay could have stored.
+  post("future");
+  const db = inspectDatabase(storagePath(storage));
+  db.prepare("UPDATE sync_relay_notices SET kind = 'future-kind' WHERE notice_id = 'future'").run();
+  db.close();
+
+  const response = await read("scope=phone&limit=200");
+  const text = await response.clone().text();
+  const phone = await page(response);
+  const shown = cases.flatMap(([noticeId, , , onPhone]) => (onPhone ? [noticeId] : []));
+  expect(
+    phone.notices.filter((notice) => notice.kind !== "share-received").map((n) => n.noticeId),
+  ).toEqual([...shown, "personal-agent-signed-in:conn-1"]);
+  expect(phone.notices.filter((notice) => notice.kind === "share-received")).toHaveLength(1);
+  const left = [
+    ...cases.flatMap(([noticeId, , , onPhone]) => (onPhone ? [] : [noticeId])),
+    wakeId,
+    "future",
+  ];
+  for (const noticeId of left) expect(text, noticeId).not.toContain(`"noticeId":"${noticeId}"`);
+  // The whole list keeps every row.
+  expect(ids(await full())).toEqual(expect.arrayContaining([...shown, ...left]));
+});
+
 it("decides a row in another account's workspace by a fixed rule that reads nothing there", async () => {
   const { storage, read, post } = await relay();
   // Ana's own notices can name any workspace ID, Ben's included.
   post("probe-path", { reach: { workspaceId: "bens" }, target: { path: "deploy/config.yaml" } });
   post("probe-thread", { reach: { workspaceId: "bens" }, target: { thread: "thread-ben" } });
+  // A row naming no place is left out whatever the workspace holds; Ana's own row shows.
   post("probe-plain", { reach: { workspaceId: "bens" }, target: {} });
+  post("own");
   const before = await (await read("scope=phone")).text();
   const write = logWriter(storage, "bens");
   write("moment.append", { objectId: "object-config", path: "deploy/config.yaml" });
@@ -453,7 +572,7 @@ it("decides a row in another account's workspace by a fixed rule that reads noth
   write("chat.thread.create", { threadId: "thread-ben", linkedPathHint: ".env" });
   const after = await read("scope=phone");
   expect(await after.clone().text()).toBe(before);
-  expect(ids(await page(after))).toEqual(["probe-plain"]);
+  expect(ids(await page(after))).toEqual(["own"]);
 });
 
 it("never looks up a thread named through a share, even beside a path the share admits", async () => {
@@ -568,6 +687,146 @@ it("answers a held read at once when a named share arrives during its last sign-
   expect(next.notices.map((notice) => [notice.kind, notice.recipientShareId])).toEqual([
     ["share-received", "share-ben"],
   ]);
+});
+
+// A mention Ana's computer posted about a file in Ben's shared notes.
+const SHARED_MENTION = {
+  reach: { shareId: "share-ben" },
+  title: "Mentioned in Ben's notes",
+  body: "Bring the packing list",
+  target: { path: "notes/list.md" },
+} as const;
+
+it("starts the phone's list over without a share's Notices once the share is lost", async () => {
+  const { storage, read, post } = await relay();
+  shareNotesWithAna(storage, { deliver: true });
+  post("kept");
+  post("share-mention", SHARED_MENTION);
+  const before = await page(await read("scope=phone"));
+  expect(ids(before)).toEqual(expect.arrayContaining(["kept", "share-mention"]));
+  const shared = before.notices.find((notice) => notice.kind === "share-received")!;
+  expect(shared).toMatchObject({ removed: false, target: { share: "share-ben" } });
+  expect(storage.revokeShare("share-ben", NOW)).toBe(true);
+
+  const response = await read(`scope=phone&cursor=${before.nextCursor}`);
+  const text = await response.clone().text();
+  const after = await page(response);
+  expect(after).toMatchObject({ replace: true, hasMore: false });
+  expect(ids(after)).toEqual(["kept"]);
+  for (const left of [
+    "share-mention",
+    SHARED_MENTION.title,
+    SHARED_MENTION.body,
+    shared.noticeId,
+    shared.title,
+  ])
+    expect(text).not.toContain(left);
+});
+
+it("starts a phone's whole pull over when a share it took a row through is lost between pages", async () => {
+  const { storage, read, post } = await relay();
+  shareNotesWithAna(storage, { deliver: true });
+  await read("scope=phone");
+  post("share-mention", SHARED_MENTION);
+  post("later");
+  const first = await page(await read("scope=phone&limit=2"));
+  expect(first).toMatchObject({ hasMore: true, replace: true });
+  expect(first.notices.map((notice) => notice.kind)).toEqual(["share-received", "mention"]);
+  expect(ids(first)).toContain("share-mention");
+  expect(storage.revokeShare("share-ben", NOW)).toBe(true);
+
+  const second = await page(await read(`scope=phone&limit=10&cursor=${first.nextCursor}`));
+  expect(second).toMatchObject({ replace: true, hasMore: false });
+  expect(ids(second)).toEqual(["later"]);
+});
+
+it("never names a share's secret or ignored row on the phone, before or after the share is lost", async () => {
+  const { storage, read, post } = await relay();
+  shareNotesWithAna(storage, { deliver: true });
+  post("share-mention", SHARED_MENTION);
+  // The share admits neither path, so the first read's reach check takes each target and keeps the words.
+  post("payroll-env", {
+    reach: { shareId: "share-ben" },
+    title: "Payroll keys",
+    body: "KEY=hunter2",
+    target: { path: "notes/.env" },
+  });
+  post("vendored-dep", {
+    reach: { shareId: "share-ben" },
+    title: "Vendored package",
+    body: "left-pad changed",
+    target: { path: "notes/node_modules/left-pad.md" },
+  });
+  const texts: string[] = [];
+  const phone = async (query: string) => {
+    const response = await read(`scope=phone&${query}`);
+    texts.push(await response.clone().text());
+    return await page(response);
+  };
+  const before = await phone("");
+  expect(ids(before)).toContain("share-mention");
+  // Rows settled before a whole read never start the list over again.
+  const caughtUp = await phone(`cursor=${before.nextCursor}`);
+  expect(caughtUp).toMatchObject({ replace: false, notices: [] });
+  expect(storage.revokeShare("share-ben", NOW)).toBe(true);
+  const after = await phone(`cursor=${caughtUp.nextCursor}`);
+  expect(after).toMatchObject({ replace: true, notices: [] });
+  await phone(`cursor=${after.nextCursor}`);
+  await phone("");
+  expect(texts).toHaveLength(5);
+  for (const text of texts) {
+    for (const hidden of ["payroll-env", "Payroll keys", "hunter2", "vendored-dep", "left-pad"])
+      expect(text).not.toContain(hidden);
+  }
+});
+
+it("keeps a lost share's rows, words and all, on the computer's list without starting it over", async () => {
+  const { storage, h, post } = await relay();
+  shareNotesWithAna(storage, { deliver: true });
+  post("share-mention", SHARED_MENTION);
+  const before = await page(await h(request("ana", "/sync/notices")));
+  expect(before.notices.map((notice) => notice.kind)).toEqual(["mention", "share-received"]);
+  expect(storage.revokeShare("share-ben", NOW)).toBe(true);
+
+  const after = await page(await h(request("ana", `/sync/notices?cursor=${before.nextCursor}`)));
+  expect(after).toMatchObject({ replace: false, hasMore: false });
+  expect(after.notices).toEqual(
+    before.notices.map((notice) => ({
+      ...notice,
+      changeSeq: expect.any(Number),
+      target: null,
+    })),
+  );
+});
+
+it("finishes a restarted phone pull, then reads on without starting over again", async () => {
+  const { storage, read, post } = await relay();
+  shareNotesWithAna(storage, { deliver: true });
+  await read("scope=phone");
+  post("share-mention", SHARED_MENTION);
+  post("later");
+  const next = async (cursor: string) =>
+    await page(await read(`scope=phone&limit=1&cursor=${cursor}`));
+  const first = await page(await read("scope=phone&limit=1"));
+  expect(first).toMatchObject({ hasMore: true, replace: true });
+  expect(storage.revokeShare("share-ben", NOW)).toBe(true);
+
+  // The restart takes "later", then the two settled rows one page each, and leaves both out.
+  const restarted = await next(first.nextCursor);
+  const settled = await next(restarted.nextCursor);
+  const last = await next(settled.nextCursor);
+  const parts = [restarted, settled, last].map((part) => [ids(part), part.replace, part.hasMore]);
+  expect(parts).toEqual([
+    [["later"], true, true],
+    [[], false, true],
+    [[], false, false],
+  ]);
+  expect(await next(last.nextCursor)).toMatchObject({
+    notices: [],
+    replace: false,
+    hasMore: false,
+    nextCursor: last.nextCursor,
+  });
 });
 
 it("moves the phone's cursor past the rows it leaves out", async () => {

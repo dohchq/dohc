@@ -3,8 +3,6 @@ import { createReaderFlip } from "./src/reader-flip.js";
 import { createGraphFlow } from "./src/graph-flow.js";
 import { matchesBuild, releaseAssets } from "./release-assets.ts";
 
-// dohc marketing site: downloads, theme toggle, and scroll reveals.
-
 const root = document.documentElement;
 const themeToggle = document.querySelector(".theme-toggle");
 
@@ -879,7 +877,6 @@ if (agentDemo) {
       return total;
     };
 
-    // Pairwise settlement: whoever owes most pays whoever is owed most.
     const settle = () => {
       const nets = Object.keys(PEOPLE).map((who) => ({ who, net: shareOf(who) - PAID[who] }));
       const debtors = nets.filter((n) => n.net > 0.5).sort((a, b) => b.net - a.net);

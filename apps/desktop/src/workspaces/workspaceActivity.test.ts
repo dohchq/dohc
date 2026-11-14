@@ -34,11 +34,6 @@ const engineUnreachableSessions = new Proxy({} as EngineWorkspaceSessions, {
   },
 });
 
-// The legacy change-set read surface
-// (listChangeSets/readChangeSet) is gone from this layer — engine moments
-// are the only history. These tests cover what remains: the capture hooks
-// and the honest no-recorder status for a workspace without a capture.
-
 let root: string;
 
 beforeEach(async () => {
@@ -669,7 +664,6 @@ describe("workspaceActivity agent run state", () => {
     const { activity, pushed } = await opened();
     expect(activity.agentRunState(id)).toEqual({ workspaceId: id, revision: 0, active: false });
     await activity.setAgentRun(id, run("run-1"));
-    // One run replacing another is no change in whether the agent works.
     await activity.setAgentRun(id, run("run-2"));
     expect(activity.agentRunState(id)).toEqual({ workspaceId: id, revision: 1, active: true });
     await activity.setAgentRun(id, null);
@@ -736,7 +730,6 @@ describe("workspaceActivity agent run state", () => {
     await activity.clearAgentRun(id, "cli-run");
     await activity.claimAgentRun(id, { ...run("dispatch-1"), dispatch: "run" }, undefined, secret);
     expect(activity.dispatchedRunSecret(id)).toBe(secret);
-    // A second run is refused the slot, so it can't replace the secret.
     expect(
       await activity.claimAgentRun(
         id,
@@ -746,7 +739,6 @@ describe("workspaceActivity agent run state", () => {
       ),
     ).toBe(false);
     expect(activity.dispatchedRunSecret(id)).toBe(secret);
-    // The secret stops working when the run ends, even if capture keeps the slot.
     capture.setActiveAgentRun.mockRejectedValueOnce(new Error("capture could not flush"));
     await expect(activity.clearAgentRun(id, "dispatch-1")).rejects.toThrow(
       "capture could not flush",
@@ -782,7 +774,6 @@ describe("workspaceActivity agent run state", () => {
     capture.release();
     await ending;
     expect(activity.agentRunState(id).active).toBe(true);
-    // Ending an older run does nothing for a run it does not hold.
     await activity.clearAgentRun(id, "run-1");
     expect(activity.agentRunState(id).active).toBe(true);
     expect(pushed).toEqual([{ workspaceId: id, revision: 1, active: true }]);
@@ -816,16 +807,10 @@ describe("workspaceActivity history-off status", () => {
     const status = await activity.open(workspace());
     expect(status.historyRecordingUnavailable).toBe(false);
     expect(status.historyShareView).toBe(false);
-    // No capture also means no versions surface.
     expect(activity.engineCaptureFor("activity-test")).toBeNull();
     await activity.stopAll();
   });
 
-  // A shared view's null capture is a capability — the view is fed by
-  // the share's pull and never records here. Without this cause on the
-  // status, the notice blames a Settings toggle nobody touched. Wired
-  // through the real gate, so the share rule and the status thread are
-  // pinned together: deleting either breaks this test.
   it("separates a shared view's null capture from a failed build", async () => {
     const activity = createWorkspaceActivity(() => {}, {
       captureFor: (w, hooks) =>
@@ -843,13 +828,10 @@ describe("workspaceActivity history-off status", () => {
     const status = await activity.open(workspace());
     expect(status.historyShareView).toBe(true);
     expect(activity.getStatus("activity-test").historyShareView).toBe(true);
-    // A capability, not a failure.
     expect(status.historyRecordingUnavailable).toBe(false);
     await activity.stopAll();
   });
 
-  // A capture build that threw leaves an empty recorder, and the cause is a
-  // failure. The status says so, so the notice can.
   it("marks a failed capture build unavailable", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const activity = createWorkspaceActivity(() => {}, {
@@ -861,7 +843,6 @@ describe("workspaceActivity history-off status", () => {
     expect(status.historyRecordingUnavailable).toBe(true);
     expect(activity.getStatus("activity-test").historyRecordingUnavailable).toBe(true);
     expect(activity.engineCaptureFor("activity-test")).toBeNull();
-    // The failure itself stays developer-facing, in the log.
     expect(errorSpy).toHaveBeenCalled();
     errorSpy.mockRestore();
     await activity.stopAll();
@@ -873,7 +854,6 @@ describe("workspaceActivity history-off status", () => {
     // history is off (nothing is known yet).
     expect(activity.getStatus("activity-test").historyRecordingUnavailable).toBe(false);
     const status = await activity.open(workspace());
-    // No captureFor option at all (test/legacy wiring): stays false.
     expect(status.historyRecordingUnavailable).toBe(false);
     await activity.stopAll();
   });
@@ -1122,7 +1102,6 @@ describe("workspaceActivity cloud sync nudge", () => {
     await activity.open(workspace());
     await reads[0];
     expect(activity.getStatus("activity-test").collectionsWaitingForSync).toBe("sync");
-    // Abandoning the pull ends the wait the next open reads.
     await activity.close("activity-test");
     pullUnfinished = false;
     await activity.open(workspace());
@@ -1151,7 +1130,6 @@ describe("workspaceActivity cloud sync nudge", () => {
     const state = new WorkspaceActivityState();
     try {
       service.recordSyncPauseReopenFailed(workspace(), state);
-      // The activity opens though the engine refused the owner open.
       await service.open(workspace(), state);
       await reads[0]!.catch(() => undefined);
       expect(service.getStatus(workspace(), state).collectionsWaitingForSync).toBe("reopen");
@@ -1182,7 +1160,6 @@ describe("workspaceActivity cloud sync nudge", () => {
         syncing: false,
         lastSyncedAtMs: null,
         pendingChangeCount: 0,
-        // A conflict shows first in the status, and must not hide a failed pass.
         conflictCount: 1,
         authExpired: false,
         sharingDeclined: [],
@@ -1301,7 +1278,6 @@ describe("workspaceActivity cloud sync nudge", () => {
     authExpired = true;
     expect(read().state).toBe("sign-in-expired");
     expect(read().signInExpired).toBe(true);
-    // A conflict shows first, and the expired sign-in still reaches Settings.
     conflictCount = 1;
     expect(read().state).toBe("conflict");
     expect(read().signInExpired).toBe(true);
@@ -1311,8 +1287,6 @@ describe("workspaceActivity cloud sync nudge", () => {
     blocked = "not-connected";
     expect(read().state).toBe("not-connected");
     blocked = undefined;
-    // The account matches and the sign-in is accepted: sync reads normal
-    // again, with no pause and the engine never stopped.
     authExpired = false;
     const confirmed = read();
     expect(confirmed.state).toBe("synced");
@@ -1455,19 +1429,16 @@ describe("workspaceActivity cloud sync nudge", () => {
         expect.objectContaining({ workspaceId: "activity-test", rootPath: root }),
       );
 
-      // Signing in again attaches a new engine. Reconciling while one is attached sends nothing.
       await service.stopEngine(state, false);
       service.reconcileCloud(state, build, false);
       service.reconcileCloud(state, build, false);
       expect(sendWorkspaceName).toHaveBeenCalledTimes(2);
 
-      // Turning sync on attaches one more, and only once.
       await service.stopEngine(state, false);
       await service.enableCloud(workspace(), state);
       await service.enableCloud(workspace(), state);
       expect(sendWorkspaceName).toHaveBeenCalledTimes(3);
 
-      // Signed out, no engine attaches and no name goes out.
       await service.stopEngine(state, false);
       signedIn = false;
       service.reconcileCloud(state, build, false);
@@ -1544,7 +1515,7 @@ describe("workspaceActivity cloud sync nudge", () => {
     await activity.stopAll();
   });
 
-  // Failed-join rollback (0P-C gate fix): close() tears down exactly one
+  // Failed-join rollback: close() tears down exactly one
   // workspace — engine stopped, entry forgotten — leaving others untouched.
   // A pass someone asked for reads as syncing, not as the failure it may
   // clear; an automatic pass does not hide the failure.
@@ -1919,9 +1890,6 @@ describe("workspaceActivity cloud sync nudge", () => {
     );
   });
 
-  // A shared view has no recorder, so its refresh reports the store's
-  // refusal. The status carries it like a capture's, and only a shared view
-  // takes it: a workspace with a recorder hears its store through capture.
   it("puts a shared view's store refusal on its status", async () => {
     const notify = vi.fn();
     const activity = createWorkspaceActivity(notify, {
@@ -1958,8 +1926,6 @@ describe("workspaceActivity cloud sync nudge", () => {
     await owned.stopAll();
   });
 
-  // The engine's own words for a refusal ride along, so a report can carry
-  // them without the log, and leave with the refusal.
   it("carries the refusal detail on the status", async () => {
     let hooks: WorkspaceCaptureHooks | null = null;
     const activity = createWorkspaceActivity(vi.fn(), {
@@ -1991,10 +1957,6 @@ describe("workspaceActivity cloud sync nudge", () => {
     await activity.stopAll();
   });
 
-  // A refused engine store rides the capture outcome into the status
-  // the notice center reads, transition-only like the capture-failed flag —
-  // a persistently refused store re-reports the same code on every pass and
-  // must not re-notify.
   it("publishes a store refusal, clears it on recovery, and notifies only on transitions", async () => {
     let hooks: WorkspaceCaptureHooks | null = null;
     const notify = vi.fn();
@@ -2022,11 +1984,9 @@ describe("workspaceActivity cloud sync nudge", () => {
     expect(refused.historyCaptureFailed).toBe(true);
     expect(notify).toHaveBeenCalledTimes(1);
 
-    // The same refusal again is not news.
     hooks!.onCaptureOutcome("unsupported-fingerprint");
     expect(notify).toHaveBeenCalledTimes(1);
 
-    // A pass that reached the store clears the refusal with the failure.
     hooks!.onCaptureOutcome(null);
     expect(activity.getStatus("activity-test").engineStoreRefused).toBeUndefined();
     expect(notify).toHaveBeenCalledTimes(2);

@@ -9,8 +9,6 @@ import { ChatsView, bridgeMock, channel, dm } from "./ChatsView.testHarness";
 import type { DesktopUserSettings } from "../../settings/userSettings";
 import { settingsWithAgent, testAgent } from "../../testing/agentSettings";
 
-// What About reads for a conversation tab in one workspace, as JSON:
-// "loading" while nothing is published.
 function AboutProbe(props: { workspaceId: string; tabPath: string }) {
   const entry = useAboutConversation(props.workspaceId, props.tabPath);
   return (
@@ -49,7 +47,6 @@ const probe = (workspaceId = "workspace-a") =>
   screen.getByTestId(`about-probe-${workspaceId}`).textContent;
 const published = (workspaceId = "workspace-a") => JSON.parse(probe(workspaceId) ?? "") as unknown;
 
-// One presence snapshot for every topic, pushed by the test.
 function presenceWith(peers: PresencePeer[]): ChatPresenceCollaboration {
   const snapshot: PresenceSnapshot = { version: 1, peers };
   const transport: PresenceTransport = {

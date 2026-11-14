@@ -362,8 +362,6 @@ impl Fixture {
         )
         .await
     }
-    /// Bootstrap `bytes` as the live document at `path`, after `seed`
-    /// writes the store.
     async fn build(
         replicates: bool,
         bytes: Vec<u8>,
@@ -649,7 +647,6 @@ fn relay_edit(doc: &Ydoc, change: impl FnOnce(&Ydoc) -> Vec<u8>) -> (Vec<u8>, Fi
     (bytes, seen)
 }
 
-/// The authors the latest settlement moment names.
 fn latest_authors(f: &Fixture) -> serde_json::Value {
     f.read(|db| {
         db.query_row(
@@ -834,7 +831,6 @@ async fn live_settlement_history_syncs_after_restore_without_granting_native_aut
     use yrs::updates::decoder::Decode;
     let f = Fixture::with_relay(true).await;
     let first = f.settle(None, 100, Arc::new(NoFaults)).await.unwrap();
-    // The first baseline covers no accepted edit, so it journals nothing.
     assert_eq!(first.settlement_id, None);
     let expected = std::fs::read(f.root.path().join(&f.binding.current_path)).unwrap();
     let before = yrs::StateVector::decode_v1(&f.doc.encode_state_vector()).unwrap();
@@ -1895,7 +1891,6 @@ async fn unload_waits_for_a_committed_settlement_whose_file_write_failed() {
             assert!(f.settle(None, 4, Arc::new(NoFaults)).await.is_err());
             None
         };
-        // Only the accepted edit records a settlement; the first baseline does not.
         assert_eq!(f.counts().0, i64::from(crash), "crash={crash}");
         assert_eq!(
             unload(&f).await,
@@ -2200,7 +2195,6 @@ fn history_generate(name: &str) -> (Option<Vec<u8>>, Vec<Vec<u8>>) {
     doc.apply(&vector("rich-unicode")).unwrap();
     let (bootstrap, mut updates) = match name {
         "short-small" | "short-large" => {
-            // The realistic prefix's visible result, without its history.
             history_status(&doc, HISTORY_LONG_PREFIX - 1);
             if name == "short-large" {
                 for i in (63..HISTORY_LONG_PREFIX).step_by(64) {
@@ -2315,7 +2309,6 @@ struct HistoryCorpus {
     bootstrap: Vec<u8>,
     updates: Vec<Vec<u8>>,
     identity: serde_json::Value,
-    /// The replayed corpus's terminal projection and native sizes.
     markdown: String,
     full_state_bytes: usize,
     delete_set_bytes: usize,
@@ -2422,8 +2415,6 @@ fn history_empty_updates(short_small: &HistoryCorpus) -> HistoryCorpus {
 }
 
 impl Fixture {
-    /// Admit `updates` at the cursors after `after`, every eighth with link
-    /// authority, and return the last receipt.
     async fn admit(&self, after: usize, updates: &[Vec<u8>]) -> LiveUpdateReceipt {
         let mut terminal = None;
         for (index, update) in updates.iter().enumerate() {
@@ -2455,8 +2446,6 @@ impl Fixture {
             .await
     }
 
-    /// Close the actor, then reacquire the owner and register the binding, as
-    /// a restarted process would.
     async fn reopen(&mut self) {
         self.supervisor.close(&self.db).unwrap();
         (self.owner, self.handle) = open_owner(&self.supervisor, &self.db, &self.binding).await;
@@ -2522,31 +2511,25 @@ fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
 /// timer stops.
 ///
 /// The scenarios vary accepted-history length and visible document size
-/// independently. Short scenarios hold 32 accepted updates on a bootstrap
-/// that already carries their document. Long ones hold 16412, with the latest
-/// checkpoint at event 16380. Large documents add 255 paragraphs to small
-/// ones. Scenarios with the same document size end with the same projected
+/// independently: 32 accepted updates or 16412, with the latest checkpoint at
+/// event 16380, and small documents or ones with 255 more paragraphs.
+/// `long-empty-updates` holds native state fixed and grows only accepted
+/// history. Scenarios with the same document size end with the same projected
 /// Markdown, and every measured interval makes the same 32 edits. Their
-/// native bytes still differ: a long edit history leaves tombstones that the
-/// native state and each update's delete set carry. `long-empty-updates`
-/// holds native state fixed and grows only accepted history. Each result
-/// records native sizes instead of assuming them.
+/// native bytes still differ, because a long edit history leaves tombstones,
+/// so each result records native sizes.
 ///
-/// Each scenario admits authentic incremental updates at monotonic cursors
-/// and settles the prefix in 32-update intervals plus one shorter final
-/// interval. Copies of that closed template then each take one fresh
-/// settlement of the last 32 updates. Half settle on the actor that admitted
-/// them; half restart the actor first. The template then settles the same
-/// interval and measures warm same-terminal replay, `owner_publication_prefix`
-/// on the settlement's journaled `moment.append` (first call on a new
-/// connection, then warm), and per actor restart the first replay and first
-/// publication. The operating system's file cache stays warm throughout.
+/// Each scenario measures fresh settlements of the last 32 updates, half on
+/// the actor that admitted them and half after an actor restart. It then
+/// measures warm same-terminal replay, `owner_publication_prefix` on the
+/// settlement's journaled `moment.append` (first call on a new connection,
+/// then warm), and per actor restart the first replay and first publication.
+/// The operating system's file cache stays warm throughout.
 ///
 /// Build the executable once under the repository's cargo budget, then run
 /// it serially. The first run writes the corpus; later runs and other builds
-/// read the same bytes. A `long-large.updates` copied from the first
-/// benchmark's single-file corpus reproduces that corpus's bytes. Scratch
-/// fixtures stay under DOHC_TEST_SCRATCH_ROOT and are removed on drop.
+/// read the same bytes. Scratch fixtures stay under DOHC_TEST_SCRATCH_ROOT
+/// and are removed on drop.
 ///
 ///   CARGO_BUILD_JOBS=<cores/4> cargo test -p dohc-engine-runtime --release --test live_settlement --no-run
 ///   DOHC_TEST_SCRATCH_ROOT=<task>/scratch DOHC_LIVE_HISTORY_CORPUS_DIR=<task>/corpus \
@@ -2907,7 +2890,6 @@ async fn live_history_publication_and_settlement_benchmark() {
                 "momentId": settled.moment_id,
             })
         );
-        // Long and short scenarios compare equal accepted suffixes.
         assert_eq!(
             layout,
             (Some(prior as i64), Some(HISTORY_INTERVAL as i64)),

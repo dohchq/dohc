@@ -277,7 +277,7 @@ fn swap_engine_folder(root: &Path) -> PathBuf {
 /// names it. The engine folder then moves and another takes its name. After
 /// a restart, recovery still finds the version in the folder the store opens
 /// through and puts it back, and the retained-file check finds a retained
-/// version there by the name main stores (#2468).
+/// version there by the name main stores.
 #[cfg(all(
     any(target_vendor = "apple", target_os = "linux"),
     feature = "fault-injection"
@@ -691,7 +691,6 @@ fn passive_store_materialization_leaves_sources_rows_and_sibling_cleanup_untouch
     store
         .remember_staging(&write.job_id, ".dohc-write-displaced")
         .unwrap();
-    // Simulate leftover owner work in a passive database, as startup recovery can find it.
     store
         .read_with(|conn| conn.execute_batch("UPDATE engine_ownership SET store_role='passive'"))
         .unwrap();
@@ -868,7 +867,6 @@ fn held_checked_delete_recovery(point: FaultPoint, retained: bool) {
         .unwrap();
     recover_displacements(&store, root, Some("ws"), &options(31_001, &StdReplacer)).unwrap();
     let replay = store.load_materialization_job(&j.job_id).unwrap().unwrap();
-    // New outside bytes supersede the delete preimage: terminate as conflict.
     assert_eq!(
         materialize_one_ordinary(&store, root, &replay, &options(31_001, &StdReplacer)).unwrap(),
         JobOutcome::Conflict

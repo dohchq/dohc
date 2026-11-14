@@ -823,7 +823,6 @@ fn a_known_author_cannot_lengthen_its_name_past_the_byte_bound() {
     assert_eq!(covered.len(), full);
     assert!(covered.journal_bytes() <= author_coverage::MAX_INTERVAL_AUTHOR_BYTES);
 
-    // Below the bound the longer name fits and applies.
     seed(&mut ts.store, full - 4);
     admit_accepted(&mut ts.store, &key, human(0, &longer))
         .expect("a longer name applies while it fits");

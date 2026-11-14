@@ -51,8 +51,6 @@ import { createDatasetFixtureCompiler } from "../testing/datasetFixtureCompiler"
 import { unguardedCollections } from "../testing/collectionsHolder";
 
 const compileFixture = createDatasetFixtureCompiler();
-// Stops a store move as a crash would: before the copy is renamed into place,
-// with nothing cleaned up after.
 const faults = vi.hoisted(() => ({ crashBeforeRename: false, crashed: false }));
 vi.mock("node:fs/promises", async (original) => {
   const actual = await original<typeof import("node:fs/promises")>();
@@ -126,7 +124,6 @@ const definition: DatasetDefinition = {
   ],
 };
 const schemaSql = "CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,name TEXT NOT NULL);";
-// Type annotations prove activation executes the compiled capture, not raw TypeScript.
 const source = `globalThis.operations={
   list(ctx: any) {return ctx.db.query('SELECT id,name FROM items ORDER BY id');},
   add(ctx: any,input: any) {if(input.fileId)ctx.files.attach(input.fileId);ctx.db.execute('INSERT INTO items VALUES(?,?)',[ctx.requestId,input.name]);return {name:input.name};}
@@ -279,7 +276,6 @@ it("finishes a restore that dohc quit partway through", async () => {
   await archive.dispose();
   await sourceHost.host.close();
   let observer: DatabaseSync | undefined;
-  // dohc stops once the restore has copied a record, so nothing after that runs, cleanup included.
   const target = await open({
     assertCurrent() {
       if (observer?.prepare("SELECT 1 FROM dohc_dataset_import_records").get())
@@ -768,7 +764,6 @@ describe("local dataset owner adapter", () => {
     );
     expect(await readdir(workspaceRoot)).toEqual([".dohc"]);
     await restarted.close();
-    // Persistent coordination files keep later supervisor sessions on the same lock inode.
     expect(
       (await readdir(join(workspaceRoot, ".dohc", "local", "datasets", "workers"))).sort(),
     ).toEqual([".dohc-worker-lock.sqlite", ".dohc-worker-session.json"]);
@@ -803,9 +798,7 @@ describe("local dataset owner adapter", () => {
     });
     const step = call(approved, id(6), "step", { name: "Pens" });
     expect(await host.automations.invoke(context, step)).toMatchObject({ replayed: false });
-    // The commit's claims are made and its wake has run by the time the step returns.
     expect(wakes).toEqual([false]);
-    // Its own automation claims nothing; the other claims at the depth the write declared.
     const claimed = host.automations.next();
     expect(claimed).toMatchObject({
       automationId: other,
@@ -819,7 +812,6 @@ describe("local dataset owner adapter", () => {
     });
     expect(host.automations.claim(own, claimed!.claimId)).toBeNull();
     expect(host.automations.next()).toBeNull();
-    // Its retries keep an identity derived from the workspace and automation, apart from the owner's.
     const principal = digest(JSON.stringify(["dohc-dataset-automation-v1", "w", own]));
     expect(host.history({ datasetId: id(1) }).entries).toEqual([
       expect.objectContaining({
@@ -829,7 +821,6 @@ describe("local dataset owner adapter", () => {
     ]);
     expect(await host.automations.invoke(context, step)).toMatchObject({ replayed: true });
     expect(await host.action(step)).toMatchObject({ replayed: false });
-    // An object shaped like a context is not one, and a chain past depth 4 writes nothing.
     await expect(
       host.automations.invoke(
         { automationId: own, claimId: "claim", depth: 1, person: null },
@@ -843,7 +834,6 @@ describe("local dataset owner adapter", () => {
       ),
     ).rejects.toThrow("You do not have access to this Collection.");
     expect(host.history({ datasetId: id(1) }).entries).toHaveLength(2);
-    // A write at depth 4 commits, and its wake says the claims it made are failed chain stops.
     await host.automations.invoke(
       host.automations.context({ automationId: own, claimId: "claim", depth: 4, person: null }),
       { ...step, idempotencyKey: "stop" },
@@ -864,7 +854,6 @@ describe("local dataset owner adapter", () => {
     await expect(
       host.approve({ preparationId: prepared.preparationId, revisionSha256: "0".repeat(64) }),
     ).rejects.toThrow(/expired or changed/);
-    // A caller modifying its review response cannot change the retained source or approved metadata.
     prepared.revision.definition.name = "Tampered";
     const revision = await host.approve({
       preparationId: prepared.preparationId,
@@ -1094,12 +1083,10 @@ describe("the computer that keeps a workspace's Collections", () => {
       () => true,
       () => false,
     );
-  // The store's files in .dohc/local, beside the worker and export folders, or null with no folder.
   const datasetFiles = async (root: string) =>
     (await readdir(join(root, ".dohc", "local", "datasets")).catch(() => null))?.filter((name) =>
       name.startsWith("state.sqlite"),
     ) ?? null;
-  // A store made before the holder record, as every workspace from before it has.
   async function storeWithoutRecord() {
     const first = await open();
     const approved = await activate(first.host);
@@ -1108,7 +1095,6 @@ describe("the computer that keeps a workspace's Collections", () => {
     hosts.splice(hosts.indexOf(first.host), 1);
     return { root: first.workspaceRoot, approved };
   }
-  // Keep's steps as main gives them, with the person's answer.
   const keepSteps = (root: string, confirm = true): KeepSteps => ({
     adoptStore: (storeId) => adoptLocalDatasetStore(root, "w", storeId),
     storeIdHere: () => localDatasetStoreId(root),
@@ -1128,7 +1114,6 @@ describe("the computer that keeps a workspace's Collections", () => {
     const { root, approved } = await storeWithoutRecord();
     expect(await datasetFiles(root)).toEqual(["state.sqlite"]);
     expect((await refusedOpen(root)).refusal).toEqual({ kind: "unclaimed" });
-    // Not opened: no -wal or -shm, and no id written into it.
     expect(await datasetFiles(root)).toEqual(["state.sqlite"]);
     expect(storeIdIn(root)).toBe("no table");
     expect(await present(recordFile(root))).toBe(false);
@@ -1166,7 +1151,6 @@ describe("the computer that keeps a workspace's Collections", () => {
       roots.push(root);
       await mkdir(join(root, ".dohc"));
       await recordNewCollectionsHolder(root, "w", here);
-      // The host's own transaction, which file associations write through.
       let storage!: {
         db: { prepare(sql: string): { run(...values: unknown[]): unknown } };
         transaction<T>(run: () => T): T;
@@ -1196,7 +1180,6 @@ describe("the computer that keeps a workspace's Collections", () => {
         }
       };
       const before = dump();
-      // An outside sync process replaces the record after the write, before the commit.
       const work = () => {
         storage.db.prepare("INSERT INTO local_dataset_usage VALUES(?,?)").run("probe", 1);
         writeFileSync(
@@ -1233,7 +1216,6 @@ describe("the computer that keeps a workspace's Collections", () => {
         name.startsWith("state.sqlite"),
       ) ?? null;
     const localStore = (root: string) => join(root, ".dohc", "local", "datasets", "state.sqlite");
-    // The system trash: the names put there, in order, unless it refuses.
     function systemTrash() {
       const trash = {
         items: [] as string[],
@@ -1268,7 +1250,6 @@ describe("the computer that keeps a workspace's Collections", () => {
       await first.host.close();
       hosts.splice(hosts.indexOf(first.host), 1);
       await rm(localStore(root));
-      // The database file alone has none of the Collection's tables yet.
       const alone = join(await mkdtemp(join(tmpdir(), "dohc-local-dataset-test-")), "state.sqlite");
       roots.push(join(alone, ".."));
       await copyFile(join(oldFolder(root), "state.sqlite"), alone);
@@ -1318,7 +1299,6 @@ describe("the computer that keeps a workspace's Collections", () => {
         faults.crashBeforeRename = false;
         faults.crashed = false;
       }
-      // The checked copy never took the store's place, and nothing left .dohc/datasets.
       expect(await datasetFiles(root)).toEqual(["state.sqlite.moving"]);
       expect(await oldFiles(root)).toContain("state.sqlite");
       expect(trash.trashItem).not.toHaveBeenCalled();
@@ -1361,7 +1341,6 @@ describe("the computer that keeps a workspace's Collections", () => {
       await moved.host.action(call(approved, id(6), "after-move", { name: "Lens" }));
       await moved.host.close();
       hosts.splice(hosts.indexOf(moved.host), 1);
-      // The old files as they were before the trash: what a stop after the rename leaves, or iCloud Drive brings back.
       for (const file of await readdir(saved))
         await copyFile(join(saved, file), join(oldFolder(root), file));
       const { host } = await open({
@@ -1396,7 +1375,6 @@ describe("the computer that keeps a workspace's Collections", () => {
       expect(trash.items.slice(-2).sort()).toEqual(["state.sqlite-shm", "state.sqlite-wal"]);
     });
 
-    // Another computer keeps the Collections meanwhile, with this store's id, as an "earlier installation" Keep there does.
     const keptElsewhere = (root: string, storeId: string | null, when: () => boolean) => {
       let kept = false;
       return {
@@ -1428,7 +1406,6 @@ describe("the computer that keeps a workspace's Collections", () => {
       const { root, storeId } = await storeInOldPlace();
       const before = await oldBytes(root),
         trash = systemTrash();
-      // The record changes once the copy is made, before its rename.
       const holder = keptElsewhere(root, storeId, () => existsSync(`${localStore(root)}.moving`));
       expect(
         (await refusedOpen(root, { holder, trashItem: trash.trashItem })).refusal,
@@ -1488,7 +1465,6 @@ describe("the computer that keeps a workspace's Collections", () => {
         trashItem: trash.trashItem,
       });
       expect(await names(first.host, approved)).toEqual(["Camera"]);
-      // Read only: nothing was checkpointed into the old store, and its -wal stays.
       expect(await oldBytes(root)).toEqual(before);
       expect(warned).toHaveBeenCalled();
       await first.host.close();
@@ -1518,7 +1494,6 @@ describe("the computer that keeps a workspace's Collections", () => {
         expect((await refusedOpen(root, { trashItem: trash.trashItem })).refusal.kind).toBe(
           "elsewhere",
         );
-        // Keep asks nothing and changes nothing while the record names no store and a copy is here.
         if (named === null)
           await expect(keepCollectionsHere(root, "w", here, keepSteps(root))).rejects.toThrow(
             "These Collections are on Laptop.",

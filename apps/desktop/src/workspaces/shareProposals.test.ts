@@ -9,7 +9,6 @@ import {
   shareProposalOpPath,
 } from "./shareProposals";
 
-// A registry marker as the share-view open path writes one.
 function marker(
   overrides: {
     access?: ShareAccess | null;
@@ -130,15 +129,12 @@ describe("requireShareViewProposalScope (the recipient lane)", () => {
     expect(requireShareViewMembership(damaged).shareId).toBe("share-1");
   });
 
-  // The granter's own workspace. Its marker is absent, not null.
   it("refuses a workspace that is not a share view", () => {
     expect(() => requireShareViewProposalScope(undefined)).toThrow(
       "This workspace is not a shared view.",
     );
   });
 
-  // A stored `null` is a share view whose marker lost its value, and the one
-  // direction this must never fail is reading it as an ordinary workspace.
   it("refuses a share view whose whole marker lost its value", () => {
     expect(
       () => requireShareViewProposalScope(null),
@@ -152,8 +148,6 @@ describe("assertShareProposalGranter (the granter lane)", () => {
     expect(() => assertShareProposalGranter(undefined)).not.toThrow();
   });
 
-  // PRESENCE, not level. An edit share view is writable and still is not the
-  // granter of anything.
   it("refuses every share view, edit included", () => {
     for (const shareView of [
       marker(),

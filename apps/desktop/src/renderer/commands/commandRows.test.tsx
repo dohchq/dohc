@@ -30,11 +30,9 @@ const context: CommandContext = {
   pinnedApps: [],
   updateStatus: null,
 };
-// Main's palette with an update ready to install.
 const mainContext: CommandContext = { ...mainPalette.context, updateStatus: "ready" };
 const viewShare: ShareViewWriteScope = { access: "view", ended: false };
 const editShare: ShareViewWriteScope = { access: "edit", ended: false };
-// In palette order.
 const CREATE_COMMANDS: readonly CommandId[] = [
   "new-file",
   "new-file-at-path",
@@ -79,8 +77,6 @@ describe("command availability", () => {
     },
   );
 
-  // Like the source toggle, Share… is hidden, not disabled, when the active
-  // editor shows no file its Share button could share.
   it.each([false, true])(
     "Share… when the active file is shareable: %s",
     (activeDocumentShareable) => {

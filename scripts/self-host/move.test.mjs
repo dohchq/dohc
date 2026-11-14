@@ -7,7 +7,6 @@ import test from "node:test";
 import { initialSettings } from "../../tools/self-host/bootstrap.mjs";
 import { parseMoveArguments, runMove } from "./move.mjs";
 
-// Valid settings for a public deployment. Each test's `contents` add to them or replace them.
 const valid =
   readFileSync(new URL("../../.env.self-host.example", import.meta.url), "utf8") +
   Object.entries({
@@ -204,7 +203,6 @@ test("move never starts when a file the deployment needs is missing", async (t) 
     assert.equal(started(mock.calls), false, missing.join());
     assert.equal(changed(mock.calls), false, missing.join());
   }
-  // Snapshot state and host data on the disk are not a relay deployment.
   const leftovers = host({
     files: ["/pg/PG_VERSION", "/snapshots/notifications.json", "/host-data/automations/replica.db"],
   });
@@ -265,7 +263,6 @@ test("move refuses while a running container can write the deployment's storage 
   const path = await envFile(t, "DOHC_DATA_DIRECTORY=/mnt/disk/dohc\n");
   const relay = { Driver: "local", Options: bind("sync-relay") };
   const writers = [
-    // The old project still runs on this host, with this deployment's own volume.
     [
       {
         volumes: { ...accounts, "dohc-self-host_dohc_self_host_sync_relay": relay },
@@ -279,7 +276,6 @@ test("move refuses while a running container can write the deployment's storage 
       },
       "dohc-self-host-sync-relay-1 (dohc-self-host_dohc_self_host_sync_relay)",
     ],
-    // Another Compose project binds the same disk folder through its own volume.
     [
       {
         volumes: { ...accounts, old_continuity: { Driver: "local", Options: bind("continuity") } },
@@ -321,7 +317,6 @@ test("move refuses while a running container can write the deployment's storage 
       },
       "old-sync-relay-1 (/mnt/disk/dohc/host-data)",
     ],
-    // The old host's snapshot job still writes its staging on the disk.
     [
       {
         volumes: { ...accounts, old_snapshots: { Driver: "local", Options: bind("snapshots") } },
@@ -389,7 +384,6 @@ test("with an external database, move needs dohc accounts there and keeps every 
   runMove(parseMoveArguments(["--env-path", path]), moved.run, () => {});
   assert.ok(accountsCheck(moved.calls).includes("tools/self-host/compose.external-postgres.yml"));
   assert.ok(moved.calls.some((call) => call.includes("relay-initialize")));
-  // No local accounts volume exists, so nothing inspects or mounts one.
   assert.ok(
     !moved.calls.some((call) => call.some((value) => value.includes("dohc_self_host_postgres"))),
   );

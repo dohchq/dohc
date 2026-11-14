@@ -24,8 +24,6 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::borrow::Cow;
 
 impl<'a> VersionedTextStore<'a> {
-    // --------------------------------------------------------------------- writes
-
     /// Write text and its history in one storage transaction.
     ///
     /// Creates an object for a new path or updates the existing path's object.
@@ -102,10 +100,6 @@ impl<'a> VersionedTextStore<'a> {
         committed(outcome)
     }
 }
-
-// ============================================================================
-// Free helpers (SQL over a borrowed connection/transaction).
-// ============================================================================
 
 /// Input for text persistence with borrowed identifiers and metadata.
 ///
@@ -989,7 +983,6 @@ where
         Some(author_json) => (b"some".as_slice(), author_json.as_bytes()),
         None => (b"none".as_slice(), b"".as_slice()),
     };
-    // Frame extended with summary/correlation; see `capture_ingest_in_tx`.
     let (summary_kind, summary) = hash_optional_text_fields(input.metadata_summary.as_deref());
     let (correlation_kind, correlation) =
         hash_optional_text_fields(input.metadata_correlation_id.as_deref());
@@ -1442,7 +1435,7 @@ pub fn switch_projection_job_id(
 
 /// The `(path, sha256)` pairs that `version`'s plaintext switch has yet to
 /// write where no file was. Another version's pending write at the same path
-/// does not count (dohc#3622).
+/// does not count.
 fn unwritten_switch_writes(
     conn: &Connection,
     workspace: &str,
@@ -2212,7 +2205,7 @@ fn head_sha256(head: &SnapshotRecord) -> Option<&str> {
 }
 
 /// Text capture's result for a head that already holds `text`. A file recorded
-/// as binary before code files were stored as text (#2666) keeps its binary
+/// as binary before code files were stored as text keeps its binary
 /// head, so its result pairs the captured text with that head's moment.
 fn capture_result_for_moment(
     conn: &Connection,

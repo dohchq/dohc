@@ -30,7 +30,7 @@ import {
 // other device's open board. Device B is the real Electron app with the
 // collection's board on screen. Device A is a real daemon-backed workspace
 // over the same relay. The serial single-display harness cannot run two
-// Electron instances (the 0P-C pattern), so device A makes the write its
+// Electron instances, so device A makes the write its
 // board drag makes: the grouped field set in the record's live document
 // session, settled to the file, and pushed. The proof is B's board moving
 // the card without any UI refresh. The view re-renders from the index when
@@ -99,8 +99,6 @@ test("a drag's field write on one device moves the card on the other device's op
     relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay", "relay.sqlite") });
     const relayConfig = { baseUrl: relay.baseUrl, token: TOKEN };
 
-    // Device A: a real daemon workspace seeds the collection the way an
-    // agent does — by writing collection.yaml and record files.
     deviceA = await openLiveDaemonWorkspace(
       { workspaceId, rootPath: sourceRoot },
       { maxRestarts: 0 },
@@ -132,8 +130,6 @@ test("a drag's field write on one device moves the card on the other device's op
     ]);
     expect((await deviceARelay.push()).pushed).toBeGreaterThan(0);
 
-    // Device B: the real app joins the synced workspace through the
-    // first-run join flow.
     await seedCloudCredentials(temp, {
       serverUrl: relay.baseUrl,
       relayUrl: relay.baseUrl,
@@ -197,7 +193,6 @@ test("a drag's field write on one device moves the card on the other device's op
     } finally {
       await apolloSession.close();
     }
-    // The settle is confirmed: its moment is recorded and A's file holds it.
     await waitForPathMoments(capture, apolloPath, 2);
     await expect
       .poll(async () => await readFile(join(sourceRoot, apolloPath), "utf8"))
@@ -272,13 +267,6 @@ test("a drag's field write on one device moves the card on the other device's op
   }
 });
 
-// An agent on device A saves records as plain files, with no live document
-// session. A is file-only: it runs no desktop capture poll, so it never
-// adopts a record and holds no lineage. Device B opens two records, so each
-// copy holds a claimed Y.Doc lineage. B leaves Zephyr unchanged, so A's save
-// of Zephyr comes in. B types a line in Apollo, so it cannot take A's save of
-// Apollo as a Y.Doc update. B opens a conflict instead, and its board keeps
-// the old value until the person resolves the conflict.
 test("an agent's file save on one device opens a conflict against a record the other device edited", async () => {
   test.setTimeout(240_000);
   const temp = await createTempWorkspace();
@@ -450,8 +438,6 @@ test("an agent's file save on one device opens a conflict against a record the o
     // Nudge writes outside the collection only wake B's pull.
     let nudge = 0;
 
-    // B claims Zephyr and changes nothing. A saves it the way an agent does,
-    // with no session, and B takes the save with no conflict.
     await claimOnB(todoZephyr, zephyrPath);
     await writeFile(join(sourceRoot, zephyrPath), recordMd(ZEPHYR_ID, "Zephyr", "Doing"));
     await waitForPathMoments(capture, zephyrPath, 2);
@@ -475,14 +461,12 @@ test("an agent's file save on one device opens a conflict against a record the o
     await expect(doingZephyr).toBeVisible({ timeout: 30_000 });
     await expect(todoZephyr).toHaveCount(0);
 
-    // B types a line in Apollo, an edit A never sees. Then A saves Apollo.
     const typedOnB = "Checked on B.";
     await claimOnB(todoApollo, apolloPath, typedOnB);
     await writeFile(join(sourceRoot, apolloPath), recordMd(APOLLO_ID, "Apollo", "Doing"));
     await waitForPathMoments(capture, apolloPath, 2);
     expect((await deviceARelay.push()).pushed).toBeGreaterThan(0);
 
-    // The conflict opens on B.
     await expect
       .poll(
         async () => {
@@ -568,7 +552,6 @@ test("an agent's file save on one device opens a conflict against a record the o
     }
     await page.evaluate(() => document.documentElement.removeAttribute("data-theme"));
 
-    // An agent listing conflicts reads the same fact, named by the path.
     await waitForCliEndpoint(temp.homeDir);
     const listedForAgents = JSON.parse(
       (await runDohcCli(temp, ["--json", "version", "conflicts"])).stdout,
@@ -590,7 +573,6 @@ test("an agent's file save on one device opens a conflict against a record the o
     await page.getByTestId("conflict-review-done").click();
     await expect(page.getByTestId("conflict-review-dialog")).toHaveCount(0);
 
-    // Applying the incoming side moves the card.
     await page.evaluate(
       async ({ id, conflictId }) => {
         const api = (

@@ -19,7 +19,6 @@ import {
   type TempWorkspace,
 } from "./helpers/workspace";
 
-// Copy this spec to main with UI_AUDIT_BEFORE=1 for the two no-report frames.
 const SHOT_DIR = process.env.UI_AUDIT_SHOT_DIR ?? "";
 const BEFORE = process.env.UI_AUDIT_BEFORE === "1";
 test.skip(SHOT_DIR === "", "set UI_AUDIT_SHOT_DIR to capture reported agent screenshots");
@@ -365,7 +364,6 @@ test("@ui-audit reported agents in feeds, replies, and run details", async () =>
     await shoot(page, "reported-agent-g-long-run-details");
     await page.keyboard.press("Escape");
 
-    // The agent conversation uses ThreadedChat's inline Run details panel.
     await page.locator('[data-testid="chats-my-agent"][data-agent-id="default"]').click();
     await expect(main.getByTestId("chats-channel-title")).toHaveText("Nova");
     await main.getByTestId("chats-lane-composer").fill("audit-panel-report");

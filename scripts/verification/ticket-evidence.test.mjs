@@ -1,6 +1,3 @@
-// Producer ticket evidence, exercised through real verification-lane acquisition
-// against private slot roots.
-
 import assert from "node:assert/strict";
 import test from "node:test";
 import { spawnSync } from "node:child_process";

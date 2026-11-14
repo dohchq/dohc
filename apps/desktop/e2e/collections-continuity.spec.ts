@@ -96,7 +96,6 @@ test("a field edit saves while its record is open in another editor group", asyn
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
     const group = (number: number) => page.getByRole("region", { name: `Editor group ${number}` });
-    // The Collection in group 1, and its record live in group 2.
     await explorerRow(page, "tasks").click();
     await expect(page.getByTestId(editorTabTestId("tab://collection/tasks"))).toBeVisible();
     await openRecordAsPage(page, "Launch plan");
@@ -123,7 +122,6 @@ test("a field edit saves while its record is open in another editor group", asyn
       "contenteditable",
       "true",
     );
-    // The table's cell follows the panel's field.
     await record.getByRole("button", { name: "Close record" }).click();
     await expect(group(1).getByRole("grid").getByRole("checkbox")).toBeChecked();
   } finally {

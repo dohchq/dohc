@@ -8,7 +8,6 @@ const marker = "live-restore-operation-v1";
 // Adds the declined phase. The phase is final, like resumed, so neither counts
 // as the document's unfinished restore.
 const declinedMarker = "live-restore-declined-v1";
-// Adds a lifecycle's publication reservation and its generation's refused settlements.
 const publicationMarker = "live-restore-publication-v1";
 const safe = Number.MAX_SAFE_INTEGER;
 /** Where a restore no longer blocks another restore of its document. */

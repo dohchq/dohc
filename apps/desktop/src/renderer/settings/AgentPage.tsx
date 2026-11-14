@@ -5,7 +5,9 @@ import {
   CircleAlert,
   Clock,
   FilePenLine,
+  Forward,
   History,
+  KeyRound,
   LoaderCircle,
   MessageSquare,
   Monitor,
@@ -13,6 +15,7 @@ import {
   Pencil,
   Send,
   Trash2,
+  TriangleAlert,
   Workflow,
 } from "lucide-react";
 import {
@@ -25,21 +28,32 @@ import {
 } from "../../agents/agentToolCatalog";
 import {
   agentHandle,
+  MAX_AGENT_NOTE_LENGTH,
   type Agent,
   type AgentSettings,
   type DesktopUserSettings,
 } from "../../settings/userSettings";
+import { ipcErrorMessage } from "../ipcError";
 import { CopyButton } from "../ui/CopyButton";
-import { SecondaryButton } from "../ui/controls";
+import { RetryRow, SecondaryButton } from "../ui/controls";
 import { isComposingKey } from "../ui/keys";
 import { Menu } from "../ui/Menu";
+import { SegmentedControl } from "../ui/SegmentedControl";
 import { ChatAvatar } from "../workbench/ChatAvatar";
 import { HueControl, SwitchControl } from "./SettingRow";
+import {
+  T3_CODE,
+  T3_CODE_CANNOT_KEEP,
+  T3CodeAllow,
+  T3CodeAllowAgain,
+  t3CodeAllowed,
+  t3CodeAllowedUntil,
+  useT3CodeAccess,
+} from "./T3CodeThread";
 
 const LINK = "rounded text-[12px] text-ink underline underline-offset-2 hover:text-muted";
 const MIN_TIMEOUT = 1;
 const MAX_TIMEOUT = 1440;
-// An agent page's boxes, their rows, the headings over them and a row's value.
 export const BOX = "rounded-lg border border-line bg-panel";
 export const ROW =
   "flex min-h-11 items-center gap-3 border-b border-line px-3 py-2 last:border-b-0";
@@ -219,11 +233,195 @@ export function checkStatus(props: {
   );
 }
 
+type PageError = (message: string, cause?: unknown, retry?: () => Promise<void>) => void;
+
+const WHILE_BUSY = [
+  { value: "line", label: "Wait in line" },
+  { value: "steer", label: "Go right away" },
+] as const;
+const ACCESS_READ_FAILED = "dohc could not check whether T3 Code allows it.";
+
+// The person's note for an agent with a thread. Leaving the field saves, and
+// Escape keeps the note as it was. An empty note removes the key.
+function AgentNote(props: {
+  agent: Agent;
+  onChange: (change: (agent: AgentSettings) => AgentSettings) => void;
+}) {
+  const saved = props.agent.note ?? "";
+  const [held, setHeld] = useState(saved);
+  const [draft, setDraft] = useState(saved);
+  // A note saved elsewhere, such as in the settings file, replaces the draft.
+  if (held !== saved) {
+    setHeld(saved);
+    setDraft(saved);
+  }
+  const cancelled = useRef(false);
+  const noteId = useId();
+  const hintId = useId();
+  const left = MAX_AGENT_NOTE_LENGTH - draft.length;
+  return (
+    <div data-testid="agent-note-row" className="flex flex-col gap-2 px-3 py-3">
+      <label htmlFor={noteId} className="text-[13px] text-ink">
+        Your note
+      </label>
+      <textarea
+        id={noteId}
+        data-testid="agent-note"
+        data-edit-in-place
+        aria-describedby={hintId}
+        rows={3}
+        maxLength={MAX_AGENT_NOTE_LENGTH}
+        value={draft}
+        onChange={(event) => setDraft(event.currentTarget.value)}
+        onBlur={() => {
+          if (cancelled.current) {
+            cancelled.current = false;
+            setDraft(saved);
+            return;
+          }
+          const note = draft.trim();
+          setDraft(note);
+          if (note === saved) return;
+          props.onChange((current) => {
+            const { note: _removed, ...rest } = current;
+            return note ? { ...rest, note } : rest;
+          });
+        }}
+        onKeyDown={(event) => {
+          if (isComposingKey(event) || event.key !== "Escape") return;
+          event.preventDefault();
+          event.stopPropagation();
+          cancelled.current = true;
+          event.currentTarget.blur();
+        }}
+        className="w-full resize-y rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink focus:border-ink"
+      />
+      <p id={hintId} className="m-0 flex gap-3 text-[12px] text-muted">
+        <span className="mr-auto">dohc sends it to the thread with every message.</span>
+        {left <= 200 ? <span className="shrink-0">{`${left} left`}</span> : null}
+      </p>
+    </div>
+  );
+}
+
+// What a person changes about an agent with a thread: whether dohc forwards
+// to it, whether T3 Code still allows dohc, what a message does while the
+// thread works, and the note that goes with each one.
+function ThreadAgentBoxes(props: {
+  agent: Agent;
+  onChange: (change: (agent: AgentSettings) => AgentSettings) => void;
+  onError?: PageError | undefined;
+}) {
+  const { agent, onChange } = props;
+  const report = useRef(props.onError);
+  report.current = props.onError;
+  const access = useT3CodeAccess((message, cause, retry) =>
+    report.current?.(message, cause, retry),
+  );
+  const { state, readError, retryRead } = access;
+  // A failed read says why once, in Notices, with its Try again.
+  useEffect(() => {
+    if (readError !== null)
+      report.current?.(ipcErrorMessage(readError, ACCESS_READ_FAILED), readError, retryRead);
+  }, [readError, retryRead]);
+  const allowed = state !== undefined && state.canKeep && t3CodeAllowed(state);
+  const whileBusy = agent.whileBusy ?? "line";
+  return (
+    <>
+      <div data-testid="agent-thread" className={`${BOX} mt-5`}>
+        <PageRow icon={<Forward size={14} />} label="Forward messages">
+          <span className={VALUE}>
+            <SwitchControl
+              label={`Forward messages to ${agent.name}`}
+              tooltip={`${agent.enabled ? "Turn off" : "Turn on"} ${agent.name}`}
+              description={agent.enabled ? "Turn off" : "Turn on"}
+              checked={agent.enabled}
+              onChange={(enabled) => onChange((current) => ({ ...current, enabled }))}
+            />
+          </span>
+        </PageRow>
+        <PageRow icon={<KeyRound size={14} />} label={`dohc in ${T3_CODE}`} wrap>
+          {readError !== null ? (
+            <div data-testid="agent-thread-access" className="ml-auto min-w-0">
+              <RetryRow testId="t3-code-access-retry" onRetry={() => void retryRead()}>
+                {ACCESS_READ_FAILED}
+              </RetryRow>
+            </div>
+          ) : (
+            <span data-testid="agent-thread-access" className={VALUE}>
+              {state === undefined ? (
+                <LoaderCircle
+                  size={12}
+                  aria-label={`Checking ${T3_CODE}`}
+                  className="animate-spin"
+                />
+              ) : allowed ? (
+                <span title="The sign-in lasts 30 days. After that, allow dohc again here.">
+                  {`Allowed until ${t3CodeAllowedUntil(state.signedInUntilMs!)}`}
+                </span>
+              ) : (
+                // Why not, or the way to allow it, follows under the row.
+                <span className="inline-flex items-center gap-1 text-warning">
+                  <TriangleAlert size={12} aria-hidden />
+                  Not allowed
+                </span>
+              )}
+            </span>
+          )}
+        </PageRow>
+        {state === undefined ? null : allowed ? (
+          <div className="px-3 py-1.5">
+            <T3CodeAllowAgain access={access} />
+          </div>
+        ) : state.canKeep ? (
+          <div className="px-3 py-3">
+            <T3CodeAllow access={access} size="row" />
+          </div>
+        ) : (
+          <p data-testid="t3-code-cannot-keep" className="m-0 px-3 py-2.5 text-[12px] text-danger">
+            {T3_CODE_CANNOT_KEEP}
+          </p>
+        )}
+      </div>
+
+      <h4 className={SECTION}>Messages</h4>
+      <div data-testid="agent-thread-messages" className={BOX}>
+        <PageRow
+          wrap
+          label={
+            <>
+              While it works
+              {whileBusy === "steer" ? (
+                <span className="mt-1 block text-[12px] text-muted">
+                  Only your own messages go right away. Other people's wait in line.
+                </span>
+              ) : null}
+            </>
+          }
+        >
+          <span className="ml-auto shrink-0 [&_button]:whitespace-nowrap">
+            <SegmentedControl
+              label="While it works"
+              testId="agent-while-busy"
+              value={whileBusy}
+              options={WHILE_BUSY}
+              onChange={(next) => onChange((current) => ({ ...current, whileBusy: next }))}
+            />
+          </span>
+        </PageRow>
+        <AgentNote agent={agent} onChange={onChange} />
+      </div>
+    </>
+  );
+}
+
 /**
  * One agent's page in Settings › Agents: who it is, then what a person
  * changes about it. An agent dohc starts has its switch, its check, what it
- * can do and how dohc starts it. An agent you run has its MCP config and the
- * run that marks this workspace's changes as its own. Each change saves at once.
+ * can do and how dohc starts it. An agent with a thread has the switch that
+ * forwards to it, whether its tool allows dohc, and what goes with a message.
+ * An agent you run has its MCP config and the run that marks this workspace's
+ * changes as its own. Each change saves at once.
  */
 export function AgentPage(props: {
   agent: Agent;
@@ -256,6 +454,8 @@ export function AgentPage(props: {
   onRemove: () => void;
   onCheck: () => void;
   onChange: (change: (agent: AgentSettings) => AgentSettings) => void;
+  // A failure on the page that the workspace's Notices keep.
+  onError?: PageError;
   onBack: () => void;
   backRef?: React.Ref<HTMLButtonElement>;
 }) {
@@ -264,6 +464,8 @@ export function AgentPage(props: {
   const [editing, setEditing] = useState<"timeout" | "command" | null>(null);
   const runLabelId = useId();
   const launched = agent.launch !== undefined;
+  // dohc forwards to this agent's own thread and never starts it.
+  const forwarded = agent.thread !== undefined;
   const profile = agent.launch ? launchProfile(agent.launch) : undefined;
   // The person's own command, or a tool's program with their own flags.
   const command =
@@ -280,7 +482,13 @@ export function AgentPage(props: {
   };
   const subtitle = [
     handle ? `@${handle}` : null,
-    !agent.launch ? null : profile ? toolLine(profile.tool, props.tools) : "Your command",
+    forwarded
+      ? `Thread in ${T3_CODE}`
+      : !agent.launch
+        ? null
+        : profile
+          ? toolLine(profile.tool, props.tools)
+          : "Your command",
   ].filter((part): part is string => part !== null);
   const activeRun = props.run?.activeRun ?? null;
   const ownRun = activeRun?.agentId === agent.id;
@@ -303,7 +511,7 @@ export function AgentPage(props: {
           kind="agent"
           presentation={{ group: "", hue: agent.hue === "olive" ? null : agent.hue, self: false }}
           size="post"
-          className={launched && !agent.enabled ? "opacity-50" : undefined}
+          className={(launched || forwarded) && !agent.enabled ? "opacity-50" : undefined}
         />
         <div className="min-w-0 flex-1">
           {props.nameField ?? (
@@ -335,7 +543,7 @@ export function AgentPage(props: {
                   {index === 0 && handle ? <span className="font-mono">{part}</span> : part}
                 </span>
               ))}
-              {!launched ? (
+              {!launched && !forwarded ? (
                 <>
                   {subtitle.length > 0 ? (
                     <span aria-hidden className="text-subtle">
@@ -375,7 +583,9 @@ export function AgentPage(props: {
         />
       </div>
 
-      {launched ? (
+      {forwarded ? (
+        <ThreadAgentBoxes agent={agent} onChange={onChange} onError={props.onError} />
+      ) : launched ? (
         <>
           <div className={`${BOX} mt-5`}>
             <PageRow icon={<Monitor size={14} />} label="Run on this computer">
@@ -605,6 +815,14 @@ export function AgentPage(props: {
                   Use your own command
                 </button>
               )}
+            </span>
+          </PageRow>
+        ) : forwarded ? (
+          <PageRow label="Forwards from">
+            <span data-testid="agent-thread-workspace" className={VALUE}>
+              {agent.workspaces?.includes(props.workspaceId)
+                ? "This workspace"
+                : "Another workspace"}
             </span>
           </PageRow>
         ) : (

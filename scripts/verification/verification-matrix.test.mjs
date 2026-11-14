@@ -496,7 +496,6 @@ test(
       ...(process.platform === "win32" ? [["pr", "js", "gallery-missing"]] : []),
       // A change to one package selects only the JavaScript gate, which runs that package and its dependents, and only the repository tests that read the source tree.
       ["pr", null, null, "packages/fixture/src/index.ts"],
-      // A run that keeps going runs every repository test.
       ["pr", "js", null, "packages/fixture/src/index.ts", false, true],
       ["pr", null, null, null, true],
       ["pr", "js", null, null, true],
@@ -659,6 +658,7 @@ test(
                 "Verifier must restore the caller's compilation policy",
               );
               const report = JSON.parse(readFileSync(join(root, ".dohc-dev/report.json"), "utf8"));
+              if (keepGoing) assert.equal(report.repositoryTests, "test:repo");
               if (preQueueFault) {
                 assert.equal(result.status, 1, result.stderr);
                 assert.match(
@@ -700,7 +700,6 @@ test(
                     );
                     assert.equal(report.stopped, undefined);
                   } else {
-                    // The failed typecheck interrupts the running Rust job, which never counts as a pass.
                     assert.deepEqual(
                       [verdicts.typecheck, verdicts.rust, verdicts["rust-verdict"]],
                       ["FAIL", "NOT RUN", "NOT RUN"],
@@ -709,7 +708,6 @@ test(
                       report.steps.find((step) => step.name === "rust").reason,
                       "stopped after typecheck failed",
                     );
-                    // The tests the typecheck failure kept from starting are listed too.
                     assert.deepEqual(report.stopped, {
                       after: "typecheck",
                       notRun: ["rust", "rust-verdict", "tests"],
@@ -757,7 +755,6 @@ test(
                     step: "@dohc/fixture",
                     test: "src/index.test.ts › keeps its value",
                   };
-                  // The lookup only reports. The package test's failure decides the verdict, as it would without a queue.
                   assert.deepEqual(report.failure, { kind: "check", cause: "tests" });
                   assert.deepEqual(report.failed, [row]);
                   assert.deepEqual(
@@ -833,7 +830,6 @@ test(
                         JSON.parse(readFileSync(report.jsTests, "utf8")).stopped.notRun,
                         ["desktop-runtime-packaging"],
                       );
-                      // A failed rust step also kept its verdict check from starting.
                       assert.deepEqual(report.stopped, {
                         after: failedStep,
                         notRun:
@@ -959,7 +955,6 @@ test(
                   const tests = JSON.parse(readFileSync(report.jsTests, "utf8"));
                   assert.equal(tests.proofs, true);
                   assert.equal(tests.steps.filter((step) => step.name === "proofs").length, 1);
-                  // A change inside one package tests it and its dependents only.
                   const tested =
                     changed === "packages/fixture/src/index.ts" && !full
                       ? ["@dohc/desktop", "@dohc/fixture"]

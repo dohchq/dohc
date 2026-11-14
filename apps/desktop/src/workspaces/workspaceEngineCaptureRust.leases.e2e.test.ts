@@ -70,7 +70,6 @@ it.skipIf(engine.missing)(
       // this real-daemon test covers durable preservation across process exit.
       await waitForPathMoments(capture, "final.md", 1);
 
-      // stopAll must not lose an already-settled durable capture.
       await activity.stopAll();
       await firstSessions.closeAll();
       await firstLifecycle.stop();
@@ -111,11 +110,10 @@ it.skipIf(engine.missing)(
   60_000,
 );
 
-// The journey behind #337 item 5, end to end through the real daemon. It was
-// filed as "no retry OR error". PR #495 gave the save indicator honest
-// states; #554 closes the retry half: a file-locked settle re-arms itself
-// with backoff, so the write lands when the external handle releases — no
-// further edit needed.
+// A locked save, end to end through the real daemon. The save indicator
+// reports the lock, and a file-locked settle re-arms itself with backoff, so
+// the write lands when the external handle releases, with no further edit
+// needed.
 it.skipIf(engine.missing || process.platform !== "win32")(
   "surfaces a locked save and lands it by itself once the lock releases",
   async () => {
@@ -180,8 +178,6 @@ it.skipIf(engine.missing || process.platform !== "win32")(
       expect(await readFile(absolute, "utf8")).toBe("locked edit\nbase\n");
       expect(states).toContain("saved");
 
-      // And an ordinary settle keeps working after the recovery: both edits
-      // stay in the file, so nothing the lock blocked was dropped.
       states.length = 0;
       await type("second edit\n");
       await session.settleNow();
@@ -205,7 +201,7 @@ it.skipIf(engine.missing || process.platform !== "win32")(
 // release refuses too — a local-only prune needs the CRDT projection to equal
 // `last_settled_sha` (crates/dohc-engine-collab/src/durable.rs). The outside
 // edit waits for this session, so the close evicts it: the disk version
-// stands and the unsettled text comes back as a recovered copy (#2463). The
+// stands and the unsettled text comes back as a recovered copy. The
 // save refusal still reads as an error, never as "changed on disk".
 it.skipIf(engine.missing)(
   "keeps unsettled edits in a recovered copy when their close meets a deferred outside edit",
@@ -269,8 +265,6 @@ it.skipIf(engine.missing)(
       expect(states.at(-1)).toBe("changed-on-disk");
       expect(errors).toContain("ydoc settle of note.md");
 
-      // The close recorded the queued disk edit without letting the refused
-      // Y.Doc save overwrite it.
       const capturedMoments = await waitForPathMoments(capture, "note.md", 4);
       expect(capturedMoments).toHaveLength(4);
       const recovery = capturedMoments.find(
@@ -284,9 +278,6 @@ it.skipIf(engine.missing)(
       expect(detail.moment.payload.after?.text).toBe(outside);
       expect(await readFile(join(root, "note.md"), "utf8")).toBe(outside);
 
-      // The outside bytes became the file. The text the engine admitted but
-      // never settled is not discarded with the lineage: it comes back as an
-      // ordinary sibling file, complete, with its own History moment.
       const recovered = await waitForRecoveredSibling(root, "note");
       expect(await readFile(join(root, recovered), "utf8")).toBe(
         "never settled\ntyped in dohc\nbase\n",

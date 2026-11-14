@@ -36,7 +36,7 @@ export interface CloudSyncEngineOptions {
   operations: RelaySyncOperations;
   capture: WorkspaceEngineCapture;
   onChange: () => void;
-  // Join bootstrap (0P-C gate fix): this engine belongs to a freshly joined
+  // Join bootstrap: this engine belongs to a freshly joined
   // workspace, so it must never append ops to the relay before its first
   // successful pull — pushing first could seed local boilerplate into the
   // remote workspace or mint conflicts against it. The first pass (and
@@ -44,7 +44,7 @@ export interface CloudSyncEngineOptions {
   // successful pull+materialize+cursor-commit a follow-up pass resumes the
   // normal push-then-pull contract.
   joinBootstrap?: boolean;
-  // MU-C4 shared channels: refresh the workspace's joined shared channels on
+  // Shared channels: refresh the workspace's joined shared channels on
   // every sync pass (push member ops, pull peers'). Best-effort — the
   // callback owns its own error handling (revocation marking, logging); a
   // throw here is logged and never fails the workspace's own pass, so a

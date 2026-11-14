@@ -57,43 +57,41 @@ import {
 } from "./datasetAutomationPlan";
 
 // One run of one dataset claim, as runCollectionAutomation runs an engine
-// claim: check reach, then run the steps in order (automationStepRun.ts),
-// each reading through the dataset's approved reads and landing each effect
+// claim: check reach, then run the steps in order (automationStepRun.ts).
+// Each step reads through the dataset's approved reads and lands each effect
 // through an approved edit or create, saved as it lands. Posts, direct
 // messages, wakes, and notices go out exactly as a document Collection's do.
 //
 // Each effect has its own idempotency key, so a resumed effect that already
 // landed replays its receipt instead of landing twice. An edit carries the
-// version its step read. When someone changed the record since, the edit
-// is refused as stale, and the run reads the record again: a field that
-// already holds its planned value is done, a field still at its planned
-// before value is sent again under a new key at the new version, and a
-// field someone changed to anything else keeps their change.
+// version its step read. An edit refused as stale reads the record again: a
+// field that already holds its planned value is done, a field still at its
+// planned before value is sent again under a new key at the new version, and
+// a field someone changed to anything else keeps their change.
 //
-// A code step can change records in other Collections and named tables.
-// The shared backend selects and authorizes each generated edit or create
-// after the code returns. It checks editors and the button caller again
-// before each effect. A record the code changes by id is read through an
-// approved read that shows the fields it changes, which also reads it again
-// when it is stale. Undo treats the code's changes as a Set fields or Add
-// record step's: a field goes back only through a reversible edit, and an
-// added record can be deleted through a recorded, still-authorized delete.
-// On a dataset whose operations someone wrote, code reads only the record's
-// id and changes none of that dataset's records; an action it feeds
-// through an invoke step undoes as any action does.
+// A code step can change records in other Collections and named tables. The
+// shared backend selects and authorizes each generated edit or create after
+// the code returns, and checks editors and the button caller again before
+// each effect. A record the code changes by id is read through an approved
+// read that shows the fields it changes, which also reads it again when it is
+// stale. Undo treats the code's changes as a Set fields or Add record step's:
+// a field goes back only through a reversible edit, and an added record can
+// be deleted through a recorded, still-authorized delete. On a dataset whose
+// operations someone wrote, code reads only the record's id and changes none
+// of that dataset's records; an action it feeds through an invoke step undoes
+// as any action does.
 //
-// A due time or a Group message has no record: the engine claims it, as
-// for a document Collection, and the run reads only what its Finds find.
-// Formulas read `now` as the due time, and a Group message and its author
-// as a document Collection's run does.
+// A due time or a Group message has no record: the engine claims it, as for
+// a document Collection, and the run reads only what its Finds find. Formulas
+// read `now` as the due time, and a Group message and its author as a
+// document Collection's run does.
 //
 // A button press's run reads its record as it is now, and formulas see the
 // person who pressed. It runs only the automation the press was checked
-// against, from the button that was pressed, in the table it was pressed
-// in. Its steps use the automation caller, as every run here does. The host
-// holds that caller to the owner's approved operations, and this computer's
-// datasets are its person's own, so the run never does more than the
-// presser could.
+// against, from the button that was pressed, in the table it was pressed in.
+// The host holds the automation caller to the owner's approved operations,
+// and this computer's datasets are its person's own, so the run never does
+// more than the presser could.
 
 export const ACCESS_NARROWED_ERROR =
   "Someone who edits this automation can no longer read a field it used, so dohc stopped the rest of this run.";

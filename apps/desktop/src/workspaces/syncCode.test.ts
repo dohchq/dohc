@@ -41,7 +41,7 @@ describe("syncCode", () => {
     expect(parseSyncCode("dohc-sync:ws:not-a-url")).toBeNull();
   });
 
-  // Security gate (0P-C gate fix): a pasted code is untrusted input and the
+  // Security gate: a pasted code is untrusted input and the
   // built code is copyable/screenshot-readable. Credentials, query strings,
   // and fragments must never ride a relay URL — in, out, or in comparison.
   it("rejects relay URLs carrying credentials, query strings, or fragments", () => {
@@ -60,8 +60,6 @@ describe("syncCode", () => {
       buildSyncCode({ workspaceId: "ws", relayUrl: "https://relay.test#fragment" }),
     ).toThrow();
 
-    // The authz comparison refuses secret-bearing or non-relay components on
-    // either side — never "matches" through them.
     expect(relayUrlsMatch("https://user:pass@relay.test", "https://relay.test")).toBe(false);
     expect(relayUrlsMatch("https://relay.test", "https://relay.test?token=x")).toBe(false);
     expect(relayUrlsMatch("https://relay.test#f", "https://relay.test#f")).toBe(false);

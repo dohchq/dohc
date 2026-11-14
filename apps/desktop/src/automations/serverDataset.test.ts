@@ -183,7 +183,6 @@ describe("a Collection on the server, as the panel reads it", () => {
         limit: 100,
       },
     ]);
-    // dohc cannot tell what the server runs when it cannot ask.
     expect(
       await readServerDataset("workspace", id(1), data, async () => {
         throw new Error("offline");

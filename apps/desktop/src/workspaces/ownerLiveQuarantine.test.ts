@@ -5,7 +5,6 @@ import type { OwnerYDocOutboxRecovery } from "@dohc/workspace-engine-client";
 import { createUnwrittenReleases, recoverySnapshot } from "./ownerLiveReleases";
 import { createTestScratch } from "./testTemp";
 
-// The engine's queue heads, by outbox, as the outbox read answers them.
 const outboxes = vi.hoisted(() => ({
   heads: new Map<string, unknown>(),
   pending: new Map<string, unknown>(),
@@ -242,9 +241,6 @@ it("reads every refused queue from durable state, and leaves binding changes to 
   ]);
 });
 
-// The engine refusing one queue's head leaves that queue an unreadable row,
-// naming the refusal, and the others usable; an engine that cannot answer at
-// all still fails the whole read. A queue a strict read names fails it too.
 it("keeps an unreadable row for a queue whose head the engine refuses, and fails a strict read of it", async () => {
   head("before", "invalid-update");
   head("after", "invalid-update");
@@ -306,7 +302,6 @@ it("keeps an unreadable row for a queue whose head the engine refuses, and fails
   outboxes.heads.delete("outbox-damaged");
 });
 
-// Whether the record came from that queue is unknown, so it keeps its own row.
 it("keeps a record its own row beside an unreadable queue of the same document", async () => {
   outboxes.heads.set(
     "outbox-only",
@@ -353,8 +348,6 @@ it("keeps a record its own row beside an unreadable queue of the same document",
   outboxes.heads.delete("outbox-only");
 });
 
-// A Stop that asked the server but has no confirmed retirement and release is
-// still waiting; only one for the queue's own version and binding counts.
 it("tells a waiting Stop from a finished one, and ignores a Stop for another version or binding", async () => {
   for (const id of ["w", "o", "x", "v"]) head(id, "invalid-update");
   const client = {
@@ -532,7 +525,6 @@ it("keeps a release that could not write the file only while the queue it came f
         recovery: "cannot-write",
       },
     ]);
-  // Only a queue a record may have come from is read whole, and once while its draft is unchanged.
   expect(outboxes.reads.filter((read) => read.startsWith("recovery:"))).toEqual([
     "recovery:outbox-q",
     "recovery:outbox-restored",
@@ -595,9 +587,6 @@ it("shows a damaged record beside the queue it came from, even with that queue's
   ]);
 });
 
-// A Stop's release failed, then the server accepted another edit, which moved
-// the queue's checkpoint. The next Stop's put keeps the first package of the
-// same refused edits, and the queue's row still speaks for their record.
 it("keeps one release's record and package across a checkpoint advance, and the queue's row still hides it", async () => {
   head("plan", "invalid-update");
   const queue = (checkpoint: number): OwnerYDocOutboxRecovery => ({
@@ -678,7 +667,6 @@ it("reads an unchanged queue's head once, and never its base", async () => {
   revision = 5;
   await readOwnerLiveQuarantines(client, "handle", { heads });
   expect(outboxes.reads).toEqual(["delivery:outbox-big", "delivery:outbox-big"]);
-  // A granted Try again is never trusted from the cache.
   head("big", "capacity-refused", "delivery-big");
   revision = 6;
   await readOwnerLiveQuarantines(client, "handle", { heads });

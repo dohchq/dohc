@@ -283,7 +283,6 @@ export function PersonalReachSheet(props: {
 export function PersonalAgentPage(props: {
   entry: PersonalEntry;
   workspaceId: string;
-  // The rename field, shown in place of the name.
   nameField: ReactNode | null;
   onRename: () => void;
   onRemove: () => void;

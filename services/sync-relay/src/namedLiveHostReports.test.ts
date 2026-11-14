@@ -27,7 +27,6 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-/** An authenticated native registration as service and device capture return it. Native sync is not exercised here. */
 function nativeHost(
   change: Partial<Pick<NamedFrameNativeHost, "binding" | "coordinate" | "invalidated">> = {},
 ): NamedFrameNativeHost {
@@ -92,7 +91,6 @@ const secondBinding = {
   selectorPaths: ["docs/b.md"],
 };
 
-/** Adds a second current document and a second named editor the way the shared fixture adds the first. */
 function addSecondDocumentAndEditor(f: Fixture) {
   f.raw
     .prepare(`INSERT INTO sync_relay_object_moments (workspace_id, object_id, relay_seq, moment_id, version_id, path, blob_sha256, content_kind, byte_length, recorded_at_ms)
@@ -445,8 +443,9 @@ it.each(["before capture", "during capture", "after an ignored abort"] as const)
   },
 );
 
+// A mint fails so its caller asks again. A redemption refuses, and the page asks for a new ticket.
 it.each(["mint", "redeem"] as const)(
-  "ticket %s refuses a report whose host was replaced before commit",
+  "ticket %s writes nothing for a report whose host was replaced before commit",
   async (operation) => {
     const f = await setup();
     const existing =
@@ -466,11 +465,12 @@ it.each(["mint", "redeem"] as const)(
         },
       },
     });
-    const result =
-      operation === "mint"
-        ? await racing.mint({ objectId: binding.objectId }, scope)
-        : await racing.redeem(existing!.token, scope);
-    expect(result).toBeNull();
+    if (operation === "mint") {
+      await expect(racing.mint({ objectId: binding.objectId }, scope)).rejects.toThrow(
+        "Live-ticket operation failed.",
+      );
+      expect(ticketCount(f)).toEqual({ count: 0 });
+    } else expect(await racing.redeem(existing!.token, scope)).toBeNull();
     f.captureNative.mockResolvedValue(nativeHost({ coordinate: replacement }));
     if (operation === "mint")
       expect(await f.tickets.mint({ objectId: binding.objectId }, scope)).not.toBeNull();

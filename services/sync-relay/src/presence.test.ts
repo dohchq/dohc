@@ -36,9 +36,7 @@ describe("PresenceHub", () => {
   it("expires an entry after the TTL without a heartbeat (self-expiring typing)", () => {
     const hub = new PresenceHub({ entryTtlMs: 5000 });
     hub.publish("ws:w:general", "alice", "tab1", { state: "typing" }, 1000);
-    // Just under TTL: still present.
     expect(hub.snapshot("ws:w:general", 5999).peers).toHaveLength(1);
-    // At/after TTL: dropped.
     expect(hub.snapshot("ws:w:general", 6000).peers).toHaveLength(0);
   });
 
@@ -52,7 +50,6 @@ describe("PresenceHub", () => {
   it("returns immediately from wait when the scope already advanced", async () => {
     const hub = new PresenceHub();
     const first = hub.publish("ws:w:general", "alice", "tab1", {}, 1000);
-    // A poller last saw version 0; the scope is now ahead, so wait resolves now.
     const snap = await hub.wait("ws:w:general", 0, { holdMs: 10_000, nowMs: 1001 });
     expect(snap.version).toBe(first.version);
     expect(snap.peers).toHaveLength(1);
@@ -62,7 +59,6 @@ describe("PresenceHub", () => {
     const hub = new PresenceHub();
     const seed = hub.publish("ws:w:general", "alice", "tab1", {}, 1000);
     const waiting = hub.wait("ws:w:general", seed.version, { holdMs: 10_000, nowMs: 1001 });
-    // Bob joins; the parked poller wakes.
     hub.publish("ws:w:general", "bob", "tab1", {}, 1002);
     const snap = await waiting;
     expect(snap.peers.map((p) => p.userId).sort()).toEqual(["alice", "bob"]);
@@ -79,18 +75,16 @@ describe("PresenceHub", () => {
   });
 
   it("a RETRIED leave still wakes parked pollers when it only prunes an expired peer", async () => {
-    // Regression: leave() used to gate bump() on deleting the caller's own
-    // entry, discarding prune()'s result. A duplicate/late leave (entry already
-    // gone) that expired a different stale peer in the same call left the
-    // version unbumped — parked pollers slept through an observable departure.
+    // leave() must bump the version when prune() expired any peer, not only
+    // when it deleted the caller's own entry. Otherwise a duplicate or late
+    // leave (entry already gone) that expires a different stale peer in the
+    // same call leaves the version unbumped, and parked pollers sleep through
+    // an observable departure.
     const hub = new PresenceHub({ entryTtlMs: 5_000 });
     hub.publish("ws:w:general", "alice", "tab1", {}, 1_000);
     hub.publish("ws:w:general", "bob", "tab1", {}, 1_001);
-    // Alice leaves; her retry below will find her entry already gone.
     const seed = hub.leave("ws:w:general", "alice", "tab1", 1_002);
     const waiting = hub.wait("ws:w:general", seed.version, { holdMs: 60_000, nowMs: 1_003 });
-    // The retried leave arrives after Bob's TTL lapsed: it deletes nothing of
-    // Alice's but prunes Bob — and that must wake the parked poller.
     hub.leave("ws:w:general", "alice", "tab1", 7_000);
     const snap = await waiting;
     expect(snap.peers).toHaveLength(0);
@@ -125,7 +119,6 @@ describe("PresenceHub", () => {
     hub.publish("ws:w:general", "a", "t", {}, 1000);
     hub.publish("ws:w:general", "b", "t", {}, 1000);
     expect(() => hub.publish("ws:w:general", "c", "t", {}, 1000)).toThrow(PresenceCapacityError);
-    // Updating an existing entry is still fine at capacity.
     expect(() => hub.publish("ws:w:general", "a", "t", { x: 1 }, 1001)).not.toThrow();
   });
 
@@ -159,9 +152,6 @@ describe("PresenceHub", () => {
   });
 });
 
-// The OOM fix: expiry is TIME-DRIVEN, not lazy. A client that publishes into
-// many unique topics and then vanishes must be reclaimed by the sweep timer
-// even though nothing ever touches those scopes again.
 describe("PresenceHub time-driven expiry (sweeper)", () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -175,12 +165,10 @@ describe("PresenceHub time-driven expiry (sweeper)", () => {
       sweepIntervalMs: 1_000,
       nowMs: () => now,
     });
-    // Spray unique topics, then never touch them again (no leave, no poll).
     for (let i = 0; i < 20; i += 1) {
       hub.publish(presenceScopeKey("w", `topic-${i}`), "ghost", "tab", {}, now);
     }
     expect(hub.stats()).toMatchObject({ scopes: 20, entries: 20 });
-    // Time passes beyond the TTL; only the sweep timer runs.
     now = 10_000;
     vi.advanceTimersByTime(1_000);
     expect(hub.stats()).toEqual({ scopes: 0, entries: 0, waiters: 0 });
@@ -225,7 +213,6 @@ describe("PresenceHub caps (memory is bounded)", () => {
     hub.publish(key("w1", "a"), "u", "c", {}, 1_000);
     hub.publish(key("w2", "a"), "u", "c", {}, 1_000);
     expect(() => hub.publish(key("w3", "a"), "u", "c", {}, 1_000)).toThrow(PresenceCapacityError);
-    // Existing scopes still accept publishes at the cap.
     expect(() => hub.publish(key("w1", "a"), "u", "c2", {}, 1_000)).not.toThrow();
     hub.dispose();
   });
@@ -235,7 +222,6 @@ describe("PresenceHub caps (memory is bounded)", () => {
     hub.publish(key("w1", "a"), "u", "c", {}, 1_000);
     hub.publish(key("w1", "b"), "u", "c", {}, 1_000);
     expect(() => hub.publish(key("w1", "c"), "u", "c", {}, 1_000)).toThrow(PresenceCapacityError);
-    // A different workspace is unaffected by w1 hitting its cap.
     expect(() => hub.publish(key("w2", "a"), "u", "c", {}, 1_000)).not.toThrow();
     hub.dispose();
   });
@@ -245,9 +231,7 @@ describe("PresenceHub caps (memory is bounded)", () => {
     hub.publish(key("w1", "a"), "u1", "c", {}, 1_000);
     hub.publish(key("w2", "a"), "u2", "c", {}, 1_000);
     expect(() => hub.publish(key("w3", "a"), "u3", "c", {}, 1_000)).toThrow(PresenceCapacityError);
-    // Updating an existing entry is still allowed at the cap.
     expect(() => hub.publish(key("w1", "a"), "u1", "c", { x: 1 }, 1_001)).not.toThrow();
-    // Freeing an entry frees the budget.
     hub.leave(key("w2", "a"), "u2", "c", 1_002);
     expect(() => hub.publish(key("w3", "a"), "u3", "c", {}, 1_003)).not.toThrow();
     hub.dispose();
@@ -271,8 +255,6 @@ describe("PresenceHub caps (memory is bounded)", () => {
   });
 });
 
-// The DoS fix: parked long-poll waiters are capped globally, per scope, and
-// per actor, and every wake/abort path releases the slot.
 describe("PresenceHub parked-waiter caps", () => {
   it("caps total parked waiters and frees the slot on wake", async () => {
     const hub = new PresenceHub({ maxTotalWaiters: 1 });
@@ -283,7 +265,6 @@ describe("PresenceHub parked-waiter caps", () => {
     expect(() => hub.wait(key, seed.version, { holdMs: 60_000, nowMs: 1_002 })).toThrow(
       PresenceCapacityError,
     );
-    // A publish wakes the parked waiter and releases its slot.
     hub.publish(key, "b", "c", {}, 1_003);
     await first;
     expect(hub.stats().waiters).toBe(0);
@@ -302,7 +283,6 @@ describe("PresenceHub parked-waiter caps", () => {
     expect(() => hub.wait(keyA, seedA.version, { holdMs: 60_000, nowMs: 1_002 })).toThrow(
       PresenceCapacityError,
     );
-    // Another scope still has budget.
     const parkedB = hub.wait(keyB, seedB.version, { holdMs: 60_000, nowMs: 1_003 });
     hub.publish(keyA, "x", "c", {}, 1_004);
     hub.publish(keyB, "x", "c", {}, 1_005);
@@ -322,7 +302,6 @@ describe("PresenceHub parked-waiter caps", () => {
     expect(() =>
       hub.wait(key, seed.version, { holdMs: 60_000, nowMs: 1_002, actorId: "mallory" }),
     ).toThrow(PresenceCapacityError);
-    // A different actor still parks fine.
     const other = hub.wait(key, seed.version, {
       holdMs: 60_000,
       nowMs: 1_003,
@@ -348,7 +327,6 @@ describe("PresenceHub parked-waiter caps", () => {
     controller.abort();
     await parked;
     expect(hub.stats().waiters).toBe(0);
-    // The freed slot is immediately reusable.
     const again = hub.wait(key, seed.version, {
       holdMs: 1,
       nowMs: 1_002,

@@ -43,7 +43,6 @@ type ScopeKind = "local" | "view" | "comment" | "edit" | "ended" | "damaged";
 type Event = { sender: { trusted: boolean } };
 type Operation = { workspace: RegistryEntry; assertCurrent(): void };
 
-// A send that finished every step after its save, with the message as shown.
 function shown<Result extends object>(result: Result): Exclude<Result, { failure: string }> {
   if ("failure" in result)
     throw new Error(`The send saved but did not finish: ${String(result.failure)}`);
@@ -139,7 +138,6 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
       atMs: 4,
     })),
     listReactions: vi.fn<DesktopLinkedChatStore["listReactions"]>(async () => []),
-    // The poll an answer resolves.
     listThreadDecisions: vi.fn<DesktopLinkedChatStore["listThreadDecisions"]>(async () => [
       {
         workspaceId: workspace.workspaceId,
@@ -354,8 +352,6 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
       ? { joinedChannel: null, authorUserId: "recipient" }
       : { joinedChannel: null, authorUserId: "verified-owner" },
   );
-  // The real module: these tests cover what each adapter hands it and how the
-  // adapter maps the result. chatWrites.test.ts covers the checks themselves.
   let chatCredentials: CloudCredentials | null = {
     serverUrl: "https://cloud.test",
     userId: "verified-owner",
@@ -381,7 +377,6 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
     betweenDispatchScans: (_workspaceId, write) => write(),
     notifyRenderer: () => undefined,
   });
-  // What the handlers read as this computer's sign-in. Signed out unless a test signs in.
   let ipcCredentials: CloudCredentials | null = null;
   const sender = { trusted: true };
   const held = authorities.acquire(workspace.workspaceId);
@@ -484,7 +479,6 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
     signInHandlers: (credentials: CloudCredentials) => {
       ipcCredentials = credentials;
     },
-    // The window opens another workspace, so its session no longer shows this one.
     endSession: () => {
       sessionCurrent = false;
     },
@@ -673,7 +667,6 @@ describe("chat sender binding", () => {
     ];
     services.forEach((service) => service.mockClear());
     const row = Object.values(chatOperations).find((operation) => operation.channel === channel);
-    // A send holds its own workspace operation, with the chats refusal.
     const refusal = row && "inactiveMessage" in row ? row.inactiveMessage : CHATS_STOPPED;
     await expect(h.invoke(channel, { ...payload, workspaceId: "other" })).rejects.toThrow(refusal);
     services.forEach((service) => expect(service).not.toHaveBeenCalled());
@@ -751,7 +744,6 @@ describe("chat message IPC identity", () => {
     expect(
       ChatMessageRecord.parse(chatMessageForIpc(message, () => null, neutralPresentation)),
     ).not.toHaveProperty("authorUserId");
-    // The badge knows your agent's run by this id alone.
     expect(
       ChatMessageRecord.parse(
         chatMessageForIpc({ ...message, authorAgentId: "codex" }, () => null, neutralPresentation),
@@ -808,13 +800,11 @@ describe("chat message IPC identity", () => {
       authorOwnerDisplayName: "Ice",
       automation: { automationId: "collection:object-tasks#stamp", collectionPath: "Voyage/Tasks" },
     });
-    // A Collection this computer no longer has still names its automation.
     expect(
       ChatMessageRecord.parse(chatMessageForIpc(automated, () => null, neutralPresentation)),
     ).toMatchObject({
       automation: { automationId: "collection:object-tasks#stamp", collectionPath: null },
     });
-    // Another computer's automation arrives without the automation.
     const { automation: _automation, ...remote } = automated;
     expect(
       ChatMessageRecord.parse(chatMessageForIpc(remote, movedTo, neutralPresentation)),
@@ -914,8 +904,6 @@ describe("registered chat writes", () => {
     );
     expect(held.waitsForTrust).toBe(true);
     expect(test.agentWaitsForTrust).toHaveBeenLastCalledWith("workspace", held.message.id);
-    // The message saved, so a trust read that fails names it and why, and
-    // the window does not send it again.
     test.agentWaitsForTrust.mockRejectedValueOnce(new Error("trust file unreadable"));
     await expect(test.invoke(chatOperations.sendChatMessage.channel, send)).resolves.toEqual({
       message: { id: "message", threadId: "thread" },
@@ -968,7 +956,6 @@ describe("registered chat writes", () => {
       });
       const result = await test.invoke(channel, { workspaceId: "workspace", ...payload });
       expect(test.storeMethods[method]).toHaveBeenCalledOnce();
-      // A post's opening message names the thread it started.
       expect(result).toEqual({
         message: { id: "message", threadId: "thread" },
         failure: `Error: ${CHATS_STOPPED}`,
@@ -1016,8 +1003,6 @@ describe("registered chat writes", () => {
       "The workspace engine stopped.",
     );
   });
-  // The work after the store write, such as bookmarks and sync, runs inside
-  // chatWrites. The message saved before it.
   it.each(sends)(
     "answers $name with its ids when the work after the write fails",
     async ({ channel, payload, method }) => {
@@ -1054,8 +1039,6 @@ describe("registered chat writes", () => {
       resolveFailure: "Error: Pick one of the poll's choices.",
     });
   });
-  // Whatever a later step says, a window whose workspace changed hears only
-  // the ids of the message it wrote and the operation's own refusal.
   it.each(sends)(
     "answers $name to a window that changed workspaces with its ids and the refusal alone",
     async ({ channel, payload }) => {
@@ -1159,7 +1142,6 @@ describe("registered chat reads and reader-local state", () => {
     });
     expect(test.activity.queueCloudSync).toHaveBeenCalledOnce();
 
-    // Another account's sign-in carries no owner context.
     test.workspace.sharedChannels = [];
     test.signInHandlers({
       serverUrl: "https://cloud.test",
@@ -1247,7 +1229,6 @@ describe("registered channels and personal chat projections", () => {
     ).toMatchObject({
       channel: { id: "channel", wireId: "channel", threadCount: 0, unreadCount: 0 },
     });
-    // A group is a folder: the default folder is the slug, and main creates it.
     expect(test.storeMethods.createChannel).toHaveBeenCalledWith({
       workspaceId: "workspace",
       name: "General",
@@ -1294,7 +1275,6 @@ describe("registered channels and personal chat projections", () => {
         name: "Team",
       }),
     ).rejects.toThrow("Use 1 to 80 characters, including at least one letter or number.");
-    // Any other engine refusal keeps its own reason.
     test.storeMethods.createChannel.mockRejectedValueOnce(new Error("disk full"));
     await expect(
       test.invoke(chatOperations.createChatChannel.channel, {
@@ -1330,7 +1310,6 @@ describe("registered channels and personal chat projections", () => {
     expect(test.storeMethods.createChannel).toHaveBeenCalledWith(
       expect.objectContaining({ folderPath: "team" }),
     );
-    // A name in another script is a name; its folder is spelled the same way.
     await test.invoke(chatOperations.createChatChannel.channel, {
       workspaceId: "workspace",
       name: "会议",
@@ -1720,7 +1699,6 @@ describe("poll IPC writes", () => {
       expect(test.storeMethods.listThreadDecisions).not.toHaveBeenCalled();
     },
   );
-  // The poll saved, so a read back that fails names it and why.
   it.each(doors)(
     "answers a written poll whose decision cannot be read back with its ids and why on $name",
     async ({ channel, target, method }) => {
@@ -1828,8 +1806,6 @@ describe("poll IPC writes", () => {
   });
 });
 
-// A send joins the stream's running conversation, so its thread is the one
-// the engine names, in a Group's chat lane as in a DM.
 it("sends into a Group's chat lane and a DM through the shared send, each in its running conversation", async () => {
   const workspace = {
     workspaceId: "workspace",
@@ -1887,7 +1863,6 @@ it("sends into a Group's chat lane and a DM through the shared send, each in its
         ).map((message) => message.body),
       ).toEqual(["Who drives?", "I can."]);
     }
-    // A post in the same Group starts its own thread.
     const post = shown(
       StartChannelThreadResult.parse(
         await test.invoke(chatOperations.startChannelThread.channel, {
@@ -1954,7 +1929,6 @@ it("reads both IPC polls back with their decisions from the live chat store", as
         }),
       ),
     );
-    // Each write returns its poll as the engine stored it, choices trimmed.
     expect(first.decision).toMatchObject({
       messageId: first.message.id,
       state: "open",
@@ -2001,7 +1975,6 @@ it("reads both IPC polls back with their decisions from the live chat store", as
   }
 });
 
-// Try again after an answer whose reply saved while its question stayed open.
 describe("marking a question answered with a reply that saved", () => {
   async function withPoll(
     run: (chats: {
@@ -2062,7 +2035,6 @@ describe("marking a question answered with a reply that saved", () => {
             }),
           ),
         ).message.id;
-      // The reply saved; its question is still open, as after a failed answer.
       const replyId = await reply(threadId, "Monday");
       await run({
         test,
@@ -2133,7 +2105,6 @@ describe("marking a question answered with a reply that saved", () => {
         await expect(resolve({ resolvedByMessageId: other.message.id })).rejects.toThrow(
           "Only your own reply in this thread can answer its question.",
         );
-        // Naming the other thread instead finds no such question there.
         await expect(
           resolve({ threadId: other.thread.id, resolvedByMessageId: other.message.id }),
         ).rejects.toThrow();
@@ -2163,8 +2134,6 @@ describe("marking a question answered with a reply that saved", () => {
     );
   });
 
-  // A fresh answer to a question another reply answered still sends, and
-  // comes back with the question as that reply left it.
   it("keeps a new answer's reply when another reply answered first", async () => {
     await withPoll(
       async ({ test, threadId, questionId, replyId, resolve, messageIds, decision }) => {
@@ -2340,6 +2309,62 @@ describe("registered chat channel and read-state boundaries", () => {
       expect(test.activity.queueCloudSync).not.toHaveBeenCalled();
     },
   );
+});
+
+it("tells a Group's composer which files its messages may link, by the shares its send checks", async () => {
+  const h = fixture();
+  h.storeMethods.listChannels.mockResolvedValue([
+    {
+      id: "channel",
+      workspaceId: "workspace",
+      name: "Trip",
+      slug: "trip",
+      kind: "channel",
+      type: "posts",
+      purpose: "",
+      createdAtMs: 1,
+      updatedAtMs: 1,
+      threadCount: 0,
+      unreadCount: 0,
+    },
+  ]);
+  const list = () =>
+    h.invoke(chatOperations.listChatChannels.channel, { workspaceId: "workspace" });
+  await expect(list()).resolves.toMatchObject({
+    channels: [{ id: "channel", fileLinks: { kind: "any" } }],
+  });
+  // Only a link shares the Group, so the relay's grant listing names nobody.
+  h.workspace.shareRoster = {
+    grants: [],
+    links: [
+      {
+        grant: {
+          granterUserId: "user-1",
+          granterEmail: null,
+          subjectName: null,
+          sharerName: null,
+          shareId: "share-trip",
+          grantId: "grant-link",
+          generation: 1,
+          status: "active",
+          recipientUserId: null,
+          recipientEmail: null,
+          selector: { kind: "group", channelWireId: "wire", paths: ["Trip"], versionId: null },
+          access: "read-write",
+          fileScope: "served",
+        },
+        ended: false,
+        automationsGeneration: null,
+      },
+    ],
+    formerGrants: [],
+    endedGrants: [],
+    version: 1,
+    listedAtMs: 1,
+  };
+  await expect(list()).resolves.toMatchObject({
+    channels: [{ id: "channel", fileLinks: { kind: "shared", shares: [["Trip"]] } }],
+  });
 });
 
 it("IPC, CLI and MCP share Links, cursors, omissions and conversation admission", async () => {

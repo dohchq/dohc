@@ -6,13 +6,11 @@ import { join } from "node:path";
 // worker. Every other file shares a worker with files of its environment, so
 // the worker never restarts to switch between jsdom and node.
 //
-// Each shared file starts from its worker's baseline: environment variables,
-// own globals, nothing stubbed, real timers, and in jsdom an empty document
-// and storage, the root element's attributes, and RESTORED_PROTOTYPES
-// (testSharedWorkerSetup.ts and testSharedDomSetup.ts). What that reset cannot
-// undo sends a file to a worker of its own. A worker that runs several files
-// keeps its module mocks and evaluated modules, so a file runs on its own when
-// it:
+// testSharedWorkerSetup.ts and testSharedDomSetup.ts return each shared file
+// to its worker's baseline, RESTORED_PROTOTYPES included. What that reset
+// cannot undo sends a file to a worker of its own. A worker that runs several
+// files keeps its module mocks and evaluated modules, so a file runs on its
+// own when it:
 //
 // - calls vi.mock, vi.doMock, or vi.resetModules;
 // - stubs a global with vi.stubGlobal and never calls vi.unstubAllGlobals;
@@ -61,7 +59,6 @@ const JSDOM = "@vitest-environment jsdom";
 export interface DesktopTestFiles {
   /** Each file runs in a worker of its own. */
   isolated: string[];
-  /** jsdom files that share workers. */
   sharedDom: string[];
   sharedNode: string[];
 }

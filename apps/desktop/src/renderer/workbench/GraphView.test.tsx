@@ -82,7 +82,6 @@ describe("GraphView", () => {
       <GraphView workspaceId="ws" activePath="beta.md" refreshKey="0" onOpenPath={vi.fn()} />,
     );
     await waitFor(() => expect(rowPaths()).toEqual(["alpha.md", "beta.md", "gamma.md"]));
-    // The open page keeps its place in the list instead of moving to the top.
     expect(screen.getAllByTestId("graph-file-row")[1]!.dataset.active).toBe("true");
     expect(screen.getByTestId("graph-canvas").dataset.nodeCount).toBe("3");
     expect(screen.getByTestId("graph-doc-count").textContent).toBe("5 files");
@@ -90,7 +89,6 @@ describe("GraphView", () => {
     view.rerender(
       <GraphView workspaceId="ws" activePath="nowhere.md" refreshKey="0" onOpenPath={vi.fn()} />,
     );
-    // With no open page in the graph, the panel shows the whole workspace.
     await waitFor(() => expect(rowPaths()).toHaveLength(5));
   });
 
@@ -185,7 +183,6 @@ describe("GraphView", () => {
           outgoing: 0,
         }) satisfies GraphNode,
     );
-    // The graph is still drawn for the earlier search "a": both files.
     const lagging = {
       sources,
       nodes: sources.map(({ path, title }) => ({
@@ -255,7 +252,6 @@ describe("GraphView", () => {
     await waitFor(() => expect(canvas.dataset.nodeCount).toBe("3"));
     canvas.focus();
     fireEvent.keyDown(canvas, { key: "ArrowRight" });
-    // With nothing open, focus starts on the most-linked node.
     expect(screen.getByTestId("graph-focused-node").textContent).toBe("beta.md, Page, 2 links");
     fireEvent.keyDown(canvas, { key: "Enter" });
     expect(onOpenPath).toHaveBeenCalledWith("beta.md");
@@ -299,7 +295,6 @@ describe("GraphView", () => {
     fireEvent.keyDown(canvas, { key: "ArrowRight" });
     const focused = description.textContent;
     expect(["sketch.excalidraw, Drawing, 1 link", "alpha.md, Page, 1 link"]).toContain(focused);
-    // Hovering the other node keeps the focused node's words.
     const focusedPath = focused!.split(",")[0]!;
     const other = hoverSomeNode(focusedPath);
     expect(other).not.toBe("");
@@ -429,7 +424,6 @@ describe("GraphView", () => {
     // The counts truncate together in a narrow panel, so their tooltip holds both.
     expect(screen.getByTestId("graph-doc-count").parentElement?.title).toBe("3 files · 1 link");
     const row = screen.getAllByTestId("graph-file-row").find((row) => row.dataset.path === "a.md")!;
-    // One link, counted once although the page repeats it.
     expect(row.textContent).toBe("a.md1");
     expect(screen.queryByText("Gathering linked mentions")).toBeNull();
   });
@@ -682,7 +676,6 @@ describe("GraphView", () => {
     expect(chatFileMentionsPage).toHaveBeenCalledOnce();
     expect(chatFileMentionsPage).toHaveBeenCalledWith({ workspaceId: "ws" });
     expect(screen.getByTestId("graph-link-count").textContent).toBe("2 links");
-    // Opening another file that draws the same files asks for nothing new.
     for (const activePath of ["a.md", "picture.svg"]) {
       rerender(
         <GraphView

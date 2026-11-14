@@ -57,7 +57,6 @@ function createTableEditor(rows = 2, cols = 2): Editor {
   return editor;
 }
 
-// A 3 by 3 table whose cells read A1 to C3, after an optional paragraph.
 function labeledTableDoc(intro?: string) {
   return {
     type: "doc",
@@ -102,8 +101,6 @@ const collabExtensions = (document: Y.Doc) => [
   Collaboration.configure({ document, field: "body" }),
 ];
 
-// Two editors on two Y.Docs that pass every update to each other, the way a
-// collaborator's edits reach a note. Both open the labeled table after "Intro".
 async function createSyncedEditors(): Promise<{ local: Editor; peer: Editor }> {
   const localDoc = new Y.Doc();
   const peerDoc = new Y.Doc();
@@ -178,7 +175,6 @@ function createColspanTableEditor(): Editor {
 function menuItemByLabel(label: string): HTMLButtonElement {
   const menu = document.body.querySelector(".dohc-table-menu");
   if (!menu) throw new Error("grip menu did not open");
-  // The label is the row's first child; a destructive row adds its Del chip.
   const item = Array.from(menu.querySelectorAll(".dohc-table-menu__item")).find(
     (el) => el.firstElementChild?.textContent === label,
   );
@@ -240,7 +236,6 @@ function tableNode(editor: Editor): JsonNode {
   return table;
 }
 
-// The align attr each cell in `colIndex` carries, top row to bottom.
 function columnAligns(editor: Editor, colIndex: number): (string | null)[] {
   return (tableNode(editor).content ?? []).map(
     (row) => row.content?.[colIndex]?.attrs?.align ?? null,
@@ -383,7 +378,6 @@ describe("table gestures while the note changes", () => {
       expect(source.getAttribute("aria-grabbed")).toBe("false");
       expectNoDragChrome(editor);
 
-      // The grip stays in place through the edit, so a new drag from it works.
       drag(source, editor.view.dom.querySelectorAll(selector)[2]!);
       const moved =
         band === "row"
@@ -588,8 +582,6 @@ describe("table controls grips", () => {
     const activeCols = dom.querySelectorAll<HTMLElement>(".dohc-table-grip--col.is-active");
     expect(activeCols).toHaveLength(1);
     expect(activeCols[0]?.dataset.col).toBe("1");
-    // Row 1's col-0 slot is covered by the rowspan, so the decoration
-    // builder dedups away row 1's grip — there is nothing to activate.
     expect(dom.querySelectorAll(".dohc-table-grip--row.is-active")).toHaveLength(0);
   });
 
@@ -724,8 +716,6 @@ describe("table controls grips", () => {
     expect(menu.getAttribute("aria-activedescendant")).toBe(items[1]?.id);
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
 
-    // Second column menu item is "Insert column right" — still an insert,
-    // so the column count grows and the menu closes either way.
     const headerRow = tableNode(editor).content?.[0];
     expect(headerRow?.content).toHaveLength(4);
     expect(document.body.querySelector(".dohc-table-menu")).toBeNull();
@@ -748,9 +738,6 @@ describe("table controls grips", () => {
     const headerRow = tableNode(editor).content?.[0];
     expect(headerRow?.content).toHaveLength(2);
   });
-
-  // A click in an embedded frame, such as an app preview, blurs the window
-  // with focus already in the frame. The grip must not pull it back out.
 
   // jsdom has no layout: a 100px list over 28px rows.
 

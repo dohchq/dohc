@@ -135,7 +135,6 @@ fn snapshot_from_store(
         .expect("read captured text")
 }
 
-/// The current binary head's sha256 for `path`, if the head is binary.
 fn binary_head(db: &Path, path: &str) -> Option<String> {
     use rusqlite::OptionalExtension;
     let store = EngineStore::open(db, 100).expect("reopen store");
@@ -156,8 +155,6 @@ fn binary_head(db: &Path, path: &str) -> Option<String> {
         .flatten()
 }
 
-/// The encrypted tip's plaintext byte length for a secret path (metadata
-/// only — the test never decrypts).
 fn secret_tip_len(db: &Path, path: &str) -> Option<i64> {
     use rusqlite::OptionalExtension;
     let store = EngineStore::open(db, 100).expect("reopen store");

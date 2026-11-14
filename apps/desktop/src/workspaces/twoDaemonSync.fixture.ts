@@ -2,10 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { getCACertificates, setDefaultCACertificates } from "node:tls";
 import { mintLocalhostCa } from "../../../../services/share-web/src/testing/localhostCa";
-import {
-  startServerProxy,
-  type HostedLogResponseBarrier,
-} from "../../e2e/helpers/selfHostOnboarding";
+import { startServerProxy } from "../../e2e/helpers/selfHostOnboarding";
 import { DatabaseSync } from "node:sqlite";
 
 import {
@@ -79,27 +76,6 @@ import { deleteWorkspacePathByHand, moveWorkspacePathByHand } from "./workspaceF
 import { readLocalStateFrom, type LocalStateBindings } from "./workspaceLocalState";
 
 export const engine = requireEngineBinaryOrSkip();
-
-export async function waitForHostedLog<T>(
-  barrier: HostedLogResponseBarrier,
-  promise: Promise<T>,
-  phase: string,
-): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => {
-          reject(new Error(`Hosted-log ${phase} did not finish within 60 s.`));
-          barrier.destroy();
-        }, 60_000);
-      }),
-    ]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
 
 let relayBuildDirectory: string;
 export let compiledRelayMain: string;
@@ -453,7 +429,7 @@ export async function expectTwoDaemonFileSync(input: {
 
 // A stale ready copy at Resume is covered by the relay test "captures a retired
 // activation's successor only after a hosted pull that started after Resume".
-export const heldStopCase = "stale-binding quarantine, Stop refused while the host is held";
+export const stopQuarantineCase = "stale-binding quarantine, released by Stop";
 
 export interface OpenEditor {
   session: Awaited<ReturnType<WorkspaceEngineCapture["openYDocSession"]>>;
@@ -1414,7 +1390,6 @@ async function runRenameRepro(
       expect
         .soft(control, `${kind}: the relay's session host runs in the self-host default mode`)
         .toMatchObject([{ mode: "service" }]);
-      // The owner edits A in its editor, and delivery carries the edit to the session host.
       await editPage(oldPath, "a-live", false);
       await expect
         .poll(
@@ -2407,7 +2382,6 @@ async function runDeleteRepro(
         stopNotice,
       });
 
-      // Step 3: delete A in Explorer, then B and C.
       step = "3-delete";
       const deleted = await appDelete(oldPath);
       observe({ deleted, onDisk: await onDisk(), ownerA: ownerRowsOfA() });
@@ -2515,7 +2489,7 @@ async function runDeleteRepro(
       kind === "file-manager-capture-stop-early" ||
       kind === "file-manager-capture-stop"
     ) {
-      // Step 2: A's file goes from disk outside dohc while live editing is on (#3129).
+      // Step 2: A's file goes from disk outside dohc while live editing is on.
       // "file-manager-capture-stop-early" stops before capture can record the delete.
       step = "2-file-manager-delete";
       await unlink(join(rootA, oldPath));
@@ -2533,7 +2507,6 @@ async function runDeleteRepro(
       };
       observe({ atStop, onDisk: await onDisk() });
 
-      // Step 3: Stop live editing on A's row, as its Stop button does.
       step = "3-stop";
       const stopped = await stopViaApp({ path: oldPath, objectId: objectIdA }).then(
         (result) => ({ ok: true as const, result }),
@@ -2546,7 +2519,6 @@ async function runDeleteRepro(
         owedStops: await owedStopsOfA(),
       };
       observe({ stopped, ...after });
-      // Live editing stops for A, and Stop says so.
       expect(
         {
           stopped,
@@ -2698,7 +2670,6 @@ async function runDeleteRepro(
       ).toEqual({ ok: true, onDisk: false });
     }
 
-    // Step 3: a new page B, and an ordinary saved change to the file C.
     await newAndChanged();
     expectPublished(
       "after B and C",

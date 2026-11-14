@@ -6,7 +6,7 @@ import { expect, it, vi } from "vitest";
 import { deferred } from "../testing/deferred";
 import { WORKSPACE, makeBridge, renderShell } from "./DesktopWorkspaceShell.testHarness";
 
-// #3089: what main sends when the engine refuses a person's move of a shared
+// What main sends when the engine refuses a person's move of a shared
 // live page whose accepted edit isn't in the file yet, as the two-daemon test
 // meets it.
 const LIVE_MOVE_REFUSAL = new Error(
@@ -38,7 +38,6 @@ async function rename(user: ReturnType<typeof userEvent.setup>, name = "renamed.
 const listing = (...paths: string[]) => ({
   visibility: { status: "ready" as const, rules: [] },
   files: paths.map((path) => ({ path, kind: "file" as const })),
-  // Each file's folder, as main lists it.
   folders: [
     ...new Set(
       paths
@@ -92,7 +91,6 @@ function refusedBatch() {
   return bridge;
 }
 
-// Selects a.md and b.md, then drags them onto `folder`.
 async function dragSelection(user: ReturnType<typeof userEvent.setup>, folder: string) {
   const row = async (path: string) =>
     (await screen.findAllByTestId("tree-row")).find(
@@ -165,10 +163,8 @@ it("a dragged selection's failed notice goes once an agent makes one of its move
   ]);
   expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(BATCH_WORDS);
   expect(await noticeRows(user, BATCH_WORDS)).toHaveLength(1);
-  // A change that leaves both files where they were keeps the notice.
   await listAfterActivity(bridge, ["a.md", "b.md", "docs/z.md", "notes/n.md"], "c.md");
   expect(await noticeRows(user, BATCH_WORDS)).toHaveLength(1);
-  // The agent moves a.md into docs.
   await listAfterActivity(bridge, ["docs/a.md", "b.md", "docs/z.md", "notes/n.md"], "d.md", [
     "a.md",
     "docs/a.md",

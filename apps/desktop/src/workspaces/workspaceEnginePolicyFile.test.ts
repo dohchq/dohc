@@ -22,7 +22,6 @@ describe("historyExcludesSubtree", () => {
     expect(excludes([{ path: "build/**", tracked: false }], "build/cache")).toBe(true);
     expect(excludes([{ path: "*/cache/**", tracked: false }], "app/cache")).toBe(true);
     expect(excludes([{ path: "**", tracked: false }], "anything")).toBe(true);
-    // A rule for some depth, or for some names, leaves the rest tracked.
     expect(excludes([{ path: "build/*", tracked: false }], "build")).toBe(false);
     expect(excludes([{ path: "build/**/x", tracked: false }], "build")).toBe(false);
     expect(excludes([{ path: "build/cache/**", tracked: false }], "build")).toBe(false);
@@ -57,7 +56,6 @@ describe("historyExcludesSubtree", () => {
         "build",
       ),
     ).toBe(false);
-    // Searchable-only rules and rules elsewhere do not reach the folder.
     expect(
       excludes(
         [
@@ -68,7 +66,6 @@ describe("historyExcludesSubtree", () => {
         "build",
       ),
     ).toBe(true);
-    // A later exclusion of the whole subtree takes the earlier inclusion back.
     expect(
       excludes(
         [
@@ -106,8 +103,8 @@ function fileSnapshot(path: string): TextFileSnapshot {
 }
 
 describe("resolveEngineSearchPolicy", () => {
-  // Search fails closed on policy errors (capture stays floor-only per
-  // WS-F): resolveEffectivePolicy defaults tracked paths to searchable, so
+  // Search fails closed on policy errors (capture stays floor-only):
+  // resolveEffectivePolicy defaults tracked paths to searchable, so
   // null rules from an unparseable file would widen search.
   it("blocks search outright when the policy snapshot carries errors", () => {
     const decision = resolveEngineSearchPolicy(snapshot({ errors: ["files.toml: bad TOML"] }));
@@ -154,7 +151,6 @@ describe("resolveEngineSearchPolicy", () => {
       searchable: false,
       reason: "ignored",
     });
-    // The secret floor can never be widened by policy.
     expect(decision.fileVisibility(fileSnapshot(".env"))).toEqual({
       searchable: false,
       reason: "secret",

@@ -54,7 +54,7 @@ import {
   subscribeChosenColors,
 } from "./chosenColors";
 
-// Shared Chats rendering (PR 13, WS-E): the file-rail LinkedChats panel and
+// Shared Chats rendering: the file-rail LinkedChats panel and
 // the workspace Chats view render messages and composers through these same
 // pieces so authorship display and send affordances can never drift. Test
 // ids are prefixed per surface ("linked-chat-*" vs "chats-*") because both
@@ -168,7 +168,6 @@ export function MentionText(props: {
 
 // Common reactions lead the searchable Unicode catalog.
 const DEFAULT_REACTION_EMOJIS = ["👍", "❤️", "🎉", "🙌", "😄", "👀", "✅", "🚀"] as const;
-// One-click reactions on the row's hover toolbar.
 const QUICK_REACTION_EMOJIS = ["👍", "🙌"] as const;
 export const TOOLBAR_BUTTON =
   "grid size-7 place-items-center rounded-md transition-colors duration-75 hover:bg-hover hover:text-ink disabled:opacity-50 disabled:cursor-default";
@@ -206,7 +205,6 @@ export interface ChatReactionControls {
   pending?: boolean;
 }
 
-// Reaction labels use the stored human or agent name.
 function reactionerNames(records: readonly ChatReactionRecord[]): string {
   return records.map((record) => chatAuthorLabel(record)).join(", ");
 }
@@ -224,7 +222,6 @@ export function MessageReactions(props: {
   // toolbar over the row's top-right corner, shown on hover or focus, so a
   // run of short lines keeps its rhythm. Pills still flow under the body.
   hoverToolbar?: boolean;
-  // The row's other actions, after the reaction controls in its toolbar.
   toolbarActions?: ReactNode;
   toolbarClassName?: string;
   actionTestId?: string;
@@ -297,7 +294,6 @@ export function MessageReactions(props: {
       ]
     : [];
 
-  // Dismiss the picker on an outside pointer press (calm, no modal scrim).
   useEffect(() => {
     if (!pickerOpen) return;
     function onPointerDown(event: PointerEvent) {
@@ -369,7 +365,6 @@ export function MessageReactions(props: {
     };
   }, [pickerOpen]);
 
-  // Group this message's reactions by emoji, preserving first-seen order.
   const byEmoji: Array<{ emoji: string; records: ChatReactionRecord[]; mine: boolean }> = [];
   const index = new Map<string, number>();
   for (const record of props.records) {

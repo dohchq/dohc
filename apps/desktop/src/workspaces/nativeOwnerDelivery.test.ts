@@ -333,11 +333,36 @@ it("requests a complete host checkpoint before discovering the enrolled outbox",
   expect(onEnrolled).toHaveBeenCalledExactlyOnceWith();
 });
 
-it("pulls accepted state when an enrolled owner has no pending edits", async () => {
+const idleDraft = {
+  binding,
+  acceptedCursor: 7,
+  outboxId: "outbox",
+  pendingBytes: 0,
+  state: "sealed",
+};
+it.each([
+  { case: "no head from the server", serverHead: undefined, draft: {}, opens: true },
+  { case: "the head this computer applied", serverHead: 7, draft: {}, opens: false },
+  {
+    case: "a note never given a queue",
+    serverHead: 7,
+    draft: { outboxId: null, state: null },
+    opens: false,
+  },
+  { case: "a head that moved", serverHead: 8, draft: {}, opens: true },
+  { case: "an edit waiting here", serverHead: 7, draft: { pendingBytes: 3 }, opens: true },
+  { case: "a quarantined queue", serverHead: 7, draft: { state: "quarantined" }, opens: true },
+  {
+    case: "a binding the list does not name",
+    serverHead: 7,
+    draft: { binding: { ...binding, currentPath: "b.md", selectorPaths: ["b.md"] } },
+    opens: true,
+  },
+])("with $case, an idle owner pass opens the connection: $opens", async (row) => {
   const client = {
     ownerYDocPrepareEnrollment: vi.fn(async () => ({
       status: "observed",
-      draft: { outboxId: "outbox" },
+      draft: { ...idleDraft, ...row.draft },
     })),
   };
   mock.drain.mockResolvedValue("empty");
@@ -353,9 +378,14 @@ it("pulls accepted state when an enrolled owner has no pending edits", async () 
       bearer: "credential",
       accountId: "owner",
       assertCurrent() {},
+      ...(row.serverHead === undefined ? {} : { serverHead: row.serverHead }),
     }),
   ).toBe("empty");
-  expect(mock.authority).toHaveBeenCalledWith(binding);
+  if (row.opens) expect(mock.authority).toHaveBeenCalledWith(binding);
+  else {
+    expect(mock.authority).not.toHaveBeenCalled();
+    expect(mock.drain).not.toHaveBeenCalled();
+  }
 });
 
 it("persists a fenced idle outbox instead of requesting it again indefinitely", async () => {
@@ -396,7 +426,7 @@ it("persists a fenced idle outbox instead of requesting it again indefinitely", 
   );
 });
 
-// #3089: a move's owner sync never enrolls, and answers only after an opening sync installed.
+// A move's owner sync never enrolls, and answers only after an opening sync installed.
 const observedPass = (client: unknown) =>
   runNativeOwnerDeliveryPass({
     client: client as EngineClient,

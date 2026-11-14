@@ -58,7 +58,7 @@ class SnapshotAwareness extends Awareness {
   }
 }
 
-// MU-C1 — DOC co-presence: bind a Yjs Awareness to the engine mirror doc and
+// Doc co-presence: bind a Yjs Awareness to the engine mirror doc and
 // bridge it over the same ephemeral relay transport as chat presence, keyed by
 // the doc's path/objectId rather than a channel. This is the design's handoff:
 // "the provider exposes the live session.doc; presence binds Yjs awareness to
@@ -95,7 +95,6 @@ interface DocPresenceOptions {
   topic: string;
   clientId: string;
   user: DocPresenceUser;
-  // Called with the display names of other editors whenever the set changes.
   onPeers: (names: string[]) => void;
 }
 
@@ -224,7 +223,6 @@ export function bindDocPresence(options: DocPresenceOptions): DocPresenceBinding
         present.add(state.yc);
         remoteClients.add(state.yc);
       }
-      // Prune peers that vanished from the snapshot (and free their slot claim).
       const departed = [...remoteClients].filter((id) => !present.has(id));
       if (departed.length > 0) {
         removeAwarenessStates(awareness, departed, "presence-remote");
@@ -264,7 +262,6 @@ export function bindDocPresence(options: DocPresenceOptions): DocPresenceBinding
       awareness.off("update", onLocalChange);
       const stopped = channel?.stop() ?? Promise.resolve();
       channel = null;
-      // Clear the local awareness entry (peers prune us on their next poll).
       removeAwarenessStates(awareness, [awareness.clientID], "presence-local");
       awareness.destroy();
       return stopped.catch(() => undefined);

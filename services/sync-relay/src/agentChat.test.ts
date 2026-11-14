@@ -137,7 +137,6 @@ async function ok(response: Response): Promise<Record<string, unknown>> {
   return json(response);
 }
 
-// Every refusal is the same bytes as a link that never existed.
 async function expectRefused(response: Response): Promise<void> {
   const refusal = errorResponse(notFound());
   expect({ status: response.status, body: await response.text() }).toEqual({
@@ -270,7 +269,6 @@ function ownerLog(f: Fixture) {
   return f.storage.fetchLogPage({ workspaceId, sinceRelaySeq: 0, limit: 1_000 }).rows;
 }
 
-// The owner posts in a thread, and held waits wake.
 function ownerSays(f: Fixture, messageId: string, threadId: string, body: string) {
   appendOwnerOps(f.storage, [
     chatMessageAppend(messageId, threadId, body, { authorUserId: OWNER, authorDisplayName: "Ada" }),
@@ -278,7 +276,6 @@ function ownerSays(f: Fixture, messageId: string, threadId: string, body: string
   f.activity.wakeLog(workspaceId);
 }
 
-// The link principal of the newest post in the log.
 function lastPrincipal(f: Fixture): string {
   return String(
     (JSON.parse(ownerLog(f).at(-1)!.payloadJson) as Record<string, unknown>).linkPrincipalId,
@@ -304,7 +301,6 @@ describe("an agent's posts through its link", () => {
     const f = await fixture();
     const agent = await connect(f, "read-write");
     const before = ownerLog(f).length;
-    // Fields that would name another author are refused, not ignored.
     for (const forged of [
       { authorKind: "human" },
       { authorDisplayName: "Ada" },
@@ -346,12 +342,10 @@ describe("an agent's posts through its link", () => {
     expect(appended[1]!.originId).toBe(`${LINK_CHAT_ORIGIN_PREFIX}${principalId}`);
     expect(String(message.messageId).startsWith(LINK_CHAT_MESSAGE_ID_PREFIX)).toBe(true);
 
-    // A retry answers the first post and appends nothing.
     expect((await ok(await post(f, agent))).message).toMatchObject({
       messageId: message.messageId,
     });
     expect(ownerLog(f)).toHaveLength(before + 2);
-    // A forged access token names no connection.
     await expectRefused(
       await post(f, { ...agent, accessToken: "x".repeat(43) }, { idempotencyKey: "post-2" }),
     );
@@ -359,8 +353,6 @@ describe("an agent's posts through its link", () => {
 
   it("refuses a device's op that names an agent connection", async () => {
     const f = await fixture();
-    // A human post naming a connection is newly refused; a link post from a
-    // device was refused before, and naming a connection keeps it refused.
     for (const fields of [
       { agentConnectionId: "connection-1" },
       { authorKind: "link", agentConnectionId: "connection-1" },
@@ -396,7 +388,6 @@ describe("an agent's posts through its link", () => {
       );
     }
     expect(ownerLog(f)).toHaveLength(before);
-    // The same bodies with the key post as the agent and answer with its Group and mention.
     expect((await ok(await internal(f, "agent-chat/post", bodies.post))).message).toMatchObject({
       authorKind: "link",
       linkAgent: true,
@@ -414,7 +405,6 @@ describe("an agent's posts through its link", () => {
     const agent = await connect(f, "read-write");
     const other = await connect(f, "read-write");
     const before = ownerLog(f).length;
-    // Another link's address, a longer one, a malformed one, and none.
     for (const resource of [
       other.resource,
       `${agent.resource}x`,
@@ -425,7 +415,6 @@ describe("an agent's posts through its link", () => {
       await expectRefused(await wait(f, agent, { resource, timeoutMs: 0 }));
     }
     expect(ownerLog(f)).toHaveLength(before);
-    // Its own address posts and waits.
     expect((await ok(await post(f, agent))).message).toMatchObject({ linkAgent: true });
     expect(ownerLog(f)).toHaveLength(before + 2);
     expect(await ok(await wait(f, agent, { timeoutMs: 0 }))).toMatchObject({
@@ -566,7 +555,6 @@ describe("which links may post and wait", () => {
       access: "edit",
     });
     const agent = await connect(f, "edit", await createLink(f, "edit", files));
-    // The agent is signed in on its link.
     expect(
       await ok(await internal(f, "agent-introspect", { accessToken: agent.accessToken })),
     ).toMatchObject({ connectionId: agent.connectionId });
@@ -575,7 +563,6 @@ describe("which links may post and wait", () => {
     await expectRefused(await wait(f, agent, { timeoutMs: 0 }));
     expect(ownerLog(f)).toHaveLength(before);
 
-    // The same calls from a Group link's agent post and wait.
     const group = await connect(f, "read-write");
     expect((await ok(await post(f, group))).message).toMatchObject({ linkAgent: true });
     expect(await ok(await wait(f, group, { timeoutMs: 0 }))).toMatchObject({
@@ -605,8 +592,6 @@ describe("an agent waiting for messages", () => {
     const held = wait(f, reader);
     await parks.next(0);
 
-    // Its own post, an unrelated message, a mention inside code, its name inside a file link, and a private
-    // channel's mention.
     const posted = (await ok(await post(f, reader, { threadId: "thread-team" }))).message as Record<
       string,
       unknown
@@ -645,7 +630,6 @@ describe("an agent waiting for messages", () => {
     ]);
     expect(f.activity.stats().waiters).toBe(0);
 
-    // A thread filter narrows the messages for it, and never adds others.
     const since = { cursor: posted.relaySeq, timeoutMs: 0 };
     const ids = async (fields: Record<string, unknown>) =>
       ((await ok(await wait(f, reader, { ...since, ...fields }))) as WaitAnswer).messages.map(
@@ -662,14 +646,11 @@ describe("an agent waiting for messages", () => {
     const agent = await connect(f, "read-write");
     await ok(await post(f, agent, { threadId: "thread-team" }));
     ownerSays(f, "owner-reply", "thread-team", "reply");
-    // The reply, and not the thread's message from before the agent signed in.
     const first = (await ok(await wait(f, agent, { timeoutMs: 0 }))) as WaitAnswer;
     expect(first.messages.map((message) => message.messageId)).toEqual(["owner-reply"]);
-    // The first answer never arrived: the next wait without a cursor returns the same reply.
     const again = (await ok(await wait(f, agent, { timeoutMs: 0 }))) as WaitAnswer;
     expect(again.messages.map((message) => message.messageId)).toEqual(["owner-reply"]);
     expect(again.cursor).toBe(first.cursor);
-    // The first answer's cursor resumes after it.
     expect(await ok(await wait(f, agent, { cursor: first.cursor, timeoutMs: 0 }))).toMatchObject({
       messages: [],
       cursor: first.cursor,
@@ -761,7 +742,6 @@ describe("an agent waiting for messages", () => {
     ownerSays(upgraded, "owner-mention", "thread-team", "@Helper hello");
     const read = (await ok(await wait(upgraded, before, { timeoutMs: 0 }))) as WaitAnswer;
     expect(read.messages.map((message) => message.messageId)).toEqual(["owner-mention"]);
-    // A new agent signs in, and starts after the mention.
     const after = await connect(upgraded, "read-write");
     expect(await ok(await wait(upgraded, after, { timeoutMs: 0 }))).toMatchObject({ messages: [] });
   });
@@ -837,7 +817,6 @@ describe("an agent waiting for messages", () => {
         await parks.next(held.length - 1);
       }
     }
-    // A connection with no wait of its own is over its link's cap; one on another link still waits.
     await expectCode(await wait(f, late, { timeoutMs: 0 }), 429, "link_read_rate_limited");
     expect((await wait(f, elsewhere, { timeoutMs: 0 })).status).toBe(200);
 
@@ -930,7 +909,6 @@ describe("an agent waiting for messages", () => {
       while (agents.length % linkConnections !== 0 && !full())
         agents.push(await connect(f, "read-only", first));
     }
-    // An agent on a link with no waits of its own.
     const late = await connect(f, "read-only");
     const parks = watchParks(f);
     const controllers: AbortController[] = [];

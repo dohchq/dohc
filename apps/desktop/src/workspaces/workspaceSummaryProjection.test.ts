@@ -2,10 +2,6 @@ import { describe, expect, it } from "vitest";
 import type { RegistryEntry } from "./registryStore";
 import { workspaceSummariesFrom, workspaceSummaryFor } from "./workspaceSummaryProjection";
 
-// The registry file is data, not a contract. These drive the projection with
-// the damaged shapes a stored record can actually carry, and pin the blast
-// radius: a share-sized fault stays share-sized.
-
 const entry = (extra: Record<string, unknown> = {}): RegistryEntry =>
   ({
     workspaceId: "ws-1",
@@ -124,9 +120,9 @@ describe("workspace summary projection", () => {
     }
   });
 
-  // The defect CodeRabbit found: one unreadable share record threw out of the
-  // whole projection, so a single stale grant answered "you have no
-  // workspaces" — false, and with no way back from the UI.
+  // One unreadable share record must not throw out of the whole projection.
+  // A single stale grant would answer "you have no workspaces", which is
+  // false and has no way back from the UI.
   it("keeps every other workspace when one stored share record is unreadable", () => {
     const summaries = workspaceSummariesFrom([
       entry({ workspaceId: "ws-healthy" }),
@@ -188,9 +184,6 @@ describe("workspace summary projection", () => {
     }
   });
 
-  // A row does not have to be an object. Reading a field off one that turned
-  // out to be `null` threw out of the whole projection, which is the same
-  // zero-workspaces defect by another door.
   it("survives rows that are not objects at all", () => {
     const summaries = workspaceSummariesFrom([
       entry({ workspaceId: "ws-healthy" }),
@@ -205,7 +198,6 @@ describe("workspace summary projection", () => {
       summaries.map((summary) => summary.workspaceId),
       "a non-object row must not empty the workspace list",
     ).toEqual(["ws-healthy", "ws-null-row", "ws-null-view", "ws-scalar-view"]);
-    // Only the readable mount survives the listing.
     expect(summaries[1]?.shareMounts?.map((m) => m.shareId)).toEqual(["m-good"]);
   });
 
@@ -219,7 +211,6 @@ describe("workspace summary projection", () => {
         summary.shareView?.damaged,
         `shareView ${JSON.stringify(raw)} must not present as an ordinary workspace`,
       ).toBe(true);
-      // Nothing is invented for a marker that carried nothing.
       expect(summary.shareView?.shareId).toBeUndefined();
       expect(summary.shareView?.granterEmail).toBeNull();
       expect(summary.shareView?.access).toBeUndefined();
@@ -248,11 +239,10 @@ describe("workspace summary projection", () => {
     }
   });
 
-  // The mount and open handlers used to parse the raw registry record. A
-  // record nests each level under its pinned grant, so the wire schema could
-  // not be satisfied: every mount threw at the end and rolled back, and a
-  // freshly opened share view reached the renderer with no level. The unit
-  // suites missed it because they never drove a handler with a real record.
+  // A registry record nests each level under its pinned grant, so parsing the
+  // raw record cannot satisfy the wire schema: a mount would throw at the end
+  // and roll back, and a freshly opened share view would reach the renderer
+  // with no level. This test drives the projection with a real record.
   it("projects a raw registry record, level and all", () => {
     const summary = workspaceSummaryFor(
       entry({
@@ -431,7 +421,6 @@ describe("workspace summary projection", () => {
     expect(stale?.damaged).toBe(true);
     expect(stale?.access).toBeUndefined();
     expect(stale?.label).toBe("sam");
-    // The out-of-range email is dropped to null rather than taking the row.
     expect(summary.shareMounts?.find((m) => m.shareId === "m-bademail")?.granterEmail).toBeNull();
   });
 

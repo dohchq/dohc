@@ -12,7 +12,6 @@ export function usePersonalChatFeed({
 }: {
   workspaceId: string;
   liveToken: Readonly<{ current: number }>;
-  // Each item's reactions are a read of its one message.
   reactions: ReactionStore;
   onError: (message: string, cause?: unknown) => void;
 }) {

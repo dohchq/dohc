@@ -17,7 +17,6 @@ fn text_ingest_rereads_updates_and_dedupes_equal_content() {
     ));
     write_file(scratch.path(), "notes/a.md", b"latest");
     let updated = ingest(&mut sink, "notes/a.md").expect("updated ingest");
-    // The receipt reports the identity of the bytes actually captured.
     assert_eq!(
         updated,
         IngestOutcome::Captured {
@@ -279,7 +278,6 @@ fn non_text_media_never_lands_in_the_plaintext_store() {
         ingest_as(&mut sink, "photo.png", "image/png").expect("binary capture"),
         IngestOutcome::Captured { .. }
     ));
-    // Content-equality dedupe holds for binary too.
     assert!(matches!(
         ingest_as(&mut sink, "photo.png", "image/png").expect("equal binary"),
         IngestOutcome::Captured { .. }
@@ -350,8 +348,6 @@ fn reconcile_settles_deferred_and_raced_paths_without_degrading() {
     };
 
     let result = apply_reconcile_plan(&plan, &mut sink, &FilesNoFaults);
-    // The text sibling and the secret apply (the secret into the
-    // encrypted store); only the raced-away path settles as not-owned.
     assert_eq!(result.applied_paths, [".env", "b-good.md"]);
     assert_eq!(result.not_owned_paths, ["c-gone.md"]);
     assert!(result.failed_applies.is_empty());
@@ -465,14 +461,11 @@ fn binary_flip_and_revert_to_identical_text_recaptures_the_head() {
         other => panic!("expected completed plan, got {other:?}"),
     };
 
-    // Capture the original text through the full plan/ack cycle.
     write_file(scratch.path(), "flip.md", b"same bytes");
     let plan = reconcile(&mut controller);
     apply_then_ack(&mut controller, &plan, &mut sink, &FilesNoFaults).expect("seed ack");
     assert!(controller.tracks_path("flip.md"));
 
-    // Flip to binary: the binary head is captured and the manifest
-    // records the binary bytes' hash.
     write_file(scratch.path(), "flip.md", &[0xff, 0xfe, 0x00]);
     controller.mark_dirty();
     let plan = reconcile(&mut controller);
@@ -499,10 +492,10 @@ fn binary_flip_and_revert_to_identical_text_recaptures_the_head() {
 
 #[test]
 fn non_ownable_ingest_spares_a_ydoc_head_but_retires_a_capture_head() {
-    // AUDIT-SILENTSAVE. Pins the sink wiring directly: that the
-    // NonOwnable branch passes allow_ydoc_origin=false. The rpc test
-    // covers the same rule end to end, but only while the driver keeps
-    // offering that path — this does not depend on the driver at all.
+    // Pins the sink wiring directly: that the NonOwnable branch passes
+    // allow_ydoc_origin=false. The rpc test covers the same rule end to end,
+    // but only while the driver keeps offering that path. This test does not
+    // depend on the driver at all.
     //
     // A settled Y.Doc past MAX_CAPTURE_TEXT_BYTES arrives here as
     // NonOwnable. Retiring it destroys a document the user just saved.
@@ -539,7 +532,6 @@ fn non_ownable_ingest_spares_a_ydoc_head_but_retires_a_capture_head() {
         .expect("ydoc head");
     drop(store);
 
-    // An ordinary captured head at another path, via the sink itself.
     let supervisor = WorkspaceSupervisor::new();
     let (_db, mut seed_sink) = sink_for(&scratch, &supervisor);
     write_file(scratch.path(), "notes/plain.md", b"plain body");
@@ -549,7 +541,6 @@ fn non_ownable_ingest_spares_a_ydoc_head_but_retires_a_capture_head() {
     ));
     assert!(snapshot(&db, "notes/plain.md").is_some());
 
-    // Both files are now NON-OWNABLE on disk: past the text cap.
     let over_cap = vec![b'x'; (MAX_CAPTURE_TEXT_BYTES + 1) as usize];
     write_file(scratch.path(), "notes/settled.md", &over_cap);
     write_file(scratch.path(), "notes/plain.md", &over_cap);
@@ -564,7 +555,6 @@ fn non_ownable_ingest_spares_a_ydoc_head_but_retires_a_capture_head() {
         IngestOutcome::NotOwned
     ));
 
-    // The assertion: ownership decided, not the classification alone.
     assert!(
         snapshot(&db, "notes/settled.md").is_some(),
         "a settled Y.Doc head must survive a not-engine-ownable ingest"

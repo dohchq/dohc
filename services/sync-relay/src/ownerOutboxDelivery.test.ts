@@ -429,8 +429,8 @@ it("applies a device host's seed before acknowledging it", async () => {
   expect(f.applied).toHaveBeenCalledTimes(1);
 });
 
-// Round 2 review: applied first, a service seed would wait forever for the
-// receipt the engine holds it behind, so the drain refuses before admitting it.
+// Applied first, a service seed would wait forever for the receipt the engine
+// holds it behind, so the drain refuses before admitting it.
 type DrainOptions = Partial<Parameters<typeof drainOwnerOutbox>[0]>;
 it.each<[string, string, (f: ReturnType<typeof seedFixture>) => Promise<DrainOptions>]>([
   [

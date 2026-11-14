@@ -75,7 +75,6 @@ describe("share mounts real daemon", () => {
         const mountedFile = join(mountRoot, "docs/brief.md");
         await expect(readFile(mountedFile, "utf8")).resolves.toContain("The lighthouse memo.");
         expect(existsSync(join(mountRoot, "private"))).toBe(false);
-        // The graph lists the share's drawings and nothing outside its scope.
         const graphFiles: string[] = [];
         let cursor: string | undefined;
         do {

@@ -98,7 +98,6 @@ it("lists typing kept for workspaces no longer listed, and removes one record on
     text: "still listed",
     update,
   });
-  // A record whose workspace id no list can name hides no other.
   await preserveLiveDraft(directory, "Not An Id", {
     path: "b.txt",
     objectId: "b",
@@ -116,7 +115,6 @@ it("lists typing kept for workspaces no longer listed, and removes one record on
     { workspaceId: "removed", path: "plan.txt", text: "typed while joining" },
   ]);
   const [listedRecord] = await listLiveDraftRecovery(directory, "listed");
-  // A record id names one workspace's record and no other's.
   await expect(removeKeptTyping(directory, "removed", listedRecord!.recordId)).rejects.toThrow();
   expect(await listLiveDraftRecovery(directory, "listed")).toEqual([listedRecord]);
   const plan = kept.find((record) => record.path === "plan.txt")!;
@@ -126,7 +124,6 @@ it("lists typing kept for workspaces no longer listed, and removes one record on
       (record) => record.path,
     ),
   ).toEqual(["notes.txt"]);
-  // Removing it again finds nothing and changes nothing.
   await removeKeptTyping(directory, "removed", plan.recordId);
   // An interrupted rewrite of a checkpoint shares its record id. Only the
   // saved record lists, so a dismissal deletes exactly the text it showed,
@@ -196,7 +193,6 @@ it("lists and discards only set-aside drafts while pending typing checkpoints st
   const [typing] = await readTypingCheckpoints(directory, "workspace");
   const listed = await listLiveDraftRecovery(directory, "workspace");
   expect(listed.map((record) => record.text)).toEqual(["set-aside draft"]);
-  // Even an explicit checkpoint ID and identical update cannot admit draft discard.
   expect(
     await removeLiveDraftCopies(
       directory,
@@ -226,7 +222,6 @@ it("lists and discards only set-aside drafts while pending typing checkpoints st
   expect(await hasRetainedLiveDraft(directory, "other", "a.txt", "object")).toBe(false);
   expect(await hasWorkspaceLiveDrafts(directory, "workspace")).toBe(true);
   expect(await hasWorkspaceLiveDrafts(directory, "other")).toBe(false);
-  // Forget's confirmed removal still removes all retained work for its workspace.
   await removeWorkspaceLiveDrafts(directory, "workspace");
   expect(await readTypingCheckpoints(directory, "workspace")).toEqual([]);
   expect(await hasRetainedLiveDraft(directory, "workspace", "a.txt", "object")).toBe(false);
@@ -1147,7 +1142,7 @@ it("recovery text matches the witnessed settled artifact, including frontmatter 
   doc.destroy();
 });
 
-// dohc#2308. The capture sets a deleted file's text aside, and removes the
+// The capture sets a deleted file's text aside, and removes the
 // draft once a save writes the file. Notices follows through one event.
 it("tells only the workspace's windows after a write and a removal, and nothing after a failure", async () => {
   const directory = await mkdtemp(join(tmpdir(), "dohc-draft-events-"));
@@ -1176,10 +1171,8 @@ it("tells only the workspace's windows after a write and a removal, and nothing 
   expect(
     (await listLiveDraftRecovery(directory, "workspace")).map((record) => record.reason),
   ).toEqual(["deleted"]);
-  // The same text again is the same draft, written again.
   const second = await store.preserveUnsentState({ ...draft, reason: "deleted" });
   expect(second.split(":")[0]).toBe(first.split(":")[0]);
-  // The older write's handle leaves the draft written again.
   await store.discardUnsentState(first);
   expect(sent).toEqual([event, event]);
   expect(
@@ -1234,8 +1227,6 @@ it("keeps a draft written again while an older write's removal waits", async () 
   ).toEqual(["kept"]);
 });
 
-// A removal frees nothing for reuse: a write after it gets a handle no queued
-// removal still holds.
 it("keeps a draft written again after a removal, when an older removal of it comes later", async () => {
   const directory = await mkdtemp(join(tmpdir(), "dohc-draft-reuse-"));
   directories.push(directory);

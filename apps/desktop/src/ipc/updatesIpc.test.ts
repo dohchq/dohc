@@ -330,7 +330,6 @@ describe("registered updater IPC", () => {
     h.setDecision(null);
     const result = h.invoke(CHANNELS.installUpdate);
     const requestId = await h.requested.promise;
-    // The window held (its dialog opened), then the user went back.
     h.exitRounds.answer(1, requestId, "hold");
     h.exitRounds.answer(1, requestId, "cancel");
     await expect(result).resolves.toMatchObject({
@@ -400,7 +399,6 @@ describe("registered updater IPC", () => {
     expect(h.revoke).toHaveBeenCalledOnce();
     expect(updater.quitAndInstall).not.toHaveBeenCalled();
     expect(h.canQuit()).toBe(false);
-    // Every participant hears the round is off, after the proceed it heard.
     expect(h.closings.map((message) => message.kind)).toEqual(["proceed", "cancelled"]);
     expect(h.closings[1]?.roundId).toBe(h.requests[0]);
   });
@@ -411,8 +409,6 @@ describe("registered updater IPC", () => {
     h.setDecision(null);
     const result = h.invoke(CHANNELS.installUpdate);
     const requestId = await h.requested.promise;
-    // A second window opens while the first holds; it is asked too, and
-    // both clear. The updater then refuses.
     const late = { id: 2 };
     h.exitRounds.enroll(late);
     h.exitRounds.answer(1, requestId, "clear");
@@ -548,8 +544,6 @@ describe("registered updater IPC", () => {
         });
       await expect(h.invoke(CHANNELS.installUpdate)).rejects.toThrow();
       expect(h.approve).toHaveBeenCalledOnce();
-      // A staging that threw never started a quit: the approval is off and
-      // the participants drop their restart intent.
       expect(h.revoke).toHaveBeenCalledOnce();
       expect(h.canQuit()).toBe(false);
       expect(h.closings.map((message) => message.kind)).toEqual(["proceed", "cancelled"]);

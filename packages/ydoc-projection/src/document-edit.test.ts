@@ -93,8 +93,6 @@ describe("documentEditUpdate", () => {
     );
   });
 
-  // An agent copies `find` from its read, which ends with the file's final
-  // newline. The writer still ends the saved file with one.
   test("takes a find that ends with the final newline, and the file still ends with one", () => {
     const doc = markdownToYDoc("Budget: 400 dollars");
     expect(markdownOf(doc)).toBe("Budget: 400 dollars\n");
@@ -128,10 +126,6 @@ describe("documentEditUpdate", () => {
     expect(documentEditUpdate(doc, { replacement: "  " }, open)).toBeNull();
   });
 
-  // A block written by the engine's own Markdown projection can lack
-  // attributes the editor schema defaults, such as an ordered list's start.
-  // Reading it back fills the default in, and the edit must not write that
-  // into a block it does not touch.
   test("leaves blocks outside the edit untouched when their stored attributes differ from the schema", () => {
     const doc = markdownToYDoc("1. one\n2. two\n\nEdit me.\n\n| a | b |\n| --- | --- |\n| 1 | 2 |");
     const body = getDohcYDocBodyFragment(doc);
@@ -182,8 +176,6 @@ describe("documentCreateUpdate", () => {
 });
 
 describe("an edit merged with a person typing", () => {
-  // The person's editor and the replica the edit reads start equal; each
-  // then changes before seeing the other's change. The edit reaches both.
   function replicas(markdown: string): { person: Y.Doc; agent: Y.Doc } {
     const person = markdownToYDoc(markdown);
     const agent = new Y.Doc();

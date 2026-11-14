@@ -128,9 +128,6 @@ async function shoot(page: Page, name: string): Promise<void> {
   await page.evaluate(() => document.documentElement.setAttribute("data-theme", "light"));
 }
 
-// A row names the computer in a few words, and keyboard focus on them shows
-// the whole sentence inside the sidebar, which does not scroll sideways for
-// it. The row's button is the next tab stop, and Escape hides the words.
 async function expectRowTooltip(
   page: Page,
   row: Locator,
@@ -162,10 +159,6 @@ async function expectRowTooltip(
   await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
 }
 
-// Another computer keeps this workspace's Collections, as one that iCloud
-// Drive carries does. This computer, signed in and not syncing the
-// workspace, lists and uses the Collection moved to the server, and leaves
-// the rest to the computer that keeps them.
 test("@collections-server-list a computer that doesn't keep the Collections uses the ones on its server", async () => {
   test.setTimeout(180_000);
   const workspace = await createTempWorkspace(),
@@ -271,7 +264,6 @@ test("@collections-server-list a computer that doesn't keep the Collections uses
     });
     await shoot(page, "collections-server-list");
 
-    // The Collection opens and takes a record through the server.
     await section.getByRole("button", { name: "Registrations", exact: true }).click();
     const collection = page.getByRole("region", { name: "Registrations", exact: true });
     await createRecord(collection, "From the other computer");
@@ -292,7 +284,6 @@ test("@collections-server-list a computer that doesn't keep the Collections uses
     );
     expect(JSON.stringify(await read.json())).toContain("From the other computer");
 
-    // Export, Access and the workspace's History reach the server Collection, as they do on the computer that keeps the Collections.
     const archivePath = join(workspace.baseDir, "registrations.dohc-recovery");
     await desktop.app.evaluate(({ dialog }, filePath) => {
       dialog.showSaveDialog = async () => ({ canceled: false, filePath });
@@ -374,7 +365,6 @@ test("@collections-server-list a computer that doesn't keep the Collections uses
     for (const store of [".dohc/local/datasets/state.sqlite", ".dohc/datasets/state.sqlite"])
       expect(existsSync(join(workspace.rootPath, store))).toBe(false);
 
-    // The server doesn't answer: the section still says where the Collections are, and the failure is reported.
     await relay.stop();
     relay = null;
     await desktop.close();
@@ -399,7 +389,6 @@ test("@collections-server-list a computer that doesn't keep the Collections uses
     );
     await shoot(desktop.page, "collections-server-offline");
 
-    // Signed out, this computer has no server to ask, and says where the Collections are as before.
     await desktop.close();
     desktop = null;
     await rm(join(workspace.homeDir, "dohc-cloud.json"));

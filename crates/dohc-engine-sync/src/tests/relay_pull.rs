@@ -1927,7 +1927,6 @@ fn seeded_relay_fault_model_converges_without_double_apply() {
     let mut b = EngineStore::open(&_path_b, 3_000).expect("b restart mid pull");
     apply_chat_envelope(&mut b, &ops[2], &NoFaults).expect("b after dropped middle");
 
-    // c is partitioned during the first pass and receives nothing.
     assert_eq!(
         read_replication_acked_seq(&c, "ws", "origin-a").expect("partition ack"),
         -1
@@ -1971,11 +1970,8 @@ fn seeded_relay_fault_model_converges_without_double_apply() {
     drop(scratch_a);
 }
 
-// ----------------------------------------------------------------------------
-// Regression coverage for the Codex-bot review findings triaged in round 2.
-
-/// #2 (relay pull workspace gating): a pulled op targeting a foreign workspace
-/// must be rejected before apply, and the fetch cursor must not advance.
+/// A pulled op targeting a foreign workspace must be rejected before apply,
+/// and the fetch cursor must not advance.
 #[test]
 fn pull_rejects_op_for_foreign_workspace() {
     let (_scratch, _path, mut engine) = open_store();
@@ -3026,8 +3022,8 @@ fn relay_retry_surfaces_refusal_acked_before_later_error() {
     seed_replication_version(&mut engine, "main", "main");
     // A mutation-level invalid input: the channel timestamp guard runs inside
     // the savepoint, so this refuses-and-acks. (moment.append with an empty
-    // payload is not usable here: since #243 implemented that applier, its
-    // payload deserialization fails pre-savepoint and stays a hard error.)
+    // payload is not usable here: its payload deserialization fails
+    // pre-savepoint and stays a hard error.)
     let refused = envelope(
         "retry-refusal-peer",
         0,
@@ -3600,16 +3596,13 @@ fn every_refusal_reason_round_trips_through_persist_and_read() {
     }
 }
 
-/// Splitting the ceiling split presence from validation, and only one half
-/// moved. `Binary` and `Ydoc` share `binary_blobs`, so once a Y.Doc base over
-/// the captured-file cap has hydrated legitimately, a later `moment.append`
-/// naming the same digest as `binary` was reported already-satisfied — skipping
-/// `hydrate_blob_content`, the only place `MAX_CAPTURE_BINARY_FILE_BYTES` is
-/// enforced. `require_binary_blob` applies no ceiling at all, so an authorized
-/// peer could materialize a 20 MiB Y.Doc payload as an oversized captured file.
-///
-/// The inverse of the defect #549 fixed: there a Y.Doc payload inherited a cap
-/// about user uploads; here a user upload borrows the Y.Doc payload's cap.
+/// `Binary` and `Ydoc` share `binary_blobs`. Once a Y.Doc base over the
+/// captured-file cap has hydrated legitimately, a later `moment.append`
+/// naming the same digest as `binary` must not be reported already-satisfied:
+/// that would skip `hydrate_blob_content`, the only place
+/// `MAX_CAPTURE_BINARY_FILE_BYTES` is enforced. `require_binary_blob` applies
+/// no ceiling, so an authorized peer could materialize a 20 MiB Y.Doc payload
+/// as an oversized captured file.
 ///
 /// The bytes must already be stored for the hole to open, and one batch cannot
 /// do it: a pass accumulates every page into a single `ops` list and hydrates
@@ -3703,7 +3696,6 @@ fn a_ydoc_payload_cannot_be_reused_as_an_over_cap_captured_binary() {
          shared table"
     );
 
-    // And nothing of the theft persisted.
     let snapshots: i64 = engine
         .read_with(|conn| {
             conn.query_row(

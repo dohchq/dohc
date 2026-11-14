@@ -55,7 +55,6 @@ fn subscription(
     }
 }
 
-/// Subscribe to added and changed records on any field.
 fn subscribe(store: &mut EngineStore, automation_id: &str, prefix: &str) -> bool {
     subscribe_automation(
         store,
@@ -102,7 +101,6 @@ fn facts(
     }
 }
 
-/// A changed-record apply on the named fields, keyed by `origin_seq`.
 fn field_change(origin_seq: i64, fields: &[&str]) -> CollectionRecordApplyFacts {
     let mut applied = facts("tasks", Some(("origin-a", origin_seq)), &[], None, None);
     applied.fields = fields
@@ -283,8 +281,6 @@ fn subscriptions_claim_only_the_change_kinds_and_fields_they_name() {
             &[AutomationChangeKind::Removed],
             None,
         ),
-        // Two subscriptions for one automation: a title change under
-        // "tasks" misses the first filter and matches the second.
         subscription(
             "collection:tasks#split",
             "tasks",
@@ -532,8 +528,6 @@ fn a_claim_keeps_the_person_or_link_the_relay_accepted_its_change_from() {
         grant_id: "grant-ana".to_owned(),
         grant_generation: 1,
     };
-    // The person is the collaborator the relay accepted the change from,
-    // never a link, and never what the frame declared.
     for (origin_seq, author, person) in [(1, link, None), (2, named, Some("user-ana"))] {
         let mut applied = field_change(origin_seq, &["status"]);
         applied.shared_author = Some(author.clone());
@@ -563,7 +557,6 @@ fn a_claim_keeps_the_person_or_link_the_relay_accepted_its_change_from() {
         );
         assert_eq!(served.change.on_behalf_of.as_deref(), person);
     }
-    // A shared author with a missing or unbounded id never reaches the ledger.
     let mut applied = field_change(3, &["status"]);
     applied.shared_author = Some(SharedChangeAuthor::Link {
         grant_id: "grant-link".to_owned(),
@@ -589,8 +582,6 @@ fn a_claim_keeps_its_live_cursor_and_still_dedupes_on_its_change() {
     applied.live_cursor = Some(41);
     let claims = claim_for(&mut store, WS, &applied, 10);
     assert_eq!(claims[0].change.live_cursor, Some(41));
-    // The same change again, as a retried apply, claims nothing: the cursor
-    // is not part of the key, whatever cursor the retry carries.
     applied.live_cursor = Some(42);
     assert!(claim_for(&mut store, WS, &applied, 11).is_empty());
     let (served, _) = claim_next_pending_automation(&mut store, WS, "collection:", 20, &NO_FAULTS)
@@ -798,8 +789,6 @@ fn failures_list_one_row_per_automation_with_the_newest_error_and_a_counting_gen
         "no failed claims, no rows"
     );
 
-    // Two failures for the same automation: a settled handler error, then a
-    // chain-stopped row inserted later.
     let first = facts("tasks", Some(("origin-a", 1)), &[1], None, None);
     let claims = claim_for(&mut store, WS, &first, 20);
     assert_eq!(claims.len(), 1);
@@ -845,8 +834,6 @@ fn failures_list_one_row_per_automation_with_the_newest_error_and_a_counting_gen
         "the generation counts the failures"
     );
 
-    // A done claim never appears, and another workspace's failures do not
-    // leak in.
     let done = facts("tasks", Some(("origin-a", 3)), &[3], None, None);
     let done_claims = claim_for(&mut store, WS, &done, 40);
     claim_next(&mut store, "collection:", 41).expect("one pending claim");
@@ -1142,7 +1129,6 @@ fn a_crash_requeue_keeps_the_run_and_a_retried_run_that_crashes_is_exhausted() {
     assert_eq!(third.run, 3);
 }
 
-/// Every claim of an automation, a page at a time, newest first.
 fn every_claim(store: &EngineStore, automation_id: &str, limit: i64) -> Vec<AutomationClaim> {
     let mut claims = Vec::new();
     let mut before = None;
@@ -1219,7 +1205,6 @@ fn failed_claims_expire_after_30_days_except_the_newest() {
         Err(DomainError::InvalidInput { .. })
     ));
 
-    // A newer failure takes over the notice, and the old newest expires.
     let newer = fail(&mut store, count + 1, later);
     let pruned = prune_automation_history(
         &mut store,
@@ -1253,8 +1238,6 @@ fn the_claim_history_pages_newest_first_and_keeps_done_claims_30_days() {
         );
     }
 
-    // The first two triage claims fail. The first then runs again and is
-    // done; the second stays failed.
     let mut failed = Vec::new();
     for index in 0..2 * count {
         let claim = claim_next(&mut store, "collection:", 1_000 + index).expect("pending claim");
@@ -1313,7 +1296,6 @@ fn the_claim_history_pages_newest_first_and_keeps_done_claims_30_days() {
         list_automation_claims(&store, WS, "collection:missing", None, 20).expect("list claims");
     assert!(empty.claims.is_empty() && empty.next.is_none());
 
-    // Within 30 days of settling, every claim stays.
     let pruned = prune_automation_history(
         &mut store,
         WS,
@@ -1325,8 +1307,6 @@ fn the_claim_history_pages_newest_first_and_keeps_done_claims_30_days() {
     assert_eq!((pruned.pruned, pruned.more), (0, false));
     assert_eq!(automation_claim_rows(&store, "collection:triage"), count);
 
-    // Past it, a done claim goes unless the prune keeps it. A failed claim
-    // stays, and the retried claim's first failure still counts.
     let kept = every_claim(&store, "collection:other", 20)[0]
         .claim_id
         .clone();
@@ -1494,8 +1474,6 @@ fn the_reaper_requeues_with_attempts_left_and_exhausts_without() {
     );
 }
 
-// ------------------------------------------------------- Group messages
-
 const GROUP: &str = "gen-1";
 const TASK: &str = "collection:object-tasks#task";
 const ALL: &str = "collection:object-tasks#all";
@@ -1508,7 +1486,6 @@ fn open_group(scratch: &ScratchDir) -> EngineStore {
     store
 }
 
-/// Every Group subscription this store watches: (automation, Group, starting text).
 type Watching<'a> = &'a [(&'a str, &'a str, Option<&'a str>)];
 
 fn watch_at(
@@ -1548,7 +1525,6 @@ fn watch_groups(
     watch_at(store, 0, watching, None, 10)
 }
 
-/// The Group subscriptions a store holds: (automation, starts at, frozen).
 fn group_rows(store: &EngineStore, workspace_id: &str) -> Vec<(String, i64, bool)> {
     store
         .read_with(|conn| {
@@ -1564,7 +1540,6 @@ fn group_rows(store: &EngineStore, workspace_id: &str) -> Vec<(String, i64, bool
         .expect("Group subscriptions")
 }
 
-/// Ada's new post in the Group.
 fn post(message_id: &str, body: &str, now_ms: i64) -> StartChannelThread {
     StartChannelThread {
         workspace_id: WS.to_owned(),
@@ -1593,7 +1568,6 @@ fn post(message_id: &str, body: &str, now_ms: i64) -> StartChannelThread {
     }
 }
 
-/// Store a post and return the claims its write took.
 fn posted(store: &mut EngineStore, input: &StartChannelThread) -> Vec<AutomationClaim> {
     let mut chats = LinkedChatStore::new(store);
     chats.start_channel_thread(input, &NO_FAULTS).expect("post");
@@ -1625,8 +1599,6 @@ fn group_subscriptions_belong_to_collection_automations_and_validate() {
             .ensure_agent_channel(WS, "agent-1", "default", "My agent", 5, &NO_FAULTS)
             .expect("agent channel");
     }
-    // Only a Group this computer has can be watched: not a DM, the agent
-    // channel, or an id nothing names.
     for channel_id in ["dm-1", "agent-1", "no-such-group"] {
         assert!(
             matches!(
@@ -1796,8 +1768,6 @@ fn a_group_message_claims_each_matching_subscription_once() {
         "m1"
     );
 
-    // The same message stored again, by an echo or a second lane, claims
-    // nothing.
     let again = store
         .write_with(&NO_FAULTS, |tx| {
             claim_group_message_in_tx(
@@ -1821,7 +1791,6 @@ fn a_group_message_claims_each_matching_subscription_once() {
         .expect("claim again");
     assert!(matches!(again, TxnOutcome::Committed(claims) if claims.is_empty()));
 
-    // A message posted before the subscription starts claims nothing.
     assert!(posted(&mut store, &post("m-early", "/task Old", 9)).is_empty());
 
     watch_groups(&mut store, &[(ALL, GROUP, None)]).expect("only all");
@@ -2028,14 +1997,10 @@ fn a_long_message_travels_truncated_and_a_settled_claim_keeps_its_key() {
     );
 }
 
-// ------------------------------------------------- automations and agent runs
-
 const STAMP: &str = "collection:tasks#stamp";
 const ASK: &str = "collection:tasks#ask";
 const MY_AGENT: &str = "agent-1";
 
-/// A change to `field` on the task, made by `actor` at its depth, or by a
-/// person when there is none.
 fn changed_by(
     origin_seq: i64,
     field: &str,
@@ -2133,14 +2098,12 @@ fn an_automation_and_the_agent_it_wakes_stop_each_other_at_the_cap() {
         .ensure_agent_channel(WS, MY_AGENT, "default", "My agent", 5, &NO_FAULTS)
         .expect("My agent");
 
-    // A person asks the agent directly: its writes start a chain at 0.
     let asked = ask_agent(&mut store, "m-person", None, 10);
     assert_eq!(asked.chain_depth, 0);
     LinkedChatStore::new(&mut store)
         .complete_dispatch(WS, &asked.run.run_id, 0, 11, &NO_FAULTS)
         .expect("the person's run ends");
 
-    // A person changes Status; Stamp stamps the task one level deeper.
     let stamp = claim_for(&mut store, WS, &changed_by(1, "Status", None), 20);
     assert_eq!((claimed_ids(&stamp), stamp[0].depth), (vec![STAMP], 0));
     let ask = claim_for(
@@ -2151,11 +2114,9 @@ fn an_automation_and_the_agent_it_wakes_stop_each_other_at_the_cap() {
     );
     assert_eq!((claimed_ids(&ask), ask[0].depth), (vec![ASK], 1));
 
-    // Ask wakes the agent with a message one deeper; the run is one deeper still.
     let woken = ask_agent(&mut store, "m-wake", Some(2), 22);
     assert_eq!(woken.chain_depth, 3);
 
-    // The agent changes Status during the run; Stamp answers at the run's depth.
     let stamp = claim_for(
         &mut store,
         WS,
@@ -2173,7 +2134,6 @@ fn an_automation_and_the_agent_it_wakes_stop_each_other_at_the_cap() {
     assert_eq!((claimed_ids(&stamp), stamp[0].depth), (vec![STAMP], 3));
     assert!(!stamp[0].chain_stopped());
 
-    // Stamp's write reaches the cap: Ask's claim records the stop instead of a run.
     let stopped = claim_for(
         &mut store,
         WS,
@@ -2477,7 +2437,6 @@ fn recorded(generation: i64) -> Option<AutomationGroupRelayRecord> {
     })
 }
 
-/// The handover a release at `generation` left for this computer.
 fn fetched(
     generation: i64,
     handover: AutomationGroupHandover,
@@ -2579,7 +2538,6 @@ fn each_group_message_claims_exactly_once_across_a_handover() {
         pairs(&[(ALL, "m3"), (TASK, "m3"), (ALL, "m4"), (TASK, "m4")])
     );
 
-    // Taking the same generation again changes nothing.
     let again = desk.watch(3, None, 41);
     assert_eq!(
         again,
@@ -2682,8 +2640,6 @@ fn a_handover_past_its_bound_starts_after_what_it_leaves_out() {
         "the start travels as it is, beside the floor"
     );
 
-    // On the new host, a message posted after the start but before the floor
-    // claims nothing, and the owner can hear why.
     let mut desk = Computer::new();
     desk.watch(3, fetched(3, handover), 6_000);
     desk.store_message(&post("m-offline", "/task Written offline", 50));
@@ -2741,7 +2697,6 @@ fn a_computer_that_never_ran_its_generation_says_so_and_the_first_takes_its_own_
     laptop.watch(1, recorded(0), 10);
     laptop.store_message(&post("m1", "/task One", 20));
     let first = release_automation_groups(&mut laptop.store, WS, 30, &NO_FAULTS).expect("release");
-    // The desk never watched at generation 3, and is asked to hand over at once.
     let desk_release =
         release_automation_groups(&mut desk.store, WS, 35, &NO_FAULTS).expect("release");
     assert_eq!(
@@ -2810,10 +2765,6 @@ fn each_decision_keeps_the_coverage_bounded() {
         .expect("floor");
     assert_eq!(floor, 102, "the floor passes what went");
 
-    // A message from before the automations started is not theirs. One
-    // posted after they started that arrives after the floor passed it
-    // claims nothing, and the owner can hear why.
-    // Watching again keeps each start where it was.
     laptop.watch(1, None, 10_001);
     assert!(
         group_rows(&laptop.store, WS)
@@ -2990,7 +2941,6 @@ fn a_called_off_handover_starts_what_was_frozen_where_it_was() {
         pairs(&[(ALL, "m1"), (TASK, "m1"), (ALL, "m2"), (TASK, "m2")])
     );
 
-    // Taking its own handover, then seeing it again at a later generation.
     let mut desk = Computer::new();
     desk.watch(5, fetched(5, released.handover.clone()), 50);
     release_automation_groups(&mut desk.store, WS, 55, &NO_FAULTS).expect("release");

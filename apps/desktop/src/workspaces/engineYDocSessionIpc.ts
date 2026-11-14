@@ -1067,7 +1067,6 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
           owned.provider.applyLocalUpdate(
             input.update,
             () => noteLocalEdit(owned.saveSeq, input.seq),
-            // Shared-view admission keeps its current contract until A2.
             this.#isSharedView(owned.workspace)
               ? {
                   idempotencyKey: input.requestId,

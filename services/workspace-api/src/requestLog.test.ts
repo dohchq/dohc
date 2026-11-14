@@ -85,7 +85,6 @@ it("logs a path no route matches as one fixed word", async () => {
 });
 
 it("logs an answer whose client leaves before its body ends, once", async () => {
-  // One chunk, then a body that never ends: the client leaves mid-answer.
   const base = await listen(
     async () =>
       new Response(

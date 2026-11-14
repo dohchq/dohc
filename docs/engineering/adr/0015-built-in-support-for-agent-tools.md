@@ -4,7 +4,7 @@ status: accepted
 
 # dohc has built-in support for some agent tools, and a command for the rest
 
-This records a planned design. None of it is built yet. Today dohc starts Claude Code and Codex with a fixed profile, starts any other program as "Your command", and knows nothing about where an agent keeps its own conversation.
+This records a design that is built in part. Built, for T3 Code on one computer: a person picks a thread in Settings, and dohc gives it messages, in line or as a steer, reads its state, and answers its questions. Planned: Claude Code and Codex, which dohc still starts with a fixed profile and no knowledge of where the agent keeps its own conversation.
 
 In the plan, dohc knows three tools by name: T3 Code, Claude Code, and Codex. For each it knows how to give a message to an agent thread in that tool. For T3 Code it also lists the person's threads, steers a busy thread, reads its state, and answers its questions. A person picks the tool and the thread in Settings, with no command to type. Every other tool uses "Your command", with a switch that says the agent keeps its own memory.
 
@@ -26,3 +26,4 @@ dohc reaches T3 Code through an interface T3 Code does not promise to keep. dohc
 - A tool gets built-in support when people ask for it. Until then its agents use "Your command".
 - What people see must not depend on the tool beyond what the tool cannot do. A tool that cannot steer shows no steer setting.
 - If a tool gives outside programs a supported way to message an open session, prefer it over starting the tool for each message.
+- T3 Code's own page decides the sign-in, and it asks for two things. When the browser that opens it is not signed in to T3 Code, it asks for a sign-in code, which a person gets today from a terminal command. It also asks what the client may do, and dohc can message only a thread that runs with no more than that. A sign-in on November 13, 2026 took both. dohc must not ship a way to connect a T3 Code thread that needs a terminal.

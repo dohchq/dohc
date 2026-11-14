@@ -73,7 +73,6 @@ function expectStatus(step: string, response: Response, status: number) {
     throw new Error(`${step}: the server answered ${response.status}, not ${status}.`);
 }
 
-/** The workspace's entry in the account's workspace list, as the phone reads it, or null. */
 async function listedWorkspace(response: Response, workspaceId: string) {
   if (!response.ok) return null;
   const body: unknown = await response.json();
@@ -128,7 +127,6 @@ test("@phone-dev-server seeds a synced workspace for the phone and holds it unti
     await page.getByTestId("settings-cloud-connect").click();
     await expect(page.getByTestId("cloud-sync-panel")).toBeVisible();
 
-    // The account approves the desktop's code as its approval page does: sign in, claim the code, then approve it.
     const approvalUrl = await openDesktopApproval(desktop, null, origin);
     const userCode = new URL(approvalUrl).searchParams.get("user_code");
     expect(userCode).toBeTruthy();

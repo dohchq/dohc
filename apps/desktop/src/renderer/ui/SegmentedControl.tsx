@@ -34,7 +34,6 @@ export function useRadioGroup<T extends string>(props: {
     optionRefs.current[index]?.focus();
   };
 
-  // The next enabled option from `from` in `direction`, wrapping.
   const step = (from: number, direction: 1 | -1) => {
     const count = props.options.length;
     for (let moved = 1; moved <= count; moved += 1) {
@@ -59,7 +58,6 @@ export function useRadioGroup<T extends string>(props: {
     choose(target);
   };
 
-  // The props each radio takes, by its index.
   const radio = (index: number) => {
     const option = props.options[index]!;
     return {

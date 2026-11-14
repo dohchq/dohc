@@ -1,4 +1,5 @@
 import { LIVE_CONNECTION_LIMIT_CLOSE_CODE } from "@dohc/live-session-contract/live-connection";
+import { LIVE_TICKET_LIFETIME_MS } from "@dohc/live-session-contract/live-ticket";
 import { selfHostLiveProfile } from "./selfHostLiveProfile";
 import { createNamedDesktopLive } from "./namedDesktopLive";
 import { createLiveConnectionAdmission } from "./liveConnectionAdmission";
@@ -6,7 +7,7 @@ import { once } from "node:events";
 import { request as httpRequest } from "node:http";
 import { createHash } from "node:crypto";
 import { WebSocket } from "ws";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { serveFetchHandler } from "@dohc/service-http";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
 import {
@@ -405,12 +406,12 @@ async function fixture(
         tickets,
         changes,
         limits: {
-          maxSessions: 10,
+          maxSessions: 32,
           retentionMs: 60000,
-          maxPendingRequests: 4,
+          maxPendingRequests: 8,
           maxRequestBytes: 16384,
           maxResponseBytes: 16384,
-          timeoutMs: 1000,
+          timeoutMs: 5000,
         },
         editorLimits: {
           provider: {
@@ -731,7 +732,6 @@ async function fixture(
       connect: (token: string) => connect(token, cookie, headers, "", session),
     };
   }
-  /** Later requests present `headers` instead of the link holder's, or the holder's again without them. */
   const useCredentials = (headers = holderHeaders) => {
     linkHeaders = headers;
   };
@@ -794,6 +794,34 @@ it.each([false, true])(
     }
     f.sessionHostBlocked.mockReturnValue(false);
     expect(await f.connect((await f.mint()).token).status).toBe(101);
+  },
+);
+
+// Tabs that keep reconnecting fill a caller's share of tickets until those tickets expire.
+it.each([false, true])(
+  "asks a link holder or agent to try again while its share of tickets is full; link=%s",
+  async (link) => {
+    const f = await fixture(limits, link);
+    const ask = async () => {
+      const response = await f.post(`/sync/live/${link ? "link" : "named"}-tickets`, {
+        discriminator: f.discriminator,
+        objectId: binding.objectId,
+      });
+      return [response.status, await response.json()];
+    };
+    expect((await ask())[0]).toBe(200);
+    expect((await ask())[0]).toBe(200);
+    expect(await ask()).toEqual(
+      link
+        ? [503, linkRefusalBody("link_live_unavailable")]
+        : [404, { ok: false, error: "not found" }],
+    );
+    if (!link) return;
+    // An agent on the same link holds its own share.
+    f.useCredentials(linkAgent(f).headers);
+    expect((await ask())[0]).toBe(200);
+    expect((await ask())[0]).toBe(200);
+    expect(await ask()).toEqual([503, linkRefusalBody("link_live_unavailable")]);
   },
 );
 
@@ -1342,9 +1370,6 @@ it("refuses a native capture for a different owner document", async () => {
   expect(f.native.client.openLiveAppliedSync).not.toHaveBeenCalled();
 });
 
-// A share narrowed from a folder to the file still covers it, but changes what
-// the recipient is shown. The open connection closes. Reopening, with a new
-// provider, shows the share as it is now.
 it.each([
   ["named", false, "docs/a.md", ["docs/a.md"]],
   ["link", true, "a.md", ["a.md"]],
@@ -1796,7 +1821,6 @@ it("returns only the named grant binding in live frames", async () => {
   expect(await socket.status).toBe(101);
   const { provider, until } = await startProvider(socket);
   await until(() => provider.state().status === "live");
-  // A named recipient sees its own share's selector, not the lineage's recorded binding.
   expect(provider.state().binding).toMatchObject({
     ...binding,
     workspaceId: `named:${scope.grantId}`,
@@ -1821,3 +1845,373 @@ it.each(["view", "comment"] as const)(
     expect(f.native.client.openLiveAppliedSync).not.toHaveBeenCalled();
   },
 );
+
+it("keeps one account's new browser sessions coming and still gives another account its session", async () => {
+  const f = await fixture(
+    limits,
+    false,
+    undefined,
+    false,
+    false,
+    undefined,
+    0,
+    0,
+    false,
+    undefined,
+    undefined,
+    { people: 2, documents: 1 },
+  );
+  // One more than the whole store holds.
+  for (let index = 0; index <= selfHostLiveProfile().browserSessions.maxSessions; index++) {
+    const response = await f.post(
+      "/sync/live/named-sessions",
+      { grantId: "edit-1" },
+      "account=reader-1",
+    );
+    expect(response.status).toBe(200);
+  }
+  const other = await f.post(
+    "/sync/live/named-sessions",
+    { grantId: "edit-2" },
+    "account=reader-2",
+  );
+  expect(other.status).toBe(200);
+});
+
+describe("a desktop's session", () => {
+  const opening = async () => {
+    // The desktop's store reads the clock it was given when it was made.
+    const clock = { now: Date.now() };
+    vi.spyOn(Date, "now").mockImplementation(() => clock.now);
+    const f = await fixture(limits, false, undefined, false, true);
+    // Each open also mints a ticket; these tests count only sessions.
+    vi.spyOn(f.tickets, "mint").mockResolvedValue({
+      token: "ticket",
+      expiresAtMs: Date.now() + 60_000,
+    });
+    const open = async (shareId = scope.shareId, path = binding.currentPath) => {
+      const response = await f.post("/sync/live/desktop-open", { shareId, path });
+      expect(response.status).toBe(200);
+      return ((await response.json()) as { discriminator: string }).discriminator;
+    };
+    const resolve = (discriminator: string) =>
+      f.desktopAdmission!.resolve(
+        new Request(`https://${relayHost}/sync/live/desktop`, {
+          headers: { authorization: "Bearer reader-token" },
+        }),
+        discriminator,
+      );
+    return { f, open, resolve, clock };
+  };
+
+  it("ends once its socket opens", async () => {
+    const { open, resolve } = await opening();
+    const opened: string[] = [];
+    for (let index = 0; index < 3; index++) opened.push(await open());
+    for (const discriminator of opened)
+      expect(await resolve(discriminator)).toMatchObject({ kind: "named", userId: scope.userId });
+    for (const discriminator of opened) expect(await resolve(discriminator)).toBeNull();
+  });
+
+  // A desktop asks again before every connect, so its notes that keep failing to connect
+  // leave sessions behind until their tickets expire. They must not cost a slow connect its own.
+  it("keeps a slow connect's session while the same account's other notes retry", async () => {
+    const { f, open, resolve, clock } = await opening();
+    f.storage.createShare({
+      share: {
+        shareId: "desktop-second-share",
+        workspaceId: scope.workspaceId,
+        granterUserId: "owner-1",
+        selectorJson: JSON.stringify({ paths: ["docs"], versionId: null }),
+        createdAtMs: 1,
+      },
+      grant: {
+        grantId: "desktop-second-grant",
+        shareId: "desktop-second-share",
+        principalKind: "user",
+        principalUserId: scope.userId,
+        principalEmail: null,
+        access: "edit",
+        generation: 1,
+        status: "active",
+        revokedAtMs: null,
+        createdAtMs: 1,
+        parentGrantId: null,
+      },
+    });
+    const notes = Array.from({ length: 4 }, (_, index) => ({
+      shareId: index % 2 ? "desktop-second-share" : scope.shareId,
+      path: `docs/note-${index}.md`,
+    }));
+    notes.forEach(({ path }, index) =>
+      f.raw
+        .prepare(
+          `INSERT INTO sync_relay_object_moments (workspace_id, object_id, relay_seq, moment_id, version_id, path, blob_sha256, content_kind, byte_length, recorded_at_ms)
+          VALUES (?, ?, ?, ?, 'main', ?, ?, 'text', 1, 1)`,
+        )
+        .run(
+          scope.workspaceId,
+          `note-${index}`,
+          100 + index,
+          `note-moment-${index}`,
+          path,
+          "b".repeat(64),
+        ),
+    );
+    const slow = await open(notes[0]!.shareId, notes[0]!.path);
+    const retries: string[] = [];
+    for (let attempt = 0; attempt < 18; attempt++) {
+      const note = notes[1 + (attempt % 3)]!;
+      retries.push(await open(note.shareId, note.path));
+    }
+    expect(await resolve(slow)).toMatchObject({ kind: "named", userId: scope.userId });
+    clock.now += LIVE_TICKET_LIFETIME_MS;
+    for (const discriminator of retries) expect(await resolve(discriminator)).toBeNull();
+  });
+
+  it("lasts no longer than its ticket", async () => {
+    const { open, resolve, clock } = await opening();
+    const discriminator = await open();
+    clock.now += LIVE_TICKET_LIFETIME_MS;
+    expect(await resolve(discriminator)).toBeNull();
+  });
+});
+
+describe("a desktop's opens while a host is away", () => {
+  const away = async () => {
+    const f = await fixture(limits, false, undefined, false, true);
+    f.storage.createShare({
+      share: {
+        shareId: "other-person-share",
+        workspaceId: scope.workspaceId,
+        granterUserId: "owner-1",
+        selectorJson: JSON.stringify({ paths: ["docs"], versionId: null }),
+        createdAtMs: 1,
+      },
+      grant: {
+        grantId: "other-person-grant",
+        shareId: "other-person-share",
+        principalKind: "user",
+        principalUserId: "other-user",
+        principalEmail: null,
+        access: "edit",
+        generation: 1,
+        status: "active",
+        revokedAtMs: null,
+        createdAtMs: 1,
+        parentGrantId: null,
+      },
+    });
+    const notes = Array.from({ length: 12 }, (_, index) => `docs/away-${index}.md`);
+    notes.forEach((path, index) =>
+      f.raw
+        .prepare(
+          `INSERT INTO sync_relay_object_moments (workspace_id, object_id, relay_seq, moment_id, version_id, path, blob_sha256, content_kind, byte_length, recorded_at_ms)
+          VALUES (?, ?, ?, ?, 'main', ?, ?, 'text', 1, 1)`,
+        )
+        .run(
+          scope.workspaceId,
+          `away-${index}`,
+          200 + index,
+          `away-moment-${index}`,
+          path,
+          "c".repeat(64),
+        ),
+    );
+    const host = { away: true };
+    // A mint throws when the host is away, as it does when the host goes away while it runs.
+    const mint = vi.spyOn(f.tickets, "mint").mockImplementation(async () => {
+      if (host.away) throw new Error("The live host changed.");
+      return { token: "ticket", expiresAtMs: Date.now() + 60_000 };
+    });
+    const answers: (number | undefined)[] = [];
+    const open = (path: string, person: "reader" | "other" = "reader") => {
+      const index = answers.push(undefined) - 1;
+      void f
+        .post(
+          "/sync/live/desktop-open",
+          { shareId: person === "reader" ? scope.shareId : "other-person-share", path },
+          "",
+          person === "reader" ? {} : { authorization: "Bearer other-token" },
+        )
+        .then((response) => (answers[index] = response.status));
+      return index;
+    };
+    const returns = () => {
+      host.away = false;
+      f.changes.notifyHost([scope.workspaceId]);
+    };
+    return { f, notes, mint, open, answers, returns };
+  };
+
+  it("lets one account's opens wait for an away host up to its limit, and every note opens once the host returns", async () => {
+    const { notes, mint, open, answers, returns } = await away();
+    const first = notes.slice(0, 6).map((path) => open(path));
+    await vi.waitFor(() => expect(mint).toHaveBeenCalledTimes(6));
+    await vi.waitFor(() => expect(answers.filter((status) => status === 404)).toHaveLength(2));
+    const refused = first.filter((index) => answers[index] === 404);
+    const other = open(notes[6]!, "other");
+    await vi.waitFor(() => expect(mint).toHaveBeenCalledTimes(7));
+    expect(answers[other]).toBeUndefined();
+    returns();
+    await vi.waitFor(() =>
+      expect(
+        first.filter((index) => !refused.includes(index)).map((index) => answers[index]),
+      ).toEqual([200, 200, 200, 200]),
+    );
+    await vi.waitFor(() => expect(answers[other]).toBe(200));
+    // The desktop asks again for a refused note once its host is back.
+    const again = refused.map((index) => open(notes[first.indexOf(index)]!));
+    await vi.waitFor(() => expect(again.map((index) => answers[index])).toEqual([200, 200]));
+  });
+
+  it("never counts opens that a ready host accepts", async () => {
+    const { notes, open, answers, returns } = await away();
+    returns();
+    for (const batch of [notes.slice(0, 6), notes.slice(6)]) {
+      const opened = batch.map((path) => open(path));
+      await vi.waitFor(() =>
+        expect(opened.map((index) => answers[index])).toEqual(batch.map(() => 200)),
+      );
+    }
+  });
+
+  it("does not count an open whose ticket is refused while its host stays current", async () => {
+    const { f, mint, open, answers, returns } = await away();
+    // The fixture's note has a current host. A mint refused for it, as when the host's binding
+    // moves during the mint, waits uncounted.
+    mint.mockResolvedValue(null);
+    const waiting = Array.from({ length: 6 }, () => open(binding.currentPath));
+    await vi.waitFor(() => expect(mint).toHaveBeenCalledTimes(6));
+    expect(waiting.map((index) => answers[index])).toEqual(waiting.map(() => undefined));
+    mint.mockResolvedValue({ token: "ticket", expiresAtMs: Date.now() + 60_000 });
+    returns();
+    f.changes.notify(binding);
+    await vi.waitFor(() =>
+      expect(waiting.map((index) => answers[index])).toEqual(waiting.map(() => 200)),
+    );
+  });
+
+  it("counts an open its account's ticket limit refuses", async () => {
+    const { mint, open, answers } = await away();
+    mint.mockRestore();
+    const first = open(binding.currentPath);
+    await vi.waitFor(() => expect(answers[first]).toBe(200));
+    // That ticket fills the fixture's tickets for this grant, so each of these waits for one to
+    // expire. Four wait; the rest are refused at once, well before the open timeout.
+    const over = Array.from({ length: 6 }, () => open(binding.currentPath));
+    await vi.waitFor(() => expect(over.filter((index) => answers[index] === 404)).toHaveLength(2));
+    expect(over.filter((index) => answers[index] === undefined)).toHaveLength(4);
+  });
+});
+
+// A link page stops editing on a 404 and tries again on a 503. Each of these answered 404 before.
+describe("a link ticket while the relay is busy", () => {
+  const tryAgain = [503, linkRefusalBody("link_live_unavailable")];
+  const opaque = [404, { ok: false, error: "not found" }];
+  const ask = async (f: LinkFixture) => {
+    const response = await f.post("/sync/live/link-tickets", {
+      discriminator: f.discriminator,
+      objectId: binding.objectId,
+    });
+    return [response.status, await response.json()];
+  };
+  const unknownAgent = (agent: ReturnType<typeof linkAgent>) => ({
+    ...agent.headers,
+    authorization: `DohcAgent ${"Z".repeat(43)}`,
+  });
+
+  it("asks a holder to try again while the relay stops, and tells an agent nothing", async () => {
+    const f = await fixture(limits, true),
+      agent = linkAgent(f);
+    f.routes.close();
+    expect(await ask(f)).toEqual(tryAgain);
+    f.useCredentials(agent.headers);
+    expect(await ask(f)).toEqual(opaque);
+  });
+
+  it("asks a holder to try again while requests are full, and tells an agent nothing", async () => {
+    const f = await fixture({ ...limits, upgradeTimeoutMs: 10_000 }, true),
+      agent = linkAgent(f);
+    let release!: () => void;
+    const held = new Promise<null>((done) => {
+      release = () => done(null);
+    });
+    const mint = vi.spyOn(f.tickets, "mint").mockImplementation(() => held);
+    const waiting = Array.from({ length: limits.maxPendingRequests }, () => ask(f));
+    await vi.waitFor(() => expect(mint).toHaveBeenCalledTimes(limits.maxPendingRequests));
+    expect(await ask(f)).toEqual(tryAgain);
+    f.useCredentials(agent.headers);
+    expect(await ask(f)).toEqual(opaque);
+    release();
+    expect(await Promise.all(waiting)).toEqual(waiting.map(() => opaque));
+  });
+
+  it("asks a holder to try again when the live host reconnects during a ticket", async () => {
+    const f = await fixture(limits, true);
+    f.invalidated.abort();
+    expect(await ask(f)).toEqual(tryAgain);
+  });
+
+  it("asks a holder to try again when the live host goes away during a ticket", async () => {
+    const f = await fixture(limits, true);
+    f.captureNative.mockImplementationOnce(async () => {
+      f.raw.exec(
+        "BEGIN IMMEDIATE; UPDATE sync_relay_session_host_control SET admission_state='closed', registered_connection_id=NULL; COMMIT",
+      );
+      return f.native;
+    });
+    expect(await ask(f)).toEqual(tryAgain);
+  });
+
+  // Only a full link says so: trying again can't help, and the holder can ask for a new link.
+  it.each([
+    ["linkDiscussionPrincipalLimit", [403, linkRefusalBody("link_full")]],
+    ["workspaceQuotaBytes", opaque],
+  ] as const)("stops a new holder that %s turns away", async (limit, answer) => {
+    const f = await fixture(limits, true);
+    // The storage context holds its limits here; the public storage type does not show them.
+    (f.storage as unknown as { options: Record<typeof limit, number> }).options[limit] = 0;
+    expect(await ask(f)).toEqual(answer);
+  });
+
+  // An agent enrolls elsewhere, so only the record of its public principal is new here.
+  it("stops a link agent whose public principal a full workspace can't hold", async () => {
+    for (const quota of [undefined, 0]) {
+      const f = await fixture(limits, true);
+      f.useCredentials(linkAgent(f).headers);
+      if (quota !== undefined)
+        (
+          f.storage as unknown as { options: { workspaceQuotaBytes: number } }
+        ).options.workspaceQuotaBytes = quota;
+      const [status] = await ask(f);
+      expect(status).toBe(quota === undefined ? 200 : 404);
+    }
+  });
+
+  it("tells a caller with neither a capability nor an agent token nothing", async () => {
+    const f = await fixture(limits, true);
+    f.routes.close();
+    f.useCredentials({});
+    expect(await ask(f)).toEqual(opaque);
+    f.useCredentials({ authorization: "Bearer something" });
+    expect(await ask(f)).toEqual(opaque);
+  });
+
+  it("asks a holder to try again when a ticket takes too long", async () => {
+    const f = await fixture(limits, true);
+    vi.spyOn(f.tickets, "mint").mockImplementation(() => new Promise(() => {}));
+    expect(await ask(f)).toEqual(tryAgain);
+  });
+
+  it("asks a known caller to try again when minting fails, and tells an unknown agent nothing", async () => {
+    const f = await fixture(limits, true),
+      agent = linkAgent(f);
+    vi.spyOn(f.tickets, "mint").mockRejectedValue(new Error("Live-ticket operation failed."));
+    expect(await ask(f)).toEqual(tryAgain);
+    f.useCredentials(agent.headers);
+    expect(await ask(f)).toEqual(tryAgain);
+    f.useCredentials(unknownAgent(agent));
+    expect(await ask(f)).toEqual(opaque);
+  });
+});

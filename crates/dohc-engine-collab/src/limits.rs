@@ -1,36 +1,19 @@
 //! Collab-layer bounds. Everything the durable Y.Doc layer accepts or grows is
-//! bounded (plan §"Rust policy": bounded everything). Violations are typed
+//! bounded. Violations are typed
 //! errors, never silent truncation, and the update log growth is bounded by
 //! compaction/retention rather than allowed to grow without limit.
 
-/// Maximum size of one Y.Doc payload — a delta OR a full-state base — accepted
+/// Maximum size of one Y.Doc payload, a delta or a full-state base, accepted
 /// by the durable append, the base claim, and the replication apply, in bytes.
 /// Reject over-cap bytes locally before the blob put and the journal, so
 /// nothing that can only fail on a peer is ever recorded.
 ///
-/// **measured, not inherited.** The previous value was 5 MiB, copied
-/// from the deleted TS engine's binary-FILE cap and justified as a bound on one
-/// update. A base is a full state, so the same number bounded whole documents,
-/// and it rejected work the rest of the engine accepts: the store takes a
-/// document body up to `MAX_TEXT_BYTES` (10 MiB), and 5 MiB of Y.Doc state is
-/// reached by a rich document holding roughly 3.5 MiB of markdown.
-///
-/// `ydoc_full_state_size.rs` encodes the full state of representative documents
-/// against their projected content. At `MAX_TEXT_BYTES` — the largest body
-/// the engine accepts — the measured full state was:
-///
-/// | document | content | full state | ratio |
-/// | --- | ---: | ---: | ---: |
-/// | plaintext | 10,486,884 | 10,486,912 | 1.000 |
-/// | rich, 700 B paragraphs | 10,486,321 | 11,263,557 | 1.074 |
-/// | rich, 400 B paragraphs | 10,486,020 | 11,836,040 | 1.129 |
-/// | rich, 120 B paragraphs (82,591 blocks) | 10,485,835 | 14,747,923 | 1.406 |
-///
-/// Revision churn adds ~60 bytes of state per interior edit, on top of content.
-///
-/// So the bound is **twice `MAX_TEXT_BYTES`**: past the worst measured document
-/// (1.406x) with room for roughly 100,000 revisions of churn above it. It is a
-/// measured limit with headroom, not a theorem — enough churn still exceeds it,
+/// The bound is twice `MAX_TEXT_BYTES` (10 MiB), the largest document body the
+/// store accepts. `ydoc_full_state_size.rs` measures the full state of
+/// representative documents at that size. The worst, a rich document of 120 B
+/// paragraphs, encodes to 1.406 times its content. Revision churn adds about
+/// 60 bytes of state per interior edit, so the bound leaves room for roughly
+/// 100,000 revisions above the worst document. Enough churn still exceeds it,
 /// and that refusal names this constraint, its limit, and the observed size.
 ///
 /// Widening this moves the whole path: `blob_ceiling(BlobKind::Ydoc)` reads it,
@@ -42,7 +25,7 @@
 /// One number covers deltas and bases on purpose. Nothing measures how big a
 /// single edit may be; a delta never exceeds the full state it is a slice of;
 /// and the paths that walk a lineage piece by piece meet snapshots and deltas
-/// mixed together. A second number would be a second thing to keep true.
+/// mixed together.
 pub const MAX_YDOC_UPDATE_BYTES: usize = 20 * 1024 * 1024;
 
 /// Existing public Markdown output bound, shared with live-session-contract.

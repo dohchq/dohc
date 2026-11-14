@@ -1,14 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { navigateTree, type FlatRow } from "./file-tree-nav";
 
-// file-org-v1 D4.3 — keyboard-nav unit tests. Pure function; no DOM.
+// Keyboard-nav unit tests. Pure function; no DOM.
 
-// Sample tree:
-//   team/           (folder, expanded)
-//     anna.md       (leaf)
-//     ben.md        (leaf)
-//   notes/          (folder, collapsed)
-//   _map.md         (leaf, root)
 function sampleRows(opts: { teamExpanded?: boolean } = {}): FlatRow[] {
   const teamExpanded = opts.teamExpanded ?? true;
   return [
@@ -84,7 +78,6 @@ describe("navigateTree — WAI-ARIA tree keyboard pattern", () => {
       kind: "focus",
       path: "team/anna.md",
     });
-    // Leaf — no-op.
     expect(navigateTree(expandedRows, "_map.md", "ArrowRight")).toBeNull();
   });
 
@@ -94,15 +87,11 @@ describe("navigateTree — WAI-ARIA tree keyboard pattern", () => {
       kind: "collapse",
       path: "team",
     });
-    // Leaf at depth 1 — focus its parent.
     expect(navigateTree(rows, "team/anna.md", "ArrowLeft")).toEqual({
       kind: "focus",
       path: "team",
     });
-    // Root-level leaf — no parent, no-op.
     expect(navigateTree(rows, "_map.md", "ArrowLeft")).toBeNull();
-    // Root-level collapsed folder — no parent, no-op (ArrowLeft on
-    // an already-collapsed root folder cannot bubble further).
     expect(navigateTree(rows, "notes", "ArrowLeft")).toBeNull();
   });
 
@@ -132,12 +121,10 @@ describe("navigateTree — WAI-ARIA tree keyboard pattern", () => {
       kind: "focus",
       path: "_map.md",
     });
-    // null currentPath: first ArrowDown focuses the first row.
     expect(navigateTree(rows, null, "ArrowDown")).toEqual({
       kind: "focus",
       path: "team",
     });
-    // null currentPath + unrelated key: no-op.
     expect(navigateTree(rows, null, "Enter")).toBeNull();
   });
 

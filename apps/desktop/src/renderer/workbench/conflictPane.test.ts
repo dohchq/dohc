@@ -63,11 +63,6 @@ describe("conflictPreview", () => {
     expect(preview.text.endsWith(lineBreak)).toBe(true);
   });
 
-  // The other side of that measurement. A character that only soft wraps is
-  // not a line box, so a body full of them is one line to the line window and
-  // the character window is what holds it. Bounded either way — and cutting
-  // these at the line window would have shown far less of the file than it
-  // safely could.
   it.each([
     ["CR", "\r"],
     ["U+2028 LINE SEPARATOR", "\u2028"],
@@ -107,7 +102,6 @@ describe("conflictPreview", () => {
     expect(lastUnit >= 0xd800 && lastUnit < 0xdc00).toBe(false);
     expect(preview.text).toHaveLength(CONFLICT_PREVIEW_MAX_CHARS - 1);
     expect(preview.text.length + preview.hiddenChars).toBe(body.length);
-    // The whole preview still decodes: no replacement character anywhere.
     expect(preview.text).not.toContain("�");
     expect([...preview.text]).toHaveLength(CONFLICT_PREVIEW_MAX_CHARS / 2);
   });
@@ -120,10 +114,10 @@ describe("conflictPreview", () => {
     expect(preview.hiddenChars).toBe(text.length - preview.text.length);
   });
 
-  // Every shape, including the one that used to stall: a short complete line
-  // followed by a line far wider than the window. Requiring a line boundary
-  // kept the cut on that first newline, so 58 of the first 59 presses of
-  // "Show more" changed nothing.
+  // Every shape, including a short complete line followed by a line far wider
+  // than the window. A cut that required a line boundary would stay on that
+  // first newline, so 58 of the first 59 presses of "Show more" would change
+  // nothing.
   const shapes: [string, string][] = [
     ["many short lines", lines(CONFLICT_PREVIEW_MAX_LINES * 5, 10)],
     ["one 1 MiB line", "y".repeat(1024 * 1024)],

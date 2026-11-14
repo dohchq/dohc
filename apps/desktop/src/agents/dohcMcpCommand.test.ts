@@ -91,8 +91,6 @@ describe("resolveDohcMcpCommand", () => {
     }
     const installed = "/Applications/dohc.app/Contents/Resources";
     expect(isTemporaryMacAppPath(installed)).toBe(false);
-    // An app installed in the Applications folder at a volume's top stays put;
-    // one in any deeper folder named Applications does not count.
     expect(
       isTemporaryMacAppPath("/Volumes/External/Applications/dohc.app/Contents/Resources"),
     ).toBe(false);

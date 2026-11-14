@@ -1,4 +1,3 @@
-/// The synced update each protection decision here is made for.
 fn incoming() -> IncomingCoordinate {
     IncomingCoordinate {
         relay_namespace: Some("namespace".into()),
@@ -10,8 +9,6 @@ fn incoming() -> IncomingCoordinate {
     }
 }
 
-/// The binding a hold of the incoming update names, or none while nothing
-/// protects the lineage.
 fn protected(f: &Fixture) -> Option<ReleasedLineageBinding> {
     protected_from(f, &incoming())
 }
@@ -20,8 +17,6 @@ fn protected_from(f: &Fixture, incoming: &IncomingCoordinate) -> Option<Released
     protected_in(f, incoming, &ReleasedTails::default())
 }
 
-/// [`protected_from`], decided with the tails `tails` keeps for the
-/// fixture's store.
 fn protected_in(f: &Fixture, incoming: &IncomingCoordinate, tails: &ReleasedTails) -> Option<ReleasedLineageBinding> {
     let key = ProtectionKey { doc: &f.key, lineage_claim_id: &f.binding.lineage_claim_id, incoming };
     match decided(f, &key, tails) {
@@ -47,7 +42,6 @@ fn decided(f: &Fixture, key: &ProtectionKey<'_>, tails: &ReleasedTails) -> Prote
     }
 }
 
-/// The validation one decision of the fixture's lineage waits for.
 fn pending(f: &Fixture, tails: &ReleasedTails) -> PendingValidation {
     let key = ProtectionKey { doc: &f.key, lineage_claim_id: &f.binding.lineage_claim_id, incoming: &incoming() };
     let tails = tails.bound_to(&f.store);
@@ -57,7 +51,6 @@ fn pending(f: &Fixture, tails: &ReleasedTails) -> PendingValidation {
     }
 }
 
-/// Every protected tail the window names.
 fn listed(binding: ReleasedLineageBinding) -> Vec<ProtectedTail> {
     match std::sync::Arc::unwrap_or_clone(binding.tails) {
         ProtectedTails::Listed(tails) => tails,
@@ -65,7 +58,6 @@ fn listed(binding: ReleasedLineageBinding) -> Vec<ProtectedTail> {
     }
 }
 
-/// The coverage a binding names for exactly `unproven`.
 fn committed(unproven: Vec<RetainedContribution>) -> RetainedCoverage {
     RetainedCoverage::Unproven(UnprovenCommitment::of(unproven).expect("unproven work"))
 }
@@ -80,7 +72,6 @@ fn unproven_of(f: &Fixture, tail: &ProtectedTail) -> Vec<RetainedContribution> {
     unproven
 }
 
-/// What validating `tail` finds, contradictions included.
 fn tail_work(f: &Fixture, tail: &ProtectedTail) -> released_protection::TailWork {
     f.store
         .read_with(|conn| {
@@ -97,7 +88,6 @@ fn tail_work(f: &Fixture, tail: &ProtectedTail) -> released_protection::TailWork
         .unwrap()
 }
 
-/// The unproven work of the one tail that protects the lineage.
 fn only_unproven(f: &Fixture) -> Vec<RetainedContribution> {
     match <[ProtectedTail; 1]>::try_from(listed(protected(f).expect("protected"))) {
         Ok([tail]) if matches!(tail.coverage, RetainedCoverage::Unproven(_)) => unproven_of(f, &tail),
@@ -105,12 +95,10 @@ fn only_unproven(f: &Fixture) -> Vec<RetainedContribution> {
     }
 }
 
-/// What the release of the fixture's tail bound.
 fn owner_release() -> Option<TailRelease> {
     Some(TailRelease { path: "owner.md".into(), restore_generation: 0 })
 }
 
-/// A native update the fixture's agent made, Carried.
 fn carried(delivery: &CarriedDelivery) -> RetainedContribution {
     carried_by(delivery, native_agent())
 }
@@ -130,7 +118,6 @@ fn carried_by(delivery: &CarriedDelivery, authors: RetainedAuthors) -> RetainedC
     }
 }
 
-/// Who `native_tail_edit` credits: its agent, for the owner, at depth 1.
 fn native_agent() -> RetainedAuthors {
     RetainedAuthors::credited(
         Some("native-agent"),
@@ -145,7 +132,7 @@ fn native_agent() -> RetainedAuthors {
     .unwrap()
 }
 
-/// Sol's 4b2i-1 ruling, the seam: a released tail protects its lineage while
+/// A released tail protects its lineage while
 /// retained work lacks proof of application. Its binding names the scope,
 /// the incoming coordinate, the head and the tail's coverage. An acknowledged
 /// seed the host never applied is Carried work too. Nothing retained, a
@@ -175,7 +162,6 @@ fn a_released_tail_protects_its_lineage_while_its_retained_work_lacks_proof() {
             }])),
         }
     );
-    // A hold persists the binding as its canonical JSON, which reads back.
     assert_eq!(ReleasedLineageBinding::from_canonical_json(&binding.canonical_json()), Some(binding.clone()));
     // The feed's namespace is the binding's own: another names another hold.
     let elsewhere = IncomingCoordinate { relay_namespace: Some("elsewhere".into()), ..incoming() };
@@ -212,7 +198,6 @@ fn a_released_tail_protects_its_lineage_while_its_retained_work_lacks_proof() {
     assert!(protected(&Fixture::new()).is_none(), "no chain");
 }
 
-/// What inspecting `binding` finds of `f`, which must still be current.
 fn inspected(f: &Fixture, binding: &ReleasedLineageBinding) -> Preservation {
     match f.store.read_with(|conn| inspect_held(conn, binding, Stop::NEVER)).unwrap() {
         HeldInspection::Current(preservation) => preservation,
@@ -220,7 +205,7 @@ fn inspected(f: &Fixture, binding: &ReleasedLineageBinding) -> Preservation {
     }
 }
 
-/// Sol's r2c Ruling A: evidence is validated before work is committed to.
+/// Evidence is validated before work is committed to.
 /// A native update's journal row, its declarations, a draft's declarations,
 /// a pending entry's receipt and application, and a Carried delivery's
 /// journal row that contradict the rest each leave the whole tail invalid,
@@ -240,8 +225,6 @@ fn contradictory_provenance_invalidates_the_whole_tail_and_names_its_work() {
     };
     let [entry]: [RetainedContribution; 1] = only_unproven(&unapplied()).try_into().unwrap();
     assert_eq!(entry.authors(), &native_agent(), "the journal row's agent");
-    // Each fixture names its delivery anew: where its native entry is, and
-    // that delivery.
     let native_entry = |f: &Fixture| {
         let native: i64 = f.store.read_with(|conn| conn.query_row(
             "SELECT COUNT(*) FROM owner_ydoc_outbox_entries WHERE native_source_json IS NOT NULL", [], |row| row.get(0),
@@ -372,15 +355,12 @@ fn applied_exactly(f: &mut Fixture, receipt: &LiveUpdateReceipt) {
         receipt.delivery_id, receipt.update_digest, receipt.journal_cursor, receipt.accepting_host_epoch));
 }
 
-/// The tails `tails` answers for the fixture's lineage, decided now, and
-/// whether a fresh validation reads the same.
 fn kept_matches_fresh(f: &Fixture, tails: &ReleasedTails) -> Option<ReleasedLineageBinding> {
     let kept = protected_in(f, &incoming(), tails);
     assert_eq!(kept, protected_in(f, &incoming(), &ReleasedTails::uncached()), "kept tails read as fresh ones");
     kept
 }
 
-/// The fixture document's released tail generation.
 fn tail_generation_of(f: &Fixture) -> Option<i64> {
     f.store
         .read_with(|conn| {
@@ -394,12 +374,11 @@ fn tail_generation_of(f: &Fixture) -> Option<i64> {
         .unwrap()
 }
 
-/// Sol's tails-cache ruling: the actor keeps a lineage's validated tails
-/// while the document's generation stands. Later decisions share the same
-/// tails, with no copy of their lists, and each reads its own path. A changed
-/// tail input, here both Carried deliveries applied, validates again. Sol's
-/// binding-cost ruling: the worker commits to the unproven work as it
-/// validates, and no decision commits to it again.
+/// The actor keeps a lineage's validated tails while the document's
+/// generation stands. Later decisions share the same tails, with no copy of
+/// their lists, and each reads its own path. A changed tail input, here both
+/// Carried deliveries applied, validates again. The worker commits to the
+/// unproven work as it validates, and no decision commits to it again.
 #[test]
 fn validated_tails_stand_until_their_generation_moves() {
     let (mut f, _, c1, c2) = released_at_b();
@@ -420,12 +399,10 @@ fn validated_tails_stand_until_their_generation_moves() {
     assert_eq!(tails.validations(), 2);
 }
 
-/// The coverage of each tail `binding` lists.
 fn coverage_of(binding: ReleasedLineageBinding) -> Vec<RetainedCoverage> {
     listed(binding).into_iter().map(|tail| tail.coverage).collect()
 }
 
-/// Both Carried deliveries applied, in `tx`.
 fn apply_both_in(tx: &rusqlite::Transaction<'_>, receipts: [&LiveUpdateReceipt; 2]) -> Result<(), ApplicationError> {
     for receipt in receipts {
         tx.execute_batch(&format!(
@@ -440,7 +417,7 @@ fn apply_both_in(tx: &rusqlite::Transaction<'_>, receipts: [&LiveUpdateReceipt; 
     Ok(())
 }
 
-/// Sol's worker ruling: a write transaction that changed the tails never
+/// A write transaction that changed the tails never
 /// decides on them. Its decision waits, and the worker, which reads only
 /// committed state, refuses the generation that transaction read rather
 /// than validate anything else for it. Back at committed state after its
@@ -488,8 +465,6 @@ fn a_rolled_back_change_keeps_no_tails() {
     assert_eq!(tails.validations(), 2);
 }
 
-/// Bump the generation of whichever fixture's is lower until both read the
-/// same.
 fn same_generation(first: &mut Fixture, second: &mut Fixture) {
     loop {
         let (a, b) = (tail_generation_of(first).unwrap(), tail_generation_of(second).unwrap());
@@ -503,12 +478,11 @@ fn same_generation(first: &mut Fixture, second: &mut Fixture) {
     }
 }
 
-/// Sol's tails-cache ruling: kept tails belong to one open store. Tails
-/// bound to another store forget them, even where the document and its
-/// generation coincide, and so does a reopen of the same file, whose
-/// generations stand. Sol's worker ruling: a document never activated has no
-/// generation and is unprotected without a scan, and an activated one
-/// without its generation is corrupt, never unprotected.
+/// Kept tails belong to one open store. Tails bound to another store forget
+/// them, even where the document and its generation coincide, and so does a
+/// reopen of the same file, whose generations stand. A document never
+/// activated has no generation and is unprotected without a scan, and an
+/// activated one without its generation is corrupt, never unprotected.
 #[test]
 fn kept_tails_belong_to_one_open_store_and_one_recorded_generation() {
     let (mut first, _, _, _) = released_at_b();
@@ -543,7 +517,7 @@ fn kept_tails_belong_to_one_open_store_and_one_recorded_generation() {
     assert_eq!((tails.validation_requests(), tails.validations()), (0, 0));
 }
 
-/// Opus's 1a-2d finding 1: a kept verdict answers only the store it was
+/// A kept verdict answers only the store it was
 /// validated on. Tails bound to one store, asked through another store's
 /// connection at the same document and generation, miss, and the bound
 /// store's worker refuses to validate another store's decision.
@@ -567,7 +541,7 @@ fn kept_tails_answer_only_the_store_they_were_validated_on() {
     assert_eq!(tails.validations(), 1);
 }
 
-/// Sol's worker ruling: identical requests share one validation, and one
+/// Identical requests share one validation, and one
 /// whose result is already kept completes without asking the worker. A
 /// waiter that first looks after the validation completed still sees it.
 #[test]
@@ -590,7 +564,7 @@ fn identical_requests_share_one_validation_and_no_completion_is_lost() {
     assert!(protected(&f).is_some());
 }
 
-/// Sol's worker ruling: a generation that moves while the worker validates
+/// A generation that moves while the worker validates
 /// an older snapshot leaves that result answering nothing current. The next
 /// decision asks again, and the current state is what it decides on.
 #[test]
@@ -611,7 +585,7 @@ fn a_generation_moved_during_validation_validates_current_state() {
     assert_eq!(tails.validations(), 2);
 }
 
-/// Sol's worker ruling: closing the tails cancels the validation running,
+/// Closing the tails cancels the validation running,
 /// wakes its waiters, and returns only once the worker ended. Nothing
 /// validates after.
 #[test]
@@ -637,7 +611,7 @@ fn bump_generation(f: &mut Fixture) {
         UPDATE live_owner_activations SET source_byte_length=source_byte_length");
 }
 
-/// Sol's 1a-2g finding 1: a queued validation nobody waits for leaves the
+/// A queued validation nobody waits for leaves the
 /// queue, however many requests a cancelled caller abandons while the worker
 /// is busy, and one a live waiter still shares stays and completes for it.
 #[test]
@@ -672,7 +646,7 @@ fn completed(validation: Validation) -> Result<(), ValidationError> {
     received.recv_timeout(std::time::Duration::from_secs(60)).expect("the validation completed")
 }
 
-/// Opus's 1a-2g finding 1: a validation that panics fails its waiters, and
+/// A validation that panics fails its waiters, and
 /// the worker goes on to the next.
 #[test]
 fn a_panicking_validation_fails_its_waiters_and_the_worker_goes_on() {
@@ -687,7 +661,7 @@ fn a_panicking_validation_fails_its_waiters_and_the_worker_goes_on() {
     assert_eq!((tails.validation_requests(), tails.validations()), (2, 1));
 }
 
-/// Sol's 4b2i-1 ruling 5: the binding lists every protected namespace's
+/// The binding lists every protected namespace's
 /// tail, in namespace order, never only the first.
 #[test]
 fn a_binding_lists_every_protected_namespace() {
@@ -801,7 +775,7 @@ fn an_update_moves_off_a_tail_at_another_path_or_restore() {
     assert!(unbound.moved("owner.md"), "a release that does not read");
 }
 
-/// Opus's 1a-2 finding 3: evidence of the window itself that does not read,
+/// Evidence of the window itself that does not read,
 /// two tails in one namespace or a current activation never adopted,
 /// protects the lineage as invalid, and no update can show it stays on it.
 /// Storage failures stay errors.
@@ -832,8 +806,6 @@ fn a_window_that_does_not_read_protects_as_invalid() {
     }
 }
 
-/// What a held proof's `read` of `f` answers within `capacity` bytes of
-/// proof memory, with what it saw on the way.
 struct WithinMemory<T> {
     answer: Result<T, ApplicationError>,
     stopped: Option<ProofStop>,
@@ -871,8 +843,6 @@ fn within_memory<T>(
     WithinMemory { answer, stopped, windows, activations, checks: proofs.checks_passed(), peak: limit.peak_reserved_bytes() }
 }
 
-/// What reading the fixture's window holds, what reading the activation of
-/// each of `namespaces`' tails holds, and what validating each holds.
 fn window_workloads(f: &Fixture, namespaces: &[&str]) -> (u64, Vec<(u64, u64)>) {
     let lineage = &f.binding.lineage_claim_id;
     f.store
@@ -892,21 +862,19 @@ fn window_workloads(f: &Fixture, namespaces: &[&str]) -> (u64, Vec<(u64, u64)>) 
         .unwrap()
 }
 
-/// The fixture's window as a held proof reads it.
 fn window_of(conn: &rusqlite::Connection, f: &Fixture, stop: Stop<'_>) -> Result<Option<released_protection::WindowWork>, ApplicationError> {
     released_protection::window_work(conn, &f.key, &f.binding.lineage_claim_id, stop, &mut stop.working())
 }
 
-/// Sol's r2c-3c-8 finding 1: a held proof reserves what reading the
-/// released window holds, and each tail's activation and its validation,
-/// from stored lengths before it reads them. With room for less than the
-/// window it reads no window and no activation; with room for the window
-/// alone, no activation; with room for the window and the tail's
-/// activation, that activation and nothing its validation reads, an
-/// activation of its chain among them, and it passes no validation check.
-/// Each refusal is too large. These counts are the evidence. Opus's
-/// r2c-3c-10 finding 4: the tail's work is kept before its validation is
-/// given back, so room for all of it holds both at once.
+/// A held proof reserves what reading the released window holds, and each
+/// tail's activation and its validation, from stored lengths before it reads
+/// them. With room for less than the window it reads no window and no
+/// activation; with room for the window alone, no activation; with room for
+/// the window and the tail's activation, that activation and nothing its
+/// validation reads, an activation of its chain among them, and it passes no
+/// validation check. Each refusal is too large. These counts are the
+/// evidence. The tail's work is kept before its validation is given back, so
+/// room for all of it holds both at once.
 #[test]
 fn a_held_proof_reserves_the_window_and_each_activation_before_it_reads_them() {
     let (f, _, _, _) = released_at_b();
@@ -1001,7 +969,7 @@ fn released_with_pending_entries(count: usize) -> (Fixture, ReleasedLineageBindi
     (f, binding, entries)
 }
 
-/// Sol's r2c-3c-10 finding 1: each contradiction validation keeps, its
+/// Each contradiction validation keeps, its
 /// namespace among it, is reserved before it is made. A tail in a namespace
 /// of 1,000 bytes, whose 1,000 pending entries each declare an agent that
 /// does not validate, reserves at its peak, beside the window, the other

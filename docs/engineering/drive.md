@@ -1,7 +1,7 @@
 # Run the dohc Drive server
 
 Use this runbook to run dohc Drive's first server from a self-host release.
-Drive runs the same release as any [self-hosted server](self-host.md), with the settings in [`tools/drive/drive.env.example`](../../tools/drive/drive.env.example).
+Drive runs the same release as any [self-hosted server](../how-to/self-host.md), with the settings in [`tools/drive/drive.env.example`](../../tools/drive/drive.env.example).
 [`tools/drive/drive.mjs`](../../tools/drive/drive.mjs) checks the host and then runs the release's own check, start, and move commands.
 Follow the sections in order. Each step names who acts:
 
@@ -42,27 +42,19 @@ Published apps use the app domain `dohc.app`.
 
 ## Build and copy the release
 
-1. **Operator:** On a build machine, check out the release commit and build the bundle as described in [Build the deployment bundle](self-host.md#build-the-deployment-bundle):
-
-   ```sh
-   node tools/self-host/release.mjs --image dohc-self-host:<release-revision> --output ../dohc-release --archive
-   ```
-
+1. **Operator:** On a build machine, check out the release commit and follow [Build the deployment bundle](../how-to/self-host.md#build-the-deployment-bundle).
+   Use `dohc-self-host:<release-revision>` as the image and `../dohc-release` as the output.
    Use the full commit ID as `<release-revision>`. `drive.mjs` refuses a bundle built from uncommitted source.
 2. **Operator:** Copy the Drive recipe from the same commit beside the bundle:
 
    ```sh
    mkdir ../dohc-drive
-   git archive <release-revision> tools/drive docs/how-to/drive.md | tar -x -C ../dohc-drive
+   git archive <release-revision> tools/drive docs/engineering/drive.md | tar -x -C ../dohc-drive
    ```
 
 3. **Operator:** Copy both folders to the server, at `/srv/dohc-release` and `/srv/dohc-drive`.
    Keep a copy of both folders off the server. A replacement server needs the same bundle.
-4. **Operator:** Load the image on the server:
-
-   ```sh
-   sudo docker image load -i /srv/dohc-release/services.tar
-   ```
+4. **Operator:** Load the image on the server with `sudo docker image load -i /srv/dohc-release/services.tar`.
 
 `drive.mjs` checks that `release.json` records a clean build for `linux/amd64`, that every bundled file is present, and that the loaded image has the recorded ID and revision.
 
@@ -92,18 +84,9 @@ It runs before the volume, the accounts, and the configuration exist, so nothing
 
    The evidence file holds the rehearsal's commands and assertions. It holds no secrets.
 
-The rehearsal uses loop-device volumes with real filesystem UUIDs, a local CA, and a TLS-only Postgres from `tools/drive/compose.rehearsal.yml` in place of Neon.
-It checks:
-
-- `drive.mjs check`, `start`, and `start --first-start` against a mounted and an unmounted volume.
-- Migrations refuse a database certificate from another CA, and a database name that its certificate does not cover.
-- The first start passes every release check except the two public HTTPS checks, including the server automations check.
-- The app domain's certificate, routing, and refusals at the gateway.
-- `drive.mjs move` refusals: a running deployment, a wrong UUID, a detached volume, a mount point that is not empty, and a volume with empty deployment folders.
-- A move that mounts the volume by UUID and continues the same relay deployment and accounts.
-- No command or output shows a secret.
-
+The rehearsal runs `drive.mjs` check, start, and move against loop-device volumes, a local CA, and a local TLS-only Postgres in place of Neon.
 The release check's public HTTPS steps need public DNS and a browser-trusted viewer certificate, so the rehearsal expects only those steps to fail.
+
 The release has no setting to trust a local CA for mail, snapshot storage, or the heartbeat, so the rehearsal does not test them.
 It also does not test a valid app launch or live editing in a browser.
 [Accept the server](#accept-the-server) tests each of these with the real providers.
@@ -208,7 +191,7 @@ The job takes its first snapshot as soon as the relay is healthy after the first
 The job takes a snapshot every hour after the first, and pings Healthchecks.io only after an upload succeeds.
 A failed snapshot emails `DOHC_SNAPSHOT_ALERT_EMAIL` at most once a day.
 Missing pings show a job that stopped or cannot email.
-See [Take hourly off-site snapshots](self-host-recovery.md#take-hourly-off-site-snapshots) and [Verify an encrypted snapshot](self-host-recovery.md#verify-an-encrypted-snapshot).
+See [Take hourly off-site snapshots](../how-to/self-host-recovery.md#take-hourly-off-site-snapshots) and [Verify an encrypted snapshot](../how-to/self-host-recovery.md#verify-an-encrypted-snapshot).
 
 Snapshots omit accounts, host data, the configuration, and continuity.
 An old snapshot supports file salvage. It does not restore a server.
@@ -220,7 +203,7 @@ Missing pings show a watch that stopped.
 
 ### App certificate
 
-1. **Provider:** Create a Cloudflare Origin CA certificate for `*.dohc.app`, and install it as described in [Serve published apps behind Cloudflare](self-host.md#serve-published-apps-behind-cloudflare).
+1. **Provider:** Create a Cloudflare Origin CA certificate for `*.dohc.app`, and install it as described in [Serve published apps behind Cloudflare](../how-to/self-host.md#serve-published-apps-behind-cloudflare).
    `drive.mjs` requires root as the owner of both files, with mode 0644 for the certificate and 0600 for the key.
 
 The Origin CA certificate serves only the app hosts. It is not the edge certificate, and browsers do not trust it.
@@ -247,7 +230,7 @@ The Origin CA certificate serves only the app hosts. It is not the edge certific
    - `DOHC_DISK_HEARTBEAT_URL`: the disk check's Healthchecks.io ping URL.
    - `DOHC_SIGN_UP_EMAILS`: the approved addresses.
 
-   Keep each value on one line. `drive.mjs` refuses a secret setting that spans lines, because it could not hide that secret in its output.
+   Keep each value on one line. `drive.mjs` refuses a secret that spans lines, because it cannot hide that secret in its output.
 4. **Operator:** Copy `/etc/dohc/drive.env` to the operator's password manager, as described in the next section.
 
 ### Keep the keys away from the server
@@ -255,7 +238,7 @@ The Origin CA certificate serves only the app hosts. It is not the edge certific
 **Operator:** Keep a copy of `/etc/dohc/drive.env` in the operator's password manager.
 After each change to `/etc/dohc/drive.env`, replace the copy. Each step that changes the file says so.
 Check that the copy holds `DOHC_SNAPSHOT_KEY` and `DOHC_RELAY_LINK_KEY`.
-Without the snapshot key, nobody can open a snapshot.
+Without the snapshot key, nobody can open a snapshot. See [Keep the snapshot key away from the server](../how-to/self-host-recovery.md#keep-the-snapshot-key-away-from-the-server).
 The release cannot rotate the relay link key, and a replacement server needs the same key to continue the deployment.
 A replacement server uses this copy. An old copy can name an older image than the data needs.
 Keep both keys out of evidence, logs, and public text.
@@ -263,9 +246,7 @@ Keep both keys out of evidence, logs, and public text.
 ### Choose who can sign up
 
 Drive keeps sign-up private. `drive.mjs` refuses an empty `DOHC_SIGN_UP_EMAILS`.
-The server also accepts an address that has a pending share invite.
-A share sent to an address without an account creates that invite. Revoking the share removes it.
-See [Choose who can create an account](self-host.md#choose-who-can-create-an-account).
+The server also accepts an address that has a pending share invite, as [Choose who can create an account](../how-to/self-host.md#choose-who-can-create-an-account) describes.
 
 **Approval:** Each change to `DOHC_SIGN_UP_EMAILS` needs approval. Stop and start the deployment to apply it.
 Then replace the password manager copy of `/etc/dohc/drive.env`.
@@ -283,8 +264,8 @@ These steps make the server reachable. **Approval:** Do them only after approval
    Caddy gets the viewer's certificate through a challenge on port 80, and redirects every other HTTP request itself.
 
 The viewer's certificate path through Cloudflare is not yet proven.
-The first start must show that Caddy obtains it through proxied port 80. Renewal must work the same way.
-If it does not, stop and report before changing the certificate setup.
+On the first start, check that Caddy obtains the viewer certificate through proxied port 80. Renewal must work the same way.
+If either fails, stop and report it before you change the certificate setup.
 
 ## Check and start
 
@@ -355,7 +336,7 @@ Never record a key, password, token, cookie, or email address.
 ### Account email
 
 1. **Approval:** Send the first delivery test only after approval.
-2. **Operator:** Connect a desktop to Drive, as in [Connect the desktop app](self-host.md#connect-the-desktop-app), with an approved address for its account.
+2. **Operator:** Connect a desktop to Drive, as in [Connect the desktop app](../how-to/self-host.md#connect-the-desktop-app), with an approved address for its account.
    Its verification email is the delivery test. Open its link, approve the device, and turn on **Sync this workspace**.
 
 The check passes when the account's email arrives, and the mail provider's delivery record shows that the receiving server accepted it over TLS.
@@ -443,7 +424,7 @@ Do this on a Linux host other than the Droplet, with the same release bundle and
 1. **Provider:** Wait until Healthchecks.io shows the first ping. Then confirm that the R2 bucket holds the first snapshot.
 2. **Operator:** Write the password manager copy of `drive.env` to `$HOME/drive-check/drive.env`, with mode 0600.
 3. **Operator:** Download the newest snapshot from the R2 bucket into `$HOME/drive-check/offsite`.
-4. **Operator:** Verify it, as in [Verify an encrypted snapshot](self-host-recovery.md#verify-an-encrypted-snapshot):
+4. **Operator:** Verify it, as in [Verify an encrypted snapshot](../how-to/self-host-recovery.md#verify-an-encrypted-snapshot):
 
    ```sh
    cd <release-bundle>
@@ -553,8 +534,8 @@ If the volume is lost, Drive cannot restore its server.
 Salvage the files from the latest snapshot:
 
 1. **Operator:** Download the latest snapshot from R2 to a private folder on a host with the release image.
-2. **Operator:** Verify it with the snapshot key, as in [Verify an encrypted snapshot](self-host-recovery.md#verify-an-encrypted-snapshot).
-3. **Operator:** Export its files, as in [Salvage portable files from an old snapshot](self-host-recovery.md#salvage-portable-files-from-an-old-snapshot).
+2. **Operator:** Verify it with the snapshot key, as in [Verify an encrypted snapshot](../how-to/self-host-recovery.md#verify-an-encrypted-snapshot).
+3. **Operator:** Export its files, as in [Salvage portable files from an old snapshot](../how-to/self-host-recovery.md#salvage-portable-files-from-an-old-snapshot).
 
 **Approval:** A new deployment after total loss is a rebuild. Plan it, including what happens to the Neon database, and get approval before any first start.
 `drive.mjs start --first-start` refuses while Neon holds dohc accounts.
@@ -566,7 +547,7 @@ Salvage the files from the latest snapshot:
 1. **Operator:** Run `drive.mjs check` with the current bundle. Update only a server that passes it.
 2. **Operator:** Build the new release and copy the Drive recipe from the same commit, as in [Build and copy the release](#build-and-copy-the-release).
 3. **Provider:** If the new bundle's `tools/self-host/cloudflare-proxies.caddy` changed, update the Cloud Firewall's Cloudflare ranges to match.
-4. **Operator:** Follow [Back up and maintain the deployment](self-host.md#back-up-and-maintain-the-deployment), using `--env-path /etc/dohc/drive.env`.
+4. **Operator:** Follow [Upgrade the server](../how-to/self-host.md#upgrade-the-server), using `--env-path /etc/dohc/drive.env`.
 5. **Operator:** Run `drive.mjs check` with the new bundle.
 6. **Operator:** Replace the password manager copy of `/etc/dohc/drive.env`. The upgrade changes `DOHC_IMAGE`.
 

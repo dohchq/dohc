@@ -23,7 +23,7 @@ export type ChatRowMenuTarget =
       // The agent's chat stays after its agent leaves Settings, archived, and
       // only Settings can bring the agent back. Remove from list takes it off Archived.
       removed: boolean;
-      // null for an agent you run yourself, which dohc never starts.
+      // null for an agent you run yourself, which dohc neither starts nor forwards to.
       enabled: boolean | null;
       canRemove: boolean;
     };
@@ -35,7 +35,6 @@ export type ChatRowMenuActions = {
   leave: () => void;
   openAgentSettings?: () => void;
   setAgentEnabled: (enabled: boolean) => void;
-  // Each asks first in a dialog.
   removeAgent: () => void;
   hideChat: () => void;
 };

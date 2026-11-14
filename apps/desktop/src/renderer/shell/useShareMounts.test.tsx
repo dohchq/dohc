@@ -59,13 +59,11 @@ it("keeps newer mount props when an older registry reload resolves", async () =>
     await pending;
   });
   expect(result.current.mountCount).toBe(0);
-  // A subsequent registry snapshot must not repeat the removal.
   rerender({ shareMounts: [] });
   expect(onExplorerPathsChanged).toHaveBeenCalledTimes(1);
   expect(reportShellError).not.toHaveBeenCalled();
 });
 
-// A failed Remove keeps Try again in Notices, and Try again removes it.
 it("reports a failed unmount with Try again", async () => {
   const unmountShare = vi
     .fn()
@@ -109,8 +107,6 @@ it("reports a failed unmount with Try again", async () => {
   vi.unstubAllGlobals();
 });
 
-// Each announced refresh's summary replaces the last one's row: a clean
-// refresh clears an earlier failure, and repeated refreshes keep one row.
 it("reports every announced share refresh under one kind", async () => {
   const refresh = vi
     .fn()
@@ -157,8 +153,6 @@ it("reports every announced share refresh under one kind", async () => {
   vi.unstubAllGlobals();
 });
 
-// A refresh that finishes after a newer one must not replace the newer
-// one's row: here the older success would erase the newer failure.
 it("lets only the newest announced refresh write its summary", async () => {
   let finishFiles!: () => void;
   const filesListed = new Promise<void>((done) => {
@@ -282,8 +276,6 @@ it("keeps a share's collision-record refusal in Notices until that share refresh
   vi.stubGlobal("dohcDesktop", { refreshShareMounts: refresh });
   const { result, reportShellError, reportShellFailure, clearIdentity, clearKind } = mountRows();
 
-  // A refresh the person starts toasts the refused share's row every time.
-  // One share refreshed, so the summary says so beside it.
   await act(async () => {
     await result.current.refreshShareMounts(true);
   });
@@ -304,7 +296,6 @@ it("keeps a share's collision-record refusal in Notices until that share refresh
   );
   expect(clearKind).not.toHaveBeenCalled();
 
-  // A polled refusal of the same share updates its row without a new toast.
   await act(async () => {
     await result.current.refreshShareMounts();
   });
@@ -315,7 +306,6 @@ it("keeps a share's collision-record refusal in Notices until that share refresh
   });
   expect(reportShellError).toHaveBeenCalledOnce();
 
-  // Try again refreshes as the person asked, and the completed refresh ends the row.
   const retry = reportShellFailure.mock.calls[0]![0].retry as () => void;
   await act(async () => {
     retry();
@@ -330,8 +320,6 @@ it("keeps a share's collision-record refusal in Notices until that share refresh
 
 const kimRefused = { ...refused, shareId: "share-2", label: "kim" };
 
-// Each refused share's row is the toast, so a summary would only repeat it.
-// The row an earlier refresh's summary left ends.
 it.each([
   { name: "one share", results: [refused] },
   { name: "two shares", results: [refused, kimRefused] },
@@ -361,8 +349,6 @@ it.each([
   },
 );
 
-// A newer refresh writes the share's row, so this one's summary still answers
-// the person.
 it("keeps the summary of a refresh the person starts when a newer one writes the rows", async () => {
   let finishPressed!: (value: unknown) => void;
   const refresh = vi
@@ -429,8 +415,6 @@ it("tells the person when dohc set aside a share's collision record", async () =
   expect(reportShellFailure).toHaveBeenCalledWith(setAside);
   expect(clearIdentity).toHaveBeenCalledWith("share-mount-collision-record:share-1");
 
-  // From a refresh the person starts, the warning is the toast, and the
-  // summary goes into Notices without one.
   reportShellFailure.mockClear();
   await act(async () => {
     await result.current.refreshShareMounts(true);
@@ -457,7 +441,6 @@ it("ends a removed share's refusal row", () => {
   expect(clearIdentity).not.toHaveBeenCalledWith("share-mount-collision-record:share-2");
 });
 
-// An older poll that finishes late must not refile a row a newer refresh ended.
 it("lets only the newest refresh write a share's rows", async () => {
   let finishOlder!: (value: unknown) => void;
   const refresh = vi
@@ -490,8 +473,6 @@ it("lets only the newest refresh write a share's rows", async () => {
   vi.unstubAllGlobals();
 });
 
-// The older refresh set the record aside, so the newer one finds no record to
-// report. The older refresh's row is the only one the person gets.
 it("files an older refresh's set-aside row", async () => {
   let finishOlder!: (value: unknown) => void;
   const refresh = vi
@@ -583,8 +564,6 @@ it.each([false, true])(
         ...(announce ? {} : { repeat: true }),
       });
       expect(clearIdentity).not.toHaveBeenCalledWith("share-mount-kept-paths:share-1");
-      // From a refresh the person starts, the warning is the toast, and the
-      // summary goes into Notices without one.
       if (announce) {
         expect(reportShellFailure).toHaveBeenLastCalledWith({
           message: "Shares refreshed — 0 files updated.",
@@ -603,7 +582,6 @@ it.each([false, true])(
         expect(clearIdentity).toHaveBeenCalledWith("share-mount-kept-paths:share-1"),
       );
       expect(refresh).toHaveBeenNthCalledWith(2, { workspaceId: "ws-1" });
-      // With no warning left, the summary is the toast.
       expect(showSuccessNotice).toHaveBeenCalledWith(
         expect.stringContaining("Shares refreshed"),
         undefined,

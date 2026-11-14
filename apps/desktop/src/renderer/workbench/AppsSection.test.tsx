@@ -52,7 +52,6 @@ type HarnessProps = {
 
 const noop = () => undefined;
 
-// The shell reads the apps; the Explorer's Home draws the section from them.
 function Harness(props: HarnessProps) {
   const apps = useApps(
     props.workspaceId ?? "ws-apps",
@@ -137,7 +136,6 @@ describe("Home's Apps section", () => {
 
     await screen.findByText("Client Portal");
     const row = screen.getByTestId("sites-row");
-    // One line: the folder is the row's tooltip, not a second line.
     expect(row.textContent).toBe("Client Portal");
     expect(row.getAttribute("title")).toBe("client-portal");
     await user.click(row);
@@ -233,10 +231,6 @@ describe("Home's Apps section", () => {
   });
 
   it("reloads detected apps when the settled files revision bumps, including a content-only edit", async () => {
-    // filesSettledRevision bumps on every settled workspace file listing,
-    // including a content-only edit to an existing file (e.g. dohc.json) —
-    // not just an add/remove. A structural path/kind/icon hash would
-    // produce the same value for that case and never rerun this effect.
     const view = render(<Harness />);
     await screen.findByText("Client Portal");
     expect(bridgeMock.listSites).toHaveBeenCalledTimes(1);
@@ -307,7 +301,6 @@ describe("Home's Apps section", () => {
     });
     expect(screen.getByText("Current App")).toBeTruthy();
     expect(notices.report).not.toHaveBeenCalled();
-    // Leaving workspace A took its row, if it had one.
     expect(notices.clear).toHaveBeenCalledWith("apps:workspace-a");
   });
 
@@ -344,7 +337,6 @@ describe("Home's Apps section", () => {
     render(<Harness />);
 
     const row = await screen.findByTestId("sites-failed");
-    // The section keeps its header; the words are the Notices row's.
     expect(screen.getByTestId("explorer-apps-toggle")).toBeTruthy();
     expect(row.textContent).toBe("Try again");
     expect(screen.queryByText("App scan failed")).toBeNull();
@@ -471,7 +463,6 @@ describe("Home's Apps section", () => {
     render(<Harness pinnedApps={["client-portal"]} />);
 
     const pinned = await screen.findByRole("button", { name: "Unpin" });
-    // An unpinned row draws its pin on its first hover or focus.
     expect(screen.queryByRole("button", { name: "Pin to sidebar" })).toBeNull();
     await user.hover(screen.getAllByTestId("sites-row")[1]!);
     const unpinned = screen.getByRole("button", { name: "Pin to sidebar" });

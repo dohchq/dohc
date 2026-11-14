@@ -72,7 +72,6 @@ const WORDS: &[&str] = &[
     "content",
 ];
 
-/// A block of at least `target` bytes of prose.
 fn block(rng: &mut Rng, target: usize) -> String {
     let mut out = String::new();
     while out.len() < target {

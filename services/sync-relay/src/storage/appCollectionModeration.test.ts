@@ -116,7 +116,6 @@ it("selects immutable public acceptances and keeps private identities out of the
   for (const privateId of privateIds) expect(JSON.stringify(page)).not.toContain(privateId);
   expect(JSON.stringify(page)).not.toContain("profile-secret-hash");
   expect(JSON.stringify(page)).not.toContain("idempotencyKey");
-  // Current contents cannot change attribution or nominate an unrelated file.
   f.write(first.path, "---\ncreated_by: forged\nacceptance_id: forged\n---\n", first.objectId);
   expect(f.storage.readOwnerAppCollectionAcceptances(ownerPage)).toEqual(page);
   f.write(first.path, "", first.objectId, "delete");

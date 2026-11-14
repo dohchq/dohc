@@ -124,3 +124,40 @@ export function memoryStore(initial: StoredSignIn | null = null) {
     },
   };
 }
+
+/** A relay Notice row as the phone's scope sends it. It expires at 10,000,000 ms: test clocks run before. */
+export function relayRow(noticeId: string, fields: Record<string, unknown> = {}) {
+  return {
+    noticeId,
+    changeSeq: 1,
+    workspaceId: "w1",
+    recipientShareId: null,
+    kind: "agent-run",
+    senderKind: "agent",
+    senderUserId: "u-agent",
+    senderLabel: "Nova",
+    title: `Nova replied (${noticeId})`,
+    body: "The train leaves at 8:09.",
+    target: { thread: "thread-1", message: "m-1" },
+    originInstallId: "laptop",
+    createdAtMs: 1000,
+    readAtMs: null,
+    dismissedAtMs: null,
+    expiresAtMs: 10_000_000,
+    removed: false,
+    ...fields,
+  };
+}
+
+/** A page of Notices as the relay answers it. */
+export function noticePageBody(notices: readonly unknown[], fields: Record<string, unknown> = {}) {
+  return {
+    ok: true,
+    notices,
+    nextCursor: "1",
+    hasMore: false,
+    replace: false,
+    personalAgentsRevision: 1,
+    ...fields,
+  };
+}

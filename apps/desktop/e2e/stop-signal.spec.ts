@@ -77,7 +77,7 @@ async function stopsCleanlyOn(
       ).toMatch(/^\[desktop\] quit: shutdown finished in \d+ ms$/u);
       expect(engines.filter(isRunning), "The quit stops the engine").toEqual([]);
     } else {
-      // Electron ends dohc before its quit finishes (#3411). The engine then
+      // Electron ends dohc before its quit finishes. The engine then
       // stops on its own once its input closes.
       await expect
         .poll(() => engines.filter(isRunning), { message: "The engine stops", timeout: 30_000 })
@@ -96,8 +96,6 @@ async function stopsCleanlyOn(
       reopened.page.getByTestId("markdown-editor"),
       "The next start shows the saved edit",
     ).toContainText(EDIT);
-    // At start, dohc shows a notice for a crash report or for typing it kept in
-    // History. Both reads must find nothing, so neither notice can show.
     const startup = await reopened.page.evaluate(async (workspaceId) => {
       const api = window.dohcDesktop!;
       const [crash, kept] = await Promise.all([
@@ -119,8 +117,6 @@ async function stopsCleanlyOn(
       "Notices has no unread row",
     ).toHaveAttribute("aria-label", "Notices");
   } finally {
-    // Closing the first app attaches its logs, and stops it if the test failed
-    // before the signal.
     await stopped
       ?.close()
       .catch((error: unknown) => console.error("[stop-signal] closing the stopped app:", error));
@@ -132,7 +128,7 @@ test.describe("stop signals", () => {
   test.skip(process.platform !== "linux", "The engine leads its own process group on Linux only.");
 
   // A SIGTERM or SIGHUP sent to the group also reaches Electron's GPU process,
-  // and Electron then ends dohc before its quit finishes (#3411).
+  // and Electron then ends dohc before its quit finishes.
   const groupStops = [
     { signal: "SIGTERM", verb: "ends", finishesQuit: false },
     { signal: "SIGINT", verb: "quits", finishesQuit: true },

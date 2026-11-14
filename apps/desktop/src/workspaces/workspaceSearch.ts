@@ -206,7 +206,6 @@ export function toSearchEntries(data: RgMatchData): SearchResultEntry[] {
     const charStart = byteToCharOffset(line, lineBytes, start);
     const charEnd = byteToCharOffset(line, lineBytes, end);
     if (charStart >= line.length && line.length > 0) continue;
-    // Window the preview around the match when the line is oversized.
     let windowStart = 0;
     if (line.length > SEARCH_MAX_PREVIEW_CHARS) {
       // Lead-in of ~1/3 keeps the match visible with context on both sides.
@@ -307,7 +306,6 @@ export function startRipgrepSearch(options: {
       if (pending.length >= SEARCH_BATCH_MAX_ENTRIES) flush(false);
     }
     if (total >= SEARCH_MAX_TOTAL_MATCHES) {
-      // Hard stream cap: stop the scan by killing our tracked child.
       limitHit = true;
       child.kill();
     }

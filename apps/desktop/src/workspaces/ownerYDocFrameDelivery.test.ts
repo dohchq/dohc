@@ -609,7 +609,6 @@ it("owns Buffer-backed pending bytes before an asynchronous transport can observ
   expect(f.submit.mock.calls[0]![0].updateBytes).toEqual(envelope.update);
 });
 
-// These entries carry no retained person or agent provenance.
 it.each(["seed", "automation", "actorless", "Collection adoption", "owner delivery"])(
   "leaves %s entries unattributed",
   async () => {
@@ -829,7 +828,6 @@ function nativeOutbox() {
     state: Partial<OwnerAcceptedState>;
   } = { result: refused, state: { isReceiptApplied: proof } };
   const submissions: unknown[] = [];
-  // Every pass builds its delivery, engine connection and drainer afresh; only the refusals outlive it.
   const pass = async (refusals: OwnerKnownRefusals) => {
     const f = fixture(host),
       engine = new NativeOutbox(
@@ -860,7 +858,6 @@ it("admits an outstanding Try again once after a crash lost its refusal, and res
   o.faults.quarantine.push("failed");
   await expect(o.pass(refusals)).rejects.toThrow("Engine unavailable.");
   expect(o.native).toMatchObject({ state: "quarantined", retryDeliveryId: envelope.deliveryId });
-  // The desktop restarts with the refusal it received; the owner's request is still open.
   refusals = new OwnerKnownRefusals();
   o.host.result = undefined;
   expect(await o.pass(refusals)).toBe("acknowledged");
@@ -887,7 +884,6 @@ it("records a Try again refused again after a crash lost its refusal, and never 
     pending: true,
   });
   expect(o.submissions).toHaveLength(3);
-  // Background passes, a restart and an upgraded host never reopen it.
   for (let pass = 0; pass < 2; pass++) expect(await o.pass(refusals)).toBe("frozen");
   refusals = new OwnerKnownRefusals();
   o.host.result = undefined;
@@ -911,7 +907,6 @@ it("keeps a refusal through repeated quarantine failures across passes, and neve
   });
   for (let pass = 0; pass < 3; pass++) expect(await o.pass(refusals)).toBe("frozen");
   expect(o.submissions).toHaveLength(1);
-  // Every write carried the one refusal it records.
   expect(o.keys).toHaveLength(4);
   expect(new Set(o.keys).size).toBe(1);
 });
@@ -924,7 +919,6 @@ it("a quarantine write repeated after its lost response cannot use up the owner'
   o.faults.quarantine.push("lost");
   await expect(o.pass(refusals)).rejects.toThrow("Engine response lost.");
   expect(o.native.retryDeliveryId).toBeNull();
-  // The owner asks again before delivery writes the refusal again.
   o.native.retryDeliveryId = envelope.deliveryId;
   expect(await o.pass(refusals)).toBe("retry");
   expect(o.native).toMatchObject({ state: "quarantined", retryDeliveryId: envelope.deliveryId });
@@ -965,7 +959,6 @@ it("keeps a Try again through a transient failure, and lets one pass at a time h
   o.host.held = release.promise;
   const first = o.pass(refusals);
   await vi.waitFor(() => expect(o.proof).toHaveBeenCalled());
-  // A duplicate wake while the first attempt is in flight submits nothing.
   expect(await o.pass(refusals)).toBe("retry");
   release.resolve();
   expect(await first).toBe("acknowledged");

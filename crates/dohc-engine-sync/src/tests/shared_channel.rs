@@ -239,7 +239,6 @@ fn a_joined_group_stays_joined_on_the_owners_other_computer() {
             .expect("owner-context read")
     };
 
-    // A: seed, then Ada replies in Bob's Group.
     seed_and_read(&mut computer_a, 10);
     LinkedChatStore::new(&mut computer_a)
         .send_message(
@@ -269,7 +268,6 @@ fn a_joined_group_stays_joined_on_the_owners_other_computer() {
         )
         .expect("Ada replies");
 
-    // A's ordinary sync carries only its own records.
     let own_records: Vec<(String, i64, String, String)> = computer_a
         .read_with(|conn| {
             let mut statement = conn.prepare(
@@ -303,7 +301,6 @@ fn a_joined_group_stays_joined_on_the_owners_other_computer() {
     }
     assert_eq!(joined_wire_ids(&computer_b), vec!["wire-bob".to_owned()]);
 
-    // B: seed after a local read, then an owner-context read.
     computer_b
         .read_with(|conn| {
             conn.execute(
@@ -1314,7 +1311,6 @@ fn shared_channel_mappings_admit_only_chat_in_the_receiving_channel() {
         .unwrap();
     let mappings = [("A","m-allowed","t-allowed"),("B","m-other","t-other")].map(|(r,m,t)|
         serde_json::from_value(json!({"reference":r.repeat(43),"createdAtMs":1,"target":{"kind":"message","messageId":m,"threadId":t,"channelId":"owner-coordinate"}})).unwrap()).to_vec();
-    // The shared chat itself, and a thread inside and outside it.
     let mappings = [
         mappings,
         [

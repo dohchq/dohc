@@ -34,7 +34,6 @@ export function formatClockDigits(createdAtMs: number): string {
     .trim();
 }
 
-// The day a chat lane divider names: Today, Yesterday, else the date.
 export function formatChatDay(createdAtMs: number, now = Date.now()): string {
   const day = new Date(createdAtMs);
   const today = new Date(now);
@@ -58,7 +57,6 @@ export function sameChatDay(a: number, b: number): boolean {
 
 const shortDayFormat = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
 
-// A row's short time trail: the time of day for today, else the date.
 export function formatShortTime(atMs: number, now = Date.now()): string {
   return sameChatDay(atMs, now) ? formatClock(atMs) : shortDayFormat.format(new Date(atMs));
 }
@@ -78,4 +76,13 @@ export function formatChatTime(createdAtMs: number): { label: string; iso: strin
     label: chatTimeFormat.format(createdAt),
     iso: createdAt.toISOString(),
   };
+}
+
+// How long something took or has lasted: "4s", "1m 20s", "2h 5m".
+export function formatRunDuration(ms: number): string {
+  const seconds = Math.max(1, Math.round(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return seconds % 60 ? `${minutes}m ${seconds % 60}s` : `${minutes}m`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }

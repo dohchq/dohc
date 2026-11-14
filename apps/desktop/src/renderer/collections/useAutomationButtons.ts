@@ -261,7 +261,6 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
     /** Whether nothing shows or runs these buttons, so the window may drop the store. */
     idle: () => listeners.size === 0 && runs.size === 0,
 
-    /** Reads what each button shows. */
     refresh,
 
     /** Check again: asks a shared view's host now, not main's last answer. */
@@ -344,7 +343,6 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
 
     key: runKey,
 
-    /** Stops listening and forgets its runs; the window dropped this store. */
     close(): void {
       closed = true;
       stopSettled();

@@ -42,7 +42,6 @@ describe("server discovery", () => {
     expect(fetcher).toHaveBeenCalledOnce();
   });
 
-  // The server may name itself; the desktop shows its address instead.
   it("permits optional validated display metadata, and keeps the network scope", async () => {
     const fetcher = vi.fn<typeof fetch>(async () =>
       Response.json({ ...descriptor, name: "My server", networkAccess: "private" }),

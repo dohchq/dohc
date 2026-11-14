@@ -34,6 +34,23 @@ it("discovers only ready documents, including after restart, and drops revoked t
   ).toEqual([]);
 });
 
+// The relay before `head` sends none; each note then opens its connection on every pass, as before.
+it("keeps a ready row's head when the server sends one, and refuses one that is not a position", () => {
+  expect(
+    readyOwnerDeliveryDocuments({ ok: true, documents: [{ ...ready, head: 0 }] }, "workspace"),
+  ).toEqual([{ ...document, head: 0 }]);
+  expect(
+    readyOwnerDeliveryDocuments({ ok: true, documents: [{ ...ready, head: 41 }] }, "workspace"),
+  ).toEqual([{ ...document, head: 41 }]);
+  expect(
+    readyOwnerDeliveryDocuments({ ok: true, documents: [ready] }, "workspace")[0],
+  ).not.toHaveProperty("head");
+  for (const head of [-1, 1.5, "4", null, Number.MAX_SAFE_INTEGER + 1])
+    expect(() =>
+      readyOwnerDeliveryDocuments({ ok: true, documents: [{ ...ready, head }] }, "workspace"),
+    ).toThrow("Invalid owner live document head.");
+});
+
 it("rejects foreign workspaces, versions, paths, duplicates and excessive target counts", () => {
   for (const row of [
     { ...ready, document: { ...document, binding: { ...binding, workspaceId: "foreign" } } },
@@ -317,7 +334,7 @@ it("retains an abort-ignoring pass after its deadline until both stop calls fini
   expect(runPass).toHaveBeenCalledTimes(1);
 });
 
-// #3089: the move guard's targeted slot.
+// The move guard's targeted slot.
 type Pass = { documentCount: number; acknowledged: boolean };
 
 it("runs a targeted turn only between ordinary passes, and answers it", async () => {
@@ -353,12 +370,10 @@ it("runs a targeted turn only between ordinary passes, and answers it", async ()
   ordinary.resolve({ documentCount: 1, acknowledged: false });
   await vi.advanceTimersByTimeAsync(0);
   expect(events).toEqual(["ordinary start", "ordinary end", "targeted a,b"]);
-  // No ordinary pass starts while the targeted one runs.
   await vi.advanceTimersByTimeAsync(5000);
   expect(runPass).toHaveBeenCalledTimes(1);
   targeted.resolve(true);
   await expect(answer).resolves.toBe(true);
-  // The ordinary schedule resumes where it was.
   await vi.advanceTimersByTimeAsync(1000);
   expect(runPass).toHaveBeenCalledTimes(2);
   await owner.stop();
@@ -434,7 +449,6 @@ it("lets other workspaces' ordinary documents advance under repeated targeted re
   const ordinary: Array<[string, number]> = [];
   const turns: string[] = [];
   let owner!: ReturnType<typeof startServerOwnerDelivery>;
-  // Each answer asks again at once, as a stream of moves in "one" would.
   let asks = 4;
   const ask = () => {
     if (asks-- > 0) void owner.catchUp("one", ["a"], new AbortController().signal).then(ask);

@@ -216,9 +216,6 @@ describe("desktop relay helpers", () => {
     }
   });
 
-  // A chat grant has no file selector at all. That is a known kind,
-  // not an unreadable response, so it resolves to null and the file surfaces
-  // refuse it with their own guidance.
   it("reports a chat grant as having no file selector", async () => {
     await expect(
       fetchShareViewInfo({

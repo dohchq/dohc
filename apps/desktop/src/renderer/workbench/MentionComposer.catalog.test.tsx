@@ -54,7 +54,6 @@ function Harness(props: {
         {...(props.onEscape ? { onEscape: props.onEscape } : {})}
         {...(props.offersPoll === false ? {} : { poll, onPollChange: setPoll })}
       />
-      {/* The open poll's choices, the ones Send would ask. */}
       <output data-testid="poll-state">{JSON.stringify(openPollChoices(poll))}</output>
     </>
   );
@@ -165,7 +164,6 @@ describe("the / catalog", () => {
     expect(composer().value).toBe("Lunch where? ");
     expect(pollState()).toEqual(["", ""]);
     expect(screen.queryByTestId("chats-catalog")).toBeNull();
-    // The question is written, so the first choice takes focus.
     expect(document.activeElement).toBe(choices()[0]);
   });
 
@@ -392,7 +390,6 @@ describe("the poll block", () => {
     expect(error.textContent).toBe("Soup is already a choice.");
     expect(choices()[1]!.getAttribute("aria-invalid")).toBe("true");
     expect(error.id).toBe(choices()[1]!.getAttribute("aria-describedby"));
-    // Under the repeated row, before the choices that follow it.
     expect(choices()[1]!.closest("div")!.nextElementSibling).toBe(error);
     expect(choices()[1]!.className).toContain("focus:border-danger");
     expect(choices()[1]!.className).toContain("focus:shadow-[inset_0_-1px_0_var(--dohc-danger)]");
@@ -409,8 +406,6 @@ describe("the poll block", () => {
     ]);
     expect(choices()[1]!.closest("div")!.nextElementSibling).toBe(errors[0]);
     expect(choices()[3]!.closest("div")!.nextElementSibling).toBe(errors[1]);
-    // Each message has its own id, and every repeat of a choice points at
-    // that choice's message; the first of each choice points at none.
     const ids = errors.map((error) => error.id);
     expect(ids.every(Boolean)).toBe(true);
     expect(new Set(ids).size).toBe(ids.length);
@@ -436,7 +431,6 @@ describe("the poll block", () => {
     expect(pollState()).toBeNull();
     fireEvent.mouseDown(screen.getByTestId("chats-poll-toggle"));
     expect(choices().map((input) => input.value)).toEqual(["Soup", "Salad"]);
-    // The pressed Poll button removes it too, and the catalog brings it back.
     fireEvent.mouseDown(screen.getByTestId("chats-poll-toggle"));
     expect(pollState()).toBeNull();
     fireEvent.change(composer(), {

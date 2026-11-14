@@ -267,10 +267,10 @@ impl Harness {
     }
 }
 
-// dohc#2342. A file capture recorded is deleted outside dohc while its
-// document is open. The session still holds the head and refuses every save
-// over the missing file, so capture leaves the head alone. Capture is waiting,
-// not failing, so it stays clean. The release alone brings the delete back.
+// A file capture recorded is deleted outside dohc while its document is open.
+// The session still holds the head and refuses every save over the missing
+// file, so capture leaves the head alone. Capture is waiting, not failing, so
+// it stays clean. The release alone brings the delete back.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_deleted_file_a_live_session_holds_is_retired_once_released() {
     let harness = Harness::new();
@@ -327,7 +327,6 @@ async fn a_deleted_file_a_live_session_holds_is_retired_once_released() {
     harness.close();
 }
 
-/// The status of the version switch's write job for `path`.
 fn switch_write_status(db: &Path, path: &str) -> String {
     rusqlite::Connection::open(db)
         .expect("open database observer")
@@ -386,7 +385,6 @@ async fn unsettled_typing_on_a_held_file_is_kept_beside_the_outside_edit() {
     assert_eq!(head_origin(&harness.db, &sibling), "ydoc");
     assert_eq!(moment_count(&harness.db, &sibling), 1);
 
-    // The pass wrote the sibling itself: the next scan leaves it alone.
     files.handle().request_rescan();
     assert!(harness.capture(&files.handle()).await);
     assert_eq!(
@@ -424,7 +422,6 @@ fn moment_count(db: &Path, path: &str) -> i64 {
         .expect("count moments")
 }
 
-/// The one `<stem> (recovered …).md` file in `<root>/<dir>`, workspace-relative.
 fn recovered_sibling_on_disk(root: &Path, dir: &str, stem: &str) -> String {
     let prefix = format!("{stem} (recovered ");
     let names: Vec<String> = std::fs::read_dir(root.join(dir))
@@ -442,9 +439,6 @@ fn recovered_sibling_on_disk(root: &Path, dir: &str, stem: &str) -> String {
     format!("{dir}/{}", names[0])
 }
 
-/// Open `path`'s captured head as a live document the way the editor does,
-/// seed it from the head, then admit `typing` the session never settles.
-/// Returns the document's key.
 fn seed_unsettled_typing(harness: &Harness, path: &str, seed: &str, typing: &str) -> DocKey {
     use dohc_engine_collab::{
         ContentKind, LocalAppend, MarkerCreation, Regime, WriterDocCache, Ydoc,
@@ -993,7 +987,6 @@ async fn fix1_no_hold_placement_replay_cost() {
     );
 }
 
-// #2413 will publish link-rewrite jobs through this same placement boundary.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn placement_against_a_deferred_writes_old_base_conflicts_without_overwriting() {
     let harness = Harness::new();
@@ -1073,7 +1066,6 @@ async fn placement_against_a_deferred_writes_old_base_conflicts_without_overwrit
     harness.close();
 }
 
-/// A driver over `root` with a started layer, its first run applied.
 async fn started_env(
     root: &Path,
     actor: &ActorHandle,
@@ -1224,7 +1216,6 @@ async fn a_file_the_first_pass_under_changed_rules_left_keeps_its_label() {
     close_env(env, layer, supervisor, db).await;
 }
 
-/// The sha256 of `version`'s head at `path`.
 fn head_sha256(db: &Path, version: &str, path: &str) -> String {
     rusqlite::Connection::open(db)
         .expect("open database observer")
@@ -1237,10 +1228,10 @@ fn head_sha256(db: &Path, version: &str, path: &str) -> String {
         .expect("read the head")
 }
 
-// dohc#3621. A switch that fails before replacing a file leaves the previous
-// version's bytes on disk, and capture refuses them for the active version.
-// The refusal must still track those bytes, so a later edit arrives as a
-// change that claims the active head instead of a new file capture skips.
+// A switch that fails before replacing a file leaves the previous version's
+// bytes on disk, and capture refuses them for the active version. The refusal
+// must still track those bytes, so a later edit arrives as a change that
+// claims the active head instead of a new file capture skips.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_edit_after_a_switch_write_waits_is_recorded() {
     const MAIN: &str = "Main's note.\n";

@@ -5,7 +5,6 @@ import { pinnedAppInitial, type PinnedApp } from "./pinnedApps";
 import { VIEW_IDENTITY } from "./viewIdentity";
 import { appViewId, SHARING_VIEW_ID, type ActivityViewId, type ViewId } from "./workbenchState";
 
-// Every rail glyph is drawn the same size and weight; only the icon differs.
 function RailGlyph(props: { Icon: LucideIcon }) {
   return <props.Icon size={18} strokeWidth={1.9} aria-hidden />;
 }
@@ -14,7 +13,6 @@ function RailButton(props: {
   label: string;
   testId: string;
   active?: boolean;
-  // Badge dot seam (conflicts, running agent — more arrive in later phases).
   badge?: "danger" | "success";
   onClick?: () => void;
   onContextMenu?: () => void;

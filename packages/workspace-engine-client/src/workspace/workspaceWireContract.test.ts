@@ -165,7 +165,6 @@ describe("workspace wire schemas", () => {
       waitingVersion,
     );
     expect(decodeConflictRecord({ ...conflict, waitingVersion: null }).waitingVersion).toBeNull();
-    // A resolve answer, and an engine from before the field, send none.
     expect("waitingVersion" in decodeConflictRecord(conflict)).toBe(false);
     for (const malformed of [
       "resolve-existing-conflict",

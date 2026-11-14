@@ -110,7 +110,6 @@ function advance(
   });
 }
 
-// The columns each tombstone still holds.
 function tombstones(
   storage: SyncRelayStorage,
 ): Array<{ accountId: unknown; operationId: unknown; stage: unknown; kept: string[] }> {
@@ -208,7 +207,6 @@ it("records a write once and answers a retry with the same binding from its row"
     settledAtMs: null,
   });
   expect(storage.lookupAccountOperation(key("operation-1"))).toEqual({ kind: "found", record });
-  // The binding is canonical, and a retry keeps the command recorded first.
   expect(
     storage.recordAccountOperation(
       input({
@@ -277,7 +275,6 @@ it("moves a stage only forward and never out of saved or refused", async () => {
     moved: true,
     record: { stage: "reply-written", messageState: "published" },
   });
-  // Nothing changed, so nothing is written.
   expect(
     advance(storage, "operation-1", "reply-written", { message: "published", nowMs: NOW + 20 }),
   ).toMatchObject({ moved: false, record: { updatedAtMs: NOW + 10 } });
@@ -371,7 +368,6 @@ it("turns writes settled more than 30 days ago into tombstones that answer too o
     record: { stage: "refused" },
   });
 
-  // An unfinished write is never forgotten, and a tombstone stays.
   expect(storage.tombstoneSettledAccountOperations(NOW + 10 * OPERATION_KEEP_SETTLED_MS)).toBe(1);
   expect(storage.tombstoneSettledAccountOperations(NOW + 10 * OPERATION_KEEP_SETTLED_MS)).toBe(0);
   expect(storage.lookupAccountOperation(key("unfinished"))).toMatchObject({
@@ -405,7 +401,6 @@ it("leaves a deleted workspace's writes as tombstones, so a retry is too old", a
   expect(
     storage.listUnfinishedAccountOperations({ workspaceId: "workspace", incarnation: 1 }),
   ).toEqual([]);
-  // A write that reaches storage after the deletion leaves nothing behind.
   expect(storage.recordAccountOperation(input({ operationId: "late" }))).toEqual({
     kind: "not-owner",
   });
@@ -422,7 +417,6 @@ it("deletes an account's writes and tombstones, and leaves another account's on 
   await own(storage, "bystander", "workspace");
   const owned = (accountId: string, operationId: string) =>
     input({ accountId, operationId, binding: binding(ARGS, "owned") });
-  // A former owner's write on the workspace the deleted account then owned, and a write elsewhere.
   const former = owned("former-owner", "former");
   recorded(storage.recordAccountOperation(former));
   giveWorkspace(storage, "owned", "leaving");
@@ -466,7 +460,6 @@ it("deletes an account's writes and tombstones, and leaves another account's on 
   db.close();
   expect(storage.recordAccountOperation(former)).toEqual({ kind: "too-old" });
   expect(storage.lookupAccountOperation(elsewhere)).toMatchObject({ kind: "found" });
-  // A write the deleted account's request started before the purge records nothing after it.
   expect(storage.recordAccountOperation(owned("leaving", "late"))).toEqual({ kind: "not-owner" });
   expect(rowCount(storage)).toEqual({ n: 2 });
 });

@@ -37,14 +37,13 @@ const NO_FILE_CHAT: ShareFileChatResolver = {
   objectIdAtPath: () => undefined,
 };
 
-// WS-MU-C3 — DM / chat grants over the relay, riding MU-C4's
-// bidirectional shared-channel lane. A DM is a `kind:"dm"` channel + one
-// email-addressed chat grant per participant, so a DM op is a strict
-// subset of the already-merged shared-channel route: it serves byte-identically
-// to a regular channel op, binds by thread (never a self-claimed
-// channelWireId on the message payload), and every unauthorized probe is
-// indistinguishable from a share that never existed. These tests are the
-// blocking adversarial isolation gate for that claim.
+// DM / chat grants over the relay, on the bidirectional shared-channel lane.
+// A DM is a `kind:"dm"` channel + one email-addressed chat grant per
+// participant, so a DM op is a strict subset of the shared-channel route: it
+// serves byte-identically to a regular channel op, binds by thread (never a
+// self-claimed channelWireId on the message payload), and every unauthorized
+// probe is indistinguishable from a share that never existed. These tests are
+// the adversarial isolation gate for that claim.
 
 afterEach(closeTestStorages);
 
@@ -67,7 +66,7 @@ async function createWorkspace(h: SyncRelayHandler): Promise<void> {
 const chatOp = logOp;
 
 // A DM channel.create carries `kind:"dm"` — the only thing distinguishing it
-// from a regular MU-C4 channel op. Everything downstream is identical.
+// from a regular channel op. Everything downstream is identical.
 function dmChannelCreate(wireId = DM_WIRE): ReturnType<typeof chatOp> {
   return chatOp(
     "chat.channel.create",
@@ -83,7 +82,7 @@ function dmThreadCreate(wireId = DM_WIRE, threadId = "thread-dm-1"): ReturnType<
 }
 
 // A message binds only by threadId — it never carries a channelWireId, exactly
-// like a solo/MU-C4 message. The relay derives scope from the thread's create.
+// like a solo or shared-channel message. The relay derives scope from the thread's create.
 function dmMessage(
   body: string,
   overrides: Record<string, unknown> = {},
@@ -119,7 +118,7 @@ async function createDmGrant(
 }
 
 // A member-append op: the client supplies its own originSeq (client-sequenced,
-// unlike MU-C3's server-owned space). The relay namespaces the origin id.
+// not a server-owned space). The relay namespaces the origin id.
 function memberMessage(
   originSeq: number,
   overrides: Record<string, unknown> = {},
@@ -180,19 +179,21 @@ describe("chat share selector (DM grants)", () => {
       channelWireId: DM_WIRE,
       access: "read-write",
     };
-    // The thread→channel resolver the chat branch scopes by. "t" belongs to the
-    // granted DM; "t2" belongs to another channel; "t3" is unbound.
+    const threadBoundToOtherChannel = "t2";
     const chat: ChatShareThreadResolver = {
       channelKind: (wireId) =>
         wireId === DM_WIRE ? "dm" : wireId === OTHER_WIRE ? "channel" : undefined,
       ...NO_FILE_CHAT,
       threadChannelWireId: (threadId) =>
-        threadId === "t" ? DM_WIRE : threadId === "t2" ? OTHER_WIRE : undefined,
+        threadId === "t"
+          ? DM_WIRE
+          : threadId === threadBoundToOtherChannel
+            ? OTHER_WIRE
+            : undefined,
     };
     const allow = (opKind: string, payload: Record<string, unknown>) =>
       filterOpForShare(selector, opKind, JSON.stringify(payload), chat).allowed;
 
-    // Honest DM stream: channel + thread + message + reaction for this wire id.
     expect(
       allow("chat.channel.create", {
         wireId: DM_WIRE,
@@ -249,27 +250,24 @@ describe("chat share selector (DM grants)", () => {
     ).toBe(false);
     expect(
       allow("chat.thread.create", {
-        threadId: "t2",
+        threadId: threadBoundToOtherChannel,
         title: "",
         createdAtMs: 1,
         channelWireId: OTHER_WIRE,
       }),
     ).toBe(false);
-    // A thread.create that forges the granted wire id for a thread already bound
-    // elsewhere is excluded (earliest-binding wins).
     expect(
       allow("chat.thread.create", {
-        threadId: "t2",
+        threadId: threadBoundToOtherChannel,
         title: "",
         createdAtMs: 1,
         channelWireId: DM_WIRE,
       }),
     ).toBe(false);
-    // A message into another channel's thread, even with a forged channelWireId.
     expect(
       allow("chat.message.append", {
         messageId: "m2",
-        threadId: "t2",
+        threadId: threadBoundToOtherChannel,
         channelWireId: DM_WIRE,
         body: "leak",
         authorKind: "human",
@@ -277,7 +275,6 @@ describe("chat share selector (DM grants)", () => {
         createdAtMs: 1,
       }),
     ).toBe(false);
-    // A message into an UNBOUND thread (no channel address at all).
     expect(
       allow("chat.message.append", {
         messageId: "m3",
@@ -292,7 +289,7 @@ describe("chat share selector (DM grants)", () => {
       allow("chat.reaction.set", {
         reactionId: "r2",
         messageId: "m",
-        threadId: "t2",
+        threadId: threadBoundToOtherChannel,
         emoji: "👍",
         authorId: "u",
         authorKind: "human",
@@ -302,8 +299,6 @@ describe("chat share selector (DM grants)", () => {
       }),
     ).toBe(false);
 
-    // A file-linked thread never crosses a chat grant even if a hostile payload
-    // staples the granted wire id next to a linked file.
     expect(
       allow("chat.thread.create", {
         threadId: "t4",
@@ -314,7 +309,6 @@ describe("chat share selector (DM grants)", () => {
       }),
     ).toBe(false);
 
-    // Nothing non-chat crosses a chat grant.
     for (const opKind of [
       "workspace.init",
       "moment.append",
@@ -366,7 +360,7 @@ describe("DM grants over the relay", () => {
     await createWorkspace(h);
     const shareId = await createDmGrant(h);
 
-    // Invalid selectors fail closed with the MU-C4 codes.
+    // Invalid selectors fail closed with the shared-channel codes.
     const invalid = await h(
       request(
         OWNER,
@@ -442,7 +436,6 @@ describe("DM grants over the relay", () => {
       grantId: expect.any(String),
       generation: 1,
     });
-    // The received summary must not expose the granter's workspace id.
     expect(receivedRow?.workspaceId).toBeUndefined();
   });
 
@@ -501,7 +494,7 @@ describe("DM grants over the relay", () => {
       "chat.message.append",
     ]);
     // The served message payload carries NO channelWireId — the exact same
-    // allowlisted shape a solo/MU-C4 message serves. Scope came from the thread.
+    // allowlisted shape a solo or shared-channel message serves. Scope came from the thread.
     const served = ops.find((op) => op.opKind === "chat.message.append")!;
     expect(served.payload).toEqual({
       messageId: (served.payload as Record<string, unknown>).messageId,
@@ -533,12 +526,9 @@ describe("DM grants over the relay", () => {
     const memberAuthored = memberOps.find(
       (op) => (op.payload as Record<string, unknown>).body === "hi alice",
     )!;
-    // Client-sequenced, scoped to the authenticated member and replica.
     expect(memberAuthored.originId).toBe(namedShareOrigin(shareId, MEMBER, "origin-member"));
     expect(memberAuthored.originSeq).toBe(0);
 
-    // The OWNER's own bucket pull sees the member's op too (one log, many
-    // authenticated readers/writers).
     const ownerLog = await json(await h(request(OWNER, `/sync/${WORKSPACE}/log?since=0`)));
     const ownerBodies = (ownerLog.ops as Array<Record<string, unknown>>)
       .filter((op) => op.opKind === "chat.message.append")
@@ -558,7 +548,6 @@ describe("DM grants over the relay", () => {
     expect(forged.status).toBe(403);
     expect((await json(forged)).code).toBe("authorship_mismatch");
 
-    // Nothing from a rejected batch is admitted.
     const ops = await fetchSharedOps(h, MEMBER, shareId);
     expect(JSON.stringify(ops)).not.toContain("forged as alice");
   });
@@ -592,7 +581,6 @@ describe("DM grants over the relay", () => {
     const shareId = await createDmGrant(h);
 
     const cases: Array<Record<string, unknown>> = [
-      // A message into a thread bound to a different channel.
       {
         originSeq: 1,
         opKind: "chat.message.append",
@@ -607,7 +595,6 @@ describe("DM grants over the relay", () => {
         },
         recordedAtMs: 5000,
       },
-      // A message into an UNBOUND thread (no channel address anywhere).
       {
         originSeq: 1,
         opKind: "chat.message.append",
@@ -630,7 +617,6 @@ describe("DM grants over the relay", () => {
         payload: { threadId: "thread-other", title: "", createdAtMs: 1, channelWireId: DM_WIRE },
         recordedAtMs: 5000,
       },
-      // A member thread must be channel-owned, never file-linked.
       {
         originSeq: 1,
         opKind: "chat.thread.create",
@@ -645,12 +631,10 @@ describe("DM grants over the relay", () => {
       },
     ];
     for (const op of cases) {
-      // Mix the hostile op with an honest one: the whole batch must fail.
       const response = await memberAppend(h, shareId, [memberMessage(0), op]);
       expect(response.status, JSON.stringify(op)).toBe(403);
       expect((await json(response)).code).toBe("share_op_rejected");
     }
-    // Nothing was admitted by any rejected batch.
     const ops = await fetchSharedOps(h, MEMBER, shareId);
     expect(ops.filter((op) => op.opKind === "chat.message.append")).toEqual([]);
   });
@@ -661,7 +645,6 @@ describe("DM grants over the relay", () => {
     await appendOwnerOps(h, [dmChannelCreate(), dmThreadCreate(), dmMessage("secret dm body")]);
     const shareId = await createDmGrant(h);
 
-    // The baseline: a share id that has never existed.
     const absent = await denialBytes(await h(request(STRANGER, "/sync/shares/never-existed")));
     const absentLog = await denialBytes(
       await h(request(STRANGER, "/sync/shares/never-existed/log?since=0")),
@@ -672,8 +655,6 @@ describe("DM grants over the relay", () => {
       ),
     );
 
-    // A REAL DM share probed by a non-participant: byte-identical denials on
-    // metadata, read, and append — existence is unconfirmable.
     expect(await denialBytes(await h(request(STRANGER, `/sync/shares/${shareId}`)))).toBe(absent);
     expect(
       await denialBytes(await h(request(STRANGER, `/sync/shares/${shareId}/log?since=0`))),
@@ -690,12 +671,10 @@ describe("DM grants over the relay", () => {
       ),
     ).toBe(absentAppend);
 
-    // The DM is invisible in the stranger's share listings.
     const listing = await json(await h(request(STRANGER, "/sync/shares")));
     expect(listing.granted).toEqual([]);
     expect(listing.received).toEqual([]);
 
-    // And the OWNER's bucket itself stays owner-only.
     const bucketProbe = await h(request(STRANGER, `/sync/${WORKSPACE}/log?since=0`));
     expect(bucketProbe.status).toBe(404);
   });
@@ -706,7 +685,6 @@ describe("DM grants over the relay", () => {
     await appendOwnerOps(h, [dmChannelCreate(), dmThreadCreate(), dmMessage("hello bob")]);
     const shareId = await createDmGrant(h);
 
-    // The honest path works before revocation.
     expect((await fetchSharedOps(h, MEMBER, shareId)).length).toBe(3);
     expect((await memberAppend(h, shareId, [memberMessage(0)])).status).toBe(200);
 
@@ -728,7 +706,6 @@ describe("DM grants over the relay", () => {
     ).toBe(absentLog);
     expect(await denialBytes(await memberAppend(h, shareId, [memberMessage(1)]))).toBe(removed);
 
-    // The revoked DM disappears from the member's received listing.
     const listing = await json(await h(request(MEMBER, "/sync/shares")));
     expect(
       (listing.received as Array<Record<string, unknown>>).find((row) => row.shareId === shareId),
@@ -747,11 +724,8 @@ describe("DM grants over the relay", () => {
     const post = await memberAppend(h, readOnlyShareId, [memberMessage(0)]);
     expect(post.status).toBe(403);
     expect((await json(post)).code).toBe("share_read_only");
-    // Reading still works for a read-only member.
     expect((await fetchSharedOps(h, MEMBER, readOnlyShareId)).length).toBe(2);
 
-    // A PATH-share recipient cannot append through the chat route at all — and
-    // learns nothing distinguishing (share_read_only, like any non-appendable).
     const pathShareId = (
       await json(
         await h(
@@ -789,7 +763,6 @@ describe("DM grants over the relay", () => {
     expect(unknown.status).toBe(200);
     const knownBody = await json(known);
     const unknownBody = await json(unknown);
-    // Identical shape either way: no recipientUserId echo, no account oracle.
     expect(Object.keys(knownBody).sort()).toEqual(Object.keys(unknownBody).sort());
     expect(knownBody.recipientUserId).toBeUndefined();
     expect(unknownBody.recipientUserId).toBeUndefined();

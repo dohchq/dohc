@@ -337,7 +337,6 @@ it("reads no engine listing when the file listing in hand has no dataset.json, a
   expect(await read(false)).toEqual([]);
   expect(requests).toEqual([]);
   expect(kept).not.toHaveBeenCalled();
-  // No listing in hand, or one that names a dataset.json: the engine's files decide.
   for (const listed of [undefined, true]) {
     expect(await read(listed)).toEqual(["gone"]);
     expect(requests).toContain("versionedText.list");

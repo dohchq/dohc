@@ -10,6 +10,7 @@ import { SETTLEMENT_BINDINGS, SETTLEMENT_CUTS } from "./hostedSettlementSchema";
 import { isNativeSettlementRecord, settlementRecordDigest } from "./hostedSettlement";
 import { NATIVE_MOMENT_FIELDS } from "./serviceActivationPublication";
 import { REFUSED_OP_KIND } from "./relayAdmission";
+import { ServerLogError } from "../serverLogWords";
 import { stableJsonStringify } from "../canonicalJson";
 import { OTHER_LINEAGE_UPDATE } from "./otherLineageUpdate";
 import {
@@ -62,8 +63,9 @@ const cuts = new WeakMap<
 const hash = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
 const integer = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+// Each message is a fixed sentence, so the server log shows it whole.
 function requireValue(value: unknown, message: string): asserts value {
-  if (!value) throw new Error(message);
+  if (!value) throw new ServerLogError(message);
 }
 function currentCut(storage: StorageContext, source: NativeOwnerActivationSource) {
   const current = storage.db

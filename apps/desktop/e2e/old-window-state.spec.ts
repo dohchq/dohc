@@ -62,7 +62,6 @@ test("a window Forget left showing its workspace stops and follows the window th
     const managerOpened = app.waitForEvent("window");
     await old.getByTestId("workspace-switcher-manage").click();
     const manager = await managerOpened;
-    // Forget, then Open folder on the same folder, which keeps its id.
     expect(
       await manager.evaluate(
         async (input) => {
@@ -123,8 +122,6 @@ test("a window Forget left showing its workspace stops and follows the window th
       await cdp.detach();
     }
 
-    // Go to that window brings the other window to the front, opens none, and
-    // leaves this one as it is.
     const reopenedContents = await contentsId(app, reopened);
     await app.evaluate(({ BrowserWindow }) => {
       const main = globalThis as unknown as MainTestState;
@@ -151,7 +148,6 @@ test("a window Forget left showing its workspace stops and follows the window th
     expect(await windowCount()).toBe(windowsBefore);
     await expect(heading).toHaveText("This workspace is open in another window.");
 
-    // The other window closes.
     const reopenedClosed = reopened.waitForEvent("close");
     await app.evaluate(({ BrowserWindow, webContents }, id) => {
       const contents = webContents.fromId(id);
@@ -169,7 +165,6 @@ test("a window Forget left showing its workspace stops and follows the window th
     ).toBeFocused();
     await expect(workbench).toHaveAttribute("inert", "");
 
-    // The workspace opens in another window again.
     const againOpened = app.waitForEvent("window");
     await old.evaluate(
       (id) => window.dohcDesktop!.openWorkspaceWindow({ workspaceId: id }),

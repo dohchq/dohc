@@ -1,5 +1,5 @@
-//! RPC-B acceptance: the complete R09 chat read/write surface through the
-//! in-process protocol transport, backed only by real domain writes.
+//! The complete chat read/write surface through the in-process protocol
+//! transport, backed only by real domain writes.
 
 use crate::common;
 
@@ -1544,10 +1544,10 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
     )
     .await;
     for sequence in 0..6_i64 {
-        // Ids are bounded (256 UTF-16 units) since round 7, so the byte
-        // pressure comes from LARGE MESSAGE BODIES — hydrated feed items
-        // embed the opening message body, so ~60 KiB bodies trip the
-        // 256 KiB page budget after a handful of items.
+        // Ids are bounded (256 UTF-16 units), so the byte pressure comes
+        // from large message bodies. Hydrated feed items embed the opening
+        // message body, so ~60 KiB bodies trip the 256 KiB page budget after
+        // a handful of items.
         let huge_body = format!("feed budget {} {}", sequence, "b".repeat(60 * 1024));
         call(
             &transport,
@@ -1814,7 +1814,6 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         failed["bookmark"]["failureReason"],
         json!("disk unavailable")
     );
-    // A person's retry queues the failed archive again at its own generation.
     let retried = call(
         &transport,
         &first_handle,
@@ -1890,8 +1889,6 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
     .await;
     assert_eq!(invalid_generation.code, ErrorCode::InvalidParams);
 
-    // Complete, fail, and close/reopen reclaim each exercise a distinct
-    // terminal/recovery transition. A claim while another is running is null.
     let enqueued = call(
         &transport,
         &first_handle,
@@ -2105,7 +2102,6 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
     .await;
     assert_eq!(retry["dispatch"]["attemptCount"], json!(2));
 
-    // A second close/reopen reclaims the second crashed attempt as exhausted.
     call(
         &transport,
         &first_handle,
@@ -2249,11 +2245,12 @@ async fn bookmark_state_filter_claim_command_default_and_path_floor() {
         .await;
     }
 
-    // Canonical Check-A floor: a percent-DISGUISED traversal has no literal
-    // ".." bytes, so the old `validate_path` floor accepted it. Mutation
-    // check: restore `crate::store::validate_path` in `save_bookmark` — this
-    // refusal fails (the save succeeds) and the dotted destination below
-    // persists un-normalized.
+    // `save_bookmark` decodes percent escapes before it checks the
+    // destination for traversal. A percent-DISGUISED traversal has no literal
+    // ".." bytes, so `crate::store::validate_path`, which reads the path as
+    // written, accepts it. Mutation check: use `crate::store::validate_path`
+    // in `save_bookmark` — this refusal fails (the save succeeds) and the
+    // dotted destination below persists un-normalized.
     let disguised = call_error(
         &transport,
         &handle,
@@ -3090,10 +3087,6 @@ async fn thread_projection_read_only_notice_and_access_line_presence() {
     assert_eq!(null_access.code, ErrorCode::InvalidParams);
 }
 
-// A poll's choices and its answer cross the RPC boundary with the decision,
-// and a channel's lanes page apart: the posts lane is the default, the chat
-// lane is named, an unknown lane is refused, and one lane's cursor does not
-// open the other.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn polls_and_lanes_cross_the_rpc_boundary() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -3713,7 +3706,6 @@ async fn group_stream_and_thread_get_round_trip_with_agent_requests() {
     }
     let db_path = engine_db_path(&scratch).expect("db");
     let conn = rusqlite::Connection::open(db_path).expect("open db");
-    // One message asked two agents.
     conn.execute_batch(
         "INSERT INTO chat_dispatch_ledger (workspace_id, trigger_message_id, agent_id, thread_id, \
          state, run_id, failure_reason, attempt_count, created_at_ms, updated_at_ms) \
@@ -3831,8 +3823,6 @@ async fn group_stream_and_thread_get_round_trip_with_agent_requests() {
     assert_eq!(found["messageCount"], json!(2));
     assert_eq!(found.get("work"), None);
 
-    // An agent's work report rides on its message, and the post and its
-    // thread serve the same Work card.
     let report = call(
         &transport,
         &handle,

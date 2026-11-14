@@ -1,6 +1,5 @@
 use crate::live_update_application::retirement::Disposition;
 
-/// Everything a refused succession could write.
 const SUCCESSION_WRITES: [&str; 10] = [
     "live_owner_activations",
     "live_owner_adoptions",
@@ -14,8 +13,6 @@ const SUCCESSION_WRITES: [&str; 10] = [
     "binary_blobs",
 ];
 
-/// The fixture's document as ordinary sync left it for a capture: a base the
-/// replication log applied, and a committed cursor past it.
 fn importable(f: &mut Fixture) {
     let payload = serde_json::json!({
         "versionId": "main", "objectId": "object", "contentKind": "richdoc", "isBaseState": true,
@@ -37,8 +34,6 @@ fn returned(f: &mut Fixture) {
     write(f, "UPDATE hosted_replicas SET main_cursor=9");
 }
 
-/// The file at the fixture binding's path, rewritten to the local Y.Doc's
-/// text, as ordinary sync brings the owner's work.
 fn file_matches_local(f: &mut Fixture, moment: &str) {
     let local = f
         .store
@@ -69,7 +64,6 @@ fn file_matches_local(f: &mut Fixture, moment: &str) {
         .unwrap();
 }
 
-/// The owner's edit while live editing was stopped, in the Y.Doc and the file.
 fn offline_edit(f: &mut Fixture, text: &str, moment: &str) {
     f.doc
         .rewrite_content_to_markdown(ContentKind::Richdoc, text)
@@ -83,7 +77,6 @@ fn offline_edit(f: &mut Fixture, text: &str, moment: &str) {
     file_matches_local(f, moment);
 }
 
-/// An imported activation's capture, adopted through the fixture's handle.
 fn adopt_root(f: &mut Fixture) -> String {
     let id = capture_imported(f, 1_000_000).unwrap().activation_id;
     f.cut.adoption_id = id.clone();
@@ -91,7 +84,6 @@ fn adopt_root(f: &mut Fixture) -> String {
     id
 }
 
-/// Release the activation the cut names at F=10, once its document parked.
 fn release_parked(f: &mut Fixture) -> Option<RetainedPrefixBody> {
     host_document(f, true, true);
     let Release::Released { replayed: false, boundary } = release_through(f, 10).unwrap() else {
@@ -100,21 +92,16 @@ fn release_parked(f: &mut Fixture) -> Option<RetainedPrefixBody> {
     boundary
 }
 
-/// Capture the released chain tail's successor, register it by name, and
-/// cut its retained prefix. Returns its ID.
 fn successor(f: &mut Fixture) -> String {
     let captured = capture_imported(f, 1_000_000).unwrap();
     follow(f, captured)
 }
 
-/// [`successor`] for a note the reader built, its capture proven by `resolver`.
 fn reader_successor(f: &mut Fixture, resolver: &crate::reader_resolver::ReaderResolver) -> String {
     let captured = prove_activation(f, resolver).unwrap();
     follow(f, captured)
 }
 
-/// The fixture's cut adopted through its handle, each reader proof it waits
-/// for resolved by `resolver`.
 fn reader_adopt(f: &mut Fixture, resolver: &crate::reader_resolver::ReaderResolver) -> OwnerAdoptionAck {
     reader_application_result(|| {
         adopt_owner_committed(&mut f.store, &f.handle, f.cut.clone(), 1_000_000, 100, 10, &NoFaults, Some(resolver), |_, _, _, _| Ok(()))
@@ -122,8 +109,6 @@ fn reader_adopt(f: &mut Fixture, resolver: &crate::reader_resolver::ReaderResolv
     .unwrap()
 }
 
-/// Register `captured`, the released chain tail's successor, by name, and cut
-/// its retained prefix. Returns its ID.
 fn follow(f: &mut Fixture, captured: ImportedOwnerActivation) -> String {
     let tail = chain_tail(f, "namespace").unwrap().expect("a released tail");
     assert_eq!(captured.source.predecessor_activation_id.as_deref(), Some(tail.as_str()));
@@ -153,7 +138,6 @@ fn follow(f: &mut Fixture, captured: ImportedOwnerActivation) -> String {
     captured.activation_id
 }
 
-/// The activation row a successor's adoption wrote.
 fn succession_row(f: &Fixture, id: &str) -> (Option<String>, Option<String>, Option<String>, bool, String) {
     f.store
         .read_with(|conn| {
@@ -167,13 +151,10 @@ fn succession_row(f: &Fixture, id: &str) -> (Option<String>, Option<String>, Opt
         .unwrap()
 }
 
-/// The coverage digest an adoption keeps for these entries, each named by its
-/// original outbox and sequence.
 fn outboxes_digest(coverage: &[(String, i64, Disposition)]) -> String {
     hex_sha256(&serde_json::to_vec(coverage).unwrap())
 }
 
-/// The outbox at `path`.
 fn outbox_at(f: &Fixture, path: &str) -> String {
     f.store
         .read_with(|conn| {
@@ -182,15 +163,12 @@ fn outbox_at(f: &Fixture, path: &str) -> String {
         .unwrap()
 }
 
-/// The coverage digest an adoption keeps for these dispositions of the
-/// entries in the outbox at the fixture's binding.
 fn coverage_digest(f: &Fixture, coverage: &[(i64, Disposition)]) -> String {
     let outbox = outbox_at(f, &f.binding.current_path);
     let coverage: Vec<_> = coverage.iter().map(|(sequence, disposition)| (outbox.clone(), *sequence, disposition.clone())).collect();
     outboxes_digest(&coverage)
 }
 
-/// Each adoption seed: its activation and outbox sequence.
 fn seeds(f: &Fixture) -> Vec<(String, i64)> {
     f.store
         .read_with(|conn| {
@@ -204,7 +182,7 @@ fn seeds(f: &Fixture) -> Vec<(String, i64)> {
         .unwrap()
 }
 
-/// Sol's plan §5: the prefix is the evidence's tenth element, only when
+/// The prefix is the evidence's tenth element, only when
 /// present, identically in Rust and TypeScript.
 #[test]
 fn owner_adoption_evidence_matches_the_shared_vectors() {
@@ -268,7 +246,7 @@ fn a_prefix_cut_is_its_prefix_alone() {
     assert!(validate_cut(&f.cut, &f.binding, 1_000_000, 10).is_err(), "no predecessor");
 }
 
-/// Sol's plan §5, adoption: the successor of the exact released tail adopts
+/// The successor of the exact released tail adopts
 /// its prefix. It inserts its own activation under the lineage's origin,
 /// names the binding, and leaves the root adoption and the accepted history
 /// as they were. Unchanged state queues no seed; an offline edit queues one
@@ -347,7 +325,6 @@ fn a_successor_adopts_its_released_prefix_without_touching_the_origin() {
         assert_eq!(rows(&f, &SUCCESSION_WRITES), written);
     }
 }
-/// A damage a succession must refuse.
 type SuccessionDamage = (&'static str, fn(&mut Fixture));
 
 /// Each successor requirement, failing alone, refuses with no writes: the
@@ -436,7 +413,7 @@ fn each_succession_requirement_refuses_without_writes() {
     }
 }
 
-/// Sol's any-namespace ruling, through adoption: once a lineage adopted in
+/// Once a lineage adopted in
 /// one namespace, a capture in another neither adopts it first nor succeeds
 /// the released tail; each refuses with no writes.
 #[test]
@@ -603,7 +580,7 @@ fn a_successor_covers_an_abandoned_seed_and_holds_only_its_own() {
     }
 }
 
-/// Opus, round 3b delta, and Sol's round 4a ruling: two never-adopted
+/// Two never-adopted
 /// captures. While the first one's retirement settles the document, the
 /// second can't adopt. Once the first releases, the second is stale: it
 /// follows nothing while the first is the tail, so neither its registration
@@ -683,7 +660,6 @@ fn write_unchecked(f: &mut Fixture, sql: &str) {
     raw.execute_batch(sql).unwrap();
 }
 
-/// Each row `sql` selects, so a step can be shown to leave them as they were.
 fn query_rows(f: &Fixture, sql: &str) -> Vec<String> {
     f.store
         .read_with(|conn| {
@@ -702,7 +678,6 @@ fn query_rows(f: &Fixture, sql: &str) -> Vec<String> {
         .unwrap()
 }
 
-/// Every terminal entry with the bytes it keeps.
 fn terminal_entries(f: &Fixture) -> Vec<String> {
     query_rows(
         f,
@@ -712,7 +687,6 @@ fn terminal_entries(f: &Fixture) -> Vec<String> {
     )
 }
 
-/// The Refused disposition of each terminal entry, as coverage records it.
 fn refusals(f: &Fixture) -> Vec<(i64, Disposition)> {
     f.store
         .read_with(|conn| {
@@ -731,7 +705,6 @@ fn refusals(f: &Fixture) -> Vec<(i64, Disposition)> {
         .unwrap()
 }
 
-/// A host's terminal refusal of `delivery`, through the refusal path.
 fn refuse(f: &mut Fixture, delivery: &str, reason: &str) {
     let (outbox_id, update_digest): (String, String) = f
         .store
@@ -756,7 +729,6 @@ fn refuse(f: &mut Fixture, delivery: &str, reason: &str) {
     assert!(matches!(refused, TxnOutcome::Committed(())));
 }
 
-/// Quarantine the document's one outbox.
 fn quarantine(f: &mut Fixture, reason: &str) {
     let outbox_id: String = f
         .store
@@ -778,7 +750,6 @@ fn refused_root(dependent: bool) -> Fixture {
     refused_root_setup(dependent, false).0
 }
 
-/// A refused root whose retirement can cover a separate accepted remote edit.
 fn refused_root_with_accepted_prefix() -> (Fixture, LiveUpdateReceipt) {
     let (f, covered) = refused_root_setup(false, true);
     (f, covered.unwrap())
@@ -817,15 +788,13 @@ fn refused_root_setup(dependent: bool, accepted_prefix: bool) -> (Fixture, Optio
     (f, covered)
 }
 
-/// Release the root once parked, and bring its document back with its file
-/// at the local state.
 fn release_and_return(f: &mut Fixture) {
     release_parked(f);
     returned(f);
     file_matches_local(f, "returned");
 }
 
-/// Sol's round 4a ruling: a refusal belongs to its delivery, never to the
+/// A refusal belongs to its delivery, never to the
 /// document's lineage. A native update and the owner write that built on it,
 /// refused through the host's refusal path; an adoption seed refused the same
 /// way; and an update enrollment recovery ended: each releases, and a
@@ -874,7 +843,6 @@ fn a_refusal_ends_its_delivery_and_never_its_lineage() {
     }
 }
 
-/// The append key a native source's entry carries.
 fn native_append_key(source: &owner_outbox::OwnerOutboxNativeSource) -> String {
     match source.origin {
         owner_outbox::OwnerOutboxNativeOrigin::AdoptionSeed => format!(
@@ -885,7 +853,6 @@ fn native_append_key(source: &owner_outbox::OwnerOutboxNativeSource) -> String {
     }
 }
 
-/// Write `source` and its append key over the entry at `sequence`.
 fn write_source(f: &mut Fixture, sequence: i64, source: &owner_outbox::OwnerOutboxNativeSource) {
     let (key, json) = (native_append_key(source), serde_json::to_string(source).unwrap());
     write(f, &format!(
@@ -1025,7 +992,6 @@ fn only_the_strict_representation_is_refused() {
     }
 }
 
-/// A root whose adoption seed a host refused through the refusal path.
 fn refused_seed() -> Fixture {
     let (mut f, seed, _) = seeded();
     refuse(&mut f, &seed, "terminal-source-refused");
@@ -1035,11 +1001,10 @@ fn refused_seed() -> Fixture {
 /// A damage to a refused seed's proof, and whether release must refuse it.
 type SeedDamage = (&'static str, bool, fn(&mut Fixture));
 
-/// The capture of the activation the entry at sequence 1 names.
 const SEED_CAPTURE: &str = "FROM ydoc_owner_activation_sources WHERE activation_id=(SELECT
     json_extract(native_source_json,'$.adoptionId') FROM owner_ydoc_outbox_entries WHERE sequence=1)";
 
-/// Sol's round 4a ruling: a refused seed has no journal row, so the capture
+/// A refused seed has no journal row, so the capture
 /// of the activation it names is its proof. That activation adopted the
 /// lineage, and its capture is present and holds the seed's native sequence
 /// and full state. Each damage leaves the seed a valid entry under a
@@ -1098,9 +1063,6 @@ fn a_refused_seed_is_proven_by_its_capture() {
     }
 }
 
-/// A root whose seed the relay refused on provenance, quarantining its
-/// outbox. The journal proved the seed absent, so reconciliation abandoned
-/// it, and Stop released the root. Returns the root.
 fn quarantined_seed_released() -> (Fixture, String) {
     let (mut f, seed, _) = seeded();
     let root = f.cut.adoption_id.clone();
@@ -1111,7 +1073,7 @@ fn quarantined_seed_released() -> (Fixture, String) {
     (f, root)
 }
 
-/// Sol's B1: the successor reopens the outbox its predecessor's refused seed
+/// The successor reopens the outbox its predecessor's refused seed
 /// quarantined, in its adoption: active again, with its entries and sequence
 /// kept and the successor's seed next. A failure before commit rolls the
 /// reopening back with the adoption, and a replay after a lost reply writes
@@ -1146,7 +1108,6 @@ fn a_successor_reopens_the_outbox_a_refused_seed_quarantined() {
     assert_eq!(rows(&f, &SUCCESSION_WRITES), written, "a replay adds no activation and no seed");
 }
 
-/// The relay journal's admission of one accepted owner delivery.
 fn owner_event(binding: &LiveObjectBinding, receipt: LiveUpdateReceipt, update_bytes: Vec<u8>) -> AdmittedLiveUpdate {
     AdmittedLiveUpdate {
         metadata: AdmittedLiveUpdateMetadata {
@@ -1166,8 +1127,6 @@ fn owner_event(binding: &LiveObjectBinding, receipt: LiveUpdateReceipt, update_b
     }
 }
 
-/// The enrolled owner's draft `index` over the local state, through the draft
-/// writer, with the accepted state it was written at and its update.
 fn owner_draft(
     store: &mut EngineStore,
     binding: &LiveObjectBinding,
@@ -1265,8 +1224,6 @@ fn owner_drafts(store: &mut EngineStore, binding: &LiveObjectBinding, plan: &[bo
     events
 }
 
-/// A document whose enrolled owner delivered `plan`'s drafts before its host
-/// registered it, with the cut the relay's journal gives its first adoption.
 fn enrolled_drafts(plan: &[bool]) -> Fixture {
     let mut events = Vec::new();
     let mut f = Fixture::new_before_host(|store, binding| events = owner_drafts(store, binding, plan));
@@ -1279,7 +1236,6 @@ fn enrolled_drafts(plan: &[bool]) -> Fixture {
     f
 }
 
-/// The outbox sequence an activation's adoption covered.
 fn covered_sequence(f: &Fixture, id: &str) -> i64 {
     f.store
         .read_with(|conn| {
@@ -1288,7 +1244,6 @@ fn covered_sequence(f: &Fixture, id: &str) -> i64 {
         .unwrap()
 }
 
-/// Reopen the fixture's store, as after a restart.
 fn reopen(f: &mut Fixture) {
     f.store = EngineStore::open(&f._scratch.join("engine.db"), 0).unwrap();
 }
@@ -1385,7 +1340,7 @@ fn a_first_adoption_refuses_what_its_coverage_cannot_account_for() {
     }
 }
 
-/// Sol's merge-review finding 2: the successor of a lineage whose baseline
+/// The successor of a lineage whose baseline
 /// the reader built adopts its released prefix, its accepted state at B
 /// replayed from that baseline by the reader's rule.
 #[test]
@@ -1408,7 +1363,7 @@ fn a_reader_built_lineage_adopts_its_successor() {
     assert!(current);
 }
 
-/// Sol's merge-review finding 2: a lineage whose baseline the reader built
+/// A lineage whose baseline the reader built
 /// writes its checkpoint at the native cadence, and its accepted state
 /// replays from that checkpoint.
 #[test]
@@ -1476,5 +1431,4 @@ fn a_reader_built_lineage_checkpoints_at_the_native_cadence() {
 /// refuse it, and whether release must.
 type RefusalDamage = (&'static str, bool, bool, fn(&mut Fixture));
 
-/// A fixture whose one entry a host refused.
 type RefusedFixture = (&'static str, fn() -> Fixture);

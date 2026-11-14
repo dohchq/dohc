@@ -1,4 +1,5 @@
 import { randomUUID, type BinaryLike } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import {
   parseLiveTicketAudience,
   parseLiveTicketToken,
@@ -17,7 +18,7 @@ import { hashLiveTicketToken, mintLiveTicketToken } from "./liveTicketSecurity.j
 export interface LiveTicketOptions {
   readonly storage: Pick<
     SyncRelayStorage,
-    "mintLiveTicket" | "readLiveTicketTarget" | "redeemLiveTicket"
+    "mintLiveTicket" | "readLiveTicketTarget" | "redeemLiveTicket" | "resolveLiveObjectHostBinding"
   >;
   readonly audience: string;
   readonly key: BinaryLike;
@@ -79,8 +80,31 @@ export function createLiveTickets(options: LiveTicketOptions) {
         return null;
       }
       try {
-        const report = await readReport(scope, objectId, signal);
-        if (report === null) return null;
+        signal?.throwIfAborted();
+        const before = storage.resolveLiveObjectHostBinding(scope, objectId);
+        // A live host that changed or went away while this ran, as when it reconnects, is a
+        // failure to ask again after, not a refusal. The link route answers the same before minting.
+        const refuseUnlessHostChanged = (report: TicketHostReport | null) => {
+          if (before.kind !== "current") return null;
+          const now = storage.resolveLiveObjectHostBinding(scope, objectId);
+          const changed =
+            now.kind === "current"
+              ? report === null ||
+                !isDeepStrictEqual({ ...now.binding }, { ...report.binding }) ||
+                !isDeepStrictEqual({ ...now.host }, { ...report.connection })
+              : now.reason === "host-unavailable" || now.reason === "stale-document";
+          if (changed) throw new Error("The live host changed.");
+          return null;
+        };
+        const candidate = await currentBinding({ ...scope }, objectId, signal);
+        signal?.throwIfAborted();
+        if (candidate === null) return refuseUnlessHostChanged(null);
+        let report: TicketHostReport;
+        try {
+          report = snapshotTicketHostReport(candidate);
+        } catch {
+          return null;
+        }
         const token = mintLiveTicketToken(entropy);
         const tokenHash = hashLiveTicketToken(token, key);
         const minted = storage.mintLiveTicket({
@@ -91,7 +115,7 @@ export function createLiveTickets(options: LiveTicketOptions) {
           ticketId: newTicketId(),
           tokenHash,
         });
-        return minted === null ? null : { token, ...minted };
+        return minted === null ? refuseUnlessHostChanged(report) : { token, ...minted };
       } catch {
         throw new Error("Live-ticket operation failed.");
       }

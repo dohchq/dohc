@@ -39,9 +39,6 @@ const OWNER_TOKEN = "test:e2e-granter",
   RECIPIENT_TOKEN = "test:e2e-recipient";
 const OWNER_EMAIL = "e2e-granter@dohc.test",
   RECIPIENT_EMAIL = "e2e-recipient@dohc.test";
-// The Collection opens on a board. These specs follow a record with nothing typed in it through the relay, and in a
-// table New record starts a row that makes no record until it holds a value. Beside a board it makes the record at once.
-// Its second view is a table, where one step types a record in the new row.
 const SCHEMA =
   "name: Tasks\nfields:\n  Task:\n    type: text\n  Status:\n    type: text\nviews:\n  - name: Board\n    kind: board\n    groupBy: Status\n  - name: Table\n    kind: table\n";
 type Op = { originId: string; opKind: string; payload: Record<string, unknown> };
@@ -75,8 +72,8 @@ async function openCollection(page: Page) {
  * is named for its record, which this Collection names by its file, so the helper waits for the new record's panel
  * before it presses Open as page. Pressed sooner, it opens the page of the record before.
  *
- * It ends with the record's page showing in its tab, which is where New record used to leave these specs. The panel
- * is not on screen then: it belongs to the Collection's tab, and shows again when a spec goes back to the Collection.
+ * It ends with the record's page showing in its tab. The panel is not on screen then: it belongs to the Collection's
+ * tab, and shows again when a spec goes back to the Collection.
  */
 async function newRecordPage(page: Page, file = "Untitled") {
   await page.getByTestId("collection-new-record").click();
@@ -562,7 +559,6 @@ test("@two-client an Edit recipient's new record opens immediately, becomes edit
             2,
           ),
         });
-        // One run stops live editing for the page, then removes it.
         const restored = await stopAndRestoreRecipient(fixture.owner.page);
         await test.info().attach("recipient-only after restore state", {
           contentType: "application/json",
@@ -860,8 +856,6 @@ test("@two-client a recipient restarts after a lost creation acknowledgement and
         body: JSON.stringify(responses, null, 2),
       });
 
-      // A recipient's new row, through the relay: the task typed in the table's row makes a record on Enter, and both
-      // the creation and the field write of what was typed reach the owner.
       await openCollection(page);
       await page
         .getByTestId("collection-view-switcher")
@@ -881,7 +875,6 @@ test("@two-client a recipient restarts after a lost creation acknowledgement and
           timeout: 120_000,
         })
         .toEqual([created!.id, typed.id].sort());
-      // The row saved, so its record has a row in the table, and no file tab opened for it.
       await expect(
         page.getByRole("grid").getByRole("button", { name: "Open Untitled 2", exact: true }),
       ).toBeVisible({ timeout: 120_000 });
@@ -914,7 +907,6 @@ test("@two-client a recipient's record survives a restart while the relay is unr
           refusedBeforeRelaunch = refusedWrites;
         })
       ).page;
-      // The restarted app tries to send the draft once its view is ready. The draft stays after that try fails.
       await expect
         .poll(() => refusedWrites, { timeout: 120_000 })
         .toBeGreaterThan(refusedBeforeRelaunch);

@@ -50,13 +50,11 @@ it("keeps a server-held refusal and its copy across a relay restart, and refuses
       checkpointDigest: null,
     }),
   ).toBe(true);
-  // The same refusal recorded again, as when its quarantine is written again, changes nothing.
   refuse("refusal-1");
   expect(f.storage.serviceKeptEditsHeld(document, identity)).toBe(false);
   refuse("refusal-2");
   const reopened = openSyncRelayStorage(f.path, f.config);
   try {
-    // The second refusal is not covered by the copy of the first.
     expect(reopened.listServiceKeptEdits(scope.workspaceId)).toEqual({
       keptEdits: [
         {
@@ -85,11 +83,6 @@ it("keeps a server-held refusal and its copy across a relay restart, and refuses
   expect(f.raw.prepare(`SELECT count(*) AS count FROM ${SERVICE_KEPT_EDITS}`).get()!.count).toBe(1);
 });
 
-// Proves: a row names the store that holds its queue, and only rows of the
-// attached store's identity hold the document. A later store's queue with the
-// same outbox ID, as after re-adopting the same lineage and base, is a row of
-// its own: recording, forgetting, ending a Try again of or copying either one
-// leaves the other as it was, and each refusal is found by its generation.
 it("keeps one row per store for queues that share an outbox ID", async () => {
   const f = await ticketFixture();
   cleanups.push(f.close);
@@ -107,9 +100,7 @@ it("keeps one row per store for queues that share an outbox ID", async () => {
   refuse(identity, "refusal-1");
   const old = f.storage.readServiceKeptEdits(queue("outbox-x"))!;
   expect(f.storage.serviceKeptEditsHeld(document, identity)).toBe(true);
-  // After a rotation the old row holds nothing under the new identity.
   expect(f.storage.serviceKeptEditsHeld(document, rotated)).toBe(false);
-  // The same refusal key from the later store is that store's refusal.
   refuse(rotated, "refusal-1");
   const later = f.storage.readServiceKeptEdits(queue("outbox-x", rotated))!;
   expect(later.generation).not.toBe(old.generation);
@@ -131,7 +122,6 @@ it("keeps one row per store for queues that share an outbox ID", async () => {
       generation: later.generation,
     }),
   ).toBeNull();
-  // Copying the later store's row leaves the old one uncopied; a Try again of it ends only its own.
   expect(
     f.storage.markServiceKeptEditsRetrying({
       workspaceId: scope.workspaceId,
@@ -153,13 +143,7 @@ it("keeps one row per store for queues that share an outbox ID", async () => {
     retrying: true,
   });
   f.storage.endServiceKeptEditsRetry(queue("outbox-x"));
-  // Forgetting the later store's queue, as when it delivers again, keeps the old row.
   f.storage.forgetServiceKeptEdits(queue("outbox-x", rotated));
   expect(f.storage.readServiceKeptEdits(queue("outbox-x"))).toEqual(old);
   expect(f.storage.serviceKeptEditsHeld(document, rotated)).toBe(false);
 });
-
-// Proves: while a queue stays frozen at its owner's adoption seed, a copy
-// counts only for the checkpoint a copy reads now. A copy confirmed before a
-// later accepted edit holds the document and keeps its row until a copy of
-// the newer checkpoint; a copy made after the edit lets it go at once.

@@ -163,7 +163,6 @@ describe("makeEmojiPlugin — appendTransaction auto-insert gating", () => {
   });
 
   it("does not replace a pre-existing literal shortcode on an unrelated doc change with the cursor after it", () => {
-    // "hi :smile: yo" — the literal is intentionally left in prose.
     const editor = makeEditor("<p>hi :smile: yo</p>");
 
     // Cursor sits right after the literal ':smile:' (absolute pos 11: para
@@ -175,8 +174,8 @@ describe("makeEmojiPlugin — appendTransaction auto-insert gating", () => {
 
     // A doc-changing transaction elsewhere (mimicking a remote/collab edit or
     // an edit further along) that keeps the collapsed cursor parked after the
-    // literal. Pre-fix, any docChanged with the cursor after a complete
-    // shortcode triggered the auto-insert; the step-gate now blocks it.
+    // literal. Without the step-gate, any docChanged with the cursor after a
+    // complete shortcode would trigger the auto-insert.
     const endPos = editor.state.doc.content.size - 1;
     const tr = editor.state.tr.insertText("Z", endPos);
     tr.setSelection(TextSelection.create(tr.doc, cursor));

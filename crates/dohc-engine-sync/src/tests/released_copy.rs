@@ -1,6 +1,6 @@
-//! Plan r3, Round 2, "Copy creation and retry": the owner's copy of what a
-//! hosted replica holds for a released chain, made once per attempt through
-//! faults, lost responses, a person's later changes and another device.
+//! The owner's copy of what a hosted replica holds for a released chain,
+//! made once per attempt through faults, lost responses, a person's later
+//! changes and another device.
 
 use super::*;
 use dohc_engine_collab::live_update_application::{
@@ -11,7 +11,6 @@ use dohc_engine_collab::live_update_application::{
 const PATH: &str = "notes/plan.md";
 const MARKDOWN: &str = "# Plan\n\nKept from the stopped session.\n";
 
-/// An agent that works for the owner.
 fn agent(id: &str) -> RetainedAuthors {
     RetainedAuthors::credited(
         Some(id),
@@ -26,7 +25,6 @@ fn agent(id: &str) -> RetainedAuthors {
     .unwrap()
 }
 
-/// The binding a hold of `covered` names.
 fn binding_of(covered: Vec<RetainedContribution>) -> ReleasedLineageBinding {
     let commitment = UnprovenCommitment::of(covered).expect("covered work");
     ReleasedLineageBinding::from_json(&json!({
@@ -57,8 +55,6 @@ fn merged() -> Vec<RetainedContribution> {
     }]
 }
 
-/// Work the held document already holds: covered, though merging adds
-/// nothing of it.
 fn contained() -> RetainedContribution {
     RetainedContribution::Carried {
         delivery_id: "delivery-0".into(),
@@ -86,7 +82,6 @@ fn request(markdown: &str) -> KeepRetainedVersion {
     }
 }
 
-/// The agents an author list names, in its order.
 fn agents(author_json: &str) -> Vec<String> {
     let authors: serde_json::Value = serde_json::from_str(author_json).expect("authors");
     authors
@@ -162,7 +157,6 @@ fn count(store: &EngineStore, sql: &str, value: &str) -> i64 {
         .expect("count")
 }
 
-/// Every row `sql` selects, each column as it is stored.
 fn rows(store: &EngineStore, sql: &str) -> Vec<String> {
     store
         .read_with(|conn| {
@@ -250,9 +244,9 @@ fn rewrite(store: &mut EngineStore, object_id: &str, path: &str, text: &str, mom
         .expect("edit copy");
 }
 
-/// Plan r3: the copy keeps the merged projection as an ordinary file beside
-/// the held document, journaled for the owner's relay, and leaves the
-/// document's own state byte for byte as it was.
+/// The copy keeps the merged projection as an ordinary file beside the held
+/// document, journaled for the owner's relay, and leaves the document's own
+/// state byte for byte as it was.
 #[test]
 fn a_copy_keeps_the_projection_without_touching_the_held_document() {
     let (_scratch, mut store) = owner_device("local");
@@ -293,8 +287,6 @@ fn a_copy_keeps_the_projection_without_touching_the_held_document() {
     );
     assert_eq!(copy.merged_contribution_ids, merged());
     assert_eq!(copy.resolution, None);
-    // The copy's creation names the binding and every covered author, as
-    // its decision does.
     let (correlation, authors, decided): (Option<String>, Option<String>, String) = store
         .read_with(|conn| {
             conn.query_row(
@@ -320,8 +312,8 @@ fn a_copy_keeps_the_projection_without_touching_the_held_document() {
     );
 }
 
-/// Plan r3: stored bytes that are not the projection roll back the copy and
-/// its decision together. The store already holds a damaged blob under the
+/// Stored bytes that are not the projection roll back the copy and its
+/// decision together. The store already holds a damaged blob under the
 /// projection's digest, so the write reuses it.
 #[test]
 fn a_stored_byte_mismatch_rolls_back_the_copy_and_its_decision() {
@@ -377,9 +369,9 @@ fn a_stored_byte_mismatch_rolls_back_the_copy_and_its_decision() {
     );
 }
 
-/// Plan r3: a crash before commit leaves neither the copy nor its decision;
-/// a crash after commit, whose response is lost, leaves both, and the retry
-/// answers that same copy without making another.
+/// A crash before commit leaves neither the copy nor its decision; a crash
+/// after commit, whose response is lost, leaves both, and the retry answers
+/// that same copy without making another.
 #[test]
 fn the_copy_and_its_decision_survive_faults_and_lost_responses() {
     let (_scratch, mut store) = owner_device("local");
@@ -419,9 +411,9 @@ fn the_copy_and_its_decision_survive_faults_and_lost_responses() {
     assert_eq!(journaled(&store, &retried.recovery_moment_id), 1);
 }
 
-/// Plan r3: after a person renames, edits and deletes the copy, keeping the
-/// same binding answers the copy it made, at the path it was made at, and
-/// never makes it again.
+/// After a person renames, edits and deletes the copy, keeping the same
+/// binding answers the copy it made, at the path it was made at, and never
+/// makes it again.
 #[test]
 fn retries_answer_the_same_copy_after_rename_edit_and_deletion() {
     let (_scratch, mut store) = owner_device("local");
@@ -500,7 +492,7 @@ fn retries_answer_the_same_copy_after_rename_edit_and_deletion() {
     );
 }
 
-/// Plan r3: a push that fails or loses its answer, an acknowledged push and a
+/// A push that fails or loses its answer, an acknowledged push and a
 /// redundant publication each answer the same attempt. Only a durable
 /// refusal of an unresolved attempt makes the next one, and the refused copy
 /// stays. A terminal stale decision makes none.
@@ -583,9 +575,9 @@ fn a_terminal_decision_permits_no_other_attempt() {
     assert_eq!(decisions(&store), 1);
 }
 
-/// Plan r3: another binding's text never reuses this binding's decision, and
-/// a request that disagrees with the decision kept for its binding is
-/// refused rather than answered with the other text.
+/// Another binding's text never reuses this binding's decision, and a
+/// request that disagrees with the decision kept for its binding is refused
+/// rather than answered with the other text.
 #[test]
 fn a_binding_keeps_one_text() {
     let (_scratch, mut store) = owner_device("local");
@@ -597,7 +589,7 @@ fn a_binding_keeps_one_text() {
     assert_eq!(decisions(&store), 1);
 }
 
-/// Plan r3: a copy past the in-band limit is kept and journaled whole.
+/// A copy past the in-band limit is kept and journaled whole.
 #[test]
 fn a_copy_past_the_inband_limit_is_kept_whole() {
     let (_scratch, mut store) = owner_device("local");
@@ -621,8 +613,8 @@ fn a_copy_past_the_inband_limit_is_kept_whole() {
     assert_eq!(length, markdown.len() as i64);
 }
 
-/// Plan r3: only the owner's ordinary file lane publishes a copy. A
-/// workspace that does not sync refuses before anything is written.
+/// Only the owner's ordinary file lane publishes a copy. A workspace that
+/// does not sync refuses before anything is written.
 #[test]
 fn only_the_owner_lane_keeps_a_copy() {
     let (_scratch, _path, mut unsynced) = open_store();
@@ -643,8 +635,6 @@ fn only_the_owner_lane_keeps_a_copy() {
     );
 }
 
-/// The probe and the copy's creation `store` journaled as `origin`, as the
-/// feed serves them, the creation at `relay_seq`.
 fn served(
     store: &EngineStore,
     origin: &str,
@@ -683,12 +673,12 @@ fn accepted(store: &EngineStore) -> Vec<String> {
     )
 }
 
-/// Plan r3, two devices, pull before publish: both keep the same binding,
-/// and one then receives the other's accepted creation. It applies as a
-/// receipt of the copy already there: no second moment, no new object, the
-/// person's later edit stays, and the accepted coordinate is recorded. The
-/// other device, already holding its own accepted creation, takes the
-/// second one's publication the same way.
+/// Two devices, pull before publish: both keep the same binding, and one
+/// then receives the other's accepted creation. It applies as a receipt of
+/// the copy already there: no second moment, no new object, the person's
+/// later edit stays, and the accepted coordinate is recorded. The other
+/// device, already holding its own accepted creation, takes the second one's
+/// publication the same way.
 #[test]
 fn identical_creations_converge_when_one_device_pulls_before_publishing() {
     let (_a_scratch, mut device_a) = owner_device("device-a");
@@ -742,7 +732,6 @@ fn identical_creations_converge_when_one_device_pulls_before_publishing() {
         (0, false, CopyPublicationState::Accepted, Some(7))
     );
 
-    // A sees its own creation come back first, then B's redundant one.
     device_a
         .write_with(&NoFaults, |tx| {
             crate::ydoc_recovery::record_released_copy_echo_in_tx(tx, &creation)
@@ -760,8 +749,6 @@ fn identical_creations_converge_when_one_device_pulls_before_publishing() {
     assert_eq!(history(&device_a), 1);
 }
 
-/// The owner's log as [`FakeRelay`] answers it, naming `redundant` for the
-/// ops a push carries.
 struct RedundantRelay {
     inner: FakeRelay,
     redundant: Vec<RedundantRecovery>,
@@ -853,9 +840,9 @@ impl RelayTransport for RedundantRelay {
     }
 }
 
-/// Plan r3, two devices, both publish: the relay answers the second
-/// device's push with the first accepted creation. That device records it
-/// and allocates nothing; a later keep answers the same attempt as accepted.
+/// Two devices, both publish: the relay answers the second device's push
+/// with the first accepted creation. That device records it and allocates
+/// nothing; a later keep answers the same attempt as accepted.
 #[test]
 fn a_redundant_publication_adopts_the_accepted_creation() {
     let (_scratch, mut device_b) = owner_device("device-b");
@@ -941,8 +928,8 @@ fn keeping_a_copy_already_received_reuses_it() {
     );
 }
 
-/// Plan r3: different bytes, correlation or authors under the same identity
-/// are not the same copy, and keep the ordinary duplicate refusal.
+/// Different bytes, correlation or authors under the same identity are not
+/// the same copy, and keep the ordinary duplicate refusal.
 #[test]
 fn a_different_creation_under_the_same_identity_is_not_equivalent() {
     let (_b_scratch, mut device_b) = owner_device("device-b");
@@ -1019,9 +1006,8 @@ fn a_different_creation_under_the_same_identity_is_not_equivalent() {
         equivalent(&"e".repeat(64), Some(&kept), false),
         TxnOutcome::Committed(false)
     );
-    // Sol's Ruling A: retained authorship is part of the copy. Authors left
-    // out, one dropped, another added or attribution withheld are another
-    // copy's.
+    // Retained authorship is part of the copy. Authors left out, one dropped,
+    // another added or attribution withheld are another copy's.
     let mut fewer = kept.clone();
     fewer.as_array_mut().unwrap().pop();
     let mut more = kept.clone();
@@ -1041,9 +1027,9 @@ fn a_different_creation_under_the_same_identity_is_not_equivalent() {
     );
 }
 
-/// Sol's Ruling A: the copy credits every author whose work the binding
-/// covers, in its creation and its decision: work the held document already
-/// held included, not only what merging added.
+/// The copy credits every author whose work the binding covers, in its
+/// creation and its decision: work the held document already held included,
+/// not only what merging added.
 #[test]
 fn the_copy_credits_already_contained_work_too() {
     let (_scratch, mut store) = owner_device("local");
@@ -1071,10 +1057,10 @@ fn the_copy_credits_already_contained_work_too() {
     );
 }
 
-/// Sol's Ruling A: a copy credits only what the binding commits to. Covered
-/// lists that leave work out, credit it to someone else, or name another
-/// namespace, a merged contribution none of them covers, and a binding whose
-/// coverage does not read are refused before anything is written.
+/// A copy credits only what the binding commits to. Covered lists that leave
+/// work out, credit it to someone else, or name another namespace, a merged
+/// contribution none of them covers, and a binding whose coverage does not
+/// read are refused before anything is written.
 #[test]
 fn covered_work_must_be_exactly_what_the_binding_commits_to() {
     let (_scratch, mut store) = owner_device("local");
@@ -1150,9 +1136,8 @@ fn covered_work_must_be_exactly_what_the_binding_commits_to() {
     );
 }
 
-/// Sol's decision-table note: a decision whose columns disagree with each
-/// other or with its key reads as corruption, never as the attempt that
-/// stands.
+/// A decision whose columns disagree with each other or with its key reads
+/// as corruption, never as the attempt that stands.
 #[test]
 fn a_decision_that_does_not_read_is_corruption() {
     let damages = [

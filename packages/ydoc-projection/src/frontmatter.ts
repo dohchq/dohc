@@ -486,7 +486,6 @@ export function keptFrontmatter(
         : undefined;
     }
     if (!/^(?:\r?\n)*$/u.test(block.rest)) return undefined;
-    // Each value renders once and compares as its canonical entry.
     const rendered = renderedEntries(current);
     const readsAsCurrent = (parsed: Map<string, string>): boolean =>
       parsed.size === rendered.size &&

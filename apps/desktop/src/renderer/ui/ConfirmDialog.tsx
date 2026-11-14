@@ -16,7 +16,6 @@ type Intent = "default" | "danger";
 
 type ConfirmDialogProps = {
   title: string;
-  /** The glyph that names the action, such as Trash2 for a delete. */
   icon: LucideIcon;
   /** The sentences a screen reader reads after the title. */
   children: ReactNode;

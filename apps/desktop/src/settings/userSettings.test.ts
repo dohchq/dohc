@@ -11,6 +11,7 @@ import {
   AgentColors,
   clampZoomLevel,
   firstAgent,
+  forwardingAgents,
   agentHandle,
   agentIdsToWake,
   agentMentionCandidates,
@@ -100,7 +101,6 @@ describe("desktop user settings model", () => {
       editor: DEFAULT_USER_SETTINGS.editor,
     };
 
-    // The stored appearance choices survive; only the new field fills in.
     expect(DesktopUserSettings.parse(legacySettings).appearance).toEqual({
       ...DEFAULT_USER_SETTINGS.appearance,
       themeMode: "dark",
@@ -175,7 +175,6 @@ describe("desktop user settings model", () => {
     ]) {
       expect(AgentsSettings.safeParse({ [id]: agent }).success, id).toBe(false);
     }
-    // A personal agent's id starts with p-; an id that only starts with p is yours.
     expect(AgentsSettings.safeParse({ planner: agent, p1: { ...agent, name: "P1" } }).success).toBe(
       true,
     );
@@ -238,7 +237,6 @@ describe("desktop user settings model", () => {
       "claude-code",
       "codex",
     ]);
-    // An agent you run, a name inside code, and @agent wake nobody.
     expect(agentIdsToWake(settings, "@Scout `@Nova` @agent", null)).toEqual([]);
     expect(agentIdsToWake(settings, "Claude Code, please", null)).toEqual([]);
   });
@@ -252,16 +250,12 @@ describe("desktop user settings model", () => {
         terminal,
       },
     };
-    // A launched agent that is off still gets a run, so dispatch says it is off.
     expect(agentIdsToWake(settings, "hello", "codex")).toEqual(["codex"]);
-    // An agent this computer doesn't list gets one too, so its notice says to set it up.
     expect(agentIdsToWake(settings, "hello", "elsewhere")).toEqual(["elsewhere"]);
     expect(agentIdsToWake(settings, "hello @Terminal", "terminal")).toEqual([]);
     expect(agentIdsToWake(settings, "hello", "p-a1b2")).toEqual([]);
-    // Naming the DM's own agent wakes it once.
     expect(agentIdsToWake(settings, "@Nova and @Codex", "default")).toEqual(["default", "codex"]);
     expect(agentIdsToWake(settings, "@Nova", "terminal")).toEqual(["default"]);
-    // A reply wakes the agent it answers when dohc starts it, once.
     expect(agentIdsToWake(settings, "Friday", null, "codex")).toEqual(["codex"]);
     expect(agentIdsToWake(settings, "@Codex, Friday", null, "codex")).toEqual(["codex"]);
     expect(agentIdsToWake(settings, "Friday", null, "terminal")).toEqual([]);
@@ -323,7 +317,6 @@ describe("desktop user settings model", () => {
     expect(agentIdsToWake(settings, "@CodexWork, look", null)).toEqual(["codex-work"]);
     expect(agentIdsToWake(settings, "@codex.", null)).toEqual(["codex"]);
     expect(agentIdsToWake(settings, "@R2-D2- and @🦊", null)).toEqual(["droid"]);
-    // Only an agent with a handle is offered after @.
     expect(
       agentMentionCandidates(listAgents(settings)).map(({ id, handle }) => [id, handle]),
     ).toEqual([
@@ -331,7 +324,6 @@ describe("desktop user settings model", () => {
       ["agent:codex-work", "CodexWork"],
       ["agent:droid", "R2-D2"],
     ]);
-    // Names a message reads as one handle are one name.
     for (const [first, second] of [
       ["Nova", "Nova."],
       ["Codex Work", "Codex (Work)"],
@@ -367,6 +359,73 @@ describe("desktop user settings model", () => {
     ]);
   });
 
+  it("forwards a workspace's messages to each agent that is on, has a thread, and serves it", () => {
+    const { launch: _launch, ...unlaunched } = testAgent();
+    const thread = (id: string) => ({ thread: { tool: "t3-code" as const, id } });
+    const agents = AgentsSettings.parse({
+      chief: {
+        ...unlaunched,
+        name: "Chief",
+        enabled: true,
+        ...thread("t-1"),
+        workspaces: ["ws-1", "ws-2"],
+      },
+      paused: {
+        ...unlaunched,
+        name: "Paused",
+        enabled: false,
+        ...thread("t-2"),
+        workspaces: ["ws-1"],
+      },
+      elsewhere: {
+        ...unlaunched,
+        name: "Elsewhere",
+        enabled: true,
+        ...thread("t-3"),
+        workspaces: ["ws-2"],
+      },
+      nowhere: { ...unlaunched, name: "Nowhere", enabled: true, ...thread("t-4") },
+      started: testAgent({ name: "Started", enabled: true }),
+      connected: { ...unlaunched, name: "Connected", enabled: false },
+    });
+
+    expect(forwardingAgents({ agents }, "ws-1").map(({ id }) => id)).toEqual(["chief"]);
+    expect(forwardingAgents({ agents }, "ws-2").map(({ id }) => id)).toEqual([
+      "chief",
+      "elsewhere",
+    ]);
+    // An agent with a thread posts as itself, like any agent dohc does not start.
+    expect(agentYouRun({ agents }, "chief")?.name).toBe("Chief");
+    expect(agentIdsToWake({ agents }, "@Chief hello", "chief")).toEqual([]);
+  });
+
+  it("gives each agent its own thread", () => {
+    const { launch: _launch, ...unlaunched } = testAgent();
+    const onThread = (name: string, id: string) => ({
+      ...unlaunched,
+      name,
+      enabled: true,
+      thread: { tool: "t3-code" as const, id },
+      workspaces: ["ws-1"],
+    });
+
+    expect(
+      AgentsSettings.safeParse({ chief: onThread("Chief", "t-1"), scout: onThread("Scout", "t-2") })
+        .success,
+    ).toBe(true);
+    const shared = AgentsSettings.safeParse({
+      chief: onThread("Chief", "t-1"),
+      scout: onThread("Scout", "t-1"),
+    });
+    expect(shared.success).toBe(false);
+    expect(shared.error?.issues[0]?.message).toBe("Give each agent its own thread.");
+    // Sound alone, so Settings says what it clashes with.
+    expect(agentProblem("scout", onThread("Scout", "t-1"))).toBe(
+      "Another agent has this name or this thread.",
+    );
+    expect(agentProblem("agent-b", testAgent())).toBe("Another agent has this name.");
+  });
+
   it("says what is wrong with an agent entry in one sentence about its first problem", () => {
     const { name: _name, ...nameless } = testAgent();
     const { launch: _launch, ...unlaunched } = testAgent();
@@ -394,6 +453,37 @@ describe("desktop user settings model", () => {
         "`timeoutMinutes` must be a whole number from 1 to 1440.",
       ],
       ["agent-b", { ...testAgent(), launch: { tool: "cursor" } }, "dohc can't read `launch`."],
+      ["agent-b", { ...unlaunched, thread: { tool: "t3" } }, "dohc can't read `thread`."],
+      [
+        "agent-b",
+        { ...unlaunched, thread: { tool: "t3-code", id: "a b" } },
+        "dohc can't read `thread`.",
+      ],
+      [
+        "agent-b",
+        { ...testAgent(), thread: { tool: "t3-code", id: "t-1" } },
+        "An agent with a `thread` has no `launch`. Its tool runs it.",
+      ],
+      [
+        "agent-b",
+        { ...unlaunched, enabled: false, note: "Post here." },
+        "`whileBusy`, `note` and `workspaces` need a `thread`.",
+      ],
+      [
+        "agent-b",
+        { ...unlaunched, thread: { tool: "t3-code", id: "t-1" }, whileBusy: "wait" },
+        "`whileBusy` must be line or steer.",
+      ],
+      [
+        "agent-b",
+        { ...unlaunched, thread: { tool: "t3-code", id: "t-1" }, note: "" },
+        "`note` must be text of 1 to 4000 characters.",
+      ],
+      [
+        "agent-b",
+        { ...unlaunched, thread: { tool: "t3-code", id: "t-1" }, workspaces: ["Not An Id"] },
+        "`workspaces` must be a list of workspace ids.",
+      ],
       ["agent-b", { ...testAgent(), color: "teal" }, "dohc doesn't use `color`."],
       ["agent-b", ["Nova"], "This entry must be an object, like the other agents."],
       ["agent-b", null, "This entry must be an object, like the other agents."],
@@ -442,7 +532,6 @@ describe("desktop user settings model", () => {
 
   it("gives the first agent the default id, and each next one an id and a name no agent has", () => {
     expect(newAgentId([], "codex")).toBe("default");
-    // An id the file holds for an entry dohc could not use is taken too.
     expect(newAgentId(["default", "codex", "codex-2"], "codex")).toBe("codex-3");
     const agents = { default: testAgent({ name: "Codex" }), other: testAgent({ name: "codex 2" }) };
     expect(newAgentName(agents, "Codex")).toBe("Codex 3");
@@ -472,7 +561,6 @@ describe("desktop user settings model", () => {
   it("adds the default agent when there is none, and changes the first agent dohc starts once there is one", () => {
     const add = (settings: DesktopUserSettings) =>
       withAgentDohcStarts(settings, (current) => current ?? testAgent({ name: "Nova" }));
-    // Two saves made from the same settings add one agent.
     expect(add(DEFAULT_USER_SETTINGS)).toEqual(add(DEFAULT_USER_SETTINGS));
     const added = add(DEFAULT_USER_SETTINGS);
     expect(Object.keys(added.agents)).toEqual(["default"]);
@@ -600,8 +688,6 @@ describe("desktop user settings store", () => {
       editor: { fontFamily: "Iowan Old Style", fontSize: 17 },
     });
 
-    // A named color, a hue dohc does not have, and a font name that could
-    // close its CSS quotes: each takes its default, and the rest applies.
     await writeFile(
       path,
       JSON.stringify({
@@ -669,7 +755,6 @@ describe("desktop user settings store", () => {
     expect(DEFAULT_USER_SETTINGS.agentRunLogs.keepDays).toBe(30);
     expect(await read(90)).toEqual({ keepDays: 90, ignored: undefined });
     expect(await read("forever")).toEqual({ keepDays: "forever", ignored: undefined });
-    // Shorter than 30 days, or not a whole number of days, falls back to 30.
     for (const keepDays of [7, 30.5, "never"]) {
       expect(await read(keepDays)).toEqual({
         keepDays: 30,
@@ -699,7 +784,6 @@ describe("desktop user settings store", () => {
       current.settings,
     );
     expect(JSON.parse(await readFile(path, "utf8"))).toEqual({
-      // A file without a version is version 1, so the save writes version 2.
       version: 2,
       appearance: { themeMode: "dark", zoomLevel: 2 },
       editor: { fontSize: 99 },
@@ -716,7 +800,6 @@ describe("desktop user settings store", () => {
         { key: "wallpaper", reason: "unknown" },
       ],
     });
-    // Changing the setting dohc could not use replaces the bad value.
     await writeUserSettingsFile(
       root,
       {
@@ -733,7 +816,6 @@ describe("desktop user settings store", () => {
     const path = join(root, USER_SETTINGS_FILE);
     await replaceUserSettingsFile(root, DEFAULT_USER_SETTINGS);
     const seen = (await readUserSettingsFile(root)).settings;
-    // The person switches to dark in the file before Settings hears of it.
     await writeFile(
       path,
       JSON.stringify({
@@ -761,7 +843,6 @@ describe("desktop user settings store", () => {
     const path = join(root, USER_SETTINGS_FILE);
     await replaceUserSettingsFile(root, DEFAULT_USER_SETTINGS);
     const seen = (await readUserSettingsFile(root)).settings;
-    // Another window adds Nova under the id this one is about to use.
     await writeFile(path, JSON.stringify(settingsWithAgent({ name: "Nova" })));
     const before = await readFile(path, "utf8");
     await expect(
@@ -780,7 +861,6 @@ describe("desktop user settings store", () => {
       launch: { tool: "claude", executable: "C:\\Tools\\claude.exe" },
     });
     await replaceUserSettingsFile(root, seen);
-    // Another window switches the agent to Codex before this one saves.
     await writeFile(
       path,
       JSON.stringify(
@@ -798,12 +878,43 @@ describe("desktop user settings store", () => {
     });
   });
 
+  it("says which agent has a thread when two windows connect it at once, and keeps the first", async () => {
+    const root = await createTestScratch("dohc-user-settings-");
+    const path = join(root, USER_SETTINGS_FILE);
+    await writeFile(path, JSON.stringify(DEFAULT_USER_SETTINGS));
+    const { launch: _launch, ...unlaunched } = testAgent();
+    // Both windows read the settings before either saves.
+    const seen = (await readUserSettingsFile(root)).settings;
+    const connecting = (id: string, name: string) => ({
+      ...seen,
+      agents: {
+        ...seen.agents,
+        [id]: {
+          ...unlaunched,
+          name,
+          enabled: true,
+          thread: { tool: "t3-code" as const, id: "t-1" },
+          workspaces: ["ws-1"],
+        },
+      },
+    });
+    await writeUserSettingsFile(root, connecting("chief", "Chief"), seen);
+
+    // A plain error, so its words reach the person as they are.
+    await expect(
+      writeUserSettingsFile(root, connecting("scout", "Scout"), seen),
+    ).rejects.toMatchObject({
+      name: "Error",
+      message: "dohc didn't connect Scout because Chief is already connected to that thread.",
+    });
+    expect(Object.keys(JSON.parse(await readFile(path, "utf8")).agents)).toEqual(["chief"]);
+  });
+
   it("refuses to save into an agent entry dohc cannot use, and leaves that entry as written", async () => {
     const root = await createTestScratch("dohc-user-settings-");
     const path = join(root, USER_SETTINGS_FILE);
     const refusal = `dohc did not save settings. ${path} has an agent "default" that dohc can't use. Fix or remove it in the file, then try again.`;
     const broken = { ...testAgent({ name: "Nova" }), hue: "green" };
-    // More unusable entries than Settings lists, before the one in the way.
     const others = Object.fromEntries(Array.from({ length: 50 }, (_, n) => [`other-${n}`, broken]));
     const agents = { ...others, default: broken };
     await writeFile(path, JSON.stringify({ ...DEFAULT_USER_SETTINGS, agents }));
@@ -815,14 +926,12 @@ describe("desktop user settings store", () => {
       (current) => current ?? testAgent({ name: "Atlas" }),
     );
     await expect(writeUserSettingsFile(root, added, seen.settings)).rejects.toThrow(refusal);
-    // A save queued behind the refused one starts from the agent it added.
     const toggled = withAgentDohcStarts(added, (current) => ({
       ...current!,
       enabled: !current!.enabled,
     }));
     await expect(writeUserSettingsFile(root, toggled, added)).rejects.toThrow(refusal);
     expect(await readFile(path, "utf8")).toBe(before);
-    // Other settings still save around it.
     await writeUserSettingsFile(
       root,
       { ...seen.settings, editor: { ...seen.settings.editor, fontSize: 16 } },
@@ -830,7 +939,6 @@ describe("desktop user settings store", () => {
     );
     expect(JSON.parse(await readFile(path, "utf8")).agents).toEqual(agents);
 
-    // An agent Settings read before the person broke it in the file.
     await writeFile(
       path,
       JSON.stringify({
@@ -912,7 +1020,6 @@ describe("desktop user settings store", () => {
     });
     expect(await reloadUserSettingsFile(root)).toBeNull();
 
-    // Half an edit: the light theme stays, and the warning names the file.
     await writeFile(path, '{ "appearance": { "themeMode": "da');
     const broken = await reloadUserSettingsFile(root);
     expect(broken).toMatchObject({
@@ -956,7 +1063,6 @@ describe("desktop user settings store", () => {
     await writeUserSettingsFile(root, unpinned, pinned);
     expect((await readUserSettingsFile(root)).settings.sidebar.pinnedApps).toEqual({});
 
-    // One workspace's bad pin list turns off only that workspace's pins.
     await writeFile(
       path,
       JSON.stringify({
@@ -971,7 +1077,6 @@ describe("desktop user settings store", () => {
       ],
     });
 
-    // A view this build does not have turns off the order, not the pins.
     await writeFile(
       path,
       JSON.stringify({
@@ -1142,7 +1247,6 @@ it("moves agents to the front of the file and keeps every other entry, a broken 
   const raw = JSON.parse(await readFile(path, "utf8"));
   expect(raw.agents.broken).toEqual({ name: 7 });
   expect(raw.unknownSetting).toBe(true);
-  // Undo passes the order the file had.
   await orderUserSettingsAgents(dir, ["default", "broken", "codex", "extra"]);
   expect(await fileAgents()).toEqual(["default", "broken", "codex", "extra"]);
 });

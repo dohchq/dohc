@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { noticeRowAccessibility, noticeRowHandlers, shortAgo, spokenAgo } from "./rowAccessibility";
-import type { PhoneNotice } from "./sample";
+import {
+  noticeRowAccessibility,
+  noticeRowHandlers,
+  shortAgo,
+  spokenAgo,
+  swipesUnread,
+} from "./rowAccessibility";
+import type { PhoneNotice } from "./phoneNotice";
 
 const base: PhoneNotice = {
   id: "n",
@@ -27,6 +33,26 @@ describe("a Notices row's actions", () => {
     expect(
       noticeRowAccessibility({ ...base, open: "openNote" }).actions.map((action) => action.label),
     ).toEqual(["Open note", "Copy notice details", "Dismiss notice"]);
+  });
+
+  it("gives a Notice from the server Mark read or Mark unread after the worded action, and Done", () => {
+    expect(
+      noticeRowAccessibility({ ...base, relayId: "n", open: "open" }).actions.map(
+        (action) => action.label,
+      ),
+    ).toEqual(["Open", "Mark read", "Copy notice details", "Done"]);
+    expect(
+      noticeRowAccessibility({ ...base, relayId: "n", read: true }).actions.map(
+        (action) => action.label,
+      ),
+    ).toEqual(["Mark unread", "Copy notice details", "Done"]);
+  });
+
+  it("swipes right only to mark a read Notice from the server unread", () => {
+    expect(swipesUnread({ ...base, relayId: "n", read: true })).toBe(true);
+    expect(swipesUnread({ ...base, relayId: "n", read: false })).toBe(false);
+    expect(swipesUnread({ ...base, read: true })).toBe(false);
+    expect(swipesUnread({ ...base, relayId: "n", read: true, dismissible: false })).toBe(false);
   });
 
   it("leaves out what the row doesn't have", () => {
@@ -78,13 +104,22 @@ describe("a Notices row's time", () => {
 // A row once offered Copy with nothing behind it. Every action a row offers, on its pill or in the rotor, needs a
 // handler; a row that can't act on one must not offer it.
 describe("a Notices row's handlers", () => {
-  const all = { open: () => {}, retry: () => {}, copy: () => {}, dismiss: () => {} };
+  const all = {
+    open: () => {},
+    retry: () => {},
+    setRead: () => {},
+    copy: () => {},
+    dismiss: () => {},
+  };
   const rows: PhoneNotice[] = [
     { ...base, open: "open" },
     { ...base, open: "openNote" },
     { ...base, retry: true, failed: true },
     { ...base, dismissible: false },
     base,
+    { ...base, relayId: "n", open: "open" },
+    { ...base, relayId: "n", read: true, elsewhere: true },
+    { ...base, relayId: "n", dismissible: false },
   ];
 
   it("has one for every action the row offers", () => {
@@ -94,6 +129,19 @@ describe("a Notices row's handlers", () => {
         expect(handlers[action.name], `${notice.title}: ${action.label}`).toBeTypeOf("function");
       }
     }
+  });
+
+  it("keeps a failure held on this phone to its own actions, with no mark sent to the server", () => {
+    const handlers = noticeRowHandlers({ ...base, retry: true, failed: true }, all);
+    expect(handlers.read).toBeUndefined();
+  });
+
+  it("marks a Notice from the server the way its control says", () => {
+    const marks: boolean[] = [];
+    const setRead = (read: boolean) => void marks.push(read);
+    noticeRowHandlers({ ...base, relayId: "n" }, { ...all, setRead }).read?.();
+    noticeRowHandlers({ ...base, relayId: "n", read: true }, { ...all, setRead }).read?.();
+    expect(marks).toEqual([true, false]);
   });
 
   it("has none for a worded action the phone can't do yet", () => {

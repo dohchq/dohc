@@ -51,7 +51,7 @@ import type { OwnerLiveDocumentActionDependencies } from "./relaySharesIpc";
 /**
  * Stop and restore removes the page next, so a release that left edits
  * outside the file counts as kept: deferred, with its Markdown write held,
- * or failed after the server stopped live editing (#3129).
+ * or failed after the server stopped live editing.
  */
 export function watchReleaseOutsideFile<Workspace>(
   ownerLiveStop: OwnerLiveDocumentActionDependencies<Workspace>["ownerLiveStop"],

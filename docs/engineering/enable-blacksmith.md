@@ -2,18 +2,15 @@
 
 This procedure is for the maintainer enabling paid CI at launch.
 Blacksmith is optional and off. Without it, PR checks run on GitHub-hosted `ubuntu-24.04` runners.
-Track the remaining public-contributor setup in [issue #1193](https://github.com/dohchq/dohc/issues/1193).
 
 ## Keep Blacksmith off
 
-The repository variable `BLACKSMITH_ENABLED` chooses the runners in `PR checks`.
+The repository variable `BLACKSMITH_ENABLED` chooses the runners in the [`PR checks` workflow](../../.github/workflows/pr-checks.yml).
 With both runner variables unset, PR checks and default manual dispatch use GitHub-hosted `ubuntu-24.04` runners.
 A manual dispatch with `runner_provider=blacksmith` opts that run into Blacksmith while the switch stays off.
-Confinement always uses GitHub's `ubuntu-24.04` image.
 
 Set `BLACKSMITH_BUILD_VCPUS` to `4` or `8` to move only the shared JavaScript build (`shared preparation`) to Blacksmith.
 An absent, empty, or other value leaves that job on GitHub. Manual `runner_provider=blacksmith-builds` selects only that job using `runner_size`.
-The Rust archive stays on the same runner type as its test jobs because tests read build-time paths.
 The full-gate switch and manual `blacksmith` selection keep their existing runner sizes; manual build-only selection overrides the build variable's size.
 
 Inspect the switch:
@@ -74,19 +71,7 @@ The `runner_provider` input accepts `github` (default), `blacksmith`, or `blacks
 The default does not override `BLACKSMITH_ENABLED=true`.
 The `runner_size` input accepts `4` or `8` vCPUs and affects both manual Blacksmith modes.
 Manual runs execute the requested gates. Automatic PR runs execute the gates that the changed files select.
-Cloud timing targets are 300 s for JavaScript and 600 s for Rust, including preparation and reporting.
-Uncontended runs above target warn and pass through ceilings of 400 s and 700 s, respectively; runs above those ceilings fail.
-Gate timing records each gate's wall span, including both confinement jobs, without estimating workload from runner waits.
-A run above target with a counted runner wait above 30 s warns that timing is unmeasured and does not fail for time.
-A receipt transfer above 30 s excuses only its own seconds; the run still fails if it is above the ceiling without the transfer.
-Final verification alone emits timing warning annotations and step summary lines.
-A confinement job's runner wait counts only if it started after shared preparation finished.
-Individual jobs have separate termination limits. See [verification timing](verify-agent-work.md#verify-a-pull-request).
-
-The workflow runs 20 JavaScript workers and 20 Rust test partitions. Combined runs permit at most 25 concurrent jobs.
-The initial peak includes preparation, Rust build, Rust policy, and both confinement jobs.
-Rust test partitions wait for the JavaScript worker matrix; the JavaScript aggregate can report alongside them.
-The Rust phase also permits at most 25 jobs: its partitions, JavaScript reporting, preparation, Rust policy, and both confinement jobs.
+The cloud timing targets and ceilings apply to these runs. Read the timing verdict as [the verification procedure](verify-agent-work.md#verify-a-pull-request) describes.
 
 Compare cold and warm runs before choosing larger runners or shorter timeouts.
 Record elapsed time, billed cost, peak memory, and disk use for each gate.
@@ -109,47 +94,33 @@ Keep focused local checks for platform-specific behavior.
 
 Review spending, runs per PR, and cancelled runner minutes each week.
 Cancellation stops future work; Blacksmith still bills time already used.
+Count all gate jobs across every run on each PR, including cancelled runs. The 2-vCPU selection and verdict jobs add cost beyond the test-job minutes.
+The free allowance is shared across the organization; check its remaining balance before including it in the budget.
 At the $50 alert, compare the month's projected spend with the $100 budget.
 If projected spending exceeds the budget, reduce unnecessary reruns or follow the shutdown procedure below.
 PR checks continue on GitHub-hosted runners after Blacksmith is off.
-
-At $0.008 per minute, 950 PRs averaging ten combined 4-vCPU runner-minutes each cost $76 before credits and overhead.
-Count all gate jobs across every run on each PR, including cancelled runs.
-The 2-vCPU selection and verdict jobs add cost beyond those test-job minutes.
-Use ten minutes per PR as a planning target, not a measured runtime or permission to remove required tests.
-The free allowance is shared across the organization; check its remaining balance before including it in the budget.
 An 8-vCPU runner costs twice as much per minute. Choose it only after comparing cost per passing run.
 
 ## Sandbox suites run on GitHub's image
 
 Blacksmith's kernel has no Landlock, which the app compiler and the relay's replicas apply.
-The `compiler confinement` and `relay confinement` jobs always use GitHub's `ubuntu-24.04` image with Landlock whenever either gate runs.
-Their engine and compiler test binaries come from shared preparation's selected pool, including Blacksmith when enabled.
-Both download and check the prepared artifacts. Both install Rust because the engine fingerprint reads the compiler version.
-They run compiler and replica proofs on separate runners; only the compiler job needs nextest.
-Both confinement jobs overlap setup with preparation, then wait for their published artifacts under a 15-minute cap.
-Workers do not wait for confinement. Aggregates and final verification require both jobs and include their finishes in both gates' wall spans.
-If confinement fails, select **Re-run all jobs**. **Re-run failed jobs** does not create preparation artifacts for the new attempt.
-The relay job runs the replica suites in a container under Docker's default seccomp profile and the self-host compose's security options, as production runs the relay.
+The `compiler confinement` and `relay confinement` jobs therefore always use GitHub's `ubuntu-24.04` image, whenever either gate runs.
 Both jobs fail if any required test skips.
-The other jobs leave these suites out with `DOHC_CONFINEMENT_SUITES=exclude` and the `without-confinement` nextest profile.
+If confinement fails, select **Re-run all jobs**. **Re-run failed jobs** does not create preparation artifacts for the new attempt.
 The local gate runs no Linux JavaScript, so the replica suites run only in the relay confinement job.
-
-The Bash profile fixtures use `--noprofile` and explicitly load their temporary profile. This isolates their assertions from the runner's system profile. They do not test automatic login-profile loading.
+The workflow holds the rest of the job graph and the confinement setup.
 
 ## Read the result
 
 PR jobs check out the event's merge commit and compare it with the event's base commit.
-The path filter uses Git, avoiding the PR files API's file limit.
 The canonical verifier records the tested commit and base in `result.json`.
 
 Require the `PR verification` result after enabling CI and confirming the repository plan supports required checks.
 When this job runs, it succeeds only when selection succeeds and every selected gate passes.
 Intentionally unselected gates must be skipped; failed or cancelled gates cannot pass.
 GitHub accepts skipped checks when their names match a required check.
-In the observed disabled run, GitHub left this job's dynamic name unexpanded.
-A required `PR verification` check can therefore remain `Expected` for a skipped run.
-Resolve the fork-verification policy in issue #1193 before requiring this check for outside contributors.
+GitHub left this job's dynamic name unexpanded in a disabled run, so a required `PR verification` check can remain `Expected` for a skipped run.
+Resolve the fork-verification policy in [issue #1193](https://github.com/dohchq/dohc/issues/1193) before requiring this check for outside contributors.
 Drafts and other same-repository PRs without cloud checks need recorded local evidence before merging.
 Never check out, install, build, or test fork PR code on the shared Windows host, the shared Mac, or any machine with Ice's credentials. Ask Ice how to verify it.
 A skipped check provides no verification evidence.

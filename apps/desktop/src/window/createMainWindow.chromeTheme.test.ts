@@ -71,7 +71,6 @@ function disk() {
   };
 }
 
-// A restart: module state resets, the files on disk stay.
 function relaunch(d: ReturnType<typeof disk>) {
   resetChromeThemeForTests(d.io);
 }
@@ -104,13 +103,11 @@ describe("chrome theme across windows", () => {
       expect(persistedChromeTheme(closedRole)).toBe("dark");
 
       rememberChromeTheme("light");
-      // The closed role's file follows the flip and keeps its own geometry.
       expect(persistedChromeTheme(closedRole)).toBe("light");
       expect(persistedChromeTheme(openRole)).toBe("light");
       expect(d.bounds(closedRole)).toEqual(closed.bounds);
       expect(d.bounds(openRole)).toEqual(open.bounds);
 
-      // Next launch opens the closed role first and reads the current theme.
       relaunch(d);
       expect(persistedChromeTheme(closedRole)).toBe("light");
       expect(persistedChromeTheme(openRole)).toBe("light");

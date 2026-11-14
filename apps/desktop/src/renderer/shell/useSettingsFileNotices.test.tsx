@@ -109,24 +109,20 @@ describe("useSettingsFileNotices", () => {
     ]);
     expect(getWorkspaceSettings).not.toHaveBeenCalled();
 
-    // The workspace file is read once the workspace is open.
     rerender({ userSettings: user([{ key: "accent", reason: "unknown" }]), ready: true });
     await waitFor(() => expect(result.current.shellErrors).toHaveLength(2));
     expect(getWorkspaceSettings).toHaveBeenCalledExactlyOnceWith({ workspaceId: "ws-a" });
-    // The row names the file where this computer keeps the workspace's settings.
     expect(
       result.current.shellErrors.find((row) => row.kind === "workspace-settings-file")?.message,
     ).toBe(
       "dohc ignored theme in .dohc/local/settings.local.json because it is not a setting dohc knows. The other settings apply.",
     );
 
-    // The same settings arriving again do not bring back a dismissed row.
     const userRow = result.current.shellErrors[0]!;
     act(() => result.current.dismissShellError(userRow.id));
     rerender({ userSettings: user([{ key: "accent", reason: "unknown" }]), ready: true });
     expect(result.current.shellErrors.map((row) => row.kind)).toEqual(["workspace-settings-file"]);
 
-    // A save from Settings that fixed the file clears its row.
     act(() =>
       result.current.onWorkspaceRead({ settings: DEFAULT_WORKSPACE_SETTINGS, source: "stored" }),
     );
@@ -169,7 +165,6 @@ describe("useSettingsFileNotices", () => {
       return errors;
     });
     await waitFor(() => expect(listeners.size).toBe(1));
-    // It reads once more as it starts listening, and the engine has still not opened it.
     await waitFor(() => expect(getWorkspaceSettings).toHaveBeenCalledTimes(2));
     expect(result.current.shellErrors).toEqual([]);
 
@@ -183,11 +178,9 @@ describe("useSettingsFileNotices", () => {
         "dohc ignored theme in .dohc/local/settings.local.json because it is not a setting dohc knows. The other settings apply.",
       ]),
     );
-    // Once a read gets the file, activity reads nothing more.
     expect(listeners.size).toBe(0);
     expect(getWorkspaceSettings).toHaveBeenCalledTimes(3);
 
-    // The person repairs the file; Try again clears its row.
     getWorkspaceSettings.mockResolvedValue({
       settings: DEFAULT_WORKSPACE_SETTINGS,
       source: "stored",
@@ -228,8 +221,6 @@ describe("useSettingsFileNotices", () => {
     await waitFor(() => expect(listeners.size).toBe(1));
     await waitFor(() => expect(getWorkspaceSettings).toHaveBeenCalledTimes(2));
 
-    // The engine opens and the hook reads the file. Before that read answers,
-    // Settings passes on its own slower read from before the open.
     let answer: ((read: WorkspaceSettingsResult) => void) | undefined;
     getWorkspaceSettings.mockImplementation(
       () =>
@@ -260,7 +251,6 @@ describe("useSettingsFileNotices", () => {
       source: "stored",
       ignored: [{ key: "theme", reason: "unknown" }],
     }));
-    // The open's activity came before this refusal, so no activity follows it.
     getWorkspaceSettings.mockResolvedValueOnce({
       settings: DEFAULT_WORKSPACE_SETTINGS,
       source: "recovered",
@@ -331,10 +321,8 @@ describe("useSettingsFileNotices", () => {
     expect(bridge.openWorkspaceSettingsFile).toHaveBeenCalledExactlyOnceWith({
       workspaceId: "ws-a",
     });
-    // Opening keeps the row: the file is still wrong until it is saved.
     expect(row("workspace-settings-file")).toBeDefined();
 
-    // A failure to open says why and what to do instead.
     act(() => result.current.runShellErrorAction(row("user-settings-file").id));
     await waitFor(() =>
       expect(result.current.shellErrors.map((error) => error.message)).toContain(
@@ -342,12 +330,10 @@ describe("useSettingsFileNotices", () => {
       ),
     );
 
-    // Try again on a file that still says the same thing brings its row back.
     act(() => result.current.retryShellError(row("user-settings-file").id));
     await waitFor(() => expect(bridge.reloadUserSettings).toHaveBeenCalledOnce());
     await waitFor(() => expect(row("user-settings-file")).toBeDefined());
 
-    // The person repairs the workspace file; Try again clears its row.
     bridge.getWorkspaceSettings.mockResolvedValue({
       settings: DEFAULT_WORKSPACE_SETTINGS,
       source: "stored",

@@ -252,10 +252,10 @@ fn host_edits<const N: usize>(owner: &RestoreOwner, paragraphs: [&str; N]) -> [V
     paragraphs.map(|paragraph| host.richdoc_append_paragraph(paragraph))
 }
 
-/// The recipient typed; the service host's update of it reached the owner
-/// 34 ms before the owner's feed, and the owner refused its own edit's echo.
-/// It now waits, through the host's audit, for the feed, and leaves as the
-/// echo it is: no refusal, no Notice, nothing written, nothing reported.
+/// The recipient typed, and the service host's update of it reaches the owner
+/// 34 ms before the owner's feed. The owner must not refuse its own edit's
+/// echo. The update waits, through the host's audit, for the feed, and leaves
+/// as the echo it is: no refusal, no Notice, nothing written, nothing reported.
 #[test]
 fn a_host_update_ahead_of_the_feed_waits_for_it_and_leaves_as_an_echo() {
     let mut owner = restore_owner();
@@ -514,7 +514,6 @@ fn a_deferred_stop_refuses_a_host_update_at_once_and_queues_nothing() {
     assert!(!text.contains("held at the Stop") && !text.contains("after the Stop"));
 }
 
-/// The owner installs `owner.observed` as its binding.
 fn bind(
     owner: &mut RestoreOwner,
 ) -> Result<(), dohc_engine_collab::owner_outbox::OwnerOutboxError> {

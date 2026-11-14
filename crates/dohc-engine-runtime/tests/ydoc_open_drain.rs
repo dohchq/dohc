@@ -28,7 +28,6 @@ async fn open_only_drains_deferred_updates_for_the_expected_key() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = engine_db_path(&scratch).expect("db");
 
-    // A captured head gives the path a real owner object.
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&db, 1).expect("open actor").actor;
     let written = handle
@@ -151,7 +150,6 @@ async fn open_only_drains_deferred_updates_for_the_expected_key() {
         "a mismatched expected key must not drain another key's deferred rows"
     );
 
-    // The same open with the matching expected key drains the parked update.
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&db, 3).expect("reopen actor").actor;
     handle

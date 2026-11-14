@@ -53,6 +53,64 @@ it("edits the existing body while live, blocks local paste while paused, and sti
     mount.remove();
   }
 });
+it("sends a tick and an untick from a to-do box while live", () => {
+  const doc = markdownToYDoc("- [ ] tick me\n"),
+    mount = document.createElement("div");
+  document.body.append(mount);
+  let sent = 0;
+  const editor = mountLiveBodyEditor(mount, {
+    body: getDohcYDocBodyFragment(doc),
+    label: "Shared file editor",
+    canEdit: () => true,
+    edit(change) {
+      doc.transact(change);
+      sent++;
+      return true;
+    },
+  });
+  try {
+    const box = mount.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    box.click();
+    expect(sent).toBe(1);
+    expect(yDocToMarkdown(doc)).toBe("- [x] tick me\n");
+    expect(box.checked).toBe(true);
+    box.click();
+    expect(sent).toBe(2);
+    expect(yDocToMarkdown(doc)).toBe("- [ ] tick me\n");
+    expect(box.checked).toBe(false);
+  } finally {
+    editor.destroy();
+    doc.destroy();
+    mount.remove();
+  }
+});
+it("leaves a to-do box as saved when the page cannot edit or the edit is refused", () => {
+  const doc = markdownToYDoc("- [ ] tick me\n"),
+    mount = document.createElement("div");
+  document.body.append(mount);
+  let live = false;
+  const editor = mountLiveBodyEditor(mount, {
+    body: getDohcYDocBodyFragment(doc),
+    label: "Shared file editor",
+    canEdit: () => live,
+    edit: () => false,
+  });
+  try {
+    const before = Y.encodeStateAsUpdate(doc),
+      box = mount.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    box.click();
+    expect(box.checked).toBe(false);
+    live = true;
+    editor.refresh();
+    box.click();
+    expect(box.checked).toBe(false);
+    expect(Y.encodeStateAsUpdate(doc)).toEqual(before);
+  } finally {
+    editor.destroy();
+    doc.destroy();
+    mount.remove();
+  }
+});
 it("opens an empty body on the projection's default paragraph", () => {
   const doc = new Y.Doc(),
     mount = document.createElement("div");

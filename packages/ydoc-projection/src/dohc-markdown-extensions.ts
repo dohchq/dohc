@@ -639,7 +639,6 @@ const DohcCallout = Node.create({
           continue;
         }
         if (count > 0 && paragraphOpen && line.trim() !== "" && !CALLOUT_LAZY_BREAK_RE.test(line)) {
-          // Lazy continuation of the open paragraph — it stays open.
           count += 1;
           continue;
         }

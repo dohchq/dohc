@@ -207,7 +207,7 @@ it("reports an abandoned captured client and serves its retry through the next b
   );
 });
 
-// #3089: T7 reads `delayMs` as one delay each way. A request body that
+// `delayMs` is one delay each way. A request body that
 // arrives with its headers must not wait a second time. The proxy's clock is
 // faked, so each leg is checked at its deadline and one millisecond before,
 // and only loopback I/O runs for real.

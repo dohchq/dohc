@@ -67,7 +67,6 @@ const THREAD_FILES: Readonly<Record<string, string>> = {
   "thread-gone": "docs/gone.md",
 };
 
-// The relay as it answers a personal agent in reach at Comment.
 function relay({ action, body }: Call): Response {
   if (action === "files") return Response.json({ ok: true, files: FILES, truncated: false });
   if (action === "groups")
@@ -94,7 +93,6 @@ function relay({ action, body }: Call): Response {
     );
   }
   if (action === "post") {
-    // Exactly one of channelWireId and filePath names where the post landed.
     const filePath =
       typeof body.filePath === "string"
         ? body.filePath
@@ -167,7 +165,6 @@ const structured = (result: unknown) =>
   (result as { structuredContent?: Record<string, unknown> }).structuredContent;
 const textOf = (result: unknown) =>
   (result as { content: Array<{ text: string }> }).content[0]!.text;
-/** A tool's refusal: an error result, or the client's throw on input the schema refuses. */
 const refusedInput = (pending: Promise<unknown>) =>
   pending.then(
     (result) => (result as { isError?: unknown }).isError === true,
@@ -392,7 +389,6 @@ it("reads one Comment thread by its id and replies there, also on a file since d
     },
   ]);
 
-  // A read names a file or a thread; anything else never reaches the relay.
   for (const place of [{ path: "docs/plan.md", threadId: "thread-plan" }, {}]) {
     expect(
       await refusedInput(
@@ -495,7 +491,6 @@ it("posts in a channel, in a thread and on a file, each naming one place", async
     },
   ]);
 
-  // A post names exactly one place; anything else never reaches the relay.
   for (const [name, place] of [
     ["dohc_post_channel", { channel: "wire-dm", threadId: "thread-dm" }],
     ["dohc_post_channel", {}],
@@ -554,7 +549,6 @@ it("waits across every workspace with an opaque cursor that resumes where the re
     { action: "wait", body: { cursor: RELAY_CURSOR, timeoutMs: 100 } },
   ]);
 
-  // A cursor that did not come from the relay never reaches it.
   const forged = Buffer.from(JSON.stringify({ ...RELAY_CURSOR, extra: true })).toString(
     "base64url",
   );
@@ -608,7 +602,6 @@ const VIEW_ONLY = {
 const refusedBy = (code: string, status: number) => () =>
   Response.json({ ok: false, code, error: "relay words" }, { status });
 
-// Every tool that names a workspace, as an agent calls it.
 const WORKSPACE_TOOLS = [
   ["dohc_list_files", {}],
   ["dohc_list_groups", {}],
@@ -629,7 +622,6 @@ it("says a workspace is out of reach from every tool that names one, in this ser
     expect(structured(result), name).toEqual(OUT_OF_REACH);
     expect(textOf(result), name).not.toContain("relay words");
   }
-  // Each tool asks the relay once, for the workspace it names.
   expect(f.calls.map((call) => call.body.workspaceId)).toEqual(WORKSPACE_TOOLS.map(() => "garden"));
 });
 
@@ -653,7 +645,6 @@ it("says a View agent can read but not post, in a channel, in a thread or on a f
     expect(structured(result), name).toEqual(VIEW_ONLY);
     expect(textOf(result), name).not.toContain("relay words");
   }
-  // The same agent still reads there.
   expect(
     structured(
       await client.callTool({
@@ -786,7 +777,6 @@ it("says a Comment's file is missing, and words every other refusal without the 
     expect(structured(refused)).toEqual(result);
     expect(textOf(refused)).not.toContain("relay words");
   }
-  // A read this server can't word reads as unavailable.
   for (const answer of [
     refusedBy("unexpected", 403),
     refusedBy("personal_agent_out_of_reach", 500),
@@ -811,7 +801,6 @@ it("says a post may have landed when its answer is lost", async () => {
     () => Response.json({ ok: false, code: "personal_agent_unavailable" }, { status: 503 }),
     () => Promise.reject(new Error("connection reset")),
     () => Response.json({ ok: true, message: { messageId: "message-9" } }),
-    // An answer must name where the post landed, a channel or a file.
     () =>
       Response.json({
         ok: true,
@@ -830,7 +819,6 @@ it("says a post may have landed when its answer is lost", async () => {
   }
 });
 
-// A Collection write as the agent sends it.
 const WRITE = {
   workspace: "trip",
   submitId: "write-1",
@@ -925,7 +913,6 @@ it("writes a Collection's files in the workspace it names, and answers as the li
           "This submitId already names a different write. Send this write with a new submitId.",
       },
     ],
-    // A content refusal names the file and what to fix.
     [
       () =>
         Response.json(
@@ -942,7 +929,6 @@ it("writes a Collection's files in the workspace it names, and answers as the li
         reason: "trip/packing/Socks.md has frontmatter that does not parse",
       },
     ],
-    // A long one is cut to 1,024 bytes of UTF-8, never inside a character.
     [
       () =>
         Response.json(
@@ -1051,7 +1037,6 @@ it("takes a write only in a request of its own, and a large one only with a body
     )?.status,
   ).toBe(429);
   expect(asked).toEqual([REACH.agent.agentId]);
-  // With no workspace at Edit it asks for none.
   await expect(
     serve(write("x".repeat(64 * 1024)), REACH, (agentId) => {
       asked.push(agentId);
@@ -1059,7 +1044,6 @@ it("takes a write only in a request of its own, and a large one only with a body
     }),
   ).rejects.toThrow(RangeError);
   expect(asked).toEqual([REACH.agent.agentId]);
-  // A slot it takes is released once the request is answered.
   await serve(write("x".repeat(64 * 1024)), atEdit, () => () => {
     released++;
   });

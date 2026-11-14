@@ -28,8 +28,6 @@ fn rename(f: &mut Fixture, to: &str, moment: &str) {
     f.binding.selector_paths = vec![to.into()];
 }
 
-/// Where the entry for `delivery` sits: its outbox and sequence, and the
-/// journal cursor of the receipt it saved.
 fn entry_of(f: &Fixture, delivery: &str) -> (String, i64, Option<i64>) {
     f.store
         .read_with(|conn| {
@@ -43,7 +41,7 @@ fn entry_of(f: &Fixture, delivery: &str) -> (String, i64, Option<i64>) {
         .unwrap()
 }
 
-/// Sol's round 4b ruling, rename: P carried C1 and C2 when it released, and
+/// P carried C1 and C2 when it released, and
 /// a person renamed the document before S captured it at its new path. S's
 /// coverage takes P's outbox at the old path, which the rename proves, and
 /// names each entry by its original outbox and sequence. S's seed opens the
@@ -76,17 +74,10 @@ fn a_successor_covers_its_predecessors_outbox_across_a_rename() {
     assert_eq!(resolve(&f, "adoption").unwrap(), 2);
 }
 
-/// P at owner.md, with its update covered at 3 and C1 Carried at 5, releases,
-/// and the document is renamed to first.md. S1 adopts there; the relay
-/// accepts its seed at 7 and its own update C2 at 8, and it releases before
-/// applying any of them. The document is renamed to second.md and S2
-/// registers there. Returns S2's expected coverage, ordered by outbox and
-/// sequence.
 fn carried_across_two_renames() -> (Fixture, Vec<(String, i64, Disposition)>) {
     carried_across_renames_to("second.md")
 }
 
-/// [`carried_across_two_renames`], with the second rename to `second`.
 fn carried_across_renames_to(second: &str) -> (Fixture, Vec<(String, i64, Disposition)>) {
     let (mut f, covered, c1, _) = covered_and_carried();
     host_document(&mut f, true, true);
@@ -189,8 +180,6 @@ fn coverage_across_outboxes_has_one_budget() {
     adopt(&mut f, 4).unwrap();
 }
 
-/// A damage to the evidence that the successor's coverage relies on, given
-/// C2's Carried delivery.
 type CoverageDamage = (&'static str, fn(&mut Fixture, &CarriedDelivery));
 
 /// Only a binding the chain held, which a rename proves, is coverage. Each
@@ -240,16 +229,12 @@ fn coverage_refuses_unproved_bindings_without_writes() {
     }
 }
 
-/// P applies a collaborator's update at 3, settles there and releases with
-/// nothing Carried, and S registers at the same binding.
 fn released_with_nothing_carried() -> Fixture {
     let mut f = released_unregistered();
     successor(&mut f);
     f
 }
 
-/// [`released_with_nothing_carried`] before S captures. P never queued
-/// anything, so it left no outbox.
 fn released_unregistered() -> Fixture {
     let mut f = Fixture::new();
     f.adopt().unwrap();
@@ -281,8 +266,6 @@ fn another_restore_generation_needs_its_restore() {
     assert_eq!(rows(&f, &SUCCESSION_WRITES), before);
 }
 
-/// Whether the registration's coverage proves `binding` a binding this
-/// document held before it.
 fn proves(f: &Fixture, binding: &LiveObjectBinding) -> Result<(), ApplicationError> {
     let held = f.handle.registration.lock().unwrap();
     f.store.read_with(|conn| require_historical(conn, &held, &f.key, &[binding], 100))
@@ -305,8 +288,6 @@ fn a_resumed_restore_proves_the_generation_it_fenced() {
     assert!(matches!(proves(&f, &elsewhere), Err(ApplicationError::Conflict)));
 }
 
-/// P adopts at generation 0, and a real restore fences it and resumes it at
-/// 1, where the fixture registers. Returns P's binding.
 fn resumed_at_one() -> (Fixture, LiveObjectBinding) {
     let mut f = Fixture::new();
     f.adopt().unwrap();

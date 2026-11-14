@@ -27,11 +27,8 @@ export function SettingRow(props: {
   testId?: string;
   // The row a Customize… command opened Settings for. Settings focuses it.
   highlighted?: boolean;
-  // Under the title, such as the way to ask your agent.
   aside?: ReactNode;
-  // Before the title, such as the signed-in account's avatar.
   lead?: ReactNode;
-  // After the title on its line, such as the app's version.
   detail?: ReactNode;
   // A row of a long list that only shows a value, such as a shortcut's keys.
   // Its title needs less room than a description, so the value stays beside it
@@ -235,9 +232,7 @@ export function ThemeControl(props: { value: ThemeMode; onChange: (value: ThemeM
 }
 
 type StepperPart = {
-  // The tooltip's words. For − and + it is also the button's name.
   label: string;
-  // The keys that do the same, shown as chips in the tooltip.
   keys?: readonly string[];
   disabled?: boolean;
   onClick: () => void;
@@ -251,7 +246,6 @@ type StepperPartName = "decrease" | "reset" | "increase";
  * keyboard focused it. A click does not open one.
  */
 export function StepperControl(props: {
-  // The setting's name in a sentence, such as "zoom".
   setting: string;
   value: string;
   decrease: StepperPart;
@@ -382,7 +376,6 @@ export function SwitchControl(props: {
   // An element whose words name the switch. Its name then wins over `label`
   // while that element exists.
   labelledBy?: string;
-  // The hover words, such as what a click does.
   tooltip?: string;
   // What a screen reader says after the name, in place of the tooltip, so a
   // tooltip that repeats the name is not read twice.

@@ -2,8 +2,8 @@
 //!
 //! Produces a deterministic, order-stable projection of a workspace's version
 //! graph, active version, moment order, and per-version snapshots (by blob
-//! hash) — the comparison surface a TS-vs-Rust differential asserts on
-//! (`TEST_ORACLE.md` §2, normalizers N2/N4–N8). Ids that carry identity are
+//! hash) — the comparison surface a TS-vs-Rust differential asserts on. Ids
+//! that carry identity are
 //! caller-supplied in the operation traces, so the capture is fully
 //! deterministic and can be compared to a golden fixture without ID
 //! substitution. A live TS runner would additionally apply N7 structural ID
@@ -24,7 +24,7 @@ pub struct VersionRow {
     pub fork_moment_id: Option<String>,
 }
 
-/// One normalized snapshot row (content by hash — N8). `content_kind` is
+/// One normalized snapshot row (content by hash). `content_kind` is
 /// carried alongside the digest so a binary head and a text head that happen to
 /// share a digest are never indistinguishable in the differential (a binary
 /// head must never be mis-projected as empty/blank text).

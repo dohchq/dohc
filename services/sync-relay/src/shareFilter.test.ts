@@ -228,11 +228,6 @@ describe("share selector validation", () => {
     });
   });
 
-  // The version rule is shared with every recipient surface that reads a
-  // selector back (the desktop's share metadata parse and its registry
-  // record). Restating it per surface is what let "" through one reader while
-  // this one refused it — a no-paths selector that carries a version grants
-  // the whole tracked workspace.
   it("refuses every version id the shared rule refuses", () => {
     for (const versionId of ["", "   ", " v1", "v1 ", "v".repeat(MAX_SHARE_VERSION_ID_CHARS + 1)]) {
       expect(
@@ -248,11 +243,6 @@ describe("share selector validation", () => {
     ).toMatchObject({ ok: true });
   });
 
-  // An oversized id has to say how oversized. The limit alone reads the same
-  // for 129 code units and for 10,000, and the caller cannot tell whether it
-  // is one character over or sending the wrong field entirely. The engine's
-  // twin refusal already names the observed length; this is the same rule
-  // answering on the same terms.
   it("names the observed length when a version id is too long", () => {
     const barelyOver = validateShareSelector({
       versionId: "v".repeat(MAX_SHARE_VERSION_ID_CHARS + 1),
@@ -268,7 +258,6 @@ describe("share selector validation", () => {
     ).toContain(`${MAX_SHARE_VERSION_ID_CHARS + 1}`);
     expect(wildlyOver.message).toContain("10000");
     expect(barelyOver.message).not.toBe(wildlyOver.message);
-    // The unit stays the one the rule measures.
     expect(barelyOver.message).toContain("UTF-16 code units");
   });
 
@@ -344,8 +333,6 @@ describe("share op filter", () => {
     ]) {
       expect(serialized, leak).not.toContain(leak);
     }
-    // The author is neutralized to a plain sync origin, and only replay
-    // fields survive.
     expect(decision.payload).toEqual({
       operation: "write",
       // Kept on purpose: the recipient's share boundary version-checks an
@@ -413,9 +400,6 @@ describe("share op filter", () => {
     }
   });
 
-  // The recipient re-runs the same equality this filter runs
-  // (`crates/dohc-engine-sync/src/share.rs`, `enforce_share_view_boundary`),
-  // which it can only do when the served moment says which version it is on.
   it("serves the granted version on every moment, for a main share and a version share", () => {
     const main = filterOpForShare(pathShare, "moment.append", momentPayload());
     expect(main.allowed).toBe(true);
@@ -444,7 +428,6 @@ describe("share op filter", () => {
         momentPayload({ path: "src/app.ts", payloadAfterPath: "src/app.ts" }),
       ).allowed,
     ).toBe(false);
-    // "docs-private" must not match the "docs" folder selector.
     expect(
       filterOpForShare(
         pathShare,
@@ -473,7 +456,6 @@ describe("share op filter", () => {
     const poisoned: ShareSelector = { paths: [".env"], versionId: null, access: "view" };
     const op = momentPayload({ path: ".env", payloadAfterPath: ".env" });
     expect(filterOpForShare(poisoned, "moment.append", op).allowed).toBe(false);
-    // And a versionful share of "everything" still excludes secret paths.
     const versionShare: ShareSelector = { paths: [], versionId: "main", access: "view" };
     expect(filterOpForShare(versionShare, "moment.append", op).allowed).toBe(false);
   });
@@ -625,7 +607,7 @@ describe("share op filter", () => {
   });
 });
 
-// MU-C4 shared channels: the chat selector + the chat branch of the
+// Shared channels: the chat selector + the chat branch of the
 // fail-closed filter.
 describe("chat share selector", () => {
   it("validates channelWireId and access separately", () => {
@@ -680,11 +662,7 @@ describe("presence topic gate (MU-C1 x MU-C4)", () => {
   };
 
   it("scopes a chat member's presence to exactly the granted wire id", () => {
-    // The one allowed topic is the granted channel's wire id: a member joins
-    // co-presence for that channel and nothing else.
     expect(presenceTopicAllowedForShare(channelShare, "wire-1", threadResolver)).toBe(true);
-    // Another channel, a file path, or an empty topic are all refused — a
-    // chat grant exposes no path-based (doc) presence at all.
     for (const topic of ["wire-2", "docs/a.md", "docs", ""]) {
       expect(presenceTopicAllowedForShare(channelShare, topic, threadResolver), topic).toBe(false);
     }
@@ -697,7 +675,7 @@ describe("presence topic gate (MU-C1 x MU-C4)", () => {
     expect(presenceTopicAllowedForShare(pathShare, "secrets/b.md")).toBe(false);
   });
 
-  // MU-C6 thread presence: a chat grant also admits `chat:thread:<tid>`
+  // Thread presence: a chat grant also admits `chat:thread:<tid>`
   // — but only for a thread that binds to the granted channel via the same
   // forge-resistant earliest-binding resolver the durable chat filter uses.
   it("admits a thread topic bound to the granted channel", () => {
@@ -736,11 +714,6 @@ describe("presence topic gate (MU-C1 x MU-C4)", () => {
     );
   });
 
-  // Ordering-collision guard: a chat:thread:-shaped topic must always resolve
-  // via the resolver — bare-wireId equality must never admit it, even when the
-  // grant's channelWireId is itself a chat:thread:<id> string. Otherwise a
-  // crafted grant could smuggle presence for a foreign thread through the bare
-  // branch.
   it("routes a thread-shaped topic through the resolver even when channelWireId equals it (no bare-equality bypass)", () => {
     const forged: ChatChannelShareSelector = {
       kind: "chat",
@@ -752,8 +725,6 @@ describe("presence topic gate (MU-C1 x MU-C4)", () => {
     // topic with NO binding check. It must go through the resolver instead —
     // and an unbound thread is denied.
     expect(presenceTopicAllowedForShare(forged, topic, threadResolver)).toBe(false);
-    // No resolver => a thread-shaped topic can never be authorized (fail
-    // closed), even against a chat:thread:<id> channelWireId.
     expect(presenceTopicAllowedForShare(forged, topic)).toBe(false);
     // Only a genuine earliest binding to this selector's channelWireId admits
     // it — proving the resolver, not bare equality, is the sole authority.
@@ -810,7 +781,6 @@ describe("parseChatThreadTopic", () => {
   });
 
   it("returns null for a non-thread or malformed topic", () => {
-    // No prefix, empty tail, or a tail carrying the scope-key NUL separator.
     for (const topic of [
       "wire-1",
       "docs/a.md",
@@ -830,9 +800,6 @@ describe("chat share op filter", () => {
     channelWireId: "wire-shared",
     access: "read-write",
   };
-  // The earliest-binding truth used by these tests: thread-in binds to the
-  // shared channel, thread-out binds to a different channel, anything else is
-  // unknown (fail-closed).
   const resolver: ChatShareThreadResolver = {
     channelKind: (wireId) =>
       wireId === "wire-shared" || wireId === "wire-private" ? "channel" : undefined,
@@ -915,7 +882,6 @@ describe("chat share op filter", () => {
     });
     expect(channel.allowed).toBe(true);
     if (!channel.allowed) return;
-    // A chat-only share carries the group's type and purpose, not its folder.
     expect(channel.payload).toEqual({
       channelId: "c1",
       name: "team",
@@ -1002,8 +968,6 @@ describe("chat share op filter", () => {
         dmResolver,
       ).allowed,
     ).toBe(false);
-    // Presence answers for neither half of such a group either, and a
-    // group whose channel the log has not named yet is the same.
     expect(presenceTopicAllowedForShare(dmGroup, "wire-dm", dmResolver)).toBe(false);
     expect(presenceTopicAllowedForShare(dmGroup, "team/a.md", dmResolver)).toBe(false);
     expect(
@@ -1528,7 +1492,6 @@ describe("chat share op filter", () => {
         createdAtMs: 1,
       }).allowed,
     ).toBe(false);
-    // A message on a thread the log has NO binding for is excluded too.
     expect(
       decide("chat.message.append", {
         messageId: "m3",
@@ -1542,8 +1505,6 @@ describe("chat share op filter", () => {
   });
 
   it("excludes a forged thread.create that claims the granted channel for an existing foreign thread", () => {
-    // The op says channelWireId=wire-shared, but the log's earliest binding
-    // for thread-out is wire-private — the re-bind is excluded.
     expect(
       decide("chat.thread.create", {
         threadId: "thread-out",
@@ -1553,7 +1514,6 @@ describe("chat share op filter", () => {
         channelWireId: "wire-shared",
       }).allowed,
     ).toBe(false);
-    // A thread.create claiming both a channel and a linked file is malformed.
     expect(
       decide("chat.thread.create", {
         threadId: "thread-new",
@@ -1700,10 +1660,6 @@ describe("chat share op filter", () => {
   });
 });
 
-// Chat follows the file share. A thread is visible through a file
-// share when the FILE it is about is visible through that file share, so every
-// case below is really a statement about one path: the one the relay resolved
-// from the owner's log, never one a client claimed.
 describe("file-chat share filter", () => {
   // docs/in.md is inside the selector; notes/out.md is not. `object-gone` was
   // deleted and `object-unknown` was never seen — the two halves of the
@@ -1733,8 +1689,6 @@ describe("file-chat share filter", () => {
           : objectId === "object-gone"
             ? null
             : undefined,
-    // The reverse lookup, consistent with the forward one above: exactly the
-    // two paths a live object sits at.
     objectIdAtPath: (path) =>
       path === "docs/in.md" ? "object-in" : path === "notes/out.md" ? "object-out" : undefined,
   };
@@ -1834,16 +1788,10 @@ describe("file-chat share filter", () => {
 
   it("denies every tri-state the resolvers can answer with, in both hops", () => {
     const denied: Array<[string, string]> = [
-      // The thread hop: no create in the log, and an authoritative create
-      // that binds the thread to no file at all.
       ["thread-never-seen", "no create in the log"],
       ["thread-unbound", "an authoritative create with no file binding"],
-      // The object hop: a deleted file (null) and one the relay has never
-      // seen (undefined). Hiding the discussion about a deleted file is the
-      // fail-closed answer.
       ["thread-gone", "the file was deleted"],
       ["thread-unknown", "the relay has never seen the object"],
-      // Resolved, but outside.
       ["thread-out", "the file sits outside the selector"],
       ["thread-by-outside-path", "a path binding outside the selector"],
     ];
@@ -1895,8 +1843,6 @@ describe("file-chat share filter", () => {
         resolver,
       ).allowed,
     ).toBe(false);
-    // And the same op in the other direction: a create for a thread already
-    // bound inside, claiming an outside file, is refused too.
     expect(
       filterOpForShare(
         share("comment"),
@@ -1912,7 +1858,6 @@ describe("file-chat share filter", () => {
       // Both shapes: reading either half would let one op bind one thread to
       // two files.
       { linkedPath: "docs/in.md" },
-      // Neither shape — a channel thread, which a file share never carries.
       { linkedObjectId: undefined, channelWireId: "wire-1", channelSlug: "general" },
     ]) {
       expect(

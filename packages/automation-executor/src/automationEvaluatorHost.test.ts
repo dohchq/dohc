@@ -39,7 +39,6 @@ describe("the shared formula evaluator", () => {
     ]);
     slow.resolve([{ ok: true, value: 2 }]);
     await expect(first).resolves.toEqual([{ ok: true, value: 2 }]);
-    // Its request finished, so the automation can ask again.
     await expect(evaluator.evaluate("collection:Tasks#slow", scope, formula)).resolves.toEqual([
       { ok: true, value: 1 },
     ]);

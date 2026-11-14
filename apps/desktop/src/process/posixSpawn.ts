@@ -2,11 +2,10 @@
 // killProcessTreeWin32. Signalling only a child's own pid leaves the servers
 // and workers it started running, still holding their ports and their cwd.
 //
-// The negated "-pid" process-group form cannot do this job here: the callers
-// fork children through Electron's utilityProcess.fork, which has no
-// `detached` option, so a child never becomes its own group leader and "-pid"
-// would signal this app's own group. Enumerate the tree from the process
-// table instead and signal each pid.
+// The negated "-pid" process-group form cannot do this job here: children
+// forked through Electron's utilityProcess.fork have no `detached` option, so
+// they never lead their own group and "-pid" would signal this app's own
+// group. Enumerate the tree from the process table instead and signal each pid.
 import { execFile } from "node:child_process";
 
 // The nominal read cap equals the default total shutdown budget. A stopped
@@ -142,7 +141,6 @@ export interface KillProcessTreePosixOptions {
   alsoSignal?: readonly number[];
   /** When present, a fresh process-table row must match before reuse. */
   alsoSignalIdentities?: readonly ProcessIdentity[];
-  /** Bounds this round's process-table read. */
   readTimeoutMs?: number;
 }
 
@@ -188,6 +186,45 @@ export async function processDescendants(
   }
 }
 
+/** Parses `ps -A -o pid=,ppid=,pgid=` output. Ignores unreadable lines. */
+export function parseProcessGroupTable(
+  output: string,
+): { pid: number; ppid: number; pgid: number }[] {
+  return output.split("\n").flatMap((line) => {
+    const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s*$/.exec(line);
+    if (!match) return [];
+    const [pid, ppid, pgid] = match.slice(1).map(Number) as [number, number, number];
+    return [pid, ppid, pgid].every(Number.isSafeInteger) ? [{ pid, ppid, pgid }] : [];
+  });
+}
+
+/**
+ * processDescendants for a root that leads its own process group: also every
+ * other process in that group, with its descendants. A child a shell puts in
+ * the background stays in the shell's group after the shell exits and init
+ * adopts it, so a read that lands after that exit still finds the child where
+ * a walk down from the root finds nothing. No new process takes a group's
+ * number while any member lives, so every member found belongs to the root.
+ */
+export async function processGroupDescendants(
+  rootPid: number,
+  readProcessGroupTable: () => Promise<string> = () => readPs("pid=,ppid=,pgid="),
+): Promise<number[]> {
+  try {
+    const table = parseProcessGroupTable(await readProcessGroupTable());
+    const members = table.filter((entry) => entry.pgid === rootPid).map((entry) => entry.pid);
+    return collectTreePidsForRoots(buildChildrenByParent(table), [rootPid, ...members]).filter(
+      (pid) => pid !== rootPid,
+    );
+  } catch (error) {
+    console.warn(
+      "[desktop] could not read the process table, so this capture found nothing",
+      error,
+    );
+    return [];
+  }
+}
+
 // Exported (unlike the rest of this module's internals) so processDescendants
 // callers outside this file (siteRunner's descendant-capture snapshot) can
 // pass it directly as a zero-arg reader — the default timeout matches what
@@ -195,10 +232,17 @@ export async function processDescendants(
 export function readProcessTableWithPs(
   readTimeoutMs: number = PROCESS_TABLE_READ_TIMEOUT_MS,
 ): Promise<string> {
+  return readPs("pid=,ppid=,lstart=", readTimeoutMs);
+}
+
+function readPs(
+  columns: string,
+  readTimeoutMs: number = PROCESS_TABLE_READ_TIMEOUT_MS,
+): Promise<string> {
   return new Promise((resolveOutput, reject) => {
     execFile(
       "ps",
-      ["-A", "-o", "pid=,ppid=,lstart="],
+      ["-A", "-o", columns],
       {
         maxBuffer: PROCESS_TABLE_MAX_BUFFER_BYTES,
         timeout: readTimeoutMs,
@@ -264,7 +308,6 @@ async function signalProcessTreePosix(
   const capturedIdentities = new Map(
     options.alsoSignalIdentities?.map((identity) => [identity.pid, identity]),
   );
-  // capturedIdentities is empty on the non-force path, so the filter was a no-op.
   const initialPids = isForceRound ? [] : [...new Set([rootPid, ...(options.alsoSignal ?? [])])];
 
   let pids = initialPids;

@@ -270,8 +270,6 @@ describe("private restore continuation", () => {
     },
   );
 
-  // Proves: an unadmitted restore that Decline or a departed path ended is
-  // not admitted. Confirmation ends it through its host's cancellation first.
   it.each(["cancel", "declined"] as const)(
     "ends an unadmitted restore instead of admitting it: %s",
     async (continuation) => {

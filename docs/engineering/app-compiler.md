@@ -27,9 +27,10 @@ Electron main sets the bounds in `main.ts`. `compilerProcessSupervisor.ts` enfor
 | Kill on close | Closing the job kills it | Stdin EOF makes the owner kill its tree. The supervisor kills the owner's process group as a fallback | As on macOS. The worker also dies when the owner dies |
 | Files and network | No isolation. The supervisor scrubs the environment | Seatbelt, below | Landlock and seccomp, below |
 
-On macOS and Linux the owner also counts the tree's task slots, which the user's process limit counts: each live process's threads on Linux, and every exited process no one has reaped.
-More than 1,024 stops the build as the process bound does, so the owner stops a tree that hoards threads or zombies.
-Like the other bounds it is sampled, so a fast loop can pass 1,024 before the next sample. It is a detection threshold, not a ceiling.
+On macOS and Linux the owner also counts what the user's process limit counts.
+On macOS that is each live process. On Linux it is each live process's threads. On both it includes every exited process no one has reaped.
+Above 1,024 the owner stops the build, as it does at the process bound. This stops a tree that hoards threads or zombies.
+The owner samples this count like the other bounds, so a fast loop can pass 1,024 before the next sample. The count is a detection threshold, not a ceiling.
 
 ## macOS and Linux containment is weaker than a Windows job
 
@@ -65,8 +66,8 @@ The Linux owner is a child subreaper, so no process escapes it this way.
 Every orphan becomes the owner's child, and the owner walks each process's children from `/proc/<pid>/task/<tid>/children`.
 It needs no process group walk, which would read the whole process table every sample.
 The kernel builds those lists without one lock, so a fork or exit during a read can hide a process from one census.
-Teardown therefore also waits until the owner has no child left: every live descendant has a live ancestor that is the owner's child.
-The owner also reaps every exited child but the worker on each sample, so adopted processes cannot hold the user's pids as zombies until teardown.
+Teardown therefore also waits until the owner has no child left. Every live descendant has a live ancestor that is the owner's child, so a remaining child shows a process the census missed.
+On each sample the owner reaps every exited child except the worker, so adopted processes cannot hold the user's pids as zombies until teardown.
 The worker dies with the owner. A descendant whose owner was killed outright still outlives it, unless the supervisor's group kill reaches it.
 
 ## The Seatbelt profile

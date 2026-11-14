@@ -8,7 +8,7 @@ import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "../workspaces/workspaceTextLim
 // A text view's test id appears one commit before CodeMirror exists: the view
 // creates its EditorView — and with it `.cm-content` — in a passive effect. A
 // `querySelector` on the render that found the test id therefore returns null
-// often enough to matter, and `as HTMLElement` used to hide exactly that null
+// often enough to matter, and an `as HTMLElement` cast would hide that null
 // until a later line failed on it. Waiting for the element is the honest read,
 // and it is what every interaction here needs anyway: no user can click into an
 // editor that has not been built.

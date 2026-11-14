@@ -4,7 +4,9 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import userEvent from "@testing-library/user-event";
 import { useState, type ComponentProps } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ChatThreadRecord } from "../../ipc/bridgeContract";
+import type { AgentThreadLinesEvent, ChatThreadRecord } from "../../ipc/bridgeContract";
+import { DEFAULT_USER_SETTINGS, type DesktopUserSettings } from "../../settings/userSettings";
+import { AgentThreadLinesProvider } from "./AgentThreadLines";
 import { deferred, type Deferred } from "../../testing/deferred";
 import { commentTitle, LinkedChatsPanel as ProductionLinkedChatsPanel } from "./LinkedChats";
 import { ReactionStoreProvider } from "./reactionStore";
@@ -37,9 +39,6 @@ function stubAnimationFrames() {
   };
 }
 
-// History stands in as the file it was given: these tests pin what the panel
-// hands it, not what History then reads. Links reads its own query, which
-// About.test.tsx pins.
 vi.mock("./About", async (importOriginal) => {
   const { createElement } = await import("react");
   return {
@@ -54,8 +53,6 @@ vi.mock("./About", async (importOriginal) => {
   };
 });
 
-// The shell's error hook and Access context, the same objects every render
-// as the shell's are.
 const notices = { report: vi.fn(), clear: vi.fn() };
 const accessContext: AccessContext = {
   facts: {
@@ -69,7 +66,6 @@ const accessContext: AccessContext = {
 type PanelProps = ComponentProps<typeof ProductionLinkedChatsPanel>;
 const links: PanelProps["links"] = { revision: 0, onOpenLink: vi.fn() };
 
-// The workspace shell provides the reaction store in production.
 function LinkedChatsPanel(
   props: Omit<PanelProps, "notices" | "accessContext" | "links"> &
     Partial<Pick<PanelProps, "notices">>,
@@ -103,6 +99,8 @@ const bridgeMock = {
   markChatThreadRead: vi.fn(),
   getObjectAccess: vi.fn(),
   requestAccessRefresh: vi.fn(),
+  readAgentThreadLines: vi.fn(),
+  onAgentThreadLines: vi.fn(),
 };
 
 // jsdom doesn't implement scrollIntoView; the thread view nudges the latest
@@ -117,7 +115,6 @@ beforeEach(() => {
   });
   bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
   bridgeMock.markChatThreadRead.mockResolvedValue(undefined);
-  // Access opens with the file. Only its owner has it.
   bridgeMock.getObjectAccess.mockImplementation(async (input: { ref: unknown }) => ({
     ref: input.ref,
     rows: [],
@@ -246,9 +243,6 @@ describe("LinkedChatsPanel startup", () => {
   });
 });
 
-// Mirrors the Shell's Chats panel: searchChatThread state feeding
-// initialThread, cleared by onInitialThreadConsumed, with the panel swapped
-// out for the other panel tab's surface (full unmount) and back.
 function RailHarness() {
   const [searchChatThread, setSearchChatThread] = useState<ChatThreadRecord | null>(searchThread);
   const [view, setView] = useState<"chats" | "history">("chats");
@@ -276,28 +270,95 @@ function RailHarness() {
   );
 }
 
+it("shows what an agent's thread is doing over the composer of a file's chat", async () => {
+  let pushLines: (event: AgentThreadLinesEvent) => void = () => undefined;
+  bridgeMock.onAgentThreadLines.mockImplementation((listener: typeof pushLines) => {
+    pushLines = listener;
+    return () => undefined;
+  });
+  bridgeMock.readAgentThreadLines.mockResolvedValue({
+    workspaceId: "workspace-1",
+    revision: 1,
+    lines: [
+      { agentId: "nova", chatThreadId: "thread-1", state: "working", sinceMs: Date.now() },
+      { agentId: "nova", chatThreadId: "thread-9", state: "silent", sinceMs: Date.now() },
+    ],
+  });
+  const settings: DesktopUserSettings = {
+    ...DEFAULT_USER_SETTINGS,
+    agents: {
+      nova: {
+        name: "Nova",
+        hue: "olive",
+        thread: { tool: "t3-code", id: "t3-nova" },
+        workspaces: ["workspace-1"],
+        changesFiles: true,
+        enabled: true,
+        timeoutMinutes: 30,
+      },
+    },
+  };
+  render(
+    <AgentThreadLinesProvider
+      workspaceId="workspace-1"
+      ready
+      settings={settings}
+      report={vi.fn()}
+      clear={vi.fn()}
+    >
+      <LinkedChatsPanel
+        workspaceId="workspace-1"
+        filePath="notes/plan.md"
+        initialThread={searchThread}
+        onError={vi.fn()}
+      />
+    </AgentThreadLinesProvider>,
+  );
+  const chat = await screen.findByTestId("linked-chat-thread");
+  const shown = await within(chat).findByTestId("agent-thread-line");
+  expect(shown.dataset.state).toBe("working");
+  expect(
+    shown.compareDocumentPosition(screen.getByTestId("linked-chat-composer")) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+
+  // The agent replied in this chat: its line goes, and another chat's stays out.
+  act(() =>
+    pushLines({
+      workspaceId: "workspace-1",
+      revision: 2,
+      lines: [
+        {
+          agentId: "nova",
+          chatThreadId: "thread-9",
+          questionId: null,
+          state: "silent",
+          sinceMs: 1,
+          forwardedAtMs: 1,
+        },
+      ],
+    }),
+  );
+  expect(screen.queryByTestId("agent-thread-line")).toBeNull();
+});
+
 describe("LinkedChatsPanel initialThread consumption", () => {
   it("clears the parent state on consumption so a History<->Chats remount shows the list, not the stale thread", async () => {
     const user = userEvent.setup();
     render(<RailHarness />);
 
-    // The search-result thread opens once.
     await waitFor(() => expect(screen.getByTestId("linked-chat-thread")).toBeTruthy());
     expect(bridgeMock.listChatMessages).toHaveBeenCalledTimes(1);
     expect(bridgeMock.listChatMessages).toHaveBeenCalledWith({
       workspaceId: "workspace-1",
       threadId: "thread-1",
     });
-    // Consumption reported upward: the parent state is cleared.
     expect(screen.getByTestId("pending-initial-thread").textContent).toBe("cleared");
 
-    // History <-> Chats fully unmounts and remounts the panel.
     await user.click(screen.getByText("show-history"));
     expect(screen.queryByTestId("linked-chat-thread")).toBeNull();
     await user.click(screen.getByText("show-chats"));
 
-    // The remounted panel lands on the thread LIST — the stale search thread
-    // must not re-open (no second listChatMessages call).
     await waitFor(() => expect(screen.getByTestId("about-chats-count")).toBeTruthy());
     expect(screen.queryByTestId("linked-chat-thread")).toBeNull();
     expect(bridgeMock.listChatMessages).toHaveBeenCalledTimes(1);
@@ -385,8 +446,6 @@ describe("LinkedChatsPanel initialThread consumption", () => {
   });
 });
 
-// A search result opens its thread while this file's Chats are still being
-// read. The two reads answer to different owners, so neither drops the other.
 describe("LinkedChatsPanel thread and file reads", () => {
   const message = {
     presentation: { group: "fixture", hue: null, self: false },
@@ -421,7 +480,6 @@ describe("LinkedChatsPanel thread and file reads", () => {
     await screen.findByTestId("linked-chat-thread");
     await waitFor(() => expect(bridgeMock.listChatMessages).toHaveBeenCalledTimes(1));
 
-    // Try again in Notices reads this file's Chats while the messages are on their way.
     await act(async () => notices.report.mock.calls[0]![0].retry());
     expect(bridgeMock.listFileChats).toHaveBeenCalledTimes(2);
     await act(async () => {
@@ -469,10 +527,8 @@ describe("LinkedChatsPanel thread and file reads", () => {
     fireEvent.click(screen.getByTestId("linked-chat-send"));
     await waitFor(() => expect(onError).toHaveBeenCalledOnce());
     const again = onError.mock.lastCall?.[2] as () => void;
-    // The send's own reload opens the chat a second time.
     await waitFor(() => expect(reads("thread-1")).toBe(2));
 
-    // Another chat on the same file stays open.
     await userEvent.click(screen.getByTestId("linked-chat-back"));
     await openThread("thread-2");
     await act(async () => again());
@@ -485,17 +541,12 @@ describe("LinkedChatsPanel thread and file reads", () => {
     await act(async () => again());
     expect(reads("thread-1")).toBe(4);
 
-    // A closed panel opens nothing.
     view.unmount();
     again();
     expect(reads("thread-1")).toBe(4);
   });
 });
 
-// Chat follows a file share. A `view` recipient reads the chat and
-// adds nothing to it; `comment` and `edit` write. Main refuses a `view` write
-// with these exact words (SharedFileReadOnlyError), so the panel states them
-// instead of offering a control that can only fail.
 describe("LinkedChatsPanel share level", () => {
   function panel(extra: Partial<Parameters<typeof LinkedChatsPanel>[0]> = {}) {
     return (
@@ -531,11 +582,6 @@ describe("LinkedChatsPanel share level", () => {
     expect(screen.queryByTestId("linked-chat-readonly-note")).toBeNull();
   });
 
-  // A reaction is a write, so a share that refuses writes offers no PICKER.
-  // The reactions already on a message are part of the conversation, though,
-  // and a reader who can see the messages must see who reacted to them —
-  // dropping the whole prop hid other people's reactions along with the
-  // affordance to add one.
   it("shows existing reactions but no picker when the share refuses writes", async () => {
     bridgeMock.listChatMessages.mockResolvedValue({
       messages: [
@@ -580,9 +626,6 @@ describe("LinkedChatsPanel share level", () => {
   });
 });
 
-// Independently mounted panels share the workspace's one reaction store, as
-// every Chats surface does under the shell: one write chain per cell, one
-// set of rows, and errors only for a panel still showing the thread.
 describe("LinkedChats reactions through the workspace store", () => {
   const note = {
     presentation: { group: "fixture", hue: null, self: false },
@@ -646,8 +689,6 @@ describe("LinkedChats reactions through the workspace store", () => {
     await userEvent.click(thumbsIn("first"));
     expect(thumbsIn("first").getAttribute("aria-pressed")).toBe("true");
     expect(thumbsIn("second").getAttribute("aria-pressed")).toBe("true");
-    // The other panel removes it before the add is answered: both paint the
-    // removal, and it waits for the add.
     await userEvent.click(thumbsIn("second"));
     expect(thumbsIn("first").getAttribute("aria-pressed")).toBe("false");
     expect(thumbsIn("second").getAttribute("aria-pressed")).toBe("false");

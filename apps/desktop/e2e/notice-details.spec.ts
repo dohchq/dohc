@@ -29,7 +29,6 @@ async function shoot(page: Page, part: Locator, name: string) {
 const focused = (page: Page) =>
   page.evaluate(() => document.activeElement?.getAttribute("data-testid") ?? null);
 
-// Keyboard focus on Details, then Enter opens it in place and Tab reaches Copy details.
 async function openFromKeyboard(page: Page, details: Locator, testId: string) {
   await details.focus();
   await page.keyboard.press("Shift+Tab");
@@ -80,7 +79,6 @@ test("a notice's Details opens its report in place, scrolls a long one, and keep
       await expect(toasts).toHaveCount(3);
       await page.mouse.move(2, 2);
 
-      // Closed: Details and no Copy icon. Open: the report under the message.
       await expect(toasts.nth(0).getByTestId("workspace-shell-error-details")).toHaveText(
         "Details",
       );
@@ -91,7 +89,6 @@ test("a notice's Details opens its report in place, scrolls a long one, and keep
       await expect(part.getByTestId("notice-details-true-details-text")).toBeVisible();
       await shoot(page, part, `notice-details-${theme}-rest`);
 
-      // A long report scrolls inside its block, which stops at 240px.
       for (const block of [
         toasts.nth(2).getByTestId("workspace-shell-error-details-text"),
         part.getByTestId("notice-details-long-details-text"),

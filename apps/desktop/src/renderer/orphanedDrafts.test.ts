@@ -659,7 +659,6 @@ describe("orphanedDrafts remap", () => {
     remapOrphanedDraftPaths("ws-1", (path) => (path === "a.md" ? "renamed.md" : path));
     expect(draftsFor(useOrphanedDrafts, "ws-1", "a.md")).toHaveLength(0);
     expect(draftsFor(useOrphanedDrafts, "ws-1", "renamed.md").map((d) => d.text)).toEqual(["kept"]);
-    // The other workspace's identical path is untouched.
     expect(draftsFor(useOrphanedDrafts, "ws-2", "a.md").map((d) => d.text)).toEqual([
       "other workspace",
     ]);
@@ -696,9 +695,6 @@ describe("orphanedDrafts remap", () => {
   });
 });
 
-// The recovery must outlive the app run that made it. Before this, the
-// only copy of a set-aside edit was a renderer-memory map, so "Close anyway",
-// a crash, or a forced restart destroyed it.
 describe("orphanedDrafts persistence", () => {
   afterEach(() => {
     resetOrphanedDrafts();
@@ -768,14 +764,11 @@ describe("orphanedDrafts persistence", () => {
     ).not.toContain("shh");
     expect(storedText()).not.toContain(".env");
 
-    // The text is still recoverable in this run, and the close warning is
-    // what stands behind it.
     expect(draftsFor(useOrphanedDrafts, "ws-1", ".env").map((d) => d.text)).toEqual([
       "API_KEY=shh",
     ]);
     expect(atRiskOrphanedDraftIds()).toHaveLength(4);
 
-    // And it is gone after the restart, rather than restored from plaintext.
     const next = await relaunch();
     expect(draftsFor(next.useOrphanedDrafts, "ws-1", ".env")).toHaveLength(0);
   });
@@ -811,8 +804,6 @@ describe("orphanedDrafts persistence", () => {
     captureOrphanedDraft("ws-1", "a.md", "SECRET_BODY");
     expect(storedText()).toContain("SECRET_BODY");
     remapOrphanedDraftPaths("ws-1", (path) => (path === "a.md" ? ".env" : path));
-    // The floor holds after the fact too: plaintext for a now-secret path is
-    // removed, and the draft goes back behind the close warning.
     expect(storedText()).not.toContain("SECRET_BODY");
     expect(atRiskOrphanedDraftIds()).toHaveLength(1);
   });
@@ -851,7 +842,6 @@ describe("orphanedDrafts persistence", () => {
       "load floor: drop isPersistableDraftPath from loadStoredDrafts. The secret row is restored into the notice and left in plaintext storage, and both assertions below fail.",
     ).toHaveLength(0);
     expect(storedText()).not.toContain("shh");
-    // ...and the row beside it is untouched.
     expect(draftsFor(next.useOrphanedDrafts, "ws-1", "a.md").map((d) => d.text)).toEqual(["kept"]);
   });
 
@@ -922,25 +912,21 @@ describe("orphanedDrafts persistence", () => {
     );
     const next = await relaunch();
     const restored = draftsFor(next.useOrphanedDrafts, "ws-1", "a.md");
-    // No text is dropped for carrying a broken id...
     expect(
       [...restored.map((d) => d.text)].sort(),
       "usable id: let the watermark and the keep-it test read `typeof row.id === 'number'`. Infinity survives, every re-key draws the same Infinity, the rewrite writes nulls, and the second relaunch below comes back empty.",
     ).toEqual(["FRACTION", "OVERFLOW", "VALID"]);
-    // ...every row can be counted from and told apart...
     expect(restored.every((d) => Number.isSafeInteger(d.id))).toBe(true);
     expect(new Set(restored.map((d) => d.id)).size).toBe(3);
     // ...and nothing serialized to a null the next launch would reject.
     expect(storedText()).not.toContain("null");
 
-    // A dismissal retires exactly its own row.
     const dismissed = restored.find((d) => d.text === "OVERFLOW")!;
     next.dismissOrphanedDraft("ws-1", "a.md", dismissed.id);
     expect(
       [...draftsFor(next.useOrphanedDrafts, "ws-1", "a.md").map((d) => d.text)].sort(),
     ).toEqual(["FRACTION", "VALID"]);
 
-    // The round trip: the launch after the repair still has both texts.
     const after = await relaunch();
     expect(
       [...draftsFor(after.useOrphanedDrafts, "ws-1", "a.md").map((d) => d.text)].sort(),
@@ -967,19 +953,13 @@ describe("orphanedDrafts persistence", () => {
     ).toEqual(["EPOCH", "NEGATIVE", "OVERFLOWED"]);
     expect(storedText()).not.toContain("null");
 
-    // The round trip that matters: the launch after the repair still has them.
     const after = await relaunch(repairedAt);
     expect(draftsFor(after.useOrphanedDrafts, "ws-1", "a.md")).toHaveLength(3);
 
-    // ...and they age from the repair, so the window still ends them.
     const expired = await relaunch(repairedAt + ORPHANED_DRAFT_RETENTION_MS);
     expect(draftsFor(expired.useOrphanedDrafts, "ws-1", "a.md")).toHaveLength(0);
   });
 
-  // Allocating above the highest id walks out of the safe range when the rows
-  // already sit near the top of it: `MAX_SAFE_INTEGER + 1` increments to
-  // itself, so the third repair reuses the second one's id and one Dismiss
-  // takes both texts.
   it("allocates repaired ids inside the safe range, however high the stored ones", async () => {
     const capturedAt = Date.now();
     const top = Number.MAX_SAFE_INTEGER - 1;
@@ -1003,7 +983,6 @@ describe("orphanedDrafts persistence", () => {
     expect(restored.every((d) => Number.isSafeInteger(d.id))).toBe(true);
     expect(new Set(restored.map((d) => d.id)).size).toBe(4);
 
-    // One confirmation retires one edit.
     next.dismissOrphanedDraft("ws-1", "a.md", restored.find((d) => d.text === "DUP2")!.id);
     const left = ["DUP1", "DUP3", "TOP"];
     expect(
@@ -1019,10 +998,6 @@ describe("orphanedDrafts persistence", () => {
     ).toEqual(left);
   });
 
-  // The live twin of the repair allocator. Counting up from the highest
-  // restored id walks a fresh capture out of the safe range just as surely:
-  // from MAX_SAFE_INTEGER-1 the second and third captures land on the same id,
-  // and on one path one Dismiss takes both texts.
   it("gives this run's captures ids of their own, however high the restored one", async () => {
     const capturedAt = Date.now();
     seedStoredDrafts(
@@ -1048,7 +1023,6 @@ describe("orphanedDrafts persistence", () => {
     expect(live.every((d) => Number.isSafeInteger(d.id))).toBe(true);
     expect(new Set(live.map((d) => d.id)).size).toBe(3);
 
-    // One confirmation retires one edit, here and after the restart.
     next.dismissOrphanedDraft("ws-1", "a.md", live.find((d) => d.text === "FIRST")!.id);
     expect(draftsFor(next.useOrphanedDrafts, "ws-1", "a.md").map((d) => d.text)).toEqual([
       "RESTORED",
@@ -1060,11 +1034,6 @@ describe("orphanedDrafts persistence", () => {
     ).toEqual(["RESTORED", "SECOND"]);
   });
 
-  // An id is a slot, not a clock. A dismissal frees its slot for the next
-  // launch, so the newest draft in a run can hold a lower id than a survivor
-  // captured before it — and an order keyed on ids then puts the new one
-  // first, while storage keeps arrival order and the launch after swaps them
-  // back.
   it("keeps one order when a dismissal frees a low id for a later capture", async () => {
     const base = Date.now();
     const clock = vi.spyOn(Date, "now").mockReturnValue(base);
@@ -1091,9 +1060,6 @@ describe("orphanedDrafts persistence", () => {
     ]);
   });
 
-  // One order, whichever surface asks. The store sorts oldest first, and a
-  // rename that merges two paths must not answer differently before and after
-  // a restart.
   it("keeps one order for a merged rename, this run and the next", async () => {
     captureOrphanedDraft("ws-1", "a.md", "captured first");
     captureOrphanedDraft("ws-1", "target.md", "captured second");
@@ -1110,10 +1076,6 @@ describe("orphanedDrafts persistence", () => {
     ]);
   });
 
-  // The floor decides once, when the draft is captured. A rename can take a
-  // row out of plaintext storage, because re-keying it would write a row under
-  // a secret path; it never puts one in, because that is a new write of text
-  // the floor already refused.
   it("keeps a secret-path draft window-only after a rename onto a tracked path", () => {
     captureOrphanedDraft("ws-1", ".env", "API_KEY=shh");
     expect(atRiskOrphanedDraftIds()).toHaveLength(1);
@@ -1135,7 +1097,6 @@ describe("orphanedDrafts persistence", () => {
       draftsFor(next.useOrphanedDrafts, "ws-1", "a.md"),
       "expiry: drop the retention filter. Abandoned recoveries accumulate for the life of the install.",
     ).toHaveLength(0);
-    // Cleaned out of storage, not just hidden from the restore.
     expect(storedText()).not.toContain("abandoned");
   });
 
@@ -1193,11 +1154,6 @@ describe("orphanedDrafts persistence", () => {
     ).toBeNull();
   });
 
-  // The scrub is not a promise the store can always keep, and the honest
-  // answer is not a fallback. Removing the key instead would take the valid
-  // row's durable copy with it — and the only refusal that can reach a write
-  // which frees space is a store taking no writes at all, which refuses a
-  // removal too. So the pass states what it really offers: it runs again.
   it("retries the scrub on the next launch when the store refuses the rewrite", async () => {
     const capturedAt = Date.now();
     seedStoredDrafts(
@@ -1225,8 +1181,6 @@ describe("orphanedDrafts persistence", () => {
     const blocked = await relaunch();
     // The floor still refuses to restore it, so no surface lists or copies it.
     expect(draftsFor(blocked.useOrphanedDrafts, "ws-1", ".env")).toHaveLength(0);
-    // The store took no write, so it still holds the bytes. Nothing pretends
-    // otherwise.
     expect(storedText()).toContain("shh");
 
     refused.mockRestore();
@@ -1235,13 +1189,9 @@ describe("orphanedDrafts persistence", () => {
       storedText(),
       "retry: scrub once per install behind a flag, or treat the refused write as handled because the row was left out of the restore. The relaunch below then leaves the plaintext exactly where it is.",
     ).not.toContain("shh");
-    // ...and the valid row it was sharing the key with came through both runs.
     expect(draftsFor(next.useOrphanedDrafts, "ws-1", "b.md").map((d) => d.text)).toEqual(["kept"]);
   });
 
-  // The read drops a row that is not a draft before the load can compare what
-  // survived against what it started with. With a valid row beside it the two
-  // counts match, so the old check saw a clean store and rewrote nothing.
   it("scrubs a row that is not a draft, and keeps the one beside it", async () => {
     const capturedAt = Date.now();
     seedStoredDrafts(
@@ -1267,14 +1217,11 @@ describe("orphanedDrafts persistence", () => {
       storedText(),
       "discard trigger: compare only kept.length with rows.length. The counts agree, no rewrite runs, and MALFORMED_BODY stays in plaintext for the life of the install.",
     ).not.toContain("MALFORMED_BODY");
-    // ...and the row beside it restores and stays durable.
     expect(draftsFor(next.useOrphanedDrafts, "ws-1", "b.md").map((d) => d.text)).toEqual(["kept"]);
     expect(next.atRiskOrphanedDraftIds()).toEqual([]);
     expect(storedText()).toContain("kept");
   });
 
-  // The other half of the trigger: a clean store must not be rewritten, and an
-  // empty one must not gain a key it never had.
   it("leaves an untouched store alone", async () => {
     captureOrphanedDraft("ws-1", "a.md", "clean");
     const written = storedText();

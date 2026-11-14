@@ -80,7 +80,6 @@ describe("where this workspace's schedules run, in Notices", () => {
     await waitFor(() => expect(show).toHaveBeenCalledWith(null));
     expect(readScheduleHost).toHaveBeenCalledWith({ workspaceId: "ws", localOnly: true });
 
-    // A step here found schedules that the laptop runs.
     state = { ...state, waits: true };
     act(() => changed?.("ws"));
     await waitFor(() => expect(show.mock.lastCall?.[0]?.message).toContain("run on Ice's laptop"));

@@ -65,7 +65,7 @@ pub enum TxnOutcome<T> {
 /// feature compiles the actual `poll` call. In a release build without the
 /// feature this is a `const false`, so the optimizer removes the unreachable
 /// crash branch — provably zero release overhead on the write lane
-/// (`plan §Rust policy`; the injection seam is dev/test-only). The
+/// (the injection seam is dev/test-only). The
 /// [`FaultInjector`] trait and [`crate::NoFaults`] stay in the public API for
 /// callers (`dohc-engine-runtime` threads an `Arc<dyn FaultInjector>`), but
 /// their `poll` is never invoked in production.
@@ -710,7 +710,7 @@ impl EngineStore {
             .map_err(StorageError::corrupt)
     }
 
-    // ---- R04: blob store -------------------------------------------------
+    // ---- blob store -------------------------------------------------
 
     /// Store `bytes` as a content-addressed binary blob (dedup by hash),
     /// returning its sha-256 key.
@@ -751,7 +751,7 @@ impl EngineStore {
         blob::binary_blob_count(&self.conn)
     }
 
-    // ---- R04: materialization jobs --------------------------------------
+    // ---- materialization jobs --------------------------------------
 
     /// Generic pending jobs, oldest first. Checked deletes are owned by the
     /// runtime publication state machine and must never enter generic replay.
@@ -1002,7 +1002,7 @@ impl EngineStore {
         materialize::max_completed_generation_for_path(&self.conn, workspace_id, path)
     }
 
-    // ---- R04: backup support --------------------------------------------
+    // ---- backup support --------------------------------------------
 
     /// The on-disk size of the main database file, from `page_count * page_size`
     /// (the free-space preflight budget). Does not require the file path.

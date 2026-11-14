@@ -14,7 +14,6 @@ const decision = {
   options: ["Soup", "Salad"],
 };
 
-// A new post has a Poll button; a chat bar starts a poll from its "+".
 function openPoll(prefix: string) {
   if (prefix === "chats-new-thread") {
     fireEvent.mouseDown(screen.getByTestId(`${prefix}-poll-toggle`));
@@ -125,9 +124,6 @@ describe("ChatsView polls", () => {
     expect(screen.queryByTestId("chats-poll")).toBeNull();
   });
 
-  // The person leaves the thread and comes back while the send is in flight.
-  // The reload on return read the thread before the write, so the poll's
-  // choices come only with the sent message.
   it("shows a comment's poll when the person left and came back during the send", async () => {
     const user = userEvent.setup();
     bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
@@ -157,8 +153,6 @@ describe("ChatsView polls", () => {
   });
 });
 
-// A send whose store write held while a later step failed answers with the
-// saved message's ids and why. What it said shows once a reload lists it.
 describe("ChatsView sends that saved before a later step failed", () => {
   const failure = "Error: The bookmark projection stopped.";
   const bodies = () =>
@@ -192,7 +186,6 @@ describe("ChatsView sends that saved before a later step failed", () => {
     expect(threadReads("thread-1")).toBe(before + 1);
     await waitFor(() => expect(bodies()).toContain("Lunch?"));
 
-    // Back in the Group, Try again reads nothing.
     await user.click(screen.getByTestId("chats-thread-back"));
     await screen.findByTestId("chats-channel-view");
     const left = threadReads("thread-1");

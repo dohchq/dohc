@@ -8,19 +8,17 @@ import type { StepReach } from "./automationReach";
 // step that goes from stopped to allowed under the same definition is held
 // until a current editor confirms it.
 //
-// The other way, a share can narrow reach. A switched-on step that could
-// run and now cannot is marked narrowed, and a notice names it until someone
-// dismisses it or the step's reach comes back.
+// A share can also narrow reach. A switched-on step that could run and now
+// cannot is marked narrowed, and a notice names it until someone dismisses it
+// or the step's reach comes back. Verdicts carry a sequence number from a
+// counter that only rises, so a confirmation or a dismissal applies only to
+// the verdict the person saw, whatever the clock.
 //
-// Verdicts carry a sequence number from a counter that only rises, so a
-// confirmation or a dismissal applies only to the verdict the person saw,
-// whatever the clock.
-//
-// A share link that wrote a Collection's automations and then stopped
-// editing may have written a step before this computer ever checked it
-// with the link as an editor. So a step that link could not have run waits
-// once, whatever its last verdict, and the verdict remembers the link so a
-// confirmation is not asked for again.
+// A share link that wrote a Collection's automations and then stopped editing
+// may have written a step before this computer ever checked it with the link
+// as an editor. So a step that link could not have run waits once, whatever
+// its last verdict, and the verdict remembers the link so a confirmation is
+// not asked for again.
 //
 // Verdicts follow the automation host. A computer that hands over releases
 // its verdicts with its Group handover, and the next host takes them before

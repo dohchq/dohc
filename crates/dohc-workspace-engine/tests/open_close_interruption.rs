@@ -168,7 +168,6 @@ async fn an_interrupted_open_or_close_never_strands_the_workspace_db() {
             Err(_) => None,
         };
 
-        // The caller retries; the retry must always land.
         let handle = open_until_success(
             &harness,
             &root_t,
@@ -187,14 +186,12 @@ async fn an_interrupted_open_or_close_never_strands_the_workspace_db() {
             .await;
         }
 
-        // A close whose future is dropped mid-flight.
         let close_harness = Arc::clone(&harness);
         let racing_close = tokio::spawn(async move { close_harness.close(handle).await });
         tokio::time::sleep(std::time::Duration::from_micros(lcg(&mut seed) % 60_000)).await;
         racing_close.abort();
         let _ = racing_close.await;
 
-        // Reopen after the aborted close, then settle clean.
         let reopened = open_until_success(
             &harness,
             &root_t,

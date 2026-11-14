@@ -33,7 +33,6 @@ beforeEach(() => {
 afterEach(cleanup);
 
 const noop = () => {};
-// The split's chord, as its tab list row shows it after the name.
 const SPLIT_KEYS = shortcutText("new-editor-group-right", undefined);
 const tabs = [{ path: "a.md" }, { path: "b.md" }, { path: "c.md" }];
 
@@ -225,7 +224,6 @@ describe("EditorTabs strip scrolling", () => {
     const strip = screen.getByRole("tablist");
     expect(strip.className).toContain("overflow-x-auto");
     expect(strip.className).toContain("overflow-y-hidden");
-    // The class is the hook the scrollbar-hiding rule in styles.css targets.
     expect(strip.className).toContain("dohc-tab-strip");
   });
 
@@ -310,10 +308,8 @@ describe("EditorTabs strip scrolling", () => {
       const windowScroll = vi.spyOn(window, "scrollTo").mockImplementation(() => undefined);
       const { rerender } = render(renderStrip("a.md"));
       const strip = screen.getByRole("tablist");
-      // The first tab is already in view, so mounting scrolls nothing.
       expect(scrollTo).not.toHaveBeenCalled();
 
-      // So is b.md, which ends 50px inside the strip's 250px view.
       rerender(renderStrip("b.md"));
       expect(scrollTo).not.toHaveBeenCalled();
 
@@ -323,7 +319,6 @@ describe("EditorTabs strip scrolling", () => {
       expect(scrollTo).toHaveBeenLastCalledWith({ left: 199, behavior: "smooth" });
       expect(scrollTo.mock.contexts[0]).toBe(strip);
 
-      // b.md starts at 100px, left of the view: its start 49px inside.
       rerender(renderStrip("b.md"));
       expect(scrollTo).toHaveBeenLastCalledWith({ left: 51, behavior: "smooth" });
 
@@ -331,7 +326,6 @@ describe("EditorTabs strip scrolling", () => {
       rerender(renderStrip("e.md"));
       expect(scrollTo).toHaveBeenLastCalledWith({ left: 266, behavior: "smooth" });
 
-      // a.md is first: back to the start.
       rerender(renderStrip("a.md"));
       expect(scrollTo).toHaveBeenCalledTimes(4);
       expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, behavior: "smooth" });
@@ -345,32 +339,24 @@ describe("EditorTabs strip scrolling", () => {
       const strip = screen.getByRole("tablist");
       expect(scrollTo).not.toHaveBeenCalled();
 
-      // A split narrows the strip to 250px: d.md, ending at 400px, is out of
-      // view, and comes back without an animation.
       resize(250);
       expect(scrollTo).toHaveBeenCalledTimes(1);
       expect(scrollTo).toHaveBeenLastCalledWith({ left: 199, behavior: "auto" });
 
-      // Widened, the tab is still in view: nothing scrolls.
       resize(300);
       expect(scrollTo).toHaveBeenCalledTimes(1);
 
-      // Scrolled away by hand, the strip stays put through scrolling and
-      // re-renders that change neither the active tab nor the width.
       strip.scrollLeft = 0;
       fireEvent.scroll(strip);
       rerender(renderStrip("d.md", true));
       resize(300);
       expect(scrollTo).toHaveBeenCalledTimes(1);
 
-      // The next width change reveals it again.
       resize(260);
       expect(scrollTo).toHaveBeenCalledTimes(2);
       expect(scrollTo).toHaveBeenLastCalledWith({ left: 189, behavior: "auto" });
     });
 
-    // Places the tabs a test names at [left, width] over `content` px of tabs
-    // and trailing hairline, and answers where a tab sits in the view.
     function layOut(content: number, boxes: Record<string, [number, number]>) {
       const box = (el: HTMLElement) => boxes[el.dataset.testid?.slice(4) ?? ""] ?? [0, 0];
       vi.spyOn(HTMLElement.prototype, "offsetLeft", "get").mockImplementation(function (
@@ -401,7 +387,6 @@ describe("EditorTabs strip scrolling", () => {
       expect(scrollTo).toHaveBeenLastCalledWith({ left: 390, behavior: "smooth" });
       expect(span("e.md")).toEqual({ start: 10, end: 234 });
 
-      // Already shown there, it does not move.
       rerender(renderStrip("a.md"));
       strip.scrollLeft = 390;
       scrollTo.mockClear();
@@ -427,8 +412,6 @@ describe("EditorTabs strip scrolling", () => {
       expect(span("c.md")).toEqual({ start: 0, end: 100 });
     });
 
-    // A tab that can't clear both fades starts at the strip's start, and the
-    // left fade gives way to it while the right one still shows more tabs.
     it("shows a tab wider than the strip from the strip's start, with no left fade", () => {
       width.current = 150;
       const span = layOut(640, { "a.md": [0, 100], "c.md": [100, 200] });
@@ -440,13 +423,11 @@ describe("EditorTabs strip scrolling", () => {
       expect(strip.hasAttribute("data-overflow-left")).toBe(false);
       expect(strip.hasAttribute("data-overflow-right")).toBe(true);
 
-      // Narrower still, it stays where it is.
       scrollTo.mockClear();
       resize(80);
       expect(scrollTo).not.toHaveBeenCalled();
       expect(span("c.md")).toEqual({ start: 0, end: 200 });
 
-      // Scrolled by hand off the strip's start, the left fade comes back.
       strip.scrollLeft = 30;
       fireEvent.scroll(strip);
       expect(strip.hasAttribute("data-overflow-left")).toBe(true);
@@ -472,16 +453,12 @@ describe("EditorTabs strip scrolling", () => {
       const span = layOut(640, { "a.md": [0, 100], "c.md": [300, 220], "d.md": [300, 160] });
       const { rerender } = render(renderStrip("a.md"));
       const strip = screen.getByRole("tablist");
-      // 30px of room can't clear both fades: the tab starts at the strip's
-      // start, with no left fade.
       rerender(renderStrip("c.md"));
       expect(scrollTo).toHaveBeenLastCalledWith({ left: 300, behavior: "smooth" });
       expect(span("c.md")).toEqual({ start: 0, end: 220 });
       expect(strip.hasAttribute("data-overflow-left")).toBe(false);
       expect(strip.hasAttribute("data-overflow-right")).toBe(true);
 
-      // 90px of room clears both 40px fades, if not the joins beside them:
-      // the nearest such scroll, and none while the tab is already clear.
       rerender(renderStrip("d.md"));
       expect(scrollTo).toHaveBeenLastCalledWith({ left: 260, behavior: "smooth" });
       expect(span("d.md")).toEqual({ start: 40, end: 200 });
@@ -492,9 +469,6 @@ describe("EditorTabs strip scrolling", () => {
     });
   });
 
-  // styles.css shows each fade from the strip's attributes through a sibling
-  // selector, so the fades follow the strip in its frame. They draw over the
-  // other tabs and under the active one (z-10), and take no clicks.
   it("draws the edge fades after the strip, under the active tab, taking no clicks", () => {
     renderTabs("a.md");
     const strip = screen.getByRole("tablist");
@@ -546,9 +520,7 @@ describe("EditorTabs strip scrolling", () => {
     }
   });
 
-  // The strip's buttons rest at the muted tone of the other tab-row controls.
   it("tones the strip's buttons muted at rest", () => {
-    // An empty group's strip holds the group close.
     const group = (groupId: string, groupNumber: number, groupTabs: typeof tabs) => (
       <EditorTabs
         groupId={groupId}
@@ -585,8 +557,6 @@ describe("EditorTabs strip scrolling", () => {
     }
   });
 
-  // The fades in styles.css read these: an edge the strip can still scroll
-  // past fades, and an edge it has reached does not.
   it("marks the edges the strip can still scroll past", () => {
     renderTabs("a.md");
     const strip = screen.getByRole("tablist");
@@ -616,7 +586,6 @@ describe("EditorTabs strip scrolling", () => {
     fireEvent.scroll(strip);
     expect(edges()).toEqual({ left: true, right: false });
 
-    // A pixel short of an edge has reached it.
     strip.scrollLeft = 399;
     fireEvent.scroll(strip);
     expect(edges()).toEqual({ left: true, right: false });
@@ -634,7 +603,6 @@ describe("EditorTabs strip scrolling", () => {
     expect(strip.scrollLeft).toBe(40);
     expect(wheel.defaultPrevented).toBe(true);
 
-    // Horizontal trackpad pans keep their native scroll.
     const pan = new WheelEvent("wheel", { deltaX: 40, deltaY: 40, cancelable: true });
     strip.dispatchEvent(pan);
     expect(strip.scrollLeft).toBe(40);
@@ -678,14 +646,11 @@ describe("EditorTabs strip scrolling", () => {
   it("marks the overflow menu's active row apart from the current tab's row", async () => {
     const user = userEvent.setup();
     renderTabs("b.md");
-    // Opened from the keyboard, which marks the first row at once.
     screen.getByTestId("tabs-overflow").focus();
     await user.keyboard("{Enter}");
     const active = screen.getByRole("menuitem", { name: "a.md" });
     const current = screen.getByRole("menuitem", { name: "b.md" });
     expect(document.activeElement).toBe(active);
-    // Both rows can hold the selected fill, so the keyboard's row line marks
-    // the active one.
     expect(current.classList).toContain("bg-selected");
     expect(active.classList).toContain("focus:bg-selected");
     expect(active.classList).toContain("dohc-focus-row");
@@ -726,7 +691,6 @@ describe("EditorTabs strip scrolling", () => {
       fireEvent.click(close);
       // A macOS Control press opens the context menu.
       press(screen.getByTestId("tab-c.md"), { ctrlKey: true });
-      // The shown tab, picked in All tabs.
       await user.click(screen.getByTestId("tabs-overflow"));
       await user.click(screen.getByRole("menuitem", { name: "a.md" }));
       expect(calls).toEqual([
@@ -890,13 +854,10 @@ describe("EditorTabs pointer drag", () => {
     const third = screen.getByTestId("tab-c.md");
 
     dragTab(first, 4, 260);
-    // Pressed 10px into the tab, so its left edge follows to 250px, and both
-    // tabs whose midpoints it passed slide left by its width.
     expect(first.style.transform).toBe("translateX(250px)");
     expect(first.dataset.dragging).toBe("");
     expect(second.style.transform).toBe("translateX(-100px)");
     expect(third.style.transform).toBe("translateX(-100px)");
-    // Nothing commits per move.
     expect(onMove).not.toHaveBeenCalled();
 
     fireEvent.pointerMove(first, { pointerId: 4, buttons: 1, clientX: 120, clientY: 10 });
@@ -941,12 +902,9 @@ describe("EditorTabs pointer drag", () => {
     dragTab(first, 4, 260);
     fireEvent.pointerUp(first, { pointerId: 4, clientX: 260, clientY: 10 });
     expect(onMove).toHaveBeenCalledWith("left", "a.md", 2);
-    // The commit re-renders the strip with the tab in its new slot.
     Object.defineProperty(first, "offsetLeft", { configurable: true, value: 200 });
     reorder([{ path: "b.md" }, { path: "c.md" }, { path: "a.md" }]);
     expect(first.style.transform).toBe("");
-    // Released with its left edge at 250px and now laid out at 200px, it
-    // slides the remaining 50px.
     expect(first.animate).toHaveBeenCalledWith(
       [{ transform: "translateX(50px)" }, { transform: "none" }],
       expect.objectContaining({ duration: 160 }),
@@ -982,7 +940,6 @@ describe("EditorTabs pointer drag", () => {
     fireEvent.pointerMove(first, { pointerId: 4, buttons: 0, clientX: 300, clientY: 10 });
     expect(onMove).toHaveBeenCalledWith("left", "a.md", 1);
     expect(first.dataset.dragging).toBeUndefined();
-    // Hovering afterwards reorders nothing.
     fireEvent.pointerMove(first, { pointerId: 4, buttons: 1, clientX: 260, clientY: 10 });
     flushFrames();
     expect(onMove).toHaveBeenCalledOnce();
@@ -1001,12 +958,8 @@ describe("EditorTabs pointer drag", () => {
     dragTab(first, 4, 160);
     const third = screen.getByTestId("tab-c.md");
     expect(screen.getByTestId("tab-b.md").style.transform).toBe("translateX(-100px)");
-    // b closes: c now lays out in its slot, and the strip re-measures when
-    // the new list renders.
     Object.defineProperty(third, "offsetLeft", { configurable: true, value: 100 });
     reorder([{ path: "a.md" }, { path: "c.md" }]);
-    // The pointer is still 150px in; the remaining neighbour derives its
-    // displacement from the fresh layout.
     fireEvent.pointerMove(first, { pointerId: 4, buttons: 1, clientX: 160, clientY: 10 });
     flushFrames();
     expect(screen.getByTestId("tab-c.md").style.transform).toBe("translateX(-100px)");
@@ -1050,14 +1003,12 @@ describe("EditorTabs pointer drag", () => {
     fireEvent.pointerDown(source, { button: 0, pointerId: 7, clientX: 10 });
     fireEvent.pointerMove(source, { pointerId: 7, buttons: 1, clientX: 500, clientY: 200 });
     flushFrames();
-    // The source strip previews nothing for a move that belongs elsewhere.
     expect(source.style.transform).toBe("");
     fireEvent.pointerUp(source, { pointerId: 7, clientX: 500, clientY: 200 });
 
     expect(onMove).not.toHaveBeenCalled();
     expect(onMoveToGroup).toHaveBeenCalledOnce();
     expect(onMoveToGroup).toHaveBeenCalledWith("left", "right", "a.md", 0);
-    // The tab now belongs to the group it was dropped on.
     expect(onPress).toHaveBeenCalledExactlyOnceWith("right", "a.md");
   });
 
@@ -1116,7 +1067,6 @@ describe("EditorTabs pointer drag", () => {
     fireEvent.pointerMove(first, { pointerId: 4, buttons: 1, clientX: 700, clientY: 200 });
     flushFrames();
     expect(second.style.transform).toBe("");
-    // The dragged tab returns home too, with its corners at rest.
     expect(first.style.transform).toBe("");
     expect(
       (first.querySelector('[data-tab-join="left"]')?.firstElementChild as HTMLElement).style
@@ -1141,7 +1091,6 @@ describe("EditorTabs pointer drag", () => {
     strip.scrollLeft = 50;
     fireEvent.scroll(strip);
     flushFrames();
-    // The pointer stayed put, so the tab moved 50px further into the content.
     expect(first.style.transform).toBe("translateX(200px)");
   });
 
@@ -1159,7 +1108,6 @@ describe("EditorTabs pointer drag", () => {
     Element.prototype.animate = vi.fn(() => animation as unknown as Animation);
     const { onMove } = renderGroup();
     const first = screen.getByTestId("tab-a.md");
-    // A short drag that changes nothing settles in place.
     dragTab(first, 4, 40);
     fireEvent.pointerUp(first, { pointerId: 4, clientX: 40, clientY: 10 });
     expect(onMove).not.toHaveBeenCalled();
@@ -1168,7 +1116,6 @@ describe("EditorTabs pointer drag", () => {
     fireEvent.pointerDown(first, { button: 0, pointerId: 5, clientX: 10, clientY: 10 });
     expect(animation.commitStyles).toHaveBeenCalledOnce();
     expect(animation.cancel).toHaveBeenCalledOnce();
-    // A press that stays a click leaves no frozen transform behind.
     fireEvent.pointerUp(first, { pointerId: 5, clientX: 10, clientY: 10 });
     expect(first.style.transform).toBe("");
   });
@@ -1182,7 +1129,6 @@ describe("EditorTabs pointer drag", () => {
     const { onMove, reorder } = renderGroup();
     const first = screen.getByTestId("tab-a.md");
     const second = screen.getByTestId("tab-b.md");
-    // a moves past b and settles into its new slot.
     dragTab(first, 4, 160);
     fireEvent.pointerUp(first, { pointerId: 4, clientX: 160, clientY: 10 });
     expect(onMove).toHaveBeenCalledWith("left", "a.md", 1);
@@ -1191,7 +1137,6 @@ describe("EditorTabs pointer drag", () => {
     reorder([{ path: "b.md" }, { path: "a.md" }, { path: "c.md" }]);
     expect(first.animate).toHaveBeenCalledOnce();
 
-    // Grabbing b while a still settles lands a first.
     layOut();
     dragTab(second, 5, 160);
     expect(neighbourAnimation.cancel).toHaveBeenCalledOnce();
@@ -1300,16 +1245,20 @@ describe("EditorTabs overlay scrollbar", () => {
     const strip = overflowStrip();
     const thumb = screen.getByTestId("tab-strip-scrollbar");
     expect(thumb.style.display).toBe("");
-    // 200 of 600 visible -> thumb is a third of the 200px viewport…
-    expect(parseFloat(thumb.style.width)).toBeCloseTo(200 / 3, 1);
+    const viewportWidth = strip.clientWidth;
+    const contentWidth = strip.scrollWidth;
+    const visibleFraction = viewportWidth / contentWidth;
+    const thumbWidth = viewportWidth * visibleFraction;
+    const thumbTravel = viewportWidth - thumbWidth;
+    const overflowWidth = contentWidth - viewportWidth;
+    expect(parseFloat(thumb.style.width)).toBeCloseTo(thumbWidth, 1);
     expect(thumb.style.transform).toBe("translateX(0px)");
 
-    // …and scrolling 100 of the 400 overflow moves it a quarter of its
-    // 133.33px travel.
     strip.scrollLeft = 100;
     fireEvent.scroll(strip);
     const translate = /translateX\(([\d.]+)px\)/.exec(thumb.style.transform);
-    expect(parseFloat(translate?.[1] ?? "")).toBeCloseTo(100 / 3, 1);
+    const scrolledFraction = strip.scrollLeft / overflowWidth;
+    expect(parseFloat(translate?.[1] ?? "")).toBeCloseTo(scrolledFraction * thumbTravel, 1);
   });
 
   it("translates a vertical wheel over the thumb into horizontal scroll", () => {
@@ -1342,7 +1291,6 @@ describe("EditorTabs overlay scrollbar", () => {
     expect(strip.scrollLeft).toBeCloseTo(120, 1);
     fireEvent.pointerUp(thumb, { pointerId: 1 });
 
-    // Released: plain pointer travel no longer scrolls.
     fireEvent.pointerMove(thumb, { pointerId: 1, buttons: 1, clientX: 90 });
     expect(strip.scrollLeft).toBeCloseTo(120, 1);
   });
@@ -1373,8 +1321,6 @@ describe("EditorTabs overlay scrollbar", () => {
     expect(onCreateGroupRight).toHaveBeenCalledWith("left");
   });
 
-  // The strip's group close sat beside the active tab's close, with the same
-  // X, so a group with tabs closes from its tab list.
   it("closes a group with tabs from the end of its tab list, not the strip", () => {
     const onActivate = vi.fn();
     const onCloseGroup = vi.fn();
@@ -1439,7 +1385,6 @@ describe("EditorTabs overlay scrollbar", () => {
         onCloseGroup={onCloseGroup}
       />
     );
-    // A split, as the shell lays it out: a group with tabs, then an empty one.
     render(
       <>
         {group("left", 1, tabs)}
@@ -1517,7 +1462,6 @@ describe("EditorTabs overlay scrollbar", () => {
       NARROW_GROUP_HIDDEN,
     );
 
-    // The keyboard reaches both rows as it reaches a tab's.
     screen.getByTestId("tabs-overflow").focus();
     await user.keyboard("{Enter}");
     const share = screen.getByRole("menuitem", { name: "Share file" });
@@ -1537,8 +1481,6 @@ describe("EditorTabs overlay scrollbar", () => {
     await user.click(screen.getByRole("menuitem", { name: "New editor group right" }));
     expect(onCreateGroupRight).toHaveBeenCalledWith("left");
 
-    // A tab that opens only once can't open in a new group, from the row
-    // either.
     rerender(group(siteTabPath("apps/trip")));
     await user.click(screen.getByTestId("tabs-overflow"));
     expect(
@@ -1683,7 +1625,6 @@ it("uses one tab stop and arrow, Home and End activation", () => {
 // The strip's scroller cuts off a tab's outset ring, and the pane edge the
 // last strip button's.
 it("draws the focus ring inside every tab and strip button", () => {
-  // An empty group's strip holds the group close.
   render(
     <>
       <EditorTabs

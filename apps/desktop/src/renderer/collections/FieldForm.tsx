@@ -4,7 +4,6 @@ import {
   type FieldDefinition,
 } from "@dohc/workspace-contracts/collection";
 
-// The one text-input and select look across the collection dialogs.
 export const inputClass =
   "w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink placeholder:text-subtle focus:border-ink disabled:opacity-50";
 export const selectClass =
@@ -18,9 +17,7 @@ export const selectClass =
 export interface FieldDraft {
   name: string;
   type: CollectionFieldType;
-  /** Comma-separated option labels for select and multi-select. */
   optionsText: string;
-  /** A collection folder path for relation fields. */
   relationTarget: string;
   relationMany: boolean;
 }
@@ -119,10 +116,8 @@ export function FieldDraftRow({
 }: {
   draft: FieldDraft;
   onChange: (draft: FieldDraft) => void;
-  /** Collection folder paths a relation field can target. */
   relationTargets: readonly string[];
   disabled?: boolean;
-  /** The field types to offer. */
   types?: readonly CollectionFieldType[];
   autoFocus?: boolean;
 }) {

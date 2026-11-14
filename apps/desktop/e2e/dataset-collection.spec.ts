@@ -188,7 +188,6 @@ test("@dataset-collection owner changes fields, archives, restores, and exports 
     await createRecord(collection, "Camera");
     await expect(await fieldCells(collection, "Name")).toHaveText("Camera");
     await collection.getByRole("button", { name: "Open Camera", exact: true }).click();
-    // The record opens in a panel beside the table, which stays where it was.
     const record = collection.getByRole("complementary", { name: "Camera", exact: true });
     await expect(record.getByRole("heading", { name: "Camera", exact: true })).toBeVisible();
     await expect(await fieldCells(collection, "Name")).toHaveText("Camera");
@@ -204,7 +203,6 @@ test("@dataset-collection owner changes fields, archives, restores, and exports 
     await views.getByRole("button", { name: "Save view", exact: true }).click();
     await expect(views.getByRole("button", { name: "Edit view Cameras" })).toBeVisible();
     await views.getByRole("button", { name: "Done", exact: true }).click();
-    // The saved view is a tab, and saving it opened it.
     await expect(
       collection
         .getByTestId("collection-view-switcher")
@@ -225,7 +223,6 @@ test("@dataset-collection owner changes fields, archives, restores, and exports 
     await expect(review).toBeHidden();
     await expect(await fieldCells(collection, "Location")).toBeVisible();
     await expect(await fieldCells(collection, "Name")).toHaveText("Camera");
-    // Running a command closed the menu, so the page shows without it.
     await expect(collection.getByRole("menu")).toHaveCount(0);
     await page.emulateMedia({ reducedMotion: "reduce" });
     for (const theme of ["light", "dark"] as const) {
@@ -246,7 +243,6 @@ test("@dataset-collection owner changes fields, archives, restores, and exports 
       );
       await page.screenshot({ path: test.info().outputPath(`collection-management-${theme}.png`) });
     }
-    // From the keyboard: Enter on the menu's button opens it on its first command, and Enter runs that command.
     await collection.getByRole("button", { name: "Manage Collection", exact: true }).focus();
     await page.keyboard.press("Enter");
     await expect(
@@ -349,7 +345,6 @@ test("@dataset-collection a deleted Collection leaves every list, and its files 
       await createRecord(collection, name);
       await expect((await fieldCells(collection, "Name")).filter({ hasText: name })).toBeVisible();
     }
-    // Three records typed with no pause: each Enter saves its row, and the Collection makes all three.
     await typeRecords(collection, ["Hedy", "Joan", "Katherine"]);
     for (const name of ["Hedy", "Joan", "Katherine"])
       await expect((await fieldCells(collection, "Name")).filter({ hasText: name })).toBeVisible();
@@ -386,7 +381,6 @@ test("@dataset-collection a deleted Collection leaves every list, and its files 
     await openExplorerHome(page);
     await expect(home.getByText("Registration", { exact: true })).toBeVisible();
 
-    // What the trash keeps: every file in the Collection's folder.
     const saved = new Map<string, Buffer>();
     for (const entry of await readdir(join(workspace.rootPath, folder), {
       recursive: true,
@@ -458,7 +452,6 @@ test("@dataset-collection Apply on a chat's change card gives the Collection the
     await create.getByLabel("Collection name").fill("Volunteers");
     await create.getByTestId("new-collection-create").click();
     await expect(create).toBeHidden();
-    // Volunteers stays in view in one editor group while the chat opens in the other.
     const table = page.getByRole("region", { name: "Volunteers", exact: true });
     await expect(table.getByRole("columnheader").filter({ hasText: "Name" })).toBeVisible({
       timeout: 30_000,
@@ -488,7 +481,6 @@ test("@dataset-collection Apply on a chat's change card gives the Collection the
         JSON.parse(await readFile(at(before.datasetPath), "utf8")) as DatasetDefinition
       ).tables[0]!.fields.map((field) => field.name);
 
-    // An agent adds a Due date field to the Collection's files, then asks in a chat to apply it.
     const definition = JSON.parse(
       await readFile(at(before.datasetPath), "utf8"),
     ) as DatasetDefinition;
@@ -566,7 +558,6 @@ test("@dataset-collection Apply on a chat's change card gives the Collection the
     await expect(table.getByRole("columnheader").filter({ hasText: "Due date" })).toHaveCount(0);
     await card.getByTestId("chats-lane-change-apply").click();
     await expect(card).toHaveAttribute("data-state", "applied", { timeout: 30_000 });
-    // The table beside the chat reads the Collection again, with no Refresh.
     await expect(table.getByRole("columnheader").filter({ hasText: "Due date" })).toBeVisible({
       timeout: 30_000,
     });

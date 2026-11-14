@@ -275,7 +275,6 @@ export function useSentNoticeProps(input: {
     [describe, seenRun, sentNotices?.toast, workspaceId],
   );
 
-  // A list main could not read is a failure with a way to ask again.
   const listFailure = sentNotices?.listFailure ?? null;
   const relist = sentNotices?.relist;
   useEffect(() => {
@@ -370,7 +369,6 @@ export function useSentNoticeProps(input: {
           case "not-here":
             return NOT_HERE_NOTE;
           case "agents-settings":
-            // A notice that names a personal agent opens its page.
             return await openTarget(
               place.agent === null
                 ? { to: "agents-settings" }
@@ -545,7 +543,6 @@ export function useSentNoticeProps(input: {
     onReadAllSentNotices,
     onRunSentNoticeNow: runNow,
     onRetrySentNotice: retrySentNotice,
-    // The confirmation Try again asks for before a run starts over.
     retryDialog: noticeRetry.dialog,
   };
 }

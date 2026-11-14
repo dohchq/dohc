@@ -14,6 +14,7 @@ const kinds = {
   "wake-unconfirmed": "chat-wake-unconfirmed",
   "wake-runners-refused": "chat-wake-runners-refused",
   "wake-runners-unreadable": "chat-wake-runners-unreadable",
+  "forward-stuck": "chat-forward-stuck",
 } as const satisfies Record<ChatDispatchNotice["reason"], ShellErrorKind>;
 
 // A message from your phone that this computer's agents can't take. Main's
@@ -112,7 +113,8 @@ export function useChatDispatchNotices(
         // Dropped is over: nothing ran here. The others stay until they end. Try again can end all but a refusal,
         // which ends when the agents in Settings change.
         const stuck = isWake(reason) && reason !== "wake-dropped";
-        const retries = stuck && reason !== "wake-runners-refused";
+        // A message that waits for an agent's thread is tried again the same way.
+        const retries = (stuck && reason !== "wake-runners-refused") || reason === "forward-stuck";
         report({
           message: notice.message,
           kind: kinds[reason],
@@ -139,6 +141,9 @@ export function useChatDispatchNotices(
               }
             : {}),
           ...(reason === "no-runner" ? { title: "No agent could take this request" } : {}),
+          ...(reason === "forward-stuck"
+            ? { tone: "warning" as const, title: "A message is waiting for an agent's thread" }
+            : {}),
           ...(reason === "budget-paused"
             ? {
                 tone: "warning" as const,

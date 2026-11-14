@@ -1224,8 +1224,6 @@ describe("desktop shutdown", () => {
     expect(quit.preventDefault).toHaveBeenCalledOnce();
     expect(f.lifecycle.isQuitting()).toBe(true);
     expect(f.dependencies.shutdown.beginEngineShutdown).toHaveBeenCalledOnce();
-    // Refusal Notices and agent wakes both stop before any producer starts to
-    // drain, and neither waits for the other.
     for (const stop of [
       f.dependencies.shutdown.stopNoticeRefusals,
       f.dependencies.shutdown.stopAutomationWakes,
@@ -1478,7 +1476,6 @@ describe("desktop shutdown", () => {
       d.shutdown.stopAutomationWakes = () => consumer.stop();
       d.shutdown.closeWorkspaces = vi.fn(async () => {
         closing = true;
-        // A Notice change while authorities close asks the stopped consumer again.
         void consumer.resume();
         await authorities.close();
       });
@@ -1504,7 +1501,6 @@ describe("desktop shutdown", () => {
     expect(new Set(ready.mock.calls.map(([admitted]) => admitted.noticeId))).toEqual(
       new Set([intent("a", true).noticeId]),
     );
-    // The wake that was never admitted stays saved for the next start.
     expect(await createAutomationWakeIntents(file).list()).toEqual([intent("b", false)]);
   });
 
@@ -1518,7 +1514,6 @@ describe("desktop shutdown", () => {
     });
     await boot(f);
     f.app.emit("will-quit", event());
-    // Reports start while producers still drain, and teardown does not wait for them.
     expect(f.dependencies.shutdown.flushReports).toHaveBeenCalledOnce();
     ydoc.resolve();
     await vi.advanceTimersByTimeAsync(0);

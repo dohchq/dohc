@@ -1,6 +1,5 @@
-//! The durable materialization pipeline — the filesystem half of the plan's
-//! filesystem/database crash boundary (`plan §Filesystem/database crash
-//! boundary`, `TEST_ORACLE.md` §3.3). The DB half (job rows, content blobs)
+//! The durable materialization pipeline: the filesystem half of the
+//! filesystem/database crash boundary. The DB half (job rows, content blobs)
 //! lives in `dohc-engine-storage`; this module executes pending jobs against
 //! the real user file tree and marks them terminal.
 //!
@@ -97,9 +96,9 @@
 //! These guarantees cover process crashes. Power-loss protection follows the
 //! flush policy: every flush persists its file before the commits after it.
 //! On Apple silicon a file on the database's device takes a barrier, and the
-//! actor drains the drive once before it replies. B1 must expose durable
-//! displacement reads as document observations before the product promises to
-//! keep every outside version read.
+//! actor drains the drive once before it replies. Durable displacement reads
+//! are not yet document observations, so the product does not promise to keep
+//! every outside version read.
 //!
 //! Every materialization first canonicalizes the workspace root, then rejects
 //! symlinks/reparse points in each existing below-root target component.
@@ -141,9 +140,8 @@ mod readonly_link;
 /// bounded the same way so a giant external file cannot blow memory.
 pub const MAX_MATERIALIZE_BYTES: usize = dohc_engine_storage::MAX_MATERIALIZE_BYTES;
 
-/// The normative maximum atomic-replace attempts before failing closed
-/// (`TEST_ORACLE.md` §3.10). Re-exported from storage so both halves share one
-/// constant.
+/// The normative maximum atomic-replace attempts before failing closed.
+/// Re-exported from storage so both halves share one constant.
 pub const MAX_REPLACE_ATTEMPTS: u32 = dohc_engine_storage::MAX_REPLACE_ATTEMPTS;
 
 /// A per-OS flush policy: which files a job flushes. The store decides how
@@ -6178,7 +6176,7 @@ mod tests {
     use dohc_test_scratch::ScratchDir;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// #595 codex P2 (rounds 2+3): only a real sharing/lock violation may
+    /// Only a real sharing/lock violation may
     /// become the retryable `FileLocked` contract at the preimage read-open.
     /// std folds `ERROR_ACCESS_DENIED` into `PermissionDenied` too, and an
     /// ACL denial is terminal — the desktop polls `FileLocked` until it
@@ -6229,11 +6227,13 @@ mod tests {
         assert!(matches!(classify(acl), MaterializeError::Io { .. }));
     }
 
+    #[cfg(unix)]
     struct AlwaysFailReplacer {
         error: fn() -> std::io::Error,
         attempts: AtomicUsize,
     }
 
+    #[cfg(unix)]
     impl AtomicReplacer for AlwaysFailReplacer {
         fn displace(&self, _target: &Path, _displaced: &Path) -> std::io::Result<()> {
             self.attempts.fetch_add(1, Ordering::Relaxed);
@@ -6639,7 +6639,7 @@ mod tests {
         replace_notes(scratch).unwrap();
     }
 
-    /// #3570: a file its owner made private stays private when the engine
+    /// A file its owner made private stays private when the engine
     /// replaces it, by a job, a secret job or `files.replace`.
     #[cfg(windows)]
     #[test]
@@ -6660,7 +6660,7 @@ mod tests {
         }
     }
 
-    /// #3640: a secret the engine creates, by a job, a secret job or
+    /// A secret the engine creates, by a job, a secret job or
     /// `files.replace`, is private to this user, though its folder lets every
     /// local user read.
     #[cfg(windows)]
@@ -6707,7 +6707,7 @@ mod tests {
         }
     }
 
-    /// #3570: when the file's DACL can't be read, the write is refused
+    /// When the file's DACL can't be read, the write is refused
     /// before a temp exists, and the file stays as it was.
     #[cfg(windows)]
     #[test]

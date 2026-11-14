@@ -134,7 +134,6 @@ describe("compiled app document", () => {
     expect(await click("#blank")).toEqual(["_blank", "_blank"]);
     expect(await click("#out", { ctrlKey: true })).toEqual([null, null]);
     expect(await click("#out", { button: 1 })).toEqual([null, null]);
-    // A target the app sets during the click stays.
     expect(await click("#named")).toEqual(["report", "report"]);
     dom.window.close();
   });

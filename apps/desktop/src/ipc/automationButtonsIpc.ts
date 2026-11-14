@@ -121,7 +121,6 @@ export function createPressWindows<Sender extends PressWindow>(
       for (const [key, entry] of watching)
         if (entry.workspaceId === workspaceId) watching.delete(key);
     },
-    /** How many runs have a window waiting, for tests. */
     size(): number {
       return watching.size;
     },
@@ -134,7 +133,6 @@ export type PressWindows<Sender extends PressWindow> = ReturnType<
 
 type TextFile = { text: string; truncated: boolean; contentHash: string | null };
 
-/** Each Button field of the tables the host describes to this person, with its table. */
 function describedButtons(
   description: DatasetDescription,
 ): Array<{ field: string; table: string }> {
@@ -296,7 +294,6 @@ export function registerAutomationButtonsIpc<
     }
   }
 
-  /** The automations file a shared view holds for a Collection. */
   async function sharedAutomations(
     operation: Operation,
     collectionPath: string,

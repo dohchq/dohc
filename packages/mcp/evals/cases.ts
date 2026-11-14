@@ -35,7 +35,6 @@ function message(id: string, threadId: string, body: string, more: Args = {}) {
   };
 }
 
-/** What the dohc app answers when a thread is read. */
 function threadRead(read: ReturnType<typeof thread>, messages: ReturnType<typeof message>[]) {
   return {
     ok: true,

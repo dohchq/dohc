@@ -31,38 +31,31 @@ import {
   type CaptureVersionedTextStore,
 } from "../workspaces/workspaceEngineCaptureLiveStore";
 
-// A daemon double for the RECIPIENT side of a relay share, built so the
-// desktop share-view and share-mount suites can drive their production code
-// paths — EngineRelayClient.pullShareView and createCaptureLiveStores — with
-// no legacy TypeScript engine store anywhere in the picture.
+// A daemon double for the recipient side of a relay share. The desktop
+// share-view and share-mount suites drive their production code paths through
+// it: EngineRelayClient.pullShareView and createCaptureLiveStores.
 //
-// It lives here rather than beside the other loopbacks in
-// packages/workspace-engine-client because share.view.pull is not part of that
-// package's versioned surface: the transport has to reach an HTTP relay double
-// and it wires desktop-only modules (engineRelayClient,
-// workspaceEngineCaptureLiveStore). Putting it in the package would drag relay
-// wire concepts into a package that deliberately knows nothing about them.
-// `src/testing/` is already the desktop home for cross-suite test helpers.
+// It lives here, not in packages/workspace-engine-client, because it reaches
+// an HTTP relay double and wires desktop-only modules. That package knows
+// nothing about relay wire concepts.
 //
 // What is real here and what is not:
 //  - Real: the versioned file state. Ops replay through VersionedLoopbackEngine
 //    as ordinary `versionedText.write` / `versionedText.delete` calls, and
-//    `versionedText.list` answers with true sha256 and contentKind. That is
-//    what shared-view reconciliation compares disk against, so the repair
-//    tests exercise real state rather than a canned answer.
+//    `versionedText.list` answers with true sha256 and contentKind, which is
+//    what shared-view reconciliation compares disk against.
 //  - Real: the relay HTTP conversation. The log is paged, blobs are fetched by
 //    sha256 and hash-verified, and the bearer token comes from what
-//    `workspace.open` was told — so a wrong token or a revoked share reaches
+//    `workspace.open` was told, so a wrong token or a revoked share reaches
 //    the same 401 / 404 translation the daemon produces.
 //  - Not real: the grant. This double serves whatever the relay double put in
 //    the log; it does not re-check `grantedSelector`. Containment is the Rust
 //    share boundary's job (`crates/dohc-engine-sync/src/share.rs`) and is
 //    tested there. Do not read a passing test here as proof a scope holds.
-//    For the same reason its pull answers with NO refusals: it refuses
-//    nothing, because it checks nothing.
+//    Its pull answers with no refusals, because it checks nothing.
 //  - Not real: durability. Cursors and file state live in this object, so they
 //    survive a `workspace.close` (as the daemon's SQLite would) but not the
-//    process. Anything that must be proven ON DISK needs a real daemon.
+//    process. Anything that must be proven on disk needs a real daemon.
 
 const SHARE_LOG_PAGE_LIMIT = 500;
 const REPLAYABLE_ORIGINS = new Set(["api", "local-file", "restore", "sync", "unknown"]);

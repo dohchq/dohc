@@ -1,6 +1,3 @@
-// The verification queue: its line rules, and the service run against a stub
-// verifier that passes, fails, fails for machine reasons, hangs, and crashes.
-
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
@@ -340,7 +337,6 @@ test("a move puts a queued request first or before another, the line follows it,
   );
 });
 
-// A request that belongs to the owner named by --owner.
 const owned = (id, name, state = "queued", extra = {}) =>
   entry(id, { owner: { key: `flag:${name}`, title: name, source: "flag" } }, state, extra);
 const now = Date.parse("2026-10-16T09:00:00Z");
@@ -529,7 +525,6 @@ test("an owner with a run in progress waits until every owner without one has ha
 });
 
 test("requests accepted before owners existed record no starts, so they keep the line order they had", () => {
-  // Without a recorded owner, each belongs to its checkout. One checkout already ran a request.
   const legacy = (id, checkout, state = "queued", extra = {}) =>
     entry(id, { checkout, branch: null }, state, extra);
   const ran = legacy("000000001-aaaaaa", "C:\\w\\one", "passed", {
@@ -1018,7 +1013,6 @@ function harness(
   const root = mkdtempSync(join(tmpdir(), "dohc-queue-"));
   const fixture = fixtureRepo();
   const calls = [];
-  // Runs that pass once the test calls finishHeld.
   const held = [];
   let stop = new AbortController();
   const worker = async ({ lane, request, grant, output, signal }) => {
@@ -1326,7 +1320,6 @@ test("two lanes run two requests at once, each in its own checkout, and the next
     [one, two].map((call) => (call.lane.endsWith("-2") ? 2 : 1)),
     "each attempt names the lane it ran in",
   );
-  // Each attempt records the load it verified under, in its status and in the history.
   const load = listRequests(root).find((candidate) => candidate.id === first.id).status.attempts[0]
     .load;
   assert.equal(load.lanes, 2);
@@ -1587,7 +1580,6 @@ test("another run waits while free memory is low, but a lone run still starts", 
     () => calls.find((call) => call.id === second.id),
     "the second run starts once memory is back",
   );
-  // With every lane busy, no run waits for memory, so status does not say so.
   memory = 5;
   await waitFor(
     () => readJson(queuePaths(root).service)?.health?.reason === null || null,
@@ -1776,7 +1768,6 @@ test("a restarted service keeps a finished receipt and retries an interrupted ru
         : null;
     }, `${count} requests must finish`);
   await settled(2);
-  // Once the status can be read, the running service recovers the request like the others.
   rmSync(held, { recursive: true });
   writeFileSync(held, status);
   const finished = await settled(3);
@@ -1952,7 +1943,6 @@ test(
     writeFileSync(join(root, "current"), "stub");
     // A command through the Windows job relay, as the verifier starts every command; it records its own pid.
     const command = `require("node:fs").appendFileSync(${JSON.stringify(join(root, "commands.log"))}, process.pid + "\\n"); setInterval(() => {}, 1000);`;
-    // A stub service: waits for go, starts a child and a relayed command, records its pids, and heartbeats.
     writeFileSync(
       join(service, "queue-service.mjs"),
       `
@@ -1992,7 +1982,6 @@ test(
             .split(/\r?\n/u)
             .filter((line) => /^\d+( \d+)?$/u.test(line))
         : [];
-    // Each service generation records its pid and its child's, and its command records its own.
     const generation = (n) =>
       waitFor(
         () => {
@@ -2054,7 +2043,6 @@ test("a Mac finds its queue only once the service is installed there, and never 
     join(home, "elsewhere"),
   );
   assert.equal(queueRoot({}, { platform: "linux", home }), null);
-  // Uninstall removes the marker, and the Mac verifies inline again.
   rmSync(join(root, "current"));
   assert.equal(queueRoot({}, mac), null);
 });
@@ -2262,7 +2250,6 @@ test(
     ]);
     assert.deepEqual([loaded.size, readdirSync(dir)], [0, []]);
     assert.deepEqual(stopped, [root, root]);
-    // A LaunchAgent launchd keeps loaded is an error, and its definition stays.
     await registerLaunchAgents(root, { dir, command, path: "/usr/bin" });
     await assert.rejects(
       unregisterLaunchAgents(root, {
@@ -2629,7 +2616,6 @@ test(
   async (t) => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), "dohc-queue-record-")));
     buildEnvHelper(envHelper(root));
-    // One process the record names by its start time, and one only its marker names.
     const recorded = spawn("/bin/sleep", ["600"], { stdio: "ignore" });
     const marked = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
       stdio: "ignore",
@@ -2669,7 +2655,6 @@ test(
       recorded.exitCode ?? recorded.signalCode ?? marked.exitCode ?? marked.signalCode,
       null,
     );
-    // A process that outlives SIGKILL fails the stop, and the record stays for the next try.
     record({});
     await assert.rejects(
       stopRecorded(root, {
@@ -2845,7 +2830,6 @@ test(
     const root = realpathSync(mkdtempSync(join(tmpdir(), "dohc-queue-supervisor-")));
     buildEnvHelper(envHelper(root));
     const log = (name) => join(root, `${name}.log`);
-    // Each helper records its pid in the log it is given, and runs until it is stopped.
     writeFileSync(
       join(root, "idle.cjs"),
       `require("node:fs").appendFileSync(process.argv[2], process.pid + "\\n"); setInterval(() => {}, 1000);`,
@@ -2900,7 +2884,6 @@ test(
         }
       rmSync(root, { recursive: true, force: true });
     });
-    // A generation: the service and the five processes it started, once the supervisor has recorded the Apple program.
     const generation = (n) =>
       waitFor(
         () => {
@@ -2915,7 +2898,6 @@ test(
     const first = startSupervisor();
     const zero = await generation(0);
     assert.ok(zero.every(running));
-    // A crash of the service alone: the supervisor stops everything it started, then starts another.
     process.kill(zero[0], "SIGKILL");
     await waitFor(
       () => zero.every((pid) => !running(pid)),
@@ -3416,7 +3398,6 @@ test("a move of a running, finished, or unknown request is refused with a reason
       args.join(" "),
     );
   }
-  // The service makes the same checks for a move written straight to it, and answers each one.
   for (const [move, message] of [
     [{ id: hung.id }, /it is running/u],
     [{ id: done.id }, /already finished/u],
@@ -3504,7 +3485,6 @@ test("a malformed move is answered and removed, and the rest of the tick still r
   for (const [move] of bad) keys.push(await requestMove(root, move));
   const array = `move-${Date.now()}-array`;
   await writeJson(join(paths.moves, `${array}.json`), [1]);
-  // A move the service can use, written as a client might: its text is cleaned to one short line.
   const dirty = await requestMove(root, {
     id: waiting.id,
     reason: `fixes main\n000000001-aaaaaa  #1  all\u001b[31m ${"x".repeat(400)}`,
@@ -3582,7 +3562,6 @@ test("sixty moves into the same gap keep the exact order", async (t) => {
   const a = await request("pass", { branch: "refs/heads/a" });
   const b = await request("pass", { branch: "refs/heads/b" });
   const c = await request("pass", { branch: "refs/heads/c" });
-  // Each move puts the last request just ahead of the one before it, into the gap behind the first.
   let [second, third] = [b.id, c.id];
   for (let n = 1; n <= 60; n += 1) {
     const key = await requestMove(root, {
@@ -3743,20 +3722,17 @@ test("a computer restart holds the line until resume; a service restart or a fir
     "PASS",
   );
   assert.equal(readPause(root), null, "a first start holds nothing");
-  // The supervisor or an upgrade restarts the service within one boot.
   await restart({ bootedAt: lastBeat() - 60 * 60_000 });
   assert.equal(readPause(root), null, "a service restart holds nothing");
   assert.equal(
     (await settled((await request("pass", { branch: "refs/heads/same-boot" })).id)).status.verdict,
     "PASS",
   );
-  // The computer booted after the last heartbeat.
   await restart({ bootedAt: lastBeat() + 1 });
   assert.equal(readPause(root)?.reason, "the computer restarted");
   const waiting = await request("pass", { branch: "refs/heads/after-boot" });
   await request("pass", { branch: "refs/heads/later" });
   assert.equal(state(waiting.id), "queued", "no run starts after the computer restarts");
-  // The pause outlasts a service restart.
   await restart({ bootedAt: 0 });
   assert.equal(readPause(root)?.reason, "the computer restarted");
   await request("pass", { branch: "refs/heads/later-still" });
@@ -3819,7 +3795,6 @@ test("status says paused and idle only when nothing runs, counting inline gates"
   assert.equal(pauseStatus(root, beat([]), 0), null);
 });
 
-/** A T3 database holding `threads`, each [id, title, payload]. */
 function t3Database(t, threads) {
   const dir = mkdtempSync(join(tmpdir(), "dohc-t3-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));

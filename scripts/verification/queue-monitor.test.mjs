@@ -1,5 +1,3 @@
-// The queue monitor: the snapshot its page draws, a run's details, and who the server answers.
-
 import assert from "node:assert/strict";
 import test from "node:test";
 import { spawnSync } from "node:child_process";
@@ -120,7 +118,6 @@ async function queueRoot(t) {
       { name: "rust", verdict: "RUNNING", startedAt: iso(9) },
     ],
   });
-  // The running attempt's logs: the verifier's own, then a step's, written later.
   for (const [name, minutesAgo] of [
     ["worker.log", 5],
     ["rust.log", 1],
@@ -319,7 +316,6 @@ test("the line is drawn in the order moves gave it, and a moved request says who
     ],
     "the nightly still goes first, the moved request is ahead of the one it was moved before, and its tooltip names who moved it and why",
   );
-  // A moved request keeps its mark in its lane once it runs.
   await writeJson(join(paths.request("000000003-cccccc"), "status.json"), {
     state: "running",
     attempts: [{ n: 1, startedAt: iso(10), lane: 2 }],
@@ -588,7 +584,6 @@ test("a request is named by the T3 thread whose worktree, linked pull request, o
     pullRequests: [{ number: 8, snapshot: { headBranch: "fix/sync-tests" } }],
     lineage: subagentOf("t3"),
   });
-  // A thread a person started a month ago, with a subagent working now.
   add(
     "t8",
     "Plan the launch",
@@ -768,13 +763,10 @@ test("status, positions, and the dashboard show the line in the order the servic
   const [a3, a4] = [await add(3, { owner: owner("ann") }), await add(4, { owner: owner("ann") })];
   const [b5, b6] = [await add(5, { owner: owner("bob") }), await add(6, { owner: owner("bob") })];
   const c7 = await add(7, { owner: owner("cat") });
-  // Accepted before owners existed: it belongs to its checkout.
   const legacy = await add(8, { checkout: "C:\\w\\legacy" });
   const nightly = await add(9, { nightly: true, checkout: "nightly", branch: "refs/heads/main" });
-  // Cat and the legacy checkout never started, Bob started five hours ago, and Ann runs now.
   const line = [running, nightly, c7, legacy, b5, a3, b6, a4];
   const requests = listRequests(root);
-  // The service starts one request a minute, every run still going.
   let queue = requests;
   const picked = [];
   for (
@@ -1052,7 +1044,6 @@ test("the page switches the host between 2 and 3 lanes with a JSON POST from its
     log: (line) => logged.push(line),
   });
   const setting = () => readFileSync(join(slots, "verification-lanes"), "utf8");
-  // A count set on the host outside the switch shows as it is.
   writeFileSync(join(slots, "verification-lanes"), "4\n");
   assert.deepEqual((await state()).laneSetting, { lanes: 4, error: null, closing: [], note: null });
   const three = await write(
@@ -1099,7 +1090,6 @@ test("the page switches the host between 2 and 3 lanes with a JSON POST from its
     "the page on the tailnet name switches back",
   );
   assert.equal(setting(), "2\n");
-  // A setting the host cannot read is shown with why, and a switch replaces it.
   writeFileSync(join(slots, "verification-lanes"), "two");
   assert.deepEqual(laneSetting(slots), {
     lanes: null,
@@ -1124,7 +1114,6 @@ test("a Mac refuses the lane switch and keeps one lane, because Electron runs ca
   );
   assert.deepEqual(readdirSync(slots), [], "the refusal writes no lane setting");
   assert.equal((await state()).laneSetting.lanes, 1);
-  // Pause and resume still work there.
   assert.equal((await write("/api/pause", { reason: "a Mac pause" })).status, 200);
 });
 
@@ -1160,7 +1149,6 @@ test("a lane switch is refused with a status, and changes nothing, unless it is 
   }
   assert.equal((await write("/api/lanes", undefined, { method: "GET" })).headers.allow, "POST");
   assert.deepEqual(laneEvents(root), []);
-  // A host without a slot root has no lane setting to show or change.
   const bare = await monitor(t, root, { slotRoot: null });
   assert.equal((await bare.state()).laneSetting, null);
   assert.equal((await bare.write("/api/lanes", { lanes: 3 })).status, 409);
@@ -1200,7 +1188,6 @@ test("switching to 2 while lane 3 runs a gate stops nothing, and the dashboard a
     return result.stdout;
   };
   assert.match(status(), /^lanes: 2, lane 3 closes after its current gate$/mu);
-  // Once lane 3's gate ends, no lane is closing.
   rmSync(join(slots, "verification-slot-3"), { recursive: true });
   assert.deepEqual(monitorState(root, { now, lanes: () => laneSetting(slots) }).laneSetting, {
     lanes: 2,

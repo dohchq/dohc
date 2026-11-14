@@ -18,9 +18,9 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// WS-D — INDEXED ENGINE SEARCH MOUNTED IN THE DESKTOP (plan PR 11/17 scope):
+// Indexed engine search in the desktop:
 // a workspace's search panel routes through the engine's FTS index
-// and returns FILES and CHAT MESSAGES in one result list; a chat hit renders
+// and returns files and chat messages in one result list; a chat hit renders
 // a distinguishable row and opens the Chats panel on its thread. The `.env`
 // family (including `.env.local`) is never findable and never present in the
 // raw FTS tables.
@@ -60,8 +60,8 @@ test("search finds file content and a chat message; .env.local content never sur
 
   try {
     await seedWorkspaceManifest(temp, workspaceId);
-    // Disk state: one ordinary tracked file plus a `.env.local` (the family
-    // member that originally fell through the secret classifier).
+    // Disk state: one ordinary tracked file plus a `.env.local` (a family
+    // member the secret classifier must catch).
     await writeWorkspaceFiles(temp, [
       {
         path: "notes/roadmap.md",
@@ -81,7 +81,6 @@ test("search finds file content and a chat message; .env.local content never sur
     await revealExplorerPath(page, "notes/roadmap.md");
     await explorerRow(page, "notes/roadmap.md").click();
     await openAboutPanel(page);
-    // A comment on the whole file: its first line titles the chat.
     await page.getByTestId("linked-chat-new").click();
     const comment = page.getByTestId("linked-chat-new-composer");
     await comment.fill("Roadmap sync\nLet's settle the quasar sync cadence this week.");
@@ -92,14 +91,11 @@ test("search finds file content and a chat message; .env.local content never sur
     await page.getByTestId(activityPin("search")).click();
     await expect(page.getByTestId("search-view")).toBeVisible();
 
-    // 1. File content resolves through the engine index.
     await page.getByTestId("search-input").fill("galaxy-brain");
     await expect(
       page.locator('[data-testid="search-result-group"][data-path="notes/roadmap.md"]'),
     ).toBeVisible({ timeout: 20_000 });
 
-    // 2. A chat message is a distinguishable result row (Chat badge + thread
-    //    title instead of a file basename).
     await page.getByTestId("search-input").fill("quasar");
     const chatGroup = page
       .locator('[data-testid="search-result-group"]')
@@ -107,7 +103,6 @@ test("search finds file content and a chat message; .env.local content never sur
     await expect(chatGroup).toBeVisible({ timeout: 20_000 });
     await expect(chatGroup.getByText("Chat", { exact: true })).toBeVisible();
 
-    // 3. Clicking the chat result opens the Chats panel on that thread.
     await chatGroup.getByTestId("search-result-row").first().click();
     await expect(page.getByTestId("linked-chat-thread")).toBeVisible({
       timeout: 20_000,
@@ -115,17 +110,11 @@ test("search finds file content and a chat message; .env.local content never sur
     await expect(page.getByTestId("linked-chat-title")).toContainText("Roadmap sync");
     await expect(page.getByTestId("linked-chat-message-body")).toContainText("quasar sync cadence");
 
-    // 4. The `.env.local` content is never findable... (the search panel is
-    // still open — opening the Chats panel does not close it)
     await page.getByTestId("search-input").fill(SECRET_VALUE);
     await expect(page.getByTestId("search-empty-state")).toBeVisible({
       timeout: 20_000,
     });
 
-    // 5. ...and ADVERSARIALLY, a raw dump of the FTS index tables in the
-    //    persisted engine.db carries no secret plaintext and no .env path,
-    //    while it does carry the tracked corpus (the dump inspects a
-    //    populated index, not a missing table).
     const dump = dumpSearchIndexTables(temp.rootPath);
     expect(dump).toContain("notes/roadmap.md");
     expect(dump).toContain("quasar sync cadence");

@@ -103,7 +103,6 @@ function snapshotsEqual(a: Uint8Array, b: Uint8Array): boolean {
   return true;
 }
 
-// Why a document left its path while it was open.
 export type DocumentGoneCause = "deleted" | "object-changed";
 
 // What one open answers: a workspace, a path, the gate, and the active-version
@@ -127,7 +126,6 @@ export function engineDocRequestKey(input: {
   ]);
 }
 
-// The settled result of one open.
 type EngineDocOpenOutcome =
   | {
       token: number;
@@ -312,7 +310,7 @@ export type EngineDocInput = {
   // lease's session behind every subscriber, with the same stale-response
   // guard as any other open.
   retryKey?: number;
-  // G2-C-3 version-switch re-bind: a monotonic token that changes whenever the
+  // Version-switch re-bind: a monotonic token that changes whenever the
   // active version of this workspace changes while the same file stays open.
   reopenKey?: number;
 };

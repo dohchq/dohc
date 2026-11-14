@@ -26,7 +26,8 @@ PR checks run automatically for ready branches in this repository, on GitHub's r
 They don't run automatically for forks. A maintainer verifies fork PRs locally before merging.
 
 - Keep each pull request focused on one change. Explain the problem and the fix.
-- Add a test for any behavior change. Tests must wait for the expected condition, not a fixed delay.
+- Add a test for any behavior change. A purely visual fix needs before and after screenshots, not a test.
+  Tests must wait for the expected condition, not a fixed delay.
 - Run the relevant checks and include their commands and results.
 - For UI changes, include before and after screenshots. Include a short video if motion or interaction changes.
 

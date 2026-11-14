@@ -6,7 +6,6 @@ import { disposeEngineDocLeasesForTests } from "./engineDocLease";
 import { harnessBridge } from "./engineDocChunkingTestHarness";
 import { useEngineDoc } from "./useEngineDoc";
 
-// The real hook import must leave projection lazy until a session binds.
 let projectionLoads = 0;
 vi.mock("@dohc/ydoc-projection", async (importOriginal) => {
   projectionLoads += 1;
@@ -35,7 +34,6 @@ afterEach(async () => {
 });
 
 it("does not load the Tiptap projection module merely by importing useEngineDoc", () => {
-  // No render, no bind, nothing — this checks the static import chain only.
   expect(
     projectionLoads,
     "reintroduce `import { yDocToMarkdown } from '@dohc/ydoc-projection'` at the top of useEngineDoc.ts -> this reads 1 instead of 0, because the test file's own top-level `import { useEngineDoc } from './useEngineDoc'` already evaluated that chain before this test body ran.",

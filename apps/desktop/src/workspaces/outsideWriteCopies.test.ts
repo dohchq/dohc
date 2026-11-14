@@ -158,8 +158,8 @@ describe("materialization keeps outside bytes before replacement", () => {
     expect(await copies.list(errors)).toEqual([["n.md", "n (kept copy).md", expect.any(String)]]);
   });
 
-  // #3496: right after launch, the sync client's first request closes the
-  // engine's binding and opens it again. A list in between showed a red toast.
+  // Right after launch, the sync client's first request closes the engine's
+  // binding and opens it again. A list in between must not show a red toast.
   it.each(["before", "after"])(
     "lists kept copies while the sync client reopens the engine's binding, starting %s the list finds its folder",
     async (when) => {
@@ -232,7 +232,6 @@ describe("materialization keeps outside bytes before replacement", () => {
       "A file is at .dohc/local/outside-write-copies, which must be a real folder.",
     );
     await rm(folder);
-    // The records went with the folder; the copy itself stays beside n.md.
     expect(await copies.list()).toEqual([]);
     expect(await readFile(join(rootPath, "n (kept copy).md"), "utf8")).toBe("outside");
   });

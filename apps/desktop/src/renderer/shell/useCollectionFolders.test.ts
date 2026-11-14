@@ -196,7 +196,6 @@ it("says where the Collections are when the server didn't answer, and still repo
   expect(result.current.collectionsElsewhere).toEqual({ computer: "Laptop", others: false, words });
   expect(result.current.datasets).toEqual([]);
   expect(result.current.collectionsRefusal).toBeNull();
-  // A list it showed before stays while the server doesn't answer.
   dataset.mockResolvedValueOnce({
     ...page,
     elsewhere: { server: "https://relay.example", computer: { label: "Laptop", sameName: false } },

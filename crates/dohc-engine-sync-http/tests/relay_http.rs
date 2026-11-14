@@ -1431,7 +1431,6 @@ fn shared_channel_pull_requires_authenticated_origin_metadata() {
     assert!(matches!(result, Err(RelayError::InvalidResponse)));
 }
 
-/// The scope the fake hosted feed below holds.
 const SCOPE_TOKEN: &str = "scope-2";
 
 fn query(target: &str, key: &str) -> Vec<String> {
@@ -1721,7 +1720,6 @@ fn hosted_feed_refusals_map_to_their_errors() {
         .expect("a batch answers per blob");
     assert_eq!(outside.results, vec![Err(RelayError::BlobMissing)]);
 
-    // An ordinary replica's transport serves no hosted feed and sends nothing.
     let ordinary = transport(&server);
     assert_eq!(
         ordinary.pull_hosted(hosted_pull(None, None)),

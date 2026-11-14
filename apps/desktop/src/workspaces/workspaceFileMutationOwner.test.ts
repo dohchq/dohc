@@ -49,8 +49,6 @@ interface TestWorkspace {
 }
 
 type MutationCapture = Pick<WorkspaceEngineCapture, "changePathsAs" | "beginFileRename">;
-// What a test gives the harness: changePathsAs settles through this
-// settleAndCloseLiveSessionsForPath as the real capture settles first.
 type TestCapture = Pick<WorkspaceEngineCapture, "settleAndCloseLiveSessionsForPath"> &
   Partial<MutationCapture>;
 
@@ -91,7 +89,6 @@ async function harness(
     shareMounts?: unknown;
     trashItem?: (path: string) => Promise<void>;
     beforeDocumentMutation?: (authorityId: symbol, path: string) => Promise<void>;
-    // Runs before the workspace operation admits the change.
     beforeOperation?: () => Promise<void>;
   } = {},
 ) {
@@ -193,7 +190,6 @@ async function harness(
     }) => Promise<Result>,
   ): Promise<Result> => {
     rendererOperationCalls(event, workspaceId);
-    // Only a gated test waits; every other change is admitted in its own turn.
     if (options.beforeOperation) await options.beforeOperation();
     if (event.authorityId !== undefined && event.authorityId !== authorityId) {
       throw new Error("File change stopped because this window changed workspaces.");
@@ -716,8 +712,6 @@ describe("WorkspaceFileMutationOwner", () => {
       "delete",
       "save",
     ]);
-    // A create and a save are journaled edits the shell pushes; a move and a
-    // delete stay for Send changes.
     expect(test.shareViewEdited.mock.calls).toEqual([
       [test.workspace.workspaceId],
       [test.workspace.workspaceId],
@@ -1293,7 +1287,6 @@ describe("WorkspaceFileMutationOwner", () => {
     await openedLocalState(test.workspace);
     await mkdir(join(test.rootPath, "notes"));
     await writeFile(join(test.rootPath, "notes/a.txt"), "text\n");
-    // No engine capture: nothing records the delete, and nothing refuses it.
     await expect(
       test.owner.deletePath(trustedEvent, {
         workspaceId: test.workspace.workspaceId,
@@ -1640,7 +1633,6 @@ describe("WorkspaceFileMutationOwner", () => {
         "[desktop] shared file change did not finish cleanly",
         testCase.outcome,
       );
-      // An edit that did not finish is not pushed.
       expect(test.shareViewEdited).not.toHaveBeenCalled();
     }
   });

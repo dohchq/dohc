@@ -37,7 +37,6 @@ export function useAgentSetup(
     };
   }, [agentRunStatus, userSettings, workspaceId, workspaceIsReady]);
 
-  // The workspace-scoped half of the setup snapshot.
   useEffect(() => {
     const version = agentSetupRequestRef.current + 1;
     agentSetupRequestRef.current = version;

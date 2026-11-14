@@ -312,7 +312,6 @@ it("rejects corrupted checkpoint ranges before starting a worker", async () => {
     cause: { message: "This Collection's saved records are damaged." },
   });
   expect(launches).toBe(0);
-  // A checkpoint that fails its check earns a wait like a worker that fails.
   await expect(f.invoke({}, { readOnly: true })).rejects.toMatchObject({
     code: "dataset_reopen_wait",
   });
@@ -508,7 +507,6 @@ it("stops a worker that is still starting on close", async () => {
     exit = new Promise<NodeJS.Signals | null>((resolve) => {
       ended = resolve;
     });
-  // A stand-in worker that never sends ready.
   const f = await fixture({
     launch: (options) => {
       const child = spawn(process.execPath, ["-e", "setInterval(()=>{},60_000)"], {
@@ -620,8 +618,6 @@ it("recovers from a materialization cache and replays only its tail while retain
   ).toMatchObject({ revision: 1, replayed: true });
 });
 
-// A dataset with one committed event, reopened by a supervisor whose worker
-// runs out of CPU in the chosen command.
 async function failingReopens(options: Partial<DatasetSupervisorOptions>) {
   const state = {
     now: 1_000_000,
@@ -681,7 +677,6 @@ it("waits longer before each reopen of a dataset whose replay ran out of CPU", a
     message: "This Collection is waiting to reopen. Try again in 5 seconds.",
   });
   expect(state.replayed).toEqual([1]);
-  // Each failure right after a wait ends doubles the wait, up to its cap.
   for (const [elapsed, wait] of [
     [5_000, 10_000],
     [10_000, 20_000],

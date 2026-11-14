@@ -49,10 +49,6 @@ function expectStableMarkdownRoundTrip(
   return once;
 }
 
-// These tests cover the desktop editor's markdown round-trip: the canonical
-// writer builds the Y.Doc and the desktop export writes it back. They hold
-// idempotency, frontmatter ordering, and custom-node preservation. Inline
-// fixtures keep the suite self-contained.
 describe("desktop editor markdown round-trip", () => {
   it("widens a code fence when the block content contains a fence", () => {
     const content = "before\n```\nafter";
@@ -228,9 +224,6 @@ describe("desktop editor markdown round-trip", () => {
   });
 
   it("exposes the body fragment (rich) and the plain-text field (plain) — the collab edit handles", () => {
-    // The E4 collab rework binds Tiptap to the body XmlFragment and the server
-    // migration reads the plainText Y.Text; these accessors are how each side
-    // reaches the right field for a given content kind.
     const rich = markdownToYDoc("# Rich body\n");
     expect(getDohcYDocBodyFragment(rich).length).toBeGreaterThan(0);
     expect(getDohcYDocPlainText(rich)).toBeNull();
@@ -420,7 +413,6 @@ describe("desktop editor markdown round-trip", () => {
   // through the node attrs (not markdown source) so each input reaches the
   // sanitizer exactly as written.
   const IMAGE_SRC_CONTRACT: ReadonlyArray<{ src: string; markdown: string }> = [
-    // Kept — relative asset paths (the ordinary case).
     { src: "assets/pic.png", markdown: "![x](assets/pic.png)" },
     { src: "./assets/pic.png", markdown: "![x](./assets/pic.png)" },
     // Kept — forward-slash parent traversal, losslessly: the global-folder
@@ -428,23 +420,18 @@ describe("desktop editor markdown round-trip", () => {
     // resolver refuses to serve an escaping path; the export drops it).
     { src: "../assets/pic.png", markdown: "![x](../assets/pic.png)" },
     { src: "../../outside.png", markdown: "![x](../../outside.png)" },
-    // Kept — remote images.
     { src: "https://example.com/x.png", markdown: "![x](https://example.com/x.png)" },
     { src: "http://example.com/x.png", markdown: "![x](http://example.com/x.png)" },
-    // Dropped — every non-http(s) scheme, however obfuscated.
     { src: "javascript:alert(1)", markdown: "![x]()" },
     { src: "JavaScript:alert(1)", markdown: "![x]()" },
     { src: "java\nscript:alert(1)", markdown: "![x]()" },
     { src: "data:image/svg+xml;base64,PHN2Zz4=", markdown: "![x]()" },
     { src: "file:///etc/passwd", markdown: "![x]()" },
     { src: "dohc-file://ws/x.png", markdown: "![x]()" },
-    // Dropped — absolute and protocol-relative.
     { src: "/etc/pic.png", markdown: "![x]()" },
     { src: "//evil.example.com/x.png", markdown: "![x]()" },
-    // Dropped — backslash-obfuscated traversal (never authored markdown).
     { src: "..\\secret\\pic.png", markdown: "![x]()" },
     { src: "a\\..\\..\\b.png", markdown: "![x]()" },
-    // Dropped — empty / whitespace-only.
     { src: "", markdown: "![x]()" },
     { src: "   ", markdown: "![x]()" },
   ];
@@ -501,7 +488,7 @@ describe("desktop editor markdown round-trip", () => {
   });
 
   it("round-trips per-column GFM alignment (left/center/right) losslessly", () => {
-    // Phase 1 assumed per-column alignment was inexpressible; it is not. The
+    // GFM can express per-column alignment. The
     // `align` cell attr (set by tableControls' column grip menu) serializes to
     // the delimiter row and parses back, so a mixed-alignment table — left
     // (`:---`), center (`:---:`), right (`---:`), and default (`---`) — is
@@ -650,8 +637,6 @@ describe("desktop editor markdown round-trip", () => {
   it("keeps a list item and a following callout distinct (nested callout survives)", () => {
     const input = ["- item", "  > [!note] In list", "  > body", "", "- second"].join("\n");
     const once = yDocToMarkdown(markdownToYDoc(input));
-    // The blank line between tight list items normalizes away, but the nested
-    // callout and both list items survive, and the result is idempotent.
     expect(once).toContain("> [!note] In list");
     expect(once).toContain("> body");
     expect(once).toContain("- item");
@@ -673,10 +658,7 @@ describe("desktop editor markdown round-trip", () => {
   it("absorbs a lazy-continuation line into the callout instead of reflowing it out", () => {
     const input = ["> [!note] Title", "> first line", "lazy continuation"].join("\n");
     const once = yDocToMarkdown(markdownToYDoc(input));
-    // First pass normalizes the lazy line to a `>`-prefixed body line inside the
-    // callout (rather than reflowing it into a separate paragraph)...
     expect(once).toBe(["> [!note] Title", "> first line", "> lazy continuation", ""].join("\n"));
-    // ...and the normalized form is byte-stable thereafter.
     const twice = yDocToMarkdown(markdownToYDoc(once));
     expect(twice).toBe(once);
   });
@@ -689,7 +671,6 @@ describe("desktop editor markdown round-trip", () => {
           content: [{ type: "text", text, marks: [{ type: "highlight" }] }],
         },
       ]);
-    // The concrete escaped form is unambiguous and reversible.
     expect(yDocToMarkdown(highlighted("a==b"))).toBe("==a\\=\\=b==\n");
     // A lone `=` adjacent to the closing delimiter must also be escaped, or the
     // mark would close one char early (`==a=` → `==a===`).
@@ -709,7 +690,6 @@ describe("desktop editor markdown round-trip", () => {
       const once = yDocToMarkdown(highlighted(text));
       const twice = yDocToMarkdown(markdownToYDoc(once));
       expect(twice, `text=${JSON.stringify(text)}`).toBe(once);
-      // The highlight is preserved as a single `==...==` span, never split.
       expect(once.startsWith("=="), `text=${JSON.stringify(text)}`).toBe(true);
       expect(once.endsWith("==\n"), `text=${JSON.stringify(text)}`).toBe(true);
     }
@@ -760,8 +740,6 @@ describe("desktop editor markdown round-trip", () => {
     // target/label separator aren't matched early.
     const once = yDocToMarkdown(doc);
     expect(once).toBe("[[notes/plan|Plan \\]\\] Draft \\| v2]]\n");
-    // Re-parsing unescapes the label and re-serializing reproduces it verbatim
-    // (a truncated re-parse would drop the tail and diverge here).
     const twice = yDocToMarkdown(markdownToYDoc(once));
     expect(twice).toBe(once);
   });
@@ -821,7 +799,6 @@ describe("desktop editor markdown round-trip", () => {
   it("does not absorb text after a fenced code block inside a callout", () => {
     const input = ["> [!note]", "> ```", "> code", "> ```", "outside"].join("\n");
     const once = yDocToMarkdown(markdownToYDoc(input));
-    // `outside` is a plain top-level paragraph, not a lazy `>`-prefixed body line.
     expect(once).toMatch(/^outside$/m);
     expect(once).not.toContain("> outside");
     const twice = yDocToMarkdown(markdownToYDoc(once));
@@ -838,9 +815,6 @@ describe("desktop editor markdown round-trip", () => {
   });
 });
 
-// The source view projects the live document, so frontmatter the canonical
-// TypeScript writer keeps in shared Y types or as Yjs Any bigints must read as
-// the values it wrote.
 describe("source view of canonically written frontmatter", () => {
   it("writes shared-type values as the projection does", () => {
     const doc = receivedYDoc(EDGE_MARKDOWN);
@@ -852,7 +826,6 @@ describe("source view of canonically written frontmatter", () => {
       for (const key of ["exact", "nested", "settings", "status"]) {
         expect(frontmatter.get(key), key).not.toBeInstanceOf(Y.AbstractType);
       }
-      // A canonical block keeps no text, so the values alone write it.
       expect(doc.getMap("meta").get("dohcFrontmatterSource")).toBeUndefined();
 
       expect(yDocToMarkdown(doc)).toBe(`${EDGE_FRONTMATTER}Body\n`);
@@ -910,9 +883,9 @@ describe("a list nested inside a task item", () => {
 
 // CommonMark lets a fenced code block's opener carry up to three leading
 // spaces. Four or more make an indented code block instead, which is a
-// different construct. The import path used to drop a top-level fence indented
-// 1-3 spaces together with its whole body, so opening such a document and
-// letting it settle wrote the deletion back to disk.
+// different construct. The import path must keep a top-level fence indented
+// 1-3 spaces together with its whole body. Dropping it would write the
+// deletion back to disk when such a document opens and settles.
 describe("desktop editor markdown import: indented code fences", () => {
   function bodyBlocks(markdown: string): JSONContent[] {
     const root = yXmlFragmentToProseMirrorRootNode(

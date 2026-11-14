@@ -141,7 +141,6 @@ function fixture(
   automationText?: string,
 ) {
   const calls: Request[] = [];
-  // The access tokens the relay has issued for this link's address.
   const tokens = new Set<string>();
   let revoked = false;
   let rateLimited: string | undefined;
@@ -207,7 +206,6 @@ function fixture(
           capabilityExpiresAtMs: Date.now() + 900_000,
           access,
         });
-      // The relay's check: an issued token, sent to the address it was issued for, and no holder credential.
       const agent = /^DohcAgent (.+)$/u.exec(request.headers.get("authorization") ?? "")?.[1];
       if (
         revoked ||
@@ -473,7 +471,6 @@ it("takes the token only from the Authorization header, from any origin", async 
       })
     ).status,
   ).toBe(404);
-  // A browser MCP client calls from its own origin, with the token as its only credential.
   const client = await f.connect(bearer, "auto", { origin: "https://inspector.example.test" });
   expect(
     (await client.callTool({ name: "dohc_list_files", arguments: {} })).structuredContent,
@@ -621,7 +618,6 @@ it("limits refused bearers by client address, and never spends for a valid one",
         "x-dohc-share-web-client-ip": address,
       },
     });
-  // A valid bearer never spends from its address.
   for (let i = 0; i <= MCP_FAILED_SIGN_IN_CAPACITY; i++)
     expect((await send("192.0.2.1", `Bearer ${bearer}`)).status).toBe(200);
   for (let i = 0; i < MCP_FAILED_SIGN_IN_CAPACITY; i++) {
@@ -633,14 +629,12 @@ it("limits refused bearers by client address, and never spends for a valid one",
   expect((await send("192.0.2.2", `Bearer ${"D".repeat(43)}`)).status).toBe(429);
   expect((await send("192.0.2.2", `Bearer ${bearer}`)).status).toBe(429);
   expect(f.calls.length).toBe(relayCalls);
-  // A sign-in can still start from that address.
   const unsigned = await f.send(mcpPath, {
     method: "POST",
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
     headers: { "content-type": "application/json", "x-dohc-share-web-client-ip": "192.0.2.2" },
   });
   expect([unsigned.status, unsigned.headers.get("www-authenticate")]).toEqual([401, challenge]);
-  // Another address is not affected, and the scheme's case does not matter.
   expect((await send("192.0.2.3", `bearer ${bearer}`)).status).toBe(200);
 });
 
@@ -990,7 +984,6 @@ function personalFixture() {
           { ok: false, code: "personal_agent_unavailable", error: "relay words" },
           { status: 503 },
         );
-      // The relay's check: an issued token, sent to the address it was issued for, with the exchange key and no browser or link credential.
       const agent = /^DohcAgent (.+)$/u.exec(request.headers.get("authorization") ?? "")?.[1];
       if (
         revoked ||
@@ -1148,7 +1141,6 @@ it("sends the relay only a personal agent's own token and address, never a brows
       call.headers.get("x-dohc-agent-resource"),
     ]).toEqual(["POST", `DohcAgent ${token}`, personalResource]);
   }
-  // The token comes only from the Authorization header, and the address has one spelling.
   const calls = f.calls.length;
   for (const path of [
     `${personalPath}?access_token=${token}`,

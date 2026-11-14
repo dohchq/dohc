@@ -3,14 +3,13 @@ import { relayPresentation } from "../workbench/actorPresentation";
 import { ChatAvatar } from "../workbench/ChatAvatar";
 import { resolvePeerDisplayName, type PresencePeer } from "./presenceChannel";
 
-// MU-C1 — calm presence UI. Small initials for who's here and a subtle typing
+// Calm presence UI. Small initials for who's here and a subtle typing
 // line. Deliberately quiet: no layout thrash, no noisy badges, and it renders
 // nothing when nobody else is around (solo stays solo). Presence changes are
 // announced politely (aria-live="polite"), never as a spam of alerts.
 
 const MAX_FACES = 3;
 
-// An agent publishes presence with `agent: true` in its state.
 function isAgentPeer(peer: PresencePeer): boolean {
   return (peer.state as { agent?: unknown } | null)?.agent === true;
 }

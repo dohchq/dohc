@@ -54,7 +54,6 @@ describe("version 1 settings", () => {
         runner: { enabled: true, command: "  node agent.mjs  ", timeoutMinutes: 30 },
       }).agents,
     ).toEqual({
-      // Version 1 did not dispatch without a name, so the agent stays off.
       default: testAgent({ enabled: false, nameBeforeMigration: "Agent" }),
     });
   });
@@ -76,7 +75,6 @@ describe("version 1 settings", () => {
       timeoutMinutes: 30,
       launch: { command: "agent run" },
     });
-    // A profile dohc cannot use falls back to the typed command.
     expect(
       agent(
         { enabled: true, command: "agent run", profile: { tool: "cursor", executable: "x" } },
@@ -127,8 +125,6 @@ describe("version 1 settings", () => {
   });
 
   it("reads the file 145.1 writes for an agent added with Claude Code", async () => {
-    // What 145.1 saved after Add an agent, a color for each of you, a 45 minute
-    // limit and your name, with the tool's folder changed.
     const root = await createTestScratch("dohc-settings-145-1-");
     await writeFile(
       join(root, USER_SETTINGS_FILE),
@@ -196,7 +192,6 @@ describe("version 1 settings", () => {
       }),
     });
     expect(read.ignored).toEqual([{ key: "wallpaper", reason: "unknown" }]);
-    // Reading leaves the file alone.
     expect(await readFile(path, "utf8")).toBe(version1);
 
     await writeUserSettingsFile(

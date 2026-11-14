@@ -1,10 +1,3 @@
-//! The `automations.*` RPC surface: workspace-scoped subscribe/unsubscribe
-//! with change-kind and field filters, the claimNext/settle drain with
-//! per-executor prefixes and field facts, retry, the claim history,
-//! settle-state validation, and the open-time reaper's requeue-or-exhaust
-//! transitions, all observed through the real in-process daemon request
-//! path over durable claims seeded in engine.db.
-
 use crate::common;
 
 use common::*;
@@ -222,8 +215,6 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
     let mut id = 1;
 
-    // Workspace scoping: every automations method refuses a request without
-    // a live workspace handle.
     for (method, params) in [
         (
             "automations.subscribe",
@@ -285,8 +276,6 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
         );
     }
 
-    // Subscription round trip; the seeded pair already exists with this
-    // filter, and a new filter for the same pair replaces it.
     let dup = call(
         &transport,
         &handle,
@@ -450,8 +439,6 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
         );
     }
 
-    // Drain the two seeded pending claims oldest-first and walk both settle
-    // arms. A served claim carries its change's facts.
     let first = call(
         &transport,
         &handle,
@@ -705,7 +692,6 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
         assert_eq!(claims[0]["error"], json!(AUTOMATION_CHAIN_STOPPED));
         assert_eq!(history["next"], Value::Null, "one page holds them all");
 
-        // Pages of two: each cursor starts after the last claim listed.
         let mut paged = Vec::new();
         let mut before = Value::Null;
         loop {
@@ -822,8 +808,6 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
         "the newest failure's error wins"
     );
 
-    // Settle-state validation refuses the malformed combinations before any
-    // write.
     for (params, wrong) in [
         (
             json!({ "claimId": "atc_x", "state": "done", "error": "boom" }),
@@ -1143,7 +1127,6 @@ async fn records_added_and_written_on_this_computer_claim_once_through_rpc() {
     );
     assert_eq!(stamped_claim["change"]["actorKind"], json!("automation"));
 
-    // Rolling a write back changes the record too, and wakes the executor.
     while notices.try_recv().is_ok() {}
     call(
         &transport,
@@ -1569,7 +1552,6 @@ async fn group_messages_written_here_claim_through_rpc() {
         "a frozen subscription claims nothing"
     );
 
-    // The next generation asks for its handover, then takes it.
     let next = |relay: Option<Value>| {
         let mut params = json!({
             "generation": 2,
@@ -1731,7 +1713,6 @@ async fn presses_and_schedule_steps_claim_through_rpc() {
     .await;
     assert_eq!(not_collection.code, ErrorCode::InvalidParams);
 
-    // An agent presses for the person at its run's depth, named as the agent.
     let agent = call(
         &transport,
         &handle,
@@ -2005,7 +1986,6 @@ async fn make_durable_requires_a_running_local_claim_and_preserves_recovery_age(
         .code,
         ErrorCode::InvalidParams
     );
-    // External claims still sync this copy's writes.
     call(
         &transport,
         &handle,

@@ -23,7 +23,7 @@ import { activateReadOnlyLinkHref, type WorkspaceLinkTarget } from "../linkActiv
 import { MARKDOWN_COMPONENTS } from "./markdownComponents";
 import { initialChunkCount, splitMarkdownBlocks } from "./splitMarkdownBlocks";
 
-// Visible-first markdown rendering (Phase 16 recovery): parse + commit only
+// Visible-first markdown rendering: parse + commit only
 // the opening window on mount, then backfill the rest in idle slices. The
 // first usable document lands in tens of ms instead of paying the full-tree
 // parse+commit (~575ms for 250KB) up front. Same react-markdown, same

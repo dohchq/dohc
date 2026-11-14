@@ -159,7 +159,6 @@ test("switches editor tabs with the platform's chords", async () => {
       expect(commands).toEqual([]);
     };
 
-    // From inside the document, where Tab indents a list item.
     const editor = page.getByTestId("markdown-editor");
     await editor.click();
     await page.keyboard.press("Control+Tab");

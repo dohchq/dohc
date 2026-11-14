@@ -8,9 +8,9 @@
 //! secret = { byteLength } only; absence carries `everTracked` (any
 //! moments/secret_moments rows) so retired and NEVER-TRACKED stay distinct.
 //!
-//! Fixtures are DISK-DRIVEN only — the ratified delta: TS `writeIfChanged`
-//! ignores `metadata_origin` (safe there because the desktop materializes API
-//! writes to disk), while this daemon enforces capture ownership. RPC-vs-disk
+//! Fixtures are disk-driven only: TS `writeIfChanged` ignores
+//! `metadata_origin` (safe there because the desktop materializes API writes
+//! to disk), while this daemon enforces capture ownership. RPC-vs-disk
 //! interleavings are covered by Rust-only acceptance tests instead.
 
 use crate::common;
@@ -208,8 +208,6 @@ fn is_secret_path(path: &str) -> bool {
 /// (everTracked, secret byte length, head (content_kind, binary sha)).
 type RawProjection = (bool, Option<u64>, Option<(String, Option<String>)>);
 
-/// Project one path from the persisted engine.db — the same source a fresh
-/// process would read, mirroring the TS emitter's projection exactly.
 fn project_path(db: &Path, path: &str) -> Projection {
     use rusqlite::OptionalExtension;
     let mut store = EngineStore::open(db, u32::MAX.into()).expect("open engine db");
@@ -431,7 +429,6 @@ async fn run_capture_scenario(name: &str) {
         close_workspace(&transport, handle.clone(), id).await;
     }
 
-    // The DIFFERENTIAL: normalized persisted state vs the TS golden.
     for path in &scenario.watch {
         let produced = project_path(&db, path);
         let expected = golden

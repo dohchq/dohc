@@ -38,11 +38,9 @@ const bridgeMock = {
   chatFileMentionsPage: vi.fn<DohcDesktopBridge["chatFileMentionsPage"]>(),
 };
 
-// The shell's error hook: the same object every render, as the shell's is.
 const notices = { report: vi.fn(), clear: vi.fn() };
 const openSyncSettings = vi.fn();
 const connect = vi.fn();
-// A workspace that syncs, with its account signed in.
 const SYNCED: AccessFacts = {
   cloud: { connected: true, workspaceSynced: true, workspaceSyncConnected: true },
   shareView: false,
@@ -81,7 +79,6 @@ function answer(overrides: Partial<AccessAnswer> = {}): AccessAnswer {
   };
 }
 
-// What main answers when it has no observation to read: no coverage at all.
 const UNKNOWN = answer({
   unknownReason: "not-listed-yet",
   coverage: { kind: "unavailable", complete: false, observation: "interval" },
@@ -109,7 +106,6 @@ function share(overrides: Partial<AccessShareRow> = {}): AccessShareRow {
   };
 }
 
-// One context per facts object, the same object every render as the shell's.
 const contexts = new Map<
   AccessFacts,
   { facts: AccessFacts; openSyncSettings: () => void; connect: () => void }
@@ -186,10 +182,8 @@ describe("About Access", () => {
     ]);
     expect(within(rows[0]!).getByText("Can view")).toBeTruthy();
     expect(within(rows[1]!).getByText("Can edit")).toBeTruthy();
-    // A level is information, so it takes secondary ink, not decorative.
     expect(within(rows[1]!).getByText("Can edit").classList.contains("text-muted")).toBe(true);
     expect(within(rows[2]!).queryByRole("img")).toBeNull();
-    // Two grants give access now; the two ended ones stay listed, their names a step down from ink.
     expect(screen.getByTestId("about-access-count").textContent).toBe("2");
     expect(rows.map((row) => row.querySelector(".flex-1")!.classList.contains("text-ink"))).toEqual(
       [true, true, false, false],
@@ -272,7 +266,6 @@ describe("About Access", () => {
   it("reads from the start when the listing changed under its cursor", async () => {
     bridgeMock.getObjectAccess
       .mockResolvedValueOnce(answer({ rows: [share()], nextCursor: "page-2" }))
-      // Main refuses a cursor from an older listing with an unknown answer.
       .mockResolvedValueOnce({ ...UNKNOWN, visibility: "unknown" })
       .mockResolvedValueOnce(
         answer({
@@ -292,7 +285,6 @@ describe("About Access", () => {
 type LinksPage = NonNullable<LinksInResult>;
 type LinkRecord = LinksPage["entries"][number];
 
-// A link from `source` at `line`, its words marked in the line around them.
 function link(source: string, line: number, ordinal = 0): LinkRecord {
   const title = source.split("/").at(-1)!.replace(/\.md$/, "");
   const snippet = `${title} cites [[plan]] here.`;
@@ -410,7 +402,6 @@ function observeAllInView() {
   };
 }
 
-// Lets every answer, render and observer report that is already due land.
 async function settleAll() {
   for (let round = 0; round < 6; round += 1) await act(async () => {});
 }
@@ -456,8 +447,6 @@ describe("About Links", () => {
     render(<Links />);
     await waitFor(() => expect(notices.report).toHaveBeenCalledOnce());
     await settleAll();
-    // Show more is still in view, and asks nothing more, though it scrolls
-    // out of view and back.
     await scrollBack();
     expect(bridgeMock.linksIn).toHaveBeenCalledTimes(2);
     expect(notices.report).toHaveBeenCalledOnce();
@@ -624,8 +613,6 @@ describe("About Links", () => {
       subject: { path: "docs/plan.md" },
       cursor: "next",
     });
-    // The repeated row is a new record, the same row by key; the last page
-    // took Show more away, and focus lands on the row it added.
     expect(screen.queryByTestId("about-chat-links-more")).toBeNull();
     expect(document.activeElement).toBe(screen.getAllByTestId("chat-file-mention")[1]);
     expect(document.activeElement?.getAttribute("data-thread-id")).toBe("thread-two");
@@ -773,7 +760,6 @@ describe("About History", () => {
     const fold = screen.getByTestId("engine-moment-run-toggle");
     expect(fold.getAttribute("aria-label")).toBe("3 changes");
     expect(screen.getByTestId("about-history-count").textContent).toBe("6");
-    // The run opens in place, its earlier edits under its newest.
     await userEvent.setup().click(fold);
     expect(screen.getAllByTestId("engine-moment-open").map((row) => row.dataset.momentId)).toEqual([
       "run-1",

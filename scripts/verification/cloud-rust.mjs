@@ -15,7 +15,7 @@ import {
 } from "../../tools/rust-engine-program/scratch-leak-report.mjs";
 import { stageReaderTestNode } from "../../tools/rust-engine-program/reader-test-node.mjs";
 
-export const RUST_SHARDS = 20;
+export const RUST_SHARDS = 8;
 export const RUST_READER_SHARD = 1;
 export const RUST_POLICY_STEPS = [
   "tree provenance",

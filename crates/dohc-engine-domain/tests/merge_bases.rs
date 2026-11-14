@@ -1,6 +1,6 @@
-//! Merging a path a second time compares against what was last merged there
-//! (#3211), not the fork point: a change already in Main is never asked about
-//! again, and a change the version reverts reaches Main.
+//! Merging a path a second time compares against what was last merged there,
+//! not the fork point: a change already in Main is never asked about again,
+//! and a change the version reverts reaches Main.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -123,7 +123,6 @@ fn merge(store: &mut EngineStore, path: &str) -> MergeTextFileResult {
     merge_with(store, &merge_request(path))
 }
 
-/// The merge's outcome as one word, so a failed assertion names it.
 fn outcome(result: &MergeTextFileResult) -> &'static str {
     match result {
         MergeTextFileResult::Write { .. } => "write",
@@ -201,7 +200,6 @@ fn open_conflicts(store: &mut EngineStore) -> usize {
         .len()
 }
 
-/// Every row of `table`, each column written out, for byte-for-byte equality.
 fn dump(store: &EngineStore, table: &str) -> Vec<String> {
     store
         .read_with(|conn| {

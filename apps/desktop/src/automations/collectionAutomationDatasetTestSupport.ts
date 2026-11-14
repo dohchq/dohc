@@ -766,7 +766,6 @@ globalThis.operations["invoices.release"] = (ctx, input) => {
     // What the pressing window hears.
     const settled: PressSettled[] = [];
     const waiting: Array<{ claimId: string; reason: PressWaitReason }> = [];
-    // What automations post and notify.
     const messages: AutomationChatMessage[] = [];
     const notices: AutomationNotice[] = [];
     const failureReports: AutomationFailureReport[] = [];

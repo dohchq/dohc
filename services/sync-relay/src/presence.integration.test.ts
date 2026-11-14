@@ -303,12 +303,9 @@ describe("two-client presence over a real relay child", () => {
     const relayRoot = await tempDir();
     const baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"));
 
-    // A and B are the same workspace owner across two devices/tabs (both
-    // authorized by workspaceIsOwnedBy). Distinct clientIds => two entries.
     const ws = "workspace-presence";
     await claimWorkspace(baseUrl, "owner", ws);
 
-    // A appears.
     const afterA = await publish(baseUrl, "owner", ws, "general", {
       clientId: "A",
       state: { displayName: "Sam", typing: false },
@@ -328,7 +325,6 @@ describe("two-client presence over a real relay child", () => {
     const bee = woke.peers.find((p) => (p.state as { typing?: boolean }).typing === true);
     expect(bee?.state).toMatchObject({ typing: true });
 
-    // B leaves -> A's next read no longer shows B.
     await fetch(`${baseUrl}/sync/${ws}/presence?topic=general`, {
       method: "POST",
       headers: { ...bearer("owner"), "content-type": "application/json" },
@@ -349,7 +345,6 @@ describe("two-client presence over a real relay child", () => {
     const wireId = "wire-general";
     await claimWorkspace(baseUrl, "owner", ownerWs);
     await appendChannelCreate(baseUrl, "owner", ownerWs, 0, wireId);
-    // Owner grants the channel to a participant (chat share).
     const shareId = await createChatShare(baseUrl, "owner", ownerWs, "member", wireId);
 
     // OWNER publishes presence via the WORKSPACE route on the wireId topic.
@@ -387,23 +382,17 @@ describe("two-client presence over a real relay child", () => {
       }
     }
 
-    // …and the OWNER, reading its workspace scope, now sees the PARTICIPANT —
-    // proving workspace-scope and share-scope resolved to the one relay scope.
     const ownerRead = await poll(baseUrl, "owner", ownerWs, wireId, 0, 0);
     const member = ownerRead.peers.find((p) => (p.state as { typing?: boolean }).typing === true);
     expect(member?.displayName).toBe("member");
     expect(member?.state).toMatchObject({ typing: true });
 
-    // Stranger denial: a fully-authenticated non-participant is refused share
-    // presence byte-identically to a share that never existed (no oracle).
     const absent = await sharePresenceRaw(baseUrl, "stranger", "never-existed", wireId, {
       clientId: "x",
     });
     const denied = await sharePresenceRaw(baseUrl, "stranger", shareId, wireId, { clientId: "x" });
     expect(absent.status).toBe(404);
     expect([denied.status, denied.body]).toEqual([absent.status, absent.body]);
-    // The stranger's rejected probe left the shared scope untouched: still just
-    // the owner + the member.
     const afterProbe = await poll(baseUrl, "owner", ownerWs, wireId, 0, 0);
     expect(afterProbe.peers).toHaveLength(2);
     expect(afterProbe.peers.every((p) => !Object.hasOwn(p, "userId"))).toBe(true);
@@ -424,11 +413,9 @@ describe("two-client presence over a real relay child", () => {
     // is left unbound (no chat.thread.create at all).
     await appendThreadCreate(baseUrl, "owner", ownerWs, 2, "thread-in", grantedWire);
     await appendThreadCreate(baseUrl, "owner", ownerWs, 3, "thread-out", otherWire);
-    // Owner grants only the general channel to the participant.
     const shareId = await createChatShare(baseUrl, "owner", ownerWs, "member", grantedWire);
 
     const threadTopic = "chat:thread:thread-in";
-    // OWNER publishes thread presence via the WORKSPACE route (workspace scope).
     const ownerView = await publish(baseUrl, "owner", ownerWs, threadTopic, {
       clientId: "owner-1",
       state: { displayName: "Owner", typing: false },
@@ -449,14 +436,11 @@ describe("two-client presence over a real relay child", () => {
       memberView.every((p) => !Object.hasOwn(p, "userId") && !Object.hasOwn(p, "clientId")),
     ).toBe(true);
 
-    // …and the OWNER, reading its workspace scope, now sees the PARTICIPANT.
     const ownerRead = await poll(baseUrl, "owner", ownerWs, threadTopic, 0, 0);
     const member = ownerRead.peers.find((p) => (p.state as { typing?: boolean }).typing === true);
     expect(member?.displayName).toBe("member");
     expect(member?.state).toMatchObject({ typing: true });
 
-    // ISOLATION — a thread bound to a different channel is refused byte-identical
-    // to a share that never existed (no oracle that the thread even exists).
     const absent = await sharePresenceRaw(baseUrl, "member", "never-existed", threadTopic, {
       clientId: "x",
     });
@@ -470,7 +454,6 @@ describe("two-client presence over a real relay child", () => {
     expect(absent.status).toBe(404);
     expect([otherThread.status, otherThread.body]).toEqual([absent.status, absent.body]);
 
-    // ISOLATION — an unbound/unknown thread topic is refused the same way.
     const unknownThread = await sharePresenceRaw(
       baseUrl,
       "member",
@@ -480,14 +463,12 @@ describe("two-client presence over a real relay child", () => {
     );
     expect([unknownThread.status, unknownThread.body]).toEqual([absent.status, absent.body]);
 
-    // NO REGRESSION — the bare granted channel wire id still converges.
     const channelView = await sharePublish(baseUrl, "member", shareId, grantedWire, {
       clientId: "member-ch",
     });
     expect(channelView).toHaveLength(1);
     expect(channelView[0]?.isSelf).toBe(true);
 
-    // The rejected thread probes left the shared thread scope untouched.
     const afterProbe = await poll(baseUrl, "owner", ownerWs, threadTopic, 0, 0);
     expect(afterProbe.peers).toHaveLength(2);
     expect(afterProbe.peers.every((p) => !Object.hasOwn(p, "userId"))).toBe(true);
@@ -538,8 +519,6 @@ describe("two-client presence over a real relay child", () => {
   }, 90_000);
 });
 
-// Poll the test-seam health endpoint until the hub reports `expected` parked
-// waiters (bounded; fails the test with a clear message on timeout).
 async function waitForWaiters(baseUrl: string, expected: number, budgetMs = 25_000): Promise<void> {
   // 10s lost the race under contention — this polls a real relay child over HTTP,
   // so it is wall-clock bound. 25s by default, and the callers raise their

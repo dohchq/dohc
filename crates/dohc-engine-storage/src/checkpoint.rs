@@ -885,7 +885,7 @@ mod tests {
         assert!(s.checkpoint_work_for_test().1 <= MAX_WRITER_BACKFILL_FRAMES);
     }
 
-    /// Opus's r2c-3c-1 finding 2: while a held reader keeps the WAL from
+    /// While a held reader keeps the WAL from
     /// restarting, the writer raises the store's pressure flag once the WAL
     /// reaches half the length writes are refused at, every write before it
     /// admitted.

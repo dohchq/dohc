@@ -41,7 +41,6 @@ export function createRunLocator(dependencies: {
     automationId: string,
     claimId: string,
   ): Promise<{ shown: boolean; asker: ServerAsker } | null>;
-  /** The signed-in account now, or null when signed out. */
   signedInAccount(): string | null;
 }) {
   const shownByServer = new Set<string>();

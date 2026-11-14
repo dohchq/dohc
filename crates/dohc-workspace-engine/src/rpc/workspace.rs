@@ -2176,7 +2176,7 @@ mod tests {
     }
 
     /// A workspace folder whose ACL passes read and search to everyone must
-    /// not pass them to the engine's folder or the store in it (#2207). A
+    /// not pass them to the engine's folder or the store in it. A
     /// folder an earlier build left open to others is made private on the
     /// next open, and its store still opens.
     #[cfg(target_os = "macos")]
@@ -2251,7 +2251,7 @@ mod tests {
 
     /// A workspace whose engine folder or store file dohc can't keep private
     /// is refused with what is there and where, which the desktop names to
-    /// the person (#2377). Linux names the folder too (#2376).
+    /// the person. Linux names the folder too.
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_open_names_what_keeps_the_engine_folder_from_being_private() {

@@ -277,7 +277,6 @@ describe("ChatMarkdown", () => {
       expect(view.container.querySelector("strong")).toBeNull();
       view.unmount();
 
-      // The body stays text for the session without asking the worker again.
       const count = workers.length;
       const again = renderBody(long("stuck **here** ", 1200));
       expect(again.container.textContent).toContain("stuck here");

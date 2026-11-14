@@ -65,6 +65,10 @@ import { SHARE_WEB_API_VERSIONS, mcpApiVersions, shareWebApiVersionRefusal } fro
 
 export const LINK_SESSION_HEADER = "x-dohc-link-session";
 
+// A file directly in the viewer build's assets/ whose name ends in an
+// 8-character hash. The build names every file there `[name]-[hash]`; this
+// keeps out names without that ending, such as the fonts' subfolder.
+const HASHED_VIEWER_FILE = /^assets\/[^/]+-[A-Za-z0-9_-]{8}\.[A-Za-z0-9]+$/;
 const REFUSAL_VALUE = { ok: false, error: "not found" };
 const REFUSAL_BODY = JSON.stringify(REFUSAL_VALUE);
 const MAX_EXCHANGE_BODY_BYTES = 8 * 1024;
@@ -166,7 +170,6 @@ function linkKeyOf(caller: LinkCaller): string {
   return "session" in caller ? caller.session.grantId : (caller.grantId ?? caller.addressKey);
 }
 
-/** Keeps an agent's grant from the relay's share answer, and removes it from the answer. */
 function takeAgentGrant(
   agent: AgentCaller,
   meta: Record<string, unknown> | null,
@@ -228,6 +231,8 @@ export interface CreateShareWebApplicationOptions {
   accountAuth?: AccountAuthConfig;
   fetchAuth?: RelayFetch;
   namedBrowserSessionLimits?: NamedLiveBrowserClientLimits;
+  /** How often the named gateway checks an open editor's session. */
+  namedSessionCheckIntervalMs?: number;
   namedLiveTickets?: boolean;
   namedRecipientBrowserLimits?: NamedLiveBrowserLimits;
   deleteAccountGateways?(userId: string, workspaceIds: readonly string[]): void;
@@ -1053,6 +1058,7 @@ export function createShareWebApplication({
   accountAuth,
   fetchAuth,
   namedBrowserSessionLimits,
+  namedSessionCheckIntervalMs,
   namedLiveTickets,
   namedRecipientBrowserLimits,
   deleteAccountGateways,
@@ -1088,6 +1094,7 @@ export function createShareWebApplication({
         exchangeKey: relayExchangeKey!,
         limits: namedBrowserSessionLimits,
         fetchRelay,
+        checkIntervalMs: namedSessionCheckIntervalMs,
       })
     : undefined;
   if (namedLiveTickets && !namedBrowser)
@@ -1216,6 +1223,14 @@ export function createShareWebApplication({
           browserLimits: linkLiveConfig.editor,
           fetchRelay,
           resolveMaterial: resolveLinkBrowserMaterial,
+          holdsSession(cookie) {
+            const cookies = parseCookies(cookie),
+              prefix = cookieName("");
+            for (const name of cookies.keys())
+              if (name.startsWith(prefix) && readBrowserSession(name.slice(prefix.length), cookies))
+                return true;
+            return false;
+          },
         })
       : undefined;
   // A personal agent edits live documents through the relay, which hosts them only on a self-hosted live host and refuses elsewhere.
@@ -1267,6 +1282,11 @@ export function createShareWebApplication({
             `form-action https://*.${appLaunchConfig.appDomain}`,
           ),
         );
+      // A file named by its content needs no session, so a browser or CDN may
+      // keep it. A page, a refusal, and a file in a subfolder such as the
+      // Excalidraw fonts, some of whose names carry no hash, stay uncached.
+      if (HASHED_VIEWER_FILE.test(relative))
+        result.headers.set("cache-control", "public, max-age=31536000, immutable");
       return result;
     } catch {
       return refused();

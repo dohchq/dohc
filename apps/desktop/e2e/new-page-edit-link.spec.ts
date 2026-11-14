@@ -28,13 +28,13 @@ import {
 
 // On a self-hosted server, an owner shares notes by Edit link. Two notes are
 // made with New page, so their files did not exist before their editors
-// opened (#3790): one is closed before it is shared and one stays open. The
+// opened: one is closed before it is shared and one stays open. The
 // third, the control, is a file the app wrote and captured before its editor
 // opened. Each must go live once its tab is closed. For the notes shared with
 // their tabs closed, a link holder types into each in a browser, and the
 // edit must reach the owner's file. A note shared with its tab open has no
-// file on the server until the tab closes (#3785), so a link holder's edit
-// while it is open belongs to that issue's own test.
+// file on the server until the tab closes, so this spec does not test a link
+// holder's edit while it is open.
 
 test.skip(
   !process.env.POSTGRES_URL && process.env.DOHC_REQUIRE_POSTGRES !== "1",
@@ -44,7 +44,6 @@ test.skip(
 type Api = DohcDesktopBridge;
 const editor = (page: Page) => page.getByTestId("markdown-editor");
 
-/** New page as Ctrl N makes it: the title, then Enter, then the body, with no wait between them. */
 async function typeNewPage(page: Page, title: string, body: string): Promise<string> {
   await page.keyboard.press("ControlOrMeta+n");
   await expect(page.getByLabel("Page title")).toBeFocused();
@@ -96,7 +95,6 @@ test("@new-page-edit-link a note made with New page goes live through an Edit li
       editLinks: true,
     });
 
-    // --- The owner connects an account and syncs the workspace ---------------
     const existing = "existing.md";
     await writeWorkspaceFiles(temp, [{ path: existing, contents: "# Existing\n" }]);
     owner = await launchDesktopApp({ workspace: temp, env: stack.trustEnv });
@@ -133,12 +131,6 @@ test("@new-page-edit-link a note made with New page goes live through an Edit li
           .filter((line) => /activation pass failed|refus/iu.test(line)),
       );
 
-    /**
-     * Makes an Edit link for `path` with the desktop's own call, runs
-     * `afterLink`, and waits for the note to go live. With `linkHolder`, a
-     * link holder then types a marker after `body`, and it must reach the
-     * owner's file.
-     */
     const shareAndEdit = async (
       name: string,
       path: string,
@@ -189,7 +181,6 @@ test("@new-page-edit-link a note made with New page goes live through an Edit li
       expect.soft(live, `${name}: the note goes live; last status ${status}`).toBe(true);
       if (!linkHolder) return;
 
-      // The share page lists a file in a folder by its own name.
       const fileButton = path.slice(path.lastIndexOf("/") + 1);
       const browserPage = await shared!.browser.newPage();
       browserPage.on("pageerror", (error) => shared!.failures.push(error.message));
@@ -239,7 +230,6 @@ test("@new-page-edit-link a note made with New page goes live through an Edit li
       await browserPage.close();
     };
 
-    // --- Control: a file the app wrote and captured before its editor opened --
     const written = "notes/written.md";
     const writtenBody = "Written by the app. Then typed.";
     await page.evaluate(
@@ -275,7 +265,6 @@ test("@new-page-edit-link a note made with New page goes live through an Edit li
       true,
     );
 
-    // --- New page, typed, and closed before any share ------------------------
     const closedBody = "Typed, closed, then shared.";
     const closed = await typeNewPage(page, "Closed page", closedBody);
     await page.keyboard.press("ControlOrMeta+w");
@@ -286,7 +275,7 @@ test("@new-page-edit-link a note made with New page goes live through an Edit li
     await shareAndEdit("New page, closed before it is shared", closed, closedBody, true);
 
     // --- New page, shared with its tab open, then closed: it goes live -------
-    // Its file reaches the server only when the tab closes (#3785).
+    // Its file reaches the server only when the tab closes.
     const openBody = "Typed with the tab open.";
     const open = await typeNewPage(page, "Open page", openBody);
     await shareAndEdit(

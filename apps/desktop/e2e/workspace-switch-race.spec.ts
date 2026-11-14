@@ -24,7 +24,7 @@ import {
 // paints is the controlled regression in DesktopWorkspaceShell.history.test.tsx
 // ("keeps a history answer workspace A asked for out of workspace B").
 //
-// This spec doubles as the PR 0M-5 performance evidence: it records history
+// This spec doubles as performance evidence: it records history
 // first-useful-content with 1,000 moments and the chat rail with 200
 // messages.
 
@@ -51,10 +51,8 @@ test("switching A->B with A's heavy panels open shows only B's history and chats
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    // --- Seed workspace A: 1,000 engine moments + one 200-message chat ---
     await seedWorkspaceManifest(temp, WORKSPACE_A_ID);
-    // Seeded through the engine daemon over RPC — post-cutover the retired
-    // TS in-process store produces stores the daemon refuses.
+    // Seeded through the engine daemon over RPC.
     const diskWrites: Array<{ path: string; contents: string }> = [];
     await seedThroughDaemon(
       { workspaceId: WORKSPACE_A_ID, rootPath: temp.rootPath },
@@ -104,7 +102,6 @@ test("switching A->B with A's heavy panels open shows only B's history and chats
     );
     await writeWorkspaceFiles(temp, diskWrites);
 
-    // --- Seed workspace B: one file, one moment ---
     await seedWorkspaceManifest(workspaceB, WORKSPACE_B_ID);
     await seedThroughDaemon(
       { workspaceId: WORKSPACE_B_ID, rootPath: workspaceB.rootPath },
@@ -130,9 +127,6 @@ test("switching A->B with A's heavy panels open shows only B's history and chats
     const page = desktop.page;
     await waitForWorkspaceReady(page);
 
-    // --- Perf evidence: history first useful content with 1,000 moments ---
-    // History lives in the left History view now (the right panel is Chats);
-    // the measurement includes opening the view.
     const historyStart = Date.now();
     await openHistoryView(page);
     await expect(page.getByTestId("engine-moment").first()).toBeVisible();
@@ -162,10 +156,8 @@ test("switching A->B with A's heavy panels open shows only B's history and chats
       `[perf] history first useful content (1,000 moments): shell-ready->first row ${historyFirstContentMs}ms; ` +
         `listEngineMoments(limit 50) IPC round-trip ${ipcTiming.ms.toFixed(1)}ms`,
     );
-    // Budget: first useful content under 500ms.
     expect(ipcTiming.ms).toBeLessThan(500);
 
-    // --- Perf evidence: chats panel with 200 messages ---
     await page.getByTestId(activityPin("explorer")).click();
     await revealExplorerPath(page, "files/doc-000.md");
     await explorerRow(page, "files/doc-000.md").click();
@@ -196,12 +188,10 @@ test("switching A->B with A's heavy panels open shows only B's history and chats
     await switcherOption(page, WORKSPACE_B_ID).click();
     await waitForWorkspaceReady(page);
 
-    // B's shell renders B's history...
     await openHistoryView(page);
     await expect(
       page.locator('[data-testid="engine-moment-open"][data-moment-path="b-note.md"]'),
     ).toBeVisible();
-    // ...and none of A's moments or chats.
     await expect(
       page.locator('[data-testid="engine-moment-open"][data-moment-path^="files/doc-"]'),
     ).toHaveCount(0);
@@ -213,7 +203,6 @@ test("switching A->B with A's heavy panels open shows only B's history and chats
     await expect(page.getByTestId("linked-chat-open")).toHaveCount(0);
     await expect(page.getByText("Doc zero deep dive")).toHaveCount(0);
 
-    // Switch back: A's data is intact and B's never leaked into it.
     await page.getByTestId("workspace-switcher").click();
     await switcherOption(page, WORKSPACE_A_ID).click();
     await waitForWorkspaceReady(page);

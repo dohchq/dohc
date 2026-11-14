@@ -175,7 +175,6 @@ describe("a workspace's Collections holder", () => {
   });
 
   it("tells from the record alone that another computer keeps them, and nothing else", async () => {
-    // Nobody keeps them yet.
     expect(await collectionsKeptElsewhere(root, workspaceId, required)).toBeNull();
     await named(laptop, storeId);
     expect(await collectionsKeptElsewhere(root, workspaceId, required)).toEqual({
@@ -219,7 +218,6 @@ describe("a workspace's Collections holder", () => {
     expect(refused.message).toBe(
       "This computer keeps this workspace's Collections, but .dohc/local/datasets/state.sqlite is not there. Restore it from a backup, then try again.",
     );
-    // A -wal without its database is not the store, in either place.
     for (const place of ["local", "old"] as const) await addStore("state.sqlite-wal", place);
     expect((await refusal(admitCollectionsStore(root, workspaceId, required))).refusal).toEqual({
       kind: "missing",
@@ -332,7 +330,6 @@ describe("a workspace's Collections holder", () => {
     expect(refused.message).toBe(
       "dohc could not read which computer keeps this workspace's Collections. Restore .dohc/collections.json, or update dohc. Then retry.",
     );
-    // Keeping them here does not replace a record dohc cannot read.
     const kept = steps();
     await refusal(keepCollectionsHere(root, workspaceId, here, kept));
     expect(kept.adoptStore).not.toHaveBeenCalled();
@@ -393,7 +390,6 @@ describe("a workspace's Collections holder", () => {
     await named(here);
     const admitted = await admitCollectionsStore(root, workspaceId, required);
     if (admitted.kind !== "create") throw new Error("Expected a new store.");
-    // Another computer's record arrives while the store is made.
     await named(laptop);
     const changed = await refusal(
       recordCollectionsStore(root, workspaceId, here, admitted.storeId, admitted.seen),
@@ -537,7 +533,6 @@ describe("keeping the Collections on this computer", () => {
     const accepted = steps({ madeBy: async () => laptop });
     expect(await keepCollectionsHere(root, workspaceId, here, accepted)).toBe(true);
     expect(await recordNow()).toMatchObject({ installId: "install-here", storeId: null });
-    // This computer made it: nothing to ask.
     await rm(recordPath());
     const own = steps({ madeBy: async () => here });
     await keepCollectionsHere(root, workspaceId, here, own);

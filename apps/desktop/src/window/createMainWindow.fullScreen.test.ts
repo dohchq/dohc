@@ -47,7 +47,6 @@ afterEach(() => {
   resetChromeThemeForTests();
 });
 
-// What a window told its renderer on one channel.
 const sentOn = (window: TestWindow, channel: string) =>
   window.webContents.send.mock.calls.filter(([sent]) => sent === channel);
 
@@ -60,7 +59,6 @@ describe("main-window full-screen state", () => {
     window.webContents.emit("dom-ready");
     window.fullScreen = true;
     window.emit("enter-full-screen");
-    // A reload while full screen starts from the current state.
     window.webContents.emit("dom-ready");
     window.fullScreen = false;
     window.emit("leave-full-screen");
@@ -100,7 +98,6 @@ describe("main-window focus", () => {
     window.webContents.emit("dom-ready");
     window.focused = true;
     window.emit("focus");
-    // A reload while focused starts from the current state.
     window.webContents.emit("dom-ready");
     window.focused = false;
     window.emit("blur");

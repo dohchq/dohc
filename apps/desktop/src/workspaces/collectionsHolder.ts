@@ -29,43 +29,34 @@ import { OLD_STORE_PATH, STORE_PATH } from "./localDatasetFolders";
 // Which installation of dohc keeps a workspace's Collections, recorded in
 // .dohc/collections.json. Their store, .dohc/local/datasets/state.sqlite with
 // its -wal and -shm, is the only copy of their records, files, approvals and
-// History. iCloud Drive skips .dohc/local, but Dropbox or a copied folder can
-// carry those files to other computers one by one, and the store was in
-// .dohc/datasets, which iCloud Drive syncs, before .dohc/local. A computer
-// could open an older copy, or write its own, and changes would be lost. So
-// only the installation the record names opens the store, and only it moves
-// a store from .dohc/datasets. Every other one refuses, creates nothing, and
-// says which computer keeps the Collections. It can still use the ones moved
-// to its signed-in server, which it asks without opening a store.
+// History. A synced or copied folder can carry those files to other
+// computers one by one, and a computer that opened an older copy, or wrote
+// its own, would lose changes. So only the installation the record names
+// opens the store, and only it moves a store from .dohc/datasets. Every other
+// one refuses, creates nothing, and says which computer keeps the
+// Collections. It can still use the ones moved to its signed-in server.
 //
-// The record also names the store by a random id that the store keeps in
-// local_dataset_store. The holder opens only the store with that id, so a
-// copy from another computer, or a backup, that took its place is refused.
+// The record names the store by a random id the store keeps in
+// local_dataset_store. The holder opens only that store, so a copy from
+// another computer, or a backup, that took its place is refused.
 //
 // A new workspace names the installation that made it, with no store id
-// until that installation first creates the store. A workspace from before
-// the record has none, and no computer opens or creates its store until a
-// person keeps the Collections on one. dohc never claims them by itself: a
-// synced folder can bring the record or the store late, after another
-// computer already keeps them. A record dohc cannot read blocks the same way.
+// until that installation first creates the store. A workspace with no
+// record, or one dohc cannot read, opens no store until a person keeps the
+// Collections on one computer: a synced folder can bring the record or the
+// store late, so dohc never claims them by itself.
 //
-// The record sits beside manifest.json, so a synced folder carries it, and
-// outside .dohc/local, which iCloud Drive skips. .dohc resolves through
+// The record sits beside manifest.json, outside .dohc/local, which iCloud
+// Drive skips, so a synced folder carries it. .dohc resolves through
 // resolveWorkspaceMetadataDir, and a link or folder at the record's name is
-// refused, never followed.
+// refused, never followed. A server's sync never carries .dohc, so a
+// workspace that syncs through a server keeps the record too. Only a
+// received share does not use it.
 //
-// Claims, adoptions and new stores run one at a time per workspace in this
-// process, and each checks just before it writes that the record is still
-// the one it read. That gives no exclusion across computers: two computers
-// that keep the Collections at once through iCloud Drive can both write.
-// Then the store id catches the one whose record lost, as "elsewhere" or
-// "replaced", and it stops.
-//
-// An open store reads the record before each piece of work, so a record that
-// names another computer or store stops the next write, with no wait between.
-//
-// A server's sync never carries .dohc, so a workspace that syncs through a
-// server keeps the record too. Only a received share does not use it.
+// Writes run one at a time per workspace in this process and recheck the
+// record first. Two computers can still both write through a synced folder.
+// The store id then stops the one whose record lost, as "elsewhere" or
+// "replaced", and an open store reads the record before each piece of work.
 
 /** The record: who keeps the Collections, and the id of their store once made. */
 export interface CollectionsHolder {
@@ -92,7 +83,6 @@ const RECORD = "collections.json";
 const STORE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const UNREADABLE = `${DOHC_COLLECTIONS_GUARD.lead} Restore ${DOHC_COLLECTIONS_GUARD.path}, or update dohc. Then retry.`;
 
-/** The words for a refusal, as a person, an agent and the CLI read them. */
 function collectionsRefusalMessage(refusal: CollectionsRefusal): string {
   switch (refusal.kind) {
     case "unclaimed":
@@ -166,7 +156,6 @@ function parseRecord(text: string, workspaceId: string): CollectionsHolder | nul
   return { computer, storeId };
 }
 
-// A guard's own refusal, which says what to remove, or the general words.
 function wordsOf(error: unknown, guard: DohcPathGuard): string {
   return error instanceof Error && error.message.startsWith(guard.lead)
     ? error.message
@@ -439,7 +428,6 @@ export interface KeepSteps {
   storeIdHere(): Promise<string | null>;
   /** The installation that made the workspace, as its sync history records it, or null. */
   madeBy(): Promise<Computer | null>;
-  /** Asks the person; false when they did not confirm. */
   confirm(question: KeepQuestion): Promise<boolean>;
 }
 

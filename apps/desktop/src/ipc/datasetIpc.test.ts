@@ -869,15 +869,12 @@ it("carries the agent main derived into an owner CLI invocation, and nothing of 
   expect(f.host.invoke).toHaveBeenLastCalledWith(
     expect.objectContaining({ idempotencyKey: "retry", agent: { depth: 3 } }),
   );
-  // An agent outside a chain is still the agent.
   await f.handler("cli", request, { depth: 0 });
   expect(f.host.invoke).toHaveBeenLastCalledWith(expect.objectContaining({ agent: { depth: 0 } }));
-  // With no agent, the invocation is the owner's own.
   await f.handler("cli", request);
   expect(f.host.invoke).toHaveBeenLastCalledWith(
     expect.not.objectContaining({ agent: expect.anything() }),
   );
-  // A caller cannot name an agent or a depth itself.
   for (const forged of [{ agent: { depth: 0 } }, { agentDepth: 9 }])
     await expect(f.handler("cli", { ...request, ...forged })).rejects.toThrow();
   expect(f.host.invoke).toHaveBeenCalledTimes(3);
@@ -1622,7 +1619,7 @@ it.each([
     ]) {
       for (const caller of ["window", "cli"]) {
         const answer = f.handler(caller, request);
-        // A list returns its refusal (#3016), as the CLI reads it.
+        // A list returns its refusal, as the CLI reads it.
         if (request.action === "list")
           expect(DatasetResult.parse(await answer)).toEqual({
             kind: "collections-refused",
@@ -1674,7 +1671,6 @@ describe("a computer that doesn't keep the workspace's Collections", () => {
     sameName: false,
   });
   function serverFixture(server: ServerCollections | null) {
-    // Main's local store, which refuses on this computer.
     const localHost = vi.fn(async (): Promise<LocalDatasetHost> => {
       throw refusal;
     });

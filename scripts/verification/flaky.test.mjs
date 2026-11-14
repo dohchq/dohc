@@ -401,7 +401,6 @@ test("the vitest reporter records the tests that passed on retry, failed both tr
       { message: "expected 1 to be 2" },
     ]),
   );
-  // The run ends with a file that failed to load, a failed beforeAll, and an unhandled error, none of which a test owns.
   const suite = (errors) => ({ errors: () => errors });
   const module = (errors, suites = []) => ({
     ...suite(errors),

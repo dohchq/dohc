@@ -43,7 +43,6 @@ describe("eval command line", () => {
     });
   });
 
-  // Each of these once started every case, or no case, without a word.
   it.each([
     [["--out", "runs/a", "--case"], "--case takes a value"],
     [["--out", "runs/a", "--baseline", "--dry-run"], "--baseline takes a value"],

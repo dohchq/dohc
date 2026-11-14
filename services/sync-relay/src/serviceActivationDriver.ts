@@ -81,6 +81,7 @@ type TargetBlock =
   | { reason: "released-lineage-unsettled"; digest: string };
 type TargetFailure = {
   count: number;
+  at: number;
   until: number;
   overBudget: boolean;
   run?: { since: number; failures: number; word: KnownRefusalWord; shown: boolean };
@@ -184,8 +185,8 @@ export interface ServiceActivationReplica {
 export type ServiceCatchUp = Map<string, Promise<{ head: number; hasMore: boolean }>>;
 /** What the document's hosted replica confirmed of it since it began departing. */
 export interface RetirementScope {
-  /** A pull confirmed the document left the hosted scope. */
-  departed(): boolean;
+  /** Undefined once a pull confirmed the document left the hosted scope; until then, why none has. */
+  departureWait(): string | undefined;
   /** A pull confirmed it parked: it is no longer departed. */
   parked(): boolean;
 }
@@ -340,7 +341,6 @@ export class ServiceActivationDriver {
     this.#kept.delete(key);
     return named;
   }
-  /** The documents with a kept block or wait. */
   keptDocuments() {
     return [...this.#kept.keys()].map((key) => {
       const [workspaceId, objectId] = JSON.parse(key) as [string, string];
@@ -387,9 +387,10 @@ export class ServiceActivationDriver {
   /**
    * Whether a target's last activation left work for a later pass: it failed, or ended pending without blocking.
    * A finished one found no owner edit waiting in the engine. A blocked one waits for its owner or the relay instead.
+   * One that waits out its back-off after a failure does not count until its wait lapses.
    */
   get unfinished() {
-    return this.#unfinished.size > 0;
+    return [...this.#unfinished].some((key) => !this.#waitingOut(key));
   }
   /**
    * Clears readiness of documents a hosted pass left held. The engine has
@@ -436,7 +437,6 @@ export class ServiceActivationDriver {
     }
     return dropped;
   }
-  // Ends the target's readiness and its owner, if it has one. Returns whether it had one.
   #drop(key: string) {
     this.#completedTargets.delete(key);
     let owned = false;
@@ -515,7 +515,6 @@ export class ServiceActivationDriver {
   clearResolvedHold(target: ServiceActivationTarget, digest: string) {
     return this.releasedHold(target) === digest && this.#blocked.delete(targetKey(target));
   }
-  // Keeps the target's hold for released retained work through `clear`.
   #keepReleasedHold(key: string, clear: () => void) {
     const block = this.#blocked.get(key);
     clear();
@@ -734,8 +733,8 @@ export class ServiceActivationDriver {
       .every((target) => this.#completedTargets.has(targetKey(target)));
   }
   // Whether an unready workspace may still push. A document with no owner that waits out a backoff after a failed
-  // activation does not hold the push back, so its siblings' settled edits still publish while it waits. It still
-  // holds readiness, so the workspace keeps pulling as an unready one does.
+  // activation does not hold the push back, so its siblings' settled edits still publish while it waits. A workspace
+  // that may push also passes `workspaceWaiting`.
   workspacePushes(workspaceId: string) {
     return this.#targets
       .filter(
@@ -748,12 +747,37 @@ export class ServiceActivationDriver {
       )
       .every((target) => this.#completedTargets.has(targetKey(target)));
   }
+  // Whether each document that holds a workspace's readiness has completed or waits out a back-off. Until a wait lapses,
+  // such a workspace has nothing more to do than a ready one.
+  workspaceWaiting(workspaceId: string) {
+    return this.#targets
+      .filter(
+        (target) =>
+          target.workspaceId === workspaceId &&
+          !this.dormant(target) &&
+          !this.#held.has(targetKey(target)) &&
+          !this.#blocked.has(targetKey(target)),
+      )
+      .every(
+        (target) =>
+          this.#completedTargets.has(targetKey(target)) || this.#waitingOut(targetKey(target)),
+      );
+  }
   #backingOff(key: string) {
     return this.#waiting(key) && ![...this.#owners.values()].some((owner) => owner.target === key);
   }
-  // Whether a failed activation's wait before its next capture has not yet lapsed.
-  #waiting(key: string) {
-    return Date.now() < (this.#failures.get(key)?.until ?? 0);
+  // Whether a target that has not completed waits out a failed activation's back-off, as `#activate` checks before it
+  // tries again.
+  #waitingOut(key: string) {
+    const owner = [...this.#owners.values()].find((owner) => owner.target === key);
+    return !owner?.completed && this.#waiting(key, owner !== undefined);
+  }
+  // Whether a failed activation's wait before its next capture or drain has not yet lapsed. A target whose owner the host
+  // holds waits at most 30 s: its document, its Stop and its workspace's push wait for that owner to complete.
+  #waiting(key: string, owned = false) {
+    const failure = this.#failures.get(key);
+    if (!failure) return false;
+    return Date.now() < (owned ? Math.min(failure.until, failure.at + 30_000) : failure.until);
   }
   consumer(value: LiveDocumentKey) {
     const document = parseLiveDocumentKey(value),
@@ -1159,10 +1183,11 @@ export class ServiceActivationDriver {
       return { kind: "pending", reason: "Hosted publication has more pages." };
     }
     check();
-    if (!scope.departed())
+    const waiting = scope.departureWait();
+    if (waiting !== undefined)
       return {
         kind: "pending",
-        reason: "Waiting for its hosted replica to confirm the document left.",
+        reason: `Waiting for its hosted replica to confirm the document left: ${waiting}.`,
       };
     const released = answer(await send("liveApplication.releaseActivation", { ...key }), {
       pending: ["reason"],
@@ -1211,7 +1236,7 @@ export class ServiceActivationDriver {
    * Without it, a retained activation resumes without that pull: its
    * caller pulled already, or the document left the hosted set, and a pull
    * would adopt the scope it left, after which the engine no longer captures it.
-   * `objectId` is as for `activationId`.
+   * `objectId` is as for `activationId`. `settle` runs only right after the document's drain returned done.
    */
   async activate(
     target: ServiceActivationTarget,
@@ -1274,6 +1299,7 @@ export class ServiceActivationDriver {
     // The first retry is the next pass. Each later one waits twice as long as the one before, up to five minutes.
     this.#failures.set(key, {
       count,
+      at: now,
       until: count < 2 ? 0 : now + Math.min(300_000, 1000 * 2 ** (count - 2)),
       overBudget,
       ...(run ? { run } : {}),
@@ -1364,9 +1390,9 @@ export class ServiceActivationDriver {
       owner = this.#owners.get(JSON.stringify(document));
       if (owner) return fenced;
     }
+    // A failed activation waits before it captures or drains again. A document already live keeps draining on every pass.
+    if (!owner?.completed && this.#waiting(key, owner !== undefined)) return backingOff;
     if (!owner) {
-      // Waiting applies to capturing: a document already live keeps draining on every pass.
-      if (this.#waiting(key)) return backingOff;
       let update = this.#latestUpdate(target);
       if (catchUp || !saved) {
         let pulling = catchUp?.get(target.workspaceId);

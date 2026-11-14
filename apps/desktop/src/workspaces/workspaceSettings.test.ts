@@ -34,7 +34,6 @@ import { LocalStateUnavailableError } from "./workspaceLocalState";
 
 const engine = fakeLocalStateOpens();
 let workspaces = 0;
-// A workspace whose engine open prepared .dohc/local.
 async function openedWorkspace(prefix = "dohc-workspace-settings-") {
   workspaces += 1;
   const workspace = {
@@ -124,7 +123,6 @@ vi.mock("./workspaceMetadata", async (importOriginal) => {
 
 describe("workspace settings model", () => {
   it("defaults and merges the attachment-location (files) group", () => {
-    // Absent files group (old settings files) defaults to per-document/assets.
     expect(DEFAULT_WORKSPACE_SETTINGS.files).toEqual({
       attachmentLocation: "per-document",
       attachmentFolderName: "assets",
@@ -136,7 +134,6 @@ describe("workspace settings model", () => {
       attachmentLocation: "global-folder",
       attachmentFolderName: "attachments",
     });
-    // Other groups are untouched.
     expect(globalFolder.privacy).toEqual(DEFAULT_WORKSPACE_SETTINGS.privacy);
     // An empty folder name is accepted by the schema (sanitized to a safe
     // segment at use time) rather than resetting the whole file.
@@ -215,12 +212,10 @@ describe("workspace settings file store", () => {
       const workspace = await openedWorkspace();
       await saveWorkspaceSettingsFile(workspace, { privacy: { confirmExternalLinks: false } });
       const path = settingsFile(workspace.rootPath);
-      // This user's file is read before the engine opens the workspace.
       engine.close(workspace);
       expect(
         (await readWorkspaceSettingsFile(workspace)).settings.privacy.confirmExternalLinks,
       ).toBe(false);
-      // Another user's file is not, even while the engine's open stands.
       await engine.open(workspace);
       openSeam.stat = madeByAnotherUser;
       const read = await readWorkspaceSettingsFile(workspace);
@@ -229,7 +224,6 @@ describe("workspace settings file store", () => {
       expect(read.warning).toBe(
         `Another user made the workspace settings file. dohc is using default settings. Fix ${path}. Or select Reset workspace in Advanced to replace it.`,
       );
-      // Reset writes a fresh file of this user's in its place.
       await resetWorkspaceSettingsFile(workspace);
       expect(await readWorkspaceSettingsFile(workspace)).toEqual({
         settings: DEFAULT_WORKSPACE_SETTINGS,
@@ -289,8 +283,6 @@ describe("workspace settings file store", () => {
     expect(read.settings.sites.defaultPreviewMode).toBe("auto");
   });
 
-  // Reset replaces only the settings file. A problem with the folder that
-  // holds it names its own way out, and taking it works.
   it("names a way out of a linked .dohc/local that works, and never offers Reset", async () => {
     const workspace = await openedWorkspace();
     const folder = join(workspace.rootPath, ".dohc", "local");
@@ -406,7 +398,6 @@ describe("workspace settings file store", () => {
       settings: DEFAULT_WORKSPACE_SETTINGS,
       source: "stored",
     });
-    // The other name keeps what it had.
     expect(JSON.parse(await readFile(second, "utf8")).privacy.confirmExternalLinks).toBe(false);
   });
 
@@ -561,15 +552,12 @@ describe("workspace settings file store", () => {
       `dohc did not save workspace settings. dohc cannot read ${path}. Fix that file. Or select Reset workspace in Advanced to replace it.`,
     );
     expect(await readFile(path, "utf8")).toBe("{not json");
-    // The refusal hands back the file's real state, warning included, so the
-    // dialog snaps its controls back instead of showing an unsaved edit.
     expect(refused.source).toBe("recovered");
     expect(refused.warning).toContain(path);
     expect(refused.settings).toEqual(DEFAULT_WORKSPACE_SETTINGS);
     // The refusal crosses the IPC boundary; a path must not overflow its bound.
     expect(WorkspaceSettingsResult.parse(refused)).toEqual(refused);
 
-    // Reset is the named way out, and it must actually work here.
     await resetWorkspaceSettingsFile(workspace);
     expect((await readWorkspaceSettingsFile(workspace)).source).toBe("stored");
   });
@@ -588,8 +576,6 @@ describe("workspace settings file store", () => {
         .refusal,
     ).toBeTruthy();
 
-    // The user repairs the file outside dohc with a distinctive value in a
-    // group this save does not touch.
     const repaired = {
       ...DEFAULT_WORKSPACE_SETTINGS,
       sites: { defaultPreviewMode: "static" as const },
@@ -603,7 +589,6 @@ describe("workspace settings file store", () => {
       ...repaired,
       files: { ...repaired.files, attachmentLocation: "same-folder" },
     });
-    // What lands on disk is the repaired file plus the one edited control.
     const onDisk = await readWorkspaceSettingsFile(workspace);
     expect(onDisk.settings.sites.defaultPreviewMode).toBe("static");
     expect(onDisk.settings.files.attachmentLocation).toBe("same-folder");
@@ -620,7 +605,6 @@ describe("workspace settings file store", () => {
     });
     expect(saved.source).toBe("stored");
     expect(saved.settings.privacy.confirmExternalLinks).toBe(false);
-    // A sibling group, and a sibling key inside the patched group, survive.
     expect(saved.settings.files).toEqual({
       attachmentLocation: "global-folder",
       attachmentFolderName: "media",
@@ -735,7 +719,6 @@ describe("workspace settings file store", () => {
       settings: DEFAULT_WORKSPACE_SETTINGS,
       source: "stored",
     });
-    // And saving works again afterwards.
     expect(
       (await saveWorkspaceSettingsFile(workspace, { privacy: { confirmExternalLinks: false } }))
         .settings.privacy.confirmExternalLinks,
@@ -743,11 +726,6 @@ describe("workspace settings file store", () => {
   });
 
   it("a reset over a FILE squatting .dohc/local/trash names the squatter, never a raw errno", async () => {
-    // Reset moves the settings-path squatter into .dohc/local/trash. A plain
-    // file there made that mkdir throw raw "EEXIST: file already exists,
-    // mkdir …" straight into the Settings dialog, while reset is the
-    // advertised recovery from an unreadable settings file. The refusal must
-    // name .dohc/local/trash, what squats it, and the way out.
     const workspace = await openedWorkspace();
     const root = workspace.rootPath;
     const path = settingsFile(root);
@@ -759,7 +737,6 @@ describe("workspace settings file store", () => {
     await expect(resetWorkspaceSettingsFile(workspace)).rejects.toThrow(
       "dohc could not move this to the workspace trash. A file is at .dohc/local/trash, which must be a real folder. Remove or rename that file. Then retry.",
     );
-    // Nothing partial landed: the settings path still reads as recovered.
     expect((await readWorkspaceSettingsFile(workspace)).source).toBe("recovered");
   });
 
@@ -775,7 +752,6 @@ describe("workspace settings file store", () => {
     ).rejects.toThrow(
       "dohc did not reset this workspace's settings because the workspace has not finished opening. Try again when it opens.",
     );
-    // The squatter is never touched: dohc names it and stops.
     expect(await readFile(join(root, ".dohc"), "utf8")).toBe("squatting");
   });
 
@@ -790,9 +766,6 @@ describe("workspace settings file store", () => {
     await expect(
       writeWorkspaceSettingsFile(workspace, DEFAULT_WORKSPACE_SETTINGS),
     ).rejects.toBeInstanceOf(LocalStateUnavailableError);
-    // The READ stays tolerant, like the symlinked-file case below: recover
-    // to defaults with a warning naming the folder, and never follow the
-    // link. Nothing is read from or written into the link target.
     const read = await readWorkspaceSettingsFile(workspace);
     expect(read.source).toBe("recovered");
     expect(read.settings).toEqual(DEFAULT_WORKSPACE_SETTINGS);
@@ -823,8 +796,6 @@ describe("workspace settings file store", () => {
     expect(result.settings.privacy.confirmExternalLinks).toBe(true);
     expect(result.warning).toContain("not a file dohc can read");
 
-    // Reset, which the warning offers, moves the link aside and writes a
-    // fresh file. What the link pointed at is left alone.
     const reset = await resetWorkspaceSettingsFile(workspace);
     expect(reset.warning).toBe(
       "dohc replaced workspace settings. The link that was in their place is now in this workspace's .dohc/local/trash.",

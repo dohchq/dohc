@@ -94,7 +94,6 @@ import { lstat, mkdir, open, readFile, readdir, realpath, stat } from "node:fs/p
 import { basename, join } from "node:path";
 
 type DeclaredTool = DeclaredOperation["mcp"]["tool"];
-// The tools of the operations declared in workspace-contracts, in declaration order.
 export const DECLARED_TOOLS = byName(
   Object.values<DeclaredOperation>(DECLARED_VERBS),
   (operation) => operation.mcp.tool,
@@ -456,8 +455,6 @@ async function readJson<T>(path: string): Promise<T | null> {
   }
 }
 
-// --- workspace filesystem ---------------------------------------------------
-
 type WorkspaceFileKind = "file" | "directory";
 type WorkspaceSearchMode = "content" | "path" | "both";
 type WorkspaceSearchMatch =
@@ -547,10 +544,9 @@ export async function listWorkspaceFiles(
   return { ok: true as const, root: root.normalized, entries };
 }
 
-// Secret-backed files (PR 08, plan agent-access default = deny): dohc-
-// controlled agent surfaces never share secret file contents. The floor is
-// the same classifyEngineFilePath rule the engine enforces everywhere —
-// policy files can never unmark it.
+// Secret-backed files: dohc-controlled agent surfaces never share secret file
+// contents. The floor is the same classifyEngineFilePath rule the engine
+// enforces everywhere, and policy files can never unmark it.
 const SECRET_READ_DENIED_REASON =
   "This file is protected: secret-backed files (like .env) are never shared with agents through dohc tools. Agent access to secret contents is denied by default.";
 
@@ -1022,8 +1018,6 @@ export async function deleteWorkspacePath(
   });
 }
 
-// --- dohc_list_workspaces / cloud binding helpers ---------------------------
-
 interface RemoteIdentity {
   serverUrl: string;
   ownerUserId: string;
@@ -1197,8 +1191,6 @@ export async function listWorkspaces(ctx: ToolContext) {
   return { workspaces };
 }
 
-// --- dohc_workspace_status --------------------------------------------------
-
 function removedShareStatus(workspace: RegistryWorkspace | null) {
   const removedShares = (workspace?.confirmedRemovedShares ?? []).map(({ shareId }) => ({
     shareId,
@@ -1270,12 +1262,8 @@ export async function workspaceStatus(ctx: ToolContext) {
   };
 }
 
-// Legacy cloud sync (dohc_sync_now / dohc_sync_cloud) was removed together with
-// the retired workspace-api file/sync routes (/workspaces/:id/files,
-// /sync/apply). Cloud sync is now automatic per workspace via the sync relay;
-// workspace history is read through dohc_list_changes (engine moments) below.
-
-// --- dohc_list_changes / dohc_read_change ----------------------------------
+// Cloud sync is automatic per workspace via the sync relay. Workspace history
+// is read through dohc_list_changes (engine moments) below.
 
 const LIST_CHANGES_HARD_LIMIT = 500;
 
@@ -1294,8 +1282,6 @@ export async function listChanges(
 export async function readChange(ctx: ToolContext, args: { id: string }) {
   return requestCli(ctx, "moment", args);
 }
-
-// --- dohc app tools ---------------------------------------------------------
 
 type RawDohcSiteConfig = Partial<Record<keyof DohcSiteConfig, unknown>> & Record<string, unknown>;
 
@@ -1622,8 +1608,7 @@ async function detectSiteAt(
   // Every entry `detectedBuildOutputs` already required a passing isFile()
   // check above; a configured output only joins them once its own check
   // here passes too — so realBuildOutputs never needs a second stat of a
-  // path this function already confirmed. detectApps' own walk used to
-  // re-stat each of these itself to learn the same thing.
+  // path this function already confirmed.
   const realBuildOutputs = [...detectedBuildOutputs];
   if (configuredBuildOutput) {
     const configuredIndexInfo = await stat(
@@ -1950,8 +1935,6 @@ export async function testApp(ctx: ToolContext, args: { appRoot: string }) {
   return { ok, app, checks };
 }
 
-// --- dohc_import_data -------------------------------------------------------
-
 // A visible user database under both spellings. The strategy is read off the
 // name, so an alias carries its own: `records.sqlite -> notes/data.sqlite-wal`
 // spells a database while the bytes are a sidecar. Both names must qualify.
@@ -2011,8 +1994,6 @@ export async function importData(
   };
 }
 
-// --- dohc_query_database ----------------------------------------------------
-
 const MAX_QUERY_ROWS = 1000;
 
 // Opens a visible database READ-ONLY and returns a bounded row window. Only a
@@ -2059,7 +2040,6 @@ function stripTrailingSemicolon(sql: string): string {
 function isReadOnlySelect(sql: string): boolean {
   const trimmed = sql.trim();
   if (!/^select\b/i.test(trimmed)) return false;
-  // No second statement after the (optional) trailing semicolon.
   return !stripTrailingSemicolon(trimmed).includes(";");
 }
 
@@ -2129,7 +2109,6 @@ async function requestCli<Verb extends CliVerb>(
   }
 }
 
-// Sends a declared tool's arguments to the socket verb its operation names.
 export async function requestDeclaredTool(ctx: ToolContext, tool: DeclaredTool, input: unknown) {
   const { cli, input: schema } = DECLARED_TOOLS[tool];
   return requestCli(ctx, cli.verb, schema.parse(input));
@@ -2337,8 +2316,6 @@ export async function makeLink(
           : { kind, path: value };
   return requestCli(ctx, "link", { target });
 }
-
-// --- groups (PR 12/15 slice, WS-E) ----------------------------------------
 
 // Group discovery for agents: names, slugs, kinds, and each group's
 // threads (id + display title) so a follow-up reply/read has real ids to

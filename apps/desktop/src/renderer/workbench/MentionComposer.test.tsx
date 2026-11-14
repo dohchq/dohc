@@ -22,7 +22,7 @@ const candidates: MentionCandidate[] = [
 // A tiny controlled harness so the composer behaves like it does in ChatsView
 // (parent owns the value).
 function Harness(props: {
-  fileCandidates?: { path: string; label: string }[];
+  fileCandidates?: { path: string; label: string; readPath?: string }[];
   onSend?: () => void;
   onRosterPick?: (pick: import("../offers/agentAddressed").AgentRosterPick | null) => void;
   onEscape?: () => void;
@@ -63,14 +63,12 @@ describe("MentionComposer autocomplete", () => {
     const composer = screen.getByTestId("chats-composer");
     await userEvent.type(composer, "hey @");
     const menu = await screen.findByTestId("chats-mention-menu");
-    // Both candidates offered; the agent leads.
     const options = within(menu).getAllByTestId("chats-mention-option");
     expect(options.map((el) => el.getAttribute("data-candidate-id"))).toEqual([
       "agent:default",
       "user:you",
     ]);
 
-    // "@agent" filters to exactly the agent (the user handle shares no prefix).
     await userEvent.type(composer, "gent");
     expect(
       within(screen.getByTestId("chats-mention-menu"))
@@ -85,7 +83,6 @@ describe("MentionComposer autocomplete", () => {
     const options = within(screen.getByTestId("chats-mention-menu")).getAllByTestId(
       "chats-mention-option",
     );
-    // Both share the "you" prefix; the exact user handle leads.
     expect(options[0]!.getAttribute("data-candidate-id")).toBe("user:you");
   });
 
@@ -359,6 +356,27 @@ describe("MentionComposer autocomplete", () => {
     expect((composer as HTMLTextAreaElement).value).toContain("@[docs/plan.md]");
   });
 
+  it("links a joined Group's file by the Group's path and reads headings from this workspace's copy", async () => {
+    const load = vi.fn(() =>
+      Promise.resolve([{ text: "Scope", anchor: "scope", line: 3, level: 2, occurrence: 0 }]),
+    );
+    render(
+      <Harness
+        fileCandidates={[
+          { path: "team/plan.md", label: "Plan", readPath: "shared-with-me/ana/team/plan.md" },
+        ]}
+        loadFileHeadings={load}
+      />,
+    );
+    const composer = screen.getByTestId("chats-composer") as HTMLTextAreaElement;
+    await userEvent.type(composer, "@plan");
+    await userEvent.click(await screen.findByTestId("chats-file-mention-option"));
+    await userEvent.click(await screen.findByTestId("chats-file-mention-heading"));
+    expect(load.mock.calls).toEqual([["shared-with-me/ana/team/plan.md"]]);
+    expect(composer.value).toContain("@[team/plan.md#scope]");
+    expect(composer.value).not.toContain("shared-with-me");
+  });
+
   it("offers the file choices from the chat's +", async () => {
     render(<Harness />);
     const composer = screen.getByTestId("chats-composer");
@@ -382,19 +400,16 @@ describe("MentionComposer autocomplete", () => {
   it("keeps the collapsed prompt on one line inside its pill", async () => {
     render(<Harness surface="post" />);
     const pill = screen.getByTestId("chats-open");
-    // A narrow channel column used to wrap this prompt past the pill's fixed
-    // height; it now shortens inside the border and the tooltip carries it.
+    // A narrow channel column must not wrap this prompt past the pill's fixed
+    // height. It shortens inside the border and the tooltip carries it.
     expect(within(pill).getByText("Write a message…").className).toContain("truncate");
     expect(pill.getAttribute("title")).toBe("Write a message…");
-    // Shortening the text costs the pill neither its name nor its job.
     expect(pill.getAttribute("aria-label")).toBe("Write a post");
     await userEvent.click(pill);
     expect(document.activeElement).toBe(screen.getByTestId("chats-composer"));
   });
 });
 
-// Two people and six files fill more than the menu's height. The textarea
-// keeps focus while the arrows move the active option.
 describe("MentionComposer menu on the Menu part's recipe", () => {
   const files = Array.from({ length: 6 }, (_, index) => ({
     path: `docs/file-${index + 1}.md`,
@@ -420,8 +435,6 @@ describe("MentionComposer menu on the Menu part's recipe", () => {
     }
   });
 
-  // The @ shows as an icon; a screen reader still hears it, so a person or
-  // an agent never reads like a file.
   it("keeps @ in a person's or agent's name", async () => {
     render(<Harness />);
     await userEvent.type(screen.getByTestId("chats-composer"), "@");

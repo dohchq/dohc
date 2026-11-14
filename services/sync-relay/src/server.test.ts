@@ -5,6 +5,8 @@ import {
   MAX_BLOB_BYTES,
   MAX_KEY_ENVELOPE_BYTES,
   MAX_PAYLOAD_JSON_BYTES,
+  maxRequestBodyBytes,
+  requestBodyCaller,
   type CreateSyncRelayHandlerOptions,
   type SyncRelayHandler,
 } from "./server";
@@ -1046,7 +1048,7 @@ describe("sync relay handler", () => {
     expect(fetched.ops).toEqual([]);
   });
 
-  // Gate finding: a missing blob in an owned workspace must be
+  // A missing blob in an owned workspace must be
   // distinguishable from a missing/foreign workspace so clients can degrade
   // honestly instead of reporting the whole workspace unavailable. The
   // isolation invariant is untouched: non-owners still get the fixed
@@ -1111,8 +1113,6 @@ describe("sync relay handler", () => {
     expect(put.status).toBe(200);
     const get = await h(request("a", "/sync/workspace-a/keys", { method: "GET" }));
     await expect(get.text()).resolves.toBe(envelope);
-    // The GET exposes the current fingerprint + write time so clients can
-    // detect a replaced envelope.
     expect(get.headers.get("etag")).toBe(`"${sha256(envelope)}"`);
     expect(get.headers.get("x-key-envelope-updated-at-ms")).toBe("1234");
 
@@ -1127,7 +1127,7 @@ describe("sync relay handler", () => {
     expect(oversized.status).toBe(413);
   });
 
-  // Gate finding (0P-D): the envelope is the only recovery path for the
+  // The envelope is the only recovery path for the
   // wrapped workspace key, so PUT /keys is create-only on first write and
   // compare-and-swap (If-Match: sha256) thereafter, and every replaced
   // envelope is retained in an audit history.
@@ -1143,38 +1143,30 @@ describe("sync relay handler", () => {
     expect(create.status).toBe(200);
     expect(await json(create)).toMatchObject({ ok: true, sha256: sha256(first) });
 
-    // Concurrent-enroll race: a second unconditional PUT with different
-    // content loses — exactly one winner, nothing clobbered.
     const racingCreate = await h(putKeys(second));
     expect(racingCreate.status).toBe(409);
     await expect(
       (await h(request("a", "/sync/workspace-a/keys", { method: "GET" }))).text(),
     ).resolves.toBe(first);
 
-    // A byte-identical re-PUT is an idempotent retry, not a replacement.
     const retry = await h(putKeys(first));
     expect(retry.status).toBe(200);
     expect(keyEnvelopeHistory(storagePath(storage), "workspace-a")).toEqual([]);
 
-    // Stale CAS: If-Match naming anything but the current envelope is a 409.
     const stale = await h(putKeys(second, sha256(third)));
     expect(stale.status).toBe(409);
     const malformedIfMatch = await h(putKeys(second, "not-a-sha"));
     expect(malformedIfMatch.status).toBe(400);
 
-    // Correct CAS replaces, and the GET fingerprint moves with it.
     const replace = await h(putKeys(second, sha256(first)));
     expect(replace.status).toBe(200);
     const afterReplace = await h(request("a", "/sync/workspace-a/keys", { method: "GET" }));
     await expect(afterReplace.text()).resolves.toBe(second);
     expect(afterReplace.headers.get("etag")).toBe(`"${sha256(second)}"`);
 
-    // A now-stale writer (still holding first's fingerprint) is rejected.
     const lostRace = await h(putKeys(third, sha256(first)));
     expect(lostRace.status).toBe(409);
 
-    // Lockout stays recoverable server-side: the replaced envelope is
-    // retained byte-for-byte with an audit trail of when and by what.
     expect(keyEnvelopeHistory(storagePath(storage), "workspace-a")).toEqual([
       {
         envelopeJson: first,
@@ -1185,7 +1177,7 @@ describe("sync relay handler", () => {
     ]);
   });
 
-  // Gate finding: unclassified errors (auth DB hiccup, unexpected SQLite
+  // Unclassified errors (auth DB hiccup, unexpected SQLite
   // failure) must become a generic 500 — never a crash, never a raw
   // error.message leak.
   it("returns a generic 500 when the auth backend fails, without leaking internals", async () => {
@@ -1230,6 +1222,105 @@ describe("sync relay handler", () => {
     } finally {
       errorSpy.mockRestore();
     }
+  });
+
+  it("caps each route's body at the largest one its senders send", () => {
+    const cap = (path: string) => maxRequestBodyBytes(new URL(`http://relay.test${path}`));
+    const dataset = "/sync/w1/datasets/0b5f3c1e-2a4d-4f6b-8c9d-1e2f3a4b5c6d";
+    const publication = "0".repeat(64);
+    const largest = MAX_BLOB_BYTES + 1024 * 1024;
+    expect({
+      log: cap("/sync/w1/log"),
+      blob: cap(`/sync/w1/blobs/${"a".repeat(64)}`),
+      shareLog: cap("/sync/shares/s1/log"),
+      shareBlob: cap(`/sync/shares/s1/blobs/${"a".repeat(64)}`),
+      shareProposals: cap("/sync/shares/s1/proposals"),
+      hostedLog: cap("/sync/w1/hosted/log"),
+      datasetUpload: cap(`${dataset}/upload`),
+      datasetActivate: cap(`${dataset}/activate`),
+      datasetInvoke: cap(`${dataset}/invoke`),
+      datasetReplicaBlob: cap(`${dataset}/replica/blob`),
+      namedDatasetUpload: cap(
+        `/sync/shares/s1/datasets/0b5f3c1e-2a4d-4f6b-8c9d-1e2f3a4b5c6d/upload`,
+      ),
+      appBackendUpload: cap(`/sync/link/app-publications/${publication}/backend/upload`),
+      appBackendInvoke: cap(`/sync/link/app-publications/${publication}/backend/invoke`),
+      linkAppCollection: cap(`/sync/link/app-publications/${publication}/collection`),
+      sharesCreate: cap("/sync/w1/shares"),
+      shareLinkCreateAtomic: cap("/sync/w1/shares/links"),
+      notices: cap("/sync/notices"),
+      blobHave: cap("/sync/w1/blobs/have"),
+      presence: cap("/sync/w1/presence"),
+      moderation: cap("/sync/shares/s1/discussion/moderation"),
+    }).toEqual({
+      log: largest,
+      blob: largest,
+      shareLog: largest,
+      shareBlob: largest,
+      shareProposals: largest,
+      hostedLog: largest,
+      datasetUpload: 8 * 1024 * 1024,
+      datasetActivate: 1024 * 1024,
+      datasetInvoke: 256 * 1024,
+      datasetReplicaBlob: 1024 * 1024,
+      namedDatasetUpload: 8 * 1024 * 1024,
+      appBackendUpload: 8 * 1024 * 1024,
+      appBackendInvoke: 256 * 1024,
+      linkAppCollection: 16 * 1024,
+      sharesCreate: 1024 * 1024,
+      shareLinkCreateAtomic: 1024 * 1024,
+      notices: 256 * 1024,
+      blobHave: 256 * 1024,
+      presence: 256 * 1024,
+      moderation: 256 * 1024,
+    });
+    // The largest bodies shipped desktops send here: 100 paths of 1,024 three-byte
+    // characters, and a full batch of blob hashes.
+    const paths = Array.from({ length: 100 }, () => "☃".repeat(1024));
+    expect(
+      Buffer.byteLength(JSON.stringify({ recipientUserId: "u2", paths, access: "edit" })),
+    ).toBeLessThan(cap("/sync/w1/shares"));
+    const hashes = Array.from({ length: 2000 }, () => "a".repeat(64));
+    expect(Buffer.byteLength(JSON.stringify({ sha256s: hashes }))).toBeLessThan(
+      cap("/sync/w1/blobs/have"),
+    );
+  });
+
+  it("keys a request's bodies in flight on the one sign-in it presents", () => {
+    const caller = (headers: Record<string, string>) =>
+      requestBodyCaller(new Headers({ "x-dohc-relay-client-ip": "10.0.0.1", ...headers }));
+    const cookie = "better-auth.session_token";
+    // Each spelling of one sign-in shares one key.
+    expect(
+      new Set([
+        caller({ authorization: "Bearer token1" }),
+        caller({ authorization: "bearer  token1.signature " }),
+        caller({ cookie: `${cookie}=token1.signature%3D; theme=dark` }),
+        caller({ cookie: `theme=light; __Secure-${cookie}=token1.other` }),
+        caller({ cookie: `${cookie}=  token1.signature ` }),
+        caller({ cookie: `${cookie}="token1.signature"` }),
+      ]),
+    ).toEqual(new Set(["session token1"]));
+    // A header the handler would ignore cannot pick a new key.
+    expect(
+      new Set([
+        caller({}),
+        caller({ authorization: "Bearer junk.1", cookie: `${cookie}=token1.signature` }),
+        caller({ cookie: `${cookie}=junk.2; __Secure-${cookie}=token1.signature` }),
+        caller({ cookie: `${cookie} =token1.signature; ${cookie}=junk.3` }),
+      ]),
+    ).toEqual(new Set(["address 10.0.0.1"]));
+    // Link capabilities are minted freely, so they share one share.
+    expect(
+      new Set([
+        caller({ authorization: "LinkCapability link1" }),
+        caller({ authorization: "LinkCapability link2", cookie: `${cookie}=token1.signature` }),
+      ]),
+    ).toEqual(new Set(["link"]));
+    // Each service host's credential keeps its own share.
+    expect(caller({ authorization: "Bearer dohc-service-v1.host1" })).not.toBe(
+      caller({ authorization: "Bearer dohc-service-v1.host2" }),
+    );
   });
 
   it("rejects a blob PUT above MAX_BLOB_BYTES with 413 and stores nothing", async () => {
@@ -1417,11 +1508,10 @@ describe("sync relay handler", () => {
     expect(owner).toEqual({ ok: true, removed: 1, removedSha256s: [orphanSha] });
   });
 
-  // WS-G2-C1 GC-ROOT: a blob referenced by a live ydoc.update log op is a root
-  // and must not be collected out from under the rich-doc head — even with a
-  // zero grace window (so aging cannot save it) and even though a sibling
-  // orphan blob IS reclaimed in the same sweep. This is the relay side of the
-  // GC-root invariant G2-B documented; referencedBlobShas now counts the update.
+  // A blob referenced by a live ydoc.update log op is a GC root and must not
+  // be collected out from under the rich-doc head, even with a zero grace
+  // window (so aging cannot save it) and even though a sibling orphan blob is
+  // reclaimed in the same sweep. referencedBlobShas counts the update.
   it.each(["ydoc.update", "live.audit.base"])(
     "never GCs a blob referenced by %s, while collecting a sibling orphan",
     async (opKind) => {
@@ -1442,8 +1532,6 @@ describe("sync relay handler", () => {
         ).toBe(200);
       }
 
-      // Append a ydoc.update op referencing the update blob. The relay is content
-      // agnostic (dumb log), but referencedBlobShas must recognize the reference.
       const appended = await h(
         request(
           "a",
@@ -1480,7 +1568,6 @@ describe("sync relay handler", () => {
       const gc = await json(
         await h(request("a", "/sync/workspace-a/maintenance/gc", { method: "POST" })),
       );
-      // Only the orphan is reclaimed; the live ydoc update blob is a root.
       expect(gc).toEqual({ ok: true, removed: 1, removedSha256s: [orphanSha] });
       expect(
         (await h(request("a", `/sync/workspace-a/blobs/${updateSha}`, { method: "GET" }))).status,
@@ -1488,12 +1575,10 @@ describe("sync relay handler", () => {
     },
   );
 
-  // 0P sync-hardening item 4 GATE FIX (GC deletes a live blob mid-upload).
   // Blob upload is two-phase: PUT /blobs/:sha, then POST /log referencing it.
-  // A GC that ran between the two used to reclaim the blob (no log row referred
-  // to it yet), orphaning the content the pending log op depends on. The
-  // retention grace window makes a freshly-uploaded blob untouchable, so the
-  // append lands on durable content.
+  // A GC that runs between the two finds no log row referring to the blob.
+  // The retention grace window makes a freshly-uploaded blob untouchable, so
+  // the append lands on durable content.
   it("does not GC a freshly uploaded blob before its referencing log op is appended (item 4)", async () => {
     const clock = { now: 1_000_000 };
     const storage = await testStorage({ blobGraceMs: 10 * 60 * 1000 });
@@ -1502,7 +1587,6 @@ describe("sync relay handler", () => {
     const content = Buffer.from("blob-in-flight");
     const contentSha = sha256(content);
 
-    // The blob is uploaded.
     expect(
       (
         await h(
@@ -1511,8 +1595,6 @@ describe("sync relay handler", () => {
       ).status,
     ).toBe(200);
 
-    // GC runs in the gap before the log append. The blob is younger than the
-    // grace window, so it is not reclaimed.
     const gc = await json(
       await h(request("a", "/sync/workspace-a/maintenance/gc", { method: "POST" })),
     );
@@ -1521,7 +1603,6 @@ describe("sync relay handler", () => {
       (await h(request("a", `/sync/workspace-a/blobs/${contentSha}`, { method: "GET" }))).status,
     ).toBe(200);
 
-    // The referencing log op is appended against durable content.
     expect(
       (
         await h(
@@ -1544,8 +1625,6 @@ describe("sync relay handler", () => {
       ).status,
     ).toBe(200);
 
-    // Once the blob has aged past the grace window and is referenced by the log,
-    // it stays (referenced). An unreferenced aged blob is still collectible.
     clock.now += 10 * 60 * 1000 + 1;
     const gcLater = await json(
       await h(request("a", "/sync/workspace-a/maintenance/gc", { method: "POST" })),
@@ -1556,11 +1635,10 @@ describe("sync relay handler", () => {
     ).toBe(200);
   });
 
-  // 0P sync-hardening GATE FIX (durable log referencing a missing blob). The
-  // grace window keeps a fresh blob alive across the PUT->POST gap, but it does
-  // not cover an old blob that ages past the grace, nor a blob GC'd after a
-  // failed /log that a retry re-references. The append validates every
-  // referenced blob IN-TRANSACTION and rejects the whole batch (retryable
+  // The grace window keeps a fresh blob alive across the PUT->POST gap, but it
+  // does not cover an old blob that ages past the grace, nor a blob GC'd after
+  // a failed /log that a retry re-references. The append validates every
+  // referenced blob in-transaction and rejects the whole batch (retryable
   // 422 blob_missing) rather than pinning the log to content the relay lost.
   it("rejects a log append referencing a blob the relay never received, atomically", async () => {
     const storage = await testStorage();
@@ -1586,8 +1664,6 @@ describe("sync relay handler", () => {
     );
     expect(rejected.status).toBe(422);
     expect(await json(rejected)).toMatchObject({ ok: false, code: "blob_missing" });
-    // No partial append: the log stays empty, so it holds no durable reference
-    // to a blob the relay cannot serve.
     const log = await json(
       await h(request("a", "/sync/workspace-a/log?since=0", { method: "GET" })),
     );
@@ -2252,7 +2328,6 @@ describe("sync relay handler", () => {
     const postOp = () =>
       h(request("a", "/sync/workspace-a/log", jsonBody({ originId: "origin-a", ops: [op0] })));
 
-    // Uploaded, then GC'd before any log row references it.
     expect(
       (
         await h(
@@ -2266,7 +2341,6 @@ describe("sync relay handler", () => {
     );
     expect(gc).toEqual({ ok: true, removed: 1, removedSha256s: [contentSha] });
 
-    // The append that would resurrect a dangling reference is rejected.
     const rejected = await postOp();
     expect(rejected.status).toBe(422);
     expect(await json(rejected)).toMatchObject({ ok: false, code: "blob_missing" });
@@ -2274,8 +2348,6 @@ describe("sync relay handler", () => {
       (await json(await h(request("a", "/sync/workspace-a/log?since=0", { method: "GET" })))).ops,
     ).toEqual([]);
 
-    // Two-phase happy path: re-upload the blob, then the same append lands
-    // cleanly against durable content.
     expect(
       (
         await h(
@@ -2305,24 +2377,17 @@ describe("sync relay handler", () => {
     }
   });
 
-  // CodeRabbit Stability: the key envelope + its append-only history count
-  // toward the quota, so a workspace cannot bypass the cap by rotating the
-  // envelope over and over.
   it("counts key-envelope storage (including rotation history) against the quota", async () => {
     const first = keyEnvelopeJson("Zmlyc3Q=");
     const storage = await testStorage({ workspaceQuotaBytes: first.length + 10 });
     const h = handler(storage);
     await createWorkspace(h);
 
-    // The create fits under the cap.
     expect((await h(putKeys(first))).status).toBe(200);
-    // A rotation moves the prior envelope into history and adds the new one, so
-    // usage would roughly double -- over the cap, rejected as quota_exceeded.
     const second = keyEnvelopeJson("c2Vjb25k");
     const rotated = await h(putKeys(second, sha256(first)));
     expect(rotated.status).toBe(413);
     expect(await json(rotated)).toMatchObject({ ok: false, code: "quota_exceeded" });
-    // The original envelope is intact (the rejected rotation changed nothing).
     const current = await h(request("a", "/sync/workspace-a/keys", { method: "GET" }));
     expect(await current.text()).toBe(first);
   });
@@ -2693,8 +2758,6 @@ describe("sync relay epoch and stream identity enforcement", () => {
       ).status,
     ).toBe(200);
 
-    // Supersede two distinct streams under the same epoch number. The
-    // three-column PK must retain both historical coordinates.
     expect(
       (
         await h(
@@ -3032,8 +3095,6 @@ describe("sync relay epoch and stream identity enforcement", () => {
       ),
     );
     expect(malformedNewClaim.status).toBe(400);
-    // A different owner can still claim it as genuinely new, proving the 400
-    // did not leave behind a reserved workspace row.
     const properClaim = await h(
       request(
         "b",
@@ -3119,8 +3180,6 @@ describe("sync relay epoch and stream identity enforcement", () => {
     expect((await push("origin-b", [op(0, { origin: "b", n: 0 })])).status).toBe(200);
     expect((await push("origin-b", [op(1, { origin: "b", n: 1 })])).status).toBe(200);
 
-    // origin-partitioned never reaches the relay; another origin continues
-    // independently and is accepted under the same workspace identity.
     expect((await push("origin-connected", [op(0, { connected: true })])).status).toBe(200);
     const pulled = await h(
       request("a", `/sync/workspace-a/log?since=0&${identityQuery()}`, { method: "GET" }),
@@ -3203,11 +3262,10 @@ describe("sync relay epoch and stream identity enforcement", () => {
   });
 });
 
-// WS-MU-C0 — the relay verifies that a chat op's claimed author equals
-// the authenticated pusher (actor.userId) before admitting it to the log. These
-// mirror PR-18's isolation rigor: a forged author is rejected atomically and
-// leaves the log unchanged. The honest path is admitted. An unattributed local
-// message cannot enter either relay log.
+// The relay verifies that a chat op's claimed author equals the authenticated
+// pusher (actor.userId) before admitting it to the log. A forged author is
+// rejected atomically and leaves the log unchanged. The honest path is
+// admitted. An unattributed local message cannot enter either relay log.
 describe("MU-C0 verified chat authorship", () => {
   function messageOp(originSeq: number, author: string | undefined, messageId = `m-${originSeq}`) {
     return {
@@ -3511,7 +3569,6 @@ describe("MU-C0 verified chat authorship", () => {
     expect(admitted.status).toBe(200);
     expect(await logOps(h)).toHaveLength(2);
 
-    // A registered kind whose marker names anyone but the pusher.
     for (const marker of ["victim", "", 7, null]) {
       const refused = await h(
         request(
@@ -3523,8 +3580,6 @@ describe("MU-C0 verified chat authorship", () => {
       expect(refused.status).toBe(403);
       expect(await json(refused)).toMatchObject({ ok: false, code: "authorship_mismatch" });
     }
-    // An unregistered kind can't opt itself in: an authored chat kind, a
-    // structural one, a kind no policy names, and an opaque non-chat op.
     for (const unregistered of [
       messageOp(2, "a"),
       {
@@ -3579,7 +3634,6 @@ describe("MU-C0 verified chat authorship", () => {
     );
     expect(mixed.status).toBe(403);
     expect(await json(mixed)).toMatchObject({ ok: false, code: "authorship_mismatch" });
-    // Atomic: the valid op in the same batch was not admitted either.
     expect(await logOps(h)).toEqual([]);
   });
 
@@ -3587,8 +3641,6 @@ describe("MU-C0 verified chat authorship", () => {
     const storage = await testStorage();
     const h = handler(storage);
     await createWorkspace(h);
-    // A non-chat op that happens to carry an authorId belonging to someone else
-    // is not a chat op, so the authorship gate ignores it.
     const opaque = await h(
       request(
         "a",
@@ -3651,10 +3703,6 @@ describe("MU-C0 verified chat authorship", () => {
   });
 
   it("Rejects an unknown chat.* op carrying author-shaped fields (fail-closed completeness)", async () => {
-    // A future authored chat op (here a made-up chat.thread.update) that carries
-    // an author-shaped field we have not taught the policy to verify must be
-    // refused, not admitted unverified. Shipping a new authored chat op without
-    // extending CHAT_OP_POLICY fails closed.
     const storage = await testStorage();
     const h = handler(storage);
     await createWorkspace(h);

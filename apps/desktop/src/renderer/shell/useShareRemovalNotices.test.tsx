@@ -81,11 +81,9 @@ describe("useShareRemovalNotices", () => {
       seen: false,
     });
 
-    // Closing the toast keeps the row and its Undo.
     act(() => result.current.shell.hideShellError(notice!.id));
     expect(result.current.shell.shellErrors[0]).toMatchObject({ id: notice!.id, seen: true });
 
-    // The removal counts as a change to the shares, and so does its Undo.
     expect(sharesChanged).toHaveBeenCalledTimes(1);
     await act(async () => result.current.shell.runShellErrorAction(notice!.id));
     expect(bridgeMock.undoRelayShare).toHaveBeenCalledWith({
@@ -172,9 +170,6 @@ describe("useShareRemovalNotices", () => {
     expect(result.current.shell.shellErrors).toEqual([]);
   });
 
-  // A removal the relay refused: the words name what did not happen, the
-  // error's words say why, Try again runs the removal again, and Copy has
-  // the cause. A failure for another workspace is dropped like a removal.
   it("files a refused removal with Try again and the cause", () => {
     const retry = vi.fn();
     const cause = new Error(
@@ -207,9 +202,6 @@ describe("useShareRemovalNotices", () => {
     expect(result.current.shell.shellErrors).toEqual([]);
   });
 
-  // One agent's Disconnect failure is one row: a repeat replaces it, and its
-  // later success takes it back and records the agent as disconnected.
-  // Another agent's row stays.
   it("keeps one row per agent's failed Disconnect, and its success takes the row back", () => {
     const cause = new Error("busy");
     const c1 = agentDisconnectIdentity("grant-1", "c1");
@@ -238,7 +230,6 @@ describe("useShareRemovalNotices", () => {
     expect(result.current.shell.shellErrors.map((error) => error.identity)).toEqual([c1, c2]);
     const set = result.current.disconnected;
 
-    // Another workspace's success leaves this one's rows alone, though that agent is gone too.
     const other = { workspaceId: "ws-other", grantId: "grant-1", connectionId: "c1" };
     act(() => result.current.notices.agentDisconnected(other));
     expect(result.current.shell.shellErrors).toHaveLength(2);

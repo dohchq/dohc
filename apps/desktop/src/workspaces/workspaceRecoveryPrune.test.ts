@@ -30,7 +30,6 @@ afterEach(() => vi.restoreAllMocks());
 
 const workspaceAt = (rootPath: string) => ({ workspaceId: "prune", rootPath });
 
-// A workspace whose engine open prepared `.dohc/local`.
 async function opened(prefix: string) {
   const root = await createTestScratch(prefix);
   await openedLocalState(workspaceAt(root));

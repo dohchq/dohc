@@ -11,6 +11,12 @@ import {
 import { AppState, View } from "react-native";
 import { createAccount, type Account, type AccountState, type SignIn } from "../server/account";
 import { createCacheFiles } from "../server/cacheFiles";
+import { createNoticeFiles } from "../server/noticeFiles";
+import {
+  clearNoticesOnSignInChange,
+  createNoticeStore,
+  type NoticeStore,
+} from "../server/noticeStore";
 import { createOpenWorkspace, type OpenWorkspaceState } from "../server/openWorkspace";
 import { createReadCache, type WorkspaceData } from "../server/workspaceData";
 import {
@@ -28,8 +34,9 @@ interface AccountValue {
   readonly workspaces: WorkspaceList;
   /** The workspace open on the phone: the one chosen, or the first that shows. Null when none shows. */
   readonly currentWorkspaceId: string | null;
-  /** What the phone has read of the open workspace. */
   readonly data: WorkspaceData | null;
+  /** The account's Notices, whichever workspace is open. */
+  readonly notices: NoticeStore | null;
   chooseWorkspace(workspaceId: string): void;
   reloadWorkspaces(): void;
   setShowOnPhone(workspaceId: string, showOnPhone: boolean): void;
@@ -51,6 +58,10 @@ const noOpen = { subscribe: () => () => undefined, state: () => NONE };
 // started can reach the screen. Its feed runs while the app is in the foreground. The read cache keeps a copy on disk,
 // saved before the app goes to the background, so a relaunch shows what was read last. It empties, on disk too,
 // whenever the sign-in changes or ends.
+//
+// The account's Notices live in their own store, beside the list, so they outlive the open workspace
+// (src/server/noticeStore.ts). It reads while the app is in the foreground, and reads the whole list again on each
+// return, when the account's workspace list is read again too. Its files empty whenever the sign-in changes or ends.
 export function AccountProvider({ children }: { children: ReactNode }) {
   const [account] = useState(() => createAccount({ store: secureSignInStore, fetch }));
   const state = useSyncExternalStore(account.subscribe, account.state);
@@ -77,20 +88,41 @@ export function AccountProvider({ children }: { children: ReactNode }) {
     (open ?? noOpen).subscribe,
     (open ?? noOpen).state,
   );
+  const [noticeFiles] = useState(() => createNoticeFiles());
+  useEffect(() => clearNoticesOnSignInChange(account, noticeFiles), [account, noticeFiles]);
+  // As the open workspace's store: making one starts nothing, and the effect runs it.
+  const notices = useMemo(
+    () => (signIn && list ? createNoticeStore({ signIn, list, files: noticeFiles }) : null),
+    [signIn, list, noticeFiles],
+  );
   useEffect(() => {
-    if (!open) return;
+    if (!open || !list || !notices) return;
     // In the background, iOS would end a held request anyway. A launch can report "unknown" before "active".
-    if (AppState.currentState !== "background") open.resume();
+    let away = AppState.currentState === "background";
+    if (!away) {
+      open.resume();
+      notices.resume();
+    }
     const subscription = AppState.addEventListener("change", (next) => {
-      if (next !== "background") return open.resume();
+      if (next !== "background") {
+        open.resume();
+        // A return from the background reads the workspace list again, for a change made on another device.
+        if (away) list.reload();
+        away = false;
+        return notices.resume();
+      }
+      away = true;
       open.pause();
+      notices.pause();
       cache.flush();
+      void noticeFiles.flush();
     });
     return () => {
       subscription.remove();
       open.stop();
+      notices.stop();
     };
-  }, [open, cache]);
+  }, [open, list, notices, cache, noticeFiles]);
 
   const value = useMemo<AccountValue>(
     () => ({
@@ -99,11 +131,12 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       workspaces,
       currentWorkspaceId,
       data,
+      notices,
       chooseWorkspace: (workspaceId) => open?.choose(workspaceId),
       reloadWorkspaces: () => list?.reload(),
       setShowOnPhone: (workspaceId, showOnPhone) => open?.setShowOnPhone(workspaceId, showOnPhone),
     }),
-    [account, state, workspaces, currentWorkspaceId, data, list, open],
+    [account, state, workspaces, currentWorkspaceId, data, notices, list, open],
   );
   return <Context value={value}>{children}</Context>;
 }

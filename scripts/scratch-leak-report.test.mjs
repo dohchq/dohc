@@ -172,10 +172,6 @@ test("a run root without the sentinel is still reclaimed, tree and all", async (
   }
 });
 
-// One directory holding a thousand empty files is 1 entry and 0 bytes, and both
-// of the row's limits are blind to it. The row still passes — there is no
-// measured healthy descendant count to reject against — but it must not report
-// the shape it cannot see as nothing.
 test("one directory full of empty files is counted, not reported as nothing", async () => {
   const parent = await mkdtemp(join(tmpdir(), "dohc-scratch-report-test-"));
   const runRoot = join(parent, "run");
@@ -224,9 +220,6 @@ async function denyListing(directory) {
   };
 }
 
-// The reporter is the gate's last reclamation point. A measurement that throws
-// is exactly when something is wrong, and it used to take the removal with it:
-// the row failed and the whole run root stayed on disk.
 test("a child that cannot be read still fails the row and still reclaims the root", async (t) => {
   const parent = await mkdtemp(join(tmpdir(), "dohc-scratch-report-test-"));
   const runRoot = join(parent, "run");
@@ -253,8 +246,6 @@ test("a child that cannot be read still fails the row and still reclaims the roo
 
     assert.equal(report.status, "FAIL", "a child that cannot be read is a leak");
     assert.match(report.reason, /scratch measurement failed/);
-    // Both facts, never one: what could not be measured, and whether the tree
-    // is still on disk.
     assert.match(report.reason, /run root reclaimed/);
     assert.equal(
       existsSync(runRoot),
@@ -267,8 +258,6 @@ test("a child that cannot be read still fails the row and still reclaims the roo
   }
 });
 
-// #605 was 196 GB, not 191,851 directories. A row bounding only the count would
-// pass one workspace that grew without limit — the same outage, different shape.
 test("a few huge directories fail on bytes even though the count is small", async () => {
   const parent = await mkdtemp(join(tmpdir(), "dohc-scratch-report-test-"));
   const runRoot = join(parent, "run");

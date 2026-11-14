@@ -61,8 +61,6 @@ describe("ConfirmDialog intent", () => {
     expect(quiet.className).not.toContain("danger");
   });
 
-  // Focus opens on the confirm button, so a screen reader reads the title and
-  // the button. The body says what is lost, so it must be read too.
   it("is described by its body", () => {
     render(
       <ConfirmDialog
@@ -86,7 +84,6 @@ describe("ConfirmDialog intent", () => {
     ).toBeTruthy();
   });
 
-  // A list of every path, or a Copy button, is not read as the description.
   it("leaves its details out of the description", () => {
     render(
       <ConfirmDialog
@@ -262,7 +259,6 @@ describe("ConfirmDialog guards against an Enter nobody meant", () => {
     ).toBe(panel);
     await user.keyboard("{Enter}");
     expect(onConfirm).not.toHaveBeenCalled();
-    // From the panel, an arrow reaches the first or the last button.
     await user.keyboard("{ArrowRight}");
     expect(document.activeElement).toBe(screen.getByTestId("confirm-cancel"));
     panel.focus();

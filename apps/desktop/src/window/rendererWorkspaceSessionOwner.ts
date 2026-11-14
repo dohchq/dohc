@@ -145,7 +145,6 @@ export class RendererWorkspaceSessionOwner<Sender extends RendererWorkspaceSende
     return this.#statesBySender.get(sender)?.rendererDocumentId;
   }
 
-  /** How many sessions this renderer has been admitted. Read-only. */
   admittedCount(sender: Sender): number {
     return this.#statesBySender.get(sender)?.admitted ?? 0;
   }

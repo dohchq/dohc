@@ -55,8 +55,6 @@ import { escapeHighlightMarkdown } from "@dohc/ydoc-projection/markdown-extensio
 
 const blockControlsKey = new PluginKey("dohc-block-controls");
 
-// ── drag payload ──────────────────────────────────────────────────────────
-
 /** The ghost a plugin instance currently has parked on the document. One slot,
  * because it tracks a lifetime rather than a drag: every path that ends a
  * ghost's life — `dragend`, the next `dragstart`, and the plugin's destroy
@@ -153,7 +151,6 @@ function buildBlockControlDecorations(
   doc.forEach((node, pos) => {
     const ownerKey = owners.get(pos) ?? nextOwnerKey();
     const hang = gutterHang(node);
-    // A numbered list hangs as many digits as its first number has.
     const digits = hang === "number" ? String(node.attrs.start ?? 1).length : 0;
     decorations.push(
       Decoration.widget(
@@ -400,8 +397,6 @@ export function insertBlockAfter(
   view.focus();
   openSlashMenuAtPosition(selectionPos);
 }
-
-// ── block context menu ─────────────────────────────────────────────────────
 
 export type BlockMenuTurnIntoId =
   | "paragraph"

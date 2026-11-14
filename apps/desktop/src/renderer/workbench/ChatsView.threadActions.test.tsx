@@ -89,7 +89,6 @@ describe("ChatsView decisions", () => {
     expect(notices()[0]?.[2], "Try again on the reply's toast").toEqual(expect.any(Function));
     expect(screen.getByTestId("chats-message-decision-open")).toBeTruthy();
 
-    // A try that fails says so again, with Try again again.
     await act(async () => {
       notices()[0]?.[2]?.();
     });
@@ -160,7 +159,6 @@ describe("ChatsView decisions", () => {
 
     await user.click(await screen.findByTestId("chats-channel"));
     await user.click(await screen.findByTestId("chats-thread"));
-    // A poll with choices offers the choices, not a bare Answer button.
     const options = await screen.findAllByTestId("chats-message-poll-option");
     expect(options.map((node) => node.textContent)).toEqual(["Friday", "Monday"]);
     expect(screen.queryByTestId("chats-message-decision-resolve")).toBeNull();
@@ -178,7 +176,6 @@ describe("ChatsView decisions", () => {
       }),
     );
     expect(await screen.findByTestId("chats-message-decision-resolved")).toBeTruthy();
-    // The answered poll keeps its choices and marks the one taken.
     const answered = screen.getAllByTestId("chats-message-poll-option");
     expect(answered.map((node) => node.dataset.chosen)).toEqual(["false", "true"]);
     expect(answered.every((node) => (node as HTMLButtonElement).disabled)).toBe(true);
@@ -274,8 +271,6 @@ describe("ChatsView work and run links", () => {
 
     const runLine = screen.getByTestId("chats-run-line");
     expect(runLine.getAttribute("data-state")).toBe("done");
-    // The line says how the run went. Its id and command wait in Details,
-    // where an agent or a person can read and copy them.
     expect(runLine.textContent).toBe("Finished in 1m 24sDetails");
     const runChip = screen.getByRole("button", { name: "Details of run run-123456789" });
     expect(runChip).toBe(screen.getByTestId("chats-run-chip"));
@@ -320,7 +315,6 @@ describe("ChatsView dispatch state", () => {
     expect((await screen.findByTestId("chats-dispatch-status")).textContent).toBe(
       "agent working · 2 queued",
     );
-    // The post asked Nova while it worked on another run.
     expect((await screen.findByTestId("chats-waiting")).textContent).toBe(
       "Nova will reply when it's free.",
     );
@@ -334,7 +328,6 @@ describe("ChatsView dispatch state", () => {
     });
     await waitFor(() => expect(screen.queryByTestId("chats-dispatch-status")).toBeNull());
     expect(screen.queryByTestId("chats-waiting")).toBeNull();
-    // The region stays mounted with no text, ready for the next run.
     expect(screen.getByTestId("chats-dispatch-announcement")).toBe(announcement);
     expect(announcement.textContent).toBe("");
   });

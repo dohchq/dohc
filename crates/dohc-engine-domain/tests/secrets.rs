@@ -147,8 +147,6 @@ fn secret_write_and_delete_refuse_non_secret_paths() {
 
 #[test]
 fn secret_write_debug_redacts_cleartext() {
-    // The one secret-bearing input type must never spill plaintext through
-    // Debug (tracing, format!, panic messages, error context).
     let w = SecretWrite {
         workspace_id: WS.to_owned(),
         version_id: "main".to_owned(),
@@ -167,7 +165,6 @@ fn secret_write_debug_redacts_cleartext() {
         "Debug must not leak cleartext"
     );
     assert!(rendered.contains("<redacted, 16 bytes>"));
-    // Non-secret fields remain visible for diagnosability.
     assert!(rendered.contains(".env"));
 }
 
@@ -185,7 +182,6 @@ fn plaintext_never_leaks_into_engine_db_or_wal() {
     let keeper = {
         let mut store = EngineStore::open(&db, 2).unwrap();
         write(&mut store, &key, ".env", &text, "sm1", 10);
-        // Also list files + moments to exercise the metadata-only surfaces.
         let stats = list_secret_files_keyless(&store, WS, "main").unwrap();
         assert_eq!(stats.len(), 1);
         assert_eq!(stats[0].byte_length, text.len() as i64);
@@ -208,15 +204,11 @@ fn plaintext_never_leaks_into_engine_db_or_wal() {
     // ciphertext is stored as. A write site that base64-encoded the plaintext
     // on the way in would slip past the raw-marker scan alone.
     scan.assert_secret_plaintext_absent(&text);
-    // Positive control: the ciphertext the store actually holds IS in the bytes
-    // we scanned, so the absence above is a result and not an empty read.
     scan.assert_stored_ciphertext_scanned(&db);
     // ...and the WAL really survived the writer's close, so the absence above
     // covers the bytes a leak would have written there.
     scan.assert_scanned_wal();
 
-    // Sanity: the ciphertext IS present somewhere (proves we scanned real data
-    // and the secret was actually stored — just never as plaintext).
     let store = EngineStore::open(&db, 3).unwrap();
     let ct_present: i64 = store
         .read_with(|conn| conn.query_row("SELECT COUNT(*) FROM secret_files", [], |r| r.get(0)))
@@ -275,8 +267,6 @@ fn every_secret_write_seals_under_a_fresh_iv() {
         "a reused IV would also make the stored ciphertext identical"
     );
 
-    // Positive control: rows 1 and 3 really do hold the same plaintext, so the
-    // inequalities above are about the nonce and not about differing inputs.
     let plaintexts: Vec<String> = ["iv-1", "iv-3"]
         .iter()
         .map(|moment_id| {
@@ -333,7 +323,6 @@ fn crash_before_persist_rolls_back_secret_write() {
         assert!(faults.fired());
     }
 
-    // Reopen: the rolled-back write left nothing — no tip, no moment, no job.
     let store = EngineStore::open(&db, 3).unwrap();
     assert_eq!(store.table_row_count("secret_files").unwrap(), 0);
     assert_eq!(store.table_row_count("secret_moments").unwrap(), 0);
@@ -369,7 +358,6 @@ fn crash_after_commit_is_durable() {
         assert!(faults.fired());
     }
 
-    // Reopen: the committed state is durably present, and materialize works.
     let mut store = EngineStore::open(&db, 3).unwrap();
     assert_eq!(store.table_row_count("secret_files").unwrap(), 1);
     assert_eq!(store.pending_materialization_count().unwrap(), 1);
@@ -403,7 +391,6 @@ fn ciphertext_spliced_from_another_secret_path_fails_closed() {
         write(&mut store, &key, "prod.env", prod_env, "sm-prod-env", 11);
     }
 
-    // Splice `.env`'s whole sealed record onto the `prod.env` row.
     {
         let conn = rusqlite::Connection::open(&db).unwrap();
         let spliced = conn
@@ -433,8 +420,6 @@ fn ciphertext_spliced_from_another_secret_path_fails_closed() {
 
     let mut store = EngineStore::open(&db, 3).unwrap();
     let secrets = SecretFileStore::new(&mut store, &key);
-    // Positive control: the SOURCE row still opens, so the failure below is the
-    // path binding and not a database we broke on the way in.
     assert_eq!(
         secrets
             .materialize_secret_file(WS, "main", ".env")
@@ -452,7 +437,6 @@ fn ciphertext_spliced_from_another_secret_path_fails_closed() {
         "decrypt-failed",
         "ciphertext sealed for .env must not open under prod.env"
     );
-    // The in-band reader authenticates too, over the same spliced row.
     let inband_err = secrets
         .materialize_secret_file_inband(WS, "main", "prod.env", 1024)
         .unwrap_err();
@@ -486,7 +470,6 @@ fn ts_written_ciphertext_decrypts_in_the_rust_store() {
     let db = engine_db_path(&scratch).unwrap();
     seed_version(&db, ts_ws);
 
-    // Insert the TS-produced sealed row directly (bypassing Rust encryption).
     {
         let conn = rusqlite::Connection::open(&db).unwrap();
         conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
@@ -584,9 +567,6 @@ fn secret_apply_propagates_source_delete() {
     assert_eq!(operation, "delete");
 }
 
-/// Set up a divergent three-way secret merge: `main` holds `base`, `feat` forks
-/// from it and moves to `source`, then `main` moves to `target`. Returns the
-/// apply that carries `feat`'s tip into `main`.
 fn diverge_for_merge(
     store: &mut EngineStore,
     key: &SecretDataKey,
@@ -654,7 +634,6 @@ fn a_divergent_secret_merge_records_no_conflict() {
         0,
         "no conflict record of any status may exist for a secret merge"
     );
-    // No conflict row means no conflict side blob, so `blobs` holds nothing.
     assert_eq!(store.table_row_count("blobs").unwrap(), 0);
 
     // Snapshotted before the close so the WAL survives for the scan (see
@@ -757,8 +736,6 @@ fn secret_restore_to_absent_enqueues_a_pending_delete() {
     assert_eq!(marker.4, restored_order);
 }
 
-// --- helpers ----------------------------------------------------------------
-
 #[test]
 fn capture_secret_ownership_is_enforced_in_both_directions() {
     use dohc_engine_domain::{CaptureSecret, CaptureSecretRetire, capture_secret_retire_with};
@@ -769,7 +746,6 @@ fn capture_secret_ownership_is_enforced_in_both_directions() {
     let mut store = EngineStore::open(&db, 1).expect("open");
     let key = key();
 
-    // A foreign writer (api) establishes the tip.
     write(&mut store, &key, ".env", "TOKEN=from-api", "sm-api", 10);
     store
         .write_with(&NO_FAULTS, |tx| {
@@ -782,7 +758,6 @@ fn capture_secret_ownership_is_enforced_in_both_directions() {
         })
         .expect("mark the tip foreign");
 
-    // First sight (claim_foreign_head = false): capture must refuse.
     let refused = SecretFileStore::new(&mut store, &key).capture_secret(
         &CaptureSecret {
             workspace_id: WS.to_owned(),
@@ -826,14 +801,12 @@ fn capture_secret_ownership_is_enforced_in_both_directions() {
         "a foreign secret tip must never be retired by a disk-driven pass"
     );
 
-    // The foreign plaintext survives both.
     let plaintext = SecretFileStore::new(&mut store, &key)
         .materialize_secret_file(WS, "main", ".env")
         .expect("materialize")
         .expect("tip present");
     assert_eq!(plaintext.into_utf8().expect("utf8"), "TOKEN=from-api");
 
-    // An observed transition (claim_foreign_head = true) may claim it.
     let claimed = SecretFileStore::new(&mut store, &key)
         .capture_secret(
             &CaptureSecret {
@@ -857,7 +830,6 @@ fn capture_secret_ownership_is_enforced_in_both_directions() {
         .expect("tip present");
     assert_eq!(plaintext.into_utf8().expect("utf8"), "TOKEN=user-edited");
 
-    // Now capture-owned: the disk-driven retire works.
     let retired = capture_secret_retire_with(
         &mut store,
         &CaptureSecretRetire {
@@ -876,12 +848,11 @@ fn capture_secret_ownership_is_enforced_in_both_directions() {
     assert!(retired.is_some(), "capture retires the tip it owns");
 }
 
-/// The three capture-ownership decisions used to key on
-/// `metadata_origin == "local-file"`, which is a member of the closed origin
-/// set an RPC caller or a replication peer may supply — so a remote writer
-/// could claim disk ownership it never had. Ownership now rides the
-/// engine-stamped `capture_owned` column, and the `write()` helper here writes
-/// exactly the spoof shape: origin `local-file` with
+/// `metadata_origin == "local-file"` is a member of the closed origin set an
+/// RPC caller or a replication peer may supply, so capture ownership must not
+/// key on it: a remote writer could claim disk ownership it never had.
+/// Ownership rides the engine-stamped `capture_owned` column. The `write()`
+/// helper here writes exactly the spoof shape: origin `local-file` with
 /// `SecretDiskIntent::Materialize` (plaintext not observed on disk).
 #[test]
 fn capture_ownership_does_not_follow_from_the_caller_supplied_origin() {
@@ -944,7 +915,6 @@ fn capture_ownership_does_not_follow_from_the_caller_supplied_origin() {
         .expect("tip present");
     assert_eq!(plaintext.into_utf8().expect("utf8"), "TOKEN=from-api");
 
-    // Positive control: a tip capture actually put on disk stays claimable.
     SecretFileStore::new(&mut store, &key)
         .capture_secret(
             &CaptureSecret {
@@ -1085,7 +1055,6 @@ fn capture_ownership_never_crosses_a_workspace_boundary() {
     let mut store = EngineStore::open(&db, 1).expect("open");
     let key = key();
 
-    // This workspace's tip, written over RPC and materialized by the engine.
     SecretFileStore::new(&mut store, &key)
         .write_secret_file(
             &SecretWrite {
@@ -1129,7 +1098,6 @@ fn capture_ownership_never_crosses_a_workspace_boundary() {
         })
         .expect("seed the replicated tip");
 
-    // A capture dedupe here stamps ownership — on this workspace's tip only.
     SecretFileStore::new(&mut store, &key)
         .capture_secret(
             &CaptureSecret {
@@ -1171,8 +1139,6 @@ fn capture_ownership_never_crosses_a_workspace_boundary() {
     );
 }
 
-/// Seal `text` and append it as a synced change, as `secret_apply` does. When
-/// `wins`, it also becomes the tip.
 fn insert_synced_change(
     store: &mut EngineStore,
     key: &SecretDataKey,
@@ -1254,10 +1220,7 @@ fn secret_text_held_matches_only_text_history_holds_for_that_path() {
     );
     insert_synced_change(&mut store, &key, "rec-lost", "TOKEN=lost", 5, false);
     insert_synced_change(&mut store, &key, "rec-won", "TOKEN=won", 20, true);
-    // Arrives after the change at 20 but was made earlier, so it loses.
     insert_synced_change(&mut store, &key, "rec-late", "TOKEN=late", 15, false);
-    // A row that does not open (sealed for another path) or does not decode
-    // counts as a different text, not a failure.
     let foreign = aead::seal(&key, WS, "other.env", b"TOKEN=moved").expect("seal");
     store
         .write_with(&NO_FAULTS, |tx| {

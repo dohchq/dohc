@@ -3,6 +3,8 @@ import { normalizeShareLabel } from "@dohc/security-contract/share-labels";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 import {
   LiveAuthorityUnavailableError,
+  LiveHostUnavailableError,
+  LiveLinkFullError,
   parseNamedLiveBrowserLimits,
   type NamedLiveBrowserLimits,
 } from "@dohc/ydoc-projection/named-live-browser-transport";
@@ -105,7 +107,8 @@ export async function namedRequest(
       if (linkRefused) {
         const code = parseLinkRefusal(value, response.status);
         const message = code ? LINK_REFUSALS[code].error : "Unavailable";
-        if (response.status === 503) throw Error(message);
+        if (response.status === 503) throw new LiveHostUnavailableError(message);
+        if (code === "link_full") throw new LiveLinkFullError(message);
         throw new LiveAuthorityUnavailableError(message);
       }
       return value;

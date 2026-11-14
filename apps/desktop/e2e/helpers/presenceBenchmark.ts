@@ -37,8 +37,8 @@ import { PresenceHub } from "../../../../services/sync-relay/src/presence.ts";
 import { createDeviceHostCredential } from "../../../../services/sync-relay/src/deviceHostCredential.ts";
 import { parseHostEpoch } from "../../../../packages/live-session-contract/src/hostControl.ts";
 import { OwnerKnownRefusals } from "../../../../packages/workspace-engine-client/src/ydoc/ownerYDocOutboxDrainer.ts";
-// No product object-topic builder exists yet. PR 5 must move and import this
-// definition for its Markdown caret binding; do not introduce a second format.
+// No product object-topic builder exists yet. The Markdown caret binding must
+// move and import this definition; do not introduce a second format.
 export const makePresenceObjectTopic = (value: {
   workspaceId: string;
   versionId: string;

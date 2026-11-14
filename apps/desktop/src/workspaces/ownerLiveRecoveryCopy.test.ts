@@ -330,7 +330,6 @@ it("keeps who wrote each edit: a declaration, a person, and the author a native 
       chainDepth: 1,
     },
     null,
-    // An agent's edit made in a run keeps the run, native or declared.
     {
       kind: "agent",
       actorOriginId: "trip-agent",
@@ -344,7 +343,6 @@ it("keeps who wrote each edit: a declaration, a person, and the author a native 
       agentRunId: "run-2",
     },
   ]);
-  // The recorded source itself travels with each native edit, unchanged.
   expect(written.updates.map((update) => update.nativeSource?.origin)).toEqual([
     undefined,
     undefined,

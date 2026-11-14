@@ -8,7 +8,6 @@ import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { documentChange } from "./pmHelpers";
 
 export type OutlineHeading = {
-  /** Heading level, 1-6. */
   level: number;
   /** Trimmed heading text — what the rail/panel display and search for. */
   text: string;

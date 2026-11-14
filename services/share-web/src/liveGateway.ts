@@ -9,6 +9,10 @@ import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import { isDeepStrictEqual } from "node:util";
 import { WebSocket, WebSocketServer } from "ws";
+import {
+  NAMED_SESSION_CHECK_MAX_INTERVAL_MS,
+  NAMED_SESSION_CHECK_MIN_INTERVAL_MS,
+} from "@dohc/live-session-contract/named-session-check";
 import { createLiveGatewayRequestParser } from "./liveGatewayRequest.js";
 
 interface LiveGatewayScope {
@@ -181,6 +185,17 @@ function untilCancelled<T>(
 // pings, about every 5 minutes at a 60 s idle timeout, so a sign-out closes an
 // editor that stays open.
 const SESSION_CHECK_PINGS = 10;
+
+/** How often the gateway checks an open named editor's session. */
+export function namedSessionCheckIntervalMs(limits: Pick<LiveGatewayLimits, "idleTimeoutMs">) {
+  return (SESSION_CHECK_PINGS * limits.idleTimeoutMs) / 2;
+}
+
+/** The named gateway idle timeouts whose check interval the relay accepts. */
+export const NAMED_GATEWAY_IDLE_TIMEOUT_RANGE_MS = {
+  min: (2 * NAMED_SESSION_CHECK_MIN_INTERVAL_MS) / SESSION_CHECK_PINGS,
+  max: (2 * NAMED_SESSION_CHECK_MAX_INTERVAL_MS) / SESSION_CHECK_PINGS,
+} as const;
 
 /** Private transport: no production listener or admission defaults. */
 export function createLiveGateway(options: LiveGatewayOptions) {

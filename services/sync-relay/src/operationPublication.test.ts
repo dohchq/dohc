@@ -123,14 +123,12 @@ async function relay() {
     streamIdentity: "stream",
   });
   const raw = inspectDatabase(storagePath(storage));
-  // The row the relay accepted at the copy's coordinate.
   const accepted = (originSeq: number, opKind: string, payload: JsonValue) =>
     raw
       .prepare(
         "INSERT INTO sync_relay_log (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms) VALUES (?, ?, ?, ?, ?, 1)",
       )
       .run(WORKSPACE, ORIGIN, originSeq, opKind, JSON.stringify(payload));
-  // The refusal the relay wrote at the coordinate instead.
   const refused = (originSeq: number) =>
     raw
       .prepare(
@@ -147,7 +145,6 @@ async function relay() {
           reason: "too large",
         }),
       );
-  // The workspace's identity moves on, as after a restore.
   const rotate = () =>
     storage.rotateWorkspaceIdentity({
       workspaceId: WORKSPACE,
@@ -278,7 +275,6 @@ const reader =
       stageKeys,
     );
 
-// Starts a write's publication on fake timers, and tells whether it has answered yet.
 function answering(start: () => Promise<PublicationAnswer>) {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   let answered = false;
@@ -338,7 +334,6 @@ describe("a phone write's publication", () => {
       authorize,
       "the caller is checked again after the step and before the answer",
     ).toHaveBeenCalledTimes(2);
-    // A retry answers from the record, without another sync or read.
     const again = await publishOperation({
       storage,
       copy: engine.replica,
@@ -372,7 +367,6 @@ describe("a phone write's publication", () => {
     });
     expect(engine.steps()).toBeGreaterThan(1);
 
-    // The relay accepts the reply: its message is published on its own, and the write still waits for the decision.
     accepted(1, "chat.message.append", messagePayload());
     const later = await publishOperation({
       storage,
@@ -500,7 +494,6 @@ describe("a phone write's publication", () => {
     ]);
     expect(logged).toHaveBeenCalledOnce();
     expect(String(logged.mock.calls[0]![0])).toContain("AUTHORSHIP_MISMATCH");
-    // Any other sync failure stalls nothing.
     const other = record(storage, { stages: [replyStage("reply-2")] }, "operation-2");
     engine.failStep(new Error("the relay is unreachable"));
     expect(await publishOnce(storage, engine.replica, [other], () => 1)).toMatchObject([
@@ -640,7 +633,6 @@ describe("a phone write's publication", () => {
 
   it("counts only a row inside the log rows the write's own epoch and stream could make", async () => {
     const { storage, accepted, rotate } = await relay();
-    // A matching row from before the write was recorded is not its own.
     accepted(1, "chat.message.append", messagePayload());
     const early = record(storage, { stages: [replyStage()] });
     const receipts = new Map<string, unknown>([
@@ -650,7 +642,6 @@ describe("a phone write's publication", () => {
       { stage: "recorded", messageState: "pending" },
     ]);
 
-    // Nor is one the relay logged after the workspace's identity moved on.
     const late = record(storage, { stages: [replyStage("reply-2")] }, "operation-2");
     rotate();
     accepted(2, "chat.message.append", messagePayload("reply-2"));
@@ -700,7 +691,6 @@ describe("a phone write's publication", () => {
         .state,
     ).toBe("saved");
     expect([engine.steps(), engine.sent.length]).toEqual([steps, reads]);
-    // Nothing but receipts was ever asked of the engine.
     expect(new Set(engine.sent)).toEqual(new Set(["sync.ordinary.publicationState"]));
   });
 
@@ -832,7 +822,6 @@ describe("a published message's wakes", () => {
       { installId: "mac", agentId: "default", label: "Mac", matched: { handle: "claude" } },
     ],
   };
-  // A command with the wakes its write froze.
   const withWakes = (command: PublicationCommand, kind: "reply" | "answer", id = "reply-1") => ({
     ...command,
     write: { kind, threadId: THREAD, messageId: id, questionId: "question" },
@@ -1077,7 +1066,6 @@ describe("what a phone chat write must publish", () => {
     ).toMatchObject({ state: "saved" });
   });
 
-  // Publishes a write whose stages' receipts list the given rows, and answers its state.
   async function published(
     write: WriteCommand,
     rows: Array<[kind: string, payload: JsonValue]>,

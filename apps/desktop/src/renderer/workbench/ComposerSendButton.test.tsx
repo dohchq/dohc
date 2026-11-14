@@ -15,9 +15,6 @@ afterEach(() => {
 
 const noop = () => {};
 
-// Every chat composer sends through the shared control: the lane, DM and
-// comment composers (stream), a group's new post (post), and a file's chats
-// in About (ChatComposer).
 const composers: { name: string; render: (sending: boolean, value?: string) => ReactElement }[] = [
   {
     name: "a group, DM or comment composer",
@@ -44,7 +41,6 @@ const showsPending = () => {
   const ring = screen.queryByTestId("chats-send-pending");
   const busy = send().getAttribute("aria-busy") === "true";
   expect(busy).toBe(ring !== null);
-  // A slow send has its own look, never the ready fill.
   expect(look() === "busy").toBe(busy);
   expect(status().textContent).toBe(busy ? "Sending…" : "");
   return busy;
@@ -60,7 +56,6 @@ describe.each(composers)("the send control in $name", ({ render: composer }) => 
     expect(look()).toBe("ready");
     act(() => vi.advanceTimersByTime(1));
     expect(showsPending()).toBe(true);
-    // The control keeps its name; the ring is not a second one.
     expect(send().getAttribute("title")).toBe("Send message");
     expect(screen.getByTestId("chats-send-pending").getAttribute("aria-hidden")).toBe("true");
   });

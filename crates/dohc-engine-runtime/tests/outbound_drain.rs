@@ -258,6 +258,28 @@ fn write_path_input(
     }
 }
 
+/// Runs an actor call until the store admits it. `FileLocked` is the store
+/// reporting itself intact and the call retryable; it clears by waiting.
+async fn until_admitted<T, F, Fut>(what: &str, mut call: F) -> T
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, dohc_engine_runtime::RuntimeError>>,
+{
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        loop {
+            match call().await {
+                Ok(value) => return value,
+                Err(dohc_engine_runtime::RuntimeError::Domain(
+                    dohc_engine_domain::DomainError::Storage(StorageError::FileLocked),
+                )) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+                Err(error) => panic!("{what}: {error:?}"),
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{what}: the store stayed locked for 60 s"))
+}
+
 fn secret_key() -> SecretDataKey {
     SecretDataKey::from_bytes(&[0x11; 32]).expect("secret key")
 }
@@ -665,29 +687,15 @@ async fn secret_fork_splits_an_oversized_row_payload_into_bounded_ops() {
             now_ms: 10 + index as i64,
             disk_intent: SecretDiskIntent::AlreadyOnDisk,
         };
-        tokio::time::timeout(std::time::Duration::from_secs(60), async {
-            loop {
-                match actor
-                    .write_secret_file(
-                        input(),
-                        secret_key(),
-                        Arc::new(NoFaults),
-                        CancellationToken::new(),
-                    )
-                    .await
-                {
-                    Ok(_) => break,
-                    Err(dohc_engine_runtime::RuntimeError::Domain(
-                        dohc_engine_domain::DomainError::Storage(StorageError::FileLocked),
-                    )) => {
-                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                    }
-                    Err(error) => panic!("write source secret: {error:?}"),
-                }
-            }
+        until_admitted("write source secret", || {
+            actor.write_secret_file(
+                input(),
+                secret_key(),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
         })
-        .await
-        .expect("backfill must admit the source secret");
+        .await;
     }
     let measured_rows = local_ops(&source_db)
         .into_iter()
@@ -713,8 +721,9 @@ async fn secret_fork_splits_an_oversized_row_payload_into_bounded_ops() {
     .len();
     assert!(single_payload_size > MAX_PAYLOAD_JSON_BYTES);
 
-    actor
-        .create_named_version(
+    // The writes above fill the store's log, so the fork can be refused until it catches up.
+    until_admitted("chunked secret fork commits", || {
+        actor.create_named_version(
             CreateNamedVersion {
                 workspace_id: workspace_id.to_owned(),
                 new_version_id: "version-secret-chunked".to_owned(),
@@ -726,8 +735,8 @@ async fn secret_fork_splits_an_oversized_row_payload_into_bounded_ops() {
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
-        .await
-        .expect("chunked secret fork commits");
+    })
+    .await;
     supervisor.close(&source_db).expect("close source actor");
 
     let ops = local_ops(&source_db);

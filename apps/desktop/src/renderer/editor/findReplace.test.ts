@@ -51,8 +51,6 @@ describe("computeMatches", () => {
   });
 
   it("spans adjacent text nodes within the same textblock (**bo**ld)", () => {
-    // A bold "bo" (pos 1-3) directly followed by a plain "ld" (pos 3-5)
-    // inside one paragraph — two text nodes, positionally contiguous.
     const d = doc(paragraph(boldText("bo"), "ld"));
     expect(computeMatches(d, "old", false)).toEqual([{ from: 2, to: 5 }]);
     expect(computeMatches(d, "bold", false)).toEqual([{ from: 1, to: 5 }]);
@@ -66,8 +64,6 @@ describe("computeMatches", () => {
     expect(computeMatches(d, "end", false)).toEqual([{ from: 1, to: 4 }]);
     expect(computeMatches(d, "start", false)).toEqual([{ from: 6, to: 11 }]);
 
-    // A non-text leaf (hardBreak) between two text nodes in the same
-    // paragraph also breaks the run.
     const withBreak = doc(paragraph("end", hardBreak(), "start"));
     expect(computeMatches(withBreak, "endstart", false)).toEqual([]);
   });
@@ -196,10 +192,6 @@ describe("findReplaceReducer", () => {
     const onSecond = findReplaceReducer(opened, { type: "next" }, catDoc);
     expect(onSecond.activeIndex).toBe(1);
 
-    // The "sat" occurrence (the active match) is gone; only "cat" (before the
-    // old position) and "mat" (after it) remain. Forward progression should
-    // land on "mat" — the nearest match at/after where we were — not snap
-    // back to "cat" at the top of the doc.
     const editedDoc = doc(paragraph("the cat ran on the mat"));
     const synced = findReplaceReducer(onSecond, { type: "sync" }, editedDoc);
     expect(synced.matches).toHaveLength(2);
@@ -368,7 +360,6 @@ describe("findReplaceExtension keys", () => {
         const find = (action: FindReplaceAction) =>
           editor.view.dispatch(editor.state.tr.setMeta(findReplaceKey, action));
         const active = () => findReplaceKey.getState(editor.state)?.activeIndex;
-        // With the bar closed, the key is left to anything else that wants it.
         expect(press(next)).toBe(false);
         find({ type: "open", replace: false, query: "the" });
         expect(active()).toBe(0);
@@ -447,7 +438,6 @@ describe("Edit > Find on macOS", () => {
     const byKey = mount();
     const byMenu = mount();
     try {
-      // Find again steps through an open search.
       if (command.startsWith("find-again")) {
         for (const { find } of [byKey, byMenu])
           find({ type: "open", replace: false, query: "the" });
@@ -506,7 +496,6 @@ describe("Edit > Find on macOS", () => {
       return { actions: [...actions], sent: [...sent] };
     };
     try {
-      // With no search open, find again reaches the menu, which finds nothing.
       expect(type("find-again-next")).toEqual({ actions: [], sent: ["find-again-next"] });
       expect(type("editor-find")).toEqual({ actions: ["open"], sent: [] });
       find({ type: "setQuery", query: "the" });

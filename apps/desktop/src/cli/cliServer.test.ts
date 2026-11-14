@@ -1798,8 +1798,6 @@ describe("CLI socket server", () => {
     }
   });
 
-  // #3089: a move of a live page waits up to the guard's limit, well inside the request's deadline.
-
   it.each(["fileMove", "fileDelete"] as const)(
     "keeps host paths out of %s failures",
     async (verb) => {
@@ -4017,10 +4015,6 @@ describe("CLI socket server", () => {
     expect(applied).toBe(5);
   });
 
-  // The shared-channel pass a write triggers must cover the channel that
-  // was written, and it only can when the write names its own target. A CLI
-  // send that reports a bare workspace leaves the message to the rotation.
-
   // No renderer poll runs the sync pass behind the CLI or MCP, so a chat
   // read must await it itself. `onReadEffect` stands in for what a real pass
   // pulls from a peer — it lands in the store only if the read genuinely waits
@@ -4097,11 +4091,6 @@ describe("CLI socket server", () => {
     expect(elapsedMs).toBeLessThan(5_000);
   });
 
-  // A detached pass past the budget stays running. Without
-  // coalescing, a slow relay behind a stream of reads starts one detached
-  // pass per read — main.ts's serializer only stops them running
-  // concurrently, not from queueing up unboundedly.
-
   it("marks a person's show under the account main names, and never asks for an agent's", async () => {
     const general = await store!.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
     const { thread } = await store!.startChannelThread({
@@ -4135,9 +4124,6 @@ describe("CLI socket server", () => {
     await invoke("show", { cwd: workspaceRoot, actor: "agent", target: thread.id, peek: false });
     expect(accountReadOwner).not.toHaveBeenCalled();
   });
-
-  // Provisioning General writes outside chatWrites, so only onWrite tells
-  // the desktop to notify the renderer and queue cloud sync for it.
 
   it("persists pending provenance across shutdown without reporting it settled", async () => {
     await seedDispatchThread("thread-restart_recovery");
@@ -4412,11 +4398,8 @@ describe("CLI socket server", () => {
     expect(shown.messages[1]?.body).toBe("Reply before access changed");
   });
 
-  // The TypeScript-backend twin of this scenario was removed with the legacy
-  // sqlite fallback in queryFtsCandidates. The daemon test below asserts the
-  // same property -- that grep hydrates only the FTS candidate threads
-  // (loadedThreadIds equals the matching thread alone) -- and additionally
-  // covers the saturation fallback, so no coverage was lost.
+  // Grep hydrates only the FTS candidate threads (loadedThreadIds equals the
+  // matching thread alone), and falls back when the candidates saturate.
   it("uses daemon candidates for substring grep and falls back when they saturate", async () => {
     const matching = await post({
       actor: "human",

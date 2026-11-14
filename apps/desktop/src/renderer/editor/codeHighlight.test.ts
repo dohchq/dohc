@@ -45,8 +45,6 @@ describe("highlightSpans", () => {
   });
 });
 
-// --- pure `computeCodeHighlightRanges` over real documents (testDocs.ts) ---
-
 describe("computeCodeHighlightRanges", () => {
   it("maps highlight spans into absolute doc coordinates (content starts at pos + 1)", () => {
     // paragraph("ab") is nodeSize 4, so the code block sits at pos 4.
@@ -86,7 +84,6 @@ describe("computeCodeHighlightRanges", () => {
     expect(cachedAfterFirstRun).toBeDefined();
 
     computeCodeHighlightRanges(d, cache);
-    // Same node object -> same cached array reference, i.e. not recomputed.
     expect(cache.get(block)).toBe(cachedAfterFirstRun);
   });
 

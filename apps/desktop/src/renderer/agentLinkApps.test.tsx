@@ -96,13 +96,11 @@ it("copies the picked agent's setup, says so on its row, then closes", async () 
   );
   expect(screen.getByTestId("apps-codex").textContent).toBe("Copied");
   expect(screen.getByRole("status", { hidden: true }).textContent).toBe("Copied");
-  // The other rows keep their names while one answers.
   expect(screen.getByTestId("apps-grok-bot").textContent).toBe("Message for Grok Bot");
   act(() => {
     vi.advanceTimersByTime(COPY_FEEDBACK_MS);
   });
   expect(list()).toBeNull();
-  // Opened again, the row has its name back.
   await user.click(screen.getByRole("button", { name: "Copy setup for an agent" }));
   expect(screen.getByTestId("apps-codex").textContent).toBe("Commands for Codex");
 });
@@ -139,7 +137,6 @@ it("says a refused copy on its row and reports it without keeping a secret link 
   const failure = report.mock.calls[0]![0];
   expect(failure.message).toContain("dohc could not copy the address for an agent.");
   expect(failure.message).not.toContain(SHARE);
-  // Once the menu is gone, Try again has no address to copy: it says where to get one.
   cleanup();
   expect(writeText).toHaveBeenCalledTimes(1);
   act(() => failure.retry?.());
@@ -161,7 +158,6 @@ it("never copies a link its surface has replaced when Try again comes after a fa
   await user.click(screen.getByRole("button", { name: "Copy setup for an agent" }));
   await user.click(screen.getByTestId("apps-codex"));
   expect(report).toHaveBeenCalledTimes(1);
-  // The surface gets a new link while the same menu stays on screen.
   const replaced = SHARE.replace(/6$/u, "7");
   rerender({ link: replaced, sensitive: true, report });
   await act(async () => report.mock.calls[0]![0].retry?.());
@@ -169,7 +165,6 @@ it("never copies a link its surface has replaced when Try again comes after a fa
   expect(writeText).toHaveBeenLastCalledWith(
     `codex mcp add dohc-share --url ${replaced}\ncodex mcp login dohc-share`,
   );
-  // With no link left, Try again copies nothing.
   rerender({ link: null, sensitive: true, report });
   await act(async () => report.mock.calls[0]![0].retry?.());
   expect(writeText).toHaveBeenCalledTimes(2);

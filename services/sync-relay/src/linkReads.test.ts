@@ -960,7 +960,6 @@ describe("relay capability reads", () => {
       const { authors: _authors, ...artifact } = payload as Record<string, unknown>;
       return { ...op, payload: artifact };
     });
-    // Named sync carries reference mappings; link logs keep their file replay contract.
     const { ownOriginId, workReferences, nextReferenceAfter, referenceHasMore, ...recipientPage } =
       recipientLog;
     expect(ownOriginId).toMatch(/^relay:share-member:[a-f0-9]{64}$/);

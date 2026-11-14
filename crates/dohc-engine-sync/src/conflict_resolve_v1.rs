@@ -3714,7 +3714,6 @@ fn prepare_local_lineage_in_tx(
     }
 }
 
-/// Whether a live editor binding owns `key`'s lineage.
 fn live_document_bound(tx: &Transaction<'_>, key: &DocKey) -> Result<bool, SyncError> {
     tx.query_row(
         &format!("SELECT EXISTS(SELECT 1 FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)
@@ -6563,12 +6562,10 @@ mod tests {
         delete_doc_as(store, "moment-deleted", 25);
     }
 
-    /// The deletion above, recorded as `moment_id` at `now_ms`.
     fn delete_doc_as(store: &mut EngineStore, moment_id: &str, now_ms: i64) {
         delete_doc_in(store, "main", moment_id, now_ms);
     }
 
-    /// The deletion above, in `version`.
     fn delete_doc_in(store: &mut EngineStore, version: &str, moment_id: &str, now_ms: i64) {
         VersionedTextStore::new(store)
             .delete_text_file(
@@ -7486,7 +7483,6 @@ mod tests {
         (digest, edit)
     }
 
-    /// A host edit appending `paragraph` to `key`'s note as it stands.
     fn host_edit(store: &EngineStore, key: &DocKey, paragraph: &str) -> Vec<u8> {
         let host = dohc_engine_collab::Ydoc::wire();
         host.apply(

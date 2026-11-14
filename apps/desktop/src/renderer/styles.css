@@ -2157,18 +2157,17 @@ body {
  *
  * @tiptap/extension-collaboration-caret's default cursor render emits
  * `.collaboration-carets__caret` (a <span>) wrapping `.collaboration-carets__label`
- * (a <div>), with the peer's color set inline as `border-color` / `background-color`
- * respectively — CSS below only owns width/shape/timing, never the color (that's
- * the stable per-clientId palette in caretPresence.ts). The remote selection tint
- * uses a custom selectionRender (caretSelectionRender) that emits
- * `.collaboration-carets__selection` with only `color` set inline, so opacity stays
- * centralized here instead of being baked into a per-peer hex string.
+ * (a <div>), with the peer's color set inline as `border-color` and
+ * `background-color`. The CSS below owns width, shape, and timing, never the
+ * color, which is the stable per-clientId palette in caretPresence.ts. The remote
+ * selection tint uses caretSelectionRender, which emits
+ * `.collaboration-carets__selection` with only `color` set inline, so opacity
+ * stays here instead of in a per-peer hex string.
  *
- * Both class trees are widget/inline decorations from `@tiptap/y-tiptap`'s
- * yCursorPlugin: a fresh DOM node whenever a peer's cursor lands on a new position,
- * which is what drives the "flash on change" — the CSS below just times the fade
- * and lets the label re-appear on hover since the caret line itself stays
- * pointer-events:none (so it never blocks clicking/selecting the text under it).
+ * Both are decorations from `@tiptap/y-tiptap`'s yCursorPlugin, which makes a
+ * fresh DOM node whenever a peer's cursor lands on a new position. That restarts
+ * the label fade. The label re-appears on hover, and the caret line stays
+ * pointer-events:none so it never blocks clicking or selecting the text under it.
  */
 @keyframes dohc-caret-label-fade {
   0% {
@@ -2226,45 +2225,27 @@ body {
 }
 
 /* ---------------------------------------------------------------------
- * Document outline rail (OutlinePanel.tsx) — its footer also carries the
- * quiet word count (there is no floating word-count badge; the count lives
- * where the document's structure does).
+ * Document outline rail (OutlinePanel.tsx). Its footer also carries the
+ * word count; there is no floating word-count badge.
  *
- * The outline floats in the editor's right margin WITHOUT taking part in
- * the document's own layout, so it can never shift the prose. The trick:
- * turn a dedicated inner wrapper — .dohc-editor-surface, NOT
- * .dohc-tiptap-editor itself — into a single-cell CSS grid and stack
- * EditorContent and the outline in that one cell (grid items can overlap
- * on purpose). The outline wrapper is height: 0 so it never affects the
- * grid row's size — EditorContent (the tall one) is what actually sizes
- * it — then position: sticky pins it to the TOP of the nearest scrolling
- * ancestor (FileInspector's overflow-auto pane), so it reads as fixed
- * chrome even though the document under it keeps scrolling.
+ * The outline floats in the editor's right margin without taking part in
+ * the document's layout, so it can never shift the prose.
+ * .dohc-editor-surface is a single-cell grid that stacks EditorContent and
+ * the outline. The outline wrapper is height: 0, so EditorContent sizes
+ * the row, and position: sticky pins the outline to the top of the nearest
+ * scrolling ancestor (FileInspector's overflow-auto pane).
  *
- * The outline additionally collapses below ~900px of inline size via a
- * native CSS container query — no JS width tracking needed for that.
- * container-type establishes .dohc-editor-surface as a query container,
- * which requires it to also become the CONTAINING BLOCK for every
- * position: fixed (and absolute) descendant — that's CSS containment, not
- * optional. .dohc-tiptap-editor is NOT a safe place for that: every
- * editing popover (slash menu, @-mention/wikilink pickers, link menu,
- * block menu) is a non-portaled position: fixed child of
- * .dohc-tiptap-editor (see MarkdownEditor.tsx) computing its top/left from
- * view.coordsAtPos(...) — VIEWPORT coordinates. If .dohc-tiptap-editor
- * were the query container, those coordinates would resolve against the
- * editor pane's box instead of the viewport, displacing every popover by
- * the pane's offset from the window's top-left (sidebar width, header
- * height). Scoping container-type to .dohc-editor-surface, and rendering
- * the popovers as siblings of it (outside it) inside .dohc-tiptap-editor,
- * keeps them structurally exempt: only EditorContent + OutlinePanel are
- * its descendants (verified against the MarkdownEditor
- * JSX — the popovers all render before the .dohc-editor-surface wrapper
- * as siblings, and none of them are inside it). No layout-affecting
- * container query needs to reach a fixed-position popover, so this loses
- * nothing; a jsdom test cannot exercise CSS containment at all (it does no
- * layout), so this constraint has to be enforced by DOM-structure
- * discipline, not a test — verify manually by inspecting
- * MarkdownEditor.tsx's returned JSX before touching this again.
+ * The outline collapses below ~900px of inline size through a container
+ * query. container-type makes .dohc-editor-surface the containing block
+ * for every position: fixed and absolute descendant, so do not put it on
+ * .dohc-tiptap-editor. Every editing popover (slash menu, @-mention and
+ * wikilink pickers, link menu, block menu) is a non-portaled position:
+ * fixed child of .dohc-tiptap-editor that computes top/left from
+ * view.coordsAtPos(...), in viewport coordinates. Inside a query container
+ * those would shift by the pane's offset from the window's top-left. The
+ * popovers render as siblings of .dohc-editor-surface, outside it. jsdom
+ * does no layout, so no test enforces this. Check MarkdownEditor.tsx's
+ * returned JSX before changing it.
  * --------------------------------------------------------------------- */
 .dohc-editor-surface {
   display: grid;
@@ -2677,10 +2658,9 @@ body {
   background: transparent;
   /* Label text needs to clear 4.5:1 (WCAG AA) on the 8%-tinted callout
    * background in both themes. --dohc-callout-accent (esp. the default
-   * note/info blue) does not: ~3.4:1 light / ~3.7:1 dark. --dohc-ink does,
-   * comfortably, for every type in both themes (14.5–16:1) — see the
-   * per-type/theme contrast table in the phase-2 review notes. The accent
-   * stays on the icon, left bar, chevron, and hover fill, which are
+   * note/info blue) does not: ~3.4:1 light / ~3.7:1 dark. --dohc-ink does
+   * for every type in both themes (14.5–16:1). The accent stays on the
+   * icon, left bar, chevron, and hover fill, which are
    * decorative/graphical (3:1 threshold) or non-text. */
   color: var(--dohc-ink);
   font: inherit;
@@ -2859,8 +2839,7 @@ mark.dohc-highlight,
   border: 1px solid var(--dohc-line);
   background: var(--dohc-panel-2);
   /* subtle-on-panel-2 fails WCAG AA at this 11.5px size (light 3.46:1, dark
-   * 4.16:1). muted clears AA in both themes (light 6.37:1, dark 7.28:1) — the
-   * same fix applied to code comments in phase 1. */
+   * 4.16:1). muted clears AA in both themes (light 6.37:1, dark 7.28:1). */
   color: var(--dohc-muted);
 }
 

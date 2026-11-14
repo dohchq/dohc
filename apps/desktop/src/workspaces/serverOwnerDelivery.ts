@@ -7,11 +7,14 @@ import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
 import { ownerDeliveryWait } from "./ownerDeliveryWait";
 
+/** `head`: the server's last accepted journal position for the note, when the server sends one. */
+export type ListedOwnerDeliveryDocument = DesktopOwnerDeliveryDocument & { head?: number };
+
 /** Only authenticated, ready server targets may enter native owner enrollment. */
 export function readyOwnerDeliveryDocuments(
   value: unknown,
   workspaceId: string,
-): DesktopOwnerDeliveryDocument[] {
+): ListedOwnerDeliveryDocument[] {
   if (
     !value ||
     typeof value !== "object" ||
@@ -23,7 +26,7 @@ export function readyOwnerDeliveryDocuments(
   ) {
     throw new Error("Invalid owner live document response.");
   }
-  const documents: DesktopOwnerDeliveryDocument[] = [];
+  const documents: ListedOwnerDeliveryDocument[] = [];
   const objects = new Set<string>();
   for (const row of value.documents) {
     if (
@@ -45,10 +48,14 @@ export function readyOwnerDeliveryDocuments(
     ) {
       throw new Error("Owner live document binding differs from the requested workspace.");
     }
+    // A server without `head` sends none; each pass then opens the note's connection as before.
+    if ("head" in row && (!Number.isSafeInteger(row.head) || row.head < 0))
+      throw new Error("Invalid owner live document head.");
     objects.add(binding.objectId);
     documents.push({
       binding,
       relayDatabaseNamespace: parseLiveUpdateIdentifier(row.document.relayDatabaseNamespace),
+      ...("head" in row ? { head: row.head as number } : {}),
     });
   }
   return documents;

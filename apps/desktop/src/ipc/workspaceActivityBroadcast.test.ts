@@ -136,8 +136,6 @@ describe("broadcastWorkspaceActivity", () => {
       workspaceId: "ws-a",
       paths: ["notes/a.md"],
     });
-    // The pin this change exists for: workspace B's window hears nothing
-    // about workspace A, and neither does a window with no workspace open.
     expect(onB.webContents.send).not.toHaveBeenCalled();
     expect(onNone.webContents.send).not.toHaveBeenCalled();
   });

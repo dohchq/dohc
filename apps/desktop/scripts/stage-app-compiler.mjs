@@ -184,7 +184,6 @@ export async function readPinnedCompilerNode(options = {}) {
   return bytes;
 }
 
-/** Builds crates/dohc-compiler-owner for this platform's target. */
 async function buildCompilerOwner(sourceRoot, platform) {
   const ownerTarget = ownerTargets[platform];
   const repoRoot = resolve(sourceRoot, "../..");

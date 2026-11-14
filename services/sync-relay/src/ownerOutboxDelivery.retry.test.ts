@@ -373,9 +373,6 @@ it("retries the retained owner head when a named submission advances its validat
   expect(f.relay.journalRows().journal).toHaveLength(2);
 });
 
-// Proves: deleting an enrolled document's last Edit share refuses the owner
-// outbox entry an in-flight drain validated before it. The journal admits
-// nothing and the owner head stays.
 it("refuses an owner outbox entry validated before the document's last Edit share was deleted", async () => {
   const f = fixture(),
     entered = deferred(),
@@ -424,8 +421,6 @@ it("refuses an owner outbox entry validated before the document's last Edit shar
   expect(f.applyThrough).not.toHaveBeenCalled();
 });
 
-// The real validator, with a stricter budget such as a relay upgrade brings,
-// refuses history the journal already admitted. That is never the owner's fault.
 it("does not quarantine the owner's head when the real validator refuses the admitted history", async () => {
   const f = fixture(),
     peer = new Y.Doc();

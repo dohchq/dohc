@@ -1,22 +1,19 @@
 //! The workspace actor: a dedicated OS thread owning exactly one storage
 //! writer connection, driven by a **tokio** command loop.
 //!
-//! This is the Rust replacement for the TS engine's process-global write chain
-//! and `workspaceActivity` map. State ownership is unambiguous: the
-//! connection lives on the worker thread and never crosses it; callers hold
-//! clonable [`ActorHandle`]s that only send messages.
+//! State ownership is unambiguous: the connection lives on the worker thread
+//! and never crosses it; callers hold clonable [`ActorHandle`]s that only
+//! send messages.
 //!
-//! ## The blocking writer under an async loop (CAL-2)
+//! ## The blocking writer under an async loop
 //!
 //! The writer connection is synchronous, blocking rusqlite. It stays on one
-//! dedicated OS thread (`std::thread`) — **never** on the async runtime (plan
-//! §Workspace actor model: "one writable `rusqlite` connection on a dedicated
-//! thread (never blocking the async runtime)"). Commands flow over a bounded
-//! [`tokio::sync::mpsc`] channel; the worker consumes them with
-//! [`blocking_recv`](tokio::sync::mpsc::Receiver::blocking_recv), so the
+//! dedicated OS thread (`std::thread`), never on the async runtime. Commands
+//! flow over a bounded [`tokio::sync::mpsc`] channel; the worker consumes them
+//! with [`blocking_recv`](tokio::sync::mpsc::Receiver::blocking_recv), so the
 //! blocking SQLite work never occupies a runtime worker. Replies come back on
 //! [`tokio::sync::oneshot`] channels. The tokio channels are runtime-agnostic
-//! for their blocking API, so the the synchronous call sites keep working
+//! for their blocking API, so the synchronous call sites keep working
 //! outside any runtime, while the async methods drive the loop from within one.
 //!
 //! Lifecycle is explicit — `open → ready → draining → closed` — and `Drop`
@@ -106,7 +103,7 @@ use tokio::sync::mpsc::OwnedPermit;
 use tokio::sync::{mpsc, oneshot};
 
 /// Bound on the actor's command queue. Backpressure blocks the sender rather
-/// than growing an unbounded queue (`plan §Rust policy`: bounded everything).
+/// than growing an unbounded queue.
 const COMMAND_QUEUE_CAPACITY: usize = 64;
 
 /// Hears the Group automation claims a workspace's chat writes and relay
@@ -594,9 +591,8 @@ impl WorkspaceActor {
     ///
     /// The subsequent `worker.join()` **does block the calling thread** until
     /// the worker drains and exits. From an async runtime that briefly parks the
-    /// executor thread; a future `close_async` could yield instead (noted for a
-    /// later shard). A worker wedged inside a fault gate must be released by the
-    /// caller before close (same contract as the storage writer).
+    /// executor thread. A worker wedged inside a fault gate must be released by
+    /// the caller before close (same contract as the storage writer).
     ///
     /// A held proof's reader still open, or opening, past the close bound,
     /// ten seconds from when held proofs start closing, fails close with
@@ -1291,10 +1287,10 @@ fn worker_main(
     // batch per idle slot.
     let mut history = Some(dohc_engine_sync::HistoryReport::default());
 
-    // The writer thread's cache of live Y.Docs (PR1 of the doc-cache design):
-    // serves the replay-parity gate base on the LOCAL append path only. It
-    // lives and dies with this thread — exactly the single-writer scope its
-    // validity proof (`doc_cache.rs`, CACHE-VALID) assumes.
+    // The writer thread's cache of live Y.Docs serves the replay-parity gate
+    // base on the local append path only. It lives and dies with this thread,
+    // exactly the single-writer scope its validity proof (`doc_cache.rs`,
+    // CACHE-VALID) assumes.
     let mut doc_cache = WriterDocCache::with_released_tails(released_tails);
     let mut live_applications = live_application::Registry::default();
 

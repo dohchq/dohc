@@ -1,5 +1,5 @@
-//! RPC-C acceptance: daemon-owned Y.Doc sessions over the in-process
-//! transport, with real domain writes, materialization, capture, and leases.
+//! Daemon-owned Y.Doc sessions over the in-process transport, with real
+//! domain writes, materialization, capture, and leases.
 
 use crate::common;
 
@@ -1096,10 +1096,8 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
     )
     .await;
     let rich_session = rich["sessionId"].as_str().expect("rich session");
-    // Richdoc settles since the full-fidelity projection landed (R15-3): the
-    // body fragment projects to markdown, and the settle materializes the .md
-    // like plaintext does. (The C1-era refusal was a stale guard — the desktop
-    // editor could journal rich edits that never reached the file.)
+    // Richdoc settles: the body fragment projects to markdown, and the
+    // settle materializes the .md like plaintext does.
     let rich_update = {
         let doc = Ydoc::wire();
         base64::engine::general_purpose::STANDARD
@@ -1390,7 +1388,6 @@ async fn capture_must_not_retire_the_settled_head_at_the_capture_cap() {
         "capture must track the Y.Doc's head without degrading: {flushed}"
     );
 
-    // The same scan must leave the settled head owned by the Y.Doc.
     id += 1;
     let listed = call(
         &transport,
@@ -1474,7 +1471,6 @@ async fn capture_ingesting_a_new_files_empty_artifact_must_not_wedge_its_session
         "capture must leave the head absent while the session lease is live"
     );
 
-    // Step 5: the first typed edit must still reach disk.
     let typed = "The first thing typed into a brand-new document.";
     call(
         &transport,
@@ -1504,7 +1500,6 @@ async fn capture_ingesting_a_new_files_empty_artifact_must_not_wedge_its_session
         "the first typed edit into a new document must replace its empty artifact"
     );
 
-    // Step 6: and the session is not wedged — a second edit settles too.
     call(
         &transport,
         &handle,
@@ -2184,8 +2179,6 @@ async fn an_inactive_versions_delete_does_not_cancel_the_active_versions_pending
     )
     .await;
 
-    // main: settle v1, then lock and leave a pending v2 job — same shape as
-    // the sibling pin above.
     let opened = call(
         &transport,
         &handle,
@@ -2361,7 +2354,7 @@ async fn deleting_a_committed_renames_locked_destination_still_lets_its_paired_s
     assert!(scratch.path().join("old.bin").exists());
 
     // Delete the renamed destination while its write job is still pending —
-    // the cancellation this PR adds fires here.
+    // the cancellation fires here.
     call_keyed(
         &transport,
         &handle,
@@ -2451,8 +2444,8 @@ async fn wait_for_captured_head(
     panic!("capture never ingested {path} as {text:?}; last head: {head}");
 }
 
-/// #665, part B: a session that can neither settle nor prune evicts, and the
-/// reopen resurrects its edits.
+/// A session that can neither settle nor prune evicts, and the reopen
+/// resurrects its edits.
 ///
 /// The desktop reaches this on two populations `captureOnePath` never captures
 /// — a policy-excluded path, and a file between the 128 KiB capture limit and
@@ -2549,8 +2542,6 @@ async fn an_uncoverable_dirty_session_evicts_and_the_reopen_resurrects_it() {
     assert_eq!(unknown.code, ErrorCode::InvalidParams);
     assert_eq!(unknown.message, "ydoc-session-not-found");
 
-    // Nothing was written and nothing was discarded: the lineage resurrects
-    // with the user's edits, and it can now be settled.
     let reopened = call(
         &transport,
         &handle,
@@ -2767,8 +2758,6 @@ async fn record_update_refuses_a_replaced_lineage_until_resync_refreshes_the_ses
         "mismatch resync must not consume the queued foreign base"
     );
 
-    // The resync moved the session to the replacement. An edit made on the
-    // document of the claim it replaced still cannot enter it.
     let before_old_client_record = settle_fingerprint(&scratch, WORKSPACE_ID);
     let old_client = transport
         .call(

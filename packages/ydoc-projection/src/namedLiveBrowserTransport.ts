@@ -68,6 +68,19 @@ const exact = (value: unknown, keys: string): value is Record<string, unknown> =
 class Refused extends Error {}
 /** The server answered and would not authorize this document. The connection works. */
 export class LiveAuthorityUnavailableError extends Error {}
+/** The server answered that it cannot start editing now. The page tries again by itself. */
+export class LiveHostUnavailableError extends Error {}
+/** The server answered that the link can take no more people. Trying again cannot help. */
+export class LiveLinkFullError extends Error {}
+/** The server answered that the owner removed this account's access. */
+class AccessRemoved extends Error {}
+/** The page has no session and has already asked for a new one in this outage. */
+class SessionSpent extends Error {}
+// A session or ticket request answers a restarting or busy server the same way as lost access,
+// to everyone. After the file was last open, the page keeps trying through such an answer for
+// this long, unless the invitation itself says the access ended. Then it stops, so a page that
+// can never open doesn't keep asking the server.
+const PASSING_REFUSAL_MS = 5 * 60_000;
 
 export function parseNamedLiveBrowserLimits(value: unknown): NamedLiveBrowserLimits {
   if (
@@ -135,10 +148,29 @@ export function createNamedLiveBrowserTransport<
       timer?: ReturnType<typeof setTimeout>;
       removeListeners?: () => void;
       writes: Set<Promise<void>>;
+      /** Set while the attempt reads the invitation again after a refusal. */
+      refused?: boolean;
+      /** Set when the attempt uses the session an earlier attempt received. */
+      kept?: boolean;
+      /** Set while an attempt with no session left reads the invitation, so its deadline stops retries. */
+      spent?: boolean;
+      /** Set once the attempt asks for its ticket, which waits on the live host. */
+      admitting?: boolean;
     };
     let attempt: Attempt | undefined;
     let automatic = false,
-      reconnectDelayMs = 250;
+      reconnectDelayMs = 250,
+      accessStoodAt: number | undefined,
+      wasLive = false;
+    // Automatic retries keep the page's session. A refusal of it may mean the server lost it, so
+    // the page asks for a new one on its own once in an outage, and again only in an outage that
+    // began PASSING_REFUSAL_MS after that request. Each request counts when it is sent.
+    let kept: { discriminator: string; expiresAtMs: number } | undefined,
+      fresh = false,
+      replacedAt: number | undefined;
+    const mayReplace = () =>
+      replacedAt === undefined ||
+      (accessStoodAt !== undefined && accessStoodAt - replacedAt >= PASSING_REFUSAL_MS);
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
     function scheduleReconnect() {
       const value = state();
@@ -147,13 +179,15 @@ export function createNamedLiveBrowserTransport<
         closed ||
         reconnectTimer !== undefined ||
         value.status !== "disconnected" ||
-        value.reason === "authority-unavailable"
+        value.reason === "authority-unavailable" ||
+        value.reason === "access-removed" ||
+        value.reason === "link-full"
       )
         return;
       reconnectTimer = setTimeout(() => {
         reconnectTimer = undefined;
         reconnectDelayMs = Math.min(10_000, reconnectDelayMs * 2);
-        void reconnect();
+        void connect();
       }, reconnectDelayMs);
     }
     const state = (): NamedLiveBrowserState => ({ ...provider.state(), ...override });
@@ -192,6 +226,7 @@ export function createNamedLiveBrowserTransport<
     }
     function fail(held: Attempt, status: Override["status"], reason: string) {
       if (!current(held)) return;
+      if (state().status === "live") accessStoodAt = Date.now();
       override = { status, reason };
       stop();
       notify();
@@ -201,7 +236,9 @@ export function createNamedLiveBrowserTransport<
       if (value.status === "live") {
         clearTimeout(attempt?.timer);
         reconnectDelayMs = 250;
-      }
+        accessStoodAt = Date.now();
+      } else if (wasLive) accessStoodAt = Date.now();
+      wasLive = value.status === "live";
       notify();
       scheduleReconnect();
     });
@@ -223,15 +260,17 @@ export function createNamedLiveBrowserTransport<
             ...(body === undefined ? {} : { body: JSON.stringify(body) }),
           });
           signal.throwIfAborted();
-          if ([401, 403, 404].includes(response.status)) throw new LiveAuthorityUnavailableError();
+          if ([401, 403].includes(response.status)) throw new LiveAuthorityUnavailableError();
+          // Only a 404's body can say the owner removed this account's access.
+          const refused = response.status === 404;
           if (
-            response.status !== 200 ||
+            (response.status !== 200 && !refused) ||
             response.redirected ||
             !response.body ||
             response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !==
               "application/json"
           )
-            throw new Error("Invalid response.");
+            throw refused ? new LiveAuthorityUnavailableError() : new Error("Invalid response.");
           const reader = response.body.getReader(),
             decoder = new TextDecoder("utf-8", { fatal: true });
           let bytes = 0,
@@ -251,7 +290,16 @@ export function createNamedLiveBrowserTransport<
               bytes += chunk.value.length;
               text += decoder.decode(chunk.value, { stream: true });
             }
-            return JSON.parse(text + decoder.decode()) as unknown;
+            const value = JSON.parse(text + decoder.decode()) as unknown;
+            if (refused)
+              throw record(value) && value.code === "share_access_removed"
+                ? new AccessRemoved()
+                : new LiveAuthorityUnavailableError();
+            return value;
+          } catch (error) {
+            throw refused && !(error instanceof AccessRemoved)
+              ? new LiveAuthorityUnavailableError()
+              : error;
           } finally {
             signal.removeEventListener("abort", abort);
             await reader.cancel().catch(() => {});
@@ -384,7 +432,45 @@ export function createNamedLiveBrowserTransport<
         };
       });
     }
-    async function reconnect(): Promise<void> {
+    /** Reads the invitation again after a refusal that a passing server state also gives. */
+    async function recheck(held: Attempt, grantId: string): Promise<string> {
+      held.refused = true;
+      try {
+        const listing = await json(held, "/api/live/named-documents", { grantId });
+        if (
+          !record(listing) ||
+          listing.access !== "edit" ||
+          listing.grantId !== grantId ||
+          !Array.isArray(listing.files) ||
+          !listing.files.some((file) => record(file) && file.objectId === target.objectId)
+        )
+          return "authority-unavailable";
+      } catch (error) {
+        if (error instanceof AccessRemoved) return "access-removed";
+      }
+      return passingRefusal();
+    }
+    /** Whether the invitation says the owner removed this account's access. */
+    async function accessRemoved(held: Attempt, grantId: string): Promise<boolean> {
+      held.spent = true;
+      try {
+        await json(held, "/api/live/named-documents", { grantId });
+        return false;
+      } catch (error) {
+        return error instanceof AccessRemoved;
+      }
+    }
+    const passingRefusal = () =>
+      accessStoodAt !== undefined && Date.now() - accessStoodAt < PASSING_REFUSAL_MS
+        ? "host-unavailable"
+        : "authority-unavailable";
+    /** The first open and Try again start with a new session. */
+    function reconnect(): Promise<void> {
+      kept = replacedAt = undefined;
+      fresh = true;
+      return connect();
+    }
+    async function connect(): Promise<void> {
       if (closed || ["quarantined", "refused"].includes(state().status)) return;
       automatic = true;
       stop();
@@ -393,37 +479,68 @@ export function createNamedLiveBrowserTransport<
       override = { status: "authorizing", reason: null };
       notify();
       held.timer = setTimeout(
-        () => fail(held, "disconnected", "connect-timeout"),
+        // A busy live host holds the ticket and the socket's upgrade until it has woken the file, so an
+        // attempt stalled there reads as the server's, not the connection's.
+        () =>
+          fail(
+            held,
+            "disconnected",
+            held.spent
+              ? "authority-unavailable"
+              : held.refused
+                ? passingRefusal()
+                : !held.route && (held.socket || held.admitting)
+                  ? "host-unavailable"
+                  : "connect-timeout",
+          ),
         limits.connectTimeoutMs,
       );
       try {
         await retiring;
         if (!current(held)) return;
         let admitted: { discriminator: string; ticketToken: string; websocketUrl: string };
-        if (options.authorize) admitted = await options.authorize(target, held.controller.signal);
-        else {
+        if (options.authorize) {
+          held.admitting = true;
+          admitted = await options.authorize(target, held.controller.signal);
+        } else {
           if (!("accountId" in target) || !("grantId" in target))
             throw new Error("Named account selection required.");
           const account = await json(held, "/api/account/session");
+          // A retired attempt must not spend the session request of the attempt that replaced it.
+          if (!current(held)) return;
           if (!exact(account, "user")) throw new Error("Invalid account response.");
           if (account.user === null) throw new Refused();
           if (!exact(account.user, "id,name") || typeof account.user.name !== "string")
             throw new Error("Invalid account response.");
           if (account.user.id !== target.accountId) throw new Refused();
-          const bootstrap = await json(held, "/api/live/named-session", {
-            grantId: target.grantId,
-          });
-          if (
-            !exact(bootstrap, "discriminator,expiresAtMs") ||
-            typeof bootstrap.discriminator !== "string" ||
-            !/^[A-Za-z0-9_-]{12}$/.test(bootstrap.discriminator) ||
-            typeof bootstrap.expiresAtMs !== "number" ||
-            !Number.isSafeInteger(bootstrap.expiresAtMs) ||
-            bootstrap.expiresAtMs <= Date.now()
-          )
-            throw new Error("Invalid session.");
+          if (kept && kept.expiresAtMs > Date.now()) held.kept = true;
+          else {
+            kept = undefined;
+            if (!fresh) {
+              // Without a session, no retry in this outage can open the file.
+              if (!mayReplace()) throw new SessionSpent();
+              replacedAt = Date.now();
+            }
+            fresh = false;
+            const bootstrap = await json(held, "/api/live/named-session", {
+              grantId: target.grantId,
+            });
+            if (
+              !exact(bootstrap, "discriminator,expiresAtMs") ||
+              typeof bootstrap.discriminator !== "string" ||
+              !/^[A-Za-z0-9_-]{12}$/.test(bootstrap.discriminator) ||
+              typeof bootstrap.expiresAtMs !== "number" ||
+              !Number.isSafeInteger(bootstrap.expiresAtMs) ||
+              bootstrap.expiresAtMs <= Date.now()
+            )
+              throw new Error("Invalid session.");
+            if (!current(held)) return;
+            kept = { discriminator: bootstrap.discriminator, expiresAtMs: bootstrap.expiresAtMs };
+          }
+          const session = kept;
+          held.admitting = true;
           const ticket = await json(held, "/api/live/named-ticket", {
-            discriminator: bootstrap.discriminator,
+            discriminator: session.discriminator,
             objectId: target.objectId,
           });
           if (
@@ -435,9 +552,9 @@ export function createNamedLiveBrowserTransport<
             throw new Error("Invalid ticket.");
           const namedUrl = new URL("/api/live", origin);
           namedUrl.protocol = "wss:";
-          namedUrl.searchParams.set("session", bootstrap.discriminator);
+          namedUrl.searchParams.set("session", session.discriminator);
           admitted = {
-            discriminator: bootstrap.discriminator,
+            discriminator: session.discriminator,
             ticketToken: ticket.token as string,
             websocketUrl: namedUrl.href,
           };
@@ -459,6 +576,13 @@ export function createNamedLiveBrowserTransport<
           throw new Error("Invalid live route.");
         await attach(held, openSocket(url.href, ["dohc-live-v1", `dohc-live-ticket.${token}`]));
       } catch (error) {
+        if (
+          held.kept &&
+          error instanceof LiveAuthorityUnavailableError &&
+          current(held) &&
+          mayReplace()
+        )
+          kept = undefined;
         fail(
           held,
           error instanceof Refused
@@ -468,9 +592,21 @@ export function createNamedLiveBrowserTransport<
             : "disconnected",
           error instanceof Refused
             ? "account-changed"
-            : error instanceof LiveAuthorityUnavailableError
-              ? "authority-unavailable"
-              : "connection-failed",
+            : error instanceof AccessRemoved
+              ? "access-removed"
+              : error instanceof LiveLinkFullError
+                ? "link-full"
+                : error instanceof SessionSpent
+                  ? "grantId" in target && (await accessRemoved(held, String(target.grantId)))
+                    ? "access-removed"
+                    : "authority-unavailable"
+                  : error instanceof LiveAuthorityUnavailableError
+                    ? !options.authorize && "grantId" in target
+                      ? await recheck(held, String(target.grantId))
+                      : "authority-unavailable"
+                    : error instanceof LiveHostUnavailableError
+                      ? "host-unavailable"
+                      : "connection-failed",
         );
       }
     }

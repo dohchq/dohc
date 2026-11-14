@@ -1215,7 +1215,6 @@ impl FailingReaderSaves {
         }
     }
 
-    /// Starts recovery and wakes it. Each pass sends the saves it attempted.
     fn recover(
         &self,
     ) -> (
@@ -1277,7 +1276,7 @@ async fn next_pass(passes: &mut UnboundedReceiver<Vec<DocKey>>) -> Vec<DocKey> {
 }
 
 /// A reader that never starts has not seen the note, so its proof gets a
-/// timeout's six retries, spaced by recovery's backoff (#3575).
+/// timeout's six retries, spaced by recovery's backoff.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn markdown_recovery_asks_a_reader_that_cannot_start_again_until_the_resolver_gives_up() {
     let fixture = FailingReaderSaves::new("startup-crash", &["note"]).await;
@@ -1306,7 +1305,7 @@ async fn markdown_recovery_asks_a_reader_that_cannot_start_again_until_the_resol
 
 /// A note that fills the reader's heap crashes it on every request, and each
 /// crash restarts the reader for every other note. Its second crash ends the
-/// proof, where a timeout's six retries would make seven requests (#3575).
+/// proof, where a timeout's six retries would make seven requests.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn markdown_recovery_does_not_ask_a_reader_that_crashed_twice_again() {
     let fixture = FailingReaderSaves::new("request-crash", &["note"]).await;

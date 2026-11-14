@@ -218,7 +218,6 @@ fn replicated_envelope(
     }
 }
 
-/// Write a text file into the main version through the versioning domain.
 fn write_file(store: &mut EngineStore, object_id: &str, path: &str, text: &str, now: i64) {
     let mut vt = VersionedTextStore::new(store);
     vt.ensure_main_version(WS, V, now, &NO_FAULTS)
@@ -243,7 +242,6 @@ fn write_file(store: &mut EngineStore, object_id: &str, path: &str, text: &str, 
     .expect("write_text");
 }
 
-/// Create a channel + start a thread with a first message, returning the thread id.
 fn start_thread(store: &mut EngineStore, channel_id: &str, thread_id: &str, body: &str, now: i64) {
     let mut chats = LinkedChatStore::new(store);
     chats
@@ -319,7 +317,6 @@ fn send(store: &mut EngineStore, thread_id: &str, message_id: &str, body: &str, 
         .expect("send");
 }
 
-/// Build the index for the main version inside one transaction (atomic rebuild).
 fn ensure_index(store: &mut EngineStore, root: &Path, now: i64) {
     let outcome = store
         .write_with(&NO_FAULTS, |tx| {
@@ -345,7 +342,6 @@ fn run_search(
         .collect()
 }
 
-/// First keyset page of policy-filtered candidates, with the daemon's budgets.
 fn candidates(
     conn: &rusqlite::Connection,
     root: &Path,
@@ -555,8 +551,6 @@ fn lowercase_expansion_highlights_survive_file_and_chat_page_continuations() {
     }
 }
 
-// -------------------------------------------------------- 1. index+query round-trip
-
 #[test]
 fn index_and_query_round_trip_files_and_chats() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -572,7 +566,6 @@ fn index_and_query_round_trip_files_and_chats() {
         10,
     );
     start_thread(&mut store, "chan-1", "th-1", "chat needle in message", 20);
-    // A later appended message with a distinct term must also be indexed.
     send(&mut store, "th-1", "th-1-msg-1", "haystack reply", 25);
     ensure_index(&mut store, &root, 30);
 
@@ -589,7 +582,6 @@ fn index_and_query_round_trip_files_and_chats() {
             .any(|r| r.surface == SearchSurface::Chat && r.thread_id.as_deref() == Some("th-1")),
         "chat result missing: {results:?}"
     );
-    // The appended message's own term round-trips through the message index.
     let haystack = run_search(&store, &root, "haystack");
     assert!(
         haystack
@@ -599,8 +591,6 @@ fn index_and_query_round_trip_files_and_chats() {
     );
 }
 
-// ---------------------------------------------------- 2. policy-filtered visibility
-
 #[test]
 fn secret_ignored_and_hidden_paths_never_appear() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -608,7 +598,7 @@ fn secret_ignored_and_hidden_paths_never_appear() {
     let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
 
-    // R07 closes the store door before search sees a row at all: plaintext
+    // The store door closes before search sees a row at all: plaintext
     // versioning refuses a secret .env. Then seed a normally-tracked file and a
     // visibility-hidden file with the same needle; only tracked may surface.
     {
@@ -646,7 +636,6 @@ fn secret_ignored_and_hidden_paths_never_appear() {
         12,
     );
 
-    // visibility.toml hides notes/private.md even though it is otherwise tracked.
     std::fs::create_dir_all(root.join(".dohc")).expect("mkdir");
     std::fs::write(
         root.join(".dohc").join("visibility.toml"),
@@ -670,8 +659,6 @@ fn secret_ignored_and_hidden_paths_never_appear() {
         "hidden file must never appear"
     );
 
-    // The refused `.env` is never in the raw FTS table either: the defense is
-    // at the domain store door, not merely filtered at query time.
     let env_indexed: i64 = store
         .read_with(|conn| {
             conn.query_row(
@@ -684,8 +671,6 @@ fn secret_ignored_and_hidden_paths_never_appear() {
     assert_eq!(env_indexed, 0, "secret path must not be indexed at all");
 }
 
-// ------------------------------------------ 3. fail-closed FILE policy, chat survives
-
 #[test]
 fn broken_file_policy_fails_closed_but_chat_search_survives() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -696,8 +681,6 @@ fn broken_file_policy_fails_closed_but_chat_search_survives() {
     write_file(&mut store, "obj-ok", "notes/plan.md", "file needle", 10);
     start_thread(&mut store, "chan-1", "th-1", "chat needle here", 20);
 
-    // A malformed files.toml → FILE search fails closed (no file results), but
-    // chat search is independent and stays available.
     std::fs::create_dir_all(root.join(".dohc")).expect("mkdir");
     std::fs::write(
         root.join(".dohc").join("files.toml"),
@@ -716,8 +699,6 @@ fn broken_file_policy_fails_closed_but_chat_search_survives() {
         "chat search must survive a broken file policy: {results:?}"
     );
 
-    // The raw candidate query also fails the file half closed while the chat
-    // half is populated.
     let candidates = store
         .read_with(|conn| candidates(conn, &root, "needle"))
         .expect("query");
@@ -727,7 +708,6 @@ fn broken_file_policy_fails_closed_but_chat_search_survives() {
             .all(|c| matches!(c, SearchCandidate::Chat { .. }))
     );
 
-    // Chat-only granular query is entirely unaffected by the file policy.
     let chat_hits = store
         .read_with(|conn| granular(conn, "needle"))
         .expect("granular");
@@ -736,8 +716,6 @@ fn broken_file_policy_fails_closed_but_chat_search_survives() {
         "granular chat search unaffected by file policy"
     );
 
-    // Removing the broken policy (ENOENT = defaults) restores file search. The
-    // frozen index_state was invalidated, so a fresh ensure rebuilds files.
     std::fs::remove_file(root.join(".dohc").join("files.toml")).expect("rm");
     ensure_index(&mut store, &root, 40);
     let restored = run_search(&store, &root, "needle");
@@ -748,8 +726,6 @@ fn broken_file_policy_fails_closed_but_chat_search_survives() {
         "removing the broken policy (ENOENT=defaults) restores file search: {restored:?}"
     );
 }
-
-// -------------------------------------------- 5. crash at index-commit boundary repairs
 
 #[test]
 fn crash_mid_index_reopen_repairs() {
@@ -762,8 +738,6 @@ fn crash_mid_index_reopen_repairs() {
         write_file(&mut store, "obj-ok", "notes/plan.md", "needle here", 10);
         start_thread(&mut store, "chan-1", "th-1", "chat needle", 20);
 
-        // Arm a crash before the index transaction persists: the whole rebuild
-        // (FTS rows + index_state) rolls back.
         let faults = ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist);
         let outcome = store
             .write_with(faults.as_ref(), |tx| {
@@ -773,7 +747,6 @@ fn crash_mid_index_reopen_repairs() {
         assert!(matches!(outcome, TxnOutcome::Crashed { committed: false }));
         assert!(faults.fired());
 
-        // The crash left NO durable index generation and NO leaked FTS rows.
         let (state_rows, fts_rows): (i64, i64) = store
             .read_with(|conn| {
                 let s: i64 = conn.query_row(
@@ -797,15 +770,12 @@ fn crash_mid_index_reopen_repairs() {
         // simulated process death
     }
 
-    // Reopen and rebuild cleanly: the repair produces a complete index.
     let mut store = open(&db, 100);
     ensure_index(&mut store, &root, 110);
     let results = run_search(&store, &root, "needle");
     assert!(results.iter().any(|r| r.surface == SearchSurface::File));
     assert!(results.iter().any(|r| r.surface == SearchSurface::Chat));
 }
-
-// ------------------------------------------------------------------- 6. bounds
 
 #[test]
 fn bounds_query_length_and_limit() {
@@ -817,21 +787,18 @@ fn bounds_query_length_and_limit() {
     write_file(&mut store, "obj-ok", "a.md", "needle needle needle", 10);
     ensure_index(&mut store, &root, 20);
 
-    // Short queries use a bounded linear scan.
     assert!(
         run_search(&store, &root, "ne")
             .iter()
             .any(|result| result.path == "a.md")
     );
 
-    // A pathologically long query is bounded (no results, no FTS blow-up).
     let long = "n".repeat(50_000);
     assert!(run_search(&store, &root, &long).is_empty());
     let overlong = store
         .read_with(|conn| candidates(conn, &root, &long))
         .expect("q");
     assert!(overlong.is_empty(), "over-long query must fail closed");
-    // A too-short query under a healthy policy is served by the bounded linear scan.
     let short = store
         .read_with(|conn| candidates(conn, &root, "ne"))
         .expect("q");
@@ -842,7 +809,6 @@ fn bounds_query_length_and_limit() {
         "sub-trigram query is served by the linear scan"
     );
 
-    // limit <= 0 short-circuits.
     let none = store
         .read_with(|conn| {
             search_workspace_page(conn, &root, WS, V, "needle", Some(0), 30, None, None)
@@ -850,7 +816,6 @@ fn bounds_query_length_and_limit() {
         .expect("search");
     assert!(none.results.is_empty());
 
-    // A positive limit caps the result count.
     let capped = store
         .read_with(|conn| {
             search_workspace_page(conn, &root, WS, V, "needle", Some(1), 30, None, None)
@@ -858,8 +823,6 @@ fn bounds_query_length_and_limit() {
         .expect("search");
     assert_eq!(capped.results.len(), 1);
 }
-
-// ------------------------------ 13. replicated chat writes feed the real reader
 
 #[test]
 fn replicated_chat_apply_is_findable_through_the_real_search_reader() {

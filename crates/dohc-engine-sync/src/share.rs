@@ -69,9 +69,7 @@ pub enum ShareSurface {
 /// the one place the relay and the desktop both read it from — held to it
 /// vector by vector in `crates/dohc-engine-sync/tests/security_contract.rs`.
 ///
-/// PR1 carries and pins this on every `ShareGrant`; all three values grant
-/// exactly what a share grants today. PR2 opens Comment and Edit to chat,
-/// PR3 opens Edit to document writes — neither is wired here yet.
+/// Every `ShareGrant` carries and pins this.
 ///
 /// No `Default`. A level is always read from the grant the relay stated, and
 /// a default would be a level nobody granted. The compiler is what keeps one
@@ -695,7 +693,7 @@ fn usable_version_id<'a>(claimed: Option<&'a str>, op_kind: &str) -> Result<&'a 
 /// payload is constructed by the relay and carries no signature, so a relay
 /// that means to lie can restate this field as easily as any other. Pinning
 /// plus this check bounds what a diverging relay can deliver; it is not
-/// forgery resistance, and #506 records the same limit for the path dimension.
+/// forgery resistance, and the path dimension has the same limit.
 ///
 /// Fail closed on shape as well as value: a moment whose `versionId` is not
 /// one the relay could have issued is refused. It cannot be version-checked at

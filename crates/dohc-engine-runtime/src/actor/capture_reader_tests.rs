@@ -222,7 +222,6 @@ async fn outside_reader_fold_owner_and_joined_keep_tree_marks_settle_and_history
                 None,
             )
             .unwrap();
-            // The edit keeps the note's line endings and its final newline.
             let newline = if source.contains('\r') { "\r\n" } else { "\n" };
             assert_eq!(
                 std::fs::read_to_string(scratch.path().join("note.md")).unwrap(),
@@ -563,7 +562,6 @@ async fn outside_reader_fold_requires_engine_serialization_to_match_the_file() {
         let delta = fold(&store, &key, canonical).await.delta;
         let source = format!("{}{ending}", canonical.trim_end());
         std::fs::write(scratch.path().join("note.md"), &source).unwrap();
-        // A byte-bound, schema-valid child result whose native output ends unlike the file.
         let config = scripted_reader(&scratch, |script| {
             script
             .replace("r.method === 'construct'", "r.method !== 'prove'")
@@ -582,7 +580,6 @@ async fn outside_reader_fold_requires_engine_serialization_to_match_the_file() {
         let doc = store
             .read_with(|conn| dohc_engine_collab::load_doc_in(conn, &key))
             .unwrap();
-        // Strict's current paragraph builder keeps the Markdown literal on this fallback.
         assert!(
             doc.canonical_content()["body"]
                 .to_string()

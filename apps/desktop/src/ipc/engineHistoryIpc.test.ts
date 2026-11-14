@@ -126,7 +126,6 @@ describe("listEngineMomentsForIpc", () => {
     );
     expect(response.moments[0]).not.toHaveProperty("namedAuthor");
     expect(response.moments[0]).not.toHaveProperty("automationAuthor");
-    // Several authors read as each of them, in order; none stands in for the rest.
     expect(response.moments[0]?.authorLabels).toEqual([
       "Ice",
       "Agent",
@@ -167,7 +166,6 @@ describe("listEngineMomentsForIpc", () => {
         authorPresentations: undefined,
       }).success,
     ).toBe(true);
-    // The token names no author: it carries only its group, hue, and self.
     expect(
       EngineMomentRecord.parse({
         ...record,
@@ -256,7 +254,6 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
     const agentNamer = vi.fn(names.agent);
     const record = engineMomentDetailForIpc(detail, { ...names, agent: agentNamer });
     expect(record).not.toHaveProperty("agentAuthorName");
-    // Each author reads on its own; the agent does not stand in for the person.
     expect(record.authorLabels).toEqual(["You", "Another person"]);
     expect(agentNamer).toHaveBeenCalledTimes(1);
     expect(record.authors).toEqual(detail.moment.authors);
@@ -304,7 +301,6 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
       if (!("moments" in page)) throw new Error("Expected ready history");
       expect(page.moments[0]).toMatchObject(field);
     }
-    // One byte past the live bound is not an identifier the relay accepts.
     const over = `${"é".repeat(LIVE_UPDATE_IDENTIFIER_MAX_BYTES / 2)}x`;
     expect(new TextEncoder().encode(over).byteLength).toBe(LIVE_UPDATE_IDENTIFIER_MAX_BYTES + 1);
     const record = engineMomentDetailForIpc(
@@ -345,15 +341,11 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
     });
     expect(record.agentAuthorName).toBeUndefined();
     expect(EngineMomentDetailRecord.parse(record)).toEqual(record);
-    // An id outside the Collection namespace keeps the moment's origin label.
     detail.moment.authors = [
       { kind: "automation", automationId: "other:tools/stamp", onBehalfOf: "local", depth: 1 },
     ];
     expect(engineMomentDetailForIpc(detail, names)).not.toHaveProperty("automationAuthor");
   });
-  // History shows an automation's name up to this bound, and its id past it.
-  // A Collection's name has the same bound. History names both, alone or
-  // beside an agent.
   it("names an automation at its longest name and Collection, alone or with another author", async () => {
     const automation = {
       name: "n".repeat(AUTOMATION_AUTHOR_TEXT_MAX),
@@ -435,8 +427,6 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
       EngineMomentDetailRecord.parse({ ...record, linkAuthor: { ...author, userId: "ana" } }),
     ).toThrow();
   });
-  // A hosted agent's live edit settles with the account holder the relay
-  // admitted beside the agent they declared.
   it("names each author of a live author snapshot as the relay admitted them", async () => {
     const owner = { kind: "human", humanId: "owner", humanName: "Owner" } as const;
     for (const [agent, labels] of [
@@ -493,7 +483,6 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
       expect(record).not.toHaveProperty("personAuthorName");
       expect(EngineMomentDetailRecord.parse(record)).toEqual(record);
     }
-    // Snapshot fields keep the live bound and their exact shape.
     const over = `${"é".repeat(LIVE_UPDATE_IDENTIFIER_MAX_BYTES / 2)}x`;
     const record = engineMomentDetailForIpc(
       detailWith({ before: null, after: textSide("new") }),
@@ -605,14 +594,10 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
   });
 });
 
-// The bridge schema is the last gate a hydrated body passes: main runs
-// `ReadEngineMomentResult.parse` on exactly what `engineMomentDetailForIpc`
-// produced (main.ts readEngineMoment handler), so these two calls are the
-// real pairing, not a stand-in.
 describe("moment bodies the engine accepted cross the bridge", () => {
   it("carries a body larger than the old 2 MB bound", () => {
-    // One character past the retired 2,000,000 bound, and well inside the
-    // engine's 10 MiB text contract: this body is ordinary stored content.
+    // One character past 2,000,000, and well inside the engine's 10 MiB text
+    // contract: this body is ordinary stored content.
     const body = "x".repeat(2_000_001);
     const record = engineMomentDetailForIpc(
       detailWith({ before: textSide("v1\n"), after: textSide(body) }),
@@ -729,7 +714,6 @@ describe("versionConflictForIpc waiting version", () => {
     const waiting = versionConflictForIpc({ ...sides, waitingVersion });
     expect(waiting.waitingVersion).toEqual(waitingVersion);
     expect(WorkspaceVersionConflict.parse(waiting)).toEqual(waiting);
-    // Never undefined: a missing field reads as none.
     expect(versionConflictForIpc(sides).waitingVersion).toBeNull();
     expect(versionConflictForIpc({ ...sides, waitingVersion: null }).waitingVersion).toBeNull();
     const { waitingVersion: _omitted, ...older } = versionConflictForIpc(sides);
@@ -751,10 +735,6 @@ describe("versionConflictForIpc waiting version", () => {
   });
 });
 
-// Same LAST-gate pairing as the moment bodies above: main runs
-// `ListWorkspaceVersionConflictsResult.parse` on exactly what
-// `versionConflictForIpc` produced (main.ts listWorkspaceVersionConflicts
-// handler), and conflict sides are the engine's stored bodies passed verbatim.
 describe("version texts the engine accepted cross the bridge", () => {
   // compareVersionFilesPage reads the differing-path listing and then the
   // sides of each listed path, so one modified path is the whole input the
@@ -789,14 +769,14 @@ describe("version texts the engine accepted cross the bridge", () => {
   };
 
   it("lists a conflict whose side is larger than the old 2 MB bound", () => {
-    // The unrecoverable case from the issue: resolving needs a conflictId that
-    // only this listing supplies, so a rejected listing left the user stuck.
+    // Resolving needs a conflictId that only this listing supplies, so a
+    // rejected listing leaves the user stuck.
     //
     // 3 MiB on purpose. The daemon serializes all three sides in band and
     // refuses the page above 8 MiB minus envelope headroom
     // (`lib.rs:244-248,7482-7491`), so a row this size does reach main, and
-    // this schema was the only gate rejecting it. #537 covers the band above
-    // that cap, where the daemon still refuses and no hydration path exists.
+    // this schema must accept it. Above that cap the daemon still refuses and
+    // no hydration path exists.
     const side = "x".repeat(3 * 1024 * 1024);
     const conflict = versionConflictForIpc({
       ...base,

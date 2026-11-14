@@ -606,7 +606,6 @@ export function createGraphRenderer(
       ctx.fill();
     }
 
-    // Nodes: batched by color, rings stroked over their paper fill.
     const visibleNode = (i: number) => {
       const r = screenR(i) * 1.3 + 2;
       const x = sx(i),
@@ -634,7 +633,6 @@ export function createGraphRenderer(
     palette.groups.forEach((color, hue) => {
       fillPass(color, rest, (i) => i !== active && group(i) === hue && !isLit(i) && !ring(i));
     });
-    // Files that are not pages: a ring on the paper, in its group's colour when it has one.
     fillPass(palette.bg, 1, (i) => ring(i) && i !== active && !isLit(i));
     ctx.globalAlpha = rest;
     ctx.lineWidth = Math.max(1, Math.min(2, 1.2 * Math.sqrt(k)));

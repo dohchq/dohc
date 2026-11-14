@@ -89,7 +89,6 @@ const V3_SQL = `CREATE TABLE ${SERVICE_HOST_ENROLLMENTS} (
   FOREIGN KEY (workspace_id) REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
   FOREIGN KEY (share_id) REFERENCES sync_relay_shares(share_id)
 ) STRICT`;
-// The v2 layout before host drain tracking.
 const V2_SQL = `CREATE TABLE ${SERVICE_HOST_ENROLLMENTS} (
   workspace_id TEXT NOT NULL,
   object_id TEXT NOT NULL,
@@ -1129,9 +1128,14 @@ export function listRetiredServiceHostEnrollments(
   const workspace = parseWorkspaceId(workspaceId),
     cursor = after === undefined ? "" : canonicalPath(after);
   storage.captureStanding();
+  // A document whose latest moment on main deleted it has nothing to resume. A move or a
+  // restore records a later moment with a path, so its row stays or comes back.
   const values = storage.db
-    .prepare(`SELECT * FROM ${SERVICE_HOST_ENROLLMENTS} INDEXED BY ${RETIRED_INDEX}
-    WHERE workspace_id=? AND retired=1 AND path>? ORDER BY path LIMIT ?`)
+    .prepare(`SELECT e.* FROM ${SERVICE_HOST_ENROLLMENTS} e INDEXED BY ${RETIRED_INDEX}
+    WHERE e.workspace_id=? AND e.retired=1 AND e.path>? AND NOT COALESCE((SELECT m.path IS NULL
+      FROM sync_relay_object_moments m WHERE m.workspace_id=e.workspace_id AND m.version_id='main'
+        AND m.object_id=e.object_id ORDER BY m.relay_seq DESC LIMIT 1),0)
+    ORDER BY e.path LIMIT ?`)
     .all(workspace, cursor, SERVICE_HOST_MAX_DOCUMENTS + 1);
   const documents = values.slice(0, SERVICE_HOST_MAX_DOCUMENTS).map(row);
   return {

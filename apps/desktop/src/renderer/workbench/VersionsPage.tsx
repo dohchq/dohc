@@ -31,9 +31,7 @@ interface ConflictCount {
 // the row, it stays gone until a read fails again, which files a new row and
 // toast.
 function useReadsNotice(notices: NoticeOwner, retry: (reads: readonly VersionsRead[]) => void) {
-  // Each failed read and its error, in the order they failed.
   const [failures, setFailures] = useState<ReadonlyMap<VersionsRead, unknown>>(new Map());
-  // The reads that start together and have not settled.
   const [reading, setReading] = useState<ReadonlySet<VersionsRead>>(new Set());
   const current = useRef(failures);
   current.current = failures;
@@ -107,7 +105,6 @@ function useReadsNotice(notices: NoticeOwner, retry: (reads: readonly VersionsRe
 export function VersionsPage(props: {
   workspaceId: string;
   versions: WorkspaceVersions;
-  // The workspace is not ready for a version change.
   disabled?: boolean;
   // Changes when history grows, so the last changes and the counts re-read.
   historyKey: string;
@@ -115,7 +112,6 @@ export function VersionsPage(props: {
   versionKey: number;
   onOpenCompare: (versionId: string) => void;
   onReviewConflicts: () => void;
-  // Where the page's failed reads go.
   notices: NoticeOwner;
 }) {
   const { workspaceId, versions } = props;
@@ -166,7 +162,6 @@ export function VersionsPage(props: {
       },
       (error: unknown) => {
         if (!lastChangeReads.isCurrent(token)) return;
-        // The rows still show, sorted by when each version was made.
         setLastChanges((current) => current ?? new Map());
         setLastChangesFailed(true);
         notice.failed("last-changes", error);

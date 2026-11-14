@@ -7,7 +7,7 @@ import {
 import { EngineRequestError, type EngineClient } from "@dohc/workspace-engine-client/daemon";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 import type { SharingDeclined } from "@dohc/workspace-contracts/relay";
-import { engineRefusalWords } from "./activationFailureLine";
+import { engineRefusalWords, ServerLogError } from "./serverLogWords";
 import { configRecord } from "./deviceLiveHostConfig";
 import {
   parseServiceRelayAttachment,
@@ -324,7 +324,7 @@ export class ServiceHostedReplication {
           departed.listed.length === 0;
         // Only its code word: the rest of the engine's message can name a file, and the log prints this message whole.
         if (retirement)
-          throw new Error(
+          throw new ServerLogError(
             `Hosted retirement failed: ${engineRefusalWords(retirement.message, retirement.code, "sync.commitCursor")}`,
           );
         if (!hasMore) return { hasMore: false, pages };
@@ -350,7 +350,8 @@ export class ServiceHostedReplication {
   async push(callerSignal?: AbortSignal) {
     return this.#run(callerSignal, async (signal) => {
       const { admissionPending, ...page } = await this.#push(signal);
-      if (admissionPending) throw new Error("Hosted publication is waiting for owner admission.");
+      if (admissionPending)
+        throw new ServerLogError("Hosted publication is waiting for owner admission.");
       return page;
     });
   }

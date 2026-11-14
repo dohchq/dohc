@@ -201,7 +201,6 @@ impl Halt {
         }
     }
 
-    /// Whether the proof's reader closed.
     fn read(&self) -> bool {
         self.read.load(Ordering::Acquire)
     }
@@ -212,7 +211,6 @@ impl Halt {
             .compare_exchange(0, reason as u8, Ordering::AcqRel, Ordering::Acquire);
     }
 
-    /// Why the proof stopped, as recorded.
     fn reason(&self) -> Option<ProofStop> {
         ProofStop::of(self.reason.load(Ordering::Acquire))
     }
@@ -900,7 +898,6 @@ pub struct HeldProofJob {
     /// What it holds of its daemon's proof memory; none for a proof nothing
     /// limits.
     memory: Option<Arc<ProofMemory>>,
-    /// The largest contribution artifact it encodes.
     artifact_cap: usize,
     /// The readers its store's proofs hold open, its own among them.
     readers: Arc<OpenReaders>,
@@ -1305,7 +1302,6 @@ struct GateState {
     pause: Option<ProofStage>,
     /// Checks there to pass before the pause holds.
     skip: u64,
-    /// Proofs holding there.
     waiting: usize,
     /// Whether proofs hold just before their reader opens, as a thread
     /// descheduled there would, until resumed.
@@ -1895,7 +1891,7 @@ mod tests {
         ));
     }
 
-    /// r2c-3c-1's open item: close stops every proof, answers its callers as
+    /// Close stops every proof, answers its callers as
     /// closed and returns once their readers closed; past its bound it says
     /// they have not.
     #[test]
@@ -1941,7 +1937,7 @@ mod tests {
         assert!(lingering.drained(), "drained once the reader closed");
     }
 
-    /// Sol's r2c-3c-2 finding 1: a proof's thread paused just before its
+    /// A proof's thread paused just before its
     /// reader opens, past every earlier check, as a descheduled thread would
     /// be, never opens one once close began: close has nothing to wait for,
     /// and the proof finds itself stopped.
@@ -1966,7 +1962,7 @@ mod tests {
         );
     }
 
-    /// Sol's and Opus's "old finding 2": a proof past its deadline, which
+    /// A proof past its deadline, which
     /// joining callers cannot extend, answers busy, not closed or corrupt.
     #[test]
     fn a_proof_past_its_deadline_answers_busy() {
@@ -2029,7 +2025,7 @@ mod tests {
         assert_eq!(limit.reserved_bytes(), 0);
     }
 
-    /// Sol's r2c-3c-2 finding 6: a reader that cannot open answers a locked
+    /// A reader that cannot open answers a locked
     /// store, which its caller retries, never corrupt state.
     #[test]
     fn a_reader_that_cannot_open_is_locked_not_corrupt() {
@@ -2048,7 +2044,7 @@ mod tests {
         );
     }
 
-    /// Sol's r2c-3c-4 finding 2 and Opus's finding 4: what a daemon's proofs
+    /// What a daemon's proofs
     /// and results keep never passes its proof memory. A proof reserves
     /// before it grows past its reservation, and answers busy beside another
     /// proof or too large past the whole memory; a result larger than its

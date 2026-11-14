@@ -258,7 +258,7 @@ describe("keepIfUnchanged", () => {
   });
 });
 
-// D2#6: the shell suspends the panel navigator's polling while a Chats tab is
+// The shell suspends the panel navigator's polling while a Chats tab is
 // live, because the page instance runs the same polls against the same store.
 // The Group list is the exception: no page reloads it.
 describe("suspended polling", () => {

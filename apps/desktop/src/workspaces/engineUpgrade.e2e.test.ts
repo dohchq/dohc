@@ -65,7 +65,6 @@ async function withEngine<T>(
   });
   const requester = new WorkspaceDaemonRequester(client);
   let adapter: VersionedLiveAdapter | undefined;
-  // The daemon always exits, and a failed shutdown never hides the failure that preceded it.
   const shutDown = async () => {
     try {
       if (adapter) await requester.request("workspace.close", {}, { workspace: adapter.workspace });
@@ -121,7 +120,6 @@ async function readBodies(
   return bodies;
 }
 
-/** The engine's settled view of the active version: every file and every moment in its history. */
 async function readView(adapter: VersionedLiveAdapter): Promise<EngineView> {
   const version = await adapter.getActiveVersion({ workspaceId });
   if (version === null)
@@ -150,7 +148,6 @@ async function readView(adapter: VersionedLiveAdapter): Promise<EngineView> {
 const momentsFor = (view: EngineView, path: string) =>
   [...view.moments.values()].filter((moment) => moment.path === path).length;
 
-/** Flushes capture until it settles with the expected content and per-path moment counts. */
 async function settledView(
   adapter: VersionedLiveAdapter,
   expected: Record<string, Buffer> = {},

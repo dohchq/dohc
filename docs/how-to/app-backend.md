@@ -6,111 +6,18 @@ Replace uppercase values with IDs returned by dohc. JSON examples work in PowerS
 
 ## Create the Collection first
 
-Use **New collection** to create a transactional Collection, then choose **Create form** from its **Manage** menu.
+Use **New collection** to create a transactional Collection, then choose **Create form** from its **Manage Collection** menu.
 Choose which approved create operation and public fields the form can use.
 Submissions appear in the same Collection. Private fields remain outside the form's grant.
-
-Forms support multiple file fields and the full 128-field table envelope, without a separate form-field ceiling.
-Each file can contain up to 5 MiB. The form uploads files sequentially with separate retry identities.
-One response can attach up to 32 files, matching the operation's file-metadata admission bound.
-Forms can have more optional file controls, but cannot require more files than an operation accepts.
-The form checks the selected file count before uploading anything.
-The combined response, including file references, must fit the 64 KiB operation input limit.
-The form checks this bound before uploading. It stores the completed response before invoking its create action.
-After an uncertain submission or reload, retrying uses that same stored response and request identity.
-
-The 128-field limit bounds table metadata, validation, generated controls, and operation field grants.
-It is the current tested product envelope, not a SQLite column limit or an unlimited-capacity claim.
-Dataset descriptors also remain bounded to 256 KiB, and generated operation source must fit its existing compilation limit.
-Larger answers can exhaust the input bound before all fields reach their individual text limits.
-
-For a related-record field, choose an approved public read action and its label under **Public choices**.
-The action must belong to the relation's target table and declare only its key and label fields.
-This grants the complete action, including its actual returned output. Declared fields do not enforce output filtering on authored code.
-Choose **Review action source** before sharing; never expose a private read action as a shortcut.
-The picker reads choices when opened, searches the selected action, and pages without a total count.
-Relations currently connect tables within one dataset. Separate datasets do not receive implicit access to each other.
-
-If no suitable action exists, expand **Create public choices**, select a public label, and choose **Review public choices**.
-This prepares a read action that returns every target record's key and selected label, with no other fields.
-Search matches only the selected label. An empty label displays the key.
-Review and approve the change, then reopen **Create form** and select the new action.
-The new action preserves existing custom source and records. Existing apps require review for the changed executable revision.
-Creating the action does not publish an app or add the action to existing app grants.
+If the form includes a related-record field, first [offer choices for it](#offer-choices-for-a-related-record).
 
 The desktop compiles Collection actions on Windows x64, Apple silicon Macs, and Linux.
 Opening or publishing an app that uses them requires Windows x64, an Apple silicon Mac running macOS 13.5 or later, or Linux x64 with Linux 5.13 or later and Landlock enabled.
 
-For custom rules, copy [the fundraiser example](../../examples/fundraiser/README.md) into the workspace.
-Review its synthetic event details and payment instructions before using it.
-The dataset descriptor names stable tables, fields, operations, schema source, and operation source.
-Prepare and approve that source:
-
-```sh
-dohc dataset prepare '{"workspaceId":"WORKSPACE_ID","descriptorPath":"fundraiser/dataset.json"}'
-dohc dataset approve '{"workspaceId":"WORKSPACE_ID","preparationId":"PREPARATION_ID","revisionSha256":"REVISION_SHA256"}'
-dohc dataset describe '{"workspaceId":"WORKSPACE_ID","datasetPath":"fundraiser/dataset.json"}'
-```
-
-Review the captured source before approving its exact revision hash.
-Keep app code and Collection views on the same dataset. They do not need separate response stores.
-
-## Connect the app
-
-Put `app.publish.json` in the app folder. Declare the frontend entry, source inputs, and a `dataset` binding.
-Include `"version": 1`. See [workspace file versions](../reference/workspace-file-versions.md) for parsing and update rules.
-Write entryPath, inputs, and packageMap paths relative to the app folder. Start a path with `../` to include a file beside it.
-After moving or renaming a dataset folder, update its path in commands and app manifests.
-An old path reports a broken reference. dohc does not rewrite app source when files move.
-Already approved apps keep their ID-based grants until you withdraw or replace their publication.
-The engine resolves the path to the internal dataset ID; the path grants no access.
-For direct Collection access in a shared workspace, the owner must include dataset.json in the share.
-Published apps keep their approved grants and do not need their audience to read dataset.json.
-
-The binding names the workspace-relative `datasetPath` ending in `dataset.json`, the approved `revision` and `revisionSha256`, and permitted `operationIds`.
-Use the [fundraiser declaration](../../examples/fundraiser/app.publish.json) as an example.
-No private app database path or backend capability is declared.
-
-The dataset's operation source assigns synchronous functions to `globalThis.operations`:
-
-```js
-globalThis.operations = {
-  reserve(ctx, input) {
-    if (!Number.isInteger(input.quantity) || input.quantity < 1) {
-      ctx.refuse("invalid_quantity", "Enter a positive quantity.");
-    }
-    const updated = ctx.db.execute(
-      "UPDATE stock SET remaining=remaining-? WHERE id=? AND remaining>=?",
-      [input.quantity, input.itemId, input.quantity],
-    );
-    if (updated.changes !== 1) ctx.refuse("stock_full", "There is not enough stock.");
-    ctx.db.execute("INSERT INTO orders(id,item_id,quantity) VALUES(?,?,?)",
-      [ctx.requestId, input.itemId, input.quantity]);
-    return { id: ctx.requestId };
-  },
-};
-```
-
-Declare those tables and operations in the dataset descriptor and schema.
-`ctx.db.query` returns rows; `ctx.db.execute` returns `{ changes }`.
-Parameters are strings, finite numbers, or null. The host verifies `ctx.caller`.
-`ctx.caller.kind` says who asked: `owner`, `named` for a person the owner granted access, `link` for someone with a share link, or `automation` for an automation on the Collection.
-An automation caller has `automationId`, such as `collection:Invoices#mark-paid`.
-It is not the owner: an operation that allows only the owner refuses it.
-An action can name its reverse with `"reversedBy": "<action name>"` in the dataset descriptor.
-It then returns `{ undo }`, at most 16 KB: the input its reverse takes.
-The host refuses to commit a result without it, and an automation run's Undo runs the reverse with that input.
-The request identity and operation context stay stable during host retries.
-`ctx.requestId` is a time-ordered UUID. A generated Collection names each new record by it, so with no sort, records list in the order they were added.
-If the clock steps back while the host restarts, a newer record can list before an older one.
-`ctx.files.attach(fileId)` associates an admitted upload with the transaction.
-`ctx.refuse(code, message)` rolls back a business-rule failure.
-Returning `{ ok: false }` is an ordinary successful result and keeps preceding writes.
-
-Backend operations have no network, filesystem, process, arbitrary dependency, or secret-store access.
-They cannot send emails or payments. See [runtime limits and isolation](../../packages/app-backend-runtime/README.md).
-
 ## Approve and open the local app
+
+In the desktop app, choose **Review and open app**, then **Approve and open**.
+The CLI does the same:
 
 ```sh
 dohc app prepareLocal '{"workspaceId":"WORKSPACE_ID","appRoot":"fundraiser"}'
@@ -120,8 +27,20 @@ dohc app launchLocal '{"workspaceId":"WORKSPACE_ID","publicationId":"PUBLICATION
 
 Review the source and requested dataset operations before approving.
 App approval grants access to the approved dataset; it does not create a second database.
+The app is ready when `launchLocal` returns `kind: "localLaunched"` with a `url`.
 The local URL starts a browser session on this computer. Keep dohc open while using it.
 It is not a public share link.
+
+### Form limits
+
+A form supports several file fields and up to 128 fields, the same limit as a table.
+Each file can contain up to 5 MiB. One response can attach up to 32 files, the most an operation accepts.
+A form can have more optional file controls, but cannot require more files than an operation accepts.
+The combined response, including file references, must fit the 64 KiB operation input limit.
+Larger answers can reach that limit before every field reaches its own text limit.
+The form checks the selected file count and this limit before uploading anything.
+It uploads files one at a time, each with its own retry identity, and stores the completed response before invoking its create action.
+After an uncertain submission or reload, retrying uses that same stored response and request identity.
 
 ## Share the app
 
@@ -136,8 +55,9 @@ dohc app prepare '{"workspaceId":"WORKSPACE_ID","appRoot":"fundraiser","shareId"
 dohc app approve '{"workspaceId":"WORKSPACE_ID","approvalId":"APPROVAL_ID","candidateDigest":"CANDIDATE_DIGEST"}'
 ```
 
-The dataset transfers to one shared authority before shared writes begin. Local writes remain fenced after transfer.
-Keep the shared host online while friends submit. A failed transfer must resume through dohc, not create another writer.
+Before shared writes begin, dohc moves the dataset to the shared host and stops local writes.
+Keep the shared host online while friends submit.
+If the transfer fails, resume it through dohc. Do not create another writer.
 Dataset records and uploaded files do not require ordinary file-share selectors.
 
 Friends open the share link and launch the app. The browser broker supplies only granted operations and files.
@@ -181,11 +101,119 @@ Source-folder access alone does not grant Collection access. An app binding and 
 Run `dohc dataset --help` to list the verbs. Run `dohc dataset <verb> --help` for that verb's fields.
 The [CLI, MCP, and SDK reference](../reference/cli-mcp-sdk.md) also lists each verb's result, and shows how an app page calls an approved operation.
 
+## Read shared records offline
+
+A named collaborator can reopen saved read pages on the same device without reaching the sharing server.
+While connected, open the Collection and each required view or page first.
+The device saves only successful results from permitted read actions, scoped to that account, workspace, and share.
+Saving happens in the background. Online responses do not confirm an offline save; a failed save leaves that page unavailable offline.
+The device saves pages you opened, not the whole Collection. It may remove older pages to make room for new ones.
+
+Offline reads require the same action, revision, filters, and page request that the device saved.
+A different search, page, or date range may require reconnecting. Offline views identify saved pages and their save time.
+Connect to change records, upload files, or open attachments. Attachment bytes are not saved for collaborators.
+
+Known revocation, changed permissions, account changes, or a narrower local share remove the affected saved pages.
+A disconnected device cannot learn about remote revocation until it reconnects.
+Revoking access cannot erase information that someone already downloaded outside dohc.
+
+## Offer choices for a related record
+
+For a related-record field, choose an approved public read action and its label under **Public choices**.
+The action must belong to the relation's target table and declare only its key and label fields.
+Anyone with the form can call the action and read its complete output.
+The declaration does not filter the action's output. Choose **Review action source** and expose only public data.
+Never expose a private read action as a shortcut.
+The picker reads choices when opened, searches the selected action, and pages without a total count.
+Relations currently connect tables within one dataset. Separate datasets do not receive implicit access to each other.
+
+If no suitable action exists, expand **Create public choices**, select a public label, and choose **Review public choices**.
+This prepares a read action that returns every target record's key and selected label, with no other fields.
+Search matches only the selected label. An empty label displays the key.
+Review and approve the change, then reopen **Create form** and select the new action.
+The new action preserves existing custom source and records. Existing apps require review for the changed executable revision.
+Creating the action does not publish an app or add the action to existing app grants.
+
+## Write custom rules
+
+For custom rules, copy [the fundraiser example](../../examples/fundraiser/README.md) into the workspace.
+Review its synthetic event details and payment instructions before using it.
+The dataset descriptor names stable tables, fields, operations, schema source, and operation source.
+Prepare and approve that source:
+
+```sh
+dohc dataset prepare '{"workspaceId":"WORKSPACE_ID","descriptorPath":"fundraiser/dataset.json"}'
+dohc dataset approve '{"workspaceId":"WORKSPACE_ID","preparationId":"PREPARATION_ID","revisionSha256":"REVISION_SHA256"}'
+dohc dataset describe '{"workspaceId":"WORKSPACE_ID","datasetPath":"fundraiser/dataset.json"}'
+```
+
+Review the captured source before approving its exact revision hash.
+Keep app code and Collection views on the same dataset. They do not need separate response stores.
+
+The dataset's operation source assigns synchronous functions to `globalThis.operations`:
+
+```js
+globalThis.operations = {
+  reserve(ctx, input) {
+    if (!Number.isInteger(input.quantity) || input.quantity < 1) {
+      ctx.refuse("invalid_quantity", "Enter a positive quantity.");
+    }
+    const updated = ctx.db.execute(
+      "UPDATE stock SET remaining=remaining-? WHERE id=? AND remaining>=?",
+      [input.quantity, input.itemId, input.quantity],
+    );
+    if (updated.changes !== 1) ctx.refuse("stock_full", "There is not enough stock.");
+    ctx.db.execute("INSERT INTO orders(id,item_id,quantity) VALUES(?,?,?)",
+      [ctx.requestId, input.itemId, input.quantity]);
+    return { id: ctx.requestId };
+  },
+};
+```
+
+Declare those tables and operations in the dataset descriptor and schema.
+`ctx.db.query` returns rows; `ctx.db.execute` returns `{ changes }`.
+Parameters are strings, finite numbers, or null. The host verifies `ctx.caller`.
+`ctx.caller.kind` says who asked: `owner`, `named` for a person the owner granted access, `link` for someone with a share link, or `automation` for an automation on the Collection.
+An automation caller has `automationId`, such as `collection:Invoices#mark-paid`.
+It is not the owner: an operation that allows only the owner refuses it.
+An action can name its reverse with `"reversedBy": "<action name>"` in the dataset descriptor.
+It then returns `{ undo }`, at most 16 KB: the input its reverse takes.
+The host refuses to commit a result without it, and an automation run's Undo runs the reverse with that input.
+`ctx.requestId` identifies the request. It and the operation context stay stable during host retries.
+A generated Collection names each new record by `ctx.requestId`, so with no sort, records list in the order they were added.
+If the clock steps back while the host restarts, a newer record can list before an older one.
+`ctx.files.attach(fileId)` associates an admitted upload with the transaction.
+`ctx.refuse(code, message)` rolls back a business-rule failure.
+Returning `{ ok: false }` is an ordinary successful result and keeps preceding writes.
+
+Backend operations have no network, filesystem, process, arbitrary dependency, or secret-store access.
+They cannot send emails or payments. See [runtime limits and isolation](../../packages/app-backend-runtime/README.md).
+
+## Connect a custom app
+
+Put `app.publish.json` in the app folder. Declare the frontend entry, source inputs, and a `dataset` binding.
+Include `"version": 1`. See [workspace file versions](../reference/workspace-file-versions.md) for parsing and update rules.
+Write entryPath, inputs, and packageMap paths relative to the app folder. Start a path with `../` to include a file beside it.
+After moving or renaming a dataset folder, update its path in commands and app manifests.
+An old path reports a broken reference. dohc does not rewrite app source when files move.
+Already approved apps keep their ID-based grants until you withdraw or replace their publication.
+The engine resolves the path to the internal dataset ID; the path grants no access.
+For direct Collection access in a shared workspace, the owner must include dataset.json in the share.
+Published apps keep their approved grants and do not need their audience to read dataset.json.
+
+The binding names the workspace-relative `datasetPath` ending in `dataset.json`, the approved `revision` and `revisionSha256`, and permitted `operationIds`.
+Use the [fundraiser declaration](../../examples/fundraiser/app.publish.json) as an example.
+No private app database path or backend capability is declared.
+Then [approve and open the app](#approve-and-open-the-local-app).
+
 ## Change fields and rules
 
 Use **Fields and names** to add fields or rename fields, tables, and the Collection.
 Renaming keeps authored operation source intact. Adding a field does not expand public or collaborator access.
 For custom operations, update their source explicitly before using a new field.
+A table can have up to 128 fields. The limit covers table metadata, validation, generated controls, and operation field grants.
+It is the tested limit, not a SQLite column limit.
+The dataset descriptor must fit 256 KiB, and generated operation source must fit its compilation limit.
 
 Choose **Change field type or requirement** to review supported conversions on generated Collections.
 Text-to-number conversions must preserve the original value. Conflicting values stop preparation instead of losing information.
@@ -215,6 +243,7 @@ dohc dataset discardMigration '{"workspaceId":"WORKSPACE_ID","preparationId":"PR
 ```
 
 Approval applies the exact reviewed checkpoint; it does not rerun the SQL.
+The change is applied when `approveMigration` returns `kind: "migrated"` with the new `revision`.
 Prepare a new review if the data changes, access changes, or the review expires.
 Reviews expire after ten minutes. Each dataset can retain one review, with at most four reviews per host.
 Rows above 128 KiB or encoded changes above 256 KiB refuse preparation without truncation.
@@ -247,22 +276,7 @@ dohc dataset prepareHistoryRestore '{"workspaceId":"WORKSPACE_ID","datasetPath":
 ```
 
 Take the before and after hashes from the selected history entry. Approve through `dataset approveMigration` as above.
-
-## Read shared records offline
-
-A named collaborator can reopen saved read pages on the same device without reaching the sharing server.
-While connected, open the Collection and each required view or page first.
-The device saves only successful results from permitted read actions, scoped to that account, workspace, and share.
-Saving happens in the background. Online responses do not confirm an offline save; a failed save leaves that page unavailable offline.
-This is a saved-page cache, not a complete dataset snapshot. Older pages can leave the cache as space fills.
-
-Offline reads require the same action, revision, filters, and page request that the device saved.
-A different search, page, or date range may require reconnecting. Offline views identify saved pages and their save time.
-Connect to change records, upload files, or open attachments. Attachment bytes are not saved for collaborators.
-
-Known revocation, changed permissions, account changes, or a narrower local share remove the affected saved pages.
-A disconnected device cannot learn about remote revocation until it reconnects.
-Revoking access cannot erase information that someone already downloaded outside dohc.
+It returns `kind: "migrated"` with the reversal's new `revision`.
 
 ## Archive or delete a Collection
 
@@ -288,9 +302,6 @@ dohc dataset export '{"workspaceId":"WORKSPACE_ID","datasetPath":"fundraiser/dat
 
 The destination directory must exist. Existing files require explicit `overwrite:true`.
 Protect the archive as private data. Its integrity checks detect corruption; they do not encrypt it.
-The host keeps a replaceable checkpoint to reduce replay when reopening a Collection.
-Checkpoint maintenance preserves committed history, schema checkpoints, and accepted retry keys. It does not delete old history.
-If checkpoint maintenance cannot finish, the host rebuilds from the original checkpoint and retained history; reopening can take longer.
 Quota exhaustion refuses further writes. Exporting an archive does not release storage.
 Do not replace an authority that has accepted newer writes with an older archive.
 Restore to clean local host storage with the same workspace identity and no existing copy of that Collection.

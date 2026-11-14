@@ -23,11 +23,11 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// WS-G2-C-2 editor-on-engine round trip. A rich markdown file edits
+// Editor-on-engine round trip. A rich markdown file edits
 // through the engine Y.Doc provider (recordUpdate +
 // debounced settle). The load-bearing proof: a
 // live edit journals only as ydoc.update — not a duplicate moment.append that
-// would collide (P0D) with the ydoc.update stream on a shared workspace — and
+// would collide with the ydoc.update stream on a shared workspace — and
 // the .md + engine.db reflect it, and a reopen resumes the rich content. The
 // SQLite readers (withEngineDb / ydocUpdateCount / replication* / moment*) live
 // in ./helpers/engineDb — shared with workspace-collab-decoupling.spec so the
@@ -35,7 +35,6 @@ import {
 
 async function openEngineDoc(page: import("@playwright/test").Page, path: string): Promise<void> {
   const segments = path.split("/");
-  // Expand each parent folder, then open the file.
   for (let i = 0; i < segments.length - 1; i += 1) {
     await explorerRow(page, segments.slice(0, i + 1).join("/")).click();
   }
@@ -48,7 +47,6 @@ async function openEngineDoc(page: import("@playwright/test").Page, path: string
   await expect(page.getByTestId("markdown-editor")).toBeVisible();
 }
 
-// The kept typing's notice: its toast, then its row in Notices.
 function recoveryToast(page: import("@playwright/test").Page) {
   return page.getByTestId("workspace-shell-notice").filter({ hasText: "Text kept in History" });
 }
@@ -120,7 +118,6 @@ async function restoreRestartTyping(
       .click();
   }
   await expect(page.getByTestId("engine-diff-lines")).toContainText(human);
-  // A shared live file's way back: Copy your version copies the kept file whole.
   await holdSystemClipboard(test.info(), async (remainingMs) => {
     await page.getByTestId("engine-diff-copy-typing").click({ timeout: remainingMs() });
     // Windows hands clipboard text back with CRLF line endings.
@@ -132,7 +129,6 @@ async function restoreRestartTyping(
       )
       .toBe(detail.moment?.beforeText);
   });
-  // Opening the recovery and copying it keep it listed until Restore.
   const kept = await page.evaluate(
     async (workspaceId) =>
       (
@@ -157,7 +153,6 @@ async function restoreRestartTyping(
       ),
     )
     .toEqual({ captureRecoveries: [] });
-  // The restore cleared the recovery, so its notice goes too.
   await expect(recoveryToast(page)).toHaveCount(0);
   await page.getByTestId("notice-center-toggle").click();
   await expect(
@@ -193,7 +188,6 @@ test("rich doc edits through the engine Y.Doc: settle lands on .md + engine.db, 
     await page.keyboard.press(DOCUMENT_END);
     await page.keyboard.type(sentinel);
 
-    // The debounced settle projects the edit into engine.db and writes the.md.
     await expect
       .poll(
         async () => await readFile(join(temp.rootPath, "notes/rich.md"), "utf8").catch(() => ""),
@@ -203,8 +197,6 @@ test("rich doc edits through the engine Y.Doc: settle lands on .md + engine.db, 
       )
       .toContain(sentinel);
 
-    // engine.db reflects it: the CRDT lineage exists (ydoc.update ops) and the
-    // settle projected a history moment carrying the text.
     await expect.poll(() => ydocUpdateCount(temp.rootPath), { timeout: 20_000 }).toBeGreaterThan(0);
     await expect
       .poll(
@@ -217,15 +209,15 @@ test("rich doc edits through the engine Y.Doc: settle lands on .md + engine.db, 
 
     // The load-bearing assertion: the edit replicates as ydoc.update ops, and
     // the watcher's observation of the settle's own.md write was deferred — so
-    // the typed sentence never became a moment.append (a double-journal that on
-    // a shared workspace would collide as a P0D). Since a ydoc.update payload is
+    // the typed sentence never became a moment.append (a double-journal that
+    // would collide on a shared workspace). Since a ydoc.update payload is
     // opaque, the sentinel plaintext must appear in NO replication op at all.
-    // Post-cutover a LOCAL workspace journals no outbound replication ops at
+    // A LOCAL workspace journals no outbound replication ops at
     // all (emit_outbound requires Regime::Replicated), so on this fixture the
     // replication-op assertions below are structural only — the LOAD-BEARING
     // double-journal check is the moments table: the settle projects exactly
     // one sentinel moment, and a capture re-observing the settle's own.md
-    // self-write (the P0D class) would append a second.
+    // self-write would append a second.
     expect(
       momentTextsForPath(temp.rootPath, "notes/rich.md").filter((t) => t.includes(sentinel)),
     ).toHaveLength(1);
@@ -254,13 +246,10 @@ test("rich doc edits through the engine Y.Doc: settle lands on .md + engine.db, 
     await expect(sourceView.locator(".cm-content")).toHaveAttribute("contenteditable", "false");
     // The WYSIWYG editor is hidden, not unmounted (undo/cursor survive).
     await expect(page.getByTestId("markdown-editor")).toBeHidden();
-    // Toggling back restores the WYSIWYG editor with the same content.
     await page.getByTestId("markdown-source-toggle").click();
     await expect(page.getByTestId("markdown-editor")).toBeVisible();
     await expect(page.getByTestId("markdown-editor")).toContainText(sentinel);
 
-    // History names who typed the sentence: the settle is this computer's
-    // person's edit, so the row names them.
     await openHistoryView(page);
     await expect(
       page
@@ -340,7 +329,6 @@ test("@restart-durability-idle-external an external edit to an idle open documen
   }
 });
 
-// The `<stem> (recovered …).md` siblings beside `<stem>.md` in one folder.
 async function recoveredSiblings(
   rootPath: string,
   folder: string,
@@ -381,9 +369,6 @@ test("@restart-durability-overlapping-typing overlapping typing on an externally
     expect(await readFile(join(temp.rootPath, path), "utf8")).toContain(external);
     await expect(page.getByTestId("markdown-editor")).toContainText(human);
     await quitDesktop(desktop);
-    // Teardown captured the outside bytes and folded the closed document onto
-    // them. The typing is not lost with it: it comes back as an ordinary
-    // sibling file, complete, that the explorer lists and History explains.
     desktop = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(desktop.page, temp);
     await waitForWorkspaceFile(desktop.page, workspace.workspaceId, path);
@@ -412,8 +397,6 @@ test("@restart-durability-overlapping-typing overlapping typing on an externally
       external,
       "notice",
     );
-    // History explains the sibling on screen, not only in the database: the
-    // row names the recovery in words, and the person whose typing it holds.
     await openHistoryView(desktop.page);
     const recoveredRow = desktop.page
       .locator(`[data-testid="engine-moment-open"][data-moment-path="${recovered!}"]`)
@@ -516,7 +499,6 @@ test("renaming a property of a live document keeps its place and comments throug
   test.setTimeout(180_000);
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
-  // One file with comments and quoting, and one in canonical form.
   const files = [
     {
       path: "trip.md",
@@ -580,11 +562,11 @@ test("renaming a property of a live document keeps its place and comments throug
   }
 });
 
-// WS-G2-C-2 gate fix 2 — a version op while a rich doc is live must settle +
-// close the session FIRST. Otherwise the live session keeps its old versionId
-// and a later settle writes a stale projection into the now-active version
+// A version op while a rich doc is live must settle + close the session
+// first. Otherwise the live session keeps its old versionId and a later
+// settle writes a stale projection into the now-active version
 // (two-canonical / two-lineage corruption). Here a version is created through
-// the product bridge while the editor is open; the fix flushes the in-flight
+// the product bridge while the editor is open; the app flushes the in-flight
 // edit and releases the session before materializing.
 test("creating a version while a rich doc is live flushes + closes the session (no stale projection, edit preserved)", async () => {
   const temp = await createTempWorkspace();
@@ -624,8 +606,6 @@ test("creating a version while a rich doc is live flushes + closes the session (
     }, workspace.workspaceId);
     expect(created).toBe(true);
 
-    // The in-flight edit was flushed by the forced settle-on-close (not lost to
-    // the fork-from-disk), so it is a durable moment and on disk.
     await expect
       .poll(
         () => momentTextsForPath(temp.rootPath, "notes/rich.md").some((t) => t.includes(sentinel)),
@@ -636,7 +616,6 @@ test("creating a version while a rich doc is live flushes + closes the session (
       .toBe(true);
     expect(await readFile(join(temp.rootPath, "notes/rich.md"), "utf8")).toContain(sentinel);
 
-    // A second (named) version now exists — the op completed past the flush.
     expect(
       withEngineDb(temp.rootPath, (db) =>
         Number(

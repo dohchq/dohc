@@ -77,7 +77,6 @@ beforeEach(() => {
   ])
     mock.mockReset();
   bridgeMock.requestAccessRefresh.mockResolvedValue(undefined);
-  // The invitation probe's answer, unless a test says otherwise: no invitations.
   bridgeMock.getShareCopyDetails.mockResolvedValue({
     status: "active",
     shareCode: "dohc-share:share-1:https://relay.test",
@@ -151,7 +150,6 @@ function received(overrides: Partial<AccessShareRow> = {}): AccessShareRow {
   });
 }
 
-// Answers per lane, read from the workspace and cursor each call names.
 function answerWith(answers: Partial<Record<Lane, AccessAnswer | Error>>) {
   bridgeMock.listSharingAccess.mockImplementation(async ({ lane }) => {
     const value = answers[lane] ?? answer(lane);
@@ -160,8 +158,6 @@ function answerWith(answers: Partial<Record<Lane, AccessAnswer | Error>>) {
   });
 }
 
-// Stands in for the shell: its removal notices count each removal, and the
-// count outlives the view, which `open` closes and reopens.
 function View(props: {
   workspaceId?: string;
   facts?: AccessFacts;
@@ -234,11 +230,9 @@ describe("the Sharing view's two lists", () => {
     const grantedRows = await screen.findAllByTestId("sharing-granted-row");
     expect(grantedRows).toHaveLength(2);
     expect(grantedRows[0]!.textContent).toBe("product-plan.md2 people can edit");
-    // A live share's name is content, in ink.
     expect(within(grantedRows[0]!).getByText("product-plan").parentElement!.className).toContain(
       "text-ink",
     );
-    // The count's tooltip names each person with their level, one per line.
     expect(within(grantedRows[0]!).getByTestId("sharing-row-who").getAttribute("title")).toBe(
       "sam@example.com can edit\nnova@example.com can edit",
     );
@@ -253,14 +247,12 @@ describe("the Sharing view's two lists", () => {
     expect(screen.getByTestId("sharing-granted-freshness").getAttribute("data-state")).toBe(
       "fresh",
     );
-    // Each list says what it covers, rows or not.
     expect(screen.getByTestId("sharing-granted-freshness-scope").textContent).toBe(
       "for this workspace",
     );
     expect(screen.getByTestId("sharing-received-freshness-scope").textContent).toBe(
       "for your account",
     );
-    // Opening the view asks main to check again once, for both lists.
     expect(bridgeMock.requestAccessRefresh).toHaveBeenCalledTimes(1);
     expect(bridgeMock.requestAccessRefresh).toHaveBeenCalledWith({
       workspaceId: "workspace-a",
@@ -272,7 +264,6 @@ describe("the Sharing view's two lists", () => {
     answerWith({ received: new Error("offline") });
     render(<View />);
     const failed = await screen.findByTestId("sharing-received-failed");
-    // The list says it could not load, in one line; the cause stays in Notices.
     expect(failed.querySelector("p")!.textContent).toBe(
       "dohc could not check the shares to your account.",
     );
@@ -295,7 +286,6 @@ describe("the Sharing view's two lists", () => {
     );
     render(<View />);
     const count = await screen.findByTestId("sharing-granted-count");
-    // "1+" on screen, read as "1 or more shares".
     expect(within(count).getByText("1+").getAttribute("aria-hidden")).toBe("true");
     expect(within(count).getByText("1 or more shares").className).toContain("sr-only");
     await userEvent.click(screen.getByTestId("sharing-granted-more"));
@@ -365,7 +355,6 @@ describe("the actions Settings offers on a share", () => {
     expect(confirm.textContent).toContain(
       "End this share? sam@example.com keeps a read-only copy and stops receiving updates.",
     );
-    // Focus lands on Cancel, and Escape takes the question back.
     expect(document.activeElement).toBe(screen.getByTestId("sharing-end-cancel"));
     await userEvent.keyboard("{Escape}");
     expect(screen.queryByTestId("sharing-end-confirm")).toBeNull();
@@ -410,7 +399,6 @@ describe("the actions Settings offers on a share", () => {
       expect(screen.getByTestId("sharing-granted-row").getAttribute("data-status")).toBe("active"),
     );
 
-    // The relay answers this time, and the list now has the share ended.
     rows = [granted({ status: "revoked", selector: null, access: null })];
     bridgeMock.revokeRelayShare.mockResolvedValue({});
     const retry = shareRemovals.failed.mock.calls[0]![0].retry!;
@@ -501,11 +489,8 @@ describe("copying a share's code or invitation", () => {
     browserInvitationUrl: "https://drive.test/s/edit/grant-1",
   };
   const ROWS = [
-    // A live edit named to one person: the code and the browser invitation.
     granted(),
-    // A grant a link depends on: the code only.
     granted({ shareId: "share-dep", grantId: "dep", via: "dependent", access: "view" }),
-    // A link, a damaged share and a chat: nothing to copy.
     granted({
       shareId: "share-link",
       grantId: "link",
@@ -539,7 +524,6 @@ describe("copying a share's code or invitation", () => {
     const named = await rowOf("share-1");
     expect(within(named).getByRole("button", { name: "Copy code" })).toBeTruthy();
     expect(await within(named).findByRole("button", { name: "Copy invitation" })).toBeTruthy();
-    // The server was asked once, for the first row that could have an invitation.
     expect(bridgeMock.getShareCopyDetails).toHaveBeenCalledOnce();
     expect(bridgeMock.getShareCopyDetails).toHaveBeenCalledWith({
       shareId: "share-1",
@@ -594,7 +578,6 @@ describe("copying a share's code or invitation", () => {
     const target = dependent.querySelector<HTMLElement>("[data-sharing-row-focus]")!;
     await waitFor(() => expect(document.activeElement).toBe(target));
     expect(callbacks.onFocused).toHaveBeenCalledOnce();
-    // Focus on the row shows its actions to the keyboard.
     await userEvent.tab();
     expect(document.activeElement).toBe(
       within(dependent).getByRole("button", { name: "Copy code" }),
@@ -654,10 +637,8 @@ describe("mounts and their skipped changes", () => {
     const row = await screen.findByTestId("sharing-received-row");
     expect(within(row).getAllByTestId("sharing-skipped")).toHaveLength(1);
 
-    // One Dismiss for the mount, named for what it dismisses.
     await userEvent.click(within(row).getByRole("button", { name: "Dismiss skipped changes" }));
     expect(within(row).queryByTestId("sharing-skipped")).toBeNull();
-    // Focus lands on the menu that holds the way back.
     expect(document.activeElement).toBe(within(row).getByTestId("sharing-received-menu"));
     expect(bridgeMock.dismissShareSkips).toHaveBeenCalledWith({
       workspaceId: "workspace-a",
@@ -666,7 +647,6 @@ describe("mounts and their skipped changes", () => {
     });
     await waitFor(() => expect(callbacks.onMountsChanged).toHaveBeenCalledOnce());
 
-    // The shell reads the record again: seen, and still kept.
     const seen = { ...skippedOps, acknowledgedGeneration: 2 };
     rerender(<View mounts={[{ ...mount, skippedOps: seen }]} />);
     expect(within(row).queryByTestId("sharing-skipped")).toBeNull();

@@ -28,6 +28,7 @@ import type { AccessContext } from "./accessReason";
 import { ChatComposer, ChatMessageList, type ChatMessageListHandle } from "./chatMessages";
 import { useReactions, type ReactionView } from "./reactionStore";
 import { CopyMessageLink } from "./messageLinks";
+import { AgentThreadLines } from "./AgentThreadLines";
 
 // The composer's replacement for every received file share.
 // Same words main throws (SharedFileReadOnlyError) and the same shape the
@@ -139,7 +140,6 @@ export function LinkedChatsPanel(props: {
     // History stopped recording, so its section says so.
     paused: boolean;
     onOpenMoment: (momentId: string, filePath: string) => void;
-    // Opens the workspace's History view.
     onOpenHistory: () => void;
   };
   // The links into the file, read again as `revision` changes. Chats that
@@ -171,7 +171,6 @@ export function LinkedChatsPanel(props: {
     token: number;
     focusMessageId?: string;
   } | null>(null);
-  // The comment being written on the whole file, while its composer is open.
   const [commenting, setCommenting] = useState<string | null>(null);
   const [composer, setComposer] = useState("");
   const [sending, setSending] = useState(false);
@@ -476,7 +475,7 @@ export function LinkedChatsPanel(props: {
     workspaceId,
   ]);
 
-  // Reactions (WS-MU-C2) go through the workspace's reaction store, shared
+  // Reactions go through the workspace's reaction store, shared
   // with every Chats surface: this thread's rows as the store knows them.
   const threadReactions = activeThread ? reactions.view(activeThread.id) : NO_REACTIONS;
   const toggleReaction = useCallback(
@@ -496,6 +495,8 @@ export function LinkedChatsPanel(props: {
     [activeThread, props.onError, reactions, threadReactions.viewerAuthorId],
   );
 
+  const activeThreadId = activeThread?.id ?? null;
+  const activeChatThreadIds = useMemo(() => [activeThreadId], [activeThreadId]);
   const reactionControls = useMemo(
     () => ({
       reactions: threadReactions.reactions,
@@ -542,6 +543,11 @@ export function LinkedChatsPanel(props: {
           onOpenPath={props.onOpenPath}
           reactionControls={reactionControls}
           rowActions={copyLinkAction}
+        />
+        <AgentThreadLines
+          workspaceId={workspaceId}
+          chatThreadIds={activeChatThreadIds}
+          className="shrink-0 px-3 py-1"
         />
         {readOnly ? (
           <ReadOnlyNotice />

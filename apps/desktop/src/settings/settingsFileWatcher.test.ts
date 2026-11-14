@@ -127,11 +127,9 @@ describe("settings file watcher", () => {
     expect(settingsWatch.close).toHaveBeenCalledOnce();
     vi.advanceTimersByTime(2000);
     expect(settingsWatch.watchSettings).toHaveBeenCalledTimes(2);
-    // An edit may have landed while nothing watched.
     vi.advanceTimersByTime(150);
     expect(onChange).toHaveBeenCalledOnce();
 
-    // The new watch hears the next save.
     settingsWatch.emit("dohc-settings.json");
     vi.runAllTimers();
     expect(onChange).toHaveBeenCalledTimes(2);
@@ -264,7 +262,6 @@ describe("settings file watcher", () => {
         await writeFile(join(file.root, "dohc-settings.json~"), '{"a":3}');
         await rename(join(file.root, "dohc-settings.json~"), file.path);
         await recreated;
-        // The folder watch survives deletion and hears the next save too.
         const saved = file.changedTo('{"a":4}');
         await writeFile(file.path, '{"a":4}');
         await saved;

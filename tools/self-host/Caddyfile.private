@@ -16,6 +16,12 @@
   }
   @relay path /sync/*
   handle @relay {
+    # The relay's largest per-route body cap. A Collection import streams a
+    # whole Collection and bounds itself.
+    @relayBounded not path_regexp ^/sync/[^/]+/datasets/[^/]+/imports/[^/]+$
+    request_body @relayBounded {
+      max_size 21MiB
+    }
     reverse_proxy sync-relay:1788
   }
   handle {

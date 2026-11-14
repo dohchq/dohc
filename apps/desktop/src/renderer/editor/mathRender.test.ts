@@ -79,19 +79,15 @@ describe("makeMathNodeView — concurrent remote edits while the source field is
   it("does not overwrite a remote tex change when the user made no local edit", () => {
     const { nodeView, dispatched } = makeNodeView("a");
 
-    // User opens the source editor (no typing).
     nodeView.selectNode?.();
     expect(sourceField(nodeView).value).toBe("a");
 
-    // A remote collaborator changes the same node's tex to "b".
     pushUpdate(nodeView, mathNode("b"));
     // The untouched field adopts the remote value so blur can't revert it.
     expect(sourceField(nodeView).value).toBe("b");
 
-    // User clicks away without ever typing.
     nodeView.deselectNode?.();
 
-    // The remote edit must survive: no dispatch overwrote it.
     expect(dispatched).toHaveLength(0);
   });
 
@@ -99,17 +95,13 @@ describe("makeMathNodeView — concurrent remote edits while the source field is
     const { nodeView, dispatched } = makeNodeView("a");
 
     nodeView.selectNode?.();
-    // User types a new expression locally.
     sourceField(nodeView).value = "xyz";
 
-    // A remote edit also lands; because the user already diverged from the
-    // baseline, their text is kept in the field (not clobbered by the remote).
     pushUpdate(nodeView, mathNode("b"));
     expect(sourceField(nodeView).value).toBe("xyz");
 
     nodeView.deselectNode?.();
 
-    // The local edit is committed — last writer wins.
     expect(dispatched).toEqual([{ pos: 0, attrs: { tex: "xyz" } }]);
   });
 
@@ -125,11 +117,8 @@ describe("makeMathNodeView — destroy commits an in-progress edit instead of di
   it("commits the field value when the node view is torn down mid-edit", () => {
     const { nodeView, dispatched } = makeNodeView("a");
     nodeView.selectNode?.();
-    // User types a new expression but switches/closes the document before
-    // blur or Enter fires — destroy() runs with the field still open.
     sourceField(nodeView).value = "e=mc^2";
     nodeView.destroy?.();
-    // The last TeX is committed, not silently dropped.
     expect(dispatched).toEqual([{ pos: 0, attrs: { tex: "e=mc^2" } }]);
   });
 

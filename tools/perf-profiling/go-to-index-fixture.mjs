@@ -1,4 +1,4 @@
-// Pure renderer workload for PR 1. Packaged admission and timing remain separate.
+// Pure renderer workload. Packaged admission and timing run separately.
 export const GO_TO_COUNTS = Object.freeze({
   files: 5000,
   folders: 50,
@@ -60,7 +60,6 @@ export function goToIndexFixture(fileCount = GO_TO_COUNTS.files) {
   };
 }
 
-// Separate scan workload with deeper folders and longer descriptive file names.
 export function goToLongPathFixture(fileCount = GO_TO_COUNTS.files) {
   const sources = goToIndexFixture(fileCount);
   sources.listing.files = sources.listing.files.map((file, n) => ({

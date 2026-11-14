@@ -65,7 +65,6 @@ it("leaves collaborator colours to Excalidraw without publishing user overrides"
   try {
     await expect.poll(collaborator).toMatchObject({ username: "Remote" });
     expect(collaborator()).not.toHaveProperty("color");
-    // No unsupported local colour is put into awareness.
     expect(published.length).toBeGreaterThan(0);
     const local = vi.mocked(bindDocPresence).mock.results.at(-1)!.value;
     expect(local.awareness.getLocalState()?.user).not.toHaveProperty("color");

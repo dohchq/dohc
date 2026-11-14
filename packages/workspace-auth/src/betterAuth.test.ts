@@ -170,7 +170,6 @@ describeWithPostgres("closed sign-up", () => {
     return sent.filter((message) => message.to === email);
   }
 
-  /** Opens the newest emailed link the way the reset page does. */
   async function choosePassword(
     closed: WorkspaceAuth,
     email: string,
@@ -185,7 +184,6 @@ describeWithPostgres("closed sign-up", () => {
     });
   }
 
-  /** Submits the set-password form over HTTP with the newest emailed link's token. */
   async function submitResetPage(
     closed: WorkspaceAuth,
     email: string,
@@ -276,14 +274,12 @@ describeWithPostgres("closed sign-up", () => {
     const ownerPassword = "owner-password-bbb";
 
     await closed.api.signUpEmail({ body: { email, password: attackerPassword, name: "Attacker" } });
-    // The owner's own sign-up gets the generic answer and a fresh link.
     const before = emailsTo(email).length;
     const duplicate = await closed.api.signUpEmail({
       body: { email, password: ownerPassword, name: "Owner" },
     });
     expect(duplicate.token).toBeNull();
     expect(emailsTo(email).length).toBe(before + 1);
-    // Asking for a new link sends the same kind of link, never a plain verification.
     await closed.api.sendVerificationEmail({ body: { email } });
     expect(emailsTo(email).length).toBe(before + 2);
     expect(
@@ -350,7 +346,6 @@ describeWithPostgres("closed sign-up", () => {
 
     await closed.api.requestPasswordReset({ body: { email } });
     expect(linkIn(lastEmailTo(email)).searchParams.get("setup")).toBeNull();
-    // A setup flag added to the page's address only makes the page send a name.
     const response = await submitResetPage(closed, email, {
       newPassword: "another-password-ddd",
       name: "Mallory",
@@ -361,7 +356,6 @@ describeWithPostgres("closed sign-up", () => {
 
   it("signs out every session before it verifies the address, so a failure between the two leaves nobody signed in", async () => {
     const email = `${unique()}@dohc.test`;
-    // A session from while sign-up was open.
     const { token, user } = await signUp(email);
     const bearer = { authorization: `Bearer ${token}` };
     expect(await auth.api.getSession({ headers: bearer })).not.toBeNull();

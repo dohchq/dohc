@@ -304,7 +304,7 @@ describe("cloud device-flow login", () => {
   });
 
   it("captures the Better Auth user id as the OPAQUE reactor identity (never the email)", async () => {
-    // WS-MU-C2 security: the reactor author key is a REPLICATED CRDT cell key, so
+    // Security: the reactor author key is a replicated CRDT cell key, so
     // it must be the opaque Better Auth user id, never the raw email (PII would
     // otherwise replicate to every peer and persist in the immutable history).
     const store = memoryStore();
@@ -326,7 +326,6 @@ describe("cloud device-flow login", () => {
       email: "ice@dohc.test",
       userId: "usr_9f3a-opaque-uuid",
     });
-    // The replicated identity is the opaque id — distinct from the email.
     expect(store.saved?.userId).not.toBe(store.saved?.email);
   });
 
@@ -764,7 +763,6 @@ describe("completed cloud login session", () => {
       "close relay workspaces",
       "refresh credentials",
       "reconcile new-session-token",
-      // And the final state once the new session is in place.
       "notify session changed",
     ]);
   });
@@ -845,10 +843,6 @@ describe("completed cloud login session", () => {
   });
 });
 
-// The logout transition follows the same rule as login adoption: the session
-// is invalid the moment the credentials are cleared, so the renderer signals
-// fire from a finally and are never gated on the credential store or engine
-// cleanup succeeding.
 describe("cloud logout transition", () => {
   it("notifies the session change even when engine cleanup rejects", async () => {
     const stopFailure = new Error("engines refused to stop");
@@ -987,9 +981,6 @@ describe("invalidateSessionIf", () => {
     expect(store.saved).toEqual({ ...SESSION_A, userId: "usr_b", token: "token-b" });
   });
 
-  // The TOCTOU the queue closes: A's 401 lands while a completed login is
-  // MID-SAVE. The invalidation queues behind the save, its compare then sees
-  // the new session, and the just-completed login survives.
   it("cannot delete a login whose save is in flight when the 401 lands", async () => {
     const saveStarted = deferred<void>();
     const releaseSave = deferred<void>();
@@ -1031,17 +1022,12 @@ describe("invalidateSessionIf", () => {
       email: "b@dohc.test",
     });
     await invalidating;
-    // B's just-completed login survives the serialized compare-and-clear.
     expect(store.saved).toMatchObject({ userId: "usr_b", token: "token-b" });
     await expect(login.credentials()).resolves.toMatchObject({
       userId: "usr_b",
     });
   });
 
-  // A failed deletion must not manufacture a live session: the record is
-  // still on disk, but the session layer knows it is dead. The tombstone
-  // holds until a deletion succeeds — status() reports disconnected and
-  // credentials() stops handing the dead token to sync engines.
   it("tombstones a dead session whose deletion failed until a retry succeeds", async () => {
     const store = memoryStore();
     store.saved = SESSION_A;
@@ -1070,7 +1056,6 @@ describe("invalidateSessionIf", () => {
     await expect(login.status()).resolves.toEqual({ connected: false });
     await expect(login.credentials()).resolves.toBeNull();
 
-    // The retry succeeds: the tombstone lifts with the record gone.
     clearFails = false;
     await login.invalidateSessionIf(identity);
     expect(store.saved).toBeNull();
@@ -1078,9 +1063,6 @@ describe("invalidateSessionIf", () => {
     await expect(login.status()).resolves.toEqual({ connected: false });
   });
 
-  // The restart shape: a fresh instance has no in-memory tombstone — only
-  // the persisted marker. The stored record matching it must read as
-  // disconnected and be deleted on load, not resurrected as connected.
   it("keeps a dead session dead across restart and deletes it on load", async () => {
     const store = memoryStore();
     store.saved = SESSION_A;
@@ -1103,7 +1085,6 @@ describe("invalidateSessionIf", () => {
     await expect(beforeRestart.invalidateSessionIf(identity)).rejects.toThrow("store unavailable");
     expect(store.invalidMarker).not.toBeNull();
 
-    // Restart: a new instance over the same store, deletion now possible.
     clearFails = false;
     const afterRestart = createCloudLogin({
       store,
@@ -1111,7 +1092,6 @@ describe("invalidateSessionIf", () => {
       fetch: fakeFetch({}).impl,
     });
     await expect(afterRestart.status()).resolves.toEqual({ connected: false });
-    // Deleted-on-load: the record is gone and the marker lifted.
     expect(store.saved).toBeNull();
     expect(store.invalidMarker).toBeNull();
     await expect(afterRestart.credentials()).resolves.toBeNull();
@@ -1136,8 +1116,6 @@ describe("invalidateSessionIf", () => {
       }),
     ).rejects.toThrow("store unavailable");
 
-    // A new session lands (a completed login overwrote the record): the
-    // tombstone names the dead token only, and the new session answers.
     store.saved = { ...SESSION_A, userId: "usr_b", token: "token-b" };
     await expect(login.status()).resolves.toMatchObject({ connected: true });
     await expect(login.credentials()).resolves.toMatchObject({
@@ -1146,7 +1124,6 @@ describe("invalidateSessionIf", () => {
   });
 });
 
-// A deleted account: every session of it is dead, whatever its token.
 describe("invalidateAccount", () => {
   const SESSION_A: CloudCredentials = {
     serverUrl: "https://cloud.test",
@@ -1251,7 +1228,6 @@ describe("invalidateAccount", () => {
     await expect(login.status()).resolves.toEqual({ connected: false });
     await expect(login.poll()).rejects.toThrow("No cloud login in progress");
 
-    // Restart: only the persisted record remains, and it still refuses.
     const restarted = createCloudLogin({
       store,
       fetch: fakeFetch({

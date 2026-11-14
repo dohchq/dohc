@@ -67,7 +67,6 @@ function nodeTypes(node: JSONContent, types = new Set<string>()): Set<string> {
   return types;
 }
 
-/** The mark types on the first text node reading `text`, in document order. */
 function marksOn(node: JSONContent, text: string): string[] | undefined {
   if (node.text === text) return (node.marks ?? []).map((mark) => mark.type);
   for (const child of node.content ?? []) {
@@ -195,7 +194,6 @@ describe("raw HTML in a browser", () => {
         expect(onDirty).toHaveBeenCalledTimes(1);
         onDirty.mockClear();
       }
-      // A restore reaches the editor as a replacement, then as a pending undo.
       act(() => ref.current?.replaceMarkdown(restoredText));
       const depth = undoDepth(editor.state);
       const onPendingUndoConsumed = vi.fn();
@@ -206,13 +204,11 @@ describe("raw HTML in a browser", () => {
       await waitFor(() => expect(onPendingUndoConsumed).toHaveBeenCalledWith(1));
       const restored = canonical.nodeFromJSON(parseRichdocMarkdown(restoredText)).toJSON();
       expect(editor.getJSON()).toEqual(restored);
-      // The same token again is already spent.
       view.rerender(
         createElement(MarkdownEditor, { ...props, pendingUndo, onPendingUndoConsumed }),
       );
       expect(onPendingUndoConsumed).toHaveBeenCalledTimes(1);
       expect(onDirty).not.toHaveBeenCalled();
-      // The restore is one undo step of its own, not part of the edit before it.
       expect(undoDepth(editor.state)).toBe(depth + 1);
 
       act(() => {
@@ -232,10 +228,6 @@ describe("raw HTML in a browser", () => {
     },
   );
 
-  // The collaboration extensions load after the first render. Until then no
-  // editor exists to take the pending undo, whatever text the caller holds,
-  // and a bound editor leaves it to the shared history through a lost and
-  // recovered connection and a rebind to the recovered document.
   it.each([["that matches the restore", "Shared."]])(
     "keeps a pending undo out of a shared document from loading through recovery, with local text %s",
     async (_name, value) => {
@@ -366,12 +358,9 @@ describe("desktop editor schema parity", () => {
         expect(bound.getJSON()).toEqual(expected);
         return bound;
       });
-      // Opening the document wrote nothing to it.
       expect(updates).toEqual([]);
       doc.off("update", recordUpdate);
 
-      // A document the editor's schema writes reads back unchanged with the
-      // projection's schema, after its own trip over the wire.
       const written = new Y.Doc();
       prosemirrorJSONToYXmlFragment(
         editor.schema,
@@ -386,8 +375,6 @@ describe("desktop editor schema parity", () => {
       written.destroy();
       received.destroy();
 
-      // The source view, the editor's copy, and the projector write the same
-      // Markdown.
       const projected = projectYDocToMarkdown(doc);
       expect(yDocToMarkdown(doc)).toBe(projected);
       expect(projected.startsWith(EDGE_FRONTMATTER)).toBe(true);
@@ -395,8 +382,6 @@ describe("desktop editor schema parity", () => {
         projected.slice(EDGE_FRONTMATTER.length),
       );
 
-      // The writer's shared types, literal special keys, and native Any
-      // bigints are untouched by every step above.
       const frontmatter = doc.getMap<unknown>("frontmatter");
       expect(frontmatter.get("exact")).toBe(9007199254740993n);
       expect(frontmatter.get("nested")).toEqual({ exact: 9007199254740993n });
@@ -408,7 +393,6 @@ describe("desktop editor schema parity", () => {
       const literal = frontmatter.get("literal") as Y.Array<Y.Map<unknown>>;
       expect(literal).toBeInstanceOf(Y.Array);
       expect(literal.get(0).get("constructor")).toBe("hostile-constructor");
-      // A literal key spelled like the bigint marker keeps one escape `$`.
       expect([...literal.get(1).keys()]).toEqual(["$$dohcBigInt"]);
       expect(literal.get(1).get("$$dohcBigInt")).toBe(9007199254740993n);
       const mixed = frontmatter.get("mixed") as Y.Array<Y.Map<unknown>>;

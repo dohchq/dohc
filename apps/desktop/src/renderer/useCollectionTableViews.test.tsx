@@ -53,7 +53,6 @@ afterEach(() => {
   latest = null;
 });
 
-// What the hook last gave its page: the tabs' data, and what the tabs' controls call.
 let latest: CollectionTableViewsState | null = null;
 type HarnessProps = {
   workspaceId: string;
@@ -63,7 +62,6 @@ type HarnessProps = {
   onNotice?(message: string, undo?: () => void): void;
   enabled?: boolean;
 };
-/** A page that shows the hook's views as the frame's tabs would: the saved names, the open one, and the Views command. */
 function Views(props: HarnessProps) {
   const views = useCollectionTableViews({ ...props, enabled: props.enabled ?? true });
   latest = views;
@@ -191,7 +189,6 @@ it("creates, reloads, renames, deletes and restores a source-backed filtered vie
   );
   first.unmount();
   render(<Views {...props} />);
-  // The view that was open opens again, from what this computer kept.
   await waitFor(() => expect(openView()).toBe(file.views()[0]!.viewId));
   fireEvent.click(screen.getByRole("button", { name: "Views" }));
   fireEvent.click(screen.getByRole("button", { name: "Edit view Unpaid" }));
@@ -201,7 +198,6 @@ it("creates, reloads, renames, deletes and restores a source-backed filtered vie
   fireEvent.click(await screen.findByRole("button", { name: "Undo view deletion" }));
   await screen.findByRole("button", { name: "Edit view Needs payment" });
   expect(props.onError).not.toHaveBeenCalled();
-  // The rename, the deletion and its Undo each named the hash they read.
   expect(hashes).toHaveLength(3);
 });
 it("ignores a source response after leaving the workspace", async () => {
@@ -227,7 +223,6 @@ it("ignores a source response after leaving the workspace", async () => {
       truncated: false,
     }),
   );
-  // Nothing the page was given changed, and nothing was reported or kept.
   expect(latest).toBe(before);
   expect(latest?.list).toEqual([]);
   expect(onError).not.toHaveBeenCalled();
@@ -263,7 +258,6 @@ it("opens a saved calendar whose date field is gone, but saves a calendar only w
   );
   expect(backend.writeWorkspaceText).not.toHaveBeenCalled();
   expect(onError).not.toHaveBeenCalled();
-  // The same holds for a calendar added from the tabs, which answers in words.
   let answer: string | null = null;
   await act(async () => {
     answer = await latest!.create({ name: "Days", kind: "calendar", dateField: id(8) });
@@ -285,7 +279,6 @@ it("adds a view from the tabs, opens it, and names the hash it read on every lat
     answer = await latest!.create({ name: "By status", kind: "board", groupBy: id(3) });
   });
   expect(answer).toBeNull();
-  // No file yet, so the first view creates it.
   expect(backend.createWorkspaceFile).toHaveBeenCalledExactlyOnceWith(
     expect.objectContaining({
       workspaceId: "w",
@@ -322,7 +315,6 @@ it("adds a view from the tabs, opens it, and names the hash it read on every lat
   );
   expect(savedNames()).toEqual(["By status", "Everything"]);
   expect(openView()).toBe(file.views()[1]!.viewId);
-  // All records opens no saved view, and this computer keeps that too.
   act(() => latest!.select(null));
   expect(openView()).toBe("");
   expect(localStorage.getItem(JSON.stringify(["dohc-collection-view", "w", id(1), id(2)]))).toBe(
@@ -340,7 +332,6 @@ it("answers in words when the file changed elsewhere, and never writes over it",
   await act(async () => {
     await latest!.create({ name: "Mine", kind: "table" });
   });
-  // Another computer changes the file after this page read it.
   const theirs = JSON.stringify({
     formatVersion: 1,
     datasetId: id(1),
@@ -359,7 +350,6 @@ it("answers in words when the file changed elsewhere, and never writes over it",
   expect(file.text).toBe(theirs);
   // The popover shows the answer, so no toast repeats it.
   expect(onError).not.toHaveBeenCalled();
-  // The hook read the file again, so the tabs show it and the next change names its hash.
   expect(savedNames()).toEqual(["Theirs"]);
   expect(openView()).toBe("");
   await act(async () => {
@@ -391,7 +381,6 @@ it("reads the file again after a write that failed, so the next change saves", a
   });
   expect(answer).toBe("dohc could not save this view. The disk is full.");
   expect(backend.readWorkspaceText.mock.calls.length).toBe(reads + 1);
-  // The page is not left busy, and the open view stays open.
   expect((screen.getByRole("button", { name: "Views" }) as HTMLButtonElement).disabled).toBe(false);
   expect(openView()).toBe(mine);
   await act(async () => {
@@ -415,7 +404,6 @@ it("reports nothing of a failed save once its table closed while the views were 
   backend.writeWorkspaceText.mockRejectedValueOnce(Error("The disk is full."));
   const again = deferred<{ text: string; contentHash: string; truncated: false }>();
   backend.readWorkspaceText.mockReturnValueOnce(again.promise);
-  // The field's save fails, and the table closes before the views are read again.
   await act(async () => {
     latest!.setField(board, { groupBy: id(3) });
   });
@@ -457,16 +445,13 @@ it("renames a view, refuses a name another view has, and saves the field a board
   });
   expect(answer).toBeNull();
   expect(file.views().map((view) => view.name)).toEqual(["Waiting", "Board"]);
-  // Board was open, and a rename of another view leaves it open.
   expect(openView()).toBe(board);
-  // The open view stays open under its new name.
   await act(async () => {
     answer = await latest!.rename(board!, "Columns");
   });
   expect(answer).toBeNull();
   expect(openView()).toBe(board);
   expect(latest!.active).toMatchObject({ name: "Columns" });
-  // With All records open, a rename opens nothing.
   act(() => latest!.select(null));
   await act(async () => {
     answer = await latest!.rename(pending!, "Queue");
@@ -517,7 +502,6 @@ it("deletes a view with an Undo in its notice, which puts the view back after th
     ),
   );
   expect(file.views().map((view) => view.name)).toEqual(["Keep"]);
-  // The open view was the deleted one, so All records shows.
   expect(openView()).toBe("");
   expect(savedNames()).toEqual(["Keep"]);
   page.unmount();

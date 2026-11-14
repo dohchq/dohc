@@ -407,7 +407,6 @@ describe("FileInspector Excalidraw view", () => {
       ),
     );
     fireEvent.click(screen.getByTestId("orphaned-draft-copy"));
-    // The copy resolves the lossless draft text asynchronously at the click.
     await waitFor(() =>
       expect((navigator.clipboard as Clipboard & { lastText?: string }).lastText).toBeTruthy(),
     );

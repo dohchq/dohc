@@ -44,7 +44,6 @@ const AT_MESSAGE: NoticeTarget = {
   message: "message-1",
 };
 
-// Main's answers wait until the test settles them, in the order they were asked.
 function renderShells() {
   const answers: Deferred<WorkLinkPlace | null>[] = [];
   const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
@@ -95,7 +94,6 @@ describe("a work link clicked in dohc", () => {
     await expect(stale).resolves.toBe(true);
     expect(onSwitchWorkspace).not.toHaveBeenCalled();
 
-    // The remounted shell asks for its own workspace and opens its own answer.
     const fresh = openWorkLinkInDohc(LINK);
     await waitFor(() =>
       expect(bridge.resolveWorkLink).toHaveBeenLastCalledWith({

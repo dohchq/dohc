@@ -18,10 +18,11 @@ import {
 } from "node:fs";
 import { chmod, lstat, readdir, rm } from "node:fs/promises";
 import { createServer } from "node:net";
-import { cpus, freemem, uptime } from "node:os";
+import { cpus, freemem, totalmem, uptime } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
+import { wslPath } from "./linux.mjs";
 import { git, run } from "./process.mjs";
 import {
   envHelper,
@@ -155,7 +156,6 @@ export async function cleanCheckout(gitOutput, root) {
   return gitOutput(clean);
 }
 
-/** Adds the owner's write permission throughout `path`, leaving symbolic links and the caches the clean keeps. */
 async function makeWritable(path, caches) {
   const info = await lstat(path).catch(() => null);
   if (!info || info.isSymbolicLink()) return;
@@ -236,7 +236,6 @@ async function holdLegacyLane({ entry, signal, lanes }) {
   });
 }
 
-/** Run the lane's own verifier for one attempt. */
 async function defaultWorker({ lane, request, grant, output, signal }) {
   const args = [
     "scripts/verification/verify.mjs",
@@ -300,6 +299,58 @@ function holdInstance(root) {
 export const freeMemoryGb = (platform = process.platform) =>
   (platform === "darwin" ? process.availableMemory() : freemem()) / 1024 ** 3;
 
+export const defaultMemoryFailGb = (bytes = totalmem()) => Math.min(3, bytes / 1024 ** 3 / 10);
+
+/** Only the immediately preceding low-memory check failure can corroborate this receipt. */
+export function trustCheckFailure(outcome, receipt, gates, previous, { disk, memory, docker }) {
+  if (outcome.outcome !== "failed" || outcome.cause !== "check") return outcome;
+  const failed = (receipt?.failed ?? [])
+    .filter((row) => row.step || row.test)
+    .map(({ step, test }) => [step ?? "", test ?? ""])
+    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  const step = receipt?.failure?.cause ?? "";
+  // Every log a receipt names sits under its attempt folder, whose path carries the attempt number.
+  let error = receipt?.error ?? "";
+  if (receipt?.output) {
+    error = error.replaceAll(receipt.output, "<attempt>");
+    try {
+      // The Linux verifier on Windows names the same folder by its WSL path.
+      error = error.replaceAll(wslPath(receipt.output), "<attempt>");
+    } catch {
+      // The folder is not on a Windows drive, so it has no WSL form.
+    }
+  }
+  const selected = receipt?.gates ?? gates;
+  const signature =
+    failed.length || error
+      ? createHash("sha256")
+          .update(
+            JSON.stringify([step, error, failed, Boolean(selected?.js), Boolean(selected?.rust)]),
+          )
+          .digest("hex")
+      : null;
+  // Disk and Docker can reproduce the same failure themselves, even when memory is also low.
+  const host = disk ?? docker ?? memory;
+  if (!host) return outcome;
+  const repeatable = host === memory && signature;
+  if (
+    repeatable &&
+    previous?.outcome === "environment" &&
+    previous.cause === "host" &&
+    previous.lowMemoryFailure === signature
+  )
+    return {
+      ...outcome,
+      reason: `${outcome.reason ?? "The check failed."} The same check failure repeated under low memory.`,
+    };
+  return {
+    outcome: "environment",
+    cause: "host",
+    reason: `${host} during the run, so its failure is not trusted.`,
+    ...(repeatable ? { lowMemoryFailure: signature } : {}),
+  };
+}
+
 /**
  * Stop what a request's verifier left running once its attempt ends, and resolve with how many processes that was.
  * Every process the verifier starts inherits the request's marker, except Apple's programs, whose environment is hidden.
@@ -340,7 +391,7 @@ export async function runService({
   floorGb = resolveBuildBudget()?.diskFloorGb ?? 40,
   // Another run starts only with this much free memory; a check that failed after it fell under the second floor is not trusted.
   memoryFloorGb = 10,
-  memoryFailGb = 3,
+  memoryFailGb = defaultMemoryFailGb(),
   freeMemory = freeMemoryGb,
   freeDisk = () => freeDiskGb(lane) ?? freeDiskGb(root),
   docker = dockerResponds,
@@ -938,20 +989,27 @@ export async function runService({
       if (outcome.outcome === "failed" && outcome.cause === "check") {
         // A check that failed while the host was failing proves nothing about the change.
         const free = freeDisk();
-        const host =
+        const disk =
           free !== null && free < Math.min(floorGb, 5)
             ? `free disk fell to ${free.toFixed(1)} GB`
-            : current.load.minFreeMemGb < memoryFailGb
-              ? `free memory fell to ${current.load.minFreeMemGb.toFixed(1)} GB`
-              : entry.request.gates?.js && !(await docker())
+            : null;
+        outcome = trustCheckFailure(
+          outcome,
+          receipt,
+          entry.request.gates,
+          entry.status.attempts.at(-1),
+          {
+            disk,
+            memory:
+              current.load.minFreeMemGb < memoryFailGb
+                ? `free memory fell to ${current.load.minFreeMemGb.toFixed(1)} GB`
+                : null,
+            docker:
+              !disk && entry.request.gates?.js && !(await docker())
                 ? "Docker stopped responding"
-                : null;
-        if (host)
-          outcome = {
-            outcome: "environment",
-            cause: "host",
-            reason: `${host} during the run, so its failure is not trusted.`,
-          };
+                : null,
+          },
+        );
       }
       // The attempt stays owned until its outcome is on disk. If that write fails, the
       // service stops, and its replacement recovers the request from the receipt.

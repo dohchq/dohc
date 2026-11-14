@@ -26,7 +26,7 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-// The four forms the editor can't hold, from #2458.
+// The four forms the editor can't hold.
 const LOSSY = [
   "# Readme",
   "",
@@ -61,7 +61,6 @@ function witness(doc: Y.Doc, source: string): Y.Doc {
   return doc;
 }
 
-// An engine session seeded from LOSSY, with the witness and head the engine records.
 function lossySession(doc = witness(markdownToYDoc(LOSSY), LOSSY)) {
   return {
     available: true as const,
@@ -81,7 +80,6 @@ type RemoteUpdateListener = (event: {
 const remoteUpdateListeners = new Set<RemoteUpdateListener>();
 const lineageReplacementListeners = new Set<(event: EngineYDocLineageReplacementEvent) => void>();
 const noticeListeners = new Set<() => void>();
-// The change the engine holds for a.md, in the tests that hold one.
 const HELD = {
   path: "a.md",
   file: LOSSY,
@@ -117,7 +115,6 @@ function bridgeFor(reads: Array<{ text: string; contentHash: string }>) {
       fileObjectId: "object-1",
       threads: [],
     })),
-    // History's page for the file: its latest moment recorded LOSSY.
     listEngineMoments: vi.fn(async (): Promise<unknown> => ({ moments: [{ id: "moment-1" }] })),
     readEngineMoment: vi.fn(async (): Promise<unknown> => ({ moment: { afterText: LOSSY } })),
     listWorkspaceFiles: vi.fn(async () => ({
@@ -219,10 +216,8 @@ describe("a lossy note", () => {
     const added = [...diff.querySelectorAll('[data-kind="added"] code')].map(
       (line) => line.textContent,
     );
-    // The file's lines are the removed side; the held change's are the added side.
     expect(removed).toEqual(["Removed: See [the docs][docs]."]);
     expect(added).toEqual(["Added: See [the setup docs][docs] first."]);
-    // Word marks show the words that changed inside the line.
     expect([...diff.querySelectorAll("ins")].map((mark) => mark.textContent?.trim())).toEqual([
       "setup",
       "first",
@@ -236,7 +231,6 @@ describe("a lossy note", () => {
 
     await user.click(within(dialog).getByRole("button", { name: "Close" }));
     expect(screen.queryByTestId("held-change-dialog")).toBeNull();
-    // Reviewing reads and changes nothing.
     expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
     expect(bridge.openEngineYDocSession).not.toHaveBeenCalled();
   });
@@ -436,7 +430,6 @@ describe("a lossy note", () => {
 
 describe("Edit anyway", () => {
   const OUTSIDE = LOSSY.replace("Hidden.", "Changed outside dohc.");
-  // The head of the file the converting save writes.
   const CONVERTED = sha(WRITTEN);
 
   // Main forwards each update with the head its state was read with, all
@@ -505,7 +498,6 @@ describe("Edit anyway", () => {
     const { bridge, engineDoc, user, title, editor } = await editAnyway();
     const stillEditing = () => expectEditing(editor, title);
 
-    // The converting save commits.
     deliver(bridge, EMPTY_UPDATE, { sha256: CONVERTED, committed: true });
     stillEditing();
     // The engine then clears the source the note recorded, which leaves the
@@ -526,7 +518,6 @@ describe("Edit anyway", () => {
     stillEditing();
     deliver(bridge, EMPTY_UPDATE, { sha256: sha("second save"), committed: true });
     stillEditing();
-    // A resync that changed nothing reads the second save's head again.
     deliver(bridge, EMPTY_UPDATE, { sha256: sha("second save") });
     stillEditing();
     await user.keyboard(" three");
@@ -584,7 +575,6 @@ describe("Edit anyway", () => {
 
   it("asks again after a restore to the same bytes while the converting save is pending, even when that save's success arrives late", async () => {
     const { bridge } = await editAnyway(LOSSY);
-    // The restore installs the bytes the person accepted, with the same head.
     deliver(bridge, EMPTY_UPDATE, { sha256: sha(LOSSY) });
     deliver(bridge, EMPTY_UPDATE, { sha256: CONVERTED, committed: true });
 

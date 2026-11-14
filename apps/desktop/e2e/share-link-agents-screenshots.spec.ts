@@ -172,7 +172,6 @@ test("@ui-audit Copy for an agent and a link's Agents list", async () => {
       )
       .toBe(true);
 
-    // The new link: its URL with Copy, and Copy for an agent beside it.
     let dialog = await openLinkPane(page);
     await dialog.getByRole("button", { name: "Create link", exact: true }).click();
     const linkUrl = new URL((await dialog.getByTestId("share-link-url").textContent()) ?? "");
@@ -189,7 +188,6 @@ test("@ui-audit Copy for an agent and a link's Agents list", async () => {
       expect(await desktop!.app.evaluate(({ clipboard }) => clipboard.readText())).toBe(address);
     });
 
-    // Two agents sign in with the copied address, and each makes a call.
     const named = await signInLinkAgent({
       handle: shared.handle,
       browser: shared.browser,
@@ -216,8 +214,6 @@ test("@ui-audit Copy for an agent and a link's Agents list", async () => {
     await expect(agents).toContainText("Claude Code");
     await expect(agents).toContainText("Name reported by the agent");
     await expect(agents).toContainText("The agent reported no name");
-    // Two agents make the pane taller than the window: the body scrolls to
-    // them while the title and the backdrop stay put.
     await expect(dialog).toHaveAttribute("data-scrolls", "");
     await agents.scrollIntoViewIfNeeded();
     const body = dialog.getByTestId("share-dialog-body");
@@ -234,7 +230,6 @@ test("@ui-audit Copy for an agent and a link's Agents list", async () => {
     await page.evaluate(() => document.documentElement.style.removeProperty("--dohc-toast-room"));
     await shoot(page, dialog, "share-link-b-agents-two");
 
-    // Disconnect ends the agent's connection: its next call is refused.
     await agents.getByRole("button", { name: "Disconnect Claude Code" }).click();
     await expect(agents.getByRole("listitem")).toHaveCount(1);
     expect((await named.rpc("tools/list")).status).toBe(401);

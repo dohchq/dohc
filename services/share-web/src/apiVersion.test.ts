@@ -20,7 +20,6 @@ vi.mock("./apiVersion", async (importOriginal) => {
     },
   };
 });
-// A later build speaks `compiled` and still accepts versions from `min`.
 const release = (compiled: number, min: number) => {
   build.compiled = compiled;
   build.accepted = { min, max: compiled };

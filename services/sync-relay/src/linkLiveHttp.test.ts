@@ -142,7 +142,6 @@ it("finds a document for a connected agent, and never opens a browser gateway se
   });
   expect(await (await handle(agentRequest(agent))).json()).toEqual({ objectId: binding.objectId });
   expect(await (await handle(request())).json()).toEqual({ objectId: binding.objectId });
-  // A capability is never read under another scheme, and a holder's capability is not an agent's token.
   for (const authorization of [`Bearer ${bearer}`, `DohcAgent ${bearer}`])
     expect((await handle(request(undefined, undefined, { authorization }))).status).toBe(404);
   const refused: Record<string, string>[] = [
@@ -262,7 +261,3 @@ it("explains a document the session host blocked as unavailable until the block 
   blocked = false;
   expect(await (await f.handle(request())).json()).toEqual({ objectId: binding.objectId });
 });
-
-// A link sees each share root by its own name, so a nested folder named
-// shared-with-me shows as the reserved top-level folder, which no binding can
-// hold. The share is valid and covers the file, so only the link's view refuses.

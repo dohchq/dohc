@@ -11,6 +11,7 @@ import type { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import type { OwnerRestoreRequest } from "../ipc/ownerRestoreContract";
 import type {
   AgentRunStateEvent,
+  AgentThreadLinesEvent,
   AgentRunStatusResult,
   CaptureRecoveryStatusResult,
   ReadCrashReportResult,
@@ -205,7 +206,6 @@ const FRESH_FILES_STATE: WorkspaceUiState = serializeUiState({
 // A workspace with no saved state but its Explorer on Home, as a new one opens.
 export const HOME_STATE: WorkspaceUiState = serializeUiState(defaultWorkbenchState());
 
-// The stored state with the chat list showing in the left side panel.
 export const STORED_CHATS_STATE: WorkspaceUiState = { ...STORED_STATE, activeView: "chats" };
 
 export function storedStateWithTabs(
@@ -530,6 +530,18 @@ function makeBaseBridge(
     emitAgentRunState: (event: AgentRunStateEvent) => {
       for (const callback of [...agentRunStateCallbacks]) callback(event);
     },
+    // No agent thread holds a forwarded message until a test says one does.
+    readAgentThreadLines: vi.fn(
+      async ({ workspaceId }: { workspaceId: string }): Promise<AgentThreadLinesEvent> => ({
+        workspaceId,
+        revision: 0,
+        lines: [],
+      }),
+    ),
+    onAgentThreadLines: vi.fn(
+      (_listener: (event: AgentThreadLinesEvent) => void) => () => undefined,
+    ),
+    openAgentThread: vi.fn(async () => undefined),
     // Agent dispatch runs until a test pauses it.
     readChatDispatchPaused: vi.fn(async () => ({ paused: chatDispatchPaused })),
     setChatDispatchPaused: vi.fn(async ({ paused }: { paused: boolean }) => {
@@ -658,6 +670,12 @@ function makeBaseBridge(
     })),
     createWorkspaceFolder: vi.fn(async (payload: { relativePath: string }) => ({
       path: payload.relativePath,
+    })),
+    duplicateWorkspaceFile: vi.fn(async (payload: { relativePath: string }) => ({
+      path: payload.relativePath.replace(/\.md$/u, " - Copy.md"),
+      materialized: true,
+      operationId: "dohc-operation:00000000-0000-4000-8000-000000000000",
+      undo: { available: true as const },
     })),
     importWorkspaceFiles: vi.fn(async (): Promise<ImportWorkspaceFilesResult> => ({
       imported: ["imported.md"],
@@ -803,14 +821,12 @@ function makeBaseBridge(
       };
     }),
     onCloudSessionChanged: vi.fn((_callback: () => void) => () => {}),
-    // Folder app offers: no folder is an app unless a test says so.
     getFolderApp: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["getFolderApp"]>(
       async ({ workspaceId, folder }) => ({ workspaceId, folder, isApp: false, run: null }),
     ),
     onFolderAppChanged: vi.fn<
       import("../ipc/bridgeContract").DohcDesktopBridge["onFolderAppChanged"]
     >(() => () => undefined),
-    // The Explorer's Apps section: no apps unless a test says so.
     listSites: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["listSites"]>(async () => ({
       sites: [],
     })),

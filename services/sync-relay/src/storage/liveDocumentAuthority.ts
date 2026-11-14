@@ -78,6 +78,7 @@ import type { LiveTicketScope } from "../liveBrowserContext";
 import { authorizeNamedLiveEditShareGrant } from "../shareAuthorization";
 import { readLiveHostControl, parseHostControlTimestamp } from "./hostControl";
 import { assertWorkspaceQuota } from "./workspaces";
+import { SyncRelayQuotaExceededError } from "./errors";
 import {
   prepareLiveDeliveryWorkspace,
   registerLiveDeliveryBaseline,
@@ -937,6 +938,17 @@ function parseStoredLiveTicket(row: Record<string, unknown>): {
 
 export const LIVE_TICKET_REFUSED = Symbol("live-ticket refused");
 
+/**
+ * A principal already holds its share of unexpired tickets, as when its tabs keep reconnecting.
+ * That passes as the tickets expire, so a mint fails like the relay's own busy state instead of
+ * refusing.
+ */
+export class LiveTicketsRetained extends Error {
+  constructor() {
+    super("The principal holds its share of live tickets.");
+  }
+}
+
 function snapshotTicketLookup(input: Record<string, unknown>): LiveTicketLookup {
   return {
     tokenHash: parseTicketHash(input.tokenHash),
@@ -993,6 +1005,13 @@ export function ticketScopeIsCurrent(storage: StorageContext, scope: LiveTicketS
             .get(scope.sessionId, scope.capabilityHash)) &&
         currentLinkEdit(storage, liveBrowserActor(scope)) !== null)
   );
+}
+
+/** Whether a link browser's ticket would enroll one browser more than its link takes. */
+export function liveLinkFull(storage: StorageContext, scope: LiveTicketScope): boolean {
+  if (scope.kind !== "link" || "agentConnectionId" in scope) return false;
+  const link = currentLinkEdit(storage, liveBrowserActor(scope));
+  return !!link && linkPrincipalLimitReached(storage, link.enrollment);
 }
 
 export function currentTicketAuthority(
@@ -1089,7 +1108,18 @@ export function mintLiveTicket(
   const objectId = parseLiveUpdateIdentifier(raw.objectId, "object ID");
   const ticketId = parseLiveUpdateIdentifier(raw.ticketId, "ticket ID");
   const report = snapshotTicketHostReport(raw.report);
+  // A full workspace refuses a ticket the way a full link does, whichever record would not fit.
   return storage.ticketTransaction((now, policy) => {
+    try {
+      return mintInTransaction(now, policy);
+    } catch (error) {
+      throw error instanceof SyncRelayQuotaExceededError ? LIVE_TICKET_REFUSED : error;
+    }
+  });
+  function mintInTransaction(
+    now: number,
+    policy: LiveTicketStoragePolicy,
+  ): { expiresAtMs: number; publicPrincipalId?: string } {
     if (now > Number.MAX_SAFE_INTEGER - LIVE_TICKET_LIFETIME_MS) throw LIVE_TICKET_REFUSED;
     if (owned.scope.kind === "link") {
       const actor = liveBrowserActor(owned.scope);
@@ -1156,7 +1186,7 @@ export function mintLiveTicket(
         ? { publicPrincipalId: ensureLiveLinkPublicPrincipal(storage, current.authority) }
         : {}),
     };
-  });
+  }
 }
 
 /**
@@ -1209,8 +1239,9 @@ export function storeLiveTicketInTransaction(
       now,
       policy.retainedTicketsPerPrincipalGrant,
     );
-  if (!count || Number(count.retained_count) >= policy.retainedTicketsPerPrincipalGrant)
-    throw LIVE_TICKET_REFUSED;
+  if (!count) throw LIVE_TICKET_REFUSED;
+  if (Number(count.retained_count) >= policy.retainedTicketsPerPrincipalGrant)
+    throw new LiveTicketsRetained();
   storage.db
     .prepare(`INSERT INTO ${LIVE_TICKET_TABLE} (${LIVE_TICKET_COLUMNS.join(", ")})
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)`)

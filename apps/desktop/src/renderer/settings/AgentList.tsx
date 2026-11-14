@@ -85,6 +85,7 @@ import {
 } from "./agentRemoval";
 import { RemoveAgentDialog } from "./agentDialogs";
 import { ArchivedAgents, archivedAgentChats, useAgentChats } from "./ArchivedAgents";
+import { T3_CODE } from "./T3CodeThread";
 import { archivedChatsFor } from "../../settings/archivedChats";
 import { isPersonalAgentId } from "../workbench/chosenColors";
 
@@ -199,7 +200,6 @@ function AgentNameField(props: {
   agentId: string;
   name: string;
   maxLength?: number;
-  // Why the field can't save this name, or null when it can.
   problem: (value: string) => string | null;
   onSave: (name: string) => Promise<boolean>;
   onDone: () => void;
@@ -243,7 +243,6 @@ function AgentNameField(props: {
         onChange={(event) => {
           const value = event.currentTarget.value;
           setDraft(value);
-          // Says at once when the name is taken, and clears once it is not.
           setError(problem(value) === NAME_TAKEN ? NAME_TAKEN : null);
         }}
         onBlur={() => void save()}
@@ -273,7 +272,6 @@ function AgentNameField(props: {
   );
 }
 
-// The agent automations wake, in its hue on a 14% tint.
 function AutomationChip(props: { hue: AgentHue | undefined }) {
   const ink = useAgentInk(presentationFor(props.hue));
   return (
@@ -298,22 +296,33 @@ function AgentRow(props: {
   forAutomations: boolean;
   // One of your personal agents has this agent's name, so @ can't tell them apart.
   nameClash: boolean;
+  // For an agent with a thread: dohc forwards the open workspace's messages to it.
+  serves: boolean;
   onOpen: () => void;
 }) {
   const { agent } = props;
   const launched = agent.launch !== undefined;
+  // dohc forwards to this agent's own thread and never starts it.
+  const forwarded = agent.thread !== undefined;
   // Only a switch turns an agent off, so only an agent with one dims.
-  const off = launched && !agent.enabled;
-  // Under the name: what starts the agent, then where it stands. A check
-  // reports even when the agent is off.
+  const off = (launched || forwarded) && !agent.enabled;
+  // Under the name: what starts the agent, or the tool that holds its thread,
+  // then where it stands. A check reports even when the agent is off.
   const launch = agent.launch;
   const toolId = launch && "tool" in launch ? launch.tool : null;
-  const tool = !launch
-    ? null
-    : toolId
-      ? AGENT_TOOLS.find((entry) => entry.id === toolId)!.name
-      : "Your command";
-  const status = !launched ? (
+  const tool = forwarded
+    ? T3_CODE
+    : !launch
+      ? null
+      : toolId
+        ? AGENT_TOOLS.find((entry) => entry.id === toolId)!.name
+        : "Your command";
+  // Pause all agents holds only the agents dohc starts, so it says nothing here.
+  const status = forwarded ? (
+    <span className="text-muted">
+      {off ? "Off" : props.serves ? "On" : "Not in this workspace"}
+    </span>
+  ) : !launched ? (
     props.listening ? (
       <span className="inline-flex items-center gap-1 text-success">
         <Ear size={12} aria-hidden />
@@ -688,7 +697,6 @@ export function AgentList(props: {
   const [checks, setChecks] = useState<Record<string, CheckState>>({});
   // A check's answer belongs to the workspace that asked for it.
   const requests = useRequestSequence([workspaceId]);
-  // The agent whose page shows, or null for the list.
   const [opened, setOpened] = useState<string | null>(null);
   useEffect(() => {
     setChecking(null);
@@ -697,13 +705,13 @@ export function AgentList(props: {
   const [renaming, setRenaming] = useState<string | null>(null);
   const [sheetOpen, setSheetOpen] = useState(false);
   const [adding, setAdding] = useState(false);
-  // The tools installed on this computer, for Add agent and each agent's page.
+  // Why the sheet's last Add added nothing, shown in the sheet.
+  const [addError, setAddError] = useState<string | null>(null);
   const [detection, setDetection] = useState<AgentToolsResult | "failed" | null>(null);
   const tools = detection === "failed" ? null : detection;
   const toolRequests = useRequestSequence([workspaceId]);
   const reportError = useRef(onError);
   reportError.current = onError;
-  // Try again on a failed look's toast looks again.
   const detectTools = useCallback(async (): Promise<void> => {
     const token = toolRequests.next();
     setDetection(null);
@@ -747,7 +755,6 @@ export function AgentList(props: {
   const [removing, setRemoving] = useState<{ workspaceId: string; agent: Agent } | null>(null);
   if (removing && removing.workspaceId !== workspaceId) setRemoving(null);
   const anyLaunch = rows.some((row) => row.kind === "agent" && row.agent.launch !== undefined);
-  // The chip shows only when there is more than one agent to choose from.
   const automation = automationAgent(settings);
   const choosing =
     rows.filter((row) => row.kind === "agent" && row.agent.launch !== undefined).length > 1;
@@ -797,7 +804,6 @@ export function AgentList(props: {
     setRenaming(null);
     setOpened(null);
   };
-  // A page whose agent left the file or the roster, such as after Remove, goes back to the list.
   useEffect(() => {
     if (opened !== null && page === null && personalPage === null) {
       focusAfter.current = "heading";
@@ -899,7 +905,6 @@ export function AgentList(props: {
       try {
         const result = await bridge().runnerSelfTest({ workspaceId, agentId: agent.id });
         if (result.ok) onClearError?.(identity);
-        // The toast names the agent and checks it again; why, and its log, go in the details.
         else if (await stillListed(agent.id)) {
           onError?.(
             result.unconfirmed
@@ -953,6 +958,7 @@ export function AgentList(props: {
   ).hue;
 
   // A new agent dohc starts is checked at once when it is on; one you run has nothing to check.
+  // An agent with a thread serves the workspace it was connected in.
   const add = async (fields: NewAgent) => {
     const id = idFor(fields.launch !== undefined, fields.idBase);
     const agent: AgentSettings = {
@@ -961,10 +967,31 @@ export function AgentList(props: {
       hue: fields.hue,
       enabled: fields.enabled,
       ...(fields.launch ? { launch: fields.launch } : {}),
+      ...(fields.thread ? { thread: fields.thread, workspaces: [workspaceId] } : {}),
     };
     // The agent is saved for every workspace; its check belongs to this one.
     const token = requests.current();
+    setAddError(null);
     setAdding(true);
+    if (fields.thread) {
+      // The thread gets dohc's introduction first. When T3 Code refuses it,
+      // nothing is saved for a thread dohc cannot message.
+      try {
+        await bridge().readyAgentThread({
+          workspaceId,
+          agentId: id,
+          name: fields.name,
+          threadId: fields.thread.id,
+        });
+      } catch (cause) {
+        setAdding(false);
+        if (requests.isCurrent(token))
+          setAddError(
+            ipcErrorMessage(cause, `dohc could not connect ${fields.name} to its thread.`),
+          );
+        return;
+      }
+    }
     const saved = await onSave({ ...settings, agents: { ...settings.agents, [id]: agent } });
     setAdding(false);
     if (!saved) return;
@@ -1158,6 +1185,7 @@ export function AgentList(props: {
             onRemove={() => setRemoving({ workspaceId, agent })}
             onCheck={() => void check(agent)}
             onChange={(change) => void onSave(withAgent(settings, agent.id, change))}
+            onError={(message, cause, retry) => onError?.(message, cause, retry)}
             onBack={closePage}
             backRef={back}
           />
@@ -1293,6 +1321,7 @@ export function AgentList(props: {
                   marking={activeRun?.agentId === row.agent.id}
                   forAutomations={choosing && automation?.id === row.agent.id}
                   nameClash={takenByPersonal(row.agent.name)}
+                  serves={row.agent.workspaces?.includes(workspaceId) ?? false}
                   onOpen={() => openPage(row.agent.id)}
                 />
               ),
@@ -1376,9 +1405,11 @@ export function AgentList(props: {
           agentLink={agentLinkChoice(personal.state, workspaceId, props.workspaceName)}
           takenElsewhere={takenByPersonal}
           adding={adding}
+          addError={addError}
           onAdd={(agent) => void add(agent)}
           onCancel={() => {
             focusAfter.current = null;
+            setAddError(null);
             setSheetOpen(false);
           }}
         />

@@ -325,10 +325,8 @@ describe("Excalidraw scene adapter", () => {
     });
 
     expect(result.changed).toBe(false);
-    // The superseded revision was not re-added beside the winner.
     expect([...declareSceneRoots(doc).revisions.keys()]).toEqual([revisionKey("shape", 2, 7)]);
 
-    // A real local edit is strictly newer than the winner and still lands.
     const edited = binding.apply({
       elements: [rectangle(3, 5, 40)],
       appState: {},
@@ -341,8 +339,6 @@ describe("Excalidraw scene adapter", () => {
   it("discards a delayed callback's superseded app state", () => {
     const doc = new Y.Doc();
     const binding = new ExcalidrawSceneBinding(doc);
-    // First remote render carries gridSize 10; a second render moves it to 20
-    // before Excalidraw delivers the first render's callback.
     binding.apply({
       elements: [],
       appState: { gridSize: 10 },
@@ -364,7 +360,6 @@ describe("Excalidraw scene adapter", () => {
     expect(stale.changed).toBe(false);
     expect(foldScene(doc).appState.gridSize).toBe(20);
 
-    // A real local change to a new value still lands.
     const edited = binding.apply({
       elements: [],
       appState: { gridSize: 30 },

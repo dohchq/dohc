@@ -118,7 +118,6 @@ for (const theme of ["light", "dark"] as const) {
       await page.screenshot({ path: test.info().outputPath(`create-form-narrow-${theme}.png`) });
       await form.getByRole("button", { name: "Cancel", exact: true }).click();
       await expect(form).toBeHidden();
-      // Focus returns to the menu's button, which opened the command's dialog.
       await expect(manage).toBeFocused();
       await manage.click();
       await expectInsideViewport(

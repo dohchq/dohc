@@ -27,7 +27,6 @@ const agent = { kind: "agent", agentId: "test-agent", onBehalfOf: "local:owner" 
 const otherId = "dohc-operation:11111111-1111-4111-8111-111111111111";
 const missingMove =
   "Cannot undo the rename. Its recovery record is missing or expired. Rename it back yourself.";
-// A refused Undo whose cause main cannot name.
 const refused = (reason: string) => ({ ok: false, reason, refusal: { code: "unexplained" } });
 async function fixture(trackedPaths = ["folder/tracked.txt"]) {
   const rootPath = await createTestScratch("history-operation-floor-");
@@ -953,8 +952,6 @@ it("refuses Undo of a delete or rename before the workspace's open prepares .doh
   expect(await readFile(join(f.rootPath, "before.txt"), "utf8")).toBe("kept edits");
 });
 
-// A saved Undo still restoring asks History again on each retry, and saves
-// what it learns, so the retry waits for the open as a first Undo does.
 it("checks readiness before a retried delete Undo asks History to finish restoring", async () => {
   const f = await fixture(),
     id = await f.remove();
@@ -987,9 +984,6 @@ it("checks readiness before a retried delete Undo asks History to finish restori
   });
 });
 
-// The engine refuses an Undo that would move back, or delete, a page this
-// computer owns live. An agent reads the words as plain text, and the
-// Explorer reads the page from the refusal.
 describe("an Undo of a page this computer owns live", () => {
   const body = "In Live documents, stop live editing for this page, then try again.";
 
@@ -1002,7 +996,6 @@ describe("an Undo of a page this computer owns live", () => {
       person,
       { capture: null, requestId: "move", trashItem: async () => undefined, markDeleted: vi.fn() },
     );
-    // History recorded the rename, so its Undo asks the engine.
     const trash = join(f.rootPath, ".dohc/local/trash");
     const sidecar = join(
       trash,
@@ -1022,6 +1015,7 @@ describe("an Undo of a page this computer owns live", () => {
       reason: `dohc can't undo renaming "after.txt" while it has live editing on\n${body}`,
       refusal: { code: "live-page-owned", path: "after.txt" },
     });
+    expect(f.history.undoHistoryOperation).toHaveBeenCalledOnce();
     expect(await readFile(join(f.rootPath, "after.txt"), "utf8")).toBe("kept edits");
     await expect(stat(join(f.rootPath, "before.txt"))).rejects.toMatchObject({ code: "ENOENT" });
   });

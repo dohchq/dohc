@@ -1,15 +1,17 @@
-import { Check, Copy, X } from "lucide-react-native";
+import { Check, CheckCircle2, Copy, X } from "lucide-react-native";
 import { useEffect, useState } from "react";
 import { Pressable, StyleSheet, View, type StyleProp, type ViewStyle } from "react-native";
 import { useTheme } from "../theme";
 
-// Copy and × on a notice's title line, each a 44pt target that doesn't overlap the other.
-// Without a dismiss label, the × column stays empty so every copy button lines up.
+// Copy and × on a notice's title line, each a 44pt target that doesn't overlap the other. A Notice from the server
+// takes Done there, a check in a circle, in place of ×. Without a dismiss label, that column stays empty so every copy
+// button lines up.
 export function TitleControls({
   copyLabel,
   onCopy,
   dismissLabel,
   onDismiss,
+  done = false,
   style,
   demoCopied = false,
 }: {
@@ -17,6 +19,8 @@ export function TitleControls({
   onCopy?(): void;
   dismissLabel?: string;
   onDismiss?(): void;
+  /** The dismiss control is Done. */
+  done?: boolean;
   style?: StyleProp<ViewStyle>;
   /** Design review only: copy once on mount, to shoot the check. */
   demoCopied?: boolean;
@@ -66,7 +70,11 @@ export function TitleControls({
           accessibilityLabel={dismissLabel}
           style={pressedBox}
         >
-          <X size={17} color={theme.subtle} strokeWidth={2} />
+          {done ? (
+            <CheckCircle2 size={17} color={theme.subtle} strokeWidth={2} />
+          ) : (
+            <X size={17} color={theme.subtle} strokeWidth={2} />
+          )}
         </Pressable>
       ) : (
         <View style={styles.box} />

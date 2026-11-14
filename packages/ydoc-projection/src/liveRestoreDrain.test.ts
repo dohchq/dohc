@@ -1969,12 +1969,10 @@ it("retires an activation that carries a restore only once its settlement moment
     let storage = restart();
     expect(complete(storage)).toEqual({ status: "pending", reason: "restore" });
     expect(state(storage)).toEqual(before);
-    // The push lands but its response is lost; the host's retry replays it.
     await pushRestoreSettlement(storage, publication);
     await pushRestoreSettlement(storage, publication);
     storage = restart();
     expect(complete(storage)).toEqual({ status: "retired", replayed: false });
-    // The completion's response is lost; the retry after a restart replays it.
     storage = restart();
     expect(complete(storage)).toEqual({ status: "retired", replayed: true });
     expect(readServiceActivationRetirement(storage as StorageContext, f.document)).toBeNull();
@@ -2036,7 +2034,6 @@ it("waits for a resumed restore's settlement before the next restore begins", as
   }
 });
 
-// The restore's checkpoint, as its host's settlement captures it.
 const restoredState = (f: Pick<ReturnType<typeof fixture>, "raw">, admitted: Admitted) =>
   f.raw
     .prepare(
@@ -2089,49 +2086,6 @@ it("reports a refused restore publication as needing repair", async () => {
   }
 });
 
-// Proves: a proof normalization refuses for capacity gets the same answer on
-// every retry, so a single push publishing a restore is refused instead of
-// asked to retry, and the device's next op lands behind it. The next restore
-// says it needs repair until a later settlement publishes the restore.
-
-// Proves: once a restore's publication is refused, a later settlement whose
-// interval spans the restore's row and runs out of proof budget is refused,
-// not asked to retry, and the device's next op lands behind it.
-
-// Proves: a refused restore publication's hold is released by the settlement
-// that later covers its row from the restore's own row, since the restore
-// can no longer publish. The hold, its lifecycle's charge and workspace usage
-// then match the stored rows.
-
-// Proves: when the newest refused settlement at a resumed restore's
-// generation reaches its last row, beginning or fencing the next restore says
-// it needs repair, with no later edit and across a restart. A settlement the
-// relay refuses and one past the push's proof budget both count.
-
-// Proves: a refused settlement stops counting once a later one covers its
-// row. After a refused publication of restore A, a covering one lands; an
-// edit after it then asks to try again, across a restart, and once the
-// edit's settlement lands the next restore begins.
-
-// Proves: the next fence waits for every row at the resumed restore's
-// generation, not only the restore's own. Edits after restore A are unsettled
-// when restore B would fence, so B waits with nothing changed. Once their
-// settlement lands, B fences and is declined after its fence, and the edits
-// are the file another device reads.
-
-// Proves: a restore's settlement proof and its journal row step back across
-// two consecutive restores declined after their fences, charging each host
-// answer they load to the caller's budget. The traversal finds nothing for a
-// cutover or binding that does not match.
-
-// Proves: the traversal steps across as many declined generations as native's
-// `require_cancelled` does, and finds nothing past them.
-
-// Proves: admission funds a restore's publication apart from its receipts and
-// keeps it through resume. The append that stores the restore's binding
-// releases it once: a failed append keeps it, a second covering settlement
-// releases nothing, and usage is the stored charges plus what is held. The
-// held amount is the moment's log row and the binding, each at its limit.
 it("funds a restore's publication at admission and releases it once with its binding", async () => {
   const f = await admittedRestoreFixture("owner", false);
   try {
@@ -2190,7 +2144,6 @@ it("funds a restore's publication at admission and releases it once with its bin
       originId: "proof",
       ops: [publication.op],
     });
-    // Another settlement of the same row, proved before either lands.
     const second = restorePublication(
       f,
       restoredState(f, f.admitted),
@@ -2203,7 +2156,6 @@ it("funds a restore's publication at admission and releases it once with its bin
       ops: [second.op],
     });
     expect(second.op).toMatchObject({ settlementAdmission: { status: "accepted" } });
-    // Proving releases nothing; only the append does.
     const before = { held: funded, usage: usage() };
     expect(held()).toEqual(funded);
     f.raw.exec(
@@ -2383,12 +2335,6 @@ const documentState = (f: Pick<DeclinedFence, "raw">) =>
     .prepare("SELECT restore_fence_generation,admission_state FROM sync_relay_live_documents")
     .get();
 
-// Proves: when the fencing host answers that no native fence committed, the
-// Decline ends the restore with no fence. The document and its open
-// retirement go back to the old generation in the same write, access and
-// admission stay stopped, and the retirement completes at its old key only.
-// When the restore kept the owner's live session, the Decline ends it and
-// opens the retirement at that old key.
 it.each([["revoked during the restore", true]] as const)(
   "ends a declined restore at the old generation when its host never fenced it: %s",
   (_cause, revoked) => {
@@ -2422,7 +2368,6 @@ it.each([["revoked during the restore", true]] as const)(
           .all(),
       ).toEqual([{ outcome: "cancelled", journal_cursor: null }]);
       expect(f.store.pendingStopRestoreCancellation(f.lookup)).toBeNull();
-      // A lost reply replays; a different answer is refused.
       const after = f.rows();
       expect(f.store.acknowledgeStopRestoreCancellation(f.lookup, f.cancelled, 180)).toEqual(
         declined,
@@ -2693,13 +2638,6 @@ function declinedAtFence(
   }
 }
 
-// Proves: a host's `cancelled` answer, which puts the generation back and
-// leaves admission closed, lets the next restore begin from that state after
-// a resumed restore and after one declined after its fence. The restore whose
-// fence the generation follows stays the predecessor; the cancelled one is no
-// step in the chain. The next restore completes and publishes, also across a
-// restart.
-
 // Proves: the next restore follows a declined one only from the generation
 // and lineage its host's recorded answer ended at. A document moved to
 // another generation, or an answer naming another lineage, refuses both the
@@ -2813,16 +2751,6 @@ it("declines a restore whose file is renamed while its host prepares, with its h
     f.close();
   }
 });
-
-// Proves: completion checks the frozen path before admission. A file renamed
-// after its proposal was saved ends the restore through its host's
-// cancellation, and nothing is admitted or sent to the host to apply.
-
-// Proves: a deleted file has left its frozen path. Before the fence the
-// restore is declined at once; after it, the fencing host is asked to cancel.
-
-// Proves: a file that leaves its frozen path before the fence ends the
-// restore at its old generation, with no host to ask.
 
 it("finishes an admitted restore at its frozen path after its file is renamed", async () => {
   const f = await admittedRestoreFixture("owner", false, "service", (hosted) =>
@@ -3076,7 +3004,6 @@ it("migrates a store from before the declined phase without changing its restore
       [LIVE_RESTORE_ACTIVE_V1_SQL],
       ["live-restore-declined-v1", "live-restore-publication-v1"],
     );
-    // The relay migrates inside its schema transaction, with foreign keys on.
     db.exec("BEGIN IMMEDIATE");
     initializeLiveRestoreOperationSchema(db);
     db.exec("COMMIT");
@@ -3221,7 +3148,6 @@ async function repeatedReviewFixture(rounds = 1) {
   const f = await admittedRestoreFixture("owner", "deleted");
   try {
     f.complete();
-    // Each restore begins once the one before it is published.
     let published = await publishRestore(f, f.admitted, "review-publication-0"),
       previous = f.admitted.admitted.accepted.receipt.journalCursor;
     for (let round = 1; ; round++) {

@@ -13,7 +13,7 @@ Put the version at the root of each document, before any TOML table headers.
 dohc treats a missing version as 1. Generated app and Collection files include the version.
 `files.toml` is hand-authored.
 A newer version stops that file from applying and names the file with an instruction to update dohc.
-An invalid version also stops the file from applying. No migration is needed for unversioned development files.
+An invalid version also stops the file from applying.
 
 `dohc.json` uses `"type": "app"` to declare an app folder. The type is optional.
 An explicit different type needs an independent app signal, such as `index.html` or `app.publish.json`, for detection.
@@ -23,7 +23,8 @@ A configured build output path alone is not an independent signal.
 It accepts at most one `collection` or `dataset` binding. Retired `backend` declarations remain invalid.
 Unknown Collection properties still prevent schema rewrites. An unsupported Collection version prevents record binding and adoption.
 Record sync continues. Agent reads name `collection.yaml` and ask for an update; relay refusals ask to update the sync service.
-Unreadable and newer file policies hold policy-dependent capture. Malformed policies use the engine's baseline capture rules.
+If dohc cannot read `.dohc/files.toml`, or the file uses a newer version, dohc pauses the capture that depends on its rules and retries it.
+A malformed `files.toml` leaves the engine's baseline capture rules in effect.
 Each of these policy failures stops file search.
 
 In `dohc-settings.json` and `.dohc/local/settings.local.json`, an unknown key leaves the other settings in effect.

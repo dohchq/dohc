@@ -59,7 +59,6 @@ describe("CloudLogin", () => {
 
     render(<CloudLogin />);
 
-    // The panel claims nothing and offers Try again. The words are a notice.
     expect((await screen.findByTestId("cloud-connection-unknown")).textContent).toBe("Try again");
     expect(screen.queryByTestId("cloud-server-url")).toBeNull();
     const toast = await screen.findByTestId("workspace-shell-error");
@@ -174,7 +173,6 @@ describe("CloudLogin", () => {
 
     expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain("offline");
     expect(screen.getByTestId("cloud-connected")).toBeTruthy();
-    // The same button is the retry once the check has answered.
     await waitFor(() =>
       expect((screen.getByTestId("cloud-disconnect") as HTMLButtonElement).disabled).toBe(false),
     );
@@ -200,9 +198,6 @@ describe("CloudLogin", () => {
     expect(screen.getByTestId("settings-row-account").textContent).toContain("ice@dohc.dev");
   });
 
-  // The server stopped accepting the session here. Signing in again starts
-  // the same sign-in at that server with no Disconnect first, and its
-  // approval reaches the host like any sign-in.
   it("signs in again to the session's server without disconnecting", async () => {
     vi.useFakeTimers();
     const onConnected = vi.fn();
@@ -229,9 +224,6 @@ describe("CloudLogin", () => {
     expect(bridgeMock.cloudEnableSync).not.toHaveBeenCalled();
   });
 
-  // A failed or refused renewal stays at the session's server: the panel
-  // offers Sign in again there, never an address to change, and a notice's
-  // Try again starts at the same server.
   it.each([
     [
       "the start fails",
@@ -270,9 +262,6 @@ describe("CloudLogin", () => {
     expect(bridgeMock.cloudLogout).not.toHaveBeenCalled();
   });
 
-  // The approval happened in the browser, but only main can say what this
-  // machine's session is. A failed refresh is an operational failure, so the
-  // panel stops claiming to know and the notice carries the way to ask again.
   it("sends a failed post-login status refresh to Notices instead of claiming a session", async () => {
     vi.useFakeTimers();
     const onConnected = vi.fn();
@@ -300,7 +289,6 @@ describe("CloudLogin", () => {
       "dohc could not check this connection after sign-in.",
     );
 
-    // Try again runs the check, not the whole login: the approval still holds.
     await act(async () => {
       fireEvent.click(screen.getByTestId("workspace-shell-error-retry"));
     });
@@ -309,7 +297,6 @@ describe("CloudLogin", () => {
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
     expect(bridgeMock.cloudStatus).toHaveBeenCalledTimes(3);
     expect(bridgeMock.cloudLoginStart).toHaveBeenCalledTimes(1);
-    // The host learns about the session the recheck found.
     expect(onConnected).toHaveBeenCalledTimes(1);
   });
 });

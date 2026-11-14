@@ -81,9 +81,12 @@ test.describe("history virtualization", () => {
       const list = page.getByTestId("engine-history-list");
       const firstGroup = page.locator('[data-history-key="moment-0"]');
       const toggle = firstGroup.getByTestId("engine-moment-group-toggle");
-      // 4,000 correlated groups, 36 day headings and a load-more row.
+      const correlatedGroups = 4_000;
+      const dayHeadingsCount = 36;
+      const loadMoreRows = 1;
+      const totalRows = correlatedGroups + dayHeadingsCount + loadMoreRows;
       await expect(firstGroup).toHaveAttribute("aria-posinset", "2");
-      await expect(firstGroup).toHaveAttribute("aria-setsize", "4037");
+      await expect(firstGroup).toHaveAttribute("aria-setsize", String(totalRows));
       await expect(
         page.getByTestId("engine-history-day-heading").first().locator(".."),
       ).toHaveAttribute("aria-posinset", "1");
@@ -97,7 +100,7 @@ test.describe("history virtualization", () => {
       await page.getByTestId("engine-history-load-more").focus();
       await expect(page.getByTestId("engine-history-load-more").locator("..")).toHaveAttribute(
         "aria-posinset",
-        "4037",
+        String(totalRows),
       );
       await page.keyboard.press("Shift+Tab");
       await expect(page.locator('[data-moment-id="moment-4999"]')).toBeFocused();
@@ -141,7 +144,7 @@ test.describe("history virtualization", () => {
       await expect(page.locator('[data-moment-id="moment-399"]')).toBeVisible();
       await expect(firstGroup.locator('[data-moment-id="moment-1"]')).toBeFocused();
       await expect(firstGroup).toHaveAttribute("aria-posinset", "2");
-      await expect(firstGroup).toHaveAttribute("aria-setsize", "4037");
+      await expect(firstGroup).toHaveAttribute("aria-setsize", String(totalRows));
       await expect
         .poll(() =>
           list.evaluate((element) => {
@@ -159,7 +162,9 @@ test.describe("history virtualization", () => {
         .getByRole("listitem")
         .evaluateAll((items) => items.map((item) => Number(item.getAttribute("aria-posinset"))));
       expect(new Set(mountedPositions).size).toBe(mountedPositions.length);
-      expect(mountedPositions.every((position) => position >= 1 && position <= 4037)).toBe(true);
+      expect(mountedPositions.every((position) => position >= 1 && position <= totalRows)).toBe(
+        true,
+      );
       const dayHeadings = await list
         .getByTestId("engine-history-day-heading")
         .evaluateAll((headings) =>

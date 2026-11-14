@@ -16,10 +16,6 @@ use rusqlite::{Connection, OptionalExtension};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-// ---------------------------------------------------------------------------
-// scratch dir helper
-// ---------------------------------------------------------------------------
-
 struct Scratch {
     root: ScratchDir,
 }
@@ -78,10 +74,6 @@ fn read_doc(store: &EngineStore, name: &str) -> Option<String> {
         .expect("read")
 }
 
-// ---------------------------------------------------------------------------
-// blobs
-// ---------------------------------------------------------------------------
-
 #[test]
 fn materialization_reads_text_without_copy_and_checks_integrity() {
     let scratch = Scratch::new("materialization-text");
@@ -126,10 +118,6 @@ fn materialization_reads_text_without_copy_and_checks_integrity() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// backups
-// ---------------------------------------------------------------------------
-
 #[test]
 fn verified_backup_restore_roundtrips_the_data() {
     let scratch = Scratch::new("backup-ok");
@@ -159,7 +147,6 @@ fn verified_backup_restore_roundtrips_the_data() {
         assert!(record.manifest_path.exists(), "manifest present");
         assert!(!record.manifest.engine_uuid.is_empty());
     }
-    // Open the backup copy as a full engine store and prove the data survived.
     let backup_db = recovery.join("snapshot.db");
     let restored = EngineStore::open(&backup_db, 1000).expect("open backup as store");
     assert_eq!(read_doc(&restored, "doc-a"), Some("alpha".to_owned()));
@@ -221,10 +208,8 @@ mod backup_crash {
             !recovery.join("snapshot.manifest.json").exists(),
             "no manifest"
         );
-        // Source intact.
         assert_eq!(read_doc(&store, "doc-a"), Some("data".to_owned()));
 
-        // Retry produces a fresh verified backup.
         let retry = create_verified_backup(
             &store,
             &recovery,
@@ -243,12 +228,6 @@ mod backup_crash {
     }
 }
 
-// ---------------------------------------------------------------------------
-// corruption classification + diagnostics
-// ---------------------------------------------------------------------------
-
-/// The rows a newer build's migration commits: its table and a completed
-/// ledger row after the last one this build defines.
 const NEWER_BUILD_MIGRATION: &str = "
     BEGIN;
     CREATE TABLE from_a_newer_build (x INTEGER);
@@ -335,10 +314,6 @@ fn refusing_a_newer_store_leaves_its_wal_frames_in_place() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// backup validator
-// ---------------------------------------------------------------------------
-
 #[test]
 fn load_valid_backup_enforces_manifest_presence_and_checksum() {
     let scratch = Scratch::new("backup-validate");
@@ -358,7 +333,6 @@ fn load_valid_backup_enforces_manifest_presence_and_checksum() {
         .expect("backup");
         assert!(matches!(outcome, BackupOutcome::Verified(_)));
     }
-    // Valid pair loads.
     assert!(
         load_valid_backup(&recovery, "snap")
             .expect("load")
@@ -372,8 +346,6 @@ fn load_valid_backup_enforces_manifest_presence_and_checksum() {
             .is_none()
     );
 
-    // Recreate a fresh valid backup, then (b) tamper the db bytes ⇒ checksum
-    // mismatch ⇒ None.
     {
         let store = EngineStore::open(&scratch.db_path(), 2).expect("reopen");
         create_verified_backup(
@@ -408,10 +380,6 @@ fn load_valid_backup_enforces_manifest_presence_and_checksum() {
         "tampered bytes must fail the checksum check"
     );
 }
-
-// ---------------------------------------------------------------------------
-// materialization job ledger
-// ---------------------------------------------------------------------------
 
 fn job_spec(id: &str, path: &str, content_sha: &str, now: i64) -> MaterializationJobSpec {
     MaterializationJobSpec {
@@ -499,8 +467,6 @@ fn job_and_canonical_state_commit_atomically() {
         let faults = OneShot {
             armed: AtomicBool::new(true),
         };
-        // One transaction: upsert a document and enqueue its materialization
-        // job. A crash before commit must roll back BOTH.
         let outcome = store
             .write_with(&faults, |tx| {
                 tx.execute(
@@ -515,7 +481,6 @@ fn job_and_canonical_state_commit_atomically() {
         assert!(matches!(outcome, TxnOutcome::Crashed { committed: false }));
         drop(store);
     }
-    // Reopen: neither the document nor the job survived the rolled-back txn.
     let store = EngineStore::open(&db, 2).expect("reopen");
     let rows: i64 = store
         .read_with(|conn| {
@@ -544,14 +509,6 @@ fn an_ordinary_sql_failure_is_still_terminal() {
         .expect_err("a malformed statement must fail");
     assert_eq!(refused.code(), "persist-failed");
 }
-
-// ---------------------------------------------------------------------------
-// transient contention
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// materialization displacements
-// ---------------------------------------------------------------------------
 
 fn displacement_spec(job_id: &str, displaced_name: &str) -> DisplacementSpec {
     DisplacementSpec {
