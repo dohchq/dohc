@@ -389,6 +389,7 @@ export class ServiceActivationDriver {
     this.#enrolled.delete(key);
     this.#failures.delete(key);
     this.#unfinished.delete(key);
+    this.#yielded.delete(key);
     for (const [document, owner] of this.#owners)
       if (owner.target === key) this.#owners.delete(document);
   }
