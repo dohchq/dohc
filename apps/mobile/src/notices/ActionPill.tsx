@@ -4,10 +4,24 @@ import { useTheme } from "../theme";
 // A worded action under a notice, toast or band: a 32pt outlined pill inside a real 44pt touch area,
 // so the pill's row keeps its spacing while the whole 44pt height takes the tap. In a row too narrow for it, as beside
 // Copy and × at the largest text sizes on a narrow phone, the pill shrinks and its label wraps.
-export function ActionPill({ label, onPress }: { label: string; onPress?(): void }) {
+export function ActionPill({
+  label,
+  onPress,
+  disabled = false,
+}: {
+  label: string;
+  onPress?(): void;
+  disabled?: boolean;
+}) {
   const theme = useTheme();
   return (
-    <Pressable accessibilityRole="button" onPress={onPress} style={styles.target}>
+    <Pressable
+      accessibilityRole="button"
+      accessibilityState={{ disabled }}
+      disabled={disabled}
+      onPress={onPress}
+      style={styles.target}
+    >
       {({ pressed }) => (
         <View
           style={[
@@ -15,7 +29,9 @@ export function ActionPill({ label, onPress }: { label: string; onPress?(): void
             { borderColor: theme.outline, backgroundColor: pressed ? theme.panel2 : "transparent" },
           ]}
         >
-          <Text style={[styles.label, { color: theme.ink }]}>{label}</Text>
+          <Text style={[styles.label, { color: disabled ? theme.subtle : theme.ink }]}>
+            {label}
+          </Text>
         </View>
       )}
     </Pressable>

@@ -28,8 +28,15 @@ Android has been run since the host was added.
 ## Controls that act
 
 The app shows its sample data only in a sample build: a development build, or one made with `EXPO_PUBLIC_DOHC_SAMPLE=1`, as the simulator tests are (`src/sampleBuild.ts`).
-Any other build signs in to a server first (`src/account/Connect.tsx`), then reads the open workspace from it, read-only: Home, Chats, a chat and a page (`src/server/workspaceData.ts`). It reads and marks the account's Notices.
+Any other build signs in to a server first (`src/account/Connect.tsx`), then reads the open workspace from it: Home, Chats, a chat and a page (`src/server/workspaceData.ts`). It reads and marks the account's Notices.
 Search shows "Not built yet".
+
+Phone writes are off by default, so a signed-in build stays read-only (`src/server/phoneWrites.ts`).
+Keep every write control behind `phoneWrites`: the composer, New post, and Send and Discard on outbox messages.
+A build made with `EXPO_PUBLIC_DOHC_PHONE_WRITES=1` turns writes on.
+Then a chat's stream has the composer, and Settings links to Messages on this phone (`src/conversation/OutboxRecovery.tsx`).
+A sample build always shows the composer, over an outbox in memory that reaches no server.
+Controls never call `sendWrite`. They enqueue through the outbox, through `src/conversation/conversationWrites.ts`.
 
 - An installable build never presents sample data as someone's work, and its bundle holds none. Import a sample module (`sample.ts`, or a screen in `Sample*.tsx`) elsewhere only as a type, or require it behind the exact test `src/sampleBuild.ts` gives.
 - A sample build may keep a control the server will drive later.
@@ -48,7 +55,7 @@ The server client is in `src/server`. Its files hold how each part works.
 - Raise `CACHE_FORMAT` when a view's value changes shape.
 - The account's Notices live in one store per sign-in, beside the workspace list, not in the open workspace's (`src/server/noticeStore.ts`). It reads the whole list again at each start, return from the background, refresh, and change to which workspaces show on the phone. Its waiting marks are in two alternating slot files in Documents, never moved over each other (`src/server/noticeFiles.ts`). Raise `NOTICE_LIST_FORMAT` or `NOTICE_MARKS_FORMAT` when a file's shape changes.
 - Ending a token deletes it from the keychain first, then revokes its session, so a phone closed between the two keeps no token (`src/server/account.ts`).
-- The outbox keeps the phone's chat writes on disk, outside Caches, through the `durable-file` module, until the server saves them and a read shows them. Nothing adds to it yet. It sends a record only with a sign-in for the record's own server and account, one at a time per thread or stream, in order, and repeats the same operation ID until the write is saved or refused. A 401 keeps every record (`src/server/outbox.ts`).
+- The outbox keeps the phone's chat writes on disk, outside Caches, through the `durable-file` module, until the server saves them and a read shows them. Only the composer adds to it, while phone writes are on. It sends a record only with a sign-in for the record's own server and account, one at a time per thread or stream, in order, and repeats the same operation ID until the write is saved or refused. A 401 keeps every record (`src/server/outbox.ts`).
 - `discard` deletes one record the person chooses. It withholds a record that may still send before deleting it, and refuses one a waiting reply needs (`src/server/outbox.ts`).
 - Only Sign out deletes all the outbox's records, through `onSignOut`: sending stops, the outbox writes a marker, the account ends the sign-in and deletes its token, and once that settles the records go, then the marker. If the marker can't be written, every record must go at once, before the token, or Sign out fails and a phone still signed in stays signed in with its token. Until the delete finishes, the outbox holds it in memory: nothing sends and nothing is added, `wake` and each sign-in try again, and Connect shows a failure that a 401 left behind. Without the marker, a relaunch loses that hold (`src/server/outbox.ts`, `src/server/account.ts`).
 

@@ -1,23 +1,101 @@
+import { accountWords } from "@dohc/interface-words/account";
+import { confirmWords } from "@dohc/interface-words/confirmations";
+import { chatWords } from "@dohc/interface-words/notices";
 import * as Haptics from "expo-haptics";
 import { SymbolView } from "expo-symbols";
 import { useState } from "react";
-import { Pressable, StyleSheet, TextInput, View } from "react-native";
+import { AccessibilityInfo, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { KeyboardStickyView } from "react-native-keyboard-controller";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { ChatComposerField, type ClearRequest } from "../../modules/chat-composer";
+import { ProblemLine } from "../account/ProblemLine";
+import type { OutboxState } from "../server/outbox";
 import { useTheme } from "../theme";
+import type { Blocked, Lanes, SubmitOutcome } from "./conversationWrites";
 
-// Design-pass stand-in: the shipped composer is a native module (Swift and Kotlin) with mention chips.
+/** The field's height: one line at the least, and about five at the body size before it scrolls inside itself. */
+const FIELD_MIN = 44;
+const FIELD_MAX = 132;
+/** The longest title the route takes. */
+const TITLE_MAX = 200;
+
+/** A problem with the outbox itself, which the composer shows above its field, with Try again when one can help. */
+export interface OutboxProblem {
+  readonly text: string;
+  readonly retry?: () => void;
+}
+
+/** What the outbox's state says above the composer, or null. Each Try again is the outbox's `wake`. */
+export function outboxProblem(
+  state: OutboxState | null,
+  blocked: Blocked,
+  wake: () => void,
+): OutboxProblem | null {
+  if (state === null) return null;
+  if (blocked === "deleting")
+    return state.deletion === "failed" || state.deletion === "failed-unmarked"
+      ? {
+          text: accountWords.signOutDeleteFailed(state.deletion === "failed-unmarked"),
+          retry: wake,
+        }
+      : null;
+  if (blocked === "locked") return { text: chatWords.unlockToSend };
+  if (blocked === "failed") return { text: chatWords.outboxUnreadable, retry: wake };
+  return null;
+}
+
+// The conversation's composer, docked to the keyboard: a native multiline field, with Send, and New post in a Group
+// that takes posts. A post adds an optional title. The text clears only once the outbox keeps it, and only the text that
+// was sent, so anything typed meanwhile stays. Text the outbox couldn't keep stays in the field, with the failure and
+// Try again above it. Return is a new line; sending is the button.
 export function Composer({
   placeholder,
+  lanes,
+  blocked,
+  problem,
+  onSubmit,
   onLayoutHeight,
 }: {
   placeholder: string;
+  lanes: Lanes;
+  blocked: Blocked;
+  problem: OutboxProblem | null;
+  onSubmit(kind: "send" | "post", body: string, title: string): Promise<SubmitOutcome>;
   onLayoutHeight(height: number): void;
 }) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
+  const [chosen, setChosen] = useState<"send" | "post">("send");
+  // A stream that takes only posts is always writing one.
+  const mode = lanes.send ? chosen : "post";
   const [text, setText] = useState("");
-  const ready = text.trim().length > 0;
+  const [title, setTitle] = useState("");
+  const [height, setHeight] = useState(FIELD_MIN);
+  const [clear, setClear] = useState<ClearRequest>({ text: "", token: 0 });
+  const [submitting, setSubmitting] = useState(false);
+  const [notKept, setNotKept] = useState(false);
+  const ready = text.trim().length > 0 && blocked === null && !submitting;
+
+  async function submit() {
+    if (!ready) return;
+    const sent = text;
+    const sentTitle = title;
+    setSubmitting(true);
+    const outcome = await onSubmit(mode, sent, sentTitle);
+    setSubmitting(false);
+    if (outcome.kind === "kept" || outcome.kind === "withheld") {
+      setNotKept(false);
+      setClear((previous) => ({ text: sent, token: previous.token + 1 }));
+      setTitle((current) => (current === sentTitle ? "" : current));
+      if (mode === "post") setChosen("send");
+      if (outcome.kind === "kept") void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    } else if (outcome.kind === "not-kept") {
+      setNotKept(true);
+      AccessibilityInfo.announceForAccessibility(chatWords.notKept);
+    }
+  }
+
+  const label = mode === "post" ? chatWords.post : chatWords.sendMessage;
   return (
     <KeyboardStickyView offset={{ closed: 0, opened: insets.bottom - 6 }} style={styles.sticky}>
       <View
@@ -31,46 +109,95 @@ export function Composer({
           },
         ]}
       >
-        <Pressable accessibilityRole="button" accessibilityLabel="Add" style={styles.round}>
-          <SymbolView
-            name="plus"
-            size={20}
-            weight="medium"
-            tintColor={theme.muted}
-            fallback={null}
-          />
-        </Pressable>
-        <View
-          style={[styles.field, { backgroundColor: theme.field, borderColor: theme.fieldLine }]}
-        >
-          <TextInput
-            value={text}
-            onChangeText={setText}
-            placeholder={placeholder}
-            placeholderTextColor={theme.subtle}
-            multiline
-            style={[styles.input, { color: theme.ink }]}
-            accessibilityLabel={placeholder}
-          />
+        {problem ? (
+          problem.retry ? (
+            <ProblemLine text={problem.text} onRetry={problem.retry} />
+          ) : (
+            <Text style={[styles.problem, { color: theme.muted }]}>{problem.text}</Text>
+          )
+        ) : null}
+        {notKept ? <ProblemLine text={chatWords.notKept} onRetry={() => void submit()} /> : null}
+        {mode === "post" ? (
+          <View style={styles.postHead}>
+            <TextInput
+              value={title}
+              onChangeText={setTitle}
+              placeholder={chatWords.title}
+              placeholderTextColor={theme.subtle}
+              accessibilityLabel={chatWords.title}
+              maxLength={TITLE_MAX}
+              returnKeyType="next"
+              style={[styles.title, { color: theme.ink, borderBottomColor: theme.line }]}
+            />
+            {lanes.send ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={confirmWords.cancel}
+                onPress={() => setChosen("send")}
+                style={styles.round}
+              >
+                <SymbolView
+                  name="xmark"
+                  size={16}
+                  weight="semibold"
+                  tintColor={theme.muted}
+                  fallback={null}
+                />
+              </Pressable>
+            ) : null}
+          </View>
+        ) : null}
+        <View style={styles.row}>
+          {lanes.post && mode === "send" ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={chatWords.newPost}
+              onPress={() => setChosen("post")}
+              style={styles.round}
+            >
+              <SymbolView
+                name="square.and.pencil"
+                size={20}
+                weight="medium"
+                tintColor={theme.muted}
+                fallback={null}
+              />
+            </Pressable>
+          ) : null}
+          <View
+            style={[styles.field, { backgroundColor: theme.field, borderColor: theme.fieldLine }]}
+          >
+            <ChatComposerField
+              placeholder={placeholder}
+              fieldLabel={placeholder}
+              editable
+              textColor={theme.ink}
+              placeholderColor={theme.subtle}
+              clearIf={clear}
+              onChangeText={(event) => {
+                setText(event.nativeEvent.text);
+              }}
+              onContentHeight={(event) => setHeight(event.nativeEvent.height)}
+              style={{ height: Math.min(Math.max(height, FIELD_MIN), FIELD_MAX) }}
+            />
+          </View>
+          <Pressable
+            disabled={!ready}
+            accessibilityRole="button"
+            accessibilityLabel={label}
+            accessibilityState={{ disabled: !ready, busy: submitting }}
+            onPress={() => void submit()}
+            style={[styles.round, ready && { backgroundColor: theme.accent }]}
+          >
+            <SymbolView
+              name="arrow.up"
+              size={18}
+              weight="bold"
+              tintColor={ready ? theme.bg : theme.subtle}
+              fallback={null}
+            />
+          </Pressable>
         </View>
-        <Pressable
-          disabled={!ready}
-          accessibilityRole="button"
-          accessibilityLabel="Send"
-          onPress={() => {
-            void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-            setText("");
-          }}
-          style={[styles.round, ready && { backgroundColor: theme.accent }]}
-        >
-          <SymbolView
-            name="arrow.up"
-            size={18}
-            weight="bold"
-            tintColor={ready ? theme.bg : theme.subtle}
-            fallback={null}
-          />
-        </Pressable>
       </View>
     </KeyboardStickyView>
   );
@@ -79,13 +206,21 @@ export function Composer({
 const styles = StyleSheet.create({
   sticky: { position: "absolute", left: 0, right: 0, bottom: 0 },
   bar: {
-    flexDirection: "row",
-    alignItems: "flex-end",
-    gap: 8,
     paddingHorizontal: 12,
     paddingTop: 6,
     borderTopWidth: StyleSheet.hairlineWidth,
   },
+  problem: { fontSize: 15, lineHeight: 20, paddingVertical: 8 },
+  postHead: { flexDirection: "row", alignItems: "center", gap: 8, paddingBottom: 6 },
+  title: {
+    flex: 1,
+    fontSize: 17,
+    fontWeight: "600",
+    minHeight: 44,
+    paddingHorizontal: 14,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  row: { flexDirection: "row", alignItems: "flex-end", gap: 8 },
   round: {
     width: 44,
     height: 44,
@@ -95,12 +230,10 @@ const styles = StyleSheet.create({
   },
   field: {
     flex: 1,
-    minHeight: 44,
-    maxHeight: 132,
+    minHeight: FIELD_MIN,
     borderRadius: 22,
     borderWidth: 1,
     paddingHorizontal: 14,
     justifyContent: "center",
   },
-  input: { fontSize: 17, paddingTop: 11, paddingBottom: 11 },
 });

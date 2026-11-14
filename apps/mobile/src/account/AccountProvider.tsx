@@ -34,7 +34,7 @@ import { secureSignInStore } from "./secureSignInStore";
 interface AccountValue {
   readonly account: Account;
   readonly state: AccountState;
-  /** Chat writes waiting for the server. Nothing adds to it yet. */
+  /** Chat writes waiting for the server. Only the composer adds to it, while phone writes are on. */
   readonly outbox: Outbox;
   /** Where a Sign out's delete of the outbox stands. */
   readonly deletion: OutboxState["deletion"];

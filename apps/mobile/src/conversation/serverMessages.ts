@@ -1,6 +1,7 @@
 import { workspaceWords } from "@dohc/interface-words/workspace";
 import type { ChatMessage } from "../server/workspaceReads";
-import type { Author, Message } from "./sample";
+import type { LocalRow } from "./outboxMessages";
+import type { Author, Message } from "./types";
 
 // A chat's messages from the server, as the conversation draws them: under a line for each day, with a follow-up
 // from the same author within 5 minutes drawn without its avatar and byline.
@@ -57,6 +58,22 @@ export function serverMessage(
   };
 }
 
+/**
+ * A post or message only this phone has, by `you`. Its ID is the one the server will give it, so the row keeps its
+ * place when a read brings the server's. It has no time of its own: its state shows in the time's place.
+ */
+export function localMessage(row: LocalRow, you: Author): Message {
+  return {
+    id: row.messageId,
+    author: you,
+    at: "",
+    minute: 0,
+    ...(row.title ? { title: row.title } : {}),
+    body: [{ text: row.mark.body }],
+    local: row.mark,
+  };
+}
+
 const dayKey = (ms: number) => new Date(ms).toDateString();
 
 /**
@@ -73,7 +90,12 @@ export function continuesRun(previous: Message | undefined, entry: Message): boo
   );
 }
 
-export function conversationItems(messages: readonly Message[], nowMs: number): ConversationItem[] {
+/** The server's messages under their days, then the messages only this phone has, each with its own byline. */
+export function conversationItems(
+  messages: readonly Message[],
+  nowMs: number,
+  local: readonly Message[] = [],
+): ConversationItem[] {
   const today = dayKey(nowMs);
   const yesterday = dayKey(nowMs - 86_400_000);
   const items: ConversationItem[] = [];
@@ -98,6 +120,16 @@ export function conversationItems(messages: readonly Message[], nowMs: number): 
       key: entry.id,
       message: entry,
       continued: continuesRun(previous, entry),
+      afterExtras: previous?.replies !== undefined,
+    });
+  }
+  for (const [index, entry] of local.entries()) {
+    const previous = index > 0 ? local[index - 1] : messages[messages.length - 1];
+    items.push({
+      type: "message",
+      key: entry.id,
+      message: entry,
+      continued: false,
       afterExtras: previous?.replies !== undefined,
     });
   }

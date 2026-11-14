@@ -1,3 +1,4 @@
+import { chatWords } from "@dohc/interface-words/notices";
 import { KeyboardAwareLegendList } from "@legendapp/list/keyboard";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { SymbolView } from "expo-symbols";
@@ -5,10 +6,23 @@ import { documentWords } from "@dohc/interface-words/documents";
 import { useMemo, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { Composer } from "./Composer";
+import { blockedBy, chatWrite } from "./conversationWrites";
 import { MessageRow } from "./MessageRow";
-import { sampleConversation, sampleMessagesFor, type Message } from "./sample";
+import { streamRows } from "./outboxMessages";
+import {
+  createSampleOutbox,
+  sampleConversation,
+  sampleLanes,
+  sampleMessagesFor,
+  sampleScope,
+  sampleYou,
+} from "./sample";
+import { localMessage } from "./serverMessages";
+import type { Message } from "./types";
+import { useConversationWrites, useLocalActions, useOutboxState } from "./useOutbox";
 import { chatSubtitle, chatTitle } from "../chats/chatLabels";
 import { sampleChat } from "../chats/sample";
+import { demoMode } from "../demo";
 import { pagePathForFile } from "../pages/sample";
 import { useTheme } from "../theme";
 
@@ -16,7 +30,10 @@ type Item =
   | { type: "day"; key: string; label: string }
   | { type: "message"; key: string; message: Message; continued: boolean; afterExtras: boolean };
 
-// A conversation, as in Slack: newest at the bottom, the composer riding the keyboard.
+const always = () => true;
+
+// A conversation, as in Slack: newest at the bottom, the composer riding the keyboard. The composer writes to an
+// outbox in memory, which never reaches a server, so the composer and its message states can be seen without one.
 export function SampleConversation() {
   const theme = useTheme();
   const router = useRouter();
@@ -29,8 +46,16 @@ export function SampleConversation() {
   // A file's chat opens its page from the header; the page's header comes back here.
   const pagePath = name ? pagePathForFile[name] : undefined;
   const [composerHeight, setComposerHeight] = useState(90);
+  const [outbox] = useState(() => createSampleOutbox(demoMode));
+  const state = useOutboxState(outbox);
+  const writes = useConversationWrites(outbox, true, always);
+  const blocked = state ? blockedBy(state, true) : "loading";
+  const actions = useLocalActions(writes, blocked !== null);
   const items = useMemo<Item[]>(() => {
     const messages = sampleMessagesFor(id);
+    const local = state
+      ? streamRows(state, sampleScope, id, new Set()).map((row) => localMessage(row, sampleYou))
+      : [];
     return [
       { type: "day", key: "today", label: "Today" },
       ...messages.map((message, index) => {
@@ -43,8 +68,15 @@ export function SampleConversation() {
         const afterExtras = previous?.reactions !== undefined || previous?.replies !== undefined;
         return { type: "message" as const, key: message.id, message, continued, afterExtras };
       }),
+      ...local.map((message) => ({
+        type: "message" as const,
+        key: message.id,
+        message,
+        continued: false,
+        afterExtras: false,
+      })),
     ];
-  }, [id]);
+  }, [id, state]);
 
   return (
     <View style={[styles.screen, { backgroundColor: theme.bg }]}>
@@ -111,11 +143,28 @@ export function SampleConversation() {
               message={item.message}
               continued={item.continued}
               afterExtras={item.afterExtras}
+              actions={actions}
             />
           )
         }
       />
-      <Composer placeholder={`Message ${shown}`} onLayoutHeight={setComposerHeight} />
+      <Composer
+        placeholder={chatWords.messageTo(shown)}
+        lanes={sampleLanes(chat.kind)}
+        blocked={blocked}
+        problem={null}
+        onSubmit={(kind, body, postTitle) => {
+          const write = chatWrite(
+            kind === "send" ? { kind, streamId: id } : { kind, groupId: id },
+            body,
+            postTitle,
+          );
+          return write
+            ? writes.submit(sampleScope.workspaceId, write)
+            : Promise.resolve({ kind: "blocked" as const });
+        }}
+        onLayoutHeight={setComposerHeight}
+      />
     </View>
   );
 }

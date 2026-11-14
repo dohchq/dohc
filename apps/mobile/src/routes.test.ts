@@ -58,7 +58,7 @@ describe("routes opened from a link", () => {
       readFileSync(join(APP, route), "utf8").match(/^export default (\w+)\(/m)?.[1];
     for (const route of ["(tabs)/(chats)/sharing.tsx", "agent-card.tsx", "checks.tsx"])
       expect(wrapped(route), route).toBe("sampleOnly");
-    for (const route of ["settings.tsx", "workspaces.tsx"])
+    for (const route of ["settings.tsx", "workspaces.tsx", "outbox.tsx"])
       expect(wrapped(route), route).toBe("signedInOnly");
   });
 });

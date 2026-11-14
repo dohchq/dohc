@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "../server/workspaceReads";
-import { conversationItems, serverMessage } from "./serverMessages";
+import { conversationItems, localMessage, serverMessage } from "./serverMessages";
 
 const at = new Date(2026, 10, 5, 12, 0).getTime();
 const entry = (
@@ -29,6 +29,29 @@ const continued = (...entries: ChatMessage[]) =>
     entries.map((item) => serverMessage(item, null, ["#000000"])),
     at,
   ).flatMap((item) => (item.type === "message" ? [item.continued] : []));
+
+describe("a conversation's outbox messages", () => {
+  it("follow the server's, each with its own byline, keyed by the ID the server will give it", () => {
+    const you = { id: "local:you", name: "You", kind: "person" as const };
+    const mine = localMessage(
+      {
+        messageId: "message-1",
+        lane: "chat",
+        mark: { operationId: "op-1", state: { kind: "waiting" }, attempted: false, body: "Hi" },
+      },
+      you,
+    );
+    const items = conversationItems(
+      [serverMessage(entry("m1", "human", "You", 0), null, ["#000000"])],
+      at,
+      [mine],
+    ).flatMap((item) => (item.type === "message" ? [[item.key, item.continued]] : []));
+    expect(items).toEqual([
+      ["m1", false],
+      ["message-1", false],
+    ]);
+  });
+});
 
 describe("a conversation's runs", () => {
   it("join a follow-up from the same author within 5 minutes", () => {

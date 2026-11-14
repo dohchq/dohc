@@ -1,4 +1,5 @@
 import { accountWords } from "@dohc/interface-words/account";
+import { chatWords } from "@dohc/interface-words/notices";
 import { DarkTheme, DefaultTheme, Stack, ThemeProvider, useRouter } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { useEffect, useMemo } from "react";
@@ -63,6 +64,7 @@ export default function RootLayout() {
               }}
             />
             <Stack.Screen name="settings" options={{ title: accountWords.settings }} />
+            <Stack.Screen name="outbox" options={{ title: chatWords.messagesOnPhone }} />
             <Stack.Screen
               name="workspaces"
               options={{
