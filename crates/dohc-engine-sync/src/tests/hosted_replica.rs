@@ -521,12 +521,6 @@ fn a_hosted_replica_journals_only_its_documents_live_work() {
     assert_eq!(last_outbound_seq(&store), 4);
 }
 
-struct ShareBeforePullResponse {
-    pull_count: usize,
-    object_id: String,
-    path: String,
-}
-
 /// The relay's scoped feed, in memory. It serves `workspace.init` and the
 /// rows of shared documents with their original coordinates, withholds every
 /// other row, and examines `raw_rows_per_page` rows per page as the relay
@@ -540,7 +534,6 @@ struct HostedFeed {
     revision: AtomicUsize,
     blobs: Mutex<BTreeMap<String, Vec<u8>>>,
     raw_rows_per_page: AtomicUsize,
-    share_before_pull_response: Mutex<Option<ShareBeforePullResponse>>,
     pulls: Mutex<Vec<HostedPullRequest>>,
     pushes: Mutex<Vec<PushRequest>>,
     /// Documents whose new host ops the relay refuses, each kept as a refusal at its coordinate.
@@ -561,7 +554,6 @@ impl HostedFeed {
             revision: AtomicUsize::new(0),
             blobs: Mutex::new(BTreeMap::new()),
             raw_rows_per_page: AtomicUsize::new(usize::MAX),
-            share_before_pull_response: Mutex::new(None),
             pulls: Mutex::new(Vec::new()),
             pushes: Mutex::new(Vec::new()),
             refusing: Mutex::new(BTreeSet::new()),
@@ -733,25 +725,7 @@ impl RelayTransport for HostedFeed {
     }
 
     fn pull_hosted(&self, req: HostedPullRequest) -> Result<HostedPullResponse, RelayError> {
-        let count = {
-            let mut pulls = self.pulls.lock().unwrap();
-            pulls.push(req.clone());
-            pulls.len()
-        };
-        let due = {
-            let mut share_at = self.share_before_pull_response.lock().unwrap();
-            if share_at
-                .as_ref()
-                .is_some_and(|share| share.pull_count == count)
-            {
-                share_at.take()
-            } else {
-                None
-            }
-        };
-        if let Some(share) = due {
-            self.share(&share.object_id, &share.path);
-        }
+        self.pulls.lock().unwrap().push(req.clone());
         let shared = self.shared.lock().unwrap().clone();
         let scope = HostedScope {
             token: self.token(),
