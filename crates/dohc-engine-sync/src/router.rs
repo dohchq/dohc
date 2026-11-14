@@ -341,3 +341,75 @@ fn map_applied<T>(
 ) -> Result<ApplyOutcome<RoutedApply>, SyncError> {
     result.map(|outcome| outcome.map(wrap))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use super::OWNED_OP_ROUTES;
+    use crate::{BlobKind, ReplicationEnvelope, relay::collect_blob_refs};
+
+    #[derive(serde::Deserialize)]
+    struct BlobReferenceVectors {
+        vectors: Vec<BlobReferenceVector>,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct BlobReferenceVector {
+        name: String,
+        op_kind: String,
+        workspace_id: String,
+        recorded_at_ms: i64,
+        payload: serde_json::Value,
+        blobs: BTreeMap<String, BTreeSet<String>>,
+    }
+
+    #[test]
+    fn shared_blob_reference_vectors_match_every_owned_op() {
+        let vectors: BlobReferenceVectors =
+            serde_json::from_str(include_str!("../tests/blob-references/vectors.json"))
+                .expect("shared blob reference vectors");
+        for (kind, _) in OWNED_OP_ROUTES {
+            assert!(
+                vectors.vectors.iter().any(|vector| vector.op_kind == *kind),
+                "missing blob reference vector for {kind}"
+            );
+        }
+        for vector in vectors.vectors {
+            let expected: BTreeMap<String, BTreeSet<BlobKind>> = vector
+                .blobs
+                .into_iter()
+                .map(|(sha, kinds)| {
+                    let kinds = kinds
+                        .into_iter()
+                        .map(|kind| match kind.as_str() {
+                            "text" => BlobKind::Text,
+                            "binary" => BlobKind::Binary,
+                            "ydoc" => BlobKind::Ydoc,
+                            _ => panic!("unknown blob kind {kind}"),
+                        })
+                        .collect();
+                    (sha, kinds)
+                })
+                .collect();
+            let envelope = ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
+                workspace_id: vector.workspace_id,
+                origin_id: "blob-reference-vector".into(),
+                origin_seq: 0,
+                relay_seq: None,
+                op_kind: vector.op_kind,
+                payload: vector.payload,
+                recorded_at_ms: vector.recorded_at_ms,
+            };
+            assert_eq!(
+                collect_blob_refs(&[envelope]).expect(&vector.name),
+                expected,
+                "{}",
+                vector.name
+            );
+        }
+    }
+}

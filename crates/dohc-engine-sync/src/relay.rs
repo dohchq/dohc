@@ -5481,6 +5481,9 @@ fn settlement_refused(op: &ReplicationEnvelope) -> bool {
     )
 }
 
+// Must name the same set as referencedBlobShas in
+// services/sync-relay/src/storage/blobReferences.ts. Both are held to
+// crates/dohc-engine-sync/tests/blob-references/vectors.json.
 pub(crate) fn collect_blob_refs(
     ops: &[ReplicationEnvelope],
 ) -> Result<BTreeMap<String, BTreeSet<BlobKind>>, RelayError> {
