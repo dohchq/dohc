@@ -165,6 +165,29 @@ it("says the owner removed the reader's access, and offers no retry", async () =
   expect(container.querySelector("button")).toBeNull();
 });
 
+it("says a full link can take no more people, and offers no retry", async () => {
+  const live = session("Body");
+  const full: NamedLiveBrowserState = {
+    ...live.state(),
+    status: "disconnected",
+    reason: "link-full",
+  };
+  await act(async () =>
+    root.render(
+      <NamedDocumentEditor
+        session={{ ...live, state: () => full }}
+        path="docs/a.md"
+        link
+        onState={() => {}}
+      />,
+    ),
+  );
+  expect(container.querySelector('[role="status"]')?.textContent).toBe(
+    "This link cannot take more people. Ask the owner for a new link.",
+  );
+  expect(container.querySelector("button")).toBeNull();
+});
+
 it("asks the reader to check the connection when the connection failed", async () => {
   const live = session("Body");
   const closed: NamedLiveBrowserState = {

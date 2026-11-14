@@ -171,6 +171,7 @@ import * as objectIndexStorage from "./storage/objectIndex";
 import * as proposalsStorage from "./storage/proposals";
 import * as currentFilesStorage from "./storage/currentFiles";
 import { captureSqliteReadRevisionMatches } from "./storage/readRevision";
+import type { LiveTicketScope } from "./liveBrowserContext";
 import * as liveDocumentAuthorityStorage from "./storage/liveDocumentAuthority";
 import type { RedeemedLiveTicket } from "@dohc/live-session-contract/live-ticket";
 import type { DeviceHostCredential } from "./deviceHostCredential";
@@ -2532,6 +2533,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   mintLiveTicket(input: LiveTicketMint): { expiresAtMs: number } | null {
     return liveDocumentAuthorityStorage.mintLiveTicket(this, input);
+  }
+
+  liveLinkFull(scope: LiveTicketScope): boolean {
+    return liveDocumentAuthorityStorage.liveLinkFull(this, scope);
   }
 
   redeemLiveTicket(input: LiveTicketRedemption): RedeemedLiveTicket | null {

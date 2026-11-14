@@ -165,6 +165,26 @@ it("reports a refused link ticket as unavailable, not as a failed connection", a
     session.close();
   }
 });
+it("stops on a link that can take no more people, without trying again", async () => {
+  vi.useFakeTimers();
+  vi.stubGlobal("location", { origin: "https://share.example.test" });
+  const fetch = vi.fn(async (url: RequestInfo | URL) =>
+    url === "/api/live/link-document"
+      ? Response.json({ objectId: "object-a", limits })
+      : Response.json(linkRefusalBody("link_full"), { status: 403 }),
+  );
+  vi.stubGlobal("fetch", fetch);
+  const session = await openLinkDocument("abcdefghijkl", "docs/a.md", new AbortController().signal);
+  try {
+    await session.reconnect();
+    expect(session.state()).toMatchObject({ status: "disconnected", reason: "link-full" });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  } finally {
+    session.close();
+    vi.useRealTimers();
+  }
+});
 // After a server restart the share service answers 503 until live editing can start again.
 it("tries a busy link ticket again by itself and opens the file once the server answers", async () => {
   class Socket extends EventTarget {

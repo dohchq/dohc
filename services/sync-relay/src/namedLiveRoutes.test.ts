@@ -2164,15 +2164,16 @@ describe("a link ticket while the relay is busy", () => {
     expect(await ask(f)).toEqual(tryAgain);
   });
 
-  it.each(["linkDiscussionPrincipalLimit", "workspaceQuotaBytes"] as const)(
-    "stops a new holder that %s turns away",
-    async (limit) => {
-      const f = await fixture(limits, true);
-      // The storage context holds its limits here; the public storage type does not show them.
-      (f.storage as unknown as { options: Record<typeof limit, number> }).options[limit] = 0;
-      expect(await ask(f)).toEqual(opaque);
-    },
-  );
+  // Only a full link says so: trying again can't help, and the holder can ask for a new link.
+  it.each([
+    ["linkDiscussionPrincipalLimit", [403, linkRefusalBody("link_full")]],
+    ["workspaceQuotaBytes", opaque],
+  ] as const)("stops a new holder that %s turns away", async (limit, answer) => {
+    const f = await fixture(limits, true);
+    // The storage context holds its limits here; the public storage type does not show them.
+    (f.storage as unknown as { options: Record<typeof limit, number> }).options[limit] = 0;
+    expect(await ask(f)).toEqual(answer);
+  });
 
   // An agent enrolls elsewhere, so only the record of its public principal is new here.
   it("stops a link agent whose public principal a full workspace can't hold", async () => {

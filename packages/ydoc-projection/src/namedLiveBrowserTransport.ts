@@ -70,6 +70,8 @@ class Refused extends Error {}
 export class LiveAuthorityUnavailableError extends Error {}
 /** The server answered that it cannot start editing now. The page tries again by itself. */
 export class LiveHostUnavailableError extends Error {}
+/** The server answered that the link can take no more people. Trying again cannot help. */
+export class LiveLinkFullError extends Error {}
 /** The server answered that the owner removed this account's access. */
 class AccessRemoved extends Error {}
 /** The page has no session and has already asked for a new one in this outage. */
@@ -176,7 +178,8 @@ export function createNamedLiveBrowserTransport<
         reconnectTimer !== undefined ||
         value.status !== "disconnected" ||
         value.reason === "authority-unavailable" ||
-        value.reason === "access-removed"
+        value.reason === "access-removed" ||
+        value.reason === "link-full"
       )
         return;
       reconnectTimer = setTimeout(() => {
@@ -586,17 +589,19 @@ export function createNamedLiveBrowserTransport<
             ? "account-changed"
             : error instanceof AccessRemoved
               ? "access-removed"
-              : error instanceof SessionSpent
-                ? "grantId" in target && (await accessRemoved(held, String(target.grantId)))
-                  ? "access-removed"
-                  : "authority-unavailable"
-                : error instanceof LiveAuthorityUnavailableError
-                  ? !options.authorize && "grantId" in target
-                    ? await recheck(held, String(target.grantId))
+              : error instanceof LiveLinkFullError
+                ? "link-full"
+                : error instanceof SessionSpent
+                  ? "grantId" in target && (await accessRemoved(held, String(target.grantId)))
+                    ? "access-removed"
                     : "authority-unavailable"
-                  : error instanceof LiveHostUnavailableError
-                    ? "host-unavailable"
-                    : "connection-failed",
+                  : error instanceof LiveAuthorityUnavailableError
+                    ? !options.authorize && "grantId" in target
+                      ? await recheck(held, String(target.grantId))
+                      : "authority-unavailable"
+                    : error instanceof LiveHostUnavailableError
+                      ? "host-unavailable"
+                      : "connection-failed",
         );
       }
     }

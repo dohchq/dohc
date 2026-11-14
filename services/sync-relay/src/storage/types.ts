@@ -1312,6 +1312,8 @@ export interface SyncRelayStorage {
   ): RelayBaselineRegistrationResult;
   mintLiveTicket(input: LiveTicketMint): { expiresAtMs: number; publicPrincipalId?: string } | null;
   readLiveTicketTarget(input: LiveTicketLookup): { workspaceId: string; objectId: string } | null;
+  /** Whether a link browser's ticket would enroll one browser more than its link takes. */
+  liveLinkFull(scope: LiveTicketScope): boolean;
   redeemLiveTicket(input: LiveTicketRedemption): RedeemedLiveTicket | null;
   getLiveHostControl(): HostControlSnapshot | null;
   // Local deployment-operator operations. Account and device requests cannot call these.
