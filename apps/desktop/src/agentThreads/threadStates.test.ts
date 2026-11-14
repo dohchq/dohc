@@ -317,7 +317,12 @@ describe("what an agent thread is doing with a forwarded message", () => {
     // Newer runs cancelled while they waited change nothing either.
     tool(
       thread(
-        newer.map((entry) => ({ ...entry, state: "ended" as const, startedAtMs: null, endedAtMs: 3_000 })),
+        newer.map((entry) => ({
+          ...entry,
+          state: "ended" as const,
+          startedAtMs: null,
+          endedAtMs: 3_000,
+        })),
       ),
     );
     await states.check();
