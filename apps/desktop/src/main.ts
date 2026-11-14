@@ -10870,6 +10870,15 @@ function registerIpcHandlers(): void {
         thread: { ...agent.thread, id: threadId },
       });
     },
+    readyAgentThreadWorkspace: async ({ workspaceId, agentId }) => {
+      const { settings } = await readCachedUserSettingsFile(stateDir());
+      const agent = listAgents(settings).find(({ id }) => id === agentId);
+      if (!agent?.thread) throw new Error("This agent has no thread.");
+      // Only a workspace the agent does not serve: this marks its unread messages read.
+      if (agent.workspaces?.includes(workspaceId))
+        throw new Error(`${agent.name} already forwards from this workspace.`);
+      await agentThreads().serve(workspaceId, { ...agent, thread: agent.thread });
+    },
     readyAgentThread: async ({ workspaceId, agentId, name, threadId }) => {
       const { agents } = (await readCachedUserSettingsFile(stateDir())).settings;
       // A new agent only: this marks the agent's unread messages read.

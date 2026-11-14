@@ -171,6 +171,20 @@ export function reminderText(target: ReplyTarget): string {
   ].join("\n");
 }
 
+/**
+ * What dohc tells an agent thread when its person lets it serve one more
+ * workspace. The thread then holds two workspaces' messages, and other
+ * people can read what it posts in either (ADR 0016).
+ */
+export function anotherWorkspaceText(input: { agentName: string; workspaceName: string }): string {
+  return [
+    `The person who connected this thread to dohc as their agent ${quoted(input.agentName)} now also forwards their messages from another workspace, named ${quoted(input.workspaceName)}.`,
+    "",
+    "- Each message says which workspace it came from, and its commands reply in that workspace.",
+    "- Other people may read a workspace's chats. Post in a workspace only what belongs there. Do not carry what you learned from one workspace into another unless the person asks you to.",
+  ].join("\n");
+}
+
 /** What dohc tells an agent thread once, when a person connects it. */
 export function introductionText(input: { cli: CliForThread; agentName: string }): string {
   return [

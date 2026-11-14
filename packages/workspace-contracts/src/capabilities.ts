@@ -599,7 +599,7 @@ const LISTED_CAPABILITIES = {
   ),
   "agent.thread.connect": capability(
     "Connect one of your agents to its own thread in another tool.",
-    { ipc: ["readyAgentThread", "changeAgentThread"] },
+    { ipc: ["readyAgentThread", "changeAgentThread", "readyAgentThreadWorkspace"] },
   ),
   "agent.thread.lines.read": capability(
     "Read what your agents' threads are doing with the messages dohc forwarded.",

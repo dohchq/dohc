@@ -91,7 +91,7 @@ function setup(
   const lineChanges: string[] = [];
   const forward = vi.fn(async (input: Sent): Promise<{ runId: string | null } | void> => {
     order.push(
-      `sent ${input.forwardId.startsWith("dohc-intro-") ? "intro" : input.forwardId.startsWith("remind-") ? "reminder" : "message"}`,
+      `sent ${input.forwardId.startsWith("dohc-intro-") ? "intro" : input.forwardId.startsWith("dohc-workspace-") ? "workspace" : input.forwardId.startsWith("remind-") ? "reminder" : "message"}`,
     );
     sent.push(input);
     return { runId: `run-${sent.length}` };
@@ -436,6 +436,27 @@ describe("agent threads", () => {
     forward.mockRejectedValueOnce(refused);
     await expect(agentThreads.change(WORKSPACE, next)).rejects.toBe(refused);
     await expect(agentThreads.change("ws-gone", next)).rejects.toThrow(
+      "no longer has this workspace",
+    );
+  });
+
+  it("readies an agent's thread for one more workspace: sets that backlog aside, then tells the thread", async () => {
+    const { agentThreads, order, sent, forward } = started(setup({ chief }, ["m1", "m2"]));
+    const agent = { id: "chief", name: "Chief", thread };
+
+    await agentThreads.serve(WORKSPACE, agent);
+
+    expect(order).toEqual(["read m2", "sent workspace"]);
+    expect(sent[0]).toMatchObject({ threadId: "t3-thread-1", how: "line" });
+    // The thread learns it now holds two workspaces' messages, and the name is quoted.
+    expect(sent[0]!.message.split("\n")[0]).toContain('another workspace, named "Launch"');
+    expect(sent[0]!.message).toContain("Do not carry what you learned from one workspace");
+
+    // Nothing is added for a thread dohc cannot tell, or a workspace that is gone.
+    const refused = new T3CodeError("thread-gone", "This thread is no longer in T3 Code.");
+    forward.mockRejectedValueOnce(refused);
+    await expect(agentThreads.serve(WORKSPACE, agent)).rejects.toBe(refused);
+    await expect(agentThreads.serve("ws-gone", agent)).rejects.toThrow(
       "no longer has this workspace",
     );
   });

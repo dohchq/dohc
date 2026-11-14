@@ -8,7 +8,13 @@ import {
 import type { LinkedChatStore } from "@dohc/workspace-contracts/engine";
 import { cliThreadId } from "@dohc/workspace-operations/chats";
 import { subscribeChatWrites } from "../workspaces/chatWriteSignals";
-import { introductionText, quoted, reminderText, type CliForThread } from "./forwardedText";
+import {
+  anotherWorkspaceText,
+  introductionText,
+  quoted,
+  reminderText,
+  type CliForThread,
+} from "./forwardedText";
 import type { ForwardLedger } from "./forwardLedger";
 import { T3CodeError } from "./t3Code";
 import { createForwarding, type ForwardingDependencies, type ServedAgent } from "./forwarding";
@@ -275,6 +281,28 @@ export function createAgentThreads(dependencies: AgentThreadsDependencies) {
       agent: Pick<AgentWithThread, "id" | "name" | "thread" | "whileBusy" | "note">,
     ): Promise<void> {
       await introduce(reached(workspaceId, agent).threadId, agent.name);
+    },
+    /**
+     * Readies the thread an agent has to serve one more workspace, before the
+     * agent is saved with it: sets aside what the agent has unread there, as
+     * connecting does, then tells the thread that it now holds this
+     * workspace's messages too. Rejects when T3 Code does not take that, so
+     * no workspace is added for a thread dohc cannot tell.
+     */
+    async serve(
+      workspaceId: string,
+      agent: Pick<AgentWithThread, "id" | "name" | "thread" | "whileBusy" | "note">,
+    ): Promise<void> {
+      const reaching = reached(workspaceId, agent);
+      const workspaceName = dependencies.workspace(workspaceId)?.name ?? "";
+      await forwarding.setAside(workspaceId, reaching);
+      await dependencies.t3Code.forward({
+        threadId: reaching.threadId,
+        how: "line",
+        message: anotherWorkspaceText({ agentName: agent.name, workspaceName }),
+        // One for each time a person adds this workspace.
+        forwardId: `dohc-workspace-${randomUUID()}`,
+      });
     },
     stop(): void {
       states.stop();

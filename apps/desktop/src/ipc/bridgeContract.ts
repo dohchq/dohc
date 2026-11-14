@@ -8414,6 +8414,18 @@ export const agentThreadOperations = {
     guard: "active-workspace",
     inactiveMessage: "The thread was not connected because this window changed workspaces.",
   },
+  // Readies the thread of an agent this workspace does not yet reach to serve
+  // it too, before the agent is saved with the workspace: sets aside what the
+  // agent has unread here, then tells the thread. Main finds the thread from
+  // the agent, so a window cannot name one.
+  readyAgentThreadWorkspace: {
+    capabilityId: "agent.thread.connect",
+    scope: "workspace",
+    channel: "desktop:ready-agent-thread-workspace",
+    payload: z.strictObject({ workspaceId: z.string().min(1), agentId: AgentId }),
+    guard: "active-workspace",
+    inactiveMessage: "The workspace was not added because this window changed workspaces.",
+  },
 } as const satisfies OperationTable;
 
 // The agents you run that hold a chat wait on this computer now, by id.

@@ -253,6 +253,7 @@
     "desktop:read-t3-code-connection",
     "desktop:read-workspace-trust",
     "desktop:ready-agent-thread",
+    "desktop:ready-agent-thread-workspace",
     "desktop:remove-collection-copies-left",
     "desktop:request-workspace-trust",
     "desktop:restrict-workspace",
