@@ -249,10 +249,11 @@ export function createLinkLiveClient(options: {
       if (response.redirected || response.headers.has("location")) return null;
       const type = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
       // A note its host doesn't hold awake has no early state. A note it holds comes as its socket's opening sync.
-      // A state larger than the page takes is no state: the page opens the note as it would without one.
       if (state && response.status === 204) return { value: null, setCookie: credential.setCookie };
       if (state && response.status === 200 && type === "application/octet-stream")
         return {
+          // A state larger than the page takes, or one whose body fails to arrive, is no state: the page opens the
+          // note as it would without one.
           value: await readBoundedBytes(
             response,
             browserLimits.provider.frames.receive.maxSyncBytes,
