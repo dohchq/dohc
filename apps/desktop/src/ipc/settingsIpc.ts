@@ -164,6 +164,8 @@ export function createSettingsIpc<
   // a reset, or an edit in the file. `write` answers null when nothing changed.
   async function changeUserSettings(
     write: () => Promise<StoredUserSettingsResult | null>,
+    // Takes a failure of what follows the save, so the save's answer stands.
+    afterSaveFailed?: (error: unknown) => void,
   ): Promise<UserSettingsChange | null> {
     const change = await enqueueUserSettingsWrite(async () => {
       const previous = await readCachedUserSettingsFile(stateDir());
@@ -173,7 +175,10 @@ export function createSettingsIpc<
       if (!settingsDeepEqual(previous, result)) takeEffect(result.settings);
       return { previous, result };
     });
-    if (change) await announce(change);
+    if (change) {
+      if (afterSaveFailed) await announce(change).catch(afterSaveFailed);
+      else await announce(change);
+    }
     return change;
   }
 
@@ -214,20 +219,28 @@ export function createSettingsIpc<
   // One agent's settings, changed from the file as it is now, so a change
   // made in another window a moment ago stays. `change` throws to refuse, and
   // answers the agent it was given when there is nothing to change.
-  function changeAgent(
+  //
+  // The caller acts on whether the agent was saved, and asks again when it
+  // was not. So what follows a save, such as the tray, fails without failing
+  // the change: the agent is saved and every window already has it.
+  async function changeAgent(
     agentId: string,
     change: (agent: AgentSettings) => AgentSettings,
   ): Promise<DesktopUserSettingsResult> {
-    return saveUserSettings(() =>
-      updateUserSettingsFile(stateDir(), (current) => {
-        const agent = current.agents[agentId];
-        if (!agent) throw new Error("This agent is no longer in Settings.");
-        const next = change(agent);
-        return next === agent
-          ? current
-          : { ...current, agents: { ...current.agents, [agentId]: next } };
-      }),
+    const saved = await changeUserSettings(
+      () =>
+        updateUserSettingsFile(stateDir(), (current) => {
+          const agent = current.agents[agentId];
+          if (!agent) throw new Error("This agent is no longer in Settings.");
+          const next = change(agent);
+          return next === agent
+            ? current
+            : { ...current, agents: { ...current.agents, [agentId]: next } };
+        }),
+      (error) => console.error("[desktop] after an agent change:", error),
     );
+    if (!saved) throw new Error("dohc did not save settings.");
+    return rendererUserSettingsResult(saved.result);
   }
 
   // Answers the function that stops the watch. It never keeps main alive.

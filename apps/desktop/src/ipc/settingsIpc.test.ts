@@ -829,6 +829,15 @@ describe("registered settings IPC", () => {
       "no longer in Settings",
     );
     expect(await saved()).toMatchObject({ name: "Chief", workspaces: [] });
+    // What follows a save can fail. The agent is saved, so the change does not fail with it.
+    h.refreshDispatchTray.mockRejectedValueOnce(new Error("tray unavailable"));
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    await expect(
+      h.changeAgent("chief", (agent) => ({ ...agent, workspaces: ["workspace-b"] })),
+    ).resolves.toMatchObject({ settings: { agents: { chief: { workspaces: ["workspace-b"] } } } });
+    expect(logged).toHaveBeenCalledOnce();
+    logged.mockRestore();
+    expect((await saved())?.workspaces).toEqual(["workspace-b"]);
     // An agent given back unchanged announces nothing.
     const announced = h.broadcastUserSettings.mock.calls.length;
     await h.changeAgent("chief", (agent) => agent);

@@ -506,7 +506,7 @@ describe("agent threads", () => {
   });
 
   it("gives no line to a message the tool took before its workspace was turned off and on again", async () => {
-    const { agentThreads, forward, save, tool, order } = started(setup({ chief }));
+    const { agentThreads, forward, save, tool, order, rows } = started(setup({ chief }));
     tool.state = {
       ...tool.state,
       runs: [
@@ -535,11 +535,12 @@ describe("agent threads", () => {
     });
     expect(order.slice(0, 2)).toEqual(["read m1", "sent workspace"]);
 
-    // Then the tool answers for the message it took before all that.
+    // Then the tool answers for the message it took before all that. The
+    // pass marks the message read once it has told what it forwarded.
     taken();
-    await settled();
-    await settled();
+    await vi.waitFor(() => expect(order.filter((entry) => entry === "read m1")).toHaveLength(2));
     expect(agentThreads.lines(WORKSPACE)).toEqual([]);
+    expect(rows()).toEqual([]);
   });
 
   it("keeps no line for a thread the agent left while the tool took a message for it", async () => {
