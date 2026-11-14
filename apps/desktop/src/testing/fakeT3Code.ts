@@ -16,8 +16,8 @@ export interface FakeT3Code {
   decisions: Array<{ authorization: Record<string, string>; decision: Record<string, unknown> }>;
   /** Makes a sign-in code that approves one sign-in, as T3 Code's own program does. */
   issueCode(): string;
-  /** Answers an approval with this address in place of the sign-in's own. */
-  redirectTo: string | null;
+  /** Answers an approval with another address, made from the sign-in's own. */
+  redirectTo: ((own: URL) => string) | null;
   calls: Array<{ tool: string; args: Record<string, unknown> }>;
   /** What each tool answers, keyed by name. */
   tools: Record<string, (args: Record<string, unknown>) => unknown>;
@@ -126,7 +126,7 @@ export async function startFakeT3Code(): Promise<FakeT3Code & { close(): Promise
           challenge: authorization.code_challenge!,
           resource: authorization.resource!,
         });
-        return json(200, { redirectTo: fake.redirectTo ?? redirect.href });
+        return json(200, { redirectTo: fake.redirectTo?.(redirect) ?? redirect.href });
       }
       if (request.method === "POST" && url.pathname === "/oauth/mcp/token") {
         const form = new URLSearchParams(await bodyOf(request));

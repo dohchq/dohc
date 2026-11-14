@@ -173,16 +173,29 @@ describe("signing in to T3 Code", () => {
     const once = t3.issueCode();
     await expect(approve(async () => once)).resolves.toMatchObject({ access: "full-access" });
     await expect(approve(async () => once)).rejects.toMatchObject({ problem: "cannot-allow-here" });
-    // The answer must be this sign-in's own address and state. Nothing is sent to any other.
-    for (const elsewhere of [
-      "http://collector.example/t3-code?state=x&code=stolen",
-      "http://127.0.0.1:1/t3-code?state=wrong&code=code-1",
-      "not an address",
-    ]) {
-      t3.redirectTo = elsewhere;
-      await expect(approve(async () => t3.issueCode())).rejects.toMatchObject({
-        problem: expect.stringMatching(/^(cannot-allow-here|unexpected)$/u),
-      });
+    // The answer must be this sign-in's own address and state, from this T3 Code, with a code.
+    // Each answer below is wrong in one way and would sign dohc in if it were read.
+    const changed = (change: (answer: URL) => void) => (own: URL) => {
+      const answer = new URL(own);
+      change(answer);
+      return answer.href;
+    };
+    const elsewhere: Array<[(own: URL) => string, string]> = [
+      [changed((answer) => (answer.hostname = "localhost")), "cannot-allow-here"],
+      [changed((answer) => (answer.port = "1")), "cannot-allow-here"],
+      [changed((answer) => (answer.pathname = "/other")), "cannot-allow-here"],
+      [changed((answer) => answer.searchParams.set("state", "another")), "cannot-allow-here"],
+      [changed((answer) => answer.searchParams.delete("state")), "cannot-allow-here"],
+      [
+        changed((answer) => answer.searchParams.set("iss", "http://127.0.0.1:1")),
+        "cannot-allow-here",
+      ],
+      [changed((answer) => answer.searchParams.delete("code")), "cannot-allow-here"],
+      [() => "not an address", "unexpected"],
+    ];
+    for (const [redirectTo, problem] of elsewhere) {
+      t3.redirectTo = redirectTo;
+      await expect(approve(async () => t3.issueCode())).rejects.toMatchObject({ problem });
     }
     t3.redirectTo = null;
 

@@ -84,6 +84,8 @@ describe("making dohc's own sign-in code with T3 Code's program", () => {
     const cases: T3CodeCliRunner[] = [
       // A policy on this computer forbids such codes: the program exits with a failure.
       async () => ({ exitCode: 1, stdout: "" }),
+      // What a program that failed printed is not read as a code.
+      async () => ({ exitCode: 1, stdout: JSON.stringify({ credential: "Q8RZ3NWD5KTC" }) }),
       // Ended for taking too long.
       async () => ({ exitCode: null, stdout: "" }),
       async () => ({ exitCode: 0, stdout: "not json" }),
