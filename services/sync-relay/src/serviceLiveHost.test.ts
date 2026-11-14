@@ -8812,6 +8812,41 @@ it("drains an idle note again after a hosted pull queued an owner edit", async (
   expect(journaled(o, "edit-desktop")).toHaveLength(1);
 });
 
+// Proves: a settlement right after a drain does not record the note quiet when a hosted pull queued an owner edit
+// between the two, so the next drain still runs and admits it.
+it("drains an idle note again after a pull between a drain and its settlement", async () => {
+  const { o, passes } = await idleNote();
+  o.native.binding = o.binding;
+  o.passes.deliver = false;
+  const drains = vi.spyOn(OwnerCommittedDelivery.prototype, "drain"),
+    checks = vi.spyOn(OwnerCommittedDelivery.prototype, "drained");
+  try {
+    // The pass that settled the note recorded it quiet, so this drain is answered from that record.
+    await expect(o.host.drain(o.document)).resolves.toMatchObject({ kind: "done" });
+    expect(drains).toHaveBeenCalledTimes(0);
+    const consumer = checks.mock.contexts.at(-1) as OwnerCommittedDelivery;
+    let queued = false;
+    o.requestListeners.add((method) => {
+      if (method === "sync.pullHosted" && !queued) {
+        queued = true;
+        o.nativeEdits("desktop");
+      }
+    });
+    const before = passes();
+    appendDocumentRow(o.raw, "ydoc.update", o.sibling.objectId);
+    notifyRelayWrite(o.f.storage);
+    await vi.waitFor(() => expect(passes()).toBeGreaterThan(before));
+    expect(queued).toBe(true);
+    await consumer.settleDrained(o.document);
+    expect(journaled(o, "edit-desktop")).toEqual([]);
+    await expect(o.host.drain(o.document)).resolves.toMatchObject({ kind: "done" });
+    expect(journaled(o, "edit-desktop")).toHaveLength(1);
+  } finally {
+    drains.mockRestore();
+    checks.mockRestore();
+  }
+});
+
 // Proves: a drain after a journal row arrived, after a drain that ended pending, and after an owner's Try again, still
 // runs, as does each drain while the owner queue is held for its owner.
 it("drains an idle note again after a new row, a pending drain, and a Try again", async () => {

@@ -498,8 +498,8 @@ export class OwnerCommittedDelivery {
               admittedEntries: 0,
               hasMore: false,
               retryReady: false,
-              // That drain recorded whether it read the queue empty.
-              empty: quiet?.adoption === adopted,
+              // That drain recorded whether it read the queue empty, and nothing that could fill it was sent since.
+              empty: quiet?.adoption === adopted && quiet.changes === changes,
             }
           : await drainOwnerOutbox({
               storage: this.storage,
