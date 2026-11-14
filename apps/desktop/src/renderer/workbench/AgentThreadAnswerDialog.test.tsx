@@ -38,6 +38,7 @@ const line = (more: Partial<AgentThreadLine> = {}): AgentThreadLine => ({
   chatThreadId: "thread-1",
   forwardedAtMs: 0,
   questionId: "q-1",
+  threadWaiting: true,
   state: "waiting-in-tool",
   sinceMs: 0,
   ...more,

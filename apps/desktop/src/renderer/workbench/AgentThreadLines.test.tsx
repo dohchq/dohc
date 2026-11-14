@@ -34,6 +34,7 @@ const line = (more: Partial<AgentThreadLine> = {}): AgentThreadLine => ({
   chatThreadId: "thread-1",
   forwardedAtMs: 0,
   questionId: null,
+  threadWaiting: false,
   state: "working",
   sinceMs: NOW - 4_000,
   ...more,
@@ -158,15 +159,35 @@ it("offers Answer here only while the thread waits on a question", () => {
   const buttons = () => screen.getAllByRole("button").map((button) => button.textContent);
 
   // An approval, say, is answered in the tool.
-  push([line({ state: "waiting-in-tool" })]);
+  push([line({ state: "waiting-in-tool", threadWaiting: true })]);
   expect(buttons()).toEqual(["Open in T3 Code"]);
 
-  push([line({ state: "waiting-in-tool", questionId: "question-1" })]);
+  push([line({ state: "waiting-in-tool", threadWaiting: true, questionId: "question-1" })]);
   expect(buttons()).toEqual(["Answer here", "Open in T3 Code"]);
   expect(within(screen.getByRole("status")).getByText("Waiting for you in T3 Code")).toBeTruthy();
 
   push([line({ state: "working" })]);
   expect(buttons()).toEqual(["Open in T3 Code"]);
+});
+
+it("says when a message is in line behind work that waits on the person, and offers its question", () => {
+  const { push } = stubDesktop();
+  render(chat());
+  const buttons = () => screen.getAllByRole("button").map((button) => button.textContent);
+  const words = () => within(screen.getByRole("status")).getByText(/line/i).textContent;
+
+  push([line({ state: "in-line" })]);
+  expect(words()).toBe("In line in T3 Code");
+  expect(buttons()).toEqual(["Open in T3 Code"]);
+
+  // The work ahead of it waits on an approval: the line will not move until the person acts there.
+  push([line({ state: "in-line", threadWaiting: true })]);
+  expect(words()).toBe("In line. The thread is waiting for you in T3 Code");
+  expect(buttons()).toEqual(["Open in T3 Code"]);
+
+  // It waits on a question: answering it here is what moves the line.
+  push([line({ state: "in-line", threadWaiting: true, questionId: "question-1" })]);
+  expect(buttons()).toEqual(["Answer here", "Open in T3 Code"]);
 });
 
 it("shows nothing for another workspace's lines", async () => {

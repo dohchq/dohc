@@ -339,6 +339,7 @@ describe("agent threads", () => {
           sinceMs: 9_000,
           forwardedAtMs: 9_000,
           questionId: null,
+          threadWaiting: false,
         },
       ]),
     );
