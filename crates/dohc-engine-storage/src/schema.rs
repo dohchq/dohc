@@ -749,7 +749,7 @@ fn validate_v2(conn: &Connection) -> Result<(), StorageError> {
     Ok(())
 }
 
-fn integrity_check(conn: &Connection) -> Result<(), StorageError> {
+pub(crate) fn integrity_check(conn: &Connection) -> Result<(), StorageError> {
     let result: String = conn
         .pragma_query_value(None, "quick_check", |row| row.get(0))
         .map_err(StorageError::corrupt)?;
