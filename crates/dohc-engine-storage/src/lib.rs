@@ -37,6 +37,7 @@ mod durability;
 pub mod error;
 pub mod faults;
 mod flush;
+pub mod held_outside_changes;
 pub mod limits;
 pub mod links;
 pub mod materialize;
