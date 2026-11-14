@@ -22,6 +22,8 @@ export type T3CodeProblem =
   | "not-this-computer"
   /** The person has not allowed dohc in T3 Code, declined, or the sign-in ran out. */
   | "not-allowed"
+  /** The thread runs with more access than the person gave dohc on T3 Code's page. */
+  | "needs-more-access"
   /** T3 Code refused the call, such as a thread that is gone. */
   | "refused"
   /** T3 Code answered in a shape dohc does not know. */
@@ -479,11 +481,17 @@ export async function openT3CodeSession(input: {
         ToolResult,
         await request("tools/call", { name: tool, arguments: args }),
       );
-      if (result.isError)
-        throw new T3CodeError(
-          "refused",
-          result.content?.find((block) => block.text)?.text ?? "T3 Code refused the call.",
-        );
+      if (result.isError) {
+        const words = result.content?.find((block) => block.text)?.text;
+        // T3 Code's words for a thread that runs with more than this client may.
+        if (words && /runtime_mode_escalation_denied|broader than parent mode/u.test(words))
+          throw new T3CodeError(
+            "needs-more-access",
+            "This thread runs with more access than dohc has in T3 Code. Allow dohc again, and pick the thread's mode on T3 Code's page.",
+          );
+        // T3 Code's own words reach Notices, so they are kept short.
+        throw new T3CodeError("refused", words?.slice(0, 300) ?? "T3 Code refused the call.");
+      }
       return result.structuredContent;
     },
     close,

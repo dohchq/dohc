@@ -597,6 +597,20 @@ const LISTED_CAPABILITIES = {
     "Read which agents you run are waiting for messages on this computer.",
     { ipc: ["readAgentsListening"] },
   ),
+  "agent.thread.connect": capability(
+    "Connect one of your agents to its own thread in another tool.",
+    { ipc: ["readyAgentThread"] },
+  ),
+  "agent.thread.t3code.allow": capability("Allow dohc in T3 Code on this computer.", {
+    ipc: ["allowDohcInT3Code", "cancelAllowDohcInT3Code"],
+  }),
+  "agent.thread.t3code.list": capability("List your projects and threads in T3 Code.", {
+    ipc: ["listT3CodeProjects", "listT3CodeThreads"],
+  }),
+  "agent.thread.t3code.read": capability(
+    "Read whether dohc is allowed in T3 Code on this computer.",
+    { ipc: ["readT3CodeConnection"] },
+  ),
   "agent.personal.read": capability("Read the personal agents of your server account.", {
     ipc: ["readPersonalAgents"],
   }),

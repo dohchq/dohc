@@ -167,6 +167,7 @@ import type { OperationBridge, OperationTable } from "./operationTable";
 import { isLoopbackHostname } from "../security/loopback";
 import {
   AgentId,
+  AgentThread,
   DesktopUserSettings as DesktopUserSettingsSchema,
   DesktopUserSettingsResult as DesktopUserSettingsResultSchema,
   ZOOM_STEPS,
@@ -8060,6 +8061,8 @@ export const ChatDispatchNotice = z.object({
     "wake-unconfirmed",
     "wake-runners-refused",
     "wake-runners-unreadable",
+    // A message waits because dohc could not give it to an agent's own thread. dohc tries again by itself.
+    "forward-stuck",
   ]),
   // Absent only for wake-unreadable, which is about a file rather than a thread.
   threadId: z.string().min(1).optional(),
@@ -8158,6 +8161,95 @@ export const chatDispatchPauseOperations = {
     channel: "desktop:set-chat-dispatch-paused",
     payload: ChatDispatchPausedEvent,
     guard: "trusted-sender",
+  },
+} as const satisfies OperationTable;
+
+// dohc's sign-in to T3 Code on this computer.
+export const T3CodeConnectionState = z.strictObject({
+  // False when this computer cannot encrypt the sign-in, so dohc does not connect.
+  canKeep: z.boolean(),
+  // When the sign-in runs out, or null when dohc has none.
+  signedInUntilMs: z.number().nullable(),
+});
+export type T3CodeConnectionState = z.infer<typeof T3CodeConnectionState>;
+export const T3CodeProjectList = z.strictObject({
+  projects: z.array(z.strictObject({ id: z.string(), title: z.string() })),
+});
+export type T3CodeProjectList = z.infer<typeof T3CodeProjectList>;
+export const T3CodeThreadPage = z.strictObject({
+  threads: z.array(
+    z.strictObject({
+      id: z.string(),
+      title: z.string(),
+      // T3 Code's word for the thread's newest run, such as "running".
+      status: z.string().nullable(),
+      updatedAt: z.string(),
+    }),
+  ),
+  nextCursor: z.number().nullable(),
+});
+export type T3CodeThreadPage = z.infer<typeof T3CodeThreadPage>;
+export const agentThreadOperations = {
+  readT3CodeConnection: {
+    capabilityId: "agent.thread.t3code.read",
+    scope: "device",
+    channel: "desktop:read-t3-code-connection",
+    payload: z.strictObject({}),
+    result: T3CodeConnectionState,
+    guard: "trusted-sender",
+  },
+  // Opens T3 Code's own page, where the person allows dohc. Settles when they
+  // answer, when the wait is cancelled, or when time runs out.
+  allowDohcInT3Code: {
+    capabilityId: "agent.thread.t3code.allow",
+    scope: "device",
+    channel: "desktop:allow-dohc-in-t3-code",
+    payload: z.strictObject({}),
+    result: T3CodeConnectionState,
+    guard: "trusted-sender",
+  },
+  cancelAllowDohcInT3Code: {
+    capabilityId: "agent.thread.t3code.allow",
+    scope: "device",
+    channel: "desktop:cancel-allow-dohc-in-t3-code",
+    payload: z.strictObject({}),
+    guard: "trusted-sender",
+  },
+  listT3CodeProjects: {
+    capabilityId: "agent.thread.t3code.list",
+    scope: "device",
+    channel: "desktop:list-t3-code-projects",
+    payload: z.strictObject({}),
+    result: T3CodeProjectList,
+    guard: "trusted-sender",
+  },
+  listT3CodeThreads: {
+    capabilityId: "agent.thread.t3code.list",
+    scope: "device",
+    channel: "desktop:list-t3-code-threads",
+    payload: z.strictObject({
+      projectId: z.string().min(1).max(512),
+      titleContains: z.string().max(200).optional(),
+      cursor: z.number().int().nonnegative().optional(),
+    }),
+    result: T3CodeThreadPage,
+    guard: "trusted-sender",
+  },
+  // Readies a thread to serve this workspace as an agent, before the agent is
+  // saved as on: sets aside what the agent has unread, then tells the thread
+  // what dohc will send it.
+  readyAgentThread: {
+    capabilityId: "agent.thread.connect",
+    scope: "workspace",
+    channel: "desktop:ready-agent-thread",
+    payload: z.strictObject({
+      workspaceId: z.string().min(1),
+      agentId: AgentId,
+      name: z.string().min(1).max(200),
+      threadId: AgentThread.shape.id,
+    }),
+    guard: "active-workspace",
+    inactiveMessage: "The thread was not connected because this window changed workspaces.",
   },
 } as const satisfies OperationTable;
 
@@ -8896,6 +8988,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof agentRunStateOperations>,
     OperationBridge<typeof stoppedRunOperations>,
     OperationBridge<typeof chatDispatchPauseOperations>,
+    OperationBridge<typeof agentThreadOperations>,
     OperationBridge<typeof agentsListeningOperations>,
     OperationBridge<typeof personalAgentsOperations>,
     OperationBridge<typeof sharedViewAccessOperations>,

@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { CircleAlert, CloudOff, Link, LoaderCircle, Plug } from "lucide-react";
 import {
   MAX_PREFERRED_NAME_LENGTH,
@@ -10,13 +10,26 @@ import {
   agentHandle,
   agentNameTaken,
   newAgentName,
+  type AgentThread,
   type DesktopUserSettings,
 } from "../../settings/userSettings";
 import { AgentLinkAppMenu } from "../agentLinkApps";
+import { ipcErrorMessage } from "../ipcError";
 import { Overlay } from "../Overlay";
 import { CopyButton } from "../ui/CopyButton";
-import { PrimaryButton, SecondaryButton } from "../ui/controls";
+import { FieldError, PrimaryButton, RetryRow, SecondaryButton } from "../ui/controls";
+import { SkeletonRows } from "../ui/SkeletonRows";
 import { HueControl, SwitchControl } from "./SettingRow";
+import {
+  T3_CODE,
+  T3_CODE_CANNOT_KEEP,
+  T3CodeAllow,
+  T3CodeAllowAgain,
+  T3CodeThreadPicker,
+  t3CodeAllowed,
+  useT3CodeAccess,
+  type T3CodeThreadChoice,
+} from "./T3CodeThread";
 import { ToolReadiness, type ReadinessTone } from "./ToolReadiness";
 
 export type ToolTileState =
@@ -30,7 +43,7 @@ const TILE_STATE: Record<ToolTileState["status"], { text: string; tone: Readines
   "not-found": { text: "Not found", tone: "unknown" },
 };
 
-export type RunsWith = "claude" | "codex" | "mcp" | "link";
+export type RunsWith = "claude" | "codex" | "t3-code" | "mcp" | "link";
 
 /**
  * The Agent link choice: none without a server account; while dohc reads the
@@ -49,6 +62,8 @@ export type NewAgent = {
   hue: AgentHue;
   enabled: boolean;
   launch?: AgentLaunch;
+  // The agent's own thread in its tool. dohc forwards to it and never starts it.
+  thread?: AgentThread;
   idBase: string;
 };
 
@@ -69,14 +84,64 @@ function nameProblem(
 }
 
 const baseName = (choice: RunsWith) =>
-  choice === "mcp" || choice === "link"
-    ? "Agent"
-    : AGENT_TOOLS.find((entry) => entry.id === choice)!.name;
+  AGENT_TOOLS.find((entry) => entry.id === choice)?.name ?? "Agent";
+
+const THREAD_SEARCH_ID = "agent-add-thread-search";
+
+// T3 Code on Add agent: why dohc cannot connect it, the ask that allows dohc
+// there, or the thread to connect. `onReady` says when a thread can be chosen.
+function T3CodeChoice(props: {
+  picked: string | null;
+  onPick: (thread: T3CodeThreadChoice | null) => void;
+  error: string | null;
+  onReady: (ready: boolean) => void;
+}) {
+  const access = useT3CodeAccess();
+  const { state } = access;
+  const ready = state !== undefined && state.canKeep && t3CodeAllowed(state);
+  const { onReady } = props;
+  useEffect(() => {
+    onReady(ready);
+    return () => onReady(false);
+  }, [onReady, ready]);
+  if (access.readError !== null)
+    return (
+      <RetryRow testId="t3-code-access-retry" onRetry={() => void access.retryRead()}>
+        {ipcErrorMessage(access.readError, "dohc could not check whether T3 Code allows it.")}
+      </RetryRow>
+    );
+  if (state === undefined)
+    return <SkeletonRows testId="t3-code-access-loading" label="Checking T3 Code" rows={2} />;
+  if (!state.canKeep)
+    return (
+      <p data-testid="t3-code-cannot-keep" className="m-0 text-[13px] text-danger">
+        {T3_CODE_CANNOT_KEEP}
+      </p>
+    );
+  if (!ready)
+    return (
+      <div className="rounded-lg border border-line bg-bg px-3 py-3">
+        <T3CodeAllow access={access} />
+      </div>
+    );
+  return (
+    <>
+      <T3CodeThreadPicker
+        picked={props.picked}
+        onPick={props.onPick}
+        error={props.error}
+        searchId={THREAD_SEARCH_ID}
+      />
+      <T3CodeAllowAgain access={access} />
+    </>
+  );
+}
 
 /**
  * Add agent: name and color, then what the agent runs with. Claude Code and
- * Codex run on this computer when their switch is on. Another agent connects
- * through MCP with the config shown here, under the id it will get. Agent
+ * Codex run on this computer when their switch is on. T3 Code connects a
+ * thread the person already has there, and dohc forwards to it. Another agent
+ * connects through MCP with the config shown here, under the id it will get. Agent
  * link adds nothing here: it copies the link an agent signs in with, and the
  * agent takes its name on the sign-in page.
  */
@@ -94,6 +159,8 @@ export function AddAgentSheet(props: {
   // A name one of your personal agents has.
   takenElsewhere: (name: string) => boolean;
   adding: boolean;
+  // Why the last Add added nothing, such as a thread T3 Code would not let dohc message.
+  addError?: string | null;
   onAdd: (agent: NewAgent) => void;
   onCancel: () => void;
 }) {
@@ -109,7 +176,19 @@ export function AddAgentSheet(props: {
   const [picked, setPicked] = useState<RunsWith | null>(null);
   const choice = picked ?? start;
   const [typed, setTyped] = useState<string | null>(null);
-  const name = typed ?? newAgentName(props.agents, baseName(choice ?? "mcp"), props.takenElsewhere);
+  // The T3 Code thread to connect. Its title is the name until the person types one.
+  const [thread, setThread] = useState<T3CodeThreadChoice | null>(null);
+  const [threadMissing, setThreadMissing] = useState(false);
+  const [t3CodeReady, setT3CodeReady] = useState(false);
+  const pickThread = useCallback((next: T3CodeThreadChoice | null) => {
+    setThread(next);
+    setThreadMissing(false);
+  }, []);
+  const threadName =
+    choice === "t3-code" ? thread?.title.trim().slice(0, MAX_PREFERRED_NAME_LENGTH).trim() : "";
+  const name =
+    typed ??
+    newAgentName(props.agents, threadName || baseName(choice ?? "mcp"), props.takenElsewhere);
   const [hue, setHue] = useState<AgentHue>(props.hue);
   const [enabled, setEnabled] = useState(true);
   const [shownError, setShownError] = useState(false);
@@ -117,8 +196,8 @@ export function AddAgentSheet(props: {
   const error = problem === "Another agent has this name." || shownError ? problem : null;
   const handle = problem ? "" : agentHandle(name.trim());
   const config = choice === "mcp" ? props.mcpConfig(props.mcpAgentId) : null;
-  const state =
-    choice === "mcp" || choice === "link" || choice === null ? null : props.toolState(choice);
+  const tool = choice === "claude" || choice === "codex" ? choice : null;
+  const state = tool ? props.toolState(tool) : null;
   const link = props.agentLink;
   const canAdd =
     !props.adding && problem === null && (choice === "mcp" || state?.status === "ready");
@@ -126,6 +205,23 @@ export function AddAgentSheet(props: {
   const submit = () => {
     // Agent link has no name to check and nothing to add.
     if (choice === "link") return;
+    if (choice === "t3-code") {
+      if (!t3CodeReady || props.adding) return;
+      if (problem) setShownError(true);
+      if (!thread) {
+        setThreadMissing(true);
+        if (!problem) document.getElementById(THREAD_SEARCH_ID)?.focus();
+      }
+      if (problem || !thread) return;
+      props.onAdd({
+        name: preferredNameFromInput(name)!,
+        hue,
+        enabled: true,
+        thread: { tool: "t3-code", id: thread.id },
+        idBase: "t3-code",
+      });
+      return;
+    }
     if (problem) {
       setShownError(true);
       return;
@@ -134,13 +230,13 @@ export function AddAgentSheet(props: {
     const trimmed = preferredNameFromInput(name)!;
     if (choice === "mcp") {
       props.onAdd({ name: trimmed, hue, enabled: false, idBase: "agent" });
-    } else if (choice !== null && state?.status === "ready") {
+    } else if (tool !== null && state?.status === "ready") {
       props.onAdd({
         name: trimmed,
         hue,
         enabled,
-        launch: { tool: choice, executable: state.executable },
-        idBase: choice,
+        launch: { tool, executable: state.executable },
+        idBase: tool,
       });
     }
   };
@@ -283,6 +379,12 @@ export function AddAgentSheet(props: {
               );
             })}
             {option(
+              "t3-code",
+              T3_CODE,
+              <span className="text-muted">A thread you have</span>,
+              false,
+            )}
+            {option(
               "mcp",
               "Another agent",
               <span className="inline-flex items-center gap-1 text-muted">
@@ -372,6 +474,13 @@ export function AddAgentSheet(props: {
               <p className="m-0 px-3 py-2.5 text-[12px] text-danger">{props.mcpUnavailable}</p>
             ) : null}
           </div>
+        ) : choice === "t3-code" ? (
+          <T3CodeChoice
+            picked={thread?.id ?? null}
+            onPick={pickThread}
+            error={threadMissing ? "Choose a thread." : null}
+            onReady={setT3CodeReady}
+          />
         ) : choice !== null && choice !== "link" ? (
           <div className="flex min-h-11 items-center gap-3 rounded-lg border border-line bg-bg px-3 py-2">
             <span id="agent-add-run-label" className="text-[13px] text-ink">
@@ -387,6 +496,11 @@ export function AddAgentSheet(props: {
             </span>
           </div>
         ) : null}
+        {props.addError ? (
+          <FieldError id="agent-add-error" testId="agent-add-error">
+            {props.addError}
+          </FieldError>
+        ) : null}
         <div className="flex items-center justify-end gap-2">
           <SecondaryButton type="button" disabled={props.adding} onClick={props.onCancel}>
             Cancel
@@ -400,12 +514,14 @@ export function AddAgentSheet(props: {
               disabled={link.status !== "ready" || link.link === null}
               getText={() => (link.status === "ready" ? link.link : null)}
             />
-          ) : (
+          ) : choice === "t3-code" && !t3CodeReady ? null : (
+            // Until dohc is allowed in T3 Code there is no thread to add.
             <PrimaryButton
               type="submit"
               data-testid="agent-add-confirm"
+              aria-describedby={props.addError ? "agent-add-error" : undefined}
               disabled={
-                props.adding || choice === null || (choice !== "mcp" && state?.status !== "ready")
+                props.adding || choice === null || (tool !== null && state?.status !== "ready")
               }
             >
               {props.adding ? "Adding…" : "Add agent"}

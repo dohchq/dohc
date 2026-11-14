@@ -71,6 +71,7 @@ export type ShellErrorKind =
   | "chat-wake-unconfirmed"
   | "chat-wake-runners-refused"
   | "chat-wake-runners-unreadable"
+  | "chat-forward-stuck"
   | "singleton-tab-split"
   | "tab-limit"
   | "workspace-search"

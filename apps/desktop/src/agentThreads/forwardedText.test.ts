@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  cliForThread,
   forwardedMessageText,
   introductionText,
   quoted,
@@ -7,7 +8,7 @@ import {
 } from "./forwardedText";
 
 const message = (over: Partial<ForwardedMessage> = {}): ForwardedMessage => ({
-  cli: "dohc",
+  cli: { program: "dohc", notes: [] },
   workspace: { id: "ws-1", name: "Launch" },
   agentId: "chief",
   place: { kind: "group", name: "launch" },
@@ -148,9 +149,110 @@ describe("forwardedMessageText", () => {
   });
 });
 
+describe("cliForThread", () => {
+  it("names dohc's own program by its full path, in quotes every shell reads whole", () => {
+    expect(cliForThread("C:\\Users\\First Last\\dohc\\cli-bin\\dohc.cmd", "win32")).toEqual({
+      program: '"C:/Users/First Last/dohc/cli-bin/dohc.cmd"',
+      notes: [
+        "In PowerShell, put & before the quoted program.",
+        "Do not install or download a program named dohc.",
+      ],
+    });
+    expect(
+      cliForThread("/Applications/dohc.app/Contents/Resources/cli-bin/dohc", "darwin"),
+    ).toEqual({
+      program: '"/Applications/dohc.app/Contents/Resources/cli-bin/dohc"',
+      notes: ["Do not install or download a program named dohc."],
+    });
+  });
+
+  it("keeps a name with spaces, dots, an apostrophe, and letters of any script", () => {
+    expect(
+      cliForThread("C:\\Users\\José O'Brien-Smith.w\\cli-bin\\dohc.cmd", "win32").program,
+    ).toBe(`"C:/Users/José O'Brien-Smith.w/cli-bin/dohc.cmd"`);
+  });
+
+  it("gives no program for a path some shell would not read whole, and never a bare name", () => {
+    for (const path of [
+      '/home/a"b/dohc',
+      "/home/$HOME/dohc",
+      "/home/a`b`/dohc",
+      "/home/a\\b/dohc",
+      "C:\\Users\\%USERNAME%\\dohc.cmd",
+      "/home/a!b/dohc",
+      `/home/a${at(0x0a)}b/dohc`,
+      // PowerShell reads curly quotes as double quotes.
+      `C:\\Users\\r${at(0x201d)};echo x;&${at(0x201c)}x\\dohc.cmd`,
+      `C:\\Users\\a${at(0x201e)}b\\dohc.cmd`,
+      // cmd.exe splits a line here when Git Bash hands it a .cmd path with no space.
+      "C:\\Users\\R&D\\dohc.cmd",
+      "C:\\Users\\a|b\\dohc.cmd",
+      "C:\\Users\\a^b\\dohc.cmd",
+      "C:\\Users\\a(b)\\dohc.cmd",
+      "C:\\Users\\a;b\\dohc.cmd",
+      "C:\\Users\\a,b\\dohc.cmd",
+      "C:\\Users\\a=b\\dohc.cmd",
+      "C:\\Users\\a<b>\\dohc.cmd",
+      `C:\\Users\\a${at(0xa0)}b\\dohc.cmd`,
+      // cmd.exe drops the quotes of a command wrapped in cmd /c when it meets an @.
+      "C:\\Program Files\\@x\\dohc.cmd",
+      "/home/a@b/dohc",
+      // The system's older text encoding on Windows turns these into a quote, a caret, a backtick.
+      `C:\\Users\\a${at(0x2ba)}b\\dohc.cmd`,
+      `C:\\Users\\a${at(0x2c6)}b\\dohc.cmd`,
+      `C:\\Users\\e${at(0x300)}\\dohc.cmd`,
+      `C:\\Users\\e${at(0x30e)}\\dohc.cmd`,
+    ]) {
+      const cli = cliForThread(path, path.startsWith("C:") ? "win32" : "linux");
+
+      expect(cli.program, path).toBeNull();
+      expect(cli.notes, path).toEqual([]);
+    }
+    expect(cliForThread("", "linux")).toEqual({ program: null, notes: [] });
+  });
+
+  it("names the first character it refused, and keeps a combining accent where no older encoding reads it", () => {
+    expect(cliForThread("C:\\Users\\R&D (work)\\dohc.cmd", "win32").refused).toBe("&");
+    expect(cliForThread(`/home/e${at(0x301)}/dohc`, "linux").program).toBe(
+      `"/home/e${at(0x301)}/dohc"`,
+    );
+    // Marks outside those two blocks stay, so names in other scripts connect.
+    expect(
+      cliForThread(`C:\\Users\\${at(0x30e6, 0x30fc, 0x30b6, 0x30fc)}\\dohc.cmd`, "win32").program,
+    ).not.toBeNull();
+  });
+
+  it("says the thread cannot reply when there is no program to name", () => {
+    const text = forwardedMessageText(message({ cli: { program: null, notes: [] } }));
+
+    expect(lines(text).at(-1)).toBe(
+      "dohc can't write its program's path in a command on this computer, so you can't reply there. Do not run another program named dohc.",
+    );
+    expect(text).not.toContain("chat reply");
+    expect(text).not.toContain("chat show");
+  });
+
+  it("puts the program in each command and its notes on one line after them", () => {
+    const cli = cliForThread("C:\\dohc\\cli-bin\\dohc.cmd", "win32");
+    const text = lines(forwardedMessageText(message({ cli })));
+
+    expect(text.slice(-3)).toEqual([
+      'Reply in that chat thread, with your text on stdin: "C:/dohc/cli-bin/dohc.cmd" chat reply th_a --workspace ws-1 --agent-id chief -',
+      'Read it first when this message points at something you were not sent, such as a file: "C:/dohc/cli-bin/dohc.cmd" chat show th_a --workspace ws-1 --agent-id chief --peek',
+      "In PowerShell, put & before the quoted program. Do not install or download a program named dohc.",
+    ]);
+    expect(lines(introductionText({ cli, agentName: "Chief" })).at(-1)).toBe(
+      "- In PowerShell, put & before the quoted program. Do not install or download a program named dohc.",
+    );
+  });
+});
+
 describe("introductionText", () => {
   it("names the agent on one line and the command that lists the reply options", () => {
-    const text = introductionText({ cli: "dohc", agentName: `Chief${at(0x0a)}"of Staff"` });
+    const text = introductionText({
+      cli: { program: "dohc", notes: [] },
+      agentName: `Chief${at(0x0a)}"of Staff"`,
+    });
 
     expect(text.split("\n")[0]).toContain(`their agent "Chief${"\\"}n${"\\"}"of Staff${"\\"}""`);
     expect(text).toContain("`dohc chat reply --help`");

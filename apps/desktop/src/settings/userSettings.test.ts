@@ -11,6 +11,7 @@ import {
   AgentColors,
   clampZoomLevel,
   firstAgent,
+  forwardingAgents,
   agentHandle,
   agentIdsToWake,
   agentMentionCandidates,
@@ -358,6 +359,73 @@ describe("desktop user settings model", () => {
     ]);
   });
 
+  it("forwards a workspace's messages to each agent that is on, has a thread, and serves it", () => {
+    const { launch: _launch, ...unlaunched } = testAgent();
+    const thread = (id: string) => ({ thread: { tool: "t3-code" as const, id } });
+    const agents = AgentsSettings.parse({
+      chief: {
+        ...unlaunched,
+        name: "Chief",
+        enabled: true,
+        ...thread("t-1"),
+        workspaces: ["ws-1", "ws-2"],
+      },
+      paused: {
+        ...unlaunched,
+        name: "Paused",
+        enabled: false,
+        ...thread("t-2"),
+        workspaces: ["ws-1"],
+      },
+      elsewhere: {
+        ...unlaunched,
+        name: "Elsewhere",
+        enabled: true,
+        ...thread("t-3"),
+        workspaces: ["ws-2"],
+      },
+      nowhere: { ...unlaunched, name: "Nowhere", enabled: true, ...thread("t-4") },
+      started: testAgent({ name: "Started", enabled: true }),
+      connected: { ...unlaunched, name: "Connected", enabled: false },
+    });
+
+    expect(forwardingAgents({ agents }, "ws-1").map(({ id }) => id)).toEqual(["chief"]);
+    expect(forwardingAgents({ agents }, "ws-2").map(({ id }) => id)).toEqual([
+      "chief",
+      "elsewhere",
+    ]);
+    // An agent with a thread posts as itself, like any agent dohc does not start.
+    expect(agentYouRun({ agents }, "chief")?.name).toBe("Chief");
+    expect(agentIdsToWake({ agents }, "@Chief hello", "chief")).toEqual([]);
+  });
+
+  it("gives each agent its own thread", () => {
+    const { launch: _launch, ...unlaunched } = testAgent();
+    const onThread = (name: string, id: string) => ({
+      ...unlaunched,
+      name,
+      enabled: true,
+      thread: { tool: "t3-code" as const, id },
+      workspaces: ["ws-1"],
+    });
+
+    expect(
+      AgentsSettings.safeParse({ chief: onThread("Chief", "t-1"), scout: onThread("Scout", "t-2") })
+        .success,
+    ).toBe(true);
+    const shared = AgentsSettings.safeParse({
+      chief: onThread("Chief", "t-1"),
+      scout: onThread("Scout", "t-1"),
+    });
+    expect(shared.success).toBe(false);
+    expect(shared.error?.issues[0]?.message).toBe("Give each agent its own thread.");
+    // Sound alone, so Settings says what it clashes with.
+    expect(agentProblem("scout", onThread("Scout", "t-1"))).toBe(
+      "Another agent has this name or this thread.",
+    );
+    expect(agentProblem("agent-b", testAgent())).toBe("Another agent has this name.");
+  });
+
   it("says what is wrong with an agent entry in one sentence about its first problem", () => {
     const { name: _name, ...nameless } = testAgent();
     const { launch: _launch, ...unlaunched } = testAgent();
@@ -385,6 +453,37 @@ describe("desktop user settings model", () => {
         "`timeoutMinutes` must be a whole number from 1 to 1440.",
       ],
       ["agent-b", { ...testAgent(), launch: { tool: "cursor" } }, "dohc can't read `launch`."],
+      ["agent-b", { ...unlaunched, thread: { tool: "t3" } }, "dohc can't read `thread`."],
+      [
+        "agent-b",
+        { ...unlaunched, thread: { tool: "t3-code", id: "a b" } },
+        "dohc can't read `thread`.",
+      ],
+      [
+        "agent-b",
+        { ...testAgent(), thread: { tool: "t3-code", id: "t-1" } },
+        "An agent with a `thread` has no `launch`. Its tool runs it.",
+      ],
+      [
+        "agent-b",
+        { ...unlaunched, enabled: false, note: "Post here." },
+        "`whileBusy`, `note` and `workspaces` need a `thread`.",
+      ],
+      [
+        "agent-b",
+        { ...unlaunched, thread: { tool: "t3-code", id: "t-1" }, whileBusy: "wait" },
+        "`whileBusy` must be line or steer.",
+      ],
+      [
+        "agent-b",
+        { ...unlaunched, thread: { tool: "t3-code", id: "t-1" }, note: "" },
+        "`note` must be text of 1 to 4000 characters.",
+      ],
+      [
+        "agent-b",
+        { ...unlaunched, thread: { tool: "t3-code", id: "t-1" }, workspaces: ["Not An Id"] },
+        "`workspaces` must be a list of workspace ids.",
+      ],
       ["agent-b", { ...testAgent(), color: "teal" }, "dohc doesn't use `color`."],
       ["agent-b", ["Nova"], "This entry must be an object, like the other agents."],
       ["agent-b", null, "This entry must be an object, like the other agents."],
@@ -777,6 +876,38 @@ describe("desktop user settings store", () => {
       tool: "claude",
       executable: "D:\\claude.exe",
     });
+  });
+
+  it("says which agent has a thread when two windows connect it at once, and keeps the first", async () => {
+    const root = await createTestScratch("dohc-user-settings-");
+    const path = join(root, USER_SETTINGS_FILE);
+    await writeFile(path, JSON.stringify(DEFAULT_USER_SETTINGS));
+    const { launch: _launch, ...unlaunched } = testAgent();
+    // Both windows read the settings before either saves.
+    const seen = (await readUserSettingsFile(root)).settings;
+    const connecting = (id: string, name: string) => ({
+      ...seen,
+      agents: {
+        ...seen.agents,
+        [id]: {
+          ...unlaunched,
+          name,
+          enabled: true,
+          thread: { tool: "t3-code" as const, id: "t-1" },
+          workspaces: ["ws-1"],
+        },
+      },
+    });
+    await writeUserSettingsFile(root, connecting("chief", "Chief"), seen);
+
+    // A plain error, so its words reach the person as they are.
+    await expect(
+      writeUserSettingsFile(root, connecting("scout", "Scout"), seen),
+    ).rejects.toMatchObject({
+      name: "Error",
+      message: "dohc didn't connect Scout because Chief is already connected to that thread.",
+    });
+    expect(Object.keys(JSON.parse(await readFile(path, "utf8")).agents)).toEqual(["chief"]);
   });
 
   it("refuses to save into an agent entry dohc cannot use, and leaves that entry as written", async () => {

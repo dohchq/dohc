@@ -75,6 +75,7 @@ it("keeps every snapshot within the IPC contract, however many chats pause", () 
     "wake-unconfirmed",
     "wake-runners-refused",
     "wake-runners-unreadable",
+    "forward-stuck",
   ] as const;
   for (const reason of others)
     notices.report("a", { reason, threadId: reason, message: `${reason}.` });

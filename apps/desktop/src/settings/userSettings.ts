@@ -92,14 +92,41 @@ export const AgentId = z
     "Ids that start with p- are kept for personal agents. Give this agent another id.",
   );
 
+// A workspace's id as this file names it.
+const SettingsWorkspaceId = z
+  .string()
+  .max(200)
+  .regex(/^[a-z0-9][a-z0-9-]*$/);
+
+// The agent's own conversation in its tool (CONTEXT.md, Agent thread). dohc
+// forwards the agent's messages there and never starts the agent.
+export const AgentThread = z
+  .object({
+    tool: z.literal("t3-code"),
+    // The thread's id in the tool, in visible ASCII.
+    id: z.string().regex(/^[\x21-\x7e]{1,512}$/),
+  })
+  .strict();
+export type AgentThread = z.infer<typeof AgentThread>;
+export const MAX_AGENT_NOTE_LENGTH = 4000;
+const MAX_AGENT_WORKSPACES = 200;
+
 export const AgentSettings = z
   .object({
     name: PreferredNameForIpc,
     hue: z.enum(AGENT_HUES),
     // How dohc starts the agent. Without one, dohc never starts it.
     launch: AgentLaunch.optional(),
+    thread: AgentThread.optional(),
+    // What dohc does with a message while the thread works: put it in line,
+    // or hand it over at once. In line when absent.
+    whileBusy: z.enum(["line", "steer"]).optional(),
+    // What the person wrote for the agent. dohc sends it with every message.
+    note: z.string().min(1).max(MAX_AGENT_NOTE_LENGTH).optional(),
+    // The workspaces whose messages dohc forwards to the thread.
+    workspaces: z.array(SettingsWorkspaceId).max(MAX_AGENT_WORKSPACES).optional(),
     changesFiles: z.boolean().default(true),
-    // Pause and Resume. dohc starts only an enabled agent.
+    // Pause and Resume. dohc starts, and forwards to, only an enabled agent.
     enabled: z.boolean(),
     timeoutMinutes: z.number().int().min(1).max(1440).default(30),
     // The name this agent's messages carried before agents had ids. Only the
@@ -107,10 +134,20 @@ export const AgentSettings = z
     nameBeforeMigration: PreferredNameForIpc.optional(),
   })
   .strict()
-  .refine((agent) => agent.launch !== undefined || !agent.enabled, {
+  .refine((agent) => agent.launch !== undefined || agent.thread !== undefined || !agent.enabled, {
     message: "Choose how dohc starts this agent before turning it on.",
     path: ["enabled"],
-  });
+  })
+  .refine((agent) => agent.launch === undefined || agent.thread === undefined, {
+    message: "An agent with a `thread` has no `launch`. Its tool runs it.",
+    path: ["thread"],
+  })
+  .refine(
+    (agent) =>
+      agent.thread !== undefined ||
+      (agent.whileBusy === undefined && agent.note === undefined && agent.workspaces === undefined),
+    { message: "`whileBusy`, `note` and `workspaces` need a `thread`.", path: ["thread"] },
+  );
 export type AgentSettings = z.infer<typeof AgentSettings>;
 export type Agent = AgentSettings & { id: string };
 
@@ -138,6 +175,17 @@ export const AgentsSettings = z
     {
       message: "Only the default agent keeps a name from before agents had ids.",
     },
+  )
+  // One thread is one agent. Two agents on it would put two workspaces'
+  // messages in one conversation with no warning (ADR 0016).
+  .refine(
+    (agents) => {
+      const threads = Object.values(agents).flatMap(({ thread }) =>
+        thread ? [`${thread.tool}\n${thread.id}`] : [],
+      );
+      return new Set(threads).size === threads.length;
+    },
+    { message: "Give each agent its own thread." },
   );
 export type AgentsSettings = z.infer<typeof AgentsSettings>;
 
@@ -168,6 +216,19 @@ export function automationAgent(
 ): AgentWithLaunch | null {
   const agent = listAgents(settings).find((entry) => entry.launch !== undefined);
   return agent?.launch ? { ...agent, launch: agent.launch } : null;
+}
+
+export type AgentWithThread = Agent & { thread: AgentThread };
+/** The agents dohc forwards a workspace's messages to: each one that is on, has a thread, and serves the workspace. */
+export function forwardingAgents(
+  settings: Pick<DesktopUserSettings, "agents">,
+  workspaceId: string,
+): AgentWithThread[] {
+  return listAgents(settings).flatMap((agent) =>
+    agent.enabled && agent.thread && agent.workspaces?.includes(workspaceId)
+      ? [{ ...agent, thread: agent.thread }]
+      : [],
+  );
 }
 
 /** The agent you run with this id: an entry dohc never starts. */
@@ -368,7 +429,11 @@ export function agentProblem(id: string, entry: unknown): string {
   }
   const fields = entry as Record<string, unknown>;
   const alone = AgentsSettings.safeParse({ [id]: entry });
-  if (alone.success) return "Another agent has this name.";
+  // The entry is sound alone, so it clashes with an agent the file lists first.
+  if (alone.success)
+    return hasKey(fields, "thread")
+      ? "Another agent has this name or this thread."
+      : "Another agent has this name.";
   const issue = alone.error.issues[0]!;
   if (issue.code === "unrecognized_keys") return `dohc doesn't use \`${issue.keys[0]}\`.`;
   const key = issue.path[1];
@@ -395,6 +460,15 @@ export function agentProblem(id: string, entry: unknown): string {
       return "`timeoutMinutes` must be a whole number from 1 to 1440.";
     case "launch":
       return "dohc can't read `launch`.";
+    case "thread":
+      // The rules across keys: a thread takes the place of `launch`, and its settings need it.
+      return issue.code === "custom" ? issue.message : "dohc can't read `thread`.";
+    case "whileBusy":
+      return "`whileBusy` must be line or steer.";
+    case "note":
+      return `\`note\` must be text of 1 to ${MAX_AGENT_NOTE_LENGTH} characters.`;
+    case "workspaces":
+      return "`workspaces` must be a list of workspace ids.";
     default:
       return "dohc can't read this entry.";
   }
@@ -418,10 +492,6 @@ export type AgentProblem = z.infer<typeof AgentProblem>;
 // one person's choice on one computer: a collaborator never sees it.
 export const MAX_PINNED_APPS = 20;
 const MAX_PINNED_WORKSPACES = 200;
-const PinnedAppsWorkspaceId = z
-  .string()
-  .max(200)
-  .regex(/^[a-z0-9][a-z0-9-]*$/);
 // Archived chats follow the same rule: hiding a chat from your sidebar is
 // your choice on this computer, and the chat's members still see it.
 export const MAX_ARCHIVED_CHATS = 500;
@@ -434,13 +504,13 @@ export const SidebarSettings = z
     hidden: z.array(z.enum(VIEW_IDS)).max(VIEW_IDS.length),
     // Each workspace's pinned apps, by the app's folder in that workspace.
     pinnedApps: z
-      .record(PinnedAppsWorkspaceId, z.array(z.string().min(1).max(4096)).max(MAX_PINNED_APPS))
+      .record(SettingsWorkspaceId, z.array(z.string().min(1).max(4096)).max(MAX_PINNED_APPS))
       .refine((pins) => Object.keys(pins).length <= MAX_PINNED_WORKSPACES, {
         message: `Pin apps in ${MAX_PINNED_WORKSPACES} workspaces or fewer.`,
       }),
     // Each workspace's archived chats, by the chat's id in that workspace.
     archivedChats: z
-      .record(PinnedAppsWorkspaceId, z.array(z.string().min(1).max(200)).max(MAX_ARCHIVED_CHATS))
+      .record(SettingsWorkspaceId, z.array(z.string().min(1).max(200)).max(MAX_ARCHIVED_CHATS))
       .refine((archived) => Object.keys(archived).length <= MAX_PINNED_WORKSPACES, {
         message: `Archive chats in ${MAX_PINNED_WORKSPACES} workspaces or fewer.`,
       })
@@ -448,7 +518,7 @@ export const SidebarSettings = z
     // Each workspace's chats of removed agents taken off Archived, by the
     // chat's id. One shows again when an agent with its id is added again.
     hiddenChats: z
-      .record(PinnedAppsWorkspaceId, z.array(z.string().min(1).max(200)).max(MAX_ARCHIVED_CHATS))
+      .record(SettingsWorkspaceId, z.array(z.string().min(1).max(200)).max(MAX_ARCHIVED_CHATS))
       .refine((hidden) => Object.keys(hidden).length <= MAX_PINNED_WORKSPACES, {
         message: `Remove chats from the list in ${MAX_PINNED_WORKSPACES} workspaces or fewer.`,
       })
