@@ -36,7 +36,7 @@ import {
   deriveMomentActor,
   parseActorKey,
 } from "@dohc/workspace-contracts/actor-identity";
-import { executeCli } from "@dohc/cli";
+import { DEFAULT_RESPONSE_TIMEOUT_MS, executeCli } from "@dohc/cli";
 import {
   CLI_PROTOCOL_VERSION,
   cliTransportResponseSchema,
@@ -70,6 +70,7 @@ import type { RegistryEntry } from "../workspaces/registryStore";
 import { createTestScratch } from "../workspaces/testTemp";
 import {
   CLI_ENDPOINT_FILE,
+  CHAT_READ_SYNC_BUDGET_MS,
   CLI_SOCKET_FILE,
   RUN_MESSAGE_LINK_RECOVERY_FILE,
   WATCH_BATCH_MAX_BYTES,
@@ -246,6 +247,10 @@ function readSocketResponse(socketPath: string, payload: unknown): Promise<CliTr
 type ThreadResult<Verb extends CliVerb> = Verb extends "show" | "chat"
   ? Exclude<CliResultByVerb[Verb], { stream: unknown }>
   : CliResultByVerb[Verb];
+
+it("keeps the chat sync budget below the CLI response timeout", () => {
+  expect(CHAT_READ_SYNC_BUDGET_MS).toBeLessThan(DEFAULT_RESPONSE_TIMEOUT_MS);
+});
 
 describe("CLI socket server", () => {
   let tempRoot: string;

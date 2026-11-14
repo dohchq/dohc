@@ -664,8 +664,8 @@ export function laterObjectMomentPaths(
 // The relay_seq guard is defence in depth, and today it is unreachable: both
 // writers walk the log in relay order (appendLogBatch inserts under the write
 // lock and reads back the row it just took; the seed scans ORDER BY
-// relay_seq), so no upsert here can arrive out of order. Its inverse mutation
-// therefore survives, which is recorded rather than papered over. It stays
+// relay_seq), so no upsert here can arrive out of order.
+// currentFiles.test.ts checks out-of-order and repeated coordinates. The guard stays
 // because this table decides which chat a share serves, and a path moved
 // backwards by a future out-of-order writer would serve a file's discussion at
 // a path the relay can no longer prove.

@@ -6,6 +6,7 @@ import {
   currentFileStateQuery,
   currentFileStatements,
   initializeCurrentFileKeySchema,
+  OBJECT_PATH_UPSERT_SQL,
 } from "./currentFiles";
 import { initializeSyncRelaySchema } from "./schema";
 import type { SqliteDb } from "./types";
@@ -13,6 +14,36 @@ import type { SqliteDb } from "./types";
 const { DatabaseSync } = createRequire(import.meta.url)(
   "node:sqlite",
 ) as typeof import("node:sqlite");
+
+it("keeps the latest object path when coordinates arrive out of order or repeat", () => {
+  const db = new DatabaseSync(":memory:");
+  try {
+    initializeSyncRelaySchema(db as unknown as SqliteDb);
+    db.prepare(
+      "INSERT INTO sync_relay_workspaces(workspace_id,owner_user_id,created_at_ms) VALUES (?,?,?)",
+    ).run("ws", "owner", 1);
+    const upsert = db.prepare(OBJECT_PATH_UPSERT_SQL);
+    const path = () =>
+      db
+        .prepare(
+          "SELECT path, relay_seq FROM sync_relay_object_paths WHERE workspace_id = ? AND object_id = ?",
+        )
+        .get("ws", "object");
+
+    upsert.run("ws", "object", "new.md", 20);
+    upsert.run("ws", "object", "old.md", 10);
+    expect(path()).toEqual({ path: "new.md", relay_seq: 20 });
+    upsert.run("ws", "object", "repeated.md", 20);
+    expect(path()).toEqual({ path: "new.md", relay_seq: 20 });
+    upsert.run("ws", "object", null, 30);
+    upsert.run("ws", "object", "new.md", 20);
+    expect(path()).toEqual({ path: null, relay_seq: 30 });
+    upsert.run("ws", "object", "restored.md", 40);
+    expect(path()).toEqual({ path: "restored.md", relay_seq: 40 });
+  } finally {
+    db.close();
+  }
+});
 
 it("maintains and backfills record identities across edits, deletes, and a UTF-8 prefix boundary", () => {
   const db = new DatabaseSync(":memory:");
