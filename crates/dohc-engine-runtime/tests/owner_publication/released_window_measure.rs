@@ -157,7 +157,6 @@ impl Sql {
     }
 }
 
-/// What each connection a segment used ran.
 #[derive(Debug, Default)]
 struct Traced {
     store: Sql,

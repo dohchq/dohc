@@ -1056,9 +1056,6 @@ fn folder_check(store: &EngineStore, folder: &str) -> Option<crate::LivePageUnde
         .unwrap()
 }
 
-/// A page this computer owns refuses a move of any folder above it, before
-/// any edit arrives, but not a move of the page itself or of a sibling that
-/// shares the folder's name as a prefix.
 #[test]
 fn an_owned_page_refuses_a_move_of_each_folder_above_it() {
     let (_dir, store, _, _) = fixture_at("notes/box/inner/owner.md");
@@ -1081,8 +1078,6 @@ fn an_owned_page_refuses_a_move_of_each_folder_above_it() {
     assert_eq!(folder_check(&store, "notes/box"), None);
 }
 
-/// The page's head is where the folder check looks, so a binding's stale
-/// `currentPath` neither hides the page nor refuses a folder it left.
 #[test]
 fn an_owned_page_is_found_by_its_head_not_its_binding_path() {
     let (_dir, mut store, _, _) = fixture_at("notes/box/owner.md");
@@ -1103,8 +1098,6 @@ fn an_owned_page_is_found_by_its_head_not_its_binding_path() {
     assert_eq!(folder_check(&store, "elsewhere"), None);
 }
 
-/// An accepted edit installed in the owned page, but not yet settled into
-/// its file, leaves the folder move refused.
 #[test]
 fn an_owned_page_with_an_unsaved_accepted_edit_refuses_a_folder_move() {
     let (_dir, mut store, observed, checkpoint) = fixture_at("notes/box/owner.md");
@@ -1165,8 +1158,6 @@ fn page_check(store: &EngineStore, path: &str) -> bool {
         .unwrap()
 }
 
-/// A page this computer owns refuses its own move, and only its own: an
-/// unbound page beside it, its folder and a prefix of its path move.
 #[test]
 fn an_owned_page_refuses_its_own_move() {
     let (_dir, mut store, _, _) = fixture_at("notes/box/owner.md");
@@ -1186,8 +1177,6 @@ fn an_owned_page_refuses_its_own_move() {
     );
 }
 
-/// The page check reads the head's path, as the folder check does, so a
-/// binding's stale `currentPath` neither hides the page nor refuses its old path.
 #[test]
 fn an_owned_page_move_is_found_by_its_head_not_its_binding_path() {
     let (_dir, mut store, _, _) = fixture_at("notes/owner.md");
@@ -1205,7 +1194,6 @@ fn an_owned_page_move_is_found_by_its_head_not_its_binding_path() {
     assert!(!page_check(&store, "elsewhere/owner.md"));
 }
 
-/// Once Stop releases the owner binding, the page and its folder move.
 #[test]
 fn a_released_owned_page_moves() {
     use dohc_engine_collab::owner_outbox::release;

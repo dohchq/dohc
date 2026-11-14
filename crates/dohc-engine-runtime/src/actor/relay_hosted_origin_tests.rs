@@ -1,6 +1,3 @@
-//! Creating a hosted replica asks the relay for the highest position at its
-//! origin, on every attach.
-
 use super::*;
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
 

@@ -92,8 +92,6 @@ fn an_over_long_identifier_is_refused_with_its_measurements() {
     }
 }
 
-/// The bound is a length, not a shape: an identifier exactly at it is work the
-/// engine still has to do.
 #[test]
 fn an_identifier_exactly_at_the_bound_is_accepted() {
     let scratch = ScratchDir::new().expect("scratch");

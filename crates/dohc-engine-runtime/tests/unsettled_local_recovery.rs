@@ -1,8 +1,3 @@
-//! Typing the engine admitted but never settled must survive the local write
-//! that folds another text into its closed lineage. The lineage converges on
-//! the written file. The typed text becomes an ordinary sibling file with its
-//! own History moment, so the person and their agents can read it back.
-
 use dohc_engine_collab::{CloseOutcome, ContentKind, DocKey, LeaseRegistry, Ydoc};
 use dohc_engine_domain::{
     ChangeActorKind, ChangeAttribution, DomainError, RenameTextFile, WriteResult, WriteText,
@@ -765,10 +760,6 @@ async fn a_crash_after_the_move_commits_moves_the_copy_once() {
     fixture.close();
 }
 
-/// Capture recorded the other program's file at the copy's name, then a
-/// person edited that file through the API before a repair pass ran. The
-/// record of the occupant stands, so the pass still moves the recovered text
-/// to the next free name and leaves the edited occupant where it is.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_edited_occupant_capture_recorded_still_moves_the_copy() {
     let fixture = fixture().await;
@@ -824,10 +815,6 @@ async fn an_edited_occupant_capture_recorded_still_moves_the_copy() {
     fixture.close();
 }
 
-/// A person renames the refused copy away and back before capture sees the
-/// other program's file. The head at the copy's name is the person's rename,
-/// not a recorded occupant: a repair pass makes no second copy of text the
-/// person already has.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_copy_renamed_away_and_back_is_not_copied_again() {
     let fixture = fixture().await;
@@ -862,7 +849,6 @@ async fn a_copy_renamed_away_and_back_is_not_copied_again() {
     fixture.close();
 }
 
-/// Which pending copy a person renames before it reaches disk.
 #[derive(Clone, Copy)]
 enum PendingCopy {
     Original,
@@ -870,10 +856,6 @@ enum PendingCopy {
     Replacement,
 }
 
-/// A person renames a recovered copy while its write is still pending. The
-/// rename keeps the text under the new name; the write aimed at the old name
-/// must go with it, or ordinary pending replay, as the next open runs it,
-/// puts a file back at that name.
 async fn a_renamed_pending_copy_is_not_written_back_at_its_old_name(which: PendingCopy) {
     let fixture = fixture().await;
     let (path, job) = match which {
@@ -959,9 +941,6 @@ async fn a_renamed_pending_replacement_is_not_written_back_at_its_old_name_by_re
     a_renamed_pending_copy_is_not_written_back_at_its_old_name(PendingCopy::Replacement).await;
 }
 
-/// Several files changed while dohc was closed. The startup pass captures
-/// them in one batch; the first folds a lineage and recovers a copy, and the
-/// copy's moment must not take the order the batch reserved for the next file.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_recovery_inside_a_capture_batch_leaves_room_for_the_next_file() {
     let fixture = fixture().await;
@@ -1018,10 +997,6 @@ async fn a_recovery_inside_a_capture_batch_leaves_room_for_the_next_file() {
     fixture.close();
 }
 
-/// The daemon's capture sink sees the occupant for the first time: the
-/// copy's name was never in its files manifest, and first sight claims no
-/// head another origin wrote. The store knows this head was never placed,
-/// so the occupant is recorded without a claim and the copy moves.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_first_sight_of_the_occupant_records_it_and_moves_the_copy() {
     let fixture = fixture().await;
@@ -1072,11 +1047,6 @@ async fn a_first_sight_of_the_occupant_records_it_and_moves_the_copy() {
     fixture.close();
 }
 
-/// First sight claims a recovery head only once the materializer has refused
-/// its write, and only while the head is still that recovery. A copy whose
-/// write is still pending, or whose text a person replaced through the API,
-/// is left alone like any head another origin wrote. The replaced copy has no
-/// recorded occupant either, so a repair pass makes no second copy of it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_first_sight_leaves_an_unrefused_or_replaced_copy_alone() {
     let fixture = fixture().await;

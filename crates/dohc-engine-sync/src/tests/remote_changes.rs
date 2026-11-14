@@ -17,9 +17,6 @@ fn apply(engine: &mut EngineStore, envelope: &ReplicationEnvelope) {
     .expect("apply");
 }
 
-/// An op another computer made counts once when it applies. A redelivery,
-/// and this computer's own op echoing back, count nothing, and the count
-/// survives reopening the store.
 #[test]
 fn an_applied_op_from_elsewhere_counts_once_and_survives_reopening() {
     let (_scratch, path, mut engine) = open_store();

@@ -492,7 +492,6 @@ fn direct_push_writes_a_schema_edit_and_send_changes_never_offers_it() {
         "a written file is not offered again"
     );
 
-    // A later edit is offered, based on what the direct lane wrote.
     journal_local_moment(
         &mut engine,
         &edit_moment("m-2", "object-schema", schema, "v2", "v3"),

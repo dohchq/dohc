@@ -425,8 +425,6 @@ async fn an_existing_store_under_an_unbound_root_is_refused() {
     );
 }
 
-/// A workspace's engine.db copied under another root is refused, whether the
-/// other root has no binding or its own.
 #[tokio::test]
 async fn an_engine_db_copied_to_another_root_is_refused() {
     let source = ScratchDir::new().expect("source");
@@ -576,8 +574,6 @@ async fn a_fresh_root_with_a_malformed_binding_refuses_twice_and_keeps_no_store(
     }
 }
 
-/// A read-only open never binds. Under an unbound root with an existing
-/// store it refuses, writes no binding, and leaves the store's bytes alone.
 #[tokio::test]
 async fn a_read_only_open_of_an_unbound_root_with_a_store_is_refused_untouched() {
     let scratch = ScratchDir::new().expect("scratch");

@@ -77,8 +77,6 @@ fn a_reconcile_run_stamps_its_summary_and_correlation_on_every_moment() {
     drop(sink);
     supervisor.close(&db).expect("close actor");
 
-    // The delete moment carries the same provenance as the pass's
-    // writes, so the history group stays contiguous.
     for path in ["notes/a.md", "photo.png", "gone.md"] {
         let (summary, correlation) = moment_metadata(&db, path);
         assert_eq!(

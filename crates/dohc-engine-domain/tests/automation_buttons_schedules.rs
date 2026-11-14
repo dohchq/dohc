@@ -1,9 +1,3 @@
-//! Button presses and schedule steps claim automations without a record
-//! change: a press claims once per press id, joins only its own person's
-//! unfinished run of the same button on the same record, and finds its
-//! claim after it is forgotten; a schedule claims each due time once behind
-//! a mark that only moves forward.
-
 use dohc_engine_domain::{
     AUTOMATION_CHAIN_DEPTH_CAP, AUTOMATION_CHAIN_STOPPED, AUTOMATION_HISTORY_RETENTION_MS,
     AUTOMATION_PRESS_RETENTION_MS, AutomationChangeKind, AutomationClaim, AutomationClaimState,
@@ -253,7 +247,6 @@ fn an_agents_press_claims_for_its_person_at_its_runs_depth_and_stops_at_the_cap(
     assert_eq!(pressed.depth, 2);
     assert_eq!(pressed.change.actor_kind, Some(ChangeActorKind::Agent));
     assert_eq!(pressed.change.author_origin_id.as_deref(), Some("dohc-mcp"));
-    // The run acts for the person, so only their presses join it.
     assert_eq!(pressed.change.on_behalf_of.as_deref(), Some(ADA));
     assert_eq!(pressed.state, AutomationClaimState::Pending);
     let theirs = joined(press(&mut store, "press-2", INVOICE, 11).expect("the person's press"));

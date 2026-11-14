@@ -1,6 +1,3 @@
-//! The complete chat read/write surface through the in-process protocol
-//! transport, backed only by real domain writes.
-
 use crate::common;
 
 use common::*;

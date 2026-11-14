@@ -2680,8 +2680,6 @@ fn ordinary_audit_evidence_cannot_credit_an_imported_moment() {
                 op.op_kind == "moment.append" && op.payload["momentId"] == moment_id.as_str()
             })
             .unwrap();
-        // Neither credential carries the moment's authors; only the relay's
-        // admission of its settlement proof can credit them.
         assert!(moment.payload.get("authors").is_none());
         assert!(moment.payload.get("settlementReference").is_some());
         let wire = moment.payload.to_string();

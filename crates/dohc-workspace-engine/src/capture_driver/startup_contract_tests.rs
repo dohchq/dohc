@@ -340,7 +340,6 @@ fn a_rescan_stops_carrying_a_file_it_recorded() {
     assert!(carried.is_none(), "a later pass recorded the last file");
 }
 
-/// A file the rescan planned stays carried when a retry cannot read it.
 #[test]
 fn a_rescan_keeps_carrying_a_file_a_retry_could_not_read() {
     let mut left = BTreeSet::new();
@@ -351,8 +350,6 @@ fn a_rescan_keeps_carrying_a_file_a_retry_could_not_read() {
     assert_eq!(left, paths(&["note-0.md"]));
 }
 
-/// Quarantine can converge a rescan's retries around a file that keeps
-/// failing, so the rescan settles. It still carries that file.
 #[test]
 fn a_rescan_that_converges_around_a_quarantined_file_carries_it() {
     let mut left = BTreeSet::new();

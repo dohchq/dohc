@@ -1520,7 +1520,6 @@ fn base_repair_recovers_remote_commit_before_idempotent_repush() {
     drop(engine);
     let mut engine = EngineStore::open(&path, 1_400).expect("reopen");
     assert_eq!(read_pushed_seq(&engine, "ws", "local").unwrap(), -1);
-    // A retry must retain the relay sequence assigned by the committed push.
     let original = {
         let coordinates = client.transport().coordinates.lock().unwrap();
         let LogCoordinateResponse::Present(op) = coordinates.get(&("local".to_owned(), 1)).unwrap()
@@ -1915,8 +1914,6 @@ fn seeded_relay_fault_model_converges_without_double_apply() {
     let (_scratch_b, _path_b, mut b) = open_store();
     let (_scratch_c, _path_c, mut c) = open_store();
 
-    // Seed 0xR10's deterministic schedule: reordered delivery, a dropped
-    // packet, a partitioned peer, a duplicate, and a restart after a prefix.
     for op in ops.iter().rev() {
         apply_chat_envelope(&mut a, op, &NoFaults).expect("a reordered");
     }
@@ -1970,8 +1967,6 @@ fn seeded_relay_fault_model_converges_without_double_apply() {
     drop(scratch_a);
 }
 
-/// A pulled op targeting a foreign workspace must be rejected before apply,
-/// and the fetch cursor must not advance.
 #[test]
 fn pull_rejects_op_for_foreign_workspace() {
     let (_scratch, _path, mut engine) = open_store();
@@ -2013,7 +2008,6 @@ fn pull_rejects_op_for_foreign_workspace() {
         ),
         Err(RelayError::InvalidResponse)
     ));
-    // Fail closed: the cursor was never persisted, so the pass is retryable.
     assert!(read_relay_cursor(&engine, "ws").expect("cursor").is_none());
 }
 
@@ -3708,8 +3702,6 @@ fn a_ydoc_payload_cannot_be_reused_as_an_over_cap_captured_binary() {
     assert_eq!(snapshots, 0, "no over-cap binary snapshot may materialize");
 }
 
-/// The Y.Doc half of the ingest chokepoint. Text and binary are pinned above.
-///
 #[test]
 fn a_ydoc_blob_at_the_ydoc_ceiling_hydrates_and_one_byte_over_is_refused() {
     let (_scratch, _path, mut engine) = open_store();

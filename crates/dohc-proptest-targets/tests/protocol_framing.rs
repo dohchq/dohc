@@ -156,17 +156,12 @@ fn encode_frames(frames: &[Frame]) -> Vec<u8> {
 }
 
 proptest! {
-    /// Pure random bytes, fed as one chunk. Never panics; never yields more
-    /// decoded payload bytes than were pushed; stays poisoned after an error.
     #[test]
     fn arbitrary_bytes_never_panic_and_never_fabricate_data(bytes in prop::collection::vec(any::<u8>(), 0..4096)) {
         let total_payload = drain_and_check_poison(&bytes);
         prop_assert!(total_payload <= bytes.len());
     }
 
-    /// The same bytes fed in small, arbitrarily-split chunks must behave
-    /// identically to the whole thing arriving at once -- the incremental
-    /// decoder must not depend on chunk boundaries for correctness.
     #[test]
     fn arbitrary_bytes_have_equivalent_chunk_schedules(
         bytes in prop::collection::vec(any::<u8>(), 0..2048),
@@ -227,8 +222,6 @@ proptest! {
         }
     }
 
-    /// Truncation at EVERY prefix length of a valid frame must never panic
-    /// and must never yield a frame (a truncated frame is never "complete").
     #[test]
     fn truncation_at_every_prefix_never_yields_a_complete_frame(cut in 0usize..1000) {
         let frame = valid_hello_frame();
@@ -301,7 +294,6 @@ fn every_split_preserves_frames_and_terminal_error() {
     }
 }
 
-/// Seed-corpus sanity: the exact bytes a real client would send round-trip.
 #[test]
 fn seed_hello_frame_round_trips() {
     let frame = valid_hello_frame();
@@ -318,10 +310,6 @@ fn seed_hello_frame_round_trips() {
     assert!(matches!(envelope, Envelope::Hello(_)));
 }
 
-/// A prefix of a valid multi-frame stream is incomplete, never an error: the
-/// decoder must wait for the rest, not refuse a partial read. The proptest
-/// above only proves a prefix is never *complete*; this proves it is never
-/// *refused*, over a control frame followed by a blob chunk.
 #[test]
 fn every_prefix_of_a_valid_stream_is_incomplete_not_an_error() {
     let limits = WireLimits::default();
@@ -352,9 +340,6 @@ fn every_prefix_of_a_valid_stream_is_incomplete_not_an_error() {
     assert!(matches!(decoder.next_frame(), Ok(None)));
 }
 
-/// Structurally valid JSON that is not a valid envelope, and pathologically
-/// deep JSON, both decode to a typed error rather than a panic or a stack
-/// overflow.
 #[test]
 fn hostile_envelope_payloads_yield_typed_errors() {
     let limits = WireLimits::default();

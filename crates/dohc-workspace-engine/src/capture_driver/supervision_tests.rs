@@ -37,9 +37,6 @@ fn a_watch_that_dies_every_tick_backs_off_instead_of_rescanning_hot() {
 
 #[test]
 fn a_files_actor_that_dies_every_tick_also_escalates() {
-    // The other uncounted path: a reconcile returning ActorUnavailable
-    // dropped the layer without recording a failure at all, so the streak
-    // sat at zero and the driver never slowed down or reported terminal.
     let (delays, status, failures) =
         run(&[TickObservation::ActorLost; MAX_RESTART_ATTEMPTS as usize]);
     assert_eq!(failures, MAX_RESTART_ATTEMPTS);

@@ -1884,9 +1884,6 @@ fn ydoc_drain_waiting_nonempty_queue_leaves_inactive_update_queued() {
     assert_parked_inactive_refusal(true, 2);
 }
 
-/// A drain report this build cannot read fails the claim that meets it once,
-/// and is gone after it; the reports beside it stay owed and the next claim
-/// reports them.
 #[test]
 fn an_unreadable_drain_report_fails_one_claim_and_the_rest_stay_owed() {
     let (_scratch, _path, mut engine) = open_store();

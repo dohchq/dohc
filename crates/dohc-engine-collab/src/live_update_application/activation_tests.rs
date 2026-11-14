@@ -984,7 +984,6 @@ fn reader_resume_and_adoption_recheck_mutable_authority() {
         if case == "fence" {
             reader_fence(&mut f);
         }
-        // Neither a capture receipt nor a cached verdict replaces current authority.
         assert!(
             reader_application_result(|| resume_imported_owner_activation(
                 &mut f.store,

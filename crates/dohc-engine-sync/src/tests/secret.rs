@@ -1040,8 +1040,6 @@ fn secret_put_over_the_domain_cap_is_refused_without_a_tip_or_moment() {
         0
     );
 
-    // The same put at exactly the cap is admitted, so the guard is a CAP and
-    // not a blanket refusal of large secrets.
     let at_cap = vec![7_u8; MAX_SECRET_FILE_BYTES];
     let at_cap_sha = engine
         .put_binary_blob(&at_cap)

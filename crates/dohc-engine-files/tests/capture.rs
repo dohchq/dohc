@@ -366,10 +366,6 @@ fn an_ingest_whose_held_file_is_gone_keeps_the_path_for_a_retire() {
     assert!(matches!(retry.ops.as_slice(), [CaptureOp::Retire { path }] if path == "open.md"));
 }
 
-// A session settled a new document before capture recorded its
-// file, and the file was gone when the sink read it. The path has no entry to
-// keep, so it waits as a retire candidate, and the scan after release retires
-// the record.
 #[test]
 fn first_sight_deferred_delete_returns_as_a_retire() {
     let ws = Scratch::new();
@@ -423,10 +419,6 @@ fn first_sight_deferred_delete_returns_as_a_retire() {
     assert!(after.is_empty(), "a retired candidate is not offered again");
 }
 
-// A session releases a tracked document, and the next scan finds it
-// grown past what capture tracks, so capture forgets the path. The offer came
-// while the path was still tracked, and it still retires the record once the
-// file is gone.
 #[test]
 fn a_path_offered_while_tracked_retires_after_capture_forgets_it() {
     let ws = Scratch::new();
@@ -614,8 +606,6 @@ fn not_owned_ingest_is_acknowledged_but_forgotten_by_the_manifest() {
         "a not-owned path must never read as already-captured"
     );
 
-    // Ownership returns (policy widened / content became ownable): the next
-    // dirty reconcile must re-emit the ingest because the manifest forgot it.
     sink.not_owned.clear();
     controller.mark_dirty();
     let retry = completed(
@@ -970,8 +960,6 @@ fn retire(path: &str) -> CaptureOp {
     }
 }
 
-/// A sink whose respelled retires wait for the paths in `waits`, as one does
-/// while an editor has the file open.
 #[derive(Default)]
 struct WaitingSink {
     inner: TwoAtATimeSink,
@@ -1044,9 +1032,6 @@ fn an_ingest_waits_for_the_waiting_retire_of_its_old_spelling() {
     assert_eq!(result.failed_applies, ["notes.md", "Notes.md"]);
 }
 
-/// Where the disk cannot prove the stored spelling, the old spelling's
-/// removal stays unconfirmed every pass. The new spelling is
-/// captured as it is without the respell fix, never held back for good.
 #[test]
 fn an_unproven_respell_never_holds_back_an_ingest() {
     let plan = plan_of(vec![ingest("Notes.md")], &["notes.md"], &[]);
@@ -1056,8 +1041,6 @@ fn an_unproven_respell_never_holds_back_an_ingest() {
     assert_eq!(result.applied_paths, ["Notes.md"]);
 }
 
-/// A retire that fails for good does not starve the new spelling either:
-/// only a retire that waits holds it back.
 #[test]
 fn a_failed_respelled_retire_never_holds_back_an_ingest() {
     let plan = plan_of(
@@ -1073,8 +1056,6 @@ fn a_failed_respelled_retire_never_holds_back_an_ingest() {
     assert_eq!(result.applied_paths, ["Notes.md"]);
 }
 
-/// A request made while a batch commits sends that path next, alone, ahead
-/// of the lexically earlier remainder. Every durable unit wakes the caller.
 #[test]
 fn a_requested_path_is_captured_alone_before_the_rest_of_a_new_file_import() {
     let plan = plan_of(
@@ -1121,9 +1102,6 @@ fn a_requested_path_is_captured_alone_before_the_rest_of_a_new_file_import() {
     assert_eq!(applied, ["a.md", "b.md", "c.md", "d.md", "e.md", "z.md"]);
 }
 
-/// A plan with retires keeps its order: a respelled path's retire must still
-/// run before its new spelling's ingest. A request for a path the plan does
-/// not hold changes nothing.
 #[test]
 fn a_request_never_reorders_a_plan_with_retires() {
     let plan = plan_of(

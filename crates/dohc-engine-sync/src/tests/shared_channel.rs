@@ -160,9 +160,6 @@ fn account_marks(engine: &EngineStore) -> i64 {
         .expect("account marks")
 }
 
-/// Ada joins Bob's Group on computer A and replies there. Computer B gets
-/// only Ada's own records through her ordinary sync. Both copies keep local
-/// counts for Bob's Group and journal no account mark.
 #[test]
 fn a_joined_group_stays_joined_on_the_owners_other_computer() {
     let (_scratch_a, _path_a, mut computer_a) = open_store();
@@ -1020,9 +1017,6 @@ fn a_shared_channel_pull_reports_the_group_message_claims_it_applied() {
     );
 }
 
-/// A link post reaches a named recipient as the relay serves it on the
-/// Group lane: with its link and no account. It applies, and claims no
-/// automation even where a person's message would.
 #[test]
 fn a_shared_channel_link_post_applies_with_its_link_and_claims_nothing() {
     let (_scratch, _path, mut engine) = open_store();

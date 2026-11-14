@@ -197,9 +197,6 @@ fn the_stream_merges_both_lanes_in_one_order_and_pages_from_the_newest_end() {
     }
 }
 
-/// A thread's Work card is its newest work report: that report's status and
-/// that report's own link. The stream, the thread listing and a thread read
-/// serve the same card.
 #[test]
 fn a_threads_work_card_is_its_newest_report_with_that_reports_own_link() {
     let (_scratch, mut store) = store();
@@ -280,9 +277,6 @@ fn a_threads_work_card_is_its_newest_report_with_that_reports_own_link() {
     assert_eq!(first.author_display_name, "Scout");
     assert_eq!(first.author_owner_display_name.as_deref(), Some("Ada"));
 
-    // A reply with no report changes nothing. Another agent's report with no
-    // link shows no link: the card never puts one report's link under
-    // another report's author.
     send(&mut store, reply_input("post", "talk", 20));
     let mut done = reply_input("post", "done", 30);
     done.author_display_name = "Nova".to_owned();

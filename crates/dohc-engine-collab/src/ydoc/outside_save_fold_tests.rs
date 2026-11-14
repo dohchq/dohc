@@ -1,5 +1,3 @@
-//! An outside save folds only what changed into a live note.
-
 use super::*;
 
 fn note(blocks: usize, edit: &str) -> String {

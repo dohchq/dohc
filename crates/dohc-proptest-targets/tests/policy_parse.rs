@@ -89,16 +89,12 @@ proptest! {
     // ignore the env var.
     #![proptest_config(ProptestConfig::default())]
 
-    /// Arbitrary Unicode/control-heavy text either parses completely or
-    /// returns a populated typed error vector; neither parser may panic.
     #[test]
     fn arbitrary_policy_text_parses_or_returns_typed_errors(text in arbitrary_text()) {
         assert_typed_parse(parse_files_policy(&text));
         assert_typed_parse(parse_visibility_policy(&text));
     }
 
-    /// Valid TOML structure with generated sections and values reaches rule
-    /// shape validation instead of stopping exclusively at the TOML lexer.
     #[test]
     fn structured_policy_toml_reaches_rule_validation(text in structured_policy_toml()) {
         assert_typed_parse(parse_files_policy(&text));

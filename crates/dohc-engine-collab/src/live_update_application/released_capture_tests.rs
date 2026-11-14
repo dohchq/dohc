@@ -39,11 +39,6 @@ fn released_without_carried() -> Fixture {
     f
 }
 
-/// Branch selection: a proven base structurally the
-/// whole Y.Doc folds as ever. The same Markdown over another structure, and
-/// a Y.Doc holding the chain's Carried deliveries, refuse. The bytes capture
-/// last recorded keep the Y.Doc, Carried deliveries and all. Outside the
-/// window, capture is ordinary.
 #[test]
 fn a_released_window_folds_only_over_a_proven_base_equal_to_the_head() {
     let f = released_without_carried();
@@ -84,12 +79,6 @@ fn a_released_window_folds_only_over_a_proven_base_equal_to_the_head() {
 
 type ProofDamage = (&'static str, fn(&mut Fixture, &mut Ydoc));
 
-/// Each condition of the released-window proof, failing alone, refuses a
-/// disk edit over a base that is otherwise proven and equal to the head:
-/// the settlement's moment, digest, binding, path or state vector, the
-/// accepted history it reconstructs from, a dependency the head is missing,
-/// a released tail whose record does not read, and a proof larger than its
-/// budget.
 #[test]
 fn the_released_window_proof_refuses_each_unproven_base() {
     let damages: [ProofDamage; 9] = [
@@ -153,10 +142,6 @@ fn proof_bytes(f: &Fixture) -> usize {
     RELEASED_CAPTURE_PROOF_BYTES - budget.remaining
 }
 
-/// In a released window, content the file at B
-/// never showed refuses a disk edit, whether the chain Carried it, a seed
-/// accepted and never applied holds it, the owner typed it after the
-/// release, or ordinary sync caught it up and a moment records it.
 #[test]
 fn a_released_window_refuses_a_disk_edit_over_content_its_file_never_showed() {
     let (f, _, _, _) = released_at_b();
@@ -186,10 +171,6 @@ fn a_released_window_refuses_a_disk_edit_over_content_its_file_never_showed() {
     assert!(diverged(disk_capture(&f, &edited_on_disk(&f), &local_doc(&f))), "caught-up content a moment holds");
 }
 
-/// The namespaces of a document lineage come from
-/// `live_owner_activations_document`, never a scan, across a history of
-/// several namespaces and documents with many released activations, with and
-/// without statistics.
 #[test]
 fn a_lineage_finds_its_namespaces_by_its_document_index() {
     let mut f = Fixture::new();
@@ -235,9 +216,6 @@ fn diverged(decided: Result<ReleasedCapture, ApplicationError>) -> bool {
     matches!(decided, Err(ApplicationError::Conflict))
 }
 
-/// The shared budget: a successor's capture reads
-/// accepted state at B and replays the Carried updates onto it within one
-/// budget. Each fits it alone; together they refuse.
 #[test]
 fn a_successor_proof_and_its_carried_replay_share_one_budget() {
     let (f, _, _, _) = released_at_b();

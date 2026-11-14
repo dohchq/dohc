@@ -416,8 +416,6 @@ fn record_in_run(
     .expect("agent edit");
 }
 
-/// Two runs by one agent, neither settled, are two authors. A row written
-/// before agent runs were recorded stays an author with no run.
 #[test]
 fn two_unsettled_runs_by_one_agent_stay_two_authors_through_compaction() {
     let mut ts = fresh_store("two-agent-runs");

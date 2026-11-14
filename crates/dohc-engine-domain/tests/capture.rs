@@ -688,8 +688,6 @@ fn retire_only_if_text_head_never_deletes_a_binary_head() {
     assert!(result.retired.is_none());
     assert!(!result.deduped);
 
-    // The unconditional retire still owns the full lifecycle (file gone from
-    // disk retires whatever head remains).
     let result = VersionedTextStore::new(&mut store)
         .capture_retire(&retire("photo.png", 30), &NO_FAULTS)
         .expect("full retire");
@@ -895,8 +893,6 @@ fn capture_supersedes_an_older_pending_materialization_job() {
     let stale_bytes = b"stale resolve content";
     std::fs::write(scratch.path().join("doc.bin"), disk_bytes).expect("seed disk");
 
-    // An older mirrored-resolve write enqueues a pending job whose preimage
-    // matches the current disk bytes.
     let stale_sha = hex_sha256(stale_bytes);
     store
         .write_with(&NO_FAULTS, |tx| {
@@ -925,8 +921,6 @@ fn capture_supersedes_an_older_pending_materialization_job() {
         .capture_ingest_binary(&ingest_binary("doc.bin", disk_bytes, 20), &NO_FAULTS)
         .expect("capture the live disk bytes");
 
-    // Draining the materializer must supersede the stale job — never regress
-    // disk behind the captured head.
     let results = run_pending_jobs(
         &store,
         scratch.path(),
@@ -1067,9 +1061,6 @@ fn deduped_capture_marks_the_confirmed_head_as_materialized() {
         })
         .expect("two resolve writes with pending jobs");
 
-    // Capture observes bytes equal to the head: a DEDUPED no-op for history,
-    // but it must still mark the confirmed head as materialized so the stale
-    // job cannot run first and regress the verified disk bytes.
     let deduped = VersionedTextStore::new(&mut store)
         .capture_ingest_binary(&ingest_binary("doc.bin", live_bytes, 20), &NO_FAULTS)
         .expect("deduped capture");
@@ -1322,8 +1313,6 @@ fn capture_manifest_excludes_pending_conflict_installed_ydoc_asset() {
     );
 }
 
-// Only this version's own unwritten switch write keeps its head out
-// of the seed. Another version's pending write of the same bytes doesn't.
 #[test]
 fn capture_manifest_ignores_another_versions_unwritten_switch_write() {
     use dohc_engine_domain::store::{CAPTURE_ORIGIN, text_blob_sha256};

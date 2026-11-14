@@ -598,9 +598,6 @@ fn secret_ignored_and_hidden_paths_never_appear() {
     let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
 
-    // The store door closes before search sees a row at all: plaintext
-    // versioning refuses a secret .env. Then seed a normally-tracked file and a
-    // visibility-hidden file with the same needle; only tracked may surface.
     {
         let mut versions = VersionedTextStore::new(&mut store);
         versions

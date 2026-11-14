@@ -310,8 +310,6 @@ fn golden_is_sensitive_to_the_content_hash() {
     );
 }
 
-/// A normalized reconcile plan op, ordered and comparable — the NormalizedState
-/// for the reconcile plan. Every field a divergence could hide in is present.
 #[derive(Debug, PartialEq, Eq)]
 enum NormOp {
     Ingest {

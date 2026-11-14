@@ -193,8 +193,6 @@ fn a_safe_append_after_historical_deletions_is_admissible() {
     );
 }
 
-/// One delete range, partly deleted already and partly live, holds on its
-/// live remainder.
 #[test]
 fn a_partly_historical_range_holds_on_its_live_remainder() {
     let (doc, _, text) = with_paragraph(1, "abcdef");
@@ -214,7 +212,6 @@ fn a_partly_historical_range_holds_on_its_live_remainder() {
     assert_eq!(inspect_update(&head, &update), Hold(LiveDeletion));
 }
 
-/// A candidate may delete items it inserts itself.
 #[test]
 fn a_candidate_deleting_its_own_fresh_items_is_admissible() {
     let (doc, _, _) = with_paragraph(1, "Kept");
@@ -334,7 +331,6 @@ fn a_formatting_change_over_existing_text_holds() {
     assert_eq!(inspect_update(&head, &update), Hold(ExistingTextFormat));
 }
 
-/// A new paragraph may set its own attributes and format its own text.
 #[test]
 fn a_new_paragraph_with_its_own_attributes_is_admissible() {
     let (doc, _, _) = with_paragraph(1, "Kept");
@@ -572,8 +568,6 @@ fn a_format_after_a_partly_known_block_in_another_parent_holds() {
     assert_eq!(inspect_update(&head, &update), Hold(Unclassifiable));
 }
 
-/// Two peers type into the same paragraph at the same place and each append
-/// a paragraph. Their merged update only adds.
 #[test]
 fn an_honest_concurrent_update_from_two_peers_is_admissible() {
     let (doc, _, _) = with_paragraph(1, "Kept");

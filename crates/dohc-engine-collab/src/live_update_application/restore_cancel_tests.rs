@@ -94,9 +94,6 @@ fn apply_restore(f: &mut Fixture, input: NativeRestoreApplication) -> Result<Nat
     f._owner.apply_restore(&mut f.store, None, &mut WriterDocCache::new(), input, coordinate, 2_000_000, 100, 90, &NoFaults, |_, _, _, _| Ok(()))
 }
 
-/// What a cancellation leaves as the fence found it: the document's state
-/// and native head, the lineage's origin, accepted history and endpoint,
-/// and the retained outboxes and their quarantines.
 fn preserved(f: &Fixture) -> (Vec<u8>, i64, Vec<String>, RetainedPrefixBody) {
     let head: i64 = f
         .store
@@ -139,12 +136,6 @@ fn reopen_store(f: &mut Fixture) {
     f._owner = ApplicationOwner::new("workspace".into()).unwrap();
 }
 
-/// A fence, its cancellation before admission, a
-/// restart and replay, then retirement and release at the fenced
-/// generation. The cancellation leaves content, native head, lineage origin,
-/// accepted endpoint and retained work as the fence left them, and the
-/// relay's key at the generation before refuses. With nothing accepted
-/// since the origin, the endpoint is the origin's.
 #[test]
 fn a_cancelled_restore_retires_and_releases_at_its_fenced_generation() {
     for edited in [false, true] {
@@ -193,11 +184,6 @@ fn a_cancelled_restore_retires_and_releases_at_its_fenced_generation() {
     }
 }
 
-/// With no binding, a cancellation holds only the lineage and
-/// generation the document proves. After a release that is the released
-/// generation; a document never registered proves nothing. A cancellation
-/// replayed after a later restore moved the document answers its own base
-/// generation, with no binding for the relay to record.
 #[test]
 fn a_cancellation_without_a_binding_holds_only_the_proven_generation() {
     let mut f = Fixture::new();
@@ -256,11 +242,6 @@ fn a_cancellation_without_a_binding_holds_only_the_proven_generation() {
     assert_eq!(f.store.table_row_count("live_restore_cancellations").unwrap(), 2);
 }
 
-/// A successor captures and adopts from the predecessor
-/// released at the cancelled generation, keeping the original lineage, the
-/// exact prefix and the retained work, through consecutive cancellations.
-/// A later genuine restore starts from the cancelled generations' real
-/// endpoint, and its application crosses them to its own generation.
 #[test]
 fn a_successor_adopts_after_consecutive_cancellations_and_a_later_restore_applies() {
     let mut f = imported_fixture();
@@ -500,10 +481,6 @@ fn cancellation_proofs_refuse_when_missing_or_altered() {
     cancel_fenced(&mut f, "restore");
 }
 
-/// A restore completes and resumes at generation 1, then one or two
-/// restores fence and cancel. The lineage registers at the last generation,
-/// accepts an update and settles from the completed restore's settlement,
-/// crossing only the cancellations after it.
 #[test]
 fn a_settlement_after_a_completed_restore_crosses_the_cancellations_after_it() {
     for cancellations in 1..=2 {
@@ -594,10 +571,6 @@ fn a_settlement_after_a_completed_restore_crosses_the_cancellations_after_it() {
     }
 }
 
-/// Every reader binds a cancellation to the fence row it ends and to
-/// the accepted history at its endpoint. One that names another host, origin
-/// or native head than its fence, or an endpoint the lineage never held,
-/// refuses retirement, adoption and both history readers.
 #[test]
 fn a_cancellation_its_fence_row_disagrees_with_refuses_every_reader() {
     let alterations = [
@@ -659,9 +632,6 @@ fn a_cancellation_its_fence_row_disagrees_with_refuses_every_reader() {
     }
 }
 
-/// A cancellation's endpoint receipt is read from the leading bytes of its
-/// event's metadata, so a long metadata tail does not change the answer, and
-/// a receipt that differs there refuses every generation read.
 #[test]
 fn a_cancellation_endpoint_receipt_is_read_exactly_from_its_metadata_head() {
     let mut f = imported_fixture();
@@ -714,10 +684,6 @@ fn a_fence_past_the_readable_cancelled_chain_refuses() {
         .unwrap();
 }
 
-/// Under a chain limit of 2, a lineage cancels four restores, split by
-/// an accepted event into two spans of 2. Crossing from the origin to the
-/// binding reads only the span after that event, while one chain over the
-/// whole history refuses.
 #[test]
 fn a_crossing_reads_each_span_within_the_chain_limit() {
     use super::super::restore_fence::{require_crossed_since_within, require_crossed_within};
@@ -750,9 +716,6 @@ fn a_crossing_reads_each_span_within_the_chain_limit() {
         .unwrap();
 }
 
-/// With no binding, a released lineage proves only the generation
-/// it released at. A later settled restore of another lineage of the
-/// document moves the document, not this lineage.
 #[test]
 fn a_released_lineage_proves_its_own_generation_after_another_lineage_restores() {
     let mut f = imported_fixture();

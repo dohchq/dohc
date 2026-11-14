@@ -1,5 +1,3 @@
-/// Each outbox of the document by path and selectors, with its state,
-/// quarantine reason and observed binding.
 type OutboxState = (String, String, String, Option<String>, Option<LiveObjectBinding>);
 
 type OutboxRow = (String, String, String, Option<String>, Option<String>);
@@ -88,10 +86,6 @@ fn extra_outbox(f: &mut Fixture, id: &str, path: &str, selectors: &[&str]) {
     );
 }
 
-/// A successor renamed away
-/// from its predecessor's outbox retires it in its adoption, seeded or not.
-/// The old outbox keeps every entry, and names the successor's binding; the
-/// successor's outbox is the generation's one open outbox.
 #[test]
 fn a_renamed_succession_retires_the_outbox_it_covered() {
     for seeded in [true, false] {
@@ -111,10 +105,6 @@ fn a_renamed_succession_retires_the_outbox_it_covered() {
     }
 }
 
-/// A succession that returns to an earlier binding reopens
-/// the outbox an earlier succession retired there, with no abandoned seed,
-/// keeping its entries; its seed and later edits continue that outbox's
-/// sequence. S1's outbox is retired in turn.
 #[test]
 fn a_succession_back_to_an_earlier_binding_reopens_its_outbox() {
     let (mut f, coverage) = carried_across_renames_to("owner.md");
@@ -136,12 +126,6 @@ fn a_succession_back_to_an_earlier_binding_reopens_its_outbox() {
     assert_eq!(entry_of(&f, &edit.delivery_id), (outbox_at(&f, "owner.md"), 4, None));
 }
 
-/// Any outbox in the generation that is neither at the
-/// successor's exact binding nor at one its chain held refuses adoption with
-/// no writes, seeded or not, with or without an outbox already at the
-/// successor's binding. That includes one at the successor's path with other
-/// selectors. Without the unrelated outbox, the existing one at its binding
-/// takes the successor's deliveries.
 #[test]
 fn an_unrelated_outbox_refuses_every_succession() {
     let unrelated: [(&str, &[&str]); 2] = [
@@ -225,11 +209,6 @@ fn only_a_chained_drained_retirement_is_covered() {
     }
 }
 
-/// Retirement, the successor's outbox, its
-/// activation and its seed commit together. A failure inside the transaction
-/// rolls all of it back. A crash before the commit leaves nothing, and one
-/// after it leaves everything; after a restart the retry adopts or replays,
-/// and a further replay changes nothing.
 #[test]
 fn a_renamed_succession_commits_whole_and_replays_after_restart() {
     use dohc_engine_storage::{FaultAction, FaultPoint};
@@ -306,9 +285,6 @@ fn released_twice_at_one_binding() -> Fixture {
     f
 }
 
-/// The chain walk counts every activation it visits, not the
-/// bindings they held. Two activations at one binding exceed a budget of
-/// one, and the adoption refuses with no writes; at two it adopts.
 #[test]
 fn the_chain_walk_counts_each_activation() {
     let mut f = released_twice_at_one_binding();

@@ -71,9 +71,6 @@ fn deleted_content_huge_len_does_not_exhaust_memory() {
     let _ = Ydoc::validate_update(&bytes);
 }
 
-/// Seed-corpus sanity: a real, valid update from the doc's own edit surface
-/// applies cleanly and round-trips. Safe -- exercises only well-formed,
-/// self-produced update bytes, never adversarial ones.
 #[test]
 fn seed_valid_update_applies_and_round_trips() {
     let doc = Ydoc::wire();
@@ -93,8 +90,6 @@ fn seed_empty_bytes_are_rejected_without_crashing() {
     assert!(doc.apply(&[]).is_err());
 }
 
-/// Seed-corpus sanity: multiple independently-produced valid updates from
-/// different edit surfaces all apply and merge cleanly on one doc.
 #[test]
 fn seed_multiple_valid_updates_compose() {
     let doc = Ydoc::wire();

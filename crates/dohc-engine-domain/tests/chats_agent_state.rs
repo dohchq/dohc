@@ -131,7 +131,6 @@ fn requests_for(chats: &LinkedChatStore<'_>, reader: &AgentReader) -> Vec<String
     )
 }
 
-/// A post in `channel`'s `thread`, which the first post starts.
 #[allow(clippy::too_many_arguments)]
 fn post(
     chats: &mut LinkedChatStore<'_>,

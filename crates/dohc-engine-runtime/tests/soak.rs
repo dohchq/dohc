@@ -5,10 +5,6 @@ use dohc_engine_testkit::{ScratchDir, engine_db_path};
 /// second.
 const SOAK_SMOKE_CYCLES: usize = 3;
 
-/// Repeatedly open and close the same workspace identity. Bounded resource
-/// check: `actor_count()` must return to exactly 0 after every close, never
-/// drifting upward across cycles (the "workspace close returns owned
-/// resources to baseline" property, at the session-registry layer).
 #[test]
 fn repeated_open_close_of_one_workspace_returns_to_baseline_every_cycle() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -36,11 +32,6 @@ fn repeated_open_close_of_one_workspace_returns_to_baseline_every_cycle() {
     }
 }
 
-/// Open many distinct workspace identities, then release them all through
-/// `close_all` -- the primitive the daemon's shutdown drain uses
-/// (`crates/dohc-workspace-engine/src/bin/dohc-workspace-engine.rs`).
-/// Bounded resource check: no leaked actor slot regardless of how many
-/// distinct identities were ever opened.
 #[test]
 fn close_all_returns_many_distinct_workspaces_to_baseline() {
     let scratch = ScratchDir::new().expect("scratch");

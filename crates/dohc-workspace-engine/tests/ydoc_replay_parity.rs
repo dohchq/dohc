@@ -135,8 +135,6 @@ struct ReplayRun {
     after_consumers: CacheStats,
 }
 
-/// Replay one scenario through the real daemon Y.Doc surface. `force_cold`
-/// clears the actor cache before each gate and before the consumer pair.
 async fn replay_through_engine(scenario: &Scenario, ordinal: usize, force_cold: bool) -> ReplayRun {
     assert!(
         !scenario.dimensions.is_empty(),

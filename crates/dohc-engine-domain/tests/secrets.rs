@@ -1,5 +1,3 @@
-//! Secret privacy, encryption identity, crash recovery, and capture ownership.
-
 use dohc_engine_crypto::{SecretDataKey, aead};
 use dohc_engine_domain::{
     ApplySecretFileFromVersion, NoFaults, SecretDelete, SecretDiskIntent, SecretFileStore,
@@ -445,10 +443,6 @@ fn ciphertext_spliced_from_another_secret_path_fails_closed() {
 
 #[test]
 fn ts_written_ciphertext_decrypts_in_the_rust_store() {
-    // The load-bearing cross-engine store check: a secret sealed by the TS
-    // engine (the committed Node fixture) is inserted directly into
-    // `secret_files` — as if TS wrote it — and the Rust domain's authorized
-    // materializer decrypts it byte-exact.
     let fixture_path = format!(
         "{}/../dohc-engine-crypto/tests/fixtures/ts_secret_ciphertext.json",
         env!("CARGO_MANIFEST_DIR")
@@ -990,10 +984,6 @@ fn capture_manifest_seed_only_carries_secrets_capture_put_on_disk() {
     );
 }
 
-/// The materializer writing a secret's plaintext to disk is the engine
-/// projecting API state outward, not capture observing the user's file. It must
-/// not confer capture ownership: otherwise deleting the projected file would
-/// retire an API-written secret. Pins the narrow scope of the ownership marker.
 #[test]
 fn materializing_an_api_secret_does_not_confer_capture_ownership() {
     use dohc_engine_domain::{CaptureSecretRetire, capture_secret_retire_with};
