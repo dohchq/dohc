@@ -2,10 +2,10 @@ import { describe, expect, it } from "vitest";
 import { membershipRefreshFailure } from "./membershipRefreshWords";
 
 describe("a joined workspace's refresh failure", () => {
-  it("says the workspace could not open with this account, names the account signed in now, and offers Switch account", () => {
+  it("says the workspace could not sync, with the workspace's name last, names the account signed in now, and offers Switch account", () => {
     const error = Object.assign(new Error("Sign in to the account that received this share."), { errorKind: "unauthorized" });
     expect(membershipRefreshFailure({ workspaceName: "Lisbon trip", signedInEmail: "bo@test", error })).toEqual({
-      title: "dohc could not open Lisbon trip with this account",
+      title: "dohc could not sync Lisbon trip",
       message: "This computer is signed in as bo@test, not the account the owner invited.",
       switchAccount: true,
     });

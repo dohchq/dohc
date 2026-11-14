@@ -250,7 +250,7 @@ describe("a joined workspace", () => {
     const toasts = screen.getByTestId("notice-toasts");
     const toast = await waitFor(() => {
       const shown = within(toasts).getByTestId("workspace-shell-error");
-      expect(shown.textContent).toContain("dohc could not open Community with this account");
+      expect(shown.textContent).toContain("dohc could not sync Community");
       return shown;
     });
     expect(toast.textContent).toContain("This computer is signed in as lee@dohc.test, not the account the owner invited.");
@@ -261,7 +261,7 @@ describe("a joined workspace", () => {
     expect(document.body.textContent).not.toContain("does not record");
     fireEvent.click(screen.getByTestId("notice-center-toggle"));
     const rows = within(screen.getByTestId("notice-center")).getAllByRole("listitem")
-      .filter(row => row.textContent?.includes("dohc could not open Community with this account"));
+      .filter(row => row.textContent?.includes("dohc could not sync Community"));
     expect(rows).toHaveLength(1);
     expect(within(rows[0]!).getByRole("button", { name: "Switch account" })).toBeTruthy();
   });

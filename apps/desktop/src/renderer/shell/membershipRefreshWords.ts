@@ -1,8 +1,11 @@
 import { joinedByAnother } from "../../ipc/joinedAccountWords";
 
-/** What a joined workspace says while an account other than the one that joined is signed in. */
+/**
+ * What a joined workspace says while an account other than the one that joined is signed in.
+ * The copy stays open and readable; what fails is every read and write with the server.
+ */
 export function otherAccountWords(workspaceName: string, signedInEmail: string | null): { title: string; message: string } {
-  return { title: `dohc could not open ${workspaceName} with this account`, message: joinedByAnother(signedInEmail) };
+  return { title: `dohc could not sync ${workspaceName}`, message: joinedByAnother(signedInEmail) };
 }
 
 // How a joined workspace says its refresh failed, in workspace words. An
