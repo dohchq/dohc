@@ -1096,10 +1096,6 @@ export interface SyncRelayStorage {
   phoneChatWakes(
     input: Parameters<typeof import("./chatWakes").phoneChatWakes>[1],
   ): import("@dohc/workspace-contracts/chat-wakes").PhoneChatWake[];
-  /** Which of the messages the account sent from its phone with an answered agent no computer matched. */
-  unmatchedWakeMessages(
-    input: Parameters<typeof import("./chatWakes").unmatchedWakeMessages>[1],
-  ): Set<string>;
   /** The threads of the account's wakes in a workspace whose rows changed after `since`, through `through`. */
   chatWakeChanges(
     input: Parameters<typeof import("./chatWakes").chatWakeChanges>[1],

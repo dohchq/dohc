@@ -184,8 +184,8 @@ const PhoneGroupKind = z.enum(["group", "dm", "agent"]);
  * says which of its lanes take a post or a message, and covers its newest items as the phone's stream read does. A
  * thread takes replies, names its group's kind, or null on a file, and covers its newest messages before the message
  * order `before`, or its newest ones; `nextBefore` covers the older ones, and is null once the first is covered.
- * `wakes` and `unmatched` are of covered messages only. `unmatched` lists the account's messages whose answered agent
- * no computer ran when it was sent. `wakeCursor` is the account's wake position when this was read, which
+ * `wakes` are of covered messages only. Whether a message's answered agent matched no computer is not part of this
+ * read; it comes with an indexed lookup later. `wakeCursor` is the account's wake position when this was read, which
  * `wakeChanges` takes as `since`.
  */
 export const PhoneChatContext = z.strictObject({
@@ -207,9 +207,6 @@ export const PhoneChatContext = z.strictObject({
   ]),
   mentions: z.array(PhoneMentionCandidate).max(PHONE_MENTION_CANDIDATES_MAX),
   wakes: z.array(PhoneChatWake).max(PHONE_CONTEXT_WAKES_MAX),
-  unmatched: z
-    .array(z.strictObject({ messageId: Id, threadId: Id }))
-    .max(PHONE_CONTEXT_MESSAGES_MAX),
   wakeCursor: Cursor,
 });
 export type PhoneChatContext = z.infer<typeof PhoneChatContext>;

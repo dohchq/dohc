@@ -19,7 +19,9 @@ import type { SyncRelayStorage } from "./storage";
 
 // What the phone needs beside a conversation it shows, read through the
 // owner's server copy: which lanes take a message, who it can mention, and the
-// latest wake of each target of the messages it covers. The conversation is
+// latest wake of each target of the messages it covers. Whether a message's
+// answered agent matched no computer isn't read here; that waits for an
+// indexed lookup. The conversation is
 // read through the same secret-file filter as the phone's own reads, so a
 // hidden thread answers exactly as a missing one. A suggestion authorizes
 // nothing: a write resolves its wake targets again when it is recorded.
@@ -47,6 +49,36 @@ type Conversation = {
 };
 
 type ThreadPages = Pick<ChatsLiveAdapter, "getThread" | "listMessagesPage">;
+
+// The most engine reads one context's messages take. The engine ends a page at its byte budget as well as at the
+// limit, and says where to go on. A page it ends early still holds a message, since it refuses a message past the
+// budget rather than answer none, so PHONE_CONTEXT_MESSAGES_MAX reads always cover a page; small messages take one.
+const MESSAGE_READS_MAX = PHONE_CONTEXT_MESSAGES_MAX;
+
+// A thread's messages of orders `start` up to `end`, following the engine's pages. Messages it doesn't cover within
+// MESSAGE_READS_MAX reads fail the read, which then names no messages and no cursor, so none is skipped.
+async function readMessages(
+  pages: ThreadPages,
+  input: { workspaceId: string; threadId: string; start: number; end: number },
+): Promise<ChatMessage[]> {
+  const wanted = input.end - input.start;
+  const messages: ChatMessage[] = [];
+  let after = input.start - 1;
+  for (let reads = 0; reads < MESSAGE_READS_MAX && messages.length < wanted; reads += 1) {
+    const page = await pages.listMessagesPage({
+      workspaceId: input.workspaceId,
+      threadId: input.threadId,
+      limit: wanted - messages.length,
+      ...(after < 0 ? {} : { afterMessageOrder: after }),
+    });
+    messages.push(...page.messages);
+    const next = page.nextAfterMessageOrder;
+    if (next === null || next <= after) break;
+    after = next;
+  }
+  if (messages.length !== wanted) throw new Error("the engine's pages didn't cover the messages");
+  return messages;
+}
 
 // The conversation as the phone's reads show it, its covered messages at most PHONE_CONTEXT_MESSAGES_MAX. A group is
 // named by its exact engine ID, and covers the newest items the phone's stream read shows. A thread the filtered store
@@ -91,17 +123,7 @@ async function readConversation(
   const { messageCount } = await pages.getThread({ workspaceId, threadId: thread.id });
   const end = Math.min(target.before ?? messageCount, messageCount);
   const start = Math.max(0, end - PHONE_CONTEXT_MESSAGES_MAX);
-  const messages =
-    end === start
-      ? []
-      : (
-          await pages.listMessagesPage({
-            workspaceId,
-            threadId: thread.id,
-            limit: end - start,
-            ...(start === 0 ? {} : { afterMessageOrder: start - 1 }),
-          })
-        ).messages;
+  const messages = await readMessages(pages, { workspaceId, threadId: thread.id, start, end });
   const channel =
     thread.channelId === undefined
       ? undefined
@@ -234,20 +256,12 @@ export async function runAccountChatContext(
       // The cursor first: a change after it, even in this same turn, moves the head past it.
       const wakeCursor = String(storage.chatWakeHead(accountId));
       const shown = new Map(read.messages.map((message) => [message.id, message.threadId]));
-      const unmatched = storage.unmatchedWakeMessages({
-        accountId,
-        workspaceId,
-        messageIds: [...shown.keys()],
-      });
       return {
         result: {
           ok: true,
           conversation: read.conversation,
           mentions: mentionCandidates(storage, { accountId, workspaceId, nowMs }, read),
           wakes: storage.phoneChatWakes({ accountId, workspaceId, messages: shown, nowMs }),
-          unmatched: [...shown]
-            .filter(([messageId]) => unmatched.has(messageId))
-            .map(([messageId, threadId]) => ({ messageId, threadId })),
           wakeCursor,
         },
         cursor,

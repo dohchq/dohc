@@ -2980,7 +2980,6 @@ describe("an account's chat writes through the server's copy", () => {
           canRetry: true,
         },
       ],
-      unmatched: [],
       wakeCursor: String(f.storage.chatWakeHead("ana")),
     });
     for (const withheld of ["install-9f2c", "installId", "candidates", '"matched"', "mention:"])
@@ -2998,7 +2997,7 @@ describe("an account's chat writes through the server's copy", () => {
     }
   });
 
-  it("reads a thread's latest generations, and hints a mention for an agent no computer ran from the write's frozen command, never from names", async () => {
+  it("reads a thread's latest generations, and gives no wake for an answered agent no computer ran, even once one does", async () => {
     const f = await writeRelay({ nowMs: () => LATE });
     const { planning } = f.seeded;
     const chats = new ChatsLiveAdapter(f.engine.chats, "trip", { workspaceId: "trip" });
@@ -3022,21 +3021,18 @@ describe("an account's chat writes through the server's copy", () => {
       ),
     ).toMatchObject({ ok: true, state: "saved" });
     expect(wakesOf(f, "op-nobody")).toEqual({ targets: [], unmatched: true });
-    const replied = phoneWriteIds("ana", "trip", "op-nobody").messageId("reply");
     const context = async () =>
       await answer(await f.write("chatContext", { threadId: "thread-nova" }));
-    expect(await context()).toMatchObject({
+    const read = await context();
+    expect(read).toMatchObject({
       ok: true,
       conversation: { kind: "thread", threadId: "thread-nova", groupKind: "group" },
       wakes: [],
-      unmatched: [{ messageId: replied, threadId: "thread-nova" }],
     });
+    expect(read, "this read gives no unmatched hint").not.toHaveProperty("unmatched");
     // A computer that runs Nova now changes nothing the write froze.
     await declare(f, "desktop", [{ agentId: "default", displayName: "Nova" }]);
-    expect(await context()).toMatchObject({
-      wakes: [],
-      unmatched: [{ messageId: replied, threadId: "thread-nova" }],
-    });
+    expect(await context()).toMatchObject({ wakes: [] });
 
     // A retried wake reads as its latest generation only. Its only computer claimed it and never confirmed, so no
     // other computer is left, and the context offers no retry, which the route refuses too.
@@ -3196,7 +3192,7 @@ describe("an account's chat writes through the server's copy", () => {
     expect(await answer(await again)).toEqual({ ok: false, reason: "failed to read chat context" });
   });
 
-  it("covers a thread's newest messages a page at a time, reading only that page", async () => {
+  it("covers a thread's newest messages a page at a time, reading only that page through every page the engine cuts it into", async () => {
     const f = await writeRelay({ nowMs: () => LATE });
     const chats = new ChatsLiveAdapter(f.engine.chats, "trip", { workspaceId: "trip" });
     await chats.startChannelThread({
@@ -3262,6 +3258,82 @@ describe("an account's chat writes through the server's copy", () => {
     expect((await covered({ before: 1_000 })).nextBefore, "past the end covers the newest").toBe(
       150,
     );
+
+    // As the engine's byte budget does, it ends each page at three messages and says where to go on. Each context still
+    // covers its whole interval, so every message is covered exactly once.
+    const interior = unconfirmedWake(f, "op-interior", "long-200", "thread-long");
+    const original = f.engine.chats.sendRequest.bind(f.engine.chats);
+    const returned: string[] = [];
+    const pages = vi.spyOn(f.engine.chats, "sendRequest");
+    pages.mockImplementation(async (request) => {
+      const params = asRecord(request.params);
+      if (
+        request.method !== CHATS_METHOD.messagesList ||
+        params === null ||
+        params.threadId !== "thread-long"
+      )
+        return await original(request);
+      const response = await original({
+        ...request,
+        params: {
+          threadId: "thread-long",
+          limit: Math.min(Number(params.limit), 3),
+          ...(typeof params.afterMessageOrder === "number"
+            ? { afterMessageOrder: params.afterMessageOrder }
+            : {}),
+        },
+      });
+      const page = response.result as unknown as { messages: Array<{ id: string }> };
+      returned.push(...page.messages.map((message) => message.id));
+      return response;
+    });
+    const orders = (from: number, to: number) =>
+      Array.from({ length: to - from }, (_, index) => `long-${from + index}`);
+    const short = async (args: Record<string, number>) => {
+      const from = returned.length;
+      const result = await covered(args);
+      return { ...result, reads: result.reads.length, ids: returned.slice(from) };
+    };
+    expect(await short({})).toEqual({
+      reads: 34,
+      nextBefore: 150,
+      wakes: [interior, newest],
+      people: ["Ana"],
+      ids: orders(150, 250),
+    });
+    expect(await short({ before: 150 })).toMatchObject({
+      reads: 34,
+      nextBefore: 50,
+      wakes: [],
+      ids: orders(50, 150),
+    });
+    expect(await short({ before: 50 })).toMatchObject({
+      reads: 17,
+      nextBefore: null,
+      wakes: [oldest],
+      ids: orders(0, 50),
+    });
+
+    // An engine whose pages never cover the messages fails the read after at most 100 reads, naming no cursor.
+    pages.mockImplementation(async (request) => {
+      const params = asRecord(request.params);
+      if (
+        request.method !== CHATS_METHOD.messagesList ||
+        params === null ||
+        params.threadId !== "thread-long"
+      )
+        return await original(request);
+      const after = typeof params.afterMessageOrder === "number" ? params.afterMessageOrder : -1;
+      return { id: request.id, result: { messages: [], nextAfterMessageOrder: after + 1 } };
+    });
+    const from = f.engine.asked.length;
+    expect(await answer(await f.write("chatContext", { threadId: "thread-long" }))).toEqual({
+      ok: false,
+      reason: "failed to read chat context",
+    });
+    expect(
+      f.engine.asked.slice(from).filter((method) => method === CHATS_METHOD.messagesList),
+    ).toHaveLength(100);
   });
 
   const wakeChanges = (

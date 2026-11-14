@@ -1,4 +1,4 @@
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, expect, it } from "vitest";
 import {
   closeTestStorage,
   closeTestStorages,
@@ -19,7 +19,6 @@ import {
   type OperationWakeChange,
 } from "./chatWakes";
 import type { StorageContext } from "./context";
-import { OPERATION_KEEP_SETTLED_MS } from "./operationRecords";
 
 afterEach(closeTestStorages);
 
@@ -734,7 +733,7 @@ it("gives the phone each shown message's latest generation per target, as its wa
   ).toEqual([]);
 });
 
-it("gives no hint once a wake's row or its write's command is gone, rather than a guess", async () => {
+it("gives no hint once a wake's row is gone, rather than a guess", async () => {
   const storage = await relay();
   publish(storage, "op-old", "message-old", [target("claude", "mac")]);
   const hints = (nowMs: number) =>
@@ -749,64 +748,6 @@ it("gives no hint once a wake's row or its write's command is gone, rather than 
   expect(hints(ended)).toEqual([expect.objectContaining({ state: "unclaimed", canRetry: false })]);
   expect(storage.sweepChatWakes(ended + CHAT_WAKE_KEEP_MS + 1)).toBe(1);
   expect(hints(ended + CHAT_WAKE_KEEP_MS + 1)).toEqual([]);
-
-  const sent = (operationId: string, messageId: string, unmatched: boolean, accountId = "ana") => {
-    const workspaceId = accountId === "ana" ? "trip" : "bens";
-    storage.recordAccountOperation({
-      accountId,
-      operationId,
-      binding: { workspaceId, operation: "reply", args: { operationId } },
-      incarnation: 1,
-      replicationEpoch: "epoch",
-      streamIdentity: "stream",
-      command: {
-        write: { kind: "reply", threadId: "thread-1", messageId, body: "Thanks" },
-        wakes: { targets: [], unmatched },
-      },
-      writesMessage: true,
-      nowMs: NOW,
-    });
-    storage.advanceAccountOperation({
-      accountId,
-      operationId,
-      stage: "saved",
-      message: "published",
-      nowMs: NOW,
-    });
-  };
-  sent("op-unmatched", "message-unmatched", true);
-  sent("op-matched", "message-matched", false);
-  sent("op-ben", "message-unmatched", true, "ben");
-  const unmatched = (accountId: string, workspaceId: string) =>
-    storage.unmatchedWakeMessages({
-      accountId,
-      workspaceId,
-      messageIds: ["message-unmatched", "message-matched", "message-nowhere"],
-    });
-  expect(unmatched("ana", "trip")).toEqual(new Set(["message-unmatched"]));
-  expect(unmatched("ana", "bens")).toEqual(new Set());
-
-  // Messages past what one statement once named take one pass over the commands all the same.
-  sent("op-late", "message-late", true);
-  const many = [
-    "message-unmatched",
-    ...Array.from({ length: 1_200 }, (_, index) => `message-${index}`),
-    "message-late",
-  ];
-  const prepare = vi.spyOn((storage as StorageContext).db, "prepare");
-  try {
-    expect(
-      storage.unmatchedWakeMessages({ accountId: "ana", workspaceId: "trip", messageIds: many }),
-    ).toEqual(new Set(["message-unmatched", "message-late"]));
-    expect(
-      prepare.mock.calls.filter(([sql]) => sql.includes("sync_relay_account_operations")),
-    ).toHaveLength(1);
-  } finally {
-    prepare.mockRestore();
-  }
-
-  expect(storage.tombstoneSettledAccountOperations(NOW + OPERATION_KEEP_SETTLED_MS + 1)).toBe(4);
-  expect(unmatched("ana", "trip"), "a tombstone keeps no command").toEqual(new Set());
 });
 
 it("lists the threads whose wakes changed after a position, only in the workspace named and only the account's own", async () => {

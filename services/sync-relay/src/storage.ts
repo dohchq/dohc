@@ -1359,10 +1359,6 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return chatWakeStorage.phoneChatWakes(this, input);
   }
 
-  unmatchedWakeMessages(input: Parameters<typeof chatWakeStorage.unmatchedWakeMessages>[1]) {
-    return chatWakeStorage.unmatchedWakeMessages(this, input);
-  }
-
   chatWakeChanges(input: Parameters<typeof chatWakeStorage.chatWakeChanges>[1]) {
     return chatWakeStorage.chatWakeChanges(this, input);
   }

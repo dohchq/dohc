@@ -584,34 +584,6 @@ export function phoneChatWakes(
   });
 }
 
-/**
- * Which of the given messages the account sent from its phone, in a workspace
- * it owns, with an agent it answered that matched no computer, as the write's
- * frozen command says. A write whose row became a tombstone says nothing.
- */
-export function unmatchedWakeMessages(
-  storage: StorageContext,
-  input: { accountId: string; workspaceId: string; messageIds: readonly string[] },
-): Set<string> {
-  const wanted = new Set(input.messageIds);
-  if (wanted.size === 0) return new Set();
-  // One pass over the account's retained commands in the workspace, however many messages are asked about. An index
-  // on the frozen message ID of unmatched commands would spare the pass; it needs a schema upgrade, so it waits.
-  const rows = storage.readTx(() =>
-    storage.db
-      .prepare(
-        `SELECT json_extract(o.command_json, '$.write.messageId') AS message_id FROM sync_relay_account_operations o
-         JOIN sync_relay_workspaces w ON w.workspace_id = o.workspace_id AND w.owner_user_id = o.account_id
-         WHERE o.account_id = ? AND o.workspace_id = ? AND o.command_json IS NOT NULL
-           AND json_extract(o.command_json, '$.wakes.unmatched') = 1`,
-      )
-      .all(input.accountId, input.workspaceId),
-  );
-  return new Set(
-    rows.map((row) => String(row.message_id)).filter((messageId) => wanted.has(messageId)),
-  );
-}
-
 /** The most changed rows one call of chatWakeChanges reads. */
 export const CHAT_WAKE_CHANGES_PAGE = 1_000;
 
